@@ -53,6 +53,7 @@ export const GATED = {
   "server/src/lib/dependency-postgres.test.ts": { db: ["GRAPH_PURGE_TEST_DATABASE_URL"] },
   "worker/src/__tests__/checkpoint-lock-order.test.ts": { db: ["CHECKPOINT_LOCK_TEST_DATABASE_URL"] },
   "worker/src/__tests__/credit-lease.test.ts": { db: ["CREDIT_LEASE_TEST_DATABASE_URL"] },
+  "worker/src/__tests__/ocr-escalation-budget.pg.test.ts": { db: ["OCR_BUDGET_TEST_DATABASE_URL"] },
   "worker/src/__tests__/provider-rate-limit.test.ts": { redis: ["AI_RATE_LIMIT_TEST_REDIS_URL"] },
   "worker/src/__tests__/superseded-purge.test.ts": { db: ["GRAPH_PURGE_TEST_DATABASE_URL"] },
 };

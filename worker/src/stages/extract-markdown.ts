@@ -90,8 +90,9 @@ import { nativePdfEmphasisEnabled, resolveNativePdfMode } from "../native-pdf/mo
 import { runNativePdfShadow } from "../native-pdf/shadow.js";
 import { nativePdfEngineState } from "../native-pdf/loader.js";
 import { logNativePdfFallback } from "../native-pdf/types.js";
-import { isDocumentLevelFailure } from "../lib/document-failure.js";
+import { isDocumentLevelFailure, RunPolicyError } from "../lib/document-failure.js";
 import { rethrowIfTeardown } from "../sandbox/teardown-breaker.js";
+import { SpendCheckUnavailableError } from "../db/spend-check.js";
 import { reportExtractionDecision, summarizeNativePdfShadow, type NativePdfStageStats } from "../native-pdf/telemetry.js";
 import { documentExtractorRegistry, serializeExtractorOptions, type CandidateExecutors, type ExtractedCandidate, type PreparedExtractor } from "../extractors/registry.js";
 import { ExtractorAttemptLedger } from "../extractors/attempt-ledger.js";
@@ -107,7 +108,8 @@ import { visionGuardFor } from "../lib/vision-attempt-guard.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
-import { OCR_FAILED_PAGES_KEY, OcrInfrastructureError, ocrFailedPages, recordOcrFailedPages, resolveOcrMode } from "../ocr/mode.js";
+import { authorizeImageFrames, authorizeImageRead } from "../ocr/image-frames.js";
+import { OCR_FAILED_PAGES_KEY, OcrInfrastructureError, OcrRefusedError, ocrFailedPages, recordOcrFailedPages, resolveOcrMode } from "../ocr/mode.js";
 import { ocrDocument } from "../ocr/read-document.js";
 
 interface PageHeatmapEntry {
@@ -474,6 +476,9 @@ export class ExtractMarkdownStage implements Stage {
                 // other candidate (possibly the in-process engine) take over as a fallback.
                 for (const result of [resultA, resultB]) {
                   if (result?.status === "rejected") rethrowIfTeardown(result.reason);
+                  // A charge check that could not decide is retried, and a run-policy stop (cost cap, unfunded run) ends the stage:
+                  // neither is a reason to try another extractor or fail the document.
+                  if (result?.status === "rejected" && (result.reason instanceof SpendCheckUnavailableError || result.reason instanceof RunPolicyError)) throw result.reason;
                 }
                 // Neither may a candidate whose OCR boundary could not run: the activity retries instead of another
                 // extractor (or a failed document) standing in for an OCR read that was never tried.
@@ -1062,7 +1067,12 @@ export class ExtractMarkdownStage implements Stage {
                     });
                   }
 
-                  await completeDocumentPages(state, document, this.name, remaining, pageCount);
+                  // A multi-frame image's page basis grows once OCR counts its frames: progress and stats cover every frame.
+                  const countedPages = Math.max(pageCount, document.pageCount);
+                  const processedPages = countedPages > pageCount
+                    ? [...remaining, ...Array.from({ length: countedPages - pageCount }, (_, index) => pageCount + index + 1)]
+                    : remaining;
+                  await completeDocumentPages(state, document, this.name, processedPages, countedPages);
 
                   console.log(
                     `[extract-debug] document=${document.id} completed ` +
@@ -1096,7 +1106,8 @@ export class ExtractMarkdownStage implements Stage {
                       preserveTables: state.run.pipeline.preserveTables,
                       preserveCode: state.run.pipeline.preserveCode,
                       skippedPages: completedPages.size,
-                      processedPages: remaining.length,
+                      processedPages: processedPages.length,
+                      pageCount: countedPages,
                       // Which extractor served the document, what else was planned or tried, and how the
                       // native PDF engine took part: queryable from stage stats without fetching the manifest.
                       extractor: winningCandidate.label,
@@ -1641,6 +1652,8 @@ export class ExtractMarkdownStage implements Stage {
   ): Promise<ExtractedCandidate> {
     if (!context?.state) throw new Error("ocr extraction requires the run state");
     const state = context.state;
+    // The read starts a VM: authorized before it (cost cap, balance for its Rich page), not only after the frames are counted.
+    await authorizeImageRead(state, context.documentId);
     const result = await ocrDocument({
       runner: this.runner,
       state,
@@ -1651,9 +1664,11 @@ export class ExtractMarkdownStage implements Stage {
       ...(context.ocrLanguage ? { languageSetting: context.ocrLanguage } : {}),
       hostedReader: createHostedOcrReader({ state, cfg: this.cfg, runner: this.runner }),
       stage: this.name,
+      // Each frame read is a page of the document (intake counted the image as one): recorded, and its extra Rich frames checked
+      // against the balance, before anything is charged.
+      beforeCharging: (frames) => authorizeImageFrames(state, context.documentId, this.name, frames),
       ...(signal ? { signal } : {}),
     });
-    if (result.truncatedFrames) console.warn(`[ocr] document=${context.documentId} frames truncated at the per-document frame cap`);
     const markdown = result.pages.map((page) => page.text).join("\f");
     const scratchDir = await mkdtemp(path.join(tmpdir(), "docslurp-extract-ocr-"));
     const outputPath = path.join(scratchDir, "ocr.md");

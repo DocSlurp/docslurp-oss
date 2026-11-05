@@ -54,9 +54,9 @@ beforeAll(async () => {
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id)
-      values ('o1', 'One', 'one', 'u1'), ('o2', 'Two', 'two', 'u1'), ('o3', 'Three', 'three', 'u1'), ('o4', 'Four', 'four', 'u1');
+      values ('o1', 'One', 'one', 'u1'), ('o2', 'Two', 'two', 'u1'), ('o3', 'Three', 'three', 'u1'), ('o4', 'Four', 'four', 'u1'), ('o-budget', 'Budget', 'budget', 'u1');
     insert into workspaces(id, org_id, user_id, name)
-      values ('w1', 'o1', 'u1', 'W'), ('w2', 'o2', 'u1', 'W2'), ('w3', 'o3', 'u1', 'W3'), ('w4', 'o4', 'u1', 'W4'), ('w-none', null, 'u1', 'Orphan');
+      values ('w1', 'o1', 'u1', 'W'), ('w2', 'o2', 'u1', 'W2'), ('w3', 'o3', 'u1', 'W3'), ('w4', 'o4', 'u1', 'W4'), ('w-budget', 'o-budget', 'u1', 'WB'), ('w-none', null, 'u1', 'Orphan');
   `);
   const served = await serveOnRandomPort(db);
   server = served.server;
@@ -96,6 +96,23 @@ describe("PostgresVisionAttemptBackend", () => {
     expect(await orgCount("o2")).toBe(2);
     expect(await orgCount("o1")).toBe(10);
   }, 60_000);
+
+  it("holds a per-document page budget across guards (an activity retry or a worker restart) and per document", async () => {
+    await insertRuns([["run-doc-budget", "o-budget", "w-budget"]]);
+    const admitOne = async (guard: VisionRunGuard, documentId: string, pageNumber: number) => {
+      const gate = guard.call({ documentId, pageNumber, purpose: "ocr", documentPageLimit: 2 });
+      try { await gate.admit({ weightCents: 0.001 }); } finally { await gate.finish(); }
+    };
+    const first = guardOf("run-doc-budget", null, { orgLimitCents: 1_000 });
+    await admitOne(first, "doc-a", 1);
+    await admitOne(first, "doc-a", 2);
+    // A new guard (retried activity, restarted worker) reads the same durable rows.
+    const retry = guardOf("run-doc-budget", null, { orgLimitCents: 1_000 });
+    await expect(admitOne(retry, "doc-a", 3)).rejects.toMatchObject({ stop: { reason: "document-page-limit", sticky: false } });
+    // A page already read keeps its own page bound; another document has its own budget.
+    await admitOne(retry, "doc-a", 1);
+    await admitOne(retry, "doc-b", 1);
+  });
 
   it("deleting the run or its workspace mid-call does not reset the org's count", async () => {
     await db.exec(`insert into workspaces(id, org_id, user_id, name) values ('w3-doomed', 'o3', 'u1', 'Doomed');`);

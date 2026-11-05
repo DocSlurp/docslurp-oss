@@ -27,6 +27,9 @@ import { defaultPipelineFeatures } from "./pipeline.js";
 import {
   ASSUMED_BYTES_PER_PAGE,
   FAST_ONLY_FORMATS,
+  IMAGE_MAX_FRAMES,
+  MULTI_FRAME_IMAGE_EXTENSIONS,
+  MULTI_FRAME_IMAGE_MIME_TYPES,
   estimateProfileFor,
   QUOTE_HIGH_MIX,
   QUOTE_HIGH_RICH_OUTPUT_TOKENS,
@@ -53,7 +56,7 @@ export const ESTIMATE_CARD_SCHEMA = 2;
  * Version of the pricing formulas (quoteUpload, estimateIngest, estimateUploadMedia, the file-type rules). Bump it
  * with any change to them, so a port built for other rules refuses the card instead of quoting with stale logic.
  */
-export const ESTIMATE_RULES = 5;
+export const ESTIMATE_RULES = 6;
 
 function cardBody() {
   return {
@@ -86,6 +89,11 @@ function cardBody() {
       /** Of those, the formats no model reads in any quality (Word, slides, sheets): priced Fast at both ends of a quote. */
       fastOnlyFormats: [...FAST_ONLY_FORMATS],
     },
+    /**
+     * Multi-frame images (TIFF): each frame is a page, at most `maxFrames` per file (more are refused); an uncounted one is quoted
+     * from 1 frame to its size at `unmeasuredPages.default.minBytesPerPage`, up to `maxFrames`.
+     */
+    multiFrameImages: { maxFrames: IMAGE_MAX_FRAMES, mimeTypes: [...MULTI_FRAME_IMAGE_MIME_TYPES], extensions: [...MULTI_FRAME_IMAGE_EXTENSIONS] },
     /** The high end of a quote counts each page a vision model reads as this many Rich pages (a dense page's typical output tokens). */
     quoteHighRichPageFactor: QUOTE_HIGH_RICH_PAGE_FACTOR,
     quoteHighRichOutputTokens: QUOTE_HIGH_RICH_OUTPUT_TOKENS,

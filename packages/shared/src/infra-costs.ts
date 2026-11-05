@@ -226,6 +226,31 @@ export const INFRA_COST_OBSERVATIONS: readonly InfraCostObservation[] = [
     method: "pricing-page",
     notes: "One physical core (2 vCPU equivalent). Memory is $0.00000222/GiB-s on top.",
   },
+  // Modal Sandboxes bill at non-preemptible rates (3x the Function list price), on max(request, usage).
+  {
+    id: "modal:sandbox-cpu-core",
+    provider: "modal",
+    sku: "sandbox-cpu-core",
+    unit: "hour",
+    usd: 0.00003942 * 3_600,
+    capacity: { vcpu: 2 },
+    sourceUrl: MODAL_PRICING,
+    observedAt: "2026-11-05",
+    method: "pricing-page",
+    notes: "Sandbox CPU, one physical core (2 vCPU equivalent), $0.00003942/core-s (non-preemptible). Minimum 0.125 cores per sandbox. Backs sandboxed document and OCR jobs, which bill as pages, not as CPU time.",
+  },
+  {
+    id: "modal:sandbox-memory-gib",
+    provider: "modal",
+    sku: "sandbox-memory-gib",
+    unit: "hour",
+    usd: 0.00000667 * 3_600,
+    capacity: { memoryGb: 1 },
+    sourceUrl: MODAL_PRICING,
+    observedAt: "2026-11-05",
+    method: "pricing-page",
+    notes: "Sandbox memory, $0.00000667/GiB-s (non-preemptible). Minimum 128 MiB per sandbox.",
+  },
   // Storage.
   {
     id: "tigris:standard",
@@ -262,6 +287,29 @@ export const INFRA_COST_OBSERVATIONS: readonly InfraCostObservation[] = [
     notes: "Standard plan credit-purchase fee is 5.5%; Business is 8%. This observation assumes Standard.",
   },
 ];
+
+/**
+ * Provider cost of a Modal Sandbox, in cents: the verified sandbox core-second and GiB-second rates (the
+ * `modal:sandbox-cpu-core` and `modal:sandbox-memory-gib` observations) on the cores and memory the sandbox requested for
+ * `seconds` of wall time. Modal bills a sandbox at max(request, usage), so the request is the floor of the bill. Excludes
+ * image builds, storage, egress and Modal's region multipliers.
+ */
+export function modalSandboxCostCents(args: { cores: number; memoryGib: number; seconds: number }): number {
+  const rate = (id: string) => {
+    const observation = INFRA_COST_OBSERVATIONS.find((entry) => entry.id === id);
+    if (!observation) throw new Error(`infra cost observation ${id} missing`);
+    return observation.usd / 3_600;
+  };
+  const seconds = Math.max(0, Number.isFinite(args.seconds) ? args.seconds : 0);
+  const cores = Math.max(0, Number(args.cores) || 0);
+  const memoryGib = Math.max(0, Number(args.memoryGib) || 0);
+  return seconds * (cores * rate("modal:sandbox-cpu-core") + memoryGib * rate("modal:sandbox-memory-gib")) * 100;
+}
+
+/** When the sandbox rates were verified, for cost metadata. */
+export function modalSandboxRatesObservedAt(): string {
+  return INFRA_COST_OBSERVATIONS.find((entry) => entry.id === "modal:sandbox-cpu-core")?.observedAt ?? "unknown";
+}
 
 // ---------------------------------------------------------------------------
 // Policy

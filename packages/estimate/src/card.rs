@@ -13,7 +13,7 @@ use crate::error::{Error, ErrorCode};
 /// Card shape this build reads; a card with another `schema` is rejected.
 pub const CARD_SCHEMA: u32 = 2;
 /// Pricing formulas this build implements; a card for other `rules` is rejected rather than quoted with stale logic.
-pub const CARD_RULES: u32 = 5;
+pub const CARD_RULES: u32 = 6;
 
 const BUNDLED: &str = include_str!("../card.json");
 
@@ -132,6 +132,15 @@ pub struct UnmeasuredPages {
     pub fast_only_formats: Vec<String>,
 }
 
+/// Multi-frame images (TIFF, `IMAGE_MAX_FRAMES` in `@docslurp/shared`): each frame is a page, at most `max_frames` per file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MultiFrameImages {
+    pub max_frames: f64,
+    pub mime_types: Vec<String>,
+    pub extensions: Vec<String>,
+}
+
 /// The worker's raster-page routing thresholds (`PAGE_RASTER_ROUTING` in `@docslurp/shared`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -171,6 +180,7 @@ pub struct Card {
     pub speed_boost_multiplier: f64,
     pub assumed_bytes_per_page: f64,
     pub unmeasured_pages: UnmeasuredPages,
+    pub multi_frame_images: MultiFrameImages,
     /// Rich pages the high end of a quote counts for each page a vision model reads (a dense page's typical output).
     pub quote_high_rich_page_factor: f64,
     pub quote_high_rich_output_tokens: f64,

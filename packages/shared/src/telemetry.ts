@@ -456,6 +456,20 @@ export function recordMediaTelemetry(args: { provider: string; model: string; op
   });
 }
 
+/**
+ * Provider usage the worker could not record on a run's usage ledger (no stage context to hold it), so it never reaches
+ * `usage_events`: a counter and its provider cost, for the loss alert. Labels are bounded provider/model/metric categories.
+ */
+export function recordUnrecordedUsageTelemetry(args: { provider: string; model: string; metric: string; costCents: number; reason: string }): void {
+  const meter = getRuntime()?.metrics?.getMeter("docslurp.usage");
+  if (!meter) return;
+  const labels = { provider: args.provider, model: args.model, metric: args.metric, reason: args.reason };
+  bestEffort(() => {
+    meter.createCounter("docslurp.usage.unrecorded").add(1, labels);
+    if (args.costCents > 0) meter.createCounter("docslurp.usage.unrecorded_cost", { unit: "cents" }).add(args.costCents, labels);
+  });
+}
+
 const dependencyScopeKey = createContextKey("docslurp.dependency.scope");
 export function withDependencyScope<T>(scope: Record<string, unknown>, run: () => T): T {
   return context.with(context.active().setValue(dependencyScopeKey, scope), run);

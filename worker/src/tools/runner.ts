@@ -13,7 +13,7 @@ import {
   vendorBundlesEnabled,
   type InstalledVendorBundle,
 } from "./vendor-bundles.js";
-import { withObservation } from "@docslurp/shared/observability";
+import { recordUnrecordedUsageTelemetry, withObservation } from "@docslurp/shared/observability";
 import { DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@docslurp/shared";
 import { existsSync, readFileSync, readdirSync, readlinkSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { access } from "node:fs/promises";
@@ -2137,10 +2137,21 @@ export function buildSandboxCommand(args: {
   };
 }
 
-/** Record a remote provider's cost in the enclosing stage's usage ledger, tagged with its scope. */
-function recordRemoteUsage(usage: UsageEvent): void {
+/**
+ * Record a remote provider's cost in the enclosing stage's usage ledger, tagged with its scope. Without a stage context
+ * there is no ledger to hold it: the cost would vanish from `usage_events`, so it is logged loudly and counted
+ * (`docslurp.usage.unrecorded`) for the provider-cost loss alert.
+ */
+export function recordRemoteUsage(usage: UsageEvent): void {
   const context = currentPerfContext();
-  if (!context) return;
+  if (!context) {
+    console.error(
+      `[usage-unrecorded] provider=${usage.provider} model=${usage.model} metric=${usage.metric} amount=${usage.amount} ` +
+        `unit=${usage.unit} costCents=${usage.costCents}: remote usage outside a stage context has no usage ledger`,
+    );
+    recordUnrecordedUsageTelemetry({ provider: usage.provider, model: usage.model, metric: usage.metric, costCents: Number(usage.costCents) || 0, reason: "no-perf-context" });
+    return;
+  }
   pushUsageEvent({ ...usage, metadata: { ...usage.metadata, scope: context.scope, stage: context.stageName } });
 }
 

@@ -6,7 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EXTRACTOR_PLUGIN_API_VERSION, registerExtractorPlugin, resetExtractorPluginsForTest, type SandboxedOcrProvider } from "../../extractors/plugins.js";
 import { CommandRunner } from "../../tools/runner.js";
 import { readWithOcr } from "../engine.js";
-import { assertOcrConfiguration, classifyOcrRunError, localOcrRefusal, OcrDeterministicFailure, OcrInfrastructureError, OcrRefusedError, resolveOcrMode, resolveServiceProfile } from "../mode.js";
+import { assertOcrConfiguration, classifyOcrRunError, localOcrRefusal, OcrDeterministicFailure, OcrInfrastructureError, ocrLongEdgeOptIn, OcrRefusedError, resolveOcrMode, resolveServiceProfile } from "../mode.js";
+import { ocrMaxLongEdge } from "../engine.js";
 
 function provider(overrides: Partial<SandboxedOcrProvider> = {}): SandboxedOcrProvider {
   return {
@@ -67,6 +68,21 @@ describe("resolveOcrMode", () => {
 });
 
 describe("assertOcrConfiguration", () => {
+  it("keeps the 2000 px long edge by default and warns at startup when an operator opts in above it", () => {
+    expect(ocrMaxLongEdge({})).toBe(2000);
+    expect(ocrLongEdgeOptIn({})).toBeNull();
+    expect(ocrLongEdgeOptIn({ DOCSLURP_OCR_MAX_LONG_EDGE: "2000" })).toBeNull();
+    expect(ocrLongEdgeOptIn({ DOCSLURP_OCR_MAX_LONG_EDGE: "9000" })).toBeNull();
+    expect(ocrLongEdgeOptIn({ DOCSLURP_OCR_MAX_LONG_EDGE: "4000" })).toBe(4000);
+    register(provider());
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    assertOcrConfiguration({ DOCSLURP_OCR_MODE: "vm" });
+    expect(warn).not.toHaveBeenCalled();
+    assertOcrConfiguration({ DOCSLURP_OCR_MODE: "vm", DOCSLURP_OCR_MAX_LONG_EDGE: "4000" });
+    expect(String(warn.mock.calls[0]?.[0])).toMatch(/long-edge-opt-in DOCSLURP_OCR_MAX_LONG_EDGE=4000 .*cost more than the Rich page/);
+  });
+
   it("refuses to start in vm mode without a provider", () => {
     expect(() => assertOcrConfiguration({ DOCSLURP_OCR_MODE: "vm" })).toThrow(/needs an OCR provider plugin.*refusing to start/);
   });

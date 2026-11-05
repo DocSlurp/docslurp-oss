@@ -1,8 +1,13 @@
 /*
- * Billing and usage for OCR reads. Every page the engine read with words in it is one Rich page read (`page-ocr`; the
- * ledger keys the charge by run, document and page, so a retried checkpoint or a second reader never charges it twice).
- * One compute event per job carries the boundary's measured CPU, peak RSS and wall time; the VM provider's own cost
- * arrives separately through the runner (settleRemote), at provider cost.
+ * Billing and usage for OCR reads (`page-ocr`, one Rich page each; the ledger keys the charge by run, document and page, so a
+ * retried checkpoint or a second reader never charges it twice):
+ *
+ * - An uploaded image: every frame the engine read is one Rich page, whether or not it found text (owner decision,
+ *   2026-11-05). The OCR VM's cost is the same either way, and a blank image is still a read the customer asked for.
+ * - A scanned PDF page: one Rich page only when the read found words; a blank page bills Fast at completion.
+ *
+ * One compute event per job carries the boundary's measured CPU, peak RSS and wall time; the VM provider's own cost arrives
+ * separately through the runner (settleRemote), at provider cost.
  */
 import type { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import type { OcrReadOutcome } from "./engine.js";
@@ -11,11 +16,14 @@ const HAS_WORDS = /[\p{L}\p{N}]/u;
 
 type OcrLedger = Pick<PipelineUsageEventLedger, "chargeRichPage" | "enqueue">;
 
-/** Charge each page with words as a Rich read and record the job's measured compute. Returns the pages charged. */
-export function recordOcrReads(ledger: OcrLedger, documentId: string, outcome: OcrReadOutcome, context: { stage: string }): number[] {
+/**
+ * Charge the job's pages as Rich reads (every frame of an image; each PDF page with words) and record the job's measured
+ * compute. Returns the pages charged.
+ */
+export function recordOcrReads(ledger: OcrLedger, documentId: string, outcome: OcrReadOutcome, context: { stage: string; kind: "image" | "pdf" }): number[] {
   const charged: number[] = [];
   for (const page of outcome.pages) {
-    if (!HAS_WORDS.test(page.text)) continue;
+    if (context.kind === "pdf" && !HAS_WORDS.test(page.text)) continue;
     ledger.chargeRichPage({ documentId, pageNumber: page.pageNumber, readBy: "page-ocr", model: `ppocr:${page.recogniser}` });
     charged.push(page.pageNumber);
   }
@@ -31,6 +39,7 @@ export function recordOcrReads(ledger: OcrLedger, documentId: string, outcome: O
     metadata: {
       documentId,
       stage: context.stage,
+      kind: context.kind,
       mode: outcome.mode,
       engine: outcome.engine,
       language: outcome.language.setting,

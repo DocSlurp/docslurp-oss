@@ -37,6 +37,7 @@ import { recordShardTiming } from "./shard-calibration.js";
 import type { PageRangeSlice } from "../temporal/shared.js";
 import { HungWorkError } from "../lib/hung-work.js";
 import { runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
+import { pinRunPageBillingRules } from "../db/page-base-fee.js";
 import { pinRunRoutingVersion } from "../lib/vision-routing-v2.js";
 import { ProgressTracker, resolveStageStallTimeoutMs, runWithProgressTracker } from "../lib/work-progress.js";
 import { latchedTeardownError } from "../sandbox/session-context.js";
@@ -247,6 +248,9 @@ export function createStageExecution(deps: {
     // pin), and persisted with the run's artifacts by the progress write below, so every stage, shard and page
     // task agrees. There is no environment switch.
     const visionRoutingVersion = pinRunRoutingVersion(state);
+    // Page billing rules, pinned the same way: a run without the pin (started by an earlier release) keeps that release's
+    // completion charge for image files and scanned pages (db/page-base-fee.ts).
+    const pageBillingRules = pinRunPageBillingRules(state);
 
     // Mark run as processing
     state.run.status = "processing";
@@ -269,7 +273,7 @@ export function createStageExecution(deps: {
       `[temporal] run=${run.id} status=init docs=${documents.length} ` +
         `minCents=${forecast.minCents} maxCents=${forecast.maxCents} ` +
         `completedRunStages=${completedRunStages.length} completedDocStages=${completedDocStages.length} ` +
-        `artifactKeys=${Object.keys(state.artifacts).length} visionRouting=${visionRoutingVersion}`,
+        `artifactKeys=${Object.keys(state.artifacts).length} visionRouting=${visionRoutingVersion} pageBilling=${pageBillingRules}`,
     );
     if (completedRunStages.length > 0) {
       console.log(

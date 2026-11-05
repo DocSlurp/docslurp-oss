@@ -47,6 +47,8 @@ const INFRASTRUCTURE_ERROR_NAMES = new Set([
   "WorkerQuarantinedError",
   // OCR could not run (VM creation, capacity, a deadline): retried, never the Document's fault.
   "OcrInfrastructureError",
+  // A charge's spend check could not decide (db/spend-check.ts): refused, retried, never a verdict on the Document.
+  "SpendCheckUnavailableError",
 ]);
 
 function causeChain(error: unknown): unknown[] {

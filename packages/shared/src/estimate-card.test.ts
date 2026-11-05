@@ -10,7 +10,7 @@ import { buildEstimateCard, ESTIMATE_RULES } from "./estimate-card.js";
 import { buildEstimateGoldenCases, serializeGoldenCases } from "./estimate-golden.js";
 import { compilePipelinePlan, defaultPipelineFeatures, type PipelineFeatures } from "./pipeline.js";
 import { pageCredits, speedBoostMultiplier } from "./billing.js";
-import { countedPagesForForecast, estimateProfileFor, intakePageCountSource, QUOTE_HIGH_RICH_PAGE_FACTOR, quoteFilePageRange, quoteFileSchema, quoteUpload, workerCountedFormat, type QuoteFile } from "./upload-quote.js";
+import { countedPagesForForecast, estimateProfileFor, IMAGE_MAX_FRAMES, intakePageCountSource, isMultiFrameImageFile, QUOTE_HIGH_RICH_PAGE_FACTOR, quoteFilePageRange, quoteFileSchema, quoteUpload, workerCountedFormat, type QuoteFile } from "./upload-quote.js";
 import { isUploadImageFile, isUploadTextFile, textPageCount, uploadMediaKind } from "./media-upload-estimate.js";
 
 const estimateDir = join(dirname(fileURLToPath(import.meta.url)), "../../estimate");
@@ -121,6 +121,36 @@ describe("quoteUpload", () => {
     expect(uncounted.credits!.high).toBe(pageCredits("fast", uncounted.pagesRange!.high));
     const mixed = quoteUpload({ files: [{ name: "memo.doc", size: 400_000, type: "application/msword" }, { name: "scan.pdf", size: 1, pages: 10 }], profile: good }).estimate;
     expect(mixed.credits!.low).toBeCloseTo(pageCredits("fast", uncounted.pagesRange!.low) + pageCredits("rich", 10));
+  });
+
+  it("keeps a Word file Fast when the client sends a scan-heavy page mix (Good and Auto)", () => {
+    for (const quality of ["good", "auto"] as const) {
+      const profile = estimateProfileFor({ ...defaultPipelineFeatures, quality }, { env: enforced });
+      // Was priced as 30 Rich pages (7.5 credits low, more at the high end); it bills 30 Fast pages, 0.15 credits.
+      const quote = quoteUpload({ files: [{ name: "contract.docx", size: 1_200_000, pages: 30, mix: { text: 0, complex: 0, scanned: 1 } }], profile }).estimate;
+      expect(quote.credits).toEqual({ low: pageCredits("fast", 30), high: pageCredits("fast", 30) });
+    }
+  });
+
+  it("prices a TIFF's frames as its pages, up to the frame cap, and notes a file over it", () => {
+    const profile = estimateProfileFor({ ...defaultPipelineFeatures, quality: "auto" }, { env: enforced });
+    const scannedPages = (pages: number) => quoteUpload({ files: [{ name: "a.pdf", size: 1, pages, mix: { text: 0, complex: 0, scanned: 1 } }], profile }).estimate.credits;
+    // 7 counted frames: 7 Rich pages (was quoted as 1).
+    const counted = quoteUpload({ files: [{ name: "fax.tiff", size: 2_000_000, pages: 7 }], profile }).estimate;
+    expect(counted.pages).toBe(7);
+    expect(counted.credits).toEqual(scannedPages(7));
+    // Over the cap: quoted at the cap and noted as refused.
+    const over = quoteUpload({ files: [{ name: "archive.tif", size: 9_000_000, pages: 100 }], profile }).estimate;
+    expect(over.pages).toBe(IMAGE_MAX_FRAMES);
+    expect(over.basis).toContain(`1 image file holds more than ${IMAGE_MAX_FRAMES} frames and will be refused`);
+    // Uncounted: 1 frame to its size at the densest page, at most the cap.
+    const uncounted = quoteUpload({ files: [{ name: "scan", size: 300_000, type: "image/tiff" }], profile }).estimate;
+    expect(uncounted.pagesRange).toEqual({ low: 1, high: Math.ceil(300_000 / (16 * 1024)) });
+    expect(quoteFilePageRange({ name: "big.tiff", size: 90_000_000 })).toMatchObject({ low: 1, high: IMAGE_MAX_FRAMES, measured: false });
+    expect(intakePageCountSource({ name: "fax.tiff" })).toBe("assumed");
+    expect(intakePageCountSource({ name: "photo.png" })).toBe("counted");
+    expect(isMultiFrameImageFile({ name: "x.pdf", type: "image/tiff" })).toBe(true);
+    expect(isMultiFrameImageFile({ name: "x.tiff", type: "image/png" })).toBe(false);
   });
 
   it("prices an image file as one scanned page", () => {

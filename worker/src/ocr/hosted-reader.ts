@@ -2,7 +2,7 @@
  * Hosted page reads for OCR: the escalation read of a page the recogniser read poorly (`ocr-escalation`), and the read of
  * a stored image in DOCSLURP_OCR_MODE=hosted (`hosted-ocr`). Both go through the worker's guarded vision call path:
  * the workspace privacy mode, the run cost cap, the run's vision attempt guard (per-page, breaker, org and route
- * bounds), a per-document page budget, and the usage ledger with the provider's actual tokens and cost.
+ * bounds, and a per-document page budget counted in its durable ledger), and the usage ledger with the provider's actual tokens and cost.
  *
  * The bytes sent are never produced on the worker host: an escalation image is the PNG the OCR boundary wrote (checked
  * by signature and size only), and a hosted-mode image is the stored file as uploaded. Neither is a substitute for a
@@ -76,20 +76,6 @@ export function ocrEscalationMaxPages(env: NodeJS.ProcessEnv = process.env): num
   return Number.isInteger(parsed) && parsed >= 0 ? Math.min(parsed, 10_000) : DEFAULT_OCR_ESCALATION_MAX_PAGES;
 }
 
-/** Hosted reads per run and document, so the per-document budget holds across stages and retries in this process. */
-const pagesRead = new WeakMap<WorkflowState, Map<string, Set<number>>>();
-
-function reserveBudget(state: WorkflowState, documentId: string, pageNumber: number, max: number): boolean {
-  let documents = pagesRead.get(state);
-  if (!documents) pagesRead.set(state, documents = new Map());
-  let pages = documents.get(documentId);
-  if (!pages) documents.set(documentId, pages = new Set());
-  if (pages.has(pageNumber)) return true;
-  if (pages.size >= max) return false;
-  pages.add(pageNumber);
-  return true;
-}
-
 export function createHostedOcrReader(args: {
   state: WorkflowState;
   cfg: Config;
@@ -115,14 +101,13 @@ export function createHostedOcrReader(args: {
         throw new HostedOcrSkipped("privacy", `privacy mode refuses ${purpose}`);
       }
       if (isCostCapExceeded(state)) throw new HostedOcrSkipped("cost-cap", `run cost cap reached before ${purpose}`);
-      if (!reserveBudget(state, page.documentId, page.pageNumber, ocrEscalationMaxPages(env))) {
-        console.warn(`[ocr] ${purpose} budget spent document=${page.documentId} page=${page.pageNumber} max=${ocrEscalationMaxPages(env)}`);
-        throw new HostedOcrSkipped("budget", `${purpose} page budget spent for this document`);
-      }
+      const maxPages = ocrEscalationMaxPages(env);
       const pageRef = { documentId: page.documentId, pageNumber: page.pageNumber };
       const outputPath = `${page.imagePath}.${purpose}.json`;
       try {
-        return await withVisionCall(state, { ...pageRef, purpose: "ocr" }, async (gate) => {
+        // The per-document page budget is counted by the guard's durable attempt ledger (run, document, page), so an
+        // activity retry or a worker restart cannot reset it.
+        return await withVisionCall(state, { ...pageRef, purpose: "ocr", documentPageLimit: maxPages }, async (gate) => {
           let result: Awaited<ReturnType<typeof executeVisionRuntime>>;
           try {
             result = await execute({
@@ -135,7 +120,12 @@ export function createHostedOcrReader(args: {
               if (usage.kind === "rejected") state.usageLedger.record(usage.input);
               else state.usageLedger.enqueue({ ...usage.input, amount: usage.input.amount ?? 1, unit: usage.input.unit ?? "attempt", costCents: usage.input.costCents ?? 0, inputTokens: usage.input.inputTokens ?? 0, outputTokens: usage.input.outputTokens ?? 0 }, { logAiUsage: true });
             }
-            if (findVisionGuardStop(error)) throw new HostedOcrSkipped("guard", toMessage(error));
+            const stop = findVisionGuardStop(error);
+            if (stop?.reason === "document-page-limit") {
+              console.warn(`[ocr] ${purpose} budget spent document=${page.documentId} page=${page.pageNumber} max=${maxPages}`);
+              throw new HostedOcrSkipped("budget", `${purpose} page budget spent for this document`);
+            }
+            if (stop) throw new HostedOcrSkipped("guard", toMessage(error));
             throw error;
           }
           const costCents = priceVisionResult(result, args.cfg);

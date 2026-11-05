@@ -161,4 +161,23 @@ describe("a measured DOCX: page rows and billing", () => {
     const { rows } = await db.query<{ control_state: string | null }>(`select control_state from workspace_runs where id = 'run1'`);
     expect(rows[0]!.control_state).toBeNull();
   }, 60_000);
+
+  it("fails closed when the measured-page spend check's database errors: retryable, never treated as funded", async () => {
+    setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await db.exec(`update workspace_runs set control_state = null, pause_reason = null where id = 'run1'`);
+    const run = await store.loadRun("run1");
+    const document = (await store.loadDocument("docx1"))!;
+    await db.exec(`alter function org_spend_status(text, text, numeric) rename to org_spend_status_unavailable`);
+    try {
+      await expect(recordMeasuredPageCount({ run, store }, layoutEngine(4_000), document, "office-word"))
+        .rejects.toMatchObject({ name: "SpendCheckUnavailableError" });
+      // A retryable infrastructure error: the stage leaves the document unfinished rather than failing it.
+      const { isDocumentLevelFailure } = await import("../lib/document-failure.js");
+      const error = await recordMeasuredPageCount({ run, store }, layoutEngine(4_000), document, "office-word").catch((caught: unknown) => caught);
+      expect(isDocumentLevelFailure(error)).toBe(false);
+    } finally {
+      await db.exec(`alter function org_spend_status_unavailable(text, text, numeric) rename to org_spend_status`);
+    }
+  }, 60_000);
 });

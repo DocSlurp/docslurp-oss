@@ -10,6 +10,7 @@ import type { CommandRunner } from "../tools/runner.js";
 import { readWithOcr, type OcrReadOutcome } from "./engine.js";
 import { escalateOcrPages, type EscalationSummary } from "./escalation.js";
 import { HOSTED_OCR_MAX_BYTES, HOSTED_OCR_MIME_TYPES, HostedOcrSkipped, ocrEscalationEnabled, type HostedOcrReader } from "./hosted-reader.js";
+import { imageTooManyFramesError } from "./image-frames.js";
 import { recordOcrReads } from "./ledger.js";
 import { OcrRefusedError, resolveOcrMode } from "./mode.js";
 
@@ -27,6 +28,11 @@ export interface OcrDocumentInput {
   /** Hosted reader for escalation (vm/local) and for hosted mode; absent disables both. */
   hostedReader?: HostedOcrReader | null;
   stage: string;
+  /**
+   * Called with the frames the boundary read, after the frame cap check and before any page is charged or escalated: an
+   * image's page basis and spend authorization (image-frames.ts). A throw refuses the document with nothing charged.
+   */
+  beforeCharging?: (frames: number) => Promise<void>;
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
 }
@@ -64,9 +70,13 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
       ...(input.signal ? { signal: input.signal } : {}),
       env,
     });
+    // An image with more frames than one file may hold is refused before anything is charged: reading its first frames would
+    // publish part of it under a bill that claims the whole file.
+    if (input.kind === "image" && outcome.truncatedFrames) throw imageTooManyFramesError(input.documentId);
+    await input.beforeCharging?.(outcome.pages.length);
     // The recogniser's reads are billed first; an escalation read of the same page is the same Rich page (the ledger sums
     // readers per page), with its own provider cost.
-    const chargedPages = recordOcrReads(input.state.usageLedger, input.documentId, outcome, { stage: input.stage });
+    const chargedPages = recordOcrReads(input.state.usageLedger, input.documentId, outcome, { stage: input.stage, kind: input.kind });
     const escalation = input.hostedReader && outcome.pages.some((page) => page.escalation)
       ? await escalateOcrPages(outcome, input.hostedReader, input.documentId, input.signal)
       : null;

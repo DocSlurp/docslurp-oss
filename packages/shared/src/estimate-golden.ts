@@ -85,7 +85,7 @@ function mediaCases() {
 
 function quoteCases() {
   const rng = sequence(0x9a07e);
-  const names = ["report.pdf", "deck.pptx", "scan.png", "photo.JPG", "a.docx", "talk.mp3", "song.flac", "clip.mp4", "film.mov", "page.html", "data", "book.epub", "sheet.XLSX", "memo.doc", "letter.odt", "note.rtf"];
+  const names = ["report.pdf", "deck.pptx", "scan.png", "photo.JPG", "a.docx", "talk.mp3", "song.flac", "clip.mp4", "film.mov", "page.html", "data", "book.epub", "sheet.XLSX", "memo.doc", "letter.odt", "note.rtf", "fax.tif"];
   const types = [undefined, undefined, "image/heic", "application/pdf", "audio/aac", "video/x-msvideo", "application/octet-stream", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/rtf"];
   const profileFor = (overrides: Partial<EstimateProfile> = {}): EstimateProfile => ({
     cardVersion: PRICE_CARD_VERSION,
@@ -117,6 +117,12 @@ function quoteCases() {
     { files: [{ name: "scan.pdf", size: 12 * 1024 * 1024 }], profile: profileFor({ quality: "fast", billing: "enforced" }) },
     { files: [{ name: "rows.csv", size: 1_000_000 }, { name: "notes.md", size: 12_345, type: "text/markdown" }, { name: "deck.pptx", size: 8_000_000, pages: 42 }], profile: profileFor({ quality: "good", billing: "enforced" }) },
     { files: [{ name: "a.pdf", size: 12 * 1024 * 1024, pages: 300, mix: { text: 0, complex: 0, scanned: 1 } }, { name: "b.docx", size: 90_000 }], profile: profileFor({ quality: "auto", billing: "enforced" }), speedBoost: true },
+    // A Word, slide or sheet file stays Fast even when the client sends a scan-heavy page mix: no model reads it.
+    { files: [{ name: "contract.docx", size: 1_200_000, pages: 30, mix: { text: 0, complex: 0, scanned: 1 } }, { name: "deck.pptx", size: 4_000_000, mix: { text: 1, complex: 1, scanned: 2 }, mixConfidence: 0.6 }], profile: profileFor({ quality: "good", billing: "enforced" }) },
+    { files: [{ name: "contract.docx", size: 1_200_000, pages: 30, mix: { text: 0, complex: 0, scanned: 1 } }], profile: profileFor({ quality: "auto", billing: "enforced" }) },
+    // Multi-frame TIFFs: counted frames (one at the frame cap, quoted at the cap and noted as refused), uncounted ones over their size.
+    { files: [{ name: "fax.tiff", size: 2_000_000, pages: 7 }, { name: "archive.tif", size: 9_000_000, pages: 100 }], profile: profileFor({ quality: "auto", billing: "enforced" }) },
+    { files: [{ name: "fax.tiff", size: 2_000_000 }, { name: "scan", size: 300_000, type: "image/tiff" }, { name: "big.TIF", size: 90_000_000, type: "application/octet-stream" }], profile: profileFor({ quality: "good", billing: "enforced" }) },
   ];
   for (let i = 0; i < 40; i += 1) {
     const files: QuoteFile[] = [];
