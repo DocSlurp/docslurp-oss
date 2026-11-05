@@ -128,3 +128,20 @@ describe.each([false, true])("direct session authorization, statusOnly=%s", stat
     expect(mocks.describe).not.toHaveBeenCalled();
   });
 });
+
+describe("idempotent session replay after a share is revoked", () => {
+  it("hands URLs back only while the user may still contribute to the session's workspace", async () => {
+    const { assertSessionWorkspaceStillContributable } = await import("../services/direct-session-idempotency.js");
+    // 'other' is a plain member of 'o': it may upload into 'excluded' only through a share.
+    await db.query("insert into workspace_members (workspace_id, user_id, role) values ('excluded', 'other', 'editor')");
+    await expect(assertSessionWorkspaceStillContributable({ workspace_id: "excluded" }, "other")).resolves.toBeUndefined();
+    await db.query("delete from workspace_members where workspace_id = 'excluded' and user_id = 'other'");
+    await expect(assertSessionWorkspaceStillContributable({ workspace_id: "excluded" }, "other")).rejects.toMatchObject({ statusCode: 403 });
+    // A viewer share does not let them upload either; another tenant's user never can.
+    await db.query("insert into workspace_members (workspace_id, user_id, role) values ('excluded', 'other', 'viewer')");
+    await expect(assertSessionWorkspaceStillContributable({ workspace_id: "excluded" }, "other")).rejects.toMatchObject({ statusCode: 403 });
+    await db.query("delete from workspace_members where workspace_id = 'excluded' and user_id = 'other'");
+    await db.query(`insert into "user" (id,name,email) values ('outsider','Out','outsider@example.test') on conflict do nothing`);
+    await expect(assertSessionWorkspaceStillContributable({ workspace_id: "w" }, "outsider")).rejects.toMatchObject({ statusCode: 403 });
+  });
+});

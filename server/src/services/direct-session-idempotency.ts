@@ -1,6 +1,7 @@
 import { getCachedIdempotentResponse, hashIdempotencyPayload, IdempotencyConflictError, scopedIdempotencyKey, storeIdempotentResponse, type IdempotencyScope } from "./idempotency.js";
 import { withDirectUploadLock } from "./direct-upload-session.js";
 import { WorkspaceIntakeError } from "./workspace-intake.js";
+import { canContributeToWorkspace, getWorkspaceAccess } from "./organizations.js";
 
 export const DIRECT_SESSION_ROUTE_KEY = "uploads.direct-session";
 
@@ -32,6 +33,27 @@ export function assertSessionReplayable(
   }
   if (["failed", "aborted"].includes(session.status)) {
     throw new WorkspaceIntakeError(`The upload session created with this Idempotency-Key was ${session.status}; create a new one with a new Idempotency-Key`, 409, undefined, "upload_session_closed");
+  }
+}
+
+/** May `userId` upload into `workspaceId` now (a live share or membership with contribute rights)? */
+async function mayContributeNow(workspaceId: string, userId: string): Promise<boolean> {
+  const access = await getWorkspaceAccess(workspaceId, userId);
+  return access !== null && canContributeToWorkspace(access, userId);
+}
+
+/**
+ * The replay's live access check: the remembered session's workspace must still accept uploads from this user. A share or
+ * membership revoked since the first request gets no upload URLs (403), even with the same key and the same credential.
+ */
+export async function assertSessionWorkspaceStillContributable(
+  session: { workspace_id: string | null },
+  userId: string,
+  mayContribute: (workspaceId: string, userId: string) => Promise<boolean> = mayContributeNow,
+): Promise<void> {
+  if (!session.workspace_id) return;
+  if (!(await mayContribute(session.workspace_id, userId))) {
+    throw new WorkspaceIntakeError("You can no longer upload into the workspace of the session created with this Idempotency-Key", 403);
   }
 }
 

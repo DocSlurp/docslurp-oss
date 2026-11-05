@@ -34,7 +34,7 @@ import {
   directUploadSessionBelongsToOrganization,
   signDirectUploadParts,
 } from "../services/direct-upload-session.js";
-import { assertSessionReplayable, createSessionIdempotently } from "../services/direct-session-idempotency.js";
+import { assertSessionReplayable, assertSessionWorkspaceStillContributable, createSessionIdempotently } from "../services/direct-session-idempotency.js";
 import { parseIdempotencyKey } from "../services/idempotency.js";
 import { isRunCreationBlockedError } from "../services/runs.js";
 import { UnreadableSourceError } from "../services/source-metadata.js";
@@ -301,6 +301,8 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
             const loaded = await loadDirectUploadSession(sessionId, userId);
             if (!loaded) return null;
             assertSessionReplayable(loaded.session, { orgId, apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null, allowedWorkspaceIds: actorAllowedWorkspaceIds(actor) });
+            // ... and the user may still contribute to that workspace (a share revoked since gets no URLs).
+            await assertSessionWorkspaceStillContributable(loaded.session, userId);
             return await describeDirectUploadSession(loaded);
           },
         });
