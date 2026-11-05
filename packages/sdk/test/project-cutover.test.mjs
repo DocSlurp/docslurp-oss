@@ -146,3 +146,27 @@ test("all public intake entrypoints refuse organization scope erased by copying"
   await assert.rejects(async () => client.createUploadSession({ files: [{ filename: "x", sizeBytes: 1, mimeType: "text/plain", project: "misplaced" }] }), /Pass intake selection/);
   assert.equal(requests, 0);
 });
+
+for (const method of ["upload", "extract"]) test(`${method} undefined scope options preserve explicit envelope scope`, async () => {
+  for (const kind of ["urls", "files"]) {
+    for (const directUpload of [true, false]) {
+      for (const named of [true, false]) {
+        let captured;
+        const client = createDocSlurpClient({ project: "client-default", fetch: async (_url, init) => {
+          captured = init.body instanceof FormData ? Object.fromEntries(init.body.entries()) : JSON.parse(init.body);
+          throw new Error("captured request");
+        } });
+        const input = { ...(kind === "urls" ? { urls: ["https://example.test/a.pdf"] } : { files: [new Blob(["x"])] }),
+          ...(named ? { project: "intended-project" } : { newProject: true, templateKey: "intended-template" }), orgId: "intended-org" };
+        await assert.rejects(() => client[method](input, { directUpload, project: undefined, orgId: undefined, newProject: undefined, templateKey: undefined }), /captured request/);
+        assert.equal(captured.orgId, "intended-org");
+        if (named) assert.equal(captured.project, "intended-project");
+        else {
+          assert.ok(captured.newProject === true || captured.newProject === "true");
+          assert.equal(captured.templateKey, "intended-template");
+          assert.equal(captured.project, undefined);
+        }
+      }
+    }
+  }
+});

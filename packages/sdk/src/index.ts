@@ -1449,6 +1449,12 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     if (Array.isArray(input) || (!("urls" in input) && !("files" in input))) rejectDirectFileSelection(input);
     const inputFiles = Array.isArray(input) ? input : "files" in input ? input.files : [];
     for (const file of inputFiles) rejectDirectFileSelection(file);
+    // Optional undefined values do not override an envelope's explicit scope.
+    // Spread retains symbol metadata used by extract's shared upload transport.
+    options = { ...options };
+    for (const key of ["project", "orgId", "newProject", "templateKey"] as const) {
+      if (options[key] === undefined) delete options[key];
+    }
     assertClientCanonicalIds(canonicalIdsOf(input, options));
     if ("urls" in input) return uploadUrls({ ...input, ...options }, options);
     if (Array.isArray(input)) input = { files: input };
