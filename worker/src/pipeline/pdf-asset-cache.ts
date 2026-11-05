@@ -19,6 +19,7 @@ import { pushPerfMetric } from "../lib/perf-context.js";
 import { isCommandTeardownError } from "../sandbox/teardown.js";
 import { SourceIntegrityError, verifyStagedSource } from "../sandbox/source-integrity.js";
 import { registerReadOnlySource, unregisterReadOnlySource } from "../sandbox/paths.js";
+import { sniffedPdf } from "../lib/sniffed-pdf.js";
 
 export type RasterEngineName = "pdftoppm" | "native-pdf";
 
@@ -341,7 +342,7 @@ export class PdfRasterCache {
     maxEdgePx?: number;
     signal?: AbortSignal;
   }): Promise<{ bytes: Buffer; widthPx: number | null; heightPx: number | null; mimeType: string; engine: RasterEngineName; dpi: number } | null> {
-    if (args.document.mimeType !== "application/pdf") return null;
+    if (!sniffedPdf(args.document)) return null;
     const { name, engine } = await this.resolveEngine();
     if (name !== "native-pdf" || !engine) return null;
     const dpi = clampDpi(args.dpi);
@@ -394,7 +395,7 @@ export class PdfRasterCache {
     const pageNumbers = normalizePageNumbers(args.pageNumbers, args.document.pageCount);
     if (pageNumbers.length === 0) return [];
 
-    const isPdf = args.document.mimeType === "application/pdf";
+    const isPdf = sniffedPdf(args.document);
     if (!isPdf && pageNumbers.some((pageNumber) => pageNumber !== 1)) {
       throw new Error(`Native image documents only support page 1, received ${pageNumbers.join(",")}`);
     }

@@ -318,7 +318,8 @@ export class ExtractMarkdownStage implements Stage {
         const extractorOptions = extractionConfig.options;
         const hasTablePages =
           state.artifactLedger.readDocument(document.id, "hasTablePages") === "true";
-        const format = state.artifactLedger.readDocument(document.id, "normalizedFormat") ?? (this.isPdfDocument(document) ? "pdf" : "unknown");
+        // The sniffed format (format-detect) alone says whether the bytes are a PDF; a file name or declared type never does.
+        const format = state.artifactLedger.readDocument(document.id, "normalizedFormat") ?? "unknown";
         if (format === "audio" || format === "video") {
           await extractMedia({ state, document, runner: this.runner, storage: this.storage, journal: this.mediaJournal, capacityStore: this.capacityStore, signal });
           return;
@@ -752,6 +753,7 @@ export class ExtractMarkdownStage implements Stage {
                     ? []
                     : await this.buildParserArtifacts(
                         document,
+                        format,
                         tempFile,
                         state,
                         { hasTablePages, nativePayloadOutcome: nativePdfStats?.parserPayload },
@@ -2312,6 +2314,8 @@ export class ExtractMarkdownStage implements Stage {
 
   private async buildParserArtifacts(
     document: import("../models.js").Document,
+    /** The sniffed format (format-detect's normalizedFormat). */
+    format: string,
     sourceTempFile: string,
     state: import("../pipeline/pipeline.js").WorkflowState,
     options: {
@@ -2323,9 +2327,10 @@ export class ExtractMarkdownStage implements Stage {
   ): Promise<
     Array<{ parser: "native-pdf" | "unstructured"; uri: string; payload: unknown }>
   > {
-    const isPdf = this.isPdfDocument(document);
-    if (!isPdf) {
-      if (options.nativePayloadOutcome) options.nativePayloadOutcome.reason = "filename and MIME type are not PDF";
+    // PDF parsers (the in-process native engine, region extraction, the Unstructured sidecar) read only bytes sniffed as a
+    // PDF: a polyglot named x.pdf, or declared application/pdf, that sniffed as HTML must never reach a PDF parser.
+    if (format !== "pdf") {
+      if (options.nativePayloadOutcome) options.nativePayloadOutcome.reason = `sniffed format is ${format}, not pdf`;
       return [];
     }
 
@@ -2897,13 +2902,6 @@ export class ExtractMarkdownStage implements Stage {
   private describeExtractorOrder(format: string, configured: Partial<Record<string, string[]>>): string {
     const order = this.tryResolveExtractorOrder(format, configured);
     return order.length ? order.join(",") : `none-for-${format}`;
-  }
-
-  private isPdfDocument(document: import("../models.js").Document): boolean {
-    return (
-      path.extname(document.filename).toLowerCase() === ".pdf" ||
-      document.mimeType.toLowerCase().includes("pdf")
-    );
   }
 
   private resolveDocumentExtractorOrder(

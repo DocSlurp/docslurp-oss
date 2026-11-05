@@ -353,13 +353,19 @@ export async function loadExtractorPlugins(
 /**
  * Refuse to start on a misconfigured deployment: an unknown DOCSLURP_PDF_EXTRACTOR or DOCSLURP_DOPPLER_HOST_PDF (which
  * would otherwise fall through to host parsing), a VM selection without a provider (the service profile always selects
- * it), or Doppler host parsing asked for where PDFs run only in the VM.
+ * it), a provider loaded without the VM selection (PDFs would fall back to the host), or Doppler host parsing asked for
+ * where PDFs run only in the VM.
  */
 export function assertExtractorPluginConfiguration(env: NodeJS.ProcessEnv = process.env): void {
   const sandboxed = sandboxedPdfConfigured(env);
   const doppler = dopplerHostPdfEnabled(env);
   if (sandboxed && !sandboxedPdfProvider()) {
     throw new Error(`DOCSLURP_PDF_EXTRACTOR=${VM_PDF_EXTRACTOR_ID}, DOCSLURP_VM_PDF_INSTALLED=1 or DOCSLURP_SERVICE_PROFILE=service needs a sandboxed PDF provider in DOCSLURP_EXTRACTOR_PLUGINS; refusing to start rather than parse PDFs on the worker host`);
+  }
+  // A loaded VM PDF provider means this deployment reads PDFs in VMs; leaving DOCSLURP_PDF_EXTRACTOR unset would quietly route
+  // them to host extractors instead. The selection must be explicit.
+  if (!sandboxed && sandboxedPdfProvider()) {
+    throw new Error(`a sandboxed PDF provider is loaded but ${VM_PDF_EXTRACTOR_ID} is not selected; set DOCSLURP_PDF_EXTRACTOR=${VM_PDF_EXTRACTOR_ID} rather than let PDFs fall back to the worker host; refusing to start`);
   }
   if (sandboxed && doppler) {
     throw new Error(`DOCSLURP_DOPPLER_HOST_PDF=1 parses PDFs on the worker host, and this deployment runs PDFs only in ${VM_PDF_EXTRACTOR_ID}; unset it`);

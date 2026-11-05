@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { sandboxedPdfConfigured } from "@docslurp/shared";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -120,6 +121,10 @@ let override: NativePdfEngineLoad | null = null;
 
 /** The engine adapter over the binding, once per process. */
 export async function loadNativePdfEngine(env: NodeJS.ProcessEnv = process.env): Promise<NativePdfEngineLoad> {
+  // The engine parses customer PDFs inside this process, which holds secrets. A deployment that runs PDFs only in vm-pdf never
+  // loads it (not even a test override), so no path can reach it there.
+  const refusal = nativePdfRefusal(env);
+  if (refusal) return { ok: false, reason: refusal };
   if (override) return override;
   if (engineCache) return engineCache;
   const loaded = loadNativePdfModule(env);
@@ -157,11 +162,27 @@ export function nativePdfEngineRequired(env: NodeJS.ProcessEnv = process.env): b
   return installed === "1" || installed === "true" || resolveNativePdfMode(env) !== "off";
 }
 
+/** Why the in-process engine may not load under this environment, or null: refused wherever PDFs run only in vm-pdf. */
+export function nativePdfRefusal(env: NodeJS.ProcessEnv = process.env): string | null {
+  return sandboxedPdfConfigured(env)
+    ? "refused: this deployment runs PDFs only in vm-pdf, and the native engine would parse them inside the worker process"
+    : null;
+}
+
 /**
  * Worker startup: load the engine eagerly so its state is logged before any document, and fail when it is
  * required but missing instead of silently serving every PDF without it.
  */
 export async function assertNativePdfEngineAtStartup(env: NodeJS.ProcessEnv = process.env): Promise<NativePdfEngineLoad> {
+  // An image that ships the engine, or a mode that asks for it, contradicts a VM-only PDF deployment: refuse to start
+  // rather than ship an in-process PDF parser beside the VM route.
+  if (nativePdfRefusal(env) && (nativePdfEngineRequired(env) || popplerFallbackEnabled(env))) {
+    throw new Error(
+      "native-pdf engine (DOCSLURP_NATIVE_PDF_INSTALLED, DOCSLURP_PDF_ENGINE or DOCSLURP_NATIVE_PDF_POPPLER) is configured, but this " +
+        "deployment runs PDFs only in vm-pdf (DOCSLURP_PDF_EXTRACTOR=vm-pdf, DOCSLURP_VM_PDF_INSTALLED=1 or DOCSLURP_SERVICE_PROFILE=service); " +
+        "build the image without DOCSLURP_NATIVE_PDF and unset the engine settings",
+    );
+  }
   const loaded = await loadNativePdfEngine(env);
   // An image that claims to ship the binding must load it; a mode alone accepts the explicit poppler subset.
   const installed = /^(1|true)$/i.test(env.DOCSLURP_NATIVE_PDF_INSTALLED?.trim() ?? "");

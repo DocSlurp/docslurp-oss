@@ -172,18 +172,28 @@ describe("loading plugins by configuration", () => {
     registerExtractorPlugin({ apiVersion: 1, name: "test-plugin", sandboxedPdf: provider() });
     expect(() => assertExtractorPluginConfiguration({ DOCSLURP_PDF_EXTRACTOR: "vm-pdf2" })).toThrow("must be empty");
     expect(() => assertExtractorPluginConfiguration({ DOCSLURP_VM_PDF_INSTALLED: "yes" })).toThrow("DOCSLURP_VM_PDF_INSTALLED");
-    // Whitespace is trimmed by the one shared resolver, and an empty value keeps the built-in order.
+    // Whitespace is trimmed by the one shared resolver. With a provider loaded an empty value is refused: PDFs would fall
+    // back to host extractors.
     expect(() => assertExtractorPluginConfiguration({ DOCSLURP_PDF_EXTRACTOR: "  vm-pdf\n" })).not.toThrow();
-    expect(() => assertExtractorPluginConfiguration({ DOCSLURP_PDF_EXTRACTOR: "   " })).not.toThrow();
+    expect(() => assertExtractorPluginConfiguration({ DOCSLURP_PDF_EXTRACTOR: "   " })).toThrow("vm-pdf is not selected");
+    expect(() => assertExtractorPluginConfiguration({})).toThrow("vm-pdf is not selected");
+    expect(() => assertExtractorPluginConfiguration({ DOCSLURP_SERVICE_PROFILE: "service" })).not.toThrow();
     resetExtractorPluginsForTest();
     await expect(loadExtractorPlugins({ DOCSLURP_PDF_EXTRACTOR: " vm-pdf " })).rejects.toThrow("needs a sandboxed PDF provider");
+  });
+
+  it("refuses to start with a VM PDF provider loaded and vm-pdf not selected (preflight fails the same way)", async () => {
+    resetExtractorPluginsForTest();
+    await expect(loadExtractorPlugins({ DOCSLURP_EXTRACTOR_PLUGINS: "/p.mjs" }, async () => ({
+      register: () => ({ apiVersion: 1, name: "test-plugin", sandboxedPdf: provider() }),
+    }))).rejects.toThrow("vm-pdf is not selected");
   });
 
   it("logs only generic provider ids and the API version at load", async () => {
     resetExtractorPluginsForTest();
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
-      await loadExtractorPlugins({ DOCSLURP_EXTRACTOR_PLUGINS: "/p.mjs" }, async () => ({
+      await loadExtractorPlugins({ DOCSLURP_EXTRACTOR_PLUGINS: "/p.mjs", DOCSLURP_PDF_EXTRACTOR: "vm-pdf" }, async () => ({
         register: () => ({ apiVersion: 1, name: "secret-engine-name", sandboxedPdf: { ...provider(), id: "secret-engine-id" } }),
       }));
       const lines = log.mock.calls.map((call) => String(call[0]));

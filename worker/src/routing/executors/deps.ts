@@ -34,6 +34,7 @@ import { visionConfigForModel } from "../routed-vision.js";
 import { RASTER_PX_PER_POINT } from "./merge.js";
 import { NATIVE_PDF_MARKDOWN_EXTRACTOR, NATIVE_PDF_TEXT_EXTRACTOR } from "./native-pdf.js";
 import type { ExecutorDeps, NativePdfOcrResult, RasterRef } from "./types.js";
+import { sniffedPdf } from "../../lib/sniffed-pdf.js";
 
 export interface ProductionExecutorDepsInput {
   runId: string;
@@ -142,7 +143,7 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
   /** The native-pdf engine's open document for this run's source, or null when no engine/PDF. */
   const openNativePdf = (): Promise<NativePdfDocument | null> => {
     nativePdfDoc ??= (async () => {
-      if (input.document.mimeType !== "application/pdf") return null;
+      if (!sniffedPdf(input.document)) return null;
       const loaded = await loadNativePdfEngine();
       if (!loaded.ok) return null;
       return await loaded.engine.openPath(await input.rasters.sourcePath(input.document));

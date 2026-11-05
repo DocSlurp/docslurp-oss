@@ -212,8 +212,10 @@ export async function recordMeasuredPageCount(
   const intakePages = document.pageCount;
   if (!formatNeedsMeasuredPages(format)) return { pages: null, method: null, intakePages };
   // A measured count is passed straight through (a deduplicated copy reuses its original's count).
-  const measured = extracted === null ? null : "pages" in extracted ? extracted : measureExtractedPages(format, extracted.extractor, extracted.markdown);
-  if (!measured) return { pages: null, method: null, intakePages };
+  const counted = extracted === null ? null : "pages" in extracted ? extracted : measureExtractedPages(format, extracted.extractor, extracted.markdown);
+  if (!counted) return { pages: null, method: null, intakePages };
+  // Never bill below the page basis: an extractor that reads less than intake counted does not lower the bill.
+  const measured: PageCountResult = { pages: Math.max(counted.pages, Math.max(1, Math.floor(intakePages) || 1)), method: counted.method };
   console.log(`[page-count] document=${document.id} format=${format} counted by ${measured.method}: ${measured.pages} pages (intake ${intakePages})`);
   if (!state.store?.setDocumentBillingPages) throw new Error("page count measured but the store cannot persist it");
   await state.store.setDocumentBillingPages(state.run.id, document.id, measured.pages, measured.method);

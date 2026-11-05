@@ -70,6 +70,7 @@ import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 
 import { assertCompleteActivePlan, assertSupportedActiveMargin } from "../routing/active-plan.js";
+import { sniffedPdf } from "../lib/sniffed-pdf.js";
 
 export const PAGE_ROUTE_DECISION_METRIC = "page-route-decision";
 export const PAGE_ROUTE_CHUNK_ESTIMATE_METRIC = "page-route-chunk-estimate";
@@ -174,7 +175,7 @@ export class RoutePagesStage implements Stage {
         `${document.id}:${PAGE_ROUTE_PLAN_SLOT}`,
         "page route plan ready",
         async () => {
-          if (document.mimeType !== "application/pdf") {
+          if (!sniffedPdf(document)) {
             return { stats: { skipped: true, reason: "unsupported-format", mode } };
           }
           try {

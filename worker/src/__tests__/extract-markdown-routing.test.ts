@@ -357,6 +357,7 @@ describe("extract markdown PDF routing", () => {
         filename: "sample.pdf",
         mimeType: "application/pdf"
       },
+      "pdf",
       sourceTemp,
       // Minimal state stub — pdfRegionExtraction not set so region extraction is skipped
       { run: { pipeline: { preserveTables: true } }, artifacts: {}, pendingPerformance: [] },
@@ -433,6 +434,7 @@ describe("extract markdown PDF routing", () => {
         mimeType: "application/pdf",
         pageCount: 5
       },
+      "pdf",
       sourceTemp,
       { run: { pipeline: { preserveTables: true } }, artifacts: {}, pendingPerformance: [] },
       { hasTablePages: true }
@@ -512,6 +514,7 @@ describe("extract markdown PDF routing", () => {
         mimeType: "application/pdf",
         pageCount: 4
       },
+      "pdf",
       sourceTemp,
       { run: { pipeline: { preserveTables: true } }, artifacts: {}, pendingPerformance: [] },
       { hasTablePages: true }
@@ -555,6 +558,7 @@ describe("extract markdown PDF routing", () => {
         mimeType: "application/pdf",
         pageCount: 5
       },
+      "pdf",
       sourceTemp,
       { run: { pipeline: { preserveTables: true } }, artifacts: {}, pendingPerformance: [] }
     );
