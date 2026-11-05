@@ -144,7 +144,7 @@ RUN cmake -S /src/doppler -B /src/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
     && rm -rf /out/usr/local/include /out/usr/local/lib/pkgconfig /out/usr/local/lib/cmake /out/usr/local/share/man \
     && install -D -m 0644 /src/doppler/COPYING /out/usr/local/share/doc/doppler/COPYING \
     && install -D -m 0644 /src/doppler/COPYING3 /out/usr/local/share/doc/doppler/COPYING3 \
-    && printf 'Doppler (GPL-2.0-or-later), source: https://github.com/DocSlurp/doppler/releases/tag/docslurp-827b3cc\n' > /out/usr/local/share/doc/doppler/SOURCE \
+    && printf 'Doppler (GPL-2.0-or-later). Corresponding source: https://github.com/DocSlurp/doppler/tree/827b3cccecfdcfe61ad89335ec2fb5476df014da (tarball: https://github.com/DocSlurp/doppler/releases/download/docslurp-827b3cc/doppler-827b3cc-src.tar.gz)\n' > /out/usr/local/share/doc/doppler/SOURCE \
     && for tool in pdftotext pdftohtml pdfinfo pdfimages pdftoppm pdfseparate pdfunite; do test -x "/out/usr/local/bin/$tool"; done
 
 FROM rust:1.99-slim-trixie@sha256:7eab7ce19273ce785e0ca7578bdf7bc1fcbae621775a8197379a04c9f6e03cd5 AS doppler-md
@@ -264,6 +264,19 @@ ARG DOCSLURP_NATIVE_PDF=
 ARG DOCSLURP_NATIVE_PDF_OCR_MODELS=
 ARG DOCSLURP_NATIVE_PDF_CJK_FONTS=
 ENV DOCSLURP_NATIVE_PDF_INSTALLED=${DOCSLURP_NATIVE_PDF:+1}
+
+# Provenance of the third-party native components (Doppler; the native PDF engine when installed): license texts and
+# PROVENANCE.json under /usr/share/licenses/<name>/, and an SPDX document. A component without a public repository
+# and pinned commit fails the build.
+COPY scripts/write-component-provenance.mjs ./scripts/write-component-provenance.mjs
+COPY worker/doppler.json ./worker/doppler.json
+RUN node scripts/write-component-provenance.mjs --doppler worker/doppler.json --doppler-prefix /usr/local \
+      --engine-manifest /app/vendor-artifacts/native-pdf/manifest.json
+LABEL io.docslurp.doppler.source="https://github.com/DocSlurp/doppler" \
+      io.docslurp.doppler.commit="827b3cccecfdcfe61ad89335ec2fb5476df014da" \
+      io.docslurp.doppler.license="GPL-2.0-or-later" \
+      io.docslurp.doppler.corresponding-source="https://github.com/DocSlurp/doppler/tree/827b3cccecfdcfe61ad89335ec2fb5476df014da" \
+      io.docslurp.sbom.native-components="/usr/share/doc/docslurp/sbom/native-components.spdx.json"
 ENV NATIVE_PDF_OCR_MODEL_DIR=${DOCSLURP_NATIVE_PDF_OCR_MODELS:+/opt/native-pdf/ocr-models}
 ENV NATIVE_PDF_FONTS_DIR=${DOCSLURP_NATIVE_PDF_CJK_FONTS:+/opt/native-pdf/fonts}
 
