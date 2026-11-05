@@ -29,7 +29,8 @@ and from the deploy error text. The CI image budget (below) is set well under it
 
 ### OCR
 
-Neither image has a system OCR engine, and Kreuzberg never OCRs. Where OCR runs is set by `DOCSLURP_OCR_MODE`;
+Neither image installs an OCR package, binary or language data. Kreuzberg's and LiteParse's native addons statically
+link Tesseract, which is disabled, not removed ([Tesseract](extraction/ocr.md#tesseract)). Where OCR runs is set by `DOCSLURP_OCR_MODE`;
 see [OCR](extraction/ocr.md) for the modes, the service and self-hosted profiles, and what fails closed.
 
 - **Lean** has no OCR engine. Production workers set `vm` (the production default) and load an OCR provider through

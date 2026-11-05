@@ -162,8 +162,9 @@ RUN rm -rf ./worker/scripts/__pycache__ \
     && chmod +x ./worker/scripts/parser-sandbox.sh ./scripts/start-worker.sh \
     && PYTHON_VENV=/app/.venv node scripts/check-worker-prerequisites.mjs --profile=lean
 
-# Kreuzberg links an OCR engine; it gets no language data (an empty, root-owned, read-only directory), so it cannot OCR
-# customer pixels on the worker host. OCR runs only in the configured OCR boundary.
+# No OCR package, binary or language data is installed. Kreuzberg's and LiteParse's native addons statically link
+# Tesseract (disabled, not removed: docs/extraction/ocr.md, "Tesseract"); it gets no language data (an empty, root-owned,
+# read-only directory), so it cannot OCR customer pixels on the worker host. OCR runs only in the configured boundary.
 RUN mkdir -p /opt/docslurp/empty-tessdata && chmod 0555 /opt/docslurp/empty-tessdata
 ENV TESSDATA_PREFIX=/opt/docslurp/empty-tessdata
 ENV HOME=/home/docslurp

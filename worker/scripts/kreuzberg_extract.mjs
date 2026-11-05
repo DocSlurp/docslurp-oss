@@ -30,7 +30,8 @@ if (!values.input || !values.output) {
   process.exit(1);
 }
 
-// Kreuzberg's linked OCR engine must find no language data, so it can never read pixels here (the worker image ships
+// Kreuzberg's addon statically links Tesseract (disabled here, not removed). It must find no language data, so it can
+// never read pixels here (the worker image ships
 // this directory empty and read-only; where it does not exist the engine fails the same way). Set before the binding loads.
 process.env.TESSDATA_PREFIX = "/opt/docslurp/empty-tessdata";
 

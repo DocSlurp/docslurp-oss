@@ -109,8 +109,9 @@ RUN groupadd --system --gid 10001 docslurp \
     && chmod +x ./worker/scripts/parser-sandbox.sh ./scripts/start-worker.sh \
     && chown -R docslurp:docslurp /home/docslurp /tmp/docslurp-parser-sandbox /tmp/clamav /var/log/clamav /var/lib/clamav
 
-# Kreuzberg links an OCR engine; it gets no language data (an empty, root-owned, read-only directory), so it cannot OCR
-# customer pixels on the worker host. OCR runs only in the configured OCR boundary.
+# No OCR package, binary or language data is installed. Kreuzberg's and LiteParse's native addons statically link
+# Tesseract (disabled, not removed: docs/extraction/ocr.md, "Tesseract"); it gets no language data (an empty, root-owned,
+# read-only directory), so it cannot OCR customer pixels on the worker host. OCR runs only in the configured boundary.
 RUN mkdir -p /opt/docslurp/empty-tessdata && chmod 0555 /opt/docslurp/empty-tessdata
 ENV TESSDATA_PREFIX=/opt/docslurp/empty-tessdata
 ENV HOME=/home/docslurp

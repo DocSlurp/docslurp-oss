@@ -160,8 +160,9 @@ export interface ClamDatabaseHealth {
 }
 
 /**
- * An empty, read-only directory (created in the worker images). Kreuzberg's linked OCR looks for language data here and
- * finds none, so it fails closed instead of reading customer pixels on the worker host.
+ * An empty, read-only directory (created in the worker images). The OCR engine linked into Kreuzberg's and LiteParse's
+ * native addons looks for language data here and finds none, so it fails closed instead of reading customer pixels on
+ * the worker host. The engine itself is still linked (docs/extraction/ocr.md, "Tesseract").
  */
 export const EMPTY_TESSDATA_DIR = "/opt/docslurp/empty-tessdata";
 
@@ -799,9 +800,10 @@ export class CommandRunner {
     output: string,
     ocrEnabled = false,
   ): Promise<CommandPlan> {
-    const args = ["--input", source, "--output", output];
-    if (ocrEnabled) args.push("--ocr");
-    return await this.planScript("node", "liteparse_extract.mjs", ...args);
+    // LiteParse's native addon carries an OCR engine. It never OCRs here: OCR runs only in the configured OCR boundary.
+    if (ocrEnabled) throw new Error("LiteParse OCR is refused: OCR runs only in the configured OCR boundary (docs/extraction/ocr.md)");
+    const plan = await this.planScript("node", "liteparse_extract.mjs", "--input", source, "--output", output);
+    return { ...plan, bundleEnv: { ...(plan.bundleEnv ?? {}), TESSDATA_PREFIX: EMPTY_TESSDATA_DIR } };
   }
 
   async dolphinMarkdown(

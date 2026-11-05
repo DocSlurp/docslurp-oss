@@ -19,6 +19,7 @@ import { CommandRunner, EMPTY_TESSDATA_DIR } from "../tools/runner.js";
  */
 
 const script = fileURLToPath(new URL("../../scripts/kreuzberg_extract.mjs", import.meta.url));
+const liteparseScript = fileURLToPath(new URL("../../scripts/liteparse_extract.mjs", import.meta.url));
 const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 const IMAGE_ONLY_WORDS = "QUARTERLY INVOICE ZEBRA 48213";
 
@@ -26,6 +27,34 @@ async function textPng(text: string): Promise<Uint8Array> {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="200"><rect width="100%" height="100%" fill="white"/>` +
     `<text x="40" y="120" font-family="sans-serif" font-size="72" fill="black">${text}</text></svg>`;
   return new Uint8Array(await sharp(Buffer.from(svg)).png().toBuffer());
+}
+
+/** A one-page PDF whose only content is a JPEG of `text`: no text layer at all. */
+async function imageOnlyPdf(text: string): Promise<Buffer> {
+  const jpeg = await sharp(await textPng(text)).flatten({ background: "white" }).jpeg({ quality: 90 }).toBuffer();
+  const width = 1400, height = 200;
+  const draw = `q ${width} 0 0 ${height} 0 0 cm /Im0 Do Q`;
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${width} ${height}] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>`,
+    null,
+    `<< /Length ${draw.length} >>\nstream\n${draw}\nendstream`,
+  ];
+  const parts: Buffer[] = [Buffer.from("%PDF-1.4\n")];
+  const offsets: number[] = [];
+  let length = parts[0]!.length;
+  objects.forEach((body, index) => {
+    offsets.push(length);
+    const chunk = body === null
+      ? Buffer.concat([Buffer.from(`${index + 1} 0 obj\n<< /Type /XObject /Subtype /Image /Width ${width} /Height ${height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`), jpeg, Buffer.from("\nendstream\nendobj\n")])
+      : Buffer.from(`${index + 1} 0 obj\n${body}\nendobj\n`);
+    parts.push(chunk);
+    length += chunk.length;
+  });
+  const xref = `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map((o) => `${String(o).padStart(10, "0")} 00000 n \n`).join("")}` +
+    `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${length}\n%%EOF\n`;
+  return Buffer.concat([...parts, Buffer.from(xref)]);
 }
 
 /** A minimal DOCX: one paragraph of real text and one inline picture whose pixels carry other words. */
@@ -100,6 +129,25 @@ describe("Kreuzberg never OCRs", () => {
     const odd = await documentExtractorRegistry.prepare("kreuzberg", runner, path.join(scratch, "report.bin"), undefined, { format: "docx", mimeType: "text/plain; --config-json={}" });
     expect(odd.plan.args).not.toContain("--mime-type");
   });
+
+  it("never lets LiteParse OCR: no OCR flag, empty language data, and no text from an image-only PDF", async () => {
+    const runner = new CommandRunner();
+    await expect(runner.liteParseExtract(path.join(scratch, "a.pdf"), path.join(scratch, "a.json"), true)).rejects.toThrow(/LiteParse OCR is refused/);
+    const plan = await runner.liteParseExtract(path.join(scratch, "a.pdf"), path.join(scratch, "a.json"));
+    expect(plan.args).not.toContain("--ocr");
+    expect(plan.bundleEnv?.TESSDATA_PREFIX).toBe(EMPTY_TESSDATA_DIR);
+    const input = path.join(scratch, "scan.pdf");
+    const output = path.join(scratch, "scan.json");
+    await writeFile(input, await imageOnlyPdf(IMAGE_ONLY_WORDS));
+    await promisify(execFile)(process.execPath, [liteparseScript, "--input", input, "--output", output], {
+      timeout: 120_000, env: { PATH: process.env.PATH ?? "", HOME: scratch },
+    });
+    const result = JSON.parse(await readFile(output, "utf8")) as { markdown: string; diagnostics: { ocrEnabled: boolean } };
+    expect(result.diagnostics.ocrEnabled).toBe(false);
+    for (const word of IMAGE_ONLY_WORDS.split(" ")) expect(result.markdown.toUpperCase()).not.toContain(word);
+    await expect(promisify(execFile)(process.execPath, [liteparseScript, "--input", input, "--output", output, "--ocr"], { timeout: 60_000 }))
+      .rejects.toMatchObject({ stderr: expect.stringContaining("liteparse OCR refused") });
+  }, 150_000);
 
   it("reads a stored image order that still names kreuzberg with the ocr extractor instead of throwing", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
