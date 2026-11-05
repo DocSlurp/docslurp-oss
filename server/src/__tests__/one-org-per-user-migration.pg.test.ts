@@ -90,6 +90,9 @@ describe.skipIf(!url)("0127 one organization per user, on PostgreSQL through mig
     expect(ackHash).toMatch(/^[0-9a-f]{16}$/);
     expect(report.out).toContain("1 removal(s) from a FUNDED organization (paid balance or auto top-up): user pg127-fund from pg127-funded.");
     expect(report.out).toContain("user pg127-guest: keeps pg127-p-host; removed from pg127-p-guest (empty_personal_organization, owner, 0 key(s), 0 grant(s), 1 empty workspace(s) deleted)");
+    // A workspace is "handed over" only when the organization keeps an owner to take it.
+    expect(report.out).toContain("user pg127-fund: keeps pg127-team; removed from pg127-funded (not_kept, owner, FUNDED, 0 key(s), 0 grant(s), 1 workspace(s) handed over)");
+    expect(report.out).toContain("user pg127-chat: keeps pg127-team; removed from pg127-p-chat (not_kept, owner, 0 key(s), 0 grant(s), 1 workspace(s) left with no owner to hand them to)");
     expect(report.out).not.toMatch(/@example\.test|Funded Team|Chat Personal/);
   });
 
@@ -139,6 +142,10 @@ describe.skipIf(!url)("0127 one organization per user, on PostgreSQL through mig
         ["pg127-funded", "pg127-p-chat", "pg127-p-host", "pg127-team"].map((id) => ({ id })),
       );
       expect(await rows("select id, workspace_id from chat_sessions where id = 'pg127-chat-session'")).toEqual([{ id: "pg127-chat-session", workspace_id: "pg127-ws-chat" }]);
+      // Handed over where an owner remains (the promoted admin), left in place where none does.
+      expect(await rows("select id, user_id from workspaces where id in ('pg127-ws-funded', 'pg127-ws-chat') order by id")).toEqual([
+        { id: "pg127-ws-chat", user_id: "pg127-chat" }, { id: "pg127-ws-funded", user_id: "pg127-fadmin" },
+      ]);
     });
 
     it("deletes an empty personal organization with its default workspace, backed up, and orphans no workspace", async () => {

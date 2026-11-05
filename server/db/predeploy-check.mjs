@@ -164,10 +164,12 @@ async function oneOrgSection(q, { plan, promotions, ack }, ack0127, redact) {
   // The acknowledgement the migration itself demands: its own SQL, so the hash printed here is the one it compares.
   const [needed] = await q(`with removed_memberships as (${plan}), owner_promotions as (${promotions}) ${ack}`);
   const users = new Map();
+  const promotedOrgIds = new Set(promoted.map((row) => row.org_id));
   for (const row of removed) {
     const entry = users.get(row.user_id) ?? { label: name.user(row), kept: row.kept_org_id ? name.org(row.kept_org_id, row.kept_org_name) : "NO organization (personal one provisioned at next sign-in)", removed: [] };
     const handled = row.workspaces === 0 ? null
-      : row.reason === "not_kept" ? `${row.workspaces} workspace(s) handed over`
+      // 0127 hands them to the organization's longest-standing remaining owner, the promoted one included; without one they stay put.
+      : row.reason === "not_kept" ? (row.owners_left > 0 || promotedOrgIds.has(row.org_id) ? `${row.workspaces} workspace(s) handed over` : `${row.workspaces} workspace(s) left with no owner to hand them to`)
       : row.reason === "empty_personal_organization" ? `${row.workspaces} empty workspace(s) deleted`
       : null;
     const facts = [row.reason, row.role, row.funded ? "FUNDED" : null, `${row.keys} key(s)`, `${row.grants} grant(s)`, handled];
