@@ -72,5 +72,5 @@ describe.skipIf(!hasOfficeLibs)("office sidecar scripts on tricky inputs", () =>
     expect(lines.slice(1).every((line) => !line.includes(","))).toBe(true);
     expect(sheet.lastCol).toBe(16_384);
     expect(textBodyPages([csvCellText(sheet.csv)])).toBe(17);
-  });
+  }, 30_000); // openpyxl writes and reads a 16,384-column sheet: about a second alone, longer beside the rest of the suite
 });
