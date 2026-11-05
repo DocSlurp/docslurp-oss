@@ -36,3 +36,13 @@ CREATE TABLE IF NOT EXISTS ocr_escalation_reads (
   PRIMARY KEY (run_id, document_id, page_number, attempt),
   CHECK (status = 'failed' OR text IS NOT NULL)
 );
+--> statement-breakpoint
+-- Least privilege for the worker at commit (server/db/roles.mjs WORKER_TABLES, reconciled again on deploy): it writes each
+-- call once and reads it back on retry; it never updates or deletes a row. The app role gets DML through default privileges.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'docslurp_worker') THEN
+    REVOKE ALL ON public.ocr_escalation_reads FROM docslurp_worker;
+    GRANT SELECT, INSERT ON public.ocr_escalation_reads TO docslurp_worker;
+  END IF;
+END $$;

@@ -269,3 +269,47 @@ describe("migration ownership preflight", () => {
     }
   });
 });
+
+describe("ocr_escalation_reads (migration 0129)", () => {
+  // The exact statements worker/src/db/store.ts runs (recordOcrEscalationRead, ocrEscalationReads).
+  const insert = (attempt: number) => `insert into ocr_escalation_reads (run_id, document_id, page_number, attempt, status, text, model, usage_events)
+    values ('esc-roles-run', 'doc-1', 3, ${attempt}, 'completed', 'Hosted transcription', 'qwen', '[{"id":"ocr-escalation:esc-roles-run:doc-1:3:${attempt}"}]'::jsonb)
+    on conflict (run_id, document_id, page_number, attempt) do nothing`;
+  const read = "select attempt, status, text, model, usage_events from ocr_escalation_reads where run_id = 'esc-roles-run' and document_id = 'doc-1' and page_number = 3 order by attempt";
+
+  beforeAll(async () => {
+    await db.exec(`
+      insert into "user" (id, name, email) values ('esc-roles-u', 'U', 'esc-roles@example.com') on conflict do nothing;
+      insert into organizations (id, name, slug, created_by_user_id) values ('esc-roles-org', 'O', 'esc-roles-org', 'esc-roles-u') on conflict do nothing;
+      insert into workspaces (id, org_id, user_id, name) values ('esc-roles-ws', 'esc-roles-org', 'esc-roles-u', 'W') on conflict do nothing;
+      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline)
+        values ('esc-roles-run', 'esc-roles-org', 'esc-roles-u', 'esc-roles-ws', 'bulk-upload', 'processing', 'extract-markdown', '{}') on conflict do nothing;`);
+  });
+
+  it("lets the worker write a read, read it back and replay the write on retry, as the store does", async () => {
+    await as(worker, async () => {
+      await db.exec(insert(1));
+      await db.exec(insert(1)); // a retried activity re-sends the same attempt: no error, no second row
+      const { rows } = await db.query<{ attempt: number; text: string }>(read);
+      expect(rows).toEqual([expect.objectContaining({ attempt: 1, text: "Hosted transcription" })]);
+    });
+  });
+
+  it("denies the worker every operation it does not need", async () => {
+    expect(WORKER_TABLES.ocr_escalation_reads?.privileges).toEqual(["select", "insert"]);
+    expect(await denied(worker, "update ocr_escalation_reads set text = 'x'")).toBe(true);
+    expect(await denied(worker, "delete from ocr_escalation_reads")).toBe(true);
+    expect(await denied(worker, "truncate ocr_escalation_reads")).toBe(true);
+  });
+
+  it("denies the backup role every write (it reads through pg_read_all_data in ops); the app role deletes it with its run", async () => {
+    for (const statement of [insert(2), "update ocr_escalation_reads set text = 'x'", "delete from ocr_escalation_reads"]) {
+      expect(await denied(backup, statement), statement).toBe(true);
+    }
+    await as(app, async () => {
+      await db.exec("delete from workspace_runs where id = 'esc-roles-run'");
+      const { rows } = await db.query(read);
+      expect(rows).toEqual([]);
+    });
+  });
+});

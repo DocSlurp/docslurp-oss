@@ -92,6 +92,9 @@ export const WORKER_TABLES = Object.freeze({
   geo_accepted_sources: { privileges: DML, evidence: "structured-extract accepted-source checkpoint" },
   geo_projection_generations: { optional: true, privileges: DML, evidence: "optional PostGIS accepted-source publisher" },
   geo_projection_features: { optional: true, privileges: DML, evidence: "optional PostGIS accepted-source publisher" },
+  // Escalation reads are written once per call (insert ... on conflict do nothing) and read back on retry; never updated or
+  // deleted by the worker: rows go with their run (ON DELETE CASCADE, as the table owner).
+  ocr_escalation_reads: { privileges: ["select", "insert"], evidence: "worker/src/db/store.ts ocrEscalationReads / recordOcrEscalationRead (worker/src/ocr/hosted-reader.ts)" },
   ready_geo_projection_generations: { optional: true, privileges: ["select"], evidence: "optional PostGIS readiness" },
   vector_index_tables: { privileges: DML, evidence: "worker/src/stages LanceDB tables; superseded-purge.ts" },
   vector_indexes: { privileges: DML, evidence: "worker/src/db/store.ts vector index rows" },

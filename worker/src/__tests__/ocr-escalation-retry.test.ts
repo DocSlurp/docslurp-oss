@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { Config } from "../config.js";
@@ -23,6 +24,7 @@ import type { executeVisionRuntime, VisionExecutionResult } from "../tools/visio
 const MODEL = "Qwen/Qwen3-VL-30B-A3B-Instruct";
 const CFG = { openAiBaseUrl: "https://api.openai.com/v1", costPer1kInputTokens: 0.01, costPer1kOutputTokens: 0.03 } as Config;
 let stop: () => Promise<void>;
+let pglite: Awaited<ReturnType<typeof startMigratedPostgres>>["db"];
 let url: string;
 let scratch: string;
 let shared: Store;
@@ -31,6 +33,7 @@ let admin: ReturnType<typeof sql>;
 beforeAll(async () => {
   const database = await startMigratedPostgres();
   stop = database.stop;
+  pglite = database.db;
   url = database.url;
   // PGlite serves one connection: every "activity" shares this store; each gets a fresh state, ledger and guard.
   shared = new Store(url, 60_000, { poolMax: 1, runEvents: { flushMs: 120_000, maxBuffered: 20_000 } });
@@ -38,7 +41,7 @@ beforeAll(async () => {
   await admin`insert into "user" (id, name, email) values ('esc-u', 'U', 'esc-u@example.com')`;
   await admin`insert into organizations (id, name, slug, created_by_user_id) values ('esc-org', 'O', 'esc-org', 'esc-u')`;
   await admin`insert into workspaces (id, org_id, user_id, name) values ('esc-ws', 'esc-org', 'esc-u', 'W')`;
-  for (const id of ["esc-run-1", "esc-run-2", "esc-run-3"]) {
+  for (const id of ["esc-run-1", "esc-run-2", "esc-run-3", "esc-run-role"]) {
     await admin`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts)
       values (${id}, 'esc-org', 'esc-u', 'esc-ws', 'bulk-upload', 'processing', 'extract-markdown', '{}', '{}')`;
   }
@@ -158,5 +161,39 @@ describe("OCR escalation across activity retries", () => {
     await expect(activity("esc-run-3", execute, env).reader.read({ ...page, pageNumber: 3, imagePath: await frame("b3") }, "ocr-escalation"))
       .rejects.toMatchObject({ name: "HostedOcrSkipped", reason: "budget" });
     expect(sent).toBe(2); // the refused request never reached the provider
+  }, 60_000);
+
+  it("runs as the restricted worker role: writes a read, reads it back, reuses it on retry, and may not update or delete it", async () => {
+    // The production grants (server/db/roles.mjs), reconciled onto this database, then this store's one connection becomes
+    // docslurp_worker for the whole flow: guard admission, the escalation write, the retry's read and the usage persist.
+    const rolesModule = pathToFileURL(path.resolve(import.meta.dirname, "../../../server/db/roles.mjs")).href;
+    const { DEFAULT_DB_ROLES, reconcileRoleGrants } = await import(/* @vite-ignore */ rolesModule) as {
+      DEFAULT_DB_ROLES: { worker: string }; reconcileRoleGrants: (client: unknown, options: { log: () => void }) => Promise<unknown>;
+    };
+    await pglite.exec(`do $$ begin if not exists (select 1 from pg_roles where rolname = '${DEFAULT_DB_ROLES.worker}') then create role ${DEFAULT_DB_ROLES.worker} nologin; end if; end $$`);
+    await reconcileRoleGrants(pglite, { log: () => undefined });
+    const execute = vi.fn(async (args: Parameters<typeof executeVisionRuntime>[0]) => {
+      await (args.gate as VisionRequestGate | null | undefined)?.admit();
+      return success();
+    });
+    const page = { documentId: "doc-role", pageNumber: 1, mimeType: "image/png" };
+    await admin.unsafe(`set role ${DEFAULT_DB_ROLES.worker}`);
+    try {
+      const [{ current_user: who }] = await admin<{ current_user: string }[]>`select current_user`;
+      expect(who).toBe(DEFAULT_DB_ROLES.worker);
+      expect((await activity("esc-run-role", execute).reader.read({ ...page, imagePath: await frame("role-1") }, "ocr-escalation")).text).toBe("Hosted transcription");
+      const retry = activity("esc-run-role", execute);
+      expect((await retry.reader.read({ ...page, imagePath: await frame("role-2") }, "ocr-escalation")).text).toBe("Hosted transcription");
+      expect(execute).toHaveBeenCalledTimes(1);
+      const batch = retry.state.usageLedger.checkpoint();
+      await persistRunUsageEvents({ client: admin, state: retry.state, usageEvents: batch.events });
+      for (const statement of ["update ocr_escalation_reads set text = 'x'", "delete from ocr_escalation_reads"]) {
+        await expect(admin.unsafe(statement), statement).rejects.toThrow(/permission denied/);
+      }
+    } finally {
+      await admin.unsafe("reset role");
+    }
+    const [row] = await admin<{ n: number }[]>`select count(*)::int as n from usage_events where run_id = 'esc-run-role' and metric = 'ocr-escalation'`;
+    expect(row?.n).toBe(1);
   }, 60_000);
 });
