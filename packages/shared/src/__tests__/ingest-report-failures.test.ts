@@ -8,6 +8,8 @@ describe("classifyIngestFailure", () => {
   it.each([
     [OCR_CRASH, "ocr_unavailable"],
     ["OCR runtime unavailable for DOCSLURP_OCR_MODE=local", "ocr_unavailable"],
+    // A stage error stored by the retired local OCR engine before the cutover.
+    ["no extractor produced output: kreuzberg=Error: Error opening data file /app/tessdata/eng.traineddata", "ocr_unavailable"],
     ["DOCSLURP_OCR_MODE=vm needs a sandboxed OCR provider plugin (DOCSLURP_EXTRACTOR_PLUGINS); refusing local fallback", "ocr_unavailable"],
     ["no extractor produced output: kreuzberg=Error: boom, poppler-text=Error: nothing", "extractor_failed"],
     ["Unsupported file format: application/x-foo", "unsupported_format"],

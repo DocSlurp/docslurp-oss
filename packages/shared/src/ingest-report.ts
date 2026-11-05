@@ -129,7 +129,9 @@ const FAILURE_COPY: Record<IngestReportFailureReason, { message: string; retryab
 
 /** Most specific, least recoverable causes first: an OCR crash arrives wrapped in "no extractor produced output". */
 const FAILURE_PATTERNS: Array<[IngestReportFailureReason, RegExp]> = [
-  ["ocr_unavailable", /model-refused|DOCSLURP_OCR_MODE|OCR provider plugin|\bocr\b.*(?:unavailable|refused|is off|not (?:installed|found|available)|failed to (?:init|load))/i],
+  // Current OCR (sandboxed VM provider) failures, plus the markers of the retired local OCR engine: stage errors stored
+  // before the cutover keep that text, and reports over those runs must still say OCR was unavailable.
+  ["ocr_unavailable", /model-refused|DOCSLURP_OCR_MODE|OCR provider plugin|tessdata|traineddata|tesseract|leptonica|\bocr\b.*(?:unavailable|refused|is off|not (?:installed|found|available)|failed to (?:init|load))/i],
   ["unsupported_format", /unsupported (?:file|format|media|mime|content)|(?:unknown|unrecognized|unrecognised) (?:file )?(?:format|type)|no (?:parser|handler) (?:for|available for)/i],
   ["unreadable_file", /password|encrypted|corrupt|truncated|malformed|damaged|invalid (?:pdf|zip|xref|header|image)|cross-reference|xref|not a valid|bad (?:zip|header)|unexpected end of file|premature end/i],
   ["timeout", /timed? ?out|timeout|deadline exceeded|ETIMEDOUT/i],
