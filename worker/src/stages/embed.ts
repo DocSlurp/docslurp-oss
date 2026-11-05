@@ -527,7 +527,7 @@ export class EmbedStage implements Stage {
                 batchLimiter: stoppingLimiter,
                 beforeBatch,
                 onRemoteUsage: async ({ inputTokens, chunks, costCents: privateCostCents, costMetadata }) => {
-                  // Private routes price themselves from the operator registry.
+                  // The provider-reported charge (OpenRouter) or the operator price (private routes); otherwise priced from tokens.
                   const priced = buildPricedAiUsageLedgerEvent({
                     provider: tunedProfile.provider, model: tunedProfile.model,
                     metric: "embedding-tokens", inputTokens,

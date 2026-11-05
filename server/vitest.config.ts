@@ -12,6 +12,8 @@ export default defineConfig({
     globals: true,
     environment: "node",
     include: ["src/**/*.test.ts"],
+    // Usage pricing in tests uses the hardcoded tables; the live OpenRouter catalog is never fetched.
+    env: { LIVE_MODEL_PRICES: "off" },
     exclude: ["node_modules", "dist"],
   },
   resolve: {

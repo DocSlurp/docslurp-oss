@@ -19,6 +19,19 @@ describe("remote media provider boundary", () => {
     await expect(provider.transcribe({ bytes: new Uint8Array(), durationSeconds: 1 }, new AbortController().signal)).rejects.toThrow("HTTP 429");
     expect(http).toHaveBeenCalledTimes(1);
   });
+  it("records the provider-reported cost when it agrees with the rate estimate", async () => {
+    const http = vi.fn(async () => Response.json({ text: "hello", segments: [{ start: 0, end: 1, text: "hello" }],
+      inference_status: { status: "succeeded", cost: 0.000007 } }));
+    const provider = new DeepInfraMediaProvider("openai/whisper-large-v3-turbo", "test-secret", http);
+    expect(await provider.transcribe({ bytes: new Uint8Array([1]), durationSeconds: 2 }, new AbortController().signal))
+      .toMatchObject({ costSource: "provider", costUsd: .000007, pricingMismatch: false, accounting: { state: "estimated", recordedFrom: "provider", estimatedCostUsd: .00000666 } });
+  });
+  it("accepts an llm:// MEDIA_TRANSCRIPTION_MODEL and refuses a provider conflict", () => {
+    expect(mediaConfig({ MEDIA_TRANSCRIPTION_MODEL: "llm://deepinfra/openai/whisper-large-v3-turbo" })).toMatchObject({ provider: "deepinfra", model: "openai/whisper-large-v3-turbo" });
+    expect(mediaConfig({ MEDIA_TRANSCRIPTION_MODEL: "openai/whisper-large-v3-turbo" })).toMatchObject({ provider: "deepinfra", model: "openai/whisper-large-v3-turbo" });
+    expect(() => mediaConfig({ MEDIA_PROVIDER: "huggingface", MEDIA_TRANSCRIPTION_MODEL: "llm://deepinfra/openai/whisper-large-v3-turbo" })).toThrow(/MEDIA_PROVIDER/);
+    expect(() => mediaConfig({ MEDIA_TRANSCRIPTION_MODEL: "llm://deepinfra/" })).toThrow(/llm:/);
+  });
   it("rejects invalid timestamps and distinguishes estimates", () => {
     expect(() => parseTranscription({ text: "x", segments: [{ start: 4, end: 2, text: "x" }] }, 10, .01)).toThrow();
     expect(parseTranscription({ text: "x" }, 10, .01)).toMatchObject({ costSource: "estimate", costUsd: .01, segments: [] });

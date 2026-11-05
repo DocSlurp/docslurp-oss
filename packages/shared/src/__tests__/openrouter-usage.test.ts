@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createOpenRouterRoutingFetch, setOpenRouterProviderPolicyResolver } from "../openrouter-routing.js";
 import { CHINA_PROVIDER_SLUGS, NON_CHINA_PROVIDER_SLUGS } from "../provider-regions.js";
+import { setLiveModelPricesForTests } from "../live-model-prices.js";
 import { createOpenRouterReasoningFetch, lowestOpenRouterReasoning, openRouterReasoningParams, createOpenRouterUsageCapture, readProviderCharge, resolveOpenRouterUsage } from "../openrouter-usage.js";
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); setLiveModelPricesForTests(null); });
 describe("OpenRouter thinking controls", () => {
   it("disables thinking without sending unsupported effort and preserves request and accounting options", async () => {
     const baseFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}"));
@@ -174,19 +175,35 @@ describe("provider cost accounting", () => {
     expect(usage).toMatchObject({ costCents: 0.025, inputTokens: 120, outputTokens: 35,
       metadata: { costSource: "provider", generationId: "gen-test", cachedTokens: 100, reasoningTokens: 15 } });
   });
-  it("labels catalog fallback as an estimate when generation accounting is unavailable", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response("", { status: 404 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ id: "test-model", pricing: { prompt: "0.00000015", completion: "0.0000005" } }] }))));
+  it("estimates a receipt-less call from the live listing, refreshing a missing snapshot in the background only", async () => {
+    setLiveModelPricesForTests(null);
+    const fetchMock = vi.fn().mockResolvedValue(new Response("", { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    // No snapshot yet: priced from the hardcoded table at once; the catalog load is not awaited.
+    const first = await resolveOpenRouterUsage({ apiKey: "test", model: "deepseek/deepseek-v4.1-flash-1017", generationId: "missing", usage: { inputTokens: 1_000_000, outputTokens: 1_000_000 } });
+    expect(first.metadata).toMatchObject({ costSource: "estimate", accountingStatus: "receipt-missing", pricingSource: "model-prices" });
+    setLiveModelPricesForTests({ models: { "test-model": { input: 0.00000015, output: 0.0000005 } } });
     const usage = await resolveOpenRouterUsage({ apiKey: "test", model: "test-model", generationId: "missing", usage: { inputTokens: 1000, outputTokens: 100 } });
     expect(usage.costCents).toBeCloseTo(0.02, 10);
-    expect(usage.metadata).toMatchObject({ costSource: "estimate", pricingSource: "openrouter-models" });
+    expect(usage.metadata).toMatchObject({ pricingSource: "openrouter-live" });
   });
-  it("estimates a receipt-less chat model call from the verified price table without the live listing", async () => {
-    const fetchMock = vi.fn().mockResolvedValueOnce(new Response("", { status: 404 }));
-    vi.stubGlobal("fetch", fetchMock);
-    const usage = await resolveOpenRouterUsage({ apiKey: "test", model: "deepseek/deepseek-v4.1-flash-1017", generationId: "missing", usage: { inputTokens: 1_000_000, outputTokens: 1_000_000 } });
-    expect(usage.costCents).toBeCloseTo(75, 10);
-    expect(usage.metadata).toMatchObject({ costSource: "estimate", pricingSource: "model-prices" });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+  it("prefers the live list price over the hardcoded table and applies a listed long-prompt override", async () => {
+    setLiveModelPricesForTests({ models: { "deepseek/deepseek-v4.1-flash-1017": {
+      input: 0.0000002, output: 0.000001, overrides: [{ minPromptTokens: 500_000, input: 0.0000004, output: 0.000002 }],
+    } } });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 404 })));
+    const small = await resolveOpenRouterUsage({ apiKey: "test", model: "deepseek/deepseek-v4.1-flash-1017", generationId: "missing", receiptRetryDelaysMs: [0], usage: { inputTokens: 1_000_000 - 1, outputTokens: 0 } });
+    expect(small.metadata).toMatchObject({ pricingSource: "openrouter-live", pricingOverride: "min-prompt-tokens" });
+    const tiny = await resolveOpenRouterUsage({ apiKey: "test", model: "deepseek/deepseek-v4.1-flash-1017", generationId: "missing", receiptRetryDelaysMs: [0], usage: { inputTokens: 1_000, outputTokens: 1_000 } });
+    expect(tiny.costCents).toBeCloseTo((1_000 * 0.0000002 + 1_000 * 0.000001) * 100, 12);
+    expect(tiny.metadata).not.toHaveProperty("pricingOverride");
+  });
+  it("retries the generation receipt once and records the provider charge", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response("", { status: 404 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { total_cost: 0.0004, is_byok: false } }))));
+    const usage = await resolveOpenRouterUsage({ apiKey: "test", model: "z-ai/glm-5.3-flash", generationId: "late", receiptRetryDelaysMs: [0, 1], usage: { inputTokens: 10, outputTokens: 10 } });
+    expect(usage.costCents).toBeCloseTo(0.04, 12);
+    expect(usage.metadata).toMatchObject({ costSource: "provider", receiptRetried: true });
   });
 });

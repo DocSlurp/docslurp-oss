@@ -476,8 +476,10 @@ export async function embedQuery(
       privacyMode,
       modelUri: route.modelUri,
       auditScope: { workspaceId: auditWorkspaceId ?? null },
-      ...(METERED_EMBEDDING_PROVIDERS.has(provider) ? { onUsage: (actual: { inputTokens: number }) => {
-        usage.record({ provider, model, metric: "embed-query", inputTokens: actual.inputTokens, logOutputTokens: false, metadata: { usageSource: "provider" } });
+      ...(METERED_EMBEDDING_PROVIDERS.has(provider) ? { onUsage: (actual: { inputTokens: number; costCents?: number; metadata?: Record<string, unknown> }) => {
+        // The provider's reported charge when it sent one; otherwise priced from tokens (an estimate).
+        usage.record({ provider, model, metric: "embed-query", inputTokens: actual.inputTokens, logOutputTokens: false, costCents: actual.costCents,
+          metadata: { ...actual.metadata, usageSource: "provider" } });
         usageRecorded = true;
       } } : {}),
     });

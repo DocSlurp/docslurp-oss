@@ -9,6 +9,7 @@ import { existsSync } from "node:fs";
 import { initializeObservability } from "@docslurp/shared/observability";
 import { startRevisionMaintenance } from "./realtime/revision-maintenance.js";
 import { envFlags, formatEnvFlags } from "@docslurp/shared/env-flags";
+import { startLiveModelPriceRefresh } from "@docslurp/shared";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { dirname, resolve } from "node:path";
@@ -303,6 +304,8 @@ export function ensureApiStartup(): Promise<void> {
       stopRevisionMaintenance = startRevisionMaintenance(env.databaseUrl);
       startMaintenanceSweeper();
       startDirectUploadReconciler();
+      // Live OpenRouter list prices for receipt-less usage; hardcoded tables until (or unless) they load.
+      startLiveModelPriceRefresh();
       // Leader-elected alert checks; logs [alert] lines and posts ALERT_WEBHOOK_URL.
       startAlertEvaluator();
       // Apply workers' pending credit debits to org pools every few seconds.

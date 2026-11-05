@@ -1,6 +1,7 @@
 import { nitroBaseModel } from "./workspace-chat-models.js";
 import { withServedProviderRegion } from "./provider-regions.js";
 import { chatModelPricePerToken } from "./chat-model-prices.js";
+import { liveModelPrice, refreshStaleLiveModelPrices } from "./live-model-prices.js";
 
 /** Provider charges are USD; the application ledger uses fractional USD cents. */
 export interface ProviderTextUsage {
@@ -40,32 +41,23 @@ async function resolveOpenRouterUsageInner(args: {
   providerName?: string;
   generationId?: string;
   usage: { inputTokens?: number; outputTokens?: number; raw?: unknown };
+  /** Delays before each generation-receipt lookup (default [0], one lookup). */
+  receiptRetryDelaysMs?: readonly number[];
 }): Promise<ProviderTextUsage> {
   const base = { inputTokens: args.usage.inputTokens ?? 0, outputTokens: args.usage.outputTokens ?? 0 };
   const direct = readProviderCharge(args.usage.raw);
   if (direct.costCents !== undefined) return { ...base, ...direct, metadata: { ...direct.metadata, generationId: args.generationId ?? null, ...(args.providerName ? { providerName: args.providerName } : {}) } };
   if (args.generationId) {
-    try {
-      const response = await fetch(`https://openrouter.ai/api/v1/generation?id=${encodeURIComponent(args.generationId)}`, {
-        headers: { Authorization: `Bearer ${args.apiKey}` }, signal: AbortSignal.timeout(5000),
-      });
-      if (response.ok) {
-        const { data } = await response.json() as { data?: Record<string, unknown> };
-        if (data && finiteNonnegative(data.total_cost)) {
-          const charge = readProviderCharge({ cost: data.total_cost, is_byok: data.is_byok,
-            cost_details: { upstream_inference_cost: data.upstream_inference_cost } });
-          if (charge.costCents === undefined) throw new Error("Incomplete BYOK accounting");
-          return {
-            inputTokens: finiteNonnegative(data.native_tokens_prompt) ? data.native_tokens_prompt : base.inputTokens,
-            outputTokens: finiteNonnegative(data.native_tokens_completion) ? data.native_tokens_completion : base.outputTokens,
-            costCents: charge.costCents,
-            metadata: { ...charge.metadata, generationId: args.generationId,
-              providerName: data.provider_name, cachedTokens: data.native_tokens_cached, reasoningTokens: data.native_tokens_reasoning,
-              upstreamInferenceCostUsd: data.upstream_inference_cost, isByok: data.is_byok },
-          };
-        }
+    // A receipt is often not queryable for a moment after the response ends. Background callers
+    // pass a retry delay (e.g. [0, 1_500]); user-facing paths look once.
+    for (const delayMs of args.receiptRetryDelaysMs ?? [0]) {
+      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      const receipt = await fetchGenerationReceipt(args.apiKey, args.generationId, base).catch(() => null);
+      if (receipt === "incomplete") break;
+      if (receipt) {
+        return { ...receipt, metadata: { ...receipt.metadata, ...(delayMs > 0 ? { receiptRetried: true } : {}) } };
       }
-    } catch { /* Record explicit fallback provenance; accounting must not discard the answer. */ }
+    }
   }
   // Nitro can select priority endpoints. A base-model listing cannot price this call.
   // Preserve tokens using an explicitly estimated ceiling. This is NOT a held budget reserve:
@@ -76,36 +68,41 @@ async function resolveOpenRouterUsageInner(args: {
       pricingSource: "nitro-endpoint-ceiling-estimate", generationId: args.generationId ?? null,
       ...(args.providerName ? { providerName: args.providerName } : {}) },
   };
-  // No receipt: estimate from the verified price table, then the live listing.
-  const verified = chatModelPricePerToken(args.model);
-  const pricing = verified ?? await getModelPricing(args.model);
+  // No receipt: estimate from the live list price, then the hardcoded verified
+  // table. A missing or stale snapshot is refreshed in the background, never
+  // awaited on this (often user-facing) path.
+  refreshStaleLiveModelPrices();
+  const reference = chatModelPricePerToken(args.model);
+  const live = liveModelPrice(args.model, { promptTokens: base.inputTokens, reference });
+  const verified = live ? undefined : reference;
+  const pricing = live ? { input: live.input, output: live.output } : verified;
   return { ...base,
     ...(pricing ? { costCents: (base.inputTokens * pricing.input + base.outputTokens * pricing.output) * 100 } : {}),
-    metadata: { costSource: "estimate", generationId: args.generationId ?? null,
-      pricingSource: verified ? "model-prices" : pricing ? "openrouter-models" : "configured-fallback", ...(pricing ? { pricingUsdPerToken: pricing } : {}) },
+    metadata: { costSource: "estimate", accountingStatus: "receipt-missing", generationId: args.generationId ?? null,
+      pricingSource: live ? "openrouter-live" : verified ? "model-prices" : "configured-fallback",
+      ...(live?.override ? { pricingOverride: live.override } : {}), ...(pricing ? { pricingUsdPerToken: pricing } : {}) },
   };
 }
 
-let catalog: { expiresAt: number; prices: Map<string, { input: number; output: number }> } | undefined;
-let catalogRequest: Promise<void> | undefined;
-async function getModelPricing(model: string) {
-  if (!catalog || catalog.expiresAt < Date.now()) {
-    catalogRequest ??= (async () => {
-      try {
-        const response = await fetch("https://openrouter.ai/api/v1/models", { signal: AbortSignal.timeout(5000) });
-        if (!response.ok) return;
-        const payload = await response.json() as { data: Array<{ id: string; pricing: { prompt: string; completion: string } }> };
-        const prices = new Map<string, { input: number; output: number }>();
-        for (const model of payload.data) {
-          const input = Number(model.pricing.prompt), output = Number(model.pricing.completion);
-          if (finiteNonnegative(input) && finiteNonnegative(output)) prices.set(model.id, { input, output });
-        }
-        catalog = { expiresAt: Date.now() + 3600_000, prices };
-      } catch { /* Leave unavailable pricing explicitly marked as a configured estimate. */ }
-    })().finally(() => { catalogRequest = undefined; });
-    await catalogRequest;
-  }
-  return catalog?.prices.get(model);
+/** The generation receipt, null when not (yet) available, "incomplete" when BYOK accounting lacks the upstream cost. */
+async function fetchGenerationReceipt(apiKey: string, generationId: string, base: { inputTokens: number; outputTokens: number }): Promise<ProviderTextUsage | "incomplete" | null> {
+  const response = await fetch(`https://openrouter.ai/api/v1/generation?id=${encodeURIComponent(generationId)}`, {
+    headers: { Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(5000),
+  });
+  if (!response.ok) return null;
+  const { data } = await response.json() as { data?: Record<string, unknown> };
+  if (!data || !finiteNonnegative(data.total_cost)) return null;
+  const charge = readProviderCharge({ cost: data.total_cost, is_byok: data.is_byok,
+    cost_details: { upstream_inference_cost: data.upstream_inference_cost } });
+  if (charge.costCents === undefined) return "incomplete";
+  return {
+    inputTokens: finiteNonnegative(data.native_tokens_prompt) ? data.native_tokens_prompt : base.inputTokens,
+    outputTokens: finiteNonnegative(data.native_tokens_completion) ? data.native_tokens_completion : base.outputTokens,
+    costCents: charge.costCents,
+    metadata: { ...charge.metadata, generationId,
+      providerName: data.provider_name, cachedTokens: data.native_tokens_cached, reasoningTokens: data.native_tokens_reasoning,
+      upstreamInferenceCostUsd: data.upstream_inference_cost, isByok: data.is_byok },
+  };
 }
 
 /** OpenRouter `reasoning` object: either thinking switched off or an explicit effort level. */
@@ -229,4 +226,30 @@ export function createOpenRouterUsageCapture(baseFetch: typeof fetch = fetch) {
     })), { status: response.status, statusText: response.statusText, headers: response.headers });
   };
   return { fetch: trackedFetch, usage: () => captured, providerName: () => providerName, responseModel: () => responseModel };
+}
+
+/**
+ * The provider charge summed over every response sent through `fetch`, for
+ * calls that may issue several requests (AI SDK `embedMany`). Read `charge()`
+ * after the call resolves. Returns `{}` (no receipt, so callers estimate) when
+ * no request was sent or any response lacked a charge, never a partial sum.
+ */
+export function createOpenRouterChargeTotal(baseFetch: typeof fetch = fetch) {
+  const captures: Array<ReturnType<typeof createOpenRouterUsageCapture>> = [];
+  const trackedFetch: typeof fetch = (input, init) => {
+    const capture = createOpenRouterUsageCapture(baseFetch);
+    captures.push(capture);
+    return capture.fetch(input, init);
+  };
+  const charge = (): Pick<ProviderTextUsage, "costCents" | "metadata"> => {
+    if (captures.length === 0) return {};
+    let costCents = 0;
+    for (const capture of captures) {
+      const one = readProviderCharge(capture.usage());
+      if (one.costCents === undefined) return {};
+      costCents += one.costCents;
+    }
+    return { costCents, metadata: { costSource: "provider", providerCostUsd: costCents / 100, providerResponses: captures.length } };
+  };
+  return { fetch: trackedFetch, charge };
 }
