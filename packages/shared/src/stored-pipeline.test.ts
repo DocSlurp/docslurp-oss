@@ -1,7 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { vi } from "vitest";
 
+import { documentExtractionConfigSchema, sanitizeStoredDocumentExtraction } from "./extraction.js";
+import { hostPdfExtractorsUnderSandbox } from "./extractors.js";
 import { defaultPipelineFeatures, normalizePipelineFeatures, normalizeStoredPipelineFeatures, parseStoredPipelineFeatures, sanitizeStoredPipeline } from "./pipeline.js";
 
 describe("parseStoredPipelineFeatures", () => {
@@ -62,5 +64,28 @@ describe("stored PII policies with patterns that no longer exist", () => {
     const features = normalizeStoredPipelineFeatures(input as never, "run r1");
     expect(features.piiPolicy.patterns).toEqual(["ssn"]);
     error.mockRestore();
+  });
+});
+
+describe("a stored host PDF extractor under a sandboxed PDF deployment", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("is dropped on read (the PDF takes the sandboxed default) and refused on write", () => {
+    vi.stubEnv("DOCSLURP_VM_PDF_INSTALLED", "1");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const stored = { order: { pdf: ["kreuzberg"], image: ["ocr"] }, pages: ["ocr", "vm-pdf"], enrich: ["kreuzberg"], voting: { enabled: true, secondary: "native-pdf" } };
+    const { value, dropped } = sanitizeStoredDocumentExtraction(stored);
+    expect(dropped).toEqual(["documentExtraction.order.pdf", "documentExtraction.pages", "documentExtraction.enrich", "documentExtraction.voting.secondary"]);
+    expect(value).toMatchObject({ order: { image: ["ocr"] }, pages: ["vm-pdf"], enrich: [], voting: { enabled: true, secondary: "next-in-order" } });
+    expect(hostPdfExtractorsUnderSandbox(value)).toEqual([]);
+    const refused = documentExtractionConfigSchema.safeParse(stored);
+    expect(refused.success).toBe(false);
+    expect(refused.error?.issues.map((issue) => issue.path.join("."))).toEqual(["order.pdf.0", "pages.0", "enrich.0", "voting.secondary"]);
+  });
+
+  it("is left alone when the deployment parses PDFs on the host", () => {
+    const stored = { order: { pdf: ["kreuzberg"] }, voting: { enabled: true, secondary: "native-pdf" } };
+    expect(sanitizeStoredDocumentExtraction(stored).dropped).toEqual([]);
+    expect(documentExtractionConfigSchema.safeParse(stored).success).toBe(true);
   });
 });

@@ -26,6 +26,7 @@ export async function applyOwnedMigrations(client, { migrationsFolder, env = pro
   if (owner !== identity.actor && (role.rolsuper || role.rolcreaterole || role.rolreplication || role.rolbypassrls)) {
     throw new Error("Delegated migration owner must not have elevated role attributes");
   }
+  await passAcknowledgements(client, env);
   try {
     // Identifier allowlist above plus SQL identifier quoting; no URL/PGOPTIONS
     // interpolation and no membership or privilege grants to runtime roles.
@@ -37,4 +38,16 @@ export async function applyOwnedMigrations(client, { migrationsFolder, env = pro
   } finally {
     await client.query("RESET ROLE");
   }
+}
+
+/**
+ * Owner acknowledgements a migration checks for itself. 0127 refuses funded removals and member-to-owner promotions unless
+ * the session setting docslurp.ack_0127 equals the hash of its current plan (predeploy-check.mjs prints it); this passes
+ * DOCSLURP_ACK_0127 through. Unset leaves the setting empty, so 0127 aborts when its plan needs one.
+ */
+export async function passAcknowledgements(client, env = process.env) {
+  const ack = env.DOCSLURP_ACK_0127?.trim();
+  if (!ack) return;
+  if (!/^[0-9a-f]{16}$/.test(ack)) throw new Error("DOCSLURP_ACK_0127 must be the 16-hex-digit hash printed by server/db/predeploy-check.mjs");
+  await client.query("select set_config('docslurp.ack_0127', $1, false)", [ack]);
 }

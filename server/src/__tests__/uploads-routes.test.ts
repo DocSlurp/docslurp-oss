@@ -283,3 +283,36 @@ describe("explicit Speed boost admission", () => {
     expect(fakes.runs).toHaveLength(0);
   });
 });
+
+describe("a sandboxed PDF deployment (vm-pdf) refuses host PDF parsers in upload pipelines", () => {
+  afterEach(() => vi.unstubAllEnvs());
+  const overrides = [
+    ["order.pdf", { order: { pdf: ["kreuzberg"] } }],
+    ["pages", { pages: ["ocr"] }],
+    ["enrich", { enrich: ["kreuzberg"] }],
+    ["voting.secondary", { voting: { enabled: true, secondary: "native-pdf" } }],
+  ] as const;
+
+  it.each(overrides)("refuses %s naming a host parser on bulk, URL and direct-session create, creating nothing", async (_label, documentExtraction) => {
+    vi.stubEnv("DOCSLURP_VM_PDF_INSTALLED", "1");
+    const { app, fakes } = setup();
+    const pipeline = { documentExtraction };
+    const responses = [
+      await app.request("/uploads/bulk", bulk([text("a.txt")], { workspace: "ws-1", pipeline: JSON.stringify(pipeline) })),
+      await app.request("/uploads/url", json({ workspace: "ws-1", urls: ["https://example.com/a.pdf"], pipeline })),
+      await app.request("/uploads/direct/sessions", json({ workspace: "ws-1", files: [{ filename: "a.pdf", mimeType: "application/pdf", sizeBytes: 10 }], pipeline })),
+    ];
+    for (const response of responses) {
+      expect([400, 422]).toContain(response.status);
+      // The issue names the refused setting (the public message is the generic validation copy).
+      expect(await response.text()).toMatch(/documentExtraction/);
+    }
+    expect(fakes.runs).toEqual([]);
+  });
+
+  it("accepts the same pipeline when the deployment parses PDFs on the host", async () => {
+    const { app } = setup();
+    const response = await app.request("/uploads/bulk", bulk([text("a.txt")], { workspace: "ws-1", pipeline: JSON.stringify({ documentExtraction: { order: { pdf: ["kreuzberg"] } } }) }));
+    expect(response.status).toBeLessThan(300);
+  });
+});

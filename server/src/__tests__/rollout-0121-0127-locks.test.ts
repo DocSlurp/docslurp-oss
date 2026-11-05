@@ -53,4 +53,9 @@ describe("0121-0128 lock prelude", () => {
     for (const table of extra) expect(PRELUDE_TABLES.has(table), `${name} re-locks prelude table ${table}`).toBe(false);
     for (const table of strong) expect(PRELUDE_TABLES.has(table) || extra.has(table), `${name} locks ${table}`).toBe(true);
   });
+
+  it("0127 also locks the workspaces and runs its plan reads, right after the prelude", () => {
+    const all = statements(release.find((name) => name.startsWith("0127_"))!);
+    expect(all[PRELUDE.length]).toBe("LOCK TABLE workspaces, workspace_runs IN SHARE ROW EXCLUSIVE MODE;");
+  });
 });

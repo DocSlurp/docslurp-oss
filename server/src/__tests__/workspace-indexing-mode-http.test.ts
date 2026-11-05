@@ -343,3 +343,36 @@ it("full-index reserves boosted credits before creating a run", async () => {
     else process.env.RUN_ADMISSION_RESERVE_CREDITS = previous;
   }
 });
+
+describe("a sandboxed PDF deployment (vm-pdf)", () => {
+  const extraction = (documentExtraction: Record<string, unknown>) => ({ pipeline: { documentExtraction } });
+
+  it.each([
+    ["order.pdf kreuzberg", { order: { pdf: ["kreuzberg"] } }],
+    ["order.pdf native-pdf after vm-pdf", { order: { pdf: ["vm-pdf", "native-pdf"] } }],
+    ["pages", { pages: ["ocr"] }],
+    ["enrich", { enrich: ["kreuzberg"] }],
+    ["voting.secondary", { voting: { enabled: true, secondary: "kreuzberg" } }],
+    ["pages with only host ids", { pages: ["ocr", "kreuzberg"] }],
+    ["enrich with only host ids", { enrich: ["kreuzberg", "native-pdf"] }],
+  ])("refuses a workspace override naming a host parser (%s) with 400, on create, update, estimate and MCP", async (_label, documentExtraction) => {
+    vi.stubEnv("DOCSLURP_VM_PDF_INSTALLED", "1");
+    const created = await app.request("/v1/workspaces", json("POST", { name: "P", orgId: "gold", ...extraction(documentExtraction) }));
+    expect(created.status).toBe(400);
+    await seedWorkspace("t-vm", "gold", "full");
+    const updated = await app.request("/v1/workspaces/t-vm", json("PATCH", extraction(documentExtraction)));
+    expect(updated.status).toBe(400);
+    // The config-change estimate takes the same body.
+    const estimated = await app.request("/v1/workspaces/t-vm/estimate", json("POST", extraction(documentExtraction)));
+    expect(estimated.status).toBe(400);
+    // MCP's settings proposals never carry documentExtraction at all (strict schema).
+    const proposed = await dispatch("/tools/proposeWorkspaceSettings", json("POST", { workspace: "t-vm", changes: extraction(documentExtraction) }));
+    expect(proposed.status).toBe(400);
+    expect(await sql`select pipeline -> 'documentExtraction' -> 'order' as o from workspaces where id = 't-vm'`).toEqual([{ o: {} }]);
+  });
+
+  it("accepts the same override when the deployment parses PDFs on the host", async () => {
+    const created = await app.request("/v1/workspaces", json("POST", { name: "P", orgId: "gold", ...extraction({ order: { pdf: ["kreuzberg"] } }) }));
+    expect(created.status).toBe(201);
+  });
+});

@@ -81,9 +81,40 @@ describe("one organization per user", () => {
     const orgId = await team(owner);
     const personal = await orgs.resolveDefaultOrganization(invitee);
     expect(personal.isPersonal).toBe(true);
+    const [defaultWorkspace] = await sql<{ id: string }[]>`select id from workspaces where org_id = ${personal.id} and is_default`;
+    expect(defaultWorkspace).toBeDefined();
     await orgs.acceptOrganizationInvite(await invite(orgId, owner, invitee), invitee);
     expect(await membershipsOf(invitee)).toEqual([{ org_id: orgId, role: "member" }]);
     expect(await sql`select id from organizations where id = ${personal.id}`).toEqual([]);
+    // Its default workspace goes with it: workspaces.org_id has no foreign key, so nothing else would remove it.
+    expect(await sql`select id from workspaces where org_id = ${personal.id}`).toEqual([]);
+  });
+
+  it.each([
+    ["a chat session in its default workspace", async (orgId: string, userId: string) => {
+      const [ws] = await sql<{ id: string }[]>`select id from workspaces where org_id = ${orgId} and is_default`;
+      await sql`insert into chat_sessions (id, workspace_id, user_id) values (${`chat-${userId}`}, ${ws!.id}, ${userId})`;
+    }],
+    ["a pending upload session", async (orgId: string, userId: string) => {
+      await sql`insert into upload_sessions (id, user_id, org_id, status) values (${`up-${userId}`}, ${userId}, ${orgId}, 'pending')`;
+    }],
+    ["auto top-up enabled", async (orgId: string) => { await sql`update organizations set auto_recharge_enabled = true where id = ${orgId}`; }],
+    ["an unrevoked MCP grant", async (orgId: string, userId: string) => {
+      await sql`insert into mcp_oauth_clients (id, name, redirect_uris) values (${`c-${userId}`}, 'c', '[]'::jsonb) on conflict do nothing`;
+      // The grant's key is revoked (a revoked key is not data); the live grant is.
+      await sql`insert into api_keys (id, user_id, org_id, key_hash, name, revoked_at) values (${`gk-${userId}`}, ${userId}, ${orgId}, ${`gh-${userId}`}, 'n', now())`;
+      await sql`insert into mcp_oauth_grants (id, client_id, user_id, org_id, resource, scopes, api_key_id) values (${`g-${userId}`}, ${`c-${userId}`}, ${userId}, ${orgId}, 'r', '[]'::jsonb, ${`gk-${userId}`})`;
+    }],
+  ])("keeps a personal organization with %s and refuses the invite", async (_label, seed) => {
+    const owner = await user("owner");
+    const invitee = await user("invitee");
+    const orgId = await team(owner);
+    const personal = await orgs.resolveDefaultOrganization(invitee);
+    await seed(personal.id, invitee);
+    const token = await invite(orgId, owner, invitee);
+    await expect(orgs.acceptOrganizationInvite(token, invitee)).rejects.toMatchObject({ status: 409, code: "user_already_in_org" });
+    expect(await membershipsOf(invitee)).toEqual([{ org_id: personal.id, role: "owner" }]);
+    expect(await sql`select id from workspaces where org_id = ${personal.id} and is_default`).toHaveLength(1);
   });
 
   it("answers 409 user_already_in_org when the current organization has data, and changes nothing", async () => {
