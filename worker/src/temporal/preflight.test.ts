@@ -85,7 +85,16 @@ describe("worker preflight", () => {
   it("refuses VM OCR without an OCR provider, and local OCR on a service profile", async () => {
     expect((await runWorkerPreflight({ DOCSLURP_OCR_MODE: "vm" }, stubs).catch((e) => e)).step).toBe("ocr configuration");
     resetExtractorPluginsForTest();
-    expect((await runWorkerPreflight({ DOCSLURP_OCR_MODE: "local", DOCSLURP_SERVICE_PROFILE: "service" }, stubs).catch((e) => e)).step).toBe("ocr configuration");
+    // The plugin step passes here (as with a VM PDF provider loaded) so the OCR step is the one under test.
+    expect((await runWorkerPreflight({ DOCSLURP_OCR_MODE: "local", DOCSLURP_SERVICE_PROFILE: "service" }, { ...stubs, loadExtractorPlugins: async () => [] }).catch((e) => e)).step).toBe("ocr configuration");
+    expectNothingStarted();
+  });
+
+  it("refuses a service profile without a VM PDF provider at the plugin step: PDFs never fall back to the worker host", async () => {
+    const error = await runWorkerPreflight({ DOCSLURP_OCR_MODE: "off", DOCSLURP_SERVICE_PROFILE: "service" }, stubs).catch((e) => e);
+    expect(error).toBeInstanceOf(WorkerPreflightError);
+    expect(error.step).toBe("extractor plugins");
+    expect(error.message).toMatch(/DOCSLURP_SERVICE_PROFILE=service needs a sandboxed PDF provider/);
     expectNothingStarted();
   });
 
