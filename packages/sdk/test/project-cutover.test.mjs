@@ -170,3 +170,30 @@ for (const method of ["upload", "extract"]) test(`${method} undefined scope opti
     }
   }
 });
+
+
+test("capability restrictions cannot disappear during serialization", async () => {
+  let requests = 0;
+  const client = createDocSlurpClient({ fetch: async () => { requests++; throw new Error("network must not run"); } });
+  for (const [key, value] of Object.entries({ projectIds: ["restricted-project"], policy: { allowAgentDiscovery: false }, ttlSeconds: 60, boundClientKeyId: "client", allowedOrigins: ["https://example.test"] })) {
+    for (const input of [Object.create({ [key]: value }), Object.defineProperty({}, key, { value })]) {
+      await assert.rejects(async () => client.createCapability(input), /must be an enumerable own property/);
+    }
+  }
+  for (const policy of [Object.create({ allowAgentDiscovery: false }), Object.defineProperty({}, "maxCreditsPerQuery", { value: 1 })]) {
+    await assert.rejects(async () => client.createCapability({ projectIds: ["restricted"], policy }), /must be an enumerable own property/);
+  }
+  assert.equal(requests, 0);
+});
+
+test("capability requests retain explicit restrictions despite custom serialization", async () => {
+  let captured;
+  const client = createDocSlurpClient({ fetch: async (_url, init) => {
+    captured = JSON.parse(init.body);
+    return new Response(JSON.stringify({ token: "sealed", expiresAt: "later" }), { headers: { "content-type": "application/json" } });
+  } });
+  const projectIds = Object.assign(["restricted-project"], { toJSON: () => undefined });
+  const allowedOrigins = Object.assign(["https://example.test"], { toJSON: () => undefined });
+  await client.createCapability({ projectIds, allowedOrigins, policy: { allowAgentDiscovery: false, toJSON: () => ({}) }, ttlSeconds: 60, boundClientKeyId: "client", toJSON: () => ({}) });
+  assert.deepEqual(captured, { projectIds: ["restricted-project"], allowedOrigins: ["https://example.test"], policy: { allowAgentDiscovery: false }, ttlSeconds: 60, boundClientKeyId: "client" });
+});

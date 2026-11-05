@@ -1011,14 +1011,18 @@ function isStreamBody(body: unknown): boolean {
   return typeof ReadableStream !== "undefined" && body instanceof ReadableStream;
 }
 
-// Intake merges only enumerable own properties. Reject selectors that a copy
-// would erase rather than silently ingesting into a different project or org.
-function rejectUncopyableIntakeSelection(input: object): void {
-  for (const key of ["project", "newProject", "templateKey", "orgId"]) {
+function rejectUncopyableFields(input: object, keys: readonly string[]): void {
+  for (const key of keys) {
     if (key in input && !Object.prototype.propertyIsEnumerable.call(input, key)) {
-      throw new TypeError(`Intake selection ${key} must be an enumerable own property.`);
+      throw new TypeError(`Selection ${key} must be an enumerable own property.`);
     }
   }
+}
+
+// Copies and JSON omit inherited/non-enumerable selectors. Refuse that loss
+// before it can select a default target or widen a delegated capability.
+function rejectUncopyableIntakeSelection(input: object): void {
+  rejectUncopyableFields(input, ["project", "projectId", "projectIds", "projectName", "project_id", "project_ids", "newProject", "templateKey", "orgId"]);
 }
 
 // Scope belongs to a URL/file-list envelope or upload options, never a file.
@@ -2245,7 +2249,25 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
     /** Mints a sealed `X-DocSlurp-Capability` token a browser can use; needs a server key. */
     createCapability(input: CreateCapabilityInput = {}, requestOptions?: RequestOptions): Promise<{ token: string; expiresAt: string } & JsonObject> {
-      return request("/v1/capabilities", jsonRequest("POST", input), requestOptions);
+      rejectLegacyProjectOptions(input);
+      rejectUncopyableIntakeSelection(input);
+      rejectUncopyableFields(input, ["policy", "ttlSeconds", "boundClientKeyId", "allowedOrigins"]);
+      const policy = input.policy;
+      const policyFields = ["maxPagesPerQuery", "maxCreditsPerQuery", "maxPagesPerDay", "deadlineMs", "allowFullIndexRequest", "allowAgentDiscovery", "mapRouter"] as const;
+      if (policy !== undefined) {
+        if (!policy || typeof policy !== "object" || Array.isArray(policy)) throw new TypeError("Capability policy must be an object.");
+        rejectUncopyableFields(policy, policyFields);
+      }
+      // Build plain protocol values, so custom serialization cannot erase a
+      // restriction and activate the server's broader omission defaults.
+      const body = {
+        projectIds: input.projectIds === undefined ? undefined : Array.from(input.projectIds),
+        policy: policy === undefined ? undefined : Object.fromEntries(policyFields.map(key => [key, policy[key]])),
+        ttlSeconds: input.ttlSeconds,
+        boundClientKeyId: input.boundClientKeyId,
+        allowedOrigins: input.allowedOrigins === undefined ? undefined : Array.from(input.allowedOrigins),
+      };
+      return request("/v1/capabilities", jsonRequest("POST", body), requestOptions);
     },
 
     /** Indexes every unindexed page of a project (or the given documents) in the background. */
@@ -2278,7 +2300,10 @@ function newIdempotencyKey(): string {
 }
 
 function jsonRequest(method: string, body: unknown): RequestInit {
-  if (body && typeof body === "object" && !Array.isArray(body)) rejectLegacyProjectOptions(body);
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    rejectLegacyProjectOptions(body);
+    rejectUncopyableIntakeSelection(body);
+  }
   return { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
 }
 
