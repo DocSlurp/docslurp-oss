@@ -90,4 +90,9 @@ describe("council fixes", () => {
     expect(ocrEscalationEnabled({ DEEPINFRA_API_KEY: "k" })).toBe(false);
     expect(ocrEscalationEnabled({ DOCSLURP_OCR_ESCALATION: "on" })).toBe(true);
   });
+
+  it("refuses a result that leaves out a requested page instead of treating it as read", async () => {
+    const { runner } = fakeOcrRunner(() => [{ frame: 1, text: "page one" }]);
+    await expect(readWithOcr(runner, { source, kind: "pdf", pages: [1, 2], escalation: false, env })).rejects.toThrow(/missing requested frames 2/);
+  });
 });

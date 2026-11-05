@@ -343,6 +343,8 @@ export class ExtractMarkdownStage implements Stage {
                 const contentHash = cachedSource.sha256;
                 const existingUri = checkDedup(state, contentHash, artifactSlot);
                 if (existingUri) {
+                  const inheritedFailures = state.artifactLedger.read(`${OCR_FAILED_PAGES_KEY}:${contentHash}`);
+                  if (inheritedFailures) state.artifactLedger.recordDocument(document.id, OCR_FAILED_PAGES_KEY, inheritedFailures);
                   console.log(
                     `[extract-debug] document=${document.id} deduplicated=true existingUri=${existingUri}`,
                   );
@@ -535,7 +537,7 @@ export class ExtractMarkdownStage implements Stage {
                   // Scanned pages (no words in the winner's text) are read by the OCR engine in its boundary; Kreuzberg and
                   // the text-layer extractors never OCR. The engine charges each page it reads.
                   const scanFill = isPdf && qualityAllowsPageReading(state.run.pipeline.quality)
-                    ? await this.ocrScannedPdfPages(state, document, { sourcePath: tempFile, text: winningText, textKey: winningCandidate.textKey, ocrLanguage: extractionConfig.ocr.language }, signal)
+                    ? await this.ocrScannedPdfPages(state, document, { sourcePath: tempFile, text: winningText, textKey: winningCandidate.textKey, ocrLanguage: extractionConfig.ocr.language, contentHash }, signal)
                     : null;
                   if (scanFill) {
                     winningText = scanFill.text;
@@ -1217,7 +1219,7 @@ export class ExtractMarkdownStage implements Stage {
   private async ocrScannedPdfPages(
     state: import("../pipeline/pipeline.js").WorkflowState,
     document: import("../models.js").Document,
-    args: { sourcePath: string; text: string; textKey: string; ocrLanguage?: string },
+    args: { sourcePath: string; text: string; textKey: string; ocrLanguage?: string; contentHash: string },
     signal?: AbortSignal,
   ): Promise<{ text: string; textUri: string; pages: number[] } | null> {
     const pageCount = Math.max(1, Math.trunc(document.pageCount) || 1);
@@ -1282,7 +1284,10 @@ export class ExtractMarkdownStage implements Stage {
       // Vision must not read these pages in OCR's place (vision-extract excludes them).
       const known = ocrFailedPages(state.artifactLedger, document.id);
       for (const page of failed) known.add(page);
-      state.artifactLedger.recordDocument(document.id, OCR_FAILED_PAGES_KEY, JSON.stringify([...known].sort((a, b) => a - b)));
+      const list = JSON.stringify([...known].sort((a, b) => a - b));
+      state.artifactLedger.recordDocument(document.id, OCR_FAILED_PAGES_KEY, list);
+      // A later document with the same bytes reuses this Markdown (checkDedup): it inherits the failed pages too.
+      state.artifactLedger.record(`${OCR_FAILED_PAGES_KEY}:${args.contentHash}`, list);
     }
     // Every page is a scan and none could be read: the document has no text, so it fails rather than publishing nothing.
     if (failed.length > 0 && failed.length === pageCount) throw new Error(`OCR failed for every page (${pageCount}) of a scanned document`);
@@ -1993,8 +1998,10 @@ export class ExtractMarkdownStage implements Stage {
       console.warn(`[extract-markdown] self-critique skipped document=${args.document.id}: text has no reliable page breaks pageCount=${args.document.pageCount}`);
       return null;
     }
+    // Pages whose OCR failed in its boundary stay failed: critique never re-reads them with a hosted model.
+    const ocrFailed = ocrFailedPages(args.state.artifactLedger, args.document.id);
     const critiquePages = budgetCritiquePages(
-      selectCritiquePages(args.heatmapPages),
+      selectCritiquePages(args.heatmapPages).filter((page) => !ocrFailed.has(page)),
       maxCostCents,
       maxCostPerPageCents,
     );

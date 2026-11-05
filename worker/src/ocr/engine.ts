@@ -153,6 +153,11 @@ export function checkResultAgainstJob(result: OcrResultRecord, job: SandboxedOcr
     if (frame.width > job.maxLongEdge || frame.height > job.maxLongEdge) throw new Error(`OCR frame ${frame.frame} exceeds the long-edge cap`);
   }
   if (result.frames.length > job.maxFrames) throw new Error("OCR result exceeds the frame cap");
+  // Every requested page must come back: a silently missing page would look unread rather than failed.
+  if (job.pages && !result.truncatedFrames) {
+    const missing = job.pages.filter((page) => !seen.has(page));
+    if (missing.length) throw new Error(`OCR result is missing requested frames ${missing.join(",")}`);
+  }
   for (const model of result.models) {
     if (pinned.get(model.id) !== model.sha256) throw new Error(`OCR result names an unpinned model ${model.id}`);
   }
