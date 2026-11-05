@@ -23,6 +23,14 @@
       "types": "./js/node.d.ts",
       "import": "./js/node.mjs"
     },
+    "./worker": {
+      "types": "./js/worker.d.ts",
+      "import": "./js/worker.mjs"
+    },
+    "./client": {
+      "types": "./js/client.d.ts",
+      "import": "./js/client.mjs"
+    },
     "./docslurp_estimate.wasm": "./dist/docslurp_estimate.wasm"
   },
   "files": [
