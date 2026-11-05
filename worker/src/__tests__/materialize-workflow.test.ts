@@ -4,7 +4,7 @@ import type { Sql } from "postgres";
 import { defaultPipelineFeatures, pageCredits } from "@docslurp/shared";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { billLockedMaterializedPages, lockPageRows, recordMaterializedPageFee, recordPageBaseFee } from "../db/page-base-fee.js";
+import { billLockedMaterializedPages, lockPageRows, pinRunPageBillingRules, recordMaterializedPageFee, recordPageBaseFee } from "../db/page-base-fee.js";
 import { Store } from "../db/store.js";
 import { completeMaterializeRun, runMaterializeRange } from "../deferred/materialize-activity.js";
 import { claimPages, ensurePageRows, markPages } from "../deferred/page-ledger.js";
@@ -18,6 +18,12 @@ import { createStageExecution } from "../pipeline/stage-execution.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
+
+/** A run this release started: startRun pinned the per-read page rule. */
+function pinned(state: WorkflowState): WorkflowState {
+  pinRunPageBillingRules(state);
+  return state;
+}
 let db: PGlite;
 let server: PGLiteSocketServer;
 let store: Store;
@@ -75,7 +81,7 @@ describe("page charges", () => {
   it("upload runs charge every document's pages as Fast when the flag is off", async () => {
     delete process.env.DOCSLURP_DEFERRED_PROFILES;
     await db.exec(`delete from usage_events where run_id = 'up'`);
-    const charges = await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("up"), []));
+    const charges = await recordPageBaseFee(sql, pinned(WorkflowState.create(await store.loadRun("up"), [])));
     expect(charges).toMatchObject({ fastPages: 20, richPages: 0 });
     const rows = await db.query<{ id: string; metric: string; amount: number; cost_cents: number }>(`select id, metric, amount, cost_cents from usage_events where run_id = 'up'`);
     expect(rows.rows.map((r) => [r.id, r.metric, Number(r.amount)])).toEqual([["fast:up", "ingest-page-fast", 20]]);
@@ -85,7 +91,7 @@ describe("page charges", () => {
   it("upload runs charge only full-mode documents when the flag is on", async () => {
     process.env.DOCSLURP_DEFERRED_PROFILES = "1";
     await db.exec(`delete from usage_events where run_id = 'up'`);
-    const state = WorkflowState.create(await store.loadRun("up"), []);
+    const state = pinned(WorkflowState.create(await store.loadRun("up"), []));
     await recordPageBaseFee(sql, state);
     const rows = await db.query<{ amount: number }>(`select amount from usage_events where run_id = 'up'`);
     expect(rows.rows.map((r) => Number(r.amount))).toEqual([3]);
@@ -99,13 +105,13 @@ describe("page charges", () => {
         values ('rich:up:full:1', 'u1', 'up', 'o1', 'w', 'docslurp', 'price-card', 'ingest-page-rich', 1, 'page', 0.25, '{"documentId":"full","pageNumber":1}');
       insert into document_page_facts (document_id, page_number, text_bytes, image_count) values ('mapped', 1, 0, 1), ('mapped', 2, 0, 2);
     `);
-    const charges = await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("up"), []));
+    const charges = await recordPageBaseFee(sql, pinned(WorkflowState.create(await store.loadRun("up"), [])));
     // full: 3 pages, 1 read by vision; mapped: 5 pages, 2 look like scans but were never read; d1: 12 text pages.
     expect(charges).toMatchObject({ fastPages: 2 + 5 + 12, richPages: 1 }); // the one page vision read, charged Rich as it was read
     expect(charges.credits).toBeCloseTo(fast(19), 9);
     await db.exec(`delete from document_page_facts where document_id = 'mapped'; update documents set mime_type = 'image/png' where id = 'full'`);
     await db.exec(`delete from usage_events where run_id = 'up' and id <> 'rich:up:full:1'`);
-    const image = await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("up"), []));
+    const image = await recordPageBaseFee(sql, pinned(WorkflowState.create(await store.loadRun("up"), [])));
     // An image file bills Rich only through a recorded read, like any page: its 2 unread pages bill Fast.
     expect(image).toMatchObject({ fastPages: 19, richPages: 1 });
     await db.exec(`update documents set mime_type = 'application/pdf' where id = 'full'; delete from usage_events where run_id = 'up'`);
