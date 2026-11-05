@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createMigratedDatabase, serveOnRandomPort, startMigratedPostgres } from "@docslurp/worker/testing";
 
 import { INDEX_NAME, buildSettings, directDatabaseUrl, ensureFoldedIndex, indexState } from "../../db/folded-search-index.mjs";
-import { collectReport, pendingMigrations, render } from "../../db/predeploy-check.mjs";
+import { collectReport, knownExtractorIds, pendingMigrations, render } from "../../db/predeploy-check.mjs";
 
 /**
  * The ops scripts of the 0121-0127 release (docs/rollout-0121-0127.md): the concurrent folded-index build is idempotent
@@ -86,7 +86,8 @@ describe("predeploy-check", () => {
         ('p1', 'P', 'p1', 'u1', true, 'u1'), ('t1', 'T', 't1', 'u1', false, null), ('t2', 'T', 't2', 'u1', false, null)`);
       await oldClient.query(`insert into org_memberships (org_id, user_id, role) values ('p1', 'u1', 'owner'), ('t1', 'u1', 'owner'), ('t2', 'u1', 'owner'), ('t1', 'u3', 'member')`);
       await oldClient.query(`insert into webhooks (id, user_id, url, secret) values ('w1', 'u1', 'https://x.test', 's'), ('w2', 'u2', 'https://x.test', 's'), ('w3', 'u3', 'https://x.test', 's')`);
-      await oldClient.query(`insert into workspaces (id, user_id, org_id, name, pipeline) values ('ws1', 'u1', 't1', 'W', '{"piiPolicy":{"patterns":["ssn","email-address"]}}')`);
+      await oldClient.query(`insert into workspaces (id, user_id, org_id, name, pipeline) values ('ws1', 'u1', 't1', 'W',
+        '{"piiPolicy":{"patterns":["ssn","email-address"]},"documentExtraction":{"order":{"pdf":["retired-extractor","kreuzberg"]},"options":{"aliased-old":{}},"voting":{"enabled":false,"secondary":"next-in-order"}}}')`);
       await oldClient.query(`insert into workspace_runs (id, workspace_id, user_id, org_id, kind, status, stage, pipeline, artifacts) values
         ('r1', 'ws1', 'u1', 't1', 'bulk-upload', 'processing', 'x', '{}', '{"run:vision-routing-version":"v2"}'),
         ('r2', 'ws1', 'u1', 't2', 'bulk-upload', 'queued', 'x', '{}', '{}')`);
@@ -97,9 +98,10 @@ describe("predeploy-check", () => {
 
       const counts = "select (select count(*) from webhooks) w, (select count(*) from api_keys) k, (select count(*) from workspace_runs) r, (select count(*) from org_memberships) m";
       const before = await oldClient.query(counts);
-      const { piiPatternTypeSchema } = await import("@docslurp/shared");
+      const { piiPatternTypeSchema, builtInDocumentExtractorDescriptors } = await import("@docslurp/shared");
+      const extractorIds = knownExtractorIds(builtInDocumentExtractorDescriptors.map((entry) => entry.id), { DOCSLURP_EXTRACTOR_ID_ALIASES: "aliased-old:vm-pdf" });
       await oldClient.query("begin read only");
-      const sections = await collectReport(oldClient, { journal, acceptedPiiPatterns: piiPatternTypeSchema.options });
+      const sections = await collectReport(oldClient, { journal, acceptedPiiPatterns: piiPatternTypeSchema.options, extractorIds });
       await oldClient.query("rollback");
       expect((await oldClient.query(counts)).rows).toEqual(before.rows);
 
@@ -119,7 +121,17 @@ describe("predeploy-check", () => {
       expect(memberships.level).toBe("warn");
       expect(memberships.title).toContain("1 user(s), 2 membership(s) to remove");
       expect(memberships.lines.join("\n")).toContain("1 in empty personal organizations");
+      // t1 and t2 tie on activity, role and membership age: the organization id keeps t1; t2 is left with no member.
+      expect(memberships.lines.join("\n")).toContain(`a@example.test (u1): keeps "T" (t1)`);
+      expect(memberships.lines.join("\n")).toContain("Left with NO member");
+      // The documentExtraction ids: kreuzberg is built in and aliased-old is an alias key; only retired-extractor is unknown.
+      const extractors = byTitle("Stored extraction configs");
+      expect(extractors.level).toBe("warn");
+      expect(extractors.title).toContain(": 1");
+      expect(extractors.lines.join("\n")).toContain(`workspaces: "retired-extractor" (1 mention(s))`);
+      expect(byTitle("documents:").title).toMatch(/^documents: ~\d+ rows, /);
       expect(byTitle("Completed stage states").level).toBe("warn");
+      expect(byTitle("Runs in flight").title).toContain("Runs in flight: 2 (");
       expect(byTitle("Runs in flight").title).toContain("v2=1");
       expect(byTitle("Runs in flight").title).toContain("(none)=1");
       // The harness applies the SQL files without drizzle's bookkeeping table, so every journal entry reads as pending.
