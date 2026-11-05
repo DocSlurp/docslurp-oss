@@ -4,7 +4,7 @@ import {
   extractionWarningMessage,
   ingestReportExtractionWarningSchema,
   ingestReportExtractorFallbackReasonSchema,
-  sanitizeFailureDetail,
+  publicFailureDetail,
   INGEST_REPORT_FACTS_SINCE,
   INGEST_REPORT_FILE_BYTE_EDGES,
   INGEST_REPORT_MAX_DOCUMENTS,
@@ -530,7 +530,7 @@ export function buildIngestReport(input: IngestReportInput): IngestReport {
 const FAILURE_EXAMPLE_LIMIT = 20;
 const FAILURE_REASON_ORDER: IngestReportFailureReason[] = ["ocr_unavailable", "extractor_failed", "unreadable_file", "unsupported_format", "policy_blocked", "provider_failed", "timeout", "unknown", "cancelled"];
 
-/** Failed files with the classified reason, failed stage and a sanitized excerpt of the stored error. */
+/** Failed files with the classified reason, failed stage and a reviewed detail phrase (never the stored error's text). */
 function listFailures(docs: IngestReportDocumentRow[], stagesByDoc: Map<string, IngestReportStageRow[]>): IngestReportFailure[] {
   const failures: IngestReportFailure[] = [];
   for (const doc of docs) {
@@ -539,7 +539,7 @@ function listFailures(docs: IngestReportDocumentRow[], stagesByDoc: Map<string, 
     const { reason, message, retryable } = classifyIngestFailure(failedStage?.error, doc.status);
     failures.push({
       documentId: doc.id, filename: doc.filename, stage: failedStage?.stage ?? null, reason, message,
-      detail: sanitizeFailureDetail(failedStage?.error), retryable,
+      detail: publicFailureDetail(failedStage?.error), retryable,
     });
   }
   return failures;
@@ -1022,11 +1022,11 @@ export function summarizeIngestReport(report: IngestReport): string {
   return lines.join("\n\n");
 }
 
-/** Names the failed files, what stopped them and (sanitized) the recorded error, so chat never has to guess a cause. */
+/** Names the failed files, what stopped them and a reviewed detail phrase, so chat never has to guess a cause. */
 function summarizeFailureLine(failures: IngestReport["failures"]): string {
   const shown = failures.examples.slice(0, 3).map((failure) => {
     const where = failure.stage ? ` at ${escapeMarkdown(failure.stage)}` : "";
-    const detail = failure.detail ? ` (recorded error: ${escapeMarkdown(failure.detail)})` : "";
+    const detail = failure.detail ? ` (${escapeMarkdown(failure.detail)})` : "";
     return `${escapeMarkdown(failure.filename)}${where}: ${failure.message}${detail}`;
   });
   const more = failures.total - shown.length;

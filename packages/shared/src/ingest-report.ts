@@ -95,7 +95,7 @@ export const ingestReportFailureSchema = z.object({
   reason: ingestReportFailureReasonSchema,
   /** Reviewed, user-facing explanation of the reason. */
   message: z.string(),
-  /** Short sanitized excerpt of the recorded error (no paths, URLs, secrets or stack frames); null when none was recorded. */
+  /** A reviewed phrase about the failure (publicFailureDetail), never the recorded error's text; null when none applies. */
   detail: z.string().nullable(),
   /** False when running the same file again fails the same way until something else is fixed. */
   retryable: z.boolean(),
@@ -149,7 +149,6 @@ export function extractionWarningMessage(wanted: string, served: string, reason:
   return `The ${wanted} extractor ${FALLBACK_COPY[reason]}, so ${served} read this file instead. Its text may lack headings, tables or layout the preferred extractor keeps; reprocess it once the cause is fixed.`;
 }
 
-export const INGEST_REPORT_FAILURE_DETAIL_MAX = 160;
 
 const FAILURE_COPY: Record<IngestReportFailureReason, { message: string; retryable: boolean }> = {
   ocr_unavailable: {
@@ -195,25 +194,25 @@ export function classifyIngestFailure(error: string | null | undefined, document
 }
 
 /**
- * A short excerpt of a stored error that is safe to show: first line only, no
- * stack frames, filesystem paths, URLs (including connection strings), e-mail
- * addresses or credential-looking values. Null when nothing remains.
+ * Reviewed detail phrases a failure may show, matched against the stored error; the stored text itself never reaches users
+ * (it goes to telemetry). First match wins.
  */
-export function sanitizeFailureDetail(error: string | null | undefined): string | null {
+const PUBLIC_FAILURE_DETAILS: ReadonlyArray<[RegExp, string]> = [
+  [/password[- ]protected|requires? a password|(?:incorrect|wrong|missing) password|\bencrypted\b/i, "The file is password-protected or encrypted."],
+  [/truncated|unexpected end of file|premature end/i, "The file appears to be truncated."],
+  [/corrupt|damaged|malformed|cross-reference|\bxref\b|bad (?:zip|header)|not a valid/i, "The file's internal structure is damaged."],
+  [/too large|exceed(?:s|ing|ed)? (?:the )?(?:\d|max|limit|size)|byte limit/i, "The file exceeds a processing size limit."],
+  [/timed? ?out|timeout|deadline exceeded/i, "Processing took longer than its time limit."],
+  [/unsupported (?:file|format|media|mime|content)|no (?:parser|handler)/i, "This file format is not supported."],
+];
+
+/**
+ * A reviewed phrase describing a stored failure, or null. Never an excerpt: stored errors can carry credentials, paths,
+ * hostnames and provider text in any form (JSON, query strings, headers), so only the allowlisted phrases above are shown.
+ */
+export function publicFailureDetail(error: string | null | undefined): string | null {
   if (!error) return null;
-  const line = error.split(/\r?\n/).find((entry) => entry.trim() && !/^\s*at\s/.test(entry)) ?? "";
-  const cleaned = line
-    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "<url>")
-    .replace(/(?<![\w.:/-])(?:[A-Za-z]:\\|~\/|\.{0,2}\/)[^\s'"`<>|,;)\]]*/g, "<path>")
-    .replace(/\bBearer\s+\S+/gi, "Bearer <redacted>")
-    .replace(/\b(?:authorization|api[_-]?key|token|secret|password|passwd|credential)s?\s*[=:]\s*(?!<)\S+(?:\s+<redacted>)?/gi, (match) => `${match.split(/[=:]/)[0]}=<redacted>`)
-    .replace(/\b(?:sk|pk|rk|ghp|gho|xox[a-z])[-_][A-Za-z0-9_-]{8,}/g, "<redacted>")
-    .replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, "<email>")
-    .replace(/[A-Za-z0-9+/_=-]{32,}/g, "<redacted>")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!cleaned) return null;
-  return cleaned.length > INGEST_REPORT_FAILURE_DETAIL_MAX ? `${cleaned.slice(0, INGEST_REPORT_FAILURE_DETAIL_MAX - 1)}…` : cleaned;
+  return PUBLIC_FAILURE_DETAILS.find(([pattern]) => pattern.test(error))?.[1] ?? null;
 }
 
 export const ingestReportConfigItemSchema =z.object({
