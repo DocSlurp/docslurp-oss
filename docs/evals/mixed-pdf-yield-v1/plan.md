@@ -1,5 +1,9 @@
 # Mixed PDF extraction-yield experiment
 
+> Historical plan, kept as written. Its local OCR arms used an OCR engine DocSlurp no longer ships or installs; the
+> worker now OCRs with PP-OCR ([OCR](../../extraction/ocr.md)). Re-running this experiment needs that engine installed
+> separately, outside the worker images, and its results do not describe current OCR.
+
 ## Decision
 
 Test whether page-local evidence can select native text, cheap OCR and stronger local OCR while preserving visible content and reducing measured processing time. Compare the existing 20% character-yield idea against image coverage, drawing/glyph evidence, compressed/decoded stream sizes, and actual OCR confidence. No production threshold promotion or deployment is part of this experiment.

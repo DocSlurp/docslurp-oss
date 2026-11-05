@@ -30,8 +30,10 @@ split-pages -> classify-route -> route-pages ------------------------> render-im
   S0 probe (free)        per-page PageFeatures: text-layer status, OCR-layer flag, glyph/unmapped ratios, images,
                          drawings, tables, H9 unusual features (forms, JS, attachments, layers, Type3, rotation,
                          encryption, links, annotations). In-process native-pdf probe (the only probe; needs the private binding).
-  S1 trust (free)        accept the native text layer when status is ok, OCR-layer band re-OCR agreement >= 0.4,
-                         math-glyph gate (0.01) and the inset gate allow it (TL1). Never a whole-page model question.
+  S1 trust (free)        accept the native text layer when status is ok, the math-glyph gate (0.01) and the inset
+                         gate allow it (TL1). The OCR-layer band re-OCR agreement check (>= 0.4) is disabled until
+                         it is re-tuned for the PP-OCR recogniser; OCR-layer pages stay unverified. Never a
+                         whole-page model question.
   S1b inset gate         per-image crops of insets covering 2-85% of the page go to the head decision model;
                          text/table/equation kinds get image-scoped assignments (TL2).
   S1c triage             pages the rules do not settle get three content questions (plain_ocr_sufficient,
@@ -68,8 +70,8 @@ Code map:
 ## Targets
 
 The catalog (`routing-targets.ts`) admits targets from the live environment and price list: `native:accept-text-layer`,
-native parsers (kreuzberg, native-pdf text/Markdown), OCR (`ocr:tesseract`; `ocr:pdf-ocr-fill` / `ocr:pdf-ocr` run
-tesseract first and use the native engine's OCR only for scripts tesseract lacks, see below), the local image labeler (Florence-2-small),
+native parsers (kreuzberg, native-pdf text/Markdown), OCR (`ocr:ppocr`: PP-OCR through the worker's OCR mode, see
+[OCR](extraction/ocr.md); offered only when the mode can serve it), the local image labeler (Florence-2-small),
 env-gated private OCR VLM endpoints, cheap hosted VLMs (GLM-5.3 Flash, DeepSeek V4.1 Flash, Haiku 5.5, Luna),
 expensive hosted VLMs for charts and math (Gemini 3.5 Flash), Sonnet 5.5 as an escalation-only target, and skip.
 Every hosted call uses the model's lowest verified reasoning effort (`OPENROUTER_LOWEST_REASONING`). Prohibited models
@@ -111,7 +113,7 @@ document extractors, all `free`. Workspace-configured embedding and vision model
 | EmbeddingGemma 300M ONNX | non-free | Gemma terms | ai.google.dev/gemma/terms |
 | LightOnOCR-3-0.8B, MinerU2.5-Pro, olmOCR-2, DeepSeek-OCR-2, PaddleOCR-VL-1.6, Infinity-Parser2, Qwen3-VL, Qwen2-VL-2B | free | Apache-2.0 | HF cards |
 | Ling-3.0-flash-VL, DeepSeek V4.1 Flash, GLM-5.3-Flash (hosted) | free | MIT | HF cards |
-| Florence-2, Kreuzberg, Tesseract, native-pdf | free | MIT / Apache-2.0 / internal | project licences |
+| Florence-2, Kreuzberg, PP-OCR (RapidOCR, PaddleOCR models), native-pdf | free | MIT / Apache-2.0 / internal | project licences |
 | Gemini, Claude, GPT-6 Luna, Jev, Clef, pplx-decider | proprietary-hosted | vendor API terms | vendor docs |
 
 ## Decision models and the health chain
@@ -139,13 +141,11 @@ features (for example OCR without models), limits and unknown errors fall back t
 output that lost the text layer (`NATIVE_PDF_DROPOUT`), and layout warnings (multi-column interleave) reroute. The
 adapter and the in-process probe open documents under the engine's `worker` limits profile.
 
-Page OCR policy (`NATIVE_PDF_OCR`, `routing/executors/ocr-policy.ts`): tesseract is primary. The engine's OCR matched
-tesseract on clean rasters and read CJK the image's tesseract languages cannot (1-CER 0.74 vs 0.00 on a dev zh-TW
-page), but lost most text on degraded scans (photocopy 0.02 vs 0.97, phone scan 0.16 vs 0.83), ran about 2x slower
-and held ~400-500 MB in-process per call. So with the default `scripts` the engine runs only when tesseract's output
-is not word-shaped, and serves only when its output is mostly another script; `prefer` runs it first. Every native
-OCR result passes a dropout guard (at least half the page's text layer; sparse output is cross-checked against
-tesseract), and calls are limited to one per process (`NATIVE_PDF_OCR_MAX_CONCURRENT`).
+Page OCR (`ocr:ppocr`) runs only where `DOCSLURP_OCR_MODE` puts it: an extractor plugin's VM provider (`vm`), the
+sandboxed local CLI on customer-owned self-hosted workers (`local`) or a hosted model reading stored image bytes
+(`hosted`). It never runs in the worker process. See [OCR](extraction/ocr.md). The earlier comparison of the native
+engine's OCR against the previous local recogniser does not carry over to PP-OCR; re-measure before routing any page
+OCR to the engine.
 
 Promotion gate (re-run on the pinned binding, evals/native-pdf/README.md): quality and
 reading order are at parity or better (routing suite content -0.02 pt, order +0.20 pt; preservation content +2.4 pt),
@@ -182,9 +182,10 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 | `DOCSLURP_PDF_ENGINE` | `off` (production: `shadow`) | off, shadow, native-pdf | Native PDF engine for document extraction (kreuzberg fallback). |
 | `DOCSLURP_NATIVE_PDF_INSTALLED` | unset | 1 | Set in images that ship the binding so `/extractors` lists native-pdf. |
 | `DOCSLURP_NATIVE_PDF_MODULE`, `DOCSLURP_NATIVE_PDF_DIR` | vendor dir | path | Binding discovery overrides (dev, bench). |
-| `NATIVE_PDF_OCR_MODEL_DIR` | unset | path | OCR models for the engine's OCR fill; unset means OCR targets use tesseract. |
+| `NATIVE_PDF_OCR_MODEL_DIR` | unset | path | OCR models for the engine's own OCR fill. Page OCR targets do not use it; they follow `DOCSLURP_OCR_MODE`. |
 | `NATIVE_PDF_OCR_MAX_CONCURRENT`, `NATIVE_PDF_FONTS_DIR` | engine default | number, path | OCR concurrency and fallback fonts for the engine. |
-| `NATIVE_PDF_OCR` | `scripts` | off, scripts, prefer | When page OCR may come from the native engine (tesseract otherwise). |
+| `NATIVE_PDF_OCR` | `scripts` | off, scripts, prefer | When the native engine may OCR inside its own extraction. Page OCR follows `DOCSLURP_OCR_MODE`. |
+| `DOCSLURP_OCR_MODE` | `off` (production: `vm`) | vm, local, hosted, off | Where page OCR runs; see [OCR](extraction/ocr.md). |
 | `PDF_RASTER_ENGINE` | `pdftoppm` | pdftoppm, native-pdf | Page and crop raster engine (native falls back to pdftoppm/sharp). Stays pdftoppm: native renders add 670-810 MB per 8-slot worker process, over the 512 MB off-heap budget, for ~2.4x throughput. |
 | `PDF_RASTER_CONCURRENCY` | min(4, cores) | 1-32 | Native render lanes per document render. |
 | `PDF_PDFTOPPM_CONCURRENCY` | 2 | 1-4 | pdftoppm lanes per selected-page render (each lane is a sandboxed process holding a full-page bitmap). Independent of `PDF_RASTER_CONCURRENCY`. |
@@ -482,7 +483,7 @@ Production (`fly.app.toml`, `fly.worker.toml`) runs both features in shadow: `PA
 `DOCSLURP_PDF_ENGINE=shadow`, worker image built with `DOCSLURP_NATIVE_PDF=1`, app with `DOCSLURP_NATIVE_PDF_INSTALLED=1`
 (set it only while the deployed worker image ships the binding). Shadow records decisions and per-page agreement/timing
 (`native-pdf-shadow` in `performance_log`, the route plan artifact) and never changes extraction output. Native OCR models
-and CJK fonts stay off; tesseract is the OCR primary.
+and CJK fonts stay off; page OCR runs in the VM provider (`DOCSLURP_OCR_MODE=vm`).
 
 Workspaces need no setup: the app stamps `pageRouter.mode=shadow` on a new run when the workspace left it unset
 (`withPlatformPageRouterMode`), so the stage plan every service compiles includes `route-pages`. A workspace that sets

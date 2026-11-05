@@ -1,11 +1,13 @@
 # Dockerfile.lean - Production worker image (fly.worker.toml)
 #
 # Contents: Node 24 + the worker's production node_modules (pnpm deploy, pruned),
-# poppler-utils (with poppler-data CMaps), Tesseract (21 languages, ~107 MiB), cwebp (lossless WebP page images), pandoc, ffmpeg, ClamAV, bubblewrap, and a wheel-only Python venv
+# poppler-utils (with poppler-data CMaps), cwebp (lossless WebP page images), pandoc, ffmpeg, ClamAV, bubblewrap, and a wheel-only Python venv
 # with the base parsers (trafilatura, ebooklib, python-pptx,
 # openpyxl, xlsx2csv, Pillow; PDFs use Kreuzberg, Poppler and the optional native-pdf engine). No LibreOffice or ML stacks: Docling and
 # Unstructured come from sha256-pinned vendor bundles fetched on demand
 # (worker/vendor-bundles.json, docs/worker-image.md). Runtime pip installs are off.
+# No OCR engine: lean workers OCR through an extractor plugin's VM provider
+# (DOCSLURP_OCR_MODE=vm), hosted mode, or not at all (docs/extraction/ocr.md).
 #
 # Every build stage starts from the same pinned base so the venv (which links
 # /usr/bin/python3) and native addons match the runtime stage exactly.
@@ -106,28 +108,6 @@ RUN apt-get update \
        poppler-data \
        poppler-utils \
        python3 \
-       tesseract-ocr \
-       tesseract-ocr-eng \
-       tesseract-ocr-fra \
-       tesseract-ocr-deu \
-       tesseract-ocr-spa \
-       tesseract-ocr-ara \
-       tesseract-ocr-chi-sim \
-       tesseract-ocr-chi-tra \
-       tesseract-ocr-ell \
-       tesseract-ocr-heb \
-       tesseract-ocr-hin \
-       tesseract-ocr-ita \
-       tesseract-ocr-jpn \
-       tesseract-ocr-kor \
-       tesseract-ocr-nld \
-       tesseract-ocr-pol \
-       tesseract-ocr-por \
-       tesseract-ocr-rus \
-       tesseract-ocr-tha \
-       tesseract-ocr-tur \
-       tesseract-ocr-ukr \
-       tesseract-ocr-vie \
        webp \
     && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/info/* \
     && rm -rf /opt/yarn-* /usr/local/bin/yarn /usr/local/bin/yarnpkg

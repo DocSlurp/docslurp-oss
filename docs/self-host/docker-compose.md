@@ -74,6 +74,23 @@ bundles](../worker-image.md) for sizes, flags and building bundles yourself. To 
 docker compose --env-file .env.selfhost -f compose.selfhost.yml --profile full stop worker-full
 ```
 
+### OCR on the full worker
+
+Neither worker OCRs by default. The full worker image bakes the local OCR runtime
+(`docslurp_ocr.py`, its venv and the pinned PP-OCR models), but it runs only when
+you choose it. If you own the files you ingest and the machine that runs the worker,
+add to `.env.selfhost`:
+
+```sh
+DOCSLURP_SERVICE_PROFILE=self-hosted
+DOCSLURP_OCR_MODE=local
+```
+
+The worker then OCRs scanned pages and images under its parser sandbox. Plan about
+1.4 to 1.7 GB of memory per concurrent OCR call. The lean worker has no OCR engine:
+use an extractor plugin's VM provider (`DOCSLURP_OCR_MODE=vm`) or a hosted model
+(`hosted`) there. See [OCR](../extraction/ocr.md) for the modes and what each one refuses.
+
 ## Upgrading from the pgvector image
 
 Earlier releases ran Postgres from `pgvector/pgvector:pg17`. Vectors live in

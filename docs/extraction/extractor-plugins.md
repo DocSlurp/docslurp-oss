@@ -1,10 +1,12 @@
 # Extractor plugins
 
-DocSlurp ships an open default for every extraction path. A deployment can add two optional providers without
+DocSlurp ships an open default for every extraction path. A deployment can add three optional providers without
 changing core code:
 
 - a **sandboxed PDF extractor**, served as the `vm-pdf` extractor id;
-- an **image orientation provider**, used for quarter-turn correction of page and embedded images.
+- an **image orientation provider**, used for quarter-turn correction of page and embedded images;
+- a **sandboxed OCR provider** (`sandboxedOcr`), which runs OCR when `DOCSLURP_OCR_MODE=vm` (see
+  [OCR](ocr.md)).
 
 Plugins are loaded by configuration, never imported by core. Core builds, typechecks and tests with none present.
 
@@ -100,6 +102,28 @@ export function register(host: ExtractorPluginHost): ExtractorPlugin {
   (`validateEmbeddedImageSet`): strict facts, hashes that match bytes, size limits and page range.
 - `shardProfile` registers the provider's prior cost profile; calibration refines it from the shard timings it
   records through `context.recordTiming`.
+
+## OCR provider (sandboxedOcr)
+
+`DOCSLURP_OCR_MODE=vm` (the production default) runs OCR only through this provider. Without one, the worker refuses
+to start; it never moves OCR to the worker host or to a hosted model instead. See [OCR](ocr.md) for the modes.
+
+- The provider receives file paths and a job (`SandboxedOcrJob` in `worker/src/extractors/plugins.ts`): the stored
+  input file and its kind (`image` or `pdf`), the pages to read, the output path, an empty image directory, and the
+  CLI settings (recognisers, attempts, retry threshold, frame and long-edge limits, which frames to keep for
+  escalation). The host never decodes the input first.
+- It runs the fixed `worker/scripts/docslurp_ocr.py` CLI inside the VM with exactly those settings and the models
+  pinned in `worker/ocr-models.json`, and copies back the CLI's JSON result to `output` and the PNGs it wrote (bounded
+  by `maxLongEdge`) to the image directory.
+- It must isolate every job in a fresh VM or microVM, with the requirements below. One job never sees another
+  job's files.
+- `maxSourceBytes` refuses larger inputs before any VM work; `timeoutMs(frames)` bounds one run's wall time;
+  `assertConfigured()` throws when the image, models or credentials are missing, which stops the worker at start.
+- The host validates everything it gets back: the result against the shared OCR result schema, page numbers, sizes,
+  and every PNG's bytes and dimensions. It refuses what does not validate, and a failed VM read fails the page. There
+  is no fallback.
+
+At load the worker lists the capability as `vm-ocr` (`[extractor-plugins] loaded api=1 providers=...,vm-ocr`).
 
 ## Isolation requirements
 

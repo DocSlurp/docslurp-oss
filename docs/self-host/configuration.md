@@ -222,6 +222,17 @@ read them through `packages/shared/src/temporal-security.ts`.
 
 Details are in [Parser sandbox providers](sandbox-providers.md#configuration).
 
+## OCR
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DOCSLURP_OCR_MODE` | `vm` when `NODE_ENV=production`; `off` elsewhere | Where OCR runs: `vm` (extractor plugin's VM provider), `local` (the local CLI under the parser sandbox), `hosted` (a hosted model reads stored image bytes) or `off`. |
+| `DOCSLURP_SERVICE_PROFILE` | unset | `self-hosted` when you own the files and the machine. `local` OCR is refused at start unless it is `self-hosted`. |
+| `DOCSLURP_OCR_PYTHON`, `DOCSLURP_OCR_MODEL_DIR` | `/opt/docslurp/ocr-venv/bin/python3`, `/opt/docslurp/ocr-models` | The local OCR runtime (`local` mode). The full worker image sets both. |
+
+The other OCR settings (escalation, attempts, language, size and concurrency limits) are in `.env.example` and
+[OCR](../extraction/ocr.md).
+
 ## Removed and deprecated
 
 `DOCSLURP_PARSER_SANDBOX_ENABLED`, `DOCSLURP_PARSER_SANDBOX_MODE` and

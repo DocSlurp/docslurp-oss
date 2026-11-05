@@ -12,7 +12,8 @@
 |------|----------|-----------|----------------|---------|
 | **native-pdf-text** | Fast bulk text, large files (>100 pg; >2000 pages fall back to kreuzberg) | Tables, math, images, layout | Fastest | **128 MB** |
 | **native-pdf** | Born-digital PDFs → markdown with pipe tables, links, reading-order repair | Scanned pages without OCR models, math | Fast | **256 MB** |
-| **native-pdf-ocr** | Scanned pages when the OCR models are shipped (`DOCSLURP_NATIVE_PDF_OCR_MODELS=1`), else tesseract | Born-digital (wastes time), poor handwriting | Medium | **512 MB** |
+| **native-pdf-ocr** | Scanned pages when the OCR models are shipped (`DOCSLURP_NATIVE_PDF_OCR_MODELS=1`) | Born-digital (wastes time), poor handwriting | Medium | **512 MB** |
+| **ppocr** (page OCR, [OCR](extraction/ocr.md)) | Scanned pages and images: PP-OCRv6 small plus PP-OCRv5 script recognisers, in the VM provider or (self-hosted) the local sandbox | Born-digital (wastes time), handwriting | Medium | **~1.4-1.7 GB** per call at the 2000 px cap |
 | **native-pdf-regions** | Layout analysis, header/footer/sidebar/body bboxes | Content extraction alone | Fast | **256 MB** |
 | **docling** | Tables, figures, structured academic docs | Very large files (>50 MB), speed-critical | Medium | **2 GB** |
 | **docling-vlm** | Math, formulas, complex figures, mixed content | Cost-sensitive, batch jobs, simple text | Slow | **4 GB** |
@@ -165,10 +166,10 @@
 | Priority | Tool | Role |
 |----------|------|------|
 | 1 | **vision-runtime** | Primary: VLM page analysis for handwriting/degraded |
-| 2 | **native-pdf-ocr** | Fallback: tesseract OCR on rendered pages |
+| 2 | **ppocr** | Fallback: PP-OCR on rendered pages, wherever `DOCSLURP_OCR_MODE` runs it |
 | 3 | **ImageExtractor** | Extract embedded scan images for re-OCR |
 
-**Routing rule**: `handwriting-or-degraded` → `vision` primary, `native-pdf-ocr` fallback
+**Routing rule**: `handwriting-or-degraded` → `vision` primary, `ppocr` fallback
 
 ---
 
@@ -245,13 +246,13 @@
 | Tables split across page breaks | native-pdf, kreuzberg, marker | Use `TableExtractor` + heuristic stitching |
 | LaTeX ligatures (fi, fl, ff) | native-pdf-text, native-pdf | Use `docling-vlm` or post-process normalization |
 | Inline images with captions | All text extractors | Use `ImageExtractor` + `vision` for captioning |
-| Handwriting mixed with print | native-pdf-ocr, tesseract | Use `vision-runtime` with handwriting prompt |
+| Handwriting mixed with print | native-pdf-ocr, ppocr | Use `vision-runtime` with handwriting prompt |
 | Watermarks / stamps | All extractors | `native-pdf-regions` helps identify non-body text |
 | QR codes | All extractors | Not yet supported; needs dedicated detector |
 | Vector diagrams (flowcharts) | All extractors | Not yet supported; needs SVG converter |
 | Nested tables | unstructured, docling | Flatten or use `TableExtractor` recursive parser |
 | Multi-page table continuation | All | `TableExtractor` needs multi-page stitching logic |
-| OCR on rotated pages | tesseract, native-pdf-ocr | Pre-deskew with `native-pdf-regions` rotation detection |
+| OCR on rotated pages | ppocr, native-pdf-ocr | Pre-deskew with `native-pdf-regions` rotation detection |
 
 ---
 
