@@ -1,7 +1,7 @@
 import { sandboxedPdfProvider, VM_PDF_EXTRACTOR_ID } from "./plugins.js";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import { builtInDocumentExtractorDescriptors, canonicalExtractorId, configureExtractorIdAliases, parseExtractorOptions, resolvePdfExtractorSetting, type ExtractorDescriptor } from "@docslurp/shared";
+import { builtInDocumentExtractorDescriptors, canonicalExtractorId, configureExtractorIdAliases, parseExtractorOptions, resolvePdfExtractorSetting, sandboxedPdfConfigured, type ExtractorDescriptor } from "@docslurp/shared";
 import type { DocumentExtractionResult } from "../lib/document-extraction-adapter.js";
 import type { CommandPlan, CommandRunner } from "../tools/runner.js";
 import { planArtifactGraph, type GraphAdapter } from "./graph.js";
@@ -233,14 +233,21 @@ export class ExtractorRegistry {
 
   resolve(format: string, configured?: string[]): string[] {
     const base = defaultDocumentExtractorOrder[format] ?? defaultDocumentExtractorOrder.default;
+    // A sandboxed PDF deployment (DOCSLURP_PDF_EXTRACTOR=vm-pdf or DOCSLURP_VM_PDF_INSTALLED=1) runs PDFs only in vm-pdf.
+    const sandboxedPdf = format === "pdf" && (resolvePdfExtractorSetting() === VM_PDF_EXTRACTOR_ID || sandboxedPdfConfigured());
     // DOCSLURP_PDF_ENGINE=native-pdf puts the native engine first; kreuzberg stays next as its fallback.
-    const defaults = format === "pdf" && resolvePdfExtractorSetting() === VM_PDF_EXTRACTOR_ID
+    const defaults = sandboxedPdf
       ? [VM_PDF_EXTRACTOR_ID]
       : format === "pdf" && resolveNativePdfMode() === "native-pdf" ? ["native-pdf", ...base] : base;
     // A configured legacy id (DOCSLURP_EXTRACTOR_ID_ALIASES) resolves to its canonical extractor; unknown ids still throw.
     const ids = configured?.map(canonicalExtractorId) ?? defaults.filter((id) =>
       this.entries.get(id)?.descriptor.capabilities.formats.includes(format),
     );
+    // Fail closed: a workspace order naming a host parser under a sandboxed deployment is refused, never run.
+    const hostIds = sandboxedPdf ? ids.filter((id) => id !== VM_PDF_EXTRACTOR_ID) : [];
+    if (hostIds.length > 0) {
+      throw new Error(`extractor ${hostIds.join(", ")} refused for pdf: this deployment runs PDFs only in ${VM_PDF_EXTRACTOR_ID}`);
+    }
     if (ids.length === 0) throw new Error(`no extractor configured for ${format}`);
     for (const id of ids) {
       const entry = this.entries.get(id);

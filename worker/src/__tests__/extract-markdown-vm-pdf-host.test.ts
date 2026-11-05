@@ -17,16 +17,17 @@ import type { CommandPlan, CommandRunner } from "../tools/runner.js";
  * extraction, page-image evidence, the OCR ledger) runs against a runner spy that records every method call and every
  * command it is asked to run. Only the provider's job may run; no host `pdf*` tool may even be planned.
  */
-function run(): WorkspaceRun {
+function run(documentExtraction: Record<string, unknown> = {}): WorkspaceRun {
   return {
     id: "run-1", orgId: "org-1", userId: "user-1", kind: "bulk-upload", status: "processing", stage: "extract-markdown",
     totalDocuments: 1, processedDocuments: 0, pagesTotal: 3, pagesProcessed: 0, spentCents: 0,
-    pipeline: { ...defaultPipelineFeatures, markdownExtraction: true, visionFallback: true },
+    pipeline: { ...defaultPipelineFeatures, markdownExtraction: true, visionFallback: true,
+      documentExtraction: { ...defaultPipelineFeatures.documentExtraction, ...documentExtraction } },
     error: null, stats: {}, artifacts: {}, claimId: null, createdAt: new Date(), updatedAt: new Date(),
   } as WorkspaceRun;
 }
 
-async function harness(providerResult: { ocrPages?: unknown; markdown: string }) {
+async function harness(providerResult: { ocrPages?: unknown; markdown: string }, documentExtraction: Record<string, unknown> = {}) {
   const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-vm-pdf-host-test-"));
   const calls: string[] = [];
   const commands: CommandPlan[] = [];
@@ -70,7 +71,7 @@ async function harness(providerResult: { ocrPages?: unknown; markdown: string })
     id: "doc-1", userId: "user-1", runId: "run-1", filename: "scan.pdf", mimeType: "application/pdf", sourceKey: "raw/scan",
     status: "processing", extractionMode: "hybrid", pageCount: 3, createdAt: new Date(), updatedAt: new Date(),
   } as Document;
-  const state = WorkflowState.create(run(), [document]);
+  const state = WorkflowState.create(run(documentExtraction), [document]);
   state.usageLedger.runId = "run-1";
   state.artifactLedger.recordDocument("doc-1", "normalizedFormat", "pdf");
   const upsertPageFacts = vi.fn(async () => undefined);
@@ -102,6 +103,26 @@ describe("the sandboxed PDF route on the worker host", () => {
       expect(h.upsertPageFacts).not.toHaveBeenCalled();
       expect(h.richIds()).toEqual(["rich:run-1:doc-1:2"]);
       expect(checkpoint?.stats).toMatchObject({ extractor: "vm-pdf", hostPdfProbes: "skipped-sandboxed-route", ocrReadPages: 1, ocrReadSource: "extractor-reported" });
+    } finally { await h.cleanup(); }
+  });
+
+  it.each([
+    ["DOCSLURP_PDF_EXTRACTOR", "vm-pdf", { order: { pdf: ["kreuzberg"] } }],
+    ["DOCSLURP_PDF_EXTRACTOR", "vm-pdf", { order: { pdf: ["native-pdf"] } }],
+    ["DOCSLURP_VM_PDF_INSTALLED", "1", { order: { pdf: ["kreuzberg", "native-pdf"] } }],
+    ["DOCSLURP_PDF_EXTRACTOR", "vm-pdf", { enrich: ["kreuzberg"] }],
+  ])("under %s=%s refuses a run whose workspace override names a host parser (%j), without touching the host", async (name, value, override) => {
+    vi.stubEnv(name, value);
+    vi.stubEnv("WORKER_PAGE_FACTS", "true");
+    const h = await harness({ markdown: "text\f\f\f" }, override);
+    try {
+      await h.stage.run(h.state).catch(() => undefined);
+      const checkpoint = h.state.documentStage("doc-1", "extract-markdown");
+      expect(checkpoint?.status).not.toBe("completed");
+      expect(JSON.stringify(checkpoint ?? {})).toMatch(/refused for pdf/);
+      expect(h.commands).toEqual([]);
+      expect(h.hostPdf()).toEqual([]);
+      expect(h.upsertPageFacts).not.toHaveBeenCalled();
     } finally { await h.cleanup(); }
   });
 

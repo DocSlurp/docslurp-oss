@@ -41,6 +41,21 @@ describe("extractor plugin registration", () => {
     expect(() => registry.resolve("image", [VM_PDF_EXTRACTOR_ID])).toThrow("does not support");
   });
 
+  it.each([
+    ["DOCSLURP_PDF_EXTRACTOR", VM_PDF_EXTRACTOR_ID],
+    ["DOCSLURP_VM_PDF_INSTALLED", "1"],
+  ])("under %s=%s refuses a workspace order naming kreuzberg or native-pdf for PDFs", (name, value) => {
+    vi.stubEnv(name, value);
+    const registry = new ExtractorRegistry();
+    expect(registry.resolve("pdf")).toEqual([VM_PDF_EXTRACTOR_ID]);
+    expect(registry.resolve("pdf", [VM_PDF_EXTRACTOR_ID])).toEqual([VM_PDF_EXTRACTOR_ID]);
+    expect(() => registry.resolve("pdf", ["kreuzberg"])).toThrow(/kreuzberg refused for pdf/);
+    expect(() => registry.resolve("pdf", ["native-pdf"])).toThrow(/native-pdf refused for pdf/);
+    expect(() => registry.resolve("pdf", [VM_PDF_EXTRACTOR_ID, "poppler-text"])).toThrow(/poppler-text refused for pdf/);
+    // Other formats keep their own order.
+    expect(registry.resolve("image", ["ocr"])).toEqual(["ocr"]);
+  });
+
   it("refuses a provider that is not ready instead of running anything", async () => {
     registerExtractorPlugin(plugin({ sandboxedPdf: provider({ assertConfigured: () => { throw new Error("image is not digest-pinned"); } }) }));
     await expect(new CommandRunner().sandboxedPdfMarkdown("/a.pdf", "/a.md")).rejects.toThrow("digest-pinned");

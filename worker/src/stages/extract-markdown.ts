@@ -29,6 +29,8 @@ import {
   htmlDocumentTitle,
   imageAnchorsToAltText,
   resolvePdfExtractorSetting,
+  hostPdfExtractorsUnderSandbox,
+  sandboxedPdfConfigured,
   type ExtractionContract,
   type ExtractionArtifactRef,
 } from "@docslurp/shared";
@@ -291,9 +293,12 @@ export class ExtractMarkdownStage implements Stage {
 
         // A PDF routed to the sandboxed provider is never parsed on this host for evidence: page facts, page-image
         // evidence and the OCR ledger's text-layer probe are skipped (stage stats say so).
-        const sandboxedPdfRoute = isPdf && this.pdfRoutesToSandbox(format, extractionConfig.order);
+        const sandboxReason = isPdf ? this.pdfSandboxReason(format, extractionConfig.order) : null;
+        const sandboxedPdfRoute = sandboxReason !== null;
+        // Under a sandboxed deployment no workspace setting may name a host PDF parser (pages, enrich, voting too).
+        const hostPdf = isPdf ? hostPdfExtractorsUnderSandbox(extractionConfig) : [];
         // Page facts for the ingest report run beside extraction (poppler, no pixels) and never fail it.
-        const pageFacts = this.recordSourcePageFacts(state, document, format, signal, sandboxedPdfRoute);
+        const pageFacts = this.recordSourcePageFacts(state, document, format, signal, sandboxedPdfRoute, sandboxReason);
         try {
           await runDocumentStage(
             state,
@@ -302,6 +307,10 @@ export class ExtractMarkdownStage implements Stage {
             artifactSlot,
             "markdown extraction ready",
             async (retryStrategy) => {
+              // Fails this document, never the run, and before anything reads the source.
+              if (hostPdf.length > 0) {
+                throw new Error(`extractor ${hostPdf.map((entry) => `${entry.id} (${entry.path.join(".")})`).join(", ")} refused for pdf: this deployment runs PDFs only in ${VM_PDF_EXTRACTOR_ID}`);
+              }
               const extractionStartedAt = Date.now();
               const pageCount = Math.max(1, document.pageCount);
 
@@ -858,7 +867,7 @@ export class ExtractMarkdownStage implements Stage {
                   const hostPdfProbes = isPdf && (sandboxedPdfRoute || winningCandidate.label === VM_PDF_EXTRACTOR_ID)
                     ? "skipped-sandboxed-route" as const : isPdf ? "ran" as const : "not-pdf" as const;
                   const pageImageEvidenceUri = hostPdfProbes === "skipped-sandboxed-route"
-                    ? this.skipHostPdfEvidence(document, "page-image-evidence")
+                    ? this.skipHostPdfEvidence(document, "page-image-evidence", sandboxReason ?? "sandboxed-pdf-winner")
                     : await this.recordDocumentImageEvidence(document, tempFile, winningText, state, { isPdf, format }, signal);
                   // Every page OCR produced text for was read by a model: record the read per page, which is the only
                   // thing that bills a page Rich (db/page-base-fee.ts). Vision reading it too is the same page, charged
@@ -1493,16 +1502,20 @@ export class ExtractMarkdownStage implements Stage {
   }
 
   /**
-   * True when this PDF goes to the sandboxed provider: the deployment selects it (DOCSLURP_PDF_EXTRACTOR=vm-pdf) or
-   * the workspace's order names it. Host-side evidence probes are then skipped, even if a later fallback wins.
+   * Why this PDF is kept off the host, or null when it is not: `sandboxed-pdf-deployment` when the deployment is sandboxed
+   * (registry.resolve then refuses any other extractor, so the PDF goes to vm-pdf or fails), `sandboxed-pdf-route` when the
+   * workspace's order names vm-pdf on a deployment that would otherwise parse on the host. Host-side evidence probes are
+   * skipped in both cases, even if a later fallback wins.
    */
-  private pdfRoutesToSandbox(format: string, configured: Partial<Record<string, string[]>>): boolean {
-    return resolvePdfExtractorSetting() === VM_PDF_EXTRACTOR_ID || this.tryResolveExtractorOrder(format, configured).includes(VM_PDF_EXTRACTOR_ID);
+  private pdfSandboxReason(format: string, configured: Partial<Record<string, string[]>>): "sandboxed-pdf-deployment" | "sandboxed-pdf-route" | null {
+    if (format !== "pdf") return null;
+    if (resolvePdfExtractorSetting() === VM_PDF_EXTRACTOR_ID || sandboxedPdfConfigured()) return "sandboxed-pdf-deployment";
+    return this.tryResolveExtractorOrder(format, configured).includes(VM_PDF_EXTRACTOR_ID) ? "sandboxed-pdf-route" : null;
   }
 
-  /** Host PDF evidence the sandboxed route does without; logged so the gap is visible. */
-  private skipHostPdfEvidence(document: import("../models.js").Document, what: "page-facts" | "page-image-evidence"): null {
-    console.log(`[extract-debug] document=${document.id} ${what}=skipped reason=sandboxed-pdf-route`);
+  /** Host PDF evidence the sandboxed route does without; logged with the reason so the gap is visible. */
+  private skipHostPdfEvidence(document: import("../models.js").Document, what: "page-facts" | "page-image-evidence", reason: string | null): null {
+    console.log(`[extract-debug] document=${document.id} ${what}=skipped reason=${reason ?? "sandboxed-pdf-route"}`);
     return null;
   }
 
@@ -1513,10 +1526,11 @@ export class ExtractMarkdownStage implements Stage {
     format: string,
     signal?: AbortSignal,
     sandboxedPdfRoute = false,
+    sandboxReason: string | null = null,
   ): Promise<void> {
     if (!pageFactsEnabled() || !state.store?.upsertPageFacts) return;
     if (format === "pdf" && sandboxedPdfRoute) {
-      this.skipHostPdfEvidence(document, "page-facts");
+      this.skipHostPdfEvidence(document, "page-facts", sandboxReason);
       return;
     }
     // A resumed run skips a completed extraction; its facts were recorded then.

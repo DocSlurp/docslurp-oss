@@ -208,3 +208,36 @@ export function publicDocumentExtractorDescriptors(options: { nativePdfInstalled
     (entry) => (entry.id !== "native-pdf" || options.nativePdfInstalled) && (entry.id !== "vm-pdf" || options.vmPdfInstalled === true),
   );
 }
+
+/** The only PDF extractor a sandboxed deployment runs. */
+export const SANDBOXED_PDF_EXTRACTOR_ID = "vm-pdf";
+
+/**
+ * Under a sandboxed PDF deployment (sandboxedPdfConfigured), every extractor a workspace's documentExtraction names for
+ * PDFs must be the sandboxed one: anything else would parse customer PDFs on the worker host. Returns each offending
+ * place (`order.pdf.0`, `pages.1`, `enrich.0`, `voting.secondary`) with its id; empty when the deployment is not sandboxed
+ * or the config names none. `pages` and `enrich` are not per format, so they are held to the same rule. Ids are compared
+ * as given: callers normalize configured aliases first.
+ */
+export function hostPdfExtractorsUnderSandbox(
+  config: unknown,
+  env: Record<string, string | undefined> = process.env,
+): Array<{ path: Array<string | number>; id: string }> {
+  if (!sandboxedPdfConfigured(env) || typeof config !== "object" || config === null) return [];
+  const value = config as { order?: unknown; pages?: unknown; enrich?: unknown; voting?: unknown };
+  const found: Array<{ path: Array<string | number>; id: string }> = [];
+  const list = (path: Array<string | number>, ids: unknown) => {
+    if (!Array.isArray(ids)) return;
+    ids.forEach((id, index) => {
+      if (id !== SANDBOXED_PDF_EXTRACTOR_ID) found.push({ path: [...path, index], id: String(id) });
+    });
+  };
+  if (typeof value.order === "object" && value.order !== null) list(["order", "pdf"], (value.order as Record<string, unknown>).pdf);
+  list(["pages"], value.pages);
+  list(["enrich"], value.enrich);
+  const secondary = typeof value.voting === "object" && value.voting !== null ? (value.voting as { secondary?: unknown }).secondary : undefined;
+  if (secondary !== undefined && secondary !== "next-in-order" && secondary !== SANDBOXED_PDF_EXTRACTOR_ID) {
+    found.push({ path: ["voting", "secondary"], id: String(secondary) });
+  }
+  return found;
+}
