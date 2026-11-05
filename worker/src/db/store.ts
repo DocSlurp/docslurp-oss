@@ -122,6 +122,7 @@ type DocumentRow = {
   page_count: number;
   billing_pages?: number | null;
   billing_pages_method?: string | null;
+  page_count_source?: string | null;
   file_facts?: import("@docslurp/shared").FileFacts | null;
   created_at: string | Date;
   updated_at: string | Date;
@@ -4366,6 +4367,7 @@ function mapDocument(row: DocumentRow): Document {
     pageCount: row.page_count,
     billingPages: row.billing_pages ?? null,
     billingPagesMethod: row.billing_pages_method ?? null,
+    pageCountSource: row.page_count_source === "assumed" || row.page_count_source === "counted" ? row.page_count_source : null,
     fileFacts: row.file_facts ?? null,
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.updated_at),

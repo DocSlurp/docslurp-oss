@@ -111,6 +111,12 @@ export interface SandboxedPdfExtractorProvider {
   };
   /** Page-shard cost profile: calibration refines the prior from observed shard timings under `key`. */
   shardProfile?: { key: string; prior: ShardCostProfile };
+  /**
+   * Count a PDF's pages in a fresh VM (the guest's own pdfinfo), for documents whose count intake only estimated (the API never
+   * parses PDFs). The worker records it before any stage uses the count or anything bills; without it a VM deployment refuses
+   * such PDFs. `usage` is the VM's provider cost.
+   */
+  pageCount?(job: { input: string }, signal?: AbortSignal): Promise<{ pages: number; usage?: UsageEvent }>;
 }
 
 /**

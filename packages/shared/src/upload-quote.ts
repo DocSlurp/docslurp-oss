@@ -127,7 +127,18 @@ export function workerCountedFormat(file: { name: string; type?: string | null }
  */
 export type PageCountSource = "counted" | "assumed";
 export function intakePageCountSource(file: { name: string; type?: string | null }): PageCountSource {
-  return workerCountedFormat(file) || isMultiFrameImageFile(file) ? "assumed" : "counted";
+  // PDFs too: the API never parses a PDF (no pdfinfo in the API process), so intake only estimates its pages from its size;
+  // the worker measures them in its boundary (quarantine) before anything bills.
+  return workerCountedFormat(file) || isMultiFrameImageFile(file) || isPdfFile(file) ? "assumed" : "counted";
+}
+
+function isPdfFile(file: { name: string; type?: string | null }): boolean {
+  return (file.type ?? "").toLowerCase() === "application/pdf" || (!file.type && /\.pdf$/i.test(file.name));
+}
+
+/** Intake's estimate of a PDF's pages from its size (ASSUMED_BYTES_PER_PAGE), never parsed; labelled `estimated`. */
+export function estimatedPdfPages(bytes: number): number {
+  return Math.max(1, Math.ceil(Math.max(0, bytes) / ASSUMED_BYTES_PER_PAGE));
 }
 
 /**

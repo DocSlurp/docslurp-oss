@@ -1,5 +1,12 @@
-import { spawnSync } from "node:child_process";
 import { describe, expect, it, vi } from "vitest";
+
+// Any child process the API path started would show here (pdfinfo used to run on every PDF upload).
+const spawned = vi.hoisted(() => [] as string[]);
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  const record = (name: string) => (...args: unknown[]) => { spawned.push(`${name}:${String(args[0])}`); throw new Error(`child process ${name} in the API path`); };
+  return { ...actual, spawn: record("spawn"), spawnSync: record("spawnSync"), execFile: record("execFile"), execFileSync: record("execFileSync"), exec: record("exec") };
+});
 
 const s3 = vi.hoisted(() => ({ bytes: new Uint8Array() }));
 vi.mock("@aws-sdk/client-s3", () => ({
@@ -8,21 +15,8 @@ vi.mock("@aws-sdk/client-s3", () => ({
   GetObjectCommand: class { constructor(readonly input: unknown) {} },
 }));
 
-import { estimateNonPdfPageCount, parsePdfInfoPageCount, resolveSourceMetadata, UnreadableSourceError } from "../services/source-metadata.js";
-
-describe("parsePdfInfoPageCount", () => {
-  it("extracts the page count from pdfinfo output", () => {
-    expect(
-      parsePdfInfoPageCount(`Title: sample.pdf
-Pages:          14
-Encrypted:      no`)
-    ).toBe(14);
-  });
-
-  it("returns null when pdfinfo output has no page count", () => {
-    expect(parsePdfInfoPageCount("Title: sample.pdf")).toBeNull();
-  });
-});
+import { ASSUMED_BYTES_PER_PAGE, intakePageCountSource } from "@docslurp/shared";
+import { estimateNonPdfPageCount, resolveSourceMetadata, UnreadableSourceError } from "../services/source-metadata.js";
 
 describe("estimateNonPdfPageCount", () => {
   it("uses line and character heuristics for text formats", () => {
@@ -35,20 +29,37 @@ describe("estimateNonPdfPageCount", () => {
   });
 });
 
-describe("resolveSourceMetadata with unreadable PDFs", () => {
-  const hasPdfInfo = spawnSync("pdfinfo", ["-v"]).error === undefined;
+describe("a PDF upload in the API: never parsed, only estimated", () => {
   const file = { mimeType: "application/pdf", sourceKey: "sources/x.pdf", filename: "report.pdf" };
 
-  it.skipIf(!hasPdfInfo).each([
-    ["empty", new Uint8Array()],
-    ["not a pdf", new TextEncoder().encode("plain text pretending to be a pdf")],
-    ["truncated header", new TextEncoder().encode("%PDF-1.7\n1 0 obj\n<< /Type /Catalog")],
-  ])("reports a %s file as a client error naming the file", async (_label, bytes) => {
-    s3.bytes = bytes;
+  it("starts no child process and loads no native module, and labels the size-based count an estimate", async () => {
+    // A 40-page-sized PDF whose body would make any parser work: the API reads only its size and header.
+    s3.bytes = new Uint8Array(Buffer.concat([Buffer.from("%PDF-1.7\n"), Buffer.alloc(40 * ASSUMED_BYTES_PER_PAGE - 9, 0x20)]));
+    spawned.length = 0;
+    const dlopen = vi.spyOn(process, "dlopen");
+    try {
+      const metadata = await resolveSourceMetadata(file);
+      expect(metadata.pageCount).toBe(40);
+      expect(metadata.fileFacts.mimeType).toBe("application/pdf");
+      expect(intakePageCountSource({ name: "report.pdf", type: metadata.fileFacts.mimeType })).toBe("assumed");
+      expect(spawned).toEqual([]);
+      expect(dlopen).not.toHaveBeenCalled();
+    } finally {
+      dlopen.mockRestore();
+    }
+  });
+
+  it("accepts a truncated or broken PDF at intake (the worker measures and fails it in its boundary)", async () => {
+    s3.bytes = new TextEncoder().encode("%PDF-1.7\n1 0 obj\n<< /Type /Catalog");
+    await expect(resolveSourceMetadata(file)).resolves.toMatchObject({ pageCount: 1 });
+    expect(spawned).toEqual([]);
+  });
+
+  it("still refuses a file whose bytes contradict its declared PDF type, from the header alone", async () => {
+    s3.bytes = new TextEncoder().encode("plain text pretending to be a pdf");
     const error = await resolveSourceMetadata(file).catch((caught) => caught);
     expect(error).toBeInstanceOf(UnreadableSourceError);
-    expect(error).toMatchObject({ statusCode: 422, code: "unreadable_source" });
-    expect(error.message).toContain("report.pdf");
+    expect(spawned).toEqual([]);
   });
 });
 

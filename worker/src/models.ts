@@ -66,6 +66,8 @@ export interface Document {
   billingPages?: number | null;
   /** How `billingPages` was found (documents.billing_pages_method); a layout conversion's count is capped by the text it holds when features bill. */
   billingPagesMethod?: string | null;
+  /** `counted` or `assumed` (documents.page_count_source): `assumed` is intake's estimate, replaced by the worker's count. */
+  pageCountSource?: "counted" | "assumed" | null;
   /** What intake sniffed the bytes to be (documents.file_facts); absent for documents ingested before it existed. */
   fileFacts?: import("@docslurp/shared").FileFacts | null;
   createdAt: Date;

@@ -2,7 +2,10 @@ import type { Document } from "../models.js";
 import type { Stage } from "../pipeline/pipeline.js";
 import { runDocumentStage } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
-import type { ArtifactStore } from "../tools/storage.js";
+import { cleanupTempFile, sourceStorageKey, type ArtifactStore } from "../tools/storage.js";
+import type { CommandRunner } from "../tools/runner.js";
+import { recordMeasuredPdfPageCount } from "../lib/pdf-page-count.js";
+import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import { detectFileFormat, type NormalizedFormat } from "@docslurp/shared";
 
@@ -19,7 +22,7 @@ function detectFormat(document: Document): { format: NormalizedFormat; detectedB
 export class FormatDetectStage implements Stage {
   readonly name = "format-detect";
 
-  constructor(private readonly storage: ArtifactStore) {}
+  constructor(private readonly storage: ArtifactStore, private readonly runner?: Pick<CommandRunner, "pdfInfo" | "run">) {}
 
   async run(state: import("../pipeline/pipeline.js").WorkflowState, signal?: AbortSignal): Promise<void> {
     for (const document of healthyDocuments(state)) {
@@ -49,6 +52,13 @@ export class FormatDetectStage implements Stage {
           });
 
           state.artifactLedger.recordDocument(document.id, "normalizedFormat", normalizedFormat);
+          // A PDF's page count from intake is an estimate (the API never parses it): measure it in the PDF boundary now,
+          // before any stage uses it or anything bills.
+          let temp: string | null = null;
+          const pdfPages = this.runner ? await recordMeasuredPdfPageCount({
+            state, document, runner: this.runner, signal,
+            sourcePath: async () => (temp ??= await this.storage.downloadSourceToTempFile(sourceStorageKey(document.sourceKey), trustedTempDownloadPattern("docslurp-pdf-pages-", document))),
+          }).finally(async () => { if (temp) await cleanupTempFile(temp); }) : null;
 
           return {
             artifactUri: this.storage.uri(key),
@@ -56,6 +66,7 @@ export class FormatDetectStage implements Stage {
               normalizedFormat,
               detectedBy,
               mimeVerdict: document.fileFacts?.mismatch ?? null,
+              ...(pdfPages ? { pdfPages: pdfPages.pages, pdfPagesEstimate: pdfPages.estimate, pdfPagesMethod: pdfPages.method } : {}),
             },
           };
         },

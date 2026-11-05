@@ -158,6 +158,7 @@ export function mapDocument(row: DocumentRow): DocumentRecord {
     status: row.status,
     extractionMode: row.extraction_mode,
     pageCount: row.page_count,
+    pageCountSource: row.page_count_source === "assumed" ? "estimated" : "measured",
     sourceSha256: row.source_sha256 ?? null,
     dedupedFromDocumentId: row.deduped_from_document_id ?? null,
     dedupScope: row.dedup_scope ?? null,
