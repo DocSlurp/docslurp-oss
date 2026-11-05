@@ -1,13 +1,15 @@
 import { reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { EMBEDDED_IMAGE_TARGETS, embeddedImageGraph, resolveEmbeddedImageRequest } from "../extractors/embedded-images.js";
 import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
-import { VM_PDF_EXTRACTOR_ID, requireSandboxedPdfProvider } from "../extractors/plugins.js";
+import {
+  SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, requireSandboxedPdfProvider, sandboxedPdfOcrPages,
+} from "../extractors/plugins.js";
 import { buildSummaryEvidence } from "./summary-evidence.js";
 import type { CapacityLeaseStore } from "../media/capacity/types.js";
 import { extractMedia } from "../media/extract.js";
 import type { MediaJournal } from "../media/types.js";
 import { constants as fsConstants, createReadStream, createWriteStream } from "node:fs";
-import { copyFile, mkdtemp, open, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdtemp, open, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
@@ -25,6 +27,8 @@ import {
   documentExtractionForQuality,
   deriveDocumentTitle,
   htmlDocumentTitle,
+  imageAnchorsToAltText,
+  resolvePdfExtractorSetting,
   type ExtractionContract,
   type ExtractionArtifactRef,
 } from "@docslurp/shared";
@@ -165,6 +169,43 @@ export function buildPerPageHeatmap(
   });
 }
 
+/** Refuse provider Markdown that is not a regular file or exceeds SANDBOXED_PDF_MAX_MARKDOWN_BYTES, before it is read. */
+export async function assertSandboxedPdfMarkdownBounded(outputPath: string): Promise<void> {
+  const info = await lstat(outputPath);
+  if (!info.isFile()) throw new Error("Sandboxed PDF provider output is not a regular file");
+  if (info.size > SANDBOXED_PDF_MAX_MARKDOWN_BYTES) {
+    throw new Error(`Sandboxed PDF provider output exceeds ${SANDBOXED_PDF_MAX_MARKDOWN_BYTES} bytes`);
+  }
+}
+
+/** Bound on the OCR ledger's own `pdftotext` probe (the text layer is light work; a slow one is a hostile file). */
+export const OCR_LEDGER_PROBE_TIMEOUT_MS = 20_000;
+
+/** Text a page holds for a "has words" test: image references and `<!-- page N -->` markers are not words read. */
+export function ocrLedgerPageText(text: string | null | undefined): string {
+  if (typeof text !== "string") return "";
+  return imageAnchorsToAltText(text).replace(/<!--\s*page\s+\d+\s*-->/gi, "");
+}
+
+/**
+ * Whether the winning candidate ran OCR, so empty-native pages holding words could only be OCR reads. Only these
+ * candidates OCR without reporting pages: Kreuzberg (unless the options disable OCR), Dolphin (a page-reading model)
+ * and liteparse with --ocr. Text-layer extractors (native-pdf, poppler-text, pandoc, json) never OCR.
+ */
+export function candidateRanUnreportedOcr(candidate: Pick<ExtractedCandidate, "label" | "plan">): boolean {
+  const args = candidate.plan?.args ?? [];
+  if (candidate.label === "dolphin") return true;
+  if (candidate.label === "liteparse") return args.includes("--ocr");
+  if (candidate.label !== "kreuzberg") return false;
+  const configIndex = args.indexOf("--config-json");
+  if (configIndex < 0) return true;
+  try {
+    return (JSON.parse(args[configIndex + 1] ?? "{}") as { disableOcr?: unknown }).disableOcr !== true;
+  } catch {
+    return false;
+  }
+}
+
 export function assertSupportedDocumentTarget(target: string): void {
   if (target !== "document/markdown") {
     throw new Error(`unsupported document extraction target ${target}; supported target: document/markdown`);
@@ -240,8 +281,11 @@ export class ExtractMarkdownStage implements Stage {
         let nativeExtraction: NativePdfStageStats["extraction"] = { status: "not-planned", code: null, reason: null };
         let lastUsableResult: DocumentStageResult | null = null;
 
+        // A PDF routed to the sandboxed provider is never parsed on this host for evidence: page facts, page-image
+        // evidence and the OCR ledger's text-layer probe are skipped (stage stats say so).
+        const sandboxedPdfRoute = isPdf && this.pdfRoutesToSandbox(format, extractionConfig.order);
         // Page facts for the ingest report run beside extraction (poppler, no pixels) and never fail it.
-        const pageFacts = this.recordSourcePageFacts(state, document, format, signal);
+        const pageFacts = this.recordSourcePageFacts(state, document, format, signal, sandboxedPdfRoute);
         try {
           await runDocumentStage(
             state,
@@ -809,13 +853,17 @@ export class ExtractMarkdownStage implements Stage {
                     parserScores.length > 0
                       ? this.storage.uri(parserEvalKey)
                       : null;
-                  const pageImageEvidenceUri = await this.recordDocumentImageEvidence(
-                    document, tempFile, winningText, state, { isPdf, format }, signal);
+                  const hostPdfProbes = isPdf && (sandboxedPdfRoute || winningCandidate.label === VM_PDF_EXTRACTOR_ID)
+                    ? "skipped-sandboxed-route" as const : isPdf ? "ran" as const : "not-pdf" as const;
+                  const pageImageEvidenceUri = hostPdfProbes === "skipped-sandboxed-route"
+                    ? this.skipHostPdfEvidence(document, "page-image-evidence")
+                    : await this.recordDocumentImageEvidence(document, tempFile, winningText, state, { isPdf, format }, signal);
                   // Every page OCR produced text for was read by a model: record the read per page, which is the only
                   // thing that bills a page Rich (db/page-base-fee.ts). Vision reading it too is the same page, charged
                   // once (the ledger keys a charge by run, document and page) and topped up for its output tokens.
-                  await this.recordOcrPageReads(state, document, {
+                  const ocrReadPages = await this.recordOcrPageReads(state, document, {
                     format, isPdf, winningText, candidate: winningCandidate, sourcePath: tempFile,
+                    sandboxedRoute: hostPdfProbes === "skipped-sandboxed-route",
                   }, signal);
                   registerHash(state, contentHash, artifactUri);
 
@@ -1013,6 +1061,10 @@ export class ExtractMarkdownStage implements Stage {
                       retryStrategy: retryStrategy ?? "default",
                       extractionMs: Date.now() - extractionStartedAt,
                       nativePdf: nativePdfStats,
+                      // Host poppler probes (page facts, page-image evidence, OCR-ledger text layer) for this PDF.
+                      hostPdfProbes,
+                      ocrReadPages: ocrReadPages.length,
+                      ocrReadSource: winningCandidate.ocrPages ? "extractor-reported" : ocrReadPages.length ? "inferred" : "none",
                     },
                   };
                   const attemptsSnapshot = attemptLedger.snapshot();
@@ -1158,52 +1210,69 @@ export class ExtractMarkdownStage implements Stage {
 
   /**
    * Records the Rich read of every page OCR produced text for, exactly once per page per run (the ledger keys a charge by run,
-   * document and page; a retry re-records the same pages under the same ids).
+   * document and page; a retry re-records the same pages under the same ids). An unknown fact never raises a charge.
    *
    * - An uploaded image: its one page, when the OCR text has words (Kreuzberg OCRs the first frame of a multi-page TIFF only, so
    *   one page is the read that happened).
-   * - A PDF: a page whose native text layer (poppler's `pdftotext`, from page facts or run here) has no words while the extractor's
-   *   text for that page does. No extractor says which pages it OCR'd (Kreuzberg's own per-page flags describe the native layer
-   *   only, so a scan reads `isBlank` with its OCR text in the document content), and an empty native layer with words
-   *   in the extracted page can only be an OCR read. Pages the graph extractor's tesseract adapter OCR'd are added from its own list.
-   * Fast never reads a page with a model, so it records nothing. Never throws: a failed probe is logged and bills nothing.
+   * - A PDF whose winning candidate reports the pages it OCR'd (graph-local's tesseract adapter, the sandboxed PDF provider):
+   *   exactly those pages, within the page count. Nothing is inferred on top.
+   * - The sandboxed route with no report: nothing. The host never probes the PDF for that route.
+   * - Otherwise, only when the winner ran OCR (candidateRanUnreportedOcr) and its text has reliable form-feed page breaks: a page
+   *   whose native text layer (poppler's `pdftotext`, from page facts or run here) has no words while the extracted page does.
+   *   Kreuzberg's own per-page flags describe the native layer only, so this is the one way to see its OCR reads.
+   * Words exclude image references and page markers. Fast never reads a page with a model, so it records nothing. Never throws:
+   * a failed probe is logged loudly (`[ocr-ledger] probe-failed`) and bills nothing.
    */
   private async recordOcrPageReads(
     state: import("../pipeline/pipeline.js").WorkflowState,
     document: import("../models.js").Document,
-    args: { format: string; isPdf: boolean; winningText: string; candidate: ExtractedCandidate; sourcePath: string },
+    args: { format: string; isPdf: boolean; winningText: string; candidate: ExtractedCandidate; sourcePath: string; sandboxedRoute?: boolean },
     signal?: AbortSignal,
   ): Promise<number[]> {
     if (!qualityAllowsPageReading(state.run.pipeline.quality)) return [];
-    const hasWords = (text: string | null | undefined) => typeof text === "string" && /[\p{L}\p{N}]/u.test(text);
+    const hasWords = (text: string | null | undefined) => /[\p{L}\p{N}]/u.test(ocrLedgerPageText(text));
     const pages = new Set<number>();
     if (args.format === "image") {
       if (args.candidate.label !== "image-textless" && hasWords(args.winningText)) pages.add(1);
     } else if (args.isPdf) {
-      for (const page of args.candidate.ocrPages ?? []) pages.add(page);
-      try {
-        const pageCount = Math.max(1, Math.trunc(document.pageCount) || 1);
+      const pageCount = Math.max(1, Math.trunc(document.pageCount) || 1);
+      const sandboxed = args.sandboxedRoute === true || args.candidate.label === VM_PDF_EXTRACTOR_ID;
+      if (args.candidate.ocrPages) {
+        for (const page of args.candidate.ocrPages) if (Number.isSafeInteger(page) && page >= 1 && page <= pageCount) pages.add(page);
+      } else if (sandboxed) {
+        console.log(`[ocr-ledger] document=${document.id} extractor=${args.candidate.label} reported no OCR pages; none recorded`);
+      } else if (candidateRanUnreportedOcr(args.candidate)) {
         const extracted = splitFormFeedPages(args.winningText, pageCount);
-        const native = await this.nativeTextLayerPages(state, document, args.sourcePath, pageCount, signal);
-        if (native && (extracted || hasWords(args.winningText))) {
-          for (let page = 1; page <= pageCount; page += 1) {
-            if (hasWords(native[page - 1])) continue;
-            // Without page breaks in the extracted text every page without a text layer shares the document's words.
-            if (extracted ? hasWords(extracted[page - 1]) : true) pages.add(page);
+        if (!extracted) {
+          console.log(`[ocr-ledger] document=${document.id} extractor=${args.candidate.label} text has no reliable page breaks; no OCR reads recorded`);
+        } else if (extracted.some((page) => hasWords(page))) {
+          try {
+            const native = await this.nativeTextLayerPages(state, document, args.sourcePath, pageCount, signal);
+            if (native) {
+              for (let page = 1; page <= pageCount; page += 1) {
+                if (!hasWords(native[page - 1]) && hasWords(extracted[page - 1])) pages.add(page);
+              }
+            } else {
+              this.ocrLedgerProbeFailed(document, args.candidate.label, "native text layer unavailable");
+            }
+          } catch (error) {
+            rethrowIfTeardown(error);
+            if (signal?.aborted) throw error;
+            this.ocrLedgerProbeFailed(document, args.candidate.label, error instanceof Error ? error.message : String(error));
           }
-        } else if (!native) {
-          console.warn(`[ocr-ledger] document=${document.id} native text layer unavailable; scanned-page OCR reads are not recorded`);
         }
-      } catch (error) {
-        rethrowIfTeardown(error);
-        if (signal?.aborted) throw error;
-        console.warn(`[ocr-ledger] document=${document.id} OCR page detection failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
     for (const pageNumber of [...pages].sort((a, b) => a - b)) {
       state.usageLedger.chargeRichPage({ documentId: document.id, pageNumber, readBy: args.format === "image" ? "image-ocr" : "pdf-ocr", model: args.candidate.label });
     }
-    return [...pages];
+    return [...pages].sort((a, b) => a - b);
+  }
+
+  /** A text-layer probe failed for an OCR-capable winner: its scanned-page reads go unbilled, so say so loudly. */
+  private ocrLedgerProbeFailed(document: import("../models.js").Document, extractor: string, reason: string): void {
+    console.warn(`[ocr-ledger] probe-failed document=${document.id} extractor=${extractor} reason=${reason.slice(0, 300)}; scanned-page OCR reads are not recorded`);
+    pushPerfMetric({ metric: "ocr-ledger-probe-failed", value: 1, unit: "count", tags: ["ocr-ledger", extractor], metadata: { documentId: document.id } });
   }
 
   /** The PDF's own text layer per page (page facts' pdftotext run, else one run here), or null when neither is available. */
@@ -1218,7 +1287,7 @@ export class ExtractMarkdownStage implements Stage {
     if (fromFacts && fromFacts.length >= pageCount) return fromFacts;
     const plan = await this.runner.pageText(sourcePath, pageCount);
     if (!plan.available) return null;
-    const result = await this.runner.run({ ...plan, pages: pageCount, timeoutMs: 120_000 }, signal);
+    const result = await this.runner.run({ ...plan, pages: pageCount, timeoutMs: OCR_LEDGER_PROBE_TIMEOUT_MS }, signal);
     return splitFormFeedPages(result.stdout, pageCount);
   }
 
@@ -1328,14 +1397,33 @@ export class ExtractMarkdownStage implements Stage {
     }
   }
 
+  /**
+   * True when this PDF goes to the sandboxed provider: the deployment selects it (DOCSLURP_PDF_EXTRACTOR=vm-pdf) or
+   * the workspace's order names it. Host-side evidence probes are then skipped, even if a later fallback wins.
+   */
+  private pdfRoutesToSandbox(format: string, configured: Partial<Record<string, string[]>>): boolean {
+    return resolvePdfExtractorSetting() === VM_PDF_EXTRACTOR_ID || this.tryResolveExtractorOrder(format, configured).includes(VM_PDF_EXTRACTOR_ID);
+  }
+
+  /** Host PDF evidence the sandboxed route does without; logged so the gap is visible. */
+  private skipHostPdfEvidence(document: import("../models.js").Document, what: "page-facts" | "page-image-evidence"): null {
+    console.log(`[extract-debug] document=${document.id} ${what}=skipped reason=sandboxed-pdf-route`);
+    return null;
+  }
+
   /** Text-layer bytes and image counts per page (PDF), or one image page (image files). */
   private async recordSourcePageFacts(
     state: import("../pipeline/pipeline.js").WorkflowState,
     document: import("../models.js").Document,
     format: string,
     signal?: AbortSignal,
+    sandboxedPdfRoute = false,
   ): Promise<void> {
     if (!pageFactsEnabled() || !state.store?.upsertPageFacts) return;
+    if (format === "pdf" && sandboxedPdfRoute) {
+      this.skipHostPdfEvidence(document, "page-facts");
+      return;
+    }
     // A resumed run skips a completed extraction; its facts were recorded then.
     if (state.documentStage(document.id, this.name)?.status === "completed") return;
     try {
@@ -1577,6 +1665,8 @@ export class ExtractMarkdownStage implements Stage {
     documentId?: string,
   ): Promise<ExtractedCandidate> {
     await this.runner.run(plan, signal);
+    // Provider output is untrusted: a regular file of bounded size, checked before anything reads it.
+    if (plan.sandboxedPdf) await assertSandboxedPdfMarkdownBounded(outputPath);
     // VM image output: put each routed-in image's reference at its reading-order position before the Markdown is stored.
     if (plan.sandboxedPdf?.embeddedImages) {
       if (!documentId) throw new Error("VM image references need the document id");
@@ -1590,6 +1680,7 @@ export class ExtractMarkdownStage implements Stage {
     );
     await pipeline(createReadStream(outputPath), upload.writable);
     await upload.done;
+    const ocrPages = plan.sandboxedPdf ? sandboxedPdfOcrPages(plan.sandboxedPdf) : undefined;
 
     return {
       label,
@@ -1597,6 +1688,7 @@ export class ExtractMarkdownStage implements Stage {
       textKey,
       textUri: this.storage.uri(textKey),
       tempTextPath: outputPath,
+      ...(ocrPages ? { ocrPages: [...ocrPages] } : {}),
     };
   }
 

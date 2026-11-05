@@ -31,7 +31,7 @@ import { runArtifactRoot } from "../lib/artifact-root.js";
 import { runBounded } from "../lib/bounded-concurrency.js";
 import { buildEvidenceIndex, locateEvidence } from "../lib/evidence-locator.js";
 import { mergeFieldAnswers, pickField, planStructuredWindows, type RawField } from "../lib/structured-windows.js";
-import { readCanonicalDocumentArtifact, readExtractedMarkdown } from "./embedding-runtime.js";
+import { readCanonicalDocumentArtifact, readExtractedText } from "./embedding-runtime.js";
 
 /** Characters of document text per model read, and the most reads per document (about 800 pages of prose). */
 export const STRUCTURED_WINDOW_CHARS = 100_000;
@@ -257,7 +257,7 @@ export class StructuredExtractStage implements Stage {
               state.artifactLedger.readDocument(document.id, "canonical-document") ?? null;
             // A recorded artifact that cannot be read is an error to retry, not an empty document.
             const markdownText = markdownArtifactUri
-              ? await readExtractedMarkdown(this.storage, markdownArtifactUri)
+              ? await readExtractedText(this.storage, markdownArtifactUri)
               : "";
             const canonicalDoc: CanonicalDocument | null = canonicalUri
               ? await readCanonicalDocumentArtifact(this.storage, canonicalUri)

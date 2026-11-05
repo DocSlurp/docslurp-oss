@@ -56,9 +56,27 @@ export class OcrLowConfidenceError extends Error {
   }
 }
 
+/**
+ * The worker's default OCR language (`DOCSLURP_OCR_LANGUAGE`): Tesseract codes such as `eng`, or empty/`auto` for
+ * script detection. Throws on anything else, so a typo stops the worker at startup instead of reaching Tesseract.
+ */
 export function ocrLanguageSettingFromEnv(env: NodeJS.ProcessEnv = process.env): string {
   const value = env.DOCSLURP_OCR_LANGUAGE?.trim();
-  return value ? value : OCR_AUTO;
+  if (!value || value === OCR_AUTO) return OCR_AUTO;
+  const parsed = ocrLanguageSchema.safeParse(value);
+  if (!parsed.success) throw new Error("DOCSLURP_OCR_LANGUAGE must be auto or Tesseract codes such as eng or eng+deu");
+  return parsed.data;
+}
+
+/**
+ * The OCR language every OCR path uses (Kreuzberg, page OCR, router OCR, the canonical stage's Tesseract): the
+ * workspace's setting when it names languages; when it is `auto` (the default) or unset, the worker's
+ * `DOCSLURP_OCR_LANGUAGE`, so an operator can pin e.g. `eng` for every workspace that did not choose.
+ */
+export function effectiveOcrLanguageSetting(setting: string | undefined, env: NodeJS.ProcessEnv = process.env): string {
+  const value = setting?.trim();
+  if (value && value !== OCR_AUTO) return value;
+  return ocrLanguageSettingFromEnv(env);
 }
 
 /** Tesseract language packs for each script its orientation detection reports, most likely first. */
@@ -190,7 +208,7 @@ export async function ocrImageText(args: {
   const now = args.now ?? Date.now;
   const started = now();
   const budgetMs = ocrPageBudgetMs(env);
-  const setting = (args.setting ?? ocrLanguageSettingFromEnv(env)).trim() || OCR_AUTO;
+  const setting = effectiveOcrLanguageSetting(args.setting, env);
   const attempts: OcrOutcome["attempts"] = [];
   let script: string | null = null;
   let candidates: string[];

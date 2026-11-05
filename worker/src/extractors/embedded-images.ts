@@ -187,7 +187,7 @@ export async function embeddedImageGraph(args: {
   const artifacts: ExtractionArtifactRef[] = [source];
   const imageIds = new Map<string, string>();
   const mediaTypes = new Map<string, MediaMapImage["mediaType"]>();
-  const orientation = new Map<string, unknown>();
+  const orientation = new Map<string, MediaMapImage["orientation"]>();
   const normalize = imageOrientationEnabled();
   if (normalize && !args.recordUsage) throw new Error("Image orientation requires scoped usage recording");
   const digest = createHash("sha256").update(`${args.producer.optionsDigest}:${IMAGE_ROUTING_TABLE_VERSION}`).digest("hex");

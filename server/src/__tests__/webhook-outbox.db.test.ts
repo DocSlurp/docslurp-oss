@@ -159,11 +159,12 @@ describe("org-keyed webhooks", () => {
     }
   });
 
-  it("deliverWebhook reaches the run's organization only, and only while the creator administers it", async () => {
+  it("delivers a run event to its organization only, and only to hooks whose creator administers it", async () => {
     await hook("team-hook", "admin", "team", "https://hooks.example/team");
     await hook("other-hook", "bob", "other", "https://hooks.example/other");
     await hook("member-hook", "mate", "team", "https://hooks.example/member");
-    await webhooks.deliverWebhook("run-a", "run.completed");
+    await outbox("ob-scope", "admin", "run.completed", event("run-a", "ws-a"));
+    await webhooks.drainWebhookOutbox();
     expect(urls()).toEqual(["https://hooks.example/team"]);
   });
 });
@@ -174,8 +175,6 @@ describe("a user in two organizations", () => {
     await hook("dual-team", "dual", "team", "https://hooks.example/dual-team");
     await outbox("ob-dual", "dual", "run.completed", event("run-o", "ws-other"));
     await webhooks.drainWebhookOutbox();
-    expect(requests).toEqual([]);
-    await webhooks.deliverWebhook("run-o", "run.completed");
     expect(requests).toEqual([]);
   });
 
@@ -192,8 +191,9 @@ describe("a user in two organizations", () => {
     expect(await webhooks.deleteWebhook("team-hook", "bob")).toBeNull();
     expect(requests).toEqual([]);
     // Deliveries are listed per organization too.
-    await webhooks.deliverWebhook("run-a", "run.completed");
-    await webhooks.deliverWebhook("run-o", "run.completed");
+    await outbox("ob-list-a", "admin", "run.completed", event("run-a", "ws-a"));
+    await outbox("ob-list-o", "bob", "run.completed", event("run-o", "ws-other"));
+    await webhooks.drainWebhookOutbox();
     const teamDeliveries = await webhooks.listWebhookDeliveries({ userId: "dual", orgId: "team" });
     expect(teamDeliveries.map((delivery) => delivery.webhookId)).toEqual(["team-hook"]);
     const otherDeliveries = await webhooks.listWebhookDeliveries({ userId: "bob", orgId: "other" });

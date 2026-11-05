@@ -10,6 +10,8 @@ import {
   OcrLowConfidenceError,
   candidateLanguageSets,
   ocrImageText,
+  effectiveOcrLanguageSetting,
+  ocrLanguageSettingFromEnv,
   ocrMaxAttempts,
   ocrPageBudgetMs,
   parseOsdOutput,
@@ -166,6 +168,20 @@ describe("ocrImageText with a scripted tesseract", () => {
     expect(result.languages).toBe("eng+deu");
     expect(calls).toHaveLength(1);
     await expect(ocrImageText({ image: "page.png", setting: "eng --psm 0", run: scripted({}) })).rejects.toThrow(/invalid OCR language/);
+  });
+
+  it("uses the operator's DOCSLURP_OCR_LANGUAGE when the workspace setting is auto, skipping script detection", async () => {
+    const calls: string[][] = [];
+    const env = { DOCSLURP_OCR_LANGUAGE: " eng " } as NodeJS.ProcessEnv;
+    const result = await ocrImageText({ exists: allPacks, image: "page.png", setting: "auto", env, run: scripted({ eng: word(90, 10) }, calls) });
+    expect(result.languages).toBe("eng");
+    expect(calls).toHaveLength(1);
+    // A named workspace language still wins over the operator default.
+    expect((await ocrImageText({ exists: allPacks, image: "page.png", setting: "deu", env, run: scripted({ deu: word(90, 10) }) })).languages).toBe("deu");
+    expect(effectiveOcrLanguageSetting(undefined, env)).toBe("eng");
+    expect(effectiveOcrLanguageSetting("auto", {})).toBe("auto");
+    expect(() => ocrLanguageSettingFromEnv({ DOCSLURP_OCR_LANGUAGE: "eng; rm -rf" })).toThrow("DOCSLURP_OCR_LANGUAGE");
+    expect(ocrLanguageSettingFromEnv({ DOCSLURP_OCR_LANGUAGE: "auto" })).toBe("auto");
   });
 });
 

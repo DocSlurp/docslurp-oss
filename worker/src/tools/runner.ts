@@ -1,4 +1,4 @@
-import { requireSandboxedPdfProvider, type SandboxedPdfJob, type SandboxedPdfRunContext } from "../extractors/plugins.js";
+import { acceptSandboxedPdfResult, requireSandboxedPdfProvider, type SandboxedPdfJob, type SandboxedPdfRunContext } from "../extractors/plugins.js";
 import { recordShardTimingInContext, type ShardCalibration } from "../pipeline/shard-calibration.js";
 import { ensurePythonDistributions, parseMissingPythonDependency, parseMissingPythonModule } from "./python-deps.js";
 import {
@@ -1345,7 +1345,8 @@ export class CommandRunner {
       const pages = plan.pages ?? currentPerfContext()?.pageCount ?? 0;
       // The provider shards long documents itself and notes progress as shards finish.
       return {
-        remote: provider.run(plan.sandboxedPdf, this.sandboxedPdfContext(pages, provider.shardProfile?.key), signal),
+        remote: provider.run(plan.sandboxedPdf, this.sandboxedPdfContext(pages, provider.shardProfile?.key), signal)
+          .then((result) => acceptSandboxedPdfResult(plan.sandboxedPdf!, result, pages)),
         timeoutMs: provider.timeoutMs(pages),
         release: async () => {},
       };
