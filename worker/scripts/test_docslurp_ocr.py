@@ -8,6 +8,7 @@ The models directory must hold the files listed in worker/ocr-models.json; the
 tests never download anything. Tests that need a missing dependency (models,
 fonts, pdftoppm, the OCR runtime) are skipped with the reason.
 """
+import contextlib
 import io
 import json
 import os
@@ -134,6 +135,41 @@ def tiff_ifd_loop(path):
         offset = following
     with open(path, 'wb') as handle:
         handle.write(bytes(data))
+
+
+def many_page_pdf(path, count, text_page, image):
+    """A PDF of `count` empty pages whose page `text_page` draws `image` (JPEG). Small at any page count."""
+    buffer = io.BytesIO()
+    image.convert('RGB').save(buffer, format='JPEG', quality=90)
+    jpeg = buffer.getvalue()
+    width, height = image.size
+    objects = {}
+    kids = ' '.join(f'{5 + n} 0 R' for n in range(count))
+    objects[1] = b'<< /Type /Catalog /Pages 2 0 R >>'
+    objects[2] = f'<< /Type /Pages /Kids [{kids}] /Count {count} >>'.encode()
+    objects[3] = (f'<< /Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace /DeviceRGB '
+                  f'/BitsPerComponent 8 /Filter /DCTDecode /Length {len(jpeg)} >>\nstream\n').encode() + jpeg + b'\nendstream'
+    draw = f'q {width} 0 0 {height} 0 0 cm /Im0 Do Q'.encode()
+    objects[4] = f'<< /Length {len(draw)} >>\nstream\n'.encode() + draw + b'\nendstream'
+    empty_contents = 5 + count
+    objects[empty_contents] = b'<< /Length 0 >>\nstream\n\nendstream'
+    for n in range(count):
+        contents = 4 if n + 1 == text_page else empty_contents
+        objects[5 + n] = (f'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] '
+                          f'/Resources << /XObject << /Im0 3 0 R >> >> /Contents {contents} 0 R >>').encode()
+    out = bytearray(b'%PDF-1.4\n')
+    offsets = {}
+    for number in sorted(objects):
+        offsets[number] = len(out)
+        out += f'{number} 0 obj\n'.encode() + objects[number] + b'\nendobj\n'
+    xref = len(out)
+    size = max(objects) + 1
+    out += f'xref\n0 {size}\n0000000000 65535 f \n'.encode()
+    for number in range(1, size):
+        out += f'{offsets[number]:010d} 00000 n \n'.encode()
+    out += f'trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n'.encode()
+    with open(path, 'wb') as handle:
+        handle.write(bytes(out))
 
 
 class OcrCliCase(unittest.TestCase):
@@ -264,6 +300,37 @@ class HappyPathTest(OcrCliCase):
         self.assertIn('Quarterly report page 2', frame['text'])
         self.assertLessEqual(max(frame['width'], frame['height']), 2000)
 
+    @unittest.skipUnless(PDFTOPPM, 'pdftoppm not installed')
+    def test_pdf_page_beyond_frame_walk_bound(self):
+        # PDF pages are rendered by number, so a page past the image frame-walk bound (2048) is still read.
+        path = self.path('long.pdf')
+        many_page_pdf(path, 2050, 2049, text_image(['Appendix page far out'], size=(1240, 400)))
+        proc, result, _ = self.run_cli(path, '--pdftoppm', PDFTOPPM, '--pages', '2049,2050', kind='pdf')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual([f['frame'] for f in result['frames']], [2049, 2050])
+        self.assertFalse(result['truncatedFrames'])
+        self.assertIn('Appendix page far out', result['frames'][0]['text'])
+        self.assertEqual(result['frames'][1]['text'], '')
+
+    def test_cyrillic_read_as_punctuation_retries_script_recogniser(self):
+        # The general recogniser reads Cyrillic as confident punctuation; the auto plan must still reach eslav.
+        lines = ['Договор поставки оборудования', 'Сумма к оплате указана ниже', 'Подпись и печать сторон']
+        path = self.save(text_image(lines, size=(1400, 360)), 'ru.png')
+        proc, result, _ = self.run_cli(path, recognisers='multi,eslav,korean')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        frame = result['frames'][0]
+        self.assertEqual(frame['recogniser'], 'eslav', frame['attempts'])
+        self.assertIn('eslav', [a['recogniser'] for a in frame['attempts']])
+        self.assertIn('Договор', frame['text'])
+        letters = sum(c.isalpha() for c in frame['text'])
+        self.assertGreater(letters, len(frame['text'].replace(' ', '').replace('\n', '')) / 2)
+
+    def test_latin_page_stops_at_first_recogniser(self):
+        path = self.save(text_image(['Plain English invoice text']), 'en-auto.png')
+        proc, result, _ = self.run_cli(path, recognisers='multi,eslav,korean')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual([a['recogniser'] for a in result['frames'][0]['attempts']], ['multi'])
+
     def test_escalation_images(self):
         path = self.save(text_image(['Escalate this page']), 'esc.png')
         images = self.path('images')
@@ -287,6 +354,9 @@ class HappyPathTest(OcrCliCase):
         self.assertEqual(frame['text'], '')
         self.assertIsNone(frame['meanConfidence'])
         self.assertIsNone(frame['image'])  # blank pages are not escalated
+        # Nothing was recognised, so only the detector is named: a valid "no text" read (one model).
+        self.assertEqual([m['id'] for m in result['models']], ['pp-ocrv6-det-small'])
+        self.assertFalse(result['truncatedFrames'])
 
     def test_long_edge_capped(self):
         image = text_image(['Large scan with text'], size=(5000, 3000), font_size=160)
@@ -517,6 +587,98 @@ class MaliciousInputTest(OcrCliCase):
         path = self.save(Image.new('RGB', (64, 64), 'white'), 'small.png')
         proc, _, _ = self.run_cli(path, '--max-input-bytes', '16')
         self.assert_refused(proc, 4, 'input-refused', 'input-too-large')
+
+
+class PageBoundsTest(unittest.TestCase):
+    """--pages bounds, checked before any model or decoder is touched."""
+
+    def parse(self, *argv):
+        sys.path.insert(0, SCRIPTS)
+        try:
+            import docslurp_ocr
+        finally:
+            sys.path.remove(SCRIPTS)
+        return docslurp_ocr
+
+    def test_pdf_pages_bounded_by_document_page_cap(self):
+        o = self.parse()
+        args = o.parse_args(['--models', '/m', '--manifest', '/m.json', '--pages', '2049,2050,100000'])
+        self.assertEqual(args.pages, [2049, 2050, 100000])
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            o.parse_args(['--models', '/m', '--manifest', '/m.json', '--pages', '100001'])
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            o.parse_args(['--models', '/m', '--manifest', '/m.json', '--pages', ','.join(str(n) for n in range(1, 2050))])
+
+    def test_image_frames_keep_the_frame_walk_bound(self):
+        o = self.parse()
+        work = tempfile.mkdtemp(prefix='docslurp-ocr-bounds-')
+        try:
+            argv = ['--models', '/nonexistent', '--manifest', '/nonexistent.json', '--input', os.path.join(work, 'x.tif'),
+                    '--kind', 'image', '--output', os.path.join(work, 'out.json'), '--pages', '2049']
+            with self.assertRaises(o.UsageError) as caught:
+                o.run(o.parse_args(argv))
+            self.assertEqual(caught.exception.payload['reason'], 'image-frame-out-of-range')
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+
+class ScriptRetryTest(unittest.TestCase):
+    """The retry rule with a scripted engine: no models needed."""
+
+    def setUp(self):
+        try:
+            import numpy
+        except ImportError:  # pragma: no cover
+            self.skipTest('numpy not installed')
+        if Image is None:
+            self.skipTest('Pillow not installed')
+        sys.path.insert(0, SCRIPTS)
+        try:
+            import docslurp_ocr
+        finally:
+            sys.path.remove(SCRIPTS)
+        self.o = docslurp_ocr
+        self.np = numpy
+
+    def frame(self, reads, families):
+        np = self.np
+        calls = []
+
+        class Engines:
+            def detect(self, bgr, family):
+                quad = np.array([[0, 0], [10, 0], [10, 10], [0, 10]], dtype=np.float32)
+                return ['crop', 'crop'], [quad, quad]
+
+            def recognise(self, family, crops):
+                calls.append(family)
+                return reads[family]
+
+        args = type('Args', (), {'max_attempts': len(families), 'retry_below': 0.8})()
+        rt = type('Rt', (), {'np': np})()
+        result = self.o.ocr_frame(rt, Engines(), Image.new('RGB', (16, 16), 'white'), families, args)
+        return result, calls
+
+    def test_confident_punctuation_tries_the_next_recogniser(self):
+        reads = {
+            'multi': (['.,:;-- ..', "'' ,,. :"], [0.95, 0.93]),
+            'eslav': (['Договор поставки', 'Сумма'], [0.9, 0.88]),
+            'korean': (['x', 'y'], [0.2, 0.2]),
+        }
+        (recogniser, attempts, _lines, text, _mean, _cut), calls = self.frame(reads, ['multi', 'eslav', 'korean'])
+        self.assertEqual(calls, ['multi', 'eslav'])
+        self.assertEqual(recogniser, 'eslav')
+        self.assertIn('Договор', text)
+        self.assertEqual([a['recogniser'] for a in attempts], ['multi', 'eslav'])
+
+    def test_confident_letters_stop_at_first_recogniser(self):
+        reads = {'multi': (['Invoice 4821', 'Total due'], [0.97, 0.95]), 'eslav': (['x', 'y'], [0.99, 0.99])}
+        (recogniser, _attempts, _lines, _text, _mean, _cut), calls = self.frame(reads, ['multi', 'eslav'])
+        self.assertEqual((recogniser, calls), ('multi', ['multi']))
+
+    def test_all_punctuation_keeps_the_most_confident_read(self):
+        reads = {'multi': (['----', '....'], [0.9, 0.9]), 'eslav': (['-- -', ',,'], [0.6, 0.6])}
+        (recogniser, _attempts, _lines, _text, _mean, _cut), calls = self.frame(reads, ['multi', 'eslav'])
+        self.assertEqual((recogniser, calls), ('multi', ['multi', 'eslav']))
 
 
 if __name__ == '__main__':

@@ -52,6 +52,11 @@ MAX_SIDE = 30000
 # Hard bound on how far we walk a multi-frame container (TIFF IFD chain, GIF),
 # whatever --pages asks for. Walking is sequential, so this bounds the work.
 MAX_FRAME_INDEX = 2048
+# PDF pages are rendered one by one by number (pdftoppm -f/-l), never walked, so they are bounded by the
+# document page cap instead (the ocr-result schema's frame bound).
+MAX_PDF_PAGE = 100_000
+# Most pages one --pages list may name (keeps argv and the job bounded; --max-frames caps the work).
+MAX_PAGES_LISTED = 2048
 MAX_TEXT_BYTES = 1024 * 1024
 MAX_LINES = 20000
 MAX_OUTPUT_BYTES = 64 * 1024 * 1024
@@ -59,6 +64,9 @@ MAX_MANIFEST_BYTES = 1024 * 1024
 PDF_PAGE_TIMEOUT_S = 120
 # RapidOCR's default: recognitions below this score are dropped from the text.
 TEXT_SCORE = 0.5
+# Below this share of letters and digits (of the non-space characters read), a recogniser's read looks like the
+# wrong script and the next recogniser in the plan is tried, whatever its confidence.
+MIN_LETTER_SHARE = 0.5
 # Never created and never read: RapidOCR needs a model_root_dir, but every
 # model is passed by explicit path and the dict-download branch is refused.
 UNUSED_MODEL_ROOT = '/nonexistent/docslurp-ocr-unused'
@@ -628,6 +636,24 @@ def is_blank(rt, rgb):
     return float(rt.np.asarray(sample, dtype=rt.np.float32).std()) < 2.0
 
 
+def letter_share(items):
+    """Share of letters and digits among the non-space characters a recogniser kept (1.0 when it kept none)."""
+    total = letters = 0
+    for item in items:
+        for char in item['text']:
+            if char.isspace():
+                continue
+            total += 1
+            if char.isalnum():
+                letters += 1
+    return letters / total if total else 1.0
+
+
+def _attempt_rank(attempt):
+    # A read with text that is mostly letters beats an empty or mostly-punctuation read; confidence breaks ties.
+    return (attempt['_plausible'], attempt['meanConfidence'] if attempt['meanConfidence'] is not None else -1)
+
+
 def ocr_frame(rt, engines, rgb, families, args):
     np = rt.np
     bgr = np.ascontiguousarray(np.asarray(rgb, dtype=np.uint8)[:, :, ::-1])
@@ -652,15 +678,19 @@ def ocr_frame(rt, engines, rgb, families, args):
             for txt, score, rect in zip(txts, scores, rects)
             if txt.strip() and score >= TEXT_SCORE
         ]
-        attempts.append({'recogniser': family, 'meanConfidence': mean, 'lines': len(items), '_items': items})
-        if best is None or (mean or -1) > (best['meanConfidence'] or -1):
+        # A recogniser for the wrong script can read detected text confidently as punctuation or as nothing at all
+        # (the general model reads Cyrillic that way): such a read is never accepted while another recogniser
+        # remains to try.
+        plausible = bool(items) and letter_share(items) >= MIN_LETTER_SHARE
+        attempts.append({'recogniser': family, 'meanConfidence': mean, 'lines': len(items), '_items': items, '_plausible': plausible})
+        if best is None or _attempt_rank(attempts[-1]) > _attempt_rank(best):
             best = attempts[-1]
-        if mean is not None and mean >= args.retry_below:
+        if mean is not None and mean >= args.retry_below and plausible:
             break
     lines, text = assemble(best['_items'], best['recogniser'] in RTL_FAMILIES)
     text, truncated = clamp_text(text)
     for attempt in attempts:
-        del attempt['_items']
+        del attempt['_items'], attempt['_plausible']
     return best['recogniser'], attempts, lines, text, best['meanConfidence'], truncated
 
 
@@ -729,8 +759,8 @@ def _pages(value):
         pages = [int(part) for part in _csv(value)]
     except ValueError:
         raise argparse.ArgumentTypeError('pages must be comma-separated integers') from None
-    if not pages or any(p < 1 or p > MAX_FRAME_INDEX for p in pages):
-        raise argparse.ArgumentTypeError(f'pages must be within 1..{MAX_FRAME_INDEX}')
+    if not pages or len(pages) > MAX_PAGES_LISTED or any(p < 1 or p > MAX_PDF_PAGE for p in pages):
+        raise argparse.ArgumentTypeError(f'pages must be at most {MAX_PAGES_LISTED} numbers within 1..{MAX_PDF_PAGE}')
     return sorted(set(pages))
 
 
@@ -823,6 +853,9 @@ def run(args):
             raise UsageError(f'missing-{name}')
     if args.kind == 'pdf' and (not args.pdftoppm or not args.pages):
         raise UsageError('pdf-needs-pdftoppm-and-pages')
+    # Image frames are walked sequentially, so they keep the frame-walk bound.
+    if args.kind == 'image' and args.pages and max(args.pages) > MAX_FRAME_INDEX:
+        raise UsageError('image-frame-out-of-range')
     if args.image_dir:
         check_image_dir(args.image_dir)
     manifest = load_manifest(args.manifest)
