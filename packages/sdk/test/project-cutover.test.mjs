@@ -92,3 +92,30 @@ for (const method of ["upload", "extract"]) test(`${method} rejects intake selec
   assert.equal(requests, 0);
   assert.equal(reads, 0);
 });
+
+for (const method of ["upload", "extract"]) test(`${method} refuses scope fields attached to direct files or streams`, async () => {
+  let requests = 0, reads = 0;
+  const client = createDocSlurpClient({ project: "client-default", fetch: async () => { requests++; throw new Error("network must not run"); } });
+  const fileFactories = [
+    () => new Blob(["test"]),
+    () => ({ data: new Blob(["test"]), filename: "a.pdf" }),
+    () => ({ async *[Symbol.asyncIterator]() { reads++; yield new Uint8Array([1]); } }),
+    () => ({ data: new ReadableStream({ pull() { reads++; } }, { highWaterMark: 0 }), filename: "a.pdf" }),
+  ];
+  for (const key of ["project", "newProject", "templateKey", "orgId"]) {
+    for (const make of fileFactories) {
+      for (const directUpload of [false, true]) {
+        const input = Object.assign(make(), { [key]: key === "newProject" ? true : "intended" });
+        await assert.rejects(() => client[method](input, { directUpload, project: "explicit-options" }), /Pass intake selection/);
+      }
+    }
+    const file = Object.assign(new Blob(["test"]), { [key]: "intended" });
+    await assert.rejects(() => client[method]([file]), /Pass intake selection/);
+    await assert.rejects(() => client[method]({ files: [file] }), /Pass intake selection/);
+    await assert.rejects(() => client[method](Object.assign([new Blob(["test"])], { [key]: "intended" })), /Pass intake selection/);
+  }
+  const staleFile = Object.assign(new Blob(["test"]), { workspace: "intended" });
+  await assert.rejects(() => client[method]({ files: [staleFile] }), /Legacy workspace selection/);
+  assert.equal(requests, 0);
+  assert.equal(reads, 0);
+});

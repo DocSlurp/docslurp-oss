@@ -946,6 +946,14 @@ function rejectUncopyableIntakeSelection(input: object): void {
   }
 }
 
+// Scope belongs to a URL/file-list envelope or upload options, never a file.
+function rejectDirectFileSelection(input: object): void {
+  rejectLegacyProjectOptions(input);
+  for (const key of ["project", "newProject", "templateKey", "orgId"]) {
+    if (key in input) throw new TypeError(`Pass intake selection ${key} in upload options or a URL/file-list envelope.`);
+  }
+}
+
 function rejectLegacyProjectOptions(input: object): void {
   if (["workspace", "workspaces", "workspaceId", "workspaceIds", "workspaceName", "newWorkspace", "workspace_id", "workspace_ids"].some(key => key in input)) {
     throw new Error("Legacy workspace selection is no longer supported; use project or newProject.");
@@ -1433,6 +1441,9 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     rejectLegacyProjectOptions(options);
     rejectUncopyableIntakeSelection(input);
     rejectUncopyableIntakeSelection(options);
+    if (!("urls" in input) && !("files" in input)) rejectDirectFileSelection(input);
+    const inputFiles = Array.isArray(input) ? input : "files" in input ? input.files : [];
+    for (const file of inputFiles) rejectDirectFileSelection(file);
     assertClientCanonicalIds(canonicalIdsOf(input, options));
     if ("urls" in input) return uploadUrls({ ...input, ...options }, options);
     if (Array.isArray(input)) input = { files: input };
