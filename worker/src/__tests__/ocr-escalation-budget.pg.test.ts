@@ -5,7 +5,9 @@ import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { Config } from "../config.js";
+import { setSpendCheckConfig } from "../db/spend-check.js";
 import { Store } from "../db/store.js";
+import { authorizeImageFrames } from "../ocr/image-frames.js";
 import { VisionRunGuard, type VisionGuardConfig, type VisionRequestGate } from "../lib/vision-attempt-guard.js";
 import type { WorkspaceRun } from "../models.js";
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
@@ -96,6 +98,40 @@ describe.skipIf(!url)("OCR escalation budget on real Postgres", () => {
     expect(await admit(retry, "race-doc", admitted[0]!)).toBe(true);
     // Another document of the run has its own budget.
     expect(await admit(retry, "other-doc", 1)).toBe(true);
+  }, 60_000);
+
+  it("fails closed for two TIFFs authorizing at the same time while the spend check's database errors", async () => {
+    await admin`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts)
+      values ('ocrb-tiff-run', 'ocrb-org', 'ocrb-u1', 'ocrb-ws', 'bulk-upload', 'processing', 'extract-markdown', '{}', '{}') on conflict do nothing`;
+    for (const id of ["ocrb-tiff-a", "ocrb-tiff-b"]) {
+      await admin`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source)
+        values (${id}, 'ocrb-org', 'ocrb-u1', 'ocrb-ws', 'ocrb-tiff-run', ${`${id}.tiff`}, 'image/tiff', ${`raw/${id}`}, 'processing', 1, 'assumed')`;
+    }
+    setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    // A real database error in the balance read: the function it calls is gone for the duration.
+    await admin`alter function org_spend_status(text, text, numeric) rename to org_spend_status_unavailable`;
+    try {
+      const activities = await Promise.all(["ocrb-tiff-a", "ocrb-tiff-b"].map(async (id) => {
+        const created = store();
+        const state = WorkflowState.create(await created.loadRun("ocrb-tiff-run"), [(await created.loadDocument(id))!]);
+        state.store = created;
+        state.usageLedger.runId = "ocrb-tiff-run";
+        return { id, state };
+      }));
+      const outcomes = await Promise.allSettled(activities.map(({ id, state }) => authorizeImageFrames(state, id, "extract-markdown", 30)));
+      expect(outcomes.map((outcome) => outcome.status)).toEqual(["rejected", "rejected"]);
+      for (const outcome of outcomes) expect((outcome as PromiseRejectedResult).reason).toMatchObject({ name: "SpendCheckUnavailableError" });
+      // Nothing charged, the run neither paused nor let through.
+      for (const { state } of activities) expect(state.usageLedger.snapshot()).toEqual([]);
+      const [run] = await admin<{ control_state: string | null }[]>`select control_state from workspace_runs where id = 'ocrb-tiff-run'`;
+      expect(run?.control_state).toBeNull();
+      const [charges] = await admin<{ n: number }[]>`select count(*)::int as n from usage_events where run_id = 'ocrb-tiff-run'`;
+      expect(charges?.n).toBe(0);
+    } finally {
+      await admin`alter function org_spend_status_unavailable(text, text, numeric) rename to org_spend_status`;
+      setSpendCheckConfig(null);
+    }
   }, 60_000);
 
   it("sends and records at most the budget's hosted escalation reads across concurrent activities", async () => {

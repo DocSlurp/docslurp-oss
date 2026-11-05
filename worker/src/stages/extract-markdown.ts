@@ -90,8 +90,9 @@ import { nativePdfEmphasisEnabled, resolveNativePdfMode } from "../native-pdf/mo
 import { runNativePdfShadow } from "../native-pdf/shadow.js";
 import { nativePdfEngineState } from "../native-pdf/loader.js";
 import { logNativePdfFallback } from "../native-pdf/types.js";
-import { isDocumentLevelFailure } from "../lib/document-failure.js";
+import { isDocumentLevelFailure, RunPolicyError } from "../lib/document-failure.js";
 import { rethrowIfTeardown } from "../sandbox/teardown-breaker.js";
+import { SpendCheckUnavailableError } from "../db/spend-check.js";
 import { reportExtractionDecision, summarizeNativePdfShadow, type NativePdfStageStats } from "../native-pdf/telemetry.js";
 import { documentExtractorRegistry, serializeExtractorOptions, type CandidateExecutors, type ExtractedCandidate, type PreparedExtractor } from "../extractors/registry.js";
 import { ExtractorAttemptLedger } from "../extractors/attempt-ledger.js";
@@ -107,7 +108,7 @@ import { visionGuardFor } from "../lib/vision-attempt-guard.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
-import { authorizeImageFrames } from "../ocr/image-frames.js";
+import { authorizeImageFrames, authorizeImageRead } from "../ocr/image-frames.js";
 import { OCR_FAILED_PAGES_KEY, OcrRefusedError, ocrFailedPages, resolveOcrMode } from "../ocr/mode.js";
 import { ocrDocument } from "../ocr/read-document.js";
 
@@ -437,6 +438,9 @@ export class ExtractMarkdownStage implements Stage {
                 // other candidate (possibly the in-process engine) take over as a fallback.
                 for (const result of [resultA, resultB]) {
                   if (result?.status === "rejected") rethrowIfTeardown(result.reason);
+                  // A charge check that could not decide is retried, and a run-policy stop (cost cap, unfunded run) ends the stage:
+                  // neither is a reason to try another extractor or fail the document.
+                  if (result?.status === "rejected" && (result.reason instanceof SpendCheckUnavailableError || result.reason instanceof RunPolicyError)) throw result.reason;
                 }
 
                 for (const [planned, result] of [
@@ -1593,6 +1597,8 @@ export class ExtractMarkdownStage implements Stage {
   ): Promise<ExtractedCandidate> {
     if (!context?.state) throw new Error("ocr extraction requires the run state");
     const state = context.state;
+    // The read starts a VM: authorized before it (cost cap, balance for its Rich page), not only after the frames are counted.
+    await authorizeImageRead(state, context.documentId);
     const result = await ocrDocument({
       runner: this.runner,
       state,

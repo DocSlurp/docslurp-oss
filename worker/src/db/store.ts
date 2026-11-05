@@ -2750,9 +2750,10 @@ export class Store {
   }
 
   /** Pauses the run when `credits` it newly owes (more pages than intake counted) no longer fit the org's balance (spend-check.ts). */
-  async enforceSpendForCharge(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean }> {
+  /** Fails closed: throws SpendCheckUnavailableError (retryable) when it cannot decide. */
+  async enforceSpendForCharge(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean; blocked: boolean }> {
     const result = await enforceRunSpendForCharge(this.sql, run, credits, "stage-boundary");
-    return { paused: result.paused };
+    return { paused: result.paused, blocked: result.blocked };
   }
 
   async setDocumentFileFacts(runId: string, documentId: string, facts: import("@docslurp/shared").FileFacts): Promise<boolean> {

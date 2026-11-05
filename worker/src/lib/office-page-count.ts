@@ -278,7 +278,7 @@ export async function recordMeasuredPageCount(
     run: { id: string; orgId?: string | null; userId?: string; workspaceId?: string; pipeline?: PipelineFeatures };
     store?: {
       setDocumentBillingPages?(runId: string, documentId: string, billingPages: number, method: string): Promise<boolean>;
-      enforceSpendForCharge?(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean }>;
+      enforceSpendForCharge?(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean; blocked?: boolean }>;
       measuredRunDocuments?(runId: string): Promise<MeasuredRunDocument[]>;
     } | null;
   },

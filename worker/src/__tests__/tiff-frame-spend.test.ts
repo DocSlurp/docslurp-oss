@@ -1,9 +1,10 @@
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
-import { defaultPipelineFeatures } from "@docslurp/shared";
+import { defaultPipelineFeatures, modalSandboxCostCents } from "@docslurp/shared";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
-import { setSpendCheckConfig } from "../db/spend-check.js";
+import { enforceRunSpendForCharge, setSpendCheckConfig, SpendCheckUnavailableError } from "../db/spend-check.js";
+import { persistRunUsageEvents } from "../db/usage-event-store.js";
 import { Store } from "../db/store.js";
 import { authorizeImageFrames } from "../ocr/image-frames.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
@@ -63,6 +64,57 @@ const control = async (runId: string) =>
   (await db.query<{ control_state: string | null; pause_reason: string | null }>(`select control_state, pause_reason from workspace_runs where id = '${runId}'`)).rows[0];
 const pageCount = async (documentId: string) =>
   (await db.query<{ page_count: number; page_count_source: string }>(`select page_count, page_count_source from documents where id = '${documentId}'`)).rows[0];
+
+describe("charge spend check fails closed", () => {
+  it("refuses with a retryable error when the balance read fails, and when the pause it decided on cannot be written", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const run = { id: "run-x", orgId: "o-low", workspaceId: "w-low", userId: "u1" };
+    const readFails = (async () => { throw new Error("connection reset"); }) as any;
+    await expect(enforceRunSpendForCharge(readFails, run, 5)).rejects.toBeInstanceOf(SpendCheckUnavailableError);
+    // The balance says no; the pause update then fails.
+    let queries = 0;
+    const pauseFails = (async () => {
+      queries += 1;
+      if (queries === 1) return [{ funded: true, available: 0, workspace_budget_paused: false, org_budget_paused: false, workspace_in_org: true }];
+      throw new Error("deadlock detected");
+    }) as any;
+    await expect(enforceRunSpendForCharge(pauseFails, run, 5)).rejects.toBeInstanceOf(SpendCheckUnavailableError);
+    // A run with no organization cannot be checked: refused, never let through.
+    await expect(enforceRunSpendForCharge(readFails, { ...run, orgId: null }, 5)).rejects.toBeInstanceOf(SpendCheckUnavailableError);
+    // Temporal retries it: an ordinary, retryable activity failure on early attempts, and never a document verdict.
+    const { classifyActivityError } = await import("../temporal/failure-classification.js");
+    const { toStageActivityFailure } = await import("../temporal/activities.js");
+    const { isDocumentLevelFailure } = await import("../lib/document-failure.js");
+    const refusal = new SpendCheckUnavailableError("spend check failed", { cause: new Error("connection reset") });
+    const classification = classifyActivityError(refusal, { shuttingDown: () => false });
+    const failure = toStageActivityFailure(refusal, { classification, attempt: 1, ordinaryFailures: 0, ordinaryAttemptLimit: 3 }) as { nonRetryable?: boolean };
+    expect(failure.nonRetryable ?? false).toBe(false);
+    expect(isDocumentLevelFailure(refusal)).toBe(false);
+  });
+});
+
+describe("OCR VM provider cost on a refused image", () => {
+  it("persists the VM's cost at the sandbox rate as providerCostCents, bills 0 credits, and a retried checkpoint writes it once", async () => {
+    const state = await stateFor("run-low", "tiff-40");
+    const cents = modalSandboxCostCents({ cores: 2, memoryGib: 2, seconds: 33.7 });
+    state.usageLedger.enqueue({ provider: "modal", model: "ocr-vm", metric: "sandbox_compute", amount: cents, unit: "cent", costCents: cents,
+      metadata: { costRole: "provider", costSource: "estimate", billable: false, documentId: "tiff-40" } });
+    const batch = state.usageLedger.checkpoint();
+    expect(state.usageLedger.pendingBillableCents).toBe(0);
+    const sql = (store as unknown as { sql: Parameters<typeof persistRunUsageEvents>[0]["client"] }).sql;
+    // The first write's commit was lost: the checkpoint retries the same batch.
+    await persistRunUsageEvents({ client: sql, state, usageEvents: batch.events });
+    await persistRunUsageEvents({ client: sql, state, usageEvents: batch.events });
+    batch.commit();
+    const { rows } = await db.query<{ n: number; cost_cents: string; provider_cost: string }>(
+      `select count(*)::int as n, coalesce(sum(cost_cents), 0)::text as cost_cents, coalesce(sum((metadata ->> 'providerCostCents')::float8), 0)::text as provider_cost
+       from usage_events where run_id = 'run-low' and metric = 'sandbox_compute'`);
+    expect(rows[0]!.n).toBe(1);
+    expect(Number(rows[0]!.cost_cents)).toBe(0);
+    expect(Number(rows[0]!.provider_cost)).toBeCloseTo(cents, 9);
+    expect(cents).toBeCloseTo(33.7 * (2 * 0.00003942 + 2 * 0.00000667) * 100, 12);
+  }, 60_000);
+});
 
 describe("TIFF frame-count spend check", () => {
   it("pauses the run and refuses a 40-frame TIFF a 5-credit balance cannot cover, before any frame is charged", async () => {

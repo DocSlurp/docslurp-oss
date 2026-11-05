@@ -121,6 +121,8 @@ export interface SpendCheckResult {
   paused: boolean;
   reason?: string;
   available?: number;
+  /** The run should pause but the pause write failed (pauseRunForSpend never throws). */
+  pauseFailed?: boolean;
 }
 
 const BLOCK_MESSAGES: Record<string, string> = {
@@ -184,9 +186,23 @@ export async function enforceRunSpend(
 }
 
 /**
+ * The charge check could not decide: the balance read or the pause write failed, or the run has no organization to check. It
+ * fails closed and is retryable: the stage leaves the document unfinished (an infrastructure error, document-failure.ts) and
+ * Temporal retries the activity, which checks again before anything is charged.
+ */
+export class SpendCheckUnavailableError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "SpendCheckUnavailableError";
+  }
+}
+
+/**
  * The same check with a charge the run is about to owe: the run pauses when `credits` more would take the org's available balance
  * below what a running job needs. For a charge admission could not see (a document measured at far more pages than intake
- * counted). Never throws.
+ * counted, a TIFF's counted frames). Fails closed: a failed balance read or pause write throws SpendCheckUnavailableError (retryable)
+ * instead of letting the charge through. `blocked` without `paused` means the balance does not cover it and the run was already
+ * paused or stopped by something else.
  */
 export async function enforceRunSpendForCharge(
   client: Client,
@@ -194,7 +210,9 @@ export async function enforceRunSpendForCharge(
   credits: number,
   trigger: "stage-boundary" | "page-interval" | "checkpoint-interval" = "stage-boundary",
 ): Promise<SpendCheckResult> {
-  if (!spendCheckConfig().enabled || !run.orgId || !(credits > 0)) return { blocked: false, paused: false };
+  if (!spendCheckConfig().enabled || !(credits > 0)) return { blocked: false, paused: false };
+  if (!run.orgId) throw new SpendCheckUnavailableError(`run ${run.id} has no organization to check a ${credits.toFixed(2)}-credit charge against`);
+  let result: SpendCheckResult;
   try {
     const [row] = await client<{
       funded: boolean | null;
@@ -209,11 +227,21 @@ export async function enforceRunSpendForCharge(
     const available = Number(row?.available ?? 0) - credits;
     const reason = spendBlockCode(row ? { ...row, available, org_id: run.orgId } : row);
     if (!reason) return { blocked: false, paused: false };
-    return await pauseRunForSpend(client, run, reason, trigger, available);
+    result = await pauseRunForSpend(client, run, reason, trigger, available);
   } catch (error) {
-    console.error(`[spend-check] run=${run.id} charge check failed: ${error instanceof Error ? error.message : String(error)}`);
-    return { blocked: false, paused: false };
+    console.error(`[spend-check] run=${run.id} charge check failed, refusing the charge: ${error instanceof Error ? error.message : String(error)}`);
+    pushSpendCheckFailure(run, "check-failed");
+    throw new SpendCheckUnavailableError(`spend check for a ${credits.toFixed(2)}-credit charge failed`, { cause: error });
   }
+  if (result.pauseFailed) {
+    pushSpendCheckFailure(run, "pause-failed");
+    throw new SpendCheckUnavailableError(`spend check blocked a ${credits.toFixed(2)}-credit charge but could not pause run ${run.id}`);
+  }
+  return result;
+}
+
+function pushSpendCheckFailure(run: { id: string; orgId: string | null }, reason: string): void {
+  console.error(`[spend-check] charge-refused run=${run.id} org=${run.orgId ?? "none"} reason=${reason} retryable=true`);
 }
 
 /**
@@ -262,7 +290,7 @@ export async function pauseRunForSpend(
     return { blocked: true, paused: true, reason, available };
   } catch (error) {
     console.error(`[spend-check] run=${run.id} pause failed: ${error instanceof Error ? error.message : String(error)}`);
-    return { blocked: true, paused: false, reason, available };
+    return { blocked: true, paused: false, reason, available, pauseFailed: true };
   }
 }
 

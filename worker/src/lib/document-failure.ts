@@ -45,6 +45,8 @@ const INFRASTRUCTURE_ERROR_NAMES = new Set([
   // The worker, not the Document: a command's teardown failed here, or this worker is quarantined.
   "CommandTeardownError",
   "WorkerQuarantinedError",
+  // A charge's spend check could not decide (db/spend-check.ts): refused, retried, never a verdict on the Document.
+  "SpendCheckUnavailableError",
 ]);
 
 function causeChain(error: unknown): unknown[] {

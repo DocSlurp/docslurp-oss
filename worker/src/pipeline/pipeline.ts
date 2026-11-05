@@ -67,7 +67,7 @@ export interface CheckpointStore {
   /** The run's TIFFs whose frames raised their page count, with the pages already charged Rich (frame-count spend check). */
   countedImageFrames?(runId: string): Promise<Array<{ documentId: string; pageCount: number; chargedPages: number }>>;
   /** Pauses the run when credits it newly owes (a measured page count above intake's) no longer fit the org's balance. */
-  enforceSpendForCharge?(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean }>;
+  enforceSpendForCharge?(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean; blocked?: boolean }>;
   /** The run's measured documents (billing_pages set) that still bill at completion, for the cumulative page-count spend check. */
   measuredRunDocuments?(runId: string): Promise<Array<{ pageCount: number; billingPages: number; method: string | null }>>;
   /**
