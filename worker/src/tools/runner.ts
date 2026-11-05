@@ -26,7 +26,7 @@ import { pipeline } from "node:stream/promises";
 import { finished } from "node:stream";
 import type { Writable } from "node:stream";
 
-import { resolveCommandPaths } from "../sandbox/paths.js";
+import { interpreterRoots, resolveCommandPaths } from "../sandbox/paths.js";
 import { latchedTeardownError, sandboxScopeStorage } from "../sandbox/session-context.js";
 import { admitCommandSource } from "../sandbox/source-quarantine.js";
 import { assertTeardownBreakerClosed } from "../sandbox/teardown-breaker.js";
@@ -1003,7 +1003,8 @@ export class CommandRunner {
     return {
       ...plan,
       available: plan.available && existsSync(paths.modelDir) && existsSync(path.join(this.scriptsDir, "docslurp_ocr.py")),
-      bundleRoots: [paths.venvRoot, paths.modelDir],
+      // The venv's interpreter may be a symlink into a Python install outside the venv (uv, pyenv): bind its prefix too.
+      bundleRoots: [...new Set([paths.venvRoot, paths.modelDir, ...interpreterRoots(paths.python)])],
       bundleEnv: { OMP_NUM_THREADS: "1", OMP_THREAD_LIMIT: "1" },
       // The CLI opens no sockets (it replaces socket creation before importing the engine).
       denyUnixSockets: true,

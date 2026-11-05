@@ -128,6 +128,7 @@ export function checkResultAgainstJob(result: OcrResultRecord, job: SandboxedOcr
     seen.add(frame.frame);
     if (allowed ? !allowed.has(frame.frame) : frame.frame > job.maxFrames) throw new Error(`OCR result has unrequested frame ${frame.frame}`);
     if (frame.recogniser !== null && !job.recognisers.includes(frame.recogniser)) throw new Error(`OCR result used an unrequested recogniser ${frame.recogniser}`);
+    if (frame.image !== null && frame.image !== `frame-${String(frame.frame).padStart(4, "0")}.png`) throw new Error(`OCR frame ${frame.frame} names another frame's image`);
     if (frame.width > job.maxLongEdge || frame.height > job.maxLongEdge) throw new Error(`OCR frame ${frame.frame} exceeds the long-edge cap`);
   }
   if (result.frames.length > job.maxFrames) throw new Error("OCR result exceeds the frame cap");
