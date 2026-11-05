@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { defaultPipelineFeatures } from "@docslurp/shared";
+import { defaultPipelineFeatures, embeddingProfileCatalog } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import { resolveEmbeddingModel } from "../embeddings/resolver.js";
@@ -74,7 +74,6 @@ describe("resolveEmbeddingModel", () => {
     const result = resolveEmbeddingModel(
       baseConfig,
       defaultPipelineFeatures,
-      "en",
     );
 
     expect(result.modelUri).toBe(defaultPipelineFeatures.embedding.modelUri);
@@ -84,8 +83,22 @@ describe("resolveEmbeddingModel", () => {
     expect(result.dimensions).toBe(1024);
   });
 
-  it("keeps the hosted default for multilingual content without loading local weights", () => {
-    const result = resolveEmbeddingModel(baseConfig, defaultPipelineFeatures, "mul");
+  it("resolves one model per index config: the route never depends on document text", () => {
+    const local = {
+      ...defaultPipelineFeatures,
+      embedding: { ...defaultPipelineFeatures.embedding, profile: "good-fast-local" as const, target: "local" as const, modelUri: embeddingProfileCatalog["good-fast-local"].config.modelUri },
+    };
+    const first = resolveEmbeddingModel(baseConfig, local);
+    // The old per-document switch moved a non-ASCII document to the multilingual
+    // MiniLM (384 dims) while the project recorded vectors of the configured model.
+    expect(first.profile).toBe("good-fast-local");
+    expect(first.modelUri).toBe(local.embedding.modelUri);
+    expect(first.dimensions).toBe(local.embedding.dimensions ?? first.dimensions);
+    expect(resolveEmbeddingModel.length).toBe(2); // (config, pipeline): no per-document input
+  });
+
+  it("keeps the hosted default without loading local weights", () => {
+    const result = resolveEmbeddingModel(baseConfig, defaultPipelineFeatures);
     expect(result.provider).toBe("openrouter");
     expect(result.model).toBe("perplexity/pplx-embed-v1-0.6b");
     expect(result.dimensions).toBe(1024);
@@ -102,7 +115,7 @@ describe("resolveEmbeddingModel", () => {
       },
     };
 
-    const result = resolveEmbeddingModel(baseConfig, pipeline, "en");
+    const result = resolveEmbeddingModel(baseConfig, pipeline);
 
     expect(result.model).toBe("text-embedding-3-small");
     expect(result.provider).toBe("openai");
@@ -121,7 +134,7 @@ describe("resolveEmbeddingModel", () => {
       },
     };
 
-    const result = resolveEmbeddingModel(baseConfig, pipeline, "en");
+    const result = resolveEmbeddingModel(baseConfig, pipeline);
 
     expect(result.target).toBe("local");
     expect(result.provider).toBe("ollama");

@@ -124,6 +124,8 @@ export async function purgeOrganization(
     await client`
       update mcp_oauth_grants set revoked_at = coalesce(revoked_at, now()) where org_id = ${orgId}
     `;
+    // The organization's webhooks (target URLs and signing secrets) go with it; their delivery log cascades.
+    await client`delete from webhooks where org_id = ${orgId}`;
     await client`delete from sso_auth_requests where org_id = ${orgId}`;
     await client`delete from sso_identity_links where org_id = ${orgId}`;
     await client`delete from sso_domains where org_id = ${orgId}`;
@@ -316,7 +318,8 @@ export async function deleteAccount(
       update api_keys set revoked_at = coalesce(revoked_at, now()), name = 'Deleted key', allowed_domains = '{}'
       where user_id = ${userId}
     `;
-    await client`delete from webhook_outbox where user_id = ${userId}`;
+    // webhook_outbox rows are an organization's queued events, attributed to the user who started the run. Those of an
+    // organization this user leaves still go to the team's webhooks; those of organizations purged above were removed with them.
     await client`delete from webhook_deliveries where user_id = ${userId}`;
     await client`delete from webhooks where user_id = ${userId}`;
     await client`delete from mcp_service_connections where user_id = ${userId}`;

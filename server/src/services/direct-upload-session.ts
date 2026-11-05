@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { PipelineFeatureOverrides, ProjectTemplateKey } from "@docslurp/shared";
 
 import { sql } from "../db.js";
+import { sanitizeUploadFilename } from "../lib/filenames.js";
 import { env } from "../config.js";
 import { reserveDirectUploadLockConnection } from "../lib/direct-upload-locks.js";
 import { normalizeUploadPath } from "../lib/canonical-id.js";
@@ -19,9 +20,13 @@ import {
 } from "../lib/storage.js";
 import {
   admitIntakeFile,
+  allRejectedError,
   rawSourceKey,
+  rejectionCode,
   ProjectIntakeError,
   type IntakeExtract,
+  type RejectedIntakeFile,
+  type ProjectIntakeErrorCode,
   type ProjectIntakeItem,
 } from "./project-intake.js";
 
@@ -30,6 +35,8 @@ const MULTIPART_THRESHOLD_BYTES = 32 * 1024 * 1024;
 const MULTIPART_PART_SIZE_BYTES = 8 * 1024 * 1024;
 
 export interface DirectUploadSessionFileInput {
+  /** The client's own id for this file; echoed on the session's file and on a rejection so clients never match by filename. */
+  clientId?: string;
   filename: string;
   mimeType: string;
   sizeBytes?: number;
@@ -97,6 +104,9 @@ export type UploadSessionFileRow = {
   completed_parts: Array<{ partNumber: number; etag: string }> | null;
   canonical_id?: string | null;
   source_path?: string | null;
+  /** Position of the file in the create request. */
+  request_index?: number | null;
+  client_id?: string | null;
 };
 
 export interface LoadedDirectUploadSession {
@@ -149,10 +159,12 @@ export async function loadDirectUploadSession(
       completed_parts,
       canonical_id,
       source_path,
-      unknown_size
+      unknown_size,
+      request_index,
+      client_id
     from upload_session_files
     where session_id = ${sessionId}
-    order by created_at asc
+    order by request_index asc nulls last, created_at asc
   `;
 
   // PostgreSQL bigint columns arrive as strings; browser file matching and
@@ -165,10 +177,28 @@ export async function loadDirectUploadSession(
   return { session, files };
 }
 
+/** How a client matches a session file to the file it sent: its position in the request and its own id. */
+function fileRef(file: UploadSessionFileRow): { index: number | null; clientId: string | null } {
+  return { index: file.request_index ?? null, clientId: file.client_id ?? null };
+}
+
+async function storedPartsAtExpectedSize(file: UploadSessionFileRow, partSize: number, partCount: number): Promise<Array<{ partNumber: number; etag: string }>> {
+  if (file.status !== "pending" || !file.upload_id) return [];
+  try {
+    const parts = await listMultipartUploadParts({ key: file.source_key, uploadId: file.upload_id });
+    return parts.filter((part) => part.partNumber <= partCount
+      && part.sizeBytes === Math.min(partSize, file.size_bytes - (part.partNumber - 1) * partSize));
+  } catch {
+    // The upload closed (completed or aborted) or storage is unreachable: report what the database already knows.
+    return [];
+  }
+}
+
 export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow) {
-  if (file.status === "completed" || file.status === "aborted") return { id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, mode: file.upload_mode as "single" | "multipart", status: file.status };
+  if (file.status === "completed" || file.status === "aborted") return { ...fileRef(file), id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, mode: file.upload_mode as "single" | "multipart", status: file.status };
   if (file.upload_mode === "single") {
     return {
+      ...fileRef(file),
       id: file.id,
       filename: file.filename,
       mimeType: file.mime_type,
@@ -191,9 +221,13 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
   if (!file.upload_id) {
     throw new Error(`Multipart session missing upload id for ${file.id}`);
   }
-  const completed = new Set(
-    (file.completed_parts ?? []).map((part) => part.partNumber),
-  );
+  // Storage is authoritative for which parts arrived: a client that lost a connection resumes from these pendingParts
+  // instead of re-sending the whole file. A part counts only at its exact expected size.
+  const stored = file.unknown_size ? [] : await storedPartsAtExpectedSize(file, partSize, partCount);
+  const completed = new Set([
+    ...(file.completed_parts ?? []).map((part) => part.partNumber),
+    ...stored.map((part) => part.partNumber),
+  ]);
   const pendingParts: Array<{
     partNumber: number;
     sizeBytes: number;
@@ -219,6 +253,7 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
   }
 
   return {
+    ...fileRef(file),
     id: file.id,
     filename: file.filename,
     mimeType: file.mime_type,
@@ -230,24 +265,44 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
     partCount,
     unknownSize: Boolean(file.unknown_size),
     pendingParts,
-    completedParts: file.completed_parts ?? [],
+    completedParts: file.completed_parts?.length ? file.completed_parts : stored,
   };
 }
 
 export async function createDirectUploadSession(input: CreateDirectUploadSessionInput) {
-  if (input.files.some(file => file.singlePart && (file.sizeBytes === undefined || file.sizeBytes > 5 * 1024 ** 3))) {
-    throw new ProjectIntakeError("Single-part uploads cannot exceed 5 GiB", 400);
-  }
-  // Project Intake's policy screens declared files before any upload target exists.
-  const files = input.files.map((file) => ({
-    ...file,
-    unknownSize: file.sizeBytes === undefined,
-    sizeBytes: file.sizeBytes ?? 0,
-    ...admitIntakeFile(
-      { filename: file.filename, mimeType: file.mimeType, sizeBytes: file.sizeBytes ?? 0 },
-      "direct-upload",
-    ),
-  }));
+  // Project Intake's policy screens each declared file before any upload target exists. One bad file never fails the
+  // request: the good files get a session and the rest come back as per-file rejections keyed by request index. Only a
+  // request in which nothing is acceptable fails, with every rejection named.
+  const rejected: RejectedIntakeFile[] = [];
+  const files: Array<DirectUploadSessionFileInput & { index: number; unknownSize: boolean; sizeBytes: number; filename: string; mimeType: string }> = [];
+  input.files.forEach((file, index) => {
+    try {
+      if (file.singlePart && (file.sizeBytes === undefined || file.sizeBytes > 5 * 1024 ** 3)) {
+        throw new ProjectIntakeError("Single-part uploads cannot exceed 5 GiB", 413);
+      }
+      files.push({
+        ...file,
+        index,
+        unknownSize: file.sizeBytes === undefined,
+        sizeBytes: file.sizeBytes ?? 0,
+        ...admitIntakeFile(
+          { filename: file.filename, mimeType: file.mimeType, sizeBytes: file.sizeBytes ?? 0 },
+          "direct-upload",
+        ),
+      });
+    } catch (error) {
+      if (!(error instanceof ProjectIntakeError)) throw error;
+      rejected.push({
+        index,
+        ...(file.clientId ? { clientId: file.clientId } : {}),
+        filename: sanitizeUploadFilename(file.filename),
+        statusCode: error.statusCode,
+        code: rejectionCode(error),
+        message: error.message,
+      });
+    }
+  });
+  if (files.length === 0) throw allRejectedError(rejected);
 
   const sessionId = randomUUID();
   await sql`
@@ -305,7 +360,9 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
         sha256,
         canonical_id,
         source_path,
-        unknown_size
+        unknown_size,
+        request_index,
+        client_id
       )
       values (
         ${fileId},
@@ -321,7 +378,9 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
         ${file.sha256 ?? null},
         ${file.canonicalId ?? null},
         ${normalizeUploadPath(file.path)},
-        ${file.unknownSize}
+        ${file.unknownSize},
+        ${file.index},
+        ${file.clientId ?? null}
       )
     `;
   }
@@ -331,7 +390,7 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
   if (!loaded) {
     throw new ProjectIntakeError("Upload session not found", 404);
   }
-  return await describeDirectUploadSession(loaded);
+  return { ...(await describeDirectUploadSession(loaded)), ...(rejected.length > 0 ? { rejected } : {}) };
 }
 
 export async function describeDirectUploadSession(
@@ -339,7 +398,7 @@ export async function describeDirectUploadSession(
   statusOnly = false,
 ) {
   const files = await Promise.all(
-    loaded.files.map(async (file) => statusOnly || ["confirmed", "failed", "aborted"].includes(loaded.session.status) ? { id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, mode: file.upload_mode as "single" | "multipart", status: file.status } : await buildDirectUploadFileDescriptor(file)),
+    loaded.files.map(async (file) => statusOnly || ["confirmed", "failed", "aborted"].includes(loaded.session.status) ? { ...fileRef(file), id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, mode: file.upload_mode as "single" | "multipart", status: file.status } : await buildDirectUploadFileDescriptor(file)),
   );
   return {
     sessionId: loaded.session.id,
@@ -366,11 +425,11 @@ export async function getDirectUploadSessionDescription(
 }
 
 /** Cross-process serialization: the dedicated connection owns the lock until release. */
-export async function withDirectUploadLock<T>(sessionId: string, run: () => Promise<T>): Promise<T> {
+export async function withDirectUploadLock<T>(sessionId: string, run: () => Promise<T>, busyMessage = "Upload session is being finalized; retry shortly", busyCode?: ProjectIntakeErrorCode): Promise<T> {
   const { connection, release } = await reserveDirectUploadLockConnection();
   try {
     const [lock] = await connection`select pg_try_advisory_lock(hashtextextended(${`upload:${sessionId}`}, 0)) as acquired`;
-    if (!lock?.acquired) throw new ProjectIntakeError("Upload session is being finalized; retry shortly", 409);
+    if (!lock?.acquired) throw new ProjectIntakeError(busyMessage, 409, undefined, busyCode);
     try { return await run(); }
     finally { await connection`select pg_advisory_unlock(hashtextextended(${`upload:${sessionId}`}, 0))`; }
   } finally { release(); }

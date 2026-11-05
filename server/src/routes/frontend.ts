@@ -18,14 +18,18 @@ import { apiStatusError } from "../lib/api-error.js";
  * for public configuration. API keys are never accepted here (session-only default).
  */
 
-/** GET /dashboard/bootstrap: the signed-in user's admin flag, organizations and accessible projects. */
+/**
+ * GET /dashboard/bootstrap: the signed-in user's platform-operator flag, organizations and accessible projects.
+ * `isOperator` is the only switch for operator-only views (worker CPU/RAM, regions, chat traces); an organization
+ * owner or admin is not an operator. `isAdmin` is the same value, kept for existing readers.
+ */
 export const dashboardRoutes = new Hono().get("/", async (c) => {
   const actor = getRequestActor(c);
   if (actor.type !== "session") return apiStatusError(c, 403, "Forbidden");
   c.header("Cache-Control", "private, no-store");
-  const isAdmin = actor.user.isAdmin === true;
+  const isOperator = actor.user.isAdmin === true;
   const [organizations, projects] = await Promise.all([listOrganizations(actor.userId), listProjects(actor.userId, { refineNames: false })]);
-  return c.json({ isAdmin, organizations, projects });
+  return c.json({ isOperator, isAdmin: isOperator, organizations, projects });
 });
 
 /** GET /v1/invites/:token?kind=organization|project: what the accept page offers. The token is the credential. */

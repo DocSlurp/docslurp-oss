@@ -1,4 +1,5 @@
 import { Writable } from "node:stream";
+import path from "node:path";
 
 import { strFromU8, unzipSync } from "fflate";
 import postgres from "postgres";
@@ -263,5 +264,154 @@ describe("buildDocumentExport", () => {
 
     expect([...uploads.keys()].filter((key) => key.startsWith("exports/o/w/exp-10/"))).toEqual(["exports/o/w/exp-10/a2.zip"]);
     expect((await sql`select object_key from document_exports where id = 'exp-10'`)[0]).toEqual({ object_key: "exports/o/w/exp-10/a2.zip" });
+  });
+});
+
+describe("embedded images in exports", () => {
+  const base = (over: Record<string, unknown>) => ({
+    role: "image", sha256: "a".repeat(64), mediaType: "image/webp", width: 4, height: 4,
+    source: { objectId: null, inline: false, encoding: "image", colorSpace: "rgb", components: 3, bitsPerComponent: 8, interpolate: false, ppi: [null, null], streamBytes: null },
+    placement: { status: "unknown", reason: "no-placement-source" }, alt: null, signals: null, signalsUnavailable: "not-measured",
+    class: { label: "figure", confidence: 0.5, signals: [] }, route: { action: "keep", reason: "unclassified-figure" },
+    ...over,
+  });
+  const md = (page: number, occ: number, included: boolean) => ({ markdown: { included, anchor: `p${page}o${occ}`, block: included ? 0 : null, method: included ? "page-end" : null } });
+  const ref = (id: string, occ: string) => `docslurp-artifact:${id}#${occ}`;
+  const uri = (n: number) => `s3://bucket/graph/doc-img/${n}`;
+  const ids = { logo: "doc-img:logo.webp", mask: "doc-img:mask.webp", secret: "doc-img:secret.webp", missing: "doc-img:missing.webp", decor: "doc-img:decor.webp", foreign: "doc-img:foreign.webp" };
+  const mediaMap = {
+    version: "docslurp-media-map@2", pageCount: 3, encoding: "lossless-webp", minWidth: 1, minHeight: 1, masks: "separate-linked-assets",
+    placementSource: "none", coordinateSpace: "pdf-points-top-left",
+    routing: { table: "image-routing@1", routedImages: 0, cap: 64, counts: { keep: 5, skip: 1 } },
+    images: [
+      base({ pageNumber: 1, occurrence: 0, artifactId: ids.logo, alt: { text: "Logo", source: "marked-content" }, ...md(1, 0, true) }),
+      base({ pageNumber: 1, occurrence: 1, role: "smask", maskOf: { pageNumber: 1, occurrence: 0 }, artifactId: ids.mask, class: { label: "mask", confidence: 1, signals: [] }, route: { action: "skip", reason: "mask" }, ...md(1, 1, false) }),
+      base({ pageNumber: 2, occurrence: 0, artifactId: ids.logo, ...md(2, 0, true) }),
+      base({ pageNumber: 2, occurrence: 1, artifactId: ids.decor, route: { action: "skip", reason: "decorative" }, ...md(2, 1, false) }),
+      base({ pageNumber: 2, occurrence: 2, artifactId: ids.secret, alt: { text: "Secret chart", source: "marked-content" }, ...md(2, 2, true) }),
+      base({ pageNumber: 3, occurrence: 0, artifactId: ids.missing, ...md(3, 0, true) }),
+      base({ pageNumber: 3, occurrence: 1, artifactId: ids.foreign, ...md(3, 1, true) }),
+    ],
+  };
+  const manifest = { documentId: "doc-img", artifacts: [
+    { id: "doc-img:source", kind: "source/pdf", uri: "s3://bucket/uploads/img.pdf", mediaType: "application/pdf", placements: [] },
+    { id: ids.logo, kind: "page/embedded-image", uri: uri(1), mediaType: "image/webp", placements: [{ pageNumber: 1 }, { pageNumber: 2 }] },
+    { id: ids.mask, kind: "page/embedded-image-mask", uri: uri(2), mediaType: "image/webp", placements: [{ pageNumber: 1 }] },
+    { id: ids.secret, kind: "page/embedded-image", uri: uri(3), mediaType: "image/webp", placements: [{ pageNumber: 2 }] },
+    { id: ids.missing, kind: "page/embedded-image", uri: uri(4), mediaType: "image/webp", placements: [{ pageNumber: 3 }] },
+    { id: ids.decor, kind: "page/embedded-image", uri: uri(6), mediaType: "image/webp", placements: [{ pageNumber: 2 }] },
+    // Named by the manifest but not recorded for this document: another tenant's object must never be read.
+    { id: ids.foreign, kind: "page/embedded-image", uri: "s3://bucket/other-tenant/secret.webp", mediaType: "image/webp", placements: [{ pageNumber: 3 }] },
+    { id: "doc-img:media-map.json", kind: "document/media-map", uri: uri(5), mediaType: "application/json", placements: [] },
+  ] };
+  const page1 = `# Report\n\n${`![Logo](${ref(ids.logo, "p1o0")})`}\n\nIntro text.`;
+  const page2 = `![](${ref(ids.logo, "p2o0")})\n\nBody.\n\n![Secret chart](${ref(ids.secret, "p2o2")})`;
+  const page3 = `![](${ref(ids.missing, "p3o0")})\n\n![Stolen](${ref(ids.foreign, "p3o1")})\n\nEnd.`;
+
+  beforeAll(async () => {
+    await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,total_documents,pipeline,artifacts)
+      values('run-img','o','u','w','bulk-upload','completed','completed',1,'{}',${sql.json({
+        "doc-img:markdown": "s3://bucket/md/doc-img.md",
+        "doc-img:artifact-graph": "s3://bucket/graph/doc-img/manifest.json",
+        "doc-img:embedded-image-artifact:0": uri(1), "doc-img:embedded-image-artifact:1": uri(2), "doc-img:embedded-image-artifact:2": uri(3),
+        "doc-img:embedded-image-artifact:3": uri(4), "doc-img:embedded-image-artifact:4": uri(5), "doc-img:embedded-image-artifact:5": uri(6),
+      })}) on conflict (id) do nothing`;
+    await sql`insert into documents(id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status,page_count,metadata)
+      values('doc-img','o','u','w-img','run-img','Images.pdf','application/pdf','uploads/img.pdf','completed',3,${sql.json({ pii: { withheldArtifactUris: [uri(3)] } })})
+      on conflict (id) do nothing`.catch(async () => {
+        await sql`insert into projects(id,org_id,user_id,name) values('w-img','o','u','Images') on conflict do nothing`;
+        await sql`insert into documents(id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status,page_count,metadata)
+          values('doc-img','o','u','w-img','run-img','Images.pdf','application/pdf','uploads/img.pdf','completed',3,${sql.json({ pii: { withheldArtifactUris: [uri(3)] } })})`;
+      });
+    await sql`insert into document_pages(id,document_id,run_id,user_id,page_number,text)
+      values('pi1','doc-img','run-img','u',1,${page1}),('pi2','doc-img','run-img','u',2,${page2}),('pi3','doc-img','run-img','u',3,${page3})
+      on conflict do nothing`;
+  });
+
+  function seedObjects() {
+    objects.set("md/doc-img.md", text(`${page1}\f${page2}\f${page3}\n`));
+    objects.set("graph/doc-img/manifest.json", text(JSON.stringify(manifest)));
+    objects.set("graph/doc-img/1", new Uint8Array([1, 1, 1]));
+    objects.set("graph/doc-img/2", new Uint8Array([2, 2]));
+    objects.set("graph/doc-img/3", new Uint8Array([3]));
+    objects.set("graph/doc-img/5", text(JSON.stringify(mediaMap)));
+    objects.set("graph/doc-img/6", new Uint8Array([6]));
+    objects.set("other-tenant/secret.webp", new Uint8Array([9, 9, 9]));
+    objects.set("uploads/img.pdf", text("%PDF"));
+  }
+
+  async function exportImages(id: string, content: "markdown" | "all") {
+    seedObjects();
+    await sql`insert into document_exports (id, org_id, project_id, user_id, document_id, content, filename, object_key, expires_at)
+      values (${id}, 'o', 'w-img', 'u', 'doc-img', ${content}, 'Images.zip', ${`exports/o/w/${id}/`}, now() + interval '7 days')`;
+    await buildDocumentExport({ sql, storage: storage as never }, id);
+    return unzip(id).files;
+  }
+
+  /** Every relative Markdown link must name a file inside the zip. */
+  function expectLinksResolve(files: Record<string, Uint8Array>) {
+    for (const [name, bytes] of Object.entries(files)) {
+      if (!name.endsWith(".md") || name.endsWith("README.md")) continue;
+      for (const [, target] of strFromU8(bytes).matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)) {
+        expect(target).not.toContain("docslurp-artifact:");
+        const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(name), target!));
+        expect(files[resolved], `${name} links to ${target}`).toBeDefined();
+      }
+    }
+  }
+
+  it("stitches Markdown to per-page image files, stores a repeated logo once and keeps masks beside their image", async () => {
+    const files = await exportImages("exp-img-1", "markdown");
+    const names = Object.keys(files).filter((name) => name.includes("/images/")).sort();
+    expect(names).toEqual(["Images/images/index.json", "Images/images/page-0001/image-001.smask.webp", "Images/images/page-0001/image-001.webp"]);
+    expect([...files["Images/images/page-0001/image-001.webp"]!]).toEqual([1, 1, 1]);
+    const markdown = strFromU8(files["Images/Images.md"]!);
+    expect(markdown).toContain("![Logo](images/page-0001/image-001.webp)");
+    expect(markdown).toContain("![](images/page-0001/image-001.webp)\n\nBody.");   // page 2 repeats the logo: same file
+    expect(markdown).not.toContain("docslurp-artifact:");
+    // Withheld, missing and foreign images keep only their alt text.
+    expect(markdown).toContain("\n\nSecret chart");
+    expect(markdown).toContain("\n\nStolen\n\nEnd.");
+    expect(strFromU8(files["Images/pages/page-0001.md"]!)).toContain("![Logo](../images/page-0001/image-001.webp)");
+    expect(strFromU8(files["Images/pages/page-0002.md"]!)).toContain("![](../images/page-0001/image-001.webp)");
+    expectLinksResolve(files);
+    // No other tenant's object, and nothing the PII policy withholds, is read into the zip.
+    expect(Object.values(files).some((bytes) => bytes.length === 3 && bytes[0] === 9)).toBe(false);
+    expect(Object.values(files).some((bytes) => bytes.length === 1 && bytes[0] === 3)).toBe(false);
+    const index = JSON.parse(strFromU8(files["Images/images/index.json"]!));
+    expect(index).toMatchObject({ version: "docslurp-export-images@1", documentId: "doc-img", source: "media-map", pageCount: 3 });
+    const byAnchor = Object.fromEntries(index.images.map((image: { anchor: string }) => [image.anchor, image]));
+    expect(byAnchor.p1o0.path).toBe("images/page-0001/image-001.webp");
+    expect(byAnchor.p1o1).toMatchObject({ path: "images/page-0001/image-001.smask.webp", maskOf: { pageNumber: 1, occurrence: 0 } });
+    expect(byAnchor.p2o0.path).toBe("images/page-0001/image-001.webp");
+    expect(byAnchor.p2o2).toMatchObject({ path: null, skipped: "withheld by the project's privacy (PII) policy" });
+    expect(byAnchor.p3o0.path).toBeNull();
+    expect(byAnchor.p3o1).toMatchObject({ path: null, skipped: "image artifact missing from the run" });
+    expect(byAnchor.p2o1).toBeUndefined();   // not referenced by the Markdown: only in full exports
+    const readme = strFromU8(files["Images/README.md"]!);
+    expect(readme).toContain("`images/page-0002/image-003.webp`: withheld by the project's privacy (PII) policy");
+    expect(readme).toContain("`images/page-0003/image-001.webp`: NoSuchKey");
+    expect(readme).toContain("`images/page-0003/image-002.webp`: image artifact missing from the run");
+    expect(readme).toContain("images/page-0001/image-001.webp");
+  });
+
+  it("adds every embedded image to a full export and still links only files it holds", async () => {
+    const files = await exportImages("exp-img-2", "all");
+    expect(Object.keys(files)).toEqual(expect.arrayContaining([
+      "Images/images/page-0001/image-001.webp", "Images/images/page-0001/image-001.smask.webp", "Images/images/page-0002/image-002.webp", "Images/images/index.json",
+    ]));
+    expect(Object.keys(files).some((name) => name.includes("page-0002/image-001") || name.includes("page-0002/image-003"))).toBe(false);
+    expectLinksResolve(files);
+  });
+
+  it("drops image links when the zip cannot hold the files", async () => {
+    seedObjects();
+    await sql`insert into document_exports (id, org_id, project_id, user_id, document_id, content, filename, object_key, expires_at)
+      values ('exp-img-3', 'o', 'w-img', 'u', 'doc-img', 'markdown', 'Images.zip', 'exports/o/w/exp-img-3/', now() + interval '7 days')`;
+    await buildDocumentExport({ sql, storage: storage as never }, "exp-img-3", { maxBytes: 1 });
+    const { files } = unzip("exp-img-3");
+    expect(Object.keys(files).some((name) => name.endsWith(".webp"))).toBe(false);
+    expect(strFromU8(files["Images/README.md"]!)).toContain("export size limit reached");
+    expectLinksResolve(files);
   });
 });

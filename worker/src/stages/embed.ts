@@ -13,7 +13,8 @@ import { keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import { deleteLanceDbRecords } from "./lancedb-writer.js";
 import { projectVectorLocation } from "./lancedb-location.js";
-import { detectLanguage, resolveEmbeddingModel, resolveVectorBackends } from "../embeddings/resolver.js";
+import { detectLanguage, detectScript, resolveEmbeddingModel, resolveVectorBackends } from "../embeddings/resolver.js";
+import { chunkTokenBudget, embeddingInputTokenLimit } from "../embeddings/input-limits.js";
 import {
   asEmbeddingReuseStore,
   documentContextKey,
@@ -29,7 +30,7 @@ import { allowHostedCall, openRouterTextCall } from "../lib/privacy-guard.js";
 import { createConcurrencyLimiter, createSerialQueue, createThrottledWriter, runBounded, type ConcurrencyLimiter } from "../lib/bounded-concurrency.js";
 import { textModelApiKey } from "../lib/text-model-route.js";
 import {
-  buildChunks,
+  buildChunksCooperative,
   contextualizeChunksForEmbedding,
   embedTextChunks,
   estimateTokens,
@@ -128,8 +129,8 @@ export class EmbedStage implements Stage {
             state.artifactLedger.recordDocument(document.id, "json-schema", this.storage.uri(schemaKey));
           }
 
-          const detectedLang = detectLanguage(extracted.text);
-          const profile = resolveEmbeddingModel(this.config, state.run.pipeline, detectedLang);
+          const detectedScript = detectScript(extracted.text);
+          const profile = resolveEmbeddingModel(this.config, state.run.pipeline);
           const tunedProfile = {
             ...profile,
             // Hosted vectors do not load an inference model into the worker.
@@ -142,6 +143,9 @@ export class EmbedStage implements Stage {
             lateChunking?: boolean;
             lateChunkingWindow?: number;
           };
+          // Chunks and their preamble are sized to the model's input window; the model truncates anything past it silently.
+          const inputTokenLimit = embeddingInputTokenLimit(profile.modelUri);
+          const chunkMaxTokens = chunkTokenBudget(profile.modelUri);
           const lateChunkingEnabled = embeddingConfig.lateChunking === true;
           const lateChunkingWindow = Math.max(1, embeddingConfig.lateChunkingWindow ?? 2);
           const reuseStore = asEmbeddingReuseStore(state.store);
@@ -250,9 +254,10 @@ export class EmbedStage implements Stage {
             chunkDrafts = extracted.canonicalDocument
               ? buildCanonicalChunksFromDocument(extracted.canonicalDocument, document.filename, {
                   chunkOverlap: state.run.pipeline.chunkOverlap,
+                  maxTokens: chunkMaxTokens,
                   sourceKind: document.mimeType.startsWith("image/") ? "image" : null
                 })
-              : fallbackChunkDrafts(extracted.text, document.filename, state.run.pipeline.chunkOverlap);
+              : await fallbackChunkDrafts(extracted.text, document.filename, state.run.pipeline.chunkOverlap, chunkMaxTokens, signal);
             contentHash = hashContent(
               JSON.stringify({
                 documentTitle: document.filename,
@@ -325,11 +330,13 @@ export class EmbedStage implements Stage {
                 config: this.config,
                 signal,
                 documentContext,
+                maxInputTokens: inputTokenLimit,
               });
           const embeddingInputs = buildLateChunkedEmbeddingInputs(
             contextualized.chunks.map((chunk) => chunk.text),
             lateChunkingEnabled,
-            lateChunkingWindow
+            lateChunkingWindow,
+            inputTokenLimit
           );
           const embedWindows = buildEmbeddingWindows(chunkDrafts, {
             maxPages: maxEmbedWindowPages(),
@@ -634,6 +641,14 @@ export class EmbedStage implements Stage {
             throw new Error(`embedding vector window assembly failed for ${document.id}`);
           }
 
+          // The artifact records the profile's model and dimension; every vector written under it must have both.
+          const badVector = embedded.vectors.findIndex((vector) => vector.length !== tunedProfile.dimensions);
+          if (tunedProfile.dimensions > 0 && badVector >= 0) {
+            throw new Error(
+              `embedding dimension mismatch for ${document.id}: ${tunedProfile.model} is recorded as ${tunedProfile.dimensions} dimensions but vector ${badVector} has ${embedded.vectors[badVector]!.length}`
+            );
+          }
+
           chunks.forEach((chunk, index) => { chunk.vector = embedded.vectors[index] ?? []; });
 
           const estimatedTokens = chunks.reduce((sum, c) => sum + c.tokenEstimate, 0);
@@ -645,7 +660,7 @@ export class EmbedStage implements Stage {
             documentId: document.id,
             embedding: tunedProfile,
             vectorBackends,
-            chunking: "semantic-heading-max-1800-chars",
+            chunking: "semantic-heading-unicode-max-1800-chars-and-model-tokens",
             source: {
               mimeType: document.mimeType,
               filename: document.filename,
@@ -760,11 +775,13 @@ export class EmbedStage implements Stage {
             documentId: document.id,
             scope: "document",
             stageName: this.name,
+            // The ingest report reads `detectedLanguage`. Metadata only: the
+            // embedding model is fixed by the index config, never by the script.
             metric: "detected-language",
-            value: detectedLang === "en" ? 0 : 1,
-            unit: "is-multilingual",
+            value: detectedScript === "latin" || detectedScript === "und" ? 0 : 1,
+            unit: "is-non-latin",
             tags: ["document", "language"],
-            metadata: { detectedLanguage: detectedLang, model: tunedProfile.model }
+            metadata: { detectedLanguage: detectLanguage(extracted.text), detectedScript, model: tunedProfile.model }
           });
           const reuseMetadata = {
             provider: tunedProfile.provider,
@@ -972,20 +989,52 @@ export class EmbedStage implements Stage {
   }
 }
 
-function buildLateChunkedEmbeddingInputs(chunks: string[], enabled: boolean, windowSize: number): string[] {
+/**
+ * Each chunk embedded with its neighbours as context ("late chunking"). Neighbours join nearest first and each side
+ * stops at the first neighbour that does not fit: skipping one and taking a farther chunk would leave a gap that
+ * the joined prefix or suffix still contains, and cut the focus chunk off the end of the model window.
+ */
+export function buildLateChunkedEmbeddingInputs(chunks: string[], enabled: boolean, windowSize: number, maxInputTokens: number): string[] {
   if (!enabled || chunks.length <= 1) {
     return chunks;
   }
 
   const radius = Math.max(1, Math.min(windowSize, 6));
-  return chunks.map((chunk, index) => {
-    const start = Math.max(0, index - radius);
-    const end = Math.min(chunks.length, index + radius + 1);
-    const prefix = chunks.slice(start, index).join("\n\n");
-    const suffix = chunks.slice(index + 1, end).join("\n\n");
-    return [prefix ? `Context before:\n${prefix}` : "", `Focus chunk:\n${chunk}`, suffix ? `Context after:\n${suffix}` : ""]
+  const costs = chunks.map((chunk) => estimateTokens(chunk) + 2);
+  const assemble = (index: number, before: number, after: number): string => {
+    const prefix = chunks.slice(before, index).join("\n\n");
+    const suffix = chunks.slice(index + 1, after + 1).join("\n\n");
+    return [prefix ? `Context before:\n${prefix}` : "", `Focus chunk:\n${chunks[index]}`, suffix ? `Context after:\n${suffix}` : ""]
       .filter(Boolean)
       .join("\n\n");
+  };
+  return chunks.map((_chunk, index) => {
+    let room = maxInputTokens - costs[index]! - 16; // labels
+    let before = index;
+    let after = index;
+    let beforeOpen = true;
+    let afterOpen = true;
+    for (let distance = 1; distance <= radius && (beforeOpen || afterOpen); distance++) {
+      const previous = index - distance;
+      if (beforeOpen) {
+        if (previous >= 0 && costs[previous]! <= room) { room -= costs[previous]!; before = previous; }
+        else beforeOpen = false;
+      }
+      const following = index + distance;
+      if (afterOpen) {
+        if (following < chunks.length && costs[following]! <= room) { room -= costs[following]!; after = following; }
+        else afterOpen = false;
+      }
+    }
+    // The estimate is the contract: drop context, farthest first, until the whole input fits; the bare chunk is
+    // always within the chunking budget.
+    let input = assemble(index, before, after);
+    while ((before < index || after > index) && estimateTokens(input) > maxInputTokens) {
+      if (index - before >= after - index) before += 1;
+      else after -= 1;
+      input = assemble(index, before, after);
+    }
+    return input;
   });
 }
 
@@ -1116,12 +1165,14 @@ function normalizedChunkPages(chunk: CanonicalChunk | undefined): number[] {
   return [...new Set(pages)].sort((a, b) => a - b);
 }
 
-function fallbackChunkDrafts(
+async function fallbackChunkDrafts(
   text: string,
   fallback: string,
-  chunkOverlap: boolean
-): CanonicalChunk[] {
-  const { texts, headingPaths } = buildChunks(text, fallback, { chunkOverlap });
+  chunkOverlap: boolean,
+  maxTokens: number,
+  signal?: AbortSignal,
+): Promise<CanonicalChunk[]> {
+  const { texts, headingPaths } = await buildChunksCooperative(text, fallback, { chunkOverlap, maxTokens }, signal);
   return texts.map((chunkText, index) => ({
     text: chunkText,
     headingPath: headingPaths[index] ?? [],

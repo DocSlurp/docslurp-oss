@@ -8,7 +8,7 @@ import { withApiErrorDetails } from "../lib/api-error.js";
 
 export const DEFAULT_PROJECT_NAME = "Default";
 
-export type ProjectAccessErrorCode = Extract<ApiErrorCode, "organization_not_found" | "project_not_found" | "project_forbidden" | "invalid_request" | "forbidden">;
+export type ProjectAccessErrorCode = Extract<ApiErrorCode, "organization_not_found" | "project_not_found" | "project_forbidden" | "project_ambiguous" | "invalid_request" | "forbidden">;
 
 /**
  * A project reference that cannot be served to the caller. Extends Hono's
@@ -19,7 +19,7 @@ export type ProjectAccessErrorCode = Extract<ApiErrorCode, "organization_not_fou
  */
 export class ProjectAccessError extends HTTPException {
   constructor(
-    status: 400 | 403 | 404,
+    status: 400 | 403 | 404 | 409,
     readonly code: ProjectAccessErrorCode,
     message: string,
     readonly details?: ApiErrorDetails,

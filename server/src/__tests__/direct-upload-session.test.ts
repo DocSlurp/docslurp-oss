@@ -118,6 +118,61 @@ describe("Direct Upload Session Module", () => {
     expect(sqlMock).not.toHaveBeenCalled();
   });
 
+  it("accepts the good files of a batch, rejects the unsupported one by request index, and echoes client ids", async () => {
+    sqlMock.mockReset();
+    const stored: Array<Record<string, unknown>> = [];
+    sqlMock.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const query = strings.join("?");
+      if (query.includes("insert into upload_session_files")) stored.push({ filename: values[2], index: values[13], clientId: values[14] });
+      if (query.includes("from upload_sessions")) return [{ id: "s", user_id: "user-1", org_id: "org-1", status: "pending" }];
+      if (query.includes("from upload_session_files")) return stored.map((file, i) => ({ id: `file-${i}`, session_id: "s", filename: file.filename, mime_type: "application/pdf", size_bytes: 10, source_key: `k${i}`, upload_mode: "single", status: "pending", request_index: file.index, client_id: file.clientId }));
+      return [];
+    });
+    const result = await createDirectUploadSession({
+      userId: "user-1", orgId: "org-1", pipeline: {},
+      files: [
+        { clientId: "a", filename: "What is RAG?.pdf", mimeType: "application/pdf", sizeBytes: 10 },
+        { clientId: "b", filename: "payload.exe", mimeType: "application/x-msdownload", sizeBytes: 10 },
+        { clientId: "c", filename: "Scan  001.pdf", mimeType: "application/pdf", sizeBytes: 10 },
+      ],
+    });
+    // The sanitized names differ from what the client sent; index and clientId are how it finds its files.
+    expect(result.files.map((file) => [file.index, file.clientId, file.filename])).toEqual([[0, "a", "What is RAG-.pdf"], [2, "c", "Scan 001.pdf"]]);
+    expect(result.rejected).toEqual([expect.objectContaining({ index: 1, clientId: "b", filename: "payload.exe", statusCode: 415, code: "unsupported_type" })]);
+  });
+
+  it("rejects an oversized file by index while the rest of the batch is accepted", async () => {
+    sqlMock.mockReset();
+    sqlMock.mockImplementation(async (strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("from upload_sessions")) return [{ id: "s", user_id: "user-1", org_id: "org-1", status: "pending" }];
+      if (query.includes("from upload_session_files")) return [{ id: "f", session_id: "s", filename: "ok.pdf", mime_type: "application/pdf", size_bytes: 10, source_key: "k", upload_mode: "single", status: "pending", request_index: 1, client_id: "ok" }];
+      return [];
+    });
+    const result = await createDirectUploadSession({
+      userId: "user-1", orgId: "org-1", pipeline: {},
+      files: [
+        { clientId: "huge", filename: "huge.pdf", mimeType: "application/pdf", sizeBytes: 10 ** 13 },
+        { clientId: "ok", filename: "ok.pdf", mimeType: "application/pdf", sizeBytes: 10 },
+      ],
+    });
+    expect(result.rejected).toEqual([expect.objectContaining({ index: 0, clientId: "huge", statusCode: 413, code: "file_too_large" })]);
+    expect(result.files).toHaveLength(1);
+  });
+
+  it("fails the request, naming every file, only when nothing can be accepted", async () => {
+    sqlMock.mockReset();
+    const error = await createDirectUploadSession({
+      userId: "user-1", orgId: "org-1", pipeline: {},
+      files: [{ filename: "a.exe", mimeType: "application/x-msdownload", sizeBytes: 1 }, { filename: "b.dll", mimeType: "application/x-msdownload", sizeBytes: 1 }],
+    }).catch((caught) => caught);
+    expect(error).toBeInstanceOf(ProjectIntakeError);
+    expect(error.statusCode).toBe(415);
+    expect(error.message).toContain("a.exe");
+    expect(error.message).toContain("b.dll");
+    expect(sqlMock).not.toHaveBeenCalled();
+  });
+
   it("verifies stored bytes before completing a signed file", async () => {
     const fixture = directUploadSessionFixture();
     fixture.files[0].status = "pending";

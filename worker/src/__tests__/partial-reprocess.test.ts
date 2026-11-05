@@ -197,11 +197,11 @@ describe("partial reprocess", () => {
 
     const [run] = await sql<{ status: string }[]>`select status from project_runs where id = 'run-re'`;
     expect(run?.status).toBe("completed");
-    // The run start pinned the legacy vision routing version in the persisted run artifacts.
-    expect(artifacts["run:vision-routing-version"]).toBe("v1");
+    // The run start pinned evidence routing (v3) in the persisted run artifacts.
+    expect(artifacts["run:vision-routing-version"]).toBe("v3");
     const [pinned] = await sql<{ version: string | null }[]>`
       select artifacts->>'run:vision-routing-version' as version from project_runs where id = 'run-re'`;
-    expect(pinned?.version).toBe("v1");
+    expect(pinned?.version).toBe("v3");
   }, 60_000);
 
   it("restartFromStage reuses earlier stages' rows, including prior chunks when embed is skipped", async () => {

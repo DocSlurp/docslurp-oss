@@ -4,6 +4,7 @@ import { WebSocket } from "ws";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { attachRealtimeServer, type RealtimeHostOptions } from "./node.js";
 import type { RealtimeBackend } from "./broker.js";
+import { REALTIME_LIMITS } from "@docslurp/shared";
 
 const ORIGIN = "https://app.example.test";
 const ORG = "00000000-0000-4000-8000-000000000001";
@@ -94,13 +95,24 @@ describe("real Node realtime Upgrade", () => {
     await vi.waitFor(() => expect(ws.readyState).toBe(WebSocket.CLOSED));
   });
   it("bounds subscription flooding", async () => {
-    // This tests admission, not the 100ms watchdog used by revocation fixtures.
-    const f = await fixture({authorizationRecheckMs:1000}); const { ws, frames } = await connect(f.url);
-    for (let n = 0; n < 33; n++) {
+    // This tests admission, not the authorization watchdog (covered by the revocation tests with a 100 ms recheck). Use
+    // the production recheck interval: on a loaded runner, 32 sequential subscriptions can outlast a short recheck window
+    // and the watchdog would correctly close with authorization_timeout before the limit is reached.
+    const f = await fixture({ authorizationRecheckMs: REALTIME_LIMITS.authorizationRecheckMs }); const { ws, frames } = await connect(f.url);
+    const closed = new Promise<{ code: number; reason: string }>(resolve => ws.once("close", (code, reason) => resolve({ code, reason: reason.toString() })));
+    for (let n = 0; n < REALTIME_LIMITS.subscriptions + 1; n++) {
       subscribe(ws, `s${n}`);
-      if (n < 32) await vi.waitFor(() => expect(frames.some(frame => frame.subscriptionId === `s${n}` && frame.type === "ack")).toBe(true));
+      if (n < REALTIME_LIMITS.subscriptions) {
+        await vi.waitFor(() => {
+          // Fail on a refusal or close at once, with what the server said, instead of waiting out the ack.
+          expect(frames.filter(frame => frame.type === "error"), "no error frames").toEqual([]);
+          expect(ws.readyState, "socket still open").toBe(WebSocket.OPEN);
+          expect(frames.some(frame => frame.subscriptionId === `s${n}` && frame.type === "ack")).toBe(true);
+        }, { timeout: 5_000 });
+      }
     }
-    await vi.waitFor(() => expect(ws.readyState).toBe(WebSocket.CLOSED));
+    // The 33rd subscription is refused by the subscription limit, not by any other close.
+    expect(await closed).toEqual({ code: 1008, reason: "subscription_limit" });
   });
   it("resnapshots after a missed notification, including deletes and terminal state", async () => {
     const f = await fixture(); const first = await connect(f.url); subscribe(first.ws);

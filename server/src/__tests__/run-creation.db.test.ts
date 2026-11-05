@@ -14,6 +14,8 @@ let recovery: ReturnType<typeof import("../services/run-start-recovery.js").crea
 let lifecycle: ReturnType<typeof import("../services/run-lifecycle.js").createRunLifecycle>;
 const prepare = vi.fn();
 const startWorkflow = vi.fn(async () => {});
+/** What intake sniffs for a PDF; the mocked resolveSourceMetadata returns it beside the counts. */
+const pdfFacts = { declaredMimeType: "application/pdf", sniffedMimeType: "application/pdf", mimeType: "application/pdf", format: "pdf", container: null, encoding: null, mismatch: "none" };
 const files = ["a.pdf", "b.pdf"].map((filename) => ({ filename, mimeType: "application/pdf", sourceKey: `u/raw/${filename}` }));
 const input = {
   userId: "u", projectId: "w", kind: "bulk-upload", pipeline: defaultPipelineFeatures,
@@ -55,7 +57,7 @@ beforeEach(async () => {
   await sql`delete from storage_cleanup_queue`;
   startWorkflow.mockClear();
   start.mockReset().mockResolvedValue({ status: "started" });
-  prepare.mockReset().mockResolvedValue({ pageCount: 3, sourceSha256: "abc" });
+  prepare.mockReset().mockResolvedValue({ pageCount: 3, sourceSha256: "abc", fileFacts: pdfFacts });
 });
 
 function gate() {
@@ -73,12 +75,44 @@ async function expire(runId: string) {
   await sql`update project_runs set creation_expires_at = now() - interval '1 second' where id = ${runId}`;
 }
 
+const docxFacts = {
+  declaredMimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", sniffedMimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", format: "office-word", container: "zip", encoding: null, mismatch: "none",
+};
+
+describe("the cost forecast and the page count's source", () => {
+  it("records an Office file's one page as assumed and prices its size, not one page; a PDF's own count stays counted", async () => {
+    const forecastOf = async (filename: string, mimeType: string, facts: object, pageCount: number, fileSize: number) => {
+      await sql`delete from documents`;
+      await sql`delete from project_runs`;
+      prepare.mockReset().mockResolvedValue({ pageCount, sourceSha256: `sha-${filename}`, fileFacts: facts });
+      const created = await runCreation.create({ ...input, sources: { kind: "files" as const, files: [{ filename, mimeType, sourceKey: `u/raw/${filename}`, fileSize }] } });
+      const [row] = await sql<{ page_count: number; page_count_source: string }[]>`select page_count, page_count_source from documents`;
+      return { forecast: created.run.costForecast!, row: row! };
+    };
+    // A 1.2 MB DOCX: intake counts 1 page, which is assumed, not counted.
+    const docx = await forecastOf("contract.docx", docxFacts.mimeType, docxFacts, 1, 1_200_000);
+    expect(docx.row).toEqual({ page_count: 1, page_count_source: "assumed" });
+    // The same size as a PDF that really has 1 page is counted, and priced as one page.
+    const onePage = await forecastOf("memo.pdf", "application/pdf", pdfFacts, 1, 1_200_000);
+    expect(onePage.row).toEqual({ page_count: 1, page_count_source: "counted" });
+    // The assumed count is not passed to the forecast, so the DOCX is priced over its size (about 100 pages at the format's
+    // 12 KB a page, up to 1,171 at its densest) instead of as one page.
+    expect(onePage.forecast.maxCents).toBeLessThan(2);
+    expect(docx.forecast.maxCents).toBeGreaterThan(onePage.forecast.maxCents * 50);
+    // A 40-page PDF is counted: forecast on 40.
+    const pdf = await forecastOf("contract.pdf", "application/pdf", pdfFacts, 40, 1_200_000);
+    expect(pdf.row).toEqual({ page_count: 40, page_count_source: "counted" });
+    expect(pdf.forecast.maxCents).toBeLessThan(docx.forecast.maxCents);
+  });
+});
+
 describe("Run creation and recovery together", () => {
   it("keeps a slow, partially inserted Run private even past the former recovery grace, then publishes it", async () => {
     const entered = gate();
     const resume = gate();
-    prepare.mockImplementationOnce(async () => ({ pageCount: 3, sourceSha256: "first" }))
-      .mockImplementationOnce(async () => { entered.release(); await resume.promise; return { pageCount: 5, sourceSha256: "second" }; });
+    prepare.mockImplementationOnce(async () => ({ pageCount: 3, sourceSha256: "first", fileFacts: pdfFacts }))
+      .mockImplementationOnce(async () => { entered.release(); await resume.promise; return { pageCount: 5, sourceSha256: "second", fileFacts: pdfFacts }; });
     const creating = runCreation.create(input);
     await entered.promise;
     try {
@@ -109,7 +143,7 @@ describe("Run creation and recovery together", () => {
 
   it("removes partial Documents and queues source cleanup when later preparation fails", async () => {
     const failure = new Error("source preparation failed");
-    prepare.mockResolvedValueOnce({ pageCount: 3, sourceSha256: "first" }).mockRejectedValueOnce(failure);
+    prepare.mockResolvedValueOnce({ pageCount: 3, sourceSha256: "first", fileFacts: pdfFacts }).mockRejectedValueOnce(failure);
     await expect(runCreation.create(input)).rejects.toBe(failure);
     expect(await sql`select id from project_runs`).toEqual([]);
     expect(await sql`select id from documents`).toEqual([]);
@@ -118,7 +152,7 @@ describe("Run creation and recovery together", () => {
   });
 
   it("publishes final totals without the unreadable sources", async () => {
-    prepare.mockResolvedValueOnce({ pageCount: 3, sourceSha256: "first" })
+    prepare.mockResolvedValueOnce({ pageCount: 3, sourceSha256: "first", fileFacts: pdfFacts })
       .mockRejectedValueOnce(new source.UnreadableSourceError("b.pdf", "bad PDF"));
     const result = await runCreation.create(input);
     expect(result.run).toMatchObject({ totalDocuments: 1, pagesTotal: 3 });
@@ -137,8 +171,8 @@ describe("Run creation and recovery together", () => {
     // process without executing its catch/finally. Recovery must discard, never start.
     const entered = gate();
     const resume = gate();
-    prepare.mockResolvedValueOnce({ pageCount: 3, sourceSha256: "first" })
-      .mockImplementationOnce(async () => { entered.release(); await resume.promise; return { pageCount: 5, sourceSha256: "second" }; });
+    prepare.mockResolvedValueOnce({ pageCount: 3, sourceSha256: "first", fileFacts: pdfFacts })
+      .mockImplementationOnce(async () => { entered.release(); await resume.promise; return { pageCount: 5, sourceSha256: "second", fileFacts: pdfFacts }; });
     const creating = runCreation.create(input);
     const rejected = expect(creating).rejects.toThrow("no longer being created");
     await entered.promise;
@@ -169,7 +203,7 @@ describe("Run creation and recovery together", () => {
   it("renews the creation lease while source preparation is waiting", async () => {
     const entered = gate();
     const resume = gate();
-    prepare.mockImplementationOnce(async () => { entered.release(); await resume.promise; return { pageCount: 3, sourceSha256: "first" }; });
+    prepare.mockImplementationOnce(async () => { entered.release(); await resume.promise; return { pageCount: 3, sourceSha256: "first", fileFacts: pdfFacts }; });
     const creating = creation.createRunCreation({ sql, start, heartbeatMs: 10 })
       .create({ ...input, sources: { kind: "files", files: files.slice(0, 1) } });
     await entered.promise;
@@ -307,7 +341,7 @@ describe("Run creation reuses completed outputs for exact-source duplicates", ()
     const duplicate = await runCreation.create({ ...input, sources: { kind: "files", files: [{ ...files[1]!, filename: "copy.pdf" }] } });
     expect(duplicate.documents[0]).toMatchObject({ dedupedFromDocumentId: first.documents[0]!.id, dedupScope: "project", sourceSha256: "abc" });
 
-    prepare.mockResolvedValueOnce({ pageCount: 1, sourceSha256: "different" });
+    prepare.mockResolvedValueOnce({ pageCount: 1, sourceSha256: "different", fileFacts: pdfFacts });
     const fresh = await runCreation.create({ ...input, sources: { kind: "files", files: [{ ...files[1]!, filename: "fresh.pdf" }] } });
     expect(fresh.documents[0]).toMatchObject({ dedupedFromDocumentId: null, dedupScope: null });
   });

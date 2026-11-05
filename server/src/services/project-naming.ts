@@ -6,8 +6,10 @@ import { sql } from "../db.js";
 /**
  * Automatic project titles move forward through phases, each a stronger signal
  * than the last: an untitled project (`empty`), its uploaded filenames
- * (`upload`), its content (`content`: a document summary, else the first
- * heading) and finally the subject of its first chat question (`chat`).
+ * (`upload`) and its content (`content`: a document summary, else the first
+ * heading). A chat message never names a project: it is one member's private
+ * question ("thanks!" would become the name everyone sees). The `chat` phase
+ * stays in the type only for titles written before this rule.
  *
  * The state lives in `project_search_settings.compat_metadata.autoTitle`
  * (`{ phase, name, source? }`). Automatic naming applies only while
@@ -25,10 +27,6 @@ export function projectSubject(value: string): string | null {
   if (!title || /^(?:copyright|all rights reserved)$/i.test(title)) return null;
   const words = title.split(" ").slice(0, 9).join(" ");
   return words.slice(0, 72).replace(/\s+\S*$/, words.length > 72 ? "" : "$&");
-}
-
-export function projectChatSubject(message: string): string | null {
-  return projectSubject(message.trim().replace(/^(?:please\s+)?(?:can you|could you|help me|i want to|i need to)\s+/i, "").replace(/[?!]+$/, ""));
 }
 
 const SUMMARY_NOTICE = /^Sampled document overview \([^)]*\)\.\s*/i;
@@ -158,26 +156,13 @@ export async function nameProjectFromUpload(args: { projectId: string; filenames
 }
 
 /**
- * Advances automatic titles from content (lazily, on project reads) or from
- * the first chat question (`firstMessage`). Content prefers the first stored
+ * Advances automatic titles from content (lazily, on project reads). Content prefers the first stored
  * document summary over the first chunk heading or Index Map title; a
  * heading-titled project is upgraded once when a summary arrives. A manual
  * edit stops automatic naming.
  */
-export async function refineProjectNames(projectIds: string[], firstMessage?: string) {
+export async function refineProjectNames(projectIds: string[]) {
   if (!projectIds.length) return;
-  if (firstMessage) {
-    const name = projectChatSubject(firstMessage);
-    if (!name) return;
-    const rows = await sql<{ id: string; name: string }[]>`
-      select w.id, w.name from projects w
-      join project_search_settings s on s.project_id = w.id
-      where w.id = any(${projectIds}) and s.compat_metadata -> 'autoTitle' ->> 'name' = w.name
-        and s.compat_metadata -> 'autoTitle' ->> 'phase' in ('empty', 'upload', 'content')
-    `;
-    for (const row of rows) await applyAutoTitle({ projectId: row.id, currentName: row.name, name, phase: "chat" });
-    return;
-  }
   const rows = await sql<{ id: string; name: string; phase: AutoTitlePhase; summary: string | null; title: string | null }[]>`
     select w.id, w.name,
       s.compat_metadata -> 'autoTitle' ->> 'phase' as phase,

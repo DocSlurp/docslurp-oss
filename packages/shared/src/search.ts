@@ -145,7 +145,12 @@ export const aggregateProjectRagSearchRequestSchema = z
   .object({
     q: z.string().min(1).optional(),
     goal: z.string().min(1).optional(),
-    /** Project IDs, slugs or names (see parseProjectInput). Empty: every project the caller can search. */
+    /**
+     * The organization to search. An API key always searches its own (another value is refused); a session defaults to
+     * its personal organization. A search never spans organizations.
+     */
+    orgId: z.string().trim().min(1).max(256).optional(),
+    /** Project IDs, slugs or names (see parseProjectInput) in that organization. Empty: every project there the caller can search. */
     projects: z.array(z.string().trim().min(1).max(256)).default([]),
     limitPerProject: z.number().int().positive().max(25).default(5),
     maxProjects: z.number().int().positive().max(50).default(12),
@@ -188,6 +193,8 @@ export const runProcessingPreviewFileSchema = z.object({
   filename: z.string().min(1),
   mimeType: z.string().min(1),
   sizeBytes: z.number().int().nonnegative(),
+  /** Counted pages, when known (a run's documents have them). Without it pages are estimated from the size, over a range. */
+  pages: z.number().int().positive().max(10_000_000).optional(),
 });
 export type RunProcessingPreviewFile = z.infer<
   typeof runProcessingPreviewFileSchema

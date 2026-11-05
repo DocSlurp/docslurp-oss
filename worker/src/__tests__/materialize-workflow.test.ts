@@ -91,7 +91,7 @@ describe("page charges", () => {
     expect(rows.rows.map((r) => Number(r.amount))).toEqual([3]);
   });
 
-  it("charges pages a vision model read as Rich (once) and the rest Fast, scans and images Rich", async () => {
+  it("charges only pages a model read as Rich (once, by the ledger) and every other page Fast, scans and images included", async () => {
     delete process.env.DOCSLURP_DEFERRED_PROFILES;
     await db.exec(`
       delete from usage_events where run_id = 'up';
@@ -100,14 +100,14 @@ describe("page charges", () => {
       insert into document_page_facts (document_id, page_number, text_bytes, image_count) values ('mapped', 1, 0, 1), ('mapped', 2, 0, 2);
     `);
     const charges = await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("up"), []));
-    // full: 3 pages, 1 read by vision; mapped: 5 pages, 2 scans; d1: 12 text pages.
-    expect(charges).toMatchObject({ fastPages: 2 + 3 + 12, richPages: 2 });
-    expect(charges.credits).toBeCloseTo(fast(17) + 2 * 0.25, 9);
+    // full: 3 pages, 1 read by vision; mapped: 5 pages, 2 look like scans but were never read; d1: 12 text pages.
+    expect(charges).toMatchObject({ fastPages: 2 + 5 + 12, richPages: 1 }); // the one page vision read, charged Rich as it was read
+    expect(charges.credits).toBeCloseTo(fast(19), 9);
     await db.exec(`delete from document_page_facts where document_id = 'mapped'; update documents set mime_type = 'image/png' where id = 'full'`);
     await db.exec(`delete from usage_events where run_id = 'up' and id <> 'rich:up:full:1'`);
     const image = await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("up"), []));
-    // An image file's pages are read as images: the 2 not yet charged bill Rich.
-    expect(image).toMatchObject({ fastPages: 17, richPages: 2 });
+    // An image file bills Rich only through a recorded read, like any page: its 2 unread pages bill Fast.
+    expect(image).toMatchObject({ fastPages: 19, richPages: 1 });
     await db.exec(`update documents set mime_type = 'application/pdf' where id = 'full'; delete from usage_events where run_id = 'up'`);
   });
 
@@ -165,7 +165,7 @@ describe("worker run load (round 4 M2)", () => {
       const run = await store.loadRun("stale-x");
       expect(run.pipeline.quality).toBe("fast");
       expect(run.pipeline.documentExtraction.options).toEqual({ dolphin: { mode: "page" } });
-      expect(run.pipeline.documentExtraction.ocr.language).toBe("eng");
+      expect(run.pipeline.documentExtraction.ocr.language).toBe("auto");
       expect(JSON.stringify(run.pipeline)).not.toContain("/tmp/attacker");
       expect(errors.join("\n")).toMatch(/run stale-x.*documentExtraction\.options\.dolphin\.repoPath/);
     } finally {
@@ -239,7 +239,7 @@ describe("page-index ledger hook", () => {
 describe("runMaterializeRange activity", () => {
   const ops: Partial<PageMaterializerOps> = {
     async extractText(_d, range) { return Array.from({ length: range.last - range.first + 1 }, () => LONG); },
-    async embed(args) { return { vectors: args.chunks.map(() => [0.1, 0.2, 0.3]), totalTokens: 10 } as never; },
+    async embed(args) { return { vectors: args.chunks.map(() => Array.from({ length: args.profile.dimensions }, () => 0.1)), totalTokens: 10 } as never; },
     async writeVectors() {},
     async deleteVectors() {},
   };
@@ -400,7 +400,7 @@ describe("runMaterializeRange activity", () => {
       async extractText(_d, range) {
         return Array.from({ length: range.last - range.first + 1 }, (_, i) => (range.first + i === 2 ? `${LONG} SSN 123-45-6789` : LONG));
       },
-      async embed(args) { seen.push({ privacyMode: args.pipeline.privacyMode, profile: args.profile.model }); return { vectors: args.chunks.map(() => [0.1, 0.2, 0.3]), totalTokens: 1 } as never; },
+      async embed(args) { seen.push({ privacyMode: args.pipeline.privacyMode, profile: args.profile.model }); return { vectors: args.chunks.map(() => Array.from({ length: args.profile.dimensions }, () => 0.1)), totalTokens: 1 } as never; },
     };
     const d = deps();
     d.materializer.ops = piiOps;
@@ -1182,7 +1182,7 @@ describe("runMaterializeRange activity", () => {
         values ('rich:fi:d1-full:3', 'u1', 'fi', 'o1', 'w', 'docslurp', 'price-card', 'ingest-page-rich', 1, 'page', 0.25, '{"documentId":"d1-full","pageNumber":3}')`);
       const charges = await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("fi"), []));
       // 12 pages - page 4 (paid by the query, not read again) - page 3 (Rich read by this run) = 10 Fast.
-      expect(charges).toMatchObject({ fastPages: 10, richPages: 0 });
+      expect(charges).toMatchObject({ fastPages: 10, richPages: 1 });
     } finally {
       delete process.env.DOCSLURP_DEFERRED_PROFILES;
       await db.exec(`delete from usage_events where run_id = 'fi'; delete from documents where id = 'd1-full'; delete from project_runs where id = 'fi';`);

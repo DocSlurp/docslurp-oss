@@ -15,7 +15,7 @@ import { recordSearchPhase, timePhase } from "./timings.js";
 import { mmrSelectWithDiagnostics } from "./mmr.js";
 import { lostInTheMiddleReorder } from "./position-reorder.js";
 import { rerankHosted } from "./hosted-rerank.js";
-import { rerankBM25, type RankedChunk } from "./rerank.js";
+import { fuseWithRerank, rerankBM25, type RankedChunk } from "./rerank.js";
 import {
   applyRelevanceFloor,
   resolveMinScore,
@@ -191,20 +191,22 @@ export async function applySearchPostRetrievalProcessing(
     return [];
   }
 
-  let ranked: RankedChunk[] = candidates.map((chunk) => ({
+  // `input.chunks` arrive in fused (rank) order. Raw adapter scores come from different
+  // scales (cosine, BM25, graph) and are never compared; position in the fused list is
+  // the baseline score from here on.
+  let ranked: RankedChunk[] = candidates.map((chunk, index) => ({
     id: chunk.id,
     text: chunk.text,
-    score: chunk.score,
+    score: 1 / (1 + index),
   }));
 
   if (input.options.useRerank) {
-    ranked = input.options.rerankProvider === "deepinfra"
+    const reranked = input.options.rerankProvider === "deepinfra"
       ? await rerankHosted({ query: input.query, chunks: ranked, model: input.options.rerankModel,
           apiKey: input.rerankApiKey, scope: input.rerankScope,
           privacyMode: input.privacyMode, session: input.session })
       : rerankBM25(input.query, ranked);
-  } else {
-    ranked = [...ranked].sort((a, b) => b.score - a.score);
+    ranked = fuseWithRerank(ranked, reranked);
   }
 
   if (input.options.useContextualCompression) {

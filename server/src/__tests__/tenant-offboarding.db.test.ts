@@ -10,6 +10,7 @@ import {
   legacyOrgTable,
   type SupersededPurgeOptions,
 } from "@docslurp/worker/testing";
+import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
 
 /**
  * Tenant offboarding against a migrated Postgres (docs/data-deletion.md):
@@ -25,6 +26,7 @@ let deps: import("../services/tenant-offboarding.js").OffboardingDeps;
 
 beforeAll(async () => {
   const pg = await startMigratedPostgres();
+  await pg.db.exec(LIFT_ONE_ORG_PER_USER_POLICY);
   stop = pg.stop;
   sql = postgres(pg.url, { max: 1, prepare: false, onnotice: () => {} });
   vi.doMock("../db.js", () => ({ sql }));
@@ -41,7 +43,7 @@ afterAll(async () => {
 async function reset() {
   for (const table of [
     "projects", "document_cleanup_queue", "storage_cleanup_queue", "org_memberships", "api_keys",
-    "credit_ledger", "usage_events", "audit_log", "webhooks", "session", "account",
+    "credit_ledger", "usage_events", "audit_log", "webhooks", "webhook_outbox", "session", "account",
   ]) {
     await sql`delete from ${sql(table)}`;
   }
@@ -90,6 +92,7 @@ describe("organization deletion", () => {
     await seedProject("ws", "team", "member");
     await sql`insert into api_keys (id, user_id, org_id, key_hash, name, key_type) values ('key', 'member', 'team', 'h', 'CI key', 'server')`;
     await sql`insert into credit_ledger (id, user_id, org_id, delta, reason) values ('ledger', 'member', 'team', -5, 'usage')`;
+    await sql`insert into webhooks (id, user_id, org_id, url, secret) values ('team-hook', 'owner', 'team', 'https://example.test/team', 's')`;
     await sql`insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, cost_cents)
       values ('usage', 'member', 'ws-done', 'openai', 'm', 'embed', 1, 'tokens', 2)`;
   });
@@ -112,6 +115,7 @@ describe("organization deletion", () => {
     expect(await sql`select count(*)::int as count from projects`).toEqual([{ count: 0 }]);
     expect(await sql`select count(*)::int as count from org_memberships where org_id = 'team'`).toEqual([{ count: 0 }]);
     expect(await sql`select revoked_at is not null as revoked, name from api_keys`).toEqual([{ revoked: true, name: "Deleted key" }]);
+    expect(await sql`select id from webhooks where org_id = 'team'`).toEqual([]);
     expect(await sql`select document_id from document_cleanup_queue`).toEqual([{ document_id: "ws-doc" }]);
     expect(await sql`select kind, target from storage_cleanup_queue order by kind, target`).toEqual([
       { kind: "storage_prefix", target: "member/ws-done/" },
@@ -202,7 +206,7 @@ describe("account deletion", () => {
     await seedOrg("team", "Team", [["leaver", "owner"], ["teammate", "member"]]);
     await seedProject("mine", "personal", "leaver");
     await seedProject("shared", "team", "leaver");
-    await sql`insert into webhooks (id, user_id, url, secret, events) values ('hook', 'leaver', 'https://example.test', 's', '{}')`;
+    await sql`insert into webhooks (id, user_id, org_id, url, secret, events) values ('hook', 'leaver', 'personal', 'https://example.test', 's', '{}')`;
     await sql`insert into "session" (id, "expiresAt", token, "createdAt", "updatedAt", "userId")
       values ('s1', now() + interval '1 day', 't1', now(), now(), 'leaver')`;
     await sql`insert into "account" (id, "accountId", "providerId", "userId", "createdAt", "updatedAt")
@@ -222,6 +226,16 @@ describe("account deletion", () => {
     await expect(offboarding.deleteAccount({ userId: "leaver", confirmation: "leaver@example.test" }, deps))
       .rejects.toMatchObject({ status: 409, code: "ownership_transfer_required" });
     expect(await sql`select count(*)::int as count from projects`).toEqual([{ count: 2 }]);
+  });
+
+  it("keeps queued webhook events of an organization the user only leaves, and drops those of the organizations it purges", async () => {
+    await sql`update org_memberships set role = 'owner' where org_id = 'team' and user_id = 'teammate'`;
+    await sql`insert into webhook_outbox (id, user_id, event_type, payload) values
+      ('queued-team', 'leaver', 'run.completed', ${sql.json({ projectId: "shared", runId: "shared-done" } as never)}),
+      ('queued-mine', 'leaver', 'run.completed', ${sql.json({ projectId: "mine", runId: "mine-done" } as never)}),
+      ('queued-teammate', 'teammate', 'run.completed', ${sql.json({ projectId: "shared", runId: "shared-live" } as never)})`;
+    await offboarding.deleteAccount({ userId: "leaver", confirmation: "leaver@example.test" }, deps);
+    expect((await sql`select id from webhook_outbox order by id`).map((row) => row.id)).toEqual(["queued-team", "queued-teammate"]);
   });
 
   it("purges personal and solo orgs, leaves team orgs with their content, and tombstones the user", async () => {

@@ -35,3 +35,10 @@ The release environment permits only main and v* tags. Organization-owned contri
 Migration 0112 requires coordinated downtime, not a rolling release. Follow the
 [enforced migration preconditions and drain procedure](generation-rollout.md)
 before deploying a fleet that uses execution generations.
+
+## Migrations 0121-0127
+
+These migrations ship in one release. 0125 and 0127 delete rows (pre-release data: webhooks and API keys without exactly one
+organization, and memberships beyond one per user), so run `node server/db/predeploy-check.mjs` first and read its WARN counts.
+The folded keyword index is built after the migration with `node server/db/folded-search-index.mjs`, not by it. The order,
+what is deleted, the brief mixed-version window and SigNoz signals are in [rollout-0121-0127.md](rollout-0121-0127.md).

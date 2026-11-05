@@ -17,7 +17,7 @@ const mocks = vi.hoisted(() => ({
   isProjectChatEnabled: vi.fn(),
 }));
 
-vi.mock("./search.js", () => ({ hybridSearch: mocks.hybridSearch }));
+vi.mock("./search.js", () => ({ hybridSearch: mocks.hybridSearch, ProjectNotFoundError: class extends Error { constructor() { super("Project not found"); } } }));
 vi.mock("./projects.js", () => ({ getProject: mocks.getProject, listProjects: mocks.listProjects }));
 vi.mock("./billing/spend-guard.js", () => ({ assertCanSpend: mocks.assertCanSpend }));
 vi.mock("../lib/ai-usage.js", () => ({ recordUsageEvent: mocks.recordUsageEvent }));
@@ -67,7 +67,7 @@ beforeEach(() => {
 
 describe("aggregateProjectRagSearch spend", () => {
   it("runs no model-calling step for a default request", async () => {
-    const response = await aggregateProjectRagSearch({ userId: "u1", request: request({}) });
+    const response = await aggregateProjectRagSearch({ userId: "u1", orgId: "org-1", request: request({}) });
     expect(response.answer).toBeNull();
     expect(response.citations).toHaveLength(1);
     expect(mocks.hybridSearch).toHaveBeenCalledWith("who is this for?", "u1", expect.objectContaining({
@@ -79,7 +79,7 @@ describe("aggregateProjectRagSearch spend", () => {
   });
 
   it("checks spend before the answer model and records its usage with the project scope", async () => {
-    const response = await aggregateProjectRagSearch({ userId: "u1", request: request({ generateAnswer: true }) });
+    const response = await aggregateProjectRagSearch({ userId: "u1", orgId: "org-1", request: request({ generateAnswer: true }) });
     expect(response.answer).toBe("Answer [1].");
     expect(mocks.calls).toEqual(["assertCanSpend", "model", "usage"]);
     expect(mocks.assertCanSpend).toHaveBeenCalledWith("org-1", "ws-1", { kind: "interactive", hold: true });
@@ -92,14 +92,14 @@ describe("aggregateProjectRagSearch spend", () => {
 
   it("calls no model when the spend guard refuses", async () => {
     mocks.assertCanSpend.mockRejectedValueOnce(Object.assign(new Error("out of credits"), { status: 402 }));
-    await expect(aggregateProjectRagSearch({ userId: "u1", request: request({ generateAnswer: true }) })).rejects.toThrow("out of credits");
+    await expect(aggregateProjectRagSearch({ userId: "u1", orgId: "org-1", request: request({ generateAnswer: true }) })).rejects.toThrow("out of credits");
     expect(mocks.generateOpenRouterDocumentText).not.toHaveBeenCalled();
     expect(mocks.recordUsageEvent).not.toHaveBeenCalled();
   });
 
   it("returns citations only, with no spend check or model call, when chat is off in an answered project", async () => {
     mocks.isProjectChatEnabled.mockResolvedValueOnce(false);
-    const response = await aggregateProjectRagSearch({ userId: "u1", request: request({ generateAnswer: true }) });
+    const response = await aggregateProjectRagSearch({ userId: "u1", orgId: "org-1", request: request({ generateAnswer: true }) });
     expect(response.answer).toBeNull();
     expect(response.citations).toHaveLength(1);
     expect(response.warnings.join(" ")).toContain("chat is turned off in Manuals");
@@ -109,21 +109,23 @@ describe("aggregateProjectRagSearch spend", () => {
     expect(mocks.recordUsageEvent).not.toHaveBeenCalled();
   });
 
-  it("refuses an answer over projects from two organizations before searching, and still searches across them without one", async () => {
+  it("never searches a project of another of the caller's organizations, named or listed", async () => {
     mocks.getProject.mockImplementation(async (id: string) => ({ id, orgId: id === "ws-1" ? "org-1" : "org-2", name: id }));
-    await expect(aggregateProjectRagSearch({ userId: "u1", request: request({ generateAnswer: true, projects: ["ws-1", "ws-2"] }) }))
-      .rejects.toMatchObject({ name: "AggregateAnswerScopeError", status: 400 });
+    await expect(aggregateProjectRagSearch({ userId: "u1", orgId: "org-1", request: request({ projects: ["ws-1", "ws-2"] }) }))
+      .rejects.toThrow("Project not found");
     expect(mocks.hybridSearch).not.toHaveBeenCalled();
-    expect(mocks.assertCanSpend).not.toHaveBeenCalled();
-    expect(mocks.generateOpenRouterDocumentText).not.toHaveBeenCalled();
-    const retrieval = await aggregateProjectRagSearch({ userId: "u1", request: request({ projects: ["ws-1", "ws-2"] }) });
-    expect(retrieval.projects).toHaveLength(2);
-    expect(retrieval.answer).toBeNull();
+    mocks.listProjects.mockResolvedValueOnce([
+      { id: "ws-1", orgId: "org-1", name: "Mine" },
+      { id: "ws-2", orgId: "org-2", name: "Other org" },
+    ]);
+    const retrieval = await aggregateProjectRagSearch({ userId: "u1", orgId: "org-1", request: request({ projects: [] }) });
+    expect(retrieval.projects.map((project) => project.projectId)).toEqual(["ws-1"]);
+    expect(mocks.hybridSearch).toHaveBeenCalledTimes(1);
   });
 
   it("answers null with a warning, and calls no model, when no project is accessible", async () => {
     mocks.listProjects.mockResolvedValueOnce([]);
-    const response = await aggregateProjectRagSearch({ userId: "u1", request: request({ generateAnswer: true, projects: [] }) });
+    const response = await aggregateProjectRagSearch({ userId: "u1", orgId: "org-1", request: request({ generateAnswer: true, projects: [] }) });
     expect(response.answer).toBeNull();
     expect(response.warnings).toEqual(["No accessible projects matched the aggregate request."]);
     expect(mocks.generateOpenRouterDocumentText).not.toHaveBeenCalled();
@@ -131,16 +133,22 @@ describe("aggregateProjectRagSearch spend", () => {
 
   it("applies the key's chat output cap to the answer", async () => {
     const apiKey = { keyId: "k", userId: "u1", orgId: "org-1", keyType: "server" as const, allowedDomains: [], scopes: ["search", "chat"], rateLimitRpm: null, rateLimitPpd: 1000, rateLimits: [], projectIds: [], maxOutputTokens: 500 };
-    await aggregateProjectRagSearch({ userId: "u1", request: request({ generateAnswer: true }), apiKey });
+    await aggregateProjectRagSearch({ userId: "u1", orgId: "org-1", request: request({ generateAnswer: true }), apiKey });
     expect(mocks.generateOpenRouterDocumentText).toHaveBeenCalledWith(expect.objectContaining({ maxOutputTokens: 500 }));
-    await aggregateProjectRagSearch({ userId: "u1", request: request({ generateAnswer: true }) });
+    await aggregateProjectRagSearch({ userId: "u1", orgId: "org-1", request: request({ generateAnswer: true }) });
     expect(mocks.generateOpenRouterDocumentText).toHaveBeenLastCalledWith(expect.objectContaining({ maxOutputTokens: 800 }));
   });
 
   it("never searches a project outside the key's organization", async () => {
     const apiKey = { keyId: "k", userId: "u1", orgId: "org-2", keyType: "server" as const, allowedDomains: [], scopes: ["search", "chat"], rateLimitRpm: null, rateLimitPpd: 1000, rateLimits: [], projectIds: [] };
-    await expect(aggregateProjectRagSearch({ userId: "u1", request: request({ generateAnswer: true }), apiKey })).rejects.toThrow("Project not found");
+    await expect(aggregateProjectRagSearch({ userId: "u1", orgId: "org-1", request: request({ generateAnswer: true }), apiKey })).rejects.toThrow("Project not found");
     expect(mocks.hybridSearch).not.toHaveBeenCalled();
     expect(mocks.generateOpenRouterDocumentText).not.toHaveBeenCalled();
+  });
+  it("fails closed for a key searching an organization other than its own", async () => {
+    const apiKey = { keyId: "k", userId: "u1", orgId: "org-2", keyType: "server" as const, allowedDomains: [], scopes: ["search", "chat"], rateLimitRpm: null, rateLimitPpd: 1000, rateLimits: [], projectIds: [] };
+    mocks.listProjects.mockResolvedValueOnce([{ id: "ws-1", orgId: "org-1", name: "Manuals" }]);
+    await expect(aggregateProjectRagSearch({ userId: "u1", orgId: "org-1", request: request({ projects: [] }), apiKey })).rejects.toThrow("Project not found");
+    expect(mocks.hybridSearch).not.toHaveBeenCalled();
   });
 });

@@ -581,3 +581,28 @@ test("Windows exec treats only PATHEXT extensions as extensions and skips relati
   assert.equal(resolveWindowsCommand("tool", env, exists), "C:\\tools\\tool.cmd");
   assert.equal(resolveWindowsCommand("tool", { ...env, PATH: "bin;." }, exists), null);
 });
+
+test("refreshTokens reports the server's machine reason and never reads the description's prose", async () => {
+  const { refreshTokens } = await import("../dist/auth/oauth.js");
+  const answers = [
+    { error: "invalid_grant", error_description: "Anything at all", docslurp_reason: "refresh_token_just_rotated" },
+    { error: "invalid_grant", error_description: "This refresh token was just rotated. Use the newest refresh token." },
+  ];
+  const server = createServer((request, response) => {
+    request.resume();
+    response.writeHead(400, { "content-type": "application/json" });
+    response.end(JSON.stringify(answers.shift()));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const endpoint = `http://127.0.0.1:${server.address().port}/token`;
+    const authorizationServer = { issuer: `http://127.0.0.1:${server.address().port}`, token_endpoint: endpoint };
+    const flagged = await refreshTokens(authorizationServer, "token");
+    assert.deepEqual([flagged.ok, flagged.error, flagged.reason], [false, "invalid_grant", "refresh_token_just_rotated"]);
+    // The same prose without the reason is an ordinary failure: the CLI no longer matches on message text.
+    const prose = await refreshTokens(authorizationServer, "token");
+    assert.equal(prose.reason, undefined);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

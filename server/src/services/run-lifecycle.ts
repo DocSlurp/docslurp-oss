@@ -1,3 +1,4 @@
+import { WorkflowExecutionAlreadyStartedError } from "@temporalio/client";
 import type { TransactionSql } from "postgres";
 import {
   compilePipelinePlan,
@@ -255,7 +256,8 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
         outcome = { status: "started" };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (!options?.restartExisting && message.toLowerCase().includes("already started")) {
+        // The typed Temporal error decides, not its wording.
+        if (!options?.restartExisting && error instanceof WorkflowExecutionAlreadyStartedError) {
           outcome = { status: "already-started" };
         } else if (isTemporalConnectionUnavailable(error)) {
           console.warn(`[temporal] deferred workflow start for run=${run.id}: ${message}`);

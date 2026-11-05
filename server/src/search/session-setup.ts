@@ -23,6 +23,26 @@ import { resolveProjectRetrievalControls } from "./project-retrieval-session.js"
 import { parseIndexConfigs, type IndexConfigMap } from "./index-serving.js";
 import { earlyLexicalDocument, fullyIndexedDocument, servableInProgressVersion } from "./eligibility.js";
 
+/**
+ * The project does not exist or the caller may not see it (the two are indistinguishable by design).
+ * The message stays "Project not found" for routes that still match it; new code tests `instanceof`.
+ */
+export class ProjectNotFoundError extends Error {
+  readonly status = 404 as const;
+  constructor(message = "Project not found") {
+    super(message);
+    this.name = "ProjectNotFoundError";
+  }
+}
+
+/** A retrieval scope spanning more than one project (HTTP 400). */
+export class CrossProjectScopeError extends Error {
+  constructor() {
+    super("Search scope must stay within a single project");
+    this.name = "CrossProjectScopeError";
+  }
+}
+
 export class MissingProjectScopeError extends Error {
   constructor() {
     super(
@@ -197,19 +217,13 @@ export async function loadSearchProjectContext(projectId: string, userId: string
       s.project_id as settings_project_id, s.user_id, s.typo_tolerance, s.dedupe_by_filename, s.ranking_rules,
       s.boosts, s.pinned_results, s.synonyms, s.compat_settings, s.rules, s.compat_metadata
     from projects w
-    join organizations o on o.id = w.org_id
-    left join org_memberships om on om.org_id = w.org_id and om.user_id = ${userId}
-    left join project_members wm on wm.project_id = w.id and wm.user_id = ${userId}
     left join project_search_settings s on s.project_id = w.id
     where w.id = ${projectId}
-      and (
-        (om.user_id is not null and (w.user_id = ${userId} or wm.user_id is not null or om.role in ('owner', 'admin') or w.is_default))
-        or (wm.user_id is not null and o.is_personal)
-      )
+      and docslurp_project_access(w.id, ${userId})
     limit 1
   `;
   const allowlist = currentRequestApiKeyProjectIds();
-  if (!row || (allowlist && !allowlist.includes(row.project_id))) throw new Error("Project not found");
+  if (!row || (allowlist && !allowlist.includes(row.project_id))) throw new ProjectNotFoundError();
   let settings: ProjectSearchSettings;
   try {
     settings = parseProjectSearchSettingsRow(row.settings_project_id ? row as SettingsRow : undefined, row.project_id, userId);
@@ -242,7 +256,7 @@ async function resolveSearchProjectScope(args: {
   if (requestedProjectId) {
     const access = await getProjectAccess(requestedProjectId, args.userId);
     if (!access) {
-      throw new Error("Project not found");
+      throw new ProjectNotFoundError();
     }
     return { projectId: access.projectId, orgId: access.orgId };
   }
@@ -258,28 +272,17 @@ async function resolveSearchProjectScope(args: {
       select distinct d.project_id, w.org_id
       from documents d
       join projects w on w.id = d.project_id
-      left join org_memberships om
-        on om.org_id = w.org_id
-        and om.user_id = ${args.userId}
-      left join project_members wm
-        on wm.project_id = w.id
-        and wm.user_id = ${args.userId}
       where d.id = any(${sql.array(documentIds)})
-        and (
-          -- G-06: team-org access always requires org membership; only a
-          -- personal org's direct shares stand alone.
-          (om.user_id is not null and (w.user_id = ${args.userId} or wm.user_id is not null or om.role in ('owner', 'admin') or w.is_default))
-          or (wm.user_id is not null and exists (select 1 from organizations o where o.id = w.org_id and o.is_personal))
-        )
+        and docslurp_project_access(w.id, ${args.userId})
         and (${keyAllowlist}::text[] is null or w.id = any(${keyAllowlist}::text[]))
     `;
 
     if (rows.length === 0) {
-      throw new Error("Project not found");
+      throw new ProjectNotFoundError();
     }
 
     if (rows.length > 1) {
-      throw new Error("Search scope must stay within a single project");
+      throw new CrossProjectScopeError();
     }
 
     return { projectId: rows[0]!.project_id, orgId: rows[0]!.org_id };
@@ -290,25 +293,14 @@ async function resolveSearchProjectScope(args: {
       select runs.project_id, w.org_id
       from project_runs runs
       join projects w on w.id = runs.project_id
-      left join org_memberships om
-        on om.org_id = w.org_id
-        and om.user_id = ${args.userId}
-      left join project_members wm
-        on wm.project_id = w.id
-        and wm.user_id = ${args.userId}
       where runs.id = ${args.runId}
-        and (
-          -- G-06: team-org access always requires org membership; only a
-          -- personal org's direct shares stand alone.
-          (om.user_id is not null and (w.user_id = ${args.userId} or wm.user_id is not null or om.role in ('owner', 'admin') or w.is_default))
-          or (wm.user_id is not null and exists (select 1 from organizations o where o.id = w.org_id and o.is_personal))
-        )
+        and docslurp_project_access(w.id, ${args.userId})
         and (${keyAllowlist}::text[] is null or w.id = any(${keyAllowlist}::text[]))
       limit 1
     `;
 
     if (!row) {
-      throw new Error("Project not found");
+      throw new ProjectNotFoundError();
     }
 
     return { projectId: row.project_id, orgId: row.org_id };

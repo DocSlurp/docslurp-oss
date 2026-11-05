@@ -17,7 +17,7 @@ import type { EmbeddingArtifact } from "./embedding-runtime.js";
 import { indexableDocuments } from "../pipeline/pii-gate.js";
 import { allowHostedCall, openRouterTextCall } from "../lib/privacy-guard.js";
 import { textFallbackCost, textModelApiKey, textUsageLabels } from "../lib/text-model-route.js";
-import { chargeDocumentFeature } from "../pipeline/feature-charges.js";
+import { chargeFeatureForTextRead, textReadPages } from "../pipeline/feature-charges.js";
 import { runBounded } from "../lib/bounded-concurrency.js";
 
 /** Store surface graph enrichment writes through (the Postgres `Store`). */
@@ -161,7 +161,10 @@ export class GraphEnrichStage implements Stage {
         llmDocuments += 1;
         // Price card: knowledge graph per started 10 pages, once per document per run, only when the
         // model extracted it (heuristic fallback graphs are free). Community summaries are included.
-        chargeDocumentFeature(state, document, "knowledgeGraph");
+        // The price follows the text the model read: every window it answered (a window whose answer did not parse was still read),
+        // the document's pages pro rata on that share, and at least the pages of text read (3,500 characters a page).
+        chargeFeatureForTextRead(state, document, "knowledgeGraph", { chars: graph.charsAttempted, total: { chars: graph.charsTotal },
+          textPages: chunks.length ? textReadPages(chunks.reduce((sum, chunk) => sum + chunk.text.length, 0)) : undefined });
       }
 
       // Persist per document: search sees the graph grow during long runs.
@@ -184,6 +187,10 @@ export class GraphEnrichStage implements Stage {
         relationships: graph.edges.length,
         chunks: chunks.length,
         windows: graph.windows,
+        charsRead: graph.charsRead,
+        charsAttempted: graph.charsAttempted,
+        charsTotal: graph.charsTotal,
+        truncated: graph.truncated,
         source: graph.source,
         llmFailed: graph.llmFailed,
         durationMs: graph.durationMs,

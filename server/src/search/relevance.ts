@@ -33,7 +33,8 @@
 import type { SearchChunk } from "../services/search.js";
 import type { EvidenceRetrievalResult } from "./retrieval-adapters.js";
 import { flattenEvidenceResults } from "./retrieval-adapters.js";
-import { stopWords, tokenize } from "./rerank.js";
+import { stopWords } from "./rerank.js";
+import { foldText, hasCjk, matchTerms } from "./text-fold.js";
 
 /** Built-in floor, in the rescaled 0..1 relevance space. Overridden by SEARCH_MIN_SCORE, the project default or the request. */
 export const DEFAULT_MIN_SCORE = 0.1;
@@ -111,34 +112,53 @@ export function vectorRelevance(score: number, baseline: number): number {
   return clamp01((cosineFromVectorScore(score) - baseline) / (1 - baseline));
 }
 
+/**
+ * Words that carry no subject in a question, so they do not count toward coverage. Negations ("not",
+ * "no", "never", "without") are content: "refunds not allowed" is not "refunds allowed". "class" and
+ * "course" are ordinary subjects ("class action settlement"), not stop words.
+ */
 const coverageStopWords = new Set([
   ...stopWords,
-  ..."about can class classes course courses did do does give list me my please show tell could would should there here we they he she if but not so than then also when where who why can will may am been being had its our out up no yes into over more most some any all just only get got make".split(" "),
+  ..."about can did do does give list me my please show tell could would should there here we they he she if but so than then also when where who why will may am been being had its our out up yes into over more most some any all just only get got make".split(" "),
 ]);
 
-/** Drops common inflections so "taxes", "taxed" and "taxation" meet at a shared prefix. */
+/** Suffixes that turn a root into an inflected form of the same word. */
+const INFLECTION = /^(?:s|e|es|ed|d|ing|ings|er|ers|ation|ations|ion|ions|ive|ly|y|ies|al|ment|ments)?$/;
+
+/** Drops common inflections so "taxes", "taxed" and "taxation" share the root "tax". */
 function stem(term: string): string {
   if (term.length <= 4) return term;
   const stripped = term.replace(/(ations?|ings?|edly|ies|es|ed|s|ly)$/, "");
   return stripped.length >= 3 ? stripped : term;
 }
 
-/** Distinct content terms of a query (stop words removed). */
-export function contentTerms(query: string): string[] {
-  return [...new Set(tokenize(query).filter((term) => !coverageStopWords.has(term)))];
+/** Whether `word` is the root or the root plus an inflection, so "tax" meets "taxes" but never "taxi". */
+function sharesRoot(word: string, root: string): boolean {
+  if (word === root) return true;
+  if (!word.startsWith(root)) return false;
+  const rest = word.slice(root.length);
+  // "run" -> "running": the final consonant doubles before the suffix.
+  return INFLECTION.test(rest) || (rest[0] === root.at(-1) && INFLECTION.test(rest.slice(1)));
 }
 
-/** Share of the query's distinct content terms present in the text (prefix match on stems). */
+/** Distinct content terms of a query (stop words removed). Unsegmented CJK runs contribute character pairs. */
+export function contentTerms(query: string): string[] {
+  return [...new Set(matchTerms(query).filter((term) => !coverageStopWords.has(term)))];
+}
+
+/** Share of the query's distinct content terms present in the text (accent-insensitive, root plus inflection). */
 export function termCoverage(query: string, text: string): number {
   const terms = contentTerms(query);
   if (terms.length === 0) return 0;
-  const lower = text.toLowerCase();
-  const words = new Set(tokenize(lower));
+  const folded = foldText(text);
+  const words = new Set(folded.split(/[^\p{L}\p{N}\p{M}-]+/u).filter(Boolean));
   const matched = terms.filter((term) => {
+    // Unsegmented scripts have no word boundaries: a character pair is looked up in the running text.
+    if (hasCjk(term)) return folded.includes(term);
+    // Inflection is only modelled for ASCII-letter words; other scripts need the whole word.
+    if (!/^[a-z]+$/.test(term)) return words.has(term);
     const root = stem(term);
-    // Unsegmented scripts have no word boundaries to prefix-match on.
-    if (!/[a-z]/.test(term)) return lower.includes(term);
-    for (const word of words) if (word.startsWith(root)) return true;
+    for (const word of words) if (sharesRoot(word, root)) return true;
     return false;
   });
   return matched.length / terms.length;

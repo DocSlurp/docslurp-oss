@@ -2,6 +2,8 @@
  * Local BM25 reranking with candidate-corpus inverse document frequency.
  */
 
+import { reciprocalRankFusionScored } from "./rrf.js";
+
 export interface RankedChunk {
   id: string;
   text: string;
@@ -90,4 +92,24 @@ export async function rerankRemote(
 ): Promise<RankedChunk[]> {
   // Stub: just return BM25 reranked results
   return rerankBM25(query, chunks);
+}
+
+/**
+ * Fuse a reranker's order with the hybrid (fused) order it was given, by
+ * reciprocal rank. A reranker is one more voice, never the verdict: replacing the
+ * hybrid order with local BM25 put "I do not know how to cook" first for "how do
+ * I cancel my subscription" because it shares the word "do", and sank the real
+ * answer ("terminate your plan") that has no query word in it. Fusion keeps
+ * agreement between both orders on top, lets a strong reranker lift a candidate
+ * and leaves a lone lexical coincidence behind. Ties keep the hybrid order.
+ * Scores returned are RRF scores, the only scale both inputs share; raw
+ * BM25 or cross-encoder scores stay on `rerankScore`.
+ */
+export function fuseWithRerank(hybridOrder: RankedChunk[], reranked: RankedChunk[]): Array<RankedChunk & { rerankScore?: number }> {
+  const rerankScoreById = new Map(reranked.map((chunk) => [chunk.id, chunk.crossScore]));
+  const textById = new Map(hybridOrder.map((chunk) => [chunk.id, chunk]));
+  return reciprocalRankFusionScored([hybridOrder, reranked]).map(({ item, score }) => {
+    const original = textById.get(item.id) ?? item;
+    return { ...original, score, crossScore: score, rerankScore: rerankScoreById.get(item.id) };
+  });
 }

@@ -13,21 +13,46 @@
  */
 
 import { open } from "node:fs/promises";
+import { PAGE_RASTER_ROUTING, assessTextLayer, pageWordCount, type TextLayerVerdict } from "@docslurp/shared";
 
 import type { CommandRunner } from "../tools/runner.js";
-import { embeddedImageBytesByPage } from "./page-yield-evidence.js";
+import { embeddedImageBytesByPage, pdfImagesListFields } from "./page-yield-evidence.js";
 
 /** Pages with fewer native words than this are "sparse" and get raster evidence. */
-export const SPARSE_PAGE_WORDS = 30;
+export const SPARSE_PAGE_WORDS = PAGE_RASTER_ROUTING.sparsePageWords;
 /** Images covering less than this share of the page (logos, bullets, rules, tracking pixels) are ignored. */
-export const MIN_SIGNIFICANT_IMAGE_COVERAGE = 0.02;
+export const MIN_SIGNIFICANT_IMAGE_COVERAGE = PAGE_RASTER_ROUTING.minSignificantImageCoverage;
 /** Images with a shorter side than this (in pixels) carry no readable content. */
-export const MIN_SIGNIFICANT_IMAGE_PIXELS = 32;
-/** Parsing stops after this many `pdfimages` rows; the rest of a hostile list is ignored. */
-export const MAX_IMAGE_ROWS = 100_000;
+export const MIN_SIGNIFICANT_IMAGE_PIXELS = PAGE_RASTER_ROUTING.minSignificantImagePixels;
+/**
+ * `pdfimages -list` lines read before the listing is declared too long: pages after the last one read are then
+ * unknown, never "no images". Rows are folded into per-page totals as they stream, so a page of 100,000 tiny images
+ * costs a counter, not memory, and cannot hide the scans after it.
+ */
+export const MAX_IMAGE_ROWS = 2_000_000;
+/** Significant images kept per page for repeated-image detection; the rest still add to the page's coverage. */
+const MAX_TRACKED_IMAGES_PER_PAGE = 64;
+/** Distinct image objects tracked for repeat detection per document. */
+const MAX_TRACKED_OBJECTS = 200_000;
+
+/** The text layer's own quality for a page, from `assessTextLayer` and (suspect layers only) an OCR cross-check. */
+export interface PageTextLayerEvidence {
+  verdict: TextLayerVerdict;
+  reasons: string[];
+  /** Whether an OCR of the page agrees with a suspect layer (precision and recall); null when not checked. */
+  matchesOcr?: boolean | null;
+  /** Where the checked text came from: the PDF's own layer (pdftotext) or the extractor's output. */
+  source: "text-layer" | "extracted";
+}
 
 export interface PageImageEvidence {
   pageNumber: number;
+  /** False when the image listing did not reach this page: its image facts are unknown, not zero. */
+  imagesKnown?: boolean;
+  /** Images of any size drawn on the page, and how many of the significant ones are repeated page furniture. */
+  anyImageCount?: number;
+  repeatedImageCount?: number;
+  textLayer?: PageTextLayerEvidence | null;
   /** Approximate embedded image/mask storage, deduplicated within this page; null if unknown.
    * Not expected text bytes and not additive across pages (shared PDF objects).
    */
@@ -57,6 +82,7 @@ export interface PageImageEvidenceArtifact {
   pages: PageImageEvidence[];
 }
 
+/** One image drawn on a page, as `pdfimages -list` reports it. */
 export interface PdfImageRow {
   pageNumber: number;
   type: string;
@@ -64,21 +90,29 @@ export interface PdfImageRow {
   height: number;
   xPpi: number;
   yPpi: number;
+  /** `object:generation` of the image XObject, or null for inline images and images without an object reference. */
+  objectKey: string | null;
 }
 
-/** Parse `pdfimages -list` output. Masks (`smask`, `mask`) describe another image's alpha and are skipped. */
+/** Parse one `pdfimages -list` line. Masks (`smask`, `mask`) describe another image's alpha and are skipped. */
+export function parsePdfImagesRow(line: string): PdfImageRow | null {
+  const fields = pdfImagesListFields(line);
+  if (fields.length < 14 || !/^\d+$/.test(fields[0]!)) return null;
+  const type = fields[2]!;
+  if (type !== "image" && type !== "stencil") return null;
+  const [pageNumber, width, height, xPpi, yPpi] = [fields[0], fields[3], fields[4], fields[12], fields[13]].map(Number);
+  if (![pageNumber, width, height, xPpi, yPpi].every((value) => Number.isFinite(value) && value! > 0)) return null;
+  const objectKey = /^\d+$/.test(fields[10] ?? "") && /^\d+$/.test(fields[11] ?? "") && fields[10] !== "0" ? `${fields[10]}:${fields[11]}` : null;
+  return { pageNumber: pageNumber!, type, width: width!, height: height!, xPpi: xPpi!, yPpi: yPpi!, objectKey };
+}
+
+/** Parse `pdfimages -list` output into rows (tests and small listings; evidence uses `summarizeImageListing`). */
 export function parsePdfImagesList(stdout: string, maxRows = MAX_IMAGE_ROWS): PdfImageRow[] {
   const rows: PdfImageRow[] = [];
   for (const line of stdout.split("\n")) {
     if (rows.length >= maxRows) break;
-    const fields = line.trim().split(/\s+/);
-    // page num type width height color comp bpc enc interp object ID x-ppi y-ppi size ratio
-    if (fields.length < 14 || !/^\d+$/.test(fields[0]!)) continue;
-    const type = fields[2]!;
-    if (type !== "image" && type !== "stencil") continue;
-    const [pageNumber, width, height, xPpi, yPpi] = [fields[0], fields[3], fields[4], fields[12], fields[13]].map(Number);
-    if (![pageNumber, width, height, xPpi, yPpi].every((value) => Number.isFinite(value) && value! > 0)) continue;
-    rows.push({ pageNumber: pageNumber!, type, width: width!, height: height!, xPpi: xPpi!, yPpi: yPpi! });
+    const row = parsePdfImagesRow(line);
+    if (row) rows.push(row);
   }
   return rows;
 }
@@ -93,45 +127,127 @@ export function parsePdfPageAreas(stdout: string): Map<number, number> {
   return areas;
 }
 
-/** Evidence for the given sparse pages from parsed image rows and page areas. */
+/** Significant, non-repeated image totals of one page. */
+export interface PageImageTotals {
+  /** Images of any size, masks excluded. */
+  anyImageCount: number;
+  imageCount: number;
+  imageCoverage: number;
+  largestImageCoverage: number;
+  /** Significant images skipped as repeated page furniture. */
+  repeatedImageCount: number;
+}
+
+export interface ImageListingSummary {
+  pages: Map<number, PageImageTotals>;
+  /** Last page the listing was read to when it was too long; pages after it are unknown. Null: read to the end. */
+  truncatedAfterPage: number | null;
+}
+
+/**
+ * Fold a `pdfimages -list` listing into per-page totals, one streaming pass plus one pass over each page's tracked
+ * images.
+ *
+ * - An image is significant when its shorter side has `minSignificantImagePixels` pixels and its placed area
+ *   (pixels / ppi * 72 points) covers `minSignificantImageCoverage` of the page.
+ * - A significant image whose object is drawn on at least `repeatedImageMinPages` pages, and on at least
+ *   `repeatedImageMinShare` of the `pagesInScope` pages, is page furniture (logo, letterhead, slide background) and
+ *   leaves the totals: a scan is a different image on every page. Inline images have no object identity and are
+ *   never repeated.
+ * - Totals are per page and the line limit is document-wide only for pages not yet read, so a page of 100,000
+ *   tiny images costs one counter and cannot hide later pages.
+ */
+export function summarizeImageListing(
+  stdout: string,
+  options: { pageAreas: Map<number, number>; defaultPageArea?: number; pagesInScope: number; maxLines?: number },
+): ImageListingSummary {
+  const maxLines = options.maxLines ?? MAX_IMAGE_ROWS;
+  const tracked = new Map<number, { rows: Array<{ key: string | null; coverage: number }>; overflowCount: number; overflowCoverage: number; overflowLargest: number; any: number }>();
+  const objectPages = new Map<string, { pages: number; last: number }>();
+  let truncatedAfterPage: number | null = null;
+  let lastPage = 0;
+  let lines = 0;
+  for (const line of stdout.split("\n")) {
+    if (++lines > maxLines) {
+      truncatedAfterPage = Math.max(0, lastPage - 1);
+      // The page being read when the limit hit is incomplete as well.
+      tracked.delete(lastPage);
+      break;
+    }
+    const row = parsePdfImagesRow(line);
+    if (!row) continue;
+    lastPage = row.pageNumber;
+    const entry = tracked.get(row.pageNumber) ?? { rows: [], overflowCount: 0, overflowCoverage: 0, overflowLargest: 0, any: 0 };
+    tracked.set(row.pageNumber, entry);
+    entry.any += 1;
+    const pageArea = options.pageAreas.get(row.pageNumber) ?? options.defaultPageArea;
+    if (!pageArea || Math.min(row.width, row.height) < MIN_SIGNIFICANT_IMAGE_PIXELS) continue;
+    // Placed size in points: pixels / (pixels per inch) * 72 points per inch.
+    const coverage = Math.min(1, ((row.width / row.xPpi) * 72 * ((row.height / row.yPpi) * 72)) / pageArea);
+    if (!(coverage >= MIN_SIGNIFICANT_IMAGE_COVERAGE)) continue;
+    if (row.objectKey !== null) {
+      const seen = objectPages.get(row.objectKey);
+      if (seen) {
+        if (seen.last !== row.pageNumber) { seen.pages += 1; seen.last = row.pageNumber; }
+      } else if (objectPages.size < MAX_TRACKED_OBJECTS) {
+        objectPages.set(row.objectKey, { pages: 1, last: row.pageNumber });
+      }
+    }
+    if (entry.rows.length < MAX_TRACKED_IMAGES_PER_PAGE) entry.rows.push({ key: row.objectKey, coverage });
+    else {
+      entry.overflowCount += 1;
+      entry.overflowCoverage += coverage;
+      entry.overflowLargest = Math.max(entry.overflowLargest, coverage);
+    }
+  }
+  const scope = Math.max(1, options.pagesInScope);
+  const repeated = new Set<string>();
+  for (const [key, seen] of objectPages) {
+    if (seen.pages >= PAGE_RASTER_ROUTING.repeatedImageMinPages && seen.pages / scope >= PAGE_RASTER_ROUTING.repeatedImageMinShare) repeated.add(key);
+  }
+  const pages = new Map<number, PageImageTotals>();
+  for (const [pageNumber, entry] of tracked) {
+    const totals: PageImageTotals = { anyImageCount: entry.any, imageCount: entry.overflowCount, imageCoverage: entry.overflowCoverage, largestImageCoverage: entry.overflowLargest, repeatedImageCount: 0 };
+    for (const image of entry.rows) {
+      if (image.key !== null && repeated.has(image.key)) { totals.repeatedImageCount += 1; continue; }
+      totals.imageCount += 1;
+      totals.imageCoverage += image.coverage;
+      totals.largestImageCoverage = Math.max(totals.largestImageCoverage, image.coverage);
+    }
+    totals.imageCoverage = Math.min(1, totals.imageCoverage);
+    pages.set(pageNumber, totals);
+  }
+  return { pages, truncatedAfterPage };
+}
+
+/** Evidence for the given sparse pages (page number to native words) from an image listing summary. */
 export function buildPageImageEvidence(args: {
   sparsePages: Map<number, number>;
-  images: PdfImageRow[];
-  pageAreas: Map<number, number>;
-  defaultPageArea?: number;
+  listing: ImageListingSummary;
 }): PageImageEvidence[] {
-  const evidence = new Map<number, PageImageEvidence>();
-  for (const [pageNumber, wordCount] of args.sparsePages) {
-    evidence.set(pageNumber, { pageNumber, wordCount, imageCount: 0, imageCoverage: 0, largestImageCoverage: 0 });
-  }
-  for (const image of args.images) {
-    const entry = evidence.get(image.pageNumber);
-    if (!entry) continue;
-    if (Math.min(image.width, image.height) < MIN_SIGNIFICANT_IMAGE_PIXELS) continue;
-    const pageArea = args.pageAreas.get(image.pageNumber) ?? args.defaultPageArea;
-    if (!pageArea) continue;
-    // Placed size in points: pixels / (pixels per inch) * 72 points per inch.
-    const placedArea = (image.width / image.xPpi) * 72 * ((image.height / image.yPpi) * 72);
-    const coverage = Math.min(1, placedArea / pageArea);
-    if (coverage < MIN_SIGNIFICANT_IMAGE_COVERAGE) continue;
-    entry.imageCount += 1;
-    entry.imageCoverage = Math.min(1, entry.imageCoverage + coverage);
-    entry.largestImageCoverage = Math.max(entry.largestImageCoverage, coverage);
-  }
-  return [...evidence.values()]
-    .map((entry) => ({
-      ...entry,
-      imageCoverage: round(entry.imageCoverage),
-      largestImageCoverage: round(entry.largestImageCoverage),
-    }))
+  return [...args.sparsePages]
+    .map(([pageNumber, wordCount]) => {
+      const known = args.listing.truncatedAfterPage === null || pageNumber <= args.listing.truncatedAfterPage;
+      const totals = args.listing.pages.get(pageNumber);
+      return {
+        pageNumber,
+        wordCount,
+        imagesKnown: known,
+        anyImageCount: known ? totals?.anyImageCount ?? 0 : 0,
+        repeatedImageCount: known ? totals?.repeatedImageCount ?? 0 : 0,
+        imageCount: known ? totals?.imageCount ?? 0 : 0,
+        imageCoverage: round(known ? totals?.imageCoverage ?? 0 : 0),
+        largestImageCoverage: round(known ? totals?.largestImageCoverage ?? 0 : 0),
+      };
+    })
     .sort((left, right) => left.pageNumber - right.pageNumber);
 }
 
 /**
- * Sparse pages (page number → native word count) from page-aligned texts. Returns an
- * empty map when no page is sparse.
+ * Sparse pages (page number to native word count) from page-aligned texts. Returns an empty map when no page is
+ * sparse. `textLayerPages` are the PDF's own layer per page (null where unknown).
  */
-export function findSparsePages(pageTexts: string[], textLayerPages?: string[] | null): Map<number, number> {
+export function findSparsePages(pageTexts: string[], textLayerPages?: Array<string | null> | null): Map<number, number> {
   const sparse = new Map<number, number>();
   pageTexts.forEach((text, index) => {
     const words = nativePageWords(text, textLayerPages?.[index]);
@@ -141,15 +257,13 @@ export function findSparsePages(pageTexts: string[], textLayerPages?: string[] |
 }
 
 /**
- * Native words on a page. Extracted text can come from OCR of a raster (Tesseract inside the
- * extractor), which is word-shaped yet says nothing about the text layer: a scan with OCR text
- * is still a raster page. When the PDF's own text layer is known (page facts' pdftotext run), the
- * smaller of the two counts is the native one.
+ * Native words on a page. Extracted text can come from OCR of a raster (Tesseract inside the extractor), which is
+ * word-shaped yet says nothing about the text layer: a scan with OCR text is still a raster page. When the PDF's own
+ * text layer is known (page facts' pdftotext run), it alone is the native text; otherwise the extracted text stands
+ * in for it (an OCR'd scan past the page-facts range then reads as text, the cheap side).
  */
 export function nativePageWords(extractedText: string, textLayerText?: string | null): number {
-  const extracted = pageEvidenceWordCount(extractedText);
-  if (typeof textLayerText !== "string") return extracted;
-  return Math.min(extracted, pageEvidenceWordCount(textLayerText));
+  return pageEvidenceWordCount(typeof textLayerText === "string" ? textLayerText : extractedText);
 }
 
 /**
@@ -162,7 +276,7 @@ export function totalEmbeddedImageBytes(stdout: string): number | null {
   let total = 0;
   let rows = 0;
   for (const line of stdout.split("\n")) {
-    const f = line.trim().split(/\s+/);
+    const f = pdfImagesListFields(line);
     if (!/^\d+$/.test(f[0] ?? "")) continue;
     if (++rows > 100_000) return null;
     if (!["image", "mask", "smask", "stencil"].includes(f[2] ?? "")) return null;
@@ -239,15 +353,9 @@ export function imageFilePageEvidence(): PageImageEvidence[] {
   return [{ pageNumber: 1, wordCount: 0, imageCount: 1, imageCoverage: 1, largestImageCoverage: 1, embeddedImageBytes: null }];
 }
 
-/**
- * Approximate native words on a page: letter/digit runs of 2+ characters (so Markdown
- * syntax and stray glyphs do not count), or letters/digits / 6 for scripts written
- * without spaces (CJK), whichever is larger.
- */
+/** Native words on a page by Unicode script (`pageWordCount`): the one word counter routing and billing share. */
 export function pageEvidenceWordCount(text: string): number {
-  const runs = (text.match(/[\p{L}\p{N}]{2,}/gu) ?? []).length;
-  const characters = (text.match(/[\p{L}\p{N}]/gu) ?? []).length;
-  return Math.max(runs, Math.floor(characters / 6));
+  return pageWordCount(text);
 }
 
 /**
@@ -267,10 +375,49 @@ export function pageAlignedTexts(text: string, pageCount: number): string[] | nu
 }
 
 const EVIDENCE_TIMEOUT_MS = 20_000;
+/** Pages whose image listing is read for repeat detection beyond the sparse pages (furniture shows on every page). */
+const LISTING_SCOPE_PAGES = 1000;
+/** Suspect text layers checked against an OCR of the page per document, spread over the suspect pages. */
+export const TEXT_LAYER_OCR_SAMPLE_PAGES = 6;
+/** Characters of a page's text the quality assessment reads. */
+const ASSESSED_PAGE_CHARS = 65_536;
 
 /**
- * Raster evidence for the sparse pages of a PDF, or null when no page is sparse or the
- * Poppler tools are unavailable or fail (callers then keep text-only triage).
+ * Whether suspect text layers match an OCR of their pages: a verdict for the pages given, `null` per page when the
+ * check could not run (no OCR, no language data, a render failure). Supplied by the stage that owns the sandbox.
+ */
+export type TextLayerVerifier = (pages: Array<{ pageNumber: number; text: string }>, signal?: AbortSignal) => Promise<Map<number, boolean | null>>;
+
+/**
+ * Verdict for suspect pages from a sample: up to `TEXT_LAYER_OCR_SAMPLE_PAGES` pages spread over them are checked and
+ * the rest take the sample's verdict when it is unanimous over at least two checked pages; otherwise they stay
+ * unchecked (null). A glyph substitution is a property of a font, so it shows on every page that font set.
+ */
+export async function verifySuspectPages(
+  suspect: Array<{ pageNumber: number; text: string }>,
+  verify: TextLayerVerifier,
+  signal?: AbortSignal,
+): Promise<Map<number, boolean | null>> {
+  const verdicts = new Map<number, boolean | null>();
+  if (suspect.length === 0) return verdicts;
+  const count = Math.min(TEXT_LAYER_OCR_SAMPLE_PAGES, suspect.length);
+  const sample = Array.from({ length: count }, (_, i) => suspect[Math.floor((i * suspect.length) / count)]!);
+  const checked = await verify(sample, signal);
+  const results = sample.map((page) => checked.get(page.pageNumber) ?? null);
+  for (const [index, page] of sample.entries()) verdicts.set(page.pageNumber, results[index]!);
+  const known = results.filter((result): result is boolean => result !== null);
+  const unanimous = known.length >= 2 && known.every((result) => result === known[0]) ? known[0]! : null;
+  for (const page of suspect) if (!verdicts.has(page.pageNumber)) verdicts.set(page.pageNumber, unanimous);
+  return verdicts;
+}
+
+/**
+ * Evidence for the pages of a PDF that need it, or null when no page does or the Poppler tools are unavailable or fail
+ * (callers then keep text-only triage):
+ *
+ * - sparse pages (few native words): significant, non-repeated image coverage from `pdfimages -list` and page sizes;
+ * - pages whose text layer is garbled or suspect (`assessTextLayer`), sparse or not, with an OCR cross-check of a
+ *   sample of the suspect ones.
  */
 export async function collectPageImageEvidence(args: {
   runner: Pick<CommandRunner, "listPdfImages" | "pdfPageSizes" | "run">;
@@ -284,41 +431,80 @@ export async function collectPageImageEvidence(args: {
    */
   sharedImagesList?: { lastPage: number; stdout: Promise<string | null> };
   /**
-   * The PDF's own text layer per page (form-feed split pdftotext output from page facts), when
-   * known. Pages past its range keep the extracted text's word count.
+   * The PDF's own text layer per page (form-feed split pdftotext output from page facts), when known; null for
+   * pages past its range, which keep the extracted text.
    */
-  textLayerPages?: string[] | null;
+  textLayerPages?: Array<string | null> | null;
+  /** OCR cross-check for suspect text layers; absent leaves them unchecked (not read, never billed). */
+  verifyTextLayer?: TextLayerVerifier;
 }): Promise<PageImageEvidence[] | null> {
-  const sparsePages = findSparsePages(args.pageTexts, args.textLayerPages);
-  if (sparsePages.size === 0) return null;
-  const pageNumbers = [...sparsePages.keys()];
-  const first = Math.min(...pageNumbers);
-  const last = Math.max(...pageNumbers);
-  const timeoutMs = args.timeoutMs ?? EVIDENCE_TIMEOUT_MS;
-  const withTimeout = () => {
-    const timeout = AbortSignal.timeout(timeoutMs);
-    return args.signal ? AbortSignal.any([args.signal, timeout]) : timeout;
+  const layerOf = (index: number): { text: string; source: "text-layer" | "extracted" } => {
+    const layer = args.textLayerPages?.[index];
+    return typeof layer === "string" ? { text: layer, source: "text-layer" } : { text: args.pageTexts[index] ?? "", source: "extracted" };
   };
-  let listing: string | null = null;
-  if (args.sharedImagesList && args.sharedImagesList.lastPage >= last) {
-    listing = await args.sharedImagesList.stdout.catch(() => null);
-  }
-  if (listing === null) {
-    const listPlan = await args.runner.listPdfImages(args.sourcePath, first, last);
-    if (!listPlan.available) return null;
-    listing = (await args.runner.run(listPlan, withTimeout())).stdout;
-  }
-  const images = parsePdfImagesList(listing).filter((image) => sparsePages.has(image.pageNumber));
-  let pageAreas = new Map<number, number>();
-  if (images.length > 0) {
-    const sizePlan = await args.runner.pdfPageSizes(args.sourcePath, first, last);
-    if (sizePlan.available) {
-      pageAreas = parsePdfPageAreas((await args.runner.run(sizePlan, withTimeout())).stdout);
+  const sparsePages = findSparsePages(args.pageTexts, args.textLayerPages);
+  const layers = new Map<number, PageTextLayerEvidence>();
+  const suspectPages: Array<{ pageNumber: number; text: string }> = [];
+  args.pageTexts.forEach((_, index) => {
+    const { text, source } = layerOf(index);
+    const assessment = assessTextLayer(text.length > ASSESSED_PAGE_CHARS ? text.slice(0, ASSESSED_PAGE_CHARS) : text);
+    if (assessment.verdict === "ok" || assessment.verdict === "empty") return;
+    layers.set(index + 1, { verdict: assessment.verdict, reasons: assessment.reasons, source, ...(assessment.verdict === "suspect" ? { matchesOcr: null } : {}) });
+    if (assessment.verdict === "suspect") suspectPages.push({ pageNumber: index + 1, text });
+  });
+  if (sparsePages.size === 0 && layers.size === 0) return null;
+
+  let evidence = new Map<number, PageImageEvidence>();
+  if (sparsePages.size > 0) {
+    const pageNumbers = [...sparsePages.keys()];
+    const last = Math.max(...pageNumbers);
+    const scopeLast = Math.min(Math.max(last, Math.min(args.pageTexts.length, LISTING_SCOPE_PAGES)), Math.max(1, args.pageTexts.length));
+    const timeoutMs = args.timeoutMs ?? EVIDENCE_TIMEOUT_MS;
+    const withTimeout = () => {
+      const timeout = AbortSignal.timeout(timeoutMs);
+      return args.signal ? AbortSignal.any([args.signal, timeout]) : timeout;
+    };
+    let listing: string | null = null;
+    let listedTo = scopeLast;
+    if (args.sharedImagesList && args.sharedImagesList.lastPage >= last) {
+      listing = await args.sharedImagesList.stdout.catch(() => null);
+      listedTo = args.sharedImagesList.lastPage;
+    }
+    if (listing === null) {
+      const listPlan = await args.runner.listPdfImages(args.sourcePath, 1, scopeLast);
+      if (!listPlan.available) return null;
+      listing = (await args.runner.run(listPlan, withTimeout())).stdout;
+      listedTo = scopeLast;
+    }
+    let pageAreas = new Map<number, number>();
+    if (/^\s*\d+\s/m.test(listing)) {
+      const sizePlan = await args.runner.pdfPageSizes(args.sourcePath, 1, listedTo);
+      if (sizePlan.available) pageAreas = parsePdfPageAreas((await args.runner.run(sizePlan, withTimeout())).stdout);
+    }
+    const summary = summarizeImageListing(listing, { pageAreas, defaultPageArea: US_LETTER_AREA, pagesInScope: listedTo });
+    const imageBytes = embeddedImageBytesByPage(listing);
+    for (const page of buildPageImageEvidence({ sparsePages, listing: summary })) {
+      evidence.set(page.pageNumber, { ...page, embeddedImageBytes: imageBytes.get(page.pageNumber) ?? null });
     }
   }
-  const imageBytes = embeddedImageBytesByPage(listing);
-  return buildPageImageEvidence({ sparsePages, images, pageAreas, defaultPageArea: US_LETTER_AREA })
-    .map((page) => ({ ...page, embeddedImageBytes: imageBytes.get(page.pageNumber) ?? null }));
+
+  if (args.verifyTextLayer && suspectPages.length > 0) {
+    const verdicts = await verifySuspectPages(suspectPages, args.verifyTextLayer, args.signal).catch(() => new Map<number, boolean | null>());
+    for (const [pageNumber, matches] of verdicts) {
+      const layer = layers.get(pageNumber);
+      if (layer) layer.matchesOcr = matches;
+    }
+  }
+  for (const [pageNumber, layer] of layers) {
+    const existing = evidence.get(pageNumber);
+    if (existing) existing.textLayer = layer;
+    else {
+      const { text } = layerOf(pageNumber - 1);
+      evidence.set(pageNumber, { pageNumber, wordCount: pageWordCount(text), imageCount: 0, imageCoverage: 0, largestImageCoverage: 0, textLayer: layer });
+    }
+  }
+  evidence = new Map([...evidence].sort(([left], [right]) => left - right));
+  return [...evidence.values()];
 }
 
 /** Fallback page area (US Letter, 612 x 792 pt) when page sizes are unavailable. */

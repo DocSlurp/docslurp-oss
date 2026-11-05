@@ -590,7 +590,12 @@ describe("fallback text and drawn-content hints", () => {
   it("garbled text is not usable fallback; readable text is", () => {
     const garbled = Array.from({ length: 20 }, () => "6FDOLQJDWWHQWLRQZLWKRXWORVLQJVLJQDO").join(" ");
     const prose = "A readable paragraph of native text that stays searchable when vision gives nothing back.";
-    const hints = legacyPageHints(surface(`${garbled}\f${prose}`, 2, []).pages);
+    // The text-layer check (assessTextLayer, page-image-evidence) found page 1's layer garbled.
+    const layer: PageImageEvidence = {
+      pageNumber: 1, wordCount: 20, imageCount: 0, imageCoverage: 0, largestImageCoverage: 0,
+      textLayer: { verdict: "garbled", reasons: ["glyph-shift"], source: "text-layer" },
+    };
+    const hints = legacyPageHints(surface(`${garbled}\f${prose}`, 2, [layer]).pages);
     expect([...hints.fallbackTextPages]).toEqual([2]);
   });
 });

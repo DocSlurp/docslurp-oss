@@ -100,12 +100,10 @@ order:
    manually.
 2. **Tombstone and access, in one transaction.** It sets `deleted_at`,
    turns off auto top-up (so no further charge can start), deletes memberships and invites, revokes API keys
-   and MCP OAuth grants, deletes SSO domains, links and requests, and writes
-   an `organization.deleted` audit row.
+   and MCP OAuth grants, deletes the organization's webhooks (URLs and signing secrets, with their delivery log),
+   deletes SSO domains, links and requests, and writes an `organization.deleted` audit row.
 3. It cancels in-flight runs through Temporal.
 4. It deletes undelivered `webhook_outbox` rows about the org's runs.
-   Webhooks are user-scoped, so the webhook endpoints themselves belong to
-   their users.
 5. It deletes every project (`deleteProjectData`): each queues
    `vector_table` drops for its LanceDB databases, and the triggers enqueue
    storage cleanup.
@@ -133,8 +131,8 @@ email address. Use `GET /v1/account/deletion` to preview the outcome:
   team content, and the org's owners and admins keep managing them.
 
 The following user data is deleted: memberships, pending invites the user
-sent, API keys (revoked and renamed), MCP grants and requests, webhooks and
-their outbox and deliveries, MCP service connections, stored OAuth tokens, SSO
+sent, API keys (revoked and renamed), MCP grants and requests, webhooks they
+created (they stop delivering once the user leaves anyway) and their deliveries, MCP service connections, stored OAuth tokens, SSO
 links, settings, notification preferences, chat and search sessions, query
 suggestions, idempotency entries, and Better Auth sessions, credentials and
 verifications. The response also clears the browser's session cookies.

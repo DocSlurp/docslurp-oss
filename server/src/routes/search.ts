@@ -24,8 +24,9 @@ import { defaultMaterializeDeps, pageKey } from "../search/deferred/materialize-
 import { loadProjectPipeline } from "../search/session-setup.js";
 import { resolveMaterializationPolicy } from "../services/materialization-policy.js";
 import { aggregateProjectRagSearch } from "../services/aggregate-rag.js";
+import { resolveDefaultOrganization } from "../services/organizations.js";
 import { ProjectAccessError } from "../services/default-project.js";
-import { hybridSearch, MissingProjectScopeError } from "../services/search.js";
+import { CrossProjectScopeError, hybridSearch, MissingProjectScopeError, ProjectNotFoundError } from "../services/search.js";
 import { prefetchBatchQueryEmbeddings } from "../search/batch-embeddings.js";
 import { chatProject, projectChatDisabledBody } from "../services/project-chat.js";
 import { beginChatTurn, chatTurnFailureReason, type ChatTurn, type ChatTurnUsage } from "../services/billing/chat-turn-billing.js";
@@ -247,36 +248,49 @@ export const projectChatRoutes = new Hono()
   .route("/operations", chatOperationRoutes)
   .use("*", nativeApiErrors)
   .post("/", projectChatHandler)
-  .get("/stream", projectChatStreamHandler);
+  .get("/stream", projectChatStreamHandler)
+  // The question travels in the body, not the URL, where proxies, logs and history keep it.
+  .post("/stream", projectChatStreamHandler);
 /** Internal tool target only. Never mount this router as a public agent entrypoint. */
 export const groundedProjectChatRoutes = new Hono().use("*", nativeApiErrors).post("/", (c: Context) => handleProjectChat(c, "grounded"));
 
 /**
- * `GET /v1/chat/stream`: the cited chat answer as server-sent events from a
- * GET, with the question in the query string. The same scoping,
- * chat settings and spend checks as `POST /v1/chat` apply.
+ * `POST /v1/chat/stream` (and `GET /v1/chat/stream`, kept for browsers that
+ * can only open an EventSource): the cited chat answer as server-sent events.
+ * The POST carries the same JSON body as `POST /v1/chat`, so the question is
+ * never in a URL. The same scoping, chat settings and spend checks apply.
  */
 async function projectChatStreamHandler(c: Context) {
   if (process.env.DOCSLURP_DURABLE_CHAT === "1" && getRequestActor(c).type === "session") {
     return c.json({ error: "Use POST /v1/chat/operations with Idempotency-Key, then resume the operation" }, 409);
   }
-  // Paid GET turns from cookie sessions require same-origin browser evidence.
-  if (getRequestActor(c).type === "session" && !sameOriginBrowserRequest(c)) {
+  const fromBody = c.req.method === "POST";
+  // Paid GET turns from cookie sessions require same-origin browser evidence; a POST is covered by the CSRF/origin checks every POST gets.
+  if (!fromBody && getRequestActor(c).type === "session" && !sameOriginBrowserRequest(c)) {
     return apiErrorResponse(c, 403, "forbidden", "Cross-site request rejected");
   }
-  let filters: unknown;
-  const rawFilters = c.req.query("filters");
-  if (rawFilters !== undefined) {
-    try {
-      if (rawFilters.length > 16384) throw new Error("Filters too large");
-      filters = JSON.parse(rawFilters);
-    } catch { return apiErrorResponse(c,400,"invalid_request","Invalid chat filters"); }
+  let input: unknown;
+  if (fromBody) {
+    const body: unknown = await c.req.json().catch(() => null);
+    input = body && typeof body === "object" && !Array.isArray(body)
+      ? { ...body, sessionToken: c.req.header(CHAT_SESSION_TOKEN_HEADER)?.trim() || (body as { sessionToken?: unknown }).sessionToken }
+      : null;
+  } else {
+    let filters: unknown;
+    const rawFilters = c.req.query("filters");
+    if (rawFilters !== undefined) {
+      try {
+        if (rawFilters.length > 16384) throw new Error("Filters too large");
+        filters = JSON.parse(rawFilters);
+      } catch { return apiErrorResponse(c,400,"invalid_request","Invalid chat filters"); }
+    }
+    input = { filters, q: c.req.query("q"),
+      project: c.req.query("project") || undefined, orgId: c.req.query("orgId") || undefined,
+      sessionId: c.req.query("sessionId"),
+      sessionToken: c.req.header(CHAT_SESSION_TOKEN_HEADER)?.trim() || undefined,
+      model: c.req.query("model"), speedBoost: c.req.query("speedBoost") === undefined ? false : c.req.query("speedBoost") === "true" ? true : c.req.query("speedBoost") === "false" ? false : c.req.query("speedBoost") };
   }
-  const parsed = projectChatInputSchema.safeParse({ filters, q: c.req.query("q"),
-    project: c.req.query("project") || undefined, orgId: c.req.query("orgId") || undefined,
-    sessionId: c.req.query("sessionId"),
-    sessionToken: c.req.header(CHAT_SESSION_TOKEN_HEADER)?.trim() || undefined,
-    model: c.req.query("model"), speedBoost: c.req.query("speedBoost") === undefined ? false : c.req.query("speedBoost") === "true" ? true : c.req.query("speedBoost") === "false" ? false : c.req.query("speedBoost") });
+  const parsed = projectChatInputSchema.safeParse(input);
   if (!parsed.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid chat input", { issues: parsed.error.issues });
   const { q: query, sessionToken, model } = parsed.data;
 
@@ -367,10 +381,10 @@ function expectedSearchFailure(error: unknown): SearchFailure | null {
       ? { code: "FORBIDDEN", apiCode: "forbidden", message: error.message, status: 403 }
       : { code: "PROJECT_NOT_FOUND", apiCode: "project_not_found", message: error.message, status: 404 };
   }
-  if (error instanceof MissingProjectScopeError || (error instanceof Error && error.message === "Search scope must stay within a single project")) {
+  if (error instanceof MissingProjectScopeError || error instanceof CrossProjectScopeError) {
     return { code: "INVALID_SEARCH_SCOPE", apiCode: "invalid_search_scope", message: error.message, status: 400 };
   }
-  if (error instanceof Error && error.message === "Project not found") {
+  if (error instanceof ProjectNotFoundError) {
     return { code: "PROJECT_NOT_FOUND", apiCode: "project_not_found", message: error.message, status: 404 };
   }
   return null;
@@ -560,21 +574,24 @@ export const searchRoutes = new Hono()
     try {
       // Each listed project may be a UUID, slug, former slug, name or
       // `default`; one that matches nothing answers 404 naming its slug.
+      // One organization per search: the key's, else the one the session names, else its personal one.
+      const orgId = actor.type === "apiKey" ? actor.apiKey.orgId : parsed.data.orgId ?? (await resolveDefaultOrganization(actor.userId)).id;
+      if (actor.type === "apiKey" && parsed.data.orgId && parsed.data.orgId !== orgId) {
+        return apiErrorResponse(c, 404, "project_not_found", "Project not found");
+      }
       const projects = await Promise.all(
-        parsed.data.projects.map((project) => resolveActorProjectId(actor, project)),
+        parsed.data.projects.map((project) => resolveActorProjectId(actor, project, orgId)),
       );
       const response = await aggregateProjectRagSearch({
         userId: actor.userId,
+        orgId,
         request: { ...parsed.data, projects },
         apiKey: actor.type === "apiKey" ? actor.apiKey : null,
       });
       return c.json(response);
     } catch (error) {
-      if (error instanceof Error && error.message.startsWith("Project not found")) {
+      if (error instanceof ProjectNotFoundError) {
         return apiErrorResponse(c, 404, "project_not_found", "Project not found");
-      }
-      if (error instanceof Error && error.name === "AggregateAnswerScopeError") {
-        return apiErrorResponse(c, 400, "invalid_request", error.message);
       }
       throw error;
     } finally {
@@ -669,4 +686,4 @@ export const searchesRoutes = new Hono().get("/:sessionId/materialization", asyn
 
 acceptApiKeys(searchRoutes);
 acceptApiKeys(searchesRoutes);
-acceptApiKeys(projectChatRoutes, ["POST /", "GET /stream"]);
+acceptApiKeys(projectChatRoutes, ["POST /", "GET /stream", "POST /stream"]);

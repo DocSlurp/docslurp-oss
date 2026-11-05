@@ -43,7 +43,7 @@ it("carries metadata.title, else the page-map title, on the document index", asy
 
 // The single-document payload (getDocumentViewerPayload) maps its row through the same mapDocument.
 it("carries the title on document listings", async () => {
-  const listed = await documents.listDocumentsWithFilters({ userId: "u", projectId: "w" });
+  const listed = (await documents.listDocumentsWithFilters({ userId: "u", projectId: "w" })).documents;
   expect(Object.fromEntries(listed.map((doc) => [doc.id, doc.title]))).toEqual(expected);
   expect(listed.find((doc) => doc.id === "titled")?.filename).toBe("Q3_board-deck_v2_FINAL (1).pdf");
 });

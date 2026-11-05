@@ -1,3 +1,4 @@
+import { normalizeDocumentExtractionAliases } from "./extractor-aliases.js";
 import { z } from "zod";
 import { layoutRegionSchema } from "./layout.js";
 
@@ -120,6 +121,12 @@ export const ocrLanguageSchema = z.string().trim()
   .max(64);
 
 /**
+ * Project OCR language: `auto` detects each page's script and runs the matching installed packs; anything else
+ * is Tesseract codes. English was the only language before, which turned Arabic, Chinese and Hindi scans into junk.
+ */
+export const ocrLanguageSettingSchema = z.union([z.literal("auto"), ocrLanguageSchema]);
+
+/**
  * Dolphin options a project may set. The repository and model paths, and the Python binary, come only from the
  * worker environment (DOLPHIN_REPO_PATH, DOLPHIN_MODEL_PATH, DOLPHIN_PYTHON_BIN): a path from a project would
  * let it choose which script the worker runs.
@@ -155,20 +162,20 @@ export type KreuzbergExtractorOptions = z.infer<typeof kreuzbergExtractorOptions
  * Option schemas by extractor id. Only these extractors take options; every other id, and every key a schema does
  * not name, is rejected. The worker re-parses each id before handing options to a script (parseExtractorOptions).
  */
-export const dopplerExtractorOptionsSchema = z.object({
+export const vmPdfExtractorOptionsSchema = z.object({
   images: extractionImageConfigSchema.strict().optional(),
   pdf: extractionPdfOptionsSchema.pick({ extractImages: true }).strict().optional(),
 }).strict();
 
 export const extractorOptionSchemas = {
-  doppler: dopplerExtractorOptionsSchema,
+  "vm-pdf": vmPdfExtractorOptionsSchema,
   kreuzberg: kreuzbergExtractorOptionsSchema,
   dolphin: dolphinExtractorOptionsSchema,
 } as const;
 
 /** Extractor options by extractor id (extractorOptionSchemas); unknown ids and keys are rejected. */
 export const documentExtractorOptionsSchema = z
-  .object({ kreuzberg: kreuzbergExtractorOptionsSchema.optional(), dolphin: dolphinExtractorOptionsSchema.optional(), doppler: dopplerExtractorOptionsSchema.optional() })
+  .object({ kreuzberg: kreuzbergExtractorOptionsSchema.optional(), dolphin: dolphinExtractorOptionsSchema.optional(), "vm-pdf": vmPdfExtractorOptionsSchema.optional() })
   .strict();
 
 /**
@@ -216,9 +223,10 @@ function dropInvalid(schema: z.ZodTypeAny, value: Record<string, unknown>, prefi
  */
 export function sanitizeStoredDocumentExtraction(value: unknown): { value: unknown; dropped: string[] } {
   if (!isPlainObject(value)) return { value, dropped: [] };
-  const next: Record<string, unknown> = structuredClone(value);
+  // Configured legacy ids first, so a renamed extractor's options are kept under its new id rather than dropped.
+  const next: Record<string, unknown> = structuredClone(normalizeDocumentExtractionAliases(value) as Record<string, unknown>);
   const dropped: string[] = [];
-  if (isPlainObject(next.ocr) && next.ocr.language !== undefined && !ocrLanguageSchema.safeParse(next.ocr.language).success) {
+  if (isPlainObject(next.ocr) && next.ocr.language !== undefined && !ocrLanguageSettingSchema.safeParse(next.ocr.language).success) {
     delete next.ocr.language;
     dropped.push("documentExtraction.ocr.language");
   }
@@ -242,8 +250,11 @@ export function sanitizeStoredDocumentExtraction(value: unknown): { value: unkno
   return { value: next, dropped };
 }
 
-/** A project policy. The document router can emit the same ordered IDs per document. */
-export const documentExtractionConfigSchema = z.object({
+/**
+ * A project policy. The document router can emit the same ordered IDs per document. Configured legacy extractor ids
+ * (DOCSLURP_EXTRACTOR_ID_ALIASES, extractor-aliases.ts) are rewritten to their canonical id before validation.
+ */
+export const documentExtractionConfigSchema = z.preprocess(normalizeDocumentExtractionAliases, z.object({
   target: z.string().min(1).default("document/markdown"),
   enrich: z.array(z.string().min(1)).default([]),
   order: z.record(z.string(), z.array(z.string().min(1)).min(1)).default({}),
@@ -260,10 +271,10 @@ export const documentExtractionConfigSchema = z.object({
   options: documentExtractorOptionsSchema.default({}),
   forceOcr: z.boolean().default(false),
   ocr: z.object({
-    language: ocrLanguageSchema.default("eng"),
+    language: ocrLanguageSettingSchema.default("auto"),
     autoRotate: z.boolean().default(true),
-  }).default({ language: "eng", autoRotate: true }),
-});
+  }).default({ language: "auto", autoRotate: true }),
+}));
 export type DocumentExtractionConfig = z.infer<typeof documentExtractionConfigSchema>;
 
 export const defaultDocumentExtractionConfig: DocumentExtractionConfig = {
@@ -275,7 +286,7 @@ export const defaultDocumentExtractionConfig: DocumentExtractionConfig = {
   voting: { enabled: false, secondary: "next-in-order" },
   options: {},
   forceOcr: false,
-  ocr: { language: "eng", autoRotate: true },
+  ocr: { language: "auto", autoRotate: true },
 };
 
 export const extractionImageSchema = z.object({

@@ -43,7 +43,10 @@ export function adapterQuery(provider: SearchProvider, projectRef: string, input
   project(projectRef);
   if (q.trim() === "*") throw new SearchCompatibilityError("Wildcard browsing is not supported. Send a nonempty search query, or use the document-list API.");
   const paged = provider === "typesense" || (provider === "meilisearch" && (params.page !== undefined || params.hitsPerPage !== undefined));
-  const size = integer(provider === "typesense" ? params.per_page : paged ? params.hitsPerPage : params.limit, provider === "pagefind" ? 100 : 20, 1);
+  // Each engine's own default page size, so a drop-in client that omits it sees what it would from the real engine
+  // (Typesense per_page 10, Meilisearch limit/hitsPerPage 20, Pagefind returns its whole result list).
+  const defaultSize = provider === "typesense" ? 10 : provider === "pagefind" ? 100 : 20;
+  const size = integer(provider === "typesense" ? params.per_page : paged ? params.hitsPerPage : params.limit, defaultSize, 1);
   const page = integer(params.page, 1, 1);
   const offset = paged ? (page - 1) * size : integer(params.offset, 0, 0);
   if (offset + size > 100) throw new SearchCompatibilityError("Only the first 100 ranked passages are available. Narrow the query instead of paging beyond this window.");

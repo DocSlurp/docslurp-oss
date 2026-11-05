@@ -54,7 +54,7 @@ describe("GET /dashboard/bootstrap", () => {
     mocks.listOrganizations.mockResolvedValue([{ id: "o1" }]);
     mocks.listProjects.mockResolvedValue([{ id: "w1", orgId: "o1" }]);
     const res = await appAs(session("u1", true)).request("/dashboard/bootstrap");
-    expect(await res.json()).toEqual({ isAdmin: true, organizations: [{ id: "o1" }], projects: [{ id: "w1", orgId: "o1" }] });
+    expect(await res.json()).toEqual({ isOperator: true, isAdmin: true, organizations: [{ id: "o1" }], projects: [{ id: "w1", orgId: "o1" }] });
     expect(mocks.ensure).not.toHaveBeenCalled();
     expect(mocks.admit).not.toHaveBeenCalled();
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");

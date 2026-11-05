@@ -301,6 +301,22 @@ describe("LanceDB maintenance", () => {
     });
   });
 
+  it("reports the FTS rebuild in the result and the log line, and does not rebuild twice", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      await writeLanceDbRecords(dir, "chunks", Array.from({ length: 12 }, (_, i) => record("fts", i)));
+      const first = await runLanceDbMaintenance(dir, "chunks", { vectorIndexMinRows: 1_000 });
+      expect(first).toMatchObject({ ok: true, ftsRebuilt: true });
+      expect(first.ftsMs).toBeGreaterThanOrEqual(0);
+      expect(log.mock.calls.map(([line]) => String(line)).find((line) => line.includes("[lancedb] maintenance"))).toMatch(/fts_rebuilt=true fts_ms=\d+/);
+      const second = await runLanceDbMaintenance(dir, "chunks", { vectorIndexMinRows: 1_000 });
+      expect(second).toMatchObject({ ok: true, ftsRebuilt: false, ftsMs: 0 });
+      expect(log.mock.calls.map(([line]) => String(line)).filter((line) => line.includes("[lancedb] maintenance")).at(-1)).toMatch(/fts_rebuilt=false fts_ms=0/);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it("adds one index segment per optimize and consolidates past maxIndexSegments", async () => {
     await writeLanceDbRecords(dir, "chunks", Array.from({ length: 40 }, (_, i) => record("base", i)));
     expect(await runLanceDbMaintenance(dir, "chunks", { vectorIndexMinRows: 40 })).toMatchObject({ indexCreated: true });

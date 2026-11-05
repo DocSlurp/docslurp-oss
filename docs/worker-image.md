@@ -31,9 +31,11 @@ and from the deploy error text. The CI image budget (below) is set well under it
 Both images ship Tesseract and its 21 languages. On the lean image they add 107 MiB (the apt delta for
 `tesseract-ocr` and the language packs, measured 2026-10-26; the image is 2,085 MiB uncompressed). The prerequisite
 check fails the build, and a `lean` or `full` worker's startup, if any language is missing. Production therefore OCRs
-images locally, in the parser sandbox, instead of sending them to vision. Image OCR uses English unless the
-extractor config sets `ocr.language`, so text in other scripts may come out poor; `DOCSLURP_OCR=off` restores
-vision-first routing. A self-built image or local setup without the language data falls back
+images locally, in the parser sandbox, instead of sending them to vision. The local page-OCR adapter reads the
+page's script first (Tesseract orientation and script detection), runs the installed packs for that script, retries
+other packs when the mean word confidence is low and refuses output it cannot read instead of indexing it. The
+project setting `documentExtraction.ocr.language` is `auto` by default; set Tesseract codes such as `eng+deu` to
+override it, or `DOCSLURP_OCR_LANGUAGE` for the whole worker. `DOCSLURP_OCR=off` restores vision-first routing. A self-built image or local setup without the language data falls back
 as follows. Kreuzberg's bundled Tesseract otherwise looks for that data at the path of the machine that built it. The extractor planner therefore checks for `<lang>.traineddata` in
 `TESSDATA_PREFIX` and Kreuzberg's system locations (`worker/src/extractors/ocr-capability.ts`) before offering
 Kreuzberg for an image, and `DOCSLURP_OCR=off` forces that answer. With no OCR, or when Kreuzberg's OCR still

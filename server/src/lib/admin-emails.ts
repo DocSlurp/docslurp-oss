@@ -5,28 +5,17 @@ export function configuredAdminEmails(csv = process.env.ADMIN_EMAILS ?? ""): str
   return [...new Set(csv.split(",").map(email => email.trim().toLowerCase()).filter(email => !email.includes("*") && /^[^\s@,]+@[^\s@,]+\.[^\s@,]+$/.test(email)))];
 }
 
-/** Admit verified identities and promote existing memberships, preserving owners. */
-export async function admitConfiguredAdminUser(pool: Pick<Pool, "query">, userId: string): Promise<boolean> {
-  const emails = configuredAdminEmails();
-  if (!emails.length) return false;
-  const result = await pool.query<{ is_admin: boolean }>(`
-    with eligible as (
-      select id from "user"
-      where id = $1 and "emailVerified" = true and deleted_at is null
-        and lower(trim(email)) = any($2::text[])
-    ), promoted_orgs as (
-      update org_memberships set role = 'admin'
-      where user_id in (select id from eligible) and role not in ('owner', 'admin')
-    ), promoted_projects as (
-      update project_members set role = 'admin'
-      where user_id in (select id from eligible) and role <> 'admin'
-    )
-    select exists(select 1 from eligible) as is_admin
-  `, [userId, emails]);
-  return result.rows[0]?.is_admin === true;
-}
+/*
+ * ADMIN_EMAILS names platform operators (DocSlurp staff), a role separate from
+ * every organization and project role. It is read, never written back: being
+ * an operator does not change, and must never imply, a role inside a customer
+ * organization. Operator tools authorize through isConfiguredAdminUser; a
+ * customer organization decides who administers it. (Sign-in used to promote an
+ * operator's memberships to admin in every organization they belonged to; that
+ * handed operators write access to customer data and was removed.)
+ */
 
-/** Read current admin eligibility without promoting memberships during requests. */
+/** Whether this verified, live user is a platform operator. Read-only. */
 export async function isConfiguredAdminUser(pool: Pick<Pool, "query">, userId: string): Promise<boolean> {
   const emails = configuredAdminEmails();
   if (!emails.length) return false;
@@ -38,4 +27,11 @@ export async function isConfiguredAdminUser(pool: Pick<Pool, "query">, userId: s
     ) as is_admin
   `, [userId, emails]);
   return result.rows[0]?.is_admin === true;
+}
+
+/** The same lookup for code that holds a postgres.js client rather than a pg Pool. */
+export async function isConfiguredAdminUserSql(sql: { unsafe: (text: string, values: string[][] | string[]) => PromiseLike<unknown[]> }, userId: string): Promise<boolean> {
+  return await isConfiguredAdminUser({
+    query: (async (text: string, values: unknown[]) => ({ rows: await sql.unsafe(text, values as string[]) })) as unknown as Pool["query"],
+  }, userId);
 }

@@ -31,6 +31,8 @@ import { createSandboxActivityInterceptor } from "../sandbox/activity-intercepto
 import { configureSourceQuarantine, postgresSourceQuarantine } from "../sandbox/source-quarantine.js";
 import { onTeardownBreakerOpen, quarantineForceExitMs, scheduleQuarantineForceExit, workerShutdownForceMs } from "../sandbox/teardown-breaker.js";
 import { initializeParserSandbox, setDefaultParserSandbox } from "../sandbox/startup.js";
+import { loadExtractorPlugins } from "../extractors/plugins.js";
+import { configureWorkerExtractorIdAliases } from "../extractors/registry.js";
 import { ArtifactStore } from "../tools/storage.js";
 import { createStages } from "../stages/index.js";
 import { createActivities } from "./activities.js";
@@ -123,6 +125,18 @@ async function main(): Promise<void> {
   const sandbox = await initializeParserSandbox(process.env, process.platform).catch((error) => {
     throw new FatalWorkerError("startup", `parser sandbox unavailable: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   });
+  // Extractor plugins named by DOCSLURP_EXTRACTOR_PLUGINS load before taking work; a missing or broken one, or a
+  // configuration that selects the VM PDF extractor without a provider, refuses to start.
+  await loadExtractorPlugins(process.env).catch((error) => {
+    throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
+  });
+  // Legacy extractor ids (DOCSLURP_EXTRACTOR_ID_ALIASES) map onto what this worker serves, so stored and in-flight
+  // configs that name a renamed extractor keep running. An alias to an id it cannot serve refuses to start.
+  try {
+    configureWorkerExtractorIdAliases(process.env);
+  } catch (error) {
+    throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
+  }
   // Load the native PDF engine before taking work: its state is logged once, and an image that ships it
   // (or a mode that needs it) refuses to start without it rather than serving every PDF without it.
   await assertNativePdfEngineAtStartup(process.env).catch((error) => {

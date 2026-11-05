@@ -44,7 +44,7 @@ import { buildRunProgressSnapshot, withRunCosts } from "./runs.js";
 import {
   canEditProject,
   canManageProject,
-  ensurePersonalOrganization,
+  resolveDefaultOrganization,
   getProjectAccess,
   listAccessibleProjectIds,
 } from "./organizations.js";
@@ -353,7 +353,7 @@ function mapProjectRun(row: ProjectRunRow): ProjectRun {
 async function assertProjectAccess(projectId: string, userId: string) {
   const access = await getProjectAccess(projectId, userId);
   if (!access) {
-    throw new Error("Project not found");
+    throw new ProjectAccessError(404, "project_not_found", "Project not found");
   }
   return access;
 }
@@ -379,7 +379,7 @@ export async function createProject(input: CreateProjectInput): Promise<ProjectR
         where om.org_id = ${parsed.orgId} and om.user_id = ${parsed.userId}
         limit 1
       `.then((rows) => rows[0] ?? null)
-    : await ensurePersonalOrganization(parsed.userId);
+    : await resolveDefaultOrganization(parsed.userId);
 
   if (!organization) {
     throw new Error("Organization not found");
@@ -515,6 +515,8 @@ export interface ProjectInputScope {
  * `project: "Legal Contracts"` pointing at the project an upload created
  * for it. Projects outside the caller's access, the scope's organization or
  * the key allowlist are never returned, so the answer never reveals them.
+ * Without `scope.orgId`, a slug or name that matches usable projects in more
+ * than one organization throws a 409 `project_ambiguous` rather than choosing.
  */
 export async function findProjectForInput(
   ref: Extract<ProjectInputRef, { kind: "id" } | { kind: "slug" }>,
@@ -533,10 +535,9 @@ export async function findProjectForInput(
   const [bySlug] = await sql<{ project_id: string }[]>`
     select project_id from project_slugs where slug = ${ref.slug}
   `;
-  if (bySlug) {
-    const project = await usable(bySlug.project_id);
-    if (project) return project;
-  }
+  const bySlugUsable = bySlug ? await usable(bySlug.project_id) : null;
+  // With an organization named, the first usable match inside it wins (slug owner, then oldest name).
+  if (bySlugUsable && scope.orgId) return bySlugUsable;
 
   const named = await sql<{ id: string; name: string }[]>`
     select w.id, w.name
@@ -546,12 +547,20 @@ export async function findProjectForInput(
       and w.id <> ${bySlug?.project_id ?? ""}
     order by (w.archived_at is not null), w.created_at, w.id
   `;
+  const matches: { id: string; orgId: string }[] = bySlugUsable ? [bySlugUsable] : [];
   for (const row of named) {
     if (slugifyProjectName(row.name) !== ref.slug) continue;
     const project = await usable(row.id);
-    if (project) return project;
+    if (!project) continue;
+    matches.push(project);
+    if (scope.orgId) break;
   }
-  return null;
+  // Without an organization the name may exist in several of the caller's organizations. Never
+  // pick one by age or slug ownership: that would put data in whichever tenant happened to be first.
+  if (!scope.orgId && new Set(matches.map((match) => match.orgId)).size > 1) {
+    throw new ProjectAccessError(409, "project_ambiguous", `More than one of your organizations has a project named "${ref.slug}"`, { projectSlug: ref.slug });
+  }
+  return matches[0] ?? null;
 }
 
 /**
@@ -571,7 +580,7 @@ export async function ensureDefaultProject(args: {
         where om.org_id = ${args.orgId} and om.user_id = ${args.userId}
         limit 1
       `.then((rows) => rows[0]?.id ?? null)
-    : (await ensurePersonalOrganization(args.userId)).id;
+    : (await resolveDefaultOrganization(args.userId)).id;
   if (!orgId) {
     // Unknown org and non-member org look the same, so membership is not leaked.
     throw new ProjectAccessError(404, "organization_not_found", "Organization not found");
@@ -612,7 +621,7 @@ export async function findDefaultProject(args: { userId: string; orgId?: string 
  * not touched an org-scoped endpoint yet.
  */
 export async function ensurePersonalDefaultProject(userId: string): Promise<void> {
-  const organization = await ensurePersonalOrganization(userId);
+  const organization = await resolveDefaultOrganization(userId);
   await insertDefaultProject(sql, { orgId: organization.id, userId });
 }
 
@@ -1073,11 +1082,11 @@ async function mutateProjectArchiveState(args: {
   const current = await getProject(args.projectId, args.userId);
   const access = await getProjectAccess(args.projectId, args.userId);
   if (!current || !access) {
-    throw new Error("Project not found");
+    throw new ProjectAccessError(404, "project_not_found", "Project not found");
   }
 
   if (!canManageProject(access, args.userId)) {
-    throw new Error("Forbidden");
+    throw new ProjectAccessError(403, "project_forbidden", "Forbidden");
   }
 
   if (current.isDefault && args.action === "archive") {
@@ -1096,7 +1105,7 @@ async function mutateProjectArchiveState(args: {
 
   const updated = await getProject(args.projectId, args.userId);
   if (!updated) {
-    throw new Error("Project not found");
+    throw new ProjectAccessError(404, "project_not_found", "Project not found");
   }
 
   return updated;
@@ -1136,11 +1145,11 @@ export async function deleteProject(
   const current = await getProject(projectId, userId);
   const access = await getProjectAccess(projectId, userId);
   if (!current || !access) {
-    throw new Error("Project not found");
+    throw new ProjectAccessError(404, "project_not_found", "Project not found");
   }
 
   if (!canManageProject(access, userId)) {
-    throw new Error("Forbidden");
+    throw new ProjectAccessError(403, "project_forbidden", "Forbidden");
   }
 
   if (current.isDefault) {
@@ -1171,12 +1180,12 @@ export async function cloneProject(
 ): Promise<ProjectRecord> {
   const current = await getProject(projectId, userId);
   if (!current) {
-    throw new Error("Project not found");
+    throw new ProjectAccessError(404, "project_not_found", "Project not found");
   }
 
   const access = await assertProjectAccess(projectId, userId);
   if (!canEditProject(access, userId)) {
-    throw new Error("Forbidden");
+    throw new ProjectAccessError(403, "project_forbidden", "Forbidden");
   }
 
   return await createProject({
@@ -1236,7 +1245,7 @@ export async function rollbackProjectVersion(
 ): Promise<ProjectRecord> {
   const access = await assertProjectAccess(projectId, userId);
   if (!canEditProject(access, userId)) {
-    throw new Error("Forbidden");
+    throw new ProjectAccessError(403, "project_forbidden", "Forbidden");
   }
 
   const [row] = await sql<ProjectVersionRow[]>`
@@ -1269,7 +1278,7 @@ export async function rollbackProjectVersion(
   });
 
   if (!updated) {
-    throw new Error("Project not found");
+    throw new ProjectAccessError(404, "project_not_found", "Project not found");
   }
 
   return updated;

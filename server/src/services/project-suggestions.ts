@@ -1,4 +1,5 @@
 import { sql } from "../db.js";
+import { escapeLikePattern } from "../search/filters.js";
 import { isProtectedStoredQuery } from "../search/session.js";
 import { getProjectAccess } from "./organizations.js";
 
@@ -7,7 +8,8 @@ export async function readProjectSuggestions(userId: string, projectId: string, 
   if (!await getProjectAccess(projectId, userId)) return null;
   const q = (options.q ?? "").trim().slice(0, 64);
   const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(50, Math.floor(options.limit!))) : 8;
-  const like = q ? `${q}%` : "%";
+  // A typed `%` or `_` is text, not a wildcard: "100%" must not match every phrase.
+  const like = q ? `${escapeLikePattern(q)}%` : "%";
 
   // 1) Recent queries for this project starting with prefix. Stored queries
   // are encrypted or hashed at rest; those rows have no text to suggest.
@@ -39,11 +41,9 @@ export async function readProjectSuggestions(userId: string, projectId: string, 
       select d.filename as phrase, 5 as weight
       from documents d
       join projects w on w.id = d.project_id
-      left join org_memberships om on om.org_id = w.org_id and om.user_id = ${userId}
-      left join project_members wm on wm.project_id = w.id and wm.user_id = ${userId}
       where d.project_id = ${projectId}
         and d.status = 'completed' and d.superseded_at is null
-        and ((om.user_id is not null and (w.user_id = ${userId} or wm.user_id is not null or om.role in ('owner', 'admin') or w.is_default)) or (wm.user_id is not null and exists (select 1 from organizations o where o.id = w.org_id and o.is_personal)))
+        and docslurp_project_access(w.id, ${userId})
         and d.filename ilike ${like}
       limit ${limit}
     ) x
@@ -89,10 +89,8 @@ export async function readProjectSuggestions(userId: string, projectId: string, 
       ), 0) as in_flight_documents
     from projects w
     left join project_corpus_stats cs on cs.project_id = w.id
-    left join org_memberships om on om.org_id = w.org_id and om.user_id = ${userId}
-    left join project_members wm on wm.project_id = w.id and wm.user_id = ${userId}
     where w.id = ${projectId}
-      and ((om.user_id is not null and (w.user_id = ${userId} or wm.user_id is not null or om.role in ('owner', 'admin') or w.is_default)) or (wm.user_id is not null and exists (select 1 from organizations o where o.id = w.org_id and o.is_personal)))
+      and docslurp_project_access(w.id, ${userId})
     limit 1
   `;
 
@@ -107,14 +105,12 @@ export async function readProjectSuggestions(userId: string, projectId: string, 
             from document_chunks c
             join documents d on d.id = c.document_id
             join projects w on w.id = d.project_id
-            left join org_memberships om on om.org_id = w.org_id and om.user_id = ${userId}
-            left join project_members wm on wm.project_id = w.id and wm.user_id = ${userId}
             cross join unnest(c.heading_path) as heading
             where d.project_id = ${projectId}
               and d.status = 'completed' and d.superseded_at is null
               and trim(both from heading) <> ''
               and char_length(trim(both from heading)) >= 4
-              and ((om.user_id is not null and (w.user_id = ${userId} or wm.user_id is not null or om.role in ('owner', 'admin') or w.is_default)) or (wm.user_id is not null and exists (select 1 from organizations o where o.id = w.org_id and o.is_personal)))
+              and docslurp_project_access(w.id, ${userId})
           ) headings
           group by heading
           order by hits desc, heading asc
@@ -128,11 +124,9 @@ export async function readProjectSuggestions(userId: string, projectId: string, 
           select d.filename
           from documents d
           join projects w on w.id = d.project_id
-          left join org_memberships om on om.org_id = w.org_id and om.user_id = ${userId}
-          left join project_members wm on wm.project_id = w.id and wm.user_id = ${userId}
           where d.project_id = ${projectId}
             and d.status = 'completed' and d.superseded_at is null
-            and ((om.user_id is not null and (w.user_id = ${userId} or wm.user_id is not null or om.role in ('owner', 'admin') or w.is_default)) or (wm.user_id is not null and exists (select 1 from organizations o where o.id = w.org_id and o.is_personal)))
+            and docslurp_project_access(w.id, ${userId})
           order by d.updated_at desc
           limit 3
         `

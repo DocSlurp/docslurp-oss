@@ -1,3 +1,4 @@
+import { WorkflowExecutionAlreadyStartedError } from "@temporalio/client";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../db.js", () => ({ sql: {} }));
@@ -56,9 +57,14 @@ describe("Run Lifecycle start", () => {
   });
 
   it("treats an already-started workflow as running unless a restart was requested", async () => {
-    const alreadyStarted = vi.fn(async () => { throw new Error("Workflow execution already started"); });
+    const alreadyStarted = vi.fn(async () => { throw new WorkflowExecutionAlreadyStartedError("Workflow execution already started", "run-1", "pipeline"); });
     await expect(lifecycle(alreadyStarted).start(run)).resolves.toEqual({ status: "already-started" });
     await expect(lifecycle(alreadyStarted).start(run, { restartExisting: true })).rejects.toThrow("already started");
+  });
+
+  it("does not treat an error that merely says 'already started' as a racing start", async () => {
+    const lookalike = vi.fn(async () => { throw new Error("worker machine already started; pool exhausted"); });
+    await expect(lifecycle(lookalike).start(run)).rejects.toThrow("already started");
   });
 
   it("surfaces other orchestration errors", async () => {

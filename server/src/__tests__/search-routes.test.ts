@@ -21,6 +21,8 @@ vi.mock("../db.js", () => ({
 vi.mock("../services/search.js", () => ({
   hybridSearch,
   MissingProjectScopeError: class extends Error {},
+  CrossProjectScopeError: class extends Error {},
+  ProjectNotFoundError: class ProjectNotFoundError extends Error { constructor() { super("Project not found"); } },
 }));
 
 vi.mock("../services/project-chat.js", () => ({
@@ -42,6 +44,7 @@ vi.mock("../services/projects.js", () => ({ resolveProjectRef: vi.fn(async () =>
 // The response cache re-checks access and reads privacy per request; projects named "*strict*" are strict-privacy.
 vi.mock("../services/organizations.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("../services/organizations.js")>(),
+  resolveDefaultOrganization: vi.fn(async () => ({ id: "org-1" })),
   getProjectAccessWithPipeline: vi.fn(async (projectId: string) => ({
     projectId, orgId: "org-1", pipeline: projectId.includes("strict") ? { privacyMode: "strict-privacy" } : {},
   })),
@@ -344,6 +347,8 @@ describe("searchRoutes", () => {
     });
     expect(aggregateProjectRagSearch).toHaveBeenCalledWith({
       userId: "user-1",
+      // A session that names no organization searches its default one, never several.
+      orgId: "org-1",
       request: expect.objectContaining({
         q: "who is this for?",
         maxProjects: 4,
@@ -380,11 +385,13 @@ describe("searchRoutes", () => {
       expect(hybridSearch).not.toHaveBeenCalled();
     });
 
-    it("answers 400 when an answer would span organizations", async () => {
-      aggregateProjectRagSearch.mockRejectedValueOnce(Object.assign(new Error("generateAnswer needs projects from one organization"), { name: "AggregateAnswerScopeError" }));
-      const response = await aggregate(keyActor(["search", "chat"]), { generateAnswer: true });
-      expect(response.status).toBe(400);
-      await expect(response.json()).resolves.toMatchObject({ error: { code: "invalid_request", message: expect.stringContaining("one organization") } });
+    it("answers 404 for the typed project-not-found error and not for look-alike messages", async () => {
+      const { ProjectNotFoundError } = await import("../services/search.js");
+      aggregateProjectRagSearch.mockRejectedValueOnce(new ProjectNotFoundError());
+      expect((await aggregate(keyActor(["search"]), {})).status).toBe(404);
+      // Control flow follows the error's type, not its wording.
+      aggregateProjectRagSearch.mockRejectedValueOnce(new Error("Project not found: cache entry evicted"));
+      expect((await aggregate(keyActor(["search"]), {})).status).toBe(500);
     });
 
     it("runs a default request from a search-only key with every model-calling step off", async () => {
@@ -487,6 +494,29 @@ describe("searchRoutes", () => {
       const query = await app.request(`/chat/stream?q=test&project=ws-chat&sessionId=${session}&sessionToken=${token}`);
       await query.text();
       expect(chatProject).toHaveBeenCalledWith(expect.objectContaining({ sessionId: undefined }));
+    });
+
+    it("streams from a POST whose question is in the body, with the same grant and key checks", async () => {
+      const { sealChatSessionToken } = await import("../lib/chat-session-tokens.js");
+      const app = buildApp(visitor());
+      const token = sealChatSessionToken({ keyId: "pub-1", projectId: "ws-chat", sessionId: session });
+      const foreign = sealChatSessionToken({ keyId: "pub-2", projectId: "ws-chat", sessionId: session });
+      const post = (body: unknown, headers: Record<string, string> = {}) => app.request("/chat/stream", { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) });
+      expect((await post({ q: "test", project: "ws-chat", sessionId: session }, { "X-DocSlurp-Chat-Session-Token": foreign })).status).toBe(403);
+      expect((await post("not an object")).status).toBe(400);
+      expect((await post({ project: "ws-chat" })).status).toBe(400);
+      expect(chatProject).not.toHaveBeenCalled();
+      sqlMock.mockResolvedValue([{ org_id: "org", funded: true, auto_top_up_on: false, available: 1_000_000, reserved: 0, project_budget_paused: false, org_budget_paused: false, project_in_org: true, has_credit_grants: true }]);
+      chatProject.mockResolvedValueOnce({ id: "a", answer: "Supported", sessionId: session, sessionToken: "next", searchSessionId: null });
+      const stream = await post({ q: "What is the late fee?", project: "ws-chat", sessionId: session }, { "X-DocSlurp-Chat-Session-Token": token });
+      expect(stream.status).toBe(200);
+      expect(await stream.text()).toContain("event: done");
+      expect(chatProject).toHaveBeenCalledWith(expect.objectContaining({ query: "What is the late fee?", sessionId: session, sessionToken: token }));
+      // A browser key limited to ws-chat cannot stream another project through the body either.
+      chatProject.mockClear();
+      const other = await post({ q: "test", project: "ws-other" });
+      expect(other.status).toBeGreaterThanOrEqual(400);
+      expect(chatProject).not.toHaveBeenCalled();
     });
 
     it("refuses a cookie-session GET stream started cross-site (top-level navigation)", async () => {

@@ -3,7 +3,7 @@ import { createMigratedDatabase, applyRemainingMigrations } from "@docslurp/work
 
 describe("project terminology upgrade", () => {
   it("preserves tenant identity and split spend and denies a foreign project", async () => {
-    const db = await createMigratedDatabase({ stopBefore: "0121_projects" });
+    const db = await createMigratedDatabase({ stopBefore: "0128_projects" });
     try {
       await db.exec(`
         INSERT INTO "user" (id,name,email) VALUES ('rename-user','Rename test','rename@example.com');
@@ -18,10 +18,10 @@ describe("project terminology upgrade", () => {
       `);
       const before = await db.query("SELECT workspace_id AS project_id,org_id,cost_cents,input_tokens FROM usage_attribution WHERE id='rename-spend' ORDER BY org_id");
       await db.exec(`UPDATE usage_events SET metadata=metadata||'{"projectIds":["foreign"]}'::jsonb WHERE id='rename-spend'`);
-      await expect(applyRemainingMigrations(db, "0121_projects")).rejects.toThrow(/conflicting project selector arrays/);
+      await expect(applyRemainingMigrations(db, "0128_projects")).rejects.toThrow(/conflicting project selector arrays/);
       expect((await db.query("SELECT to_regclass('public.workspaces') IS NOT NULL AS retained")).rows).toEqual([{ retained: true }]);
       await db.exec("UPDATE usage_events SET metadata=metadata-'projectIds' WHERE id='rename-spend'");
-      await applyRemainingMigrations(db, "0121_projects");
+      await applyRemainingMigrations(db, "0128_projects");
       expect((await db.query("SELECT project_id,org_id,cost_cents,input_tokens FROM usage_attribution WHERE id='rename-spend' ORDER BY org_id")).rows).toEqual(before.rows);
       expect(before.rows).toHaveLength(2);
       expect((await db.query("SELECT id,org_id FROM projects WHERE is_default ORDER BY id")).rows).toEqual([{ id: "rename-a", org_id: "rename-org-a" }, { id: "rename-b", org_id: "rename-org-b" }]);

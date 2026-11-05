@@ -9,7 +9,7 @@
 import { currentPerfContext } from "../lib/perf-context.js";
 import type { JsonMap } from "../models.js";
 import { calibrateShardProfile, type ShardCostProfile, type ShardObservation } from "../temporal/page-shards.js";
-import { SHARD_PROFILES, type ShardProfileKey } from "../temporal/page-shard-profiles.js";
+import { shardProfile, type ShardProfileKey } from "../temporal/page-shard-profiles.js";
 import type { WorkflowState } from "./pipeline.js";
 
 export const SHARD_TIMING_METRIC = "shard_timing_ms";
@@ -101,7 +101,7 @@ export async function calibratedShardProfile(
   const now = (deps.now ?? Date.now)();
   const hit = cache.get(key);
   if (hit && now - hit.at < SHARD_CALIBRATION_TTL_MS) return hit.profile;
-  const prior: ShardCostProfile = SHARD_PROFILES[key];
+  const prior: ShardCostProfile = shardProfile(key);
   let profile = prior;
   try {
     profile = calibrateShardProfile(prior, await deps.loadObservations(key, SHARD_OBSERVATION_LIMIT));
@@ -130,7 +130,7 @@ export function createShardCalibration(
   return {
     profile: (key) => load
       ? calibratedShardProfile(key, { loadObservations: load, ...(now ? { now } : {}) })
-      : Promise.resolve(SHARD_PROFILES[key]),
+      : Promise.resolve(shardProfile(key)),
     record: recordShardTiming,
   };
 }

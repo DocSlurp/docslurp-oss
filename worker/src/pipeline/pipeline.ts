@@ -61,6 +61,15 @@ export interface CheckpointStore {
    * (re-runs do not churn it and a user rename wins). Returns whether it was written.
    */
   setDocumentTitleIfAbsent?(documentId: string, title: DerivedDocumentTitle): Promise<boolean>;
+  /** Persists the pages the worker measured after conversion (documents.billing_pages), which completion billing and features read. */
+  setDocumentBillingPages?(runId: string, documentId: string, billingPages: number, method: string): Promise<boolean>;
+  /** Pauses the run when credits it newly owes (a measured page count above intake's) no longer fit the org's balance. */
+  enforceSpendForCharge?(run: { id: string; orgId: string | null; projectId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean }>;
+  /**
+   * Replaces the API's provisional file facts (header inspection) with the worker's full inspection, and the document's
+   * MIME type with the one the bytes are. Scoped to the run's own document.
+   */
+  setDocumentFileFacts?(runId: string, documentId: string, facts: import("@docslurp/shared").FileFacts): Promise<boolean>;
   /** Newest observed page-shard timings for one `${stage}:${executor}` profile (shard calibration). */
   loadShardObservations?(profileKey: string, limit?: number): Promise<Array<{ pages: number; ms: number; maxRssMiB?: number }>>;
 }

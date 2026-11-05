@@ -82,9 +82,12 @@ describe("worker AI usage Module", () => {
     read(1, 900); // a retry of the same page in the same run: not charged again
     read(2, 2_035); // dense page: 3 Rich pages
     const charges = ledger.snapshot().filter((event) => event.metric === "ingest-page-rich");
+    // Page 2 is three Rich units, each its own event so a retried read can never charge one twice.
     expect(charges.map((event) => [event.id, event.amount, event.costCents])).toEqual([
       ["rich:run-1:doc-1:1", 1, 0.25],
-      ["rich:run-1:doc-1:2", 3, 0.75],
+      ["rich:run-1:doc-1:2", 1, 0.25],
+      ["rich:run-1:doc-1:2:unit:2", 1, 0.25],
+      ["rich:run-1:doc-1:2:unit:3", 1, 0.25],
     ]);
     expect(charges[0]!.metadata).toMatchObject({ billable: true, unitCharge: true, readBy: "page-analysis" });
     expect(ledger.pendingBillableCents).toBeCloseTo(1);
@@ -92,6 +95,47 @@ describe("worker AI usage Module", () => {
     // A local OCR read with no tokens or cost still bills the page.
     ledger.record({ provider: "vision-runtime", model: "local", metric: "ocr-native-pdf", amount: 1, unit: "image", costCents: 0, inputTokens: 0, outputTokens: 0, metadata: { documentId: "doc-1", pageNumber: 3 } });
     expect(ledger.richPagesOf("doc-1").has(3)).toBe(true);
+  });
+
+  it("keeps the output-token surcharge when a vision read follows an OCR read of the same page", () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const ledger = new PipelineUsageEventLedger();
+    ledger.runId = "run-1";
+    const vision = (outputTokens: number) => ledger.record({
+      provider: "openrouter", model: "google/gemini-3.1-flash-lite", metric: "page-analysis",
+      inputTokens: 1_149, outputTokens, costCents: 0.12, metadata: { documentId: "img", pageNumber: 1 },
+    });
+    // An uploaded image: OCR reads it (no output tokens) and charges the page as one Rich page; vision then reads it for
+    // 2,500 output tokens, which the page's first charge did not cover (3 Rich pages in all).
+    ledger.chargeRichPage({ documentId: "img", pageNumber: 1, readBy: "image-ocr" });
+    expect(ledger.pendingBillableCents).toBeCloseTo(0.25);
+    vision(2_500);
+    const charges = () => ledger.snapshot().filter((event) => event.metric === "ingest-page-rich");
+    expect(charges().map((event) => event.id)).toEqual(["rich:run-1:img:1", "rich:run-1:img:1:unit:2", "rich:run-1:img:1:unit:3"]);
+    expect(ledger.pendingBillableCents).toBeCloseTo(0.75);
+    expect(ledger.richPagesCharged("img", 1)).toBe(3);
+    // The same vision read recorded again (a retry in the same run) adds nothing; a bigger one adds only the difference.
+    vision(2_400);
+    expect(charges()).toHaveLength(3);
+    vision(3_100);
+    expect(charges().map((event) => event.id).at(-1)).toBe("rich:run-1:img:1:unit:4");
+    expect(ledger.pendingBillableCents).toBeCloseTo(1);
+    // A retry in a new ledger (a restarted activity) reading the same page emits the same ids, which insert nothing twice.
+    const retry = new PipelineUsageEventLedger();
+    retry.runId = "run-1";
+    retry.chargeRichPage({ documentId: "img", pageNumber: 1, readBy: "image-ocr" });
+    retry.record({ provider: "openrouter", model: "google/gemini-3.1-flash-lite", metric: "page-analysis", inputTokens: 1, outputTokens: 3_100, costCents: 0, metadata: { documentId: "img", pageNumber: 1 } });
+    expect(retry.snapshot().filter((event) => event.metric === "ingest-page-rich").map((event) => event.id)).toEqual(charges().map((event) => event.id));
+  });
+
+  it("bills every OCR reader as a Rich read of its page", () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const ledger = new PipelineUsageEventLedger();
+    ledger.runId = "run-1";
+    for (const metric of ["image-ocr", "tesseract-page-ocr", "pdf-ocr", "ocr-native-pdf"]) {
+      ledger.record({ provider: "local", model: "tesseract", metric, amount: 1, unit: "image", costCents: 0, metadata: { documentId: metric, pageNumber: 1 } });
+      expect(ledger.hasRichCharge(metric, 1)).toBe(true);
+    }
   });
 
   it("does not record empty AI usage", () => {

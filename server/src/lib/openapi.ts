@@ -164,9 +164,9 @@ export function buildOpenApiDocument(baseUrl: string) {
       "/v1/webhooks": {
         get: {
           tags: ["webhooks"],
-          summary: "List configured webhooks",
+          summary: "List an organization's webhooks (owners and admins)",
           parameters: [
-            { in: "query", name: "userId", schema: { type: "string" } }
+            { in: "query", name: "orgId", schema: { type: "string" }, description: "Organization whose webhooks to list; omitted means your personal organization." }
           ],
           responses: {
             "200": { description: "Webhook list" }
@@ -174,15 +174,17 @@ export function buildOpenApiDocument(baseUrl: string) {
         },
         post: {
           tags: ["webhooks"],
-          summary: "Create a webhook",
+          summary: "Create an organization webhook (owners and admins)",
+          description: "Receives the organization's run events, whoever started the run, while its creator stays an owner or admin there.",
           requestBody: {
             required: true,
             content: {
               "application/json": {
                 schema: {
                   type: "object",
+                  additionalProperties: false,
                   properties: {
-                    userId: { type: "string" },
+                    orgId: { type: "string", description: "Organization to receive events for; omitted means your personal organization." },
                     url: { type: "string", format: "uri" },
                     secret: { type: "string", minLength: 16 },
                     events: {

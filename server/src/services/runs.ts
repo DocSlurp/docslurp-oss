@@ -36,7 +36,8 @@ import { sql } from "../db.js";
 import { RUN_EVENTS_CHANNEL, RunEventHub, type RunEventHubRow } from "./run-event-hub.js";
 import { env as apiEnv } from "../config.js";
 import { getPipelineTemporalSnapshot } from "../lib/temporal.js";
-import { buildProgressModule } from "./progress-snapshot.js";
+import { buildProgressModule, redactOperatorRunFields } from "./progress-snapshot.js";
+import { decodeListCursor, encodeListCursor } from "../lib/list-cursor.js";
 import {
   buildRunProcessingPreview,
   getRunProcessingPreview,
@@ -359,18 +360,42 @@ export async function listRuns(userId: string, activityOnly = false): Promise<Pr
     return await withRunCosts(result);
   }
 
-  const rows = await sql<ProjectRunRow[]>`
+  return (await listRunsPage(userId, {})).runs;
+}
+
+export type RunsPage = { runs: ProjectRun[]; hasMore: boolean; nextCursor: string | null };
+
+/**
+ * One page of run history, highest priority and newest first, over the projects the caller can reach (and, for
+ * an API key, only its organization). Pages are keyset-ordered on (priority, created_at, id), so runs created
+ * while paging never shift a page; `nextCursor` is null on the last page.
+ */
+export async function listRunsPage(userId: string, args: { orgId?: string | null; limit?: number; cursor?: string }): Promise<RunsPage> {
+  const limit = args.limit ?? 50;
+  const projectIds = await listAccessibleProjectIds(userId);
+  if (projectIds.length === 0) return { runs: [], hasMore: false, nextCursor: null };
+  const after = args.cursor ? decodeListCursor<{ priority: number; createdAt: string; id: string }>("runs", args.cursor, { priority: "int", createdAt: "timestamp", id: "string" }) : null;
+  const rows = await sql<(ProjectRunRow & { cursor_created_at: string })[]>`
     select
       runs.*,
+      runs.created_at::text as cursor_created_at,
       projects.name as project_name
     from project_runs runs
     join projects on projects.id = runs.project_id
     where runs.project_id = any(${sql.array(projectIds)})
-    order by runs.priority desc, runs.created_at desc
-    limit 50
+      ${args.orgId ? sql`and runs.org_id = ${args.orgId}` : sql``}
+      ${after ? sql`and (runs.priority, runs.created_at, runs.id) < (${after.priority}::int, ${after.createdAt}::timestamptz, ${after.id})` : sql``}
+    order by runs.priority desc, runs.created_at desc, runs.id desc
+    limit ${limit + 1}
   `;
-
-  return await withRunCosts(rows.map((row) => mapProjectRun(row)));
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  const last = page.at(-1);
+  return {
+    runs: await withRunCosts(page.map((row) => mapProjectRun(row))),
+    hasMore,
+    nextCursor: hasMore && last ? encodeListCursor("runs", { priority: Number(last.priority), createdAt: last.cursor_created_at, id: last.id }) : null,
+  };
 }
 
 export async function getRun(
@@ -893,6 +918,11 @@ export async function buildRunProgressSnapshot(
     recentEventLimit?: number;
     /** Observe persisted state without querying/reconciling the executor. */
     readOnly?: boolean;
+    /**
+     * The caller is a platform operator and may see worker CPU/RAM, regions and
+     * worker classes. Anyone else gets them removed here, so the default is the safe one.
+     */
+    operator?: boolean;
   },
 ): Promise<ProjectRunProgressSnapshot> {
   const recentEventLimit = options?.recentEventLimit ?? 100;
@@ -965,7 +995,7 @@ export async function buildRunProgressSnapshot(
     ...cost,
   });
 
-  return projectRunProgressSnapshotSchema.parse({
+  const snapshot = projectRunProgressSnapshotSchema.parse({
     // One cost on every surface: the run record carries progress.usageTotals.costCents.
     run: { ...reconciledRun, costCents: cost.costCents, computeEstimated: cost.computeEstimated, billedCostCents: cost.billedCostCents },
     stages,
@@ -975,6 +1005,7 @@ export async function buildRunProgressSnapshot(
     stats,
     artifacts: reconciledRun.artifacts ?? {},
   });
+  return options?.operator === true ? snapshot : redactOperatorRunFields(snapshot);
 }
 
 export async function getRunProgress(
@@ -982,6 +1013,8 @@ export async function getRunProgress(
   userId: string,
   options?: {
     recentEventLimit?: number;
+    /** Platform operator: keep the worker diagnostics (see buildRunProgressSnapshot). */
+    operator?: boolean;
   },
 ): Promise<ProjectRunProgressSnapshot | null> {
   const run = await getRun(runId, userId, { cost: false });

@@ -45,7 +45,7 @@ test("uploads above the threshold go through a direct session, never multipart /
     "GET https://api.invalid/v1/uploads/direct/sessions/s1?statusOnly=true",
   ]);
   const session = JSON.parse(api.calls[0].body);
-  assert.deepEqual(session.files, [{ filename: "big.pdf", mimeType: "application/pdf", sizeBytes: big.size, canonicalId: "/manual" }]);
+  assert.deepEqual(session.files, [{ clientId: "0", filename: "big.pdf", mimeType: "application/pdf", sizeBytes: big.size, canonicalId: "/manual" }]);
   assert.equal(session.project, "default");
   // Presigned storage URLs never receive the API key.
   assert.equal(api.calls[1].auth, null);

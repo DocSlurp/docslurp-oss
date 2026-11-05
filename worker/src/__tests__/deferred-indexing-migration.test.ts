@@ -34,7 +34,7 @@ describe("migration 0064 deferred indexing modes", () => {
   it("defaults indexing_mode to full and key policy to {}", async () => {
     const doc = await db.query<{ indexing_mode: string }>(`select indexing_mode from documents where id = 'd1'`);
     expect(doc.rows[0]!.indexing_mode).toBe("full");
-    await db.exec(`insert into api_keys (id, user_id, key_hash, name) values ('k1', 'u1', 'h1', 'n')`);
+    await db.exec(`insert into api_keys (id, user_id, org_id, key_hash, name) values ('k1', 'u1', 'o1', 'h1', 'n')`);
     const key = await db.query<{ materialization_policy: unknown }>(
       `select materialization_policy from api_keys where id = 'k1'`,
     );

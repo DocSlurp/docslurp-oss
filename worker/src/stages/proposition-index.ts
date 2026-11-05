@@ -6,7 +6,7 @@ import { textFallbackCost, textModelApiKey, textUsageLabels } from "../lib/text-
 import { allowHostedCall, openRouterTextCall } from "../lib/privacy-guard.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import { runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
-import { chargeDocumentFeature } from "../pipeline/feature-charges.js";
+import { chargeDocumentFeature, textPagesOfText } from "../pipeline/feature-charges.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { buildTrustedDocumentTaskPrompt } from "../lib/trusted-llm-task.js";
@@ -17,7 +17,6 @@ import {
   estimateTokens,
 } from "./embedding-runtime.js";
 import {
-  detectLanguage,
   resolveEmbeddingModel,
 } from "../embeddings/resolver.js";
 import { indexableDocuments } from "../pipeline/pii-gate.js";
@@ -137,12 +136,7 @@ export class PropositionIndexStage implements Stage {
             }
 
             // Embed all propositions
-            const detectedLang = detectLanguage(extracted.text);
-            const profile = resolveEmbeddingModel(
-              this.config,
-              state.run.pipeline,
-              detectedLang,
-            );
+            const profile = resolveEmbeddingModel(this.config, state.run.pipeline);
             const embedded = await embedTextChunks({
               chunks: allPropositions.map((p) => p.text),
               profile,
@@ -206,7 +200,8 @@ export class PropositionIndexStage implements Stage {
               },
             );
             // Price card (provisional): propositions per started 10 pages, once per document per run.
-            chargeDocumentFeature(state, document, "propositions");
+            // Priced on the pages the document bills, but never on more pages than its text holds (a layout-measured count of blank pages).
+            chargeDocumentFeature(state, document, "propositions", undefined, { textPages: textPagesOfText(paragraphs.join("\n")) });
 
             // Record usage for embedding calls
             const embeddingTokens =

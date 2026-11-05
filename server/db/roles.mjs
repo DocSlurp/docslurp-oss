@@ -100,7 +100,7 @@ export const WORKER_TABLES = Object.freeze({
   vision_run_attempts: { privileges: ["select", "insert", "update"], evidence: "worker/src/db/vision-attempt-store.ts (vision attempt guard run counts)" },
   vision_route_overruns: { privileges: ["select", "insert", "delete"], evidence: "worker/src/db/vision-attempt-store.ts (per-org route overrun count, route weight correction, retention)" },
   webhook_outbox: { privileges: ["select", "insert"], evidence: "worker/src/db/store.ts enqueueWebhook (insert ... returning id)" },
-  webhooks: { privileges: [], columns: { select: ["user_id", "active", "events"] }, evidence: "worker/src/db/store.ts enqueueWebhook subscription check (no url or signing secret)" },
+  webhooks: { privileges: [], columns: { select: ["org_id", "active", "events"] }, evidence: "worker/src/db/store.ts enqueueWebhookEvent subscription check by organization (no url, creator or signing secret)" },
   worker_capabilities: { privileges: DML, evidence: "worker/src/db/worker-capabilities.ts" },
   worker_maintenance_leases: { privileges: DML, evidence: "worker/src/db/worker-slot-store.ts" },
   worker_slot_tokens: { privileges: DML, evidence: "worker/src/db/worker-slot-store.ts; acquire/renew/release_worker_slot()" },
@@ -148,6 +148,7 @@ export const WORKER_DENIED_TABLES = Object.freeze({
   oauth_accounts: "OAuth identity links and tokens",
   org_invites: "membership invitations",
   org_memberships: "membership and roles",
+  org_memberships_removed_backup: "memberships removed by 0127 (one organization per user); admin recovery only",
   parser_eval_fixtures: "evaluation fixtures (admin)",
   passkey: "Better Auth passkey credentials",
   query_suggestions: "search (API only)",
@@ -195,8 +196,10 @@ export function quoteIdent(name) {
  * the roles in `present` (role names that exist). Pure: `relations` are the
  * public relation names that exist, `sequences` maps a sequence name to the
  * table that owns it. `migrationsTable` says drizzle.__drizzle_migrations exists.
+ * `columns` (table -> column names), when given, drops worker column grants for
+ * columns that do not exist yet.
  */
-export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, relations, sequences = {}, migrationsTable = false, nativeSchema = false }) {
+export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, relations, sequences = {}, migrationsTable = false, nativeSchema = false, columns: existingColumns = null }) {
   const statements = [];
   const has = (role) => present.includes(role);
   const ownerIdent = quoteIdent(owner);
@@ -230,7 +233,11 @@ export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, 
       const target = `public.${quoteIdent(table)}`;
       if (spec.privileges.length > 0) statements.push(`grant ${spec.privileges.join(", ")} on ${target} to ${worker}`);
       for (const [privilege, columns] of Object.entries(spec.columns ?? {})) {
-        statements.push(`grant ${privilege} (${columns.map(quoteIdent).join(", ")}) on ${target} to ${worker}`);
+        // A database caught between migrations (a test that reconciles, then applies the
+        // newest ones) lacks columns the next migration adds; `reconcileRoleGrants` always
+        // runs after migrating, so by then they exist and are granted.
+        const present = existingColumns?.[table] ? columns.filter((column) => existingColumns[table].includes(column)) : columns;
+        if (present.length > 0) statements.push(`grant ${privilege} (${present.map(quoteIdent).join(", ")}) on ${target} to ${worker}`);
       }
     }
     for (const [sequence, table] of Object.entries(sequences)) {
@@ -314,6 +321,9 @@ export async function reconcileRoleGrants(client, { roles = DEFAULT_DB_ROLES, lo
     join pg_class t on t.oid = d.refobjid
     where s.relkind = 'S' and n.nspname = 'public'
   `);
+  const { rows: columnRows } = await client.query(
+    "select c.relname, array_agg(a.attname::text) as columns from pg_attribute a join pg_class c on c.oid = a.attrelid join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relkind in ('r','p') and a.attnum > 0 and not a.attisdropped group by c.relname",
+  );
   const { rows: [{ migrations }] } = await client.query("select to_regclass('drizzle.__drizzle_migrations') is not null as migrations");
   const { rows: [{ native }] } = await client.query("select to_regnamespace('docslurp_mastra') is not null as native");
   const statements = roleGrantStatements({
@@ -323,6 +333,7 @@ export async function reconcileRoleGrants(client, { roles = DEFAULT_DB_ROLES, lo
     roles,
     present,
     relations: relationRows.map((row) => row.relname),
+    columns: Object.fromEntries(columnRows.map((row) => [row.relname, row.columns])),
     sequences: Object.fromEntries(sequenceRows.map((row) => [row.sequence, row.table])),
   });
   await client.query("begin");

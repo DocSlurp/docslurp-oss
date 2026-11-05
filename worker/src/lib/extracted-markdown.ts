@@ -1,3 +1,4 @@
+import { assessTextLayer, pageWordCount } from "@docslurp/shared";
 import { stripLeadingFrontmatter } from "./markdown-structure.js";
 
 const MARKDOWN_TABLE_BLOCK =
@@ -49,10 +50,20 @@ export function sanitizeExtractedMarkdown(
   };
 }
 
+/** Readability of extracted text by `assessTextLayer` verdict (0..1): an ok layer is fully readable. */
+const READABILITY: Record<string, number> = { ok: 1, suspect: 0.5, garbled: 0.1, empty: 0 };
+/** Share of the score that is yield (words per page over `YIELD_WORDS_PER_PAGE`); the rest is readability. */
+const YIELD_WEIGHT = 0.2;
+const YIELD_WORDS_PER_PAGE = 100;
+const PLAUSIBILITY_WINDOW_CHARS = 32 * 1024;
+
 /**
- * Measures whether output looks non-empty and text-like. This is deliberately
- * not calibrated extraction quality: it cannot judge correctness, reading
- * order, OCR substitutions, tables, geometry, or hallucinations.
+ * How readable extracted text is, and roughly how much of it there is. Readability is the text-layer quality
+ * detector's verdict (`assessTextLayer`: unmapped glyphs, mojibake, glyph shifts, letter pairs per script), taken over
+ * the start, middle and end of the text; yield is words per page (script-aware) against a typical page, so a short real
+ * page loses at most `YIELD_WEIGHT`. It is deliberately not calibrated extraction quality: it cannot judge
+ * correctness, reading order, OCR substitutions, tables, geometry, or hallucinations, only whether the text is
+ * text and not noise. A garbled export scores under the store's warning threshold; an invoice of 20 words does not.
  */
 export function scoreExtractionPlausibility(
   text: string,
@@ -69,25 +80,25 @@ export function scoreExtractionPlausibility(
       wordCount: 0,
     };
   }
-  const words = sanitized.trim().split(/\s+/).filter(Boolean);
-  const wordCount = words.length;
+  const wordCount = pageWordCount(sanitized);
   const charCount = sanitized.length;
   const whitespaceCount = (sanitized.match(/\s/g) ?? []).length;
-
+  const windows = charCount <= PLAUSIBILITY_WINDOW_CHARS * 3
+    ? [sanitized]
+    : [
+        sanitized.slice(0, PLAUSIBILITY_WINDOW_CHARS),
+        sanitized.slice(Math.floor(charCount / 2) - PLAUSIBILITY_WINDOW_CHARS / 2, Math.floor(charCount / 2) + PLAUSIBILITY_WINDOW_CHARS / 2),
+        sanitized.slice(-PLAUSIBILITY_WINDOW_CHARS),
+      ];
+  const readability = windows.reduce((sum, window) => sum + (READABILITY[assessTextLayer(window).verdict] ?? 0), 0) / windows.length;
   const charYield = Math.min(1, charCount / (pageCount * 500));
-  const avgWordLen = wordCount > 0 ? charCount / wordCount : 0;
-  const averageWordLengthPlausibility = Math.min(1, avgWordLen / 6);
+  const words = sanitized.trim().split(/\s+/).filter(Boolean).length;
+  const averageWordLengthPlausibility = Math.min(1, (words > 0 ? charCount / words : 0) / 6);
   const whitespaceRatio = charCount > 0 ? whitespaceCount / charCount : 0;
-  const whitespacePlausibility =
-    whitespaceRatio > 0.05 && whitespaceRatio < 0.4 ? 1 : 0.5;
-
+  const whitespacePlausibility = whitespaceRatio > 0.05 && whitespaceRatio < 0.4 ? 1 : 0.5;
+  const yieldShare = Math.min(1, wordCount / (pageCount * YIELD_WORDS_PER_PAGE));
   return {
-    plausibilityScore: Math.min(
-      1,
-      charYield * 0.5 +
-        averageWordLengthPlausibility * 0.3 +
-        whitespacePlausibility * 0.2,
-    ),
+    plausibilityScore: Math.min(1, readability * (1 - YIELD_WEIGHT) + yieldShare * YIELD_WEIGHT),
     charYield,
     averageWordLengthPlausibility,
     whitespacePlausibility,

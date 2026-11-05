@@ -2,6 +2,7 @@ import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { parseProjectInput } from "@docslurp/shared";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
+import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
 
 vi.mock("../lib/auth.js", () => ({ appDbPool: { query: vi.fn() }, auth: { api: { getSession: vi.fn() } } }));
 
@@ -20,6 +21,7 @@ async function find(value: string, scope: { userId: string; orgId?: string | nul
 
 beforeAll(async () => {
   const database = await startMigratedPostgres();
+  await database.db.exec(LIFT_ONE_ORG_PER_USER_POLICY);
   stop = database.stop;
   sql = postgres(database.url, { max: 1, prepare: false, onnotice: () => {} });
   vi.doMock("../db.js", () => ({ sql }));
@@ -92,6 +94,30 @@ describe("project input resolution", () => {
     expect(short.slug).not.toBe("hr");
     // Still reachable by name.
     expect(await find("HR", { userId: "alice", orgId: "org-a" })).toBe(short.id);
+  });
+});
+
+describe("project names that exist in more than one of the caller's organizations", () => {
+  it("answers 409 instead of picking one, and resolves once the organization is named", async () => {
+    await sql`insert into organizations (id, name, slug, created_by_user_id) values ('org-c', 'Org C', 'org-c', 'alice')`;
+    await sql`insert into org_memberships (org_id, user_id, role) values ('org-c', 'alice', 'owner')`;
+    const inA = await projects.createProject({ userId: "alice", orgId: "org-a", name: "Contracts", slug: "contracts" });
+    const inC = await projects.createProject({ userId: "alice", orgId: "org-c", name: "Contracts", slug: "contracts" });
+    // Without an organization neither the slug owner nor the oldest match wins.
+    await expect(find("Contracts", { userId: "alice" })).rejects.toMatchObject({ status: 409, code: "project_ambiguous" });
+    await expect(find("contracts", { userId: "alice" })).rejects.toMatchObject({ status: 409, code: "project_ambiguous" });
+    expect(await find("Contracts", { userId: "alice", orgId: "org-a" })).toBe(inA.id);
+    expect(await find("Contracts", { userId: "alice", orgId: "org-c" })).toBe(inC.id);
+    // A UUID is never ambiguous.
+    expect(await find(inC.id, { userId: "alice" })).toBe(inC.id);
+  });
+
+  it("does not count organizations the caller cannot use, and never reveals them", async () => {
+    // Bob's org-b also has "Legal Contracts"; Alice is not a member, so her lookup is not ambiguous.
+    expect(await find("Legal Contracts", { userId: "alice" })).toBe(legalId);
+    // A key allowlist narrows the candidates before ambiguity is judged.
+    const inC = (await projects.listProjects("alice")).find((project) => project.orgId === "org-c" && project.name === "Contracts")!;
+    expect(await find("Contracts", { userId: "alice", allowedProjectIds: [inC.id] })).toBe(inC.id);
   });
 });
 

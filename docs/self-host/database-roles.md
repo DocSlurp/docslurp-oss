@@ -6,7 +6,7 @@ By default the server, the workers, migrations and backups all connect as one Po
 | --- | --- | --- |
 | `docslurp` (owner) | Migrations (`MIGRATION_DATABASE_URL`) and break-glass access | Owns every object |
 | `docslurp_app` | The API server (`DATABASE_URL`) | Select, insert, update and delete on every table; usage on sequences; execute on functions. No `CREATE`, not an owner |
-| `docslurp_worker` | Workers (`DATABASE_URL` on worker hosts) | DML only on the tables workers use; column-level reads of `user` (`id`, `email`), `webhooks` (`user_id`, `active`, `events`) and `project_secrets` (no ciphertext). No access to auth, API key, OAuth, SSO, connector or Stripe tables |
+| `docslurp_worker` | Workers (`DATABASE_URL` on worker hosts) | DML only on the tables workers use; column-level reads of `user` (`id`, `email`), `webhooks` (`org_id`, `active`, `events`) and `project_secrets` (no ciphertext). No access to auth, API key, OAuth, SSO, connector or Stripe tables |
 | `docslurp_backup` | `pg_dump` | `pg_read_all_data` |
 
 The worker's table list lives in `server/db/roles.mjs` (`WORKER_TABLES`, with the code that needs each one, and `WORKER_DENIED_TABLES`, with the reason for each). A test (`server/src/__tests__/db-roles.test.ts`) fails when a migration adds a table that is in neither list, so a new table is never silently granted or denied.

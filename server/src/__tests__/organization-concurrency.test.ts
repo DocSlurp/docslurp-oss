@@ -15,8 +15,24 @@ vi.mock("../db.js", async () => {
 vi.mock("../services/notifications.js", () => ({ sendProjectInviteEmail: vi.fn() }));
 const { sql } = await import("../db.js");
 const { createOrganization, getProjectAccess, updateOrganizationMemberRole, removeOrganizationMember } = await import("../services/organizations.js");
+// One organization per user (migration 0127, DOCSLURP_MAX_ORGS_PER_USER=1): joining another organization first leaves the
+// current one, and an organization left without an owner (a previous case's org, the personal org a removal provisions) goes
+// with it, as the cleanup below does. The policy itself is covered by org-membership-limit tests; this suite covers
+// ownership concurrency, so each case starts its users with no membership.
+async function leaveCurrentOrganizations(userId: string) {
+  const rows = await sql<{ org_id: string }[]>`delete from org_memberships where user_id = ${userId} returning org_id`;
+  const orgIds = rows.map(row => row.org_id);
+  if (!orgIds.length) return;
+  const ownerless = (await sql<{ id: string }[]>`select o.id from organizations o where o.id in ${sql(orgIds)}
+    and not exists (select 1 from org_memberships om where om.org_id = o.id and om.role = 'owner')`).map(row => row.id);
+  if (!ownerless.length) return;
+  await sql`delete from audit_log where org_id in ${sql(ownerless)}`;
+  await sql`delete from projects where org_id in ${sql(ownerless)}`;
+  await sql`delete from organizations where id in ${sql(ownerless)}`;
+}
 // Org membership is invite-only now (G-02); seed the second owner directly.
 async function addOwner(orgId: string, userId: string) {
+  await leaveCurrentOrganizations(userId);
   await sql`insert into org_memberships (org_id, user_id, role) values (${orgId}, ${userId}, 'owner')`;
 }
 const { validateApiKey, createApiKey, updateApiKey, rotateApiKey } = await import("../services/api-keys.js");
@@ -50,6 +66,7 @@ describe.skipIf(!database.url)("PostgreSQL organization ownership concurrency", 
   });
 
   async function twoOwners(name: string) {
+    for (const id of users) await leaveCurrentOrganizations(id);
     const org = await createOrganization({ userId: A, name });
     await addOwner(org.id, B);
     return org.id;
@@ -137,6 +154,7 @@ describe.skipIf(!database.url)("PostgreSQL organization ownership concurrency", 
     expect(usages).toHaveLength(0);
   });
   it("rolls back duplicate-slug creation without orphan organizations or owner memberships", async () => {
+    for (const id of users) await leaveCurrentOrganizations(id);
     const outcomes = await Promise.allSettled([A, B].map(userId => createOrganization({ userId, name: "Same", slug: `same-slug-${run}` })));
     expect(outcomes.filter(o => o.status === "fulfilled")).toHaveLength(1);
     const rows = await sql`select o.id, count(om.user_id)::int as members from organizations o left join org_memberships om on om.org_id = o.id where o.slug = ${`same-slug-${run}`} group by o.id`;

@@ -91,7 +91,7 @@ describe("Fast page billing from the usage ledger (recordPageBaseFee)", () => {
 
     const charges = await recordPageBaseFee(sql(), WorkflowState.create(await store.loadRun("fast"), []));
     // facts-off 3 + write-failed image 1 + long scan 305 + no-canonical 2 + unpaged 3 + f-read's unread page 1.
-    expect(charges).toMatchObject({ fastPages: 315, richPages: 0 });
+    expect(charges).toMatchObject({ fastPages: 315, richPages: 1 });
     expect(await chargedPages("fast", BILLABLE_UNIT_METRICS.fastPage)).toBe(315);
     // Only the recorded read bills Rich.
     expect(await chargedPages("fast", BILLABLE_UNIT_METRICS.richPage)).toBe(1);
@@ -106,9 +106,41 @@ describe("Fast page billing from the usage ledger (recordPageBaseFee)", () => {
     expect(await chargedPages("fast", BILLABLE_UNIT_METRICS.richPage)).toBe(1);
   });
 
-  it("still bills every scan and image file Rich under auto", { timeout: 60_000 }, async () => {
+  it("bills a scan or an image file Rich only when its read is recorded; an unread one bills Fast (auto)", { timeout: 60_000 }, async () => {
+    // Page facts say pages 2 and 3 of a-pdf are scans (no text bytes, an image). That is never what bills Rich.
+    const reading = WorkflowState.create(await store.loadRun("auto"), []);
+    reading.usageLedger.record({
+      provider: "openrouter", model: "google/gemini-3.1-flash-lite", metric: "page-analysis",
+      inputTokens: 900, outputTokens: 300, metadata: { documentId: "a-pdf", pageNumber: 2 },
+    });
+    // The image file was read by OCR (extract-markdown records it like any read).
+    reading.usageLedger.chargeRichPage({ documentId: "a-png", pageNumber: 1, readBy: "image-ocr" });
+    // A read recorded for a page the document does not have must not cancel a real page's Fast charge.
+    reading.usageLedger.chargeRichPage({ documentId: "a-pdf", pageNumber: 99, readBy: "page-analysis" });
+    const batch = reading.usageLedger.checkpoint();
+    await persistRunUsageEvents({ client: sql(), state: reading, usageEvents: batch.events });
+    batch.commit();
+
     const charges = await recordPageBaseFee(sql(), WorkflowState.create(await store.loadRun("auto"), []));
-    // pdf: 2 scans Rich, 1 text Fast; the image file Rich.
-    expect(charges).toMatchObject({ fastPages: 1, richPages: 3 });
+    // a-pdf: pages 1 and 3 Fast (page 2 was read); a-png: its one page was read. Nothing bills Rich here.
+    expect(charges).toMatchObject({ fastPages: 2, richPages: 2 });
+    const { rows } = await db.query<{ documents: Record<string, { fast: number; rich: number }> }>(
+      `select metadata -> 'documents' as documents from usage_events where id = 'fast:auto'`,
+    );
+    expect(rows[0]?.documents).toEqual({ "a-pdf": { fast: 2, rich: 0 } });
+  });
+
+  it("bills an unread image file and an unread scan Fast: unknown or unread is never Rich", { timeout: 60_000 }, async () => {
+    await db.exec(`
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+        values ('auto-unread', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'embed', '${pipeline("auto")}', 2, 4);
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count) values
+        ('u-pdf', 'o1', 'u1', 'w', 'auto-unread', 'scan.pdf', 'application/pdf', 'raw/u1', 'completed', 3),
+        ('u-png', 'o1', 'u1', 'w', 'auto-unread', 'photo.png', 'image/png', 'raw/u2', 'completed', 1);
+      insert into document_page_facts (document_id, page_number, run_id, text_bytes, image_count) values
+        ('u-pdf', 1, 'auto-unread', 0, 1), ('u-pdf', 2, 'auto-unread', 0, 1), ('u-png', 1, 'auto-unread', 0, 1);
+    `);
+    const charges = await recordPageBaseFee(sql(), WorkflowState.create(await store.loadRun("auto-unread"), []));
+    expect(charges).toMatchObject({ fastPages: 4, richPages: 0 });
   });
 });

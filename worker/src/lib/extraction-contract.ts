@@ -1,5 +1,5 @@
 import {
-  splitTextIntoPages,
+  splitTextIntoPagesStrict,
   type ExtractionContract,
   type ExtractionHeader,
   type ExtractionLink,
@@ -7,6 +7,32 @@ import {
   type ExtractionTable,
 } from "@docslurp/shared";
 import { scoreExtractionPlausibility } from "./extracted-markdown.js";
+import { estimateTokens, foldKey } from "./unicode-text.js";
+
+/** Whole-heading titles of a table of contents. A substring test ("toc") also matched Stockton, protocol and octocat. */
+const TOC_HEADINGS = new Set([
+  "table of contents", "contents", "toc", "index of contents",
+  "inhaltsverzeichnis", "inhalt", "sommaire", "table des matieres", "table des matières",
+  "indice", "índice", "tabla de contenido", "sumário", "sumario", "indice dei contenuti", "inhoud", "inhoudsopgave",
+  "содержание", "оглавление", "目次", "目录", "目錄", "차례", "목차", "المحتويات", "विषय सूची",
+].map(foldKey));
+
+function isTocHeading(text: string): boolean {
+  return TOC_HEADINGS.has(foldKey(text.replace(/^#+\s*/, "")));
+}
+
+/** Five or more consecutive entries that end in a page number after a dot leader or a wide gap. */
+function hasLeaderTocRun(text: string): boolean {
+  let run = 0;
+  for (const line of text.split("\n")) {
+    if (/\S.*(?:\.{3,}|…|·{3,}|\s{3,})\s*\d{1,4}\s*$/u.test(line)) {
+      if (++run >= 5) return true;
+    } else if (line.trim()) {
+      run = 0;
+    }
+  }
+  return false;
+}
 
 export function buildExtractionContract(args: {
   documentId: string;
@@ -28,7 +54,10 @@ export function buildExtractionContract(args: {
   } = args;
 
   const rawText = markdown.replace(/[#*`]/g, ""); // Very basic raw text extraction
-  const pages = splitTextIntoPages(markdown, pageCount);
+  // Page numbers only where the text's own page breaks match the page count;
+  // otherwise the document is one section of unknown page.
+  const strictPages = splitTextIntoPagesStrict(markdown, pageCount);
+  const pages = strictPages ?? [markdown.replace(/\f/g, "\n")];
   const plausibilitySignals = scoreExtractionPlausibility(markdown, pageCount);
 
   const headers: ExtractionHeader[] = [];
@@ -38,7 +67,7 @@ export function buildExtractionContract(args: {
   let hasToC = false;
   let hasLaTeX = false;
   let hasCode = false;
-  let hasQRCodes = false;
+  const hasQRCodes = false;
 
   if (canonicalDocument) {
     for (const block of canonicalDocument.blocks) {
@@ -48,10 +77,7 @@ export function buildExtractionContract(args: {
           text: block.text,
           pageNumber: block.pageNumber,
         });
-        if (
-          block.text.toLowerCase().includes("table of contents") ||
-          block.text.toLowerCase().includes("toc")
-        ) {
+        if (isTocHeading(block.text)) {
           hasToC = true;
         }
       } else if (block.type === "table") {
@@ -76,7 +102,7 @@ export function buildExtractionContract(args: {
   }
 
   pages.forEach((pageText, index) => {
-    const pageNumber = index + 1;
+    const pageNumber = strictPages ? index + 1 : null;
 
     // Fallback headers if no canonical doc
     if (!canonicalDocument) {
@@ -88,10 +114,7 @@ export function buildExtractionContract(args: {
           text: headerMatch[2].trim(),
           pageNumber,
         });
-        if (
-          headerMatch[2].toLowerCase().includes("table of contents") ||
-          headerMatch[2].toLowerCase().includes("toc")
-        ) {
+        if (isTocHeading(headerMatch[2])) {
           hasToC = true;
         }
         headerMatch = headerRegex.exec(pageText);
@@ -117,14 +140,15 @@ export function buildExtractionContract(args: {
     if (pageText.includes("```")) {
       hasCode = true;
     }
-    if (pageText.toLowerCase().includes("qr code")) {
-      hasQRCodes = true;
+    if (hasLeaderTocRun(pageText)) {
+      hasToC = true;
     }
+    // hasQRCodes stays false: a page that mentions "QR code" does not contain one,
+    // and only a decoder run over the page images (not in the pipeline yet) can say.
   });
 
   // Simple token/chunk counts
-  const words = markdown.split(/\s+/).filter(Boolean).length;
-  const tokenCount = Math.ceil(words * 1.35);
+  const tokenCount = estimateTokens(markdown);
   const chunkCount = pages.length;
 
   return {

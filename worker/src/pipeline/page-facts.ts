@@ -6,7 +6,9 @@
  *
  * Kill switch: WORKER_PAGE_FACTS=false skips recording entirely.
  */
+import { pageWordCount } from "@docslurp/shared";
 import type { CommandRunner } from "../tools/runner.js";
+import { pdfImagesListFields } from "../lib/page-yield-evidence.js";
 
 /**
  * `rejected`: vision ran but its output was rejected (degenerate, refusal, truncated) and the page
@@ -91,9 +93,9 @@ export function plainTextBytes(text: string): number {
   return collapsed ? Buffer.byteLength(collapsed, "utf8") : 0;
 }
 
+/** Words by Unicode script: the one counter routing, billing evidence and the ingest report share. */
 export function wordCount(text: string): number {
-  const trimmed = text.trim();
-  return trimmed ? trimmed.split(/\s+/).length : 0;
+  return pageWordCount(text);
 }
 
 /**
@@ -115,7 +117,7 @@ export function splitFormFeedPages(text: string, pageCount: number): string[] | 
 export function parsePdfImagesList(stdout: string): Map<number, number> {
   const counts = new Map<number, number>();
   for (const line of stdout.split("\n")) {
-    const fields = line.trim().split(/\s+/);
+    const fields = pdfImagesListFields(line);
     if (fields.length < 3 || !/^\d+$/.test(fields[0]!) || !/^\d+$/.test(fields[1]!)) continue;
     if (fields[2] !== "image") continue;
     const page = Number(fields[0]);

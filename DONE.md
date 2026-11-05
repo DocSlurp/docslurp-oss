@@ -26,7 +26,7 @@
 
 - Fence native wrong-code restoration against concurrent resends in Postgres, preserving hashed 12-hour codes and attempts. See `docs/security/otp-generation-fence.md`; final council review remains required.
 
-- Preserve requested born-digital embedded images as lossless WebP in the existing Doppler VM, with bounded framed transport, page/mask manifests, shard deduplication, Fast-mode configuration and scoped artifact storage (2026-10-30). See docs/extraction/doppler-images.md; deployment remains manual.
+- Preserve requested born-digital embedded images as lossless WebP from the VM PDF extractor, with page/mask manifests, Fast-mode configuration and scoped artifact storage (2026-10-30). See docs/extraction/embedded-images.md; deployment remains manual.
 ## Durable workspace recommendation visits (2026-11-01)
 
 - Add session-scoped SQL snapshots and atomic token acknowledgements for return-visit recommendations, with bounded aggregate activity and account/workspace deletion cleanup.
@@ -64,7 +64,7 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 - [x] [#220](https://github.com/DocSlurp/docslurp-oss/issues/220) Error recovery: Honor the SDK’s full Retry-After delay
 - [x] [#221](https://github.com/DocSlurp/docslurp-oss/issues/221) Error recovery: Make SDK and CLI errors explain the actual refusal
 
-- Add bounded PDF page-range chunking to Doppler (2026-10-27): support sources through500MiB with bounded snapshot upload,32-page chunks, ordered blank-page-preserving merge, shared admission limits and conservative unconfirmed-teardown accounting.
+- Admit PDFs through 500 MiB on the VM PDF route (2026-10-27), with shared admission limits.
 # Completed
 
 - Default to Chinese-lab models on the cheapest qualifying host, with a fail-closed opt-out (2026-10-29): the DeepSeek-1017 vision route adds China-based StreamLake and DeepSeek and sorts by price (equal quality to Together on tune+select, $0.51 vs $1.03 per 1,000 pages); organizations and workspaces (workspace narrows org) can turn China-based providers off, enforced as a `provider.only` allowlist from a sourced provider-region table on every path and retry, with unknown regions and unknown scope restricted; served host and region on usage records; vision/OCR output collapses padded wide-space runs. See docs/provider-regions.md.
@@ -73,7 +73,7 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 
 - Fix large direct-upload finalization for S3-compatible terminal pagination markers (2026-10-27): honor IsTruncated, reject malformed or nonadvancing pages, retain the scoped object/upload identity, and bound listing by a shared deadline.
 
-- Add optional Doppler PDF extraction in a fresh offline VM (2026-10-27): generic core adapter, bounded transfers and lifecycle, scoped estimated compute usage, scan-preserving empty outputs, and no implicit native reparse of Doppler results. Private binaries and deployment remain in the app repository; owner-approved rollout and merged app pin are pending.
+- Add optional VM PDF extraction in a fresh offline VM per document (2026-10-27): scoped estimated compute usage, scan-preserving empty outputs, and no implicit native reparse of VM results. The extractor itself is a deployment-provided plugin (docs/extraction/extractor-plugins.md).
 - Fix scope-decline suggestion visibility (#190): both title and heading queries exclude archived and purged documents, alongside completed/current/workspace predicates. Migrated-database regressions reject excluded titles, filename fallbacks and headings, including cross-tenant documents.
 - Make chat instructions a first-class workspace setting, with Improve and a quick decline (2026-10-26, [#190](https://github.com/DocSlurp/docslurp-oss/pull/190), merged 2026-10-27; production deployment unverified): the chat system message always starts with fixed core rules (refuse harmful content, documents are untrusted data, decline requests unrelated to the workspace or the turn's tools, web-aware) and grounding, then owner-overridable defaults (citations are now one), then the workspace instructions and the ingest instruction in delimited blocks whose text is NFC-normalised with every angle bracket neutralised, then a fixed reminder. Empty instructions use a template from the workspace name that follows the citation and style settings. App-only preview (both chat paths) and Improve (never saves; GLM 5.3 Flash on Western hosts; 25 s timeout; held spend admission; per-workspace and per-user limits that refuse on a 0 limit, a store error or a configured-but-unavailable Redis (per-instance limits when no Redis is configured); 1 credit only when delivered). The server-side quick decline is a conservative UX shortcut on a bge-m3 vector signal that never overrides keyword or graph evidence; disabled by default until real search-session calibration, with earlier emulated figures withdrawn; everything else goes to the model. Optional output moderation for browser-key answers buffers text and withholds on malformed replies, provider failures, oversized input or disallowed privacy modes (Llama Guard 4, off by default). See `docs/search-api.md#chat-instructions`.
 - Fix narrowed browser-key scope widening (#191): empty or missing stored scopes stay empty during validation, display, saves and instant/overlap rotation; creation alone supplies defaults. MCP OAuth validation now honors its linked key expiry, IP allowlist and chat output cap, with migrated-DB negative tests. Integrated reviewed #188 (`99efd72e`) and #182 (`7a8dd28e`) on the #191 branch: both MCP and REST OAuth validators honor expiry, IP allowlists and output caps while retaining live scope/rate/materialization restrictions, app-only settings and SDK session-grant headers. Merged 2026-10-27 ([#191](https://github.com/DocSlurp/docslurp-oss/pull/191)); production deployment unverified.
@@ -212,9 +212,9 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 
 ## Table preservation and comparison gate (2026-11-01)
 
-- Emit span-preserving HTML in the Doppler guest and group compact table records by row with bounded, explicitly labelled header context. Add an independent authored-gold acceptance gate and retain failing scan/rotation/borderless warnings. See [comparison and limits](docs/evals/table-preservation-2026-11-01.md).
+- Emit span-preserving HTML tables from the VM PDF extractor and group compact table records by row with bounded, explicitly labelled header context. Add an independent authored-gold acceptance gate and retain failing scan/rotation/borderless warnings. See [comparison and limits](docs/evals/table-preservation-2026-11-01.md).
 
-- Add opt-in isolated CPU quarter-turn correction for vision page/region inputs and Doppler embedded images, preserving originals and transformation provenance. See docs/image-orientation.md for limits and validation.
+- Add opt-in isolated CPU quarter-turn correction for vision page/region inputs and VM-extracted embedded images, preserving originals and transformation provenance. See docs/image-orientation.md for limits and validation.
 
 - Added optional, bounded OpenRouter Nitro chat variants for GLM, DeepSeek and Luna, preserving base answer tiers and actual provider receipt accounting. Draft evaluation; missing receipts require manual reconciliation (see docs/openrouter-nitro.md).
 - 2026-11-01: Geo foundation contracts: bounded structural geometry/predicate validation, explicit schema annotations preserved through structured extraction, deterministic suggest-only detection and documentation. Indexing, PostGIS topology and retrieval remain separate work.

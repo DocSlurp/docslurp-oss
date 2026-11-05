@@ -19,7 +19,7 @@ vi.mock("../db.js", () => ({
 vi.mock("../services/organizations.js", () => ({
   canEditProject: vi.fn(() => true),
   canManageProject: vi.fn(() => true),
-  ensurePersonalOrganization: vi.fn(),
+  resolveDefaultOrganization: vi.fn(),
   getProjectAccess: vi.fn(),
   listAccessibleProjectIds: listAccessibleProjectIdsMock,
 }));

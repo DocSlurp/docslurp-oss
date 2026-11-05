@@ -97,11 +97,10 @@ describe("automatic project naming", () => {
     await naming.refineProjectNames([project.id]);
     expect((await state(project.id)).name).toBe("Residential lease agreement between Acme and Bob");
 
-    await naming.refineProjectNames([project.id], "What is the security deposit?");
-    expect(await state(project.id)).toEqual({ name: "What is the security deposit", autoTitle: { phase: "chat", name: "What is the security deposit" } });
-    await naming.refineProjectNames([project.id], "When is rent due?");
+    // A chat message cannot rename the project: refineProjectNames takes no message at all.
+    expect(naming.refineProjectNames.length).toBe(1);
     await naming.refineProjectNames([project.id]);
-    expect((await state(project.id)).name).toBe("What is the security deposit");
+    expect((await state(project.id)).name).toBe("Residential lease agreement between Acme and Bob");
   });
 
   it("names an untitled project from its first chunk heading when no upload named it", async () => {
@@ -118,7 +117,7 @@ describe("automatic project naming", () => {
     await ws.updateProject(project.id, "u", { name: "My leases" });
     await addDocument(project.id, "lease.pdf");
     expect(await naming.nameProjectFromUpload({ projectId: project.id, filenames: ["lease.pdf"] })).toBeNull();
-    await naming.refineProjectNames([project.id], "What is the deposit?");
+    await naming.refineProjectNames([project.id]);
     expect((await state(project.id)).name).toBe("My leases");
   });
 });
@@ -133,7 +132,7 @@ it.skipIf(!raceDatabaseUrl).each(["changed", "same"])("does not overwrite a conc
     await connection`update projects set name = 'Manual confidential title' where id = ${project.id}`;
     // The initial SELECT sees the old committed name. applyAutoTitle must wait
     // for this transaction, then reject the stale expected name in the UPDATE.
-    automatic = naming.refineProjectNames([project.id], candidate === "same" ? "Untitled project" : "Annual budget review");
+    automatic = naming.nameProjectFromUpload({ projectId: project.id, filenames: [candidate === "same" ? `${before.name}.pdf` : "Annual budget review.pdf"] });
     const deadline = Date.now() + 10_000;
     for (;;) {
       // pg_stat_activity is cached within a transaction until explicitly cleared.
@@ -155,15 +154,6 @@ it.skipIf(!raceDatabaseUrl).each(["changed", "same"])("does not overwrite a conc
     await automatic;
   }
 }, 15_000);
-
-it("advances a same-name phase and leaves the project timestamp unchanged", async () => {
-  const project = await ws.createProject({ userId: "u", orgId: "o" });
-  const [before] = await sql`select updated_at from projects where id = ${project.id}`;
-  await naming.refineProjectNames([project.id], "Untitled project");
-  expect(await state(project.id)).toEqual({ name: "Untitled project", autoTitle: { phase: "chat", name: "Untitled project" } });
-  const [after] = await sql`select updated_at from projects where id = ${project.id}`;
-  expect(after!.updated_at).toEqual(before!.updated_at);
-});
 
 it.each(["superseded", "archived", "purged", "failed", "cancelled", "pii_blocked", "queued", "processing"])("excludes %s documents from all naming sources", async (excluded) => {
   const project = await ws.createProject({ userId: "u", orgId: "o" });

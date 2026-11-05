@@ -33,7 +33,10 @@ export interface PiiDetectionArtifact {
     patternType: string;
     matchedPrefix: string;
     pageNumber: number | null;
+    /** UTF-8 byte offset within the scanned text (a canonical block's text, the markdown, ...), not the file. */
     byteOffset: number;
+    /** UTF-16 code-unit index within the same scanned text. */
+    charOffset: number;
     length: number;
     source: PiiTextSource;
   }>;
@@ -72,8 +75,22 @@ export type PiiDocumentOutcome = {
   withheldArtifactUris: string[];
 };
 
+/** A scan could not look at text it was supposed to check. The stage fails; "no PII found" is not an answer. */
+export class PiiScanIncompleteError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "PiiScanIncompleteError";
+  }
+}
+
 export function resolvePolicy(pipeline: WorkflowState["run"]["pipeline"]): PiiPolicy {
   const raw = pipeline.piiPolicy;
+  // A pattern this worker does not know (a newer API configured it) must stop the scan, not be dropped:
+  // dropping it would index documents the project asked to have checked for it.
+  const unknown = raw.enabled ? (raw.patterns ?? []).filter((p) => !piiPatternTypeSchema.options.includes(p as PiiPatternType)) : [];
+  if (unknown.length > 0) {
+    throw new PiiScanIncompleteError(`PII policy names patterns this worker cannot detect: ${unknown.join(", ")}`);
+  }
   return {
     enabled: raw.enabled,
     patterns: (raw.patterns ?? []).filter((p): p is PiiPatternType =>
@@ -223,18 +240,36 @@ export class PiiDetectStage implements Stage {
     signal?: AbortSignal,
   ) {
     const ledger = state.artifactLedger;
-    const markdown = await this.readTextArtifact("markdown", ledger.readDocument(document.id, "markdown"), "text/markdown");
-    const html = await this.readTextArtifact("html", ledger.read(`${document.id}:html`), "text/html; charset=utf-8", ".html");
-    const canonical = await this.readJsonArtifact("canonical-document", ledger.readDocument(document.id, "canonical-document"));
-    const contract = await this.readJsonArtifact("extraction-contract", ledger.readDocument(document.id, "extraction-contract"));
+    let markdown: TextArtifact | null;
+    let html: TextArtifact | null;
+    let canonical: JsonArtifact | null;
+    let contract: JsonArtifact | null;
+    let fallbackText: string;
+    try {
+      markdown = await this.readTextArtifact("markdown", ledger.readDocument(document.id, "markdown"), "text/markdown");
+      html = await this.readTextArtifact("html", ledger.read(`${document.id}:html`), "text/html; charset=utf-8", ".html");
+      canonical = await this.readJsonArtifact("canonical-document", ledger.readDocument(document.id, "canonical-document"));
+      contract = await this.readJsonArtifact("extraction-contract", ledger.readDocument(document.id, "extraction-contract"));
 
-    // With no extracted markdown or canonical document, embed falls back to the
-    // source text; scan exactly that so nothing reaches the index unscanned.
-    const fallbackText = !markdown && !canonical
-      ? await extractTextForEmbedding(document, this.runner, this.storage, undefined, signal, undefined)
-          .then((result) => result.text)
-          .catch(() => "")
-      : "";
+      // With no extracted markdown or canonical document, embed falls back to the
+      // source text; scan exactly that so nothing reaches the index unscanned.
+      // A failure to extract it is not "no text": it fails the stage.
+      fallbackText = !markdown && !canonical
+        ? await extractTextForEmbedding(document, this.runner, this.storage, undefined, signal, undefined)
+            .then((result) => result.text)
+            .catch((error: unknown) => {
+              throw new PiiScanIncompleteError(`PII scan could not read the source text of ${document.id}`, { cause: error });
+            })
+        : "";
+    } catch (error) {
+      // Summary evidence was cut from the unscanned text; no later stage may use it.
+      if (error instanceof PiiScanIncompleteError) {
+        await refreshSummaryEvidence({
+          storage: this.storage, ledger, document, text: null, sourceUri: ledger.readDocument(document.id, "markdown"),
+        }).catch(() => undefined);
+      }
+      throw error;
+    }
 
     const sourcesScanned: PiiTextSource[] = [];
     const findings = await measureOp(
@@ -383,6 +418,7 @@ export class PiiDetectStage implements Stage {
         matchedPrefix: m.matchedPrefix,
         pageNumber: m.pageNumber,
         byteOffset: m.byteOffset,
+        charOffset: m.charOffset,
         length: m.length,
         source: m.source,
       })),
@@ -426,6 +462,11 @@ export class PiiDetectStage implements Stage {
     return [...uris].filter((uri) => !servable.has(uri)).sort();
   }
 
+  /**
+   * Reads an artifact the scan must cover. An artifact that is not recorded is simply absent
+   * (null); one that is recorded but cannot be read, parsed or decoded throws, because skipping it
+   * would let its text reach the index unscanned.
+   */
   private async readTextArtifact(
     slot: string,
     uri: string | undefined,
@@ -434,32 +475,32 @@ export class PiiDetectStage implements Stage {
   ): Promise<TextArtifact | null> {
     if (!uri || (requiredExtension && !uri.endsWith(requiredExtension))) return null;
     let key = keyFromStorageUri(uri, this.storage.bucket);
-    if (!key) return null;
+    if (!key) throw new PiiScanIncompleteError(`PII scan cannot resolve the ${slot} artifact location`);
     try {
       let bytes = await this.storage.getBytes(key);
       if (key.endsWith(".json")) {
         // A markdown manifest points at the text it selected.
         const manifest = JSON.parse(bytes.toString("utf8")) as { textArtifactUri?: string };
         const textKey = manifest.textArtifactUri ? keyFromStorageUri(manifest.textArtifactUri, this.storage.bucket) : null;
-        if (!textKey) return null;
+        if (!textKey) throw new Error("manifest names no readable text artifact");
         key = textKey;
         bytes = await this.storage.getBytes(key);
       }
-      if (!isUtf8(bytes)) return null;
+      if (!isUtf8(bytes)) throw new Error("artifact is not valid UTF-8");
       return { slot, key, text: bytes.toString("utf8"), contentType };
-    } catch {
-      return null;
+    } catch (error) {
+      throw new PiiScanIncompleteError(`PII scan could not read the ${slot} artifact`, { cause: error });
     }
   }
 
   private async readJsonArtifact(slot: string, uri: string | undefined): Promise<JsonArtifact | null> {
     if (!uri) return null;
     const key = keyFromStorageUri(uri, this.storage.bucket);
-    if (!key) return null;
+    if (!key) throw new PiiScanIncompleteError(`PII scan cannot resolve the ${slot} artifact location`);
     try {
       return { slot, key, value: await this.storage.getJson<unknown>(key) };
-    } catch {
-      return null;
+    } catch (error) {
+      throw new PiiScanIncompleteError(`PII scan could not read the ${slot} artifact`, { cause: error });
     }
   }
 

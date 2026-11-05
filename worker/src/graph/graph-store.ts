@@ -4,6 +4,7 @@ import type { JSONValue, Sql } from "postgres";
 
 import type { DocumentGraph, GraphNodeKey } from "./extract.js";
 import { graphEdgeEndpoints, graphNodeKey } from "./extract.js";
+import { healLegacyGraphKeysOnce } from "./legacy-keys.js";
 
 type Client = Sql<Record<string, unknown>>;
 
@@ -53,6 +54,8 @@ export async function replaceDocumentGraph(sql: Client, input: ReplaceDocumentGr
   nodes: number;
   edges: number;
 }> {
+  // Nodes keyed before Unicode names (g3 and earlier) would never meet this document's keys: re-key them first.
+  await healLegacyGraphKeysOnce(sql, input.projectId);
   return await sql.begin(async (tx) => {
     const client = tx as unknown as Client;
     await lockProjectGraph(client, input.projectId);

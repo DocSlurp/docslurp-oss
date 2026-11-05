@@ -22,7 +22,7 @@ const client = new pg.Client({ connectionString: raw });
 await client.connect();
 try {
   const journal = JSON.parse(await readFile(join(source, "meta/_journal.json"), "utf8"));
-  const stop = journal.entries.findIndex(entry => entry.tag === "0121_projects");
+  const stop = journal.entries.findIndex(entry => entry.tag === "0128_projects");
   assert.ok(stop > 0);
   await mkdir(join(scratch, "meta"));
   await writeFile(join(scratch, "meta/_journal.json"), JSON.stringify({ ...journal, entries: journal.entries.slice(0, stop) }));

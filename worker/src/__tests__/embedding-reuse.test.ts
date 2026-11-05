@@ -63,7 +63,8 @@ const BUCKET = "test-bucket";
 
 function fakeVector(text: string, dimensions: number): number[] {
   const digest = createHash("sha256").update(text).digest();
-  return Array.from({ length: Math.min(dimensions, 8) }, (_, index) => digest[index]! / 255);
+  // A vector has the recorded dimension: the stage refuses any other length.
+  return Array.from({ length: dimensions }, (_, index) => digest[index % digest.length]! / 255);
 }
 
 class MemoryStorage {

@@ -549,7 +549,8 @@ describe("hybridSearch", () => {
         text.includes("to_tsquery('english'") &&
         !text.includes("websearch_to_tsquery")
       ) {
-        expect(values).toContain("math");
+        // "classes" is an ordinary content word, not a stop word; the OR query keeps it.
+        expect(values).toContain("math | classes");
         return [
           {
             id: "chunk-1",
@@ -557,7 +558,8 @@ describe("hybridSearch", () => {
             run_id: "run-1",
             chunk_index: 0,
             text: "MATH 1010 Calculus 1",
-            heading_path: ["Mathematics"],
+            // "classes" is a content word of the query, so the hit must mention it to clear the relevance floor.
+            heading_path: ["Math classes"],
             page_number: 12,
             token_estimate: 4,
             rank: 1,

@@ -306,7 +306,7 @@ describe("stored pipelines with settings the strict schemas reject (round 4 M2)"
       });
       expect(JSON.stringify(parsed)).not.toContain("/tmp/attacker");
       expect(JSON.stringify(parsed)).not.toContain("/tmp/model");
-      expect(parsed.documentExtraction.ocr).toEqual({ language: "eng", autoRotate: false });
+      expect(parsed.documentExtraction.ocr).toEqual({ language: "auto", autoRotate: false });
       expect(errors).toHaveLength(1);
       expect(errors[0]).toContain("project ws_1");
       for (const path of [
@@ -426,17 +426,17 @@ describe("Fast page-image references", () => {
 
 it("keeps explicit image preservation in Fast while disabling OCR enrichment",()=>{
   const config={...defaultDocumentExtractionConfig,enrich:["document/media-map","page/ocr-text"],
-    order:{pdf:["doppler"]},options:{doppler:{images:{enabled:true,minWidth:20,minHeight:30}}}};
+    order:{pdf:["vm-pdf"]},options:{"vm-pdf":{images:{enabled:true,minWidth:20,minHeight:30}}}};
   const result=documentExtractionForQuality(config,"fast");
   expect(result.config.enrich).toEqual(["document/media-map"]);
-  expect(result.config.options.doppler).toEqual(config.options.doppler);
+  expect(result.config.options["vm-pdf"]).toEqual(config.options["vm-pdf"]);
   expect(result.config.forceOcr).toBe(false);
 });
 
-it("accepts bounded Doppler image options and rejects executable or out-of-range settings",()=>{
-  expect(parseExtractorOptions("doppler",{images:{enabled:true}})).toEqual({images:{enabled:true,minWidth:100,minHeight:100}});
-  expect(parseExtractorOptions("doppler",{pdf:{extractImages:true}})).toEqual({pdf:{extractImages:true}});
+it("accepts bounded VM PDF image options and rejects executable or out-of-range settings",()=>{
+  expect(parseExtractorOptions("vm-pdf",{images:{enabled:true}})).toEqual({images:{enabled:true,minWidth:100,minHeight:100}});
+  expect(parseExtractorOptions("vm-pdf",{pdf:{extractImages:true}})).toEqual({pdf:{extractImages:true}});
   for(const bad of [{binary:"custom"},{images:{enabled:true,minWidth:0}},{images:{minHeight:4097}},{pdf:{passwords:["secret"]}}]) {
-    expect(()=>parseExtractorOptions("doppler",bad)).toThrow();
+    expect(()=>parseExtractorOptions("vm-pdf",bad)).toThrow();
   }
 });

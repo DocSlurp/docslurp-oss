@@ -17,6 +17,7 @@ const {
   phraseRelevance,
   resolveMinScore,
   termCoverage,
+  contentTerms,
   vectorRelevance,
 } = await import("../search/relevance.js");
 const { executeSearchSessionRetrieval, searchResultsToChunks } = await import("../search/session-execution.js");
@@ -121,6 +122,32 @@ describe("relevance signals", () => {
     expect(termCoverage("zxqvbn nonsense gibberish", "A nonsense clause about taxes.")).toBeCloseTo(1 / 3, 10);
     expect(termCoverage("the of and", "anything")).toBe(0);
     expect(termCoverage("税金", "この税金は")).toBe(1);
+  });
+
+  it("matches a root with its inflections but not a different word that starts with it", () => {
+    expect(termCoverage("tax", "Taxes are due")).toBe(1);
+    expect(termCoverage("taxes", "income taxation rules")).toBe(1);
+    expect(termCoverage("tax", "The taxi arrives at nine")).toBe(0);
+    expect(termCoverage("policies", "Our policy covers it")).toBe(1);
+    expect(termCoverage("run", "running costs")).toBe(1);
+  });
+
+  it("counts negations and ordinary nouns as content, not filler", () => {
+    expect(contentTerms("refunds not allowed")).toContain("not");
+    expect(contentTerms("no refunds")).toContain("no");
+    expect(contentTerms("class action settlement")).toEqual(["class", "action", "settlement"]);
+    expect(contentTerms("course catalog")).toContain("course");
+    expect(termCoverage("refunds not allowed", "refunds allowed")).toBeCloseTo(2 / 3, 10);
+  });
+
+  it("measures coverage across accents, scripts and unsegmented text", () => {
+    expect(termCoverage("Muller Gebuhren", "Die Müller Gebühren steigen")).toBe(1);
+    expect(termCoverage("Gebühren", "gebuhren")).toBe(1);
+    expect(termCoverage("налоговая декларация", "Налоговая декларация подана")).toBe(1);
+    expect(termCoverage("налог", "налоговая декларация")).toBe(0);
+    expect(termCoverage("東京 首都", "東京は日本の首都です")).toBe(1);
+    expect(termCoverage("日本の首都", "東京は日本の首都です")).toBeGreaterThanOrEqual(0.5);
+    expect(termCoverage("日本の首都", "今日の天気は晴れ")).toBeLessThan(0.5);
   });
 
   it("counts lexical evidence only for a majority of the query terms", () => {

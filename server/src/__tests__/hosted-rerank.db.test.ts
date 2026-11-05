@@ -52,8 +52,11 @@ describe("real hybrid search with hosted reranking and actual SQL usage", () => 
   it("reads project opt-in, preserves citations and persists scoped actual tokens", async () => {
     const result = await hybridSearch("pump maintenance", "hosted-user", options);
     expect(http).toHaveBeenCalledTimes(1);
-    expect(result.results[0].citation).toMatchObject({ documentId: "hosted-doc", pageNumber: 2 });
-    expect(result.results[0].text).toBe("Pump maintenance valve inspection.");
+    // The reranker is fused with the hybrid order (a two-candidate swap ties and keeps the hybrid order), but the
+    // candidate it scored still carries its own citation and body.
+    const valve = result.results.find((hit) => hit.text === "Pump maintenance valve inspection.");
+    expect(valve?.citation).toMatchObject({ documentId: "hosted-doc", pageNumber: 2 });
+    expect(result.results).toHaveLength(2);
     expect(result.usageEvents).toMatchObject([{ model: "Qwen/Qwen3-Reranker-0.6B", inputTokens: 174 }]);
     const { attributedUsage } = await import("../services/usage-attribution.js");
     const events = await sql`select org_id,project_id,input_tokens,run_id,metric,cost_cents from ${attributedUsage(null)} au where au.metadata->>'sessionId'=${result.sessionId} order by au.metric`;

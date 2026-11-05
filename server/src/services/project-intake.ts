@@ -18,7 +18,7 @@ import { Transform, type Readable } from "node:stream";
 
 import {
   applyProjectPipelineOverrides,
-  DOPPLER_MAX_PDF_BYTES,
+  VM_PDF_MAX_SOURCE_BYTES,
   defaultPipelineFeatures,
   getProjectTemplate,
   isUntitledProjectName,
@@ -59,12 +59,19 @@ export type ProjectIntakeKind =
 
 export type ProjectIntakeStatusCode = 400 | 403 | 404 | 409 | 413 | 415 | 422 | 500;
 
+/**
+ * Machine-readable causes clients act on. `idempotency_in_flight`: the first request with this Idempotency-Key is still being
+ * processed, so retry with the same key. `idempotency_key_reused`: the key was used for a different request. `upload_session_closed`:
+ * the session remembered for the key can no longer take uploads, so use a new key.
+ */
+export type ProjectIntakeErrorCode = "remote_format_disabled" | "idempotency_in_flight" | "idempotency_key_reused" | "upload_session_closed";
+
 export class ProjectIntakeError extends Error {
   constructor(
     message: string,
     readonly statusCode: ProjectIntakeStatusCode,
     readonly issues?: Array<{ path: string; message: string; code: string }>,
-    readonly code?: "remote_format_disabled",
+    readonly code?: ProjectIntakeErrorCode,
   ) {
     super(message);
     this.name = "ProjectIntakeError";
@@ -182,6 +189,10 @@ export interface ProjectIntakeResult {
 }
 
 export interface RejectedIntakeFile {
+  /** Position of the file in the request, so clients match by index instead of by (sanitized) filename. */
+  index?: number;
+  /** The client's own correlation id for the file, echoed back. */
+  clientId?: string;
   filename: string;
   /** HTTP status the file would have produced on its own. */
   statusCode: number;
@@ -189,7 +200,7 @@ export interface RejectedIntakeFile {
   message: string;
 }
 
-function rejectionCode(error: ProjectIntakeError): RejectedIntakeFile["code"] {
+export function rejectionCode(error: ProjectIntakeError): RejectedIntakeFile["code"] {
   if (error.code === "remote_format_disabled") return error.code;
   if (error.statusCode === 415) return "unsupported_type";
   if (error.statusCode === 413) return "file_too_large";
@@ -341,9 +352,9 @@ function isRemoteKind(kind: ProjectIntakeKind): kind is keyof typeof remoteSourc
 }
 
 function intakeByteLimit(filename: string, mimeType?: string | null): number {
-  const dopplerPdf = resolveUploadMimeType(mimeType ?? null, filename) === "application/pdf" &&
-    (process.env.DOCSLURP_DOPPLER_INSTALLED === "1" || process.env.DOCSLURP_PDF_EXTRACTOR === "doppler");
-  return dopplerPdf ? Math.min(env.maxUploadBytes, DOPPLER_MAX_PDF_BYTES) : env.maxUploadBytes;
+  const vmPdf = resolveUploadMimeType(mimeType ?? null, filename) === "application/pdf" &&
+    (process.env.DOCSLURP_VM_PDF_INSTALLED === "1" || process.env.DOCSLURP_PDF_EXTRACTOR === "vm-pdf");
+  return vmPdf ? Math.min(env.maxUploadBytes, VM_PDF_MAX_SOURCE_BYTES) : env.maxUploadBytes;
 }
 
 /** The one validation policy for every intake source. */
@@ -553,13 +564,13 @@ async function resolveIntakeTarget(
 }
 
 /** Every file was rejected: fail the request, naming each file. */
-function allRejectedError(rejected: RejectedIntakeFile[]): ProjectIntakeError {
+export function allRejectedError(rejected: RejectedIntakeFile[]): ProjectIntakeError {
   const statuses = new Set(rejected.map((file) => file.statusCode));
   const statusCode = (statuses.size === 1 ? rejected[0]!.statusCode : 422) as ProjectIntakeStatusCode;
   const message = rejected.length === 1
     ? rejected[0]!.message
     : `None of the ${rejected.length} files could be accepted: ${rejected.map((file) => `${file.filename} (${file.message})`).join("; ")}`;
-  return new ProjectIntakeError(message, statusCode, rejected.map((file) => ({ path: file.filename, message: file.message, code: file.code })), rejected.every(file => file.code === "remote_format_disabled") ? "remote_format_disabled" : undefined);
+  return new ProjectIntakeError(message, statusCode, rejected.map((file) => ({ path: file.filename, message: file.message, code: file.code, ...(file.index !== undefined ? { index: file.index } : {}), ...(file.clientId ? { clientId: file.clientId } : {}) })), rejected.every(file => file.code === "remote_format_disabled") ? "remote_format_disabled" : undefined);
 }
 
 /**

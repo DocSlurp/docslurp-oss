@@ -5,6 +5,10 @@ import { healthyDocuments } from "../pipeline/document-health.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
+import { recordMeasuredPageCount } from "../lib/office-page-count.js";
+import { sourceStorageKey } from "../tools/storage.js";
+import { resolveOcrLanguages } from "../extractors/kreuzberg-ocr.js";
+import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 
 type CanonicalStrategy =
   | "already-pdf"
@@ -93,6 +97,8 @@ export class ToCanonicalStage implements Stage {
             strategy = "tiff-split-ocr";
           }
 
+          // The project's OCR language, not English (`auto` is English plus the installed major-script packs).
+          const ocrLanguages = resolveOcrLanguages(state.run.pipeline.documentExtraction?.ocr?.language) ?? undefined;
           const artifact: Record<string, unknown> = {
             documentId: document.id,
             normalizedFormat,
@@ -192,17 +198,30 @@ export class ToCanonicalStage implements Stage {
             artifact.outputKey = output;
           } else if (strategy === "tiff-split-ocr") {
             const splitPlan = await this.runner.tiffSplit(document.sourceKey, "page-%04d.tiff");
-            const ocrPlan = await this.runner.tesseractOcr("page-0001.tiff", "ocr-output");
+            const ocrPlan = await this.runner.tesseractOcr("page-0001.tiff", "ocr-output", ocrLanguages);
             artifact.splitPlan = { binary: splitPlan.binary, args: splitPlan.args, available: splitPlan.available };
             artifact.ocrPlan = { binary: ocrPlan.binary, args: ocrPlan.args, available: ocrPlan.available };
           } else if (strategy === "tesseract-ocr") {
-            const plan = await this.runner.tesseractOcr(document.sourceKey, "ocr-output");
+            const plan = await this.runner.tesseractOcr(document.sourceKey, "ocr-output", ocrLanguages);
             artifact.plan = {
               binary: plan.binary,
               args: plan.args,
               available: plan.available,
             };
           }
+
+          // Office, EPUB and spreadsheet files arrive counted as one page. Measure what the document really holds and record it as
+          // documents.billing_pages before the completion charge reads it (page-base-fee.ts). The page basis (page_count) stays what
+          // the text splits into: these formats' text has no page breaks.
+          const pages = await recordMeasuredPageCount(state, {
+            runner: this.runner,
+            signal,
+            downloadSource: (target) => this.storage.downloadSourceToTempFile(
+              sourceStorageKey(target.sourceKey),
+              trustedTempDownloadPattern("docslurp-pages-", target),
+            ),
+          }, document, normalizedFormat);
+          artifact.pageCount = { intake: pages.intakePages, measured: pages.pages, method: pages.method };
 
           await this.storage.putJson(key, artifact);
 
@@ -211,6 +230,10 @@ export class ToCanonicalStage implements Stage {
             stats: {
               strategy,
               normalizedFormat,
+              pageCount: pages.pages ?? pages.intakePages,
+              // The pages the text splits into (citations, page rows); `pageCount` above is what the document bills.
+              pageBasis: document.pageCount,
+              pageCountMethod: pages.method,
             },
           };
         },

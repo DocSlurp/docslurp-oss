@@ -34,7 +34,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => { await sql?.end(); await stop?.(); });
-beforeEach(() => { prepare.mockReset().mockResolvedValue({ pageCount: 1, sourceSha256: "abc" }); });
+beforeEach(() => { prepare.mockReset().mockResolvedValue({ pageCount: 1, sourceSha256: "abc", fileFacts: { mimeType: "application/pdf", format: "pdf", mismatch: "none" } }); });
 
 describe("jsonb values are stored as objects, not JSON strings", () => {
   it("stores documents.metadata as an object", async () => {

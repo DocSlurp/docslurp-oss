@@ -525,6 +525,11 @@ export async function materializePageRange(
           },
         });
         if (embedded.vectors.length !== batch.length) throw new Error("embedding provider returned a different number of vectors");
+        // Search filters vectors on the recorded model and dimension: a vector of another size would be unsearchable.
+        const badVector = embedded.vectors.findIndex((vector) => !Array.isArray(vector) || vector.length !== profile.dimensions);
+        if (profile.dimensions > 0 && badVector >= 0) {
+          throw new Error(`embedding dimension mismatch: ${profile.model} is recorded as ${profile.dimensions} dimensions but vector ${from + badVector} has ${embedded.vectors[badVector]?.length ?? 0}`);
+        }
         vectors.push(...embedded.vectors);
         if (!recordedRemote) {
           const tokens = embedded.totalTokens ?? batch.reduce((sum, c) => sum + estimateTokens(c.text), 0);
@@ -537,7 +542,7 @@ export async function materializePageRange(
           });
         }
       }
-      dims = vectors[0]?.length ?? dims;
+      dims = profile.dimensions > 0 ? profile.dimensions : vectors[0]?.length ?? dims;
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       for (const page of [...prepared.keys()]) failed.set(page, reason);

@@ -124,9 +124,9 @@ describe("request actor helpers", () => {
     await expect(loadActorScopedProject("ws-1", actor)).resolves.toBe(project);
   });
 
-  it("denies project access for a key without an organization", async () => {
+  it("denies project access for a key whose organization is blank", async () => {
     vi.mocked(getProject).mockResolvedValue(project);
-    await expect(loadActorScopedProject("ws-1", { type: "apiKey", userId: "user-1", apiKey: { ...validatedKey, orgId: null } })).resolves.toBeNull();
+    await expect(loadActorScopedProject("ws-1", { type: "apiKey", userId: "user-1", apiKey: { ...validatedKey, orgId: "" } })).resolves.toBeNull();
   });
 
   it("denies API-key project loads outside the key organization", async () => {

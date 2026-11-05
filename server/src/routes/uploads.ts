@@ -9,6 +9,8 @@ import {
   PROJECT_INPUT_MAX_LENGTH,
   projectTemplateKeySchema,
   indexingModeSchema,
+  estimateCardRevision,
+  quoteFileSchema,
 } from "@docslurp/shared";
 
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
@@ -26,10 +28,14 @@ import {
   abortDirectUploadSession,
   completeDirectUploadFile,
   createDirectUploadSession,
+  describeDirectUploadSession,
   getDirectUploadSessionDescription,
+  loadDirectUploadSession,
   directUploadSessionBelongsToOrganization,
   signDirectUploadParts,
 } from "../services/direct-upload-session.js";
+import { assertSessionReplayable, createSessionIdempotently } from "../services/direct-session-idempotency.js";
+import { parseIdempotencyKey } from "../services/idempotency.js";
 import { isRunCreationBlockedError } from "../services/runs.js";
 import { UnreadableSourceError } from "../services/source-metadata.js";
 import { ProjectAccessError } from "../services/default-project.js";
@@ -95,6 +101,8 @@ const ingestUrlSchema = z.object({
 });
 
 export const directUploadFileSchema = z.object({
+  /** The client's own id for this file, echoed on the session's file and on a rejection. */
+  clientId: z.string().min(1).max(128).optional(),
   singlePart: z.boolean().optional(),
   filename: z.string().min(1).max(512),
   mimeType: z.string().min(1).max(256),
@@ -114,7 +122,7 @@ const createDirectSessionSchema = z.object({
   newProject: z.boolean().optional(),
   templateKey: projectTemplateKeySchema.optional(),
   pipeline: pipelineFeatureOverridesSchema.optional(),
-  files: z.array(directUploadFileSchema).min(1),
+  files: z.array(directUploadFileSchema).min(1).max(1000),
 });
 
 const completeDirectFileSchema = z.object({
@@ -268,19 +276,36 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
         const target = await directUploadTarget(getRequestActor(c), input, orgId);
         // Overrides only; confirm merges them onto the project pipeline and its template locks.
         const pipeline = parseProjectIntakePipeline({ ...input.pipeline, speedBoost: input.speedBoost === true, ...(input.indexingMode ? { indexingMode: input.indexingMode } : {}) });
-        const session = await createDirectUploadSession({
-          userId,
-          orgId,
-          apiKeyId: c.get("apiKey")?.keyId ?? null,
-          allowedProjectIds: actorAllowedProjectIds(getRequestActor(c)),
-          projectId: target.projectId,
-          projectName: target.projectName,
-          templateKey: input.templateKey ?? null,
-          pipeline,
-          files: input.files,
-          tags: input.tags,
+        const actor = getRequestActor(c);
+        const parsedKey = parseIdempotencyKey(c.req.header("Idempotency-Key"));
+        if ("error" in parsedKey) return apiStatusError(c, 400, parsedKey.error);
+        const { body: session, status, replayed } = await createSessionIdempotently({
+          key: parsedKey.key,
+          // The key and target are part of the scope: another key of this user, or a request for another project, never replays this session.
+          scope: { orgId, userId, apiKeyId: c.get("apiKey")?.keyId ?? null, project: target.projectId ?? (target.projectName ? `name:${target.projectName}` : null) },
+          request: input,
+          create: () => createDirectUploadSession({
+            userId,
+            orgId,
+            apiKeyId: c.get("apiKey")?.keyId ?? null,
+            allowedProjectIds: actorAllowedProjectIds(actor),
+            projectId: target.projectId,
+            projectName: target.projectName,
+            templateKey: input.templateKey ?? null,
+            pipeline,
+            files: input.files,
+            tags: input.tags,
+          }),
+          describe: async (sessionId) => {
+            // A replay is authorized like any session route: same organization, same key, inside the key's project allowlist.
+            const loaded = await loadDirectUploadSession(sessionId, userId);
+            if (!loaded) return null;
+            assertSessionReplayable(loaded.session, { orgId, apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null, allowedProjectIds: actorAllowedProjectIds(actor) });
+            return await describeDirectUploadSession(loaded);
+          },
         });
-        return c.json(session, 201);
+        if (replayed) c.header("Idempotency-Replayed", "true");
+        return c.json(session, status);
       } catch (error) {
         const response = projectIntakeErrorResponse(c, error);
         if (response) return response;
@@ -515,15 +540,7 @@ export async function directUploadTarget(
 
 const uploadEstimateSchema = z.object({
   speedBoost: z.boolean().optional(),
-  files: z.array(z.object({
-    name: z.string().min(1).max(1024),
-    size: z.number().int().nonnegative(),
-    pages: z.number().int().positive().optional(),
-    /** MIME type, so audio and video are priced by duration even when the name has no extension. */
-    type: z.string().max(255).optional(),
-    /** Length in seconds when the client can read it; otherwise estimated from the size. */
-    durationSeconds: z.number().positive().max(24 * 3600).optional(),
-  })).min(1).max(1000),
+  files: z.array(quoteFileSchema).min(1).max(1000),
   project: projectInputSchema.optional(),
   orgId: z.string().optional(),
 });
@@ -551,9 +568,18 @@ export const uploadEstimateRoutes = new Hono().post(
     if (!project || (actor.type === "apiKey" && !apiKeyCanUseProject(actor.apiKey, project))) {
       return apiErrorResponse(c, 404, "project_not_found", "Project not found");
     }
-    const { estimate, media } = await estimateUpload({ files: body.files, project, speedBoost: body.speedBoost === true });
-    // `orgId` is the organization whose credits the upload would spend, for reading its balance.
-    return c.json({ estimate, media, billing: billingState(), orgId: project.orgId, billingExempt: isBillingExemptOrg(project.orgId) });
+    const { estimate, media, profile } = await estimateUpload({ files: body.files, project, speedBoost: body.speedBoost === true });
+    // `orgId` is the organization whose credits the upload would spend, for reading its balance. `profile` and
+    // `cardRevision` let offline estimators quote later batches for this project and notice a newer card.
+    return c.json({
+      estimate,
+      media,
+      profile,
+      cardRevision: estimateCardRevision(),
+      billing: billingState(),
+      orgId: project.orgId,
+      billingExempt: isBillingExemptOrg(project.orgId),
+    });
   },
 );
 acceptApiKeys(uploadEstimateRoutes);

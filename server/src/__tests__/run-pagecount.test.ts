@@ -51,3 +51,59 @@ describe("resolveSourceMetadata with unreadable PDFs", () => {
     expect(error.message).toContain("report.pdf");
   });
 });
+
+describe("estimateNonPdfPageCount decoding", () => {
+  it("counts a UTF-16LE CSV by its characters, not its bytes", () => {
+    const rows = Array.from({ length: 100 }, (_, index) => `row${index},value${index}`).join("\r\n");
+    const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(rows, "utf16le")]);
+    expect(estimateNonPdfPageCount("text/csv", utf16, "utf-16le")).toBe(estimateNonPdfPageCount("text/csv", Buffer.from(rows)));
+  });
+
+  it("counts East Asian text at its information density, and HTML without its markup", () => {
+    const cjk = "日本語".repeat(500); // 1,500 characters ≈ 4,500 weighted → 2 pages
+    expect(estimateNonPdfPageCount("text/plain", Buffer.from(cjk))).toBe(2);
+    const markup = `<html><head><style>${"a{color:red}".repeat(2000)}</style><script>${"var x=1;".repeat(2000)}</script></head><body><p>Short page.</p></body></html>`;
+    expect(estimateNonPdfPageCount("text/html", Buffer.from(markup))).toBe(1);
+    expect(estimateNonPdfPageCount("text/plain", Buffer.from(markup))).toBeGreaterThan(1);
+  });
+});
+
+describe("resolveSourceMetadata file facts", () => {
+  const csv = "name,total\nacme,10\nbeta,20\n";
+
+  it("stores a CSV declared application/vnd.ms-excel as text/csv with a warning, and counts it as text", async () => {
+    s3.bytes = new TextEncoder().encode(csv);
+    const metadata = await resolveSourceMetadata({ mimeType: "application/vnd.ms-excel", sourceKey: "k", filename: "data.csv" });
+    expect(metadata.fileFacts).toMatchObject({ mimeType: "text/csv", mismatch: "same-family", declaredMimeType: "application/vnd.ms-excel" });
+    expect(metadata.pageCount).toBe(1);
+  });
+
+  it("refuses plain text declared as a PDF, per file, before any parser sees it", async () => {
+    s3.bytes = new TextEncoder().encode("this is just words\nnot a pdf\n");
+    const error = await resolveSourceMetadata({ mimeType: "application/pdf", sourceKey: "k", filename: "fake.pdf" }).catch((caught) => caught);
+    expect(error).toBeInstanceOf(UnreadableSourceError);
+    expect(error.message).toContain("fake.pdf");
+    expect(error.message).toContain("not the declared application/pdf");
+  });
+
+  it("does not open a ZIP declared as a DOCX: the worker's quarantine inspects it, the API keeps the declaration provisional", async () => {
+    s3.bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04, ...new Array(64).fill(7)]);
+    const metadata = await resolveSourceMetadata({ mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", sourceKey: "k", filename: "x.docx" });
+    expect(metadata.fileFacts).toMatchObject({ container: "zip", mismatch: "none", inspection: "header" });
+  });
+
+  it("refuses a ZIP declared as a PDF, which the magic bytes alone contradict", async () => {
+    s3.bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04, ...new Array(64).fill(7)]);
+    const error = await resolveSourceMetadata({ mimeType: "application/pdf", sourceKey: "k", filename: "x.pdf" }).catch((caught) => caught);
+    expect(error).toBeInstanceOf(UnreadableSourceError);
+  });
+
+  it("counts a very large text file from a bounded sample", async () => {
+    const line = `${"word ".repeat(40)}\n`;
+    const bytes = Buffer.from(line.repeat(Math.ceil(30_000_000 / line.length)));
+    const started = performance.now();
+    const pages = estimateNonPdfPageCount("text/plain", bytes);
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(pages).toBeGreaterThan(8_000);
+  });
+});

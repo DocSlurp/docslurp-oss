@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const getRunMock = vi.fn();
 const getRunProgressMock = vi.fn();
 const listRunsMock = vi.fn();
+const listRunsPageMock = vi.fn();
 const getProjectMock = vi.fn();
 const getRunProcessingPreviewMock = vi.fn();
 const reprocessRunMock = vi.fn();
@@ -50,6 +51,7 @@ vi.mock("../services/runs.js", () => ({
   listenForRunEvents: listenForRunEventsMock,
   listRunEvents: listRunEventsMock,
   listRuns: listRunsMock,
+  listRunsPage: listRunsPageMock,
   reprocessRun: reprocessRunMock,
   retryRun: retryRunMock
 }));
@@ -310,10 +312,20 @@ describe("API-key run reads", () => {
     expect(modes["POST /:runId/reprocess/estimate"]).toBe("apiKey");
     expect(modes["POST /:runId/control"] ?? "session").toBe("session");
   });
-  it("filters run lists to the key organization", async () => {
+  it("scopes run history to the key organization in the query and pages it with a cursor", async () => {
+    listRunsPageMock.mockResolvedValue({ runs: [{ id: "own", orgId: "org-1" }], hasMore: true, nextCursor: "next" });
+    const response = await keyApp().request("/runs?limit=20&cursor=abc");
+    expect(await response.json()).toEqual({ runs: [{ id: "own", orgId: "org-1" }], hasMore: true, nextCursor: "next" });
+    // The organization is a SQL condition, not a filter over an already truncated page.
+    expect(listRunsPageMock).toHaveBeenCalledWith(expect.any(String), { orgId: "org-1", limit: 20, cursor: "abc" });
+    expect((await keyApp().request("/runs?limit=0")).status).toBe(400);
+    expect((await keyApp().request("/runs?limit=101")).status).toBe(400);
+    expect((await keyApp().request("/runs?limit=ten")).status).toBe(400);
+  });
+  it("keeps the activity list organization-filtered and reports it as complete", async () => {
     listRunsMock.mockResolvedValue([{ id: "own", orgId: "org-1" }, { id: "foreign", orgId: "org-2" }]);
-    const response = await keyApp().request("/runs");
-    expect(await response.json()).toEqual({ runs: [{ id: "own", orgId: "org-1" }] });
+    const response = await keyApp().request("/runs?activity=true");
+    expect(await response.json()).toEqual({ runs: [{ id: "own", orgId: "org-1" }], hasMore: false, nextCursor: null });
   });
   it.each(["/events", "/events/stream", "/progress/stream"])("isolates streaming/event reads across organizations at %s", async suffix => {
     getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-2" });
@@ -329,6 +341,32 @@ describe("API-key run reads", () => {
     const response = await keyApp().request("/runs/run-1/events?after=2026-10-02T00%3A00%3A00.000Z&limit=5");
     expect(await response.json()).toEqual({ events: [{ id: "event-1", type: "run.progress" }] });
     expect(listRunEventsMock).toHaveBeenCalledWith({ runId: "run-1", userId: "user-1", after: "2026-10-02T00:00:00.000Z", limit: 5 });
+  });
+  const heartbeat = {
+    id: "event-hb", runId: "run-1", type: "heartbeat", stage: "extract", message: null,
+    progress: { completedDocumentStages: 3 }, stats: { rssMb: 812, pages: 12 },
+    payload: { kind: "heartbeat", metrics: { costCents: 2, rssBytes: 123456789, peakRssBytes: 234567890, cpuUserMs: 910, cpuSystemMs: 80 } },
+  };
+  it("withholds worker CPU and RAM from heartbeat events returned by polling", async () => {
+    listRunEventsMock.mockResolvedValue([heartbeat]);
+    const text = await (await keyApp().request("/runs/run-1/events")).text();
+    expect(text).not.toMatch(/rss|cpu|123456789|234567890/i);
+    expect(JSON.parse(text).events[0]).toMatchObject({ id: "event-hb", stats: { pages: 12 }, payload: { metrics: { costCents: 2 } }, progress: { completedDocumentStages: 3 } });
+  });
+  it("withholds worker CPU and RAM from heartbeat events pushed on the event stream", async () => {
+    const close = vi.fn().mockResolvedValue(undefined);
+    listenForRunEventsMock.mockResolvedValue({ close });
+    const response = await keyApp().request("/runs/run-1/events/stream");
+    const reader = response.body!.getReader();
+    const seen = [new TextDecoder().decode((await reader.read()).value)];
+    await vi.waitFor(() => expect(listenForRunEventsMock).toHaveBeenCalledOnce());
+    const delta = listenForRunEventsMock.mock.calls[0][0]({ ...heartbeat, runId: "run-1" });
+    seen.push(new TextDecoder().decode((await reader.read()).value), new TextDecoder().decode((await reader.read()).value));
+    await delta;
+    await reader.cancel();
+    const text = seen.join("");
+    expect(text).toContain("event: heartbeat");
+    expect(text).not.toMatch(/rss|cpu|123456789|234567890/i);
   });
   it("sends snapshots and run deltas, then releases its listener on disconnect", async () => {
     const close = vi.fn().mockResolvedValue(undefined);
@@ -357,7 +395,7 @@ describe("API-key run reads", () => {
     expect(body).toContain("event: snapshot");
     expect(body).toContain('"completed":20');
     expect(response.headers.get("cache-control")).toBe("no-cache, no-transform");
-    expect(getRunProgressMock).toHaveBeenCalledWith("run-1", "user-1", { recentEventLimit: 0 });
+    expect(getRunProgressMock).toHaveBeenCalledWith("run-1", "user-1", { recentEventLimit: 0, operator: false });
     expect(isApiKeyLiveMock).toHaveBeenCalled();
     expect(close).toHaveBeenCalledOnce();
   });

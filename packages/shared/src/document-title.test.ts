@@ -85,6 +85,15 @@ describe("cleanDocumentTitle", () => {
       expect(cleanDocumentTitle("Contact sales@example.com today")).toBeNull();
     });
 
+    it("rejects a title that is only a host name, but keeps real titles with dotted names in them", () => {
+      expect(cleanDocumentTitle("example.com/docs/pricing")).toBeNull();
+      expect(cleanDocumentTitle("acme-widgets.io")).toBeNull();
+      expect(cleanDocumentTitle("Visit www.acme.com for details")).toBeNull();
+      for (const title of ["ASP.NET Core in Action", "Node.js Design Patterns", "Learning .NET 8", "Working with Next.js and Vue.js", "Notes on example.com SEO audits"]) {
+        expect(cleanDocumentTitle(title), title).toBe(title);
+      }
+    });
+
     it("rejects very long injected payloads", () => {
       expect(cleanDocumentTitle(`Report ${"A".repeat(10_000)}`)).toBeNull();
     });

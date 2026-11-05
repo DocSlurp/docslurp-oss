@@ -34,6 +34,19 @@ test('uses canonical page identity, isolated project and public ingestion/progre
   assert.deepEqual(await indexDocs(corpus, { apiUrl: 'https://docslurp.io' }, 'private-index-key', fetchMock), { projectId: 'docs-id', runId: 'run-id' });
   assert.equal(calls.length, 2);
 });
+test('stops on the run states the API actually reports instead of waiting out the deadline', async () => {
+  const progress = run => async url => url.endsWith('/v1/uploads/bulk')
+    ? Response.json({ run: { id: 'run-id' }, project: { id: 'docs-id' } })
+    : Response.json({ run });
+  for (const [run, message] of [
+    [{ id: 'run-id', status: 'failed' }, /^Error: Docs ingestion failed$/],
+    [{ id: 'run-id', status: 'processing', controlState: 'cancelled' }, /^Error: Docs ingestion cancelled$/],
+    [{ id: 'run-id', status: 'processing', controlState: 'dead-letter' }, /^Error: Docs ingestion dead-letter$/],
+    [{ id: 'run-id', status: 'processing', controlState: 'paused', pauseReason: 'credit_exhausted' }, /paused \(credit_exhausted\)/],
+  ]) {
+    await assert.rejects(indexDocs([], { apiUrl: 'https://docslurp.io' }, 'k', progress(run)), message);
+  }
+});
 test('targets a configured project ID, slug or name and reports upstream errors without credentials', async () => {
   const sent = [];
   await assert.rejects(indexDocs([], { apiUrl: 'https://docslurp.io', project: 'product-manuals' }, 'secret', async (url, init) => {

@@ -90,7 +90,7 @@ export interface VisionPageOutput {
   finishReason?: string | null;
   /** Model id the provider reports having served, when it differs in form from `model` or is the only report. */
   servedModel?: string;
-  orientation?: import("../sandbox/providers/modal/image-orientation.js").OrientationResult | { status: "skipped-limit" };
+  orientation?: import("../lib/image-orientation.js").OrientationResult | { status: "skipped-limit" };
   /** Present when the served model differs from the requested one (see `VISION_MODEL_SWAP_POLICY`). */
   modelSwap?: { requested: string; served: string; provider: string | null };
 }
@@ -566,6 +566,8 @@ export class VisionExtractStage implements Stage {
 
             console.log(
               `[extract-debug] document=${document.id} visionCompleted ` +
+                `documentPages=${pages} selectedPages=${needsVision.selectedPages.length} failedPages=${failedPages.length} ` +
+                `routingVersion=${routingVersion(routingV2)} ` +
                 `processedPages=${outputs.length} inputTokens=${inputTokens} ` +
                 `outputTokens=${outputTokens} costCents=${costCents}`,
             );
@@ -581,6 +583,10 @@ export class VisionExtractStage implements Stage {
                 score: needsVision.score,
                 latencyMs: totalLatencyMs,
                 selectedPages: needsVision.selectedPages,
+                // Counts beside the page lists, so dashboards read selected vs read vs failed without unpacking arrays.
+                documentPages: pages,
+                selectedPageCount: needsVision.selectedPages.length,
+                failedPageCount: failedPages.length,
                 routingPolicy: needsVision.routing?.visionPolicy ?? null,
                 routingVersion: routingVersion(routingV2),
                 failedPages: failedPages.map((page) => ({ pageNumber: page.pageNumber, reason: page.outcome, fallbackText: page.fallbackText })),
@@ -647,7 +653,9 @@ export class VisionExtractStage implements Stage {
         parserPlaybookCatalog[playbook]?.guidance?.visionDensityThreshold ??
         this.cfg.visionDensityThreshold;
       score = this.scoreTextDensity(text ?? "", pageCount);
-      needed = !text || this.needsVision(text, pageCount, threshold);
+      // Without routing evidence, a document that has text keeps it under evidence routing: characters per page say
+      // nothing about whether a page's content is pixels. Only a document with no text at all has no other reader.
+      needed = !text || (!routingV2 && this.needsVision(text, pageCount, threshold));
       reason = !text
         ? "routing-and-extraction-evidence-unavailable"
         : needed
@@ -754,6 +762,7 @@ export class VisionExtractStage implements Stage {
     return visionAllowedForDocument(
       state.run.pipeline,
       state.artifactLedger.readDocument(documentId, "parser-playbook"),
+      { evidenceRouting: resolveRunRoutingV2(state) },
     );
   }
 
@@ -853,6 +862,7 @@ export class VisionExtractStage implements Stage {
           storage: this.storage,
           rasters: this.rasters,
           runner: this.runner,
+          ocrLanguage: state.run.pipeline.documentExtraction?.ocr?.language,
           canonicalUri: () => state.artifactLedger.readDocument(document.id, "canonical-document") ?? null,
           selection,
           allow,

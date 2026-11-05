@@ -615,9 +615,9 @@ describe("Project Intake from remote URLs", () => {
 });
 
 
-describe("Doppler PDF admission contract", () => {
+describe("VM PDF admission contract", () => {
   it("admits the large PDFs supported by the chunked VM route and refuses excess before storage", () => {
-    vi.stubEnv("DOCSLURP_DOPPLER_INSTALLED", "1");
+    vi.stubEnv("DOCSLURP_VM_PDF_INSTALLED", "1");
     (env as { maxUploadBytes: number }).maxUploadBytes = 1024 * 1024 * 1024;
     for (const mib of [64, 65, 80, 500]) {
       expect(screenIntakeFile({ filename: "document.pdf", sizeBytes: mib * 1024 * 1024 }, "bulk-upload").ok).toBe(true);
@@ -627,7 +627,7 @@ describe("Doppler PDF admission contract", () => {
     expect(screenIntakeFile({ filename: "data.txt", sizeBytes: 600 * 1024 * 1024 }, "bulk-upload").ok).toBe(true);
   });
   it("keeps an operator's smaller limit", () => {
-    vi.stubEnv("DOCSLURP_DOPPLER_INSTALLED", "1");
+    vi.stubEnv("DOCSLURP_VM_PDF_INSTALLED", "1");
     (env as { maxUploadBytes: number }).maxUploadBytes = 10;
     expect(screenIntakeFile({ filename: "document.pdf", sizeBytes: 11 }, "bulk-upload"))
       .toMatchObject({ ok: false, statusCode: 413 });

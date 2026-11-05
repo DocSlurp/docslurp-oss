@@ -1,5 +1,7 @@
 import path from "node:path";
 
+import { fileFactsFor, sniffFileBytes, type FileFacts } from "@docslurp/shared";
+
 import type { Config } from "../config.js";
 import { DocumentStageError } from "../pipeline/checkpoints.js";
 import type { MalwareScanResult } from "../tools/runner.js";
@@ -30,7 +32,10 @@ export interface QuarantineArtifact {
   filename: string;
   declaredMimeType: string;
   sniffedMimeType: string | null;
+  /** True when the declared type cannot be reconciled with the bytes (an error). Same-family differences are warnings. */
   mimeMismatch: boolean;
+  /** The bytes' facts as sniffed here: encoding, container and the declared-vs-sniffed verdict. */
+  fileFacts: Pick<FileFacts, "sniffedMimeType" | "encoding" | "container" | "mismatch">;
   archive: ArchiveInspection | null;
   malwareScan: MalwareScanResult;
   decision: "accepted" | "quarantined";
@@ -55,6 +60,26 @@ type QuarantinePolicy = Pick<
   | "quarantineMaxExpansionRatio"
 >;
 
+/**
+ * The API only glances at an upload (magic bytes and the declared type; it never opens a container), so a document it
+ * recorded with `inspection: "header"` is provisional. This is the full inspection, run on the staged bytes before any parser:
+ * it opens ZIP and OLE containers, classifies text, and decides what the file is.
+ *
+ * `refused` means the bytes cannot be what was declared (a generic ZIP declared as a DOCX); the quarantine records that
+ * as a mime-mismatch error. Otherwise `facts` replace the provisional record (persisted by the stage) and
+ * `scanDeclaredMimeType` is the type the scan should treat as declared. Null when the record is not provisional.
+ */
+export function verifyIntakeFileFacts(
+  document: { filename: string; mimeType: string; fileFacts?: FileFacts | null },
+  bytes: Uint8Array,
+): { facts: FileFacts; refused: boolean; scanDeclaredMimeType: string } | null {
+  if (document.fileFacts?.inspection !== "header") return null;
+  const declared = document.fileFacts.declaredMimeType ?? document.mimeType;
+  const facts = fileFactsFor(bytes, { filename: document.filename, declaredMimeType: declared });
+  const refused = facts.mismatch === "unresolved";
+  return { facts, refused, scanDeclaredMimeType: refused ? declared : facts.mimeType };
+}
+
 export async function scanDocumentForQuarantine(args: {
   documentId: string;
   filename: string;
@@ -66,8 +91,12 @@ export async function scanDocumentForQuarantine(args: {
   signal?: AbortSignal;
 }): Promise<QuarantineArtifact> {
   const reasons: QuarantineReason[] = [];
-  const sniffedMimeType = sniffMimeType(args.bytes, args.filename);
-  const mimeMismatch = isUnsafeMimeMismatch(args.declaredMimeType, sniffedMimeType);
+  const facts = fileFactsFor(args.bytes, { filename: args.filename, declaredMimeType: args.declaredMimeType });
+  const sniffedMimeType = facts.sniffedMimeType;
+  // Intake stores the type the bytes are, so a document that reaches the worker under another type (ingested before intake
+  // sniffed, or a declaration no sniff could confirm) is refused. A declared type that differs only within one family (a CSV
+  // labelled as a spreadsheet, a .docx labelled application/msword) is a warning: the bytes are what the file claims to be.
+  const mimeMismatch = facts.mismatch === "corrected" || facts.mismatch === "unresolved";
   if (mimeMismatch) {
     reasons.push({
       code: "mime-mismatch",
@@ -77,6 +106,13 @@ export async function scanDocumentForQuarantine(args: {
         declaredMimeType: args.declaredMimeType,
         sniffedMimeType
       }
+    });
+  } else if (facts.mismatch === "same-family") {
+    reasons.push({
+      code: "mime-mismatch-same-family",
+      severity: "warning",
+      message: `declared ${args.declaredMimeType} but the bytes are ${sniffedMimeType ?? "unknown"}, the same kind of file`,
+      details: { declaredMimeType: args.declaredMimeType, sniffedMimeType }
     });
   }
 
@@ -162,6 +198,7 @@ export async function scanDocumentForQuarantine(args: {
     declaredMimeType: args.declaredMimeType,
     sniffedMimeType,
     mimeMismatch,
+    fileFacts: { sniffedMimeType, encoding: facts.encoding, container: facts.container, mismatch: facts.mismatch },
     archive,
     malwareScan,
     decision: reasons.some((reason) => reason.severity === "error") ? "quarantined" : "accepted",
@@ -190,6 +227,8 @@ export function buildQuarantineStats(artifact: QuarantineArtifact): Record<strin
     declaredMimeType: artifact.declaredMimeType,
     sniffedMimeType: artifact.sniffedMimeType,
     mimeMismatch: artifact.mimeMismatch,
+    mimeVerdict: artifact.fileFacts.mismatch,
+    textEncoding: artifact.fileFacts.encoding,
     reasonCodes: artifact.reasons.map((reason) => reason.code),
     archiveEntryCount: artifact.archive?.entryCount ?? null,
     archiveExpandedBytes: artifact.archive?.totalUncompressedBytes ?? null,
@@ -204,69 +243,7 @@ export function buildQuarantineStats(artifact: QuarantineArtifact): Record<strin
 }
 
 export function sniffMimeType(bytes: Buffer, filename: string): string | null {
-  if (bytes.length === 0) {
-    return null;
-  }
-
-  if (bytes.subarray(0, 5).toString("ascii") === "%PDF-") {
-    return "application/pdf";
-  }
-  if (hasPrefix(bytes, [0x50, 0x4b, 0x03, 0x04]) || hasPrefix(bytes, [0x50, 0x4b, 0x05, 0x06]) || hasPrefix(bytes, [0x50, 0x4b, 0x07, 0x08])) {
-    return inferZipMimeType(bytes, filename);
-  }
-  if (hasPrefix(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) {
-    return "image/png";
-  }
-  if (hasPrefix(bytes, [0xff, 0xd8, 0xff])) {
-    return "image/jpeg";
-  }
-  if (hasPrefix(bytes, [0x49, 0x49, 0x2a, 0x00]) || hasPrefix(bytes, [0x4d, 0x4d, 0x00, 0x2a])) {
-    return "image/tiff";
-  }
-  if (bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") {
-    return "image/webp";
-  }
-  if (bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WAVE") {
-    return "audio/wav";
-  }
-  if (bytes.subarray(4, 8).toString("ascii") === "ftyp") {
-    const brand = bytes.subarray(8, 12).toString("ascii").trim().toLowerCase();
-    if (brand.startsWith("mp4") || brand.startsWith("isom") || brand.startsWith("m4a")) {
-      return brand.startsWith("m4a") ? "audio/mp4" : "video/mp4";
-    }
-  }
-  if (hasPrefix(bytes, [0x1a, 0x45, 0xdf, 0xa3])) {
-    const lowered = path.extname(filename).toLowerCase();
-    return lowered === ".weba" ? "audio/webm" : "video/webm";
-  }
-  if (bytes.subarray(0, 3).toString("ascii") === "ID3" || isLikelyMp3Frame(bytes)) {
-    return "audio/mpeg";
-  }
-  if (hasPrefix(bytes, [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1])) {
-    return inferLegacyOfficeMimeType(filename);
-  }
-
-  if (looksLikeUtf8Text(bytes)) {
-    const text = bytes.subarray(0, Math.min(bytes.length, 4096)).toString("utf8").trimStart();
-    if (text.startsWith("{\\rtf")) {
-      return "application/rtf";
-    }
-    if (text.startsWith("{") || text.startsWith("[")) {
-      return "application/json";
-    }
-    if (/^<!doctype html|^<html|^<body|^<head/i.test(text)) {
-      return "text/html";
-    }
-    if (looksLikeDelimitedText(text, "\t")) {
-      return "text/tab-separated-values";
-    }
-    if (looksLikeDelimitedText(text, ",")) {
-      return "text/csv";
-    }
-    return "text/plain";
-  }
-
-  return null;
+  return sniffFileBytes(bytes, filename).mimeType;
 }
 
 export function inspectArchive(bytes: Buffer, filename: string, policy: QuarantinePolicy): ArchiveInspection | null {
@@ -364,66 +341,6 @@ function describeArchiveIssue(issue: string, archive: ArchiveInspection): string
   }
 }
 
-function inferZipMimeType(bytes: Buffer, filename: string): string {
-  const entries = parseZipEntries(bytes);
-  if (entries) {
-    const names = new Set(entries.map((entry) => entry.name));
-    if ([...names].some((name) => name.startsWith("word/"))) {
-      return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-    }
-    if ([...names].some((name) => name.startsWith("xl/"))) {
-      return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-    }
-    if ([...names].some((name) => name.startsWith("ppt/"))) {
-      return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
-    }
-    if (path.extname(filename).toLowerCase() === ".epub" || names.has("mimetype")) {
-      return "application/epub+zip";
-    }
-  }
-
-  return "application/zip";
-}
-
-function inferLegacyOfficeMimeType(filename: string): string {
-  switch (path.extname(filename).toLowerCase()) {
-    case ".doc":
-      return "application/msword";
-    case ".xls":
-      return "application/vnd.ms-excel";
-    case ".ppt":
-      return "application/vnd.ms-powerpoint";
-    default:
-      return "application/x-ole-storage";
-  }
-}
-
-function isUnsafeMimeMismatch(declaredMimeType: string, sniffedMimeType: string | null): boolean {
-  if (!sniffedMimeType) {
-    return false;
-  }
-
-  const declared = normalizeMimeType(declaredMimeType);
-  const sniffed = normalizeMimeType(sniffedMimeType);
-  if (declared === sniffed) {
-    return false;
-  }
-
-  const compatibleGroups = [
-    new Set(["text/plain", "text/markdown", "text/html", "application/json", "application/x-ndjson", "text/csv", "text/tab-separated-values", "application/x-latex", "text/x-tex", "application/rtf"]),
-    new Set(["audio/webm", "video/webm"]),
-    new Set(["application/msword", "application/x-ole-storage"]),
-    new Set(["application/vnd.ms-excel", "application/x-ole-storage"]),
-    new Set(["application/vnd.ms-powerpoint", "application/x-ole-storage"])
-  ];
-
-  return !compatibleGroups.some((group) => group.has(declared) && group.has(sniffed));
-}
-
-function normalizeMimeType(value: string): string {
-  return value.split(";")[0]?.trim().toLowerCase() ?? value.toLowerCase();
-}
-
 function hasPrefix(bytes: Buffer, expected: number[]): boolean {
   if (bytes.length < expected.length) {
     return false;
@@ -433,38 +350,6 @@ function hasPrefix(bytes: Buffer, expected: number[]): boolean {
 
 function isZipBytes(bytes: Buffer): boolean {
   return hasPrefix(bytes, [0x50, 0x4b, 0x03, 0x04]) || hasPrefix(bytes, [0x50, 0x4b, 0x05, 0x06]) || hasPrefix(bytes, [0x50, 0x4b, 0x07, 0x08]);
-}
-
-function isLikelyMp3Frame(bytes: Buffer): boolean {
-  return bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0;
-}
-
-function looksLikeUtf8Text(bytes: Buffer): boolean {
-  const sample = bytes.subarray(0, Math.min(bytes.length, 4096));
-  let printable = 0;
-  let zeroBytes = 0;
-
-  for (const byte of sample) {
-    if (byte === 0) {
-      zeroBytes += 1;
-      continue;
-    }
-    if (byte === 0x09 || byte === 0x0a || byte === 0x0d || (byte >= 0x20 && byte <= 0x7e)) {
-      printable += 1;
-    }
-  }
-
-  return zeroBytes === 0 && printable / Math.max(1, sample.length) > 0.75;
-}
-
-function looksLikeDelimitedText(text: string, delimiter: string): boolean {
-  const lines = text.split(/\r?\n/).filter(Boolean).slice(0, 5);
-  if (lines.length < 2) {
-    return false;
-  }
-
-  const counts = lines.map((line) => line.split(delimiter).length);
-  return counts.every((count) => count > 1) && new Set(counts).size === 1;
 }
 
 function parseZipEntries(bytes: Buffer): ZipEntry[] | null {

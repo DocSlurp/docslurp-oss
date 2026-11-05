@@ -5,6 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { defaultPipelineFeatures, projectTemplates } from "@docslurp/shared";
 
 import { startMigratedPostgres } from "@docslurp/worker/testing";
+import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
 
 /**
  * Real routes over a migrated database: each work-creating mutation reports the same `job.estimate` its
@@ -26,6 +27,7 @@ type Key = { orgId: string | null; scopes: string[]; keyType?: string; projectId
 
 beforeAll(async () => {
   const pg = await startMigratedPostgres();
+  await pg.db.exec(LIFT_ONE_ORG_PER_USER_POLICY);
   stop = pg.stop;
   sql = postgres(pg.url, {
     max: 1, prepare: false, onnotice: () => {},
@@ -230,6 +232,25 @@ describe("estimate twins enforce the mutation's authorization", () => {
     const before = (await sql<{ n: number }[]>`select count(*)::int n from projects`)[0]!.n;
     expect((await post(appFor("u2"), "/v1/uploads/estimate", files)).status).toBe(404);
     expect((await sql<{ n: number }[]>`select count(*)::int n from projects`)[0]!.n).toBe(before);
+  });
+
+  it("upload estimate returns the profile and card revision, and narrows the range with a measured mix", async () => {
+    const pdf = { name: "a.pdf", size: 1, pages: 100 };
+    const unknown = await (await post(appFor("u1"), "/v1/uploads/estimate", { files: [pdf] })).json() as {
+      estimate: { credits: { low: number; high: number } | null }; profile: { quality: string; cardVersion: string }; cardRevision: string;
+    };
+    expect(unknown.profile).toMatchObject({ quality: expect.any(String), cardVersion: expect.any(String) });
+    expect(unknown.cardRevision).toMatch(/^[0-9a-f]{64}$/);
+    const measured = await (await post(appFor("u1"), "/v1/uploads/estimate", {
+      files: [{ ...pdf, mix: { text: 1, complex: 0, scanned: 0 } }],
+    })).json() as { estimate: { credits: { low: number; high: number } | null } };
+    if (unknown.estimate.credits && measured.estimate.credits) {
+      expect(measured.estimate.credits.high).toBeLessThanOrEqual(unknown.estimate.credits.high);
+      expect(measured.estimate.credits.low).toBe(measured.estimate.credits.high);
+    }
+    // A partial or over-trusted mix is a 400, never a silent under-quote.
+    expect((await post(appFor("u1"), "/v1/uploads/estimate", { files: [{ ...pdf, mix: { text: 1 } }] })).status).toBe(400);
+    expect((await post(appFor("u1"), "/v1/uploads/estimate", { files: [{ ...pdf, mix: { text: 1, complex: 0, scanned: 0 }, mixConfidence: 2 }] })).status).toBe(400);
   });
 
   it("a project-restricted key cannot read another project through any estimate or job route", async () => {

@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 
 import type { Config } from "../config.js";
 import type { Stage } from "../pipeline/pipeline.js";
-import { buildQuarantineStats, scanDocumentForQuarantine, assertAcceptedQuarantine } from "../lib/quarantine.js";
+import { buildQuarantineStats, scanDocumentForQuarantine, assertAcceptedQuarantine, verifyIntakeFileFacts } from "../lib/quarantine.js";
 import { runDocumentStage, runDocuments, } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import {
@@ -60,10 +60,12 @@ export class QuarantineStage implements Stage {
             const bytes = await readFile(tempFile);
             // The scanned (and later parsed) bytes must be the bytes the server hashed.
             verifyStagedSource(document, sha256Bytes(bytes));
+            // The API only glanced at this file; this is the first full look, before any parser.
+            const verified = verifyIntakeFileFacts(document, bytes);
             const artifact = await scanDocumentForQuarantine({
               documentId: document.id,
               filename: document.filename,
-              declaredMimeType: document.mimeType,
+              declaredMimeType: verified?.scanDeclaredMimeType ?? document.mimeType,
               bytes,
               tempFile,
               runner: this.runner,
@@ -73,6 +75,13 @@ export class QuarantineStage implements Stage {
 
             await this.storage.putArtifactJson(key, artifact);
             const artifactUri = this.storage.uri(key);
+            if (verified && !verified.refused) {
+              // Persist what the bytes are over the API's provisional record; format-detect and routing read it.
+              if (!state.store?.setDocumentFileFacts) throw new Error("file facts verified but the store cannot persist them");
+              await state.store.setDocumentFileFacts(state.run.id, document.id, verified.facts);
+              document.fileFacts = verified.facts;
+              document.mimeType = verified.facts.mimeType;
+            }
             assertAcceptedQuarantine(artifact, artifactUri);
 
             return {

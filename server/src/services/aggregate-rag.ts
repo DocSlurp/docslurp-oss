@@ -19,7 +19,7 @@ import { recordUsageEvent } from "../lib/ai-usage.js";
 import { assertCanSpend } from "./billing/spend-guard.js";
 import type { ValidatedKey } from "./api-keys.js";
 import { apiKeyCanUseProject } from "../lib/api-key-project-scope.js";
-import { hybridSearch, type SearchOptions } from "./search.js";
+import { hybridSearch, ProjectNotFoundError, type SearchOptions } from "./search.js";
 import {
   buildFallbackAnswer,
   buildNativeDocumentInputs,
@@ -65,32 +65,33 @@ function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
-function singleOrgId(projects: ProjectRecord[]): string | null {
-  const orgIds = uniqueStrings(projects.map((project) => project.orgId));
-  return orgIds.length === 1 ? orgIds[0]! : null;
-}
-
 function apiKeyCanReadProject(
   apiKey: ValidatedKey | null | undefined,
   project: ProjectRecord,
 ): boolean {
-  return !apiKey?.orgId || apiKeyCanUseProject(apiKey, project);
+  // No key means a signed-in session, which getProject/listProjects already scoped to the user.
+  // A key must carry an org and allow this project; a key without an org reads nothing.
+  if (!apiKey) return true;
+  return apiKeyCanUseProject(apiKey, project);
 }
 
+/** The projects of one organization the caller may search: an aggregate search never spans tenants. */
 async function resolveAggregateProjects(args: {
   userId: string;
+  orgId: string;
   apiKey?: ValidatedKey | null;
   projectIds: string[];
   maxProjects: number;
 }): Promise<ProjectRecord[]> {
   const requestedProjectIds = uniqueStrings(args.projectIds);
+  if (args.apiKey && args.apiKey.orgId !== args.orgId) throw new ProjectNotFoundError();
 
   if (requestedProjectIds.length > 0) {
     const projects = await Promise.all(
       requestedProjectIds.map(async (projectId) => {
         const project = await getProject(projectId, args.userId);
-        if (!project || !apiKeyCanReadProject(args.apiKey, project)) {
-          throw new Error(`Project not found: ${projectId}`);
+        if (!project || project.orgId !== args.orgId || !apiKeyCanReadProject(args.apiKey, project)) {
+          throw new ProjectNotFoundError();
         }
         return project;
       }),
@@ -100,7 +101,7 @@ async function resolveAggregateProjects(args: {
 
   const projects = await listProjects(args.userId);
   return projects
-    .filter((project) => apiKeyCanReadProject(args.apiKey, project))
+    .filter((project) => project.orgId === args.orgId && apiKeyCanReadProject(args.apiKey, project))
     .slice(0, args.maxProjects);
 }
 
@@ -281,17 +282,10 @@ async function generateAggregateAnswer(args: {
   };
 }
 
-/** generateAnswer over projects from more than one organization (HTTP 400). */
-export class AggregateAnswerScopeError extends Error {
-  readonly status = 400 as const;
-  constructor() {
-    super("generateAnswer needs projects from one organization: list only that organization's projects in `projects`, or set generateAnswer to false to search across organizations.");
-    this.name = "AggregateAnswerScopeError";
-  }
-}
-
 export async function aggregateProjectRagSearch(args: {
   userId: string;
+  /** The one organization searched (an API key's, or the session's named or personal one); the answer bills to it. */
+  orgId: string;
   request: AggregateProjectRagSearchRequest;
   apiKey?: ValidatedKey | null;
 }): Promise<AggregateRagSearchResponse> {
@@ -299,6 +293,7 @@ export async function aggregateProjectRagSearch(args: {
   const query = (request.q ?? request.goal ?? "").trim();
   const projects = await resolveAggregateProjects({
     userId: args.userId,
+    orgId: args.orgId,
     apiKey: args.apiKey,
     projectIds: request.projects,
     maxProjects: request.maxProjects,
@@ -319,13 +314,6 @@ export async function aggregateProjectRagSearch(args: {
         totalTokens: 0,
       },
     };
-  }
-
-  // One answer is billed to one organization's credits (the usage scope), so an
-  // answer may not draw on projects from several organizations. Refused
-  // before retrieval; retrieval alone may still span organizations.
-  if (request.generateAnswer && new Set(projects.map((project) => project.orgId ?? null)).size > 1) {
-    throw new AggregateAnswerScopeError();
   }
 
   const projectResults = await Promise.all(
@@ -410,18 +398,15 @@ export async function aggregateProjectRagSearch(args: {
   // The answer calls a model: every answered project's org must be able to spend.
   // Interactive spend (chat reserve and overdraft, spend-guard.ts): budget
   // caps per project, one interactive hold per org for the one answer.
-  const heldOrgs = new Set<string>();
-  for (const project of projects) {
-    const hold = project.orgId ? !heldOrgs.has(project.orgId) : true;
-    await assertCanSpend(project.orgId, project.id, { kind: "interactive", hold });
-    if (project.orgId) heldOrgs.add(project.orgId);
+  for (const [index, project] of projects.entries()) {
+    await assertCanSpend(args.orgId, project.id, { kind: "interactive", hold: index === 0 });
   }
   const generated = await generateAggregateAnswer({
     userId: args.userId,
     query,
     citations,
     projects: projectResults,
-    orgId: singleOrgId(projects),
+    orgId: args.orgId,
     // The key's chat output cap applies here as on every chat surface.
     maxOutputTokens: capOutputTokens(
       AGGREGATE_ANSWER_MAX_OUTPUT_TOKENS,

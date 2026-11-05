@@ -394,6 +394,31 @@ export function normalizePageNumbers(
   return [...normalized].sort((left, right) => left - right);
 }
 
+/**
+ * Splits extracted text into pages only when the text itself says where the
+ * pages are. Returns null when the form feeds do not describe exactly
+ * `pageCount` pages (or there is no page count to check them against), so no
+ * text is ever labelled with another page's number. Unlike
+ * `splitTextIntoPages` it never falls back to `---` rules or equal-length
+ * slices, and it keeps empty pages in place.
+ *
+ * A document that is known to be one page (`pageCount === 1`) is that page.
+ */
+export function splitTextIntoPagesStrict(
+  text: string,
+  pageCount: number | null | undefined,
+): string[] | null {
+  const normalizedPageCount = normalizePageNumber(pageCount);
+  if (normalizedPageCount === null) return null;
+  const unified = text.replace(/\r\n/g, "\n");
+  if (!unified.trim()) return [];
+  if (normalizedPageCount === 1) return [unified.replace(/\f/g, "\n").trim()];
+
+  const parts = unified.split("\f").map((page) => page.trim());
+  while (parts.length > normalizedPageCount && parts[parts.length - 1] === "") parts.pop();
+  return parts.length === normalizedPageCount ? parts : null;
+}
+
 export function splitTextIntoPages(
   text: string,
   pageCount?: number | null,

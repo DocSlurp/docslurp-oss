@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ search: vi.fn(), chat: vi.fn(), access: vi.fn() }));
-vi.mock("../services/search.js", () => ({ hybridSearch: mocks.search, MissingProjectScopeError: class extends Error {} }));
+vi.mock("../services/search.js", () => ({ hybridSearch: mocks.search, MissingProjectScopeError: class extends Error {}, CrossProjectScopeError: class extends Error {}, ProjectNotFoundError: class extends Error { constructor() { super("Project not found"); } }, }));
 vi.mock("../services/project-chat.js", () => ({ chatProject: mocks.chat, projectChatDisabledBody: async () => null }));
 vi.mock("../services/aggregate-rag.js", () => ({ aggregateProjectRagSearch: vi.fn() }));
 vi.mock("../db.js", () => ({ sql: vi.fn() }));

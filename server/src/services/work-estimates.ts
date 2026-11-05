@@ -1,11 +1,11 @@
 import {
-  speedBoostMultiplier,
   compilePipelinePlan,
   effectiveIndexingMode,
-  estimateUploadMedia,
-  uploadMediaKind,
+  estimateProfileFor,
+  quoteUpload,
+  type EstimateProfile,
+  type QuoteFile,
   type UploadMediaEstimate,
-  type UploadMediaFile,
   sanitizeStoredPipeline,
   withoutStageSelection,
   type CostEstimate,
@@ -14,7 +14,7 @@ import {
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
-import { estimateWork, sumEstimates, type EstimateEnv } from "./config-change.js";
+import { estimateWork, orgWorkerSlots, sumEstimates, type EstimateEnv } from "./config-change.js";
 import { getRun } from "./runs.js";
 import { listEditableProjectIds } from "./organizations.js";
 
@@ -93,55 +93,22 @@ export async function estimateDocumentReprocess(args: {
   return sumEstimates(parts);
 }
 
-/** Pages assumed for a file whose page count the client does not know (about 75 KB of source per page). */
-export const ASSUMED_BYTES_PER_PAGE = 75 * 1024;
-
 /**
  * `POST /v1/uploads/estimate`: ingesting new files with the target project's pipeline. Audio and video are priced
- * by duration (`media`, also included in `estimate.credits`); everything else by page.
+ * by duration (`media`, also included in `estimate.credits`); everything else by page. The project reduces to an
+ * EstimateProfile, which the response returns so offline estimators (`@docslurp/estimate`) price later batches the same way.
  */
 export async function estimateUpload(args: {
   speedBoost?: boolean;
-  files: Array<UploadMediaFile & { pages?: number }>;
+  files: QuoteFile[];
   project: { pipeline: PipelineFeatures; orgId: string };
   env?: EstimateEnv;
-}): Promise<{ estimate: CostEstimate; media: UploadMediaEstimate | null }> {
-  const paged = args.files.filter((file) => !uploadMediaKind(file));
-  const pages = paged.reduce(
-    (sum, file) => sum + Math.max(1, Math.round(file.pages ?? Math.ceil(file.size / ASSUMED_BYTES_PER_PAGE))),
-    0,
-  );
-  const media = estimateUploadMedia(args.files, { videoFrames: args.project.pipeline.mediaVideo?.enabled !== false });
-  if (media) {
-    const multiplier = speedBoostMultiplier(args.speedBoost);
-    media.credits = { low: media.credits.low * multiplier, high: media.credits.high * multiplier };
-    if (media.lighter) {
-      media.lighter.credits *= multiplier;
-      media.lighter.savedCredits *= multiplier;
-    }
-  }
-  const documents = estimateWork({
-    features: { ...args.project.pipeline, speedBoost: args.speedBoost === true },
-    stages: compilePipelinePlan(args.project.pipeline).stageOrder,
-    documents: paged.length,
-    pages,
-    orgId: args.project.orgId,
-    env: args.env,
+}): Promise<{ estimate: CostEstimate; media: UploadMediaEstimate | null; profile: EstimateProfile }> {
+  const profile = estimateProfileFor(args.project.pipeline, {
+    workerSlots: await orgWorkerSlots(args.project.orgId),
+    env: args.env ?? process.env,
   });
-  const estimate = await documents;
-  if (!media) return { estimate, media };
-  // Media files add their own price; the page estimate already covers any other files in the batch.
-  return {
-    media,
-    estimate: {
-      ...estimate,
-      documents: estimate.documents + media.audioFiles + media.videoFiles,
-      credits: estimate.credits
-        ? { low: estimate.credits.low + media.credits.low, high: estimate.credits.high + media.credits.high }
-        : null,
-      basis: `${estimate.basis}; audio and video priced by duration`,
-    },
-  };
+  return { ...quoteUpload({ files: args.files, profile, speedBoost: args.speedBoost === true }), profile };
 }
 
 /** The one project the (editable) documents belong to, or null when they span several or none are found. */

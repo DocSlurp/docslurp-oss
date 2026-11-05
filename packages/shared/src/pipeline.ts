@@ -1,6 +1,7 @@
 import { validateGeoAnnotations } from "./geo.js";
 import { z } from "zod";
 import { migrateStoredModelSettings } from "./stored-model-settings.js";
+import { normalizeDocumentExtractionAliases } from "./extractor-aliases.js";
 import { DEFAULT_QUALITY_MODE, migrateLegacyQualitySettings, qualityModeSchema } from "./quality.js";
 import {
   defaultDocumentExtractionConfig,
@@ -19,6 +20,7 @@ import {
   parseLlmModelUri,
 } from "./embedding.js";
 import { isProviderCallAllowed } from "./privacy.js";
+import { piiPatternTypeSchema } from "./pii.js";
 import { decisionFormatSchema, routingObjectiveSchema } from "./page-routing.js";
 import {
   indexingModeSchema,
@@ -505,8 +507,9 @@ export const pipelineFeaturesSchema = z
     piiPolicy: z
       .object({
         enabled: z.boolean().default(false),
+        // Only detectors that exist: an unknown name is rejected here instead of being dropped by a scan.
         patterns: z
-          .array(z.string())
+          .array(piiPatternTypeSchema)
           .default([
             "ssn",
             "credit-card",
@@ -514,6 +517,9 @@ export const pipelineFeaturesSchema = z
             "anthropic-api-key",
             "github-token",
             "generic-api-key",
+            "aws-access-key",
+            "stripe-api-key",
+            "private-key",
           ]),
         action: z
           .enum(["flag_for_review", "redact_artifacts", "block_indexing"])
@@ -699,6 +705,9 @@ export const defaultPipelineFeatures: PipelineFeatures = {
       "anthropic-api-key",
       "github-token",
       "generic-api-key",
+      "aws-access-key",
+      "stripe-api-key",
+      "private-key",
     ],
     action: "flag_for_review",
     allowlistPatterns: [],
@@ -1025,6 +1034,13 @@ export function normalizePipelineFeatures(
   });
 }
 
+/** `value` with its `documentExtraction` extractor ids aliased to their canonical ids (extractor-aliases.ts). */
+function withCanonicalExtractorIds<T>(value: T): T {
+  if (!isPlainRecord(value) || !isPlainRecord(value.documentExtraction)) return value;
+  const extraction = normalizeDocumentExtractionAliases(value.documentExtraction);
+  return extraction === value.documentExtraction ? value : ({ ...value, documentExtraction: extraction } as T);
+}
+
 /**
  * `normalizePipelineFeatures` for a stored pipeline (a project or run row). Stored extractor settings that the
  * strict schemas now reject (an unknown extractor id or key, a Dolphin path, an invalid OCR language) are dropped
@@ -1038,13 +1054,34 @@ export function normalizeStoredPipelineFeatures(
   return normalizePipelineFeatures(sanitizeStoredPipeline(stored, source));
 }
 
-/** Drops invalid stored extractor settings (see normalizeStoredPipelineFeatures), logging what it dropped. */
+/**
+ * Drops what a stored pipeline holds that the strict schemas now reject (see normalizeStoredPipelineFeatures), logging
+ * what it dropped: invalid extractor settings, and PII detector names that no longer exist (the policy, its action and the
+ * other detectors stay). New writes stay strict.
+ */
 export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
-  if (!isPlainRecord(stored) || !isPlainRecord(stored.documentExtraction)) return stored;
-  const { value, dropped } = sanitizeStoredDocumentExtraction(stored.documentExtraction);
-  if (dropped.length === 0) return stored;
-  console.error(`[pipeline] stored pipeline of ${source} has extractor settings the schema rejects; dropped ${dropped.join(", ")}`);
-  return { ...stored, documentExtraction: value } as T;
+  if (!isPlainRecord(stored)) return stored;
+  let next: Record<string, unknown> = withCanonicalExtractorIds(stored);
+  const dropped: string[] = [];
+  if (isPlainRecord(next.documentExtraction)) {
+    const extraction = sanitizeStoredDocumentExtraction(next.documentExtraction);
+    if (extraction.dropped.length > 0) {
+      next = { ...next, documentExtraction: extraction.value };
+      dropped.push(...extraction.dropped);
+    }
+  }
+  if (isPlainRecord(stored.piiPolicy) && Array.isArray(stored.piiPolicy.patterns)) {
+    const patterns = stored.piiPolicy.patterns;
+    const known = patterns.filter((pattern) => piiPatternTypeSchema.safeParse(pattern).success);
+    if (known.length !== patterns.length) {
+      const unknown = patterns.filter((pattern) => !piiPatternTypeSchema.safeParse(pattern).success);
+      next = { ...next, piiPolicy: { ...stored.piiPolicy, patterns: known } };
+      dropped.push(...unknown.map((pattern) => `piiPolicy.patterns[${typeof pattern === "string" ? pattern.slice(0, 64) : typeof pattern}]`));
+    }
+  }
+  if (dropped.length === 0) return next as T;
+  console.error(`[pipeline] stored pipeline of ${source} has settings the schema rejects; dropped ${dropped.join(", ")}`);
+  return next as T;
 }
 
 /** Keys whose override value replaces the base value instead of merging into it. */
@@ -1095,7 +1132,7 @@ const pipelineFeatureKeys = new Set(Object.keys(defaultPipelineFeatures).concat(
  * filling in defaults, so they can be merged onto the project pipeline.
  */
 export const pipelineFeatureOverridesSchema = z
-  .preprocess(migrateLegacyQualitySettings, z.record(z.string(), z.unknown()))
+  .preprocess((value) => withCanonicalExtractorIds(migrateLegacyQualitySettings(value as never)), z.record(z.string(), z.unknown()))
   .superRefine((value, ctx) => {
     const unknownKeys = Object.keys(value).filter((key) => !pipelineFeatureKeys.has(key));
     for (const key of unknownKeys) {

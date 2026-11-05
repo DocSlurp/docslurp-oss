@@ -214,6 +214,24 @@ test("wait rejects failed and controlled runs with the last run", async () => {
   }
 });
 
+test("wait treats a spend-paused run as waiting, not failed, and keeps the pause on timeout", async () => {
+  let calls = 0;
+  const resumed = client(async () => json({ run: ++calls < 3
+    ? { id: "run", status: "processing", controlState: "paused", pauseReason: "credit_exhausted" }
+    : { id: "run", status: "completed", controlState: null } }));
+  assert.equal((await resumed.waitForRun("run", { pollIntervalMs: 1 })).status, "completed");
+  assert.equal(calls, 3);
+  const stuck = client(async () => json({ run: { id: "run", status: "processing", controlState: "paused", pauseReason: "org_budget_paused" } }));
+  await assert.rejects(stuck.waitForRun("run", { timeoutMs: 15, pollIntervalMs: 100 }), (error) => {
+    assert.ok(error instanceof DocSlurpTimeoutError);
+    assert.equal(error.run.pauseReason, "org_budget_paused");
+    assert.match(error.message, /paused \(org_budget_paused\)/);
+    return true;
+  });
+  // An operator pause (no spend reason) still ends the wait.
+  await assert.rejects(client(async () => json({ run: { id: "run", status: "processing", controlState: "paused", pauseReason: null } })).waitForRun("run"), DocSlurpRunError);
+});
+
 test("deferred queued processing has a bounded wait and retains state", async () => {
   const sdk = client(async () => json({ run: { id: "run", status: "queued" }, temporal: null }));
   await assert.rejects(sdk.waitForRun("run", { timeoutMs: 15, pollIntervalMs: 100 }), (error) => {
@@ -302,9 +320,18 @@ test("AI calls and unkeyed uploads never retry; keyed upload can retry", async (
   for (const method of ["chat", "search", "upload", "ingestUrls"]) {
     let calls = 0;
     const sdk = client(async () => { calls++; return json({ error: "Busy" }, 503, { "retry-after": "0" }); });
+    // Direct sessions always send an Idempotency-Key, so a transient 503 on create is retried safely; the bulk path without a key is not.
     const input = method === "upload" ? { files: [new Blob(["data"])] } : { project: "project", q: "question", urls: ["https://example.test/doc"] };
-    await assert.rejects(sdk[method](input), DocSlurpApiError);
+    await assert.rejects(method === "upload" ? sdk.upload(input, { directUpload: false }) : sdk[method](input), DocSlurpApiError);
     assert.equal(calls, 1, method);
+  }
+  {
+    let calls = 0;
+    const keys = new Set();
+    const sdk = client(async (_url, init) => { calls++; keys.add(new Headers(init.headers).get("idempotency-key")); return json({ error: "Busy" }, 503, { "retry-after": "0" }); });
+    await assert.rejects(sdk.upload({ files: [new Blob(["data"])] }), DocSlurpApiError);
+    assert.equal(calls, 3, "direct session create is keyed and retried");
+    assert.equal(keys.size, 1, "every attempt carries the same key");
   }
   let calls = 0;
   const sdk = client(async (_url, init) => {

@@ -147,8 +147,21 @@ export function featureCredits(feature: DocumentFeature, pages: number): number 
   return per10 * blocks;
 }
 
+/**
+ * Pages an optional feature actually read when its model saw only part of the
+ * text (structured extraction and graph enrichment read long documents in
+ * windows, and a document longer than the windows allowed is read in part).
+ * Pro rata on the characters read, at least one page, never more than the
+ * document; nothing known about the text means the whole document.
+ */
+export function featurePagesRead(pages: number, charsRead: number, charsTotal: number): number {
+  const total = Math.max(1, Math.trunc(Number.isFinite(pages) ? pages : 0));
+  if (!(charsTotal > 0) || !(charsRead >= 0) || charsRead >= charsTotal) return total;
+  return Math.min(total, Math.max(1, Math.ceil(total * (charsRead / charsTotal))));
+}
+
 /** Stamped on billable events so a receipt says which price card charged it. */
-export const PRICE_CARD_VERSION = "2026-10-25b";
+export const PRICE_CARD_VERSION = "2026-11-04";
 
 /** Per dedicated machine, sold by sales, not self-serve. */
 export const PRIVATE_DEDICATED_MONTHLY_USD = 2_000;

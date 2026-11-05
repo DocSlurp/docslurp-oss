@@ -1,3 +1,4 @@
+import { WorkflowExecutionAlreadyStartedError } from "@temporalio/client";
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
 import { describe, expect, it, vi } from "vitest";
@@ -59,7 +60,7 @@ function fakeTemporal() {
     state.startCalls += 1;
     if (state.delayMs) await new Promise((resolve) => setTimeout(resolve, state.delayMs));
     if (state.down) throw temporalDown;
-    if (workflows.has(runId)) throw new Error("Workflow execution already started");
+    if (workflows.has(runId)) throw new WorkflowExecutionAlreadyStartedError("Workflow execution already started", runId, "pipeline");
     workflows.set(runId, Date.now());
   });
   return { workflows, state, startWorkflow };

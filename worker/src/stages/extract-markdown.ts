@@ -1,5 +1,7 @@
 import { reserveOrientationAttempt } from "../lib/image-orientation.js";
-import { dopplerImageGraph, resolveDopplerImages } from "../extractors/doppler-image-graph.js";
+import { EMBEDDED_IMAGE_TARGETS, embeddedImageGraph, resolveEmbeddedImageRequest } from "../extractors/embedded-images.js";
+import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
+import { VM_PDF_EXTRACTOR_ID, requireSandboxedPdfProvider } from "../extractors/plugins.js";
 import { buildSummaryEvidence } from "./summary-evidence.js";
 import type { CapacityLeaseStore } from "../media/capacity/types.js";
 import { extractMedia } from "../media/extract.js";
@@ -16,7 +18,7 @@ import {
   defaultDocumentExtractionConfig,
   isProviderCallAllowed,
   resolveVisionRoute,
-  splitTextIntoPages,
+  splitTextIntoPagesStrict,
   parserPlaybookCatalog,
   parserPlaybookForQuality,
   qualityAllowsPageReading,
@@ -87,6 +89,7 @@ import { logNativePdfFallback } from "../native-pdf/types.js";
 import { isDocumentLevelFailure } from "../lib/document-failure.js";
 import { rethrowIfTeardown } from "../sandbox/teardown-breaker.js";
 import { reportExtractionDecision, summarizeNativePdfShadow, type NativePdfStageStats } from "../native-pdf/telemetry.js";
+import { withKreuzbergOcrLanguage } from "../extractors/kreuzberg-ocr.js";
 import { documentExtractorRegistry, serializeExtractorOptions, type CandidateExecutors, type ExtractedCandidate, type PreparedExtractor } from "../extractors/registry.js";
 import { ExtractorAttemptLedger } from "../extractors/attempt-ledger.js";
 import { runLocalPdfArtifactGraph } from "../extractors/local-graph-runner.js";
@@ -100,6 +103,7 @@ import type { VisionServedRoute } from "../lib/vision-pricing.js";
 import { visionGuardFor } from "../lib/vision-attempt-guard.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
+import { createTextLayerVerifier } from "../lib/text-layer-check.js";
 
 interface PageHeatmapEntry {
   pageNumber: number;
@@ -135,13 +139,15 @@ type SelfCritiqueResult = {
   costCents: number;
 };
 
-function buildPerPageHeatmap(
+export function buildPerPageHeatmap(
   text: string,
   pageCount: number,
   strategy: string,
 ): PageHeatmapEntry[] {
-  const pageTexts = splitTextIntoPages(text, pageCount);
-  if (pageTexts.length === 0) {
+  // Only page breaks the text itself carries: equal-length slices would score invented pages, and the critique
+  // that reads this heatmap would re-read and rewrite them.
+  const pageTexts = splitTextIntoPagesStrict(text, pageCount);
+  if (pageTexts === null || pageTexts.length === 0) {
     return [];
   }
 
@@ -211,6 +217,8 @@ export class ExtractMarkdownStage implements Stage {
           );
         }
         assertSupportedDocumentTarget(extractionConfig.target);
+        // The project's OCR language reaches Kreuzberg too (it reads English only otherwise).
+        const extractorOptions = withKreuzbergOcrLanguage(extractionConfig.options, extractionConfig.ocr.language);
         const hasTablePages =
           state.artifactLedger.readDocument(document.id, "hasTablePages") === "true";
         const format = state.artifactLedger.readDocument(document.id, "normalizedFormat") ?? (this.isPdfDocument(document) ? "pdf" : "unknown");
@@ -219,7 +227,7 @@ export class ExtractMarkdownStage implements Stage {
           return;
         }
         const isPdf = format === "pdf";
-        const requestedImages = resolveDopplerImages(extractionConfig, format, this.tryResolveExtractorOrder(format, extractionConfig.order));
+        const requestedImages = resolveEmbeddedImageRequest(extractionConfig, format, this.tryResolveExtractorOrder(format, extractionConfig.order));
 
         console.log(
           `[extract-debug] stage=${this.name} document=${document.id} ` +
@@ -313,7 +321,7 @@ export class ExtractMarkdownStage implements Stage {
                   secondaryId: extractionConfig.voting.secondary,
                   order: extractionConfig.order,
                   format,
-                  options: extractionConfig.options,
+                  options: extractorOptions,
                   attemptLedger,
                 });
                 // Why an image continues without extracted text (reported in the manifest and stats).
@@ -355,13 +363,13 @@ export class ExtractMarkdownStage implements Stage {
                   secondary: plannedExtractors.secondary,
                   sourcePath: tempFile,
                   format,
-                  options: extractionConfig.options,
+                  options: extractorOptions,
                   dirs: candidateDirs,
                 });
                 if (requestedImages) {
                   for (const prepared of [isolated.primary.extractor, isolated.secondary?.extractor]) {
-                    if (prepared && !prepared.plan.dopplerVm) throw new Error("Embedded image extraction refuses a non-VM candidate");
-                    if (prepared?.plan.dopplerVm) Object.assign(prepared.plan.dopplerVm, { embeddedImages: true, imageMinWidth: requestedImages.minWidth, imageMinHeight: requestedImages.minHeight });
+                    if (prepared && !prepared.plan.sandboxedPdf) throw new Error("Embedded image extraction refuses a non-VM candidate");
+                    if (prepared?.plan.sandboxedPdf) prepared.plan.sandboxedPdf.embeddedImages = { minWidth: requestedImages.minWidth, minHeight: requestedImages.minHeight };
                   }
                 }
                 const [resultA, resultB] = await this.collectCandidateResults({
@@ -371,7 +379,7 @@ export class ExtractMarkdownStage implements Stage {
                   secondaryKey: candidateBKey,
                   primarySource: isolated.primary.source,
                   secondarySource: isolated.secondary?.source ?? tempFile,
-                  graphContext: { sourceHash: contentHash, pageCount, documentId: document.id },
+                  graphContext: { sourceHash: contentHash, pageCount, documentId: document.id, ocrLanguage: state.run.pipeline.documentExtraction?.ocr?.language },
                   signal,
                 });
                 // A candidate whose command could not be torn down ends the stage: never let the
@@ -564,7 +572,7 @@ export class ExtractMarkdownStage implements Stage {
                     );
                   }
                   const nativePdfMode = resolveNativePdfMode();
-                  const nativeEngineState = isPdf && winningCandidate.label !== "doppler" ? await nativePdfEngineState() : null;
+                  const nativeEngineState = isPdf && winningCandidate.label !== VM_PDF_EXTRACTOR_ID ? await nativePdfEngineState() : null;
                   const nativePdfStats: NativePdfStageStats | null = nativeEngineState
                     ? {
                         mode: nativePdfMode,
@@ -590,7 +598,7 @@ export class ExtractMarkdownStage implements Stage {
                         parserPayload: { status: "none", reason: null },
                       }
                     : null;
-                  if (isPdf && winningCandidate.label !== "native-pdf" && winningCandidate.label !== "doppler" && nativePdfMode === "shadow") {
+                  if (isPdf && winningCandidate.label !== "native-pdf" && winningCandidate.label !== VM_PDF_EXTRACTOR_ID && nativePdfMode === "shadow") {
                     // Shadow mode records agreement and timing only; the primary output is untouched.
                     const nativeEngine = await resolveNativePdfEngine(this.runner).catch(() => null);
                     if (!nativeEngine) {
@@ -632,8 +640,8 @@ export class ExtractMarkdownStage implements Stage {
                         sourceArtifactUri,
                         extractor: winningCandidate.label,
                       });
-                  // Doppler already reconstructs Markdown; do not silently parse it again on the host.
-                  const parserArtifacts = winningCandidate.structuredResult || winningCandidate.label === "doppler"
+                  // The VM extractor already reconstructs Markdown; do not silently parse it again on the host.
+                  const parserArtifacts = winningCandidate.structuredResult || winningCandidate.label === VM_PDF_EXTRACTOR_ID
                     ? []
                     : await this.buildParserArtifacts(
                         document,
@@ -674,9 +682,9 @@ export class ExtractMarkdownStage implements Stage {
                           })),
                         )
                       : [];
-                  const imageCandidate = availableCandidates.find(candidate => candidate.plan.dopplerVm?.embeddedImages);
+                  const imageCandidate = availableCandidates.find(candidate => candidate.plan.sandboxedPdf?.embeddedImages);
                   if (requestedImages && !imageCandidate) {
-                    throw new Error("Doppler images unavailable; refusing local image enrichment fallback");
+                    throw new Error("VM images unavailable; refusing local image enrichment fallback");
                   }
                   const graph = extractionConfig.enrich.length > 0
                     ? await this.enrichDocumentArtifacts({
@@ -689,7 +697,7 @@ export class ExtractMarkdownStage implements Stage {
                         reserveOrientation: () => reserveOrientationAttempt(state),
                         recordUsage: event => state.usageLedger.enqueue({ ...event,
                           metadata: { ...event.metadata, documentId: document.id, stage: "embedded-image-orientation" } }),
-                        dopplerImageBundle: imageCandidate ? `${imageCandidate.tempTextPath}.images` : undefined,
+                        vmImages: imageCandidate ? { output: imageCandidate.tempTextPath, markdownPath: imageCandidate.tempTextPath } : undefined,
                         pageNumbers: allPages,
                         runId: state.run.id,
                         signal,
@@ -732,6 +740,7 @@ export class ExtractMarkdownStage implements Stage {
                     artifactGraphSteps: graph?.steps ?? [],
                     artifactGraphOutputCount: graph?.outputCount ?? 0,
                     artifactGraphLatencyMs: graph?.latencyMs ?? 0,
+                    artifactGraphStats: graph?.stats ?? null,
                     preserve: {
                       tables: state.run.pipeline.preserveTables,
                       code: state.run.pipeline.preserveCode,
@@ -802,6 +811,12 @@ export class ExtractMarkdownStage implements Stage {
                       : null;
                   const pageImageEvidenceUri = await this.recordDocumentImageEvidence(
                     document, tempFile, winningText, state, { isPdf, format }, signal);
+                  // Every page OCR produced text for was read by a model: record the read per page, which is the only
+                  // thing that bills a page Rich (db/page-base-fee.ts). Vision reading it too is the same page, charged
+                  // once (the ledger keys a charge by run, document and page) and topped up for its output tokens.
+                  await this.recordOcrPageReads(state, document, {
+                    format, isPdf, winningText, candidate: winningCandidate, sourcePath: tempFile,
+                  }, signal);
                   registerHash(state, contentHash, artifactUri);
 
                   for (const parserArtifact of parserArtifacts) {
@@ -977,6 +992,7 @@ export class ExtractMarkdownStage implements Stage {
                       artifactGraphSteps: graph?.steps ?? [],
                       artifactGraphOutputCount: graph?.outputCount ?? 0,
                       artifactGraphLatencyMs: graph?.latencyMs ?? 0,
+                      artifactGraphStats: graph?.stats ?? null,
                       canonicalUri,
                       parserArtifactUri:
                         parserAwareCanonicalDocument.source.parserArtifactUri,
@@ -1102,7 +1118,7 @@ export class ExtractMarkdownStage implements Stage {
       const metadataTitles = format === "html" ? [htmlDocumentTitle(await readFileHead(sourcePath, 256 * 1024))] : [];
       const derived = deriveDocumentTitle({
         metadataTitles,
-        pages: splitTextIntoPages(markdown, document.pageCount).slice(0, 2),
+        pages: (splitTextIntoPagesStrict(markdown, document.pageCount) ?? [markdown]).slice(0, 2),
         filename: document.filename,
       });
       if (!derived) return;
@@ -1138,6 +1154,72 @@ export class ExtractMarkdownStage implements Stage {
     if (!listing) return null;
     const stdout = await listing.stdout.catch(() => null);
     return stdout === null ? null : splitFormFeedPages(stdout, listing.lastPage);
+  }
+
+  /**
+   * Records the Rich read of every page OCR produced text for, exactly once per page per run (the ledger keys a charge by run,
+   * document and page; a retry re-records the same pages under the same ids).
+   *
+   * - An uploaded image: its one page, when the OCR text has words (Kreuzberg OCRs the first frame of a multi-page TIFF only, so
+   *   one page is the read that happened).
+   * - A PDF: a page whose native text layer (poppler's `pdftotext`, from page facts or run here) has no words while the extractor's
+   *   text for that page does. No extractor says which pages it OCR'd (Kreuzberg's own per-page flags describe the native layer
+   *   only, so a scan reads `isBlank` with its OCR text in the document content), and an empty native layer with words
+   *   in the extracted page can only be an OCR read. Pages the graph extractor's tesseract adapter OCR'd are added from its own list.
+   * Fast never reads a page with a model, so it records nothing. Never throws: a failed probe is logged and bills nothing.
+   */
+  private async recordOcrPageReads(
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    document: import("../models.js").Document,
+    args: { format: string; isPdf: boolean; winningText: string; candidate: ExtractedCandidate; sourcePath: string },
+    signal?: AbortSignal,
+  ): Promise<number[]> {
+    if (!qualityAllowsPageReading(state.run.pipeline.quality)) return [];
+    const hasWords = (text: string | null | undefined) => typeof text === "string" && /[\p{L}\p{N}]/u.test(text);
+    const pages = new Set<number>();
+    if (args.format === "image") {
+      if (args.candidate.label !== "image-textless" && hasWords(args.winningText)) pages.add(1);
+    } else if (args.isPdf) {
+      for (const page of args.candidate.ocrPages ?? []) pages.add(page);
+      try {
+        const pageCount = Math.max(1, Math.trunc(document.pageCount) || 1);
+        const extracted = splitFormFeedPages(args.winningText, pageCount);
+        const native = await this.nativeTextLayerPages(state, document, args.sourcePath, pageCount, signal);
+        if (native && (extracted || hasWords(args.winningText))) {
+          for (let page = 1; page <= pageCount; page += 1) {
+            if (hasWords(native[page - 1])) continue;
+            // Without page breaks in the extracted text every page without a text layer shares the document's words.
+            if (extracted ? hasWords(extracted[page - 1]) : true) pages.add(page);
+          }
+        } else if (!native) {
+          console.warn(`[ocr-ledger] document=${document.id} native text layer unavailable; scanned-page OCR reads are not recorded`);
+        }
+      } catch (error) {
+        rethrowIfTeardown(error);
+        if (signal?.aborted) throw error;
+        console.warn(`[ocr-ledger] document=${document.id} OCR page detection failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    for (const pageNumber of [...pages].sort((a, b) => a - b)) {
+      state.usageLedger.chargeRichPage({ documentId: document.id, pageNumber, readBy: args.format === "image" ? "image-ocr" : "pdf-ocr", model: args.candidate.label });
+    }
+    return [...pages];
+  }
+
+  /** The PDF's own text layer per page (page facts' pdftotext run, else one run here), or null when neither is available. */
+  private async nativeTextLayerPages(
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    document: import("../models.js").Document,
+    sourcePath: string,
+    pageCount: number,
+    signal?: AbortSignal,
+  ): Promise<string[] | null> {
+    const fromFacts = await this.textLayerPages(state, document);
+    if (fromFacts && fromFacts.length >= pageCount) return fromFacts;
+    const plan = await this.runner.pageText(sourcePath, pageCount);
+    if (!plan.available) return null;
+    const result = await this.runner.run({ ...plan, pages: pageCount, timeoutMs: 120_000 }, signal);
+    return splitFormFeedPages(result.stdout, pageCount);
   }
 
   /**
@@ -1224,8 +1306,14 @@ export class ExtractMarkdownStage implements Stage {
         pageTexts,
         signal,
         sharedImagesList: this.imageListings.get(this.imageListingKey(state, document)),
-        // Routing v2 counts native words from the text layer, so an OCR'd scan stays sparse.
-        textLayerPages: resolveRunRoutingV2(state) ? await this.textLayerPages(state, document) : null,
+        // Evidence routing counts native words from the PDF's own text layer, so an OCR'd scan stays sparse, and
+        // judges the layer's quality (a suspect layer is cross-checked against an OCR of its page).
+        ...(resolveRunRoutingV2(state)
+          ? {
+              textLayerPages: await this.textLayerPages(state, document),
+              verifyTextLayer: createTextLayerVerifier({ runner: this.runner, sourcePath }),
+            }
+          : {}),
       });
       if (!pages) return null;
       return await this.storePageImageEvidence(document, state, pages, "pdfimages",
@@ -1283,17 +1371,17 @@ export class ExtractMarkdownStage implements Stage {
     textKey: string,
     sourceTempFile: string,
     signal?: AbortSignal,
-    graphContext?: { sourceHash: string; pageCount: number; documentId: string },
+    graphContext?: { sourceHash: string; pageCount: number; documentId: string; ocrLanguage?: string },
   ): Promise<ExtractedCandidate> {
     return extractor.execute(this.candidateExecutors(graphContext), textKey, sourceTempFile, signal);
   }
 
   private candidateExecutors(
-    graphContext?: { sourceHash: string; pageCount: number; documentId: string },
+    graphContext?: { sourceHash: string; pageCount: number; documentId: string; ocrLanguage?: string },
   ): CandidateExecutors {
     return {
       stream: (plan, label, key, abort) => this.extractStreamCandidate(plan, label, key, abort),
-      file: (plan, label, key, outputPath, abort) => this.extractFileCandidate(plan, label, key, outputPath, abort),
+      file: (plan, label, key, outputPath, abort) => this.extractFileCandidate(plan, label, key, outputPath, abort, graphContext?.documentId),
       liteparse: (candidate, key, source, abort) => this.extractLiteParseCandidate(candidate, key, source, abort),
       graph: (candidate, key, source, abort) => this.extractGraphCandidate(candidate, key, source, graphContext, abort),
       markdownFile: (candidate, key, outputPath) => this.uploadMarkdownFileCandidate(candidate, key, outputPath),
@@ -1370,7 +1458,7 @@ export class ExtractMarkdownStage implements Stage {
     extractor: PreparedExtractor,
     textKey: string,
     sourcePath: string,
-    context?: { sourceHash: string; pageCount: number; documentId: string },
+    context?: { sourceHash: string; pageCount: number; documentId: string; ocrLanguage?: string },
     signal?: AbortSignal,
   ): Promise<ExtractedCandidate> {
     if (!context) throw new Error("graph-local requires source hash and page count");
@@ -1383,6 +1471,7 @@ export class ExtractMarkdownStage implements Stage {
         pageCount: context.pageCount,
         targetKinds: ["document/markdown"],
         scratchDir,
+        ocrLanguage: context.ocrLanguage,
         signal,
       });
       const markdown = graph.targets.find((artifact) => artifact.kind === "document/markdown");
@@ -1396,6 +1485,7 @@ export class ExtractMarkdownStage implements Stage {
         textKey,
         textUri: this.storage.uri(textKey),
         tempTextPath: markdown.uri,
+        ...(graph.ocrPages?.length ? { ocrPages: [...graph.ocrPages] } : {}),
       };
     } catch (error) {
       await rm(scratchDir, { recursive: true, force: true });
@@ -1484,8 +1574,15 @@ export class ExtractMarkdownStage implements Stage {
     textKey: string,
     outputPath: string,
     signal?: AbortSignal,
+    documentId?: string,
   ): Promise<ExtractedCandidate> {
     await this.runner.run(plan, signal);
+    // VM image output: put each routed-in image's reference at its reading-order position before the Markdown is stored.
+    if (plan.sandboxedPdf?.embeddedImages) {
+      if (!documentId) throw new Error("VM image references need the document id");
+      const images = await requireSandboxedPdfProvider().embeddedImages!.read(outputPath, signal);
+      await anchorImageMarkdownFile({ markdownPath: outputPath, images, sourceDocumentId: documentId });
+    }
 
     const upload = this.storage.createMultipartUploadStream(
       textKey,
@@ -1597,7 +1694,7 @@ export class ExtractMarkdownStage implements Stage {
     secondaryKey: string | null;
     primarySource: string;
     secondarySource: string;
-    graphContext: { sourceHash: string; pageCount: number; documentId: string };
+    graphContext: { sourceHash: string; pageCount: number; documentId: string; ocrLanguage?: string };
     signal?: AbortSignal;
   }): Promise<
     [
@@ -1666,6 +1763,14 @@ export class ExtractMarkdownStage implements Stage {
       process.env.DOCSLURP_CRITIQUE_MAX_COST_PER_PAGE_CENTS ??
         String(maxCostCents),
     );
+    // Critique rewrites single pages and joins them with form feeds, which later stages trust as page breaks. Text
+    // without reliable page breaks (the form feeds do not describe exactly `pageCount` pages) has no pages to
+    // rewrite: skip the critique rather than invent boundaries.
+    const pageTexts = splitTextIntoPagesStrict(args.winningText, Math.max(1, args.document.pageCount));
+    if (pageTexts === null || pageTexts.length === 0) {
+      console.warn(`[extract-markdown] self-critique skipped document=${args.document.id}: text has no reliable page breaks pageCount=${args.document.pageCount}`);
+      return null;
+    }
     const critiquePages = budgetCritiquePages(
       selectCritiquePages(args.heatmapPages),
       maxCostCents,
@@ -1684,10 +1789,6 @@ export class ExtractMarkdownStage implements Stage {
       return null;
     }
 
-    const pageTexts = splitTextIntoPages(
-      args.winningText,
-      Math.max(1, args.document.pageCount),
-    );
     const scratchDir = await mkdtemp(path.join(tmpdir(), "docslurp-critique-"));
     const critiqueArtifactKey = `${runArtifactRoot(args.state.run, args.document.userId)}/critique/${args.document.id}.json`;
     const correctedTextKey = `${runArtifactRoot(args.state.run, args.document.userId)}/markdown/${args.document.id}.critique.md`;
@@ -2448,21 +2549,25 @@ export class ExtractMarkdownStage implements Stage {
     runId: string;
     signal?: AbortSignal;
     graphRunner?: typeof runLocalPdfArtifactGraph;
-    dopplerImageBundle?: string;
+    /** Images the VM extractor returned beside its Markdown output; read through the provider, never re-parsed here. */
+    vmImages?: { output: string; markdownPath?: string };
     canContinue?: () => boolean;
     reserveOrientation?: () => boolean;
     recordUsage?: (event: import("../models.js").UsageEvent) => void;
-  }): Promise<{ manifestUri: string; targetIds: string[]; requestedTargets: string[]; steps: string[]; outputCount: number; latencyMs: number; artifactUris?: string[] }> {
+  }): Promise<{ manifestUri: string; targetIds: string[]; requestedTargets: string[]; steps: string[]; outputCount: number; latencyMs: number; artifactUris: string[]; stats?: Readonly<Record<string, unknown>> }> {
     const startedAt = Date.now();
     const scratchDir = await mkdtemp(path.join(tmpdir(), "docslurp-artifact-graph-"));
     try {
       if (args.format !== "pdf") {
         throw new Error(`artifact enrichment is unavailable for ${args.format}`);
       }
-      const result = args.dopplerImageBundle
-        ? await dopplerImageGraph({ bundlePath: args.dopplerImageBundle, sourcePath: args.sourcePath,
+      const vmImages = args.vmImages ? requireSandboxedPdfProvider().embeddedImages : undefined;
+      if (args.vmImages && !vmImages) throw new Error("The sandboxed PDF provider does not return embedded images");
+      const result = args.vmImages && vmImages
+        ? await embeddedImageGraph({ images: await vmImages.read(args.vmImages.output, args.signal),
+            producer: { id: vmImages.producerId, optionsDigest: vmImages.optionsDigest }, sourcePath: args.sourcePath,
             sourceDocumentId: args.document.id, sourceHash: args.sourceHash, pageCount: args.pageNumbers.length,
-            targets: args.targets, scratchDir, signal: args.signal,
+            targets: args.targets, scratchDir, signal: args.signal, markdownPath: args.vmImages.markdownPath,
             recordUsage: args.recordUsage, canContinue: args.canContinue, reserveOrientation: args.reserveOrientation })
         : await (args.graphRunner ?? runLocalPdfArtifactGraph)({
         sourcePath: args.sourcePath,
@@ -2504,7 +2609,10 @@ export class ExtractMarkdownStage implements Stage {
         steps: [...result.steps],
         outputCount: persisted.length - 1,
         latencyMs: Date.now() - startedAt,
-        ...(args.dopplerImageBundle ? { artifactUris: persisted.slice(1).map(ref => ref.uri) } : {}),
+        // Image children and the media map are recorded as document artifact slots, so the artifact and PII guards
+        // (and exports) see them, whichever producer made them.
+        artifactUris: persisted.slice(1).filter(ref => EMBEDDED_IMAGE_TARGETS.has(ref.kind) || ref.kind === "page/embedded-image-mask").map(ref => ref.uri),
+        ...(result.stats ? { stats: result.stats } : {}),
       };
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
@@ -2661,8 +2769,10 @@ export function mergeCritiquedPages(
   pageCount: number,
   corrections: Array<{ pageNumber: number; text: string }>,
 ): string {
-  const pages = splitTextIntoPages(originalText, pageCount);
-  if (pages.length === 0) {
+  // Strict: a text whose page breaks do not match the page count has no pages to replace, and joining slices with
+  // form feeds would write boundaries the text never had.
+  const pages = splitTextIntoPagesStrict(originalText, pageCount);
+  if (pages === null || pages.length === 0) {
     return originalText;
   }
 

@@ -13,12 +13,16 @@ import { VisionExtractStage } from "../stages/vision-extract.js";
 import {
   buildPageImageEvidence,
   collectPageImageEvidence,
+  summarizeImageListing,
   pageAlignedTexts,
   parsePdfImagesList,
   parsePdfPageAreas,
   type PageImageEvidence,
+  type TextLayerVerifier,
 } from "../lib/page-image-evidence.js";
 import { DocumentArtifactLedger } from "../pipeline/artifact-ledger.js";
+import { VISION_ROUTING_VERSION_SLOT } from "../lib/vision-routing-v2.js";
+import { splitFormFeedPages } from "../pipeline/page-facts.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
 import type { Document } from "../models.js";
 import type { Config } from "../config.js";
@@ -64,7 +68,7 @@ describe.skipIf(!hasPoppler)("raster page triage on generated PDFs", () => {
   });
 
   /** Kreuzberg extraction → raster evidence → classification → vision and render selection. */
-  async function triage(pages: TestPdfPage[], maxPagesPerDocument = 20): Promise<Triage> {
+  async function triage(pages: TestPdfPage[], maxPagesPerDocument = 20, verifyTextLayer?: TextLayerVerifier): Promise<Triage> {
     const dir = await mkdtemp(path.join(tmpdir(), "raster-triage-"));
     dirs.push(dir);
     const input = path.join(dir, "doc.pdf");
@@ -75,7 +79,11 @@ describe.skipIf(!hasPoppler)("raster page triage on generated PDFs", () => {
 
     const pageTexts = pageAlignedTexts(markdown, pages.length);
     expect(pageTexts, "Kreuzberg Markdown should be page-aligned").not.toBeNull();
-    const evidence = await collectPageImageEvidence({ runner: new CommandRunner(), sourcePath: input, pageTexts: pageTexts! });
+    // The PDF's own text layer, as page facts record it (one pdftotext run, form-feed split).
+    const runner = new CommandRunner();
+    const layerPlan = await runner.pageText(input, pages.length);
+    const textLayerPages = splitFormFeedPages((await runner.run(layerPlan)).stdout, pages.length);
+    const evidence = await collectPageImageEvidence({ runner, sourcePath: input, pageTexts: pageTexts!, textLayerPages, ...(verifyTextLayer ? { verifyTextLayer } : {}) });
     const evidenceMap = new Map((evidence ?? []).map((page) => [page.pageNumber, page]));
     const surface = buildAdaptiveRoutingDecisionSurface({
       documentId: "doc-1",
@@ -88,12 +96,16 @@ describe.skipIf(!hasPoppler)("raster page triage on generated PDFs", () => {
           ? { source: "page-image-evidence", artifactUri: "s3://bucket/evidence.json" }
           : null,
       pageImageEvidence: evidenceMap,
+      routingV2: true,
     });
 
     const storage = { bucket: "bucket", getJson: async () => surface } as unknown as ArtifactStore;
     const stage = new VisionExtractStage({} as CommandRunner, storage, { visionDensityThreshold: 0.25 } as Config, {} as never);
     const state = {
-      artifactLedger: DocumentArtifactLedger.create({ "doc-1:classification": "s3://bucket/classification.json" }),
+      artifactLedger: DocumentArtifactLedger.create({
+        "doc-1:classification": "s3://bucket/classification.json",
+        [VISION_ROUTING_VERSION_SLOT]: "v3",
+      }),
       pendingPerformance: [],
       run: { pipeline: { quality: "auto", vision: {} } },
     } as unknown as WorkflowState;
@@ -105,7 +117,7 @@ describe.skipIf(!hasPoppler)("raster page triage on generated PDFs", () => {
       visionPages: decision.selectedPages.slice(0, maxPagesPerDocument),
       visionNeeded: decision.needed,
       reason: decision.reason,
-      renderPages: selectRasterPagesFromClassification(surface, { maxPages: maxPagesPerDocument }),
+      renderPages: selectRasterPagesFromClassification(surface, { maxPages: maxPagesPerDocument, routingV2: true }),
     };
   }
 
@@ -127,6 +139,12 @@ describe.skipIf(!hasPoppler)("raster page triage on generated PDFs", () => {
     expect(result.reason).not.toBe("page-triage-skip");
     expect(result.visionPages).toEqual([2, 4]);
     expect(result.renderPages).toEqual([2, 4]);
+  }, 90_000);
+
+  it("a scan drawn as an inline image goes to vision", async () => {
+    const result = await triage([textPage(1), { kind: "image", images: [{ image: scannedImage(), inline: true }] }, textPage(3)]);
+    expect(result.evidence?.find((page) => page.pageNumber === 2)).toMatchObject({ imageCount: 1, largestImageCoverage: 1 });
+    expect(result.visionPages).toEqual([2]);
   }, 90_000);
 
   it("near-empty native text over a full-page image goes to vision", async () => {
@@ -179,6 +197,58 @@ describe.skipIf(!hasPoppler)("raster page triage on generated PDFs", () => {
     expect(result.visionPages).toEqual([]);
   }, 90_000);
 
+  it("a logo or letterhead drawn on every page is page furniture, not a scan", async () => {
+    // 3 words of text and a repeated image covering 40% of each page; a different image per page would be a scan.
+    const letterhead = { image: scannedImage({ width: 600, height: 400, lines: 8 }), rect: { x: 0, y: 0, width: PAGE_WIDTH, height: PAGE_HEIGHT * 0.4 }, shareKey: "letterhead" };
+    const sheet = (line: string): TestPdfPage => ({ kind: "image", images: [letterhead], lines: [line] });
+    const result = await triage([sheet("Invoice 1001"), sheet("Invoice 1002"), sheet("Invoice 1003"), sheet("Invoice 1004")]);
+    expect(result.evidence?.every((page) => page.imageCount === 0 && (page.repeatedImageCount ?? 0) === 1)).toBe(true);
+    expect(result.visionPages).toEqual([]);
+    expect(result.renderPages).toEqual([]);
+  }, 90_000);
+
+  it("a full-bleed slide background shared by every slide does not make titled slides scans", async () => {
+    const background = { image: scannedImage({ width: 800, height: 600, lines: 4 }), shareKey: "slide-background" };
+    const slide = (title: string): TestPdfPage => ({ kind: "image", images: [background], lines: [title] });
+    const result = await triage([slide("Quarterly roadmap overview"), slide("Hiring plan for the spring"), slide("Risks and open questions"), slide("Thank you")]);
+    expect(result.visionPages).toEqual([]);
+  }, 90_000);
+
+  it("a blank page carrying a 1x1 image is blank: never rendered, never read", async () => {
+    const pixel: TestPdfPage = { kind: "image", images: [{ image: solidImage(1, 1, 255) }] };
+    const result = await triage([textPage(1), pixel, textPage(3)]);
+    expect(result.visionPages).toEqual([]);
+    expect(result.renderPages).toEqual([]);
+  }, 90_000);
+
+  it("a scan beside repeated furniture is still read: only the repeated image is dropped", async () => {
+    const logo = { image: solidImage(200, 200, 60), rect: { x: 20, y: PAGE_HEIGHT - 160, width: 140, height: 140 }, shareKey: "logo" };
+    const page = (scan: boolean): TestPdfPage => ({ kind: "image", images: scan ? [logo, { image: scannedImage() }] : [logo], lines: scan ? [] : ["Quarterly update"] });
+    const result = await triage([page(false), page(true), page(false), page(false)]);
+    expect(result.visionPages).toEqual([2]);
+  }, 90_000);
+
+  it("a garbled text layer over a page image is read; the same page with a readable layer is not", async () => {
+    const garbledLines = Array.from({ length: 20 }, (_, index) => `${index}KHPDWUL[SURGXFWFRPSDUHVHDFKTXHU\\ZLWK QRUPDOL]DWLRQ7KHUHVXOWLQJZHLJKWVDUHXVHG`);
+    const pages: TestPdfPage[] = [textPage(1), { kind: "text", heading: "Garbled export", lines: garbledLines }, textPage(3)];
+    // A glyph-code shift is suspect, not garbled: the OCR cross-check of the page image decides. (The generated PDF draws
+    // the shifted text itself, so a real OCR would agree with it; the verifier stands in for a page that shows the
+    // intended text.) Without a check the page is reported and not read.
+    const unchecked = await triage(pages);
+    expect(unchecked.evidence?.find((page) => page.pageNumber === 2)?.textLayer).toMatchObject({ verdict: "suspect", reasons: expect.arrayContaining(["glyph-shift"]) });
+    expect(unchecked.visionPages).toEqual([]);
+    const disagrees: TextLayerVerifier = async (checked) => new Map(checked.map((page) => [page.pageNumber, false]));
+    const result = await triage(pages, 20, disagrees);
+    expect(result.evidence?.find((page) => page.pageNumber === 2)?.textLayer).toMatchObject({ verdict: "suspect", matchesOcr: false });
+    expect(result.visionPages).toEqual([2]);
+  }, 90_000);
+
+  it("a text page of prose that mentions photos, figures and percentages is not read", async () => {
+    const prose = ["The photovoltaic paragraph 4(b) estimate rose 5% while the diagram figure and image captions stayed the same."];
+    const result = await triage([textPage(1), { kind: "text", heading: "Photovoltaic output", lines: [...prose, ...proseLines(10, 4)] }, textPage(3)]);
+    expect(result.visionPages).toEqual([]);
+  }, 90_000);
+
   it("keeps raster-only pages first when the per-document vision budget truncates the selection", async () => {
     const result = await triage([textPage(1), scanPage(), scanPage(), scanPage(), scanPage(), scanPage(), scanPage()], 4);
     expect(result.visionPages).toEqual([2, 3, 4, 5]);
@@ -188,7 +258,7 @@ describe.skipIf(!hasPoppler)("raster page triage on generated PDFs", () => {
 
 describe("page image evidence parsing", () => {
   it("measures placed image coverage and ignores masks and tiny or unplaced images", () => {
-    const rows = parsePdfImagesList([
+    const rowsText = [
       "page   num  type   width height color comp bpc  enc interp  object ID x-ppi y-ppi size ratio",
       "--------------------------------------------------------------------------------------------",
       "   2     0 image    1275  1650  gray    1   8  image  no         8  0   150   150 31.6K 1.5%",
@@ -197,15 +267,17 @@ describe("page image evidence parsing", () => {
       "   3     3 image     600   400  rgb     3   8  jpeg   no        11  0     0     0  10K 1.5%",
       "   3     4 image     300   200  rgb     3   8  jpeg   no        12  0   300   300  10K 1.5%",
       "garbage line",
-    ].join("\n"));
+    ].join("\n");
+    const rows = parsePdfImagesList(rowsText);
     expect(rows.map((row) => [row.pageNumber, row.type])).toEqual([[2, "image"], [3, "image"], [3, "image"]]);
     const areas = parsePdfPageAreas("Page    2 size:  612 x 792 pts (letter)\nPage    3 size:  612 x 792 pts (letter)\n");
-    const evidence = buildPageImageEvidence({ sparsePages: new Map([[2, 0], [3, 4], [4, 0]]), images: rows, pageAreas: areas });
-    expect(evidence).toEqual([
+    const listing = summarizeImageListing(rowsText, { pageAreas: areas, pagesInScope: 4 });
+    const evidence = buildPageImageEvidence({ sparsePages: new Map([[2, 0], [3, 4], [4, 0]]), listing });
+    expect(evidence).toMatchObject([
       { pageNumber: 2, wordCount: 0, imageCount: 1, imageCoverage: 1, largestImageCoverage: 1 },
       // 300x200 px at 300 ppi = 72x48 pt: under the significance floor (2% of the page).
-      { pageNumber: 3, wordCount: 4, imageCount: 0, imageCoverage: 0, largestImageCoverage: 0 },
-      { pageNumber: 4, wordCount: 0, imageCount: 0, imageCoverage: 0, largestImageCoverage: 0 },
+      { pageNumber: 3, wordCount: 4, imageCount: 0, imageCoverage: 0, largestImageCoverage: 0, anyImageCount: 2 },
+      { pageNumber: 4, wordCount: 0, imageCount: 0, imageCoverage: 0, largestImageCoverage: 0, anyImageCount: 0 },
     ]);
     expect(PAGE_WIDTH * PAGE_HEIGHT).toBe(612 * 792);
   });
@@ -257,13 +329,53 @@ describe("page image evidence parsing", () => {
     const shared = await collectPageImageEvidence({
       runner, sourcePath: "/x.pdf", pageTexts, sharedImagesList: { lastPage: 2, stdout: Promise.resolve(listing) },
     });
-    expect(shared).toEqual([{ pageNumber: 2, wordCount: 0, imageCount: 1, imageCoverage: 1, largestImageCoverage: 1, embeddedImageBytes: 32358 }]);
+    expect(shared).toMatchObject([{ pageNumber: 2, wordCount: 0, imageCount: 1, imageCoverage: 1, largestImageCoverage: 1, embeddedImageBytes: 32358 }]);
     expect(calls).toEqual(["pdfinfo:"]);
 
     calls.length = 0;
     await collectPageImageEvidence({ runner, sourcePath: "/x.pdf", pageTexts, sharedImagesList: { lastPage: 1, stdout: Promise.resolve(listing) } });
     await collectPageImageEvidence({ runner, sourcePath: "/x.pdf", pageTexts, sharedImagesList: { lastPage: 2, stdout: Promise.resolve(null) } });
     expect(calls).toEqual(["pdfimages:own", "pdfinfo:", "pdfimages:own", "pdfinfo:"]);
+  });
+
+  it("reads inline images, whose object column is one `[inline]` token", () => {
+    // Verbatim poppler 26.10 output for a page drawn with BI … ID … EI.
+    const rows = parsePdfImagesList("   1     0 image      40   100  gray    1   8  image  no   [inline]       5     9 4000B 100%");
+    expect(rows).toEqual([{ pageNumber: 1, type: "image", width: 40, height: 100, xPpi: 5, yPpi: 9, objectKey: null }]);
+    // An image object poppler cannot reference (reconstructed xref, out-of-range generation) prints `[none]`.
+    expect(parsePdfImagesList("   1     0 image      40   100  gray    1   8  image  no   [none]       5     9 4001B 100%")).toHaveLength(1);
+  });
+
+  it("folds a hostile listing into per-page totals: 150,000 tiny images on page 1 cannot hide the scan on page 3", () => {
+    const row = (page: number, num: number, size: number, ppi: number, object: number) =>
+      `   ${page}  ${num} image  ${size}  ${size}  gray  1  8  image  no  ${object}  0  ${ppi}  ${ppi}  1K 1%`;
+    const lines = Array.from({ length: 150_000 }, (_, index) => row(1, index, 40, 72, 1000 + index));
+    lines.push("   3  0 image  1275  1650  gray  1  8  image  no  9  0  150  150  1K 1%");
+    const areas = new Map([[1, 612 * 792], [3, 612 * 792]]);
+    const summary = summarizeImageListing(lines.join("\n"), { pageAreas: areas, pagesInScope: 3 });
+    expect(summary.truncatedAfterPage).toBeNull();
+    expect(summary.pages.get(1)).toMatchObject({ anyImageCount: 150_000, imageCount: 0 });
+    expect(summary.pages.get(3)).toMatchObject({ imageCount: 1, largestImageCoverage: 1 });
+  });
+
+  it("marks pages after a listing that is too long as unknown, never as having no images", () => {
+    const row = (page: number, object: number) => `   ${page}  0 image  1275  1650  gray  1  8  image  no  ${object}  0  150  150  1K 1%`;
+    const lines = [row(1, 1), row(1, 2), row(2, 3), row(2, 4), row(3, 5), row(3, 6)];
+    const summary = summarizeImageListing(lines.join("\n"), { pageAreas: new Map(), defaultPageArea: 612 * 792, pagesInScope: 3, maxLines: 4 });
+    expect(summary.truncatedAfterPage).toBe(1);
+    const evidence = buildPageImageEvidence({ sparsePages: new Map([[1, 0], [2, 0], [3, 0]]), listing: summary });
+    expect(evidence.map((page) => [page.pageNumber, page.imagesKnown])).toEqual([[1, true], [2, false], [3, false]]);
+  });
+
+  it("detects an image drawn on at least three pages and a fifth of them as furniture, and nothing less", () => {
+    const row = (page: number, object: number) => `   ${page}  0 image  1275  1650  gray  1  8  image  no  ${object}  0  150  150  1K 1%`;
+    const furniture = summarizeImageListing([1, 2, 3, 4, 5].map((page) => row(page, 7)).join("\n"), { pageAreas: new Map(), defaultPageArea: 612 * 792, pagesInScope: 5 });
+    expect(furniture.pages.get(2)).toMatchObject({ imageCount: 0, repeatedImageCount: 1 });
+    // two scans of the same object (a duplicated page) stay scans; three of 100 pages are not a fifth
+    const twice = summarizeImageListing([row(1, 7), row(2, 7)].join("\n"), { pageAreas: new Map(), defaultPageArea: 612 * 792, pagesInScope: 2 });
+    expect(twice.pages.get(1)).toMatchObject({ imageCount: 1, repeatedImageCount: 0 });
+    const sparseShare = summarizeImageListing([row(1, 7), row(2, 7), row(3, 7)].join("\n"), { pageAreas: new Map(), defaultPageArea: 612 * 792, pagesInScope: 100 });
+    expect(sparseShare.pages.get(1)).toMatchObject({ imageCount: 1, repeatedImageCount: 0 });
   });
 
   it("caps the rows parsed from a hostile image list", () => {

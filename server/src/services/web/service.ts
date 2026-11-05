@@ -9,7 +9,7 @@ import { assertSafeExternalUrl } from "../../lib/network-security.js";
 import { allowHostedCallForProject } from "../../lib/privacy.js";
 import { loadProjectPipeline } from "../../search/session-setup.js";
 import { assertCanSpend } from "../billing/spend-guard.js";
-import { reviewUntrustedEvidenceText } from "../prompt-injection.js";
+import { classifyUntrustedEvidenceText, logInjectionIndicators } from "../prompt-injection.js";
 import { createExaAdapter } from "./providers/exa.js";
 import { createFirecrawlAdapter } from "./providers/firecrawl.js";
 import { createJinaAdapter } from "./providers/jina.js";
@@ -52,7 +52,7 @@ export interface WebServiceDeps {
 const CALL_DEADLINE_MS: Record<Exclude<WebCapability, "crawl">, number> = { search: 30_000, fetch: 60_000, map: 60_000 };
 /** Chat tool results go to a hosted model; keep each page small. */
 const CHAT_PAGE_CHARACTERS = 10_000;
-/** Appended to a page cut for chat. Worded to pass the prompt-injection screen (no fetch/URL instructions). */
+/** Appended to a page cut for chat. */
 export const CHAT_SHORTENED_NOTE = "[Page shortened for chat. The remaining text is not available in this conversation; search for the specific section instead.]";
 
 function isProviderId(value: string): value is WebProviderId {
@@ -245,12 +245,14 @@ function resultCount<C extends WebCapability>(capability: C, output: WebOutput<C
   return (output as WebOutput<"fetch">).pages.length;
 }
 
-/** Web text is untrusted: instruction-like lines are suppressed before a model reads it. */
+/**
+ * Web text is untrusted but never edited: the chat model receives it verbatim in a tool result (data, not
+ * instructions), and instruction-shaped text is only logged. Only the length is bounded.
+ */
 function forChat(page: WebPage): WebPage {
-  // The page text is screened first and our note appended after, so the screen never removes the note.
-  // Saying plainly that the rest is unavailable matters: a bare "[truncated]" made the model refetch the page.
+  // A bare "[truncated]" made the model refetch the page, so the note says plainly that the rest is unavailable.
   const clean = (text: string | undefined, max: number) => text === undefined ? undefined
-    : text.length > max ? `${reviewUntrustedEvidenceText(text.slice(0, max)).text}\n\n${CHAT_SHORTENED_NOTE}` : reviewUntrustedEvidenceText(text).text;
+    : (logInjectionIndicators("web", classifyUntrustedEvidenceText(text)), text.length > max ? `${text.slice(0, max)}\n\n${CHAT_SHORTENED_NOTE}` : text);
   return { ...page, title: clean(page.title, 300), snippet: clean(page.snippet, 1_000), markdown: clean(page.markdown, CHAT_PAGE_CHARACTERS) };
 }
 

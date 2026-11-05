@@ -165,6 +165,9 @@ COPY --from=python-venv /app/.venv /app/.venv
 COPY --from=builder /prod/worker/package.json ./worker/package.json
 COPY --from=builder /prod/worker/node_modules ./worker/node_modules
 COPY --from=native-pdf /app/vendor-artifacts ./vendor-artifacts
+# Optional extractor plugins a deployment stages into the build context; the worker loads only the ones
+# DOCSLURP_EXTRACTOR_PLUGINS names (docs/extraction/extractor-plugins.md). Absent by default.
+COPY vendor-artifact[s]/extractor-plugin[s] ./vendor-artifacts/extractor-plugins/
 COPY --from=native-pdf-assets /opt/native-pdf /opt/native-pdf
 COPY worker/LICENSE ./worker/LICENSE
 COPY worker/scripts ./worker/scripts

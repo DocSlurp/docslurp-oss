@@ -50,8 +50,12 @@ vi.mock("../services/documents.js", () => ({
 }));
 vi.mock("../services/document-review.js", () => ({
 }));
-vi.mock("../services/search.js", () => ({ hybridSearch: vi.fn(), MissingProjectScopeError: class extends Error {} }));
+vi.mock("../services/search.js", () => ({ hybridSearch: vi.fn(), MissingProjectScopeError: class extends Error {}, CrossProjectScopeError: class extends Error {}, ProjectNotFoundError: class extends Error { constructor() { super("Project not found"); } }, }));
 vi.mock("../services/project-chat.js", () => ({ chatProject: vi.fn() }));
+vi.mock("../services/organizations.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../services/organizations.js")>(),
+  resolveDefaultOrganization: vi.fn(async () => ({ id: "org-1" })),
+}));
 vi.mock("../services/aggregate-rag.js", () => ({ aggregateProjectRagSearch: mocks.aggregateProjectRagSearch }));
 vi.mock("../services/runs.js", () => ({
   getRunProcessingPreview: mocks.getRunProcessingPreview,

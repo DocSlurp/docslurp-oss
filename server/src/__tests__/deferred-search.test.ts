@@ -430,7 +430,7 @@ describe("request policy for context-less routes", () => {
       { projectPipeline: pipeline, projectId: "ws-1" },
       {
         keyId: () => "key-1",
-        lookupKey: vi.fn(async () => ({ keyType: "client" as const, scopes: ["search"], projectIds: [], materializationPolicy: { maxPagesPerQuery: 5 } })),
+        lookupKey: vi.fn(async () => ({ orgId: "org-1", keyType: "client" as const, scopes: ["search"], projectIds: [], materializationPolicy: { maxPagesPerQuery: 5 } })),
         resolve: resolveMaterializationPolicy,
       },
     );

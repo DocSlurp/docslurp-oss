@@ -35,8 +35,8 @@ it("dry-runs and re-encrypts every real store in bounded resumable passes", asyn
     ('c1','rotate-ws','test','Connector',${credential})`;
   await sql`insert into mcp_service_connections (id,user_id,name,url,transport,auth_type,credentials_encrypted)
     values ('m1','rotate-user','MCP','https://example.com','streamable-http','header-token',${credential})`;
-  await sql`insert into webhooks (id,user_id,url,secret) values
-    ('h1','rotate-user','https://example.com','plaintext webhook secret')`;
+  await sql`insert into webhooks (id,user_id,org_id,url,secret) values
+    ('h1','rotate-user','rotate-org','https://example.com','plaintext webhook secret')`;
   await sql`update organizations set sso_config = ${sql.json({ clientSecret: "plaintext sso secret", enabled: false })} where id='rotate-org'`;
   for (const key of keys) {
     vi.stubEnv(key, newKey);

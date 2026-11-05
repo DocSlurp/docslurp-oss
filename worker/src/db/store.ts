@@ -7,7 +7,7 @@ import { dbTraceStatementHook } from "../lib/db-trace.js";
 import { pipelineTransaction, pipelineInTransaction } from "./transaction-pipeline.js";
 import { PostgresCapacityLeaseStore } from "../media/capacity/store.js";
 import { PostgresMediaJournal } from "../media/journal.js";
-import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
+import { DOCUMENT_FAILURE_MARKERS, PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 import { DocumentNotFoundError, isMissingDocumentError } from "./missing-document.js";
 import { recordPageBaseFee } from "./page-base-fee.js";
 import { reserveFastPageImageRenders } from "./fast-page-image-budget.js";
@@ -54,7 +54,7 @@ import {
   type SupersededPurgeOptions,
   type SupersededPurgeResult,
 } from "./superseded-purge.js";
-import { enforceRunSpend, spendCounterSql } from "./spend-check.js";
+import { enforceRunSpend, enforceRunSpendForCharge, spendCounterSql } from "./spend-check.js";
 import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
 import { PostgresVisionAttemptBackend } from "./vision-attempt-store.js";
@@ -120,6 +120,9 @@ type DocumentRow = {
   status: string;
   extraction_mode: string;
   page_count: number;
+  billing_pages?: number | null;
+  billing_pages_method?: string | null;
+  file_facts?: import("@docslurp/shared").FileFacts | null;
   created_at: string | Date;
   updated_at: string | Date;
   /** Joined by the run document loaders: the run's extract storage prefix. */
@@ -1145,13 +1148,16 @@ export class Store {
         }
         state.refreshStats();
         await this.writeProgressNow(state, undefined, {}, { client, afterCommit });
-        await recordPageBaseFee(client, state, { afterCommit });
+        const pageCharges = await recordPageBaseFee(client, state, { afterCommit });
+        // Reported in the run's stats: the Fast pages charged now and the Rich pages their reads charged as they happened.
+        state.run.stats = { ...state.run.stats, pageCharges };
         const adopted = state.run.kind === "full-index" ? new Set(await adoptBackfillDocuments(client, state.run.id)) : new Set<string>();
         const completed = await completeRunDocuments(client, state.run.id);
         const replacements = await supersededInThisTransaction(client, completed.filter(id => !adopted.has(id)));
         await this.announceReplacements(state, replacements, client, logicalId);
         await client`update project_runs set status = 'completed', stage = 'completed',
           processed_documents = total_documents, pages_processed = pages_total,
+          stats = coalesce(stats, '{}'::jsonb) || ${this.toJson({ pageCharges })}::jsonb,
           lease_expires_at = null, updated_at = now() where id = ${state.run.id}`;
         await insertProjectRunEvents({ sql: client, events: [{ ...buildRunCompletedEvent(state, "pipeline completed"), id: logicalId }] });
         await this.triggerWebhooks(state.run.id, "run.completed", client, logicalId);
@@ -2010,6 +2016,9 @@ export class Store {
    * signed, SSRF-checked dispatcher; the worker never calls subscriber URLs.
    */
   async triggerWebhooks(runId: string, event: string, client: Sql<Record<string, unknown>> = this.sql, logicalId?: string): Promise<void> {
+    // One statement: the run is read inside the outbox insert. Subscribers include teammates and external systems, so the
+    // raw worker error (stack frames, hosts, provider text) stays in the run record and telemetry; the payload carries its
+    // public copy, the same mapping as publicDocumentError (reviewed copy for known markers, else the generic message).
     await this.enqueueWebhookEvent(event, client`
       select r.user_id, jsonb_build_object(
         'event', ${event}::text,
@@ -2020,7 +2029,7 @@ export class Store {
         'processedDocuments', r.processed_documents,
         'pagesProcessed', r.pages_processed,
         'failedDocuments', coalesce((r.stats->>'failedDocuments')::int, 0),
-        'error', r.error
+        'error', ${publicErrorSql(client, "r.error")}
       ) as payload
       from project_runs r
       where r.id = ${runId}
@@ -2046,7 +2055,7 @@ export class Store {
     }
   }
 
-  /** Inserts one outbox row per source row, only for users subscribed to the event, and wakes the API. */
+  /** Inserts one outbox row per source row, only when its run's organization has a webhook subscribed to the event, and wakes the API. */
   private async enqueueWebhookEvent(
     event: string,
     source: postgres.PendingQuery<postgres.Row[]>,
@@ -2060,8 +2069,13 @@ export class Store {
         select coalesce(${logicalId ?? null}::text, gen_random_uuid()::text), source.user_id, ${event}, source.payload
         from source
         where exists (
+          -- Webhooks belong to the run's organization, not to the user who started the run, so a
+          -- teammate's run reaches the team's webhook. user_id is attribution only; the API routes
+          -- each event by its run and checks the webhook's creator still administers the organization.
           select 1 from webhooks w
-          where w.user_id = source.user_id and w.active = true and ${event} = any(w.events)
+          join project_runs r on r.org_id = w.org_id
+          where r.id = source.payload->>'runId'
+            and w.active = true and ${event} = any(w.events)
         )
         returning id
       )
@@ -2676,6 +2690,35 @@ export class Store {
             updated_at = now()
       `;
     }
+  }
+
+  /**
+   * Records the pages the worker measured for an Office, slide, sheet or EPUB document (documents.billing_pages), so the completion
+   * charge and the optional features bill what the file really holds. `page_count`, the page basis the text splits into, is not
+   * touched: those formats' text has no page breaks. Scoped to the run's own document.
+   */
+  async setDocumentBillingPages(runId: string, documentId: string, billingPages: number, method: string): Promise<boolean> {
+    const rows = await this.sql`
+      update documents set billing_pages = ${billingPages}, billing_pages_method = ${method}, updated_at = now()
+      where id = ${documentId} and run_id = ${runId} and deduped_from_document_id is null
+      returning id
+    `;
+    return rows.length > 0;
+  }
+
+  /** Pauses the run when `credits` it newly owes (more pages than intake counted) no longer fit the org's balance (spend-check.ts). */
+  async enforceSpendForCharge(run: { id: string; orgId: string | null; projectId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean }> {
+    const result = await enforceRunSpendForCharge(this.sql, run, credits, "stage-boundary");
+    return { paused: result.paused };
+  }
+
+  async setDocumentFileFacts(runId: string, documentId: string, facts: import("@docslurp/shared").FileFacts): Promise<boolean> {
+    const rows = await this.sql`
+      update documents set file_facts = ${this.sql.json(JSON.parse(JSON.stringify(facts)))}, mime_type = ${facts.mimeType}, updated_at = now()
+      where id = ${documentId} and run_id = ${runId} and deduped_from_document_id is null
+      returning id
+    `;
+    return rows.length > 0;
   }
 
   async setDocumentTitleIfAbsent(documentId: string, title: DerivedDocumentTitle): Promise<boolean> {
@@ -4253,6 +4296,9 @@ function mapDocument(row: DocumentRow): Document {
     status: row.status,
     extractionMode: row.extraction_mode,
     pageCount: row.page_count,
+    billingPages: row.billing_pages ?? null,
+    billingPagesMethod: row.billing_pages_method ?? null,
+    fileFacts: row.file_facts ?? null,
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.updated_at),
     ...(row.run_storage_prefix ? { artifactRoot: row.run_storage_prefix } : {}),
@@ -4296,4 +4342,18 @@ export function groupReferencesByRunPrefix(keys: string[]): { byPrefix: Map<stri
     else byPrefix.set(prefix, [key]);
   }
   return { byPrefix, ungrouped };
+}
+
+/**
+ * SQL for publicDocumentError over a text column: null stays null, a known failure marker maps to its reviewed public
+ * copy, anything else to the generic processing message. Built from the same tables, so the two cannot drift.
+ */
+function publicErrorSql(client: Sql<Record<string, unknown>>, column: "r.error"): postgres.PendingQuery<postgres.Row[]> {
+  const value = client.unsafe(column);
+  let expression = client`case when ${value} is null or ${value} = '' then null::text`;
+  for (const [key, marker] of Object.entries(DOCUMENT_FAILURE_MARKERS)) {
+    const message = PUBLIC_ERROR_MESSAGES[key as keyof typeof DOCUMENT_FAILURE_MARKERS];
+    expression = client`${expression} when strpos(${value}, ${marker}::text) > 0 then ${message}::text`;
+  }
+  return client`${expression} else ${PUBLIC_ERROR_MESSAGES.processing}::text end`;
 }

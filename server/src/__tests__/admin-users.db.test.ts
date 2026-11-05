@@ -42,9 +42,10 @@ beforeAll(async () => {
     ('d1', 'u-active', 'w1', 'a.pdf', 'application/pdf', 'k1', 'completed', 12),
     ('d2', 'u-active', 'w1', 'b.pdf', 'application/pdf', 'k2', 'completed', 3)`;
   await sql`insert into search_sessions (id, user_id, query) values ('s1', 'u-active', 'termination clause')`;
-  await sql`insert into api_keys (id, user_id, key_hash, name, key_type) values
-    ('k1', 'u-active', 'hash-1', 'server', 'server'), ('k2', 'u-active', 'hash-2', 'widget', 'client')`;
-  await sql`insert into api_keys (id, user_id, key_hash, name, key_type, revoked_at) values ('k3', 'u-idle', 'hash-3', 'old', 'server', now())`;
+  await sql`insert into organizations (id, name, slug, created_by_user_id) values ('keys-org', 'Keys', 'keys-org', 'u-active')`;
+  await sql`insert into api_keys (id, user_id, org_id, key_hash, name, key_type) values
+    ('k1', 'u-active', 'keys-org', 'hash-1', 'server', 'server'), ('k2', 'u-active', 'keys-org', 'hash-2', 'widget', 'client')`;
+  await sql`insert into api_keys (id, user_id, org_id, key_hash, name, key_type, revoked_at) values ('k3', 'u-idle', 'keys-org', 'hash-3', 'old', 'server', now())`;
 }, 120_000);
 
 afterAll(async () => { await pool?.end(); await sql?.end(); await server?.stop(); await database?.close(); });

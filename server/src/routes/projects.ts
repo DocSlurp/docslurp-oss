@@ -81,6 +81,7 @@ import {
   inviteProjectMember,
   listProjectInvites,
   listProjectMembers,
+  OrganizationError,
   removeProjectMember,
   revokeProjectInvite,
   updateProjectMemberRole,
@@ -656,6 +657,10 @@ export const projectsRoutes = new Hono()
         });
         return c.json(member);
       } catch (error) {
+        // Joining the project's organization would exceed the one-organization-per-user policy.
+        if (error instanceof OrganizationError && error.code === "user_already_in_org") {
+          return apiStatusError(c, 409, error.message, { code: error.code });
+        }
         return apiStatusError(c, 400, reportPublicError(error));
       }
     },

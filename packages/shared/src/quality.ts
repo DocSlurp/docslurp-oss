@@ -47,7 +47,7 @@ export function qualityAllowsPageReading(quality: QualityMode | null | undefined
  * Kreuzberg under Fast (its config carries the `disableOcr` marker). `liteparse` runs without OCR.
  */
 export const TEXT_LAYER_EXTRACTORS: ReadonlySet<string> = new Set([
-  "kreuzberg", "native-pdf", "poppler-text", "pandoc", "json", "doppler", "liteparse",
+  "kreuzberg", "native-pdf", "poppler-text", "pandoc", "json", "vm-pdf", "liteparse",
 ]);
 
 /** Kreuzberg options that turn OCR on; Fast removes them and sets the `disableOcr` marker (not a Kreuzberg switch). */
@@ -59,7 +59,7 @@ const KREUZBERG_OCR_KEYS = ["ocr", "forceOcr", "forceOcrPages", "disableOcr"] as
  * extractors' entries, Kreuzberg loses every OCR option (no `ocr`, `forceOcr` or `forceOcrPages`) and gets the
  * `disableOcr: true` marker, which Kreuzberg itself ignores: the worker reads it to refuse image inputs to Kreuzberg,
  * the one format Kreuzberg OCRs without being asked. Artifact-graph
- * enrichment that can OCR is off; explicit image preservation remains (the worker requires a Doppler-only VM route), an explicit voting secondary outside the text-layer set falls back to
+ * enrichment that can OCR is off; explicit image preservation remains (served by the local artifact graph, or the vm-pdf route alone when a VM provider is installed), an explicit voting secondary outside the text-layer set falls back to
  * next-in-order, and `forceOcr` is false. `removed` lists what was dropped, for a loud log line.
  * Other quality modes return the config unchanged.
  */

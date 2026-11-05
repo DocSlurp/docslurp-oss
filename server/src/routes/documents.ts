@@ -36,6 +36,7 @@ import {
 } from "../services/documents.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
+import { parseListLimit } from "../lib/list-cursor.js";
 import { isReprocessRejectedError } from "../services/reprocess-errors.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
@@ -162,14 +163,17 @@ export const documentsRoutes = new Hono()
     const tags = tagQuery
       ? tagQuery.split(",").map((value) => value.trim()).filter(Boolean)
       : [];
-    const documents = await listDocumentsWithFilters({
+    // `limit` (1-250, default 250) and the `cursor` from the previous page's nextCursor page the list.
+    const page = await listDocumentsWithFilters({
       userId,
       orgId: apiKey?.orgId ?? undefined,
       runId: c.req.query("runId") ?? undefined,
       projectId,
-      tags
+      tags,
+      limit: parseListLimit(c.req.query("limit"), 250, 250),
+      cursor: c.req.query("cursor") || undefined,
     });
-    return c.json({ documents });
+    return c.json(page);
   })
   .post("/:documentId/full-index", zValidator("json", z.object({ speedBoost: z.boolean().optional() }).default({}), validationHook), async (c) => {
     if (!deferredProfilesEnabled()) return apiErrorResponse(c, 404, "not_found", "Not found");

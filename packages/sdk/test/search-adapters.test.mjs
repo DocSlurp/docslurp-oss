@@ -84,3 +84,10 @@ test('Algolia legacy params must be plain objects', async () => {
   }
   assert.equal(calls, 0);
 });
+
+test('each adapter defaults to its engine\'s own page size', () => {
+  assert.equal(adapterQuery('typesense', 'ws', { q: 'x' }).size, 10);
+  assert.equal(adapterQuery('meilisearch', 'ws', { q: 'x' }).size, 20);
+  assert.equal(adapterQuery('meilisearch', 'ws', { q: 'x', page: 2 }).size, 20);
+  assert.equal(adapterQuery('pagefind', 'ws', { term: 'x' }).size, 100);
+});

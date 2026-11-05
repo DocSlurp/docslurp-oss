@@ -2,6 +2,7 @@
 
 import { safeHttpFailure, retryAfterSeconds } from "./http-failure.js";
 
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { writeFile } from "node:fs/promises";
 import { basename } from "node:path";
@@ -60,7 +61,7 @@ export function resolveQualityPipeline(flags: Record<string, string | boolean>):
 
 function usage(): void {
   console.log(`Usage:
-  docslurp upload <files...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--canonical-id <id>] [--path <folder>] [--estimate] [--watch] [--api-url <url>]
+  docslurp upload <files...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--canonical-id <id>] [--path <folder>] [--idempotency-key <key>] [--estimate] [--watch] [--api-url <url>]
   docslurp ingest-url <urls...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--watch] [--api-url <url>]
   docslurp extract <files...|urls...> [--retention-days <n>] [--no-email] [--download <markdown|all>] [upload options]
   docslurp extract-status <extractId> [--json]
@@ -70,7 +71,7 @@ function usage(): void {
   docslurp jobs get <jobId> [--json]
   docslurp jobs watch <jobId> [--timeout <seconds>]
   docslurp status <runId> [--api-url <url>] [--watch] [--timeout <seconds>]
-  docslurp runs [--api-url <url>]
+  docslurp runs [--limit <1-100>] [--cursor <nextCursor>] [--api-url <url>]
   docslurp search <query> [--project <id|slug|name>] [--min-score <0..1>] [--json | --context]
   docslurp search --queries-file <queries.json> [--project <id|slug|name>] [--concurrency <1..4>] [--json | --context]
   docslurp chat <question> [--project <id|slug|name>] [--session <id>] [--json]
@@ -287,7 +288,7 @@ function parseCliArgs(argv: string[]) {
       i++;
     } else if (arg === "--project-name" || arg === "--project-id") {
       throw new Error(`${arg} was removed: pass a project ID, slug or name with --project (a name that matches no project is created on upload).`);
-    } else if (arg === "--project" || arg === "--api-url" || arg === "--run" || arg === "--api-key" || arg === "--source" || arg === "--out" || arg === "--queries-file" || arg === "--concurrency" || arg === "--min-score" || arg === "--session" || arg === "--canonical-id" || arg === "--path" || arg === "--template" || arg === "--document" || arg === "--stage-from" || arg === "--retention-days" || arg === "--download" || arg === "--quality") {
+    } else if (arg === "--project" || arg === "--api-url" || arg === "--run" || arg === "--api-key" || arg === "--source" || arg === "--out" || arg === "--queries-file" || arg === "--concurrency" || arg === "--min-score" || arg === "--session" || arg === "--canonical-id" || arg === "--path" || arg === "--template" || arg === "--document" || arg === "--stage-from" || arg === "--retention-days" || arg === "--download" || arg === "--quality" || arg === "--idempotency-key") {
       const key = arg.replace(/^--/, "").replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
       flags[key] = argv[i + 1] ?? "";
       i += 2;
@@ -337,75 +338,219 @@ function requestAuth(flags: Record<string, string | boolean>, apiUrl: string): P
 /** Same threshold as the SDK's DIRECT_UPLOAD_THRESHOLD_BYTES. */
 const DIRECT_UPLOAD_THRESHOLD_BYTES = 20 * 1024 * 1024;
 
-const MIME_BY_EXTENSION: Record<string, string> = {
-  pdf: "application/pdf", md: "text/markdown", txt: "text/plain", html: "text/html", htm: "text/html", csv: "text/csv",
-  json: "application/json", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", epub: "application/epub+zip",
-};
-
-function mimeTypeForPath(filePath: string): string {
-  return MIME_BY_EXTENSION[filePath.split(".").pop()?.toLowerCase() ?? ""] ?? "application/octet-stream";
+/**
+ * The type the file declares. The CLI keeps no format table of its own: the server resolves a missing or generic type from the file's
+ * extension and sniffs the bytes, so there is one list of formats (packages/shared/src/file-formats.ts).
+ */
+function declaredMimeType(blob: Blob): string {
+  return blob.type || "application/octet-stream";
 }
 
 type DirectUploadDescriptor = {
   id: string; filename: string; mimeType: string; sizeBytes: number; mode: "single" | "multipart";
+  /** Position in the create request and the client id sent with it: how a file is matched, never by (sanitized) filename. */
+  index?: number | null; clientId?: string | null; status?: string;
   putUrl?: string; partSize?: number; pendingParts?: Array<{ partNumber: number; sizeBytes: number; url: string }>;
+  completedParts?: Array<{ partNumber: number; etag: string }>;
 };
+type UploadRejection = { index?: number; clientId?: string; filename: string; statusCode: number; code: string; message: string };
+type DirectSession = { sessionId: string; status?: string; files: DirectUploadDescriptor[]; rejected?: UploadRejection[]; result?: unknown };
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** A timeout or a dropped connection: the request may or may not have reached the server. */
+function isLostResponse(error: unknown): boolean {
+  return error instanceof TypeError || (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError"));
+}
+
+const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+
+/** The server's coded 409 for a request whose Idempotency-Key is still being processed. */
+async function isInFlightConflict(response: Response): Promise<boolean> {
+  try {
+    const body = await response.clone().json() as { code?: unknown; error?: { code?: unknown } | unknown };
+    const code = (body.error && typeof body.error === "object" ? (body.error as { code?: unknown }).code : undefined) ?? body.code;
+    return code === "idempotency_in_flight";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Sends a request that is safe to repeat (it carries an Idempotency-Key, or is a read): a lost response or a transient status is retried
+ * with backoff, so a timeout never makes a second session or a second charge.
+ */
+async function apiFetchRepeatable(pathname: string, flags: Record<string, string | boolean>, init: RequestInit, timeoutMs?: number): Promise<Response> {
+  // A coded 409 means the first request with this Idempotency-Key is still being processed: its session is the one wanted, so wait
+  // and send the same key again until the request timeout rather than failing and orphaning it.
+  const waitLimitMs = Number.isFinite(Number(flags.timeout ?? 30)) && Number(flags.timeout ?? 30) > 0 ? Number(flags.timeout ?? 30) * 1000 : 30_000;
+  const giveUpAt = Date.now() + waitLimitMs;
+  let inFlight = 0;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const response = await apiFetch(pathname, flags, init, timeoutMs);
+      if (response.status === 409 && await isInFlightConflict(response)) {
+        const wait = Math.min(2_000, 250 * 2 ** inFlight++);
+        if (Date.now() + wait < giveUpAt) {
+          await response.body?.cancel();
+          await sleepMs(wait);
+          attempt--;
+          continue;
+        }
+      }
+      if (attempt >= 3 || !RETRYABLE_STATUSES.has(response.status)) return response;
+      const wait = Math.min(10, retryAfterSeconds(response.headers.get("retry-after")) ?? 0.25 * 2 ** attempt);
+      await response.body?.cancel();
+      await sleepMs(wait * 1000);
+    } catch (error) {
+      if (attempt >= 3 || !isLostResponse(error)) throw error;
+      await sleepMs(250 * 2 ** attempt);
+    }
+  }
+}
+
+/** Milliseconds a request carrying `bytes` may take: the request timeout plus time to send the body at a floor rate of 100 KB/s. */
+function bodyTimeoutMs(flags: Record<string, string | boolean>, bytes: number): number {
+  const base = Number(flags.timeout ?? 30) * 1000;
+  return (Number.isFinite(base) && base > 0 ? base : 30_000) + (bytes / 100_000) * 1000;
+}
 
 async function putToStorage(url: string, body: Blob, contentType?: string): Promise<string | null> {
-  // Presigned URL: never send the API key to storage.
-  const response = await fetch(url, { method: "PUT", body, headers: contentType ? { "Content-Type": contentType } : undefined });
-  if (!response.ok) throw await responseFailure(response);
-  return response.headers.get("etag");
+  // Presigned URL: never send the API key to storage. A part is retried with backoff before the caller resumes from the server's view.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const response = await fetch(url, {
+        method: "PUT", body, headers: contentType ? { "Content-Type": contentType } : undefined,
+        signal: AbortSignal.timeout(Math.ceil(Math.max(60_000, 30_000 + (body.size / 100_000) * 1000))),
+      });
+      if (response.ok) return response.headers.get("etag");
+      if (attempt >= 2 || !RETRYABLE_STATUSES.has(response.status)) throw await responseFailure(response);
+      await response.body?.cancel();
+    } catch (error) {
+      if (attempt >= 2 || !isLostResponse(error)) throw error;
+    }
+    await sleepMs(250 * 2 ** attempt);
+  }
+}
+
+/** Sends one file (or its remaining parts). Returns the completion body for `files/complete`. */
+async function sendFile(descriptor: DirectUploadDescriptor, blob: Blob): Promise<Record<string, unknown>> {
+  if (descriptor.mode === "single") {
+    const etag = await putToStorage(descriptor.putUrl ?? "", blob, descriptor.mimeType);
+    return { fileId: descriptor.id, ...(etag ? { etag } : {}) };
+  }
+  const parts: Array<{ partNumber: number; etag: string }> = [...(descriptor.completedParts ?? [])];
+  for (const part of descriptor.pendingParts ?? []) {
+    const start = (part.partNumber - 1) * (descriptor.partSize ?? part.sizeBytes);
+    const etag = await putToStorage(part.url, blob.slice(start, start + part.sizeBytes));
+    if (!etag) throw new Error(`Storage returned no ETag for ${descriptor.filename} part ${part.partNumber}`);
+    parts.push({ partNumber: part.partNumber, etag });
+    console.error(`Uploaded ${descriptor.filename} part ${part.partNumber}/${(descriptor.pendingParts ?? []).length}`);
+  }
+  return { fileId: descriptor.id, parts: parts.sort((a, b) => a.partNumber - b.partNumber) };
+}
+
+/** The local file a descriptor belongs to: by request index, then client id; by name and size only for an older server. */
+function localFileFor(descriptor: DirectUploadDescriptor, files: Array<{ blob: Blob; name: string }>, claimed: Set<number>): { file: { blob: Blob; name: string }; index: number } | undefined {
+  const byIndex = typeof descriptor.index === "number" ? descriptor.index
+    : descriptor.clientId != null && /^\d+$/.test(descriptor.clientId) ? Number(descriptor.clientId) : -1;
+  const index = byIndex >= 0 ? byIndex : files.findIndex((file, at) => !claimed.has(at) && file.name === descriptor.filename && file.blob.size === descriptor.sizeBytes);
+  const file = files[index];
+  if (!file || claimed.has(index)) return undefined;
+  claimed.add(index);
+  return { file, index };
+}
+
+/** After a lost confirm response, the session says whether intake already finished: poll it rather than confirming again. */
+async function pollConfirmedSession(sessionPath: string, flags: Record<string, string | boolean>): Promise<Response | null> {
+  const stopAt = Date.now() + Math.max(60_000, Number(flags.timeout ?? 30) * 1000);
+  while (Date.now() < stopAt) {
+    try {
+      const response = await apiFetch(`${sessionPath}?statusOnly=true`, flags);
+      if (response.ok) {
+        const session = await response.json() as { status?: string; result?: unknown };
+        if (session.result) return new Response(JSON.stringify(session.result), { status: 201, headers: { "content-type": "application/json" } });
+        if (session.status && ["failed", "aborted", "expired"].includes(session.status)) return null;
+      }
+    } catch (error) {
+      if (!isLostResponse(error)) throw error;
+    }
+    await sleepMs(1000);
+  }
+  return null;
 }
 
 /** Create a direct upload session, PUT each file (or its parts), complete, then confirm. Returns the confirm response. */
 async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: FormData, flags: Record<string, string | boolean>, intake: IntakeMode = UPLOAD_MODE): Promise<Response> {
   const field = (name: string) => (typeof fields.get(name) === "string" ? String(fields.get(name)) : undefined);
-  const json = (body: unknown): RequestInit => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const json = (body: unknown, headers: Record<string, string> = {}): RequestInit => ({ method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) });
+  // One key per upload: a create that timed out is sent again with it and returns the same session, never a second one.
+  const idempotencyKey = typeof flags.idempotencyKey === "string" && flags.idempotencyKey ? flags.idempotencyKey : randomUUID();
   // Extract sessions are created under /v1/extracts and continue on the shared upload session routes.
-  const created = await apiFetch(`${intake.base}/direct/sessions`, flags, json({
+  const created = await apiFetchRepeatable(`${intake.base}/direct/sessions`, flags, json({
     ...intake.fields,
     ...(field("project") ? { project: field("project") } : {}),
     ...(field("newProject") === "true" ? { newProject: true } : {}),
     ...(field("templateKey") ? { templateKey: field("templateKey") } : {}),
     ...(field("pipeline") ? { pipeline: JSON.parse(field("pipeline")!) } : {}),
-    files: files.map(({ blob, name }) => ({
-      filename: name, mimeType: blob.type || mimeTypeForPath(name), sizeBytes: blob.size,
+    files: files.map(({ blob, name }, index) => ({
+      clientId: String(index),
+      filename: name, mimeType: declaredMimeType(blob), sizeBytes: blob.size,
       ...(field("canonicalId") ? { canonicalId: field("canonicalId") } : {}),
       ...(typeof flags.path === "string" && flags.path ? { path: flags.path } : {}),
     })),
-  }));
+  }, { "Idempotency-Key": idempotencyKey }));
   if (!created.ok) return created;
-  const session = await created.json() as { sessionId: string; files: DirectUploadDescriptor[] };
+  const session = await created.json() as DirectSession;
   const sessionPath = `/v1/uploads/direct/sessions/${encodeURIComponent(session.sessionId)}`;
+  // Files the server left out while taking the rest, under the names the user typed.
+  const rejected = (session.rejected ?? []).map((rejection) => ({
+    ...rejection,
+    filename: typeof rejection.index === "number" ? files[rejection.index]?.name ?? rejection.filename : rejection.filename,
+  }));
   try {
-    const remaining = [...files];
-    for (const descriptor of session.files) {
-      const at = remaining.findIndex((file) => file.name === descriptor.filename && file.blob.size === descriptor.sizeBytes);
-      const source = at < 0 ? undefined : remaining.splice(at, 1)[0];
-      if (!source) throw new Error(`Upload session returned an unknown file: ${descriptor.filename}`);
-      let complete: Record<string, unknown>;
-      if (descriptor.mode === "single") {
-        const etag = await putToStorage(descriptor.putUrl ?? "", source.blob, descriptor.mimeType);
-        complete = { fileId: descriptor.id, ...(etag ? { etag } : {}) };
-      } else {
-        const parts: Array<{ partNumber: number; etag: string }> = [];
-        for (const part of descriptor.pendingParts ?? []) {
-          const start = (part.partNumber - 1) * (descriptor.partSize ?? part.sizeBytes);
-          const etag = await putToStorage(part.url, source.blob.slice(start, start + part.sizeBytes));
-          if (!etag) throw new Error(`Storage returned no ETag for ${descriptor.filename} part ${part.partNumber}`);
-          parts.push({ partNumber: part.partNumber, etag });
-          console.error(`Uploaded ${descriptor.filename} part ${part.partNumber}/${(descriptor.pendingParts ?? []).length}`);
+    const claimed = new Set<number>();
+    for (const first of session.files) {
+      const match = localFileFor(first, files, claimed);
+      if (!match) throw new Error(`Upload session returned a file this upload did not send: ${first.filename}`);
+      let descriptor = first;
+      let complete: Record<string, unknown> | null = null;
+      for (let round = 0; complete === null; round++) {
+        try {
+          complete = await sendFile(descriptor, match.file.blob);
+        } catch (error) {
+          if (round >= 2 || !(isLostResponse(error) || (error instanceof CliApiError && (error.status === 403 || RETRYABLE_STATUSES.has(error.status))))) throw error;
+          // Resume from what storage holds: the session lists the parts still missing, with fresh signed URLs.
+          await sleepMs(250 * 2 ** round);
+          const refreshed = await apiFetchRepeatable(sessionPath, flags, {});
+          if (!refreshed.ok) throw error;
+          const next = ((await refreshed.json()) as DirectSession).files.find((file) => file.id === descriptor.id);
+          if (!next) throw error;
+          if (next.status === "completed") { complete = { fileId: descriptor.id }; break; }
+          descriptor = next;
         }
-        complete = { fileId: descriptor.id, parts };
       }
-      const done = await apiFetch(`${sessionPath}/files/complete`, flags, json(complete));
+      const done = await apiFetchRepeatable(`${sessionPath}/files/complete`, flags, json(complete));
       if (!done.ok) throw await responseFailure(done);
     }
-    return await apiFetch(`${sessionPath}/confirm`, flags, { method: "POST" });
+    let confirmed: Response | null;
+    try {
+      confirmed = await apiFetch(`${sessionPath}/confirm`, flags, { method: "POST" });
+    } catch (error) {
+      if (!isLostResponse(error)) throw error;
+      confirmed = await pollConfirmedSession(sessionPath, flags);
+      if (!confirmed) throw error;
+    }
+    if (!confirmed.ok || rejected.length === 0) return confirmed;
+    const result = await confirmed.json() as Record<string, unknown>;
+    const warning = `${rejected.length} of ${files.length} files were not uploaded: ${rejected.map((file) => `${file.filename} (${file.message})`).join("; ")}`;
+    return new Response(JSON.stringify({
+      ...result,
+      rejected: [...rejected, ...((result.rejected as UploadRejection[] | undefined) ?? [])],
+      warnings: [...((result.warnings as string[] | undefined) ?? []), warning],
+    }), { status: confirmed.status, headers: { "content-type": "application/json" } });
   } catch (error) {
     await apiFetch(`${sessionPath}/abort`, flags, { method: "POST" }).catch(() => undefined);
     throw error;
@@ -460,12 +605,15 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
   // /v1/uploads/bulk buffers multipart bodies and is capped (25 MB by default);
   // larger uploads go straight to storage through a direct upload session.
   const totalBytes = blobs.reduce((sum, file) => sum + file.blob.size, 0);
+  // The bulk body is timed by its size, not the 30 s a small request gets, and carries an Idempotency-Key so a timed-out
+  // attempt can be sent again without uploading (and billing) the files twice.
   const response = totalBytes > DIRECT_UPLOAD_THRESHOLD_BYTES
     ? await uploadDirect(blobs, formData, flags, intake)
-    : await apiFetch(`${intake.base}/bulk`, flags, {
+    : await apiFetchRepeatable(`${intake.base}/bulk`, flags, {
       method: "POST",
+      headers: { "Idempotency-Key": typeof flags.idempotencyKey === "string" && flags.idempotencyKey ? flags.idempotencyKey : randomUUID() },
       body: formData
-    });
+    }, bodyTimeoutMs(flags, totalBytes));
 
   if (!response.ok) {
     printFailure(await responseFailure(response));
@@ -746,6 +894,24 @@ function formatElapsed(ms: number): string {
   return minutes > 0 ? `${minutes}m${String(secs).padStart(2, "0")}s` : `${secs}s`;
 }
 
+/** An AbortSignal.timeout abort (TimeoutError), as fetch rejects with it directly or as its cause. */
+function isTimeoutAbort(error: unknown): boolean {
+  const named = (value: unknown) => value instanceof Error && (value.name === "TimeoutError" || value.name === "AbortError");
+  return named(error) || (error instanceof Error && named((error as Error & { cause?: unknown }).cause));
+}
+
+/** What a spend-paused run is waiting for, so "paused" is not read as stuck. */
+function spendPausedNote(run: { controlState?: string | null; pauseReason?: string | null }): string {
+  if (run.controlState !== "paused" || !run.pauseReason) return "";
+  const why: Record<string, string> = {
+    credit_exhausted: "out of credits; resumes after a top-up",
+    project_budget_paused: "project budget reached; resumes when it is raised",
+    org_budget_paused: "organization budget reached; resumes when it is raised",
+    plan_not_entitled: "not covered by the current plan",
+  };
+  return ` (${why[run.pauseReason] ?? run.pauseReason})`;
+}
+
 async function statusCommand(runId: string, flags: Record<string, string | boolean>): Promise<void> {
   const watch = flags.watch === true;
   const timeoutSeconds = Number(flags.timeout ?? 300);
@@ -757,8 +923,18 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
 
   const printStatus = async (): Promise<boolean> => {
     const remainingMs = expiresAt - Date.now();
-    if (watch && remainingMs <= 0) throw new Error(`Run ${runId} did not complete within ${timeoutSeconds}s; it may still be queued or processing.`);
-    const response = await apiFetch(`/v1/runs/${encodeURIComponent(runId)}/progress`, flags, {}, watch ? Math.min(30_000, remainingMs) : Math.min(30_000, timeoutSeconds * 1000));
+    const deadlineError = () => new Error(`Run ${runId} did not complete within ${timeoutSeconds}s; it may still be queued or processing.`);
+    if (watch && remainingMs <= 0) throw deadlineError();
+    const requestTimeoutMs = watch ? Math.min(30_000, remainingMs) : Math.min(30_000, timeoutSeconds * 1000);
+    let response: Response;
+    try {
+      response = await apiFetch(`/v1/runs/${encodeURIComponent(runId)}/progress`, flags, {}, requestTimeoutMs);
+    } catch (error) {
+      // The request's timeout was the watch's remaining time: it aborted because the watch deadline arrived, so report
+      // that, not the transport's generic "aborted due to timeout". A request that timed out early keeps its own error.
+      if (watch && isTimeoutAbort(error) && expiresAt - Date.now() <= 0) throw deadlineError();
+      throw error;
+    }
 
     if (!response.ok) {
       throw await responseFailure(response);
@@ -770,6 +946,7 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
         status: string;
         stage: string;
         controlState?: string | null;
+        pauseReason?: string | null;
         error?: string | null;
         totalDocuments: number;
         processedDocuments: number;
@@ -785,7 +962,7 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
 
     const lines = [
       `Run:       ${run.id}`,
-      `Status:    ${run.controlState ?? run.status}`,
+      `Status:    ${run.controlState ?? run.status}${spendPausedNote(run)}`,
       `Stage:     ${run.stage}`,
       `Documents: [${renderBar(run.processedDocuments, run.totalDocuments)}] ${run.processedDocuments}/${run.totalDocuments} (${docPct}%)`,
       `Pages:     [${renderBar(run.pagesProcessed, run.pagesTotal)}] ${run.pagesProcessed}/${run.pagesTotal} (${pagePct}%)`,
@@ -800,7 +977,9 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
     process.stdout.write(output);
     lineCount = lines.length;
 
-    const stopped = ["paused", "cancelled", "dead-letter"].includes(run.controlState ?? "");
+    // A spend pause (credits, a budget, a plan) lifts by itself once the org can spend: keep watching it.
+    const spendPaused = run.controlState === "paused" && Boolean(run.pauseReason);
+    const stopped = !spendPaused && ["paused", "cancelled", "dead-letter"].includes(run.controlState ?? "");
     const done = run.status === "completed" || run.status === "failed" || stopped;
     if (done) {
       const succeeded = run.status === "completed" && !stopped;
@@ -825,7 +1004,12 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
 }
 
 async function runsCommand(flags: Record<string, string | boolean>): Promise<void> {
-  const response = await apiFetch("/v1/runs", flags);
+  const params = new URLSearchParams();
+  for (const name of ["limit", "cursor"]) {
+    const value = flags[name];
+    if (typeof value === "string" && value) params.set(name, value);
+  }
+  const response = await apiFetch(`/v1/runs${params.size ? `?${params}` : ""}`, flags);
   if (!response.ok) {
     console.error(`Failed to list runs (${response.status})`);
     process.exitCode = 1;
@@ -840,6 +1024,8 @@ async function runsCommand(flags: Record<string, string | boolean>): Promise<voi
       totalDocuments: number;
       createdAt: string;
     }>;
+    hasMore?: boolean;
+    nextCursor?: string | null;
   };
 
   if (data.runs.length === 0) {
@@ -853,6 +1039,8 @@ async function runsCommand(flags: Record<string, string | boolean>): Promise<voi
       `${run.id}  ${run.status.padEnd(10)}  ${(run.stage ?? "-").padEnd(15)}  ${String(run.totalDocuments).padStart(4)}  ${run.createdAt}`
     );
   }
+  // A page is not the whole history: say so, and how to read the rest.
+  if (data.hasMore && data.nextCursor) console.log(`\nMore runs exist. Next page: docslurp runs --cursor ${data.nextCursor}`);
 }
 
 type CliSearchResponse = {

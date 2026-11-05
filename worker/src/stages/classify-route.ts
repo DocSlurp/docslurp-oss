@@ -1,6 +1,16 @@
 import {
   adaptiveRoutingDecisionSurfaceSchema,
   adaptiveRoutingArtifactSchema,
+  BLANK_PAGE_SIGNAL,
+  DRAWN_CONTENT_SIGNAL,
+  GARBLED_TEXT_LAYER_SIGNAL,
+  PAGE_RASTER_ROUTING,
+  SPARSE_FULL_PAGE_IMAGE_SIGNAL,
+  STAMPED_RASTER_SIGNAL,
+  TEXT_LAYER_DISAGREES_SIGNAL,
+  assessTextLayer,
+  decidePageRaster,
+  rasterPageSignal,
   splitTextIntoPages,
   type AdaptiveDocumentComplexity,
   type AdaptivePageRoute,
@@ -18,7 +28,7 @@ import { runDocumentStage, runDocuments, } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
-import { SPARSE_PAGE_WORDS, pageAlignedTexts, pageEvidenceWordCount, type PageImageEvidence } from "../lib/page-image-evidence.js";
+import { SPARSE_PAGE_WORDS, pageAlignedTexts, pageEvidenceWordCount, type PageImageEvidence, type PageTextLayerEvidence } from "../lib/page-image-evidence.js";
 import { pageTextYield } from "../lib/page-yield-evidence.js";
 import { resolveRunRoutingV2, routingVersion, type RoutingVersionOptions } from "../lib/vision-routing-v2.js";
 
@@ -92,6 +102,19 @@ export class ClassifyRouteStage implements Stage {
             state.artifactLedger.recordDocument(document.id, "parser-playbook", surface.suggestedPlaybook);
           }
 
+          const decisions = summarizeRoutingDecisions(surface.pages, {
+            intakePageCount: document.pageCount,
+            measuredPages: Math.max(imageEvidence?.pages.size ?? 0, structured?.pages.size ?? 0),
+            imageEvidence: imageEvidence?.pages,
+          });
+          console.log(
+            `[classify-route] run=${state.run.id} document=${document.id} routing=${routingVersion(routingV2)} ` +
+              `pages=${decisions.intakePages} measured=${decisions.measuredPages} read=${decisions.pagesRead} ` +
+              `reasons=${JSON.stringify(decisions.pagesReadByReason)} blank=${decisions.blankPages} ` +
+              `repeatedImagePages=${decisions.repeatedImagePages} textLayer=${JSON.stringify(decisions.textLayerVerdicts)} ` +
+              `ocrChecked=${decisions.textLayerOcrChecked}`,
+          );
+
           return {
             artifactUri: this.storage.uri(key),
             stats: {
@@ -105,7 +128,9 @@ export class ClassifyRouteStage implements Stage {
               specializedContentKinds: surface.specializedContentSummary.map((entry) => entry.kind),
               nonStraightforwardPages: surface.pages.filter((page) => page.route !== "straightforward-text").length,
               // Ingest report: tables observed (heuristic, from the extracted text).
-              tablePages: surface.pages.filter((page) => page.route === "table-heavy").length
+              tablePages: surface.pages.filter((page) => page.route === "table-heavy").length,
+              // What the routing decided, per document, so operators can see it in stage stats and SigNoz.
+              ...decisions,
             }
           };
         },
@@ -257,8 +282,25 @@ function parsePageImageEvidence(value: unknown): PageImageEvidence | null {
   ) {
     return null;
   }
+  const textLayer = parseTextLayerEvidence(entry.textLayer);
   return { pageNumber, wordCount, imageCount, imageCoverage, largestImageCoverage,
-    embeddedImageBytes: number("embeddedImageBytes", Number.MAX_SAFE_INTEGER) };
+    embeddedImageBytes: number("embeddedImageBytes", Number.MAX_SAFE_INTEGER),
+    ...(entry.imagesKnown === false ? { imagesKnown: false } : {}),
+    ...(number("anyImageCount") !== null ? { anyImageCount: number("anyImageCount")! } : {}),
+    ...(number("repeatedImageCount") !== null ? { repeatedImageCount: number("repeatedImageCount")! } : {}),
+    ...(textLayer ? { textLayer } : {}) };
+}
+
+function parseTextLayerEvidence(value: unknown): PageTextLayerEvidence | null {
+  if (!value || typeof value !== "object") return null;
+  const entry = value as Record<string, unknown>;
+  if (entry.verdict !== "suspect" && entry.verdict !== "garbled") return null;
+  return {
+    verdict: entry.verdict,
+    reasons: Array.isArray(entry.reasons) ? entry.reasons.filter((reason): reason is string => typeof reason === "string").slice(0, 8) : [],
+    ...(typeof entry.matchesOcr === "boolean" || entry.matchesOcr === null ? { matchesOcr: entry.matchesOcr } : {}),
+    source: entry.source === "extracted" ? "extracted" : "text-layer",
+  };
 }
 
 export interface StructuredPageComplexityEvidence {
@@ -309,63 +351,10 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
     });
   }
   const { label, confidence, signals } = classifyTextAndFilename(args.text, args.filename, { routingV2 });
-  const hasPageAlignment = pageAlignedTexts(args.text, args.pageCount) !== null;
-  const pageTexts = splitTextIntoPages(args.text, Math.max(1, args.pageCount));
-  const pageText = (pageNumber: number) => pageTexts[pageNumber - 1] ?? "";
-  // No extractor produced any text for the whole document, and its file minus every embedded
-  // image is far larger than blank pages need: the content may be drawn (vector paths, outlined
-  // glyphs), so a page without text or images may not be blank and vision is its only reader.
-  // Byte counts are spoofable (padding, metadata, attachments, a large font), so this only
-  // nominates the page: vision-extract skips it unless its render shows ink (renderLooksBlank).
-  const documentWithoutText = !args.text.trim();
-  // Likewise (v2) a page with no text layer and no image whose extracted text (OCR of its
-  // render) still has words: the words are drawn, so the page is not blank.
-  const drawnContent = (text: string) =>
-    (routingV2 && pageEvidenceWordCount(text) >= DRAWN_TEXT_MIN_WORDS) ||
-    (documentWithoutText && args.drawnBytesPerPage != null && args.drawnBytesPerPage >= DRAWN_CONTENT_MIN_BYTES_PER_PAGE);
-  const pages = buildAdaptivePageRoutesFromTexts(pageTexts, Math.max(1, args.pageCount), { routingV2 }).map((page) => {
-    const complexity = args.structuredComplexity?.get(page.pageNumber);
-    const imageEvidence = args.pageImageEvidence?.get(page.pageNumber);
-    if (!complexity && !imageEvidence) return page;
-    const evidenceDecision = complexity
-      ? authorizeStructuredOcr(complexity, pageText(page.pageNumber), imageEvidence, hasPageAlignment)
-      : authorizeRasterPageOcr(imageEvidence!);
-    const ocrDecision: AdaptiveOcrDecision =
-      evidenceDecision.signals.includes(BLANK_PAGE_SIGNAL) &&
-      drawnContent(pageText(page.pageNumber))
-        ? { authorized: true, confidence: 0.7, signals: [DRAWN_CONTENT_SIGNAL] }
-        : evidenceDecision;
-    if (!ocrDecision.authorized) {
-      // Blank pages: confident there is nothing to read, so they are neither rendered nor sent to vision.
-      if (ocrDecision.signals.includes(BLANK_PAGE_SIGNAL)) {
-        return {
-          ...page,
-          confidence: Math.max(page.confidence, ocrDecision.confidence),
-          signals: [...page.signals, ...ocrDecision.signals],
-          ocrDecision,
-        };
-      }
-      // Sparse page with only minor images: keep the text heuristics' route.
-      if (!complexity) {
-        return { ...page, signals: [...page.signals, ...ocrDecision.signals] };
-      }
-      return {
-        ...page,
-        signals: [...page.signals, ...ocrDecision.signals],
-        ocrDecision,
-      };
-    }
-    return {
-      ...page,
-      // v2: OCR text keeps visible structure cues (numeric rows, field labels, equations): keep
-      // that route so the ingest report counts the table; any other raster page is degraded.
-      route: routingV2 && STRUCTURED_TEXT_ROUTES.has(page.route) ? page.route : ("handwriting-or-degraded" as const),
-      extractorHint: "vision-rescue" as const,
-      confidence: Math.max(page.confidence, ocrDecision.confidence),
-      signals: [...page.signals, ...ocrDecision.signals],
-      ocrDecision,
-    };
-  });
+  const pageCount = Math.max(1, args.pageCount);
+  const pages = routingV2
+    ? buildEvidencePages(args, pageCount)
+    : buildLegacyPages(args, pageCount);
   const summary = summarizeAdaptiveRouting(pages);
   const specializedContentSummary = summarizeSpecializedContent(pages);
   const suggestedPlaybook = resolveAdaptivePlaybook({
@@ -396,18 +385,202 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
   });
 }
 
-const BLANK_PAGE_SIGNAL = "ocr-not-authorized:blank-page";
-export const DRAWN_CONTENT_SIGNAL = "ocr-authorized:drawn-content";
+
+/** Routing v1 (runs started before evidence routing): text heuristics plus raster evidence, as it has always been. */
+function buildLegacyPages(
+  args: Parameters<typeof buildAdaptiveRoutingDecisionSurface>[0],
+  pageCount: number,
+): AdaptivePageRoutingEntry[] {
+  const routingV2 = false;
+  const hasPageAlignment = pageAlignedTexts(args.text, args.pageCount) !== null;
+  const pageTexts = splitTextIntoPages(args.text, pageCount);
+  const pageText = (pageNumber: number) => pageTexts[pageNumber - 1] ?? "";
+  const documentWithoutText = !args.text.trim();
+  const drawnContent = () =>
+    documentWithoutText && args.drawnBytesPerPage != null && args.drawnBytesPerPage >= DRAWN_CONTENT_MIN_BYTES_PER_PAGE;
+  return buildAdaptivePageRoutesFromTexts(pageTexts, pageCount, { routingV2 }).map((page) => {
+    const complexity = args.structuredComplexity?.get(page.pageNumber);
+    const imageEvidence = args.pageImageEvidence?.get(page.pageNumber);
+    if (!complexity && !imageEvidence) return page;
+    const evidenceDecision = complexity
+      ? authorizeStructuredOcr(complexity, pageText(page.pageNumber), imageEvidence, hasPageAlignment)
+      : authorizeRasterPageOcr(imageEvidence!);
+    const ocrDecision: AdaptiveOcrDecision =
+      evidenceDecision.signals.includes(BLANK_PAGE_SIGNAL) && drawnContent()
+        ? { authorized: true, confidence: 0.7, signals: [DRAWN_CONTENT_SIGNAL] }
+        : evidenceDecision;
+    if (!ocrDecision.authorized) {
+      if (ocrDecision.signals.includes(BLANK_PAGE_SIGNAL)) {
+        return { ...page, confidence: Math.max(page.confidence, ocrDecision.confidence), signals: [...page.signals, ...ocrDecision.signals], ocrDecision };
+      }
+      if (!complexity) return { ...page, signals: [...page.signals, ...ocrDecision.signals] };
+      return { ...page, signals: [...page.signals, ...ocrDecision.signals], ocrDecision };
+    }
+    return {
+      ...page,
+      route: "handwriting-or-degraded" as const,
+      extractorHint: "vision-rescue" as const,
+      confidence: Math.max(page.confidence, ocrDecision.confidence),
+      signals: [...page.signals, ...ocrDecision.signals],
+      ocrDecision,
+    };
+  });
+}
+
+/**
+ * Evidence routing: whether a page is read by a model comes from facts about the PDF page alone (`decidePageRaster`:
+ * native words from the text layer, significant non-repeated images, the text layer's own quality, drawn content).
+ * Text routes still label pages for the report (tables, forms, formulas, code) but never authorize or veto a read.
+ * Page boundaries must be known: with text that does not line up with the page count, labels are not made.
+ */
+function buildEvidencePages(
+  args: Parameters<typeof buildAdaptiveRoutingDecisionSurface>[0],
+  pageCount: number,
+): AdaptivePageRoutingEntry[] {
+  const aligned = pageAlignedTexts(args.text, pageCount);
+  const texts = aligned ?? Array.from({ length: pageCount }, () => "");
+  const evidence = args.pageImageEvidence;
+  // The document has no text layer worth the name and its bytes, less its images, say the pages are drawn.
+  let nativeWordTotal = 0;
+  let allPagesKnown = (evidence?.size ?? 0) >= pageCount;
+  for (let page = 1; page <= pageCount && allPagesKnown; page += 1) {
+    const entry = evidence?.get(page);
+    if (!entry) allPagesKnown = false;
+    else nativeWordTotal += entry.wordCount;
+  }
+  const documentWithoutText = allPagesKnown && nativeWordTotal / pageCount < DRAWN_TEXT_MAX_WORDS_PER_PAGE;
+  const drawnBytes = args.drawnBytesPerPage != null && args.drawnBytesPerPage >= DRAWN_CONTENT_MIN_BYTES_PER_PAGE;
+  return texts.map((text, index) => {
+    const pageNumber = index + 1;
+    const page = classifyAdaptivePage(pageNumber, text, { routingV2: true });
+    const complexity = args.structuredComplexity?.get(pageNumber);
+    const imageEvidence = evidence?.get(pageNumber);
+    if (!complexity && !imageEvidence) return aligned ? page : { ...page, signals: [...page.signals, "page-text-unknown"] };
+    const nativeText = aligned ? text : "";
+    const words = imageEvidence?.wordCount ?? (complexity ? pageEvidenceWordCount(nativeText) : null);
+    // OCR of a render found words on a page whose layer has none and that holds no image: the words are drawn.
+    const ocrWordsOnBarePage = aligned !== null && imageEvidence !== undefined && imageEvidence.wordCount === 0 &&
+      imageEvidence.imageCount === 0 && pageEvidenceWordCount(text) >= DRAWN_TEXT_MIN_WORDS;
+    const uncoveredVectors = complexity ? (complexity.uncoveredVectorArea ?? 0) / Math.max(1, complexity.pageArea) >= 0.05 : false;
+    const textLayer = imageEvidence?.textLayer ??
+      (complexity?.isGarbled ? { verdict: "garbled" as const, reasons: ["structured-parser-garbled"], source: "text-layer" as const } : null);
+    const images = imageEvidence
+      ? imageEvidence.imagesKnown === false ? null : { count: imageEvidence.imageCount, coverage: imageEvidence.imageCoverage, largestCoverage: imageEvidence.largestImageCoverage }
+      : complexity
+        ? { count: complexity.hasSubstantialImages ? 1 : 0, coverage: complexity.imageCoverage, largestCoverage: complexity.largestImageCoverage }
+        : null;
+    const decision = decidePageRaster({
+      nativeWords: words,
+      images,
+      textLayer: textLayer ? { verdict: textLayer.verdict, matchesOcr: textLayer.matchesOcr ?? null } : null,
+      drawnContent: ocrWordsOnBarePage || uncoveredVectors || (documentWithoutText && drawnBytes),
+    });
+    const yieldEvidence = complexity && aligned !== null && !decision.read
+      ? pageTextYield(nativeText, complexity.textLength) : null;
+    const yieldDeficit = yieldEvidence?.substantialDeficit === true && complexity !== undefined && !complexity.isGarbled &&
+      Number.isFinite(complexity.textCoverage) && complexity.textCoverage >= 0.05 && complexity.textCoverage <= 1;
+    const ocrDecision: AdaptiveOcrDecision = yieldDeficit
+      ? {
+          authorized: true,
+          confidence: 0.8,
+          signals: [
+            "ocr-authorized:structured-text-yield-deficit",
+            `text-yield:expected-chars=${yieldEvidence!.expectedCharacters}:actual-chars=${yieldEvidence!.actualCharacters}:actual-utf8-bytes=${yieldEvidence!.actualTextBytes}`,
+          ],
+        }
+      : { authorized: decision.read, confidence: decision.confidence, signals: decision.signals };
+    if (!ocrDecision.authorized) {
+      return { ...page, signals: [...page.signals, ...ocrDecision.signals], ocrDecision };
+    }
+    return {
+      ...page,
+      // OCR text that keeps visible structure (numeric rows, field labels, equations) keeps its route, so the
+      // ingest report counts the table; any other page a model reads is degraded.
+      route: STRUCTURED_TEXT_ROUTES.has(page.route) ? page.route : ("handwriting-or-degraded" as const),
+      extractorHint: "vision-rescue" as const,
+      confidence: Math.max(page.confidence, ocrDecision.confidence),
+      signals: [...page.signals, ...ocrDecision.signals, ...(ocrDecision.signals.includes(GARBLED_TEXT_LAYER_SIGNAL) || decision.kind === "garbled-text-layer" ? ["garbled-text"] : [])],
+      ocrDecision,
+    };
+  });
+}
+
+export { DRAWN_CONTENT_SIGNAL };
+
+/** Why a page was sent to a vision/OCR read, from the signals of its routing decision. */
+export type PageReadReason = "raster" | "garbled" | "drawn" | "yield-deficit" | "other";
+
+export function pageReadReason(signals: readonly string[]): PageReadReason {
+  if (signals.includes(GARBLED_TEXT_LAYER_SIGNAL) || signals.includes(TEXT_LAYER_DISAGREES_SIGNAL) ||
+      signals.includes("ocr-authorized:complexity-and-plausibility-failure")) return "garbled";
+  if (signals.includes(DRAWN_CONTENT_SIGNAL)) return "drawn";
+  if (signals.includes("ocr-authorized:structured-text-yield-deficit")) return "yield-deficit";
+  if (signals.some((signal) => signal.startsWith("ocr-authorized:"))) return "raster";
+  return "other";
+}
+
+/**
+ * Per-document counts of what routing decided (classify-route stage stats): pages sent to a read by reason, blank pages
+ * skipped, pages whose significant images are all repeated furniture and so were left out of the raster rule, the text-layer
+ * verdicts and how many suspect layers were cross-checked against an OCR, and the page count measured from evidence
+ * against the count recorded at intake. Pure; reads only the routing decision and the page evidence.
+ */
+export function summarizeRoutingDecisions(
+  pages: readonly AdaptivePageRoutingEntry[],
+  args: { intakePageCount: number; measuredPages: number; imageEvidence?: ReadonlyMap<number, PageImageEvidence> },
+) {
+  const pagesReadByReason: Record<PageReadReason, number> = { raster: 0, garbled: 0, drawn: 0, "yield-deficit": 0, other: 0 };
+  let pagesRead = 0;
+  let blankPages = 0;
+  for (const page of pages) {
+    if (page.ocrDecision?.authorized === true) {
+      pagesRead += 1;
+      pagesReadByReason[pageReadReason(page.ocrDecision.signals)] += 1;
+    } else if (page.ocrDecision?.signals.includes(BLANK_PAGE_SIGNAL)) {
+      blankPages += 1;
+    }
+  }
+  const textLayerVerdicts: Record<string, number> = {};
+  let repeatedImagePages = 0;
+  let textLayerOcrChecked = 0;
+  let textLayerOcrDisagrees = 0;
+  for (const evidence of args.imageEvidence?.values() ?? []) {
+    if ((evidence.repeatedImageCount ?? 0) > 0) repeatedImagePages += 1;
+    const layer = evidence.textLayer;
+    if (!layer) continue;
+    textLayerVerdicts[layer.verdict] = (textLayerVerdicts[layer.verdict] ?? 0) + 1;
+    if (layer.matchesOcr !== null && layer.matchesOcr !== undefined) {
+      textLayerOcrChecked += 1;
+      if (layer.matchesOcr === false) textLayerOcrDisagrees += 1;
+    }
+  }
+  return {
+    intakePages: args.intakePageCount,
+    measuredPages: args.measuredPages,
+    pagesRead,
+    pagesReadByReason,
+    blankPages,
+    repeatedImagePages,
+    textLayerVerdicts,
+    textLayerOcrChecked,
+    textLayerOcrDisagrees,
+  };
+}
+/** A document averaging fewer native words per page than this has no text layer worth the name. */
+const DRAWN_TEXT_MAX_WORDS_PER_PAGE = 3;
 const NO_NATIVE_TEXT_SIGNALS = new Set([
   "ocr-authorized:no-native-text",
   "ocr-authorized:raster-page-without-text",
+  // A scan with a stamp or a few words of text layer: its content is still pixels only a read can recover.
+  STAMPED_RASTER_SIGNAL,
+  SPARSE_FULL_PAGE_IMAGE_SIGNAL,
   DRAWN_CONTENT_SIGNAL,
 ]);
 /**
  * Bytes per page above which a PDF with no extractable text holds drawn content. Blank pages
  * need well under 1 KB; a page of text drawn as paths needs tens to hundreds of KB.
  */
-export const DRAWN_CONTENT_MIN_BYTES_PER_PAGE = 16 * 1024;
+export const DRAWN_CONTENT_MIN_BYTES_PER_PAGE = PAGE_RASTER_ROUTING.drawnContentMinBytesPerPage;
 /** Extracted words on a page with neither a text layer nor images that make it drawn text, not blank. */
 export const DRAWN_TEXT_MIN_WORDS = 10;
 const STRUCTURED_TEXT_ROUTES = new Set<AdaptivePageRoute>(["table-heavy", "form", "formula-heavy", "chart-or-figure"]);
@@ -427,15 +600,10 @@ export function pageLacksNativeText(page: Pick<AdaptivePageRoutingEntry, "ocrDec
  * their only source of searchable text, so they keep their place when a page budget truncates
  * the selection.
  *
- * v1 (routing v2 off): a routing decision from page evidence decides alone; otherwise
- * vision-rescue routes and sparse form or table pages. v2:
- *
- * - OCR authorized by raster or structured evidence (scans, OCR'd rasters, no text layer).
- * - Blank pages never.
- * - Otherwise the text route decides, also when raster evidence did not authorize OCR (a page
- *   with a minor image is still a formula or figure page): vision-rescue routes, formula pages
- *   (a text layer flattens notation that vision transcribes as LaTeX), and sparse form or table
- *   pages.
+ * v1 (runs started before evidence routing): a routing decision from page evidence decides alone; otherwise
+ * vision-rescue routes and sparse form or table pages. v2 (evidence routing): exactly the pages whose own
+ * evidence authorized a read (scans, raster pages, drawn content, an unreadable text layer); blank pages never,
+ * and no text route adds or removes a page.
  */
 export function selectLegacyVisionPages(
   pages: AdaptivePageRoutingEntry[],
@@ -455,16 +623,9 @@ export function selectLegacyVisionPages(
       })
       .map((page) => page.pageNumber);
   }
+  // Evidence routing: the page's own facts decided (`ocrDecision`); text routes never add or remove a page.
   return prioritizePagesWithoutNativeText(pages)
-    .filter((page) => {
-      if (page.ocrDecision?.authorized) return true;
-      if (page.ocrDecision?.signals.includes(BLANK_PAGE_SIGNAL)) return false;
-      return (
-        page.extractorHint === "vision-rescue" ||
-        page.route === "formula-heavy" ||
-        ((page.route === "form" || page.route === "table-heavy") && page.textDensityScore < 0.45)
-      );
-    })
+    .filter((page) => page.ocrDecision?.authorized === true)
     .map((page) => page.pageNumber);
 }
 
@@ -473,17 +634,17 @@ export function prioritizePagesWithoutNativeText<T extends Pick<AdaptivePageRout
   return pages.slice().sort((left, right) => Number(pageLacksNativeText(right)) - Number(pageLacksNativeText(left)));
 }
 /** A page without native text whose largest image covers at least this share holds its content as pixels. */
-export const RASTER_PAGE_MIN_LARGEST_IMAGE_COVERAGE = 0.25;
+export const RASTER_PAGE_MIN_LARGEST_IMAGE_COVERAGE = PAGE_RASTER_ROUTING.rasterPageMinLargestImageCoverage;
 /** ...or whose significant images together cover at least this share (banded or tiled scans). */
-export const RASTER_PAGE_MIN_TOTAL_IMAGE_COVERAGE = 0.35;
+export const RASTER_PAGE_MIN_TOTAL_IMAGE_COVERAGE = PAGE_RASTER_ROUTING.rasterPageMinTotalImageCoverage;
 /**
  * A page whose native text is only a stamp, page number or generated footer ("Page 1 of 2",
  * a Bates number) over an image covering at least this share is a scan placed with margins.
  */
-export const STAMP_TEXT_MAX_WORDS = 10;
-export const STAMPED_SCAN_MIN_IMAGE_COVERAGE = 0.5;
+export const STAMP_TEXT_MAX_WORDS = PAGE_RASTER_ROUTING.stampTextMaxWords;
+export const STAMPED_SCAN_MIN_IMAGE_COVERAGE = PAGE_RASTER_ROUTING.stampedScanMinImageCoverage;
 /** A page with a little more native text (title, caption) needs an image this large to be a scan. */
-export const SPARSE_TEXT_FULL_PAGE_IMAGE_COVERAGE = 0.85;
+export const SPARSE_TEXT_FULL_PAGE_IMAGE_COVERAGE = PAGE_RASTER_ROUTING.sparseTextFullPageImageCoverage;
 
 /**
  * OCR authorization from raster evidence alone (no structured parser evidence): the
@@ -495,22 +656,12 @@ export function authorizeRasterPageOcr(evidence: PageImageEvidence): AdaptiveOcr
   if (evidence.wordCount === 0 && evidence.imageCount === 0) {
     return { authorized: false, confidence: 0.9, signals: [BLANK_PAGE_SIGNAL] };
   }
-  if (
-    evidence.wordCount === 0 &&
-    (evidence.largestImageCoverage >= RASTER_PAGE_MIN_LARGEST_IMAGE_COVERAGE ||
-      evidence.imageCoverage >= RASTER_PAGE_MIN_TOTAL_IMAGE_COVERAGE)
-  ) {
-    return { authorized: true, confidence: 0.94, signals: ["ocr-authorized:raster-page-without-text"] };
-  }
-  if (evidence.wordCount <= STAMP_TEXT_MAX_WORDS && evidence.largestImageCoverage >= STAMPED_SCAN_MIN_IMAGE_COVERAGE) {
-    return { authorized: true, confidence: 0.9, signals: ["ocr-authorized:stamped-raster-page"] };
-  }
-  if (
-    evidence.wordCount < SPARSE_PAGE_WORDS &&
-    evidence.largestImageCoverage >= SPARSE_TEXT_FULL_PAGE_IMAGE_COVERAGE
-  ) {
-    return { authorized: true, confidence: 0.9, signals: ["ocr-authorized:full-page-image-with-sparse-text"] };
-  }
+  const raster = rasterPageSignal(evidence.wordCount, {
+    count: evidence.imageCount,
+    coverage: evidence.imageCoverage,
+    largestCoverage: evidence.largestImageCoverage,
+  });
+  if (raster) return { authorized: true, confidence: raster.confidence, signals: [raster.signal] };
   return {
     authorized: false,
     confidence: 0.8,
@@ -547,7 +698,7 @@ export function authorizeStructuredOcr(
     reasons.has("scanned-page");
   const fullPageImage =
     complexity.fullPageImage ||
-    complexity.largestImageCoverage >= 0.85 ||
+    complexity.largestImageCoverage >= SPARSE_TEXT_FULL_PAGE_IMAGE_COVERAGE ||
     reasons.has("full-page-image");
   const plausibilityFailed = nativeTextFailsPlausibility(nativeText);
   const uncoveredVectorRatio =
@@ -852,12 +1003,14 @@ export function classifyAdaptivePage(
   let extractorHint: AdaptivePageRoutingEntry["extractorHint"] = "cheap-text";
   let confidence = Math.max(0.45, textDensityScore);
 
-  if (garbledText) {
+  // v2 never reads a page's quality or content class off its words: a page is degraded, a chart or an image page
+  // only when facts about the PDF page say so (buildEvidencePages). Its text still labels tables, forms, formulas, code.
+  if (!routingV2 && garbledText) {
     route = "handwriting-or-degraded";
     extractorHint = "vision-rescue";
     confidence = 0.86;
     signals.push("garbled-text");
-  } else if (degradationMarkers >= 2) {
+  } else if (!routingV2 && degradationMarkers >= 2) {
     route = "handwriting-or-degraded";
     extractorHint = "vision-rescue";
     confidence = 0.82;
@@ -878,12 +1031,12 @@ export function classifyAdaptivePage(
     extractorHint = "layout-aware";
     confidence = 0.76;
     signals.push("table-markers");
-  } else if (chartMarkers >= 2) {
+  } else if (!routingV2 && chartMarkers >= 2) {
     route = "chart-or-figure";
     extractorHint = "vision-rescue";
     confidence = 0.72;
     signals.push("chart-markers");
-  } else if (imageMarkers >= 1) {
+  } else if (!routingV2 && imageMarkers >= 1) {
     route = "image-heavy";
     extractorHint = "vision-rescue";
     confidence = 0.68;

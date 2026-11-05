@@ -23,7 +23,7 @@ const imageRow = (page: number, object: number, size: string) =>
 
 type Listing = { lastPage: number; stdout: Promise<string | null> };
 
-function setup(version: "v1" | "v2", options: { visionFallback?: boolean; pageCount?: number } = {}) {
+function setup(version: "v1" | "v3", options: { visionFallback?: boolean; pageCount?: number } = {}) {
   const written: Array<{ key: string; value: PageImageEvidenceArtifact }> = [];
   const runner = {
     listPdfImages: vi.fn(async () => ({ available: true, binary: "pdfimages", args: [] })),
@@ -72,7 +72,7 @@ describe("extract-markdown page image evidence wiring", () => {
   });
 
   it("v2 counts native words from page facts' text layer, so an OCR'd scan stays sparse", async () => {
-    const harness = setup("v2");
+    const harness = setup("v3");
     harness.shareTextLayer({ lastPage: 1, stdout: Promise.resolve("\f") });
     harness.shareImages({ lastPage: 1, stdout: Promise.resolve(HEADER + imageRow(1, 7, "280K")) });
     const uri = await harness.stage.recordDocumentImageEvidence(harness.document, source, OCR_PROSE, harness.state,
@@ -87,11 +87,11 @@ describe("extract-markdown page image evidence wiring", () => {
   });
 
   it("falls back to the v1 word count when pdftotext failed", async () => {
-    const harness = setup("v2");
+    const harness = setup("v3");
     harness.shareTextLayer({ lastPage: 1, stdout: Promise.resolve(null) });
     expect(await harness.stage.recordDocumentImageEvidence(harness.document, source, OCR_PROSE, harness.state,
       { isPdf: true, format: "pdf" })).toBeNull();
-    const rejected = setup("v2");
+    const rejected = setup("v3");
     rejected.shareTextLayer({ lastPage: 1, stdout: Promise.reject(new Error("pdftotext crashed")) });
     expect(await rejected.stage.recordDocumentImageEvidence(rejected.document, source, OCR_PROSE, rejected.state,
       { isPdf: true, format: "pdf" })).toBeNull();
@@ -99,7 +99,7 @@ describe("extract-markdown page image evidence wiring", () => {
   });
 
   it("falls back to the v1 word count when the text layer does not line up with the pages", async () => {
-    const harness = setup("v2");
+    const harness = setup("v3");
     // Three form-feed pages for a one-page document: never pair a page with another page's text.
     harness.shareTextLayer({ lastPage: 1, stdout: Promise.resolve("\fa\fb\f") });
     expect(await harness.stage.recordDocumentImageEvidence(harness.document, source, OCR_PROSE, harness.state,
@@ -115,7 +115,7 @@ describe("extract-markdown page image evidence wiring", () => {
   });
 
   it("drawn bytes stay unknown unless the image listing covers every page", async () => {
-    const harness = setup("v2", { pageCount: 2 });
+    const harness = setup("v3", { pageCount: 2 });
     harness.shareTextLayer({ lastPage: 2, stdout: Promise.resolve("\f\f") });
     // Page facts probed only page 1 of 2: page 2's images are unlisted.
     harness.shareImages({ lastPage: 1, stdout: Promise.resolve(HEADER + imageRow(1, 7, "10K")) });
@@ -125,14 +125,14 @@ describe("extract-markdown page image evidence wiring", () => {
 
   it("an uploaded image gets full-page raster evidence with v2 only", async () => {
     const image = { isPdf: false, format: "image" };
-    const v2 = setup("v2");
+    const v2 = setup("v3");
     expect(await v2.stage.recordDocumentImageEvidence(v2.document, source, OCR_PROSE, v2.state, image)).toMatch(/doc-1\.json$/);
     expect(v2.written[0]!.value).toMatchObject({
       source: "image-file", pages: [{ pageNumber: 1, wordCount: 0, imageCount: 1, imageCoverage: 1 }],
     });
     const v1 = setup("v1");
     expect(await v1.stage.recordDocumentImageEvidence(v1.document, source, OCR_PROSE, v1.state, image)).toBeNull();
-    const off = setup("v2", { visionFallback: false });
+    const off = setup("v3", { visionFallback: false });
     expect(await off.stage.recordDocumentImageEvidence(off.document, source, OCR_PROSE, off.state, image)).toBeNull();
     expect(await off.stage.recordDocumentImageEvidence(off.document, source, OCR_PROSE, off.state, { isPdf: true, format: "pdf" }))
       .toBeNull();

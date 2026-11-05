@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createMigratedDatabase } from "@docslurp/worker/testing";
 import { createHash, randomBytes } from "node:crypto";
+import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
 
 // Only the SQL transport is replaced: authentication and ownership run production queries
 // against an isolated database built from the full migration journal.
@@ -40,6 +41,7 @@ const ownershipQueries = () => mocks.query.mock.calls.filter(([sql]) => /from up
 beforeAll(async () => {
   vi.stubEnv("API_RATE_LIMIT_ENABLED", "false");
   db = await createMigratedDatabase();
+  await db.exec(LIFT_ONE_ORG_PER_USER_POLICY);
   await db.exec(`
     insert into "user" (id,name,email) values ('u','Test','upload@example.test'), ('other','Other','other@example.test');
     insert into organizations (id,name,slug,created_by_user_id) values ('o','Org','upload-test','u'), ('foreign','Foreign','upload-foreign','u');
@@ -73,7 +75,7 @@ describe.each([false, true])("direct session authorization, statusOnly=%s", stat
     ["other tenant", { orgId: "foreign" }, 404],
     ["other project", { projectIds: ["excluded"] }, 404],
     ["other owner", { userId: "other" }, 404],
-    ["missing organization", { orgId: null }, 403],
+    // A live key without an organization cannot be inserted: api_keys_org_id_required (migration 0125, api-keys-org-required.db.test.ts).
   ])("rejects %s before serialization or signing", async (_label, overrides, status) => {
     await seedKey(overrides);
     expect((await request()).status).toBe(status);

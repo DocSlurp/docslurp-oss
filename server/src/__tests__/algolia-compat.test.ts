@@ -42,6 +42,19 @@ vi.mock("../services/search.js", () => ({
   hybridSearch: hybridSearchMock
 }));
 
+// An in-memory stand-in for the tenant-scoped response cache, off unless a test turns it on.
+const responseCache = { on: false, store: new Map<string, unknown>(), tickets: [] as Array<Record<string, unknown>> };
+vi.mock("../search/response-cache.js", () => ({
+  cacheableApiKeyId: (id: string | null | undefined) => id,
+  searchResponseCacheTtlMs: () => (responseCache.on ? 30_000 : 0),
+  responseCacheTicket: async (args: Record<string, unknown>) => {
+    responseCache.tickets.push(args);
+    return { key: JSON.stringify([args.userId, args.apiKeyId, args.projectIds, args.request]) };
+  },
+  readCachedResponse: (ticket: { key: string }) => responseCache.store.get(ticket.key),
+  storeResponse: async (ticket: { key: string }, data: unknown) => { responseCache.store.set(ticket.key, data); },
+}));
+
 vi.mock("../services/search-controls.js", () => ({
   getProjectSearchSettings: getProjectSearchSettingsMock,
   mutateProjectSearchSettingsForUser: async (args: { projectId: string; userId: string; mutate: (current: unknown) => unknown }) => {
@@ -204,7 +217,57 @@ describe("algolia compat", () => {
     expect(body.facets.filename["a.pdf"]).toBe(1);
   });
 
-  it("uses page-aware overfetching and trims attributes on single-index search", async () => {
+  it("highlights the words the query matched, not a placeholder", async () => {
+    hybridSearchMock.mockResolvedValue({
+      sessionId: "session-1",
+      results: [{ ...makeResult(0, "Müller-Report.pdf"), text: "The Müller fee schedule: fees for Gebühren." }],
+    });
+    const res = await app.request("/compat/algolia/1/indexes/ws-1/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer test" },
+      body: JSON.stringify({ query: "muller fee", highlightPreTag: "<em>", highlightPostTag: "</em>" }),
+    });
+    const body = await res.json();
+    expect(body.hits[0]._highlightResult.text).toEqual({
+      value: "The <em>Müller</em> <em>fee</em> schedule: fees for Gebühren.",
+      matchLevel: "full",
+      matchedWords: ["muller", "fee"],
+      fullyHighlighted: false,
+    });
+    expect(body.hits[0]._highlightResult.filename.value).toBe("<em>Müller</em>-Report.pdf");
+  });
+
+  it("serves the next pages of a result list from one search instead of re-running it", async () => {
+    responseCache.on = true;
+    responseCache.store.clear();
+    responseCache.tickets.length = 0;
+    hybridSearchMock.mockReset();
+    hybridSearchMock.mockResolvedValue({
+      sessionId: "session-1",
+      availability: { status: "complete" },
+      results: Array.from({ length: 30 }, (_, index) => makeResult(index)),
+    });
+    try {
+      const page = async (n: number, query = "alpha") => (await app.request("/compat/algolia/1/indexes/ws-1/query", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer test" },
+        body: JSON.stringify({ query, hitsPerPage: 10, page: n }),
+      })).json();
+      const first = await page(0);
+      const second = await page(1);
+      const third = await page(2);
+      expect(hybridSearchMock).toHaveBeenCalledTimes(1);
+      expect([first, second, third].map((body) => body.hits[0].objectID)).toEqual(["doc-0:0", "doc-10:10", "doc-20:20"]);
+      // The cache key carries the caller, the key and the project: a different query is a different search.
+      await page(0, "beta");
+      expect(hybridSearchMock).toHaveBeenCalledTimes(2);
+      expect(responseCache.tickets[0]).toMatchObject({ userId: "demo-user", apiKeyId: "key-1", projectIds: ["ws-1"] });
+    } finally {
+      responseCache.on = false;
+    }
+  });
+
+  it("retrieves a 100-passage window, reports the passages found in it and trims attributes on single-index search", async () => {
     hybridSearchMock.mockResolvedValue({
       sessionId: "session-1",
       results: [makeResult(0), makeResult(1), makeResult(2), makeResult(3), makeResult(4)]
@@ -229,7 +292,7 @@ describe("algolia compat", () => {
 
     expect(res.status).toBe(200);
     expect(hybridSearchMock).toHaveBeenCalledWith("alpha", "demo-user", expect.objectContaining({
-      limit: 5,
+      limit: 100,
       filters: expect.objectContaining({
         projectId: "ws-1",
         tags: ["finance"],
@@ -247,10 +310,36 @@ describe("algolia compat", () => {
       pageNumber: 3,
       _highlightResult: undefined
     });
+    // Five passages came back from a window of 100, so the window was not full: that is the whole result set.
     expect(body.nbHits).toBe(5);
     expect(body.nbPages).toBe(3);
-    expect(body.exhaustiveNbHits).toBe(false);
+    expect(body.exhaustiveNbHits).toBe(true);
     expect(body.facets.filename["doc-0.pdf"]).toBe(1);
+  });
+
+  it("reports a full window as a floor, never inventing one more hit", async () => {
+    hybridSearchMock.mockResolvedValue({
+      sessionId: "session-1",
+      results: Array.from({ length: 100 }, (_, index) => makeResult(index))
+    });
+    const res = await app.request("/compat/algolia/1/indexes/ws-1/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer test" },
+      body: JSON.stringify({ query: "alpha", hitsPerPage: 10, page: 0 })
+    });
+    const body = await res.json();
+    expect(body.hits).toHaveLength(10);
+    expect(body.nbHits).toBe(100);
+    expect(body.nbPages).toBe(10);
+    expect(body.exhaustiveNbHits).toBe(false);
+    // A deeper page widens the window instead of reading past it: 201 passages are needed, fetched as the next
+    // stable bucket (400) so later pages share the same cached search.
+    await app.request("/compat/algolia/1/indexes/ws-1/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer test" },
+      body: JSON.stringify({ query: "alpha", hitsPerPage: 50, page: 3 })
+    });
+    expect(hybridSearchMock).toHaveBeenLastCalledWith("alpha", "demo-user", expect.objectContaining({ limit: 400 }));
   });
 
   it.each([null, { query: {} }, { facetQuery: 1 }, { maxFacetHits: -1 }])("rejects invalid facet requests before retrieval: %j", async (payload) => {
