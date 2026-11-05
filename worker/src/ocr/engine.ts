@@ -41,6 +41,8 @@ export interface OcrPageRead {
   elapsedMs: number;
   /** Why this page should get a hosted second read, and the boundary's PNG of it; null when it should not. */
   escalation: { reason: OcrEscalationReason; imagePath: string; width: number; height: number } | null;
+  /** The boundary's bounded rendition of the frame (validated by header and size only, never decoded here), when asked for. */
+  rendition?: { imagePath: string; width: number; height: number };
 }
 
 export interface OcrReadOutcome {
@@ -76,6 +78,8 @@ export interface OcrReadInput {
   languageSetting?: string;
   /** Keep PNGs of pages that qualify for escalation. */
   escalation: boolean;
+  /** Ask the boundary for a bounded rendition of every frame (visual indexing of uploaded images). */
+  rendition?: { maxLongEdge: number; maxBytes: number };
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
 }
@@ -208,17 +212,37 @@ export function checkResultAgainstJob(result: OcrResultRecord, job: SandboxedOcr
   return { unreadPages };
 }
 
+/**
+ * A frame's rendition, accepted only when it is the PNG the job asked for: named for this frame, a PNG by signature and IHDR,
+ * within the job's byte cap, its long edge within the job's cap and its pixels within that square. Anything else is refused
+ * (logged; the page then has no visual index), never decoded or repaired here.
+ */
+async function validRendition(
+  frame: { frame: number; rendition?: string | null },
+  imageDir: string,
+  cap: { maxLongEdge: number; maxBytes: number },
+): Promise<OcrPageRead["rendition"] | undefined> {
+  if (!frame.rendition) return undefined;
+  const refuse = (why: string) => { console.warn(`[ocr] frame=${frame.frame} rendition refused: ${why}`); return undefined; };
+  if (frame.rendition !== `rendition-${String(frame.frame).padStart(4, "0")}.png`) return refuse("names another frame");
+  const imagePath = path.join(imageDir, frame.rendition);
+  const dims = await pngDimensions(imagePath, cap.maxBytes);
+  if (!dims) return refuse("missing, not a PNG or over the byte cap");
+  if (dims.width < 1 || dims.height < 1 || Math.max(dims.width, dims.height) > cap.maxLongEdge) return refuse(`${dims.width}x${dims.height} exceeds the ${cap.maxLongEdge}px cap`);
+  return { imagePath, width: dims.width, height: dims.height };
+}
+
 /** A PNG's signature and IHDR size, read without decoding pixels. Null when the file is not that PNG. */
-async function pngDimensions(file: string): Promise<{ width: number; height: number } | null> {
+async function pngDimensions(file: string, maxBytes = OCR_ESCALATION_IMAGE_MAX_BYTES): Promise<{ width: number; height: number; bytes: number } | null> {
   const info = await lstat(file).catch(() => null);
-  if (!info?.isFile() || info.size < 33 || info.size > OCR_ESCALATION_IMAGE_MAX_BYTES) return null;
+  if (!info?.isFile() || info.size < 33 || info.size > maxBytes) return null;
   const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const head = Buffer.alloc(24);
     await handle.read(head, 0, 24, 0);
     if (!head.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return null;
     if (head.readUInt32BE(8) !== 13 || head.toString("ascii", 12, 16) !== "IHDR") return null;
-    return { width: head.readUInt32BE(16), height: head.readUInt32BE(20) };
+    return { width: head.readUInt32BE(16), height: head.readUInt32BE(20), bytes: info.size };
   } finally {
     await handle.close();
   }
@@ -269,6 +293,8 @@ export async function readWithOcr(runner: OcrRunner, input: OcrReadInput): Promi
       maxFrames,
       maxLongEdge: ocrMaxLongEdge(env),
       escalation: input.escalation ? { belowConfidence: OCR_ESCALATE_BELOW, recognisers: [...ESCALATE_RECOGNISERS] } : null,
+      // Renditions only where the boundary makes them (local CLI, or a VM provider whose guest declares them).
+      ...(input.rendition && input.kind === "image" && (mode === "local" || provider?.renditions === true) ? { rendition: { ...input.rendition } } : {}),
     };
     const started = Date.now();
     const result = await withOcrSlot(env, async () => {
@@ -297,10 +323,12 @@ export async function readWithOcr(runner: OcrRunner, input: OcrReadInput): Promi
         const imagePath = path.join(imageDir, frame.image);
         const dims = await pngDimensions(imagePath);
         // The PNG must be the frame the boundary read; anything else is dropped, never decoded here.
-        if (dims && dims.width === frame.width && dims.height === frame.height) escalation = { reason, imagePath, ...dims };
+        if (dims && dims.width === frame.width && dims.height === frame.height) escalation = { reason, imagePath, width: dims.width, height: dims.height };
         else console.warn(`[ocr] frame=${frame.frame} escalation image refused (missing or not the frame read)`);
       }
+      const rendition = input.rendition ? await validRendition(frame, imageDir, input.rendition) : undefined;
       pages.push({
+        ...(rendition ? { rendition } : {}),
         pageNumber: frame.frame,
         text: frame.text,
         meanConfidence: frame.meanConfidence,

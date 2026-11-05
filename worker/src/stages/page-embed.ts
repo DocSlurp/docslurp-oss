@@ -15,6 +15,7 @@ import type { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import { sniffedPdf } from "../lib/sniffed-pdf.js";
+import { pageRenditionKey } from "../lib/page-rendition.js";
 
 type Sql = postgres.Sql<Record<string, unknown>>;
 
@@ -36,7 +37,9 @@ export interface PageEmbedDeps {
 export interface EmbedPageImagesResult {
   embeddedPages: number[];
   /** Set when the call stopped early; pages after the stop were not embedded. */
-  stoppedBy?: "cost-cap" | "quality-fast" | "customer-image-not-decoded";
+  stoppedBy?: "cost-cap" | "quality-fast" | "no-vm-rendition";
+  /** Pages of an uploaded image without the OCR boundary's rendition: not embedded (never decoded from the customer's bytes). */
+  skippedWithoutRendition?: number[];
   inputTokens: number;
   costCents: number;
 }
@@ -91,21 +94,28 @@ export async function embedPageImages(
     result.stoppedBy = "quality-fast";
     return result;
   }
-  // Page images are decoded in this process (sharp/libvips) to make the JPEG the embedder reads. Only renders we produced in
-  // the parser sandbox or a VM may be: an image upload's page image is the customer's own bytes, so it is not embedded.
-  if (!sniffedPdf(document)) {
-    console.error(
-      `[page-embed] skipped: customer image not decoded in-process run=${run.id} document=${document.id} pages=${pages.length} ` +
-        "(no sandbox or VM rendition of an uploaded image exists yet; the page is indexed by its text only)",
-    );
-    result.stoppedBy = "customer-image-not-decoded";
-    return result;
-  }
   if (!run.workspaceId) throw new Error("page-embed requires a workspace-scoped run");
+  // Page images are decoded in this process (sharp/libvips) to make the JPEG the embedder reads. Only images we produced may
+  // be: a PDF page's render, or for an uploaded image the bounded rendition its OCR boundary wrote (lib/page-rendition.ts).
+  // The customer's own image bytes are never decoded here; a page without a rendition is skipped and reported.
+  const imageUpload = !sniffedPdf(document);
   const workspaceId = run.workspaceId;
   await ensurePageRows(deps.sql, document.id, document.pageCount);
 
   const renderWindow = async (windowPages: number[]): Promise<RenderedWindow> => {
+    if (imageUpload) {
+      const out: RenderedWindow = { pages: [], jpegs: [] };
+      for (const pageNumber of windowPages) {
+        const rendition = await deps.storage.getBytes(pageRenditionKey(document, pageNumber)).catch(() => null);
+        if (!rendition) {
+          (result.skippedWithoutRendition ??= []).push(pageNumber);
+          continue;
+        }
+        out.jpegs.push(await toPageJpeg(rendition));
+        out.pages.push(pageNumber);
+      }
+      return out;
+    }
     const rasters = await deps.rasters.renderSelectedPages({
       document,
       runId: run.id,
@@ -196,6 +206,13 @@ export async function embedPageImages(
     result.costCents += embedded.costCents;
     await args.onWindow?.({ embedded: currentWindow.pages, windowIndex: index, windows: windows.length });
   }
+  if (result.skippedWithoutRendition?.length) {
+    console.error(
+      `[page-embed] skipped ${result.skippedWithoutRendition.length} page(s) without an OCR-boundary rendition run=${run.id} document=${document.id} ` +
+        "(the uploaded image is never decoded in the worker; those pages are indexed by text only)",
+    );
+    if (result.embeddedPages.length === 0) result.stoppedBy = "no-vm-rendition";
+  }
   return result;
 }
 
@@ -280,6 +297,9 @@ export class PageEmbedStage implements Stage {
           return {
             artifactUri: this.storage.uri(key),
             stats: {
+              // The ingest report lists this under skipped stages (reason image-without-vm-rendition).
+              ...(outcome.stoppedBy === "no-vm-rendition" ? { skipped: true, reason: "image-without-vm-rendition" } : {}),
+              skippedWithoutRendition: outcome.skippedWithoutRendition?.length ?? 0,
               embeddingModel: embedder.model,
               dims: embedder.dims,
               embeddedPages: outcome.embeddedPages.length,

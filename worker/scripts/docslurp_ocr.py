@@ -714,6 +714,20 @@ def write_png(rgb, directory, name):
         rgb.save(handle, format='PNG')
 
 
+def write_rendition(rt, rgb, directory, frame_no, max_edge, max_bytes):
+    """The frame's rendition (RGB, long edge <= max_edge, PNG), or None when it would exceed max_bytes."""
+    width, height = rgb.size
+    scale = min(1.0, max_edge / max(width, height))
+    image = rgb if scale >= 1.0 else rgb.resize((max(1, round(width * scale)), max(1, round(height * scale))), rt.Image.LANCZOS)
+    name = f'rendition-{frame_no:04d}.png'
+    path = os.path.join(directory, name)
+    write_png(image.convert('RGB'), directory, name)
+    if os.path.getsize(path) > max_bytes:
+        os.unlink(path)
+        return None
+    return name
+
+
 def write_result_atomically(path, payload):
     data = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
     if len(data) > MAX_OUTPUT_BYTES:
@@ -797,6 +811,10 @@ def parse_args(argv):
     parser.add_argument('--image-dir')
     parser.add_argument('--escalate-below', type=_bounded(float, 0.0, 1.0), default=0.80)
     parser.add_argument('--escalate-recognisers', type=_csv, default=[])
+    # A bounded, normalized rendition of every frame for visual indexing (the host never decodes the customer's own bytes):
+    # rendition-NNNN.png, long edge at most --rendition-max-edge, dropped when it encodes larger than --rendition-max-bytes.
+    parser.add_argument('--rendition-max-edge', type=_bounded(int, 0, 2048), default=0)
+    parser.add_argument('--rendition-max-bytes', type=_bounded(int, 1024, 16 * 1024 * 1024), default=4 * 1024 * 1024)
     parser.add_argument('--self-test', action='store_true')
     return parser.parse_args(argv)
 
@@ -858,6 +876,8 @@ def run(args):
         raise UsageError('image-frame-out-of-range')
     if args.image_dir:
         check_image_dir(args.image_dir)
+    if args.rendition_max_edge and not args.image_dir:
+        raise UsageError('rendition-needs-image-dir')
     manifest = load_manifest(args.manifest)
     families = resolve_families(args, manifest)
     det, recs = verify_job_models(args, manifest, families)
@@ -930,6 +950,8 @@ def run(args):
                     name = f'frame-{frame_no:04d}.png'
                     write_png(rgb, args.image_dir, name)
                     frame['image'] = name
+                if args.rendition_max_edge:
+                    frame['rendition'] = write_rendition(rt, rgb, args.image_dir, frame_no, args.rendition_max_edge, args.rendition_max_bytes)
                 frames.append(frame)
                 started = time.perf_counter()
         finally:

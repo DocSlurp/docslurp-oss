@@ -47,6 +47,7 @@ export function ocrCliArgs(job: SandboxedOcrJob, models: { modelDir: string; man
   ];
   if (job.pages?.length) args.push("--pages", job.pages.join(","));
   if (job.kind === "pdf" && extra.pdftoppm) args.push("--pdftoppm", extra.pdftoppm);
+  if (job.rendition) args.push("--rendition-max-edge", String(job.rendition.maxLongEdge), "--rendition-max-bytes", String(job.rendition.maxBytes));
   if (job.escalation) {
     args.push("--escalate-below", String(job.escalation.belowConfidence));
     if (job.escalation.recognisers.length) args.push("--escalate-recognisers", job.escalation.recognisers.join(","));

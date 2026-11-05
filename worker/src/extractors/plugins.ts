@@ -153,6 +153,11 @@ export interface SandboxedOcrJob {
   maxLongEdge: number;
   /** Frames to keep as PNG for an escalation read: below this confidence, or read by one of these recognisers. */
   escalation: { belowConfidence: number; recognisers: string[] } | null;
+  /**
+   * Write a bounded, normalized PNG rendition of every frame (`rendition-NNNN.png` in imageDir): the only pixels of an
+   * uploaded image the worker ever decodes (visual indexing). Absent or null: none.
+   */
+  rendition?: { maxLongEdge: number; maxBytes: number } | null;
 }
 
 /** What a sandboxed OCR run returns: the command result. The host reads and validates `job.output` itself. */
@@ -161,6 +166,8 @@ export type SandboxedOcrResult = SandboxResult;
 export interface SandboxedOcrProvider {
   /** Stable id for telemetry and ledger metadata, chosen by the plugin. */
   id: string;
+  /** The provider's guest returns frame renditions (SandboxedOcrJob.rendition). Without it image uploads get no visual index. */
+  renditions?: boolean;
   /** Largest source the provider accepts; larger files are refused before any VM work. */
   maxSourceBytes: number;
   /** Throw when the deployment is not ready (unpinned image, missing models or credentials). Never fall back. */

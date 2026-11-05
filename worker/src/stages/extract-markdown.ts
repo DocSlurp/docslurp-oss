@@ -109,6 +109,7 @@ import { affordableImageFrames, authorizeImageFrames, authorizeImageRead } from 
 import { OCR_FAILED_PAGES_KEY, OcrInfrastructureError, OcrRefusedError, ocrFailedPages, recordOcrFailedPages, resolveOcrMode } from "../ocr/mode.js";
 import { ocrDocument } from "../ocr/read-document.js";
 import { recordMeasuredPageCount, type PageCountResult } from "../lib/office-page-count.js";
+import { PAGE_RENDITION, pageRenditionKey } from "../lib/page-rendition.js";
 import { extractorFailureReason, extractorFallbackFor, recordExtractorFallback } from "../lib/extractor-fallback.js";
 
 interface PageHeatmapEntry {
@@ -1684,8 +1685,20 @@ export class ExtractMarkdownStage implements Stage {
       beforeCharging: (frames) => authorizeImageFrames(state, context.documentId, this.name, frames),
       // The VM reads no more frames than the run can pay for.
       frameBudget: (max) => affordableImageFrames(state, context.documentId, max),
+      // Its bounded rendition of each frame is the only pixels of this upload the worker ever decodes (page-image embedding).
+      rendition: PAGE_RENDITION,
       ...(signal ? { signal } : {}),
     });
+    const owner = state.documents.find((candidate) => candidate.id === context.documentId);
+    let renditions = 0;
+    for (const page of result.pages) {
+      if (!owner || !page.rendition) continue;
+      await this.storage.putBytes(pageRenditionKey(owner, page.pageNumber), page.rendition.bytes, "image/png");
+      renditions += 1;
+    }
+    if (owner && renditions < result.pages.length) {
+      console.warn(`[ocr] document=${context.documentId} renditions=${renditions}/${result.pages.length}: pages without one get no page-image vectors`);
+    }
     const markdown = result.pages.map((page) => page.text).join("\f");
     const scratchDir = await mkdtemp(path.join(tmpdir(), "docslurp-extract-ocr-"));
     const outputPath = path.join(scratchDir, "ocr.md");

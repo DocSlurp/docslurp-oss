@@ -681,5 +681,43 @@ class ScriptRetryTest(unittest.TestCase):
         self.assertEqual((recogniser, calls), ('multi', ['multi', 'eslav']))
 
 
+
+@unittest.skipUnless(Image is not None, 'Pillow not installed')
+class RenditionTests(unittest.TestCase):
+    """The bounded, normalized rendition: the only pixels of an uploaded image the worker ever decodes."""
+
+    def setUp(self):
+        sys.path.insert(0, SCRIPTS)
+        import docslurp_ocr
+        self.ocr = docslurp_ocr
+        self.dir = tempfile.mkdtemp()
+        self.rt = type('rt', (), {'Image': Image})
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_scales_to_the_long_edge_cap_and_writes_a_png(self):
+        name = self.ocr.write_rendition(self.rt, Image.new('RGB', (3000, 1500), 'white'), self.dir, 7, 1024, 4 * 1024 * 1024)
+        self.assertEqual(name, 'rendition-0007.png')
+        with Image.open(os.path.join(self.dir, name)) as image:
+            self.assertEqual(image.format, 'PNG')
+            self.assertEqual(image.size, (1024, 512))
+
+    def test_never_upscales(self):
+        name = self.ocr.write_rendition(self.rt, Image.new('RGB', (300, 200), 'white'), self.dir, 1, 1024, 4 * 1024 * 1024)
+        with Image.open(os.path.join(self.dir, name)) as image:
+            self.assertEqual(image.size, (300, 200))
+
+    def test_drops_a_rendition_over_the_byte_cap(self):
+        noise = Image.frombytes('RGB', (512, 512), os.urandom(512 * 512 * 3))
+        self.assertIsNone(self.ocr.write_rendition(self.rt, noise, self.dir, 2, 1024, 1024))
+        self.assertEqual(os.listdir(self.dir), [])
+
+    def test_rendition_needs_an_image_dir(self):
+        args = self.ocr.parse_args(['--input', 'x', '--kind', 'image', '--output', 'y', '--models', 'm', '--manifest', 'f', '--rendition-max-edge', '512'])
+        with self.assertRaises(self.ocr.UsageError):
+            self.ocr.run(args)
+
+
 if __name__ == '__main__':
     unittest.main()

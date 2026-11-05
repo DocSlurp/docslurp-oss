@@ -3,7 +3,7 @@
  * (ledger.ts), then the escalation reads (escalation.ts). In `hosted` mode, a stored image's bytes go to the hosted reader
  * as uploaded. Every refusal throws; the caller fails the page or document and never substitutes another reader.
  */
-import { lstat } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 
 import type { WorkflowState } from "../pipeline/pipeline.js";
 import type { CommandRunner } from "../tools/runner.js";
@@ -39,6 +39,8 @@ export interface OcrDocumentInput {
    * run and refuses the image) and nothing is charged.
    */
   frameBudget?: (max: number) => Promise<number>;
+  /** Ask the boundary for a bounded rendition of every frame (visual indexing); returned as bytes on each page. */
+  rendition?: { maxLongEdge: number; maxBytes: number };
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
 }
@@ -47,6 +49,8 @@ export interface OcrDocumentPage {
   pageNumber: number;
   text: string;
   reader: string;
+  /** The boundary's validated rendition of the frame (PNG), read before its scratch directory is removed. */
+  rendition?: { bytes: Buffer; width: number; height: number };
 }
 
 export interface OcrDocumentResult {
@@ -75,6 +79,7 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
       ...(input.pages ? { pages: input.pages } : {}),
       ...(input.languageSetting ? { languageSetting: input.languageSetting } : {}),
       escalation: Boolean(input.hostedReader) && ocrEscalationEnabled(env),
+      ...(input.rendition ? { rendition: input.rendition } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
       env,
     });
@@ -99,9 +104,16 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
       `[ocr] document=${input.documentId} stage=${input.stage} mode=${outcome.mode} engine=${outcome.engine} pages=${outcome.pages.length} ` +
         `charged=${chargedPages.length} wallMs=${outcome.wallMs} cpuMs=${outcome.cpuMs} peakRssKb=${outcome.peakRssKb} truncated=${outcome.truncatedFrames}`,
     );
+    const pages: OcrDocumentPage[] = [];
+    for (const page of outcome.pages) {
+      // The rendition was validated by header and size (engine.ts); its bytes are carried as-is, never decoded here.
+      const rendition = page.rendition ? { bytes: await readFile(page.rendition.imagePath), width: page.rendition.width, height: page.rendition.height } : undefined;
+      if (rendition && input.rendition && rendition.bytes.length > input.rendition.maxBytes) throw new Error("OCR rendition grew past its cap");
+      pages.push({ pageNumber: page.pageNumber, text: page.text, reader: page.recogniser, ...(rendition ? { rendition } : {}) });
+    }
     return {
       mode: outcome.mode,
-      pages: outcome.pages.map((page) => ({ pageNumber: page.pageNumber, text: page.text, reader: page.recogniser })),
+      pages,
       chargedPages,
       truncatedFrames: outcome.truncatedFrames,
       unreadPages: outcome.unreadPages,
