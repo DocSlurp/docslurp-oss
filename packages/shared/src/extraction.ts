@@ -1,10 +1,9 @@
-import { normalizeDocumentExtractionAliases } from "./extractor-aliases.js";
+import { dropRetiredExtractorIds, normalizeDocumentExtractionAliases } from "./extractor-aliases.js";
 import { z } from "zod";
 import { layoutRegionSchema } from "./layout.js";
 
 export const extractionAdapterSchema = z.enum([
   "auto",
-  "kreuzberg",
   "dolphin",
 ]);
 export type ExtractionAdapter = z.infer<typeof extractionAdapterSchema>;
@@ -142,27 +141,6 @@ export const dolphinExtractorOptionsSchema = z.object({
 export type DolphinExtractorOptions = z.infer<typeof dolphinExtractorOptionsSchema>;
 
 /**
- * Kreuzberg options a workspace may set. The worker spreads them into Kreuzberg's extractFile config, so only these
- * keys are accepted: anything else (structured extraction, a VLM OCR config with its own base URL, cache
- * namespaces) would let a workspace make the parser call out or share caches. Unknown keys are rejected.
- *
- * Kreuzberg never OCRs: the worker strips the OCR keys below before calling it (worker/scripts/kreuzberg_extract.mjs)
- * and never hands it an image (the `ocr` extractor reads images). The keys stay accepted so stored configs still parse;
- * `disableOcr` remains the marker Fast sets (quality.ts).
- */
-export const kreuzbergExtractorOptionsSchema = z.object({
-  outputFormat: z.literal("markdown").optional(),
-  forceOcr: z.boolean().optional(),
-  forceOcrPages: z.array(z.number().int().positive()).max(5_000).optional(),
-  disableOcr: z.boolean().optional(),
-  ocr: z.object({
-    backend: extractionOcrBackendSchema.optional(),
-    language: ocrLanguageSchema.optional(),
-  }).strict().optional(),
-}).strict();
-export type KreuzbergExtractorOptions = z.infer<typeof kreuzbergExtractorOptionsSchema>;
-
-/**
  * Option schemas by extractor id. Only these extractors take options; every other id, and every key a schema does
  * not name, is rejected. The worker re-parses each id before handing options to a script (parseExtractorOptions).
  */
@@ -173,13 +151,12 @@ export const vmPdfExtractorOptionsSchema = z.object({
 
 export const extractorOptionSchemas = {
   "vm-pdf": vmPdfExtractorOptionsSchema,
-  kreuzberg: kreuzbergExtractorOptionsSchema,
   dolphin: dolphinExtractorOptionsSchema,
 } as const;
 
 /** Extractor options by extractor id (extractorOptionSchemas); unknown ids and keys are rejected. */
 export const documentExtractorOptionsSchema = z
-  .object({ kreuzberg: kreuzbergExtractorOptionsSchema.optional(), dolphin: dolphinExtractorOptionsSchema.optional(), "vm-pdf": vmPdfExtractorOptionsSchema.optional() })
+  .object({ dolphin: dolphinExtractorOptionsSchema.optional(), "vm-pdf": vmPdfExtractorOptionsSchema.optional() })
   .strict();
 
 /**
@@ -227,9 +204,11 @@ function dropInvalid(schema: z.ZodTypeAny, value: Record<string, unknown>, prefi
  */
 export function sanitizeStoredDocumentExtraction(value: unknown): { value: unknown; dropped: string[] } {
   if (!isPlainObject(value)) return { value, dropped: [] };
-  // Configured legacy ids first, so a renamed extractor's options are kept under its new id rather than dropped.
-  const next: Record<string, unknown> = structuredClone(normalizeDocumentExtractionAliases(value) as Record<string, unknown>);
-  const dropped: string[] = [];
+  // Retired ids are dropped and reported; configured legacy ids are then rewritten, so a renamed extractor's options are
+  // kept under its new id rather than dropped.
+  const retired = dropRetiredExtractorIds(value);
+  const next: Record<string, unknown> = structuredClone(normalizeDocumentExtractionAliases(retired.value) as Record<string, unknown>);
+  const dropped: string[] = retired.dropped.map((entry) => `documentExtraction.${entry}`);
   if (isPlainObject(next.ocr) && next.ocr.language !== undefined && !ocrLanguageSettingSchema.safeParse(next.ocr.language).success) {
     delete next.ocr.language;
     dropped.push("documentExtraction.ocr.language");

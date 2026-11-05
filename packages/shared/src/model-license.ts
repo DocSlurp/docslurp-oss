@@ -97,7 +97,6 @@ export const MODEL_LICENSES: Readonly<Record<string, ModelLicenseEntry>> = {
   "native:pdf-text": { licenseClass: "free", id: "internal", source: "DocSlurp native-pdf engine" },
   "ocr:pdf-ocr-fill": { licenseClass: "free", id: "internal", source: "DocSlurp native-pdf engine" },
   "ocr:pdf-ocr": { licenseClass: "free", id: "internal", source: "DocSlurp native-pdf engine" },
-  "native:kreuzberg": { licenseClass: "free", id: "mit", source: `pypi.org/project/kreuzberg, ${VERIFIED}` },
   "ocr:ppocr": { licenseClass: "free", id: "apache-2.0", source: "github.com/PaddlePaddle/PaddleOCR (PP-OCRv6/v5 models) + github.com/RapidAI/RapidOCR 3.10.0" },
   skip: { licenseClass: "free", id: "internal", source: "no model" },
   // ---- closed hosted decision APIs

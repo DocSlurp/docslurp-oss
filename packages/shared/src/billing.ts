@@ -831,7 +831,7 @@ export const PIPELINE_PROFILE_BASIS = {
  *
  * complex (unchanged: fast 0.8, standard 4, deep 6), `unmeasured`:
  * - The load test measured 0.14-0.28 s on synthetic table pages through the
- *   kreuzberg extraction path without any model call, not the native PDF engine
+ *   (since removed) Kreuzberg extraction path without any model call, not the native PDF engine
  *   production uses, and with vision off. That is a floor for layout-aware
  *   extraction, not a measurement of it. Production shows a model-read page
  *   (`worker.vision` spans) at p50 4.1 s, p95 32 s, which is the order of
