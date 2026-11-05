@@ -38,3 +38,15 @@ export function toModelUri(value: string): string {
   const trimmed = value.trim();
   return trimmed.toLowerCase().startsWith(LLM_URI_SCHEME) ? trimmed : `${OPENROUTER_MODEL_URI_PREFIX}${trimmed}`;
 }
+
+/**
+ * `llm://<provider>/<model>` split into its provider and model id (null for
+ * anything else, including a query, fragment or missing model). Used by
+ * env settings that name a model for one fixed provider family.
+ */
+export function parseProviderModelUri(value: string | null | undefined): { provider: string; model: string } | null {
+  if (typeof value !== "string") return null;
+  const match = /^llm:\/\/([a-z0-9][a-z0-9.-]*)\/([^?#\s]+)$/i.exec(value.trim());
+  if (!match || match[2]!.startsWith("/")) return null;
+  return { provider: match[1]!.toLowerCase(), model: match[2]! };
+}

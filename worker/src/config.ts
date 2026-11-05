@@ -5,6 +5,7 @@ import { defaultDocConcurrency, resolveActivityConcurrency } from "./concurrency
 import {
   inferenceLaneOptions,
   textGenerationProfileSchema,
+  normalizeHostedModelRef,
   pageRouterModeSchema,
   type PageRouterMode,
   type TextGenerationProfile,
@@ -319,7 +320,8 @@ export function fromEnv(): Config {
     costPer1kOutputTokens: Number.parseFloat(
       process.env.COST_PER_1K_OUTPUT_TOKENS ?? "0.03",
     ),
-    textGenerationModel: readEnv(process.env.DOCSLURP_TEXT_MODEL),
+    // An OpenRouter id, llm://openrouter/<id> (stored as the bare id) or llm://private/<alias>/<model>.
+    textGenerationModel: (() => { const value = readEnv(process.env.DOCSLURP_TEXT_MODEL); return value ? normalizeHostedModelRef(value) : value; })(),
     textGenerationProfile: textGenerationProfileSchema.optional().parse(readEnv(process.env.DOCSLURP_TEXT_PROFILE)),
     perplexityApiKey: process.env.PERPLEXITY_API_KEY ?? process.env.PERPLEXITYAI_API_KEY,
     openRouterApiKey:

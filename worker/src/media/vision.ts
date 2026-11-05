@@ -1,5 +1,5 @@
 import { verifyDeepInfraRate } from "./rates.js";
-import { tokenCost, disputed, MEDIA_RATE_VERSION, nonnegative, type MediaAccounting } from "./accounting.js";
+import { tokenCost, disputed, MEDIA_RATE_VERSION, nonnegative, recordedMediaCost, type MediaAccounting } from "./accounting.js";
 import { jsonResponse } from "./providers.js";
 export interface VideoFrame { seconds: number; bytes: Uint8Array; }
 export interface VisionResult { text: string; requestId?: string; inputTokens?: number; outputTokens?: number; costUsd: number; accounting: MediaAccounting; }
@@ -33,12 +33,13 @@ export class DeepInfraVisionProvider implements MediaVisionProvider {
     const usage = data.usage;
     const input = nonnegative(usage?.prompt_tokens) && Number.isInteger(usage.prompt_tokens) ? usage.prompt_tokens : undefined;
     const output = nonnegative(usage?.completion_tokens) && Number.isInteger(usage.completion_tokens) ? usage.completion_tokens : undefined;
-    const costUsd = input !== undefined && output !== undefined ? tokenCost(input, output, .15, .60) : this.reserveUsd;
+    const estimatedUsd = input !== undefined && output !== undefined ? tokenCost(input, output, .15, .60) : this.reserveUsd;
     const reported = nonnegative(usage?.estimated_cost) ? usage.estimated_cost : undefined;
     const requestId = response.headers.get("x-request-id")?.slice(0,200) ?? data.id?.slice(0,200);
-    return { text, requestId, inputTokens: input, outputTokens: output, costUsd,
-      accounting: { state: disputed(reported, costUsd) ? "disputed" : "estimated", basis: "tokens", rateVersion: MEDIA_RATE_VERSION,
-        rateSource: `https://api.deepinfra.com/models/${this.model}`, reportedCostUsd: reported, estimatedCostUsd: costUsd, providerRequestId: requestId,
+    const recorded = recordedMediaCost(reported, estimatedUsd);
+    return { text, requestId, inputTokens: input, outputTokens: output, costUsd: recorded.costUsd,
+      accounting: { state: disputed(reported, estimatedUsd) ? "disputed" : "estimated", basis: "tokens", recordedFrom: recorded.recordedFrom, rateVersion: MEDIA_RATE_VERSION,
+        rateSource: `https://api.deepinfra.com/models/${this.model}`, reportedCostUsd: reported, estimatedCostUsd: estimatedUsd, providerRequestId: requestId,
         inputTokens: input, outputTokens: output } };
   }
 }
