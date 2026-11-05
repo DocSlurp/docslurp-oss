@@ -17,7 +17,8 @@ type IdempotencyRow = {
 export function scopedIdempotencyKey(scope: IdempotencyScope, key: string): string {
   // An API key and a target project narrow the scope further: two keys of one user (with different project allowlists)
   // never share a cache entry, and neither do two targets. Omitted, the scope is the organization and user alone.
-  const narrowed = scope.apiKeyId || scope.project ? `\u0000key:${scope.apiKeyId ?? ""}\u0000project:${scope.project ?? ""}` : "";
+  // Keep the opaque hash namespace stable across the terminology cutover.
+  const narrowed = scope.apiKeyId || scope.project ? `\u0000key:${scope.apiKeyId ?? ""}\u0000workspace:${scope.project ?? ""}` : "";
   return createHash("sha256").update(`${scope.orgId ?? ""}\u0000${scope.userId}${narrowed}\u0000${key}`).digest("hex");
 }
 

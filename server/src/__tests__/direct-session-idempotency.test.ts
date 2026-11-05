@@ -110,6 +110,11 @@ describe("createSessionIdempotently", () => {
 });
 
 describe("idempotency keys", () => {
+  it("preserves the pre-cutover scoped-key digest", () => {
+    // Recorded from the estimator candidate's scope encoding before the rename.
+    expect(scopedIdempotencyKey({ orgId: "org-a", userId: "u", apiKeyId: "credential", project: "target" }, "k"))
+      .toBe("b035af9e5df3f8fb99078889e23c715b4e882cb629ac6a73a2b8e96346cb527e");
+  });
   it("scopes the stored key to organization and user", () => {
     const a = scopedIdempotencyKey({ orgId: "org-a", userId: "u" }, "k");
     expect(a).not.toBe(scopedIdempotencyKey({ orgId: "org-b", userId: "u" }, "k"));
