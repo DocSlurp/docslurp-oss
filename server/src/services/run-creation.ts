@@ -780,7 +780,7 @@ export function createRunCreation(deps: RunCreationDeps) {
             'queued',
             'hybrid',
             ${metadata.pageCount},
-            -- A PDF's own count, the text rule over a text file and an image's one page are counted; a format only the worker can count is assumed.
+            -- The text rule over a text file and an image's one page are counted; a PDF (the API never parses one) and a format only the worker can count are assumed.
             ${intakePageCountSource({ name: filename, type: metadata.fileFacts.mimeType })},
             ${metadata.sourceSha256},
             ${sql.json(JSON.parse(JSON.stringify(metadata.fileFacts)))},

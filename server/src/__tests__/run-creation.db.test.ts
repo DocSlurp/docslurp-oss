@@ -81,7 +81,7 @@ const docxFacts = {
 };
 
 describe("the cost forecast and the page count's source", () => {
-  it("records an Office file's one page as assumed and prices its size, not one page; a PDF's own count stays counted", async () => {
+  it("records an Office file's and a PDF's intake count as assumed and prices their size, never the API's page count", async () => {
     const forecastOf = async (filename: string, mimeType: string, facts: object, pageCount: number, fileSize: number) => {
       await sql`delete from documents`;
       await sql`delete from workspace_runs`;
@@ -93,19 +93,19 @@ describe("the cost forecast and the page count's source", () => {
     // A 1.2 MB DOCX: intake counts 1 page, which is assumed, not counted.
     const docx = await forecastOf("contract.docx", docxFacts.mimeType, docxFacts, 1, 1_200_000);
     expect(docx.row).toEqual({ page_count: 1, page_count_source: "assumed" });
-    // The same size as a PDF that really has 1 page is counted, and priced as one page.
-    const onePage = await forecastOf("memo.pdf", "application/pdf", pdfFacts, 1, 1_200_000);
-    expect(onePage.row).toEqual({ page_count: 1, page_count_source: "counted" });
     // The assumed count is not passed to the forecast, so the DOCX is priced over its size (about 100 pages at the format's
     // 12 KB a page, up to 1,171 at its densest) instead of as one page. No model reads a Word page, so those pages are Fast:
     // 1,171 pages at 5 credits per 1,000.
-    expect(onePage.forecast.maxCents).toBeLessThan(2);
     expect(docx.forecast.maxCents).toBeCloseTo(1_171 * 5 / 1_000, 1);
-    expect(docx.forecast.maxCents).toBeGreaterThan(onePage.forecast.maxCents * 10);
-    // A 40-page PDF is counted: forecast on 40.
+    // The API never parses a PDF (no pdfinfo in its process): its count is a size estimate, recorded as assumed, and the
+    // worker measures the real count in the VM before anything bills. The forecast prices the size, so a PDF the estimate
+    // calls 1 page and one it calls 40 are quoted the same, and well above one page.
+    const onePage = await forecastOf("memo.pdf", "application/pdf", pdfFacts, 1, 1_200_000);
+    expect(onePage.row).toEqual({ page_count: 1, page_count_source: "assumed" });
     const pdf = await forecastOf("contract.pdf", "application/pdf", pdfFacts, 40, 1_200_000);
-    expect(pdf.row).toEqual({ page_count: 40, page_count_source: "counted" });
-    expect(pdf.forecast.maxCents).toBeGreaterThan(onePage.forecast.maxCents * 30);
+    expect(pdf.row).toEqual({ page_count: 40, page_count_source: "assumed" });
+    expect(pdf.forecast.maxCents).toBe(onePage.forecast.maxCents);
+    expect(onePage.forecast.maxCents).toBeGreaterThan(1 * 5 / 1_000 * 10);
   });
 });
 

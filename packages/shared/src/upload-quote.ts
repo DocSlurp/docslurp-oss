@@ -121,8 +121,9 @@ export function workerCountedFormat(file: { name: string; type?: string | null }
 }
 
 /**
- * Where intake's page count came from: `counted` (a PDF's own count, the text rule over a text file, a single-frame image's one page)
- * or `assumed` (one page for a format only the worker can count, and for a multi-frame image, whose frames the OCR engine counts).
+ * Where intake's page count came from: `counted` (the text rule over a text file, a single-frame image's one page)
+ * or `assumed` (a PDF's size estimate, which the worker measures in the VM; one page for a format only the worker can count; and a
+ * multi-frame image, whose frames the OCR engine counts).
  * Stored as documents.page_count_source (migration 0126).
  */
 export type PageCountSource = "counted" | "assumed";
