@@ -1,6 +1,31 @@
 /** Maximum PDF source size the isolated VM PDF route (`vm-pdf`) accepts. */
 export const VM_PDF_MAX_SOURCE_BYTES = 500 * 1024 * 1024;
 
+/** The extractor ids DOCSLURP_PDF_EXTRACTOR accepts. Empty selects the built-in PDF order. */
+export const PDF_EXTRACTOR_SETTINGS = ["vm-pdf"] as const;
+export type PdfExtractorSetting = (typeof PDF_EXTRACTOR_SETTINGS)[number];
+
+/**
+ * DOCSLURP_PDF_EXTRACTOR, trimmed: null for the built-in order, or a known id. Any other value throws, so a typo or a
+ * retired value stops the process instead of silently parsing PDFs on the worker host. Worker and API both use this.
+ */
+export function resolvePdfExtractorSetting(env: Record<string, string | undefined> = process.env): PdfExtractorSetting | null {
+  const raw = env.DOCSLURP_PDF_EXTRACTOR?.trim() ?? "";
+  if (!raw) return null;
+  if ((PDF_EXTRACTOR_SETTINGS as readonly string[]).includes(raw)) return raw as PdfExtractorSetting;
+  throw new Error(`DOCSLURP_PDF_EXTRACTOR must be empty or one of: ${PDF_EXTRACTOR_SETTINGS.join(", ")}`);
+}
+
+/**
+ * True when the deployment uses the sandboxed PDF provider: DOCSLURP_PDF_EXTRACTOR=vm-pdf or
+ * DOCSLURP_VM_PDF_INSTALLED=1. Throws on an unknown value of either, for the same reason.
+ */
+export function sandboxedPdfConfigured(env: Record<string, string | undefined> = process.env): boolean {
+  const installed = env.DOCSLURP_VM_PDF_INSTALLED?.trim() ?? "";
+  if (!["", "0", "1"].includes(installed)) throw new Error("DOCSLURP_VM_PDF_INSTALLED must be empty, 0 or 1");
+  return resolvePdfExtractorSetting(env) === "vm-pdf" || installed === "1";
+}
+
 import type { ExtractionImage, ExtractionTable } from "./extraction.js";
 import type { UsageEvent } from "./usage.js";
 

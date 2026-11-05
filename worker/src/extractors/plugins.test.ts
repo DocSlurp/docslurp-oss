@@ -110,4 +110,35 @@ describe("loading plugins by configuration", () => {
     expect(() => assertExtractorPluginConfiguration({})).not.toThrow();
     expect(await loadExtractorPlugins({})).toEqual([]);
   });
+
+  it("refuses to start on an unknown DOCSLURP_PDF_EXTRACTOR instead of parsing PDFs on the host", async () => {
+    for (const value of ["vm_pdf", "VM-PDF", "sandbox", "kreuzberg", "pdf-engine-x"]) {
+      resetExtractorPluginsForTest();
+      await expect(loadExtractorPlugins({ DOCSLURP_PDF_EXTRACTOR: value })).rejects.toThrow("DOCSLURP_PDF_EXTRACTOR must be empty or one of: vm-pdf");
+      expect(() => assertExtractorPluginConfiguration({ DOCSLURP_PDF_EXTRACTOR: value })).toThrow("must be empty");
+    }
+    // A provider being present does not make an unknown value acceptable.
+    resetExtractorPluginsForTest();
+    registerExtractorPlugin({ apiVersion: 1, name: "test-plugin", sandboxedPdf: provider() });
+    expect(() => assertExtractorPluginConfiguration({ DOCSLURP_PDF_EXTRACTOR: "vm-pdf2" })).toThrow("must be empty");
+    expect(() => assertExtractorPluginConfiguration({ DOCSLURP_VM_PDF_INSTALLED: "yes" })).toThrow("DOCSLURP_VM_PDF_INSTALLED");
+    // Whitespace is trimmed by the one shared resolver, and an empty value keeps the built-in order.
+    expect(() => assertExtractorPluginConfiguration({ DOCSLURP_PDF_EXTRACTOR: "  vm-pdf\n" })).not.toThrow();
+    expect(() => assertExtractorPluginConfiguration({ DOCSLURP_PDF_EXTRACTOR: "   " })).not.toThrow();
+    resetExtractorPluginsForTest();
+    await expect(loadExtractorPlugins({ DOCSLURP_PDF_EXTRACTOR: " vm-pdf " })).rejects.toThrow("needs a sandboxed PDF provider");
+  });
+
+  it("logs only generic provider ids and the API version at load", async () => {
+    resetExtractorPluginsForTest();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await loadExtractorPlugins({ DOCSLURP_EXTRACTOR_PLUGINS: "/p.mjs" }, async () => ({
+        register: () => ({ apiVersion: 1, name: "secret-engine-name", sandboxedPdf: { ...provider(), id: "secret-engine-id" } }),
+      }));
+      const lines = log.mock.calls.map((call) => String(call[0]));
+      expect(lines).toContain("[extractor-plugins] loaded api=1 providers=vm-pdf");
+      expect(lines.join("\n")).not.toContain("secret-engine");
+    } finally { log.mockRestore(); }
+  });
 });

@@ -13,8 +13,8 @@ Plugins are loaded by configuration, never imported by core. Core builds, typech
 | Variable | Where | Meaning |
 | --- | --- | --- |
 | `DOCSLURP_EXTRACTOR_PLUGINS` | worker | Comma-separated absolute module paths (or `file:` URLs) loaded at startup. |
-| `DOCSLURP_PDF_EXTRACTOR=vm-pdf` | worker | Make `vm-pdf` the default PDF extractor. |
-| `DOCSLURP_VM_PDF_INSTALLED=1` | API (and worker) | List `vm-pdf` in `GET /v1/extractors` and admit PDFs up to its source limit. |
+| `DOCSLURP_PDF_EXTRACTOR=vm-pdf` | API and worker | Make `vm-pdf` the default PDF extractor. Empty keeps the built-in order; any other value stops the process. |
+| `DOCSLURP_VM_PDF_INSTALLED=1` | API (and worker) | List `vm-pdf` in `GET /v1/extractors` and admit PDFs up to its source limit. Must be empty, `0` or `1`. |
 | `DOCSLURP_EXTRACTOR_ID_ALIASES` | API and worker | Legacy extractor ids, `<old>:<new>[,<old>:<new>]`; see [Renaming an extractor](#renaming-an-extractor). |
 
 Workspaces select the extractor with `documentExtraction.order.pdf: ["vm-pdf"]` and pass its options under
@@ -24,7 +24,14 @@ Workspaces select the extractor with `documentExtraction.order.pdf: ["vm-pdf"]` 
 ## Fail closed
 
 - A module that cannot load, or that exports no `register`, stops the worker at startup.
+- `DOCSLURP_PDF_EXTRACTOR` is trimmed and must be empty or `vm-pdf`; any other value (a typo, a retired id) stops
+  the worker and the API at startup instead of silently routing PDFs to the built-in host parsers. Worker and API
+  read it through one resolver (`resolvePdfExtractorSetting` / `sandboxedPdfConfigured` in `@docslurp/shared`).
 - `DOCSLURP_PDF_EXTRACTOR=vm-pdf` or `DOCSLURP_VM_PDF_INSTALLED=1` without a registered provider stops the worker.
+- Either setting makes the API cap PDF uploads at the sandboxed provider's source limit.
+- At load the worker logs one line with the plugin API version and the generic ids of the loaded capabilities
+  (`[extractor-plugins] loaded api=1 providers=vm-pdf,image-orientation`). A plugin's own name and details are the
+  plugin's to log.
 - Preparing `vm-pdf` without a provider, or with one whose `assertConfigured()` throws, refuses the candidate. The
   VM route never falls back to parsing on the worker host.
 - With a sandboxed PDF provider registered, embedded image extraction requires the `vm-pdf` route alone. Without

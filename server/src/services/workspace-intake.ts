@@ -19,6 +19,7 @@ import { Transform, type Readable } from "node:stream";
 import {
   applyWorkspacePipelineOverrides,
   VM_PDF_MAX_SOURCE_BYTES,
+  sandboxedPdfConfigured,
   defaultPipelineFeatures,
   getWorkspaceTemplate,
   isUntitledWorkspaceName,
@@ -353,7 +354,7 @@ function isRemoteKind(kind: WorkspaceIntakeKind): kind is keyof typeof remoteSou
 
 function intakeByteLimit(filename: string, mimeType?: string | null): number {
   const vmPdf = resolveUploadMimeType(mimeType ?? null, filename) === "application/pdf" &&
-    (process.env.DOCSLURP_VM_PDF_INSTALLED === "1" || process.env.DOCSLURP_PDF_EXTRACTOR === "vm-pdf");
+    sandboxedPdfConfigured();
   return vmPdf ? Math.min(env.maxUploadBytes, VM_PDF_MAX_SOURCE_BYTES) : env.maxUploadBytes;
 }
 

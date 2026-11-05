@@ -17,7 +17,7 @@
  */
 import { pathToFileURL } from "node:url";
 import path from "node:path";
-import type { EmbeddedImageFacts, EmbeddedImageMediaType, MediaMap } from "@docslurp/shared";
+import { sandboxedPdfConfigured, type EmbeddedImageFacts, type EmbeddedImageMediaType, type MediaMap } from "@docslurp/shared";
 
 import { SandboxRunError, type SandboxResult } from "../sandbox/types.js";
 import type { UsageEvent } from "../models.js";
@@ -199,6 +199,14 @@ export function imageOrientationProvider(): ImageOrientationProvider | null {
   return plugins.find((plugin) => plugin.imageOrientation)?.imageOrientation ?? null;
 }
 
+/** The generic ids of the capabilities registered plugins provide (`vm-pdf`, `image-orientation`). */
+export function loadedPluginCapabilities(): string[] {
+  return [
+    ...(sandboxedPdfProvider() ? [VM_PDF_EXTRACTOR_ID] : []),
+    ...(imageOrientationProvider() ? ["image-orientation"] : []),
+  ];
+}
+
 export function registeredExtractorPlugins(): readonly string[] {
   return plugins.map((plugin) => plugin.name);
 }
@@ -241,14 +249,18 @@ export async function loadExtractorPlugins(
   }
   loadedFrom = key;
   assertExtractorPluginConfiguration(env);
-  if (plugins.length) console.log(`[extractor-plugins] loaded ${plugins.map((plugin) => plugin.name).join(",")}`);
+  // Generic capability ids only: plugin names and details are the plugin's own to log.
+  const capabilities = loadedPluginCapabilities();
+  if (capabilities.length) console.log(`[extractor-plugins] loaded api=${EXTRACTOR_PLUGIN_API_VERSION} providers=${capabilities.join(",")}`);
   return registeredExtractorPlugins();
 }
 
-/** A deployment that selects the VM extractor without a provider is misconfigured: refuse to start. */
+/**
+ * Refuse to start on a misconfigured deployment: an unknown DOCSLURP_PDF_EXTRACTOR (which would otherwise fall through
+ * to host parsing) or a VM selection without a provider.
+ */
 export function assertExtractorPluginConfiguration(env: NodeJS.ProcessEnv = process.env): void {
-  const wantsVm = env.DOCSLURP_PDF_EXTRACTOR?.trim() === VM_PDF_EXTRACTOR_ID || env.DOCSLURP_VM_PDF_INSTALLED?.trim() === "1";
-  if (wantsVm && !sandboxedPdfProvider()) {
+  if (sandboxedPdfConfigured(env) && !sandboxedPdfProvider()) {
     throw new Error(`DOCSLURP_PDF_EXTRACTOR=${VM_PDF_EXTRACTOR_ID} or DOCSLURP_VM_PDF_INSTALLED=1 needs a sandboxed PDF provider in DOCSLURP_EXTRACTOR_PLUGINS`);
   }
 }

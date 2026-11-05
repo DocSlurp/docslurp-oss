@@ -1,7 +1,7 @@
 import { sandboxedPdfProvider, VM_PDF_EXTRACTOR_ID } from "./plugins.js";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import { builtInDocumentExtractorDescriptors, canonicalExtractorId, configureExtractorIdAliases, parseExtractorOptions, type ExtractorDescriptor } from "@docslurp/shared";
+import { builtInDocumentExtractorDescriptors, canonicalExtractorId, configureExtractorIdAliases, parseExtractorOptions, resolvePdfExtractorSetting, type ExtractorDescriptor } from "@docslurp/shared";
 import type { DocumentExtractionResult } from "../lib/document-extraction-adapter.js";
 import type { CommandPlan, CommandRunner } from "../tools/runner.js";
 import { planArtifactGraph, type GraphAdapter } from "./graph.js";
@@ -221,7 +221,7 @@ export class ExtractorRegistry {
   resolve(format: string, configured?: string[]): string[] {
     const base = defaultDocumentExtractorOrder[format] ?? defaultDocumentExtractorOrder.default;
     // DOCSLURP_PDF_ENGINE=native-pdf puts the native engine first; kreuzberg stays next as its fallback.
-    const defaults = format === "pdf" && process.env.DOCSLURP_PDF_EXTRACTOR === VM_PDF_EXTRACTOR_ID
+    const defaults = format === "pdf" && resolvePdfExtractorSetting() === VM_PDF_EXTRACTOR_ID
       ? [VM_PDF_EXTRACTOR_ID]
       : format === "pdf" && resolveNativePdfMode() === "native-pdf" ? ["native-pdf", ...base] : base;
     // A configured legacy id (DOCSLURP_EXTRACTOR_ID_ALIASES) resolves to its canonical extractor; unknown ids still throw.
