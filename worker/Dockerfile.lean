@@ -119,6 +119,9 @@ RUN cmake -S /src/doppler -B /src/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
     && cmake --build /src/build -j"$(nproc)" \
     && DESTDIR=/out cmake --install /src/build \
     && rm -rf /out/usr/local/include /out/usr/local/lib/pkgconfig /out/usr/local/lib/cmake /out/usr/local/share/man \
+    && install -D -m 0644 /src/doppler/COPYING /out/usr/local/share/doc/doppler/COPYING \
+    && install -D -m 0644 /src/doppler/COPYING3 /out/usr/local/share/doc/doppler/COPYING3 \
+    && printf 'Doppler (GPL-2.0-or-later), source: https://github.com/DocSlurp/doppler/releases/tag/docslurp-827b3cc\n' > /out/usr/local/share/doc/doppler/SOURCE \
     && for tool in pdftotext pdftohtml pdfinfo pdfimages pdftoppm pdfseparate pdfunite; do test -x "/out/usr/local/bin/$tool"; done
 
 FROM rust:1.99-slim-trixie@sha256:7eab7ce19273ce785e0ca7578bdf7bc1fcbae621775a8197379a04c9f6e03cd5 AS doppler-md
