@@ -156,8 +156,10 @@ describe("signed URLs for an existing session need current contribute access", (
   const get = (sessionId: string, statusOnly = false) => app.request(`/uploads/direct/sessions/${sessionId}?statusOnly=${statusOnly}`, { headers: headers() });
   const sign = (sessionId: string) => app.request(`/uploads/direct/sessions/${sessionId}/files/f1/parts/sign`, { method: "POST", headers: headers(), body: JSON.stringify({ partNumbers: [1] }) });
   const noUrls = async (response: Response) => expect(await response.text()).not.toContain("signed.example");
-  const share = (role: string | null) => db.query("delete from workspace_members where workspace_id = 'excluded' and user_id = 'other'")
-    .then(() => role && db.query("insert into workspace_members (workspace_id, user_id, role) values ('excluded', 'other', $1)", [role]));
+  const share = async (role: string | null) => {
+    await db.query("delete from workspace_members where workspace_id = 'excluded' and user_id = 'other'");
+    if (role) await db.query("insert into workspace_members (workspace_id, user_id, role) values ('excluded', 'other', $1)", [role]);
+  };
   beforeEach(async () => { await seedKey({ userId: "other", workspaceIds: ["excluded"] }); await share("editor"); });
 
   it("mints URLs while the share lets the user upload", async () => {

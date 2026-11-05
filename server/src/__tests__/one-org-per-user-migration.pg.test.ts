@@ -109,7 +109,7 @@ describe.skipIf(!url)("0127 one organization per user, on PostgreSQL through mig
   });
 
   it("aborts 0127, changing nothing, while a personal organization would be left ownerless: even with the acknowledgement", async () => {
-    for (const env of [{}, { DOCSLURP_ACK_0127: ackHash }]) {
+    for (const env of [{}, { DOCSLURP_ACK_0127: ackHash }] as Array<Record<string, string>>) {
       const refused = run("server/db/migrate.mjs", [], env);
       expect(refused.status).toBe(1);
       expect(refused.out).toMatch(/0127 refused: 1 organization\(s\) would keep members but no owner and cannot be given one: pg127-p-host/);
