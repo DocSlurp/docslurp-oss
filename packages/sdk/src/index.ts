@@ -1417,6 +1417,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   function upload(input: UploadInput, options?: UploadOptions): Promise<UploadResponse>;
   function upload(input: Blob | UploadFileInput | UploadByteStream, options?: UploadOptions): Promise<UploadResponse>;
   async function upload(input: UploadUrlsInput | UploadInput | Blob | UploadFileInput | UploadByteStream | Array<Blob | File | UploadFileInput>, options: UploadOptions = {}): Promise<UploadResponse> {
+    rejectLegacyProjectOptions(input);
+    rejectLegacyProjectOptions(options);
     assertClientCanonicalIds(canonicalIdsOf(input, options));
     if ("urls" in input) return uploadUrls({ ...input, ...options }, options);
     if (Array.isArray(input)) input = { files: input };
@@ -1494,6 +1496,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   function extract(input: UploadInput, options?: UploadOptions & ExtractOptions): Promise<ExtractResponse>;
   function extract(input: Blob | UploadFileInput | UploadByteStream, options?: UploadOptions & ExtractOptions): Promise<ExtractResponse>;
   async function extract(input: UploadUrlsInput | UploadInput | Blob | UploadFileInput | UploadByteStream | Array<Blob | File | UploadFileInput>, options: UploadOptions & ExtractOptions = {}): Promise<ExtractResponse> {
+    rejectLegacyProjectOptions(input);
+    rejectLegacyProjectOptions(options);
     const { retentionDays, notifyEmail, download, ...rest } = options;
     if (retentionDays !== undefined && (!Number.isInteger(retentionDays) || retentionDays < 1)) throw new RangeError("retentionDays must be a positive whole number of days.");
     const marked = { ...rest, [EXTRACT_MODE]: { retentionDays, notifyEmail, download } } as UploadOptions;

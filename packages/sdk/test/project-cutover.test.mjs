@@ -38,3 +38,23 @@ test("inherited legacy selectors are refused instead of becoming an implicit def
     await assert.rejects(async()=>call(client,Object.create({workspace:"intended-project"})),/Legacy workspace selection/);
   }
 });
+
+for (const method of ["upload","extract"]) test(`${method} validates original input/options before copies, fetch or source reads`, async () => {
+  let requests=0,reads=0;
+  const client=createDocSlurpClient({project:"client-default",fetch:async()=>{requests++;throw new Error("network must not run");}});
+  const withSelector=(base,style)=>{
+    if(style==="inherited") return Object.assign(Object.create({workspace:"intended-project"}),base);
+    Object.defineProperty(base,"workspace",{value:"intended-project",enumerable:style!=="non-enumerable"});
+    return base;
+  };
+  for (const style of ["own","inherited","non-enumerable"]) {
+    await assert.rejects(()=>client[method](withSelector({urls:["https://example.test/a.pdf"]},style)),/Legacy workspace selection/);
+    await assert.rejects(()=>client[method]({urls:["https://example.test/a.pdf"]},withSelector({},style)),/Legacy workspace selection/);
+    await assert.rejects(()=>client[method](withSelector({files:[new Blob(["test"])]},style)),/Legacy workspace selection/);
+    await assert.rejects(()=>client[method]([new Blob(["test"])],withSelector({},style)),/Legacy workspace selection/);
+    const source={async *[Symbol.asyncIterator](){reads++;yield new Uint8Array([1]);}};
+    await assert.rejects(()=>client[method](source,withSelector({},style)),/Legacy workspace selection/);
+  }
+  assert.equal(requests,0);
+  assert.equal(reads,0);
+});
