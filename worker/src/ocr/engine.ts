@@ -15,7 +15,7 @@ import { sandboxedOcrProvider } from "../extractors/plugins.js";
 import type { CommandPlan, CommandRunner } from "../tools/runner.js";
 import { ESCALATE_RECOGNISERS, planOcrLanguages, type OcrLanguagePlan } from "./languages.js";
 import { OcrRefusedError, resolveOcrMode, type OcrMode } from "./mode.js";
-import { pinnedOcrModels } from "./models.js";
+import { pinnedOcrModelEntries, type PinnedOcrModel } from "./models.js";
 
 /** Bound on the result JSON read back from the boundary. */
 export const OCR_RESULT_MAX_BYTES = 64 * 1024 * 1024;
@@ -49,7 +49,14 @@ export interface OcrReadOutcome {
   engine: string;
   language: OcrLanguagePlan;
   pages: OcrPageRead[];
+  /** The boundary stopped at the frame cap with more frames or requested pages left. */
   truncatedFrames: boolean;
+  /**
+   * Requested pages the boundary did not reach because the job named more than its frame cap. The caller must fail them
+   * (they are neither read nor billed). Empty for a job without `pages`: its frames past the cap are signalled by
+   * `truncatedFrames` alone.
+   */
+  unreadPages: number[];
   wallMs: number;
   cpuMs: number;
   peakRssKb: number;
@@ -139,28 +146,55 @@ async function readResult(output: string): Promise<OcrResultRecord> {
   return parsed.data;
 }
 
-/** The result's frames must be the ones asked for, once each, read only by pinned models. */
-export function checkResultAgainstJob(result: OcrResultRecord, job: SandboxedOcrJob, pinned: ReadonlyMap<string, string>): void {
+/**
+ * The result's frames must be the ones asked for, once each, read only by pinned models. Returns the requested pages the
+ * boundary legitimately did not reach (a job naming more pages than its frame cap); the caller fails them. Every other
+ * requested page must come back: no page is ever neither read nor failed.
+ */
+export function checkResultAgainstJob(result: OcrResultRecord, job: SandboxedOcrJob, pinned: ReadonlyMap<string, PinnedOcrModel>): { unreadPages: number[] } {
   const seen = new Set<number>();
   const allowed = job.pages ? new Set(job.pages) : null;
+  const used = new Set<string>();
   for (const frame of result.frames) {
     if (seen.has(frame.frame)) throw new Error(`OCR result repeats frame ${frame.frame}`);
     seen.add(frame.frame);
     if (allowed ? !allowed.has(frame.frame) : frame.frame > job.maxFrames) throw new Error(`OCR result has unrequested frame ${frame.frame}`);
     if (frame.recogniser !== null && !job.recognisers.includes(frame.recogniser)) throw new Error(`OCR result used an unrequested recogniser ${frame.recogniser}`);
+    for (const attempt of frame.attempts) {
+      if (!job.recognisers.includes(attempt.recogniser)) throw new Error(`OCR result used an unrequested recogniser ${attempt.recogniser}`);
+      used.add(attempt.recogniser);
+    }
+    if (frame.recogniser !== null) used.add(frame.recogniser);
     if (frame.chars !== [...frame.text].length && frame.chars !== frame.text.length) throw new Error(`OCR frame ${frame.frame} reports ${frame.chars} chars for different text`);
+    if (frame.recogniser === null && frame.chars > 0) throw new Error(`OCR frame ${frame.frame} has text but no recogniser`);
     if (frame.image !== null && frame.image !== `frame-${String(frame.frame).padStart(4, "0")}.png`) throw new Error(`OCR frame ${frame.frame} names another frame's image`);
     if (frame.width > job.maxLongEdge || frame.height > job.maxLongEdge) throw new Error(`OCR frame ${frame.frame} exceeds the long-edge cap`);
   }
   if (result.frames.length > job.maxFrames) throw new Error("OCR result exceeds the frame cap");
-  // Every requested page must come back: a silently missing page would look unread rather than failed.
-  if (job.pages && !result.truncatedFrames) {
-    const missing = job.pages.filter((page) => !seen.has(page));
-    if (missing.length) throw new Error(`OCR result is missing requested frames ${missing.join(",")}`);
+  // Truncation is only legitimate when there was more to read than the frame cap allows, and then the cap was filled.
+  if (result.truncatedFrames) {
+    if (job.pages && job.pages.length <= job.maxFrames) throw new Error("OCR result claims truncation for a job within its frame cap");
+    if (result.frames.length < job.maxFrames) throw new Error("OCR result claims truncation before reaching its frame cap");
   }
+  const unreadPages = job.pages ? job.pages.filter((page) => !seen.has(page)) : [];
+  if (unreadPages.length && !result.truncatedFrames) throw new Error(`OCR result is missing requested frames ${unreadPages.join(",")}`);
+  // Models: each pinned (id and sha256), once; exactly one detector; a recogniser model for every family that ran (one may
+  // also be listed when detection loaded it but found nothing). A result whose frames are all blank names only the
+  // detector: a valid "no text" read.
+  const families = new Set<string>();
+  let detectors = 0;
+  const ids = new Set<string>();
   for (const model of result.models) {
-    if (pinned.get(model.id) !== model.sha256) throw new Error(`OCR result names an unpinned model ${model.id}`);
+    const entry = pinned.get(model.id);
+    if (!entry || entry.sha256 !== model.sha256) throw new Error(`OCR result names an unpinned model ${model.id}`);
+    if (ids.has(model.id)) throw new Error(`OCR result names model ${model.id} twice`);
+    ids.add(model.id);
+    if (entry.role === "det") detectors += 1;
+    else families.add(entry.family!);
   }
+  if (detectors !== 1) throw new Error("OCR result must name exactly one detector model");
+  for (const family of used) if (!families.has(family)) throw new Error(`OCR result names no model for recogniser ${family}`);
+  return { unreadPages };
 }
 
 /** A PNG's signature and IHDR size, read without decoding pixels. Null when the file is not that PNG. */
@@ -231,7 +265,7 @@ export async function readWithOcr(runner: OcrRunner, input: OcrReadInput): Promi
       await runner.run(plan, input.signal);
       return await readResult(job.output);
     }, input.signal);
-    checkResultAgainstJob(result, job, pinnedOcrModels());
+    const { unreadPages } = checkResultAgainstJob(result, job, pinnedOcrModelEntries());
     const pages: OcrPageRead[] = [];
     for (const frame of result.frames) {
       let escalation: OcrPageRead["escalation"] = null;
@@ -260,6 +294,7 @@ export async function readWithOcr(runner: OcrRunner, input: OcrReadInput): Promi
       language,
       pages,
       truncatedFrames: result.truncatedFrames,
+      unreadPages,
       wallMs: Date.now() - started,
       cpuMs: result.cpuMs,
       peakRssKb: result.peakRssKb,

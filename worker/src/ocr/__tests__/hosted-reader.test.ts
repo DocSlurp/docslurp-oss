@@ -72,7 +72,7 @@ async function outcomeWith(pages: Array<{ pageNumber: number; text: string; esca
   }
   return {
     mode: "vm", engine: "test-vm-ocr", language: { recognisers: ["multi"], unsupportedScript: false, setting: "auto" },
-    pages: reads, truncatedFrames: false, wallMs: 1, cpuMs: 1, peakRssKb: 1, dispose: async () => undefined,
+    pages: reads, truncatedFrames: false, unreadPages: [], wallMs: 1, cpuMs: 1, peakRssKb: 1, dispose: async () => undefined,
   };
 }
 

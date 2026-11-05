@@ -2,6 +2,7 @@
  * A fake OCR boundary for tests: a runner whose `sandboxedOcrRead`/`localOcrRead` plans are "run" by writing a
  * docslurp-ocr@1 result (and escalation PNGs) for the job, as the VM guest or the local CLI would.
  */
+import { readFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { vi } from "vitest";
@@ -18,10 +19,18 @@ export interface FakeFrame {
   image?: boolean;
 }
 
-const MODELS = [
-  { id: "pp-ocrv6-det-small", sha256: "090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f" },
-  { id: "pp-ocrv6-rec-small", sha256: "6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884" },
-];
+const MANIFEST = JSON.parse(readFileSync(new URL("../../ocr-models.json", import.meta.url), "utf8")) as {
+  models: Array<{ id: string; sha256: string; role: string; family: string | null }>;
+};
+const DETECTOR = MANIFEST.models.find((model) => model.role === "det")!;
+
+/** The models a real CLI names for these frames: the detector, plus a recogniser model per family that read a frame. */
+export function ocrModelsFor(frames: Array<{ recogniser: string | null }>): Array<{ id: string; sha256: string }> {
+  const families = [...new Set(frames.map((frame) => frame.recogniser).filter((family): family is string => family !== null))];
+  const recs = families.map((family) => MANIFEST.models.find((model) => model.role === "rec" && model.family === family))
+    .filter((model) => model !== undefined);
+  return [DETECTOR, ...recs].map((model) => ({ id: model.id, sha256: model.sha256 }));
+}
 
 /** A minimal PNG header (signature + IHDR) with the given size; enough for the host's no-decode check. */
 export function pngHeader(width: number, height: number): Buffer {
@@ -35,26 +44,27 @@ export function pngHeader(width: number, height: number): Buffer {
 }
 
 export function ocrResultFor(job: SandboxedOcrJob, frames: FakeFrame[], overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const records = frames.map((frame) => ({
+    frame: frame.frame,
+    width: 100,
+    height: 50,
+    sourceWidth: 200,
+    sourceHeight: 100,
+    recogniser: frame.recogniser === undefined ? job.recognisers[0] : frame.recogniser,
+    attempts: [],
+    text: frame.text,
+    lines: [],
+    meanConfidence: frame.meanConfidence === undefined ? 0.95 : frame.meanConfidence,
+    chars: frame.text.length,
+    elapsedMs: 10,
+    image: frame.image ? `frame-${String(frame.frame).padStart(4, "0")}.png` : null,
+  }));
   return {
     protocol: "docslurp-ocr@1",
     engine: { name: "rapidocr", version: "3.10.0", onnxruntime: "1.31.1" },
-    models: MODELS,
+    models: ocrModelsFor(records),
     truncatedFrames: false,
-    frames: frames.map((frame) => ({
-      frame: frame.frame,
-      width: 100,
-      height: 50,
-      sourceWidth: 200,
-      sourceHeight: 100,
-      recogniser: frame.recogniser === undefined ? job.recognisers[0] : frame.recogniser,
-      attempts: [],
-      text: frame.text,
-      lines: [],
-      meanConfidence: frame.meanConfidence === undefined ? 0.95 : frame.meanConfidence,
-      chars: frame.text.length,
-      elapsedMs: 10,
-      image: frame.image ? `frame-${String(frame.frame).padStart(4, "0")}.png` : null,
-    })),
+    frames: records,
     peakRssKb: 660_000,
     cpuMs: 1_200,
     ...overrides,

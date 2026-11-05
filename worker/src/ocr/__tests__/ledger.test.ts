@@ -8,7 +8,7 @@ function outcome(pages: Array<Pick<OcrPageRead, "pageNumber" | "text">>, overrid
   return {
     mode: "vm", engine: "test-vm-ocr", language: { recognisers: ["multi"], unsupportedScript: false, setting: "auto" },
     pages: pages.map((page) => ({ ...page, meanConfidence: 0.9, recogniser: "multi", chars: page.text.length, elapsedMs: 3, escalation: null })),
-    truncatedFrames: false, wallMs: 2_500, cpuMs: 1_900, peakRssKb: 1_400_000, dispose: async () => undefined,
+    truncatedFrames: false, unreadPages: [], wallMs: 2_500, cpuMs: 1_900, peakRssKb: 1_400_000, dispose: async () => undefined,
     ...overrides,
   };
 }
