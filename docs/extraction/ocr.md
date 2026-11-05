@@ -59,7 +59,9 @@ self-test whenever the runtime is present, and fails when `local` is set without
 
 - `vm` without a provider, or with one whose `assertConfigured()` throws: the worker does not start.
 - `local` under `DOCSLURP_SERVICE_PROFILE=service` or with the profile unset: the worker does not start.
-- A failed, refused or invalid OCR read: the page fails. It is not read by a hosted model instead, and an escalation
+- A failed, refused or invalid OCR read: the page fails, and is recorded as such (`ocr-failed-pages`). Vision page
+  selection and the page router skip it, and in the router a failed boundary read stops the document's routed run rather
+  than reaching the workspace-model fallback or a cascade. It is not read by a hosted model instead, and an escalation
   read is never a substitute for a read that did not happen.
 - Output from the boundary is untrusted. The host validates the JSON result against the shared schema (bounded fields,
   unknown keys refused) and checks frame numbers, image names and text sizes again. Escalation PNGs are checked by
@@ -87,7 +89,8 @@ After a `vm` or `local` read, some pages get an extra hosted read: degraded and 
 the Arabic or Devanagari (Hindi) recogniser, and pages in a script no recogniser covers.
 
 - The reader is `DOCSLURP_OCR_ESCALATION_MODEL`, default `llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct`.
-- `DOCSLURP_OCR_ESCALATION` turns it on or off. It defaults to on when `DEEPINFRA_API_KEY` is set.
+- `DOCSLURP_OCR_ESCALATION=on` turns it on; it is off unless set. The model must be a hosted, priced route
+  (DeepInfra, OpenRouter or OpenAI); a local or private one is refused.
 - It has its own per-document page budget (`DOCSLURP_OCR_ESCALATION_MAX_PAGES`, default 25), its own ledger entries,
   the run's cost cap, the workspace privacy mode and the run's vision attempt guard.
 - It reads the PNG the OCR boundary wrote. The host produces no image for it.
@@ -128,7 +131,7 @@ quality](../page-text-layer-quality.md)). Pages they would have checked stay unv
 | `DOCSLURP_SERVICE_PROFILE` | unset | `service` or `self-hosted`. `local` needs `self-hosted`. |
 | `DOCSLURP_OCR_PYTHON` | `/opt/docslurp/ocr-venv/bin/python3` | OCR venv interpreter (`local`). |
 | `DOCSLURP_OCR_MODEL_DIR` | `/opt/docslurp/ocr-models` | Directory holding the pinned models (`local`). |
-| `DOCSLURP_OCR_ESCALATION` | on when `DEEPINFRA_API_KEY` is set | `on` or `off`. |
+| `DOCSLURP_OCR_ESCALATION` | off | `on` to enable escalation reads. |
 | `DOCSLURP_OCR_ESCALATION_MODEL` | `llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct` | Hosted reader for escalation and `hosted` mode. |
 | `DOCSLURP_OCR_ESCALATION_MAX_PAGES` | `25` | Hosted reads per document. |
 | `DOCSLURP_OCR_MAX_ATTEMPTS` | `3` | Recogniser attempts per page under `auto` (1 to 7). |

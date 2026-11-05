@@ -1,3 +1,4 @@
+import { OcrBoundaryFailure } from "../../ocr/mode.js";
 import type { PolicyPack, RoutingTarget } from "@docslurp/shared";
 
 import { findProviderRetryableError } from "../../lib/provider-retry.js";
@@ -143,7 +144,9 @@ export async function executeAssignments(
         }
         if (output) result.outputs.push(output);
       } catch (error) {
-        if (options.signal?.aborted || findProviderRetryableError(error)) throw error;
+        // A failed OCR read in its boundary fails the page outright: recorded as a soft failure it would be served by
+        // the workspace-model fallback instead.
+        if (options.signal?.aborted || findProviderRetryableError(error) || error instanceof OcrBoundaryFailure) throw error;
         fail(request, error instanceof Error ? error.message : String(error));
       }
     };

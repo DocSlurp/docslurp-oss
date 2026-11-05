@@ -1,3 +1,4 @@
+import { ocrFailedPages } from "../ocr/mode.js";
 import { imageOrientationEnabled, normalizeImageOrientation, withOrientationAdmission, reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { rm } from "node:fs/promises";
 import {
@@ -675,6 +676,15 @@ export class VisionExtractStage implements Stage {
       reason = "playbook-disallows-vision";
     }
 
+    // Pages whose OCR read failed in its boundary stay failed: vision never reads them in OCR's place. (Good reads every
+    // page with vision by the workspace's own choice, so it keeps them.)
+    const ocrFailed = qualityReadsEveryPage(state.run.pipeline.quality) ? new Set<number>() : ocrFailedPages(state.artifactLedger, document.id);
+    if (ocrFailed.size > 0) {
+      selectedPages = selectedPages.filter((page) => !ocrFailed.has(page));
+      needed = needed && selectedPages.length > 0;
+      console.warn(`[ocr] vision skips pages whose OCR failed document=${document.id} pages=${[...ocrFailed].join(",")}`);
+    }
+
     if (!needed) {
       selectedPages = [];
     }
@@ -811,7 +821,17 @@ export class VisionExtractStage implements Stage {
     const plan = await loadActiveRoutePlan(state, this.storage, document.id, this.cfg);
     if (!plan) return null;
     const catalog = buildRuntimeCatalog({ privacyMode: state.run.pipeline.privacyMode }).allTargets;
-    return { plan, execution: groupAssignmentsByTarget(plan, catalog), catalog };
+    const execution = groupAssignmentsByTarget(plan, catalog);
+    // Pages whose OCR read failed in its boundary are read by no routed target either.
+    const failed = ocrFailedPages(state.artifactLedger, document.id);
+    if (failed.size > 0) {
+      for (const group of execution.groups) group.pages = group.pages.filter((page) => !failed.has(page));
+      execution.groups = execution.groups.filter((group) => group.pages.length > 0);
+      execution.requests = execution.requests.filter((request) => !failed.has(request.assignment.pageNumber));
+      execution.fallbackPages = execution.fallbackPages.filter((page) => !failed.has(page));
+      console.warn(`[ocr] routed vision skips pages whose OCR failed document=${document.id} pages=${[...failed].join(",")}`);
+    }
+    return { plan, execution, catalog };
   }
 
   private routedSelection(routed: { execution: RoutedExecution }): Awaited<ReturnType<VisionExtractStage["checkNeedsVision"]>> {

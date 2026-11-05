@@ -10,6 +10,7 @@ import type { CascadeVerifier } from "../cascade.js";
 import { mergePageText } from "./merge.js";
 import { executorFor } from "./registry.js";
 import { executeAssignments } from "./run.js";
+import { OcrBoundaryFailure } from "../../ocr/mode.js";
 import type { ExecutorDeps, ExecutorOutput } from "./types.js";
 
 const catalog = testCatalog();
@@ -103,6 +104,15 @@ describe("executor registry", () => {
     ]);
     expect(res.outputs.map((o) => o.model)).toEqual(expect.arrayContaining(["ppocr-v6-small", "florence", "m"]));
     expect(res.failures).toEqual([]);
+  });
+
+  it("propagates a failed OCR boundary read instead of recording a failure another reader would serve", async () => {
+    const vlm = vi.fn();
+    const { deps } = fakeDeps({ ocr: vi.fn(async () => { throw new OcrBoundaryFailure("OCR of page 2 failed in the vm boundary"); }), vlm });
+    await expect(executeAssignments([
+      { assignment: asg(2, ppocr.id, "ocr"), index: 0, target: ppocr },
+    ], deps, { canContinue: () => true })).rejects.toBeInstanceOf(OcrBoundaryFailure);
+    expect(vlm).not.toHaveBeenCalled();
   });
 
   it("reports failures, missing rasters and cost-cap skips instead of throwing", async () => {

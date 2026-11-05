@@ -29,6 +29,30 @@ export class OcrRefusedError extends Error {
   }
 }
 
+/**
+ * An OCR read the boundary failed or refused in `vm`/`local` mode. Callers that have other readers (the page router's
+ * workspace-model fallback and cascades) must let it propagate: no other reader serves a page whose OCR failed.
+ */
+export class OcrBoundaryFailure extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "OcrBoundaryFailure";
+  }
+}
+
+/** Artifact-ledger key listing (JSON) the pages of a document whose OCR read failed; vision never reads them instead. */
+export const OCR_FAILED_PAGES_KEY = "ocr-failed-pages";
+
+/** The pages of a document whose OCR read failed, from the run's artifact ledger. */
+export function ocrFailedPages(ledger: { readDocument(documentId: string, key: string): string | null | undefined }, documentId: string): Set<number> {
+  try {
+    const raw = JSON.parse(ledger.readDocument(documentId, OCR_FAILED_PAGES_KEY) ?? "[]") as unknown;
+    return new Set(Array.isArray(raw) ? raw.filter((page): page is number => Number.isSafeInteger(page) && page > 0) : []);
+  } catch {
+    return new Set();
+  }
+}
+
 /** `DOCSLURP_OCR_MODE`, or the default: `vm` under the service profile, `off` elsewhere. Throws on an unknown value. */
 export function resolveOcrMode(env: NodeJS.ProcessEnv = process.env): OcrMode {
   const raw = env.DOCSLURP_OCR_MODE?.trim().toLowerCase();

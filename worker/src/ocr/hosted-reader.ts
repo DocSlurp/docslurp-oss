@@ -58,13 +58,14 @@ export interface HostedOcrReader {
   read(page: HostedOcrPage, purpose: HostedOcrPurpose, signal?: AbortSignal): Promise<HostedOcrRead>;
 }
 
-/** Whether escalation runs (`DOCSLURP_OCR_ESCALATION`): on by default when a DeepInfra key is configured. */
+/** Whether escalation runs (`DOCSLURP_OCR_ESCALATION=on`): an explicit operator opt-in, off by default. */
 export function ocrEscalationEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const raw = env.DOCSLURP_OCR_ESCALATION?.trim().toLowerCase();
-  if (raw === "off" || raw === "0" || raw === "false") return false;
-  if (raw === "on" || raw === "1" || raw === "true") return true;
-  return Boolean(env.DEEPINFRA_API_KEY?.trim());
+  return raw === "on" || raw === "1" || raw === "true";
 }
+
+/** Hosted providers the OCR reader may use; a local or private route would read the boundary's PNGs on another host. */
+const HOSTED_OCR_PROVIDERS = new Set(["deepinfra", "openrouter", "openai"]);
 
 export function ocrEscalationModel(env: NodeJS.ProcessEnv = process.env): string {
   return env.DOCSLURP_OCR_ESCALATION_MODEL?.trim() || DEFAULT_OCR_ESCALATION_MODEL;
@@ -105,7 +106,12 @@ export function createHostedOcrReader(args: {
       if (purpose === "ocr-escalation" && !ocrEscalationEnabled(env)) throw new HostedOcrSkipped("disabled", "OCR escalation is off");
       if (!HOSTED_OCR_MIME_TYPES.has(page.mimeType)) throw new Error(`hosted OCR refuses ${page.mimeType}: it would need host decoding`);
       const vision: VisionConfig = { ...visionConfigForModel(state.run.pipeline.vision, ocrEscalationModel(env)), prompt: "markdown-transcription", remoteFallbackModelUri: null };
-      if (!(await allowHostedCall(state, visionCall(resolveVisionRoute(vision)), [page.documentId]))) {
+      const route = resolveVisionRoute(vision);
+      if (!HOSTED_OCR_PROVIDERS.has(route.provider)) {
+        console.error(`[ocr] ${purpose} refused: DOCSLURP_OCR_ESCALATION_MODEL must be a hosted, priced model (provider=${route.provider})`);
+        throw new HostedOcrSkipped("disabled", `${purpose} model is not a hosted route`);
+      }
+      if (!(await allowHostedCall(state, visionCall(route), [page.documentId]))) {
         throw new HostedOcrSkipped("privacy", `privacy mode refuses ${purpose}`);
       }
       if (isCostCapExceeded(state)) throw new HostedOcrSkipped("cost-cap", `run cost cap reached before ${purpose}`);

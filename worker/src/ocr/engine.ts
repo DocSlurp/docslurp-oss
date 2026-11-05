@@ -5,7 +5,7 @@
  * back: a refused or failed read throws, and the caller fails the page or document.
  */
 import { constants } from "node:fs";
-import { lstat, mkdir, mkdtemp, open, readFile, rm } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { ocrResultSchema, type OcrFrameRecord, type OcrResultRecord } from "@docslurp/shared";
@@ -125,7 +125,12 @@ async function readResult(output: string): Promise<OcrResultRecord> {
   if (info.size > OCR_RESULT_MAX_BYTES) throw new Error(`OCR result exceeds ${OCR_RESULT_MAX_BYTES} bytes`);
   let raw: unknown;
   try {
-    raw = JSON.parse(await readFile(output, "utf8"));
+    const handle = await open(output, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      raw = JSON.parse(await handle.readFile("utf8"));
+    } finally {
+      await handle.close();
+    }
   } catch {
     throw new Error("OCR result is not valid JSON");
   }

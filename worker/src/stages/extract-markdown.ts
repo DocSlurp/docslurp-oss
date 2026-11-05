@@ -107,7 +107,7 @@ import { visionGuardFor } from "../lib/vision-attempt-guard.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
-import { resolveOcrMode } from "../ocr/mode.js";
+import { OCR_FAILED_PAGES_KEY, ocrFailedPages, resolveOcrMode } from "../ocr/mode.js";
 import { ocrDocument } from "../ocr/read-document.js";
 
 interface PageHeatmapEntry {
@@ -1268,6 +1268,12 @@ export class ExtractMarkdownStage implements Stage {
           read.push(page.pageNumber);
         }
       }
+    }
+    if (failed.length > 0) {
+      // Vision must not read these pages in OCR's place (vision-extract excludes them).
+      const known = ocrFailedPages(state.artifactLedger, document.id);
+      for (const page of failed) known.add(page);
+      state.artifactLedger.recordDocument(document.id, OCR_FAILED_PAGES_KEY, JSON.stringify([...known].sort((a, b) => a - b)));
     }
     // Every page is a scan and none could be read: the document has no text, so it fails rather than publishing nothing.
     if (failed.length > 0 && failed.length === pageCount) throw new Error(`OCR failed for every page (${pageCount}) of a scanned document`);

@@ -288,6 +288,8 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
       await h.stage.run(h.state);
       expect(h.checkpoint()?.status).toBe("completed");
       expect(error.mock.calls.flat().join(" ")).toMatch(/\[ocr\] scanned-pages-failed document=doc-1 pages=2/);
+      // Recorded so vision never reads the failed page in OCR's place.
+      expect(h.state.artifactLedger.readDocument("doc-1", "ocr-failed-pages")).toBe("[2]");
       expect(h.richIds()).toEqual([]);
     } finally { await h.cleanup(); error.mockRestore(); }
   });

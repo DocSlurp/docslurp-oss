@@ -9,7 +9,10 @@ import { parseArgs } from "node:util";
 
 import { insertPageMarkers } from "./kreuzberg_page_markers.mjs";
 
-const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".tif", ".tiff", ".bmp", ".heic", ".heif", ".avif", ".jp2", ".jpx", ".pnm", ".pbm", ".pgm", ".ppm"]);
+const IMAGE_EXTENSIONS = new Set([
+  ".png", ".jpg", ".jpeg", ".jpe", ".jfif", ".gif", ".webp", ".tif", ".tiff", ".bmp", ".dib", ".heic", ".heif", ".avif",
+  ".jp2", ".jpx", ".j2k", ".j2c", ".jpf", ".jpm", ".jxl", ".pnm", ".pbm", ".pgm", ".ppm", ".ico", ".tga", ".pcx", ".svg",
+]);
 import { missingTableMarkdown } from "./kreuzberg_tables.mjs";
 
 const { values } = parseArgs({
@@ -50,7 +53,8 @@ try {
     useCache: true,
     ...kreuzbergConfig,
     ocr: null,
-    forceOcr: false
+    forceOcr: false,
+    disableOcr: true
   });
 
   // Build output: main content followed by any tables not already embedded

@@ -12,7 +12,8 @@ import type { CommandPlan } from "../../tools/runner.js";
 import { fakeOcrRunner, ocrResultFor } from "../../test/fake-ocr.js";
 import { escalationReason, readWithOcr } from "../engine.js";
 import { planOcrLanguages } from "../languages.js";
-import { assertOcrConfiguration } from "../mode.js";
+import { OCR_FAILED_PAGES_KEY, assertOcrConfiguration, ocrFailedPages } from "../mode.js";
+import { ocrEscalationEnabled } from "../hosted-reader.js";
 
 let scratch: string;
 let source: string;
@@ -76,5 +77,17 @@ describe("council fixes", () => {
     const outcome = await first;
     await outcome.dispose();
     expect(started).toBe(1);
+  });
+
+  it("reads back the pages whose OCR failed, ignoring anything malformed", () => {
+    const values = new Map<string, string>([[OCR_FAILED_PAGES_KEY, JSON.stringify([3, 1, "x", -2, 1.5])]]);
+    const ledger = { readDocument: (_doc: string, key: string) => values.get(key) ?? null };
+    expect([...ocrFailedPages(ledger, "doc")].sort()).toEqual([1, 3]);
+    expect(ocrFailedPages({ readDocument: () => "{not json" }, "doc").size).toBe(0);
+  });
+
+  it("escalates only on an explicit opt-in, whatever keys are configured", () => {
+    expect(ocrEscalationEnabled({ DEEPINFRA_API_KEY: "k" })).toBe(false);
+    expect(ocrEscalationEnabled({ DOCSLURP_OCR_ESCALATION: "on" })).toBe(true);
   });
 });

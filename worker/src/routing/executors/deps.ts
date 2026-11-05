@@ -22,7 +22,7 @@ import type { CommandRunner } from "../../tools/runner.js";
 import { cleanupTempFile, keyFromStorageUri, readJsonFile, type ArtifactStore } from "../../tools/storage.js";
 import { trustedTempDownloadPattern } from "../../lib/temp-file-names.js";
 import { escalationReason, readWithOcr } from "../../ocr/engine.js";
-import { OcrRefusedError, resolveOcrMode } from "../../ocr/mode.js";
+import { OcrBoundaryFailure, OcrRefusedError, resolveOcrMode } from "../../ocr/mode.js";
 import { extractNativePdfDocument } from "../../native-pdf/extract.js";
 import { loadNativePdfEngine } from "../../native-pdf/loader.js";
 import { logNativePdfFallback } from "../../native-pdf/types.js";
@@ -247,8 +247,10 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
     async ocr(raster, { pageNumber, signal }) {
       const started = Date.now();
       // The router's raster (already rendered for routing) is read in the OCR boundary; OCR itself renders and decodes
-      // nothing on the host. A refusal (OCR off or hosted) is an empty read, so the route moves to its next reader; a
-      // failed read throws and fails the page.
+      // nothing on the host. In vm/local mode a failed or refused read throws OcrBoundaryFailure, which the executor
+      // loop propagates: neither the workspace-model fallback nor a cascade reads the page in OCR's place. With OCR off
+      // or hosted (operator choices with no recogniser) the read is empty and the route moves on.
+      const mode = resolveOcrMode();
       let outcome: Awaited<ReturnType<typeof readWithOcr>>;
       try {
         outcome = await readWithOcr(input.runner, {
@@ -257,6 +259,11 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
           ...(signal ? { signal } : {}),
         });
       } catch (error) {
+        if (signal?.aborted) throw error;
+        if (mode === "vm" || mode === "local") {
+          console.error(`[ocr] page=${pageNumber} router OCR failed in the ${mode} boundary: ${error instanceof Error ? error.message.slice(0, 300) : String(error)}`);
+          throw new OcrBoundaryFailure(`OCR of page ${pageNumber} failed in the ${mode} boundary`, { cause: error });
+        }
         if (!(error instanceof OcrRefusedError)) throw error;
         console.error(`[ocr] page=${pageNumber} router OCR refused (${error.reason}): ${error.message}`);
         return { text: "", latencyMs: Date.now() - started, model: OCR_MODEL };

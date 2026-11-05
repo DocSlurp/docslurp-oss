@@ -999,7 +999,7 @@ export class CommandRunner {
     const refusal = localOcrRefusal(env);
     if (refusal) throw new OcrRefusedError(refusal, "profile");
     const paths = localOcrPaths(this.scriptsDir, env);
-    const plan = await this.plan(paths.python, path.join(this.scriptsDir, "docslurp_ocr.py"), ...localOcrCommandArgs(job, paths, env));
+    const plan = await this.plan(paths.python, "-I", path.join(this.scriptsDir, "docslurp_ocr.py"), ...localOcrCommandArgs(job, paths, env));
     return {
       ...plan,
       available: plan.available && existsSync(paths.modelDir) && existsSync(path.join(this.scriptsDir, "docslurp_ocr.py")),
