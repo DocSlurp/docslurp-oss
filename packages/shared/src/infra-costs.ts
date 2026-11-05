@@ -288,6 +288,29 @@ export const INFRA_COST_OBSERVATIONS: readonly InfraCostObservation[] = [
   },
 ];
 
+/**
+ * Provider cost of a Modal Sandbox, in cents: the verified sandbox core-second and GiB-second rates (the
+ * `modal:sandbox-cpu-core` and `modal:sandbox-memory-gib` observations) on the cores and memory the sandbox requested for
+ * `seconds` of wall time. Modal bills a sandbox at max(request, usage), so the request is the floor of the bill. Excludes
+ * image builds, storage, egress and Modal's region multipliers.
+ */
+export function modalSandboxCostCents(args: { cores: number; memoryGib: number; seconds: number }): number {
+  const rate = (id: string) => {
+    const observation = INFRA_COST_OBSERVATIONS.find((entry) => entry.id === id);
+    if (!observation) throw new Error(`infra cost observation ${id} missing`);
+    return observation.usd / 3_600;
+  };
+  const seconds = Math.max(0, Number.isFinite(args.seconds) ? args.seconds : 0);
+  const cores = Math.max(0, Number(args.cores) || 0);
+  const memoryGib = Math.max(0, Number(args.memoryGib) || 0);
+  return seconds * (cores * rate("modal:sandbox-cpu-core") + memoryGib * rate("modal:sandbox-memory-gib")) * 100;
+}
+
+/** When the sandbox rates were verified, for cost metadata. */
+export function modalSandboxRatesObservedAt(): string {
+  return INFRA_COST_OBSERVATIONS.find((entry) => entry.id === "modal:sandbox-cpu-core")?.observedAt ?? "unknown";
+}
+
 // ---------------------------------------------------------------------------
 // Policy
 // ---------------------------------------------------------------------------
