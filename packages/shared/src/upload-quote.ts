@@ -79,9 +79,11 @@ export const UNMEASURED_WORKER_COUNTED_BYTES_PER_PAGE: Readonly<Record<WorkerCou
  */
 export const FAST_ONLY_FORMATS: readonly WorkerCountedFormat[] = ["office-word", "office-other", "office-excel", "office-pptx"];
 
-/** Whether a file's pages bill Fast whatever the workspace's quality (FAST_ONLY_FORMATS), unless the client measured a page mix. */
-export function isFastOnlyFile(file: { name: string; type?: string | null; mix?: PageMix }): boolean {
-  if (file.mix && file.mix.text + file.mix.complex + file.mix.scanned > 0) return false;
+/**
+ * Whether a file's pages bill Fast whatever the workspace's quality (FAST_ONLY_FORMATS). A page mix the client sent does not change
+ * that: no model reads these files, so a measured scanned share would quote Rich pages the worker never bills.
+ */
+export function isFastOnlyFile(file: { name: string; type?: string | null }): boolean {
   const format = workerCountedFormat(file);
   return format !== null && FAST_ONLY_FORMATS.includes(format);
 }
@@ -119,12 +121,13 @@ export function workerCountedFormat(file: { name: string; type?: string | null }
 }
 
 /**
- * Where intake's page count came from: `counted` (a PDF's own count, the text rule over a text file, an image's one page) or `assumed`
- * (one page for a format only the worker can count). Stored as documents.page_count_source (migration 0126).
+ * Where intake's page count came from: `counted` (a PDF's own count, the text rule over a text file, a single-frame image's one page)
+ * or `assumed` (one page for a format only the worker can count, and for a multi-frame image, whose frames the OCR engine counts).
+ * Stored as documents.page_count_source (migration 0126).
  */
 export type PageCountSource = "counted" | "assumed";
 export function intakePageCountSource(file: { name: string; type?: string | null }): PageCountSource {
-  return workerCountedFormat(file) ? "assumed" : "counted";
+  return workerCountedFormat(file) || isMultiFrameImageFile(file) ? "assumed" : "counted";
 }
 
 /**
@@ -139,6 +142,23 @@ export function countedPagesForForecast(document: { pageCount: number; billingPa
 /** Pages of a file of `format` from its size alone, at the format's typical bytes per page (at least 1). */
 export function pagesFromSize(format: WorkerCountedFormat, sizeBytes: number): number {
   return Math.max(1, Math.ceil(Math.max(0, sizeBytes) / UNMEASURED_WORKER_COUNTED_BYTES_PER_PAGE[format].typical));
+}
+
+/**
+ * Frames one multi-frame image file (a TIFF) may hold: the OCR engine reads each frame as a page, and refuses a file with more
+ * (split it, or upload a PDF). A quote prices a TIFF's frames as its pages, up to this many.
+ */
+export const IMAGE_MAX_FRAMES = 64;
+/** Image formats that can hold several frames (pages). */
+export const MULTI_FRAME_IMAGE_MIME_TYPES: readonly string[] = ["image/tiff", "image/tiff-fx"];
+export const MULTI_FRAME_IMAGE_EXTENSIONS: readonly string[] = ["tif", "tiff"];
+
+/** Whether a file is a multi-frame image: its declared type, else its extension when the type is absent or generic. */
+export function isMultiFrameImageFile(file: { name: string; type?: string | null }): boolean {
+  const type = (file.type ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
+  if (MULTI_FRAME_IMAGE_MIME_TYPES.includes(type)) return true;
+  if (type !== "" && type !== "application/octet-stream") return false;
+  return MULTI_FRAME_IMAGE_EXTENSIONS.includes(fileExtension(file.name).slice(1));
 }
 
 /** The cheap end of a quote when a file's page mix is unknown: every page has a text layer. */
@@ -237,9 +257,12 @@ export type PageRange = { low: number; central: number; high: number; measured: 
 
 /**
  * Pages a non-media file counts as: its known page count; else 1 for an image file, its size over TEXT_PAGE_CHARS
- * for a text file, and its size at ASSUMED_BYTES_PER_PAGE for anything else (at least 1).
+ * for a text file, and its size at ASSUMED_BYTES_PER_PAGE for anything else (at least 1). A TIFF counts its frames (1 when not
+ * counted), at most IMAGE_MAX_FRAMES.
  */
 export function quoteFilePages(file: { name: string; type?: string | null; size: number; pages?: number }): number {
+  // A TIFF's frames are its pages, up to the frames one file may hold (more are refused, never read or billed).
+  if (isMultiFrameImageFile(file)) return Math.max(1, Math.min(IMAGE_MAX_FRAMES, Math.round(file.pages ?? 1)));
   const counted = file.pages === undefined ? workerCountedFormat(file) : null;
   const pages = file.pages
     ?? (isUploadImageFile(file)
@@ -256,6 +279,10 @@ export function quoteFilePages(file: { name: string; type?: string | null; size:
 /** Pages of a file over the range its size allows when the client has not counted them; one value when they are known. */
 export function quoteFilePageRange(file: { name: string; type?: string | null; size: number; pages?: number }): PageRange {
   const central = quoteFilePages(file);
+  // An uncounted TIFF holds one frame to as many as its size allows at the densest page, up to IMAGE_MAX_FRAMES.
+  if (file.pages === undefined && isMultiFrameImageFile(file)) {
+    return { low: 1, central, high: Math.max(central, Math.min(IMAGE_MAX_FRAMES, Math.ceil(file.size / UNMEASURED_MIN_BYTES_PER_PAGE))), measured: false };
+  }
   if (file.pages !== undefined || isUploadImageFile(file)) return { low: central, central, high: central, measured: true };
   const counted = workerCountedFormat(file);
   const [lowDivisor, highDivisor] = isUploadTextFile(file)
@@ -410,6 +437,11 @@ export function quoteUpload(args: {
   const range = mixes.unmeasured === 0
     ? mixRange
     : `${mixRange}; pages not counted for ${mixes.unmeasured} of ${documents} files, assumed ${Math.max(0, Math.round(mixes.rangeLow))} to ${Math.max(0, Math.round(mixes.rangeHigh))} from their sizes`;
+  // A TIFF with more frames than one file may hold is refused unread; it is quoted at the cap, the most it could bill.
+  const tooManyFrames = paged.filter((file) => isMultiFrameImageFile(file) && (file.pages ?? 0) > IMAGE_MAX_FRAMES).length;
+  const framesNote = tooManyFrames > 0
+    ? `${tooManyFrames} image ${tooManyFrames === 1 ? "file holds" : "files hold"} more than ${IMAGE_MAX_FRAMES} frames and will be refused (quoted at ${IMAGE_MAX_FRAMES}); `
+    : "";
   const pagedEstimate = costEstimateSchema.parse({
     pages,
     documents,
@@ -423,6 +455,7 @@ export function quoteUpload(args: {
       : {}),
     basis: `${profile.quality} profile, ${profile.stageCount} of ${profile.stageCount} stages; ${range}; `
       + (profile.quality === "fast" ? "" : `${richHighEnd(QUOTE_HIGH_RICH_PAGE_FACTOR)}; `)
+      + framesNote
       + "modeled averages, not measured for this corpus",
   });
 

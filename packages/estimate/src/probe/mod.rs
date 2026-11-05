@@ -143,9 +143,11 @@ pub fn read_plan(card: &Card, meta: &FileMeta) -> ReadPlan {
     let size = meta.size;
     let extension = meta.extension();
     let mime = meta.mime();
-    let whole_formats = ["pdf", "docx", "pptx", "epub"];
+    // TIFF frames are chained through offsets anywhere in the file, so counting them needs the whole file.
+    let whole_formats = ["pdf", "docx", "pptx", "epub", "tif", "tiff"];
     let wants_whole = whole_formats.contains(&extension.as_str())
         || mime == "application/pdf"
+        || mime == "image/tiff"
         || mime.starts_with("application/vnd.openxmlformats-officedocument.");
     if wants_whole {
         return if size <= WHOLE_FILE_MAX_BYTES { ReadPlan { head: size, tail: 0 } } else { ReadPlan { head: SNIFF_BYTES.min(size), tail: 0 } };
@@ -262,7 +264,7 @@ fn sniff(card: &Card, input: &ProbeInput<'_>) -> ProbeResult {
     if head.starts_with(b"%PDF-") || find(head, b"%PDF-", 1024).is_some() {
         return pdf::probe(card, input);
     }
-    if let Some(result) = image(head) {
+    if let Some(result) = image(card, input) {
         return result;
     }
     if head.starts_with(b"PK\x03\x04") {
@@ -293,8 +295,10 @@ fn text(card: &Card, input: &ProbeInput<'_>, format: &str) -> ProbeResult {
     result
 }
 
-/// Image files by magic number. Pricing counts an image file as one scanned page, so only its type matters.
-fn image(head: &[u8]) -> Option<ProbeResult> {
+/// Image files by magic number. Pricing counts an image file as one scanned page, except a TIFF, whose frames are its pages:
+/// those are counted from the frame chain when the whole file was read.
+fn image(card: &Card, input: &ProbeInput<'_>) -> Option<ProbeResult> {
+    let head = input.head;
     let (format, mime) = if head.starts_with(b"\x89PNG\r\n\x1a\n") {
         ("png", "image/png")
     } else if head.starts_with(&[0xFF, 0xD8, 0xFF]) {
@@ -315,8 +319,88 @@ fn image(head: &[u8]) -> Option<ProbeResult> {
         return None;
     };
     let mut result = ProbeResult::new(ProbeKind::Image, format, Some(mime));
-    result.pages = Some(1.0);
+    if format != "tiff" {
+        result.pages = Some(1.0);
+        return Some(result);
+    }
+    if !input.is_whole() {
+        return Some(result.note("TIFF not read whole; frames not counted, priced from size"));
+    }
+    let max = card.multi_frame_images.max_frames;
+    match tiff_frames(head) {
+        TiffFrames::Counted(frames) => {
+            result.pages = Some(frames as f64);
+            if frames as f64 > max {
+                result.notes.push(format!("TIFF holds {frames} frames; a file with more than {max} is refused"));
+            }
+        }
+        TiffFrames::AtLeast(frames) => {
+            result.pages = Some(frames as f64);
+            result.notes.push(format!("TIFF holds at least {frames} frames (count stopped); a file with more than {max} is refused"));
+        }
+        TiffFrames::Malformed(reason) => result.notes.push(format!("TIFF frame chain unreadable ({reason}); frames not counted, priced from size")),
+    }
     Some(result)
+}
+
+/// Frames walked at most: far past the card's `multiFrameImages.maxFrames`, so a count that stops here still says the file is refused.
+const TIFF_FRAME_WALK_LIMIT: u64 = 4_096;
+
+enum TiffFrames {
+    Counted(u64),
+    AtLeast(u64),
+    Malformed(&'static str),
+}
+
+/// The TIFF (or BigTIFF) top-level frame chain: each image file directory (IFD) is a frame, linked by next-IFD offsets. SubIFDs
+/// (thumbnails, reduced resolutions) are not frames. Bounded by the walk limit and a visited set, so a looping chain cannot hang.
+fn tiff_frames(bytes: &[u8]) -> TiffFrames {
+    let little = match bytes.get(0..2) {
+        Some(b"II") => true,
+        Some(b"MM") => false,
+        _ => return TiffFrames::Malformed("byte order"),
+    };
+    let u16_at = |at: usize| if little { u16_le(bytes, at) } else { u16_be(bytes, at) };
+    let u32_at = |at: usize| if little { u32_le(bytes, at) } else { u32_be(bytes, at) };
+    let u64_at = |at: usize| if little { u64_le(bytes, at) } else { u64_be(bytes, at) };
+    let big = match u16_at(2) {
+        Some(42) => false,
+        Some(43) => true,
+        _ => return TiffFrames::Malformed("magic"),
+    };
+    let first = if big {
+        if u16_at(4) != Some(8) {
+            return TiffFrames::Malformed("BigTIFF offset size");
+        }
+        u64_at(8)
+    } else {
+        u32_at(4).map(u64::from)
+    };
+    let Some(mut offset) = first else { return TiffFrames::Malformed("header") };
+    let mut visited = std::collections::BTreeSet::new();
+    let mut frames = 0u64;
+    while offset != 0 {
+        if frames >= TIFF_FRAME_WALK_LIMIT {
+            return TiffFrames::AtLeast(frames);
+        }
+        if !visited.insert(offset) {
+            return TiffFrames::Malformed("frame chain loops");
+        }
+        let Ok(at) = usize::try_from(offset) else { return TiffFrames::Malformed("offset") };
+        let next = if big {
+            u64_at(at).and_then(|count| usize::try_from(count).ok()).and_then(|count| count.checked_mul(20)).and_then(|entries| at.checked_add(8 + entries))
+                .and_then(u64_at)
+        } else {
+            u16_at(at).and_then(|count| at.checked_add(2 + usize::from(count) * 12)).and_then(|next_at| u32_at(next_at).map(u64::from))
+        };
+        let Some(next) = next else { return TiffFrames::Malformed("directory past the end of the file") };
+        frames += 1;
+        offset = next;
+    }
+    if frames == 0 {
+        return TiffFrames::Malformed("no frames");
+    }
+    TiffFrames::Counted(frames)
 }
 
 /// Position of `needle` within the first `limit` bytes of `haystack`.
@@ -330,6 +414,9 @@ pub(crate) fn find(haystack: &[u8], needle: &[u8], limit: usize) -> Option<usize
 
 pub(crate) fn u16_le(bytes: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes(bytes.get(at..at.checked_add(2)?)?.try_into().ok()?))
+}
+pub(crate) fn u16_be(bytes: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_be_bytes(bytes.get(at..at.checked_add(2)?)?.try_into().ok()?))
 }
 pub(crate) fn u32_be(bytes: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_be_bytes(bytes.get(at..at.checked_add(4)?)?.try_into().ok()?))
@@ -355,6 +442,44 @@ mod tests {
         assert_eq!(result.kind, ProbeKind::Text);
         assert_eq!(result.pages, Some(6.0)); // 301 lines
         assert_eq!(result.mime_type, None);
+    }
+
+    /// A little- or big-endian TIFF with `frames` empty IFDs chained in order (or looping back to the first).
+    fn tiff(frames: usize, little: bool, looping: bool) -> Vec<u8> {
+        let mut bytes = if little { b"II*\0".to_vec() } else { b"MM\0*".to_vec() };
+        let u16b = |value: u16| if little { value.to_le_bytes() } else { value.to_be_bytes() };
+        let u32b = |value: u32| if little { value.to_le_bytes() } else { value.to_be_bytes() };
+        bytes.extend_from_slice(&u32b(8));
+        for index in 0..frames {
+            // One entry (12 bytes) per IFD, then the next offset.
+            let at = bytes.len() as u32;
+            bytes.extend_from_slice(&u16b(1));
+            bytes.extend_from_slice(&[0u8; 12]);
+            let next = if index + 1 < frames { at + 2 + 12 + 4 } else if looping { 8 } else { 0 };
+            bytes.extend_from_slice(&u32b(next));
+        }
+        bytes
+    }
+
+    #[test]
+    fn counts_tiff_frames_and_notes_a_file_over_the_cap() {
+        let card = Card::bundled();
+        for little in [true, false] {
+            let three = probe(card, &ProbeInput::whole("fax.tiff", None, &tiff(3, little, false)));
+            assert_eq!((three.kind, three.pages), (ProbeKind::Image, Some(3.0)));
+            assert!(three.notes.is_empty());
+        }
+        let many = probe(card, &ProbeInput::whole("archive.tif", None, &tiff(70, true, false)));
+        assert_eq!(many.pages, Some(70.0));
+        assert!(many.notes.iter().any(|note| note.contains("more than 64")));
+        // A looping chain, a truncated file and a head-only read leave the count unknown.
+        assert_eq!(probe(card, &ProbeInput::whole("loop.tiff", None, &tiff(5, true, true))).pages, None);
+        let truncated = tiff(5, true, false);
+        assert_eq!(probe(card, &ProbeInput::whole("cut.tiff", None, &truncated[..truncated.len() - 6])).pages, None);
+        let whole = tiff(5, true, false);
+        let partial = ProbeInput { name: "fax.tiff", mime_type: None, size: whole.len() as u64 + 10, head: &whole, tail: None };
+        assert_eq!(probe(card, &partial).pages, None);
+        assert_eq!(read_plan(card, &FileMeta { name: "fax.TIFF".into(), mime_type: None, size: 1_000 }), ReadPlan { head: 1_000, tail: 0 });
     }
 
     #[test]

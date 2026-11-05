@@ -1,6 +1,6 @@
 {
  "schema": 2,
- "rules": 5,
+ "rules": 6,
  "version": "2026-11-04b",
  "creditsPerDollar": 100,
  "priceCard": {
@@ -217,6 +217,17 @@
    "office-pptx"
   ]
  },
+ "multiFrameImages": {
+  "maxFrames": 64,
+  "mimeTypes": [
+   "image/tiff",
+   "image/tiff-fx"
+  ],
+  "extensions": [
+   "tif",
+   "tiff"
+  ]
+ },
  "quoteHighRichPageFactor": 2,
  "quoteHighRichOutputTokens": 2000,
  "quoteLowMix": {
@@ -309,5 +320,5 @@
   "repeatedImageMinShare": 0.2,
   "unspacedCharsPerWord": 2
  },
- "revision": "1910714ee9a92e63ce1ab961bcafb95b413de95c3334bcce2197fd8db7e868fe"
+ "revision": "59066f0c47082601d21524ed47d4f6a214501185a4b829aabf2c24280ae06427"
 }
