@@ -1,4 +1,5 @@
 import type { Stage } from "../pipeline/pipeline.js";
+import { resolveOcrMode } from "../ocr/mode.js";
 import { runDocumentStage, runDocuments, } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { resolveNativePdfEngine } from "../native-pdf/engine.js";
@@ -89,7 +90,7 @@ export class FormatToolingStage implements Stage {
       );
     } else if (format === "image") {
       checks.push(
-        { tool: "tesseract", profile: "ocr", plan: () => this.runner.tesseractOcr(sourceKey, "out") },
+        { tool: "ocr", profile: "ocr", plan: async () => ({ available: resolveOcrMode() !== "off" }) },
         { tool: "tiffcp", profile: "tiff-split", plan: () => this.runner.tiffSplit(sourceKey, "page-%04d.tiff") }
       );
     } else if (format === "structured-json" || format === "structured-csv" || format === "markdown" || format === "plain-text") {

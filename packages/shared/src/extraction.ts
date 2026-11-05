@@ -27,11 +27,14 @@ export type ExtractionResultFormat = z.infer<
   typeof extractionResultFormatSchema
 >;
 
-export const extractionOcrBackendSchema = z.enum([
-  "tesseract",
-  "paddleocr",
-  "easyocr",
-]);
+/**
+ * OCR engine. PP-OCR (worker/src/ocr) is the only one; any engine name stored before it is read as PP-OCR, so older
+ * workspace and run configs still parse.
+ */
+export const extractionOcrBackendSchema = z.preprocess(
+  (value) => (typeof value === "string" ? "ppocr" : value),
+  z.literal("ppocr"),
+);
 export type ExtractionOcrBackend = z.infer<typeof extractionOcrBackendSchema>;
 
 export const extractionOcrModelTierSchema = z.enum(["mobile", "server"]);
@@ -58,7 +61,7 @@ export const dolphinModelFlavorSchema = z.enum([
 export type DolphinModelFlavor = z.infer<typeof dolphinModelFlavorSchema>;
 
 export const extractionOcrConfigSchema = z.object({
-  backend: extractionOcrBackendSchema.default("tesseract"),
+  backend: extractionOcrBackendSchema.default("ppocr"),
   language: z.string().trim().min(2).max(16).default("eng"),
   autoRotate: z.boolean().default(true),
   modelTier: extractionOcrModelTierSchema.default("mobile"),
@@ -142,9 +145,9 @@ export type DolphinExtractorOptions = z.infer<typeof dolphinExtractorOptionsSche
  * keys are accepted: anything else (structured extraction, a VLM OCR config with its own base URL, cache
  * namespaces) would let a workspace make the parser call out or share caches. Unknown keys are rejected.
  *
- * `disableOcr` is a marker for the worker, not a Kreuzberg switch: @kreuzberg/node 4.10.2 drops it (and
- * `ocr.enabled`) in normalizeExtractionConfig and OCRs every image regardless, so the extractor registry refuses
- * image inputs to Kreuzberg when it is set (Fast sets it).
+ * Kreuzberg never OCRs: the worker strips the OCR keys below before calling it (worker/scripts/kreuzberg_extract.mjs)
+ * and never hands it an image (the `ocr` extractor reads images). The keys stay accepted so stored configs still parse;
+ * `disableOcr` remains the marker Fast sets (quality.ts).
  */
 export const kreuzbergExtractorOptionsSchema = z.object({
   outputFormat: z.literal("markdown").optional(),

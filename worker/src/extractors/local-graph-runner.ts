@@ -18,7 +18,7 @@ export interface LocalPdfGraphInput {
   maxOutputs?: number;
   maxSourceBytes?: number;
   maxArtifactBytes?: number;
-  /** OCR language setting (`auto` or Tesseract codes); the workspace's documentExtraction.ocr.language. */
+  /** OCR language setting (`auto` or language codes); the workspace's documentExtraction.ocr.language. */
   ocrLanguage?: string;
 }
 
@@ -26,7 +26,7 @@ export interface LocalPdfGraphOutput {
   artifacts: readonly ExtractionArtifactRef[];
   targets: readonly ExtractionArtifactRef[];
   steps: readonly string[];
-  /** Pages the tesseract adapter OCR'd to text (one model read each, billed as a Rich page by the caller). */
+  /** Pages the OCR adapter (ppocr-page-ocr) OCR'd to text (one model read each, billed as a Rich page by the caller). */
   ocrPages?: readonly number[];
   /** Per-run measurements the stage records beside the graph (image counts by class and route, for example). */
   stats?: Readonly<Record<string, unknown>>;

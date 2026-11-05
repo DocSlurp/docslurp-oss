@@ -8,6 +8,8 @@ import { writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 
 import { insertPageMarkers } from "./kreuzberg_page_markers.mjs";
+
+const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".tif", ".tiff", ".bmp", ".heic", ".heif", ".avif", ".jp2", ".jpx", ".pnm", ".pbm", ".pgm", ".ppm"]);
 import { missingTableMarkdown } from "./kreuzberg_tables.mjs";
 
 const { values } = parseArgs({
@@ -33,13 +35,22 @@ try {
 
 try {
   const parsedConfig = values["config-json"] ? JSON.parse(values["config-json"]) : {};
-  const { preferredAdapter, dolphin, ...kreuzbergConfig } = parsedConfig;
+  // Kreuzberg never OCRs: its built-in OCR would read customer pixels inside this process. OCR keys are dropped, and
+  // an image input is refused outright (@kreuzberg/node 4.10.2 OCRs images whatever its options say). Scanned pages come
+  // back empty and are read by the worker's OCR engine in its own boundary.
+  const { preferredAdapter, dolphin, ocr, forceOcr, forceOcrPages, disableOcr, ...kreuzbergConfig } = parsedConfig;
+  if (IMAGE_EXTENSIONS.has(path.extname(values.input).toLowerCase())) {
+    process.stderr.write("kreuzberg extraction refused: images are read by the OCR engine, not Kreuzberg\n");
+    process.exit(1);
+  }
   const result = await kreuzberg.extractFile(values.input, null, {
     outputFormat: "markdown",
     includeDocumentStructure: true,
     enableQualityProcessing: true,
     useCache: true,
-    ...kreuzbergConfig
+    ...kreuzbergConfig,
+    ocr: null,
+    forceOcr: false
   });
 
   // Build output: main content followed by any tables not already embedded

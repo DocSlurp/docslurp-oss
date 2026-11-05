@@ -1,0 +1,243 @@
+/*
+ * One OCR read of a stored customer file, wherever the operator chose to run it (mode.ts). The host never decodes the
+ * file: it hands the path to the VM provider (or, self-hosted only, the local sandbox), then reads back and validates a
+ * bounded JSON result and, for pages that need a second opinion, a bounded PNG the boundary produced. Nothing here falls
+ * back: a refused or failed read throws, and the caller fails the page or document.
+ */
+import { lstat, mkdir, mkdtemp, open, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { ocrResultSchema, type OcrFrameRecord, type OcrResultRecord } from "@docslurp/shared";
+
+import type { SandboxedOcrJob } from "../extractors/plugins.js";
+import { sandboxedOcrProvider } from "../extractors/plugins.js";
+import type { CommandPlan, CommandRunner } from "../tools/runner.js";
+import { ESCALATE_RECOGNISERS, planOcrLanguages, type OcrLanguagePlan } from "./languages.js";
+import { OcrRefusedError, resolveOcrMode, type OcrMode } from "./mode.js";
+import { pinnedOcrModels } from "./models.js";
+
+/** Bound on the result JSON read back from the boundary. */
+export const OCR_RESULT_MAX_BYTES = 64 * 1024 * 1024;
+/** Bound on one escalation PNG read back from the boundary. */
+export const OCR_ESCALATION_IMAGE_MAX_BYTES = 16 * 1024 * 1024;
+/** Default long-edge cap (pixels): PP-OCRv6 small holds ~1.4-1.7 GB RSS per call at full A4 resolution. */
+export const OCR_DEFAULT_MAX_LONG_EDGE = 2000;
+/** A frame below this mean confidence is retried with the next recogniser in the plan. */
+export const OCR_RETRY_BELOW = 0.8;
+/** A frame below this mean confidence after every attempt is escalated (when escalation is on). */
+export const OCR_ESCALATE_BELOW = 0.8;
+/** Frames one job reads at most (pages of a PDF job, frames of a multi-frame image). */
+export const OCR_DEFAULT_MAX_FRAMES = 64;
+
+export type OcrEscalationReason = "script" | "unsupported-script" | "low-confidence" | "empty";
+
+export interface OcrPageRead {
+  pageNumber: number;
+  text: string;
+  meanConfidence: number | null;
+  recogniser: string;
+  chars: number;
+  elapsedMs: number;
+  /** Why this page should get a hosted second read, and the boundary's PNG of it; null when it should not. */
+  escalation: { reason: OcrEscalationReason; imagePath: string; width: number; height: number } | null;
+}
+
+export interface OcrReadOutcome {
+  mode: Extract<OcrMode, "vm" | "local">;
+  /** The provider id (vm) or `local-sandbox`. */
+  engine: string;
+  language: OcrLanguagePlan;
+  pages: OcrPageRead[];
+  truncatedFrames: boolean;
+  wallMs: number;
+  cpuMs: number;
+  peakRssKb: number;
+  /** Removes the job's scratch directory (escalation PNGs live there until the caller is done with them). */
+  dispose(): Promise<void>;
+}
+
+export interface OcrReadInput {
+  /** Absolute path to the stored file (a private temp copy). Never decoded here. */
+  source: string;
+  kind: "image" | "pdf";
+  /** 1-based pages (PDF) or frames to read; absent reads every frame up to the frame cap. */
+  pages?: number[];
+  /** Workspace OCR language setting (`auto` or codes). */
+  languageSetting?: string;
+  /** Keep PNGs of pages that qualify for escalation. */
+  escalation: boolean;
+  signal?: AbortSignal;
+  env?: NodeJS.ProcessEnv;
+}
+
+type OcrRunner = Pick<CommandRunner, "run" | "sandboxedOcrRead" | "localOcrRead">;
+
+/** Long-edge cap for OCR input (`DOCSLURP_OCR_MAX_LONG_EDGE`, 640 to 4000). */
+export function ocrMaxLongEdge(env: NodeJS.ProcessEnv = process.env): number {
+  const parsed = Number(env.DOCSLURP_OCR_MAX_LONG_EDGE?.trim());
+  return Number.isInteger(parsed) && parsed >= 640 && parsed <= 4000 ? parsed : OCR_DEFAULT_MAX_LONG_EDGE;
+}
+
+/** Concurrent OCR jobs this process runs (`DOCSLURP_OCR_MAX_CONCURRENT`): 1 by default, so one ~1.7 GB call per slot. */
+export function ocrMaxConcurrent(env: NodeJS.ProcessEnv = process.env): number {
+  const parsed = Number(env.DOCSLURP_OCR_MAX_CONCURRENT?.trim());
+  return Number.isInteger(parsed) && parsed >= 1 ? Math.min(parsed, 32) : 1;
+}
+
+let active = 0;
+const waiting: Array<() => void> = [];
+async function withOcrSlot<T>(env: NodeJS.ProcessEnv, fn: () => Promise<T>): Promise<T> {
+  if (active >= ocrMaxConcurrent(env)) await new Promise<void>((resolve) => waiting.push(resolve));
+  else active += 1;
+  try {
+    return await fn();
+  } finally {
+    const next = waiting.shift();
+    if (next) next();
+    else active -= 1;
+  }
+}
+
+/** Plan the job: the VM provider, or (self-hosted only) the local sandbox. */
+async function planJob(runner: OcrRunner, job: SandboxedOcrJob, mode: "vm" | "local", env: NodeJS.ProcessEnv): Promise<CommandPlan> {
+  return mode === "vm" ? await runner.sandboxedOcrRead(job) : await runner.localOcrRead(job, env);
+}
+
+/** Read the result JSON the boundary wrote, bounded, as untrusted input. */
+async function readResult(output: string): Promise<OcrResultRecord> {
+  const info = await lstat(output).catch(() => null);
+  if (!info?.isFile()) throw new Error("OCR produced no result file");
+  if (info.size > OCR_RESULT_MAX_BYTES) throw new Error(`OCR result exceeds ${OCR_RESULT_MAX_BYTES} bytes`);
+  let raw: unknown;
+  try {
+    raw = JSON.parse(await readFile(output, "utf8"));
+  } catch {
+    throw new Error("OCR result is not valid JSON");
+  }
+  const parsed = ocrResultSchema.safeParse(raw);
+  if (!parsed.success) throw new Error(`OCR result failed validation: ${parsed.error.issues[0]?.path.join(".") ?? "?"}`);
+  return parsed.data;
+}
+
+/** The result's frames must be the ones asked for, once each, read only by pinned models. */
+export function checkResultAgainstJob(result: OcrResultRecord, job: SandboxedOcrJob, pinned: ReadonlyMap<string, string>): void {
+  const seen = new Set<number>();
+  const allowed = job.pages ? new Set(job.pages) : null;
+  for (const frame of result.frames) {
+    if (seen.has(frame.frame)) throw new Error(`OCR result repeats frame ${frame.frame}`);
+    seen.add(frame.frame);
+    if (allowed ? !allowed.has(frame.frame) : frame.frame > job.maxFrames) throw new Error(`OCR result has unrequested frame ${frame.frame}`);
+    if (frame.recogniser !== null && !job.recognisers.includes(frame.recogniser)) throw new Error(`OCR result used an unrequested recogniser ${frame.recogniser}`);
+    if (frame.width > job.maxLongEdge || frame.height > job.maxLongEdge) throw new Error(`OCR frame ${frame.frame} exceeds the long-edge cap`);
+  }
+  if (result.frames.length > job.maxFrames) throw new Error("OCR result exceeds the frame cap");
+  for (const model of result.models) {
+    if (pinned.get(model.id) !== model.sha256) throw new Error(`OCR result names an unpinned model ${model.id}`);
+  }
+}
+
+/** A PNG's signature and IHDR size, read without decoding pixels. Null when the file is not that PNG. */
+async function pngDimensions(file: string): Promise<{ width: number; height: number } | null> {
+  const info = await lstat(file).catch(() => null);
+  if (!info?.isFile() || info.size < 33 || info.size > OCR_ESCALATION_IMAGE_MAX_BYTES) return null;
+  const handle = await open(file, "r");
+  try {
+    const head = Buffer.alloc(24);
+    await handle.read(head, 0, 24, 0);
+    if (!head.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return null;
+    if (head.readUInt32BE(8) !== 13 || head.toString("ascii", 12, 16) !== "IHDR") return null;
+    return { width: head.readUInt32BE(16), height: head.readUInt32BE(20) };
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Why a frame deserves a hosted second read, or null. */
+export function escalationReason(frame: { recogniser: string | null; meanConfidence: number | null; chars: number }, language: OcrLanguagePlan, belowConfidence = OCR_ESCALATE_BELOW): OcrEscalationReason | null {
+  if (frame.recogniser !== null && (ESCALATE_RECOGNISERS as readonly string[]).includes(frame.recogniser)) return "script";
+  if (language.unsupportedScript) return "unsupported-script";
+  if (frame.chars === 0) return "empty";
+  if (frame.meanConfidence !== null && frame.meanConfidence < belowConfidence) return "low-confidence";
+  return null;
+}
+
+/**
+ * OCR `input.source` in the configured boundary. Throws OcrRefusedError when the mode refuses OCR, and a plain Error
+ * when the boundary failed or returned anything malformed; either way nothing was read and nothing should be billed.
+ */
+export async function readWithOcr(runner: OcrRunner, input: OcrReadInput): Promise<OcrReadOutcome> {
+  const env = input.env ?? process.env;
+  const mode = resolveOcrMode(env);
+  if (mode === "off") throw new OcrRefusedError("OCR is off (DOCSLURP_OCR_MODE=off)", "off");
+  if (mode === "hosted") throw new OcrRefusedError("DOCSLURP_OCR_MODE=hosted reads pages with the hosted reader, not a recogniser", "hosted");
+  const language = planOcrLanguages(input.languageSetting, env);
+  const maxFrames = Math.min(input.pages?.length ?? OCR_DEFAULT_MAX_FRAMES, OCR_DEFAULT_MAX_FRAMES);
+  const provider = mode === "vm" ? sandboxedOcrProvider() : null;
+  if (provider) {
+    const size = (await lstat(input.source)).size;
+    if (size > provider.maxSourceBytes) throw new OcrRefusedError(`OCR source exceeds the provider's ${provider.maxSourceBytes}-byte limit`, "too-large");
+  }
+  const dir = await mkdtemp(path.join(env.DOCSLURP_OCR_SCRATCH_DIR?.trim() || tmpdir(), "docslurp-ocr-"));
+  const dispose = () => rm(dir, { recursive: true, force: true });
+  try {
+    const imageDir = path.join(dir, "images");
+    await mkdir(imageDir, { mode: 0o700 });
+    const job: SandboxedOcrJob = {
+      input: input.source,
+      kind: input.kind,
+      ...(input.pages?.length ? { pages: [...input.pages] } : {}),
+      output: path.join(dir, "result.json"),
+      imageDir,
+      recognisers: language.recognisers,
+      maxAttempts: language.recognisers.length,
+      retryBelow: OCR_RETRY_BELOW,
+      maxFrames,
+      maxLongEdge: ocrMaxLongEdge(env),
+      escalation: input.escalation ? { belowConfidence: OCR_ESCALATE_BELOW, recognisers: [...ESCALATE_RECOGNISERS] } : null,
+    };
+    const started = Date.now();
+    const result = await withOcrSlot(env, async () => {
+      const plan = await planJob(runner, job, mode, env);
+      if (!plan.available) throw new OcrRefusedError(`OCR runtime unavailable for DOCSLURP_OCR_MODE=${mode}`, "unavailable");
+      await runner.run(plan, input.signal);
+      return await readResult(job.output);
+    });
+    checkResultAgainstJob(result, job, pinnedOcrModels());
+    const pages: OcrPageRead[] = [];
+    for (const frame of result.frames) {
+      let escalation: OcrPageRead["escalation"] = null;
+      const reason = input.escalation ? escalationReason(frame, language) : null;
+      if (reason && frame.image) {
+        const imagePath = path.join(imageDir, frame.image);
+        const dims = await pngDimensions(imagePath);
+        // The PNG must be the frame the boundary read; anything else is dropped, never decoded here.
+        if (dims && dims.width === frame.width && dims.height === frame.height) escalation = { reason, imagePath, ...dims };
+        else console.warn(`[ocr] frame=${frame.frame} escalation image refused (missing or not the frame read)`);
+      }
+      pages.push({
+        pageNumber: frame.frame,
+        text: frame.text,
+        meanConfidence: frame.meanConfidence,
+        recogniser: frame.recogniser ?? "none",
+        chars: frame.chars,
+        elapsedMs: frame.elapsedMs,
+        escalation,
+      });
+    }
+    pages.sort((a, b) => a.pageNumber - b.pageNumber);
+    return {
+      mode,
+      engine: provider?.id ?? "local-sandbox",
+      language,
+      pages,
+      truncatedFrames: result.truncatedFrames,
+      wallMs: Date.now() - started,
+      cpuMs: result.cpuMs,
+      peakRssKb: result.peakRssKb,
+      dispose,
+    };
+  } catch (error) {
+    await dispose();
+    throw error;
+  }
+}

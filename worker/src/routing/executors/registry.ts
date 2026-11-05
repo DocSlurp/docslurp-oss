@@ -24,14 +24,15 @@ const acceptTextLayer: TargetExecutor = {
   },
 };
 
-const tesseract: TargetExecutor = {
-  id: "ocr:tesseract",
+/** PP-OCR in the configured OCR boundary (ocr/engine.ts): the VM in production, never the worker host there. */
+const ppocr: TargetExecutor = {
+  id: "ocr:ppocr",
   needsRaster: true,
   async run(request, deps, signal) {
     const raster = request.raster;
     if (!raster) return null;
     const result = await deps.ocr(raster, { pageNumber: request.assignment.pageNumber, signal });
-    return { ...base(request), text: result.text, model: result.model, runtime: "tesseract", latencyMs: result.latencyMs };
+    return { ...base(request), text: result.text, model: result.model, runtime: "ppocr", latencyMs: result.latencyMs };
   },
 };
 
@@ -85,7 +86,7 @@ const BY_ID = new Map<string, TargetExecutor>([
   [acceptTextLayer.id, acceptTextLayer],
   ["native:kreuzberg", nativeExtractor("native:kreuzberg", "kreuzberg")],
   ...nativePdfExecutors.map((e): [string, TargetExecutor] => [e.id, e]),
-  [tesseract.id, tesseract],
+  [ppocr.id, ppocr],
   [florenceLabeler.id, florenceLabeler],
   [skip.id, skip],
 ]);

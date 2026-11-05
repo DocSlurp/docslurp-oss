@@ -37,7 +37,7 @@ export interface NativeProbeOptions {
   thumbPx?: number;
   verifyOcrLayer?: boolean;
   signal?: AbortSignal;
-  /** OCR for the layer check; must run sandboxed (`sandboxedTesseract`). Absent: the layer stays unverified. */
+  /** OCR for the layer check; must run in the OCR boundary. Absent (the worker passes none): the layer stays unverified. */
   recognise?: Recogniser;
   /**
    * Render each page's 72 DPI image on a second handle of the same document while this handle reads the page's
@@ -60,7 +60,7 @@ export const PROBE_OVERLAP_MAX_PAGES = 1000;
  */
 export const PROBE_OVERLAP_MAX_OBJECTS = 10_000;
 
-/** Without a sandboxed recogniser the OCR layer stays unverified, as when tesseract is not installed. */
+/** Without a recogniser the OCR layer stays unverified (the worker passes none until the check is re-tuned). */
 const noRecogniser: Recogniser = async () => null;
 
 /** The document could not be opened by the binding (damaged, unsupported encryption); callers may fall back. */

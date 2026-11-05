@@ -12,7 +12,7 @@ import { extractNativePdf } from "../native-pdf/extract.js";
 import { nativePdfAdapterVersion } from "../native-pdf/loader.js";
 import { nativePdfEmphasisEnabled, resolveNativePdfMode } from "../native-pdf/mode.js";
 import { NativePdfError, logNativePdfFallback } from "../native-pdf/types.js";
-import { ocrAvailable } from "./ocr-capability.js";
+import { resolveOcrMode } from "../ocr/mode.js";
 
 export interface ExtractedCandidate {
   label: string;
@@ -22,8 +22,13 @@ export interface ExtractedCandidate {
   tempTextPath: string;
   structuredResult?: DocumentExtractionResult;
   structuredArtifactUri?: string;
-  /** Pages whose text this extractor OCR'd itself and reports (the graph extractor's tesseract adapter); billed as Rich reads. */
+  /**
+   * Pages whose text this extractor OCR'd itself and reports (the graph extractor's OCR adapter). The OCR engine charges
+   * its own reads (ocr/ledger.ts); the stage only records the reads an extractor reports without having charged them.
+   */
   ocrPages?: number[];
+  /** The extractor already charged its OCR reads through the ledger (the OCR engine does); the stage must not again. */
+  ocrCharged?: boolean;
 }
 
 export interface CandidateExecutors {
@@ -33,6 +38,8 @@ export interface CandidateExecutors {
   graph?(candidate: PreparedExtractor, textKey: string, sourcePath: string, signal?: AbortSignal): Promise<ExtractedCandidate>;
   /** Publish Markdown an in-process extractor already wrote to `outputPath`. */
   markdownFile?(candidate: PreparedExtractor, textKey: string, outputPath: string, signal?: AbortSignal): Promise<ExtractedCandidate>;
+  /** OCR an image (every frame) in the configured OCR boundary and publish its Markdown (ocr/read-document.ts). */
+  ocr?(candidate: PreparedExtractor, textKey: string, sourcePath: string, signal?: AbortSignal): Promise<ExtractedCandidate>;
 }
 
 export interface PreparedExtractor {
@@ -70,6 +77,10 @@ const file: Execution = (candidate, executors, key, _source, signal) =>
   executors.file(candidate.plan, candidate.label, key, candidate.outputPath!, signal);
 const liteparse: Execution = (candidate, executors, key, source, signal) =>
   executors.liteparse(candidate, key, source, signal);
+const ocr: Execution = (candidate, executors, key, source, signal) => {
+  if (!executors.ocr) throw new Error("ocr extraction requires an ocr candidate executor");
+  return executors.ocr(candidate, key, source, signal);
+};
 const graph: Execution = (candidate, executors, key, source, signal) => {
   if (!executors.graph) throw new Error("graph-local execution requires a graph candidate executor");
   return executors.graph(candidate, key, source, signal);
@@ -133,20 +144,21 @@ const registered = [
   definition({ id: "kreuzberg", outputSuffix: ".kreuzberg.md", tableAware: true, execute: file,
     prepare: async (runner, source, config, context) => {
       const plan = await runner.kreuzbergMarkdown(source, `${source}.kreuzberg.md`, config);
-      // Kreuzberg ignores disableOcr and OCRs every image (@kreuzberg/node 4.10.2), so an image never reaches it
-      // when OCR is meant to be off (Fast): report it unavailable instead.
-      if (kreuzbergOcrDisabled(config) && kreuzbergImageInput(source, context)) {
-        console.warn(`[extractors] kreuzberg refused an image input with OCR disabled format=${context?.format ?? "unknown"}`);
-        return { ...plan, available: false };
-      }
-      // An image has no text layer, so Kreuzberg can only OCR it. Without Tesseract language data (an image or
-      // local setup built without it) that fails on every image, so report it unavailable and let the stage
-      // route the image to vision. Text-layer formats never invoke OCR.
-      if (context?.format === "image" && !ocrAvailable({ env: context.env, language: kreuzbergOcrLanguage(config) })) {
+      // Kreuzberg never OCRs (its built-in OCR would read customer pixels on the worker host). @kreuzberg/node 4.10.2
+      // OCRs every image whatever its options say, so an image never reaches it: images go to the `ocr` extractor.
+      if (kreuzbergImageInput(source, context)) {
+        console.warn(`[extractors] kreuzberg refused an image input format=${context?.format ?? "unknown"}; images are read by the ocr extractor`);
         return { ...plan, available: false };
       }
       return plan;
     } }),
+  // Images, every frame of a multi-frame TIFF: read in the configured OCR boundary (DOCSLURP_OCR_MODE). Unavailable
+  // when OCR is off; a refused or failed read fails the document, never falling back to another reader.
+  definition({ id: "ocr", execute: ocr,
+    prepare: async (_runner, _source, _config, context) => ({
+      ...inProcessPlan("ocr"),
+      available: resolveOcrMode(context?.env ?? process.env) !== "off",
+    }) }),
   definition({ id: "native-pdf", outputSuffix: ".native-pdf.md", tableAware: true, execute: nativePdf,
     prepare: async (runner) => {
       const engine = await resolveNativePdfEngine(runner);
@@ -178,6 +190,7 @@ const registered = [
 
 export const defaultDocumentExtractorOrder: Record<string, string[]> = {
   pdf: ["kreuzberg", "native-pdf", "poppler-text"],
+  image: ["ocr"],
   "structured-json": ["json"],
   default: ["kreuzberg", "pandoc"],
 };
@@ -256,16 +269,6 @@ export class ExtractorRegistry {
   }
 }
 
-function kreuzbergOcrLanguage(configJson?: string): string | undefined {
-  if (!configJson) return undefined;
-  try {
-    const language = (JSON.parse(configJson) as { ocr?: { language?: unknown } }).ocr?.language;
-    return typeof language === "string" && language.trim() ? language : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 /**
  * One extractor's options as the JSON its script receives. Every extractor's options are re-parsed through their
  * shared strict schema (parseExtractorOptions) even when the pipeline already was, so no other id or key reaches a
@@ -284,16 +287,6 @@ const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".ti
 /** True when Kreuzberg would read `source` as an image (format id or file extension). */
 function kreuzbergImageInput(source: string, context?: PrepareContext): boolean {
   return context?.format === "image" || IMAGE_EXTENSIONS.has(path.extname(source).toLowerCase());
-}
-
-/** True when the options carry the `disableOcr` marker (Fast sets it; documentExtractionForQuality). */
-function kreuzbergOcrDisabled(configJson?: string): boolean {
-  if (!configJson) return false;
-  try {
-    return (JSON.parse(configJson) as { disableOcr?: unknown }).disableOcr === true;
-  } catch {
-    return true;
-  }
 }
 
 export const documentExtractorRegistry = new ExtractorRegistry();

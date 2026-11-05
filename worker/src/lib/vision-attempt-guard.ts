@@ -20,7 +20,7 @@ import { configuredVisionModel, maxCatalogWorstCaseVisionRequestCents, worstCase
  * embeddings and media frame description. Admission refuses when:
  *
  * - **Page bound**: the run already admitted `VISION_PAGE_ATTEMPTS` (default 2) requests for this
- *   page and purpose (whole-page read, document-map OCR, self-critique), or
+ *   page and purpose (whole-page read, document-map OCR, self-critique, OCR escalation or hosted OCR), or
  *   `VISION_REGION_ATTEMPTS_PER_PAGE` (default 12) routed region requests for this page. Refuses
  *   that page only.
  * - **Rejection breaker**: at least `VISION_BREAKER_MIN_FAILURES` (default 20) of the run's requests
@@ -63,7 +63,7 @@ import { configuredVisionModel, maxCatalogWorstCaseVisionRequestCents, worstCase
  * leave the page bound, the breaker and the org count. Throttles are bounded per call by
  * `VISION_THROTTLE_ALLOWANCE` (default 5); past it the wait goes to Temporal with its Retry-After.
  */
-export type VisionAttemptPurpose = "page" | "region" | "map-ocr" | "critique";
+export type VisionAttemptPurpose = "page" | "region" | "map-ocr" | "critique" | "ocr";
 
 export interface VisionAttemptTarget {
   documentId: string;

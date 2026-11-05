@@ -7,7 +7,8 @@ import { parsePdfImagesList, pdfImagesFacts, pngDimensions } from "./pdfimages-l
 import type { ArtifactGraphAdapter } from "./artifact-graph.js";
 import { CommandRunner, resolveVenvBin } from "../tools/runner.js";
 import { ensureBinary } from "../tools/python-deps.js";
-import { ocrImageText } from "../lib/ocr-language.js";
+import { readWithOcr } from "../ocr/engine.js";
+import { resolveOcrMode } from "../ocr/mode.js";
 
 /** The caller owns outputDir and its lifetime. Each run writes immutable files there. */
 export interface LocalArtifactAdapterOptions {
@@ -16,11 +17,11 @@ export interface LocalArtifactAdapterOptions {
   timeoutMs?: number;
   imageScaleTo?: number;
   /**
-   * OCR language: `auto` (the default; DOCSLURP_OCR_LANGUAGE overrides it) detects the page's script and runs the
-   * matching installed packs, or Tesseract codes such as `eng+deu` from the workspace.
+   * OCR language: `auto` (the default; DOCSLURP_OCR_LANGUAGE overrides it) tries the recognisers in order, or codes such
+   * as `eng+deu` from the workspace (ocr/languages.ts).
    */
   ocrLanguage?: string;
-  /** Called with a page's number when `tesseract-page-ocr` produced text for it: a model read that bills as a Rich page. */
+  /** Called with a page's number when `ppocr-page-ocr` produced text for it: a model read that bills as a Rich page. */
   onOcrRead?: (pageNumber: number) => void;
 }
 
@@ -84,7 +85,7 @@ function filePath(ref: ExtractionArtifactRef): string {
 }
 
 export async function localArtifactToolAvailability(): Promise<Record<string, boolean>> {
-  const binaries = ["pdftoppm", "pdftotext", "pdftohtml", "pdfinfo", "pdfimages", "tesseract", "pandoc"];
+  const binaries = ["pdftoppm", "pdftotext", "pdftohtml", "pdfinfo", "pdfimages", "pandoc"];
   // Commands spawn with the venv bin first on PATH, so binaries provisioned there count.
   const venvBin = resolveVenvBin(process.env.PYTHON_VENV);
   return Object.fromEntries(await Promise.all(binaries.map(async (binary) => {
@@ -177,16 +178,22 @@ export function createLocalArtifactAdapters(options: LocalArtifactAdapterOptions
       const set = await emit("poppler-embedded-images", "page/embedded-image-set", input, Buffer.from(JSON.stringify(pageSet)), "application/json", "json", number);
       return [set, ...images.map(image => image.ref)];
     } },
-    { id: "tesseract-page-ocr", accepts: ["page/image"], emits: ["page/text"], scope: "page", cost: 4, async run(inputs, ctx) {
+    { id: "ppocr-page-ocr", accepts: ["page/image"], emits: ["page/text"], scope: "page", cost: 4, async run(inputs, ctx) {
       const input = one(inputs), number = page(ctx.pageNumber);
-      const ocr = await ocrImageText({
-        image: filePath(input),
-        setting: options.ocrLanguage,
-        run: async (args) => (await runLocalArtifactCommand("tesseract", args, maxBytes, timeoutMs, ctx.signal)).toString("utf8"),
+      // The page image is read in the configured OCR boundary (the VM in production); nothing is decoded here.
+      const ocr = await readWithOcr(localArtifactRunner(), {
+        source: filePath(input), kind: "image", pages: [1], escalation: false,
+        ...(options.ocrLanguage ? { languageSetting: options.ocrLanguage } : {}),
+        ...(ctx.signal ? { signal: ctx.signal } : {}),
       });
-      const emitted = await emit("tesseract-page-ocr", "page/text", input, Buffer.from(ocr.text, "utf8"), "text/plain; charset=utf-8", "txt", number);
-      if (/[\p{L}\p{N}]/u.test(ocr.text)) options.onOcrRead?.(number);
-      return [emitted];
+      try {
+        const text = ocr.pages[0]?.text ?? "";
+        const emitted = await emit("ppocr-page-ocr", "page/text", input, Buffer.from(text, "utf8"), "text/plain; charset=utf-8", "txt", number);
+        if (/[\p{L}\p{N}]/u.test(text)) options.onOcrRead?.(number);
+        return [emitted];
+      } finally {
+        await ocr.dispose();
+      }
     } },
     { id: "pandoc-text-markdown", accepts: ["page/text"], emits: ["page/markdown"], scope: "page", cost: 1, async run(inputs, ctx) {
       const input = one(inputs), number = page(ctx.pageNumber);
@@ -246,8 +253,11 @@ export async function availableLocalArtifactAdapters(options: LocalArtifactAdapt
   const binary: Record<string, string> = {
     "poppler-page-image": "pdftoppm", "poppler-page-text": "pdftotext",
     "poppler-page-html": "pdftohtml", "poppler-pdf-metadata": "pdfinfo",
-    "poppler-embedded-images": "pdfimages", "tesseract-page-ocr": "tesseract",
+    "poppler-embedded-images": "pdfimages",
     "pandoc-text-markdown": "pandoc", "pandoc-html-markdown": "pandoc",
   };
-  return createLocalArtifactAdapters(options).filter((adapter) => !binary[adapter.id] || available[binary[adapter.id]]);
+  // OCR is available when DOCSLURP_OCR_MODE puts it in a VM or the self-hosted sandbox; never a host binary.
+  const ocr = resolveOcrMode() === "vm" || resolveOcrMode() === "local";
+  return createLocalArtifactAdapters(options).filter((adapter) =>
+    adapter.id === "ppocr-page-ocr" ? ocr : !binary[adapter.id] || available[binary[adapter.id]]);
 }

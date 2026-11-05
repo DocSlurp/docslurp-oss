@@ -1,6 +1,6 @@
 /**
  * Production ExecutorDeps: page text from the canonical document, per-page native-pdf text/Markdown, page
- * rasters from the shared raster cache, sharp crops, the worker's tesseract and Florence
+ * rasters from the shared raster cache, sharp crops, the OCR engine (in its VM, or the self-hosted sandbox) and Florence
  * tooling, and the vision stage's own per-image model call (usage ledger, cost, privacy gate).
  */
 
@@ -21,7 +21,8 @@ import type { VisionPageOutput } from "../../stages/vision-extract.js";
 import type { CommandRunner } from "../../tools/runner.js";
 import { cleanupTempFile, keyFromStorageUri, readJsonFile, type ArtifactStore } from "../../tools/storage.js";
 import { trustedTempDownloadPattern } from "../../lib/temp-file-names.js";
-import { OcrLowConfidenceError, ocrImageText } from "../../lib/ocr-language.js";
+import { escalationReason, readWithOcr } from "../../ocr/engine.js";
+import { OcrRefusedError, resolveOcrMode } from "../../ocr/mode.js";
 import { extractNativePdfDocument } from "../../native-pdf/extract.js";
 import { loadNativePdfEngine } from "../../native-pdf/loader.js";
 import { logNativePdfFallback } from "../../native-pdf/types.js";
@@ -37,8 +38,8 @@ export interface ProductionExecutorDepsInput {
   document: Document;
   storage: Pick<ArtifactStore, "bucket" | "getJson" | "downloadToTempFile">;
   rasters: Pick<PdfRasterCache, "renderSelectedPages" | "sourcePath"> & Partial<Pick<PdfRasterCache, "renderClip">>;
-  runner: Pick<CommandRunner, "plan" | "florence2" | "run">;
-  /** The workspace OCR language setting (`auto` or Tesseract codes); unset reads the environment default. */
+  runner: Pick<CommandRunner, "plan" | "florence2" | "run" | "sandboxedOcrRead" | "localOcrRead">;
+  /** The workspace OCR language setting (`auto` or language codes); unset reads the environment default. */
   ocrLanguage?: string;
   /** Ledger lookup for the document's canonical-document artifact uri. */
   canonicalUri: () => string | null;
@@ -51,6 +52,9 @@ export interface ProductionExecutorDepsInput {
   recordLocalUsage: (event: { model: string; metric: string; pageNumber: number; latencyMs: number; outputChars: number }) => void;
   labelerModel?: string;
 }
+
+/** Model label for router OCR reads in usage rows and route outputs. */
+const OCR_MODEL = "ppocr-v6-small";
 
 export interface ProductionExecutorDeps extends ExecutorDeps {
   /** Page height in points for pages whose raster was fetched (null otherwise). */
@@ -180,6 +184,8 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
     nativeOcrPolicy: readRoutingFlags().nativeOcr,
 
     async nativePdfOcr({ pageNumber, mode, dpi }): Promise<NativePdfOcrResult | null> {
+      // The native engine OCRs inside the worker process: only customer-owned self-hosting (local mode) may use it.
+      if (resolveOcrMode() !== "local") return null;
       const doc = await openNativePdf();
       if (!doc) return null;
       // One engine OCR at a time per process: each call holds ~400-500 MB outside WORKER_COMMAND_MAX_RSS_MB.
@@ -240,28 +246,36 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
 
     async ocr(raster, { pageNumber, signal }) {
       const started = Date.now();
-      // Script detection and the matching language packs, as in page OCR (lib/ocr-language.ts).
+      // The router's raster (already rendered for routing) is read in the OCR boundary; OCR itself renders and decodes
+      // nothing on the host. A refusal (OCR off or hosted) is an empty read, so the route moves to its next reader; a
+      // failed read throws and fails the page.
+      let outcome: Awaited<ReturnType<typeof readWithOcr>>;
       try {
-        const ocr = await ocrImageText({
-          image: raster.path,
-          setting: input.ocrLanguage,
-          run: async (args) => {
-            const plan = await input.runner.plan("tesseract", ...args);
-            if (!plan.available) throw new Error("tesseract unavailable");
-            return (await input.runner.run(plan, signal)).stdout;
-          },
+        outcome = await readWithOcr(input.runner, {
+          source: raster.path, kind: "image", pages: [1], escalation: false,
+          ...(input.ocrLanguage ? { languageSetting: input.ocrLanguage } : {}),
+          ...(signal ? { signal } : {}),
         });
-        const latencyMs = Date.now() - started;
-        const text = ocr.text.trim();
-        // Tesseract read this page (or a crop of it): a model read, billed as a Rich page once per page per run by the ledger.
-        if (/[\p{L}\p{N}]/u.test(text)) input.recordLocalUsage({ model: "tesseract", metric: "tesseract-page-ocr", pageNumber, latencyMs, outputChars: text.length });
-        return { text, latencyMs, model: "tesseract" };
       } catch (error) {
-        if (!(error instanceof OcrLowConfidenceError)) throw error;
-        // No installed pack read the page: empty output, so the route falls back to the next, stronger reader
-        // instead of indexing junk or failing the document.
-        console.warn(`[ocr] page=${pageNumber} unreadable by tesseract: ${error.message}`);
-        return { text: "", latencyMs: Date.now() - started, model: "tesseract" };
+        if (!(error instanceof OcrRefusedError)) throw error;
+        console.error(`[ocr] page=${pageNumber} router OCR refused (${error.reason}): ${error.message}`);
+        return { text: "", latencyMs: Date.now() - started, model: OCR_MODEL };
+      }
+      try {
+        const page = outcome.pages[0];
+        const text = page?.text.trim() ?? "";
+        const latencyMs = Date.now() - started;
+        // A degraded or empty read goes to the route's next, stronger reader instead of indexing junk.
+        const reason = page ? escalationReason(page, outcome.language) : "empty";
+        if (reason === "low-confidence" || reason === "empty") {
+          console.warn(`[ocr] page=${pageNumber} router OCR read ${reason}; next reader`);
+          return { text: "", latencyMs, model: OCR_MODEL };
+        }
+        // The engine read this page (or a crop of it): a model read, billed as a Rich page once per page per run.
+        if (/[\p{L}\p{N}]/u.test(text)) input.recordLocalUsage({ model: OCR_MODEL, metric: "page-ocr", pageNumber, latencyMs, outputChars: text.length });
+        return { text, latencyMs, model: OCR_MODEL };
+      } finally {
+        await outcome.dispose();
       }
     },
 

@@ -257,7 +257,7 @@ export function findSparsePages(pageTexts: string[], textLayerPages?: Array<stri
 }
 
 /**
- * Native words on a page. Extracted text can come from OCR of a raster (Tesseract inside the extractor), which is
+ * Native words on a page. Extracted text can come from OCR of a raster (an OCR read inside the extractor), which is
  * word-shaped yet says nothing about the text layer: a scan with OCR text is still a raster page. When the PDF's own
  * text layer is known (page facts' pdftotext run), it alone is the native text; otherwise the extracted text stands
  * in for it (an OCR'd scan past the page-facts range then reads as text, the cheap side).

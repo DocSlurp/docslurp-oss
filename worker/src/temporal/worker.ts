@@ -32,7 +32,8 @@ import { configureSourceQuarantine, postgresSourceQuarantine } from "../sandbox/
 import { onTeardownBreakerOpen, quarantineForceExitMs, scheduleQuarantineForceExit, workerShutdownForceMs } from "../sandbox/teardown-breaker.js";
 import { initializeParserSandbox, setDefaultParserSandbox } from "../sandbox/startup.js";
 import { loadExtractorPlugins } from "../extractors/plugins.js";
-import { ocrLanguageSettingFromEnv } from "../lib/ocr-language.js";
+import { ocrLanguageSettingFromEnv } from "../ocr/languages.js";
+import { assertOcrConfiguration } from "../ocr/mode.js";
 import { configureWorkerExtractorIdAliases } from "../extractors/registry.js";
 import { ArtifactStore } from "../tools/storage.js";
 import { createStages } from "../stages/index.js";
@@ -138,8 +139,10 @@ async function main(): Promise<void> {
   } catch (error) {
     throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
   }
-  // The operator's OCR language default must be valid Tesseract codes (or auto); log what every `auto` workspace gets.
+  // OCR runs only where DOCSLURP_OCR_MODE puts it: `vm` without an OCR provider, or `local` outside a self-hosted
+  // profile, refuses to start. The operator's OCR language default must be valid codes (or auto).
   try {
+    assertOcrConfiguration(process.env);
     console.log(`[ocr] default language=${ocrLanguageSettingFromEnv(process.env)} (applies where documentExtraction.ocr.language is auto)`);
   } catch (error) {
     throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });

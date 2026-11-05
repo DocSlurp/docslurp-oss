@@ -1,4 +1,9 @@
-import { acceptSandboxedPdfResult, requireSandboxedPdfProvider, type SandboxedPdfJob, type SandboxedPdfRunContext } from "../extractors/plugins.js";
+import {
+  acceptSandboxedPdfResult, requireSandboxedOcrProvider, requireSandboxedPdfProvider, type SandboxedOcrJob, type SandboxedPdfJob,
+  type SandboxedPdfRunContext,
+} from "../extractors/plugins.js";
+import { localOcrCommandArgs, localOcrPaths } from "../ocr/local.js";
+import { localOcrRefusal, resolveOcrMode, OcrRefusedError } from "../ocr/mode.js";
 import { recordShardTimingInContext, type ShardCalibration } from "../pipeline/shard-calibration.js";
 import { ensurePythonDistributions, parseMissingPythonDependency, parseMissingPythonModule } from "./python-deps.js";
 import {
@@ -9,7 +14,7 @@ import {
   type InstalledVendorBundle,
 } from "./vendor-bundles.js";
 import { withObservation } from "@docslurp/shared/observability";
-import { DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL, ocrLanguageSchema } from "@docslurp/shared";
+import { DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@docslurp/shared";
 import { existsSync, readFileSync, readdirSync, readlinkSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { access } from "node:fs/promises";
 import path from "node:path";
@@ -57,6 +62,8 @@ import {
 export interface CommandPlan {
   /** Isolated-VM PDF extraction through the registered provider plugin; dispatched before any local provider or backend. */
   sandboxedPdf?: SandboxedPdfJob;
+  /** Isolated-VM OCR through the registered provider plugin (DOCSLURP_OCR_MODE=vm); never runs on the worker host. */
+  sandboxedOcr?: SandboxedOcrJob;
   binary: string;
   args: string[];
   available: boolean;
@@ -978,21 +985,40 @@ export class CommandRunner {
     return await this.plan("catdoc", source);
   }
 
-  async tesseractOcr(
-    source: string,
-    outputBase: string,
-    langs?: string,
-  ): Promise<CommandPlan> {
-    // Tesseract codes only (`eng`, `chi_sim`, `eng+deu`); language selection per page is ocrImageText (lib/ocr-language.ts).
-    const langArg = langs === undefined ? "eng" : ocrLanguageSchema.parse(langs);
-    return await this.plan(
-      "tesseract",
-      source,
-      outputBase,
-      "-l",
-      langArg,
-      "txt",
-    );
+  /**
+   * OCR in a fresh VM through the registered provider (DOCSLURP_OCR_MODE=vm). Refuses without one: VM OCR never falls back
+   * to the worker host or to another reader.
+   */
+  async sandboxedOcrRead(job: SandboxedOcrJob): Promise<CommandPlan> {
+    for (const value of [job.input, job.output, job.imageDir]) {
+      if (!path.isAbsolute(value)) throw new Error("VM OCR requires absolute input, output and image paths");
+    }
+    if (new Set([job.input, job.output, job.imageDir]).size !== 3) throw new Error("VM OCR requires distinct input, output and image paths");
+    const provider = requireSandboxedOcrProvider();
+    provider.assertConfigured();
+    return { binary: provider.id, args: [], available: true, sandboxedOcr: job, pages: job.pages?.length ?? job.maxFrames };
+  }
+
+  /**
+   * The fixed OCR CLI under the parser sandbox (DOCSLURP_OCR_MODE=local). Customer-owned execution only: refused unless
+   * DOCSLURP_SERVICE_PROFILE=self-hosted, so a service deployment can never run OCR on the worker host.
+   */
+  async localOcrRead(job: SandboxedOcrJob, env: NodeJS.ProcessEnv = process.env): Promise<CommandPlan> {
+    if (resolveOcrMode(env) !== "local") throw new OcrRefusedError("local OCR is refused: DOCSLURP_OCR_MODE is not local", "mode");
+    const refusal = localOcrRefusal(env);
+    if (refusal) throw new OcrRefusedError(refusal, "profile");
+    const paths = localOcrPaths(this.scriptsDir, env);
+    const plan = await this.plan(paths.python, path.join(this.scriptsDir, "docslurp_ocr.py"), ...localOcrCommandArgs(job, paths, env));
+    return {
+      ...plan,
+      available: plan.available && existsSync(paths.modelDir) && existsSync(path.join(this.scriptsDir, "docslurp_ocr.py")),
+      bundleRoots: [paths.venvRoot, paths.modelDir],
+      bundleEnv: { OMP_NUM_THREADS: "1", OMP_THREAD_LIMIT: "1" },
+      // The CLI opens no sockets (it replaces socket creation before importing the engine).
+      denyUnixSockets: true,
+      readOnlyInputs: true,
+      pages: job.pages?.length ?? job.maxFrames,
+    };
   }
 
   async tiffSplit(source: string, outputPattern: string): Promise<CommandPlan> {
@@ -1340,6 +1366,11 @@ export class CommandRunner {
 
   async launch(plan: CommandPlan, signal?: AbortSignal): Promise<LaunchedCommand> {
     await admitCommand();
+    if (plan.sandboxedOcr) {
+      const provider = requireSandboxedOcrProvider();
+      const frames = plan.pages ?? plan.sandboxedOcr.maxFrames;
+      return { remote: provider.run(plan.sandboxedOcr, signal), timeoutMs: provider.timeoutMs(frames), release: async () => {} };
+    }
     if (plan.sandboxedPdf) {
       const provider = requireSandboxedPdfProvider();
       const pages = plan.pages ?? currentPerfContext()?.pageCount ?? 0;
@@ -1894,7 +1925,7 @@ function assertProcessTeardown(session: SandboxSession): void {
  *   and multiprocessing (forkserver, Manager, duplex Pipe) use socketpair(AF_UNIX).
  * - node: libuv's child-process stdio and IPC use socketpair(AF_UNIX).
  * - kreuzberg: a tokio runtime's signal driver uses a UNIX socket pair.
- * Poppler, qpdf, tesseract, pandoc, unrtf, catdoc, tiffcp and clamscan do not use one. A tool not
+ * Poppler, qpdf, pandoc, unrtf, catdoc, tiffcp and clamscan do not use one. A tool not
  * listed here gets the filter: add it only after checking that it needs a socket.
  */
 const UNIX_SOCKET_CLIENTS = new Set([

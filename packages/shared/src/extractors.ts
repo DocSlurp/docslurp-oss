@@ -108,11 +108,11 @@ export interface ResolvedExtractionPlan {
 export const builtInDocumentExtractorDescriptors: ExtractorDescriptor[] = [
   {
     id: "kreuzberg", kind: "document", label: "Kreuzberg",
-    description: "Local document parser with broad format support.",
+    description: "Local document parser with broad format support. Never OCRs: images go to the OCR engine.",
 
-    transforms: [{ accepts: ["source/pdf"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/office-word"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/office-pptx"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/office-excel"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/office-other"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/epub"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/html"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/image"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/plain-text"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/markdown"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/structured-csv"], emits: ["document/markdown"], scope: "document" }],
+    transforms: [{ accepts: ["source/pdf"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/office-word"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/office-pptx"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/office-excel"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/office-other"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/epub"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/html"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/plain-text"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/markdown"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/structured-csv"], emits: ["document/markdown"], scope: "document" }],
     capabilities: {
-      formats: ["pdf", "office-word", "office-pptx", "office-excel", "office-other", "epub", "html", "image", "plain-text", "markdown", "structured-csv"],
+      formats: ["pdf", "office-word", "office-pptx", "office-excel", "office-other", "epub", "html", "plain-text", "markdown", "structured-csv"],
       produces: ["markdown"], costClass: "local-cpu",
     },
   },
@@ -149,6 +149,12 @@ export const builtInDocumentExtractorDescriptors: ExtractorDescriptor[] = [
     description: "Layout-aware PDF Markdown and tables from a deployment-provided extractor, one offline VM per document.",
     transforms: [{ accepts: ["source/pdf"], emits: ["document/markdown"], scope: "document" }],
     capabilities: { formats: ["pdf"], produces: ["markdown", "pages"], costClass: "local-cpu" },
+  },
+  {
+    id: "ocr", kind: "document", label: "OCR",
+    description: "PP-OCR text from images, every frame of a multi-frame TIFF, read in the deployment's OCR boundary (an isolated VM in production).",
+    transforms: [{ accepts: ["source/image"], emits: ["document/markdown"], scope: "document" }],
+    capabilities: { formats: ["image"], produces: ["markdown", "pages"], costClass: "local-cpu" },
   },
   {
     id: "graph-local", kind: "document", label: "Local artifact graph",

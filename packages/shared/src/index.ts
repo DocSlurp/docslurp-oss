@@ -19,6 +19,7 @@ export * from "./extractors.js";
 export * from "./extractor-aliases.js";
 export * from "./visual-artifacts.js";
 export * from "./media-map.js";
+export * from "./ocr-result.js";
 export * from "./image-routing.js";
 export * from "./image-anchors.js";
 export * from "./structured.js";

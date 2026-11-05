@@ -1,14 +1,13 @@
 /**
  * TL1 OCR-layer agreement: how well a hidden text layer agrees with a fresh OCR of one band of the page.
- * Same algorithm and thresholds as page_probe.py (`ocr_layer_agreement`); tesseract stays the recogniser.
+ * Same algorithm and thresholds as page_probe.py (`ocr_layer_agreement`).
+ *
+ * Off in the worker: the thresholds were tuned against Tesseract's band reads, and the OCR engine is now PP-OCR in an
+ * isolated boundary. No production caller passes a recogniser, so OCR-layer pages stay unverified (as they always were
+ * without one) until the agreement threshold is re-measured for the new recogniser. A recogniser passed here must run
+ * in that boundary; nothing in this module runs OCR itself.
  */
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
-
 import { tokenAgreement } from "@docslurp/shared";
-
-import type { CommandRunner } from "../../tools/runner.js";
 
 import type { ProbeBindingPage } from "./binding.js";
 import { round } from "./features.js";
@@ -19,7 +18,7 @@ export const OCR_CHECK_DPI = 100;
 export const OCR_CHECK_MIN_TOKENS = 10;
 /**
  * Largest band OCR'd (pixels at OCR_CHECK_DPI). A Letter page's band is about 0.23 MP; a hostile page size makes a
- * band tesseract spends a minute and about 1 GB on, so larger bands are left unverified.
+ * band a recogniser spends a minute and about 1 GB on, so larger bands are left unverified.
  */
 export const OCR_CHECK_MAX_PIXELS = 4_000_000;
 /** Least agreement (lesser of precision and recall) of the layer with the OCR; the shared text-layer cross-check threshold. */
@@ -32,34 +31,11 @@ export interface OcrLayerCheck {
   wallMs: number;
 }
 
-/**
- * Recogniser that runs `tesseract` through the parser sandbox (allowlisted environment, bounded time and RSS). The
- * band is rendered from a customer PDF, so it never runs as a bare child of the worker. Resolves null when tesseract
- * is not installed.
- */
-export function sandboxedTesseract(runner: Pick<CommandRunner, "plan" | "run">, timeoutMs = 60_000, language = "eng"): Recogniser {
-  return async (png, signal, requestedLanguage) => {
-    const dir = await mkdtemp(path.join(tmpdir(), "docslurp-ocr-layer-"));
-    try {
-      const input = path.join(dir, "band.png");
-      const base = path.join(dir, "band");
-      await writeFile(input, png);
-      const plan = await runner.plan("tesseract", input, base, "--psm", "4", "-l", requestedLanguage ?? language);
-      if (!plan.available) return null;
-      // One thread, as the agreement threshold was tuned; bundleEnv is the plan's extra-environment channel.
-      await runner.run({ ...plan, timeoutMs, bundleEnv: { OMP_THREAD_LIMIT: "1" } }, signal);
-      return await readFile(`${base}.txt`, "utf8");
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  };
-}
-
-/** OCR of one PNG; `language` is a Tesseract language string for the layer's script (the recogniser's default when absent). */
+/** OCR of one PNG; `language` is an OCR language string for the layer's script (the recogniser's default when absent). */
 export type Recogniser = (png: Buffer, signal?: AbortSignal, language?: string) => Promise<string | null>;
 
-/** Tesseract language packs for the dominant script of a text; null when no pack is mapped (the check is skipped). */
-export function tesseractLanguageForText(text: string): string | null {
+/** OCR language codes for the dominant script of a text; null when no script is mapped (the check is skipped). */
+export function ocrLanguageForText(text: string): string | null {
   const sample = text.slice(0, 20_000);
   const scripts: Array<[string, RegExp]> = [
     ["eng", /\p{Script=Latin}/gu],
@@ -104,7 +80,7 @@ export async function ocrLayerAgreement(
     ];
     // The layer's words inside the OCR'd band, in the layer's reading order: what the OCR can be compared with.
     const bandText = words.filter((w) => w.y >= clip[1] && w.y <= clip[3]).map((w) => w.text).join(" ");
-    const language = tesseractLanguageForText(bandText);
+    const language = ocrLanguageForText(bandText);
     const bandPixels = ((clip[2] - clip[0]) * OCR_CHECK_DPI / 72) * ((clip[3] - clip[1]) * OCR_CHECK_DPI / 72);
     const text = language !== null && Number.isFinite(bandPixels) && bandPixels <= OCR_CHECK_MAX_PIXELS
       ? await recognise(await page.renderAsync({ dpi: OCR_CHECK_DPI, clip, gray: true, format: "png" }), signal, language)

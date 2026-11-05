@@ -2,8 +2,9 @@
  * Extractor plugins: optional providers a deployment loads by configuration, never by import.
  *
  * DocSlurp ships an open default for everything here. A deployment may add one sandboxed PDF extractor (served as the
- * `vm-pdf` extractor id) and one image orientation provider by naming plugin modules in DOCSLURP_EXTRACTOR_PLUGINS
- * (comma-separated absolute paths or file: URLs). Each module exports `register(host)`, which returns the plugin.
+ * `vm-pdf` extractor id), one image orientation provider and one sandboxed OCR provider (`DOCSLURP_OCR_MODE=vm`) by naming
+ * plugin modules in DOCSLURP_EXTRACTOR_PLUGINS (comma-separated absolute paths or file: URLs). Each module exports
+ * `register(host)`, which returns the plugin.
  *
  * Rules the host enforces:
  * - Fail closed. A named plugin that cannot load is a startup error, and a deployment that asks for the VM extractor
@@ -124,11 +125,49 @@ export interface ImageOrientationProvider {
   orient(input: string, output: string, signal?: AbortSignal): Promise<{ result: OrientationResult; usage?: UsageEvent }>;
 }
 
+/**
+ * One OCR job in an isolated VM. The provider stages `input` (the stored customer file, never decoded on the host) into a
+ * fresh VM, runs the fixed `docslurp_ocr.py` CLI there with exactly these settings, and copies back `output` (the CLI's
+ * JSON result) and the PNGs it wrote into `imageDir`. Paths are absolute and distinct; `imageDir` exists and is empty.
+ */
+export interface SandboxedOcrJob {
+  input: string;
+  kind: "image" | "pdf";
+  /** 1-based pages (PDF) or frames (multi-frame image) to read; absent reads every frame up to `maxFrames`. */
+  pages?: number[];
+  output: string;
+  imageDir: string;
+  /** Recogniser families to try, in order, while a frame's confidence stays below `retryBelow`. */
+  recognisers: string[];
+  maxAttempts: number;
+  retryBelow: number;
+  maxFrames: number;
+  maxLongEdge: number;
+  /** Frames to keep as PNG for an escalation read: below this confidence, or read by one of these recognisers. */
+  escalation: { belowConfidence: number; recognisers: string[] } | null;
+}
+
+/** What a sandboxed OCR run returns: the command result. The host reads and validates `job.output` itself. */
+export type SandboxedOcrResult = SandboxResult;
+
+export interface SandboxedOcrProvider {
+  /** Stable id for telemetry and ledger metadata, chosen by the plugin. */
+  id: string;
+  /** Largest source the provider accepts; larger files are refused before any VM work. */
+  maxSourceBytes: number;
+  /** Throw when the deployment is not ready (unpinned image, missing models or credentials). Never fall back. */
+  assertConfigured(): void;
+  run(job: SandboxedOcrJob, signal?: AbortSignal): Promise<SandboxedOcrResult>;
+  /** Upper bound on one run's wall time for this many frames: the remote command budget. */
+  timeoutMs(frames: number): number;
+}
+
 export interface ExtractorPlugin {
   apiVersion: typeof EXTRACTOR_PLUGIN_API_VERSION;
   name: string;
   sandboxedPdf?: SandboxedPdfExtractorProvider;
   imageOrientation?: ImageOrientationProvider;
+  sandboxedOcr?: SandboxedOcrProvider;
 }
 
 /** Host values a plugin uses at runtime. Plugins import only types from the worker. */
@@ -185,6 +224,15 @@ export function registerExtractorPlugin(plugin: ExtractorPlugin): void {
     if (!PROVIDER_ID.test(orientation.id ?? "")) throw new Error("Image orientation provider needs a lowercase id");
     if (typeof orientation.orient !== "function" || !(orientation.maxCostCents >= 0)) throw new Error("Image orientation provider needs orient() and maxCostCents");
   }
+  const ocr = plugin.sandboxedOcr;
+  if (ocr) {
+    if (sandboxedOcrProvider()) throw new Error("Only one sandboxed OCR provider may be registered");
+    if (!PROVIDER_ID.test(ocr.id ?? "")) throw new Error("Sandboxed OCR provider needs a lowercase id");
+    if (!Number.isSafeInteger(ocr.maxSourceBytes) || ocr.maxSourceBytes < 1) throw new Error("Sandboxed OCR provider needs maxSourceBytes");
+    for (const name of ["assertConfigured", "run", "timeoutMs"] as const) {
+      if (typeof ocr[name] !== "function") throw new Error(`Sandboxed OCR provider lacks ${name}()`);
+    }
+  }
   plugins.push(plugin);
   if (pdf?.shardProfile) registerShardProfile(pdf.shardProfile.key, pdf.shardProfile.prior);
 }
@@ -229,11 +277,23 @@ export function imageOrientationProvider(): ImageOrientationProvider | null {
   return plugins.find((plugin) => plugin.imageOrientation)?.imageOrientation ?? null;
 }
 
-/** The generic ids of the capabilities registered plugins provide (`vm-pdf`, `image-orientation`). */
+export function sandboxedOcrProvider(): SandboxedOcrProvider | null {
+  return plugins.find((plugin) => plugin.sandboxedOcr)?.sandboxedOcr ?? null;
+}
+
+/** The provider, or a refusal: VM OCR never falls back to the worker host or to another reader. */
+export function requireSandboxedOcrProvider(): SandboxedOcrProvider {
+  const provider = sandboxedOcrProvider();
+  if (!provider) throw new Error("DOCSLURP_OCR_MODE=vm needs a sandboxed OCR provider plugin (DOCSLURP_EXTRACTOR_PLUGINS); refusing local fallback");
+  return provider;
+}
+
+/** The generic ids of the capabilities registered plugins provide (`vm-pdf`, `image-orientation`, `vm-ocr`). */
 export function loadedPluginCapabilities(): string[] {
   return [
     ...(sandboxedPdfProvider() ? [VM_PDF_EXTRACTOR_ID] : []),
     ...(imageOrientationProvider() ? ["image-orientation"] : []),
+    ...(sandboxedOcrProvider() ? ["vm-ocr"] : []),
   ];
 }
 
