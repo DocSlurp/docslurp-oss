@@ -1,4 +1,7 @@
 import { OcrBoundaryFailure } from "../../ocr/mode.js";
+
+/** Failure reason of an assignment whose OCR read failed in its boundary; routed-vision never falls back for it. */
+export const OCR_BOUNDARY_FAILED = "ocr-boundary-failed";
 import type { PolicyPack, RoutingTarget } from "@docslurp/shared";
 
 import { findProviderRetryableError } from "../../lib/provider-retry.js";
@@ -144,9 +147,12 @@ export async function executeAssignments(
         }
         if (output) result.outputs.push(output);
       } catch (error) {
-        // A failed OCR read in its boundary fails the page outright: recorded as a soft failure it would be served by
-        // the workspace-model fallback instead.
-        if (options.signal?.aborted || findProviderRetryableError(error) || error instanceof OcrBoundaryFailure) throw error;
+        if (options.signal?.aborted || findProviderRetryableError(error)) throw error;
+        // A failed OCR read in its boundary fails that assignment terminally: no fallback or cascade reads it instead.
+        if (error instanceof OcrBoundaryFailure) {
+          fail(request, OCR_BOUNDARY_FAILED);
+          return;
+        }
         fail(request, error instanceof Error ? error.message : String(error));
       }
     };
@@ -169,6 +175,10 @@ export async function executeAssignments(
         await deps.withCrop(raster, bbox, async (crop) => await execute(crop));
       } catch (error) {
         if (options.signal?.aborted || findProviderRetryableError(error)) throw error;
+        if (error instanceof OcrBoundaryFailure) {
+          fail(request, OCR_BOUNDARY_FAILED);
+          return;
+        }
         fail(request, `crop-failed: ${error instanceof Error ? error.message : String(error)}`);
       }
       return;

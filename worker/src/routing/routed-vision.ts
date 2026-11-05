@@ -1,3 +1,4 @@
+import { OCR_BOUNDARY_FAILED } from "./executors/run.js";
 import {
   inferModelTarget,
   type Assignment,
@@ -394,6 +395,8 @@ export async function runRoutedVision(args: RoutedVisionArgs): Promise<RoutedVis
     for (const failure of run.failures) {
       const assignment = plan.assignments[failure.assignmentIndex]!;
       if (assignment.scope.kind !== "page" || assignment.role === "accept-text" || assignment.role === "image-label" || assignment.role === "skip") continue;
+      // The page's OCR failed in its boundary: it fails, and no hosted model reads it in OCR's place.
+      if (failure.reason === OCR_BOUNDARY_FAILED) continue;
       const served = (parts.get(failure.pageNumber) ?? []).some((p) => p.placement === "prose");
       if (!served && !execution.fallbackPages.includes(failure.pageNumber) && !fallbackFromFailures.includes(failure.pageNumber)) {
         fallbackFromFailures.push(failure.pageNumber);

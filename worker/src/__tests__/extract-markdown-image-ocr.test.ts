@@ -294,6 +294,20 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
     } finally { await h.cleanup(); error.mockRestore(); }
   });
 
+  it("retries a transient VM failure once before failing the scanned pages", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const h = await harness({ format: "pdf", pageCount: 2, extract: async () => ({ text: "Native\f\f" }) });
+    h.runner.run.mockRejectedValueOnce(new Error("vm capacity"));
+    try {
+      await h.stage.run(h.state);
+      expect(h.checkpoint()?.status).toBe("completed");
+      expect(h.runner.run).toHaveBeenCalledTimes(2);
+      expect(warn.mock.calls.flat().join(" ")).toMatch(/scanned-pages-retry document=doc-1 pages=2/);
+      expect(h.state.artifactLedger.readDocument("doc-1", "ocr-failed-pages")).toBeFalsy();
+    } finally { await h.cleanup(); warn.mockRestore(); }
+  });
+
   it("fails the document when every page is a scan and the VM read fails", async () => {
     vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
     const h = await harness({ format: "pdf", pageCount: 2, extract: async () => ({ text: "" }) });

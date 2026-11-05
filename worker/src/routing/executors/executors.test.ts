@@ -9,7 +9,7 @@ import { BIG_BUDGET, makePage, testCatalog } from "../testing.js";
 import type { CascadeVerifier } from "../cascade.js";
 import { mergePageText } from "./merge.js";
 import { executorFor } from "./registry.js";
-import { executeAssignments } from "./run.js";
+import { OCR_BOUNDARY_FAILED, executeAssignments } from "./run.js";
 import { OcrBoundaryFailure } from "../../ocr/mode.js";
 import type { ExecutorDeps, ExecutorOutput } from "./types.js";
 
@@ -106,12 +106,21 @@ describe("executor registry", () => {
     expect(res.failures).toEqual([]);
   });
 
-  it("propagates a failed OCR boundary read instead of recording a failure another reader would serve", async () => {
+  it("fails a page whose OCR boundary read failed terminally, page and crop scope alike, without failing its siblings", async () => {
     const vlm = vi.fn();
-    const { deps } = fakeDeps({ ocr: vi.fn(async () => { throw new OcrBoundaryFailure("OCR of page 2 failed in the vm boundary"); }), vlm });
-    await expect(executeAssignments([
+    const ocr = vi.fn(async (_raster: unknown, { pageNumber }: { pageNumber: number }) => {
+      if (pageNumber === 2) throw new OcrBoundaryFailure("OCR of page 2 failed in the vm boundary");
+      return { text: "ok words", latencyMs: 1, model: "ppocr-v6-small" };
+    });
+    const { deps } = fakeDeps({ ocr: ocr as never, vlm });
+    const bbox = { x: 1, y: 1, width: 10, height: 10 };
+    const res = await executeAssignments([
       { assignment: asg(2, ppocr.id, "ocr"), index: 0, target: ppocr },
-    ], deps, { canContinue: () => true })).rejects.toBeInstanceOf(OcrBoundaryFailure);
+      { assignment: asg(2, ppocr.id, "ocr", { kind: "region", bbox }), index: 1, target: ppocr },
+      { assignment: asg(3, ppocr.id, "ocr"), index: 2, target: ppocr },
+    ], deps, { canContinue: () => true });
+    expect(res.failures.map((f) => [f.assignmentIndex, f.reason]).sort()).toEqual([[0, OCR_BOUNDARY_FAILED], [1, OCR_BOUNDARY_FAILED]]);
+    expect(res.outputs.map((o) => o.pageNumber)).toEqual([3]);
     expect(vlm).not.toHaveBeenCalled();
   });
 
@@ -204,6 +213,14 @@ describe("runRoutedVision with executors", () => {
     expect(result.executorFailures).toHaveLength(1);
     expect(result.outputs.map((o) => [o.pageNumber, o.text.startsWith("native page 1") || o.text.startsWith("vlm page 2")])).toEqual([[1, true], [2, true]]);
     expect(result.actuals.find((a) => a.servesTargetId === ppocr.id)?.costUsd).toBe(0.005);
+  });
+
+  it("never falls back to the workspace model for a page whose OCR failed in its boundary", async () => {
+    const { deps } = fakeDeps({ ocr: vi.fn(async () => { throw new OcrBoundaryFailure("OCR of page 2 failed in the vm boundary"); }) });
+    const { result, extract } = await run([asg(1, nativeText.id, "extract-text"), asg(2, ppocr.id, "ocr")], { deps });
+    expect(extract).not.toHaveBeenCalled();
+    expect(result.executorFailures.map((f) => f.reason)).toEqual([OCR_BOUNDARY_FAILED]);
+    expect(result.outputs.map((o) => o.pageNumber)).toEqual([1]);
   });
 
   it("without executor deps, executor-only extraction pages fall back to the workspace model", async () => {

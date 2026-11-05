@@ -107,7 +107,7 @@ import { visionGuardFor } from "../lib/vision-attempt-guard.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
-import { OCR_FAILED_PAGES_KEY, ocrFailedPages, resolveOcrMode } from "../ocr/mode.js";
+import { OCR_FAILED_PAGES_KEY, OcrRefusedError, ocrFailedPages, resolveOcrMode } from "../ocr/mode.js";
 import { ocrDocument } from "../ocr/read-document.js";
 
 interface PageHeatmapEntry {
@@ -1246,12 +1246,21 @@ export class ExtractMarkdownStage implements Stage {
     for (let start = 0; start < empty.length; start += OCR_PDF_BATCH_PAGES) {
       const batch = empty.slice(start, start + OCR_PDF_BATCH_PAGES);
       let result: Awaited<ReturnType<typeof ocrDocument>>;
+      const readBatch = () => ocrDocument({
+        runner: this.runner, state, documentId: document.id, source: args.sourcePath, kind: "pdf", pages: batch,
+        ...(args.ocrLanguage ? { languageSetting: args.ocrLanguage } : {}),
+        hostedReader, stage: this.name, ...(signal ? { signal } : {}),
+      });
       try {
-        result = await ocrDocument({
-          runner: this.runner, state, documentId: document.id, source: args.sourcePath, kind: "pdf", pages: batch,
-          ...(args.ocrLanguage ? { languageSetting: args.ocrLanguage } : {}),
-          hostedReader, stage: this.name, ...(signal ? { signal } : {}),
-        });
+        try {
+          result = await readBatch();
+        } catch (first) {
+          // One more try for a transient boundary failure (VM capacity, a dropped connection); a refusal is final.
+          rethrowIfTeardown(first);
+          if (signal?.aborted || first instanceof OcrRefusedError) throw first;
+          console.warn(`[ocr] scanned-pages-retry document=${document.id} pages=${batch.join(",")} reason=${(first instanceof Error ? first.message : String(first)).slice(0, 200)}`);
+          result = await readBatch();
+        }
       } catch (error) {
         rethrowIfTeardown(error);
         if (signal?.aborted) throw error;
