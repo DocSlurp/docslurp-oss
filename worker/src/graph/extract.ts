@@ -221,7 +221,9 @@ export async function extractDocumentGraph(args: {
     // A graph cut short (credit ran out mid-document) stays stale, so it is extracted again later.
     llmFailed: llmAttempted && (source === "heuristic" || stoppedEarly),
     windows: windowsRead,
-    charsAttempted: source === "llm" ? [...attempted].reduce((sum, index) => sum + (windows[index]?.length ?? 0), 0) : 0,
+    // Every window the model answered, whether or not its answer parsed (and so whether or not the graph is the model's): the
+    // provider was paid to read them, so the feature bills them.
+    charsAttempted: [...attempted].reduce((sum, index) => sum + (windows[index]?.length ?? 0), 0),
     charsRead: source === "llm" ? charsRead : 0,
     charsTotal: plan.charsTotal,
     truncated: plan.truncated || (llmAttempted && charsRead < plan.charsTotal),

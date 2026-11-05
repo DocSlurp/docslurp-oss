@@ -161,3 +161,18 @@ it("counts every window the model answered as read, parsed or not, so billing fo
   expect(graph.charsRead).toBeLessThan(graph.charsAttempted); // the unparsed window was still read
   expect(graph.charsAttempted).toBe(graph.charsTotal);
 });
+
+it("still counts the windows the model answered when no answer parsed and the graph falls back to heuristics", async () => {
+  const bad = { text: "not JSON", finishReason: "stop", usage: { inputTokens: 50, outputTokens: 10 } };
+  vi.mocked(generateOpenRouterText).mockReset().mockResolvedValue(bad);
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  const chunks = Array.from({ length: 3 }, (_, index) => ({ id: `c${index}`, text: `Example ${"x".repeat(11_000)}` }));
+  const graph = await extractDocumentGraph({
+    filename: "long.txt", chunks,
+    context: { config: { ...defaultGraphConfig, depth: "standard" }, scope: "Synthetic", model: "test-model", apiKey: "mock", useLlm: true, privacyMode: "standard", onUsage: () => {} },
+  });
+  expect(graph).toMatchObject({ source: "heuristic", llmFailed: true, windows: 0, charsRead: 0 });
+  // The provider was paid to read all three windows: the feature bills them (graph-enrich charges on charsAttempted).
+  expect(graph.charsAttempted).toBe(graph.charsTotal);
+  expect(graph.inputTokens).toBe(150);
+});

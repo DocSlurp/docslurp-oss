@@ -49,6 +49,11 @@ export function textPagesOfText(text: string): number {
 export function featurePages(state: WorkflowState, document: FeatureDocument, options: { textPages?: number } = {}): number {
   const media = Number(state.artifactLedger.read(`media-charge:${document.id}`));
   if (Number.isFinite(media) && media > 0) return media;
+  return documentFeaturePages(document, options);
+}
+
+/** featurePages for a paged (non-media) document, for callers outside a run (the graph rebuild job). */
+export function documentFeaturePages(document: Omit<FeatureDocument, "id">, options: { textPages?: number } = {}): number {
   const intake = Math.max(1, Number(document.pageCount) || 0);
   const method = document.billingPagesMethod ?? null;
   const billed = Number(document.billingPages) > 0 ? Math.max(1, Math.floor(Number(document.billingPages))) : intake;
