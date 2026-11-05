@@ -68,6 +68,8 @@ export interface CheckpointStore {
   countedImageFrames?(runId: string): Promise<Array<{ documentId: string; pageCount: number; chargedPages: number }>>;
   /** Pauses the run when credits it newly owes (a measured page count above intake's) no longer fit the org's balance. */
   enforceSpendForCharge?(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean; blocked?: boolean }>;
+  /** The largest n in 1..max whose `creditsFor(n)` the org's balance covers; read-only (nothing is paused). */
+  largestFundedCharge?(run: { id: string; orgId: string | null; workspaceId?: string | null }, max: number, creditsFor: (n: number) => number): Promise<number>;
   /** The run's measured documents (billing_pages set) that still bill at completion, for the cumulative page-count spend check. */
   measuredRunDocuments?(runId: string): Promise<Array<{ pageCount: number; billingPages: number; method: string | null }>>;
   /**

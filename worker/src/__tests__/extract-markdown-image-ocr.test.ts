@@ -209,6 +209,29 @@ describe("image documents are read by the OCR extractor", () => {
     } finally { await h.cleanup(); }
   });
 
+  it("bounds the VM read to the frames the balance covers before it starts, then refuses the TIFF with nothing charged", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const all = Array.from({ length: 40 }, (_, index) => ({ frame: index + 1, text: `Page ${index + 1}` }));
+    const h = await harness({ format: "image", filename: "deposition.tiff", mimeType: "image/tiff", pageCount: 1,
+      frames: (job) => all.slice(0, job.maxFrames),
+      result: (job) => ocrResultFor(job, all.slice(0, job.maxFrames), { truncatedFrames: all.length > job.maxFrames }) });
+    const { store, calls } = spendStore(1);
+    const sized: number[] = [];
+    // The balance covers 5 frames (the read-only sizing query); the run is not paused by asking.
+    (store as any).largestFundedCharge = async (_run: unknown, max: number) => { sized.push(max); return 5; };
+    (h.state as any).store = store;
+    try {
+      await h.stage.run(h.state);
+      expect(sized).toEqual([64]);
+      expect(h.jobs).toHaveLength(1);
+      expect(h.jobs[0]!.maxFrames).toBe(5); // the VM read no more than the run could pay for
+      expect(publicDocumentError(h.checkpoint()?.error)).toBe(PUBLIC_ERROR_MESSAGES.imageFramesUnfunded);
+      expect(calls.pageCounts).toEqual([6]); // one past the budget: the frame check pauses the run
+      expect(h.richIds()).toEqual([]);
+    } finally { await h.cleanup(); }
+  });
+
   it("charges and reports every counted frame when the balance covers them", async () => {
     vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
     const frames = Array.from({ length: 40 }, (_, index) => ({ frame: index + 1, text: `Page ${index + 1}` }));

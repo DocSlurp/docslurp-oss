@@ -288,6 +288,11 @@ export interface RasterPageArtifact {
   engine?: RasterEngineName;
   /** Requested density; oversized pages are bounded before allocation. */
   dpi?: number;
+  /**
+   * The customer's own uploaded bytes passed through as the page image (an image document), not a render this service produced
+   * in its parser sandbox or VM. Never decode it in-process (sharp/libvips in the worker): only renders we produced may be.
+   */
+  customerOriginal?: boolean;
 }
 
 type RasterStorage = Pick<ArtifactStore, "objectSize" | "putBytes" | "uri">;
@@ -518,6 +523,7 @@ export class PdfRasterCache {
         heightPx: generatedPage?.heightPx ?? null,
         sizeBytes: generatedPage?.sizeBytes ?? existing.get(pageNumber) ?? 0,
         cacheHit: existing.get(pageNumber) !== null,
+        ...(isPdf ? {} : { customerOriginal: true }),
         mimeType: outputMimeType,
         engine: isPdf ? engineName : undefined,
         dpi: isPdf ? dpi : undefined,

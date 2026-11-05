@@ -70,6 +70,8 @@ export interface OcrReadInput {
   kind: "image" | "pdf";
   /** 1-based pages (PDF) or frames to read; absent reads every frame up to the frame cap. */
   pages?: number[];
+  /** A lower frame cap than the default (the frames the run can pay for); the boundary stops there and reports truncation. */
+  maxFrames?: number;
   /** Workspace OCR language setting (`auto` or codes). */
   languageSetting?: string;
   /** Keep PNGs of pages that qualify for escalation. */
@@ -243,7 +245,8 @@ export async function readWithOcr(runner: OcrRunner, input: OcrReadInput): Promi
   if (mode === "off") throw new OcrRefusedError("OCR is off (DOCSLURP_OCR_MODE=off)", "off");
   if (mode === "hosted") throw new OcrRefusedError("DOCSLURP_OCR_MODE=hosted reads pages with the hosted reader, not a recogniser", "hosted");
   const language = planOcrLanguages(input.languageSetting, env);
-  const maxFrames = Math.min(input.pages?.length ?? OCR_DEFAULT_MAX_FRAMES, OCR_DEFAULT_MAX_FRAMES);
+  const capped = Number.isSafeInteger(input.maxFrames) && input.maxFrames! >= 1 ? input.maxFrames! : OCR_DEFAULT_MAX_FRAMES;
+  const maxFrames = Math.min(input.pages?.length ?? OCR_DEFAULT_MAX_FRAMES, OCR_DEFAULT_MAX_FRAMES, capped);
   const provider = mode === "vm" ? sandboxedOcrProvider() : null;
   if (provider) {
     const size = (await lstat(input.source)).size;

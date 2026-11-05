@@ -54,7 +54,7 @@ import {
   type SupersededPurgeOptions,
   type SupersededPurgeResult,
 } from "./superseded-purge.js";
-import { enforceRunSpend, enforceRunSpendForCharge, spendCounterSql } from "./spend-check.js";
+import { enforceRunSpend, enforceRunSpendForCharge, largestFundedCharge, spendCounterSql } from "./spend-check.js";
 import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
 import { PostgresVisionAttemptBackend } from "./vision-attempt-store.js";
@@ -2754,6 +2754,11 @@ export class Store {
   async enforceSpendForCharge(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean; blocked: boolean }> {
     const result = await enforceRunSpendForCharge(this.sql, run, credits, "stage-boundary");
     return { paused: result.paused, blocked: result.blocked };
+  }
+
+  /** The largest n in 1..max whose `creditsFor(n)` the org's balance covers (spend-check.ts largestFundedCharge); read-only. */
+  async largestFundedCharge(run: { id: string; orgId: string | null; workspaceId?: string | null }, max: number, creditsFor: (n: number) => number): Promise<number> {
+    return await largestFundedCharge(this.sql, run, max, creditsFor);
   }
 
   async setDocumentFileFacts(runId: string, documentId: string, facts: import("@docslurp/shared").FileFacts): Promise<boolean> {

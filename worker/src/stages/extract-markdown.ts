@@ -105,7 +105,7 @@ import { visionGuardFor } from "../lib/vision-attempt-guard.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
-import { authorizeImageFrames, authorizeImageRead } from "../ocr/image-frames.js";
+import { affordableImageFrames, authorizeImageFrames, authorizeImageRead } from "../ocr/image-frames.js";
 import { OCR_FAILED_PAGES_KEY, OcrInfrastructureError, OcrRefusedError, ocrFailedPages, recordOcrFailedPages, resolveOcrMode } from "../ocr/mode.js";
 import { ocrDocument } from "../ocr/read-document.js";
 import { recordMeasuredPageCount, type PageCountResult } from "../lib/office-page-count.js";
@@ -1668,6 +1668,8 @@ export class ExtractMarkdownStage implements Stage {
       // Each frame read is a page of the document (intake counted the image as one): recorded, and its extra Rich frames checked
       // against the balance, before anything is charged.
       beforeCharging: (frames) => authorizeImageFrames(state, context.documentId, this.name, frames),
+      // The VM reads no more frames than the run can pay for.
+      frameBudget: (max) => affordableImageFrames(state, context.documentId, max),
       ...(signal ? { signal } : {}),
     });
     const markdown = result.pages.map((page) => page.text).join("\f");

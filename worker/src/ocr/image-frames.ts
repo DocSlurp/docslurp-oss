@@ -40,6 +40,31 @@ export async function authorizeImageRead(state: WorkflowState, documentId: strin
 }
 
 /**
+ * Before an image's OCR read starts a VM: how many frames the run can pay for, so the read never covers frames the org could
+ * not afford (the boundary stops at this cap; ocr/read-document.ts refuses the image if it had more). The same credits
+ * authorizeImageFrames checks after the read: this image's Rich frames past intake plus every other TIFF of the run's uncovered
+ * frames and the charges still buffered here. At least 1 (authorizeImageRead already covered the first frame) and at most `max`.
+ */
+export async function affordableImageFrames(state: WorkflowState, documentId: string, max: number): Promise<number> {
+  const store = state.store;
+  if (!store?.largestFundedCharge || !state.run.userId) return max;
+  const document = state.documents.find((candidate) => candidate.id === documentId);
+  const intake = Math.max(1, Math.trunc(document?.pageCount ?? 1) || 1);
+  const pipeline = state.run.pipeline;
+  const rows = store.countedImageFrames ? await store.countedImageFrames(state.run.id) : [];
+  const others = rows
+    .filter((row) => row.documentId !== documentId)
+    .reduce((sum, row) => sum + extraCreditsForMeasuredPages(pipeline, Math.max(1, row.chargedPages), row.pageCount, null, { mode: "rich", features: false }), 0);
+  const pending = state.usageLedger.pendingBillableCents;
+  const frames = await store.largestFundedCharge(
+    { id: state.run.id, orgId: state.run.orgId ?? null, workspaceId: state.run.workspaceId },
+    max,
+    (n) => extraCreditsForMeasuredPages(pipeline, intake, n, null, { mode: "rich" }) + others + pending,
+  );
+  return Math.max(1, Math.min(max, frames));
+}
+
+/**
  * After the boundary counted an image's frames and before any is charged or escalated: record them as the page basis, report
  * progress over them, and check the balance for the Rich frames admission never priced (intake counted one page). The check adds
  * the uncharged frames of every TIFF of the run (the store's rows, this document's included once recorded), as the measured

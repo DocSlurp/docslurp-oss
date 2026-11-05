@@ -14,6 +14,7 @@ import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import type { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
+import { sniffedPdf } from "../lib/sniffed-pdf.js";
 
 type Sql = postgres.Sql<Record<string, unknown>>;
 
@@ -35,7 +36,7 @@ export interface PageEmbedDeps {
 export interface EmbedPageImagesResult {
   embeddedPages: number[];
   /** Set when the call stopped early; pages after the stop were not embedded. */
-  stoppedBy?: "cost-cap" | "quality-fast";
+  stoppedBy?: "cost-cap" | "quality-fast" | "customer-image-not-decoded";
   inputTokens: number;
   costCents: number;
 }
@@ -90,6 +91,16 @@ export async function embedPageImages(
     result.stoppedBy = "quality-fast";
     return result;
   }
+  // Page images are decoded in this process (sharp/libvips) to make the JPEG the embedder reads. Only renders we produced in
+  // the parser sandbox or a VM may be: an image upload's page image is the customer's own bytes, so it is not embedded.
+  if (!sniffedPdf(document)) {
+    console.error(
+      `[page-embed] skipped: customer image not decoded in-process run=${run.id} document=${document.id} pages=${pages.length} ` +
+        "(no sandbox or VM rendition of an uploaded image exists yet; the page is indexed by its text only)",
+    );
+    result.stoppedBy = "customer-image-not-decoded";
+    return result;
+  }
   if (!run.workspaceId) throw new Error("page-embed requires a workspace-scoped run");
   const workspaceId = run.workspaceId;
   await ensurePageRows(deps.sql, document.id, document.pageCount);
@@ -106,6 +117,7 @@ export async function embedPageImages(
     try {
       const out: RenderedWindow = { pages: [], jpegs: [] };
       for (const raster of [...rasters].sort((a, b) => a.pageNumber - b.pageNumber)) {
+        if (raster.customerOriginal) throw new Error(`page-embed refused to decode the customer's original bytes document=${document.id}`);
         out.jpegs.push(await toPageJpeg(await deps.storage.getBytes(raster.artifactKey)));
         out.pages.push(raster.pageNumber);
       }

@@ -240,6 +240,36 @@ export async function enforceRunSpendForCharge(
   return result;
 }
 
+/**
+ * The largest n in 1..max whose charge (`creditsFor(n)`) the org's balance still covers, by the same rule as
+ * enforceRunSpendForCharge, or 0 when not even one does. Read-only: nothing is paused. For bounding work before it is done (the
+ * frames an image's OCR read may cover). Fails closed: a failed read throws SpendCheckUnavailableError (retryable).
+ */
+export async function largestFundedCharge(
+  client: Client,
+  run: { id: string; orgId: string | null; workspaceId?: string | null },
+  max: number,
+  creditsFor: (n: number) => number,
+): Promise<number> {
+  if (!spendCheckConfig().enabled) return max;
+  if (!run.orgId) throw new SpendCheckUnavailableError(`run ${run.id} has no organization to size a charge against`);
+  let row: { funded: boolean | null; available: string | number; workspace_budget_paused: boolean; org_budget_paused: boolean; workspace_in_org: boolean } | undefined;
+  try {
+    [row] = await client<NonNullable<typeof row>[]>`
+      select funded, available, workspace_budget_paused, org_budget_paused, workspace_in_org
+      from org_spend_status(${run.orgId}, ${run.workspaceId ?? null}::text, 0)
+    `;
+  } catch (error) {
+    pushSpendCheckFailure(run, "check-failed");
+    throw new SpendCheckUnavailableError("balance read for sizing a charge failed", { cause: error });
+  }
+  for (let n = max; n >= 1; n -= 1) {
+    const available = Number(row?.available ?? 0) - creditsFor(n);
+    if (!spendBlockCode(row ? { ...row, available, org_id: run.orgId } : row)) return n;
+  }
+  return 0;
+}
+
 function pushSpendCheckFailure(run: { id: string; orgId: string | null }, reason: string): void {
   console.error(`[spend-check] charge-refused run=${run.id} org=${run.orgId ?? "none"} reason=${reason} retryable=true`);
 }

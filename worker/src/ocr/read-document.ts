@@ -7,7 +7,7 @@ import { lstat } from "node:fs/promises";
 
 import type { WorkflowState } from "../pipeline/pipeline.js";
 import type { CommandRunner } from "../tools/runner.js";
-import { readWithOcr, type OcrReadOutcome } from "./engine.js";
+import { OCR_DEFAULT_MAX_FRAMES, readWithOcr, type OcrReadOutcome } from "./engine.js";
 import { escalateOcrPages, type EscalationSummary } from "./escalation.js";
 import { HOSTED_OCR_MAX_BYTES, HOSTED_OCR_MIME_TYPES, HostedOcrSkipped, ocrEscalationEnabled, type HostedOcrReader } from "./hosted-reader.js";
 import { imageTooManyFramesError } from "./image-frames.js";
@@ -33,6 +33,12 @@ export interface OcrDocumentInput {
    * image's page basis and spend authorization (image-frames.ts). A throw refuses the document with nothing charged.
    */
   beforeCharging?: (frames: number) => Promise<void>;
+  /**
+   * An image's frames the run can pay for (image-frames.ts affordableImageFrames), asked before the read starts: the boundary
+   * reads no more. When the image had more frames than that, beforeCharging is called with one past the budget (it pauses the
+   * run and refuses the image) and nothing is charged.
+   */
+  frameBudget?: (max: number) => Promise<number>;
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
 }
@@ -60,8 +66,10 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
   if (mode === "off") throw new OcrRefusedError("OCR is off (DOCSLURP_OCR_MODE=off)", "off");
   if (mode === "hosted") return await hostedDocument(input);
   let outcome: OcrReadOutcome | null = null;
+  const budget = input.kind === "image" && input.frameBudget ? Math.max(1, Math.min(OCR_DEFAULT_MAX_FRAMES, await input.frameBudget(OCR_DEFAULT_MAX_FRAMES))) : null;
   try {
     outcome = await readWithOcr(input.runner, {
+      ...(budget !== null && budget < OCR_DEFAULT_MAX_FRAMES ? { maxFrames: budget } : {}),
       source: input.source,
       kind: input.kind,
       ...(input.pages ? { pages: input.pages } : {}),
@@ -72,7 +80,14 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
     });
     // An image with more frames than one file may hold is refused before anything is charged: reading its first frames would
     // publish part of it under a bill that claims the whole file.
-    if (input.kind === "image" && outcome.truncatedFrames) throw imageTooManyFramesError(input.documentId);
+    if (input.kind === "image" && outcome.truncatedFrames) {
+      if (budget !== null && budget < OCR_DEFAULT_MAX_FRAMES) {
+        // The image has more frames than the run can pay for: the frame check pauses the run and refuses it, nothing charged.
+        await input.beforeCharging?.(budget + 1);
+        throw new OcrRefusedError(`image ${input.documentId} has more frames than the run's credits cover (${budget} funded)`, "spend-paused");
+      }
+      throw imageTooManyFramesError(input.documentId);
+    }
     await input.beforeCharging?.(outcome.pages.length);
     // The recogniser's reads are billed first; an escalation read of the same page is the same Rich page (the ledger sums
     // readers per page), with its own provider cost.
