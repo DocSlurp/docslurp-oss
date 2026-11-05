@@ -226,6 +226,31 @@ export const INFRA_COST_OBSERVATIONS: readonly InfraCostObservation[] = [
     method: "pricing-page",
     notes: "One physical core (2 vCPU equivalent). Memory is $0.00000222/GiB-s on top.",
   },
+  // Modal Sandboxes bill at non-preemptible rates (3x the Function list price), on max(request, usage).
+  {
+    id: "modal:sandbox-cpu-core",
+    provider: "modal",
+    sku: "sandbox-cpu-core",
+    unit: "hour",
+    usd: 0.00003942 * 3_600,
+    capacity: { vcpu: 2 },
+    sourceUrl: MODAL_PRICING,
+    observedAt: "2026-11-05",
+    method: "pricing-page",
+    notes: "Sandbox CPU, one physical core (2 vCPU equivalent), $0.00003942/core-s (non-preemptible). Minimum 0.125 cores per sandbox. Backs sandboxed document and OCR jobs, which bill as pages, not as CPU time.",
+  },
+  {
+    id: "modal:sandbox-memory-gib",
+    provider: "modal",
+    sku: "sandbox-memory-gib",
+    unit: "hour",
+    usd: 0.00000667 * 3_600,
+    capacity: { memoryGb: 1 },
+    sourceUrl: MODAL_PRICING,
+    observedAt: "2026-11-05",
+    method: "pricing-page",
+    notes: "Sandbox memory, $0.00000667/GiB-s (non-preemptible). Minimum 128 MiB per sandbox.",
+  },
   // Storage.
   {
     id: "tigris:standard",
