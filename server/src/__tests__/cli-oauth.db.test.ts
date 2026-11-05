@@ -255,7 +255,10 @@ describe("authorization code flow for the CLI", () => {
     // `other` cannot approve a grant into an organization it does not belong to.
     const { callback } = await authorize({ user: "other", org: "org-owner" });
     expect(callback).toBeNull();
-    // Leaving the organization invalidates the token at once.
+    // Leaving the organization invalidates the token at once. One organization per user (migration 0127): `other` moves
+    // from its own organization into the owner's, rather than holding two memberships.
+    await q("delete from org_memberships where org_id = 'org-other' and user_id = 'other'");
+    expect((await whoami(other.access_token)).status).toBe(401);
     await q("insert into org_memberships(org_id, user_id, role) values ('org-owner', 'other', 'member')");
     const joined = await login({ user: "other", org: "org-owner" });
     expect((await whoami(joined.access_token)).status).toBe(200);
