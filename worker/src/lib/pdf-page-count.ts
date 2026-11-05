@@ -45,7 +45,15 @@ export async function recordMeasuredPdfPageCount(args: {
       console.error(`[pdf-pages] refused document=${document.id}: the VM PDF provider cannot count pages; refusing to bill an estimate or parse on the host`);
       throw new Error("PDF page count unavailable: the VM PDF provider does not count pages (guest protocol 8 or newer is required)");
     }
-    const counted = await provider.pageCount({ input: await args.sourcePath() }, args.signal);
+    let counted: Awaited<ReturnType<NonNullable<typeof provider.pageCount>>>;
+    try {
+      counted = await provider.pageCount({ input: await args.sourcePath() }, args.signal);
+    } catch (error) {
+      // A VM that ran and failed still cost the provider: record its usage (0 credits) before the refusal propagates.
+      const usage = (error as { usage?: unknown } | null)?.usage;
+      if (usage && typeof usage === "object") state.usageLedger.enqueue(usage as Parameters<typeof state.usageLedger.enqueue>[0]);
+      throw error;
+    }
     if (counted.usage) state.usageLedger.enqueue(counted.usage);
     pages = Number.isSafeInteger(counted.pages) && counted.pages >= 1 && counted.pages <= MAX_MEASURED_PDF_PAGES ? counted.pages : null;
   } else {

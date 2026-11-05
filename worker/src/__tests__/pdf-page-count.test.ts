@@ -9,6 +9,8 @@ import { Store } from "../db/store.js";
 import { registerExtractorPlugin, resetExtractorPluginsForTest, type SandboxedPdfExtractorProvider } from "../extractors/plugins.js";
 import { recordMeasuredPdfPageCount } from "../lib/pdf-page-count.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
+import { runDocumentStage } from "../pipeline/checkpoints.js";
+import { SandboxRunError } from "../sandbox/types.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
@@ -117,5 +119,32 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
     const { rows } = await db.query<{ amount: string; cost_cents: string }>(`select amount::text, cost_cents::text from usage_events where run_id = 'run1' and metric = $1`, [BILLABLE_UNIT_METRICS.fastPage]);
     expect(Number(rows[0]!.amount)).toBe(19);
     expect(Number(rows[0]!.cost_cents)).toBeCloseTo(pageCredits("fast", 19));
+  }, 60_000);
+
+  it("a page-count VM that ran and failed records its provider cost (0 credits) before the refusal propagates", async () => {
+    await db.exec(`
+      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+        values ('run-fail', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 1, 3);
+      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts)
+        values ('vm-fail', 'o1', 'u1', 'w1', 'run-fail', 'e.pdf', 'application/pdf', 'raw/e', 'processing', 3, 'assumed', '${JSON.stringify(pdfFacts)}');`);
+    const usage = { provider: "modal", model: "doppler-vm", metric: "sandbox_compute", amount: 12, unit: "second", costCents: 0.42, inputTokens: 0, outputTokens: 0, metadata: { costRollup: "authoritative" } };
+    const pageCount = vi.fn(async () => { throw new SandboxRunError("Document VM invalid page-count envelope", usage as never); });
+    registerExtractorPlugin({ apiVersion: 1, name: "vm", sandboxedPdf: { id: "test-vm", maxSourceBytes: 1e9, assertConfigured() {}, run: vi.fn(), timeoutMs: () => 1, pageCount } as unknown as SandboxedPdfExtractorProvider });
+    const { state, document } = await stateFor("run-fail", "vm-fail");
+    await runDocumentStage(state, document, "format-detect", "vm-fail:format-detect", "x", async () => {
+      await recordMeasuredPdfPageCount({ state, document, runner: runner("Pages: 9\n"), sourcePath: async () => "/tmp/e.pdf", env: { DOCSLURP_PDF_MODE: "vm" } });
+      return { stats: {} };
+    }).catch(() => undefined);
+    expect(state.documentStage("vm-fail", "format-detect")?.status).toBe("failed");
+    const rows = (await db.query<{ metric: string; cost_cents: string; provider_cost: string | null }>(
+      `select metric, cost_cents::text, (metadata ->> 'providerCostCents') as provider_cost from usage_events where run_id = 'run-fail'`)).rows;
+    expect(rows).toEqual([expect.objectContaining({ metric: "sandbox_compute" })]);
+    // Our cost is kept as providerCostCents; the customer is charged nothing for it (cost_cents 0).
+    expect(Number(rows[0]!.provider_cost)).toBeCloseTo(0.42);
+    expect(Number(rows[0]!.cost_cents)).toBe(0);
+    // Customer credits: nothing billable for the run.
+    const billable = await db.query<{ n: number }>(`select count(*)::int as n from usage_events where run_id = 'run-fail' and metric = any($1)`, [Object.values(BILLABLE_UNIT_METRICS)]);
+    expect(billable.rows[0]!.n).toBe(0);
+    expect(await pageRow("vm-fail")).toEqual({ page_count: 3, page_count_source: "assumed" });
   }, 60_000);
 });
