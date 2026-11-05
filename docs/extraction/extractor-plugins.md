@@ -40,6 +40,17 @@ Workspaces select the extractor with `documentExtraction.order.pdf: ["vm-pdf"]` 
   one, the local artifact graph serves image targets.
 - Image orientation without a provider is off; it never decodes pixels on the host.
 
+### Checking a configuration before a release
+
+`node worker/dist/temporal/preflight-main.js` (in the image, `/app/worker/dist/temporal/preflight-main.js`) runs
+the worker's startup configuration checks with the current environment and exits: the parser sandbox probe, plugin
+load and API version, the `DOCSLURP_PDF_EXTRACTOR` setting, extractor id aliases, the OCR mode, profile and provider
+(including the provider's own `assertConfigured()`), the OCR model manifest and the native PDF engine. Exit 0 means
+the worker would start; 1 names the failing step (`[worker-preflight] FAILED step=...`); 2 means the checks did not
+finish within `DOCSLURP_WORKER_PREFLIGHT_TIMEOUT_MS` (default 120000). It never connects to Temporal or the database,
+runs no migrations, schedulers or maintenance and writes nothing, so a deployment can run it on a new image before
+migrating. Checks that need the database (the vision ledger schema) are reported as skipped.
+
 ## Renaming an extractor
 
 When a deployment's stored configs name an extractor by an id it no longer serves (for example after moving a
