@@ -1,5 +1,5 @@
 import { sandboxedPdfProvider, VM_PDF_EXTRACTOR_ID } from "./plugins.js";
-import { writeFile } from "node:fs/promises";
+import { open, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { builtInDocumentExtractorDescriptors, canonicalExtractorId, configureExtractorIdAliases, parseExtractorOptions, resolvePdfExtractorSetting, RETIRED_EXTRACTOR_IDS, sandboxedPdfConfigured, type ExtractorDescriptor } from "@docslurp/shared";
 import type { CommandPlan, CommandRunner } from "../tools/runner.js";
@@ -312,6 +312,34 @@ export function pandocReader(source: string, context?: PrepareContext): string |
     case "latex": return "latex";
     default: return undefined;
   }
+}
+
+const OLE_MAGIC = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+const OFFICE_FORMATS = new Set(["office-word", "office-other", "office-pptx", "office-excel"]);
+const LEGACY_OFFICE = /\.(doc|ppt|xls|dot|pps|xlt)$/i;
+const LEGACY_OFFICE_MIME = /^application\/(msword|vnd\.ms-(powerpoint|excel)|x-ole-storage)$/i;
+
+/**
+ * Why an Office source has no reader in this worker, or null. Legacy binary Word, PowerPoint and Excel files and
+ * password-protected Office Open XML files (both are OLE compound files) are not read by any extractor here: the stage
+ * fails them as an unsupported format instead of handing them to a reader that would return nothing.
+ */
+export async function unsupportedSourceReason(sourcePath: string, context: PrepareContext & { filename?: string }): Promise<string | null> {
+  if (!OFFICE_FORMATS.has(context.format ?? "")) return null;
+  let head = Buffer.alloc(0);
+  try {
+    const handle = await open(sourcePath, "r");
+    try {
+      const { buffer, bytesRead } = await handle.read(Buffer.alloc(8), 0, 8, 0);
+      head = buffer.subarray(0, bytesRead);
+    } finally { await handle.close(); }
+  } catch { /* unreadable: the extractor reports it */ }
+  const ole = head.equals(OLE_MAGIC);
+  const legacyName = LEGACY_OFFICE.test(context.filename ?? sourcePath);
+  if (!ole && !(legacyName && LEGACY_OFFICE_MIME.test(context.mimeType ?? ""))) return null;
+  return legacyName || !/\.(docx|pptx|xlsx)$/i.test(context.filename ?? sourcePath)
+    ? `unsupported format: legacy binary Office file (${context.format}); convert it to .docx, .pptx or .xlsx`
+    : `unsupported format: encrypted or password-protected Office file (${context.format}); remove the password and upload again`;
 }
 
 /** An Office Open XML sidecar plan, unavailable for the legacy binary format of the same family (.ppt, .xls). */

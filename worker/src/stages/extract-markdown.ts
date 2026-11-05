@@ -91,7 +91,7 @@ import { isDocumentLevelFailure, RunPolicyError } from "../lib/document-failure.
 import { rethrowIfTeardown } from "../sandbox/teardown-breaker.js";
 import { SpendCheckUnavailableError } from "../db/spend-check.js";
 import { reportExtractionDecision, summarizeNativePdfShadow, type NativePdfStageStats } from "../native-pdf/telemetry.js";
-import { documentExtractorRegistry, serializeExtractorOptions, type CandidateExecutors, type ExtractedCandidate, type PreparedExtractor } from "../extractors/registry.js";
+import { documentExtractorRegistry, serializeExtractorOptions, unsupportedSourceReason, type CandidateExecutors, type ExtractedCandidate, type PreparedExtractor } from "../extractors/registry.js";
 import { ExtractorAttemptLedger } from "../extractors/attempt-ledger.js";
 import { runLocalPdfArtifactGraph } from "../extractors/local-graph-runner.js";
 import type { CommandRunner } from "../tools/runner.js";
@@ -408,6 +408,14 @@ export class ExtractMarkdownStage implements Stage {
                 // does not know is kept unread too instead of reaching an OCR-capable extractor.
                 const keepImageUnread = (format === "image" || (document.mimeType ?? "").startsWith("image/")) &&
                   !qualityAllowsPageReading(state.run.pipeline.quality);
+                // An Office file no reader here can open fails now, loudly and for good, never through a weaker reader.
+                const unsupported = keepImageUnread ? null : await unsupportedSourceReason(tempFile, {
+                  format, mimeType: document.fileFacts?.sniffedMimeType ?? document.mimeType, filename: document.filename,
+                });
+                if (unsupported) {
+                  console.error(`[extract-markdown] unsupported-format document=${document.id} format=${format} reason=${JSON.stringify(unsupported)}`);
+                  throw new Error(unsupported);
+                }
                 let plannedExtractors = keepImageUnread ? null : await this.planExtractors({
                   mimeType: document.fileFacts?.sniffedMimeType ?? null,
                   tempFile,
