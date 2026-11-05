@@ -171,6 +171,61 @@ describe("image documents are read by the OCR extractor", () => {
     } finally { await h.cleanup(); }
   });
 
+  /** A store that persists page counts, reports the run's counted TIFFs and pauses the run past `balance` credits. */
+  function spendStore(balance: number) {
+    const calls = { pageCounts: [] as number[], checks: [] as number[], events: [] as Array<Record<string, unknown>> };
+    const known: Record<string, unknown> = {
+      getCompletedPages: async () => new Set<number>(),
+      setDocumentPageCount: async (_run: string, _doc: string, pages: number) => { calls.pageCounts.push(pages); return true; },
+      countedImageFrames: async () => calls.pageCounts.length ? [{ documentId: "doc-1", pageCount: calls.pageCounts.at(-1)!, chargedPages: 0 }] : [],
+      enforceSpendForCharge: async (_run: unknown, credits: number) => { calls.checks.push(credits); return { paused: credits > balance }; },
+      appendEvent: async (event: Record<string, unknown>) => { calls.events.push(event); },
+    };
+    const store = new Proxy(known, { get: (target, key: string) => target[key] ?? (async () => undefined) });
+    return { store, calls };
+  }
+
+  it("checks the balance for a TIFF's counted frames before charging any: a low balance pauses the run and refuses it", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const frames = Array.from({ length: 40 }, (_, index) => ({ frame: index + 1, text: `Page ${index + 1}` }));
+    const h = await harness({ format: "image", filename: "deposition.tiff", mimeType: "image/tiff", pageCount: 1, frames: () => frames });
+    const { store, calls } = spendStore(1);
+    (h.state as any).store = store;
+    try {
+      await h.stage.run(h.state);
+      const checkpoint = h.checkpoint();
+      expect(checkpoint?.status).toBe("failed");
+      expect(publicDocumentError(checkpoint?.error)).toBe(PUBLIC_ERROR_MESSAGES.imageFramesUnfunded);
+      // 39 frames beyond intake's one page, Rich: 9.75 credits checked against a 1-credit balance, and nothing charged.
+      expect(calls.pageCounts).toEqual([40]);
+      expect(calls.checks).toHaveLength(1);
+      expect(calls.checks[0]).toBeGreaterThanOrEqual(9.75);
+      expect(h.richIds()).toEqual([]);
+    } finally { await h.cleanup(); }
+  });
+
+  it("charges and reports every counted frame when the balance covers them", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    const frames = Array.from({ length: 40 }, (_, index) => ({ frame: index + 1, text: `Page ${index + 1}` }));
+    const h = await harness({ format: "image", filename: "deposition.tiff", mimeType: "image/tiff", pageCount: 1, frames: () => frames });
+    const { store, calls } = spendStore(1_000);
+    (h.state as any).store = store;
+    try {
+      await h.stage.run(h.state);
+      const checkpoint = h.checkpoint();
+      expect(checkpoint?.status).toBe("completed");
+      expect(h.richIds()).toHaveLength(40);
+      // Progress and stage stats count the 40 frames, not intake's one page.
+      expect(checkpoint?.stats).toMatchObject({ processedPages: 40, pageCount: 40 });
+      const progress = [...h.state.pageProgress.values()].filter((entry) => entry.documentId === "doc-1");
+      expect(progress.filter((entry) => entry.status === "completed").map((entry) => entry.pageNumber)).toEqual(Array.from({ length: 40 }, (_, index) => index + 1));
+      expect(progress.every((entry) => entry.pageCount === 40)).toBe(true);
+      expect(h.state.run.pagesTotal).toBe(40);
+      expect(JSON.stringify(calls.events)).toContain('"pageCount":40');
+    } finally { await h.cleanup(); }
+  });
+
   it("refuses a TIFF with more frames than one file may hold, publishing nothing and charging nothing", async () => {
     vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
     vi.spyOn(console, "error").mockImplementation(() => undefined);

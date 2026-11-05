@@ -107,7 +107,7 @@ import { visionGuardFor } from "../lib/vision-attempt-guard.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
-import { recordImageFramePages } from "../ocr/image-frames.js";
+import { authorizeImageFrames } from "../ocr/image-frames.js";
 import { OCR_FAILED_PAGES_KEY, OcrRefusedError, ocrFailedPages, resolveOcrMode } from "../ocr/mode.js";
 import { ocrDocument } from "../ocr/read-document.js";
 
@@ -1020,7 +1020,12 @@ export class ExtractMarkdownStage implements Stage {
                     });
                   }
 
-                  await completeDocumentPages(state, document, this.name, remaining, pageCount);
+                  // A multi-frame image's page basis grows once OCR counts its frames: progress and stats cover every frame.
+                  const countedPages = Math.max(pageCount, document.pageCount);
+                  const processedPages = countedPages > pageCount
+                    ? [...remaining, ...Array.from({ length: countedPages - pageCount }, (_, index) => pageCount + index + 1)]
+                    : remaining;
+                  await completeDocumentPages(state, document, this.name, processedPages, countedPages);
 
                   console.log(
                     `[extract-debug] document=${document.id} completed ` +
@@ -1054,7 +1059,8 @@ export class ExtractMarkdownStage implements Stage {
                       preserveTables: state.run.pipeline.preserveTables,
                       preserveCode: state.run.pipeline.preserveCode,
                       skippedPages: completedPages.size,
-                      processedPages: remaining.length,
+                      processedPages: processedPages.length,
+                      pageCount: countedPages,
                       // Which extractor served the document, what else was planned or tried, and how the
                       // native PDF engine took part: queryable from stage stats without fetching the manifest.
                       extractor: winningCandidate.label,
@@ -1597,10 +1603,11 @@ export class ExtractMarkdownStage implements Stage {
       ...(context.ocrLanguage ? { languageSetting: context.ocrLanguage } : {}),
       hostedReader: createHostedOcrReader({ state, cfg: this.cfg, runner: this.runner }),
       stage: this.name,
+      // Each frame read is a page of the document (intake counted the image as one): recorded, and its extra Rich frames checked
+      // against the balance, before anything is charged.
+      beforeCharging: (frames) => authorizeImageFrames(state, context.documentId, this.name, frames),
       ...(signal ? { signal } : {}),
     });
-    // Each frame read is a page of the document (intake counted the image as one).
-    await recordImageFramePages(state, context.documentId, result.pages.length);
     const markdown = result.pages.map((page) => page.text).join("\f");
     const scratchDir = await mkdtemp(path.join(tmpdir(), "docslurp-extract-ocr-"));
     const outputPath = path.join(scratchDir, "ocr.md");

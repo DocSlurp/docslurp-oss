@@ -5,6 +5,8 @@
  */
 import { DOCUMENT_FAILURE_MARKERS, IMAGE_MAX_FRAMES } from "@docslurp/shared";
 
+import { extraCreditsForMeasuredPages } from "../lib/office-page-count.js";
+import { emitDocumentPageProgress } from "../pipeline/checkpoints.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
 import { OcrRefusedError } from "./mode.js";
 
@@ -12,6 +14,39 @@ import { OcrRefusedError } from "./mode.js";
 export function imageTooManyFramesError(documentId: string): OcrRefusedError {
   console.error(`[ocr] image-frames-refused document=${documentId} max=${IMAGE_MAX_FRAMES}: the image holds more frames than one file may`);
   return new OcrRefusedError(`${DOCUMENT_FAILURE_MARKERS.imageTooManyFrames} (${IMAGE_MAX_FRAMES})`, "too-many-frames");
+}
+
+/**
+ * After the boundary counted an image's frames and before any is charged or escalated: record them as the page basis, report
+ * progress over them, and check the balance for the Rich frames admission never priced (intake counted one page). The check adds
+ * the uncharged frames of every TIFF of the run (the store's rows, this document's included once recorded), as the measured
+ * Office page check does, so concurrent documents cannot each fit alone and together overdraw. When they no longer fit the run
+ * is paused and the image is refused before anything is charged. The count itself needs the boundary's read: the host never
+ * parses the file.
+ */
+export async function authorizeImageFrames(state: WorkflowState, documentId: string, stageName: string, frames: number): Promise<void> {
+  const document = state.documents.find((candidate) => candidate.id === documentId);
+  if (!document) return;
+  const intake = Math.max(1, Math.trunc(document.pageCount) || 1);
+  await recordImageFramePages(state, documentId, frames);
+  if (frames <= intake) return;
+  // The run's page total counted the image as one page; progress counts every frame.
+  state.run.pagesTotal = Math.max(0, Number(state.run.pagesTotal) || 0) + frames - intake;
+  await emitDocumentPageProgress(state, document, stageName, 1, frames, "processing");
+  const store = state.store;
+  if (!store?.enforceSpendForCharge || !state.run.userId) return;
+  const pipeline = state.run.pipeline;
+  const own = extraCreditsForMeasuredPages(pipeline, intake, frames, null, { mode: "rich" });
+  if (!(own > 0)) return;
+  const ownRich = extraCreditsForMeasuredPages(pipeline, intake, frames, null, { mode: "rich", features: false });
+  const rows = store.countedImageFrames ? await store.countedImageFrames(state.run.id) : [];
+  // Frames of the run's TIFFs no Rich charge covers yet (page 1 was priced at admission).
+  const runRich = rows.reduce((sum, row) => sum + extraCreditsForMeasuredPages(pipeline, Math.max(1, row.chargedPages), row.pageCount, null, { mode: "rich", features: false }), 0);
+  const extra = own - ownRich + Math.max(ownRich, runRich);
+  const outcome = await store.enforceSpendForCharge({ id: state.run.id, orgId: state.run.orgId ?? null, workspaceId: state.run.workspaceId, userId: state.run.userId }, extra);
+  if (!outcome.paused) return;
+  console.warn(`[ocr] image-frames-unfunded run=${state.run.id} document=${documentId} frames=${frames} intake=${intake} owes=${extra.toFixed(2)}: run paused, image refused before any charge`);
+  throw new OcrRefusedError(`${DOCUMENT_FAILURE_MARKERS.imageFramesUnfunded} (${frames} frames)`, "spend-paused");
 }
 
 /** Record the frames read as the document's page count, persisted before anything downstream reads it. */
