@@ -77,9 +77,9 @@ describe("assertOcrConfiguration", () => {
     register(provider());
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     vi.spyOn(console, "log").mockImplementation(() => undefined);
-    assertOcrConfiguration({ DOCSLURP_OCR_MODE: "vm" });
+    assertOcrConfiguration({ DOCSLURP_OCR_MODE: "vm", DOCSLURP_SERVICE_PROFILE: "service" });
     expect(warn).not.toHaveBeenCalled();
-    assertOcrConfiguration({ DOCSLURP_OCR_MODE: "vm", DOCSLURP_OCR_MAX_LONG_EDGE: "4000" });
+    assertOcrConfiguration({ DOCSLURP_OCR_MODE: "vm", DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_OCR_MAX_LONG_EDGE: "4000" });
     expect(String(warn.mock.calls[0]?.[0])).toMatch(/long-edge-opt-in DOCSLURP_OCR_MAX_LONG_EDGE=4000 .*cost more than the Rich page/);
   });
 
