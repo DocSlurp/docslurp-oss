@@ -257,7 +257,7 @@ export class PdfToolingStage implements Stage {
         tier: "cheap-layout",
         kind: "in-process",
         bestFor: ["per-page Markdown with tables, links and image placements", "reading-order repair on multi-column pages", "in-process page rendering and OCR fill"],
-        tradeoffs: ["private optional engine (DOCSLURP_NATIVE_PDF=1 images); unavailable in the public tree, which falls back to Kreuzberg and Poppler", "documents past its page limit fall back to Kreuzberg"],
+        tradeoffs: ["private optional engine (DOCSLURP_NATIVE_PDF=1 images); unavailable in the public tree, which falls back to Poppler", "documents past its page limit fall back to Poppler"],
         commands: {
           markdown: nativePdf,
           text: nativePdf,

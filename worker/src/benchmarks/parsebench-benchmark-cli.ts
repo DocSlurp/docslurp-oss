@@ -56,7 +56,7 @@ function repoRoot(): string {
 }
 
 function parseExtractor(value: string | undefined): ParseBenchDocSlurpExtractor {
-  const extractor = value ?? "kreuzberg";
+  const extractor = value ?? "hybrid";
   if (parseBenchDocSlurpExtractors.includes(extractor as ParseBenchDocSlurpExtractor)) {
     return extractor as ParseBenchDocSlurpExtractor;
   }

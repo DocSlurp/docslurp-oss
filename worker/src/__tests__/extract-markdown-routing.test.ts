@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CommandPlan } from "../tools/runner.js";
 import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
@@ -57,38 +57,12 @@ function createUploadCapture() {
 }
 
 describe("extract markdown PDF routing", () => {
-  it("prefers Kreuzberg for fast PDF extraction", async () => {
+  it("uses Poppler text for PDFs when the native-pdf engine is not installed", async () => {
     const stage = new ExtractMarkdownStage(
       {
         extractMarkdown: async () => ({ binary: "pandoc", args: [], available: true }),
+        dopplerMarkdown: async () => ({ binary: "pdftomarkdown", args: [], available: false }),
         extractText: popplerText,
-        kreuzbergMarkdown: async () => ({ binary: "node", args: [], available: true })
-      } as any,
-      {} as any,
-      {} as any
-    );
-
-    const planned = await (stage as any).planExtractors({
-      tempFile: "/tmp/sample.pdf",
-      format: "pdf",
-      order: {},
-      options: {},
-      multiStrategyVoting: false,
-      secondaryId: "next-in-order",
-      attemptLedger: new ExtractorAttemptLedger()
-    });
-
-    expect(planned.primary.label).toBe("kreuzberg");
-    expect(planned.secondary).toBeNull();
-    expect(planned.tableAware).toBe(true);
-  });
-
-  it("falls back to the native-pdf engine, then Poppler, when Kreuzberg is unavailable", async () => {
-    const stage = new ExtractMarkdownStage(
-      {
-        extractMarkdown: async () => ({ binary: "pandoc", args: [], available: true }),
-        extractText: popplerText,
-        kreuzbergMarkdown: async () => ({ binary: "node", args: [], available: false })
       } as any,
       {} as any,
       {} as any
@@ -109,12 +83,12 @@ describe("extract markdown PDF routing", () => {
     expect(planned.tableAware).toBe(false);
   });
 
-it("prefers the native-pdf engine over Poppler when it is installed", async () => {
+  it("prefers the native-pdf engine over Poppler when it is installed", async () => {
     const stage = new ExtractMarkdownStage(
       {
         extractMarkdown: async () => ({ binary: "pandoc", args: [], available: true }),
+        dopplerMarkdown: async () => ({ binary: "pdftomarkdown", args: [], available: false }),
         extractText: popplerText,
-        kreuzbergMarkdown: async () => ({ binary: "node", args: [], available: false })
       } as any,
       {} as any,
       {} as any
@@ -136,48 +110,72 @@ it("prefers the native-pdf engine over Poppler when it is installed", async () =
     expect(planned.tableAware).toBe(true);
   });
 
-  it("uses Kreuzberg before Pandoc for non-PDF extraction", async () => {
+  it("prefers Doppler's Markdown for PDFs when it is installed, in the sandbox like other host tools", async () => {
     const stage = new ExtractMarkdownStage(
       {
-        extractMarkdown: async () => ({ binary: "pandoc", args: [], available: true }),
-        kreuzbergMarkdown: async () => ({ binary: "node", args: [], available: true })
+        dopplerMarkdown: async (source: string) => ({ binary: "pdftomarkdown", args: ["--", source], available: true }),
+        extractText: popplerText,
       } as any,
       {} as any,
       {} as any
     );
-
+    setNativePdfEngineForTesting(fakeNativeEngine());
     const planned = await (stage as any).planExtractors({
-      tempFile: "/tmp/brief.docx",
-      format: "office-word",
-      order: {},
-      options: {},
-      multiStrategyVoting: false,
-      secondaryId: "next-in-order",
-      attemptLedger: new ExtractorAttemptLedger()
+      tempFile: "/tmp/sample.pdf", format: "pdf", order: {}, options: {}, multiStrategyVoting: true,
+      secondaryId: "next-in-order", attemptLedger: new ExtractorAttemptLedger(),
+    });
+    expect(planned.primary.label).toBe("doppler-md");
+    expect(planned.primary.plan.args).toEqual(["--", "/tmp/sample.pdf"]);
+    expect(planned.secondary.label).toBe("native-pdf");
+    expect(planned.tableAware).toBe(true);
+  });
+
+  it("fails closed when an image requires Doppler and pdftomarkdown is missing", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const runner = { dopplerMarkdown: async () => ({ binary: "pdftomarkdown", args: [], available: false }) } as any;
+    await expect(documentExtractorRegistry.prepare("doppler-md", runner, "/tmp/sample.pdf", undefined, { format: "pdf", env: { DOCSLURP_DOPPLER_REQUIRED: "1" } }))
+      .rejects.toThrow(/doppler-md unavailable/);
+    const optional = await documentExtractorRegistry.prepare("doppler-md", runner, "/tmp/sample.pdf", undefined, { format: "pdf", env: {} });
+    expect(optional.plan.available).toBe(false);
+  });
+
+  it("reads Word documents with Pandoc through the office sidecar, and slides and sheets with their own sidecars", async () => {
+    const officeMarkdown = async (kind: string) => ({ binary: "python3", args: ["/app/worker/scripts/office_markdown.py", "--kind", kind], available: true });
+    const stage = new ExtractMarkdownStage(
+      { extractMarkdown: async () => ({ binary: "pandoc", args: [], available: true }), officeMarkdown } as any,
+      {} as any,
+      {} as any
+    );
+    const plan = (tempFile: string, format: string) => (stage as any).planExtractors({
+      tempFile, format, order: {}, options: {}, multiStrategyVoting: false, secondaryId: "next-in-order",
+      attemptLedger: new ExtractorAttemptLedger(),
     });
 
-    expect(planned.primary.label).toBe("kreuzberg");
-    expect(planned.secondary).toBeNull();
-    expect(planned.tableAware).toBe(true);
+    const word = await plan("/tmp/brief.docx", "office-word");
+    expect(word.primary.label).toBe("pandoc");
+    expect(word.primary.plan.args).toEqual(expect.arrayContaining(["--kind", "docx"]));
+    expect(word.secondary).toBeNull();
+    expect((await plan("/tmp/deck.pptx", "office-pptx")).primary.label).toBe("pptx");
+    expect((await plan("/tmp/book.xlsx", "office-excel")).primary.label).toBe("xlsx");
   });
 
   it("honors Poppler retry overrides for PDFs", async () => {
     const stage = new ExtractMarkdownStage(
       {
         extractMarkdown: async () => ({ binary: "pandoc", args: [], available: true }),
+        dopplerMarkdown: async () => ({ binary: "pdftomarkdown", args: [], available: false }),
         extractText: popplerText,
-        kreuzbergMarkdown: async () => ({ binary: "node", args: [], available: false })
       } as any,
       {} as any,
       {} as any
     );
 
     const attemptLedger = new ExtractorAttemptLedger();
-    attemptLedger.reserve("kreuzberg");
+    attemptLedger.reserve("native-pdf");
     const planned = await (stage as any).planExtractors({
       tempFile: "/tmp/sample.pdf",
       format: "pdf",
-      order: { pdf: ["kreuzberg", "poppler-text"] },
+      order: { pdf: ["native-pdf", "poppler-text"] },
       options: {},
       multiStrategyVoting: false,
       secondaryId: "next-in-order",
@@ -191,7 +189,7 @@ it("prefers the native-pdf engine over Poppler when it is installed", async () =
   it("does not plan an unavailable tool or reattempt a voting candidate on retry", async () => {
     const stage = new ExtractMarkdownStage(
       {
-        kreuzbergMarkdown: async () => ({ binary: "kreuzberg", args: [], available: false }),
+        dopplerMarkdown: async () => ({ binary: "pdftomarkdown", args: [], available: false }),
         extractText: popplerText,
       } as any,
       {} as any,
@@ -205,7 +203,7 @@ it("prefers the native-pdf engine over Poppler when it is installed", async () =
     setNativePdfEngineForTesting(fakeNativeEngine());
     const first = await (stage as any).planExtractors(args);
     expect([first.primary.label, first.secondary.label]).toEqual(["native-pdf", "poppler-text"]);
-    expect(attemptLedger.snapshot()).toEqual({ attempted: [], unavailable: ["kreuzberg"] });
+    expect(attemptLedger.snapshot()).toEqual({ attempted: [], unavailable: ["doppler-md"] });
     attemptLedger.reserve(first.primary.label);
     attemptLedger.reserve(first.secondary.label);
     const retry = await (stage as any).planExtractors(args);
@@ -215,37 +213,38 @@ it("prefers the native-pdf engine over Poppler when it is installed", async () =
   it("does not reattempt an explicit voting secondary on retry", async () => {
     const stage = new ExtractMarkdownStage(
       {
-        kreuzbergMarkdown: async () => ({ binary: "kreuzberg", args: [], available: true }),
+        dopplerMarkdown: async () => ({ binary: "pdftomarkdown", args: [], available: false }),
         extractText: popplerText,
       } as any,
       {} as any,
       {} as any,
     );
+    setNativePdfEngineForTesting(fakeNativeEngine());
     const attemptLedger = new ExtractorAttemptLedger();
     const args = {
       tempFile: "/tmp/sample.pdf", format: "pdf",
-      order: { pdf: ["kreuzberg", "poppler-text"] }, options: {},
+      order: { pdf: ["native-pdf", "poppler-text"] }, options: {},
       multiStrategyVoting: true, secondaryId: "poppler-text", attemptLedger,
     };
     const first = await (stage as any).planExtractors(args);
-    expect([first.primary.label, first.secondary.label]).toEqual(["kreuzberg", "poppler-text"]);
+    expect([first.primary.label, first.secondary.label]).toEqual(["native-pdf", "poppler-text"]);
     attemptLedger.reserve(first.primary.label);
     attemptLedger.reserve(first.secondary.label);
     const retry = await (stage as any).planExtractors(args);
     expect(retry).toBeNull();
   });
 
-  it("uploads file-backed extractor output for Kreuzberg candidates", async () => {
-    const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-kreuzberg-test-"));
-    const sourceTemp = path.join(scratch, "source.pdf");
-    const outputPath = `${sourceTemp}.kreuzberg.md`;
-    await writeFile(sourceTemp, "pdf");
+  it("uploads file-backed extractor output for office sidecar candidates", async () => {
+    const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-office-test-"));
+    const sourceTemp = path.join(scratch, "source.pptx");
+    const outputPath = `${sourceTemp}.pptx.md`;
+    await writeFile(sourceTemp, "pptx");
 
     const uploaded = createUploadCapture();
     const stage = new ExtractMarkdownStage(
       {
         run: async (_plan: CommandPlan) => {
-          await writeFile(outputPath, "kreuzberg text");
+          await writeFile(outputPath, "slide text");
           return { stdout: "", stderr: "" };
         }
       } as any,
@@ -257,16 +256,16 @@ it("prefers the native-pdf engine over Poppler when it is installed", async () =
     );
 
     const candidate = await (stage as any).extractCandidate(
-      await documentExtractorRegistry.prepare("kreuzberg", {
-        kreuzbergMarkdown: async () => ({ binary: "node", args: [], available: true }),
+      await documentExtractorRegistry.prepare("pptx", {
+        officeMarkdown: async () => ({ binary: "python3", args: [], available: true }),
       } as any, sourceTemp),
-      "demo-user/run-1/markdown/doc-1.kreuzberg.md",
+      "demo-user/run-1/markdown/doc-1.pptx.md",
       sourceTemp
     );
 
-    expect(candidate.textUri).toBe("s3://docslurp/demo-user/run-1/markdown/doc-1.kreuzberg.md");
+    expect(candidate.textUri).toBe("s3://docslurp/demo-user/run-1/markdown/doc-1.pptx.md");
     expect(candidate.tempTextPath).toBe(outputPath);
-    expect(uploaded.read()).toBe("kreuzberg text");
+    expect(uploaded.read()).toBe("slide text");
     await uploaded.done;
   });
 
@@ -594,7 +593,7 @@ it("prefers the native-pdf engine over Poppler when it is installed", async () =
     const [resultA, resultB] = await (stage as any).collectCandidateResults({
       primary: { label: "poppler-text", plan: { binary: "pdftotext", args: [], available: true }, mode: "stream" },
       primaryKey: "primary.md",
-      secondary: { label: "kreuzberg", plan: { binary: "node", args: [], available: true }, mode: "file", outputPath: "/tmp/kreuzberg.md" },
+      secondary: { label: "pptx", plan: { binary: "python3", args: [], available: true }, mode: "file", outputPath: "/tmp/pptx.md" },
       secondaryKey: "secondary.md",
       sourceTempFile: "/tmp/source.pdf"
     });
@@ -605,8 +604,8 @@ it("prefers the native-pdf engine over Poppler when it is installed", async () =
     expect(events).toEqual([
       "start:poppler-text",
       "end:poppler-text",
-      "start:kreuzberg",
-      "end:kreuzberg"
+      "start:pptx",
+      "end:pptx"
     ]);
   });
 });

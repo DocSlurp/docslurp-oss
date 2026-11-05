@@ -317,8 +317,8 @@ describe("a sandboxed PDF deployment (vm-pdf) refuses host PDF parsers in extrac
   it.each([
     ["order.pdf", { order: { pdf: ["native-pdf"] } }],
     ["pages", { pages: ["ocr"] }],
-    ["enrich", { enrich: ["kreuzberg"] }],
-    ["voting.secondary", { voting: { enabled: true, secondary: "kreuzberg" } }],
+    ["enrich", { enrich: ["poppler-text"] }],
+    ["voting.secondary", { voting: { enabled: true, secondary: "poppler-text" } }],
   ])("refuses %s on bulk, URL and direct-session extracts, creating nothing", async (_label, documentExtraction) => {
     vi.stubEnv("DOCSLURP_VM_PDF_INSTALLED", "1");
     const { app, runs } = setup({ scopes: ["ingest"] });
@@ -337,7 +337,7 @@ describe("a sandboxed PDF deployment (vm-pdf) refuses host PDF parsers in extrac
 describe("the same extract pipeline on a host-parsing deployment", () => {
   it("is accepted, so the refusal above is the vm-pdf rule", async () => {
     const { app } = setup({ scopes: ["ingest"] });
-    const pipeline = JSON.stringify({ documentExtraction: { order: { pdf: ["native-pdf"] }, pages: ["ocr"], enrich: ["kreuzberg"], voting: { enabled: true, secondary: "kreuzberg" } } });
+    const pipeline = JSON.stringify({ documentExtraction: { order: { pdf: ["native-pdf"] }, pages: ["ocr"], enrich: ["poppler-text"], voting: { enabled: true, secondary: "poppler-text" } } });
     expect((await app.request("/extracts/bulk", bulk([text("a.txt")], { pipeline }))).status).toBeLessThan(300);
   });
 });

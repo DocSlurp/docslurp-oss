@@ -45,7 +45,7 @@ The cap is per command, not per document. DocSlurp does not publish a memory fig
 
 ### What scales with concurrency
 
-`WORKER_DOC_CONCURRENCY` is the number of documents each worker processes at once. The Compose default is `1`. Memory scales with it, because each document can run its own parser commands. [Extraction feature matrix](../extraction-feature-matrix.md) gives minimum RAM per extractor (for example about 2 GB for Docling and 512 MB for Kreuzberg) and notes that four parallel documents with Docling need about 8 GB. [Worker image](../worker-image.md) puts a Docling call at about 2 GB RSS. Raise concurrency only after you have watched memory and latency at the current setting.
+`WORKER_DOC_CONCURRENCY` is the number of documents each worker processes at once. The Compose default is `1`. Memory scales with it, because each document can run its own parser commands. [Extraction feature matrix](../extraction-feature-matrix.md) gives minimum RAM per extractor (for example about 2 GB for Docling) and notes that four parallel documents with Docling need about 8 GB. [Worker image](../worker-image.md) puts a Docling call at about 2 GB RSS. Raise concurrency only after you have watched memory and latency at the current setting.
 
 ## GPU
 

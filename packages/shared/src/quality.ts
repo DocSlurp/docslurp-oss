@@ -40,28 +40,18 @@ export function qualityAllowsPageReading(quality: QualityMode | null | undefined
   return quality !== "fast";
 }
 
-/**
- * Extractors that only read a file's own text layer or structure: no OCR, no model. Fast may run only these.
- * `kreuzberg` qualifies for text-layer formats only: @kreuzberg/node 4.10.2 drops `disableOcr` and `ocr.enabled`
- * (normalizeExtractionConfig) and OCRs every image, so the worker's extractor registry refuses image inputs to
- * Kreuzberg under Fast (its config carries the `disableOcr` marker). `liteparse` runs without OCR.
- */
+/** Extractors that only read a file's own text layer or structure: no OCR, no model. Fast may run only these. */
 export const TEXT_LAYER_EXTRACTORS: ReadonlySet<string> = new Set([
-  "kreuzberg", "native-pdf", "poppler-text", "pandoc", "json", "vm-pdf", "liteparse",
+  "doppler-md", "native-pdf", "poppler-text", "pandoc", "pptx", "xlsx", "json", "vm-pdf",
 ]);
-
-/** Kreuzberg options that turn OCR on; Fast removes them and sets the `disableOcr` marker (not a Kreuzberg switch). */
-const KREUZBERG_OCR_KEYS = ["ocr", "forceOcr", "forceOcrPages", "disableOcr"] as const;
 
 /**
  * The document extraction policy Fast runs with, fail closed: `order` keeps only text-layer extractors (a format
  * left with none falls back to the defaults, which are all text-layer), extractor options keep only text-layer
- * extractors' entries, Kreuzberg loses every OCR option (no `ocr`, `forceOcr` or `forceOcrPages`) and gets the
- * `disableOcr: true` marker, which Kreuzberg itself ignores: the worker reads it to refuse image inputs to Kreuzberg,
- * the one format Kreuzberg OCRs without being asked. Artifact-graph
- * enrichment that can OCR is off; explicit image preservation remains (served by the local artifact graph, or the vm-pdf route alone when a VM provider is installed), an explicit voting secondary outside the text-layer set falls back to
- * next-in-order, and `forceOcr` is false. `removed` lists what was dropped, for a loud log line.
- * Other quality modes return the config unchanged.
+ * extractors' entries, artifact-graph enrichment that can OCR is off; explicit image preservation remains (served by
+ * the local artifact graph, or the vm-pdf route alone when a VM provider is installed), an explicit voting secondary
+ * outside the text-layer set falls back to next-in-order, and `forceOcr` is false. `removed` lists what was dropped,
+ * for a loud log line. Other quality modes return the config unchanged.
  */
 export function documentExtractionForQuality(
   config: DocumentExtractionConfig,
@@ -80,17 +70,6 @@ export function documentExtractionForQuality(
     if (!TEXT_LAYER_EXTRACTORS.has(id)) { removed.push(`options.${id}`); continue; }
     options[id] = value;
   }
-  const kreuzberg = isRecord(options.kreuzberg) ? { ...options.kreuzberg } : {};
-  for (const key of KREUZBERG_OCR_KEYS) {
-    if (key in kreuzberg && !(key === "disableOcr" && kreuzberg[key] === true)) removed.push(`options.kreuzberg.${key}`);
-    delete kreuzberg[key];
-  }
-  // Nested `kreuzberg` options are not ours to model: drop any other key that names OCR.
-  for (const key of Object.keys(kreuzberg)) {
-    if (/ocr/i.test(key)) { removed.push(`options.kreuzberg.${key}`); delete kreuzberg[key]; }
-  }
-  // The marker the worker reads to keep images away from Kreuzberg (it ignores disableOcr and OCRs images anyway).
-  options.kreuzberg = { ...kreuzberg, disableOcr: true };
   const enrich = (config.enrich ?? []).filter(target => (DIGITAL_IMAGE_TARGETS as readonly string[]).includes(target));
   if (enrich.length !== (config.enrich ?? []).length) removed.push("enrich");
   const secondary = config.voting?.secondary ?? "next-in-order";

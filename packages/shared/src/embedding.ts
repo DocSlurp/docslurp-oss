@@ -1155,7 +1155,6 @@ export const adaptiveRoutingEvidenceSchema = z.object({
     "canonical-document",
     "markdown-manifest",
     "extraction-contract",
-    "liteparse-structured",
     "page-image-evidence",
   ]),
   artifactUri: z.string(),
@@ -1216,7 +1215,7 @@ export const parserPlaybookCatalog: Record<
   "layout-aware": {
     label: "Dynamic",
     description:
-      "Prefer kreuzberg/native-pdf; align blocks with parser geometry.",
+      "Prefer layout-aware PDF Markdown; align blocks with parser geometry.",
     est: { costCentsPer100Pages: 10, latencySecPer100Pages: 180 },
     guidance: {
       preferLayoutMarkdown: true,

@@ -79,7 +79,7 @@ export type RoutingEvalFixtureResult = {
 export type RoutingEvalReport = {
   schemaVersion: typeof routingEvalSchemaVersion;
   generatedAt: string;
-  executor: "liteparse-local-structured";
+  executor: "local-structured";
   hostedAiCalls: 0;
   estimatedCostUsd: 0;
   fixtureCount: number;
@@ -299,7 +299,7 @@ export function buildRoutingEvalReport(args: {
   return {
     schemaVersion: routingEvalSchemaVersion,
     generatedAt: args.generatedAt ?? new Date().toISOString(),
-    executor: "liteparse-local-structured",
+    executor: "local-structured",
     hostedAiCalls: 0,
     estimatedCostUsd: 0,
     fixtureCount,

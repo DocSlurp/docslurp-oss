@@ -107,36 +107,38 @@ export interface ResolvedExtractionPlan {
 /** Public catalog data; runtime methods and availability live in the worker. */
 export const builtInDocumentExtractorDescriptors: ExtractorDescriptor[] = [
   {
-    id: "kreuzberg", kind: "document", label: "Kreuzberg",
-    description: "Local document parser with broad format support. Never OCRs: images go to the OCR engine.",
+    id: "pandoc", kind: "document", label: "Pandoc",
+    description: "Local document format converter to Markdown (Word, OpenDocument, RTF, EPUB, HTML, CSV/TSV, LaTeX, text).",
 
-    transforms: [{ accepts: ["source/pdf"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/office-word"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/office-pptx"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/office-excel"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/office-other"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/epub"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/html"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/plain-text"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/markdown"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/structured-csv"], emits: ["document/markdown"], scope: "document" }],
+    transforms: [{ accepts: ["source/office-word"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/office-other"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/epub"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/html"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/plain-text"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/markdown"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/structured-csv"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/latex"], emits: ["document/markdown"], scope: "document" }],
     capabilities: {
-      formats: ["pdf", "office-word", "office-pptx", "office-excel", "office-other", "epub", "html", "plain-text", "markdown", "structured-csv"],
+      formats: ["office-word", "office-other", "epub", "html", "plain-text", "markdown", "structured-csv", "latex"],
       produces: ["markdown"], costClass: "local-cpu",
     },
   },
   {
-    id: "pandoc", kind: "document", label: "Pandoc",
-    description: "Local document format converter to Markdown.",
-
-    transforms: [{ accepts: ["source/office-word"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/office-other"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/epub"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/html"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/plain-text"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/markdown"], emits: ["document/markdown"], scope: "document" }, { accepts: ["source/latex"], emits: ["document/markdown"], scope: "document" }],
-    capabilities: {
-      formats: ["office-word", "office-other", "epub", "html", "plain-text", "markdown", "latex"],
-      produces: ["markdown"], costClass: "local-cpu",
-    },
+    id: "pptx", kind: "document", label: "PowerPoint (python-pptx)",
+    description: "Slide titles, text, tables and speaker notes from .pptx files as Markdown, one page per slide.",
+    transforms: [{ accepts: ["source/office-pptx"], emits: ["document/markdown"], scope: "document" }],
+    capabilities: { formats: ["office-pptx"], produces: ["markdown", "pages", "headings"], costClass: "local-cpu" },
+  },
+  {
+    id: "xlsx", kind: "document", label: "Excel (openpyxl)",
+    description: "Every sheet of an .xlsx workbook as a Markdown table, plus its formulas and source context.",
+    transforms: [{ accepts: ["source/office-excel"], emits: ["document/markdown"], scope: "document" }],
+    capabilities: { formats: ["office-excel"], produces: ["markdown", "tables"], costClass: "local-cpu" },
   },
   {
     id: "native-pdf", kind: "document", label: "Native PDF engine",
-    description: "In-process PDF engine with per-page Markdown, links, image placements and layout checks; falls back to Kreuzberg.",
+    description: "In-process PDF engine with per-page Markdown, links, image placements and layout checks; falls back to Poppler text.",
     transforms: [{ accepts: ["source/pdf"], emits: ["document/markdown"], scope: "document" }],
     capabilities: { formats: ["pdf"], produces: ["markdown", "pages", "links", "images"], costClass: "local-cpu" },
   },
   {
-    id: "liteparse", kind: "document", label: "LiteParse",
-    description: "Local PDF parser with page output.",
+    id: "doppler-md", kind: "document", label: "Doppler Markdown",
+    description: "Layout-aware PDF Markdown (headings, tables, reading order) from Doppler, the DocSlurp Poppler fork, run as a sandboxed executable; one page per form feed.",
     transforms: [{ accepts: ["source/pdf"], emits: ["document/markdown"], scope: "document" }],
-    capabilities: { formats: ["pdf"], produces: ["markdown", "pages"], costClass: "local-cpu" },
+    capabilities: { formats: ["pdf"], produces: ["markdown", "pages", "tables", "headings"], costClass: "local-cpu" },
   },
   {
     id: "poppler-text", kind: "document", label: "Poppler text",

@@ -47,7 +47,6 @@ describe("buildRoutingTargetCatalog", () => {
     const ids = off.targets.map((t) => t.id);
     expect(ids).toEqual(
       expect.arrayContaining([
-        "native:kreuzberg",
         "native:pdf-markdown",
         "ocr:ppocr",
         "vlm:openrouter/google/gemini-3.5-flash",

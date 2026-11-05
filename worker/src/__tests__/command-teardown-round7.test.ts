@@ -479,7 +479,7 @@ describe("Low: candidate isolation settles every sibling before failing", () => 
     writeFileSync(source, "%PDF-1.4");
     let siblingSettled = false;
     vi.spyOn(documentExtractorRegistry, "prepare").mockImplementation(async (id: string) => {
-      if (id === "kreuzberg") throw new Error("prepare failed");
+      if (id === "native-pdf") throw new Error("prepare failed");
       await new Promise((resolve) => setTimeout(resolve, 150));
       siblingSettled = true;
       return { label: id, plan: { binary: "pdftotext", args: [], available: true } } as never;
@@ -488,7 +488,7 @@ describe("Low: candidate isolation settles every sibling before failing", () => 
     const dirs: string[] = [];
     const error = await (stage as unknown as { isolateConcurrentCandidates(args: object): Promise<unknown> })
       .isolateConcurrentCandidates({
-        primary: { label: "kreuzberg" },
+        primary: { label: "native-pdf" },
         secondary: { label: "poppler-text" },
         sourcePath: source,
         format: "pdf",

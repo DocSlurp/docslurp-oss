@@ -70,7 +70,7 @@ Code map:
 ## Targets
 
 The catalog (`routing-targets.ts`) admits targets from the live environment and price list: `native:accept-text-layer`,
-native parsers (kreuzberg, native-pdf text/Markdown), OCR (`ocr:ppocr`: PP-OCR through the worker's OCR mode, see
+native parsers (native-pdf text/Markdown), OCR (`ocr:ppocr`: PP-OCR through the worker's OCR mode, see
 [OCR](extraction/ocr.md); offered only when the mode can serve it), the local image labeler (Florence-2-small),
 env-gated private OCR VLM endpoints, cheap hosted VLMs (GLM-5.3 Flash, DeepSeek V4.1 Flash, Haiku 5.5, Luna),
 expensive hosted VLMs for charts and math (Gemini 3.5 Flash), Sonnet 5.5 as an escalation-only target, and skip.
@@ -113,7 +113,7 @@ document extractors, all `free`. Workspace-configured embedding and vision model
 | EmbeddingGemma 300M ONNX | non-free | Gemma terms | ai.google.dev/gemma/terms |
 | LightOnOCR-3-0.8B, MinerU2.5-Pro, olmOCR-2, DeepSeek-OCR-2, PaddleOCR-VL-1.6, Infinity-Parser2, Qwen3-VL, Qwen2-VL-2B | free | Apache-2.0 | HF cards |
 | Ling-3.0-flash-VL, DeepSeek V4.1 Flash, GLM-5.3-Flash (hosted) | free | MIT | HF cards |
-| Florence-2, Kreuzberg, PP-OCR (RapidOCR, PaddleOCR models), native-pdf | free | MIT / Apache-2.0 / internal | project licences |
+| Florence-2, PP-OCR (RapidOCR, PaddleOCR models), native-pdf | free | MIT / Apache-2.0 / internal | project licences |
 | Gemini, Claude, GPT-6 Luna, Jev, Clef, pplx-decider | proprietary-hosted | vendor API terms | vendor docs |
 
 ## Decision models and the health chain
@@ -135,9 +135,9 @@ fit bases under `scripts/page-router/packs/`; fit scripts are `scripts/page-rout
 `DOCSLURP_PDF_ENGINE=off|shadow|native-pdf`. The adapter (`worker/src/native-pdf/`) wraps an engine behind
 `NativePdfEngine`; the default implementation is a private, pinned Node binding installed from
 `vendor-artifacts/native-pdf/` (sha256 in `manifest.json`, installed by `scripts/install-native-pdf.mjs`). Without the
-binding every mode degrades to kreuzberg. Fallback semantics: every engine error maps to a defined outcome
+binding every mode degrades to poppler-text. Fallback semantics: every engine error maps to a defined outcome
 (`ENGINE_ERROR_CODES`); a locked PDF takes the same path as without the engine; unsupported encryption, unsupported
-features (for example OCR without models), limits and unknown errors fall back to kreuzberg. A dropout guard rejects
+features (for example OCR without models), limits and unknown errors fall back to poppler-text. A dropout guard rejects
 output that lost the text layer (`NATIVE_PDF_DROPOUT`), and layout warnings (multi-column interleave) reroute. The
 adapter and the in-process probe open documents under the engine's `worker` limits profile.
 
@@ -179,7 +179,7 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 | `PAGE_ROUTER_MODEL_PRICES_PATH` | shipped list | path | Price list override for estimates. |
 | `DOCSLURP_DECISION_HEALTH_HISTORY` | in memory | path | Multi-day canary history for quarantined decision models. |
 | `DECISION_LOCAL_SIDECAR_CMD` | none | command | Local decision-model sidecar (eval). |
-| `DOCSLURP_PDF_ENGINE` | `off` (production: `shadow`) | off, shadow, native-pdf | Native PDF engine for document extraction (kreuzberg fallback). |
+| `DOCSLURP_PDF_ENGINE` | `off` (production: `shadow`) | off, shadow, native-pdf | Native PDF engine shadow runs; when installed the engine is the first PDF extractor (poppler-text fallback). |
 | `DOCSLURP_NATIVE_PDF_INSTALLED` | unset | 1 | Set in images that ship the binding so `/extractors` lists native-pdf. |
 | `DOCSLURP_NATIVE_PDF_MODULE`, `DOCSLURP_NATIVE_PDF_DIR` | vendor dir | path | Binding discovery overrides (dev, bench). |
 | `NATIVE_PDF_OCR_MODEL_DIR` | unset | path | OCR models for the engine's own OCR fill. Page OCR targets do not use it; they follow `DOCSLURP_OCR_MODE`. |

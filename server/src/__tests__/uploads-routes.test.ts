@@ -287,9 +287,9 @@ describe("explicit Speed boost admission", () => {
 describe("a sandboxed PDF deployment (vm-pdf) refuses host PDF parsers in upload pipelines", () => {
   afterEach(() => vi.unstubAllEnvs());
   const overrides = [
-    ["order.pdf", { order: { pdf: ["kreuzberg"] } }],
+    ["order.pdf", { order: { pdf: ["poppler-text"] } }],
     ["pages", { pages: ["ocr"] }],
-    ["enrich", { enrich: ["kreuzberg"] }],
+    ["enrich", { enrich: ["poppler-text"] }],
     ["voting.secondary", { voting: { enabled: true, secondary: "native-pdf" } }],
   ] as const;
 
@@ -312,7 +312,7 @@ describe("a sandboxed PDF deployment (vm-pdf) refuses host PDF parsers in upload
 
   it("accepts the same pipeline when the deployment parses PDFs on the host", async () => {
     const { app } = setup();
-    const response = await app.request("/uploads/bulk", bulk([text("a.txt")], { workspace: "ws-1", pipeline: JSON.stringify({ documentExtraction: { order: { pdf: ["kreuzberg"] } } }) }));
+    const response = await app.request("/uploads/bulk", bulk([text("a.txt")], { workspace: "ws-1", pipeline: JSON.stringify({ documentExtraction: { order: { pdf: ["poppler-text"] } } }) }));
     expect(response.status).toBeLessThan(300);
   });
 });

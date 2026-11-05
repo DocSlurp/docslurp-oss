@@ -1,7 +1,7 @@
 import { validateGeoAnnotations } from "./geo.js";
 import { z } from "zod";
 import { migrateStoredModelSettings } from "./stored-model-settings.js";
-import { normalizeDocumentExtractionAliases } from "./extractor-aliases.js";
+import { dropRetiredExtractorIds, normalizeDocumentExtractionAliases } from "./extractor-aliases.js";
 import { DEFAULT_QUALITY_MODE, migrateLegacyQualitySettings, qualityModeSchema } from "./quality.js";
 import {
   defaultDocumentExtractionConfig,
@@ -1061,8 +1061,10 @@ export function normalizeStoredPipelineFeatures(
  */
 export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
   if (!isPlainRecord(stored)) return stored;
+  // Canonical ids drop retired extractors silently; a stored read reports what they named.
+  const retired = isPlainRecord(stored.documentExtraction) ? dropRetiredExtractorIds(stored.documentExtraction).dropped : [];
   let next: Record<string, unknown> = withCanonicalExtractorIds(stored);
-  const dropped: string[] = [];
+  const dropped: string[] = retired.map((entry) => `documentExtraction.${entry}`);
   if (isPlainRecord(next.documentExtraction)) {
     const extraction = sanitizeStoredDocumentExtraction(next.documentExtraction);
     if (extraction.dropped.length > 0) {
@@ -1269,7 +1271,6 @@ export const stageDataFlow: Record<PipelineRunStage, StageDataFlow> = {
     produces: [
       ...extractedText,
       "markdown-manifest",
-      "liteparse-structured",
       "artifact-graph",
       "heatmap",
       "markdown-critique",
@@ -1280,11 +1281,11 @@ export const stageDataFlow: Record<PipelineRunStage, StageDataFlow> = {
   },
   "extract-html": { produces: ["html", "html-manifest"] },
   "classify-route": {
-    consumes: ["canonical-document", "markdown-manifest", "extraction-contract", "liteparse-structured", "page-image-evidence"],
+    consumes: ["canonical-document", "markdown-manifest", "extraction-contract", "page-image-evidence"],
     produces: ["classification", "parser-playbook"],
   },
   "route-pages": {
-    consumes: ["classification", "canonical-document", "liteparse-structured", "parser-playbook"],
+    consumes: ["classification", "canonical-document", "parser-playbook"],
     produces: ["page-route-plan"],
   },
   "render-images": { consumes: ["classification", "page-route-plan"], produces: ["images", "page-images"] },

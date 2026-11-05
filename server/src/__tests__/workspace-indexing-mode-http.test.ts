@@ -243,7 +243,8 @@ describe("stored extractor settings the strict schemas reject (round 4 M2)", () 
       expect(get.status).toBe(200);
       const body = await get.json() as { pipeline: { quality: string; documentExtraction: { options: unknown; ocr: { language: string } } } };
       expect(body.pipeline.quality).toBe("fast");
-      expect(body.pipeline.documentExtraction.options).toEqual({ kreuzberg: {}, dolphin: { mode: "page" } });
+      // Retired extractors' options are dropped with the rest.
+      expect(body.pipeline.documentExtraction.options).toEqual({ dolphin: { mode: "page" } });
       expect(body.pipeline.documentExtraction.ocr.language).toBe("auto");
       expect(JSON.stringify(await list.json())).not.toContain("/tmp/attacker");
       const runs = await import("../services/runs.js");
@@ -283,8 +284,7 @@ describe("stored extractor settings the strict schemas reject (round 4 M2)", () 
     await seedWorkspace("t-strict-x", "gold", "full");
     for (const documentExtraction of [
       { options: { dolphin: { repoPath: "/tmp/attacker" } } },
-      { options: { kreuzberg: { useCache: false } } },
-      { options: { liteparse: {} } },
+      { options: { "not-an-extractor": {} } },
       { ocr: { language: "en" } },
     ]) {
       const patch = await app.request("/v1/workspaces/t-strict-x", json("PATCH", { pipeline: { documentExtraction } }));
@@ -294,6 +294,11 @@ describe("stored extractor settings the strict schemas reject (round 4 M2)", () 
     }
     const stored = (await sql<{ p: unknown }[]>`select pipeline -> 'documentExtraction' -> 'options' as p from workspaces where id = 't-strict-x'`)[0]?.p;
     expect(JSON.stringify(stored ?? {})).not.toContain("/tmp/attacker");
+    // Retired extractors (kreuzberg, liteparse) are normalized away on write instead: accepted, never stored or run.
+    const retired = await app.request("/v1/workspaces/t-strict-x", json("PATCH", { pipeline: { documentExtraction: { options: { kreuzberg: { useCache: false }, liteparse: {} } } } }));
+    expect(retired.status).toBe(200);
+    const kept = (await sql<{ p: unknown }[]>`select pipeline -> 'documentExtraction' as p from workspaces where id = 't-strict-x'`)[0]?.p;
+    expect(JSON.stringify(kept ?? {})).not.toMatch(/kreuzberg|liteparse/);
   });
 });
 
@@ -348,13 +353,13 @@ describe("a sandboxed PDF deployment (vm-pdf)", () => {
   const extraction = (documentExtraction: Record<string, unknown>) => ({ pipeline: { documentExtraction } });
 
   it.each([
-    ["order.pdf kreuzberg", { order: { pdf: ["kreuzberg"] } }],
+    ["order.pdf poppler-text", { order: { pdf: ["poppler-text"] } }],
     ["order.pdf native-pdf after vm-pdf", { order: { pdf: ["vm-pdf", "native-pdf"] } }],
     ["pages", { pages: ["ocr"] }],
-    ["enrich", { enrich: ["kreuzberg"] }],
-    ["voting.secondary", { voting: { enabled: true, secondary: "kreuzberg" } }],
-    ["pages with only host ids", { pages: ["ocr", "kreuzberg"] }],
-    ["enrich with only host ids", { enrich: ["kreuzberg", "native-pdf"] }],
+    ["enrich", { enrich: ["poppler-text"] }],
+    ["voting.secondary", { voting: { enabled: true, secondary: "poppler-text" } }],
+    ["pages with only host ids", { pages: ["ocr", "poppler-text"] }],
+    ["enrich with only host ids", { enrich: ["poppler-text", "native-pdf"] }],
   ])("refuses a workspace override naming a host parser (%s) with 400, on create, update, estimate and MCP", async (_label, documentExtraction) => {
     vi.stubEnv("DOCSLURP_VM_PDF_INSTALLED", "1");
     const created = await app.request("/v1/workspaces", json("POST", { name: "P", orgId: "gold", ...extraction(documentExtraction) }));
@@ -372,7 +377,7 @@ describe("a sandboxed PDF deployment (vm-pdf)", () => {
   });
 
   it("accepts the same override when the deployment parses PDFs on the host", async () => {
-    const created = await app.request("/v1/workspaces", json("POST", { name: "P", orgId: "gold", ...extraction({ order: { pdf: ["kreuzberg"] } }) }));
+    const created = await app.request("/v1/workspaces", json("POST", { name: "P", orgId: "gold", ...extraction({ order: { pdf: ["poppler-text"] } }) }));
     expect(created.status).toBe(201);
   });
 });

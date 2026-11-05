@@ -3,7 +3,7 @@
 // vendor-artifacts/native-pdf/manifest.json (package, version, tarball, sha256).
 // The tarball is gitignored and supplied by the build (artifact path or build
 // context). No manifest, or no tarball with --optional, is a normal no-op: the
-// worker then runs Kreuzberg as before. A sha256 mismatch always fails.
+// worker then reads PDFs with Poppler as before. A sha256 mismatch always fails.
 //
 // DOCSLURP_NATIVE_PDF=1 (a Docker build arg) makes the engine required: a missing
 // tarball or a binding that does not load fails the build even with --optional,

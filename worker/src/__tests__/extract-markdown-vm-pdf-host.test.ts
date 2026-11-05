@@ -107,10 +107,10 @@ describe("the sandboxed PDF route on the worker host", () => {
   });
 
   it.each([
-    ["DOCSLURP_PDF_EXTRACTOR", "vm-pdf", { order: { pdf: ["kreuzberg"] } }],
+    ["DOCSLURP_PDF_EXTRACTOR", "vm-pdf", { order: { pdf: ["poppler-text"] } }],
     ["DOCSLURP_PDF_EXTRACTOR", "vm-pdf", { order: { pdf: ["native-pdf"] } }],
-    ["DOCSLURP_VM_PDF_INSTALLED", "1", { order: { pdf: ["kreuzberg", "native-pdf"] } }],
-    ["DOCSLURP_PDF_EXTRACTOR", "vm-pdf", { enrich: ["kreuzberg"] }],
+    ["DOCSLURP_VM_PDF_INSTALLED", "1", { order: { pdf: ["poppler-text", "native-pdf"] } }],
+    ["DOCSLURP_PDF_EXTRACTOR", "vm-pdf", { enrich: ["poppler-text"] }],
   ])("under %s=%s refuses a run whose workspace override names a host parser (%j), without touching the host", async (name, value, override) => {
     vi.stubEnv(name, value);
     vi.stubEnv("WORKER_PAGE_FACTS", "true");
@@ -135,7 +135,7 @@ describe("the sandboxed PDF route on the worker host", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     // What the worker's store hands the stage for a run whose stored pipeline named only host parsers.
     const stored = { ...defaultPipelineFeatures, documentExtraction: { ...defaultPipelineFeatures.documentExtraction,
-      order: { pdf: ["kreuzberg", "native-pdf"] }, pages: ["ocr"], enrich: ["kreuzberg"], voting: { enabled: true, secondary: "kreuzberg" } } };
+      order: { pdf: ["poppler-text", "native-pdf"] }, pages: ["ocr"], enrich: ["poppler-text"], voting: { enabled: true, secondary: "poppler-text" } } };
     const extraction = normalizeStoredPipelineFeatures(stored as never, "run run-1").documentExtraction;
     const h = await harness({ markdown: "Text\f\f\f" }, extraction as never);
     try {

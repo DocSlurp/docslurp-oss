@@ -99,7 +99,8 @@ describe("predeploy-check", () => {
       const counts = "select (select count(*) from webhooks) w, (select count(*) from api_keys) k, (select count(*) from workspace_runs) r, (select count(*) from org_memberships) m";
       const before = await oldClient.query(counts);
       const { piiPatternTypeSchema, builtInDocumentExtractorDescriptors } = await import("@docslurp/shared");
-      const extractorIds = knownExtractorIds(builtInDocumentExtractorDescriptors.map((entry) => entry.id), { DOCSLURP_EXTRACTOR_ID_ALIASES: "aliased-old:vm-pdf" });
+      const { RETIRED_EXTRACTOR_IDS } = await import("@docslurp/shared");
+      const extractorIds = knownExtractorIds([...builtInDocumentExtractorDescriptors.map((entry) => entry.id), ...RETIRED_EXTRACTOR_IDS], { DOCSLURP_EXTRACTOR_ID_ALIASES: "aliased-old:vm-pdf" });
       await oldClient.query("begin read only");
       const sections = await collectReport(oldClient, { journal, acceptedPiiPatterns: piiPatternTypeSchema.options, extractorIds });
       await oldClient.query("rollback");
@@ -124,7 +125,7 @@ describe("predeploy-check", () => {
       // t1 and t2 tie on activity, role and membership age: the organization id keeps t1; t2 is left with no member.
       expect(memberships.lines.join("\n")).toContain(`a@example.test (u1): keeps "T" (t1)`);
       expect(memberships.lines.join("\n")).toContain("Left with NO member");
-      // The documentExtraction ids: kreuzberg is built in and aliased-old is an alias key; only retired-extractor is unknown.
+      // The documentExtraction ids: kreuzberg is retired (dropped at parse) and aliased-old is an alias key; only retired-extractor is unknown.
       const extractors = byTitle("Stored extraction configs");
       expect(extractors.level).toBe("warn");
       expect(extractors.title).toContain(": 1");

@@ -73,7 +73,7 @@ describe("a stored host PDF extractor under a sandboxed PDF deployment", () => {
   it("is dropped on read (the PDF takes the sandboxed default) and refused on write", () => {
     vi.stubEnv("DOCSLURP_VM_PDF_INSTALLED", "1");
     vi.spyOn(console, "error").mockImplementation(() => {});
-    const stored = { order: { pdf: ["kreuzberg"], image: ["ocr"] }, pages: ["ocr", "vm-pdf"], enrich: ["kreuzberg"], voting: { enabled: true, secondary: "native-pdf" } };
+    const stored = { order: { pdf: ["poppler-text"], image: ["ocr"] }, pages: ["ocr", "vm-pdf"], enrich: ["poppler-text"], voting: { enabled: true, secondary: "native-pdf" } };
     const { value, dropped } = sanitizeStoredDocumentExtraction(stored);
     expect(dropped).toEqual(["documentExtraction.order.pdf", "documentExtraction.pages", "documentExtraction.enrich", "documentExtraction.voting.secondary"]);
     expect(value).toMatchObject({ order: { image: ["ocr"] }, pages: ["vm-pdf"], enrich: [], voting: { enabled: true, secondary: "next-in-order" } });
@@ -84,7 +84,7 @@ describe("a stored host PDF extractor under a sandboxed PDF deployment", () => {
   });
 
   it("is left alone when the deployment parses PDFs on the host", () => {
-    const stored = { order: { pdf: ["kreuzberg"] }, voting: { enabled: true, secondary: "native-pdf" } };
+    const stored = { order: { pdf: ["poppler-text"] }, voting: { enabled: true, secondary: "native-pdf" } };
     expect(sanitizeStoredDocumentExtraction(stored).dropped).toEqual([]);
     expect(documentExtractionConfigSchema.safeParse(stored).success).toBe(true);
   });

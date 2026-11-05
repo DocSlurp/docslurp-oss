@@ -35,7 +35,7 @@ describe("API startup with DOCSLURP_EXTRACTOR_ID_ALIASES", () => {
 
   it("refuses an unknown target and an alias over a built-in id", () => {
     expect(() => configureApiExtractorIdAliases({ ...ENV, DOCSLURP_EXTRACTOR_ID_ALIASES: `${LEGACY}:no-such-extractor` })).toThrow(/does not serve/);
-    expect(() => configureApiExtractorIdAliases({ ...ENV, DOCSLURP_EXTRACTOR_ID_ALIASES: "kreuzberg:vm-pdf" })).toThrow(/may not override/);
+    expect(() => configureApiExtractorIdAliases({ ...ENV, DOCSLURP_EXTRACTOR_ID_ALIASES: "poppler-text:vm-pdf" })).toThrow(/may not override/);
   });
 
   it("installs a valid alias", () => {
@@ -111,7 +111,7 @@ describe("stored legacy-id pipelines under the alias", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const host = { ...defaultPipelineFeatures, documentExtraction: { ...defaultPipelineFeatures.documentExtraction,
-        order: { pdf: ["kreuzberg", "native-pdf"] }, pages: ["ocr"], enrich: ["kreuzberg"], voting: { enabled: true, secondary: "native-pdf" } } };
+        order: { pdf: ["poppler-text", "native-pdf"] }, pages: ["ocr"], enrich: ["poppler-text"], voting: { enabled: true, secondary: "native-pdf" } } };
       await sql`
         insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
         values ('run-host', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', ${sql.json(host as unknown as postgres.JSONValue)}, 1, 2)`;
@@ -122,7 +122,7 @@ describe("stored legacy-id pipelines under the alias", () => {
       expect(result.failed).toEqual([]);
       const [row] = await sql<{ pipeline: { documentExtraction: Record<string, unknown> } }[]>`select pipeline from workspace_runs where id = ${result.runs[0]!.id}`;
       for (const pipeline of [row!.pipeline, startWorkflow.mock.calls[0]![1] as typeof row.pipeline]) {
-        expect(JSON.stringify(pipeline.documentExtraction)).not.toMatch(/kreuzberg|native-pdf/);
+        expect(JSON.stringify(pipeline.documentExtraction)).not.toMatch(/poppler-text|native-pdf/);
         expect({ pages: pipeline.documentExtraction.pages, enrich: pipeline.documentExtraction.enrich, voting: pipeline.documentExtraction.voting }).toEqual({ pages: [], enrich: [], voting: { enabled: true, secondary: "next-in-order" } });
         expect((pipeline.documentExtraction.order as Record<string, unknown>).pdf).toBeUndefined();
       }

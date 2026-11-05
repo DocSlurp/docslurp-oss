@@ -259,7 +259,7 @@ describe("quality fast: kept-as-image renders are bounded", () => {
 
   it("does not attribute unpaged text to page 1 in a multi-page document", () => {
     const canonical = canonicalDocumentSchema.parse({
-      ...buildCanonicalDocumentFromMarkdown({ documentId: "doc", text: "Some text.", pageCount: 3, extractor: "kreuzberg" }),
+      ...buildCanonicalDocumentFromMarkdown({ documentId: "doc", text: "Some text.", pageCount: 3, extractor: "poppler-text" }),
     });
     canonical.blocks = canonical.blocks.map((block) => ({ ...block, pageNumber: null }));
     expect(pagesKeptAsImage({ canonicalDocument: canonical, pageCount: 3, isImage: false }))

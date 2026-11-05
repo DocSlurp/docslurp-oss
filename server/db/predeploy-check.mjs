@@ -115,7 +115,8 @@ async function loadBuiltInExtractorIds() {
   const mod = await import("@docslurp/shared");
   const ids = mod.builtInDocumentExtractorDescriptors?.map((entry) => entry.id);
   if (!Array.isArray(ids) || ids.length === 0) throw new Error("@docslurp/shared does not export builtInDocumentExtractorDescriptors (build it: pnpm --filter @docslurp/shared build)");
-  return ids;
+  // Retired ids are known too: parsing drops them (extractor-aliases.ts), so a stored mention is not a rollout problem.
+  return [...ids, ...(mod.RETIRED_EXTRACTOR_IDS ?? [])];
 }
 
 async function loadAcceptedPiiPatterns() {

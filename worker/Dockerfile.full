@@ -108,6 +108,51 @@ RUN node -e ' \
       }).catch((e) => { console.error(e.message); process.exit(1); });' "${TARGETARCH}" \
     && /usr/local/bin/landrun --version
 
+# Doppler (DocSlurp/doppler, GPL-2.0-or-later): the Poppler fork's command-line utilities and the doppler-md /
+# pdftomarkdown converter, built from the public source pinned in worker/doppler.json (sha256-verified). They replace
+# Debian's poppler-utils and run only as separate executables in the parser sandbox; nothing links them.
+FROM node:24-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446 AS doppler-src
+COPY worker/doppler.json /tmp/doppler.json
+RUN node -e ' \
+      const fs = require("node:fs"); const crypto = require("node:crypto"); \
+      const pin = JSON.parse(fs.readFileSync("/tmp/doppler.json", "utf8")).source; \
+      fetch(pin.url).then((r) => { if (!r.ok) throw new Error("doppler source download failed: " + r.status); return r.arrayBuffer(); }).then((buf) => { \
+        const data = Buffer.from(buf); \
+        const sum = crypto.createHash("sha256").update(data).digest("hex"); \
+        if (sum !== pin.sha256) throw new Error("doppler source sha256 mismatch: " + sum); \
+        fs.writeFileSync("/tmp/doppler-src.tar.gz", data); \
+      }).catch((e) => { console.error(e.message); process.exit(1); });' \
+    && mkdir -p /src \
+    && tar -xzf /tmp/doppler-src.tar.gz -C /src \
+    && mv "/src/$(node -p 'require("/tmp/doppler.json").source.prefix')" /src/doppler
+
+FROM node:24-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446 AS doppler-utils
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      build-essential cmake ninja-build pkg-config ca-certificates \
+      libfreetype-dev libfontconfig-dev libjpeg-dev libopenjp2-7-dev libpng-dev \
+      libtiff-dev liblcms2-dev zlib1g-dev libboost-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=doppler-src /src/doppler /src/doppler
+RUN cmake -S /src/doppler -B /src/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_RPATH=/usr/local/lib -DPOPPLER_DATADIR=/usr/share/poppler \
+      -DENABLE_QT5=OFF -DENABLE_QT6=OFF -DENABLE_GLIB=OFF -DENABLE_GOBJECT_INTROSPECTION=OFF \
+      -DENABLE_CPP=OFF -DENABLE_NSS3=OFF -DENABLE_GPGME=OFF -DENABLE_LIBCURL=OFF \
+      -DENABLE_BROTLI=OFF -DENABLE_HARFBUZZ=OFF -DBUILD_GTK_TESTS=OFF -DBUILD_MANUAL_TESTS=OFF \
+      -DBUILD_CPP_TESTS=OFF -DENABLE_UNSTABLE_API_ABI_HEADERS=OFF -DRUN_GPERF_IF_PRESENT=OFF \
+    && cmake --build /src/build -j"$(nproc)" \
+    && DESTDIR=/out cmake --install /src/build \
+    && rm -rf /out/usr/local/include /out/usr/local/lib/pkgconfig /out/usr/local/lib/cmake /out/usr/local/share/man \
+    && install -D -m 0644 /src/doppler/COPYING /out/usr/local/share/doc/doppler/COPYING \
+    && install -D -m 0644 /src/doppler/COPYING3 /out/usr/local/share/doc/doppler/COPYING3 \
+    && printf 'Doppler (GPL-2.0-or-later). Corresponding source: https://github.com/DocSlurp/doppler/tree/827b3cccecfdcfe61ad89335ec2fb5476df014da (tarball: https://github.com/DocSlurp/doppler/releases/download/docslurp-827b3cc/doppler-827b3cc-src.tar.gz)\n' > /out/usr/local/share/doc/doppler/SOURCE \
+    && for tool in pdftotext pdftohtml pdfinfo pdfimages pdftoppm pdfseparate pdfunite; do test -x "/out/usr/local/bin/$tool"; done
+
+FROM rust:1.99-slim-trixie@sha256:7eab7ce19273ce785e0ca7578bdf7bc1fcbae621775a8197379a04c9f6e03cd5 AS doppler-md
+COPY --from=doppler-src /src/doppler/docslurp/doppler-md /src/doppler-md
+RUN cargo build --release --locked --manifest-path /src/doppler-md/Cargo.toml \
+    && install -D -m 0755 /src/doppler-md/target/release/doppler-md /out/usr/local/bin/doppler-md \
+    && install -D -m 0755 /src/doppler-md/target/release/pdftomarkdown /out/usr/local/bin/pdftomarkdown
+
 # Production stage: runtime only (no TypeScript toolchain, pnpm store or devDeps)
 FROM node:24-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446
 WORKDIR /app
@@ -137,7 +182,14 @@ RUN apt-get update \
        libreoffice \
        pandoc \
        poppler-data \
-       poppler-utils \
+       libfontconfig1 \
+       libfreetype6 \
+       libjpeg62-turbo \
+       liblcms2-2 \
+       libopenjp2-7 \
+       libpng16-16t64 \
+       libtiff6 \
+       zlib1g \
        python3 \
        python3-venv \
        qpdf \
@@ -160,6 +212,12 @@ RUN groupadd --system --gid 10001 docslurp \
 COPY LICENSE THIRD_PARTY_NOTICES.md ./
 COPY LICENSES ./LICENSES
 COPY --from=landrun /usr/local/bin/landrun /usr/local/bin/landrun
+# Doppler: Poppler-fork utilities (pdftotext, pdfinfo, pdfimages, pdftoppm, pdftohtml, pdfseparate, pdfunite) with
+# libpoppler, and doppler-md / pdftomarkdown, all under /usr/local (on PATH, inside the sandbox's read-only /usr).
+COPY --from=doppler-utils /out/usr/local/ /usr/local/
+COPY --from=doppler-md /out/usr/local/bin/ /usr/local/bin/
+RUN ldconfig && test -x /usr/local/bin/pdftomarkdown && pdftotext -v
+ENV DOCSLURP_DOPPLER_REQUIRED=1
 # Owned by the worker user so the optional first-boot install can extend it.
 COPY --from=python-venv --chown=10001:10001 /app/.venv /app/.venv
 COPY --from=builder /prod/worker/package.json ./worker/package.json
@@ -169,7 +227,6 @@ COPY --from=native-pdf-assets /opt/native-pdf /opt/native-pdf
 # OCR runtime: COPY --from keeps the stages' modes and makes everything root-owned.
 COPY --from=ocr-venv /opt/docslurp/ocr-venv /opt/docslurp/ocr-venv
 COPY --from=ocr-models /opt/docslurp/ocr-models /opt/docslurp/ocr-models
-RUN cd worker && node -e "require('@kreuzberg/node'); console.log('kreuzberg native binding ok')"
 
 COPY worker/LICENSE ./worker/LICENSE
 COPY worker/scripts ./worker/scripts
@@ -185,11 +242,9 @@ RUN rm -rf ./worker/scripts/__pycache__ \
        --models /opt/docslurp/ocr-models --manifest ./worker/ocr-models.json \
     && PYTHON_VENV=/app/.venv PYTHONDONTWRITEBYTECODE=1 node scripts/check-worker-prerequisites.mjs --profile=full
 
-# No OCR package, binary or language data is installed. Kreuzberg's and LiteParse's native addons statically link
-# Tesseract (disabled, not removed: docs/extraction/ocr.md, "Tesseract"); it gets no language data (an empty, root-owned,
-# read-only directory), so it cannot OCR customer pixels on the worker host. OCR runs only in the configured boundary.
-RUN mkdir -p /opt/docslurp/empty-tessdata && chmod 0555 /opt/docslurp/empty-tessdata
-ENV TESSDATA_PREFIX=/opt/docslurp/empty-tessdata
+# No OCR engine, package, binary or language data is installed or linked: no native addon embeds Tesseract, Leptonica
+# or PaddleOCR (worker/src/__tests__/no-tesseract.test.ts and scripts/scan-ocr-engines.mjs check this). OCR runs only
+# in the configured boundary (docs/extraction/ocr.md).
 ENV HOME=/home/docslurp
 ENV DOCSLURP_CLAMAV_RUN_DIR=/tmp/clamav
 ENV DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS=
@@ -209,6 +264,19 @@ ARG DOCSLURP_NATIVE_PDF=
 ARG DOCSLURP_NATIVE_PDF_OCR_MODELS=
 ARG DOCSLURP_NATIVE_PDF_CJK_FONTS=
 ENV DOCSLURP_NATIVE_PDF_INSTALLED=${DOCSLURP_NATIVE_PDF:+1}
+
+# Provenance of the third-party native components (Doppler; the native PDF engine when installed): license texts and
+# PROVENANCE.json under /usr/share/licenses/<name>/, and an SPDX document. A component without a public repository
+# and pinned commit fails the build.
+COPY scripts/write-component-provenance.mjs ./scripts/write-component-provenance.mjs
+COPY worker/doppler.json ./worker/doppler.json
+RUN node scripts/write-component-provenance.mjs --doppler worker/doppler.json --doppler-prefix /usr/local \
+      --engine-manifest /app/vendor-artifacts/native-pdf/manifest.json
+LABEL io.docslurp.doppler.source="https://github.com/DocSlurp/doppler" \
+      io.docslurp.doppler.commit="827b3cccecfdcfe61ad89335ec2fb5476df014da" \
+      io.docslurp.doppler.license="GPL-2.0-or-later" \
+      io.docslurp.doppler.corresponding-source="https://github.com/DocSlurp/doppler/tree/827b3cccecfdcfe61ad89335ec2fb5476df014da" \
+      io.docslurp.sbom.native-components="/usr/share/doc/docslurp/sbom/native-components.spdx.json"
 ENV NATIVE_PDF_OCR_MODEL_DIR=${DOCSLURP_NATIVE_PDF_OCR_MODELS:+/opt/native-pdf/ocr-models}
 ENV NATIVE_PDF_FONTS_DIR=${DOCSLURP_NATIVE_PDF_CJK_FONTS:+/opt/native-pdf/fonts}
 

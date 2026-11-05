@@ -200,7 +200,7 @@ describe("M1: a provider that cannot filter UNIX sockets refuses the commands th
     for (const binary of ["pdftoppm", "/usr/bin/pdfinfo", "qpdf", "pdftotext", "pandoc", "unrtf", "catdoc", "tiffcp", "clamscan", "some-new-tool"]) {
       expect(deniesUnixSockets({ binary }), binary).toBe(true);
     }
-    for (const binary of ["clamdscan", "soffice", "/opt/venv/bin/python3", "python3.13", "node", "docling", "kreuzberg"]) {
+    for (const binary of ["clamdscan", "soffice", "/opt/venv/bin/python3", "python3.13", "node", "docling"]) {
       expect(deniesUnixSockets({ binary }), binary).toBe(false);
     }
     expect(deniesUnixSockets({ binary: "pdftoppm", denyUnixSockets: false })).toBe(false);
@@ -256,7 +256,7 @@ describe("M2: concurrent extractor candidates share no writable directory", () =
     const isolated = await (stage as unknown as {
       isolateConcurrentCandidates(args: object): Promise<{ primary: { extractor: { plan: { args: string[]; binary: string } }; source: string }; secondary: { extractor: { plan: { args: string[]; binary: string } }; source: string } }>;
     }).isolateConcurrentCandidates({
-      primary: await prepare("kreuzberg"),
+      primary: await prepare("pptx"),
       secondary: await prepare("poppler-text"),
       sourcePath: source,
       format: "pdf",

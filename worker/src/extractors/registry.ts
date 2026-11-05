@@ -1,8 +1,7 @@
 import { sandboxedPdfProvider, VM_PDF_EXTRACTOR_ID } from "./plugins.js";
-import { writeFile } from "node:fs/promises";
+import { open, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { builtInDocumentExtractorDescriptors, canonicalExtractorId, configureExtractorIdAliases, parseExtractorOptions, resolvePdfExtractorSetting, sandboxedPdfConfigured, type ExtractorDescriptor } from "@docslurp/shared";
-import type { DocumentExtractionResult } from "../lib/document-extraction-adapter.js";
+import { builtInDocumentExtractorDescriptors, canonicalExtractorId, configureExtractorIdAliases, parseExtractorOptions, resolvePdfExtractorSetting, RETIRED_EXTRACTOR_IDS, sandboxedPdfConfigured, type ExtractorDescriptor } from "@docslurp/shared";
 import type { CommandPlan, CommandRunner } from "../tools/runner.js";
 import { planArtifactGraph, type GraphAdapter } from "./graph.js";
 import { availableLocalArtifactAdapters } from "./local-artifact-adapters.js";
@@ -10,7 +9,7 @@ import { extractStructuredJsonFile } from "./structured-json.js";
 import { resolveNativePdfEngine } from "../native-pdf/engine.js";
 import { extractNativePdf } from "../native-pdf/extract.js";
 import { nativePdfAdapterVersion } from "../native-pdf/loader.js";
-import { nativePdfEmphasisEnabled, resolveNativePdfMode } from "../native-pdf/mode.js";
+import { nativePdfEmphasisEnabled } from "../native-pdf/mode.js";
 import { NativePdfError, logNativePdfFallback } from "../native-pdf/types.js";
 import { resolveOcrMode } from "../ocr/mode.js";
 
@@ -20,8 +19,6 @@ export interface ExtractedCandidate {
   textKey: string;
   textUri: string;
   tempTextPath: string;
-  structuredResult?: DocumentExtractionResult;
-  structuredArtifactUri?: string;
   /**
    * Pages whose text this extractor OCR'd itself and reports (the graph extractor's OCR adapter). The OCR engine charges
    * its own reads (ocr/ledger.ts); the stage only records the reads an extractor reports without having charged them.
@@ -34,7 +31,6 @@ export interface ExtractedCandidate {
 export interface CandidateExecutors {
   stream(plan: CommandPlan, label: string, textKey: string, signal?: AbortSignal): Promise<ExtractedCandidate>;
   file(plan: CommandPlan, label: string, textKey: string, outputPath: string, signal?: AbortSignal): Promise<ExtractedCandidate>;
-  liteparse(candidate: PreparedExtractor, textKey: string, sourcePath: string, signal?: AbortSignal): Promise<ExtractedCandidate>;
   graph?(candidate: PreparedExtractor, textKey: string, sourcePath: string, signal?: AbortSignal): Promise<ExtractedCandidate>;
   /** Publish Markdown an in-process extractor already wrote to `outputPath`. */
   markdownFile?(candidate: PreparedExtractor, textKey: string, outputPath: string, signal?: AbortSignal): Promise<ExtractedCandidate>;
@@ -77,8 +73,6 @@ const stream: Execution = (candidate, executors, key, _source, signal) =>
   executors.stream(candidate.plan, candidate.label, key, signal);
 const file: Execution = (candidate, executors, key, _source, signal) =>
   executors.file(candidate.plan, candidate.label, key, candidate.outputPath!, signal);
-const liteparse: Execution = (candidate, executors, key, source, signal) =>
-  executors.liteparse(candidate, key, source, signal);
 const ocr: Execution = (candidate, executors, key, source, signal) => {
   if (!executors.ocr) throw new Error("ocr extraction requires an ocr candidate executor");
   return executors.ocr(candidate, key, source, signal);
@@ -99,7 +93,7 @@ const structuredJson: Execution = async (candidate, executors, key, source, sign
 /**
  * Per-page Markdown from the in-process native PDF engine. Every failure (locked or unsupported encryption,
  * resource limits, missing engine, rejected output, engine errors) rejects with a NativePdfError, logged once by
- * kind, and the stage's retry strategies move on to the next extractor in order (kreuzberg by default). A locked
+ * kind, and the stage's retry strategies move on to the next extractor in order (poppler-text by default). A locked
  * PDF therefore takes the same path it takes without native-pdf.
  */
 const nativePdf: Execution = async (candidate, executors, key, source, signal) => {
@@ -143,19 +137,12 @@ const registered = [
   // Served by the sandboxed PDF provider plugin; without one, preparing it refuses (no host fallback).
   definition({ id: VM_PDF_EXTRACTOR_ID, outputSuffix: ".vm-pdf.md", tableAware: true, execute: file,
     prepare: (runner, source) => runner.sandboxedPdfMarkdown(source, `${source}.vm-pdf.md`) }),
-  definition({ id: "kreuzberg", outputSuffix: ".kreuzberg.md", tableAware: true, execute: file,
-    prepare: async (runner, source, config, context) => {
-      // The sniffed MIME type goes to Kreuzberg explicitly, so it never re-detects the bytes as another (image) format.
-      const mimeType = KREUZBERG_MIME.test(context?.mimeType ?? "") ? context!.mimeType! : undefined;
-      const plan = await runner.kreuzbergMarkdown(source, `${source}.kreuzberg.md`, config, mimeType);
-      // Kreuzberg never OCRs (its built-in OCR would read customer pixels on the worker host). @kreuzberg/node 4.10.2
-      // OCRs every image whatever its options say, so an image never reaches it: images go to the `ocr` extractor.
-      if (kreuzbergImageInput(source, context)) {
-        console.warn(`[extractors] kreuzberg refused an image input format=${context?.format ?? "unknown"}; images are read by the ocr extractor`);
-        return { ...plan, available: false };
-      }
-      return plan;
-    } }),
+  // Office Open XML through the sandboxed python-pptx / openpyxl sidecar (scripts/office_markdown.py). Legacy binary
+  // .ppt and .xls have no reader here: they plan as unavailable and the document fails with no extractor output.
+  definition({ id: "pptx", outputSuffix: ".pptx.md", tableAware: true, execute: file,
+    prepare: async (runner, source, _config, context) => officeOpenXml(await runner.officeMarkdown("pptx", source, `${source}.pptx.md`), source, context) }),
+  definition({ id: "xlsx", outputSuffix: ".xlsx.md", tableAware: true, execute: file,
+    prepare: async (runner, source, _config, context) => officeOpenXml(await runner.officeMarkdown("xlsx", source, `${source}.xlsx.md`), source, context) }),
   // Images, every frame of a multi-frame TIFF: read in the configured OCR boundary (DOCSLURP_OCR_MODE). Unavailable
   // when OCR is off; a refused or failed read fails the document, never falling back to another reader.
   definition({ id: "ocr", execute: ocr,
@@ -168,10 +155,28 @@ const registered = [
       const engine = await resolveNativePdfEngine(runner);
       return { ...inProcessPlan("native-pdf"), available: engine !== null };
     } }),
-  definition({ id: "pandoc", execute: stream,
-    prepare: (runner, source) => runner.extractMarkdown(source) }),
-  definition({ id: "liteparse", outputSuffix: ".liteparse.json", execute: liteparse,
-    prepare: (runner, source) => runner.liteParseExtract(source, `${source}.liteparse.json`, false) }),
+  // Word .docx: Pandoc plus the source context body extraction omits (headers, footers, comments; office_markdown.py).
+  // Every other format: Pandoc with the reader the sniffed format names, never one the file name picks.
+  definition({ id: "pandoc", outputSuffix: ".pandoc.md", tableAware: true,
+    execute: (candidate, executors, key, source, signal) => candidate.plan.args.some((arg) => path.basename(arg) === "office_markdown.py")
+      ? file(candidate, executors, key, source, signal)
+      : stream(candidate, executors, key, source, signal),
+    prepare: async (runner, source, _config, context) => {
+      const reader = pandocReader(source, context);
+      if (reader === "docx") return await runner.officeMarkdown("docx", source, `${source}.pandoc.md`);
+      return await runner.extractMarkdown(source, reader);
+    } }),
+  // Doppler's PDF Markdown. In images that build Doppler (DOCSLURP_DOPPLER_REQUIRED=1) a missing converter is an error,
+  // never a quiet step down to Poppler text.
+  definition({ id: "doppler-md", tableAware: true, execute: stream,
+    prepare: async (runner, source, _config, context) => {
+      const plan = await runner.dopplerMarkdown(source);
+      if (!plan.available && (context?.env ?? process.env).DOCSLURP_DOPPLER_REQUIRED === "1") {
+        console.error("[extractors] doppler-md required (DOCSLURP_DOPPLER_REQUIRED=1) but pdftomarkdown is not installed");
+        throw new Error("doppler-md unavailable: pdftomarkdown is not installed in an image that requires it");
+      }
+      return plan;
+    } }),
   definition({ id: "poppler-text", execute: stream,
     prepare: (runner, source) => runner.extractText(source, true) }),
   definition({ id: "graph-local", execute: graph,
@@ -192,11 +197,19 @@ const registered = [
     prepare: (runner, source, config) => runner.dolphinMarkdown(source, `${source}.dolphin.md`, config) }),
 ];
 
+/**
+ * Default order per format. PDFs: Doppler's Markdown (a sandboxed executable, unavailable where Doppler is not
+ * installed), then the optional in-process native engine, then Poppler's text layer; a deployment with the sandboxed
+ * PDF provider replaces this with `vm-pdf` alone (resolve). No extractor here
+ * links an OCR engine: images go to the `ocr` extractor, which reads them in the configured OCR boundary.
+ */
 export const defaultDocumentExtractorOrder: Record<string, string[]> = {
-  pdf: ["kreuzberg", "native-pdf", "poppler-text"],
+  pdf: ["doppler-md", "native-pdf", "poppler-text"],
   image: ["ocr"],
   "structured-json": ["json"],
-  default: ["kreuzberg", "pandoc"],
+  "office-pptx": ["pptx"],
+  "office-excel": ["xlsx"],
+  default: ["pandoc"],
 };
 
 export interface RegisteredGraphAdapter extends GraphAdapter {
@@ -239,20 +252,18 @@ export class ExtractorRegistry {
     const base = defaultDocumentExtractorOrder[format] ?? defaultDocumentExtractorOrder.default;
     // A sandboxed PDF deployment (DOCSLURP_PDF_EXTRACTOR=vm-pdf or DOCSLURP_VM_PDF_INSTALLED=1) runs PDFs only in vm-pdf.
     const sandboxedPdf = format === "pdf" && (resolvePdfExtractorSetting() === VM_PDF_EXTRACTOR_ID || sandboxedPdfConfigured());
-    // DOCSLURP_PDF_ENGINE=native-pdf puts the native engine first; kreuzberg stays next as its fallback.
-    const defaults = sandboxedPdf
-      ? [VM_PDF_EXTRACTOR_ID]
-      : format === "pdf" && resolveNativePdfMode() === "native-pdf" ? ["native-pdf", ...base] : base;
-    // A configured legacy id (DOCSLURP_EXTRACTOR_ID_ALIASES) resolves to its canonical extractor; unknown ids still throw.
-    let ids = configured?.map(canonicalExtractorId) ?? defaults.filter((id) =>
+    const defaults = sandboxedPdf ? [VM_PDF_EXTRACTOR_ID] : base;
+    // A configured legacy id (DOCSLURP_EXTRACTOR_ID_ALIASES) resolves to its canonical extractor; a retired id
+    // (RETIRED_EXTRACTOR_IDS) is dropped, and an order it emptied uses the defaults. Unknown ids still throw.
+    const kept = configured?.filter((id) => !RETIRED_EXTRACTOR_IDS.has(id)).map(canonicalExtractorId);
+    if (configured && kept && kept.length < configured.length) {
+      console.warn(`[extractors] ${format} extractor order names a retired extractor; dropped it order=${configured.join(",")}`);
+    }
+    // Only an order emptied by retired ids takes the defaults; an explicitly empty order still fails closed below.
+    const emptiedByRetired = configured !== undefined && configured.length > 0 && kept!.length === 0;
+    const ids = kept && !emptiedByRetired ? kept : defaults.filter((id) =>
       this.entries.get(id)?.descriptor.capabilities.formats.includes(format),
     );
-    // Kreuzberg no longer reads images (its OCR would run on the worker host). A stored or in-flight image order that
-    // still names it is read by the OCR extractor in its place, rather than failing the document on an old setting.
-    if (format === "image" && ids.includes("kreuzberg")) {
-      console.warn("[extractors] image extractor order names kreuzberg; using the ocr extractor in its place");
-      ids = ids.map((id) => (id === "kreuzberg" ? "ocr" : id));
-    }
     // Fail closed: a workspace order naming a host parser under a sandboxed deployment is refused, never run.
     const hostIds = sandboxedPdf ? ids.filter((id) => id !== VM_PDF_EXTRACTOR_ID) : [];
     if (hostIds.length > 0) {
@@ -299,15 +310,55 @@ export function serializeExtractorOptions(options: Record<string, unknown>, id: 
   return JSON.stringify(parseExtractorOptions(id, value));
 }
 
-const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".tif", ".tiff", ".bmp", ".heic", ".heif", ".avif", ".jp2", ".jpx", ".pnm", ".pbm", ".pgm", ".ppm"]);
+/** Pandoc's reader for a source: the sniffed format first, the extension only within it. Null: Pandoc cannot read it. */
+export function pandocReader(source: string, context?: PrepareContext): string | null | undefined {
+  const extension = path.extname(source).toLowerCase();
+  switch (context?.format) {
+    case "office-word": return "docx";
+    case "office-other": return extension === ".odt" ? "odt" : extension === ".rtf" ? "rtf" : null;
+    case "epub": return "epub";
+    case "html": return "html";
+    case "markdown":
+    case "plain-text": return "markdown";
+    case "structured-csv": return extension === ".tsv" ? "tsv" : "csv";
+    case "latex": return "latex";
+    default: return undefined;
+  }
+}
 
-/** True when Kreuzberg would read `source` as an image (format id or file extension). */
-/** A plain MIME type (no parameters) that is safe to pass on a command line. */
-const KREUZBERG_MIME = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,127}$/;
+const OLE_MAGIC = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+const OFFICE_FORMATS = new Set(["office-word", "office-other", "office-pptx", "office-excel"]);
+const LEGACY_OFFICE = /\.(doc|ppt|xls|dot|pps|xlt)$/i;
+const LEGACY_OFFICE_MIME = /^application\/(msword|vnd\.ms-(powerpoint|excel)|x-ole-storage)$/i;
 
-function kreuzbergImageInput(source: string, context?: PrepareContext): boolean {
-  return context?.format === "image" || IMAGE_EXTENSIONS.has(path.extname(source).toLowerCase()) ||
-    /^image\//i.test(context?.mimeType ?? "");
+/**
+ * Why an Office source has no reader in this worker, or null. Legacy binary Word, PowerPoint and Excel files and
+ * password-protected Office Open XML files (both are OLE compound files) are not read by any extractor here: the stage
+ * fails them as an unsupported format instead of handing them to a reader that would return nothing.
+ */
+export async function unsupportedSourceReason(sourcePath: string, context: PrepareContext & { filename?: string }): Promise<string | null> {
+  if (!OFFICE_FORMATS.has(context.format ?? "")) return null;
+  let head = Buffer.alloc(0);
+  try {
+    const handle = await open(sourcePath, "r");
+    try {
+      const { buffer, bytesRead } = await handle.read(Buffer.alloc(8), 0, 8, 0);
+      head = buffer.subarray(0, bytesRead);
+    } finally { await handle.close(); }
+  } catch { /* unreadable: the extractor reports it */ }
+  const ole = head.equals(OLE_MAGIC);
+  const legacyName = LEGACY_OFFICE.test(context.filename ?? sourcePath);
+  if (!ole && !(legacyName && LEGACY_OFFICE_MIME.test(context.mimeType ?? ""))) return null;
+  return legacyName || !/\.(docx|pptx|xlsx)$/i.test(context.filename ?? sourcePath)
+    ? `unsupported format: legacy binary Office file (${context.format}); convert it to .docx, .pptx or .xlsx`
+    : `unsupported format: encrypted or password-protected Office file (${context.format}); remove the password and upload again`;
+}
+
+/** An Office Open XML sidecar plan, unavailable for the legacy binary format of the same family (.ppt, .xls). */
+function officeOpenXml(plan: CommandPlan, source: string, context: PrepareContext | undefined): CommandPlan {
+  const legacy = [".ppt", ".xls"].includes(path.extname(source).toLowerCase()) || /^application\/vnd\.ms-(powerpoint|excel)$/i.test(context?.mimeType ?? "");
+  if (legacy) console.warn(`[extractors] no reader for legacy binary Office files format=${context?.format ?? "unknown"} mime=${context?.mimeType}`);
+  return legacy ? { ...plan, available: false } : plan;
 }
 
 export const documentExtractorRegistry = new ExtractorRegistry();

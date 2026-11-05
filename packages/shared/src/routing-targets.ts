@@ -120,7 +120,6 @@ function rolesFor(id: string, latex = false): AssignmentRole[] {
   if (id === "native:accept-text-layer") return ["accept-text"];
   if (id === "skip") return ["skip"];
   if (id === "local:florence-2-small") return ["image-label"];
-  if (id === "native:kreuzberg") return ["extract-text", "table"];
   // Neutral native-pdf engine targets (the engine behind them is an internal detail).
   if (id === NATIVE_PDF_MARKDOWN_TARGET_ID) return ["extract-text", "table"];
   if (id === NATIVE_PDF_TEXT_TARGET_ID) return ["extract-text"];
@@ -228,13 +227,6 @@ function seedTargets(): RoutingTarget[] {
       "local-labeler",
       { modelUri: "llm://local/florence-2-small" },
       { imageInput: true },
-      "local",
-    ),
-    base(
-      "native:kreuzberg",
-      "native",
-      { extractorId: "kreuzberg" },
-      { usesNativeTextLayer: true, emitsHtmlTables: true },
       "local",
     ),
     nativePdfTarget(NATIVE_PDF_MARKDOWN_TARGET_ID, "markdown", { emitsHtmlTables: false }),

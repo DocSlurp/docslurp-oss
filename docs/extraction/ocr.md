@@ -14,8 +14,7 @@ to a weaker boundary or to another reader.
 - The eight model files are pinned by sha256 in `worker/ocr-models.json` (RapidOCR's v3.10.0 ONNX exports, Apache-2.0,
   84 MB in total). The CLI loads models only by explicit path and refuses a missing or mismatched file (exit 3).
   Nothing downloads a model at runtime: images bake them read-only, and `--self-test` checks them.
-- Kreuzberg and LiteParse never OCR. Each one's native addon statically links Tesseract, which is disabled on every
-  path, not removed (see [Tesseract](#tesseract)).
+- No document extractor OCRs, and none links an OCR engine (see [Tesseract](#tesseract)).
 
 ## Modes
 
@@ -162,24 +161,32 @@ inspecting a built `worker/Dockerfile.lean` image (`dpkg -l`, `find` for the lib
 The mixed-PDF evaluation harness uses the PP-OCR CLI. This covers DocSlurp's images only: a developer machine may have
 Tesseract installed by its own package manager (on Arch, `libmupdf` depends on it).
 
-**2. Tesseract statically linked into two native addons: present, disabled.** `@kreuzberg/node` 4.10.2
-(`kreuzberg-node.linux-x64-gnu.node`) and `@llamaindex/liteparse` 2.17.0 (`liteparse.linux-x64-gnu.node`) compile
-Tesseract 5 and Leptonica into the addon itself. `ldd` shows no Tesseract or Leptonica library, but the binaries carry
-the Tesseract C++ API and its source paths (`third_party/tesseract/src/...`), and Kreuzberg's also carries a PaddleOCR
-backend. The npm prebuilds offer no OCR-free variant: the upstream Node bindings enable the `full` feature set, which
-includes `ocr` (Kreuzberg 4.x `crates/kreuzberg-node`, `crates/kreuzberg-ffi`; the renamed xberg 1.x binding does the
-same). The engine is disabled, not absent:
+**2. Tesseract statically linked into native addons: removed.** Until 2026-11-05 two npm addons compiled Tesseract 5
+and Leptonica in (`@kreuzberg/node` 4.10.2, which also carried a PaddleOCR backend, and `@llamaindex/liteparse`
+2.17.0); no OCR-free build existed, so both extractors were removed and their formats moved (see
+[Extractors per format](../extraction-feature-matrix.md#extractors-per-format)). `scripts/scan-ocr-engines.mjs` checks that nothing replaces them. It
+finds every ELF and WebAssembly object under the given paths by its magic bytes and reads it directly:
 
-- Kreuzberg: its OCR options are dropped and `disableOcr` set; image inputs are refused by extension, format and sniffed
-  MIME type, which the worker passes to Kreuzberg explicitly.
-- LiteParse: `ocrEnabled` is always false, `--ocr` is refused by the runner and the script, and no OCR server is set.
-- Both: the engine's language data points at an empty, read-only directory (`/opt/docslurp/empty-tessdata`, through
-  `TESSDATA_PREFIX` in the image, each command's sandbox environment and each script, and LiteParse's `tessdataPath`),
-  so an OCR call that slipped past those options fails ("Traineddata file does not exist") instead of reading pixels.
+- linkage: `DT_NEEDED` entries naming `libtesseract`, `liblept` or a Paddle library;
+- symbols: every name in `.dynsym` and `.symtab` (wasm: imports, exports and the name section);
+- banners: version strings and embedded language data in `.rodata`, `.comment` and data sections (`tesseract 5.`,
+  `Leptonica-1.`, `.traineddata`).
 
-`worker/src/__tests__/no-tesseract.test.ts` lists the native addons that embed Tesseract and fails when that list
-changes, so a new dependency cannot bring another copy in unnoticed. Removing the linked engine would mean replacing
-these extractors for the formats they handle, or building and maintaining OCR-free bindings from source.
+Each object is `hit`, `clean` (its symbol table was present and searched) or `unverified` (stripped or unparseable). A
+stripped object without evidence is not proof of absence, so it is never reported clean: corroborate it from its
+package (the owning Debian package's dependencies, the crate or npm package's build features) and record that. Against
+the retired addons the scanner reports both: the stripped Kreuzberg build through `.dynsym` and an embedded
+`tesseract 5.5` banner, LiteParse through 5,244 `.symtab` symbols. `worker/src/__tests__/no-tesseract.test.ts` runs it
+over the installed workspace and fails on any hit, and proves detection on a stripped system binary with a patched-in
+banner. Run it over a built image too:
+
+```sh
+docker run --rm -u 0 -v "$PWD/scripts/scan-ocr-engines.mjs:/scan.mjs:ro" --entrypoint node <image> /scan.mjs /
+```
+
+Pinned model files can be exempted by digest (`--allow-sha256-file worker/ocr-models.json`), never by name; the ONNX
+models are not ELF or wasm objects, so the default scan does not need it. A deployment that adds native extensions to
+its image (a provider plugin, an optional engine) scans that final image the same way.
 
 **3. A pure-Python wrapper with no binary: `unstructured-pytesseract`.** It stays in the Python lock because
 `unstructured[pdf]` requires it. Its wheel (`unstructured.pytesseract-0.3.15-py3-none-any.whl`, sha256 `a3f505c5…13d1`,

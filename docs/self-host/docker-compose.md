@@ -60,7 +60,7 @@ docker compose --env-file .env.selfhost -f compose.selfhost.yml --profile full u
 
 This switches the queue consumer to the full worker. It needs more resources.
 Both workers bake the base Python parsers (the Office/EPUB/HTML
-readers; PDFs go through Kreuzberg and Poppler). Docling and Unstructured come from prebuilt vendor bundles when
+readers; PDFs go through Poppler and the optional native engine). Docling and Unstructured come from prebuilt vendor bundles when
 `DOCSLURP_VENDOR_BUNDLE_BASE_URL` is set: an `https://` mirror or a
 `file:///path` directory of bundle archives, verified against the sha256 pins in
 `worker/vendor-bundles.json`. The bucket DocSlurp's own workers read is private, so build the bundles yourself and serve them from your own mirror. Without a bundle source, the full worker falls back

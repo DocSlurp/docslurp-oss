@@ -168,11 +168,8 @@ describe("documentExtractionForQuality", () => {
   // An unparsed config: documentExtractionForQuality must hold even for keys the schema would strip.
   const hostile = {
     ...defaultDocumentExtractionConfig,
-    order: { pdf: ["dolphin", "graph-local", "kreuzberg"], image: ["dolphin"] },
-    options: {
-      kreuzberg: { forceOcr: true, ocr: { backend: "paddleocr" }, forceOcrPages: [1, 2], tesseractOcrConfig: {}, outputFormat: "markdown" },
-      dolphin: { mode: "layout" },
-    },
+    order: { pdf: ["dolphin", "graph-local", "poppler-text"], image: ["dolphin"] },
+    options: { dolphin: { mode: "layout" } },
     enrich: ["page/ocr-text"],
     voting: { enabled: true, secondary: "dolphin" },
     forceOcr: true,
@@ -183,66 +180,60 @@ describe("documentExtractionForQuality", () => {
     expect(documentExtractionForQuality(hostile, "good").config).toBe(hostile);
   });
 
-  it("restricts fast to text-layer extractors with Kreuzberg OCR explicitly off", () => {
+  it("restricts fast to text-layer extractors", () => {
     const { config, removed } = documentExtractionForQuality(hostile, "fast");
-    expect(config.order).toEqual({ pdf: ["kreuzberg"] });
-    expect(config.options).toEqual({ kreuzberg: { outputFormat: "markdown", disableOcr: true } });
+    expect(config.order).toEqual({ pdf: ["poppler-text"] });
+    expect(config.options).toEqual({});
     expect(config.enrich).toEqual([]);
     expect(config.voting.secondary).toBe("next-in-order");
     expect(config.forceOcr).toBe(false);
     expect(removed).toEqual(expect.arrayContaining([
       "order.pdf:dolphin", "order.pdf:graph-local", "order.image:dolphin", "options.dolphin",
-      "options.kreuzberg.forceOcr", "options.kreuzberg.ocr", "options.kreuzberg.forceOcrPages",
-      "options.kreuzberg.tesseractOcrConfig", "enrich", "voting.secondary:dolphin", "forceOcr",
+      "enrich", "voting.secondary:dolphin", "forceOcr",
     ]));
   });
 
-  it("passes Kreuzberg disableOcr even when nothing was configured", () => {
+  it("adds nothing when nothing was configured", () => {
     const { config, removed } = documentExtractionForQuality(defaultDocumentExtractionConfig, "fast");
-    expect(config.options).toEqual({ kreuzberg: { disableOcr: true } });
+    expect(config.options).toEqual({});
     expect(removed).toEqual([]);
   });
 
-  it("strips a stored workspace's OCR settings too (normalized pipelines keep documentExtraction)", () => {
-    const pipeline = normalizePipelineFeatures({ quality: "fast", documentExtraction: { options: { kreuzberg: { forceOcr: true } } } });
-    expect(documentExtractionForQuality(pipeline.documentExtraction, pipeline.quality).config.options)
-      .toEqual({ kreuzberg: { disableOcr: true } });
+  it("counts the office sidecars and Pandoc as text-layer extractors", () => {
+    const config = { ...defaultDocumentExtractionConfig, order: { "office-pptx": ["pptx"], "office-excel": ["xlsx"], "office-word": ["pandoc"] } };
+    expect(documentExtractionForQuality(config, "fast").config.order).toEqual(config.order);
   });
 });
 
-describe("Kreuzberg options allow-list", () => {
-  it("keeps the allow-listed Kreuzberg keys in Auto and Good", () => {
-    const pipeline = normalizePipelineFeatures({
-      quality: "auto",
-      documentExtraction: { options: { kreuzberg: { forceOcr: true, ocr: { backend: "paddleocr", language: "deu" } } } } as never,
-    });
-    // Kreuzberg never OCRs (worker/scripts/kreuzberg_extract.mjs strips these); any stored backend reads back as ppocr.
-    expect(pipeline.documentExtraction.options.kreuzberg).toEqual({ forceOcr: true, ocr: { backend: "ppocr", language: "deu" } });
-  });
-
-  it("rejects every key outside the allow-list, nested OCR keys included (fail closed)", () => {
-    for (const kreuzberg of [
-      { structuredExtraction: { schema: {} } },
-      { baseUrl: "http://attacker.invalid" },
-      { cacheNamespace: "other-tenant" },
-      { useCache: false },
-      { ocr: { backend: "paddleocr", vlmConfig: { model: "x" } } },
-      { ocr: { baseUrl: "http://169.254.169.254" } },
-    ]) {
-      expect(() => documentExtractionConfigSchema.parse({ options: { kreuzberg } }), JSON.stringify(kreuzberg)).toThrow();
-      expect(() => normalizePipelineFeatures({ quality: "auto", documentExtraction: { options: { kreuzberg } } } as never)).toThrow();
-    }
-  });
-
+describe("OCR language setting", () => {
   it("constrains OCR languages to three-letter language codes (L2)", () => {
     for (const language of ["eng", "deu", "chi_sim", "chi_sim_vert", "chi_tra_vert", "jpn_vert", "eng+deu", "eng+chi_tra+jpn", "eng+chi_sim_vert"]) {
-      expect(documentExtractionConfigSchema.parse({ options: { kreuzberg: { ocr: { language } } }, ocr: { language } }).ocr.language).toBe(language);
+      expect(documentExtractionConfigSchema.parse({ ocr: { language } }).ocr.language).toBe(language);
     }
     for (const language of ["../../etc/passwd", "eng;rm -rf /", "en", "ENG", "eng+", "+eng", "eng deu", "--psm 0", "e".repeat(9), "eng\nX",
       "chi_sim_vert_x", "eng_", "_eng", "eng__sim", "eng/../x", "eng|id", "$(id)", "`id`", "eng&deu", "eng_sim1", "chi_sim_toolongx"]) {
-      expect(() => documentExtractionConfigSchema.parse({ options: { kreuzberg: { ocr: { language } } } }), language).toThrow();
       expect(() => documentExtractionConfigSchema.parse({ ocr: { language } }), language).toThrow();
     }
+  });
+});
+
+describe("retired extractors (kreuzberg, liteparse)", () => {
+  it("drops them from requests: orders fall back to the deployment default, options and secondaries go", () => {
+    const parsed = documentExtractionConfigSchema.parse({
+      order: { pdf: ["kreuzberg"], "office-word": ["kreuzberg", "pandoc"], html: ["liteparse"] },
+      voting: { enabled: true, secondary: "kreuzberg" },
+      options: { kreuzberg: { forceOcr: true, ocr: { backend: "tesseract" } }, liteparse: { ocr: true }, dolphin: { mode: "page" } },
+      components: { tables: ["liteparse"], formulas: [], images: [] },
+    });
+    expect(parsed.order).toEqual({ "office-word": ["pandoc"] });
+    expect(parsed.voting).toEqual({ enabled: true, secondary: "next-in-order" });
+    expect(parsed.options).toEqual({ dolphin: { mode: "page" } });
+    expect(parsed.components.tables).toEqual([]);
+  });
+
+  it("still rejects unknown option keys and ids that were never extractors", () => {
+    expect(() => documentExtractionConfigSchema.parse({ options: { tesseract: {} } })).toThrow();
+    expect(() => documentExtractionConfigSchema.parse({ options: { dolphin: { repoPath: "/tmp/x" } } })).toThrow();
   });
 });
 
@@ -271,7 +262,7 @@ describe("extractor options (M4: one strict schema per extractor id)", () => {
   });
 
   it("rejects options for extractor ids without an option schema", () => {
-    for (const id of ["pandoc", "native-pdf", "liteparse", "poppler-text", "graph-local", "json", "unknown", "__proto__", "constructor", "toString"]) {
+    for (const id of ["pandoc", "pptx", "xlsx", "native-pdf", "poppler-text", "graph-local", "json", "unknown", "__proto__", "constructor", "toString"]) {
       expect(() => documentExtractionConfigSchema.parse({ options: { [id]: {} } }), id).toThrow();
       expect(() => parseExtractorOptions(id, {}), id).toThrow(/takes no options/);
     }
@@ -300,11 +291,9 @@ describe("stored pipelines with settings the strict schemas reject (round 4 M2)"
     try {
       const parsed = normalizeStoredPipelineFeatures(JSON.parse(JSON.stringify(stored)) as never, "workspace ws_1");
       expect(parsed.quality).toBe("fast");
-      expect(parsed.documentExtraction.order.pdf).toEqual(["liteparse", "kreuzberg"]);
-      expect(parsed.documentExtraction.options).toEqual({
-        kreuzberg: { forceOcr: false, ocr: { backend: "ppocr" } },
-        dolphin: { mode: "page" },
-      });
+      // Both retired ids go, so the PDF order falls back to the deployment default.
+      expect(parsed.documentExtraction.order.pdf).toBeUndefined();
+      expect(parsed.documentExtraction.options).toEqual({ dolphin: { mode: "page" } });
       expect(JSON.stringify(parsed)).not.toContain("/tmp/attacker");
       expect(JSON.stringify(parsed)).not.toContain("/tmp/model");
       expect(parsed.documentExtraction.ocr).toEqual({ language: "auto", autoRotate: false });
@@ -312,8 +301,8 @@ describe("stored pipelines with settings the strict schemas reject (round 4 M2)"
       expect(errors[0]).toContain("workspace ws_1");
       for (const path of [
         "documentExtraction.ocr.language", "documentExtraction.options.liteparse", "documentExtraction.options.__proto__",
-        "documentExtraction.options.kreuzberg.useCache", "documentExtraction.options.kreuzberg.ocr.vlmConfig",
-        "documentExtraction.options.kreuzberg.ocr.language", "documentExtraction.options.dolphin.repoPath",
+        "documentExtraction.options.kreuzberg", "documentExtraction.order.pdf:liteparse", "documentExtraction.order.pdf:kreuzberg",
+        "documentExtraction.options.dolphin.repoPath",
         "documentExtraction.options.dolphin.modelPath",
       ]) expect(errors[0]).toContain(path);
       expect(({} as Record<string, unknown>).polluted).toBeUndefined();
@@ -329,7 +318,7 @@ describe("stored pipelines with settings the strict schemas reject (round 4 M2)"
     console.error = () => {};
     try {
       expect(normalizeStoredPipelineFeatures({ documentExtraction: { options: { dolphin: "repoPath=/tmp/x", kreuzberg: { ocr: "x" } } } } as never, "run r2")
-        .documentExtraction.options).toEqual({ kreuzberg: {} });
+        .documentExtraction.options).toEqual({});
       expect(normalizeStoredPipelineFeatures({ documentExtraction: { options: ["dolphin"] } } as never, "run r3").documentExtraction.options).toEqual({});
     } finally {
       console.error = quiet;
@@ -353,30 +342,6 @@ describe("stored pipelines with settings the strict schemas reject (round 4 M2)"
     } finally {
       console.error = original;
     }
-  });
-});
-
-describe("Fast's Kreuzberg config (L1)", () => {
-  it("carries no ocr key, only the disableOcr marker", () => {
-    const hostileOcr = documentExtractionConfigSchema.parse({
-      options: { kreuzberg: { forceOcr: true, forceOcrPages: [1], ocr: { backend: "tesseract", language: "eng" } } },
-    });
-    const { config } = documentExtractionForQuality(hostileOcr, "fast");
-    const kreuzberg = config.options.kreuzberg as Record<string, unknown>;
-    expect(Object.keys(kreuzberg)).toEqual(["disableOcr"]);
-    expect("ocr" in kreuzberg).toBe(false);
-    expect(kreuzberg.disableOcr).toBe(true);
-  });
-});
-
-describe("Kreuzberg OCR backend", () => {
-  it("reads any stored OCR backend name as ppocr and rejects a non-string backend", () => {
-    for (const backend of ["vlm", "tesseract", "paddleocr", "ppocr"]) {
-      const parsed = documentExtractionConfigSchema.parse({ options: { kreuzberg: { ocr: { backend } } } });
-      expect((parsed.options.kreuzberg as { ocr: { backend: string } }).ocr.backend).toBe("ppocr");
-    }
-    expect(() => documentExtractionConfigSchema.parse({ options: { kreuzberg: { ocr: { backend: 5 } } } })).toThrow();
-    expect(() => documentExtractionConfigSchema.parse({ options: { kreuzberg: { ocr: { backend: { url: "http://169.254.169.254" } } } } })).toThrow();
   });
 });
 
