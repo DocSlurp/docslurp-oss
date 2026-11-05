@@ -724,11 +724,11 @@ Signed-in sessions don't need key scopes. Demoting, removing or leaving as the l
 For now a user belongs to exactly one organization. Everything tenant-scoped (runs, documents, API keys, webhooks, search) still names its organization explicitly, and organization IDs stay in every API, so several organizations per user can be enabled later without API changes.
 
 - Sign-up creates your personal organization.
-- Accepting an organization or workspace invite into another organization, or creating an organization, works only while your current organization is a personal one with no data (no documents, runs, API keys or webhooks, never paid). That personal organization is then deleted and replaced. Otherwise the request returns 409 `user_already_in_org`: leave your current organization first.
+- Accepting an organization or workspace invite into another organization, or creating an organization, works only while your current organization is a personal one with no data (no documents, runs, unrevoked API keys or webhooks, never paid). That personal organization is then deleted and replaced. Otherwise the request returns 409 `user_already_in_org`: leave your current organization first.
 - Leaving an organization, or being removed from one, gives you your personal organization back, so you always have exactly one. Access to the organization you left ends at once.
 - While the limit is 1, `orgId` on requests made with a session can only name your own organization, and `workspace_ambiguous` cannot occur.
 
-Self-hosters: the limit is `DOCSLURP_MAX_ORGS_PER_USER` (default and current maximum `1`) and the unique index `org_memberships_one_org_per_user` (migration 0127). Lifting it means dropping that index in a new migration and raising the variable; nothing else in the server assumes one organization per user.
+Self-hosters: the limit is `DOCSLURP_MAX_ORGS_PER_USER` (default and current maximum `1`) and the unique index `org_memberships_one_org_per_user` (migration 0127). Lifting it means dropping that index in a new migration and raising the variable; nothing else in the server assumes one organization per user. Raising the variable while the index exists has no effect, and the API logs `[org-limit]` at startup.
 
 ### Grant organization scopes explicitly
 
