@@ -66,12 +66,23 @@ export type ReindexTarget = {
   source_key: string;
   extraction_mode: string;
   page_count: number;
+  /** The worker's measured count (migration 0126), its method, intake's count source and the file facts: copied to the new version. */
+  billing_pages: number | null;
+  billing_pages_method: string | null;
+  page_count_source: string | null;
+  file_facts: unknown;
   canonical_id: string | null;
   version_number: number | null;
   source_sha256: string | null;
   source_path: string | null;
   index_config_hash: string | null;
 };
+
+/** Pages a document bills: the worker's measured count of an Office, slide, sheet or EPUB file, else its page count. */
+export function billedPages(doc: { page_count: number | null; billing_pages?: number | null }): number {
+  const measured = Number(doc.billing_pages);
+  return Math.max(0, measured > 0 ? measured : Number(doc.page_count) || 0);
+}
 
 export type ReindexMode = "required" | "recommended";
 
@@ -116,7 +127,8 @@ async function loadTargets(
   const busyKinds = options.ignoreReindexRuns ? ["full-index"] : ["reindex", "full-index"];
   return await db<ReindexTarget[]>`
     select d.id, d.org_id, d.user_id, d.workspace_id, d.run_id, d.filename, d.mime_type, d.source_key,
-      d.extraction_mode, d.page_count, d.canonical_id, d.version_number, d.source_sha256, d.source_path, d.index_config_hash
+      d.extraction_mode, d.page_count, d.billing_pages, d.billing_pages_method, d.page_count_source, d.file_facts,
+      d.canonical_id, d.version_number, d.source_sha256, d.source_path, d.index_config_hash
     from documents d
     where d.workspace_id = ${workspaceId}
       and ${LIVE_DOCUMENT}
@@ -268,7 +280,8 @@ export async function planWorkspaceChange(args: {
       const stages = owed ? compiledStages(nextPipeline, owed) : everything;
       const group = groups.get(stages.join(",")) ?? { stages, documents: 0, pages: 0 };
       group.documents += 1;
-      group.pages += Math.max(0, doc.page_count ?? 0);
+      // Priced on the pages the document bills, not the page basis its text splits into (one page for a measured DOCX).
+      group.pages += billedPages(doc);
       groups.set(stages.join(","), group);
     }
     const parts: CostEstimate[] = [];
@@ -367,10 +380,13 @@ export async function createReindexRuns(args: {
       const versionNumber = await nextVersionNumber(tx as unknown as typeof sql, workspace.id, canonicalId);
       await tx`
         insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status,
-          extraction_mode, page_count, canonical_id, version_number, previous_version_id, reused_from_document_id,
+          extraction_mode, page_count, billing_pages, billing_pages_method, page_count_source, file_facts,
+          canonical_id, version_number, previous_version_id, reused_from_document_id,
           source_sha256, source_path, indexing_mode, reindex_of)
         values (${randomUUID()}, ${doc.org_id}, ${doc.user_id}, ${doc.workspace_id}, ${runId}, ${doc.filename},
           ${doc.mime_type}, ${doc.source_key}, 'queued', ${doc.extraction_mode}, ${doc.page_count},
+          ${doc.billing_pages ?? null}, ${doc.billing_pages_method ?? null}, ${doc.page_count_source ?? "counted"},
+          ${doc.file_facts ? tx.json(doc.file_facts as never) : null},
           ${canonicalId}, ${versionNumber}, ${doc.id},
           ${batch.partial ? doc.id : null}, ${doc.source_sha256 ?? null}, ${doc.source_path ?? ""},
           ${effectiveIndexingMode("full")}, ${doc.id})

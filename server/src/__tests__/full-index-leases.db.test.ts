@@ -76,3 +76,18 @@ it("a post-grant failure rolls back the run and its lease", async () => {
   const [status] = await sql<{ reserved: string }[]>`select reserved from org_spend_status('fx-org','fx-a',0)`;
   expect(Number(status!.reserved)).toBe(0);
 });
+it("prices a full index of a measured DOCX on its 300 billed pages and carries the measured count to the new version", async () => {
+  vi.stubEnv('DOCSLURP_BILL_INGEST', 'true');
+  await sql`update organizations set credit_balance_cents = 1000 where id = 'fx-org'`;
+  await sql`insert into workspaces(id,org_id,user_id,name,pipeline) values ('fx-a','fx-org','fx-user','fx-a',${sql.json(JSON.parse(JSON.stringify({ ...defaultPipelineFeatures, indexingMode: 'map' })))})`;
+  await sql`insert into workspace_runs(id,org_id,user_id,workspace_id,kind,status,stage,pipeline,total_documents,pages_total) values ('run-docx','fx-org','fx-user','fx-a','bulk-upload','completed','completed',${sql.json(JSON.parse(JSON.stringify(defaultPipelineFeatures)))},1,1)`;
+  const facts = { mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', format: 'office-word' };
+  await sql`insert into documents(id,org_id,user_id,workspace_id,run_id,filename,mime_type,source_key,status,page_count,billing_pages,billing_pages_method,page_count_source,file_facts,indexing_mode)
+    values ('fx-docx','fx-org','fx-user','fx-a','run-docx','contract.docx',${facts.mimeType},'raw/c.docx','completed',1,300,'pdf-conversion','assumed',${sql.json(facts)},'map')`;
+  const prepared = await svc.prepareFullIndex({ orgId: 'fx-org', workspaceId: 'fx-a', actor, policy });
+  expect(prepared.unindexedPages).toBe(1); // what is left to index, in the page basis
+  expect(prepared.estimatedCredits).toBeCloseTo(300 * svc.fullIndexCreditsPerPage()); // what it bills
+  await svc.commitIndexJobs(prepared, 'fx-user');
+  const [copy] = await sql`select page_count, billing_pages, billing_pages_method, page_count_source, file_facts from documents where previous_version_id = 'fx-docx'`;
+  expect(copy).toEqual({ page_count: 1, billing_pages: 300, billing_pages_method: 'pdf-conversion', page_count_source: 'assumed', file_facts: facts });
+});

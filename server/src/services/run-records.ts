@@ -61,6 +61,8 @@ export type DocumentRow = {
   page_count: number;
   /** The worker's measured page count of an Office, slide, sheet or EPUB file (migration 0126); null until measured. */
   billing_pages?: number | null;
+  /** How billing_pages was found (pdf-conversion, slides, sheet-rows, text-pages, text-rule, size-estimate). */
+  billing_pages_method?: string | null;
   /** `counted` or `assumed`: whether intake counted page_count or assumed one page for a format only the worker can count. */
   page_count_source?: string | null;
   source_sha256?: string | null;
