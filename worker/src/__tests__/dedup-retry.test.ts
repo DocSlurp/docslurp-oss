@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Document, WorkspaceRun } from "../models.js";
 import { checkDedup, registerHash, runDocumentStage } from "../pipeline/checkpoints.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
+import { extractorFailureReason, extractorFallbackFor, recordExtractorFallback } from "../lib/extractor-fallback.js";
 
 /**
  * A low-plausibility attempt (empty text on a scanned page) escalates to the next extractor. Its output was registered under
@@ -42,6 +43,10 @@ describe("dedup never serves a document its own rejected attempt", () => {
     await runDocumentStage(state, doc, "extract-markdown", "doc-a:markdown", "markdown extracted",
       extractStage(state, doc, { "poppler-text": "", ocr: "Scanned page text." }, seen), undefined, { retryStrategies: ["ocr"] });
     expect(seen).toEqual(["poppler-text", "ocr"]);
+    // The rejected extractor is a fallback the ingest report shows.
+    expect(extractorFallbackFor(state.artifactLedger, "doc-a", "ocr", ["poppler-text", "ocr"])).toEqual({
+      wanted: "poppler-text", served: "ocr", reasons: [{ extractor: "poppler-text", reason: "low-quality" }],
+    });
     expect(state.documentStage("doc-a", "extract-markdown")).toMatchObject({ status: "completed", stats: { extractor: "ocr" } });
 
     // A copy of the same bytes reuses the accepted output, never the rejected one.
@@ -62,5 +67,37 @@ describe("dedup never serves a document its own rejected attempt", () => {
       return { artifactUri: "s3://b/doc-a/poppler-text.md", stats: { plausibilityScore: 0 } };
     }, undefined, { retryStrategies: ["ocr"] });
     expect(copySaw).toBeUndefined();
+  });
+});
+
+describe("extractor fallbacks", () => {
+  const ledger = () => {
+    const values = new Map<string, string>();
+    return { read: (key: string) => values.get(key), record: (key: string, value: string | null | undefined) => { if (value) values.set(key, value); return value ?? undefined; } };
+  };
+
+  it("names the wanted extractor, the one that served, and public reasons only", () => {
+    const l = ledger();
+    recordExtractorFallback(l, "d", "doppler-md", extractorFailureReason(new Error("pdftomarkdown crashed: SIGSEGV at /usr/local/bin")));
+    recordExtractorFallback(l, "d", "native-pdf", extractorFailureReason(Object.assign(new Error("aborted"), { name: "AbortError" })));
+    expect(extractorFallbackFor(l, "d", "poppler-text", ["doppler-md", "native-pdf", "poppler-text"])).toEqual({
+      wanted: "doppler-md", served: "poppler-text",
+      reasons: [{ extractor: "doppler-md", reason: "failed" }, { extractor: "native-pdf", reason: "timeout" }],
+    });
+    expect(l.read("extractor-fallbacks:d")).not.toMatch(/SIGSEGV|usr/);
+  });
+
+  it("is not a fallback when the extractor that failed comes after the one that served (a voting secondary)", () => {
+    const l = ledger();
+    recordExtractorFallback(l, "d", "poppler-text", "failed");
+    expect(extractorFallbackFor(l, "d", "native-pdf", ["native-pdf", "poppler-text"])).toBeNull();
+    expect(extractorFallbackFor(l, "other", "native-pdf", ["native-pdf", "poppler-text"])).toBeNull();
+  });
+
+  it("drops ids that are not extractor ids", () => {
+    const l = ledger();
+    recordExtractorFallback(l, "d", "/bin/sh -c x", "failed");
+    recordExtractorFallback(l, "d", undefined, "low-quality");
+    expect(extractorFallbackFor(l, "d", "poppler-text", ["poppler-text"])).toBeNull();
   });
 });

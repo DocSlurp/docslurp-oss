@@ -74,3 +74,20 @@ describe("sanitizeFailureDetail", () => {
 it("parses stored reports without failures as none", () => {
   expect(ingestReportFailuresSchema.default({ total: 0, byReason: [], examples: [] }).parse(undefined)).toEqual({ total: 0, byReason: [], examples: [] });
 });
+
+describe("missing or unavailable converters classify as extractor failures, not unknown", () => {
+  it.each([
+    "doppler-md unavailable: DOCSLURP_DOPPLER_HOST_PDF=1 but pdftomarkdown is not installed",
+    "pdftoppm unavailable for selected-page rasterization",
+    "Error: spawn pandoc ENOENT",
+    "pdftomarkdown: command not found",
+    "python3 exited with code 127",
+  ])("%j", (error) => {
+    expect(classifyIngestFailure(error).reason).toBe("extractor_failed");
+  });
+
+  it("keeps OCR and unreadable-file causes ahead of it", () => {
+    expect(classifyIngestFailure("OCR runtime unavailable for DOCSLURP_OCR_MODE=vm").reason).toBe("ocr_unavailable");
+    expect(classifyIngestFailure("encrypted PDF: extractor unavailable").reason).toBe("unreadable_file");
+  });
+});

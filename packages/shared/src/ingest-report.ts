@@ -110,6 +110,45 @@ export const ingestReportFailuresSchema = z.object({
 });
 export type IngestReportFailures = z.infer<typeof ingestReportFailuresSchema>;
 
+/** Why an extractor tried for a file did not serve it: public codes only, never error text. */
+export const ingestReportExtractorFallbackReasonSchema = z.enum(["unavailable", "failed", "timeout", "low-quality"]);
+export type IngestReportExtractorFallbackReason = z.infer<typeof ingestReportExtractorFallbackReasonSchema>;
+
+const extractorId = z.string().regex(/^[a-z0-9][a-z0-9-]{0,39}$/);
+
+/**
+ * A file that completed with a fallback extractor: the one wanted (first tried) failed, timed out or returned output rejected
+ * as low quality, and another served it. The file looks like a success, so the report says what it is missing.
+ */
+export const ingestReportExtractionWarningSchema = z.object({
+  documentId: z.string(),
+  filename: z.string(),
+  wantedExtractor: extractorId,
+  servedExtractor: extractorId,
+  reasons: z.array(z.object({ extractor: extractorId, reason: ingestReportExtractorFallbackReasonSchema })).max(16),
+  /** Reviewed, user-facing explanation. */
+  message: z.string(),
+});
+export type IngestReportExtractionWarning = z.infer<typeof ingestReportExtractionWarningSchema>;
+
+export const ingestReportExtractionWarningsSchema = z.object({
+  total: count,
+  /** Up to 20 files, newest first. */
+  examples: z.array(ingestReportExtractionWarningSchema),
+});
+
+const FALLBACK_COPY: Record<IngestReportExtractorFallbackReason, string> = {
+  unavailable: "was not available on the processing server",
+  failed: "failed on this file",
+  timeout: "timed out on this file",
+  "low-quality": "returned too little usable text",
+};
+
+/** The reviewed message for a fallback: what was wanted, why it did not serve, and what served instead. */
+export function extractionWarningMessage(wanted: string, served: string, reason: IngestReportExtractorFallbackReason): string {
+  return `The ${wanted} extractor ${FALLBACK_COPY[reason]}, so ${served} read this file instead. Its text may lack headings, tables or layout the preferred extractor keeps; reprocess it once the cause is fixed.`;
+}
+
 export const INGEST_REPORT_FAILURE_DETAIL_MAX = 160;
 
 const FAILURE_COPY: Record<IngestReportFailureReason, { message: string; retryable: boolean }> = {
@@ -138,6 +177,9 @@ const FAILURE_PATTERNS: Array<[IngestReportFailureReason, RegExp]> = [
   ["policy_blocked", /privacy mode|local-only|strict-privacy|cost cap|spend cap|maxCostCents|budget|\bpii\b|policy/i],
   ["provider_failed", /rate.?limit|\b429\b|\bprovider\b|openrouter|upstream|overloaded|quota|\b50[0234]\b/i],
   ["extractor_failed", /no extractor produced output|extractor/i],
+  // A converter that is missing or did not start (an executable absent from the image, a plan marked unavailable): the
+  // extractor could not run at all.
+  ["extractor_failed", /\b(?:unavailable|not installed|not found on PATH|command not found|missing (?:binary|converter|executable))\b|spawn \S+ ENOENT|\bENOENT\b.*\bspawn\b|exited with (?:code )?127\b/i],
 ];
 
 /** Maps a stored worker error (and the document status) to a reason and reviewed copy. Never echoes the raw text. */
@@ -301,6 +343,8 @@ export const ingestReportSchema = z.object({
   }),
   /** Files that failed, why, and at which stage. Defaults to none for reports stored before this field existed. */
   failures: ingestReportFailuresSchema.default({ total: 0, byReason: [], examples: [] }),
+  /** Files that completed with a fallback extractor. Defaults to none for reports stored before this field existed. */
+  extractionWarnings: ingestReportExtractionWarningsSchema.default({ total: 0, examples: [] }),
   focus: ingestReportPageSchema.array().nullable(),
   languages: z.array(z.object({ code: z.string(), documents: count })),
   stages: z.object({

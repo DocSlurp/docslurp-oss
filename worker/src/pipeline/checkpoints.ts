@@ -1,4 +1,5 @@
 import type { GeoFinalSource } from "../db/geo-final-source.js";
+import { recordExtractorFallback } from "../lib/extractor-fallback.js";
 import { reportException, initializeWorkerErrorReporting } from "@docslurp/shared/error-reporting";
 import { createHash } from "node:crypto";
 
@@ -311,6 +312,8 @@ export async function runDocumentStage(
         recordRetryCount(state, document.id, attempt.attempt);
         // The rejected attempt's output must not be served by dedup, to this document's retry or to a copy of it.
         releaseDocumentHashes(state, document.id);
+        // Its extractor did not serve the document: the ingest report shows the fallback.
+        recordExtractorFallback(state.artifactLedger, document.id, stats.extractor, "low-quality");
         continue;
       }
 

@@ -109,6 +109,7 @@ import { affordableImageFrames, authorizeImageFrames, authorizeImageRead } from 
 import { OCR_FAILED_PAGES_KEY, OcrInfrastructureError, OcrRefusedError, ocrFailedPages, recordOcrFailedPages, resolveOcrMode } from "../ocr/mode.js";
 import { ocrDocument } from "../ocr/read-document.js";
 import { recordMeasuredPageCount, type PageCountResult } from "../lib/office-page-count.js";
+import { extractorFailureReason, extractorFallbackFor, recordExtractorFallback } from "../lib/extractor-fallback.js";
 
 interface PageHeatmapEntry {
   pageNumber: number;
@@ -515,6 +516,15 @@ export class ExtractMarkdownStage implements Stage {
                   if (result?.status === "rejected" && findOcrInfrastructureError(result.reason)) throw findOcrInfrastructureError(result.reason);
                 }
 
+                // Every candidate that failed is a fallback the ingest report shows when another extractor serves the file.
+                for (const [planned, result] of [
+                  [plannedExtractors.primary, resultA],
+                  [plannedExtractors.secondary, resultB],
+                ] as const) {
+                  if (planned && result?.status === "rejected") {
+                    recordExtractorFallback(state.artifactLedger, document.id, planned.label, extractorFailureReason(result.reason));
+                  }
+                }
                 for (const [planned, result] of [
                   [plannedExtractors.primary, resultA],
                   [plannedExtractors.secondary, resultB],
@@ -1112,6 +1122,8 @@ export class ExtractMarkdownStage implements Stage {
                       secondaryExtractor: plannedExtractors.secondary?.label ?? null,
                       extractorOrder: this.tryResolveExtractorOrder(format, extractionConfig.order),
                       extractorAttempts: attemptLedger.snapshot(),
+                      // Extractors tried before the served one that failed, timed out or were rejected (ingest report warning).
+                      extractorFallback: extractorFallbackFor(state.artifactLedger, document.id, winningCandidate.label, this.tryResolveExtractorOrder(format, extractionConfig.order)),
                       retryStrategy: retryStrategy ?? "default",
                       extractionMs: Date.now() - extractionStartedAt,
                       nativePdf: nativePdfStats,

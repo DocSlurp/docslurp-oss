@@ -1,6 +1,9 @@
 import {
   buildByteHistogram,
   classifyIngestFailure,
+  extractionWarningMessage,
+  ingestReportExtractionWarningSchema,
+  ingestReportExtractorFallbackReasonSchema,
   sanitizeFailureDetail,
   INGEST_REPORT_FACTS_SINCE,
   INGEST_REPORT_FILE_BYTE_EDGES,
@@ -19,6 +22,7 @@ import {
   type IngestReport,
   type IngestReportFileItem,
   type IngestReportConfigItem,
+  type IngestReportExtractionWarning,
   type IngestReportFailure,
   type IngestReportFailureReason,
   type IngestReportPage,
@@ -28,6 +32,7 @@ import {
   type PipelineFeatures,
   type WorkspaceRecord,
 } from "@docslurp/shared";
+import { z } from "zod";
 import type { BulkReprocessResult } from "./documents.js";
 import { sql, type SqlClient } from "../db.js";
 import { workspaceRunsUsageCost } from "./usage-attribution.js";
@@ -85,6 +90,8 @@ export interface IngestReportStageRow {
   durationSeconds: number | null;
   /** The worker's stored stage error (raw: never exposed, only classified and sanitized). Present on failed stages. */
   error?: string | null;
+  /** extract-markdown's recorded extractor fallback (stats.extractorFallback), validated before use. */
+  extractorFallback?: unknown;
 }
 
 export interface IngestReportRunRow {
@@ -481,6 +488,7 @@ export function buildIngestReport(input: IngestReportInput): IngestReport {
       examples,
     },
     failures: summarizeFailures(failureList),
+    extractionWarnings: listExtractionWarnings(docs, stagesByDoc),
     focus,
     languages: [...languageCounts].sort((a, b) => b[1] - a[1]).map(([code, documents]) => ({ code, documents })),
     stages: {
@@ -535,6 +543,30 @@ function listFailures(docs: IngestReportDocumentRow[], stagesByDoc: Map<string, 
     });
   }
   return failures;
+}
+
+const fallbackStatsSchema = z.object({
+  wanted: z.string(),
+  served: z.string(),
+  reasons: z.array(z.object({ extractor: z.string(), reason: ingestReportExtractorFallbackReasonSchema })).min(1).max(16),
+});
+
+/** Completed files a fallback extractor served (extract-markdown's stats.extractorFallback): wanted, served, public reason codes. */
+function listExtractionWarnings(docs: IngestReportDocumentRow[], stagesByDoc: Map<string, IngestReportStageRow[]>): IngestReport["extractionWarnings"] {
+  const warnings: IngestReportExtractionWarning[] = [];
+  for (const doc of docs) {
+    if (statusBucket(doc.status) === "failed") continue;
+    const stage = stagesByDoc.get(doc.id)?.findLast((row) => row.stage === "extract-markdown" && row.extractorFallback);
+    const parsed = fallbackStatsSchema.safeParse(stage?.extractorFallback);
+    if (!parsed.success) continue;
+    const warning = ingestReportExtractionWarningSchema.safeParse({
+      documentId: doc.id, filename: doc.filename, wantedExtractor: parsed.data.wanted, servedExtractor: parsed.data.served,
+      reasons: parsed.data.reasons,
+      message: extractionWarningMessage(parsed.data.wanted, parsed.data.served, parsed.data.reasons[0]!.reason),
+    });
+    if (warning.success) warnings.push(warning.data);
+  }
+  return { total: warnings.length, examples: warnings.slice(0, FAILURE_EXAMPLE_LIMIT) };
 }
 
 function summarizeFailures(failures: IngestReportFailure[]): IngestReport["failures"] {
@@ -1133,7 +1165,7 @@ export async function loadIngestReport(args: {
     client<{
       document_id: string; stage_name: string; status: string; skipped: boolean; reason: string | null;
       selected_pages: number | null; pages: string | number | null; cost_cents: string | number | null;
-      table_pages: string | number | null; duration_seconds: string | number | null; error: string | null;
+      table_pages: string | number | null; duration_seconds: string | number | null; error: string | null; extractor_fallback: unknown;
     }[]>`
       select s.document_id, s.stage_name, s.status, left(s.error, 1000) as error,
         coalesce(s.stats -> 'skipped' = 'true'::jsonb, false) as skipped,
@@ -1142,7 +1174,8 @@ export async function loadIngestReport(args: {
         case when jsonb_typeof(s.stats -> 'pages') = 'number' then (s.stats ->> 'pages')::numeric end as pages,
         case when jsonb_typeof(s.stats -> 'costCents') = 'number' then (s.stats ->> 'costCents')::numeric end as cost_cents,
         case when jsonb_typeof(s.stats -> 'tablePages') = 'number' then (s.stats ->> 'tablePages')::numeric end as table_pages,
-        case when jsonb_typeof(s.stats -> 'durationSeconds') = 'number' then (s.stats ->> 'durationSeconds')::numeric end as duration_seconds
+        case when jsonb_typeof(s.stats -> 'durationSeconds') = 'number' then (s.stats ->> 'durationSeconds')::numeric end as duration_seconds,
+        case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'extractorFallback') = 'object' then s.stats -> 'extractorFallback' end as extractor_fallback
       from document_run_stage_states s
       join documents d on d.id = s.document_id and d.run_id = s.run_id
       where d.workspace_id = ${workspaceId} and d.id = any(${client.array(ids)}::text[])
@@ -1193,6 +1226,7 @@ export async function loadIngestReport(args: {
       selectedPages: numOrNull(row.selected_pages), pages: numOrNull(row.pages), costCents: numOrNull(row.cost_cents),
       tablePages: numOrNull(row.table_pages), durationSeconds: numOrNull(row.duration_seconds),
       error: row.status === "failed" ? row.error : null,
+      extractorFallback: row.extractor_fallback ?? null,
     })),
     runs: runRows.map((row) => ({ id: row.id, status: row.status, pagesProcessed: num(row.pages_processed), durationMs: num(row.duration_ms) })),
     costCents: cost?.costCents ?? null,

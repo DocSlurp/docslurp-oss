@@ -613,3 +613,44 @@ describe("ingest report: run-scoped file items", () => {
     expect(running.run).toEqual({ id: "run-1", status: "processing", durationMs: null });
   });
 });
+
+describe("ingest report: extractor fallbacks", () => {
+  const stage = (documentId: string, extractorFallback: unknown) => ({
+    documentId, stage: "extract-markdown", status: "completed", skipped: false, reason: null, selectedPages: null, pages: null,
+    costCents: null, tablePages: null, durationSeconds: null, extractorFallback,
+  });
+
+  it("warns per file when doppler-md crashed and poppler-text served it, with public codes and no error text", () => {
+    const report = build({
+      documents: [doc("annual"), doc("plain")],
+      stages: [
+        stage("annual", { wanted: "doppler-md", served: "poppler-text", reasons: [{ extractor: "doppler-md", reason: "failed" }] }),
+        stage("plain", null),
+      ],
+    });
+    expect(report.extractionWarnings.total).toBe(1);
+    expect(report.extractionWarnings.examples[0]).toMatchObject({
+      documentId: "annual", filename: "annual.pdf", wantedExtractor: "doppler-md", servedExtractor: "poppler-text",
+      reasons: [{ extractor: "doppler-md", reason: "failed" }],
+    });
+    expect(report.extractionWarnings.examples[0]!.message).toContain("doppler-md extractor failed on this file, so poppler-text read this file instead");
+  });
+
+  it("ignores malformed or raw stats instead of echoing them", () => {
+    const report = build({
+      documents: [doc("a"), doc("b"), doc("c")],
+      stages: [
+        stage("a", { wanted: "doppler-md", served: "poppler-text", reasons: [{ extractor: "doppler-md", reason: "Error: segfault at /usr/local/bin/pdftomarkdown" }] }),
+        stage("b", { wanted: "/usr/local/bin/x", served: "poppler-text", reasons: [{ extractor: "/usr/local/bin/x", reason: "failed" }] }),
+        stage("c", "doppler-md failed: Error: spawn pdftomarkdown ENOENT"),
+      ],
+    });
+    expect(report.extractionWarnings).toEqual({ total: 0, examples: [] });
+    expect(JSON.stringify(report)).not.toMatch(/segfault|ENOENT|\/usr\/local/);
+  });
+
+  it("parses stored reports without the field as none", () => {
+    const { extractionWarnings: _omitted, ...stored } = build({ documents: [doc("x")] });
+    expect(ingestReportSchema.parse(stored).extractionWarnings).toEqual({ total: 0, examples: [] });
+  });
+});
