@@ -2707,6 +2707,20 @@ export class Store {
   }
 
   /**
+   * Records the frames the OCR engine read from a multi-frame image (a TIFF) as the document's page basis (documents.page_count), so
+   * page rows, citations, strict page splitting and the completion charge count the pages the Markdown holds. Intake counts every
+   * image as one page. Scoped to the run's own document.
+   */
+  async setDocumentPageCount(runId: string, documentId: string, pageCount: number): Promise<boolean> {
+    const rows = await this.sql`
+      update documents set page_count = ${pageCount}, page_count_source = 'counted', updated_at = now()
+      where id = ${documentId} and run_id = ${runId} and deduped_from_document_id is null
+      returning id
+    `;
+    return rows.length > 0;
+  }
+
+  /**
    * The run's own documents the worker measured (billing_pages set) and that still bill at completion: their intake count, the measured
    * count and its method. The page-count re-check adds up their extra pages, whose Fast fee is charged only when the run completes.
    */

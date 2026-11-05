@@ -10,6 +10,7 @@ import type { CommandRunner } from "../tools/runner.js";
 import { readWithOcr, type OcrReadOutcome } from "./engine.js";
 import { escalateOcrPages, type EscalationSummary } from "./escalation.js";
 import { HOSTED_OCR_MAX_BYTES, HOSTED_OCR_MIME_TYPES, HostedOcrSkipped, ocrEscalationEnabled, type HostedOcrReader } from "./hosted-reader.js";
+import { imageTooManyFramesError } from "./image-frames.js";
 import { recordOcrReads } from "./ledger.js";
 import { OcrRefusedError, resolveOcrMode } from "./mode.js";
 
@@ -62,6 +63,9 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
       ...(input.signal ? { signal: input.signal } : {}),
       env,
     });
+    // An image with more frames than one file may hold is refused before anything is charged: reading its first frames would
+    // publish part of it under a bill that claims the whole file.
+    if (input.kind === "image" && outcome.truncatedFrames) throw imageTooManyFramesError(input.documentId);
     // The recogniser's reads are billed first; an escalation read of the same page is the same Rich page (the ledger sums
     // readers per page), with its own provider cost.
     const chargedPages = recordOcrReads(input.state.usageLedger, input.documentId, outcome, { stage: input.stage, kind: input.kind });

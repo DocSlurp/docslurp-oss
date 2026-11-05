@@ -107,6 +107,7 @@ import { visionGuardFor } from "../lib/vision-attempt-guard.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
+import { recordImageFramePages } from "../ocr/image-frames.js";
 import { OCR_FAILED_PAGES_KEY, OcrRefusedError, ocrFailedPages, resolveOcrMode } from "../ocr/mode.js";
 import { ocrDocument } from "../ocr/read-document.js";
 
@@ -1598,7 +1599,8 @@ export class ExtractMarkdownStage implements Stage {
       stage: this.name,
       ...(signal ? { signal } : {}),
     });
-    if (result.truncatedFrames) console.warn(`[ocr] document=${context.documentId} frames truncated at the per-document frame cap`);
+    // Each frame read is a page of the document (intake counted the image as one).
+    await recordImageFramePages(state, context.documentId, result.pages.length);
     const markdown = result.pages.map((page) => page.text).join("\f");
     const scratchDir = await mkdtemp(path.join(tmpdir(), "docslurp-extract-ocr-"));
     const outputPath = path.join(scratchDir, "ocr.md");

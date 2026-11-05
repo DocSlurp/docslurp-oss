@@ -11,7 +11,7 @@ import type { SandboxedOcrJob } from "../extractors/plugins.js";
 import type { Document, WorkspaceRun } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { ExtractMarkdownStage, OCR_PDF_BATCH_PAGES } from "../stages/extract-markdown.js";
-import { fakeOcrRunner, type FakeFrame } from "../test/fake-ocr.js";
+import { fakeOcrRunner, ocrResultFor, type FakeFrame } from "../test/fake-ocr.js";
 import type { CommandRunner } from "../tools/runner.js";
 
 /*
@@ -50,6 +50,8 @@ async function harness(args: {
   extract?: (label: string) => Promise<{ text: string }>;
   /** What the fake OCR boundary reads for a job. */
   frames?: (job: SandboxedOcrJob) => FakeFrame[];
+  /** The whole result the fake boundary writes, when a case needs more than its frames. */
+  result?: (job: SandboxedOcrJob) => unknown;
 }) {
   const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-image-ocr-test-"));
   const attempted: string[] = [];
@@ -74,7 +76,7 @@ async function harness(args: {
       };
     },
   };
-  const ocr = fakeOcrRunner(args.frames ?? ((job) => (job.pages ?? [1]).map((frame) => ({ frame, text: `OCR page ${frame}` }))));
+  const ocr = fakeOcrRunner(args.frames ?? ((job) => (job.pages ?? [1]).map((frame) => ({ frame, text: `OCR page ${frame}` }))), args.result ? { result: args.result } : {});
   const runner = {
     ...ocr.runner,
     sandboxedPdfMarkdown: async () => ({ binary: "test-vm", args: [], available: true }),
@@ -150,10 +152,11 @@ describe("image documents are read by the OCR extractor", () => {
     } finally { await h.cleanup(); }
   });
 
-  it("yields one page per frame of a multi-frame TIFF and charges only frames with words", async () => {
+  it("yields one page per frame of a multi-frame TIFF, makes the frames its page count and charges every frame", async () => {
     vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    // Intake counts every image as one page; the engine reads three frames.
     const h = await harness({
-      format: "image", filename: "fax.tiff", mimeType: "image/tiff", pageCount: 3,
+      format: "image", filename: "fax.tiff", mimeType: "image/tiff", pageCount: 1,
       frames: () => [{ frame: 1, text: "Cover sheet" }, { frame: 2, text: "   " }, { frame: 3, text: "Signed by Ada" }],
     });
     try {
@@ -161,7 +164,29 @@ describe("image documents are read by the OCR extractor", () => {
       expect(h.checkpoint()?.status).toBe("completed");
       expect(h.jobs).toHaveLength(1);
       expect(h.text()).toContain("Cover sheet\f   \fSigned by Ada");
-      expect(h.richIds()).toEqual(["rich:run-1:doc-1:1", "rich:run-1:doc-1:3"]);
+      // The page basis is the frames read, so the Markdown's three pages, page rows and the bill agree.
+      expect(h.state.documents[0]!.pageCount).toBe(3);
+      // An uploaded image bills Rich per frame read, words or not (0.75 credits; 0.5 under the earlier words rule).
+      expect(h.richIds()).toEqual(["rich:run-1:doc-1:1", "rich:run-1:doc-1:2", "rich:run-1:doc-1:3"]);
+    } finally { await h.cleanup(); }
+  });
+
+  it("refuses a TIFF with more frames than one file may hold, publishing nothing and charging nothing", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const frames = Array.from({ length: 64 }, (_, index) => ({ frame: index + 1, text: `Page ${index + 1}` }));
+    const h = await harness({
+      format: "image", filename: "archive.tiff", mimeType: "image/tiff", pageCount: 1,
+      frames: () => frames,
+      result: (job) => ocrResultFor(job, frames, { truncatedFrames: true }),
+    });
+    try {
+      await h.stage.run(h.state);
+      const checkpoint = h.checkpoint();
+      expect(checkpoint?.status).toBe("failed");
+      expect(publicDocumentError(checkpoint?.error)).toBe(PUBLIC_ERROR_MESSAGES.imageTooManyFrames);
+      expect(h.richIds()).toEqual([]);
+      expect(h.state.documents[0]!.pageCount).toBe(1);
     } finally { await h.cleanup(); }
   });
 
