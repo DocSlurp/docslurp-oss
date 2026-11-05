@@ -1,3 +1,6 @@
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { BILLABLE_UNIT_METRICS, defaultPipelineFeatures, pageCredits } from "@docslurp/shared";
@@ -11,6 +14,8 @@ import { recordMeasuredPdfPageCount } from "../lib/pdf-page-count.js";
 import { authorizeMeasuredPages } from "../lib/measured-page-authorization.js";
 import { SpendCheckUnavailableError } from "../db/spend-check.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
+import { FormatDetectStage } from "../stages/format-detect.js";
+import type { ArtifactStore } from "../tools/storage.js";
 import { runDocumentStage } from "../pipeline/checkpoints.js";
 import { SandboxRunError } from "../sandbox/types.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
@@ -179,5 +184,35 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
     expect(rows[0]!.control_state).toBe("paused");
     const billable = await db.query<{ n: number }>(`select count(*)::int as n from usage_events where run_id = 'run-retry' and metric = any($1)`, [Object.values(BILLABLE_UNIT_METRICS)]);
     expect(billable.rows[0]!.n).toBe(0);
+  }, 60_000);
+
+  it("a real upload bills its measured pages: intake's assumed PDF and counted text through format-detect, then the page fee", async () => {
+    vi.stubEnv("DOCSLURP_PDF_MODE", "local");
+    const textFacts = { declaredMimeType: "text/plain", sniffedMimeType: null, mimeType: "text/plain", format: "plain-text", container: null, encoding: "utf-8", mismatch: "none" };
+    // As run creation writes them: the PDF's size estimate is assumed, the small text file was counted from its bytes.
+    await db.exec(`
+      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+        values ('run-e2e', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 2, 4);
+      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts)
+        values ('e2e-pdf', 'o1', 'u1', 'w1', 'run-e2e', 'f.pdf', 'application/pdf', 'raw/f', 'processing', 2, 'assumed', '${JSON.stringify(pdfFacts)}'),
+               ('e2e-txt', 'o1', 'u1', 'w1', 'run-e2e', 'g.txt', 'text/plain', 'raw/g', 'processing', 2, 'counted', '${JSON.stringify(textFacts)}');`);
+    const storage = {
+      putJson: vi.fn(async () => undefined), uri: (key: string) => `s3://b/${key}`,
+      // As the real store does: a private docslurp-* directory per download, which format-detect removes afterwards.
+      downloadSourceToTempFile: vi.fn(async () => {
+        const dir = await mkdtemp(path.join(process.env.TMPDIR || tmpdir(), "docslurp-"));
+        await writeFile(path.join(dir, "f.pdf"), "%PDF-1.7\n");
+        return path.join(dir, "f.pdf");
+      }),
+      getBytes: vi.fn(),
+    } as unknown as ArtifactStore;
+    const state = WorkflowState.create(await store.loadRun("run-e2e"), [(await store.loadDocument("e2e-pdf"))!, (await store.loadDocument("e2e-txt"))!]);
+    state.store = store;
+    await new FormatDetectStage(storage, runner("Pages: 9\n")).run(state);
+    expect(await pageRow("e2e-pdf")).toEqual({ page_count: 9, page_count_source: "counted" });
+    expect(await pageRow("e2e-txt")).toEqual({ page_count: 2, page_count_source: "counted" });
+    const sql = (store as unknown as { sql: Parameters<typeof recordPageBaseFee>[0] }).sql;
+    const billing = WorkflowState.create(await store.loadRun("run-e2e"), [(await store.loadDocument("e2e-pdf"))!, (await store.loadDocument("e2e-txt"))!]);
+    expect((await recordPageBaseFee(sql, billing)).fastPages).toBe(9 + 2);
   }, 60_000);
 });
