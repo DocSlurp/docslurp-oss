@@ -753,7 +753,8 @@ function nativeTextFailsPlausibility(text: string): boolean {
   );
 }
 
-function canonicalBlocksToPageText(
+/** A canonical document's blocks as classify-route reads them: each page's blocks in order, pages joined by form feeds. */
+export function canonicalBlocksToPageText(
   blocks: Array<{ text?: string; pageNumber?: number | null; order?: number }>,
   pageCount: number,
 ): string {
@@ -904,6 +905,25 @@ function buildAdaptivePageRoutesFromTexts(
   return resolvedPages.map((pageText, index) => classifyAdaptivePage(index + 1, pageText, options));
 }
 
+/** Rows of a whitespace-aligned table that make a page a table page, like two Markdown table rows do. */
+const ALIGNED_TABLE_MIN_ROWS = 3;
+
+/** Cells separated by a run of two or more spaces (or a tab) after the line's own indentation. */
+function alignedCells(line: string): string[] {
+  return line.trim().split(/ {2,}|\t+/).filter(Boolean);
+}
+
+/** A line laid out in columns: at least three cells separated by wide gaps. */
+function hasColumnGaps(line: string): boolean {
+  return alignedCells(line).length >= 3;
+}
+
+/** A whitespace-aligned table row: three or more cells, two or more of them numbers, amounts or percentages. */
+function isAlignedNumericRow(line: string): boolean {
+  const cells = alignedCells(line);
+  return cells.length >= 3 && cells.filter((cell) => /^[-+(]?[$€£¥]?\d[\d,.:/%)]*$/.test(cell)).length >= 2;
+}
+
 export function classifyAdaptivePage(
   pageNumber: number,
   text: string,
@@ -921,6 +941,8 @@ export function classifyAdaptivePage(
   const scanLines = scanText ? scanText.split(/\n+/).filter(Boolean) : [];
   const colonLineCount = lines.filter((line) => line.includes(":")).length;
   const markdownTableLineCount = lines.filter((line) => /^\s*\|.*\|\s*$/.test(line)).length;
+  // A layout-preserving extractor (pdftotext -layout) keeps a table as rows of cells aligned by runs of spaces, not pipes.
+  const alignedTableRowLines = lines.filter(isAlignedNumericRow).length;
   // v2: OCR flattens a table into rows of space-separated cells; several rows with two or more
   // numeric cells are the table that survives.
   const numericRowLines = !routingV2 ? 0 : scanLines.filter((line) => {
@@ -991,7 +1013,7 @@ export function classifyAdaptivePage(
     extractorHint = "layout-aware";
     confidence = 0.79;
     signals.push("field-markers", "label-value-layout");
-  } else if (tableMarkers >= 2 || markdownTableLineCount >= 2) {
+  } else if (tableMarkers >= 2 || markdownTableLineCount >= 2 || alignedTableRowLines >= ALIGNED_TABLE_MIN_ROWS) {
     route = "table-heavy";
     extractorHint = "layout-aware";
     confidence = 0.76;
@@ -1106,7 +1128,9 @@ function detectSourceCodeContent(text: string, lines: string[]): SpecializedSign
     /<\/?[A-Za-z][^>]*>/.test(line) ||
     /\bconsole\.log\b|\bprint\(/.test(line)
   ).length;
-  const indentationLines = lines.filter((line) => /^[ \t]{2,}\S/.test(line)).length;
+  // Code indentation, not a layout-preserving extractor's column alignment (pdftotext -layout indents table rows and
+  // two-column runs too): a line whose cells are separated by wide gaps is laid out, not nested.
+  const indentationLines = lines.filter((line) => /^[ \t]{2,}\S/.test(line) && !hasColumnGaps(line)).length;
   const commentLines = lines.filter((line) => /^\s*(?:\/\/|#|\/\*|\*)/.test(line)).length;
   const mathLikeLines = lines.filter((line) =>
     /\\(?:frac|sum|int|sqrt|partial|nabla|alpha|beta|theta)\b/.test(line) ||

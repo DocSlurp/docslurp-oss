@@ -31,6 +31,7 @@
     "bench:sandbox": "tsx src/benchmarks/sandbox-overhead-cli.ts",
     "benchmark:extractors": "tsx src/benchmarks/extractor-benchmark-cli.ts",
     "benchmark:parser-policy-eval": "tsx src/benchmarks/parser-policy-eval-cli.ts",
+    "eval:document-routing": "pnpm --filter @docslurp/shared build && tsx src/benchmarks/document-routing-eval-cli.ts",
     "eval:local-vision": "tsx src/benchmarks/local-vision-model-eval-cli.ts",
     "media:watchdog": "node dist/media/capacity/watchdog.js",
     "media:reconcile": "node dist/media/reconcile-cli.js"

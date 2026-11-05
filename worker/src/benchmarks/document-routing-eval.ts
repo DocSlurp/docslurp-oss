@@ -34,6 +34,12 @@ export type RoutingEvalFixture = {
   id: string;
   path: string;
   tags: string[];
+  /**
+   * A known routing gap on the evidence the pipeline has today, with why. The fixture is still run and scored, but it is
+   * held out of the gated pass rate and quality, and it must keep failing: once it passes, the gate fails until the
+   * mark is removed (a strict expected failure), so a fix is never silently absorbed and a gap never silently widens.
+   */
+  expectedFailure?: { reason: string };
   expected: {
     suggestedPlaybook?: string | null;
     visionPolicy?: "skip" | "selective" | "aggressive";
@@ -70,6 +76,8 @@ export type RoutingEvalFixtureResult = {
   fixtureId: string;
   tags: string[];
   passed: boolean;
+  /** The manifest marks this fixture as a known gap (RoutingEvalFixture.expectedFailure). */
+  expectedFailure: boolean;
   qualityScore: number;
   latencyMs: number;
   checks: RoutingEvalCheck[];
@@ -79,12 +87,16 @@ export type RoutingEvalFixtureResult = {
 export type RoutingEvalReport = {
   schemaVersion: typeof routingEvalSchemaVersion;
   generatedAt: string;
-  executor: "local-structured";
+  executor: "local-host-evidence";
   hostedAiCalls: 0;
   estimatedCostUsd: 0;
+  /** Gated fixtures: every fixture not marked as an expected failure. */
   fixtureCount: number;
   fixturePassRate: number;
   qualityScore: number;
+  /** Over every fixture, expected failures included: the number to compare across evidence changes. */
+  allFixtures: { fixtureCount: number; fixturePassRate: number; qualityScore: number };
+  expectedFailures: Array<{ fixtureId: string; reason: string; qualityScore: number }>;
   p95LatencyMs: number;
   passed: boolean;
   gateChecks: RoutingEvalCheck[];
@@ -167,6 +179,13 @@ export function parseRoutingEvalManifest(value: unknown): RoutingEvalManifest {
       throw new Error(`routing eval fixture id is duplicated: ${fixture.id}`);
     }
     fixtureIds.add(fixture.id);
+    if (
+      fixture.expectedFailure !== undefined &&
+      (typeof fixture.expectedFailure !== "object" || fixture.expectedFailure === null ||
+        typeof fixture.expectedFailure.reason !== "string" || fixture.expectedFailure.reason.trim().length < 20)
+    ) {
+      throw new Error(`routing eval fixture ${fixture.id} marks an expected failure without a reason`);
+    }
 
     const pageNumbers = new Set<number>();
     for (const page of fixture.expected.pages) {
@@ -241,6 +260,7 @@ export function scoreRoutingEvalFixture(
     fixtureId: fixture.id,
     tags: fixture.tags,
     passed: qualityScore === 1,
+    expectedFailure: fixture.expectedFailure !== undefined,
     qualityScore,
     latencyMs: observation.latencyMs,
     checks,
@@ -253,12 +273,18 @@ export function buildRoutingEvalReport(args: {
   results: RoutingEvalFixtureResult[];
   generatedAt?: string;
 }): RoutingEvalReport {
-  const fixtureCount = args.results.length;
-  const fixturePassRate =
-    args.results.filter((result) => result.passed).length / Math.max(1, fixtureCount);
-  const qualityScore =
-    args.results.reduce((sum, result) => sum + result.qualityScore, 0) /
-    Math.max(1, fixtureCount);
+  const summarize = (results: RoutingEvalFixtureResult[]) => ({
+    fixtureCount: results.length,
+    fixturePassRate: results.filter((result) => result.passed).length / Math.max(1, results.length),
+    qualityScore: results.reduce((sum, result) => sum + result.qualityScore, 0) / Math.max(1, results.length),
+  });
+  const gated = args.results.filter((result) => !result.expectedFailure);
+  const { fixtureCount, fixturePassRate, qualityScore } = summarize(gated);
+  const reasons = new Map(args.manifest.fixtures.map((fixture) => [fixture.id, fixture.expectedFailure?.reason ?? ""]));
+  const expectedFailures = args.results
+    .filter((result) => result.expectedFailure)
+    .map((result) => ({ fixtureId: result.fixtureId, reason: reasons.get(result.fixtureId) ?? "", qualityScore: result.qualityScore }));
+  const unexpectedPasses = args.results.filter((result) => result.expectedFailure && result.passed).map((result) => result.fixtureId);
   const p95LatencyMs = percentile(
     args.results.map((result) => result.latencyMs),
     0.95,
@@ -294,17 +320,25 @@ export function buildRoutingEvalReport(args: {
       actual: 0,
       passed: 0 <= args.manifest.gates.maximumEstimatedCostUsd,
     },
+    {
+      metric: "expectedFailuresStillFail",
+      expected: [],
+      actual: unexpectedPasses,
+      passed: unexpectedPasses.length === 0,
+    },
   ];
 
   return {
     schemaVersion: routingEvalSchemaVersion,
     generatedAt: args.generatedAt ?? new Date().toISOString(),
-    executor: "local-structured",
+    executor: "local-host-evidence",
     hostedAiCalls: 0,
     estimatedCostUsd: 0,
     fixtureCount,
     fixturePassRate,
     qualityScore,
+    allFixtures: summarize(args.results),
+    expectedFailures,
     p95LatencyMs,
     passed: gateChecks.every((check) => check.passed),
     gateChecks,
