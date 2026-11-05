@@ -31,6 +31,18 @@ describe("the workspace OCR language reaches Kreuzberg", () => {
     expect(resolveOcrLanguages("auto", env, packs())).toBeNull();
   });
 
+  it("pins Kreuzberg to the operator's DOCSLURP_OCR_LANGUAGE when the workspace says auto", () => {
+    const pinned = { ...env, DOCSLURP_OCR_LANGUAGE: "eng" } as NodeJS.ProcessEnv;
+    const all = packs("eng", "chi_sim", "rus", "ara");
+    // Before: auto ran eng+chi_sim+rus+ara on every scan whatever the operator set.
+    expect(resolveOcrLanguages("auto", env, all)).toBe("eng+chi_sim+rus+ara");
+    expect(resolveOcrLanguages("auto", pinned, all)).toBe("eng");
+    expect(resolveOcrLanguages(undefined, pinned, all)).toBe("eng");
+    expect(resolveOcrLanguages("deu", pinned, all)).toBe("deu");
+    expect(withKreuzbergOcrLanguage({}, "auto", pinned, all)).toEqual({ kreuzberg: { ocr: { language: "eng" } } });
+    expect(() => resolveOcrLanguages("auto", { ...env, DOCSLURP_OCR_LANGUAGE: "--psm 0" }, all)).toThrow("DOCSLURP_OCR_LANGUAGE");
+  });
+
   it("keeps the language a workspace set on the Kreuzberg options and the other options untouched", () => {
     const options = { kreuzberg: { forceOcr: true, ocr: { language: "kor" } } };
     expect(withKreuzbergOcrLanguage(options, "deu", env, packs("eng"))).toBe(options);

@@ -32,6 +32,7 @@ import { configureSourceQuarantine, postgresSourceQuarantine } from "../sandbox/
 import { onTeardownBreakerOpen, quarantineForceExitMs, scheduleQuarantineForceExit, workerShutdownForceMs } from "../sandbox/teardown-breaker.js";
 import { initializeParserSandbox, setDefaultParserSandbox } from "../sandbox/startup.js";
 import { loadExtractorPlugins } from "../extractors/plugins.js";
+import { ocrLanguageSettingFromEnv } from "../lib/ocr-language.js";
 import { configureWorkerExtractorIdAliases } from "../extractors/registry.js";
 import { ArtifactStore } from "../tools/storage.js";
 import { createStages } from "../stages/index.js";
@@ -134,6 +135,12 @@ async function main(): Promise<void> {
   // configs that name a renamed extractor keep running. An alias to an id it cannot serve refuses to start.
   try {
     configureWorkerExtractorIdAliases(process.env);
+  } catch (error) {
+    throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
+  }
+  // The operator's OCR language default must be valid Tesseract codes (or auto); log what every `auto` workspace gets.
+  try {
+    console.log(`[ocr] default language=${ocrLanguageSettingFromEnv(process.env)} (applies where documentExtraction.ocr.language is auto)`);
   } catch (error) {
     throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
   }

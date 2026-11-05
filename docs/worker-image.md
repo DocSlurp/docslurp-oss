@@ -35,7 +35,11 @@ images locally, in the parser sandbox, instead of sending them to vision. The lo
 page's script first (Tesseract orientation and script detection), runs the installed packs for that script, retries
 other packs when the mean word confidence is low and refuses output it cannot read instead of indexing it. The
 workspace setting `documentExtraction.ocr.language` is `auto` by default; set Tesseract codes such as `eng+deu` to
-override it, or `DOCSLURP_OCR_LANGUAGE` for the whole worker. `DOCSLURP_OCR=off` restores vision-first routing. A self-built image or local setup without the language data falls back
+override it. `DOCSLURP_OCR_LANGUAGE` is the worker's default for every workspace left on `auto`, on every OCR path
+(Kreuzberg, page OCR, router OCR and the canonical stage's Tesseract). Without it, `auto` makes Kreuzberg read up to
+four scripts at once (`eng+chi_sim+rus+ara` with those packs installed), which multiplies OCR CPU on every scan; set
+`DOCSLURP_OCR_LANGUAGE=eng` to pin English for a cutover. It must be `auto` or Tesseract codes, or the worker refuses
+to start, and the worker logs the default it applies at startup (`[ocr] default language=...`). `DOCSLURP_OCR=off` restores vision-first routing. A self-built image or local setup without the language data falls back
 as follows. Kreuzberg's bundled Tesseract otherwise looks for that data at the path of the machine that built it. The extractor planner therefore checks for `<lang>.traineddata` in
 `TESSDATA_PREFIX` and Kreuzberg's system locations (`worker/src/extractors/ocr-capability.ts`) before offering
 Kreuzberg for an image, and `DOCSLURP_OCR=off` forces that answer. With no OCR, or when Kreuzberg's OCR still
