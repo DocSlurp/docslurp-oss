@@ -898,8 +898,11 @@ export class VisionExtractStage implements Stage {
               throw error;
             }
           },
-          // Router OCR is billed like every OCR read (Rich page with words + the job's compute), not as a local model.
-          recordOcrRead: (outcome) => { recordOcrReads(state.usageLedger, document.id, outcome, { stage: this.name }); },
+          // Router OCR is billed like every OCR read (ocr/ledger.ts: an uploaded image per read, a PDF page with words), not
+          // as a local model.
+          recordOcrRead: (outcome) => {
+            recordOcrReads(state.usageLedger, document.id, outcome, { stage: this.name, kind: document.mimeType.startsWith("image/") ? "image" : "pdf" });
+          },
           hostedReader: createHostedOcrReader({ state, cfg: this.cfg, runner: this.runner }),
           recordLocalUsage: (event) => {
             state.usageLedger.record({
