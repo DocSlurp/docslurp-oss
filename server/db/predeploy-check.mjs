@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Read-only pre-deploy report for the 0121-0127 release (docs/rollout-0121-0127.md):
 //
-//   DATABASE_URL=... node server/db/predeploy-check.mjs [--strict] [--json] [--ack-0127=<hash>]
+//   DATABASE_URL=... node server/db/predeploy-check.mjs [--strict] [--json] [--ack-0127=<hash>] [--redact | --no-redact]
 //
 // Everything runs in one READ ONLY transaction with a statement timeout; it changes nothing. It measures what the
 // migrations and the new code will meet in this database and prints what to fix or watch first:
@@ -11,14 +11,16 @@
 //   3. api_keys and webhooks 0125 deletes or homes;
 //   4. every user 0127 affects (one organization per user), by running the migration's own plan SQL, read from
 //      0127_one_org_per_user.sql: the organization kept, those removed (funded or not), keys and grants revoked, owners
-//      promoted and organizations left without a member. A removal from a funded organization is a BLOCKER until an owner
-//      acknowledges that exact list with --ack-0127=<hash>;
+//      promoted and organizations left without a member. A removal from a funded organization or a plain member promoted to
+//      owner is a BLOCKER until an owner acknowledges that exact list with --ack-0127=<hash>, and 0127 itself refuses to run
+//      unless the migrator has DOCSLURP_ACK_0127=<the same hash>;
 //   5. stored pipelines whose piiPolicy.patterns name a detector this build no longer accepts, and stored extraction configs
 //      naming an extractor id this build does not know (built-in ids plus DOCSLURP_EXTRACTOR_ID_ALIASES keys);
 //   6. recorded stage artifacts that are empty, which the fail-closed readers refuse (object-store existence is not checkable from SQL);
 //   7. runs in flight, by the routing version they are pinned to.
+// Output names people and organizations by id only (no emails, no organization names) with --redact or whenever stdout is
+// not a terminal (CI logs); an owner's interactive terminal gets the full list unless --redact is given.
 // Exit code: 0 for a report, 1 with --strict when a BLOCKER is found, 2 when the check itself could not run.
-import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -89,13 +91,18 @@ export function oneOrgPlanSql(migrationSql, { webhooksHaveOrg = true } = {}) {
   const call = "docslurp_personal_org_is_empty(candidate.id)";
   const plan = between(migrationSql, "one-org-plan");
   if (!plan.includes(call)) throw new Error(`the 0127 plan no longer calls ${call}`);
-  return { plan: plan.replace(call, `(${body})`), promotions: between(migrationSql, "one-org-promotions") };
+  return { plan: plan.replace(call, `(${body})`), promotions: between(migrationSql, "one-org-promotions"), ack: between(migrationSql, "one-org-ack") };
 }
 
-/** Pure: the acknowledgement hash of a list of funded removals (user and organization ids), independent of order. */
-export function fundedRemovalsHash(removals) {
-  const lines = removals.map((row) => `${row.user_id}\t${row.org_id}`).sort();
-  return createHash("sha256").update(lines.join("\n")).digest("hex").slice(0, 16);
+/**
+ * Pure: how a person or organization is named in the report. Redacted (CI logs, any non-interactive run, --redact) it is
+ * the opaque id only, never an email or an organization name; the full report is for the owner's terminal.
+ */
+export function namer(redact) {
+  return {
+    user: (row) => (redact ? `user ${row.user_id}` : `${row.email} (${row.user_id})`),
+    org: (id, name) => (redact ? id : `"${name}" (${id})`),
+  };
 }
 
 /** Pure: the extractor ids this build knows: built-in ids plus the keys of DOCSLURP_EXTRACTOR_ID_ALIASES (`<old>:<new>,...`). */
@@ -119,11 +126,12 @@ async function loadAcceptedPiiPatterns() {
   return options;
 }
 
-async function oneOrgSection(q, { plan, promotions }, ack0127) {
+async function oneOrgSection(q, { plan, promotions, ack }, ack0127, redact) {
+  const name = namer(redact);
   const removed = await q(
     `with removed_memberships as (${plan})
      select gone.user_id, coalesce(u.email, '(no user row)') as email, gone.org_id, o.name as org_name, o.is_personal, gone.reason, om.role,
-       (o.funded_at is not null or o.auto_recharge_enabled) as funded,
+       (o.funded_at is not null or coalesce(o.auto_recharge_enabled, false)) as funded,
        (select count(*) from api_keys k where k.org_id = gone.org_id and k.user_id = gone.user_id and k.revoked_at is null)::int as keys,
        (select count(*) from mcp_oauth_grants g where g.org_id = gone.org_id and g.user_id = gone.user_id and g.revoked_at is null)::int as grants,
        (select count(*) from workspaces w where w.org_id = gone.org_id and w.user_id = gone.user_id)::int as workspaces,
@@ -137,12 +145,15 @@ async function oneOrgSection(q, { plan, promotions }, ack0127) {
      join organizations o on o.id = gone.org_id
      left join "user" u on u.id = gone.user_id
      left join lateral (
+       -- The membership the user keeps: not removed, and not in an organization rule 2 deletes.
        select rest.org_id, ko.name from org_memberships rest join organizations ko on ko.id = rest.org_id
        where rest.user_id = gone.user_id
          and not exists (select 1 from removed_memberships g2 where g2.org_id = rest.org_id and g2.user_id = rest.user_id)
+         and not exists (select 1 from removed_memberships g3 where g3.org_id = rest.org_id and g3.reason = 'empty_personal_organization')
+       order by rest.org_id
        limit 1
      ) kept on true
-     order by 2, gone.user_id, gone.org_id`,
+     order by gone.user_id, gone.org_id`,
   );
   const promoted = await q(
     `with removed_memberships as (${plan}), owner_promotions as (${promotions})
@@ -150,11 +161,17 @@ async function oneOrgSection(q, { plan, promotions }, ack0127) {
      from owner_promotions p join organizations o on o.id = p.org_id left join "user" u on u.id = p.user_id
      order by p.org_id`,
   );
+  // The acknowledgement the migration itself demands: its own SQL, so the hash printed here is the one it compares.
+  const [needed] = await q(`with removed_memberships as (${plan}), owner_promotions as (${promotions}) ${ack}`);
   const users = new Map();
   for (const row of removed) {
-    const entry = users.get(row.user_id) ?? { email: row.email, kept: row.kept_org_id ? `"${row.kept_org_name}" (${row.kept_org_id})` : "NO organization (personal one provisioned at next sign-in)", removed: [] };
-    const facts = [row.reason, row.role, row.funded ? "FUNDED" : null, `${row.keys} key(s)`, `${row.grants} grant(s)`, row.workspaces ? `${row.workspaces} workspace(s) handed over` : null];
-    entry.removed.push(`"${row.org_name}" (${row.org_id}, ${facts.filter(Boolean).join(", ")})`);
+    const entry = users.get(row.user_id) ?? { label: name.user(row), kept: row.kept_org_id ? name.org(row.kept_org_id, row.kept_org_name) : "NO organization (personal one provisioned at next sign-in)", removed: [] };
+    const handled = row.workspaces === 0 ? null
+      : row.reason === "not_kept" ? `${row.workspaces} workspace(s) handed over`
+      : row.reason === "empty_personal_organization" ? `${row.workspaces} empty workspace(s) deleted`
+      : null;
+    const facts = [row.reason, row.role, row.funded ? "FUNDED" : null, `${row.keys} key(s)`, `${row.grants} grant(s)`, handled];
+    entry.removed.push(redact ? `${row.org_id} (${facts.filter(Boolean).join(", ")})` : `"${row.org_name}" (${row.org_id}, ${facts.filter(Boolean).join(", ")})`);
     users.set(row.user_id, entry);
   }
   const promotedOrgs = new Set(promoted.map((row) => row.org_id));
@@ -162,37 +179,42 @@ async function oneOrgSection(q, { plan, promotions }, ack0127) {
   const memberless = [...new Map(live.filter((row) => row.members_left === 0).map((row) => [row.org_id, row])).values()];
   const ownerless = [...new Map(live.filter((row) => row.members_left > 0 && row.owners_left === 0 && row.role === "owner" && !promotedOrgs.has(row.org_id)).map((row) => [row.org_id, row])).values()];
   const funded = live.filter((row) => row.funded);
-  const hash = fundedRemovalsHash(funded);
-  const acknowledged = funded.length > 0 && ack0127 === hash;
+  const memberPromotions = promoted.filter((row) => row.previous_role === "member");
+  const hash = needed?.hash ?? null;
+  if (hash && (needed.funded_removals !== funded.length || needed.member_promotions !== memberPromotions.length)) {
+    throw new Error(`0127 acknowledgement list (${needed.funded_removals} funded removal(s), ${needed.member_promotions} member promotion(s)) disagrees with the report (${funded.length}, ${memberPromotions.length})`);
+  }
+  const acknowledged = hash !== null && ack0127 === hash;
   const count = (reason) => removed.filter((row) => row.reason === reason).length;
-  const userLines = [...users].map(([id, entry]) => `${entry.email} (${id}): keeps ${entry.kept}; removed from ${entry.removed.join("; ")}`);
+  const userLines = [...users.values()].map((entry) => `${entry.label}: keeps ${entry.kept}; removed from ${entry.removed.join("; ")}`);
   const listed = userLines.length > MAX_LISTED ? [...userLines.slice(0, MAX_LISTED), `... and ${userLines.length - MAX_LISTED} more user(s)`] : userLines;
   return section(
     `Memberships beyond one per user (0127): ${users.size} user(s), ${removed.length} membership(s) to remove`,
-    funded.length > 0 && !acknowledged ? "blocker" : removed.length > 0 ? "warn" : "ok",
+    hash && !acknowledged ? "blocker" : removed.length > 0 ? "warn" : "ok",
     removed.length === 0
       ? ["None. Every user belongs to at most one live organization."]
       : [
-          `${count("deleted_organization")} in tombstoned organizations; ${count("empty_personal_organization")} in empty personal organizations (DELETED with the organization);`,
+          `${count("deleted_organization")} in tombstoned organizations; ${count("empty_personal_organization")} in empty personal organizations (DELETED with the organization and its empty workspaces, backed up to organizations_removed_backup);`,
           `${count("not_kept")} more removed by the keep rule (team before personal, then most recent run or document, then role, then oldest membership).`,
           "Removed memberships are copied to org_memberships_removed_backup; the user loses access at once (keys and MCP grants revoked).",
-          ...(funded.length === 0
-            ? ["No user is removed from a funded organization."]
-            : [
-                `${funded.length} removal(s) from a FUNDED organization (paid balance or auto top-up): ${funded.map((row) => `${row.email} from ${row.org_id}`).join(", ")}.`,
-                acknowledged
-                  ? `Acknowledged with --ack-0127=${hash}.`
-                  : `BLOCKER until an owner reviews this list and re-runs with --ack-0127=${hash} (the hash changes when the list does).`,
-              ]),
-          ...(promoted.length === 0 ? [] : [`Owner promoted (the last owner is removed and members remain): ${promoted.map((row) => `${row.org_id} -> ${row.email} (was ${row.previous_role})`).join(", ")}.`]),
-          ...(memberless.length === 0 ? [] : [`Left with NO member (data kept, nobody can reach it until an operator restores a membership from the backup): ${memberless.map((row) => `"${row.org_name}" (${row.org_id})`).join(", ")}.`]),
+          funded.length === 0
+            ? "No user is removed from a funded organization."
+            : `${funded.length} removal(s) from a FUNDED organization (paid balance or auto top-up): ${funded.map((row) => `${name.user(row)} from ${row.org_id}`).join(", ")}.`,
+          ...(memberPromotions.length === 0 ? [] : [`${memberPromotions.length} plain member(s) promoted to OWNER: ${memberPromotions.map((row) => `${name.user(row)} in ${row.org_id}`).join(", ")}.`]),
+          ...(hash === null
+            ? []
+            : [acknowledged
+                ? `Acknowledged with --ack-0127=${hash}; run the migrator with DOCSLURP_ACK_0127=${hash}.`
+                : `BLOCKER until an owner reviews the funded removals and member promotions above and re-runs with --ack-0127=${hash}; 0127 itself refuses to run unless the migrator has DOCSLURP_ACK_0127=${hash} (the hash changes when the list does).`]),
+          ...(promoted.length === 0 ? [] : [`Owner promoted (the last owner is removed and members remain): ${promoted.map((row) => `${row.org_id} -> ${name.user(row)} (was ${row.previous_role})`).join(", ")}.`]),
+          ...(memberless.length === 0 ? [] : [`Left with NO member (data kept, nobody can reach it until an operator restores a membership from the backup): ${memberless.map((row) => name.org(row.org_id, row.org_name)).join(", ")}.`]),
           ...(ownerless.length === 0 ? [] : [`Left without an owner (personal organizations are never promoted): ${ownerless.map((row) => row.org_id).join(", ")}.`]),
           ...listed,
         ],
   );
 }
 
-export async function collectReport(client, { journal, acceptedPiiPatterns, extractorIds, oneOrgMigrationSql, ack0127 = null }) {
+export async function collectReport(client, { journal, acceptedPiiPatterns, extractorIds, oneOrgMigrationSql, ack0127 = null, redact = false }) {
   oneOrgMigrationSql ??= readFileSync(ONE_ORG_MIGRATION, "utf8");
   extractorIds ??= knownExtractorIds(await loadBuiltInExtractorIds());
   const sections = [];
@@ -218,7 +240,7 @@ export async function collectReport(client, { journal, acceptedPiiPatterns, extr
       ? [
           `Transactions open for more than 30 s. ${BOUNDED_LOCK_MIGRATIONS.slice(0, -1).join(", ")} and ${BOUNDED_LOCK_MIGRATIONS.at(-1)} wait at most 10 s (3 s for api_keys) for their locks, so a long reader`,
           "makes the migration fail fast instead of queueing the site behind it; re-run it after these end:",
-          ...longTx.map((row) => `pid ${row.pid} ${row.state} ${row.seconds}s: ${row.query}`),
+          ...longTx.map((row) => `pid ${row.pid} ${row.state} ${row.seconds}s${redact ? "" : `: ${row.query}`}`),
         ]
       : ["No transaction older than 30 s."],
   ));
@@ -314,7 +336,7 @@ export async function collectReport(client, { journal, acceptedPiiPatterns, extr
   if (oneOrgIndex) {
     sections.push(section("Memberships beyond one per user (0127): already applied", "ok", ["org_memberships_one_org_per_user exists."]));
   } else {
-    sections.push(await oneOrgSection(q, oneOrgPlanSql(oneOrgMigrationSql, { webhooksHaveOrg: hookHasOrg }), ack0127));
+    sections.push(await oneOrgSection(q, oneOrgPlanSql(oneOrgMigrationSql, { webhooksHaveOrg: hookHasOrg }), ack0127, redact));
   }
 
   // 4. Stored pipelines naming detectors the build no longer accepts.
@@ -432,6 +454,13 @@ export async function collectReport(client, { journal, acceptedPiiPatterns, extr
   return sections;
 }
 
+/** Pure: redact unless asked not to (--no-redact) on an interactive terminal; --redact always redacts (CI passes it). */
+export function redactOutput(argv, isTTY) {
+  if (argv.includes("--redact")) return true;
+  if (argv.includes("--no-redact")) return false;
+  return !isTTY;
+}
+
 async function main() {
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error("DATABASE_URL is required");
@@ -439,6 +468,7 @@ async function main() {
   const acceptedPiiPatterns = await loadAcceptedPiiPatterns();
   const extractorIds = knownExtractorIds(await loadBuiltInExtractorIds());
   const ack0127 = process.argv.find((arg) => arg.startsWith("--ack-0127="))?.slice("--ack-0127=".length) ?? null;
+  const redact = redactOutput(process.argv, process.stdout.isTTY);
   const require = createRequire(import.meta.url);
   const { Client } = require("pg");
   const client = new Client({ connectionString: directDatabaseUrl(url) });
@@ -446,7 +476,8 @@ async function main() {
   try {
     await client.query("begin read only");
     await client.query("set local statement_timeout = '30s'");
-    const sections = await collectReport(client, { journal, acceptedPiiPatterns, extractorIds, ack0127 });
+    const sections = await collectReport(client, { journal, acceptedPiiPatterns, extractorIds, ack0127, redact });
+    if (redact) console.error("[predeploy-check] redacted output (ids only, no emails or organization names); run with --no-redact in an owner's terminal for the full list");
     await client.query("rollback");
     console.log(process.argv.includes("--json") ? JSON.stringify(sections, null, 2) : render(sections));
     if (process.argv.includes("--strict") && sections.some((s) => s.level === "blocker")) process.exitCode = 1;

@@ -39,6 +39,7 @@ export const GATED = {
   "server/src/__tests__/cli-oauth.db.test.ts": { db: ["CLI_OAUTH_TEST_DATABASE_URL"] },
   "server/src/__tests__/db-resume.db.test.ts": { db: ["RESUME_TEST_DATABASE_URL"] },
   "server/src/__tests__/organization-concurrency.test.ts": { db: ["ORG_TEST_DATABASE_URL"] },
+  "server/src/__tests__/one-org-per-user-migration.pg.test.ts": { db: ["ONE_ORG_MIGRATION_TEST_DATABASE_URL"] },
   "server/src/__tests__/pending-supersession-locks.db.test.ts": { db: ["MIGRATION_LOCK_TEST_DATABASE_URL"] },
   "server/src/__tests__/query-bounds.pg.test.ts": { db: ["SEARCH_BOUNDS_PG_URL"] },
   "server/src/__tests__/rate-limit.redis.test.ts": { redis: ["RATE_LIMIT_TEST_REDIS_URL"] },
