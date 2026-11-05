@@ -24,6 +24,7 @@ import time
 import unicodedata
 
 import fitz
+from execution_guard import assert_eval_execution
 from contract import (evaluation_identity,identity_hash,file_hash,immutable_json,validate_manifest,
                       validate_policy_receipt,validate_labels,validate_complete_inventory,validate_panel_binding,validate_panel_manifest)
 
@@ -135,6 +136,7 @@ def run_ocr_cli(argv, env):
 
 def ocr(image, cache, dpi, psm, use_cache=True):
     """PP-OCR of one rendered page. `dpi` is the page's render resolution; `psm` is kept for the arm's identity only."""
+    assert_eval_execution()
     key=sha(image+f"{OCR_BINARY_HASH}-{OCR_LANGUAGE_HASH}-dpi{dpi}-psm{psm}-ppocr-v3".encode())
     output=cache/f"{key}.json"
     if use_cache and output.exists():
@@ -218,6 +220,7 @@ def measure_case(args):
     destination=out/"cases"/case['split']/f"{case['id']}.json"
     case_identity={'sourceHash':case['sha256'],'labelHash':case['labelHash'],'evaluationIdentityHash':identity_hash(identity),'policyHash':policy_hash}
     source=root/case["pdf"]
+    assert_eval_execution(source)  # a dataset entry may not be a link out of the data roots
     labels_path=root/case['labels']
     if not source.resolve().is_relative_to(root.resolve()) or not labels_path.resolve().is_relative_to(root.resolve()):raise RuntimeError('artifact-escaped-dataset')
     if file_hash(source)!=case['sha256'] or file_hash(labels_path)!=case['labelHash']:raise RuntimeError('artifact-hash-mismatch')
@@ -229,6 +232,7 @@ def measure_case(args):
     sys.path.insert(0,scorers)
     import tolerant_markdown
     source=root/case["pdf"]
+    assert_eval_execution(source)  # a dataset entry may not be a link out of the data roots
     if sha(source.read_bytes()) != case["sha256"]: raise RuntimeError("input-hash-mismatch")
     if file_hash(root/case['labels'])!=case['labelHash']:raise RuntimeError('label-hash-mismatch')
     doc=fitz.open(source)
@@ -298,7 +302,7 @@ if __name__ == "__main__":
     p.add_argument("--scorers",type=Path,required=True); p.add_argument("--split",choices=["train","tune","heldout"],required=True)
     p.add_argument("--workers",type=int,default=3); p.add_argument("--frozen-policy",type=Path)
     p.add_argument("--families",help="Predeclared complete source families, comma-separated numbers")
-    a=p.parse_args();os.environ["MIXED_EVAL_WORKERS"]=str(a.workers);os.environ["MIXED_EVAL_ATTEMPT"]=str(uuid.uuid4());os.environ.setdefault("TMPDIR","/home/dan/tmp/agents")
+    a=p.parse_args();assert_eval_execution(a.dataset);os.environ["MIXED_EVAL_WORKERS"]=str(a.workers);os.environ["MIXED_EVAL_ATTEMPT"]=str(uuid.uuid4());os.environ.setdefault("TMPDIR","/home/dan/tmp/agents")
     manifest=json.loads((a.dataset/"manifest.json").read_text())
     all_cases=validate_manifest(manifest)
     identity=evaluation_identity(a.dataset,a.scorers,Path(__file__),OCR_BINARY_HASH,OCR_LANGUAGE_HASH,fitz.VersionBind)
