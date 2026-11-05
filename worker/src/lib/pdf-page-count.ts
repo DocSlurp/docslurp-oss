@@ -1,10 +1,9 @@
-import { pageCredits, resolvePdfMode, speedBoostMultiplier } from "@docslurp/shared";
+import { resolvePdfMode } from "@docslurp/shared";
 
 import { sandboxedPdfProvider } from "../extractors/plugins.js";
 import type { Document } from "../models.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
 import type { CommandRunner } from "../tools/runner.js";
-import { RunPolicyError } from "./document-failure.js";
 import { sniffedPdf } from "./sniffed-pdf.js";
 
 /** More pages than this is a parser fault, not a document. */
@@ -22,8 +21,8 @@ export function parsePdfInfoPages(stdout: string): number | null {
  *  - `vm`: the sandboxed PDF provider counts it in a fresh VM; a provider that cannot is a refusal, never host parsing;
  *  - `local` (customer-owned): pdfinfo under the parser sandbox on this host;
  *  - `off`: nothing (PDF extraction refuses the document anyway).
- * Pages above the estimate are re-checked against the balance (Fast base fee) and pause an unfunded run. Billing reads only
- * this measured count: a PDF still `assumed` never bills (db/page-base-fee.ts).
+ * Measuring only: the pages above the estimate are authorized separately, on every attempt (authorizeMeasuredPages). Billing
+ * reads only this measured count: a PDF still `assumed` never bills (db/page-base-fee.ts).
  */
 export async function recordMeasuredPdfPageCount(args: {
   state: WorkflowState;
@@ -68,14 +67,6 @@ export async function recordMeasuredPdfPageCount(args: {
   document.pageCountSource = "counted";
   state.run.pagesTotal = Math.max(0, (Number(state.run.pagesTotal) || 0) + pages - estimate);
   console.log(`[pdf-pages] document=${document.id} measured=${pages} estimate=${estimate} mode=${mode}`);
-  // Admission priced the estimate: pages above it owe a Fast base fee admission never saw.
-  if (pages > estimate && state.store.enforceSpendForCharge && state.run.userId) {
-    const credits = pageCredits("fast", pages - estimate) * speedBoostMultiplier(state.run.pipeline.speedBoost === true);
-    const outcome = await state.store.enforceSpendForCharge({ id: state.run.id, orgId: state.run.orgId ?? null, workspaceId: state.run.workspaceId, userId: state.run.userId }, credits);
-    if (outcome.paused || outcome.blocked) {
-      console.warn(`[pdf-pages] run=${state.run.id} document=${document.id} paused: ${pages} measured pages (estimate ${estimate}) owe ${credits.toFixed(2)} credits more than the balance holds`);
-      throw new RunPolicyError(`Credits do not cover the measured pages of PDF ${document.id}; run paused`);
-    }
-  }
+  // Authorizing the pages above the estimate is separate (lib/measured-page-authorization.ts) and runs on every attempt.
   return { pages, method: mode, estimate };
 }

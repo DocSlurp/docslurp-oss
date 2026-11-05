@@ -8,6 +8,7 @@ import { recordPageBaseFee } from "../db/page-base-fee.js";
 import { setSpendCheckConfig } from "../db/spend-check.js";
 import { Store } from "../db/store.js";
 import { recordMeasuredTextPageCount, TEXT_MEASURE_MAX_BYTES } from "../lib/text-page-count.js";
+import { authorizeMeasuredPages } from "../lib/measured-page-authorization.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
@@ -103,8 +104,8 @@ describe("text pages are measured in full by the worker, and only that count bil
   it("pauses the run when the measured pages above the estimate no longer fit the balance", async () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
     const { state, document } = await stateFor("run2", "poor");
-    await expect(recordMeasuredTextPageCount({ state, document, format: "plain-text", readSource: async () => bytes }))
-      .rejects.toMatchObject({ name: "RunPolicyError" });
+    expect(await recordMeasuredTextPageCount({ state, document, format: "plain-text", readSource: async () => bytes })).toMatchObject({ pages: fullCount });
+    await expect(authorizeMeasuredPages(state, document)).rejects.toMatchObject({ name: "RunPolicyError" });
     const { rows } = await db.query<{ control_state: string | null }>(`select control_state from workspace_runs where id = 'run2'`);
     expect(rows[0]!.control_state).toBe("paused");
   }, 60_000);

@@ -1,9 +1,14 @@
--- documents.page_count_source defaults to `assumed`: a page count is `counted` only on evidence (a count taken from the
--- bytes at intake, or the worker's own measurement), so an insert that omits the provenance must not claim one. Every
--- current insert sets it explicitly; this closes the default that 0126 set to `counted`.
+-- Page-count provenance for billing.
 --
--- SET DEFAULT changes the catalog only (no rewrite, no scan; existing rows keep their value), but takes ACCESS EXCLUSIVE on
--- documents, which the release's lock prelude already holds in its order (see 0122).
+-- 1. documents.page_count_source defaults to `assumed`: a page count is `counted` only on evidence (a count taken from the
+--    bytes at intake, or the worker's own measurement), so an insert that omits the provenance must not claim one.
+-- 2. documents.intake_page_count: the page count admission priced, captured at insert and immutable afterwards. The
+--    worker authorizes every measured page above it against the balance on every attempt (a retry included), so
+--    authorization never depends on page_count or page_count_source, which the measurement itself rewrites. Rows written
+--    before this migration keep NULL (read as page_count: their counts were priced as they stand).
+--
+-- Catalog-only changes (no rewrite, no scan; a nullable column with no default), under ACCESS EXCLUSIVE on documents,
+-- which the release's lock prelude already holds in its order (see 0122). The trigger's function touches only NEW/OLD.
 SET LOCAL lock_timeout = '10s';
 --> statement-breakpoint
 LOCK TABLE documents IN ACCESS EXCLUSIVE MODE;
@@ -21,3 +26,22 @@ SET LOCAL lock_timeout = '10s';
 LOCK TABLE webhooks IN ACCESS EXCLUSIVE MODE;
 --> statement-breakpoint
 ALTER TABLE documents ALTER COLUMN page_count_source SET DEFAULT 'assumed';
+--> statement-breakpoint
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS intake_page_count integer CHECK (intake_page_count IS NULL OR intake_page_count >= 0);
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION documents_intake_page_count() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    NEW.intake_page_count := COALESCE(NEW.intake_page_count, NEW.page_count);
+  ELSIF OLD.intake_page_count IS NOT NULL THEN
+    -- Immutable once set: what admission priced cannot be rewritten by a later measurement or any other writer.
+    NEW.intake_page_count := OLD.intake_page_count;
+  END IF;
+  RETURN NEW;
+END $$;
+--> statement-breakpoint
+DROP TRIGGER IF EXISTS documents_intake_page_count ON documents;
+--> statement-breakpoint
+CREATE TRIGGER documents_intake_page_count BEFORE INSERT OR UPDATE OF intake_page_count ON documents
+  FOR EACH ROW EXECUTE FUNCTION documents_intake_page_count();

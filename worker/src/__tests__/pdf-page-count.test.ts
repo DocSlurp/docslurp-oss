@@ -8,6 +8,8 @@ import { setSpendCheckConfig } from "../db/spend-check.js";
 import { Store } from "../db/store.js";
 import { registerExtractorPlugin, resetExtractorPluginsForTest, type SandboxedPdfExtractorProvider } from "../extractors/plugins.js";
 import { recordMeasuredPdfPageCount } from "../lib/pdf-page-count.js";
+import { authorizeMeasuredPages } from "../lib/measured-page-authorization.js";
+import { SpendCheckUnavailableError } from "../db/spend-check.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { runDocumentStage } from "../pipeline/checkpoints.js";
 import { SandboxRunError } from "../sandbox/types.js";
@@ -104,8 +106,10 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
   it("pauses the run when the measured pages above the estimate no longer fit the balance", async () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
     const { state, document } = await stateFor("run2", "big");
-    await expect(recordMeasuredPdfPageCount({ state, document, runner: runner("Pages: 5000\n"), sourcePath: async () => "/tmp/d.pdf", env: { DOCSLURP_PDF_MODE: "local" } }))
-      .rejects.toMatchObject({ name: "RunPolicyError" });
+    // Measuring only records the count; authorization is its own step.
+    expect(await recordMeasuredPdfPageCount({ state, document, runner: runner("Pages: 5000\n"), sourcePath: async () => "/tmp/d.pdf", env: { DOCSLURP_PDF_MODE: "local" } }))
+      .toMatchObject({ pages: 5000 });
+    await expect(authorizeMeasuredPages(state, document)).rejects.toMatchObject({ name: "RunPolicyError" });
     const { rows } = await db.query<{ control_state: string | null }>(`select control_state from workspace_runs where id = 'run2'`);
     expect(rows[0]!.control_state).toBe("paused");
   }, 60_000);
@@ -146,5 +150,34 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
     const billable = await db.query<{ n: number }>(`select count(*)::int as n from usage_events where run_id = 'run-fail' and metric = any($1)`, [Object.values(BILLABLE_UNIT_METRICS)]);
     expect(billable.rows[0]!.n).toBe(0);
     expect(await pageRow("vm-fail")).toEqual({ page_count: 3, page_count_source: "assumed" });
+  }, 60_000);
+
+  it("a retry after a failed balance check re-authorizes the persisted measurement from durable state, and charges nothing", async () => {
+    setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
+    await db.exec(`
+      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+        values ('run-retry', 'o2', 'u1', 'w2', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 1, 3);
+      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts)
+        values ('retry', 'o2', 'u1', 'w2', 'run-retry', 'r.pdf', 'application/pdf', 'raw/r', 'processing', 3, 'assumed', '${JSON.stringify(pdfFacts)}');`);
+    // Attempt 1: the count is measured and persisted, then the balance query fails (a dropped connection).
+    const first = await stateFor("run-retry", "retry");
+    const host = runner("Pages: 5000\n");
+    await recordMeasuredPdfPageCount({ state: first.state, document: first.document, runner: host, sourcePath: async () => "/tmp/r.pdf", env: { DOCSLURP_PDF_MODE: "local" } });
+    const real = store.enforceSpendForCharge.bind(store);
+    const failing = vi.spyOn(store, "enforceSpendForCharge").mockRejectedValueOnce(new SpendCheckUnavailableError("connection terminated"));
+    await expect(authorizeMeasuredPages(first.state, first.document)).rejects.toMatchObject({ name: "SpendCheckUnavailableError" });
+    failing.mockImplementation(real);
+    expect(await pageRow("retry")).toEqual({ page_count: 5000, page_count_source: "counted" });
+    // Attempt 2 (a retried activity): it loads the persisted, counted measurement and skips measuring, but still authorizes.
+    const retry = await stateFor("run-retry", "retry");
+    expect(retry.document).toMatchObject({ pageCount: 5000, pageCountSource: "counted", intakePageCount: 3 });
+    expect(await recordMeasuredPdfPageCount({ state: retry.state, document: retry.document, runner: host, sourcePath: async () => "/tmp/r.pdf", env: { DOCSLURP_PDF_MODE: "local" } })).toBeNull();
+    expect(host.run).toHaveBeenCalledTimes(1);
+    await expect(authorizeMeasuredPages(retry.state, retry.document)).rejects.toMatchObject({ name: "RunPolicyError" });
+    failing.mockRestore();
+    const { rows } = await db.query<{ control_state: string | null }>(`select control_state from workspace_runs where id = 'run-retry'`);
+    expect(rows[0]!.control_state).toBe("paused");
+    const billable = await db.query<{ n: number }>(`select count(*)::int as n from usage_events where run_id = 'run-retry' and metric = any($1)`, [Object.values(BILLABLE_UNIT_METRICS)]);
+    expect(billable.rows[0]!.n).toBe(0);
   }, 60_000);
 });

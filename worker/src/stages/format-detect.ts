@@ -6,6 +6,7 @@ import { cleanupTempFile, sourceStorageKey, type ArtifactStore } from "../tools/
 import type { CommandRunner } from "../tools/runner.js";
 import { recordMeasuredPdfPageCount } from "../lib/pdf-page-count.js";
 import { recordMeasuredTextPageCount } from "../lib/text-page-count.js";
+import { authorizeMeasuredPages } from "../lib/measured-page-authorization.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import { detectFileFormat, type NormalizedFormat } from "@docslurp/shared";
@@ -65,6 +66,9 @@ export class FormatDetectStage implements Stage {
             state, document, format: normalizedFormat,
             readSource: (maxBytes) => this.storage.getBytes(sourceStorageKey(document.sourceKey), { maxBytes }),
           });
+          // Every attempt, including a retry that finds the measurement already persisted: authorize the measured pages above
+          // what admission priced, from durable state (intake_page_count), before any later stage runs.
+          await authorizeMeasuredPages(state, document);
 
           return {
             artifactUri: this.storage.uri(key),
