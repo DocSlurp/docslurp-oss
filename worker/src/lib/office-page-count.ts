@@ -249,12 +249,13 @@ export function extraCreditsForMeasuredPages(
   intakePages: number,
   measuredPages: number,
   method?: string | null,
-  options: { features?: boolean } = {},
+  options: { features?: boolean; mode?: "fast" | "rich" } = {},
 ): number {
   const before = Math.max(1, intakePages);
   if (!(measuredPages > before)) return 0;
   const features = estimateProfileFor(pipeline, { env: {} }).documentFeatures;
-  let credits = pageCredits("fast", measuredPages - before);
+  // Office pages bill Fast; a multi-frame image's frames are each read by OCR and bill Rich.
+  let credits = pageCredits(options.mode ?? "fast", measuredPages - before);
   if (options.features !== false && method !== "size-estimate") {
     for (const feature of DOCUMENT_FEATURES) {
       if (features[feature]) credits += featureCredits(feature, measuredPages) - featureCredits(feature, before);
@@ -277,7 +278,7 @@ export async function recordMeasuredPageCount(
     run: { id: string; orgId?: string | null; userId?: string; workspaceId?: string; pipeline?: PipelineFeatures };
     store?: {
       setDocumentBillingPages?(runId: string, documentId: string, billingPages: number, method: string): Promise<boolean>;
-      enforceSpendForCharge?(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean }>;
+      enforceSpendForCharge?(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean; blocked?: boolean }>;
       measuredRunDocuments?(runId: string): Promise<MeasuredRunDocument[]>;
     } | null;
   },

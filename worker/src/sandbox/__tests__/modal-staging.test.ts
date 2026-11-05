@@ -719,6 +719,20 @@ describe("modal usage event", () => {
     expect(event.metadata).toMatchObject({ costRollup: "included", billable: false, activityId: "activity-1" });
     expect(Number(event.metadata?.effectiveCostCents)).toBeGreaterThan(0);
   });
+
+  it("records the provider cost at Modal's sandbox core-second and GiB-second rates, on the sandbox's own size", () => {
+    const core = 0.00003942;
+    const gib = 0.00000667;
+    for (const [cpu, memoryMb] of [[2, 2048], [2, 3072]] as const) {
+      const event = buildModalUsageEvent({ ...lifecycleConfig, cpu, memoryMb }, "activity-1", 10);
+      const expected = 10 * (cpu * core + (memoryMb / 1024) * gib) * 100;
+      // 2 cores / 2 GiB for 10 s: 0.0922 cents; 3 GiB: 0.0988 cents.
+      expect(Number(event.metadata?.providerCostCents)).toBeCloseTo(expected, 10);
+      expect(event.metadata).toMatchObject({ physicalCores: cpu, memoryGib: memoryMb / 1024, rateSource: "modal-sandbox", costRole: "provider" });
+      expect(event.costCents).toBe(0);
+    }
+    expect(Number(buildModalUsageEvent({ ...lifecycleConfig, cpu: 2, memoryMb: 2048 }, "a", 10).metadata?.providerCostCents)).toBeCloseTo(0.09218, 6);
+  });
 });
 
 describe("modal image default", () => {

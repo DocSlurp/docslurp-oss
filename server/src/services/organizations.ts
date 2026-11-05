@@ -258,7 +258,19 @@ async function admitToOrganization(tx: OrgTransaction, userId: string, targetOrg
     throw error;
   }
   if (!replacePersonalOrgId) return;
-  await tx`delete from organizations where id = ${replacePersonalOrgId} and is_personal and docslurp_personal_org_is_empty(id)`;
+  // Lock the organization and its workspaces (a concurrent API key, run, chat or upload that references them now waits),
+  // then re-check under the locks that it is still empty. workspaces.org_id has no foreign key, so its workspaces are deleted
+  // explicitly; anything else that hangs off them is empty by docslurp_personal_org_is_empty. Fails closed: an organization
+  // that gained data keeps the user in it and the join is refused.
+  await tx`select id from organizations where id = ${replacePersonalOrgId} for update`;
+  await tx`select id from workspaces where org_id = ${replacePersonalOrgId} for update`;
+  const [stillEmpty] = await tx<{ empty: boolean }[]>`
+    select is_personal and personal_owner_user_id = ${userId} and docslurp_personal_org_is_empty(id) as empty
+    from organizations where id = ${replacePersonalOrgId}
+  `;
+  if (!stillEmpty?.empty) throw new OrganizationError(409, "user_already_in_org", new UserAlreadyInOrgError().message);
+  await tx`delete from workspaces where org_id = ${replacePersonalOrgId}`;
+  await tx`delete from organizations where id = ${replacePersonalOrgId}`;
   await tx`insert into audit_log (id, user_id, action, resource_type, resource_id, metadata)
     values (${randomUUID()}, ${userId}, 'organization.personal.replaced', 'organization', ${replacePersonalOrgId}, ${tx.json({ joinedOrgId: targetOrgId })})`;
 }

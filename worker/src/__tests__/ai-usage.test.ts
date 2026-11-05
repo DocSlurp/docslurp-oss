@@ -138,6 +138,29 @@ describe("worker AI usage Module", () => {
     }
   });
 
+  it("bills an OCR escalation read one Rich page at most, and nothing when it returned no text", () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const ledger = new PipelineUsageEventLedger();
+    ledger.runId = "run-1";
+    const escalation = (pageNumber: number, outputTokens: number, outcome: string) => ledger.record({
+      provider: "deepinfra", model: "Qwen/Qwen3-VL-30B-A3B-Instruct", metric: "ocr-escalation", amount: 1, unit: "page",
+      costCents: 0.3, inputTokens: 1_500, outputTokens, metadata: { documentId: "doc", pageNumber, outcome },
+    });
+    const charges = (pageNumber: number) => ledger.snapshot().filter((event) => event.metric === "ingest-page-rich" && event.metadata?.pageNumber === pageNumber);
+    // 9,000 output tokens would owe 9 Rich units on a vision read; an escalation read owes one.
+    escalation(1, 9_000, "completed");
+    expect(charges(1).map((event) => event.id)).toEqual(["rich:run-1:doc:1"]);
+    // Empty output: provider cost recorded (the event is kept), no Rich charge.
+    expect(escalation(2, 40, "empty-output")).not.toBeNull();
+    expect(charges(2)).toEqual([]);
+    expect(ledger.hasRichCharge("doc", 2)).toBe(false);
+    // A page the recogniser already charged stays one Rich page after its escalation.
+    ledger.chargeRichPage({ documentId: "doc", pageNumber: 3, readBy: "page-ocr" });
+    escalation(3, 4_000, "completed");
+    expect(charges(3)).toHaveLength(1);
+    expect(ledger.pendingBillableCents).toBeCloseTo(0.5);
+  });
+
   it("does not record empty AI usage", () => {
     const ledger = new PipelineUsageEventLedger();
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);

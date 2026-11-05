@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { defaultPipelineFeatures, hostPdfExtractorsUnderSandbox, normalizeStoredPipelineFeatures } from "@docslurp/shared";
 import {
   VM_PDF_EXTRACTOR_ID, assertExtractorPluginConfiguration, extractorPluginSpecifiers, loadExtractorPlugins, registerExtractorPlugin,
   requireSandboxedPdfProvider, resetExtractorPluginsForTest, sandboxedPdfProvider, type ExtractorPlugin, type SandboxedPdfExtractorProvider,
@@ -39,6 +40,55 @@ describe("extractor plugin registration", () => {
     const registry = new ExtractorRegistry();
     expect(registry.resolve("pdf")).toEqual([VM_PDF_EXTRACTOR_ID]);
     expect(() => registry.resolve("image", [VM_PDF_EXTRACTOR_ID])).toThrow("does not support");
+  });
+
+  it.each([
+    ["DOCSLURP_PDF_EXTRACTOR", VM_PDF_EXTRACTOR_ID],
+    ["DOCSLURP_VM_PDF_INSTALLED", "1"],
+  ])("under %s=%s refuses a workspace order naming poppler-text or native-pdf for PDFs", (name, value) => {
+    vi.stubEnv(name, value);
+    const registry = new ExtractorRegistry();
+    expect(registry.resolve("pdf")).toEqual([VM_PDF_EXTRACTOR_ID]);
+    expect(registry.resolve("pdf", [VM_PDF_EXTRACTOR_ID])).toEqual([VM_PDF_EXTRACTOR_ID]);
+    expect(() => registry.resolve("pdf", ["poppler-text"])).toThrow(/poppler-text refused for pdf/);
+    expect(() => registry.resolve("pdf", ["native-pdf"])).toThrow(/native-pdf refused for pdf/);
+    expect(() => registry.resolve("pdf", [VM_PDF_EXTRACTOR_ID, "poppler-text"])).toThrow(/poppler-text refused for pdf/);
+    // A retired id is dropped, never run: the order it empties takes the sandboxed default.
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(registry.resolve("pdf", ["kreuzberg"])).toEqual([VM_PDF_EXTRACTOR_ID]);
+    expect(() => registry.resolve("pdf", ["liteparse", "native-pdf"])).toThrow(/native-pdf refused for pdf/);
+    // Other formats keep their own order.
+    expect(registry.resolve("image", ["ocr"])).toEqual(["ocr"]);
+  });
+
+  it.each([
+    ["DOCSLURP_PDF_EXTRACTOR", VM_PDF_EXTRACTOR_ID],
+    ["DOCSLURP_VM_PDF_INSTALLED", "1"],
+  ])("under %s=%s a stored config emptied of host parsers resolves to vm-pdf only, and an empty order fails closed", (name, value) => {
+    vi.stubEnv(name, value);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const registry = new ExtractorRegistry();
+    const stored = {
+      ...defaultPipelineFeatures,
+      documentExtraction: { ...defaultPipelineFeatures.documentExtraction, order: { pdf: ["poppler-text", "native-pdf", "poppler-text"] },
+        pages: ["ocr"], enrich: ["poppler-text"], voting: { enabled: true, secondary: "native-pdf" } },
+    };
+    const extraction = normalizeStoredPipelineFeatures(stored as never, "run test").documentExtraction;
+    expect(extraction.order.pdf).toBeUndefined();
+    expect(extraction.pages).toEqual([]);
+    expect(extraction.enrich).toEqual([]);
+    expect(extraction.voting.secondary).toBe("next-in-order");
+    expect(hostPdfExtractorsUnderSandbox(extraction)).toEqual([]);
+    // No order: the deployment's default, which is vm-pdf alone; never the built-in host order.
+    expect(registry.resolve("pdf", extraction.order.pdf)).toEqual([VM_PDF_EXTRACTOR_ID]);
+    // An explicitly empty order is not a request for the default: it fails closed.
+    expect(() => registry.resolve("pdf", [])).toThrow(/no extractor configured for pdf/);
+    // A stored empty list alone never parses into a run (fail closed) ...
+    const emptyOnly = { ...defaultPipelineFeatures, documentExtraction: { ...defaultPipelineFeatures.documentExtraction, order: { pdf: [] } } };
+    expect(() => normalizeStoredPipelineFeatures(emptyOnly as never, "run test")).toThrow();
+    // ... and beside host ids elsewhere it is dropped with them, which again leaves vm-pdf alone.
+    const emptied = normalizeStoredPipelineFeatures({ ...stored, documentExtraction: { ...stored.documentExtraction, order: { pdf: [] } } } as never, "run test");
+    expect(registry.resolve("pdf", emptied.documentExtraction.order.pdf)).toEqual([VM_PDF_EXTRACTOR_ID]);
   });
 
   it("refuses a provider that is not ready instead of running anything", async () => {
@@ -112,7 +162,7 @@ describe("loading plugins by configuration", () => {
   });
 
   it("refuses to start on an unknown DOCSLURP_PDF_EXTRACTOR instead of parsing PDFs on the host", async () => {
-    for (const value of ["vm_pdf", "VM-PDF", "sandbox", "kreuzberg", "pdf-engine-x"]) {
+    for (const value of ["vm_pdf", "VM-PDF", "sandbox", "poppler-text", "pdf-engine-x"]) {
       resetExtractorPluginsForTest();
       await expect(loadExtractorPlugins({ DOCSLURP_PDF_EXTRACTOR: value })).rejects.toThrow("DOCSLURP_PDF_EXTRACTOR must be empty or one of: vm-pdf");
       expect(() => assertExtractorPluginConfiguration({ DOCSLURP_PDF_EXTRACTOR: value })).toThrow("must be empty");

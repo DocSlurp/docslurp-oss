@@ -39,6 +39,7 @@ export const GATED = {
   "server/src/__tests__/cli-oauth.db.test.ts": { db: ["CLI_OAUTH_TEST_DATABASE_URL"] },
   "server/src/__tests__/db-resume.db.test.ts": { db: ["RESUME_TEST_DATABASE_URL"] },
   "server/src/__tests__/organization-concurrency.test.ts": { db: ["ORG_TEST_DATABASE_URL"] },
+  "server/src/__tests__/one-org-per-user-migration.pg.test.ts": { db: ["ONE_ORG_MIGRATION_TEST_DATABASE_URL"] },
   "server/src/__tests__/pending-supersession-locks.db.test.ts": { db: ["MIGRATION_LOCK_TEST_DATABASE_URL"] },
   "server/src/__tests__/query-bounds.pg.test.ts": { db: ["SEARCH_BOUNDS_PG_URL"] },
   "server/src/__tests__/rate-limit.redis.test.ts": { redis: ["RATE_LIMIT_TEST_REDIS_URL"] },
@@ -53,6 +54,7 @@ export const GATED = {
   "server/src/lib/dependency-postgres.test.ts": { db: ["GRAPH_PURGE_TEST_DATABASE_URL"] },
   "worker/src/__tests__/checkpoint-lock-order.test.ts": { db: ["CHECKPOINT_LOCK_TEST_DATABASE_URL"] },
   "worker/src/__tests__/credit-lease.test.ts": { db: ["CREDIT_LEASE_TEST_DATABASE_URL"] },
+  "worker/src/__tests__/ocr-escalation-budget.pg.test.ts": { db: ["OCR_BUDGET_TEST_DATABASE_URL"] },
   "worker/src/__tests__/provider-rate-limit.test.ts": { redis: ["AI_RATE_LIMIT_TEST_REDIS_URL"] },
   "worker/src/__tests__/superseded-purge.test.ts": { db: ["GRAPH_PURGE_TEST_DATABASE_URL"] },
 };

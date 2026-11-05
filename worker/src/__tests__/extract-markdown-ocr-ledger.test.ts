@@ -109,7 +109,7 @@ afterEach(() => {
 });
 
 describe("OCR reads on the usage ledger", () => {
-  it("bills the OCR engine's read of an uploaded image once as page-ocr, and nothing for one with no words", async () => {
+  it("bills the OCR engine's read of an uploaded image once as page-ocr, with or without words", async () => {
     const read = await harness({ format: "image", frames: () => [{ frame: 1, text: "Invoice total 4200" }] });
     try {
       await read.stage.run(read.state);
@@ -125,7 +125,8 @@ describe("OCR reads on the usage ledger", () => {
     const blank = await harness({ format: "image", frames: () => [{ frame: 1, text: "   " }] });
     try {
       await blank.stage.run(blank.state);
-      expect(blank.richIds()).toEqual([]);
+      // An uploaded image bills its OCR read whether or not it found text (owner decision, 2026-11-05).
+      expect(blank.richIds()).toEqual(["rich:run-1:doc-1:1"]);
     } finally { await blank.cleanup(); }
   });
 

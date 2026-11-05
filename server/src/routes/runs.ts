@@ -31,7 +31,7 @@ import {
   reprocessRun,
   retryRun
 } from "../services/runs.js";
-import { redactOperatorEvent } from "../services/progress-snapshot.js";
+import { redactOperatorEvent, redactOperatorRun } from "../services/progress-snapshot.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { parseListLimit } from "../lib/list-cursor.js";
@@ -112,13 +112,15 @@ export const runsRoutes = new Hono()
       return apiStatusError(c, 403, "Forbidden");
     }
     const orgId = actor.type === "apiKey" ? actor.apiKey.orgId : null;
+    // Run stats carry worker CPU, RAM, class and region: operators only, like the progress snapshot.
+    const visible = await isPlatformAdminActor(actor) ? <R,>(run: R) => run : redactOperatorRun;
     if (c.req.query("activity") === "true") {
       const runs = await listRuns(userId, true);
-      return c.json({ runs: orgId ? runs.filter((run) => run.orgId === orgId) : runs, hasMore: false, nextCursor: null });
+      return c.json({ runs: (orgId ? runs.filter((run) => run.orgId === orgId) : runs).map(visible), hasMore: false, nextCursor: null });
     }
     // History is paged: `limit` (1-100, default 50) and the `cursor` from the previous page's nextCursor.
     const page = await listRunsPage(userId, { orgId, limit: parseListLimit(c.req.query("limit"), 50, 100), cursor: c.req.query("cursor") || undefined });
-    return c.json(page);
+    return c.json({ ...page, runs: page.runs.map(visible) });
   })
   .get("/activity/stream", async (c) => {
     const userId = c.get("sessionUser").id;
@@ -127,6 +129,7 @@ export const runsRoutes = new Hono()
       return apiStatusError(c, 403, "Forbidden");
     }
     const orgId = actor.type === "apiKey" ? actor.apiKey.orgId : null;
+    const operator = await isPlatformAdminActor(actor);
     c.header("Cache-Control", "no-cache, no-transform");
     c.header("X-Accel-Buffering", "no");
     return streamSSE(c, async stream => {
@@ -140,12 +143,12 @@ export const runsRoutes = new Hono()
         const run = await getRun(event.runId, userId);
         if (!run || (orgId && run.orgId !== orgId)) return;
         if (aborted) return;
-        await stream.writeSSE({ event: "activity-run", data: JSON.stringify(run) });
-        await stream.writeSSE({ event: "activity-event", id: event.id, data: JSON.stringify(event) });
+        await stream.writeSSE({ event: "activity-run", data: JSON.stringify(operator ? run : redactOperatorRun(run)) });
+        await stream.writeSSE({ event: "activity-event", id: event.id, data: JSON.stringify(operator ? event : redactOperatorEvent(event)) });
       });
       async function inventory() {
         const runs = await listRuns(userId, true);
-        return orgId ? runs.filter(run => run.orgId === orgId) : runs;
+        return (orgId ? runs.filter(run => run.orgId === orgId) : runs).map(run => operator ? run : redactOperatorRun(run));
       }
       try {
         let reconciledAt = Number.NEGATIVE_INFINITY;

@@ -86,6 +86,12 @@ most `DOCSLURP_OCR_MAX_LONG_EDGE` (default 2000 px, 640 to 4000), which bounds t
 (default 1) caps concurrent OCR jobs per worker process; plan memory as that many calls on top of the worker. In `vm`
 mode the memory is the VM's, not the worker's.
 
+A cap above the 2000 px default is an operator opt-in, off unless set. It buys detail on small print at the cost of more
+VM time and memory per page (a VM provider may need a larger size above 3000 px). A page still bills one Rich page,
+so with escalation on a dense page at a high cap can cost more than it bills: slightly loss-making. The worker logs
+`[ocr] long-edge-opt-in` at startup when it is set, `pricing:validate` reports the case as a warning, and the provider
+cost is recorded at the VM's real rate, so the provider-cost loss alert flags runs that lose money.
+
 ## Languages
 
 `DOCSLURP_OCR_LANGUAGE` is the worker's default for workspaces left on `auto`. It takes `auto` or three-letter codes
@@ -103,7 +109,9 @@ the Arabic or Devanagari (Hindi) recogniser, and pages in a script no recogniser
 - `DOCSLURP_OCR_ESCALATION=on` turns it on; it is off unless set. The model must be a hosted, priced route
   (DeepInfra, OpenRouter or OpenAI); a local or private one is refused.
 - It has its own per-document page budget (`DOCSLURP_OCR_ESCALATION_MAX_PAGES`, default 25), its own ledger entries,
-  the run's cost cap, the workspace privacy mode and the run's vision attempt guard.
+  the run's cost cap, the workspace privacy mode and the run's vision attempt guard. The budget counts the document's
+  pages in the guard's durable attempt ledger (`vision_run_attempts`, purpose `ocr`), so an activity retry or a worker
+  restart does not reset it.
 - It reads the PNG the OCR boundary wrote. The host produces no image for it.
 - A skipped or failed escalation keeps the recogniser's text. Escalation never stands in for a missing VM.
 
@@ -111,12 +119,20 @@ the Arabic or Devanagari (Hindi) recogniser, and pages in a script no recogniser
 
 ## Billing and usage
 
-- Every page OCR read with words in it is one Rich page read, metric `page-ocr`, charged once per run, document and
-  page, so a retry or a second reader does not charge it twice.
+- An uploaded image: every frame the engine read is one Rich page read, metric `page-ocr`, with or without text in it
+  (owner decision, 2026-11-05). The VM costs the same for a blank frame.
+- A scanned PDF page: one Rich page read only when the read found words.
+- Each charge is keyed by run, document and page, so a retry or a second reader does not charge it twice.
+- A TIFF's frames are its pages: the frames read become `documents.page_count`. A TIFF with more than 64 frames (the
+  job's frame cap) is refused before anything is charged, with the public error `imageTooManyFrames`.
 - Each job records one compute event (`ocr-compute`) with the boundary's measured CPU, peak RSS and wall time. A VM
-  provider's own cost arrives separately, at provider cost.
+  provider's own cost arrives separately, at provider cost. Remote usage outside a stage context has no usage ledger:
+  it is logged as `[usage-unrecorded]` and counted on `docslurp.usage.unrecorded`, never dropped silently.
 - Escalation reads are recorded as `ocr-escalation`, and `hosted` mode reads as `hosted-ocr`, each with the provider's
-  actual input and output tokens and cost.
+  actual input and output tokens and cost. An escalated page bills at most one Rich page, whatever the output length
+  (escalation output tokens add no Rich pages), and an escalation that returned no text charges nothing; its provider
+  cost is still recorded.
+- Quotes price a TIFF at its frames, up to 64 ([Pricing and credits](../pricing-and-credits.md#quotes-for-tiff-files)).
 
 ## Host phases outside OCR
 
@@ -186,7 +202,7 @@ not install unstructured at all; it comes with the `unstructured` vendor bundle.
 | `DOCSLURP_OCR_ESCALATION_MAX_PAGES` | `25` | Hosted reads per document. |
 | `DOCSLURP_OCR_MAX_ATTEMPTS` | `3` | Recogniser attempts per page under `auto` (1 to 7). |
 | `DOCSLURP_OCR_LANGUAGE` | `auto` | Default language for workspaces left on `auto`. |
-| `DOCSLURP_OCR_MAX_LONG_EDGE` | `2000` | Long-edge cap in pixels (640 to 4000). |
+| `DOCSLURP_OCR_MAX_LONG_EDGE` | `2000` | Long-edge cap in pixels (640 to 4000). Above 2000 is an explicit opt-in (see [Sizing](#sizing)). |
 | `DOCSLURP_OCR_MAX_CONCURRENT` | `1` | Concurrent OCR jobs per worker process. |
 
 `DOCSLURP_OCR=off` no longer exists; use `DOCSLURP_OCR_MODE=off`.

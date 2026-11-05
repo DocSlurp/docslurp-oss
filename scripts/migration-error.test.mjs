@@ -12,3 +12,8 @@ test('redacts database credentials in either output stream', () => {
   assert.ok(!detail.includes('user:'));
   assert.equal(detail.match(/redacted database URL/g).length, 2);
 });
+test('leads with the database error drizzle keeps as the cause, and its hint', () => {
+  const cause = Object.assign(new Error('0127 refused: it would remove 1 membership(s)'), { hint: 'Review the list with predeploy-check.mjs' });
+  const detail = migrationFailureDetail(Object.assign(new Error('Failed query: DO $$ ... $$'), { cause }));
+  assert.equal(detail, 'cause: 0127 refused: it would remove 1 membership(s)\nhint: Review the list with predeploy-check.mjs\nFailed query: DO $$ ... $$');
+});

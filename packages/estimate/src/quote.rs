@@ -205,6 +205,10 @@ fn worker_counted_format<'a>(card: &'a Card, name: &str, mime_type: Option<&str>
 /// characters per text page for a text file, its size at the format's typical bytes per page for a Word, slide, sheet or EPUB
 /// file, and its size at the card's bytes per page for anything else (at least 1).
 pub fn quote_file_pages(card: &Card, file: &QuoteFile) -> f64 {
+    // A TIFF's frames are its pages, up to the frames one file may hold (more are refused, never read or billed).
+    if is_multi_frame_image(card, file) {
+        return 1f64.max(card.multi_frame_images.max_frames.min(js_round(file.pages.unwrap_or(1.0))));
+    }
     let pages = file.pages.unwrap_or_else(|| {
         let mime = file.mime_type.as_deref();
         if is_image_file(card, &file.name, mime) {
@@ -221,12 +225,19 @@ pub fn quote_file_pages(card: &Card, file: &QuoteFile) -> f64 {
     1f64.max(js_round(pages))
 }
 
-/// Port of `isFastOnlyFile`: a Word, slide or sheet file (the card's `fastOnlyFormats`) whose pages no model reads in any quality,
-/// unless the client measured a page mix for it.
-fn is_fast_only_file(card: &Card, file: &QuoteFile) -> bool {
-    if file.mix.is_some_and(|mix| mix.text + mix.complex + mix.scanned > 0.0) {
-        return false;
+/// Port of `isMultiFrameImageFile`: the card's multi-frame image types, or their extensions when the type is absent or generic.
+pub fn is_multi_frame_image(card: &Card, file: &QuoteFile) -> bool {
+    let mime = declared_type(file.mime_type.as_deref());
+    let frames = &card.multi_frame_images;
+    if frames.mime_types.iter().any(|candidate| *candidate == mime) {
+        return true;
     }
+    is_generic_type(&mime) && frames.extensions.iter().any(|candidate| *candidate == extension_of(&file.name))
+}
+
+/// Port of `isFastOnlyFile`: a Word, slide or sheet file (the card's `fastOnlyFormats`) whose pages no model reads in any quality.
+/// A page mix the client sent does not change that.
+fn is_fast_only_file(card: &Card, file: &QuoteFile) -> bool {
     worker_counted_format(card, &file.name, file.mime_type.as_deref())
         .is_some_and(|format| card.unmeasured_pages.fast_only_formats.iter().any(|candidate| candidate == format))
 }
@@ -249,6 +260,11 @@ struct PageRange {
 fn quote_file_page_range(card: &Card, file: &QuoteFile) -> PageRange {
     let central = quote_file_pages(card, file);
     let mime = file.mime_type.as_deref();
+    // An uncounted TIFF holds one frame to as many as its size allows at the densest page, up to the frame cap.
+    if file.pages.is_none() && is_multi_frame_image(card, file) {
+        let by_size = (file.size / card.unmeasured_pages.default.min_bytes_per_page).ceil();
+        return PageRange { low: 1.0, high: central.max(card.multi_frame_images.max_frames.min(by_size)), measured: false };
+    }
     if file.pages.is_some() || is_image_file(card, &file.name, mime) {
         return PageRange { low: central, high: central, measured: true };
     }
@@ -459,6 +475,17 @@ pub fn quote_upload(
             paged.len()
         )
     };
+    // A TIFF with more frames than one file may hold is refused unread; it is quoted at the cap, the most it could bill.
+    let max_frames = card.multi_frame_images.max_frames;
+    let too_many_frames = paged.iter().filter(|file| is_multi_frame_image(card, file) && file.pages.unwrap_or(0.0) > max_frames).count();
+    let frames_note = if too_many_frames == 0 {
+        String::new()
+    } else {
+        format!(
+            "{too_many_frames} image {} more than {max_frames} frames and will be refused (quoted at {max_frames}); ",
+            if too_many_frames == 1 { "file holds" } else { "files hold" }
+        )
+    };
     let paged_estimate = CostEstimate {
         pages,
         pages_range: (mixes.unmeasured > 0).then_some(PagesRange { low: range_low, high: range_high }),
@@ -474,7 +501,7 @@ pub fn quote_upload(
         },
         seconds: Some(CreditRange { low: round_up5(seconds(low.wall_seconds)), high: round_up5(seconds(high.wall_seconds)) }),
         basis: format!(
-            "{} profile, {} of {} stages; {range}; {}modeled averages, not measured for this corpus",
+            "{} profile, {} of {} stages; {range}; {}{frames_note}modeled averages, not measured for this corpus",
             profile.quality,
             profile.stage_count,
             profile.stage_count,

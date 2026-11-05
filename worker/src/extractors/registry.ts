@@ -1,7 +1,7 @@
 import { sandboxedPdfProvider, VM_PDF_EXTRACTOR_ID } from "./plugins.js";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import { builtInDocumentExtractorDescriptors, canonicalExtractorId, configureExtractorIdAliases, parseExtractorOptions, resolvePdfExtractorSetting, RETIRED_EXTRACTOR_IDS, type ExtractorDescriptor } from "@docslurp/shared";
+import { builtInDocumentExtractorDescriptors, canonicalExtractorId, configureExtractorIdAliases, parseExtractorOptions, resolvePdfExtractorSetting, RETIRED_EXTRACTOR_IDS, sandboxedPdfConfigured, type ExtractorDescriptor } from "@docslurp/shared";
 import type { CommandPlan, CommandRunner } from "../tools/runner.js";
 import { planArtifactGraph, type GraphAdapter } from "./graph.js";
 import { availableLocalArtifactAdapters } from "./local-artifact-adapters.js";
@@ -238,17 +238,25 @@ export class ExtractorRegistry {
 
   resolve(format: string, configured?: string[]): string[] {
     const base = defaultDocumentExtractorOrder[format] ?? defaultDocumentExtractorOrder.default;
-    // The sandboxed PDF provider, when the deployment selects it, is the only default PDF route.
-    const defaults = format === "pdf" && resolvePdfExtractorSetting() === VM_PDF_EXTRACTOR_ID ? [VM_PDF_EXTRACTOR_ID] : base;
+    // A sandboxed PDF deployment (DOCSLURP_PDF_EXTRACTOR=vm-pdf or DOCSLURP_VM_PDF_INSTALLED=1) runs PDFs only in vm-pdf.
+    const sandboxedPdf = format === "pdf" && (resolvePdfExtractorSetting() === VM_PDF_EXTRACTOR_ID || sandboxedPdfConfigured());
+    const defaults = sandboxedPdf ? [VM_PDF_EXTRACTOR_ID] : base;
     // A configured legacy id (DOCSLURP_EXTRACTOR_ID_ALIASES) resolves to its canonical extractor; a retired id
     // (RETIRED_EXTRACTOR_IDS) is dropped, and an order it emptied uses the defaults. Unknown ids still throw.
     const kept = configured?.filter((id) => !RETIRED_EXTRACTOR_IDS.has(id)).map(canonicalExtractorId);
     if (configured && kept && kept.length < configured.length) {
       console.warn(`[extractors] ${format} extractor order names a retired extractor; dropped it order=${configured.join(",")}`);
     }
-    const ids = kept?.length ? kept : defaults.filter((id) =>
+    // Only an order emptied by retired ids takes the defaults; an explicitly empty order still fails closed below.
+    const emptiedByRetired = configured !== undefined && configured.length > 0 && kept!.length === 0;
+    const ids = kept && !emptiedByRetired ? kept : defaults.filter((id) =>
       this.entries.get(id)?.descriptor.capabilities.formats.includes(format),
     );
+    // Fail closed: a workspace order naming a host parser under a sandboxed deployment is refused, never run.
+    const hostIds = sandboxedPdf ? ids.filter((id) => id !== VM_PDF_EXTRACTOR_ID) : [];
+    if (hostIds.length > 0) {
+      throw new Error(`extractor ${hostIds.join(", ")} refused for pdf: this deployment runs PDFs only in ${VM_PDF_EXTRACTOR_ID}`);
+    }
     if (ids.length === 0) throw new Error(`no extractor configured for ${format}`);
     for (const id of ids) {
       const entry = this.entries.get(id);

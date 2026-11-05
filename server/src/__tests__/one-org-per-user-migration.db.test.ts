@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { applyRemainingMigrations, createMigratedDatabase, serveOnRandomPort } from "@docslurp/worker/testing";
 
-import { collectReport, fundedRemovalsHash, oneOrgPlanSql } from "../../db/predeploy-check.mjs";
+import { collectReport, oneOrgPlanSql, redactOutput } from "../../db/predeploy-check.mjs";
 
 /**
  * Migration 0127 enforces the current one-organization-per-user policy (DOCSLURP_MAX_ORGS_PER_USER=1): existing users with
@@ -23,7 +23,10 @@ let plannedRemovals: Removal[];
 let plannedPromotions: Promotion[];
 let report: { title: string; level: string; lines: string[] };
 let acknowledgedReport: { title: string; level: string; lines: string[] };
+let redactedReport: { title: string; level: string; lines: string[] };
 let before: Record<string, number>;
+let ackHash: string;
+let unacknowledgedError: unknown;
 const COUNTS = `select (select count(*)::int from org_memberships) as memberships, (select count(*)::int from organizations) as organizations,
   (select count(*)::int from api_keys where revoked_at is null) as live_keys, (select count(*)::int from mcp_oauth_grants where revoked_at is null) as live_grants,
   (select count(*)::int from workspace_members) as shares`;
@@ -83,25 +86,34 @@ beforeAll(async () => {
   plannedRemovals = (await db.query<Removal>(`select * from (${oneOrgPlanSql(migrationSql).plan}) plan order by user_id, org_id`)).rows;
   const { plan, promotions } = oneOrgPlanSql(migrationSql);
   plannedPromotions = (await db.query<Promotion>(`with removed_memberships as (${plan}) select * from (${promotions}) p order by org_id`)).rows;
+  ackHash = (await db.query<{ hash: string }>(`with removed_memberships as (${plan}), owner_promotions as (${promotions}) ${oneOrgPlanSql(migrationSql).ack}`)).rows[0]!.hash;
   // The pre-deploy report against the same database, over a real wire connection, read-only.
   const serving = await serveOnRandomPort(db);
   const client = new pg.Client({ connectionString: `postgres://postgres@127.0.0.1:${serving.port}/postgres` });
   await client.connect();
   try {
     const { piiPatternTypeSchema } = await import("@docslurp/shared");
-    const run = async (ack0127: string | null) => {
+    const run = async (ack0127: string | null, redact = false) => {
       await client.query("begin read only");
-      const sections = await collectReport(client, { journal, acceptedPiiPatterns: piiPatternTypeSchema.options, ack0127 });
+      const sections = await collectReport(client, { journal, acceptedPiiPatterns: piiPatternTypeSchema.options, ack0127, redact });
       await client.query("rollback");
       return sections.find((s: { title: string }) => s.title.startsWith("Memberships beyond one per user"))!;
     };
     report = await run(null);
-    acknowledgedReport = await run(fundedRemovalsHash([{ user_id: "sole-owner", org_id: "t3" }]));
+    acknowledgedReport = await run(ackHash);
+    redactedReport = await run(null, true);
   } finally {
     await client.end();
     await serving.server.stop();
   }
   before = (await db.query<Record<string, number>>(COUNTS)).rows[0]!;
+  // 0127 refuses its funded removal and member promotion without the acknowledgement, and rolls back.
+  unacknowledgedError = await applyRemainingMigrations(db, MIGRATION).catch((error: unknown) => error);
+  await db.query("select set_config('docslurp.ack_0127', $1, false)", ["0000000000000000"]);
+  const staleError = await applyRemainingMigrations(db, MIGRATION).catch((error: unknown) => error);
+  if (!String(staleError).includes("does not match the current plan")) throw new Error(`expected a stale-ack refusal, got ${String(staleError)}`);
+  if ((await db.query<Record<string, number>>(COUNTS)).rows[0]!.memberships !== before.memberships) throw new Error("a refused 0127 changed memberships");
+  await db.query("select set_config('docslurp.ack_0127', $1, false)", [ackHash]);
   await applyRemainingMigrations(db, MIGRATION);
 }, 180_000);
 
@@ -216,18 +228,41 @@ describe("pre-deploy report of 0127", () => {
     expect(text).toContain("4 more removed by the keep rule");
     expect(text).toContain(`u@example.test (sole-owner): keeps "T4" (t4); removed from "T3" (t3, not_kept, owner, FUNDED, 1 key(s), 0 grant(s), 1 workspace(s) handed over)`);
     expect(text).toContain(`z@example.test (only-tomb): keeps NO organization`);
-    expect(text).toContain("Owner promoted (the last owner is removed and members remain): t3 -> a3@example.test (was admin), t5 -> m5a@example.test (was member).");
+    expect(text).toContain("Owner promoted (the last owner is removed and members remain): t3 -> a3@example.test (t3-admin) (was admin), t5 -> m5a@example.test (t5-old) (was member).");
+    expect(text).toContain("1 plain member(s) promoted to OWNER: m5a@example.test (t5-old) in t5.");
+    // Every promotion is in the acknowledgement, the admin's too.
+    expect(text).toContain("2 promotion(s) to OWNER, each in the acknowledgement: a3@example.test (t3-admin) in t3 (was admin), m5a@example.test (t5-old) in t5 (was member).");
     expect(text).toContain(`Left with NO member (data kept, nobody can reach it until an operator restores a membership from the backup): "P" (p-data).`);
   });
 
-  it("blocks on a removal from a funded organization until that exact list is acknowledged", () => {
-    const hash = fundedRemovalsHash([{ user_id: "sole-owner", org_id: "t3" }]);
+  it("blocks on a funded removal and a member promotion until that exact list is acknowledged", () => {
+    expect(ackHash).toMatch(/^[0-9a-f]{16}$/);
     expect(report.level).toBe("blocker");
-    expect(report.lines.join("\n")).toContain(`--ack-0127=${hash}`);
+    expect(report.lines.join("\n")).toContain(`--ack-0127=${ackHash}`);
+    expect(report.lines.join("\n")).toContain(`DOCSLURP_ACK_0127=${ackHash}`);
     expect(acknowledgedReport.level).toBe("warn");
-    expect(acknowledgedReport.lines.join("\n")).toContain(`Acknowledged with --ack-0127=${hash}.`);
-    expect(fundedRemovalsHash([{ user_id: "a", org_id: "b" }, { user_id: "c", org_id: "d" }])).toBe(fundedRemovalsHash([{ user_id: "c", org_id: "d" }, { user_id: "a", org_id: "b" }]));
-    expect(fundedRemovalsHash([{ user_id: "a", org_id: "b" }])).not.toBe(hash);
+    expect(acknowledgedReport.lines.join("\n")).toContain(`Acknowledged with --ack-0127=${ackHash}`);
+  });
+
+  it("names people and organizations by id only when redacted", () => {
+    const text = redactedReport.lines.join("\n");
+    expect(text).not.toMatch(/@example\.test/);
+    expect(text).not.toMatch(/"T3"|"P"/);
+    expect(text).toContain("user sole-owner: keeps t4; removed from t3 (not_kept, owner, FUNDED, 1 key(s), 0 grant(s), 1 workspace(s) handed over)");
+    expect(text).toContain(`--ack-0127=${ackHash}`);
+  });
+
+  it("redacts in CI and any piped run, and on request; shows the full list only in a terminal", () => {
+    expect(redactOutput(["--strict"], false)).toBe(true);
+    expect(redactOutput(["--strict"], undefined)).toBe(true);
+    expect(redactOutput(["--strict"], true)).toBe(false);
+    expect(redactOutput(["--redact"], true)).toBe(true);
+    expect(redactOutput(["--no-redact"], false)).toBe(false);
+    expect(redactOutput(["--redact", "--no-redact"], true)).toBe(true);
+  });
+
+  it("refuses to run 0127 without the acknowledgement, or with a stale one, and changes nothing", () => {
+    expect(String(unacknowledgedError)).toMatch(/0127 refused: it would remove 1 membership\(s\) from funded organizations and promote 2 member\(s\) to owner \(1 of them plain members\)/);
   });
 
   it("counted the rows the migration then changed", () => {

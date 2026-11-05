@@ -7,7 +7,7 @@ import { dbTraceStatementHook } from "../lib/db-trace.js";
 import { pipelineTransaction, pipelineInTransaction } from "./transaction-pipeline.js";
 import { PostgresCapacityLeaseStore } from "../media/capacity/store.js";
 import { PostgresMediaJournal } from "../media/journal.js";
-import { DOCUMENT_FAILURE_MARKERS, PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
+import { BILLABLE_UNIT_METRICS, DOCUMENT_FAILURE_MARKERS, PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 import { DocumentNotFoundError, isMissingDocumentError } from "./missing-document.js";
 import { recordPageBaseFee } from "./page-base-fee.js";
 import { reserveFastPageImageRenders } from "./fast-page-image-budget.js";
@@ -2707,6 +2707,37 @@ export class Store {
   }
 
   /**
+   * Records the frames the OCR engine read from a multi-frame image (a TIFF) as the document's page basis (documents.page_count), so
+   * page rows, citations, strict page splitting and the completion charge count the pages the Markdown holds. Intake counts every
+   * image as one page. Scoped to the run's own document.
+   */
+  async setDocumentPageCount(runId: string, documentId: string, pageCount: number): Promise<boolean> {
+    const rows = await this.sql`
+      update documents set page_count = ${pageCount}, page_count_source = 'counted', updated_at = now()
+      where id = ${documentId} and run_id = ${runId} and deduped_from_document_id is null
+      returning id
+    `;
+    return rows.length > 0;
+  }
+
+  /**
+   * The run's multi-frame images (TIFF) whose counted frames raised their page basis above intake's one page, with the distinct
+   * pages a Rich charge of this run already covers (read through usage_attribution). The frame-count spend check adds up the
+   * frames not yet charged, so concurrent documents of one run cannot each fit the balance alone and together overdraw it.
+   */
+  async countedImageFrames(runId: string): Promise<Array<{ documentId: string; pageCount: number; chargedPages: number }>> {
+    const rows = await this.sql<{ id: string; page_count: number; charged: number }[]>`
+      select d.id, d.page_count,
+        coalesce((select count(distinct (au.metadata ->> 'pageNumber')) from usage_attribution au
+          where au.run_id = ${runId} and au.metric = ${BILLABLE_UNIT_METRICS.richPage} and au.metadata ->> 'documentId' = d.id), 0)::int as charged
+      from documents d
+      where d.run_id = ${runId} and d.deduped_from_document_id is null and d.page_count > 1
+        and lower(split_part(coalesce(d.mime_type, ''), ';', 1)) in ('image/tiff', 'image/tiff-fx')
+    `;
+    return rows.map((row) => ({ documentId: row.id, pageCount: Number(row.page_count) || 0, chargedPages: Number(row.charged) || 0 }));
+  }
+
+  /**
    * The run's own documents the worker measured (billing_pages set) and that still bill at completion: their intake count, the measured
    * count and its method. The page-count re-check adds up their extra pages, whose Fast fee is charged only when the run completes.
    */
@@ -2719,9 +2750,10 @@ export class Store {
   }
 
   /** Pauses the run when `credits` it newly owes (more pages than intake counted) no longer fit the org's balance (spend-check.ts). */
-  async enforceSpendForCharge(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean }> {
+  /** Fails closed: throws SpendCheckUnavailableError (retryable) when it cannot decide. */
+  async enforceSpendForCharge(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean; blocked: boolean }> {
     const result = await enforceRunSpendForCharge(this.sql, run, credits, "stage-boundary");
-    return { paused: result.paused };
+    return { paused: result.paused, blocked: result.blocked };
   }
 
   async setDocumentFileFacts(runId: string, documentId: string, facts: import("@docslurp/shared").FileFacts): Promise<boolean> {

@@ -1,3 +1,5 @@
+import { modalSandboxCostCents, modalSandboxRatesObservedAt } from "@docslurp/shared";
+
 import { resolveWorkerDeploymentProfile, buildLocalComputeUsageEvent } from "../../../pipeline/local-compute-cost.js";
 import type { UsageEvent } from "../../../models.js";
 import { readSandboxConfig } from "../../config-schema.js";
@@ -222,9 +224,11 @@ function buildRemoteFs(sdk: ModalSdk, fs: import("modal").SandboxFilesystem): Re
 
 /**
  * Provider cost of one command as a usage event. The SDK reports no cpu/memory consumption
- * for a sandbox, so usage is the requested cpu x wall seconds and requested memory GB x wall
- * seconds (what Modal bills for). It is provider cost only: `costRollup: "included"` and
- * `billable: false` keep it out of customer credits, which the stage's own compute event covers.
+ * for a sandbox, so usage is the requested cpu x wall seconds and requested memory GiB x wall
+ * seconds (what Modal bills for, at max(request, usage)). It is priced at Modal's sandbox rates
+ * (`modalSandboxCostCents`, the verified INFRA_COST_OBSERVATIONS), not the worker host's, and the
+ * cost rides as `providerCostCents` so the provider-cost loss alert sees it. It is provider cost only:
+ * `costRollup: "included"` and `billable: false` keep it out of customer credits.
  */
 export function buildModalUsageEvent(config: ModalConfig, activityId: string, wallSeconds: number): UsageEvent {
   const cpuSeconds = config.cpu * wallSeconds;
@@ -245,7 +249,24 @@ export function buildModalUsageEvent(config: ModalConfig, activityId: string, wa
     costRollup: "included",
     metadata: { activityId, sandboxProvider: "modal", billable: false },
   });
-  return { ...event, provider: "modal" };
+  const memoryGib = config.memoryMb / 1024;
+  const providerCostCents = modalSandboxCostCents({ cores: config.cpu, memoryGib, seconds: wallSeconds });
+  return {
+    ...event,
+    provider: "modal",
+    metadata: {
+      ...event.metadata,
+      providerCostCents,
+      effectiveCostCents: providerCostCents,
+      infraCostCents: providerCostCents,
+      costSource: "estimate",
+      rateSource: "modal-sandbox",
+      rateObservedAt: modalSandboxRatesObservedAt(),
+      physicalCores: config.cpu,
+      memoryGib,
+      wallSeconds,
+    },
+  };
 }
 
 export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSandboxProvider<ModalConfig> {

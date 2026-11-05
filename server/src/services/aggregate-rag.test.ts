@@ -41,6 +41,7 @@ vi.mock("./workspace-chat.js", async (importOriginal) => ({
 }));
 
 const { aggregateWorkspaceRagSearch } = await import("./aggregate-rag.js");
+const { createChatTurnContext, runInChatTurnContext } = await import("../lib/chat-turn-context.js");
 const { aggregateWorkspaceRagSearchRequestSchema, chatAnswerCredits, chatModelTier } = await import("@docslurp/shared");
 
 const hit = {
@@ -107,6 +108,14 @@ describe("aggregateWorkspaceRagSearch spend", () => {
     // Each answer is its own item and charge.
     await aggregateWorkspaceRagSearch({ userId: "u1", orgId: "org-1", request: request({ generateAnswer: true }) });
     expect((mocks.recordUnitCharge.mock.calls[1]![0] as { charge: { id: string } }).charge.id).not.toBe(charge.charge.id);
+  });
+
+  it("keeps the chat turn's id on an answer generated inside a turn, and charges no separate answer", async () => {
+    const turn = createChatTurnContext({ id: "turn-42", refundOnFailure: true });
+    await runInChatTurnContext(turn, () => aggregateWorkspaceRagSearch({ userId: "u1", orgId: "org-1", request: request({ generateAnswer: true }) }));
+    const usage = mocks.recordUsageEvent.mock.calls[0]![0] as { usage: { metadata: Record<string, unknown> } };
+    expect(usage.usage.metadata.chatTurnId).toBe("turn-42");
+    expect(mocks.recordUnitCharge).not.toHaveBeenCalled();
   });
 
   it("charges nothing when no model answered (no evidence to answer from)", async () => {

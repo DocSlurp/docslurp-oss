@@ -253,7 +253,9 @@ async function generateAggregateAnswer(args: {
   });
   // The answer is one item for the provider-loss alert (providerCostLossItems keys chat items on metadata.chatTurnId):
   // its model cost and its charge carry the same id, so a loss on it is seen like a chat turn's.
-  const answerItemId = `aggregate-answer:${randomUUID()}`;
+  // Inside a chat turn the answer is part of the turn: it keeps the turn's id, so the turn's cost and its charge stay one item.
+  const turn = currentChatTurn();
+  const answerItemId = turn?.id ?? `aggregate-answer:${randomUUID()}`;
   const scope = {
     orgId: args.orgId,
     workspaceIds: uniqueStrings(
@@ -281,7 +283,7 @@ async function generateAggregateAnswer(args: {
   });
   // A generated answer bills as a chat answer does (PRICE_CARD.chatAnswerTiers at the model's tier, once more per started
   // 100k total tokens). Inside a chat turn the turn's own answer already covers it.
-  if (!currentChatTurn()) {
+  if (!turn) {
     const totalTokens = generated.usage.inputTokens + generated.usage.outputTokens;
     const tier = chatModelTier(SEARCH_OPENROUTER_MODEL);
     await recordUnitCharge({

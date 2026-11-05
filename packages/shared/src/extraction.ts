@@ -1,4 +1,5 @@
 import { dropRetiredExtractorIds, normalizeDocumentExtractionAliases } from "./extractor-aliases.js";
+import { hostPdfExtractorsUnderSandbox } from "./extractors.js";
 import { z } from "zod";
 import { layoutRegionSchema } from "./layout.js";
 
@@ -209,6 +210,25 @@ export function sanitizeStoredDocumentExtraction(value: unknown): { value: unkno
   const retired = dropRetiredExtractorIds(value);
   const next: Record<string, unknown> = structuredClone(normalizeDocumentExtractionAliases(retired.value) as Record<string, unknown>);
   const dropped: string[] = retired.dropped.map((entry) => `documentExtraction.${entry}`);
+  // A stored host PDF extractor under a sandboxed deployment is dropped (the PDF then takes the sandboxed default), never run.
+  const hostPdf = hostPdfExtractorsUnderSandbox(next);
+  if (hostPdf.length > 0) {
+    if (isPlainObject(next.order) && Array.isArray(next.order.pdf)) {
+      delete next.order.pdf;
+      dropped.push("documentExtraction.order.pdf");
+    }
+    for (const key of ["pages", "enrich"] as const) {
+      if (Array.isArray(next[key]) && (next[key] as unknown[]).some((id) => id !== "vm-pdf")) {
+        next[key] = (next[key] as unknown[]).filter((id) => id === "vm-pdf");
+        dropped.push(`documentExtraction.${key}`);
+      }
+    }
+    if (isPlainObject(next.voting) && hostPdf.some((entry) => entry.path[0] === "voting")) {
+      // Explicitly the next extractor of the (now vm-pdf-only) order, never a host parser.
+      next.voting.secondary = "next-in-order";
+      dropped.push("documentExtraction.voting.secondary");
+    }
+  }
   if (isPlainObject(next.ocr) && next.ocr.language !== undefined && !ocrLanguageSettingSchema.safeParse(next.ocr.language).success) {
     delete next.ocr.language;
     dropped.push("documentExtraction.ocr.language");
@@ -257,6 +277,11 @@ export const documentExtractionConfigSchema = z.preprocess(normalizeDocumentExtr
     language: ocrLanguageSettingSchema.default("auto"),
     autoRotate: z.boolean().default(true),
   }).default({ language: "auto", autoRotate: true }),
+}).superRefine((config, ctx) => {
+  // A sandboxed PDF deployment never lets a workspace route PDFs to a host parser (fail closed, 400 at the API).
+  for (const { path, id } of hostPdfExtractorsUnderSandbox(config)) {
+    ctx.addIssue({ code: "custom", path, message: `extractor ${id} parses PDFs on the worker host; this deployment runs PDFs only in the sandboxed extractor (vm-pdf)` });
+  }
 }));
 export type DocumentExtractionConfig = z.infer<typeof documentExtractionConfigSchema>;
 
