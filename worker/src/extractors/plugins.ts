@@ -73,6 +73,20 @@ export interface EmbeddedImageSet {
   placements: EmbeddedImageFacts[];
 }
 
+/** What a sandboxed PDF run returns: the command result, plus the pages the provider OCR'd, when it knows. */
+export interface SandboxedPdfResult extends SandboxResult {
+  /**
+   * 1-based pages whose text the provider read with OCR (each is billed as a Rich read). Omit when unknown: an unknown
+   * fact never raises a charge. Validated by the host: unique integers within the document's page count.
+   */
+  ocrPages?: number[];
+}
+
+/** Upper bound on a provider's Markdown output, checked before the host reads it. */
+export const SANDBOXED_PDF_MAX_MARKDOWN_BYTES = 256 * 1024 * 1024;
+/** Page bound for `ocrPages` when the host's page count is unknown. */
+const MAX_REPORTED_PAGES = 100_000;
+
 export interface SandboxedPdfExtractorProvider {
   /** Stable id for telemetry and command metrics, chosen by the plugin. */
   id: string;
@@ -81,7 +95,7 @@ export interface SandboxedPdfExtractorProvider {
   /** Throw when the deployment is not ready (unpinned image, missing control credentials). Never fall back. */
   assertConfigured(): void;
   /** Write Markdown (pages joined by form feeds, one slot per page) to `job.output`. */
-  run(job: SandboxedPdfJob, context: SandboxedPdfRunContext, signal?: AbortSignal): Promise<SandboxResult>;
+  run(job: SandboxedPdfJob, context: SandboxedPdfRunContext, signal?: AbortSignal): Promise<SandboxedPdfResult>;
   /** Upper bound on one run's wall time for this many pages: the remote command budget. */
   timeoutMs(pages: number): number;
   /** Present when the provider can return embedded images beside the Markdown. */
@@ -184,6 +198,31 @@ export function requireSandboxedPdfProvider(): SandboxedPdfExtractorProvider {
   const provider = sandboxedPdfProvider();
   if (!provider) throw new Error(`The ${VM_PDF_EXTRACTOR_ID} extractor needs a sandboxed PDF provider plugin (DOCSLURP_EXTRACTOR_PLUGINS); refusing local fallback`);
   return provider;
+}
+
+const reportedOcrPages = new WeakMap<SandboxedPdfJob, number[]>();
+
+/**
+ * Validate a provider run's `ocrPages` against the page count and keep them for the job. A malformed list refuses the
+ * run: provider output is untrusted, and billing evidence must not be guessed from it.
+ */
+export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: SandboxedPdfResult, pages: number): SandboxedPdfResult {
+  reportedOcrPages.delete(job);
+  const raw: unknown = result.ocrPages;
+  if (raw === undefined) return result;
+  const bound = Number.isSafeInteger(pages) && pages > 0 ? pages : MAX_REPORTED_PAGES;
+  if (!Array.isArray(raw) || raw.length > bound ||
+      raw.some((page) => !Number.isSafeInteger(page) || page < 1 || page > bound) || new Set(raw).size !== raw.length) {
+    throw new SandboxRunError(`Sandboxed PDF provider returned invalid ocrPages (expected unique pages 1..${bound})`, result.usage);
+  }
+  const ocrPages = [...(raw as number[])].sort((a, b) => a - b);
+  reportedOcrPages.set(job, ocrPages);
+  return { ...result, ocrPages };
+}
+
+/** The validated pages a finished job reported it OCR'd, or undefined when the provider did not say. */
+export function sandboxedPdfOcrPages(job: SandboxedPdfJob): number[] | undefined {
+  return reportedOcrPages.get(job);
 }
 
 export function imageOrientationProvider(): ImageOrientationProvider | null {

@@ -117,15 +117,72 @@ describe("OCR reads on the usage ledger", () => {
     try { await fast.stage.run(fast.state); expect(fast.richIds()).toEqual([]); } finally { await fast.cleanup(); }
   });
 
-  it("charges the pages without a text layer when the extractor's text carries no page breaks", async () => {
+  it("records no OCR reads when the extractor's text carries no page breaks: an unknown fact never raises a charge", async () => {
+    // Before: pages 2 and 3 (no text layer) were both charged because they "shared the document's words".
     const h = await harness({ format: "pdf", pageCount: 3, text: "Native page text then scanned words", nativePages: ["Native page text", "", ""] });
     try {
       await h.stage.run(h.state);
-      expect(h.richIds()).toEqual(["rich:run-1:doc-1:2", "rich:run-1:doc-1:3"]);
+      expect(h.richIds()).toEqual([]);
     } finally { await h.cleanup(); }
   });
 
-  it("adds the pages the graph extractor's tesseract adapter reports it OCR'd", async () => {
+  it("does not bill a page that holds only an image reference or a page marker", async () => {
+    const ref = `![](docslurp-artifact:doc-1:${"a".repeat(64)}.webp#p2o0)`;
+    const h = await harness({
+      format: "pdf", pageCount: 3,
+      text: `Native text\f<!-- page 2 -->\n\n${ref}\f<!-- page 3 -->\n\n![Signed by Ada](docslurp-artifact:doc-1:${"b".repeat(64)}.webp#p3o0)\nTotal 4200\f`,
+      nativePages: ["Native text", "", ""],
+    });
+    try {
+      await h.stage.run(h.state);
+      // Page 2 is an image reference alone (before: billed Rich); page 3 has OCR words besides its reference.
+      expect(h.richIds()).toEqual(["rich:run-1:doc-1:3"]);
+    } finally { await h.cleanup(); }
+  });
+
+  it("infers OCR reads only for a winner that ran OCR", async () => {
+    const h = await harness({ format: "pdf", pageCount: 2, text: "x\fScanned words\f", nativePages: ["x", ""] });
+    try {
+      const record = (candidate: Record<string, unknown>) => (h.stage as any).recordOcrPageReads(h.state, h.state.documents[0], {
+        format: "pdf", isPdf: true, winningText: "x\fScanned words\f", candidate, sourcePath: "unused",
+      });
+      for (const label of ["native-pdf", "poppler-text", "pandoc"]) expect(await record({ label, plan: { binary: "x", args: [] } })).toEqual([]);
+      expect(await record({ label: "liteparse", plan: { binary: "node", args: ["--input", "a"] } })).toEqual([]);
+      expect(await record({ label: "kreuzberg", plan: { binary: "node", args: ["--config-json", JSON.stringify({ disableOcr: true })] } })).toEqual([]);
+      expect(h.richIds()).toEqual([]);
+      expect(await record({ label: "kreuzberg", plan: { binary: "node", args: ["--config-json", "{}"] } })).toEqual([2]);
+      expect(h.richIds()).toEqual(["rich:run-1:doc-1:2"]);
+    } finally { await h.cleanup(); }
+  });
+
+  it("logs and counts a failed text-layer probe for an OCR-capable winner and bills nothing", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const h = await harness({ format: "pdf", pageCount: 2, text: "x\fScanned words\f", nativePages: null });
+    try {
+      (h.stage as any).runner.pageText = async () => ({ binary: "pdftotext", args: [], available: true });
+      (h.stage as any).runner.run = async () => { throw new Error("pdftotext timed out"); };
+      await h.stage.run(h.state);
+      expect(h.richIds()).toEqual([]);
+      expect(warn.mock.calls.flat().join(" ")).toMatch(/\[ocr-ledger\] probe-failed document=doc-1 extractor=kreuzberg reason=pdftotext timed out/);
+    } finally { await h.cleanup(); warn.mockRestore(); }
+  });
+
+  it("uses the sandboxed provider's reported pages and never probes the host for them", async () => {
+    const h = await harness({ format: "pdf", pageCount: 3, text: "a\fb\fc\f", nativePages: ["", "", ""] });
+    try {
+      const probe = vi.fn(async () => { throw new Error("must not probe the host"); });
+      (h.stage as any).nativeTextLayerPages = probe;
+      const record = (candidate: Record<string, unknown>) => (h.stage as any).recordOcrPageReads(h.state, h.state.documents[0], {
+        format: "pdf", isPdf: true, winningText: "a\fb\fc\f", candidate, sourcePath: "unused", sandboxedRoute: true,
+      });
+      expect(await record({ label: "vm-pdf", plan: { binary: "vm", args: [] } })).toEqual([]);
+      expect(await record({ label: "vm-pdf", plan: { binary: "vm", args: [] }, ocrPages: [3, 1, 9] })).toEqual([1, 3]);
+      expect(probe).not.toHaveBeenCalled();
+      expect(h.richIds()).toEqual(["rich:run-1:doc-1:1", "rich:run-1:doc-1:3"]);
+    } finally { await h.cleanup(); }
+  });
+
+  it("bills exactly the pages the graph extractor's tesseract adapter reports it OCR'd", async () => {
     const h = await harness({ format: "pdf", pageCount: 2, text: "<!-- page 1 -->\n\nWords", nativePages: ["Words", "Words"] });
     try {
       const pages = await (h.stage as any).recordOcrPageReads(h.state, h.state.documents[0], {

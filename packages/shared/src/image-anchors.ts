@@ -164,6 +164,31 @@ export function mergeImageResult(markdown: string, target: { pageNumber: number;
   return { markdown: pages.join("\f"), merged: true };
 }
 
+/**
+ * The text an image reference line stands for: its alt text (possibly empty), or null when the line is not one. The one
+ * rule every text consumer (canonical blocks, page rows, propositions, summaries, structured inputs) applies; the link
+ * target is an internal artifact id and never text.
+ */
+export function imageAnchorLineText(line: string): string | null {
+  return parseImageAnchorLine(line)?.alt ?? null;
+}
+
+/**
+ * Replace every image reference line with its alt text, dropping a line with none. Exports keep the raw reference;
+ * everything that reads Markdown as text uses this.
+ */
+export function imageAnchorsToAltText(markdown: string): string {
+  if (!markdown.includes(IMAGE_ANCHOR_SCHEME)) return markdown;
+  return markdown.split("\f").map((page) => page.split("\n").flatMap((line) => {
+    const alt = imageAnchorLineText(line);
+    if (alt !== null) return alt ? [alt] : [];
+    // A reference inside a line (not where the producer puts them, but untrusted text may) becomes its alt text too.
+    return [line.replace(INLINE_ANCHOR, (_match, raw: string) => raw.replace(/\\([\\[\]])/g, "$1"))];
+  }).join("\n")).join("\f");
+}
+
+const INLINE_ANCHOR = /!\[((?:[^\]\\]|\\.)*)\]\(docslurp-artifact:[^)\s#]+#p[0-9]+o[0-9]+\)/g;
+
 /** Remove every image reference line (and nothing else), for consumers that want the text alone. */
 export function stripImageAnchors(markdown: string): string {
   return markdown.split("\f").map((page) => page.split("\n").filter((line) => parseImageAnchorLine(line) === null).join("\n")).join("\f");

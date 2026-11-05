@@ -88,7 +88,14 @@ export function register(host: ExtractorPluginHost): ExtractorPlugin {
   `currentPerfContext`). A plugin imports only types from the worker, so the errors and usage it raises are the
   worker's own classes.
 - `run` writes Markdown with one form-feed-separated slot per page. Throw `host.SandboxRunError(message, usage)` on
-  failure so the usage is recorded; never put raw provider or parser text in the message.
+  failure so the usage is recorded; never put raw provider or parser text in the message. The host refuses Markdown
+  that is not a regular file or exceeds 256 MiB (`SANDBOXED_PDF_MAX_MARKDOWN_BYTES`) before reading it.
+- `run` may return `ocrPages`: the 1-based pages whose text it read with OCR. Each is billed as one Rich page read.
+  The host requires unique integers within the document's page count and refuses the run otherwise. Omit the field
+  when unknown: the host then records no OCR reads for the document. It never infers them for this route.
+- `imageOrientation.orient` returns a record the host validates against `orientationResultSchema`
+  (`@docslurp/shared`): strict fields, bounded numbers, a status enum, a 64-hex `modelSha256`, and `model` equal to
+  the provider's `id` (it becomes the derived artifact's producer id). A failing record refuses the image.
 - `embeddedImages.read(output)` returns an `EmbeddedImageSet`. Core validates it again
   (`validateEmbeddedImageSet`): strict facts, hashes that match bytes, size limits and page range.
 - `shardProfile` registers the provider's prior cost profile; calibration refines it from the shard timings it
@@ -101,3 +108,27 @@ Untrusted files are processed behind a VM or microVM boundary (`AGENTS.md`). A p
 - run each job in a fresh VM with no network, no credentials and no cloud metadata access;
 - bound input, output, memory and time, and terminate the VM on every exit path;
 - return only framed, bounded output that the host validates without decoding pixels or parsing the PDF.
+
+## Host-side PDF parsing that remains
+
+The sandboxed route moves Markdown extraction into the provider's VM. It does not yet move every read of the PDF.
+When a PDF goes to `vm-pdf` (the deployment sets `DOCSLURP_PDF_EXTRACTOR=vm-pdf`, or the workspace order names it),
+the extract stage skips these host probes, and its stage stats record `hostPdfProbes: "skipped-sandboxed-route"`:
+
+- page facts (`pdftotext`, `pdfimages -list`) for the ingest report;
+- page-image evidence for classify-route (`pdfimages`, `pdfinfo` and the text-layer verifier);
+- the OCR ledger's text-layer probe (`pdftotext`). OCR reads come only from the provider's `ocrPages`.
+
+Other stages still read the PDF on the worker host. Today that includes:
+
+- `normalize` runs `pdfinfo` for page count and metadata;
+- page rasterization for vision extraction, page embeddings and deferred page materialization (`pdftoppm`,
+  `pdftotext`);
+- the document map reads the outline and structure in process, with pdf.js;
+- a fallback extractor, when a workspace's order lists one after `vm-pdf` and the provider fails, runs on the host
+  like any built-in extractor.
+
+The poppler commands run under the worker's parser sandbox (see `docs/worker-image.md`), which is defense in depth
+inside the worker, not a VM boundary. The pdf.js structure read runs inside the worker process itself. Moving these
+behind the provider, or deriving their facts from provider output, is open work.
+
