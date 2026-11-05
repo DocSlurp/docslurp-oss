@@ -4,6 +4,8 @@ import { atomize, fitsLimits, headWords, normalizeNfc, tailWords, type SizeLimit
 import {
   isPageImageReferenceBlock,
   normalizePageNumbers,
+  parseImageAnchorLine,
+  stripImageAnchors,
   splitTextIntoPagesStrict,
   type CanonicalBlock,
   type CanonicalBlockType,
@@ -226,6 +228,19 @@ export function buildCanonicalDocumentFromMarkdown(args: {
         continue;
       }
 
+      // An image reference (docslurp-artifact:...) is its own block. Its text is the alt text only: the link target is an
+      // internal artifact id and would be noise in an embedding. Position and artifact stay in the block's metadata.
+      const imageAnchor = parseImageAnchorLine(line);
+      if (imageAnchor) {
+        lineIndex++;
+        blocks.push(createBlock({
+          documentId: args.documentId, order: order++, type: "paragraph", text: imageAnchor.alt,
+          headingPath: activeHeadingPath(headingStack), pageNumber, lineStart: startLine, lineEnd: startLine,
+          metadata: { extractor: "embedded-image", imageAnchor: imageAnchor.anchor, imageArtifactId: imageAnchor.artifactId },
+        }));
+        continue;
+      }
+
       const paragraphLines: string[] = [];
       while (lineIndex < lines.length) {
         const nextLine = lines[lineIndex] ?? "";
@@ -238,7 +253,8 @@ export function buildCanonicalDocumentFromMarkdown(args: {
           isTableStart(lines, lineIndex) ||
           /^ {0,3}<table(?=\s|>|$)/i.test(nextLine) ||
           isListLine(nextLine) ||
-          QUOTE_RE.test(nextLine)
+          QUOTE_RE.test(nextLine) ||
+          parseImageAnchorLine(nextLine) !== null
         ) {
           break;
         }
@@ -268,7 +284,9 @@ export function buildCanonicalDocumentFromMarkdown(args: {
       if (block.lineStart === null || block.lineEnd === null) continue;
       const raw = lines.slice(block.lineStart - 1, block.lineEnd).join("\n");
       const charStart = (lineOffsets[block.lineStart - 1] ?? 0) + (raw.length - raw.trimStart().length);
-      block.metadata = { ...block.metadata, charStart, charEnd: charStart + block.text.length };
+      // An image reference block spans its whole Markdown line even though its text is only the alt text.
+      const span = block.metadata.extractor === "embedded-image" ? raw.trim().length : block.text.length;
+      block.metadata = { ...block.metadata, charStart, charEnd: charStart + span };
     }
   }
 
@@ -325,7 +343,7 @@ export function buildCanonicalChunksFromDocument(
 
   if (meaningfulBlocks.length === 0) {
     return [{
-      text: fallback,
+      text: stripImageAnchors(fallback),
       headingPath: [],
       pageNumber: null,
       pageNumbers: [],

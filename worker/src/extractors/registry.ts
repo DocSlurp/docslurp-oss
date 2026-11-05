@@ -1,6 +1,7 @@
+import { sandboxedPdfProvider, VM_PDF_EXTRACTOR_ID } from "./plugins.js";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import { builtInDocumentExtractorDescriptors, parseExtractorOptions, type ExtractorDescriptor } from "@docslurp/shared";
+import { builtInDocumentExtractorDescriptors, canonicalExtractorId, configureExtractorIdAliases, parseExtractorOptions, type ExtractorDescriptor } from "@docslurp/shared";
 import type { DocumentExtractionResult } from "../lib/document-extraction-adapter.js";
 import type { CommandPlan, CommandRunner } from "../tools/runner.js";
 import { planArtifactGraph, type GraphAdapter } from "./graph.js";
@@ -126,8 +127,9 @@ function definition(args: {
 }
 
 const registered = [
-  definition({ id: "doppler", outputSuffix: ".doppler.md", tableAware: true, execute: file,
-    prepare: (runner, source) => runner.dopplerMarkdown(source, `${source}.doppler.md`) }),
+  // Served by the sandboxed PDF provider plugin; without one, preparing it refuses (no host fallback).
+  definition({ id: VM_PDF_EXTRACTOR_ID, outputSuffix: ".vm-pdf.md", tableAware: true, execute: file,
+    prepare: (runner, source) => runner.sandboxedPdfMarkdown(source, `${source}.vm-pdf.md`) }),
   definition({ id: "kreuzberg", outputSuffix: ".kreuzberg.md", tableAware: true, execute: file,
     prepare: async (runner, source, config, context) => {
       const plan = await runner.kreuzbergMarkdown(source, `${source}.kreuzberg.md`, config);
@@ -219,10 +221,11 @@ export class ExtractorRegistry {
   resolve(format: string, configured?: string[]): string[] {
     const base = defaultDocumentExtractorOrder[format] ?? defaultDocumentExtractorOrder.default;
     // DOCSLURP_PDF_ENGINE=native-pdf puts the native engine first; kreuzberg stays next as its fallback.
-    const defaults = format === "pdf" && process.env.DOCSLURP_PDF_EXTRACTOR === "doppler"
-      ? ["doppler"]
+    const defaults = format === "pdf" && process.env.DOCSLURP_PDF_EXTRACTOR === VM_PDF_EXTRACTOR_ID
+      ? [VM_PDF_EXTRACTOR_ID]
       : format === "pdf" && resolveNativePdfMode() === "native-pdf" ? ["native-pdf", ...base] : base;
-    const ids = configured ?? defaults.filter((id) =>
+    // A configured legacy id (DOCSLURP_EXTRACTOR_ID_ALIASES) resolves to its canonical extractor; unknown ids still throw.
+    const ids = configured?.map(canonicalExtractorId) ?? defaults.filter((id) =>
       this.entries.get(id)?.descriptor.capabilities.formats.includes(format),
     );
     if (ids.length === 0) throw new Error(`no extractor configured for ${format}`);
@@ -236,7 +239,8 @@ export class ExtractorRegistry {
     return [...new Set(ids)];
   }
 
-  async prepare(id: string, runner: CommandRunner, sourcePath: string, configJson?: string, context?: PrepareContext): Promise<PreparedExtractor> {
+  async prepare(requested: string, runner: CommandRunner, sourcePath: string, configJson?: string, context?: PrepareContext): Promise<PreparedExtractor> {
+    const id = canonicalExtractorId(requested);
     const entry = this.entries.get(id);
     if (!entry) throw new Error(`unknown extractor ${id}; registered: ${[...this.entries.keys()].join(", ")}`);
     const plan = await entry.prepare(runner, sourcePath, configJson, context);
@@ -293,3 +297,16 @@ function kreuzbergOcrDisabled(configJson?: string): boolean {
 }
 
 export const documentExtractorRegistry = new ExtractorRegistry();
+
+/** The extractor ids this worker can run: every registered one, and `vm-pdf` only with a provider plugin loaded. */
+export function servedExtractorIds(registry: ExtractorRegistry = documentExtractorRegistry): string[] {
+  return registry.list().map((descriptor) => descriptor.id).filter((id) => id !== VM_PDF_EXTRACTOR_ID || sandboxedPdfProvider() !== null);
+}
+
+/**
+ * Install DOCSLURP_EXTRACTOR_ID_ALIASES against the ids this worker serves. Call after the plugins load: an alias to
+ * `vm-pdf` without a provider, to an unknown id, or over a built-in id throws and the worker does not start.
+ */
+export function configureWorkerExtractorIdAliases(env: NodeJS.ProcessEnv = process.env): ReadonlyMap<string, string> {
+  return configureExtractorIdAliases(servedExtractorIds(), env);
+}

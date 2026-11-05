@@ -464,10 +464,10 @@ describe("M2: the shared PDF source is read-only for every command", () => {
     expect(paths.writablePaths).toEqual([]);
     expect(paths.readablePaths).toContain(cached.path);
     // An output beside the shared source would make its directory writable: fail closed.
-    expect(() => resolve([cached.path, `${cached.path}.doppler.md`])).toThrow(/shared source/);
+    expect(() => resolve([cached.path, `${cached.path}.vm-pdf.md`])).toThrow(/shared source/);
     await cache.clear();
     // Once evicted the path is an ordinary file again.
-    expect(() => resolve([cached.path, `${cached.path}.doppler.md`])).not.toThrow();
+    expect(() => resolve([cached.path, `${cached.path}.vm-pdf.md`])).not.toThrow();
   });
 });
 

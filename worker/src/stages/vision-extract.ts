@@ -90,7 +90,7 @@ export interface VisionPageOutput {
   finishReason?: string | null;
   /** Model id the provider reports having served, when it differs in form from `model` or is the only report. */
   servedModel?: string;
-  orientation?: import("../sandbox/providers/modal/image-orientation.js").OrientationResult | { status: "skipped-limit" };
+  orientation?: import("../lib/image-orientation.js").OrientationResult | { status: "skipped-limit" };
   /** Present when the served model differs from the requested one (see `VISION_MODEL_SWAP_POLICY`). */
   modelSwap?: { requested: string; served: string; provider: string | null };
 }

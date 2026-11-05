@@ -28,6 +28,8 @@ export interface LocalPdfGraphOutput {
   steps: readonly string[];
   /** Pages the tesseract adapter OCR'd to text (one model read each, billed as a Rich page by the caller). */
   ocrPages?: readonly number[];
+  /** Per-run measurements the stage records beside the graph (image counts by class and route, for example). */
+  stats?: Readonly<Record<string, unknown>>;
 }
 
 async function hashFile(filePath: string, signal?: AbortSignal): Promise<string> {

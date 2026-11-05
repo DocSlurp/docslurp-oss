@@ -8,13 +8,17 @@ import {
   recordShardTimingInContext,
   resetShardCalibrationCache,
 } from "../pipeline/shard-calibration.js";
-import { SHARD_PROFILES } from "../temporal/page-shard-profiles.js";
+import { registerShardProfile } from "../temporal/page-shard-profiles.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
 import { runWithPerfContext } from "../lib/perf-context.js";
 import type { PerformanceEvent } from "../models.js";
 
-const KEY = "extract-markdown:doppler-vm" as const;
-const prior = SHARD_PROFILES[KEY];
+const KEY = "extract-markdown:test-vm" as const;
+const prior = {
+  stage: "extract-markdown", executor: "test-vm", fixedMs: 2_000, perPageMs: 15, baseMiB: 200, perPageMiB: 0, memoryLimitMiB: 1_024,
+  maxShardMs: 120_000, minShardPages: 32, maxShardPages: 10_000, pageAlign: 32, usdPerSecond: 0.00004,
+};
+registerShardProfile(KEY, prior);
 const state = () => ({ pendingPerformance: [] }) as unknown as WorkflowState;
 const line = (fixedMs: number, perPageMs: number) =>
   [8, 16, 32, 64, 96, 128, 192, 256, 320, 400].map((pages) => ({ pages, ms: fixedMs + pages * perPageMs }));
@@ -27,11 +31,11 @@ afterEach(() => {
 describe("recordShardTiming", () => {
   it("pushes one document-scoped performance row keyed by profile", () => {
     const s = state();
-    recordShardTiming(s, { stage: "extract-markdown", executor: "doppler-vm", documentId: "doc-1", pages: 96, ms: 3_100.4, maxRssMiB: 210, shardIndex: 1, shardCount: 5 });
+    recordShardTiming(s, { stage: "extract-markdown", executor: "test-vm", documentId: "doc-1", pages: 96, ms: 3_100.4, maxRssMiB: 210, shardIndex: 1, shardCount: 5 });
     expect(s.pendingPerformance).toEqual([{
       documentId: "doc-1", scope: "document", stageName: "extract-markdown", metric: SHARD_TIMING_METRIC, value: 3_100,
-      unit: "ms", tags: ["shard", "doppler-vm"],
-      metadata: { executor: "doppler-vm", pages: 96, profileKey: KEY, maxRssMiB: 210, shardIndex: 1, shardCount: 5 },
+      unit: "ms", tags: ["shard", "test-vm"],
+      metadata: { executor: "test-vm", pages: 96, profileKey: KEY, maxRssMiB: 210, shardIndex: 1, shardCount: 5 },
     }]);
   });
 
@@ -47,10 +51,10 @@ describe("recordShardTimingInContext", () => {
   it("writes the same metric and profile key through the active perf context", async () => {
     const events: PerformanceEvent[] = [];
     await runWithPerfContext({ runId: "r", scope: "document", stageName: "extract-markdown", documentId: "doc-9", pushPerformance: (e) => events.push(e) }, async () => {
-      recordShardTimingInContext({ stage: "extract-markdown", executor: "doppler-vm", pages: 32, ms: 2_300, shardIndex: 0, shardCount: 3 });
+      recordShardTimingInContext({ stage: "extract-markdown", executor: "test-vm", pages: 32, ms: 2_300, shardIndex: 0, shardCount: 3 });
     });
     const s = state();
-    recordShardTiming(s, { stage: "extract-markdown", executor: "doppler-vm", documentId: "doc-9", pages: 32, ms: 2_300, shardIndex: 0, shardCount: 3 });
+    recordShardTiming(s, { stage: "extract-markdown", executor: "test-vm", documentId: "doc-9", pages: 32, ms: 2_300, shardIndex: 0, shardCount: 3 });
     expect(events).toEqual(s.pendingPerformance);
   });
 

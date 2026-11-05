@@ -16,7 +16,11 @@ export * from "./rate-limits.js";
 // duplicate export removed (was listed twice in original)
 export * from "./extraction.js";
 export * from "./extractors.js";
+export * from "./extractor-aliases.js";
 export * from "./visual-artifacts.js";
+export * from "./media-map.js";
+export * from "./image-routing.js";
+export * from "./image-anchors.js";
 export * from "./structured.js";
 export * from "./connectors.js";
 export * from "./artifacts.js";

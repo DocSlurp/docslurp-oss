@@ -1,5 +1,7 @@
 import { reserveOrientationAttempt } from "../lib/image-orientation.js";
-import { dopplerImageGraph, resolveDopplerImages } from "../extractors/doppler-image-graph.js";
+import { EMBEDDED_IMAGE_TARGETS, embeddedImageGraph, resolveEmbeddedImageRequest } from "../extractors/embedded-images.js";
+import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
+import { VM_PDF_EXTRACTOR_ID, requireSandboxedPdfProvider } from "../extractors/plugins.js";
 import { buildSummaryEvidence } from "./summary-evidence.js";
 import type { CapacityLeaseStore } from "../media/capacity/types.js";
 import { extractMedia } from "../media/extract.js";
@@ -225,7 +227,7 @@ export class ExtractMarkdownStage implements Stage {
           return;
         }
         const isPdf = format === "pdf";
-        const requestedImages = resolveDopplerImages(extractionConfig, format, this.tryResolveExtractorOrder(format, extractionConfig.order));
+        const requestedImages = resolveEmbeddedImageRequest(extractionConfig, format, this.tryResolveExtractorOrder(format, extractionConfig.order));
 
         console.log(
           `[extract-debug] stage=${this.name} document=${document.id} ` +
@@ -366,8 +368,8 @@ export class ExtractMarkdownStage implements Stage {
                 });
                 if (requestedImages) {
                   for (const prepared of [isolated.primary.extractor, isolated.secondary?.extractor]) {
-                    if (prepared && !prepared.plan.dopplerVm) throw new Error("Embedded image extraction refuses a non-VM candidate");
-                    if (prepared?.plan.dopplerVm) Object.assign(prepared.plan.dopplerVm, { embeddedImages: true, imageMinWidth: requestedImages.minWidth, imageMinHeight: requestedImages.minHeight });
+                    if (prepared && !prepared.plan.sandboxedPdf) throw new Error("Embedded image extraction refuses a non-VM candidate");
+                    if (prepared?.plan.sandboxedPdf) prepared.plan.sandboxedPdf.embeddedImages = { minWidth: requestedImages.minWidth, minHeight: requestedImages.minHeight };
                   }
                 }
                 const [resultA, resultB] = await this.collectCandidateResults({
@@ -570,7 +572,7 @@ export class ExtractMarkdownStage implements Stage {
                     );
                   }
                   const nativePdfMode = resolveNativePdfMode();
-                  const nativeEngineState = isPdf && winningCandidate.label !== "doppler" ? await nativePdfEngineState() : null;
+                  const nativeEngineState = isPdf && winningCandidate.label !== VM_PDF_EXTRACTOR_ID ? await nativePdfEngineState() : null;
                   const nativePdfStats: NativePdfStageStats | null = nativeEngineState
                     ? {
                         mode: nativePdfMode,
@@ -596,7 +598,7 @@ export class ExtractMarkdownStage implements Stage {
                         parserPayload: { status: "none", reason: null },
                       }
                     : null;
-                  if (isPdf && winningCandidate.label !== "native-pdf" && winningCandidate.label !== "doppler" && nativePdfMode === "shadow") {
+                  if (isPdf && winningCandidate.label !== "native-pdf" && winningCandidate.label !== VM_PDF_EXTRACTOR_ID && nativePdfMode === "shadow") {
                     // Shadow mode records agreement and timing only; the primary output is untouched.
                     const nativeEngine = await resolveNativePdfEngine(this.runner).catch(() => null);
                     if (!nativeEngine) {
@@ -638,8 +640,8 @@ export class ExtractMarkdownStage implements Stage {
                         sourceArtifactUri,
                         extractor: winningCandidate.label,
                       });
-                  // Doppler already reconstructs Markdown; do not silently parse it again on the host.
-                  const parserArtifacts = winningCandidate.structuredResult || winningCandidate.label === "doppler"
+                  // The VM extractor already reconstructs Markdown; do not silently parse it again on the host.
+                  const parserArtifacts = winningCandidate.structuredResult || winningCandidate.label === VM_PDF_EXTRACTOR_ID
                     ? []
                     : await this.buildParserArtifacts(
                         document,
@@ -680,9 +682,9 @@ export class ExtractMarkdownStage implements Stage {
                           })),
                         )
                       : [];
-                  const imageCandidate = availableCandidates.find(candidate => candidate.plan.dopplerVm?.embeddedImages);
+                  const imageCandidate = availableCandidates.find(candidate => candidate.plan.sandboxedPdf?.embeddedImages);
                   if (requestedImages && !imageCandidate) {
-                    throw new Error("Doppler images unavailable; refusing local image enrichment fallback");
+                    throw new Error("VM images unavailable; refusing local image enrichment fallback");
                   }
                   const graph = extractionConfig.enrich.length > 0
                     ? await this.enrichDocumentArtifacts({
@@ -695,7 +697,7 @@ export class ExtractMarkdownStage implements Stage {
                         reserveOrientation: () => reserveOrientationAttempt(state),
                         recordUsage: event => state.usageLedger.enqueue({ ...event,
                           metadata: { ...event.metadata, documentId: document.id, stage: "embedded-image-orientation" } }),
-                        dopplerImageBundle: imageCandidate ? `${imageCandidate.tempTextPath}.images` : undefined,
+                        vmImages: imageCandidate ? { output: imageCandidate.tempTextPath, markdownPath: imageCandidate.tempTextPath } : undefined,
                         pageNumbers: allPages,
                         runId: state.run.id,
                         signal,
@@ -738,6 +740,7 @@ export class ExtractMarkdownStage implements Stage {
                     artifactGraphSteps: graph?.steps ?? [],
                     artifactGraphOutputCount: graph?.outputCount ?? 0,
                     artifactGraphLatencyMs: graph?.latencyMs ?? 0,
+                    artifactGraphStats: graph?.stats ?? null,
                     preserve: {
                       tables: state.run.pipeline.preserveTables,
                       code: state.run.pipeline.preserveCode,
@@ -989,6 +992,7 @@ export class ExtractMarkdownStage implements Stage {
                       artifactGraphSteps: graph?.steps ?? [],
                       artifactGraphOutputCount: graph?.outputCount ?? 0,
                       artifactGraphLatencyMs: graph?.latencyMs ?? 0,
+                      artifactGraphStats: graph?.stats ?? null,
                       canonicalUri,
                       parserArtifactUri:
                         parserAwareCanonicalDocument.source.parserArtifactUri,
@@ -1377,7 +1381,7 @@ export class ExtractMarkdownStage implements Stage {
   ): CandidateExecutors {
     return {
       stream: (plan, label, key, abort) => this.extractStreamCandidate(plan, label, key, abort),
-      file: (plan, label, key, outputPath, abort) => this.extractFileCandidate(plan, label, key, outputPath, abort),
+      file: (plan, label, key, outputPath, abort) => this.extractFileCandidate(plan, label, key, outputPath, abort, graphContext?.documentId),
       liteparse: (candidate, key, source, abort) => this.extractLiteParseCandidate(candidate, key, source, abort),
       graph: (candidate, key, source, abort) => this.extractGraphCandidate(candidate, key, source, graphContext, abort),
       markdownFile: (candidate, key, outputPath) => this.uploadMarkdownFileCandidate(candidate, key, outputPath),
@@ -1570,8 +1574,15 @@ export class ExtractMarkdownStage implements Stage {
     textKey: string,
     outputPath: string,
     signal?: AbortSignal,
+    documentId?: string,
   ): Promise<ExtractedCandidate> {
     await this.runner.run(plan, signal);
+    // VM image output: put each routed-in image's reference at its reading-order position before the Markdown is stored.
+    if (plan.sandboxedPdf?.embeddedImages) {
+      if (!documentId) throw new Error("VM image references need the document id");
+      const images = await requireSandboxedPdfProvider().embeddedImages!.read(outputPath, signal);
+      await anchorImageMarkdownFile({ markdownPath: outputPath, images, sourceDocumentId: documentId });
+    }
 
     const upload = this.storage.createMultipartUploadStream(
       textKey,
@@ -2538,21 +2549,25 @@ export class ExtractMarkdownStage implements Stage {
     runId: string;
     signal?: AbortSignal;
     graphRunner?: typeof runLocalPdfArtifactGraph;
-    dopplerImageBundle?: string;
+    /** Images the VM extractor returned beside its Markdown output; read through the provider, never re-parsed here. */
+    vmImages?: { output: string; markdownPath?: string };
     canContinue?: () => boolean;
     reserveOrientation?: () => boolean;
     recordUsage?: (event: import("../models.js").UsageEvent) => void;
-  }): Promise<{ manifestUri: string; targetIds: string[]; requestedTargets: string[]; steps: string[]; outputCount: number; latencyMs: number; artifactUris?: string[] }> {
+  }): Promise<{ manifestUri: string; targetIds: string[]; requestedTargets: string[]; steps: string[]; outputCount: number; latencyMs: number; artifactUris: string[]; stats?: Readonly<Record<string, unknown>> }> {
     const startedAt = Date.now();
     const scratchDir = await mkdtemp(path.join(tmpdir(), "docslurp-artifact-graph-"));
     try {
       if (args.format !== "pdf") {
         throw new Error(`artifact enrichment is unavailable for ${args.format}`);
       }
-      const result = args.dopplerImageBundle
-        ? await dopplerImageGraph({ bundlePath: args.dopplerImageBundle, sourcePath: args.sourcePath,
+      const vmImages = args.vmImages ? requireSandboxedPdfProvider().embeddedImages : undefined;
+      if (args.vmImages && !vmImages) throw new Error("The sandboxed PDF provider does not return embedded images");
+      const result = args.vmImages && vmImages
+        ? await embeddedImageGraph({ images: await vmImages.read(args.vmImages.output, args.signal),
+            producer: { id: vmImages.producerId, optionsDigest: vmImages.optionsDigest }, sourcePath: args.sourcePath,
             sourceDocumentId: args.document.id, sourceHash: args.sourceHash, pageCount: args.pageNumbers.length,
-            targets: args.targets, scratchDir, signal: args.signal,
+            targets: args.targets, scratchDir, signal: args.signal, markdownPath: args.vmImages.markdownPath,
             recordUsage: args.recordUsage, canContinue: args.canContinue, reserveOrientation: args.reserveOrientation })
         : await (args.graphRunner ?? runLocalPdfArtifactGraph)({
         sourcePath: args.sourcePath,
@@ -2594,7 +2609,10 @@ export class ExtractMarkdownStage implements Stage {
         steps: [...result.steps],
         outputCount: persisted.length - 1,
         latencyMs: Date.now() - startedAt,
-        ...(args.dopplerImageBundle ? { artifactUris: persisted.slice(1).map(ref => ref.uri) } : {}),
+        // Image children and the media map are recorded as document artifact slots, so the artifact and PII guards
+        // (and exports) see them, whichever producer made them.
+        artifactUris: persisted.slice(1).filter(ref => EMBEDDED_IMAGE_TARGETS.has(ref.kind) || ref.kind === "page/embedded-image-mask").map(ref => ref.uri),
+        ...(result.stats ? { stats: result.stats } : {}),
       };
     } finally {
       await rm(scratchDir, { recursive: true, force: true });

@@ -426,17 +426,17 @@ describe("Fast page-image references", () => {
 
 it("keeps explicit image preservation in Fast while disabling OCR enrichment",()=>{
   const config={...defaultDocumentExtractionConfig,enrich:["document/media-map","page/ocr-text"],
-    order:{pdf:["doppler"]},options:{doppler:{images:{enabled:true,minWidth:20,minHeight:30}}}};
+    order:{pdf:["vm-pdf"]},options:{"vm-pdf":{images:{enabled:true,minWidth:20,minHeight:30}}}};
   const result=documentExtractionForQuality(config,"fast");
   expect(result.config.enrich).toEqual(["document/media-map"]);
-  expect(result.config.options.doppler).toEqual(config.options.doppler);
+  expect(result.config.options["vm-pdf"]).toEqual(config.options["vm-pdf"]);
   expect(result.config.forceOcr).toBe(false);
 });
 
-it("accepts bounded Doppler image options and rejects executable or out-of-range settings",()=>{
-  expect(parseExtractorOptions("doppler",{images:{enabled:true}})).toEqual({images:{enabled:true,minWidth:100,minHeight:100}});
-  expect(parseExtractorOptions("doppler",{pdf:{extractImages:true}})).toEqual({pdf:{extractImages:true}});
+it("accepts bounded VM PDF image options and rejects executable or out-of-range settings",()=>{
+  expect(parseExtractorOptions("vm-pdf",{images:{enabled:true}})).toEqual({images:{enabled:true,minWidth:100,minHeight:100}});
+  expect(parseExtractorOptions("vm-pdf",{pdf:{extractImages:true}})).toEqual({pdf:{extractImages:true}});
   for(const bad of [{binary:"custom"},{images:{enabled:true,minWidth:0}},{images:{minHeight:4097}},{pdf:{passwords:["secret"]}}]) {
-    expect(()=>parseExtractorOptions("doppler",bad)).toThrow();
+    expect(()=>parseExtractorOptions("vm-pdf",bad)).toThrow();
   }
 });

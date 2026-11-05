@@ -31,7 +31,7 @@ export function planRunPageRanges(args: {
   let remaining = budget;
   for (const document of candidates) {
     if (remaining < 2) break;
-    const capacity = shardCapacity(args.profile.executor, { idleSlots: remaining, orgSlots: remaining, vmParallel: remaining });
+    const capacity = shardCapacity(args.profile.executor, { idleSlots: remaining, orgSlots: remaining });
     const plan = planPageShards(Math.floor(document.pageCount), args.profile, capacity, {
       maxCostOverhead: args.maxCostOverhead ?? 1,
       maxShards: remaining,
