@@ -2706,6 +2706,18 @@ export class Store {
     return rows.length > 0;
   }
 
+  /**
+   * The run's own documents the worker measured (billing_pages set) and that still bill at completion: their intake count, the measured
+   * count and its method. The page-count re-check adds up their extra pages, whose Fast fee is charged only when the run completes.
+   */
+  async measuredRunDocuments(runId: string): Promise<Array<{ pageCount: number; billingPages: number; method: string | null }>> {
+    const rows = await this.sql<{ page_count: number; billing_pages: number; billing_pages_method: string | null }[]>`
+      select page_count, billing_pages, billing_pages_method from documents
+      where run_id = ${runId} and billing_pages is not null and deduped_from_document_id is null and status <> 'failed'
+    `;
+    return rows.map((row) => ({ pageCount: Number(row.page_count) || 0, billingPages: Number(row.billing_pages) || 0, method: row.billing_pages_method }));
+  }
+
   /** Pauses the run when `credits` it newly owes (more pages than intake counted) no longer fit the org's balance (spend-check.ts). */
   async enforceSpendForCharge(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean }> {
     const result = await enforceRunSpendForCharge(this.sql, run, credits, "stage-boundary");

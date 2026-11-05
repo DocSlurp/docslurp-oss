@@ -40,18 +40,22 @@ export function textPagesOfText(text: string): number {
  * Pages an optional feature is priced on: the document's billed pages (the worker's measured count for an Office, slide, sheet or EPUB
  * file, else the page basis), or for a media file its Rich-equivalent pages (minutes x factor, recorded by the media stage).
  *
- * `textPages` is how much text the document holds, when the stage knows it. A count from a layout conversion (LibreOffice's pages of a
- * Word file) is capped by it: a document of thousands of blank pages is thousands of pages of base fee, but a feature reads only text,
- * so it never bills more pages than the text holds.
+ * `textPages` is how much text the document holds, when the stage knows it. A count the worker measured (LibreOffice's pages of a
+ * Word file, a sheet's rows, an EPUB's chapters, the text rule) is capped by it: a document of thousands of blank pages is thousands
+ * of pages of base fee, but a feature reads only text, so it never bills more pages than the text holds. Slides are the exception:
+ * a slide is a page whatever it holds. A count guessed from the file's size (`size-estimate`) never prices a feature: it bills the
+ * text the stage read, or the intake count when that is unknown.
  */
 export function featurePages(state: WorkflowState, document: FeatureDocument, options: { textPages?: number } = {}): number {
   const media = Number(state.artifactLedger.read(`media-charge:${document.id}`));
   if (Number.isFinite(media) && media > 0) return media;
-  const billed = Math.max(1, Number(document.billingPages) || Number(document.pageCount) || 0);
+  const intake = Math.max(1, Number(document.pageCount) || 0);
+  const method = document.billingPagesMethod ?? null;
+  const billed = Number(document.billingPages) > 0 ? Math.max(1, Math.floor(Number(document.billingPages))) : intake;
   const textPages = options.textPages;
-  if (document.billingPagesMethod === "pdf-conversion" && textPages !== undefined && Number.isFinite(textPages)) {
-    return Math.max(1, Math.min(billed, Math.floor(textPages)));
-  }
+  const knownText = textPages !== undefined && Number.isFinite(textPages);
+  if (method === "size-estimate") return knownText ? Math.max(1, Math.floor(textPages)) : intake;
+  if (method !== null && method !== "slides" && knownText) return Math.max(1, Math.min(billed, Math.floor(textPages)));
   return billed;
 }
 

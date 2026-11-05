@@ -76,6 +76,43 @@ export function contentLines(text: string): string {
   return text.split(/\r?\n/).filter((line) => /[^\s,"';\t|]/.test(line)).join("\n");
 }
 
+/**
+ * The text a sheet's CSV holds: each record's non-empty cells, one record a line, cells joined by a space. Separators and empty
+ * cells are not read, so a row padded out to a far column (openpyxl pads every row to the sheet's widest one; one stray cell at XFD1
+ * makes 16,383 commas a row) counts what its cells hold, not the width of the sheet. Quoted cells may hold commas and newlines.
+ */
+export function csvCellText(csv: string): string {
+  const lines: string[] = [];
+  let cells: string[] = [];
+  let cell = "";
+  let quoted = false;
+  const endCell = () => {
+    const value = cell.trim();
+    if (value) cells.push(value);
+    cell = "";
+  };
+  const endRecord = () => {
+    endCell();
+    if (cells.length) lines.push(cells.join(" "));
+    cells = [];
+  };
+  for (let index = 0; index < csv.length; index += 1) {
+    const char = csv[index]!;
+    if (quoted) {
+      if (char !== '"') cell += char;
+      else if (csv[index + 1] === '"') { cell += '"'; index += 1; }
+      else quoted = false;
+    } else if (char === '"' && cell.trim() === "") {
+      cell = "";
+      quoted = true;
+    } else if (char === ",") endCell();
+    else if (char === "\n") endRecord();
+    else if (char !== "\r") cell += char;
+  }
+  endRecord();
+  return lines.join("\n");
+}
+
 /** Pages of one text split into chunks that each already fit the text rule, summed as one body of text. */
 export function textBodyPages(bodies: readonly string[]): number {
   return Math.max(1, bodies.reduce((total, body) => {
@@ -164,7 +201,8 @@ export async function measureDocumentPages(deps: PageCountDeps, document: Docume
     if (format === "office-excel" && !/\.xls$/i.test(document.filename)) {
       const payload = await sidecarJson(deps, sourcePath, "xlsx", (output) => deps.runner.xlsxExtractPy(sourcePath, output)) as { sheets?: Array<{ csv?: unknown }> } | null;
       if (!payload || !Array.isArray(payload.sheets)) return null;
-      const pages = bounded(textBodyPages(payload.sheets.map((sheet) => (typeof sheet.csv === "string" ? sheet.csv : ""))));
+      // Sheets bill by the text their cells hold, never by the characters of the CSV that carries them.
+      const pages = bounded(textBodyPages(payload.sheets.map((sheet) => (typeof sheet.csv === "string" ? csvCellText(sheet.csv) : ""))));
       return pages ? { pages, method: "sheet-rows" } : null;
     }
     if (format === "epub") {
@@ -204,18 +242,29 @@ export async function measureDocumentPages(deps: PageCountDeps, document: Docume
 /**
  * Credits a run newly owes once a document measures at `measuredPages` where admission priced `intakePages`: the Fast page fee on the
  * extra pages, and each enabled per-page feature on them, times the speed boost. Zero when the count did not grow. Page reads by a model
- * are not included (they bill as they happen).
+ * are not included (they bill as they happen). A count guessed from the file's size prices no feature (feature-charges.ts featurePages).
  */
-export function extraCreditsForMeasuredPages(pipeline: PipelineFeatures, intakePages: number, measuredPages: number): number {
+export function extraCreditsForMeasuredPages(
+  pipeline: PipelineFeatures,
+  intakePages: number,
+  measuredPages: number,
+  method?: string | null,
+  options: { features?: boolean } = {},
+): number {
   const before = Math.max(1, intakePages);
   if (!(measuredPages > before)) return 0;
   const features = estimateProfileFor(pipeline, { env: {} }).documentFeatures;
   let credits = pageCredits("fast", measuredPages - before);
-  for (const feature of DOCUMENT_FEATURES) {
-    if (features[feature]) credits += featureCredits(feature, measuredPages) - featureCredits(feature, before);
+  if (options.features !== false && method !== "size-estimate") {
+    for (const feature of DOCUMENT_FEATURES) {
+      if (features[feature]) credits += featureCredits(feature, measuredPages) - featureCredits(feature, before);
+    }
   }
   return credits * speedBoostMultiplier(pipeline.speedBoost === true);
 }
+
+/** A document of the run the worker measured: intake's count, the measured one and how it was found. */
+export interface MeasuredRunDocument { pageCount: number; billingPages: number; method: string | null }
 
 /**
  * Measures the document's pages and records them as `documents.billing_pages` (and on the in-memory document) before billing reads
@@ -229,6 +278,7 @@ export async function recordMeasuredPageCount(
     store?: {
       setDocumentBillingPages?(runId: string, documentId: string, billingPages: number, method: string): Promise<boolean>;
       enforceSpendForCharge?(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean }>;
+      measuredRunDocuments?(runId: string): Promise<MeasuredRunDocument[]>;
     } | null;
   },
   deps: PageCountDeps,
@@ -254,9 +304,19 @@ export async function recordMeasuredPageCount(
   document.billingPagesMethod = measured.method;
   // Admission priced the intake count (one page for these formats). When the measured count is far above it, the credits the run
   // now owes may not fit the balance: check again here and pause the run instead of finding out when the completion fee is charged.
+  // The Fast fee on those pages is charged only when the run completes, so the balance shows no measured document's extra pages
+  // yet: the check adds the Fast extra of every document of the run measured so far, not just this one, or ten large files that each
+  // fit the balance would together overdraw it. Features are charged as their stages run (and checked at those checkpoints), so
+  // only this document's feature extra is added.
   if (state.store.enforceSpendForCharge && state.run.pipeline && state.run.userId) {
-    const extra = extraCreditsForMeasuredPages(state.run.pipeline, intakePages, measured.pages);
-    if (extra > 0) {
+    const pipeline = state.run.pipeline;
+    const own = extraCreditsForMeasuredPages(pipeline, intakePages, measured.pages, measured.method);
+    if (own > 0) {
+      const ownFast = extraCreditsForMeasuredPages(pipeline, intakePages, measured.pages, measured.method, { features: false });
+      const measuredDocuments = state.store.measuredRunDocuments ? await state.store.measuredRunDocuments(state.run.id) : [];
+      const runFast = measuredDocuments.reduce((sum, row) => sum + extraCreditsForMeasuredPages(pipeline, row.pageCount, row.billingPages, row.method, { features: false }), 0);
+      // The run's rows include this document once it is recorded; never count less than this document alone.
+      const extra = own - ownFast + Math.max(ownFast, runFast);
       const outcome = await state.store.enforceSpendForCharge({ id: state.run.id, orgId: state.run.orgId ?? null, workspaceId: state.run.workspaceId, userId: state.run.userId }, extra);
       if (outcome.paused) console.warn(`[page-count] run=${state.run.id} document=${document.id} paused: measured ${measured.pages} pages (intake ${intakePages}) owes ${extra.toFixed(2)} more credits than the balance holds`);
     }

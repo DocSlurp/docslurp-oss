@@ -65,6 +65,8 @@ export interface CheckpointStore {
   setDocumentBillingPages?(runId: string, documentId: string, billingPages: number, method: string): Promise<boolean>;
   /** Pauses the run when credits it newly owes (a measured page count above intake's) no longer fit the org's balance. */
   enforceSpendForCharge?(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean }>;
+  /** The run's measured documents (billing_pages set) that still bill at completion, for the cumulative page-count spend check. */
+  measuredRunDocuments?(runId: string): Promise<Array<{ pageCount: number; billingPages: number; method: string | null }>>;
   /**
    * Replaces the API's provisional file facts (header inspection) with the worker's full inspection, and the document's
    * MIME type with the one the bytes are. Scoped to the run's own document.
