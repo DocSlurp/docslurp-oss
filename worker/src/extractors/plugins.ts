@@ -17,7 +17,9 @@
  */
 import { pathToFileURL } from "node:url";
 import path from "node:path";
-import { sandboxedPdfConfigured, type EmbeddedImageFacts, type EmbeddedImageMediaType, type MediaMap } from "@docslurp/shared";
+import {
+  sandboxedPdfConfigured, type EmbeddedImageFacts, type EmbeddedImageMediaType, type MediaMap, type OrientationResultRecord,
+} from "@docslurp/shared";
 
 import { SandboxRunError, type SandboxResult } from "../sandbox/types.js";
 import type { UsageEvent } from "../models.js";
@@ -94,23 +96,11 @@ export interface SandboxedPdfExtractorProvider {
   shardProfile?: { key: string; prior: ShardCostProfile };
 }
 
-/** What orientation decided for one image. The provider decodes pixels; the host only reads this record. */
-export interface OrientationResult {
-  model: string;
-  modelSha256: string;
-  status: "upright" | "uncertain" | "corrected";
-  inputClockwiseDegrees: number;
-  correctionClockwiseDegrees: number;
-  confidence: number;
-  margin: number;
-  width: number;
-  height: number;
-  sourceWidth: number;
-  sourceHeight: number;
-  exifOrientation: number;
-  exifApplied: boolean;
-  mimeType: "image/png";
-}
+/**
+ * What orientation decided for one image. The provider decodes pixels; the host only reads this record, after
+ * validating it against `orientationResultSchema` and checking `model` equals the provider's id.
+ */
+export type OrientationResult = OrientationResultRecord;
 
 export interface ImageOrientationProvider {
   id: string;
@@ -178,6 +168,7 @@ export function registerExtractorPlugin(plugin: ExtractorPlugin): void {
   const orientation = plugin.imageOrientation;
   if (orientation) {
     if (imageOrientationProvider()) throw new Error("Only one image orientation provider may be registered");
+    if (!PROVIDER_ID.test(orientation.id ?? "")) throw new Error("Image orientation provider needs a lowercase id");
     if (typeof orientation.orient !== "function" || !(orientation.maxCostCents >= 0)) throw new Error("Image orientation provider needs orient() and maxCostCents");
   }
   plugins.push(plugin);
