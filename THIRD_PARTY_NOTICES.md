@@ -87,7 +87,7 @@ pinned binary package rather than vendored source. The package carries its own
 it; that is how its MIT notice is satisfied. Code, public docs and the extractor
 catalog use the neutral `native-pdf` id. It replaced PyMuPDF and
 PyMuPDF4LLM (AGPL) in the worker on 2026-10-15; without the engine the worker falls back to
-Kreuzberg and Poppler.
+Poppler.
 
 ### Optional OCR models and CJK fonts
 

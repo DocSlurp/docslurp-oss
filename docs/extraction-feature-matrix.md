@@ -1,6 +1,31 @@
 # Extraction Adapter Feature Matrix
 
-> **PyMuPDF replaced (2026-10-15).** The former `pymupdf-text`, `pymupdf4llm`, `pymupdf-ocr` and `pymupdf-regions` columns are now the private in-process `native-pdf` engine (MIT, optional; the public tree falls back to kreuzberg and Poppler). Ratings carried over from the PyMuPDF columns were re-checked for markdown, tables, reading order and speed in evals/native-pdf-vs-pymupdf-2026-10-15.md; the rest are unchanged estimates.
+> **PyMuPDF replaced (2026-10-15).** The former `pymupdf-text`, `pymupdf4llm`, `pymupdf-ocr` and `pymupdf-regions` columns are now the private in-process `native-pdf` engine (MIT, optional; the public tree falls back to Poppler). Ratings carried over from the PyMuPDF columns were re-checked for markdown, tables, reading order and speed in evals/native-pdf-vs-pymupdf-2026-10-15.md; the rest are unchanged estimates.
+
+> **Kreuzberg and LiteParse were removed (2026-11-05).** Both native addons statically linked Tesseract and Leptonica
+> into the worker process and no OCR-free build existed ([OCR, Tesseract](extraction/ocr.md#tesseract)). The `kreuzberg`
+> columns and rows below are historical; stored settings naming either id are dropped at parse time (an emptied order
+> uses the deployment default). The current routing is the table below.
+
+## Extractors per format
+
+The default order per format (`worker/src/extractors/registry.ts`). Every extractor below runs as a sandboxed
+subprocess (the parser sandbox, `docs/self-host/sandbox-providers.md`) or in the VM, except `json`, which is plain
+in-process JSON parsing, and the optional `native-pdf` binding, which runs in-process where a deployment installs it. No
+extractor links an OCR engine.
+
+| Format | Default order | Where it parses | Notes |
+| --- | --- | --- | --- |
+| PDF, sandboxed deployment (`DOCSLURP_PDF_EXTRACTOR=vm-pdf`) | `vm-pdf` | One offline VM per document | Host PDF extractors are refused. |
+| PDF, self-hosted | `native-pdf` (when installed), `poppler-text` | In-process binding / sandboxed `pdftotext` | `poppler-text` is layout text: page-aligned, no Markdown headings or pipe tables. |
+| Word `.docx` | `pandoc` | Sandboxed `office_markdown.py` running `pandoc --sandbox -f docx` | Appends headers, footers, comments and link targets (`office_context.py`). |
+| OpenDocument `.odt`, RTF | `pandoc` | Sandboxed `pandoc --sandbox` | Pandoc 3.1's ODT reader drops a table's header row; its RTF reader can drop the letter after an opening curly quote. |
+| PowerPoint `.pptx` | `pptx` | Sandboxed `office_markdown.py` (python-pptx) | One form-feed page per slide: title heading, bullets, tables, notes. |
+| Excel `.xlsx` | `xlsx` | Sandboxed `office_markdown.py` (openpyxl, read-only, cached values) | One table per sheet, then formulas and source context. |
+| EPUB, HTML, Markdown, plain text, CSV/TSV, LaTeX | `pandoc` | Sandboxed `pandoc --sandbox` with the sniffed format's reader | `--sandbox` blocks file and network reads (LaTeX `\input`, remote images). |
+| JSON / JSONL | `json` | In-process JSON parsing | No native code. |
+| Images | `ocr` | The configured OCR boundary (`DOCSLURP_OCR_MODE`; a VM in production) | PP-OCR only. |
+| Legacy `.doc`, `.ppt`, `.xls`; password-protected Office files | none | Not parsed | Fails as `unsupported format` (ingest report `unsupported_format`, not retryable). |
 
 > Living reference for choosing the right extraction tool per document type and feature requirement. Update this when adding new adapters or benchmarks.
 >

@@ -23,14 +23,14 @@ and from the deploy error text. The CI image budget (below) is set well under it
 | OCR | none: OCR runs in an extractor plugin's VM provider (`vm`), through a hosted model (`hosted`), or not at all | the local OCR runtime: `docslurp_ocr.py`, its venv `/opt/docslurp/ocr-venv` and the pinned models `/opt/docslurp/ocr-models` (root-owned, read-only); used only in `local` mode |
 | Python venv `/app/.venv` | base parsers: trafilatura, ebooklib, python-pptx, openpyxl, xlsx2csv, Pillow (wheel-only, read-only) | same, plus pip for the legacy first-boot install |
 | Unstructured | vendor bundles, fetched on first use | vendor bundles, or the legacy first-boot pip install when no bundle source is configured |
-| Kreuzberg, LiteParse, mammoth, LanceDB, transformers.js | in `node_modules` | same |
-| Native PDF engine | optional, `DOCSLURP_NATIVE_PDF=1`; PDFs otherwise use Kreuzberg and Poppler (PyMuPDF/pymupdf4llm and the MuPDF `mupdf-tools` apt package were removed 2026-10-15: AGPL) | same |
+| mammoth, LanceDB, transformers.js | in `node_modules` | same |
+| Native PDF engine | optional, `DOCSLURP_NATIVE_PDF=1`; PDFs otherwise use Poppler (PyMuPDF/pymupdf4llm and the MuPDF `mupdf-tools` apt package were removed 2026-10-15: AGPL) | same |
 | Runtime pip installs | off (`DOCSLURP_PYTHON_LAZY_INSTALL=false`) | on for the first-boot path only |
 
 ### OCR
 
-Neither image installs an OCR package, binary or language data. Kreuzberg's and LiteParse's native addons statically
-link Tesseract, which is disabled, not removed ([Tesseract](extraction/ocr.md#tesseract)). Where OCR runs is set by `DOCSLURP_OCR_MODE`;
+Neither image installs or links an OCR engine, package, binary or language data; `scripts/scan-ocr-engines.mjs` checks
+every ELF and wasm object in a built image ([Tesseract](extraction/ocr.md#tesseract)). Where OCR runs is set by `DOCSLURP_OCR_MODE`;
 see [OCR](extraction/ocr.md) for the modes, the service and self-hosted profiles, and what fails closed.
 
 - **Lean** has no OCR engine. Production workers set `vm` (the production default) and load an OCR provider through
@@ -117,7 +117,7 @@ Not trimmed yet (candidates):
 
 Docling was retired on 2026-10-21 because its Pillow <13 constraint prevented
 security fixes. It is no longer installed, advertised, or selected by the worker.
-Use Kreuzberg, native-pdf, or Poppler for PDF extraction. Historical Docling size
+Use native-pdf or Poppler for PDF extraction. Historical Docling size
 and timing measurements below describe the retired bundle. Only Unstructured
 is supported by the current bundle manifest.
 
