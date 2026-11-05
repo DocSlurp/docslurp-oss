@@ -64,7 +64,7 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
     });
     // The recogniser's reads are billed first; an escalation read of the same page is the same Rich page (the ledger sums
     // readers per page), with its own provider cost.
-    const chargedPages = recordOcrReads(input.state.usageLedger, input.documentId, outcome, { stage: input.stage });
+    const chargedPages = recordOcrReads(input.state.usageLedger, input.documentId, outcome, { stage: input.stage, kind: input.kind });
     const escalation = input.hostedReader && outcome.pages.some((page) => page.escalation)
       ? await escalateOcrPages(outcome, input.hostedReader, input.documentId, input.signal)
       : null;
