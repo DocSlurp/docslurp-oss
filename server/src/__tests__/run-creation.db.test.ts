@@ -97,13 +97,15 @@ describe("the cost forecast and the page count's source", () => {
     const onePage = await forecastOf("memo.pdf", "application/pdf", pdfFacts, 1, 1_200_000);
     expect(onePage.row).toEqual({ page_count: 1, page_count_source: "counted" });
     // The assumed count is not passed to the forecast, so the DOCX is priced over its size (about 100 pages at the format's
-    // 12 KB a page, up to 1,171 at its densest) instead of as one page.
+    // 12 KB a page, up to 1,171 at its densest) instead of as one page. No model reads a Word page, so those pages are Fast:
+    // 1,171 pages at 5 credits per 1,000.
     expect(onePage.forecast.maxCents).toBeLessThan(2);
-    expect(docx.forecast.maxCents).toBeGreaterThan(onePage.forecast.maxCents * 50);
+    expect(docx.forecast.maxCents).toBeCloseTo(1_171 * 5 / 1_000, 1);
+    expect(docx.forecast.maxCents).toBeGreaterThan(onePage.forecast.maxCents * 10);
     // A 40-page PDF is counted: forecast on 40.
     const pdf = await forecastOf("contract.pdf", "application/pdf", pdfFacts, 40, 1_200_000);
     expect(pdf.row).toEqual({ page_count: 40, page_count_source: "counted" });
-    expect(pdf.forecast.maxCents).toBeLessThan(docx.forecast.maxCents);
+    expect(pdf.forecast.maxCents).toBeGreaterThan(onePage.forecast.maxCents * 30);
   });
 });
 
