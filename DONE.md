@@ -1,6 +1,6 @@
 ## API never parses PDFs; image visual indexing from VM renditions (2026-11-05)
 
-- Council A High: the API no longer runs `pdfinfo`. A PDF's intake count is a size estimate (`page_count_source = assumed`, documents show `pageCountSource: "estimated"`); the worker measures it at format-detect through `sandboxedPdf.pageCount` (VM `--pdf-facts`, guest protocol 8) or sandboxed `pdfinfo` in local mode, records it `counted`, and re-checks spend. Billing reads only measured counts (`worker/src/lib/pdf-page-count.ts`).
+- Council A High: the API no longer runs `pdfinfo`. A PDF's intake count is a size estimate (`page_count_source = assumed`, documents show `pageCountSource: "estimated"`); the worker measures it at format-detect through `sandboxedPdf.pageCount` (VM `--pdf-facts`, guest protocol 8) or sandboxed `pdfinfo` in local mode, records it `counted`, and re-checks spend. The completion page fee reads only measured counts (`worker/src/db/page-base-fee.ts`): `billing_pages` or a `counted` page count; text files over 2 MB are counted in full at format-detect (`worker/src/lib/text-page-count.ts`), and `page_count_source` defaults to `assumed` (migration 0130). Per-page features of an Office file with nothing to count still use intake's one page.
 - Image uploads are visually indexed only from a bounded, normalized PNG rendition the VM OCR guest returns per frame (protocol 8); the worker never decodes the upload. Without one, page-embed skips loudly (`image-without-vm-rendition`).
 
 ## Actual provider charges, live list prices and loss alerts (2026-11-04)
