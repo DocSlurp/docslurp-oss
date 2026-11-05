@@ -74,11 +74,25 @@ describe("assertOcrConfiguration", () => {
   it("calls the provider's assertConfigured when one is registered, and propagates its refusal", () => {
     const ready = provider();
     register(ready);
-    expect(assertOcrConfiguration({ DOCSLURP_OCR_MODE: "vm" })).toBe("vm");
+    expect(assertOcrConfiguration({ DOCSLURP_OCR_MODE: "vm", DOCSLURP_SERVICE_PROFILE: "service" })).toBe("vm");
     expect(ready.assertConfigured).toHaveBeenCalledTimes(1);
     resetExtractorPluginsForTest();
     register(provider({ assertConfigured: () => { throw new Error("VM image is not pinned"); } }));
-    expect(() => assertOcrConfiguration({ DOCSLURP_OCR_MODE: "vm" })).toThrow("VM image is not pinned");
+    expect(() => assertOcrConfiguration({ DOCSLURP_OCR_MODE: "vm", DOCSLURP_SERVICE_PROFILE: "service" })).toThrow("VM image is not pinned");
+  });
+
+  it("refuses to start when a VM OCR provider is loaded but DOCSLURP_SERVICE_PROFILE is unset", () => {
+    register(provider());
+    for (const mode of ["vm", "off", "hosted"]) {
+      expect(() => assertOcrConfiguration({ DOCSLURP_OCR_MODE: mode }), mode).toThrow(/DOCSLURP_SERVICE_PROFILE is unset.*refusing to start/);
+    }
+    expect(() => assertOcrConfiguration({})).toThrow(/DOCSLURP_SERVICE_PROFILE is unset/);
+  });
+
+  it("refuses local mode whenever a VM OCR provider is loaded, even under the self-hosted profile", () => {
+    register(provider());
+    expect(() => assertOcrConfiguration({ DOCSLURP_OCR_MODE: "local", DOCSLURP_SERVICE_PROFILE: "self-hosted" })).toThrow(/VM provider is loaded.*refusing to start/);
+    expect(localOcrRefusal({ DOCSLURP_SERVICE_PROFILE: "self-hosted" })).toMatch(/VM OCR provider is loaded/);
   });
 
   it("refuses local mode under the service profile and with the profile unset", () => {

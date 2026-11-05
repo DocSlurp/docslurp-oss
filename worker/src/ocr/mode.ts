@@ -135,6 +135,9 @@ export function resolveServiceProfile(env: NodeJS.ProcessEnv = process.env): Ser
 
 /** Why `local` mode is refused under this environment, or null when it is allowed. */
 export function localOcrRefusal(env: NodeJS.ProcessEnv = process.env): string | null {
+  // With a VM OCR provider loaded the deployment reads customer files in VMs; nothing OCRs on the worker host.
+  const provider = sandboxedOcrProvider();
+  if (provider) return `DOCSLURP_OCR_MODE=local runs OCR on the worker host, and the ${provider.id} VM OCR provider is loaded`;
   const profile = resolveServiceProfile(env);
   if (profile === "self-hosted") return null;
   return profile === "service"
@@ -148,9 +151,17 @@ export function localOcrRefusal(env: NodeJS.ProcessEnv = process.env): string | 
  */
 export function assertOcrConfiguration(env: NodeJS.ProcessEnv = process.env): OcrMode {
   const mode = resolveOcrMode(env);
-  resolveServiceProfile(env);
+  const profile = resolveServiceProfile(env);
+  const provider = sandboxedOcrProvider();
+  // A loaded VM OCR provider means a deployment that reads customer files in VMs: it must say which profile it is, and it
+  // never runs OCR on the worker host instead.
+  if (provider && profile === null) {
+    throw new Error("a sandboxedOcr provider plugin is loaded but DOCSLURP_SERVICE_PROFILE is unset; set it (service) rather than let the OCR boundary depend on a default; refusing to start");
+  }
+  if (provider && mode === "local") {
+    throw new Error(`DOCSLURP_OCR_MODE=local would run OCR on the worker host while the ${provider.id} VM provider is loaded; use vm; refusing to start`);
+  }
   if (mode === "vm") {
-    const provider = sandboxedOcrProvider();
     if (!provider) {
       throw new Error("DOCSLURP_OCR_MODE=vm needs an OCR provider plugin (sandboxedOcr in DOCSLURP_EXTRACTOR_PLUGINS); refusing to start rather than run OCR anywhere else");
     }
@@ -160,6 +171,6 @@ export function assertOcrConfiguration(env: NodeJS.ProcessEnv = process.env): Oc
     const refusal = localOcrRefusal(env);
     if (refusal) throw new Error(`${refusal}; refusing to start`);
   }
-  console.log(`[ocr] mode=${mode} profile=${resolveServiceProfile(env) ?? "unset"}${mode === "vm" ? " boundary=vm" : mode === "local" ? " boundary=local-sandbox" : ""}`);
+  console.log(`[ocr] mode=${mode} profile=${profile ?? "unset"}${mode === "vm" ? " boundary=vm" : mode === "local" ? " boundary=local-sandbox" : ""}`);
   return mode;
 }

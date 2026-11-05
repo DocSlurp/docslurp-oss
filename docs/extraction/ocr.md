@@ -59,6 +59,8 @@ self-test whenever the runtime is present, and fails when `local` is set without
 
 - `vm` without a provider, or with one whose `assertConfigured()` throws: the worker does not start.
 - `local` under `DOCSLURP_SERVICE_PROFILE=service` or with the profile unset: the worker does not start.
+- A `sandboxedOcr` provider plugin loaded with `DOCSLURP_SERVICE_PROFILE` unset, or with `DOCSLURP_OCR_MODE=local` under
+  any profile: the worker does not start, and the local runner refuses every job.
 - A refused or invalid OCR read (a CLI refusal, a model-pin mismatch, hostile input, a result that fails validation):
   the page fails, without another read of the same bytes, and is recorded as such (`ocr-failed-pages`). Vision page
   selection and the page router skip it; in the router the assignment fails as `ocr-boundary-failed` and never reaches
