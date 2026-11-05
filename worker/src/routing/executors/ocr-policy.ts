@@ -5,12 +5,9 @@
  * The native engine OCRs in the worker process, so it may run only in DOCSLURP_OCR_MODE=local (customer-owned
  * self-hosting); every other mode reads pages with the OCR engine in its boundary (deps.ts).
  *
- * History, measured on binding a88a052 (o1a2 smoke, 4 development pages) against the former Tesseract CLI OCR: the
- * engine's OCR matched it on clean rasters (1-CER 0.973 vs 0.959) and read CJK its installed languages could not
- * (0.740 vs 0.000), but dropped most text on degraded scans (photocopy 0.023 vs 0.969, phone scan 0.156 vs 0.827), ran
- * about 2x slower and added ~400 MB in-process RSS outside WORKER_COMMAND_MAX_RSS_MB. So the CLI OCR stays primary; the
- * engine serves a page only when the primary's output does not look like text and the engine's does (another script),
- * or when NATIVE_PDF_OCR=prefer. Either way a native result that lost text is rejected. Re-measure against PP-OCR.
+ * The OCR engine stays primary: the native engine serves a page only when the primary's output does not look like text
+ * and the engine's does (another script), or when NATIVE_PDF_OCR=prefer. Either way a native result that lost text is
+ * rejected.
  */
 
 /** Primary OCR output whose word-shaped token share is below this is treated as unreadable-script noise. */
@@ -23,8 +20,7 @@ export const OCR_DROPOUT_RATIO = 0.5;
 export const OCR_DROPOUT_MIN_EXPECTED = 80;
 /**
  * Output characters per square inch of page below which a native result needs a cross-check. A full Latin text
- * page runs ~20-40 chars/in2 (clean dev page: ~21; the collapsed photocopy ~1, phone scan ~4.5); CJK carries more
- * per character (~12 on the dev zh-TW page), so its floor is lower.
+ * page runs ~20-40 chars/in2; CJK carries more per character, so its floor is lower.
  */
 export const OCR_DENSITY_FLOOR_LATIN = 8;
 export const OCR_DENSITY_FLOOR_OTHER_SCRIPT = 4;
