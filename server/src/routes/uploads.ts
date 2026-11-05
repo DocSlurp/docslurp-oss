@@ -71,6 +71,12 @@ export const canonicalIdSchema = z.string().trim().min(1).max(MAX_CANONICAL_ID_L
 /** The public `workspace` field: a workspace UUID, slug, former slug or name; created when no workspace matches. */
 export const workspaceInputSchema = z.string().max(WORKSPACE_INPUT_MAX_LENGTH);
 
+/** GET /direct/sessions/:id (unless status only), part signing, file completion and confirm: the routes that mint URLs or ingest. */
+export function sessionRouteNeedsContribute(method: string, path: string, statusOnly: boolean): boolean {
+  if (method === "GET") return /\/direct\/sessions\/[^/]+\/?$/.test(path) && !statusOnly;
+  return method === "POST" && /\/direct\/sessions\/[^/]+\/(?:files\/[^/]+\/parts\/sign|files\/complete|confirm)\/?$/.test(path);
+}
+
 /** A restricted API key's workspace allowlist (null for sessions and unrestricted keys). */
 export function actorAllowedWorkspaceIds(actor: RequestActor): readonly string[] | null {
   return actor.type === "apiKey" && actor.apiKey.workspaceIds?.length ? actor.apiKey.workspaceIds : null;
@@ -258,6 +264,18 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
           return apiStatusError(c, 403, "Forbidden");
         }
         // The `workspace` value itself is resolved inside the key's org and allowlist by intake.
+      }
+    }
+    // Every route that mints signed upload URLs for an existing session, or ingests it, re-checks that this user may still
+    // contribute to its workspace (a revoked or demoted share gets 403 and no URLs). Status-only reads and abort do not.
+    if (sessionMatch && sessionRouteNeedsContribute(c.req.method, c.req.path, c.req.query("statusOnly") === "true")) {
+      const loaded = await loadDirectUploadSession(sessionMatch[1], actor.userId);
+      if (loaded) {
+        try {
+          await assertSessionWorkspaceStillContributable(loaded.session, actor.userId);
+        } catch (error) {
+          return workspaceIntakeErrorResponse(c, error) ?? apiStatusError(c, 403, "Forbidden");
+        }
       }
     }
     await next();

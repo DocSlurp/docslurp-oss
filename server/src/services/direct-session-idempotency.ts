@@ -1,6 +1,7 @@
 import { getCachedIdempotentResponse, hashIdempotencyPayload, IdempotencyConflictError, scopedIdempotencyKey, storeIdempotentResponse, type IdempotencyScope } from "./idempotency.js";
 import { withDirectUploadLock } from "./direct-upload-session.js";
 import { WorkspaceIntakeError } from "./workspace-intake.js";
+import { sql } from "../db.js";
 import { canContributeToWorkspace, getWorkspaceAccess } from "./organizations.js";
 
 export const DIRECT_SESSION_ROUTE_KEY = "uploads.direct-session";
@@ -42,18 +43,32 @@ async function mayContributeNow(workspaceId: string, userId: string): Promise<bo
   return access !== null && canContributeToWorkspace(access, userId);
 }
 
+/** Is `userId` still a member of `orgId` (a session whose confirm creates its workspace there)? */
+async function isOrgMemberNow(orgId: string, userId: string): Promise<boolean> {
+  const rows = await sql<{ one: number }[]>`
+    select 1 as one from org_memberships om join organizations o on o.id = om.org_id and o.deleted_at is null
+    where om.org_id = ${orgId} and om.user_id = ${userId} limit 1`;
+  return rows.length > 0;
+}
+
 /**
- * The replay's live access check: the remembered session's workspace must still accept uploads from this user. A share or
- * membership revoked since the first request gets no upload URLs (403), even with the same key and the same credential.
+ * The live access check before anything hands out upload URLs for, or ingests into, an existing session (the idempotent replay,
+ * GET /direct/sessions/:id, part signing, file completion, confirm): the session's workspace must still accept uploads from
+ * this user, or, for a session whose confirm creates its workspace, the user must still belong to the session's organization.
+ * A share or membership revoked or demoted since the session was made gets no URLs (403). Fails closed on a session with
+ * neither a workspace nor an organization.
  */
 export async function assertSessionWorkspaceStillContributable(
-  session: { workspace_id: string | null },
+  session: { workspace_id: string | null; org_id?: string | null },
   userId: string,
   mayContribute: (workspaceId: string, userId: string) => Promise<boolean> = mayContributeNow,
+  isMember: (orgId: string, userId: string) => Promise<boolean> = isOrgMemberNow,
 ): Promise<void> {
-  if (!session.workspace_id) return;
-  if (!(await mayContribute(session.workspace_id, userId))) {
-    throw new WorkspaceIntakeError("You can no longer upload into the workspace of the session created with this Idempotency-Key", 403);
+  const allowed = session.workspace_id
+    ? await mayContribute(session.workspace_id, userId)
+    : session.org_id === undefined ? true : session.org_id !== null && await isMember(session.org_id, userId);
+  if (!allowed) {
+    throw new WorkspaceIntakeError("You can no longer upload into this upload session's workspace", 403);
   }
 }
 
