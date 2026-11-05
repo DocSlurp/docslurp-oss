@@ -8,7 +8,7 @@ import path from "node:path";
 import type { CanonicalDocument } from "@docslurp/shared";
 import { localEmbeddingPooling, type EmbeddingPooling, assertProviderAllowed, authorizePrivateModelCall, textModelCallDescriptor, canonicalDocumentSchema, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, openRouterEmbeddingRoute, validateHostedEmbeddingVector, OPENROUTER_BASE_URL, PRIVATE_MODEL_PROVIDER, isProviderCallAllowed, resolvePipelineTextModel, createOpenRouterRoutingFetch, createOpenRouterChargeTotal, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
 import { embedMany } from "ai";
-import { blankPages, embedPerplexity, pageImageReferencePages } from "@docslurp/shared";
+import { blankPages, embedPerplexity, imageAnchorsToAltText, pageImageReferencePages } from "@docslurp/shared";
 import { noteWorkProgress, withRequestTimeout } from "../lib/work-progress.js";
 import { runWithProviderRateLimit } from "../lib/provider-rate-limit.js";
 import { createSerialQueue, runBounded, type ConcurrencyLimiter } from "../lib/bounded-concurrency.js";
@@ -178,7 +178,7 @@ async function extractTextForEmbeddingRaw(
     : undefined;
   // Fast page-image references carry no document text; keep them out of chunk context and embeddings.
   const markdownText = markdownArtifactUri
-    ? await readExtractedMarkdown(storage, markdownArtifactUri)
+    ? await readExtractedText(storage, markdownArtifactUri)
     : null;
   // References are known structurally (the canonical blocks the worker wrote), never by matching their text.
   const referencePages = canonicalDocument ? pageImageReferencePages(canonicalDocument.blocks) : new Set<number>();
@@ -314,6 +314,15 @@ async function readUtf8Artifact(storage: ArtifactStore, artifactUri: string): Pr
   }
   if (!isUtf8(data)) throw new ArtifactReadError(artifactUri, "not valid UTF-8", { kind: "invalid" });
   return data.toString("utf8");
+}
+
+/**
+ * The extracted Markdown as text consumers read it (page rows, chunks, propositions, structured inputs): each image
+ * reference is replaced by its alt text (imageAnchorsToAltText, the rule canonical blocks use). Exports read the raw
+ * Markdown with readExtractedMarkdown and keep the references.
+ */
+export async function readExtractedText(storage: ArtifactStore, artifactUri: string): Promise<string> {
+  return imageAnchorsToAltText(await readExtractedMarkdown(storage, artifactUri));
 }
 
 export async function readExtractedMarkdown(

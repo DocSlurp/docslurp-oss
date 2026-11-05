@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { imageAnchorsToAltText } from "@docslurp/shared";
 
 export const SUMMARY_INPUT_MAX_BYTES = 10_000;
 export const SUMMARY_EVIDENCE_MAX_BYTES = 12_000;
@@ -39,7 +40,8 @@ export function selectSummaryPages(total: number, seed: string): number[] {
 export function buildSummaryEvidence(args: {
   text: string; pageCount: number; documentId: string; sourceUri: string;
 }): SummaryEvidence {
-  const { text } = args;
+  // Summaries read text: an image reference stands for its alt text, never its internal artifact id.
+  const text = imageAnchorsToAltText(args.text);
   let separators = 0;
   for (let at = text.indexOf("\f"); at >= 0; at = text.indexOf("\f", at + 1)) separators++;
   const trailingSeparator = text.endsWith("\f");

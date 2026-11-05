@@ -5,7 +5,7 @@ import {
   isPageImageReferenceBlock,
   normalizePageNumbers,
   parseImageAnchorLine,
-  stripImageAnchors,
+  imageAnchorsToAltText,
   splitTextIntoPagesStrict,
   type CanonicalBlock,
   type CanonicalBlockType,
@@ -343,7 +343,7 @@ export function buildCanonicalChunksFromDocument(
 
   if (meaningfulBlocks.length === 0) {
     return [{
-      text: stripImageAnchors(fallback),
+      text: imageAnchorsToAltText(fallback),
       headingPath: [],
       pageNumber: null,
       pageNumbers: [],
