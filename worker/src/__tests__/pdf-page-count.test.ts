@@ -10,7 +10,7 @@ import { recordPageBaseFee } from "../db/page-base-fee.js";
 import { setSpendCheckConfig } from "../db/spend-check.js";
 import { Store } from "../db/store.js";
 import { registerExtractorPlugin, resetExtractorPluginsForTest, type SandboxedPdfExtractorProvider } from "../extractors/plugins.js";
-import { recordMeasuredPdfPageCount } from "../lib/pdf-page-count.js";
+import { parsePdfInfoPages, recordMeasuredPdfPageCount } from "../lib/pdf-page-count.js";
 import { authorizeMeasuredPages } from "../lib/measured-page-authorization.js";
 import { SpendCheckUnavailableError } from "../db/spend-check.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
@@ -68,6 +68,28 @@ const runner = (stdout: string) => ({
   run: vi.fn(async () => ({ stdout, stderr: "" })),
 });
 const pageRow = async (id: string) => (await db.query<{ page_count: number; page_count_source: string }>(`select page_count, page_count_source from documents where id = '${id}'`)).rows[0];
+
+describe("parsePdfInfoPages: a PDF's metadata cannot forge its page count", () => {
+  it("reads the one Pages line", () => {
+    expect(parsePdfInfoPages("Title:          Report\nProducer:       x\nPages:          50\nEncrypted:      no\n")).toBe(50);
+    expect(parsePdfInfoPages("Pages: 7\r\n")).toBe(7);
+  });
+  it.each([
+    ["a Title with a raw newline", "Title:          Report\nPages: 1\nProducer:       x\nPages:          50\n"],
+    ["a Title after Pages", "Pages:          50\nTitle: x\nPages: 1\n"],
+    ["no Pages line", "Title: Report\n"],
+    ["an out-of-range count", "Pages: 0\n"],
+    ["a huge count", "Pages: 99999999999\n"],
+  ])("refuses %s", (_name, stdout) => {
+    expect(parsePdfInfoPages(stdout)).toBeNull();
+  });
+  it("does not treat U+2028 or U+2029 in a Title as a line break", () => {
+    expect(parsePdfInfoPages("Title:          Report\u2028Pages: 1\nPages:          50\n")).toBe(50);
+    expect(parsePdfInfoPages("Title:          Report\u2029Pages: 1\nPages:          50\n")).toBe(50);
+    // The old multiline regex took the first match, so this read 1.
+    expect("Title: Report\u2028Pages: 1\nPages: 50\n".match(/^Pages:\s+(\d+)\s*$/m)?.[1]).toBe("1");
+  });
+});
 
 describe("PDF page counts are measured by the worker, never parsed by the API", () => {
   it("local mode: pdfinfo under the parser sandbox replaces intake's estimate", async () => {

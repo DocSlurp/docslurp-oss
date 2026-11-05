@@ -9,9 +9,15 @@ import { sniffedPdf } from "./sniffed-pdf.js";
 /** More pages than this is a parser fault, not a document. */
 export const MAX_MEASURED_PDF_PAGES = 100_000;
 
+/**
+ * The page count in pdfinfo's output, or null. pdfinfo prints customer-controlled metadata (Title, Subject, ...) before
+ * `Pages:`, and a title can hold a newline or a Unicode line separator: lines are split on "\n" only (never U+2028/U+2029,
+ * which a multiline regex treats as breaks) and exactly one line may be a `Pages:` line, else the count is refused.
+ */
 export function parsePdfInfoPages(stdout: string): number | null {
-  const match = stdout.match(/^Pages:\s+(\d+)\s*$/m);
-  const pages = match ? Number.parseInt(match[1]!, 10) : NaN;
+  const matches = stdout.split("\n").map((line) => /^Pages:[ \t]+(\d{1,7})[ \t\r]*$/.exec(line)).filter((match) => match !== null);
+  if (matches.length !== 1) return null;
+  const pages = Number.parseInt(matches[0]![1]!, 10);
   return Number.isSafeInteger(pages) && pages >= 1 && pages <= MAX_MEASURED_PDF_PAGES ? pages : null;
 }
 
