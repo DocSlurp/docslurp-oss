@@ -77,7 +77,7 @@ it("parses stored reports without failures as none", () => {
 
 describe("missing or unavailable converters classify as extractor failures, not unknown", () => {
   it.each([
-    "doppler-md unavailable: DOCSLURP_DOPPLER_HOST_PDF=1 but pdftomarkdown is not installed",
+    "doppler-md unavailable: pdftomarkdown is not installed (DOCSLURP_PDF_MODE=local needs Doppler)",
     "pdftoppm unavailable for selected-page rasterization",
     "Error: spawn pandoc ENOENT",
     "pdftomarkdown: command not found",

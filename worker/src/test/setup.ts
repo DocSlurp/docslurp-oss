@@ -13,5 +13,9 @@ if (process.env.DOCSLURP_LOCAL_EMBED_THREAD === undefined) {
   process.env.DOCSLURP_LOCAL_EMBED_THREAD = "off";
 }
 
+// Extraction suites exercise host PDF extractors, which run only in customer-owned local PDF mode; the PDF-mode boundary
+// tests stub DOCSLURP_PDF_MODE (and the profile) themselves.
+if (process.env.DOCSLURP_PDF_MODE === undefined) process.env.DOCSLURP_PDF_MODE = "local";
+
 // Unit suites do not launch paid VM preprocessing; orientation suites explicitly enable/mock it.
 process.env.DOCSLURP_IMAGE_ORIENTATION = "false";

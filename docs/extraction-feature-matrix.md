@@ -16,9 +16,9 @@ extractor links an OCR engine.
 
 | Format | Default order | Where it parses | Notes |
 | --- | --- | --- | --- |
-| PDF, sandboxed deployment (`DOCSLURP_PDF_EXTRACTOR=vm-pdf`, `DOCSLURP_VM_PDF_INSTALLED=1` or `DOCSLURP_SERVICE_PROFILE=service`) | `vm-pdf` | One offline VM per document | Host PDF extractors are refused; without a provider the worker does not start. |
-| PDF, self-hosted | `native-pdf` (when installed), `poppler-text` | In-process binding / sandboxed `pdftotext` | `poppler-text` is layout text without headings or tables. |
-| PDF, self-hosted with Doppler opted in (`DOCSLURP_DOPPLER_HOST_PDF=1`, image built with `DOCSLURP_DOPPLER=1`) | `doppler-md`, then the above | Sandboxed `pdftomarkdown` (Doppler) on the worker host | Host parsing ([worker image](worker-image.md#doppler-opt-in-host-parsing)). Headings, pipe tables and form-feed pages. A missing converter fails the PDF. |
+| PDF, VM deployment (`DOCSLURP_PDF_MODE=vm`, `DOCSLURP_PDF_EXTRACTOR=vm-pdf`, `DOCSLURP_VM_PDF_INSTALLED=1` or `DOCSLURP_SERVICE_PROFILE=service`) | `vm-pdf` (Doppler) | One offline VM per document | Host PDF extractors are refused; without a provider the worker does not start. Production ships this, configured statically. |
+| PDF, customer-owned local mode (`DOCSLURP_PDF_MODE=local`, `DOCSLURP_SERVICE_PROFILE=self-hosted`) | `doppler-md`, then `native-pdf` (when installed) and `poppler-text` only when Doppler failed on the file | Sandboxed `pdftomarkdown` (Doppler) on the worker host | Host parsing ([Docker Compose](self-host/docker-compose.md#pdfs)). Headings, pipe tables and form-feed pages. A fallback shows as a per-file warning in the ingest report. |
+| PDF, neither | none | | Refused: `PDF extraction is not configured`; the worker logs `[pdf] mode=off` at startup. |
 | Word `.docx` | `pandoc` | Sandboxed `office_markdown.py` running `pandoc --sandbox -f docx` | Appends headers, footers, comments and link targets (`office_context.py`). |
 | OpenDocument `.odt`, RTF | `pandoc` | Sandboxed `pandoc --sandbox` | Pandoc 3.1's ODT reader drops a table's header row; its RTF reader can drop the letter after an opening curly quote. |
 | PowerPoint `.pptx` | `pptx` | Sandboxed `office_markdown.py` (python-pptx) | One form-feed page per slide: title heading, bullets, tables, notes. |

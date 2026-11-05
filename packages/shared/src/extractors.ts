@@ -16,29 +16,52 @@ export function resolvePdfExtractorSetting(env: Record<string, string | undefine
   throw new Error(`DOCSLURP_PDF_EXTRACTOR must be empty or one of: ${PDF_EXTRACTOR_SETTINGS.join(", ")}`);
 }
 
+/** DOCSLURP_PDF_MODE values: `vm` (the sandboxed PDF provider) or `local` (customer-owned host parsing). Unset: neither. */
+export const PDF_MODES = ["vm", "local"] as const;
+export type PdfMode = (typeof PDF_MODES)[number] | "off";
+
+function explicitPdfMode(env: Record<string, string | undefined>): (typeof PDF_MODES)[number] | null {
+  const raw = env.DOCSLURP_PDF_MODE?.trim().toLowerCase() ?? "";
+  if (!raw) return null;
+  if ((PDF_MODES as readonly string[]).includes(raw)) return raw as (typeof PDF_MODES)[number];
+  throw new Error(`DOCSLURP_PDF_MODE must be empty or one of: ${PDF_MODES.join(", ")}`);
+}
+
 /**
- * True when the deployment runs PDFs only in the sandboxed PDF provider: DOCSLURP_PDF_EXTRACTOR=vm-pdf,
- * DOCSLURP_VM_PDF_INSTALLED=1, or DOCSLURP_SERVICE_PROFILE=service (a multi-tenant service never parses customer PDFs on
- * the worker host; without a provider the worker refuses to start). Throws on an unknown value of the first two, for the
- * same reason.
+ * True when the deployment runs PDFs only in the sandboxed PDF provider (Doppler in a VM): DOCSLURP_PDF_MODE=vm,
+ * DOCSLURP_PDF_EXTRACTOR=vm-pdf, DOCSLURP_VM_PDF_INSTALLED=1, or DOCSLURP_SERVICE_PROFILE=service (a multi-tenant service never
+ * parses customer PDFs on the worker host; without a provider the worker refuses to start). Throws on an unknown value.
  */
 export function sandboxedPdfConfigured(env: Record<string, string | undefined> = process.env): boolean {
   const installed = env.DOCSLURP_VM_PDF_INSTALLED?.trim() ?? "";
   if (!["", "0", "1"].includes(installed)) throw new Error("DOCSLURP_VM_PDF_INSTALLED must be empty, 0 or 1");
   const serviceProfile = env.DOCSLURP_SERVICE_PROFILE?.trim().toLowerCase() === "service";
-  return resolvePdfExtractorSetting(env) === "vm-pdf" || installed === "1" || serviceProfile;
+  const mode = explicitPdfMode(env);
+  return mode === "vm" || resolvePdfExtractorSetting(env) === "vm-pdf" || installed === "1" || serviceProfile;
 }
 
 /**
- * DOCSLURP_DOPPLER_HOST_PDF=1: the operator's explicit opt-in to parse customer PDFs on the worker host with Doppler's
- * `pdftomarkdown` (the `doppler-md` extractor, in the parser sandbox: host parsing, not a VM boundary). Off by default: without
- * it `doppler-md` is never planned, run or probed. Refused under a sandboxed PDF deployment. Throws on any value but empty, 0 or 1.
+ * Where PDFs are extracted. Doppler is the PDF extractor either way:
+ *  - `vm`: in the sandboxed PDF provider's VM (`vm-pdf`), the default wherever one is configured (sandboxedPdfConfigured);
+ *  - `local`: Doppler's `doppler-md` on the worker host, in the parser sandbox. Customer-owned execution only: it needs
+ *    DOCSLURP_PDF_MODE=local and DOCSLURP_SERVICE_PROFILE=self-hosted (the worker refuses to start otherwise), like local OCR;
+ *  - `off`: neither. PDF extraction is refused (no host parser runs instead) and the worker logs it at startup.
+ * A VM selection wins over `local`, and the worker refuses to start with both.
  */
-export function dopplerHostPdfEnabled(env: Record<string, string | undefined> = process.env): boolean {
-  const raw = env.DOCSLURP_DOPPLER_HOST_PDF?.trim() ?? "";
-  if (!["", "0", "1"].includes(raw)) throw new Error("DOCSLURP_DOPPLER_HOST_PDF must be empty, 0 or 1");
-  return raw === "1";
+export function resolvePdfMode(env: Record<string, string | undefined> = process.env): PdfMode {
+  if (sandboxedPdfConfigured(env)) return "vm";
+  return explicitPdfMode(env) === "local" ? "local" : "off";
 }
+
+/** DOCSLURP_PDF_MODE=local was asked for (whether or not the rest of the configuration allows it). */
+export function localPdfModeRequested(env: Record<string, string | undefined> = process.env): boolean {
+  return explicitPdfMode(env) === "local";
+}
+
+/** Why PDF extraction is refused under this environment: the public reason for a document, and the startup log. */
+export const PDF_EXTRACTION_UNCONFIGURED =
+  "PDF extraction is not configured: run Doppler in a VM (a sandboxed PDF provider, DOCSLURP_PDF_MODE=vm) or, for customer-owned " +
+  "execution only, on this host (DOCSLURP_PDF_MODE=local with DOCSLURP_SERVICE_PROFILE=self-hosted)";
 
 import type { ExtractionImage, ExtractionTable } from "./extraction.js";
 import type { UsageEvent } from "./usage.js";
@@ -150,7 +173,7 @@ export const builtInDocumentExtractorDescriptors: ExtractorDescriptor[] = [
   },
   {
     id: "doppler-md", kind: "document", label: "Doppler Markdown",
-    description: "Layout-aware PDF Markdown (headings, tables, reading order) from Doppler, the DocSlurp Poppler fork, run as a separate executable in the worker's parser sandbox (host parsing); one page per form feed. Only where the operator opts in (DOCSLURP_DOPPLER_HOST_PDF=1).",
+    description: "Layout-aware PDF Markdown (headings, tables, reading order) from Doppler, the DocSlurp Poppler fork, run as a separate executable in the worker's parser sandbox (host parsing); one page per form feed. Customer-owned execution only (DOCSLURP_PDF_MODE=local); a VM deployment runs Doppler in vm-pdf.",
     transforms: [{ accepts: ["source/pdf"], emits: ["document/markdown"], scope: "document" }],
     capabilities: { formats: ["pdf"], produces: ["markdown", "pages", "tables", "headings"], costClass: "local-cpu" },
   },
@@ -219,10 +242,13 @@ export interface ExtractionArtifactRef {
  * hidden unless the deployment reports the engine as installed
  * (`DOCSLURP_NATIVE_PDF_INSTALLED=1`, or a configured module / vendored package).
  */
-export function publicDocumentExtractorDescriptors(options: { nativePdfInstalled: boolean; vmPdfInstalled?: boolean; dopplerHostPdf?: boolean }): ExtractorDescriptor[] {
+export function publicDocumentExtractorDescriptors(options: { nativePdfInstalled: boolean; vmPdfInstalled?: boolean; localPdf?: boolean }): ExtractorDescriptor[] {
+  // Host PDF extractors are listed only in customer-owned local mode; a VM deployment lists vm-pdf alone for PDFs.
+  const hostPdf = options.localPdf === true && options.vmPdfInstalled !== true;
   return builtInDocumentExtractorDescriptors.filter(
-    (entry) => (entry.id !== "native-pdf" || options.nativePdfInstalled) && (entry.id !== "vm-pdf" || options.vmPdfInstalled === true) &&
-      (entry.id !== "doppler-md" || (options.dopplerHostPdf === true && options.vmPdfInstalled !== true)),
+    (entry) => (entry.id !== "vm-pdf" || options.vmPdfInstalled === true) &&
+      (entry.id !== "native-pdf" || (options.nativePdfInstalled && hostPdf)) &&
+      (!["doppler-md", "poppler-text"].includes(entry.id) || hostPdf),
   );
 }
 

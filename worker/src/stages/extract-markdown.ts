@@ -1125,7 +1125,7 @@ export class ExtractMarkdownStage implements Stage {
                       extractorOrder: this.tryResolveExtractorOrder(format, extractionConfig.order),
                       extractorAttempts: attemptLedger.snapshot(),
                       // Extractors tried before the served one that failed, timed out or were rejected (ingest report warning).
-                      extractorFallback: extractorFallbackFor(state.artifactLedger, document.id, winningCandidate.label, this.tryResolveExtractorOrder(format, extractionConfig.order)),
+                      extractorFallback: extractorFallbackFor(state.artifactLedger, document.id, winningCandidate.label, this.tryResolveExtractorOrder(format, extractionConfig.order), attemptLedger.snapshot().unavailable),
                       retryStrategy: retryStrategy ?? "default",
                       extractionMs: Date.now() - extractionStartedAt,
                       nativePdf: nativePdfStats,

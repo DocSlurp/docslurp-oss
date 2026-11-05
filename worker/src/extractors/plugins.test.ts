@@ -137,6 +137,7 @@ describe("loading plugins by configuration", () => {
       }\n`);
       vi.stubEnv("DOCSLURP_EXTRACTOR_PLUGINS", file);
       vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", VM_PDF_EXTRACTOR_ID);
+      vi.stubEnv("DOCSLURP_PDF_MODE", "");
       expect(await loadExtractorPlugins()).toEqual(["file-plugin"]);
       expect(await loadExtractorPlugins()).toEqual(["file-plugin"]);
       const host = (globalThis as { __pluginHost?: { SandboxRunError: unknown; apiVersion: number } }).__pluginHost!;

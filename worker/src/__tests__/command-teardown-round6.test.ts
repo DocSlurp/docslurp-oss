@@ -298,7 +298,8 @@ describe("M2: concurrent extractor candidates share no writable directory", () =
         .isolateConcurrentCandidates({ primary: candidate, secondary, sourcePath: source, format: "pdf", options: {}, dirs });
       roots.push(...dirs);
       expect(isolated.primary.source).not.toBe(source);
-      expect(path.dirname(isolated.primary.source)).toBe(dirs[0]);
+      // Both candidates' directories are created concurrently: `dirs` (the cleanup list) is in completion order.
+      expect(dirs).toContain(path.dirname(isolated.primary.source));
       expect(dirs).toHaveLength(secondary ? 2 : 1);
     }
   });

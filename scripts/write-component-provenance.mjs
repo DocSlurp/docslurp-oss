@@ -2,11 +2,11 @@
 // Records where the third-party native components in a worker image come from, inside the image:
 //   /usr/share/licenses/<name>/   license texts and PROVENANCE.json (public repository, pinned commit, source, files)
 //   <sbom>                        an SPDX 2.3 document listing every component and its installed files with sha256
-// Doppler is recorded when the image was built with it (DOCSLURP_DOPPLER=1, worker/doppler.json). An optional native PDF engine is recorded when its
+// Doppler (worker/doppler.json, installed under /usr/lib/doppler) is recorded in every worker image. An optional native PDF engine is recorded when its
 // vendor manifest is installed; with DOCSLURP_NATIVE_PDF_INSTALLED=1 its manifest must name a public repository and a
 // commit, or the build fails (a component without provenance never ships).
 //
-//   node scripts/write-component-provenance.mjs --doppler worker/doppler.json --doppler-prefix /usr/local \
+//   node scripts/write-component-provenance.mjs --doppler worker/doppler.json --doppler-prefix /usr/lib/doppler \
 //     [--engine-manifest /app/vendor-artifacts/native-pdf/manifest.json --engine-dir <installed package dir>] \
 //     [--licenses /usr/share/licenses] [--sbom /usr/share/doc/docslurp/sbom/native-components.spdx.json]
 import { createHash } from "node:crypto";

@@ -51,9 +51,20 @@ export function recordExtractorFallback(ledger: Ledger, documentId: string, extr
  * not in it) that failed, timed out or returned rejected output. A voting secondary that failed while the primary served
  * is not a fallback.
  */
-export function extractorFallbackFor(ledger: Ledger, documentId: string, served: string, order: readonly string[]): ExtractorFallback | null {
+export function extractorFallbackFor(
+  ledger: Ledger,
+  documentId: string,
+  served: string,
+  order: readonly string[],
+  /** Extractors the final attempt found unavailable (not installed, not configured). */
+  unavailable: readonly string[] = [],
+): ExtractorFallback | null {
   const servedAt = order.indexOf(served);
-  const earlier = recorded(ledger, documentId).filter((entry) => {
+  const all = [...recorded(ledger, documentId)];
+  for (const extractor of unavailable) {
+    if (EXTRACTOR_ID.test(extractor) && !all.some((entry) => entry.extractor === extractor)) all.push({ extractor, reason: "unavailable" });
+  }
+  const earlier = all.filter((entry) => {
     if (entry.extractor === served) return false;
     const at = order.indexOf(entry.extractor);
     return servedAt < 0 || at < 0 || at < servedAt;

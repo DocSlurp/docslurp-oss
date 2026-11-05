@@ -2,6 +2,7 @@ import {
   acceptSandboxedPdfResult, requireSandboxedOcrProvider, requireSandboxedPdfProvider, type SandboxedOcrJob, type SandboxedPdfJob,
   type SandboxedPdfRunContext,
 } from "../extractors/plugins.js";
+import { dopplerConverterPath } from "./doppler.js";
 import { localOcrCommandArgs, localOcrPaths } from "../ocr/local.js";
 import { localOcrRefusal, resolveOcrMode, OcrRefusedError } from "../ocr/mode.js";
 import { recordShardTimingInContext, type ShardCalibration } from "../pipeline/shard-calibration.js";
@@ -653,11 +654,12 @@ export class CommandRunner {
   }
 
   /**
-   * PDF to Markdown with Doppler's `pdftomarkdown` (it runs the fork's own `pdftotext -bbox-layout` and converts the
-   * XHTML), pages joined by form feeds. A separate executable in the parser sandbox, like every host PDF tool.
+   * PDF to Markdown with Doppler's `pdftomarkdown` (it runs the fork's own `pdftotext -bbox-layout` from beside itself and
+   * converts the XHTML), pages joined by form feeds. A separate executable in the parser sandbox, at its absolute path off PATH
+   * (tools/doppler.ts); customer-owned local PDF mode only.
    */
   async dopplerMarkdown(source: string): Promise<CommandPlan> {
-    return await this.planDocumentTool({ binary: "pdftomarkdown", args: [source], fileArgIndexes: [0], supportsDoubleDash: true });
+    return await this.planDocumentTool({ binary: dopplerConverterPath(), args: [source], fileArgIndexes: [0], supportsDoubleDash: true });
   }
 
   /** Markdown from a .docx, .pptx or .xlsx file (scripts/office_markdown.py, run in the parser sandbox). */

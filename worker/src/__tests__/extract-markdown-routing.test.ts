@@ -110,8 +110,8 @@ describe("extract markdown PDF routing", () => {
     expect(planned.tableAware).toBe(true);
   });
 
-  it("prefers Doppler's Markdown for PDFs only where the operator opts in to Doppler host parsing", async () => {
-    vi.stubEnv("DOCSLURP_DOPPLER_HOST_PDF", "1");
+  it("prefers Doppler's Markdown for PDFs in customer-owned local mode", async () => {
+    vi.stubEnv("DOCSLURP_PDF_MODE", "local");
     const stage = new ExtractMarkdownStage(
       {
         dopplerMarkdown: async (source: string) => ({ binary: "pdftomarkdown", args: ["--", source], available: true }),
@@ -132,11 +132,12 @@ describe("extract markdown PDF routing", () => {
     vi.unstubAllEnvs();
   });
 
-  it("fails closed when Doppler host parsing is opted in and pdftomarkdown is missing", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const runner = { dopplerMarkdown: async () => ({ binary: "pdftomarkdown", args: [], available: false }) } as any;
-    await expect(documentExtractorRegistry.prepare("doppler-md", runner, "/tmp/sample.pdf", undefined, { format: "pdf", env: { DOCSLURP_DOPPLER_HOST_PDF: "1" } }))
-      .rejects.toThrow(/doppler-md unavailable/);
+  it("in local mode, plans a missing pdftomarkdown as unavailable with an error (startup refuses local mode without it)", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const runner = { dopplerMarkdown: async () => ({ binary: "/usr/lib/doppler/bin/pdftomarkdown", args: [], available: false }) } as any;
+    const prepared = await documentExtractorRegistry.prepare("doppler-md", runner, "/tmp/sample.pdf", undefined, { format: "pdf", env: { DOCSLURP_PDF_MODE: "local" } });
+    expect(prepared.plan.available).toBe(false);
+    expect(error.mock.calls.flat().join(" ")).toContain("doppler-md unavailable");
   });
 
   it("reads Word documents with Pandoc through the office sidecar, and slides and sheets with their own sidecars", async () => {
@@ -196,7 +197,7 @@ describe("extract markdown PDF routing", () => {
       {} as any,
     );
     const attemptLedger = new ExtractorAttemptLedger();
-    // doppler-md is unavailable here (no DOCSLURP_DOPPLER_HOST_PDF opt-in), so it is recorded and never planned.
+    // doppler-md is unavailable here (pdftomarkdown not installed), so it is recorded and never planned.
     const args = {
       tempFile: "/tmp/sample.pdf", format: "pdf", order: { pdf: ["doppler-md", "native-pdf", "poppler-text"] }, options: {},
       multiStrategyVoting: true, secondaryId: "next-in-order", attemptLedger,

@@ -16,10 +16,12 @@
  *
  * Contract details: docs/extraction/extractor-plugins.md.
  */
+import { accessSync, constants as fsConstants } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { dopplerBinDir, dopplerConverterPath } from "../tools/doppler.js";
 import path from "node:path";
 import {
-  dopplerHostPdfEnabled, sandboxedPdfConfigured, type EmbeddedImageFacts, type EmbeddedImageMediaType, type MediaMap, type OrientationResultRecord,
+  localPdfModeRequested, PDF_EXTRACTION_UNCONFIGURED, resolvePdfMode, sandboxedPdfConfigured, type EmbeddedImageFacts, type EmbeddedImageMediaType, type MediaMap, type OrientationResultRecord,
 } from "@docslurp/shared";
 
 import { SandboxRunError, type SandboxResult } from "../sandbox/types.js";
@@ -351,26 +353,46 @@ export async function loadExtractorPlugins(
 }
 
 /**
- * Refuse to start on a misconfigured deployment: an unknown DOCSLURP_PDF_EXTRACTOR or DOCSLURP_DOPPLER_HOST_PDF (which
- * would otherwise fall through to host parsing), a VM selection without a provider (the service profile always selects
- * it), a provider loaded without the VM selection (PDFs would fall back to the host), or Doppler host parsing asked for
- * where PDFs run only in the VM.
+ * Refuse to start on a misconfigured deployment. PDFs are Doppler's, in a VM or (customer-owned only) on this host:
+ *  - an unknown DOCSLURP_PDF_EXTRACTOR, DOCSLURP_PDF_MODE or DOCSLURP_VM_PDF_INSTALLED;
+ *  - a VM selection (or the service profile) without a sandboxed PDF provider;
+ *  - a provider loaded without the VM selection (PDFs would otherwise not run in it);
+ *  - DOCSLURP_PDF_MODE=local beside a VM selection or a loaded provider, or outside DOCSLURP_SERVICE_PROFILE=self-hosted, or
+ *    without Doppler's pdftomarkdown installed.
+ * With neither a VM nor local mode the worker starts (other formats still run) and says loudly that PDFs are refused.
  */
-export function assertExtractorPluginConfiguration(env: NodeJS.ProcessEnv = process.env): void {
+export function assertExtractorPluginConfiguration(env: NodeJS.ProcessEnv = process.env, deps: { dopplerInstalled?: () => boolean } = {}): void {
   const sandboxed = sandboxedPdfConfigured(env);
-  const doppler = dopplerHostPdfEnabled(env);
+  const local = localPdfModeRequested(env);
   if (sandboxed && !sandboxedPdfProvider()) {
-    throw new Error(`DOCSLURP_PDF_EXTRACTOR=${VM_PDF_EXTRACTOR_ID}, DOCSLURP_VM_PDF_INSTALLED=1 or DOCSLURP_SERVICE_PROFILE=service needs a sandboxed PDF provider in DOCSLURP_EXTRACTOR_PLUGINS; refusing to start rather than parse PDFs on the worker host`);
+    throw new Error(`DOCSLURP_PDF_MODE=vm, DOCSLURP_PDF_EXTRACTOR=${VM_PDF_EXTRACTOR_ID}, DOCSLURP_VM_PDF_INSTALLED=1 or DOCSLURP_SERVICE_PROFILE=service needs a sandboxed PDF provider in DOCSLURP_EXTRACTOR_PLUGINS; refusing to start rather than parse PDFs on the worker host`);
   }
-  // A loaded VM PDF provider means this deployment reads PDFs in VMs; leaving DOCSLURP_PDF_EXTRACTOR unset would quietly route
-  // them to host extractors instead. The selection must be explicit.
+  // A loaded VM PDF provider means this deployment reads PDFs in VMs; the selection must be explicit.
   if (!sandboxed && sandboxedPdfProvider()) {
-    throw new Error(`a sandboxed PDF provider is loaded but ${VM_PDF_EXTRACTOR_ID} is not selected; set DOCSLURP_PDF_EXTRACTOR=${VM_PDF_EXTRACTOR_ID} rather than let PDFs fall back to the worker host; refusing to start`);
+    throw new Error(`a sandboxed PDF provider is loaded but ${VM_PDF_EXTRACTOR_ID} is not selected; set DOCSLURP_PDF_MODE=vm (or DOCSLURP_PDF_EXTRACTOR=${VM_PDF_EXTRACTOR_ID}) rather than let PDFs fall back to the worker host; refusing to start`);
   }
-  if (sandboxed && doppler) {
-    throw new Error(`DOCSLURP_DOPPLER_HOST_PDF=1 parses PDFs on the worker host, and this deployment runs PDFs only in ${VM_PDF_EXTRACTOR_ID}; unset it`);
+  if (local) {
+    if (sandboxed) throw new Error(`DOCSLURP_PDF_MODE=local parses PDFs on the worker host, and this deployment runs PDFs only in ${VM_PDF_EXTRACTOR_ID}; unset it`);
+    if (env.DOCSLURP_SERVICE_PROFILE?.trim().toLowerCase() !== "self-hosted") {
+      throw new Error("DOCSLURP_PDF_MODE=local parses customer PDFs on the worker host and is only for customer-owned execution: it needs DOCSLURP_SERVICE_PROFILE=self-hosted; refusing to start");
+    }
+    if (!(deps.dopplerInstalled ?? (() => dopplerConverterInstalled(env)))()) {
+      throw new Error(`DOCSLURP_PDF_MODE=local needs Doppler's pdftomarkdown at ${dopplerBinDir(env)} (worker images ship it; DOCSLURP_DOPPLER_BIN_DIR points elsewhere); refusing to start`);
+    }
+    console.warn("[pdf] mode=local: Doppler (doppler-md) parses customer PDFs on the worker host, in the parser sandbox, not a VM (customer-owned execution)");
   }
-  if (doppler) console.warn("[extractors] DOCSLURP_DOPPLER_HOST_PDF=1: doppler-md parses customer PDFs on the worker host (parser sandbox, no VM boundary)");
+  const mode = resolvePdfMode(env);
+  if (mode === "off") console.error(`[pdf] mode=off: ${PDF_EXTRACTION_UNCONFIGURED}; PDFs will be refused`);
+  else if (mode === "vm") console.log(`[pdf] mode=vm extractor=${VM_PDF_EXTRACTOR_ID}`);
+}
+
+function dopplerConverterInstalled(env: NodeJS.ProcessEnv): boolean {
+  try {
+    accessSync(dopplerConverterPath(env), fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Test hook. */

@@ -19,28 +19,25 @@ and from the deploy error text. The CI image budget (below) is set well under it
 | | `Dockerfile.lean` (production, `fly.worker.toml`) | `Dockerfile.full` (self-host `--profile full`) |
 | --- | --- | --- |
 | Node | worker-only production `node_modules` from `pnpm deploy`, pruned | same |
-| System tools | Debian poppler-utils (`pdftotext`, `pdfinfo`, `pdfimages`, `pdftoppm`, `pdftohtml`, `pdfseparate`, `pdfunite`; with `DOCSLURP_DOPPLER=1`, Doppler's instead, see below) + poppler-data (CJK CMaps), cwebp (lossless WebP page images), pandoc, ffmpeg, ClamAV, bubblewrap; fonts for non-embedded PDF fonts: URW base-35 and Liberation (metric-compatible Times/Helvetica/Courier and Arial/Times New Roman/Courier New), Noto core (Arabic, Hebrew, Thai, Devanagari, Greek, Cyrillic), Droid Sans Fallback (CJK) | adds LibreOffice, ghostscript, ImageMagick, qpdf, catdoc, unrtf; Noto CJK instead of Droid Sans Fallback |
+| System tools | Debian poppler-utils (`pdftotext`, `pdfinfo`, `pdfimages`, `pdftoppm`, `pdftohtml`, `pdfseparate`, `pdfunite`) + Doppler under `/usr/lib/doppler`, off `PATH` (see below) + poppler-data (CJK CMaps), cwebp (lossless WebP page images), pandoc, ffmpeg, ClamAV, bubblewrap; fonts for non-embedded PDF fonts: URW base-35 and Liberation (metric-compatible Times/Helvetica/Courier and Arial/Times New Roman/Courier New), Noto core (Arabic, Hebrew, Thai, Devanagari, Greek, Cyrillic), Droid Sans Fallback (CJK) | adds LibreOffice, ghostscript, ImageMagick, qpdf, catdoc, unrtf; Noto CJK instead of Droid Sans Fallback |
 | OCR | none: OCR runs in an extractor plugin's VM provider (`vm`), through a hosted model (`hosted`), or not at all | the local OCR runtime: `docslurp_ocr.py`, its venv `/opt/docslurp/ocr-venv` and the pinned models `/opt/docslurp/ocr-models` (root-owned, read-only); used only in `local` mode |
 | Python venv `/app/.venv` | base parsers: trafilatura, ebooklib, python-pptx, openpyxl, xlsx2csv, Pillow (wheel-only, read-only) | same, plus pip for the legacy first-boot install |
 | Unstructured | vendor bundles, fetched on first use | vendor bundles, or the legacy first-boot pip install when no bundle source is configured |
 | mammoth, LanceDB, transformers.js | in `node_modules` | same |
-| Native PDF engine | optional, `DOCSLURP_NATIVE_PDF=1`; PDFs otherwise use Poppler text (and Doppler Markdown first only with `DOCSLURP_DOPPLER=1`) (PyMuPDF/pymupdf4llm and the MuPDF `mupdf-tools` apt package were removed 2026-10-15: AGPL) | same |
+| Native PDF engine | optional, `DOCSLURP_NATIVE_PDF=1`; PDFs are Doppler's (in a VM, or `doppler-md` in local mode) (PyMuPDF/pymupdf4llm and the MuPDF `mupdf-tools` apt package were removed 2026-10-15: AGPL) | same |
 | Runtime pip installs | off (`DOCSLURP_PYTHON_LAZY_INSTALL=false`) | on for the first-boot path only |
 
-### Doppler (opt-in host parsing)
+### Doppler
 
-Doppler ([DocSlurp/doppler](https://github.com/DocSlurp/doppler), GPL-2.0-or-later, the DocSlurp Poppler fork) is not in the
-default images. Build with `--build-arg DOCSLURP_DOPPLER=1` to compile it from the source pinned in `worker/doppler.json`:
-its utilities (`pdftotext`, `pdfinfo`, `pdfimages`, `pdftoppm`, `pdftohtml`, `pdfseparate`, `pdfunite`, `libpoppler`) and
-`doppler-md` / `pdftomarkdown` go under `/usr/local`, ahead of Debian's on `PATH`, and the image sets
-`DOCSLURP_DOPPLER_HOST_PDF=1`, which puts the `doppler-md` extractor first in the PDF order.
+Doppler ([DocSlurp/doppler](https://github.com/DocSlurp/doppler), GPL-2.0-or-later, the DocSlurp Poppler fork) is the PDF
+extractor. Both images build it from the source pinned in `worker/doppler.json` and install it under `/usr/lib/doppler`
+(`bin/pdftomarkdown`, `bin/doppler-md`, the fork's `pdftotext` and other utilities, `lib/libpoppler`), off `PATH`:
+`pdftomarkdown` runs the fork's `pdftotext` from beside itself, and every other host PDF tool (`pdfinfo`, `pdfimages`,
+`pdftoppm`) stays Debian's `poppler-utils`. The images set `DOCSLURP_DOPPLER_BIN_DIR=/usr/lib/doppler/bin`.
 
-This is **host parsing**: customer PDFs are read by Doppler on the worker host, inside the parser sandbox (bubblewrap), not a
-VM, and every host PDF probe (page facts, page-image evidence, renders) runs the fork instead of Debian's Poppler. Opt in
-only where you own the files and the machine. The worker refuses `DOCSLURP_DOPPLER_HOST_PDF=1` under a sandboxed PDF
-deployment (`DOCSLURP_PDF_EXTRACTOR=vm-pdf`, `DOCSLURP_VM_PDF_INSTALLED=1` or `DOCSLURP_SERVICE_PROFILE=service`), and an
-opted-in worker without `pdftomarkdown` fails the PDF rather than stepping down to Poppler text. Without the opt-in,
-`doppler-md` is never planned, probed or run, even when a workspace's extractor order names it.
+Where it runs is `DOCSLURP_PDF_MODE` ([Docker Compose](self-host/docker-compose.md#pdfs)): in a VM (`vm`, the sandboxed PDF
+provider; production) or, for customer-owned execution only, on the worker host under the parser sandbox (`local`, which needs
+`DOCSLURP_SERVICE_PROFILE=self-hosted`). With neither, PDFs are refused and no other host parser runs.
 
 ### OCR
 
@@ -132,7 +129,7 @@ Not trimmed yet (candidates):
 
 Docling was retired on 2026-10-21 because its Pillow <13 constraint prevented
 security fixes. It is no longer installed, advertised, or selected by the worker.
-Use native-pdf or Poppler text (or doppler-md, opted in) for PDF extraction. Historical Docling size
+Use Doppler (vm-pdf or doppler-md) for PDF extraction. Historical Docling size
 and timing measurements below describe the retired bundle. Only Unstructured
 is supported by the current bundle manifest.
 

@@ -74,6 +74,28 @@ bundles](../worker-image.md) for sizes, flags and building bundles yourself. To 
 docker compose --env-file .env.selfhost -f compose.selfhost.yml --profile full stop worker-full
 ```
 
+### PDFs
+
+PDFs are read by Doppler (the DocSlurp Poppler fork, `doppler-md`), and DocSlurp does not parse them on the worker host
+unless you say so. Pick one:
+
+- **A VM:** load an extractor plugin with a sandboxed PDF provider (`DOCSLURP_EXTRACTOR_PLUGINS`) and set
+  `DOCSLURP_PDF_MODE=vm`. Doppler runs in a fresh, offline VM per document. Use this whenever the files are not yours.
+- **This host, for files you own:** if you own the files you ingest and the machine that runs the worker, add to
+  `.env.selfhost`:
+
+  ```sh
+  DOCSLURP_SERVICE_PROFILE=self-hosted
+  DOCSLURP_PDF_MODE=local
+  ```
+
+  The worker then runs Doppler's `pdftomarkdown` (shipped in both worker images under `/usr/lib/doppler/bin`, off `PATH`)
+  under its parser sandbox. That sandbox is not a VM: a malicious PDF that escapes it reaches the worker's secrets.
+
+With neither, the worker starts and processes other formats, logs `[pdf] mode=off` at startup, and fails each PDF with
+`PDF extraction is not configured`. It never falls back to another parser on the host. The worker refuses to start with
+`DOCSLURP_PDF_MODE=local` outside `DOCSLURP_SERVICE_PROFILE=self-hosted`, beside a VM selection, or without Doppler.
+
 ### OCR on the full worker
 
 Neither worker OCRs by default. The full worker image bakes the local OCR runtime

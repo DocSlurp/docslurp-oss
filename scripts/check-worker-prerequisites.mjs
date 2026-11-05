@@ -58,15 +58,17 @@ for (const name of profile === 'routing' ? [] : ['mammoth', '@lancedb/lancedb'])
     await import(require.resolve(name));
   } catch (error) { failures.push(`cannot load Node package ${name}: ${error.message}`); }
 }
-// An image built with DOCSLURP_DOPPLER=1 sets DOCSLURP_DOPPLER_HOST_PDF=1 (doppler-md, host parsing opted in): the converter
-// must be present and pdftotext must be the fork, so an opted-in image never ships stock Poppler by mistake.
-if ((process.env.DOCSLURP_DOPPLER_HOST_PDF ?? '').trim() === '1') {
-  for (const name of ['pdftomarkdown', 'doppler-md', 'pdfseparate', 'pdfunite']) {
-    if (!await binaryPath(name)) failures.push(`missing Doppler executable: ${name}`);
+// Worker images ship Doppler, the default PDF extractor, under DOCSLURP_DOPPLER_BIN_DIR (/usr/lib/doppler/bin, off PATH) and set
+// DOCSLURP_DOPPLER_REQUIRED=1: the converter must be there and its pdftotext must be the fork, while pdftotext on PATH stays
+// Debian's poppler-utils (no host tool is replaced by the fork).
+if ((process.env.DOCSLURP_DOPPLER_REQUIRED ?? '').trim() === '1') {
+  const dopplerBin = (process.env.DOCSLURP_DOPPLER_BIN_DIR ?? '').trim() || '/usr/lib/doppler/bin';
+  for (const name of ['pdftomarkdown', 'doppler-md', 'pdftotext']) {
+    if (!existsSync(path.join(dopplerBin, name))) failures.push(`missing Doppler executable: ${path.join(dopplerBin, name)}`);
   }
-  const pdftotextPath = await binaryPath('pdftotext');
-  const help = pdftotextPath ? spawnSync(pdftotextPath, ['-h'], { encoding: 'utf8', timeout: 30000 }) : null;
-  if (!help || !`${help.stdout}${help.stderr}`.includes('-wordmeta')) failures.push(`pdftotext is not the Doppler fork (${pdftotextPath ?? 'not found'})`);
+  const forkHelp = spawnSync(path.join(dopplerBin, 'pdftotext'), ['-h'], { encoding: 'utf8', timeout: 30000 });
+  if (!`${forkHelp.stdout ?? ''}${forkHelp.stderr ?? ''}`.includes('-wordmeta')) failures.push(`${dopplerBin}/pdftotext is not the Doppler fork`);
+  if (await binaryPath('pdftomarkdown')) failures.push('pdftomarkdown is on PATH: Doppler must stay off PATH (DOCSLURP_DOPPLER_BIN_DIR)');
 }
 if (profile === 'full' || profile === 'test' || profile === 'lean') {
   // Every image bakes the base parsers into its venv (runtime pip installs are off).

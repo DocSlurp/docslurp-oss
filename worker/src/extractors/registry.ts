@@ -1,7 +1,7 @@
 import { sandboxedPdfProvider, VM_PDF_EXTRACTOR_ID } from "./plugins.js";
 import { open, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { builtInDocumentExtractorDescriptors, canonicalExtractorId, configureExtractorIdAliases, dopplerHostPdfEnabled, parseExtractorOptions, resolvePdfExtractorSetting, RETIRED_EXTRACTOR_IDS, sandboxedPdfConfigured, type ExtractorDescriptor } from "@docslurp/shared";
+import { builtInDocumentExtractorDescriptors, canonicalExtractorId, configureExtractorIdAliases, parseExtractorOptions, PDF_EXTRACTION_UNCONFIGURED, resolvePdfMode, RETIRED_EXTRACTOR_IDS, type ExtractorDescriptor } from "@docslurp/shared";
 import type { CommandPlan, CommandRunner } from "../tools/runner.js";
 import { planArtifactGraph, type GraphAdapter } from "./graph.js";
 import { availableLocalArtifactAdapters } from "./local-artifact-adapters.js";
@@ -166,21 +166,14 @@ const registered = [
       if (reader === "docx") return await runner.officeMarkdown("docx", source, `${source}.pandoc.md`);
       return await runner.extractMarkdown(source, reader);
     } }),
-  // Doppler's PDF Markdown: a separate executable in the parser sandbox on the worker host, so host parsing of customer
-  // PDFs. It runs only where the operator opts in (DOCSLURP_DOPPLER_HOST_PDF=1); otherwise it plans as unavailable without
-  // touching the runner, even when a workspace order names it. Opted in, a missing converter is an error, never a quiet
-  // step down to Poppler text.
+  // Doppler's PDF Markdown on the worker host (a separate executable in the parser sandbox): customer-owned local mode only
+  // (DOCSLURP_PDF_MODE=local; prepare refuses every host PDF extractor elsewhere). A missing converter is an error, never a
+  // quiet step down to another host parser.
   definition({ id: "doppler-md", tableAware: true, execute: stream,
-    prepare: async (runner, source, _config, context) => {
-      if (!dopplerHostPdfEnabled(context?.env ?? process.env)) {
-        console.warn("[extractors] doppler-md not run: it parses PDFs on the worker host and needs DOCSLURP_DOPPLER_HOST_PDF=1");
-        return { binary: "pdftomarkdown", args: [], available: false };
-      }
+    prepare: async (runner, source) => {
       const plan = await runner.dopplerMarkdown(source);
-      if (!plan.available) {
-        console.error("[extractors] doppler-md opted in (DOCSLURP_DOPPLER_HOST_PDF=1) but pdftomarkdown is not installed");
-        throw new Error("doppler-md unavailable: DOCSLURP_DOPPLER_HOST_PDF=1 but pdftomarkdown is not installed");
-      }
+      // Startup refuses local mode without the converter; one missing now is an error the ingest report shows as a fallback.
+      if (!plan.available) console.error(`[extractors] doppler-md unavailable: pdftomarkdown is not installed at ${plan.binary}`);
       return plan;
     } }),
   definition({ id: "poppler-text", execute: stream,
@@ -204,13 +197,13 @@ const registered = [
 ];
 
 /**
- * Default order per format. PDFs: the optional in-process native engine, then Poppler's text layer; `doppler-md` goes
- * first only where the operator opts in to Doppler host parsing (DOCSLURP_DOPPLER_HOST_PDF=1), and a deployment with the
- * sandboxed PDF provider (or DOCSLURP_SERVICE_PROFILE=service) replaces the order with `vm-pdf` alone (resolve). No
- * extractor here links an OCR engine: images go to the `ocr` extractor, which reads them in the configured OCR boundary.
+ * Default order per format. PDFs are Doppler's, and where they run is the PDF mode (resolvePdfMode): `vm-pdf` alone in a
+ * VM deployment; in customer-owned local mode `doppler-md`, then the in-process native engine (when installed) and Poppler
+ * text only when Doppler failed on the file, a fallback the ingest report shows per file; refused with neither (resolve),
+ * so no host parser runs. No extractor here links an OCR engine: images go to the `ocr` extractor, in the OCR boundary.
  */
 export const defaultDocumentExtractorOrder: Record<string, string[]> = {
-  pdf: ["native-pdf", "poppler-text"],
+  pdf: ["doppler-md", "native-pdf", "poppler-text"],
   image: ["ocr"],
   "structured-json": ["json"],
   "office-pptx": ["pptx"],
@@ -255,11 +248,13 @@ export class ExtractorRegistry {
   }
 
   resolve(format: string, configured?: string[]): string[] {
-    const builtIn = defaultDocumentExtractorOrder[format] ?? defaultDocumentExtractorOrder.default;
-    const base = format === "pdf" && dopplerHostPdfEnabled() ? ["doppler-md", ...builtIn] : builtIn;
-    // A sandboxed PDF deployment (DOCSLURP_PDF_EXTRACTOR=vm-pdf, DOCSLURP_VM_PDF_INSTALLED=1 or
-    // DOCSLURP_SERVICE_PROFILE=service) runs PDFs only in vm-pdf.
-    const sandboxedPdf = format === "pdf" && (resolvePdfExtractorSetting() === VM_PDF_EXTRACTOR_ID || sandboxedPdfConfigured());
+    const base = defaultDocumentExtractorOrder[format] ?? defaultDocumentExtractorOrder.default;
+    // PDFs: a VM deployment (DOCSLURP_PDF_MODE=vm, DOCSLURP_PDF_EXTRACTOR=vm-pdf, DOCSLURP_VM_PDF_INSTALLED=1 or
+    // DOCSLURP_SERVICE_PROFILE=service) runs them only in vm-pdf; with neither a VM nor local mode they are refused here,
+    // whatever a workspace names, so no host parser runs.
+    const pdfMode = format === "pdf" ? resolvePdfMode() : null;
+    if (pdfMode === "off") throw new Error(PDF_EXTRACTION_UNCONFIGURED);
+    const sandboxedPdf = pdfMode === "vm";
     const defaults = sandboxedPdf ? [VM_PDF_EXTRACTOR_ID] : base;
     // A configured legacy id (DOCSLURP_EXTRACTOR_ID_ALIASES) resolves to its canonical extractor; a retired id
     // (RETIRED_EXTRACTOR_IDS) is dropped, and an order it emptied uses the defaults. Unknown ids still throw.
@@ -292,6 +287,14 @@ export class ExtractorRegistry {
     const id = canonicalExtractorId(requested);
     const entry = this.entries.get(id);
     if (!entry) throw new Error(`unknown extractor ${id}; registered: ${[...this.entries.keys()].join(", ")}`);
+    // Host PDF parsers run only in customer-owned local mode, however they were reached (an order, a voting secondary).
+    if (context?.format === "pdf" && id !== VM_PDF_EXTRACTOR_ID) {
+      const mode = resolvePdfMode(context.env ?? process.env);
+      if (mode !== "local") {
+        console.error(`[extractors] ${id} refused for pdf: pdf mode is ${mode}; host PDF parsing needs DOCSLURP_PDF_MODE=local`);
+        throw new Error(mode === "off" ? PDF_EXTRACTION_UNCONFIGURED : `extractor ${id} refused for pdf: this deployment runs PDFs only in ${VM_PDF_EXTRACTOR_ID}`);
+      }
+    }
     const plan = await entry.prepare(runner, sourcePath, configJson, context);
     const candidate: PreparedExtractor = {
       label: id,
