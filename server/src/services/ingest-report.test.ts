@@ -286,13 +286,13 @@ describe("ingest report: failed files", () => {
     ],
   });
 
-  it("surfaces the real failure: reason, stage and a sanitized detail with no paths", () => {
+  it("surfaces the real failure: reason, stage and reviewed copy, never the stored error's text", () => {
     const report = failedImage();
     expect(report.failures).toMatchObject({ total: 1, byReason: [{ reason: "ocr_unavailable", documents: 1 }] });
     const [failure] = report.failures.examples;
     expect(failure).toMatchObject({ documentId: "shot", filename: "shot.png", stage: "extract-markdown", reason: "ocr_unavailable", retryable: false });
-    expect(failure?.detail).toContain("Error opening data file <path>");
-    expect(JSON.stringify(report)).not.toMatch(/node_modules|\/app\//);
+    expect(failure?.detail).toBeNull();
+    expect(JSON.stringify(report)).not.toMatch(/node_modules|\/app\/|Error opening data file/);
   });
 
   it("does not blame page triage or recommend vision for a file that crashed in extraction", () => {
