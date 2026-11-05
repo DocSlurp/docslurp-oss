@@ -367,7 +367,7 @@ export async function collectReport(client, { journal, acceptedPiiPatterns, extr
         ],
   ));
 
-  // 4b. Stored extraction configs naming an extractor id this build does not know.
+  // 5b. Stored extraction configs naming an extractor id this build does not know.
   const unknownExtractors = await q(
     `with configs as (
        select 'workspaces' as source, pipeline -> 'documentExtraction' as x from workspaces where jsonb_typeof(pipeline -> 'documentExtraction') = 'object'
