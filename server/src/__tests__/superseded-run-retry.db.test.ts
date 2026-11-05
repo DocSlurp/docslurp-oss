@@ -76,7 +76,8 @@ describe("retired documents stay outside run retries", () => {
     await doc('repair-d-old-completed', 'repair-terminal', 'completed', true);
     await doc('repair-e-active', 'repair-active', 'queued', true);
     const repair = readFileSync(new URL('../../db/migrations/0073_retire_superseded_pending_documents.sql', import.meta.url), 'utf8');
-    await sql.unsafe(repair);
+    // Replay the immutable historical repair against the post-cutover schema.
+    await sql.unsafe(repair.replaceAll("workspace_runs", "project_runs"));
     expect(await statuses('repair-terminal')).toEqual([
       { id: 'repair-a-old-queued', status: 'cancelled' }, { id: 'repair-b-old-processing', status: 'cancelled' },
       { id: 'repair-c-current', status: 'queued' }, { id: 'repair-d-old-completed', status: 'completed' },
