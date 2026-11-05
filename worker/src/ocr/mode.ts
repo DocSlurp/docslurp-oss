@@ -101,5 +101,21 @@ export function assertOcrConfiguration(env: NodeJS.ProcessEnv = process.env): Oc
     if (refusal) throw new Error(`${refusal}; refusing to start`);
   }
   console.log(`[ocr] mode=${mode} profile=${resolveServiceProfile(env) ?? "unset"}${mode === "vm" ? " boundary=vm" : mode === "local" ? " boundary=local-sandbox" : ""}`);
+  const longEdge = ocrLongEdgeOptIn(env);
+  if (longEdge !== null) {
+    console.warn(
+      `[ocr] long-edge-opt-in DOCSLURP_OCR_MAX_LONG_EDGE=${longEdge} (default ${OCR_LONG_EDGE_DEFAULT}): more VM time and memory per page; ` +
+        "with escalation a dense page can cost more than the Rich page it bills (pricing:validate, docs/extraction/ocr.md)",
+    );
+  }
   return mode;
+}
+
+/** The OCR long-edge default (engine.ts OCR_DEFAULT_MAX_LONG_EDGE); a larger cap is an explicit operator opt-in. */
+const OCR_LONG_EDGE_DEFAULT = 2000;
+
+/** The configured long-edge cap when it opts in above the default (up to 4000), else null. */
+export function ocrLongEdgeOptIn(env: NodeJS.ProcessEnv = process.env): number | null {
+  const parsed = Number(env.DOCSLURP_OCR_MAX_LONG_EDGE?.trim());
+  return Number.isInteger(parsed) && parsed > OCR_LONG_EDGE_DEFAULT && parsed <= 4000 ? parsed : null;
 }

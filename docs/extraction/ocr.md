@@ -75,6 +75,12 @@ most `DOCSLURP_OCR_MAX_LONG_EDGE` (default 2000 px, 640 to 4000), which bounds t
 (default 1) caps concurrent OCR jobs per worker process; plan memory as that many calls on top of the worker. In `vm`
 mode the memory is the VM's, not the worker's.
 
+A cap above the 2000 px default is an operator opt-in, off unless set. It buys detail on small print at the cost of more
+VM time and memory per page (a VM provider may need a larger size above 3000 px). A page still bills one Rich page,
+so with escalation on a dense page at a high cap can cost more than it bills: slightly loss-making. The worker logs
+`[ocr] long-edge-opt-in` at startup when it is set, `pricing:validate` reports the case as a warning, and the provider
+cost is recorded at the VM's real rate, so the provider-cost loss alert flags runs that lose money.
+
 ## Languages
 
 `DOCSLURP_OCR_LANGUAGE` is the worker's default for workspaces left on `auto`. It takes `auto` or three-letter codes
@@ -146,7 +152,7 @@ quality](../page-text-layer-quality.md)). Pages they would have checked stay unv
 | `DOCSLURP_OCR_ESCALATION_MAX_PAGES` | `25` | Hosted reads per document. |
 | `DOCSLURP_OCR_MAX_ATTEMPTS` | `3` | Recogniser attempts per page under `auto` (1 to 7). |
 | `DOCSLURP_OCR_LANGUAGE` | `auto` | Default language for workspaces left on `auto`. |
-| `DOCSLURP_OCR_MAX_LONG_EDGE` | `2000` | Long-edge cap in pixels (640 to 4000). |
+| `DOCSLURP_OCR_MAX_LONG_EDGE` | `2000` | Long-edge cap in pixels (640 to 4000). Above 2000 is an explicit opt-in (see [Sizing](#sizing)). |
 | `DOCSLURP_OCR_MAX_CONCURRENT` | `1` | Concurrent OCR jobs per worker process. |
 
 `DOCSLURP_OCR=off` no longer exists; use `DOCSLURP_OCR_MODE=off`.
