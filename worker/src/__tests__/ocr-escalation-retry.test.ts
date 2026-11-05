@@ -15,6 +15,7 @@ import { pngHeader } from "../test/fake-ocr.js";
 import { startMigratedPostgres } from "../test/migrated-postgres.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { executeVisionRuntime, VisionExecutionResult } from "../tools/vision-runtime.js";
+import { attachVisionBilledUsage } from "../tools/vision-stream.js";
 
 /**
  * OCR escalation across activity retries (migration 0129): a retried activity reuses a page's persisted read instead of
@@ -41,7 +42,7 @@ beforeAll(async () => {
   await admin`insert into "user" (id, name, email) values ('esc-u', 'U', 'esc-u@example.com')`;
   await admin`insert into organizations (id, name, slug, created_by_user_id) values ('esc-org', 'O', 'esc-org', 'esc-u')`;
   await admin`insert into workspaces (id, org_id, user_id, name) values ('esc-ws', 'esc-org', 'esc-u', 'W')`;
-  for (const id of ["esc-run-1", "esc-run-2", "esc-run-3", "esc-run-role"]) {
+  for (const id of ["esc-run-1", "esc-run-2", "esc-run-3", "esc-run-role", "esc-run-race"]) {
     await admin`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts)
       values (${id}, 'esc-org', 'esc-u', 'esc-ws', 'bulk-upload', 'processing', 'extract-markdown', '{}', '{}')`;
   }
@@ -113,7 +114,7 @@ describe("OCR escalation across activity retries", () => {
       select id, cost_cents::text, (metadata ->> 'providerCostCents')::float8 as provider_cost
       from usage_events where run_id = 'esc-run-1' and metric = 'ocr-escalation'`;
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.id).toBe("ocr-escalation:esc-run-1:doc-1:3:1");
+    expect(rows[0]!.id).toMatch(/^ocr-escalation:esc-run-1:doc-1:3:[0-9a-f-]{36}$/);
     // The loss alert reads providerCostCents: the escalation row bills 0 credits and keeps its provider cost.
     expect(Number(rows[0]!.cost_cents)).toBe(0);
     expect(rows[0]!.provider_cost).toBeGreaterThan(0);
@@ -125,25 +126,88 @@ describe("OCR escalation across activity retries", () => {
       await (args.gate as VisionRequestGate | null | undefined)?.admit();
       calls += 1;
       if (calls === 1) {
-        throw Object.assign(new Error("upstream reset after the response was billed"), {
-          visionUsage: { provider: "deepinfra", model: MODEL, inputTokens: 1_500, outputTokens: 120, costCents: 0.03, usageSource: "provider" },
-        });
+        // The production path: the vision runtime attaches the billed usage to the error it throws.
+        const error = new Error("upstream reset after the response was billed");
+        attachVisionBilledUsage(error, { inputTokens: 1_500, outputTokens: 120, costCents: 0.03, usageSource: "provider" });
+        throw error;
       }
       return success();
     });
     const first = activity("esc-run-2", execute);
     const page = { documentId: "doc-2", pageNumber: 1, imagePath: await frame("f1"), mimeType: "image/png" };
     await expect(first.reader.read(page, "ocr-escalation")).rejects.toThrow();
+    // The first activity dies before its checkpoint: only the persisted read carries the failed call's usage.
     const retry = activity("esc-run-2", execute);
     expect((await retry.reader.read({ ...page, imagePath: await frame("f2") }, "ocr-escalation")).text).toBe("Hosted transcription");
     expect(execute).toHaveBeenCalledTimes(2);
     const reads = await admin<{ attempt: number; status: string }[]>`
       select attempt, status from ocr_escalation_reads where run_id = 'esc-run-2' order by attempt`;
-    expect(reads.map((row) => row.status)).toEqual([...(reads.length === 2 ? ["failed"] : []), "completed"]);
+    expect(reads).toEqual([{ attempt: 1, status: "failed" }, { attempt: 2, status: "completed" }]);
+    // A third activity replays both persisted calls; persisting twice records each exactly once.
+    for (const replayed of [retry, activity("esc-run-2", execute)]) {
+      if (replayed !== retry) await replayed.reader.read({ ...page, imagePath: await frame("f3") }, "ocr-escalation");
+      const batch = replayed.state.usageLedger.checkpoint();
+      await persistRunUsageEvents({ client: sql(replayed.store), state: replayed.state, usageEvents: batch.events });
+      batch.commit();
+    }
+    expect(execute).toHaveBeenCalledTimes(2);
+    const receipts = await admin<{ metric: string; input_tokens: number; output_tokens: number; cost_cents: string; provider_cost: number }[]>`
+      select metric, input_tokens, output_tokens, cost_cents::text, (metadata ->> 'providerCostCents')::float8 as provider_cost
+      from usage_events where run_id = 'esc-run-2' and metric in ('page-analysis-attempt', 'ocr-escalation') order by metric`;
+    expect(receipts).toHaveLength(2);
+    expect(receipts[0]).toMatchObject({ metric: "ocr-escalation", input_tokens: 1_500, output_tokens: 400 });
+    expect(receipts[0]!.provider_cost).toBeGreaterThan(0);
+    expect(receipts[1]).toMatchObject({ metric: "page-analysis-attempt", input_tokens: 1_500, output_tokens: 120 });
+    expect(receipts[1]!.provider_cost).toBeCloseTo(0.03);
     // Both calls were admitted by the durable guard: they count against the document's attempt budget.
     const [attempts] = await admin<{ attempts: number }[]>`
       select coalesce(sum(attempts), 0)::int as attempts from vision_run_attempts where run_id = 'esc-run-2' and document_id = 'doc-2' and purpose = 'ocr'`;
     expect(attempts?.attempts).toBe(2);
+  }, 60_000);
+
+  it("two overlapping calls of the same page both persist and both ledger their cost, within the attempt budget", async () => {
+    // A barrier: both calls are in flight (both have read the page's persisted rows) before either returns.
+    let arrived = 0;
+    let sent = 0;
+    let release!: () => void;
+    const together = new Promise<void>((resolve) => { release = resolve; });
+    const execute = vi.fn(async (args: Parameters<typeof executeVisionRuntime>[0]) => {
+      await (args.gate as VisionRequestGate | null | undefined)?.admit();
+      sent += 1; // past the durable guard's admission
+      arrived += 1;
+      if (arrived === 2) release();
+      await together;
+      return success();
+    });
+    const env = { DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS: "2" };
+    const page = { documentId: "doc-race", pageNumber: 1, mimeType: "image/png" };
+    const a = activity("esc-run-race", execute, env);
+    const b = activity("esc-run-race", execute, env);
+    const [ra, rb] = await Promise.all([
+      a.reader.read({ ...page, imagePath: await frame("race-a") }, "ocr-escalation"),
+      b.reader.read({ ...page, imagePath: await frame("race-b") }, "ocr-escalation"),
+    ]);
+    expect([ra.text, rb.text]).toEqual(["Hosted transcription", "Hosted transcription"]);
+    expect(sent).toBe(2);
+    const reads = await admin<{ attempt: number; status: string }[]>`
+      select attempt, status from ocr_escalation_reads where run_id = 'esc-run-race' order by attempt`;
+    expect(reads).toEqual([{ attempt: 1, status: "completed" }, { attempt: 2, status: "completed" }]);
+    for (const done of [a, b]) {
+      const batch = done.state.usageLedger.checkpoint();
+      await persistRunUsageEvents({ client: sql(done.store), state: done.state, usageEvents: batch.events });
+      batch.commit();
+    }
+    const receipts = await admin<{ id: string; provider_cost: number }[]>`
+      select id, (metadata ->> 'providerCostCents')::float8 as provider_cost from usage_events where run_id = 'esc-run-race' and metric = 'ocr-escalation'`;
+    expect(new Set(receipts.map((row) => row.id)).size).toBe(2);
+    for (const row of receipts) expect(row.provider_cost).toBeGreaterThan(0);
+    // The budget held: two admitted calls, and a third is refused before the provider.
+    const [attempts] = await admin<{ attempts: number }[]>`
+      select coalesce(sum(attempts), 0)::int as attempts from vision_run_attempts where run_id = 'esc-run-race' and document_id = 'doc-race' and purpose = 'ocr'`;
+    expect(attempts?.attempts).toBe(2);
+    await expect(activity("esc-run-race", execute, env).reader.read({ ...page, pageNumber: 2, imagePath: await frame("race-c") }, "ocr-escalation"))
+      .rejects.toMatchObject({ name: "HostedOcrSkipped", reason: "budget" });
+    expect(sent).toBe(2); // the third request was refused at admission, before the provider
   }, 60_000);
 
   it("refuses a call past the document's total attempt budget, retries included", async () => {

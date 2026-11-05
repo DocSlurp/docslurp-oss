@@ -2774,12 +2774,21 @@ export class Store {
     }));
   }
 
-  async recordOcrEscalationRead(row: import("../pipeline/pipeline.js").OcrEscalationReadRow & { runId: string; documentId: string; pageNumber: number }): Promise<void> {
-    await this.sql`
-      insert into ocr_escalation_reads (run_id, document_id, page_number, attempt, status, text, model, usage_events)
-      values (${row.runId}, ${row.documentId}, ${row.pageNumber}, ${row.attempt}, ${row.status}, ${row.text}, ${row.model},
-        ${this.sql.json(JSON.parse(JSON.stringify(row.usageEvents)))})
-      on conflict (run_id, document_id, page_number, attempt) do nothing`;
+  async recordOcrEscalationRead(row: Omit<import("../pipeline/pipeline.js").OcrEscalationReadRow, "attempt"> & { runId: string; documentId: string; pageNumber: number }): Promise<number> {
+    const events = this.sql.json(JSON.parse(JSON.stringify(row.usageEvents)));
+    // The next attempt number in the same statement as the insert; a concurrent call that took it first makes this insert a
+    // no-op, and the loop takes the one after. Each call's usage events carry their own unique ids, so none is lost either way.
+    for (let tries = 0; tries < 16; tries += 1) {
+      const inserted = await this.sql<{ attempt: number }[]>`
+        insert into ocr_escalation_reads (run_id, document_id, page_number, attempt, status, text, model, usage_events)
+        select ${row.runId}, ${row.documentId}, ${row.pageNumber},
+          coalesce((select max(attempt) from ocr_escalation_reads where run_id = ${row.runId} and document_id = ${row.documentId} and page_number = ${row.pageNumber}), 0) + 1,
+          ${row.status}, ${row.text}, ${row.model}, ${events}
+        on conflict (run_id, document_id, page_number, attempt) do nothing
+        returning attempt`;
+      if (inserted.length > 0) return Number(inserted[0]!.attempt);
+    }
+    throw new Error(`could not persist an OCR escalation read for ${row.documentId} page ${row.pageNumber}: attempt numbers kept colliding`);
   }
 
   /** The largest n in 1..max whose `creditsFor(n)` the org's balance covers (spend-check.ts largestFundedCharge); read-only. */

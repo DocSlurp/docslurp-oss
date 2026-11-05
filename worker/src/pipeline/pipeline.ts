@@ -82,8 +82,11 @@ export interface CheckpointStore {
   pauseRunForSpend?(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, reason: string): Promise<{ paused: boolean; blocked: boolean }>;
   /** This run's persisted OCR escalation reads of a page, oldest first (migration 0129). */
   ocrEscalationReads?(runId: string, documentId: string, pageNumber: number): Promise<OcrEscalationReadRow[]>;
-  /** Persist one OCR escalation call as soon as it returns; a replayed attempt number is a no-op. */
-  recordOcrEscalationRead?(row: OcrEscalationReadRow & { runId: string; documentId: string; pageNumber: number }): Promise<void>;
+  /**
+   * Persist one OCR escalation call as soon as it returns, under the next free attempt number (assigned atomically, so
+   * concurrent calls of a page never share one); returns that number.
+   */
+  recordOcrEscalationRead?(row: Omit<OcrEscalationReadRow, "attempt"> & { runId: string; documentId: string; pageNumber: number }): Promise<number>;
   /** The largest n in 1..max whose `creditsFor(n)` the org's balance covers; read-only (nothing is paused). */
   largestFundedCharge?(run: { id: string; orgId: string | null; workspaceId?: string | null }, max: number, creditsFor: (n: number) => number): Promise<number>;
   /** The run's measured documents (billing_pages set) that still bill at completion, for the cumulative page-count spend check. */

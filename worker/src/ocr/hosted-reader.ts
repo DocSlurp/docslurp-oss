@@ -8,6 +8,7 @@
  * by signature and size only), and a hosted-mode image is the stored file as uploaded. Neither is a substitute for a
  * missing VM: escalation only follows a VM (or self-hosted) read, and hosted mode is its own operator setting.
  */
+import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { resolveVisionRoute, type VisionConfig } from "@docslurp/shared";
 import type { UsageEvent } from "../models.js";
@@ -121,23 +122,23 @@ export function createHostedOcrReader(args: {
       // its provider cost is recorded exactly once even when the activity that made it never reached its checkpoint.
       const store = state.store;
       const durable = purpose === "ocr-escalation" && store?.ocrEscalationReads && store.recordOcrEscalationRead ? store : null;
-      let attempt = 1;
       if (durable) {
         const prior = await durable.ocrEscalationReads!(state.run.id, page.documentId, page.pageNumber);
         const pending = new Set(state.usageLedger.snapshot().map((event) => event.id));
         for (const row of prior) for (const event of row.usageEvents) if (event.id && !pending.has(event.id)) state.usageLedger.enqueue(event);
-        attempt = prior.reduce((max, row) => Math.max(max, row.attempt), 0) + 1;
         const done = prior.find((row) => row.status === "completed" && row.text !== null);
         if (done) {
           console.log(`[ocr] ${purpose} reused document=${page.documentId} page=${page.pageNumber} attempt=${done.attempt}: no new provider call`);
           return { text: done.text!, model: done.model, inputTokens: 0, outputTokens: 0, costCents: 0 };
         }
       }
-      const callId = `${purpose}:${state.run.id}:${page.documentId}:${page.pageNumber}:${attempt}`;
+      // Unique per real call: two calls of the same page (overlapping activities) never share a usage id, so neither's cost
+      // is dropped by the ledger's id dedup. Replays reuse the ids persisted with the call.
+      const callId = `${purpose}:${state.run.id}:${page.documentId}:${page.pageNumber}:${randomUUID()}`;
       const persist = async (status: "completed" | "failed", text: string | null, model: string, events: Array<UsageEvent | null>) => {
         if (!durable) return;
         await durable.recordOcrEscalationRead!({
-          runId: state.run.id, documentId: page.documentId, pageNumber: page.pageNumber, attempt, status, text, model,
+          runId: state.run.id, documentId: page.documentId, pageNumber: page.pageNumber, status, text, model,
           usageEvents: events.filter((event): event is UsageEvent => event !== null),
         });
       };
