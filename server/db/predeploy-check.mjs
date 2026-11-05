@@ -91,7 +91,7 @@ export function oneOrgPlanSql(migrationSql, { webhooksHaveOrg = true } = {}) {
   const call = "docslurp_personal_org_is_empty(candidate.id)";
   const plan = between(migrationSql, "one-org-plan");
   if (!plan.includes(call)) throw new Error(`the 0127 plan no longer calls ${call}`);
-  return { plan: plan.replace(call, `(${body})`), promotions: between(migrationSql, "one-org-promotions"), ack: between(migrationSql, "one-org-ack") };
+  return { plan: plan.replace(call, `(${body})`), promotions: between(migrationSql, "one-org-promotions"), ownerless: between(migrationSql, "one-org-ownerless"), ack: between(migrationSql, "one-org-ack") };
 }
 
 /**
@@ -126,7 +126,7 @@ async function loadAcceptedPiiPatterns() {
   return options;
 }
 
-async function oneOrgSection(q, { plan, promotions, ack }, ack0127, redact) {
+async function oneOrgSection(q, { plan, promotions, ownerless: ownerlessSql, ack }, ack0127, redact) {
   const name = namer(redact);
   const removed = await q(
     `with removed_memberships as (${plan})
@@ -163,6 +163,11 @@ async function oneOrgSection(q, { plan, promotions, ack }, ack0127, redact) {
   );
   // The acknowledgement the migration itself demands: its own SQL, so the hash printed here is the one it compares.
   const [needed] = await q(`with removed_memberships as (${plan}), owner_promotions as (${promotions}) ${ack}`);
+  // Organizations the migration refuses to leave with members but no owner (it aborts while any exists).
+  const unownable = await q(
+    `with removed_memberships as (${plan}), owner_promotions as (${promotions}), ownerless as (${ownerlessSql})
+     select x.org_id, x.is_personal, x.members_left, o.name as org_name from ownerless x join organizations o on o.id = x.org_id order by x.org_id`,
+  );
   const users = new Map();
   const promotedOrgIds = new Set(promoted.map((row) => row.org_id));
   for (const row of removed) {
@@ -179,12 +184,11 @@ async function oneOrgSection(q, { plan, promotions, ack }, ack0127, redact) {
   const promotedOrgs = new Set(promoted.map((row) => row.org_id));
   const live = removed.filter((row) => row.reason === "not_kept");
   const memberless = [...new Map(live.filter((row) => row.members_left === 0).map((row) => [row.org_id, row])).values()];
-  const ownerless = [...new Map(live.filter((row) => row.members_left > 0 && row.owners_left === 0 && row.role === "owner" && !promotedOrgs.has(row.org_id)).map((row) => [row.org_id, row])).values()];
   const funded = live.filter((row) => row.funded);
   const memberPromotions = promoted.filter((row) => row.previous_role === "member");
   const hash = needed?.hash ?? null;
-  if (hash && (needed.funded_removals !== funded.length || needed.member_promotions !== memberPromotions.length)) {
-    throw new Error(`0127 acknowledgement list (${needed.funded_removals} funded removal(s), ${needed.member_promotions} member promotion(s)) disagrees with the report (${funded.length}, ${memberPromotions.length})`);
+  if (hash && (needed.funded_removals !== funded.length || needed.promotions !== promoted.length || needed.member_promotions !== memberPromotions.length)) {
+    throw new Error(`0127 acknowledgement list (${needed.funded_removals} funded removal(s), ${needed.promotions} promotion(s), ${needed.member_promotions} of members) disagrees with the report (${funded.length}, ${promoted.length}, ${memberPromotions.length})`);
   }
   const acknowledged = hash !== null && ack0127 === hash;
   const count = (reason) => removed.filter((row) => row.reason === reason).length;
@@ -192,8 +196,8 @@ async function oneOrgSection(q, { plan, promotions, ack }, ack0127, redact) {
   const listed = userLines.length > MAX_LISTED ? [...userLines.slice(0, MAX_LISTED), `... and ${userLines.length - MAX_LISTED} more user(s)`] : userLines;
   return section(
     `Memberships beyond one per user (0127): ${users.size} user(s), ${removed.length} membership(s) to remove`,
-    hash && !acknowledged ? "blocker" : removed.length > 0 ? "warn" : "ok",
-    removed.length === 0
+    unownable.length > 0 || (hash && !acknowledged) ? "blocker" : removed.length > 0 || promoted.length > 0 ? "warn" : "ok",
+    removed.length === 0 && promoted.length === 0 && unownable.length === 0
       ? ["None. Every user belongs to at most one live organization."]
       : [
           `${count("deleted_organization")} in tombstoned organizations; ${count("empty_personal_organization")} in empty personal organizations (DELETED with the organization and its empty workspaces, backed up to organizations_removed_backup);`,
@@ -202,15 +206,16 @@ async function oneOrgSection(q, { plan, promotions, ack }, ack0127, redact) {
           funded.length === 0
             ? "No user is removed from a funded organization."
             : `${funded.length} removal(s) from a FUNDED organization (paid balance or auto top-up): ${funded.map((row) => `${name.user(row)} from ${row.org_id}`).join(", ")}.`,
+          ...(unownable.length === 0 ? [] : [`0127 WILL ABORT: ${unownable.length} organization(s) would keep members but no owner and cannot be given one (personal organizations are never handed to another user): ${unownable.map((row) => `${name.org(row.org_id, row.org_name)} (${row.members_left} member(s) left)`).join(", ")}. Resolve each (restore its owner, or remove or move the other members) and re-run this check.`]),
+          ...(promoted.length === 0 ? [] : [`${promoted.length} promotion(s) to OWNER, each in the acknowledgement: ${promoted.map((row) => `${name.user(row)} in ${row.org_id} (was ${row.previous_role})`).join(", ")}.`]),
           ...(memberPromotions.length === 0 ? [] : [`${memberPromotions.length} plain member(s) promoted to OWNER: ${memberPromotions.map((row) => `${name.user(row)} in ${row.org_id}`).join(", ")}.`]),
           ...(hash === null
             ? []
             : [acknowledged
                 ? `Acknowledged with --ack-0127=${hash}; run the migrator with DOCSLURP_ACK_0127=${hash}.`
-                : `BLOCKER until an owner reviews the funded removals and member promotions above and re-runs with --ack-0127=${hash}; 0127 itself refuses to run unless the migrator has DOCSLURP_ACK_0127=${hash} (the hash changes when the list does).`]),
+                : `BLOCKER until an owner reviews the funded removals and promotions above and re-runs with --ack-0127=${hash}; 0127 itself refuses to run unless the migrator has DOCSLURP_ACK_0127=${hash} (the hash changes when the list does).`]),
           ...(promoted.length === 0 ? [] : [`Owner promoted (the last owner is removed and members remain): ${promoted.map((row) => `${row.org_id} -> ${name.user(row)} (was ${row.previous_role})`).join(", ")}.`]),
           ...(memberless.length === 0 ? [] : [`Left with NO member (data kept, nobody can reach it until an operator restores a membership from the backup): ${memberless.map((row) => name.org(row.org_id, row.org_name)).join(", ")}.`]),
-          ...(ownerless.length === 0 ? [] : [`Left without an owner (personal organizations are never promoted): ${ownerless.map((row) => row.org_id).join(", ")}.`]),
           ...listed,
         ],
   );

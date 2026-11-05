@@ -14,15 +14,17 @@
 --      longest-standing membership, then the organization id. The others are removed and handled as a member removal
 --      (organizations.ts mutateMembership): the user's API keys and MCP grants there are revoked and their direct
 --      workspace shares there deleted.
---   4. No live team organization is left without an owner. When rule 3 removes an organization's last owner(s) and members
---      remain, its longest-standing admin, else its longest-standing member, is promoted to owner (audit_log
+--   4. No live organization is left with members but no owner, and nobody becomes an owner unacknowledged. Every live
+--      team organization that, after rules 1-3, has members but no owner (whether rule 3 removed its last owner or it had
+--      none) has its longest-standing admin, else its longest-standing member, promoted to owner (audit_log
 --      'organization.member.promoted_to_owner'). Workspaces a removed user owned there pass to its longest-standing owner,
---      the promoted one included. An organization with no member left keeps its data and has no owner; the pre-deploy
---      report lists it.
---   5. Acknowledgement. A removal from a funded organization and the promotion of a plain member to owner need an owner's
---      review: the pre-deploy report lists them as a BLOCKER with a hash of exactly that list, and this migration refuses to
---      run unless the session setting docslurp.ack_0127 holds the same hash (server/db/migrate.mjs sets it from
---      DOCSLURP_ACK_0127). A missing or stale acknowledgement aborts the whole migration run and changes nothing.
+--      the promoted one included. A live personal organization in that state (its owner leaves, a guest stays) is never
+--      given another user as owner: the migration aborts and names it, and an operator resolves it first. An organization
+--      with no member left keeps its data and has no owner; the pre-deploy report lists it.
+--   5. Acknowledgement. A removal from a funded organization and every promotion to owner need an owner's review (a plain
+--      member promoted is called out): the pre-deploy report lists them as a BLOCKER with a hash of exactly that list, and
+--      this migration refuses to run unless the session setting docslurp.ack_0127 holds the same hash (server/db/migrate.mjs
+--      sets it from DOCSLURP_ACK_0127). A missing or stale acknowledgement aborts the whole migration run and changes nothing.
 -- A unique index then refuses a second membership.
 --
 -- Locks: the release's lock prelude, the same in every lock-taking migration of it (0122, 0123, 0125, 0126, 0127; see 0122).
@@ -146,19 +148,14 @@ UNION ALL SELECT org_id, user_id, 'not_kept'::text FROM ranked WHERE position > 
 -- one-org-plan:end
 ;
 --> statement-breakpoint
--- Rule 4: one promotion per live team organization whose last owner(s) rule 3 removes and that keeps members. Computed before
--- any row changes, from the same state the plan saw. Read verbatim by predeploy-check.mjs.
+-- Rule 4: one promotion per live team organization that keeps members but no owner after rules 1-3. Computed before any
+-- row changes, from the same state the plan saw. Read verbatim by predeploy-check.mjs.
 CREATE TEMP TABLE owner_promotions ON COMMIT DROP AS
 -- one-org-promotions:begin
 SELECT DISTINCT ON (om.org_id) om.org_id, om.user_id, om.role AS previous_role
 FROM org_memberships om
 JOIN organizations o ON o.id = om.org_id AND o.deleted_at IS NULL AND NOT o.is_personal
-WHERE EXISTS (
-    SELECT 1 FROM removed_memberships gone
-    JOIN org_memberships was ON was.org_id = gone.org_id AND was.user_id = gone.user_id
-    WHERE gone.org_id = om.org_id AND gone.reason = 'not_kept' AND was.role = 'owner'
-  )
-  AND NOT EXISTS (SELECT 1 FROM removed_memberships gone WHERE gone.org_id = om.org_id AND gone.user_id = om.user_id)
+WHERE NOT EXISTS (SELECT 1 FROM removed_memberships gone WHERE gone.org_id = om.org_id AND gone.user_id = om.user_id)
   AND NOT EXISTS (
     SELECT 1 FROM org_memberships owner
     WHERE owner.org_id = om.org_id AND owner.role = 'owner'
@@ -168,21 +165,51 @@ ORDER BY om.org_id, CASE om.role WHEN 'admin' THEN 0 ELSE 1 END, om.created_at, 
 -- one-org-promotions:end
 ;
 --> statement-breakpoint
+-- Rule 4's limit: live organizations that would keep members but no owner and get no promotion (personal ones). Read
+-- verbatim by predeploy-check.mjs. The migration aborts while any exists.
+CREATE TEMP TABLE ownerless_organizations ON COMMIT DROP AS
+-- one-org-ownerless:begin
+SELECT o.id AS org_id, o.is_personal,
+  (SELECT count(*) FROM org_memberships m WHERE m.org_id = o.id
+     AND NOT EXISTS (SELECT 1 FROM removed_memberships gone WHERE gone.org_id = m.org_id AND gone.user_id = m.user_id))::int AS members_left
+FROM organizations o
+WHERE o.deleted_at IS NULL
+  AND EXISTS (SELECT 1 FROM org_memberships m WHERE m.org_id = o.id
+    AND NOT EXISTS (SELECT 1 FROM removed_memberships gone WHERE gone.org_id = m.org_id AND gone.user_id = m.user_id))
+  AND NOT EXISTS (SELECT 1 FROM org_memberships m WHERE m.org_id = o.id AND m.role = 'owner'
+    AND NOT EXISTS (SELECT 1 FROM removed_memberships gone WHERE gone.org_id = m.org_id AND gone.user_id = m.user_id))
+  AND NOT EXISTS (SELECT 1 FROM owner_promotions p WHERE p.org_id = o.id)
+-- one-org-ownerless:end
+;
+--> statement-breakpoint
+DO $$
+DECLARE listed text; total int;
+BEGIN
+  SELECT count(*), string_agg(org_id, ', ' ORDER BY org_id) FILTER (WHERE rn <= 50) INTO total, listed
+  FROM (SELECT org_id, row_number() OVER (ORDER BY org_id) AS rn FROM ownerless_organizations) x;
+  IF total > 0 THEN
+    RAISE EXCEPTION '0127 refused: % organization(s) would keep members but no owner and cannot be given one: %', total, listed
+      USING HINT = 'These are personal organizations whose owner leaves while another member stays. Resolve each (restore its owner, or remove or move the other members), then re-run node server/db/predeploy-check.mjs.';
+  END IF;
+END $$;
+--> statement-breakpoint
 -- Rule 5: what needs an owner's acknowledgement, and the hash of exactly that list. Read verbatim by predeploy-check.mjs,
 -- which prints the hash; keep it one SELECT over removed_memberships and owner_promotions.
 CREATE TEMP TABLE one_org_ack ON COMMIT DROP AS
 -- one-org-ack:begin
 SELECT count(*) FILTER (WHERE item.kind = 'funded_removal')::int AS funded_removals,
-  count(*) FILTER (WHERE item.kind = 'member_promotion')::int AS member_promotions,
+  count(*) FILTER (WHERE item.kind = 'owner_promotion')::int AS promotions,
+  count(*) FILTER (WHERE item.kind = 'owner_promotion' AND item.previous_role = 'member')::int AS member_promotions,
   CASE WHEN count(*) = 0 THEN NULL ELSE left(encode(sha256(convert_to(
-    string_agg(item.kind || E'\t' || item.user_id || E'\t' || item.org_id, E'\n' ORDER BY item.kind || E'\t' || item.user_id || E'\t' || item.org_id COLLATE "C"),
+    string_agg(item.kind || E'\t' || item.user_id || E'\t' || item.org_id || E'\t' || item.previous_role, E'\n'
+      ORDER BY item.kind || E'\t' || item.user_id || E'\t' || item.org_id || E'\t' || item.previous_role COLLATE "C"),
     'UTF8')), 'hex'), 16) END AS hash
 FROM (
-  SELECT 'funded_removal'::text AS kind, gone.user_id, gone.org_id
+  SELECT 'funded_removal'::text AS kind, gone.user_id, gone.org_id, ''::text AS previous_role
   FROM removed_memberships gone JOIN organizations o ON o.id = gone.org_id
   WHERE gone.reason = 'not_kept' AND (o.funded_at IS NOT NULL OR coalesce(o.auto_recharge_enabled, false))
   UNION ALL
-  SELECT 'member_promotion'::text, p.user_id, p.org_id FROM owner_promotions p WHERE p.previous_role = 'member'
+  SELECT 'owner_promotion'::text, p.user_id, p.org_id, p.previous_role FROM owner_promotions p
 ) item
 -- one-org-ack:end
 ;
@@ -194,10 +221,10 @@ DECLARE
 BEGIN
   SELECT * INTO need FROM one_org_ack;
   IF need.hash IS NOT NULL AND given IS NULL THEN
-    RAISE EXCEPTION '0127 refused: it would remove % membership(s) from funded organizations and promote % plain member(s) to owner without an acknowledgement', need.funded_removals, need.member_promotions
+    RAISE EXCEPTION '0127 refused: it would remove % membership(s) from funded organizations and promote % member(s) to owner (% of them plain members) without an acknowledgement', need.funded_removals, need.promotions, need.member_promotions
       USING HINT = 'Review the list with node server/db/predeploy-check.mjs, then run the migrator with DOCSLURP_ACK_0127 set to the hash it prints.';
   ELSIF need.hash IS NOT NULL AND given IS DISTINCT FROM need.hash THEN
-    RAISE EXCEPTION '0127 refused: DOCSLURP_ACK_0127=% does not match the current plan (% funded removal(s), % member promotion(s)); the data changed since it was reviewed', left(given, 64), need.funded_removals, need.member_promotions
+    RAISE EXCEPTION '0127 refused: DOCSLURP_ACK_0127=% does not match the current plan (% funded removal(s), % promotion(s) to owner, % of them plain members); the data changed since it was reviewed', left(given, 64), need.funded_removals, need.promotions, need.member_promotions
       USING HINT = 'Re-run node server/db/predeploy-check.mjs, review the new list and acknowledge its hash.';
   END IF;
 END $$;

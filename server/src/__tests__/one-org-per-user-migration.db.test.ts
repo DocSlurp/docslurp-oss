@@ -230,6 +230,8 @@ describe("pre-deploy report of 0127", () => {
     expect(text).toContain(`z@example.test (only-tomb): keeps NO organization`);
     expect(text).toContain("Owner promoted (the last owner is removed and members remain): t3 -> a3@example.test (t3-admin) (was admin), t5 -> m5a@example.test (t5-old) (was member).");
     expect(text).toContain("1 plain member(s) promoted to OWNER: m5a@example.test (t5-old) in t5.");
+    // Every promotion is in the acknowledgement, the admin's too.
+    expect(text).toContain("2 promotion(s) to OWNER, each in the acknowledgement: a3@example.test (t3-admin) in t3 (was admin), m5a@example.test (t5-old) in t5 (was member).");
     expect(text).toContain(`Left with NO member (data kept, nobody can reach it until an operator restores a membership from the backup): "P" (p-data).`);
   });
 
@@ -260,7 +262,7 @@ describe("pre-deploy report of 0127", () => {
   });
 
   it("refuses to run 0127 without the acknowledgement, or with a stale one, and changes nothing", () => {
-    expect(String(unacknowledgedError)).toMatch(/0127 refused: it would remove 1 membership\(s\) from funded organizations and promote 1 plain member\(s\) to owner/);
+    expect(String(unacknowledgedError)).toMatch(/0127 refused: it would remove 1 membership\(s\) from funded organizations and promote 2 member\(s\) to owner \(1 of them plain members\)/);
   });
 
   it("counted the rows the migration then changed", () => {

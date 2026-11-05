@@ -6,8 +6,8 @@ export type MigrationJournal = { entries?: Array<{ tag: string; when: number }> 
 export declare function pendingMigrations(journal: MigrationJournal, newestAppliedMs: number): string[];
 export declare function section(title: string, level: ReportLevel, lines: string[]): ReportSection;
 export declare function render(sections: ReportSection[]): string;
-/** 0127's plan, promotion and acknowledgement queries, read from the migration. `ack` selects funded_removals, member_promotions and hash. */
-export declare function oneOrgPlanSql(migrationSql: string, options?: { webhooksHaveOrg?: boolean }): { plan: string; promotions: string; ack: string };
+/** 0127's plan, promotion and acknowledgement queries, read from the migration. `ack` selects funded_removals, promotions, member_promotions and hash; `ownerless` the organizations 0127 refuses to leave ownerless. */
+export declare function oneOrgPlanSql(migrationSql: string, options?: { webhooksHaveOrg?: boolean }): { plan: string; promotions: string; ownerless: string; ack: string };
 export declare function namer(redact: boolean): { user: (row: { user_id: string; email: string }) => string; org: (id: string, name: string) => string };
 export declare function redactOutput(argv: readonly string[], isTTY: boolean | undefined): boolean;
 export declare function knownExtractorIds(builtInIds: readonly string[], env?: Record<string, string | undefined>): string[];
