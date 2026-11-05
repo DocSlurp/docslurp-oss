@@ -90,6 +90,7 @@ async function harness(args: {
       configs.dolphin = configJson;
       return { binary: "python", args: [], available: true };
     },
+    dopplerMarkdown: async () => ({ binary: "pdftomarkdown", args: [], available: false }),
     extractText: async () => ({ binary: "pdftotext", args: [], available: true }),
   } as unknown as CommandRunner & typeof ocr.runner;
   const stage = new ExtractMarkdownStage(runner, storage as any, {} as any);

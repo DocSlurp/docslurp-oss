@@ -135,6 +135,12 @@ export const builtInDocumentExtractorDescriptors: ExtractorDescriptor[] = [
     capabilities: { formats: ["pdf"], produces: ["markdown", "pages", "links", "images"], costClass: "local-cpu" },
   },
   {
+    id: "doppler-md", kind: "document", label: "Doppler Markdown",
+    description: "Layout-aware PDF Markdown (headings, tables, reading order) from Doppler, the DocSlurp Poppler fork, run as a sandboxed executable; one page per form feed.",
+    transforms: [{ accepts: ["source/pdf"], emits: ["document/markdown"], scope: "document" }],
+    capabilities: { formats: ["pdf"], produces: ["markdown", "pages", "tables", "headings"], costClass: "local-cpu" },
+  },
+  {
     id: "poppler-text", kind: "document", label: "Poppler text",
     description: "Local PDF text extraction with Poppler.",
     transforms: [{ accepts: ["source/pdf"], emits: ["document/text"], scope: "document" }],

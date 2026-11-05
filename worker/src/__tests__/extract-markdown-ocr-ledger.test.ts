@@ -60,6 +60,7 @@ async function harness(args: {
   const ocr = fakeOcrRunner(args.frames ?? ((job) => (job.pages ?? [1]).map((frame) => ({ frame, text: `OCR words ${frame}` }))));
   const runner = {
     ...ocr.runner,
+    dopplerMarkdown: async () => ({ binary: "pdftomarkdown", args: [], available: false }),
     extractText: async () => ({ binary: "pdftotext", args: [], available: true }),
     pageText: async () => ({ binary: "pdftotext", args: [], available: false }),
   } as unknown as CommandRunner & typeof ocr.runner;

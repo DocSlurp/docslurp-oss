@@ -1,7 +1,7 @@
 # Dockerfile.lean - Production worker image (fly.worker.toml)
 #
 # Contents: Node 24 + the worker's production node_modules (pnpm deploy, pruned),
-# poppler-utils (with poppler-data CMaps), cwebp (lossless WebP page images), pandoc, ffmpeg, ClamAV, bubblewrap, and a wheel-only Python venv
+# Doppler (the DocSlurp Poppler fork, built from worker/doppler.json; with poppler-data CMaps), cwebp (lossless WebP page images), pandoc, ffmpeg, ClamAV, bubblewrap, and a wheel-only Python venv
 # with the base parsers (trafilatura, ebooklib, python-pptx,
 # openpyxl, xlsx2csv, Pillow; PDFs use Poppler, the optional native-pdf engine or the sandboxed PDF provider). No LibreOffice or ML stacks: Docling and
 # Unstructured come from sha256-pinned vendor bundles fetched on demand
@@ -85,6 +85,48 @@ RUN node -e ' \
       }).catch((e) => { console.error(e.message); process.exit(1); });' "${TARGETARCH}" \
     && /usr/local/bin/landrun --version
 
+# Doppler (DocSlurp/doppler, GPL-2.0-or-later): the Poppler fork's command-line utilities and the doppler-md /
+# pdftomarkdown converter, built from the public source pinned in worker/doppler.json (sha256-verified). They replace
+# Debian's poppler-utils and run only as separate executables in the parser sandbox; nothing links them.
+FROM node:24-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446 AS doppler-src
+COPY worker/doppler.json /tmp/doppler.json
+RUN node -e ' \
+      const fs = require("node:fs"); const crypto = require("node:crypto"); \
+      const pin = JSON.parse(fs.readFileSync("/tmp/doppler.json", "utf8")).source; \
+      fetch(pin.url).then((r) => { if (!r.ok) throw new Error("doppler source download failed: " + r.status); return r.arrayBuffer(); }).then((buf) => { \
+        const data = Buffer.from(buf); \
+        const sum = crypto.createHash("sha256").update(data).digest("hex"); \
+        if (sum !== pin.sha256) throw new Error("doppler source sha256 mismatch: " + sum); \
+        fs.writeFileSync("/tmp/doppler-src.tar.gz", data); \
+      }).catch((e) => { console.error(e.message); process.exit(1); });' \
+    && mkdir -p /src \
+    && tar -xzf /tmp/doppler-src.tar.gz -C /src \
+    && mv "/src/$(node -p 'require("/tmp/doppler.json").source.prefix')" /src/doppler
+
+FROM node:24-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446 AS doppler-utils
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      build-essential cmake ninja-build pkg-config ca-certificates \
+      libfreetype-dev libfontconfig-dev libjpeg-dev libopenjp2-7-dev libpng-dev \
+      libtiff-dev liblcms2-dev zlib1g-dev libboost-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=doppler-src /src/doppler /src/doppler
+RUN cmake -S /src/doppler -B /src/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_RPATH=/usr/local/lib -DPOPPLER_DATADIR=/usr/share/poppler \
+      -DENABLE_QT5=OFF -DENABLE_QT6=OFF -DENABLE_GLIB=OFF -DENABLE_GOBJECT_INTROSPECTION=OFF \
+      -DENABLE_CPP=OFF -DENABLE_NSS3=OFF -DENABLE_GPGME=OFF -DENABLE_LIBCURL=OFF \
+      -DENABLE_BROTLI=OFF -DENABLE_HARFBUZZ=OFF -DBUILD_GTK_TESTS=OFF -DBUILD_MANUAL_TESTS=OFF \
+      -DBUILD_CPP_TESTS=OFF -DENABLE_UNSTABLE_API_ABI_HEADERS=OFF -DRUN_GPERF_IF_PRESENT=OFF \
+    && cmake --build /src/build -j"$(nproc)" \
+    && DESTDIR=/out cmake --install /src/build \
+    && rm -rf /out/usr/local/include /out/usr/local/lib/pkgconfig /out/usr/local/lib/cmake /out/usr/local/share/man \
+    && for tool in pdftotext pdftohtml pdfinfo pdfimages pdftoppm pdfseparate pdfunite; do test -x "/out/usr/local/bin/$tool"; done
+
+FROM rust:1.99-slim-trixie@sha256:7eab7ce19273ce785e0ca7578bdf7bc1fcbae621775a8197379a04c9f6e03cd5 AS doppler-md
+COPY --from=doppler-src /src/doppler/docslurp/doppler-md /src/doppler-md
+RUN cargo build --release --locked --manifest-path /src/doppler-md/Cargo.toml \
+    && install -D -m 0755 /src/doppler-md/target/release/doppler-md /out/usr/local/bin/doppler-md \
+    && install -D -m 0755 /src/doppler-md/target/release/pdftomarkdown /out/usr/local/bin/pdftomarkdown
+
 # Production stage: runtime only (no TypeScript toolchain, pnpm store or devDeps)
 FROM node:24-trixie-slim@sha256:54f84b4cf8432b21aaffd5d3ce8d41e12cea0d10d33c09d2f3c9879d49d6b446
 ENV ONNXRUNTIME_NODE_INSTALL_CUDA=skip
@@ -106,7 +148,14 @@ RUN apt-get update \
        fonts-urw-base35 \
        pandoc \
        poppler-data \
-       poppler-utils \
+       libfontconfig1 \
+       libfreetype6 \
+       libjpeg62-turbo \
+       liblcms2-2 \
+       libopenjp2-7 \
+       libpng16-16t64 \
+       libtiff6 \
+       zlib1g \
        python3 \
        webp \
     && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/info/* \
@@ -139,6 +188,12 @@ RUN if grep -q '^#\?ConcurrentDatabaseReload' /etc/clamav/clamd.conf; then \
 COPY LICENSE THIRD_PARTY_NOTICES.md ./
 COPY LICENSES ./LICENSES
 COPY --from=landrun /usr/local/bin/landrun /usr/local/bin/landrun
+# Doppler: Poppler-fork utilities (pdftotext, pdfinfo, pdfimages, pdftoppm, pdftohtml, pdfseparate, pdfunite) with
+# libpoppler, and doppler-md / pdftomarkdown, all under /usr/local (on PATH, inside the sandbox's read-only /usr).
+COPY --from=doppler-utils /out/usr/local/ /usr/local/
+COPY --from=doppler-md /out/usr/local/bin/ /usr/local/bin/
+RUN ldconfig && test -x /usr/local/bin/pdftomarkdown && pdftotext -v
+ENV DOCSLURP_DOPPLER_REQUIRED=1
 # Python base parsers (root-owned, read-only for the worker user).
 COPY --from=python-venv /app/.venv /app/.venv
 # Production node_modules, then compiled output (changes most often, so last).

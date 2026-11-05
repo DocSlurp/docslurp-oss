@@ -166,6 +166,17 @@ const registered = [
       if (reader === "docx") return await runner.officeMarkdown("docx", source, `${source}.pandoc.md`);
       return await runner.extractMarkdown(source, reader);
     } }),
+  // Doppler's PDF Markdown. In images that build Doppler (DOCSLURP_DOPPLER_REQUIRED=1) a missing converter is an error,
+  // never a quiet step down to Poppler text.
+  definition({ id: "doppler-md", tableAware: true, execute: stream,
+    prepare: async (runner, source, _config, context) => {
+      const plan = await runner.dopplerMarkdown(source);
+      if (!plan.available && (context?.env ?? process.env).DOCSLURP_DOPPLER_REQUIRED === "1") {
+        console.error("[extractors] doppler-md required (DOCSLURP_DOPPLER_REQUIRED=1) but pdftomarkdown is not installed");
+        throw new Error("doppler-md unavailable: pdftomarkdown is not installed in an image that requires it");
+      }
+      return plan;
+    } }),
   definition({ id: "poppler-text", execute: stream,
     prepare: (runner, source) => runner.extractText(source, true) }),
   definition({ id: "graph-local", execute: graph,
@@ -187,12 +198,13 @@ const registered = [
 ];
 
 /**
- * Default order per format. PDFs: the optional native engine (unavailable when not installed), then Poppler's text
- * layer; a deployment with the sandboxed PDF provider replaces this with `vm-pdf` alone (resolve). No extractor here
+ * Default order per format. PDFs: Doppler's Markdown (a sandboxed executable, unavailable where Doppler is not
+ * installed), then the optional in-process native engine, then Poppler's text layer; a deployment with the sandboxed
+ * PDF provider replaces this with `vm-pdf` alone (resolve). No extractor here
  * links an OCR engine: images go to the `ocr` extractor, which reads them in the configured OCR boundary.
  */
 export const defaultDocumentExtractorOrder: Record<string, string[]> = {
-  pdf: ["native-pdf", "poppler-text"],
+  pdf: ["doppler-md", "native-pdf", "poppler-text"],
   image: ["ocr"],
   "structured-json": ["json"],
   "office-pptx": ["pptx"],

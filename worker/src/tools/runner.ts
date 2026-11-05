@@ -652,6 +652,14 @@ export class CommandRunner {
     });
   }
 
+  /**
+   * PDF to Markdown with Doppler's `pdftomarkdown` (it runs the fork's own `pdftotext -bbox-layout` and converts the
+   * XHTML), pages joined by form feeds. A separate executable in the parser sandbox, like every host PDF tool.
+   */
+  async dopplerMarkdown(source: string): Promise<CommandPlan> {
+    return await this.planDocumentTool({ binary: "pdftomarkdown", args: [source], fileArgIndexes: [0], supportsDoubleDash: true });
+  }
+
   /** Markdown from a .docx, .pptx or .xlsx file (scripts/office_markdown.py, run in the parser sandbox). */
   async officeMarkdown(kind: "docx" | "pptx" | "xlsx", source: string, output: string): Promise<CommandPlan> {
     return await this.planScript("python3", "office_markdown.py", "--kind", kind, "--input", source, "--output", output);

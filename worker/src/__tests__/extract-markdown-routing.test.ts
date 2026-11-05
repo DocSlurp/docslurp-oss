@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CommandPlan } from "../tools/runner.js";
 import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
@@ -61,6 +61,7 @@ describe("extract markdown PDF routing", () => {
     const stage = new ExtractMarkdownStage(
       {
         extractMarkdown: async () => ({ binary: "pandoc", args: [], available: true }),
+        dopplerMarkdown: async () => ({ binary: "pdftomarkdown", args: [], available: false }),
         extractText: popplerText,
       } as any,
       {} as any,
@@ -86,6 +87,7 @@ describe("extract markdown PDF routing", () => {
     const stage = new ExtractMarkdownStage(
       {
         extractMarkdown: async () => ({ binary: "pandoc", args: [], available: true }),
+        dopplerMarkdown: async () => ({ binary: "pdftomarkdown", args: [], available: false }),
         extractText: popplerText,
       } as any,
       {} as any,
@@ -106,6 +108,35 @@ describe("extract markdown PDF routing", () => {
     expect(planned.primary.label).toBe("native-pdf");
     expect(planned.secondary).toBeNull();
     expect(planned.tableAware).toBe(true);
+  });
+
+  it("prefers Doppler's Markdown for PDFs when it is installed, in the sandbox like other host tools", async () => {
+    const stage = new ExtractMarkdownStage(
+      {
+        dopplerMarkdown: async (source: string) => ({ binary: "pdftomarkdown", args: ["--", source], available: true }),
+        extractText: popplerText,
+      } as any,
+      {} as any,
+      {} as any
+    );
+    setNativePdfEngineForTesting(fakeNativeEngine());
+    const planned = await (stage as any).planExtractors({
+      tempFile: "/tmp/sample.pdf", format: "pdf", order: {}, options: {}, multiStrategyVoting: true,
+      secondaryId: "next-in-order", attemptLedger: new ExtractorAttemptLedger(),
+    });
+    expect(planned.primary.label).toBe("doppler-md");
+    expect(planned.primary.plan.args).toEqual(["--", "/tmp/sample.pdf"]);
+    expect(planned.secondary.label).toBe("native-pdf");
+    expect(planned.tableAware).toBe(true);
+  });
+
+  it("fails closed when an image requires Doppler and pdftomarkdown is missing", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const runner = { dopplerMarkdown: async () => ({ binary: "pdftomarkdown", args: [], available: false }) } as any;
+    await expect(documentExtractorRegistry.prepare("doppler-md", runner, "/tmp/sample.pdf", undefined, { format: "pdf", env: { DOCSLURP_DOPPLER_REQUIRED: "1" } }))
+      .rejects.toThrow(/doppler-md unavailable/);
+    const optional = await documentExtractorRegistry.prepare("doppler-md", runner, "/tmp/sample.pdf", undefined, { format: "pdf", env: {} });
+    expect(optional.plan.available).toBe(false);
   });
 
   it("reads Word documents with Pandoc through the office sidecar, and slides and sheets with their own sidecars", async () => {
@@ -132,6 +163,7 @@ describe("extract markdown PDF routing", () => {
     const stage = new ExtractMarkdownStage(
       {
         extractMarkdown: async () => ({ binary: "pandoc", args: [], available: true }),
+        dopplerMarkdown: async () => ({ binary: "pdftomarkdown", args: [], available: false }),
         extractText: popplerText,
       } as any,
       {} as any,
@@ -157,6 +189,7 @@ describe("extract markdown PDF routing", () => {
   it("does not plan an unavailable tool or reattempt a voting candidate on retry", async () => {
     const stage = new ExtractMarkdownStage(
       {
+        dopplerMarkdown: async () => ({ binary: "pdftomarkdown", args: [], available: false }),
         extractText: popplerText,
       } as any,
       {} as any,
@@ -170,7 +203,7 @@ describe("extract markdown PDF routing", () => {
     setNativePdfEngineForTesting(fakeNativeEngine());
     const first = await (stage as any).planExtractors(args);
     expect([first.primary.label, first.secondary.label]).toEqual(["native-pdf", "poppler-text"]);
-    expect(attemptLedger.snapshot()).toEqual({ attempted: [], unavailable: [] });
+    expect(attemptLedger.snapshot()).toEqual({ attempted: [], unavailable: ["doppler-md"] });
     attemptLedger.reserve(first.primary.label);
     attemptLedger.reserve(first.secondary.label);
     const retry = await (stage as any).planExtractors(args);
@@ -180,6 +213,7 @@ describe("extract markdown PDF routing", () => {
   it("does not reattempt an explicit voting secondary on retry", async () => {
     const stage = new ExtractMarkdownStage(
       {
+        dopplerMarkdown: async () => ({ binary: "pdftomarkdown", args: [], available: false }),
         extractText: popplerText,
       } as any,
       {} as any,

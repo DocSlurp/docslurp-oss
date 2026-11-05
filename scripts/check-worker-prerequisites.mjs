@@ -58,6 +58,16 @@ for (const name of profile === 'routing' ? [] : ['mammoth', '@lancedb/lancedb'])
     await import(require.resolve(name));
   } catch (error) { failures.push(`cannot load Node package ${name}: ${error.message}`); }
 }
+// Worker images build Doppler (worker/doppler.json) in place of poppler-utils and set DOCSLURP_DOPPLER_REQUIRED=1:
+// the converter must be present and pdftotext must be the fork, so an image never ships stock Poppler by mistake.
+if (process.env.DOCSLURP_DOPPLER_REQUIRED === '1') {
+  for (const name of ['pdftomarkdown', 'doppler-md', 'pdfseparate', 'pdfunite']) {
+    if (!await binaryPath(name)) failures.push(`missing Doppler executable: ${name}`);
+  }
+  const pdftotextPath = await binaryPath('pdftotext');
+  const help = pdftotextPath ? spawnSync(pdftotextPath, ['-h'], { encoding: 'utf8', timeout: 30000 }) : null;
+  if (!help || !`${help.stdout}${help.stderr}`.includes('-wordmeta')) failures.push(`pdftotext is not the Doppler fork (${pdftotextPath ?? 'not found'})`);
+}
 if (profile === 'full' || profile === 'test' || profile === 'lean') {
   // Every image bakes the base parsers into its venv (runtime pip installs are off).
   const python = existsSync(path.join(venv, 'bin/python3')) ? path.join(venv, 'bin/python3') : await binaryPath('python3');

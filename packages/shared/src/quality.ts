@@ -42,7 +42,7 @@ export function qualityAllowsPageReading(quality: QualityMode | null | undefined
 
 /** Extractors that only read a file's own text layer or structure: no OCR, no model. Fast may run only these. */
 export const TEXT_LAYER_EXTRACTORS: ReadonlySet<string> = new Set([
-  "native-pdf", "poppler-text", "pandoc", "pptx", "xlsx", "json", "vm-pdf",
+  "doppler-md", "native-pdf", "poppler-text", "pandoc", "pptx", "xlsx", "json", "vm-pdf",
 ]);
 
 /**

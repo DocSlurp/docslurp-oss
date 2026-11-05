@@ -31,6 +31,7 @@ async function extractWithTitle(args: { filename: string; mimeType: string; form
     };
     const runner = {
       officeMarkdown: async () => ({ binary: "python3", args: [], available: true }),
+      dopplerMarkdown: async () => ({ binary: "pdftomarkdown", args: [], available: false }),
       extractText: async () => ({ binary: "pdftotext", args: [], available: true }),
       extractMarkdown: async () => ({ binary: "pandoc", args: [], available: true }),
     } as unknown as CommandRunner;
