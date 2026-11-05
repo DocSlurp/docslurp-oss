@@ -167,7 +167,9 @@ describe("worker role", () => {
     expect(await denied(worker, `select name from "user"`)).toBe(true);
     expect(await denied(worker, `update "user" set email = email`)).toBe(true);
     expect(await denied(worker, "select org_id, active, events from webhooks")).toBe(false);
-    expect(await denied(worker, "select user_id from webhooks")).toBe(true);
+    // Kept for N-1 workers during the 0125 rollout (roles.mjs); a later release drops it.
+    expect(await denied(worker, "select user_id from webhooks")).toBe(false);
+    expect(await denied(worker, "select url from webhooks")).toBe(true);
     expect(await denied(worker, "select secret from webhooks")).toBe(true);
     expect(await denied(worker, "select id, workspace_id, name, type, expires_at from workspace_secrets")).toBe(false);
     expect(await denied(worker, "select encrypted_value from workspace_secrets")).toBe(true);

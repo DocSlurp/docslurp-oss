@@ -100,7 +100,9 @@ export const WORKER_TABLES = Object.freeze({
   vision_run_attempts: { privileges: ["select", "insert", "update"], evidence: "worker/src/db/vision-attempt-store.ts (vision attempt guard run counts)" },
   vision_route_overruns: { privileges: ["select", "insert", "delete"], evidence: "worker/src/db/vision-attempt-store.ts (per-org route overrun count, route weight correction, retention)" },
   webhook_outbox: { privileges: ["select", "insert"], evidence: "worker/src/db/store.ts enqueueWebhook (insert ... returning id)" },
-  webhooks: { privileges: [], columns: { select: ["org_id", "active", "events"] }, evidence: "worker/src/db/store.ts enqueueWebhookEvent subscription check by organization (no url, creator or signing secret)" },
+  // user_id stays for this release only: N-1 workers still check subscriptions by webhooks.user_id during the rollout
+  // (docs/rollout-0121-0127.md), and losing it would fail their terminal-checkpoint outbox insert. A later release drops it.
+  webhooks: { privileges: [], columns: { select: ["user_id", "org_id", "active", "events"] }, evidence: "worker/src/db/store.ts enqueueWebhookEvent subscription check by organization (no url or signing secret); user_id for N-1 workers during the 0125 rollout" },
   worker_capabilities: { privileges: DML, evidence: "worker/src/db/worker-capabilities.ts" },
   worker_maintenance_leases: { privileges: DML, evidence: "worker/src/db/worker-slot-store.ts" },
   worker_slot_tokens: { privileges: DML, evidence: "worker/src/db/worker-slot-store.ts; acquire/renew/release_worker_slot()" },
