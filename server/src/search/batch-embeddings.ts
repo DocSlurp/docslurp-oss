@@ -73,8 +73,10 @@ export async function prefetchBatchQueryEmbeddings(
         scope: { orgId, projectId },
         usage: {
           provider: route.provider, model: route.model, metric: "embed-query", inputTokens: result.usage.inputTokens, logOutputTokens: false,
+          // The provider's reported charge when it sent one (OpenRouter); otherwise priced from tokens.
+          costCents: result.usage.costCents,
           // Every hosted batch path reports actual tokens (OpenAI included); only a zero count is not.
-          metadata: { usageSource: METERED_EMBEDDING_PROVIDERS.has(route.provider) || (route.runtime === "remote" && result.usage.inputTokens > 0) ? "provider" : "estimate", batchSize: values.length, batch: true },
+          metadata: { ...result.usage.metadata, usageSource: METERED_EMBEDDING_PROVIDERS.has(route.provider) || (route.runtime === "remote" && result.usage.inputTokens > 0) ? "provider" : "estimate", batchSize: values.length, batch: true },
         },
       });
       [...texts.keys()].forEach((key, index) => cache.set(key, result.embeddings[index]!.slice()));

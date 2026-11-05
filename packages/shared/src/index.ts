@@ -37,6 +37,7 @@ export * from "./config-change.js";
 export * from "./privacy.js";
 export * from "./private-endpoints.js";
 export * from "./model-uri.js";
+export * from "./live-model-prices.js";
 export * from "./graph.js";
 export * from "./run.js";
 export * from "./run-failure.js";

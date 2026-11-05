@@ -21,6 +21,7 @@ import {
 } from "./alert-rules.js";
 import { AlertTracker } from "./alert-tracker.js";
 import { WorkerFloorFallback } from "./worker-floor.js";
+import { ProviderCostLossMonitor, resolveProviderCostLossSettings } from "./provider-cost-loss.js";
 
 /**
  * Periodic alert evaluation inside the app process (docs/observability.md#alerting).
@@ -155,9 +156,12 @@ export interface AlertEvaluatorDeps {
   now: () => number;
   /** Leader only: start a worker when runs wait with no pollers (worker-floor.ts). */
   workerFloor?: (checks: AlertCheck[]) => Promise<unknown>;
+  /** Leader-only provider-cost loss checks (provider-cost-loss.ts); `reset` runs when leadership is lost. */
+  providerCostLoss?: { evaluate: () => Promise<AlertCheck[]>; reset: () => void };
 }
 
 const workerFloorFallback = new WorkerFloorFallback();
+const providerCostLossMonitor = new ProviderCostLossMonitor(resolveProviderCostLossSettings());
 
 const defaultDeps: AlertEvaluatorDeps = {
   tryLease: async (holder, ttlMs) => {
@@ -175,6 +179,7 @@ const defaultDeps: AlertEvaluatorDeps = {
   deliver: (notification, config) => deliverAlert(notification, config),
   now: () => Date.now(),
   workerFloor: (checks) => workerFloorFallback.evaluate(checks),
+  providerCostLoss: providerCostLossMonitor,
 };
 
 export interface AlertEvaluatorOptions {
@@ -241,6 +246,7 @@ export class AlertEvaluator {
         console.log(`[alert] evaluator_leader=${leader} instance=${this.options.instance}`);
         // The new leader owns fleet alerts now; forget ours without a resolved notice.
         if (!leader) {
+          this.deps.providerCostLoss?.reset();
           this.tracker.drop((id) => id !== "http-5xx-rate" && id !== "database-unreachable");
           for (const id of this.pendingDeliveries.keys()) if (id !== "http-5xx-rate" && id !== "database-unreachable") this.pendingDeliveries.delete(id);
         }
@@ -267,6 +273,7 @@ export class AlertEvaluator {
         http: { ...this.deps.readHttp(windowMs, now), windowMs },
       };
       const checks = evaluateAlertRules(observation, this.options.thresholds, leader ? this.workerHistory : undefined);
+      if (leader && this.deps.providerCostLoss) checks.push(...await this.deps.providerCostLoss.evaluate().catch(() => []));
       this.lastChecks = checks;
       this.lastEvaluatedAt = now;
       for (const notification of this.tracker.update(checks, now)) this.pendingDeliveries.set(notification.id, notification);

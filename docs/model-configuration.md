@@ -31,7 +31,10 @@ Where each field accepts them:
 | `pipeline.textGeneration.model`, `.models.<task>`, `pipeline.structuredExtraction.model` | `llm://openrouter/...`, the bare id, or `llm://private/...` | Hosted URIs are stored as the bare OpenRouter id. |
 | `pipeline.vision.modelUri`, `.remoteFallbackModelUri` | An `llm://` URI from the vision catalog | Bare ids are not accepted. |
 | `pipeline.embedding.modelUri` | An `llm://` URI from the embedding catalog | Bare ids are not accepted. |
-| `DOCSLURP_SEARCH_MODEL`, `DOCSLURP_CHAT_EVAL_MODELS` | `llm://openrouter/...` or the bare id | |
+| `DOCSLURP_SEARCH_MODEL`, `DOCSLURP_CHAT_EVAL_MODELS`, `CHAT_INSTRUCTIONS_IMPROVE_MODEL` | `llm://openrouter/...` or the bare id | |
+| `DOCSLURP_TEXT_MODEL` | `llm://openrouter/...`, the bare id, or `llm://private/...` | The deployment default for text stages. |
+| `DOCSLURP_VISION_MODEL_URI` | An `llm://` URI from the vision catalog | |
+| `MEDIA_TRANSCRIPTION_MODEL` | `llm://<provider>/<model>` (e.g. `llm://deepinfra/openai/whisper-large-v3-turbo`) or the provider's model id | The URI's provider stands in for `MEDIA_PROVIDER`; a conflicting `MEDIA_PROVIDER` fails startup. |
 
 Model URIs never carry credentials: a URI with a user name or password is
 rejected. Responses report the hosted model by its bare OpenRouter id (for

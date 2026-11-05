@@ -29,6 +29,8 @@ import {
   baseProviderSlug,
   currentOpenRouterProviderPolicy,
   isProviderAllowedByRegion,
+  liveModelPrice,
+  readProviderCharge,
   providerRegion,
   resolveDecisionModelLicense,
   type DecisionModel,
@@ -75,8 +77,10 @@ export interface DecisionCallResult {
   answers: Record<string, DecisionAnswer>;
   usage: { inputTokens: number; outputTokens: number };
   latencyMs: number;
-  /** Input tokens x catalog price, in cents (fractional). */
+  /** The provider-reported charge, else the catalog/live-price estimate, in cents (fractional). */
   costCents: number;
+  /** `provider`, or which prices the estimate used. */
+  costSource?: string;
   model: string;
   provider: string;
 }
@@ -176,7 +180,7 @@ function probRecord(value: unknown): Record<string, number> | null {
 export function parseDecisionResponse(
   body: unknown,
   questions: Record<string, DecisionQuestion>,
-): { answers: Record<string, DecisionAnswer>; usage: { inputTokens: number; outputTokens: number } } {
+): { answers: Record<string, DecisionAnswer>; usage: { inputTokens: number; outputTokens: number }; rawUsage: Record<string, unknown> } {
   if (!isRecord(body) || !isRecord(body.answers)) {
     throw new DecisionRequestError("decision response has no answers object");
   }
@@ -218,7 +222,26 @@ export function parseDecisionResponse(
     throw new DecisionRequestError("decision response has no usage.input_tokens");
   }
   const outputTokens = Number(usage.output_tokens);
-  return { answers, usage: { inputTokens, outputTokens: Number.isFinite(outputTokens) ? outputTokens : 0 } };
+  return { answers, usage: { inputTokens, outputTokens: Number.isFinite(outputTokens) ? outputTokens : 0 }, rawUsage: usage };
+}
+
+/**
+ * The provider-reported charge when the response carries one; otherwise
+ * input tokens at the catalog price plus any output tokens at the live list
+ * output price (the catalog prices input only).
+ */
+export function decisionCallCost(model: DecisionModel, usage: { inputTokens: number; outputTokens: number }, rawUsage: unknown): { costCents: number; costSource: string } {
+  const charge = readProviderCharge(rawUsage);
+  if (charge.costCents !== undefined) return { costCents: charge.costCents, costSource: "provider" };
+  const live = usage.outputTokens > 0 ? liveModelPrice(baseDecisionModelId(model.id)) : undefined;
+  return {
+    costCents: decisionCostCents(model, usage.inputTokens) + (live ? usage.outputTokens * live.output * 100 : 0),
+    costSource: live ? "catalog-input-price+live-output-price" : "catalog-input-price",
+  };
+}
+
+function baseDecisionModelId(id: string): string {
+  return id.replace(/^llm:\/\/openrouter\//i, "");
 }
 
 export interface DecisionClientOptions {
@@ -367,11 +390,13 @@ export function createDecisionClient(options: DecisionClientOptions): DecisionCl
       }
 
       const parsed = parseDecisionResponse(body, questions);
+      const cost = decisionCallCost(model, parsed.usage, parsed.rawUsage);
       const result: DecisionCallResult = {
         answers: parsed.answers,
         usage: parsed.usage,
         latencyMs: Math.round(now() - started),
-        costCents: decisionCostCents(model, parsed.usage.inputTokens),
+        costCents: cost.costCents,
+        costSource: cost.costSource,
         model: model.id,
         provider,
       };
@@ -408,7 +433,7 @@ export function recordDecisionUsage(
       inputTokens: result.usage.inputTokens,
       outputTokens: result.usage.outputTokens,
       metadata: {
-        costSource: "catalog-input-price",
+        costSource: result.costSource ?? "catalog-input-price",
         endpoint: model.endpoint,
         latencyMs: result.latencyMs,
         questionAnswers: Object.keys(result.answers).length,

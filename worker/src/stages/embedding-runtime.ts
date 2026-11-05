@@ -6,7 +6,7 @@ import { isUtf8 } from "node:buffer";
 import path from "node:path";
 
 import type { CanonicalDocument } from "@docslurp/shared";
-import { localEmbeddingPooling, type EmbeddingPooling, assertProviderAllowed, authorizePrivateModelCall, textModelCallDescriptor, canonicalDocumentSchema, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, openRouterEmbeddingRoute, validateHostedEmbeddingVector, OPENROUTER_BASE_URL, PRIVATE_MODEL_PROVIDER, isProviderCallAllowed, resolvePipelineTextModel, createOpenRouterRoutingFetch, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
+import { localEmbeddingPooling, type EmbeddingPooling, assertProviderAllowed, authorizePrivateModelCall, textModelCallDescriptor, canonicalDocumentSchema, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, openRouterEmbeddingRoute, validateHostedEmbeddingVector, OPENROUTER_BASE_URL, PRIVATE_MODEL_PROVIDER, isProviderCallAllowed, resolvePipelineTextModel, createOpenRouterRoutingFetch, createOpenRouterChargeTotal, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
 import { embedMany } from "ai";
 import { blankPages, embedPerplexity, pageImageReferencePages } from "@docslurp/shared";
 import { noteWorkProgress, withRequestTimeout } from "../lib/work-progress.js";
@@ -666,9 +666,13 @@ async function embedRemoteChunks(args: {
     const privateCall = isPrivate
       ? await authorizePrivateModelCall({ privacyMode: args.privacyMode, modelUri: args.profile.modelUri, capability: "embedding", operation: "worker.embedding" })
       : null;
+    // OpenRouter batches get their own client so the reported charge is this batch's alone.
+    const openRouterCharge = !privateCall && args.profile.provider === "openrouter" ? createOpenRouterChargeTotal(createOpenRouterRoutingFetch()) : null;
     const model = privateCall
       ? createOpenAI({ apiKey: "private-endpoint", baseURL: privateCall.baseUrl, fetch: instrumentFetch("private", "embedding", privateCall.fetch) }).embedding(privateCall.model) as any
-      : sharedModel;
+      : openRouterCharge
+        ? createOpenAI({ apiKey: requiredKey(args.config.openRouterApiKey, "OPENROUTER_API_KEY"), baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding", openRouterCharge.fetch) }).embedding(args.profile.model) as any
+        : sharedModel;
     const batchStartedAt = Date.now();
     const result = await withObservation(
       {
@@ -722,8 +726,11 @@ async function embedRemoteChunks(args: {
     // Persist actual paid usage before retaining vectors or starting another request.
     if (!isNativePerplexity && typeof result.usage.tokens === "number") {
       const tokens = result.usage.tokens;
+      // The provider's reported charge (OpenRouter) or the operator price (private); otherwise the caller estimates.
+      const reported = openRouterCharge?.charge() ?? {};
+      const cost = privateCost ?? (reported.costCents !== undefined ? { costCents: reported.costCents, metadata: reported.metadata ?? {} } : null);
       await serialUsage(async () => args.onRemoteUsage?.({ inputTokens: tokens, chunks: batch.length,
-        ...(privateCost ? { costCents: privateCost.costCents, costMetadata: privateCost.metadata } : {}) }));
+        ...(cost ? { costCents: cost.costCents, costMetadata: cost.metadata } : {}) }));
     }
     if (args.profile.provider === "openrouter") {
       if (!Number.isSafeInteger(result.usage.tokens) || !(result.usage.tokens! > 0)) throw new Error("OpenRouter embedding response omitted actual usage");

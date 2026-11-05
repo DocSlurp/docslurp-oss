@@ -48,6 +48,16 @@ describe("output moderation", () => {
     expect(safe.flagged).toBe(false);
   });
 
+  it("records the provider-reported charge when the response carries one", async () => {
+    const fetch = async () => new Response(JSON.stringify({ choices: [{ message: { content: "safe" } }], usage: { prompt_tokens: 800, completion_tokens: 5, cost: 0.0002 } }), { status: 200 });
+    const verdict = await llamaGuardOutputModerator({ apiKey: "k", fetch: fetch as never }).moderate({ question: "q", answer: "a" });
+    expect(verdict.usage).toMatchObject({ costCents: 0.02, metadata: { costSource: "provider" } });
+    const byok = async () => new Response(JSON.stringify({ choices: [{ message: { content: "safe" } }], usage: { prompt_tokens: 800, completion_tokens: 5, cost: 0, is_byok: true } }), { status: 200 });
+    // BYOK without an upstream cost is not a $0 receipt: it is estimated.
+    expect((await llamaGuardOutputModerator({ apiKey: "k", fetch: byok as never }).moderate({ question: "q", answer: "a" })).usage)
+      .toMatchObject({ metadata: { costSource: "estimate" } });
+  });
+
   it("replaces a flagged public answer, drops citations and records usage with scope", async () => {
     const moderator = llamaGuardOutputModerator({ apiKey: "k", fetch: guardFetch("unsafe\nS9") as never });
     const out = await moderateChatAnswer(response, { actor: browserKey, question: "q", userId: "u", projectId: "ws-1", orgId: "org-1", privacyMode: "standard", moderator });

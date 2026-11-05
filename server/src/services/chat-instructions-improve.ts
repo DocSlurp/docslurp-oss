@@ -10,6 +10,7 @@ import {
   chatModelTier,
   foldFullWidthAscii,
   type ProjectSearchSettings,
+  normalizeHostedModelRef,
 } from "@docslurp/shared";
 
 import { generateOpenRouterText, resolveOpenRouterApiKey } from "../lib/ai.js";
@@ -47,7 +48,8 @@ const MAX_OUTPUT_TOKENS = 1_400;
 
 /** The Improve model: env override if allowed, else the default. Refuses Pro/Ultra and expensive or unpriced models. */
 export function resolveImproveModel(env: NodeJS.ProcessEnv = process.env): string {
-  const model = env.CHAT_INSTRUCTIONS_IMPROVE_MODEL?.trim() || IMPROVE_DEFAULT_MODEL;
+  // A bare OpenRouter id or llm://openrouter/<id>.
+  const model = env.CHAT_INSTRUCTIONS_IMPROVE_MODEL?.trim() ? normalizeHostedModelRef(env.CHAT_INSTRUCTIONS_IMPROVE_MODEL) : IMPROVE_DEFAULT_MODEL;
   if (!isAllowedImproveModel(model)) throw new Error(`Chat instructions improve model is not allowed: ${model}`);
   return model;
 }

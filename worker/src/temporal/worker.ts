@@ -1,5 +1,6 @@
 import { flushErrorReporting, initializeWorkerErrorReporting, reportException } from "@docslurp/shared/error-reporting";
 import { envFlags, formatEnvFlags } from "@docslurp/shared/env-flags";
+import { startLiveModelPriceRefresh } from "@docslurp/shared";
 import { initializeObservability, shutdownObservability, withBackgroundSpan } from "@docslurp/shared/observability";
 /**
  * Temporal worker entry point.
@@ -116,6 +117,8 @@ async function main(): Promise<void> {
   } catch (error) {
     throw new FatalWorkerError("startup", `private model endpoint configuration is invalid: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
+  // Live OpenRouter list prices for receipt-less usage; hardcoded tables until (or unless) they load.
+  startLiveModelPriceRefresh();
   // Fail before connecting if the parser sandbox is unavailable or violates the production policy.
   const sandbox = await initializeParserSandbox(process.env, process.platform).catch((error) => {
     throw new FatalWorkerError("startup", `parser sandbox unavailable: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
