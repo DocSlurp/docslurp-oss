@@ -240,7 +240,10 @@ describe("image documents are read by the OCR extractor", () => {
       const checkpoint = h.checkpoint();
       expect(checkpoint?.status).toBe("failed");
       expect(publicDocumentError(checkpoint?.error)).toBe(PUBLIC_ERROR_MESSAGES.imageTooManyFrames);
+      // No charge of any kind: no Rich page, no billable credits, no OCR read recorded as billed.
       expect(h.richIds()).toEqual([]);
+      expect(h.state.usageLedger.pendingBillableCents).toBe(0);
+      expect(h.state.usageLedger.snapshot().filter((event) => event.metric === "page-ocr" || event.metric === "ocr-escalation")).toEqual([]);
       expect(h.state.documents[0]!.pageCount).toBe(1);
     } finally { await h.cleanup(); }
   });
