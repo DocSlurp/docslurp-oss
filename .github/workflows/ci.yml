@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # No paths filter: every job, the OCR CLI job included, runs on every PR into these bases.
+    branches: [main, feat/offline-credit-estimator]
   workflow_dispatch:
 
 concurrency:

@@ -25,3 +25,16 @@ test("the gated files exist and CI runs this script", () => {
   assert.match(ci, /bash scripts\/install-ocr-runtime\.sh/);
   assert.match(ci, /needs: \[[^\]]*\bocr-cli\b[^\]]*\]/);
 });
+
+test("the OCR CLI job runs on every PR into main and feat/offline-credit-estimator", () => {
+  const ci = readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8");
+  const on = ci.slice(ci.indexOf("\non:"), ci.indexOf("\nconcurrency:"));
+  const pullRequest = on.slice(on.indexOf("pull_request:"), on.indexOf("workflow_dispatch:"));
+  assert.match(pullRequest, /branches: \[main, feat\/offline-credit-estimator\]/);
+  // Neither a path filter on the trigger nor a condition on the job may skip it.
+  assert.doesNotMatch(on, /paths(-ignore)?:/);
+  const job = ci.slice(ci.indexOf("\n  ocr-cli:"), ci.indexOf("\n  # The offline estimator"));
+  assert.ok(job.length > 0);
+  assert.doesNotMatch(job, /^\s{4}if:/m);
+  assert.match(job, /node scripts\/run-ocr-cli-tests\.mjs/);
+});
