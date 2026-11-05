@@ -2,12 +2,13 @@ import { describe, expect, it } from "vitest";
 import { classifyIngestFailure, ingestReportFailuresSchema, INGEST_REPORT_FAILURE_DETAIL_MAX, sanitizeFailureDetail } from "../ingest-report.js";
 import { DOCUMENT_FAILURE_MARKERS, PUBLIC_ERROR_MESSAGES } from "../public-errors.js";
 
-const OCR_CRASH = "no extractor produced output: kreuzberg=Error: Failed to initialize OCR: Error opening data file /app/node_modules/kreuzberg/tessdata/eng.traineddata, poppler-text=Error: pdftotext failed";
+const OCR_CRASH = "no extractor produced output: ocr=Error: OCR runtime unavailable for DOCSLURP_OCR_MODE=local: Error opening data file /opt/docslurp/ocr-models/pp-ocrv6-rec-small.onnx, poppler-text=Error: pdftotext failed";
 
 describe("classifyIngestFailure", () => {
   it.each([
     [OCR_CRASH, "ocr_unavailable"],
-    ["tesseract: Please make sure the TESSDATA_PREFIX environment variable is set", "ocr_unavailable"],
+    ["OCR runtime unavailable for DOCSLURP_OCR_MODE=local", "ocr_unavailable"],
+    ["DOCSLURP_OCR_MODE=vm needs a sandboxed OCR provider plugin (DOCSLURP_EXTRACTOR_PLUGINS); refusing local fallback", "ocr_unavailable"],
     ["no extractor produced output: kreuzberg=Error: boom, poppler-text=Error: nothing", "extractor_failed"],
     ["Unsupported file format: application/x-foo", "unsupported_format"],
     ["PDF is password protected", "unreadable_file"],
@@ -33,7 +34,7 @@ describe("classifyIngestFailure", () => {
 
   it("never echoes the raw error in the user-facing message and flags unrecoverable causes", () => {
     const result = classifyIngestFailure(OCR_CRASH);
-    expect(result.message).not.toMatch(/tessdata|kreuzberg|\/app/);
+    expect(result.message).not.toMatch(/ocr-models|DOCSLURP_OCR_MODE|\/opt|onnx/);
     expect(result.retryable).toBe(false);
     expect(classifyIngestFailure("Activity timed out").retryable).toBe(true);
   });
@@ -43,7 +44,7 @@ describe("sanitizeFailureDetail", () => {
   it("drops filesystem paths but keeps the diagnosis", () => {
     const detail = sanitizeFailureDetail(OCR_CRASH)!;
     expect(detail).toContain("Error opening data file <path>");
-    expect(detail).not.toMatch(/\/app|node_modules|tessdata/);
+    expect(detail).not.toMatch(/\/opt|ocr-models|\.onnx/);
   });
 
   it.each([

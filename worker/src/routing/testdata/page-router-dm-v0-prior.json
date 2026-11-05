@@ -137,7 +137,7 @@
       "n": 0
     },
     {
-      "targetId": "ocr:tesseract",
+      "targetId": "ocr:ppocr",
       "pass": {
         "text": {
           "intercept": 2.4445,

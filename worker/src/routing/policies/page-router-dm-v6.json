@@ -4,7 +4,7 @@
   "policyVersion": "page-router-dm-v6",
   "trainingDataSha256": "210794fb441b63220db4c0ba721890764ad20a883fc9a02a22c4f527296b0c0a",
   "fitDate": "2026-10-12",
-  "splitPolicy": "fit=development+calibration splits of eval-suite (W11 tolerant-markdown@v1 labels/outcomes) and eval-suite (generator gold); the test split is held out and used only to report calibration brier/auroc; split by sourceFamily; decision questions are plain_ocr_sufficient/needs_math_extraction/needs_table_structure only (no whole-page trust question); per-target pass mappings are fit on the primary model's calibrated answers; the native accept-text-layer mapping is fit only on pages the production trust cascade accepts (status, OCR-layer agreement >= 0.4, provisional math gate 0.01, inset crop gate); no case ids, filenames or content in this pack; v3 adds Claude Haiku 5.5 and Claude Sonnet 5.5 targets and refits DeepSeek V4.1 Flash (effort none) and GLM-5.3 Flash (effort minimal) from fresh runs of the lowest accepted reasoning effort; page-router-dm-v5 = page-router-dm-v3 unchanged plus native-pdf targets: native:pdf-markdown and native:pdf-text pass mappings fit on the primary model's calibrated answers over development+calibration text-layer pages (probe textLayerStatus ok) of the preservation suite (suite inputs and born-digital source pages) and eval-suite, scored with tolerant-markdown@v1 at the W11 thresholds (text .90, math .70, tables .70, overall .85); the test split was never extracted; ocr:pdf-ocr-fill and ocr:pdf-ocr alias the ocr:tesseract mapping until the engine OCR is measured; latency from the native-pdf engine bench; page-router-dm-v5 merges v3 (E2 transcription targets) with v4 (native-pdf targets) in one fit on the v3 base and adds Platt calibrations for liquid/d1 (text state, same three questions, fit on development+calibration); target pass mappings stay fit on the primary calibrated answers (Platt calibration makes the mapping inputs comparable across the chain models); page-router-dm-v6 keeps the v5 mappings (fit on cloudflare/clef-flash answers) as the default and adds per-serving-model target mappings fit the same way on each model's own calibrated development+calibration answers: openai/gpt-6-luna-decisions (19 targets), typesafe/jev-1.13 (19 targets), liquid/d1 (19 targets)",
+  "splitPolicy": "fit=development+calibration splits of eval-suite (W11 tolerant-markdown@v1 labels/outcomes) and eval-suite (generator gold); the test split is held out and used only to report calibration brier/auroc; split by sourceFamily; decision questions are plain_ocr_sufficient/needs_math_extraction/needs_table_structure only (no whole-page trust question); per-target pass mappings are fit on the primary model's calibrated answers; the native accept-text-layer mapping is fit only on pages the production trust cascade accepts (status, OCR-layer agreement >= 0.4, provisional math gate 0.01, inset crop gate); no case ids, filenames or content in this pack; v3 adds Claude Haiku 5.5 and Claude Sonnet 5.5 targets and refits DeepSeek V4.1 Flash (effort none) and GLM-5.3 Flash (effort minimal) from fresh runs of the lowest accepted reasoning effort; page-router-dm-v5 = page-router-dm-v3 unchanged plus native-pdf targets: native:pdf-markdown and native:pdf-text pass mappings fit on the primary model's calibrated answers over development+calibration text-layer pages (probe textLayerStatus ok) of the preservation suite (suite inputs and born-digital source pages) and eval-suite, scored with tolerant-markdown@v1 at the W11 thresholds (text .90, math .70, tables .70, overall .85); the test split was never extracted; ocr:pdf-ocr-fill and ocr:pdf-ocr alias the ocr:ppocr mapping until the engine OCR is measured; latency from the native-pdf engine bench; page-router-dm-v5 merges v3 (E2 transcription targets) with v4 (native-pdf targets) in one fit on the v3 base and adds Platt calibrations for liquid/d1 (text state, same three questions, fit on development+calibration); target pass mappings stay fit on the primary calibrated answers (Platt calibration makes the mapping inputs comparable across the chain models); page-router-dm-v6 keeps the v5 mappings (fit on cloudflare/clef-flash answers) as the default and adds per-serving-model target mappings fit the same way on each model's own calibrated development+calibration answers: openai/gpt-6-luna-decisions (19 targets), typesafe/jev-1.13 (19 targets), liquid/d1 (19 targets)",
   "passThreshold": 0.85
  },
  "decisionModels": [
@@ -208,7 +208,7 @@
    "n": 93
   },
   {
-   "targetId": "ocr:tesseract",
+   "targetId": "ocr:ppocr",
    "pass": {
     "text": {
      "intercept": -0.4228,
@@ -1063,7 +1063,7 @@
    "n": 93
   },
   {
-   "targetId": "ocr:tesseract",
+   "targetId": "ocr:ppocr",
    "decisionModel": "openai/gpt-6-luna-decisions",
    "pass": {
     "text": {
@@ -1936,7 +1936,7 @@
    "n": 93
   },
   {
-   "targetId": "ocr:tesseract",
+   "targetId": "ocr:ppocr",
    "decisionModel": "typesafe/jev-1.13",
    "pass": {
     "text": {
@@ -2809,7 +2809,7 @@
    "n": 93
   },
   {
-   "targetId": "ocr:tesseract",
+   "targetId": "ocr:ppocr",
    "decisionModel": "liquid/d1",
    "pass": {
     "text": {

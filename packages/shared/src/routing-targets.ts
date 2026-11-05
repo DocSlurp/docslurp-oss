@@ -125,7 +125,7 @@ function rolesFor(id: string, latex = false): AssignmentRole[] {
   if (id === NATIVE_PDF_MARKDOWN_TARGET_ID) return ["extract-text", "table"];
   if (id === NATIVE_PDF_TEXT_TARGET_ID) return ["extract-text"];
   if (id === NATIVE_PDF_OCR_FILL_TARGET_ID || id === NATIVE_PDF_OCR_TARGET_ID) return ["ocr", "extract-text"];
-  if (id === "ocr:tesseract") return ["ocr", "extract-text"];
+  if (id === "ocr:ppocr") return ["ocr", "extract-text"];
   if (id.startsWith("vlm:private/")) {
     return latex
       ? ["ocr", "extract-text", "table", "math"]
@@ -239,7 +239,8 @@ function seedTargets(): RoutingTarget[] {
     ),
     nativePdfTarget(NATIVE_PDF_MARKDOWN_TARGET_ID, "markdown", { emitsHtmlTables: false }),
     nativePdfTarget(NATIVE_PDF_TEXT_TARGET_ID, "text", {}),
-    // OCR tiers: unmeasured until the binding supports ocr-fill; the executor falls back to ocr:tesseract.
+    // OCR tiers: unmeasured until the binding supports ocr-fill; the executor falls back to ocr:ppocr (PP-OCR in the
+    // OCR boundary; the native engine's in-process OCR runs only in DOCSLURP_OCR_MODE=local).
     base(
       NATIVE_PDF_OCR_FILL_TARGET_ID,
       "local-ocr",
@@ -255,9 +256,9 @@ function seedTargets(): RoutingTarget[] {
       "local",
     ),
     base(
-      "ocr:tesseract",
+      "ocr:ppocr",
       "local-ocr",
-      { extractorId: "tesseract" },
+      { extractorId: "ppocr" },
       { imageInput: true },
       "local",
     ),

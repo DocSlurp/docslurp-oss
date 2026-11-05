@@ -48,7 +48,7 @@
   "stats": [
    {
     "cellId": "cell-0",
-    "targetId": "ocr:tesseract",
+    "targetId": "ocr:ppocr",
     "pass": {
      "text": {
       "alpha": 30.0,
@@ -272,7 +272,7 @@
    },
    {
     "cellId": "cell-1",
-    "targetId": "ocr:tesseract",
+    "targetId": "ocr:ppocr",
     "pass": {
      "text": {
       "alpha": 9.83333,
@@ -496,7 +496,7 @@
    },
    {
     "cellId": "cell-2",
-    "targetId": "ocr:tesseract",
+    "targetId": "ocr:ppocr",
     "pass": {
      "text": {
       "alpha": 20.83333,
