@@ -15,6 +15,7 @@ Plugins are loaded by configuration, never imported by core. Core builds, typech
 | `DOCSLURP_EXTRACTOR_PLUGINS` | worker | Comma-separated absolute module paths (or `file:` URLs) loaded at startup. |
 | `DOCSLURP_PDF_EXTRACTOR=vm-pdf` | worker | Make `vm-pdf` the default PDF extractor. |
 | `DOCSLURP_VM_PDF_INSTALLED=1` | API (and worker) | List `vm-pdf` in `GET /v1/extractors` and admit PDFs up to its source limit. |
+| `DOCSLURP_EXTRACTOR_ID_ALIASES` | API and worker | Legacy extractor ids, `<old>:<new>[,<old>:<new>]`; see [Renaming an extractor](#renaming-an-extractor). |
 
 Workspaces select the extractor with `documentExtraction.order.pdf: ["vm-pdf"]` and pass its options under
 `documentExtraction.options["vm-pdf"]` (`images.enabled`, `images.minWidth`, `images.minHeight`,
@@ -29,6 +30,29 @@ Workspaces select the extractor with `documentExtraction.order.pdf: ["vm-pdf"]` 
 - With a sandboxed PDF provider registered, embedded image extraction requires the `vm-pdf` route alone. Without
   one, the local artifact graph serves image targets.
 - Image orientation without a provider is off; it never decodes pixels on the host.
+
+## Renaming an extractor
+
+When a deployment's stored configs name an extractor by an id it no longer serves (for example after moving a
+provider behind the `vm-pdf` id), set `DOCSLURP_EXTRACTOR_ID_ALIASES=<old>:<new>` on the API and the worker:
+
+- Parsing rewrites the old id to the new one wherever a `documentExtraction` config names an extractor: `order`,
+  `components`, `pages`, `enrich`, `voting.secondary` and the `options` key. It applies to requests and to stored
+  workspace, run and upload-session configs alike, so nothing written after the deploy carries the old id. Free text
+  elsewhere in a pipeline is never touched.
+- Startup refuses an alias whose target the process does not serve (`vm-pdf` without a provider on the worker, or
+  without `DOCSLURP_VM_PDF_INSTALLED=1` on the API), an alias that names a built-in id, a chain, or a malformed
+  entry. Ids that are neither aliased nor known still fail validation as before.
+- A config holding options under both the old and the new key is never merged: requests are rejected, and stored
+  reads keep the new key's options and log the dropped old key.
+
+Order of a rename:
+
+1. Deploy the API and the worker with the alias and the provider under its new id, in one release. Runs created
+   before the deploy, and runs in flight across it, load their stored config through the alias and complete.
+2. Old configs keep working; new and updated configs are written with the new id.
+3. Optionally rewrite stored rows (a deployment's own tested script), so nothing still names the old id.
+4. Remove the alias in a later release, once nothing stored names the old id.
 
 ## Module contract
 

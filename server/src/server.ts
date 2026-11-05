@@ -30,7 +30,7 @@ import { sessionAuth } from "./middleware/session-auth.js";
 import { chatCompletionsRoutes } from "./routes/chat-completions.js";
 import { documentsRoutes } from "./routes/documents.js";
 import { exportsRoutes } from "./routes/exports.js";
-import { extractorRoutes } from "./routes/extractors.js";
+import { configureApiExtractorIdAliases, extractorRoutes } from "./routes/extractors.js";
 import { docsRoutes } from "./routes/docs.js";
 import { healthRoutes } from "./routes/health.js";
 import { organizationsRoutes } from "./routes/organizations.js";
@@ -286,6 +286,8 @@ export function ensureApiStartup(): Promise<void> {
       initializeObservability({ serviceName: "docslurp-api" });
       // Invalid private endpoint config fails startup; the /models probe never blocks it.
       initializePrivateModelEndpoints();
+      // Legacy extractor ids must be installed before any stored or incoming config is parsed; a bad alias fails startup.
+      configureApiExtractorIdAliases();
       if (shouldRunStartupMigrations()) {
         await runStartupMigrations();
       }

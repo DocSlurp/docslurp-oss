@@ -1,3 +1,4 @@
+import { normalizeDocumentExtractionAliases } from "./extractor-aliases.js";
 import { z } from "zod";
 import { layoutRegionSchema } from "./layout.js";
 
@@ -222,7 +223,8 @@ function dropInvalid(schema: z.ZodTypeAny, value: Record<string, unknown>, prefi
  */
 export function sanitizeStoredDocumentExtraction(value: unknown): { value: unknown; dropped: string[] } {
   if (!isPlainObject(value)) return { value, dropped: [] };
-  const next: Record<string, unknown> = structuredClone(value);
+  // Configured legacy ids first, so a renamed extractor's options are kept under its new id rather than dropped.
+  const next: Record<string, unknown> = structuredClone(normalizeDocumentExtractionAliases(value) as Record<string, unknown>);
   const dropped: string[] = [];
   if (isPlainObject(next.ocr) && next.ocr.language !== undefined && !ocrLanguageSettingSchema.safeParse(next.ocr.language).success) {
     delete next.ocr.language;
@@ -248,8 +250,11 @@ export function sanitizeStoredDocumentExtraction(value: unknown): { value: unkno
   return { value: next, dropped };
 }
 
-/** A workspace policy. The document router can emit the same ordered IDs per document. */
-export const documentExtractionConfigSchema = z.object({
+/**
+ * A workspace policy. The document router can emit the same ordered IDs per document. Configured legacy extractor ids
+ * (DOCSLURP_EXTRACTOR_ID_ALIASES, extractor-aliases.ts) are rewritten to their canonical id before validation.
+ */
+export const documentExtractionConfigSchema = z.preprocess(normalizeDocumentExtractionAliases, z.object({
   target: z.string().min(1).default("document/markdown"),
   enrich: z.array(z.string().min(1)).default([]),
   order: z.record(z.string(), z.array(z.string().min(1)).min(1)).default({}),
@@ -269,7 +274,7 @@ export const documentExtractionConfigSchema = z.object({
     language: ocrLanguageSettingSchema.default("auto"),
     autoRotate: z.boolean().default(true),
   }).default({ language: "auto", autoRotate: true }),
-});
+}));
 export type DocumentExtractionConfig = z.infer<typeof documentExtractionConfigSchema>;
 
 export const defaultDocumentExtractionConfig: DocumentExtractionConfig = {

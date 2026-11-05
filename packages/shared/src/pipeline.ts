@@ -1,6 +1,7 @@
 import { validateGeoAnnotations } from "./geo.js";
 import { z } from "zod";
 import { migrateStoredModelSettings } from "./stored-model-settings.js";
+import { normalizeDocumentExtractionAliases } from "./extractor-aliases.js";
 import { DEFAULT_QUALITY_MODE, migrateLegacyQualitySettings, qualityModeSchema } from "./quality.js";
 import {
   defaultDocumentExtractionConfig,
@@ -1033,6 +1034,13 @@ export function normalizePipelineFeatures(
   });
 }
 
+/** `value` with its `documentExtraction` extractor ids aliased to their canonical ids (extractor-aliases.ts). */
+function withCanonicalExtractorIds<T>(value: T): T {
+  if (!isPlainRecord(value) || !isPlainRecord(value.documentExtraction)) return value;
+  const extraction = normalizeDocumentExtractionAliases(value.documentExtraction);
+  return extraction === value.documentExtraction ? value : ({ ...value, documentExtraction: extraction } as T);
+}
+
 /**
  * `normalizePipelineFeatures` for a stored pipeline (a workspace or run row). Stored extractor settings that the
  * strict schemas now reject (an unknown extractor id or key, a Dolphin path, an invalid OCR language) are dropped
@@ -1053,10 +1061,10 @@ export function normalizeStoredPipelineFeatures(
  */
 export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
   if (!isPlainRecord(stored)) return stored;
-  let next: Record<string, unknown> = stored;
+  let next: Record<string, unknown> = withCanonicalExtractorIds(stored);
   const dropped: string[] = [];
-  if (isPlainRecord(stored.documentExtraction)) {
-    const extraction = sanitizeStoredDocumentExtraction(stored.documentExtraction);
+  if (isPlainRecord(next.documentExtraction)) {
+    const extraction = sanitizeStoredDocumentExtraction(next.documentExtraction);
     if (extraction.dropped.length > 0) {
       next = { ...next, documentExtraction: extraction.value };
       dropped.push(...extraction.dropped);
@@ -1071,7 +1079,7 @@ export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
       dropped.push(...unknown.map((pattern) => `piiPolicy.patterns[${typeof pattern === "string" ? pattern.slice(0, 64) : typeof pattern}]`));
     }
   }
-  if (dropped.length === 0) return stored;
+  if (dropped.length === 0) return next as T;
   console.error(`[pipeline] stored pipeline of ${source} has settings the schema rejects; dropped ${dropped.join(", ")}`);
   return next as T;
 }
@@ -1124,7 +1132,7 @@ const pipelineFeatureKeys = new Set(Object.keys(defaultPipelineFeatures).concat(
  * filling in defaults, so they can be merged onto the workspace pipeline.
  */
 export const pipelineFeatureOverridesSchema = z
-  .preprocess(migrateLegacyQualitySettings, z.record(z.string(), z.unknown()))
+  .preprocess((value) => withCanonicalExtractorIds(migrateLegacyQualitySettings(value as never)), z.record(z.string(), z.unknown()))
   .superRefine((value, ctx) => {
     const unknownKeys = Object.keys(value).filter((key) => !pipelineFeatureKeys.has(key));
     for (const key of unknownKeys) {
