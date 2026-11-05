@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { applyRemainingMigrations, createMigratedDatabase, serveOnRandomPort } from "@docslurp/worker/testing";
 
-import { collectReport, oneOrgPlanSql } from "../../db/predeploy-check.mjs";
+import { collectReport, oneOrgPlanSql, redactOutput } from "../../db/predeploy-check.mjs";
 
 /**
  * Migration 0127 enforces the current one-organization-per-user policy (DOCSLURP_MAX_ORGS_PER_USER=1): existing users with
@@ -248,6 +248,15 @@ describe("pre-deploy report of 0127", () => {
     expect(text).not.toMatch(/"T3"|"P"/);
     expect(text).toContain("user sole-owner: keeps t4; removed from t3 (not_kept, owner, FUNDED, 1 key(s), 0 grant(s), 1 workspace(s) handed over)");
     expect(text).toContain(`--ack-0127=${ackHash}`);
+  });
+
+  it("redacts in CI and any piped run, and on request; shows the full list only in a terminal", () => {
+    expect(redactOutput(["--strict"], false)).toBe(true);
+    expect(redactOutput(["--strict"], undefined)).toBe(true);
+    expect(redactOutput(["--strict"], true)).toBe(false);
+    expect(redactOutput(["--redact"], true)).toBe(true);
+    expect(redactOutput(["--no-redact"], false)).toBe(false);
+    expect(redactOutput(["--redact", "--no-redact"], true)).toBe(true);
   });
 
   it("refuses to run 0127 without the acknowledgement, or with a stale one, and changes nothing", () => {

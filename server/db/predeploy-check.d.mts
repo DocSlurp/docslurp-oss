@@ -6,8 +6,10 @@ export type MigrationJournal = { entries?: Array<{ tag: string; when: number }> 
 export declare function pendingMigrations(journal: MigrationJournal, newestAppliedMs: number): string[];
 export declare function section(title: string, level: ReportLevel, lines: string[]): ReportSection;
 export declare function render(sections: ReportSection[]): string;
-export declare function oneOrgPlanSql(migrationSql: string, options?: { webhooksHaveOrg?: boolean }): { plan: string; promotions: string };
-export declare function fundedRemovalsHash(removals: ReadonlyArray<{ user_id: string; org_id: string }>): string;
+/** 0127's plan, promotion and acknowledgement queries, read from the migration. `ack` selects funded_removals, member_promotions and hash. */
+export declare function oneOrgPlanSql(migrationSql: string, options?: { webhooksHaveOrg?: boolean }): { plan: string; promotions: string; ack: string };
+export declare function namer(redact: boolean): { user: (row: { user_id: string; email: string }) => string; org: (id: string, name: string) => string };
+export declare function redactOutput(argv: readonly string[], isTTY: boolean | undefined): boolean;
 export declare function knownExtractorIds(builtInIds: readonly string[], env?: Record<string, string | undefined>): string[];
 export declare function collectReport(
   client: QueryClient,
@@ -18,7 +20,9 @@ export declare function collectReport(
     extractorIds?: readonly string[];
     /** Defaults to migrations/0127_one_org_per_user.sql. */
     oneOrgMigrationSql?: string;
-    /** --ack-0127: the hash of the funded-removal list an owner reviewed. */
+    /** --ack-0127: the hash of the funded-removal and member-promotion list an owner reviewed. */
     ack0127?: string | null;
+    /** Name people and organizations by id only (no emails, no organization names). */
+    redact?: boolean;
   },
 ): Promise<ReportSection[]>;
