@@ -49,7 +49,11 @@ it.skipIf(!url)("keeps already-connected restricted sessions working at migratio
     // Bootstrap the historical grant policy before the project rename.
     await reconcileRoleGrants({ query: async (statement: string, params?: unknown[]) => {
       const result = await migration.query(statement.replaceAll("project", "workspace"), params);
-      return { ...result, rows: result.rows.map((row: Record<string, unknown>) => Object.fromEntries(Object.entries(row).map(([key,value]) => [key,["relname","table","sequence"].includes(key) && typeof value === "string" ? value.replaceAll("workspace","project") : value]))) };
+      return { ...result, rows: result.rows.map((row: Record<string, unknown>) => Object.fromEntries(Object.entries(row).map(([key, value]) => {
+        // The old schema reports column arrays as well as relation names.
+        if (key === "columns" && Array.isArray(value)) return [key, value.map(column => typeof column === "string" ? column.replaceAll("workspace", "project") : column)];
+        return [key, ["relname", "table", "sequence"].includes(key) && typeof value === "string" ? value.replaceAll("workspace", "project") : value];
+      }))) };
     } }, { log: () => {} });
     await migration.query(`insert into "user"(id,name,email) values('upgrade','Test','upgrade@example.test');
       insert into organizations(id,name,slug,created_by_user_id) values('upgrade','Test','upgrade','upgrade');
