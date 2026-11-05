@@ -15,6 +15,10 @@ const evidence = JSON.parse(readFileSync(new URL("../../../../docs/evals/model-p
 const routeEvidence = JSON.parse(readFileSync(new URL("../../../../docs/evals/vision-route-prices-2026-10-29.json", import.meta.url), "utf8")) as {
   endpoints: Record<string, { tag: string; pricing: { prompt: string; completion: string } }[]>;
 };
+/** DeepInfra's /models/list pricing for vision routes priced from a direct provider's list (`basis: "provider-list"`). */
+const deepInfraEvidence = JSON.parse(readFileSync(new URL("../../../../docs/evals/deepinfra-vision-prices-2026-11-04.json", import.meta.url), "utf8")) as {
+  models: { model_name: string; pricing: { cents_per_input_token: number; cents_per_output_token: number } }[];
+};
 const registry = JSON.parse(readFileSync(new URL("../../../../scripts/lib/model-prices.json", import.meta.url), "utf8")) as {
   models: Record<string, { input: number; output: number; vision?: boolean; contextWindow?: number; unavailable?: string }>;
 };
@@ -48,6 +52,16 @@ describe("official model price evidence", () => {
     for (const model of visionModelCatalog) {
       const pricing: VisionTokenPricing | null = model.tokenPricing;
       if (!pricing) continue;
+      if (pricing.basis === "provider-list") {
+        // A direct-provider route is priced at that provider's retained list price (cents per token x 1e4 = USD per M).
+        expect(pricing.providers, model.id).toEqual(["deepinfra"]);
+        expect(model.uri.startsWith("llm://deepinfra/"), model.id).toBe(true);
+        const listed = deepInfraEvidence.models.find((entry) => entry.model_name === model.id);
+        expect(listed, model.id).toBeDefined();
+        expect(pricing.inputUsdPerMillion, model.id).toBeCloseTo(listed!.pricing.cents_per_input_token * 1e4, 10);
+        expect(pricing.outputUsdPerMillion, model.id).toBeCloseTo(listed!.pricing.cents_per_output_token * 1e4, 10);
+        continue;
+      }
       const id = model.id === "gpt-4.1-mini" ? "openai/gpt-4.1-mini" : model.id;
       expect(prices.get(id)!.architecture.input_modalities).toContain("image");
       if (pricing.basis !== "pinned-route") {

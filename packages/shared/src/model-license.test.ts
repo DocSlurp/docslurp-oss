@@ -165,6 +165,12 @@ describe("licence classes of the tuned hosted vision models", () => {
     expect(licenseClassOfModel("llm://openrouter/openai/gpt-6-luna")).toBe("proprietary-hosted");
   });
 
+  it("records the DeepInfra Qwen3-VL 30B escalation route as Apache-2.0 (free), by id and by URI", () => {
+    expect(lookupModelLicense("Qwen/Qwen3-VL-30B-A3B-Instruct")).toMatchObject({ licenseClass: "free", id: "apache-2.0" });
+    expect(lookupModelLicense("qwen/qwen3-vl-30b-a3b-instruct")?.source).toMatch(/Qwen3-VL-30B-A3B-Instruct.*2026-11-04/);
+    expect(licenseClassOfModel("llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct")).toBe("free");
+  });
+
   it("gives every opt-in entry a source", () => {
     for (const id of ["deepseek/deepseek-v4.1-flash-1017", "xiaomi/mimo-v2.6-flash", "openai/gpt-6-luna"]) {
       expect(lookupModelLicense(id)?.source).toBeTruthy();

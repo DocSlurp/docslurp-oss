@@ -42,6 +42,8 @@ export const MODEL_LICENSES: Readonly<Record<string, ModelLicenseEntry>> = {
   "deepseek-ocr-2": { licenseClass: "free", id: "apache-2.0", source: hub("deepseek-ai/DeepSeek-OCR-2") },
   "paddleocr-vl": { licenseClass: "free", id: "apache-2.0", source: hub("PaddlePaddle/PaddleOCR-VL-1.6") },
   "qwen/qwen3-vl-8b-instruct": { licenseClass: "free", id: "apache-2.0", source: hub("Qwen/Qwen3-VL-8B-Instruct") },
+  // Hosted on DeepInfra (`llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct`); Hub `cardData.license` apache-2.0.
+  "qwen/qwen3-vl-30b-a3b-instruct": { licenseClass: "free", id: "apache-2.0", source: "huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct model card, verified 2026-11-04" },
   "qwen/qwen2-vl-2b-instruct": { licenseClass: "free", id: "apache-2.0", source: hub("Qwen/Qwen2-VL-2B-Instruct") },
   "microsoft/florence-2-small-ft": { licenseClass: "free", id: "mit", source: `microsoft/Florence-2 model card (MIT), ${VERIFIED}` },
   "microsoft/florence-2-base-ft": { licenseClass: "free", id: "mit", source: `microsoft/Florence-2 model card (MIT), ${VERIFIED}` },

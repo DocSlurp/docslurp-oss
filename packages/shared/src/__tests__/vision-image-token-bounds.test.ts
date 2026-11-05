@@ -97,6 +97,27 @@ function qwen2vlTokens(width: number, height: number): number | null {
   return (h / 16) * (w / 16) / 4 + 2;
 }
 
+/**
+ * Qwen3-VL (`Qwen2VLImageProcessorFast`, Qwen/Qwen3-VL-30B-A3B-Instruct preprocessor_config.json, checked 2026-11-04):
+ * `smart_resize` with factor 32 (16-px patches, 2x2 merge), 65,536 to 16,777,216 pixels, plus vision start/end tokens.
+ */
+function qwen3vlTokens(width: number, height: number): number | null {
+  const factor = 32, minPixels = 65_536, maxPixels = 16_777_216;
+  if (Math.max(width, height) / Math.min(width, height) > 200) return null;
+  let h = Math.max(factor, pyRound(height / factor) * factor);
+  let w = Math.max(factor, pyRound(width / factor) * factor);
+  if (h * w > maxPixels) {
+    const beta = Math.sqrt((height * width) / maxPixels);
+    h = Math.max(factor, Math.floor(height / beta / factor) * factor);
+    w = Math.max(factor, Math.floor(width / beta / factor) * factor);
+  } else if (h * w < minPixels) {
+    const beta = Math.sqrt(minPixels / (height * width));
+    h = Math.ceil((height * beta) / factor) * factor;
+    w = Math.ceil((width * beta) / factor) * factor;
+  }
+  return (h / 16) * (w / 16) / 4 + 2;
+}
+
 /** GLM5-Next `smart_resize` (14-px patches, 2x2 merge, 2 frames, 16 to 8,000 merged tokens), start and end tokens. */
 function glm5NextTokens(width: number, height: number): number {
   const factor = 28, frames = 2;
@@ -147,6 +168,7 @@ const RULES: Record<string, (width: number, height: number) => number | null> = 
   "openai/gpt-6-luna": openAiTokens(2.46),
   "google/gemini-2.5-flash-lite": gemini2Tokens,
   "google/gemini-3.1-flash-lite": () => 2_240,
+  "Qwen/Qwen3-VL-30B-A3B-Instruct": qwen3vlTokens,
 };
 
 const SIZES: Array<[number, number]> = [
@@ -182,7 +204,8 @@ describe("vision image-token bounds against each model's published image process
     expect(deepseekTokens(14, 14)).toBeGreaterThan(100);
     expect(glm5NextTokens(14, 14)).toBeGreaterThanOrEqual(16);
     expect(qwen2vlTokens(14, 14)).toBeGreaterThanOrEqual(8_192 / 1_024);
-    for (const model of ["deepseek/deepseek-v4.1-flash-1017", "z-ai/glm-5.3-flash"]) {
+    expect(qwen3vlTokens(14, 14)).toBeGreaterThanOrEqual(64);
+    for (const model of ["deepseek/deepseek-v4.1-flash-1017", "z-ai/glm-5.3-flash", "Qwen/Qwen3-VL-30B-A3B-Instruct"]) {
       expect(visionImageTokens(model, { widthPx: 14, heightPx: 14 })!).toBeGreaterThanOrEqual(RULES[model]!(14, 14)!);
     }
   });
@@ -194,5 +217,21 @@ describe("vision image-token bounds against each model's published image process
     expect(qwen2vlTokens(8_000, 8_000)).toBeLessThanOrEqual(8_194);
     expect(glm5NextTokens(8_000, 8_000)).toBeLessThanOrEqual(8_002);
     expect(glm5NextTokens(8_000, 8_000)).toBeGreaterThan(7_900);
+    expect(qwen3vlTokens(4_096, 4_096)).toBe(16_384 + 2);
+    expect(qwen3vlTokens(8_000, 8_000)).toBeLessThanOrEqual(16_386);
+    expect(visionImageTokens("Qwen/Qwen3-VL-30B-A3B-Instruct", null)).toBe(16_386);
+  });
+
+  it("bounds Qwen3-VL's minimum-size upscaling at every aspect the processor accepts", () => {
+    // Upscaled images land near 64 merged tokens; ceil rounding at the 200:1 limit can add up to ~115 more.
+    for (let long = 1; long <= 400; long += 1) {
+      for (const short of [1, 2, 3, Math.max(1, Math.floor(long / 200)), Math.max(1, Math.ceil(long / 200))]) {
+        for (const [w, h] of [[long, short], [short, long]] as const) {
+          const actual = qwen3vlTokens(w, h);
+          if (actual === null) continue;
+          expect(visionImageTokens("Qwen/Qwen3-VL-30B-A3B-Instruct", { widthPx: w, heightPx: h })!, `${w}x${h}`).toBeGreaterThanOrEqual(actual);
+        }
+      }
+    }
   });
 });
