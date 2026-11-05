@@ -35,6 +35,8 @@ const fastDocs = `
 
 beforeAll(async () => {
   db = await createMigratedDatabase();
+  // These fixtures model documents whose page_count the worker already measured (`counted`); billing ignores an assumed count.
+  await db.exec(`alter table documents alter column page_count_source set default 'counted'`);
   // Probed facts stop at page 300 (WORKER_PAGE_FACTS_MAX_PAGES): pages 1-300 look like scans with no Fast status,
   // which the old facts-based rule billed Rich; pages 301-305 have no facts at all.
   const longScanFacts = Array.from({ length: 300 }, (_, index) => `('f-long-scan', ${index + 1}, 'fast', 0, 1, null)`).join(",");

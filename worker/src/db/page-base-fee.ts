@@ -143,8 +143,9 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
         where d.run_id = ${state.run.id} and d.deduped_from_document_id is null and d.status <> 'failed'
           and coalesce(d.mime_type, '') not like 'audio/%' and coalesce(d.mime_type, '') not like 'video/%'
           and (${!deferredProfilesEnabled()} or d.indexing_mode = 'full')
-          -- A PDF bills only the worker's measured count, never intake's size estimate: one still assumed bills nothing.
-          and not (d.mime_type = 'application/pdf' and d.page_count_source = 'assumed')
+          -- Only measured counts bill: the worker's billing_pages, or a page_count counted from the bytes or by the worker. A count
+          -- still assumed (an intake estimate: a PDF's size, a sampled text file, an Office file's one page) bills nothing.
+          and (d.billing_pages is not null or d.page_count_source = 'counted')
       )
       select docs.id as document_id, docs.pages, docs.image,
         -- Runs started before the per-read rule only (splitLegacyRemainingPages): pages the facts show as scans.

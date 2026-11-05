@@ -17,6 +17,8 @@ let store: Store;
 
 beforeAll(async () => {
   db = await createMigratedDatabase();
+  // These fixtures model documents whose page_count the worker already measured (`counted`); billing ignores an assumed count.
+  await db.exec(`alter table documents alter column page_count_source set default 'counted'`);
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com');
     insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 100000);

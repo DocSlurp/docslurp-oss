@@ -167,9 +167,17 @@ export function stripHtmlMarkup(text: string): string {
  */
 export function textPageCount(text: string, options: { markup?: boolean } = {}): number {
   if (text.length > TEXT_MEASURE_SAMPLE_CHARS) {
-    const sampled = textPageCount(text.slice(0, TEXT_MEASURE_SAMPLE_CHARS), options);
+    const sampled = measuredTextPages(text.slice(0, TEXT_MEASURE_SAMPLE_CHARS), options);
     return Math.max(1, Math.ceil(sampled * (text.length / TEXT_MEASURE_SAMPLE_CHARS)));
   }
+  return measuredTextPages(text, options);
+}
+
+/**
+ * The same text rule as textPageCount over the whole text, never sampled: the worker's measured count of a text file, which
+ * billing reads (worker/src/lib/text-page-count.ts). The caller bounds the text's size.
+ */
+export function measuredTextPages(text: string, options: { markup?: boolean } = {}): number {
   const visible = options.markup ? stripHtmlMarkup(text) : text;
   const lines = options.markup ? visible.split(/\r?\n/).filter((line) => line.trim() !== "").length : visible.split(/\r?\n/).length;
   const trimmed = visible.trim();

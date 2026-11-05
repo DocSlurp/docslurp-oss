@@ -5,6 +5,7 @@ import { healthyDocuments } from "../pipeline/document-health.js";
 import { cleanupTempFile, sourceStorageKey, type ArtifactStore } from "../tools/storage.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { recordMeasuredPdfPageCount } from "../lib/pdf-page-count.js";
+import { recordMeasuredTextPageCount } from "../lib/text-page-count.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import { detectFileFormat, type NormalizedFormat } from "@docslurp/shared";
@@ -59,6 +60,11 @@ export class FormatDetectStage implements Stage {
             state, document, runner: this.runner, signal,
             sourcePath: async () => (temp ??= await this.storage.downloadSourceToTempFile(sourceStorageKey(document.sourceKey), trustedTempDownloadPattern("docslurp-pdf-pages-", document))),
           }).finally(async () => { if (temp) await cleanupTempFile(temp); }) : null;
+          // A text file intake could not count in full (sampled over 2 MB, or no evidence): the same text rule over the whole text.
+          const textPages = await recordMeasuredTextPageCount({
+            state, document, format: normalizedFormat,
+            readSource: (maxBytes) => this.storage.getBytes(sourceStorageKey(document.sourceKey), { maxBytes }),
+          });
 
           return {
             artifactUri: this.storage.uri(key),
@@ -67,6 +73,7 @@ export class FormatDetectStage implements Stage {
               detectedBy,
               mimeVerdict: document.fileFacts?.mismatch ?? null,
               ...(pdfPages ? { pdfPages: pdfPages.pages, pdfPagesEstimate: pdfPages.estimate, pdfPagesMethod: pdfPages.method } : {}),
+              ...(textPages ? { textPages: textPages.pages, textPagesEstimate: textPages.estimate } : {}),
             },
           };
         },
