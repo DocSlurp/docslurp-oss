@@ -2,7 +2,7 @@ import { instrumentFetch } from "@docslurp/shared/observability";
 import { jsonResponse } from "./http.js";
 export { jsonResponse } from "./http.js";
 import { verifyDeepInfraRate } from "./rates.js";
-import { disputed, MEDIA_RATE_VERSION } from "./accounting.js";
+import { disputed, MEDIA_RATE_VERSION, recordedMediaCost } from "./accounting.js";
 import type { AudioInput, MediaProvider, SpeakerTurn, Transcription, TranscriptSegment, TranscriptWord } from "./types.js";
 
 // Official metadata checked 2026-10-13. Native speech cost units are disputed; preserve raw evidence.
@@ -123,8 +123,9 @@ export class DeepInfraMediaProvider implements MediaProvider {
     const reported = result.costSource === "provider" ? result.costUsd : undefined;
     const mismatch = disputed(reported, expectedCostUsd);
     const requestId = result.requestId ?? response.headers.get("x-request-id")?.slice(0, 200);
-    return { ...result, requestId, costUsd: expectedCostUsd, costSource: "estimate", expectedCostUsd,
-      pricingMismatch: mismatch, accounting: { state: mismatch ? "disputed" : "estimated", basis: "input-seconds",
+    const recorded = recordedMediaCost(reported, expectedCostUsd);
+    return { ...result, requestId, costUsd: recorded.costUsd, costSource: recorded.recordedFrom, expectedCostUsd,
+      pricingMismatch: mismatch, accounting: { state: mismatch ? "disputed" : "estimated", basis: "input-seconds", recordedFrom: recorded.recordedFrom,
         rateVersion: MEDIA_RATE_VERSION, rateSource: `https://api.deepinfra.com/models/${this.model}`,
         reportedCostUsd: reported, estimatedCostUsd: expectedCostUsd, providerRequestId: requestId,
         inputTokens: result.inputTokens, outputTokens: result.outputTokens } };
@@ -168,8 +169,9 @@ export class HuggingFaceMediaProvider implements MediaProvider {
     const reported = result.costSource === "provider" ? result.costUsd : undefined;
     const requestId = result.requestId ?? response.headers.get("x-request-id")?.slice(0, 200);
     const mismatch = disputed(reported, expectedCostUsd);
-    return { ...result, requestId, costUsd: expectedCostUsd, costSource: "estimate", expectedCostUsd, pricingMismatch: mismatch,
-      accounting: { state: mismatch ? "disputed" : "estimated", basis: "input-seconds", rateVersion: "operator-configured",
+    const recorded = recordedMediaCost(reported, expectedCostUsd);
+    return { ...result, requestId, costUsd: recorded.costUsd, costSource: recorded.recordedFrom, expectedCostUsd, pricingMismatch: mismatch,
+      accounting: { state: mismatch ? "disputed" : "estimated", basis: "input-seconds", recordedFrom: recorded.recordedFrom, rateVersion: "operator-configured",
         rateSource: "MEDIA_HF_USD_PER_MINUTE", reportedCostUsd: reported, estimatedCostUsd: expectedCostUsd, providerRequestId: requestId,
         inputTokens: result.inputTokens, outputTokens: result.outputTokens } };
   }

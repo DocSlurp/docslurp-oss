@@ -1,4 +1,4 @@
-import { assertProviderAllowed, authorizePrivateModelCall, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, createOpenRouterUsageCapture, isPrivateModelUri, PRIVATE_MODEL_PROVIDER, resolveOpenRouterUsage, resolveSupportedModelIdWithWarning, type PrivacyMode, type PrivateCallAuditScope, type ProviderTextUsage } from "@docslurp/shared";
+import { assertProviderAllowed, authorizePrivateModelCall, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, createOpenRouterUsageCapture, createOpenRouterChargeTotal, isPrivateModelUri, readProviderCharge, PRIVATE_MODEL_PROVIDER, resolveOpenRouterUsage, resolveSupportedModelIdWithWarning, type PrivacyMode, type PrivateCallAuditScope, type ProviderTextUsage } from "@docslurp/shared";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
@@ -36,7 +36,7 @@ export interface TextGenerationUsage extends ProviderTextUsage {}
 
 export interface EmbeddingUsage {
   inputTokens: number;
-  /** Set for private endpoint routes: operator-priced cost of this call. */
+  /** The provider-reported charge (OpenRouter `usage.cost`), or the operator price of a private endpoint call. */
   costCents?: number;
   metadata?: Record<string, unknown>;
 }
@@ -535,14 +535,15 @@ export async function embedConfiguredText(args: {
     const route = openRouterEmbeddingRoute(args.model ?? "");
     if (args.dimensions !== undefined && args.dimensions !== route.dimensions) throw new Error("OpenRouter embedding dimensions do not match the registered model");
     if (!args.apiKey) throw new Error("OPENROUTER_API_KEY is required for remote OpenRouter embeddings");
-    const provider = createOpenAI({ apiKey: args.apiKey, baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding", createOpenRouterRoutingFetch()) });
+    const accounting = createOpenRouterUsageCapture(createOpenRouterRoutingFetch());
+    const provider = createOpenAI({ apiKey: args.apiKey, baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding", accounting.fetch) });
     const result = await withObservation({ name: "api.embedding.openrouter", type: "embedding", model: route.model, input: args.value, result: aiResultDetails }, () => embed({
       model: provider.embedding(route.model), value: args.value, abortSignal: args.signal, maxRetries: 0,
       ...posthogAiTelemetry({ functionId: "api.embedding.openrouter", provider: "openrouter", context: args.observability }),
     }));
     const inputTokens = result.usage.tokens;
     if (!Number.isSafeInteger(inputTokens) || !(inputTokens! > 0)) throw new Error("OpenRouter embedding response omitted actual usage");
-    const usage = { inputTokens: inputTokens! };
+    const usage: EmbeddingUsage = { inputTokens: inputTokens!, ...readProviderCharge(accounting.usage()) };
     await args.onUsage?.(usage);
     return { embedding: validateHostedEmbeddingVector(result.embedding, route.dimensions, args.normalize), usage };
   }
@@ -603,9 +604,9 @@ export async function embedConfiguredTexts(args: Omit<Parameters<typeof embedCon
     withObservation({ name, type: "embedding", model, input: args.values.join("\n"), result: aiResultDetails }, () => embedMany({
       model: provider.embedding(model), values: args.values, abortSignal: args.signal, maxRetries: 0, ...extra,
     }));
-  const exactUsage = async (tokens: number | undefined, label: string): Promise<EmbeddingUsage> => {
+  const exactUsage = async (tokens: number | undefined, label: string, charge: Pick<EmbeddingUsage, "costCents" | "metadata"> = {}): Promise<EmbeddingUsage> => {
     if (!Number.isSafeInteger(tokens) || !(tokens! > 0)) throw new Error(`${label} embedding response omitted actual usage`);
-    const usage = { inputTokens: tokens! };
+    const usage: EmbeddingUsage = { inputTokens: tokens!, ...charge };
     await args.onUsage?.(usage);
     return usage;
   };
@@ -613,9 +614,11 @@ export async function embedConfiguredTexts(args: Omit<Parameters<typeof embedCon
     const route = openRouterEmbeddingRoute(args.model ?? "");
     if (args.dimensions !== undefined && args.dimensions !== route.dimensions) throw new Error("OpenRouter embedding dimensions do not match the registered model");
     if (!args.apiKey) throw new Error("OPENROUTER_API_KEY is required for remote OpenRouter embeddings");
-    const provider = createOpenAI({ apiKey: args.apiKey, baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding", createOpenRouterRoutingFetch()) });
+    // embedMany may split the batch into several requests: sum every response's charge.
+    const accounting = createOpenRouterChargeTotal(createOpenRouterRoutingFetch());
+    const provider = createOpenAI({ apiKey: args.apiKey, baseURL: OPENROUTER_BASE_URL, fetch: instrumentFetch("openrouter", "embedding", accounting.fetch) });
     const result = await many(provider, route.model, "api.embedding.openrouter.batch");
-    const usage = await exactUsage(result.usage.tokens, "OpenRouter");
+    const usage = await exactUsage(result.usage.tokens, "OpenRouter", accounting.charge());
     return { embeddings: result.embeddings.map((vector) => validateHostedEmbeddingVector(vector, route.dimensions, args.normalize)), usage };
   }
   if (args.provider === "deepinfra") {

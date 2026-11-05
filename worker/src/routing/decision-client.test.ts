@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PrivacyModeViolationError } from "@docslurp/shared";
+import { PrivacyModeViolationError, setLiveModelPricesForTests } from "@docslurp/shared";
 
 import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import {
@@ -9,6 +9,7 @@ import {
   OPENROUTER_SYSTEMONE_URL,
   PERPLEXITY_DECISIONS_URL,
   createDecisionClient,
+  decisionCallCost,
   decisionCostCents,
   imageDataUrlPart,
   parseDecisionResponse,
@@ -206,5 +207,17 @@ describe("usage recording", () => {
 
   it("prices input tokens only", () => {
     expect(decisionCostCents(catalogModel("typesafe/jev-1.13"), 1_000_000)).toBeCloseTo(4.2, 10);
+  });
+
+  it("records the provider-reported charge when the response carries one, else adds live output pricing", () => {
+    const model = catalogModel("typesafe/jev-1.13");
+    expect(decisionCallCost(model, { inputTokens: 1_000_000, outputTokens: 10 }, { cost: 0.05 })).toEqual({ costCents: 5, costSource: "provider" });
+    expect(decisionCallCost(model, { inputTokens: 1_000_000, outputTokens: 0 }, {})).toMatchObject({ costSource: "catalog-input-price" });
+    setLiveModelPricesForTests({ models: { [model.id.replace(/^llm:\/\/openrouter\//, "")]: { input: 0, output: 0.000001 } } });
+    try {
+      const priced = decisionCallCost(model, { inputTokens: 1_000_000, outputTokens: 1_000 }, {});
+      expect(priced.costSource).toBe("catalog-input-price+live-output-price");
+      expect(priced.costCents).toBeCloseTo(4.2 + 0.1, 10);
+    } finally { setLiveModelPricesForTests(null); }
   });
 });

@@ -1,3 +1,11 @@
+## Actual provider charges, live list prices and loss alerts (2026-11-04)
+
+- Record the provider-reported charge for OpenRouter embeddings, moderation, decision calls and consistent media receipts; price receipt-less usage from live OpenRouter list prices (hourly, hardcoded fallback); alert per org when hourly provider cost exceeds credits charged. Credits are unchanged. See `docs/pricing-and-credits.md#provider-cost`.
+
+## llm:// model URIs on every model input (2026-11-04)
+
+- Chat `model`, Chat Completions `docslurp.model`, text-generation fields and model env settings accept `llm://<provider>/<model>`; see `docs/model-configuration.md#model-uris-llm`.
+
 ## Opt-in first-party realtime transport and durable chat integration (2026-11-03)
 
 - Add the session-only Node Upgrade adapter, mounted-host export, bounded shared dashboard/suggestions/viewer projections, commit-visible revision reconciliation, durable operation provider hookup and shared tree reconciliation. Preserve parent job/child run identities and existing HTTP mutation/cancellation ownership. Flags remain off pending app integration, independent council review and measured canary gates; see `docs/realtime-protocol.md`.

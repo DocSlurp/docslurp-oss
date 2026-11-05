@@ -628,3 +628,131 @@ export async function extractUsageTotals(orgId: string, since: UsageWindow, clie
     pagesPerDollar: cost > 0 ? pages / (cost / 100) : null,
   };
 }
+
+/** One chat turn, finished run or search session whose provider cost exceeded the credits it charged. */
+export interface ProviderCostLossItem {
+  kind: "chat-turn" | "run" | "search-session";
+  /** The chat turn id, run id or search session id. */
+  key: string;
+  orgId: string;
+  /** Credits the item charged (1 credit = 1 cent), after any refund. */
+  creditCents: number;
+  /** What providers charged: the reported charge, or the list-price estimate where no receipt arrived. */
+  providerCostCents: number;
+  /** The part of providerCostCents that is an estimate rather than a provider receipt. */
+  estimatedCostCents: number;
+  lossCents: number;
+  /** Credits were refunded (an undelivered chat turn), so the loss is expected. */
+  refunded: boolean;
+  /** Model with the largest provider cost in the item. */
+  topModel: string | null;
+  lastEventAt: Date;
+}
+
+const TERMINAL_RUN_STATUSES = ["completed", "failed", "cancelled", "pii_blocked"];
+
+/** One organization's loss over the window, summed in SQL over every non-refunded loss item. */
+export interface ProviderCostLossOrgTotal {
+  orgId: string;
+  lossCents: number;
+  providerCostCents: number;
+  creditCents: number;
+  estimatedCostCents: number;
+  items: number;
+  refundedItems: number;
+}
+
+/**
+ * Loss items in a window (provider cost above the credits charged), plus
+ * per-org totals over all of them (the item list is capped; the totals are
+ * not). An item is a chat turn (`metadata.chatTurnId`), a run (judged once
+ * terminal, at whichever is later of its last event and its last status
+ * change), or a search session that carried a `search-query` charge (chat
+ * work outside a turn never forms an item). Events up to `lookbackMs` before
+ * `since` count toward an item; items running longer are judged on their
+ * recent part. Non-numeric `providerCostCents` counts as 0. The statements
+ * run under a statement timeout (default 20 s) so a slow scan cannot stall
+ * the alert leader.
+ */
+export async function providerCostLossItems(
+  args: { since: Date; until: Date; lookbackMs?: number; limit?: number; statementTimeoutMs?: number },
+  client: SqlClient = sql,
+): Promise<{ items: ProviderCostLossItem[]; orgs: ProviderCostLossOrgTotal[] }> {
+  const from = new Date(args.since.getTime() - (args.lookbackMs ?? 6 * 60 * 60_000));
+  const timeoutMs = Math.max(1_000, Math.round(args.statementTimeoutMs ?? 20_000));
+  const lossItems = (db: SqlClient) => db`
+    with events as (
+      select au.*,
+        case
+          when au.metadata ->> 'chatTurnId' is not null then 'chat-turn'
+          when au.source_run_id is not null then 'run'
+          when au.metadata ->> 'sessionId' is not null then 'search-session'
+        end as item_kind,
+        coalesce(au.metadata ->> 'chatTurnId', au.source_run_id, au.metadata ->> 'sessionId') as item_key,
+        case when jsonb_typeof(au.metadata -> 'providerCostCents') = 'number'
+          then greatest((au.metadata ->> 'providerCostCents')::double precision, 0) else 0 end * au.share as provider_cost
+      from ${attributedUsage(from, db)} au
+      where au.org_id is not null
+    ),
+    items as (
+      select item_kind as kind, item_key as key, org_id,
+        coalesce(sum(cost_cents), 0)::double precision as credit_cents,
+        coalesce(sum(provider_cost), 0)::double precision as provider_cost_cents,
+        coalesce(sum(provider_cost) filter (where metadata ->> 'costSource' is distinct from 'provider'), 0)::double precision as estimated_cost_cents,
+        bool_or(metadata ? 'chatTurnRefund') as refunded,
+        bool_or(metric = ${BILLABLE_UNIT_METRICS.search}) as search_charged,
+        (array_agg(model order by provider_cost desc))[1] as top_model,
+        max(created_at) as last_event_at
+      from events
+      where item_kind is not null
+      group by item_kind, item_key, org_id
+    )
+    select i.kind, i.key, i.org_id, i.credit_cents, i.provider_cost_cents, i.estimated_cost_cents, i.refunded, i.top_model,
+      case when i.kind = 'run' and wr.id is not null then greatest(i.last_event_at, wr.updated_at) else i.last_event_at end as judged_at
+    from items i
+    left join workspace_runs wr on i.kind = 'run' and wr.id = i.key
+    where i.provider_cost_cents > i.credit_cents + 0.000001
+      and (i.kind <> 'search-session' or i.search_charged)
+      and (i.kind <> 'run' or wr.id is null or wr.status = any(${TERMINAL_RUN_STATUSES}::text[]))
+      and (case when i.kind = 'run' and wr.id is not null then greatest(i.last_event_at, wr.updated_at) else i.last_event_at end)
+        > ${args.since}
+      and (case when i.kind = 'run' and wr.id is not null then greatest(i.last_event_at, wr.updated_at) else i.last_event_at end)
+        <= ${args.until}`;
+  type ItemRow = { kind: ProviderCostLossItem["kind"]; key: string; org_id: string; credit_cents: number; provider_cost_cents: number;
+    estimated_cost_cents: number; refunded: boolean; top_model: string | null; judged_at: Date };
+  type OrgRow = { org_id: string; loss_cents: number; provider_cost_cents: number; credit_cents: number; estimated_cost_cents: number; items: number; refunded_items: number };
+  const { itemRows, orgRows } = await client.begin(async (tx) => {
+    const db = tx as unknown as SqlClient;
+    await db`select set_config('statement_timeout', ${String(timeoutMs)}, true)`;
+    const itemRows = await db<ItemRow[]>`
+      select * from (${lossItems(db)}) loss
+      order by loss.provider_cost_cents - loss.credit_cents desc
+      limit ${args.limit ?? 500}`;
+    const orgRows = await db<OrgRow[]>`
+      select org_id,
+        coalesce(sum(provider_cost_cents - credit_cents) filter (where not refunded), 0)::double precision as loss_cents,
+        coalesce(sum(provider_cost_cents) filter (where not refunded), 0)::double precision as provider_cost_cents,
+        coalesce(sum(credit_cents) filter (where not refunded), 0)::double precision as credit_cents,
+        coalesce(sum(estimated_cost_cents) filter (where not refunded), 0)::double precision as estimated_cost_cents,
+        (count(*) filter (where not refunded))::int as items,
+        (count(*) filter (where refunded))::int as refunded_items
+      from (${lossItems(db)}) loss
+      group by org_id
+      order by loss_cents desc`;
+    return { itemRows, orgRows };
+  }) as { itemRows: ItemRow[]; orgRows: OrgRow[] };
+  const items = itemRows.map((row) => {
+    const creditCents = Number(row.credit_cents), providerCostCents = Number(row.provider_cost_cents);
+    return {
+      kind: row.kind, key: row.key, orgId: row.org_id, creditCents, providerCostCents,
+      estimatedCostCents: Number(row.estimated_cost_cents), lossCents: providerCostCents - creditCents,
+      refunded: Boolean(row.refunded), topModel: row.top_model, lastEventAt: new Date(row.judged_at),
+    };
+  });
+  const orgs = orgRows.map((row) => ({
+    orgId: row.org_id, lossCents: Number(row.loss_cents), providerCostCents: Number(row.provider_cost_cents),
+    creditCents: Number(row.credit_cents), estimatedCostCents: Number(row.estimated_cost_cents),
+    items: Number(row.items), refundedItems: Number(row.refunded_items),
+  }));
+  return { items, orgs };
+}

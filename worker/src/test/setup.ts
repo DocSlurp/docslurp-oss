@@ -1,3 +1,5 @@
+// Usage pricing in tests uses the hardcoded tables; the live OpenRouter catalog is never fetched.
+if (process.env.LIVE_MODEL_PRICES === undefined) process.env.LIVE_MODEL_PRICES = "off";
 if (process.env.DOCSLURP_PARSER_SANDBOX === undefined) {
   process.env.DOCSLURP_PARSER_SANDBOX = "none";
 }
