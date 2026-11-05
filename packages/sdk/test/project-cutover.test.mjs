@@ -31,3 +31,10 @@ for (const [name,call] of selectorCalls) test(`${name} rejects stale or mixed se
   }
   assert.equal(requests,0);
 });
+
+test("inherited legacy selectors are refused instead of becoming an implicit default", async () => {
+  const client=createDocSlurpClient({project:"default-project",fetch:()=>{throw new Error("network must not run");}});
+  for (const [,call] of selectorCalls) {
+    await assert.rejects(async()=>call(client,Object.create({workspace:"intended-project"})),/Legacy workspace selection/);
+  }
+});

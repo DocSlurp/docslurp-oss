@@ -937,7 +937,7 @@ function isStreamBody(body: unknown): boolean {
 }
 
 function rejectLegacyProjectOptions(input: object): void {
-  if (["workspace", "workspaces", "workspaceId", "workspaceIds", "workspaceName", "newWorkspace", "workspace_id", "workspace_ids"].some(key => Object.hasOwn(input, key))) {
+  if (["workspace", "workspaces", "workspaceId", "workspaceIds", "workspaceName", "newWorkspace", "workspace_id", "workspace_ids"].some(key => key in input)) {
     throw new Error("Legacy workspace selection is no longer supported; use project or newProject.");
   }
 }
