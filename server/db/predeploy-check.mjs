@@ -31,7 +31,7 @@ import { directDatabaseUrl, INDEX_NAME } from "./folded-search-index.mjs";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const ONE_ORG_MIGRATION = path.join(here, "migrations", "0127_one_org_per_user.sql");
 /** Migrations of this release that wait a bounded time for their locks (the shared lock prelude, 0122). */
-const BOUNDED_LOCK_MIGRATIONS = ["0122", "0123", "0125", "0126", "0127"];
+const BOUNDED_LOCK_MIGRATIONS = ["0122", "0123", "0125", "0126", "0127", "0128", "0129", "0130"];
 /** Lines listed per affected-user report before the rest is summarized (--json carries the same lines). */
 const MAX_LISTED = 500;
 const ACTIVE_RUN_STATUSES = ["queued", "blocked", "processing"];

@@ -357,7 +357,7 @@ export const documents = pgTable(
     billingPages: integer("billing_pages"),
     billingPagesMethod: text("billing_pages_method"),
     /** `counted` or `assumed` (intake could not count the pages; migration 0126). */
-    pageCountSource: text("page_count_source").default("counted").notNull(),
+    pageCountSource: text("page_count_source").default("assumed").notNull(),
     dedupedFromDocumentId: text("deduped_from_document_id"),
     reusedFromDocumentId: text("reused_from_document_id"),
     dedupScope: text("dedup_scope"),

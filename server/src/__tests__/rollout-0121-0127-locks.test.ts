@@ -2,14 +2,14 @@ import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 /**
- * The migrator applies every pending migration in one transaction, so the locks of 0121-0128 add up until it commits. Each
+ * The migrator applies every pending migration in one transaction, so the locks of 0121-0130 add up until it commits. Each
  * lock-taking migration of the release starts with the same lock prelude (explained in 0122), so whichever runs first takes
  * every strong lock of the release in one canonical order. This pins that: the prelude is identical and first, and no
  * migration of the release takes a strong lock on a table the prelude does not hold, unless it locks that table itself
  * right after the prelude (0128's vision_run_attempts, which no transaction takes before a prelude table).
  */
 const dir = new URL("../../db/migrations/", import.meta.url);
-const release = readdirSync(dir).filter((name) => /^012[1-9]_.*\.sql$/.test(name)).sort();
+const release = readdirSync(dir).filter((name) => /^(012[1-9]|0130)_.*\.sql$/.test(name)).sort();
 const statements = (name: string) =>
   readFileSync(new URL(name, dir), "utf8")
     .split("--> statement-breakpoint")
@@ -27,9 +27,9 @@ const PRELUDE = [
 ];
 const PRELUDE_TABLES = new Set(["documents", "upload_session_files", "organizations", "org_memberships", "api_keys", "webhooks"]);
 
-describe("0121-0129 lock prelude", () => {
-  it("covers the nine migrations of the release", () => {
-    expect(release).toHaveLength(9);
+describe("0121-0130 lock prelude", () => {
+  it("covers the ten migrations of the release", () => {
+    expect(release).toHaveLength(10);
   });
 
   it.each(release)("%s takes no strong lock before or outside the prelude", (name) => {
@@ -64,5 +64,10 @@ describe("0121-0129 lock prelude", () => {
   it("0129 locks workspace_runs, which its foreign key references, right after the prelude", () => {
     const all = statements(release.find((name) => name.startsWith("0129_"))!);
     expect(all[PRELUDE.length]).toBe("LOCK TABLE workspace_runs IN SHARE ROW EXCLUSIVE MODE;");
+  });
+
+  it("0130 changes only documents' page_count_source default, under the prelude", () => {
+    const all = statements(release.find((name) => name.startsWith("0130_"))!);
+    expect(all.slice(PRELUDE.length)).toEqual(["ALTER TABLE documents ALTER COLUMN page_count_source SET DEFAULT 'assumed';"]);
   });
 });
