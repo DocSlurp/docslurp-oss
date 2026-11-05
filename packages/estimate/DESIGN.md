@@ -118,7 +118,29 @@ above handle them.
 - An import guard keeps `server/`, `worker/`, `shared` and the SDK (a server dependency) from depending on
   `@docslurp/estimate`: probing never runs on DocSlurp infrastructure. The app's browser bundle may import it;
   its server-side code must not (app review rule, not yet automated).
-- The app uses the published npm package plus the card from its own server, so app builds never need Rust.
+- The app uses the published npm package plus the card from its own server, so app builds never need Rust. Until
+  the package is published, the app takes it from the workspace and loads the module by URL inside a Web Worker;
+  a build without `dist/` serves no module, and the uploader falls back to the server's size-based quote.
+
+## Progress and cancellation (2026-11-04)
+
+`estimateFiles` wraps the four ABI calls in a bounded, observable run; the ABI is unchanged.
+
+- **Truthful progress.** Only reading is measurable, so only reading reports bytes (`read-progress`, per 1 MiB of
+  the read plan). A probe is one synchronous call that cannot report partial progress: its events give the stage
+  and the time taken, never a percentage. Plans are computed up front, so the byte denominator is real from the
+  first event.
+- **Bounds.** One estimator (one 256 MiB memory) per thread. Batches run in order; inside a batch, `concurrency`
+  files read at once while the previous one probes; bytes read but not yet probed stay under `maxBufferedBytes`
+  (one larger file runs alone). Nothing is queued past the current batch, and the event iterator applies
+  backpressure. The run yields to the event loop after each file.
+- **Fail per file, never per batch.** Unreadable files, refusals and traps price that file from name, type and size
+  with a reason; a trap also resets the instance (`health()` counts both). Only a request the module refuses
+  outright (a profile for a newer card) rejects, and it does so before any read.
+- **Cancellation.** The signal is checked before each file and between reads; a probe in progress finishes (its
+  budgets bound it). The result is `partial`, quoting finished files plus size-only assumptions for the rest. The
+  Web Worker client gives an aborted worker a grace period, then terminates it and rebuilds the result from the
+  events it already received.
 
 ## Delivery order
 

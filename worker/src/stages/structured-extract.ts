@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { acceptedGeoSource, geoSchemaFields } from "../db/geo-final-source.js";
 import { geoProviderSchema, validateGeoAnnotations } from "@docslurp/shared";
 import { resolvePipelineTextModel } from "@docslurp/shared";
@@ -312,13 +314,42 @@ export class StructuredExtractStage implements Stage {
               ...(plan.truncated || skippedForCap > 0 ? { total: { chars: plan.charsTotal } } : {}),
             });
 
+            // Each answered window's model text is kept under the run's own artifacts, keyed by everything that shaped the answer, so
+            // a retry of the stage (a later window failed) reads only the windows that never finished. Best effort: a window
+            // that cannot be read back is asked again, and billing is unchanged either way (its charge is idempotent per run).
+            const windowCacheKey = (windowIndex: number) => {
+              const digest = createHash("sha256").update(JSON.stringify([
+                extractionConfig.model, schemaDescription, extractionConfig.supportingPrompt ?? "", extractionConfig.maxOutputTokens,
+                plan.windows.length, windowIndex, plan.windows[windowIndex]!.text,
+              ])).digest("hex").slice(0, 32);
+              return `${key.slice(0, -".json".length)}.windows/${digest}.json`;
+            };
+            const cachedWindowText = async (windowIndex: number): Promise<string | null> => {
+              try {
+                const cached = await this.storage.getJson<{ text?: unknown }>(windowCacheKey(windowIndex));
+                return typeof cached?.text === "string" ? cached.text : null;
+              } catch {
+                return null;
+              }
+            };
+
             const readWindow = async (windowIndex: number) => {
+              const window = plan.windows[windowIndex]!;
+              const cached = await cachedWindowText(windowIndex);
+              if (cached !== null) {
+                // Read (and billed) by an earlier attempt of this run: no model call, no new spend.
+                windowFields[windowIndex] = parseStructuredFields(cached || "{}");
+                windowsRead += 1;
+                readChars += window.text.length;
+                readCjk += cjkCount(window.text);
+                billRead(false);
+                return;
+              }
               // The run's cost cap counts this stage's own spend: once it is reached no further window is read.
               if (isCostCapExceeded(state)) {
                 skippedForCap += 1;
                 return;
               }
-              const window = plan.windows[windowIndex]!;
               const task = buildTrustedDocumentTaskPrompt({
                 instruction: [
                   "Extract structured fields from document text.",
@@ -378,6 +409,9 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
                 throw llmError;
               }
               windowFields[windowIndex] = parseStructuredFields(result.text || "{}");
+              await this.storage.putJson(windowCacheKey(windowIndex), { text: result.text ?? "" }).catch((error: unknown) => {
+                console.warn(`[structured-extract] document=${document.id} window=${windowIndex + 1} cache write failed: ${toError(error).message}`);
+              });
               windowsRead += 1;
               readChars += window.text.length;
               readCjk += cjkCount(window.text);

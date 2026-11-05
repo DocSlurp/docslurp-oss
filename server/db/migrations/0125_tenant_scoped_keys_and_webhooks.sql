@@ -14,12 +14,22 @@
 -- moved, revoked, to its owner's organization when the owner belongs to exactly one live organization (so its audit and usage
 -- history stays with that tenant), and deleted otherwise, revoked or not. Re-homing never revives a key: it stays revoked.
 --
--- Lock order (as 0063): organizations, then webhooks, the order a worker transaction takes them, so this migration and a worker
--- transaction cannot deadlock. lock_timeout fails the deploy instead of queueing readers of a hot table behind a long
--- transaction; a retried deploy finishes the work. server/db/predeploy-check.mjs counts what this deletes.
+-- Locks: the release's lock prelude, the same in every lock-taking migration of it (0122, 0123, 0125, 0126, 0127; the order and
+-- what it does and does not rule out are explained in 0122). lock_timeout fails the deploy instead of queueing readers of a hot
+-- table behind a long transaction; a retried deploy finishes the work. server/db/predeploy-check.mjs counts what this deletes.
 SET LOCAL lock_timeout = '10s';
 --> statement-breakpoint
-LOCK TABLE organizations IN SHARE ROW EXCLUSIVE MODE;
+LOCK TABLE documents IN ACCESS EXCLUSIVE MODE;
+--> statement-breakpoint
+LOCK TABLE upload_session_files IN ACCESS EXCLUSIVE MODE;
+--> statement-breakpoint
+LOCK TABLE organizations, org_memberships IN SHARE ROW EXCLUSIVE MODE;
+--> statement-breakpoint
+SET LOCAL lock_timeout = '3s';
+--> statement-breakpoint
+LOCK TABLE api_keys IN ACCESS EXCLUSIVE MODE;
+--> statement-breakpoint
+SET LOCAL lock_timeout = '10s';
 --> statement-breakpoint
 LOCK TABLE webhooks IN ACCESS EXCLUSIVE MODE;
 --> statement-breakpoint
@@ -42,9 +52,7 @@ ALTER TABLE webhooks ALTER COLUMN org_id SET NOT NULL;
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS webhooks_org_active_idx ON webhooks (org_id) WHERE active;
 --> statement-breakpoint
--- api_keys is read and touched on every API request: wait only briefly for its lock.
-SET LOCAL lock_timeout = '3s';
---> statement-breakpoint
+-- api_keys is already locked by the prelude (3 s wait: every API request reads it).
 UPDATE api_keys k
 SET org_id = only_org.org_id, revoked_at = coalesce(k.revoked_at, now())
 FROM (

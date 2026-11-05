@@ -1,7 +1,7 @@
 {
  "schema": 2,
- "rules": 4,
- "version": "2026-11-04",
+ "rules": 5,
+ "version": "2026-11-04b",
  "creditsPerDollar": 100,
  "priceCard": {
   "fastPer1kPages": 5,
@@ -209,6 +209,12 @@
      "epub"
     ]
    }
+  ],
+  "fastOnlyFormats": [
+   "office-word",
+   "office-other",
+   "office-excel",
+   "office-pptx"
   ]
  },
  "quoteHighRichPageFactor": 2,
@@ -224,7 +230,7 @@
   "scanned": 1
  },
  "defaultProfile": {
-  "cardVersion": "2026-11-04",
+  "cardVersion": "2026-11-04b",
   "quality": "auto",
   "documentFeatures": {
    "documentSummary": false,
@@ -303,5 +309,5 @@
   "repeatedImageMinShare": 0.2,
   "unspacedCharsPerWord": 2
  },
- "revision": "0cfbb0410888c2f6f7a39f9e90d704b4c97b6556fb08817cb73df415661792b1"
+ "revision": "1910714ee9a92e63ce1ab961bcafb95b413de95c3334bcce2197fd8db7e868fe"
 }

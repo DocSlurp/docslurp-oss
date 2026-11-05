@@ -5,7 +5,9 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import type { Document } from "../models.js";
-import { measureDocumentPages, parsePdfInfoPages, recordMeasuredPageCount, type PageCountDeps } from "../lib/office-page-count.js";
+import { defaultPipelineFeatures, normalizePipelineFeatures, pageCredits } from "@docslurp/shared";
+
+import { csvCellText, extraCreditsForMeasuredPages, measureDocumentPages, parsePdfInfoPages, recordMeasuredPageCount, type PageCountDeps } from "../lib/office-page-count.js";
 
 function document(filename: string, mimeType: string, pageCount = 1): Document {
   return { id: "doc-1", userId: "u", runId: "run-1", filename, mimeType, sourceKey: `u/run/raw/${filename}`, status: "queued", extractionMode: "hybrid", pageCount, createdAt: new Date(), updatedAt: new Date() };
@@ -132,6 +134,25 @@ describe("measureDocumentPages", () => {
     expect(await measureDocumentPages(fakeDeps({ sidecar: { sheets: [{ csv: "a,b,c\r\n\r\na note\r\n" }] } }), document("stray.xlsx", XLSX), "office-excel")).toEqual({ pages: 1, method: "sheet-rows" });
   });
 
+  it("counts a sheet with a stray cell at XFD1 by what its cells hold, not the 16,383 commas each padded row carried", async () => {
+    // The council's shape: 1,000 short rows in column A and one "x" at XFD1. openpyxl pads every row to column XFD, so the old
+    // sidecar wrote 16 MB of CSV from a 12 KB file and the counter read it as 4,688 pages.
+    const pad = ",".repeat(16_383);
+    const padded = [`row 1${pad.slice(1)},x`, ...Array.from({ length: 999 }, (_, row) => `row ${row + 2}${pad}`)].join("\r\n");
+    expect(padded.length).toBeGreaterThan(16_000_000);
+    const result = await measureDocumentPages(fakeDeps({ sidecar: { sheets: [{ csv: padded }] } }), document("far.xlsx", XLSX), "office-excel");
+    expect(result).toEqual({ pages: 17, method: "sheet-rows" }); // 1,000 lines of content by the 60-line rule
+    // A wide sheet whose far cells are real data still bills for them: 50 rows of 200 filled cells is 10,000 values of text.
+    const wide = Array.from({ length: 50 }, (_, row) => Array.from({ length: 200 }, (_, col) => `v${row}x${col}`).join(",")).join("\n");
+    expect((await measureDocumentPages(fakeDeps({ sidecar: { sheets: [{ csv: wide }] } }), document("wide.xlsx", XLSX), "office-excel"))!.pages)
+      .toBeGreaterThanOrEqual(15);
+  });
+
+  it("reads quoted cells with commas, quotes and newlines as one cell, and skips empty cells between values", () => {
+    expect(csvCellText('a,,,"b, c",,\n,,\n"say ""hi""",\r\n"two\nlines",,z\n')).toBe('a b, c\nsay "hi"\ntwo\nlines z');
+    expect(csvCellText(",,,,\n\n , ,\n")).toBe("");
+  });
+
   it("counts an EPUB by the text rule over its chapters", async () => {
     const chapter = "word ".repeat(2_000); // 10,000 characters → 3 pages
     const result = await measureDocumentPages(fakeDeps({ sidecar: { chapters: [{ text: chapter }, { text: chapter }] } }), document("book.epub", "application/epub+zip"), "epub");
@@ -142,6 +163,17 @@ describe("measureDocumentPages", () => {
     const names = ["[Content_Types].xml", "ppt/slides/slide1.xml", "ppt/slides/slide2.xml", "ppt/slides/slide3.xml", "ppt/slides/_rels/slide1.xml.rels", "ppt/slideLayouts/slideLayout1.xml"];
     const result = await measureDocumentPages(fakeDeps({ bytes: zipWithNames(names) }), document("deck.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"), "office-pptx");
     expect(result).toEqual({ pages: 3, method: "slides" });
+  });
+
+  it("bills a 30 MB legacy .ppt no tool reads at the quote's typical size estimate, and prices no feature on that guess", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const ppt = await measureDocumentPages(fakeDeps({ noSoffice: true, bytes: Buffer.alloc(30 * 1024 * 1024) }), document("deck.ppt", "application/vnd.ms-powerpoint"), "office-pptx");
+    expect(ppt).toEqual({ pages: 768, method: "size-estimate" }); // 30 MB at a slide's typical 40 KB: the quote's central count
+    warn.mockRestore();
+    const features = normalizePipelineFeatures({ ...defaultPipelineFeatures, graphRag: true, outputSchema: { type: "object", properties: { total: { type: "number" } } } });
+    // Fast pages only: 767 extra pages at 5 credits per 1,000. Measured by any other method, the features would add on top.
+    expect(extraCreditsForMeasuredPages(features, 1, 768, "size-estimate")).toBeCloseTo(pageCredits("fast", 767));
+    expect(extraCreditsForMeasuredPages(features, 1, 768, "text-rule")).toBeGreaterThan(pageCredits("fast", 767) * 10);
   });
 
   it("caps a runaway count at the ceiling", async () => {

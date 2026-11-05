@@ -1095,7 +1095,7 @@ export async function acceptWorkspaceInvite(token: string, userId: string): Prom
     throw new Error("Invite email does not match the accepting user");
   }
 
-  await sql.begin(async (tx) => {
+  try { await sql.begin(async (tx) => {
     const [org] = await tx<{ is_personal: boolean }[]>`select is_personal from organizations where id = ${invite.org_id}`;
     if (org && !org.is_personal) {
       // Team-org workspace access requires org membership. An outsider joins
@@ -1108,7 +1108,9 @@ export async function acceptWorkspaceInvite(token: string, userId: string): Prom
           throw new Error("This invite can no longer add you to the organization; ask an organization admin to invite you");
         }
         await admitToOrganization(tx, userId, invite.org_id);
-        await tx`insert into org_memberships (org_id, user_id, role) values (${invite.org_id}, ${userId}, 'member') on conflict do nothing`;
+        // Only this exact membership may already exist. A target-less ON CONFLICT would also swallow the one-organization
+        // index (a concurrent join that committed first) and accept the invite without a membership.
+        await tx`insert into org_memberships (org_id, user_id, role) values (${invite.org_id}, ${userId}, 'member') on conflict (org_id, user_id) do nothing`;
         await auditOrganization(tx, invite.org_id, userId, "organization.member.joined_via_workspace_invite", { inviteId: invite.id, workspaceId: invite.workspace_id });
       }
     }
@@ -1127,7 +1129,12 @@ export async function acceptWorkspaceInvite(token: string, userId: string): Prom
         accepted_at = now()
       where id = ${invite.id} and status = 'pending'
     `;
-  });
+  }); } catch (error) {
+    // The one-organization index refusing a join that passed the check (a race) is the policy's 409, not a 500.
+    const conflict = organizationConflict(error);
+    if (conflict instanceof OrganizationError && conflict.code === "user_already_in_org") throw conflict;
+    throw error;
+  }
 
   const [row] = await sql<WorkspaceMemberRow[]>`
     select

@@ -9,8 +9,16 @@
 // run during a deploy:
 //   - a session advisory lock keeps two builds from running at once (the second exits 0);
 //   - a valid index is left alone; an INVALID one (an interrupted build) is dropped concurrently and rebuilt;
-//   - lock_timeout bounds the brief waits CONCURRENTLY needs; a timed-out attempt is retried, then the script fails
-//     (exit 1) without leaving a lock behind. Postgres may leave an INVALID index; the next run cleans it up.
+//   - the short lock_timeout bounds only the initial lock acquire: each attempt first takes SHARE UPDATE EXCLUSIVE on
+//     document_chunks in a probe transaction under FOLDED_INDEX_LOCK_TIMEOUT_MS and releases it at once, so a table busy
+//     with DDL or a manual VACUUM is retried later instead of queueing. The build itself then runs with lock_timeout = 0:
+//     CREATE INDEX CONCURRENTLY waits for every transaction older than each of its phases, and those waits are lock waits
+//     too, so a short timeout there would fail a long build at its end and leave an INVALID index. Its SHARE UPDATE
+//     EXCLUSIVE lock never blocks reads or writes. A timed-out probe is retried, then the script fails (exit 1) without
+//     leaving a lock behind. Postgres may leave an INVALID index after an interruption; the next run cleans it up;
+//   - maintenance_work_mem (FOLDED_INDEX_MAINTENANCE_WORK_MEM, default 128MB) is the build's sort memory on the database
+//     server. Size it to the compute: up to about a quarter of its RAM while nothing else heavy runs (Neon: 0.25 CU has
+//     1 GB). Too large risks the server's memory; too small only makes the build slower.
 // Keyword search works without the index (slower, bounded by a short statement timeout; search/folded-index.ts).
 import { createRequire } from "node:module";
 
@@ -26,8 +34,16 @@ export function buildSettings(env = process.env) {
     lockTimeoutMs: int(env.FOLDED_INDEX_LOCK_TIMEOUT_MS, 5_000),
     attempts: Math.max(1, int(env.FOLDED_INDEX_ATTEMPTS, 6)),
     retryDelayMs: int(env.FOLDED_INDEX_RETRY_DELAY_MS, 10_000),
-    maintenanceWorkMem: env.FOLDED_INDEX_MAINTENANCE_WORK_MEM ?? "512MB",
+    maintenanceWorkMem: memorySetting(env.FOLDED_INDEX_MAINTENANCE_WORK_MEM, "128MB"),
   };
+}
+
+/** Pure: a Postgres memory setting such as 128MB or 1GB (unset: the fallback). Anything else is refused, so a typo cannot ask for unbounded memory. */
+function memorySetting(value, fallback) {
+  const text = value?.trim();
+  if (!text) return fallback;
+  if (!/^\d{1,6}(kB|MB|GB)$/.test(text)) throw new Error(`FOLDED_INDEX_MAINTENANCE_WORK_MEM must look like 128MB or 1GB, got ${JSON.stringify(text)}`);
+  return text;
 }
 
 /** Pure: migrate.mjs's direct-connection rule (session settings and advisory locks need one backend, not a pooler). */
@@ -73,7 +89,19 @@ export async function ensureFoldedIndex(client, { settings = buildSettings(), lo
         return { action: "dry-run", state: before.state };
       }
       try {
-        await client.query(`set lock_timeout = '${settings.lockTimeoutMs}ms'`);
+        // Initial acquire, bounded: can this session get the build's lock now? Released at once (CONCURRENTLY cannot run
+        // inside a transaction, so the lock cannot be carried into the build).
+        await client.query("begin");
+        try {
+          await client.query(`set local lock_timeout = '${settings.lockTimeoutMs}ms'`);
+          await client.query("lock table public.document_chunks in share update exclusive mode");
+          await client.query("commit");
+        } catch (error) {
+          await client.query("rollback").catch(() => {});
+          throw error;
+        }
+        // The build: wait as long as older transactions need (they are not blocked by it).
+        await client.query("set lock_timeout = 0");
         await client.query("set statement_timeout = 0");
         await client.query("select set_config('maintenance_work_mem', $1, false)", [settings.maintenanceWorkMem]);
         if (before.state === "invalid") {

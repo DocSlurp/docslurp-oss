@@ -1,5 +1,6 @@
 import json
 import pathlib
+import threading
 import unittest
 
 from docslurp_estimate import Estimator, EstimatorError
@@ -30,6 +31,36 @@ class EstimatorTest(unittest.TestCase):
         self.assertEqual(quote["estimate"]["pages"], 2)
         self.assertEqual([probe["mix"]["scanned"] for probe in quote["probes"]], [1, 0])
         self.assertIn("page mix known for every file", quote["estimate"]["basis"])
+
+    def test_estimate_paths_reports_progress_in_order(self):
+        events = []
+        result = self.estimator.estimate_paths([FIXTURES / "scan_plain.pdf", FIXTURES / "missing.pdf", FIXTURES / "text_wrapped_with_photo.pdf"], on_progress=events.append)
+        self.assertEqual(events[-1]["type"], "quote-done")
+        first = [event["type"] for event in events if event.get("file", {}).get("index") == 0]
+        self.assertEqual(first, ["file-start", "read-progress", "probe-start", "probe-done", "file-done"])
+        self.assertEqual([file["status"] for file in result["files"]], ["probed", "failed", "probed"])
+        self.assertEqual(result["files"][1]["reason"]["code"], "read_failed")
+        self.assertEqual(result["stats"]["pages"]["found"], 2)
+        self.assertTrue(result["partial"])
+        self.assertFalse(result["cancelled"])
+        self.assertFalse(any("percent" in key for event in events for key in event))
+        expected = self.estimator.quote_paths([FIXTURES / "scan_plain.pdf", FIXTURES / "text_wrapped_with_photo.pdf"])
+        self.assertEqual(result["stats"]["bytes"]["read"], result["stats"]["bytes"]["planned"])
+        self.assertEqual(result["quote"]["estimate"]["pages"], expected["estimate"]["pages"] + 1)
+
+    def test_estimate_paths_stops_when_cancelled(self):
+        cancel = threading.Event()
+        paths = [FIXTURES / "scan_plain.pdf"] * 20
+
+        def on_progress(event):
+            if event["type"] == "file-done" and event["files"]["completed"] == 3:
+                cancel.set()
+
+        result = self.estimator.estimate_paths(paths, on_progress=on_progress, cancel=cancel)
+        self.assertTrue(result["cancelled"])
+        self.assertEqual(result["stats"]["files"]["probed"], 3)
+        self.assertEqual(result["stats"]["files"]["skipped"], 17)
+        self.assertEqual(result["quote"]["estimate"]["documents"], 20)
 
     def test_refuses_what_it_cannot_price(self):
         with self.assertRaises(EstimatorError) as caught:

@@ -1,17 +1,24 @@
 #!/usr/bin/env node
 // Read-only pre-deploy report for the 0121-0127 release (docs/rollout-0121-0127.md):
 //
-//   DATABASE_URL=... node server/db/predeploy-check.mjs [--strict] [--json]
+//   DATABASE_URL=... node server/db/predeploy-check.mjs [--strict] [--json] [--ack-0127=<hash>]
 //
 // Everything runs in one READ ONLY transaction with a statement timeout; it changes nothing. It measures what the
 // migrations and the new code will meet in this database and prints what to fix or watch first:
 //   1. migrations still pending, and transactions old enough to make a migration lock wait time out;
-//   2. document_chunks rows and size, and the state of the folded keyword index (how long its CONCURRENTLY build will take);
-//   3. api_keys and webhooks 0125 deletes or homes, and the memberships 0127 removes (one organization per user);
-//   4. stored pipelines whose piiPolicy.patterns name a detector this build no longer accepts;
-//   5. recorded stage artifacts that are empty, which the fail-closed readers refuse (object-store existence is not checkable from SQL);
-//   6. runs in flight, by the routing version they are pinned to.
+//   2. documents rows and size (every documents reader waits while the migration holds its lock), document_chunks rows and
+//      size, and the state of the folded keyword index (how long its CONCURRENTLY build will take);
+//   3. api_keys and webhooks 0125 deletes or homes;
+//   4. every user 0127 affects (one organization per user), by running the migration's own plan SQL, read from
+//      0127_one_org_per_user.sql: the organization kept, those removed (funded or not), keys and grants revoked, owners
+//      promoted and organizations left without a member. A removal from a funded organization is a BLOCKER until an owner
+//      acknowledges that exact list with --ack-0127=<hash>;
+//   5. stored pipelines whose piiPolicy.patterns name a detector this build no longer accepts, and stored extraction configs
+//      naming an extractor id this build does not know (built-in ids plus DOCSLURP_EXTRACTOR_ID_ALIASES keys);
+//   6. recorded stage artifacts that are empty, which the fail-closed readers refuse (object-store existence is not checkable from SQL);
+//   7. runs in flight, by the routing version they are pinned to.
 // Exit code: 0 for a report, 1 with --strict when a BLOCKER is found, 2 when the check itself could not run.
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -20,6 +27,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { directDatabaseUrl, INDEX_NAME } from "./folded-search-index.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+const ONE_ORG_MIGRATION = path.join(here, "migrations", "0127_one_org_per_user.sql");
+/** Migrations of this release that wait a bounded time for their locks (the shared lock prelude, 0122). */
+const BOUNDED_LOCK_MIGRATIONS = ["0122", "0123", "0125", "0126", "0127"];
+/** Lines listed per affected-user report before the rest is summarized (--json carries the same lines). */
+const MAX_LISTED = 500;
 const ACTIVE_RUN_STATUSES = ["queued", "blocked", "processing"];
 /** Measured on a laptop with ~2 KB chunks: 0.8 ms per row for the CONCURRENTLY build. Production IO differs; this is a budget, not a promise. */
 const INDEX_BUILD_MS_PER_ROW = 0.8;
@@ -52,6 +64,53 @@ async function columnExists(client, table, column) {
   return rows.length > 0;
 }
 
+/** Pure: the text between `-- <name>:begin` and `-- <name>:end` in a migration, or throws. */
+function between(migrationSql, name) {
+  const match = new RegExp(`-- ${name}:begin\\n([\\s\\S]*?)\\n-- ${name}:end`).exec(migrationSql);
+  if (!match) throw new Error(`0127_one_org_per_user.sql has no ${name} markers`);
+  return match[1];
+}
+
+/**
+ * Pure: 0127's plan and promotion queries, read from the migration so the report and the migration cannot drift. The plan
+ * calls docslurp_personal_org_is_empty(), which 0127 itself (re)defines, so the function's body from the same file is
+ * inlined. Before 0125 webhooks have no org_id: 0125 deletes every webhook of a user with several memberships, and those are
+ * the only users rule 2 applies to, so "no webhooks" holds for every personal organization the rule examines.
+ */
+export function oneOrgPlanSql(migrationSql, { webhooksHaveOrg = true } = {}) {
+  const fn = /FUNCTION docslurp_personal_org_is_empty\(p_org_id text\)[^$]*\$\$([\s\S]*?)\$\$/.exec(migrationSql);
+  if (!fn) throw new Error("0127_one_org_per_user.sql does not define docslurp_personal_org_is_empty");
+  let body = fn[1].replace(/\bp_org_id\b/g, "candidate.id");
+  if (!webhooksHaveOrg) {
+    const webhookRule = "NOT EXISTS (SELECT 1 FROM webhooks h WHERE h.org_id = o.id)";
+    if (!body.includes(webhookRule)) throw new Error("docslurp_personal_org_is_empty no longer has the expected webhook rule");
+    body = body.replace(webhookRule, "true");
+  }
+  const call = "docslurp_personal_org_is_empty(candidate.id)";
+  const plan = between(migrationSql, "one-org-plan");
+  if (!plan.includes(call)) throw new Error(`the 0127 plan no longer calls ${call}`);
+  return { plan: plan.replace(call, `(${body})`), promotions: between(migrationSql, "one-org-promotions") };
+}
+
+/** Pure: the acknowledgement hash of a list of funded removals (user and organization ids), independent of order. */
+export function fundedRemovalsHash(removals) {
+  const lines = removals.map((row) => `${row.user_id}\t${row.org_id}`).sort();
+  return createHash("sha256").update(lines.join("\n")).digest("hex").slice(0, 16);
+}
+
+/** Pure: the extractor ids this build knows: built-in ids plus the keys of DOCSLURP_EXTRACTOR_ID_ALIASES (`<old>:<new>,...`). */
+export function knownExtractorIds(builtInIds, env = process.env) {
+  const aliases = (env.DOCSLURP_EXTRACTOR_ID_ALIASES ?? "").split(",").map((entry) => entry.split(":")[0]?.trim()).filter(Boolean);
+  return [...new Set([...builtInIds, ...aliases])];
+}
+
+async function loadBuiltInExtractorIds() {
+  const mod = await import("@docslurp/shared");
+  const ids = mod.builtInDocumentExtractorDescriptors?.map((entry) => entry.id);
+  if (!Array.isArray(ids) || ids.length === 0) throw new Error("@docslurp/shared does not export builtInDocumentExtractorDescriptors (build it: pnpm --filter @docslurp/shared build)");
+  return ids;
+}
+
 async function loadAcceptedPiiPatterns() {
   // The patterns the code in this checkout accepts: shared's built enum, never a copy kept here.
   const mod = await import("@docslurp/shared");
@@ -60,7 +119,82 @@ async function loadAcceptedPiiPatterns() {
   return options;
 }
 
-export async function collectReport(client, { journal, acceptedPiiPatterns }) {
+async function oneOrgSection(q, { plan, promotions }, ack0127) {
+  const removed = await q(
+    `with removed_memberships as (${plan})
+     select gone.user_id, coalesce(u.email, '(no user row)') as email, gone.org_id, o.name as org_name, o.is_personal, gone.reason, om.role,
+       (o.funded_at is not null or o.auto_recharge_enabled) as funded,
+       (select count(*) from api_keys k where k.org_id = gone.org_id and k.user_id = gone.user_id and k.revoked_at is null)::int as keys,
+       (select count(*) from mcp_oauth_grants g where g.org_id = gone.org_id and g.user_id = gone.user_id and g.revoked_at is null)::int as grants,
+       (select count(*) from workspaces w where w.org_id = gone.org_id and w.user_id = gone.user_id)::int as workspaces,
+       (select count(*) from org_memberships rest where rest.org_id = gone.org_id
+          and not exists (select 1 from removed_memberships g2 where g2.org_id = rest.org_id and g2.user_id = rest.user_id))::int as members_left,
+       (select count(*) from org_memberships rest where rest.org_id = gone.org_id and rest.role = 'owner'
+          and not exists (select 1 from removed_memberships g2 where g2.org_id = rest.org_id and g2.user_id = rest.user_id))::int as owners_left,
+       kept.org_id as kept_org_id, kept.name as kept_org_name
+     from removed_memberships gone
+     join org_memberships om on om.org_id = gone.org_id and om.user_id = gone.user_id
+     join organizations o on o.id = gone.org_id
+     left join "user" u on u.id = gone.user_id
+     left join lateral (
+       select rest.org_id, ko.name from org_memberships rest join organizations ko on ko.id = rest.org_id
+       where rest.user_id = gone.user_id
+         and not exists (select 1 from removed_memberships g2 where g2.org_id = rest.org_id and g2.user_id = rest.user_id)
+       limit 1
+     ) kept on true
+     order by 2, gone.user_id, gone.org_id`,
+  );
+  const promoted = await q(
+    `with removed_memberships as (${plan}), owner_promotions as (${promotions})
+     select p.org_id, o.name as org_name, p.user_id, coalesce(u.email, '(no user row)') as email, p.previous_role
+     from owner_promotions p join organizations o on o.id = p.org_id left join "user" u on u.id = p.user_id
+     order by p.org_id`,
+  );
+  const users = new Map();
+  for (const row of removed) {
+    const entry = users.get(row.user_id) ?? { email: row.email, kept: row.kept_org_id ? `"${row.kept_org_name}" (${row.kept_org_id})` : "NO organization (personal one provisioned at next sign-in)", removed: [] };
+    const facts = [row.reason, row.role, row.funded ? "FUNDED" : null, `${row.keys} key(s)`, `${row.grants} grant(s)`, row.workspaces ? `${row.workspaces} workspace(s) handed over` : null];
+    entry.removed.push(`"${row.org_name}" (${row.org_id}, ${facts.filter(Boolean).join(", ")})`);
+    users.set(row.user_id, entry);
+  }
+  const promotedOrgs = new Set(promoted.map((row) => row.org_id));
+  const live = removed.filter((row) => row.reason === "not_kept");
+  const memberless = [...new Map(live.filter((row) => row.members_left === 0).map((row) => [row.org_id, row])).values()];
+  const ownerless = [...new Map(live.filter((row) => row.members_left > 0 && row.owners_left === 0 && row.role === "owner" && !promotedOrgs.has(row.org_id)).map((row) => [row.org_id, row])).values()];
+  const funded = live.filter((row) => row.funded);
+  const hash = fundedRemovalsHash(funded);
+  const acknowledged = funded.length > 0 && ack0127 === hash;
+  const count = (reason) => removed.filter((row) => row.reason === reason).length;
+  const userLines = [...users].map(([id, entry]) => `${entry.email} (${id}): keeps ${entry.kept}; removed from ${entry.removed.join("; ")}`);
+  const listed = userLines.length > MAX_LISTED ? [...userLines.slice(0, MAX_LISTED), `... and ${userLines.length - MAX_LISTED} more user(s)`] : userLines;
+  return section(
+    `Memberships beyond one per user (0127): ${users.size} user(s), ${removed.length} membership(s) to remove`,
+    funded.length > 0 && !acknowledged ? "blocker" : removed.length > 0 ? "warn" : "ok",
+    removed.length === 0
+      ? ["None. Every user belongs to at most one live organization."]
+      : [
+          `${count("deleted_organization")} in tombstoned organizations; ${count("empty_personal_organization")} in empty personal organizations (DELETED with the organization);`,
+          `${count("not_kept")} more removed by the keep rule (team before personal, then most recent run or document, then role, then oldest membership).`,
+          "Removed memberships are copied to org_memberships_removed_backup; the user loses access at once (keys and MCP grants revoked).",
+          ...(funded.length === 0
+            ? ["No user is removed from a funded organization."]
+            : [
+                `${funded.length} removal(s) from a FUNDED organization (paid balance or auto top-up): ${funded.map((row) => `${row.email} from ${row.org_id}`).join(", ")}.`,
+                acknowledged
+                  ? `Acknowledged with --ack-0127=${hash}.`
+                  : `BLOCKER until an owner reviews this list and re-runs with --ack-0127=${hash} (the hash changes when the list does).`,
+              ]),
+          ...(promoted.length === 0 ? [] : [`Owner promoted (the last owner is removed and members remain): ${promoted.map((row) => `${row.org_id} -> ${row.email} (was ${row.previous_role})`).join(", ")}.`]),
+          ...(memberless.length === 0 ? [] : [`Left with NO member (data kept, nobody can reach it until an operator restores a membership from the backup): ${memberless.map((row) => `"${row.org_name}" (${row.org_id})`).join(", ")}.`]),
+          ...(ownerless.length === 0 ? [] : [`Left without an owner (personal organizations are never promoted): ${ownerless.map((row) => row.org_id).join(", ")}.`]),
+          ...listed,
+        ],
+  );
+}
+
+export async function collectReport(client, { journal, acceptedPiiPatterns, extractorIds, oneOrgMigrationSql, ack0127 = null }) {
+  oneOrgMigrationSql ??= readFileSync(ONE_ORG_MIGRATION, "utf8");
+  extractorIds ??= knownExtractorIds(await loadBuiltInExtractorIds());
   const sections = [];
   const q = async (text, params = []) => (await client.query(text, params)).rows;
 
@@ -82,14 +216,29 @@ export async function collectReport(client, { journal, acceptedPiiPatterns }) {
     longTx.length > 0 && pending.length > 0 ? "warn" : "ok",
     longTx.length > 0
       ? [
-          "Transactions open for more than 30 s. 0122, 0123, 0125 and 0127 wait at most 10 s (3 s for api_keys) for their locks, so a long reader",
+          `Transactions open for more than 30 s. ${BOUNDED_LOCK_MIGRATIONS.slice(0, -1).join(", ")} and ${BOUNDED_LOCK_MIGRATIONS.at(-1)} wait at most 10 s (3 s for api_keys) for their locks, so a long reader`,
           "makes the migration fail fast instead of queueing the site behind it; re-run it after these end:",
           ...longTx.map((row) => `pid ${row.pid} ${row.state} ${row.seconds}s: ${row.query}`),
         ]
       : ["No transaction older than 30 s."],
   ));
 
-  // 2. document_chunks and the folded index.
+  // 2. documents, document_chunks and the folded index.
+  const [docs] = await q(
+    `select c.reltuples::bigint as rows, pg_total_relation_size(c.oid) as total_bytes, pg_relation_size(c.oid) as heap_bytes,
+            pg_indexes_size(c.oid) as index_bytes
+     from pg_class c where c.oid = 'public.documents'::regclass`,
+  );
+  const docRows = Number(docs.rows);
+  sections.push(section(
+    `documents: ${docRows >= 0 ? `~${docRows.toLocaleString("en-US")} rows` : "row count unknown (never analyzed; run ANALYZE documents)"}, ${gb(docs.total_bytes)} (heap ${gb(docs.heap_bytes)}, indexes ${gb(docs.index_bytes)})`,
+    "ok",
+    [
+      "The migration holds ACCESS EXCLUSIVE on documents from its first statement to its commit (lock prelude, 0122): every documents",
+      "reader waits for the whole migration. Nothing scans or rewrites documents under that lock (0122 and 0126 change the catalog only);",
+      "0127 reads it only for the organizations of users with several memberships.",
+    ],
+  ));
   const [chunks] = await q(
     `select c.reltuples::bigint as rows, pg_total_relation_size(c.oid) as total_bytes, pg_relation_size(c.oid) as heap_bytes,
             pg_indexes_size(c.oid) as index_bytes
@@ -160,47 +309,12 @@ export async function collectReport(client, { journal, acceptedPiiPatterns }) {
         ],
   ));
 
-  // 0127: one organization per user (DOCSLURP_MAX_ORGS_PER_USER=1). Mirrors the migration's rules.
+  // 0127: one organization per user (DOCSLURP_MAX_ORGS_PER_USER=1), from the migration's own plan SQL.
   const [{ has_index: oneOrgIndex }] = await q("select to_regclass('public.org_memberships_one_org_per_user') is not null as has_index");
   if (oneOrgIndex) {
     sections.push(section("Memberships beyond one per user (0127): already applied", "ok", ["org_memberships_one_org_per_user exists."]));
   } else {
-    const keysOf = hookHasOrg ? "or exists (select 1 from webhooks h where h.org_id = o.id)" : "";
-    const [members] = await q(
-      `with multi as (select user_id from org_memberships group by user_id having count(*) > 1),
-       candidates as (
-         select om.org_id, om.user_id,
-           case
-             when o.deleted_at is not null then 'deleted_organization'
-             when o.is_personal and o.personal_owner_user_id = om.user_id and o.funded_at is null
-               and not exists (select 1 from workspace_runs r where r.org_id = o.id)
-               and not exists (select 1 from documents d join workspaces w on w.id = d.workspace_id where w.org_id = o.id)
-               and not (exists (select 1 from api_keys k where k.org_id = o.id) ${keysOf})
-               then 'empty_personal_organization'
-           end as reason
-         from org_memberships om join organizations o on o.id = om.org_id
-         where om.user_id in (select user_id from multi)
-       ),
-       kept as (
-         select user_id, count(*) filter (where reason is null) as remaining from candidates group by user_id
-       )
-       select (select count(*) from multi)::int as users,
-         (select count(*) from candidates where reason = 'deleted_organization')::int as deleted_org,
-         (select count(*) from candidates where reason = 'empty_personal_organization')::int as empty_personal,
-         (select coalesce(sum(greatest(remaining - 1, 0)), 0) from kept)::int as not_kept`,
-    );
-    const removed = members.deleted_org + members.empty_personal + members.not_kept;
-    sections.push(section(
-      `Memberships beyond one per user (0127): ${members.users} user(s), ${removed} membership(s) to remove`,
-      removed > 0 ? "warn" : "ok",
-      members.users === 0
-        ? ["None. Every user belongs to at most one organization."]
-        : [
-            `${members.deleted_org} in tombstoned organizations; ${members.empty_personal} in empty personal organizations (DELETED with the organization);`,
-            `${members.not_kept} more removed by the keep rule (owner/admin first, then most recent run or document). Removed memberships are copied`,
-            "to org_memberships_removed_backup; the user loses access to that organization's data at once (keys and MCP grants revoked).",
-          ],
-    ));
+    sections.push(await oneOrgSection(q, oneOrgPlanSql(oneOrgMigrationSql, { webhooksHaveOrg: hookHasOrg }), ack0127));
   }
 
   // 4. Stored pipelines naming detectors the build no longer accepts.
@@ -253,6 +367,49 @@ export async function collectReport(client, { journal, acceptedPiiPatterns }) {
         ],
   ));
 
+  // 5b. Stored extraction configs naming an extractor id this build does not know.
+  const unknownExtractors = await q(
+    `with configs as (
+       select 'workspaces' as source, pipeline -> 'documentExtraction' as x from workspaces where jsonb_typeof(pipeline -> 'documentExtraction') = 'object'
+       union all
+       select 'upload_sessions', pipeline -> 'documentExtraction' from upload_sessions where jsonb_typeof(pipeline -> 'documentExtraction') = 'object'
+       union all
+       select 'workspace_runs (in flight)', pipeline -> 'documentExtraction' from workspace_runs
+         where status = any($2::text[]) and jsonb_typeof(pipeline -> 'documentExtraction') = 'object'
+     ),
+     lists as (
+       select source, value as list from configs, jsonb_each(case when jsonb_typeof(x -> 'order') = 'object' then x -> 'order' else '{}' end)
+       union all
+       select source, value from configs, jsonb_each(case when jsonb_typeof(x -> 'components') = 'object' then x -> 'components' else '{}' end)
+       union all
+       select source, x -> 'pages' from configs
+       union all
+       select source, x -> 'enrich' from configs
+     ),
+     ids as (
+       select source, id from lists, jsonb_array_elements_text(case when jsonb_typeof(list) = 'array' then list else '[]' end) as id
+       union all
+       select source, x -> 'voting' ->> 'secondary' from configs
+         where jsonb_typeof(x -> 'voting' -> 'secondary') = 'string' and x -> 'voting' ->> 'secondary' <> 'next-in-order'
+       union all
+       select source, key from configs, jsonb_object_keys(case when jsonb_typeof(x -> 'options') = 'object' then x -> 'options' else '{}' end) as key
+     )
+     select source, left(id, 64) as id, count(*)::int as mentions from ids where id <> all($1::text[])
+     group by 1, 2 order by 1, 2`,
+    [extractorIds, ACTIVE_RUN_STATUSES],
+  );
+  sections.push(section(
+    `Stored extraction configs naming an extractor id this build does not know: ${unknownExtractors.reduce((sum, row) => sum + row.mentions, 0)}`,
+    unknownExtractors.length > 0 ? "warn" : "ok",
+    unknownExtractors.length === 0
+      ? ["Every documentExtraction id is a built-in id or a DOCSLURP_EXTRACTOR_ID_ALIASES key of this environment."]
+      : [
+          "Compared with this build's built-in ids and the DOCSLURP_EXTRACTOR_ID_ALIASES keys set where this check runs (set it as on the",
+          "API and worker). A plugin-served id is listed too. Unknown ids fail validation: alias them or edit these configs first.",
+          ...unknownExtractors.map((row) => `${row.source}: "${row.id}" (${row.mentions} mention(s))`),
+        ],
+  ));
+
   // 6. Runs in flight by pin.
   const pins = await q(
     `select coalesce(artifacts ->> 'run:vision-routing-version', '(none)') as pin, status, count(*)::int as runs
@@ -261,10 +418,12 @@ export async function collectReport(client, { journal, acceptedPiiPatterns }) {
   );
   const byPin = new Map();
   for (const row of pins) byPin.set(row.pin, (byPin.get(row.pin) ?? 0) + row.runs);
+  const inFlight = [...byPin.values()].reduce((sum, runs) => sum + runs, 0);
   sections.push(section(
-    `Runs in flight by routing pin: ${[...byPin].map(([pin, runs]) => `${pin}=${runs}`).join(" ") || "none"}`,
+    `Runs in flight: ${inFlight}${inFlight ? ` (by routing pin: ${[...byPin].map(([pin, runs]) => `${pin}=${runs}`).join(" ")})` : ""}`,
     "ok",
     [
+      `${inFlight} run(s) queued, blocked or processing. They continue across the deploy (old workers finish theirs; new workers pick up the rest).`,
       "v3 = evidence routing (this release). v1 and (none) route with the keyword rules, as before. A v2 pin was written by the previous release's canary:",
       "this release routes it as v1 and warns ([vision-routing] ... routing as v1). Old workers treat v3 as unknown and route it as v1, never as evidence routing.",
       ...pins.map((row) => `${row.pin} ${row.status}: ${row.runs}`),
@@ -278,6 +437,8 @@ async function main() {
   if (!url) throw new Error("DATABASE_URL is required");
   const journal = JSON.parse(readFileSync(path.join(here, "migrations", "meta", "_journal.json"), "utf8"));
   const acceptedPiiPatterns = await loadAcceptedPiiPatterns();
+  const extractorIds = knownExtractorIds(await loadBuiltInExtractorIds());
+  const ack0127 = process.argv.find((arg) => arg.startsWith("--ack-0127="))?.slice("--ack-0127=".length) ?? null;
   const require = createRequire(import.meta.url);
   const { Client } = require("pg");
   const client = new Client({ connectionString: directDatabaseUrl(url) });
@@ -285,7 +446,7 @@ async function main() {
   try {
     await client.query("begin read only");
     await client.query("set local statement_timeout = '30s'");
-    const sections = await collectReport(client, { journal, acceptedPiiPatterns });
+    const sections = await collectReport(client, { journal, acceptedPiiPatterns, extractorIds, ack0127 });
     await client.query("rollback");
     console.log(process.argv.includes("--json") ? JSON.stringify(sections, null, 2) : render(sections));
     if (process.argv.includes("--strict") && sections.some((s) => s.level === "blocker")) process.exitCode = 1;

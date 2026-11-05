@@ -17,6 +17,29 @@ export function maxOrgsPerUser(env: Record<string, string | undefined> = process
   return Number.isInteger(parsed) && parsed >= 1 ? parsed : 1;
 }
 
+/**
+ * Startup check: a limit above 1 while org_memberships_one_org_per_user still exists cannot take effect. Every join past the
+ * first passes the check and is then refused by the index (409 user_already_in_org), so the setting would only mislead.
+ * Logged loudly rather than refusing to boot: the outcome is the stricter policy, and a database that is down at boot must
+ * not block startup. Returns whether the mismatch was found.
+ */
+export async function warnOrgLimitAboveOneWithUniqueIndex(
+  oneOrgIndexExists: () => Promise<boolean>,
+  env: Record<string, string | undefined> = process.env,
+  log: (line: string) => void = console.error,
+): Promise<boolean> {
+  const limit = maxOrgsPerUser(env);
+  if (limit <= 1) return false;
+  try {
+    if (!(await oneOrgIndexExists())) return false;
+  } catch (error) {
+    log(`[org-limit] could not check org_memberships_one_org_per_user: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
+  log(`[org-limit] DOCSLURP_MAX_ORGS_PER_USER=${limit} has no effect: the unique index org_memberships_one_org_per_user still limits every user to one organization. Drop it in a migration first (docs/api-sdk.md#one-organization-per-user).`);
+  return true;
+}
+
 /** The user already has as many organizations as the policy allows (HTTP 409, `user_already_in_org`). */
 export class UserAlreadyInOrgError extends Error {
   readonly status = 409 as const;

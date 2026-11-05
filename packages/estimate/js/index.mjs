@@ -2,6 +2,10 @@
 // published price card, as POST /v1/uploads/estimate would. One WebAssembly module with a plain JSON ABI
 // (src/abi.rs); this file loads it in browsers, Node, Deno and edge runtimes and wraps the calls.
 
+import { blobSource, eventStream, runEstimate } from "./run.mjs";
+
+export { yieldToEventLoop } from "./run.mjs";
+
 const WASM_URL = new URL("../dist/docslurp_estimate.wasm", import.meta.url);
 /** The module's imported memory, in 64 KiB pages: 16 MiB initial, 256 MiB maximum (.cargo/config.toml). */
 const MEMORY_INITIAL_PAGES = 256;
@@ -9,14 +13,9 @@ const MEMORY_MAXIMUM_PAGES = 4096;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-/** An estimator error with a stable `code`: invalid_request, invalid_card, unsupported_rules or crashed. */
-export class EstimatorError extends Error {
-  constructor(code, message) {
-    super(message);
-    this.name = "EstimatorError";
-    this.code = code;
-  }
-}
+import { EstimatorError } from "./error.mjs";
+
+export { EstimatorError };
 
 async function compile(source) {
   if (source instanceof WebAssembly.Module) return source;
@@ -46,11 +45,13 @@ export async function createEstimator(options = {}) {
   const memory = new WebAssembly.Memory({ initial: MEMORY_INITIAL_PAGES, maximum: MEMORY_MAXIMUM_PAGES });
   const instantiate = () => new WebAssembly.Instance(module, { env: { memory } });
   let instance = instantiate();
+  const health = { calls: 0, crashes: 0, resets: 0 };
   const cardBytes = options.card ? encoder.encode(typeof options.card === "string" ? options.card : JSON.stringify(options.card)) : null;
 
   function call(name, ...inputs) {
     const exports = instance.exports;
     let packed;
+    health.calls += 1;
     try {
       const args = [];
       for (const input of inputs) {
@@ -70,8 +71,10 @@ export async function createEstimator(options = {}) {
       if (error instanceof WebAssembly.RuntimeError) {
         // A trap (a panic, an input larger than the memory, or a file that hit the memory cap) leaves the heap
         // inconsistent: zero the memory and instantiate the module into it again, exactly as on first load.
+        health.crashes += 1;
         new Uint8Array(memory.buffer).fill(0);
         instance = instantiate();
+        health.resets += 1;
         throw new EstimatorError("crashed", `the estimator stopped on this input (${error.message})`);
       }
       throw error;
@@ -129,8 +132,39 @@ export async function createEstimator(options = {}) {
       }
       return { ...estimator.quote({ ...request, files }), probes };
     },
+    /** Probe and quote with progress events, cancellation and per-file fallbacks; see `estimateFiles`. */
+    estimateFiles(blobs, options) {
+      return estimateFiles(estimator, blobs, options);
+    },
+    /** Calls into the module, and how many trapped and were recovered by a fresh instance. */
+    health() {
+      return { ...health };
+    },
   };
   return estimator;
+}
+
+const sourcesOf = (files) => Array.from(files, (file) => (typeof file?.open === "function" ? file : blobSource(file)));
+
+/**
+ * Probe `files` (Blobs/Files) in bounded batches and quote them, with progress events. Never rejects for one
+ * file: a file that cannot be read or probed is priced from name, type and size, with a `reason`. When
+ * `options.signal` aborts, work stops between files and between 1 MiB reads, and the result is `partial`, quoting the
+ * finished files plus size-only assumptions for the rest. Rejects only for a request the module refuses (e.g. a
+ * profile from a newer price card).
+ */
+export async function estimateFiles(estimator, files, options = {}) {
+  const onProgress = options.onProgress;
+  return runEstimate(estimator, sourcesOf(files), options, onProgress ? (event) => onProgress(event) : undefined);
+}
+
+/**
+ * The same run as an async iterator of events, ending with `quote-done` (whose `result` is what `estimateFiles`
+ * returns). A slow consumer pauses the run once `highWaterMark` events are waiting, so events never pile up.
+ */
+export function estimateEvents(estimator, files, options = {}) {
+  const sources = sourcesOf(files);
+  return eventStream((emit) => runEstimate(estimator, sources, options, emit), options.highWaterMark);
 }
 
 /** Copy a probe's measurements into a quote file, keeping fields the file already has (ProbeResult::apply). */

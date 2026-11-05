@@ -850,7 +850,7 @@ export function createRunCreation(deps: RunCreationDeps) {
         const [inserted] = await client<DocumentRow[]>`
           insert into documents (
             id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key,
-            status, extraction_mode, page_count, page_count_source, file_size, source_sha256, file_facts,
+            status, extraction_mode, page_count, page_count_source, billing_pages, billing_pages_method, file_size, source_sha256, file_facts,
             canonical_id, version_number, previous_version_id, reused_from_document_id, metadata, indexing_mode
           )
           values (
@@ -867,6 +867,10 @@ export function createRunCreation(deps: RunCreationDeps) {
             -- A new version starts from the source's page_count; the worker re-counts Office and EPUB pages after conversion.
             ${source.page_count ?? 0},
             ${source.page_count_source ?? "counted"},
+            -- The source's measured count bills the new version until the worker measures it again; a run that reuses the
+            -- conversion stage never does, and without it a 300-page DOCX would bill as one page.
+            ${source.billing_pages ?? null},
+            ${source.billing_pages_method ?? null},
             ${Number(source.file_size ?? 0) || 0},
             ${source.source_sha256 ?? null},
             ${source.file_facts ? sql.json(source.file_facts as never) : null},

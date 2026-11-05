@@ -44,8 +44,15 @@ describe("features priced on text read", () => {
     // 5,000 pages of which almost all are blank: features read text, so they price the text (2 pages), base fee still bills 5,000.
     expect(featurePages(state, { id: "d", pageCount: 1, billingPages: 5_000, billingPagesMethod: "pdf-conversion" }, { textPages: textPagesOfText("one short note\n".repeat(100)) })).toBe(1);
     expect(featurePages(state, { id: "d", pageCount: 1, billingPages: 5_000, billingPagesMethod: "pdf-conversion" }, { textPages: 40 })).toBe(40);
-    // A count that is not from a layout conversion (sheet rows, text rule) is already a count of text.
-    expect(featurePages(state, { id: "d", pageCount: 1, billingPages: 50, billingPagesMethod: "sheet-rows" }, { textPages: 2 })).toBe(50);
+    // Every other measured count is capped by the text too: a sheet whose rows measure 4,688 pages but hold 2 pages of text.
+    expect(featurePages(state, { id: "d", pageCount: 1, billingPages: 4_688, billingPagesMethod: "sheet-rows" }, { textPages: 2 })).toBe(2);
+    expect(featurePages(state, { id: "d", pageCount: 1, billingPages: 50, billingPagesMethod: "text-pages" }, { textPages: 9 })).toBe(9);
+    expect(featurePages(state, { id: "d", pageCount: 1, billingPages: 50, billingPagesMethod: "text-rule" }, { textPages: 80 })).toBe(50);
+    // A slide is a page whatever it holds.
+    expect(featurePages(state, { id: "d", pageCount: 1, billingPages: 40, billingPagesMethod: "slides" }, { textPages: 3 })).toBe(40);
+    // A size estimate never prices a feature: the text read when known, else intake's count.
+    expect(featurePages(state, { id: "d", pageCount: 1, billingPages: 768, billingPagesMethod: "size-estimate" }, { textPages: 12 })).toBe(12);
+    expect(featurePages(state, { id: "d", pageCount: 1, billingPages: 768, billingPagesMethod: "size-estimate" })).toBe(1);
   });
 
   it("raises a charge to the text read and never lowers it; a repeat adds nothing, a larger read adds the difference under a new id", () => {
