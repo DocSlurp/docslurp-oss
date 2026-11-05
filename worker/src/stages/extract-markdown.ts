@@ -406,6 +406,7 @@ export class ExtractMarkdownStage implements Stage {
                 const keepImageUnread = (format === "image" || (document.mimeType ?? "").startsWith("image/")) &&
                   !qualityAllowsPageReading(state.run.pipeline.quality);
                 let plannedExtractors = keepImageUnread ? null : await this.planExtractors({
+                  mimeType: document.fileFacts?.sniffedMimeType ?? null,
                   tempFile,
                   multiStrategyVoting: extractionConfig.voting.enabled,
                   secondaryId: extractionConfig.voting.secondary,
@@ -445,6 +446,7 @@ export class ExtractMarkdownStage implements Stage {
                 attemptLedger.reserve(plannedExtractors.primary.label);
                 if (plannedExtractors.secondary) attemptLedger.reserve(plannedExtractors.secondary.label);
                 const isolated = await this.isolateConcurrentCandidates({
+                  mimeType: document.fileFacts?.sniffedMimeType ?? null,
                   primary: plannedExtractors.primary,
                   secondary: plannedExtractors.secondary,
                   sourcePath: tempFile,
@@ -1926,6 +1928,7 @@ export class ExtractMarkdownStage implements Stage {
    * directories for the caller to remove.
    */
   private async isolateConcurrentCandidates(args: {
+    mimeType?: string | null;
     primary: PreparedExtractor;
     secondary: PreparedExtractor | null;
     sourcePath: string;
@@ -1952,7 +1955,7 @@ export class ExtractMarkdownStage implements Stage {
         this.runner,
         source,
         serializeExtractorOptions(args.options, extractor.label),
-        { format: args.format },
+        { format: args.format, mimeType: args.mimeType ?? null },
       );
       return { extractor: prepared, source };
     };
@@ -2938,6 +2941,8 @@ export class ExtractMarkdownStage implements Stage {
 
   private async planExtractors(args: {
     tempFile: string;
+    /** The bytes' sniffed MIME type (quarantine's file facts), handed to extractors that take one. */
+    mimeType?: string | null;
     multiStrategyVoting: boolean;
     secondaryId: string;
     order: Partial<Record<string, string[]>>;
@@ -2959,7 +2964,7 @@ export class ExtractMarkdownStage implements Stage {
           this.runner,
           args.tempFile,
           serializeExtractorOptions(args.options, id),
-          { format: args.format },
+          { format: args.format, mimeType: args.mimeType ?? null },
         ),
       ),
     );
@@ -2983,7 +2988,7 @@ export class ExtractMarkdownStage implements Stage {
           this.runner,
           args.tempFile,
           serializeExtractorOptions(args.options, args.secondaryId),
-          { format: args.format },
+          { format: args.format, mimeType: args.mimeType ?? null },
         );
         if (!explicit.plan.available) args.attemptLedger.markUnavailable(explicit.label);
         secondary = explicit.plan.available ? explicit : null;

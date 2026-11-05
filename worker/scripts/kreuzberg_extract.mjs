@@ -19,7 +19,9 @@ const { values } = parseArgs({
   options: {
     input: { type: "string" },
     output: { type: "string" },
-    "config-json": { type: "string" }
+    "config-json": { type: "string" },
+    // The worker's sniffed MIME type: Kreuzberg uses it instead of detecting the format itself.
+    "mime-type": { type: "string" }
   }
 });
 
@@ -27,6 +29,10 @@ if (!values.input || !values.output) {
   process.stderr.write("usage: kreuzberg_extract.mjs --input file.pdf --output out.md\n");
   process.exit(1);
 }
+
+// Kreuzberg's linked OCR engine must find no language data, so it can never read pixels here (the worker image ships
+// this directory empty and read-only; where it does not exist the engine fails the same way). Set before the binding loads.
+process.env.TESSDATA_PREFIX = "/opt/docslurp/empty-tessdata";
 
 let kreuzberg;
 try {
@@ -42,11 +48,14 @@ try {
   // an image input is refused outright (@kreuzberg/node 4.10.2 OCRs images whatever its options say). Scanned pages come
   // back empty and are read by the worker's OCR engine in its own boundary.
   const { preferredAdapter, dolphin, ocr, forceOcr, forceOcrPages, disableOcr, ...kreuzbergConfig } = parsedConfig;
-  if (IMAGE_EXTENSIONS.has(path.extname(values.input).toLowerCase())) {
+  const mimeType = values["mime-type"] ?? null;
+  if (IMAGE_EXTENSIONS.has(path.extname(values.input).toLowerCase()) || /^image\//i.test(mimeType ?? "")) {
     process.stderr.write("kreuzberg extraction refused: images are read by the OCR engine, not Kreuzberg\n");
     process.exit(1);
   }
-  const result = await kreuzberg.extractFile(values.input, null, {
+  // Belt and braces for the OCR Kreuzberg links: the worker image points TESSDATA_PREFIX at an empty read-only
+  // directory, so an OCR call it makes despite disableOcr has no language data and fails instead of reading pixels.
+  const result = await kreuzberg.extractFile(values.input, mimeType, {
     outputFormat: "markdown",
     includeDocumentStructure: true,
     enableQualityProcessing: true,

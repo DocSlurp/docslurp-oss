@@ -159,6 +159,12 @@ export interface ClamDatabaseHealth {
   source: string | null;
 }
 
+/**
+ * An empty, read-only directory (created in the worker images). Kreuzberg's linked OCR looks for language data here and
+ * finds none, so it fails closed instead of reading customer pixels on the worker host.
+ */
+export const EMPTY_TESSDATA_DIR = "/opt/docslurp/empty-tessdata";
+
 /** A command that ran to completion and exited non-zero (local or remote). The message keeps its historical shape. */
 export class CommandExitError extends Error {
   constructor(message: string, readonly exitCode: number | null) {
@@ -776,12 +782,16 @@ export class CommandRunner {
     source: string,
     output: string,
     configJson?: string,
+    mimeType?: string,
   ): Promise<CommandPlan> {
     const args = ["--input", source, "--output", output];
     if (configJson) {
       args.push("--config-json", configJson);
     }
-    return await this.planScript("node", "kreuzberg_extract.mjs", ...args);
+    if (mimeType) args.push("--mime-type", mimeType);
+    const plan = await this.planScript("node", "kreuzberg_extract.mjs", ...args);
+    // Kreuzberg links an OCR engine; with no language data it cannot read pixels, whatever its options say.
+    return { ...plan, bundleEnv: { ...(plan.bundleEnv ?? {}), TESSDATA_PREFIX: EMPTY_TESSDATA_DIR } };
   }
 
   async liteParseExtract(

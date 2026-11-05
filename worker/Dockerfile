@@ -109,6 +109,10 @@ RUN groupadd --system --gid 10001 docslurp \
     && chmod +x ./worker/scripts/parser-sandbox.sh ./scripts/start-worker.sh \
     && chown -R docslurp:docslurp /home/docslurp /tmp/docslurp-parser-sandbox /tmp/clamav /var/log/clamav /var/lib/clamav
 
+# Kreuzberg links an OCR engine; it gets no language data (an empty, root-owned, read-only directory), so it cannot OCR
+# customer pixels on the worker host. OCR runs only in the configured OCR boundary.
+RUN mkdir -p /opt/docslurp/empty-tessdata && chmod 0555 /opt/docslurp/empty-tessdata
+ENV TESSDATA_PREFIX=/opt/docslurp/empty-tessdata
 ENV HOME=/home/docslurp
 ENV DOCSLURP_CLAMAV_RUN_DIR=/tmp/clamav
 ENV DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS=
