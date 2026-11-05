@@ -73,7 +73,9 @@ def main():
             last_col = max(last_col, max(filled))
             # Structure-only keeps just the rows up to the header (the first non-empty row); data rows are numbers only.
             if not args.structure_only or row_number == first_row:
-                writer.writerow([str(c) if c is not None else "" for c in row])
+                # openpyxl pads every row to the sheet's widest column: one stray cell at XFD1 turns each row into 16,383 commas
+                # that read, and bill, as pages of text. A row ends at its last non-empty cell.
+                writer.writerow([str(c) if c is not None else "" for c in row[:max(filled)]])
             if row_number != first_row:
                 if len(data_rows) < MAX_ROW_NUMBERS:
                     data_rows.append(row_number)

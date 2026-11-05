@@ -13,7 +13,7 @@ use crate::error::{Error, ErrorCode};
 /// Card shape this build reads; a card with another `schema` is rejected.
 pub const CARD_SCHEMA: u32 = 2;
 /// Pricing formulas this build implements; a card for other `rules` is rejected rather than quoted with stale logic.
-pub const CARD_RULES: u32 = 4;
+pub const CARD_RULES: u32 = 5;
 
 const BUNDLED: &str = include_str!("../card.json");
 
@@ -128,6 +128,8 @@ pub struct UnmeasuredPages {
     pub text: BytesPerPageRange,
     pub worker_counted: BTreeMap<String, BytesPerPageTriple>,
     pub formats: Vec<WorkerCountedFormatSpec>,
+    /// Worker-counted formats no model reads in any quality (Word, slides, sheets): priced Fast at both ends of a quote.
+    pub fast_only_formats: Vec<String>,
 }
 
 /// The worker's raster-page routing thresholds (`PAGE_RASTER_ROUTING` in `@docslurp/shared`).

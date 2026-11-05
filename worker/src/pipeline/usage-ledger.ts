@@ -21,18 +21,19 @@ import {
 } from "../lib/ai-usage.js";
 
 /**
- * Usage metrics that mean a vision or OCR model read one page (hosted vision,
- * local OCR of any kind, page mapping OCR, image labelling). Each such page bills as a
- * Rich page (PRICE_CARD), once per run, plus one more per extra 1,000 output tokens.
- * A Fast-mode page that falls back to vision is billed Rich the same way. Tesseract is an OCR model:
+ * Usage metrics that mean a vision or OCR model read one page's content (hosted vision, local OCR of any kind, page
+ * mapping OCR). Each such page bills as a Rich page (PRICE_CARD), once per run, plus one more per extra 1,000 output
+ * tokens. A Fast-mode page that falls back to vision is billed Rich the same way. Tesseract is an OCR model:
  * `image-ocr` (an uploaded image), `tesseract-page-ocr` (a page the router or the local graph OCR'd) and
  * `pdf-ocr` (Kreuzberg's OCR of a scanned PDF page) bill the same as a vision read.
+ *
+ * A local caption of a photo on the page (`image-label`, the image labeler) is not in the set: it describes a picture,
+ * it does not read the page's text, so it is recorded at its compute cost and the page stays Fast.
  */
 export const RICH_PAGE_READ_METRICS: ReadonlySet<string> = new Set([
   "page-analysis",
   "document-map-ocr",
   "ocr-native-pdf",
-  "image-label",
   "image-ocr",
   "tesseract-page-ocr",
   "pdf-ocr",

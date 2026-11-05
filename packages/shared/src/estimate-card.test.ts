@@ -9,7 +9,7 @@ import { estimatePipelineWork } from "./config-change.js";
 import { buildEstimateCard, ESTIMATE_RULES } from "./estimate-card.js";
 import { buildEstimateGoldenCases, serializeGoldenCases } from "./estimate-golden.js";
 import { compilePipelinePlan, defaultPipelineFeatures, type PipelineFeatures } from "./pipeline.js";
-import { speedBoostMultiplier } from "./billing.js";
+import { pageCredits, speedBoostMultiplier } from "./billing.js";
 import { countedPagesForForecast, estimateProfileFor, intakePageCountSource, QUOTE_HIGH_RICH_PAGE_FACTOR, quoteFilePageRange, quoteFileSchema, quoteUpload, workerCountedFormat, type QuoteFile } from "./upload-quote.js";
 import { isUploadImageFile, isUploadTextFile, textPageCount, uploadMediaKind } from "./media-upload-estimate.js";
 
@@ -71,10 +71,12 @@ describe("quoteUpload", () => {
     ["fast, no video frames", { ...defaultPipelineFeatures, quality: "fast", mediaVideo: { ...defaultPipelineFeatures.mediaVideo, enabled: false } }],
   ];
   // Counted pages: the server's estimate is the reference for the cheap end; uncounted pages are quoted over a range (below).
+  // The server's page estimate does not know formats, so these are files a model may read (Word, slide and sheet files, which
+  // no model reads, are priced Fast in every quality: tested below).
   const batches: QuoteFile[][] = [
     [{ name: "a.pdf", size: 2_000_000, pages: 27 }],
-    [{ name: "a.pdf", size: 10, pages: 300 }, { name: "b.docx", size: 90_000, pages: 2 }, { name: "c.xlsx", size: 4_000_000, pages: 54 }],
-    [{ name: "talk.mp3", size: 30_000_000 }, { name: "deck.pptx", size: 8_000_000, pages: 42 }, { name: "clip.mp4", size: 1, durationSeconds: 125 }],
+    [{ name: "a.pdf", size: 10, pages: 300 }, { name: "b.pdf", size: 90_000, pages: 2 }, { name: "c.pdf", size: 4_000_000, pages: 54 }],
+    [{ name: "talk.mp3", size: 30_000_000 }, { name: "deck.pdf", size: 8_000_000, pages: 42 }, { name: "clip.mp4", size: 1, durationSeconds: 125 }],
   ];
 
   for (const [label, pipeline] of pipelines) {
@@ -101,6 +103,25 @@ describe("quoteUpload", () => {
       }
     }
   }
+
+  it("prices Word, slide and sheet files Fast in every quality: no model reads their pages", () => {
+    const office: QuoteFile[] = [{ name: "b.docx", size: 90_000, pages: 2 }, { name: "c.xlsx", size: 4_000_000, pages: 54 }, { name: "deck.pptx", size: 8_000_000, pages: 42 }];
+    const quotes = (["fast", "auto", "good"] as const).map((quality) =>
+      quoteUpload({ files: office, profile: estimateProfileFor({ ...defaultPipelineFeatures, quality }, { env: enforced }) }).estimate);
+    for (const quote of quotes) {
+      expect(quote.pages).toBe(98);
+      expect(quote.credits).toEqual({ low: pageCredits("fast", 98), high: pageCredits("fast", 98) });
+      expect(quote.basis).toContain("page mix known for every file");
+    }
+    // A Good DOCX was quoted at the Rich price: 300 pages, 75 credits at both ends. It bills 1.5.
+    const good = estimateProfileFor({ ...defaultPipelineFeatures, quality: "good" }, { env: enforced });
+    expect(quoteUpload({ files: [{ name: "contract.docx", size: 400_000, pages: 300 }], profile: good }).estimate.credits).toEqual({ low: 1.5, high: 1.5 });
+    // An uncounted one is quoted Fast over its size's page range; a PDF beside it keeps its own range.
+    const uncounted = quoteUpload({ files: [{ name: "memo.doc", size: 400_000, type: "application/msword" }], profile: good }).estimate;
+    expect(uncounted.credits!.high).toBe(pageCredits("fast", uncounted.pagesRange!.high));
+    const mixed = quoteUpload({ files: [{ name: "memo.doc", size: 400_000, type: "application/msword" }, { name: "scan.pdf", size: 1, pages: 10 }], profile: good }).estimate;
+    expect(mixed.credits!.low).toBeCloseTo(pageCredits("fast", uncounted.pagesRange!.low) + pageCredits("rich", 10));
+  });
 
   it("prices an image file as one scanned page", () => {
     const profile = estimateProfileFor(defaultPipelineFeatures, { env: enforced });

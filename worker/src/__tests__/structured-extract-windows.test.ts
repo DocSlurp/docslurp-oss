@@ -24,6 +24,10 @@ function memoryStorage(initial: Record<string, string>) {
       return Buffer.from(String(objects.get(key)), "utf8");
     },
     putJson: async (key: string, value: unknown) => void objects.set(key, value),
+    getJson: async (key: string) => {
+      if (!objects.has(key)) throw Object.assign(new Error(`missing ${key}`), { name: "NoSuchKey" });
+      return objects.get(key);
+    },
   };
   return { storage: storage as unknown as ArtifactStore, objects };
 }
@@ -169,11 +173,14 @@ describe("structured extraction of long documents", () => {
     const state = stateFor(document, schema);
     const enqueue = vi.spyOn(state.usageLedger, "enqueue");
     const ok = answer({ total: { value: 1, confidence: 0.9, evidence: [] }, signer: { value: null, confidence: 0.1, evidence: [] } });
-    // Window 3 of 4 fails on the first attempt (calls are concurrent, so fail the third started call).
+    // Window 3 of 4 fails on the first attempt (calls are concurrent, so fail the third started call, after the others answered).
     let started = 0;
     vi.mocked(generateOpenRouterText).mockImplementation((async () => {
       started += 1;
-      if (started === 3) throw new Error("provider 500");
+      if (started === 3) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        throw new Error("provider 500");
+      }
       return ok;
     }) as never);
     await new StructuredExtractStage(storage, config).run(state);
@@ -182,14 +189,17 @@ describe("structured extraction of long documents", () => {
     // Three windows were read (about 285,000 characters, 82 pages of text): billed, not 0.
     expect(afterFailure).toBeGreaterThan(0);
     expect(afterFailure).toBe(featureCredits("structuredFields", Math.ceil(3 * 95_000 / 3_500)));
-    // The retry (a new attempt: its state is rebuilt from the persisted artifacts) reads every window again; the document is
-    // 4 pages of 95,000 characters. It adds only the difference to what the failed attempt already billed.
+    // The retry (a new attempt: its state is rebuilt from the persisted artifacts) asks the model only for the window that failed:
+    // the three that finished are read back from the run's artifacts. The document is 4 pages of 95,000 characters; the retry adds
+    // only the difference to what the failed attempt already billed.
     const retry = stateFor(document, schema);
     retry.artifactLedger.record("feature-charge:structuredFields:doc", String(afterFailure));
     const retryEnqueue = vi.spyOn(retry.usageLedger, "enqueue");
     vi.mocked(generateOpenRouterText).mockReset();
     vi.mocked(generateOpenRouterText).mockResolvedValue(ok as never);
     await new StructuredExtractStage(storage, config).run(retry);
+    expect(generateOpenRouterText).toHaveBeenCalledTimes(1);
+    expect(retry.documentStage("doc", "structured-extract")?.status).not.toBe("failed");
     const total = featureCredits("structuredFields", Math.ceil(4 * 95_000 / 3_500));
     expect(structuredCredits(retryEnqueue)).toBeCloseTo(total - afterFailure);
     expect(afterFailure + structuredCredits(retryEnqueue)).toBeCloseTo(total);
