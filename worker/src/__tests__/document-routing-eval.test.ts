@@ -185,3 +185,22 @@ describe("document routing eval", () => {
     expect(report.passed).toBe(false);
   });
 });
+
+describe("recorded Doppler evidence", () => {
+  it("covers every fixture, from the pinned Doppler commit, with hashes that match the files", async () => {
+    const { createHash } = await import("node:crypto");
+    const sha = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
+    const recorded = JSON.parse(readFileSync(path.join(fixtureRoot, "doppler-md", "manifest.json"), "utf8")) as {
+      doppler: { commit: string }; files: Record<string, { source: string; sourceSha256: string; sha256: string }>;
+    };
+    const pin = JSON.parse(readFileSync(path.resolve(process.cwd(), "doppler.json"), "utf8")) as { commit: string };
+    expect(recorded.doppler.commit).toBe(pin.commit);
+    const manifest = parseRoutingEvalManifest(JSON.parse(readFileSync(manifestPath, "utf8")) as unknown);
+    for (const fixture of manifest.fixtures) {
+      const entry = recorded.files[`${fixture.path}.md`];
+      expect(entry, fixture.path).toBeDefined();
+      expect(sha(path.join(fixtureRoot, fixture.path))).toBe(entry!.sourceSha256);
+      expect(sha(path.join(fixtureRoot, "doppler-md", `${fixture.path}.md`))).toBe(entry!.sha256);
+    }
+  });
+});

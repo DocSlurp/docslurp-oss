@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "description": "Doppler's Markdown for the routing-eval fixtures: the PDF extractor's output the eval routes on (doppler-md evidence). Regenerate with Doppler built from the pinned commit: pdftotext -q -bbox-layout -wordmeta -rules -compact-layout FILE - | doppler-md (what pdftomarkdown runs).",
+  "doppler": {
+    "repository": "https://github.com/DocSlurp/doppler",
+    "commit": "827b3cccecfdcfe61ad89335ec2fb5476df014da"
+  },
+  "files": {
+    "academic-latex-ligatures.pdf.md": {
+      "source": "academic-latex-ligatures.pdf",
+      "sourceSha256": "252890ab640cf226e6a4eb996ad235c5c8a7ba2e8b1ac1f15e31eac70ce9fa2d",
+      "sha256": "ed976b212642a4f91804c0038dee9ba00422236d69397e838f2b32f335d7ea77"
+    },
+    "form-rotated-notes.pdf.md": {
+      "source": "form-rotated-notes.pdf",
+      "sourceSha256": "d017d60ed8db68950e2603eec076987e9405b6ab62a8dc18335cddf617c99fc6",
+      "sha256": "f92d91117beef38952db86acd9d8d840a92fd61e257f5114a78dc03b218d46f4"
+    },
+    "image-heavy-ocr.pdf.md": {
+      "source": "image-heavy-ocr.pdf",
+      "sourceSha256": "b990112b189f19b42f20e39a97ce66804610ba3ba4e8b2284c1c03ac288f6ad2",
+      "sha256": "62a927bc4a242700ad92f6d499ba0c2465b0fe1ec3897647689be215409eb32f"
+    },
+    "kreuzberg-handwriting-notes.pdf.md": {
+      "source": "kreuzberg-handwriting-notes.pdf",
+      "sourceSha256": "a09310cba8b88a052dd98c6cf85744775690d355c956c1b8809a2b9b2e9067f4",
+      "sha256": "f3b27a83205a676912f1aea509ebb54f2e84b8dc940c4177bac36edded78b7d5"
+    },
+    "kreuzberg-metadata-document.pdf.md": {
+      "source": "kreuzberg-metadata-document.pdf",
+      "sourceSha256": "afd17ccd40b3e2e0f5a6f0ef2dd19dce8d59a59038df7f98d9a41164eaa63bcc",
+      "sha256": "371fc7623c91e4ac99581696806be3a33f9aaf9f9a581500397dfdd5582c3974"
+    },
+    "tables-multipage-financials.pdf.md": {
+      "source": "tables-multipage-financials.pdf",
+      "sourceSha256": "e8575371b043ca42ae2b5dd1b36be445686d2fe89bb718846a8f4e38820cc788",
+      "sha256": "bb380eabff1040396eabc52da1151c2a67b2aafe89e5631473a1e6bdff1954ea"
+    }
+  }
+}

@@ -108,3 +108,26 @@ describe("layout-preserving text (pdftotext -layout)", () => {
     expect(classifyAdaptivePage(1, text).route).not.toBe("table-heavy");
   });
 });
+
+describe("tables in the shapes extraction writes them", () => {
+  // preserveTables (the default) turns GFM tables into HTML tables before routing reads the text.
+  const htmlTable = (rows: string[][]) =>
+    `<table>\n<thead>\n<tr><th>${rows[0]!.join("</th><th>")}</th></tr>\n</thead>\n<tbody>\n${rows.slice(1).map((row) => `<tr><td>${row.join("</td><td>")}</td></tr>`).join("")}\n</tbody>\n</table>`;
+
+  it("reads an HTML table as a table, not as code markup", () => {
+    const text = ["## Quarterly shipments", "", htmlTable([["Depot", "Units", "Share"], ["Harbor", "1,204", "31%"], ["Ridge", "980", "25%"], ["Valley", "1,710", "44%"]])].join("\n");
+    const page = classifyAdaptivePage(1, text);
+    expect(page.route).toBe("table-heavy");
+    expect(page.signals).not.toContain("code:structure");
+  });
+
+  it("reads a GFM pipe table of numbers and percentages as a table, not a formula", () => {
+    const text = ["| Station | Temp | Rain |", "| --- | --- | --- |", "| Lakeside | 18.2 | 12% |", "| Ridge | 14.9 | 40% |", "| Valley | 20.4 | 3% |"].join("\n");
+    expect(classifyAdaptivePage(1, text).route).toBe("table-heavy");
+  });
+
+  it("still reads real code beside a table as code", () => {
+    const text = [htmlTable([["a", "b"], ["1", "2"]]), "export function total(items) {", "  const sum = items.reduce((acc, item) => acc + item, 0);", "  return sum;", "}", "import { total } from './total';"].join("\n");
+    expect(classifyAdaptivePage(1, text).route).toBe("code-heavy");
+  });
+});

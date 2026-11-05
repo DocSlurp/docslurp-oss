@@ -14,7 +14,7 @@
       "path": "kreuzberg-handwriting-notes.pdf",
       "tags": ["handwriting", "scanned", "mixed-raster-text"],
       "expectedFailure": {
-        "reason": "Known gap since the LiteParse removal (73456463). Page 1 has about 60 native words beside a scanned image; OCR was authorized only by the structured-parser complexity evidence (authorizeStructuredOcr), which no shipped extractor produces now. The shared raster rule (decidePageRaster, mirrored by the offline estimator) treats a page with 30 or more native words as a Fast text page, so authorizing OCR here is a billing-policy change, not a routing fix."
+        "reason": "Policy, not evidence. Page 1 has about 60 native words (Doppler and Poppler read the same text) beside a 560x420 scanned image. OCR was authorized only by LiteParse's structured-complexity path (authorizeStructuredOcr), which no shipped extractor feeds. The shared raster rule (decidePageRaster, mirrored by the offline estimator) reads a page with 30 or more native words as a Fast text page and never OCRs it. Passing needs an owner decision to OCR text pages that also carry a large image (Rich billing on such pages), not a routing fix."
       },
       "expected": {
         "suggestedPlaybook": "review-grade",
@@ -123,7 +123,7 @@
       "path": "kreuzberg-metadata-document.pdf",
       "tags": ["born-digital", "metadata", "negative-control"],
       "expectedFailure": {
-        "reason": "Known gap since the LiteParse removal (73456463). On poppler-text output the page's six 'Key: value' property lines plus the word 'date' meet the v1 form rule (colon lines >= 25% of lines and a field keyword), so the page routes as a form with aggressive vision. Narrowing that rule to make this page pass would tune production routing to this fixture; it needs a form-detection change validated on other documents."
+        "reason": "Expectation predates an extractor that sees this page's table. Doppler extracts its 4-row revision-history table as a real table (LiteParse and Kreuzberg did not), so the page routes table-heavy: layout-aware, and, as the only page, aggressive vision. Whether one small table on a prose page should route as table-heavy is routing policy for the owner and council; tuning the table rule to this page would fit production routing to the fixture."
       },
       "expected": {
         "suggestedPlaybook": "fast",

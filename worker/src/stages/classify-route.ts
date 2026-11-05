@@ -940,7 +940,10 @@ export function classifyAdaptivePage(
   const scanText = routingV2 ? normalized.slice(0, PAGE_SCAN_MAX_CHARS) : "";
   const scanLines = scanText ? scanText.split(/\n+/).filter(Boolean) : [];
   const colonLineCount = lines.filter((line) => line.includes(":")).length;
-  const markdownTableLineCount = lines.filter((line) => /^\s*\|.*\|\s*$/.test(line)).length;
+  // Tables reach routing as GFM pipe rows or, with preserveTables (the default), as the HTML tables normalizeExtractedMarkdown
+  // writes: both count as table rows, and neither is read as code, formula or chemistry markup below.
+  const htmlTableRowCount = countMatches(normalized, /<tr[\s>]/gi);
+  const markdownTableLineCount = lines.filter((line) => /^\s*\|.*\|\s*$/.test(line)).length + htmlTableRowCount;
   // A layout-preserving extractor (pdftotext -layout) keeps a table as rows of cells aligned by runs of spaces, not pipes.
   const alignedTableRowLines = lines.filter(isAlignedNumericRow).length;
   // v2: OCR flattens a table into rows of space-separated cells; several rows with two or more
@@ -984,7 +987,10 @@ export function classifyAdaptivePage(
   ].filter(Boolean).length;
   const textDensityScore = Math.min(1, (charCount / 900) * 0.6 + (wordCount / 180) * 0.4);
   const signals: string[] = [];
-  const specializedContent = detectSpecializedContent(normalized, lines, routingV2);
+  const withoutTables = normalized
+    .replace(/<table[\s>][\s\S]*?(?:<\/table>|$)/gi, "\n")
+    .split("\n").filter((line) => !/^\s*\|.*\|\s*$/.test(line)).join("\n");
+  const specializedContent = detectSpecializedContent(withoutTables, withoutTables.split(/\n+/).filter(Boolean), routingV2);
 
   let route: AdaptivePageRoute = "straightforward-text";
   let extractorHint: AdaptivePageRoutingEntry["extractorHint"] = "cheap-text";

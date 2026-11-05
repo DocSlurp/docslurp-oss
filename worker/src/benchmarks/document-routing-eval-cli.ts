@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -6,6 +7,7 @@ import { normalizeExtractedMarkdown } from "../lib/extracted-markdown.js";
 import { collectPageImageEvidence, drawnBytesPerPage, pageAlignedTexts, totalEmbeddedImageBytes, type PageImageEvidence } from "../lib/page-image-evidence.js";
 import { buildAdaptiveRoutingDecisionSurface, canonicalBlocksToPageText } from "../stages/classify-route.js";
 import { CommandRunner } from "../tools/runner.js";
+import { dopplerConverterPath } from "../tools/doppler.js";
 import {
   buildRoutingEvalReport,
   parseRoutingEvalManifest,
@@ -32,23 +34,51 @@ function pdfInfoPages(stdout: string): number {
 }
 
 /**
- * The evidence classify-route reads for a host-extracted PDF, built the way the pipeline builds it: `poppler-text`'s output
- * (the default host order's last step, and the one every self-hosted worker has), normalized and turned into the canonical
- * document extract-markdown stores, read back as classify-route reads it; plus extract-markdown's page-image evidence
- * (`pdfimages -list` and page sizes for sparse or suspect pages) and the drawn-bytes hint. No OCR cross-check runs (it is
- * off in the pipeline too) and nothing calls a hosted model.
+ * The PDF extractor output routing reads. Doppler is the PDF extractor (vm-pdf, or doppler-md in local mode), so the default is
+ * `doppler-recorded`: Doppler's Markdown for each fixture, recorded from the pinned Doppler commit (testdata/pdf-fixtures/
+ * doppler-md, sha256-checked against its manifest) so CI routes on Doppler's output without building it. `doppler-live` runs
+ * Doppler's pdftomarkdown (DOCSLURP_DOPPLER_BIN_DIR); `poppler-text` runs Poppler's layout text, the local-mode last resort.
+ */
+type Evidence = "doppler-recorded" | "doppler-live" | "poppler-text";
+const EVIDENCE: readonly Evidence[] = ["doppler-recorded", "doppler-live", "poppler-text"];
+
+async function extractedText(evidence: Evidence, inputPath: string, fixtureRoot: string, runner: CommandRunner): Promise<{ text: string; extractor: string }> {
+  if (evidence === "poppler-text") return { text: (await runner.run(await runner.extractText(inputPath, true))).stdout, extractor: "poppler-text" };
+  if (evidence === "doppler-live") {
+    const plan = await runner.dopplerMarkdown(inputPath);
+    if (!plan.available) throw new Error(`doppler-live evidence needs pdftomarkdown at ${dopplerConverterPath()}`);
+    return { text: (await runner.run(plan)).stdout, extractor: "doppler-md" };
+  }
+  const recordedDir = path.join(fixtureRoot, "doppler-md");
+  const manifest = JSON.parse(await readFile(path.join(recordedDir, "manifest.json"), "utf8")) as { files: Record<string, { sha256: string; sourceSha256: string }> };
+  const name = `${path.basename(inputPath)}.md`;
+  const entry = manifest.files[name];
+  if (!entry) throw new Error(`no recorded Doppler output for ${path.basename(inputPath)}`);
+  const sha = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+  if (sha(await readFile(inputPath)) !== entry.sourceSha256) throw new Error(`${path.basename(inputPath)} changed since its Doppler output was recorded; regenerate doppler-md/`);
+  const recorded = await readFile(path.join(recordedDir, name));
+  if (sha(recorded) !== entry.sha256) throw new Error(`recorded Doppler output ${name} does not match its manifest`);
+  return { text: recorded.toString("utf8"), extractor: "doppler-md" };
+}
+
+/**
+ * The evidence classify-route reads for a PDF, built the way the pipeline builds it: the PDF extractor's output (above),
+ * normalized and turned into the canonical document extract-markdown stores, read back as classify-route reads it; plus
+ * extract-markdown's page-image evidence (`pdfimages -list` and page sizes for sparse or suspect pages) and the drawn-bytes
+ * hint. No OCR cross-check runs (it is off in the pipeline too) and nothing calls a hosted model.
  */
 async function evaluateFixture(args: {
   fixture: RoutingEvalFixture;
   fixtureRoot: string;
   runner: CommandRunner;
+  evidence: Evidence;
 }): Promise<RoutingEvalObservation> {
   const inputPath = path.resolve(args.fixtureRoot, args.fixture.path);
   const startedAt = performance.now();
   const pageCount = pdfInfoPages((await args.runner.run(await args.runner.pdfInfo(inputPath))).stdout);
-  const extracted = (await args.runner.run(await args.runner.extractText(inputPath, true))).stdout;
+  const { text: extracted, extractor } = await extractedText(args.evidence, inputPath, args.fixtureRoot, args.runner);
   const winningText = normalizeExtractedMarkdown({ markdown: extracted, preserveTables: true });
-  const canonical = buildCanonicalDocumentFromMarkdown({ documentId: args.fixture.id, text: winningText, pageCount, extractor: "poppler-text" });
+  const canonical = buildCanonicalDocumentFromMarkdown({ documentId: args.fixture.id, text: winningText, pageCount, extractor });
   const text = canonicalBlocksToPageText(canonical.blocks, pageCount);
   const pageTexts = pageAlignedTexts(winningText, pageCount);
   let pageImageEvidence: Map<number, PageImageEvidence> | undefined;
@@ -112,6 +142,8 @@ async function main(): Promise<void> {
     throw new Error("no routing eval fixtures matched the requested tags");
   }
 
+  const evidence = (readArg("--evidence") ?? "doppler-recorded") as Evidence;
+  if (!EVIDENCE.includes(evidence)) throw new Error(`--evidence must be one of ${EVIDENCE.join(", ")}`);
   const runner = new CommandRunner();
   const results = [];
   for (const fixture of fixtures) {
@@ -119,6 +151,7 @@ async function main(): Promise<void> {
       fixture,
       fixtureRoot: path.dirname(manifestPath),
       runner,
+      evidence,
     });
     const result = scoreRoutingEvalFixture(fixture, observation);
     results.push(result);
@@ -146,7 +179,7 @@ async function main(): Promise<void> {
   console.log(
     `[routing-eval] status=${report.passed ? "pass" : "fail"} fixtures=${report.fixtureCount} ` +
       `pass_rate=${report.fixturePassRate.toFixed(3)} quality=${report.qualityScore.toFixed(3)} ` +
-      `p95_latency_ms=${report.p95LatencyMs.toFixed(1)} evidence=poppler-text+page-image-evidence hosted_ai_calls=0 estimated_cost_usd=0`,
+      `p95_latency_ms=${report.p95LatencyMs.toFixed(1)} evidence=${evidence}+page-image-evidence hosted_ai_calls=0 estimated_cost_usd=0`,
   );
   console.log(
     `[routing-eval] all_fixtures=${report.allFixtures.fixtureCount} all_pass_rate=${report.allFixtures.fixturePassRate.toFixed(3)} ` +
