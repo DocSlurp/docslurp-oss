@@ -90,6 +90,30 @@ describe("worker preflight", () => {
     expectNothingStarted();
   });
 
+  it("refuses a loaded VM PDF provider plugin with DOCSLURP_PDF_EXTRACTOR unset at the plugin step (council A M1)", async () => {
+    const { mkdtemp, rm, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    const dir = await mkdtemp(path.join(process.env.TMPDIR || tmpdir(), "preflight-plugin-"));
+    try {
+      const file = path.join(dir, "plugin.mjs");
+      await writeFile(file, `export function register() {
+        return { apiVersion: 1, name: "vm-plugin", sandboxedPdf: { id: "test-vm", maxSourceBytes: 10, assertConfigured() {}, timeoutMs: () => 1, async run() { throw new Error("never"); } } };
+      }\n`);
+      const error = await runWorkerPreflight({ DOCSLURP_OCR_MODE: "off", DOCSLURP_PDF_MODE: "", DOCSLURP_EXTRACTOR_PLUGINS: file }, stubs).catch((e) => e);
+      expect(error).toBeInstanceOf(WorkerPreflightError);
+      expect(error.step).toBe("extractor plugins");
+      expect(error.message).toMatch(/vm-pdf is not selected/);
+      expectNothingStarted();
+      // The same plugin with vm-pdf selected passes the plugin step.
+      resetExtractorPluginsForTest();
+      const results = await runWorkerPreflight({ DOCSLURP_OCR_MODE: "off", DOCSLURP_PDF_MODE: "", DOCSLURP_EXTRACTOR_PLUGINS: file, DOCSLURP_PDF_EXTRACTOR: "vm-pdf" }, stubs);
+      expect(results.find((result) => result.step === "extractor plugins")?.status).not.toBe("failed");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("refuses a service profile without a VM PDF provider at the plugin step: PDFs never fall back to the worker host", async () => {
     const error = await runWorkerPreflight({ DOCSLURP_OCR_MODE: "off", DOCSLURP_SERVICE_PROFILE: "service" }, stubs).catch((e) => e);
     expect(error).toBeInstanceOf(WorkerPreflightError);

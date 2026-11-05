@@ -19,12 +19,13 @@ import type { CommandRunner } from "../tools/runner.js";
  */
 
 /** A runner that records every method called on it; `run` (executing a command) always fails the test. */
-function spyRunner() {
+function spyRunner(overrides: Record<string, unknown> = {}) {
   const calls: string[] = [];
   const runner = new Proxy({}, {
     get: (_target, property) => {
       const name = String(property);
       if (name === "then") return undefined;
+      if (name in overrides) return overrides[name];
       return vi.fn(async (...args: unknown[]) => {
         calls.push(name);
         if (name === "run") throw new Error(`a command ran: ${JSON.stringify(args[0])}`);
@@ -107,6 +108,44 @@ describe("customer-owned local mode (DOCSLURP_PDF_MODE=local)", () => {
     for (const env of [{ DOCSLURP_SERVICE_PROFILE: "service" }, { DOCSLURP_PDF_EXTRACTOR: VM_PDF_EXTRACTOR_ID }, { DOCSLURP_PDF_MODE: "vm" }]) {
       expect(() => assertExtractorPluginConfiguration({ ...env, DOCSLURP_PDF_MODE: "local" }, doppler), JSON.stringify(env)).toThrow(/runs PDFs only in vm-pdf|vm-pdf is not selected/);
     }
+  });
+});
+
+describe("which extractor runs a PDF through the stage", () => {
+  const planFor = async (runner: CommandRunner) => {
+    const stage = new ExtractMarkdownStage(runner, {} as never, {} as never);
+    return await (stage as unknown as { planExtractors(args: unknown): Promise<{ primary: { label: string; plan: { binary: string; sandboxedPdf?: unknown } } }> }).planExtractors({
+      tempFile: "/tmp/tenant/input.pdf", format: "pdf", order: {}, options: {}, multiStrategyVoting: false,
+      secondaryId: "next-in-order", attemptLedger: new ExtractorAttemptLedger(),
+    });
+  };
+
+  it("explicit local opt-in: doppler-md runs on the host at Doppler's path, and the choice is logged at startup", async () => {
+    vi.stubEnv("DOCSLURP_PDF_MODE", "local");
+    vi.stubEnv("DOCSLURP_SERVICE_PROFILE", "self-hosted");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(() => assertExtractorPluginConfiguration(process.env, doppler)).not.toThrow();
+    expect(warn.mock.calls.flat().join(" ")).toContain("[pdf] mode=local: Doppler (doppler-md) parses customer PDFs on the worker host");
+    const dopplerMarkdown = vi.fn(async (source: string) => ({ binary: dopplerConverterPath(), args: ["--", source], available: true }));
+    const extractText = vi.fn(async () => ({ binary: "pdftotext", args: [], available: true }));
+    const planned = await planFor({ dopplerMarkdown, extractText } as unknown as CommandRunner);
+    expect(planned.primary.label).toBe("doppler-md");
+    expect(planned.primary.plan.binary).toBe("/usr/lib/doppler/bin/pdftomarkdown");
+    expect(dopplerMarkdown).toHaveBeenCalledWith("/tmp/tenant/input.pdf");
+  });
+
+  it("VM configured: Doppler runs only through vm-pdf; no host extractor is planned or probed", async () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", VM_PDF_EXTRACTOR_ID);
+    registerExtractorPlugin({ apiVersion: 1, name: "test-plugin", sandboxedPdf: provider() });
+    expect(() => assertExtractorPluginConfiguration(process.env)).not.toThrow();
+    // vm-pdf's plan comes from the runner's sandboxedPdfMarkdown; give it the real shape. Every other method is spied.
+    const { runner, calls } = spyRunner({
+      sandboxedPdfMarkdown: async (input: string, output: string) => ({ binary: "test-vm", args: [], available: true, sandboxedPdf: { input, output } }),
+    });
+    const planned = await planFor(runner);
+    expect(planned.primary.label).toBe(VM_PDF_EXTRACTOR_ID);
+    expect(planned.primary.plan.sandboxedPdf).toBeDefined();
+    for (const host of ["dopplerMarkdown", "extractText", "run"]) expect(calls).not.toContain(host);
   });
 });
 
