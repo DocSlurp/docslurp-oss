@@ -166,11 +166,11 @@ function commandFor(extractor: ExtractorId, input: string, outputDir: string) {
           "--input",
           input,
           "--output",
-          path.join(outputDir, "unstructured-hi-res.json"),
+          path.join(outputDir, "unstructured-fast.json"),
           "--strategy",
-          "hi_res",
+          "fast",
         ],
-        outputPath: path.join(outputDir, "unstructured-hi-res.json"),
+        outputPath: path.join(outputDir, "unstructured-fast.json"),
       };
   }
 }

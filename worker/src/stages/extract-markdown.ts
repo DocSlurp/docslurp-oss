@@ -2295,7 +2295,8 @@ export class ExtractMarkdownStage implements Stage {
           this.runner.unstructuredPartition(
             sourceTempFile,
             `${sourceTempFile}.unstructured.json`,
-            "hi_res",
+            // Text layer only: unstructured's OCR strategies would OCR inside this process.
+            "fast",
         ),
         timeoutMs: this.cfg.parserArtifactTimeoutMs,
       });
@@ -2454,7 +2455,7 @@ export class ExtractMarkdownStage implements Stage {
       const plan = await this.runner.unstructuredPartition(
         args.sourceTempFile,
         args.outputPath,
-        "hi_res",
+        "fast",
       );
       if (!plan.available) {
         return null;
@@ -2582,7 +2583,7 @@ export class ExtractMarkdownStage implements Stage {
     const unstructuredPlan = await this.runner.unstructuredPartition(
       slicePath,
       outputPath,
-      "hi_res",
+      "fast",
     );
     if (!unstructuredPlan.available) {
       throw new Error("unstructured parser is unavailable");
@@ -2718,7 +2719,7 @@ export class ExtractMarkdownStage implements Stage {
     const plan = await this.runner.unstructuredPartition(
       args.sourceTempFile,
       args.outputPath,
-      "hi_res",
+      "fast",
     );
     if (!plan.available) {
       return null;

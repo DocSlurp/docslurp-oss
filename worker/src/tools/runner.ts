@@ -721,15 +721,6 @@ export class CommandRunner {
     });
   }
 
-  async ocrPdf(source: string, output: string): Promise<CommandPlan> {
-    return await this.planDocumentTool({
-      binary: "ocrmypdf",
-      args: ["--skip-text", "--redo-ocr", source, output],
-      fileArgIndexes: [2, 3],
-      supportsDoubleDash: true,
-    });
-  }
-
   async unstructuredPartition(
     source: string,
     output: string,
@@ -1921,7 +1912,7 @@ function assertProcessTeardown(session: SandboxSession): void {
  * every other command gets it. Audited 2026-10-29 against every binary the runner plans:
  * - clamdscan talks to clamd over its LocalSocket.
  * - LibreOffice (soffice, soffice.bin, libreoffice, unoconv) uses one for its own IPC.
- * - Python interpreters and Python entry points (docling, ocrmypdf, xlsx2csv): asyncio's self-pipe
+ * - Python interpreters and Python entry points (docling, xlsx2csv): asyncio's self-pipe
  *   and multiprocessing (forkserver, Manager, duplex Pipe) use socketpair(AF_UNIX).
  * - node: libuv's child-process stdio and IPC use socketpair(AF_UNIX).
  * - kreuzberg: a tokio runtime's signal driver uses a UNIX socket pair.
@@ -1930,7 +1921,7 @@ function assertProcessTeardown(session: SandboxSession): void {
  */
 const UNIX_SOCKET_CLIENTS = new Set([
   "clamdscan", "soffice", "soffice.bin", "libreoffice", "unoconv",
-  "docling", "ocrmypdf", "xlsx2csv", "node", "kreuzberg",
+  "docling", "xlsx2csv", "node", "kreuzberg",
 ]);
 
 export function needsUnixSockets(binary: string): boolean {
