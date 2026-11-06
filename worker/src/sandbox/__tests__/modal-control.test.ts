@@ -196,8 +196,10 @@ describe.skipIf(!dockerKillTest)("parser VM image lock and reset (council W #1)"
       'python3 -I -c "$LOCK" /tmp/docslurp-parser-sandbox; echo "lock=$?"',
       `${asUser("open('/app/.venv/bin/python3','w').write('evil')")} 2>/dev/null; echo "venv-write=$?"`,
       `${asUser("[open(p,'w').write('a') for p in ['/tmp/a','/var/tmp/a','/dev/shm/a','/home/docslurp/.a','/tmp/docslurp-parser-sandbox/a']]; os.makedirs('/tmp/d/e'); open('/tmp/d/e/f','w').write('a')")}; echo "a-writes=$?"`,
+      // A's job tree as staging leaves it after a successful command: its uploaded input and its downloaded output (W #3).
+      `${asUser("os.makedirs('/tmp/docslurp-job-a/out'); open('/tmp/docslurp-job-a/in.pdf','w').write('%PDF'); open('/tmp/docslurp-job-a/out/page.md','w').write('a')")}`,
       'python3 -I -c "$RESET" /tmp/docslurp-parser-sandbox; echo "reset=$?"',
-      `${asUser("import glob; print('b-sees=' + ','.join(p for p in ['/tmp/a','/var/tmp/a','/dev/shm/a','/home/docslurp/.a','/tmp/docslurp-parser-sandbox/a','/tmp/d'] if os.path.lexists(p)))")}`,
+      `${asUser("import glob; print('b-sees=' + ','.join(p for p in ['/tmp/a','/var/tmp/a','/dev/shm/a','/home/docslurp/.a','/tmp/docslurp-parser-sandbox/a','/tmp/d','/tmp/docslurp-job-a'] if os.path.lexists(p)))")}`,
       "echo \"venv=$(cat /app/.venv/bin/python3) owner=$(stat -c %u /app/.venv/bin/python3)\"",
     ].join("\n"));
     expect(run.stdout).toContain("lock=0");
