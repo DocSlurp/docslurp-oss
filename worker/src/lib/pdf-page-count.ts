@@ -42,6 +42,7 @@ export class PdfPageCountError extends Error {
   }
 }
 
+const PDF_PAGE_COUNT_OUTCOMES = new Set<PdfPageCountOutcome>(["open-failed", "encrypted", "limit", "malformed", "killed", "unavailable"]);
 const EXIT_OUTCOMES: Record<number, PdfPageCountOutcome> = { 1: "open-failed", 2: "encrypted", 3: "limit", 4: "malformed", 99: "unavailable" };
 
 /** Exactly one decimal integer, at least 1, and a newline: anything else is not a count. */
@@ -117,6 +118,11 @@ export async function recordMeasuredPdfPageCount(args: {
       // A VM that ran and failed still cost the provider: record its usage (0 credits) before the refusal propagates.
       const usage = (error as { usage?: unknown } | null)?.usage;
       if (usage && typeof usage === "object") state.usageLedger.enqueue(usage as Parameters<typeof state.usageLedger.enqueue>[0]);
+      // The VM's pdfpagecount outcome: the same refusal (or retry) as local mode.
+      const outcome = (error as { pageCountOutcome?: unknown } | null)?.pageCountOutcome;
+      if (typeof outcome === "string" && PDF_PAGE_COUNT_OUTCOMES.has(outcome as PdfPageCountOutcome)) {
+        throw new PdfPageCountError(`PDF page count failed in the VM: ${outcome}`, outcome as PdfPageCountOutcome);
+      }
       throw error;
     }
     if (counted.usage) state.usageLedger.enqueue(counted.usage);

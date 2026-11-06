@@ -121,7 +121,9 @@ export interface SandboxedPdfExtractorProvider {
   /**
    * Count a PDF's pages in a fresh VM (the guest's own pdfinfo), for documents whose count intake only estimated (the API never
    * parses PDFs). The worker records it before any stage uses the count or anything bills; without it a VM deployment refuses
-   * such PDFs. `usage` is the VM's provider cost.
+   * such PDFs. `usage` is the VM's provider cost. A count the VM could not make throws an error carrying `pageCountOutcome`
+   * (lib/pdf-page-count.ts PdfPageCountOutcome: open-failed, encrypted, limit, malformed, killed, unavailable), so a refused
+   * document fails the same way in both modes.
    */
   pageCount?(job: { input: string }, signal?: AbortSignal): Promise<{ pages: number; usage?: UsageEvent }>;
 }

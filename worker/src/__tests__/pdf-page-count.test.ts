@@ -267,6 +267,28 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
     expect(host.run).not.toHaveBeenCalled();
   }, 60_000);
 
+  it("vm mode: the VM's pdfpagecount outcome becomes the same refusal or retry as local mode, its cost still recorded", async () => {
+    for (const [outcome, documentLevel] of [["encrypted", true], ["malformed", true], ["limit", true], ["killed", true], ["unavailable", false]] as const) {
+      const usage = { provider: "modal", model: "doppler-document-vm", metric: "sandbox_compute", amount: 1, unit: "cent", costCents: 1 };
+      const pageCount = vi.fn(async () => { throw Object.assign(new Error(`Document VM page count refused: ${outcome}`), { usage, pageCountOutcome: outcome }); });
+      registerExtractorPlugin({ apiVersion: 1, name: "vm", sandboxedPdf: { id: "test-vm", maxSourceBytes: 1e9, assertConfigured() {}, run: vi.fn(), timeoutMs: () => 1, pageCount } as unknown as SandboxedPdfExtractorProvider });
+      await db.exec(`update documents set page_count = 3, page_count_source = 'assumed' where id = 'vm'`);
+      const { state, document } = await stateFor("run1", "vm");
+      const error = await recordMeasuredPdfPageCount({ state, document, runner: runner(9), sourcePath: async () => "/tmp/b.pdf", env: { DOCSLURP_PDF_MODE: "vm" } }).catch((caught: unknown) => caught);
+      expect(error).toMatchObject({ outcome });
+      expect(isDocumentLevelFailure(error)).toBe(documentLevel);
+      expect(state.usageLedger.snapshot().some((event) => event.model === "doppler-document-vm")).toBe(true);
+      resetExtractorPluginsForTest();
+    }
+    // An unknown outcome is not trusted as one: the original error propagates.
+    const odd = Object.assign(new Error("odd"), { pageCountOutcome: "fine-actually" });
+    registerExtractorPlugin({ apiVersion: 1, name: "vm", sandboxedPdf: { id: "test-vm", maxSourceBytes: 1e9, assertConfigured() {}, run: vi.fn(), timeoutMs: () => 1, pageCount: async () => { throw odd; } } as unknown as SandboxedPdfExtractorProvider });
+    const { state, document } = await stateFor("run1", "vm");
+    await expect(recordMeasuredPdfPageCount({ state, document, runner: runner(9), sourcePath: async () => "/tmp/b.pdf", env: { DOCSLURP_PDF_MODE: "vm" } })).rejects.toBe(odd);
+    // Leave the row as the earlier vm-mode test measured it; later tests bill it.
+    await db.exec(`update documents set page_count = 12, page_count_source = 'counted' where id = 'vm'`);
+  }, 60_000);
+
   it("vm mode with a provider that cannot count: refused loudly, never measured on the host", async () => {
     registerExtractorPlugin({ apiVersion: 1, name: "old", sandboxedPdf: { id: "old-vm", maxSourceBytes: 1e9, assertConfigured() {}, run: vi.fn(), timeoutMs: () => 1 } as unknown as SandboxedPdfExtractorProvider });
     const { state, document } = await stateFor("run1", "never");
