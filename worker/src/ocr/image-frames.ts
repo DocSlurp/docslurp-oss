@@ -27,17 +27,29 @@ export function imageTooManyFramesError(documentId: string): OcrRefusedError {
  * on either path.
  */
 export async function authorizeImageRead(state: WorkflowState, documentId: string): Promise<void> {
+  await authorizeOcrRead(state, documentId, 1, "image");
+}
+
+/**
+ * Before an OCR read starts a VM for `pages` Rich pages of a document (an image's first frame, a batch of a scanned PDF's
+ * pages): the run's cost cap, then the balance for those pages plus the run's charges still buffered in this activity (the
+ * pages earlier batches read included). Fails closed like authorizeImageRead: an unfunded run is paused and stopped here
+ * (RunPolicyError, before any VM cost), and a check that cannot decide throws SpendCheckUnavailableError (retryable).
+ */
+export async function authorizeOcrRead(state: WorkflowState, documentId: string, pages: number, what: "image" | "pdf-batch"): Promise<void> {
+  const label = what === "image" ? "image-read-refused" : "pdf-batch-refused";
+  const subject = what === "image" ? `image ${documentId}` : `${pages} scanned page(s) of document ${documentId}`;
   if (isCostCapExceeded(state)) {
-    console.warn(`[ocr] image-read-refused run=${state.run.id} document=${documentId} reason=cost-cap`);
-    throw new RunPolicyError(`Run cost cap reached before the OCR read of image ${documentId}`);
+    console.warn(`[ocr] ${label} run=${state.run.id} document=${documentId} pages=${pages} reason=cost-cap`);
+    throw new RunPolicyError(`Run cost cap reached before the OCR read of ${subject}`);
   }
   const store = state.store;
   if (!store?.enforceSpendForCharge || !state.run.userId) return;
-  const credits = pageCredits("rich", 1) * speedBoostMultiplier(state.run.pipeline.speedBoost === true) + state.usageLedger.pendingBillableCents;
+  const credits = pageCredits("rich", Math.max(1, pages)) * speedBoostMultiplier(state.run.pipeline.speedBoost === true) + state.usageLedger.pendingBillableCents;
   const outcome = await store.enforceSpendForCharge({ id: state.run.id, orgId: state.run.orgId ?? null, workspaceId: state.run.workspaceId, userId: state.run.userId }, credits);
   if (outcome.paused || outcome.blocked) {
-    console.warn(`[ocr] image-read-refused run=${state.run.id} document=${documentId} reason=unfunded credits=${credits.toFixed(2)}`);
-    throw new RunPolicyError(`Credits do not cover the OCR read of image ${documentId}; run paused`);
+    console.warn(`[ocr] ${label} run=${state.run.id} document=${documentId} pages=${pages} reason=unfunded credits=${credits.toFixed(2)}`);
+    throw new RunPolicyError(`Credits do not cover the OCR read of ${subject}; run paused`);
   }
 }
 

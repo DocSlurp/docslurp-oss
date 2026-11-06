@@ -106,7 +106,7 @@ import { visionGuardFor } from "../lib/vision-attempt-guard.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
-import { affordableImageFrames, authorizeImageFrames, authorizeImageRead, refuseUnfundedImageFrames } from "../ocr/image-frames.js";
+import { affordableImageFrames, authorizeImageFrames, authorizeImageRead, authorizeOcrRead, refuseUnfundedImageFrames } from "../ocr/image-frames.js";
 import { OCR_FAILED_PAGES_KEY, OcrInfrastructureError, OcrRefusedError, ocrFailedPages, recordOcrFailedPages, resolveOcrMode } from "../ocr/mode.js";
 import { ocrDocument } from "../ocr/read-document.js";
 import { recordMeasuredPageCount, type PageCountResult } from "../lib/office-page-count.js";
@@ -1191,6 +1191,10 @@ export class ExtractMarkdownStage implements Stage {
                 // OCR could not run (VM creation, capacity, a deadline): the activity retries; the document is not at fault.
                 const ocrInfrastructure = findOcrInfrastructureError(error);
                 if (ocrInfrastructure) throw ocrInfrastructure;
+                // A run-policy stop (cost cap, an unfunded run paused by a measured-page or OCR batch check) or a charge check
+                // that could not decide ends the stage as it is: wrapped as a partial-artifact failure it would lose its identity
+                // and be retried with another extractor, then fail the document.
+                if (error instanceof RunPolicyError || error instanceof SpendCheckUnavailableError) throw error;
                 if (!partialArtifactUri && !signal?.aborted && isDocumentLevelFailure(error, signal)) {
                   // Every extractor failed: keep what was planned and tried, and say so in telemetry.
                   const attempts = attemptLedger.snapshot();
@@ -1342,6 +1346,10 @@ export class ExtractMarkdownStage implements Stage {
     let consecutiveFailedBatches = 0;
     for (let start = 0; start < empty.length; start += OCR_PDF_BATCH_PAGES) {
       const batch = empty.slice(start, start + OCR_PDF_BATCH_PAGES);
+      // Each batch's Rich pages are authorized before its VM starts, as an image's read is: the cost cap, then the balance
+      // for this batch plus what earlier batches read (still buffered). A refusal pauses the run here (RunPolicyError, outside
+      // the refusal handling below); pages already read stay ledgered and are charged once.
+      await authorizeOcrRead(state, document.id, batch.length, "pdf-batch");
       let result: Awaited<ReturnType<typeof ocrDocument>>;
       try {
         result = await ocrDocument({

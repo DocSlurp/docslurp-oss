@@ -4,7 +4,7 @@ import path from "node:path";
 import { Writable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { defaultPipelineFeatures, pricing, PUBLIC_ERROR_MESSAGES, publicDocumentError } from "@docslurp/shared";
+import { defaultPipelineFeatures, pageCredits, pricing, PUBLIC_ERROR_MESSAGES, publicDocumentError } from "@docslurp/shared";
 
 import { enforceRunSpendForCharge, SpendCheckUnavailableError, setSpendCheckConfig } from "../db/spend-check.js";
 import { pushUsageEvent } from "../lib/perf-context.js";
@@ -624,6 +624,44 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
       expect(new Set(ids).size).toBe(40);
       expect(ids).not.toContain("rich:run-1:doc-1:1");
     } finally { await h.cleanup(); }
+  });
+
+  it("authorizes each batch's Rich pages before its VM starts: a 2,000-page scan stops after the funded batch (council E #3)", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const pageCount = 2_000;
+    const scan = async () => ({ text: Array.from({ length: pageCount }, () => "").join("\f") + "\f" });
+    const store = (balance: number) => {
+      const checks: number[] = [];
+      const known: Record<string, unknown> = {
+        getCompletedPages: async () => new Set<number>(),
+        enforceSpendForCharge: async (_run: unknown, credits: number) => { checks.push(credits); return { paused: credits > balance }; },
+      };
+      return { store: new Proxy(known, { get: (target, key: string) => target[key] ?? (async () => undefined) }), checks };
+    };
+    const batchCredits = pageCredits("rich", OCR_PDF_BATCH_PAGES);
+    // A 1-credit balance covers no batch: the run pauses before any VM starts, nothing is read or charged.
+    const poor = await harness({ format: "pdf", pageCount, extract: scan });
+    const unfunded = store(1);
+    (poor.state as any).store = unfunded.store;
+    try {
+      await expect(poor.stage.run(poor.state)).rejects.toMatchObject({ name: "RunPolicyError" });
+      expect(poor.jobs).toEqual([]);
+      expect(poor.richEvents()).toEqual([]);
+      expect(unfunded.checks).toEqual([batchCredits]);
+    } finally { await poor.cleanup(); }
+    // A balance that funds exactly one batch: that batch is read (and stays ledgered), the second is refused before its VM.
+    const one = await harness({ format: "pdf", pageCount, extract: scan });
+    const funded = store(batchCredits + 0.01);
+    (one.state as any).store = funded.store;
+    try {
+      await expect(one.stage.run(one.state)).rejects.toMatchObject({ name: "RunPolicyError" });
+      expect(one.jobs).toHaveLength(1);
+      expect(one.jobs[0]!.pages).toHaveLength(OCR_PDF_BATCH_PAGES);
+      expect(one.richEvents()).toHaveLength(OCR_PDF_BATCH_PAGES);
+      expect(funded.checks).toHaveLength(2);
+      expect(funded.checks[1]!).toBeGreaterThan(batchCredits + 0.01);
+    } finally { await one.cleanup(); }
   });
 
   it("fails only the scanned pages, loudly, when the VM read fails during scan fill; the text pages stand", async () => {
