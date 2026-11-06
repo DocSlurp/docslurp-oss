@@ -1139,7 +1139,7 @@ export class ExtractMarkdownStage implements Stage {
                       billingPages: measuredPages.pages,
                       billingPagesMethod: measuredPages.method,
                       ...(pdfPageCheck ? { pdfPagesMeasured: pdfPageCheck.measured, pdfPagesProcessed: pdfPageCheck.processed, pdfPagesMismatch: pdfPageCheck.mismatch } : {}),
-                      ...(pageEquivalents ? { pageEquivalents: pageEquivalents.equivalents, pageEquivalentsBilled: pageEquivalents.billed, densePages: pageEquivalents.densePages.slice(0, 50), densePageCount: pageEquivalents.densePages.length } : {}),
+                      ...(pageEquivalents ? { pageEquivalents: pageEquivalents.equivalents, densePages: pageEquivalents.densePages.slice(0, 50), densePageCount: pageEquivalents.densePages.length } : {}),
                       // Which extractor served the document, what else was planned or tried, and how the
                       // native PDF engine took part: queryable from stage stats without fetching the manifest.
                       extractor: winningCandidate.label,

@@ -2759,8 +2759,8 @@ export class Store {
    * every paged document still in the run: none of them is charged before the run's completion fee. Images are excluded:
    * their frames bill Rich as they are read (ocr/image-frames.ts).
    */
-  async recordPageEquivalents(runId: string, documentId: string, rows: import("./page-equivalents.js").PageEquivalentRow[], allowance?: number): Promise<number | null> {
-    return await recordPageEquivalents(this.sql, { runId, documentId, rows, ...(allowance === undefined ? {} : { allowance }) });
+  async recordPageEquivalents(runId: string, documentId: string, rows: import("./page-equivalents.js").PageEquivalentRow[]): Promise<number | null> {
+    return await recordPageEquivalents(this.sql, { runId, documentId, rows });
   }
 
   async measuredPagesAboveIntake(runId: string): Promise<number> {
