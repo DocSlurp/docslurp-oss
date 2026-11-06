@@ -4,7 +4,7 @@ import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 import { findWebhookEvent } from "../lib/webhook-events.js";
 
 /** Catalog examples are documentation and test-delivery payloads: they must look like what the worker outbox sends. */
-const OUTBOX_RUN_FIELDS = ["deliveredAt", "error", "event", "failedDocuments", "pagesProcessed", "processedDocuments", "runId", "stage", "status", "projectId"];
+const OUTBOX_RUN_FIELDS = ["deliveredAt", "error", "event", "failedDocuments", "pagesProcessed", "processedDocuments", "projectId", "runId", "stage", "status"];
 
 describe("webhook event catalog", () => {
   it.each(["run.completed", "run.failed"])("%s example has the outbox's fields, no cost, and only public error copy", (type) => {
