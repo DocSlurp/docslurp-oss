@@ -134,6 +134,15 @@ export class SessionStaging {
   }
 
   /** Drop a removed path, its subtree and its ancestors from the uploaded set so they upload again. */
+  /**
+   * Forget every upload (recheck S #7): the next command re-uploads all its inputs. Called when a VM moves to another
+   * document, whose parser could have rewritten this document's remote copies.
+   */
+  forgetUploads(): void {
+    this.uploaded.clear();
+    this.inputHashes.clear();
+  }
+
   private forget(abs: string): void {
     for (const p of this.uploaded) if (p === abs || p.startsWith(`${abs}${path.sep}`)) { this.uploaded.delete(p); this.inputHashes.delete(p); }
     for (let p = path.dirname(abs); ; p = path.dirname(p)) {

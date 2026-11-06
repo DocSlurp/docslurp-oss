@@ -110,6 +110,21 @@ export class SandboxInfrastructureError extends SandboxRunError {
   }
 }
 
+/** Parser-sandbox infrastructure failures a document's stage is retried for on fresh VMs before the document fails. */
+export const SANDBOX_INFRASTRUCTURE_RETRIES = 2;
+
+/**
+ * The parser sandbox failed under one document on more fresh VMs than SANDBOX_INFRASTRUCTURE_RETRIES allows (recheck S #2):
+ * whatever the cause, that document fails, once, and the run's other documents go on. A document-level failure: it
+ * deliberately carries no SandboxInfrastructureError cause.
+ */
+export class SandboxRepeatedFailureError extends Error {
+  constructor(readonly strikes: number, lastFailure: string) {
+    super(`the parser sandbox failed under this document on ${strikes} fresh VMs (last: ${lastFailure}); failing the document`);
+    this.name = "SandboxRepeatedFailureError";
+  }
+}
+
 export function findSandboxInfrastructureError(error: unknown): SandboxInfrastructureError | null {
   let current: unknown = error;
   for (let depth = 0; current && depth < 8; depth++) {

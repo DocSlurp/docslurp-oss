@@ -18,5 +18,11 @@ for (const tool of TOOLS) {
 import { readFile } from "node:fs/promises";
 const sysctl = async (name) => { try { const value = Number((await readFile(`/proc/sys/fs/${name}`, "utf8")).trim()); return Number.isInteger(value) ? value : null; } catch { return null; } };
 const links = { hardlinks: await sysctl("protected_hardlinks"), symlinks: await sysctl("protected_symlinks") };
+// dumps / ptrace (recheck S #5): fs.suid_dumpable (the host requires 0) and kernel.yama.ptrace_scope (null without Yama;
+// the host requires at least 1 when present). cgroupV2: whether per-command cgroups (and cgroup.kill) are possible.
+const kernel = async (file) => { try { const value = Number((await readFile(file, "utf8")).trim()); return Number.isInteger(value) ? value : null; } catch { return null; } };
+const hardening = { suidDumpable: await kernel("/proc/sys/fs/suid_dumpable"), ptraceScope: await kernel("/proc/sys/kernel/yama/ptrace_scope") };
+let cgroupV2 = false;
+try { await access("/sys/fs/cgroup/cgroup.controllers"); cgroupV2 = true; } catch { /* no unified hierarchy */ }
 // uid: the user the host launched this as; the host refuses root (parser commands drop privileges in the VM).
-console.log(JSON.stringify({ protocol: "parser-vm@2", uid: process.getuid?.() ?? null, tools, links }));
+console.log(JSON.stringify({ protocol: "parser-vm@2", uid: process.getuid?.() ?? null, tools, links, hardening, cgroupV2 }));

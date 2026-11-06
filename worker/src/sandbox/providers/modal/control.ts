@@ -26,6 +26,10 @@ const LAUNCH_SCRIPT = [
   "wait $! 2>/dev/null",
 ].join("\n");
 
+/** Where per-command cgroups live (cgroup v2) and their name prefix; the suffix is the command's control number. */
+export const CGROUP_ROOT = "/sys/fs/cgroup";
+export const CGROUP_PREFIX = "docslurp-cmd-";
+
 /** The unprivileged user parser commands run as in the VM (the worker images' `docslurp`, uid and gid 10001). */
 export const PARSER_VM_UID = 10001;
 
@@ -53,9 +57,16 @@ function startScript(tools: ParserVmTools): string {
   const q = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
   return [
     'echo $$ > "$1.pid"; [ -e "$1.cancel" ] && exit 137',
-    'n=$2; shift 2',
+    'id=${1##*/}; n=$2; shift 2',
     `u=$(${q(tools.id)} -u) || { echo "parser VM: cannot read the uid; refusing" >&2; exit 126; }`,
     'if [ "$u" = 0 ]; then',
+    // Each command in its own cgroup where the VM has a writable cgroup v2 hierarchy (recheck S #2): the leftover kill then
+    // uses cgroup.kill, which no process of the command can dodge (a SIGSTOP loop, fork-hopping). Entering it is fatal
+    // once the cgroup exists; a VM without cgroup v2 falls back to the uid-wide kill (KILL_PARSER_USER_ARGV).
+    `  cg=${CGROUP_ROOT}/${CGROUP_PREFIX}$id`,
+    `  if [ -e ${CGROUP_ROOT}/cgroup.controllers ] && mkdir "$cg" 2>/dev/null; then`,
+    '    echo $$ > "$cg/cgroup.procs" || { echo "parser VM: cannot enter the command cgroup; refusing" >&2; exit 126; }',
+    '  fi',
     // Writable directories are created by the parser user (staging runs as uid 10001), so root never changes ownership
     // in a job tree: a chown there could be steered through a swapped parent link (council O #4).
     '  shift "$n"',
@@ -82,15 +93,24 @@ export function launchArgv(control: string, binary: string, args: string[], writ
 
 /**
  * Run once as root when a parser VM starts: turn on the kernel's hardlink and symlink protections (council K #5; Modal's
- * microVMs boot with both 0). Exits 3 unless both read back as 1, and the session refuses to run anything then: every
- * job VM is checked, not just the startup probe's.
+ * microVMs boot with both 0) and turn off core dumps of set-id processes (`fs.suid_dumpable=0`, recheck S #5), each read
+ * back; and, where Yama is present, `kernel.yama.ptrace_scope` raised to at least 1 so a parser process cannot ptrace
+ * another. Exits 3 unless every one reads back as required, and the session refuses to run anything then: every job VM is
+ * checked, not just the startup probe's.
  */
 export const HARDEN_LINKS_ARGV = ["/bin/sh", "-c", [
-  "for f in protected_hardlinks protected_symlinks; do",
-  "  { echo 1 > /proc/sys/fs/$f; } 2>/dev/null",
-  "  v=; read -r v < /proc/sys/fs/$f 2>/dev/null",
-  '  [ "$v" = 1 ] || { echo "parser VM: fs.$f is ${v:-unreadable}, not 1" >&2; exit 3; }',
-  "done",
+  "set_check() {",
+  "  { echo \"$2\" > \"$1\"; } 2>/dev/null",
+  "  v=; read -r v < \"$1\" 2>/dev/null",
+  '  [ "$v" = "$2" ] || { echo "parser VM: $1 is ${v:-unreadable}, not $2" >&2; exit 3; }',
+  "}",
+  "set_check /proc/sys/fs/protected_hardlinks 1",
+  "set_check /proc/sys/fs/protected_symlinks 1",
+  "set_check /proc/sys/fs/suid_dumpable 0",
+  "if [ -e /proc/sys/kernel/yama/ptrace_scope ]; then",
+  "  v=; read -r v < /proc/sys/kernel/yama/ptrace_scope 2>/dev/null",
+  '  case "$v" in 1|2|3) ;; *) set_check /proc/sys/kernel/yama/ptrace_scope 1 ;; esac',
+  "fi",
   "exit 0",
 ].join("\n")];
 
@@ -113,6 +133,29 @@ const KILL_PARSER_USER_SCRIPT = [
   "import os, signal, sys, time",
   "uid = int(sys.argv[1])",
   "if os.geteuid() != 0: sys.exit(4)",
+  // As root, first: cgroup.kill on every command cgroup (recheck S #2) kills each command's whole tree in the kernel, even
+  // a process that stops the killer or keeps forking; then wait for each to empty and remove it.
+  `root, prefix = '${CGROUP_ROOT}', '${CGROUP_PREFIX}'`,
+  "try: groups = [os.path.join(root, d) for d in os.listdir(root) if d.startswith(prefix)]",
+  "except OSError: groups = []",
+  "method = 'kill-1'",
+  "for g in groups:",
+  "    try:",
+  "        with open(g + '/cgroup.kill', 'w') as f: f.write('1')",
+  "        method = 'cgroup'",
+  "    except OSError: pass",
+  "deadline = time.time() + 10",
+  "for g in groups:",
+  "    while time.time() < deadline:",
+  "        try:",
+  "            with open(g + '/cgroup.events') as f: populated = 'populated 1' in f.read()",
+  "        except OSError: populated = False",
+  "        if not populated: break",
+  "        time.sleep(0.01)",
+  "    try: os.rmdir(g)",
+  "    except OSError: pass",
+  "print('[leftover-kill] method=' + method + ' cgroups=' + str(len(groups)), flush=True)",
+  // Then the uid-wide pass for anything outside a command cgroup (staging helpers), atomic as before (recheck Q #2).
   "os.setgroups([]); os.setresgid(uid, uid, uid); os.setresuid(uid, uid, uid)",
   "me = str(os.getpid())",
   "def live():",

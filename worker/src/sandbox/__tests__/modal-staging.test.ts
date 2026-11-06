@@ -299,6 +299,10 @@ function fakeSdk(
     createFailsFrom?: number;
     /** The leftover kill fails only in this VM. */
     killFailsInVm?: number;
+    /** The leftover kill exec throws: a deadline (held up inside the VM) or a transport error. */
+    killThrows?: "deadline" | "transport";
+    /** Directory creation in job trees exits non-zero (a job broke the tree). */
+    mkdirFails?: boolean | (() => boolean);
     /** The first client's terminate request never answers (a stuck connection). */
     terminateHangs?: boolean;
     /** Terminate requests wait on this (a slow acknowledgement). */
@@ -381,7 +385,7 @@ function fakeSdk(
       }
       if (asUser?.[0] === "python3" && asUser[1] === "-I") return finished((await remote.list(asUser[4]!)).map((entry) => JSON.stringify(entry)).join("\n"));
       // Staging in job trees, as the parser user (council M #3).
-      if (asUser?.[0] === "/bin/mkdir") { state.mkdirs.push(asUser[3]!); await remote.mkdir(asUser[3]!); return finished("", 0); }
+      if (asUser?.[0] === "/bin/mkdir") { if (typeof opts.mkdirFails === "function" ? opts.mkdirFails() : opts.mkdirFails) return finished("", 1); state.mkdirs.push(asUser[3]!); await remote.mkdir(asUser[3]!); return finished("", 0); }
       if (asUser?.[0] === "/bin/rm") { await remote.remove(asUser[3]!); return finished("", 0); }
       if (asUser?.[0] === "/bin/sh" && asUser[2]?.includes("cp --")) { await remote.writeFile(asUser[5]!, await remote.readFile(asUser[4]!)); return finished("", 0); }
       // The root leftover kill (KILL_PARSER_USER_ARGV): kill(-1) as the parser user, verified.
@@ -390,6 +394,8 @@ function fakeSdk(
         state.events.push("kill-start");
         await opts.killGate;
         state.events.push("kill-end");
+        if (opts.killThrows === "deadline") throw new Error("Deadline exceeded while waiting for the exec");
+        if (opts.killThrows === "transport") throw new Error("stream reset by peer");
         return finished("", opts.killFails || opts.killFailsInVm === vm ? 4 : 0);
       }
       if (argv[0] === "/bin/chmod") return finished("", 0);
@@ -527,12 +533,14 @@ describe("modal provider session lifecycle", () => {
     await opened.close();
   });
 
-  it("a leftover kill that leaves a parser-user process alive fails the command and terminates its VM (council O #4)", async () => {
+  it("a leftover kill that leaves a parser-user process alive fails that command's document and terminates its VM (council O #4, recheck S #2b)", async () => {
     const { state, session } = await open({ killFailsInVm: 1, exec: async () => finished() });
     const opened = await session();
     const failure = await opened.run!(command).catch((error: unknown) => error);
-    expect(failure).toBeInstanceOf(SandboxInfrastructureError);
-    expect(String((failure as Error).message)).toMatch(/leftover processes could not be killed/);
+    // The survivors are the command's own processes: its document fails, once, rather than retrying the stage.
+    expect(failure).toBeInstanceOf(SandboxOutputError);
+    expect(failure).not.toBeInstanceOf(SandboxInfrastructureError);
+    expect(String((failure as Error).message)).toMatch(/could not be killed; VM terminated/);
     expect(state.terminate).toBe(1);
     // That VM never runs another command: the next one gets a fresh VM, hardened like the first.
     await expect(opened.run!(command)).resolves.toMatchObject({ exitCode: 0 });
@@ -572,9 +580,12 @@ describe("modal provider session lifecycle", () => {
       expect((failure as SandboxOutputError).usage).toBeDefined();
       const { isDocumentLevelFailure } = await import("../../lib/document-failure.js");
       expect(isDocumentLevelFailure(failure)).toBe(true);
-      // The VM stays usable for the next document.
+      // Its VM is terminated: the disk and processes a hostile document left are not trusted (recheck S #3). The next
+      // document gets a fresh VM.
+      expect(state.terminate).toBe(1);
       state.remote.stat = stat;
       await expect(opened.run!(command)).resolves.toMatchObject({ exitCode: 0 });
+      expect(state.createOptions).toHaveLength(2);
       await opened.close();
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -613,6 +624,106 @@ describe("modal provider session lifecycle", () => {
     await Promise.all([first, second]);
     expect(events).toEqual(["first", "second"]);
     await opened.close();
+  });
+
+  describe("failures a document can force are its own, not the sandbox's (recheck S #2)", () => {
+    it("(a) an output listing over its byte bound fails the document and terminates the VM", async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "docslurp-s2a-"));
+      const out = path.join(dir, "out");
+      try {
+        const { state, session } = await open({ exec: async () => finished() });
+        await state.remote.mkdir(out);
+        // Under 8192 entries, but long names: the JSON listing passes 4 MiB.
+        const list = state.remote.list.bind(state.remote);
+        state.remote.list = async (p: string) => (p === out
+          ? Array.from({ length: 5_000 }, (_, i) => ({ path: path.join(out, `${"n".repeat(900)}${i}`), isDir: false, size: 1, mtime: 1 }))
+          : list(p));
+        const opened = await session();
+        const failure = await opened.run!({ ...command, writablePaths: [out] }).catch((error: unknown) => error);
+        expect(failure).toBeInstanceOf(SandboxOutputError);
+        expect(String((failure as Error).message)).toMatch(/listing exceeds its limit/);
+        expect(state.terminate).toBe(1);
+        await opened.close();
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("(b) a leftover kill held up inside the VM (a SIGSTOP loop) fails the document; a kill that cannot run is infrastructure", async () => {
+      const stalled = await open({ killThrows: "deadline", exec: async () => finished() });
+      const held = await (await stalled.session()).run!(command).catch((error: unknown) => error);
+      expect(held).toBeInstanceOf(SandboxOutputError);
+      expect(stalled.state.terminate).toBe(1);
+      const broken = await open({ killThrows: "transport", exec: async () => finished() });
+      const lost = await (await broken.session()).run!(command).catch((error: unknown) => error);
+      expect(lost).toBeInstanceOf(SandboxInfrastructureError);
+      expect(broken.state.terminate).toBe(1);
+    });
+
+    it("(c) a job tree the parser user cannot stage into fails the document that broke it; on a VM another document used last it is infrastructure", async () => {
+      const own = await open({ mkdirFails: true, exec: async () => finished() });
+      const mine = await (await own.session()).run!({ ...command, affinityKey: "doc-a", writablePaths: ["/job/out"] }).catch((error: unknown) => error);
+      expect(mine).toBeInstanceOf(SandboxOutputError);
+      expect(own.state.terminate).toBe(1);
+
+      let broken = false;
+      const shared = await open({ mkdirFails: () => broken, exec: async () => finished() });
+      const opened = await shared.session();
+      await opened.run!({ ...command, affinityKey: "doc-a" });
+      // doc-a's command left the tree so that staging fails for the next document on this VM.
+      broken = true;
+      const theirs = await opened.run!({ ...command, affinityKey: "doc-b", writablePaths: ["/job/out"] }).catch((error: unknown) => error);
+      expect(theirs).toBeInstanceOf(SandboxInfrastructureError);
+      expect(String((theirs as Error).message)).toMatch(/left unusable by an earlier command/);
+      expect(shared.state.terminate).toBe(1);
+      await opened.close();
+    });
+
+    it("a command flooding its stdout past the bound fails its document", async () => {
+      const { state, session } = await open({ exec: async () => finished("x".repeat(9 * 1024 * 1024)) });
+      const failure = await (await session()).run!(command).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(SandboxOutputError);
+      expect(String((failure as Error).message)).toMatch(/stdout exceeds its limit/);
+      expect(state.terminate).toBe(1);
+    });
+  });
+
+  it("creates and hardens the VM before admitting the command; a VM that cannot be created never admits it (recheck S #4)", async () => {
+    const { sdk, state } = fakeSdk({ createFailsFrom: 2, exec: async () => finished() });
+    const provider = createModalProvider(async () => sdk);
+    const opened = await provider.openSession({ ...config, vmsPerActivity: 1, vmIdleSeconds: 0.05 }, { activityId: "a" });
+    const events: string[] = [];
+    await opened.run!(command, undefined, { onStart: () => events.push(`start after ${state.hardened} hardened`) });
+    await new Promise((resolve) => setTimeout(resolve, 120)); // the idle VM is reaped
+    const failure = await opened.run!(command, undefined, { onStart: () => events.push("admitted without a VM") }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(SandboxInfrastructureError);
+    expect(String((failure as Error).message)).toMatch(/creation failed/);
+    expect(events).toEqual(["start after 1 hardened"]);
+    await opened.close();
+  });
+
+  it("re-uploads a document's inputs after another document used the VM (recheck S #7)", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "docslurp-s7-"));
+    try {
+      const input = path.join(dir, "in.txt");
+      await writeFile(input, "doc-a input");
+      const { state, session } = await open({ exec: async () => finished() });
+      const opened = await session();
+      // Each upload goes through its own control-dir temp file (written, then removed): count those.
+      const uploads = () => new Set(state.rootWrites.filter((target) => target.includes("/upload-"))).size;
+      await opened.run!({ ...command, affinityKey: "doc-a", inputPaths: [input] });
+      await opened.run!({ ...command, affinityKey: "doc-a", inputPaths: [input] });
+      expect(uploads()).toBe(1); // same document, unchanged input: cached
+      // doc-b's parser rewrites doc-a's remote copy.
+      await opened.run!({ ...command, affinityKey: "doc-b" });
+      await state.remote.writeFile(input, Buffer.from("tampered"));
+      await opened.run!({ ...command, affinityKey: "doc-a", inputPaths: [input] });
+      expect(uploads()).toBe(2);
+      expect(Buffer.from(await state.remote.readFile(input)).toString()).toBe("doc-a input");
+      await opened.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("meters each command from its admission, not from its wait in the queue (recheck R #3)", async () => {
@@ -691,7 +802,7 @@ describe("modal provider session lifecycle", () => {
       await vi.waitFor(() => expect(state.commands).toHaveLength(1));
       const failure = await opened.run!({ ...command, affinityKey: "b" }).catch((error: unknown) => error);
       expect(failure).toBeInstanceOf(SandboxInfrastructureError);
-      expect(String((failure as Error).message)).toMatch(/modal sandbox command failed: no capacity/);
+      expect(String((failure as Error).message)).toMatch(/modal sandbox creation failed: no capacity/);
       slow.end(0);
       await busy;
       // The failed lane is gone; the next command runs on the healthy VM.
@@ -920,7 +1031,7 @@ describe("modal provider session lifecycle", () => {
     vi.useFakeTimers();
     try {
       vi.spyOn(console, "warn").mockImplementation(() => {});
-      const { sdk, state } = fakeSdk({ terminateHangs: true, exec: async () => finished(JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: 1, symlinks: 1 } })) });
+      const { sdk, state } = fakeSdk({ terminateHangs: true, exec: async () => finished(JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: 1, symlinks: 1 }, hardening: { suidDumpable: 0, ptraceScope: 1 } })) });
       const provider = createModalProvider(async () => sdk);
       const probing = provider.probe(config);
       await vi.advanceTimersByTimeAsync(10_001);

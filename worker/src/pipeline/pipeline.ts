@@ -36,6 +36,11 @@ export interface CheckpointStore {
   /** Returns the stage's ordinary failure total when the store tracks it. */
   failRunStage(state: WorkflowState, stage: string, message: string, options?: { countFailure?: boolean }): Promise<number | void>;
   startDocumentStage(state: WorkflowState, documentId: string, stage: string): Promise<void>;
+  /**
+   * Count one parser-sandbox infrastructure failure under this document's stage, durably across activity retries, and
+   * return the new count (recheck S #2: a document that keeps breaking fresh VMs fails instead of retrying the stage).
+   */
+  noteSandboxInfrastructureStrike?(state: WorkflowState, documentId: string, stage: string): Promise<number>;
   completeDocumentStage(
     state: WorkflowState,
     documentId: string,

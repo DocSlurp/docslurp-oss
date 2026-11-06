@@ -466,6 +466,19 @@ describe("runtime database identity gate (council N #1)", () => {
   });
 });
 
+describe("grant options (recheck S #6)", () => {
+  it("a runtime role holding WITH GRANT OPTION is refused at startup and at the gate", async () => {
+    const { checkRuntimeIdentity } = await import("../../db/runtime-role-check.mjs");
+    await db.exec(`grant select on public.documents to ${app} with grant option`);
+    try {
+      const problems = await as(app, () => checkRuntimeIdentity({ query: (query: string, params?: unknown[]) => db.query<Record<string, unknown>>(query, params) }, app));
+      expect(problems.join("\n")).toMatch(/holds grant options \(WITH GRANT OPTION\) on relation/);
+    } finally {
+      await db.exec(`revoke grant option for select on public.documents from ${app}`);
+    }
+  });
+});
+
 describe("owner SECURITY DEFINER functions (recheck Q #5c)", () => {
   it("reconcile revokes EXECUTE on every one outside the allowlist, and the allowlist matches the shared rule's", async () => {
     const { RUNTIME_SECURITY_DEFINER_ALLOWLIST } = await import("../../db/roles.mjs");

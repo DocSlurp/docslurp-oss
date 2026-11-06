@@ -183,6 +183,24 @@ it.skipIf(!url)("refuses an owner SECURITY DEFINER function it can execute or fi
   expect(await reasonsAs(runtime)).toEqual([]);
 });
 
+it.skipIf(!url)("refuses a grant option on any object, and an owned large object (recheck S #6)", async () => {
+  for (const grant of [
+    `grant select on public.documents to ${runtime} with grant option`,
+    `grant select (id) on public.documents to ${runtime} with grant option`,
+    `grant usage on schema public to ${runtime} with grant option`,
+  ]) {
+    await admin.query(grant);
+    try { expect((await reasonsAs(runtime)).join("\n")).toMatch(/holds grant options/); }
+    finally { await admin.query(grant.replace(/^grant /, "revoke grant option for ").replace(/ to /, " from ").replace(/ with grant option$/, "")); }
+  }
+  expect(await reasonsAs(runtime)).toEqual([]);
+  const { rows: [{ oid }] } = await admin.query("select lo_create(0)::text as oid");
+  await admin.query(`alter large object ${oid} owner to ${runtime}`);
+  try { expect((await reasonsAs(runtime)).join("\n")).toMatch(/owns 1 object\(s\) \(relations, functions, types, schemas or large objects\)/); }
+  finally { await admin.query(`select lo_unlink(${oid})`); }
+  expect(await reasonsAs(runtime)).toEqual([]);
+});
+
 it.skipIf(!url)("startup refuses the same way (assertRuntimeDatabaseIdentity)", async () => {
   const sql = { unsafe: async (query: string, params?: unknown[]) => (await admin.query(query, params as unknown[])).rows };
   await expect(assertRuntimeDatabaseIdentity(sql, [runtime])).rejects.toThrow(/superuser[\s\S]*refusing to start/);

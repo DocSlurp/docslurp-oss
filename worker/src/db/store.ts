@@ -1589,6 +1589,19 @@ export class Store {
     return Number(counted?.ordinary_failures ?? increment);
   }
 
+  async noteSandboxInfrastructureStrike(state: WorkflowState, documentId: string, stage: string): Promise<number> {
+    // In the stage checkpoint's stats, which startDocumentStage keeps across retries.
+    const [row] = await this.sql<{ strikes: number }[]>`
+      update document_run_stage_states
+      set stats = jsonb_set(stats, '{sandboxInfrastructureStrikes}',
+            to_jsonb(coalesce((stats->>'sandboxInfrastructureStrikes')::int, 0) + 1)),
+          updated_at = now()
+      where run_id = ${state.run.id} and document_id = ${documentId} and stage_name = ${stage}
+      returning (stats->>'sandboxInfrastructureStrikes')::int as strikes
+    `;
+    return Number(row?.strikes ?? 0);
+  }
+
   async startDocumentStage(
     state: WorkflowState,
     documentId: string,

@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import type { Document } from "../models.js";
 import { runWithPerfContext } from "../lib/perf-context.js";
 import { latchedTeardownError, watchSandboxInfrastructure } from "../sandbox/session-context.js";
+import { SANDBOX_INFRASTRUCTURE_RETRIES, SandboxRepeatedFailureError } from "../sandbox/types.js";
 import { findQuarantinedSourceError } from "../sandbox/source-quarantine.js";
 import { noteWorkProgress } from "../lib/work-progress.js";
 import { hasFailedDocumentStage } from "./document-health.js";
@@ -299,7 +300,17 @@ export async function runDocumentStage(
       // The sandbox failed under this document (VM creation or hardening, a leftover kill, a control deadline): that is
       // the outcome, even when the stage caught it and fell back or skipped a page. The document neither fails nor
       // completes on it; the activity retries (real-Modal check F1).
-      if (watched.infrastructure) throw watched.infrastructure;
+      if (watched.infrastructure) {
+        // Counted durably: a document that breaks a fresh VM every time cannot keep the whole stage retrying (recheck S #2).
+        const strikes = state.store?.noteSandboxInfrastructureStrike
+          ? await state.store.noteSandboxInfrastructureStrike(state, document.id, stageName).catch((error: unknown) => {
+            console.warn(`[checkpoint-debug] document=${document.id} stage=${stageName} sandbox strike not recorded: ${error instanceof Error ? error.message : String(error)}`);
+            return 0;
+          })
+          : 0;
+        if (strikes > SANDBOX_INFRASTRUCTURE_RETRIES) throw new SandboxRepeatedFailureError(strikes, watched.infrastructure.message);
+        throw watched.infrastructure;
+      }
       if ("error" in watched) throw watched.error;
       const result = watched.result!;
       // A command teardown that failed in this activity ends it, even if the stage swallowed it.
@@ -368,7 +379,9 @@ export async function runDocumentStage(
       recordRetryCount(state, document.id, attempt.attempt);
 
       // A quarantined source fails the Document at once: another strategy would only try again.
-      if (!hasRemainingAttempts(attempt) || !isDocumentLevelFailure(error, signal) || findQuarantinedSourceError(error)) {
+      // So does a document over its sandbox strike limit: another strategy would break another VM.
+      if (!hasRemainingAttempts(attempt) || !isDocumentLevelFailure(error, signal) || findQuarantinedSourceError(error)
+        || error instanceof SandboxRepeatedFailureError) {
         break;
       }
     }

@@ -33,8 +33,13 @@ describe("modal startup probe requires the parser-vm@2 contract", () => {
     ["link protections null", JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: null, symlinks: null } }), 0],
     ["link protections malformed", JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: "1", symlinks: 2 } }), 0],
     ["parser-vm@2 run as root", JSON.stringify({ protocol: "parser-vm@2", uid: 0 }), 0],
+    // Recheck S #5: set-id core dumps must read back off, and Yama ptrace restricted when present.
+    ["suid_dumpable not 0", JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: 1, symlinks: 1 }, hardening: { suidDumpable: 2, ptraceScope: 1 } }), 0],
+    ["suid_dumpable unknown", JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: 1, symlinks: 1 }, hardening: { suidDumpable: null, ptraceScope: 1 } }), 0],
+    ["hardening absent", JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: 1, symlinks: 1 } }), 0],
+    ["ptrace_scope 0", JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: 1, symlinks: 1 }, hardening: { suidDumpable: 0, ptraceScope: 0 } }), 0],
     ["parser-vm@2 without a uid", JSON.stringify({ protocol: "parser-vm@2" }), 0],
-    ["a failed run", JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: 1, symlinks: 1 } }), 1],
+    ["a failed run", JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: 1, symlinks: 1 }, hardening: { suidDumpable: 0, ptraceScope: 1 } }), 1],
   ])("%s fails the probe and refuses startup", async (_, stdout, exitCode) => {
     const close = fakeSession(stdout, exitCode);
     const probe = await modal.probe(modal.readConfig(env));
@@ -43,8 +48,13 @@ describe("modal startup probe requires the parser-vm@2 contract", () => {
     await expect(initializeParserSandbox(env, "linux")).rejects.toThrow(/parser isolation unavailable/);
   });
 
+  it("passes without Yama (ptrace_scope null) when everything else holds", async () => {
+    fakeSession(JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: 1, symlinks: 1 }, hardening: { suidDumpable: 0, ptraceScope: null } }));
+    expect((await modal.probe(modal.readConfig(env))).ok).toBe(true);
+  });
+
   it("parser-vm@2 passes", async () => {
-    fakeSession(JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: 1, symlinks: 1 } }));
+    fakeSession(JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: 1, symlinks: 1 }, hardening: { suidDumpable: 0, ptraceScope: 1 } }));
     expect((await modal.probe(modal.readConfig(env))).ok).toBe(true);
     await expect(initializeParserSandbox(env, "linux")).resolves.toMatchObject({ provider: modal });
   });
@@ -52,7 +62,7 @@ describe("modal startup probe requires the parser-vm@2 contract", () => {
 
 describe("modal startup probe requires a job root the parser user can write (real-Modal check F4)", () => {
   it("refuses with a clear message when uid 10001 cannot create a directory under a job root", async () => {
-    const good = JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: 1, symlinks: 1 } });
+    const good = JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: 1, symlinks: 1 }, hardening: { suidDumpable: 0, ptraceScope: 1 } });
     const close = vi.fn(async () => {});
     const run = vi.fn(async (command: { binary: string; args: string[] }) => command.binary === "/bin/sh"
       ? { exitCode: 1, stdout: "", stderr: "mkdir: Permission denied" }

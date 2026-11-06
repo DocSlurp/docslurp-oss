@@ -127,7 +127,9 @@ export const RUNTIME_SECURITY_DEFINER_ALLOWLIST: readonly string[] = Object.free
  * - any role membership other than the allowed roles, direct or indirect and whatever its INHERIT or SET option
  *   (a SET ROLE to the owner or postgres; pg_execute_server_program; pg_write_all_data; pg_database_owner);
  * - CREATE on the database, or on any schema outside the system schemas (public, docslurp_mastra, drizzle, ...);
- * - owned relations, functions, types or schemas outside the system schemas;
+ * - owned relations, functions, types or schemas outside the system schemas, or owned large objects;
+ * - any grant option (WITH GRANT OPTION) on a relation, column, function, schema, the database or a large object (recheck
+ *   S #6): a runtime role must not be able to hand its privileges to another role;
  * - ownership of pricing_provider_state, INSERT/UPDATE (any column)/DELETE/TRUNCATE on it, or EXECUTE on
  *   pricing_state_raise;
  * - a SECURITY DEFINER function outside the allowlist that it may execute, or that fires as a trigger on a table it
@@ -154,7 +156,22 @@ export const RUNTIME_IDENTITY_SQL = `
     ((select count(*) from pg_class where relowner in (select oid from held) and relnamespace not in (select oid from system_ns))
       + (select count(*) from pg_proc where proowner in (select oid from held) and pronamespace not in (select oid from system_ns))
       + (select count(*) from pg_type where typowner in (select oid from held) and typnamespace not in (select oid from system_ns))
-      + (select count(*) from pg_namespace where nspowner in (select oid from held) and oid not in (select oid from system_ns)))::int as owned_objects,
+      + (select count(*) from pg_namespace where nspowner in (select oid from held) and oid not in (select oid from system_ns))
+      + (select count(*) from pg_largeobject_metadata where lomowner in (select oid from held)))::int as owned_objects,
+    coalesce((select string_agg(distinct kind, ',' order by kind) from (
+      select 'relation' as kind from pg_class c, aclexplode(c.relacl) a
+        where c.relnamespace not in (select oid from system_ns) and a.is_grantable and a.grantee in (select oid from held)
+      union all select 'column' from pg_attribute att join pg_class c on c.oid = att.attrelid, aclexplode(att.attacl) a
+        where c.relnamespace not in (select oid from system_ns) and a.is_grantable and a.grantee in (select oid from held)
+      union all select 'function' from pg_proc p, aclexplode(p.proacl) a
+        where p.pronamespace not in (select oid from system_ns) and a.is_grantable and a.grantee in (select oid from held)
+      union all select 'schema' from pg_namespace n, aclexplode(n.nspacl) a
+        where n.oid not in (select oid from system_ns) and a.is_grantable and a.grantee in (select oid from held)
+      union all select 'database' from pg_database d, aclexplode(d.datacl) a
+        where d.datname = current_database() and a.is_grantable and a.grantee in (select oid from held)
+      union all select 'large object' from pg_largeobject_metadata l, aclexplode(l.lomacl) a
+        where a.is_grantable and a.grantee in (select oid from held)
+    ) grantable), '') as grant_options,
     case when (select oid from state) is null then false
       else (select relowner from pg_class where oid = (select oid from state)) in (select oid from held) end as owns_state,
     case when (select oid from state) is null then ''
@@ -188,6 +205,7 @@ export function runtimeIdentityReasons(row: Record<string, unknown> | undefined,
   const schemas = list(row.create_schemas);
   const definers = list(row.definer_functions);
   const paths = list(row.state_write_paths);
+  const grantable = list(row.grant_options);
   return [
     row.superuser === true ? "is (or can become) a superuser" : null,
     row.elevated === true ? "can create roles or databases, replicate or bypass row security" : null,
@@ -195,7 +213,8 @@ export function runtimeIdentityReasons(row: Record<string, unknown> | undefined,
     held.length ? null : `is not a member of ${allowed.join(" or ")}`,
     row.can_create_in_database === true ? "can CREATE in the database (a schema could shadow another role's search_path)" : null,
     schemas.length ? `can CREATE in schema ${schemas.join(", ")}` : null,
-    Number(row.owned_objects) > 0 ? `owns ${Number(row.owned_objects)} object(s) (relations, functions, types or schemas)` : null,
+    Number(row.owned_objects) > 0 ? `owns ${Number(row.owned_objects)} object(s) (relations, functions, types, schemas or large objects)` : null,
+    grantable.length ? `holds grant options (WITH GRANT OPTION) on ${grantable.join(", ")}: it could pass privileges on` : null,
     row.owns_state === true ? "owns pricing_provider_state" : null,
     writes.length ? `can ${writes.join(", ")} pricing_provider_state` : null,
     row.raises_state === true ? "may execute pricing_state_raise" : null,

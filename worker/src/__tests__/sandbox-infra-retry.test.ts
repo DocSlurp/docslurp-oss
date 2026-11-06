@@ -114,7 +114,8 @@ describe("sandbox infrastructure failures retry the stage without failing the do
   it("exhausted retries fail the document cleanly (the workflow's failPipelineRun)", async () => {
     const attempts = { n: 0 };
     const execution = createStageExecution({ store, stages: [extractStage(() => new SandboxInfrastructureError("parser VM leftover processes could not be killed; VM terminated"), attempts)], config });
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    // Within the strike limit (SANDBOX_INFRASTRUCTURE_RETRIES): each attempt is an infrastructure retry.
+    for (let attempt = 1; attempt <= 2; attempt++) {
       expect((await settle(execution.runStage(input, runtime(attempt))) as Error).name).toBe("SandboxInfrastructureError");
       expect((await documentStages()).y).not.toBe("failed");
     }
@@ -124,6 +125,22 @@ describe("sandbox infrastructure failures retry the stage without failing the do
     const documents = (await db.query<{ id: string; status: string }>(`select id, status from documents where run_id = 'r1' order by id`)).rows;
     expect(documents.find((row) => row.id === "y")?.status).toBe("failed");
     expect(await visionEvents()).toBe(1); // only x ran; nothing billed twice
+  });
+
+  it("a document that breaks a fresh VM on every attempt fails at the strike limit; the other document completes (recheck S #2)", async () => {
+    const attempts = { n: 0 };
+    const execution = createStageExecution({ store, stages: [extractStage(() => new SandboxInfrastructureError("modal sandbox command failed: control deadline exceeded"), attempts)], config });
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      expect((await settle(execution.runStage(input, runtime(attempt))) as Error).name).toBe("SandboxInfrastructureError");
+    }
+    // The third strike on a fresh VM is the document's: it fails, the stage completes, the run goes on.
+    expect(await settle(execution.runStage(input, runtime(3)))).toBeNull();
+    expect(await documentStages()).toEqual({ x: "completed", y: "failed" });
+    const { rows: [row] } = await db.query<{ strikes: number; error: string }>(`select (stats->>'sandboxInfrastructureStrikes')::int as strikes, error from document_run_stage_states where document_id = 'y'`);
+    expect(row!.error).toMatch(/failed under this document on 3 fresh VMs/);
+    await execution.completeRun({ runId: "r1", executionGeneration: "g1" });
+    expect((await run()).status).toBe("completed");
+    expect(await visionEvents()).toBe(1); // x once; y never billed
   });
 
   it("a document's own staging violation fails only that document, once; the other completes (recheck Q #1)", async () => {

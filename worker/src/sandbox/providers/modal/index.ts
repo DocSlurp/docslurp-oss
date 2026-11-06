@@ -293,6 +293,31 @@ async function runChecked(sandbox: import("modal").Sandbox, argv: string[], fail
   if (code !== 0) throw new Error(failure);
 }
 
+/**
+ * A staging step in a job tree, as the parser user (recheck S #2): a non-zero exit or output over its bound means the tree
+ * is not what staging expects (a job replaced a directory, planted a link, filled the disk), so it is a SandboxOutputError;
+ * an exec that cannot run at all is the sandbox's and propagates as is.
+ */
+async function runInJobTree(sandbox: import("modal").Sandbox, argv: string[], failure: string): Promise<void> {
+  const proc = await sandbox.exec(argv, { mode: "binary", timeoutMs: 30_000 });
+  const [, , code] = await Promise.all([
+    boundedVmStream(proc.stdout, 64 * 1024).catch(() => null),
+    boundedVmStream(proc.stderr, 64 * 1024).catch(() => null),
+    proc.wait(),
+  ]);
+  if (code !== 0) throw new SandboxOutputError(failure);
+}
+
+/** Read a bounded stream of job output; going over the bound is the job's (recheck S #2a). */
+async function boundedJobOutput(stream: ReadableStream<Uint8Array | string>, limit: number, what: string): Promise<Buffer> {
+  try {
+    return await boundedVmStream(stream, limit);
+  } catch (error) {
+    if (error instanceof Error && error.message === "parser VM transfer exceeded byte limit") throw new SandboxOutputError(`${what} exceeds its limit`);
+    throw error;
+  }
+}
+
 function buildRemoteFs(sdk: ModalSdk, sandbox: import("modal").Sandbox): RemoteFs {
   const fs = sandbox.filesystem;
   return {
@@ -313,7 +338,7 @@ function buildRemoteFs(sdk: ModalSdk, sandbox: import("modal").Sandbox): RemoteF
       await fs.writeBytes(data, staged);
       try {
         await runChecked(sandbox, ["/bin/chmod", "0644", "--", staged], "parser VM upload staging failed");
-        await runChecked(sandbox, [...asParserUser(), "/bin/sh", "-c", 'mkdir -p -- "$(dirname -- "$2")" && cp -- "$1" "$2"', "sh", staged, p], "parser VM upload failed");
+        await runInJobTree(sandbox, [...asParserUser(), "/bin/sh", "-c", 'mkdir -p -- "$(dirname -- "$2")" && cp -- "$1" "$2"', "sh", staged, p], "parser VM upload into the job tree failed");
       } finally {
         await fs.remove(staged).catch(() => {});
       }
@@ -321,7 +346,7 @@ function buildRemoteFs(sdk: ModalSdk, sandbox: import("modal").Sandbox): RemoteF
     async readFile(p) {
       // Read as the parser user: root never follows a link the job left in its own output (council K #5).
       const proc = await sandbox.exec([...asParserUser(), "/bin/cat", "--", p], { mode: "binary", timeoutMs: 30_000 });
-      const [data, , code] = await Promise.all([boundedVmStream(proc.stdout, 128 * 1024 * 1024), boundedVmStream(proc.stderr, 64 * 1024), proc.wait()]);
+      const [data, , code] = await Promise.all([boundedJobOutput(proc.stdout, 128 * 1024 * 1024, "parser VM output file"), boundedVmStream(proc.stderr, 64 * 1024).catch(() => null), proc.wait()]);
       // Run as the parser user: a non-zero exit is the job's own output (made unreadable, a fifo), the document's fault.
       if (code !== 0) throw new SandboxOutputError("parser VM output could not be read back");
       return data;
@@ -330,7 +355,7 @@ function buildRemoteFs(sdk: ModalSdk, sandbox: import("modal").Sandbox): RemoteF
       // Do not ask the SDK to allocate an unbounded directory listing from the guest.
       const code = "import os,sys,json\np=sys.argv[1]\nwith os.scandir(p) as entries:\n for i,e in enumerate(entries):\n  if i>=8192: raise RuntimeError('directory entry limit')\n  if e.is_symlink(): continue\n  st=e.stat(follow_symlinks=False)\n  print(json.dumps(dict(path=e.path,isDir=e.is_dir(follow_symlinks=False),size=st.st_size,mtime=st.st_mtime)))";
       const proc = await sandbox.exec([...asParserUser(), "python3", "-I", "-c", code, p], { mode: "binary", timeoutMs: 30_000 });
-      const [data, , status] = await Promise.all([boundedVmStream(proc.stdout, 4 * 1024 * 1024), boundedVmStream(proc.stderr, 64 * 1024), proc.wait()]);
+      const [data, , status] = await Promise.all([boundedJobOutput(proc.stdout, 4 * 1024 * 1024, "parser VM output directory listing"), boundedVmStream(proc.stderr, 64 * 1024).catch(() => null), proc.wait()]);
       if (status !== 0) throw new SandboxOutputError("parser VM output directory could not be listed (unreadable, or over the entry limit)");
       return data.toString("utf8").split("\n").filter(Boolean).map((line) => {
         const entry = JSON.parse(line) as RemoteEntry;
@@ -338,8 +363,8 @@ function buildRemoteFs(sdk: ModalSdk, sandbox: import("modal").Sandbox): RemoteF
         return entry;
       });
     },
-    mkdir: (p) => runChecked(sandbox, [...asParserUser(), "/bin/mkdir", "-p", "--", p], "parser VM directory creation failed"),
-    remove: (p) => runChecked(sandbox, [...asParserUser(), "/bin/rm", "-rf", "--", p], "parser VM removal failed"),
+    mkdir: (p) => runInJobTree(sandbox, [...asParserUser(), "/bin/mkdir", "-p", "--", p], "parser VM directory creation in the job tree failed"),
+    remove: (p) => runInJobTree(sandbox, [...asParserUser(), "/bin/rm", "-rf", "--", p], "parser VM removal in the job tree failed"),
   };
 }
 
@@ -430,7 +455,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
       try {
         session = await provider.openSession({ ...config, sessionTimeoutSeconds: Math.min(config.sessionTimeoutSeconds, PROBE_SESSION_TIMEOUT_SECONDS) }, { activityId: "startup-probe", unmetered: true });
         const result = await session.run!({ binary: "node", args: ["/app/worker/scripts/parser-vm-contract.mjs"], env: { PATH: "/usr/local/bin:/usr/bin:/bin" }, readablePaths: [], inputPaths: [], writablePaths: [], limits: { timeoutMs: 30_000 } });
-        const contract = result.exitCode === 0 ? JSON.parse(result.stdout) as { protocol?: unknown; uid?: unknown; tools?: unknown; links?: { hardlinks?: unknown; symlinks?: unknown } } : null;
+        const contract = result.exitCode === 0 ? JSON.parse(result.stdout) as { protocol?: unknown; uid?: unknown; tools?: unknown; links?: { hardlinks?: unknown; symlinks?: unknown }; hardening?: { suidDumpable?: unknown; ptraceScope?: unknown }; cgroupV2?: unknown } : null;
         if (contract?.protocol !== "parser-vm@2") throw new Error("parser VM image contract unavailable");
         // Parser commands drop root in the VM (control.ts); a contract run as root means they would parse as root (N10).
         if (typeof contract.uid !== "number" || contract.uid === 0) throw new Error("parser VM commands do not drop root privileges");
@@ -438,6 +463,15 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         if (contract.links?.hardlinks !== 1 || contract.links?.symlinks !== 1) {
           throw new Error(`parser VM kernel link protections are not confirmed on (hardlinks=${JSON.stringify(contract.links?.hardlinks ?? null)}, symlinks=${JSON.stringify(contract.links?.symlinks ?? null)})`);
         }
+        // Set-id core dumps off, and Yama ptrace restricted where present (recheck S #5): read back in the VM, or refused.
+        if (contract.hardening?.suidDumpable !== 0) {
+          throw new Error(`parser VM fs.suid_dumpable is not confirmed 0 (${JSON.stringify(contract.hardening?.suidDumpable ?? null)})`);
+        }
+        const ptrace = contract.hardening?.ptraceScope;
+        if (ptrace !== null && !(typeof ptrace === "number" && ptrace >= 1)) {
+          throw new Error(`parser VM kernel.yama.ptrace_scope is ${JSON.stringify(ptrace ?? null)}, not at least 1`);
+        }
+        console.log(`[parser-sandbox] provider=modal probe cgroup_v2=${contract.cgroupV2 === true} (per-command cgroup kill ${contract.cgroupV2 === true ? "available" : "unavailable: uid-wide kill only"})`);
         // Job paths are the worker's own temp paths, staged by the parser user (council M #3): every root must be creatable
         // and writable by uid 10001 in the VM, or every parser command would fail (real-Modal check F4).
         for (const root of parserJobRoots()) {
@@ -500,6 +534,10 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         dead: boolean;
         /** The affinity key of its last command: a document's later commands prefer the VM that holds its inputs. */
         lastKey: string | undefined;
+        /** The key of the command before the current one (who left the job tree as it is). */
+        previousKey: string | undefined;
+        /** A new document on this VM: its inputs are uploaded afresh (recheck S #7). */
+        forgetUploads(): void;
         /** When the VM's time was last metered; undefined until it is created (it holds a budget token from then). */
         accountedAt: number | undefined;
         /** Records the VM's last metered stretch into the usage ledger of the stage that ran its last command. */
@@ -518,7 +556,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         let staging: SessionStaging | undefined;
         let creating: Promise<void> | undefined;
         let terminating: Promise<void> | undefined;
-        const lane: Lane = { id: ++laneCount, busy: false, dead: false, lastKey: undefined, accountedAt: undefined, recorder: undefined, idleTimer: undefined, reserve, ensureSandbox, execute, terminate };
+        const lane: Lane = { id: ++laneCount, busy: false, dead: false, lastKey: undefined, previousKey: undefined, accountedAt: undefined, recorder: undefined, idleTimer: undefined, reserve, ensureSandbox, execute, terminate, forgetUploads: () => staging?.forgetUploads() };
         let holdsToken = false;
         /** When creation was requested (Modal bills from then at the latest), and the raw create call. */
         let createdAt: number | undefined;
@@ -675,7 +713,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           const aborted = whenAborted(signal);
           try {
             const process = await sandbox!.exec(argv, { env, timeoutMs: execTimeoutMs(command.limits.timeoutMs), mode: "text" });
-            settled = Promise.all([boundedVmStream(process.stdout, 8 * 1024 * 1024).then((bytes) => bytes.toString("utf8")), boundedVmStream(process.stderr, 1024 * 1024).then((bytes) => bytes.toString("utf8")), process.wait()]).then(
+            // A command that floods its stdout or stderr past the bound is the document's doing (recheck S #2).
+            settled = Promise.all([boundedJobOutput(process.stdout, 8 * 1024 * 1024, "parser command stdout").then((bytes) => bytes.toString("utf8")), boundedJobOutput(process.stderr, 1024 * 1024, "parser command stderr").then((bytes) => bytes.toString("utf8")), process.wait()]).then(
               ([stdout, stderr, exitCode]) => ({ stdout, stderr, exitCode }),
             );
             settled.catch(() => {});
@@ -721,15 +760,21 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
          */
         async function killParserUserProcesses(): Promise<void> {
           let code: number | null = null;
+          let transport: unknown;
           try {
             const proc = await sandbox!.exec(KILL_PARSER_USER_ARGV, { timeoutMs: KILL_SETTLE_MS * 3 });
             code = await proc.wait();
           } catch (error) {
             console.error(`[parser-sandbox] provider=modal leftover kill failed: ${safeMessage(config, error)}`);
+            // A kill that ran out of time was held up inside the VM (a stopped or flooding leftover): that is the job's.
+            if (!isExecTimeout(sdk, error)) transport = error;
           }
           if (code !== 0) {
             await terminate().catch(() => {});
-            throw new SandboxInfrastructureError("parser VM leftover processes could not be killed; VM terminated");
+            // Only the exec failing to run is the sandbox's. Processes the command left that survive the kill, or that stall
+            // it, are its document's doing (recheck S #2b): that document fails, once; the VM is gone either way.
+            if (transport !== undefined) throw new SandboxInfrastructureError("parser VM leftover kill could not run; VM terminated", undefined, { cause: transport });
+            throw new SandboxOutputError("processes this document's parser command left in the VM could not be killed; VM terminated");
           }
         }
 
@@ -757,6 +802,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
 
         async function executeCommand(command: SandboxCommand, started: number, signal: AbortSignal | undefined, markCleaned: () => void): Promise<SandboxResult> {
           const control = `${CONTROL_DIR}/${++commandCount}`;
+          /** Whether this command's own process ran: a staging failure before that may be another document's doing. */
+          let ran = false;
           try {
             await ensureSandbox();
             throwIfAborted(signal);
@@ -769,6 +816,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             throwIfAborted(signal);
             let outcome: RemoteOutcome;
             try {
+              ran = true;
               outcome = await runRemote(command, control, signal);
             } catch (error) {
               pendingDiscards.push(snapshot);
@@ -799,8 +847,17 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           } catch (error) {
             // Elapsed Modal time is billed even when staging or exec failed.
             if (error instanceof CommandAborted) throw new SandboxRunError("modal sandbox command aborted", meterLane(lane));
-            // The document's own files broke a staging rule: its verdict, never retried (recheck Q #1).
-            if (error instanceof SandboxOutputError) throw new SandboxOutputError(error.message, meterLane(lane), { cause: error });
+            if (error instanceof SandboxOutputError) {
+              // The VM's disk and processes are no longer trusted: it runs nothing more (recheck S #3).
+              await terminate().catch(() => {});
+              // Before this command ran, on a VM another document used last, the tree was that document's: the sandbox's
+              // failure for this one (a retry on a fresh VM; the strike limit stops a document that keeps doing it).
+              if (!ran && lane.previousKey !== undefined && lane.previousKey !== command.affinityKey) {
+                throw new SandboxInfrastructureError(`modal sandbox job tree left unusable by an earlier command: ${error.message}; VM terminated`, meterLane(lane), { cause: error });
+              }
+              // The document's own files broke a staging rule: its verdict, never retried (recheck Q #1).
+              throw new SandboxOutputError(error.message, meterLane(lane), { cause: error });
+            }
             // Anything else that throws here is the sandbox's: SDK and transport errors, control commands, VM creation and
             // hardening, the leftover kill, a closed session (a document's own failure is a non-zero exit or the above).
             throw new SandboxInfrastructureError(`modal sandbox command failed: ${safeMessage(config, error)}`, meterLane(lane), { cause: error });
@@ -838,7 +895,10 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           ?? (canGrow() ? addLane() : undefined);
         if (lane) {
           lane.busy = true;
+          lane.previousKey = lane.lastKey;
           lane.lastKey = key;
+          // Another document's parser ran here last and could have rewritten this one's remote inputs (recheck S #7).
+          if (lane.previousKey !== key) lane.forgetUploads();
           if (lane.idleTimer) { clearTimeout(lane.idleTimer); lane.idleTimer = undefined; }
         }
         return lane;
@@ -926,12 +986,19 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           if (closed) throw new SandboxInfrastructureError("modal sandbox session is closed");
           if (signal?.aborted) throw new SandboxRunError("modal sandbox command aborted");
           const lane = await acquireLane(command.affinityKey, signal);
+          if (hooks?.recordUsage) lane.recorder = hooks.recordUsage;
           try {
             // The worker VM token too, before admission: a command waiting for capacity is still queued, its time limit not
             // yet running, and an abort ends the wait (recheck T #2).
             await lane.reserve(signal);
+            // The VM is created and hardened before admission too (recheck S #4): its start-up never spends the command's
+            // time limit, and a VM that cannot be created is the sandbox's failure.
+            try {
+              await lane.ensureSandbox();
+            } catch (error) {
+              throw new SandboxInfrastructureError(`modal sandbox creation failed: ${safeMessage(config, error)}`, undefined, { cause: error });
+            }
             hooks?.onStart?.();
-            if (hooks?.recordUsage) lane.recorder = hooks.recordUsage;
             // Metered as the VM's time since it was last metered (recheck R #3, VM pool follow-up): never this command's
             // wait for a VM, which is another command's time on it.
             return await lane.execute(command, Date.now(), signal);
