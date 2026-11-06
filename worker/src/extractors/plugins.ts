@@ -411,7 +411,7 @@ export function assertExtractorPluginConfiguration(env: NodeJS.ProcessEnv = proc
       throw new Error("DOCSLURP_PDF_MODE=local parses customer PDFs on the worker host and is only for customer-owned execution: it needs DOCSLURP_SERVICE_PROFILE=self-hosted; refusing to start");
     }
     if (!(deps.dopplerInstalled ?? (() => dopplerConverterInstalled(env)))()) {
-      throw new Error(`DOCSLURP_PDF_MODE=local needs Doppler's pdftomarkdown at ${dopplerBinDir(env)} (worker images ship it; DOCSLURP_DOPPLER_BIN_DIR points elsewhere); refusing to start`);
+      throw new Error(`DOCSLURP_PDF_MODE=local needs Doppler's pdftomarkdown and pdfpagecount at ${dopplerBinDir(env)}, and prlimit on PATH (worker images ship them; DOCSLURP_DOPPLER_BIN_DIR points elsewhere); refusing to start`);
     }
     console.warn("[pdf] mode=local: Doppler (doppler-md) parses customer PDFs on the worker host, in the parser sandbox, not a VM (customer-owned execution)");
   }
@@ -420,9 +420,12 @@ export function assertExtractorPluginConfiguration(env: NodeJS.ProcessEnv = proc
   else if (mode === "vm") console.log(`[pdf] mode=vm extractor=${VM_PDF_EXTRACTOR_ID}`);
 }
 
+/** Local mode's PDF tools: the converter, the structural page counter, and prlimit (the counter's external memory limit). */
 function dopplerConverterInstalled(env: NodeJS.ProcessEnv): boolean {
   try {
     accessSync(dopplerConverterPath(env), fsConstants.X_OK);
+    accessSync(path.join(dopplerBinDir(env), "pdfpagecount"), fsConstants.X_OK);
+    if (!(env.PATH ?? "").split(path.delimiter).some((dir) => { try { accessSync(path.join(dir, "prlimit"), fsConstants.X_OK); return true; } catch { return false; } })) return false;
     return true;
   } catch {
     return false;

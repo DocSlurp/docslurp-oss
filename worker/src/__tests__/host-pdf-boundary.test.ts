@@ -71,7 +71,7 @@ describe("neither a VM nor local mode: PDF extraction fails closed", () => {
     }
     const stage = new ExtractMarkdownStage(runner, {} as never, {} as never);
     await expect((stage as unknown as { planExtractors(args: unknown): Promise<unknown> }).planExtractors({
-      tempFile: "/tmp/tenant/input.pdf", format: "pdf", order: { pdf: ["poppler-text"] }, options: {}, multiStrategyVoting: true,
+      tempFile: "/tmp/tenant/input.pdf", pageCount: 3, format: "pdf", order: { pdf: ["poppler-text"] }, options: {}, multiStrategyVoting: true,
       secondaryId: "poppler-text", attemptLedger: new ExtractorAttemptLedger(),
     })).rejects.toThrow(PDF_EXTRACTION_UNCONFIGURED);
     expect(calls).toEqual([]);
@@ -115,7 +115,7 @@ describe("which extractor runs a PDF through the stage", () => {
   const planFor = async (runner: CommandRunner) => {
     const stage = new ExtractMarkdownStage(runner, {} as never, {} as never);
     return await (stage as unknown as { planExtractors(args: unknown): Promise<{ primary: { label: string; plan: { binary: string; sandboxedPdf?: unknown } } }> }).planExtractors({
-      tempFile: "/tmp/tenant/input.pdf", format: "pdf", order: {}, options: {}, multiStrategyVoting: false,
+      tempFile: "/tmp/tenant/input.pdf", pageCount: 3, format: "pdf", order: {}, options: {}, multiStrategyVoting: false,
       secondaryId: "next-in-order", attemptLedger: new ExtractorAttemptLedger(),
     });
   };
@@ -131,7 +131,8 @@ describe("which extractor runs a PDF through the stage", () => {
     const planned = await planFor({ dopplerMarkdown, extractText } as unknown as CommandRunner);
     expect(planned.primary.label).toBe("doppler-md");
     expect(planned.primary.plan.binary).toBe("/usr/lib/doppler/bin/pdftomarkdown");
-    expect(dopplerMarkdown).toHaveBeenCalledWith("/tmp/tenant/input.pdf");
+    // Bounded to the measured count (-f 1 -l N), never the file's own /Count.
+    expect(dopplerMarkdown).toHaveBeenCalledWith("/tmp/tenant/input.pdf", 3);
   });
 
   it("VM configured: Doppler runs only through vm-pdf; no host extractor is planned or probed", async () => {

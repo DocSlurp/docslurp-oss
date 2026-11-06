@@ -281,11 +281,15 @@ describe("mode, loader and engines", () => {
   });
 
   it("serves text pages from poppler output and rejects geometry", async () => {
+    const extractText = vi.fn(async (_source: string, _pages: number) => ({ binary: "pdftotext", args: [], available: true }));
     const runner = {
-      extractText: async () => ({ binary: "pdftotext", args: [], available: true }),
-      run: async () => ({ stdout: "Page   one\n\nline\fPage two\f", stderr: "" }),
+      extractText,
+      // The walked page count (pdfpagecount) bounds pdftotext's range.
+      pdfPageCount: async () => ({ binary: "prlimit", args: [], available: true }),
+      run: async (plan: { binary: string }) => ({ stdout: plan.binary === "prlimit" ? "2\n" : "Page   one\n\nline\fPage two\f", stderr: "" }),
     };
     const result = await extractNativePdf(new PopplerNativePdfEngine(runner), "/x.pdf");
+    expect(extractText).toHaveBeenCalledWith("/x.pdf", 2, true);
     expect(result.pageCount).toBe(2);
     expect(result.markdown).toBe("Page one\n\nline\fPage two");
   });

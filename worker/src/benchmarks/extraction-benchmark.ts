@@ -1,4 +1,5 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { countPdfPages } from "../lib/pdf-page-count.js";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { CommandRunner } from "../tools/runner.js";
@@ -44,7 +45,7 @@ export async function benchmarkExtractor(args: {
         break;
       }
       case "poppler-text": {
-        const plan = await runner.extractText(fixturePath, true);
+        const plan = await runner.extractText(fixturePath, await countPdfPages(runner, fixturePath), true);
         markdown = (await runner.run(plan)).stdout;
         break;
       }

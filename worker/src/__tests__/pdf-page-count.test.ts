@@ -10,8 +10,13 @@ import { recordPageBaseFee } from "../db/page-base-fee.js";
 import { setSpendCheckConfig } from "../db/spend-check.js";
 import { Store } from "../db/store.js";
 import { registerExtractorPlugin, resetExtractorPluginsForTest, type SandboxedPdfExtractorProvider } from "../extractors/plugins.js";
-import { MAX_MEASURED_PDF_PAGES, pastLastPage, PdfPageCountError, pdfPageTreeCount, processedPdfPages, reconcileProcessedPdfPages, recordMeasuredPdfPageCount, sandboxedPageProbe, type PageProbe } from "../lib/pdf-page-count.js";
-import { CommandExitError } from "../tools/runner.js";
+import { countPdfPages, MAX_MEASURED_PDF_PAGES, parsePdfPageCount, PDF_PAGE_COUNT_LIMITS, PdfPageCountError, processedPdfPages, reconcileProcessedPdfPages, recordMeasuredPdfPageCount } from "../lib/pdf-page-count.js";
+import { isDocumentLevelFailure } from "../lib/document-failure.js";
+import { HungWorkError } from "../lib/hung-work.js";
+import { CommandExitError, CommandRunner, pdfPageRangeArgs } from "../tools/runner.js";
+import { cyclicTreePdf, deepTreePdf, encryptedPdf, flatTreePdf, memoryBombPdf, zeroPagePdf } from "../test/page-tree-pdf.js";
+import { dopplerBinDir } from "../tools/doppler.js";
+import { mkdir, readdir } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { authorizeMeasuredPages } from "../lib/measured-page-authorization.js";
 import { SpendCheckUnavailableError } from "../db/spend-check.js";
@@ -65,133 +70,180 @@ async function stateFor(runId: string, documentId: string) {
   state.usageLedger.runId = runId;
   return { state, document };
 }
-/** A sandboxed page probe over a PDF of `pages` pages: page k exists for k <= pages, else pdftotext's exit 99. */
+/** A runner whose pdfpagecount reports `pages` (0: the tool refuses the file as malformed, exit 4). */
 const runner = (pages: number) => ({
-  pdfPageProbe: vi.fn(async (source: string, page: number) => ({ binary: "pdftotext", args: [String(page), source], available: true })),
-  run: vi.fn(async (plan: { args: string[] }) => {
-    const page = Number(plan.args[0]);
-    if (page <= pages) return { stdout: "", stderr: "" };
-    throw new CommandExitError(`pdftotext (99): Command Line Error: Wrong page range given: the first page (${page}) can not be after the last page (${pages}).`, 99);
+  pdfPageCount: vi.fn(async (source: string) => ({ binary: "prlimit", args: [source], available: true })),
+  run: vi.fn(async () => {
+    if (pages >= 1) return { stdout: `${pages}\n`, stderr: "" };
+    throw new CommandExitError("prlimit (4): pdfpagecount: malformed page tree: no pages", 4);
   }),
 });
 const pageRow = async (id: string) => (await db.query<{ page_count: number; page_count_source: string }>(`select page_count, page_count_source from documents where id = '${id}'`)).rows[0];
 
-describe("pdfPageTreeCount: the page tree as Poppler walks it, never text the author controls", () => {
-  const tree = (pages: number) => async (page: number): Promise<PageProbe> => page <= pages ? { exists: true } : { exists: false, lastPage: pages };
+describe("countPdfPages: one Doppler pdfpagecount run, every exit code mapped", () => {
+  const stub = (result: { stdout?: string; exit?: number | null; error?: Error }, available = true) => ({
+    pdfPageCount: vi.fn(async () => ({ binary: "prlimit", args: [], available })),
+    run: vi.fn(async () => {
+      if (result.error) throw result.error;
+      if (result.exit !== undefined) throw new CommandExitError(`prlimit (${result.exit}): pdfpagecount: fixed message`, result.exit);
+      return { stdout: result.stdout ?? "", stderr: "" };
+    }),
+  });
 
-  it("finds the last existing page by binary search, and refuses an empty or oversized tree", async () => {
-    for (const pages of [1, 2, 7, 1_000, 99_999, MAX_MEASURED_PDF_PAGES]) {
-      const asked: number[] = [];
-      expect(await pdfPageTreeCount(async (page) => { asked.push(page); return await tree(pages)(page); })).toBe(pages);
-      expect(asked.length).toBeLessThanOrEqual(20);
+  it("reads exactly one integer and a newline", async () => {
+    expect(await countPdfPages(stub({ stdout: "7\n" }), "/x.pdf")).toBe(7);
+    for (const stdout of ["7", "7\n\n", " 7\n", "07\n", "0\n", "-3\n", "7\r\n", "7\n8\n", "abc\n", "", `${MAX_MEASURED_PDF_PAGES + 1}\n`, "1e3\n"]) {
+      expect(parsePdfPageCount(stdout), JSON.stringify(stdout)).toBeNull();
+      await expect(countPdfPages(stub({ stdout }), "/x.pdf")).rejects.toMatchObject({ outcome: "unavailable", name: "PdfPageCountUnavailableError" });
     }
-    expect(await pdfPageTreeCount(async () => ({ exists: false, lastPage: 0 }))).toBeNull();
-    await expect(pdfPageTreeCount(async () => ({ exists: true }))).rejects.toThrow(/more than/);
   });
 
-  it("refuses answers that disagree with Poppler's own last-page count instead of shortening the count", async () => {
-    // A 50-page file whose page 49 (on the search's path) claims to be past the end (lastPage 48): without the check the search
-    // would settle on 48; the probes and Poppler's own reports disagree, so the count is refused.
-    const asked: number[] = [];
-    await expect(pdfPageTreeCount(async (page) => { asked.push(page); return page === 49 ? { exists: false, lastPage: 48 } : await tree(50)(page); }))
-      .rejects.toMatchObject({ name: "PdfPageCountError" });
-    expect(asked).toContain(49);
+  it("maps every exit code to a distinct outcome: refusals fail the document, a broken tool retries", async () => {
+    const cases: Array<[number | null, string]> = [[1, "open-failed"], [2, "encrypted"], [3, "limit"], [4, "malformed"], [99, "unavailable"], [134, "killed"], [139, "killed"], [5, "killed"], [null, "killed"]];
+    for (const [exit, outcome] of cases) {
+      const error = await countPdfPages(stub({ exit }), "/x.pdf").catch((caught: unknown) => caught);
+      expect(error, `exit ${exit}`).toBeInstanceOf(PdfPageCountError);
+      expect((error as PdfPageCountError).outcome).toBe(outcome);
+      // Refused outcomes are the document's; a usage error or a missing tool is the platform's and retries.
+      expect(isDocumentLevelFailure(error)).toBe(outcome !== "unavailable");
+      // The tool's stderr never reaches the message.
+      expect((error as Error).message).not.toContain("fixed message");
+    }
+    const timeout = await countPdfPages(stub({ error: new HungWorkError("command-timeout", "prlimit exceeded its 60 s wall-clock budget") }), "/x.pdf").catch((caught: unknown) => caught);
+    expect(timeout).toMatchObject({ outcome: "killed" });
+    await expect(countPdfPages(stub({ stdout: "3\n" }, false), "/x.pdf")).rejects.toMatchObject({ outcome: "unavailable" });
+    // Other errors (a teardown, an abort) are not reinterpreted.
+    const teardown = Object.assign(new Error("teardown"), { name: "CommandTeardownError" });
+    await expect(countPdfPages(stub({ error: teardown }), "/x.pdf")).rejects.toBe(teardown);
   });
 
-  it("reads past-the-end only from Poppler's own line for the probed page; any other failure fails closed", async () => {
-    const line = (first: number, last: number) => `Command Line Error: Wrong page range given: the first page (${first}) can not be after the last page (${last}).`;
-    expect(pastLastPage(`pdftotext (99): ${line(9, 5)}`, 9)).toBe(5);
-    expect(pastLastPage(`/usr/bin/pdftotext (99): Syntax Error (12): x\n${line(9, 5)}`, 9)).toBe(5);
-    expect(pastLastPage(`pdftotext (99): ${line(8, 5)}`, 9)).toBeNull();      // another page's message
-    expect(pastLastPage(`pdftotext (99): ${line(9, 9)}`, 9)).toBeNull();      // not past the end
-    expect(pastLastPage("pdftotext (99): Syntax Error: Internal: page 9 failed", 9)).toBeNull();
-    expect(pastLastPage(`pdftotext (99): Syntax Error: font 'x ${line(9, 1)}'`, 9)).toBeNull(); // not a whole line
-    // In the sandbox probe: page 7 of a 20-page file errors with 99 and no range line, mid-search.
-    const failing = {
-      pdfPageProbe: vi.fn(async (source: string, page: number) => ({ binary: "pdftotext", args: [String(page), source], available: true })),
-      run: vi.fn(async (plan: { args: string[] }) => {
-        const page = Number(plan.args[0]);
-        if (page === 7) throw new CommandExitError("pdftotext (99): Syntax Error: Couldn't read page 7", 99);
-        if (page <= 20) return { stdout: "", stderr: "" };
-        throw new CommandExitError(`pdftotext (99): ${line(page, 20)}`, 99);
-      }),
-    };
-    // The search probes 1, 100001, then halves down, reaching page 7 only if the count is below it, so ask it directly too.
-    const probe = sandboxedPageProbe(failing as never, "/tmp/x.pdf");
-    await expect(probe(7)).rejects.toMatchObject({ name: "PdfPageCountError" });
-    expect(await probe(21)).toEqual({ exists: false, lastPage: 20 });
-    expect(await probe(3)).toEqual({ exists: true });
-    // A crash or an unreadable file (exit 1) never reads as a count either.
-    const broken = { ...failing, run: vi.fn(async () => { throw new CommandExitError("pdftotext (1): Syntax Error: Couldn't find trailer dictionary", 1); }) };
-    await expect(pdfPageTreeCount(sandboxedPageProbe(broken as never, "/tmp/x.pdf"))).rejects.toMatchObject({ name: "PdfPageCountError" });
-  });
-
-  // A real Poppler pdftotext, as local mode runs it. Skipped on hosts without poppler-utils.
-  const pdftotext = spawnSync("pdftotext", ["-v"]).error ? null : "pdftotext";
-  const realProbe = (file: string) => async (page: number): Promise<PageProbe> => {
-    const result = spawnSync(pdftotext!, ["-f", String(page), "-l", String(page), file, "/dev/null"], { encoding: "utf8" });
-    if (result.status === 0) return { exists: true };
-    const lastPage = result.status === 99 ? pastLastPage(result.stderr, page) : null;
-    if (lastPage === null) throw new PdfPageCountError(`page ${page}: exit ${result.status}`);
-    return { exists: false, lastPage };
-  };
-  it.skipIf(!pdftotext).each([
-    ["a Title with a raw newline", { title: "Report\nPages: 1" }],
-    ["a Title with U+2028", { title: "Report\u2028Pages: 1" }],
-    ["XMP saying one page", { xmpPages: 1 }],
-    ["page text saying Page 1 of 1", {}],
-  ])("counts the real 5 pages despite %s", async (_name, forged) => {
-    const dir = await mkdtemp(path.join(process.env.TMPDIR || tmpdir(), "pdf-tree-"));
-    const file = path.join(dir, "forged.pdf");
-    await writeFile(file, forgedPdf(5, forged));
-    expect(await pdfPageTreeCount(realProbe(file))).toBe(5);
-  });
-
-  it.skipIf(!pdftotext)("a truncated PDF is refused (Poppler cannot open it: exit 1), never counted as some number of pages", async () => {
-    const dir = await mkdtemp(path.join(process.env.TMPDIR || tmpdir(), "pdf-tree-"));
-    const whole = forgedPdf(5, {});
-    // Cut before the xref and trailer: Poppler cannot read the file at all.
-    const cut = path.join(dir, "cut.pdf");
-    await writeFile(cut, whole.subarray(0, whole.indexOf(Buffer.from("xref"))));
-    await expect(pdfPageTreeCount(realProbe(cut))).rejects.toMatchObject({ name: "PdfPageCountError" });
-    // Cut inside the header: nothing to walk; refused, not counted as some number of pages.
-    const stub = path.join(dir, "stub.pdf");
-    await writeFile(stub, whole.subarray(0, 40));
-    await expect(pdfPageTreeCount(realProbe(stub))).rejects.toMatchObject({ name: "PdfPageCountError" });
+  it("runs the tool under prlimit with explicit page, depth and memory budgets, a CPU cap and a wall clock", async () => {
+    const plan = await new CommandRunner().pdfPageCount("/tmp/in.pdf", PDF_PAGE_COUNT_LIMITS);
+    const tool = `${dopplerBinDir()}/pdfpagecount`;
+    expect(plan.binary).toBe("prlimit");
+    expect(plan.args).toEqual([`--as=${768 * 1024 * 1024}`, "--cpu=30", "--", tool, "-max-pages", "100000", "-max-depth", "64", "-max-memory", "512", "--", "/tmp/in.pdf"]);
+    expect(plan.timeoutMs).toBe(60_000);
+    expect(PDF_PAGE_COUNT_LIMITS.addressSpaceMiB).toBeGreaterThan(PDF_PAGE_COUNT_LIMITS.toolMemoryMiB);
   });
 });
 
-/** A PDF of `pages` pages, each reading "Page 1 of 1", with an optional forged Info Title and XMP page count. */
-function forgedPdf(pages: number, forged: { title?: string; xmpPages?: number }): Buffer {
-  const objects: Buffer[] = [];
-  const kids = Array.from({ length: pages }, (_, index) => `${3 + index * 2} 0 R`).join(" ");
-  const font = 3 + pages * 2;
-  const xmp = forged.xmpPages === undefined ? null : `<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:xmpTPg="http://ns.adobe.com/xap/1.0/t/pg/"><xmpTPg:NPages>${forged.xmpPages}</xmpTPg:NPages></rdf:Description></rdf:RDF></x:xmpmeta>`;
-  objects.push(Buffer.from(`<< /Type /Catalog /Pages 2 0 R${xmp ? ` /Metadata ${font + 2} 0 R` : ""} >>`));
-  objects.push(Buffer.from(`<< /Type /Pages /Count ${pages} /Kids [${kids}] >>`));
-  for (let index = 0; index < pages; index += 1) {
-    const content = "BT /F1 12 Tf 72 700 Td (Page 1 of 1) Tj ET";
-    objects.push(Buffer.from(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 ${font} 0 R >> >> /Contents ${4 + index * 2} 0 R >>`));
-    objects.push(Buffer.from(`<< /Length ${content.length} >>\nstream\n${content}\nendstream`));
-  }
-  objects.push(Buffer.from("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"));
-  const title = forged.title === undefined ? "Report" : forged.title;
-  objects.push(Buffer.concat([Buffer.from("<< /Title <FEFF"), Buffer.from(Buffer.from(title, "utf16le").swap16().toString("hex").toUpperCase()), Buffer.from("> >>")]));
-  if (xmp) objects.push(Buffer.from(`<< /Type /Metadata /Subtype /XML /Length ${xmp.length} >>\nstream\n${xmp}\nendstream`));
-  const info = font + 1;
-  const parts = [Buffer.from("%PDF-1.7\n")];
-  const offsets: number[] = [];
-  let length = parts[0]!.length;
-  objects.forEach((object, index) => {
-    offsets.push(length);
-    const part = Buffer.concat([Buffer.from(`${index + 1} 0 obj\n`), object, Buffer.from("\nendobj\n")]);
-    parts.push(part);
-    length += part.length;
+describe("page-range utilities stop at the billed count", () => {
+  it("never plans an open or zero range", async () => {
+    expect(pdfPageRangeArgs(1, 3)).toEqual(["-f", "1", "-l", "3"]);
+    for (const [first, last] of [[1, 0], [0, 3], [2, 1], [1, Number.NaN], [1, 2.5], [1, -1]]) expect(() => pdfPageRangeArgs(first!, last!)).toThrow(/invalid PDF page range/);
+    const runner = new CommandRunner();
+    const plans = await Promise.all([
+      runner.extractText("/s.pdf", 3), runner.extractText("/s.pdf", 3, true), runner.extractHtml("/s.pdf", 3), runner.extractImages("/s.pdf", "/o/p", 3),
+      runner.splitPages("/s.pdf", "/o/p-%d.pdf", 3), runner.renderPageImages("/s.pdf", "/o/p", 3), runner.listImages("/s.pdf", 3),
+      runner.pageText("/s.pdf", 3), runner.dopplerMarkdown("/s.pdf", 3), runner.listPdfImages("/s.pdf", 1, 3), runner.pdfPageSizes("/s.pdf", 1, 3),
+      runner.renderPdfPageRange("/s.pdf", "/o/p", 1, 3), runner.splitPdfPageRange("/s.pdf", "/o/p-%d.pdf", 1, 3), runner.pdfWordBoxes("/s.pdf", 1, 3, "/o/w.xhtml"),
+    ]);
+    for (const plan of plans) {
+      const f = plan.args.indexOf("-f");
+      expect(plan.args.slice(f, f + 4), `${plan.binary} ${plan.args.join(" ")}`).toEqual(["-f", "1", "-l", "3"]);
+      // The range comes before the file, and the file after "--".
+      expect(plan.args.indexOf("/s.pdf")).toBeGreaterThan(plan.args.indexOf("--"));
+      expect(plan.args.indexOf("--")).toBeGreaterThan(f);
+    }
+    for (const call of [() => runner.extractText("/s.pdf", 0), () => runner.renderPageImages("/s.pdf", "/o/p", 0), () => runner.pageText("/s.pdf", 0), () => runner.listImages("/s.pdf", 0)]) {
+      await expect(call()).rejects.toThrow(/invalid PDF page range/);
+    }
   });
-  const xref = `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`).join("")}` +
-    `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R /Info ${info} 0 R >>\nstartxref\n${length}\n%%EOF\n`;
-  return Buffer.concat([...parts, Buffer.from(xref)]);
-}
+});
+
+// The real tool, as local mode runs it (prlimit + Doppler pdfpagecount). Runs where Doppler's utilities are installed (the
+// worker images, the CI "Doppler page count" job); elsewhere it skips.
+const dopplerBin = dopplerBinDir();
+const realTool = spawnSync(`${dopplerBin}/pdfpagecount`, ["-v"]).status === 0 && spawnSync("prlimit", ["--version"]).status === 0;
+
+// The CI "Doppler page count" job sets DOCSLURP_REQUIRE_DOPPLER_TOOLS=1: there these tests must run, never skip.
+it.runIf(process.env.DOCSLURP_REQUIRE_DOPPLER_TOOLS === "1")("has Doppler's pdfpagecount and prlimit where they are required", () => {
+  expect(realTool).toBe(true);
+});
+
+describe.skipIf(!realTool)("pdfpagecount on hostile page trees (real tool)", () => {
+  const tool = new CommandRunner();
+  const file = async (name: string, bytes: Buffer) => {
+    const dir = await mkdtemp(path.join(process.env.TMPDIR || tmpdir(), "pdfpagecount-"));
+    const target = path.join(dir, name);
+    await writeFile(target, bytes);
+    return target;
+  };
+  const count = async (bytes: Buffer, limits = PDF_PAGE_COUNT_LIMITS) => await countPdfPages(tool, await file("in.pdf", bytes), undefined, limits);
+  const outcome = async (bytes: Buffer, limits = PDF_PAGE_COUNT_LIMITS) => await count(bytes, limits).then(() => null, (error: PdfPageCountError) => error.outcome);
+
+  it.each([
+    ["a forged Title with a raw newline", flatTreePdf(5, { title: "Report\nPages: 1" })],
+    ["a forged Title with U+2028", flatTreePdf(5, { title: "Report Pages: 1" })],
+    ["XMP claiming 1 page", flatTreePdf(5, { xmpPages: 1 })],
+  ])("counts the 5 pages of the tree despite %s", async (_name, bytes) => {
+    expect(await count(bytes)).toBe(5);
+  });
+
+  it("counts the kids, never /Count: /Count 1 over 50 kids is 50, /Count 1000 over 3 kids is 3", async () => {
+    expect(await count(flatTreePdf(50, { claimedCount: 1 }))).toBe(50);
+    expect(await count(flatTreePdf(3, { claimedCount: 1000 }))).toBe(3);
+  });
+
+  it("refuses a cycle, nesting past the depth limit and a tree with no pages", async () => {
+    expect(await outcome(cyclicTreePdf())).toBe("malformed");
+    expect(await outcome(deepTreePdf(PDF_PAGE_COUNT_LIMITS.maxDepth + 16))).toBe("limit");
+    expect(await count(deepTreePdf(10))).toBe(1);
+    expect(await outcome(zeroPagePdf())).toBe("malformed");
+  });
+
+  it("counts an encrypted PDF with an empty user password; refuses one that needs a password or an unknown handler", async () => {
+    expect(await count(await encryptedPdf(""))).toBe(3);
+    expect(await outcome(await encryptedPdf("letmein"))).toBe("encrypted");
+    expect(await outcome(await encryptedPdf("", "AcmeSecure"))).toBe("encrypted");
+  });
+
+  it("refuses a truncated file and a file that is not a PDF", async () => {
+    expect(await outcome(flatTreePdf(5).subarray(0, 40))).toBe("open-failed");
+    expect(await outcome(Buffer.from("not a pdf at all"))).toBe("open-failed");
+  });
+
+  it("stops a memory bomb at the external limit when the tool's own limit is off", async () => {
+    const bomb = memoryBombPdf(4_000_000);
+    const unbounded = { ...PDF_PAGE_COUNT_LIMITS, maxPages: 10_000_000, toolMemoryMiB: 0 };
+    // Only prlimit's address-space cap stands between the walk and the bomb, and it stops it.
+    expect(await outcome(bomb, { ...unbounded, addressSpaceMiB: 96 })).toMatch(/^(limit|killed)$/);
+    // The default budgets refuse it before memory matters (kid entries are capped at twice the page limit).
+    expect(await outcome(bomb)).toBe("limit");
+  }, 120_000);
+});
+
+describe.skipIf(!realTool)("an inflated /Count: no utility processes more than the walked count (real tools)", () => {
+  it("pdftoppm renders /Count's 8 pages without a range; every planned utility stops at the walked 3", async () => {
+    const dir = await mkdtemp(path.join(process.env.TMPDIR || tmpdir(), "inflated-count-"));
+    const source = path.join(dir, "in.pdf");
+    await writeFile(source, flatTreePdf(3, { claimedCount: 8 }));
+    const runner = new CommandRunner();
+    const pages = await countPdfPages(runner, source);
+    expect(pages).toBe(3);
+    // The hazard: with no -l, pdftoppm renders up to the claimed /Count.
+    const open = path.join(dir, "open");
+    await mkdir(open);
+    spawnSync(`${dopplerBin}/pdftoppm`, ["-r", "10", "-png", source, path.join(open, "p")]);
+    expect((await readdir(open)).length).toBe(8);
+    // Every page-range plan, run for real with the billed count, stops at it.
+    const out = async (name: string) => { const target = path.join(dir, name); await mkdir(target); return target; };
+    const tool = (name: string) => `${dopplerBin}/${name}`;
+    const rendered = await out("render");
+    await runner.run({ ...(await runner.renderPageImages(source, path.join(rendered, "p"), pages)), binary: tool("pdftoppm") });
+    expect((await readdir(rendered)).length).toBe(3);
+    const ranged = await out("ranged");
+    await runner.run({ ...(await runner.renderPdfPageRange(source, path.join(ranged, "p"), 1, pages, 10, 200)), binary: tool("pdftoppm") });
+    expect((await readdir(ranged)).length).toBe(3);
+    const split = await out("split");
+    await runner.run({ ...(await runner.splitPages(source, path.join(split, "p-%d.pdf"), pages)), binary: tool("pdfseparate") });
+    expect((await readdir(split)).length).toBe(3);
+    expect(processedPdfPages((await runner.run({ ...(await runner.extractText(source, pages, true)), binary: tool("pdftotext") })).stdout)).toBe(3);
+    expect(processedPdfPages((await runner.run({ ...(await runner.pageText(source, pages)), binary: tool("pdftotext") })).stdout)).toBe(3);
+    const sizes = (await runner.run({ ...(await runner.pdfPageSizes(source, 1, pages)), binary: tool("pdfinfo") })).stdout;
+    expect(sizes.match(/^Page +\d+ size:/gm)?.length).toBe(3);
+  }, 120_000);
+});
 
 describe("PDF page counts are measured by the worker, never parsed by the API", () => {
   it("local mode: the page tree walked under the parser sandbox replaces intake's estimate", async () => {
@@ -211,7 +263,7 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
     expect(await recordMeasuredPdfPageCount({ state, document, runner: host, sourcePath: async () => "/tmp/b.pdf", env: { DOCSLURP_PDF_MODE: "vm" } }))
       .toEqual({ pages: 12, method: "vm", estimate: 3 });
     expect(pageCount).toHaveBeenCalledWith({ input: "/tmp/b.pdf" }, undefined);
-    expect(host.pdfPageProbe).not.toHaveBeenCalled();
+    expect(host.pdfPageCount).not.toHaveBeenCalled();
     expect(host.run).not.toHaveBeenCalled();
   }, 60_000);
 
@@ -228,7 +280,7 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
     await db.exec(`update documents set page_count = 3, page_count_source = 'assumed' where id = 'local'`);
     const { state, document } = await stateFor("run1", "local");
     await expect(recordMeasuredPdfPageCount({ state, document, runner: runner(0), sourcePath: async () => "/tmp/a.pdf", env: { DOCSLURP_PDF_MODE: "local" } }))
-      .rejects.toThrow(/no valid page count/);
+      .rejects.toMatchObject({ outcome: "malformed" });
     await db.exec(`update documents set page_count = 7, page_count_source = 'counted' where id = 'local'`);
   }, 60_000);
 
@@ -300,11 +352,11 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
     // Attempt 2 (a retried activity): it loads the persisted, counted measurement and skips measuring, but still authorizes.
     const retry = await stateFor("run-retry", "retry");
     expect(retry.document).toMatchObject({ pageCount: 5000, pageCountSource: "counted", intakePageCount: 3 });
-    // Measured once, on attempt 1 (a page-tree walk of a few probes); the retry probes nothing.
-    const probes = host.pdfPageProbe.mock.calls.length;
-    expect(probes).toBeGreaterThan(1);
+    // Measured once, on attempt 1 (one pdfpagecount run); the retry measures nothing.
+    const probes = host.pdfPageCount.mock.calls.length;
+    expect(probes).toBe(1);
     expect(await recordMeasuredPdfPageCount({ state: retry.state, document: retry.document, runner: host, sourcePath: async () => "/tmp/r.pdf", env: { DOCSLURP_PDF_MODE: "local" } })).toBeNull();
-    expect(host.pdfPageProbe.mock.calls.length).toBe(probes);
+    expect(host.pdfPageCount.mock.calls.length).toBe(probes);
     await expect(authorizeMeasuredPages(retry.state, retry.document)).rejects.toMatchObject({ name: "RunPolicyError" });
     failing.mockRestore();
     const { rows } = await db.query<{ control_state: string | null }>(`select control_state from workspace_runs where id = 'run-retry'`);
@@ -357,7 +409,7 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
     state.store = store;
     await new FormatDetectStage(storage, host).run(state);
     expect(state.documentStage("off-pdf", "format-detect")?.status).toBe("failed");
-    expect(host.pdfPageProbe).not.toHaveBeenCalled();
+    expect(host.pdfPageCount).not.toHaveBeenCalled();
     expect(host.run).not.toHaveBeenCalled();
     expect((storage as unknown as { downloadSourceToTempFile: ReturnType<typeof vi.fn> }).downloadSourceToTempFile).not.toHaveBeenCalled();
   }, 60_000);

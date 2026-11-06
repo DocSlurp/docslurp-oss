@@ -443,6 +443,7 @@ export class ExtractMarkdownStage implements Stage {
                 }
                 let plannedExtractors = keepImageUnread ? null : await this.planExtractors({
                   mimeType: document.fileFacts?.sniffedMimeType ?? null,
+                  pageCount: document.pageCount,
                   tempFile,
                   multiStrategyVoting: extractionConfig.voting.enabled,
                   secondaryId: extractionConfig.voting.secondary,
@@ -483,6 +484,7 @@ export class ExtractMarkdownStage implements Stage {
                 if (plannedExtractors.secondary) attemptLedger.reserve(plannedExtractors.secondary.label);
                 const isolated = await this.isolateConcurrentCandidates({
                   mimeType: document.fileFacts?.sniffedMimeType ?? null,
+                  pageCount: document.pageCount,
                   primary: plannedExtractors.primary,
                   secondary: plannedExtractors.secondary,
                   sourcePath: tempFile,
@@ -1998,6 +2000,8 @@ export class ExtractMarkdownStage implements Stage {
    */
   private async isolateConcurrentCandidates(args: {
     mimeType?: string | null;
+    /** The billed page count: every page-range utility a candidate runs stops at it. */
+    pageCount: number;
     primary: PreparedExtractor;
     secondary: PreparedExtractor | null;
     sourcePath: string;
@@ -2024,7 +2028,7 @@ export class ExtractMarkdownStage implements Stage {
         this.runner,
         source,
         serializeExtractorOptions(args.options, extractor.label),
-        { format: args.format, mimeType: args.mimeType ?? null },
+        { format: args.format, mimeType: args.mimeType ?? null, pageCount: args.pageCount },
       );
       return { extractor: prepared, source };
     };
@@ -3006,6 +3010,8 @@ export class ExtractMarkdownStage implements Stage {
 
   private async planExtractors(args: {
     tempFile: string;
+    /** The billed page count: every page-range utility a candidate runs stops at it. */
+    pageCount: number;
     /** The bytes' sniffed MIME type (quarantine's file facts), handed to extractors that take one. */
     mimeType?: string | null;
     multiStrategyVoting: boolean;
@@ -3029,7 +3035,7 @@ export class ExtractMarkdownStage implements Stage {
           this.runner,
           args.tempFile,
           serializeExtractorOptions(args.options, id),
-          { format: args.format, mimeType: args.mimeType ?? null },
+          { format: args.format, mimeType: args.mimeType ?? null, pageCount: args.pageCount },
         ),
       ),
     );
@@ -3053,7 +3059,7 @@ export class ExtractMarkdownStage implements Stage {
           this.runner,
           args.tempFile,
           serializeExtractorOptions(args.options, args.secondaryId),
-          { format: args.format, mimeType: args.mimeType ?? null },
+          { format: args.format, mimeType: args.mimeType ?? null, pageCount: args.pageCount },
         );
         if (!explicit.plan.available) args.attemptLedger.markUnavailable(explicit.label);
         secondary = explicit.plan.available ? explicit : null;

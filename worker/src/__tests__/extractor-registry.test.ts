@@ -48,13 +48,19 @@ describe("document extractor registry", () => {
       .toEqual(["native-pdf", "poppler-text", "graph-local"]);
     const popplerPlan = { binary: "pdftotext", args: [], available: true };
     const poppler = await documentExtractorRegistry.prepare("poppler-text", {
-      extractText: async (source: string, preservePageBreaks: boolean) => {
+      extractText: async (source: string, pages: number, preservePageBreaks: boolean) => {
         expect(source).toBe("/tmp/sample.pdf");
+        expect(pages).toBe(4);
         expect(preservePageBreaks).toBe(true);
         return popplerPlan;
       },
-    } as unknown as CommandRunner, "/tmp/sample.pdf");
+    } as unknown as CommandRunner, "/tmp/sample.pdf", undefined, { format: "pdf", pageCount: 4 });
     expect(poppler.plan).toBe(popplerPlan);
+    // Without the measured count a PDF extractor refuses, never reading to the file's own claim.
+    for (const pageCount of [undefined, 0, 2.5]) {
+      await expect(documentExtractorRegistry.prepare("poppler-text", { extractText: async () => popplerPlan } as unknown as CommandRunner, "/tmp/sample.pdf", undefined, { format: "pdf", ...(pageCount === undefined ? {} : { pageCount }) }))
+        .rejects.toThrow(/measured page count/);
+    }
     let streamed = false;
     await poppler.execute({ stream: async () => { streamed = true; return {} as any; } } as any, "key", "/tmp/sample.pdf");
     expect(streamed).toBe(true);

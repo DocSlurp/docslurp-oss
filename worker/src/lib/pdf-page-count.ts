@@ -3,89 +3,89 @@ import { resolvePdfMode } from "@docslurp/shared";
 import { sandboxedPdfProvider } from "../extractors/plugins.js";
 import type { Document } from "../models.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
-import { CommandExitError, type CommandRunner } from "../tools/runner.js";
+import { HungWorkError } from "./hung-work.js";
+import { CommandExitError, type CommandRunner, type PdfPageCountLimits } from "../tools/runner.js";
 import { authorizeMeasuredPages } from "./measured-page-authorization.js";
 import { sniffedPdf } from "./sniffed-pdf.js";
 
 /** More pages than this is a parser fault, not a document. */
 export const MAX_MEASURED_PDF_PAGES = 100_000;
 
-/** One page probe's answer: the page exists, or the tool reported the document's last page (`lastPage` < the probed page). */
-export type PageProbe = { exists: true } | { exists: false; lastPage: number };
+/** Budgets for one structural count (`pdfpagecount`): explicit to the tool, plus an external hard limit and timeout around it. */
+export const PDF_PAGE_COUNT_LIMITS: PdfPageCountLimits = {
+  maxPages: MAX_MEASURED_PDF_PAGES,
+  // Real page trees are a few levels deep; Poppler's own default is 256.
+  maxDepth: 64,
+  toolMemoryMiB: 512,
+  addressSpaceMiB: 768,
+  cpuSeconds: 30,
+  wallMs: 60_000,
+};
 
-/** The page count could not be measured (a probe failed some other way, or the answers disagree). Never read as a count. */
+/**
+ * Why a structural count produced no number. Refused outcomes are verdicts on the document (it fails with the reason, no retry
+ * reads it differently); `unavailable` is the platform's (missing tool, a usage error, output that breaks the tool's contract).
+ */
+export type PdfPageCountOutcome =
+  | "open-failed"       // exit 1: not a readable PDF, or the output could not be written
+  | "encrypted"         // exit 2: needs a password, or an unknown security handler
+  | "limit"             // exit 3: pages, depth, work or memory over budget
+  | "malformed"         // exit 4: no pages, a cycle, a broken page tree
+  | "killed"            // killed by the external limit, the wall clock, or a crash (an abort, a signal, any other exit code)
+  | "unavailable";      // the tool is missing, exit 99 (usage), or exit 0 without exactly one count
+
+/** The page count could not be measured. Never read as a count. Refused outcomes fail the document; `unavailable` retries. */
 export class PdfPageCountError extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly outcome: PdfPageCountOutcome) {
     super(message);
-    this.name = "PdfPageCountError";
+    this.name = outcome === "unavailable" ? "PdfPageCountUnavailableError" : "PdfPageCountError";
   }
 }
 
-/**
- * The PDF's page count as its page tree is walked, never parsed out of text the author controls: the largest page `probe` reports
- * as existing, found by binary search over 1..limit (about 17 probes). Every "past the end" answer carries Poppler's own count of
- * the last page; they must all agree with the result, or the count is refused, so a damaged or hostile file that fails a page some
- * other way cannot shorten the count. Null when page 1 does not exist; throws past `limit`.
- */
-export async function pdfPageTreeCount(probe: (page: number) => Promise<PageProbe>, limit = MAX_MEASURED_PDF_PAGES): Promise<number | null> {
-  const reported = new Set<number>();
-  const exists = async (page: number) => {
-    const answer = await probe(page);
-    if (!answer.exists) reported.add(answer.lastPage);
-    return answer.exists;
-  };
-  if (!(await exists(1))) return null;
-  if (await exists(limit + 1)) throw new Error(`PDF has more than ${limit} pages`);
-  let low = 1;
-  let high = limit + 1;
-  while (high - low > 1) {
-    const middle = Math.floor((low + high) / 2);
-    if (await exists(middle)) low = middle;
-    else high = middle;
-  }
-  if (reported.size !== 1 || !reported.has(low)) {
-    throw new PdfPageCountError(`PDF page tree is inconsistent: probes found ${low} pages, Poppler reported ${[...reported].join(", ")}`);
-  }
-  return low;
+const EXIT_OUTCOMES: Record<number, PdfPageCountOutcome> = { 1: "open-failed", 2: "encrypted", 3: "limit", 4: "malformed", 99: "unavailable" };
+
+/** Exactly one decimal integer, at least 1, and a newline: anything else is not a count. */
+export function parsePdfPageCount(stdout: string, maxPages = MAX_MEASURED_PDF_PAGES): number | null {
+  const match = /^([1-9][0-9]{0,9})\n$/.exec(stdout);
+  const pages = match ? Number(match[1]) : null;
+  return pages !== null && Number.isSafeInteger(pages) && pages <= maxPages ? pages : null;
 }
 
 /**
- * Poppler's own message for a page past the end (utils/pdftotext.cc, errCommandLine): its format string holds only the two page
- * numbers, so no document text can appear in it. Matched as a whole line, for the page this probe asked for.
+ * The PDF's page count from its page tree, in the parser sandbox: one `pdfpagecount` run (runner.pdfPageCount), which walks the
+ * tree the way Poppler builds its page list and never reads `/Count`, Info, XMP or page content. Its stderr is fixed text and is
+ * never parsed. Every exit code maps to a distinct outcome; anything unexpected fails closed.
  */
-export function pastLastPage(stderr: string, page: number): number | null {
-  for (const line of stderr.split("\n")) {
-    const match = /^(?:\S+ \(99\): )?Command Line Error: Wrong page range given: the first page \((\d{1,7})\) can not be after the last page \((\d{1,7})\)\.\r?$/.exec(line);
-    if (match && Number(match[1]) === page && Number(match[2]) < page) return Number(match[2]);
-  }
-  return null;
-}
-
-/**
- * A page probe in the parser sandbox (runner.pdfPageProbe): exit 0 is an existing page; exit 99 with Poppler's wrong-page-range
- * line for this page is past the end; anything else (another 99, a crash, an unreadable file) fails closed with
- * PdfPageCountError, never a shorter count.
- */
-export function sandboxedPageProbe(runner: Pick<CommandRunner, "pdfPageProbe" | "run">, source: string, signal?: AbortSignal): (page: number) => Promise<PageProbe> {
-  return async (page) => {
-    const plan = await runner.pdfPageProbe(source, page);
-    if (!plan.available) throw new Error("PDF page count unavailable: pdftotext is not installed (DOCSLURP_PDF_MODE=local)");
-    try {
-      await runner.run(plan, signal);
-      return { exists: true };
-    } catch (error) {
-      const lastPage = error instanceof CommandExitError && error.exitCode === 99 ? pastLastPage(error.message, page) : null;
-      if (lastPage !== null) return { exists: false, lastPage };
-      throw new PdfPageCountError(`PDF page ${page} could not be probed (exit ${error instanceof CommandExitError ? error.exitCode : "unknown"})`);
+export async function countPdfPages(
+  runner: Pick<CommandRunner, "pdfPageCount" | "run">,
+  source: string,
+  signal?: AbortSignal,
+  limits: PdfPageCountLimits = PDF_PAGE_COUNT_LIMITS,
+): Promise<number> {
+  const plan = await runner.pdfPageCount(source, limits);
+  if (!plan.available) throw new PdfPageCountError("PDF page count unavailable: Doppler pdfpagecount or prlimit is not installed", "unavailable");
+  let stdout: string;
+  try {
+    stdout = (await runner.run(plan, signal)).stdout;
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    if (error instanceof CommandExitError) {
+      const outcome = error.exitCode === null ? "killed" : EXIT_OUTCOMES[error.exitCode] ?? "killed";
+      throw new PdfPageCountError(`PDF page count failed: ${outcome} (exit ${error.exitCode ?? "signal"})`, outcome);
     }
-  };
+    if (error instanceof HungWorkError) throw new PdfPageCountError("PDF page count failed: killed (wall-clock limit)", "killed");
+    throw error;
+  }
+  const pages = parsePdfPageCount(stdout, limits.maxPages);
+  if (pages === null) throw new PdfPageCountError("PDF page count failed: the tool exited 0 without exactly one page count", "unavailable");
+  return pages;
 }
 
 /**
  * The API never parses customer PDF bytes, so a PDF arrives with a page count intake estimated from its size (`assumed`).
  * Measure it in the PDF mode's boundary before any stage uses it or anything bills, and record it as `counted`:
  *  - `vm`: the sandboxed PDF provider counts it in a fresh VM; a provider that cannot is a refusal, never host parsing;
- *  - `local` (customer-owned): the page tree walked under the parser sandbox on this host (pdfPageTreeCount, exit codes only);
+ *  - `local` (customer-owned): the page tree walked under the parser sandbox on this host (countPdfPages: Doppler pdfpagecount);
  *  - `off`: nothing (PDF extraction refuses the document anyway).
  * Measuring only: the pages above the estimate are authorized separately, on every attempt (authorizeMeasuredPages). Billing
  * reads only this measured count: a PDF still `assumed` never bills (db/page-base-fee.ts).
@@ -93,7 +93,7 @@ export function sandboxedPageProbe(runner: Pick<CommandRunner, "pdfPageProbe" | 
 export async function recordMeasuredPdfPageCount(args: {
   state: WorkflowState;
   document: Document;
-  runner: Pick<CommandRunner, "pdfPageProbe" | "run">;
+  runner: Pick<CommandRunner, "pdfPageCount" | "run">;
   sourcePath: () => Promise<string>;
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
@@ -122,7 +122,7 @@ export async function recordMeasuredPdfPageCount(args: {
     if (counted.usage) state.usageLedger.enqueue(counted.usage);
     pages = Number.isSafeInteger(counted.pages) && counted.pages >= 1 && counted.pages <= MAX_MEASURED_PDF_PAGES ? counted.pages : null;
   } else {
-    pages = await pdfPageTreeCount(sandboxedPageProbe(args.runner, await args.sourcePath(), args.signal));
+    pages = await countPdfPages(args.runner, await args.sourcePath(), args.signal);
   }
   if (pages === null) throw new Error("unreadable PDF: no valid page count");
   if (!state.store?.setDocumentPageCount) throw new Error("PDF page count measured but the store cannot persist it");
@@ -143,7 +143,7 @@ export function processedPdfPages(markdown: string): number {
 /**
  * Cross-checks the structural count against the pages extraction actually processed, and bills and authorizes the larger: when
  * the extractor processed more pages than the page tree reported, the page count is raised to that (recorded `counted`) and the
- * extra pages are authorized (authorizeMeasuredPages). A large disagreement either way is flagged in the stage stats and logs.
+ * extra pages are authorized (authorizeMeasuredPages). Any disagreement either way is flagged in the stage stats and logs.
  */
 export async function reconcileProcessedPdfPages(
   state: WorkflowState,
@@ -162,7 +162,8 @@ export async function reconcileProcessedPdfPages(
     await authorizeMeasuredPages(state, document);
     return { measured, processed, mismatch: "processed-above-measured" };
   }
-  if (processed * 2 < measured && measured - processed > 2) {
+  if (processed < measured) {
+    // Billing stays on the walked count (the larger); the disagreement is flagged, never silently absorbed.
     console.warn(`[pdf-pages] document=${document.id} extraction processed ${processed} of ${measured} measured pages`);
     return { measured, processed, mismatch: "processed-below-measured" };
   }

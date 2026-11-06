@@ -58,6 +58,15 @@ export interface PrepareContext {
   env?: NodeJS.ProcessEnv;
   /** The bytes' sniffed MIME type (quarantine's file facts); extractors that detect formats get it explicitly. */
   mimeType?: string | null;
+  /** The document's billed page count; PDF extractors pass `-f 1 -l pageCount` to every page-range utility. */
+  pageCount?: number;
+}
+
+/** The billed page count a PDF extractor bounds its utilities to; without one it refuses rather than read the file's own claim. */
+function requirePageCount(context: PrepareContext | undefined, extractor: string): number {
+  const pages = context?.pageCount;
+  if (!Number.isSafeInteger(pages) || pages! < 1) throw new Error(`${extractor} needs the document's measured page count`);
+  return pages!;
 }
 
 type Preparation = (runner: CommandRunner, sourcePath: string, configJson?: string, context?: PrepareContext) => Promise<CommandPlan>;
@@ -172,14 +181,14 @@ const registered = [
   // (DOCSLURP_PDF_MODE=local; prepare refuses every host PDF extractor elsewhere). A missing converter is an error, never a
   // quiet step down to another host parser.
   definition({ id: "doppler-md", tableAware: true, execute: stream,
-    prepare: async (runner, source) => {
-      const plan = await runner.dopplerMarkdown(source);
+    prepare: async (runner, source, _config, context) => {
+      const plan = await runner.dopplerMarkdown(source, requirePageCount(context, "doppler-md"));
       // Startup refuses local mode without the converter; one missing now is an error the ingest report shows as a fallback.
       if (!plan.available) console.error(`[extractors] doppler-md unavailable: pdftomarkdown is not installed at ${plan.binary}`);
       return plan;
     } }),
   definition({ id: "poppler-text", execute: stream,
-    prepare: (runner, source) => runner.extractText(source, true) }),
+    prepare: (runner, source, _config, context) => runner.extractText(source, requirePageCount(context, "poppler-text"), true) }),
   definition({ id: "graph-local", execute: graph,
     prepare: async (_runner, source) => {
       const adapters = await availableLocalArtifactAdapters({ outputDir: path.dirname(source) });

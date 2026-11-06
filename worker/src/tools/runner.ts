@@ -95,6 +95,30 @@ export interface CommandPlan {
   readOnlyInputs?: boolean;
 }
 
+/** Budgets for one `pdfpagecount` run (lib/pdf-page-count.ts PDF_PAGE_COUNT_LIMITS). */
+export interface PdfPageCountLimits {
+  maxPages: number;
+  maxDepth: number;
+  /** The tool's own address-space limit (`-max-memory`). */
+  toolMemoryMiB: number;
+  /** The external hard limit (`prlimit --as`), above the tool's own so the tool's clean refusal comes first. */
+  addressSpaceMiB: number;
+  cpuSeconds: number;
+  wallMs: number;
+}
+
+/**
+ * `-f first -l last` for a Poppler/Doppler utility that takes a page range. Every such call passes an explicit range ending at the
+ * billed page count: without `-l` (or with `-l 0`, which the utilities read as "all pages") an inflated `/Count` makes them
+ * process, render or list pages up to the number the file claims. Throws on anything but 1 <= first <= last.
+ */
+export function pdfPageRangeArgs(first: number, last: number): string[] {
+  if (!Number.isSafeInteger(first) || !Number.isSafeInteger(last) || first < 1 || last < first) {
+    throw new Error(`invalid PDF page range ${first}..${last}: a page-range utility needs 1 <= first <= last`);
+  }
+  return ["-f", String(first), "-l", String(last)];
+}
+
 export interface CommandResult {
   stdout: string;
   stderr: string;
@@ -554,21 +578,28 @@ export class CommandRunner {
    * page; past the last page it exits 99 with Poppler's own "Wrong page range given" line (pdf-page-count.ts reads only that
    * tool-authored line and the exit code, never the document's text or metadata). The page's text goes to /dev/null.
    */
-  async pdfPageProbe(source: string, page: number): Promise<CommandPlan> {
-    if (!Number.isSafeInteger(page) || page < 1) throw new Error("pdfPageProbe needs a page number of at least 1");
-    return await this.planDocumentTool({
-      binary: "pdftotext",
-      args: ["-f", String(page), "-l", String(page), source, "/dev/null"],
-      fileArgIndexes: [4],
+  /**
+   * Doppler's `pdfpagecount` (the page tree walked as Poppler builds its page list; never `/Count`, Info or XMP) under an external
+   * hard limit on top of its own: `prlimit` caps its address space and CPU time, the plan its wall clock, and the tool gets explicit
+   * page, depth and memory budgets. Stdout is one integer on success; lib/pdf-page-count.ts maps every exit code.
+   */
+  async pdfPageCount(source: string, limits: PdfPageCountLimits): Promise<CommandPlan> {
+    const tool = path.join(dopplerBinDir(), "pdfpagecount");
+    const planned = planDocumentToolInvocation({
+      binary: tool,
+      args: ["-max-pages", String(limits.maxPages), "-max-depth", String(limits.maxDepth), "-max-memory", String(limits.toolMemoryMiB), source],
+      fileArgIndexes: [6],
       supportsDoubleDash: true,
     });
+    const plan = await this.plan("prlimit", `--as=${limits.addressSpaceMiB * 1024 * 1024}`, `--cpu=${limits.cpuSeconds}`, "--", planned.binary, ...planned.args);
+    return { ...plan, available: plan.available && existsSync(tool), timeoutMs: limits.wallMs, readOnlyInputs: true };
   }
 
-  async splitPages(source: string, pattern: string): Promise<CommandPlan> {
+  async splitPages(source: string, pattern: string, pages: number): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pdfseparate",
-      args: [source, pattern],
-      fileArgIndexes: [0, 1],
+      args: [...pdfPageRangeArgs(1, pages), source, pattern],
+      fileArgIndexes: [4, 5],
       supportsDoubleDash: true,
     });
   }
@@ -581,7 +612,7 @@ export class CommandRunner {
   ): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pdfseparate",
-      args: ["-f", String(firstPage), "-l", String(lastPage), source, pattern],
+      args: [...pdfPageRangeArgs(firstPage, lastPage), source, pattern],
       fileArgIndexes: [4, 5],
       supportsDoubleDash: true,
     });
@@ -609,11 +640,11 @@ export class CommandRunner {
     });
   }
 
-  async renderPageImages(source: string, prefix: string): Promise<CommandPlan> {
+  async renderPageImages(source: string, prefix: string, pages: number): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pdftoppm",
-      args: ["-png", "-r", "150", source, prefix],
-      fileArgIndexes: [3, 4],
+      args: ["-png", "-r", "150", ...pdfPageRangeArgs(1, pages), source, prefix],
+      fileArgIndexes: [7, 8],
       supportsDoubleDash: true,
     });
   }
@@ -640,10 +671,7 @@ export class CommandRunner {
         String(maxEdgePx),
         "-r",
         String(dpi),
-        "-f",
-        String(firstPage),
-        "-l",
-        String(lastPage),
+        ...pdfPageRangeArgs(firstPage, lastPage),
         source,
         prefix,
       ],
@@ -674,8 +702,8 @@ export class CommandRunner {
    * converts the XHTML), pages joined by form feeds. A separate executable in the parser sandbox, at its absolute path off PATH
    * (tools/doppler.ts); customer-owned local PDF mode only.
    */
-  async dopplerMarkdown(source: string): Promise<CommandPlan> {
-    return await this.planDocumentTool({ binary: dopplerConverterPath(), args: [source], fileArgIndexes: [0], supportsDoubleDash: true });
+  async dopplerMarkdown(source: string, pages: number): Promise<CommandPlan> {
+    return await this.planDocumentTool({ binary: dopplerConverterPath(), args: [...pdfPageRangeArgs(1, pages), source], fileArgIndexes: [4], supportsDoubleDash: true });
   }
 
   /** Markdown from a .docx, .pptx or .xlsx file (scripts/office_markdown.py, run in the parser sandbox). */
@@ -693,10 +721,11 @@ export class CommandRunner {
     return { binary: provider.id, args: [], available: true, sandboxedPdf: { input: source, output } };
   }
 
-  async extractText(source: string, preservePageBreaks = false): Promise<CommandPlan> {
+  async extractText(source: string, pages: number, preservePageBreaks = false): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pdftotext",
       args: [
+        ...pdfPageRangeArgs(1, pages),
         "-layout",
         "-enc",
         "UTF-8",
@@ -706,25 +735,25 @@ export class CommandRunner {
         source,
         "-",
       ],
-      fileArgIndexes: [preservePageBreaks ? 5 : 6],
+      fileArgIndexes: [preservePageBreaks ? 9 : 10],
       supportsDoubleDash: true,
     });
   }
 
-  async extractHtml(source: string): Promise<CommandPlan> {
+  async extractHtml(source: string, pages: number): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pdftohtml",
-      args: ["-stdout", "-hidden", "-nodrm", source],
-      fileArgIndexes: [3],
+      args: ["-stdout", "-hidden", "-nodrm", ...pdfPageRangeArgs(1, pages), source],
+      fileArgIndexes: [7],
       supportsDoubleDash: true,
     });
   }
 
-  async extractImages(source: string, prefix: string): Promise<CommandPlan> {
+  async extractImages(source: string, prefix: string, pages: number): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pdfimages",
-      args: ["-png", "-j", source, prefix],
-      fileArgIndexes: [2, 3],
+      args: ["-png", "-j", ...pdfPageRangeArgs(1, pages), source, prefix],
+      fileArgIndexes: [6, 7],
       supportsDoubleDash: true,
     });
   }
@@ -733,8 +762,8 @@ export class CommandRunner {
   async listImages(source: string, lastPage: number): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pdfimages",
-      args: ["-list", "-l", String(Math.max(1, Math.trunc(lastPage))), source],
-      fileArgIndexes: [3],
+      args: ["-list", ...pdfPageRangeArgs(1, lastPage), source],
+      fileArgIndexes: [5],
       supportsDoubleDash: true,
     });
   }
@@ -743,7 +772,7 @@ export class CommandRunner {
   async listPdfImages(source: string, firstPage: number, lastPage: number): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pdfimages",
-      args: ["-list", "-f", String(firstPage), "-l", String(lastPage), source],
+      args: ["-list", ...pdfPageRangeArgs(firstPage, lastPage), source],
       fileArgIndexes: [5],
       supportsDoubleDash: true,
     });
@@ -758,7 +787,7 @@ export class CommandRunner {
     const rules = existsSync(doppler);
     return await this.planDocumentTool({
       binary: rules ? doppler : "pdftotext",
-      args: [...(rules ? ["-rules"] : []), "-bbox-layout", "-f", String(firstPage), "-l", String(lastPage), source, output],
+      args: [...(rules ? ["-rules"] : []), "-bbox-layout", ...pdfPageRangeArgs(firstPage, lastPage), source, output],
       fileArgIndexes: rules ? [6, 7] : [5, 6],
       supportsDoubleDash: true,
     });
@@ -777,7 +806,7 @@ export class CommandRunner {
   async pdfPageSizes(source: string, firstPage: number, lastPage: number): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pdfinfo",
-      args: ["-f", String(firstPage), "-l", String(lastPage), source],
+      args: [...pdfPageRangeArgs(firstPage, lastPage), source],
       fileArgIndexes: [4],
       supportsDoubleDash: true,
     });
@@ -787,8 +816,8 @@ export class CommandRunner {
   async pageText(source: string, lastPage: number): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pdftotext",
-      args: ["-l", String(Math.max(1, Math.trunc(lastPage))), "-enc", "UTF-8", "-eol", "unix", source, "-"],
-      fileArgIndexes: [6],
+      args: [...pdfPageRangeArgs(1, lastPage), "-enc", "UTF-8", "-eol", "unix", source, "-"],
+      fileArgIndexes: [8],
       supportsDoubleDash: true,
     });
   }

@@ -63,12 +63,15 @@ for (const name of profile === 'routing' ? [] : ['mammoth', '@lancedb/lancedb'])
 // Debian's poppler-utils (no host tool is replaced by the fork).
 if ((process.env.DOCSLURP_DOPPLER_REQUIRED ?? '').trim() === '1') {
   const dopplerBin = (process.env.DOCSLURP_DOPPLER_BIN_DIR ?? '').trim() || '/usr/lib/doppler/bin';
-  for (const name of ['pdftomarkdown', 'doppler-md', 'pdftotext']) {
+  for (const name of ['pdftomarkdown', 'doppler-md', 'pdftotext', 'pdfpagecount']) {
     if (!existsSync(path.join(dopplerBin, name))) failures.push(`missing Doppler executable: ${path.join(dopplerBin, name)}`);
   }
   const forkHelp = spawnSync(path.join(dopplerBin, 'pdftotext'), ['-h'], { encoding: 'utf8', timeout: 30000 });
   if (!`${forkHelp.stdout ?? ''}${forkHelp.stderr ?? ''}`.includes('-wordmeta')) failures.push(`${dopplerBin}/pdftotext is not the Doppler fork`);
   if (await binaryPath('pdftomarkdown')) failures.push('pdftomarkdown is on PATH: Doppler must stay off PATH (DOCSLURP_DOPPLER_BIN_DIR)');
+  // The structural page count runs under prlimit (an external address-space and CPU limit around pdfpagecount).
+  if (!(await binaryPath('prlimit'))) failures.push('missing prlimit (util-linux): the PDF page count runs under it');
+  if (spawnSync(path.join(dopplerBin, 'pdfpagecount'), ['-v'], { timeout: 30000 }).status !== 0) failures.push(`${dopplerBin}/pdfpagecount does not run`);
 }
 if (profile === 'full' || profile === 'test' || profile === 'lean') {
   // Every image bakes the base parsers into its venv (runtime pip installs are off).

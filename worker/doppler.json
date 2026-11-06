@@ -2,12 +2,12 @@
   "name": "Doppler",
   "repository": "https://github.com/DocSlurp/doppler",
   "license": "GPL-2.0-or-later",
-  "commit": "827b3cccecfdcfe61ad89335ec2fb5476df014da",
+  "commit": "c69df42525eb44a803435086f520c7255d741b0a",
   "source": {
-    "url": "https://github.com/DocSlurp/doppler/releases/download/docslurp-827b3cc/doppler-827b3cc-src.tar.gz",
-    "sha256": "39a589f669e44f8e24136bef85c0d0705668f678fb14f21f65ac2f0aa1f4779d",
-    "prefix": "doppler-827b3cc"
+    "url": "https://github.com/DocSlurp/doppler/releases/download/docslurp-c69df42/doppler-c69df42-src.tar.gz",
+    "sha256": "94639c72590421c9216852d9847b4b6b1af49628db50d583af53b257a51dec7f",
+    "prefix": "doppler-c69df42"
   },
-  "notes": "Built from this pinned public source in the worker images (worker/Dockerfile.lean, worker/Dockerfile.full) and installed under /usr/lib/doppler, off PATH, as separate executables (the Poppler utilities, doppler-md, pdftomarkdown). The PDF extractor: in a VM (vm-pdf) or, customer-owned only, on the host (DOCSLURP_PDF_MODE=local). Never linked or vendored into core packages or the SDKs (GPL-2.0-or-later).",
+  "notes": "Built from this pinned public source in the worker images (worker/Dockerfile.lean, worker/Dockerfile.full) and installed under /usr/lib/doppler, off PATH, as separate executables (the Poppler utilities, pdfpagecount, doppler-md, pdftomarkdown). The PDF extractor: in a VM (vm-pdf) or, customer-owned only, on the host (DOCSLURP_PDF_MODE=local). Never linked or vendored into core packages or the SDKs (GPL-2.0-or-later).",
   "advisories": "Doppler is a Poppler fork pinned to one commit; Debian's poppler-utils security patches do not reach it. Before each release, and at least monthly, check Poppler upstream security fixes (gitlab.freedesktop.org/poppler/poppler, Debian security tracker for src:poppler) against the fork's base and the DocSlurp/doppler advisories, rebase or cherry-pick, and move this pin (commit, source url and sha256). Tracked in TODO.md."
 }
