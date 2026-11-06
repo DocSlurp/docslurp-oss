@@ -5,7 +5,10 @@
 --
 -- The value only ever rises: runtime roles read the table and raise a key through pricing_state_raise(key, candidate), a
 -- SECURITY DEFINER function that inserts the key or keeps the larger of the stored and candidate values in one statement
--- (concurrent raises serialize on the row) and returns the stored value. No runtime role may INSERT, UPDATE, DELETE or
+-- (concurrent raises serialize on the row) and returns the stored value. Each raise may lift a value by at most 1000 (a
+-- missing key counts as 0) and fails otherwise, so a compromised runtime role (the worker raises too: every process that
+-- activates the provider's state does) cannot jump a value to the bigint limit and wedge it there. Pre-release: this
+-- migration was edited in place before its first deploy (council G L1, 2026-11-06). No runtime role may INSERT, UPDATE, DELETE or
 -- TRUNCATE the table itself, so none can lower or reset a value; the grants below hold at commit for the roles that exist,
 -- and server/db/roles.mjs reconciles them after every migration.
 --
@@ -18,12 +21,21 @@ CREATE TABLE IF NOT EXISTS pricing_provider_state (
 );
 --> statement-breakpoint
 CREATE OR REPLACE FUNCTION pricing_state_raise(p_key text, p_candidate bigint) RETURNS bigint
-LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+DECLARE stored bigint;
+BEGIN
+  SELECT s.value INTO stored FROM public.pricing_provider_state s WHERE s.key = p_key FOR UPDATE;
+  -- A counter rises by at most 1000 per raise (a missing key counts as 0), so no role can wedge it near the bigint limit.
+  IF p_candidate::numeric > coalesce(stored, 0)::numeric + 1000 THEN
+    RAISE EXCEPTION 'pricing_state_raise: candidate exceeds the stored value by more than 1000' USING ERRCODE = '22003';
+  END IF;
   INSERT INTO public.pricing_provider_state AS s (key, value) VALUES (p_key, p_candidate)
   ON CONFLICT (key) DO UPDATE
     SET value = greatest(s.value, excluded.value),
         updated_at = CASE WHEN excluded.value > s.value THEN now() ELSE s.updated_at END
-  RETURNING value
+  RETURNING s.value INTO stored;
+  RETURN stored;
+END
 $$;
 --> statement-breakpoint
 REVOKE ALL ON public.pricing_provider_state FROM PUBLIC;

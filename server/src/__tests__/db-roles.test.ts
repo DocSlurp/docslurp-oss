@@ -342,6 +342,20 @@ describe("pricing_provider_state (migration 0131)", () => {
     expect(await state.read("concurrent.key")).toBe(candidates.reduce((max, value) => (value > max ? value : max)));
   });
 
+  it("lets no role jump a value more than 1000 above the stored one (council G L1)", async () => {
+    for (const role of [app, worker]) {
+      const state = await stateAs(role);
+      const key = `card.jump.${role}`;
+      await expect(state.raise(key, 1001n)).rejects.toThrow(/more than 1000/);
+      expect(await state.read(key)).toBeNull();
+      expect(await state.raise(key, 9n)).toBe(9n);
+      await expect(state.raise(key, 2n ** 63n - 1n)).rejects.toThrow(/more than 1000/);
+      await expect(state.raise(key, 1010n)).rejects.toThrow(/more than 1000/);
+      expect(await state.read(key)).toBe(9n);
+      expect(await state.raise(key, 1009n)).toBe(1009n);
+    }
+  });
+
   it("denies runtime roles every direct write: no INSERT, UPDATE, DELETE or TRUNCATE", async () => {
     expect(WORKER_TABLES.pricing_provider_state?.privileges).toEqual(["select"]);
     for (const role of [app, worker, backup]) {

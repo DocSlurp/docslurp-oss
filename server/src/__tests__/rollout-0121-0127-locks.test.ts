@@ -80,7 +80,7 @@ describe("0121-0131 lock prelude", () => {
     const all = statements(release.find((name) => name.startsWith("0131_"))!);
     expect(all.some((statement) => /^LOCK TABLE/i.test(statement))).toBe(false);
     expect(all[0]).toMatch(/^CREATE TABLE IF NOT EXISTS pricing_provider_state \(/);
-    expect(all[1]).toMatch(/^CREATE OR REPLACE FUNCTION pricing_state_raise\(p_key text, p_candidate bigint\) RETURNS bigint\s+LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, public/);
+    expect(all[1]).toMatch(/^CREATE OR REPLACE FUNCTION pricing_state_raise\(p_key text, p_candidate bigint\) RETURNS bigint\s+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public/);
     for (const statement of all) expect(statement).not.toMatch(/\b(?:ALTER TABLE|REFERENCES|CREATE (?:UNIQUE )?INDEX)\b/i);
   });
 });
