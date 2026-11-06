@@ -72,10 +72,33 @@ export class SandboxRunError extends Error {
   constructor(
     message: string,
     readonly usage?: UsageEvent,
+    options?: { cause?: unknown },
   ) {
-    super(message);
+    super(message, options);
     this.name = "SandboxRunError";
   }
+}
+
+/**
+ * The sandbox, not the document, failed: a VM that could not be created or hardened, a leftover kill that did not
+ * verify, a control deadline, a transport error. Infrastructure (lib/document-failure.ts): retried, never a verdict on
+ * the document (real-Modal check F1). The runner notes it per document (session-context.ts), so a stage that catches it
+ * and falls back still fails the activity instead of failing or degrading the document.
+ */
+export class SandboxInfrastructureError extends SandboxRunError {
+  constructor(message: string, usage?: UsageEvent, options?: { cause?: unknown }) {
+    super(message, usage, options);
+    this.name = "SandboxInfrastructureError";
+  }
+}
+
+export function findSandboxInfrastructureError(error: unknown): SandboxInfrastructureError | null {
+  let current: unknown = error;
+  for (let depth = 0; current && depth < 8; depth++) {
+    if (current instanceof Error && current.name === "SandboxInfrastructureError") return current as SandboxInfrastructureError;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return null;
 }
 
 export interface SandboxSession {

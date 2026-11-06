@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
-import type { SandboxSession } from "./types.js";
+import { findSandboxInfrastructureError, type SandboxSession } from "./types.js";
 
 /**
  * One sandbox session per scope (one Temporal activity). The session opens
@@ -13,7 +13,8 @@ export class SandboxSessionScope {
   constructor(private readonly open: () => Promise<SandboxSession>) {}
 
   get(): Promise<SandboxSession> {
-    this.opening ??= this.open();
+    // A session that could not be created is the sandbox's failure: noted for the document that asked (real-Modal F1).
+    this.opening ??= this.open().catch((error: unknown) => { noteSandboxInfrastructureError(error); throw error; });
     return this.opening;
   }
 
@@ -45,6 +46,32 @@ export class SandboxSessionScope {
 }
 
 export const sandboxScopeStorage = new AsyncLocalStorage<SandboxSessionScope>();
+
+/** The sandbox infrastructure failure seen while one document's stage ran (watchSandboxInfrastructure). */
+const infrastructureWatch = new AsyncLocalStorage<{ error: Error | null }>();
+
+/**
+ * Run `fn` (one document's stage) watching for sandbox infrastructure failures (SandboxInfrastructureError). The runner
+ * notes every one it sees, so the caller learns of it even when the stage caught it and fell back to another extractor
+ * or skipped a page: such a document must neither fail nor complete on a degraded result (real-Modal check F1).
+ */
+export async function watchSandboxInfrastructure<T>(fn: () => Promise<T>): Promise<{ result?: T; error?: unknown; infrastructure: Error | null }> {
+  const holder: { error: Error | null } = { error: null };
+  try {
+    const result = await infrastructureWatch.run(holder, fn);
+    return { result, infrastructure: holder.error };
+  } catch (error) {
+    return { error, infrastructure: holder.error };
+  }
+}
+
+/** Record `error` for the watching document when it is (or wraps) a SandboxInfrastructureError. */
+export function noteSandboxInfrastructureError(error: unknown): void {
+  const infrastructure = findSandboxInfrastructureError(error);
+  if (!infrastructure) return;
+  const holder = infrastructureWatch.getStore();
+  if (holder) holder.error ??= infrastructure;
+}
 
 /** The current activity's latched teardown failure, if any (see SandboxSessionScope.teardownError). */
 export function latchedTeardownError(): Error | null {

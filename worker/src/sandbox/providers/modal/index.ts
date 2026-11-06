@@ -8,6 +8,7 @@ import type { UsageEvent } from "../../../models.js";
 import { readSandboxConfig } from "../../config-schema.js";
 import {
   SandboxConfigError,
+  SandboxInfrastructureError,
   SandboxRunError,
   type ParserSandboxProvider,
   type SandboxCommand,
@@ -562,7 +563,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         }
         if (code !== 0) {
           await terminate().catch(() => {});
-          throw new Error("parser VM leftover processes could not be killed; session closed");
+          throw new SandboxInfrastructureError("parser VM leftover processes could not be killed; session closed");
         }
       }
 
@@ -592,7 +593,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
 
       async function executeExclusive(command: SandboxCommand, started: number, signal?: AbortSignal): Promise<SandboxResult> {
         // A command queued behind one that closed the session never starts.
-        if (closed) throw new SandboxRunError("modal sandbox session is closed");
+        if (closed) throw new SandboxInfrastructureError("modal sandbox session is closed");
         while (discarding || cleaning) await (discarding ?? cleaning);
         cleanedAfterRun = false;
         inFlight++;
@@ -601,7 +602,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           catch (error) {
             if (error instanceof Error && error.message === "parser VM control deadline exceeded") {
               await terminate().catch(() => {});
-              throw new SandboxRunError(error.message, meter(started));
+              throw new SandboxInfrastructureError(error.message, meter(started), { cause: error });
             }
             throw error;
           }
@@ -660,13 +661,14 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         } catch (error) {
           // Elapsed Modal time is billed even when staging or exec failed.
           if (error instanceof CommandAborted) throw new SandboxRunError("modal sandbox command aborted", meter(started));
-          throw new SandboxRunError(`modal sandbox command failed: ${safeMessage(config, error)}`, meter(started));
+          // Anything else that throws here is the sandbox's (a document's own failure is a non-zero exit, not a throw).
+          throw new SandboxInfrastructureError(`modal sandbox command failed: ${safeMessage(config, error)}`, meter(started), { cause: error });
         }
       }
 
       await ensureSandbox().catch(async (error: unknown) => {
         await terminate().catch(() => {});
-        throw new Error(`modal sandbox creation failed: ${safeMessage(config, error)}`);
+        throw new SandboxInfrastructureError(`modal sandbox creation failed: ${safeMessage(config, error)}`, undefined, { cause: error });
       });
 
       const session: SandboxSession = {

@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 
 import type { Document } from "../models.js";
 import { runWithPerfContext } from "../lib/perf-context.js";
-import { latchedTeardownError } from "../sandbox/session-context.js";
+import { latchedTeardownError, watchSandboxInfrastructure } from "../sandbox/session-context.js";
 import { findQuarantinedSourceError } from "../sandbox/source-quarantine.js";
 import { noteWorkProgress } from "../lib/work-progress.js";
 import { hasFailedDocumentStage } from "./document-health.js";
@@ -285,7 +285,7 @@ export async function runDocumentStage(
         `attempt=${attempt.attempt}/${attempt.totalAttempts} strategy=${attempt.strategy ?? "default"}`,
     );
     try {
-      const result = await runWithPerfContext({
+      const watched = await watchSandboxInfrastructure(() => runWithPerfContext({
         runId: state.run.id,
         documentId: document.id,
         orgId: state.run.orgId,
@@ -295,7 +295,13 @@ export async function runDocumentStage(
         stageName,
         pushPerformance: (event) => state.pendingPerformance.push(event),
         pushUsage: (event) => state.usageLedger.enqueue(event),
-      }, async () => await runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.allowChinaProviders, speedBoost: state.run.pipeline.speedBoost }, () => run(attempt.strategy)));
+      }, async () => await runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.allowChinaProviders, speedBoost: state.run.pipeline.speedBoost }, () => run(attempt.strategy))));
+      // The sandbox failed under this document (VM creation or hardening, a leftover kill, a control deadline): that is
+      // the outcome, even when the stage caught it and fell back or skipped a page. The document neither fails nor
+      // completes on it; the activity retries (real-Modal check F1).
+      if (watched.infrastructure) throw watched.infrastructure;
+      if ("error" in watched) throw watched.error;
+      const result = watched.result!;
       // A command teardown that failed in this activity ends it, even if the stage swallowed it.
       const latched = latchedTeardownError();
       if (latched) throw latched;

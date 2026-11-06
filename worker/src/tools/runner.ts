@@ -29,7 +29,7 @@ import { finished } from "node:stream";
 import type { Writable } from "node:stream";
 
 import { interpreterRoots, resolveCommandPaths } from "../sandbox/paths.js";
-import { latchedTeardownError, sandboxScopeStorage } from "../sandbox/session-context.js";
+import { latchedTeardownError, noteSandboxInfrastructureError, sandboxScopeStorage } from "../sandbox/session-context.js";
 import { admitCommandSource } from "../sandbox/source-quarantine.js";
 import { assertTeardownBreakerClosed } from "../sandbox/teardown-breaker.js";
 import { defaultParserSandbox, registeredParserSandbox } from "../sandbox/startup.js";
@@ -1604,6 +1604,7 @@ export class CommandRunner {
       result = await launched.remote;
     } catch (error) {
       if (error instanceof SandboxRunError && error.usage) recordRemoteUsage(error.usage);
+      noteSandboxInfrastructureError(error);
       throw error;
     } finally {
       clearInterval(progress);
