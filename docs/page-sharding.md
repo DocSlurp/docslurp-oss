@@ -70,7 +70,11 @@ which is the known isolation gap; sharding them must not widen it and needs a co
 temporal-workflow-changes.md)
 
 1. VM PDF extraction: the provider plugin runs range shards as parallel VMs and merges them in page order (its
-   own contract; see extractor-plugins.md).
+   own contract; see extractor-plugins.md). The Doppler guest converts each range `{first, last, documentPages}` in one
+   streaming `pdftomarkdown` pass with 16 context pages either side; on any shard failure the host runs one
+   whole-document VM once (all VM costs recorded). Running headers are judged as in a whole-document pass; the body
+   font size comes from each shard's first window, so headings and emphasis across a short shard with atypical
+   opening pages can differ from a whole-document run.
 2. Page-range shard activity: extend `runPipelineStageShard` from document IDs to
    `(documentId, pageRange)` for render-images and embed.
 3. Feed observed shard timings back through `calibrateShardProfile` (per stage, executor class).

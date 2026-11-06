@@ -292,7 +292,7 @@ export const postgresIntakeRecords: WorkspaceIntakeRecords = {
     const defaults = await getUserSettings(args.userId).then((settings) => settings.general, () => null);
     const template = getWorkspaceTemplate(args.templateKey ?? null);
     const base = seedPipelineFromProcessingDefaults(
-      normalizePipelineFeatures(template?.pipeline ?? { ...defaultPipelineFeatures, summarize: true }),
+      normalizePipelineFeatures(template?.pipeline ?? defaultPipelineFeatures),
       defaults,
     );
     const pipeline = applyWorkspacePipelineOverrides(base, overrides, template);
