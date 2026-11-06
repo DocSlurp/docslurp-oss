@@ -1,5 +1,6 @@
 import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { createHash } from "node:crypto";
 
 /** One remote filesystem entry. `mtime` is in the remote clock's units (Modal reports whole seconds). */
 export interface RemoteEntry {
@@ -42,13 +43,14 @@ export interface RemoteSnapshot {
  */
 export class SessionStaging {
   private readonly uploaded = new Set<string>();
+  private readonly inputHashes = new Map<string, string>();
   /** Path -> the last upload, download or directory creation that put it there, by sequence number. */
   private readonly claims = new Map<string, { seq: number; kind: ClaimKind }>();
   private seq = 0;
 
   constructor(private readonly remote: RemoteFs) {}
 
-  /** Upload each local file or directory (recursively) once per session. Missing paths and symlinks are skipped. */
+  /** Upload each local file or directory (recursively) when their content changes. Missing paths and symlinks are skipped. */
   async ensureUploaded(paths: string[]): Promise<void> {
     for (const p of paths) await this.upload(path.resolve(p));
   }
@@ -130,7 +132,7 @@ export class SessionStaging {
 
   /** Drop a removed path, its subtree and its ancestors from the uploaded set so they upload again. */
   private forget(abs: string): void {
-    for (const p of this.uploaded) if (p === abs || p.startsWith(`${abs}${path.sep}`)) this.uploaded.delete(p);
+    for (const p of this.uploaded) if (p === abs || p.startsWith(`${abs}${path.sep}`)) { this.uploaded.delete(p); this.inputHashes.delete(p); }
     for (let p = path.dirname(abs); ; p = path.dirname(p)) {
       this.uploaded.delete(p);
       if (p === path.dirname(p)) break;
@@ -165,7 +167,6 @@ export class SessionStaging {
   }
 
   private async upload(abs: string): Promise<void> {
-    if (this.uploaded.has(abs)) return;
     let stats;
     try {
       stats = await lstat(abs);
@@ -180,7 +181,13 @@ export class SessionStaging {
       this.claim(abs, "upload");
       for (const name of await readdir(abs)) await this.upload(path.join(abs, name));
     } else if (stats.isFile()) {
-      await this.remote.writeFile(abs, await readFile(abs));
+      if (stats.size > 512 * 1024 * 1024) throw new Error("parser VM input file exceeds limit");
+      const data = await readFile(abs);
+      if (data.byteLength > 512 * 1024 * 1024) throw new Error("parser VM actual input file exceeds limit");
+      const hash = createHash("sha256").update(data).digest("hex");
+      if (this.inputHashes.get(abs) === hash) return;
+      await this.remote.writeFile(abs, data);
+      this.inputHashes.set(abs, hash);
       this.claim(abs, "upload");
     }
   }

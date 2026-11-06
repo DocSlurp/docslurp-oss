@@ -1,10 +1,11 @@
+import { HTML_TABLE_MAX_SOURCE_CHARS, HTML_TABLE_MAX_TAGS } from "./html-table-limits.js";
 import { parseFragment, type DefaultTreeAdapterTypes as Tree } from "parse5";
 export interface HtmlTableCell { label: string; value: string; header?: boolean }
 const STRUCTURE = new Set(["table", "thead", "tbody", "tfoot", "tr", "td", "th", "caption"]);
 const INLINE = new Set(["br", "b", "strong", "em", "i", "span", "code", "sub", "sup"]);
 export function readTableCells(source: string): HtmlTableCell[] | null {
   // Bound parser repair cost before parsing, and geometry cost separately below.
-  if (source.length > 262_144 || (source.match(/</g)?.length ?? 0) > 8192) return null;
+  if (source.length > HTML_TABLE_MAX_SOURCE_CHARS || (source.match(/</g)?.length ?? 0) > HTML_TABLE_MAX_TAGS) return null;
   let invalid = false;
   const root = parseFragment(source, { onParseError: () => { invalid = true; } });
   const tables = root.childNodes.filter(n => "tagName" in n && n.tagName === "table");
@@ -14,7 +15,7 @@ export function readTableCells(source: string): HtmlTableCell[] | null {
   let row = 0;
   let column = 1;
   let work = 0;
-  function charge() { if (++work > 100_000) throw new Error("geometry limit"); }
+  function charge() { if (++work > 1_000_000) throw new Error("geometry limit"); }
   function text(node: Tree.Node, depth: number): string {
     charge();
     if (depth > 32) throw new Error("depth limit");

@@ -75,6 +75,14 @@ describe("SessionStaging", () => {
     expect(Buffer.from(remote.files.get(file)!.data).toString()).toBe("hello");
   });
 
+  it("refreshes a reused input path when its contents change, including same-size edits", async () => {
+    const file = path.join(root, "a.txt");
+    writeFileSync(file, "first"); await staging.ensureUploaded([file]);
+    writeFileSync(file, "other"); await staging.ensureUploaded([file]);
+    expect(remote.writes).toEqual([file, file]);
+    expect(Buffer.from(remote.files.get(file)!.data).toString()).toBe("other");
+  });
+
   it("uploads directories recursively at the same absolute path", async () => {
     mkdirSync(path.join(root, "in", "nested"), { recursive: true });
     writeFileSync(path.join(root, "in", "one.txt"), "1");

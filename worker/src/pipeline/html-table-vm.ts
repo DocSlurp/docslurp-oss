@@ -1,3 +1,4 @@
+import { HTML_TABLE_MAX_SOURCE_CHARS, HTML_TABLE_MAX_CELLS, HTML_TABLE_MAX_BATCH_BYTES } from "./html-table-limits.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -10,27 +11,35 @@ export function preparedHtmlTableCells(source: string): HtmlTableCell[] | null |
 /** Prepare flat typed records in the VM, then keep synchronous chunking scoped to this document. */
 export async function withPreparedHtmlTables<T>(sources: string[], runner: Pick<CommandRunner, "run">, fn: () => T, signal?: AbortSignal): Promise<T> {
   if (process.env.NODE_ENV !== "production") return fn();
-  const unique = [...new Set(sources.map(s => s.trim()).filter(s => /^<table(?=\s|>|$)/i.test(s) && s.length > 0 && s.length <= 262_144))];
+  const unique = [...new Set(sources.map(s => s.trim()).filter(s => /^<table(?=\s|>|$)/i.test(s) && s.length > 0 && s.length <= HTML_TABLE_MAX_SOURCE_CHARS))];
   if (unique.length > 1024) throw new Error("HTML table count exceeds VM limit");
+  if (unique.reduce((total, source) => total + source.length, 0) > 32 * 1024 * 1024) throw new Error("HTML table document source exceeds limit");
   const prepared = new Map<string, HtmlTableCell[] | null>();
   if (unique.length) {
     const dir = await mkdtemp(path.join(tmpdir(), "docslurp-html-tables-"));
     try {
-      for (let start = 0; start < unique.length; start += 64) {
-        const batch = unique.slice(start, start + 64);
+      let chars = 0, cellCount = 0;
+      for (let start = 0; start < unique.length;) {
+        const batch: string[] = []; let batchBytes = 2;
+        while (start < unique.length && batch.length < 64) {
+          const source = unique[start]!; const bytes = Buffer.byteLength(JSON.stringify(source)) + 1;
+          if (bytes + 2 > HTML_TABLE_MAX_BATCH_BYTES) throw new Error("HTML table source exceeds VM batch limit");
+          if (batchBytes + bytes > HTML_TABLE_MAX_BATCH_BYTES) break;
+          batch.push(source); batchBytes += bytes; start++;
+        }
         const input = path.join(dir, `tables-${start}.json`), output = path.join(dir, `cells-${start}.json`);
         await writeFile(input, JSON.stringify(batch), { mode: 0o600 });
         await runner.run({ binary: "node", args: [path.join(resolveScriptsDir(), "table-cells.mjs"), input, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 }, signal);
         if ((await stat(output)).size > 64 * 1024 * 1024) throw new Error("HTML table result exceeds limit");
         const result = JSON.parse(await readFile(output, "utf8")) as Array<HtmlTableCell[] | null>;
         if (!Array.isArray(result) || result.length !== batch.length) throw new Error("invalid HTML table result");
-        let chars = 0;
         for (let i = 0; i < result.length; i++) {
           const cells = result[i];
           if (cells !== null) {
-            if (!Array.isArray(cells) || cells.length > 8192) throw new Error("HTML table cell count exceeds limit");
+            if (!Array.isArray(cells) || cells.length > HTML_TABLE_MAX_CELLS) throw new Error("HTML table cell count exceeds limit");
+            cellCount += cells.length; if (cellCount > 256_000) throw new Error("HTML table document cell count exceeds limit");
             for (const cell of cells) {
-              if (!cell || typeof cell.label !== "string" || !/^(caption|row [1-9][0-9]{0,3} column [1-9][0-9]{0,3} rowspan [1-9][0-9]{0,3} colspan [1-9][0-9]{0,3})$/.test(cell.label) || typeof cell.value !== "string" || cell.value.length > 262_144 || !(cell.header === undefined || typeof cell.header === "boolean")) throw new Error("invalid HTML table cell");
+              if (!cell || typeof cell.label !== "string" || !/^(caption|row [1-9][0-9]{0,3} column [1-9][0-9]{0,3} rowspan [1-9][0-9]{0,3} colspan [1-9][0-9]{0,3})$/.test(cell.label) || typeof cell.value !== "string" || cell.value.length > HTML_TABLE_MAX_SOURCE_CHARS || !(cell.header === undefined || typeof cell.header === "boolean")) throw new Error("invalid HTML table cell");
               chars += cell.value.length; if (chars > 32 * 1024 * 1024) throw new Error("HTML table text exceeds limit");
             }
           }
