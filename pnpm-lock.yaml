@@ -315,6 +315,9 @@ importers:
       jose:
         specifier: ^6.2.15
         version: 6.2.15
+      modal:
+        specifier: 0.11.1
+        version: 0.11.1
       pg:
         specifier: ^8.23.1
         version: 8.23.1
@@ -8469,8 +8472,7 @@ snapshots:
 
   '@xtuc/long@4.2.2': {}
 
-  abort-controller-x@0.5.0:
-    optional: true
+  abort-controller-x@0.5.0: {}
 
   abort-controller@3.0.0:
     dependencies:
@@ -8704,7 +8706,6 @@ snapshots:
   cbor-x@1.6.8:
     optionalDependencies:
       cbor-extract: 2.2.2
-    optional: true
 
   ccount@2.0.1: {}
 
@@ -10119,7 +10120,6 @@ snapshots:
       protobufjs: 7.6.6
       smol-toml: 1.9.1
       uuid: 11.1.1
-    optional: true
 
   mongodb-connection-string-url@7.0.2:
     dependencies:
@@ -10234,14 +10234,12 @@ snapshots:
   nice-grpc-common@2.0.4:
     dependencies:
       ts-error: 1.0.6
-    optional: true
 
   nice-grpc@2.1.17:
     dependencies:
       '@grpc/grpc-js': 1.14.6
       abort-controller-x: 0.5.0
       nice-grpc-common: 2.0.4
-    optional: true
 
   node-domexception@1.0.0: {}
 
@@ -10880,8 +10878,7 @@ snapshots:
   smart-buffer@4.2.0:
     optional: true
 
-  smol-toml@1.9.1:
-    optional: true
+  smol-toml@1.9.1: {}
 
   socks@2.8.10:
     dependencies:
@@ -11046,8 +11043,7 @@ snapshots:
 
   ts-algebra@2.0.0: {}
 
-  ts-error@1.0.6:
-    optional: true
+  ts-error@1.0.6: {}
 
   tslib@1.14.1: {}
 

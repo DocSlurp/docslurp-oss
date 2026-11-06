@@ -18,12 +18,12 @@ import {
 import { recordUnrecordedUsageTelemetry, withObservation } from "@docslurp/shared/observability";
 import { DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@docslurp/shared";
 import { existsSync, readFileSync, readdirSync, readlinkSync, lstatSync, realpathSync, statSync } from "node:fs";
-import { access } from "node:fs/promises";
+import { access, copyFile, mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { AsyncResource } from "node:async_hooks";
 import { spawn, type ChildProcess } from "node:child_process";
 import { Readable } from "node:stream";
-import { platform } from "node:os";
+import { platform, tmpdir } from "node:os";
 import { pipeline } from "node:stream/promises";
 import { finished } from "node:stream";
 import type { Writable } from "node:stream";
@@ -69,6 +69,8 @@ export interface CommandPlan {
   binary: string;
   args: string[];
   available: boolean;
+  /** Auxiliary regular files under a private DocSlurp temp workspace, staged read-only. */
+  stagedInputs?: string[];
   /** Page count for the wall-clock budget; defaults to the document in the perf context. */
   pages?: number;
   /** Explicit wall-clock budget, overriding the page-based one. */
@@ -1138,14 +1140,59 @@ export class CommandRunner {
     );
   }
 
-  async scanForMalware(
+  private async clamVmDatabaseHealth(policy: MalwareScanPolicy, signal: AbortSignal | undefined, databaseArgs: string[]): Promise<ClamDatabaseHealth> {
+    try {
+      const signatureFiles = databaseArgs.filter((_, index) => index % 2 === 1);
+      if (!signatureFiles.length) throw new Error("No staged signature files");
+      // ClamAV print_version accepts a directory and reads its daily.cvd/cld header.
+      const plan = await this.plan("clamscan", "--database", path.dirname(signatureFiles[0]!), "--version");
+      plan.stagedInputs = signatureFiles;
+      plan.readOnlyInputs = true;
+      const result = await this.run(plan, signal);
+      return parseClamVmDatabaseHealth(result.stdout, policy.maxSignatureAgeHours);
+    } catch {
+      return { status: "missing", updatedAt: null, ageHours: null, source: null };
+    }
+  }
+
+  async scanForMalware(source: string, signal?: AbortSignal): Promise<MalwareScanResult> {
+    if (process.env.NODE_ENV !== "production") return this.scanForMalwareWithDefinitions(source, signal);
+    // Copy only named signature assets, never host configuration or credentials. The host
+    // updater keeps these fresh; the VM verifies the same staged definitions it will scan with.
+    const policy = resolveMalwareScanPolicy();
+    const dir = await mkdtemp(path.join(tmpdir(), "docslurp-clam-definitions-"));
+    try {
+      const databaseArgs: string[] = [];
+      let totalBytes = 0;
+      for (const entry of await readdir(policy.databaseDirectory, { withFileTypes: true })) {
+        if (!entry.isFile() || !/^(?:main|daily|bytecode)\.(?:cvd|cld)$/.test(entry.name)) continue;
+        const sourceFile = path.join(policy.databaseDirectory, entry.name);
+        totalBytes += (await stat(sourceFile)).size;
+        if (totalBytes > 512 * 1024 * 1024) throw new Error("ClamAV signature assets exceed transfer limit");
+        const target = path.join(dir, entry.name);
+        await copyFile(sourceFile, target);
+        databaseArgs.push("--database", target);
+      }
+      if (databaseArgs.length === 0) throw new Error("ClamAV signature assets unavailable; refusing VM scan");
+      return await this.scanForMalwareWithDefinitions(source, signal, databaseArgs);
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  }
+
+  private async scanForMalwareWithDefinitions(
     source: string,
     signal?: AbortSignal,
+    databaseArgs: string[] = [],
   ): Promise<MalwareScanResult> {
     const policy = resolveMalwareScanPolicy();
-    const databaseHealth = inspectClamDatabaseHealth(policy);
-    const daemonPlan = await this.clamDaemonScan(source);
+    const databaseHealth = process.env.NODE_ENV === "production"
+      ? await this.clamVmDatabaseHealth(policy, signal, databaseArgs)
+      : inspectClamDatabaseHealth(policy);
+    const daemonPlan = process.env.NODE_ENV === "production"
+      ? { binary: "clamdscan", args: [], available: false }
+      : await this.clamDaemonScan(source);
     const directPlan = await this.clamScan(source);
+    directPlan.args.unshift(...databaseArgs);
+    directPlan.readOnlyInputs = true;
     const healthWarnings: string[] = [];
 
     const databaseWarning = describeClamDatabaseHealth(
@@ -2263,7 +2310,7 @@ export function resolveMalwareScanPolicy(
   return {
     requireDaemon: readBooleanFlag(
       env.DOCSLURP_CLAMAV_REQUIRE_DAEMON,
-      production,
+      false,
     ),
     failOpenOnStaleDefinitions: readBooleanFlag(
       env.DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB,
@@ -2273,6 +2320,13 @@ export function resolveMalwareScanPolicy(
       readPositiveNumber(env.DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS) ?? 24,
     databaseDirectory: env.DOCSLURP_CLAMAV_DB_DIR?.trim() || "/var/lib/clamav",
   };
+}
+
+/** ClamAV reports the database version and signature timestamp from the scanner's own image. */
+export function parseClamVmDatabaseHealth(output: string, maxSignatureAgeHours: number): ClamDatabaseHealth {
+  const parts = output.trim().split("/");
+  const updatedAtMs = parts.length === 3 && /^ClamAV [0-9.]+$/.test(parts[0]!) && /^\d+$/.test(parts[1]!) ? Date.parse(parts[2]!) : NaN;
+  return assessClamDatabaseHealth({ maxSignatureAgeHours, entries: Number.isFinite(updatedAtMs) && updatedAtMs <= Date.now() + 3_600_000 ? [{ path: "parser-vm:clamav-signatures", updatedAtMs }] : [] });
 }
 
 export function assessClamDatabaseHealth(args: {

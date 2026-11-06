@@ -17,15 +17,20 @@ export function resolveCommandPaths(args: {
   scriptsDir: string;
 }): { readablePaths: string[]; inputPaths: string[]; writablePaths: string[] } {
   const runtimeProjectDir = path.dirname(path.dirname(args.scriptsDir));
+  const auxiliary = (args.plan.stagedInputs ?? []).map((file) => {
+    if (!path.isAbsolute(file) || !inferDocslurpTempAncestor(path.dirname(file)) || !lstatSync(file).isFile()) throw new Error("Auxiliary parser inputs must be regular files in private DocSlurp temporary workspaces");
+    return path.resolve(file);
+  });
+  const auxiliaryDirectories = new Set(auxiliary.map(file => path.dirname(file)));
   return {
-    readablePaths: resolveSandboxReadablePaths(args),
-    inputPaths: resolveSandboxInputPaths({ commandArgs: args.plan.args, runtimeProjectDir }),
+    readablePaths: [...resolveSandboxReadablePaths(args), ...auxiliary],
+    inputPaths: [...new Set([...resolveSandboxInputPaths({ commandArgs: args.plan.args, runtimeProjectDir }), ...auxiliary])],
     writablePaths: resolveSandboxWritablePaths({
       configuredPaths: args.configuredWritablePaths,
       // Inputs of a readOnlyInputs plan stay read-only (bound as readable files above), and so does
       // a registered shared source in any plan: its directory never becomes writable.
       commandArgs: args.plan.args.filter(
-        (arg) => !(path.isAbsolute(arg) && (isReadOnlySource(arg) || (args.plan.readOnlyInputs && isExistingFile(arg)))),
+        (arg) => !(path.isAbsolute(arg) && (isReadOnlySource(arg) || (args.plan.readOnlyInputs && (isExistingFile(arg) || auxiliaryDirectories.has(path.resolve(arg)))))),
       ),
       runtimeProjectDir,
     }),

@@ -4,7 +4,7 @@
  * classify-route heuristic (when available) into each page's `heuristic`.
  */
 
-import sharp from "sharp";
+import sharp from "../tools/isolated-image.js";
 import {
   PAGE_FEATURES_SCHEMA_VERSION,
   PAGE_INPUT_SCHEMA_VERSION,

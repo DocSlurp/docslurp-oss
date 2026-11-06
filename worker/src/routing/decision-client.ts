@@ -328,6 +328,7 @@ export function createDecisionClient(options: DecisionClientOptions): DecisionCl
       let body: unknown;
       let provider: string;
       if (model.endpoint === "local-transformers") {
+        if (process.env.NODE_ENV === "production" || env.NODE_ENV === "production") throw new DecisionUnavailableError("local image decision sidecars lack a VM boundary in production; configure a remote model endpoint");
         provider = "local";
         // Local runtimes never leave the machine, so they stay allowed in every privacy mode.
         assertProviderAllowed(options.privacyMode, {

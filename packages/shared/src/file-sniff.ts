@@ -330,8 +330,15 @@ const TEXT_FAMILY_MIME = (mimeType: string | null) => mimeFamily(mimeType) === "
  * and persists the result.
  */
 export function fileFactsFor(bytes: Uint8Array, file: { filename: string; declaredMimeType?: string | null }, options: SniffOptions = {}): FileFacts {
+  return fileFactsFromSniff(sniffFileBytes(bytes, file.filename, options), file, options);
+}
+
+/**
+ * The file facts from a sniff already taken (sniffFileBytes), without the bytes: where the sniff ran elsewhere (the worker's
+ * parser VM), the declared-type verdict is decided here, for any declared type, from that small result alone.
+ */
+export function fileFactsFromSniff(sniffed: SniffedBytes, file: { filename: string; declaredMimeType?: string | null }, options: Pick<SniffOptions, "depth"> = {}): FileFacts {
   const inspection: FileInspection = options.depth === "header" ? "header" : "full";
-  const sniffed = sniffFileBytes(bytes, file.filename, options);
   const declaredBare = bareMimeType(file.declaredMimeType);
   const declared = canonicalMimeType(declaredBare);
   const extensionMime = MIME_BY_EXTENSION[fileExtension(file.filename)] ?? null;

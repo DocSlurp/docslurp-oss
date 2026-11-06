@@ -1,3 +1,4 @@
+import { HTML_TABLE_MAX_SOURCE_CHARS } from "../pipeline/html-table-limits.js";
 import { tableChunks } from "../pipeline/table-chunking.js";
 import { describe, expect, it } from "vitest";
 import { chunkTextWithMeta, chunkText } from "../pipeline/chunking.js";
@@ -74,8 +75,16 @@ describe("HTML table chunks", () => {
     const source = '```html\n<table><tr><td>example</td></tr></table>\n```';
     expect([...chunkText(source, 100)]).toEqual([source]);
   });
+  it("retains cell geometry above the former source-size threshold", () => {
+    const value = "x".repeat(270_000);
+    const chunks = [...chunkText(`<table><tr><td>${value}</td></tr></table>`, 1800)];
+    const cells = records(chunks);
+    expect(chunks.every(c => c.length <= 1800)).toBe(true);
+    expect(cells.every(c => c.context.includes("row 1 column 1"))).toBe(true);
+    expect(cells.map(c => c.value).join("")).toBe(value);
+  });
   it("bounds large fallback input and preserves its source", () => {
-    const source = '<table><tr><td>' + 'x'.repeat(270_000) + '</td></tr></table>';
+    const source = '<table><tr><td>' + 'x'.repeat(HTML_TABLE_MAX_SOURCE_CHARS + 1) + '</td></tr></table>';
     const chunks = [...chunkText(source, 1800)];
     expect(chunks.every(c => c.length <= 1800)).toBe(true);
     expect(records(chunks).map(r => r.value).join("")).toBe(source);

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { buildQuarantineStats, inspectArchive, scanDocumentForQuarantine, sniffMimeType, verifyIntakeFileFacts } from "../lib/quarantine.js";
+import { inspectQuarantineBytes } from "../lib/quarantine-bytes.js";
+
+/** The bytes' inspection as the stage takes it (in-process here; in the parser VM in production). */
+const inspectionOf = (bytes: Buffer, filename = "a.docx") => inspectQuarantineBytes(bytes, filename, { quarantineFailOpenOnToolMissing: false, quarantineMaxArchiveEntries: 1000, quarantineMaxArchiveDepth: 10, quarantineMaxTotalUncompressedBytes: 1e9, quarantineMaxSingleEntryBytes: 1e9, quarantineMaxExpansionRatio: 1000 } as never);
 
 function buildZipBuffer(entries: Array<{ name: string; compressedSize: number; uncompressedSize: number }>): Buffer {
   const localParts: Buffer[] = [];
@@ -341,31 +345,31 @@ describe("verifyIntakeFileFacts (the worker inspects what the API only glanced a
 
   it("opens the container, upgrades a header-only record to full facts and keeps a real DOCX", () => {
     const zip = buildZipBuffer([{ name: "word/document.xml", compressedSize: 12, uncompressedSize: 64 }]);
-    const verified = verifyIntakeFileFacts(intake(DOCX), zip);
+    const verified = verifyIntakeFileFacts(intake(DOCX), inspectionOf(zip));
     expect(verified).toMatchObject({ refused: false, facts: { mimeType: DOCX, inspection: "full", sniffedMimeType: DOCX } });
   });
 
   it("refuses a generic ZIP the API accepted as a DOCX, and keeps the declaration for the quarantine verdict", () => {
     const zip = buildZipBuffer([{ name: "payload.bin", compressedSize: 12, uncompressedSize: 64 }]);
-    const verified = verifyIntakeFileFacts(intake(DOCX), zip);
+    const verified = verifyIntakeFileFacts(intake(DOCX), inspectionOf(zip));
     expect(verified).toMatchObject({ refused: true, scanDeclaredMimeType: DOCX });
   });
 
   it("refuses a ZIP whose only word/ entry is not the document part", () => {
     const zip = buildZipBuffer([{ name: "word/evil.bin", compressedSize: 12, uncompressedSize: 64 }]);
-    expect(verifyIntakeFileFacts(intake(DOCX), zip)?.refused).toBe(true);
+    expect(verifyIntakeFileFacts(intake(DOCX), inspectionOf(zip))?.refused).toBe(true);
   });
 
   it("routes a mislabelled XLSX on its bytes instead of the declaration", () => {
     const zip = buildZipBuffer([{ name: "xl/workbook.xml", compressedSize: 12, uncompressedSize: 64 }]);
-    const verified = verifyIntakeFileFacts(intake(DOCX), zip);
+    const verified = verifyIntakeFileFacts(intake(DOCX), inspectionOf(zip));
     expect(verified).toMatchObject({ refused: false, facts: { mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", mismatch: "corrected" } });
     expect(verified?.scanDeclaredMimeType).toBe("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
   });
 
   it("does nothing for records the API did not leave provisional", () => {
     const zip = buildZipBuffer([{ name: "word/document.xml", compressedSize: 12, uncompressedSize: 64 }]);
-    expect(verifyIntakeFileFacts({ ...intake(DOCX), fileFacts: { ...(intake(DOCX).fileFacts as object), inspection: "full" } as never }, zip)).toBeNull();
-    expect(verifyIntakeFileFacts({ filename: "a.docx", mimeType: DOCX, fileFacts: null }, zip)).toBeNull();
+    expect(verifyIntakeFileFacts({ ...intake(DOCX), fileFacts: { ...(intake(DOCX).fileFacts as object), inspection: "full" } as never }, inspectionOf(zip))).toBeNull();
+    expect(verifyIntakeFileFacts({ filename: "a.docx", mimeType: DOCX, fileFacts: null }, inspectionOf(zip))).toBeNull();
   });
 });

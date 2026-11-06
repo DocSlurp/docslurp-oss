@@ -1,5 +1,7 @@
 import { pricing } from "@docslurp/shared";
 
+import { boundedVmStream } from "./transfer.js";
+import path from "node:path";
 import { resolveWorkerDeploymentProfile, buildLocalComputeUsageEvent } from "../../../pipeline/local-compute-cost.js";
 import type { UsageEvent } from "../../../models.js";
 import { readSandboxConfig } from "../../config-schema.js";
@@ -24,6 +26,8 @@ export interface ModalConfig {
   app: string;
   /** Image reference sandboxes run; `repo@sha256:<digest>` when a digest is configured. */
   image: string;
+  /** Immutable Modal import produced from this image by deployment. */
+  imageId?: string;
   /** Name of a Modal Secret with REGISTRY_USERNAME/REGISTRY_PASSWORD for a private image. */
   registrySecret?: string;
   cpu: number;
@@ -59,6 +63,7 @@ const configSchema: SandboxConfigSchema = {
         "Accepts a digest-pinned reference (repo@sha256:<digest>).",
       env: "DOCSLURP_MODAL_IMAGE",
     },
+    imageId: { type: "string", description: "Immutable Modal image import ID, supplied together with the pinned registry image by deployment.", env: "DOCSLURP_MODAL_IMAGE_ID" },
     imageDigest: {
       type: "string",
       description:
@@ -168,6 +173,15 @@ type RemoteOutcome =
 
 class CommandAborted extends Error {}
 
+async function withDeadline<T>(work: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([work, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("parser VM control deadline exceeded")), timeoutMs);
+    })]);
+  } finally { if (timer) clearTimeout(timer); }
+}
+
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw new CommandAborted();
 }
@@ -200,7 +214,8 @@ function toRemoteEntry(info: import("modal").FileInfo): RemoteEntry {
   return { path: info.path, isDir: info.type === "directory", size: info.size, mtime: info.modifiedTime };
 }
 
-function buildRemoteFs(sdk: ModalSdk, fs: import("modal").SandboxFilesystem): RemoteFs {
+function buildRemoteFs(sdk: ModalSdk, sandbox: import("modal").Sandbox): RemoteFs {
+  const fs = sandbox.filesystem;
   return {
     async stat(p) {
       try {
@@ -212,10 +227,23 @@ function buildRemoteFs(sdk: ModalSdk, fs: import("modal").SandboxFilesystem): Re
       }
     },
     writeFile: (p, data) => fs.writeBytes(data, p),
-    readFile: (p) => fs.readBytes(p),
+    async readFile(p) {
+      const proc = await sandbox.exec(["/bin/cat", "--", p], { mode: "binary", timeoutMs: 30_000 });
+      const [data, , code] = await Promise.all([boundedVmStream(proc.stdout, 128 * 1024 * 1024), boundedVmStream(proc.stderr, 64 * 1024), proc.wait()]);
+      if (code !== 0) throw new Error("parser VM file transfer failed");
+      return data;
+    },
     async list(p) {
-      const entries = await fs.listFiles(p);
-      return entries.filter((entry) => entry.type !== "symlink").map(toRemoteEntry);
+      // Do not ask the SDK to allocate an unbounded directory listing from the guest.
+      const code = "import os,sys,json\np=sys.argv[1]\nwith os.scandir(p) as entries:\n for i,e in enumerate(entries):\n  if i>=8192: raise RuntimeError('directory entry limit')\n  if e.is_symlink(): continue\n  st=e.stat(follow_symlinks=False)\n  print(json.dumps(dict(path=e.path,isDir=e.is_dir(follow_symlinks=False),size=st.st_size,mtime=st.st_mtime)))";
+      const proc = await sandbox.exec(["python3", "-I", "-c", code, p], { mode: "binary", timeoutMs: 30_000 });
+      const [data, , status] = await Promise.all([boundedVmStream(proc.stdout, 4 * 1024 * 1024), boundedVmStream(proc.stderr, 64 * 1024), proc.wait()]);
+      if (status !== 0) throw new Error("parser VM directory listing failed");
+      return data.toString("utf8").split("\n").filter(Boolean).map((line) => {
+        const entry = JSON.parse(line) as RemoteEntry;
+        if (typeof entry.path !== "string" || path.dirname(entry.path) !== p || !Number.isSafeInteger(entry.size) || entry.size < 0 || typeof entry.isDir !== "boolean" || !Number.isFinite(entry.mtime)) throw new Error("invalid parser VM directory entry");
+        return entry;
+      });
     },
     mkdir: (p) => fs.makeDirectory(p),
     remove: (p) => fs.remove(p, { recursive: true }),
@@ -285,7 +313,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
     }
   }
 
-  return {
+  const provider: ParserSandboxProvider<ModalConfig> = {
     id: "modal",
     name: "Modal",
     description: "Runs each parser in a remote Modal sandbox with files staged in and out per activity.",
@@ -294,19 +322,23 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
       const { imageDigest, ...config } = readSandboxConfig<
         Omit<ModalConfig, "image"> & { image?: string; imageDigest?: string }
       >(configSchema, env);
-      return { ...config, image: resolveModalImage(config.image ?? defaultModalImage(env), imageDigest) };
+      const image = resolveModalImage(config.image ?? defaultModalImage(env), imageDigest);
+      if ((env.NODE_ENV === "production" || process.env.NODE_ENV === "production") && !/@sha256:[a-f0-9]{64}$/i.test(image)) {
+        throw new SandboxConfigError("production parser VM images must be pinned by sha256 digest");
+      }
+      if (config.imageId && !/^im-[A-Za-z0-9]+$/.test(config.imageId)) throw new SandboxConfigError("invalid DOCSLURP_MODAL_IMAGE_ID");
+      return { ...config, image };
     },
     async probe(config) {
-      let client: Awaited<ReturnType<typeof loadClient>>["client"] | undefined;
+      let session: SandboxSession | undefined;
       try {
-        client = (await loadClient(config)).client;
-        await client.apps.fromName(config.app, { createIfMissing: true });
-        return { ok: true, isolation: ISOLATION, detail: `modal app '${config.app}' reachable` };
+        session = await provider.openSession(config, { activityId: "startup-probe" });
+        const result = await session.run!({ binary: "node", args: ["/app/worker/scripts/parser-vm-contract.mjs"], env: { PATH: "/usr/local/bin:/usr/bin:/bin" }, readablePaths: [], inputPaths: [], writablePaths: [], limits: { timeoutMs: 30_000 } });
+        if (result.exitCode !== 0 || JSON.parse(result.stdout).protocol !== "parser-vm@2") throw new Error("parser VM image contract unavailable");
+        return { ok: true, isolation: ISOLATION, detail: `VM image contract verified for '${config.app}'` };
       } catch (error) {
         return { ok: false, isolation: ISOLATION, detail: safeMessage(config, error) };
-      } finally {
-        client?.close();
-      }
+      } finally { await session?.close(); }
     },
     async openSession(config, context) {
       const { sdk, client } = await loadClient(config);
@@ -314,6 +346,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
       let staging: SessionStaging | undefined;
       let creating: Promise<void> | undefined;
       let closed = false;
+      let clientClosed = false;
 
       let terminating: Promise<void> | undefined;
       function terminate(): Promise<void> {
@@ -323,28 +356,42 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
       }
       async function doTerminate(): Promise<void> {
         try {
-          await creating?.catch(() => {});
-          await sandbox?.terminate();
+          if (sandbox) await withDeadline(sandbox.terminate({ wait: true }), 5_000);
         } catch (error) {
           throw new Error(`modal sandbox terminate failed: ${safeMessage(config, error)}`);
         } finally {
+          clientClosed = true;
           client.close();
         }
+      }
+      async function terminateLate(created: import("modal").Sandbox): Promise<void> {
+        const cleanupClient = clientClosed ? new sdk.ModalClient({ tokenId: config.tokenId, tokenSecret: config.tokenSecret }) : client;
+        try { await withDeadline(new sdk.Sandbox(cleanupClient, created.sandboxId).terminate({ wait: true }), 5_000); }
+        catch { console.warn("[parser-sandbox] late VM cleanup failed; provider lifetime limit remains enforced"); }
+        finally { if (cleanupClient !== client) cleanupClient.close(); }
       }
 
       function ensureSandbox(): Promise<void> {
         creating ??= (async () => {
-          const app = await client.apps.fromName(config.app, { createIfMissing: true });
-          const registrySecret = config.registrySecret ? await client.secrets.fromName(config.registrySecret) : undefined;
-          const image = client.images.fromRegistry(config.image, registrySecret);
-          sandbox = await client.sandboxes.create(app, image, {
-            cpu: config.cpu,
-            memoryMiB: config.memoryMb,
+          const app = await withDeadline(client.apps.fromName(config.app, { createIfMissing: true }), 30_000);
+          const registrySecret = config.registrySecret && !config.imageId ? await withDeadline(client.secrets.fromName(config.registrySecret), 30_000) : undefined;
+          const image = config.imageId ? await withDeadline(client.images.fromId(config.imageId), 30_000) : client.images.fromRegistry(config.image, registrySecret);
+          const opened = await withDeadline(client.sandboxes.create(app, image, {
+            runtime: "vm",
+            includeOidcIdentityToken: false,
+            env: {}, secrets: [], volumes: {}, cloudBucketMounts: {},
+            cpu: config.cpu, cpuLimit: config.cpu,
+            memoryMiB: config.memoryMb, memoryLimitMiB: config.memoryMb,
             timeoutMs: config.sessionTimeoutSeconds * 1000,
             blockNetwork: true,
-          });
-          await sandbox.filesystem.makeDirectory(CONTROL_DIR);
-          staging = new SessionStaging(buildRemoteFs(sdk, sandbox.filesystem));
+          }).then(async (created) => {
+            if (closed) { await terminateLate(created); throw new Error("parser VM session closed during creation"); }
+            return created;
+          }), 30_000);
+          if (!opened) throw new Error("parser VM creation returned no sandbox");
+          sandbox = opened;
+          await withDeadline(opened.filesystem.makeDirectory(CONTROL_DIR), 30_000);
+          staging = new SessionStaging(buildRemoteFs(sdk, opened));
         })();
         return creating;
       }
@@ -394,7 +441,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         const aborted = whenAborted(signal);
         try {
           const process = await sandbox!.exec(argv, { env, timeoutMs: execTimeoutMs(command.limits.timeoutMs), mode: "text" });
-          settled = Promise.all([process.stdout.readText(), process.stderr.readText(), process.wait()]).then(
+          settled = Promise.all([boundedVmStream(process.stdout, 8 * 1024 * 1024).then((bytes) => bytes.toString("utf8")), boundedVmStream(process.stderr, 1024 * 1024).then((bytes) => bytes.toString("utf8")), process.wait()]).then(
             ([stdout, stderr, exitCode]) => ({ stdout, stderr, exitCode }),
           );
           settled.catch(() => {});
@@ -443,7 +490,14 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         while (discarding) await discarding;
         inFlight++;
         try {
-          return await executeCommand(command, started, signal);
+          try { return await withDeadline(executeCommand(command, started, signal), command.limits.timeoutMs + 60_000); }
+          catch (error) {
+            if (error instanceof Error && error.message === "parser VM control deadline exceeded") {
+              await terminate().catch(() => {});
+              throw new SandboxRunError(error.message, meter(started));
+            }
+            throw error;
+          }
         } finally {
           inFlight--;
           if (inFlight === 0 && pendingDiscards.length > 0 && !closed) {
@@ -476,6 +530,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           }
           if (outcome.kind === "exited" && !signal?.aborted) {
             // Only what this command created or changed comes back.
+            if (closed) throw new Error("parser VM session closed before download");
             await staging!.download(snapshot);
             const usage = meter(started);
             return { ...outcome.output, cpuSeconds: config.cpu * ((Date.now() - started) / 1000), usage };
@@ -522,6 +577,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
       return session;
     },
   };
+  return provider;
 }
 
 export default createModalProvider(() => import("modal")) as unknown as ParserSandboxProvider;

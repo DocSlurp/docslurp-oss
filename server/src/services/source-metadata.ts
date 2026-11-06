@@ -101,7 +101,11 @@ async function downloadSourceBytes(sourceKey: string): Promise<Uint8Array> {
     }),
   );
 
+  const maxBytes = 500 * 1024 * 1024;
+  if (response.ContentLength !== undefined && (!Number.isSafeInteger(response.ContentLength) || response.ContentLength < 0 || response.ContentLength > maxBytes)) throw new Error("source object exceeds metadata byte limit");
+  if (process.env.NODE_ENV === "production" && response.ContentLength === undefined) throw new Error("source object size unavailable; refusing unbounded metadata download");
   const bytes = await response.Body?.transformToByteArray();
+  if (bytes && bytes.byteLength > maxBytes) throw new Error("source object exceeds metadata byte limit");
   return bytes ?? new Uint8Array();
 }
 
@@ -109,7 +113,7 @@ export async function resolveSourceMetadata(file: {
   mimeType: string;
   sourceKey: string;
   filename: string;
-}): Promise<SourceMetadata> {
+}, scope?: { userId: string; orgId: string; workspaceId: string; runId: string; apiKeyId?: string | null }): Promise<SourceMetadata> {
   const bytes = await downloadSourceBytes(file.sourceKey);
   const sourceSha256 = sha256Hex(bytes);
   // Header depth: magic bytes in the first few KB plus the declared type. ZIP and OLE containers are not opened and text is
