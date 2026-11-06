@@ -70,8 +70,8 @@ export const projectSchema = z.object({
   name: z.string(),
   templateKey: projectTemplateKeySchema.nullable().default(null),
   systemPrompt: z.string().max(2000).nullable().default(null),
-  /** Generate reusable document summaries to improve search results. One-time generation and embedding cost per processed document version; reprocessing can incur it again. */
-  summaries: z.boolean().default(true),
+  /** Generate reusable document summaries for project overviews and titles. Off by default: a per-document generation and embedding cost, again on reprocessing. */
+  summaries: z.boolean().default(false),
   pipeline: pipelineFeaturesSchema.default(defaultPipelineFeatures),
   monthlyBudgetCents: z.number().int().nonnegative().max(2_147_483_647).nullable().default(null),
   /** Days before a run's artifacts are purged; null keeps them. */
@@ -850,8 +850,8 @@ export const createProjectSchema = z.object({
   slug: z.string().trim().min(1).max(63).optional(),
   templateKey: projectTemplateKeySchema.optional(),
   systemPrompt: z.string().trim().max(2000).nullable().optional(),
-  /** Enabled by default. Adds a one-time per-document processing cost to improve search results; privacy/template restrictions still apply. */
-  summaries: z.boolean().default(true),
+  /** Off by default. Turning it on adds a per-document processing cost; privacy/template restrictions still apply. */
+  summaries: z.boolean().default(false),
   pipeline: pipelineFeaturesSchema.optional(),
 });
 export type CreateProjectInput = z.input<typeof createProjectSchema>;

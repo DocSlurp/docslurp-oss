@@ -72,22 +72,22 @@ async function seedDoc(id: string, projectId: string, orgId: string, pages: numb
 }
 
 describe("project defaults", () => {
-  it("defaults document summaries on, persists opt-outs, and preserves privacy locks", async () => {
-    const enabled = await ws.createProject({ userId: "u1", orgId: "gold", name: "Summaries" });
+  it("defaults document summaries off, persists opt-ins, and preserves privacy locks", async () => {
+    const plain = await ws.createProject({ userId: "u1", orgId: "gold", name: "Plain" });
+    expect(plain.summaries).toBe(false);
+    expect(plain.pipeline.summarize).toBe(false);
+    expect(plain.pipeline.pageIndex).toBe(false);
+    const enabled = await ws.createProject({ userId: "u1", orgId: "gold", name: "Summaries", summaries: true });
     expect(enabled.summaries).toBe(true);
     expect(enabled.pipeline.summarize).toBe(true);
-    expect(enabled.pipeline.pageIndex).toBe(false);
-    const disabled = await ws.createProject({ userId: "u1", orgId: "gold", name: "No summaries", summaries: false });
-    expect(disabled.summaries).toBe(false);
-    expect(disabled.pipeline.summarize).toBe(false);
+    expect((await ws.updateProject(enabled.id, "u1", { name: "Renamed" }))?.summaries).toBe(true);
     expect((await ws.updateProject(enabled.id, "u1", { summaries: false }))?.summaries).toBe(false);
-    expect((await ws.updateProject(enabled.id, "u1", { name: "Renamed" }))?.summaries).toBe(false);
-    expect((await ws.updateProject(enabled.id, "u1", { summaries: true }))?.pipeline.summarize).toBe(true);
+    expect((await ws.updateProject(plain.id, "u1", { summaries: true }))?.pipeline.summarize).toBe(true);
     const privateProject = await ws.createProject({ userId: "u1", orgId: "gold", name: "Private", templateKey: "legal-contracts" });
     expect(privateProject.summaries).toBe(false);
     expect((await ws.updateProject(privateProject.id, "u1", { summaries: true }))?.summaries).toBe(false);
     const defaultProject = await ws.ensureDefaultProject({ userId: "u1", orgId: "gold" });
-    expect(defaultProject.summaries).toBe(true);
+    expect(defaultProject.summaries).toBe(false);
   });
 
   it("defaults every organization to full, whatever it has bought", async () => {

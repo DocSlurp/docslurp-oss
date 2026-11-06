@@ -291,7 +291,7 @@ export const postgresIntakeRecords: ProjectIntakeRecords = {
     const defaults = await getUserSettings(args.userId).then((settings) => settings.general, () => null);
     const template = getProjectTemplate(args.templateKey ?? null);
     const base = seedPipelineFromProcessingDefaults(
-      normalizePipelineFeatures(template?.pipeline ?? { ...defaultPipelineFeatures, summarize: true }),
+      normalizePipelineFeatures(template?.pipeline ?? defaultPipelineFeatures),
       defaults,
     );
     const pipeline = applyProjectPipelineOverrides(base, overrides, template);

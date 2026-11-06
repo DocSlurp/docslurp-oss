@@ -70,7 +70,7 @@ export async function insertDefaultProject(
       ${args.userId},
       ${DEFAULT_PROJECT_NAME},
       true,
-      ${query.json(JSON.parse(JSON.stringify(normalizePipelineFeatures({ ...defaultPipelineFeatures, summarize: true }))))}
+      ${query.json(JSON.parse(JSON.stringify(normalizePipelineFeatures(defaultPipelineFeatures))))}
     )
     on conflict (org_id) where is_default do nothing
   `;
