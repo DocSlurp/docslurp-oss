@@ -15,7 +15,7 @@ import type { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import { sniffedPdf } from "../lib/sniffed-pdf.js";
-import { pageRenditionKey } from "../lib/page-rendition.js";
+import { PAGE_RENDITION, pageRenditionKey, parseRawRendition, type RawRendition } from "../lib/page-rendition.js";
 
 type Sql = postgres.Sql<Record<string, unknown>>;
 
@@ -52,6 +52,19 @@ export async function toPageJpeg(bytes: Uint8Array): Promise<Uint8Array> {
       .rotate()
       .resize({ width: PAGE_IMAGE_MAX_EDGE, height: PAGE_IMAGE_MAX_EDGE, fit: "inside", withoutEnlargement: true })
       .flatten({ background: "#ffffff" })
+      .jpeg({ quality: PAGE_IMAGE_JPEG_QUALITY })
+      .toBuffer(),
+  );
+}
+
+/**
+ * A rendition's pixels as the embedder's JPEG. sharp reads them as raw RGB (no decoder, no colour profile, no EXIF), capped
+ * at PAGE_RENDITION's pixel bound.
+ */
+export async function renditionToPageJpeg(raw: RawRendition): Promise<Uint8Array> {
+  return new Uint8Array(
+    await sharp(raw.pixels, { raw: { width: raw.width, height: raw.height, channels: 3 }, limitInputPixels: PAGE_RENDITION.maxLongEdge * PAGE_RENDITION.maxLongEdge, failOn: "error" })
+      .resize({ width: PAGE_IMAGE_MAX_EDGE, height: PAGE_IMAGE_MAX_EDGE, fit: "inside", withoutEnlargement: true })
       .jpeg({ quality: PAGE_IMAGE_JPEG_QUALITY })
       .toBuffer(),
   );
@@ -111,7 +124,14 @@ export async function embedPageImages(
           (result.skippedWithoutRendition ??= []).push(pageNumber);
           continue;
         }
-        out.jpegs.push(await toPageJpeg(rendition));
+        // Re-validated at read time: stored bytes are trusted no more than the boundary's.
+        const raw = parseRawRendition(rendition);
+        if (!raw) {
+          console.warn(`[page-embed] refused a stored rendition run=${run.id} document=${document.id} page=${pageNumber}: not a raw RGB rendition within its caps`);
+          (result.skippedWithoutRendition ??= []).push(pageNumber);
+          continue;
+        }
+        out.jpegs.push(await renditionToPageJpeg(raw));
         out.pages.push(pageNumber);
       }
       return out;

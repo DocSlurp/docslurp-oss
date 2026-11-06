@@ -47,8 +47,8 @@ export const ocrFrameSchema = z.strictObject({
   elapsedMs: int(0, 3_600_000),
   /** A bounded PNG of the frame as OCR saw it, written beside the result for escalation; null when not requested. */
   image: z.string().regex(/^frame-[0-9]{4,6}\.png$/).nullable(),
-  /** A bounded, normalized rendition of the frame for visual indexing (`rendition` jobs only); null when it was too large. */
-  rendition: z.string().regex(/^rendition-[0-9]{4,6}\.png$/).nullable().optional(),
+  /** A bounded, normalized rendition of the frame (raw RGB with a fixed header) for visual indexing (`rendition` jobs only); null when it was too large. */
+  rendition: z.string().regex(/^rendition-[0-9]{4,6}\.rgb$/).nullable().optional(),
   /** The frame's text was cut at OCR_MAX_FRAME_TEXT_CHARS. */
   textTruncated: z.boolean().optional(),
 });

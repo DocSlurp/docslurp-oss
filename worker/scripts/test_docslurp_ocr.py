@@ -696,21 +696,26 @@ class RenditionTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)
 
-    def test_scales_to_the_long_edge_cap_and_writes_a_png(self):
-        name = self.ocr.write_rendition(self.rt, Image.new('RGB', (3000, 1500), 'white'), self.dir, 7, 1024, 4 * 1024 * 1024)
-        self.assertEqual(name, 'rendition-0007.png')
-        with Image.open(os.path.join(self.dir, name)) as image:
-            self.assertEqual(image.format, 'PNG')
-            self.assertEqual(image.size, (1024, 512))
+    def read(self, name):
+        data = open(os.path.join(self.dir, name), 'rb').read()
+        self.assertEqual(data[:8], self.ocr.RENDITION_MAGIC)
+        width, height = struct.unpack('>II', data[8:16])
+        self.assertEqual(len(data), 16 + width * height * 3)
+        return width, height, data[16:]
 
-    def test_never_upscales(self):
-        name = self.ocr.write_rendition(self.rt, Image.new('RGB', (300, 200), 'white'), self.dir, 1, 1024, 4 * 1024 * 1024)
-        with Image.open(os.path.join(self.dir, name)) as image:
-            self.assertEqual(image.size, (300, 200))
+    def test_scales_to_the_long_edge_cap_and_writes_raw_rgb(self):
+        name = self.ocr.write_rendition(self.rt, Image.new('RGB', (3000, 1500), 'white'), self.dir, 7, 1024, 4 * 1024 * 1024)
+        self.assertEqual(name, 'rendition-0007.rgb')
+        width, height, pixels = self.read(name)
+        self.assertEqual((width, height), (1024, 512))
+        self.assertEqual(pixels[:3], b'\xff\xff\xff')
+
+    def test_never_upscales_and_normalizes_to_rgb(self):
+        name = self.ocr.write_rendition(self.rt, Image.new('L', (300, 200), 128), self.dir, 1, 1024, 4 * 1024 * 1024)
+        self.assertEqual(self.read(name)[:2], (300, 200))
 
     def test_drops_a_rendition_over_the_byte_cap(self):
-        noise = Image.frombytes('RGB', (512, 512), os.urandom(512 * 512 * 3))
-        self.assertIsNone(self.ocr.write_rendition(self.rt, noise, self.dir, 2, 1024, 1024))
+        self.assertIsNone(self.ocr.write_rendition(self.rt, Image.new('RGB', (512, 512)), self.dir, 2, 1024, 1024))
         self.assertEqual(os.listdir(self.dir), [])
 
     def test_rendition_needs_an_image_dir(self):

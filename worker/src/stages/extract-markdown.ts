@@ -1694,7 +1694,7 @@ export class ExtractMarkdownStage implements Stage {
     let renditions = 0;
     for (const page of result.pages) {
       if (!owner || !page.rendition) continue;
-      await this.storage.putBytes(pageRenditionKey(owner, page.pageNumber), page.rendition.bytes, "image/png");
+      await this.storage.putBytes(pageRenditionKey(owner, page.pageNumber), page.rendition.bytes, "application/octet-stream");
       renditions += 1;
     }
     if (owner && renditions < result.pages.length) {

@@ -12,6 +12,7 @@ import { ocrResultSchema, type OcrFrameRecord, type OcrResultRecord } from "@doc
 
 import type { SandboxedOcrJob } from "../extractors/plugins.js";
 import { sandboxedOcrProvider } from "../extractors/plugins.js";
+import { parseRawRendition } from "../lib/page-rendition.js";
 import type { CommandPlan, CommandRunner } from "../tools/runner.js";
 import { ESCALATE_RECOGNISERS, planOcrLanguages, type OcrLanguagePlan } from "./languages.js";
 import { classifyOcrRunError, OcrDeterministicFailure, OcrRefusedError, resolveOcrMode, type OcrMode } from "./mode.js";
@@ -41,7 +42,7 @@ export interface OcrPageRead {
   elapsedMs: number;
   /** Why this page should get a hosted second read, and the boundary's PNG of it; null when it should not. */
   escalation: { reason: OcrEscalationReason; imagePath: string; width: number; height: number } | null;
-  /** The boundary's bounded rendition of the frame (validated by header and size only, never decoded here), when asked for. */
+  /** The boundary's bounded raw RGB rendition of the frame (validated by header and exact size; there is nothing to decode), when asked for. */
   rendition?: { imagePath: string; width: number; height: number };
 }
 
@@ -213,9 +214,10 @@ export function checkResultAgainstJob(result: OcrResultRecord, job: SandboxedOcr
 }
 
 /**
- * A frame's rendition, accepted only when it is the PNG the job asked for: named for this frame, a PNG by signature and IHDR,
- * within the job's byte cap, its long edge within the job's cap and its pixels within that square. Anything else is refused
- * (logged; the page then has no visual index), never decoded or repaired here.
+ * A frame's rendition, accepted only when it is the raw RGB file the job asked for: named for this frame, a regular file
+ * within the job's byte cap, with the fixed header and exactly width x height x 3 pixel bytes, its long edge within the
+ * job's cap (lib/page-rendition.ts parseRawRendition). Anything else is refused (logged; the page then has no visual
+ * index). It is never decoded: there is no encoded image to decode.
  */
 async function validRendition(
   frame: { frame: number; rendition?: string | null },
@@ -224,12 +226,16 @@ async function validRendition(
 ): Promise<OcrPageRead["rendition"] | undefined> {
   if (!frame.rendition) return undefined;
   const refuse = (why: string) => { console.warn(`[ocr] frame=${frame.frame} rendition refused: ${why}`); return undefined; };
-  if (frame.rendition !== `rendition-${String(frame.frame).padStart(4, "0")}.png`) return refuse("names another frame");
+  if (frame.rendition !== `rendition-${String(frame.frame).padStart(4, "0")}.rgb`) return refuse("names another frame");
   const imagePath = path.join(imageDir, frame.rendition);
-  const dims = await pngDimensions(imagePath, cap.maxBytes);
-  if (!dims) return refuse("missing, not a PNG or over the byte cap");
-  if (dims.width < 1 || dims.height < 1 || Math.max(dims.width, dims.height) > cap.maxLongEdge) return refuse(`${dims.width}x${dims.height} exceeds the ${cap.maxLongEdge}px cap`);
-  return { imagePath, width: dims.width, height: dims.height };
+  const info = await lstat(imagePath).catch(() => null);
+  if (!info?.isFile() || info.size > cap.maxBytes) return refuse("missing, not a regular file or over the byte cap");
+  const handle = await open(imagePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  let bytes: Buffer;
+  try { bytes = await handle.readFile(); } finally { await handle.close(); }
+  const raw = parseRawRendition(bytes, cap);
+  if (!raw) return refuse("not a raw RGB rendition within its caps");
+  return { imagePath, width: raw.width, height: raw.height };
 }
 
 /** A PNG's signature and IHDR size, read without decoding pixels. Null when the file is not that PNG. */
