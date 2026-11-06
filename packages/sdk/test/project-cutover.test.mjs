@@ -312,3 +312,27 @@ test("batch search uses query data slots instead of caller array methods", async
   await assert.rejects(async () => client.search({ queries }), /must be data properties/);
   assert.equal(reads, 0);
 });
+
+
+test("inherited batch protocol fields refuse before getters can erase child selection", async () => {
+  let reads = 0, requests = 0;
+  const client = createDocSlurpClient({ fetch: async () => { requests++; throw new Error("network must not run"); } });
+  for (const key of ["queries", "concurrency"]) {
+    const query = { q: "question", project: "intended" };
+    const prototype = Object.defineProperty({}, key, { get() { reads++; delete query.project; return key === "queries" ? [query] : 4; } });
+    const input = Object.assign(Object.create(prototype), key === "queries" ? {} : { queries: [query] });
+    await assert.rejects(async () => client.search(input), /must be an enumerable own property/);
+  }
+  assert.equal(reads, 0); assert.equal(requests, 0);
+});
+
+
+test("client configuration captures scope without invoking mutating accessors", () => {
+  let reads = 0;
+  const options = { project: "intended", get apiUrl() { reads++; delete this.project; return "https://example.test"; } };
+  assert.throws(() => createDocSlurpClient(options), /must be data properties/);
+  for (const [key,value] of Object.entries({ projectId: "intended", projectIds: ["intended"], orgId: "org", newProject: true, templateKey: "template" })) {
+    assert.throws(() => createDocSlurpClient({ [key]: value }), /project only/);
+  }
+  assert.equal(reads, 0);
+});

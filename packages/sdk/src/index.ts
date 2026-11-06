@@ -1134,6 +1134,10 @@ function rejectLegacyProjectOptions(input: object): void {
 
 export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   rejectLegacyProjectOptions(options);
+  rejectUncopyableIntakeSelection(options);
+  for (const key of INTAKE_SELECTION_FIELDS) {
+    if (key !== "project" && key in options) throw new TypeError("Pass the client project selection in project only.");
+  }
   // Read server configuration at construction time; never import it into browser bundles.
   const env = typeof window === "undefined" && typeof process !== "undefined" ? process.env : undefined;
   const apiUrl = normalizeApiUrl(options.apiUrl ?? (env?.DOCSLURP_URL?.trim() || "https://docslurp.io"));
@@ -1648,6 +1652,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     rejectLegacyProjectOptions(input);
     rejectUncopyableIntakeSelection(input);
     if ("queries" in input) {
+      rejectUncopyableFields(input, ["queries", "concurrency"]);
       for (const key of INTAKE_SELECTION_FIELDS) if (key in input) throw new TypeError("Pass batch search selections in each query.");
       if (!Array.isArray(input.queries) || input.queries.length < 1 || input.queries.length > 20) throw new RangeError("search accepts 1–20 queries.");
       const queries: SearchInput[] = [];
