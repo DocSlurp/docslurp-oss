@@ -18,6 +18,7 @@ import {
 import { sql, type SqlClient } from "../db.js";
 import { currentChatTurn, trackChatTurnWrite, type ChatTurnContext } from "./chat-turn-context.js";
 import { currentRequestApiKeyId } from "./request-context.js";
+import { withServedUsageModel } from "@docslurp/shared";
 
 /**
  * Usage Event ledger (write side).
@@ -287,7 +288,9 @@ export function stampUsageScope(
   return stamped;
 }
 
-function logUsage({ id, ...input }: UsageInput): UsageEvent {
+function logUsage({ id, ...raw }: UsageInput): UsageEvent {
+  // A call the restricted-provider fallback re-targeted is recorded as the model that ran.
+  const input = withServedUsageModel(raw);
   const event = { ...priceAiUsageEvent(buildPricedAiUsageLedgerEvent(input, {
     fallback: resolveApiAiUsagePricing(),
   })), id: id ?? randomUUID() };

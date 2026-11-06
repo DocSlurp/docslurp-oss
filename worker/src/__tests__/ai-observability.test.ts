@@ -4,7 +4,7 @@ const mocks = vi.hoisted(() => ({ observe: vi.fn(), generate: vi.fn(), usage: vi
 vi.mock("@docslurp/shared/observability", async (importOriginal) => ({ ...await importOriginal<typeof import("@docslurp/shared/observability")>(), withObservation: mocks.observe, aiResultDetails: () => ({ usageDetails: { input: 10, output: 2 } }) }));
 vi.mock("@docslurp/shared", async (importOriginal) => ({
   ...await importOriginal<typeof import("@docslurp/shared")>(),
-  createOpenRouterUsageCapture: () => ({ fetch: vi.fn(), usage: () => undefined, providerName: () => undefined }),
+  createOpenRouterUsageCapture: () => ({ fetch: vi.fn(), usage: () => undefined, providerName: () => undefined, sentModel: () => undefined }),
   resolveOpenRouterUsage: mocks.usage,
 }));
 vi.mock("@ai-sdk/openai", () => ({ createOpenAI: () => (model: string) => model }));

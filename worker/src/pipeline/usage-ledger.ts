@@ -13,6 +13,7 @@ import {
 } from "@docslurp/shared";
 
 import type { UsageEvent } from "../models.js";
+import { withServedUsageModel } from "@docslurp/shared";
 import {
   buildWorkerAiUsageEvent,
   hasWorkerAiUsage,
@@ -77,7 +78,7 @@ export class PipelineUsageEventLedger {
    * that persists the charge removes that request from the org's uncharged count.
    */
   record(input: WorkerAiUsageInput, options: { visionAttemptTicket?: string | null } = {}): UsageEvent | null {
-    const event = buildWorkerAiUsageEvent(input);
+    const event = buildWorkerAiUsageEvent(withServedUsageModel(input));
     this.chargeRichPageRead(event, false, options.visionAttemptTicket ?? null);
     if (!hasWorkerAiUsage(event)) {
       return null;
