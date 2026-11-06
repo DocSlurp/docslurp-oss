@@ -447,3 +447,18 @@ Providers live in `worker/src/sandbox/providers/<id>/index.ts`.
 5. Never put secret values in probe details or error messages.
 
 Source: `worker/src/sandbox/`, `worker/sandbox-tools.json`, [Security](security.md#parser-sandbox).
+
+## Large data tables in production
+
+HTML table geometry is prepared in the parser VM and validated before chunking.
+The limits accommodate 5,000 data rows by 20 columns plus headers: 4 MiB of source
+characters, 128,000 cells per table and byte-aware batches capped at 32 MiB.
+Across a document, table source and cell text each have a 32 MiB character budget,
+and validated cells are capped at 256,000. Wider or verbose tables can hit those
+independent limits before the row count; unsupported geometry retains source text
+without inferred cell coordinates. Source beyond a document budget refuses work.
+
+JSON record arrays are not truncated by the default 100-row Markdown block size;
+the renderer repeats tables for subsequent rows until its explicit output budget.
+For exhaustive numerical aggregation or complete dataset export, use the original
+data: RAG chunks provide cited retrieval, not a substitute for a dataframe engine.

@@ -1,5 +1,6 @@
-import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
 
 /** One remote filesystem entry. `mtime` is in the remote clock's units (Modal reports whole seconds). */
@@ -182,8 +183,14 @@ export class SessionStaging {
       for (const name of await readdir(abs)) await this.upload(path.join(abs, name));
     } else if (stats.isFile()) {
       if (stats.size > 512 * 1024 * 1024) throw new Error("parser VM input file exceeds limit");
-      const data = await readFile(abs);
-      if (data.byteLength > 512 * 1024 * 1024) throw new Error("parser VM actual input file exceeds limit");
+      const chunks: Buffer[] = []; let bytes = 0;
+      // Bound allocation while reading, including growth after the initial stat.
+      for await (const chunk of createReadStream(abs)) {
+        bytes += chunk.length;
+        if (bytes > 512 * 1024 * 1024) throw new Error("parser VM actual input file exceeds limit");
+        chunks.push(chunk as Buffer);
+      }
+      const data = Buffer.concat(chunks, bytes);
       const hash = createHash("sha256").update(data).digest("hex");
       if (this.inputHashes.get(abs) === hash) return;
       await this.remote.writeFile(abs, data);
