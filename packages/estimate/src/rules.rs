@@ -19,7 +19,7 @@ pub struct Extensions {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TextPages {
     pub mime_prefixes: Vec<String>,
     pub lines: f64,
@@ -27,7 +27,7 @@ pub struct TextPages {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MultiFrameImages {
     pub max_frames: f64,
     pub mime_types: Vec<String>,
@@ -35,7 +35,7 @@ pub struct MultiFrameImages {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PageRasterRouting {
     pub sparse_page_words: f64,
     pub min_significant_image_coverage: f64,
@@ -57,7 +57,7 @@ pub struct PageRasterRouting {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Rules {
     pub profile_schema: u32,
     pub max_sampled_pages: usize,
@@ -73,7 +73,7 @@ pub struct Rules {
 
 /// The page-equivalent rule billing measures with: area against a standard page, capped per page; text by the text rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PageEquivalentRules {
     pub standard_page_area_pt2: f64,
     pub area_equivalents_cap: f64,
@@ -83,7 +83,7 @@ pub struct PageEquivalentRules {
 
 /// What the worker's PDF text extraction keeps (`EXTRACTION_LIMITS` in `@docslurp/shared`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExtractionLimits {
     pub tiny_glyph_points: f64,
     pub tiny_glyphs_per_page: f64,
