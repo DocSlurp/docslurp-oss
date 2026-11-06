@@ -188,7 +188,7 @@ export const KILL_PARSER_USER_ARGV = ["python3", "-I", "-c", KILL_PARSER_USER_SC
 export const PARSER_VM_HOME = "/home/docslurp";
 
 /** Directories uid 10001 may write outside job trees. Every one is wiped after each command (council W #1). */
-export const PARSER_SCRATCH_ROOTS: readonly string[] = ["/tmp", "/var/tmp", "/dev/shm", "/run/lock", PARSER_VM_HOME];
+export const PARSER_SCRATCH_ROOTS: readonly string[] = ["/tmp", "/var/tmp", "/dev/shm", "/dev/mqueue", "/run/lock", PARSER_VM_HOME];
 
 /**
  * Paths parser images (worker/Dockerfile*) have shipped owned by uid 10001: made root-owned and not group- or
@@ -199,9 +199,10 @@ const IMAGE_LOCK_PATHS = ["/app", "/opt", "/usr/local", "/var/lib/clamav", "/var
 /**
  * Run once as root when a parser VM starts, after HARDEN_LINKS_ARGV (council W #1). First it makes every path under
  * IMAGE_LOCK_PATHS that uid 10001 owns, or that is group- or world-writable, root-owned and not writable by others.
- * Then a child drops to uid 10001 and walks the root filesystem (one device, symlinks not followed): any file or
- * directory it can write outside the scratch roots and the job roots given as arguments is printed and the script exits
- * 6, and the session runs nothing on that VM. Arguments: the job roots.
+ * Then a child drops to uid 10001 and walks every mounted filesystem except /proc, /sys and /dev/pts (symlinks not
+ * followed; council X #3): anything outside the scratch roots and the job roots given as arguments that uid 10001 owns,
+ * whatever its mode, or that it can write (directories, regular files, sockets and FIFOs; device nodes are skipped) is
+ * printed and the script exits 6, and the session runs nothing on that VM. Arguments: the job roots.
  */
 const LOCK_IMAGE_SCRIPT = [
   "# docslurp-image-lock",
@@ -220,29 +221,32 @@ const LOCK_IMAGE_SCRIPT = [
   "            if st.st_uid == uid or st.st_gid == uid: os.lchown(p, 0, 0)",
   "            if st.st_mode & 0o022: os.chmod(p, stat.S_IMODE(st.st_mode) & ~0o022)",
   `allowed = set(${JSON.stringify(PARSER_SCRATCH_ROOTS)} + [os.path.normpath(r) for r in sys.argv[1:]])`,
-  "allowed |= {'/proc', '/sys', '/dev'}",
+  "pruned = {'/proc', '/sys', '/dev/pts'}",
   "r, w = os.pipe()",
   "pid = os.fork()",
   "if pid == 0:",
   "    os.close(r)",
   "    os.setgroups([]); os.setresgid(uid, uid, uid); os.setresuid(uid, uid, uid)",
   "    found = []",
-  "    rootdev = os.lstat('/').st_dev",
+  "    def bad(p, st):",
+  "        if st.st_uid == uid: return True",
+  "        if stat.S_ISCHR(st.st_mode) or stat.S_ISBLK(st.st_mode) or stat.S_ISLNK(st.st_mode): return False",
+  "        return os.access(p, os.W_OK)",
   "    for base, dirs, files in os.walk('/'):",
   "        keep = []",
   "        for d in dirs:",
   "            p = os.path.join(base, d)",
   "            try: st = os.lstat(p)",
   "            except OSError: continue",
-  "            if p in allowed or st.st_dev != rootdev or stat.S_ISLNK(st.st_mode): continue",
-  "            if os.access(p, os.W_OK): found.append(p)",
+  "            if p in allowed or p in pruned or stat.S_ISLNK(st.st_mode): continue",
+  "            if bad(p, st): found.append(p)",
   "            keep.append(d)",
   "        dirs[:] = keep",
   "        for f in files:",
   "            p = os.path.join(base, f)",
   "            try: st = os.lstat(p)",
   "            except OSError: continue",
-  "            if stat.S_ISREG(st.st_mode) and os.access(p, os.W_OK): found.append(p)",
+  "            if bad(p, st): found.append(p)",
   "        if len(found) >= 5: break",
   "    os.write(w, '\\n'.join(found[:5]).encode())",
   "    os._exit(6 if found else 0)",
@@ -303,7 +307,30 @@ const RESET_SCRIPT = [
   "for root in roots:",
   "    try: clean(root)",
   "    except OSError as error: print('[parser-reset] wipe failed in %s: %s' % (root, error), flush=True)",
+  // SysV IPC objects and POSIX message queues the parser user made outlive its processes: removed too (council X #3).
+  "import subprocess",
+  "def ipc_owned():",
+  "    out = []",
+  "    for kind, flag in (('shm', '-m'), ('sem', '-s'), ('msg', '-q')):",
+  "        try: lines = open('/proc/sysvipc/' + kind).read().splitlines()[1:]",
+  "        except OSError: continue",
+  "        for line in lines:",
+  "            f = line.split()",
+  "            ident = f[1]",
+  "            owners = (f[4], f[6]) if kind == 'sem' else (f[7], f[9])",
+  "            if str(uid) in owners: out.append((flag, ident))",
+  "    return out",
+  // Removed as their owner: root needs CAP_IPC_OWNER or CAP_SYS_ADMIN for another user's objects, which a VM may not grant.
+  "owned = ipc_owned()",
+  "if owned:",
+  "    child = os.fork()",
+  "    if child == 0:",
+  "        os.setgroups([]); os.setresgid(uid, uid, uid); os.setresuid(uid, uid, uid)",
+  "        for flag, ident in owned: subprocess.run(['ipcrm', flag, ident], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
+  "        os._exit(0)",
+  "    os.waitpid(child, 0)",
   "left = []",
+  "left += ['sysv%s:%s' % pair for pair in ipc_owned()]",
   "for root in roots: residue(root, left)",
   "if left:",
   "    print('[parser-reset] residue after wipe: ' + ', '.join(left[:5]), flush=True)",

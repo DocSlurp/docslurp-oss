@@ -210,6 +210,27 @@ describe.skipIf(!dockerKillTest)("parser VM image lock and reset (council W #1)"
     expect(run.stdout).toContain("venv=original owner=0");
   }, 150_000);
 
+  it("walks every mount: a path the parser user owns, whatever its mode, refuses the VM; SysV IPC it left is removed (council X #3)", () => {
+    const run = docker([
+      ...setup,
+      'python3 -I -c "$LOCK" /tmp/docslurp-parser-sandbox 2>&1; echo "clean-lock=$?"',
+      "mkdir -p /srv/owned && chmod 0555 /srv/owned && chown 10001:10001 /srv/owned",
+      'python3 -I -c "$LOCK" /tmp/docslurp-parser-sandbox 2>&1; echo "owned-lock=$?"',
+      "rmdir /srv/owned",
+      `${asUser("import subprocess; subprocess.run(['ipcmk', '-M', '4096'], check=True, stdout=subprocess.DEVNULL); subprocess.run(['ipcmk', '-Q'], check=True, stdout=subprocess.DEVNULL); subprocess.run(['ipcmk', '-S', '1'], check=True, stdout=subprocess.DEVNULL)")}; echo "ipc-made=$?"`,
+      'echo "ipc-before=$(awk \'NR>1 && $8==10001\' /proc/sysvipc/shm | wc -l)/$(awk \'NR>1 && $8==10001\' /proc/sysvipc/msg | wc -l)/$(awk \'NR>1 && $5==10001\' /proc/sysvipc/sem | wc -l)"',
+      'python3 -I -c "$RESET" /tmp/docslurp-parser-sandbox; echo "reset=$?"',
+      'echo "ipc-after=$(awk \'NR>1 && $8==10001\' /proc/sysvipc/shm | wc -l)/$(awk \'NR>1 && $8==10001\' /proc/sysvipc/msg | wc -l)/$(awk \'NR>1 && $5==10001\' /proc/sysvipc/sem | wc -l)"',
+    ].join("\n"));
+    expect(run.stdout).toContain("clean-lock=0");
+    expect(run.stdout).toMatch(/outside scratch and job roots: \/srv\/owned/);
+    expect(run.stdout).toContain("owned-lock=6");
+    expect(run.stdout).toContain("ipc-made=0");
+    expect(run.stdout).toContain("ipc-before=1/1/1");
+    expect(run.stdout).toContain("reset=0");
+    expect(run.stdout).toContain("ipc-after=0/0/0");
+  }, 150_000);
+
   it("refuses an image path the parser user can still write, and reports a full job root or /dev/shm", () => {
     const run = docker([
       ...setup,
@@ -219,7 +240,9 @@ describe.skipIf(!dockerKillTest)("parser VM image lock and reset (council W #1)"
       'python3 -I -c "$RESET" /full; echo "reset-full=$?"',
       'python3 -I -c "$RESET" /tmp/docslurp-parser-sandbox; echo "reset-ok=$?"',
     ].join("\n"), ["--tmpfs", "/full:size=1m,mode=1777"]);
-    expect(run.stdout).toMatch(/writable by uid 10001 outside scratch and job roots: \/srv\/open/);
+    // Every mount is walked (council X #3): the extra tmpfs is flagged as well as /srv/open.
+    expect(run.stdout).toMatch(/writable by uid 10001 outside scratch and job roots: [^\n]*\/srv\/open/);
+    expect(run.stdout).toMatch(/outside scratch and job roots: [^\n]*\/full/);
     expect(run.stdout).toContain("lock=6");
     expect(run.stdout).toContain("[parser-reset] unhealthy root=/full");
     expect(run.stdout).toContain("reset-full=5");
