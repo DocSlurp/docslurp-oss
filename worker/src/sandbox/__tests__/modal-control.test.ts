@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { KILL_PARSER_USER_ARGV, killArgv, launchArgv, lockImageArgv, resetArgv } from "../providers/modal/control.js";
+import { HARDEN_LINKS_ARGV, KILL_PARSER_USER_ARGV, killArgv, launchArgv, lockImageArgv, resetArgv } from "../providers/modal/control.js";
 
 /** Run an argv locally, the way Modal runs it remotely, and collect its exit status and output. */
 function run(argv: string[]): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
@@ -246,6 +246,22 @@ describe.skipIf(!dockerKillTest)("parser VM image lock and reset (council W #1)"
     for (const gone of ["/tmp/docslurp-job-a/out", "/tmp/docslurp-job-a/extra", "/var/tmp/sneaky", "/tmp/other"]) expect(run.stdout).toContain(`absent ${gone}`);
     expect(run.stdout).toContain("full-reset=0");
     expect(run.stdout).toContain("job-a absent");
+  }, 150_000);
+
+  it("after hardening the parser user cannot create a POSIX message queue (council XQ)", () => {
+    // Only the IPC-namespaced line of the real hardening script runs here: the others are host-wide sysctls.
+    const lines = HARDEN_LINKS_ARGV[2]!.split("\n");
+    const fn = lines.slice(lines.indexOf("set_check() {"), lines.indexOf("}") + 1);
+    const mq = lines.find((line) => line.includes("fs/mqueue/queues_max"))!;
+    expect(mq).toBe("set_check /proc/sys/fs/mqueue/queues_max 0");
+    const harden = [...fn, mq].join("\n");
+    const mqOpen = "import ctypes, os; rt = ctypes.CDLL('librt.so.1', use_errno=True); rt.mq_open.restype = ctypes.c_int; os.setgroups([]); os.setresgid(10001,10001,10001); os.setresuid(10001,10001,10001); fd = rt.mq_open(('/docslurp-xq-%d' % os.getpid()).encode(), os.O_CREAT | os.O_RDWR, 0o600, None); print('mq_open=%d errno=%d' % (fd, ctypes.get_errno()))";
+    const run = spawnSync("docker", ["run", "--rm", "--network", "none", "--ipc", "private", "--security-opt", "systempaths=unconfined", "-e", `HARDEN=${harden}`, "-e", `MQ=${mqOpen}`,
+      "python:3.11-slim-bookworm", "sh", "-c", 'python3 -c "$MQ"; sh -c "$HARDEN"; echo "harden=$? max=$(cat /proc/sys/fs/mqueue/queues_max)"; python3 -c "$MQ"'], { encoding: "utf8", timeout: 120_000 });
+    const opens = [...run.stdout.matchAll(/mq_open=(-?\d+) errno=(\d+)/g)].map((m) => Number(m[1]));
+    expect(opens[0]).toBeGreaterThanOrEqual(0); // before: the parser user could create one
+    expect(run.stdout).toContain("harden=0 max=0");
+    expect(opens[1]).toBe(-1); // after: refused (ENOSPC)
   }, 150_000);
 
   it("locks Modal's root 1777 /run tmpfs so the walk passes; without the lock step it is refused (council X #8)", () => {

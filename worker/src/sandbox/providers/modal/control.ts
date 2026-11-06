@@ -107,6 +107,9 @@ export const HARDEN_LINKS_ARGV = ["/bin/sh", "-c", [
   "set_check /proc/sys/fs/protected_hardlinks 1",
   "set_check /proc/sys/fs/protected_symlinks 1",
   "set_check /proc/sys/fs/suid_dumpable 0",
+  // No POSIX message queues for the parser user (council XQ): Modal VMs have no /dev/mqueue mount, so a queue one
+  // document made would be invisible to the reset and outlive into the next. Root (CAP_SYS_RESOURCE) is unaffected.
+  "set_check /proc/sys/fs/mqueue/queues_max 0",
   "if [ -e /proc/sys/kernel/yama/ptrace_scope ]; then",
   "  v=; read -r v < /proc/sys/kernel/yama/ptrace_scope 2>/dev/null",
   '  case "$v" in 1|2|3) ;; *) set_check /proc/sys/kernel/yama/ptrace_scope 1 ;; esac',
@@ -210,6 +213,14 @@ const LOCK_IMAGE_SCRIPT = [
   "import os, stat, sys",
   `uid = ${PARSER_VM_UID}`,
   "if os.geteuid() != 0: sys.exit(6)",
+  // Best effort: mount the POSIX mqueue filesystem so any queue that exists is visible to the reset (council XQ). The
+  // required control is fs.mqueue.queues_max=0 in HARDEN_LINKS_ARGV.
+  "import subprocess",
+  "if not os.path.ismount('/dev/mqueue'):",
+  "    try:",
+  "        os.makedirs('/dev/mqueue', exist_ok=True)",
+  "        subprocess.run(['mount', '-t', 'mqueue', 'mqueue', '/dev/mqueue'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)",
+  "    except Exception: pass",
   `for top in ${JSON.stringify(IMAGE_LOCK_PATHS)}:`,
   "    if not os.path.lexists(top): continue",
   "    dev = os.lstat(top).st_dev",
