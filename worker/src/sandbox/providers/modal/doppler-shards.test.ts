@@ -52,7 +52,7 @@ describe("executeDopplerShards", () => {
     expect(vm.calls.map((c) => c.range)).toEqual([undefined, undefined]);
   });
 
-  it("runs aligned ranges in parallel and merges them byte-identically in page order", async () => {
+  it("runs aligned ranges in parallel and merges them in page order", async () => {
     const vm = fakeVm();
     const timings: number[] = [];
     const result = await executeDopplerShards(job, 477, undefined, on, { execute: vm.execute, recordTiming: (t) => timings.push(t.pages) });

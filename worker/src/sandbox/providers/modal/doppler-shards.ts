@@ -46,7 +46,10 @@ function logPlan(fields: Record<string, string | number | boolean | undefined>):
  * The host never parses the PDF. It plans from the page count the pipeline already holds
  * and the file size; each guest re-counts pages and refuses a range that does not fit, and
  * a final shard must end on the document's last page. Shard boundaries sit on the guest's
- * 32-page chunk grid, so the merged Markdown is byte-identical to one whole-document VM.
+ * 32-page grid. Each guest also converts 16 context pages either side of its range and keeps
+ * only its own pages, so running headers are judged as in one whole-document VM; the body
+ * font size is taken from each shard's first window, so output near a shard start can still
+ * differ slightly from a whole-document run.
  */
 
 export interface DopplerShardSettings {

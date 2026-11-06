@@ -32,7 +32,16 @@ CHUNK_PAGES = 32
 # headers and body size are judged inside that window), so memory stays bounded by the
 # window rather than the range and no intermediate XHTML is written.
 CONVERTER = ('/opt/doppler/bin/pdftomarkdown', '--stream', '--html', '--report')
-MAX_REPORT = 16 * 1024
+# A shard also converts this many pages either side of its range (the --stream window) and
+# keeps only its own page slots, so running headers and table headers near a shard edge are
+# judged with the same neighbours as in a whole-document pass.
+CONTEXT_PAGES = 16
+# The converter's document work budget (engine default max_doc_work) per 32 pages: one
+# streaming pass over a range must not get less work per page than a 32-page chunk did.
+DOC_WORK_PER_CHUNK = 5.0e7
+# Report line: fixed fields plus per-page lists (degraded pages, truncated rules).
+MAX_REPORT_BASE = 16 * 1024
+MAX_REPORT_PER_PAGE = 96
 JOB_SECONDS = 150
 
 
@@ -254,12 +263,15 @@ def shard_request(pages, path=Path('/job/shard.json')):
     return first, last
 
 
-def converter_settings(settings):
-    # The bundle's tuned parameters, passed through unchanged: the converter's window judges
-    # running headers over neighbouring pages, so no per-range rescaling is needed.
+def converter_settings(settings, pages):
+    # The bundle's tuned parameters, with the document work budget scaled to the range.
     params = json.loads(settings)
     if type(params) is not dict:
         raise ValueError('invalid converter settings')
+    per_chunk = params.get('max_doc_work', DOC_WORK_PER_CHUNK)
+    if type(per_chunk) not in (int, float) or not 0 < per_chunk < float('inf'):
+        raise ValueError('invalid converter settings')
+    params['max_doc_work'] = per_chunk * -(-pages // CHUNK_PAGES)
     return json.dumps(params, separators=(',', ':'))
 
 
@@ -278,12 +290,33 @@ def check_output(path, expected_pages):
     return size
 
 
-def converter_report(path):
+def keep_slots(source, target, skip, keep):
+    # Copy page slots [skip, skip + keep) of a form-feed-joined file, dropping context pages.
+    slot = 0
+    size = 0
+    with source.open('rb') as src, target.open('xb') as dst:
+        while data := src.read(65536):
+            for index, part in enumerate(data.split(b'\f')):
+                if index:
+                    slot += 1
+                    if skip < slot < skip + keep:
+                        dst.write(b'\f')
+                        size += 1
+                if part and skip <= slot < skip + keep:
+                    dst.write(part)
+                    size += len(part)
+            if size > MAX_OUTPUT:
+                raise ValueError('Markdown exceeds limit')
+    return size
+
+
+def converter_report(path, pages):
     # pdftomarkdown writes its JSON report as the last stderr line (pdftotext runs quietly).
+    limit = MAX_REPORT_BASE + MAX_REPORT_PER_PAGE * pages
     with path.open('rb') as log:
         log.seek(0, os.SEEK_END)
-        log.seek(max(0, log.tell() - MAX_REPORT))
-        tail = log.read(MAX_REPORT)
+        log.seek(max(0, log.tell() - limit))
+        tail = log.read(limit)
     lines = [line for line in tail.split(b'\n') if line.strip()]
     if not lines:
         raise ValueError('converter report missing')
@@ -291,6 +324,34 @@ def converter_report(path):
     if type(report) is not dict:
         raise ValueError('converter report invalid')
     return report
+
+
+def convert_range(run, pages, first, last, settings, job=Path('/job')):
+    """Convert pages first..last to job/output with context pages either side.
+
+    Returns (output bytes, converter report, context range). `run(args, stdout, stderr, limit)`
+    executes the converter; the context pages' slots are converted and then dropped.
+    """
+    context_first = max(1, first - CONTEXT_PAGES)
+    context_last = min(pages, last + CONTEXT_PAGES)
+    context_pages = context_last - context_first + 1
+    page_ranges(pages, first, last)  # the range itself must fit one VM
+    if context_pages > MAX_PAGES:  # a range at the per-VM limit converts without context
+        context_first, context_last, context_pages = first, last, last - first + 1
+    params = converter_settings(settings, context_pages)
+    converted = job / ('converted' if (context_first, context_last) != (first, last) else 'output')
+    with open(converted, 'xb') as output, open(job / 'converter.log', 'xb') as log:
+        run([*CONVERTER, '--params', params, '-f', str(context_first), '-l', str(context_last), '--', str(job / 'input')],
+            output, log, limit=JOB_SECONDS)
+    diagnostics = converter_report(job / 'converter.log', context_pages)
+    if type(diagnostics.get('pages')) is not int or diagnostics['pages'] != context_pages:
+        raise ValueError('PDF page count mismatch')
+    check_output(converted, context_pages)
+    if converted != job / 'output':
+        keep_slots(converted, job / 'output', first - context_first, last - first + 1)
+        converted.unlink()
+    total_bytes = check_output(job / 'output', last - first + 1)
+    return total_bytes, diagnostics, (context_first, context_last)
 
 
 # Image extraction is an explicit option in the same Markdown VM. Page previews and vector
@@ -525,16 +586,9 @@ def main():
         raise ValueError('invalid PDF page count')  # validated before any request is read
     shard_first, shard_last = shard_request(pages)
     page_ranges(pages, shard_first, shard_last)  # per-VM page limit
-    params = converter_settings(Path('/opt/doppler/defaults.json').read_text())
     expected_pages = shard_last - shard_first + 1
-    # One streaming conversion for the whole range, bounded by the document deadline.
-    with open('/job/output', 'xb') as output, open('/job/converter.log', 'xb') as log:
-        run([*CONVERTER, '--params', params, '-f', str(shard_first), '-l', str(shard_last), '--', '/job/input'],
-            output, log, limit=JOB_SECONDS)
-    diagnostics = converter_report(Path('/job/converter.log'))
-    if type(diagnostics.get('pages')) is not int or diagnostics['pages'] != expected_pages:
-        raise ValueError('PDF page count mismatch')
-    total_bytes = check_output(Path('/job/output'), expected_pages)
+    total_bytes, diagnostics, (context_first, context_last) = convert_range(
+        run, pages, shard_first, shard_last, Path('/opt/doppler/defaults.json').read_text())
     words = diagnostics.get('words', 0) if type(diagnostics.get('words', 0)) is int else 0
     degraded = diagnostics.get('degraded', [])
     degraded_pages = len(degraded) if type(degraded) is list else 0
@@ -551,6 +605,7 @@ def main():
                       'elapsedMs': round((time.monotonic() - started) * 1000), 'outputBytes': total_bytes,
                       'conversion': {'pages': shard_last - shard_first + 1, 'first': shard_first, 'last': shard_last,
                                      'documentPages': pages, 'chunks': 1, 'chunkPages': expected_pages, 'stream': True,
+                                     'contextFirst': context_first, 'contextLast': context_last,
                                      'words': words, 'degradedPages': degraded_pages}}), file=sys.stderr)
     fd = os.open('/job/output', os.O_RDONLY | os.O_NOFOLLOW)
     try:

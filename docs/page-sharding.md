@@ -75,9 +75,11 @@ which is the known isolation gap; sharding them must not widen it and needs a co
 ## Integration order (each behind a flag, Temporal changes `patched()` per
 temporal-workflow-changes.md)
 
-1. Doppler extraction: guest accepts `{first, last, documentPages}` and keeps its 32-page
-   internal chunking; host runs the planned shards as parallel VMs, merges in page order and, on any shard
-   failure, runs one whole-document VM once (all VM costs recorded). Output stays byte-identical.
+1. Doppler extraction: guest accepts `{first, last, documentPages}` and converts its range in one
+   streaming `pdftomarkdown` pass with 16 context pages either side; host runs the planned shards as
+   parallel VMs, merges in page order and, on any shard failure, runs one whole-document VM once (all VM
+   costs recorded). Running headers are judged as in a whole-document pass; the body font size comes
+   from each shard's first window, so output near a shard start can differ slightly.
 2. Page-range shard activity: extend `runPipelineStageShard` from document IDs to
    `(documentId, pageRange)` for render-images and embed.
 3. Feed observed shard timings back through `calibrateShardProfile` (per stage, executor class).
