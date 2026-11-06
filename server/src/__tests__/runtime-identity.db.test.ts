@@ -288,6 +288,51 @@ it.skipIf(!url)("refuses a write path through views of views, owned operators, s
   }
 });
 
+it.skipIf(!url)("refuses state writes through a view or a rule into a table with a definer trigger, and through a cascading foreign key (council X #4)", async () => {
+  const t = `rt_t_${suffix}`;
+  await admin.query(`create table public.${t} (k text)`);
+  await admin.query(`create function public.rt_trg_${suffix}() returns trigger language plpgsql security definer set search_path = pg_catalog, public as $$
+    begin insert into public.pricing_provider_state(key, value, updated_at) values ('pwn.' || new.k, 1, now()) on conflict do nothing; return new; end $$`);
+  await admin.query(`revoke execute on function public.rt_trg_${suffix}() from public`);
+  await admin.query(`create trigger rt_trg_${suffix} after insert on public.${t} for each row execute function public.rt_trg_${suffix}()`);
+  try {
+    // (a) An updatable view over that table: the role writes the view, the trigger fires on the table.
+    await admin.query(`create view public.rt_tv_${suffix} as select * from public.${t}`);
+    await admin.query(`grant insert on public.rt_tv_${suffix} to ${runtime}`);
+    try { expect((await reasonsAs(runtime)).join("\n")).toMatch(new RegExp(`SECURITY DEFINER function\\(s\\) outside the allowlist: [^\\n]*rt_trg_${suffix}`)); }
+    finally { await admin.query(`drop view public.rt_tv_${suffix}`); }
+    // (b) A rule on a table the role may write: DO ALSO INSERT into the table with the trigger.
+    await admin.query(`create table public.rt_r_${suffix} (k text)`);
+    await admin.query(`create rule rt_rule_${suffix} as on insert to public.rt_r_${suffix} do also insert into public.${t} values (new.k)`);
+    await admin.query(`grant insert on public.rt_r_${suffix} to ${runtime}`);
+    try { expect((await reasonsAs(runtime)).join("\n")).toMatch(new RegExp(`SECURITY DEFINER function\\(s\\) outside the allowlist: [^\\n]*rt_trg_${suffix}`)); }
+    finally { await admin.query(`drop table public.rt_r_${suffix}`); }
+    expect(await reasonsAs(runtime)).toEqual([]);
+  } finally {
+    await admin.query(`drop table public.${t}; drop function public.rt_trg_${suffix}()`);
+  }
+  // (c) A foreign key from pricing_provider_state that cascades from a parent the role may delete from or update.
+  const parent = `rt_parent_${suffix}`;
+  await admin.query(`create table public.${parent} (id int primary key)`);
+  for (const action of ["on delete cascade", "on delete set null", "on update set default"]) {
+    await admin.query(`alter table public.pricing_provider_state add column rt_fk_${suffix} int references public.${parent} ${action}`);
+    await admin.query(`grant ${action.includes("update") ? "update" : "delete"} on public.${parent} to ${runtime}`);
+    try { expect((await reasonsAs(runtime)).join("\n")).toMatch(new RegExp(`can delete from or update ${parent}, whose foreign key from pricing_provider_state cascades or sets values`)); }
+    finally {
+      await admin.query(`revoke all on public.${parent} from ${runtime}`);
+      await admin.query(`alter table public.pricing_provider_state drop column rt_fk_${suffix}`);
+    }
+  }
+  // NO ACTION / RESTRICT never write state.
+  await admin.query(`alter table public.pricing_provider_state add column rt_fk_${suffix} int references public.${parent} on delete restrict`);
+  await admin.query(`grant delete on public.${parent} to ${runtime}`);
+  try { expect(await reasonsAs(runtime)).toEqual([]); }
+  finally {
+    await admin.query(`alter table public.pricing_provider_state drop column rt_fk_${suffix}`);
+    await admin.query(`drop table public.${parent}`);
+  }
+});
+
 it.skipIf(!url)("startup refuses the same way (assertRuntimeDatabaseIdentity)", async () => {
   const sql = { unsafe: async (query: string, params?: unknown[]) => (await admin.query(query, params as unknown[])).rows };
   await expect(assertRuntimeDatabaseIdentity(sql, [runtime])).rejects.toThrow(/superuser[\s\S]*refusing to start/);

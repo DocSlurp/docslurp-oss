@@ -145,6 +145,18 @@ export const RUNTIME_IDENTITY_SQL = `
   state as (select to_regclass('public.pricing_provider_state') as oid),
   writable as (select c.oid from pg_class c, held h where c.relkind in ('r', 'p', 'v', 'f', 'm') and c.relnamespace not in (select oid from system_ns)
     and (has_any_column_privilege(h.oid, c.oid, 'INSERT, UPDATE') or has_table_privilege(h.oid, c.oid, 'DELETE, TRUNCATE'))),
+  -- What a write the role may make can touch (council X #4): its writable relations and, through their views' and rules'
+  -- actions, every relation those reach, recursively. Triggers there fire whatever the role may EXECUTE.
+  touched as (
+    with recursive reach(oid) as (
+      select oid from writable
+      union
+      select d.refobjid from pg_rewrite rw join pg_depend d on d.classid = 'pg_rewrite'::regclass and d.objid = rw.oid
+        and d.refclassid = 'pg_class'::regclass
+        join reach on rw.ev_class = reach.oid
+      where d.refobjid <> reach.oid
+    )
+    select distinct oid from reach),
   over_state as (
     with recursive reach(oid) as (
       select oid from state where oid is not null
@@ -218,10 +230,19 @@ export const RUNTIME_IDENTITY_SQL = `
       where p.prosecdef and p.pronamespace not in (select oid from system_ns) and p.oid not in (select objid from extension_members)
         and not (p.oid = any (array(select to_regprocedure(a) from unnest($2::text[]) a where to_regprocedure(a) is not null)))
         and (exists (select 1 from held h where has_function_privilege(h.oid, p.oid, 'EXECUTE'))
-          or exists (select 1 from pg_trigger t where t.tgfoid = p.oid and t.tgrelid in (select oid from writable)))), '') as definer_functions,
+          or exists (select 1 from pg_trigger t where t.tgfoid = p.oid and t.tgrelid in (select oid from touched)))), '') as definer_functions,
     case when (select oid from state) is null then ''
       else coalesce((select string_agg(distinct o.oid::regclass::text, ',' order by o.oid::regclass::text) from over_state o
-        where o.oid in (select oid from writable)), '') end as state_write_paths
+        where o.oid in (select oid from writable)), '') end as state_write_paths,
+    -- A foreign key from pricing_provider_state whose ON DELETE or ON UPDATE action changes state rows (CASCADE, SET NULL,
+    -- SET DEFAULT), to a parent the role can delete from or update, directly or through a view or rule (council X #4).
+    case when (select oid from state) is null then ''
+      else coalesce((select string_agg(distinct c.confrelid::regclass::text, ',' order by c.confrelid::regclass::text) from pg_constraint c
+        where c.contype = 'f' and c.conrelid = (select oid from state)
+          and ((c.confdeltype in ('c', 'n', 'd') and (c.confrelid in (select oid from touched)
+                 or exists (select 1 from held h where has_table_privilege(h.oid, c.confrelid, 'DELETE, TRUNCATE'))))
+            or (c.confupdtype in ('c', 'n', 'd') and (c.confrelid in (select oid from touched)
+                 or exists (select 1 from held h where has_any_column_privilege(h.oid, c.confrelid, 'UPDATE')))))), '') end as state_fk_paths
   from me
 `;
 
@@ -235,6 +256,7 @@ export function runtimeIdentityReasons(row: Record<string, unknown> | undefined,
   const schemas = list(row.create_schemas);
   const definers = list(row.definer_functions);
   const paths = list(row.state_write_paths);
+  const fkPaths = list(row.state_fk_paths);
   const grantable = list(row.grant_options);
   const admins = list(row.admin_memberships);
   return [
@@ -252,6 +274,7 @@ export function runtimeIdentityReasons(row: Record<string, unknown> | undefined,
     row.raises_state === true ? "may execute pricing_state_raise" : null,
     definers.length ? `can reach SECURITY DEFINER function(s) outside the allowlist: ${definers.join(", ")}` : null,
     paths.length ? `can write ${paths.join(", ")}, a view or rule over pricing_provider_state` : null,
+    fkPaths.length ? `can delete from or update ${fkPaths.join(", ")}, whose foreign key from pricing_provider_state cascades or sets values` : null,
   ].filter((reason): reason is string => reason !== null);
 }
 
