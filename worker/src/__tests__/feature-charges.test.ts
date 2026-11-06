@@ -10,7 +10,7 @@ const run = { id: "run-1", userId: "u1", orgId: "o1", workspaceId: "w1", stats: 
 describe("optional per-document feature charges", () => {
   it("charges each feature once per document per run, priced on its pages", () => {
     const state = WorkflowState.create(run, []);
-    const document = { id: "doc-1", pageCount: 23 };
+    const document = { id: "doc-1", pageCount: 23, pageCountSource: "counted" as const };
     chargeDocumentFeature(state, document, "documentSummary");
     chargeDocumentFeature(state, document, "knowledgeGraph");
     chargeDocumentFeature(state, document, "knowledgeGraph"); // a retried stage: no second charge
@@ -50,9 +50,9 @@ describe("features priced on text read", () => {
     expect(featurePages(state, { id: "d", pageCount: 1, billingPages: 50, billingPagesMethod: "text-rule" }, { textPages: 80 })).toBe(50);
     // A slide is a page whatever it holds.
     expect(featurePages(state, { id: "d", pageCount: 1, billingPages: 40, billingPagesMethod: "slides" }, { textPages: 3 })).toBe(40);
-    // A size estimate never prices a feature: the text read when known, else intake's count.
+    // A size estimate never prices a feature: the text read when known, else nothing (never intake's assumed page).
     expect(featurePages(state, { id: "d", pageCount: 1, billingPages: 768, billingPagesMethod: "size-estimate" }, { textPages: 12 })).toBe(12);
-    expect(featurePages(state, { id: "d", pageCount: 1, billingPages: 768, billingPagesMethod: "size-estimate" })).toBe(1);
+    expect(featurePages(state, { id: "d", pageCount: 1, billingPages: 768, billingPagesMethod: "size-estimate" })).toBe(0);
   });
 
   it("raises a charge to the text read and never lowers it; a repeat adds nothing, a larger read adds the difference under a new id", () => {

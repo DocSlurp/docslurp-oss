@@ -7,6 +7,10 @@
 --    authorization never depends on page_count or page_count_source, which the measurement itself rewrites. Rows written
 --    before this migration keep NULL (read as page_count: their counts were priced as they stand).
 --
+-- 3. documents.billing_pages may be 0: an Office, slide, sheet or EPUB file whose extractor read no text measured 0 pages, and
+--    bills neither a page fee nor a feature (never intake's assumed page). The CHECK is re-added NOT VALID (no scan); every
+--    existing row satisfies it by construction (the old CHECK required >= 1).
+--
 -- Catalog-only changes (no rewrite, no scan; a nullable column with no default), under ACCESS EXCLUSIVE on documents,
 -- which the release's lock prelude already holds in its order (see 0122). The trigger's function touches only NEW/OLD.
 SET LOCAL lock_timeout = '10s';
@@ -45,3 +49,7 @@ DROP TRIGGER IF EXISTS documents_intake_page_count ON documents;
 --> statement-breakpoint
 CREATE TRIGGER documents_intake_page_count BEFORE INSERT OR UPDATE OF intake_page_count ON documents
   FOR EACH ROW EXECUTE FUNCTION documents_intake_page_count();
+--> statement-breakpoint
+ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_billing_pages_check;
+--> statement-breakpoint
+ALTER TABLE documents ADD CONSTRAINT documents_billing_pages_check CHECK (billing_pages IS NULL OR billing_pages >= 0) NOT VALID;

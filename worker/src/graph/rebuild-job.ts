@@ -147,9 +147,9 @@ async function runClaimedJob(sql: Client, job: GraphJobRow, options: GraphJobRun
 
   if (job.phase === "extracting" || job.phase === "queued") {
     for (;;) {
-      const documents = await sql<{ id: string; filename: string; page_count: number | null; billing_pages: number | null; billing_pages_method: string | null }[]>`
+      const documents = await sql<{ id: string; filename: string; page_count: number | null; page_count_source: string | null; billing_pages: number | null; billing_pages_method: string | null }[]>`
         -- The pages the document bills (the worker's measured count of an Office file, and how it was found), and its page basis.
-        select d.id, d.filename, d.page_count, d.billing_pages, d.billing_pages_method from documents d
+        select d.id, d.filename, d.page_count, d.page_count_source, d.billing_pages, d.billing_pages_method from documents d
         where d.workspace_id = ${job.workspace_id}
           and d.status = 'completed' and d.superseded_at is null
           and (${cursor}::text is null or d.id > ${cursor})
@@ -225,7 +225,7 @@ async function runClaimedJob(sql: Client, job: GraphJobRow, options: GraphJobRun
             // text read (3,500 characters a page). A window whose answer did not parse was still read, even when none parsed.
             // The same pages a run's feature charge uses: a measured count capped by the text, never a size estimate.
             const documentPages = documentFeaturePages(
-              { pageCount: Number(document.page_count) || 0, billingPages: document.billing_pages, billingPagesMethod: document.billing_pages_method },
+              { pageCount: Number(document.page_count) || 0, pageCountSource: document.page_count_source === "counted" ? "counted" : document.page_count_source === "assumed" ? "assumed" : null, billingPages: document.billing_pages, billingPagesMethod: document.billing_pages_method },
               { textPages: textReadPages(graph.charsTotal) },
             );
             const pages = Math.max(

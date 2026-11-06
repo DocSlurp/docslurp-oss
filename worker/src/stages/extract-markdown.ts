@@ -262,7 +262,7 @@ function measuredPagesOf(value: string | undefined): PageCountResult | null {
   if (!value) return null;
   try {
     const parsed = JSON.parse(value) as Partial<PageCountResult>;
-    return Number.isSafeInteger(parsed.pages) && parsed.pages! >= 1 && (parsed.method === "slides" || parsed.method === "sheet-rows" || parsed.method === "text-rule")
+    return Number.isSafeInteger(parsed.pages) && parsed.pages! >= 0 && (parsed.method === "slides" || parsed.method === "sheet-rows" || parsed.method === "text-rule" || parsed.method === "empty")
       ? { pages: parsed.pages!, method: parsed.method }
       : null;
   } catch {

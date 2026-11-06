@@ -124,8 +124,10 @@ describe("measureExtractedPages: counts from the extractor's own output", () => 
     expect(measureExtractedPages("office-excel", "xlsx", book)!.pages).toBeGreaterThanOrEqual(21);
   });
 
-  it("reports nothing to count for empty output, and does not touch formats the server already counts", () => {
-    expect(measureExtractedPages("office-word", "pandoc", " \n\n ")).toBeNull();
+  it("measures empty output as 0 pages, and does not touch formats measured elsewhere", () => {
+    expect(measureExtractedPages("office-word", "pandoc", " \n\n ")).toEqual({ pages: 0, method: "empty" });
+    // Separator-only output (an empty sheet's commas) is no text either.
+    expect(measureExtractedPages("office-excel", "pandoc", ",,,\n,,\n")).toEqual({ pages: 0, method: "empty" });
     expect(measureExtractedPages("pdf", "poppler-text", markdownOfPages(5))).toBeNull();
     expect(measureExtractedPages("image", "ocr", markdownOfPages(5))).toBeNull();
   });
@@ -156,11 +158,13 @@ describe("recordMeasuredPageCount", () => {
     expect(setDocumentBillingPages).toHaveBeenCalledWith("run-1", "doc-1", 40, "slides");
   });
 
-  it("records nothing when there is nothing to count, or the format is counted at intake", async () => {
+  it("records an empty extraction as 0 measured pages, and nothing for formats measured elsewhere", async () => {
     const setDocumentBillingPages = vi.fn(async () => true);
     const state = { run: { id: "run-1" }, store: { setDocumentBillingPages } };
     expect(await recordMeasuredPageCount(state, document("empty.odt", "application/vnd.oasis.opendocument.text"), "office-other", { extractor: "pandoc", markdown: "" }))
-      .toEqual({ pages: null, method: null, intakePages: 1 });
+      .toEqual({ pages: 0, method: "empty", intakePages: 1 });
+    expect(setDocumentBillingPages).toHaveBeenCalledExactlyOnceWith("run-1", "doc-1", 0, "empty");
+    setDocumentBillingPages.mockClear();
     expect(await recordMeasuredPageCount(state, document("a.pdf", "application/pdf", 12), "pdf", { extractor: "poppler-text", markdown: markdownOfPages(3) }))
       .toMatchObject({ pages: null });
     expect(await recordMeasuredPageCount(state, document("b.docx", DOCX), "office-word", null)).toMatchObject({ pages: null });

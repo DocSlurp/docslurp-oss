@@ -23,7 +23,11 @@ import { RunPolicyError } from "./document-failure.js";
  * A long document is never left at the intake count of one page. Earlier counts (`pdf-conversion`, `text-pages`,
  * `size-estimate`) can still be on stored documents; features and billing read them as before.
  */
-export type PageCountMethod = "slides" | "sheet-rows" | "text-rule";
+/**
+ * `empty`: the extractor read no text at all, so the file measured 0 pages; it bills no page fee and no feature, never intake's
+ * assumed page.
+ */
+export type PageCountMethod = "slides" | "sheet-rows" | "text-rule" | "empty";
 export interface PageCountResult { pages: number; method: PageCountMethod }
 
 /** Hard ceiling for a measured count: more than this is a parser fault, not a document. */
@@ -141,14 +145,15 @@ export function sheetCellTexts(markdown: string): string[] {
 }
 
 /**
- * The measured page count of a document from its extractor's Markdown, or null when there is nothing to count (the document then
- * bills its intake count). `extractor` is the winning extractor's id: only python-pptx's output marks slides, and only the
- * spreadsheet extractor's output is sheet tables; any other output is counted by the text rule.
+ * The measured page count of a document from its extractor's Markdown; null only for a format not measured this way. There is
+ * always a measurement: text is counted (slides, sheet rows, else the text rule), and no text at all is 0 pages (`empty`). An
+ * Office, slide, sheet or EPUB file therefore never bills on intake's assumed page. `extractor` is the winning extractor's id: only
+ * python-pptx's output marks slides, and only the spreadsheet extractor's output is sheet tables.
  */
 export function measureExtractedPages(format: string, extractor: string, markdown: string): PageCountResult | null {
   if (!formatNeedsMeasuredPages(format)) return null;
   const text = markdown.length > MAX_COUNTED_TEXT_CHARS ? markdown.slice(0, MAX_COUNTED_TEXT_CHARS) : markdown;
-  if (!text.trim()) return null;
+  if (!text.trim()) return { pages: 0, method: "empty" };
   if (format === "office-pptx" && extractor === "pptx") {
     // Each slide is at least one page, and as many as its text fills by the text rule: a single slide holding a book's worth
     // of text bills that text, not one page.
@@ -162,11 +167,12 @@ export function measureExtractedPages(format: string, extractor: string, markdow
   if (format === "office-excel" && extractor === "xlsx") {
     const sheets = sheetCellTexts(text);
     const pages = sheets.length ? bounded(textBodyPages(sheets)) : null;
-    return pages ? { pages, method: "sheet-rows" } : null;
+    // A spreadsheet extractor that wrote text but no sheet tables is counted by the text rule below.
+    if (pages) return { pages, method: "sheet-rows" };
   }
   const content = contentLines(text);
   const pages = content.trim() ? bounded(textPageCount(content, { markup: true })) : null;
-  return pages ? { pages, method: "text-rule" } : null;
+  return pages ? { pages, method: "text-rule" } : { pages: 0, method: "empty" };
 }
 
 /**
@@ -222,7 +228,10 @@ export async function recordMeasuredPageCount(
   const counted = extracted === null ? null : "pages" in extracted ? extracted : measureExtractedPages(format, extracted.extractor, extracted.markdown);
   if (!counted) return { pages: null, method: null, intakePages };
   // Never bill below the page basis: an extractor that reads less than intake counted does not lower the bill.
-  const measured: PageCountResult = { pages: Math.max(counted.pages, Math.max(1, Math.floor(intakePages) || 1)), method: counted.method };
+  // Never bill below a page basis intake counted from the bytes; an assumed intake (these formats' one page) is no floor, so an
+  // empty file measures 0 pages.
+  const floor = document.pageCountSource === "counted" ? Math.max(1, Math.floor(intakePages) || 1) : 0;
+  const measured: PageCountResult = { pages: Math.max(counted.pages, floor), method: counted.method };
   console.log(`[page-count] document=${document.id} format=${format} counted by ${measured.method}: ${measured.pages} pages (intake ${intakePages})`);
   if (!state.store?.setDocumentBillingPages) throw new Error("page count measured but the store cannot persist it");
   await state.store.setDocumentBillingPages(state.run.id, document.id, measured.pages, measured.method);

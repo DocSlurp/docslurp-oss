@@ -52,3 +52,16 @@ it("captures intake_page_count at insert and keeps it immutable through measurem
     ]);
   } finally { await db.close(); }
 }, 120_000);
+
+// Migration 0130: billing_pages may be 0 (an Office file that measured empty); negative stays refused.
+it("allows billing_pages 0 and still refuses a negative count", async () => {
+  const db = await createMigratedDatabase();
+  try {
+    await db.exec(`${seed}
+      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, billing_pages, billing_pages_method)
+      values ('empty', 'o', 'u', 'w', 'r', 'e.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'raw/e', 'queued', 1, 0, 'empty');
+    `);
+    expect((await db.query(`select billing_pages from documents where id = 'empty'`)).rows).toEqual([{ billing_pages: 0 }]);
+    await expect(db.exec(`update documents set billing_pages = -1 where id = 'empty'`)).rejects.toThrow(/documents_billing_pages_check/);
+  } finally { await db.close(); }
+}, 120_000);
