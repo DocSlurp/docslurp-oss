@@ -1646,12 +1646,19 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   function search(input: SearchBatchInput, options?: RequestOptions): Promise<SearchBatchResponse>;
   function search(input: SearchInput | SearchBatchInput, options?: RequestOptions): SearchRequest | Promise<SearchBatchResponse> {
     rejectLegacyProjectOptions(input);
+    rejectUncopyableIntakeSelection(input);
     if ("queries" in input) {
       for (const key of INTAKE_SELECTION_FIELDS) if (key in input) throw new TypeError("Pass batch search selections in each query.");
-      if (input.queries.length < 1 || input.queries.length > 20) throw new RangeError("search accepts 1–20 queries.");
+      if (!Array.isArray(input.queries) || input.queries.length < 1 || input.queries.length > 20) throw new RangeError("search accepts 1–20 queries.");
+      const queries: SearchInput[] = [];
+      for (let i = 0; i < input.queries.length; i++) {
+        const field = Object.getOwnPropertyDescriptor(input.queries, String(i));
+        if (!field || !("value" in field)) throw new TypeError("Batch queries must be data properties.");
+        queries.push(inProject(field.value));
+      }
       const concurrency = input.concurrency ?? 4;
       if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4) throw new RangeError("Search concurrency must be an integer from 1 to 4.");
-      return request<SearchBatchResponse>("/v1/search", jsonRequest("POST", { queries: input.queries.map(inProject), concurrency }), options);
+      return request<SearchBatchResponse>("/v1/search", jsonRequest("POST", { queries, concurrency }), options);
     }
     const response = request<SearchResponse>("/v1/search", jsonRequest("POST", inProject(input)), options);
     return Object.assign(response, { async *[Symbol.asyncIterator]() { yield* (await response).results; } });
@@ -1670,6 +1677,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       throw new TypeError("Upload arrays cannot also be URL/file-list envelopes.");
     }
     if (Array.isArray(input) || (!("urls" in input) && !("files" in input))) rejectDirectFileSelection(input);
+    // Preserve validated scope before file iterators or source preparation can
+    // mutate caller-owned containers. Native files/streams keep their identity.
+    if (!Array.isArray(input) && ("urls" in input || "files" in input)) input = { ...input };
+    options = { ...options };
     const inputFiles = Array.isArray(input) ? input : "files" in input ? input.files : [];
     for (const file of inputFiles) rejectDirectFileSelection(file);
     // Optional undefined values do not override an envelope's explicit scope.
@@ -2292,6 +2303,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     createUploadSession(input: UploadSessionInput, options?: RequestOptions & { idempotencyKey?: string }): Promise<UploadSession> {
       rejectLegacyProjectOptions(input);
       rejectUncopyableIntakeSelection(input);
+      input = { ...input };
       for (const file of input.files) rejectDirectFileSelection(file);
       assertClientCanonicalIds(canonicalIdsOf(input, undefined));
       return postUploadSession<UploadSession>("/v1/uploads/direct/sessions", { ...input, ...intakeTarget(input) }, options ?? {}, options?.idempotencyKey ?? newIdempotencyKey());

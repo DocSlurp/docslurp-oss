@@ -230,7 +230,7 @@ test("selection and capability restrictions require stable protocol values", asy
   Object.defineProperty(input, "project", { enumerable: true, get() { reads++; return reads === 1 ? "intended" : "default"; } });
   await assert.rejects(async () => client.search(input), /must be a data property/);
   for (const key of ["project", "orgId", "projectIds", "newProject", "templateKey"]) {
-    await assert.rejects(async () => client.search({ queries: [{ q: "question" }], [key]: "intended" }), /batch search selections in each query/);
+    await assert.rejects(async () => client.search({ queries: [{ q: "question" }], [key]: key === "projectIds" ? ["intended"] : key === "newProject" ? true : "intended" }), /batch search selections in each query/);
   }
   for (const input of [
     { boundClientKeyId: erased }, { ttlSeconds: erased }, { allowedOrigins: [erased] },
@@ -273,4 +273,42 @@ test("unrelated request accessors cannot mutate validated scope during copying",
   await assert.rejects(async () => client.search(input), /must be data properties/);
   assert.equal(reads, 0);
   assert.equal(requests, 0);
+});
+
+
+test("batch root accessors cannot mutate child scope before validation", async () => {
+  let requests = 0, reads = 0;
+  const client = createDocSlurpClient({ fetch: async () => { requests++; throw new Error("network must not run"); } });
+  for (const key of ["queries", "concurrency"]) {
+    const query = { q: "question", project: "intended" };
+    const input = { queries: [query] };
+    Object.defineProperty(input, key, { enumerable: true, get() { reads++; delete query.project; return key === "queries" ? [query] : 4; } });
+    await assert.rejects(async () => client.search(input), /must be data properties/);
+  }
+  assert.equal(reads, 0); assert.equal(requests, 0);
+});
+
+for (const method of ["upload", "extract", "createUploadSession"]) test(`${method} snapshots explicit scope before file iteration`, async () => {
+  let captured;
+  const client = createDocSlurpClient({ project: "client-default", fetch: async (_url, init) => {
+    captured = JSON.parse(init.body); throw new Error("captured request");
+  } });
+  const input = { files: method === "createUploadSession" ? [{ filename: "x", sizeBytes: 1, mimeType: "text/plain" }] : [new Blob(["x"])], project: "intended", orgId: "intended-org" };
+  input.files[Symbol.iterator] = function* () { delete input.project; delete input.orgId; yield this[0]; };
+  await assert.rejects(async () => client[method](input), /captured request/);
+  assert.equal(captured.project, "intended"); assert.equal(captured.orgId, "intended-org");
+});
+
+
+test("batch search uses query data slots instead of caller array methods", async () => {
+  let captured;
+  const client = createDocSlurpClient({ fetch: async (_url, init) => { captured = JSON.parse(init.body); throw new Error("captured request"); } });
+  const queries = [{ q: "question", project: "intended" }];
+  queries.map = () => [{ q: "question" }];
+  await assert.rejects(async () => client.search({ queries }), /captured request/);
+  assert.equal(captured.queries[0].project, "intended");
+  let reads = 0;
+  Object.defineProperty(queries, "0", { get() { reads++; return { q: "question" }; } });
+  await assert.rejects(async () => client.search({ queries }), /must be data properties/);
+  assert.equal(reads, 0);
 });
