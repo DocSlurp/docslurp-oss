@@ -1,3 +1,4 @@
+import { dopplerBinDir } from "./doppler.js";
 import {
   acceptSandboxedPdfResult, requireSandboxedOcrProvider, requireSandboxedPdfProvider, type SandboxedOcrJob, type SandboxedPdfJob,
   type SandboxedPdfRunContext,
@@ -746,6 +747,30 @@ export class CommandRunner {
       fileArgIndexes: [5],
       supportsDoubleDash: true,
     });
+  }
+
+  /**
+   * `pdftotext -bbox-layout` for a page range: the text layer's word boxes, as XHTML, written to `output`. Doppler's build
+   * (customer-owned local mode installs it) adds its ruling lines (`-rules`, ruled table grids); Debian's has no rules.
+   */
+  async pdfWordBoxes(source: string, firstPage: number, lastPage: number, output: string): Promise<CommandPlan> {
+    const doppler = path.join(dopplerBinDir(), "pdftotext");
+    const rules = existsSync(doppler);
+    return await this.planDocumentTool({
+      binary: rules ? doppler : "pdftotext",
+      args: [...(rules ? ["-rules"] : []), "-bbox-layout", "-f", String(firstPage), "-l", String(lastPage), source, output],
+      fileArgIndexes: rules ? [6, 7] : [5, 6],
+      supportsDoubleDash: true,
+    });
+  }
+
+  /**
+   * The layout walker (scripts/pdf_layout_facts.py, pdf-layout-facts@1) over files this worker already produced: the PDF,
+   * its `pdfimages -list` output, its word boxes and the extractor's Markdown. Prints JSON; reads only the named files.
+   */
+  async pdfLayoutFacts(args: { source: string; lastPage: number; listing: string; wordBoxes: string; markdown: string }): Promise<CommandPlan> {
+    return await this.planScript("python3", "pdf_layout_facts.py", "--input", args.source, "--first", "1", "--last", String(args.lastPage),
+      "--listing", args.listing, "--xhtml", args.wordBoxes, "--markdown", args.markdown);
   }
 
   /** `pdfinfo -f -l`: per-page size lines ("Page N size: W x H pts") for a page range. */

@@ -92,10 +92,13 @@ describe("layout-preserving text (pdftotext -layout)", () => {
       " Ridge          14.9        71            22",
       " Valley         20.4        58            7",
       " Harbor         17.1        80            15",
+      " Summit         11.6        75            31",
     ].join("\n");
     const page = classifyAdaptivePage(1, text);
     expect(page.route).toBe("table-heavy");
     expect(page.extractorHint).toBe("layout-aware");
+    // Owner rule (2026-11-05): four rows is a small table in prose, not a table-heavy page.
+    expect(classifyAdaptivePage(1, text.split("\n").slice(0, -1).join("\n")).route).not.toBe("table-heavy");
   });
 
   it("does not read aligned prose columns without numbers as a table", () => {
@@ -115,15 +118,21 @@ describe("tables in the shapes extraction writes them", () => {
     `<table>\n<thead>\n<tr><th>${rows[0]!.join("</th><th>")}</th></tr>\n</thead>\n<tbody>\n${rows.slice(1).map((row) => `<tr><td>${row.join("</td><td>")}</td></tr>`).join("")}\n</tbody>\n</table>`;
 
   it("reads an HTML table as a table, not as code markup", () => {
-    const text = ["## Quarterly shipments", "", htmlTable([["Depot", "Units", "Share"], ["Harbor", "1,204", "31%"], ["Ridge", "980", "25%"], ["Valley", "1,710", "44%"]])].join("\n");
+    const rows = [["Depot", "Units", "Share"], ["Harbor", "1,204", "31%"], ["Ridge", "980", "25%"], ["Valley", "1,710", "44%"]];
+    const text = ["## Quarterly shipments", "", htmlTable([...rows, ["Summit", "640", "16%"]])].join("\n");
     const page = classifyAdaptivePage(1, text);
     expect(page.route).toBe("table-heavy");
     expect(page.signals).not.toContain("code:structure");
+    const small = classifyAdaptivePage(1, ["## Quarterly shipments", "", htmlTable(rows)].join("\n"));
+    expect(small.route).not.toBe("table-heavy");
+    expect(small.signals).not.toContain("code:structure");
   });
 
   it("reads a GFM pipe table of numbers and percentages as a table, not a formula", () => {
-    const text = ["| Station | Temp | Rain |", "| --- | --- | --- |", "| Lakeside | 18.2 | 12% |", "| Ridge | 14.9 | 40% |", "| Valley | 20.4 | 3% |"].join("\n");
+    const text = ["| Station | Temp | Rain |", "| --- | --- | --- |", "| Lakeside | 18.2 | 12% |", "| Ridge | 14.9 | 40% |", "| Valley | 20.4 | 3% |", "| Summit | 11.6 | 22% |"].join("\n");
     expect(classifyAdaptivePage(1, text).route).toBe("table-heavy");
+    expect(classifyAdaptivePage(1, text.split("\n").slice(0, -1).join("\n")).route).not.toBe("table-heavy");
+    expect(classifyAdaptivePage(1, text.split("\n").slice(0, -1).join("\n")).route).not.toBe("formula-heavy");
   });
 
   it("still reads real code beside a table as code", () => {
