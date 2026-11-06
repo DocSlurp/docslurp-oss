@@ -301,6 +301,8 @@ function fakeSdk(
     killFailsInVm?: number;
     /** The leftover kill exec throws: a deadline (held up inside the VM) or a transport error. */
     killThrows?: "deadline" | "transport";
+    /** The app lookup before each create takes this long (a slow Modal API). */
+    lookupDelayMs?: number;
     /** Directory creation in job trees exits non-zero (a job broke the tree). */
     mkdirFails?: boolean | (() => boolean);
     /** The first client's terminate request never answers (a stuck connection). */
@@ -418,7 +420,7 @@ function fakeSdk(
     SandboxFilesystemNotFoundError: NotFound,
     Sandbox: class { constructor(_client: unknown, _id: string) {} async terminate() { state.terminate++; state.lateTerminate++; if (opts.terminateFails) throw new Error("terminate refused"); } },
     ModalClient: class {
-      apps = { fromName: async () => ({}) };
+      apps = { fromName: async () => { if (opts.lookupDelayMs) await new Promise((resolve) => setTimeout(resolve, opts.lookupDelayMs)); return {}; } };
       images = { fromRegistry: (tag: string, secret?: unknown) => void state.images.push([tag, secret]) };
       secrets = { fromName: async (name: string) => ({ secret: name }) };
       sandboxes = {
@@ -972,6 +974,51 @@ describe("modal provider session lifecycle", () => {
       await b.then((session) => session.close().catch(() => {}));
       expect(state.createdAt[1]!).toBeGreaterThanOrEqual(created + 400 - 5); // only after the limit
       expect(Date.now() - started).toBeLessThan(2_500);
+    });
+
+    it("a quarantined VM's capacity is held for its lifetime from when Modal created it, not from the request (council V #1)", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const { sdk, state } = fakeSdk({ terminateFails: true, lookupDelayMs: 300, exec: async () => finished() });
+      const provider = createModalProvider(async () => sdk);
+      const pooled = { ...config, vmsPerActivity: 1, vmsPerWorker: 1, vmIdleSeconds: 60, sessionTimeoutSeconds: 0.4 };
+      const a = await provider.openSession(pooled, { activityId: "a" });
+      await a.run!(command);
+      await a.settle!(); // terminate refused: quarantined
+      const b = await provider.openSession(pooled, { activityId: "b" });
+      // The replacement's own create came at least the lifetime after the first VM's create returned.
+      expect(state.createdAt[1]! - state.createdAt[0]!).toBeGreaterThanOrEqual(400 - 5);
+      await b.close().catch(() => {});
+    });
+
+    it("holds capacity while a creation is unconfirmed, and frees it once the late VM is stopped (council V #1)", async () => {
+      vi.useFakeTimers();
+      try {
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        let release!: () => void;
+        const createGate = new Promise<void>((resolve) => (release = resolve));
+        const { sdk, state } = fakeSdk({ createGate, exec: async () => finished() });
+        const provider = createModalProvider(async () => sdk);
+        const pooled = { ...config, vmsPerActivity: 1, vmsPerWorker: 1, vmIdleSeconds: 60, createSettleMs: 30 };
+        // A's create hangs past its 30 s deadline; its terminate gives up waiting after 30 ms: creation unconfirmed.
+        const failed = provider.openSession(pooled, { activityId: "a" }).catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(30_001);
+        await vi.advanceTimersByTimeAsync(31);
+        expect(await failed).toBeInstanceOf(Error);
+        // The worker's only token stays with the unconfirmed create: B does not start a VM, however long it waits.
+        let bOpened = false;
+        const b = provider.openSession(pooled, { activityId: "b" }).then((session) => { bOpened = true; return session; });
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(bOpened).toBe(false);
+        expect(state.createOptions).toHaveLength(1);
+        // The create finally returns: that late VM is stopped (fresh client), and only then does B get the token.
+        release();
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(state.lateTerminate).toBe(1);
+        const session = await b;
+        expect(state.createOptions).toHaveLength(2);
+        await session.close();
+      } finally { vi.useRealTimers(); }
     });
 
     it("waits for a worker VM before admitting a command, and an abort ends that wait (recheck T #2)", async () => {

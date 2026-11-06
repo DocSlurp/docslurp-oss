@@ -47,6 +47,8 @@ export interface ModalConfig {
   vmsPerWorker?: number;
   /** An idle pool VM is terminated after this long (modalVmIdleSeconds). */
   vmIdleSeconds?: number;
+  /** Tests only: how long a terminate waits for a create call in flight (CREATE_SETTLE_MS). */
+  createSettleMs?: number;
 }
 
 /**
@@ -113,8 +115,10 @@ export const PROBE_SESSION_TIMEOUT_SECONDS = 120;
 const TERMINATE_REQUEST_MS = 10_000;
 /** Root-owned home of read-only assets in a parser VM (ClamAV definitions), outside every job tree. */
 const ASSET_ROOT = "/opt/docslurp-assets";
-/** How long a terminate waits for a create call still in flight before quarantining its capacity. */
+/** How long a terminate waits for a create call still in flight before leaving it to settle on its own. */
 const CREATE_SETTLE_MS = 5_000;
+/** Added to a quarantined VM's lifetime bound (at most 10% of the lifetime): Modal's stop is not instantaneous. */
+const LIFETIME_MARGIN_MS = 60_000;
 
 const ISOLATION: SandboxIsolation = { filesystem: true, network: "full", processes: true, location: "remote" };
 
@@ -567,8 +571,12 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         let terminating: Promise<void> | undefined;
         const lane: Lane = { id: ++laneCount, busy: false, dead: false, lastKey: undefined, previousKey: undefined, accountedAt: undefined, recorder: undefined, idleTimer: undefined, reserve, ensureSandbox, execute, terminate, forgetUploads: () => staging?.forgetUploads() };
         let holdsToken = false;
-        /** When creation was requested (Modal bills from then at the latest), and the raw create call. */
-        let createdAt: number | undefined;
+        /**
+         * When Modal's create call returned (council V #1): the VM's own lifetime limit started no later than this, so a VM
+         * whose terminate is unconfirmed is gone by lifetimeStart + sessionTimeoutSeconds (+ margin). Metering starts
+         * earlier, at the creation request (lane.accountedAt): each bound errs on its own safe side.
+         */
+        let lifetimeStart: number | undefined;
         let rawCreate: Promise<unknown> | undefined;
         let terminateDone = false;
 
@@ -613,7 +621,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
          * is billed to that bound and its worker token stays taken until then; the worker never runs past its cap.
          */
         function quarantine(reason: string): void {
-          const expiry = (createdAt ?? Date.now()) + config.sessionTimeoutSeconds * 1000;
+          const lifetimeMs = config.sessionTimeoutSeconds * 1000;
+          const expiry = (lifetimeStart ?? Date.now()) + lifetimeMs + Math.min(LIFETIME_MARGIN_MS, lifetimeMs * 0.1);
           console.error(`[parser-sandbox] provider=modal status=vm-quarantined reason=${reason} activity=${context.activityId} release_in_ms=${Math.max(0, expiry - Date.now())}`);
           recordTail(expiry);
           if (holdsToken) setTimeout(releaseToken, Math.max(0, expiry - Date.now())).unref();
@@ -631,8 +640,14 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
               if (creating) await creating.catch(() => {});
               if (rawCreate) {
                 let settled = false;
-                await Promise.race([rawCreate.then(() => { settled = true; }), new Promise((resolve) => setTimeout(resolve, CREATE_SETTLE_MS).unref())]);
-                if (!settled) { quarantine("creation-unconfirmed"); throw new Error("modal sandbox creation did not settle; VM quarantined until its lifetime limit"); }
+                await Promise.race([rawCreate.then(() => { settled = true; }), new Promise((resolve) => setTimeout(resolve, config.createSettleMs ?? CREATE_SETTLE_MS).unref())]);
+                if (!settled) {
+                  // No VM may exist yet, or one may: hold its worker token until the create call settles (council V #1). The
+                  // create's own handlers then stop a late VM and release the token, or quarantine it from its real start.
+                  terminateDone = true;
+                  console.error(`[parser-sandbox] provider=modal status=vm-creation-unconfirmed activity=${context.activityId}; holding its capacity until the create call settles`);
+                  throw new Error("modal sandbox creation did not settle; its capacity stays held until it does");
+                }
               }
               if (sandbox) {
                 try {
@@ -660,7 +675,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           creating ??= (async () => {
             if (!holdsToken) { await vmBudget.acquire(() => closed || lane.dead); holdsToken = true; }
             if (closed || lane.dead) throw new Error("parser VM session closed during creation");
-            lane.accountedAt = createdAt = Date.now();
+            lane.accountedAt = Date.now();
             const app = await withDeadline(client.apps.fromName(config.app, { createIfMissing: true }), 30_000);
             const registrySecret = config.registrySecret && !config.imageId ? await withDeadline(client.secrets.fromName(config.registrySecret), 30_000) : undefined;
             const image = config.imageId ? await withDeadline(client.images.fromId(config.imageId), 30_000) : client.images.fromRegistry(config.image, registrySecret);
@@ -674,11 +689,20 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
               timeoutMs: config.sessionTimeoutSeconds * 1000,
               blockNetwork: true,
             }).then(async (created) => {
-              // A VM that arrives after this lane's terminate finished is stopped here; any other is the lane's own, and
-              // terminate() stops it (it waits for this call first).
-              if (terminateDone) { await terminateLate(created); throw new Error("parser VM session closed during creation"); }
+              lifetimeStart = Date.now();
+              // A VM that arrives after this lane's terminate finished is stopped here (its capacity was held for it); any
+              // other is the lane's own, and terminate() stops it (it waits for this call first).
+              if (terminateDone) {
+                if (await terminateLate(created)) { recordTail(Date.now()); releaseToken(); }
+                else quarantine("late-vm-terminate-unconfirmed");
+                throw new Error("parser VM session closed during creation");
+              }
               sandbox = created;
               return created;
+            }, (error: unknown) => {
+              // The create failed: no VM exists. A capacity held for an unconfirmed creation is free again.
+              if (terminateDone) { recordTail(Date.now()); releaseToken(); }
+              throw error;
             });
             rawCreate = create.catch(() => {});
             const opened = await withDeadline(create, 30_000);

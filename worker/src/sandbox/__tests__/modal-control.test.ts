@@ -177,3 +177,50 @@ describe.skipIf(!dockerKillTest)("leftover kill in a container (recheck Q #2)", 
     expect(run.stdout.trim().split("\n").at(-1)).toBe("dead");
   }, 150_000);
 });
+
+// Council V #4: the per-command cgroup path, end to end in a container with its own cgroup namespace (cgroup v2, writable
+// as in a parser VM). The real launch script puts the command in /sys/fs/cgroup/docslurp-cmd-<n> as root before dropping to
+// uid 10001; the real leftover kill must then report method=cgroup and beat both a process that SIGSTOPs everything it may
+// and one that keeps forking. Without the cgroup path these assertions fail (method=kill-1, no cgroup).
+describe.skipIf(!dockerKillTest)("leftover kill uses the command cgroup (council V #4)", () => {
+  const stopper = "import os, signal, time\nwhile True:\n    try: os.kill(-1, signal.SIGSTOP)\n    except OSError: pass\n    time.sleep(0.001)";
+  const hopper = "import os\nn = 0\nwhile True:\n    n += 1\n    if n % 50 == 0: open('/w/hb', 'w').write(str(n))\n    if os.fork(): os._exit(0)";
+  const runInContainer = (attack: string) => {
+    const argv = launchArgv("/tmp/.docslurp-modal-control/7", "python3", ["-c", attack]);
+    const script = [
+      "mount -o remount,rw /sys/fs/cgroup 2>/dev/null || true",
+      "mkdir -p /w /tmp/.docslurp-modal-control && chmod 1777 /w",
+      'count() { for d in /proc/[0-9]*; do awk \'/^Uid:/{print $2}\' "$d/status" 2>/dev/null; done | grep -c "^10001$"; }',
+      '"$@" &',
+      "sleep 0.7",
+      'echo "cgroup=$(ls -d /sys/fs/cgroup/docslurp-cmd-7 2>/dev/null)"',
+      'echo "before=$(count)"',
+      'a=$(cat /w/hb 2>/dev/null); sleep 0.3; b=$(cat /w/hb 2>/dev/null); [ -n "$b" ] && [ "$a" != "$b" ] && echo hopper=running',
+      'timeout 60 python3 -I -c "$KILL" 10001; echo "kill=$?"',
+      "sleep 0.5",
+      'echo "after=$(count)"',
+      'a=$(cat /w/hb 2>/dev/null); sleep 0.5; b=$(cat /w/hb 2>/dev/null); [ "$a" = "$b" ] && echo hopper=still',
+    ].join("\n");
+    return spawnSync("docker", ["run", "--rm", "--network", "none", "--cgroupns", "private", "--cap-add", "SYS_ADMIN", "-e", `KILL=${KILL_PARSER_USER_ARGV[3]}`,
+      "python:3.11-slim-bookworm", "sh", "-c", script, "sh", ...argv], { encoding: "utf8", timeout: 120_000 });
+  };
+
+  it("kills a process that SIGSTOPs everything it may, through cgroup.kill", () => {
+    const run = runInContainer(stopper);
+    expect(run.stdout).toContain("cgroup=/sys/fs/cgroup/docslurp-cmd-7");
+    expect(run.stdout).toMatch(/before=[1-9]/);
+    expect(run.stdout).toContain("[leftover-kill] method=cgroup cgroups=1");
+    expect(run.stdout).toContain("kill=0");
+    expect(run.stdout).toContain("after=0");
+  }, 150_000);
+
+  it("kills a fork-hopper, through cgroup.kill", () => {
+    const run = runInContainer(hopper);
+    expect(run.stdout).toContain("cgroup=/sys/fs/cgroup/docslurp-cmd-7");
+    expect(run.stdout).toContain("hopper=running");
+    expect(run.stdout).toContain("[leftover-kill] method=cgroup cgroups=1");
+    expect(run.stdout).toContain("kill=0");
+    expect(run.stdout).toContain("hopper=still");
+    expect(run.stdout).toContain("after=0");
+  }, 150_000);
+});
