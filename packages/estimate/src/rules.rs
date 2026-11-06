@@ -62,6 +62,34 @@ pub struct Rules {
     pub text_pages: TextPages,
     pub multi_frame_images: MultiFrameImages,
     pub page_raster_routing: PageRasterRouting,
+    pub page_equivalents: PageEquivalentRules,
+}
+
+/// The page-equivalent rule billing measures with: area against a standard page, capped per page; text by the text rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageEquivalentRules {
+    pub standard_page_area_pt2: f64,
+    pub area_equivalents_cap: f64,
+}
+
+impl Rules {
+    /// Text pages of `chars` glyphs on `lines` lines: at least 1, else the larger of lines and characters per page.
+    pub fn text_equivalents(&self, chars: f64, lines: f64) -> f64 {
+        if chars <= 0.0 {
+            return 1.0;
+        }
+        1f64.max((lines / self.text_pages.lines).ceil()).max((chars / self.text_pages.chars).ceil())
+    }
+
+    /// Standard pages a page of `area_pt2` square points counts as, 1..cap.
+    pub fn area_equivalents(&self, area_pt2: f64) -> f64 {
+        if !(area_pt2.is_finite() && area_pt2 > 0.0) {
+            return 1.0;
+        }
+        self.page_equivalents.area_equivalents_cap.min(1f64.max((area_pt2 / self.page_equivalents.standard_page_area_pt2 - 1e-9).ceil()))
+    }
+
 }
 
 impl Rules {

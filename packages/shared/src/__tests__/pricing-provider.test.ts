@@ -62,6 +62,8 @@ function pdfProfile(overrides: Partial<FileProfile> = {}, pdf: Partial<NonNullab
       drawnContent: false,
       budgetExhausted: false,
       sampledWords: 1_800,
+      sampledChars: 0, sampledTextLines: 0, charsByFontSize: [0, 0, 0, 0, 0], invisibleChars: 0, offCropChars: 0,
+      sampledTextEquivalents: 10, sampledAreaEquivalents: 10, sampledPageEquivalents: 10, maxPageEquivalents: 1,
       medianPageAreaSqIn: 94,
       maxPageAreaSqIn: 94,
       ...pdf,

@@ -90,9 +90,11 @@ function openQuoteUpload(args: ProviderQuoteArgs): { estimate: CostEstimate; med
   for (const file of paged) {
     const range = quoteFilePageRange(file);
     if (!range.measured) unmeasured += 1;
-    low += range.low;
-    central += range.central;
-    high += range.high;
+    // A stuffed page bills the pages it holds (page equivalents): the open rule charges every one of them.
+    const extra = Math.max(0, (file.pageEquivalents ?? range.central) - range.central);
+    low += range.low + extra;
+    central += range.central + extra;
+    high += range.high + extra;
   }
   const media = estimateUploadMedia(args.files, { videoFrames: args.profile.videoFrames });
   const mediaCredits = media ? media.credits : { low: 0, high: 0 };

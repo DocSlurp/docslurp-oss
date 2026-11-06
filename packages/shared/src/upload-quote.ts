@@ -7,6 +7,7 @@ import type { UploadMediaEstimate, UploadMediaFile } from "./media-upload-estima
 import { pricing } from "./pricing-provider.js";
 
 export * from "./upload-pages.js";
+import { profilePageEquivalents } from "./upload-pages.js";
 import { compilePipelinePlan, type PipelineFeatures } from "./pipeline.js";
 
 /*
@@ -78,6 +79,11 @@ export function estimateProfileFor(
 /** One file to quote: name, size and type, a counted page count or duration when known, and the client's file profile. */
 export type QuoteFile = UploadMediaFile & {
   pages?: number;
+  /**
+   * Page equivalents the billing measurement will count for the file (profilePageEquivalents), when its profile measured
+   * them: the structural pages plus what stuffed pages hold beyond one page each. Never below `pages`.
+   */
+  pageEquivalents?: number;
   profile?: FileProfile;
 };
 
@@ -95,6 +101,10 @@ export function applyFileProfile(file: QuoteFile): QuoteFile {
   return {
     ...file,
     ...(file.pages === undefined && profile.pages !== undefined ? { pages: profile.pages } : {}),
+    ...(() => {
+      const equivalents = profilePageEquivalents({ ...(file.pages !== undefined ? { pages: file.pages } : {}), profile });
+      return equivalents !== undefined ? { pageEquivalents: equivalents } : {};
+    })(),
     ...(file.durationSeconds === undefined && profile.durationSeconds !== undefined ? { durationSeconds: profile.durationSeconds } : {}),
     ...(!file.type && profile.mimeType ? { type: profile.mimeType } : {}),
     profile,

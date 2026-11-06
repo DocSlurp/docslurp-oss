@@ -53,7 +53,8 @@ export const DISTINCT_TEST_PRICING: Partial<PricingProvider> = {
     let low = 0, central = 0, high = 0, unmeasured = 0;
     for (const file of paged) {
       const range = quoteFilePageRange(file);
-      low += range.low; central += range.central; high += range.high;
+      const extra = Math.max(0, (file.pageEquivalents ?? range.central) - range.central);
+      low += range.low + extra; central += range.central + extra; high += range.high + extra;
       if (!range.measured) unmeasured += 1;
     }
     const boost = test.speedBoostMultiplier!(args.speedBoost === true);

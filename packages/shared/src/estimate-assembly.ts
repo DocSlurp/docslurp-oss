@@ -62,7 +62,12 @@ export function assembleEstimateQuote(args: ProviderEstimateArgs & {
   const { files, settings, ingest } = args;
   const billed = args.profile.billing === "enforced";
   const paged = files.filter((file) => !uploadMediaKind(file));
-  const pageRanges = new Map(paged.map((file) => [file, quoteFilePageRange(file)] as const));
+  // Page equivalents: a stuffed page holds (and is billed as) more than one page; hosting scales with what it holds.
+  const pageRanges = new Map(paged.map((file) => {
+    const range = quoteFilePageRange(file);
+    const extra = Math.max(0, (file.pageEquivalents ?? range.central) - range.central);
+    return [file, { ...range, low: range.low + extra, central: range.central + extra, high: range.high + extra }] as const;
+  }));
   const pages = sum([...pageRanges.values()].map((range) => ({ low: range.low, high: range.high })));
   const stored = ordered(sum(files.map((file) => args.bytes(file, pageRanges.get(file) ?? { low: 0, high: 0 }, settings))));
   const storagePerMonth = { low: storageCreditsPerMonth(stored.low), high: storageCreditsPerMonth(stored.high) };

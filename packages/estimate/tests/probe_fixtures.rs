@@ -157,3 +157,96 @@ fn encrypted_files_are_not_loaded() {
     assert!(result.pdf.is_none());
     assert!(result.notes.iter().any(|note| note.contains("encrypted")));
 }
+
+/// A one-page PDF with `content` as its page stream, a Helvetica font F1, and the given MediaBox (and CropBox).
+fn one_page_pdf(content: &str, media: [f64; 4], crop: Option<[f64; 4]>) -> Vec<u8> {
+    let boxes = format!(
+        "/MediaBox [{} {} {} {}]{}",
+        media[0], media[1], media[2], media[3],
+        crop.map(|c| format!(" /CropBox [{} {} {} {}]", c[0], c[1], c[2], c[3])).unwrap_or_default()
+    );
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        format!("<< /Type /Page /Parent 2 0 R {boxes} /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"),
+        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding /ToUnicode 6 0 R >>".to_string(),
+        "<< /Length 0 >>\nstream\n\nendstream".to_string(),
+    ];
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (index, body) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes());
+    }
+    let xref = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
+    for offset in offsets {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).as_bytes());
+    pdf
+}
+
+const LETTER: [f64; 4] = [0.0, 0.0, 612.0, 792.0];
+
+/// `lines` text lines of `per_line` glyphs, at `size` pt and rendering mode `mode`, starting at (x, y).
+fn text_block(lines: usize, per_line: usize, size: f64, mode: u8, x: f64, y: f64) -> String {
+    let line = "x".repeat(per_line);
+    let mut content = format!("BT /F1 {size} Tf {mode} Tr {} TL {x} {y} Td\n", size * 1.2);
+    for _ in 0..lines {
+        content.push_str(&format!("({line}) Tj T*\n"));
+    }
+    content.push_str("ET");
+    content
+}
+
+fn profile_of(bytes: &[u8]) -> PdfProfile {
+    let result = probe(Rules::bundled(), &ProbeInput::whole("stuffed.pdf", None, bytes));
+    assert_neutral(&result);
+    result.pdf.clone().unwrap_or_else(|| panic!("no page facts: {result:?}"))
+}
+
+#[test]
+fn an_ordinary_page_is_one_page_equivalent() {
+    let pdf = profile_of(&one_page_pdf(&text_block(40, 60, 11.0, 0, 72.0, 720.0), LETTER, None));
+    assert_eq!((pdf.sampled_chars, pdf.sampled_text_lines), (2_400, 40));
+    assert_eq!(pdf.chars_by_font_size, [0, 0, 0, 2_400, 0]);
+    assert_eq!((pdf.invisible_chars, pdf.off_crop_chars), (0, 0));
+    assert_eq!((pdf.sampled_text_equivalents, pdf.sampled_area_equivalents, pdf.sampled_page_equivalents, pdf.max_page_equivalents), (1, 1, 1, 1));
+}
+
+#[test]
+fn tiny_text_counts_the_pages_it_holds() {
+    // 0.1 pt text: 400 lines of 100 glyphs (40,000 glyphs) on one page, as the billing text rule counts them.
+    let pdf = profile_of(&one_page_pdf(&text_block(400, 100, 0.1, 0, 72.0, 720.0), LETTER, None));
+    assert_eq!(pdf.chars_by_font_size[0], 40_000);
+    // Lines rule: 400 / 60 = 7 pages; characters: 40,000 / 3,500 = 12 pages.
+    assert_eq!((pdf.sampled_text_equivalents, pdf.sampled_page_equivalents, pdf.max_page_equivalents), (12, 12, 12));
+}
+
+#[test]
+fn invisible_text_is_counted_and_flagged() {
+    let content = format!("{}\n{}", text_block(10, 50, 11.0, 0, 72.0, 720.0), text_block(200, 100, 11.0, 3, 72.0, 600.0));
+    let pdf = profile_of(&one_page_pdf(&content, LETTER, None));
+    assert_eq!((pdf.sampled_chars, pdf.invisible_chars), (20_500, 20_000));
+    assert_eq!(pdf.sampled_page_equivalents, 6); // 20,500 / 3,500
+}
+
+#[test]
+fn text_outside_the_crop_box_is_counted_and_flagged() {
+    let content = format!("{}\n{}", text_block(5, 40, 11.0, 0, 72.0, 720.0), text_block(100, 100, 11.0, 0, 5_000.0, 400.0));
+    let pdf = profile_of(&one_page_pdf(&content, [0.0, 0.0, 10_000.0, 10_000.0], Some(LETTER)));
+    assert_eq!((pdf.sampled_chars, pdf.off_crop_chars), (10_200, 10_000));
+    assert_eq!(pdf.sampled_page_equivalents, 3); // text rule: 10,200 / 3,500
+    assert_eq!(pdf.sampled_area_equivalents, 1); // the visible (crop) box is a Letter page
+}
+
+#[test]
+fn a_giant_page_counts_its_area_up_to_the_cap() {
+    let inches = 200.0 * 72.0;
+    let pdf = profile_of(&one_page_pdf(&text_block(2, 20, 11.0, 0, 72.0, 720.0), [0.0, 0.0, inches, inches], None));
+    assert_eq!((pdf.sampled_area_equivalents, pdf.sampled_page_equivalents, pdf.max_page_equivalents), (8, 8, 8));
+    let tabloid = profile_of(&one_page_pdf(&text_block(2, 20, 11.0, 0, 72.0, 720.0), [0.0, 0.0, 792.0, 1_224.0], None));
+    assert_eq!(tabloid.sampled_area_equivalents, 2);
+}

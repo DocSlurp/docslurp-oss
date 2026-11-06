@@ -1,5 +1,8 @@
 import { z } from "zod";
 
+import { TEXT_PAGE_CHARS, TEXT_PAGE_LINES } from "./media-upload-estimate.js";
+import { PAGE_AREA_EQUIVALENTS_CAP } from "./page-equivalents.js";
+
 /*
  * File profiles: what the offline profiler (`@docslurp/estimate`, Rust/WASM) measures about a file on the customer's own
  * machine, and what `POST /v1/uploads/estimate` accepts beside a file's name, size and type.
@@ -21,6 +24,8 @@ export const FILE_PROFILE_MAX_SAMPLED_PAGES = 24;
  * edges are the page raster rule's stamp-text and sparse-page word limits (PAGE_RASTER_ROUTING).
  */
 export const WORDS_PER_PAGE_BUCKETS = [0, 1, 11, 30, 200, 500] as const;
+/** Effective font size (font size times text and page scaling), in points, bucket lower bounds: under 1, 1, 4, 6, 20. */
+export const FONT_SIZE_BUCKETS = [0, 1, 4, 6, 20] as const;
 /** Share of the page area covered by significant, non-furniture images, bucket lower bounds: 0, >0, 0.15, 0.5, 0.9. */
 export const IMAGE_COVERAGE_BUCKETS = [0, Number.MIN_VALUE, 0.15, 0.5, 0.9] as const;
 /** A serialized profile larger than this is refused. */
@@ -67,6 +72,22 @@ export const pdfProfileSchema = z.strictObject({
   /** Median and largest visible page area of the sampled pages, in square inches (render and OCR size). */
   medianPageAreaSqIn: z.number().int().nonnegative().max(1_000_000),
   maxPageAreaSqIn: z.number().int().nonnegative().max(1_000_000),
+  /** Glyphs shown on the sampled pages, and text lines started. */
+  sampledChars: z.number().int().nonnegative().max(10 ** 12),
+  sampledTextLines: z.number().int().nonnegative().max(10 ** 12),
+  /** Glyphs per effective font size (FONT_SIZE_BUCKETS). */
+  charsByFontSize: z.array(z.number().int().nonnegative().max(10 ** 12)).length(5),
+  /** Glyphs drawn invisibly (text rendering modes 3 and 7), and glyphs placed outside the visible box. */
+  invisibleChars: z.number().int().nonnegative().max(10 ** 12),
+  offCropChars: z.number().int().nonnegative().max(10 ** 12),
+  /**
+   * Page equivalents of the sampled pages by the rule billing measures with (page-equivalents.ts): text pages, area in
+   * standard pages, each page's larger of the two (at least 1), summed; and the largest page.
+   */
+  sampledTextEquivalents: z.number().int().nonnegative().max(10 ** 9),
+  sampledAreaEquivalents: z.number().int().nonnegative().max(10 ** 9),
+  sampledPageEquivalents: z.number().int().nonnegative().max(10 ** 9),
+  maxPageEquivalents: z.number().int().nonnegative().max(10 ** 9),
 });
 export type PdfProfile = z.infer<typeof pdfProfileSchema>;
 
@@ -128,7 +149,9 @@ export function normalizeFileProfile(profile: FileProfile, file: { size: number 
     const pdf = normalized.pdf;
     const sampled = Math.min(pdf.sampledPages, normalized.pages ?? pdf.sampledPages);
     const sum = (values: readonly number[]) => values.reduce((total, value) => total + value, 0);
-    if (normalized.kind !== "pdf" || sum(pdf.wordsPerPage) !== pdf.sampledPages || sum(pdf.imageCoverage) !== pdf.sampledPages) {
+    // Histograms must account for exactly the pages (and glyphs) sampled, and the page sum may not undercount its parts.
+    if (normalized.kind !== "pdf" || sum(pdf.wordsPerPage) !== pdf.sampledPages || sum(pdf.imageCoverage) !== pdf.sampledPages
+      || sum(pdf.charsByFontSize) !== pdf.sampledChars) {
       delete normalized.pdf;
     } else {
       const clamp = (value: number) => Math.min(sampled, value);
@@ -144,8 +167,19 @@ export function normalizeFileProfile(profile: FileProfile, file: { size: number 
         vectorHeavyPages: clamp(pdf.vectorHeavyPages),
         unmappedFontPages: clamp(pdf.unmappedFontPages),
         images: Math.min(pdf.images, sampled * 64),
-        // Words on a page are bounded by what a page can hold; areas beyond a large-format sheet are clamped.
-        sampledWords: Math.min(pdf.sampledWords, sampled * 20_000),
+        sampledWords: Math.min(pdf.sampledWords, pdf.sampledChars),
+        sampledTextLines: Math.min(pdf.sampledTextLines, pdf.sampledChars),
+        invisibleChars: Math.min(pdf.invisibleChars, pdf.sampledChars),
+        offCropChars: Math.min(pdf.offCropChars, pdf.sampledChars),
+        // Every sampled page counts at least once; text pages are bounded by the glyphs and lines measured (the text rule),
+        // area pages by their cap, the page sum by its parts and the largest page by the sum.
+        ...(() => {
+          const textBound = sampled + Math.ceil(pdf.sampledChars / TEXT_PAGE_CHARS) + Math.ceil(pdf.sampledTextLines / TEXT_PAGE_LINES);
+          const text = Math.min(textBound, Math.max(sampled, pdf.sampledTextEquivalents));
+          const area = Math.min(sampled * PAGE_AREA_EQUIVALENTS_CAP, Math.max(sampled, pdf.sampledAreaEquivalents));
+          const page = Math.min(text + area, Math.max(sampled, text, area, pdf.sampledPageEquivalents));
+          return { sampledTextEquivalents: text, sampledAreaEquivalents: area, sampledPageEquivalents: page, maxPageEquivalents: Math.min(page, Math.max(1, pdf.maxPageEquivalents)) };
+        })(),
         medianPageAreaSqIn: Math.min(pdf.medianPageAreaSqIn, pdf.maxPageAreaSqIn, MAX_PAGE_AREA_SQ_IN),
         maxPageAreaSqIn: Math.min(pdf.maxPageAreaSqIn, MAX_PAGE_AREA_SQ_IN),
         // Histograms are kept as measured: their totals were checked above.

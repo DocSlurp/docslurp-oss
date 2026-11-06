@@ -69,6 +69,10 @@ PDF facts (counts are over the sampled pages):
 | `budgetExhausted` | A page or the document hit the profiler's content budget; facts are partial |
 | `sampledWords` | Native words on the sampled pages in total (text volume: chunks and embeddings) |
 | `medianPageAreaSqIn`, `maxPageAreaSqIn` | Visible page area (render, OCR and page-image size) |
+| `sampledChars`, `sampledTextLines` | Glyphs shown and text lines started on the sampled pages (text volume as extraction reads it) |
+| `charsByFontSize` | Glyphs per effective font size: under 1 pt, 1-4, 4-6, 6-20, 20 pt and up (tiny text) |
+| `invisibleChars`, `offCropChars` | Glyphs drawn invisibly (rendering modes 3 and 7), and glyphs placed outside the visible box |
+| `sampledTextEquivalents`, `sampledAreaEquivalents`, `sampledPageEquivalents`, `maxPageEquivalents` | Page equivalents of the sampled pages by the rule billing measures with (`page-equivalents.ts`): a page counts as the larger of 1, its text pages (60 lines or 3,500 characters a page) and its area in Letter pages (capped at 8). A page packed with tiny, invisible or off-page text, or an oversized page, counts as the pages it holds |
 
 The thresholds (significant image size, the raster rule, repeated-image detection, the text page rule) come from
 `profiler-rules.json`, generated from `@docslurp/shared`, so the profiler and the worker read the same numbers.

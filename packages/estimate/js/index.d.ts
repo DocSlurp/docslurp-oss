@@ -38,6 +38,19 @@ export type FileProfile = {
     /** Median and largest visible page area, in square inches. */
     medianPageAreaSqIn: number;
     maxPageAreaSqIn: number;
+    /** Glyphs shown on the sampled pages, and text lines started. */
+    sampledChars: number;
+    sampledTextLines: number;
+    /** Glyphs per effective font size: under 1 pt, 1-4, 4-6, 6-20, 20 pt and up. */
+    charsByFontSize: [number, number, number, number, number];
+    /** Glyphs drawn invisibly (rendering modes 3 and 7), and glyphs placed outside the visible box. */
+    invisibleChars: number;
+    offCropChars: number;
+    /** Page equivalents of the sampled pages (the billing measurement's rule): text, area, each page's larger, the largest. */
+    sampledTextEquivalents: number;
+    sampledAreaEquivalents: number;
+    sampledPageEquivalents: number;
+    maxPageEquivalents: number;
   };
   /** Package structure: slide and worksheet parts, body bytes; `declaredPages` is authored metadata, informational only. */
   office?: { embeddedImages: number; slides?: number; sheets?: number; bodyBytes: number; declaredPages?: number };

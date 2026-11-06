@@ -8,6 +8,7 @@ import {
   TEXT_PAGE_MIME_PREFIXES,
   VIDEO_EXTENSIONS,
 } from "./media-upload-estimate.js";
+import { PAGE_AREA_EQUIVALENTS_CAP, STANDARD_PAGE_AREA_PT2 } from "./page-equivalents.js";
 import { PAGE_RASTER_ROUTING } from "./page-raster-routing.js";
 import { IMAGE_MAX_FRAMES, MULTI_FRAME_IMAGE_EXTENSIONS, MULTI_FRAME_IMAGE_MIME_TYPES } from "./upload-pages.js";
 
@@ -32,6 +33,8 @@ export function buildProfilerRules() {
     multiFrameImages: { maxFrames: IMAGE_MAX_FRAMES, mimeTypes: [...MULTI_FRAME_IMAGE_MIME_TYPES], extensions: [...MULTI_FRAME_IMAGE_EXTENSIONS] },
     /** PDF page raster thresholds the worker routes with. */
     pageRasterRouting: { ...PAGE_RASTER_ROUTING },
+    /** The page-equivalent measurement billing uses (page-equivalents.ts): area against a standard page, capped per page. */
+    pageEquivalents: { standardPageAreaPt2: STANDARD_PAGE_AREA_PT2, areaEquivalentsCap: PAGE_AREA_EQUIVALENTS_CAP },
   };
 }
 export type ProfilerRules = ReturnType<typeof buildProfilerRules>;

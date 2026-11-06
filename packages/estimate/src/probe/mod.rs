@@ -18,6 +18,8 @@ use crate::rules::Rules;
 pub const WORDS_BUCKETS: usize = 6;
 /// Buckets of the image coverage histogram (`imageCoverageBuckets`).
 pub const COVERAGE_BUCKETS: usize = 5;
+/// Buckets of the effective font size histogram.
+pub const FONT_SIZE_BUCKETS: usize = 5;
 /// Notes kept per profile, and characters per note.
 const MAX_NOTES: usize = 8;
 const MAX_NOTE_CHARS: usize = 160;
@@ -71,6 +73,21 @@ pub struct PdfProfile {
     /// Median and largest visible page area of the sampled pages, in square inches (render and OCR size).
     pub median_page_area_sq_in: u32,
     pub max_page_area_sq_in: u32,
+    /// Glyphs shown on the sampled pages, and text lines started (text volume as extraction reads it).
+    pub sampled_chars: u64,
+    pub sampled_text_lines: u64,
+    /// Glyphs per effective font size: under 1 pt, 1-4, 4-6, 6-20, 20 pt and up.
+    pub chars_by_font_size: [u64; FONT_SIZE_BUCKETS],
+    /// Glyphs drawn invisibly (text rendering modes 3 and 7), and glyphs placed outside the visible box.
+    pub invisible_chars: u64,
+    pub off_crop_chars: u64,
+    /// Page equivalents of the sampled pages by the rule billing measures with (`page-equivalents.ts` in
+    /// `@docslurp/shared`): each page the larger of 1, its text pages (lines or characters per page) and its area in
+    /// Letter pages (capped). Sums over the sampled pages, and the largest page.
+    pub sampled_text_equivalents: u64,
+    pub sampled_area_equivalents: u64,
+    pub sampled_page_equivalents: u64,
+    pub max_page_equivalents: u32,
 }
 
 /// Facts about an Office or EPUB package.

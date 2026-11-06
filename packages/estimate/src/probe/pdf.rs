@@ -135,6 +135,22 @@ fn probe_document(rules: &Rules, document: &Document, file_bytes: usize, mut res
             profile.unmapped_font_pages += 1;
         }
         profile.sampled_words = profile.sampled_words.saturating_add(reading.words.min(f64::from(u32::MAX)) as u32);
+        let volume = &reading.text;
+        let count = |value: f64| value.max(0.0).min(u64::MAX as f64) as u64;
+        profile.sampled_chars = profile.sampled_chars.saturating_add(count(volume.chars));
+        profile.sampled_text_lines = profile.sampled_text_lines.saturating_add(count(volume.lines));
+        for (bucket, glyphs) in volume.by_size.iter().enumerate() {
+            profile.chars_by_font_size[bucket] = profile.chars_by_font_size[bucket].saturating_add(count(*glyphs));
+        }
+        profile.invisible_chars = profile.invisible_chars.saturating_add(count(volume.invisible));
+        profile.off_crop_chars = profile.off_crop_chars.saturating_add(count(volume.off_crop));
+        let text = rules.text_equivalents(volume.chars, volume.lines);
+        let area = rules.area_equivalents(reading.area);
+        profile.sampled_text_equivalents = profile.sampled_text_equivalents.saturating_add(count(text));
+        profile.sampled_area_equivalents = profile.sampled_area_equivalents.saturating_add(count(area));
+        let page = text.max(area);
+        profile.sampled_page_equivalents = profile.sampled_page_equivalents.saturating_add(count(page));
+        profile.max_page_equivalents = profile.max_page_equivalents.max(page.min(f64::from(u32::MAX)) as u32);
     }
     let mut areas: Vec<f64> = readings.iter().map(|reading| reading.area / (72.0 * 72.0)).collect();
     areas.sort_by(f64::total_cmp);
@@ -392,6 +408,8 @@ struct PageStats {
     exhausted: bool,
     /// Text was shown in a font with no Unicode mapping (`unmapped_font`).
     unmapped_text: bool,
+    /// Text volume: glyphs shown and text lines started (both as extraction would see them).
+    text: TextVolume,
     /// Significant images (pixels and placed area over the rules' floors), at most `MAX_TRACKED_IMAGES_PER_PAGE`; the
     /// totals the class is read from are taken after repeated objects are dropped (`ImageTotals`).
     images: Vec<ImageUse>,
@@ -509,6 +527,17 @@ fn page_box(document: &Document, page_id: ObjectId, key: &[u8]) -> Option<[f64; 
 }
 
 /// Visible page area: the CropBox clipped to the MediaBox, as the worker measures coverage.
+/// The page's visible box: its CropBox clipped to its MediaBox (either alone when only one is set).
+fn visible_box(document: &Document, page_id: ObjectId) -> Option<[f64; 4]> {
+    let media = page_box(document, page_id, b"MediaBox");
+    let crop = page_box(document, page_id, b"CropBox");
+    match (media, crop) {
+        (Some(m), Some(c)) => Some([m[0].max(c[0]), m[1].max(c[1]), m[2].min(c[2]), m[3].min(c[3])]),
+        (Some(b), None) | (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
 fn page_area(document: &Document, page_id: ObjectId) -> f64 {
     let media = page_box(document, page_id, b"MediaBox");
     let crop = page_box(document, page_id, b"CropBox");
@@ -566,6 +595,7 @@ struct PageReading {
     unmapped_text: bool,
     /// Visible page area in square points.
     area: f64,
+    text: TextVolume,
 }
 
 impl PageReading {
@@ -584,10 +614,11 @@ fn classify_page(routing: &PageRasterRouting, document: &Document, page_id: Obje
     forms.charge(content.len());
     let resources = page_resources(document, page_id);
     let area = page_area(document, page_id);
+    let visible = visible_box(document, page_id).unwrap_or([0.0, 0.0, 612.0, 792.0]);
     let mut stats = PageStats::default();
-    let mut context = Context { document, routing, forms, area };
+    let mut context = Context { document, routing, forms, area, visible };
     context.interpret(&content, &resources, IDENTITY, 0, &mut stats);
-    Some(PageReading { words: stats.words.words(), path_operations: stats.path_operations, images: stats.images, exhausted: stats.exhausted, unmapped_text: stats.unmapped_text, area })
+    Some(PageReading { words: stats.words.words(), path_operations: stats.path_operations, images: stats.images, exhausted: stats.exhausted, unmapped_text: stats.unmapped_text, area, text: stats.text })
 }
 
 /// The worker's drawn-content rule (`classify-route.ts`): a document with no extractable text anywhere whose bytes,
@@ -622,9 +653,81 @@ struct Context<'a, 'f> {
     routing: &'a PageRasterRouting,
     forms: &'f mut FormCache,
     area: f64,
+    /// The page's visible box (CropBox within MediaBox), in default user space.
+    visible: [f64; 4],
+}
+
+/// Lower bounds of the effective font size buckets, in points: under 1, 1-4, 4-6, 6-20, 20 and up.
+const FONT_SIZE_BUCKETS: [f64; 5] = [0.0, 1.0, 4.0, 6.0, 20.0];
+
+/// What a page's text adds up to, measured from its text-showing operators as extraction would read them.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct TextVolume {
+    /// Glyphs shown (a two-byte string's pairs count once).
+    chars: f64,
+    /// Text lines started: a new text object, a line move or a next-line operator followed by shown text.
+    lines: f64,
+    /// Glyphs per effective font size bucket (FONT_SIZE_BUCKETS).
+    by_size: [f64; 5],
+    /// Glyphs in an invisible rendering mode (3 or 7).
+    invisible: f64,
+    /// Glyphs whose text position lies outside the visible box.
+    off_crop: f64,
+}
+
+/// The text state the volume needs: text matrices, leading, rendering mode, and whether a new line awaits its first glyph.
+#[derive(Clone, Copy)]
+struct TextState {
+    matrix: Matrix,
+    line: Matrix,
+    leading: f64,
+    render_mode: i64,
+    new_line: bool,
+}
+
+impl Default for TextState {
+    fn default() -> Self {
+        Self { matrix: IDENTITY, line: IDENTITY, leading: 0.0, render_mode: 0, new_line: true }
+    }
+}
+
+/// Glyphs in a shown string: pairs for a two-byte (CID) string, bytes otherwise (the word counter's rule).
+fn glyph_count(bytes: &[u8]) -> f64 {
+    let zero_high_bytes = bytes.iter().step_by(2).filter(|byte| **byte == 0).count();
+    if bytes.len() >= 4 && zero_high_bytes * 2 >= bytes.len() / 2 { bytes.len() as f64 / 2.0 } else { bytes.len() as f64 }
 }
 
 impl<'a> Context<'a, '_> {
+    /// Count a shown string into the page's text volume: its glyphs, the line it starts, their effective size, whether
+    /// they are invisible or placed outside the visible box. The text position then advances by an estimate of the run's
+    /// width (half an em a glyph), so a long run off the page edge is found.
+    fn text_shown(&self, stats: &mut PageStats, text: &mut TextState, bytes: &[u8], font_size: f64, ctm: &Matrix) {
+        let glyphs = glyph_count(bytes);
+        if glyphs <= 0.0 {
+            return;
+        }
+        let volume = &mut stats.text;
+        volume.chars += glyphs;
+        if text.new_line {
+            volume.lines += 1.0;
+            text.new_line = false;
+        }
+        let device = multiply(&text.matrix, ctm);
+        let scale = (device[0] * device[3] - device[1] * device[2]).abs().sqrt();
+        let size = (font_size.abs() * scale).max(0.0);
+        let bucket = FONT_SIZE_BUCKETS.iter().rposition(|bound| size >= *bound).unwrap_or(0);
+        volume.by_size[bucket] += glyphs;
+        if matches!(text.render_mode, 3 | 7) {
+            volume.invisible += glyphs;
+        }
+        let [x0, y0, x1, y1] = self.visible;
+        let (x, y) = (device[4], device[5]);
+        if !(x.is_finite() && y.is_finite()) || x < x0 || x > x1 || y < y0 || y > y1 {
+            volume.off_crop += glyphs;
+        }
+        text.matrix = multiply(&[1.0, 0.0, 0.0, 1.0, glyphs * 0.5 * font_size, 0.0], &text.matrix);
+    }
+
     fn record_image(&self, stats: &mut PageStats, id: Option<ObjectId>, ctm: &Matrix, width: f64, height: f64) {
         let placed = (ctm[0] * ctm[3] - ctm[1] * ctm[2]).abs();
         let coverage = (placed / self.area).min(1.0);
@@ -659,6 +762,7 @@ impl<'a> Context<'a, '_> {
         let mut stack: Vec<Matrix> = Vec::new();
         let mut font_size = 12.0;
         let mut font_unmapped = false;
+        let mut text = TextState::default();
         for operation in Content::decode_iter(content) {
             let Ok(operation) = operation else { break };
             stats.operations += 1;
@@ -675,7 +779,29 @@ impl<'a> Context<'a, '_> {
                         ctm = multiply(&matrix, &ctm);
                     }
                 }
-                "BT" | "ET" | "T*" | "Tm" => stats.words.gap(),
+                "BT" => {
+                    stats.words.gap();
+                    text = TextState { render_mode: text.render_mode, leading: text.leading, ..TextState::default() };
+                }
+                "ET" => stats.words.gap(),
+                "T*" => {
+                    stats.words.gap();
+                    text.line = multiply(&[1.0, 0.0, 0.0, 1.0, 0.0, -text.leading], &text.line);
+                    text.matrix = text.line;
+                    text.new_line = true;
+                }
+                "Tm" => {
+                    stats.words.gap();
+                    if let Some(matrix) = matrix_from(operands) {
+                        if (matrix[5] - text.line[5]).abs() > 0.01 || (matrix[3] - text.line[3]).abs() > 0.01 {
+                            text.new_line = true;
+                        }
+                        text.line = matrix;
+                        text.matrix = matrix;
+                    }
+                }
+                "TL" => text.leading = operands.first().and_then(number).unwrap_or(text.leading),
+                "Tr" => text.render_mode = operands.first().and_then(number).map(|mode| mode as i64).unwrap_or(text.render_mode),
                 "Tf" => {
                     font_size = operands.get(1).and_then(number).unwrap_or(font_size);
                     if let Some(Object::Name(name)) = operands.first() {
@@ -686,18 +812,31 @@ impl<'a> Context<'a, '_> {
                     let tx = operands.first().and_then(number).unwrap_or(0.0);
                     let ty = operands.get(1).and_then(number).unwrap_or(0.0);
                     stats.words.moved(tx, ty, font_size);
+                    if operation.operator == "TD" {
+                        text.leading = -ty;
+                    }
+                    text.line = multiply(&[1.0, 0.0, 0.0, 1.0, tx, ty], &text.line);
+                    text.matrix = text.line;
+                    if ty.abs() > 0.01 {
+                        text.new_line = true;
+                    }
                 }
                 "Tj" => {
                     if let Some(Object::String(bytes, _)) = operands.last() {
                         stats.words.show(bytes);
                         stats.unmapped_text |= font_unmapped && !bytes.is_empty();
+                        self.text_shown(stats, &mut text, bytes, font_size, &ctm);
                     }
                 }
                 "'" | "\"" => {
                     stats.words.gap();
+                    text.line = multiply(&[1.0, 0.0, 0.0, 1.0, 0.0, -text.leading], &text.line);
+                    text.matrix = text.line;
+                    text.new_line = true;
                     if let Some(Object::String(bytes, _)) = operands.last() {
                         stats.words.show(bytes);
                         stats.unmapped_text |= font_unmapped && !bytes.is_empty();
+                        self.text_shown(stats, &mut text, bytes, font_size, &ctm);
                     }
                 }
                 "TJ" => {
@@ -707,6 +846,7 @@ impl<'a> Context<'a, '_> {
                                 Object::String(bytes, _) => {
                                     stats.words.show(bytes);
                                     stats.unmapped_text |= font_unmapped && !bytes.is_empty();
+                                    self.text_shown(stats, &mut text, bytes, font_size, &ctm);
                                 }
                                 // A large negative adjustment is a word gap in kerned text.
                                 other if number(other).is_some_and(|gap| gap <= -200.0) => stats.words.gap(),
@@ -835,6 +975,7 @@ mod tests {
             exhausted: false,
             unmapped_text: false,
             area: DEFAULT_PAGE_AREA,
+            text: TextVolume::default(),
         };
         // The same full-bleed background on four pages: furniture, so the pages are blank.
         let slides = vec![page(&[7]), page(&[7]), page(&[7]), page(&[7])];

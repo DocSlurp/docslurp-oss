@@ -17,6 +17,8 @@ function profile(bytes: number, pages: number) {
       sampledPages: 2, textLayerPages: 2, wordsPerPage: [0, 0, 0, 0, 2, 0], lowTextPages: 0, blankPages: 0, rasterPages: 0,
       imagePages: 0, images: 0, imageCoverage: [2, 0, 0, 0, 0], furnitureImages: 0, layoutHeavyPages: 0, vectorHeavyPages: 0,
       unmappedFontPages: 0, drawnContent: false, budgetExhausted: false, sampledWords: 700, medianPageAreaSqIn: 94, maxPageAreaSqIn: 94,
+      sampledChars: 4_200, sampledTextLines: 80, charsByFontSize: [0, 0, 0, 4_200, 0], invisibleChars: 0, offCropChars: 0,
+      sampledTextEquivalents: 2, sampledAreaEquivalents: 2, sampledPageEquivalents: 2, maxPageEquivalents: 1,
     },
   };
 }
@@ -51,6 +53,18 @@ describe("POST /v1/estimate (public)", () => {
     const lying = await (await post({ files: [{ name: "a.pdf", size: 40_000, profile: profile(9, 9_999_999) }] })).json() as { files: { profiled: number }; pages: { high: number } };
     expect(lying.files.profiled).toBe(0);
     expect(lying.pages.high).toBeLessThan(100);
+  });
+
+  it("quotes a stuffed profile at its page equivalents, and clamps an equivalent count no page could hold", async () => {
+    const stuffed = profile(40_000, 2);
+    stuffed.pdf = { ...stuffed.pdf, sampledChars: 70_000, charsByFontSize: [70_000, 0, 0, 0, 0], sampledTextEquivalents: 20, sampledPageEquivalents: 20, maxPageEquivalents: 10 };
+    const quote = await (await post({ files: [{ name: "a.pdf", size: 40_000, profile: stuffed }] })).json() as { pages: { low: number; high: number } };
+    expect(quote.pages).toEqual({ low: 20, high: 20 });
+    // Equivalents the measured glyphs, lines and area cannot hold are clamped to what they can: text (2 pages + 70,000 / 3,500
+    // + 80 / 60) plus area (2 pages).
+    const inflated = { ...stuffed, pdf: { ...stuffed.pdf, sampledTextEquivalents: 5_000, sampledPageEquivalents: 5_000, maxPageEquivalents: 5_000 } };
+    const clamped = await (await post({ files: [{ name: "a.pdf", size: 40_000, profile: inflated }] })).json() as { pages: { high: number } };
+    expect(clamped.pages.high).toBeLessThanOrEqual(2 + 20 + 2 + 2);
   });
 
   it("rate limits per client IP", async () => {

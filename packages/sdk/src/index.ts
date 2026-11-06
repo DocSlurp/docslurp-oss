@@ -152,6 +152,8 @@ export type FileProfile = {
     rasterPages: number; imagePages: number; images: number; imageCoverage: number[]; furnitureImages: number;
     layoutHeavyPages: number; vectorHeavyPages: number; unmappedFontPages: number; drawnContent: boolean; budgetExhausted: boolean;
     sampledWords: number; medianPageAreaSqIn: number; maxPageAreaSqIn: number;
+    sampledChars: number; sampledTextLines: number; charsByFontSize: number[]; invisibleChars: number; offCropChars: number;
+    sampledTextEquivalents: number; sampledAreaEquivalents: number; sampledPageEquivalents: number; maxPageEquivalents: number;
   };
   /** Package structure; `declaredPages` is the document's own metadata claim: informational only, never counted or priced. */
   office?: { embeddedImages: number; slides?: number; sheets?: number; bodyBytes: number; declaredPages?: number };

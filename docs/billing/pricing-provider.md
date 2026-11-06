@@ -61,6 +61,9 @@ Fail closed:
 
 - validated strictly (`fileProfileSchema`, unknown fields refused), at most 1,000 files and a 6 MiB body per request,
   and rate limited with uploads;
+- read for page equivalents: `profilePageEquivalents` scales the sampled pages' equivalents (the billing measurement's
+  rule, `page-equivalents.ts`) to the document, so a stuffed document is quoted at the pages it will be billed as
+  (`QuoteFile.pageEquivalents`);
 - clamped against the file they claim to describe (`normalizeFileProfile`): a size mismatch or inconsistent histogram
   drops the profile, counts are clamped to the pages sampled, durations to a day;
 - passed to `quoteUpload` only. Billing is measured by the worker; a profile never changes a charge.

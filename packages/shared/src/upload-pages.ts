@@ -175,6 +175,19 @@ export function quoteFilePages(file: { name: string; type?: string | null; size:
   return Math.max(1, Math.round(pages));
 }
 
+/**
+ * Page equivalents of a profiled PDF: the pages the billing measurement (page-equivalents.ts) will count, estimated from the
+ * sampled pages' equivalents scaled to the document. Equal to the page count for an ordinary document; more for a stuffed
+ * one (tiny, invisible or off-page text, oversized pages). Undefined when the profile carries no page facts.
+ */
+export function profilePageEquivalents(file: { pages?: number; profile?: { pages?: number; pdf?: { sampledPages: number; sampledPageEquivalents: number } } }): number | undefined {
+  const pages = file.pages ?? file.profile?.pages;
+  const pdf = file.profile?.pdf;
+  if (!pages || !pdf || pdf.sampledPages <= 0) return undefined;
+  if (pdf.sampledPages >= pages) return Math.max(pages, pdf.sampledPageEquivalents);
+  return Math.max(pages, Math.ceil(pages * (pdf.sampledPageEquivalents / pdf.sampledPages)));
+}
+
 /** Pages of a file over the range its size allows when the client has not counted them; one value when they are known. */
 export function quoteFilePageRange(file: { name: string; type?: string | null; size: number; pages?: number }): PageRange {
   const central = quoteFilePages(file);
