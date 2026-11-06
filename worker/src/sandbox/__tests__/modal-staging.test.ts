@@ -1,5 +1,6 @@
 import { pricing } from "@docslurp/shared";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -304,6 +305,8 @@ function fakeSdk(
     lateTerminate: 0,
     hardened: 0,
     readsAsUser: 0,
+    leftoverKills: 0,
+    rootWrites: [] as string[],
     clientClose: 0,
     mkdirs: [] as string[],
     stats: [] as string[],
@@ -324,13 +327,15 @@ function fakeSdk(
     sandboxId: "sb-test",
     terminate: async () => { state.terminate++; if (opts.terminateHangs) await new Promise(() => {}); },
     filesystem: {
+      // Root's filesystem API: recorded, so a test can require that root writes only its own control directory.
       makeDirectory: async (p: string) => {
         state.mkdirs.push(p);
+        state.rootWrites.push(p);
         await remote.mkdir(p);
       },
-      writeBytes: (data: Uint8Array, p: string) => remote.writeFile(p, data),
+      writeBytes: (data: Uint8Array, p: string) => { state.rootWrites.push(p); return remote.writeFile(p, data); },
       readBytes: (p: string) => remote.readFile(p),
-      remove: (p: string) => remote.remove(p),
+      remove: (p: string) => { state.rootWrites.push(p); return remote.remove(p); },
       stat: async (p: string) => {
         state.stats.push(p);
         const entry = await remote.stat(p);
@@ -345,6 +350,12 @@ function fakeSdk(
       const asUser = argv[0] === "/usr/bin/setpriv" && argv.includes("--reuid=10001") ? argv.slice(argv.indexOf("--") + 1) : null;
       if (asUser?.[0] === "/bin/cat") { state.readsAsUser++; return { stdout: stream(await remote.readFile(asUser[2]!)), stderr: stream(""), wait: async () => 0 }; }
       if (asUser?.[0] === "python3" && asUser[1] === "-I") return finished((await remote.list(asUser[4]!)).map((entry) => JSON.stringify(entry)).join("\n"));
+      // Staging in job trees, as the parser user (council M #3).
+      if (asUser?.[0] === "/bin/mkdir") { state.mkdirs.push(asUser[3]!); await remote.mkdir(asUser[3]!); return finished("", 0); }
+      if (asUser?.[0] === "/bin/rm") { await remote.remove(asUser[3]!); return finished("", 0); }
+      if (asUser?.[0] === "/bin/sh" && asUser[2]?.includes("cp --")) { await remote.writeFile(asUser[5]!, await remote.readFile(asUser[4]!)); return finished("", 0); }
+      if (asUser?.[0] === "/bin/sh" && asUser[2]?.startsWith("kill -9 -1")) { state.leftoverKills++; return finished("", 0); }
+      if (argv[0] === "/bin/chmod") return finished("", 0);
       if (argv[0] === "/bin/cat" || argv[0] === "python3") throw new Error("root must never read or list job output");
       if (isKill(argv)) {
         state.kills.push(controlOf(argv));
@@ -424,6 +435,42 @@ describe("modal provider session lifecycle", () => {
     await opened.run!({ ...command, writablePaths: ["/job/out"] });
     await opened.close();
     expect(state.hardened).toBe(1);
+  });
+
+  it("root writes only its own control directory; job trees are staged as the parser user (council M #3)", async () => {
+    const { state, session } = await open({ exec: async () => finished() });
+    const opened = await session();
+    const dir = await mkdtemp(path.join(tmpdir(), "docslurp-m3-"));
+    try {
+      const input = path.join(dir, "in.txt");
+      await writeFile(input, "first");
+      await opened.run!({ ...command, inputPaths: [input], writablePaths: [path.join(dir, "out")] });
+      await writeFile(input, "second edit");
+      await opened.run!({ ...command, inputPaths: [input], writablePaths: [path.join(dir, "out")] });
+      expect(state.rootWrites.length).toBeGreaterThan(0);
+      for (const target of state.rootWrites) expect(target.startsWith("/tmp/.docslurp-modal-control")).toBe(true);
+      expect(Buffer.from(await state.remote.readFile(input)).toString()).toBe("second edit");
+      // Leftover parser-user processes are killed after each command, before anything is read back or staged.
+      expect(state.leftoverKills).toBeGreaterThanOrEqual(2);
+    } finally {
+      await opened.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("never kills the parser user's processes while another command is still running (council M #3)", async () => {
+    const slow = running();
+    let calls = 0;
+    const { state, session } = await open({ exec: async () => (++calls === 1 ? slow.process : finished()) });
+    const opened = await session();
+    const first = opened.run!(command);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await opened.run!(command);
+    expect(state.leftoverKills).toBe(0);
+    slow.end(0);
+    await first;
+    expect(state.leftoverKills).toBeGreaterThan(0);
+    await opened.close();
   });
 
   it("starts every parser VM with the idle command, never the image's entrypoint (validation N1)", async () => {
@@ -780,9 +827,10 @@ describe("CommandRunner through the modal provider", () => {
 
     await runner.run({ binary: venvPython, args: [script, "--input", input, "--output", output], available: true });
 
-    expect(state.remote.writes).toEqual([input]);
+    // Root stages the bytes in its control directory; the parser user copies them to the input path (council M #3).
+    expect(state.remote.writes.filter((p: string) => !p.startsWith("/tmp/.docslurp-modal-control/"))).toEqual([input]);
     expect(state.mkdirs).toEqual(["/tmp/.docslurp-modal-control", workspace]);
-    const staged = [...state.remote.writes, ...state.mkdirs.slice(1)].join("\n");
+    const staged = [...state.remote.writes.filter((p: string) => !p.startsWith("/tmp/.docslurp-modal-control/")), ...state.mkdirs.slice(1)].join("\n");
     for (const host of ["node_modules", ".venv", process.execPath, resolveScriptsDir()]) expect(staged).not.toContain(host);
     expect(staged.split("\n").some((p) => p === "/usr" || p.startsWith("/usr/"))).toBe(false);
   });

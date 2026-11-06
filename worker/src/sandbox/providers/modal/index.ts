@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { pricing } from "@docslurp/shared";
 
 import { boundedVmStream } from "./transfer.js";
@@ -225,6 +226,13 @@ function toRemoteEntry(info: import("modal").FileInfo): RemoteEntry {
   return { path: info.path, isDir: info.type === "directory", size: info.size, mtime: info.modifiedTime };
 }
 
+/** Run a short control command in the VM and require exit 0 (bounded output, never shown to customers). */
+async function runChecked(sandbox: import("modal").Sandbox, argv: string[], failure: string): Promise<void> {
+  const proc = await sandbox.exec(argv, { mode: "binary", timeoutMs: 30_000 });
+  const [, , code] = await Promise.all([boundedVmStream(proc.stdout, 64 * 1024), boundedVmStream(proc.stderr, 64 * 1024), proc.wait()]);
+  if (code !== 0) throw new Error(failure);
+}
+
 function buildRemoteFs(sdk: ModalSdk, sandbox: import("modal").Sandbox): RemoteFs {
   const fs = sandbox.filesystem;
   return {
@@ -237,7 +245,19 @@ function buildRemoteFs(sdk: ModalSdk, sandbox: import("modal").Sandbox): RemoteF
         throw error;
       }
     },
-    writeFile: (p, data) => fs.writeBytes(data, p),
+    // Job-controlled trees are written only as the parser user (council M #3): root writes the bytes into its own control
+    // directory, then uid 10001 copies them into place, so a link a surviving job process planted reaches only what
+    // uid 10001 could already write.
+    async writeFile(p, data) {
+      const staged = `${CONTROL_DIR}/upload-${randomUUID()}`;
+      await fs.writeBytes(data, staged);
+      try {
+        await runChecked(sandbox, ["/bin/chmod", "0644", "--", staged], "parser VM upload staging failed");
+        await runChecked(sandbox, [...asParserUser(), "/bin/sh", "-c", 'mkdir -p -- "$(dirname -- "$2")" && cp -- "$1" "$2"', "sh", staged, p], "parser VM upload failed");
+      } finally {
+        await fs.remove(staged).catch(() => {});
+      }
+    },
     async readFile(p) {
       // Read as the parser user: root never follows a link the job left in its own output (council K #5).
       const proc = await sandbox.exec([...asParserUser(), "/bin/cat", "--", p], { mode: "binary", timeoutMs: 30_000 });
@@ -257,8 +277,8 @@ function buildRemoteFs(sdk: ModalSdk, sandbox: import("modal").Sandbox): RemoteF
         return entry;
       });
     },
-    mkdir: (p) => fs.makeDirectory(p),
-    remove: (p) => fs.remove(p, { recursive: true }),
+    mkdir: (p) => runChecked(sandbox, [...asParserUser(), "/bin/mkdir", "-p", "--", p], "parser VM directory creation failed"),
+    remove: (p) => runChecked(sandbox, [...asParserUser(), "/bin/rm", "-rf", "--", p], "parser VM removal failed"),
   };
 }
 
@@ -424,6 +444,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           // As root, once: kernel link protections on (best effort; the contract reports them and the probe refuses 0).
           await withDeadline(opened.exec(HARDEN_LINKS_ARGV, { timeoutMs: 10_000 }).then((proc) => proc.wait()), 15_000);
           await withDeadline(opened.filesystem.makeDirectory(CONTROL_DIR), 30_000);
+          // Root-owned and not writable by the parser user; uploads staged here are copied into place as uid 10001.
+          await withDeadline(runChecked(opened, ["/bin/chmod", "0711", "--", CONTROL_DIR], "parser VM control directory setup failed"), 30_000);
           staging = new SessionStaging(buildRemoteFs(sdk, opened));
         })();
         return creating;
@@ -520,6 +542,21 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         }
       }
 
+      /**
+       * Kill every process the parser user still runs (council M #3): a daemon a command left behind could otherwise act
+       * between commands. Only when no other command is in flight, since they share the user. Best effort: an empty VM
+       * has nothing to kill.
+       */
+      async function killParserUserProcesses(): Promise<void> {
+        try {
+          // The shell's builtin kill (slim images ship no kill binary); kill(-1) spares the calling shell.
+          const proc = await sandbox!.exec([...asParserUser(), "/bin/sh", "-c", "kill -9 -1 2>/dev/null; exit 0"], { timeoutMs: KILL_SETTLE_MS });
+          await proc.wait();
+        } catch (error) {
+          console.warn(`[parser-sandbox] provider=modal leftover kill failed: ${safeMessage(config, error)}`);
+        }
+      }
+
       async function execute(command: SandboxCommand, started: number, signal?: AbortSignal): Promise<SandboxResult> {
         while (discarding) await discarding;
         inFlight++;
@@ -534,6 +571,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           }
         } finally {
           inFlight--;
+          if (inFlight === 0 && sandbox && !closed) await killParserUserProcesses();
           if (inFlight === 0 && pendingDiscards.length > 0 && !closed) {
             discarding ??= runDiscards();
             await discarding;
@@ -563,6 +601,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             throw error;
           }
           if (outcome.kind === "exited" && !signal?.aborted) {
+            // Leftover processes die before anything is read back or staged (council M #3), when this is the only command.
+            if (inFlight === 1) await killParserUserProcesses();
             // Only what this command created or changed comes back.
             if (closed) throw new Error("parser VM session closed before download");
             await staging!.download(snapshot);
