@@ -1,9 +1,9 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 
 /**
  * The chat executor charges chat answers, so it loads the deployment's pricing provider before it claims any operation
@@ -26,6 +26,14 @@ function runExecutor(env: Record<string, string>) {
 }
 
 describe("chat executor pricing startup (council E #2)", () => {
+  // The executor runs against the built packages, as in the app image: build @docslurp/shared once when it is not built
+  // (the vitest suites read its sources and never need the build).
+  beforeAll(() => {
+    if (existsSync(path.resolve(serverDir, "../packages/shared/dist/pricing-loader.js"))) return;
+    const built = spawnSync("pnpm", ["--filter", "@docslurp/shared", "build"], { cwd: path.resolve(serverDir, ".."), encoding: "utf8", timeout: 240_000 });
+    if (built.status !== 0) throw new Error(`@docslurp/shared build failed: ${built.stderr.slice(-2000)}`);
+  }, 300_000);
+
   it("refuses to start with DOCSLURP_PRICING_REQUIRED=1 and no provider", () => {
     const run = runExecutor({});
     expect(run.status).toBe(1);
