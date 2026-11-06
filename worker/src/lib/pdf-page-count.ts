@@ -168,7 +168,9 @@ export async function recordMeasuredPdfPageCount(args: {
 
 /** Pages a PDF extractor's output holds: every PDF extractor writes one form-feed-separated page per page it processed. */
 export function processedPdfPages(markdown: string): number {
-  return markdown.replace(/\f\s*$/, "").split("\f").length;
+  // Only the last page's own terminator is dropped (one form feed, then any spaces or newlines): trailing blank pages are
+  // pages, and `\s` would swallow their form feeds too.
+  return markdown.replace(/\f[ \t\r\n]*$/, "").split("\f").length;
 }
 
 /** Run-ledger slot holding a PDF's walked page count when extraction processed fewer pages (so a retry still knows N of M). */

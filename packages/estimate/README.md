@@ -149,5 +149,5 @@ const { files, request, stats, partial, cancelled } = await estimateFiles(estima
 - `test/page-equivalents.test.mjs` holds the profile's page equivalents to the shared functions billing uses
   (`pageTextEquivalents`, `pageAreaEquivalentsPt`, `pageEquivalents`) on generated stuffed pages.
 - After changing a threshold or file-type list in `@docslurp/shared`, run
-  `UPDATE_PROFILER_RULES=1 pnpm --filter @docslurp/shared test estimate-profiler-rules` to regenerate
+  `UPDATE_PROFILER_RULES=1 node --test packages/estimate/test/profiler-rules.test.mjs` to regenerate
   `profiler-rules.json`.

@@ -55,7 +55,7 @@ for very long documents.
 `@docslurp/estimate` (`packages/estimate`) applies the scan-beside-text rule in the browser from the same thresholds:
 it reads `pageRasterRouting` and `layout` (these grid constants, and `MAX_ANCHOR_WORDS`) from the neutral
 `profiler-rules.json`, generated from `PAGE_RASTER_ROUTING`, `PAGE_TABLE_ROUTING` and `LAYOUT_GRID_RULES` and checked
-against them and against this walker's constants (`estimate-profiler-rules.test.ts`). The Rust parser refuses unknown
+against them and against this walker's constants (`estimate-profiler-rules.test.ts`; the committed file by `packages/estimate/test/profiler-rules.test.mjs`). The Rust parser refuses unknown
 fields, so a new threshold fails the build until the profiler handles it.
 
 It computes the same geometry from the content stream: the displayed page space, each image's clipped coverage, pixel

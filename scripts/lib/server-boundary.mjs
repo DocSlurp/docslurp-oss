@@ -122,10 +122,6 @@ function checkAstroServerImports(root, appDir) {
 // behind the VM boundary (CLAUDE.md, untrusted file processing). Customers import @docslurp/estimate directly.
 export function checkEstimatorBoundary(root, dirs = ["server", "worker", "packages/shared", "packages/sdk"]) {
   const violations = [];
-  // The neutral profiler rules are data (no probe code) that shared generates: a test may read the committed file to check
-  // it against the generator. Source still may not import it.
-  const neutralRules = resolve(root, "packages/estimate/profiler-rules.json");
-  const isTest = (file) => /\.test\.[cm]?[jt]sx?$/.test(file);
   for (const dir of dirs) {
     for (const file of sourceFiles(resolve(root, dir))) {
       const text = readFileSync(file, "utf8");
@@ -135,7 +131,7 @@ export function checkEstimatorBoundary(root, dirs = ["server", "worker", "packag
         if (
           specifier === "@docslurp/estimate"
           || specifier.startsWith("@docslurp/estimate/")
-          || (target && !(target === neutralRules && isTest(file)) && (target === resolve(root, "packages/estimate") || target.startsWith(resolve(root, "packages/estimate") + sep)))
+          || (target && (target === resolve(root, "packages/estimate") || target.startsWith(resolve(root, "packages/estimate") + sep)))
         ) {
           violations.push(`${relative(root, file)}: ${specifier} (probing runs only on the customer's machine)`);
         }

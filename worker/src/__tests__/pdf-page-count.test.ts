@@ -514,6 +514,10 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
         values ('x-more', 'o1', 'u1', 'w1', 'run-x', 'm.pdf', 'application/pdf', 'raw/m', 'processing', 3, 'counted', '${JSON.stringify(pdfFacts)}'),
                ('x-less', 'o1', 'u1', 'w1', 'run-x', 'l.pdf', 'application/pdf', 'raw/l', 'processing', 10, 'counted', '${JSON.stringify(pdfFacts)}');`);
     expect(processedPdfPages("a\fb\fc\fd\fe\f")).toBe(5);
+    // Blank pages count, trailing ones included (pdftotext ends every page with a form feed).
+    expect(processedPdfPages("text one\f\ftext three\f\f")).toBe(4);
+    expect(processedPdfPages("a\f\f\f\n")).toBe(3);
+    expect(processedPdfPages("a\fb")).toBe(2);
     const more = await stateFor("run-x", "x-more");
     expect(await reconcileProcessedPdfPages(more.state, more.document, processedPdfPages("a\fb\fc\fd\fe"))).toEqual({ measured: 3, processed: 5, mismatch: "processed-above-measured" });
     expect(await pageRow("x-more")).toEqual({ page_count: 5, page_count_source: "counted" });

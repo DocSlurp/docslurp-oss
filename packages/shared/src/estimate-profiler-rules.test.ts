@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
@@ -7,14 +7,9 @@ import { sha256Hex } from "./hash.js";
 import { PAGE_RASTER_ROUTING } from "./page-raster-routing.js";
 import { PAGE_TABLE_ROUTING } from "./page-table-routing.js";
 
-const RULES = fileURLToPath(new URL("../../estimate/profiler-rules.json", import.meta.url));
-
+// The committed packages/estimate/profiler-rules.json is compared with this generator by the estimator package's own test
+// (packages/estimate/test/profiler-rules.test.mjs): the estimator depends on shared, never the other way round.
 describe("offline profiler rules", () => {
-  it("match the committed profiler-rules.json", () => {
-    const expected = `${JSON.stringify(buildProfilerRules(), null, 1)}\n`;
-    if (process.env.UPDATE_PROFILER_RULES === "1") writeFileSync(RULES, expected);
-    expect(readFileSync(RULES, "utf8")).toBe(expected);
-  });
 
   it("build grids with the layout walker's own constants", () => {
     const walker = readFileSync(fileURLToPath(new URL("../../../worker/scripts/pdf_layout_facts.py", import.meta.url)), "utf8");

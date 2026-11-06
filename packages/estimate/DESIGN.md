@@ -21,7 +21,7 @@ The README lists every field.
 ## Heuristics kept in the profiler
 
 They describe pages, not prices, and the worker reads the same thresholds (`profiler-rules.json`, generated from
-`@docslurp/shared` and checked by `estimate-profiler-rules.test.ts`):
+`@docslurp/shared` and checked against the committed file by this package's `test/profiler-rules.test.mjs`):
 
 - **Page raster rule** (`decidePageRaster`, `page-raster-routing.ts`): a sparse page whose content is held by
   significant, non-repeated images is a full-page raster page (`rasterPages`).
