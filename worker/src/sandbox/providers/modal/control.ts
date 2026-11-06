@@ -188,13 +188,14 @@ export const KILL_PARSER_USER_ARGV = ["python3", "-I", "-c", KILL_PARSER_USER_SC
 export const PARSER_VM_HOME = "/home/docslurp";
 
 /** Directories uid 10001 may write outside job trees. Every one is wiped after each command (council W #1). */
-export const PARSER_SCRATCH_ROOTS: readonly string[] = ["/tmp", "/var/tmp", "/dev/shm", "/dev/mqueue", "/run/lock", PARSER_VM_HOME];
+export const PARSER_SCRATCH_ROOTS: readonly string[] = ["/tmp", "/var/tmp", "/dev/shm", "/dev/mqueue", PARSER_VM_HOME];
 
 /**
- * Paths parser images (worker/Dockerfile*) have shipped owned by uid 10001: made root-owned and not group- or
- * world-writable at VM start, so an image built before the ownership fix still cannot be rewritten by a parser.
+ * Paths made root-owned and not group- or world-writable at VM start: what parser images (worker/Dockerfile*) have shipped
+ * owned by uid 10001, so an image built before the ownership fix still cannot be rewritten by a parser; and `/run`, which
+ * Modal mounts as a root 1777 tmpfs (council X #8), with everything under it (`/run/lock` included: no parser needs it).
  */
-const IMAGE_LOCK_PATHS = ["/app", "/opt", "/usr/local", "/var/lib/clamav", "/var/log/clamav"];
+const IMAGE_LOCK_PATHS = ["/run", "/app", "/opt", "/usr/local", "/var/lib/clamav", "/var/log/clamav"];
 
 /**
  * Run once as root when a parser VM starts, after HARDEN_LINKS_ARGV (council W #1). First it makes every path under

@@ -248,6 +248,21 @@ describe.skipIf(!dockerKillTest)("parser VM image lock and reset (council W #1)"
     expect(run.stdout).toContain("job-a absent");
   }, 150_000);
 
+  it("locks Modal's root 1777 /run tmpfs so the walk passes; without the lock step it is refused (council X #8)", () => {
+    const run = docker([
+      ...setup,
+      "chmod 1777 /run && mkdir -p /run/lock && chmod 1777 /run/lock && touch /run/open.sock && chmod 0666 /run/open.sock",
+      // The walk alone (the lock list emptied): Modal's /run is refused, fail-closed.
+      `python3 -I -c "$(printf '%s' "$LOCK" | sed 's/^for top in \\[.*\\]:$/for top in []:/')" /tmp/docslurp-parser-sandbox 2>&1; echo "walk-only=$?"`,
+      'python3 -I -c "$LOCK" /tmp/docslurp-parser-sandbox 2>&1; echo "lock=$?"',
+      'echo "run=$(stat -c %a /run) lock=$(stat -c %a /run/lock) sock=$(stat -c %a /run/open.sock)"',
+    ].join("\n"), ["--tmpfs", "/run:mode=1777"]);
+    expect(run.stdout).toMatch(/outside scratch and job roots: [^\n]*\/run/);
+    expect(run.stdout).toContain("walk-only=6");
+    expect(run.stdout).toContain("lock=0");
+    expect(run.stdout).toContain("run=1755 lock=1755 sock=644");
+  }, 150_000);
+
   it("refuses an image path the parser user can still write, and reports a full job root or /dev/shm", () => {
     const run = docker([
       ...setup,
