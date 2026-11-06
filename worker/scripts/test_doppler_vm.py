@@ -1,6 +1,7 @@
 """Pure range/merge regressions; no PDF parser or provider is executed."""
 import importlib.util
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,16 +10,16 @@ spec = importlib.util.spec_from_file_location("doppler_vm", Path(__file__).with_
 guest = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guest)
 
-class ChunkMergeTest(unittest.TestCase):
-    def test_short_tail_cannot_lower_furniture_repetition_threshold(self):
-        for document_pages in (1, 32, 33, 67, 10000):
-            for first, last in guest.page_ranges(document_pages):
-                count = last - first + 1
-                params = json.loads(guest.chunk_settings('{"tables":true}', document_pages, count))
-                self.assertAlmostEqual(params['furniture_min_share'] * count, 0.4 * document_pages)
-                self.assertTrue(params['tables'])
-        params = json.loads(guest.chunk_settings('{"furniture_min_share":0.6}', 67, 3))
-        self.assertAlmostEqual(params['furniture_min_share'] * 3, 40.2)
+class ConversionTest(unittest.TestCase):
+    def test_settings_keep_tuning_and_scale_the_document_budget(self):
+        params = json.loads(guest.converter_settings('{"tables": true, "furniture_min_share": 0.6}', 1))
+        self.assertEqual(params, {"tables": True, "furniture_min_share": 0.6, "max_doc_work": guest.DOC_WORK_PER_CHUNK})
+        # Every started 32 pages gets the budget one chunk had.
+        for pages, chunks in ((32, 1), (33, 2), (600, 19), (10000, 313)):
+            self.assertEqual(json.loads(guest.converter_settings('{}', pages))["max_doc_work"], guest.DOC_WORK_PER_CHUNK * chunks)
+        self.assertEqual(json.loads(guest.converter_settings('{"max_doc_work": 10}', 64))["max_doc_work"], 20)
+        for bad in ('[]', '1', '"x"', 'not json', '{"max_doc_work": 0}', '{"max_doc_work": "1"}', '{"max_doc_work": true}'):
+            with self.assertRaises(ValueError, msg=bad): guest.converter_settings(bad, 1)
 
     def test_ranges_cover_every_page_once(self):
         for pages in (1, 31, 32, 33, 64, 65, 10000):
@@ -37,33 +38,126 @@ class ChunkMergeTest(unittest.TestCase):
         with self.assertRaises(ValueError): guest.page_ranges(guest.MAX_DOCUMENT_PAGES + 1, 1, 32)
         self.assertEqual(self_request(pages, {"first": 19969, "last": 25000, "final": True}), (19969, 25000))
 
-    def test_document_limit_boundaries_and_settings_scale(self):
+    def test_document_limit_boundaries(self):
         self.assertEqual(guest.page_ranges(100000, 1, 10000)[-1], (9985, 10000))
         with self.assertRaises(ValueError): guest.page_ranges(100000, 1, 10001)
         with self.assertRaises(ValueError): guest.page_ranges(100001, 1, 32)
         self.assertEqual(self_request(100000, {"first": 99969, "last": 100000, "final": True}), (99969, 100000))
-        for pages in (25000, 100000):
-            for count in (32, 1):
-                share = json.loads(guest.chunk_settings('{}', pages, count))['furniture_min_share']
-                self.assertTrue(share == share and share < float('inf'))  # finite; furniture never repeats past 1.0
 
-    def test_order_and_blank_slots_across_chunk_boundaries(self):
+    def test_output_keeps_every_page_slot_including_blank_ends(self):
         with tempfile.TemporaryDirectory() as d:
-            p = Path(d); output = p / "merged"; size = 0
-            chunks = [b"first\f\fthird", b"\ffifth\f", b"last"]
-            with output.open("wb") as f:
-                for i, data in enumerate(chunks):
-                    chunk = p / "chunk"; chunk.write_bytes(data)
-                    size = guest.append_chunk(f, chunk, data.count(b"\f") + 1, i == 0, size)
-            self.assertEqual(output.read_bytes(), b"first\f\fthird\f\ffifth\f\flast")
-            self.assertEqual(size, output.stat().st_size)
+            out = Path(d) / "out"; out.write_bytes(b"\ffirst\f\fthird\f")
+            self.assertEqual(guest.check_output(out, 5), out.stat().st_size)
 
-    def test_refuses_wrong_page_count_and_oversize_merge(self):
+    def test_refuses_wrong_page_slots_and_oversize_output(self):
         with tempfile.TemporaryDirectory() as d:
-            p = Path(d); chunk = p / "chunk"; chunk.write_bytes(b"one")
-            with (p / "out").open("wb") as f:
-                with self.assertRaises(ValueError): guest.append_chunk(f, chunk, 2, True, 0)
-                with self.assertRaises(ValueError): guest.append_chunk(f, chunk, 1, False, guest.MAX_OUTPUT - 2)
+            out = Path(d) / "out"; out.write_bytes(b"one\ftwo")
+            with self.assertRaises(ValueError): guest.check_output(out, 3)
+            with self.assertRaises(ValueError): guest.check_output(out, 1)
+            big = Path(d) / "big"
+            with big.open("wb") as f:
+                f.truncate(guest.MAX_OUTPUT + 1)
+            with self.assertRaises(ValueError): guest.check_output(big, 1)
+
+    def test_reads_the_report_from_the_last_stderr_line(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "log"
+            log.write_bytes(b"pdftotext: Syntax Warning: noise\n" + b"x" * (3 * guest.MAX_REPORT_BASE) + b"\n" + json.dumps({"pages": 3, "words": 9}).encode() + b"\n")
+            self.assertEqual(guest.converter_report(log, 3)["pages"], 3)
+            for bad in (b"", b"\n\n", b"not json\n", b"[1]\n", b"x" * (2 * guest.MAX_REPORT_BASE)):
+                log.write_bytes(bad)
+                with self.assertRaises(ValueError, msg=repr(bad[:20])): guest.converter_report(log, 1)
+
+    def test_report_bound_grows_with_degraded_pages(self):
+        # 600 degraded pages make a report well over 16 KiB; it must still be read whole.
+        report = {"pages": 600, "words": 1, "degraded": [{"page": n, "reason": "doc_work"} for n in range(1, 601)]}
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "log"; log.write_bytes(json.dumps(report).encode() + b"\n")
+            self.assertGreater(log.stat().st_size, guest.MAX_REPORT_BASE)
+            self.assertEqual(len(guest.converter_report(log, 600)["degraded"]), 600)
+
+    def test_keep_slots_drops_context_pages(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "src"; src.write_bytes(b"\f".join(b"p%d" % n for n in range(1, 8)))
+            for skip, keep, want in ((0, 7, b"p1\fp2\fp3\fp4\fp5\fp6\fp7"), (2, 3, b"p3\fp4\fp5"), (6, 1, b"p7"), (0, 1, b"p1")):
+                out = Path(d) / f"out{skip}{keep}"
+                self.assertEqual(guest.keep_slots(src, out, skip, keep), len(want))
+                self.assertEqual(out.read_bytes(), want)
+            blanks = Path(d) / "blanks"; blanks.write_bytes(b"a\f\f\fd\f")  # slots: a, '', '', d, ''
+            out = Path(d) / "mid"; guest.keep_slots(blanks, out, 1, 3)
+            self.assertEqual(out.read_bytes(), b"\f\fd")
+
+    def test_converter_is_streaming_html_with_a_report(self):
+        self.assertEqual(guest.CONVERTER[0], "/opt/doppler/bin/pdftomarkdown")
+        for flag in ("--stream", "--html", "--report"):
+            self.assertIn(flag, guest.CONVERTER)
+
+class FakeConverter:
+    """Stands in for pdftomarkdown: page n's Markdown is `pN`; reports what it converted."""
+    def __init__(self, pages_reported=None, fail=False, degraded=0):
+        self.calls, self.pages_reported, self.fail, self.degraded = [], pages_reported, fail, degraded
+
+    def __call__(self, args, stdout, stderr, limit=45):
+        self.calls.append(args)
+        first, last = int(args[args.index("-f") + 1]), int(args[args.index("-l") + 1])
+        stdout.write(b"\f".join(b"p%d" % n for n in range(first, last + 1)))
+        report = {"pages": self.pages_reported or last - first + 1, "words": last - first + 1,
+                  "degraded": [{"page": n, "reason": "doc_work"} for n in range(self.degraded)]}
+        stderr.write(b"pdftotext noise\n" + json.dumps(report).encode() + b"\n")
+        if self.fail:
+            raise subprocess.CalledProcessError(1, args)
+
+
+class ConvertRangeTest(unittest.TestCase):
+    def convert(self, pages, first, last, run=None, settings="{}"):
+        run = run or FakeConverter()
+        with tempfile.TemporaryDirectory() as d:
+            job = Path(d)
+            size, report, context = guest.convert_range(run, pages, first, last, settings, job)
+            data = (job / "output").read_bytes()
+            self.assertEqual(size, len(data))
+            self.assertEqual(sorted(p.name for p in job.iterdir()), ["converter.log", "output"])
+            return data, report, context, run
+
+    def test_whole_document_has_no_context(self):
+        data, _, context, run = self.convert(5, 1, 5)
+        self.assertEqual(data, b"p1\fp2\fp3\fp4\fp5")
+        self.assertEqual(context, (1, 5))
+        args = run.calls[0]
+        self.assertEqual(args[:4], list(guest.CONVERTER))
+        self.assertEqual(args[args.index("--") + 1:], [str(Path(args[-1]))])
+        self.assertTrue(args[-1].endswith("/input"))
+
+    def test_middle_shard_converts_context_and_keeps_its_own_pages(self):
+        data, report, context, run = self.convert(200, 65, 96)
+        self.assertEqual(context, (49, 112))
+        self.assertEqual(data, b"\f".join(b"p%d" % n for n in range(65, 97)))
+        self.assertEqual(report["pages"], 64)
+        self.assertEqual(json.loads(run.calls[0][run.calls[0].index("--params") + 1])["max_doc_work"], guest.DOC_WORK_PER_CHUNK * 2)
+
+    def test_edge_shards_clip_context_to_the_document(self):
+        self.assertEqual(self.convert(100, 1, 32)[2], (1, 48))
+        data, _, context, _ = self.convert(100, 97, 100)
+        self.assertEqual(context, (81, 100))
+        self.assertEqual(data, b"p97\fp98\fp99\fp100")
+
+    def test_context_never_exceeds_the_vm_page_limit(self):
+        self.assertEqual(self.convert(guest.MAX_DOCUMENT_PAGES, 1, guest.MAX_PAGES)[2], (1, guest.MAX_PAGES))
+        # 9,984 pages leave 16 spare: all of it goes before the range.
+        self.assertEqual(self.convert(30000, 9985, 19968)[2], (9969, 19968))
+        # 9,990 pages leave 10: before first, then nothing after.
+        self.assertEqual(self.convert(30000, 9985, 19974)[2], (9975, 19974))
+        # At the document start the spare goes after.
+        self.assertEqual(self.convert(30000, 1, 9990)[2], (1, 10000))
+
+    def test_refuses_a_wrong_page_count_or_a_failed_converter(self):
+        with self.assertRaises(ValueError): self.convert(10, 1, 10, FakeConverter(pages_reported=9))
+        with self.assertRaises(subprocess.CalledProcessError): self.convert(10, 1, 10, FakeConverter(fail=True))
+
+    def test_many_degraded_pages_still_convert(self):
+        _, report, _, _ = self.convert(600, 1, 600, FakeConverter(degraded=600))
+        self.assertEqual(len(report["degraded"]), 600)
+
 
 def self_request(pages, body):
     with tempfile.TemporaryDirectory() as d:
