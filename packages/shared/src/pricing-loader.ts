@@ -7,8 +7,8 @@
  *
  * Fail closed:
  * - a named plugin that cannot load, or returns an invalid provider, is a startup error;
- * - DOCSLURP_SERVICE_PROFILE=service without DOCSLURP_PRICING_PLUGIN is a startup error, so the hosted service never
- *   prices with the open default;
+ * - DOCSLURP_SERVICE_PROFILE=service or DOCSLURP_PRICING_REQUIRED=1 without DOCSLURP_PRICING_PLUGIN is a startup error, so
+ *   a deployment that bills never prices with the open default;
  * Without a plugin and outside the service profile, the open default prices (a flat, published rule).
  */
 import path from "node:path";
@@ -23,10 +23,15 @@ import {
   type PricingProvider,
 } from "./pricing-provider.js";
 
-/** What a pricing plugin's `register(host)` receives. */
+/**
+ * What a pricing plugin's `register(host)` receives. `shared` is the host's own `@docslurp/shared`: a plugin imports only
+ * types from it and calls its helpers through `host.shared`, so one copy of the shared module (and its provider registry)
+ * runs in the process.
+ */
 export interface PricingPluginHost {
   apiVersion: typeof PRICING_PROVIDER_API_VERSION;
   env: Readonly<Record<string, string | undefined>>;
+  shared: typeof import("./index.js");
 }
 
 export interface PricingPluginModule {
@@ -59,8 +64,8 @@ export async function loadPricingProvider(
     return pricing().id;
   }
   if (!specifier) {
-    if (pricingServiceProfile(env)) {
-      throw new Error("DOCSLURP_SERVICE_PROFILE=service needs a pricing provider in DOCSLURP_PRICING_PLUGIN; refusing to start with the open pricing default");
+    if (pricingServiceProfile(env) || env.DOCSLURP_PRICING_REQUIRED?.trim() === "1") {
+      throw new Error("DOCSLURP_SERVICE_PROFILE=service or DOCSLURP_PRICING_REQUIRED=1 needs a pricing provider in DOCSLURP_PRICING_PLUGIN; refusing to start with the open pricing default");
     }
     loadedFrom = null;
     console.warn("[pricing] provider=open: no DOCSLURP_PRICING_PLUGIN; charges follow the open default's flat per-page rule");
@@ -73,7 +78,8 @@ export async function loadPricingProvider(
     throw new Error(`Pricing plugin failed to load: ${specifier}: ${error instanceof Error ? error.message : String(error)}`);
   }
   if (typeof module.register !== "function") throw new Error(`Pricing plugin exports no register(host): ${specifier}`);
-  const provider = await module.register({ apiVersion: PRICING_PROVIDER_API_VERSION, env });
+  const shared = await import("./index.js");
+  const provider = await module.register({ apiVersion: PRICING_PROVIDER_API_VERSION, env, shared });
   installPricingProvider(provider);
   loadedFrom = specifier;
   // Generic ids only: the provider's details are its own to log.

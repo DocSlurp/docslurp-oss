@@ -21,6 +21,7 @@ describe("loadPricingProvider", () => {
 
   it("refuses to start the service profile without a pricing plugin", async () => {
     await expect(loadPricingProvider({ DOCSLURP_SERVICE_PROFILE: "service" })).rejects.toThrow(/needs a pricing provider/);
+    await expect(loadPricingProvider({ DOCSLURP_PRICING_REQUIRED: "1" })).rejects.toThrow(/needs a pricing provider/);
   });
 
   it("installs the plugin's provider and uses it under the service profile", async () => {
