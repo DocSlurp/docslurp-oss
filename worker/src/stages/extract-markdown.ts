@@ -635,7 +635,10 @@ export class ExtractMarkdownStage implements Stage {
                   const pdfPageCheck = isPdf ? await reconcileProcessedPdfPages(state, document, processedPdfPages(winningText, winningCandidate.label)) : null;
                   // What each extracted page holds, by the text rule: a page carrying many pages of text (tiny, invisible or
                   // off-page text included, which is indexed like any other) bills as that many (lib/page-equivalents.ts).
-                  const pageEquivalents = await recordExtractedPageEquivalents(state, document, format, winningText);
+                  // A VM-extracted PDF's page areas come from its layout facts (the page boxes the walker measured in the VM);
+                  // a host-rendered page records its area when rendered. Either way it is recorded and authorized here.
+                  const pageEquivalents = await recordExtractedPageEquivalents(state, document, format, winningText, [],
+                    winningCandidate.layoutFacts ? { pageSizesPt: winningCandidate.layoutFacts } : {});
                   // Office, EPUB and spreadsheet files arrive counted as one page. Count what the extractor read, from its own
                   // output (no other parser runs and the source is not read again), and record it as documents.billing_pages
                   // before features and the completion charge read it (page-base-fee.ts). The page basis (page_count) stays what

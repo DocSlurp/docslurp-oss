@@ -1,4 +1,4 @@
-import { billedPagePageEquivalents, DENSE_PAGE_EQUIVALENTS, imageAreaEquivalents, pageTextEquivalents, pricing } from "@docslurp/shared";
+import { billedPagePageEquivalents, DENSE_PAGE_EQUIVALENTS, imageAreaEquivalents, pageAreaEquivalentsPt, pageTextEquivalents, pricing } from "@docslurp/shared";
 
 import type { Document } from "../models.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
@@ -41,6 +41,14 @@ export async function recordExtractedPageEquivalents(
   format: string,
   markdown: string,
   frames: ReadonlyArray<{ pageNumber: number; sourceWidth?: number; sourceHeight?: number }> = [],
+  options: {
+    /**
+     * PDF page sizes in points, measured from the page structure where the pages were extracted (the VM's layout facts, real-
+     * Modal finding F4): each page's area counts against a Letter page (capped), as a host render's would. Pages without a
+     * size bill no area here; a later host render may still record it (the larger is kept).
+     */
+    pageSizesPt?: ReadonlyMap<number, { widthPt?: number | null; heightPt?: number | null }>;
+  } = {},
 ): Promise<ExtractedPageEquivalents | null> {
   if (formatNeedsMeasuredPages(format)) return null;
   const paged = PAGED_FORMATS.has(format);
@@ -49,6 +57,11 @@ export async function recordExtractedPageEquivalents(
   const pages = markdown.replace(/\f\s*$/, "").split("\f");
   const area = new Map(frames.filter((frame) => frame.sourceWidth && frame.sourceHeight)
     .map((frame) => [frame.pageNumber, imageAreaEquivalents(frame.sourceWidth!, frame.sourceHeight!)]));
+  if (format === "pdf") {
+    for (const [pageNumber, size] of options.pageSizesPt ?? []) {
+      if (size.widthPt && size.heightPt && !area.has(pageNumber)) area.set(pageNumber, pageAreaEquivalentsPt(size.widthPt, size.heightPt));
+    }
+  }
   const rows = pages.map((text, index) => ({ pageNumber: index + 1, text: pageTextEquivalents(text), area: area.get(index + 1) ?? 1 }));
   // HTML, text, CSV, JSON and LaTeX have no structural pages: the text rule over all of their extracted text is the whole
   // count (the rule their page_count already is), never pages added to page_count.

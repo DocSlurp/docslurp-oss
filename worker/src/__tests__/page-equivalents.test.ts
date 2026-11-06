@@ -19,6 +19,7 @@ import { recordPageEquivalents } from "../db/page-equivalents.js";
 import { measureExtractedPages } from "../lib/office-page-count.js";
 import { MAX_PAGE_EQUIVALENTS, recordExtractedPageEquivalents } from "../lib/page-equivalents.js";
 import { recordMeasuredTextPageCount } from "../lib/text-page-count.js";
+import { parsePageLayoutFacts } from "../lib/page-layout-facts.js";
 import { configurePageAreaSink, createPageAreaSink, recordRenderedPageAreas } from "../pipeline/page-area-sink.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
@@ -548,3 +549,32 @@ describe("rendered-area equivalents are authorized like every measured page (cou
     expect(() => createStages({ runner: {} as never, storage: {} as never, config: {} as never, sql: sql() as never })).toThrow(/need a store/);
   });
 });
+
+describe("VM-extracted page areas bill from the layout facts' page boxes (real-Modal finding F4)", () => {
+  afterEach(() => { setSpendCheckConfig(null); });
+  const facts = (pages: Array<Record<string, unknown>>) => parsePageLayoutFacts({ version: "pdf-layout-facts@1", pages: pages.map((page) => ({ known: true, words: 3, ...page })) });
+
+  it("a twice-Letter page with little text bills 2; Letter pages bill 1", async () => {
+    const { state, document, runId, documentId } = await documentRun(2);
+    const sizes = facts([{ pageNumber: 1, widthPt: 792, heightPt: 1224 }, { pageNumber: 2, widthPt: 612, heightPt: 792 }]);
+    const measured = (await recordExtractedPageEquivalents(state, document, "pdf", "A short caption\fAnother short page", [], { pageSizesPt: sizes }))!;
+    expect(measured).toMatchObject({ pages: 2, equivalents: 3, billed: 3 });
+    expect((await store.loadDocument(documentId))!.billingPages).toBe(3);
+    expect(await billedFastPages(runId, documentId)).toBe(3);
+  });
+
+  it("the area increase is authorized: an unfunded run pauses", async () => {
+    setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
+    const { state, document, runId } = await documentRun(1, "application/pdf", pdfFacts, { org: "o3", workspace: "w3" });
+    await expect(recordExtractedPageEquivalents(state, document, "pdf", "caption", [], { pageSizesPt: facts([{ pageNumber: 1, widthPt: 14_400, heightPt: 14_400 }]) }))
+      .rejects.toMatchObject({ name: "RunPolicyError" });
+    expect((await db.query<{ control_state: string }>(`select control_state from workspace_runs where id = '${runId}'`)).rows[0]!.control_state).toBe("paused");
+  });
+
+  it("parses the walker's page box, bounded; an unknown or hostile size bills no area", () => {
+    const parsed = facts([{ pageNumber: 1, widthPt: 792, heightPt: 1224 }, { pageNumber: 2, widthPt: 1e9, heightPt: 792 }, { pageNumber: 3, widthPt: -5, heightPt: 10 }, { pageNumber: 4 }]);
+    expect(parsed.get(1)).toMatchObject({ widthPt: 792, heightPt: 1224 });
+    for (const page of [2, 3, 4]) expect(parsed.get(page)?.widthPt).toBeUndefined();
+  });
+});
+

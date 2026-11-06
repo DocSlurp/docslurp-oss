@@ -12,6 +12,9 @@ export interface PageLayoutFacts {
   grids: PageTable[] | null;
   /** Share of the page covered by the union of its table boxes and grids; null when unknown. */
   tableCoverage: number | null;
+  /** The page's visible box in points (the walker's measure of the page structure); null when unknown. */
+  widthPt?: number | null;
+  heightPt?: number | null;
 }
 
 /** Parse a pdf-layout-facts@1 payload into per-page facts; malformed pages are dropped (unknown), never guessed. */
@@ -40,7 +43,11 @@ export function parsePageLayoutFacts(payload: unknown, maxPage = 100_000): Map<n
     const grids = Array.isArray(page.grids) ? (page.grids as Array<Record<string, unknown>>).slice(0, 64).map((grid) => ({
       rows: num(grid.rows) ?? 0, columns: num(grid.columns) ?? 0, coverage: num(grid.coverage),
     })) : null;
-    out.set(pageNumber, { images, tables, words: num(page.words), grids, tableCoverage: num(page.tableCoverage) });
+    // A page size from the walk (its visible box), bounded: 1 pt to the PDF limit of 14,400 pt per side.
+    const side = (value: unknown) => { const n = num(value); return n !== null && n >= 1 && n <= 14_400 ? n : null; };
+    const widthPt = side(page.widthPt), heightPt = side(page.heightPt);
+    out.set(pageNumber, { images, tables, words: num(page.words), grids, tableCoverage: num(page.tableCoverage),
+      ...(widthPt !== null && heightPt !== null ? { widthPt, heightPt } : {}) });
   }
   return out;
 }
