@@ -2,7 +2,8 @@
 
 A PDF page is read by a vision/OCR model, and bills Rich, only when facts about the page say its content is not in its
 text layer. No keyword, substring, filename or ASCII-class rule authorizes or vetoes a read. Text routes (`table-heavy`,
-`form`, `formula-heavy`, `code-heavy`) still label pages for the ingest report.
+`form`, `formula-heavy`, `code-heavy`) still label pages for the ingest report; a page is `table-heavy` when a table has
+5 or more rows or tables cover 40 % of it ([page-layout-facts.md](page-layout-facts.md)).
 
 Rule: `decidePageRaster` in `packages/shared/src/page-raster-routing.ts`, thresholds in `PAGE_RASTER_ROUTING`. The worker
 collects the facts (`worker/src/lib/page-image-evidence.ts`), classify-route applies the rule
@@ -29,7 +30,8 @@ the offline estimator mirrors the thresholds from the estimate card (`packages/e
 
 1. Text layer `garbled`: read. `suspect`: read only if an OCR of the page disagrees; unchecked is reported, never charged.
 2. Unknown words or an unknown image listing: not read (`evidence-unknown`); unknown is never zero.
-3. 30 or more native words: a text page, Fast.
+3. 30 or more native words: a text page, Fast, unless its layout facts show a scan placed beside the text (a large,
+   scan-like, non-furniture image with no native words over it): read. See [page-layout-facts.md](page-layout-facts.md).
 4. Sparse pages: no words and a largest image of 25 % (or images totalling 35 %): a scan. 10 words or fewer (a stamp, a page
    number) and an image of 50 %: a scan. Fewer than 30 words and an image of 85 %: a scan.
 5. No words, no significant image, no drawn-content hint: **blank**, never rendered, never read. A page with a little real
