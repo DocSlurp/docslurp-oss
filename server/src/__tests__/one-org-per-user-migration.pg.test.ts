@@ -1,13 +1,18 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 /**
  * Migration 0127 on real PostgreSQL, through the real migrator and pre-deploy processes. The database is a fresh copy of a
- * template migrated to the latest migration; the test rewinds 0127 (drops its index, forgets its journal row), seeds the
- * shapes the first version of 0127 got wrong, and re-applies it with `node server/db/migrate.mjs`:
+ * template migrated to the latest migration. This file creates its own empty database and applies immutable SQL through
+ * 0126, seeds the shapes the first version of 0127 got wrong, then upgrades through the project cutover with the real
+ * `node server/db/migrate.mjs`. Rewinding only the journal of a fully renamed template cannot restore historical tables:
  *   - a personal organization whose only "data" is a default workspace with a chat session is not empty;
  *   - a personal organization with another member is not empty, so that member is never cascaded out;
  *   - a truly empty personal organization goes with its default workspace (no foreign key would remove it), backed up;
@@ -20,14 +25,18 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 const url = process.env.ONE_ORG_MIGRATION_TEST_DATABASE_URL;
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const journal = JSON.parse(readFileSync(new URL("../../db/migrations/meta/_journal.json", import.meta.url), "utf8"));
-const when0127 = journal.entries.find((entry: { tag: string }) => entry.tag.startsWith("0127_")).when as number;
+const fixtureName = `one_org_upgrade_${process.pid}`;
+let fixtureUrl: string;
+let admin: pg.Client;
+let created = false;
+let scratch: string | undefined;
 
 let client: pg.Client;
 const rows = async <T = Record<string, unknown>>(text: string) => (await client.query(text)).rows as T[];
 const run = (script: string, args: string[], env: Record<string, string> = {}) => {
   const result = spawnSync(process.execPath, [script, ...args], {
     cwd: root, encoding: "utf8", timeout: 120_000,
-    env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", DATABASE_URL: url!, ...env },
+    env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", DATABASE_URL: fixtureUrl, ...env },
   });
   return { status: result.status, out: `${result.stdout}\n${result.stderr}` };
 };
@@ -43,11 +52,22 @@ const OWNERLESS = `select o.id from organizations o where o.deleted_at is null a
 
 describe.skipIf(!url)("0127 one organization per user, on PostgreSQL through migrate.mjs", () => {
   beforeAll(async () => {
-    client = new pg.Client({ connectionString: url });
+    const target = new URL(url!);
+    target.pathname = "/postgres";
+    admin = new pg.Client({ connectionString: target.toString() });
+    await admin.connect();
+    await admin.query(`create database ${fixtureName} template template0`);
+    created = true;
+    target.pathname = `/${fixtureName}`;
+    fixtureUrl = target.toString();
+    client = new pg.Client({ connectionString: fixtureUrl });
     await client.connect();
-    // Rewind 0127 (the template has it applied) so the migrator applies it again over the seeded rows.
-    await client.query("drop index if exists org_memberships_one_org_per_user");
-    await client.query("delete from drizzle.__drizzle_migrations where created_at >= $1", [when0127]);
+    scratch = mkdtempSync(join(tmpdir(), "one-org-upgrade-"));
+    mkdirSync(join(scratch, "meta"));
+    const entries = journal.entries.filter((entry: { idx: number }) => entry.idx < 127);
+    writeFileSync(join(scratch, "meta/_journal.json"), JSON.stringify({ ...journal, entries }));
+    for (const entry of entries) copyFileSync(join(root, "server/db/migrations", `${entry.tag}.sql`), join(scratch, `${entry.tag}.sql`));
+    await migrate(drizzle(client), { migrationsFolder: scratch });
     await client.query(`
       insert into "user"(id, name, email) values
         ('pg127-chat', 'C', 'pg127-chat@example.test'), ('pg127-host', 'H', 'pg127-host@example.test'),
@@ -92,7 +112,10 @@ describe.skipIf(!url)("0127 one organization per user, on PostgreSQL through mig
 
   afterAll(async () => {
     await client?.end();
-  });
+    if (created) await admin.query(`drop database ${fixtureName} with (force)`);
+    await admin?.end();
+    if (scratch) rmSync(scratch, { recursive: true });
+  }, 60_000);
 
   it("reports the funded removal, every promotion and the organization it cannot give an owner as BLOCKERs, by id only", () => {
     expect(report.status).toBe(1);
@@ -192,22 +215,22 @@ describe.skipIf(!url)("0127 one organization per user, on PostgreSQL through mig
         expect(await rows("select id from organizations where id like 'pg127-%' order by id")).toEqual(
           ["pg127-funded", "pg127-orphan", "pg127-p-chat", "pg127-p-guest", "pg127-team"].map((id) => ({ id })),
         );
-        expect(await rows("select id, workspace_id from chat_sessions where id = 'pg127-chat-session'")).toEqual([{ id: "pg127-chat-session", workspace_id: "pg127-ws-chat" }]);
+        expect(await rows("select id, project_id from chat_sessions where id = 'pg127-chat-session'")).toEqual([{ id: "pg127-chat-session", project_id: "pg127-ws-chat" }]);
         // Handed over where an owner remains (the promoted admin), left in place where none does.
-        expect(await rows("select id, user_id from workspaces where id in ('pg127-ws-funded', 'pg127-ws-chat') order by id")).toEqual([
+        expect(await rows("select id, user_id from projects where id in ('pg127-ws-funded', 'pg127-ws-chat') order by id")).toEqual([
           { id: "pg127-ws-chat", user_id: "pg127-chat" }, { id: "pg127-ws-funded", user_id: "pg127-fadmin" },
         ]);
       });
 
       it("deletes empty personal organizations with their default workspace, backed up, and orphans no workspace", async () => {
-        expect(await rows("select id from workspaces where id like 'pg127-%' order by id")).toEqual(
+        expect(await rows("select id from projects where id like 'pg127-%' order by id")).toEqual(
           ["pg127-ws-chat", "pg127-ws-funded", "pg127-ws-guest", "pg127-ws-team"].map((id) => ({ id })),
         );
-        expect(await rows("select count(*)::int as n from workspaces w where w.org_id is not null and not exists (select 1 from organizations o where o.id = w.org_id)")).toEqual([{ n: 0 }]);
-        expect(await rows(`select org_id, organization ->> 'name' as name, jsonb_path_query_array(workspaces, '$[*].id') as workspaces, reason
+        expect(await rows("select count(*)::int as n from projects w where w.org_id is not null and not exists (select 1 from organizations o where o.id = w.org_id)")).toEqual([{ n: 0 }]);
+        expect(await rows(`select org_id, organization ->> 'name' as name, jsonb_path_query_array(projects, '$[*].id') as projects, reason
           from organizations_removed_backup where org_id like 'pg127-%' order by org_id`)).toEqual([
-          { org_id: "pg127-p-empty", name: "Empty Personal", workspaces: ["pg127-ws-empty"], reason: "empty_personal_organization" },
-          { org_id: "pg127-p-host", name: "Host Personal", workspaces: ["pg127-ws-host"], reason: "empty_personal_organization" },
+          { org_id: "pg127-p-empty", name: "Empty Personal", projects: ["pg127-ws-empty"], reason: "empty_personal_organization" },
+          { org_id: "pg127-p-host", name: "Host Personal", projects: ["pg127-ws-host"], reason: "empty_personal_organization" },
         ]);
       });
 
