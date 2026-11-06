@@ -178,8 +178,17 @@ const PAGE_TERMINATED_PDF_EXTRACTORS: ReadonlySet<string> = new Set(["poppler-te
  *   with no terminator, so a trailing form feed is a blank last page.
  */
 export function processedPdfPages(markdown: string, extractor: string): number {
-  if (PAGE_TERMINATED_PDF_EXTRACTORS.has(extractor)) return markdown.replace(/\f[ \t\r\n]*$/, "").split("\f").length;
-  return markdown.split("\f").length;
+  return splitProcessedPdfPages(markdown, extractor).length;
+}
+
+/**
+ * A PDF extractor's output split into its pages by that extractor's form-feed convention (processedPdfPages): blank pages,
+ * trailing ones included, keep their slots. The one splitter for the processed count and the page-equivalents measurement,
+ * so both see the same pages.
+ */
+export function splitProcessedPdfPages(markdown: string, extractor: string): string[] {
+  if (PAGE_TERMINATED_PDF_EXTRACTORS.has(extractor)) return markdown.replace(/\f[ \t\r\n]*$/, "").split("\f");
+  return markdown.split("\f");
 }
 
 /** Run-ledger slot holding a PDF's walked page count when extraction processed fewer pages (so a retry still knows N of M). */

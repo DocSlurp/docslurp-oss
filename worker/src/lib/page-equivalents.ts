@@ -5,7 +5,7 @@ import type { WorkflowState } from "../pipeline/pipeline.js";
 import { formatNeedsMeasuredPages } from "./office-page-count.js";
 import { authorizeMeasuredPages } from "./measured-page-authorization.js";
 import { ocrMaxLongEdge } from "../ocr/engine.js";
-import { MAX_MEASURED_PDF_PAGES } from "./pdf-page-count.js";
+import { MAX_MEASURED_PDF_PAGES, splitProcessedPdfPages } from "./pdf-page-count.js";
 
 /** Formats whose pages are real pages (PDF pages, image frames): the dense-page allowance applies to their text. */
 const PAGED_FORMATS = new Set(["pdf", "image"]);
@@ -49,13 +49,22 @@ export async function recordExtractedPageEquivalents(
      * size bill no area here; a later host render may still record it (the larger is kept).
      */
     pageSizesPt?: ReadonlyMap<number, { widthPt?: number | null; heightPt?: number | null }>;
+    /**
+     * The PDF extractor whose output this is: its pages are split by its form-feed convention (splitProcessedPdfPages), so
+     * the measured rows match the processed page count and a blank final page keeps its slot (and its area). Without it a
+     * PDF's output is read as pdftotext's (each page terminated).
+     */
+    extractor?: string;
   } = {},
 ): Promise<ExtractedPageEquivalents | null> {
   if (formatNeedsMeasuredPages(format)) return null;
   const paged = PAGED_FORMATS.has(format);
   // The installed pricing provider's dense-page allowance (core's default: DEFAULT_PAGE_EQUIVALENT_ALLOWANCE) for paged documents.
   const allowance = paged ? pricing().pageEquivalentAllowance : 1;
-  const pages = markdown.replace(/\f\s*$/, "").split("\f");
+  // A PDF splits by its extractor's convention; an image's OCR frames are separated; whole-document text is measured joined.
+  const pages = format === "pdf" ? splitProcessedPdfPages(markdown, options.extractor ?? "poppler-text")
+    : format === "image" ? markdown.split("\f")
+    : markdown.replace(/\f\s*$/, "").split("\f");
   const area = new Map(frames.filter((frame) => frame.sourceWidth && frame.sourceHeight)
     // As the OCR read takes the frame (its long-edge cap): the work a frame costs, not the size it was uploaded at.
     .map((frame) => [frame.pageNumber, imageAreaEquivalents(frame.sourceWidth!, frame.sourceHeight!, ocrMaxLongEdge())]));

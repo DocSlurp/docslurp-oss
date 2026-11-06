@@ -20,6 +20,7 @@ import { measureExtractedPages } from "../lib/office-page-count.js";
 import { MAX_PAGE_EQUIVALENTS, recordExtractedPageEquivalents } from "../lib/page-equivalents.js";
 import { recordMeasuredTextPageCount } from "../lib/text-page-count.js";
 import { parsePageLayoutFacts } from "../lib/page-layout-facts.js";
+import { processedPdfPages, splitProcessedPdfPages } from "../lib/pdf-page-count.js";
 import { configurePageAreaSink, createPageAreaSink, recordRenderedPageAreas } from "../pipeline/page-area-sink.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
@@ -589,6 +590,37 @@ describe("VM-extracted page areas bill from the layout facts' page boxes (real-M
     const { state, document, runId } = await documentRun(1, "application/pdf", pdfFacts, { org: "o3", workspace: "w3" });
     await expect(recordExtractedPageEquivalents(state, document, "pdf", "caption", [], { pageSizesPt: facts([{ pageNumber: 1, widthPt: 14_400, heightPt: 14_400 }]) }))
       .rejects.toMatchObject({ name: "RunPolicyError" });
+    expect((await db.query<{ control_state: string }>(`select control_state from workspace_runs where id = '${runId}'`)).rows[0]!.control_state).toBe("paused");
+  });
+
+  it("a blank trailing page keeps its slot and bills its area: Doppler's \"caption\\f\" with a 4-Letter page 2 bills 5 (council H)", async () => {
+    const { state, document, runId, documentId } = await documentRun(2);
+    const sizes = facts([{ pageNumber: 1, widthPt: 612, heightPt: 792 }, { pageNumber: 2, widthPt: 1224, heightPt: 1584 }]);
+    expect(processedPdfPages("caption\f", "vm-pdf")).toBe(2);
+    const measured = (await recordExtractedPageEquivalents(state, document, "pdf", "caption\f", [], { extractor: "vm-pdf", pageSizesPt: sizes }))!;
+    expect(measured).toMatchObject({ pages: 2, billed: 5 });
+    expect((await store.loadDocument(documentId))!.billingPages).toBe(5);
+    expect(await billedFastPages(runId, documentId)).toBe(5);
+  });
+
+  it("several trailing blank pages each keep their slot and area; the rows match the processed count", async () => {
+    const { state, document, documentId } = await documentRun(4);
+    const markdown = "caption\f\f\f";
+    expect(splitProcessedPdfPages(markdown, "doppler-md")).toHaveLength(processedPdfPages(markdown, "doppler-md"));
+    expect(processedPdfPages(markdown, "doppler-md")).toBe(4);
+    const sizes = facts([3, 4].map((pageNumber) => ({ pageNumber, widthPt: 1224, heightPt: 792 })));
+    const measured = (await recordExtractedPageEquivalents(state, document, "pdf", markdown, [], { extractor: "doppler-md", pageSizesPt: sizes }))!;
+    expect(measured).toMatchObject({ pages: 4, billed: 1 + 1 + 2 + 2 });
+    expect((await store.loadDocument(documentId))!.billingPages).toBe(6);
+    // pdftotext terminates every page: the same text from poppler-text is 3 pages, the last blank.
+    expect(splitProcessedPdfPages(markdown, "poppler-text")).toEqual(["caption", "", ""]);
+  });
+
+  it("a blank trailing page's area is authorized: an unfunded run pauses", async () => {
+    setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
+    const { state, document, runId } = await documentRun(2, "application/pdf", pdfFacts, { org: "o3", workspace: "w3" });
+    await expect(recordExtractedPageEquivalents(state, document, "pdf", "caption\f", [],
+      { extractor: "vm-pdf", pageSizesPt: facts([{ pageNumber: 2, widthPt: 14_400, heightPt: 14_400 }]) })).rejects.toMatchObject({ name: "RunPolicyError" });
     expect((await db.query<{ control_state: string }>(`select control_state from workspace_runs where id = '${runId}'`)).rows[0]!.control_state).toBe("paused");
   });
 
