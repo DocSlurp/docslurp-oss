@@ -8,7 +8,7 @@ import {
   TEXT_PAGE_MIME_PREFIXES,
   VIDEO_EXTENSIONS,
 } from "./media-upload-estimate.js";
-import { PAGE_AREA_EQUIVALENTS_CAP, STANDARD_PAGE_AREA_PT2 } from "./page-equivalents.js";
+import { DENSE_PAGE_EQUIVALENTS, PAGE_AREA_EQUIVALENTS_CAP, STANDARD_PAGE_AREA_PT2 } from "./page-equivalents.js";
 import { PAGE_RASTER_ROUTING } from "./page-raster-routing.js";
 import { IMAGE_MAX_FRAMES, MULTI_FRAME_IMAGE_EXTENSIONS, MULTI_FRAME_IMAGE_MIME_TYPES } from "./upload-pages.js";
 
@@ -18,6 +18,16 @@ import { IMAGE_MAX_FRAMES, MULTI_FRAME_IMAGE_EXTENSIONS, MULTI_FRAME_IMAGE_MIME_
  * `estimate-profiler-rules.test.ts` fails when the committed JSON differs from what the TypeScript produces;
  * `UPDATE_PROFILER_RULES=1 pnpm --filter @docslurp/shared test estimate-profiler-rules` rewrites it.
  */
+
+/**
+ * Text the worker's PDF text extraction keeps, as observed (Poppler): at most `tinyGlyphsPerPage` glyphs under
+ * `tinyGlyphPoints` points a page, and nothing placed outside the page's MediaBox. Text outside the CropBox but inside the
+ * MediaBox is kept. The profiler mirrors these so a stuffed page is counted as billing will count it.
+ */
+export const EXTRACTION_LIMITS = { tinyGlyphPoints: 3, tinyGlyphsPerPage: 50_000 } as const;
+
+/** Content-stream bytes per glyph assumed when a page's text could not be read to the end (an estimate, flagged). */
+export const ESTIMATED_CONTENT_BYTES_PER_GLYPH = 2;
 
 export function buildProfilerRules() {
   return {
@@ -34,7 +44,9 @@ export function buildProfilerRules() {
     /** PDF page raster thresholds the worker routes with. */
     pageRasterRouting: { ...PAGE_RASTER_ROUTING },
     /** The page-equivalent measurement billing uses (page-equivalents.ts): area against a standard page, capped per page. */
-    pageEquivalents: { standardPageAreaPt2: STANDARD_PAGE_AREA_PT2, areaEquivalentsCap: PAGE_AREA_EQUIVALENTS_CAP },
+    pageEquivalents: { standardPageAreaPt2: STANDARD_PAGE_AREA_PT2, areaEquivalentsCap: PAGE_AREA_EQUIVALENTS_CAP, densePageEquivalents: DENSE_PAGE_EQUIVALENTS },
+    /** What the PDF text extractor keeps, so the profiler counts the text billing will measure (EXTRACTION_LIMITS). */
+    extraction: { ...EXTRACTION_LIMITS, estimatedContentBytesPerGlyph: ESTIMATED_CONTENT_BYTES_PER_GLYPH },
   };
 }
 export type ProfilerRules = ReturnType<typeof buildProfilerRules>;

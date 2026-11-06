@@ -16,7 +16,7 @@ use std::rc::Rc;
 use lopdf::content::Content;
 use lopdf::{Dictionary, Document, LoadOptions, Object, ObjectId};
 
-use super::{PdfProfile, ProbeInput, ProbeKind, ProbeResult, COVERAGE_BUCKETS, WHOLE_FILE_MAX_BYTES, WORDS_BUCKETS};
+use super::{PdfProfile, ProbeInput, ProbeKind, ProbeResult, AREA_EQUIVALENT_BUCKETS, COVERAGE_BUCKETS, TEXT_EQUIVALENT_BOUNDS, WHOLE_FILE_MAX_BYTES, WORDS_BUCKETS};
 use crate::rules::{PageRasterRouting, Rules};
 
 /// Decompressed bytes of one content stream or form XObject.
@@ -151,7 +151,25 @@ fn probe_document(rules: &Rules, document: &Document, file_bytes: usize, mut res
         let page = text.max(area);
         profile.sampled_page_equivalents = profile.sampled_page_equivalents.saturating_add(count(page));
         profile.max_page_equivalents = profile.max_page_equivalents.max(page.min(f64::from(u32::MAX)) as u32);
+        let text_bucket = TEXT_EQUIVALENT_BOUNDS.iter().rposition(|bound| text >= *bound).unwrap_or(0);
+        profile.text_equivalents_per_page[text_bucket] += 1;
+        let area_bucket = ((area as usize).clamp(1, AREA_EQUIVALENT_BUCKETS)) - 1;
+        profile.area_equivalents_per_page[area_bucket] += 1;
+        if text > rules.page_equivalents.dense_page_equivalents {
+            profile.dense_pages += 1;
+        }
+        profile.off_page_chars = profile.off_page_chars.saturating_add(count(volume.off_page));
+        profile.tiny_chars_dropped = profile.tiny_chars_dropped.saturating_add(count(volume.tiny_dropped));
+        if volume.estimated {
+            profile.text_estimated_pages += 1;
+        }
     }
+    let points = |value: f64| value.round().clamp(0.0, 10_000_000.0) as u32;
+    let median = |mut values: Vec<f64>| { values.sort_by(f64::total_cmp); values[values.len() / 2] };
+    profile.median_page_width_pt = points(median(readings.iter().map(|reading| reading.width).collect()));
+    profile.median_page_height_pt = points(median(readings.iter().map(|reading| reading.height).collect()));
+    profile.max_page_width_pt = points(readings.iter().map(|reading| reading.width).fold(0.0, f64::max));
+    profile.max_page_height_pt = points(readings.iter().map(|reading| reading.height).fold(0.0, f64::max));
     let mut areas: Vec<f64> = readings.iter().map(|reading| reading.area / (72.0 * 72.0)).collect();
     areas.sort_by(f64::total_cmp);
     let square_inches = |value: f64| value.round().clamp(0.0, 1_000_000.0) as u32;
@@ -593,8 +611,10 @@ struct PageReading {
     exhausted: bool,
     /// Text was shown in a font with no Unicode mapping.
     unmapped_text: bool,
-    /// Visible page area in square points.
+    /// Visible page area in square points, and the visible box's width and height in points.
     area: f64,
+    width: f64,
+    height: f64,
     text: TextVolume,
 }
 
@@ -615,10 +635,24 @@ fn classify_page(routing: &PageRasterRouting, document: &Document, page_id: Obje
     let resources = page_resources(document, page_id);
     let area = page_area(document, page_id);
     let visible = visible_box(document, page_id).unwrap_or([0.0, 0.0, 612.0, 792.0]);
+    let media = page_box(document, page_id, b"MediaBox").unwrap_or(visible);
+    let rules = &crate::rules::Rules::bundled().extraction;
+    let limits = ExtractionLimitsCopy { tiny_points: rules.tiny_glyph_points, tiny_per_page: rules.tiny_glyphs_per_page };
     let mut stats = PageStats::default();
-    let mut context = Context { document, routing, forms, area, visible };
+    let mut context = Context { document, routing, forms, area, visible, media, limits };
     context.interpret(&content, &resources, IDENTITY, 0, &mut stats);
-    Some(PageReading { words: stats.words.words(), path_operations: stats.path_operations, images: stats.images, exhausted: stats.exhausted, unmapped_text: stats.unmapped_text, area, text: stats.text })
+    if stats.exhausted && stats.text.chars > 0.0 {
+        // A page with text that was not read to the end: estimate its glyphs from its own content stream's size (forms it
+        // draws are not text), never fewer than counted. The font size histogram keeps only the glyphs measured.
+        let estimated = content.len() as f64 / rules.estimated_content_bytes_per_glyph;
+        if estimated > stats.text.chars {
+            stats.text.lines = stats.text.lines.max((estimated / 80.0).ceil());
+            stats.text.chars = estimated;
+        }
+        stats.text.estimated = true;
+    }
+    let (width, height) = ((visible[2] - visible[0]).max(0.0), (visible[3] - visible[1]).max(0.0));
+    Some(PageReading { words: stats.words.words(), path_operations: stats.path_operations, images: stats.images, exhausted: stats.exhausted, unmapped_text: stats.unmapped_text, area, width, height, text: stats.text })
 }
 
 /// The worker's drawn-content rule (`classify-route.ts`): a document with no extractable text anywhere whose bytes,
@@ -653,8 +687,17 @@ struct Context<'a, 'f> {
     routing: &'a PageRasterRouting,
     forms: &'f mut FormCache,
     area: f64,
-    /// The page's visible box (CropBox within MediaBox), in default user space.
+    /// The page's visible box (CropBox within MediaBox) and its MediaBox, in default user space.
     visible: [f64; 4],
+    media: [f64; 4],
+    limits: ExtractionLimitsCopy,
+}
+
+/// The extraction limits a page is read with (from the profiler rules).
+#[derive(Clone, Copy)]
+struct ExtractionLimitsCopy {
+    tiny_points: f64,
+    tiny_per_page: f64,
 }
 
 /// Lower bounds of the effective font size buckets, in points: under 1, 1-4, 4-6, 6-20, 20 and up.
@@ -671,8 +714,15 @@ struct TextVolume {
     by_size: [f64; 5],
     /// Glyphs in an invisible rendering mode (3 or 7).
     invisible: f64,
-    /// Glyphs whose text position lies outside the visible box.
+    /// Glyphs whose text position lies outside the visible box (inside the MediaBox: still extracted).
     off_crop: f64,
+    /// Glyphs placed outside the MediaBox (extraction drops them), and tiny glyphs beyond the per-page limit.
+    off_page: f64,
+    tiny_dropped: f64,
+    /// Tiny glyphs kept so far on the page.
+    tiny_kept: f64,
+    /// The page's text could not be read to the end; `chars` is estimated from its content size.
+    estimated: bool,
 }
 
 /// The text state the volume needs: text matrices, leading, rendering mode, and whether a new line awaits its first glyph.
@@ -702,30 +752,47 @@ impl<'a> Context<'a, '_> {
     /// they are invisible or placed outside the visible box. The text position then advances by an estimate of the run's
     /// width (half an em a glyph), so a long run off the page edge is found.
     fn text_shown(&self, stats: &mut PageStats, text: &mut TextState, bytes: &[u8], font_size: f64, ctm: &Matrix) {
-        let glyphs = glyph_count(bytes);
+        let all = glyph_count(bytes);
+        if all <= 0.0 {
+            return;
+        }
+        let device = multiply(&text.matrix, ctm);
+        text.matrix = multiply(&[1.0, 0.0, 0.0, 1.0, all * 0.5 * font_size, 0.0], &text.matrix);
+        let volume = &mut stats.text;
+        let (x, y) = (device[4], device[5]);
+        let inside = |b: [f64; 4]| x.is_finite() && y.is_finite() && x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3];
+        // Extraction drops glyphs placed outside the MediaBox: they are not text billing will measure.
+        if !inside(self.media) {
+            volume.off_page += all;
+            return;
+        }
+        let scale = (device[0] * device[3] - device[1] * device[2]).abs().sqrt();
+        let size = (font_size.abs() * scale).max(0.0);
+        // Extraction keeps at most `tiny_per_page` tiny glyphs a page.
+        let glyphs = if size < self.limits.tiny_points {
+            let kept = all.min((self.limits.tiny_per_page - volume.tiny_kept).max(0.0));
+            volume.tiny_kept += kept;
+            volume.tiny_dropped += all - kept;
+            kept
+        } else {
+            all
+        };
         if glyphs <= 0.0 {
             return;
         }
-        let volume = &mut stats.text;
         volume.chars += glyphs;
         if text.new_line {
             volume.lines += 1.0;
             text.new_line = false;
         }
-        let device = multiply(&text.matrix, ctm);
-        let scale = (device[0] * device[3] - device[1] * device[2]).abs().sqrt();
-        let size = (font_size.abs() * scale).max(0.0);
         let bucket = FONT_SIZE_BUCKETS.iter().rposition(|bound| size >= *bound).unwrap_or(0);
         volume.by_size[bucket] += glyphs;
         if matches!(text.render_mode, 3 | 7) {
             volume.invisible += glyphs;
         }
-        let [x0, y0, x1, y1] = self.visible;
-        let (x, y) = (device[4], device[5]);
-        if !(x.is_finite() && y.is_finite()) || x < x0 || x > x1 || y < y0 || y > y1 {
+        if !inside(self.visible) {
             volume.off_crop += glyphs;
         }
-        text.matrix = multiply(&[1.0, 0.0, 0.0, 1.0, glyphs * 0.5 * font_size, 0.0], &text.matrix);
     }
 
     fn record_image(&self, stats: &mut PageStats, id: Option<ObjectId>, ctm: &Matrix, width: f64, height: f64) {
@@ -975,6 +1042,8 @@ mod tests {
             exhausted: false,
             unmapped_text: false,
             area: DEFAULT_PAGE_AREA,
+            width: 612.0,
+            height: 792.0,
             text: TextVolume::default(),
         };
         // The same full-bleed background on four pages: furniture, so the pages are blank.

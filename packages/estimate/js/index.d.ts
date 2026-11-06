@@ -51,6 +51,21 @@ export type FileProfile = {
     sampledAreaEquivalents: number;
     sampledPageEquivalents: number;
     maxPageEquivalents: number;
+    /** Sampled pages per text equivalents (1, 2, 3, 4-8, 9-16, 17-64, 65+) and per area equivalents (1 to 8). */
+    textEquivalentsPerPage: [number, number, number, number, number, number, number];
+    areaEquivalentsPerPage: [number, number, number, number, number, number, number, number];
+    /** Sampled pages over 3 text equivalents. */
+    densePages: number;
+    /** Median and largest visible (CropBox) page width and height, in points. */
+    medianPageWidthPt: number;
+    medianPageHeightPt: number;
+    maxPageWidthPt: number;
+    maxPageHeightPt: number;
+    /** Glyphs extraction drops, so not counted: outside the MediaBox, and tiny glyphs over the per-page limit. */
+    offPageChars: number;
+    tinyCharsDropped: number;
+    /** Sampled pages whose text was estimated from content size (read only in part). */
+    textEstimatedPages: number;
   };
   /** Package structure: slide and worksheet parts, body bytes; `declaredPages` is authored metadata, informational only. */
   office?: { embeddedImages: number; slides?: number; sheets?: number; bodyBytes: number; declaredPages?: number };

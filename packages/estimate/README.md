@@ -72,6 +72,10 @@ PDF facts (counts are over the sampled pages):
 | `sampledChars`, `sampledTextLines` | Glyphs shown and text lines started on the sampled pages (text volume as extraction reads it) |
 | `charsByFontSize` | Glyphs per effective font size: under 1 pt, 1-4, 4-6, 6-20, 20 pt and up (tiny text) |
 | `invisibleChars`, `offCropChars` | Glyphs drawn invisibly (rendering modes 3 and 7), and glyphs placed outside the visible box |
+| `textEquivalentsPerPage`, `areaEquivalentsPerPage`, `densePages` | Per-page distributions: sampled pages per text equivalents (1, 2, 3, 4-8, 9-16, 17-64, 65+) and per area equivalents (1 to 8), and pages over 3 text equivalents |
+| `medianPageWidthPt`, `medianPageHeightPt`, `maxPageWidthPt`, `maxPageHeightPt` | Visible (CropBox) page dimensions in points |
+| `offPageChars`, `tinyCharsDropped` | Glyphs the text extraction drops, as observed with Poppler, and so not counted: placed outside the MediaBox, and glyphs under 3 pt beyond 50,000 a page |
+| `textEstimatedPages` | Pages with text the profiler could not read to the end (a content budget): their glyphs are estimated from the content stream's size (2 bytes a glyph) and the text facts are estimates |
 | `sampledTextEquivalents`, `sampledAreaEquivalents`, `sampledPageEquivalents`, `maxPageEquivalents` | Page equivalents of the sampled pages by the rule billing measures with (`page-equivalents.ts`): a page counts as the larger of 1, its text pages (60 lines or 3,500 characters a page) and its area in Letter pages (capped at 8). A page packed with tiny, invisible or off-page text, or an oversized page, counts as the pages it holds |
 
 The thresholds (significant image size, the raster rule, repeated-image detection, the text page rule) come from
@@ -133,6 +137,8 @@ const { files, request, stats, partial, cancelled } = await estimateFiles(estima
 - `pnpm test:wasm`: build `dist/docslurp_estimate.wasm` (size budget) and run the JS tests, including progress,
   cancellation, bounds and the worker's event-loop delay against an inline run.
 - `pnpm test:python`: the Python package on the same module.
+- `test/page-equivalents.test.mjs` holds the profile's page equivalents to the shared functions billing uses
+  (`pageTextEquivalents`, `pageAreaEquivalentsPt`, `pageEquivalents`) on generated stuffed pages.
 - After changing a threshold or file-type list in `@docslurp/shared`, run
   `UPDATE_PROFILER_RULES=1 pnpm --filter @docslurp/shared test estimate-profiler-rules` to regenerate
   `profiler-rules.json`.

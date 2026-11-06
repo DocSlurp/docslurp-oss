@@ -96,6 +96,12 @@
  },
  "pageEquivalents": {
   "standardPageAreaPt2": 484704,
-  "areaEquivalentsCap": 8
+  "areaEquivalentsCap": 8,
+  "densePageEquivalents": 3
+ },
+ "extraction": {
+  "tinyGlyphPoints": 3,
+  "tinyGlyphsPerPage": 50000,
+  "estimatedContentBytesPerGlyph": 2
  }
 }

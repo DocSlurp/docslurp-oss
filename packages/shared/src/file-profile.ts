@@ -24,6 +24,8 @@ export const FILE_PROFILE_MAX_SAMPLED_PAGES = 24;
  * edges are the page raster rule's stamp-text and sparse-page word limits (PAGE_RASTER_ROUTING).
  */
 export const WORDS_PER_PAGE_BUCKETS = [0, 1, 11, 30, 200, 500] as const;
+/** Per-page text equivalents, histogram bucket lower bounds: 1, 2, 3, 4-8, 9-16, 17-64, 65 and up. */
+export const TEXT_EQUIVALENT_BUCKETS = [1, 2, 3, 4, 9, 17, 65] as const;
 /** Effective font size (font size times text and page scaling), in points, bucket lower bounds: under 1, 1, 4, 6, 20. */
 export const FONT_SIZE_BUCKETS = [0, 1, 4, 6, 20] as const;
 /** Share of the page area covered by significant, non-furniture images, bucket lower bounds: 0, >0, 0.15, 0.5, 0.9. */
@@ -75,7 +77,7 @@ export const pdfProfileSchema = z.strictObject({
   /** Glyphs shown on the sampled pages, and text lines started. */
   sampledChars: z.number().int().nonnegative().max(10 ** 12),
   sampledTextLines: z.number().int().nonnegative().max(10 ** 12),
-  /** Glyphs per effective font size (FONT_SIZE_BUCKETS). */
+  /** Glyphs per effective font size (FONT_SIZE_BUCKETS), of the glyphs measured (not those estimated). */
   charsByFontSize: z.array(z.number().int().nonnegative().max(10 ** 12)).length(5),
   /** Glyphs drawn invisibly (text rendering modes 3 and 7), and glyphs placed outside the visible box. */
   invisibleChars: z.number().int().nonnegative().max(10 ** 12),
@@ -88,6 +90,21 @@ export const pdfProfileSchema = z.strictObject({
   sampledAreaEquivalents: z.number().int().nonnegative().max(10 ** 9),
   sampledPageEquivalents: z.number().int().nonnegative().max(10 ** 9),
   maxPageEquivalents: z.number().int().nonnegative().max(10 ** 9),
+  /** Sampled pages per text equivalents (TEXT_EQUIVALENT_BUCKETS) and per area equivalents (1 to 8). */
+  textEquivalentsPerPage: z.array(count).length(TEXT_EQUIVALENT_BUCKETS.length),
+  areaEquivalentsPerPage: z.array(count).length(8),
+  /** Sampled pages whose text counts as more than DENSE_PAGE_EQUIVALENTS pages. */
+  densePages: count,
+  /** Median and largest visible page width and height, in points. */
+  medianPageWidthPt: z.number().int().nonnegative().max(10_000_000),
+  medianPageHeightPt: z.number().int().nonnegative().max(10_000_000),
+  maxPageWidthPt: z.number().int().nonnegative().max(10_000_000),
+  maxPageHeightPt: z.number().int().nonnegative().max(10_000_000),
+  /** Glyphs extraction drops (outside the MediaBox; tiny glyphs over the per-page limit), not counted above. */
+  offPageChars: z.number().int().nonnegative().max(10 ** 12),
+  tinyCharsDropped: z.number().int().nonnegative().max(10 ** 12),
+  /** Sampled pages whose text could not be read to the end: their text facts are estimates from content size. */
+  textEstimatedPages: count,
 });
 export type PdfProfile = z.infer<typeof pdfProfileSchema>;
 
@@ -151,7 +168,9 @@ export function normalizeFileProfile(profile: FileProfile, file: { size: number 
     const sum = (values: readonly number[]) => values.reduce((total, value) => total + value, 0);
     // Histograms must account for exactly the pages (and glyphs) sampled, and the page sum may not undercount its parts.
     if (normalized.kind !== "pdf" || sum(pdf.wordsPerPage) !== pdf.sampledPages || sum(pdf.imageCoverage) !== pdf.sampledPages
-      || sum(pdf.charsByFontSize) !== pdf.sampledChars) {
+      // Estimated pages add glyphs no size was measured for: the histogram may then hold fewer, never more.
+      || (pdf.textEstimatedPages > 0 ? sum(pdf.charsByFontSize) > pdf.sampledChars : sum(pdf.charsByFontSize) !== pdf.sampledChars)
+      || sum(pdf.textEquivalentsPerPage) !== pdf.sampledPages || sum(pdf.areaEquivalentsPerPage) !== pdf.sampledPages) {
       delete normalized.pdf;
     } else {
       const clamp = (value: number) => Math.min(sampled, value);
@@ -175,13 +194,21 @@ export function normalizeFileProfile(profile: FileProfile, file: { size: number 
         // area pages by their cap, the page sum by its parts and the largest page by the sum.
         ...(() => {
           const textBound = sampled + Math.ceil(pdf.sampledChars / TEXT_PAGE_CHARS) + Math.ceil(pdf.sampledTextLines / TEXT_PAGE_LINES);
-          const text = Math.min(textBound, Math.max(sampled, pdf.sampledTextEquivalents));
-          const area = Math.min(sampled * PAGE_AREA_EQUIVALENTS_CAP, Math.max(sampled, pdf.sampledAreaEquivalents));
+          // The histograms bound the sums from below: a page in the "9-16" bucket counts at least 9.
+          const textFloor = pdf.textEquivalentsPerPage.reduce((total, pages, index) => total + pages * TEXT_EQUIVALENT_BUCKETS[index]!, 0);
+          const text = Math.min(textBound, Math.max(sampled, textFloor, pdf.sampledTextEquivalents));
+          // Area equivalents are whole pages 1..8: the histogram gives their sum exactly.
+          const area = pdf.areaEquivalentsPerPage.reduce((total, pages, index) => total + pages * (index + 1), 0);
           const page = Math.min(text + area, Math.max(sampled, text, area, pdf.sampledPageEquivalents));
           return { sampledTextEquivalents: text, sampledAreaEquivalents: area, sampledPageEquivalents: page, maxPageEquivalents: Math.min(page, Math.max(1, pdf.maxPageEquivalents)) };
         })(),
         medianPageAreaSqIn: Math.min(pdf.medianPageAreaSqIn, pdf.maxPageAreaSqIn, MAX_PAGE_AREA_SQ_IN),
         maxPageAreaSqIn: Math.min(pdf.maxPageAreaSqIn, MAX_PAGE_AREA_SQ_IN),
+        // Dense pages are the text histogram's pages over 3 equivalents.
+        densePages: pdf.textEquivalentsPerPage.slice(3).reduce((total, pages) => total + pages, 0),
+        textEstimatedPages: Math.min(pdf.textEstimatedPages, sampled),
+        medianPageWidthPt: Math.min(pdf.medianPageWidthPt, pdf.maxPageWidthPt),
+        medianPageHeightPt: Math.min(pdf.medianPageHeightPt, pdf.maxPageHeightPt),
         // Histograms are kept as measured: their totals were checked above.
       };
       if (sampled !== pdf.sampledPages) delete normalized.pdf;

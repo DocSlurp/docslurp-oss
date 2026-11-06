@@ -227,7 +227,8 @@ fn tiny_text_counts_the_pages_it_holds() {
 
 #[test]
 fn invisible_text_is_counted_and_flagged() {
-    let content = format!("{}\n{}", text_block(10, 50, 11.0, 0, 72.0, 720.0), text_block(200, 100, 11.0, 3, 72.0, 600.0));
+    // 200 lines of 3 pt invisible text, kept on the page (3.6 pt leading from y = 760).
+    let content = format!("{}\n{}", text_block(10, 50, 11.0, 0, 72.0, 720.0), text_block(200, 100, 3.0, 3, 72.0, 760.0));
     let pdf = profile_of(&one_page_pdf(&content, LETTER, None));
     assert_eq!((pdf.sampled_chars, pdf.invisible_chars), (20_500, 20_000));
     assert_eq!(pdf.sampled_page_equivalents, 6); // 20,500 / 3,500
@@ -235,7 +236,7 @@ fn invisible_text_is_counted_and_flagged() {
 
 #[test]
 fn text_outside_the_crop_box_is_counted_and_flagged() {
-    let content = format!("{}\n{}", text_block(5, 40, 11.0, 0, 72.0, 720.0), text_block(100, 100, 11.0, 0, 5_000.0, 400.0));
+    let content = format!("{}\n{}", text_block(5, 40, 11.0, 0, 72.0, 720.0), text_block(100, 100, 11.0, 0, 5_000.0, 5_000.0));
     let pdf = profile_of(&one_page_pdf(&content, [0.0, 0.0, 10_000.0, 10_000.0], Some(LETTER)));
     assert_eq!((pdf.sampled_chars, pdf.off_crop_chars), (10_200, 10_000));
     assert_eq!(pdf.sampled_page_equivalents, 3); // text rule: 10,200 / 3,500
@@ -249,4 +250,48 @@ fn a_giant_page_counts_its_area_up_to_the_cap() {
     assert_eq!((pdf.sampled_area_equivalents, pdf.sampled_page_equivalents, pdf.max_page_equivalents), (8, 8, 8));
     let tabloid = profile_of(&one_page_pdf(&text_block(2, 20, 11.0, 0, 72.0, 720.0), [0.0, 0.0, 792.0, 1_224.0], None));
     assert_eq!(tabloid.sampled_area_equivalents, 2);
+}
+
+#[test]
+fn tiny_glyphs_over_the_extraction_limit_are_dropped_as_extraction_drops_them() {
+    // 60,000 glyphs of 0.1 pt: extraction keeps 50,000 a page.
+    let pdf = profile_of(&one_page_pdf(&text_block(600, 100, 0.1, 0, 72.0, 720.0), LETTER, None));
+    assert_eq!((pdf.sampled_chars, pdf.tiny_chars_dropped), (50_000, 10_000));
+    assert_eq!(pdf.sampled_text_lines, 500);
+    assert_eq!(pdf.sampled_text_equivalents, 15); // 50,000 / 3,500
+    // 9-16 text pages, and dense.
+    assert_eq!(pdf.text_equivalents_per_page, [0, 0, 0, 0, 1, 0, 0]);
+    assert_eq!(pdf.dense_pages, 1);
+}
+
+#[test]
+fn text_outside_the_media_box_is_dropped_and_reported() {
+    let content = format!("{}\n{}", text_block(5, 40, 11.0, 0, 72.0, 720.0), text_block(100, 100, 11.0, 0, 20_000.0, 400.0));
+    let pdf = profile_of(&one_page_pdf(&content, LETTER, None));
+    assert_eq!((pdf.sampled_chars, pdf.off_page_chars, pdf.off_crop_chars), (200, 10_000, 0));
+    assert_eq!((pdf.sampled_page_equivalents, pdf.dense_pages), (1, 0));
+}
+
+#[test]
+fn reports_page_dimensions_and_area_distribution() {
+    let pdf = profile_of(&one_page_pdf(&text_block(2, 20, 11.0, 0, 72.0, 720.0), [0.0, 0.0, 792.0, 1_224.0], None));
+    assert_eq!((pdf.median_page_width_pt, pdf.median_page_height_pt, pdf.max_page_width_pt, pdf.max_page_height_pt), (792, 1_224, 792, 1_224));
+    assert_eq!(pdf.area_equivalents_per_page, [0, 1, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(pdf.text_equivalents_per_page, [1, 0, 0, 0, 0, 0, 0]);
+}
+
+#[test]
+fn a_page_read_only_in_part_estimates_its_text_from_content_size() {
+    // More text-showing operations than the per-page budget: the page is read in part, its glyphs estimated.
+    let mut content = String::from("BT /F1 11 Tf 72 720 Td\n");
+    for _ in 0..210_000 {
+        content.push_str("(ab) Tj\n");
+    }
+    content.push_str("ET");
+    let pdf = profile_of(&one_page_pdf(&content, LETTER, None));
+    assert_eq!(pdf.text_estimated_pages, 1);
+    assert!(pdf.budget_exhausted);
+    // At least what was read: about 200,000 operations of two glyphs, estimated from the bytes interpreted.
+    assert!(pdf.sampled_chars >= 400_000, "{}", pdf.sampled_chars);
+    assert!(pdf.sampled_text_equivalents >= 100);
 }

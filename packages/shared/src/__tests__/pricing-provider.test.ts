@@ -63,7 +63,7 @@ function pdfProfile(overrides: Partial<FileProfile> = {}, pdf: Partial<NonNullab
       budgetExhausted: false,
       sampledWords: 1_800,
       sampledChars: 0, sampledTextLines: 0, charsByFontSize: [0, 0, 0, 0, 0], invisibleChars: 0, offCropChars: 0,
-      sampledTextEquivalents: 10, sampledAreaEquivalents: 10, sampledPageEquivalents: 10, maxPageEquivalents: 1,
+      sampledTextEquivalents: 10, sampledAreaEquivalents: 10, sampledPageEquivalents: 10, maxPageEquivalents: 1, textEquivalentsPerPage: [10, 0, 0, 0, 0, 0, 0], areaEquivalentsPerPage: [10, 0, 0, 0, 0, 0, 0, 0], densePages: 0, medianPageWidthPt: 612, medianPageHeightPt: 792, maxPageWidthPt: 612, maxPageHeightPt: 792, offPageChars: 0, tinyCharsDropped: 0, textEstimatedPages: 0,
       medianPageAreaSqIn: 94,
       maxPageAreaSqIn: 94,
       ...pdf,

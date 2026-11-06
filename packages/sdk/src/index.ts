@@ -154,6 +154,9 @@ export type FileProfile = {
     sampledWords: number; medianPageAreaSqIn: number; maxPageAreaSqIn: number;
     sampledChars: number; sampledTextLines: number; charsByFontSize: number[]; invisibleChars: number; offCropChars: number;
     sampledTextEquivalents: number; sampledAreaEquivalents: number; sampledPageEquivalents: number; maxPageEquivalents: number;
+    textEquivalentsPerPage: number[]; areaEquivalentsPerPage: number[]; densePages: number;
+    medianPageWidthPt: number; medianPageHeightPt: number; maxPageWidthPt: number; maxPageHeightPt: number;
+    offPageChars: number; tinyCharsDropped: number; textEstimatedPages: number;
   };
   /** Package structure; `declaredPages` is the document's own metadata claim: informational only, never counted or priced. */
   office?: { embeddedImages: number; slides?: number; sheets?: number; bodyBytes: number; declaredPages?: number };

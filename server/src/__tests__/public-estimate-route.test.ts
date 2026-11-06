@@ -18,7 +18,7 @@ function profile(bytes: number, pages: number) {
       imagePages: 0, images: 0, imageCoverage: [2, 0, 0, 0, 0], furnitureImages: 0, layoutHeavyPages: 0, vectorHeavyPages: 0,
       unmappedFontPages: 0, drawnContent: false, budgetExhausted: false, sampledWords: 700, medianPageAreaSqIn: 94, maxPageAreaSqIn: 94,
       sampledChars: 4_200, sampledTextLines: 80, charsByFontSize: [0, 0, 0, 4_200, 0], invisibleChars: 0, offCropChars: 0,
-      sampledTextEquivalents: 2, sampledAreaEquivalents: 2, sampledPageEquivalents: 2, maxPageEquivalents: 1,
+      sampledTextEquivalents: 2, sampledAreaEquivalents: 2, sampledPageEquivalents: 2, maxPageEquivalents: 1, textEquivalentsPerPage: [2, 0, 0, 0, 0, 0, 0], areaEquivalentsPerPage: [2, 0, 0, 0, 0, 0, 0, 0], densePages: 0, medianPageWidthPt: 612, medianPageHeightPt: 792, maxPageWidthPt: 612, maxPageHeightPt: 792, offPageChars: 0, tinyCharsDropped: 0, textEstimatedPages: 0,
     },
   };
 }
@@ -57,7 +57,7 @@ describe("POST /v1/estimate (public)", () => {
 
   it("quotes a stuffed profile at its page equivalents, and clamps an equivalent count no page could hold", async () => {
     const stuffed = profile(40_000, 2);
-    stuffed.pdf = { ...stuffed.pdf, sampledChars: 70_000, charsByFontSize: [70_000, 0, 0, 0, 0], sampledTextEquivalents: 20, sampledPageEquivalents: 20, maxPageEquivalents: 10 };
+    stuffed.pdf = { ...stuffed.pdf, sampledChars: 70_000, charsByFontSize: [70_000, 0, 0, 0, 0], sampledTextEquivalents: 20, sampledPageEquivalents: 20, maxPageEquivalents: 10, textEquivalentsPerPage: [0, 0, 0, 0, 2, 0, 0], densePages: 2 };
     const quote = await (await post({ files: [{ name: "a.pdf", size: 40_000, profile: stuffed }] })).json() as { pages: { low: number; high: number } };
     expect(quote.pages).toEqual({ low: 20, high: 20 });
     // Equivalents the measured glyphs, lines and area cannot hold are clamped to what they can: text (2 pages + 70,000 / 3,500

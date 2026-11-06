@@ -20,6 +20,11 @@ pub const WORDS_BUCKETS: usize = 6;
 pub const COVERAGE_BUCKETS: usize = 5;
 /// Buckets of the effective font size histogram.
 pub const FONT_SIZE_BUCKETS: usize = 5;
+/// Lower bounds of the per-page text equivalents histogram.
+pub const TEXT_EQUIVALENT_BOUNDS: [f64; 7] = [1.0, 2.0, 3.0, 4.0, 9.0, 17.0, 65.0];
+pub const TEXT_EQUIVALENT_BUCKETS: usize = 7;
+/// Area equivalents run 1 to the cap (8).
+pub const AREA_EQUIVALENT_BUCKETS: usize = 8;
 /// Notes kept per profile, and characters per note.
 const MAX_NOTES: usize = 8;
 const MAX_NOTE_CHARS: usize = 160;
@@ -88,6 +93,24 @@ pub struct PdfProfile {
     pub sampled_area_equivalents: u64,
     pub sampled_page_equivalents: u64,
     pub max_page_equivalents: u32,
+    /// Sampled pages per text equivalents (1, 2, 3, 4-8, 9-16, 17-64, 65 and up).
+    pub text_equivalents_per_page: [u32; TEXT_EQUIVALENT_BUCKETS],
+    /// Sampled pages per area equivalents, 1 to 8 Letter pages.
+    pub area_equivalents_per_page: [u32; AREA_EQUIVALENT_BUCKETS],
+    /// Sampled pages whose text counts as more than the dense threshold (3 pages).
+    pub dense_pages: u32,
+    /// Median and largest visible page width and height of the sampled pages, in points.
+    pub median_page_width_pt: u32,
+    pub median_page_height_pt: u32,
+    pub max_page_width_pt: u32,
+    pub max_page_height_pt: u32,
+    /// Glyphs extraction drops, and that are therefore not counted above: placed outside the MediaBox, or tiny glyphs
+    /// beyond the per-page limit.
+    pub off_page_chars: u64,
+    pub tiny_chars_dropped: u64,
+    /// Sampled pages whose text could not be read to the end (a content budget): their glyphs are estimated from the
+    /// content-stream size, so the text facts above are estimates for them.
+    pub text_estimated_pages: u32,
 }
 
 /// Facts about an Office or EPUB package.

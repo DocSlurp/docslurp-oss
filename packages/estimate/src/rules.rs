@@ -63,6 +63,7 @@ pub struct Rules {
     pub multi_frame_images: MultiFrameImages,
     pub page_raster_routing: PageRasterRouting,
     pub page_equivalents: PageEquivalentRules,
+    pub extraction: ExtractionLimits,
 }
 
 /// The page-equivalent rule billing measures with: area against a standard page, capped per page; text by the text rule.
@@ -71,6 +72,17 @@ pub struct Rules {
 pub struct PageEquivalentRules {
     pub standard_page_area_pt2: f64,
     pub area_equivalents_cap: f64,
+    /** A page whose text counts as more than this many pages is dense (possible hidden or stuffed text). */
+    pub dense_page_equivalents: f64,
+}
+
+/// What the worker's PDF text extraction keeps (`EXTRACTION_LIMITS` in `@docslurp/shared`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractionLimits {
+    pub tiny_glyph_points: f64,
+    pub tiny_glyphs_per_page: f64,
+    pub estimated_content_bytes_per_glyph: f64,
 }
 
 impl Rules {
