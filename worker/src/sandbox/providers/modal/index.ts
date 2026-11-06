@@ -22,7 +22,8 @@ import {
 import { asParserUser, CONTROL_DIR, HARDEN_LINKS_ARGV, KILL_PARSER_USER_ARGV, killArgv, launchArgv } from "./control.js";
 import { SessionStaging, type RemoteEntry, type RemoteFs, type RemoteSnapshot } from "./staging.js";
 import { vmOnlyParsing } from "../../../lib/vm-only-parsing.js";
-import { defaultDocConcurrency } from "../../../concurrency.js";
+import { defaultDocConcurrency, resolveActivityConcurrency } from "../../../concurrency.js";
+import { VmBudget } from "./vm-budget.js";
 
 export type ModalSdk = typeof import("modal");
 
@@ -41,6 +42,10 @@ export interface ModalConfig {
   sessionTimeoutSeconds: number;
   /** Parser VMs one activity may run at once (modalVmsPerActivity); each runs one command at a time. */
   vmsPerActivity?: number;
+  /** Parser VMs one worker process may run at once across its activities (modalVmsPerWorker). */
+  vmsPerWorker?: number;
+  /** An idle pool VM is terminated after this long (modalVmIdleSeconds). */
+  vmIdleSeconds?: number;
 }
 
 /**
@@ -76,6 +81,29 @@ export function modalVmsPerActivity(env: NodeJS.ProcessEnv = process.env): numbe
   const documents = Number.isSafeInteger(configured) && configured >= 1 ? configured : defaultDocConcurrency();
   const serialized = ["1", "true", "yes", "on"].includes((env.WORKER_SERIALIZE_PDF_CANDIDATES ?? "").trim().toLowerCase());
   return Math.min(16, documents * (serialized ? 1 : 2));
+}
+
+/**
+ * Parser VMs one worker process may run at once, across all its activities (VM pool follow-up): the fleet's worst case
+ * is workers x this. Defaults to the worker's activity slots (WORKER_ACTIVITY_CONCURRENCY), so a fleet never runs more
+ * parser VMs than it did with one VM per activity; an activity's extra VMs use slots other activities leave free.
+ * DOCSLURP_MODAL_VMS_PER_WORKER overrides it (1 to 64).
+ */
+export function modalVmsPerWorker(env: NodeJS.ProcessEnv = process.env): number {
+  const explicit = Number.parseInt(env.DOCSLURP_MODAL_VMS_PER_WORKER ?? "", 10);
+  if (Number.isSafeInteger(explicit) && explicit >= 1) return Math.min(explicit, 64);
+  return Math.min(64, resolveActivityConcurrency(env));
+}
+
+/**
+ * Seconds an idle pool VM lives before it is terminated (DOCSLURP_MODAL_VM_IDLE_SECONDS, 1 to 300, default 20). A new
+ * VM costs about 2 s to start and harden, so a gap shorter than that is cheaper to wait through; 20 s covers the gaps
+ * between a document's commands inside a stage (staging, model calls between candidates) while bounding the idle time
+ * Modal bills per VM to 20 s after its last command. Every VM is terminated when the stage settles or the activity ends.
+ */
+export function modalVmIdleSeconds(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.DOCSLURP_MODAL_VM_IDLE_SECONDS);
+  return Number.isFinite(raw) && raw >= 1 && raw <= 300 ? raw : 20;
 }
 
 /** Lifetime of the startup probe's VM: a backstop if its terminate request is lost. */
@@ -376,6 +404,9 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
     }
   }
 
+  /** One budget per worker process (one provider instance), sized by the first session's config. */
+  let budget: VmBudget | undefined;
+
   const provider: ParserSandboxProvider<ModalConfig> = {
     id: "modal",
     name: "Modal",
@@ -390,7 +421,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         throw new SandboxConfigError("production parser VM images must be pinned by sha256 digest");
       }
       if (config.imageId && !/^im-[A-Za-z0-9]+$/.test(config.imageId)) throw new SandboxConfigError("invalid DOCSLURP_MODAL_IMAGE_ID");
-      return { ...config, image, vmsPerActivity: modalVmsPerActivity(env) };
+      return { ...config, image, vmsPerActivity: modalVmsPerActivity(env), vmsPerWorker: modalVmsPerWorker(env), vmIdleSeconds: modalVmIdleSeconds(env) };
     },
     async probe(config) {
       let session: SandboxSession | undefined;
@@ -426,6 +457,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
     async openSession(config, context) {
       const { sdk, client } = await loadClient(config);
       const maxLanes = Math.max(1, Math.floor(config.vmsPerActivity ?? 1));
+      const idleMs = Math.max(0.01, config.vmIdleSeconds ?? 20) * 1000;
+      const vmBudget = (budget ??= new VmBudget(Math.max(1, Math.floor(config.vmsPerWorker ?? Number.MAX_SAFE_INTEGER))));
       let closed = false;
       let clientClosed = false;
 
@@ -436,11 +469,18 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         finally { if (cleanupClient !== client) cleanupClient.close(); }
       }
 
-      /** Log the command's Modal time and return it as a provider-cost usage event (none for an unmetered session). */
-      function meter(started: number): UsageEvent | undefined {
-        const wallSeconds = (Date.now() - started) / 1000;
+      /**
+       * Meter a VM's time since it was last metered (VM pool follow-up): its start-up and any idle time before a command
+       * are billed with that command, and the time after its last command with its termination (meterTail). The events
+       * of one VM tile its life from creation to terminate, which is what Modal bills. Logged, and returned as a
+       * provider-cost usage event (none for an unmetered session).
+       */
+      function meterLane(lane: { accountedAt: number | undefined }, kind = "command"): UsageEvent | undefined {
+        const now = Date.now();
+        const wallSeconds = lane.accountedAt === undefined ? 0 : Math.max(0, now - lane.accountedAt) / 1000;
+        if (lane.accountedAt !== undefined) lane.accountedAt = now;
         console.log(
-          `[sandbox-usage] provider=modal cpu_seconds=${(config.cpu * wallSeconds).toFixed(3)} memory_gb_seconds=${((config.memoryMb / 1024) * wallSeconds).toFixed(3)} activity=${context.activityId}`,
+          `[sandbox-usage] provider=modal kind=${kind} cpu_seconds=${(config.cpu * wallSeconds).toFixed(3)} memory_gb_seconds=${((config.memoryMb / 1024) * wallSeconds).toFixed(3)} activity=${context.activityId}`,
         );
         if (context.unmetered) return undefined;
         return buildModalUsageEvent(config, context.activityId, wallSeconds);
@@ -459,6 +499,11 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         dead: boolean;
         /** The affinity key of its last command: a document's later commands prefer the VM that holds its inputs. */
         lastKey: string | undefined;
+        /** When the VM's time was last metered; undefined until it is created (it holds a budget token from then). */
+        accountedAt: number | undefined;
+        /** Records the VM's last metered stretch into the usage ledger of the stage that ran its last command. */
+        recorder: ((event: UsageEvent) => void) | undefined;
+        idleTimer: NodeJS.Timeout | undefined;
         ensureSandbox(): Promise<void>;
         execute(command: SandboxCommand, started: number, signal?: AbortSignal): Promise<SandboxResult>;
         terminate(): Promise<void>;
@@ -470,10 +515,29 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         let staging: SessionStaging | undefined;
         let creating: Promise<void> | undefined;
         let terminating: Promise<void> | undefined;
-        const lane: Lane = { id: ++laneCount, busy: false, dead: false, lastKey: undefined, ensureSandbox, execute, terminate };
+        const lane: Lane = { id: ++laneCount, busy: false, dead: false, lastKey: undefined, accountedAt: undefined, recorder: undefined, idleTimer: undefined, ensureSandbox, execute, terminate };
+        let holdsToken = false;
 
         function terminate(): Promise<void> {
           lane.dead = true;
+          if (lane.idleTimer) { clearTimeout(lane.idleTimer); lane.idleTimer = undefined; }
+          if (!terminating) {
+            // The time since its last command, until now, is the VM's too: billed where its last command was.
+            // Metering never stands in the way of the terminate (a pricing failure is logged, the VM still stops).
+            if (lane.accountedAt !== undefined) {
+              try {
+                const tail = meterLane(lane, "idle");
+                if (tail) {
+                  if (lane.recorder) lane.recorder(tail);
+                  else console.warn(`[sandbox-usage] provider=modal status=unrecorded reason=no-stage activity=${context.activityId} wall_seconds=${tail.metadata?.wallSeconds ?? "?"}`);
+                }
+              } catch (error) {
+                console.error(`[sandbox-usage] provider=modal status=unrecorded reason=meter-failed activity=${context.activityId}: ${safeMessage(config, error)}`);
+              }
+            }
+            // Its budget token returns now: the terminate request below stops Modal billing.
+            if (holdsToken) { holdsToken = false; vmBudget.release(); }
+          }
           terminating ??= (async () => {
             let failure: unknown;
             try {
@@ -494,6 +558,10 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
 
         function ensureSandbox(): Promise<void> {
           creating ??= (async () => {
+            await vmBudget.acquire(() => closed || lane.dead);
+            holdsToken = true;
+            if (closed || lane.dead) { holdsToken = false; vmBudget.release(); throw new Error("parser VM session closed during creation"); }
+            lane.accountedAt = Date.now();
             const app = await withDeadline(client.apps.fromName(config.app, { createIfMissing: true }), 30_000);
             const registrySecret = config.registrySecret && !config.imageId ? await withDeadline(client.secrets.fromName(config.registrySecret), 30_000) : undefined;
             const image = config.imageId ? await withDeadline(client.images.fromId(config.imageId), 30_000) : client.images.fromRegistry(config.image, registrySecret);
@@ -628,7 +696,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             } catch (error) {
               if (error instanceof Error && error.message === "parser VM control deadline exceeded") {
                 await terminate().catch(() => {});
-                throw new SandboxInfrastructureError(error.message, meter(started), { cause: error });
+                throw new SandboxInfrastructureError(error.message, meterLane(lane), { cause: error });
               }
               throw error;
             }
@@ -666,14 +734,14 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
               // Only what this command created or changed comes back.
               if (closed || lane.dead) throw new Error("parser VM session closed before download");
               await staging!.download(snapshot);
-              const usage = meter(started);
+              const usage = meterLane(lane);
               return { ...outcome.output, cpuSeconds: config.cpu * ((Date.now() - started) / 1000), usage };
             }
             // Aborted or timed out: its outputs may be partial. Never download them, and remove
             // them remotely so no later command's download copies them back.
             pendingDiscards.push(snapshot);
             if (outcome.kind !== "timeout") throw new CommandAborted();
-            const usage = meter(started);
+            const usage = meterLane(lane);
             return {
               stdout: "",
               stderr: "command exceeded its time limit",
@@ -683,12 +751,12 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             };
           } catch (error) {
             // Elapsed Modal time is billed even when staging or exec failed.
-            if (error instanceof CommandAborted) throw new SandboxRunError("modal sandbox command aborted", meter(started));
+            if (error instanceof CommandAborted) throw new SandboxRunError("modal sandbox command aborted", meterLane(lane));
             // The document's own files broke a staging rule: its verdict, never retried (recheck Q #1).
-            if (error instanceof SandboxOutputError) throw new SandboxOutputError(error.message, meter(started), { cause: error });
+            if (error instanceof SandboxOutputError) throw new SandboxOutputError(error.message, meterLane(lane), { cause: error });
             // Anything else that throws here is the sandbox's: SDK and transport errors, control commands, VM creation and
             // hardening, the leftover kill, a closed session (a document's own failure is a non-zero exit or the above).
-            throw new SandboxInfrastructureError(`modal sandbox command failed: ${safeMessage(config, error)}`, meter(started), { cause: error });
+            throw new SandboxInfrastructureError(`modal sandbox command failed: ${safeMessage(config, error)}`, meterLane(lane), { cause: error });
           }
         }
 
@@ -709,7 +777,11 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         const idle = lanes.filter((lane) => !lane.busy && !lane.dead);
         const lane = (key ? idle.find((candidate) => candidate.lastKey === key) : undefined) ?? idle[0]
           ?? (lanes.filter((candidate) => !candidate.dead).length < maxLanes ? addLane() : undefined);
-        if (lane) { lane.busy = true; lane.lastKey = key; }
+        if (lane) {
+          lane.busy = true;
+          lane.lastKey = key;
+          if (lane.idleTimer) { clearTimeout(lane.idleTimer); lane.idleTimer = undefined; }
+        }
         return lane;
       }
 
@@ -744,13 +816,35 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
       function releaseLane(lane: Lane): void {
         lane.busy = false;
         if (lane.dead) lanes.splice(lanes.indexOf(lane), 1);
+        else if (!closed) {
+          // Idle VMs are reaped: Modal bills them until terminated (VM pool follow-up).
+          lane.idleTimer = setTimeout(() => { lane.idleTimer = undefined; if (!lane.busy && !lane.dead) reap(lane); }, idleMs);
+          lane.idleTimer.unref();
+        }
         wakeNext();
       }
+
+      /** Terminate an idle VM and drop it from the pool; a later command opens a fresh one. */
+      function reap(lane: Lane): void {
+        void lane.terminate().catch((error: unknown) => console.warn(`[parser-sandbox] provider=modal idle VM terminate: ${safeMessage(config, error)}`));
+        const index = lanes.indexOf(lane);
+        if (index >= 0) lanes.splice(index, 1);
+        wakeNext();
+      }
+
+      // Another activity on this worker needs a VM and none is free: give up one idle VM of this pool.
+      const unregisterReaper = vmBudget.register(() => {
+        const idle = lanes.find((lane) => !lane.busy && !lane.dead && lane.accountedAt !== undefined);
+        if (!idle) return false;
+        reap(idle);
+        return true;
+      });
 
       // The first VM opens with the session, so a session that cannot create or harden a VM fails here (real-Modal F1).
       const first = addLane();
       await first.ensureSandbox().catch(async (error: unknown) => {
         closed = true;
+        unregisterReaper();
         await first.terminate().catch(() => {});
         clientClosed = true;
         client.close();
@@ -768,16 +862,24 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           if (signal?.aborted) throw new SandboxRunError("modal sandbox command aborted");
           const lane = await acquireLane(command.affinityKey, signal);
           hooks?.onStart?.();
+          if (hooks?.recordUsage) lane.recorder = hooks.recordUsage;
           try {
-            // Metered from admission (recheck R #3): time spent waiting for a lane is not Modal time for this command.
+            // Metered as the VM's time since it was last metered (recheck R #3, VM pool follow-up): never this command's
+            // wait for a VM, which is another command's time on it.
             return await lane.execute(command, Date.now(), signal);
           } finally {
             releaseLane(lane);
           }
         },
+        async settle() {
+          // The stage is done with the pool (VM pool follow-up): terminate idle VMs now, so their time after the last
+          // command is recorded in the stage's ledger before its final checkpoint, and Modal stops billing them.
+          for (const lane of lanes.filter((candidate) => !candidate.busy && !candidate.dead)) reap(lane);
+        },
         close() {
           closing ??= (async () => {
             closed = true;
+            unregisterReaper();
             while (waiting.length > 0) waiting.shift()!();
             const results = await Promise.allSettled(lanes.map((lane) => lane.terminate()));
             clientClosed = true;

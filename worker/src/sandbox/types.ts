@@ -139,10 +139,25 @@ export interface SandboxSession {
    * Remote providers run to completion and enforce limits provider-side. A provider that may queue the command calls
    * `hooks.onStart` when it is admitted (the runner's stall window starts there, recheck Q #4).
    */
-  run?(command: SandboxCommand, signal?: AbortSignal, hooks?: { onStart?(): void }): Promise<SandboxResult>;
+  run?(command: SandboxCommand, signal?: AbortSignal, hooks?: SandboxRunHooks): Promise<SandboxResult>;
   /** `run` calls `hooks.onStart` on admission (it may queue commands); without it the window starts at launch. */
   readonly reportsStart?: boolean;
+  /**
+   * The stage is done with the session for now: a pooling provider terminates idle VMs and records their remaining time
+   * (through `SandboxRunHooks.recordUsage`) before the stage's final checkpoint. The session stays usable.
+   */
+  settle?(): Promise<void>;
   close(): Promise<void>;
+}
+
+export interface SandboxRunHooks {
+  /** Called when a provider that may queue the command admits it (`reportsStart`). */
+  onStart?(): void;
+  /**
+   * Records provider cost that belongs to this command's stage but is known only later: a pooled VM's time after its
+   * last command, metered when the VM is reaped or settled. Bound to the command's stage context by the runner.
+   */
+  recordUsage?(event: UsageEvent): void;
 }
 
 export interface SandboxConfigProperty {

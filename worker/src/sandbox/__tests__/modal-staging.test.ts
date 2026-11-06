@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CommandRunner, resolveVenvBin } from "../../tools/runner.js";
 import { resolveScriptsDir } from "../../tools/scripts-dir.js";
-import { buildModalUsageEvent, createModalProvider, modalVmsPerActivity, type ModalSdk } from "../providers/modal/index.js";
+import { buildModalUsageEvent, createModalProvider, modalVmIdleSeconds, modalVmsPerActivity, modalVmsPerWorker, type ModalSdk } from "../providers/modal/index.js";
 import { SessionStaging, type RemoteFs } from "../providers/modal/staging.js";
 import { SandboxConfigError, SandboxInfrastructureError, SandboxOutputError, SandboxRunError } from "../types.js";
 
@@ -328,6 +328,9 @@ function fakeSdk(
     createOptions: [] as unknown[],
     /** Which VM ran each parser command, in start order. */
     commandVms: [] as number[],
+    /** When each VM was created and terminated (index = VM number - 1). */
+    createdAt: [] as number[],
+    terminatedAt: [] as number[],
     remote,
   };
   const info = (entry: { path: string; isDir: boolean; size: number; mtime: number }) => ({
@@ -409,7 +412,8 @@ function fakeSdk(
           if (opts.createFails) throw new Error("no capacity");
           const vm = state.createOptions.length;
           if (opts.createFailsFrom !== undefined && vm >= opts.createFailsFrom) throw new Error("no capacity");
-          return { ...sandbox, sandboxId: `sb-${vm}`, exec: (argv: string[], params?: { timeoutMs?: number }) => sandbox.exec(argv, params, vm) };
+          state.createdAt[vm - 1] = Date.now();
+          return { ...sandbox, sandboxId: `sb-${vm}`, terminate: async () => { state.terminatedAt[vm - 1] = Date.now(); return sandbox.terminate(); }, exec: (argv: string[], params?: { timeoutMs?: number }) => sandbox.exec(argv, params, vm) };
         },
       };
       close() {
@@ -702,6 +706,78 @@ describe("modal provider session lifecycle", () => {
       expect(await waiting).toBeInstanceOf(SandboxInfrastructureError);
     });
 
+    it("reaps a VM idle past the window; the next command opens a fresh one (VM pool follow-up)", async () => {
+      const { sdk, state } = fakeSdk({ exec: async () => finished() });
+      const provider = createModalProvider(async () => sdk);
+      const opened = await provider.openSession({ ...config, vmsPerActivity: 2, vmIdleSeconds: 0.1 }, { activityId: "a" });
+      await opened.run!(command);
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(state.terminate).toBe(0); // still inside the window
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      expect(state.terminate).toBe(1);
+      await opened.run!(command);
+      expect(state.createOptions).toHaveLength(2);
+      await opened.close();
+      expect(state.terminate).toBe(2);
+    });
+
+    it("meters each VM's whole life, from creation to terminate, across commands, idle time and reaping", async () => {
+      const { sdk, state } = fakeSdk({ exec: async () => { await new Promise((resolve) => setTimeout(resolve, 50)); return finished(); } });
+      const provider = createModalProvider(async () => sdk);
+      const opened = await provider.openSession({ ...config, vmsPerActivity: 2, vmIdleSeconds: 0.15 }, { activityId: "a" });
+      const recorded: number[] = [];
+      const hooks = { recordUsage: (event: { metadata?: Record<string, unknown> }) => recorded.push(Number(event.metadata?.wallSeconds)) };
+      const metered: number[] = [];
+      const run = async (key: string) => metered.push(Number((await opened.run!({ ...command, affinityKey: key }, undefined, hooks)).usage?.metadata?.wallSeconds));
+      await new Promise((resolve) => setTimeout(resolve, 80)); // idle before the first command
+      await Promise.all([run("a"), run("b")]); // two VMs
+      await new Promise((resolve) => setTimeout(resolve, 60)); // idle between commands
+      await run("a");
+      await new Promise((resolve) => setTimeout(resolve, 300)); // both reaped
+      expect(state.terminate).toBe(2);
+      const lifetime = state.createdAt.reduce((total, created, index) => total + (state.terminatedAt[index]! - created), 0) / 1000;
+      const billed = [...metered, ...recorded].reduce((total, seconds) => total + seconds, 0);
+      expect(recorded).toHaveLength(2); // one tail per VM
+      expect(Math.abs(billed - lifetime)).toBeLessThan(0.05);
+      await opened.close();
+    });
+
+    it("settle terminates idle VMs and records their remaining time before the stage's checkpoint", async () => {
+      const { sdk, state } = fakeSdk({ exec: async () => finished() });
+      const provider = createModalProvider(async () => sdk);
+      const opened = await provider.openSession({ ...config, vmsPerActivity: 2, vmIdleSeconds: 60 }, { activityId: "a" });
+      const recorded: unknown[] = [];
+      await opened.run!(command, undefined, { recordUsage: (event) => recorded.push(event) });
+      await opened.settle!();
+      expect(state.terminate).toBe(1);
+      expect(recorded).toHaveLength(1);
+      await opened.run!(command); // still usable: a fresh VM
+      expect(state.createOptions).toHaveLength(2);
+      await opened.close();
+    });
+
+    it("caps parser VMs per worker across activities; a waiting activity takes another activity's idle VM", async () => {
+      const slow = running();
+      let calls = 0;
+      const { sdk, state } = fakeSdk({ exec: async () => (++calls === 1 ? slow.process : finished()) });
+      const provider = createModalProvider(async () => sdk);
+      const pooled = { ...config, vmsPerActivity: 4, vmsPerWorker: 2, vmIdleSeconds: 60 };
+      const a = await provider.openSession(pooled, { activityId: "a" });
+      const b = await provider.openSession(pooled, { activityId: "b" });
+      expect(state.createOptions).toHaveLength(2);
+      const busy = a.run!({ ...command, affinityKey: "x" }); // A's VM busy
+      await vi.waitFor(() => expect(state.commands).toHaveLength(1));
+      await b.run!(command); // B's own VM; B is now idle with one VM
+      // A wants a second VM: the worker is at its limit, so B's idle VM is reaped for it.
+      await a.run!({ ...command, affinityKey: "y" });
+      expect(state.createOptions).toHaveLength(3);
+      expect(state.terminate).toBe(1);
+      slow.end(0);
+      await busy;
+      await Promise.all([a.close(), b.close()]);
+      expect(state.terminate).toBe(3);
+    });
+
     it("sizes the pool from the document and candidate concurrency settings", () => {
       expect(modalVmsPerActivity({ WORKER_DOC_CONCURRENCY: "4" })).toBe(8);
       expect(modalVmsPerActivity({ WORKER_DOC_CONCURRENCY: "4", WORKER_SERIALIZE_PDF_CANDIDATES: "1" })).toBe(4);
@@ -709,6 +785,11 @@ describe("modal provider session lifecycle", () => {
       expect(modalVmsPerActivity({ WORKER_DOC_CONCURRENCY: "4", DOCSLURP_MODAL_VMS_PER_ACTIVITY: "3" })).toBe(3);
       expect(modalVmsPerActivity({ WORKER_DOC_CONCURRENCY: "64" })).toBe(16);
       expect(modalVmsPerActivity({ DOCSLURP_MODAL_VMS_PER_ACTIVITY: "0", WORKER_DOC_CONCURRENCY: "2" })).toBe(4);
+      expect(modalVmsPerWorker({ WORKER_ACTIVITY_CONCURRENCY: "2" })).toBe(2);
+      expect(modalVmsPerWorker({ WORKER_ACTIVITY_CONCURRENCY: "8", DOCSLURP_MODAL_VMS_PER_WORKER: "3" })).toBe(3);
+      expect(modalVmIdleSeconds({})).toBe(20);
+      expect(modalVmIdleSeconds({ DOCSLURP_MODAL_VM_IDLE_SECONDS: "0" })).toBe(20);
+      expect(modalVmIdleSeconds({ DOCSLURP_MODAL_VM_IDLE_SECONDS: "45" })).toBe(45);
     });
   });
 
@@ -989,7 +1070,9 @@ describe("modal provider session lifecycle", () => {
       expect(await queued).toBeInstanceOf(Error);
       expect(processes.has("queued")).toBe(false);
       expect(state.remote.removed).toEqual([]);
-      expect(warn).not.toHaveBeenCalled();
+      // No discard ran against the closed sandbox (the only warning allowed is the idle VM time this direct run, outside
+      // a stage, has nowhere to record).
+      expect(warn.mock.calls.filter(([line]) => !String(line).startsWith("[sandbox-usage]"))).toEqual([]);
     } finally {
       warn.mockRestore();
       rmSync(dir, { recursive: true, force: true });

@@ -33,6 +33,13 @@ export class SandboxSessionScope {
     this.latched ??= error;
   }
 
+  /** Let the opened session release what the stage no longer needs (SandboxSession.settle); never opens one. */
+  async settle(): Promise<void> {
+    if (!this.opening) return;
+    const session = await this.opening.catch(() => null);
+    await session?.settle?.();
+  }
+
   async close(): Promise<void> {
     if (!this.opening) return;
     const opening = this.opening;
@@ -77,6 +84,15 @@ export function noteSandboxInfrastructureError(error: unknown): void {
 /** The current activity's latched teardown failure, if any (see SandboxSessionScope.teardownError). */
 export function latchedTeardownError(): Error | null {
   return sandboxScopeStorage.getStore()?.teardownError ?? null;
+}
+
+/**
+ * Before a stage's final checkpoint: idle pooled VMs are terminated and their remaining time recorded in the stage's
+ * ledger, so the checkpoint persists it (VM pool follow-up). Best effort: a failure is logged, never the stage's.
+ */
+export async function settleSandboxSession(): Promise<void> {
+  await sandboxScopeStorage.getStore()?.settle().catch((error: unknown) =>
+    console.warn(`[parser-sandbox] settle failed: ${error instanceof Error ? error.message : String(error)}`));
 }
 
 export function runWithSandboxScope<T>(scope: SandboxSessionScope, fn: () => Promise<T>): Promise<T> {

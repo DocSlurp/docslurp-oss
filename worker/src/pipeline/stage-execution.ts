@@ -40,7 +40,7 @@ import { runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
 import { pinRunPageBillingRules } from "../db/page-base-fee.js";
 import { pinRunRoutingVersion } from "../lib/vision-routing-v2.js";
 import { ProgressTracker, resolveStageStallTimeoutMs, runWithProgressTracker } from "../lib/work-progress.js";
-import { latchedTeardownError } from "../sandbox/session-context.js";
+import { latchedTeardownError, settleSandboxSession } from "../sandbox/session-context.js";
 import { findCommandTeardownError } from "../sandbox/teardown-breaker.js";
 import {
   buildRunProgressEvent,
@@ -598,6 +598,8 @@ export function createStageExecution(deps: {
           reasons: tuning.reasons,
         },
       };
+      // Idle parser VMs end here, and their time after the last command lands in this stage's ledger (VM pool follow-up).
+      await settleSandboxSession();
       // Everything this attempt recorded, including events already flushed by
       // mid-stage checkpoints. The pending buffer alone (ledger.snapshot())
       // misses those: it reported only the trailing worker-stage compute event
@@ -667,6 +669,7 @@ export function createStageExecution(deps: {
           `[temporal] run=${runId} stage=${stageName} shard progress flush failed: ${String(flushError)}`));
         throw error;
       }
+      await settleSandboxSession();
       // Throttling waits out Retry-After; it is not a document failure.
       const ordinaryFailures = await store.failRunStage(state, stageName, message, {
         countFailure: classification !== "throttled",

@@ -1582,7 +1582,9 @@ export class CommandRunner {
         const documentId = currentPerfContext()?.documentId;
         let onStart!: () => void;
         const started = new Promise<void>((resolve) => (onStart = resolve));
-        const remote = session.run(documentId ? { ...command, affinityKey: documentId } : command, signal, { onStart });
+        // Bound to this stage's context: a pooled VM's idle time is recorded in this stage's ledger when the VM is reaped.
+        const recordUsage = AsyncResource.bind((event: UsageEvent) => recordRemoteUsage(event));
+        const remote = session.run(documentId ? { ...command, affinityKey: documentId } : command, signal, { onStart, recordUsage });
         if (!session.reportsStart) return { remote, timeoutMs: command.limits.timeoutMs, release };
         void remote.then(onStart, onStart); // a run that settles without admission (closed, aborted) ends the wait
         return { remote, timeoutMs: command.limits.timeoutMs, release, started };
