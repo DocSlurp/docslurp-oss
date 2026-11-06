@@ -417,3 +417,59 @@ describe("pricing_provider_state (migration 0131)", () => {
     await expect(db.query("select pricing_state_raise('Bad Key', 1)")).rejects.toThrow(/check constraint/);
   });
 });
+
+describe("runtime database identity gate (council N #1)", () => {
+  const check = async (role: string | null, expected: string) => {
+    const { checkRuntimeIdentity } = await import("../../db/runtime-role-check.mjs");
+    const client = { query: (query: string, params?: unknown[]) => db.query(query, params) };
+    return role ? as(role, () => checkRuntimeIdentity(client, expected)) : checkRuntimeIdentity(client, expected);
+  };
+
+  it("passes the API and executor role and the worker role as themselves", async () => {
+    expect(await check(app, app)).toEqual([]);
+    expect(await check(worker, worker)).toEqual([]);
+  });
+
+  it("refuses the owner or a superuser, whatever role it claims", async () => {
+    const problems = (await check(null, app)).join("\n");
+    expect(problems).toMatch(/superuser/);
+    expect(problems).toMatch(/owns \d+ relation/);
+  });
+
+  it("refuses a role that is not the expected least-privilege role", async () => {
+    expect((await check(worker, app)).join("\n")).toMatch(/not a member of docslurp_app/);
+    expect((await check(backup, worker)).join("\n")).toMatch(/not a member of docslurp_worker/);
+    expect((await check(app, "docslurp")).join("\n")).toMatch(/unknown expected role/);
+  });
+
+  it("refuses a runtime role that can raise or write the pricing high-water mark", async () => {
+    await db.exec(`grant execute on function public.pricing_state_raise(text, bigint) to ${app}`);
+    await db.exec(`grant insert on public.pricing_provider_state to ${worker}`);
+    try {
+      expect((await check(app, app)).join("\n")).toMatch(/can execute pricing_state_raise/);
+      expect((await check(worker, worker)).join("\n")).toMatch(/can write pricing_provider_state/);
+    } finally {
+      await db.exec(`revoke execute on function public.pricing_state_raise(text, bigint) from ${app}`);
+      await db.exec(`revoke insert on public.pricing_provider_state from ${worker}`);
+    }
+    expect(await check(app, app)).toEqual([]);
+  });
+
+  it("refuses a runtime role that owns a table", async () => {
+    await db.exec(`create table public.runtime_owned_probe (id int)`);
+    await db.exec(`alter table public.runtime_owned_probe owner to ${worker}`);
+    try {
+      expect((await check(worker, worker)).join("\n")).toMatch(/owns 1 relation/);
+    } finally {
+      await db.exec(`drop table public.runtime_owned_probe`);
+    }
+  });
+});
+
+describe("runtime database identity gate before the role rollout", () => {
+  it("refuses with a rollout pointer when the least-privilege role does not exist", async () => {
+    const { runtimeIdentityProblems } = await import("../../db/runtime-role-check.mjs");
+    expect(runtimeIdentityProblems({ role: "docslurp", superuser: false, owned_relations: 40, expected_exists: false }, app).join("\n"))
+      .toMatch(/owner role docslurp[\s\S]*role docslurp_app does not exist: roll out the least-privilege roles/);
+  });
+});
