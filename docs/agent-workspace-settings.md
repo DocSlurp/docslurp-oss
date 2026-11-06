@@ -60,9 +60,10 @@ by credits, budgets or policy; saving settings does not imply the job finished.
 Supported pipeline toggles are video frames, chunk overlap, summaries, embeddings, vector
 indexing, table/code/image preservation, PDF region extraction and vision
 fallback, plus processing quality: `quality` (`fast` reads the text layer only and
-keeps scanned pages as page images, $0.05 per 1,000 pages; `auto`, the default, reads
-each page the cheapest faithful way, $0.05 to $2.50; `good` reads every page with
-vision, $2.50; there is no per-file page limit). Quality is what the
+keeps scanned pages as page images, billed as Fast pages; `auto`, the default, reads
+each page the cheapest faithful way, Fast or Rich per page; `good` reads every page with
+vision, Rich; prices on [docslurp.io/pricing](https://docslurp.io/pricing); there is no
+per-file page limit). Quality is what the
 [ingest report](api-sdk.md#ingest-report) recommends for scanned pages that page
 triage skipped or that Fast kept as images, so its `patch` can be proposed as
 `{"changes":{"pipeline":{"visionFallback":true,"quality":"good"}}}`. A retired
