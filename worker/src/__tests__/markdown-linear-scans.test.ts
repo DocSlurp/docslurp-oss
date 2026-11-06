@@ -39,3 +39,28 @@ describe("linear scans over hostile extracted Markdown", () => {
     expect(stripLeadingFrontmatter("---\ntitle: x\n---\n\n\nbody").markdown).toBe("body");
   });
 });
+
+describe("table normalization is one forward pass over many small tables (council K #1)", () => {
+  const table = "| a | b |\n| --- | --- |\n| 1 | 2 |\n\n";
+  const tables = (mb: number) => table.repeat(Math.floor((mb * MB) / table.length));
+  const convert = (text: string) => () => normalizeExtractedMarkdown({ markdown: text, preserveTables: true });
+
+  it("converts every table, and 1 MB of small pipe tables in under 250 ms", () => {
+    const text = tables(1);
+    expect(convert(text)().split("<table").length - 1).toBe(Math.floor(MB / table.length));
+    expect(elapsed(convert(text))).toBeLessThan(250);
+  });
+
+  it("4 MB is linear in 1 MB (a splice per table took 110 s at 4 MB)", () => {
+    const one = elapsed(convert(tables(1)));
+    const four = elapsed(convert(tables(4)));
+    expect(four).toBeLessThan(Math.max(6 * one, 50));
+    expect(four).toBeLessThan(1_000);
+  });
+
+  it("a row holding a form feed is never a table row, so the page break survives (council K #7)", () => {
+    const text = "| a | b |\n| --- | --- |\n| 1 |\f2 |\n\n";
+    const out = normalizeExtractedMarkdown({ markdown: text, preserveTables: true });
+    expect(out.split("\f")).toHaveLength(2);
+  });
+});

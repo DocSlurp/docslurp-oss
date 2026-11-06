@@ -219,9 +219,12 @@ export function repairMarkdownTables(markdown: string): { markdown: string; repa
   const pages = markdown.split("\f").map((raw) => {
     // An oversized page is left as extracted; tableReliability reports it unreliable.
     if (raw.length > TABLE_SCAN_MAX_PAGE_CHARS) return raw;
-    // HTML tables (Doppler --html, the VM guest's output) get the same repairs as pipe tables, as HTML.
-    let page = raw;
-    for (const table of htmlTables(raw).reverse()) {
+    // HTML tables (Doppler --html, the VM guest's output) get the same repairs as pipe tables, as HTML. One forward pass
+    // over the page (tables are in order and do not overlap): never a splice or re-slice per table, which is quadratic
+    // on a page of many small tables (council K #1).
+    const parts: string[] = [];
+    let at = 0;
+    for (const table of htmlTables(raw)) {
       if (!table.simple) continue;
       let replacement: string | null = null;
       if (isListAsTable(table)) {
@@ -237,25 +240,34 @@ export function repairMarkdownTables(markdown: string): { markdown: string; repa
           repairs.mergedHeaders += 1;
         }
       }
-      if (replacement !== null) page = page.slice(0, table.start) + replacement + page.slice(table.end);
+      if (replacement !== null) { parts.push(raw.slice(at, table.start), replacement); at = table.end; }
     }
-    const lines = page.split("\n");
-    for (const table of pipeTables(lines).reverse()) {
+    parts.push(raw.slice(at));
+    const page = parts.join("");
+    const source = page.split("\n");
+    const lines: string[] = [];
+    let next = 0;
+    for (const table of pipeTables(source)) {
+      let replacement: string[] | null = null;
       if (isListAsTable(table)) {
-        const items = [table.header, ...table.body].map((cells) => {
+        replacement = [table.header, ...table.body].map((cells) => {
           const marker = /^\d/.test(cells[0]!) ? `${cells[0]!.replace(/\)$/, ".")} ` : "- ";
           return marker + cells.slice(1).filter(Boolean).join(" — ");
         });
-        lines.splice(table.start, table.end - table.start, ...items);
         repairs.listsRestored += 1;
-        continue;
+      } else {
+        const header = mergedTwoLineHeader(table);
+        if (header) {
+          replacement = [row(header), row(header.map(() => "---")), ...table.body.slice(1).map(row)];
+          repairs.mergedHeaders += 1;
+        }
       }
-      const header = mergedTwoLineHeader(table);
-      if (header) {
-        lines.splice(table.start, table.end - table.start, row(header), row(header.map(() => "---")), ...table.body.slice(1).map(row));
-        repairs.mergedHeaders += 1;
-      }
+      if (replacement === null) continue;
+      for (; next < table.start; next++) lines.push(source[next]!);
+      for (const line of replacement) lines.push(line);
+      next = table.end;
     }
+    for (; next < source.length; next++) lines.push(source[next]!);
     return lines.join("\n");
   });
   return { markdown: pages.join("\f"), repairs };

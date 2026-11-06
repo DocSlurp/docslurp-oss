@@ -122,3 +122,15 @@ describe("pipe-table checks are linear on whitespace-heavy page text (council I 
     expect(markdownTables(page)).toEqual([{ rows: 2, columns: 2 }]);
   });
 });
+
+describe("table repair is one forward pass over a page of many small tables (council K #1)", () => {
+  const elapsed = (fn: () => unknown) => { fn(); let best = Infinity; for (let i = 0; i < 3; i++) { const start = performance.now(); fn(); best = Math.min(best, performance.now() - start); } return best; };
+  it("a page at the cap of small list-as-tables, HTML and pipe, repairs in well under 50 ms", () => {
+    const html = "<table><tr><td>-</td><td>a</td></tr><tr><td>-</td><td>b</td></tr><tr><td>-</td><td>c</td></tr></table>\n";
+    const pipe = "| - | a |\n| --- | --- |\n| - | b |\n| - | c |\n\n";
+    const page = (html + pipe).repeat(Math.floor((TABLE_SCAN_MAX_PAGE_CHARS - 64) / (html.length + pipe.length)));
+    const { repairs } = repairMarkdownTables(page);
+    expect(repairs.listsRestored).toBeGreaterThan(2_000);
+    expect(elapsed(() => repairMarkdownTables(page))).toBeLessThan(50);
+  });
+});
