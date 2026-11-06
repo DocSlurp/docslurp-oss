@@ -178,6 +178,24 @@ describe.skipIf(!dockerKillTest)("leftover kill in a container (recheck Q #2)", 
   }, 150_000);
 });
 
+// Council U #8: the health check after the leftover kill. A job root on a nearly full filesystem exits 5 (that command's
+// failure); a healthy root exits 0. Real script, real statvfs and mkdtemp as uid 10001.
+describe.skipIf(!dockerKillTest)("leftover kill health check (council U #8)", () => {
+  it("exits 5 for a job root on a full filesystem and 0 for a healthy one", () => {
+    const script = [
+      "mkdir -p /healthy && chmod 1777 /healthy",
+      '"$@" /healthy; echo "healthy=$?"',
+      '"$@" /full; echo "full=$?"',
+      '"$@" /healthy/not-yet-created; echo "absent=$?"',
+    ].join("\n");
+    const run = spawnSync("docker", ["run", "--rm", "--network", "none", "--tmpfs", "/full:size=1m,mode=1777", "python:3.11-slim-bookworm", "sh", "-c", script, "sh", ...KILL_PARSER_USER_ARGV], { encoding: "utf8", timeout: 120_000 });
+    expect(run.stdout).toContain("healthy=0");
+    expect(run.stdout).toContain("full=5");
+    expect(run.stdout).toContain("[leftover-kill] unhealthy root=/full");
+    expect(run.stdout).toContain("absent=0");
+  }, 150_000);
+});
+
 // Council V #4: the per-command cgroup path, end to end in a container with its own cgroup namespace (cgroup v2, writable
 // as in a parser VM). The real launch script puts the command in /sys/fs/cgroup/docslurp-cmd-<n> as root before dropping to
 // uid 10001; the real leftover kill must then report method=cgroup and beat both a process that SIGSTOPs everything it may

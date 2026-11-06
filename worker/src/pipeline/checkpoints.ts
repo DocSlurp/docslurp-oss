@@ -301,8 +301,11 @@ export async function runDocumentStage(
       // the outcome, even when the stage caught it and fell back or skipped a page. The document neither fails nor
       // completes on it; the activity retries (real-Modal check F1).
       if (watched.infrastructure) {
-        // Counted durably: a document that breaks a fresh VM every time cannot keep the whole stage retrying (recheck S #2).
-        const strikes = state.store?.noteSandboxInfrastructureStrike
+        // Counted durably, and only when the failure followed this document's own command on its VM (council U #4): a
+        // document that breaks a fresh VM every time cannot keep the whole stage retrying (recheck S #2), while a provider
+        // outage (session open, VM creation, API errors) is a plain retry and never fails a document.
+        const ownCommand = (watched.infrastructure as { afterCommand?: unknown }).afterCommand === true;
+        const strikes = ownCommand && state.store?.noteSandboxInfrastructureStrike
           ? await state.store.noteSandboxInfrastructureStrike(state, document.id, stageName).catch((error: unknown) => {
             console.warn(`[checkpoint-debug] document=${document.id} stage=${stageName} sandbox strike not recorded: ${error instanceof Error ? error.message : String(error)}`);
             return 0;

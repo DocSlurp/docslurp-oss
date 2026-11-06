@@ -201,6 +201,47 @@ it.skipIf(!url)("refuses a grant option on any object, and an owned large object
   expect(await reasonsAs(runtime)).toEqual([]);
 });
 
+it.skipIf(!url)("refuses grant options on types, languages, FDWs, foreign servers and parameters, and ADMIN OPTION on a held role (council U #9)", async () => {
+  await admin.query(`create type public.rt_type_${suffix} as (a int)`);
+  await admin.query(`create foreign data wrapper rt_fdw_${suffix}`);
+  await admin.query(`create server rt_srv_${suffix} foreign data wrapper rt_fdw_${suffix}`);
+  try {
+    for (const [grant, kind] of [
+      [`grant usage on type public.rt_type_${suffix} to ${runtime} with grant option`, "type"],
+      [`grant usage on language plpgsql to ${runtime} with grant option`, "language"],
+      [`grant usage on foreign data wrapper rt_fdw_${suffix} to ${runtime} with grant option`, "foreign data wrapper"],
+      [`grant usage on foreign server rt_srv_${suffix} to ${runtime} with grant option`, "foreign server"],
+      [`grant set on parameter work_mem to ${runtime} with grant option`, "parameter"],
+    ] as const) {
+      await admin.query(grant);
+      try { expect((await reasonsAs(runtime)).join("\n")).toMatch(new RegExp(`holds grant options \\(WITH GRANT OPTION\\) on ${kind}`)); }
+      finally { await admin.query(grant.replace(/^grant /, "revoke grant option for ").replace(/ to /, " from ").replace(/ with grant option$/, "")); }
+    }
+    expect(await reasonsAs(runtime)).toEqual([]);
+  } finally {
+    await admin.query(`revoke all on parameter work_mem from ${runtime}`).catch(() => {});
+    await admin.query(`revoke all on language plpgsql from ${runtime}`).catch(() => {});
+    await admin.query(`drop server rt_srv_${suffix} cascade`);
+    await admin.query(`drop foreign data wrapper rt_fdw_${suffix} cascade`);
+    await admin.query(`drop type public.rt_type_${suffix}`);
+  }
+  // A login that holds the allowed role WITH ADMIN OPTION could hand it to any role it creates or controls.
+  const login = `rt_login_${suffix}`;
+  await admin.query(`create role ${login} nologin`);
+  await admin.query(`grant ${runtime} to ${login} with admin option`);
+  try {
+    await admin.query(`set role ${login}`);
+    const { rows: [row] } = await admin.query(RUNTIME_IDENTITY_SQL, [[runtime], RUNTIME_SECURITY_DEFINER_ALLOWLIST]).finally(() => admin.query("reset role"));
+    expect(runtimeIdentityReasons(row, [runtime]).join("\n")).toMatch(new RegExp(`holds ADMIN OPTION on ${runtime}`));
+    await admin.query(`revoke admin option for ${runtime} from ${login}`);
+    await admin.query(`set role ${login}`);
+    const { rows: [clean] } = await admin.query(RUNTIME_IDENTITY_SQL, [[runtime], RUNTIME_SECURITY_DEFINER_ALLOWLIST]).finally(() => admin.query("reset role"));
+    expect(runtimeIdentityReasons(clean, [runtime])).toEqual([]);
+  } finally {
+    await admin.query(`drop role if exists ${login}`).catch(() => {});
+  }
+});
+
 it.skipIf(!url)("startup refuses the same way (assertRuntimeDatabaseIdentity)", async () => {
   const sql = { unsafe: async (query: string, params?: unknown[]) => (await admin.query(query, params as unknown[])).rows };
   await expect(assertRuntimeDatabaseIdentity(sql, [runtime])).rejects.toThrow(/superuser[\s\S]*refusing to start/);

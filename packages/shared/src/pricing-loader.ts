@@ -150,6 +150,8 @@ export const RUNTIME_IDENTITY_SQL = `
     coalesce((select string_agg(r.rolname::text, ',' order by r.rolname) from pg_roles r
       where r.oid <> me.oid and not (r.rolname = any($1::text[])) and pg_has_role(me.oid, r.oid, 'MEMBER')), '') as other_memberships,
     coalesce((select string_agg(rolname::text, ',' order by rolname) from held where rolname = any($1::text[])), '') as allowed_held,
+    coalesce((select string_agg(distinct m.roleid::regrole::text, ',' order by m.roleid::regrole::text) from pg_auth_members m
+      where m.member in (select oid from held) and m.admin_option), '') as admin_memberships,
     (select bool_or(has_database_privilege(h.oid, current_database(), 'CREATE')) from held h) as can_create_in_database,
     coalesce((select string_agg(distinct n.nspname::text, ',' order by n.nspname::text) from pg_namespace n, held h
       where n.oid not in (select oid from system_ns) and has_schema_privilege(h.oid, n.oid, 'CREATE')), '') as create_schemas,
@@ -171,6 +173,13 @@ export const RUNTIME_IDENTITY_SQL = `
         where d.datname = current_database() and a.is_grantable and a.grantee in (select oid from held)
       union all select 'large object' from pg_largeobject_metadata l, aclexplode(l.lomacl) a
         where a.is_grantable and a.grantee in (select oid from held)
+      union all select 'type' from pg_type t, aclexplode(t.typacl) a where a.is_grantable and a.grantee in (select oid from held)
+      union all select 'language' from pg_language l, aclexplode(l.lanacl) a where a.is_grantable and a.grantee in (select oid from held)
+      union all select 'foreign data wrapper' from pg_foreign_data_wrapper w, aclexplode(w.fdwacl) a
+        where a.is_grantable and a.grantee in (select oid from held)
+      union all select 'foreign server' from pg_foreign_server f, aclexplode(f.srvacl) a where a.is_grantable and a.grantee in (select oid from held)
+      union all select 'tablespace' from pg_tablespace t, aclexplode(t.spcacl) a where a.is_grantable and a.grantee in (select oid from held)
+      union all select 'parameter' from pg_parameter_acl p, aclexplode(p.paracl) a where a.is_grantable and a.grantee in (select oid from held)
     ) grantable), '') as grant_options,
     case when (select oid from state) is null then false
       else (select relowner from pg_class where oid = (select oid from state)) in (select oid from held) end as owns_state,
@@ -206,6 +215,7 @@ export function runtimeIdentityReasons(row: Record<string, unknown> | undefined,
   const definers = list(row.definer_functions);
   const paths = list(row.state_write_paths);
   const grantable = list(row.grant_options);
+  const admins = list(row.admin_memberships);
   return [
     row.superuser === true ? "is (or can become) a superuser" : null,
     row.elevated === true ? "can create roles or databases, replicate or bypass row security" : null,
@@ -214,6 +224,7 @@ export function runtimeIdentityReasons(row: Record<string, unknown> | undefined,
     row.can_create_in_database === true ? "can CREATE in the database (a schema could shadow another role's search_path)" : null,
     schemas.length ? `can CREATE in schema ${schemas.join(", ")}` : null,
     Number(row.owned_objects) > 0 ? `owns ${Number(row.owned_objects)} object(s) (relations, functions, types, schemas or large objects)` : null,
+    admins.length ? `holds ADMIN OPTION on ${admins.join(", ")}: it could grant that role to others` : null,
     grantable.length ? `holds grant options (WITH GRANT OPTION) on ${grantable.join(", ")}: it could pass privileges on` : null,
     row.owns_state === true ? "owns pricing_provider_state" : null,
     writes.length ? `can ${writes.join(", ")} pricing_provider_state` : null,

@@ -127,7 +127,10 @@ export function killArgv(control: string): string[] {
  * its lock, so no fork slips past. It then reads the Uid: line of every /proc/<pid>/status and needs two consecutive
  * rounds with no live (non-zombie) process holding the uid, other than itself, repeating the kill otherwise. Exits 0
  * when clean, 4 when processes survive 50 rounds or it is not root; a job that kills the killer makes it exit non-zero.
- * The session fails closed on anything but 0.
+ * Then a health check, still as the parser user (council U #8): every job root given after the uid must sit on a
+ * filesystem with at least 64 MiB and (where it counts inodes) 1024 inodes free, and an existing root must take a new directory. Exits 5 when it
+ * does not, so the command that just ran is blamed for the VM it left unusable, never the next document. The session
+ * fails closed on anything but 0.
  */
 const KILL_PARSER_USER_SCRIPT = [
   "import os, signal, sys, time",
@@ -177,8 +180,25 @@ const KILL_PARSER_USER_SCRIPT = [
   "    except ProcessLookupError: pass",
   "    time.sleep(0.01)",
   "    clean = clean + 1 if live() == 0 else 0",
-  "    if clean >= 2: sys.exit(0)",
-  "sys.exit(4)",
+    "    if clean >= 2: break",
+  "else: sys.exit(4)",
+  "import tempfile",
+  "for root in sys.argv[2:]:",
+  "    probe = root",
+  "    while probe != '/' and not os.path.isdir(probe): probe = os.path.dirname(probe) or '/'",
+  "    try:",
+  "        st = os.statvfs(probe)",
+  "        if st.f_bavail * st.f_frsize < 64 * 1024 * 1024 or (st.f_files and st.f_favail < 1024): raise OSError('filesystem nearly full')",
+  "        if probe == root: os.rmdir(tempfile.mkdtemp(prefix='.docslurp-health.', dir=root))",
+  "    except OSError as error:",
+  "        print('[leftover-kill] unhealthy root=' + root + ': ' + str(error), flush=True)",
+  "        sys.exit(5)",
+  "sys.exit(0)",
 ].join("\n");
 
 export const KILL_PARSER_USER_ARGV = ["python3", "-I", "-c", KILL_PARSER_USER_SCRIPT, String(PARSER_VM_UID)];
+
+/** The leftover kill plus the health check of these job roots (council U #8). */
+export function leftoverKillArgv(jobRoots: readonly string[]): string[] {
+  return [...KILL_PARSER_USER_ARGV, ...jobRoots];
+}

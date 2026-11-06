@@ -109,9 +109,17 @@ export class SandboxOutputError extends SandboxRunError {
  * and falls back still fails the activity instead of failing or degrading the document.
  */
 export class SandboxInfrastructureError extends SandboxRunError {
-  constructor(message: string, usage?: UsageEvent, options?: { cause?: unknown }) {
+  /**
+   * The failure came after the document's own command ran on its VM (council U #4): only then may it count toward the
+   * document's strike limit. Session-open, VM creation and hardening, a closed session and Modal API failures before the
+   * command ran are plain retries, so a provider outage never fails documents.
+   */
+  readonly afterCommand: boolean;
+
+  constructor(message: string, usage?: UsageEvent, options?: { cause?: unknown; afterCommand?: boolean }) {
     super(message, usage, options);
     this.name = "SandboxInfrastructureError";
+    this.afterCommand = options?.afterCommand === true;
   }
 }
 

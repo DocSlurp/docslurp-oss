@@ -299,6 +299,8 @@ function fakeSdk(
     createFailsFrom?: number;
     /** The leftover kill fails only in this VM. */
     killFailsInVm?: number;
+    /** The leftover kill's health check finds the VM's disk or job roots unusable (exit 5) in this VM. */
+    killUnhealthyInVm?: number;
     /** The leftover kill exec throws: a deadline (held up inside the VM) or a transport error. */
     killThrows?: "deadline" | "transport";
     /** The app lookup before each create takes this long (a slow Modal API). */
@@ -326,6 +328,7 @@ function fakeSdk(
     hardened: 0,
     readsAsUser: 0,
     leftoverKills: 0,
+    killArgs: [] as string[][],
     rootWrites: [] as string[],
     events: [] as string[],
     clientClose: 0,
@@ -399,6 +402,8 @@ function fakeSdk(
         state.events.push("kill-end");
         if (opts.killThrows === "deadline") throw new Error("Deadline exceeded while waiting for the exec");
         if (opts.killThrows === "transport") throw new Error("stream reset by peer");
+        state.killArgs.push(argv.slice(5));
+        if (opts.killUnhealthyInVm === vm) return finished("[leftover-kill] unhealthy", 5);
         return finished("", opts.killFails || opts.killFailsInVm === vm ? 4 : 0);
       }
       if (argv[0] === "/bin/chmod") { state.chmods.push(argv.slice(1)); return finished("", 0); }
@@ -550,6 +555,47 @@ describe("modal provider session lifecycle", () => {
     expect(state.createOptions).toHaveLength(2);
     expect(state.commandVms).toEqual([1, 2]);
     expect(state.hardened).toBe(2);
+    await opened.close();
+  });
+
+  it("a VM whose disk or job roots a command left unusable is that command's strike, never the next document's (council U #8)", async () => {
+    const { state, session } = await open({ killUnhealthyInVm: 1, exec: async () => finished() });
+    const opened = await session();
+    const failure = await opened.run!({ ...command, affinityKey: "doc-a" }).catch((error: unknown) => error);
+    // Checked right after doc-a's own command, as part of the leftover kill, with the job roots to check.
+    expect(failure).toBeInstanceOf(SandboxInfrastructureError);
+    expect((failure as SandboxInfrastructureError).afterCommand).toBe(true);
+    expect(String((failure as Error).message)).toMatch(/unusable after this document's command; VM terminated/);
+    expect(state.killArgs[0]!.length).toBeGreaterThan(0);
+    expect(state.terminate).toBe(1);
+    // doc-b runs on a fresh VM and never sees the broken one.
+    await expect(opened.run!({ ...command, affinityKey: "doc-b" })).resolves.toMatchObject({ exitCode: 0 });
+    expect(state.commandVms).toEqual([1, 2]);
+    await opened.close();
+  });
+
+  it("only a failure after the document's own command ran counts toward its strikes (council U #4)", async () => {
+    // VM creation failing (a Modal outage) is a plain retry.
+    const { sdk } = fakeSdk({ createFailsFrom: 1, exec: async () => finished() });
+    const created = await createModalProvider(async () => sdk).openSession({ ...config, vmsPerActivity: 1 }, { activityId: "a" }).catch((error: unknown) => error);
+    expect(created).toBeInstanceOf(SandboxInfrastructureError);
+    expect((created as SandboxInfrastructureError).afterCommand).toBe(false);
+    // A leftover kill that could not run is Modal's, even after the command.
+    const lost = await (await open({ killThrows: "transport", exec: async () => finished() }).then((opened) => opened.session())).run!(command).catch((error: unknown) => error);
+    expect((lost as SandboxInfrastructureError).afterCommand).toBe(false);
+    // A VM lost while this document's command ran may be its doing: a strike.
+    const crashed = await (await open({ exec: async () => { throw new Error("stream reset by peer"); } }).then((opened) => opened.session())).run!(command).catch((error: unknown) => error);
+    expect(crashed).toBeInstanceOf(SandboxInfrastructureError);
+    expect((crashed as SandboxInfrastructureError).afterCommand).toBe(true);
+    // A job tree an earlier document broke is never the next document's strike.
+    let broken = false;
+    const shared = await open({ mkdirFails: () => broken, exec: async () => finished() });
+    const opened = await shared.session();
+    await opened.run!({ ...command, affinityKey: "doc-a" });
+    broken = true;
+    const theirs = await opened.run!({ ...command, affinityKey: "doc-b", writablePaths: ["/job/out"] }).catch((error: unknown) => error);
+    expect(theirs).toBeInstanceOf(SandboxInfrastructureError);
+    expect((theirs as SandboxInfrastructureError).afterCommand).toBe(false);
     await opened.close();
   });
 
@@ -1018,6 +1064,36 @@ describe("modal provider session lifecycle", () => {
         const session = await b;
         expect(state.createOptions).toHaveLength(2);
         await session.close();
+      } finally { vi.useRealTimers(); }
+    });
+
+    it("frees an unconfirmed creation's capacity as soon as Modal rejects that create, with no quarantine (council U #7)", async () => {
+      vi.useFakeTimers();
+      try {
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        let reject!: (error: Error) => void;
+        const createGate = new Promise<void>((_resolve, fail) => (reject = fail));
+        createGate.catch(() => {});
+        const { sdk, state } = fakeSdk({ createGate, exec: async () => finished() });
+        const provider = createModalProvider(async () => sdk);
+        const pooled = { ...config, vmsPerActivity: 1, vmsPerWorker: 1, vmIdleSeconds: 60, createSettleMs: 30 };
+        const failed = provider.openSession(pooled, { activityId: "a" }).catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(30_001);
+        await vi.advanceTimersByTimeAsync(31);
+        expect(await failed).toBeInstanceOf(Error);
+        // B waits: the worker's only token is with A's unconfirmed create.
+        const b = provider.openSession(pooled, { activityId: "b" }).catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(state.createOptions).toHaveLength(1);
+        // Modal rejects the late create: no VM exists, so nothing is stopped and the token goes straight to B (not 15 min).
+        // (This fake's gate rejects B's create too; what matters is that B was admitted to create a VM.)
+        reject(new Error("create rejected"));
+        await vi.advanceTimersByTimeAsync(100);
+        expect(state.createOptions).toHaveLength(2);
+        expect(state.lateTerminate).toBe(0);
+        await vi.advanceTimersByTimeAsync(31_000);
+        await b;
       } finally { vi.useRealTimers(); }
     });
 

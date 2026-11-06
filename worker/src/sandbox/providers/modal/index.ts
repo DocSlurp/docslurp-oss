@@ -20,7 +20,7 @@ import {
   type SandboxResult,
   type SandboxSession,
 } from "../../types.js";
-import { asParserUser, CONTROL_DIR, HARDEN_LINKS_ARGV, KILL_PARSER_USER_ARGV, killArgv, launchArgv } from "./control.js";
+import { asParserUser, CONTROL_DIR, HARDEN_LINKS_ARGV, killArgv, launchArgv, leftoverKillArgv } from "./control.js";
 import { SessionStaging, type RemoteEntry, type RemoteFs, type RemoteSnapshot } from "./staging.js";
 import { vmOnlyParsing } from "../../../lib/vm-only-parsing.js";
 import { defaultDocConcurrency, resolveActivityConcurrency } from "../../../concurrency.js";
@@ -805,7 +805,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           let code: number | null = null;
           let transport: unknown;
           try {
-            const proc = await sandbox!.exec(KILL_PARSER_USER_ARGV, { timeoutMs: KILL_SETTLE_MS * 3 });
+            const proc = await sandbox!.exec(leftoverKillArgv(parserJobRoots()), { timeoutMs: KILL_SETTLE_MS * 3 });
             code = await proc.wait();
           } catch (error) {
             console.error(`[parser-sandbox] provider=modal leftover kill failed: ${safeMessage(config, error)}`);
@@ -817,21 +817,28 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             // Only the exec failing to run is the sandbox's. Processes the command left that survive the kill, or that stall
             // it, are its document's doing (recheck S #2b): that document fails, once; the VM is gone either way.
             if (transport !== undefined) throw new SandboxInfrastructureError("parser VM leftover kill could not run; VM terminated", undefined, { cause: transport });
+            // The command that just ran left the VM's disk or job roots unusable (council U #8): its document takes the
+            // strike, on a fresh VM next time, and the next document never inherits the broken VM.
+            if (code === 5) throw new SandboxInfrastructureError("parser VM disk or job root unusable after this document's command; VM terminated", undefined, { afterCommand: true });
             throw new SandboxOutputError("processes this document's parser command left in the VM could not be killed; VM terminated");
           }
         }
 
         let commandCount = 0;
 
+        /** Whether the current command's own process has started (council U #4: only failures after that are strikes). */
+        let commandRan = false;
+
         async function execute(command: SandboxCommand, started: number, signal?: AbortSignal): Promise<SandboxResult> {
           let cleaned = false;
+          commandRan = false;
           try {
             try {
               return await withDeadline(executeCommand(command, started, signal, () => { cleaned = true; }), command.limits.timeoutMs + 60_000);
             } catch (error) {
               if (error instanceof Error && error.message === "parser VM control deadline exceeded") {
                 await terminate().catch(() => {});
-                throw new SandboxInfrastructureError(error.message, meterLane(lane), { cause: error });
+                throw new SandboxInfrastructureError(error.message, meterLane(lane), { cause: error, afterCommand: commandRan });
               }
               throw error;
             }
@@ -909,6 +916,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             let outcome: RemoteOutcome;
             try {
               ran = true;
+              commandRan = true;
               outcome = await runRemote(command, control, signal);
             } catch (error) {
               pendingDiscards.push(snapshot);
@@ -952,7 +960,10 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             }
             // Anything else that throws here is the sandbox's: SDK and transport errors, control commands, VM creation and
             // hardening, the leftover kill, a closed session (a document's own failure is a non-zero exit or the above).
-            throw new SandboxInfrastructureError(`modal sandbox command failed: ${safeMessage(config, error)}`, meterLane(lane), { cause: error });
+            // It counts toward the document's strikes only after its own command ran (council U #4); an error that already
+            // says whether it does (a leftover kill that could not run is Modal's) keeps that.
+            const afterCommand = error instanceof SandboxInfrastructureError ? error.afterCommand : ran;
+            throw new SandboxInfrastructureError(`modal sandbox command failed: ${safeMessage(config, error)}`, meterLane(lane), { cause: error, afterCommand });
           }
         }
 
