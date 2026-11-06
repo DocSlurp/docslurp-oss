@@ -101,11 +101,11 @@ pub struct PdfProfile {
     pub area_equivalents_per_page: [u32; AREA_EQUIVALENT_BUCKETS],
     /// Sampled pages whose text counts as more than the dense threshold (3 pages).
     pub dense_pages: u32,
-    /// Sampled pages per page equivalents (the larger of text and area; 1, 2, 3, 4-8, 9-16, 17-64, 65 and up), and the
-    /// equivalents summed over the pages above the dense threshold: with the 1-3 buckets, the billed volume under any
-    /// per-page allowance of 1 to 3.
-    pub page_equivalents_per_page: [u32; TEXT_EQUIVALENT_BUCKETS],
-    pub dense_page_equivalents: u64,
+    /// Page equivalents under a text allowance of 1, 2 and 3 (core `billedPagePageEquivalents`): summed over the sampled
+    /// pages, each page counting max(its text equivalents when above the allowance else 1, its area equivalents), and the
+    /// largest single page under each. Text and area are combined per page, so any allowance from 1 to 3 is exact.
+    pub page_equivalents_by_allowance: [u64; 3],
+    pub max_page_equivalents_by_allowance: [u32; 3],
     /// Median and largest visible page width and height of the sampled pages, in points.
     pub median_page_width_pt: u32,
     pub median_page_height_pt: u32,

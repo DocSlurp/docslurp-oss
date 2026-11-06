@@ -1,7 +1,7 @@
 import type { Sql } from "postgres";
 import type { CapacityLeaseStore } from "../media/capacity/types.js";
 import type { MediaJournal } from "../media/types.js";
-import { pipelineStageOrder, type PipelineRunStage } from "@docslurp/shared";
+import { pipelineStageOrder, pricing, type PipelineRunStage } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import type { Stage } from "../pipeline/pipeline.js";
@@ -48,7 +48,8 @@ export function createStages(args: {
   // Rendered page areas raise the page's measured equivalents (db/page-equivalents.ts), from every raster cache instance.
   if (args.sql) {
     const sql = args.sql;
-    configurePageAreaSink((rows) => recordPageEquivalents(sql, rows));
+    // Rendered PDF pages: the installed pricing provider's dense-page allowance (area always bills in full).
+    configurePageAreaSink((args) => recordPageEquivalents(sql, { ...args, allowance: pricing().pageEquivalentAllowance }));
   }
   const sourceCache = new PdfSourceCache(args.storage);
   const rasterCache = new PdfRasterCache(args.runner, args.storage, sourceCache);

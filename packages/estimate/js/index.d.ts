@@ -66,10 +66,10 @@ export type FileProfile = {
     tinyCharsDropped: number;
     /** Sampled pages whose text was estimated from content size (read only in part). */
     textEstimatedPages: number;
-    /** Sampled pages per page equivalents (larger of text and area): 1, 2, 3, 4-8, 9-16, 17-64, 65+. */
-    pageEquivalentsPerPage: [number, number, number, number, number, number, number];
-    /** Page equivalents summed over the pages holding more than 3. */
-    densePageEquivalents: number;
+    /** Page equivalents under a text allowance of 1, 2 and 3: per page max(text above the allowance else 1, area), summed. */
+    pageEquivalentsByAllowance: [number, number, number];
+    /** The largest single page under each of those allowances. */
+    maxPageEquivalentsByAllowance: [number, number, number];
     /** Significant images per placed resolution: under 100, 100-200, 200-300, 300+ ppi. */
     imagePpi: [number, number, number, number];
     /** Significant images per stream bytes per pixel: under 0.05, 0.05-0.2, 0.2-0.5, 0.5-1, 1+. */

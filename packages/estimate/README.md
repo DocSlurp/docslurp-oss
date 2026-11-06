@@ -76,8 +76,8 @@ PDF facts (counts are over the sampled pages):
 | `medianPageWidthPt`, `medianPageHeightPt`, `maxPageWidthPt`, `maxPageHeightPt` | Visible (CropBox) page dimensions in points |
 | `offPageChars`, `tinyCharsDropped` | Glyphs the text extraction drops, as observed with Poppler, and so not counted: placed outside the MediaBox, and glyphs under 3 pt beyond 50,000 a page |
 | `textEstimatedPages` | Pages with text the profiler could not read to the end (a content budget): their glyphs are estimated from the content stream's size (2 bytes a glyph) and the text facts are estimates |
-| `pageEquivalentsPerPage` | Sampled pages per page equivalents (the larger of text and area): 1, 2, 3, 4-8, 9-16, 17-64, 65 and up |
-| `densePageEquivalents` | Page equivalents summed over the sampled pages holding more than 3 |
+| `pageEquivalentsByAllowance` | Page equivalents under a dense-page text allowance of 1, 2 and 3 (core `billedPagePageEquivalents`): each sampled page counts max(its text equivalents when above the allowance else 1, its area equivalents), summed. A twice-Letter page with little text counts 2 under each |
+| `maxPageEquivalentsByAllowance` | The largest single sampled page under each of those allowances |
 | `imagePpi` | Significant, non-repeated images per placed resolution (pixels over the placed inches): under 100, 100-200, 200-300, 300+ ppi |
 | `imageBytesPerPixel` | The same images per stream bytes per pixel, a compression signal (scans are dense, flat art is not): under 0.05, 0.05-0.2, 0.2-0.5, 0.5-1, 1+ |
 | `glyphsOverImages` | Glyphs whose run starts inside one of those images' boxes: a text layer over a scan, or captions over a figure |

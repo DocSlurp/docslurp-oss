@@ -26,7 +26,7 @@ function scan(pages: number, bytes = pages * 200_000): { name: string; size: num
         layoutHeavyPages: 0, vectorHeavyPages: 0, unmappedFontPages: 0, drawnContent: false, budgetExhausted: false,
         sampledWords: 0, medianPageAreaSqIn: 94, maxPageAreaSqIn: 94,
       sampledChars: 0, sampledTextLines: 0, charsByFontSize: [0, 0, 0, 0, 0], invisibleChars: 0, offCropChars: 0,
-      sampledTextEquivalents: sampled, sampledAreaEquivalents: sampled, sampledPageEquivalents: sampled, maxPageEquivalents: 1, textEquivalentsPerPage: [sampled, 0, 0, 0, 0, 0, 0], areaEquivalentsPerPage: [sampled, 0, 0, 0, 0, 0, 0, 0], densePages: 0, medianPageWidthPt: 612, medianPageHeightPt: 792, maxPageWidthPt: 612, maxPageHeightPt: 792, offPageChars: 0, tinyCharsDropped: 0, textEstimatedPages: 0, pageEquivalentsPerPage: [sampled, 0, 0, 0, 0, 0, 0], densePageEquivalents: 0, imagePpi: [0, 0, sampled, 0], imageBytesPerPixel: [0, 0, sampled, 0, 0], glyphsOverImages: 0, textOverImagePages: 0, scanBesideTextPages: 0, scanBesideTextUnknownPages: 0, ruledTablePages: 0,
+      sampledTextEquivalents: sampled, sampledAreaEquivalents: sampled, sampledPageEquivalents: sampled, maxPageEquivalents: 1, textEquivalentsPerPage: [sampled, 0, 0, 0, 0, 0, 0], areaEquivalentsPerPage: [sampled, 0, 0, 0, 0, 0, 0, 0], densePages: 0, medianPageWidthPt: 612, medianPageHeightPt: 792, maxPageWidthPt: 612, maxPageHeightPt: 792, offPageChars: 0, tinyCharsDropped: 0, textEstimatedPages: 0, pageEquivalentsByAllowance: [sampled, sampled, sampled], maxPageEquivalentsByAllowance: [1, 1, 1], imagePpi: [0, 0, sampled, 0], imageBytesPerPixel: [0, 0, sampled, 0, 0], glyphsOverImages: 0, textOverImagePages: 0, scanBesideTextPages: 0, scanBesideTextUnknownPages: 0, ruledTablePages: 0,
       },
     },
   };
@@ -63,13 +63,19 @@ describe("quoteEstimate", () => {
   it("quotes a stuffed document at the page equivalents billing will measure, never below its pages", () => {
     installTestPricing(DISTINCT_TEST_PRICING);
     const ordinary = scan(1);
-    const stuffed = { ...ordinary, profile: { ...ordinary.profile, pdf: { ...ordinary.profile.pdf!, sampledChars: 40_000, charsByFontSize: [40_000, 0, 0, 0, 0], sampledTextEquivalents: 12, sampledPageEquivalents: 12, maxPageEquivalents: 12, textEquivalentsPerPage: [0, 0, 0, 0, 1, 0, 0], densePages: 1 } } };
+    const stuffed = { ...ordinary, profile: { ...ordinary.profile, pdf: { ...ordinary.profile.pdf!, sampledChars: 40_000, charsByFontSize: [40_000, 0, 0, 0, 0], sampledTextEquivalents: 12, sampledPageEquivalents: 12, maxPageEquivalents: 12, textEquivalentsPerPage: [0, 0, 0, 0, 1, 0, 0], densePages: 1, pageEquivalentsByAllowance: [12, 12, 12], maxPageEquivalentsByAllowance: [12, 12, 12] } } };
     const plain = quoteEstimate({ files: [ordinary] }, { env: BILLED });
     const packed = quoteEstimate({ files: [stuffed] }, { env: BILLED });
     expect(plain.pages).toEqual({ low: 1, high: 1 });
     expect(packed.pages).toEqual({ low: 12, high: 12 });
     expect(packed.ingest.credits!.low).toBeGreaterThan(plain.ingest.credits!.low);
     expect(packed.hosting.bytes.high).toBeGreaterThan(plain.hosting.bytes.high);
+    // The dense-page allowance (core default 3) covers text only: a page of 3 text equivalents quotes as 1, a twice-Letter
+    // page with little text quotes its area, 2.
+    const dense = { ...ordinary, profile: { ...ordinary.profile, pdf: { ...ordinary.profile.pdf!, sampledChars: 10_000, charsByFontSize: [0, 0, 0, 10_000, 0], sampledTextEquivalents: 3, sampledPageEquivalents: 3, maxPageEquivalents: 3, textEquivalentsPerPage: [0, 0, 1, 0, 0, 0, 0], pageEquivalentsByAllowance: [3, 3, 1], maxPageEquivalentsByAllowance: [3, 3, 1] } } };
+    expect(quoteEstimate({ files: [dense] }, { env: BILLED }).pages).toEqual({ low: 1, high: 1 });
+    const tabloid = { ...ordinary, profile: { ...ordinary.profile, pdf: { ...ordinary.profile.pdf!, sampledAreaEquivalents: 2, sampledPageEquivalents: 2, maxPageEquivalents: 2, areaEquivalentsPerPage: [0, 1, 0, 0, 0, 0, 0, 0], pageEquivalentsByAllowance: [2, 2, 2], maxPageEquivalentsByAllowance: [2, 2, 2] } } };
+    expect(quoteEstimate({ files: [tabloid] }, { env: BILLED }).pages).toEqual({ low: 2, high: 2 });
     // A profile cannot claim fewer equivalents than pages sampled: clamped up to one a page.
     const understated = { ...ordinary, profile: { ...ordinary.profile, pdf: { ...ordinary.profile.pdf!, sampledPageEquivalents: 0, sampledTextEquivalents: 0, sampledAreaEquivalents: 0 } } };
     expect(quoteEstimate({ files: [understated] }, { env: BILLED }).pages).toEqual({ low: 1, high: 1 });

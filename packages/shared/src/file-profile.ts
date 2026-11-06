@@ -100,11 +100,12 @@ export const pdfProfileSchema = z.strictObject({
   /** Sampled pages whose text counts as more than DENSE_PAGE_EQUIVALENTS pages. */
   densePages: count,
   /**
-   * Sampled pages per page equivalents (the larger of text and area; TEXT_EQUIVALENT_BUCKETS), and the equivalents summed
-   * over the pages above DENSE_PAGE_EQUIVALENTS: with the 1-3 buckets, the billed volume under an allowance of 1 to 3.
+   * Page equivalents under a text allowance of 1, 2 and 3 (page-equivalents.ts `billedPagePageEquivalents`): summed over
+   * the sampled pages, each page counting max(its text equivalents when above the allowance else 1, its area
+   * equivalents), and the largest single page under each. Text and area are combined per page, so each is exact.
    */
-  pageEquivalentsPerPage: z.array(count).length(7),
-  densePageEquivalents: z.number().int().nonnegative().max(10 ** 12),
+  pageEquivalentsByAllowance: z.array(z.number().int().nonnegative().max(10 ** 12)).length(3),
+  maxPageEquivalentsByAllowance: z.array(count).length(3),
   /** Median and largest visible page width and height, in points. */
   medianPageWidthPt: z.number().int().nonnegative().max(10_000_000),
   medianPageHeightPt: z.number().int().nonnegative().max(10_000_000),
@@ -203,7 +204,6 @@ export function normalizeFileProfile(profile: FileProfile, file: { size: number 
       // Estimated pages add glyphs no size was measured for: the histogram may then hold fewer, never more.
       || (pdf.textEstimatedPages > 0 ? sum(pdf.charsByFontSize) > pdf.sampledChars : sum(pdf.charsByFontSize) !== pdf.sampledChars)
       || sum(pdf.textEquivalentsPerPage) !== pdf.sampledPages || sum(pdf.areaEquivalentsPerPage) !== pdf.sampledPages
-      || sum(pdf.pageEquivalentsPerPage) !== pdf.sampledPages
       || sum(pdf.imagePpi) !== pdf.images || sum(pdf.imageBytesPerPixel) !== pdf.images) {
       delete normalized.pdf;
     } else {
@@ -227,7 +227,7 @@ export function normalizeFileProfile(profile: FileProfile, file: { size: number 
         // Every sampled page counts at least once; text pages are bounded by the glyphs and lines measured (the text rule),
         // area pages by their cap, the page sum by its parts and the largest page by the sum.
         ...(() => {
-          const textBound = sampled + Math.ceil(pdf.sampledChars / TEXT_PAGE_CHARS) + Math.ceil(pdf.sampledTextLines / TEXT_PAGE_LINES);
+          const textBound = sampled + Math.ceil((pdf.sampledChars + pdf.sampledTextLines) / TEXT_PAGE_CHARS) + Math.ceil(pdf.sampledTextLines / TEXT_PAGE_LINES);
           // The histograms bound the sums from below: a page in the "9-16" bucket counts at least 9.
           const textFloor = pdf.textEquivalentsPerPage.reduce((total, pages, index) => total + pages * TEXT_EQUIVALENT_BUCKETS[index]!, 0);
           const text = Math.min(textBound, Math.max(sampled, textFloor, pdf.sampledTextEquivalents));
@@ -242,7 +242,6 @@ export function normalizeFileProfile(profile: FileProfile, file: { size: number 
         densePages: pdf.textEquivalentsPerPage.slice(3).reduce((total, pages) => total + pages, 0),
         textEstimatedPages: Math.min(pdf.textEstimatedPages, sampled),
         // Each page over the dense threshold holds at least 4 equivalents, and they are part of the page sum.
-        densePageEquivalents: Math.max(4 * sum(pdf.pageEquivalentsPerPage.slice(3)), Math.min(pdf.densePageEquivalents, pdf.sampledPageEquivalents)),
         glyphsOverImages: Math.min(pdf.glyphsOverImages, pdf.sampledChars),
         textOverImagePages: Math.min(pdf.textOverImagePages, sampled),
         // Only pages with native text, and never a page already held by a full-page image.
@@ -253,6 +252,17 @@ export function normalizeFileProfile(profile: FileProfile, file: { size: number 
         medianPageHeightPt: Math.min(pdf.medianPageHeightPt, pdf.maxPageHeightPt),
         // Histograms are kept as measured: their totals were checked above.
       };
+      // Each allowance's sum lies between one per page and the next lower allowance's; allowance 1 is the (clamped) page sum.
+      // The largest page under each is bounded the same way by the largest page.
+      const clamped = normalized.pdf;
+      const sums: number[] = [];
+      const maxes: number[] = [];
+      pdf.pageEquivalentsByAllowance.forEach((value, index) => {
+        sums.push(Math.max(sampled, Math.min(value, index === 0 ? clamped.sampledPageEquivalents : sums[index - 1]!)));
+        maxes.push(Math.max(1, Math.min(pdf.maxPageEquivalentsByAllowance[index]!, index === 0 ? clamped.maxPageEquivalents : maxes[index - 1]!)));
+      });
+      clamped.pageEquivalentsByAllowance = sums;
+      clamped.maxPageEquivalentsByAllowance = maxes;
       if (sampled !== pdf.sampledPages) delete normalized.pdf;
     }
   }

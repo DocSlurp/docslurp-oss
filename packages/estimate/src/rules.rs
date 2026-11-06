@@ -106,12 +106,14 @@ pub struct ExtractionLimits {
 }
 
 impl Rules {
-    /// Text pages of `chars` glyphs on `lines` lines: at least 1, else the larger of lines and characters per page.
+    /// Text pages of `chars` glyphs on `lines` lines: at least 1, else the larger of lines and characters per page. The
+    /// text rule counts the extracted text's characters, so the line breaks between the lines count too.
     pub fn text_equivalents(&self, chars: f64, lines: f64) -> f64 {
         if chars <= 0.0 {
             return 1.0;
         }
-        1f64.max((lines / self.text_pages.lines).ceil()).max((chars / self.text_pages.chars).ceil())
+        let characters = chars + (lines - 1.0).max(0.0);
+        1f64.max((lines / self.text_pages.lines).ceil()).max((characters / self.text_pages.chars).ceil())
     }
 
     /// Standard pages a page of `area_pt2` square points counts as, 1..cap.

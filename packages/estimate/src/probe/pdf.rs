@@ -159,10 +159,10 @@ fn probe_document(rules: &Rules, document: &Document, file_bytes: usize, mut res
         if text > rules.page_equivalents.dense_page_equivalents {
             profile.dense_pages += 1;
         }
-        let page_bucket = TEXT_EQUIVALENT_BOUNDS.iter().rposition(|bound| page >= *bound).unwrap_or(0);
-        profile.page_equivalents_per_page[page_bucket] += 1;
-        if page > rules.page_equivalents.dense_page_equivalents {
-            profile.dense_page_equivalents = profile.dense_page_equivalents.saturating_add(count(page));
+        for (index, allowance) in [1.0, 2.0, 3.0].into_iter().enumerate() {
+            let billed = (if text > allowance { text } else { 1.0 }).max(area).max(1.0);
+            profile.page_equivalents_by_allowance[index] = profile.page_equivalents_by_allowance[index].saturating_add(count(billed));
+            profile.max_page_equivalents_by_allowance[index] = profile.max_page_equivalents_by_allowance[index].max(billed.min(f64::from(u32::MAX)) as u32);
         }
         profile.off_page_chars = profile.off_page_chars.saturating_add(count(volume.off_page));
         profile.tiny_chars_dropped = profile.tiny_chars_dropped.saturating_add(count(volume.tiny_dropped));

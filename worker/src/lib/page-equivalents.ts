@@ -1,4 +1,4 @@
-import { billedPagePageEquivalents, DEFAULT_PAGE_EQUIVALENT_ALLOWANCE, DENSE_PAGE_EQUIVALENTS, imageAreaEquivalents, pageTextEquivalents } from "@docslurp/shared";
+import { billedPagePageEquivalents, DENSE_PAGE_EQUIVALENTS, imageAreaEquivalents, pageTextEquivalents, pricing } from "@docslurp/shared";
 
 import type { Document } from "../models.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
@@ -43,7 +43,8 @@ export async function recordExtractedPageEquivalents(
   if (formatNeedsMeasuredPages(format)) return null;
   // The dense-page allowance applies to paged documents only (PDF pages, image frames); HTML and text files keep the
   // whole-document text rule, so every equivalent they hold bills.
-  const allowance = PAGED_FORMATS.has(format) ? DEFAULT_PAGE_EQUIVALENT_ALLOWANCE : 1;
+  // The installed pricing provider's allowance (core's default: DEFAULT_PAGE_EQUIVALENT_ALLOWANCE).
+  const allowance = PAGED_FORMATS.has(format) ? pricing().pageEquivalentAllowance : 1;
   const pages = markdown.replace(/\f\s*$/, "").split("\f");
   const area = new Map(frames.filter((frame) => frame.sourceWidth && frame.sourceHeight)
     .map((frame) => [frame.pageNumber, imageAreaEquivalents(frame.sourceWidth!, frame.sourceHeight!)]));

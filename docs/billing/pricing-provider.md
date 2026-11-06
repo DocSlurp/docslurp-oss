@@ -106,9 +106,12 @@ Limits: anonymous; a 1 MiB body; at most 200 files; per client IP `ESTIMATE_RATE
 `ds_estimate_session` cookie, issued on the first quote, holding no identity) on top of the API's IP limits; no database
 read, nothing stored.
 
-Page equivalents follow the provider's `pageEquivalentAllowance`: a page bills 1 up to the allowance and its full volume
-above it (`billedPageEquivalents`). Billing (`documents.billing_pages`) and quotes apply the same rule; the open default
-is 1, so every page bills its full volume. Pages the profiler had to estimate (`textEstimatedPages`), and unsampled pages
+Page equivalents follow the provider's dense-page allowance (`pageEquivalentAllowance`; core's default
+`DEFAULT_PAGE_EQUIVALENT_ALLOWANCE` is 3). It covers text only, and only PDF pages and image frames: each such page bills
+max(its text equivalents when above the allowance else 1, its area equivalents up to 8) (`billedPagePageEquivalents`), so
+a twice-Letter page with little text bills 2. Office, EPUB, HTML and text files keep the whole-document text rule with no
+allowance. Billing (`recordPageEquivalents`' `allowance`, over the stored whole measurements) and quotes (the profile's
+`pageEquivalentsByAllowance`, exact for an allowance of 1 to 3) apply the same rule. Pages the profiler had to estimate (`textEstimatedPages`), and unsampled pages
 of a file whose sampled pages were dense, widen only a quote's high end. Signed-in callers and API keys quote
 against a workspace's settings with `POST /v1/uploads/estimate` (`settings` overrides, answer in `quote`), which uses
 the same quote function.

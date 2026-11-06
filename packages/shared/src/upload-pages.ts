@@ -1,4 +1,5 @@
 import { fileExtension, FILE_FORMATS } from "./file-formats.js";
+import { DEFAULT_PAGE_EQUIVALENT_ALLOWANCE } from "./page-equivalents.js";
 import { isUploadImageFile, isUploadTextFile, TEXT_PAGE_CHARS, TEXT_PAGE_MIME_PREFIXES } from "./media-upload-estimate.js";
 
 /*
@@ -185,28 +186,33 @@ type ProfiledPdf = {
   sampledPageEquivalents: number;
   textEstimatedPages?: number;
   maxPageEquivalents?: number;
-  pageEquivalentsPerPage?: readonly number[];
-  densePageEquivalents?: number;
+  pageEquivalentsByAllowance?: readonly number[];
+  maxPageEquivalentsByAllowance?: readonly number[];
 };
 type ProfiledFile = { pages?: number; profile?: { pages?: number; pdf?: ProfiledPdf } };
 
+/** The profile's index for a text allowance: 1, 2 or 3 (a larger allowance is quoted as 3, which can only overstate). */
+const allowanceIndex = (allowance: number) => Math.min(2, Math.max(0, Math.floor(allowance) - 1));
+
 /**
- * The sampled pages' billed equivalents under a per-page `allowance` (billedPageEquivalents). Exact for an allowance of 1
- * to 3 (the page histogram's 1, 2 and 3 buckets plus the dense pages' sum); a larger allowance is quoted as 3, which can
- * only overstate. Without the page histogram (an older profile), every page's full volume.
+ * The sampled pages' equivalents under a dense-page `allowance` (billedPagePageEquivalents: each page's text above the
+ * allowance else 1, or its area, whichever is larger). Exact for an allowance of 1 to 3. Without the per-allowance sums (an
+ * older profile), every page's full volume.
  */
 export function sampledBilledEquivalents(pdf: ProfiledPdf, allowance: number): number {
-  const histogram = pdf.pageEquivalentsPerPage;
-  if (allowance <= 1 || !histogram || histogram.length < 4 || pdf.densePageEquivalents === undefined) return pdf.sampledPageEquivalents;
-  const densePages = histogram.slice(3).reduce((total, pages) => total + pages, 0);
-  let billed = pdf.sampledPages - densePages + pdf.densePageEquivalents;
-  if (allowance < 2) billed += histogram[1]!;
-  if (allowance < 3) billed += 2 * histogram[2]!;
-  return Math.max(pdf.sampledPages, billed);
+  const sums = pdf.pageEquivalentsByAllowance;
+  if (!sums || sums.length !== 3) return pdf.sampledPageEquivalents;
+  return Math.max(pdf.sampledPages, sums[allowanceIndex(allowance)]!);
+}
+
+/** The largest sampled page under `allowance`. */
+function densestBilledPage(pdf: ProfiledPdf, allowance: number): number {
+  const maxes = pdf.maxPageEquivalentsByAllowance;
+  return Math.max(1, maxes && maxes.length === 3 ? maxes[allowanceIndex(allowance)]! : pdf.maxPageEquivalents ?? 1);
 }
 
 /** A file's billed page equivalents from its profile under `allowance`, scaled from the sampled pages; at least its pages. */
-export function profilePageEquivalents(file: ProfiledFile, allowance = 1): number | undefined {
+export function profilePageEquivalents(file: ProfiledFile, allowance = DEFAULT_PAGE_EQUIVALENT_ALLOWANCE): number | undefined {
   const pages = file.pages ?? file.profile?.pages;
   const pdf = file.profile?.pdf;
   if (!pages || !pdf || pdf.sampledPages <= 0) return undefined;
@@ -220,14 +226,14 @@ export function profilePageEquivalents(file: ProfiledFile, allowance = 1): numbe
  * whose text was estimated (read only in part: up to twice their estimated volume) and of pages not sampled at all when
  * the sampled pages were dense (up to the largest sampled page each).
  */
-export function profilePageEquivalentRange(file: ProfiledFile, allowance = 1): { low: number; high: number } | undefined {
+export function profilePageEquivalentRange(file: ProfiledFile, allowance = DEFAULT_PAGE_EQUIVALENT_ALLOWANCE): { low: number; high: number } | undefined {
   const low = profilePageEquivalents(file, allowance);
   const pdf = file.profile?.pdf;
   const pages = file.pages ?? file.profile?.pages;
   if (low === undefined || !pdf || !pages) return low === undefined ? undefined : { low, high: low };
   const estimatedShare = Math.min(1, (pdf.textEstimatedPages ?? 0) / pdf.sampledPages);
   let high = Math.ceil(low * (1 + estimatedShare));
-  const densest = (pdf.maxPageEquivalents ?? 1) > allowance ? pdf.maxPageEquivalents! : 1;
+  const densest = densestBilledPage(pdf, allowance);
   if (pages > pdf.sampledPages && densest > 1) {
     high = Math.max(high, Math.ceil(low + (pages - pdf.sampledPages) * (densest - sampledBilledEquivalents(pdf, allowance) / pdf.sampledPages)));
   }

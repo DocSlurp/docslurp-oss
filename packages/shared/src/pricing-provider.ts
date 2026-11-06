@@ -114,9 +114,11 @@ export interface PricingProvider {
   version: string;
   plans: PricingPlans;
   /**
-   * Page equivalents a page may hold and still bill as one page (an integer, 1 or more): a page bills 1 up to the
-   * allowance and its full volume above it (billedPageEquivalents). Billing (documents.billing_pages) and quotes both
-   * apply it; 1 bills every page's full volume.
+   * The dense-page allowance (an integer, 1 or more) for PDF pages and image frames: a page whose text counts as this many
+   * pages or fewer bills its text as 1, above it its full text volume; its area always bills in full
+   * (billedPagePageEquivalents: max(text above the allowance else 1, area)). Office, EPUB, HTML and text files have none.
+   * Billing (recordPageEquivalents' `allowance`) and quotes both apply it. Core's default is
+   * DEFAULT_PAGE_EQUIVALENT_ALLOWANCE.
    */
   pageEquivalentAllowance: number;
 

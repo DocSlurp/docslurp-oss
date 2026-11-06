@@ -262,7 +262,8 @@ fn tiny_glyphs_over_the_extraction_limit_are_dropped_as_extraction_drops_them() 
     // 9-16 text pages, and dense.
     assert_eq!(pdf.text_equivalents_per_page, [0, 0, 0, 0, 1, 0, 0]);
     assert_eq!(pdf.dense_pages, 1);
-    assert_eq!((pdf.page_equivalents_per_page, pdf.dense_page_equivalents), ([0, 0, 0, 0, 1, 0, 0], 15));
+    // 15 pages of text: above every allowance, so it counts in full under each.
+    assert_eq!((pdf.page_equivalents_by_allowance, pdf.max_page_equivalents_by_allowance), ([15, 15, 15], [15, 15, 15]));
 }
 
 #[test]
@@ -279,8 +280,8 @@ fn reports_page_dimensions_and_area_distribution() {
     assert_eq!((pdf.median_page_width_pt, pdf.median_page_height_pt, pdf.max_page_width_pt, pdf.max_page_height_pt), (792, 1_224, 792, 1_224));
     assert_eq!(pdf.area_equivalents_per_page, [0, 1, 0, 0, 0, 0, 0, 0]);
     assert_eq!(pdf.text_equivalents_per_page, [1, 0, 0, 0, 0, 0, 0]);
-    // Tabloid: two pages of area, under the dense threshold.
-    assert_eq!((pdf.page_equivalents_per_page, pdf.dense_page_equivalents), ([0, 1, 0, 0, 0, 0, 0], 0));
+    // Tabloid (twice Letter) with little text: its area counts in full under every allowance.
+    assert_eq!((pdf.page_equivalents_by_allowance, pdf.max_page_equivalents_by_allowance), ([2, 2, 2], [2, 2, 2]));
 }
 
 #[test]
@@ -327,4 +328,16 @@ fn counts_the_pages_the_router_reads_for_a_scan_beside_native_text() {
     for name in ["routing-photo-overlaid-caption.pdf", "routing-letterhead-logo.pdf", "routing-scan-with-text-layer.pdf"] {
         assert_eq!(pdf(&worker_fixture(name)).scan_beside_text_pages, 0, "{name}");
     }
+}
+
+#[test]
+fn the_allowance_applies_to_text_only_and_area_always_counts() {
+    // Two pages of text on a Letter page (6,800 glyphs and 67 line breaks): 2 under allowance 1, 1 under 2 and 3.
+    let two = profile_of(&one_page_pdf(&text_block(68, 100, 5.0, 0, 72.0, 720.0), LETTER, None));
+    assert_eq!(two.sampled_text_equivalents, 2);
+    assert_eq!(two.page_equivalents_by_allowance, [2, 1, 1]);
+    // A twice-Letter page with three pages of text: text 3 is within allowance 3, but the area's 2 still counts.
+    let three = profile_of(&one_page_pdf(&text_block(102, 100, 5.0, 0, 72.0, 1_100.0), [0.0, 0.0, 792.0, 1_224.0], None));
+    assert_eq!((three.sampled_text_equivalents, three.sampled_area_equivalents), (3, 2));
+    assert_eq!(three.page_equivalents_by_allowance, [3, 3, 2]);
 }

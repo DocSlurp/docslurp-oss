@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   applyFileProfile,
+  profilePageEquivalents,
   applySpeedBoostUnitCharge,
   billingPrices,
   chatAnswerCredits,
@@ -63,7 +64,7 @@ function pdfProfile(overrides: Partial<FileProfile> = {}, pdf: Partial<NonNullab
       budgetExhausted: false,
       sampledWords: 1_800,
       sampledChars: 0, sampledTextLines: 0, charsByFontSize: [0, 0, 0, 0, 0], invisibleChars: 0, offCropChars: 0,
-      sampledTextEquivalents: 10, sampledAreaEquivalents: 10, sampledPageEquivalents: 10, maxPageEquivalents: 1, textEquivalentsPerPage: [10, 0, 0, 0, 0, 0, 0], areaEquivalentsPerPage: [10, 0, 0, 0, 0, 0, 0, 0], densePages: 0, medianPageWidthPt: 612, medianPageHeightPt: 792, maxPageWidthPt: 612, maxPageHeightPt: 792, offPageChars: 0, tinyCharsDropped: 0, textEstimatedPages: 0, pageEquivalentsPerPage: [10, 0, 0, 0, 0, 0, 0], densePageEquivalents: 0, imagePpi: [0, 0, 4, 0], imageBytesPerPixel: [0, 0, 4, 0, 0], glyphsOverImages: 0, textOverImagePages: 0, scanBesideTextPages: 0, scanBesideTextUnknownPages: 0, ruledTablePages: 0,
+      sampledTextEquivalents: 10, sampledAreaEquivalents: 10, sampledPageEquivalents: 10, maxPageEquivalents: 1, textEquivalentsPerPage: [10, 0, 0, 0, 0, 0, 0], areaEquivalentsPerPage: [10, 0, 0, 0, 0, 0, 0, 0], densePages: 0, medianPageWidthPt: 612, medianPageHeightPt: 792, maxPageWidthPt: 612, maxPageHeightPt: 792, offPageChars: 0, tinyCharsDropped: 0, textEstimatedPages: 0, pageEquivalentsByAllowance: [10, 10, 10], maxPageEquivalentsByAllowance: [1, 1, 1], imagePpi: [0, 0, 4, 0], imageBytesPerPixel: [0, 0, 4, 0, 0], glyphsOverImages: 0, textOverImagePages: 0, scanBesideTextPages: 0, scanBesideTextUnknownPages: 0, ruledTablePages: 0,
       medianPageAreaSqIn: 94,
       maxPageAreaSqIn: 94,
       ...pdf,
@@ -182,9 +183,14 @@ describe("file profiles are untrusted", () => {
     expect([exact.pageEquivalents, exact.pageEquivalentsHigh]).toEqual([10, 10]);
     const estimated = applyFileProfile({ name: "a.pdf", size: 100_000, profile: pdfProfile({}, { textEstimatedPages: 5 }) });
     expect([estimated.pageEquivalents, estimated.pageEquivalentsHigh]).toEqual([10, 15]);
-    const partial = applyFileProfile({ name: "a.pdf", size: 100_000, profile: pdfProfile({ pages: 20 }, { sampledPageEquivalents: 12, maxPageEquivalents: 3, textEquivalentsPerPage: [8, 1, 0, 1, 0, 0, 0] }) });
-    expect(partial.pageEquivalents).toBe(24);
-    expect(partial.pageEquivalentsHigh).toBe(42);
+    // 10 of 20 pages sampled: eight ordinary, one with 2 pages of text, one twice Letter. Allowance 1 counts 12, the default
+    // allowance (3) 11: the text page counts 1, the tabloid its area.
+    const sampled = { sampledTextEquivalents: 11, sampledAreaEquivalents: 11, sampledPageEquivalents: 12, maxPageEquivalents: 2, textEquivalentsPerPage: [9, 1, 0, 0, 0, 0, 0], areaEquivalentsPerPage: [9, 1, 0, 0, 0, 0, 0, 0], pageEquivalentsByAllowance: [12, 11, 11], maxPageEquivalentsByAllowance: [2, 2, 2] };
+    const partial = applyFileProfile({ name: "a.pdf", size: 100_000, profile: pdfProfile({ pages: 20 }, sampled) });
+    expect(partial.pageEquivalents).toBe(22);
+    // Unsampled pages may each be as large as the largest sampled one: 22 + 10 × (2 − 1.1).
+    expect(partial.pageEquivalentsHigh).toBe(31);
+    expect(profilePageEquivalents({ pages: 20, profile: partial.profile }, 1)).toBe(24);
   });
 
   it("merges counts only where the caller gave none", () => {

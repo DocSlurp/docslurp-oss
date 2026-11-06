@@ -15,6 +15,7 @@ import { estimateUploadMedia } from "./media-upload-estimate.js";
 // Type-only: pricing-provider.ts imports this module for its fallback, so nothing here may need it at load time.
 import type { DocumentFeature, IngestEstimate, IngestEstimateInput, PricingProvider, ProviderQuoteArgs } from "./pricing-provider.js";
 import { costEstimateSchema } from "./jobs.js";
+import { DEFAULT_PAGE_EQUIVALENT_ALLOWANCE } from "./page-equivalents.js";
 import { assembleEstimateQuote, profiledPageArea, profiledTextChars, type StoredBytesModel } from "./estimate-assembly.js";
 import { quoteFilePageRange, isMultiFrameImageFile, IMAGE_MAX_FRAMES } from "./upload-pages.js";
 import { uploadMediaKind } from "./media-upload-estimate.js";
@@ -135,7 +136,7 @@ export const OPEN_PRICING: PricingProvider = {
   apiVersion: 1,
   id: "open",
   version: "open-1",
-  pageEquivalentAllowance: 1,
+  pageEquivalentAllowance: DEFAULT_PAGE_EQUIVALENT_ALLOWANCE,
   plans: { creditPacksCents: [], starterCredits: OPEN_STARTER_CREDITS, workerSlots: { ...OPEN_WORKER_SLOTS }, privateDedicatedMonthlyUsd: null },
   pageCredits: (_mode, pages) => nonNegative(pages) * OPEN_CREDITS_PER_PAGE,
   richPagesForOutputTokens: () => 1,

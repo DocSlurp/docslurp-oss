@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   DENSE_PAGE_EQUIVALENTS, PAGE_AREA_EQUIVALENTS_CAP, defaultPipelineFeatures, imageAreaEquivalents, measuredTextPages, pageAreaEquivalentsPt,
-  pageTextEquivalents, stripHtmlMarkup, billedPageEquivalents, billedPagePageEquivalents, DEFAULT_PAGE_EQUIVALENT_ALLOWANCE,
+  pageTextEquivalents, stripHtmlMarkup, billedPageEquivalents, billedPagePageEquivalents, DEFAULT_PAGE_EQUIVALENT_ALLOWANCE, DISTINCT_TEST_PRICING, installTestPricing,
 } from "@docslurp/shared";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -283,5 +283,20 @@ describe("dense-page allowance (owner decision 2026-11-05): paged pages bill 1 u
     const measured = (await recordExtractedPageEquivalents(state, document, "html", "v".repeat(2 * 3_500)))!;
     expect(measured).toMatchObject({ equivalents: 2, billed: 2 });
     expect((await store.loadDocument(documentId))!.billingPages).toBe(2);
+  });
+
+  it("billing uses the installed pricing provider's allowance for paged formats, never for HTML", async () => {
+    installTestPricing({ pageEquivalentAllowance: 1 });
+    try {
+      const paged = await documentRun(1);
+      const pdf = (await recordExtractedPageEquivalents(paged.state, paged.document, "pdf", "u".repeat(2 * 3_500)))!;
+      expect(pdf).toMatchObject({ equivalents: 2, billed: 2 });
+      expect((await store.loadDocument(paged.documentId))!.billingPages).toBe(2);
+    } finally {
+      installTestPricing(DISTINCT_TEST_PRICING);
+    }
+    // The core default (3) again: the same page bills 1.
+    const again = await documentRun(1);
+    expect((await recordExtractedPageEquivalents(again.state, again.document, "pdf", "u".repeat(2 * 3_500)))!.billed).toBe(1);
   });
 });

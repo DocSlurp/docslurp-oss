@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { DENSE_PAGE_EQUIVALENTS, pageAreaEquivalentsPt, pageEquivalents, pageTextEquivalents } from "@docslurp/shared";
+import { billedPagePageEquivalents, DENSE_PAGE_EQUIVALENTS, pageAreaEquivalentsPt, pageEquivalents, pageTextEquivalents } from "@docslurp/shared";
 
 import { createEstimator } from "../js/index.mjs";
 
@@ -57,7 +57,20 @@ const cases = [
   { name: "text running off the page", blocks: [{ lines: 200, perLine: 80, size: 11 }] },
   { name: "a tabloid page", blocks: [{ lines: 2, perLine: 20, size: 11 }], width: 792, height: 1_224 },
   { name: "a 200-inch page", blocks: [{ lines: 2, perLine: 20, size: 11 }], width: 14_400, height: 14_400 },
+  { name: "two pages of text on one page", blocks: [{ lines: 70, perLine: 100, size: 5 }] },
+  { name: "three pages of text on one page", blocks: [{ lines: 105, perLine: 100, size: 5 }] },
+  { name: "four pages of text on one page", blocks: [{ lines: 140, perLine: 100, size: 4 }] },
+  { name: "a twice-Letter page with little text", blocks: [{ lines: 3, perLine: 40, size: 11 }], width: 792, height: 1_224 },
+  { name: "a twice-Letter page with three pages of text", blocks: [{ lines: 105, perLine: 100, size: 5 }], width: 792, height: 1_224 },
 ];
+
+describe("the dense-page allowance never hides area", () => {
+  it("a twice-Letter page with little text counts 2 under every allowance", () => {
+    const bytes = pdf([{ lines: 3, perLine: 40, size: 11 }], 792, 1_224);
+    const profile = estimator.profile({ name: "tabloid.pdf", size: bytes.length }, bytes);
+    assert.deepEqual(profile.pdf.pageEquivalentsByAllowance, [2, 2, 2]);
+  });
+});
 
 describe("profile page equivalents match the shared billing functions", () => {
   for (const { name, blocks, width = 612, height = 792 } of cases) {
@@ -71,6 +84,10 @@ describe("profile page equivalents match the shared billing functions", () => {
       assert.equal(profile.pdf.areaEquivalentsPerPage.findIndex((pages) => pages === 1) + 1, area, "area equivalents");
       assert.equal(profile.pdf.sampledPageEquivalents, expected, "page equivalents");
       assert.equal(profile.pdf.densePages, text > DENSE_PAGE_EQUIVALENTS ? 1 : 0, "dense");
+      // The dense-page allowance applies to text only; area always counts (core billedPagePageEquivalents).
+      const byAllowance = [1, 2, 3].map((allowance) => billedPagePageEquivalents(text, area, allowance));
+      assert.deepEqual(profile.pdf.pageEquivalentsByAllowance, byAllowance, "page equivalents by allowance");
+      assert.deepEqual(profile.pdf.maxPageEquivalentsByAllowance, byAllowance, "largest page by allowance");
       assert.deepEqual([profile.pdf.maxPageWidthPt, profile.pdf.maxPageHeightPt], [width, height]);
     });
   }
