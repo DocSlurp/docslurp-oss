@@ -318,7 +318,12 @@
   "drawnContentMinBytesPerPage": 16384,
   "repeatedImageMinPages": 3,
   "repeatedImageMinShare": 0.2,
-  "unspacedCharsPerWord": 2
+  "unspacedCharsPerWord": 2,
+  "mixedScanMinCoverage": 0.2,
+  "mixedScanMaxWordsInside": 2,
+  "mixedScanMinShortSidePx": 200,
+  "mixedScanMinPpi": 50,
+  "scanLikeMaxBytesPerPixel": 0.15
  },
- "revision": "59066f0c47082601d21524ed47d4f6a214501185a4b829aabf2c24280ae06427"
+ "revision": "953caa96daa735ac23f03927446ec665675320560ee5661cb27d6e82848e53d5"
 }

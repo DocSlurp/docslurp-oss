@@ -157,6 +157,12 @@ pub struct PageRasterRouting {
     pub repeated_image_min_pages: f64,
     pub repeated_image_min_share: f64,
     pub unspaced_chars_per_word: f64,
+    /// A scan beside native text (`mixedScanImage`; geometry in docs/page-layout-facts.md).
+    pub mixed_scan_min_coverage: f64,
+    pub mixed_scan_max_words_inside: f64,
+    pub mixed_scan_min_short_side_px: f64,
+    pub mixed_scan_min_ppi: f64,
+    pub scan_like_max_bytes_per_pixel: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
