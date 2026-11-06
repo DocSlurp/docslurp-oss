@@ -144,9 +144,13 @@ describe("installed pricing provider", () => {
 describe("service profile fails closed", () => {
   it("prices nothing with the open default under DOCSLURP_SERVICE_PROFILE=service", () => {
     vi.stubEnv("DOCSLURP_SERVICE_PROFILE", "service");
-    expect(() => pricing()).toThrow(/no pricing provider installed/);
-    expect(() => pageCredits("fast", 1)).toThrow(/no pricing provider installed/);
-    expect(() => workerSlotsFor(true)).toThrow(/no pricing provider installed/);
+    expect(() => pricing()).toThrow(/no pricing provider is installed/);
+    expect(() => pageCredits("fast", 1)).toThrow(/no pricing provider is installed/);
+    expect(() => workerSlotsFor(true)).toThrow(/no pricing provider is installed/);
+    vi.unstubAllEnvs();
+    // DOCSLURP_PRICING_REQUIRED=1 (the chat executor's setting) is refused the same way (council E #2).
+    vi.stubEnv("DOCSLURP_PRICING_REQUIRED", "1");
+    expect(() => pageCredits("fast", 1)).toThrow(/no pricing provider is installed/);
     installTestPricing();
     expect(pricing().id).toBe("test");
   });
