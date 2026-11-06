@@ -325,6 +325,18 @@ describe("ingest report: failed files", () => {
     expect(summarizeIngestReport(report)).toContain("The file is password-protected or encrypted.");
   });
 
+  it("lists files with dense pages (possible hidden or stuffed text) and says so in the summary", () => {
+    const report = build({
+      documents: [doc("stuffed", { filename: "stuffed.pdf", mimeType: "application/pdf", status: "completed", pageCount: 2 }), doc("plain", { filename: "plain.pdf", mimeType: "application/pdf", status: "completed", pageCount: 2 })],
+      stages: [
+        { documentId: "stuffed", stage: "extract-markdown", status: "completed", skipped: false, reason: null, selectedPages: null, pages: 2, costCents: null, tablePages: null, durationSeconds: null, pageEquivalents: 52, densePages: [1], densePageCount: 1 },
+        { documentId: "plain", stage: "extract-markdown", status: "completed", skipped: false, reason: null, selectedPages: null, pages: 2, costCents: null, tablePages: null, durationSeconds: null, pageEquivalents: 2, densePages: [], densePageCount: 0 },
+      ],
+    });
+    expect(report.denseText).toEqual({ total: 1, examples: [{ documentId: "stuffed", filename: "stuffed.pdf", densePages: [1], densePageCount: 1, pageEquivalents: 52 }] });
+    expect(summarizeIngestReport(report)).toMatch(/1 file has pages holding several pages of text each .*stuffed\.pdf \(1 page\)/);
+  });
+
   it("does not blame page triage or recommend vision for a file that crashed in extraction", () => {
     const report = failedImage();
     expect(report.images.scannedLookingPages).toBe(0);

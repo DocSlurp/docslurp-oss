@@ -54,6 +54,7 @@ import {
   type SupersededPurgeOptions,
   type SupersededPurgeResult,
 } from "./superseded-purge.js";
+import { recordPageEquivalents } from "./page-equivalents.js";
 import { enforceRunSpend, enforceRunSpendForCharge, largestFundedCharge, pauseRunForSpend, SpendCheckUnavailableError, spendCounterSql } from "./spend-check.js";
 import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
@@ -2758,6 +2759,10 @@ export class Store {
    * every paged document still in the run: none of them is charged before the run's completion fee. Images are excluded:
    * their frames bill Rich as they are read (ocr/image-frames.ts).
    */
+  async recordPageEquivalents(runId: string, documentId: string, rows: import("./page-equivalents.js").PageEquivalentRow[]): Promise<number | null> {
+    return await recordPageEquivalents(this.sql, { runId, documentId, rows });
+  }
+
   async measuredPagesAboveIntake(runId: string): Promise<number> {
     const [row] = await this.sql<{ pages: number }[]>`
       select coalesce(sum(greatest(0, coalesce(billing_pages, page_count) - coalesce(intake_page_count, page_count))), 0)::int as pages

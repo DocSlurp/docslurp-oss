@@ -44,6 +44,9 @@ export interface OcrPageRead {
   escalation: { reason: OcrEscalationReason; imagePath: string; width: number; height: number } | null;
   /** The boundary's bounded raw RGB rendition of the frame (validated by header and exact size; there is nothing to decode), when asked for. */
   rendition?: { imagePath: string; width: number; height: number };
+  /** The frame's decoded pixel size before any downscaling (the boundary decoded it): its page area. */
+  sourceWidth?: number;
+  sourceHeight?: number;
 }
 
 export interface OcrReadOutcome {
@@ -342,6 +345,8 @@ export async function readWithOcr(runner: OcrRunner, input: OcrReadInput): Promi
         chars: frame.chars,
         elapsedMs: frame.elapsedMs,
         escalation,
+        sourceWidth: frame.sourceWidth,
+        sourceHeight: frame.sourceHeight,
       });
     }
     pages.sort((a, b) => a.pageNumber - b.pageNumber);

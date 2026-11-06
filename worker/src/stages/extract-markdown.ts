@@ -110,6 +110,7 @@ import { OCR_FAILED_PAGES_KEY, OcrInfrastructureError, OcrRefusedError, ocrFaile
 import { ocrDocument } from "../ocr/read-document.js";
 import { recordMeasuredPageCount, type PageCountResult } from "../lib/office-page-count.js";
 import { processedPdfPages, reconcileProcessedPdfPages } from "../lib/pdf-page-count.js";
+import { recordExtractedPageEquivalents } from "../lib/page-equivalents.js";
 import { PAGE_RENDITION, pageRenditionKey } from "../lib/page-rendition.js";
 import { extractorFailureReason, extractorFallbackFor, recordExtractorFallback } from "../lib/extractor-fallback.js";
 
@@ -625,6 +626,9 @@ export class ExtractMarkdownStage implements Stage {
                   let winningText = policyDecision.selectedMarkdown;
                   // The page tree's count (format-detect) against the pages extraction processed: bill and authorize the larger.
                   const pdfPageCheck = isPdf ? await reconcileProcessedPdfPages(state, document, processedPdfPages(winningText)) : null;
+                  // What each extracted page holds, by the text rule: a page carrying many pages of text (tiny, invisible or
+                  // off-page text included, which is indexed like any other) bills as that many (lib/page-equivalents.ts).
+                  const pageEquivalents = await recordExtractedPageEquivalents(state, document, format, winningText);
                   // Office, EPUB and spreadsheet files arrive counted as one page. Count what the extractor read, from its own
                   // output (no other parser runs and the source is not read again), and record it as documents.billing_pages
                   // before features and the completion charge read it (page-base-fee.ts). The page basis (page_count) stays what
@@ -1123,6 +1127,7 @@ export class ExtractMarkdownStage implements Stage {
                       billingPages: measuredPages.pages,
                       billingPagesMethod: measuredPages.method,
                       ...(pdfPageCheck ? { pdfPagesMeasured: pdfPageCheck.measured, pdfPagesProcessed: pdfPageCheck.processed, pdfPagesMismatch: pdfPageCheck.mismatch } : {}),
+                      ...(pageEquivalents ? { pageEquivalents: pageEquivalents.equivalents, densePages: pageEquivalents.densePages.slice(0, 50), densePageCount: pageEquivalents.densePages.length } : {}),
                       // Which extractor served the document, what else was planned or tried, and how the
                       // native PDF engine took part: queryable from stage stats without fetching the manifest.
                       extractor: winningCandidate.label,
@@ -1705,6 +1710,8 @@ export class ExtractMarkdownStage implements Stage {
       console.warn(`[ocr] document=${context.documentId} renditions=${renditions}/${result.pages.length}: pages without one get no page-image vectors`);
     }
     const markdown = result.pages.map((page) => page.text).join("\f");
+    // An uploaded image's frames also count their decoded area (a giant scan is several standard pages to read).
+    if (owner) await recordExtractedPageEquivalents(state, owner, "image", markdown, result.pages);
     const scratchDir = await mkdtemp(path.join(tmpdir(), "docslurp-extract-ocr-"));
     const outputPath = path.join(scratchDir, "ocr.md");
     try {

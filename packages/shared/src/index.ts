@@ -38,6 +38,7 @@ export * from "./pipeline.js";
 export * from "./document-versions.js";
 export * from "./jobs.js";
 export * from "./media-upload-estimate.js";
+export * from "./page-equivalents.js";
 export * from "./file-formats.js";
 export * from "./file-sniff.js";
 export * from "./page-raster-routing.js";
