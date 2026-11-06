@@ -160,7 +160,10 @@ export type PageRange = { low: number; central: number; high: number; measured: 
  * for a text file, and its size at ASSUMED_BYTES_PER_PAGE for anything else (at least 1). A TIFF counts its frames (1 when not
  * counted), at most IMAGE_MAX_FRAMES.
  */
-export function quoteFilePages(file: { name: string; type?: string | null; size: number; pages?: number }): number {
+export function quoteFilePages(file: { name: string; type?: string | null; size: number; pages?: number; measured?: { pages: number } }): number {
+  // A stored document the worker measured at no pages (an empty Office file): nothing to process. Only the server sets
+  // `measured` (stored-quote.ts); a client's request cannot carry it.
+  if (file.measured?.pages === 0) return 0;
   // A TIFF's frames are its pages, up to the frames one file may hold (more are refused, never read or billed).
   if (isMultiFrameImageFile(file)) return Math.max(1, Math.min(IMAGE_MAX_FRAMES, Math.round(file.pages ?? 1)));
   const counted = file.pages === undefined ? workerCountedFormat(file) : null;
@@ -241,8 +244,9 @@ export function profilePageEquivalentRange(file: ProfiledFile, allowance = DEFAU
 }
 
 /** Pages of a file over the range its size allows when the client has not counted them; one value when they are known. */
-export function quoteFilePageRange(file: { name: string; type?: string | null; size: number; pages?: number }): PageRange {
+export function quoteFilePageRange(file: { name: string; type?: string | null; size: number; pages?: number; measured?: { pages: number } }): PageRange {
   const central = quoteFilePages(file);
+  if (file.measured?.pages === 0) return { low: 0, central: 0, high: 0, measured: true };
   // An uncounted TIFF holds one frame to as many as its size allows at the densest page, up to IMAGE_MAX_FRAMES.
   if (file.pages === undefined && isMultiFrameImageFile(file)) {
     return { low: 1, central, high: Math.max(central, Math.min(IMAGE_MAX_FRAMES, Math.ceil(file.size / UNMEASURED_MIN_BYTES_PER_PAGE))), measured: false };

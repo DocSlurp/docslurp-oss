@@ -22,36 +22,60 @@ import { orgWorkerSlots, type EstimateEnv } from "./config-change.js";
 export type StoredQuoteScope = { orgId: string; workspaceId?: string; runId?: string; documentIds?: readonly string[] };
 
 /**
- * The scoped documents as quote files, one per MIME type (hosting and the page mix are linear in pages and bytes, so a
- * type's documents add up): pages are the billed pages (`billing_pages`, else the counted pages), `measured.readPages`
- * the pages whose page facts record a model read. Superseded, purged and deduplicated copies are left out.
+ * Where a stored document's page count stands for a quote: `measured` (the worker's `billing_pages`, else a `counted`
+ * page_count), `empty` (measured at 0 pages: an empty Office file), or `assumed` (intake's guess, never measured).
+ */
+type StoredPageState = "measured" | "empty" | "assumed";
+
+/**
+ * The scoped documents as quote files, one per MIME type and page state (hosting and the page mix are linear in pages and
+ * bytes, so a group's documents add up):
+ * - measured: `pages` and `measured.pages` are the measured pages, `measured.readPages` the pages whose facts record a model read;
+ * - empty: `measured.pages` 0, so the quote prices no pages for them (only their stored bytes);
+ * - assumed: no page count at all, so the quote prices them as a range over their size, never as measured pages.
+ * Superseded, purged and deduplicated copies are left out.
  */
 export async function storedQuoteFiles(scope: StoredQuoteScope): Promise<QuoteFile[]> {
   if (scope.documentIds && scope.documentIds.length === 0) return [];
-  const rows = await sql<{ mime_type: string; documents: number; bytes: string | number; pages: string | number; read_pages: string | number }[]>`
-    select d.mime_type,
+  const rows = await sql<{ mime_type: string; state: StoredPageState; documents: number; bytes: string | number; pages: string | number; read_pages: string | number }[]>`
+    with scoped as (
+      select d.id, d.mime_type, d.file_size,
+        case
+          when d.billing_pages is null and d.page_count_source is distinct from 'counted' then 'assumed'
+          when greatest(coalesce(d.billing_pages, d.page_count), 0) = 0 then 'empty'
+          else 'measured'
+        end as state,
+        greatest(coalesce(d.billing_pages, d.page_count), 0) as pages
+      from documents d
+      where d.org_id = ${scope.orgId}
+        ${scope.workspaceId ? sql`and d.workspace_id = ${scope.workspaceId}` : sql``}
+        ${scope.runId ? sql`and d.run_id = ${scope.runId}` : sql``}
+        ${scope.documentIds ? sql`and d.id = any(${sql.array([...scope.documentIds])})` : sql``}
+        and d.superseded_at is null and d.purged_at is null and d.deduped_from_document_id is null
+    )
+    select s.mime_type, s.state,
       count(*)::int as documents,
-      coalesce(sum(d.file_size), 0)::bigint as bytes,
-      coalesce(sum(greatest(coalesce(d.billing_pages, d.page_count), 0)), 0)::bigint as pages,
-      coalesce(sum((select count(*) from document_page_facts f where f.document_id = d.id and f.vision_status = 'extracted')), 0)::bigint as read_pages
-    from documents d
-    where d.org_id = ${scope.orgId}
-      ${scope.workspaceId ? sql`and d.workspace_id = ${scope.workspaceId}` : sql``}
-      ${scope.runId ? sql`and d.run_id = ${scope.runId}` : sql``}
-      ${scope.documentIds ? sql`and d.id = any(${sql.array([...scope.documentIds])})` : sql``}
-      and d.superseded_at is null and d.purged_at is null and d.deduped_from_document_id is null
-    group by d.mime_type
-    order by d.mime_type
+      coalesce(sum(s.file_size), 0)::bigint as bytes,
+      coalesce(sum(case when s.state = 'measured' then s.pages else 0 end), 0)::bigint as pages,
+      coalesce(sum(case when s.state = 'measured' then (select count(*) from document_page_facts f where f.document_id = s.id and f.vision_status = 'extracted') else 0 end), 0)::bigint as read_pages
+    from scoped s
+    group by s.mime_type, s.state
+    order by s.mime_type, s.state
     limit 200`;
-  return rows.map((row) => {
-    const pages = Number(row.pages) || 0;
-    return {
-      name: `${row.documents} stored ${row.documents === 1 ? "document" : "documents"}`,
-      size: Number(row.bytes) || 0,
-      type: row.mime_type,
-      ...(pages > 0 ? { pages, measured: { pages, readPages: Math.min(pages, Number(row.read_pages) || 0) } } : {}),
-    };
-  });
+  return rows.map((row) => storedQuoteFile(row));
+}
+
+/** One group of stored documents as a quote file, keeping its page state explicit (storedQuoteFiles). */
+export function storedQuoteFile(row: { mime_type: string; state: StoredPageState; documents: number; bytes: string | number; pages: string | number; read_pages: string | number }): QuoteFile {
+  const file = {
+    name: `${row.documents} stored ${row.documents === 1 ? "document" : "documents"} (${row.state === "assumed" ? "pages not measured" : row.state === "empty" ? "no pages" : "measured"})`,
+    size: Number(row.bytes) || 0,
+    type: row.mime_type,
+  };
+  if (row.state === "assumed") return file;
+  if (row.state === "empty") return { ...file, measured: { pages: 0, readPages: 0 } };
+  const pages = Math.max(1, Number(row.pages) || 0);
+  return { ...file, pages, measured: { pages, readPages: Math.min(pages, Number(row.read_pages) || 0) } };
 }
 
 /**
