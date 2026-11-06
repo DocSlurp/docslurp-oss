@@ -93,7 +93,7 @@ describe("parser commands drop root in the VM (validation N10, council K #4/#5)"
     write("id", uid === null ? "#!/bin/sh\nexit 1\n" : `#!/bin/sh\necho ${uid}\n`);
     write("chown", `#!/bin/sh\necho "chown $*" >> "${log}"\n`);
     if (withSetpriv) write("setpriv", `#!/bin/sh\necho "setpriv $*" >> "${log}"\nwhile [ "$1" != "--" ]; do shift; done; shift; exec "$@"\n`);
-    return { id: path.join(bin, "id"), setpriv: path.join(bin, "setpriv"), chown: path.join(bin, "chown") };
+    return { id: path.join(bin, "id"), setpriv: path.join(bin, "setpriv") };
   }
   /** A PATH whose `id` claims a non-root user and whose setpriv/chown do nothing: the launch must never use them. */
   function hostilePath(): string {
@@ -111,14 +111,14 @@ describe("parser commands drop root in the VM (validation N10, council K #4/#5)"
     child.once("error", reject); child.once("close", (exitCode) => resolve({ exitCode, stdout, stderr }));
   });
 
-  it.each([["an empty PATH", () => ""], ["a hostile PATH", () => ""]])("as root under %s, hands only the writable directory itself to uid 10001 and runs through the absolute setpriv", async (label) => {
+  it.each([["an empty PATH", () => ""], ["a hostile PATH", () => ""]])("as root under %s, runs through the absolute setpriv and changes no ownership", async (label) => {
     const tools = fakeTools("0");
     const out = path.join(dir, "out with space"); mkdirSync(out);
     const PATH = label === "a hostile PATH" ? hostilePath() : "";
     const result = await runWithPath(launchArgv(path.join(dir, "1"), "/bin/echo", ["a b"], [out, path.join(dir, "missing")], tools), PATH);
     expect(result).toMatchObject({ exitCode: 0, stdout: "a b\n" });
+    // Root changes no ownership in the job tree (staging creates it as uid 10001, council O #4): only setpriv runs.
     expect(readFileSync(path.join(dir, "calls"), "utf8").split("\n").filter(Boolean)).toEqual([
-      `chown -h 10001:10001 -- ${out}`,
       "setpriv --reuid=10001 --regid=10001 --clear-groups --no-new-privs -- /bin/echo a b",
     ]);
   });

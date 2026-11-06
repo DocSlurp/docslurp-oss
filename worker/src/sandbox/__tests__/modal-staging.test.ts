@@ -301,6 +301,8 @@ function fakeSdk(
     hardeningFails?: boolean;
     /** The leftover kill waits on this (a slow kill). */
     killGate?: Promise<void>;
+    /** The leftover kill leaves a parser-user process alive (exit 4). */
+    killFails?: boolean;
   } = {},
 ) {
   const remote = new MemoryRemoteFs();
@@ -359,12 +361,13 @@ function fakeSdk(
       if (asUser?.[0] === "/bin/mkdir") { state.mkdirs.push(asUser[3]!); await remote.mkdir(asUser[3]!); return finished("", 0); }
       if (asUser?.[0] === "/bin/rm") { await remote.remove(asUser[3]!); return finished("", 0); }
       if (asUser?.[0] === "/bin/sh" && asUser[2]?.includes("cp --")) { await remote.writeFile(asUser[5]!, await remote.readFile(asUser[4]!)); return finished("", 0); }
-      if (asUser?.[0] === "/bin/sh" && asUser[2]?.startsWith("kill -9 -1")) {
+      // The root leftover kill (KILL_PARSER_USER_ARGV): scans /proc for the parser user, verified.
+      if (argv[0] === "/bin/sh" && argv[2]?.includes("stat -c %u")) {
         state.leftoverKills++;
         state.events.push("kill-start");
         await opts.killGate;
         state.events.push("kill-end");
-        return finished("", 0);
+        return finished("", opts.killFails ? 4 : 0);
       }
       if (argv[0] === "/bin/chmod") return finished("", 0);
       if (argv[0] === "/bin/cat" || argv[0] === "python3") throw new Error("root must never read or list job output");
@@ -470,42 +473,39 @@ describe("modal provider session lifecycle", () => {
     }
   });
 
-  it("a command arriving during the leftover kill waits for it, then runs unharmed (council P #3)", async () => {
+  it("commands in a session run one at a time: a command arriving during a run or the leftover kill waits (council P #3, O #4)", async () => {
     let release!: () => void;
     const killGate = new Promise<void>((resolve) => { release = resolve; });
-    const { state, session } = await open({ killGate, exec: async () => finished() });
+    const slow = running();
+    let calls = 0;
+    const { state, session } = await open({ killGate, exec: async () => (++calls === 1 ? slow.process : finished()) });
     const opened = await session();
     const first = opened.run!({ ...command, binary: "/bin/first" });
-    // Let the first command finish and its cleanup kill begin (it is held at the gate).
-    for (let i = 0; i < 50 && !state.events.includes("kill-start"); i++) await new Promise((resolve) => setTimeout(resolve, 1));
-    expect(state.events).toContain("kill-start");
+    await new Promise((resolve) => setTimeout(resolve, 20));
     const second = opened.run!({ ...command, binary: "/bin/second" });
     await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(state.events.some((event) => event.startsWith("exec:/bin/second"))).toBe(false); // not admitted during the kill
+    expect(state.events.some((event) => event.startsWith("exec:/bin/second"))).toBe(false); // not while the first runs
+    slow.end(0);
+    for (let i = 0; i < 50 && !state.events.includes("kill-start"); i++) await new Promise((resolve) => setTimeout(resolve, 1));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(state.events.some((event) => event.startsWith("exec:/bin/second"))).toBe(false); // nor during the kill
     release();
     await first;
     await second;
-    const killEnd = state.events.indexOf("kill-end");
-    const secondExec = state.events.findIndex((event) => event.startsWith("exec:/bin/second"));
-    expect(killEnd).toBeGreaterThanOrEqual(0);
-    expect(secondExec).toBeGreaterThan(killEnd); // the old daemon was killed first; the new command ran after
+    const events = state.events.filter((event) => event === "kill-end" || event.startsWith("exec:"));
+    expect(events.slice(0, 3)).toEqual(["exec:/bin/first", "kill-end", "exec:/bin/second"]);
     await opened.close();
   });
 
-  it("never kills the parser user's processes while another command is still running (council M #3)", async () => {
-    const slow = running();
-    let calls = 0;
-    const { state, session } = await open({ exec: async () => (++calls === 1 ? slow.process : finished()) });
+  it("a leftover kill that leaves a parser-user process alive fails the command and closes the session (council O #4)", async () => {
+    const { state, session } = await open({ killFails: true, exec: async () => finished() });
     const opened = await session();
-    const first = opened.run!(command);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    await opened.run!(command);
-    expect(state.leftoverKills).toBe(0);
-    slow.end(0);
-    await first;
-    expect(state.leftoverKills).toBeGreaterThan(0);
-    await opened.close();
+    await expect(opened.run!(command)).rejects.toThrow(/leftover processes could not be killed/);
+    expect(state.terminate).toBeGreaterThanOrEqual(1);
+    await expect(opened.run!(command)).rejects.toThrow();
   });
+
+
 
   it("a job VM whose link hardening fails runs nothing and is terminated (Modal check)", async () => {
     const commands: string[][] = [];
@@ -683,43 +683,37 @@ describe("modal provider session lifecycle", () => {
     }
   });
 
-  it("defers removing an aborted command's changes until concurrent commands finish", async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "docslurp-modal-concurrent-"));
+  it("removes an aborted command's changes before the next command in the session starts (commands run one at a time, council O #4)", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "docslurp-modal-serial-"));
     try {
       const processes = new Map<string, ReturnType<typeof running>>();
       const { state, session } = await open({
-        exec: async ([binary], control) => {
+        exec: async ([binary]) => {
           const proc = running();
           processes.set(binary, proc);
-          state.remote.put(path.join(dir, `${binary}.json`), binary === "slow" ? "{\"in-progress\":" : "{");
+          state.remote.put(path.join(dir, `${binary}.json`), binary === "next" ? "{\"done\":true}" : "{");
+          if (binary === "next") proc.end(0);
           return proc.process;
         },
         onKill: () => processes.get("aborted")?.end(137),
       });
       const opened = await session();
       const controller = new AbortController();
-      const aborted = opened.run!({ ...command, binary: "aborted", writablePaths: [dir] }, controller.signal).catch(
-        (e: unknown) => e,
-      );
+      const aborted = opened.run!({ ...command, binary: "aborted", writablePaths: [dir] }, controller.signal).catch((e: unknown) => e);
       await vi.waitFor(() => expect(processes.has("aborted")).toBe(true));
-      const slow = opened.run!({ ...command, binary: "slow", writablePaths: [dir] });
-      await vi.waitFor(() => expect(processes.has("slow")).toBe(true));
+      const next = opened.run!({ ...command, binary: "next", writablePaths: [dir] });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(processes.has("next")).toBe(false); // waits for the aborted command, its discard and the leftover kill
       controller.abort();
       expect((await aborted) as Error).toBeInstanceOf(SandboxRunError);
-      // The slow command is still writing slow.json, which the aborted command's snapshot
-      // cannot tell apart from its own output; nothing may be removed yet.
-      expect(state.remote.removed).toEqual([]);
-
-      state.remote.put(path.join(dir, "slow.json"), "{\"done\":true}");
-      processes.get("slow")!.end(0);
-      await slow;
-      expect(readFileSync(path.join(dir, "slow.json"), "utf8")).toBe("{\"done\":true}");
+      await next;
       expect(state.remote.removed).toEqual([path.join(dir, "aborted.json")]);
-      expect(state.remote.files.has(path.join(dir, "slow.json"))).toBe(true);
+      expect(readFileSync(path.join(dir, "next.json"), "utf8")).toBe("{\"done\":true}");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
 
   it("reports an exec error caused by an abort while the exec starts as an abort", async () => {
     const controller = new AbortController();
@@ -737,7 +731,7 @@ describe("modal provider session lifecycle", () => {
     expect(usageLines()).toHaveLength(1);
   });
 
-  it("drops pending removals once the session is closed", async () => {
+  it("drops pending removals and queued commands once the session is closed", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "docslurp-modal-closed-"));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
@@ -753,20 +747,18 @@ describe("modal provider session lifecycle", () => {
       });
       const opened = await session();
       const controller = new AbortController();
-      const aborted = opened.run!({ ...command, binary: "aborted", writablePaths: [dir] }, controller.signal).catch(
-        (e: unknown) => e,
-      );
+      const aborted = opened.run!({ ...command, binary: "aborted", writablePaths: [dir] }, controller.signal).catch((e: unknown) => e);
       await vi.waitFor(() => expect(processes.has("aborted")).toBe(true));
-      const slow = opened.run!({ ...command, binary: "slow", writablePaths: [dir] }).catch((e: unknown) => e);
-      await vi.waitFor(() => expect(processes.has("slow")).toBe(true));
+      const queued = opened.run!({ ...command, binary: "queued", writablePaths: [dir] }).catch((e: unknown) => e);
+      await opened.close();
       controller.abort();
       await aborted;
-      await opened.close();
-      processes.get("slow")!.end(0);
-      await slow;
+      expect(await queued).toBeInstanceOf(Error);
+      expect(processes.has("queued")).toBe(false);
       expect(state.remote.removed).toEqual([]);
       expect(warn).not.toHaveBeenCalled();
     } finally {
+      warn.mockRestore();
       rmSync(dir, { recursive: true, force: true });
     }
   });

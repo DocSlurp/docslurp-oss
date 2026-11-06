@@ -30,8 +30,8 @@ const LAUNCH_SCRIPT = [
 export const PARSER_VM_UID = 10001;
 
 /** The tools the root path calls, by absolute path: never from PATH, which the command's env sets (council K #4). */
-export interface ParserVmTools { id: string; setpriv: string; chown: string }
-export const PARSER_VM_TOOLS: ParserVmTools = { id: "/usr/bin/id", setpriv: "/usr/bin/setpriv", chown: "/usr/bin/chown" };
+export interface ParserVmTools { id: string; setpriv: string }
+export const PARSER_VM_TOOLS: ParserVmTools = { id: "/usr/bin/id", setpriv: "/usr/bin/setpriv" };
 
 /** argv prefix that runs a command as PARSER_VM_UID (no new privileges, no supplementary groups). */
 export function asParserUser(tools: ParserVmTools = PARSER_VM_TOOLS): string[] {
@@ -56,7 +56,9 @@ function startScript(tools: ParserVmTools): string {
     'n=$2; shift 2',
     `u=$(${q(tools.id)} -u) || { echo "parser VM: cannot read the uid; refusing" >&2; exit 126; }`,
     'if [ "$u" = 0 ]; then',
-    `  i=0; while [ "$i" -lt "$n" ]; do [ -d "$1" ] && ${q(tools.chown)} -h ${PARSER_VM_UID}:${PARSER_VM_UID} -- "$1"; shift; i=$((i + 1)); done`,
+    // Writable directories are created by the parser user (staging runs as uid 10001), so root never changes ownership
+    // in a job tree: a chown there could be steered through a swapped parent link (council O #4).
+    '  shift "$n"',
     `  [ -x ${q(tools.setpriv)} ] || { echo "parser VM: setpriv unavailable; refusing to run as root" >&2; exit 126; }`,
     `  exec ${asParserUser(tools).map(q).join(" ")} "$@"`,
     'fi',
@@ -96,3 +98,23 @@ export const HARDEN_LINKS_ARGV = ["/bin/sh", "-c", [
 export function killArgv(control: string): string[] {
   return ["/bin/sh", "-c", KILL_SCRIPT, "sh", control];
 }
+
+/**
+ * Run as root between commands (council M #3, O #4): SIGKILL every live process of PARSER_VM_UID, found by scanning
+ * /proc (zombies skipped: the VM's idle main process does not reap them), until none is left. Exits 4 when some survive
+ * 50 rounds; the session then fails closed.
+ */
+export const KILL_PARSER_USER_ARGV = ["/bin/sh", "-c", [
+  "i=0",
+  'while [ "$i" -lt 50 ]; do',
+  "  found=",
+  "  for d in /proc/[0-9]*; do",
+  `    [ "$(stat -c %u "$d" 2>/dev/null)" = ${PARSER_VM_UID} ] || continue`,
+  '    grep -q "^State:[[:space:]]*Z" "$d/status" 2>/dev/null && continue',
+  '    found=1; kill -9 "${d#/proc/}" 2>/dev/null',
+  "  done",
+  '  [ -z "$found" ] && exit 0',
+  "  i=$((i + 1))",
+  "done",
+  "exit 4",
+].join("\n")];

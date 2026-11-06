@@ -16,7 +16,7 @@ import {
   type SandboxResult,
   type SandboxSession,
 } from "../../types.js";
-import { asParserUser, CONTROL_DIR, HARDEN_LINKS_ARGV, killArgv, launchArgv } from "./control.js";
+import { asParserUser, CONTROL_DIR, HARDEN_LINKS_ARGV, KILL_PARSER_USER_ARGV, killArgv, launchArgv } from "./control.js";
 import { SessionStaging, type RemoteEntry, type RemoteFs, type RemoteSnapshot } from "./staging.js";
 import { vmOnlyParsing } from "../../../lib/vm-only-parsing.js";
 
@@ -551,12 +551,18 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
        * has nothing to kill.
        */
       async function killParserUserProcesses(): Promise<void> {
+        // As root, so it needs no fork as the parser user (RLIMIT_NPROC cannot stop it), and verified: a parser-user process
+        // left alive fails the session closed (council O #4).
+        let code: number | null = null;
         try {
-          // The shell's builtin kill (slim images ship no kill binary); kill(-1) spares the calling shell.
-          const proc = await sandbox!.exec([...asParserUser(), "/bin/sh", "-c", "kill -9 -1 2>/dev/null; exit 0"], { timeoutMs: KILL_SETTLE_MS });
-          await proc.wait();
+          const proc = await sandbox!.exec(KILL_PARSER_USER_ARGV, { timeoutMs: KILL_SETTLE_MS * 3 });
+          code = await proc.wait();
         } catch (error) {
-          console.warn(`[parser-sandbox] provider=modal leftover kill failed: ${safeMessage(config, error)}`);
+          console.error(`[parser-sandbox] provider=modal leftover kill failed: ${safeMessage(config, error)}`);
+        }
+        if (code !== 0) {
+          await terminate().catch(() => {});
+          throw new Error("parser VM leftover processes could not be killed; session closed");
         }
       }
 
@@ -570,8 +576,25 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         return cleaning;
       }
 
-      async function execute(command: SandboxCommand, started: number, signal?: AbortSignal): Promise<SandboxResult> {
+      /**
+       * One command at a time per session (council O #4): staging, the run, the leftover kill and the download never
+       * overlap another command's, so a user-wide kill can never hit a command that is starting or running.
+       */
+      let sessionQueue: Promise<unknown> = Promise.resolve();
+      function execute(command: SandboxCommand, started: number, signal?: AbortSignal): Promise<SandboxResult> {
+        const turn = sessionQueue.then(() => executeExclusive(command, started, signal));
+        sessionQueue = turn.catch(() => {});
+        return turn;
+      }
+
+      /** Whether the running command already killed the parser user's leftovers (before its download). */
+      let cleanedAfterRun = false;
+
+      async function executeExclusive(command: SandboxCommand, started: number, signal?: AbortSignal): Promise<SandboxResult> {
+        // A command queued behind one that closed the session never starts.
+        if (closed) throw new SandboxRunError("modal sandbox session is closed");
         while (discarding || cleaning) await (discarding ?? cleaning);
+        cleanedAfterRun = false;
         inFlight++;
         try {
           try { return await withDeadline(executeCommand(command, started, signal), command.limits.timeoutMs + 60_000); }
@@ -584,7 +607,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           }
         } finally {
           inFlight--;
-          if (inFlight === 0 && sandbox && !closed) await cleanLeftovers();
+          if (inFlight === 0 && sandbox && !closed && !cleanedAfterRun) await cleanLeftovers();
           if (inFlight === 0 && pendingDiscards.length > 0 && !closed) {
             discarding ??= runDiscards();
             await discarding;
@@ -615,7 +638,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           }
           if (outcome.kind === "exited" && !signal?.aborted) {
             // Leftover processes die before anything is read back or staged (council M #3), when this is the only command.
-            if (inFlight === 1) await cleanLeftovers();
+            if (inFlight === 1) { await cleanLeftovers(); cleanedAfterRun = true; }
             // Only what this command created or changed comes back.
             if (closed) throw new Error("parser VM session closed before download");
             await staging!.download(snapshot);
