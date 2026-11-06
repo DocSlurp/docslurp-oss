@@ -49,6 +49,8 @@ export interface ModalConfig {
   vmIdleSeconds?: number;
   /** Tests only: how long a terminate waits for a create call in flight (CREATE_SETTLE_MS). */
   createSettleMs?: number;
+  /** Tests only: the deadline on one read-only asset write (ASSET_WRITE_DEADLINE_MS). */
+  assetWriteDeadlineMs?: number;
   /** Tests only: when an unconfirmed creation's token is released at the latest (default: lifetime plus margins). */
   unconfirmedBackstopMs?: number;
 }
@@ -287,6 +289,9 @@ const JOB_TREE_PROBE_SCRIPT = [
   '  mkdir -p -- "$r" && d=$(mktemp -d "$r/.docslurp-probe.XXXXXX") && rmdir -- "$d" || exit 3',
   "done",
 ].join("\n");
+
+/** How long one read-only asset file may take to reach a VM. */
+const ASSET_WRITE_DEADLINE_MS = 3 * 60_000;
 
 /** How long the worker's read-only assets (the ClamAV definitions) may take to reach a VM, apart from any command. */
 const ASSET_STAGING_DEADLINE_MS = 10 * 60_000;
@@ -619,6 +624,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
          * the same moment (lane.accountedAt, real-Modal M1); the worker token is held from the creation request.
          */
         let lifetimeStart: number | undefined;
+        /** When this lane asked Modal for its VM: the unconfirmed-creation backstop counts from here (council X #5). */
+        let createRequestedAt: number | undefined;
         let rawCreate: Promise<unknown> | undefined;
         let terminateDone = false;
 
@@ -702,13 +709,14 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
                   console.error(`[parser-sandbox] provider=modal status=vm-creation-unconfirmed activity=${context.activityId}; holding its capacity until the create call settles`);
                   // Backstop (council W #6): a create call that never settles cannot hold the token forever. Any VM it made
                   // started before now and Modal stops it within its lifetime, so the token is free after that and margins.
+                  // Measured from the create request (council X #5): the cap holds however long terminate took to give up.
                   const lifetimeMs = config.sessionTimeoutSeconds * 1000;
                   const backstopMs = config.unconfirmedBackstopMs ?? lifetimeMs + Math.min(LIFETIME_MARGIN_MS, lifetimeMs * 0.1) + CREATE_DEADLINE_MS;
                   setTimeout(() => {
                     if (!holdsToken) return;
                     console.error(`[parser-sandbox] provider=modal status=vm-creation-backstop activity=${context.activityId}; releasing capacity after the VM lifetime`);
                     releaseToken();
-                  }, backstopMs).unref();
+                  }, Math.max(0, (createRequestedAt ?? Date.now()) + backstopMs - Date.now())).unref();
                   throw new Error("modal sandbox creation did not settle; its capacity stays held until it does");
                 }
               }
@@ -743,6 +751,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             const image = config.imageId ? await withDeadline(client.images.fromId(config.imageId), 30_000) : client.images.fromRegistry(config.image, registrySecret);
             // A unique name, so a VM whose create call failed in transit can be found and stopped (council W #6).
             const name = `docslurp-parser-${randomBytes(12).toString("hex")}`;
+            createRequestedAt = Date.now();
             const create = client.sandboxes.create(app, image, {
               name,
               runtime: "vm",
@@ -1005,7 +1014,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
                 const data = await readFile(path.join(hostDir, entry.name));
                 total += data.byteLength;
                 if (total > 512 * 1024 * 1024) throw new Error("read-only assets exceed transfer limit");
-                await sandbox!.filesystem.writeBytes(data, `${vmDir}/${entry.name}`);
+                // Each write has its own deadline (council X #5), so one stuck transfer cannot hold the worker's staging slot.
+                await withDeadline(sandbox!.filesystem.writeBytes(data, `${vmDir}/${entry.name}`), config.assetWriteDeadlineMs ?? ASSET_WRITE_DEADLINE_MS);
                 files.push(`${vmDir}/${entry.name}`);
               }
               await runChecked(sandbox!, ["/bin/chmod", "0755", "--", ASSET_ROOT, vmDir], "parser VM asset directory setup failed");

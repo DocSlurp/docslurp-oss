@@ -310,6 +310,8 @@ function fakeSdk(
     treeBroken?: boolean | (() => boolean);
     /** The job-tree upload copy (cp as the parser user) exits non-zero, e.g. ENOSPC in the job tree. */
     cpFails?: boolean;
+    /** Read-only asset writes never answer while this returns true (council X #5). */
+    assetWriteHangs?: () => boolean;
     /** Each read-only asset write takes this long (council W #7). */
     assetWriteDelayMs?: number;
     /** A create that fails left a VM behind anyway, found by name (council W #6). */
@@ -394,6 +396,7 @@ function fakeSdk(
         state.rootWrites.push(p);
         const failure = typeof opts.writeFails === "function" ? opts.writeFails(p) : undefined;
         if (failure) return Promise.reject(new Error(failure));
+        if (opts.assetWriteHangs?.() && p.startsWith("/opt/docslurp-assets/")) return new Promise<void>(() => {});
         if (opts.assetWriteDelayMs && p.startsWith("/opt/docslurp-assets/")) {
           state.assetWritesInFlight++;
           state.maxAssetWritesInFlight = Math.max(state.maxAssetWritesInFlight, state.assetWritesInFlight);
@@ -688,6 +691,33 @@ describe("modal provider session lifecycle", () => {
     expect((theirs as SandboxInfrastructureError).blameDocumentId).toBe("doc-a");
     expect((theirs as SandboxInfrastructureError).afterCommand).toBe(false);
     await opened.close();
+  });
+
+  it("a stuck asset write times out, strikes no one and frees the worker's staging slot (council X #5)", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "docslurp-x5-"));
+    try {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const assets = path.join(dir, "docslurp-clam-definitions-0123");
+      mkdirSync(assets);
+      writeFileSync(path.join(assets, "daily.cvd"), "defs");
+      let hang = true;
+      const { sdk } = fakeSdk({ assetWriteHangs: () => hang, exec: async () => finished() });
+      const provider = createModalProvider(async () => sdk);
+      const pooled = { ...config, vmsPerWorker: 2, assetWriteDeadlineMs: 100 };
+      const a = await provider.openSession(pooled, { activityId: "a" });
+      const error = await a.run!({ ...command, readOnlyAssetDir: assets }).catch((failure: unknown) => failure);
+      expect(error).toBeInstanceOf(SandboxInfrastructureError);
+      expect(String((error as Error).message)).toMatch(/read-only asset staging failed: parser VM control deadline exceeded/);
+      expect((error as SandboxInfrastructureError).strikes).toBe(false);
+      // The slot is free: another VM stages its assets.
+      hang = false;
+      const b = await provider.openSession(pooled, { activityId: "b" });
+      await expect(b.run!({ ...command, readOnlyAssetDir: assets })).resolves.toMatchObject({ exitCode: 0 });
+      await a.close(); await b.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("stages the read-only assets into one VM at a time per worker, never into several at once (council W #7)", async () => {
@@ -1318,9 +1348,9 @@ describe("modal provider session lifecycle", () => {
         await vi.advanceTimersByTimeAsync(31);
         expect(await failed).toBeInstanceOf(Error);
         const b = provider.openSession(pooled, { activityId: "b" }).catch((error: unknown) => error);
-        await vi.advanceTimersByTimeAsync(60_000);
+        await vi.advanceTimersByTimeAsync(88_900); // ~119.9 s after the create request
         expect(state.createOptions).toHaveLength(1); // still held
-        await vi.advanceTimersByTimeAsync(61_000);
+        await vi.advanceTimersByTimeAsync(1_200); // past 120 s from the request, not from the terminate (council X #5)
         expect(state.createOptions).toHaveLength(2); // the backstop freed it for B
         await vi.advanceTimersByTimeAsync(31_000);
         await b;
