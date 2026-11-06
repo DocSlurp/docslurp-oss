@@ -262,6 +262,7 @@ fn tiny_glyphs_over_the_extraction_limit_are_dropped_as_extraction_drops_them() 
     // 9-16 text pages, and dense.
     assert_eq!(pdf.text_equivalents_per_page, [0, 0, 0, 0, 1, 0, 0]);
     assert_eq!(pdf.dense_pages, 1);
+    assert_eq!((pdf.page_equivalents_per_page, pdf.dense_page_equivalents), ([0, 0, 0, 0, 1, 0, 0], 15));
 }
 
 #[test]
@@ -278,6 +279,8 @@ fn reports_page_dimensions_and_area_distribution() {
     assert_eq!((pdf.median_page_width_pt, pdf.median_page_height_pt, pdf.max_page_width_pt, pdf.max_page_height_pt), (792, 1_224, 792, 1_224));
     assert_eq!(pdf.area_equivalents_per_page, [0, 1, 0, 0, 0, 0, 0, 0]);
     assert_eq!(pdf.text_equivalents_per_page, [1, 0, 0, 0, 0, 0, 0]);
+    // Tabloid: two pages of area, under the dense threshold.
+    assert_eq!((pdf.page_equivalents_per_page, pdf.dense_page_equivalents), ([0, 1, 0, 0, 0, 0, 0], 0));
 }
 
 #[test]
@@ -309,4 +312,19 @@ fn reports_the_layout_walkers_image_facts_and_text_drawn_over_images() {
     let plain = probe_fixture("scan_plain.pdf");
     assert_eq!((pdf(&plain).glyphs_over_images, pdf(&plain).text_over_image_pages), (0, 0));
     assert_eq!(pdf(&plain).image_ppi.iter().sum::<u32>(), 1);
+}
+
+fn worker_fixture(name: &str) -> FileProfile {
+    let path = format!("{}/../../worker/testdata/pdf-fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+    let bytes = std::fs::read(&path).unwrap_or_else(|error| panic!("{path}: {error}"));
+    probe(Rules::bundled(), &ProbeInput::whole(name, None, &bytes))
+}
+
+#[test]
+fn counts_the_pages_the_router_reads_for_a_scan_beside_native_text() {
+    // The routing eval's generated fixtures (#288): only the scan beside its caption is read.
+    assert_eq!(pdf(&worker_fixture("routing-scan-beside-caption.pdf")).scan_beside_text_pages, 1);
+    for name in ["routing-photo-overlaid-caption.pdf", "routing-letterhead-logo.pdf", "routing-scan-with-text-layer.pdf"] {
+        assert_eq!(pdf(&worker_fixture(name)).scan_beside_text_pages, 0, "{name}");
+    }
 }

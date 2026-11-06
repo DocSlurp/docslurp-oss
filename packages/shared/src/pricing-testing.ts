@@ -43,6 +43,7 @@ export const DISTINCT_TEST_PRICING: Partial<PricingProvider> = {
     creditsPer1kPages: mode === "fast" ? { min: 5, max: 5 } : mode === "good" ? { min: 250, max: 250 } : { min: 5, max: 250 },
     priceNote: "Test price note.",
   }),
+  pageEquivalentAllowance: 1,
   plans: { creditPacksCents: [2_500, 5_000, 10_000], starterCredits: 250, workerSlots: { starter: 50, funded: 250 }, privateDedicatedMonthlyUsd: null },
   publicPrices: () => ({ rule: "test", summary: "Test summary: pay per page." }),
   // A simple test quote over the provider's own delegates: the fewest pages all Fast to the most pages all Rich, media by

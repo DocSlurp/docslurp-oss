@@ -17,6 +17,14 @@ export const IMAGE_AREA_DPI = 150;
 /** A page whose text counts as more than this many pages is reported as dense (possible hidden or stuffed text). */
 export const DENSE_PAGE_EQUIVALENTS = 3;
 
+/**
+ * Page equivalents one page bills under a provider's per-page allowance (PricingProvider.pageEquivalentAllowance): 1 up
+ * to the allowance, its full volume above it.
+ */
+export function billedPageEquivalents(equivalents: number, allowance: number): number {
+  return equivalents > allowance ? equivalents : 1;
+}
+
 /** Pages of text on one extracted page by the text rule (never sampled), at least 1. */
 export function pageTextEquivalents(pageText: string): number {
   return pageText.trim() ? Math.max(1, measuredTextPages(pageText)) : 1;

@@ -99,6 +99,11 @@ pub struct PdfProfile {
     pub area_equivalents_per_page: [u32; AREA_EQUIVALENT_BUCKETS],
     /// Sampled pages whose text counts as more than the dense threshold (3 pages).
     pub dense_pages: u32,
+    /// Sampled pages per page equivalents (the larger of text and area; 1, 2, 3, 4-8, 9-16, 17-64, 65 and up), and the
+    /// equivalents summed over the pages above the dense threshold: with the 1-3 buckets, the billed volume under any
+    /// per-page allowance of 1 to 3.
+    pub page_equivalents_per_page: [u32; TEXT_EQUIVALENT_BUCKETS],
+    pub dense_page_equivalents: u64,
     /// Median and largest visible page width and height of the sampled pages, in points.
     pub median_page_width_pt: u32,
     pub median_page_height_pt: u32,
@@ -119,6 +124,9 @@ pub struct PdfProfile {
     /// with at least 20 such glyphs.
     pub glyphs_over_images: u64,
     pub text_over_image_pages: u32,
+    /// Sampled pages with native text that also place a scan the router reads (`mixedScanImage`): a non-repeated,
+    /// scan-like image covering a fifth of the page or more, of readable size, with at most two native words inside it.
+    pub scan_beside_text_pages: u32,
 }
 
 /// Facts about an Office or EPUB package.

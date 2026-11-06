@@ -104,7 +104,7 @@ export function applyFileProfile(file: QuoteFile): QuoteFile {
     ...file,
     ...(file.pages === undefined && profile.pages !== undefined ? { pages: profile.pages } : {}),
     ...(() => {
-      const range = profilePageEquivalentRange({ ...(file.pages !== undefined ? { pages: file.pages } : {}), profile });
+      const range = profilePageEquivalentRange({ ...(file.pages !== undefined ? { pages: file.pages } : {}), profile }, pricing().pageEquivalentAllowance);
       return range !== undefined ? { pageEquivalents: range.low, pageEquivalentsHigh: range.high } : {};
     })(),
     ...(file.durationSeconds === undefined && profile.durationSeconds !== undefined ? { durationSeconds: profile.durationSeconds } : {}),

@@ -5,7 +5,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
-  DENSE_PAGE_EQUIVALENTS, PAGE_AREA_EQUIVALENTS_CAP, defaultPipelineFeatures, imageAreaEquivalents, measuredTextPages, pageAreaEquivalentsPt,
+  DENSE_PAGE_EQUIVALENTS, DISTINCT_TEST_PRICING, PAGE_AREA_EQUIVALENTS_CAP, installTestPricing, defaultPipelineFeatures, imageAreaEquivalents, measuredTextPages, pageAreaEquivalentsPt,
   pageTextEquivalents, stripHtmlMarkup,
 } from "@docslurp/shared";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -161,6 +161,25 @@ describe("stuffed PDFs bill the text extraction actually produced", () => {
     // A second render of the same page records nothing more.
     await recordRenderedPageAreas(runId, documentId, [{ pageNumber: 1, area: PAGE_AREA_EQUIVALENTS_CAP }]);
     expect((await store.loadDocument(documentId))!.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
+  });
+
+  it("bills a page 1 up to the provider's per-page allowance and its full volume above it", async () => {
+    const { runId, documentId } = await documentRun(3);
+    // Allowance 3: a 2-page tabloid and a 3-equivalent page bill 1 each; an 8-equivalent page bills 8.
+    const rows = [{ pageNumber: 1, area: 2 }, { pageNumber: 2, text: 3 }, { pageNumber: 3, area: 8 }];
+    expect(await recordPageEquivalents(sql(), { runId, documentId, rows, allowance: 3 })).toBe(1 + 1 + 8);
+    // The provider's allowance is the default: the open default (1) bills every page's full volume.
+    const full = await documentRun(3);
+    expect(await recordPageEquivalents(sql(), { runId: full.runId, documentId: full.documentId, rows })).toBe(2 + 3 + 8);
+    const installed = installTestPricing({ pageEquivalentAllowance: 3 });
+    try {
+      const hosted = await documentRun(3);
+      expect(installed.pageEquivalentAllowance).toBe(3);
+      expect(await recordPageEquivalents(sql(), { runId: hosted.runId, documentId: hosted.documentId, rows: rows.slice(0, 2) })).toBeNull();
+      expect((await store.loadDocument(hosted.documentId))!.billingPages).toBeNull();
+    } finally {
+      installTestPricing(DISTINCT_TEST_PRICING);
+    }
   });
 
   it("an uploaded image's frames count their decoded area as well as their text", async () => {

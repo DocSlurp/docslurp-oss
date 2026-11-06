@@ -99,6 +99,12 @@ export const pdfProfileSchema = z.strictObject({
   areaEquivalentsPerPage: z.array(count).length(8),
   /** Sampled pages whose text counts as more than DENSE_PAGE_EQUIVALENTS pages. */
   densePages: count,
+  /**
+   * Sampled pages per page equivalents (the larger of text and area; TEXT_EQUIVALENT_BUCKETS), and the equivalents summed
+   * over the pages above DENSE_PAGE_EQUIVALENTS: with the 1-3 buckets, the billed volume under an allowance of 1 to 3.
+   */
+  pageEquivalentsPerPage: z.array(count).length(7),
+  densePageEquivalents: z.number().int().nonnegative().max(10 ** 12),
   /** Median and largest visible page width and height, in points. */
   medianPageWidthPt: z.number().int().nonnegative().max(10_000_000),
   medianPageHeightPt: z.number().int().nonnegative().max(10_000_000),
@@ -118,6 +124,12 @@ export const pdfProfileSchema = z.strictObject({
   /** Glyphs shown inside such an image's box (a text layer over a scan, captions over a figure), and pages with 20 or more. */
   glyphsOverImages: z.number().int().nonnegative().max(10 ** 12),
   textOverImagePages: count,
+  /**
+   * Sampled pages with native text that also place a scan the page router reads (page-raster-routing.ts
+   * `mixedScanImage`): a non-repeated, scan-like image over a fifth of the page or more, readable, with at most two
+   * native words inside it.
+   */
+  scanBesideTextPages: count,
 });
 export type PdfProfile = z.infer<typeof pdfProfileSchema>;
 
@@ -184,6 +196,7 @@ export function normalizeFileProfile(profile: FileProfile, file: { size: number 
       // Estimated pages add glyphs no size was measured for: the histogram may then hold fewer, never more.
       || (pdf.textEstimatedPages > 0 ? sum(pdf.charsByFontSize) > pdf.sampledChars : sum(pdf.charsByFontSize) !== pdf.sampledChars)
       || sum(pdf.textEquivalentsPerPage) !== pdf.sampledPages || sum(pdf.areaEquivalentsPerPage) !== pdf.sampledPages
+      || sum(pdf.pageEquivalentsPerPage) !== pdf.sampledPages
       || sum(pdf.imagePpi) !== pdf.images || sum(pdf.imageBytesPerPixel) !== pdf.images) {
       delete normalized.pdf;
     } else {
@@ -221,8 +234,12 @@ export function normalizeFileProfile(profile: FileProfile, file: { size: number 
         // Dense pages are the text histogram's pages over 3 equivalents.
         densePages: pdf.textEquivalentsPerPage.slice(3).reduce((total, pages) => total + pages, 0),
         textEstimatedPages: Math.min(pdf.textEstimatedPages, sampled),
+        // Each page over the dense threshold holds at least 4 equivalents, and they are part of the page sum.
+        densePageEquivalents: Math.max(4 * sum(pdf.pageEquivalentsPerPage.slice(3)), Math.min(pdf.densePageEquivalents, pdf.sampledPageEquivalents)),
         glyphsOverImages: Math.min(pdf.glyphsOverImages, pdf.sampledChars),
         textOverImagePages: Math.min(pdf.textOverImagePages, sampled),
+        // Only pages with native text, and never a page already held by a full-page image.
+        scanBesideTextPages: Math.min(pdf.scanBesideTextPages, Math.max(0, sampled - Math.min(sampled, pdf.rasterPages)), pdf.textLayerPages),
         medianPageWidthPt: Math.min(pdf.medianPageWidthPt, pdf.maxPageWidthPt),
         medianPageHeightPt: Math.min(pdf.medianPageHeightPt, pdf.maxPageHeightPt),
         // Histograms are kept as measured: their totals were checked above.

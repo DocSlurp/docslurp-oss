@@ -158,6 +158,11 @@ fn probe_document(rules: &Rules, document: &Document, file_bytes: usize, mut res
         if text > rules.page_equivalents.dense_page_equivalents {
             profile.dense_pages += 1;
         }
+        let page_bucket = TEXT_EQUIVALENT_BOUNDS.iter().rposition(|bound| page >= *bound).unwrap_or(0);
+        profile.page_equivalents_per_page[page_bucket] += 1;
+        if page > rules.page_equivalents.dense_page_equivalents {
+            profile.dense_page_equivalents = profile.dense_page_equivalents.saturating_add(count(page));
+        }
         profile.off_page_chars = profile.off_page_chars.saturating_add(count(volume.off_page));
         profile.tiny_chars_dropped = profile.tiny_chars_dropped.saturating_add(count(volume.tiny_dropped));
         if volume.estimated {
@@ -177,6 +182,10 @@ fn probe_document(rules: &Rules, document: &Document, file_bytes: usize, mut res
         profile.glyphs_over_images = profile.glyphs_over_images.saturating_add(count(over));
         if over >= 20.0 {
             profile.text_over_image_pages += 1;
+        }
+        // `mixedScanImage`: a page with native text the router reads for a scan placed beside its text.
+        if !raster && reading.words > 0.0 && images.iter().any(|image| is_mixed_scan(routing, image, &reading.runs)) {
+            profile.scan_beside_text_pages += 1;
         }
     }
     let points = |value: f64| value.round().clamp(0.0, 10_000_000.0) as u32;
@@ -462,12 +471,15 @@ struct ImageUse {
     bbox: [f64; 4],
     ppi: f64,
     bytes_per_pixel: f64,
+    /// The shorter side in pixels, and a bilevel or fax encoding (CCITT, JBIG2, 1 bit per component, an image mask).
+    short_side_px: f64,
+    bilevel: bool,
 }
 
 impl ImageUse {
     #[cfg(test)]
     fn plain(id: Option<ObjectId>, coverage: f64) -> Self {
-        Self { id, coverage, bbox: [0.0, 0.0, 612.0, 792.0], ppi: 150.0, bytes_per_pixel: 0.2 }
+        Self { id, coverage, bbox: [0.0, 0.0, 612.0, 792.0], ppi: 150.0, bytes_per_pixel: 0.2, short_side_px: 1_000.0, bilevel: false }
     }
 }
 
@@ -477,6 +489,30 @@ struct GlyphRun {
     x: f64,
     y: f64,
     glyphs: f64,
+    /// Words the run starts or holds (the word counter's rule over the run alone).
+    words: f64,
+}
+
+/// Words in one shown string: alphanumeric runs of two or more, or for two-byte (CID) strings a word per
+/// `unspaced` glyphs.
+fn run_words(bytes: &[u8], glyphs: f64, unspaced: f64) -> f64 {
+    let zero_high_bytes = bytes.iter().step_by(2).filter(|byte| **byte == 0).count();
+    if bytes.len() >= 4 && zero_high_bytes * 2 >= bytes.len() / 2 {
+        return (glyphs / unspaced.max(1.0)).ceil();
+    }
+    let mut words = 0.0;
+    let mut length = 0;
+    for byte in bytes.iter().chain(std::iter::once(&b' ')) {
+        if byte.is_ascii_alphanumeric() || *byte >= 0xC0 {
+            length += 1;
+        } else {
+            if length >= 2 {
+                words += 1.0;
+            }
+            length = 0;
+        }
+    }
+    words
 }
 
 /// Text positions kept per page for the text-over-image count; beyond it the count covers the first runs only.
@@ -713,6 +749,19 @@ fn drawn_document(routing: &PageRasterRouting, document: &Document, file_bytes: 
     drawn_per_page >= routing.drawn_content_min_bytes_per_page
 }
 
+/// `mixedScanImage` (shared page-raster-routing.ts) for one non-repeated image: placed over a fifth of the page or more,
+/// readable, scan-like (bilevel or fax, or compressed like ink on paper) and with almost no native words inside its box.
+fn is_mixed_scan(routing: &PageRasterRouting, image: &ImageUse, runs: &[GlyphRun]) -> bool {
+    let inside = |run: &&GlyphRun| run.x >= image.bbox[0] && run.x <= image.bbox[2] && run.y >= image.bbox[1] && run.y <= image.bbox[3];
+    let words_inside: f64 = runs.iter().filter(inside).map(|run| run.words).sum();
+    image.coverage >= routing.mixed_scan_min_coverage
+        && words_inside <= routing.mixed_scan_max_words_inside
+        && image.short_side_px >= routing.mixed_scan_min_short_side_px
+        && image.ppi.is_finite()
+        && image.ppi >= routing.mixed_scan_min_ppi
+        && (image.bilevel || image.bytes_per_pixel <= routing.scan_like_max_bytes_per_pixel)
+}
+
 /// `decidePageRaster` for the sampled page: a sparse page (fewer than `sparsePageWords` words) whose content is held by
 /// significant, non-repeated images is a full-page raster (a scan or a photo of the page).
 fn is_raster_page(routing: &PageRasterRouting, words: f64, images: &ImageTotals) -> bool {
@@ -823,7 +872,8 @@ impl<'a> Context<'a, '_> {
         }
         volume.chars += glyphs;
         if stats.runs.len() < MAX_GLYPH_RUNS_PER_PAGE {
-            stats.runs.push(GlyphRun { x, y, glyphs });
+            let words = run_words(bytes, all, self.routing.unspaced_chars_per_word);
+            stats.runs.push(GlyphRun { x, y, glyphs, words });
         }
         let volume = &mut stats.text;
         if text.new_line {
@@ -840,7 +890,7 @@ impl<'a> Context<'a, '_> {
         }
     }
 
-    fn record_image(&self, stats: &mut PageStats, id: Option<ObjectId>, ctm: &Matrix, width: f64, height: f64, stream_bytes: usize) {
+    fn record_image(&self, stats: &mut PageStats, id: Option<ObjectId>, ctm: &Matrix, width: f64, height: f64, stream_bytes: usize, bilevel: bool) {
         let placed = (ctm[0] * ctm[3] - ctm[1] * ctm[2]).abs();
         let coverage = (placed / self.area).min(1.0);
         if !coverage.is_finite()
@@ -857,11 +907,13 @@ impl<'a> Context<'a, '_> {
             corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max),
             corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max),
         ];
-        // Pixels per inch as placed: the image's pixels over its placed size (the walker's ppi, from `pdfimages -list`).
-        let placed_inches = ((ctm[0].hypot(ctm[1])) / 72.0).max(1e-9);
-        let ppi = width / placed_inches;
+        // Pixels per inch as placed, the lower of the two axes: the image's pixels over its placed size (the walker's
+        // ppi, from `pdfimages -list`).
+        let x_ppi = width / ((ctm[0].hypot(ctm[1])) / 72.0).max(1e-9);
+        let y_ppi = height / ((ctm[2].hypot(ctm[3])) / 72.0).max(1e-9);
+        let ppi = x_ppi.min(y_ppi);
         let bytes_per_pixel = if width * height > 0.0 { stream_bytes as f64 / (width * height) } else { 0.0 };
-        let image = ImageUse { id, coverage, bbox, ppi, bytes_per_pixel };
+        let image = ImageUse { id, coverage, bbox, ppi, bytes_per_pixel, short_side_px: width.min(height), bilevel };
         if stats.images.len() < MAX_TRACKED_IMAGES_PER_PAGE {
             stats.images.push(image);
         } else if let Some(smallest) = stats.images.iter_mut().min_by(|a, b| a.coverage.total_cmp(&b.coverage)) {
@@ -870,6 +922,20 @@ impl<'a> Context<'a, '_> {
                 *smallest = image;
             }
         }
+    }
+
+    /// A bilevel or fax image: a CCITT or JBIG2 filter, 1 bit per component, or an image mask.
+    fn bilevel(&self, dict: &Dictionary, filter_keys: &[&[u8]], bpc_keys: &[&[u8]], mask_keys: &[&[u8]]) -> bool {
+        let value = |keys: &[&[u8]]| keys.iter().find_map(|key| dict.get(key).ok().and_then(|object| deref(self.document, object)).map(|(_, value)| value));
+        let fax = |name: &[u8]| matches!(name, b"CCITTFaxDecode" | b"CCF" | b"JBIG2Decode");
+        let filtered = match value(filter_keys) {
+            Some(Object::Name(name)) => fax(name),
+            Some(Object::Array(filters)) => filters.iter().any(|filter| matches!(filter, Object::Name(name) if fax(name))),
+            _ => false,
+        };
+        let one_bit = value(bpc_keys).and_then(number).is_some_and(|bits| bits == 1.0);
+        let mask = matches!(value(mask_keys), Some(Object::Boolean(true)));
+        filtered || one_bit || mask
     }
 
     fn image_size(&self, dict: &Dictionary, width_key: &[u8], height_key: &[u8]) -> (f64, f64) {
@@ -987,7 +1053,8 @@ impl<'a> Context<'a, '_> {
                         if width == 0.0 {
                             (width, height) = self.image_size(&image.dict, b"Width", b"Height");
                         }
-                        self.record_image(stats, None, &ctm, width, height, image.content.len());
+                        let bilevel = self.bilevel(&image.dict, &[b"F", b"Filter"], &[b"BPC", b"BitsPerComponent"], &[b"IM", b"ImageMask"]);
+                        self.record_image(stats, None, &ctm, width, height, image.content.len(), bilevel);
                     }
                 }
                 "Do" => {
@@ -997,7 +1064,8 @@ impl<'a> Context<'a, '_> {
                     match subtype {
                         Some(Object::Name(kind)) if kind == b"Image" => {
                             let (width, height) = self.image_size(&xobject.dict, b"Width", b"Height");
-                            self.record_image(stats, id, &ctm, width, height, xobject.content.len());
+                            let bilevel = self.bilevel(&xobject.dict, &[b"Filter"], &[b"BitsPerComponent"], &[b"ImageMask"]);
+                            self.record_image(stats, id, &ctm, width, height, xobject.content.len(), bilevel);
                         }
                         Some(Object::Name(kind)) if kind == b"Form" && depth < MAX_FORM_DEPTH => {
                             stats.form_calls += 1;

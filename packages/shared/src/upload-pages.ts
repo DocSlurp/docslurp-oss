@@ -180,12 +180,39 @@ export function quoteFilePages(file: { name: string; type?: string | null; size:
  * sampled pages' equivalents scaled to the document. Equal to the page count for an ordinary document; more for a stuffed
  * one (tiny, invisible or off-page text, oversized pages). Undefined when the profile carries no page facts.
  */
-export function profilePageEquivalents(file: { pages?: number; profile?: { pages?: number; pdf?: { sampledPages: number; sampledPageEquivalents: number } } }): number | undefined {
+type ProfiledPdf = {
+  sampledPages: number;
+  sampledPageEquivalents: number;
+  textEstimatedPages?: number;
+  maxPageEquivalents?: number;
+  pageEquivalentsPerPage?: readonly number[];
+  densePageEquivalents?: number;
+};
+type ProfiledFile = { pages?: number; profile?: { pages?: number; pdf?: ProfiledPdf } };
+
+/**
+ * The sampled pages' billed equivalents under a per-page `allowance` (billedPageEquivalents). Exact for an allowance of 1
+ * to 3 (the page histogram's 1, 2 and 3 buckets plus the dense pages' sum); a larger allowance is quoted as 3, which can
+ * only overstate. Without the page histogram (an older profile), every page's full volume.
+ */
+export function sampledBilledEquivalents(pdf: ProfiledPdf, allowance: number): number {
+  const histogram = pdf.pageEquivalentsPerPage;
+  if (allowance <= 1 || !histogram || histogram.length < 4 || pdf.densePageEquivalents === undefined) return pdf.sampledPageEquivalents;
+  const densePages = histogram.slice(3).reduce((total, pages) => total + pages, 0);
+  let billed = pdf.sampledPages - densePages + pdf.densePageEquivalents;
+  if (allowance < 2) billed += histogram[1]!;
+  if (allowance < 3) billed += 2 * histogram[2]!;
+  return Math.max(pdf.sampledPages, billed);
+}
+
+/** A file's billed page equivalents from its profile under `allowance`, scaled from the sampled pages; at least its pages. */
+export function profilePageEquivalents(file: ProfiledFile, allowance = 1): number | undefined {
   const pages = file.pages ?? file.profile?.pages;
   const pdf = file.profile?.pdf;
   if (!pages || !pdf || pdf.sampledPages <= 0) return undefined;
-  if (pdf.sampledPages >= pages) return Math.max(pages, pdf.sampledPageEquivalents);
-  return Math.max(pages, Math.ceil(pages * (pdf.sampledPageEquivalents / pdf.sampledPages)));
+  const billed = sampledBilledEquivalents(pdf, allowance);
+  if (pdf.sampledPages >= pages) return Math.max(pages, billed);
+  return Math.max(pages, Math.ceil(pages * (billed / pdf.sampledPages)));
 }
 
 /**
@@ -193,17 +220,16 @@ export function profilePageEquivalents(file: { pages?: number; profile?: { pages
  * whose text was estimated (read only in part: up to twice their estimated volume) and of pages not sampled at all when
  * the sampled pages were dense (up to the largest sampled page each).
  */
-export function profilePageEquivalentRange(file: Parameters<typeof profilePageEquivalents>[0] & {
-  profile?: { pdf?: { sampledPages: number; sampledPageEquivalents: number; textEstimatedPages?: number; maxPageEquivalents?: number } };
-}): { low: number; high: number } | undefined {
-  const low = profilePageEquivalents(file);
+export function profilePageEquivalentRange(file: ProfiledFile, allowance = 1): { low: number; high: number } | undefined {
+  const low = profilePageEquivalents(file, allowance);
   const pdf = file.profile?.pdf;
   const pages = file.pages ?? file.profile?.pages;
   if (low === undefined || !pdf || !pages) return low === undefined ? undefined : { low, high: low };
   const estimatedShare = Math.min(1, (pdf.textEstimatedPages ?? 0) / pdf.sampledPages);
   let high = Math.ceil(low * (1 + estimatedShare));
-  if (pages > pdf.sampledPages && (pdf.maxPageEquivalents ?? 1) > 1) {
-    high = Math.max(high, Math.ceil(low + (pages - pdf.sampledPages) * ((pdf.maxPageEquivalents ?? 1) - pdf.sampledPageEquivalents / pdf.sampledPages)));
+  const densest = (pdf.maxPageEquivalents ?? 1) > allowance ? pdf.maxPageEquivalents! : 1;
+  if (pages > pdf.sampledPages && densest > 1) {
+    high = Math.max(high, Math.ceil(low + (pages - pdf.sampledPages) * (densest - sampledBilledEquivalents(pdf, allowance) / pdf.sampledPages)));
   }
   return { low, high: Math.max(low, high) };
 }

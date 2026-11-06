@@ -113,6 +113,12 @@ export interface PricingProvider {
   /** Stamped on every billable unit event and pinned on runs, so a receipt says which rules charged it. */
   version: string;
   plans: PricingPlans;
+  /**
+   * Page equivalents a page may hold and still bill as one page (an integer, 1 or more): a page bills 1 up to the
+   * allowance and its full volume above it (billedPageEquivalents). Billing (documents.billing_pages) and quotes both
+   * apply it; 1 bills every page's full volume.
+   */
+  pageEquivalentAllowance: number;
 
   /** Credits for `pages` pages charged in `mode` (fractional). */
   pageCredits(mode: PageMode, pages: number): number;
@@ -194,6 +200,9 @@ export function assertPricingProvider(value: unknown): asserts value is PricingP
     if (typeof provider[method] !== "function") throw new Error(`pricing provider ${provider.id} has no ${String(method)}()`);
   }
   const plans = provider.plans;
+  if (!Number.isSafeInteger(provider.pageEquivalentAllowance) || provider.pageEquivalentAllowance! < 1 || provider.pageEquivalentAllowance! > 64) {
+    throw new Error(`pricing provider ${provider.id} has an invalid pageEquivalentAllowance`);
+  }
   if (!plans || !Array.isArray(plans.creditPacksCents) || !(plans.workerSlots?.starter >= 1) || !(plans.workerSlots?.funded >= 1)
     || !(plans.starterCredits >= 0)) {
     throw new Error(`pricing provider ${provider.id} has invalid plans`);

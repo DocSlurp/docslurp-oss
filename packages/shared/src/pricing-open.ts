@@ -135,6 +135,7 @@ export const OPEN_PRICING: PricingProvider = {
   apiVersion: 1,
   id: "open",
   version: "open-1",
+  pageEquivalentAllowance: 1,
   plans: { creditPacksCents: [], starterCredits: OPEN_STARTER_CREDITS, workerSlots: { ...OPEN_WORKER_SLOTS }, privateDedicatedMonthlyUsd: null },
   pageCredits: (_mode, pages) => nonNegative(pages) * OPEN_CREDITS_PER_PAGE,
   richPagesForOutputTokens: () => 1,

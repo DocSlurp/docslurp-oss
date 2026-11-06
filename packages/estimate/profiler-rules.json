@@ -92,7 +92,12 @@
   "drawnContentMinBytesPerPage": 16384,
   "repeatedImageMinPages": 3,
   "repeatedImageMinShare": 0.2,
-  "unspacedCharsPerWord": 2
+  "unspacedCharsPerWord": 2,
+  "mixedScanMinCoverage": 0.2,
+  "mixedScanMaxWordsInside": 2,
+  "mixedScanMinShortSidePx": 200,
+  "mixedScanMinPpi": 50,
+  "scanLikeMaxBytesPerPixel": 0.15
  },
  "pageEquivalents": {
   "standardPageAreaPt2": 484704,
