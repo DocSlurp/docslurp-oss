@@ -18,6 +18,12 @@ describe("@docslurp/estimate (wasm)", () => {
     assert.equal(estimator.info().profileSchema, FILE_PROFILE_SCHEMA);
   });
 
+  it("bundles the neutral profiler rules @docslurp/shared generated, exactly", () => {
+    const bundled = JSON.parse(readFileSync(new URL("../profiler-rules.json", import.meta.url), "utf8"));
+    assert.deepEqual(estimator.rules(), bundled);
+    assert.equal(estimator.rules().pageRasterRouting.mixedScanMinCoverage, bundled.pageRasterRouting.mixedScanMinCoverage);
+  });
+
   it("profiles every fixture into a small, neutral profile the server schema accepts unchanged", async () => {
     for (const name of fixtureNames) {
       const { file, profile } = await profilePath(estimator, fixture(name));

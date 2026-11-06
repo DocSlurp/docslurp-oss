@@ -104,6 +104,8 @@ export class EstimatorError extends Error {
 
 export type Estimator = {
   info(): EstimatorInfo;
+  /** The neutral evidence and routing rules the probe measures with (`profiler-rules.json`); never priced. */
+  rules(): Record<string, unknown> & { profileSchema: number; pageRasterRouting: Record<string, number>; layout: Record<string, number> };
   readPlan(file: FileMeta): ReadPlan;
   profile(file: FileMeta, head: Uint8Array, tail?: Uint8Array): FileProfile;
   profileBlob(blob: Blob, name?: string): Promise<FileProfile>;

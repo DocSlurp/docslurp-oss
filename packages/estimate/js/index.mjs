@@ -94,6 +94,10 @@ export async function createEstimator(options = {}) {
     info() {
       return call("ds_info");
     },
+    /** The neutral evidence and routing rules the probe measures with (`profiler-rules.json`); never priced. */
+    rules() {
+      return call("ds_rules");
+    },
     /** Bytes `profile` needs of a file: `{ head, tail }` (head === size means the whole file). */
     readPlan(file) {
       return call("ds_read_plan", json(meta(file)));

@@ -15,6 +15,7 @@ import zlib
 from pathlib import Path
 
 HERE = Path(__file__).parent
+CORE_ROOT = HERE.resolve().parent.parent
 
 
 def load(name, file):
@@ -299,7 +300,10 @@ class ReadingOrderTest(Scratch):
         return facts.block_anchors(markdown, words, images, height)
 
     def test_block_counting_matches_the_shared_vectors(self):
-        vectors = json.loads((HERE.parent.parent.parent / 'core/packages/shared/test-vectors/markdown-blocks.json').read_text())
+        # Core's own root (worker/scripts -> worker -> root), the same standalone or as the app's core/ checkout. A missing
+        # vector file fails the test: the parity check never passes without the shared vectors.
+        vectors = json.loads((CORE_ROOT / 'packages' / 'shared' / 'test-vectors' / 'markdown-blocks.json').read_text())
+        self.assertGreater(len(vectors), 0)
         for vector in vectors:
             with self.subTest(vector['name']):
                 self.assertEqual(facts.markdown_blocks(vector['page']), vector['blocks'])

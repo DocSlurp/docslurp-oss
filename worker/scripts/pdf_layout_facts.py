@@ -17,7 +17,7 @@ Three independent parts, all fail-soft (an unknown fact is reported as unknown, 
   boxes. The page Markdown is never changed here; the host inserts references at the reported block index.
 
 Classification and routing are NOT decided here: the guest reports measurements, the host applies one reviewed
-threshold table (`core/packages/shared/src/image-routing.ts`).
+threshold table (`packages/shared/src/image-routing.ts`).
 """
 import collections
 import math
@@ -1225,7 +1225,7 @@ def pixel_signals(png_bytes, ppi_hint=None):
     """Measured raster statistics for one extracted PNG, or (None, reason) when they cannot be taken.
 
     Everything is computed from a bounded thumbnail (and one row-projection), with no model and no OCR. The numbers
-    are measurements; the host's threshold table (core/packages/shared/src/image-routing.ts) interprets them.
+    are measurements; the host's threshold table (packages/shared/src/image-routing.ts) interprets them.
     """
     try:
         from PIL import Image, ImageChops
