@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createMigratedDatabase, serveOnRandomPort, startMigratedPostgres } from "@docslurp/worker/testing";
 
 import { INDEX_NAME, buildSettings, directDatabaseUrl, ensureFoldedIndex, indexState } from "../../db/folded-search-index.mjs";
-import { collectReport, knownExtractorIds, pendingMigrations, render } from "../../db/predeploy-check.mjs";
+import { collectReport, knownExtractorIds, pendingMigrations, render, SUPPORTED_VECTOR_BACKENDS } from "../../db/predeploy-check.mjs";
 
 /**
  * The ops scripts of the 0121-0127 release (docs/rollout-0121-0127.md): the concurrent folded-index build is idempotent
@@ -154,6 +154,31 @@ describe("predeploy-check", () => {
     expect(byTitle("api_keys").level).toBe("ok");
     expect(byTitle("webhooks").level).toBe("ok");
     expect(byTitle("Memberships beyond one per user").title).toContain("already applied");
+  });
+
+  it("blocks on stored pipelines naming a vector backend this build no longer writes (Chroma, removed)", async () => {
+    const shared = await import("@docslurp/shared");
+    expect(SUPPORTED_VECTOR_BACKENDS).toEqual([...shared.SUPPORTED_VECTOR_BACKENDS]);
+    const report = async () => {
+      await client.query("begin read only");
+      try {
+        const sections = await collectReport(client, { journal, acceptedPiiPatterns: shared.piiPatternTypeSchema.options });
+        return sections.find((section: { title: string }) => section.title.startsWith("Stored pipelines naming a vector backend"))!;
+      } finally {
+        await client.query("rollback");
+      }
+    };
+    expect((await report()).level).toBe("ok");
+    await client.query(`insert into "user"(id, name, email) values ('vb-u', 'U', 'vb@example.com') on conflict do nothing;
+      insert into organizations(id, name, slug, created_by_user_id) values ('vb-o', 'O', 'vb-o', 'vb-u') on conflict do nothing;
+      insert into workspaces(id, org_id, user_id, name, pipeline) values ('vb-w', 'vb-o', 'vb-u', 'W', '{"vectorBackends": ["lancedb", "chroma"]}'::jsonb)`);
+    try {
+      const blocked = await report();
+      expect(blocked.level).toBe("blocker");
+      expect(blocked.lines.join("\n")).toContain('workspaces: "chroma" in 1 pipeline(s)');
+    } finally {
+      await client.query("delete from workspaces where id = 'vb-w'; delete from organizations where id = 'vb-o'; delete from \"user\" where id = 'vb-u'");
+    }
   });
 
   it("reports the pricing-provider state (0131) and blocks when a runtime role can write it directly", async () => {

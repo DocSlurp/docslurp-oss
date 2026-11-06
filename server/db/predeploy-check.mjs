@@ -14,7 +14,8 @@
 //      promoted and organizations left without a member. A removal from a funded organization or a plain member promoted to
 //      owner is a BLOCKER until an owner acknowledges that exact list with --ack-0127=<hash>, and 0127 itself refuses to run
 //      unless the migrator has DOCSLURP_ACK_0127=<the same hash>;
-//   5. stored pipelines whose piiPolicy.patterns name a detector this build no longer accepts, and stored extraction configs
+//   5. stored pipelines whose piiPolicy.patterns name a detector this build no longer accepts or whose vectorBackends name a
+//      backend it no longer writes (Chroma, removed), and stored extraction configs
 //      naming an extractor id this build does not know (built-in ids plus DOCSLURP_EXTRACTOR_ID_ALIASES keys);
 //   6. recorded stage artifacts that are empty, which the fail-closed readers refuse (object-store existence is not checkable from SQL);
 //   7. runs in flight, by the routing version they are pinned to;
@@ -31,6 +32,8 @@ import { directDatabaseUrl, INDEX_NAME } from "./folded-search-index.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const ONE_ORG_MIGRATION = path.join(here, "migrations", "0127_one_org_per_user.sql");
+/** Vector backends this build writes (packages/shared embedding.ts SUPPORTED_VECTOR_BACKENDS; pinned by its test). */
+export const SUPPORTED_VECTOR_BACKENDS = ["lancedb", "orama", "milvus"];
 /** Migrations of this release that wait a bounded time for their locks (the shared lock prelude, 0122). */
 const BOUNDED_LOCK_MIGRATIONS = ["0122", "0123", "0125", "0126", "0127", "0128", "0129", "0130"];
 /** Lines listed per affected-user report before the rest is summarized (--json carries the same lines). */
@@ -373,6 +376,34 @@ export async function collectReport(client, { journal, acceptedPiiPatterns, extr
       : [
           "The previous release accepted any string here and silently scanned for nothing; this one rejects the pipeline. Edit or remove these entries first:",
           ...badPatterns.map((row) => `${row.source}: "${row.pattern}" in ${row.pipelines} pipeline(s)`),
+        ],
+  ));
+
+  // 4c. Stored pipelines naming a vector backend this build no longer writes (Chroma was removed): they are refused at parse,
+  // never rerouted to another backend.
+  const badBackends = await q(
+    `select source, backend, count(*)::int as pipelines from (
+       select 'workspaces' as source, jsonb_array_elements_text(pipeline -> 'vectorBackends') as backend
+         from workspaces where jsonb_typeof(pipeline -> 'vectorBackends') = 'array'
+       union all
+       select 'upload_sessions', jsonb_array_elements_text(pipeline -> 'vectorBackends')
+         from upload_sessions where jsonb_typeof(pipeline -> 'vectorBackends') = 'array'
+       union all
+       select 'workspace_runs (in flight)', jsonb_array_elements_text(pipeline -> 'vectorBackends')
+         from workspace_runs where status = any($2::text[]) and jsonb_typeof(pipeline -> 'vectorBackends') = 'array'
+     ) found
+     where lower(btrim(backend)) <> all($1::text[])
+     group by source, backend order by source, backend`,
+    [[...SUPPORTED_VECTOR_BACKENDS], ACTIVE_RUN_STATUSES],
+  );
+  sections.push(section(
+    `Stored pipelines naming a vector backend this build does not write: ${badBackends.length}`,
+    badBackends.length > 0 ? "blocker" : "ok",
+    badBackends.length === 0
+      ? [`Every stored vectorBackends entry is one of: ${SUPPORTED_VECTOR_BACKENDS.join(", ")}.`]
+      : [
+          "This build refuses these pipelines (unsupported vector backend; Chroma was removed) instead of writing elsewhere. Edit them to a supported backend first:",
+          ...badBackends.map((row) => `${row.source}: "${String(row.backend).slice(0, 64)}" in ${row.pipelines} pipeline(s)`),
         ],
   ));
 

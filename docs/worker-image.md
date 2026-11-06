@@ -108,7 +108,7 @@ amount when those are included.
    `unstructured[all-docs]` and useless on CPU), torch (708 MB), Python
    LanceDB + pyarrow (340 MB, unused because the worker writes LanceDB from Node),
    two OpenCV builds (270 MB), pypandoc's bundled pandoc (155 MB, a duplicate of
-   apt pandoc), and chromadb/kubernetes. The bundles keep only what each extractor
+   apt pandoc), and (before it was removed) chromadb/kubernetes. The bundles keep only what each extractor
    imports, use CPU-only torch, and leave out the audio extras.
 4. **Duplicate models.** `docling-tools models download` fetches the layout model
    twice (safetensors and ONNX, 171 MB each), TableFormer "fast" and "accurate",
@@ -290,4 +290,4 @@ installs `unstructured` from the real bucket into a scratch cache and deletes it
 image must stay at or under 2.5 GiB. It also checks that runtime pip is off, that
 `/app` and the venv are not writable by uid 10001, that the bundle cache is
 writable, and that no pnpm store, pnpm or venv pip ships. The other images keep
-the 6 GiB budget and the "no torch/chromadb baked" check.
+the 6 GiB budget and the "no torch, chromadb, lancedb or pymilvus baked" check (chromadb is no longer a dependency at all).

@@ -142,13 +142,40 @@ export const embeddingProviderSchema = z.enum([
 ]);
 export type EmbeddingProvider = z.infer<typeof embeddingProviderSchema>;
 
-export const vectorBackendSchema = z.enum([
-  "lancedb",
-  "orama",
-  "chroma",
-  "milvus",
-]);
+/** The vector backends this build writes. Chroma was removed (2026-11-05): a config naming it is refused, never rerouted. */
+export const SUPPORTED_VECTOR_BACKENDS = ["lancedb", "orama", "milvus"] as const;
+
+/** Why `value` is not a vector backend this build accepts. */
+export function unsupportedVectorBackendMessage(value: unknown): string {
+  const name = typeof value === "string" ? value : JSON.stringify(value);
+  return `unsupported vector backend: ${name} (supported: ${SUPPORTED_VECTOR_BACKENDS.join(", ")}${name === "chroma" ? "; Chroma support was removed" : ""})`;
+}
+
+export const vectorBackendSchema = z.enum(SUPPORTED_VECTOR_BACKENDS, { error: (issue) => unsupportedVectorBackendMessage(issue.input) });
 export type VectorBackend = z.infer<typeof vectorBackendSchema>;
+
+/** A vector backend list from configuration (env or a stored pipeline) that names one this build does not write. */
+export class UnsupportedVectorBackendError extends Error {
+  override name = "UnsupportedVectorBackendError";
+}
+
+/**
+ * The backends named in `values` (trimmed, lowercased, de-duplicated, in order), refusing any this build does not write. Never
+ * filters an unknown one out or falls back to another backend: a config that names one fails loudly. `source` names where the
+ * list came from, for the error.
+ */
+export function assertSupportedVectorBackends(values: readonly string[], source: string): VectorBackend[] {
+  const out: VectorBackend[] = [];
+  for (const raw of values) {
+    const value = raw.trim().toLowerCase();
+    if (!value) continue;
+    if (!(SUPPORTED_VECTOR_BACKENDS as readonly string[]).includes(value)) {
+      throw new UnsupportedVectorBackendError(`${source}: ${unsupportedVectorBackendMessage(value)}`);
+    }
+    if (!out.includes(value as VectorBackend)) out.push(value as VectorBackend);
+  }
+  return out;
+}
 export const inferenceLaneSchema = z.enum(["realtime", "standard", "backfill"]);
 export type InferenceLane = z.infer<typeof inferenceLaneSchema>;
 export const inferenceLaneOptions = inferenceLaneSchema.options;
