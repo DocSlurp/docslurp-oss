@@ -269,6 +269,18 @@ function withAssetStagingSlot<T>(work: () => Promise<T>): Promise<T> {
   return run;
 }
 
+/**
+ * As the parser user: every job root is either absent and creatable, or a real directory (not a link) owned by root or the
+ * parser user that takes a new directory. Exit 0 when usable.
+ */
+const JOB_TREE_PROBE_SCRIPT = [
+  'for r in "$@"; do',
+  '  if [ -L "$r" ]; then exit 3; fi',
+  '  if [ -e "$r" ]; then [ -d "$r" ] || exit 3; o=$(stat -c %u -- "$r") || exit 3; [ "$o" = 0 ] || [ "$o" = "$(id -u)" ] || exit 3; fi',
+  '  mkdir -p -- "$r" && d=$(mktemp -d "$r/.docslurp-probe.XXXXXX") && rmdir -- "$d" || exit 3',
+  "done",
+].join("\n");
+
 /** How long the worker's read-only assets (the ClamAV definitions) may take to reach a VM, apart from any command. */
 const ASSET_STAGING_DEADLINE_MS = 10 * 60_000;
 
@@ -901,6 +913,20 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           throw new SandboxInfrastructureError(`parser VM ${code === 5 ? "disk or job root unusable" : "scratch could not be wiped"} after this document's command; VM terminated`, undefined, { afterCommand: true });
         }
 
+        /** The job roots as the next document's staging finds them; a broken one blames `previous` (council X #1). */
+        async function probeJobTree(previous: string): Promise<void> {
+          let code: number | null = null;
+          try {
+            const proc = await sandbox!.exec([...asParserUser(), "/bin/sh", "-c", JOB_TREE_PROBE_SCRIPT, "sh", ...parserJobRoots()], { timeoutMs: 30_000 });
+            code = await proc.wait();
+          } catch (error) {
+            throw new SandboxInfrastructureError(`modal sandbox job tree probe could not run: ${safeMessage(config, error)}`, meterLane(lane), { cause: error });
+          }
+          if (code === 0) return;
+          await terminate().catch(() => {});
+          throw new SandboxInfrastructureError("modal sandbox job tree left unusable by an earlier command (missing, replaced or wrong owner); VM terminated", meterLane(lane), { blameDocumentId: previous });
+        }
+
         let commandCount = 0;
 
         /**
@@ -1001,6 +1027,9 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             await ensureSandbox();
             throwIfAborted(signal);
             command = await withAssets(command);
+            // On a VM another document used last, check its job roots first (council X #1): missing-and-uncreatable,
+            // replaced (not a directory, a link) or owned by someone else is the previous document's doing.
+            if (lane.previousKey !== undefined && lane.previousKey !== command.affinityKey) await probeJobTree(lane.previousKey);
             // Only the command's inputs travel; the parser runtime comes from the image. From here a failure the VM itself
             // reports (no space, the document's own staging timing out) is this document's doing (council W #2).
             ownStaging = true;
@@ -1051,14 +1080,12 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             if (error instanceof SandboxOutputError) {
               // The VM's disk and processes are no longer trusted: it runs nothing more (recheck S #3).
               await terminate().catch(() => {});
-              // Before this command ran, on a VM another document used last, the tree was that document's: the sandbox's
-              // failure for this one (a retry on a fresh VM; the strike limit stops a document that keeps doing it).
-              if (!ran && lane.previousKey !== undefined && lane.previousKey !== command.affinityKey) {
-                // The previous command's document (same activity, so the same run) takes the strike (council W #2).
-                throw new SandboxInfrastructureError(`modal sandbox job tree left unusable by an earlier command: ${error.message}; VM terminated`, meterLane(lane), { cause: error, blameDocumentId: lane.previousKey });
-              }
-              // The document's own files broke a staging rule: its verdict, never retried (recheck Q #1).
-              throw new SandboxOutputError(error.message, meterLane(lane), { cause: error });
+              // Only the job-tree probe blames the previous document (council X #1); it throws its own error, below.
+              // After its command ran, or a size limit on its own files: this document's verdict, never retried (recheck Q #1).
+              if (ran || /exceeds (?:its )?limit/.test(error.message)) throw new SandboxOutputError(error.message, meterLane(lane), { cause: error });
+              // Anything else this document's own staging hit (a cp or mkdir in its job tree that the VM refused, an
+              // unreadable or unlistable output) is its strike: retried on a fresh VM, failed at the limit (council X #1).
+              throw new SandboxInfrastructureError(`modal sandbox staging failed for this document: ${error.message}; VM terminated`, meterLane(lane), { cause: error, afterCommand: true });
             }
             // Anything else that throws here is the sandbox's: SDK and transport errors, control commands, VM creation and
             // hardening, the leftover kill, a closed session (a document's own failure is a non-zero exit or the above).
@@ -1066,6 +1093,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             // says whether it does (a leftover kill that could not run is Modal's) keeps that.
             // Staging the document's own inputs that the VM refuses for lack of space is the document's too (council W #2);
             // a Modal API or transport error during staging is not.
+            // An infrastructure error that already says whom it strikes (the job-tree probe's blame) passes through unchanged.
+            if (error instanceof SandboxInfrastructureError && error.blameDocumentId !== undefined) throw error;
             const afterCommand = error instanceof SandboxInfrastructureError ? error.afterCommand : ran || (ownStaging && isOwnStagingFailure(error));
             throw new SandboxInfrastructureError(`modal sandbox command failed: ${safeMessage(config, error)}`, meterLane(lane), { cause: error, afterCommand });
           }

@@ -227,6 +227,36 @@ describe("sandbox infrastructure failures retry the stage without failing the do
     expect(await documentStages()).toEqual({ x: "failed", y: "completed" });
   });
 
+  it("a blamed strike lands on the blamed document's own latest stage row; with no row it is logged, not struck (council X #1)", async () => {
+    // x last ran 'ocr' in this run (after an earlier 'extract'); y's failure blames x, then a document with no row.
+    await db.query(`insert into document_run_stage_states (run_id, document_id, stage_name, status, attempts, stats, started_at) values
+      ('r1', 'x', 'extract', 'completed', 1, '{}', now() - interval '2 minutes'), ('r1', 'x', 'ocr', 'processing', 1, '{}', now() - interval '1 minute')`);
+    const warn = vi.mocked(console.warn);
+    warn.mockClear();
+    let blame = "x";
+    const execution = createStageExecution({ store, stages: [{
+      name: "extract",
+      run: async (state) => {
+        for (const document of [...state.documents].filter((d) => d.id === "y")) {
+          await runDocumentStage(state, document, "extract", `${document.id}:extract`, "x", async () => {
+            const failure = new SandboxInfrastructureError("modal sandbox job tree left unusable by an earlier command", undefined, { blameDocumentId: blame });
+            noteSandboxInfrastructureError(failure);
+            throw failure;
+          });
+        }
+      },
+    }], config });
+    await settle(execution.runStage(input, runtime(1)));
+    const strikes = async (stage: string) => (await db.query<{ n: number | null }>(`select (stats->>'sandboxInfrastructureStrikes')::int as n from document_run_stage_states where document_id = 'x' and stage_name = $1`, [stage])).rows[0]?.n ?? 0;
+    expect(await strikes("ocr")).toBe(1);
+    expect(await strikes("extract")).toBe(0);
+    blame = "ghost";
+    await settle(execution.runStage(input, runtime(2)));
+    expect(warn.mock.calls.some((call) => /document=ghost .*blamed sandbox strike not recorded: no stage row/.test(String(call[0])))).toBe(true);
+    const { rows: [y] } = await db.query<{ n: number | null }>(`select (stats->>'sandboxInfrastructureStrikes')::int as n from document_run_stage_states where document_id = 'y'`);
+    expect(y?.n ?? 0).toBe(0);
+  });
+
   it("a document's own staging violation fails only that document, once; the other completes (recheck Q #1)", async () => {
     const attempts = { n: 0 };
     const execution = createStageExecution({ store, stages: [extractStage(() => new SandboxOutputError("parser VM output entry/depth limit exceeded"), attempts)], config });

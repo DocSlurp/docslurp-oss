@@ -1592,6 +1592,26 @@ export class Store {
     return Number(counted?.ordinary_failures ?? increment);
   }
 
+  /**
+   * A strike another document's failure blames on `documentId` (council X #1): on that document's own row in this run, for
+   * the stage it last ran. Returns its strikes, or null when it has no stage row in this run (nothing struck).
+   */
+  async noteBlamedSandboxStrike(state: WorkflowState, documentId: string): Promise<number | null> {
+    const [row] = await this.sql<{ strikes: number }[]>`
+      update document_run_stage_states s
+      set stats = jsonb_set(s.stats, '{sandboxInfrastructureStrikes}',
+            to_jsonb(coalesce((s.stats->>'sandboxInfrastructureStrikes')::int, 0) + 1)),
+          updated_at = now()
+      where s.run_id = ${state.run.id} and s.document_id = ${documentId}
+        and s.stage_name = (
+          select stage_name from document_run_stage_states
+          where run_id = ${state.run.id} and document_id = ${documentId}
+          order by started_at desc nulls last, updated_at desc limit 1)
+      returning (s.stats->>'sandboxInfrastructureStrikes')::int as strikes
+    `;
+    return row ? Number(row.strikes) : null;
+  }
+
   async noteSandboxInfrastructureStrike(state: WorkflowState, documentId: string, stage: string): Promise<number> {
     // In the stage checkpoint's stats, which startDocumentStage keeps across retries.
     const [row] = await this.sql<{ strikes: number }[]>`

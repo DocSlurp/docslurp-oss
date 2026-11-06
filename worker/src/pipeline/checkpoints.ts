@@ -312,10 +312,15 @@ export async function runDocumentStage(
         // A job tree the previous document of this run left unusable is that document's strike (council W #2); it fails
         // at the limit the next time its stage runs.
         const blamed = typeof failure.blameDocumentId === "string" && failure.blameDocumentId !== document.id ? failure.blameDocumentId : null;
-        if (!ownCommand && blamed && state.store?.noteSandboxInfrastructureStrike) {
-          await state.store.noteSandboxInfrastructureStrike(state, blamed, stageName).catch((error: unknown) => {
-            console.warn(`[checkpoint-debug] document=${blamed} stage=${stageName} blamed sandbox strike not recorded: ${error instanceof Error ? error.message : String(error)}`);
-          });
+        if (!ownCommand && blamed) {
+          // On the blamed document's own row for the stage it last ran (council X #1), never this document's stage name.
+          const recorded = state.store?.noteBlamedSandboxStrike
+            ? await state.store.noteBlamedSandboxStrike(state, blamed).catch((error: unknown) => {
+              console.warn(`[checkpoint-debug] document=${blamed} blamed sandbox strike not recorded: ${error instanceof Error ? error.message : String(error)}`);
+              return null;
+            })
+            : null;
+          if (recorded === null) console.warn(`[checkpoint-debug] document=${blamed} run=${state.run.id} blamed sandbox strike not recorded: no stage row for that document in this run`);
         }
         const strikes = (ownCommand || failure.blameDocumentId === document.id) && state.store?.noteSandboxInfrastructureStrike
           ? await state.store.noteSandboxInfrastructureStrike(state, document.id, stageName).catch((error: unknown) => {

@@ -41,6 +41,7 @@ export interface CheckpointStore {
    * return the new count (recheck S #2: a document that keeps breaking fresh VMs fails instead of retrying the stage).
    */
   noteSandboxInfrastructureStrike?(state: WorkflowState, documentId: string, stage: string): Promise<number>;
+  noteBlamedSandboxStrike?(state: WorkflowState, documentId: string): Promise<number | null>;
   completeDocumentStage(
     state: WorkflowState,
     documentId: string,

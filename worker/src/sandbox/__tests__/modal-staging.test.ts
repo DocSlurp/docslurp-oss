@@ -304,6 +304,10 @@ function fakeSdk(
     resetUnhealthyInVm?: number;
     /** The VM-start image lock finds paths the parser user can write (exit 6). */
     lockFails?: boolean;
+    /** The job-tree probe before another document's staging finds the tree unusable (council X #1). */
+    treeBroken?: boolean | (() => boolean);
+    /** The job-tree upload copy (cp as the parser user) exits non-zero, e.g. ENOSPC in the job tree. */
+    cpFails?: boolean;
     /** Each read-only asset write takes this long (council W #7). */
     assetWriteDelayMs?: number;
     /** A create that fails left a VM behind anyway, found by name (council W #6). */
@@ -339,6 +343,7 @@ function fakeSdk(
     leftoverKills: 0,
     locks: 0,
     lookups: [] as string[],
+    probes: 0,
     assetWritesInFlight: 0,
     maxAssetWritesInFlight: 0,
     orphanTerminates: [] as string[],
@@ -418,7 +423,8 @@ function fakeSdk(
       // Staging in job trees, as the parser user (council M #3).
       if (asUser?.[0] === "/bin/mkdir") { if (typeof opts.mkdirFails === "function" ? opts.mkdirFails() : opts.mkdirFails) return finished("", 1); state.mkdirs.push(asUser[3]!); await remote.mkdir(asUser[3]!); return finished("", 0); }
       if (asUser?.[0] === "/bin/rm") { await remote.remove(asUser[3]!); return finished("", 0); }
-      if (asUser?.[0] === "/bin/sh" && asUser[2]?.includes("cp --")) { await remote.writeFile(asUser[5]!, await remote.readFile(asUser[4]!)); return finished("", 0); }
+      if (asUser?.[0] === "/bin/sh" && asUser[2]?.includes(".docslurp-probe.")) { state.probes++; return finished("", (typeof opts.treeBroken === "function" ? opts.treeBroken() : opts.treeBroken) ? 3 : 0); }
+      if (asUser?.[0] === "/bin/sh" && asUser[2]?.includes("cp --")) { if (opts.cpFails) return finished("cp: error writing: No space left on device", 1); await remote.writeFile(asUser[5]!, await remote.readFile(asUser[4]!)); return finished("", 0); }
       // VM start: the image lock and writable check (council W #1).
       if (argv[0] === "python3" && argv[3]?.startsWith("# docslurp-image-lock")) { state.locks++; return finished("", opts.lockFails ? 6 : 0); }
       // After every command: the root wipe of the parser user's scratch and the health check (council W #1, U #8).
@@ -670,7 +676,7 @@ describe("modal provider session lifecycle", () => {
       await rm(dir, { recursive: true, force: true });
     }
     let broken = false;
-    const shared = await open({ mkdirFails: () => broken, exec: async () => finished() });
+    const shared = await open({ treeBroken: () => broken, exec: async () => finished() });
     const opened = await shared.session();
     await opened.run!({ ...command, affinityKey: "doc-a" });
     broken = true;
@@ -698,6 +704,46 @@ describe("modal provider session lifecycle", () => {
     }
   });
 
+  it("document B's own oversize input or job-tree ENOSPC strikes B, never the previous document A (council X #1)", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "docslurp-x1-"));
+    try {
+      const big = path.join(dir, "big.bin");
+      await writeFile(big, "");
+      const { truncate } = await import("node:fs/promises");
+      await truncate(big, 512 * 1024 * 1024 + 1);
+      const small = path.join(dir, "in.pdf");
+      await writeFile(small, "%PDF");
+      // Oversize: B's verdict (a document failure), nothing blamed on A.
+      const oversize = await open({ exec: async () => finished() });
+      const s1 = await oversize.session();
+      await s1.run!({ ...command, affinityKey: "doc-a" });
+      const tooBig = await s1.run!({ ...command, affinityKey: "doc-b", inputPaths: [big] }).catch((error: unknown) => error);
+      expect(tooBig).toBeInstanceOf(SandboxOutputError);
+      expect((tooBig as { blameDocumentId?: string }).blameDocumentId).toBeUndefined();
+      await s1.close();
+      // The copy into B's job tree fails (ENOSPC): B's strike, not A's.
+      let failCopy = false;
+      const enospc = await open({ exec: async () => finished() });
+      const s2 = await enospc.session();
+      await s2.run!({ ...command, affinityKey: "doc-a", inputPaths: [small] });
+      failCopy = true;
+      Object.assign(enospc.state, {});
+      const copyFailure = await (async () => {
+        const opened = await open({ cpFails: true, exec: async () => finished() });
+        const session = await opened.session();
+        await session.run!({ ...command, affinityKey: "doc-a" });
+        return session.run!({ ...command, affinityKey: "doc-b", inputPaths: [small] }).catch((error: unknown) => error);
+      })();
+      expect(failCopy).toBe(true);
+      expect(copyFailure).toBeInstanceOf(SandboxInfrastructureError);
+      expect((copyFailure as SandboxInfrastructureError).afterCommand).toBe(true);
+      expect((copyFailure as SandboxInfrastructureError).blameDocumentId).toBeUndefined();
+      await s2.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("only a failure after the document's own command ran counts toward its strikes (council U #4)", async () => {
     // VM creation failing (a Modal outage) is a plain retry.
     const { sdk } = fakeSdk({ createFailsFrom: 1, exec: async () => finished() });
@@ -713,7 +759,7 @@ describe("modal provider session lifecycle", () => {
     expect((crashed as SandboxInfrastructureError).afterCommand).toBe(true);
     // A job tree an earlier document broke is never the next document's strike.
     let broken = false;
-    const shared = await open({ mkdirFails: () => broken, exec: async () => finished() });
+    const shared = await open({ treeBroken: () => broken, exec: async () => finished() });
     const opened = await shared.session();
     await opened.run!({ ...command, affinityKey: "doc-a" });
     broken = true;
@@ -836,11 +882,13 @@ describe("modal provider session lifecycle", () => {
     it("(c) a job tree the parser user cannot stage into fails the document that broke it; on a VM another document used last it is infrastructure", async () => {
       const own = await open({ mkdirFails: true, exec: async () => finished() });
       const mine = await (await own.session()).run!({ ...command, affinityKey: "doc-a", writablePaths: ["/job/out"] }).catch((error: unknown) => error);
-      expect(mine).toBeInstanceOf(SandboxOutputError);
+      // Its own staging failing before its command: its strike, on a fresh VM next time (council X #1).
+      expect(mine).toBeInstanceOf(SandboxInfrastructureError);
+      expect((mine as SandboxInfrastructureError).afterCommand).toBe(true);
       expect(own.state.terminate).toBe(1);
 
       let broken = false;
-      const shared = await open({ mkdirFails: () => broken, exec: async () => finished() });
+      const shared = await open({ treeBroken: () => broken, exec: async () => finished() });
       const opened = await shared.session();
       await opened.run!({ ...command, affinityKey: "doc-a" });
       // doc-a's command left the tree so that staging fails for the next document on this VM.
