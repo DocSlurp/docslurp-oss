@@ -278,6 +278,20 @@ describe("dense-page allowance (owner decision 2026-11-05): paged pages bill 1 u
     expect((await store.loadDocument(documentId))!.billingPages).toBe(5);
   });
 
+  it("a twice-Letter page with little text bills 2: the allowance covers text, never area", async () => {
+    expect(pageAreaEquivalentsPt(792, 1_224)).toBe(2);
+    expect(billedPagePageEquivalents(1, 2)).toBe(2);
+    expect(billedPagePageEquivalents(3, 2)).toBe(2); // text within the allowance, the area still counts
+    const { state, document, runId, documentId } = await documentRun(1);
+    const measured = (await recordExtractedPageEquivalents(state, document, "pdf", "A short caption on a tabloid page."))!;
+    expect(measured).toMatchObject({ equivalents: 1, billed: 1 });
+    // Its area arrives when the page is rendered (the raster cache's sink), under the same allowance.
+    configurePageAreaSink((args) => recordPageEquivalents(sql(), { ...args, allowance: DEFAULT_PAGE_EQUIVALENT_ALLOWANCE }));
+    await recordRenderedPageAreas(runId, documentId, [{ pageNumber: 1, area: pageAreaEquivalentsPt(792, 1_224) }]);
+    expect((await store.loadDocument(documentId))!.billingPages).toBe(2);
+    expect(await billedFastPages(runId, documentId)).toBe(2);
+  });
+
   it("HTML and text keep the whole-document text rule: no allowance", async () => {
     const { state, document, documentId } = await documentRun(1, "text/html", { declaredMimeType: "text/html", sniffedMimeType: null, mimeType: "text/html", format: "html", container: null, encoding: "utf-8", mismatch: "none" });
     const measured = (await recordExtractedPageEquivalents(state, document, "html", "v".repeat(2 * 3_500)))!;
