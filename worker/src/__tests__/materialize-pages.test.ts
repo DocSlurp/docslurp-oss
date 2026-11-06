@@ -143,7 +143,7 @@ describe("materializePageRange", () => {
     h.usage.runId = runId;
     const range = { ...input(h, [1, 2], { ...defaultPipelineFeatures, speedBoost }), runId };
     const first = await claimAndMaterialize(h.deps, range);
-    expect(first.costCredits).toBeCloseTo((0.005 + 0.25) * (speedBoost ? 4 : 1), 6);
+    expect(first.costCredits).toBeCloseTo((0.01 + 0.25) * (speedBoost ? 4 : 1), 6);
     const firstRows = await sql`select id, cost_cents, metadata from usage_events where run_id = ${runId}`;
     const billed = firstRows.reduce((sum, row) => sum + Number(row.cost_cents), 0);
     expect(billed).toBeCloseTo(first.costCredits, 6);
@@ -176,7 +176,7 @@ describe("materializePageRange", () => {
     const ledger = (h.usage as unknown as { pending: Array<{ metric: string; unit: string }> }).pending;
     expect(ledger.filter((e) => e.metric === "page-analysis" && e.unit === "page")).toHaveLength(1);
     // Customer credits: the OCR-read page bills Rich, the text-layer page Fast; provider cost is not billed.
-    expect(result.costCredits).toBeCloseTo(0.25 + 0.005, 6);
+    expect(result.costCredits).toBeCloseTo(0.25 + 0.01, 6);
   });
 
   it("never chunks or writes a PII-blocked page", async () => {

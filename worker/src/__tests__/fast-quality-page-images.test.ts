@@ -132,7 +132,7 @@ describe("quality fast: pages without a text layer", () => {
     expect(splitRemainingPages({ ...scannedPdf, richRead: 1 }, false)).toEqual({ fast: 1, rich: 0 });
     expect(splitRemainingPages({ image: true, pages: 1, richRead: 0, scanned: 0 }, false)).toEqual({ fast: 1, rich: 0 });
     expect(splitRemainingPages({ image: true, pages: 1, richRead: 1, scanned: 0 }, false)).toEqual({ fast: 0, rich: 0 });
-    expect(pageCredits("fast", 2)).toBeCloseTo(0.01);
+    expect(pageCredits("fast", 2)).toBeCloseTo(0.02);
     // auto and good still bill an unread scan Rich.
     expect(splitRemainingPages(scannedPdf, true)).toEqual({ fast: 1, rich: 1 });
     expect(splitRemainingPages({ image: true, pages: 1, richRead: 0, scanned: 0 }, true)).toEqual({ fast: 0, rich: 1 });
