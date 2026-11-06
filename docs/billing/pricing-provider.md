@@ -47,20 +47,22 @@ installed provider (such as `assembleEstimateQuote`) through it, not through a b
 the chat executor load it at startup (`@docslurp/shared/pricing-loader`), before serving requests, polling task queues or
 claiming chat operations.
 
-`host.durableState` (`PricingDurableState`) is durable, fleet-shared state for the provider: named, monotone 64-bit
-counters in Postgres (`pricing_provider_state`, migration 0131), the same for every API, worker and chat-executor
-process. A provider uses it for what must survive restarts and be shared, such as the highest version of something it has
-accepted, so it can refuse an older one replayed later.
+`host.durableState` (`PricingDurableState`) is durable, fleet-shared state for the provider, read-only: named, monotone
+64-bit counters in Postgres (`pricing_provider_state`, migration 0131), the same for every API, worker and chat-executor
+process. A provider uses it for what must survive restarts and be shared, such as the highest version of something an
+operator has activated, so it can refuse an older one replayed later.
 
 - `read(key)` returns the stored value as a `bigint`, or `null` when the key was never raised;
-- `raise(key, candidate)` stores the larger of the stored value and `candidate` in one statement and returns the stored
-  value; it never lowers a value, and concurrent raises keep the largest;
 - keys are 1-128 characters of `[a-z0-9._:-]`, starting with a letter or digit;
-- both throw when the database is unavailable, and in a process started without one. What the provider does then is its
+- it throws when the database is unavailable, and in a process started without one. What the provider does then is its
   own rule; a provider that depends on the state should refuse to price (fail closed).
 
-Runtime database roles can only read the table and raise through `pricing_state_raise(key, candidate)` (a SECURITY DEFINER
-function); none can insert, update, delete or truncate it directly.
+Runtime processes never raise a value. Runtime database roles can only read the table: none can execute
+`pricing_state_raise`, insert, update, delete or truncate it, so a compromised API, worker or executor cannot move a
+value however often it tries. The operator's activation tool raises values with the table owner's credential through
+`pricingStateAdminFromSql(sql).raise(key, candidate)`, which calls `pricing_state_raise(key, candidate)` (SECURITY
+INVOKER): it stores the larger of the stored value and `candidate`, never lowers a value, keeps the largest of concurrent
+raises, and refuses a candidate more than 1000 above the stored value (a missing key counts as 0).
 
 Fail closed:
 

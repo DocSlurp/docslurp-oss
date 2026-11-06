@@ -315,45 +315,54 @@ describe("ocr_escalation_reads (migration 0129)", () => {
 });
 
 describe("pricing_provider_state (migration 0131)", () => {
-  // The seam the pricing plugin receives (packages/shared/src/pricing-loader.ts), over this database.
-  const stateAs = async (role: string) => {
-    const { pricingDurableStateFromSql } = await import("@docslurp/shared/pricing-loader");
-    return pricingDurableStateFromSql({ unsafe: async (query, params) => (await as(role, () => db.query<Record<string, unknown>>(query, params as unknown[]))).rows });
-  };
+  // The read-only seam the pricing plugin receives, and the operator's admin seam (packages/shared/src/pricing-loader.ts).
+  const sqlAs = (role: string | null) => ({ unsafe: async (query: string, params?: unknown[]) =>
+    (role ? await as(role, () => db.query<Record<string, unknown>>(query, params as unknown[])) : await db.query<Record<string, unknown>>(query, params as unknown[])).rows });
+  const stateAs = async (role: string) => (await import("@docslurp/shared/pricing-loader")).pricingDurableStateFromSql(sqlAs(role));
+  /** The admin seam over a runtime role's connection: what a compromised runtime role could try. */
+  const adminAs = async (role: string) => (await import("@docslurp/shared/pricing-loader")).pricingStateAdminFromSql(sqlAs(role));
+  /** The admin seam as the table owner (this test database's migration connection): the operator's activation path. */
+  const owner = async () => (await import("@docslurp/shared/pricing-loader")).pricingStateAdminFromSql(sqlAs(null));
 
-  it("raises monotonically for the API and worker roles, never lowering a value", async () => {
+  it("runtime seam is read-only: the API and worker read a value the owner raised and get no raise at all", async () => {
+    await (await owner()).raise("card.sequence.read", 5n);
     for (const role of [app, worker]) {
       const state = await stateAs(role);
-      const key = `card.sequence.${role}`;
-      expect(await state.read(key)).toBeNull();
-      expect(await state.raise(key, 5n)).toBe(5n);
-      expect(await state.raise(key, 3n)).toBe(5n);
-      expect(await state.raise(key, 9n)).toBe(9n);
-      expect(await state.read(key)).toBe(9n);
-      expect(await state.raise(key, -(2n ** 62n))).toBe(9n);
+      expect(await state.read("card.sequence.read")).toBe(5n);
+      expect(await state.read(`never.${role}`)).toBeNull();
+      expect((state as unknown as { raise?: unknown }).raise).toBeUndefined();
     }
   });
 
-  it("keeps the largest of concurrent raises and never returns less than a raise's own candidate", async () => {
-    const state = await stateAs(app);
+  it("no runtime role can execute pricing_state_raise, however often it tries (council J)", async () => {
+    for (const role of [app, worker, backup]) {
+      for (const value of [1000n, 2000n, 3000n]) {
+        expect(await denied(role, `select pricing_state_raise('wedge.${role}', ${value})`), `${role} ${value}`).toBe(true);
+      }
+      if (role !== backup) await expect((await adminAs(role)).raise(`wedge.${role}`, 1n)).rejects.toThrow(/permission denied/);
+      expect(await (await owner()).read(`wedge.${role}`)).toBeNull();
+    }
+  });
+
+  it("the owner raises monotonically, never lowering a value, at most 1000 per raise", async () => {
+    const admin = await owner();
+    expect(await admin.read("card.sequence.owner")).toBeNull();
+    expect(await admin.raise("card.sequence.owner", 5n)).toBe(5n);
+    expect(await admin.raise("card.sequence.owner", 3n)).toBe(5n);
+    expect(await admin.raise("card.sequence.owner", 9n)).toBe(9n);
+    expect(await admin.raise("card.sequence.owner", -(2n ** 62n))).toBe(9n);
+    await expect(admin.raise("card.sequence.owner", 1010n)).rejects.toThrow(/more than 1000/);
+    await expect(admin.raise("card.jump.owner", 1001n)).rejects.toThrow(/more than 1000/);
+    expect(await admin.read("card.jump.owner")).toBeNull();
+    expect(await admin.raise("card.sequence.owner", 1009n)).toBe(1009n);
+  });
+
+  it("keeps the largest of concurrent owner raises and never returns less than a raise's own candidate", async () => {
+    const admin = await owner();
     const candidates = Array.from({ length: 40 }, (_, index) => BigInt((index * 7919) % 1000));
-    const results = await Promise.all(candidates.map((candidate) => state.raise("concurrent.key", candidate)));
+    const results = await Promise.all(candidates.map((candidate) => admin.raise("concurrent.key", candidate)));
     results.forEach((value, index) => expect(value >= candidates[index]!).toBe(true));
-    expect(await state.read("concurrent.key")).toBe(candidates.reduce((max, value) => (value > max ? value : max)));
-  });
-
-  it("lets no role jump a value more than 1000 above the stored one (council G L1)", async () => {
-    for (const role of [app, worker]) {
-      const state = await stateAs(role);
-      const key = `card.jump.${role}`;
-      await expect(state.raise(key, 1001n)).rejects.toThrow(/more than 1000/);
-      expect(await state.read(key)).toBeNull();
-      expect(await state.raise(key, 9n)).toBe(9n);
-      await expect(state.raise(key, 2n ** 63n - 1n)).rejects.toThrow(/more than 1000/);
-      await expect(state.raise(key, 1010n)).rejects.toThrow(/more than 1000/);
-      expect(await state.read(key)).toBe(9n);
-      expect(await state.raise(key, 1009n)).toBe(1009n);
-    }
+    expect(await admin.read("concurrent.key")).toBe(candidates.reduce((max, value) => (value > max ? value : max)));
   });
 
   it("denies runtime roles every direct write: no INSERT, UPDATE, DELETE or TRUNCATE", async () => {
@@ -366,21 +375,21 @@ describe("pricing_provider_state (migration 0131)", () => {
         "truncate pricing_provider_state",
       ]) expect(await denied(role, statement), `${role}: ${statement}`).toBe(true);
     }
-    // The backup role reads through pg_read_all_data in ops; it cannot raise.
-    expect(await denied(backup, "select pricing_state_raise('x', 1)")).toBe(true);
   });
 
   it("keeps those grants after reconciliation, despite the app's schema-wide DML and default privileges", async () => {
     await reconcileRoleGrants(db, { log: silent });
-    expect(await denied(app, "update pricing_provider_state set value = 0")).toBe(true);
-    expect(await denied(worker, "update pricing_provider_state set value = 0")).toBe(true);
-    expect(await (await stateAs(worker)).raise("after.reconcile", 2n)).toBe(2n);
+    for (const role of [app, worker]) {
+      expect(await denied(role, "update pricing_provider_state set value = 0")).toBe(true);
+      expect(await denied(role, "select pricing_state_raise('after.reconcile', 2)")).toBe(true);
+      expect(await (await stateAs(role)).read("card.sequence.owner")).toBe(1009n);
+    }
   });
 
   it("refuses keys outside the neutral key shape and values outside int8", async () => {
-    const state = await stateAs(app);
-    await expect(state.raise("Bad Key", 1n)).rejects.toThrow(/invalid key/);
-    await expect(state.raise("ok.key", 2n ** 63n)).rejects.toThrow(/64-bit/);
-    await expect(as(app, () => db.query("select pricing_state_raise('Bad Key', 1)"))).rejects.toThrow(/check constraint/);
+    const admin = await owner();
+    await expect(admin.raise("Bad Key", 1n)).rejects.toThrow(/invalid key/);
+    await expect(admin.raise("ok.key", 2n ** 63n)).rejects.toThrow(/64-bit/);
+    await expect(db.query("select pricing_state_raise('Bad Key', 1)")).rejects.toThrow(/check constraint/);
   });
 });

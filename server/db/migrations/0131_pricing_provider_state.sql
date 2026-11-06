@@ -1,16 +1,16 @@
 -- Durable, fleet-shared state for the deployment's pricing provider (DOCSLURP_PRICING_PLUGIN): named, monotone counters.
 -- A provider keeps here what must survive restarts and be shared by every API, worker and chat-executor machine, such as
--- the highest version of something it has accepted, so it can refuse an older one replayed after a restart. Neutral: a key
--- and a bigint; no prices, rates or provider details are stored or described here.
+-- the highest version of something an operator has activated, so every process can refuse an older one replayed after a
+-- restart. Neutral: a key and a bigint; no prices, rates or provider details are stored or described here.
 --
--- The value only ever rises: runtime roles read the table and raise a key through pricing_state_raise(key, candidate), a
--- SECURITY DEFINER function that inserts the key or keeps the larger of the stored and candidate values in one statement
--- (concurrent raises serialize on the row) and returns the stored value. Each raise may lift a value by at most 1000 (a
--- missing key counts as 0) and fails otherwise, so a compromised runtime role (the worker raises too: every process that
--- activates the provider's state does) cannot jump a value to the bigint limit and wedge it there. Pre-release: this
--- migration was edited in place before its first deploy (council G L1, 2026-11-06). No runtime role may INSERT, UPDATE, DELETE or
--- TRUNCATE the table itself, so none can lower or reset a value; the grants below hold at commit for the roles that exist,
--- and server/db/roles.mjs reconciles them after every migration.
+-- Runtime roles only read it. A value rises only through pricing_state_raise(key, candidate), run by the table owner (the
+-- operator's credential, never a runtime role): it inserts the key or keeps the larger of the stored and candidate values
+-- (concurrent raises serialize on the row) and returns the stored value, and refuses a candidate more than 1000 above the
+-- stored value (a missing key counts as 0) as a guard against an operator's typo. The function is SECURITY INVOKER and no
+-- runtime role may EXECUTE it, INSERT, UPDATE, DELETE or TRUNCATE the table, so no runtime role can raise, lower or reset a
+-- value: a per-call cap alone could not stop a caller allowed unlimited calls (council J). The grants below hold at commit
+-- for the roles that exist, and server/db/roles.mjs reconciles them after every migration. Pre-release: this migration was
+-- edited in place before its first deploy (council G L1 and J, 2026-11-06).
 --
 -- A new table and a function: no lock on any existing table, so no lock prelude (0122's rule; pinned by
 -- rollout-0121-0127-locks.test.ts, which covers this release).
@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS pricing_provider_state (
 );
 --> statement-breakpoint
 CREATE OR REPLACE FUNCTION pricing_state_raise(p_key text, p_candidate bigint) RETURNS bigint
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+LANGUAGE plpgsql SECURITY INVOKER SET search_path = pg_catalog, public AS $$
 DECLARE stored bigint;
 BEGIN
   SELECT s.value INTO stored FROM public.pricing_provider_state s WHERE s.key = p_key FOR UPDATE;
@@ -46,12 +46,11 @@ DO $$
 DECLARE runtime_role text;
 BEGIN
   -- The app role (API and chat executor) gets table DML and function EXECUTE through default privileges; the worker none.
-  -- Both end with SELECT and EXECUTE only.
+  -- Both end with SELECT on the table only.
   FOREACH runtime_role IN ARRAY ARRAY['docslurp_app','docslurp_worker'] LOOP
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = runtime_role) THEN CONTINUE; END IF;
     EXECUTE format('REVOKE ALL ON public.pricing_provider_state FROM %I', runtime_role);
     EXECUTE format('GRANT SELECT ON public.pricing_provider_state TO %I', runtime_role);
     EXECUTE format('REVOKE ALL ON FUNCTION public.pricing_state_raise(text, bigint) FROM %I', runtime_role);
-    EXECUTE format('GRANT EXECUTE ON FUNCTION public.pricing_state_raise(text, bigint) TO %I', runtime_role);
   END LOOP;
 END $$;

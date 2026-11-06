@@ -46,12 +46,13 @@ describe("chat executor pricing startup (council E #2)", () => {
     expect(run.output).toMatch(/startup_refused pricing: Pricing plugin failed to load/);
   }, 120_000);
 
-  it("loads a provider (with its durable state) before running the chat worker", () => {
+  it("loads a provider (with its read-only durable state) before running the chat worker", () => {
     const dir = mkdtempSync(path.join(process.env.TMPDIR ?? tmpdir(), "executor-pricing-"));
     try {
       const plugin = path.join(dir, "pricing-plugin.mjs");
       writeFileSync(plugin, `export function register(host) {
-  console.log("[fixture] durableState=" + (typeof host.durableState?.read === "function" && typeof host.durableState?.raise === "function"));
+  // Read-only (council J): the host's durable state reads; only the operator's tool raises.
+  console.log("[fixture] durableState=" + (typeof host.durableState?.read === "function" && host.durableState?.raise === undefined));
   return { ...host.shared.OPEN_PRICING, id: "fixture", version: "fixture-1" };
 }\n`);
       const run = runExecutor({ DOCSLURP_PRICING_PLUGIN: plugin });

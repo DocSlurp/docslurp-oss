@@ -25,13 +25,22 @@ import {
 
 /**
  * Durable, fleet-shared, monotone state for the pricing provider: named bigint counters in Postgres
- * (pricing_provider_state, migration 0131), shared by every API, worker and chat-executor process. `read` returns a key's
- * value (null when never raised); `raise` stores max(stored, candidate) atomically and returns the stored value, which is
- * never lowered. Both throw when the database is unavailable: what the provider does then (fail closed) is its own rule.
- * Keys are 1-128 characters of [a-z0-9._:-], starting with a letter or digit.
+ * (pricing_provider_state, migration 0131), shared by every API, worker and chat-executor process. Read-only here: `read`
+ * returns a key's value (null when never raised) and throws when the database is unavailable; what the provider does then
+ * (fail closed) is its own rule. Runtime processes never raise a value (council J): only the operator's activation tool
+ * does, with the table owner's credential, through PricingStateAdmin. Keys are 1-128 characters of [a-z0-9._:-],
+ * starting with a letter or digit.
  */
 export interface PricingDurableState {
   read(key: string): Promise<bigint | null>;
+}
+
+/**
+ * The operator's side of the durable state: `raise` stores max(stored, candidate) atomically through pricing_state_raise
+ * and returns the stored value, which is never lowered; a candidate more than 1000 above the stored value is refused.
+ * Needs the table owner's credential: no runtime role may execute pricing_state_raise (migration 0131).
+ */
+export interface PricingStateAdmin extends PricingDurableState {
   raise(key: string, candidate: bigint): Promise<bigint>;
 }
 
@@ -56,13 +65,20 @@ function toBigInt(value: unknown): bigint {
   throw new Error("pricing durable state: the database returned a non-integer value");
 }
 
-/** The durable state over a database connection (the entrypoint's own pool): reads the table, raises through pricing_state_raise. */
+/** The read-only durable state over a runtime process's own pool (the plugin host's `durableState`). */
 export function pricingDurableStateFromSql(sql: DurableStateSql): PricingDurableState {
   return {
     async read(key) {
       const rows = await sql.unsafe("select value::text as value from pricing_provider_state where key = $1", [durableKey(key)]);
       return rows.length === 0 ? null : toBigInt(rows[0]!.value);
     },
+  };
+}
+
+/** The operator's durable state over a connection as the table owner: reads, and raises through pricing_state_raise. */
+export function pricingStateAdminFromSql(sql: DurableStateSql): PricingStateAdmin {
+  return {
+    ...pricingDurableStateFromSql(sql),
     async raise(key, candidate) {
       if (typeof candidate !== "bigint" || candidate < INT8_MIN || candidate > INT8_MAX) throw new Error("pricing durable state: candidate must be a 64-bit bigint");
       const rows = await sql.unsafe("select pricing_state_raise($1, $2::bigint)::text as value", [durableKey(key), candidate.toString()]);
@@ -75,7 +91,6 @@ export function pricingDurableStateFromSql(sql: DurableStateSql): PricingDurable
 /** A process that has no database: every call throws, so a provider that needs durable state fails closed there. */
 export const UNAVAILABLE_PRICING_DURABLE_STATE: PricingDurableState = {
   async read() { throw new Error("pricing durable state is not available in this process"); },
-  async raise() { throw new Error("pricing durable state is not available in this process"); },
 };
 
 /**
@@ -87,7 +102,7 @@ export interface PricingPluginHost {
   apiVersion: typeof PRICING_PROVIDER_API_VERSION;
   env: Readonly<Record<string, string | undefined>>;
   shared: typeof import("./index.js");
-  /** Durable, fleet-shared monotone state (PricingDurableState); throws in a process without a database. */
+  /** Durable, fleet-shared monotone state, read-only (PricingDurableState); throws in a process without a database. */
   durableState: PricingDurableState;
 }
 

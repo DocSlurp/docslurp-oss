@@ -128,7 +128,7 @@ async function main(): Promise<void> {
   // The pricing provider (DOCSLURP_PRICING_PLUGIN) loads first: every charge the worker records is priced by it, including
   // the parser sandbox probe's VM time, so it must be installed before the probe (validation N2). The service profile
   // refuses to start without one rather than price with the open default. Its durable state (pricing_provider_state,
-  // 0131) reads and raises through the worker's pool. Then fail before connecting if the parser sandbox is unavailable
+  // 0131) is read-only through the worker's pool; only the operator raises it. Then fail before connecting if the parser sandbox is unavailable
   // or violates the production policy.
   const sandbox = await loadPricingThenParserSandbox({
     loadPricing: () => loadPricingProvider(process.env, { durableState: pricingDurableStateFromSql(store.stageSql) }).catch((error) => {

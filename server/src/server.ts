@@ -293,7 +293,7 @@ export function ensureApiStartup(): Promise<void> {
       initializeObservability({ serviceName: "docslurp-api" });
       // The pricing provider (DOCSLURP_PRICING_PLUGIN) prices every quote and charge; the service profile refuses to
       // start without one rather than price with the open default.
-      // Its durable state (pricing_provider_state, 0131) reads and raises through this process's pool.
+      // Its durable state (pricing_provider_state, 0131) is read-only through this process's pool; only the operator raises it.
       await loadPricingProvider(process.env, { durableState: pricingDurableStateFromSql(pricingStateSql) });
       // Invalid private endpoint config fails startup; the /models probe never blocks it.
       initializePrivateModelEndpoints();

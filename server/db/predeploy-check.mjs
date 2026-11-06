@@ -493,12 +493,12 @@ export async function collectReport(client, { journal, acceptedPiiPatterns, extr
   ));
 
   // 7. Pricing-provider durable state (0131): a new table and function, no lock on existing tables. Once present, no runtime
-  // role may write it directly (it only rises through pricing_state_raise); a direct write grant is a BLOCKER.
+  // role may write it or execute pricing_state_raise (only the table owner raises it); either grant is a BLOCKER.
   const [{ has_state: hasState }] = await q("select to_regclass('public.pricing_provider_state') is not null as has_state");
   if (!hasState) {
     sections.push(section("Pricing-provider state (0131): pending", "ok", [
-      "0131 creates pricing_provider_state and pricing_state_raise(key, candidate) (SECURITY DEFINER; each raise lifts a value by at most 1000). It locks no existing table.",
-      "API, worker and chat-executor roles get SELECT and EXECUTE only; the pricing provider reads and raises its keys through them.",
+      "0131 creates pricing_provider_state and pricing_state_raise(key, candidate) (SECURITY INVOKER; each raise lifts a value by at most 1000). It locks no existing table.",
+      "API, worker and chat-executor roles get SELECT only; values rise only through pricing_state_raise run by the table owner (the operator's activation credential).",
     ]));
   } else {
     const writers = await q(
@@ -506,7 +506,8 @@ export async function collectReport(client, { journal, acceptedPiiPatterns, extr
          case when has_table_privilege(r.oid, 'public.pricing_provider_state', 'INSERT') then 'insert' end,
          case when has_table_privilege(r.oid, 'public.pricing_provider_state', 'UPDATE') then 'update' end,
          case when has_table_privilege(r.oid, 'public.pricing_provider_state', 'DELETE') then 'delete' end,
-         case when has_table_privilege(r.oid, 'public.pricing_provider_state', 'TRUNCATE') then 'truncate' end], null) as privileges
+         case when has_table_privilege(r.oid, 'public.pricing_provider_state', 'TRUNCATE') then 'truncate' end,
+         case when has_function_privilege(r.oid, 'public.pricing_state_raise(text, bigint)', 'EXECUTE') then 'execute pricing_state_raise' end], null) as privileges
        from pg_roles r where r.rolname = any($1::text[])`,
       [["docslurp_app", "docslurp_worker", "docslurp_backup"]],
     );
@@ -516,9 +517,9 @@ export async function collectReport(client, { journal, acceptedPiiPatterns, extr
       `Pricing-provider state (0131): ${keys} key(s)`,
       direct.length ? "blocker" : "ok",
       direct.length
-        ? ["Runtime roles can write pricing_provider_state directly (it must only rise through pricing_state_raise); run the role reconciliation (migrate.mjs):",
+        ? ["Runtime roles can write pricing_provider_state or execute pricing_state_raise (only the table owner may raise it); run the role reconciliation (migrate.mjs):",
           ...direct.map((row) => `${row.role}: ${row.privileges.join(", ")}`)]
-        : ["No runtime role writes the table directly; values rise only through pricing_state_raise."],
+        : ["No runtime role writes the table or executes pricing_state_raise; only the table owner raises values."],
     ));
   }
   return sections;

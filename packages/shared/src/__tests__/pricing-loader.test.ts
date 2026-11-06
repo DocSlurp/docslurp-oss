@@ -58,14 +58,15 @@ describe("loadPricingProvider", () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     let host: PricingPluginHost | null = null;
     const capture = async () => ({ register: (h: PricingPluginHost) => { host = h; return { ...OPEN_PRICING, id: "durable", version: "d-1" }; } });
-    const state: PricingDurableState = { read: async () => 7n, raise: async (_key, candidate) => candidate };
+    const state: PricingDurableState = { read: async () => 7n };
     await loadPricingProvider({ DOCSLURP_PRICING_PLUGIN: "/d.mjs" }, { importModule: capture, durableState: state });
     expect(host!.durableState).toBe(state);
     resetPricingLoaderForTests();
     resetPricingProviderForTests();
     await loadPricingProvider({ DOCSLURP_PRICING_PLUGIN: "/d.mjs" }, { importModule: capture });
     await expect(host!.durableState.read("card.sequence")).rejects.toThrow(/not available/);
-    await expect(host!.durableState.raise("card.sequence", 1n)).rejects.toThrow(/not available/);
+    // Read-only (council J): the host offers no raise at all.
+    expect((host!.durableState as unknown as { raise?: unknown }).raise).toBeUndefined();
   });
 });
 
