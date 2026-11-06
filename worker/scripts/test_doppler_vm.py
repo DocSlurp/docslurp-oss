@@ -141,8 +141,14 @@ class ConvertRangeTest(unittest.TestCase):
         self.assertEqual(context, (81, 100))
         self.assertEqual(data, b"p97\fp98\fp99\fp100")
 
-    def test_range_at_the_vm_limit_converts_without_context(self):
+    def test_context_never_exceeds_the_vm_page_limit(self):
         self.assertEqual(self.convert(guest.MAX_DOCUMENT_PAGES, 1, guest.MAX_PAGES)[2], (1, guest.MAX_PAGES))
+        # 9,984 pages leave 16 spare: all of it goes before the range.
+        self.assertEqual(self.convert(30000, 9985, 19968)[2], (9969, 19968))
+        # 9,990 pages leave 10: before first, then nothing after.
+        self.assertEqual(self.convert(30000, 9985, 19974)[2], (9975, 19974))
+        # At the document start the spare goes after.
+        self.assertEqual(self.convert(30000, 1, 9990)[2], (1, 10000))
 
     def test_refuses_a_wrong_page_count_or_a_failed_converter(self):
         with self.assertRaises(ValueError): self.convert(10, 1, 10, FakeConverter(pages_reported=9))

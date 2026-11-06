@@ -79,7 +79,8 @@ temporal-workflow-changes.md)
    streaming `pdftomarkdown` pass with 16 context pages either side; host runs the planned shards as
    parallel VMs, merges in page order and, on any shard failure, runs one whole-document VM once (all VM
    costs recorded). Running headers are judged as in a whole-document pass; the body font size comes
-   from each shard's first window, so output near a shard start can differ slightly.
+   from each shard's first window, so headings and emphasis across a short shard with atypical opening
+   pages (an index, say) can differ from a whole-document run, as with the earlier per-chunk guest.
 2. Page-range shard activity: extend `runPipelineStageShard` from document IDs to
    `(documentId, pageRange)` for render-images and embed.
 3. Feed observed shard timings back through `calibrateShardProfile` (per stage, executor class).

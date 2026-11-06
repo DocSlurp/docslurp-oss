@@ -58,7 +58,9 @@ file size only. Each guest re-counts pages and refuses a range that is off the 3
 document or (for the final shard) short of the last page. Shards are merged in page order under the same output cap,
 and each guest converts 16 context pages either side of its range, keeping only its own pages, so running
 headers and repeated table headers near a shard edge are judged as in one whole-document VM. The body font size
-comes from each shard's first window, so output near a shard start can differ slightly from a whole-document run.
+still comes from each shard's first window: on a short shard whose opening pages are atypical (an index, a table
+section), heading and emphasis decisions across that shard can differ from a whole-document run. The chunked guest
+had the same per-chunk behaviour. Passing the whole-document body size into each shard is tracked in DocSlurp/doppler.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |

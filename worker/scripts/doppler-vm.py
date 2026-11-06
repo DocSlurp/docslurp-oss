@@ -332,12 +332,13 @@ def convert_range(run, pages, first, last, settings, job=Path('/job')):
     Returns (output bytes, converter report, context range). `run(args, stdout, stderr, limit)`
     executes the converter; the context pages' slots are converted and then dropped.
     """
-    context_first = max(1, first - CONTEXT_PAGES)
-    context_last = min(pages, last + CONTEXT_PAGES)
-    context_pages = context_last - context_first + 1
     page_ranges(pages, first, last)  # the range itself must fit one VM
-    if context_pages > MAX_PAGES:  # a range at the per-VM limit converts without context
-        context_first, context_last, context_pages = first, last, last - first + 1
+    # Context fills whatever the per-VM page limit leaves, before the range first, then after.
+    spare = MAX_PAGES - (last - first + 1)
+    before = min(CONTEXT_PAGES, first - 1, spare)
+    after = min(CONTEXT_PAGES, pages - last, spare - before)
+    context_first, context_last = first - before, last + after
+    context_pages = context_last - context_first + 1
     params = converter_settings(settings, context_pages)
     converted = job / ('converted' if (context_first, context_last) != (first, last) else 'output')
     with open(converted, 'xb') as output, open(job / 'converter.log', 'xb') as log:
