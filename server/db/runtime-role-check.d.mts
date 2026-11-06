@@ -7,9 +7,8 @@ export type RuntimeIdentityRow = {
   can_create?: boolean;
   expected_exists?: boolean;
   member_of_expected?: boolean;
-  has_pricing_state?: boolean;
-  writes_pricing_state?: boolean;
-  raises_pricing_state?: boolean;
+  /** A PRICING_STATE_WRITER_SQL row (@docslurp/shared/pricing-loader), the rule shared with the startup check. */
+  pricing?: Record<string, unknown>;
 };
 export declare const RUNTIME_ROLES: readonly string[];
 export declare const RUNTIME_IDENTITY_SQL: string;

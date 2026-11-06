@@ -446,8 +446,8 @@ describe("runtime database identity gate (council N #1)", () => {
     await db.exec(`grant execute on function public.pricing_state_raise(text, bigint) to ${app}`);
     await db.exec(`grant insert on public.pricing_provider_state to ${worker}`);
     try {
-      expect((await check(app, app)).join("\n")).toMatch(/can execute pricing_state_raise/);
-      expect((await check(worker, worker)).join("\n")).toMatch(/can write pricing_provider_state/);
+      expect((await check(app, app)).join("\n")).toMatch(/may execute pricing_state_raise/);
+      expect((await check(worker, worker)).join("\n")).toMatch(/can insert pricing_provider_state/);
     } finally {
       await db.exec(`revoke execute on function public.pricing_state_raise(text, bigint) from ${app}`);
       await db.exec(`revoke insert on public.pricing_provider_state from ${worker}`);
@@ -507,5 +507,65 @@ describe("runtime processes refuse to start as a pricing-state writer (council M
     await expect(loadPricingProvider({ DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_PRICING_PLUGIN: "/p.mjs" }, { sql: sqlAs(null), importModule })).rejects.toThrow(/refusing to start/);
     expect(importModule).not.toHaveBeenCalled();
     resetPricingLoaderForTests();
+  });
+});
+
+describe("one pricing-state writer rule for startup and the deploy gate (council P #1)", () => {
+  const sqlAs = (role: string) => ({ unsafe: async (query: string, params?: unknown[]) => (await as(role, () => db.query<Record<string, unknown>>(query, params as unknown[]))).rows });
+  const gate = async (role: string, expected: string) => {
+    const { checkRuntimeIdentity } = await import("../../db/runtime-role-check.mjs");
+    return as(role, () => checkRuntimeIdentity({ query: (query: string, params?: unknown[]) => db.query<Record<string, unknown>>(query, params) }, expected));
+  };
+  const refusedBoth = async (role: string, expected: string, pattern: RegExp) => {
+    const { assertRuntimeCannotMovePricingState } = await import("@docslurp/shared/pricing-loader");
+    await expect(assertRuntimeCannotMovePricingState(sqlAs(role))).rejects.toThrow(pattern);
+    expect((await gate(role, expected)).join("\n")).toMatch(pattern);
+  };
+
+  it.each(["insert", "update", "delete", "truncate"])("refuses a runtime role granted %s on pricing_provider_state, at startup and at deploy", async (privilege) => {
+    await db.exec(`grant ${privilege} on public.pricing_provider_state to ${app}`);
+    try { await refusedBoth(app, app, new RegExp(`can ${privilege} pricing_provider_state`)); }
+    finally { await db.exec(`revoke ${privilege} on public.pricing_provider_state from ${app}`); }
+  });
+
+  it("refuses an inherited grant (through another role) and pg_write_all_data membership", async () => {
+    await db.exec("create role pricing_state_writer_probe nologin");
+    await db.exec("grant update on public.pricing_provider_state to pricing_state_writer_probe");
+    await db.exec(`grant pricing_state_writer_probe to ${worker}`);
+    try { await refusedBoth(worker, worker, /can update pricing_provider_state/); }
+    finally { await db.exec(`revoke pricing_state_writer_probe from ${worker}`); await db.exec("drop owned by pricing_state_writer_probe"); await db.exec("drop role pricing_state_writer_probe"); }
+    await db.exec(`grant pg_write_all_data to ${app}`);
+    try { await refusedBoth(app, app, /pg_write_all_data/); }
+    finally { await db.exec(`revoke pg_write_all_data from ${app}`); }
+  });
+
+  it("the lowering attack is refused before it can run: SELECT plus UPDATE", async () => {
+    await db.exec(`grant select, update on public.pricing_provider_state to ${worker}`);
+    try { await refusedBoth(worker, worker, /can update pricing_provider_state/); }
+    finally { await db.exec(`revoke update on public.pricing_provider_state from ${worker}`); }
+    const { assertRuntimeCannotMovePricingState } = await import("@docslurp/shared/pricing-loader");
+    await expect(assertRuntimeCannotMovePricingState(sqlAs(worker))).resolves.toBeUndefined();
+  });
+});
+
+describe("the emergency override is loud (council P #2)", () => {
+  it("starts with DOCSLURP_REFUSE_PRICING_STATE_WRITER=0 where pricing is required, logging an error that names the role's powers", async () => {
+    const { loadPricingProvider, resetPricingLoaderForTests } = await import("@docslurp/shared/pricing-loader");
+    const { resetPricingProviderForTests, installTestPricing, DISTINCT_TEST_PRICING } = await import("@docslurp/shared");
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((message: unknown) => { errors.push(String(message)); });
+    resetPricingLoaderForTests();
+    resetPricingProviderForTests();
+    try {
+      const sql = { unsafe: async (query: string, params?: unknown[]) => (await db.query<Record<string, unknown>>(query, params as unknown[])).rows };
+      const importModule = async () => ({ register: (host: { shared: { OPEN_PRICING: object } }) => ({ ...host.shared.OPEN_PRICING, id: "override-fixture", version: "1" }) });
+      await expect(loadPricingProvider({ DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_PRICING_PLUGIN: "/p.mjs", DOCSLURP_REFUSE_PRICING_STATE_WRITER: "0" }, { sql, importModule })).resolves.toBe("override-fixture");
+      expect(errors.join("\n")).toMatch(/EMERGENCY OVERRIDE: .*is a superuser.*deploys still refuse this role/);
+    } finally {
+      spy.mockRestore();
+      resetPricingLoaderForTests();
+      resetPricingProviderForTests();
+      installTestPricing(DISTINCT_TEST_PRICING);
+    }
   });
 });

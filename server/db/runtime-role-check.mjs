@@ -10,6 +10,8 @@
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 
+import { PRICING_STATE_WRITER_SQL, pricingStateWriterReasons } from "@docslurp/shared/pricing-loader";
+
 import { DEFAULT_DB_ROLES } from "./roles.mjs";
 
 /** The roles a runtime app may connect as (roles.mjs): the API and executor as `app`, the worker as `worker`. */
@@ -24,15 +26,7 @@ export const RUNTIME_IDENTITY_SQL = `
       where n.nspname = 'public' and c.relkind in ('r', 'p', 'v', 'm', 'S') and pg_has_role(current_user, c.relowner, 'USAGE')) as owned_relations,
     has_schema_privilege(current_user, 'public', 'CREATE') as can_create,
     exists (select 1 from pg_roles where rolname = $1::text) as expected_exists,
-    case when exists (select 1 from pg_roles where rolname = $1::text) then pg_has_role(current_user, $1::text, 'MEMBER') else false end as member_of_expected,
-    to_regclass('public.pricing_provider_state') is not null as has_pricing_state,
-    case when to_regclass('public.pricing_provider_state') is null then false
-      else has_table_privilege(current_user, 'public.pricing_provider_state', 'INSERT')
-        or has_table_privilege(current_user, 'public.pricing_provider_state', 'UPDATE')
-        or has_table_privilege(current_user, 'public.pricing_provider_state', 'DELETE')
-        or has_table_privilege(current_user, 'public.pricing_provider_state', 'TRUNCATE') end as writes_pricing_state,
-    case when to_regprocedure('public.pricing_state_raise(text, bigint)') is null then false
-      else has_function_privilege(current_user, 'public.pricing_state_raise(text, bigint)', 'EXECUTE') end as raises_pricing_state
+    case when exists (select 1 from pg_roles where rolname = $1::text) then pg_has_role(current_user, $1::text, 'MEMBER') else false end as member_of_expected
 `;
 
 /** Pure: why `row` (RUNTIME_IDENTITY_SQL) is not a safe runtime identity for `expected`; empty when it is. */
@@ -47,8 +41,8 @@ export function runtimeIdentityProblems(row, expected) {
   if (row.can_create) problems.push(`connected role ${role} can create objects in schema public`);
   if (!row.expected_exists) problems.push(`role ${expected} does not exist: roll out the least-privilege roles (docs/releases.md#runtime-database-roles)`);
   else if (!row.member_of_expected) problems.push(`connected role ${role} is not a member of ${expected}`);
-  if (row.writes_pricing_state) problems.push(`connected role ${role} can write pricing_provider_state`);
-  if (row.raises_pricing_state) problems.push(`connected role ${role} can execute pricing_state_raise`);
+  // The pricing-state rule is shared with the startup check (council P #1): ownership, any write, pg_write_all_data, the raise.
+  if (row.pricing) for (const reason of pricingStateWriterReasons(row.pricing)) if (reason !== "is a superuser") problems.push(`connected role ${role} ${reason}`);
   return problems;
 }
 
@@ -59,7 +53,8 @@ export async function checkRuntimeIdentity(client, expected) {
   try {
     await client.query("set local statement_timeout = '15s'");
     const { rows: [row] } = await client.query(RUNTIME_IDENTITY_SQL, [expected]);
-    return runtimeIdentityProblems(row, expected);
+    const { rows: [pricing] } = await client.query(PRICING_STATE_WRITER_SQL);
+    return runtimeIdentityProblems({ ...row, pricing }, expected);
   } finally {
     await client.query("rollback");
   }
