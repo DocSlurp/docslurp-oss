@@ -336,6 +336,7 @@ function fakeSdk(
     createOptions: [] as unknown[],
     /** Which VM ran each parser command, in start order. */
     commandVms: [] as number[],
+    chmods: [] as string[][],
     /** When each VM was created and terminated (index = VM number - 1). */
     createdAt: [] as number[],
     terminatedAt: [] as number[],
@@ -398,7 +399,7 @@ function fakeSdk(
         if (opts.killThrows === "transport") throw new Error("stream reset by peer");
         return finished("", opts.killFails || opts.killFailsInVm === vm ? 4 : 0);
       }
-      if (argv[0] === "/bin/chmod") return finished("", 0);
+      if (argv[0] === "/bin/chmod") { state.chmods.push(argv.slice(1)); return finished("", 0); }
       if (argv[0] === "/bin/cat" || argv[0] === "python3") throw new Error("root must never read or list job output");
       if (isKill(argv)) {
         state.kills.push(controlOf(argv));
@@ -726,6 +727,31 @@ describe("modal provider session lifecycle", () => {
     }
   });
 
+  it("stages read-only assets once per VM, root-owned and read-only, outside the job tree (real-Modal P1)", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "docslurp-clam-definitions-0123456789abcdef"));
+    try {
+      await writeFile(path.join(dir, "daily.cvd"), "daily signatures");
+      await writeFile(path.join(dir, "main.cvd"), "main signatures");
+      const { state, session } = await open({ exec: async () => finished() });
+      const opened = await session();
+      const name = path.basename(dir);
+      const scan = (key: string) => opened.run!({ ...command, affinityKey: key, args: ["--database", path.join(dir, "daily.cvd"), "--database", path.join(dir, "main.cvd"), "/job/in.pdf"], inputPaths: [path.join(dir, "daily.cvd"), path.join(dir, "main.cvd")], readOnlyAssetDir: dir });
+      await scan("doc-a");
+      await scan("doc-b"); // another document on the same VM: no second copy
+      const assetWrites = state.rootWrites.filter((target) => target.startsWith(`/opt/docslurp-assets/${name}/`));
+      expect(assetWrites.sort()).toEqual([`/opt/docslurp-assets/${name}/daily.cvd`, `/opt/docslurp-assets/${name}/main.cvd`]);
+      // Files read-only, directories root-owned 0755: the parser user (uid 10001) can read them, never change them.
+      expect(state.chmods.some((args) => args[0] === "0444" && assetWrites.every((file) => args.includes(file)))).toBe(true);
+      expect(state.chmods.some((args) => args[0] === "0755" && args.includes("/opt/docslurp-assets"))).toBe(true);
+      // The command reads them at the VM path; nothing of them went through the job-tree upload.
+      for (const run of state.commands) expect(run).toEqual(expect.arrayContaining([`/opt/docslurp-assets/${name}/daily.cvd`, `/opt/docslurp-assets/${name}/main.cvd`]));
+      expect(state.rootWrites.filter((target) => target.includes("/upload-"))).toEqual([]);
+      await opened.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("meters each command from its admission, not from its wait in the queue (recheck R #3)", async () => {
     const { session } = await open({ exec: async () => { await new Promise((resolve) => setTimeout(resolve, 300)); return finished(); } });
     const opened = await session();
@@ -982,6 +1008,30 @@ describe("modal provider session lifecycle", () => {
       expect(state.createOptions).toHaveLength(3); // B, A, then B again: never two at once (worker cap 1)
       for (let vm = 1; vm < 3; vm++) expect(state.createdAt[vm]!).toBeGreaterThanOrEqual(state.terminatedAt[vm - 1]!);
       await Promise.all([a.close(), b.close()]);
+    });
+
+    it("a command waiting for a worker VM takes over its own activity's VM when it goes idle, instead of a new one (real-Modal P2)", async () => {
+      let ack!: () => void;
+      const terminateGate = new Promise<void>((resolve) => (ack = resolve));
+      const slow = running();
+      let calls = 0;
+      const { sdk, state } = fakeSdk({ terminateGate, exec: async (argv) => (argv[0] === "/bin/slow" && ++calls === 1 ? slow.process : finished()) });
+      const provider = createModalProvider(async () => sdk);
+      const pooled = { ...config, vmsPerActivity: 2, vmsPerWorker: 2, vmIdleSeconds: 60 };
+      const c = await provider.openSession(pooled, { activityId: "c" });
+      await c.run!(command); // C's VM, idle
+      const a = await provider.openSession(pooled, { activityId: "a" });
+      const busy = a.run!({ ...command, binary: "/bin/slow", affinityKey: "x" });
+      await vi.waitFor(() => expect(state.commands.some(([binary]) => binary === "/bin/slow")).toBe(true));
+      // A's second command opens a lane (C holds an idle VM to give up); C's terminate is slow, so it waits for a token.
+      const second = a.run!({ ...command, affinityKey: "y" });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(state.createOptions).toHaveLength(2);
+      slow.end(0); // A's own VM goes idle: the waiting command takes it over
+      await Promise.all([busy, second]);
+      expect(state.createOptions).toHaveLength(2); // no third VM for A
+      ack();
+      await Promise.all([a.close(), c.close()]);
     });
 
     it("sizes the pool from the document and candidate concurrency settings", () => {
@@ -1417,6 +1467,23 @@ describe("modal usage event", () => {
     // A larger sandbox costs more.
     expect(Number(buildModalUsageEvent({ ...lifecycleConfig, cpu: 2, memoryMb: 3072 }, "a", 10).metadata?.providerCostCents))
       .toBeGreaterThan(Number(buildModalUsageEvent({ ...lifecycleConfig, cpu: 2, memoryMb: 2048 }, "a", 10).metadata?.providerCostCents));
+  });
+});
+
+describe("modal usage amount is not provider cost (real-Modal run)", () => {
+  it("the loss alert and spend attribution read providerCostCents, and amount only for billable metrics", async () => {
+    const { readFileSync } = await import("node:fs");
+    const attribution = readFileSync(new URL("../../../../server/src/services/usage-attribution.ts", import.meta.url), "utf8");
+    // The provider-cost loss query takes provider cost from metadata.providerCostCents, never from amount.
+    const loss = attribution.slice(attribution.indexOf("const lossItems"), attribution.indexOf("const lossItems") + 2_000);
+    expect(loss).toMatch(/metadata -> 'providerCostCents'/);
+    expect(loss).not.toMatch(/\bamount\b/);
+    // amount is summed per metric, and only billable unit metrics are read from that sum.
+    const sums = attribution.slice(attribution.indexOf("sum(au.amount)") - 1_500, attribution.indexOf("sum(au.amount)") + 1_500);
+    expect([...sums.matchAll(/get\(([^)]+)\)\.amount/g)].every(([, metric]) => metric!.startsWith("BILLABLE_UNIT_METRICS."))).toBe(true);
+    const event = buildModalUsageEvent(lifecycleConfig, "a", 10);
+    expect(event.metric).toBe("sandbox_compute");
+    expect(event.costCents).toBe(0);
   });
 });
 

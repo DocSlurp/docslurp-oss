@@ -7,7 +7,7 @@ import { dbTraceStatementHook } from "../lib/db-trace.js";
 import { pipelineTransaction, pipelineInTransaction } from "./transaction-pipeline.js";
 import { PostgresCapacityLeaseStore } from "../media/capacity/store.js";
 import { PostgresMediaJournal } from "../media/journal.js";
-import { BILLABLE_UNIT_METRICS, DOCUMENT_FAILURE_MARKERS, PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
+import { BILLABLE_UNIT_METRICS, DOCUMENT_FAILURE_MARKERS, INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT, PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 import { DocumentNotFoundError, isMissingDocumentError } from "./missing-document.js";
 import { recordPageBaseFee } from "./page-base-fee.js";
 import { reserveFastPageImageRenders } from "./fast-page-image-budget.js";
@@ -1213,7 +1213,7 @@ export class Store {
     });
   }
 
-  async failRun(runId: string, stage: string, message: string, owner: ExecutionOwner): Promise<void> {
+  async failRun(runId: string, stage: string, message: string, owner: ExecutionOwner, options: { infrastructureRetriesExhausted?: boolean } = {}): Promise<void> {
     if (owner.runId !== runId) throw new StaleExecutionError();
     await this.finalizeRun(owner, "failed", async (client, logicalId) => {
       const [current] = await client<
@@ -1266,7 +1266,10 @@ export class Store {
       }
 
       await client`select retire_replaced_pending_documents(${runId})`;
-      await this.failProcessingDocumentStages(runId, stage, message, client);
+      // Exhausted infrastructure retries: each unfinished document gets the public reason marker (real-Modal P3); the raw
+      // run error after it is for operators only (public APIs map stored errors to reviewed copy).
+      await this.failProcessingDocumentStages(runId, stage,
+        options.infrastructureRetriesExhausted ? `${INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT}: ${message}` : message, client);
       await this.failUnfinishedDocumentsForRun(runId, client);
 
       await insertWorkspaceRunEvents({ sql: client, events: [{

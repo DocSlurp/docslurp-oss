@@ -85,6 +85,8 @@ export const ingestReportFailureReasonSchema = z.enum([
   "cancelled",
   /** The PDF's page tree was walked, but the PDF reader refuses it and sees no pages (a page count claimed beyond the file). */
   "pdf-structure-rejected",
+  /** The run stopped after its infrastructure retries ran out (sandbox, network, database): nothing was found wrong with the file. */
+  "infrastructure-retries-exhausted",
   "unknown",
 ]);
 export type IngestReportFailureReason = z.infer<typeof ingestReportFailureReasonSchema>;
@@ -211,16 +213,27 @@ const FAILURE_COPY: Record<IngestReportFailureReason, { message: string; retryab
     message: "This PDF's internal page structure is inconsistent, so its pages could not be read. Nothing was charged for it. Re-save or re-export the PDF and upload it again.",
     retryable: false,
   },
+  "infrastructure-retries-exhausted": {
+    message: "Processing stopped after repeated failures on our side, not because of this file. Upload it again to retry.",
+    retryable: true,
+  },
   unknown: { message: "Processing failed and the cause was not recorded.", retryable: true },
 };
 
 /** Most specific, least recoverable causes first: an OCR crash arrives wrapped in "no extractor produced output". */
 /** The worker's fixed refusal text for a PDF its reader rejects after the page tree was walked (lib/pdf-page-count.ts). */
 const PDF_STRUCTURE_REJECTED_TEXT = "PDF structure rejected";
+/**
+ * The marker the worker writes on a document whose run stopped after its infrastructure retries ran out (store.failRun):
+ * the document's public reason is then "infrastructure-retries-exhausted", whatever raw run error follows it.
+ */
+export const INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT = "Infrastructure retries exhausted";
 
 const FAILURE_PATTERNS: Array<[IngestReportFailureReason, RegExp]> = [
   // First: its text also says "PDF", "page" and "structure", which later patterns would claim.
   ["pdf-structure-rejected", new RegExp(PDF_STRUCTURE_REJECTED_TEXT)],
+  // Before every cause pattern: the raw run error that follows the marker would match one of them.
+  ["infrastructure-retries-exhausted", new RegExp(`^${INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT}`)],
   // Current OCR (sandboxed VM provider) failures, plus the markers of the retired local OCR engine: stage errors stored
   // before the cutover keep that text, and reports over those runs must still say OCR was unavailable.
   ["ocr_unavailable", /model-refused|DOCSLURP_OCR_MODE|OCR provider plugin|tessdata|traineddata|tesseract|leptonica|\bocr\b.*(?:unavailable|refused|is off|not (?:installed|found|available)|failed to (?:init|load))/i],

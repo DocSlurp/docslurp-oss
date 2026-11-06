@@ -18,7 +18,9 @@ import {
 import { recordUnrecordedUsageTelemetry, withObservation } from "@docslurp/shared/observability";
 import { DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@docslurp/shared";
 import { existsSync, readFileSync, readdirSync, readlinkSync, lstatSync, realpathSync, statSync } from "node:fs";
-import { access, copyFile, mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { access, chmod, copyFile, mkdtemp, readdir, rename, rm, stat } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { AsyncResource } from "node:async_hooks";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -72,6 +74,12 @@ export interface CommandPlan {
   available: boolean;
   /** Auxiliary regular files under a private DocSlurp temp workspace, staged read-only. */
   stagedInputs?: string[];
+  /**
+   * A host directory of read-only reference files the command reads (ClamAV definitions), named by its content's hash. A
+   * remote provider stages it once per VM where the parser user can read but not change it, and maps paths under it; it
+   * is never uploaded into the command's job tree (real-Modal P1).
+   */
+  readOnlyAssetDir?: string;
   /** Page count for the wall-clock budget; defaults to the document in the perf context. */
   pages?: number;
   /** Explicit wall-clock budget, overriding the page-based one. */
@@ -1147,13 +1155,15 @@ export class CommandRunner {
     );
   }
 
-  private async clamVmDatabaseHealth(policy: MalwareScanPolicy, signal: AbortSignal | undefined, databaseArgs: string[]): Promise<ClamDatabaseHealth> {
+  private async clamVmDatabaseHealth(policy: MalwareScanPolicy, signal: AbortSignal | undefined, databaseArgs: string[], assetDir?: string): Promise<ClamDatabaseHealth> {
     try {
       const signatureFiles = databaseArgs.filter((_, index) => index % 2 === 1);
       if (!signatureFiles.length) throw new Error("No staged signature files");
-      // ClamAV print_version accepts a directory and reads its daily.cvd/cld header.
+      // ClamAV print_version accepts a directory and reads its daily.cvd/cld header: the same staged definitions the scan
+      // uses, so the freshness check still covers what scans.
       const plan = await this.plan("clamscan", "--database", path.dirname(signatureFiles[0]!), "--version");
-      plan.stagedInputs = signatureFiles;
+      if (assetDir) plan.readOnlyAssetDir = assetDir;
+      else plan.stagedInputs = signatureFiles;
       plan.readOnlyInputs = true;
       const result = await this.run(plan, signal);
       return parseClamVmDatabaseHealth(result.stdout, policy.maxSignatureAgeHours);
@@ -1167,32 +1177,21 @@ export class CommandRunner {
     // Copy only named signature assets, never host configuration or credentials. The host
     // updater keeps these fresh; the VM verifies the same staged definitions it will scan with.
     const policy = resolveMalwareScanPolicy();
-    const dir = await mkdtemp(path.join(tmpdir(), "docslurp-clam-definitions-"));
-    try {
-      const databaseArgs: string[] = [];
-      let totalBytes = 0;
-      for (const entry of await readdir(policy.databaseDirectory, { withFileTypes: true })) {
-        if (!entry.isFile() || !/^(?:main|daily|bytecode)\.(?:cvd|cld)$/.test(entry.name)) continue;
-        const sourceFile = path.join(policy.databaseDirectory, entry.name);
-        totalBytes += (await stat(sourceFile)).size;
-        if (totalBytes > 512 * 1024 * 1024) throw new Error("ClamAV signature assets exceed transfer limit");
-        const target = path.join(dir, entry.name);
-        await copyFile(sourceFile, target);
-        databaseArgs.push("--database", target);
-      }
-      if (databaseArgs.length === 0) throw new Error("ClamAV signature assets unavailable; refusing VM scan");
-      return await this.scanForMalwareWithDefinitions(source, signal, databaseArgs);
-    } finally { await rm(dir, { recursive: true, force: true }); }
+    // Staged once per definitions content and reused by every document (real-Modal P1): a remote VM receives them once.
+    const staged = await stageClamDefinitions(policy.databaseDirectory);
+    const databaseArgs = staged.files.flatMap((file) => ["--database", file]);
+    return await this.scanForMalwareWithDefinitions(source, signal, databaseArgs, staged.dir);
   }
 
   private async scanForMalwareWithDefinitions(
     source: string,
     signal?: AbortSignal,
     databaseArgs: string[] = [],
+    assetDir?: string,
   ): Promise<MalwareScanResult> {
     const policy = resolveMalwareScanPolicy();
     const databaseHealth = process.env.NODE_ENV === "production"
-      ? await this.clamVmDatabaseHealth(policy, signal, databaseArgs)
+      ? await this.clamVmDatabaseHealth(policy, signal, databaseArgs, assetDir)
       : inspectClamDatabaseHealth(policy);
     const daemonPlan = process.env.NODE_ENV === "production"
       ? { binary: "clamdscan", args: [], available: false }
@@ -1200,6 +1199,7 @@ export class CommandRunner {
     const directPlan = await this.clamScan(source);
     directPlan.args.unshift(...databaseArgs);
     directPlan.readOnlyInputs = true;
+    if (assetDir) directPlan.readOnlyAssetDir = assetDir;
     const healthWarnings: string[] = [];
 
     const databaseWarning = describeClamDatabaseHealth(
@@ -2265,6 +2265,64 @@ export function buildCommandEnv(args: {
 }
 
 /** Provider-neutral description of a parser command: allowlisted env plus the paths it may read and write. */
+/** The ClamAV definitions currently staged on this host, by the source files' name, size and mtime. */
+let stagedDefinitions: { signature: string; staging: Promise<{ dir: string; files: string[] }> } | null = null;
+
+/**
+ * Copy the named ClamAV definition files once into a directory named by their content's sha256 (real-Modal P1), read-only,
+ * and reuse it until the host updater changes them; the previous directory is removed then. Only the signature databases
+ * travel, never host configuration or credentials.
+ */
+export async function stageClamDefinitions(directory: string): Promise<{ dir: string; files: string[] }> {
+  const names: string[] = [];
+  const parts: string[] = [];
+  let totalBytes = 0;
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    if (!entry.isFile() || !/^(?:main|daily|bytecode)\.(?:cvd|cld)$/.test(entry.name)) continue;
+    const info = await stat(path.join(directory, entry.name));
+    totalBytes += info.size;
+    if (totalBytes > 512 * 1024 * 1024) throw new Error("ClamAV signature assets exceed transfer limit");
+    names.push(entry.name);
+    parts.push(`${entry.name}:${info.size}:${info.mtimeMs}`);
+  }
+  if (!names.length) throw new Error("ClamAV signature assets unavailable; refusing VM scan");
+  names.sort();
+  const signature = `${directory}|${parts.sort().join("|")}`;
+  if (stagedDefinitions?.signature === signature) {
+    const current = await stagedDefinitions.staging.catch(() => null);
+    if (current && existsSync(current.dir)) return current;
+  }
+  const previous = stagedDefinitions;
+  const staging = (async () => {
+    const hash = createHash("sha256");
+    for (const name of names) {
+      hash.update(`${name}\0`);
+      for await (const chunk of createReadStream(path.join(directory, name))) hash.update(chunk as Buffer);
+    }
+    const dir = path.join(tmpdir(), `docslurp-clam-definitions-${hash.digest("hex").slice(0, 32)}`);
+    if (!existsSync(dir)) {
+      const temp = await mkdtemp(`${dir}.staging-`);
+      try {
+        for (const name of names) {
+          await copyFile(path.join(directory, name), path.join(temp, name));
+          await chmod(path.join(temp, name), 0o444);
+        }
+        await rename(temp, dir).catch(async (error: NodeJS.ErrnoException) => {
+          if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") throw error;
+        });
+      } finally {
+        await rm(temp, { recursive: true, force: true });
+      }
+    }
+    return { dir, files: names.map((name) => path.join(dir, name)) };
+  })();
+  stagedDefinitions = { signature, staging };
+  const result = await staging;
+  const old = await previous?.staging.catch(() => null);
+  if (old && old.dir !== result.dir) await rm(old.dir, { recursive: true, force: true }).catch(() => {});
+  return result;
+}
+
 export function buildSandboxCommand(args: {
   plan: CommandPlan;
   venvBin: string;
@@ -2281,12 +2339,16 @@ export function buildSandboxCommand(args: {
     configuredWritablePaths: args.configuredWritablePaths,
     scriptsDir: args.scriptsDir,
   });
+  const assetDir = args.plan.readOnlyAssetDir ? path.resolve(args.plan.readOnlyAssetDir) : null;
+  const underAssets = (p: string) => assetDir !== null && (p === assetDir || p.startsWith(`${assetDir}${path.sep}`));
   return {
     binary: args.plan.binary,
     args: args.plan.args,
     env: buildCommandEnv({ plan: args.plan, venvBin: args.venvBin, isVectorBackend: false, env: args.env }),
-    readablePaths: paths.readablePaths,
-    inputPaths: paths.inputPaths,
+    // Read-only assets are readable (local providers bind them) and never uploaded into the job tree (remote providers).
+    readablePaths: assetDir ? [...paths.readablePaths.filter((p) => !underAssets(p)), assetDir] : paths.readablePaths,
+    inputPaths: paths.inputPaths.filter((p) => !underAssets(p)),
+    ...(assetDir ? { readOnlyAssetDir: assetDir } : {}),
     writablePaths: paths.writablePaths,
     limits: args.limits,
     ...(deniesUnixSockets(args.plan) ? { denyUnixSockets: true } : {}),

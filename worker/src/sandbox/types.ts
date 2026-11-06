@@ -60,6 +60,11 @@ export interface SandboxCommand {
    * holds this key's inputs. Never a security boundary; any idle VM of the activity may run it.
    */
   affinityKey?: string;
+  /**
+   * A host directory of read-only reference files named by its content hash (CommandPlan.readOnlyAssetDir). A remote
+   * provider stages it once per VM, readable but not writable by the command, and maps paths under it.
+   */
+  readOnlyAssetDir?: string;
 }
 
 export interface SandboxResult {

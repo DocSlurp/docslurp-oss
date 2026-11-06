@@ -42,6 +42,7 @@ import { pinRunRoutingVersion } from "../lib/vision-routing-v2.js";
 import { ProgressTracker, resolveStageStallTimeoutMs, runWithProgressTracker } from "../lib/work-progress.js";
 import { latchedTeardownError, settleSandboxSession } from "../sandbox/session-context.js";
 import { findCommandTeardownError } from "../sandbox/teardown-breaker.js";
+import { WORKER_INTERRUPTED } from "../temporal/failure-classification.js";
 import {
   buildRunProgressEvent,
   buildRunStartedEvent,
@@ -739,7 +740,9 @@ export function createStageExecution(deps: {
     );
 
     const state = await loadRunState(store, input.runId);
-    await store.failRun(input.runId, stage, input.message, { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
+    await store.failRun(input.runId, stage, input.message, { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration },
+      // The stage's infrastructure retries ran out: its unfinished documents say so publicly (real-Modal P3).
+      { infrastructureRetriesExhausted: input.failureType === WORKER_INTERRUPTED });
 
     await notifyTerminal(input.runId, "run.failed");
   }

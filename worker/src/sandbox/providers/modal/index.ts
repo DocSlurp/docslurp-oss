@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { pricing } from "@docslurp/shared";
 
 import { boundedVmStream } from "./transfer.js";
+import { readdir, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { resolveWorkerDeploymentProfile, buildLocalComputeUsageEvent } from "../../../pipeline/local-compute-cost.js";
@@ -110,6 +111,8 @@ export function modalVmIdleSeconds(env: NodeJS.ProcessEnv = process.env): number
 export const PROBE_SESSION_TIMEOUT_SECONDS = 120;
 /** Deadline for the terminate request. Modal stops the VM once it accepts the request; exit is not awaited. */
 const TERMINATE_REQUEST_MS = 10_000;
+/** Root-owned home of read-only assets in a parser VM (ClamAV definitions), outside every job tree. */
+const ASSET_ROOT = "/opt/docslurp-assets";
 /** How long a terminate waits for a create call still in flight before quarantining its capacity. */
 const CREATE_SETTLE_MS = 5_000;
 
@@ -244,6 +247,8 @@ type RemoteOutcome =
   | { kind: "aborted" };
 
 class CommandAborted extends Error {}
+/** A command waiting for a worker VM token gives up its empty lane for an idle VM of its own activity (real-Modal P2). */
+class HandOver extends Error {}
 
 async function withDeadline<T>(work: Promise<T>, timeoutMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -375,6 +380,10 @@ function buildRemoteFs(sdk: ModalSdk, sandbox: import("modal").Sandbox): RemoteF
  * rates (`internalCost.sandboxCostCents`; 0 under the open default), not the worker host's, and the
  * cost rides as `providerCostCents` so the provider-cost loss alert sees it. It is provider cost only:
  * `costRollup: "included"` and `billable: false` keep it out of customer credits.
+ *
+ * `amount` is NOT provider cost: it is the local-compute rate-card estimate for the same CPU and memory seconds
+ * (buildLocalComputeUsageEvent), several times lower than Modal's price. Provider cost is `metadata.providerCostCents`
+ * only; the loss alert and spend attribution read that, and `amount` is summed only for billable page and minute metrics.
  */
 export function buildModalUsageEvent(config: ModalConfig, activityId: string, wallSeconds: number): UsageEvent {
   const cpuSeconds = config.cpu * wallSeconds;
@@ -565,7 +574,17 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
 
         async function reserve(signal?: AbortSignal): Promise<void> {
           if (holdsToken || sandbox || lane.dead) return;
-          await vmBudget.acquire(() => closed || lane.dead, signal);
+          let handOver = false;
+          await vmBudget.acquire(() => {
+            if (closed || lane.dead) return true;
+            // This activity's own VM went idle while this command waited for a worker token: take it over rather than
+            // have the budget terminate it and start another (real-Modal P2). Same activity, so no wipe is needed.
+            if (idleWithVm()) { handOver = true; return true; }
+            return false;
+          }, signal, budgetMember).catch((error: unknown) => {
+            if (handOver) throw new HandOver();
+            throw error;
+          });
           if (closed || lane.dead) { vmBudget.release(); throw new SandboxInfrastructureError("modal sandbox session is closed"); }
           holdsToken = true;
         }
@@ -800,13 +819,62 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           }
         }
 
-        async function executeCommand(command: SandboxCommand, started: number, signal: AbortSignal | undefined, markCleaned: () => void): Promise<SandboxResult> {
+        /**
+         * Read-only assets in this VM (real-Modal P1), by content-named directory: staged once by root under ASSET_ROOT
+         * (directories 0755, files 0444), so the parser user reads them but can never change them for a later document,
+         * and outside every job tree, so no upload, discard or download touches them.
+         */
+        const assetDirs = new Map<string, Promise<string>>();
+        function ensureAssetDir(hostDir: string): Promise<string> {
+          const name = path.basename(hostDir);
+          if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name)) return Promise.reject(new Error("invalid read-only asset directory name"));
+          let staged = assetDirs.get(name);
+          if (!staged) {
+            staged = (async () => {
+              const vmDir = `${ASSET_ROOT}/${name}`;
+              await withDeadline(sandbox!.filesystem.makeDirectory(vmDir), 30_000);
+              const files: string[] = [];
+              let total = 0;
+              for (const entry of await readdir(hostDir, { withFileTypes: true })) {
+                if (!entry.isFile()) continue;
+                const data = await readFile(path.join(hostDir, entry.name));
+                total += data.byteLength;
+                if (total > 512 * 1024 * 1024) throw new Error("read-only assets exceed transfer limit");
+                await sandbox!.filesystem.writeBytes(data, `${vmDir}/${entry.name}`);
+                files.push(`${vmDir}/${entry.name}`);
+              }
+              await runChecked(sandbox!, ["/bin/chmod", "0755", "--", ASSET_ROOT, vmDir], "parser VM asset directory setup failed");
+              if (files.length) await runChecked(sandbox!, ["/bin/chmod", "0444", "--", ...files], "parser VM asset setup failed");
+              return vmDir;
+            })();
+            assetDirs.set(name, staged);
+            staged.catch(() => assetDirs.delete(name));
+          }
+          return staged;
+        }
+
+        /** The command with its read-only asset paths mapped into the VM, and those paths out of its uploads. */
+        async function withAssets(command: SandboxCommand): Promise<SandboxCommand> {
+          if (!command.readOnlyAssetDir) return command;
+          const hostDir = path.resolve(command.readOnlyAssetDir);
+          const vmDir = await ensureAssetDir(hostDir);
+          const under = (p: string) => p === hostDir || p.startsWith(`${hostDir}/`);
+          return {
+            ...command,
+            args: command.args.map((arg) => (under(arg) ? `${vmDir}${arg.slice(hostDir.length)}` : arg)),
+            inputPaths: command.inputPaths.filter((p) => !under(p)),
+          };
+        }
+
+        async function executeCommand(original: SandboxCommand, started: number, signal: AbortSignal | undefined, markCleaned: () => void): Promise<SandboxResult> {
           const control = `${CONTROL_DIR}/${++commandCount}`;
+          let command = original;
           /** Whether this command's own process ran: a staging failure before that may be another document's doing. */
           let ran = false;
           try {
             await ensureSandbox();
             throwIfAborted(signal);
+            command = await withAssets(command);
             // Only the command's inputs travel; the parser runtime comes from the image.
             await staging!.ensureUploaded(command.inputPaths);
             throwIfAborted(signal);
@@ -934,6 +1002,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
 
       function releaseLane(lane: Lane): void {
         lane.busy = false;
+        // A command of this activity waiting for a worker token may take this VM over (real-Modal P2).
+        if (!lane.dead && lane.accountedAt !== undefined) vmBudget.wake();
         if (lane.dead) lanes.splice(lanes.indexOf(lane), 1);
         else if (!closed) {
           // Idle VMs are reaped: Modal bills them until terminated (VM pool follow-up).
@@ -985,12 +1055,31 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           // A closed session is the sandbox's failure, never the document's (recheck R #2).
           if (closed) throw new SandboxInfrastructureError("modal sandbox session is closed");
           if (signal?.aborted) throw new SandboxRunError("modal sandbox command aborted");
-          const lane = await acquireLane(command.affinityKey, signal);
+          let lane = await acquireLane(command.affinityKey, signal);
           if (hooks?.recordUsage) lane.recorder = hooks.recordUsage;
           try {
             // The worker VM token too, before admission: a command waiting for capacity is still queued, its time limit not
-            // yet running, and an abort ends the wait (recheck T #2).
-            await lane.reserve(signal);
+            // yet running, and an abort ends the wait (recheck T #2). If this activity's own VM goes idle meanwhile, the
+            // command drops its empty lane and takes that VM over (real-Modal P2).
+            for (;;) {
+              try {
+                await lane.reserve(signal);
+                break;
+              } catch (error) {
+                if (!(error instanceof HandOver)) throw error;
+                const idle = idleWithVm();
+                if (!idle) continue;
+                lane.dead = true;
+                lanes.splice(lanes.indexOf(lane), 1);
+                lane = idle;
+                lane.busy = true;
+                lane.previousKey = lane.lastKey;
+                lane.lastKey = command.affinityKey;
+                if (lane.previousKey !== command.affinityKey) lane.forgetUploads();
+                if (lane.idleTimer) { clearTimeout(lane.idleTimer); lane.idleTimer = undefined; }
+                if (hooks?.recordUsage) lane.recorder = hooks.recordUsage;
+              }
+            }
             // The VM is created and hardened before admission too (recheck S #4): its start-up never spends the command's
             // time limit, and a VM that cannot be created is the sandbox's failure.
             try {

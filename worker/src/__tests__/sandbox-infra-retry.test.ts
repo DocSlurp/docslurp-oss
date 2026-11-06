@@ -120,11 +120,19 @@ describe("sandbox infrastructure failures retry the stage without failing the do
       expect((await documentStages()).y).not.toBe("failed");
     }
     // Temporal gives up (STAGE_THROTTLED_ATTEMPTS); the workflow records the failure.
-    await execution.failRun({ runId: "r1", executionGeneration: "g1", stage: "extract", message: "parser VM leftover processes could not be killed; VM terminated" });
+    await execution.failRun({ runId: "r1", executionGeneration: "g1", stage: "extract", message: "parser VM leftover processes could not be killed; VM terminated", failureType: "WorkerInterrupted" });
     expect((await run()).status).toBe("failed");
     const documents = (await db.query<{ id: string; status: string }>(`select id, status from documents where run_id = 'r1' order by id`)).rows;
     expect(documents.find((row) => row.id === "y")?.status).toBe("failed");
     expect(await visionEvents()).toBe(1); // only x ran; nothing billed twice
+    // Real-Modal P3: the document carries a public reason; the raw error never reaches the public copy.
+    const { classifyIngestFailure } = await import("@docslurp/shared");
+    const { rows: [stage] } = await db.query<{ error: string }>(`select error from document_run_stage_states where document_id = 'y'`);
+    expect(stage!.error).toMatch(/^Infrastructure retries exhausted: /);
+    const reason = classifyIngestFailure(stage!.error, "failed");
+    expect(reason.reason).toBe("infrastructure-retries-exhausted");
+    expect(reason.message).not.toMatch(/leftover|VM terminated/);
+    expect(reason.retryable).toBe(true);
   });
 
   it("a document that breaks a fresh VM on every attempt fails at the strike limit; the other document completes (recheck S #2)", async () => {

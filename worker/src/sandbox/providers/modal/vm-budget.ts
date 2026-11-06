@@ -32,14 +32,15 @@ export class VmBudget {
    * Take a token, waiting while every one is held. `abandoned()` true (the session closed) ends the wait with a throw, and
    * an abort of `signal` ends it with SandboxRunError("aborted") (recheck T #2).
    */
-  async acquire(abandoned: () => boolean, signal?: AbortSignal): Promise<void> {
+  async acquire(abandoned: () => boolean, signal?: AbortSignal, self?: VmBudgetMember): Promise<void> {
     const check = () => {
       if (signal?.aborted) throw new SandboxRunError("modal sandbox command aborted");
       if (abandoned()) throw new Error("parser VM session closed while waiting for a VM");
     };
     while (this.used >= this.limit) {
       check();
-      for (const member of this.reapers) if (member.reapIdle()) break;
+      // Never the waiting session's own idle VM: that one is handed to the waiting command instead (real-Modal P2).
+      for (const member of this.reapers) if (member !== self && member.reapIdle()) break;
       if (this.used < this.limit) continue;
       await new Promise<void>((resolve) => {
         const done = () => {
@@ -58,6 +59,11 @@ export class VmBudget {
     }
     check();
     this.used++;
+  }
+
+  /** Let every waiter re-check now (a session's own VM became idle and may be handed over). */
+  wake(): void {
+    for (const waiter of [...this.waiters]) waiter();
   }
 
   release(): void {

@@ -174,6 +174,11 @@ export interface FailRunInput {
    * recorded instead of `stage`.
    */
   stageGroup?: string[];
+  /**
+   * The Temporal ApplicationFailure type that ended the run, when there was one: "WorkerInterrupted" means the stage's
+   * infrastructure retries ran out (failure-classification.ts), and its unfinished documents get that public reason.
+   */
+  failureType?: string;
 }
 
 // ── Workflow input/output types ──
