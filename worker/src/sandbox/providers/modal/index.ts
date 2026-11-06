@@ -443,8 +443,9 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           }), 30_000);
           if (!opened) throw new Error("parser VM creation returned no sandbox");
           sandbox = opened;
-          // As root, once: kernel link protections on (best effort; the contract reports them and the probe refuses 0).
-          await withDeadline(opened.exec(HARDEN_LINKS_ARGV, { timeoutMs: 10_000 }).then((proc) => proc.wait()), 15_000);
+          // As root, once: kernel link protections on and read back as 1, or this VM runs nothing (council K #5, Modal check).
+          const hardened = await withDeadline(opened.exec(HARDEN_LINKS_ARGV, { timeoutMs: 10_000 }).then((proc) => proc.wait()), 15_000);
+          if (hardened !== 0) throw new Error("parser VM kernel link protections could not be turned on");
           await withDeadline(opened.filesystem.makeDirectory(CONTROL_DIR), 30_000);
           // Root-owned and not writable by the parser user; uploads staged here are copied into place as uid 10001.
           await withDeadline(runChecked(opened, ["/bin/chmod", "0711", "--", CONTROL_DIR], "parser VM control directory setup failed"), 30_000);

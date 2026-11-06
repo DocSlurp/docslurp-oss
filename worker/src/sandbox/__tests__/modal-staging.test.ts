@@ -297,6 +297,8 @@ function fakeSdk(
     onKill?: (control: string) => void;
     /** The first client's terminate request never answers (a stuck connection). */
     terminateHangs?: boolean;
+    /** The VM's link hardening fails (a sysctl that cannot be written or reads back 0). */
+    hardeningFails?: boolean;
   } = {},
 ) {
   const remote = new MemoryRemoteFs();
@@ -345,7 +347,7 @@ function fakeSdk(
       listFiles: async (p: string) => (await remote.list(p)).map(info),
     },
     exec: async (argv: string[], params?: { timeoutMs?: number }) => {
-      if (argv[0] === "/bin/sh" && argv[2]?.includes("protected_hardlinks")) { state.hardened++; return finished("", 0); }
+      if (argv[0] === "/bin/sh" && argv[2]?.includes("protected_hardlinks")) { state.hardened++; return finished("", opts.hardeningFails ? 3 : 0); }
       // Readback and listing run as the parser user (setpriv prefix): record it, then serve them.
       const asUser = argv[0] === "/usr/bin/setpriv" && argv.includes("--reuid=10001") ? argv.slice(argv.indexOf("--") + 1) : null;
       if (asUser?.[0] === "/bin/cat") { state.readsAsUser++; return { stdout: stream(await remote.readFile(asUser[2]!)), stderr: stream(""), wait: async () => 0 }; }
@@ -471,6 +473,15 @@ describe("modal provider session lifecycle", () => {
     await first;
     expect(state.leftoverKills).toBeGreaterThan(0);
     await opened.close();
+  });
+
+  it("a job VM whose link hardening fails runs nothing and is terminated (Modal check)", async () => {
+    const commands: string[][] = [];
+    const { state, session } = await open({ hardeningFails: true, exec: async (argv) => { commands.push(argv); return finished(); } });
+    await expect(session()).rejects.toThrow(/creation failed/);
+    expect(state.hardened).toBe(1);
+    expect(commands).toEqual([]);
+    expect(state.terminate).toBe(1);
   });
 
   it("starts every parser VM with the idle command, never the image's entrypoint (validation N1)", async () => {

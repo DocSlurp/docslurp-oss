@@ -79,10 +79,18 @@ export function launchArgv(control: string, binary: string, args: string[], writ
 }
 
 /**
- * Run once as root when a parser VM starts: turn on the kernel's hardlink and symlink protections where the kernel allows
- * it (council K #5). Best effort here; the parser-vm contract reports the values and the startup probe refuses 0.
+ * Run once as root when a parser VM starts: turn on the kernel's hardlink and symlink protections (council K #5; Modal's
+ * microVMs boot with both 0). Exits 3 unless both read back as 1, and the session refuses to run anything then: every
+ * job VM is checked, not just the startup probe's.
  */
-export const HARDEN_LINKS_ARGV = ["/bin/sh", "-c", "for f in protected_hardlinks protected_symlinks; do [ -w /proc/sys/fs/$f ] && echo 1 > /proc/sys/fs/$f; done; exit 0"];
+export const HARDEN_LINKS_ARGV = ["/bin/sh", "-c", [
+  "for f in protected_hardlinks protected_symlinks; do",
+  "  { echo 1 > /proc/sys/fs/$f; } 2>/dev/null",
+  "  v=; read -r v < /proc/sys/fs/$f 2>/dev/null",
+  '  [ "$v" = 1 ] || { echo "parser VM: fs.$f is ${v:-unreadable}, not 1" >&2; exit 3; }',
+  "done",
+  "exit 0",
+].join("\n")];
 
 /** argv that kills the command launched with the same `control` path, or stops it from starting. */
 export function killArgv(control: string): string[] {
