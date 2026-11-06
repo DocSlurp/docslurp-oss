@@ -47,7 +47,7 @@ const GB = 1024 ** 3;
 describe("price card", () => {
   it("publishes the owner-approved unit prices", () => {
     expect(PRICE_CARD).toMatchObject({
-      fastPer1kPages: 5,
+      fastPer1kPages: 10,
       richPer1kPages: 250,
       audioMinuteRichPages: 1,
       videoMinuteRichPages: 3,
@@ -66,10 +66,11 @@ describe("price card", () => {
   });
 
   it("prices pages by mode", () => {
-    expect(pageCredits("fast", 1_000)).toBeCloseTo(5);
+    expect(pageCredits("fast", 1_000)).toBeCloseTo(10);
     expect(pageCredits("rich", 1_000)).toBeCloseTo(250);
     expect(pageCredits("rich", 1)).toBeCloseTo(0.25);
     expect(pageCredits("fast", -5)).toBe(0);
+    expect(pageCredits("fast", 10_000)).toBeCloseTo(100);
   });
 
   it("counts one more Rich page per started 1,000 output tokens beyond the first 1,000", () => {
@@ -253,7 +254,7 @@ describe("ingest estimator", () => {
   it("prices with the price card: text pages Fast, scans Rich", () => {
     const text = estimateIngest({ pages: 1_000, mix: { text: 1 }, documents: 1 });
     expect(text.fastPages).toBe(1_000);
-    expect(text.credits.totalCredits).toBeCloseTo(5);
+    expect(text.credits.totalCredits).toBeCloseTo(10);
     const scanned = estimateIngest({ pages: 1_000, mix: { scanned: 1 }, documents: 1 });
     expect(scanned.richPages).toBe(1_000);
     expect(scanned.credits.totalCredits).toBeCloseTo(250);
@@ -261,7 +262,7 @@ describe("ingest estimator", () => {
 
   it("charges small files only for their pages (no per-file minimum) and prices media minutes", () => {
     const tiny = estimateIngest({ pages: 10, mix: { text: 1 }, documents: 10 });
-    expect(tiny.credits.totalCredits).toBeCloseTo(0.05);
+    expect(tiny.credits.totalCredits).toBeCloseTo(0.1);
     expect("perFileMinimum" in PRICE_CARD).toBe(false);
     const podcast = estimateIngest({ pages: 0, mix: {}, audioMinutes: 60, documents: 1 });
     expect(podcast.mediaRichPages).toBe(60);

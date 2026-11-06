@@ -76,8 +76,8 @@ export function dollarsToCredits(dollars: number): number {
  * cost. The fix for those is batching small files, not a fee.
  */
 export const PRICE_CARD = {
-  /** Text-layer PDF, Office, HTML, Markdown, EPUB, text. */
-  fastPer1kPages: 5,
+  /** Text-layer PDF, Office, HTML, Markdown, EPUB, text. Owner rate: 10,000 pages/$1. */
+  fastPer1kPages: 10,
   /** Scanned, image, or complex layout read by a vision/OCR model. */
   richPer1kPages: 250,
   /** One audio minute counts as this many Rich pages. */
@@ -742,7 +742,7 @@ const formatUsdPer1k = (credits: number): string => {
   return `$${dollars.toFixed(2)}`;
 };
 
-/** "$0.05", "$0.05 to $2.50" or "$2.50" per 1,000 pages for a quality mode. */
+/** "$0.10", "$0.10 to $2.50" or "$2.50" per 1,000 pages for a quality mode. */
 export function qualityModePriceRange(mode: QualityMode): string {
   const { min, max } = QUALITY_MODES[mode].creditsPer1kPages;
   return min === max ? formatUsdPer1k(min) : `${formatUsdPer1k(min)} to ${formatUsdPer1k(max)}`;

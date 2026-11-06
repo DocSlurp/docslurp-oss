@@ -382,8 +382,8 @@ describe("QUALITY_MODES", () => {
   });
 
   it("formats the price per 1,000 pages", () => {
-    expect(qualityModePriceRange("fast")).toBe("$0.05");
-    expect(qualityModePriceRange("auto")).toBe("$0.05 to $2.50");
+    expect(qualityModePriceRange("fast")).toBe("$0.10");
+    expect(qualityModePriceRange("auto")).toBe("$0.10 to $2.50");
     expect(qualityModePriceRange("good")).toBe("$2.50");
   });
 
