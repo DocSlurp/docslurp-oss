@@ -26,7 +26,7 @@ import { ApplicationFailure, CancelledFailure } from "@temporalio/common";
 
 import { findHungWorkError } from "../lib/hung-work.js";
 import { findProviderRetryableError } from "../lib/provider-retry.js";
-import { isTransientNetworkError } from "../lib/transient-errors.js";
+import { isTransientDatabaseError, isTransientNetworkError } from "../lib/transient-errors.js";
 import { isWorkerShuttingDown } from "../lib/worker-lifecycle.js";
 import { findCommandTeardownError, findWorkerQuarantinedError } from "../sandbox/teardown-breaker.js";
 
@@ -67,6 +67,9 @@ export function classifyActivityError(
   // A dropped socket or restarted database is the infrastructure failing, not the document:
   // retry without spending an ordinary attempt (Temporal's maximumAttempts still bounds it).
   if (isTransientNetworkError(error, { includeTimeouts: false })) return "interruption";
+  // So is a database statement timeout or a charge check that could not decide: re-authorized from durable state on retry
+  // (real-Modal finding F6: a 57014 during re-authorization had failed the document as an ordinary error).
+  if (isTransientDatabaseError(error)) return "interruption";
   return "ordinary";
 }
 

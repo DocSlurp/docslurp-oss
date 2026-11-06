@@ -36,3 +36,19 @@ export function isTransientNetworkError(error: unknown, options: { includeTimeou
   return false;
 }
 
+/**
+ * A database failing rather than the document: Postgres SQLSTATE classes 08 (connection), 53 (insufficient resources) and 57
+ * (operator intervention: a statement timeout or cancellation, 57014, and shutdowns), a serialization failure or deadlock
+ * (40001, 40P01), and a charge check that could not decide (SpendCheckUnavailableError, retryable by design). A retry
+ * re-runs the work from durable state (a measured count is re-authorized; reads and charges already persisted are reused).
+ */
+export function isTransientDatabaseError(error: unknown): boolean {
+  for (const link of causeChain(error)) {
+    if (typeof link !== "object" || link === null) continue;
+    if ((link as { name?: unknown }).name === "SpendCheckUnavailableError") return true;
+    const code = (link as { code?: unknown }).code;
+    if (typeof code === "string" && /^[0-9A-Z]{5}$/.test(code) && (/^(08|53|57)/.test(code) || code === "40001" || code === "40P01")) return true;
+  }
+  return false;
+}
+
