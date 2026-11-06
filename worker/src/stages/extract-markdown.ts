@@ -2,7 +2,7 @@ import { reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { EMBEDDED_IMAGE_TARGETS, embeddedImageGraph, resolveEmbeddedImageRequest } from "../extractors/embedded-images.js";
 import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
 import {
-  SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, requireSandboxedPdfProvider, sandboxedPdfOcrPages,
+  SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, requireSandboxedPdfProvider, sandboxedPdfLayoutFacts, sandboxedPdfOcrPages,
 } from "../extractors/plugins.js";
 import { buildSummaryEvidence } from "./summary-evidence.js";
 import type { CapacityLeaseStore } from "../media/capacity/types.js";
@@ -949,9 +949,11 @@ export class ExtractMarkdownStage implements Stage {
                   if (pageImageEvidenceUri) {
                     state.artifactLedger.recordDocument(document.id, "page-image-evidence", pageImageEvidenceUri);
                   }
-                  // Layout facts (image placement, tables) for evidence routing; the sandboxed route gets them from the PDF VM.
-                  const pageLayoutFactsUri = hostPdfProbes === "ran" && resolveRunRoutingV2(state)
-                    ? await this.recordPageLayoutFacts(document, tempFile, winningText, state, signal)
+                  // Layout facts (image placement, tables) for evidence routing: collected in the parser sandbox for host-probed
+                  // PDFs, or returned by the PDF VM from the same job that wrote the winning Markdown. Never host-probed otherwise.
+                  const pageLayoutFactsUri = !isPdf || !resolveRunRoutingV2(state) ? null
+                    : hostPdfProbes === "ran" ? await this.recordPageLayoutFacts(document, tempFile, winningText, state, signal)
+                    : winningCandidate.layoutFacts ? await this.storePageLayoutFacts(document, state, winningCandidate.layoutFacts, "vm-pdf")
                     : null;
                   if (pageLayoutFactsUri) {
                     state.artifactLedger.recordDocument(document.id, "page-layout-facts", pageLayoutFactsUri);
@@ -1608,9 +1610,22 @@ export class ExtractMarkdownStage implements Stage {
     });
     if (signal?.aborted) throw signal.reason ?? new Error("aborted");
     if (!pages) return null;
+    return await this.storePageLayoutFacts(document, state, pages, "parser-sandbox", Date.now() - startedAt);
+  }
+
+  private async storePageLayoutFacts(
+    document: import("../models.js").Document,
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    pages: Map<number, import("../lib/page-layout-facts.js").PageLayoutFacts>,
+    source: "parser-sandbox" | "vm-pdf",
+    ms: number | null = null,
+  ): Promise<string> {
     const key = `${runArtifactRoot(state.run, document.userId)}/page-layout-facts/${document.id}.json`;
-    await this.storage.putJson(key, { version: "pdf-layout-facts@1", documentId: document.id, pages: [...pages.entries()].map(([pageNumber, page]) => ({ pageNumber, known: true, ...page })) });
-    console.log(`[extract-debug] document=${document.id} pageLayoutFacts pages=${pages.size} ms=${Date.now() - startedAt}`);
+    await this.storage.putJson(key, {
+      version: "pdf-layout-facts@1", documentId: document.id, source,
+      pages: [...pages.entries()].map(([pageNumber, page]) => ({ pageNumber, known: true, ...page })),
+    });
+    console.log(`[extract-debug] document=${document.id} pageLayoutFacts source=${source} pages=${pages.size}${ms === null ? "" : ` ms=${ms}`}`);
     return this.storage.uri(key);
   }
 
@@ -1923,6 +1938,7 @@ export class ExtractMarkdownStage implements Stage {
     await pipeline(createReadStream(outputPath), upload.writable);
     await upload.done;
     const ocrPages = plan.sandboxedPdf ? sandboxedPdfOcrPages(plan.sandboxedPdf) : undefined;
+    const layoutFacts = plan.sandboxedPdf ? sandboxedPdfLayoutFacts(plan.sandboxedPdf) : undefined;
 
     return {
       label,
@@ -1931,6 +1947,7 @@ export class ExtractMarkdownStage implements Stage {
       textUri: this.storage.uri(textKey),
       tempTextPath: outputPath,
       ...(ocrPages ? { ocrPages: [...ocrPages] } : {}),
+      ...(layoutFacts ? { layoutFacts } : {}),
     };
   }
 

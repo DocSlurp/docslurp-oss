@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { parsePageLayoutFacts, type PageLayoutFacts } from "../stages/classify-route.js";
+import { parsePageLayoutFacts, type PageLayoutFacts } from "./page-layout-facts.js";
 import { rethrowIfTeardown } from "../sandbox/teardown-breaker.js";
 import type { CommandRunner } from "../tools/runner.js";
 
