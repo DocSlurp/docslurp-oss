@@ -12,8 +12,11 @@ import { measuredTextPages } from "./media-upload-estimate.js";
 export const STANDARD_PAGE_AREA_PT2 = 612 * 792;
 /** Most standard pages one real page's area may count as: rendering and OCR are pixel-bounded per page (raster caps). */
 export const PAGE_AREA_EQUIVALENTS_CAP = 8;
-/** DPI an uploaded image's pixels are read at to give it a page area. */
-export const IMAGE_AREA_DPI = 150;
+/**
+ * DPI an uploaded image's pixels are read at to give it a page area: the standard scan resolution, so a Letter page scanned
+ * at 300 dpi (2550 x 3300 px) is one page.
+ */
+export const IMAGE_AREA_DPI = 300;
 /** A page whose text counts as more than this many pages is reported as dense (possible hidden or stuffed text). */
 export const DENSE_PAGE_EQUIVALENTS = 3;
 
@@ -49,9 +52,15 @@ export function pageAreaEquivalentsPt(widthPt: number, heightPt: number): number
   return pageAreaEquivalents(widthPt, heightPt, 72);
 }
 
-/** Area equivalents of an uploaded image frame from its decoded pixels (read at IMAGE_AREA_DPI). */
-export function imageAreaEquivalents(widthPx: number, heightPx: number): number {
-  return pageAreaEquivalents(widthPx, heightPx, IMAGE_AREA_DPI);
+/**
+ * Area equivalents of an uploaded image frame: its pixels as the OCR read takes them (scaled down so the long edge is at
+ * most `readLongEdge`, the OCR boundary's cap, when given), against a Letter page at IMAGE_AREA_DPI, capped per frame. An
+ * ordinary upload (a scan, a phone photo) is one page; only a read cap above the default lets one frame count as more.
+ */
+export function imageAreaEquivalents(widthPx: number, heightPx: number, readLongEdge?: number): number {
+  const longEdge = Math.max(widthPx, heightPx);
+  const scale = readLongEdge && readLongEdge > 0 && longEdge > readLongEdge ? readLongEdge / longEdge : 1;
+  return pageAreaEquivalents(widthPx * scale, heightPx * scale, IMAGE_AREA_DPI);
 }
 
 /** One page's equivalents: the larger of its text and its area, at least 1. */

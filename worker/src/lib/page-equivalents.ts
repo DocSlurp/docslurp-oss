@@ -4,6 +4,7 @@ import type { Document } from "../models.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
 import { formatNeedsMeasuredPages } from "./office-page-count.js";
 import { authorizeMeasuredPages } from "./measured-page-authorization.js";
+import { ocrMaxLongEdge } from "../ocr/engine.js";
 import { MAX_MEASURED_PDF_PAGES } from "./pdf-page-count.js";
 
 /** Formats whose pages are real pages (PDF pages, image frames): the dense-page allowance applies to their text. */
@@ -56,7 +57,8 @@ export async function recordExtractedPageEquivalents(
   const allowance = paged ? pricing().pageEquivalentAllowance : 1;
   const pages = markdown.replace(/\f\s*$/, "").split("\f");
   const area = new Map(frames.filter((frame) => frame.sourceWidth && frame.sourceHeight)
-    .map((frame) => [frame.pageNumber, imageAreaEquivalents(frame.sourceWidth!, frame.sourceHeight!)]));
+    // As the OCR read takes the frame (its long-edge cap): the work a frame costs, not the size it was uploaded at.
+    .map((frame) => [frame.pageNumber, imageAreaEquivalents(frame.sourceWidth!, frame.sourceHeight!, ocrMaxLongEdge())]));
   if (format === "pdf") {
     for (const [pageNumber, size] of options.pageSizesPt ?? []) {
       if (size.widthPt && size.heightPt && !area.has(pageNumber)) area.set(pageNumber, pageAreaEquivalentsPt(size.widthPt, size.heightPt));

@@ -115,8 +115,12 @@ describe("page equivalents: measurement", () => {
     expect(pageAreaEquivalentsPt(612, 792)).toBe(1);
     expect(pageAreaEquivalentsPt(1224, 1584)).toBe(4);
     expect(pageAreaEquivalentsPt(14_400, 14_400)).toBe(PAGE_AREA_EQUIVALENTS_CAP); // a 200-inch page
-    expect(imageAreaEquivalents(1275, 1650)).toBe(1); // Letter at 150 dpi
-    expect(imageAreaEquivalents(20_000, 20_000)).toBe(PAGE_AREA_EQUIVALENTS_CAP);
+    expect(imageAreaEquivalents(2_550, 3_300)).toBe(1); // Letter scanned at 300 dpi
+    expect(imageAreaEquivalents(1_700, 2_200)).toBe(1); // the blank upload the real-Modal run billed as 2
+    expect(imageAreaEquivalents(4_032, 3_024, 2_000)).toBe(1); // a 12 MP phone photo, as the OCR reads it
+    expect(imageAreaEquivalents(20_000, 20_000, 2_000)).toBe(1);
+    expect(imageAreaEquivalents(20_000, 20_000, 4_000)).toBe(2); // only a raised read cap reads more than a page
+    expect(imageAreaEquivalents(20_000, 20_000)).toBe(PAGE_AREA_EQUIVALENTS_CAP); // no read cap: the full pixels
   });
 });
 
@@ -172,14 +176,26 @@ describe("stuffed PDFs bill the text extraction actually produced", () => {
     expect((await store.loadDocument(documentId))!.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
   });
 
-  it("an uploaded image's frames count their decoded area as well as their text", async () => {
+  it("an uploaded image's frames count their area as the OCR reads them, and their text", async () => {
     const image = { declaredMimeType: "image/tiff", sniffedMimeType: "image/tiff", mimeType: "image/tiff", format: "image", container: null, encoding: null, mismatch: "none" };
-    const { state, document, runId, documentId } = await documentRun(2, "image/tiff", image);
-    const measured = (await recordExtractedPageEquivalents(state, document, "image", "frame one\fframe two",
-      [{ pageNumber: 1, sourceWidth: 20_000, sourceHeight: 20_000 }, { pageNumber: 2, sourceWidth: 1_000, sourceHeight: 1_000 }]))!;
-    expect(measured.equivalents).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
-    expect((await store.loadDocument(documentId))!.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
-    expect(runId).toBeTruthy();
+    // At the default read cap (2,000 px long edge) any frame is one page of area: a 20,000 px frame and a blank 1700x2200 scan.
+    const ordinary = await documentRun(2, "image/tiff", image);
+    const measured = (await recordExtractedPageEquivalents(ordinary.state, ordinary.document, "image", "frame one\fframe two",
+      [{ pageNumber: 1, sourceWidth: 20_000, sourceHeight: 20_000 }, { pageNumber: 2, sourceWidth: 1_700, sourceHeight: 2_200 }]))!;
+    expect(measured.equivalents).toBe(2);
+    // Nothing above one page per frame: billing_pages is not raised (the frames bill as their OCR reads, one Rich page each).
+    expect((await store.loadDocument(ordinary.documentId))!.billingPages).toBeNull();
+    // A raised read cap reads more pixels: the large frame counts 2 there.
+    vi.stubEnv("DOCSLURP_OCR_MAX_LONG_EDGE", "4000");
+    try {
+      const raised = await documentRun(2, "image/tiff", image);
+      const big = (await recordExtractedPageEquivalents(raised.state, raised.document, "image", "frame one\fframe two",
+        [{ pageNumber: 1, sourceWidth: 20_000, sourceHeight: 20_000 }]))!;
+      expect(big.equivalents).toBe(3);
+      expect((await store.loadDocument(raised.documentId))!.billingPages).toBe(3);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("a document over the page-equivalents limit is refused, never capped", async () => {
@@ -277,12 +293,17 @@ describe("dense-page allowance (owner decision 2026-11-05): paged pages bill 1 u
   });
 
   it("image frames get the same allowance; area still bills in full", async () => {
-    const { state, document, documentId } = await documentRun(2, "image/tiff");
-    const measured = (await recordExtractedPageEquivalents(state, document, "image", `${"w".repeat(2 * 3_500)}\fshort`, [
-      { pageNumber: 2, sourceWidth: 2_550, sourceHeight: 3_300 }, // Letter at 300 dpi read at 150: 4 standard pages of area
-    ]))!;
-    expect(measured.billed).toBe(1 + 4);
-    expect((await store.loadDocument(documentId))!.billingPages).toBe(5);
+    vi.stubEnv("DOCSLURP_OCR_MAX_LONG_EDGE", "4000");
+    try {
+      const { state, document, documentId } = await documentRun(2, "image/tiff");
+      const measured = (await recordExtractedPageEquivalents(state, document, "image", `${"w".repeat(2 * 3_500)}\fshort`, [
+        { pageNumber: 2, sourceWidth: 8_000, sourceHeight: 8_000 }, // read at 4,000 px: 960 x 960 pt, 2 standard pages of area
+      ]))!;
+      expect(measured.billed).toBe(1 + 2);
+      expect((await store.loadDocument(documentId))!.billingPages).toBe(3);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("a twice-Letter page with little text bills 2: the allowance covers text, never area", async () => {
