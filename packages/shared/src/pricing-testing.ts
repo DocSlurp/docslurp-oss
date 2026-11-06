@@ -1,6 +1,7 @@
 import { costEstimateSchema } from "./jobs.js";
 import { estimateUploadMedia, uploadMediaKind } from "./media-upload-estimate.js";
-import { OPEN_PRICING } from "./pricing-open.js";
+import { assembleEstimateQuote } from "./estimate-assembly.js";
+import { OPEN_PRICING, openStoredBytes } from "./pricing-open.js";
 import { quoteFilePageRange } from "./upload-pages.js";
 import { installPricingProvider, resetPricingProviderForTests, type PricingProvider } from "./pricing-provider.js";
 
@@ -77,6 +78,13 @@ export const DISTINCT_TEST_PRICING: Partial<PricingProvider> = {
     });
     return { estimate, media };
   },
+  quote: (args) => assembleEstimateQuote({
+    ...args,
+    ingest: DISTINCT_TEST_PRICING.quoteUpload!({ files: args.files, profile: args.profile, speedBoost: args.settings.speedBoost }),
+    bytes: openStoredBytes,
+    version: "test-1",
+    validForMs: 15 * 60 * 1000,
+  }),
   internalCost: {
     computeRates: () => null,
     listCredits: () => null,

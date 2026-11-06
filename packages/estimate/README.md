@@ -43,10 +43,11 @@ Aggregates only, never file content, never per-page arrays, at most 4 KiB (`file
 |---|---|
 | `kind`, `format`, `mimeType?` | The detected format (`pdf`, `docx`, `mp4`, `png`, ...); `mimeType` only when the file's name and declared type say nothing |
 | `bytes` | The size the profile was measured on (the server drops a profile whose size does not match the file) |
-| `pages?` | Pages, slides or image frames (TIFF), when counted; text files are counted as the API counts them |
+| `pages?` | Pages, slides or image frames (TIFF), counted from the file's structure (PDF page tree, slide parts, TIFF frames); text files are counted as the API counts them. Never from authored metadata |
+| `textChars?` | Characters of a text file (text volume) |
 | `encrypted?` | An encrypted PDF: its page facts are not measured |
 | `durationSeconds?` | Audio or video length from the container headers |
-| `office?.embeddedImages` | Images embedded in a Word, PowerPoint, Excel or EPUB package |
+| `office?` | Images embedded in a Word, PowerPoint, Excel or EPUB package; slide and worksheet parts; uncompressed bytes of the body parts (text volume); and `declaredPages`, the count the document's own metadata claims: informational only, nothing counts or prices from it |
 | `pdf?` | Facts over up to 24 pages spread evenly over the document, below |
 | `notes?` | Up to 8 short reasons a fact is missing or approximate |
 
@@ -66,6 +67,8 @@ PDF facts (counts are over the sampled pages):
 | `unmappedFontPages` | Pages showing text in a font with no Unicode mapping, whose text layer is likely unreadable |
 | `drawnContent` | No page has words or images, yet the file carries heavy non-image content per page (text drawn as paths) |
 | `budgetExhausted` | A page or the document hit the profiler's content budget; facts are partial |
+| `sampledWords` | Native words on the sampled pages in total (text volume: chunks and embeddings) |
+| `medianPageAreaSqIn`, `maxPageAreaSqIn` | Visible page area (render, OCR and page-image size) |
 
 The thresholds (significant image size, the raster rule, repeated-image detection, the text page rule) come from
 `profiler-rules.json`, generated from `@docslurp/shared`, so the profiler and the worker read the same numbers.

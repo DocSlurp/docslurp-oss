@@ -134,7 +134,13 @@ fn probe_document(rules: &Rules, document: &Document, file_bytes: usize, mut res
         if reading.unmapped_text {
             profile.unmapped_font_pages += 1;
         }
+        profile.sampled_words = profile.sampled_words.saturating_add(reading.words.min(f64::from(u32::MAX)) as u32);
     }
+    let mut areas: Vec<f64> = readings.iter().map(|reading| reading.area / (72.0 * 72.0)).collect();
+    areas.sort_by(f64::total_cmp);
+    let square_inches = |value: f64| value.round().clamp(0.0, 1_000_000.0) as u32;
+    profile.median_page_area_sq_in = square_inches(areas[areas.len() / 2]);
+    profile.max_page_area_sq_in = square_inches(*areas.last().unwrap_or(&0.0));
     if budget_hit {
         result.notes.push("a page hit the profiler's content budget; its facts are approximate".into());
     }
@@ -558,6 +564,8 @@ struct PageReading {
     exhausted: bool,
     /// Text was shown in a font with no Unicode mapping.
     unmapped_text: bool,
+    /// Visible page area in square points.
+    area: f64,
 }
 
 impl PageReading {
@@ -579,7 +587,7 @@ fn classify_page(routing: &PageRasterRouting, document: &Document, page_id: Obje
     let mut stats = PageStats::default();
     let mut context = Context { document, routing, forms, area };
     context.interpret(&content, &resources, IDENTITY, 0, &mut stats);
-    Some(PageReading { words: stats.words.words(), path_operations: stats.path_operations, images: stats.images, exhausted: stats.exhausted, unmapped_text: stats.unmapped_text })
+    Some(PageReading { words: stats.words.words(), path_operations: stats.path_operations, images: stats.images, exhausted: stats.exhausted, unmapped_text: stats.unmapped_text, area })
 }
 
 /// The worker's drawn-content rule (`classify-route.ts`): a document with no extractable text anywhere whose bytes,
@@ -826,6 +834,7 @@ mod tests {
             images: ids.iter().map(|number| ImageUse { id: Some(id(*number)), coverage: 0.9 }).collect(),
             exhausted: false,
             unmapped_text: false,
+            area: DEFAULT_PAGE_AREA,
         };
         // The same full-bleed background on four pages: furniture, so the pages are blank.
         let slides = vec![page(&[7]), page(&[7]), page(&[7]), page(&[7])];

@@ -60,6 +60,7 @@ export function resolveQualityPipeline(flags: Record<string, string | boolean>):
 
 function usage(): void {
   console.log(`Usage:
+  docslurp estimate <files...> [--quality <fast|auto|good>] [--indexing <full|on-demand>] [--months <n>] [--json]
   docslurp upload <files...> [--workspace <id|slug|name> | --new-workspace] [--template <key>] [--quality <fast|auto|good>] [--canonical-id <id>] [--path <folder>] [--idempotency-key <key>] [--estimate] [--watch] [--api-url <url>]
   docslurp ingest-url <urls...> [--workspace <id|slug|name> | --new-workspace] [--template <key>] [--quality <fast|auto|good>] [--watch] [--api-url <url>]
   docslurp extract <files...|urls...> [--retention-days <n>] [--no-email] [--download <markdown|all>] [upload options]
@@ -662,6 +663,46 @@ async function profiledEstimateFiles(paths: string[]): Promise<Array<{ name: str
   } catch {
     return sized;
   }
+}
+
+/**
+ * `docslurp estimate <files...>`: profile the files locally (when `@docslurp/estimate` is installed) and print the
+ * server's quote: ingest credits, monthly hosting and usage. Works without an API key (`POST /v1/estimate`).
+ */
+async function estimateCommand(files: string[], flags: Record<string, string | boolean>): Promise<void> {
+  if (files.length === 0) {
+    console.error("Error: at least one file path required");
+    process.exitCode = 1;
+    return;
+  }
+  const settings: Record<string, unknown> = {};
+  if (typeof flags.quality === "string") settings.quality = resolveQualityPipeline(flags).pipeline?.quality;
+  if (typeof flags.indexing === "string") settings.indexing = flags.indexing;
+  if (typeof flags.months === "string") settings.hostingMonths = Number.parseInt(flags.months, 10);
+  const body = { files: await profiledEstimateFiles(files), ...(Object.keys(settings).length ? { settings } : {}) };
+  const base = (typeof flags["api-url"] === "string" ? flags["api-url"] : process.env.DOCSLURP_API_URL ?? "https://docslurp.io").replace(/\/$/, "");
+  const response = await fetch(`${base}/v1/estimate`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  if (!response.ok) {
+    console.error(`Error: estimate failed (${response.status}): ${await response.text()}`);
+    process.exitCode = 1;
+    return;
+  }
+  const quote = await response.json() as {
+    pages: { low: number; high: number }; pricingVersion: string; validUntil: string; files: { total: number; profiled: number };
+    ingest: { credits: { low: number; high: number } | null }; hosting: { bytes: { low: number; high: number }; creditsPerMonth: { low: number; high: number } | null };
+    rates: { pagesPerDollar: { low: number; high: number } | null };
+  };
+  if (flags.json === true) {
+    console.log(JSON.stringify(quote, null, 2));
+    return;
+  }
+  const range = (r: { low: number; high: number }, digits = 2) => (r.low === r.high ? r.low.toFixed(digits) : `${r.low.toFixed(digits)}–${r.high.toFixed(digits)}`);
+  console.log(`Files:     ${quote.files.total} (${quote.files.profiled} profiled locally)`);
+  console.log(`Pages:     ${range(quote.pages, 0)}`);
+  console.log(quote.ingest.credits ? `Ingest:    ${range(quote.ingest.credits)} credits (estimate)` : "Ingest:    no credits (billing disabled on this deployment)");
+  console.log(`Hosting:   ${range({ low: quote.hosting.bytes.low / 1e6, high: quote.hosting.bytes.high / 1e6 }, 1)} MB${quote.hosting.creditsPerMonth ? `, ${range(quote.hosting.creditsPerMonth)} credits per month` : ""}`);
+  if (quote.rates.pagesPerDollar) console.log(`Pages/$1:  ${range(quote.rates.pagesPerDollar, 0)}`);
+  console.log(`Pricing:   ${quote.pricingVersion}, valid until ${quote.validUntil}`);
 }
 
 /** POSTs to a `…/estimate` route, prints the estimate (or raw JSON with --json) and leaves the operation undone. */
@@ -1335,6 +1376,9 @@ async function main(): Promise<void> {
   switch (command) {
     case "upload":
       await uploadCommand(positional, flags);
+      break;
+    case "estimate":
+      await estimateCommand(positional, flags);
       break;
     case "ingest-url":
       await ingestUrlCommand(positional, flags);

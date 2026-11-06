@@ -39,6 +39,7 @@ import { organizationsRoutes } from "./routes/organizations.js";
 import { runsRoutes } from "./routes/runs.js";
 import { jobsRoutes } from "./routes/jobs.js";
 import { uploadEstimateRoutes, uploadsRoutes } from "./routes/uploads.js";
+import { estimateRoutes } from "./routes/estimate.js";
 import { webhooksRoutes } from "./routes/webhooks.js";
 import { workspacesRoutes } from "./routes/workspaces.js";
 import { chatInstructionsRoutes } from "./routes/chat-instructions.js";
@@ -200,6 +201,7 @@ export function createApiApp(): Hono {
   app.route("/v1/extractors", extractorRoutes);
   // Deprecated alias of /v1/uploads, kept while browser-key uploads depend on its widget CORS policy (middleware/widget-cors.ts).
   app.route("/v1/ingest", uploadsRoutes);
+  app.route("/v1/estimate", estimateRoutes);
   app.route("/v1/uploads", uploadEstimateRoutes);
   app.route("/v1/uploads", uploadsRoutes);
   app.route("/v1/extracts", extractsRoutes);

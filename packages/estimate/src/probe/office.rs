@@ -14,9 +14,6 @@ const MAX_ENTRIES: usize = 50_000;
 
 /// Image file extensions counted as embedded images inside a package.
 const IMAGE_ENTRY_EXTENSIONS: [&str; 10] = ["png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp", "emf", "wmf"];
-/// Uncompressed `word/document.xml` bytes one page can hold at most (verbose Word XML runs 10-40 KB per page; this is a very dense page).
-/// A claimed count whose pages could not hold the body is a stale one.
-const DOCX_MAX_XML_BYTES_PER_PAGE: usize = 120 * 1024;
 
 const DOCX_MIME: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 const PPTX_MIME: &str = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
@@ -33,7 +30,8 @@ pub(super) fn probe(input: &ProbeInput<'_>, extension: &str) -> ProbeResult {
     };
     if archive.read("mimetype").is_some_and(|value| value.trim_ascii() == b"application/epub+zip") {
         let mut result = ProbeResult::new(ProbeKind::Ebook, "epub", Some("application/epub+zip"));
-        result.office = Some(OfficeProfile { embedded_images: archive.images_under("") });
+        let body_bytes = archive.uncompressed_where(|name| name.ends_with(".xhtml") || name.ends_with(".html") || name.ends_with(".htm"));
+        result.office = Some(OfficeProfile { embedded_images: archive.images_under(""), body_bytes, ..OfficeProfile::default() });
         return result;
     }
     let (format, mime, count_tag) = if archive.has("word/document.xml") {
@@ -51,22 +49,33 @@ pub(super) fn probe(input: &ProbeInput<'_>, extension: &str) -> ProbeResult {
         "pptx" => "ppt/media/",
         _ => "xl/media/",
     };
-    result.office = Some(OfficeProfile { embedded_images: archive.images_under(media) });
-    let Some(tag) = count_tag else {
-        return result.note("spreadsheets have no page count");
+    // Counts come from the package's structure only: slide and worksheet parts. A Word document has no structural page
+    // count (pages exist only after layout), so its text volume is reported instead. The count the document's own metadata
+    // claims is kept as an informational field and never used as a count.
+    let slides = (format == "pptx").then(|| archive.count_where(|name| part_number(name, "ppt/slides/slide").is_some()));
+    let sheets = (format == "xlsx").then(|| archive.count_where(|name| part_number(name, "xl/worksheets/sheet").is_some()));
+    let body_bytes = match format {
+        "docx" => archive.uncompressed("word/document.xml").map_or(0, |bytes| bytes as u64),
+        "pptx" => archive.uncompressed_where(|name| part_number(name, "ppt/slides/slide").is_some()),
+        _ => archive.uncompressed_where(|name| part_number(name, "xl/worksheets/sheet").is_some()),
     };
-    match archive.read("docProps/app.xml").and_then(|xml| element_number(&xml, tag)) {
-        Some(count) if count > 0 => {
-            let body = if format == "docx" { archive.uncompressed("word/document.xml") } else { None };
-            if body.is_some_and(|bytes| usize::try_from(count).map_or(true, |pages| pages.saturating_mul(DOCX_MAX_XML_BYTES_PER_PAGE) < bytes)) {
-                result.notes.push(format!("<{tag}> count in docProps/app.xml is smaller than the document body allows; pages not counted"));
-            } else {
-                result.pages = Some(count as f64);
-            }
-        }
-        _ => result.notes.push(format!("no <{tag}> count in docProps/app.xml; pages not counted")),
+    let declared_pages = count_tag
+        .and_then(|tag| archive.read("docProps/app.xml").and_then(|xml| element_number(&xml, tag)))
+        .and_then(|count| u32::try_from(count).ok())
+        .filter(|count| *count > 0);
+    if let Some(slides) = slides.filter(|slides| *slides > 0) {
+        result.pages = Some(f64::from(slides));
     }
+    if format == "docx" {
+        result.notes.push("Word documents have no structural page count; text volume reported instead".into());
+    }
+    result.office = Some(OfficeProfile { embedded_images: archive.images_under(media), slides, sheets, body_bytes, declared_pages });
     result
+}
+
+/// `N` of a part named `<prefix>N.xml` (`ppt/slides/slide3.xml`), else None.
+fn part_number(name: &str, prefix: &str) -> Option<u32> {
+    name.strip_prefix(prefix)?.strip_suffix(".xml")?.parse().ok()
 }
 
 struct Entry<'a> {
@@ -115,6 +124,17 @@ impl<'a> Archive<'a> {
     }
 
     /// An entry's declared uncompressed size (not trusted for allocation; it is only compared).
+    /// Entries whose name passes `keep`.
+    fn count_where(&self, keep: impl Fn(&str) -> bool) -> u32 {
+        let count = self.entries.iter().filter(|entry| std::str::from_utf8(entry.name).is_ok_and(&keep)).count();
+        u32::try_from(count).unwrap_or(u32::MAX)
+    }
+
+    /// Uncompressed bytes of the entries whose name passes `keep` (from the central directory).
+    fn uncompressed_where(&self, keep: impl Fn(&str) -> bool) -> u64 {
+        self.entries.iter().filter(|entry| std::str::from_utf8(entry.name).is_ok_and(&keep)).fold(0u64, |sum, entry| sum.saturating_add(entry.uncompressed as u64))
+    }
+
     fn uncompressed(&self, name: &str) -> Option<usize> {
         self.entries.iter().find(|entry| entry.name == name.as_bytes()).map(|entry| entry.uncompressed)
     }
@@ -201,46 +221,38 @@ mod tests {
     }
 
     #[test]
-    fn reads_word_pages_and_powerpoint_slides() {
+    fn counts_slides_and_sheets_from_parts_and_never_from_document_metadata() {
+        // Word: the metadata's page count is informational only; the body's size is the text volume.
         let docx = archive(&[("word/document.xml", "<w:document/>"), ("docProps/app.xml", "<Properties><Pages>12</Pages></Properties>")]);
         let result = probe(&ProbeInput::whole("a.docx", None, &docx), "docx");
-        assert_eq!((result.format.as_str(), result.pages), ("docx", Some(12.0)));
+        assert_eq!((result.format.as_str(), result.pages), ("docx", None));
         assert_eq!(result.mime_type.as_deref(), Some(DOCX_MIME));
+        let office = result.office.unwrap();
+        assert_eq!((office.declared_pages, office.body_bytes), (Some(12), 13));
 
-        let pptx = archive(&[("ppt/presentation.xml", "<p/>"), ("docProps/app.xml", "<ep:Properties><ep:Slides> 31 </ep:Slides></ep:Properties>")]);
-        assert_eq!(probe(&ProbeInput::whole("a.pptx", None, &pptx), "pptx").pages, Some(31.0));
+        // PowerPoint: slides are counted from the slide parts, whatever the metadata claims.
+        let pptx = archive(&[
+            ("ppt/presentation.xml", "<p/>"),
+            ("ppt/slides/slide1.xml", "<p:sld/>"),
+            ("ppt/slides/slide2.xml", "<p:sld/>"),
+            ("ppt/slides/_rels/slide1.xml.rels", "<r/>"),
+            ("docProps/app.xml", "<ep:Properties><ep:Slides> 31 </ep:Slides></ep:Properties>"),
+        ]);
+        let result = probe(&ProbeInput::whole("a.pptx", None, &pptx), "pptx");
+        assert_eq!(result.pages, Some(2.0));
+        assert_eq!(result.office.as_ref().map(|office| (office.slides, office.declared_pages)), Some((Some(2), Some(31))));
+
+        let xlsx = archive(&[("xl/workbook.xml", "<w/>"), ("xl/worksheets/sheet1.xml", "<s/>"), ("xl/worksheets/sheet2.xml", "<s/>")]);
+        let result = probe(&ProbeInput::whole("a.xlsx", None, &xlsx), "xlsx");
+        assert_eq!((result.pages, result.office.map(|office| office.sheets)), (None, Some(Some(2))));
     }
 
     #[test]
-    fn drops_a_page_count_the_document_body_contradicts_and_counts_embedded_images() {
-        // A generated file keeps a stale <Pages>1</Pages> while its body would fill dozens of pages.
-        let body = "<w:p>x</w:p>".repeat(40_000); // ~480 KB of body XML
-        let stale = archive(&[("word/document.xml", &body), ("docProps/app.xml", "<Properties><Pages>1</Pages></Properties>")]);
-        let result = probe(&ProbeInput::whole("a.docx", None, &stale), "docx");
-        assert_eq!(result.pages, None);
-        assert!(result.notes.iter().any(|note| note.contains("smaller than the document body allows")));
-        // A plausible count is kept; a document without images says so.
+    fn counts_embedded_images() {
         let honest = archive(&[("word/document.xml", "<w:document/>"), ("docProps/app.xml", "<Properties><Pages>3</Pages></Properties>")]);
-        let kept = probe(&ProbeInput::whole("a.docx", None, &honest), "docx");
-        assert_eq!((kept.pages, kept.office.as_ref().map(|office| office.embedded_images)), (Some(3.0), Some(0)));
-        // Images pasted into the document are counted.
-        let mut state = 0x9E37_79B9u32;
-        let noise: String = (0..400_000)
-            .map(|_| {
-                state ^= state << 13;
-                state ^= state >> 17;
-                state ^= state << 5;
-                char::from(b'a' + (state % 26) as u8)
-            })
-            .collect();
-        let scanned = archive(&[
-            ("word/document.xml", "<w:document/>"),
-            ("word/media/image1.png", &noise),
-            ("docProps/app.xml", "<Properties><Pages>4</Pages></Properties>"),
-        ]);
-        let result = probe(&ProbeInput::whole("a.docx", None, &scanned), "docx");
-        assert_eq!(result.pages, Some(4.0));
-        assert_eq!(result.office.map(|office| office.embedded_images), Some(1));
+        assert_eq!(probe(&ProbeInput::whole("a.docx", None, &honest), "docx").office.map(|office| office.embedded_images), Some(0));
+        let pictured = archive(&[("word/document.xml", "<w:document/>"), ("word/media/image1.png", "png"), ("word/media/image2.jpeg", "jpg")]);
+        assert_eq!(probe(&ProbeInput::whole("a.docx", None, &pictured), "docx").office.map(|office| office.embedded_images), Some(2));
     }
 
     #[test]

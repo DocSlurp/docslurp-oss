@@ -62,6 +62,11 @@ export const pdfProfileSchema = z.strictObject({
   drawnContent: z.boolean(),
   /** A page or the document hit the profiler's content budget; facts are partial. */
   budgetExhausted: z.boolean(),
+  /** Native words on the sampled pages, in total (text volume). */
+  sampledWords: z.number().int().nonnegative().max(100_000_000),
+  /** Median and largest visible page area of the sampled pages, in square inches (render and OCR size). */
+  medianPageAreaSqIn: z.number().int().nonnegative().max(1_000_000),
+  maxPageAreaSqIn: z.number().int().nonnegative().max(1_000_000),
 });
 export type PdfProfile = z.infer<typeof pdfProfileSchema>;
 
@@ -82,14 +87,30 @@ export const fileProfileSchema = z.strictObject({
   encrypted: z.boolean().optional(),
   /** Audio or video length in seconds, when read. */
   durationSeconds: z.number().positive().max(7 * 24 * 3600).optional(),
+  /** Characters of a text file read whole (text volume). */
+  textChars: z.number().int().nonnegative().max(10 ** 12).optional(),
   pdf: pdfProfileSchema.optional(),
-  /** Office files: images embedded in the package. */
-  office: z.strictObject({ embeddedImages: count }).optional(),
+  /** Office and EPUB packages: counts from the package structure. */
+  office: z.strictObject({
+    embeddedImages: count,
+    /** Slide or worksheet parts in the package. */
+    slides: count.optional(),
+    sheets: count.optional(),
+    /** Uncompressed bytes of the main body parts (text volume). */
+    bodyBytes: z.number().int().nonnegative().max(10 ** 13),
+    /**
+     * Informational only: the page or slide number the document's own metadata claims. Authored metadata is not a
+     * measurement; nothing prices or counts from it.
+     */
+    declaredPages: count.optional(),
+  }).optional(),
   /** Why a fact is missing or approximate (truncated input, budget reached, parse error). */
   notes: z.array(z.string().max(160)).max(8).optional(),
 });
 export type FileProfile = z.infer<typeof fileProfileSchema>;
 
+/** Largest page area an estimate trusts: an A0 sheet (about 1,800 square inches). */
+const MAX_PAGE_AREA_SQ_IN = 1_900;
 /** Longest media duration an estimate trusts; longer ones are clamped (the worker measures the real one). */
 const MAX_MEDIA_SECONDS = 24 * 3600;
 
@@ -123,11 +144,18 @@ export function normalizeFileProfile(profile: FileProfile, file: { size: number 
         vectorHeavyPages: clamp(pdf.vectorHeavyPages),
         unmappedFontPages: clamp(pdf.unmappedFontPages),
         images: Math.min(pdf.images, sampled * 64),
+        // Words on a page are bounded by what a page can hold; areas beyond a large-format sheet are clamped.
+        sampledWords: Math.min(pdf.sampledWords, sampled * 20_000),
+        medianPageAreaSqIn: Math.min(pdf.medianPageAreaSqIn, pdf.maxPageAreaSqIn, MAX_PAGE_AREA_SQ_IN),
+        maxPageAreaSqIn: Math.min(pdf.maxPageAreaSqIn, MAX_PAGE_AREA_SQ_IN),
         // Histograms are kept as measured: their totals were checked above.
       };
       if (sampled !== pdf.sampledPages) delete normalized.pdf;
     }
   }
   if (normalized.office && normalized.kind !== "office" && normalized.kind !== "ebook") delete normalized.office;
+  // A text file holds at most one character per byte of UTF-8 (two for UTF-16): a larger claim is clamped.
+  if (normalized.textChars !== undefined) normalized.textChars = Math.min(normalized.textChars, file.size);
+  if (normalized.office) normalized.office = { ...normalized.office, bodyBytes: Math.min(normalized.office.bodyBytes, file.size * 1_000) };
   return normalized;
 }

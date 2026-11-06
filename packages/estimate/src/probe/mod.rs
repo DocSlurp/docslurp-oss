@@ -66,6 +66,11 @@ pub struct PdfProfile {
     pub unmapped_font_pages: u32,
     pub drawn_content: bool,
     pub budget_exhausted: bool,
+    /// Native words on the sampled pages, in total (text volume).
+    pub sampled_words: u32,
+    /// Median and largest visible page area of the sampled pages, in square inches (render and OCR size).
+    pub median_page_area_sq_in: u32,
+    pub max_page_area_sq_in: u32,
 }
 
 /// Facts about an Office or EPUB package.
@@ -73,6 +78,17 @@ pub struct PdfProfile {
 #[serde(rename_all = "camelCase")]
 pub struct OfficeProfile {
     pub embedded_images: u32,
+    /// Slides (`ppt/slides/slideN.xml` parts) or worksheets (`xl/worksheets/sheetN.xml` parts), counted from the package.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slides: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sheets: Option<u32>,
+    /// Uncompressed bytes of the main body parts (Word `document.xml`, slide or sheet XML, EPUB content documents).
+    pub body_bytes: u64,
+    /// Informational only, never a count: the page or slide number the document's own metadata (`docProps/app.xml`)
+    /// claims. Authored metadata is not measured and nothing may price from it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared_pages: Option<u32>,
 }
 
 /// What profiling found (`fileProfileSchema` in `@docslurp/shared`). Facts it could not determine are absent.
@@ -96,6 +112,9 @@ pub struct FileProfile {
     pub encrypted: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_seconds: Option<f64>,
+    /// Characters of text (UTF-16 code units, trimmed) of a text file read whole: text volume.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_chars: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pdf: Option<PdfProfile>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -120,6 +139,7 @@ impl FileProfile {
             pages: None,
             encrypted: None,
             duration_seconds: None,
+            text_chars: None,
             pdf: None,
             office: None,
             notes: Vec::new(),
@@ -335,7 +355,9 @@ fn text(rules: &Rules, input: &ProbeInput<'_>, format: &str) -> ProbeResult {
         // HTML is counted by its visible text, as the API counts it (the stored type is text/html).
         let markup = input.mime().starts_with("text/html")
             || (matches!(input.mime().as_str(), "" | "application/octet-stream") && matches!(input.extension().as_str(), "html" | "htm" | "mhtml"));
-        result.pages = Some(crate::rules::text_page_count(rules, input.head, markup));
+        let (pages, chars) = crate::rules::text_page_count_and_chars(rules, input.head, markup);
+        result.pages = Some(pages);
+        result.text_chars = Some(chars);
     } else {
         result.notes.push("text file larger than the probe limit; pages not counted".into());
     }

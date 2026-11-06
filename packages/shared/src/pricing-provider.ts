@@ -152,6 +152,12 @@ export interface PricingProvider {
    * and clamped, used only to estimate. It never affects what a run is charged.
    */
   quoteUpload(args: ProviderQuoteArgs): ProviderQuote;
+  /**
+   * The full estimate for files and settings: ingest credits, monthly hosting and usage, neutral lines, ranges, the
+   * pricing version and how long it holds (`assembleEstimateQuote` builds the shape). Must answer in milliseconds: it runs
+   * on every knob change of an interactive quote.
+   */
+  quote(args: import("./estimate-quote.js").ProviderEstimateArgs): import("./estimate-quote.js").EstimateQuote;
 
   /** Internal cost (our own cost reports; never a customer charge). */
   internalCost: {
@@ -172,7 +178,7 @@ const REQUIRED_METHODS: ReadonlyArray<keyof PricingProvider> = [
   "pageCredits", "richPagesForOutputTokens", "mediaRichPages", "storageCreditsPerMonth", "extractRetentionCredits",
   "searchUnits", "searchCredits", "webSearchCredits", "webPageCredits", "webMapCredits", "chatModelTier",
   "chatAnswerUnits", "chatAnswerCredits", "featureCredits", "speedBoostMultiplier", "pageChargeShare",
-  "qualityModePricing", "publicPrices", "estimateIngest", "quoteUpload",
+  "qualityModePricing", "publicPrices", "estimateIngest", "quoteUpload", "quote",
 ];
 
 /** Throw unless `value` is a complete provider for this API version. */

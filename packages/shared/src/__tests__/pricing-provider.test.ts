@@ -61,6 +61,9 @@ function pdfProfile(overrides: Partial<FileProfile> = {}, pdf: Partial<NonNullab
       unmappedFontPages: 0,
       drawnContent: false,
       budgetExhausted: false,
+      sampledWords: 1_800,
+      medianPageAreaSqIn: 94,
+      maxPageAreaSqIn: 94,
       ...pdf,
     },
     ...overrides,
@@ -106,14 +109,14 @@ describe("installed pricing provider", () => {
   it("prices every delegate through the provider", () => {
     installTestPricing(DISTINCT_TEST_PRICING);
     expect(pricingVersion()).toBe("test-1");
-    expect(pageCredits("rich", 2)).toBe(20);
-    expect(pageCredits("fast", 2)).toBe(2);
-    expect(richPagesForOutputTokens(1_200)).toBe(3);
-    expect(speedBoostMultiplier(true)).toBe(3);
+    expect(pageCredits("rich", 2)).toBeCloseTo(0.5, 12);
+    expect(pageCredits("fast", 2)).toBeCloseTo(0.01, 12);
+    expect(richPagesForOutputTokens(1_200)).toBe(2);
+    expect(speedBoostMultiplier(true)).toBe(4);
     const event = applySpeedBoostUnitCharge({ provider: "docslurp", costCents: 5, metric: "ingest-page-fast", metadata: unitChargeMetadata() }, true);
-    expect(event.costCents).toBe(15);
+    expect(event.costCents).toBe(20);
     // Re-applying the same snapshot keeps the base, never compounds.
-    expect(applySpeedBoostUnitCharge(event, true).costCents).toBe(15);
+    expect(applySpeedBoostUnitCharge(event, true).costCents).toBe(20);
   });
 
   it("rejects incomplete providers and the reserved open id", () => {

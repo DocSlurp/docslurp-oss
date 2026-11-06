@@ -15,6 +15,7 @@ import { estimateUploadMedia } from "./media-upload-estimate.js";
 // Type-only: pricing-provider.ts imports this module for its fallback, so nothing here may need it at load time.
 import type { DocumentFeature, IngestEstimate, IngestEstimateInput, PricingProvider, ProviderQuoteArgs } from "./pricing-provider.js";
 import { costEstimateSchema } from "./jobs.js";
+import { assembleEstimateQuote, profiledPageArea, profiledTextChars, type StoredBytesModel } from "./estimate-assembly.js";
 import { quoteFilePageRange, isMultiFrameImageFile, IMAGE_MAX_FRAMES } from "./upload-pages.js";
 import { uploadMediaKind } from "./media-upload-estimate.js";
 
@@ -114,6 +115,19 @@ function openQuoteUpload(args: ProviderQuoteArgs): { estimate: CostEstimate; med
   return { estimate, media };
 }
 
+/**
+ * The open default's stored-bytes model (published planning figures, not measurements of any deployment): the original,
+ * a page image of about 1.2 KB per square inch of page, the extracted text twice (Markdown and chunks), and 6 KB of vector
+ * per 2,000 characters when every page is indexed on upload (on-demand indexing starts with none).
+ */
+export const openStoredBytes: StoredBytesModel = (file, pages, settings) => {
+  const text = profiledTextChars(file, pages, 2_000);
+  const images = profiledPageArea(file) * 1_200;
+  const index = (chars: number) => (settings.indexing === "full" ? Math.ceil(chars / 2_000) * 6 * 1024 : 0);
+  const bytesFor = (pageCount: number, chars: number) => file.size + pageCount * images + chars * 2 + index(chars);
+  return { low: bytesFor(pages.low, text.low), high: bytesFor(pages.high, text.high) };
+};
+
 export const OPEN_PRICING: PricingProvider = {
   apiVersion: 1,
   id: "open",
@@ -151,6 +165,13 @@ export const OPEN_PRICING: PricingProvider = {
   }),
   estimateIngest: openEstimateIngest,
   quoteUpload: openQuoteUpload,
+  quote: (args) => assembleEstimateQuote({
+    ...args,
+    ingest: openQuoteUpload({ files: args.files, profile: args.profile, speedBoost: args.settings.speedBoost }),
+    bytes: openStoredBytes,
+    version: "open-1",
+    validForMs: 60 * 60 * 1000,
+  }),
   internalCost: {
     computeRates: () => null,
     listCredits: () => null,

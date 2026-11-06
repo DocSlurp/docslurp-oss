@@ -10,6 +10,7 @@ import {
   workspaceTemplateKeySchema,
   indexingModeSchema,
   quoteFileSchema,
+  quoteSettingsSchema,
   pricingVersion,
 } from "@docslurp/shared";
 
@@ -565,6 +566,8 @@ const uploadEstimateSchema = z.object({
   speedBoost: z.boolean().optional(),
   /** Files by name, size and type, each optionally with a client file profile (`@docslurp/estimate`); untrusted, estimate only. */
   files: z.array(quoteFileSchema).min(1).max(1000),
+  /** Knobs to quote with instead of the workspace's own (the same as `POST /v1/estimate`). */
+  settings: quoteSettingsSchema.partial().optional(),
   workspace: workspaceInputSchema.optional(),
   orgId: z.string().optional(),
 });
@@ -597,7 +600,7 @@ export const uploadEstimateRoutes = new Hono().post(
     if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) {
       return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     }
-    const { estimate, media, profile } = await estimateUpload({ files: body.files, workspace, speedBoost: body.speedBoost === true });
+    const { estimate, media, profile, quote } = await estimateUpload({ files: body.files, workspace, speedBoost: body.speedBoost === true, settings: body.settings });
     // `orgId` is the organization whose credits the upload would spend, for reading its balance. `profile` is the
     // workspace's settings the estimate priced with; `kind` labels the answer an estimate, never a charge.
     return c.json({
@@ -606,6 +609,8 @@ export const uploadEstimateRoutes = new Hono().post(
       media,
       profile,
       pricingVersion: pricingVersion(),
+      // The full estimate (ingest, monthly hosting and usage, lines) for the workspace's settings and any overrides.
+      quote,
       billing: billingState(),
       orgId: workspace.orgId,
       billingExempt: isBillingExemptOrg(workspace.orgId),

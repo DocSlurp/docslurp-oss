@@ -56,6 +56,8 @@ const ROUTE_AUTHENTICATED = [
   "POST /v1/waitlist",
   // Public price list (routes/billing.ts): prices are readable without signing in.
   "GET /v1/billing/prices",
+  // Public quote (routes/estimate.ts): profiles and settings only, no account data, rate limited per IP.
+  "POST /v1/estimate",
 ].sort();
 
 type Operation = { method: string; path: string };

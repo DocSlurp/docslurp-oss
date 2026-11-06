@@ -97,4 +97,14 @@ export const configChangePaths = {
       responses: estimateResponses,
     },
   },
+  "/v1/estimate": {
+    post: {
+      tags: ["ingest"],
+      summary: "Quote files before uploading (public)",
+      description: "No account needed. Body `{ files: [{ name, size, type?, pages?, durationSeconds?, profile? }], settings? }` with at most 200 files, each `profile` from the offline profiler `@docslurp/estimate` (files never leave the caller's machine). `settings` are the quote's knobs: `quality` (fast, auto, good), `indexing` (full, on-demand), `documentSummary`, `structuredFields`, `knowledgeGraph`, `propositions`, `videoFrames`, `speedBoost`, `hostingMonths` (1-60), `searchesPerMonth`, `chatAnswersPerMonth`, `chatTier`. Answers an estimate (`kind: estimate`, never a charge): ingest credits, monthly hosting and usage credits, neutral `lines`, page and byte ranges, `pricingVersion` and `validUntil`. Rate limited per client IP; reads no account data and stores nothing. Signed-in callers quote a workspace with `POST /v1/uploads/estimate`.",
+      security: [],
+      requestBody: body,
+      responses: estimateResponses,
+    },
+  },
 };

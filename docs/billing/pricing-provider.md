@@ -69,3 +69,34 @@ profiles without credits and ask the user to connect for a quote.
 ## Hosted prices
 
 DocSlurp's hosted price list is on [docslurp.io/pricing](https://docslurp.io/pricing) and `GET /v1/billing/prices`.
+
+## The quote endpoint: `POST /v1/estimate`
+
+Price transparency: anyone can profile files in the browser (`@docslurp/estimate` in a Web Worker; files never leave the
+machine) and see what processing and hosting them costs, then turn knobs and watch the price move. Each knob change
+re-sends only the small profiles and the settings; the server re-quotes in milliseconds (`quote()` must stay fast; the
+shared test measures 1,000 profiled files at a few milliseconds per quote). Prices and their rules never leave the server.
+
+Request (strict: unknown fields are refused):
+
+```json
+{
+  "files": [{ "name": "scan.pdf", "size": 812345, "type": "application/pdf", "profile": { "schema": 1, "...": "..." } }],
+  "settings": { "quality": "auto", "indexing": "full", "hostingMonths": 12, "searchesPerMonth": 0 }
+}
+```
+
+Knobs (`quoteSettingsSchema`; omitted ones take a new workspace's defaults): `quality` (`fast`, `auto`, `good`),
+`indexing` (`full`, `on-demand`), `documentSummary`, `structuredFields`, `knowledgeGraph`, `propositions`,
+`videoFrames`, `speedBoost`, `hostingMonths` (1–60), `searchesPerMonth`, `chatAnswersPerMonth`, `chatTier`.
+
+Response (`EstimateQuote`): `kind: "estimate"`, `pricingVersion`, `validUntil`, `billing`, the resolved `settings`,
+`files` (total, profiled), `pages` and `mediaMinutes`, `ingest.credits` (once) and `ingest.seconds`, `hosting` (bytes,
+credits per month, months, total), `usage.creditsPerMonth` (searches and chat), neutral `lines`
+(`pages`, `media`, `storage`, `search`, `chat`; label, period, credit range) and `rates` (pages per $1, pages per
+minute). Every credit figure is a range where the profile is uncertain, and null where the deployment does not bill.
+
+Limits: anonymous; a 1 MiB body; at most 200 files; per client IP `ESTIMATE_RATE_LIMIT_PER_MINUTE` quotes a minute
+(default 120) on top of the API's IP limits; no database read, nothing stored. Signed-in callers and API keys quote
+against a workspace's settings with `POST /v1/uploads/estimate` (`settings` overrides, answer in `quote`), which uses
+the same quote function.

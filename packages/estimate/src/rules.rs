@@ -224,6 +224,11 @@ fn strip_markup(text: &str) -> String {
 /// [`TEXT_PAGE_CJK_WEIGHT`] each. With `markup` (HTML) tags, scripts and styles are removed first and only non-blank
 /// lines count. The text is decoded by its byte-order mark (UTF-16 or UTF-8).
 pub fn text_page_count(rules: &Rules, bytes: &[u8], markup: bool) -> f64 {
+    text_page_count_and_chars(rules, bytes, markup).0
+}
+
+/// [`text_page_count`] and the characters it counted (UTF-16 code units of the trimmed visible text).
+pub fn text_page_count_and_chars(rules: &Rules, bytes: &[u8], markup: bool) -> (f64, u64) {
     let decoded = decode_text(bytes);
     let visible = if markup { strip_markup(&decoded) } else { decoded };
     let lines = if markup {
@@ -232,7 +237,8 @@ pub fn text_page_count(rules: &Rules, bytes: &[u8], markup: bool) -> f64 {
         visible.matches('\n').count() as f64 + 1.0
     };
     let trimmed = visible.trim_matches(js_space);
-    let chars = (trimmed.encode_utf16().count() + trimmed.chars().filter(|c| is_cjk(*c)).count() * (TEXT_PAGE_CJK_WEIGHT - 1)) as f64;
-    1f64.max((lines / rules.text_pages.lines).ceil()).max((chars / rules.text_pages.chars).ceil())
+    let units = trimmed.encode_utf16().count();
+    let chars = (units + trimmed.chars().filter(|c| is_cjk(*c)).count() * (TEXT_PAGE_CJK_WEIGHT - 1)) as f64;
+    (1f64.max((lines / rules.text_pages.lines).ceil()).max((chars / rules.text_pages.chars).ceil()), units as u64)
 }
 

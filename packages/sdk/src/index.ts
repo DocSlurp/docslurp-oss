@@ -135,6 +135,8 @@ export type EstimateResponse = {
   kind?: "estimate";
   /** Upload estimates only: the workspace settings the estimate priced with, and the pricing version that priced it. */
   profile?: EstimateProfile; pricingVersion?: string;
+  /** Upload estimates only: the full quote (ingest, monthly hosting and usage) for the workspace's settings. */
+  quote?: EstimateQuote;
 };
 
 /**
@@ -176,7 +178,38 @@ export type UploadEstimateInput = {
     /** The file's profile from `@docslurp/estimate`, measured locally; narrows the estimate. Never billed. */
     profile?: FileProfile;
   }>;
+  /** Knobs to quote with instead of the workspace's own; the answer's `quote` reflects them. */
+  settings?: Partial<QuoteSettings>;
   workspace?: string };
+
+/** The knobs of a quote, in customer terms; omitted ones take a new workspace's defaults. */
+export type QuoteSettings = {
+  quality: "fast" | "auto" | "good";
+  /** `full` indexes every page on upload; `on-demand` indexes pages when a query first needs them. */
+  indexing: "full" | "on-demand";
+  documentSummary: boolean; structuredFields: boolean; knowledgeGraph: boolean; propositions: boolean;
+  videoFrames: boolean; speedBoost: boolean;
+  /** Months the files stay hosted (1 to 60). */
+  hostingMonths: number;
+  searchesPerMonth: number; chatAnswersPerMonth: number;
+  chatTier: "standard" | "advanced" | "premium";
+};
+export type EstimateInput = {
+  files: Array<{ name: string; size: number; type?: string; pages?: number; durationSeconds?: number; profile?: FileProfile }>;
+  settings?: Partial<QuoteSettings>;
+};
+export type CreditRange = { low: number; high: number };
+/** `POST /v1/estimate`. Every credit figure is null where the deployment does not bill. */
+export type EstimateQuote = {
+  kind: "estimate"; pricingVersion: string; validUntil: string; billing: "enforced" | "disabled"; settings: QuoteSettings;
+  files: { total: number; profiled: number }; pages: CreditRange; mediaMinutes: number;
+  ingest: { credits: CreditRange | null; seconds: CreditRange };
+  hosting: { bytes: CreditRange; creditsPerMonth: CreditRange | null; months: number; credits: CreditRange | null };
+  usage: { creditsPerMonth: CreditRange | null };
+  lines: Array<{ id: string; label: string; period: "once" | "month"; credits: CreditRange }>;
+  rates: { pagesPerDollar: CreditRange | null; pagesPerMinute: CreditRange };
+  basis: string;
+};
 
 /** What upload pricing reads from a workspace; returned by `uploadEstimate`. */
 export type EstimateProfile = {
@@ -1959,6 +1992,14 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     /** Cost of an upload before sending any bytes. */
     uploadEstimate(input: UploadEstimateInput, requestOptions?: RequestOptions): Promise<EstimateResponse> {
       return estimateAt("/v1/uploads/estimate", inWorkspace(input), requestOptions);
+    },
+    /**
+     * `POST /v1/estimate`: the public quote for profiled files (no account needed): ingest credits, monthly hosting and
+     * usage, neutral lines and ranges, the pricing version and until when it holds. Profile files locally with
+     * `@docslurp/estimate`; only profiles are sent. Re-send with other `settings` to see the price move. Never a charge.
+     */
+    estimate(input: EstimateInput, requestOptions?: RequestOptions): Promise<EstimateQuote> {
+      return request<EstimateQuote>("/v1/estimate", jsonRequest("POST", input as unknown as JsonObject), requestOptions);
     },
     /**
      * Sets how many versions of each document are kept (1–100; null clears the override).
