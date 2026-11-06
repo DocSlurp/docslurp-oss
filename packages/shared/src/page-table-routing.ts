@@ -85,7 +85,7 @@ const row = (values: string[]) => `| ${values.join(" | ")} |`;
  * A two-line header Doppler split: group labels over empty cells in the header row (`| | Revenue | | Margin | |`), the
  * sub-labels as the first body row, numbers below. Null when the table is not that shape.
  */
-function mergedTwoLineHeader(table: PipeTable): string[] | null {
+function mergedTwoLineHeader(table: Pick<PipeTable, "header" | "body">): string[] | null {
   const [labels, ...data] = table.body;
   const width = table.header.length;
   if (!labels || data.length < 2 || labels.length !== width || table.body.some((cells) => cells.length !== width)) return null;
@@ -102,12 +102,47 @@ function mergedTwoLineHeader(table: PipeTable): string[] | null {
 }
 
 /** A list Doppler laid out as a table: every row's first cell is a bullet or an item number. */
-function isListAsTable(table: PipeTable): boolean {
+function isListAsTable(table: Pick<PipeTable, "header" | "body">): boolean {
   const rows = [table.header, ...table.body];
   return rows.length >= 3 && table.header.length >= 2 && rows.every((cells) => BULLET_CELL.test(cells[0] ?? ""));
 }
 
 export interface TableRepairs { mergedHeaders: number; listsRestored: number }
+
+/**
+ * An HTML table in one page's Markdown (Doppler's `--html` output, which the VM guest emits): its character span and its
+ * rows' cell texts, the first row as the header. `simple` is false when a cell spans rows or columns or holds markup other
+ * than text, which the repairs leave alone (its geometry cannot be read from the row list).
+ */
+interface HtmlTable { start: number; end: number; header: string[]; body: string[][]; simple: boolean }
+
+const HTML_TABLE = /<table(?:\s[^>]*)?>[\s\S]*?<\/table>/gi;
+const HTML_ROW = /<tr(?:\s[^>]*)?>([\s\S]*?)<\/tr>/gi;
+const HTML_CELL = /<(t[dh])(\s[^>]*)?>([\s\S]*?)<\/\1>/gi;
+const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: "\"", "#39": "'", apos: "'", nbsp: " " };
+
+function htmlText(value: string): string {
+  return value.replace(/<br\s*\/?>/gi, " ").replace(/&(amp|lt|gt|quot|#39|apos|nbsp);/g, (_, name: string) => ENTITIES[name]!)
+    .replace(/\s+/g, " ").trim();
+}
+
+const escapeHtml = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+function htmlTables(page: string): HtmlTable[] {
+  const tables: HtmlTable[] = [];
+  for (const match of page.matchAll(HTML_TABLE)) {
+    let simple = true;
+    const rows = [...match[0].matchAll(HTML_ROW)].map((row) => [...row[1]!.matchAll(HTML_CELL)].map((cell) => {
+      if (/\b(?:colspan|rowspan)\s*=/i.test(cell[2] ?? "") || /<(?!br\s*\/?>)[a-z]/i.test(cell[3]!)) simple = false;
+      return htmlText(cell[3]!);
+    }));
+    if (rows.length === 0) continue;
+    tables.push({ start: match.index!, end: match.index! + match[0].length, header: rows[0]!, body: rows.slice(1), simple });
+  }
+  return tables;
+}
+
+const htmlRow = (values: string[], cell: "td" | "th") => `<tr>${values.map((value) => `<${cell}>${escapeHtml(value)}</${cell}>`).join("")}</tr>`;
 
 /**
  * Structural repairs of a born-digital PDF's tables, from the extractor's own Markdown (no model reads the page): a two-line
@@ -116,7 +151,27 @@ export interface TableRepairs { mergedHeaders: number; listsRestored: number }
  */
 export function repairMarkdownTables(markdown: string): { markdown: string; repairs: TableRepairs } {
   const repairs: TableRepairs = { mergedHeaders: 0, listsRestored: 0 };
-  const pages = markdown.split("\f").map((page) => {
+  const pages = markdown.split("\f").map((raw) => {
+    // HTML tables (Doppler --html, the VM guest's output) get the same repairs as pipe tables, as HTML.
+    let page = raw;
+    for (const table of htmlTables(raw).reverse()) {
+      if (!table.simple) continue;
+      let replacement: string | null = null;
+      if (isListAsTable(table)) {
+        replacement = [table.header, ...table.body].map((cells) => {
+          const marker = /^\d/.test(cells[0]!) ? `${cells[0]!.replace(/\)$/, ".")} ` : "- ";
+          return marker + cells.slice(1).filter(Boolean).join(" — ");
+        }).join("\n");
+        repairs.listsRestored += 1;
+      } else {
+        const header = mergedTwoLineHeader(table);
+        if (header) {
+          replacement = `<table>\n<thead>\n${htmlRow(header, "th")}\n</thead>\n<tbody>\n${table.body.slice(1).map((cells) => htmlRow(cells, "td")).join("\n")}\n</tbody>\n</table>`;
+          repairs.mergedHeaders += 1;
+        }
+      }
+      if (replacement !== null) page = page.slice(0, table.start) + replacement + page.slice(table.end);
+    }
     const lines = page.split("\n");
     for (const table of pipeTables(lines).reverse()) {
       if (isListAsTable(table)) {
@@ -149,9 +204,11 @@ export const TABLE_UNRELIABLE_EMPTY_CELL_SHARE = 0.4;
  */
 export function tableReliability(page: string): string[] {
   const signals = new Set<string>();
-  for (const table of pipeTables(page.split("\n"))) {
+  // A spanning HTML table's row lengths do not show its columns; it is judged only by its empty cells.
+  const tables = [...pipeTables(page.split("\n")).map((table) => ({ ...table, simple: true })), ...htmlTables(page)];
+  for (const table of tables) {
     if (table.body.length === 0) continue;
-    if (table.body.some((cells) => cells.length !== table.header.length)) signals.add("table:inconsistent-columns");
+    if (table.simple && table.body.some((cells) => cells.length !== table.header.length)) signals.add("table:inconsistent-columns");
     // A blank first cell on a row whose other cells are filled continues a row-spanning cell above (a merged label); it
     // is sound structure, not a missing value, and is not counted.
     const body = table.body.flatMap((cells) => (!cells[0] && cells.slice(1).every(Boolean) ? cells.slice(1) : cells));
