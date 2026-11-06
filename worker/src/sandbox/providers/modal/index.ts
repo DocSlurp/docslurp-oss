@@ -298,7 +298,8 @@ const ASSET_STAGING_DEADLINE_MS = 10 * 60_000;
 
 /** A staging failure the VM reports for the document's own data (no space, quota), not a Modal API or transport error. */
 function isOwnStagingFailure(error: unknown): boolean {
-  return /\bENOSPC\b|no space left|\bEDQUOT\b|disk quota exceeded|file too large|\bEFBIG\b/i.test(error instanceof Error ? error.message : String(error));
+  // Modal's filesystem API reports a full disk on writeBytes as a bare "I/O error" (real-Modal W2a).
+  return /\bENOSPC\b|no space left|\bEDQUOT\b|disk quota exceeded|file too large|\bEFBIG\b|^I\/O error$/i.test(error instanceof Error ? error.message : String(error));
 }
 
 async function withDeadline<T>(work: Promise<T>, timeoutMs: number): Promise<T> {

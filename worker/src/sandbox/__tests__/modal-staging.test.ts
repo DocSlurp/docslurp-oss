@@ -666,6 +666,10 @@ describe("modal provider session lifecycle", () => {
       const noSpace = await (await full.session()).run!({ ...command, affinityKey: "doc-a", inputPaths: [input] }).catch((error: unknown) => error);
       expect(noSpace).toBeInstanceOf(SandboxInfrastructureError);
       expect((noSpace as SandboxInfrastructureError).afterCommand).toBe(true);
+      // Modal reports the same full disk on writeBytes as a bare "I/O error" (real-Modal W2a): still this document's.
+      const io = await open({ writeFails: (target) => (isUpload(target) ? "I/O error" : undefined), exec: async () => finished() });
+      const ioError = await (await io.session()).run!({ ...command, affinityKey: "doc-a", inputPaths: [input] }).catch((error: unknown) => error);
+      expect((ioError as SandboxInfrastructureError).afterCommand).toBe(true);
       const flaky = await open({ writeFails: (target) => (isUpload(target) ? "stream reset by peer" : undefined), exec: async () => finished() });
       const transport = await (await flaky.session()).run!({ ...command, affinityKey: "doc-a", inputPaths: [input] }).catch((error: unknown) => error);
       expect((transport as SandboxInfrastructureError).afterCommand).toBe(false);
