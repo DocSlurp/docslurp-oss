@@ -115,6 +115,8 @@ export const WORKER_TABLES = Object.freeze({
   workspace_runs: { privileges: DML, evidence: "worker/src/db/store.ts and page-task-store.ts" },
   workspace_secrets: { privileges: [], columns: { select: ["id", "workspace_id", "name", "type", "expires_at"] }, evidence: "worker/src/db/store.ts expiring-secret reminders (no encrypted_value)" },
   workspaces: { privileges: ["select", "update"], evidence: "worker/src/db/store.ts budget alerts; deferred/materialize-activity.ts" },
+  // Raised only through pricing_state_raise() (SECURITY DEFINER, EXECUTE granted below); never written directly.
+  pricing_provider_state: { privileges: ["select"], evidence: "packages/shared/src/pricing-loader.ts durableState (pricing provider, migration 0131)" },
 });
 
 /** Relations the worker must not touch, and why. */
@@ -271,6 +273,18 @@ export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, 
     }
     if (has(roles.app)) statements.push(`grant select on public.realtime_revisions to ${quoteIdent(roles.app)}`,
       `grant execute on function public.realtime_compact_revisions(text) to ${quoteIdent(roles.app)}`);
+  }
+  if (relations.includes("pricing_provider_state")) {
+    // Monotone pricing-provider state (0131): runtime roles read it and raise a key only through the SECURITY DEFINER
+    // function, which never lowers a value. The app's schema-wide DML and default privileges are taken back here.
+    statements.push("revoke all on public.pricing_provider_state from public",
+      "revoke all on function public.pricing_state_raise(text, bigint) from public");
+    for (const role of [roles.app, roles.worker].filter(has)) {
+      statements.push(`revoke all on public.pricing_provider_state from ${quoteIdent(role)}`,
+        `grant select on public.pricing_provider_state to ${quoteIdent(role)}`,
+        `revoke all on function public.pricing_state_raise(text, bigint) from ${quoteIdent(role)}`,
+        `grant execute on function public.pricing_state_raise(text, bigint) to ${quoteIdent(role)}`);
+    }
   }
   if (nativeSchema) {
     // Native chat execution is an application service, never the ingestion role.

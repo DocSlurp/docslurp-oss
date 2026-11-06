@@ -17,7 +17,8 @@
 //   5. stored pipelines whose piiPolicy.patterns name a detector this build no longer accepts, and stored extraction configs
 //      naming an extractor id this build does not know (built-in ids plus DOCSLURP_EXTRACTOR_ID_ALIASES keys);
 //   6. recorded stage artifacts that are empty, which the fail-closed readers refuse (object-store existence is not checkable from SQL);
-//   7. runs in flight, by the routing version they are pinned to.
+//   7. runs in flight, by the routing version they are pinned to;
+//   8. the pricing-provider durable state (0131): pending, or which runtime roles could write it directly (a BLOCKER).
 // Output names people and organizations by id only (no emails, no organization names) with --redact or whenever stdout is
 // not a terminal (CI logs); an owner's interactive terminal gets the full list unless --redact is given.
 // Exit code: 0 for a report, 1 with --strict when a BLOCKER is found, 2 when the check itself could not run.
@@ -459,6 +460,36 @@ export async function collectReport(client, { journal, acceptedPiiPatterns, extr
       ...pins.map((row) => `${row.pin} ${row.status}: ${row.runs}`),
     ],
   ));
+
+  // 7. Pricing-provider durable state (0131): a new table and function, no lock on existing tables. Once present, no runtime
+  // role may write it directly (it only rises through pricing_state_raise); a direct write grant is a BLOCKER.
+  const [{ has_state: hasState }] = await q("select to_regclass('public.pricing_provider_state') is not null as has_state");
+  if (!hasState) {
+    sections.push(section("Pricing-provider state (0131): pending", "ok", [
+      "0131 creates pricing_provider_state and pricing_state_raise(key, candidate) (SECURITY DEFINER). It locks no existing table.",
+      "API, worker and chat-executor roles get SELECT and EXECUTE only; the pricing provider reads and raises its keys through them.",
+    ]));
+  } else {
+    const writers = await q(
+      `select r.rolname as role, array_remove(array[
+         case when has_table_privilege(r.oid, 'public.pricing_provider_state', 'INSERT') then 'insert' end,
+         case when has_table_privilege(r.oid, 'public.pricing_provider_state', 'UPDATE') then 'update' end,
+         case when has_table_privilege(r.oid, 'public.pricing_provider_state', 'DELETE') then 'delete' end,
+         case when has_table_privilege(r.oid, 'public.pricing_provider_state', 'TRUNCATE') then 'truncate' end], null) as privileges
+       from pg_roles r where r.rolname = any($1::text[])`,
+      [["docslurp_app", "docslurp_worker", "docslurp_backup"]],
+    );
+    const direct = writers.filter((row) => row.privileges.length > 0);
+    const [{ keys }] = await q("select count(*)::int as keys from pricing_provider_state");
+    sections.push(section(
+      `Pricing-provider state (0131): ${keys} key(s)`,
+      direct.length ? "blocker" : "ok",
+      direct.length
+        ? ["Runtime roles can write pricing_provider_state directly (it must only rise through pricing_state_raise); run the role reconciliation (migrate.mjs):",
+          ...direct.map((row) => `${row.role}: ${row.privileges.join(", ")}`)]
+        : ["No runtime role writes the table directly; values rise only through pricing_state_raise."],
+    ));
+  }
   return sections;
 }
 

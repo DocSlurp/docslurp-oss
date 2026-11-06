@@ -232,13 +232,22 @@ function processEnv(): Record<string, string | undefined> | undefined {
 }
 
 /**
- * The active provider. Fail closed: under the service profile, throws until a deployment provider is installed (startup
- * loads it before serving or polling), so production never prices anything with the open default.
+ * Whether this process must price with a deployment provider: the service profile, or DOCSLURP_PRICING_REQUIRED=1 (set by
+ * every deployed process that charges, including ones that do not run the service profile, such as the chat executor).
+ */
+export function pricingRequired(env: Record<string, string | undefined> | undefined = processEnv()): boolean {
+  return pricingServiceProfile(env) || env?.DOCSLURP_PRICING_REQUIRED?.trim() === "1";
+}
+
+/**
+ * The active provider. Fail closed: when pricing is required (pricingRequired), throws until a deployment provider is
+ * installed (startup loads it before serving or polling), so a deployment that bills never prices with the open default,
+ * even in a process whose startup forgot to load it.
  */
 export function pricing(): PricingProvider {
   if (installed) return installed;
-  if (pricingServiceProfile()) {
-    throw new Error("DOCSLURP_SERVICE_PROFILE=service has no pricing provider installed (DOCSLURP_PRICING_PLUGIN); refusing to price with the open default");
+  if (pricingRequired()) {
+    throw new Error("pricing is required here (DOCSLURP_SERVICE_PROFILE=service or DOCSLURP_PRICING_REQUIRED=1) but no pricing provider is installed (DOCSLURP_PRICING_PLUGIN); refusing to price with the open default");
   }
   return OPEN_PRICING;
 }

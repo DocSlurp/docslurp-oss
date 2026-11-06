@@ -313,3 +313,60 @@ describe("ocr_escalation_reads (migration 0129)", () => {
     });
   });
 });
+
+describe("pricing_provider_state (migration 0131)", () => {
+  // The seam the pricing plugin receives (packages/shared/src/pricing-loader.ts), over this database.
+  const stateAs = async (role: string) => {
+    const { pricingDurableStateFromSql } = await import("@docslurp/shared/pricing-loader");
+    return pricingDurableStateFromSql({ unsafe: async (query, params) => (await as(role, () => db.query<Record<string, unknown>>(query, params as unknown[]))).rows });
+  };
+
+  it("raises monotonically for the API and worker roles, never lowering a value", async () => {
+    for (const role of [app, worker]) {
+      const state = await stateAs(role);
+      const key = `card.sequence.${role}`;
+      expect(await state.read(key)).toBeNull();
+      expect(await state.raise(key, 5n)).toBe(5n);
+      expect(await state.raise(key, 3n)).toBe(5n);
+      expect(await state.raise(key, 9n)).toBe(9n);
+      expect(await state.read(key)).toBe(9n);
+      expect(await state.raise(key, -(2n ** 62n))).toBe(9n);
+    }
+  });
+
+  it("keeps the largest of concurrent raises and never returns less than a raise's own candidate", async () => {
+    const state = await stateAs(app);
+    const candidates = Array.from({ length: 40 }, (_, index) => BigInt((index * 7919) % 1000));
+    const results = await Promise.all(candidates.map((candidate) => state.raise("concurrent.key", candidate)));
+    results.forEach((value, index) => expect(value >= candidates[index]!).toBe(true));
+    expect(await state.read("concurrent.key")).toBe(candidates.reduce((max, value) => (value > max ? value : max)));
+  });
+
+  it("denies runtime roles every direct write: no INSERT, UPDATE, DELETE or TRUNCATE", async () => {
+    expect(WORKER_TABLES.pricing_provider_state?.privileges).toEqual(["select"]);
+    for (const role of [app, worker, backup]) {
+      for (const statement of [
+        "insert into pricing_provider_state (key, value) values ('forged', 1)",
+        "update pricing_provider_state set value = 0",
+        "delete from pricing_provider_state",
+        "truncate pricing_provider_state",
+      ]) expect(await denied(role, statement), `${role}: ${statement}`).toBe(true);
+    }
+    // The backup role reads through pg_read_all_data in ops; it cannot raise.
+    expect(await denied(backup, "select pricing_state_raise('x', 1)")).toBe(true);
+  });
+
+  it("keeps those grants after reconciliation, despite the app's schema-wide DML and default privileges", async () => {
+    await reconcileRoleGrants(db, { log: silent });
+    expect(await denied(app, "update pricing_provider_state set value = 0")).toBe(true);
+    expect(await denied(worker, "update pricing_provider_state set value = 0")).toBe(true);
+    expect(await (await stateAs(worker)).raise("after.reconcile", 2n)).toBe(2n);
+  });
+
+  it("refuses keys outside the neutral key shape and values outside int8", async () => {
+    const state = await stateAs(app);
+    await expect(state.raise("Bad Key", 1n)).rejects.toThrow(/invalid key/);
+    await expect(state.raise("ok.key", 2n ** 63n)).rejects.toThrow(/64-bit/);
+    await expect(as(app, () => db.query("select pricing_state_raise('Bad Key', 1)"))).rejects.toThrow(/check constraint/);
+  });
+});

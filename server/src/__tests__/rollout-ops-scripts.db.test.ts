@@ -155,4 +155,28 @@ describe("predeploy-check", () => {
     expect(byTitle("webhooks").level).toBe("ok");
     expect(byTitle("Memberships beyond one per user").title).toContain("already applied");
   });
+
+  it("reports the pricing-provider state (0131) and blocks when a runtime role can write it directly", async () => {
+    const { piiPatternTypeSchema } = await import("@docslurp/shared");
+    const report = async () => {
+      await client.query("begin read only");
+      try {
+        const sections = await collectReport(client, { journal, acceptedPiiPatterns: piiPatternTypeSchema.options });
+        return sections.find((section: { title: string }) => section.title.startsWith("Pricing-provider state"))!;
+      } finally {
+        await client.query("rollback");
+      }
+    };
+    await client.query("do $$ begin if not exists (select 1 from pg_roles where rolname = 'docslurp_app') then create role docslurp_app nologin; end if; end $$");
+    await client.query("revoke all on pricing_provider_state from docslurp_app; grant select on pricing_provider_state to docslurp_app");
+    expect((await report()).level).toBe("ok");
+    await client.query("grant update on pricing_provider_state to docslurp_app");
+    try {
+      const blocked = await report();
+      expect(blocked.level).toBe("blocker");
+      expect(blocked.lines.join("\n")).toContain("docslurp_app: update");
+    } finally {
+      await client.query("revoke update on pricing_provider_state from docslurp_app");
+    }
+  });
 });

@@ -32,7 +32,7 @@ import { configureSourceQuarantine, postgresSourceQuarantine } from "../sandbox/
 import { onTeardownBreakerOpen, quarantineForceExitMs, scheduleQuarantineForceExit, workerShutdownForceMs } from "../sandbox/teardown-breaker.js";
 import { initializeParserSandbox, setDefaultParserSandbox } from "../sandbox/startup.js";
 import { loadExtractorPlugins } from "../extractors/plugins.js";
-import { loadPricingProvider } from "@docslurp/shared/pricing-loader";
+import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
 import { ocrLanguageSettingFromEnv } from "../ocr/languages.js";
 import { assertOcrConfiguration } from "../ocr/mode.js";
 import { configureWorkerExtractorIdAliases } from "../extractors/registry.js";
@@ -130,7 +130,8 @@ async function main(): Promise<void> {
   });
   // The pricing provider (DOCSLURP_PRICING_PLUGIN) loads before taking work: every charge the worker records is priced
   // by it. The service profile refuses to start without one rather than price with the open default.
-  await loadPricingProvider(process.env).catch((error) => {
+  // Its durable state (pricing_provider_state, 0131) reads and raises through the worker's pool.
+  await loadPricingProvider(process.env, { durableState: pricingDurableStateFromSql(store.stageSql) }).catch((error) => {
     throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
   });
   // Extractor plugins named by DOCSLURP_EXTRACTOR_PLUGINS load before taking work; a missing or broken one, or a

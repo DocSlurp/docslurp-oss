@@ -1,5 +1,6 @@
 import { realtimeMetrics } from "./realtime/broker.js";
-import { loadPricingProvider } from "@docslurp/shared/pricing-loader";
+import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
+import { sql as pricingStateSql } from "./db.js";
 import { closeDirectUploadLockPool } from "./lib/direct-upload-locks.js";
 import { tigrisUploadWebhookRoutes } from "./routes/tigris-upload-webhook.js";
 import { startDirectUploadReconciler, stopDirectUploadReconciler } from "./services/direct-upload-reconciler.js";
@@ -292,7 +293,8 @@ export function ensureApiStartup(): Promise<void> {
       initializeObservability({ serviceName: "docslurp-api" });
       // The pricing provider (DOCSLURP_PRICING_PLUGIN) prices every quote and charge; the service profile refuses to
       // start without one rather than price with the open default.
-      await loadPricingProvider(process.env);
+      // Its durable state (pricing_provider_state, 0131) reads and raises through this process's pool.
+      await loadPricingProvider(process.env, { durableState: pricingDurableStateFromSql(pricingStateSql) });
       // Invalid private endpoint config fails startup; the /models probe never blocks it.
       initializePrivateModelEndpoints();
       // Legacy extractor ids must be installed before any stored or incoming config is parsed; a bad alias fails startup.

@@ -43,15 +43,31 @@ estimates show no credits. The open default is not DocSlurp's hosted pricing.
 
 `DOCSLURP_PRICING_PLUGIN` names one module (an absolute path or a `file:` URL) that exports `register(host)` and returns
 a `PricingProvider` with `apiVersion: 1`. `host.shared` is the host's own `@docslurp/shared`: call anything that reads the
-installed provider (such as `assembleEstimateQuote`) through it, not through a bundled copy. The API server and the worker load it at startup
-(`@docslurp/shared/pricing-loader`), before serving requests or polling task queues.
+installed provider (such as `assembleEstimateQuote`) through it, not through a bundled copy. The API server, the worker and
+the chat executor load it at startup (`@docslurp/shared/pricing-loader`), before serving requests, polling task queues or
+claiming chat operations.
+
+`host.durableState` (`PricingDurableState`) is durable, fleet-shared state for the provider: named, monotone 64-bit
+counters in Postgres (`pricing_provider_state`, migration 0131), the same for every API, worker and chat-executor
+process. A provider uses it for what must survive restarts and be shared, such as the highest version of something it has
+accepted, so it can refuse an older one replayed later.
+
+- `read(key)` returns the stored value as a `bigint`, or `null` when the key was never raised;
+- `raise(key, candidate)` stores the larger of the stored value and `candidate` in one statement and returns the stored
+  value; it never lowers a value, and concurrent raises keep the largest;
+- keys are 1-128 characters of `[a-z0-9._:-]`, starting with a letter or digit;
+- both throw when the database is unavailable, and in a process started without one. What the provider does then is its
+  own rule; a provider that depends on the state should refuse to price (fail closed).
+
+Runtime database roles can only read the table and raise through `pricing_state_raise(key, candidate)` (a SECURITY DEFINER
+function); none can insert, update, delete or truncate it directly.
 
 Fail closed:
 
 - a named plugin that does not load, exports no `register`, or returns an incomplete provider is a startup error;
 - `DOCSLURP_SERVICE_PROFILE=service` (or `DOCSLURP_PRICING_REQUIRED=1`) without `DOCSLURP_PRICING_PLUGIN` is a startup
-  error, and `pricing()` throws in the service profile until a provider is installed, so a billing deployment never prices
-  with the open default;
+  error, and `pricing()` throws under either setting until a provider is installed, so a billing deployment never prices
+  with the open default, even in a process whose startup did not load one;
 - the id `open` is reserved for the open default; a second, different provider in one process is refused.
 
 ## Estimates and file profiles

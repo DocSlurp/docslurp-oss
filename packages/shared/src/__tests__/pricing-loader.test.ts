@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { loadPricingProvider, pricingPluginSpecifier, resetPricingLoaderForTests } from "../pricing-loader.js";
+import { loadPricingProvider, pricingPluginSpecifier, resetPricingLoaderForTests, type PricingDurableState, type PricingPluginHost } from "../pricing-loader.js";
 import { OPEN_PRICING } from "../pricing-open.js";
 import { pricing, resetPricingProviderForTests } from "../pricing-provider.js";
 
@@ -27,16 +27,16 @@ describe("loadPricingProvider", () => {
   it("installs the plugin's provider and uses it under the service profile", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const env = { DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_PRICING_PLUGIN: "/opt/pricing/plugin.mjs" };
-    expect(await loadPricingProvider(env, plugin({ ...OPEN_PRICING, id: "deployment", version: "d-1" }))).toBe("deployment");
+    expect(await loadPricingProvider(env, { importModule: plugin({ ...OPEN_PRICING, id: "deployment", version: "d-1" }) })).toBe("deployment");
     expect(pricing().version).toBe("d-1");
   });
 
   it("fails closed on a plugin that does not load, has no register() or returns an invalid provider", async () => {
     const env = { DOCSLURP_PRICING_PLUGIN: "/opt/pricing/plugin.mjs" };
-    await expect(loadPricingProvider(env, async () => { throw new Error("ENOENT"); })).rejects.toThrow(/failed to load.*ENOENT/);
-    await expect(loadPricingProvider(env, async () => ({}))).rejects.toThrow(/exports no register/);
-    await expect(loadPricingProvider(env, plugin({ ...OPEN_PRICING }))).rejects.toThrow(/reserved id/);
-    await expect(loadPricingProvider(env, plugin({ id: "x" }))).rejects.toThrow(/apiVersion/);
+    await expect(loadPricingProvider(env, { importModule: async () => { throw new Error("ENOENT"); } })).rejects.toThrow(/failed to load.*ENOENT/);
+    await expect(loadPricingProvider(env, { importModule: async () => ({}) })).rejects.toThrow(/exports no register/);
+    await expect(loadPricingProvider(env, { importModule: plugin({ ...OPEN_PRICING }) })).rejects.toThrow(/reserved id/);
+    await expect(loadPricingProvider(env, { importModule: plugin({ id: "x" }) })).rejects.toThrow(/apiVersion/);
     expect(pricing().id).toBe("open");
   });
 
@@ -50,7 +50,39 @@ describe("loadPricingProvider", () => {
 
   it("refuses a second load from a different plugin", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    await loadPricingProvider({ DOCSLURP_PRICING_PLUGIN: "/a.mjs" }, plugin({ ...OPEN_PRICING, id: "a" }));
+    await loadPricingProvider({ DOCSLURP_PRICING_PLUGIN: "/a.mjs" }, { importModule: plugin({ ...OPEN_PRICING, id: "a" }) });
     await expect(loadPricingProvider({ DOCSLURP_PRICING_PLUGIN: "/b.mjs" })).rejects.toThrow(/different/);
+  });
+
+  it("hands the plugin the entrypoint's durable state, or one that throws when the process has none", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    let host: PricingPluginHost | null = null;
+    const capture = async () => ({ register: (h: PricingPluginHost) => { host = h; return { ...OPEN_PRICING, id: "durable", version: "d-1" }; } });
+    const state: PricingDurableState = { read: async () => 7n, raise: async (_key, candidate) => candidate };
+    await loadPricingProvider({ DOCSLURP_PRICING_PLUGIN: "/d.mjs" }, { importModule: capture, durableState: state });
+    expect(host!.durableState).toBe(state);
+    resetPricingLoaderForTests();
+    resetPricingProviderForTests();
+    await loadPricingProvider({ DOCSLURP_PRICING_PLUGIN: "/d.mjs" }, { importModule: capture });
+    await expect(host!.durableState.read("card.sequence")).rejects.toThrow(/not available/);
+    await expect(host!.durableState.raise("card.sequence", 1n)).rejects.toThrow(/not available/);
+  });
+});
+
+describe("pricing() fails closed when pricing is required (council E #2)", () => {
+  it("refuses the open default under DOCSLURP_PRICING_REQUIRED=1 as under the service profile", () => {
+    vi.stubEnv("DOCSLURP_PRICING_REQUIRED", "1");
+    try {
+      expect(() => pricing()).toThrow(/no pricing provider is installed/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    vi.stubEnv("DOCSLURP_SERVICE_PROFILE", "service");
+    try {
+      expect(() => pricing()).toThrow(/no pricing provider is installed/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(pricing().id).toBe("open");
   });
 });
