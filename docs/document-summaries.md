@@ -1,7 +1,8 @@
 # Document and workspace summaries
 
-New workspaces default to `summaries: true`. This generates one reusable summary
-per document during ingestion. Summaries improve document search: the document
+New workspaces default to `summaries: false`. Turning summaries on generates one
+reusable summary per document during ingestion, priced per document. Summaries
+improve document search: the document
 index matches query text against summaries as well as filenames, and workspace
 overview answers can use the stored summaries instead of rereading whole files.
 This option does not create page-level summaries or per-page model calls.
@@ -13,19 +14,23 @@ This option does not create page-level summaries or per-page model calls.
 }
 ```
 
-Use this body with `POST /v1/workspaces`. To disable future generation, send
-`{"summaries": false}` to `PATCH /v1/workspaces/:id`, or use the SDK:
+Use this body with `POST /v1/workspaces`. To turn generation on or off later, send
+`{"summaries": true}` or `{"summaries": false}` to `PATCH /v1/workspaces/:id`, or use the SDK:
 
 ```ts
-await client.updateWorkspace("catalogs", { summaries: false });
+await client.updateWorkspace("catalogs", { summaries: true });
 ```
+
+Without summaries, a new workspace takes its title from the first document's
+headings, and workspace overview answers fall back to ordinary search.
 
 Workspace responses expose the effective `summaries` value. The setting uses the
 existing `pipeline.summarize` storage and run snapshot; there is no second copy of
-the setting. On creation, `summaries` defaults to true and takes precedence over
+the setting. On creation, `summaries` defaults to false and takes precedence over
 `pipeline.summarize`. On update, an omitted `summaries` leaves the pipeline's value
-unchanged. Template locks still win, including the legal and medical templates
-that disable hosted summaries for privacy. Existing workspaces retain their saved
+unchanged. Template settings still win: the financial-reports and meeting-notes templates
+turn summaries on, and the legal and medical templates lock hosted summaries off
+for privacy. Existing workspaces retain their saved
 setting. Disabling generation does not delete summaries already created.
 
 ## Cost and existing documents
