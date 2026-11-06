@@ -276,6 +276,8 @@ export interface VisionPageTask {
   inkCheck?: boolean;
   /** The page has usable native or OCR text to keep if vision gives nothing. */
   fallbackText?: boolean;
+  /** A scan beside native text: read by the VM OCR engine (DOCSLURP_OCR_MODE=vm), never a hosted vision model. */
+  vmOcr?: boolean;
   /** Set by slot-gated workflows only. */
   slotGate?: boolean;
 }
