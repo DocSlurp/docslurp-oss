@@ -4,7 +4,7 @@ import {
   createOpenRouterRoutingFetch, DEFAULT_RESTRICTED_FALLBACK_MODEL, isTextOnlyRequest, resetRegionBlockedModels,
   restrictedFallbackModel, setOpenRouterProviderPolicyResolver,
 } from "../openrouter-routing.js";
-import { createOpenRouterUsageCapture, servedTextModel } from "../openrouter-usage.js";
+import { createOpenRouterUsageCapture, regionFallbackUsageMetadata, servedTextModel, withServedUsageModel } from "../openrouter-usage.js";
 import { CHINA_PROVIDER_SLUGS, providerRegion } from "../provider-regions.js";
 
 const CHAT = "https://openrouter.ai/api/v1/chat/completions";
@@ -188,5 +188,14 @@ describe("usage for a re-targeted call", () => {
   it("keeps pricing a speed-boost call as its requested model", () => {
     expect(servedTextModel(OPEN, `${OPEN}:nitro`)).toEqual({ model: OPEN, regionFallback: false });
     expect(servedTextModel(OPEN, undefined)).toEqual({ model: OPEN, regionFallback: false });
+  });
+
+  it("relabels a usage input as the model that ran only when marked as a region fallback", () => {
+    const served = servedTextModel(BLOCKED, DEFAULT_RESTRICTED_FALLBACK_MODEL);
+    const input = { provider: "openrouter", model: BLOCKED, metric: "query-rewrite", metadata: { costSource: "provider", ...regionFallbackUsageMetadata(BLOCKED, served) } };
+    expect(withServedUsageModel(input)).toMatchObject({ model: DEFAULT_RESTRICTED_FALLBACK_MODEL, metadata: { requestedModel: BLOCKED, regionFallback: true, costSource: "provider" } });
+    const plain = { provider: "openrouter", model: OPEN, metric: "query-rewrite", metadata: { routedModel: `${OPEN}:nitro` } };
+    expect(withServedUsageModel(plain)).toBe(plain);
+    expect(regionFallbackUsageMetadata(OPEN, servedTextModel(OPEN, `${OPEN}:nitro`))).toEqual({});
   });
 });

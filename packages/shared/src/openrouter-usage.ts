@@ -196,6 +196,22 @@ export function servedTextModel(requested: string, sent: string | undefined): { 
   return base(sent) === base(requested) ? { model: requested, regionFallback: false } : { model: sent, regionFallback: true };
 }
 
+/** Usage metadata marking a call the restricted fallback re-targeted: the model that ran and the one requested. */
+export function regionFallbackUsageMetadata(requested: string, served: { model: string; regionFallback: boolean }): Record<string, unknown> {
+  return served.regionFallback ? { routedModel: served.model, regionFallback: true, requestedModel: requested } : {};
+}
+
+/**
+ * A usage input for a call the restricted fallback re-targeted (metadata
+ * `regionFallback` with `routedModel`), relabelled as the model that ran; the
+ * caller's model stays in metadata as `requestedModel`. Other inputs pass through.
+ */
+export function withServedUsageModel<T extends { model: string; metadata?: Record<string, unknown> | null }>(input: T): T {
+  const metadata = input.metadata ?? undefined;
+  if (metadata?.regionFallback !== true || typeof metadata.routedModel !== "string" || metadata.routedModel === input.model) return input;
+  return { ...input, model: metadata.routedModel, metadata: { ...metadata, requestedModel: metadata.requestedModel ?? input.model } };
+}
+
 /** Observe the original response before SDK validation discards router cost fields. */
 export function createOpenRouterUsageCapture(baseFetch: typeof fetch = fetch) {
   let captured: unknown;

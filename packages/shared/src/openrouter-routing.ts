@@ -270,9 +270,11 @@ function withFallbackModel(body: Record<string, unknown>, fallback: string): Rec
 export interface OpenRouterRoutingOptions {
   /**
    * Re-send a restricted text request whose model has no host outside China to
-   * the open fallback model (restrictedFallbackModel). Only for calls on a
-   * pipeline or deployment default; never for a model a user chose (chat) or a
-   * purpose-built classifier, whose replies another model cannot stand in for.
+   * the open fallback model (restrictedFallbackModel). For worker pipeline text
+   * stages (a stage would otherwise fail or degrade to heuristics, whichever
+   * pipeline model is set) and the API's default-model helpers. Never for a chat
+   * model a user chose or a purpose-built classifier, whose replies another
+   * model cannot stand in for.
    */
   restrictedFallback?: boolean;
 }

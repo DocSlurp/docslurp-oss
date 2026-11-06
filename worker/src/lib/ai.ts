@@ -1,5 +1,5 @@
 import { currentProviderPolicy } from "./provider-rate-limit.js";
-import { speedBoostModel, assertProviderAllowed, authorizePrivateModelCall, isPrivateModelUri, type PrivacyMode, createOpenRouterUsageCapture, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, resolveOpenRouterUsage, servedTextModel, resolvePipelineTextGenerationOptions, resolveSupportedModelIdWithWarning, type TextGenerationConfig, type TextGenerationProfile, type ProviderTextUsage, type PipelineTextOperation } from "@docslurp/shared";
+import { speedBoostModel, assertProviderAllowed, authorizePrivateModelCall, isPrivateModelUri, type PrivacyMode, createOpenRouterUsageCapture, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, resolveOpenRouterUsage, servedTextModel, regionFallbackUsageMetadata, resolvePipelineTextGenerationOptions, resolveSupportedModelIdWithWarning, type TextGenerationConfig, type TextGenerationProfile, type ProviderTextUsage, type PipelineTextOperation } from "@docslurp/shared";
 import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
@@ -170,7 +170,7 @@ export async function generateOpenRouterText(args: {
       const served = servedTextModel(args.model, accounting.sentModel());
       const usage = await resolveOpenRouterUsage({ apiKey: args.apiKey, model: served.model, providerName: accounting.providerName(), generationId: result.response.id, receiptRetryDelaysMs: [0, 1_500], usage: { ...result.usage, raw: accounting.usage() ?? result.usage.raw } });
       const recordedUsage: TextGenerationUsage = { ...usage, metadata: { ...usage.metadata, routedModel: served.model,
-        ...(served.regionFallback ? { regionFallback: true, requestedModel: args.model } : {}),
+        ...regionFallbackUsageMetadata(args.model, served),
         reasoningTokens: result.usage.outputTokenDetails?.reasoningTokens ?? usage.metadata?.reasoningTokens } };
       return { text: result.text, finishReason: result.finishReason, usage: recordedUsage };
     },
