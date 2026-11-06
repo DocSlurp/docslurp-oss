@@ -410,6 +410,10 @@ const NO_NATIVE_TEXT_SIGNALS = new Set([
 export const DRAWN_CONTENT_MIN_BYTES_PER_PAGE = 16 * 1024;
 /** Extracted words on a page with neither a text layer nor images that make it drawn text, not blank. */
 export const DRAWN_TEXT_MIN_WORDS = 10;
+/** v2: the page's table survived in the text layer as HTML or pipe rows. */
+export const STRUCTURED_TABLE_SIGNAL = "table:structured";
+/** v2: the page's table was flattened into rows or a column of numbers. */
+export const FLATTENED_TABLE_SIGNAL = "table:flattened";
 const STRUCTURED_TEXT_ROUTES = new Set<AdaptivePageRoute>(["table-heavy", "form", "formula-heavy", "chart-or-figure"]);
 
 /**
@@ -434,8 +438,9 @@ export function pageLacksNativeText(page: Pick<AdaptivePageRoutingEntry, "ocrDec
  * - Blank pages never.
  * - Otherwise the text route decides, also when raster evidence did not authorize OCR (a page
  *   with a minor image is still a formula or figure page): vision-rescue routes, formula pages
- *   (a text layer flattens notation that vision transcribes as LaTeX), and sparse form or table
- *   pages.
+ *   (a text layer flattens notation that vision transcribes as LaTeX), sparse form pages, and
+ *   table pages whose table the text layer flattened (always) or did not visibly keep (when
+ *   sparse). A table the text layer kept as HTML or pipe rows stays on native text.
  */
 export function selectLegacyVisionPages(
   pages: AdaptivePageRoutingEntry[],
@@ -459,10 +464,14 @@ export function selectLegacyVisionPages(
     .filter((page) => {
       if (page.ocrDecision?.authorized) return true;
       if (page.ocrDecision?.signals.includes(BLANK_PAGE_SIGNAL)) return false;
+      if (page.route === "table-heavy") {
+        if (page.signals.includes(STRUCTURED_TABLE_SIGNAL)) return false;
+        return page.signals.includes(FLATTENED_TABLE_SIGNAL) || page.textDensityScore < 0.45;
+      }
       return (
         page.extractorHint === "vision-rescue" ||
         page.route === "formula-heavy" ||
-        ((page.route === "form" || page.route === "table-heavy") && page.textDensityScore < 0.45)
+        (page.route === "form" && page.textDensityScore < 0.45)
       );
     })
     .map((page) => page.pageNumber);
@@ -817,6 +826,15 @@ export function classifyAdaptivePage(
     /table\s+\d+|subtotal|total|amount|qty|balance|debit|credit/i.test(normalized),
     numericRowLines >= 3,
   ].filter(Boolean).length;
+  // v2: a table the text layer kept as HTML or pipe rows is already structured; one that
+  // extraction flattened into rows of numbers, or into one number per line (a rotated or
+  // borderless table read out of order), is a table only pixels can restore.
+  const structuredTable = routingV2 && (markdownTableLineCount >= 2 || (/<table\b/i.test(scanText) && /<tr\b/i.test(scanText)));
+  const bareNumberLines = !routingV2 ? 0 : scanLines.filter((line) => /^[-+(]?[$€£¥]?\d[\d,.:/%)]*$/.test(line.trim())).length;
+  const flattenedTable = routingV2 && !structuredTable && (
+    (numericRowLines >= 3 && numericRowLines + bareNumberLines >= scanLines.length * 0.5) ||
+    (bareNumberLines >= 6 && bareNumberLines >= scanLines.length * 0.5)
+  );
   const formFieldLineCount = lines.filter((line) =>
     /^(?:#{1,6}\s*)?(?:name|address|date|signature|phone|email|case\s+id|submitted\s+by|preferred\s+contact|reviewer\s+notes)\b/i.test(line.trim()),
   ).length;
@@ -846,7 +864,12 @@ export function classifyAdaptivePage(
   ].filter(Boolean).length;
   const textDensityScore = Math.min(1, (charCount / 900) * 0.6 + (wordCount / 180) * 0.4);
   const signals: string[] = [];
-  const specializedContent = detectSpecializedContent(normalized, lines, routingV2);
+  // v2: markup is not mathematics; `<td>1.5</td>` has the operators of an equation line.
+  // Only pages whose scanned prefix carries markup pay for the extra pass.
+  const hasMarkup = routingV2 && /<\/?[a-z][^>]*>/i.test(scanText);
+  const contentText = hasMarkup ? normalized.replace(/<\/?[a-z][^>]*>/gi, " ") : normalized;
+  const contentLines = hasMarkup ? contentText.split(/\n+/).filter((line) => line.trim()) : lines;
+  const specializedContent = detectSpecializedContent(contentText, contentLines, routingV2);
 
   let route: AdaptivePageRoute = "straightforward-text";
   let extractorHint: AdaptivePageRoutingEntry["extractorHint"] = "cheap-text";
@@ -857,7 +880,8 @@ export function classifyAdaptivePage(
     extractorHint = "vision-rescue";
     confidence = 0.86;
     signals.push("garbled-text");
-  } else if (degradationMarkers >= 2) {
+  } else if (degradationMarkers >= 2 && !structuredTable) {
+    // (v2: a table's own pipes and rules are not OCR noise.)
     route = "handwriting-or-degraded";
     extractorHint = "vision-rescue";
     confidence = 0.82;
@@ -873,11 +897,13 @@ export function classifyAdaptivePage(
     extractorHint = "layout-aware";
     confidence = 0.79;
     signals.push("field-markers", "label-value-layout");
-  } else if (tableMarkers >= 2 || markdownTableLineCount >= 2) {
+  } else if (tableMarkers >= 2 || markdownTableLineCount >= 2 || structuredTable || flattenedTable) {
     route = "table-heavy";
     extractorHint = "layout-aware";
     confidence = 0.76;
     signals.push("table-markers");
+    if (structuredTable) signals.push(STRUCTURED_TABLE_SIGNAL);
+    if (flattenedTable) signals.push(FLATTENED_TABLE_SIGNAL);
   } else if (chartMarkers >= 2) {
     route = "chart-or-figure";
     extractorHint = "vision-rescue";

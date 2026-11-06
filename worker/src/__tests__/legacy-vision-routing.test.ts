@@ -155,6 +155,71 @@ describe("legacy vision page selector", () => {
   });
 });
 
+describe("tables in the text layer", () => {
+  // Generic shapes, not copied from any evaluation file.
+  const htmlTable = [
+    "Quarterly stock levels",
+    "<table>",
+    "<thead><tr><th>Site</th><th>Opening</th><th>Change</th></tr></thead>",
+    "<tbody>",
+    "<tr><td>North</td><td>1,204.50</td><td>(32.00)</td></tr>",
+    "<tr><td>South</td><td>2,980.75</td><td>14.25</td></tr>",
+    "<tr><td>East</td><td>815.00</td><td>(7.50)</td></tr>",
+    "</tbody>",
+    "</table>",
+  ].join("\n");
+
+  it("reads an HTML table as a table, not as equations", () => {
+    const page = classifyAdaptivePage(1, htmlTable, V2);
+    expect(page.route).toBe("table-heavy");
+    expect(page.signals.filter((signal) => signal.startsWith("math:"))).toEqual([]);
+  });
+
+  it("keeps a table the text layer already preserved off vision", () => {
+    expect(selectLegacyVisionPages([classifyAdaptivePage(1, htmlTable, V2)], V2)).toEqual([]);
+    const pipe = ["| Site | Opening |", "| --- | --- |", "| North | 1,204.50 |", "| South | 2,980.75 |"].join("\n");
+    expect(selectLegacyVisionPages([classifyAdaptivePage(1, pipe, V2)], V2)).toEqual([]);
+  });
+
+  it("sends a table flattened into rows of numbers to vision", () => {
+    const rows = ["Readings", "Gauge A Gauge B Gauge C", "41 77 19", "38 80 22", "45 71 18", "40 79 25"].join("\n");
+    const page = classifyAdaptivePage(1, rows, V2);
+    expect(page.route).toBe("table-heavy");
+    expect(selectLegacyVisionPages([page], V2)).toEqual([1]);
+  });
+
+  it("sends a table flattened into one number per line to vision", () => {
+    const column = ["Readings", "Gauge A", "Gauge B", "41", "77", "38", "80", "45", "71", "40", "79"].join("\n");
+    const page = classifyAdaptivePage(1, column, V2);
+    expect(page.route).toBe("table-heavy");
+    expect(selectLegacyVisionPages([page], V2)).toEqual([1]);
+  });
+
+  it("still sends equations the text layer laid out as a table to vision", () => {
+    const identities = [
+      "<table>",
+      "<tr><td>Product rule</td><td>𝑑(𝑢𝑣) = 𝑢 𝑑𝑣 + 𝑣 𝑑𝑢</td></tr>",
+      "<tr><td>Chain rule</td><td>𝑑𝑦/𝑑𝑥 = (𝑑𝑦/𝑑𝑢)(𝑑𝑢/𝑑𝑥)</td></tr>",
+      "<tr><td>Quotient rule</td><td>𝑑(𝑢/𝑣) = (𝑣 𝑑𝑢 − 𝑢 𝑑𝑣)/𝑣²</td></tr>",
+      "</table>",
+    ].join("\n");
+    const page = classifyAdaptivePage(1, identities, V2);
+    expect(page.route).toBe("formula-heavy");
+    expect(selectLegacyVisionPages([page], V2)).toEqual([1]);
+  });
+
+  it("leaves prose that mentions a few numbers on native text", () => {
+    const prose = [
+      "The committee met on 12 March and again in 2024 to review the plan.",
+      "Members agreed that 3 of the 7 proposals needed more detail before a vote.",
+      "A follow-up session is planned once the budget office replies.",
+    ].join("\n");
+    const page = classifyAdaptivePage(1, prose, V2);
+    expect(page.route).not.toBe("table-heavy");
+    expect(selectLegacyVisionPages([page], V2)).toEqual([]);
+  });
+});
+
 describe("pages whose text is drawn", () => {
   it("sends a page with OCR words but no text layer and no images to vision", () => {
     const empty: PageImageEvidence = { pageNumber: 1, wordCount: 0, imageCount: 0, imageCoverage: 0, largestImageCoverage: 0 };
