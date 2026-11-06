@@ -24,6 +24,8 @@ export interface SandboxProbeResult {
   ok: boolean;
   isolation: SandboxIsolation;
   detail: string;
+  /** A remote provider's tools, as the VM image reports them: command availability is decided from these, not the host PATH. */
+  tools?: readonly string[];
 }
 
 export interface SandboxLimits {

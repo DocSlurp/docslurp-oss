@@ -7,6 +7,8 @@ export interface InitializedParserSandbox {
   provider: ParserSandboxProvider;
   config: Record<string, unknown>;
   isolation: SandboxIsolation;
+  /** The VM image's tools (SandboxProbeResult.tools), when the provider reports them. */
+  tools?: readonly string[];
 }
 
 /**
@@ -31,7 +33,7 @@ export async function initializeParserSandbox(
     `[parser-sandbox] provider=${provider.id} filesystem=${isolation.filesystem} ` +
       `network=${isolation.network} processes=${isolation.processes} location=${isolation.location}`,
   );
-  return { provider, config, isolation };
+  return { provider, config, isolation, ...(probe.tools ? { tools: probe.tools } : {}) };
 }
 
 let registeredSandbox: InitializedParserSandbox | undefined;

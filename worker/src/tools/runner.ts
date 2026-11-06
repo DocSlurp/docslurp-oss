@@ -1438,6 +1438,10 @@ export class CommandRunner {
   }
 
   private async isAvailable(binary: string): Promise<boolean> {
+    // Commands run in a remote VM: a bare tool name is available when the VM image reports it (the startup probe), never
+    // because the worker host happens to have it on its PATH (validation N7).
+    const vm = registeredParserSandbox();
+    if (vm?.isolation.location === "remote" && vm.tools && !binary.includes(path.sep)) return vm.tools.includes(binary);
     if (binary.includes(path.sep)) {
       try {
         await access(binary);

@@ -345,11 +345,12 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
       try {
         session = await provider.openSession({ ...config, sessionTimeoutSeconds: Math.min(config.sessionTimeoutSeconds, PROBE_SESSION_TIMEOUT_SECONDS) }, { activityId: "startup-probe", unmetered: true });
         const result = await session.run!({ binary: "node", args: ["/app/worker/scripts/parser-vm-contract.mjs"], env: { PATH: "/usr/local/bin:/usr/bin:/bin" }, readablePaths: [], inputPaths: [], writablePaths: [], limits: { timeoutMs: 30_000 } });
-        const contract = result.exitCode === 0 ? JSON.parse(result.stdout) as { protocol?: unknown; uid?: unknown } : null;
+        const contract = result.exitCode === 0 ? JSON.parse(result.stdout) as { protocol?: unknown; uid?: unknown; tools?: unknown } : null;
         if (contract?.protocol !== "parser-vm@2") throw new Error("parser VM image contract unavailable");
         // Parser commands drop root in the VM (control.ts); a contract run as root means they would parse as root (N10).
         if (typeof contract.uid !== "number" || contract.uid === 0) throw new Error("parser VM commands do not drop root privileges");
-        return { ok: true, isolation: ISOLATION, detail: `VM image contract verified for '${config.app}'` };
+        const tools = Array.isArray(contract.tools) ? contract.tools.filter((tool): tool is string => typeof tool === "string" && /^[a-z0-9][a-z0-9_.-]{0,63}$/.test(tool)) : undefined;
+        return { ok: true, isolation: ISOLATION, detail: `VM image contract verified for '${config.app}'`, ...(tools ? { tools } : {}) };
       } catch (error) {
         return { ok: false, isolation: ISOLATION, detail: safeMessage(config, error) };
       } finally {
