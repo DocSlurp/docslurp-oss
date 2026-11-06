@@ -17,16 +17,14 @@ let store: Store;
 
 beforeAll(async () => {
   db = await createMigratedDatabase();
-  // These fixtures model documents whose page_count the worker already measured (`counted`); billing ignores an assumed count.
-  await db.exec(`alter table documents alter column page_count_source set default 'counted'`);
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com');
     insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 100000);
     insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
     insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
       values ('scan', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'embed', '${JSON.stringify(defaultPipelineFeatures)}', 1, 5);
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
-      values ('scan-pdf', 'o1', 'u1', 'w', 'scan', 'scan.pdf', 'application/pdf', 'raw/s', 'completed', 5);
+    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source)
+      values ('scan-pdf', 'o1', 'u1', 'w', 'scan', 'scan.pdf', 'application/pdf', 'raw/s', 'completed', 5, 'counted');
   `);
   const served = await serveOnRandomPort(db);
   server = served.server;

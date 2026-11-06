@@ -232,6 +232,46 @@ describe("image documents are read by the OCR extractor", () => {
     } finally { await h.cleanup(); }
   });
 
+  it("a retry after a failed frame check re-authorizes the recorded frames from the durable intake, and charges nothing", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const frames = Array.from({ length: 40 }, (_, index) => ({ frame: index + 1, text: `Page ${index + 1}` }));
+    const h = await harness({ format: "image", filename: "deposition.tiff", mimeType: "image/tiff", pageCount: 1, frames: () => frames });
+    const { store, calls } = spendStore(1);
+    const sized: number[] = [];
+    (store as any).largestFundedCharge = async (_run: unknown, max: number, creditsFor: (n: number) => number) => { sized.push(creditsFor(max)); return max; };
+    // Attempt 1: the frame check's balance read fails after the frames were recorded as the page count.
+    const real = (store as any).enforceSpendForCharge;
+    let checks = 0;
+    (store as any).enforceSpendForCharge = async (run: unknown, credits: number) => {
+      checks += 1;
+      if (checks === 2) throw new SpendCheckUnavailableError("connection terminated");
+      return await real(run, credits);
+    };
+    (h.state as any).store = store;
+    try {
+      await expect(h.stage.run(h.state)).rejects.toMatchObject({ name: "SpendCheckUnavailableError" });
+      expect(h.checkpoint()?.status).not.toBe("failed");
+      expect(calls.pageCounts).toEqual([40]);
+      // Attempt 2, as a retried activity loads it: the persisted page count is the 40 recorded frames, intake stays 1.
+      const document = h.state.documents[0]!;
+      expect(document.pageCount).toBe(40);
+      document.intakePageCount = 1;
+      (store as any).enforceSpendForCharge = real;
+      await h.stage.run(h.state);
+      // The read was sized against intake (39 unpriced Rich frames), not against the recorded 40...
+      expect(sized).toHaveLength(2);
+      expect(sized[1]).toBeGreaterThan(0);
+      expect(sized[1]).toBeCloseTo(sized[0]!);
+      // ...and the frame check ran again and refused the image: run paused, nothing charged.
+      expect(calls.checks.at(-1)).toBeGreaterThanOrEqual(9.75);
+      expect(h.checkpoint()?.status).toBe("failed");
+      expect(publicDocumentError(h.checkpoint()?.error)).toBe(PUBLIC_ERROR_MESSAGES.imageFramesUnfunded);
+      expect(h.richIds()).toEqual([]);
+    } finally { await h.cleanup(); }
+  });
+
   describe("the balance changes between sizing the read and the frame check", () => {
     // Sizing funds 5 frames of a 40-frame TIFF; by the frame check the balance covers it (a top-up in between).
     async function changedBalance(pause: ((run: unknown, reason: string) => Promise<{ paused: boolean; blocked: boolean }>) | null) {

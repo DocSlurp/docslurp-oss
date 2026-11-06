@@ -50,8 +50,11 @@ describe.skipIf(!hasOfficeLibs)("a PPTX with renamed slide parts", () => {
 });
 
 describe("a measured count never bills below the page basis", () => {
-  it("keeps page_count when the extractor's output counts fewer pages", async () => {
-    const document = { id: "doc-1", userId: "u", runId: "run-1", filename: "deck.pptx", mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation", sourceKey: "k", status: "queued", extractionMode: "hybrid", pageCount: 12, createdAt: new Date(), updatedAt: new Date() } as Document;
+  it("keeps a counted page_count when the extractor's output counts fewer pages; an assumed one is no floor", async () => {
+    const assumed = { id: "doc-2", userId: "u", runId: "run-1", filename: "deck.pptx", mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation", sourceKey: "k", status: "queued", extractionMode: "hybrid", pageCount: 12, pageCountSource: "assumed", createdAt: new Date(), updatedAt: new Date() } as Document;
+    const recorded = vi.fn(async () => true);
+    expect((await recordMeasuredPageCount({ run: { id: "run-1" }, store: { setDocumentBillingPages: recorded } }, assumed, "office-pptx", { extractor: "pptx", markdown: "## One\n\f\n## Two" })).pages).toBe(2);
+    const document = { id: "doc-1", userId: "u", runId: "run-1", filename: "deck.pptx", mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation", sourceKey: "k", status: "queued", extractionMode: "hybrid", pageCount: 12, pageCountSource: "counted", createdAt: new Date(), updatedAt: new Date() } as Document;
     const setDocumentBillingPages = vi.fn(async () => true);
     const result = await recordMeasuredPageCount({ run: { id: "run-1" }, store: { setDocumentBillingPages } }, document, "office-pptx", { extractor: "pptx", markdown: "## One\n\f\n## Two" });
     expect(result.pages).toBe(12);

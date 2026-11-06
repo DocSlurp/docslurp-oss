@@ -26,17 +26,15 @@ const pipeline = (quality: "fast" | "auto") => JSON.stringify({ ...defaultPipeli
 
 /** Fast run documents, one per way page facts go missing or mislead, plus a document a reader actually read. */
 const fastDocs = `
-  ('f-facts-off', 'o1', 'u1', 'w', 'fast', 'scan.pdf', 'application/pdf', 'raw/f1', 'completed', 3),
-  ('f-write-failed', 'o1', 'u1', 'w', 'fast', 'photo.png', 'image/png', 'raw/f2', 'completed', 1),
-  ('f-long-scan', 'o1', 'u1', 'w', 'fast', 'catalog.pdf', 'application/pdf', 'raw/f3', 'completed', 305),
-  ('f-no-canonical', 'o1', 'u1', 'w', 'fast', 'odd.pdf', 'application/pdf', 'raw/f4', 'completed', 2),
-  ('f-unpaged', 'o1', 'u1', 'w', 'fast', 'unpaged.pdf', 'application/pdf', 'raw/f5', 'completed', 3),
-  ('f-read', 'o1', 'u1', 'w', 'fast', 'read.pdf', 'application/pdf', 'raw/f6', 'completed', 2)`;
+  ('f-facts-off', 'o1', 'u1', 'w', 'fast', 'scan.pdf', 'application/pdf', 'raw/f1', 'completed', 3, 'counted'),
+  ('f-write-failed', 'o1', 'u1', 'w', 'fast', 'photo.png', 'image/png', 'raw/f2', 'completed', 1, 'counted'),
+  ('f-long-scan', 'o1', 'u1', 'w', 'fast', 'catalog.pdf', 'application/pdf', 'raw/f3', 'completed', 305, 'counted'),
+  ('f-no-canonical', 'o1', 'u1', 'w', 'fast', 'odd.pdf', 'application/pdf', 'raw/f4', 'completed', 2, 'counted'),
+  ('f-unpaged', 'o1', 'u1', 'w', 'fast', 'unpaged.pdf', 'application/pdf', 'raw/f5', 'completed', 3, 'counted'),
+  ('f-read', 'o1', 'u1', 'w', 'fast', 'read.pdf', 'application/pdf', 'raw/f6', 'completed', 2, 'counted')`;
 
 beforeAll(async () => {
   db = await createMigratedDatabase();
-  // These fixtures model documents whose page_count the worker already measured (`counted`); billing ignores an assumed count.
-  await db.exec(`alter table documents alter column page_count_source set default 'counted'`);
   // Probed facts stop at page 300 (WORKER_PAGE_FACTS_MAX_PAGES): pages 1-300 look like scans with no Fast status,
   // which the old facts-based rule billed Rich; pages 301-305 have no facts at all.
   const longScanFacts = Array.from({ length: 300 }, (_, index) => `('f-long-scan', ${index + 1}, 'fast', 0, 1, null)`).join(",");
@@ -47,10 +45,10 @@ beforeAll(async () => {
     insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
       values ('fast', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'embed', '${pipeline("fast")}', 6, 316),
              ('auto', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'embed', '${pipeline("auto")}', 2, 4);
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count) values
+    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source) values
       ${fastDocs},
-      ('a-pdf', 'o1', 'u1', 'w', 'auto', 'scan.pdf', 'application/pdf', 'raw/a1', 'completed', 3),
-      ('a-png', 'o1', 'u1', 'w', 'auto', 'photo.png', 'image/png', 'raw/a2', 'completed', 1);
+      ('a-pdf', 'o1', 'u1', 'w', 'auto', 'scan.pdf', 'application/pdf', 'raw/a1', 'completed', 3, 'counted'),
+      ('a-png', 'o1', 'u1', 'w', 'auto', 'photo.png', 'image/png', 'raw/a2', 'completed', 1, 'counted');
     insert into document_page_facts (document_id, page_number, run_id, text_bytes, image_count, vision_status) values
       ${longScanFacts},
       ('f-unpaged', 1, 'fast', 0, 1, null),
@@ -145,9 +143,9 @@ describe("Fast page billing from the usage ledger (recordPageBaseFee)", () => {
     await db.exec(`
       insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
         values ('auto-unread', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'embed', '${pipeline("auto")}', 2, 4);
-      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count) values
-        ('u-pdf', 'o1', 'u1', 'w', 'auto-unread', 'scan.pdf', 'application/pdf', 'raw/u1', 'completed', 3),
-        ('u-png', 'o1', 'u1', 'w', 'auto-unread', 'photo.png', 'image/png', 'raw/u2', 'completed', 1);
+      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source) values
+        ('u-pdf', 'o1', 'u1', 'w', 'auto-unread', 'scan.pdf', 'application/pdf', 'raw/u1', 'completed', 3, 'counted'),
+        ('u-png', 'o1', 'u1', 'w', 'auto-unread', 'photo.png', 'image/png', 'raw/u2', 'completed', 1, 'counted');
       insert into document_page_facts (document_id, page_number, run_id, text_bytes, image_count) values
         ('u-pdf', 1, 'auto-unread', 0, 1), ('u-pdf', 2, 'auto-unread', 0, 1), ('u-png', 1, 'auto-unread', 0, 1);
     `);
@@ -159,9 +157,9 @@ describe("Fast page billing from the usage ledger (recordPageBaseFee)", () => {
     await db.exec(`
       insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
         values ('auto-blank', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'embed', '${pipeline("auto")}', 2, 3);
-      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count) values
-        ('b-pdf', 'o1', 'u1', 'w', 'auto-blank', 'scan.pdf', 'application/pdf', 'raw/b1', 'completed', 2),
-        ('b-png', 'o1', 'u1', 'w', 'auto-blank', 'blank.png', 'image/png', 'raw/b2', 'completed', 1);
+      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source) values
+        ('b-pdf', 'o1', 'u1', 'w', 'auto-blank', 'scan.pdf', 'application/pdf', 'raw/b1', 'completed', 2, 'counted'),
+        ('b-png', 'o1', 'u1', 'w', 'auto-blank', 'blank.png', 'image/png', 'raw/b2', 'completed', 1, 'counted');
     `);
     const read = (pages: Array<{ pageNumber: number; text: string }>): OcrReadOutcome => ({
       mode: "vm", engine: "test-vm-ocr", language: { recognisers: ["multi"], unsupportedScript: false, setting: "auto" },
@@ -194,10 +192,10 @@ describe("Fast page billing from the usage ledger (recordPageBaseFee)", () => {
     await db.exec(`
       insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
         values ('auto-legacy', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'embed', '${pipeline("auto")}', 3, 5);
-      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count) values
-        ('l-pdf', 'o1', 'u1', 'w', 'auto-legacy', 'scan.pdf', 'application/pdf', 'raw/l1', 'completed', 3),
-        ('l-png', 'o1', 'u1', 'w', 'auto-legacy', 'photo.png', 'image/png', 'raw/l2', 'completed', 1),
-        ('l-read', 'o1', 'u1', 'w', 'auto-legacy', 'read.png', 'image/png', 'raw/l3', 'completed', 1);
+      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source) values
+        ('l-pdf', 'o1', 'u1', 'w', 'auto-legacy', 'scan.pdf', 'application/pdf', 'raw/l1', 'completed', 3, 'counted'),
+        ('l-png', 'o1', 'u1', 'w', 'auto-legacy', 'photo.png', 'image/png', 'raw/l2', 'completed', 1, 'counted'),
+        ('l-read', 'o1', 'u1', 'w', 'auto-legacy', 'read.png', 'image/png', 'raw/l3', 'completed', 1, 'counted');
       insert into document_page_facts (document_id, page_number, run_id, text_bytes, image_count) values
         ('l-pdf', 1, 'auto-legacy', 0, 1), ('l-pdf', 2, 'auto-legacy', 0, 1), ('l-pdf', 3, 'auto-legacy', 400, 0);
     `);

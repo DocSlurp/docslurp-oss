@@ -123,6 +123,7 @@ type DocumentRow = {
   billing_pages?: number | null;
   billing_pages_method?: string | null;
   page_count_source?: string | null;
+  intake_page_count?: number | null;
   file_facts?: import("@docslurp/shared").FileFacts | null;
   created_at: string | Date;
   updated_at: string | Date;
@@ -2752,6 +2753,20 @@ export class Store {
 
   /** Pauses the run when `credits` it newly owes (more pages than intake counted) no longer fit the org's balance (spend-check.ts). */
   /** Fails closed: throws SpendCheckUnavailableError (retryable) when it cannot decide. */
+  /**
+   * Fast pages of the run measured above what admission priced (durable: documents.intake_page_count, migration 0130), over
+   * every paged document still in the run: none of them is charged before the run's completion fee. Images are excluded:
+   * their frames bill Rich as they are read (ocr/image-frames.ts).
+   */
+  async measuredPagesAboveIntake(runId: string): Promise<number> {
+    const [row] = await this.sql<{ pages: number }[]>`
+      select coalesce(sum(greatest(0, coalesce(billing_pages, page_count) - coalesce(intake_page_count, page_count))), 0)::int as pages
+      from documents
+      where run_id = ${runId} and deduped_from_document_id is null and status <> 'failed'
+        and coalesce(mime_type, '') not like 'image/%' and coalesce(mime_type, '') not like 'audio/%' and coalesce(mime_type, '') not like 'video/%'`;
+    return Number(row?.pages) || 0;
+  }
+
   async pauseRunForSpend(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, reason: string): Promise<{ paused: boolean; blocked: boolean }> {
     const result = await pauseRunForSpend(this.sql, run, reason, "stage-boundary", Number.NaN);
     if (result.pauseFailed) throw new SpendCheckUnavailableError(`could not pause run ${run.id} for ${reason}`);
@@ -4383,6 +4398,7 @@ function mapDocument(row: DocumentRow): Document {
     billingPages: row.billing_pages ?? null,
     billingPagesMethod: row.billing_pages_method ?? null,
     pageCountSource: row.page_count_source === "assumed" || row.page_count_source === "counted" ? row.page_count_source : null,
+    intakePageCount: row.intake_page_count === null || row.intake_page_count === undefined ? null : Number(row.intake_page_count),
     fileFacts: row.file_facts ?? null,
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.updated_at),

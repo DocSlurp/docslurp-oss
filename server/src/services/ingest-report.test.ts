@@ -286,13 +286,43 @@ describe("ingest report: failed files", () => {
     ],
   });
 
-  it("surfaces the real failure: reason, stage and a sanitized detail with no paths", () => {
+  it("surfaces the real failure: reason, stage and reviewed copy, never the stored error's text", () => {
     const report = failedImage();
     expect(report.failures).toMatchObject({ total: 1, byReason: [{ reason: "ocr_unavailable", documents: 1 }] });
     const [failure] = report.failures.examples;
     expect(failure).toMatchObject({ documentId: "shot", filename: "shot.png", stage: "extract-markdown", reason: "ocr_unavailable", retryable: false });
-    expect(failure?.detail).toContain("Error opening data file <path>");
-    expect(JSON.stringify(report)).not.toMatch(/node_modules|\/app\//);
+    expect(failure?.detail).toBeNull();
+    expect(JSON.stringify(report)).not.toMatch(/node_modules|\/app\/|Error opening data file/);
+  });
+
+  it.each([
+    ["quoted JSON", 'provider 502: {"password":"hunter2","token":"short-secret"}', ["hunter2", "short-secret"]],
+    ["a query string", "upstream request https://api.example.com/v1/read?key=abc123&secret=s3cr3t failed with 500", ["abc123", "s3cr3t", "api.example.com"]],
+    ["headers", "upstream 401: Authorization: Bearer abcdefghijklmnop; X-Api-Key: k-12345; Cookie: session=xyz", ["abcdefghijklmnop", "k-12345", "session=xyz"]],
+  ])("an upstream error with credentials in %s reaches no part of the report or its chat summary", (_form, error, secrets) => {
+    const report = build({
+      documents: [doc("leak", { filename: "leak.pdf", mimeType: "application/pdf", status: "failed", pageCount: 2 })],
+      stages: [{ documentId: "leak", stage: "extract-markdown", status: "failed", skipped: false, reason: null, selectedPages: null, pages: null, costCents: null, tablePages: null, durationSeconds: null, error }],
+    });
+    const [failure] = report.failures.examples;
+    // The safe public reason and stage, reviewed copy, and no allowlisted phrase applies to these errors.
+    expect(failure).toMatchObject({ documentId: "leak", stage: "extract-markdown", reason: "provider_failed", detail: null });
+    expect(failure?.message).toBeTruthy();
+    const visible = `${JSON.stringify(report)}\n${summarizeIngestReport(report)}`;
+    for (const secret of [...secrets, error]) expect(visible).not.toContain(secret);
+  });
+
+  it("an allowlisted cause shows its reviewed phrase, never the stored text around it", () => {
+    const report = build({
+      documents: [doc("locked", { filename: "locked.pdf", mimeType: "application/pdf", status: "failed", pageCount: 2 })],
+      stages: [{ documentId: "locked", stage: "extract-markdown", status: "failed", skipped: false, reason: null, selectedPages: null, pages: null, costCents: null, tablePages: null, durationSeconds: null,
+        error: 'PDF is encrypted; owner said {"password":"hunter2"} at /srv/app/x.js' }],
+    });
+    const [failure] = report.failures.examples;
+    expect(failure).toMatchObject({ stage: "extract-markdown", reason: "unreadable_file", detail: "The file is password-protected or encrypted." });
+    const visible = `${JSON.stringify(report)}\n${summarizeIngestReport(report)}`;
+    expect(visible).not.toMatch(/hunter2|\/srv\/app/);
+    expect(summarizeIngestReport(report)).toContain("The file is password-protected or encrypted.");
   });
 
   it("does not blame page triage or recommend vision for a file that crashed in extraction", () => {

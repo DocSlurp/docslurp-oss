@@ -7,6 +7,7 @@ import { DOCUMENT_FAILURE_MARKERS, IMAGE_MAX_FRAMES, pageCredits, speedBoostMult
 
 import { SpendCheckUnavailableError } from "../db/spend-check.js";
 import { RunPolicyError } from "../lib/document-failure.js";
+import { intakePagesOf } from "../lib/measured-page-authorization.js";
 import { extraCreditsForMeasuredPages } from "../lib/office-page-count.js";
 import { emitDocumentPageProgress, isCostCapExceeded } from "../pipeline/checkpoints.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
@@ -50,7 +51,8 @@ export async function affordableImageFrames(state: WorkflowState, documentId: st
   const store = state.store;
   if (!store?.largestFundedCharge || !state.run.userId) return max;
   const document = state.documents.find((candidate) => candidate.id === documentId);
-  const intake = Math.max(1, Math.trunc(document?.pageCount ?? 1) || 1);
+  // What admission priced (durable), never the frames a previous attempt recorded as the page count.
+  const intake = document ? intakePagesOf(document) : 1;
   const pipeline = state.run.pipeline;
   const rows = store.countedImageFrames ? await store.countedImageFrames(state.run.id) : [];
   const others = rows
@@ -76,12 +78,17 @@ export async function affordableImageFrames(state: WorkflowState, documentId: st
 export async function authorizeImageFrames(state: WorkflowState, documentId: string, stageName: string, frames: number): Promise<void> {
   const document = state.documents.find((candidate) => candidate.id === documentId);
   if (!document) return;
-  const intake = Math.max(1, Math.trunc(document.pageCount) || 1);
+  // What admission priced (durable, migration 0130): a retry finds the frames an earlier attempt recorded as the page count,
+  // and must still authorize them; it never treats them as already priced.
+  const intake = intakePagesOf(document);
+  const recorded = Math.max(1, Math.trunc(document.pageCount) || 1);
   await recordImageFramePages(state, documentId, frames);
+  if (frames !== recorded) {
+    // The run's page total counted the page basis recorded so far; progress counts every frame.
+    state.run.pagesTotal = Math.max(0, Number(state.run.pagesTotal) || 0) + frames - recorded;
+    await emitDocumentPageProgress(state, document, stageName, 1, frames, "processing");
+  }
   if (frames <= intake) return;
-  // The run's page total counted the image as one page; progress counts every frame.
-  state.run.pagesTotal = Math.max(0, Number(state.run.pagesTotal) || 0) + frames - intake;
-  await emitDocumentPageProgress(state, document, stageName, 1, frames, "processing");
   const store = state.store;
   if (!store?.enforceSpendForCharge || !state.run.userId) return;
   const pipeline = state.run.pipeline;

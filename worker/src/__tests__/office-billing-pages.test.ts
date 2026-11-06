@@ -40,6 +40,11 @@ beforeAll(async () => {
     insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count) values
       ('docx1', 'o1', 'u1', 'w1', 'run1', 'contract.docx', '${DOCX}', 'raw/c1', 'completed', 1),
       ('docx2', 'o2', 'u1', 'w2', 'run2', 'huge.docx', '${DOCX}', 'raw/c2', 'processing', 1);
+    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+      values ('run4', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'embed', '${withFeatures}', 2, 2);
+    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source) values
+      ('blank', 'o1', 'u1', 'w1', 'run4', 'blank.docx', '${DOCX}', 'raw/blank', 'completed', 1, 'assumed'),
+      ('sheetless', 'o1', 'u1', 'w1', 'run4', 'notes.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'raw/sheetless', 'completed', 1, 'assumed');
   `);
   const served = await serveOnRandomPort(db);
   server = served.server;
@@ -102,10 +107,13 @@ describe("a measured DOCX: page rows and billing", () => {
     // 20,000 blank pages: a few credits of base fee plus every enabled feature on them, against a 20-credit balance.
     const owed = extraCreditsForMeasuredPages(run.pipeline, 1, 20_000);
     expect(owed).toBeGreaterThan(20);
-    const measured = await recordMeasuredPageCount({ run, store }, document, "office-word", counted(20_000));
-    expect(measured.pages).toBe(20_000);
+    // The count is recorded, the run is paused and the document is stopped (a run-policy stop), not carried on.
+    await expect(recordMeasuredPageCount({ run, store }, document, "office-word", counted(20_000))).rejects.toMatchObject({ name: "RunPolicyError" });
+    expect((await store.loadDocument("docx2"))!.billingPages).toBe(20_000);
     const { rows } = await db.query<{ control_state: string | null; pause_reason: string | null }>(`select control_state, pause_reason from workspace_runs where id = 'run2'`);
     expect(rows[0]).toEqual({ control_state: "paused", pause_reason: "credit_exhausted" });
+    // A run already paused (or stopped) by something else: the check reports blocked without pausing, and still stops it.
+    await expect(recordMeasuredPageCount({ run, store }, document, "office-word", counted(20_000))).rejects.toMatchObject({ name: "RunPolicyError" });
   }, 60_000);
 
   it("adds up the run's measured documents: ten large DOCX files that each fit a 10-credit balance cannot together overdraw it", async () => {
@@ -119,8 +127,12 @@ describe("a measured DOCX: page rows and billing", () => {
     const state = async () => (await db.query<{ control_state: string | null }>(`select control_state from workspace_runs where id = 'run3'`)).rows[0]!.control_state;
     let pausedAt = 0;
     for (let n = 1; n <= 10 && !pausedAt; n += 1) {
-      await recordMeasuredPageCount({ run, store }, (await store.loadDocument(`big${n}`))!, "office-word", counted(400));
-      if (await state() === "paused") pausedAt = n;
+      const stopped = await recordMeasuredPageCount({ run, store }, (await store.loadDocument(`big${n}`))!, "office-word", counted(400))
+        .then(() => false, (error: Error) => error.name === "RunPolicyError");
+      if (await state() === "paused") {
+        expect(stopped).toBe(true);
+        pausedAt = n;
+      } else expect(stopped).toBe(false);
     }
     // Five files owe 9.98 credits and fit; the sixth takes the run to 11.97 and pauses it. Checked one file at a time, none ever would.
     expect(pausedAt).toBe(Math.floor(10 / each) + 1);
@@ -159,4 +171,44 @@ describe("a measured DOCX: page rows and billing", () => {
       await db.exec(`alter function org_spend_status_unavailable(text, text, numeric) rename to org_spend_status`);
     }
   }, 60_000);
+});
+
+describe("an Office file always bills a measured outcome, never intake's assumed page", () => {
+  it("nothing extracted: measured 0 pages; no page fee and no feature", async () => {
+    const run = await store.loadRun("run4");
+    const blank = (await store.loadDocument("blank"))!;
+    expect(blank).toMatchObject({ pageCount: 1, pageCountSource: "assumed" });
+    expect(await recordMeasuredPageCount({ run, store }, blank, "office-word", { extractor: "pandoc", markdown: "  \n\n " }))
+      .toEqual({ pages: 0, method: "empty", intakePages: 1 });
+    const stored = (await store.loadDocument("blank"))!;
+    expect(stored).toMatchObject({ billingPages: 0, billingPagesMethod: "empty" });
+    const state = WorkflowState.create(run, [stored]);
+    expect(featurePages(state, stored)).toBe(0);
+    expect(featurePages(state, stored, { textPages: 5 })).toBe(0);
+  }, 60_000);
+
+  it("text extracted but no sheet tables: counted by the text rule", async () => {
+    const run = await store.loadRun("run4");
+    const sheet = (await store.loadDocument("sheetless"))!;
+    const measured = await recordMeasuredPageCount({ run, store }, sheet, "office-excel", { extractor: "xlsx", markdown: markdownOfPages(12) });
+    expect(measured).toMatchObject({ method: "text-rule" });
+    expect(measured.pages).toBeGreaterThanOrEqual(12);
+    const stored = (await store.loadDocument("sheetless"))!;
+    expect(stored.billingPages).toBe(measured.pages);
+    expect(featurePages(WorkflowState.create(run, [stored]), stored)).toBe(measured.pages);
+  }, 60_000);
+
+  it("the page fee bills only the measured outcomes: 0 for the blank file, the text-rule count for the other", async () => {
+    const run = await store.loadRun("run4");
+    const docs = [(await store.loadDocument("blank"))!, (await store.loadDocument("sheetless"))!];
+    const charges = await recordPageBaseFee(sql(), WorkflowState.create(run, docs));
+    expect(charges.fastPages).toBe(docs[1]!.billingPages);
+  }, 60_000);
+
+  it("an assumed page count with no measurement prices no feature", () => {
+    const state = WorkflowState.create({ id: "r", pipeline: {}, stats: {}, artifacts: {} } as never, []);
+    expect(featurePages(state, { id: "d", pageCount: 1, pageCountSource: "assumed" })).toBe(0);
+    expect(featurePages(state, { id: "d", pageCount: 7, pageCountSource: "counted" })).toBe(7);
+    expect(featurePages(state, { id: "d", pageCount: 1, pageCountSource: "assumed", billingPages: 40, billingPagesMethod: "text-rule" })).toBe(40);
+  });
 });

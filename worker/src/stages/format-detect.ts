@@ -6,9 +6,11 @@ import { cleanupTempFile, sourceStorageKey, type ArtifactStore } from "../tools/
 import type { CommandRunner } from "../tools/runner.js";
 import { recordMeasuredPdfPageCount } from "../lib/pdf-page-count.js";
 import { recordMeasuredTextPageCount } from "../lib/text-page-count.js";
+import { authorizeMeasuredPages } from "../lib/measured-page-authorization.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
-import { detectFileFormat, type NormalizedFormat } from "@docslurp/shared";
+import { detectFileFormat, resolvePdfMode, type NormalizedFormat } from "@docslurp/shared";
+import { sniffedPdf } from "../lib/sniffed-pdf.js";
 
 /**
  * The format intake persisted from the sniffed bytes (documents.file_facts) when there is one; otherwise the stored MIME type
@@ -23,7 +25,7 @@ function detectFormat(document: Document): { format: NormalizedFormat; detectedB
 export class FormatDetectStage implements Stage {
   readonly name = "format-detect";
 
-  constructor(private readonly storage: ArtifactStore, private readonly runner?: Pick<CommandRunner, "pdfInfo" | "run">) {}
+  constructor(private readonly storage: ArtifactStore, private readonly runner?: Pick<CommandRunner, "pdfPageProbe" | "run">) {}
 
   async run(state: import("../pipeline/pipeline.js").WorkflowState, signal?: AbortSignal): Promise<void> {
     for (const document of healthyDocuments(state)) {
@@ -53,6 +55,12 @@ export class FormatDetectStage implements Stage {
           });
 
           state.artifactLedger.recordDocument(document.id, "normalizedFormat", normalizedFormat);
+          // With no PDF mode (neither a VM provider nor customer-owned local mode) extraction refuses every PDF: refuse it here,
+          // before split-pages, render-images, routing evidence or any other stage runs host Poppler on its bytes.
+          if (sniffedPdf(document) && resolvePdfMode(process.env) === "off") {
+            console.error(`[format-detect] refused document=${document.id}: a PDF with no PDF mode configured (DOCSLURP_PDF_MODE); no host parser runs`);
+            throw new Error("PDF extraction unavailable: no PDF mode is configured (DOCSLURP_PDF_MODE), so this PDF is refused before any parser runs");
+          }
           // A PDF's page count from intake is an estimate (the API never parses it): measure it in the PDF boundary now,
           // before any stage uses it or anything bills.
           let temp: string | null = null;
@@ -65,6 +73,9 @@ export class FormatDetectStage implements Stage {
             state, document, format: normalizedFormat,
             readSource: (maxBytes) => this.storage.getBytes(sourceStorageKey(document.sourceKey), { maxBytes }),
           });
+          // Every attempt, including a retry that finds the measurement already persisted: authorize the measured pages above
+          // what admission priced, from durable state (intake_page_count), before any later stage runs.
+          await authorizeMeasuredPages(state, document);
 
           return {
             artifactUri: this.storage.uri(key),

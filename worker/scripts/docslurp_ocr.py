@@ -33,6 +33,7 @@ import re
 import resource
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -714,17 +715,27 @@ def write_png(rgb, directory, name):
         rgb.save(handle, format='PNG')
 
 
+# A rendition is raw 8-bit RGB behind a fixed header, never an encoded image: the host builds its pixels from these bytes
+# without running any image decoder (no PNG, ICC, EXIF or text chunks to parse). Header: magic, width, height (u32 BE).
+RENDITION_MAGIC = b'DSRGB1\n\0'
+RENDITION_HEADER_BYTES = len(RENDITION_MAGIC) + 8
+
+
 def write_rendition(rt, rgb, directory, frame_no, max_edge, max_bytes):
-    """The frame's rendition (RGB, long edge <= max_edge, PNG), or None when it would exceed max_bytes."""
+    """The frame's rendition (raw RGB, long edge <= max_edge), or None when it would exceed max_bytes."""
     width, height = rgb.size
     scale = min(1.0, max_edge / max(width, height))
     image = rgb if scale >= 1.0 else rgb.resize((max(1, round(width * scale)), max(1, round(height * scale))), rt.Image.LANCZOS)
-    name = f'rendition-{frame_no:04d}.png'
-    path = os.path.join(directory, name)
-    write_png(image.convert('RGB'), directory, name)
-    if os.path.getsize(path) > max_bytes:
-        os.unlink(path)
+    image = image.convert('RGB')
+    pixels = image.tobytes()
+    width, height = image.size
+    if len(pixels) != width * height * 3 or RENDITION_HEADER_BYTES + len(pixels) > max_bytes:
         return None
+    name = f'rendition-{frame_no:04d}.rgb'
+    fd = os.open(os.path.join(directory, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
+    with os.fdopen(fd, 'wb') as handle:
+        handle.write(RENDITION_MAGIC + struct.pack('>II', width, height))
+        handle.write(pixels)
     return name
 
 
@@ -812,7 +823,8 @@ def parse_args(argv):
     parser.add_argument('--escalate-below', type=_bounded(float, 0.0, 1.0), default=0.80)
     parser.add_argument('--escalate-recognisers', type=_csv, default=[])
     # A bounded, normalized rendition of every frame for visual indexing (the host never decodes the customer's own bytes):
-    # rendition-NNNN.png, long edge at most --rendition-max-edge, dropped when it encodes larger than --rendition-max-bytes.
+    # rendition-NNNN.rgb (raw RGB, RENDITION_MAGIC header), long edge at most --rendition-max-edge, dropped when larger than
+    # --rendition-max-bytes.
     parser.add_argument('--rendition-max-edge', type=_bounded(int, 0, 2048), default=0)
     parser.add_argument('--rendition-max-bytes', type=_bounded(int, 1024, 16 * 1024 * 1024), default=4 * 1024 * 1024)
     parser.add_argument('--self-test', action='store_true')
