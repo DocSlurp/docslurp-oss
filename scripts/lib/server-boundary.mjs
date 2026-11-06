@@ -140,3 +140,36 @@ export function checkEstimatorBoundary(root, dirs = ["server", "worker", "packag
   }
   return violations;
 }
+
+/**
+ * Runtime loads of the offline estimator the app may make: the Web Worker entry (bundled as a worker by Vite's `?worker`)
+ * and the client that only posts messages to it. The probes, the WASM and the estimator itself run in the worker, never
+ * on the page's main thread or in the server-rendered app.
+ */
+export const APP_ALLOWED_ESTIMATOR_IMPORTS = new Set(["@docslurp/estimate/worker?worker", "@docslurp/estimate/client"]);
+
+/** Type-only imports and re-exports (`import type`, `export type`) carry no code: always allowed. */
+const TYPE_ONLY = /\b(?:import|export)\s+type\s[^;]*?\bfrom\s*(['"])([^'"]+)\1/g;
+
+/**
+ * The app (outside tests) loads `@docslurp/estimate` only through APP_ALLOWED_ESTIMATOR_IMPORTS; types may be imported
+ * anywhere. `appDir` is relative to `root` (the app repository runs this with its own root).
+ */
+export function checkAppEstimatorImports(root, appDir = "app") {
+  const violations = [];
+  const files = [...sourceFiles(resolve(root, appDir)), ...astroFiles(resolve(root, appDir))];
+  for (const file of files) {
+    if (isTestFile(file)) continue;
+    const text = readFileSync(file, "utf8");
+    const typeOnly = new Set([...text.matchAll(TYPE_ONLY)].map((match) => match.index + match[0].length));
+    for (const match of text.matchAll(SPECIFIER)) {
+      const specifier = match[2];
+      if (specifier !== "@docslurp/estimate" && !specifier.startsWith("@docslurp/estimate/")) continue;
+      if (typeOnly.has(match.index + match[0].length)) continue;
+      if (APP_ALLOWED_ESTIMATOR_IMPORTS.has(specifier)) continue;
+      violations.push(`${relative(root, file)}: ${specifier} (the app runs the estimator only in its Web Worker: @docslurp/estimate/worker?worker and @docslurp/estimate/client)`);
+    }
+  }
+  return violations;
+}
+
