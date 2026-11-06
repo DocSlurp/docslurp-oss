@@ -283,8 +283,9 @@ export function scoreMarkdownCandidate(args: {
   const formattingSignals =
     (sanitized.match(/^#{1,6}\s+/gm) ?? []).length * 2 +
     (sanitized.match(/\*\*[^*\n][^*\n]*\*\*/g) ?? []).length +
-    (sanitized.match(/\[[^\]]+\]\([^)]+\)/g) ?? []).length +
-    (sanitized.match(/^\s*[-*+]\s+/gm) ?? []).length;
+    // Linear: link classes exclude their own opener; a list marker's indent never crosses lines (council K #3 audit).
+    (sanitized.match(/\[[^\][]+\]\([^()]+\)/g) ?? []).length +
+    (sanitized.match(/^[^\S\n]*[-*+]\s+/gm) ?? []).length;
   const formattingScore = Math.min(0.2, formattingSignals * 0.02);
   const selectionScore =
     plausibilityScore +

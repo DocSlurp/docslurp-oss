@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { countMarkdownTables, normalizeExtractedMarkdown, sanitizeExtractedMarkdown } from "../lib/extracted-markdown.js";
+import { countMarkdownTables, normalizeExtractedMarkdown, sanitizeExtractedMarkdown, scoreMarkdownCandidate } from "../lib/extracted-markdown.js";
 import { HEADING_MAX_LINE_CHARS, parseAtxHeading, plainHeadingText, stripLeadingFrontmatter } from "../lib/markdown-structure.js";
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
 import { chunkText } from "../pipeline/chunking.js";
@@ -92,5 +92,31 @@ describe("heading detection and cleanup are linear on hostile heading lines (cou
     expect(parseAtxHeading("####### seven")).toBeNull();
     expect(parseAtxHeading("#nospace")).toBeNull();
     expect(parseAtxHeading(`# ${"a".repeat(HEADING_MAX_LINE_CHARS)}`)).toBeNull();
+  });
+});
+
+describe("the remaining host regexes the audit found superlinear are linear (council K #3 audit)", () => {
+  it("TOC leader lines: 1 MB of hostile 1 KB lines in under 250 ms, and real entries still match", async () => {
+    const { isLeaderTocLine, buildExtractionContract } = await import("../lib/extraction-contract.js");
+    for (const entry of ["Introduction ........ 12", "Methods … 7", "Results ··· 103", "Appendix A      2048", "Intro.....  3"]) expect(isLeaderTocLine(entry), entry).toBe(true);
+    for (const other of ["... 12", "    12", "Chapter 12345", "Total 12", "text"]) expect(isLeaderTocLine(other), other).toBe(false);
+    const hostile = [`<table>${" ".repeat(1000)}`, `a${" ".repeat(1000)}`, `a${".".repeat(1000)}`, `a${" ".repeat(1000)}1x`];
+    for (const line of hostile) {
+      const text = `${line}\n`.repeat(Math.floor(MB / (line.length + 1)));
+      expect(elapsed(() => buildExtractionContract({ documentId: "d", markdown: text, extractor: "x", strategy: "s", extractionTimeMs: 1, pageCount: 1 }))).toBeLessThan(1_000);
+    }
+  });
+
+  it("candidate scoring counts links and list markers in linear time on unclosed and blank-line runs", () => {
+    for (const text of ["![[".repeat(MB / 3), "\n".repeat(MB), "[a](".repeat(MB / 4)]) {
+      expect(elapsed(() => scoreMarkdownCandidate({ markdown: text }))).toBeLessThan(1_000);
+    }
+    expect(scoreMarkdownCandidate({ markdown: "- a\n- b\n\n[x](y)\n" })).toBeTruthy();
+  });
+
+  it("table cell typing refuses the percentage regex on long cells", async () => {
+    const { typeColumn } = await import("../lib/table-typing.js");
+    expect(elapsed(() => typeColumn([`1${" ".repeat(8 * 1024)}x%`, "12%"]))).toBeLessThan(50);
+    expect(typeColumn(["12 %", "3.5%"]).columnType).toBe("percentage");
   });
 });
