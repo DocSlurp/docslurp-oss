@@ -145,7 +145,12 @@ export const aggregateWorkspaceRagSearchRequestSchema = z
   .object({
     q: z.string().min(1).optional(),
     goal: z.string().min(1).optional(),
-    /** Workspace IDs, slugs or names (see parseWorkspaceInput). Empty: every workspace the caller can search. */
+    /**
+     * The organization to search. An API key always searches its own (another value is refused); a session defaults to
+     * its personal organization. A search never spans organizations.
+     */
+    orgId: z.string().trim().min(1).max(256).optional(),
+    /** Workspace IDs, slugs or names (see parseWorkspaceInput) in that organization. Empty: every workspace there the caller can search. */
     workspaces: z.array(z.string().trim().min(1).max(256)).default([]),
     limitPerWorkspace: z.number().int().positive().max(25).default(5),
     maxWorkspaces: z.number().int().positive().max(50).default(12),
@@ -188,6 +193,8 @@ export const runProcessingPreviewFileSchema = z.object({
   filename: z.string().min(1),
   mimeType: z.string().min(1),
   sizeBytes: z.number().int().nonnegative(),
+  /** Counted pages, when known (a run's documents have them). Without it pages are estimated from the size, over a range. */
+  pages: z.number().int().positive().max(10_000_000).optional(),
 });
 export type RunProcessingPreviewFile = z.infer<
   typeof runProcessingPreviewFileSchema

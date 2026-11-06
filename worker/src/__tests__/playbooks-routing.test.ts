@@ -29,14 +29,14 @@ describe("classifyTextAndFilename", () => {
     });
   });
 
-  it("treats no-text LiteParse complexity as valid first-run routing evidence", () => {
+  it("treats no-text structured page complexity as valid first-run routing evidence", () => {
     const surface = buildAdaptiveRoutingDecisionSurface({
       documentId: "doc-scan",
       filename: "scan.pdf",
       text: "",
       pageCount: 1,
       evidence: {
-        source: "liteparse-structured",
+        source: "page-image-evidence",
         artifactUri: "s3://bucket/scan.structured.json",
       },
       structuredComplexity: new Map([
@@ -61,7 +61,7 @@ describe("classifyTextAndFilename", () => {
 
     expect(surface.status).toBe("ready");
     if (surface.status === "ready") {
-      expect(surface.evidence.source).toBe("liteparse-structured");
+      expect(surface.evidence.source).toBe("page-image-evidence");
       expect(surface.pages[0]).toMatchObject({
         pageNumber: 1,
         route: "handwriting-or-degraded",
@@ -173,11 +173,13 @@ describe("classifyTextAndFilename", () => {
   it("recognizes Markdown tables without requiring chart-like terms", () => {
     const page = classifyAdaptivePage(
       1,
-      "| Region | Product | Q1 | Q2 |\n|---|---|---|---|\n| North | Crawler | 120 | 124 |",
+      "| Region | Product | Q1 | Q2 |\n|---|---|---|---|\n| North | Crawler | 120 | 124 |\n| South | Crawler | 98 | 101 |\n| East | Loader | 77 | 80 |\n| West | Loader | 64 | 70 |",
     );
 
     expect(page.route).toBe("table-heavy");
     expect(page.extractorHint).toBe("layout-aware");
+    // Owner rule (2026-11-05): a two-row table is not a table-heavy page.
+    expect(classifyAdaptivePage(1, "| Region | Product | Q1 | Q2 |\n|---|---|---|---|\n| North | Crawler | 120 | 124 |").route).not.toBe("table-heavy");
   });
 
   it("recognizes extracted form fields expressed as Markdown headings", () => {
@@ -276,7 +278,7 @@ describe("structured OCR authorization", () => {
   });
 
   it("authorizes OCR for a no-text scan or full-page image", () => {
-    // LiteParse marks a raster-only page "scanned" with a full-page image.
+    // A structured parser marks a raster-only page "scanned" with a full-page image.
     expect(
       authorizeStructuredOcr(
         { ...baseComplexity, textLength: 0, fullPageImage: true, reasons: ["scanned"] },
@@ -297,11 +299,11 @@ describe("structured OCR authorization", () => {
   });
 
   it("does not authorize OCR for a blank page (no native text, nothing drawn)", () => {
-    // LiteParse marks a blank page "no-text" with no image or vector content.
+    // A structured parser marks a blank page "no-text" with no image or vector content.
     expect(
       authorizeStructuredOcr({ ...baseComplexity, textLength: 0, reasons: ["no-text"] }, ""),
     ).toMatchObject({ authorized: false, signals: ["ocr-not-authorized:blank-page"] });
-    // Raster evidence from the PDF itself can still show image content LiteParse missed.
+    // Raster evidence from the PDF itself can still show image content the parser missed.
     expect(
       authorizeStructuredOcr({ ...baseComplexity, textLength: 0, reasons: ["no-text"] }, "", {
         pageNumber: 1, wordCount: 0, imageCount: 1, imageCoverage: 0.6, largestImageCoverage: 0.6,

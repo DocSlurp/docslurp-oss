@@ -14,7 +14,7 @@ describe("quarantine production boundary", () => {
       const encoded = await readFile(plan.args[2], "utf8");
       expect(encoded).not.toContain("credential-sentinel");
       expect(Object.keys(JSON.parse(encoded).policy)).toHaveLength(6);
-      await writeFile(plan.args[3], JSON.stringify({ sniffedMimeType: "application/pdf", archive: null }));
+      await writeFile(plan.args[3], JSON.stringify({ sniffed: { mimeType: "application/pdf", container: null, encoding: null }, archive: null }));
     });
     expect((await scanDocumentForQuarantine(args(run))).decision).toBe("accepted"); expect(run).toHaveBeenCalledOnce();
   });
@@ -24,7 +24,22 @@ describe("quarantine production boundary", () => {
   });
   it("rejects malformed archive fields from a compromised guest", async () => {
     vi.stubEnv("NODE_ENV", "production");
-    const run = vi.fn(async (plan) => writeFile(plan.args[3], JSON.stringify({ sniffedMimeType: null, archive: { issues: [], kind: "zip", suspicious: false, inspectable: true, entryCount: -1 } })));
+    const run = vi.fn(async (plan) => writeFile(plan.args[3], JSON.stringify({ sniffed: { mimeType: null, container: "zip", encoding: null }, archive: { issues: [], kind: "zip", suspicious: false, inspectable: true, entryCount: -1 } })));
     await expect(scanDocumentForQuarantine(args(run))).rejects.toThrow(/invalid quarantine archive size/);
   });
+  it("rejects a forged sniff result from a compromised guest: unknown fields, containers, encodings or MIME syntax", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    for (const sniffed of [
+      { mimeType: "application/pdf", container: null, encoding: null, trusted: true },
+      { mimeType: "application/pdf", container: "tar", encoding: null },
+      { mimeType: "text/plain", container: null, encoding: "ebcdic" },
+      { mimeType: "application/pdf; charset=x", container: null, encoding: null },
+      { mimeType: "a".repeat(300), container: null, encoding: null },
+      null,
+    ]) {
+      const run = vi.fn(async (plan) => writeFile(plan.args[3], JSON.stringify({ sniffed, archive: null })));
+      await expect(scanDocumentForQuarantine(args(run)), JSON.stringify(sniffed)).rejects.toThrow(/invalid quarantine MIME result/);
+    }
+  });
 });
+

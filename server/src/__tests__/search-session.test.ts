@@ -296,7 +296,7 @@ describe("Search Session execution helpers", () => {
     },
   };
 
-  it.each([false, true])("preserves the reranker winner through context positioning (MMR=%s)", async (useMmr) => {
+  it.each([false, true])("fuses the reranker with the hybrid order instead of replacing it (MMR=%s)", async (useMmr) => {
     const chunks = searchResultsToChunks([
       { ...result, text: "Routine maintenance checklist for the plant.", score: 1 },
       {
@@ -317,10 +317,45 @@ describe("Search Session execution helpers", () => {
       session: createSearchSessionJournal({ rootSessionId: "ranking-test" }),
     });
 
-    expect(processed[0]?.id).toBe(chunks[2]?.id);
+    // BM25 alone would put the cobalt chunk first; against a hybrid order that ranked it last
+    // the two orders tie, and a tie keeps the hybrid order.
+    expect(processed[0]?.id).toBe(chunks[0]?.id);
     expect(new Set(processed.map((chunk) => chunk.id))).toEqual(
       new Set(chunks.map((chunk) => chunk.id)),
     );
+  });
+
+  it("keeps the real answer on top when BM25 rewards a stray shared word", async () => {
+    const texts = [
+      "To terminate your plan, open Billing and choose End membership.",
+      "Plans renew monthly unless ended from the Billing page.",
+      "I do not know how to cook.",
+      "Office hours are nine to five.",
+    ];
+    const chunks = searchResultsToChunks(texts.map((text, i) => ({
+      ...result, text, score: 1 / (i + 1), citation: { ...result.citation, chunkIndex: i },
+    })));
+    const run = (useRerank: boolean) => applySearchPostRetrievalProcessing({
+      query: "how do I cancel my subscription", chunks, limit: 4,
+      options: { useRerank, resultOrder: "relevance" }, privacyMode: "standard", session: createSearchSessionJournal({}),
+    });
+    const withRerank = await run(true);
+    expect(withRerank[0]?.text).toBe(texts[0]);
+    expect(withRerank.map(c => c.text).indexOf(texts[0]!)).toBeLessThan(withRerank.map(c => c.text).indexOf(texts[2]!));
+    expect((await run(false)).map(c => c.id)).toEqual(chunks.map(c => c.id));
+  });
+
+  it("orders by fused rank, not by raw adapter scores from different scales", async () => {
+    // The vector branch reports ~0.9, the keyword branch a BM25 score of 14: fused order wins.
+    const chunks = searchResultsToChunks([
+      { ...result, text: "alpha vector hit", score: 0.9, citation: { ...result.citation, chunkIndex: 1 } },
+      { ...result, text: "alpha keyword hit", score: 14, citation: { ...result.citation, chunkIndex: 2 } },
+    ]);
+    const processed = await applySearchPostRetrievalProcessing({
+      query: "alpha", chunks, limit: 2, options: { useMmr: true, mmrLambda: 1, resultOrder: "relevance" },
+      privacyMode: "standard", session: createSearchSessionJournal({}),
+    });
+    expect(processed.map(c => c.id)).toEqual(chunks.map(c => c.id));
   });
 
   it("lets MMR replace a near-duplicate with a different passage", async () => {
@@ -357,8 +392,8 @@ describe("Search Session execution helpers", () => {
       });
       expect(processed).toHaveLength(3);
       expect(processed.every(c => chunks.slice(0, 50).some(x => x.id === c.id))).toBe(true);
-      if (useRerank) expect(processed[0]?.id).toBe(chunks[49].id);
-      else expect(processed.map(c => c.id)).toEqual(chunks.slice(0, 3).map(c => c.id));
+      // Rerank is fused with the hybrid order: the BM25 winner at hybrid rank 50 cannot leapfrog the top.
+      expect(processed.map(c => c.id)).toEqual(chunks.slice(0, 3).map(c => c.id));
     }
   });
 

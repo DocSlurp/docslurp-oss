@@ -503,20 +503,20 @@ describe("job resource", () => {
   });
 });
 
-describe("inline estimate budget", () => {
-  it("drops the inline estimate for a slow computation and points at the estimate route", async () => {
+describe("inline estimates", () => {
+  it("a slow estimate is still the mutation's estimate, with the estimate route beside it", async () => {
     const estimate = { pages: 1, documents: 1, billing: "disabled" as const, credits: null, seconds: null, basis: "x" };
-    expect(await jobs.inlineEstimate(() => estimate, "/est")).toEqual({ estimate });
-    const slow = await jobs.inlineEstimate(async () => { await new Promise((r) => setTimeout(r, 20)); return estimate; }, "/est", 5);
-    expect(slow).toEqual({ estimate: null, estimateUrl: "/est" });
+    expect(await jobs.inlineEstimate(() => estimate, "/est")).toEqual({ estimate, estimateUrl: "/est" });
+    const slow = await jobs.inlineEstimate(async () => { await new Promise((r) => setTimeout(r, 200)); return estimate; }, "/est");
+    expect(slow).toEqual({ estimate, estimateUrl: "/est" });
   });
 
-  it("a workspace change whose planning exceeds the budget returns job.estimate null with estimateUrl", async () => {
+  it("a workspace change's job carries its estimate and the estimate route", async () => {
     await seed({ credits: 10_000 });
-    const plan = await change.planWorkspaceChange({ workspaceId: "w", userId: "u1", input: embeddingChange() as never, budgetMs: -1 });
-    expect(plan!.estimateWithinBudget).toBe(false);
+    const plan = await change.planWorkspaceChange({ workspaceId: "w", userId: "u1", input: embeddingChange() as never });
     const applied = await change.applyWorkspaceChange({ plan: plan!, userId: "u1" });
-    expect(applied!.job).toMatchObject({ estimate: null, estimateUrl: "/v1/workspaces/w/estimate" });
+    expect(applied!.job).toMatchObject({ estimate: plan!.estimate, estimateUrl: "/v1/workspaces/w/estimate" });
+    expect(plan!.estimate).not.toBeNull();
     // The estimate route still answers in full.
     const full = await change.estimateWorkspaceChange({ workspaceId: "w", userId: "u1", input: { monthlyBudgetCents: 1 } as never });
     expect(full!.estimate).toBeNull();

@@ -1,5 +1,5 @@
 import {
-  slotInfraUsdPerHour,
+  pricing,
   type Assignment,
   type AssignmentRole,
   type AssignmentScope,
@@ -20,13 +20,13 @@ import {
 //   the catalog `imageTokensPerImage` when present).
 //   Local / private compute targets: cost = hourlyUsd / 60 / pagesPerMinute when the
 //   catalog observed both; otherwise seconds-per-page assumption * infra $/second
-//   (worker slot from infra-costs.ts for CPU targets, GPU hourly assumption for GPU targets).
+//   (the pricing provider's worker slot cost for CPU targets, 0 when it has none; GPU hourly assumption for GPU targets).
 //   Decision models bill input tokens only: thumbnail tiles (~1 token per 1000 px,
 //   i.e. ~1000 tok/MP) + facts text + per-call question overhead amortised over pages.
 //
 // MARGIN MODEL
 //   Provider AI and local compute receipts are cost-only (bill 0 credits).
-//   Customers pay PRICE_CARD page/minute units, not resource list rates.
+//   Customers pay page/minute unit charges, not resource list rates.
 //   This estimator lacks the run-level mode/tier and page-charge deduplication
 //   context needed to allocate that revenue exactly once across assignments,
 //   cascades and router calls. Keep billedUsd at zero as a conservative bound:
@@ -80,7 +80,7 @@ export const ESTIMATE_ASSUMPTIONS = {
   questionTokens: 18,
 } as const;
 
-const slotCostUsdPerSec = () => slotInfraUsdPerHour() / 3600;
+const slotCostUsdPerSec = () => (pricing().internalCost.workerSlotUsdPerHour() ?? 0) / 3600;
 
 export interface CostBreakdown {
   costUsd: number;

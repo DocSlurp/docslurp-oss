@@ -47,9 +47,8 @@ describe("buildRoutingTargetCatalog", () => {
     const ids = off.targets.map((t) => t.id);
     expect(ids).toEqual(
       expect.arrayContaining([
-        "native:kreuzberg",
         "native:pdf-markdown",
-        "ocr:tesseract",
+        "ocr:ppocr",
         "vlm:openrouter/google/gemini-3.5-flash",
         "vlm:openrouter/openai/gpt-6-luna",
       ]),
@@ -70,7 +69,7 @@ describe("buildRoutingTargetCatalog", () => {
     expect(roles("native:accept-text-layer")).toEqual(["accept-text"]);
     expect(roles("local:florence-2-small")).toEqual(["image-label"]);
     expect(roles("skip")).toEqual(["skip"]);
-    expect(roles("ocr:tesseract")).toContain("ocr");
+    expect(roles("ocr:ppocr")).toContain("ocr");
     expect(roles("vlm:openrouter/google/gemini-3.5-flash")).toEqual(
       expect.arrayContaining(["chart-data", "math", "diagram"]),
     );

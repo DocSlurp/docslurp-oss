@@ -1,3 +1,4 @@
+import { pageCredits, speedBoostMultiplier } from "@docslurp/shared";
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { defaultPipelineFeatures } from "@docslurp/shared";
@@ -203,15 +204,17 @@ describe("run cost cap figure", () => {
     state.usageLedger.record({ provider: "openrouter", model: "z-ai/glm-5.3-flash:nitro", metric: "page-analysis",
       inputTokens: 100, outputTokens: 50, costCents: 0.37, metadata: { documentId: "boost-doc", pageNumber: 1 } });
     const charge = state.usageLedger.snapshot().find(event => event.metric === "ingest-page-rich")!;
-    expect(runSpentCents(state)).toBe(1);
-    expect(isCostCapExceeded(state)).toBe(true);
+    const boosted = charge.costCents;
+    expect(boosted).toBeCloseTo(pageCredits("rich", 1) * speedBoostMultiplier(true), 9);
+    expect(runSpentCents(state)).toBe(boosted);
+    expect(isCostCapExceeded(state)).toBe(boosted >= 1);
     await store.updateProgress(state);
-    expect(await spentCents("r-boost")).toBe(1);
-    expect(await billedLedgerCents("r-boost")).toBe(1);
+    expect(await spentCents("r-boost")).toBeCloseTo(boosted, 9);
+    expect(await billedLedgerCents("r-boost")).toBeCloseTo(boosted, 9);
     expect(await scalar(`select (metadata->>'providerCostCents')::text as v from usage_attribution where run_id='r-boost' and metric='page-analysis'`)).toBe(0.37);
     state.usageLedger.enqueue(charge);
     await store.updateProgress(state);
-    expect(await spentCents("r-boost")).toBe(1);
+    expect(await spentCents("r-boost")).toBeCloseTo(boosted, 9);
     expect(await scalar(`select count(*)::text as v from usage_attribution where run_id='r-boost' and metric='ingest-page-rich' and org_id='o1' and workspace_id='w'`)).toBe(1);
   });
 

@@ -59,6 +59,23 @@ export interface Document {
   status: string;
   extractionMode: string;
   pageCount: number;
+  /**
+   * Pages the document bills when they differ from `pageCount` (the page basis the text splits into): the worker's measured count of an
+   * Office, slide, sheet or EPUB file (documents.billing_pages). Null/absent: it bills `pageCount`.
+   */
+  billingPages?: number | null;
+  /** How `billingPages` was found (documents.billing_pages_method); a layout conversion's count is capped by the text it holds when features bill. */
+  billingPagesMethod?: string | null;
+  /** `counted` or `assumed` (documents.page_count_source): `assumed` is intake's estimate, replaced by the worker's count. */
+  pageCountSource?: "counted" | "assumed" | null;
+  /**
+   * The page count admission priced (documents.intake_page_count, migration 0130): set at insert, never rewritten. Measured
+   * pages above it are authorized against the balance on every attempt (lib/measured-page-authorization.ts). Null on rows
+   * from before 0130, read as pageCount.
+   */
+  intakePageCount?: number | null;
+  /** What intake sniffed the bytes to be (documents.file_facts); absent for documents ingested before it existed. */
+  fileFacts?: import("@docslurp/shared").FileFacts | null;
   createdAt: Date;
   updatedAt: Date;
   /** Set for documents of an extract run: the run's storage prefix (see runArtifactRoot). */

@@ -17,6 +17,7 @@ export type DocumentArtifactName =
   | "normalize"
   | "normalizedFormat"
   | "page-image-evidence"
+  | "page-layout-facts"
   | "page-index"
   | "parser-eval"
   | "parser-playbook"

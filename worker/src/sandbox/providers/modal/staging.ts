@@ -3,6 +3,8 @@ import path from "node:path";
 import { createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
 
+import { SandboxOutputError } from "../../types.js";
+
 /** One remote filesystem entry. `mtime` is in the remote clock's units (Modal reports whole seconds). */
 export interface RemoteEntry {
   path: string;
@@ -20,6 +22,8 @@ export interface RemoteFs {
   /** Direct children of a directory, symlinks excluded. */
   list(p: string): Promise<RemoteEntry[]>;
   mkdir(p: string): Promise<void>;
+  /** Create several directories (with parents) in one call, when the transport can (council X #7). */
+  mkdirAll?(paths: string[]): Promise<void>;
   /** Remove a file, or a directory and everything under it. */
   remove(p: string): Promise<void>;
 }
@@ -58,11 +62,15 @@ export class SessionStaging {
 
   /** Create remote directories (with parents). */
   async ensureDirectories(paths: string[]): Promise<void> {
-    for (const p of paths) {
-      const abs = path.resolve(p);
-      await this.remote.mkdir(abs);
-      this.claim(abs, "directory");
-    }
+    const resolved = paths.map((p) => path.resolve(p));
+    if (resolved.length > 1 && this.remote.mkdirAll) await this.remote.mkdirAll(resolved);
+    else for (const abs of resolved) await this.remote.mkdir(abs);
+    for (const abs of resolved) this.claim(abs, "directory");
+  }
+
+  /** Paths uploaded and still assumed present (kept across the same document's commands, council X #7). */
+  uploadedPaths(): string[] {
+    return [...this.uploaded];
   }
 
   /** Record the current state of `roots` so a command's own changes can be told apart later. */
@@ -82,9 +90,9 @@ export class SessionStaging {
     let totalBytes = 0;
     for (const entry of changed) {
       if (!entry.isDir) {
-        if (!Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > 128 * 1024 * 1024) throw new Error("parser VM output file exceeds limit");
+        if (!Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > 128 * 1024 * 1024) throw new SandboxOutputError("parser VM output file exceeds limit");
         totalBytes += entry.size;
-        if (totalBytes > 512 * 1024 * 1024) throw new Error("parser VM aggregate output exceeds limit");
+        if (totalBytes > 512 * 1024 * 1024) throw new SandboxOutputError("parser VM aggregate output exceeds limit");
       }
     }
     let downloadedBytes = 0;
@@ -96,7 +104,7 @@ export class SessionStaging {
         await mkdir(path.dirname(entry.path), { recursive: true });
         const data = await this.remote.readFile(entry.path);
         downloadedBytes += data.byteLength;
-        if (data.byteLength > 128 * 1024 * 1024 || downloadedBytes > 512 * 1024 * 1024) throw new Error("parser VM actual output exceeds limit");
+        if (data.byteLength > 128 * 1024 * 1024 || downloadedBytes > 512 * 1024 * 1024) throw new SandboxOutputError("parser VM actual output exceeds limit");
         await writeFile(entry.path, data);
       }
       this.claim(entry.path, "download");
@@ -132,6 +140,15 @@ export class SessionStaging {
   }
 
   /** Drop a removed path, its subtree and its ancestors from the uploaded set so they upload again. */
+  /**
+   * Forget every upload (recheck S #7): the next command re-uploads all its inputs. Called when a VM moves to another
+   * document, whose parser could have rewritten this document's remote copies.
+   */
+  forgetUploads(): void {
+    this.uploaded.clear();
+    this.inputHashes.clear();
+  }
+
   private forget(abs: string): void {
     for (const p of this.uploaded) if (p === abs || p.startsWith(`${abs}${path.sep}`)) { this.uploaded.delete(p); this.inputHashes.delete(p); }
     for (let p = path.dirname(abs); ; p = path.dirname(p)) {
@@ -154,9 +171,9 @@ export class SessionStaging {
   private async walk(roots: string[]): Promise<Map<string, RemoteEntry>> {
     const entries = new Map<string, RemoteEntry>();
     const visit = async (entry: RemoteEntry): Promise<void> => {
-      if (!roots.some((root) => entry.path === root || entry.path.startsWith(root + path.sep))) throw new Error("parser VM output escaped staging roots");
+      if (!roots.some((root) => entry.path === root || entry.path.startsWith(root + path.sep))) throw new SandboxOutputError("parser VM output escaped staging roots");
       if (entries.has(entry.path)) return;
-      if (entries.size >= 8192 || entry.path.split(path.sep).length > 64) throw new Error("parser VM output entry/depth limit exceeded");
+      if (entries.size >= 8192 || entry.path.split(path.sep).length > 64) throw new SandboxOutputError("parser VM output entry/depth limit exceeded");
       entries.set(entry.path, entry);
       if (entry.isDir) for (const child of await this.remote.list(entry.path)) await visit(child);
     };
@@ -182,12 +199,12 @@ export class SessionStaging {
       this.claim(abs, "upload");
       for (const name of await readdir(abs)) await this.upload(path.join(abs, name));
     } else if (stats.isFile()) {
-      if (stats.size > 512 * 1024 * 1024) throw new Error("parser VM input file exceeds limit");
+      if (stats.size > 512 * 1024 * 1024) throw new SandboxOutputError("parser VM input file exceeds limit");
       const chunks: Buffer[] = []; let bytes = 0;
       // Bound allocation while reading, including growth after the initial stat.
       for await (const chunk of createReadStream(abs)) {
         bytes += chunk.length;
-        if (bytes > 512 * 1024 * 1024) throw new Error("parser VM actual input file exceeds limit");
+        if (bytes > 512 * 1024 * 1024) throw new SandboxOutputError("parser VM actual input file exceeds limit");
         chunks.push(chunk as Buffer);
       }
       const data = Buffer.concat(chunks, bytes);

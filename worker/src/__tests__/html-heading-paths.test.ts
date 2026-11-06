@@ -1,9 +1,7 @@
-import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 
 import { afterAll, describe, expect, it } from "vitest";
 
@@ -12,10 +10,11 @@ import { sanitizeExtractedMarkdown } from "../lib/extracted-markdown.js";
 import { leadingFrontmatterLineCount, plainHeadingText, stripLeadingFrontmatter } from "../lib/markdown-structure.js";
 import { chunkTextWithMeta } from "../pipeline/chunking.js";
 import { buildHeuristicDocumentSummary } from "../stages/embedding-runtime.js";
+import { CommandRunner } from "../tools/runner.js";
 
-const scriptsDir = fileURLToPath(new URL("../../scripts/", import.meta.url));
-type MissingTables = (content: string, tables: unknown) => string[];
-const { missingTableMarkdown } = (await import(path.join(scriptsDir, "kreuzberg_tables.mjs"))) as { missingTableMarkdown: MissingTables };
+const pandocInstalled = (() => {
+  try { execFileSync("pandoc", ["--version"], { stdio: "ignore", timeout: 20_000 }); return true; } catch { return false; }
+})();
 
 // What an HTML converter emits for `<title>`/`<meta>`: an unterminated metadata block whose
 // last `key: value` line was read as a setext H2.
@@ -116,31 +115,16 @@ describe("canonical heading paths for converted HTML pages", () => {
   });
 });
 
-describe("missingTableMarkdown", () => {
-  const padded = "## Limits\n\n| Header      | Meaning         |\n| ----------- | --------------- |\n| Retry-After | Seconds to wait |\n\n## Later section\n\nText.";
-  const compact = { markdown: "| Header | Meaning |\n| --- | --- |\n| Retry-After | Seconds to wait |\n" };
-
-  it("does not append a table the content already renders with padded cells", () => {
-    expect(missingTableMarkdown(padded, [compact, compact])).toEqual([]);
-  });
-
-  it("appends a genuinely missing table once", () => {
-    const other = { markdown: "| Code | Meaning |\n| --- | --- |\n| 402 | Out of credits |" };
-    expect(missingTableMarkdown(padded, [other, other, compact])).toEqual([other.markdown]);
-  });
-});
-
-describe("kreuzberg_extract.mjs on a minimal HTML docs page", () => {
+describe.runIf(pandocInstalled)("Pandoc (the default HTML extractor) on a minimal HTML docs page", () => {
   const dirs: string[] = [];
   afterAll(async () => {
     await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })));
   });
 
   it("produces chunks whose heading paths follow the page's own headings", async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), "kreuzberg-html-"));
+    const dir = await mkdtemp(path.join(tmpdir(), "pandoc-html-"));
     dirs.push(dir);
     const input = path.join(dir, "page.html");
-    const output = path.join(dir, "page.md");
     await writeFile(input, [
       "<!doctype html><html><head><meta charset=\"utf-8\"><title>Widget API | Example docs</title>",
       "<meta name=\"description\" content=\"Upload from any language.\"></head><body><main>",
@@ -152,9 +136,9 @@ describe("kreuzberg_extract.mjs on a minimal HTML docs page", () => {
       "<h2>Sponsor</h2><p>Thanks to our sponsor.</p><h3>Footnotes</h3><p>Last words.</p>",
       "</main></body></html>",
     ].join(""));
-    await promisify(execFile)(process.execPath, [path.join(scriptsDir, "kreuzberg_extract.mjs"), "--input", input, "--output", output], { timeout: 60_000 });
-    const raw = await readFile(output, "utf8");
-    // The table is rendered inline once and not appended again after the last heading.
+    const runner = new CommandRunner();
+    const raw = (await runner.run(await runner.extractMarkdown(input, "html"))).stdout;
+    // The table is rendered inline once.
     expect(raw.match(/Retry-After/g)).toHaveLength(1);
 
     const { chunks } = chunksFor(raw);

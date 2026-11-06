@@ -30,8 +30,10 @@ split-pages -> classify-route -> route-pages ------------------------> render-im
   S0 probe (free)        per-page PageFeatures: text-layer status, OCR-layer flag, glyph/unmapped ratios, images,
                          drawings, tables, H9 unusual features (forms, JS, attachments, layers, Type3, rotation,
                          encryption, links, annotations). In-process native-pdf probe (the only probe; needs the private binding).
-  S1 trust (free)        accept the native text layer when status is ok, OCR-layer band re-OCR agreement >= 0.4,
-                         math-glyph gate (0.01) and the inset gate allow it (TL1). Never a whole-page model question.
+  S1 trust (free)        accept the native text layer when status is ok, the math-glyph gate (0.01) and the inset
+                         gate allow it (TL1). The OCR-layer band re-OCR agreement check (>= 0.4) is disabled until
+                         it is re-tuned for the PP-OCR recogniser; OCR-layer pages stay unverified. Never a
+                         whole-page model question.
   S1b inset gate         per-image crops of insets covering 2-85% of the page go to the head decision model;
                          text/table/equation kinds get image-scoped assignments (TL2).
   S1c triage             pages the rules do not settle get three content questions (plain_ocr_sufficient,
@@ -68,8 +70,8 @@ Code map:
 ## Targets
 
 The catalog (`routing-targets.ts`) admits targets from the live environment and price list: `native:accept-text-layer`,
-native parsers (kreuzberg, native-pdf text/Markdown), OCR (`ocr:tesseract`; `ocr:pdf-ocr-fill` / `ocr:pdf-ocr` run
-tesseract first and use the native engine's OCR only for scripts tesseract lacks, see below), the local image labeler (Florence-2-small),
+native parsers (native-pdf text/Markdown), OCR (`ocr:ppocr`: PP-OCR through the worker's OCR mode, see
+[OCR](extraction/ocr.md); offered only when the mode can serve it), the local image labeler (Florence-2-small),
 env-gated private OCR VLM endpoints, cheap hosted VLMs (GLM-5.3 Flash, DeepSeek V4.1 Flash, Haiku 5.5, Luna),
 expensive hosted VLMs for charts and math (Gemini 3.5 Flash), Sonnet 5.5 as an escalation-only target, and skip.
 Every hosted call uses the model's lowest verified reasoning effort (`OPENROUTER_LOWEST_REASONING`). Prohibited models
@@ -111,7 +113,7 @@ document extractors, all `free`. Workspace-configured embedding and vision model
 | EmbeddingGemma 300M ONNX | non-free | Gemma terms | ai.google.dev/gemma/terms |
 | LightOnOCR-3-0.8B, MinerU2.5-Pro, olmOCR-2, DeepSeek-OCR-2, PaddleOCR-VL-1.6, Infinity-Parser2, Qwen3-VL, Qwen2-VL-2B | free | Apache-2.0 | HF cards |
 | Ling-3.0-flash-VL, DeepSeek V4.1 Flash, GLM-5.3-Flash (hosted) | free | MIT | HF cards |
-| Florence-2, Kreuzberg, Tesseract, native-pdf | free | MIT / Apache-2.0 / internal | project licences |
+| Florence-2, PP-OCR (RapidOCR, PaddleOCR models), native-pdf | free | MIT / Apache-2.0 / internal | project licences |
 | Gemini, Claude, GPT-6 Luna, Jev, Clef, pplx-decider | proprietary-hosted | vendor API terms | vendor docs |
 
 ## Decision models and the health chain
@@ -133,19 +135,17 @@ fit bases under `scripts/page-router/packs/`; fit scripts are `scripts/page-rout
 `DOCSLURP_PDF_ENGINE=off|shadow|native-pdf`. The adapter (`worker/src/native-pdf/`) wraps an engine behind
 `NativePdfEngine`; the default implementation is a private, pinned Node binding installed from
 `vendor-artifacts/native-pdf/` (sha256 in `manifest.json`, installed by `scripts/install-native-pdf.mjs`). Without the
-binding every mode degrades to kreuzberg. Fallback semantics: every engine error maps to a defined outcome
+binding every mode degrades to poppler-text. Fallback semantics: every engine error maps to a defined outcome
 (`ENGINE_ERROR_CODES`); a locked PDF takes the same path as without the engine; unsupported encryption, unsupported
-features (for example OCR without models), limits and unknown errors fall back to kreuzberg. A dropout guard rejects
+features (for example OCR without models), limits and unknown errors fall back to poppler-text. A dropout guard rejects
 output that lost the text layer (`NATIVE_PDF_DROPOUT`), and layout warnings (multi-column interleave) reroute. The
 adapter and the in-process probe open documents under the engine's `worker` limits profile.
 
-Page OCR policy (`NATIVE_PDF_OCR`, `routing/executors/ocr-policy.ts`): tesseract is primary. The engine's OCR matched
-tesseract on clean rasters and read CJK the image's tesseract languages cannot (1-CER 0.74 vs 0.00 on a dev zh-TW
-page), but lost most text on degraded scans (photocopy 0.02 vs 0.97, phone scan 0.16 vs 0.83), ran about 2x slower
-and held ~400-500 MB in-process per call. So with the default `scripts` the engine runs only when tesseract's output
-is not word-shaped, and serves only when its output is mostly another script; `prefer` runs it first. Every native
-OCR result passes a dropout guard (at least half the page's text layer; sparse output is cross-checked against
-tesseract), and calls are limited to one per process (`NATIVE_PDF_OCR_MAX_CONCURRENT`).
+Page OCR (`ocr:ppocr`) runs only where `DOCSLURP_OCR_MODE` puts it: an extractor plugin's VM provider (`vm`), the
+sandboxed local CLI on customer-owned self-hosted workers (`local`) or a hosted model reading stored image bytes
+(`hosted`). It never runs in the worker process. See [OCR](extraction/ocr.md). The earlier comparison of the native
+engine's OCR against the previous local recogniser does not carry over to PP-OCR; re-measure before routing any page
+OCR to the engine.
 
 Promotion gate (re-run on the pinned binding, evals/native-pdf/README.md): quality and
 reading order are at parity or better (routing suite content -0.02 pt, order +0.20 pt; preservation content +2.4 pt),
@@ -166,7 +166,6 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 | workspace `pipeline.pageRouter` | mode unset, router `baseline` | see `pageRouterConfigSchema` | Opt-in, objective, router kind, decision-model chain, tile size, budget per document, margin floor, verifier value. |
 | `DISABLE_NON_FREE_SOFTWARE` | `false` | true, false, 1, 0 | Opt-out of non-free-licensed models and engines; see "Licence classes" below. A typo reads as false with one warning. |
 | `PAGE_ROUTER_TABLE_GATE` | `off` | off, shadow | Ruled-grid-or-crop table rule in shadow (telemetry only). |
-| `VISION_ROUTING_V2` | `off` | off, on, workspace ids | Legacy vision routing v2 (below) for every run or a comma-separated canary list of workspace ids. Worker only, read once per run at run start. A malformed value reads as off with one warning. |
 | `VISION_PAGE_ATTEMPTS` | `2` | integer 1..4 (clamped) | Vision provider requests per page and purpose per run, retries and fallbacks included (vision run guard, below). |
 | `VISION_REGION_ATTEMPTS_PER_PAGE` | `12` | integer 0..64 (clamped) | Routed region requests per page per run. |
 | `VISION_BREAKER_MIN_FAILURES` | `20` | integer 1..10000 (clamped) | Failed or rejected requests before the rejection breaker can stop vision for the run. |
@@ -180,12 +179,13 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 | `PAGE_ROUTER_MODEL_PRICES_PATH` | shipped list | path | Price list override for estimates. |
 | `DOCSLURP_DECISION_HEALTH_HISTORY` | in memory | path | Multi-day canary history for quarantined decision models. |
 | `DECISION_LOCAL_SIDECAR_CMD` | none | command | Local decision-model sidecar (eval). |
-| `DOCSLURP_PDF_ENGINE` | `off` (production: `shadow`) | off, shadow, native-pdf | Native PDF engine for document extraction (kreuzberg fallback). |
+| `DOCSLURP_PDF_ENGINE` | `off` (production: `shadow`) | off, shadow, native-pdf | Native PDF engine shadow runs; when installed the engine is the first PDF extractor (poppler-text fallback). |
 | `DOCSLURP_NATIVE_PDF_INSTALLED` | unset | 1 | Set in images that ship the binding so `/extractors` lists native-pdf. |
 | `DOCSLURP_NATIVE_PDF_MODULE`, `DOCSLURP_NATIVE_PDF_DIR` | vendor dir | path | Binding discovery overrides (dev, bench). |
-| `NATIVE_PDF_OCR_MODEL_DIR` | unset | path | OCR models for the engine's OCR fill; unset means OCR targets use tesseract. |
+| `NATIVE_PDF_OCR_MODEL_DIR` | unset | path | OCR models for the engine's own OCR fill. Page OCR targets do not use it; they follow `DOCSLURP_OCR_MODE`. |
 | `NATIVE_PDF_OCR_MAX_CONCURRENT`, `NATIVE_PDF_FONTS_DIR` | engine default | number, path | OCR concurrency and fallback fonts for the engine. |
-| `NATIVE_PDF_OCR` | `scripts` | off, scripts, prefer | When page OCR may come from the native engine (tesseract otherwise). |
+| `NATIVE_PDF_OCR` | `scripts` | off, scripts, prefer | When the native engine may OCR inside its own extraction. Page OCR follows `DOCSLURP_OCR_MODE`. |
+| `DOCSLURP_OCR_MODE` | `off` (production: `vm`) | vm, local, hosted, off | Where page OCR runs; see [OCR](extraction/ocr.md). |
 | `PDF_RASTER_ENGINE` | `pdftoppm` | pdftoppm, native-pdf | Page and crop raster engine (native falls back to pdftoppm/sharp). Stays pdftoppm: native renders add 670-810 MB per 8-slot worker process, over the 512 MB off-heap budget, for ~2.4x throughput. |
 | `PDF_RASTER_CONCURRENCY` | min(4, cores) | 1-32 | Native render lanes per document render. |
 | `PDF_PDFTOPPM_CONCURRENCY` | 2 | 1-4 | pdftoppm lanes per selected-page render (each lane is a sandboxed process holding a full-page bitmap). Independent of `PDF_RASTER_CONCURRENCY`. |
@@ -196,34 +196,18 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 
 `.env.example` lists every flag above with its default.
 
-### Legacy vision routing v2
+### Legacy vision routing: evidence routing (v2) and v1
 
-`VISION_ROUTING_V2` gates the fixes to the legacy (non-router) vision path so production can
-enable them for one workspace before everyone. The worker reads it once, when the run starts
-(`startRun`), and persists the resolved version as the run artifact `run:vision-routing-version`
-(`v1` or `v2`). Extract-markdown, classify-route, vision fan-out and page tasks read that artifact,
-so workers with different environments, retries and rehydrated runs route a run the same way
-(`worker/src/lib/vision-routing-v2.ts`). The pure routing functions take `{ routingV2 }`; none
-of them read the environment. Every comma-separated entry must be a valid workspace id: `ws-a,,`,
-`,ws-a` and `ws-a,` are malformed and read as off with one warning.
+New runs read a page with a vision/OCR model only on facts about the PDF page (native words from the text layer, significant
+non-repeated images, text-layer quality, drawn content): see [page-routing-evidence.md](page-routing-evidence.md) and
+[page-text-layer-quality.md](page-text-layer-quality.md). The worker pins the version when the run starts (`startRun`) as the
+run artifact `run:vision-routing-version` (`v2` for every new run). Extract-markdown, classify-route, vision fan-out and page
+tasks read that artifact, so workers of different builds, retries and rehydrated runs route a run the same way
+(`worker/src/lib/vision-routing-v2.ts`). The pure routing functions take `{ routingV2 }`; none of them read the environment.
+There is no environment switch (`VISION_ROUTING_V2` was removed). `v1`, the keyword and character-class routing, remains only
+for runs already in flight and for states built without a pin; delete it once those runs drain.
 
-Gated (v2 only):
-
-- Page triage counts native words from page facts' shared `pdftotext` run, so an OCR'd scan stays
-  sparse (`extract-markdown` passes `textLayerPages`; when `pdftotext` failed or its pages do not
-  line up, triage keeps the v1 count); uploaded images get full-page raster evidence
-  (`imageFilePageEvidence`).
-- Document labels use whole-word terms and need two distinct body terms, read from the first
-  256 KB of text (`hasDistinctTerms` stops at the answer, so memory does not grow with the upload).
-- Page routes: the numeric-row table cue, garbled-text detection, Unicode-math formula signals
-  (each scanning the first 64 KB of a page), and keeping structured routes (table, form, formula,
-  figure) for OCR'd pages.
-- A page without text layer or images whose OCR text has words counts as drawn content.
-- `selectLegacyVisionPages` also admits formula pages and lets the text route decide when raster
-  evidence does not authorize OCR; v1 lets any page-evidence decision decide alone.
-
-With the flag off, routing is v1 except for these always-on changes, so it does **not** reproduce
-`origin/main` exactly:
+Both versions share these changes, which are not gated:
 
 - A page whose vision output is rejected (degenerate, refusal, truncated) no longer fails the
   document (`shouldFailOpenVisionError`). It keeps its native or OCR text when that text is usable
@@ -450,7 +434,7 @@ Outside the guard: the decision-model verifier (off unless a workspace values qu
 0.50 USD per unit; stops at the run cost cap), page-image embeddings and media frame description,
 which are not page transcription calls and keep their own bounds.
 
-Telemetry: `classify-route` and `vision-extract` record `routingVersion` (`v1` or `v2`) in their
+Telemetry: `classify-route` and `vision-extract` record `routingVersion` (`v1` or `v3`; `v3` is evidence routing, and a `v2` pin from the previous release's canary routes as `v1`) in their
 stage stats, the vision manifest and the `vision-text-density-score`, `vision-fail-open` and
 `vision-attempt-failure` performance metadata. Per document, vision-extract logs
 `[vision-rejections] org=<id> run=<id> document=<id> rejected=<n> attempted=<n> rate=<r>` and records
@@ -499,7 +483,7 @@ Production (`fly.app.toml`, `fly.worker.toml`) runs both features in shadow: `PA
 `DOCSLURP_PDF_ENGINE=shadow`, worker image built with `DOCSLURP_NATIVE_PDF=1`, app with `DOCSLURP_NATIVE_PDF_INSTALLED=1`
 (set it only while the deployed worker image ships the binding). Shadow records decisions and per-page agreement/timing
 (`native-pdf-shadow` in `performance_log`, the route plan artifact) and never changes extraction output. Native OCR models
-and CJK fonts stay off; tesseract is the OCR primary.
+and CJK fonts stay off; page OCR runs in the VM provider (`DOCSLURP_OCR_MODE=vm`).
 
 Workspaces need no setup: the app stamps `pageRouter.mode=shadow` on a new run when the workspace left it unset
 (`withPlatformPageRouterMode`), so the stage plan every service compiles includes `route-pages`. A workspace that sets

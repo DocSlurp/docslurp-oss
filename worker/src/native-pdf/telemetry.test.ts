@@ -66,10 +66,10 @@ describe("reportExtractionDecision", () => {
   const decision = {
     documentId: "doc-1",
     format: "pdf",
-    extractor: "kreuzberg",
-    strategy: "kreuzberg-solo",
-    extractorOrder: ["kreuzberg", "native-pdf", "poppler-text"],
-    attempted: ["kreuzberg"],
+    extractor: "poppler-text",
+    strategy: "poppler-text-solo",
+    extractorOrder: ["poppler-text"],
+    attempted: ["poppler-text"],
     unavailable: [],
   };
 
@@ -78,7 +78,7 @@ describe("reportExtractionDecision", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     reportExtractionDecision({ ...decision, nativePdf: baseStats() });
     expect(warn).not.toHaveBeenCalled();
-    expect(log.mock.calls[0]![0]).toMatch(/extractor=kreuzberg .*nativePdf=loaded@0\.13\.0\+abc mode=shadow nativeExtraction=not-planned shadow=ran/);
+    expect(log.mock.calls[0]![0]).toMatch(/extractor=poppler-text .*nativePdf=loaded@0\.13\.0\+abc mode=shadow nativeExtraction=not-planned shadow=ran/);
   });
 
   it("warns when native-pdf was expected but neither served nor shadowed the document", () => {
@@ -92,7 +92,7 @@ describe("reportExtractionDecision", () => {
 });
 
 describe("logNativePdfFallback", () => {
-  it("names the next step instead of assuming kreuzberg", () => {
+  it("names the next step instead of assuming the next extractor", () => {
     const error = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     logNativePdfFallback("extract", new NativePdfError("NATIVE_PDF_EMPTY", "no text"));
@@ -110,8 +110,8 @@ describe("untrusted error text", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     reportExtractionDecision({
-      documentId: "doc-1", format: "pdf", extractor: "kreuzberg", strategy: "kreuzberg-solo",
-      extractorOrder: ["kreuzberg"], attempted: ["kreuzberg"], unavailable: [],
+      documentId: "doc-1", format: "pdf", extractor: "poppler-text", strategy: "poppler-text-solo",
+      extractorOrder: ["poppler-text"], attempted: ["poppler-text"], unavailable: [],
       nativePdf: baseStats({ shadow: { status: "failed", reason: hostile, agreement: null, nativeMs: null } }),
     });
     expect(String(warn.mock.calls[0]![0])).not.toMatch(/[\n\r\u001b\u2028]/);
@@ -127,7 +127,7 @@ describe("untrusted error text", () => {
   it("never reaches end users through public diagnostics", async () => {
     const { publicDiagnostics } = await import("@docslurp/shared");
     const stats = {
-      strategy: "kreuzberg-solo",
+      strategy: "poppler-text-solo",
       error: hostile,
       nativePdf: baseStats({ shadow: { status: "failed", reason: hostile, agreement: null, nativeMs: null } }),
     };
@@ -137,7 +137,7 @@ describe("untrusted error text", () => {
   it("telemetry never throws into the pipeline", () => {
     vi.spyOn(console, "log").mockImplementation(() => { throw new Error("stdout closed"); });
     expect(() => reportExtractionDecision({
-      documentId: "doc-1", format: "pdf", extractor: "kreuzberg", strategy: "kreuzberg-solo",
+      documentId: "doc-1", format: "pdf", extractor: "poppler-text", strategy: "poppler-text-solo",
       extractorOrder: [], attempted: [], unavailable: [], nativePdf: baseStats(),
     })).not.toThrow();
   });
@@ -164,8 +164,8 @@ describe("engine requirement with the poppler subset", () => {
 
 describe("native-pdf participation", () => {
   const decision = {
-    documentId: "doc-2", format: "pdf", extractor: "kreuzberg", strategy: "kreuzberg-solo",
-    extractorOrder: ["native-pdf", "kreuzberg"], attempted: ["native-pdf", "kreuzberg"], unavailable: [],
+    documentId: "doc-2", format: "pdf", extractor: "poppler-text", strategy: "poppler-text-solo",
+    extractorOrder: ["native-pdf", "poppler-text"], attempted: ["native-pdf", "poppler-text"], unavailable: [],
   };
 
   it("does not warn when native-pdf ran as a candidate and lost the vote", () => {

@@ -1,6 +1,6 @@
 import type Stripe from "stripe";
 
-import { CREDIT_PACK_CENTS, MAX_TOPUP_CENTS, MIN_TOPUP_CENTS, PRICE_CARD } from "@docslurp/shared";
+import { billingPrices, creditPackCents, MAX_TOPUP_CENTS, MIN_TOPUP_CENTS } from "@docslurp/shared";
 
 import { appUrl, getStripe } from "./stripe-client.js";
 
@@ -22,7 +22,7 @@ export const CATALOG_IMPORT_API_VERSION = "2026-09-30.preview";
 /** Software as a service, business use. Credits are SaaS access. */
 const SAAS_TAX_CODE = "txcd_10103001";
 
-export { CREDIT_PACK_CENTS };
+export { creditPackCents };
 
 export const CATALOG_FEED_COLUMNS = [
   "id", "title", "description", "link", "brand", "mpn", "image_link", "product_category",
@@ -68,15 +68,17 @@ export function buildCatalogFeedRows(options: CatalogFeedOptions = {}): CatalogF
     availability: "in_stock", inventory_not_tracked: "true", stripe_product_tax_code: SAAS_TAX_CODE,
     tax_behavior: "exclusive", disable_checkout: "true",
   };
-  const packs = CREDIT_PACK_CENTS.map((cents): CatalogFeedRow => {
+  // The pricing provider's one-line customer price summary, when it publishes one.
+  const summary = (billingPrices() as Record<string, unknown>).summary;
+  const priceLine = typeof summary === "string" && summary.trim() ? `${summary.trim()} ` : "";
+  const packs = creditPackCents().map((cents): CatalogFeedRow => {
     if (cents < MIN_TOPUP_CENTS || cents > MAX_TOPUP_CENTS) throw new Error(`Credit pack ${cents} is outside the top-up range`);
     const id = `docslurp-credits-${cents}`;
     return {
       ...shared, id, mpn: id,
       title: `DocSlurp ${credits(cents)} prepaid credits`,
       description: `${credits(cents)} prepaid DocSlurp credits for document ingestion, search and chat (1 credit = $0.01). `
-        + `Pay per use: ${PRICE_CARD.fastPer1kPages} credits per 1,000 text pages, ${PRICE_CARD.richPer1kPages} per 1,000 scanned or image pages, `
-        + `${PRICE_CARD.storageGbMonth} per GB-month stored, ${PRICE_CARD.searchPer1k} per 1,000 searches, from ${PRICE_CARD.chatAnswerTiers.standard} per chat answer. `
+        + priceLine
         + "Credits are added to your organization's prepaid balance and do not expire.",
       item_group_id: "docslurp-credits", item_group_title: "DocSlurp prepaid credits",
       custom_variant_option_name_1: "Credits", custom_variant_option_value_1: credits(cents),

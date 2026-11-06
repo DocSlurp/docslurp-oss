@@ -1,6 +1,32 @@
 # Extraction Adapter Feature Matrix
 
-> **PyMuPDF replaced (2026-10-15).** The former `pymupdf-text`, `pymupdf4llm`, `pymupdf-ocr` and `pymupdf-regions` columns are now the private in-process `native-pdf` engine (MIT, optional; the public tree falls back to kreuzberg and Poppler). Ratings carried over from the PyMuPDF columns were re-checked for markdown, tables, reading order and speed in evals/native-pdf-vs-pymupdf-2026-10-15.md; the rest are unchanged estimates.
+> **PyMuPDF replaced (2026-10-15).** The former `pymupdf-text`, `pymupdf4llm`, `pymupdf-ocr` and `pymupdf-regions` columns are now the private in-process `native-pdf` engine (MIT, optional; the public tree falls back to Poppler). Ratings carried over from the PyMuPDF columns were re-checked for markdown, tables, reading order and speed in evals/native-pdf-vs-pymupdf-2026-10-15.md; the rest are unchanged estimates.
+
+> **Kreuzberg and LiteParse were removed (2026-11-05).** Both native addons statically linked Tesseract and Leptonica
+> into the worker process and no OCR-free build existed ([OCR, Tesseract](extraction/ocr.md#tesseract)). The `kreuzberg`
+> columns and rows below are historical; stored settings naming either id are dropped at parse time (an emptied order
+> uses the deployment default). The current routing is the table below.
+
+## Extractors per format
+
+The default order per format (`worker/src/extractors/registry.ts`). Every extractor below runs as a sandboxed
+subprocess (the parser sandbox, `docs/self-host/sandbox-providers.md`) or in the VM, except `json`, which is plain
+in-process JSON parsing, and the optional `native-pdf` binding, which runs in-process where a deployment installs it. No
+extractor links an OCR engine.
+
+| Format | Default order | Where it parses | Notes |
+| --- | --- | --- | --- |
+| PDF, VM deployment (`DOCSLURP_PDF_MODE=vm`, `DOCSLURP_PDF_EXTRACTOR=vm-pdf`, `DOCSLURP_VM_PDF_INSTALLED=1` or `DOCSLURP_SERVICE_PROFILE=service`) | `vm-pdf` (Doppler) | One offline VM per document | Host PDF extractors are refused; without a provider the worker does not start. Production ships this, configured statically. |
+| PDF, customer-owned local mode (`DOCSLURP_PDF_MODE=local`, `DOCSLURP_SERVICE_PROFILE=self-hosted`) | `doppler-md`, then `native-pdf` (when installed) and `poppler-text` only when Doppler failed on the file | Sandboxed `pdftomarkdown` (Doppler) on the worker host | Host parsing ([Docker Compose](self-host/docker-compose.md#pdfs)). Headings, pipe tables and form-feed pages. A fallback shows as a per-file warning in the ingest report. |
+| PDF, neither | none | | Refused: `PDF extraction is not configured`; the worker logs `[pdf] mode=off` at startup. |
+| Word `.docx` | `pandoc` | Sandboxed `office_markdown.py` running `pandoc --sandbox -f docx` | Appends headers, footers, comments and link targets (`office_context.py`). |
+| OpenDocument `.odt`, RTF | `pandoc` | Sandboxed `pandoc --sandbox` | Pandoc 3.1's ODT reader drops a table's header row; its RTF reader can drop the letter after an opening curly quote. |
+| PowerPoint `.pptx` | `pptx` | Sandboxed `office_markdown.py` (python-pptx) | One form-feed page per slide: title heading, bullets, tables, notes. |
+| Excel `.xlsx` | `xlsx` | Sandboxed `office_markdown.py` (openpyxl, read-only, cached values) | One table per sheet, then formulas and source context. |
+| EPUB, HTML, Markdown, plain text, CSV/TSV, LaTeX | `pandoc` | Sandboxed `pandoc --sandbox` with the sniffed format's reader | `--sandbox` blocks file and network reads (LaTeX `\input`, remote images). |
+| JSON / JSONL | `json` | In-process JSON parsing | No native code. |
+| Images | `ocr` | The configured OCR boundary (`DOCSLURP_OCR_MODE`; a VM in production) | PP-OCR only. |
+| Legacy `.doc`, `.ppt`, `.xls`; password-protected Office files | none | Not parsed | Fails as `unsupported format` (ingest report `unsupported_format`, not retryable). |
 
 > Living reference for choosing the right extraction tool per document type and feature requirement. Update this when adding new adapters or benchmarks.
 >
@@ -12,7 +38,8 @@
 |------|----------|-----------|----------------|---------|
 | **native-pdf-text** | Fast bulk text, large files (>100 pg; >2000 pages fall back to kreuzberg) | Tables, math, images, layout | Fastest | **128 MB** |
 | **native-pdf** | Born-digital PDFs → markdown with pipe tables, links, reading-order repair | Scanned pages without OCR models, math | Fast | **256 MB** |
-| **native-pdf-ocr** | Scanned pages when the OCR models are shipped (`DOCSLURP_NATIVE_PDF_OCR_MODELS=1`), else tesseract | Born-digital (wastes time), poor handwriting | Medium | **512 MB** |
+| **native-pdf-ocr** | Scanned pages when the OCR models are shipped (`DOCSLURP_NATIVE_PDF_OCR_MODELS=1`) | Born-digital (wastes time), poor handwriting | Medium | **512 MB** |
+| **ppocr** (page OCR, [OCR](extraction/ocr.md)) | Scanned pages and images: PP-OCRv6 small plus PP-OCRv5 script recognisers, in the VM provider or (self-hosted) the local sandbox | Born-digital (wastes time), handwriting | Medium | **~1.4-1.7 GB** per call at the 2000 px cap |
 | **native-pdf-regions** | Layout analysis, header/footer/sidebar/body bboxes | Content extraction alone | Fast | **256 MB** |
 | **docling** | Tables, figures, structured academic docs | Very large files (>50 MB), speed-critical | Medium | **2 GB** |
 | **docling-vlm** | Math, formulas, complex figures, mixed content | Cost-sensitive, batch jobs, simple text | Slow | **4 GB** |
@@ -165,10 +192,10 @@
 | Priority | Tool | Role |
 |----------|------|------|
 | 1 | **vision-runtime** | Primary: VLM page analysis for handwriting/degraded |
-| 2 | **native-pdf-ocr** | Fallback: tesseract OCR on rendered pages |
+| 2 | **ppocr** | Fallback: PP-OCR on rendered pages, wherever `DOCSLURP_OCR_MODE` runs it |
 | 3 | **ImageExtractor** | Extract embedded scan images for re-OCR |
 
-**Routing rule**: `handwriting-or-degraded` → `vision` primary, `native-pdf-ocr` fallback
+**Routing rule**: `handwriting-or-degraded` → `vision` primary, `ppocr` fallback
 
 ---
 
@@ -245,13 +272,13 @@
 | Tables split across page breaks | native-pdf, kreuzberg, marker | Use `TableExtractor` + heuristic stitching |
 | LaTeX ligatures (fi, fl, ff) | native-pdf-text, native-pdf | Use `docling-vlm` or post-process normalization |
 | Inline images with captions | All text extractors | Use `ImageExtractor` + `vision` for captioning |
-| Handwriting mixed with print | native-pdf-ocr, tesseract | Use `vision-runtime` with handwriting prompt |
+| Handwriting mixed with print | native-pdf-ocr, ppocr | Use `vision-runtime` with handwriting prompt |
 | Watermarks / stamps | All extractors | `native-pdf-regions` helps identify non-body text |
 | QR codes | All extractors | Not yet supported; needs dedicated detector |
 | Vector diagrams (flowcharts) | All extractors | Not yet supported; needs SVG converter |
 | Nested tables | unstructured, docling | Flatten or use `TableExtractor` recursive parser |
 | Multi-page table continuation | All | `TableExtractor` needs multi-page stitching logic |
-| OCR on rotated pages | tesseract, native-pdf-ocr | Pre-deskew with `native-pdf-regions` rotation detection |
+| OCR on rotated pages | ppocr, native-pdf-ocr | Pre-deskew with `native-pdf-regions` rotation detection |
 
 ---
 

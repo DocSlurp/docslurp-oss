@@ -1,33 +1,21 @@
+import { FILE_FORMATS } from "@docslurp/shared";
+
 type DocumentFileMetadata = {
   mimeType?: string | null;
 };
 
+/**
+ * The temp-file extension for each MIME type: derived from FILE_FORMATS (every accepted format, canonical type and
+ * aliases), so a format intake accepts always reaches its reader with its extension (ODT was missing: every ODT upload
+ * failed as "pandoc unavailable", validation N4). The extras are container types that are not uploads by themselves.
+ */
 const trustedExtensionsByMimeType: Record<string, string> = {
-  "application/epub+zip": ".epub",
-  "application/json": ".json",
-  "application/x-ndjson": ".jsonl",
-  "application/msword": ".doc",
-  "application/pdf": ".pdf",
-  "application/rtf": ".rtf",
-  "application/vnd.ms-excel": ".xls",
-  "application/vnd.ms-powerpoint": ".ppt",
-  "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
   "application/xml": ".xml",
   "application/zip": ".zip",
   "image/bmp": ".bmp",
   "image/gif": ".gif",
-  "image/jpeg": ".jpg",
-  "image/png": ".png",
-  "image/tiff": ".tiff",
-  "image/webp": ".webp",
-  "text/csv": ".csv",
-  "text/html": ".html",
-  "text/markdown": ".md",
-  "text/plain": ".txt",
-  "text/tab-separated-values": ".tsv",
   "text/xml": ".xml",
+  ...Object.fromEntries(FILE_FORMATS.flatMap((spec) => [spec.mimeType, ...(spec.aliases ?? [])].map((mime) => [mime, spec.extensions[0]!]))),
 };
 
 export function trustedTempFileExtensionForDocument(

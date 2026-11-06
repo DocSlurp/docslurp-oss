@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_OPENROUTER_VISION_MODEL, defaultPipelineFeatures, visionModelCatalogById, ingestReportSchema, mergePipelineFeatures, requestsIngestReport, ingestReportFocusPages, type PipelineFeatures } from "@docslurp/shared";
+import { DEFAULT_OPENROUTER_VISION_MODEL, defaultPipelineFeatures, visionModelCatalogById, ingestReportSchema, mergePipelineFeatures, requestsIngestReport, ingestReportFocusPages, partialExtractionMessage, type PipelineFeatures } from "@docslurp/shared";
 
 vi.mock("../db.js", () => ({ sql: vi.fn() }));
 vi.mock("./usage-attribution.js", () => ({ workspaceRunsUsageCost: vi.fn(async () => ({ costCents: 0, billedCostCents: 0, computeEstimated: false })) }));
@@ -286,13 +286,79 @@ describe("ingest report: failed files", () => {
     ],
   });
 
-  it("surfaces the real failure: reason, stage and a sanitized detail with no paths", () => {
+  it("surfaces the real failure: reason, stage and reviewed copy, never the stored error's text", () => {
     const report = failedImage();
     expect(report.failures).toMatchObject({ total: 1, byReason: [{ reason: "ocr_unavailable", documents: 1 }] });
     const [failure] = report.failures.examples;
     expect(failure).toMatchObject({ documentId: "shot", filename: "shot.png", stage: "extract-markdown", reason: "ocr_unavailable", retryable: false });
-    expect(failure?.detail).toContain("Error opening data file <path>");
-    expect(JSON.stringify(report)).not.toMatch(/node_modules|\/app\//);
+    expect(failure?.detail).toBeNull();
+    expect(JSON.stringify(report)).not.toMatch(/node_modules|\/app\/|Error opening data file/);
+  });
+
+  it.each([
+    ["quoted JSON", 'provider 502: {"password":"hunter2","token":"short-secret"}', ["hunter2", "short-secret"]],
+    ["a query string", "upstream request https://api.example.com/v1/read?key=abc123&secret=s3cr3t failed with 500", ["abc123", "s3cr3t", "api.example.com"]],
+    ["headers", "upstream 401: Authorization: Bearer abcdefghijklmnop; X-Api-Key: k-12345; Cookie: session=xyz", ["abcdefghijklmnop", "k-12345", "session=xyz"]],
+  ])("an upstream error with credentials in %s reaches no part of the report or its chat summary", (_form, error, secrets) => {
+    const report = build({
+      documents: [doc("leak", { filename: "leak.pdf", mimeType: "application/pdf", status: "failed", pageCount: 2 })],
+      stages: [{ documentId: "leak", stage: "extract-markdown", status: "failed", skipped: false, reason: null, selectedPages: null, pages: null, costCents: null, tablePages: null, durationSeconds: null, error }],
+    });
+    const [failure] = report.failures.examples;
+    // The safe public reason and stage, reviewed copy, and no allowlisted phrase applies to these errors.
+    expect(failure).toMatchObject({ documentId: "leak", stage: "extract-markdown", reason: "provider_failed", detail: null });
+    expect(failure?.message).toBeTruthy();
+    const visible = `${JSON.stringify(report)}\n${summarizeIngestReport(report)}`;
+    for (const secret of [...secrets, error]) expect(visible).not.toContain(secret);
+  });
+
+  it("an allowlisted cause shows its reviewed phrase, never the stored text around it", () => {
+    const report = build({
+      documents: [doc("locked", { filename: "locked.pdf", mimeType: "application/pdf", status: "failed", pageCount: 2 })],
+      stages: [{ documentId: "locked", stage: "extract-markdown", status: "failed", skipped: false, reason: null, selectedPages: null, pages: null, costCents: null, tablePages: null, durationSeconds: null,
+        error: 'PDF is encrypted; owner said {"password":"hunter2"} at /srv/app/x.js' }],
+    });
+    const [failure] = report.failures.examples;
+    expect(failure).toMatchObject({ stage: "extract-markdown", reason: "unreadable_file", detail: "The file is password-protected or encrypted." });
+    const visible = `${JSON.stringify(report)}\n${summarizeIngestReport(report)}`;
+    expect(visible).not.toMatch(/hunter2|\/srv\/app/);
+    expect(summarizeIngestReport(report)).toContain("The file is password-protected or encrypted.");
+  });
+
+  it("lists files with dense pages (possible hidden or stuffed text) and says so in the summary", () => {
+    const report = build({
+      documents: [doc("stuffed", { filename: "stuffed.pdf", mimeType: "application/pdf", status: "completed", pageCount: 2 }), doc("plain", { filename: "plain.pdf", mimeType: "application/pdf", status: "completed", pageCount: 2 })],
+      stages: [
+        { documentId: "stuffed", stage: "extract-markdown", status: "completed", skipped: false, reason: null, selectedPages: null, pages: 2, costCents: null, tablePages: null, durationSeconds: null, pageEquivalents: 52, densePages: [1], densePageCount: 1 },
+        { documentId: "plain", stage: "extract-markdown", status: "completed", skipped: false, reason: null, selectedPages: null, pages: 2, costCents: null, tablePages: null, durationSeconds: null, pageEquivalents: 2, densePages: [], densePageCount: 0 },
+      ],
+    });
+    expect(report.denseText).toEqual({ total: 1, examples: [{ documentId: "stuffed", filename: "stuffed.pdf", densePages: [1], densePageCount: 1, pageEquivalents: 52 }] });
+    expect(summarizeIngestReport(report)).toMatch(/1 file has pages holding several pages of text each .*stuffed\.pdf \(1 page\)/);
+  });
+
+  it("flags a PDF extracted short of its page tree (pdf-partially-extracted, N of M), loudly, with no tool text", () => {
+    const report = build({
+      documents: [doc("partial", { filename: "partial.pdf", mimeType: "application/pdf", status: "completed", pageCount: 1 }), doc("whole", { filename: "whole.pdf", mimeType: "application/pdf", status: "completed", pageCount: 3 })],
+      stages: [
+        { documentId: "partial", stage: "extract-markdown", status: "completed", skipped: false, reason: null, selectedPages: null, pages: 1, costCents: null, tablePages: null, durationSeconds: null, pdfPagesMeasured: 50, pdfPagesProcessed: 1, pdfPagesMismatch: "processed-below-measured" },
+        { documentId: "whole", stage: "extract-markdown", status: "completed", skipped: false, reason: null, selectedPages: null, pages: 3, costCents: null, tablePages: null, durationSeconds: null, pdfPagesMeasured: 3, pdfPagesProcessed: 3, pdfPagesMismatch: "none" },
+      ],
+    });
+    expect(report.partialExtraction).toEqual({ total: 1, examples: [{ documentId: "partial", filename: "partial.pdf", reason: "pdf-partially-extracted", pagesExtracted: 1, pagesInFile: 50,
+      message: partialExtractionMessage(1, 50) }] });
+    expect(report.partialExtraction.examples[0]!.message).toContain("Only 1 of this PDF's 50 pages could be extracted");
+    expect(summarizeIngestReport(report)).toMatch(/\*\*1 PDF was only partly extracted\*\*.*partial\.pdf \(1 of 50 pages\)/);
+  });
+
+  it("classifies a PDF its reader rejects after the walk as pdf-structure-rejected, not retryable, with reviewed copy", () => {
+    const report = build({
+      documents: [doc("rejected", { filename: "rejected.pdf", mimeType: "application/pdf", status: "failed", pageCount: 3 })],
+      stages: [{ documentId: "rejected", stage: "format-detect", status: "failed", skipped: false, reason: null, selectedPages: null, pages: null, costCents: null, tablePages: null, durationSeconds: null,
+        error: "PdfPageCountError: PDF structure rejected: the page tree was walked but the PDF reader sees no pages" }],
+    });
+    expect(report.failures.examples[0]).toMatchObject({ reason: "pdf-structure-rejected", retryable: false });
+    expect(report.failures.examples[0]!.message).toContain("Nothing was charged");
   });
 
   it("does not blame page triage or recommend vision for a file that crashed in extraction", () => {
@@ -611,5 +677,46 @@ describe("ingest report: run-scoped file items", () => {
     expect(base("run-x", [doc("a")]).run).toBeNull();
     const running = base("run-1", [doc("a")], { runs: [{ id: "run-1", status: "processing", pagesProcessed: 0, durationMs: 5000 }] });
     expect(running.run).toEqual({ id: "run-1", status: "processing", durationMs: null });
+  });
+});
+
+describe("ingest report: extractor fallbacks", () => {
+  const stage = (documentId: string, extractorFallback: unknown) => ({
+    documentId, stage: "extract-markdown", status: "completed", skipped: false, reason: null, selectedPages: null, pages: null,
+    costCents: null, tablePages: null, durationSeconds: null, extractorFallback,
+  });
+
+  it("warns per file when doppler-md crashed and poppler-text served it, with public codes and no error text", () => {
+    const report = build({
+      documents: [doc("annual"), doc("plain")],
+      stages: [
+        stage("annual", { wanted: "doppler-md", served: "poppler-text", reasons: [{ extractor: "doppler-md", reason: "failed" }] }),
+        stage("plain", null),
+      ],
+    });
+    expect(report.extractionWarnings.total).toBe(1);
+    expect(report.extractionWarnings.examples[0]).toMatchObject({
+      documentId: "annual", filename: "annual.pdf", wantedExtractor: "doppler-md", servedExtractor: "poppler-text",
+      reasons: [{ extractor: "doppler-md", reason: "failed" }],
+    });
+    expect(report.extractionWarnings.examples[0]!.message).toContain("doppler-md extractor failed on this file, so poppler-text read this file instead");
+  });
+
+  it("ignores malformed or raw stats instead of echoing them", () => {
+    const report = build({
+      documents: [doc("a"), doc("b"), doc("c")],
+      stages: [
+        stage("a", { wanted: "doppler-md", served: "poppler-text", reasons: [{ extractor: "doppler-md", reason: "Error: segfault at /usr/local/bin/pdftomarkdown" }] }),
+        stage("b", { wanted: "/usr/local/bin/x", served: "poppler-text", reasons: [{ extractor: "/usr/local/bin/x", reason: "failed" }] }),
+        stage("c", "doppler-md failed: Error: spawn pdftomarkdown ENOENT"),
+      ],
+    });
+    expect(report.extractionWarnings).toEqual({ total: 0, examples: [] });
+    expect(JSON.stringify(report)).not.toMatch(/segfault|ENOENT|\/usr\/local/);
+  });
+
+  it("parses stored reports without the field as none", () => {
+    const { extractionWarnings: _omitted, ...stored } = build({ documents: [doc("x")] });
+    expect(ingestReportSchema.parse(stored).extractionWarnings).toEqual({ total: 0, examples: [] });
   });
 });

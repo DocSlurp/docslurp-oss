@@ -44,7 +44,7 @@ import { buildRunProgressSnapshot, withRunCosts } from "./runs.js";
 import {
   canEditWorkspace,
   canManageWorkspace,
-  ensurePersonalOrganization,
+  resolveDefaultOrganization,
   getWorkspaceAccess,
   listAccessibleWorkspaceIds,
 } from "./organizations.js";
@@ -353,7 +353,7 @@ function mapWorkspaceRun(row: WorkspaceRunRow): WorkspaceRun {
 async function assertWorkspaceAccess(workspaceId: string, userId: string) {
   const access = await getWorkspaceAccess(workspaceId, userId);
   if (!access) {
-    throw new Error("Workspace not found");
+    throw new WorkspaceAccessError(404, "workspace_not_found", "Workspace not found");
   }
   return access;
 }
@@ -379,7 +379,7 @@ export async function createWorkspace(input: CreateWorkspaceInput): Promise<Work
         where om.org_id = ${parsed.orgId} and om.user_id = ${parsed.userId}
         limit 1
       `.then((rows) => rows[0] ?? null)
-    : await ensurePersonalOrganization(parsed.userId);
+    : await resolveDefaultOrganization(parsed.userId);
 
   if (!organization) {
     throw new Error("Organization not found");
@@ -515,6 +515,8 @@ export interface WorkspaceInputScope {
  * `workspace: "Legal Contracts"` pointing at the workspace an upload created
  * for it. Workspaces outside the caller's access, the scope's organization or
  * the key allowlist are never returned, so the answer never reveals them.
+ * Without `scope.orgId`, a slug or name that matches usable workspaces in more
+ * than one organization throws a 409 `workspace_ambiguous` rather than choosing.
  */
 export async function findWorkspaceForInput(
   ref: Extract<WorkspaceInputRef, { kind: "id" } | { kind: "slug" }>,
@@ -533,10 +535,9 @@ export async function findWorkspaceForInput(
   const [bySlug] = await sql<{ workspace_id: string }[]>`
     select workspace_id from workspace_slugs where slug = ${ref.slug}
   `;
-  if (bySlug) {
-    const workspace = await usable(bySlug.workspace_id);
-    if (workspace) return workspace;
-  }
+  const bySlugUsable = bySlug ? await usable(bySlug.workspace_id) : null;
+  // With an organization named, the first usable match inside it wins (slug owner, then oldest name).
+  if (bySlugUsable && scope.orgId) return bySlugUsable;
 
   const named = await sql<{ id: string; name: string }[]>`
     select w.id, w.name
@@ -546,12 +547,20 @@ export async function findWorkspaceForInput(
       and w.id <> ${bySlug?.workspace_id ?? ""}
     order by (w.archived_at is not null), w.created_at, w.id
   `;
+  const matches: { id: string; orgId: string }[] = bySlugUsable ? [bySlugUsable] : [];
   for (const row of named) {
     if (slugifyWorkspaceName(row.name) !== ref.slug) continue;
     const workspace = await usable(row.id);
-    if (workspace) return workspace;
+    if (!workspace) continue;
+    matches.push(workspace);
+    if (scope.orgId) break;
   }
-  return null;
+  // Without an organization the name may exist in several of the caller's organizations. Never
+  // pick one by age or slug ownership: that would put data in whichever tenant happened to be first.
+  if (!scope.orgId && new Set(matches.map((match) => match.orgId)).size > 1) {
+    throw new WorkspaceAccessError(409, "workspace_ambiguous", `More than one of your organizations has a workspace named "${ref.slug}"`, { workspaceSlug: ref.slug });
+  }
+  return matches[0] ?? null;
 }
 
 /**
@@ -571,7 +580,7 @@ export async function ensureDefaultWorkspace(args: {
         where om.org_id = ${args.orgId} and om.user_id = ${args.userId}
         limit 1
       `.then((rows) => rows[0]?.id ?? null)
-    : (await ensurePersonalOrganization(args.userId)).id;
+    : (await resolveDefaultOrganization(args.userId)).id;
   if (!orgId) {
     // Unknown org and non-member org look the same, so membership is not leaked.
     throw new WorkspaceAccessError(404, "organization_not_found", "Organization not found");
@@ -612,7 +621,7 @@ export async function findDefaultWorkspace(args: { userId: string; orgId?: strin
  * not touched an org-scoped endpoint yet.
  */
 export async function ensurePersonalDefaultWorkspace(userId: string): Promise<void> {
-  const organization = await ensurePersonalOrganization(userId);
+  const organization = await resolveDefaultOrganization(userId);
   await insertDefaultWorkspace(sql, { orgId: organization.id, userId });
 }
 
@@ -1073,11 +1082,11 @@ async function mutateWorkspaceArchiveState(args: {
   const current = await getWorkspace(args.workspaceId, args.userId);
   const access = await getWorkspaceAccess(args.workspaceId, args.userId);
   if (!current || !access) {
-    throw new Error("Workspace not found");
+    throw new WorkspaceAccessError(404, "workspace_not_found", "Workspace not found");
   }
 
   if (!canManageWorkspace(access, args.userId)) {
-    throw new Error("Forbidden");
+    throw new WorkspaceAccessError(403, "workspace_forbidden", "Forbidden");
   }
 
   if (current.isDefault && args.action === "archive") {
@@ -1096,7 +1105,7 @@ async function mutateWorkspaceArchiveState(args: {
 
   const updated = await getWorkspace(args.workspaceId, args.userId);
   if (!updated) {
-    throw new Error("Workspace not found");
+    throw new WorkspaceAccessError(404, "workspace_not_found", "Workspace not found");
   }
 
   return updated;
@@ -1136,11 +1145,11 @@ export async function deleteWorkspace(
   const current = await getWorkspace(workspaceId, userId);
   const access = await getWorkspaceAccess(workspaceId, userId);
   if (!current || !access) {
-    throw new Error("Workspace not found");
+    throw new WorkspaceAccessError(404, "workspace_not_found", "Workspace not found");
   }
 
   if (!canManageWorkspace(access, userId)) {
-    throw new Error("Forbidden");
+    throw new WorkspaceAccessError(403, "workspace_forbidden", "Forbidden");
   }
 
   if (current.isDefault) {
@@ -1171,12 +1180,12 @@ export async function cloneWorkspace(
 ): Promise<WorkspaceRecord> {
   const current = await getWorkspace(workspaceId, userId);
   if (!current) {
-    throw new Error("Workspace not found");
+    throw new WorkspaceAccessError(404, "workspace_not_found", "Workspace not found");
   }
 
   const access = await assertWorkspaceAccess(workspaceId, userId);
   if (!canEditWorkspace(access, userId)) {
-    throw new Error("Forbidden");
+    throw new WorkspaceAccessError(403, "workspace_forbidden", "Forbidden");
   }
 
   return await createWorkspace({
@@ -1236,7 +1245,7 @@ export async function rollbackWorkspaceVersion(
 ): Promise<WorkspaceRecord> {
   const access = await assertWorkspaceAccess(workspaceId, userId);
   if (!canEditWorkspace(access, userId)) {
-    throw new Error("Forbidden");
+    throw new WorkspaceAccessError(403, "workspace_forbidden", "Forbidden");
   }
 
   const [row] = await sql<WorkspaceVersionRow[]>`
@@ -1269,7 +1278,7 @@ export async function rollbackWorkspaceVersion(
   });
 
   if (!updated) {
-    throw new Error("Workspace not found");
+    throw new WorkspaceAccessError(404, "workspace_not_found", "Workspace not found");
   }
 
   return updated;

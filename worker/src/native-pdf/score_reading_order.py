@@ -18,7 +18,7 @@ def score(ref, hyp):
     if not a and not b: return 1.0
     return SequenceMatcher(None, a, b, autojunk=False).ratio()
 
-rows, totals = [], {"raw": [], "assembled": [], "kreuzberg": []}
+rows, totals = [], {"raw": [], "assembled": []}
 for f in sorted(bench.glob("*.json")):
     r = json.loads(f.read_text())
     if flt and flt not in r["id"]: continue
@@ -30,10 +30,8 @@ for f in sorted(bench.glob("*.json")):
     for k in ("raw", "assembled"):
         s = [score(a, b) for a, b in zip(refs, r[k])]
         line[k] = sum(s) / len(s); totals[k] += s
-    if "kreuzberg" in r:
-        s = score("\n".join(refs), r["kreuzberg"]); line["kreuzberg"] = s; totals["kreuzberg"].append(s)
     rows.append(line)
 for l in rows:
-    print(f"{l['id']:44s} raw={l['raw']:.3f} assembled={l['assembled']:.3f}" + (f" kreuzberg={l['kreuzberg']:.3f}" if "kreuzberg" in l else ""))
+    print(f"{l['id']:44s} raw={l['raw']:.3f} assembled={l['assembled']:.3f}")
 for k, v in totals.items():
     if v: print(f"MEAN {k}: {sum(v)/len(v):.4f} over {len(v)}")

@@ -245,7 +245,7 @@ describe("pipelineFeaturesSchema", () => {
   it("accepts an ordered extraction policy a router can fill", () => {
     const result = pipelineFeaturesSchema.safeParse({
       documentExtraction: {
-        order: { pdf: ["native-pdf", "kreuzberg"] },
+        order: { pdf: ["native-pdf", "poppler-text"] },
         components: { tables: [], formulas: [], images: [] },
         pages: [],
         voting: { enabled: true, secondary: "next-in-order" },

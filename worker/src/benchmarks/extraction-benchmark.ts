@@ -1,4 +1,5 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { countPdfPages } from "../lib/pdf-page-count.js";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { CommandRunner } from "../tools/runner.js";
@@ -18,7 +19,7 @@ export interface ExtractionBenchmarkResult {
 export async function benchmarkExtractor(args: {
   fixtureId: string;
   fixturePath: string;
-  method: "docling" | "native-pdf" | "kreuzberg" | "pandoc";
+  method: "docling" | "native-pdf" | "poppler-text" | "pandoc";
   runner: CommandRunner;
 }): Promise<ExtractionBenchmarkResult> {
   const { fixtureId, fixturePath, method, runner } = args;
@@ -43,11 +44,9 @@ export async function benchmarkExtractor(args: {
         markdown = await runNativePdfArm(fixturePath, "markdown");
         break;
       }
-      case "kreuzberg": {
-        const outPath = path.join(tempDir, "out.md");
-        const plan = await runner.kreuzbergMarkdown(fixturePath, outPath);
-        await runner.run(plan);
-        markdown = await readFile(outPath, "utf8");
+      case "poppler-text": {
+        const plan = await runner.extractText(fixturePath, await countPdfPages(runner, fixturePath), true);
+        markdown = (await runner.run(plan)).stdout;
         break;
       }
       case "pandoc": {

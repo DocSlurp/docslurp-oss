@@ -1,3 +1,4 @@
+import { quoteStoredDocuments } from "../services/stored-quote.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { Hono, type Context } from "hono";
 import { zValidator } from "@hono/zod-validator";
@@ -9,7 +10,7 @@ import {
   runProcessingPreviewRequestSchema
 } from "@docslurp/shared";
 
-import { actorHasAnyApiKeyScope, getRequestActor, loadActorScopedWorkspace, requireActorWorkspace, type RequestActor } from "../lib/request-actor.js";
+import { actorHasAnyApiKeyScope, getRequestActor, isPlatformAdminActor, loadActorScopedWorkspace, requireActorWorkspace, type RequestActor } from "../lib/request-actor.js";
 import { WorkspaceAccessError } from "../services/default-workspace.js";
 import { validationErrorResponse, type ValidationErrorSource, validationHook } from "../lib/validation.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
@@ -22,6 +23,7 @@ import {
   getRun,
   getRunProcessingPreview,
   getRunProgress,
+  listRunsPage,
   isReprocessRejectedError,
   isRunCreationBlockedError,
   listenForRunEvents,
@@ -30,8 +32,10 @@ import {
   reprocessRun,
   retryRun
 } from "../services/runs.js";
+import { redactOperatorEvent, redactOperatorRun } from "../services/progress-snapshot.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
+import { parseListLimit } from "../lib/list-cursor.js";
 import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from "../services/jobs.js";
 import { billingState } from "../services/config-change.js";
 import { estimateRunReprocess } from "../services/work-estimates.js";
@@ -108,9 +112,16 @@ export const runsRoutes = new Hono()
     if (!apiKeyMayReadRuns(actor)) {
       return apiStatusError(c, 403, "Forbidden");
     }
-    const runs = c.req.query("activity") === "true" ? await listRuns(userId, true) : await listRuns(userId);
     const orgId = actor.type === "apiKey" ? actor.apiKey.orgId : null;
-    return c.json({ runs: orgId ? runs.filter((run) => run.orgId === orgId) : runs });
+    // Run stats carry worker CPU, RAM, class and region: operators only, like the progress snapshot.
+    const visible = await isPlatformAdminActor(actor) ? <R,>(run: R) => run : redactOperatorRun;
+    if (c.req.query("activity") === "true") {
+      const runs = await listRuns(userId, true);
+      return c.json({ runs: (orgId ? runs.filter((run) => run.orgId === orgId) : runs).map(visible), hasMore: false, nextCursor: null });
+    }
+    // History is paged: `limit` (1-100, default 50) and the `cursor` from the previous page's nextCursor.
+    const page = await listRunsPage(userId, { orgId, limit: parseListLimit(c.req.query("limit"), 50, 100), cursor: c.req.query("cursor") || undefined });
+    return c.json({ ...page, runs: page.runs.map(visible) });
   })
   .get("/activity/stream", async (c) => {
     const userId = c.get("sessionUser").id;
@@ -119,6 +130,7 @@ export const runsRoutes = new Hono()
       return apiStatusError(c, 403, "Forbidden");
     }
     const orgId = actor.type === "apiKey" ? actor.apiKey.orgId : null;
+    const operator = await isPlatformAdminActor(actor);
     c.header("Cache-Control", "no-cache, no-transform");
     c.header("X-Accel-Buffering", "no");
     return streamSSE(c, async stream => {
@@ -132,12 +144,12 @@ export const runsRoutes = new Hono()
         const run = await getRun(event.runId, userId);
         if (!run || (orgId && run.orgId !== orgId)) return;
         if (aborted) return;
-        await stream.writeSSE({ event: "activity-run", data: JSON.stringify(run) });
-        await stream.writeSSE({ event: "activity-event", id: event.id, data: JSON.stringify(event) });
+        await stream.writeSSE({ event: "activity-run", data: JSON.stringify(operator ? run : redactOperatorRun(run)) });
+        await stream.writeSSE({ event: "activity-event", id: event.id, data: JSON.stringify(operator ? event : redactOperatorEvent(event)) });
       });
       async function inventory() {
         const runs = await listRuns(userId, true);
-        return orgId ? runs.filter(run => run.orgId === orgId) : runs;
+        return (orgId ? runs.filter(run => run.orgId === orgId) : runs).map(run => operator ? run : redactOperatorRun(run));
       }
       try {
         let reconciledAt = Number.NEGATIVE_INFINITY;
@@ -168,7 +180,7 @@ export const runsRoutes = new Hono()
         return apiStatusError(c, 404, "Run not found");
       }
     }
-    const snapshot = await getRunProgress(c.req.param("runId"), userId);
+    const snapshot = await getRunProgress(c.req.param("runId"), userId, { operator: await isPlatformAdminActor(actor) });
 
     if (!snapshot) {
       return apiStatusError(c, 404, "Run not found");
@@ -187,13 +199,14 @@ export const runsRoutes = new Hono()
       return apiStatusError(c, 404, "Run not found");
     }
     c.header("X-Accel-Buffering", "no");
+    const operator = await isPlatformAdminActor(actor);
     const response = streamSSE(c, async stream => {
       await streamRunProgressSnapshots({
         stream,
         subscribe: invalidate => listenForRunEvents(event => { if (event.runId === runId) invalidate(); }, { runId }),
         snapshot: async () => {
           if (actor.type === "apiKey" && !await isApiKeyLive(actor.apiKey, ["ingest", "search", "artifacts"])) return null;
-          const snapshot = await getRunProgress(runId, actor.userId, { recentEventLimit: 0 });
+          const snapshot = await getRunProgress(runId, actor.userId, { recentEventLimit: 0, operator });
           if (!snapshot || !await loadActorScopedWorkspace(snapshot.run.workspaceId, actor)) return null;
           return snapshot;
         },
@@ -223,7 +236,8 @@ export const runsRoutes = new Hono()
       after,
       limit: limit ? Number(limit) : undefined
     });
-    return c.json({ events });
+    // Heartbeat events carry worker CPU and RAM: operators only, like the progress snapshot.
+    return c.json({ events: await isPlatformAdminActor(actor) ? events : events.map(redactOperatorEvent) });
   })
   .get("/:runId/events/stream", async (c) => {
     const userId = c.get("sessionUser").id;
@@ -240,6 +254,7 @@ export const runsRoutes = new Hono()
 
     c.header("Cache-Control", "no-cache");
     c.header("X-Accel-Buffering", "no");
+    const operator = await isPlatformAdminActor(actor);
 
     return streamSSE(c, async (stream) => {
       let aborted = stream.aborted;
@@ -247,7 +262,7 @@ export const runsRoutes = new Hono()
       const abortSignal = new Promise<void>(resolve => { resolveAbort = resolve; });
       stream.onAbort(() => { aborted = true; resolveAbort(); });
       async function authorizedSnapshot() {
-        const snapshot = await getRunProgress(runId, userId);
+        const snapshot = await getRunProgress(runId, userId, { operator });
         if (!snapshot || (actor.type === "apiKey" && !await loadActorScopedWorkspace(snapshot.run.workspaceId, actor))) return null;
         return snapshot;
       }
@@ -256,7 +271,7 @@ export const runsRoutes = new Hono()
         // Validate current access before sending either events or their snapshot.
         const snapshot = await authorizedSnapshot();
         if (!snapshot || aborted) return;
-        await stream.writeSSE({ id: event.id, event: event.type, data: JSON.stringify(event) });
+        await stream.writeSSE({ id: event.id, event: event.type, data: JSON.stringify(operator ? event : redactOperatorEvent(event)) });
         await stream.writeSSE({ event: "snapshot", data: JSON.stringify(snapshot) });
       }, { runId });
 
@@ -295,9 +310,15 @@ export const runsRoutes = new Hono()
   .post("/:runId/reprocess/estimate", zValidator("json", reprocessRunSchema, validationHook), async (c) => {
     const denied = await denyRunContentUpdate(c, c.req.param("runId"));
     if (denied) return denied;
-    const estimate = await estimateRunReprocess({ runId: c.req.param("runId"), userId: c.get("sessionUser").id, options: c.req.valid("json") });
+    const userId = c.get("sessionUser").id;
+    const estimate = await estimateRunReprocess({ runId: c.req.param("runId"), userId, options: c.req.valid("json") });
     if (!estimate) return apiStatusError(c, 404, "Run not found");
-    return c.json({ estimate, billing: billingState() });
+    // The same quote shape as POST /v1/estimate, from the run's measured documents (estimateRunReprocess checked access).
+    const run = await getRun(c.req.param("runId"), userId, { cost: false });
+    const quote = run?.orgId
+      ? await quoteStoredDocuments({ scope: { orgId: run.orgId, workspaceId: run.workspaceId, runId: run.id }, pipeline: run.pipeline, estimate })
+      : null;
+    return c.json({ estimate, quote, billing: billingState() });
   })
   .post("/:runId/reprocess", zValidator("json", reprocessRunSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;

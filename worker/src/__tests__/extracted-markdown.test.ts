@@ -11,7 +11,8 @@ describe("extraction plausibility", () => {
   it("names the legacy score as plausibility rather than quality", () => {
     const signals = scoreExtractionPlausibility("A useful paragraph of text.", 1);
     expect(signals.plausibilityScore).toBeGreaterThan(0);
-    expect(signals).toMatchObject({ charCount: 27, wordCount: 5 });
+    // Words are counted by script (runs of two or more letters), as routing counts them: the one-letter "A" is not one.
+    expect(signals).toMatchObject({ charCount: 27, wordCount: 4 });
   });
 
   it("externalizes base64 data URIs", () => {

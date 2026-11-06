@@ -7,7 +7,7 @@ import {
   type CanonicalDocument,
 } from "@docslurp/shared";
 
-import { splitRemainingPages } from "../db/page-base-fee.js";
+import { remainingFastPages } from "../db/page-base-fee.js";
 import { applyPageImageReferences, fastPageImageCaps, pagesKeptAsImage } from "../lib/page-image-references.js";
 import { artifactExportPath, CANONICAL_REFERENCE_MAX_BYTES, documentExportEntries, type ExportDocumentRow, type ExportSource } from "../exports/build-document-export.js";
 import { RenderImagesStage } from "../stages/render-images.js";
@@ -125,17 +125,14 @@ describe("quality fast: pages without a text layer", () => {
     expect(chunks[0]!.pageNumbers).toEqual([]);
   });
 
-  it("bills Fast pages from the ledger: only pages with a recorded Rich read are Rich (already charged)", () => {
-    const scannedPdf = { image: false, pages: 2, richRead: 0, scanned: 1 };
-    expect(splitRemainingPages(scannedPdf, false)).toEqual({ fast: 2, rich: 0 });
+  it("bills the pages no recorded Rich read covers Fast, per page", () => {
+    expect(remainingFastPages({ pages: 2, richRead: 0 })).toBe(2);
     // One page was read and charged Rich by the ledger; the other bills Fast.
-    expect(splitRemainingPages({ ...scannedPdf, richRead: 1 }, false)).toEqual({ fast: 1, rich: 0 });
-    expect(splitRemainingPages({ image: true, pages: 1, richRead: 0, scanned: 0 }, false)).toEqual({ fast: 1, rich: 0 });
-    expect(splitRemainingPages({ image: true, pages: 1, richRead: 1, scanned: 0 }, false)).toEqual({ fast: 0, rich: 0 });
+    expect(remainingFastPages({ pages: 2, richRead: 1 })).toBe(1);
+    expect(remainingFastPages({ pages: 1, richRead: 1 })).toBe(0);
+    // More reads than pages never goes negative.
+    expect(remainingFastPages({ pages: 1, richRead: 5 })).toBe(0);
     expect(pageCredits("fast", 2)).toBeCloseTo(0.01);
-    // auto and good still bill an unread scan Rich.
-    expect(splitRemainingPages(scannedPdf, true)).toEqual({ fast: 1, rich: 1 });
-    expect(splitRemainingPages({ image: true, pages: 1, richRead: 0, scanned: 0 }, true)).toEqual({ fast: 0, rich: 1 });
   });
 });
 
@@ -262,7 +259,7 @@ describe("quality fast: kept-as-image renders are bounded", () => {
 
   it("does not attribute unpaged text to page 1 in a multi-page document", () => {
     const canonical = canonicalDocumentSchema.parse({
-      ...buildCanonicalDocumentFromMarkdown({ documentId: "doc", text: "Some text.", pageCount: 3, extractor: "kreuzberg" }),
+      ...buildCanonicalDocumentFromMarkdown({ documentId: "doc", text: "Some text.", pageCount: 3, extractor: "poppler-text" }),
     });
     canonical.blocks = canonical.blocks.map((block) => ({ ...block, pageNumber: null }));
     expect(pagesKeptAsImage({ canonicalDocument: canonical, pageCount: 3, isImage: false }))

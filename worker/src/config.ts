@@ -11,7 +11,7 @@ import {
   type TextGenerationProfile,
   type InferenceLane,
 } from "@docslurp/shared";
-import { resolveLanceDbConfig, resolveObjectStorageConfig, type LanceDbConfig, type ObjectStorageConfig } from "@docslurp/shared";
+import { assertSupportedVectorBackends, resolveLanceDbConfig, resolveObjectStorageConfig, type LanceDbConfig, type ObjectStorageConfig } from "@docslurp/shared";
 import { lanceDbMaintenanceSettings } from "./stages/lancedb-maintenance.js";
 
 const defaultDatabaseUrl =
@@ -270,7 +270,8 @@ export function fromEnv(): Config {
       inferenceLaneOptions,
       "standard",
     ) as InferenceLane,
-    vectorBackends: readList(process.env.VECTOR_BACKENDS, ["lancedb"]),
+    // A backend this build does not write (Chroma was removed) refuses to start the worker, never falls back to another.
+    vectorBackends: assertSupportedVectorBackends(readList(process.env.VECTOR_BACKENDS, ["lancedb"]), "VECTOR_BACKENDS"),
     // Maintenance tuning rides on LANCEDB_URI, e.g. s3://bucket/lancedb?reindexPages=20&vectorIndexMinRows=1000.
     lancedbReindexPages: maintenance.reindexPages,
     lancedbMaintenanceEnabled: maintenance.enabled,

@@ -16,7 +16,8 @@ const originalEnv = {
   EMBEDDING_PROFILE: process.env.EMBEDDING_PROFILE,
   EMBEDDING_MODEL: process.env.EMBEDDING_MODEL,
   QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING: process.env.QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING,
-  QUARANTINE_MAX_ARCHIVE_ENTRIES: process.env.QUARANTINE_MAX_ARCHIVE_ENTRIES
+  QUARANTINE_MAX_ARCHIVE_ENTRIES: process.env.QUARANTINE_MAX_ARCHIVE_ENTRIES,
+  VECTOR_BACKENDS: process.env.VECTOR_BACKENDS
 };
 
 describe("fromEnv", () => {
@@ -28,6 +29,13 @@ describe("fromEnv", () => {
       }
       process.env[key] = value;
     }
+  });
+
+  it("refuses to start with VECTOR_BACKENDS naming chroma (removed), never falling back to another backend", () => {
+    process.env.VECTOR_BACKENDS = "lancedb,chroma";
+    expect(() => fromEnv()).toThrow(/VECTOR_BACKENDS: unsupported vector backend: chroma .*Chroma support was removed/);
+    process.env.VECTOR_BACKENDS = "lancedb, Milvus";
+    expect(fromEnv().vectorBackends).toEqual(["lancedb", "milvus"]);
   });
 
   it("reads the quality warning threshold override", () => {

@@ -17,9 +17,6 @@ import { getWorkspaceAccess } from "./organizations.js";
  * run's id and every run of the job carries `stats.job = { id, kind, estimate?, estimateUrl? }`.
  */
 
-/** Inline estimates must compute within this budget; otherwise the job carries `estimateUrl`. */
-export const INLINE_ESTIMATE_BUDGET_MS = 150;
-
 export const jobStatusUrl = (id: string) => `/v1/jobs/${id}`;
 
 export type JobMeta = {
@@ -239,18 +236,16 @@ export async function jobStatusForMutation(
 }
 
 /**
- * The estimate a mutation reports inline: computed (target loading included) within the budget, else null with
- * an `estimateUrl` to the matching estimate route.
+ * The estimate a mutation reports inline: the same estimate its estimate route (`estimateUrl`) returns, target loading
+ * included. The mutation waits for it either way, so a computed estimate is never dropped for being slow; null only when
+ * the work has none.
  */
 export async function inlineEstimate(
   compute: () => Promise<CostEstimate | null> | CostEstimate | null,
   estimateUrl: string,
-  budgetMs = INLINE_ESTIMATE_BUDGET_MS,
 ): Promise<{ estimate: CostEstimate | null; estimateUrl?: string }> {
-  const started = performance.now();
   const estimate = await compute();
-  if (performance.now() - started > budgetMs) return { estimate: null, estimateUrl };
-  return { estimate };
+  return { estimate, estimateUrl };
 }
 
 /** Job metadata from an inline estimate result. */

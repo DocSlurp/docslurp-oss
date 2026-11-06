@@ -15,10 +15,20 @@ describe("expandQuery", () => {
     expect(result).toContain("model");
   });
 
-  it("wraps expanded tokens with OR alternatives in parentheses", () => {
+  it("distributes alternatives into whole websearch queries instead of using parentheses", () => {
     const glossary: Glossary = { ml: ["machine learning"] };
-    const result = expandQuery("ml", glossary);
-    expect(result).toBe("(ml OR machine learning)");
+    expect(expandQuery("ml", glossary)).toBe('ml or "machine learning"');
+    // websearch_to_tsquery has no grouping and `a b or c` is (a AND b) OR c: every alternative keeps "model".
+    expect(expandQuery("ml model", glossary)).toBe('ml model or "machine learning" model');
+  });
+
+  it("combines several expansions and caps the number of alternative queries", () => {
+    const glossary: Glossary = { ml: ["machine learning"], nn: ["neural network", "net"] };
+    expect(expandQuery("ml nn", glossary)).toBe('ml nn or ml "neural network" or ml net or "machine learning" nn or "machine learning" "neural network" or "machine learning" net');
+    const wide: Glossary = Object.fromEntries(["a", "b", "c", "d", "e"].map((key) => [key, [`${key}1`, `${key}2`]]));
+    const expanded = expandQuery("a b c d e", wide);
+    expect(expanded.split(" or ").length).toBeLessThanOrEqual(16);
+    expect(expanded.startsWith("a b c d e")).toBe(true);
   });
 
   it("expands a bigram (two-word token)", () => {

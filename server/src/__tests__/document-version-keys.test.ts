@@ -26,7 +26,7 @@ beforeAll(async () => {
     isTemporalClientConnected: () => true, onTemporalClientConnected: vi.fn(), warmTemporalClient: vi.fn(),
   }));
   vi.doMock("../services/source-metadata.js", () => ({
-    resolveSourceMetadata: async (file: { sourceKey: string }) => ({ pageCount: 1, sourceSha256: `sha-${file.sourceKey}` }),
+    resolveSourceMetadata: async (file: { sourceKey: string }) => ({ pageCount: 1, sourceSha256: `sha-${file.sourceKey}`, fileFacts: { mimeType: "application/pdf", format: "pdf", mismatch: "none" } }),
   }));
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 100000)`;

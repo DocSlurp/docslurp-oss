@@ -51,8 +51,10 @@ export function graphConfigFingerprint(config: GraphConfig, model: string): stri
     hash = Math.imul(hash, 0x01000193) >>> 0;
   }
   // g3 uses current document chunk identities; earlier reused graphs may
-  // reference source chunks (and g1 may reverse edges). Mark stale, never enqueue.
-  return `g3-${hash.toString(16).padStart(8, "0")}`;
+  // reference source chunks (and g1 may reverse edges). g4 keys entities by
+  // Unicode names (NFC, any script; C, C++ and C# distinct), so graphs built
+  // with the ASCII-only keys are stale. Mark stale, never enqueue.
+  return `g4-${hash.toString(16).padStart(8, "0")}`;
 }
 
 /** Observed per-window figures from earlier builds, used in place of defaults. */

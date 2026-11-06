@@ -82,7 +82,7 @@ function sameSecret(a: string, b: string): boolean {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
-async function tokenRequest(server: AuthorizationServer, values: Record<string, string>): Promise<{ ok: true; tokens: TokenSet } | { ok: false; error: string; description: string; status: number }> {
+async function tokenRequest(server: AuthorizationServer, values: Record<string, string>): Promise<{ ok: true; tokens: TokenSet } | { ok: false; error: string; description: string; status: number; reason?: string }> {
   let response: Response;
   try {
     response = await fetch(server.token_endpoint, {
@@ -95,7 +95,10 @@ async function tokenRequest(server: AuthorizationServer, values: Record<string, 
     return { ok: false, error: "network_error", description: `Could not reach ${new URL(server.token_endpoint).origin}.`, status: 0 };
   }
   const body = await response.json().catch(() => ({})) as Record<string, unknown>;
-  if (!response.ok) return { ok: false, error: safeText(body.error) || "server_error", description: safeText(body.error_description), status: response.status };
+  if (!response.ok) {
+    const reason = safeText(body.docslurp_reason);
+    return { ok: false, error: safeText(body.error) || "server_error", description: safeText(body.error_description), status: response.status, ...(reason ? { reason } : {}) };
+  }
   if (typeof body.access_token !== "string" || typeof body.refresh_token !== "string" || typeof body.expires_in !== "number" || String(body.token_type).toLowerCase() !== "bearer") {
     return { ok: false, error: "invalid_response", description: "The token response was malformed.", status: response.status };
   }
@@ -240,7 +243,7 @@ export async function deviceLogin(server: AuthorizationServer, scopes: string[],
   throw new OAuthError("The device code expired before it was approved. Run `docslurp login --device` again.", "expired_token");
 }
 
-export async function refreshTokens(server: AuthorizationServer, refreshToken: string): Promise<{ ok: true; tokens: TokenSet } | { ok: false; error: string; description: string; status: number }> {
+export async function refreshTokens(server: AuthorizationServer, refreshToken: string): Promise<{ ok: true; tokens: TokenSet } | { ok: false; error: string; description: string; status: number; reason?: string }> {
   return await tokenRequest(server, { grant_type: "refresh_token", refresh_token: refreshToken });
 }
 

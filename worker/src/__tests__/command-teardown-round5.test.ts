@@ -172,7 +172,7 @@ describe.skipIf(!linux)("H1: an activity whose command teardown failed always en
   it("shutdown cancellation of a latched activity ends as teardown, not a retryable interruption", async () => {
     silence();
     const outcome = await runActivity(containedSession(), async () => {
-      recordUnverifiedTeardown(new CommandTeardownError("tesseract teardown could not be verified"), "label=tesseract");
+      recordUnverifiedTeardown(new CommandTeardownError("pdftoppm teardown could not be verified"), "label=pdftoppm");
       markWorkerShuttingDown("teardown-unverified");
       throw new CancelledFailure("WORKER_SHUTDOWN");
     });

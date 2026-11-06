@@ -85,6 +85,10 @@
     "./workspace-chat-ui": {
       "types": "./dist/workspace-chat-ui.d.ts",
       "import": "./dist/workspace-chat-ui.js"
+    },
+    "./pricing-loader": {
+      "types": "./dist/pricing-loader.d.ts",
+      "import": "./dist/pricing-loader.js"
     }
   },
   "files": [

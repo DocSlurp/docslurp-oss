@@ -1,3 +1,4 @@
+import { webSearchCredits } from "@docslurp/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { env } from "../../config.js";
@@ -96,8 +97,8 @@ describe("runWebCapability", () => {
 
   it("charges deep searches double", async () => {
     const t = setup();
-    expect((await runWebCapability("search", { ...search, depth: "deep" }, ctx)).usage.credits).toBe(2);
-    expect(t.recordCharge).toHaveBeenCalledWith(expect.objectContaining({ charge: expect.objectContaining({ credits: 2 }) }));
+    expect((await runWebCapability("search", { ...search, depth: "deep" }, ctx)).usage.credits).toBe(webSearchCredits({ deep: true }));
+    expect(t.recordCharge).toHaveBeenCalledWith(expect.objectContaining({ charge: expect.objectContaining({ credits: webSearchCredits({ deep: true }) }) }));
   });
 
   it("refuses when disabled, for private URLs, for opted-out or privacy-restricted workspaces and over the org rate limit", async () => {
@@ -134,10 +135,11 @@ describe("runWebCapability", () => {
     expect(result.results[0]!.markdown).not.toContain("suppressed");
   });
 
-  it("suppresses instruction-like web text before a chat model reads it", async () => {
+  it("passes instruction-shaped web text verbatim as tool data", async () => {
     setup();
     const result = await runWebCapability("search", search, { ...ctx, surface: "chat" });
-    expect(result.results[0]!.title).not.toMatch(/ignore previous instructions/i);
+    expect(result.results[0]!.title).toMatch(/ignore previous instructions/i);
+    expect(result.results[0]!.title).not.toContain("suppressed");
     expect(result.results[0]!.snippet).toBe("Solar output rose.");
   });
 });

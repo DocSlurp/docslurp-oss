@@ -51,7 +51,7 @@ Config estimates return `{ impact, estimate, billing }`; the others return `{ es
   "basis": "default pipeline, historical averages" }
 ```
 
-A mutation's returned `job.estimate` equals its estimate route's result. If an estimate takes longer than 150 ms, the job carries `estimate: null` and an `estimateUrl` to fetch it.
+A mutation's returned `job.estimate` equals its estimate route's result, and `job.estimateUrl` names that route. A slow estimate is still returned: the mutation waits for it either way.
 
 On self-hosted deployments billing is disabled: `billing` is `"disabled"`, `credits` is `null`, and pages and time still apply. Nothing is ever priced or charged.
 

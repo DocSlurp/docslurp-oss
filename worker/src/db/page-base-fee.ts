@@ -6,6 +6,8 @@ import {
   compilePipelinePlan,
   deferredProfilesEnabled,
   pageCredits,
+  pricing,
+  pricingVersion,
   qualityAllowsPageReading,
   unitChargeMetadata,
   type CompiledPipelinePlan,
@@ -19,56 +21,81 @@ import { pipelineTransaction, pipelineInTransaction } from "./transaction-pipeli
 import { debitRunUsageCredits, persistRunUsageEvents, runUsageEventStatements, type RunUsageState } from "./usage-event-store.js";
 
 /**
- * Ingest page charges (PRICE_CARD). Pages a vision/OCR model read are charged
- * Rich as they are read (pipeline/usage-ledger.ts). When the run completes,
- * every other page of its completed documents is charged here: Rich for image
- * files and for pages the page facts show as scans (no text layer, an embedded
- * image), Fast otherwise. Quality `fast` never reads a page, so it bills from
- * the usage ledger alone (splitRemainingPages): a page bills Rich only when a
- * Rich read of it was recorded for this run, and every other page bills Fast.
- * Page facts are best effort and never decide a Fast charge.
+ * Ingest page charges (priced by the pricing provider). Runs started by this release pin the per-read rule below
+ * (`pinRunPageBillingRules`, from `startRun`). One rule, per page: a page bills Rich only when a vision/OCR model read it, and
+ * the usage ledger records that read per page (pipeline/usage-ledger.ts, charged as the page is read). When the run
+ * completes, every other page of its completed documents is charged here, Fast. Nothing about a page's content
+ * (a scan, an image, a missing text layer) bills Rich by itself: those facts are best effort (page facts can be
+ * disabled, capped or fail) and an unknown fact must never raise a charge. An uploaded image file is read by OCR or
+ * vision, which the extraction stage records on the ledger like any other read.
  * Audio and video bill by the minute (media stage).
  *
- * Stages that only rebuild indexes from existing content. A partial run that
- * executes nothing else is a reindex: its embeddings are mostly reused, so it
- * pays no page charge.
+ * A run without the pin was started by an earlier release and may have read its pages with that release's code, which
+ * charged image files and scanned pages Rich here, at completion, rather than per read: it keeps that rule
+ * (`splitLegacyRemainingPages`) so a run in flight at the cutover is not under-billed. Delete it once those runs drain.
  */
-const INDEX_ONLY_STAGES: ReadonlySet<PipelineRunStage> = new Set([
-  "pii-detect", "embed", "graph-enrich", "page-index", "index",
-]);
 
 /**
- * Share of the completion page charge a run pays. Full runs pay 1. Partial
- * reprocess runs pay the fraction of enabled stages they execute (reused
- * stages are free), and reindex-only runs pay 0.
+ * Share of the completion page charge a run pays, from the pricing provider: a full run's share, and a partial
+ * reprocess run's for the stages it executes and reuses. Clamped to [0, 1]: a provider can lower a run's page
+ * charge, never raise it above a full run's.
  */
 export function pageBaseFeeMultiplier(plan: Pick<CompiledPipelinePlan, "stageOrder" | "reusedStages">): number {
-  if (plan.reusedStages.length === 0) return 1;
-  if (plan.stageOrder.every((stage) => INDEX_ONLY_STAGES.has(stage))) return 0;
-  const enabled = plan.stageOrder.length + plan.reusedStages.length;
-  return Math.round((plan.stageOrder.length / enabled) * 100) / 100;
+  const share = pricing().pageChargeShare({ stageOrder: plan.stageOrder, reusedStages: plan.reusedStages });
+  if (!Number.isFinite(share)) throw new Error("pricing provider returned an invalid page charge share");
+  return Math.min(1, Math.max(0, share));
 }
 
 /**
- * Splits a completed document's pages not already charged by a Rich read into Fast and Rich pages.
- *
- * Auto and Good (`pagesRead`): image files and scanned pages (no text layer, an embedded image) bill Rich.
- *
- * Fast bills from the mandatory usage ledger only: every page a reader actually read (OCR, vision, materialization)
- * was charged Rich by the ledger when it was read (`richRead`), so the remaining pages bill Fast. Page facts are
- * optional and best effort (disabled, capped at WORKER_PAGE_FACTS_MAX_PAGES, a failed write), so Fast never consults
- * them.
+ * Fast pages of a completed document: its pages (1..page_count) that no Rich read of this run covers. `richRead` is
+ * the number of distinct pages in that range a read charged Rich, counted by page number, so a read outside the
+ * document's pages (or a page read twice) can never cancel another page's Fast charge.
  */
-export function splitRemainingPages(
+export function remainingFastPages(row: { pages: number; richRead: number }): number {
+  return Math.max(0, row.pages - Math.min(row.richRead, row.pages));
+}
+
+/** Run artifact slot holding the page billing rules the run started under: the pricing version of the per-read rule. */
+export const PAGE_BILLING_RULES_SLOT = "run:page-billing-rules";
+
+type RunArtifactsState = { artifactLedger: Pick<WorkflowState["artifactLedger"], "read" | "record"> };
+
+/**
+ * Pins the run to the per-read page rule unless it already has a pin, persisted with the run's artifacts by the caller's
+ * next progress write. Called by `startRun` before any stage executes; idempotent, so a retried start keeps the first value.
+ */
+export function pinRunPageBillingRules(state: RunArtifactsState): string {
+  const stored = state.artifactLedger.read(PAGE_BILLING_RULES_SLOT);
+  if (stored) return stored;
+  const version = pricingVersion();
+  state.artifactLedger.record(PAGE_BILLING_RULES_SLOT, version);
+  return version;
+}
+
+/** Whether the run started before the per-read rule (no pin): it bills image files and scanned pages at completion. */
+export function runBillsScansAtCompletion(state: RunArtifactsState): boolean {
+  return !state.artifactLedger.read(PAGE_BILLING_RULES_SLOT);
+}
+
+/**
+ * The earlier release's split of a completed document's pages not already charged by a Rich read, for runs it started:
+ * Auto and Good (`pagesRead`) bill image files and scanned pages (no text layer, an embedded image) Rich; Fast bills only
+ * the ledger's reads Rich, so every remaining page bills Fast.
+ */
+export function splitLegacyRemainingPages(
   row: { image: boolean; pages: number; richRead: number; scanned: number },
   pagesRead: boolean,
 ): { fast: number; rich: number } {
-  const remaining = Math.max(0, row.pages - row.richRead);
+  const remaining = remainingFastPages(row);
   if (!pagesRead) return { fast: remaining, rich: 0 };
   const rich = row.image ? remaining : Math.min(remaining, Math.max(0, row.scanned - row.richRead));
   return { fast: remaining - rich, rich };
 }
 
+/**
+ * What the completion charge decided: `fastPages` it charged now, `richPages` already charged as they were read (counted, not
+ * charged here), the share of the fee this run pays and the Fast credits it charged.
+ */
 export type RunPageCharges = { fastPages: number; richPages: number; multiplier: number; credits: number };
 
 /**
@@ -79,7 +106,9 @@ export type RunPageCharges = { fastPages: number; richPages: number; multiplier:
 export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state: WorkflowState, transaction?: { afterCommit: Array<() => void> }): Promise<RunPageCharges> {
   const multiplier = pageBaseFeeMultiplier(compilePipelinePlan(state.run.pipeline));
   let charges: RunPageCharges = { fastPages: 0, richPages: 0, multiplier, credits: 0 };
-  const pagesRead = qualityAllowsPageReading(state.run.pipeline.quality);
+  const legacy = runBillsScansAtCompletion(state);
+  const legacyPagesRead = legacy && qualityAllowsPageReading(state.run.pipeline.quality);
+  if (legacy) console.warn(`[page-charges] run=${state.run.id} has no page billing pin: billing image files and scanned pages at completion (earlier release's rule)`);
   const write = async () => {
     let total = 0;
     await (transaction ? pipelineInTransaction : pipelineTransaction)(sql, (client) => [
@@ -90,10 +119,12 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
       // A stamped page this run read again is already left out through rich_read, so it is not subtracted
       // twice (which would leave another page unbilled).
       // Rich reads are read through usage_attribution (the one spend reader the worker may use).
-      client<{ document_id: string; image: boolean; pages: number; rich_read: number; scanned: number }[]>`
+      client<{ document_id: string; pages: number; rich_read: number; image: boolean; scanned: number }[]>`
       with docs as (
-        select d.id, coalesce(d.mime_type, '') like 'image/%' as image,
-          greatest(0, d.page_count - case when ${state.run.kind === "full-index"} then (
+        -- billing_pages: the worker's measured count of an Office, slide, sheet or EPUB file; page_count (the page basis the text
+        -- splits into) bills for every other document.
+        select d.id, d.page_count as page_count, coalesce(d.mime_type, '') like 'image/%' as image,
+          greatest(0, coalesce(d.billing_pages, d.page_count) - case when ${state.run.kind === "full-index"} then (
             select count(*) from document_page_states s where s.document_id = d.previous_version_id
               -- A stale stamp (its run charged nothing and can no longer commit) paid nothing, so this run charges it.
               -- A page whose read was charged and then failed (read_billed_run) paid its one charge.
@@ -106,36 +137,43 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
         where d.run_id = ${state.run.id} and d.deduped_from_document_id is null and d.status <> 'failed'
           and coalesce(d.mime_type, '') not like 'audio/%' and coalesce(d.mime_type, '') not like 'video/%'
           and (${!deferredProfilesEnabled()} or d.indexing_mode = 'full')
+          -- Only measured counts bill: the worker's billing_pages, or a page_count counted from the bytes or by the worker. A count
+          -- still assumed (an intake estimate: a PDF's size, a sampled text file, an Office file's one page) bills nothing.
+          and (d.billing_pages is not null or d.page_count_source = 'counted')
       )
-      select docs.id as document_id, docs.image, docs.pages,
-        coalesce((select count(distinct au.id) from usage_attribution au
+      select docs.id as document_id, docs.pages, docs.image,
+        -- Runs started before the per-read rule only (splitLegacyRemainingPages): pages the facts show as scans.
+        case when ${legacyPagesRead} then coalesce((select count(*) from document_page_facts f
+          where f.document_id = docs.id and coalesce(f.text_bytes, 0) = 0 and coalesce(f.image_count, 0) > 0), 0) else 0 end::int as scanned,
+        -- Distinct pages of this document a Rich read charged: by page number, inside the document's pages.
+        coalesce((select count(distinct (au.metadata ->> 'pageNumber')::int) from usage_attribution au
           where au.run_id = ${state.run.id} and au.metric = ${BILLABLE_UNIT_METRICS.richPage}
-            and au.metadata ->> 'documentId' = docs.id), 0)::int as rich_read,
-        -- Auto and Good only: Fast bills from the ledger alone (splitRemainingPages).
-        case when ${pagesRead} then coalesce((select count(*) from document_page_facts f
-          where f.document_id = docs.id and coalesce(f.text_bytes, 0) = 0 and coalesce(f.image_count, 0) > 0), 0) else 0 end::int as scanned
+            and au.metadata ->> 'documentId' = docs.id
+            and (au.metadata ->> 'pageNumber') ~ '^[0-9]{1,9}$'
+            and (au.metadata ->> 'pageNumber')::int between 1 and docs.page_count), 0)::int as rich_read
       from docs
     `,
     ], async (client, [lockedRows, rows]) => {
       const locked = lockedRows[0];
       let fastPages = 0;
-      let richPages = 0;
+      let scanPages = 0;
       const documents: Record<string, { fast: number; rich: number }> = {};
       for (const row of rows) {
-        // Auto/Good: image files are read as images; scanned PDF pages without a vision read still bill Rich.
-        // Fast: only pages the ledger recorded as read bill Rich (already charged), so the rest bill Fast.
-        const { fast, rich } = splitRemainingPages(
-          { image: row.image, pages: Number(row.pages), richRead: Number(row.rich_read), scanned: Number(row.scanned) },
-          pagesRead,
-        );
+        const counts = { pages: Number(row.pages), richRead: Number(row.rich_read) };
+        const { fast, rich } = legacy
+          ? splitLegacyRemainingPages({ ...counts, image: Boolean(row.image), scanned: Number(row.scanned) || 0 }, legacyPagesRead)
+          : { fast: remainingFastPages(counts), rich: 0 };
         fastPages += fast;
-        richPages += rich;
+        scanPages += rich;
         if (fast > 0 || rich > 0) documents[row.document_id] = { fast, rich };
       }
+      // Rich pages are charged as they are read (the ledger); here they are only counted, for the report: the distinct pages of the
+      // completed documents a Rich read charged this run, inside each document's pages (plus a legacy run's scan pages).
+      const richPages = scanPages + rows.reduce((sum, row) => sum + Math.min(Number(row.rich_read) || 0, Number(row.pages) || 0), 0);
       const fastCredits = pageCredits("fast", fastPages) * multiplier;
-      const richCredits = pageCredits("rich", richPages) * multiplier;
+      const scanCredits = pageCredits("rich", scanPages) * multiplier;
       charges = { fastPages, richPages, multiplier: multiplier * speedBoostMultiplier(state.usageLedger.speedBoost),
-        credits: (fastCredits + richCredits) * speedBoostMultiplier(state.usageLedger.speedBoost) };
+        credits: (fastCredits + scanCredits) * speedBoostMultiplier(state.usageLedger.speedBoost) };
       const base = { workspaceId: state.run.workspaceId, multiplier, documents: Object.keys(documents).length <= 200 ? documents : undefined };
       // The insert and its pending debit (for exactly the rows it inserted) are one statement.
       const usage = runUsageEventStatements({ client, state, usageEvents: [
@@ -144,9 +182,10 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
           id: `fast:${state.run.id}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: BILLABLE_UNIT_METRICS.fastPage,
           amount: fastPages, unit: "page", costCents: fastCredits, metadata: unitChargeMetadata({ ...base, pages: fastPages }),
         },
-        ...(richPages > 0 ? [{
+        // Runs started before the per-read rule: image files and scanned pages no read charged.
+        ...(scanPages > 0 ? [{
           id: `rich-scan:${state.run.id}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card", metric: BILLABLE_UNIT_METRICS.richPage,
-          amount: richPages, unit: "page", costCents: richCredits, metadata: unitChargeMetadata({ ...base, pages: richPages, readBy: "scan-or-image" }),
+          amount: scanPages, unit: "page", costCents: scanCredits, metadata: unitChargeMetadata({ ...base, pages: scanPages, readBy: "scan-or-image" }),
         }] : []),
       ] });
       const inserted = usage.cost(await Promise.all(usage.statements.map((statement) => statement.execute())));

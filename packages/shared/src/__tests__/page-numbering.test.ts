@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizePageNumber, normalizePageNumbers, splitTextIntoPages } from "../index.js";
+import { normalizePageNumber, normalizePageNumbers, splitTextIntoPages, splitTextIntoPagesStrict } from "../index.js";
 
 describe("normalizePageNumber", () => {
   it("keeps positive 1-based integers and rejects zero/negative values", () => {
@@ -43,5 +43,25 @@ describe("splitTextIntoPages", () => {
     const pages = splitTextIntoPages("abcdefghij", 3);
     expect(pages).toHaveLength(3);
     expect(pages.join("")).toBe("abcdefghij");
+  });
+});
+
+describe("splitTextIntoPagesStrict", () => {
+  it("returns pages only when the form feeds match the page count", () => {
+    expect(splitTextIntoPagesStrict("alpha\fbravo", 2)).toEqual(["alpha", "bravo"]);
+    expect(splitTextIntoPagesStrict("alpha\f\fcharlie\f", 4)).toEqual(["alpha", "", "charlie", ""]);
+    expect(splitTextIntoPagesStrict("alpha\fbravo\f", 2)).toEqual(["alpha", "bravo"]);
+  });
+
+  it("returns null instead of inventing page boundaries", () => {
+    expect(splitTextIntoPagesStrict("alpha\fbravo", 3)).toBeNull();
+    expect(splitTextIntoPagesStrict("alpha\n---\nbravo", 2)).toBeNull();
+    expect(splitTextIntoPagesStrict("abcdefghij", 3)).toBeNull();
+    expect(splitTextIntoPagesStrict("alpha\fbravo", null)).toBeNull();
+  });
+
+  it("treats a known single-page document as that page", () => {
+    expect(splitTextIntoPagesStrict("alpha\fbravo", 1)).toEqual(["alpha\nbravo"]);
+    expect(splitTextIntoPagesStrict("  ", 3)).toEqual([]);
   });
 });

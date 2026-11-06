@@ -170,6 +170,7 @@ trip the watchdog.
 | `SEARCH_SESSION_WRITE_BEHIND` | with `SEARCH_LANCEDB_NATIVE` (on) | Write search sessions, result ranks and zero-result diagnostics after the response. Usage events (billing) still commit before the response. Writes for one session stay ordered; `GET /v1/search/diagnostics` waits for them. |
 | `SEARCH_WRITE_BEHIND_CONCURRENCY` | `2` | Background search writes running at once. |
 | `SEARCH_WRITE_BEHIND_MAX_PENDING` | `200` | Background search writes allowed to wait for a slot. Past it a search waits for its own writes, so the backlog (session rows a crash could lose) stays bounded. The standalone server drains the backlog on `SIGTERM`/`SIGINT`; an embedding host should call `drainSearchSessionWrites(ms)` from `@docslurp/server/server` on shutdown. |
+| `LANCEDB_FTS_LANGUAGE` | `auto` | Worker: analyzer of the LanceDB chunk-text full-text index. `auto` segments words with ICU (Japanese, Chinese, Thai and every other script), lower-cases and folds accents, and does not stem or drop stop words, because either one is per-language. Name one language (`English`, `German`, ...) to restore stemming and stop words for a deployment whose documents are in that language. An index built with the old English analyzer is replaced by the next maintenance run. |
 | `LANCEDB_FTS_INDEX` | on | Worker: LanceDB maintenance also builds and refreshes a full-text index on chunk text, which native search queries; `0` disables it. Existing tables: run the backfill, `node worker/dist/stages/lancedb-native-backfill-cli.js --all` in the worker image (or `--org <id>`, `--workspace <id>`; from a checkout, `pnpm --filter @docslurp/worker exec tsx scripts/lancedb-native-backfill.ts …`) with `DATABASE_URL` and `LANCEDB_URI` set. For every workspace database in scope (one per workspace and embedding space) it adds the hydration columns, fills them from Postgres, builds the index and optimizes the table once so the rewritten rows return to the vector index; no re-embedding. It is idempotent and safe beside ingest, but it rewrites every row of each table: run it off-peak, try `--dry-run` first, and do not pass `--skip-optimize` unless maintenance will optimize the table soon after. It reports a failing table and continues, exiting 1 at the end. |
 | `DB_WATCHDOG_INTERVAL_MS` | `15000` | How often the production watchdog probes. |
 | `DB_WATCHDOG_TIMEOUT_MS` | `5000` | Timeout of one probe. |
@@ -216,10 +217,23 @@ read them through `packages/shared/src/temporal-security.ts`.
 | `DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS` | empty | Comma-separated private workspaces parsers may write (bubblewrap, landlock). |
 | `DOCSLURP_LANDRUN_BINARY` | `landrun` | landrun executable (landlock). |
 | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` | required for `modal` | Modal API token. Secrets. |
-| `DOCSLURP_MODAL_APP`, `DOCSLURP_MODAL_IMAGE`, `DOCSLURP_MODAL_IMAGE_DIGEST`, `DOCSLURP_MODAL_REGISTRY_SECRET`, `DOCSLURP_MODAL_CPU`, `DOCSLURP_MODAL_MEMORY_MB`, `DOCSLURP_MODAL_SESSION_TIMEOUT_SECONDS` | `docslurp-parsers`, `ghcr.io/docslurp/worker-full:<DOCSLURP_VERSION>` (required when `DOCSLURP_VERSION` is unset), unset, unset, `2`, `4096`, `900` | Modal sandbox settings. `DOCSLURP_MODAL_IMAGE_DIGEST` pins the image by digest; see [Verifying worker images](security.md#verifying-worker-images). |
+| `DOCSLURP_MODAL_APP`, `DOCSLURP_MODAL_IMAGE`, `DOCSLURP_MODAL_IMAGE_DIGEST`, `DOCSLURP_MODAL_REGISTRY_SECRET`, `DOCSLURP_MODAL_CPU`, `DOCSLURP_MODAL_MEMORY_MB`, `DOCSLURP_MODAL_SESSION_TIMEOUT_SECONDS`, `DOCSLURP_MODAL_VMS_PER_ACTIVITY` | `docslurp-parsers`, `ghcr.io/docslurp/worker-full:<DOCSLURP_VERSION>` (required when `DOCSLURP_VERSION` is unset), unset, unset, `2`, `4096`, `900`, `WORKER_DOC_CONCURRENCY` × 2 | Modal sandbox settings. `DOCSLURP_MODAL_VMS_PER_ACTIVITY` caps the VMs one activity runs at once, `DOCSLURP_MODAL_VMS_PER_WORKER` (default `WORKER_ACTIVITY_CONCURRENCY`) the VMs one worker runs, and `DOCSLURP_MODAL_VM_IDLE_SECONDS` (default 20) how long an idle VM lives ([Modal](sandbox-providers.md#modal)). `DOCSLURP_MODAL_IMAGE_DIGEST` pins the image by digest; see [Verifying worker images](security.md#verifying-worker-images). |
 | `DOCSLURP_VERSION` | set by release worker images; unset in source installs | Release version the image was built from. Picks the default Modal image. |
 
 Details are in [Parser sandbox providers](sandbox-providers.md#configuration).
+
+## OCR
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DOCSLURP_OCR_MODE` | `vm` when `DOCSLURP_SERVICE_PROFILE=service`; `off` elsewhere (a stock self-hosted install reads no OCR until you choose a mode) | Where OCR runs: `vm` (extractor plugin's VM provider), `local` (the local CLI under the parser sandbox), `hosted` (a hosted model reads stored image bytes) or `off`. |
+| `DOCSLURP_SERVICE_PROFILE` | unset | `self-hosted` when you own the files and the machine; `service` for a multi-tenant service (makes `vm` the default and refuses `local`; runs PDFs only in `vm-pdf` and refuses to start without a sandboxed PDF provider). `local` OCR is refused at start unless it is `self-hosted`. |
+| `DOCSLURP_PDF_MODE` | `vm` when a VM is selected (`DOCSLURP_SERVICE_PROFILE=service`, `DOCSLURP_PDF_EXTRACTOR=vm-pdf`, `DOCSLURP_VM_PDF_INSTALLED=1`); otherwise unset (PDFs refused) | Where Doppler reads PDFs: `vm` (the sandboxed PDF provider, one VM per document) or `local` (`doppler-md` on this host under the parser sandbox; customer-owned execution only, needs `DOCSLURP_SERVICE_PROFILE=self-hosted`). Unset with no VM: the worker logs `[pdf] mode=off` and refuses PDFs; nothing falls back to a host parser. See [Docker Compose](docker-compose.md#pdfs). |
+| `DOCSLURP_DOPPLER_BIN_DIR` | `/usr/lib/doppler/bin` | Where Doppler's `pdftomarkdown` is (the worker images install it there, off `PATH`). `local` mode refuses to start without it. |
+| `DOCSLURP_OCR_PYTHON`, `DOCSLURP_OCR_MODEL_DIR` | `/opt/docslurp/ocr-venv/bin/python3`, `/opt/docslurp/ocr-models` | The local OCR runtime (`local` mode). The full worker image sets both. |
+
+The other OCR settings (escalation, attempts, language, size and concurrency limits) are in `.env.example` and
+[OCR](../extraction/ocr.md).
 
 ## Removed and deprecated
 

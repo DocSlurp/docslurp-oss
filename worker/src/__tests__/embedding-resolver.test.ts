@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { defaultPipelineFeatures } from "@docslurp/shared";
+import { defaultPipelineFeatures, embeddingProfileCatalog } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
-import { resolveEmbeddingModel } from "../embeddings/resolver.js";
+import { backendRuntime, resolveEmbeddingModel, resolveVectorBackends } from "../embeddings/resolver.js";
 import { parseLanceDbUri, parseStorageUri } from "@docslurp/shared";
 
 const baseConfig: Config = {
@@ -74,7 +74,6 @@ describe("resolveEmbeddingModel", () => {
     const result = resolveEmbeddingModel(
       baseConfig,
       defaultPipelineFeatures,
-      "en",
     );
 
     expect(result.modelUri).toBe(defaultPipelineFeatures.embedding.modelUri);
@@ -84,8 +83,22 @@ describe("resolveEmbeddingModel", () => {
     expect(result.dimensions).toBe(1024);
   });
 
-  it("keeps the hosted default for multilingual content without loading local weights", () => {
-    const result = resolveEmbeddingModel(baseConfig, defaultPipelineFeatures, "mul");
+  it("resolves one model per index config: the route never depends on document text", () => {
+    const local = {
+      ...defaultPipelineFeatures,
+      embedding: { ...defaultPipelineFeatures.embedding, profile: "good-fast-local" as const, target: "local" as const, modelUri: embeddingProfileCatalog["good-fast-local"].config.modelUri },
+    };
+    const first = resolveEmbeddingModel(baseConfig, local);
+    // The old per-document switch moved a non-ASCII document to the multilingual
+    // MiniLM (384 dims) while the workspace recorded vectors of the configured model.
+    expect(first.profile).toBe("good-fast-local");
+    expect(first.modelUri).toBe(local.embedding.modelUri);
+    expect(first.dimensions).toBe(local.embedding.dimensions ?? first.dimensions);
+    expect(resolveEmbeddingModel.length).toBe(2); // (config, pipeline): no per-document input
+  });
+
+  it("keeps the hosted default without loading local weights", () => {
+    const result = resolveEmbeddingModel(baseConfig, defaultPipelineFeatures);
     expect(result.provider).toBe("openrouter");
     expect(result.model).toBe("perplexity/pplx-embed-v1-0.6b");
     expect(result.dimensions).toBe(1024);
@@ -102,7 +115,7 @@ describe("resolveEmbeddingModel", () => {
       },
     };
 
-    const result = resolveEmbeddingModel(baseConfig, pipeline, "en");
+    const result = resolveEmbeddingModel(baseConfig, pipeline);
 
     expect(result.model).toBe("text-embedding-3-small");
     expect(result.provider).toBe("openai");
@@ -121,12 +134,30 @@ describe("resolveEmbeddingModel", () => {
       },
     };
 
-    const result = resolveEmbeddingModel(baseConfig, pipeline, "en");
+    const result = resolveEmbeddingModel(baseConfig, pipeline);
 
     expect(result.target).toBe("local");
     expect(result.provider).toBe("ollama");
     expect(result.model).toBe("nomic-embed-text");
     expect(result.runtime).toBe("remote");
     expect(result.baseUrl).toBe("http://127.0.0.1:11434/v1");
+  });
+});
+
+describe("vector backends: Chroma was removed (owner decision 2026-11-05)", () => {
+  it("offers lancedb, orama and milvus only; chroma is no backend", () => {
+    expect(resolveVectorBackends(baseConfig, { ...defaultPipelineFeatures, vectorBackends: ["lancedb", "milvus", "orama"] })).toEqual(["lancedb", "milvus", "orama"]);
+    expect(backendRuntime("chroma")).toBe("custom");
+    expect(backendRuntime("milvus")).toBe("service");
+  });
+
+  it("refuses an explicit chroma from VECTOR_BACKENDS or a pipeline, never falling back to another backend", () => {
+    expect(() => resolveVectorBackends({ ...baseConfig, vectorBackends: ["chroma"] }, { ...defaultPipelineFeatures, vectorBackends: [] }))
+      .toThrow(/VECTOR_BACKENDS: unsupported vector backend: chroma .*Chroma support was removed/);
+    // A pipeline that slipped past the schema (an old in-memory run) is refused too, even beside a supported backend.
+    expect(() => resolveVectorBackends(baseConfig, { ...defaultPipelineFeatures, vectorBackends: ["lancedb", "chroma"] as never }))
+      .toThrow(/pipeline.vectorBackends: unsupported vector backend: chroma/);
+    expect(() => resolveVectorBackends({ ...baseConfig, vectorBackends: ["pinecone"] }, { ...defaultPipelineFeatures, vectorBackends: [] }))
+      .toThrow(/unsupported vector backend: pinecone/);
   });
 });

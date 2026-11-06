@@ -19,8 +19,8 @@ import type {
 } from "@docslurp/shared";
 import {
   BILLABLE_UNIT_METRICS,
-  PRICE_CARD,
   searchCredits,
+  searchUnits,
   deferredProfilesEnabled,
   citationLocatorSchema,
   indexConfigHash,
@@ -70,6 +70,8 @@ import {
   servableInProgressVersion,
 } from "../search/eligibility.js";
 import { queryPhraseWindows } from "../search/relevance.js";
+import { estimateTextTokens } from "../search/token-estimate.js";
+import { backoffWords, buildFoldedBackoffTsQuery, hasNonAscii } from "../search/text-fold.js";
 import { currentSearchAdmissionGroup, withSearchSlot, type SearchAdmission } from "../search/search-limiter.js";
 import { currentChatSessionId } from "../lib/chat-agent-context.js";
 import {
@@ -81,9 +83,10 @@ import {
   searchStatementTimeoutMs,
   withSearchSignal,
 } from "../search/query-bounds.js";
+import { FOLDED_INDEX_NAME, foldedIndexReady, foldedUnindexedTimeoutMs } from "../search/folded-index.js";
 import { collectSearchTimings, countSearchEvent, recordSearchPhase, timePhase, type SearchTimings } from "../search/timings.js";
 
-export { MissingWorkspaceScopeError } from "../search/session-setup.js";
+export { CrossWorkspaceScopeError, MissingWorkspaceScopeError, WorkspaceNotFoundError } from "../search/session-setup.js";
 
 export interface SearchChunk {
   id: string;
@@ -1059,6 +1062,12 @@ async function nativeTextSearch(
       countSearchEvent("nativeLexicalError");
       return null;
     }
+    // The native BM25 index tokenizes for English: an accent, Cyrillic or CJK query it cannot match is
+    // answered by the Postgres folded leg instead of returning nothing.
+    if (result.indexed && result.hits.length === 0 && hasNonAscii(query)) {
+      countSearchEvent("nativeLexicalNonAsciiEmpty");
+      return null;
+    }
     if (!result.indexed) {
       countSearchEvent("nativeLexicalUnindexed");
       logNativeLexicalFallback(context.orgId, result.fallback ?? "no-fts-index", result.table);
@@ -1081,58 +1090,42 @@ async function nativeTextSearch(
     .map((chunk, index) => ({ ...chunk, score: 1 / (60 + index + 1) }));
 }
 
+/**
+ * Query words that carry no subject in a conversational question. Negations ("not", "no", "without")
+ * are never listed: dropping them inverted a query's meaning. The words "class" and "course" used to
+ * be listed here, which made "class action settlement" lose its subject.
+ */
 const lexicalBackoffStopWords = new Set([
-  "a",
-  "an",
-  "and",
-  "are",
-  "about",
-  "by",
-  "can",
-  "class",
-  "classes",
-  "course",
-  "courses",
-  "does",
-  "for",
-  "from",
-  "give",
-  "how",
-  "in",
-  "is",
-  "list",
-  "me",
-  "of",
-  "on",
-  "please",
-  "show",
-  "tell",
-  "the",
-  "to",
-  "what",
-  "which",
-  "with",
+  "a", "an", "and", "are", "about", "by", "can", "does", "for", "from", "give", "how", "in", "is",
+  "list", "me", "of", "on", "please", "show", "tell", "the", "to", "what", "which", "with",
 ]);
 
-function buildLexicalBackoffTsQuery(query: string): string | null {
-  const tokens = query
-    .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, " ")
-    .split(/\s+/)
-    .map((token) => token.trim())
-    .filter(
-      (token) =>
-        token.length >= 3 &&
-        !lexicalBackoffStopWords.has(token) &&
-        /[a-z]/.test(token),
-    );
+/** The English-stemmed OR query: Unicode words (accents and non-Latin scripts kept), at least three characters. */
+export function buildLexicalBackoffTsQuery(query: string): string | null {
+  const uniqueTokens = [...new Set(
+    backoffWords(query).filter((token) => token.length >= 3 && !lexicalBackoffStopWords.has(token) && /\p{L}/u.test(token)),
+  )];
+  return uniqueTokens.length === 0 ? null : uniqueTokens.join(" | ");
+}
 
-  const uniqueTokens = [...new Set(tokens)];
-  if (uniqueTokens.length === 0) {
-    return null;
+/** The folded leg's OR query (see search/text-fold.ts): words plus CJK character pairs. */
+export function buildFoldedLexicalBackoffQuery(query: string): string | null {
+  return buildFoldedBackoffTsQuery(query, lexicalBackoffStopWords);
+}
+
+/** Round-robin merge of two ranked lists, dropping repeats, so neither text-search configuration buries the other. */
+function interleaveRanked(first: ChunkRow[], second: ChunkRow[]): ChunkRow[] {
+  const seen = new Set<string>();
+  const merged: ChunkRow[] = [];
+  for (let index = 0; index < Math.max(first.length, second.length); index += 1) {
+    for (const row of [first[index], second[index]]) {
+      if (row && !seen.has(row.id)) {
+        seen.add(row.id);
+        merged.push(row);
+      }
+    }
   }
-
-  return uniqueTokens.join(" | ");
+  return merged;
 }
 
 function mapRankedChunkRows(rows: ChunkRow[], partial = false, phraseIds?: ReadonlySet<string>): SearchChunk[] {
@@ -1167,7 +1160,14 @@ export function lexicalCandidateLimit(env: NodeJS.ProcessEnv = process.env): num
     : 1_000;
 }
 
-type LexicalParser = "websearch" | "plain" | "tsquery";
+/**
+ * `websearch`, `plain` and `tsquery` read the English-stemmed `ts_content`. `folded` and `folded-tsquery` read
+ * to_tsvector('simple', docslurp_fold_text(text)): the 'simple' configuration over accent-folded, CJK-split text
+ * (migration 0121), which has no stop words, so negations survive, and matches accent variants and CJK substrings.
+ * The expression must stay character-identical to the GIN index built by scripts/folded-search-index.mjs, or the planner
+ * cannot use it; without that index these legs scan the workspace's chunks and are cut off by the search statement timeout.
+ */
+type LexicalParser = "websearch" | "plain" | "tsquery" | "folded" | "folded-tsquery";
 
 /**
  * Top `limit` chunks matching `query` (parsed by websearch_to_tsquery,
@@ -1229,23 +1229,69 @@ export function rankedLexicalChunks(client: SqlClient, args: {
           from candidates order by score desc, id limit ${limit}
         )
         ${topChunks}
+      `;    case "folded":
+      return client<ChunkRow[]>`
+        with candidates as materialized (
+          select c.id, to_tsvector('simple'::regconfig, docslurp_fold_text(c.text)) as ts_folded
+          from document_chunks c join documents d on d.id = c.document_id
+          where ${where} and to_tsvector('simple'::regconfig, docslurp_fold_text(c.text)) @@ websearch_to_tsquery('simple', docslurp_fold_text(${query}))
+          limit ${candidates}
+        ), ranked as (
+          select id, ts_rank_cd(ts_folded, websearch_to_tsquery('simple', docslurp_fold_text(${query}))) as score
+          from candidates order by score desc, id limit ${limit}
+        )
+        ${topChunks}
+      `;
+    case "folded-tsquery":
+      return client<ChunkRow[]>`
+        with candidates as materialized (
+          select c.id, to_tsvector('simple'::regconfig, docslurp_fold_text(c.text)) as ts_folded
+          from document_chunks c join documents d on d.id = c.document_id
+          where ${where} and to_tsvector('simple'::regconfig, docslurp_fold_text(c.text)) @@ to_tsquery('simple', ${query})
+          limit ${candidates}
+        ), ranked as (
+          select id, ts_rank_cd(ts_folded, to_tsquery('simple', ${query})) as score
+          from candidates order by score desc, id limit ${limit}
+        )
+        ${topChunks}
       `;
   }
 }
 
-async function textSearch(
+export async function textSearch(
   query: string,
   _userId: string,
   options: SearchOptions,
 ): Promise<SearchChunk[]> {
   const limit = options.limit ?? 20;
   const where = buildChunkSearchWhere(options.filters, options.runId);
-  const lexical = (parser: LexicalParser, text: string) =>
-    boundedSearchQuery((client) => rankedLexicalChunks(client, { where, parser, query: text, limit }));
+  const lexical = async (parser: LexicalParser, text: string) => {
+    if (parser !== "folded" && parser !== "folded-tsquery") {
+      return await boundedSearchQuery((client) => rankedLexicalChunks(client, { where, parser, query: text, limit }));
+    }
+    // The folded leg's GIN index is built after the migration (scripts/folded-search-index.mjs). Until then the leg
+    // scans the workspace's chunks, so it runs on a short timeout and is dropped, not retried, when it is cut off:
+    // the English results of the same search must survive it.
+    const indexed = await foldedIndexReady();
+    try {
+      return await boundedSearchQuery(
+        (client) => rankedLexicalChunks(client, { where, parser, query: text, limit }),
+        indexed ? {} : { timeoutMs: Math.min(foldedUnindexedTimeoutMs(), searchStatementTimeoutMs() || Infinity) },
+      );
+    } catch (error) {
+      if (indexed || !isSearchStatementTimeout(error)) throw error;
+      countSearchEvent("foldedUnindexedTimeout");
+      console.warn(`[search] folded keyword leg cut off after ${foldedUnindexedTimeoutMs()}ms: ${FOLDED_INDEX_NAME} is not built (docs/rollout-0121-0127.md)`);
+      return [] as ChunkRow[];
+    }
+  };
 
   // websearch_to_tsquery handles quoted phrases, AND/OR/-, and is more forgiving than
   // plainto_tsquery on special characters. Fall back to plainto_tsquery on parse errors.
   const lexicalBackoffQuery = buildLexicalBackoffTsQuery(query);
+  const foldedBackoffQuery = buildFoldedLexicalBackoffQuery(query);
+  // Accents, non-Latin scripts and CJK are what the English configuration cannot see through.
+  const nonAscii = hasNonAscii(query);
 
   try {
     try {
@@ -1254,17 +1300,27 @@ async function textSearch(
         return mapRankedChunkRows(rows);
       }
 
-      if (!lexicalBackoffQuery) {
+      if (nonAscii) {
+        const foldedRows = await lexical("folded", query);
+        if (foldedRows.length > 0) return mapRankedChunkRows(foldedRows);
+      }
+
+      if (!lexicalBackoffQuery && !foldedBackoffQuery) {
         return [];
       }
 
-      const lexicalRows = await lexical("tsquery", lexicalBackoffQuery);
+      const lexicalRows = lexicalBackoffQuery ? await lexical("tsquery", lexicalBackoffQuery) : [];
+      // The folded OR leg runs for non-ASCII queries, and as a last resort for ASCII ones typed without the
+      // accents the documents carry ("Muller" for "Müller"), so the common English path is unchanged.
+      const foldedLexicalRows = foldedBackoffQuery && (nonAscii || lexicalRows.length === 0)
+        ? await lexical("folded-tsquery", foldedBackoffQuery)
+        : [];
       // Preserve phrase matches in conversational queries: OR backoff alone lets
       // repeated generic words crowd out the subject of the question.
       const phrases = queryPhraseWindows(query).map((window) => `"${window}"`).join(" OR ");
       const phraseRows = phrases ? await lexical("websearch", phrases) : [];
       const seen = new Set<string>();
-      return mapRankedChunkRows([...phraseRows, ...lexicalRows].filter(row => {
+      return mapRankedChunkRows([...phraseRows, ...interleaveRanked(lexicalRows, foldedLexicalRows)].filter(row => {
         if (seen.has(row.id)) return false;
         seen.add(row.id);
         return true;
@@ -1279,10 +1335,13 @@ async function textSearch(
         if (rows.length > 0) {
           return mapRankedChunkRows(rows);
         }
-        if (!lexicalBackoffQuery) {
+        if (!lexicalBackoffQuery && !foldedBackoffQuery) {
           return [];
         }
-        return mapRankedChunkRows(await lexical("tsquery", lexicalBackoffQuery), true);
+        return mapRankedChunkRows(interleaveRanked(
+          lexicalBackoffQuery ? await lexical("tsquery", lexicalBackoffQuery) : [],
+          foldedBackoffQuery && (nonAscii || !lexicalBackoffQuery) ? await lexical("folded-tsquery", foldedBackoffQuery) : [],
+        ), true);
       } catch (fallbackError) {
         if (isSearchBoundError(fallbackError)) throw fallbackError;
         return [];
@@ -1321,6 +1380,13 @@ async function progressivePageSearch(
 
   const limit = options.limit ?? 20;
   const whereClause = buildProgressivePageWhere(options.filters, options.runId);
+  // Pages have no stored vector, so the folded vector is computed per row, and only for non-ASCII queries
+  // (accents, Cyrillic, CJK), where the English configuration cannot match.
+  const foldedQuery = hasNonAscii(query);
+  const foldedPageColumn = foldedQuery ? sql`, to_tsvector('simple', docslurp_fold_text(p.text)) as ts_folded` : sql``;
+  const foldedPageMatch = foldedQuery
+    ? sql` or progressive_pages.ts_folded @@ websearch_to_tsquery('simple', docslurp_fold_text(${query}))`
+    : sql``;
 
   const rows = await degradeOnTimeout<ProgressivePageRow[]>("progressive", [], () => boundedSearchQuery((client) => client<ProgressivePageRow[]>`
     select
@@ -1344,7 +1410,7 @@ async function progressivePageSearch(
           p.token_estimate,
           p.created_at,
           d.filename,
-          to_tsvector('english', p.text) as ts_content
+          to_tsvector('english', p.text) as ts_content${foldedPageColumn}
         from document_pages p
         join documents d on d.id = p.document_id
         join document_run_stage_states page_stage
@@ -1364,7 +1430,7 @@ async function progressivePageSearch(
           and not ${earlyLexicalDocument("d")}
       ) progressive_pages
       where ${whereClause}
-        and progressive_pages.ts_content @@ websearch_to_tsquery('english', ${query})
+        and (progressive_pages.ts_content @@ websearch_to_tsquery('english', ${query})${foldedPageMatch})
       order by ts_rank_cd(progressive_pages.ts_content, websearch_to_tsquery('english', ${query})) desc
       limit ${limit}
   `), Boolean(options.filters?.geo));
@@ -1387,6 +1453,9 @@ async function completedPageSearch(args: {
 
   try {
     const limit = args.options.limit ?? 20;
+    const completedFoldedMatch = hasNonAscii(args.query)
+      ? sql` or to_tsvector('simple', docslurp_fold_text(p.text)) @@ websearch_to_tsquery('simple', docslurp_fold_text(${args.query}))`
+      : sql``;
     const pageRows = await boundedSearchQuery((client) => client<ProgressivePageRow[]>`
       select p.id, p.document_id, p.run_id, p.page_number, p.text,
              p.token_estimate, d.filename,
@@ -1398,7 +1467,7 @@ async function completedPageSearch(args: {
         and d.status = 'completed' and d.superseded_at is null
         and c.id is null
         and ${retrievalScope({ workspaceId: args.workspaceId, filters: args.options.filters, runId: args.options.runId }).page()}
-        and to_tsvector('english', p.text) @@ websearch_to_tsquery('english', ${args.query})
+        and (to_tsvector('english', p.text) @@ websearch_to_tsquery('english', ${args.query})${completedFoldedMatch})
       order by rank asc
       limit ${limit}
     `);
@@ -1450,7 +1519,7 @@ async function communitySummarySearch(
     text: qualifyCommunitySummary(row.summary, { ...options.filters, ...(options.runId ? { runId: options.runId } : {}) }),
     headingPath: [row.label],
     pageNumber: null,
-    tokenEstimate: Math.ceil(qualifyCommunitySummary(row.summary, { ...options.filters, ...(options.runId ? { runId: options.runId } : {}) }).length / 4),
+    tokenEstimate: estimateTextTokens(qualifyCommunitySummary(row.summary, { ...options.filters, ...(options.runId ? { runId: options.runId } : {}) })),
     score: 1 / (120 + row.rank),
     filename: `${row.label} community`,
     pageNumbers: [],
@@ -1588,7 +1657,7 @@ export async function hybridSearch(rawQuery: string, userId: string, options: Se
     result.timings = timings;
     console.info(`[search-timing] ${Object.entries(timings).map(([key, ms]) => `${key.replace(/Ms$/, "")}=${ms}`).join(" ")} results=${result.results.length}`);
     // Price card: one search per root query (sub-searches of decomposition and
-    // multi-hop are part of it); LLM query strategies count as llmSearchMultiplier.
+    // multi-hop are part of it); LLM query strategies count as the provider's searchUnits.
     // Searches a chat turn runs are part of the chat answer's price.
     if (!options.rootSessionId && !currentChatTurn()) await chargeSearch(result, userId, activity.id);
     report?.({ ...activity, status: "success", runtimeMs: Date.now() - started, resultCount: result.results.length,
@@ -1603,10 +1672,10 @@ export async function hybridSearch(rawQuery: string, userId: string, options: Se
 }
 
 /**
- * Bill one completed root search (PRICE_CARD.searchPer1k). A search that ran an
+ * Bill one completed root search (pricing provider). A search that ran an
  * LLM query strategy (HyDE, rewrite, stepback, compression, self-query,
- * decomposition: any call with output tokens) counts as llmSearchMultiplier
- * searches. Query embeddings and strategy tokens are our cost, recorded
+ * decomposition: any call with output tokens) counts as the pricing
+ * provider's searchUnits. Query embeddings and strategy tokens are our cost, recorded
  * non-billable by the Search Session journal.
  */
 async function chargeSearch(result: SearchResponse, userId: string, searchId: string): Promise<void> {
@@ -1623,7 +1692,7 @@ async function chargeSearch(result: SearchResponse, userId: string, searchId: st
         amount: 1,
         unit: "search",
         credits: searchCredits(1, { llmStrategies }),
-        metadata: { llmStrategies, searchUnits: llmStrategies ? PRICE_CARD.llmSearchMultiplier : 1 },
+        metadata: { llmStrategies, searchUnits: searchUnits({ llmStrategies }) },
       },
     });
   } catch (error) {

@@ -9,6 +9,9 @@ import {
   WORKSPACE_INPUT_MAX_LENGTH,
   workspaceTemplateKeySchema,
   indexingModeSchema,
+  quoteFileSchema,
+  quoteSettingsSchema,
+  pricingVersion,
 } from "@docslurp/shared";
 
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
@@ -26,10 +29,14 @@ import {
   abortDirectUploadSession,
   completeDirectUploadFile,
   createDirectUploadSession,
+  describeDirectUploadSession,
   getDirectUploadSessionDescription,
+  loadDirectUploadSession,
   directUploadSessionBelongsToOrganization,
   signDirectUploadParts,
 } from "../services/direct-upload-session.js";
+import { assertSessionReplayable, assertSessionWorkspaceStillContributable, createSessionIdempotently } from "../services/direct-session-idempotency.js";
+import { parseIdempotencyKey } from "../services/idempotency.js";
 import { isRunCreationBlockedError } from "../services/runs.js";
 import { UnreadableSourceError } from "../services/source-metadata.js";
 import { WorkspaceAccessError } from "../services/default-workspace.js";
@@ -48,7 +55,7 @@ import {
   type WorkspaceIntakePorts,
 } from "../services/workspace-intake.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
-import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
+import { apiErrorResponse, apiStatusError, nativeBodyLimit } from "../lib/api-error.js";
 import { findDefaultWorkspace, getWorkspace } from "../services/workspaces.js";
 import { IndexingModeError } from "../services/workspace-indexing-mode.js";
 import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
@@ -64,6 +71,12 @@ export const canonicalIdSchema = z.string().trim().min(1).max(MAX_CANONICAL_ID_L
 
 /** The public `workspace` field: a workspace UUID, slug, former slug or name; created when no workspace matches. */
 export const workspaceInputSchema = z.string().max(WORKSPACE_INPUT_MAX_LENGTH);
+
+/** GET /direct/sessions/:id (unless status only), part signing, file completion and confirm: the routes that mint URLs or ingest. */
+export function sessionRouteNeedsContribute(method: string, path: string, statusOnly: boolean): boolean {
+  if (method === "GET") return /\/direct\/sessions\/[^/]+\/?$/.test(path) && !statusOnly;
+  return method === "POST" && /\/direct\/sessions\/[^/]+\/(?:files\/[^/]+\/parts\/sign|files\/complete|confirm)\/?$/.test(path);
+}
 
 /** A restricted API key's workspace allowlist (null for sessions and unrestricted keys). */
 export function actorAllowedWorkspaceIds(actor: RequestActor): readonly string[] | null {
@@ -95,6 +108,8 @@ const ingestUrlSchema = z.object({
 });
 
 export const directUploadFileSchema = z.object({
+  /** The client's own id for this file, echoed on the session's file and on a rejection. */
+  clientId: z.string().min(1).max(128).optional(),
   singlePart: z.boolean().optional(),
   filename: z.string().min(1).max(512),
   mimeType: z.string().min(1).max(256),
@@ -114,7 +129,7 @@ const createDirectSessionSchema = z.object({
   newWorkspace: z.boolean().optional(),
   templateKey: workspaceTemplateKeySchema.optional(),
   pipeline: pipelineFeatureOverridesSchema.optional(),
-  files: z.array(directUploadFileSchema).min(1),
+  files: z.array(directUploadFileSchema).min(1).max(1000),
 });
 
 const completeDirectFileSchema = z.object({
@@ -252,6 +267,18 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
         // The `workspace` value itself is resolved inside the key's org and allowlist by intake.
       }
     }
+    // Every route that mints signed upload URLs for an existing session, or ingests it, re-checks that this user may still
+    // contribute to its workspace (a revoked or demoted share gets 403 and no URLs). Status-only reads and abort do not.
+    if (sessionMatch && sessionRouteNeedsContribute(c.req.method, c.req.path, c.req.query("statusOnly") === "true")) {
+      const loaded = await loadDirectUploadSession(sessionMatch[1], actor.userId);
+      if (loaded) {
+        try {
+          await assertSessionWorkspaceStillContributable(loaded.session, actor.userId);
+        } catch (error) {
+          return workspaceIntakeErrorResponse(c, error) ?? apiStatusError(c, 403, "Forbidden");
+        }
+      }
+    }
     await next();
   })
   .post(
@@ -268,19 +295,38 @@ export const createUploadsRoutes = (ports: WorkspaceIntakePorts = workspaceIntak
         const target = await directUploadTarget(getRequestActor(c), input, orgId);
         // Overrides only; confirm merges them onto the workspace pipeline and its template locks.
         const pipeline = parseWorkspaceIntakePipeline({ ...input.pipeline, speedBoost: input.speedBoost === true, ...(input.indexingMode ? { indexingMode: input.indexingMode } : {}) });
-        const session = await createDirectUploadSession({
-          userId,
-          orgId,
-          apiKeyId: c.get("apiKey")?.keyId ?? null,
-          allowedWorkspaceIds: actorAllowedWorkspaceIds(getRequestActor(c)),
-          workspaceId: target.workspaceId,
-          workspaceName: target.workspaceName,
-          templateKey: input.templateKey ?? null,
-          pipeline,
-          files: input.files,
-          tags: input.tags,
+        const actor = getRequestActor(c);
+        const parsedKey = parseIdempotencyKey(c.req.header("Idempotency-Key"));
+        if ("error" in parsedKey) return apiStatusError(c, 400, parsedKey.error);
+        const { body: session, status, replayed } = await createSessionIdempotently({
+          key: parsedKey.key,
+          // The key and target are part of the scope: another key of this user, or a request for another workspace, never replays this session.
+          scope: { orgId, userId, apiKeyId: c.get("apiKey")?.keyId ?? null, workspace: target.workspaceId ?? (target.workspaceName ? `name:${target.workspaceName}` : null) },
+          request: input,
+          create: () => createDirectUploadSession({
+            userId,
+            orgId,
+            apiKeyId: c.get("apiKey")?.keyId ?? null,
+            allowedWorkspaceIds: actorAllowedWorkspaceIds(actor),
+            workspaceId: target.workspaceId,
+            workspaceName: target.workspaceName,
+            templateKey: input.templateKey ?? null,
+            pipeline,
+            files: input.files,
+            tags: input.tags,
+          }),
+          describe: async (sessionId) => {
+            // A replay is authorized like any session route: same organization, same key, inside the key's workspace allowlist.
+            const loaded = await loadDirectUploadSession(sessionId, userId);
+            if (!loaded) return null;
+            assertSessionReplayable(loaded.session, { orgId, apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null, allowedWorkspaceIds: actorAllowedWorkspaceIds(actor) });
+            // ... and the user may still contribute to that workspace (a share revoked since gets no URLs).
+            await assertSessionWorkspaceStillContributable(loaded.session, userId);
+            return await describeDirectUploadSession(loaded);
+          },
         });
-        return c.json(session, 201);
+        if (replayed) c.header("Idempotency-Replayed", "true");
+        return c.json(session, status);
       } catch (error) {
         const response = workspaceIntakeErrorResponse(c, error);
         if (response) return response;
@@ -513,24 +559,27 @@ export async function directUploadTarget(
   return found ? { workspaceId: found.id, workspaceName: null } : create(lookup.ref.name);
 }
 
+/** Largest estimate request body: 1,000 files with a capped profile (FILE_PROFILE_MAX_BYTES) each, plus names. */
+const UPLOAD_ESTIMATE_MAX_BODY_BYTES = 6 * 1024 * 1024;
+
 const uploadEstimateSchema = z.object({
   speedBoost: z.boolean().optional(),
-  files: z.array(z.object({
-    name: z.string().min(1).max(1024),
-    size: z.number().int().nonnegative(),
-    pages: z.number().int().positive().optional(),
-    /** MIME type, so audio and video are priced by duration even when the name has no extension. */
-    type: z.string().max(255).optional(),
-    /** Length in seconds when the client can read it; otherwise estimated from the size. */
-    durationSeconds: z.number().positive().max(24 * 3600).optional(),
-  })).min(1).max(1000),
+  /** Files by name, size and type, each optionally with a client file profile (`@docslurp/estimate`); untrusted, estimate only. */
+  files: z.array(quoteFileSchema).min(1).max(1000),
+  /** Knobs to quote with instead of the workspace's own (the same as `POST /v1/estimate`). */
+  settings: quoteSettingsSchema.partial().optional(),
   workspace: workspaceInputSchema.optional(),
   orgId: z.string().optional(),
 });
 
-/** `POST /v1/uploads/estimate`: what ingesting these files would cost and take, before anything is stored. */
+/**
+ * `POST /v1/uploads/estimate`: what ingesting these files would cost and take, before anything is stored. Files may carry a
+ * file profile from the offline profiler; profiles are validated, clamped and used only to estimate. The upload itself is
+ * billed by what the worker measures, never by a profile.
+ */
 export const uploadEstimateRoutes = new Hono().post(
   "/estimate",
+  nativeBodyLimit(UPLOAD_ESTIMATE_MAX_BODY_BYTES),
   zValidator("json", uploadEstimateSchema),
   async (c) => {
     const userId = c.get("sessionUser").id;
@@ -551,9 +600,21 @@ export const uploadEstimateRoutes = new Hono().post(
     if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) {
       return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     }
-    const { estimate, media } = await estimateUpload({ files: body.files, workspace, speedBoost: body.speedBoost === true });
-    // `orgId` is the organization whose credits the upload would spend, for reading its balance.
-    return c.json({ estimate, media, billing: billingState(), orgId: workspace.orgId, billingExempt: isBillingExemptOrg(workspace.orgId) });
+    const { estimate, media, profile, quote } = await estimateUpload({ files: body.files, workspace, speedBoost: body.speedBoost === true, settings: body.settings });
+    // `orgId` is the organization whose credits the upload would spend, for reading its balance. `profile` is the
+    // workspace's settings the estimate priced with; `kind` labels the answer an estimate, never a charge.
+    return c.json({
+      kind: "estimate" as const,
+      estimate,
+      media,
+      profile,
+      pricingVersion: pricingVersion(),
+      // The full estimate (ingest, monthly hosting and usage, lines) for the workspace's settings and any overrides.
+      quote,
+      billing: billingState(),
+      orgId: workspace.orgId,
+      billingExempt: isBillingExemptOrg(workspace.orgId),
+    });
   },
 );
 acceptApiKeys(uploadEstimateRoutes);

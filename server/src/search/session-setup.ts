@@ -23,6 +23,26 @@ import { resolveWorkspaceRetrievalControls } from "./workspace-retrieval-session
 import { parseIndexConfigs, type IndexConfigMap } from "./index-serving.js";
 import { earlyLexicalDocument, fullyIndexedDocument, servableInProgressVersion } from "./eligibility.js";
 
+/**
+ * The workspace does not exist or the caller may not see it (the two are indistinguishable by design).
+ * The message stays "Workspace not found" for routes that still match it; new code tests `instanceof`.
+ */
+export class WorkspaceNotFoundError extends Error {
+  readonly status = 404 as const;
+  constructor(message = "Workspace not found") {
+    super(message);
+    this.name = "WorkspaceNotFoundError";
+  }
+}
+
+/** A retrieval scope spanning more than one workspace (HTTP 400). */
+export class CrossWorkspaceScopeError extends Error {
+  constructor() {
+    super("Search scope must stay within a single workspace");
+    this.name = "CrossWorkspaceScopeError";
+  }
+}
+
 export class MissingWorkspaceScopeError extends Error {
   constructor() {
     super(
@@ -197,19 +217,13 @@ export async function loadSearchWorkspaceContext(workspaceId: string, userId: st
       s.workspace_id as settings_workspace_id, s.user_id, s.typo_tolerance, s.dedupe_by_filename, s.ranking_rules,
       s.boosts, s.pinned_results, s.synonyms, s.compat_settings, s.rules, s.compat_metadata
     from workspaces w
-    join organizations o on o.id = w.org_id
-    left join org_memberships om on om.org_id = w.org_id and om.user_id = ${userId}
-    left join workspace_members wm on wm.workspace_id = w.id and wm.user_id = ${userId}
     left join workspace_search_settings s on s.workspace_id = w.id
     where w.id = ${workspaceId}
-      and (
-        (om.user_id is not null and (w.user_id = ${userId} or wm.user_id is not null or om.role in ('owner', 'admin') or w.is_default))
-        or (wm.user_id is not null and o.is_personal)
-      )
+      and docslurp_workspace_access(w.id, ${userId})
     limit 1
   `;
   const allowlist = currentRequestApiKeyWorkspaceIds();
-  if (!row || (allowlist && !allowlist.includes(row.workspace_id))) throw new Error("Workspace not found");
+  if (!row || (allowlist && !allowlist.includes(row.workspace_id))) throw new WorkspaceNotFoundError();
   let settings: WorkspaceSearchSettings;
   try {
     settings = parseWorkspaceSearchSettingsRow(row.settings_workspace_id ? row as SettingsRow : undefined, row.workspace_id, userId);
@@ -242,7 +256,7 @@ async function resolveSearchWorkspaceScope(args: {
   if (requestedWorkspaceId) {
     const access = await getWorkspaceAccess(requestedWorkspaceId, args.userId);
     if (!access) {
-      throw new Error("Workspace not found");
+      throw new WorkspaceNotFoundError();
     }
     return { workspaceId: access.workspaceId, orgId: access.orgId };
   }
@@ -258,28 +272,17 @@ async function resolveSearchWorkspaceScope(args: {
       select distinct d.workspace_id, w.org_id
       from documents d
       join workspaces w on w.id = d.workspace_id
-      left join org_memberships om
-        on om.org_id = w.org_id
-        and om.user_id = ${args.userId}
-      left join workspace_members wm
-        on wm.workspace_id = w.id
-        and wm.user_id = ${args.userId}
       where d.id = any(${sql.array(documentIds)})
-        and (
-          -- G-06: team-org access always requires org membership; only a
-          -- personal org's direct shares stand alone.
-          (om.user_id is not null and (w.user_id = ${args.userId} or wm.user_id is not null or om.role in ('owner', 'admin') or w.is_default))
-          or (wm.user_id is not null and exists (select 1 from organizations o where o.id = w.org_id and o.is_personal))
-        )
+        and docslurp_workspace_access(w.id, ${args.userId})
         and (${keyAllowlist}::text[] is null or w.id = any(${keyAllowlist}::text[]))
     `;
 
     if (rows.length === 0) {
-      throw new Error("Workspace not found");
+      throw new WorkspaceNotFoundError();
     }
 
     if (rows.length > 1) {
-      throw new Error("Search scope must stay within a single workspace");
+      throw new CrossWorkspaceScopeError();
     }
 
     return { workspaceId: rows[0]!.workspace_id, orgId: rows[0]!.org_id };
@@ -290,25 +293,14 @@ async function resolveSearchWorkspaceScope(args: {
       select runs.workspace_id, w.org_id
       from workspace_runs runs
       join workspaces w on w.id = runs.workspace_id
-      left join org_memberships om
-        on om.org_id = w.org_id
-        and om.user_id = ${args.userId}
-      left join workspace_members wm
-        on wm.workspace_id = w.id
-        and wm.user_id = ${args.userId}
       where runs.id = ${args.runId}
-        and (
-          -- G-06: team-org access always requires org membership; only a
-          -- personal org's direct shares stand alone.
-          (om.user_id is not null and (w.user_id = ${args.userId} or wm.user_id is not null or om.role in ('owner', 'admin') or w.is_default))
-          or (wm.user_id is not null and exists (select 1 from organizations o where o.id = w.org_id and o.is_personal))
-        )
+        and docslurp_workspace_access(w.id, ${args.userId})
         and (${keyAllowlist}::text[] is null or w.id = any(${keyAllowlist}::text[]))
       limit 1
     `;
 
     if (!row) {
-      throw new Error("Workspace not found");
+      throw new WorkspaceNotFoundError();
     }
 
     return { workspaceId: row.workspace_id, orgId: row.org_id };

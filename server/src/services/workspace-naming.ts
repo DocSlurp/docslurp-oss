@@ -6,8 +6,10 @@ import { sql } from "../db.js";
 /**
  * Automatic workspace titles move forward through phases, each a stronger signal
  * than the last: an untitled workspace (`empty`), its uploaded filenames
- * (`upload`), its content (`content`: a document summary, else the first
- * heading) and finally the subject of its first chat question (`chat`).
+ * (`upload`) and its content (`content`: a document summary, else the first
+ * heading). A chat message never names a workspace: it is one member's private
+ * question ("thanks!" would become the name everyone sees). The `chat` phase
+ * stays in the type only for titles written before this rule.
  *
  * The state lives in `workspace_search_settings.compat_metadata.autoTitle`
  * (`{ phase, name, source? }`). Automatic naming applies only while
@@ -25,10 +27,6 @@ export function workspaceSubject(value: string): string | null {
   if (!title || /^(?:copyright|all rights reserved)$/i.test(title)) return null;
   const words = title.split(" ").slice(0, 9).join(" ");
   return words.slice(0, 72).replace(/\s+\S*$/, words.length > 72 ? "" : "$&");
-}
-
-export function workspaceChatSubject(message: string): string | null {
-  return workspaceSubject(message.trim().replace(/^(?:please\s+)?(?:can you|could you|help me|i want to|i need to)\s+/i, "").replace(/[?!]+$/, ""));
 }
 
 const SUMMARY_NOTICE = /^Sampled document overview \([^)]*\)\.\s*/i;
@@ -158,26 +156,13 @@ export async function nameWorkspaceFromUpload(args: { workspaceId: string; filen
 }
 
 /**
- * Advances automatic titles from content (lazily, on workspace reads) or from
- * the first chat question (`firstMessage`). Content prefers the first stored
+ * Advances automatic titles from content (lazily, on workspace reads). Content prefers the first stored
  * document summary over the first chunk heading or Index Map title; a
  * heading-titled workspace is upgraded once when a summary arrives. A manual
  * edit stops automatic naming.
  */
-export async function refineWorkspaceNames(workspaceIds: string[], firstMessage?: string) {
+export async function refineWorkspaceNames(workspaceIds: string[]) {
   if (!workspaceIds.length) return;
-  if (firstMessage) {
-    const name = workspaceChatSubject(firstMessage);
-    if (!name) return;
-    const rows = await sql<{ id: string; name: string }[]>`
-      select w.id, w.name from workspaces w
-      join workspace_search_settings s on s.workspace_id = w.id
-      where w.id = any(${workspaceIds}) and s.compat_metadata -> 'autoTitle' ->> 'name' = w.name
-        and s.compat_metadata -> 'autoTitle' ->> 'phase' in ('empty', 'upload', 'content')
-    `;
-    for (const row of rows) await applyAutoTitle({ workspaceId: row.id, currentName: row.name, name, phase: "chat" });
-    return;
-  }
   const rows = await sql<{ id: string; name: string; phase: AutoTitlePhase; summary: string | null; title: string | null }[]>`
     select w.id, w.name,
       s.compat_metadata -> 'autoTitle' ->> 'phase' as phase,

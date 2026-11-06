@@ -488,7 +488,7 @@ describe("fitted head parity with the offline pipeline", () => {
 
   it("classifies targets like the offline fit", () => {
     expect(targetClass("native:pdf-text")).toBe("native");
-    expect(targetClass("ocr:tesseract")).toBe("ocr");
+    expect(targetClass("ocr:ppocr")).toBe("ocr");
     expect(targetClass("vlm:private/mineru2.5")).toBe("parser");
     expect(targetClass("vlm:openrouter/z-ai/glm-5.3-flash")).toBe("vlm");
   });

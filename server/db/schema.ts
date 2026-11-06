@@ -352,6 +352,14 @@ export const documents = pgTable(
     versionNumber: integer("version_number").default(1).notNull(),
     previousVersionId: text("previous_version_id"),
     sourceSha256: text("source_sha256"),
+    fileFacts: jsonb("file_facts"),
+    /** Pages billed when they differ from `pageCount` (the page basis): the worker's measured count of an Office or EPUB file (migration 0126). */
+    billingPages: integer("billing_pages"),
+    billingPagesMethod: text("billing_pages_method"),
+    /** `counted` or `assumed` (intake could not count the pages; migration 0126). */
+    pageCountSource: text("page_count_source").default("assumed").notNull(),
+    /** The page count admission priced, set at insert and immutable (migration 0130 trigger); the worker authorizes measured pages above it. */
+    intakePageCount: integer("intake_page_count"),
     dedupedFromDocumentId: text("deduped_from_document_id"),
     reusedFromDocumentId: text("reused_from_document_id"),
     dedupScope: text("dedup_scope"),
@@ -991,6 +999,8 @@ export const webhooks = pgTable(
   {
     id: text().primaryKey().notNull(),
     userId: text("user_id").notNull(),
+    /** The organization whose runs this webhook receives, whoever started them. The only tenant scope of a webhook. */
+    orgId: text("org_id").notNull(),
     url: text().notNull(),
     secret: text().notNull(),
     events: text().array().default(["run.completed", "run.failed"]).notNull(),
@@ -1008,6 +1018,11 @@ export const webhooks = pgTable(
       columns: [table.userId],
       foreignColumns: [user.id],
       name: "webhooks_user_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.orgId],
+      foreignColumns: [organizations.id],
+      name: "webhooks_org_id_fkey",
     }).onDelete("cascade"),
   ],
 );
@@ -1036,6 +1051,8 @@ export const documentChunks = pgTable(
       .notNull(),
   },
   (table) => [
+    // The folded keyword leg reads to_tsvector('simple', docslurp_fold_text(text)) (migration 0121). Its GIN expression
+    // index, document_chunks_ts_folded_expr_idx, is built CONCURRENTLY by scripts/folded-search-index.mjs, not by a migration.
     index("document_chunks_ts_content_idx").using(
       "gin",
       table.tsContent.asc().nullsLast().op("tsvector_ops"),
@@ -1287,7 +1304,7 @@ export const apiKeys = pgTable(
       .defaultNow()
       .notNull(),
     revokedAt: timestamp("revoked_at", { withTimezone: true, mode: "string" }),
-    orgId: text("org_id"),
+    orgId: text("org_id").notNull(),
     materializationPolicy: jsonb("materialization_policy").default({}).notNull(),
   },
   (table) => [
@@ -2248,6 +2265,8 @@ export const uploadSessionFiles = pgTable(
     sha256: text(),
     canonicalId: text("canonical_id"),
     sourcePath: text("source_path").default("").notNull(),
+    requestIndex: integer("request_index"),
+    clientId: text("client_id"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
@@ -2930,6 +2949,9 @@ export const orgMemberships = pgTable(
       table.userId.asc().nullsLast().op("text_ops"),
       table.createdAt.desc().nullsFirst().op("text_ops"),
     ),
+    // One organization per user while DOCSLURP_MAX_ORGS_PER_USER is 1 (migration 0127, services/org-membership-limit.ts).
+    // Allowing several means dropping this index and raising that limit.
+    uniqueIndex("org_memberships_one_org_per_user").using("btree", table.userId.asc().nullsLast().op("text_ops")),
     foreignKey({
       columns: [table.orgId],
       foreignColumns: [organizations.id],

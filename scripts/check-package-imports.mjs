@@ -7,19 +7,20 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { releasePackages } from "./package-release.mjs";
-import { checkAppServerImports, checkServerBoundary } from "./lib/server-boundary.mjs";
+import { checkAppServerImports, checkEstimatorBoundary, checkServerBoundary } from "./lib/server-boundary.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 
 // Static boundary rule: server/ must stay extractable without app/ or other
 // packages' sources. `--boundaries` runs only this check (no build required).
-const boundaryViolations = [...checkServerBoundary(root), ...checkAppServerImports(root)];
+const boundaryViolations = [...checkServerBoundary(root), ...checkAppServerImports(root), ...checkEstimatorBoundary(root)];
 for (const violation of boundaryViolations) console.error(`✖ server boundary: ${violation}`);
 if (boundaryViolations.length) {
   console.error(`${boundaryViolations.length} server import-boundary violation(s)`);
   process.exit(1);
 }
 console.log("✔ server/ import boundaries (no app/ imports, no package src/ deep imports, worker only via @docslurp/worker/testing in tests); server/db/ is covered");
+console.log("✔ server/, worker/, packages/shared and packages/sdk never load the offline estimator's file probes");
 if (process.argv.includes("--boundaries")) process.exit(0);
 
 function jsTargets(exportsField, main) {

@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { resolveScriptsDir } from "./scripts-dir.js";
+import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 
 const MAX_BYTES = 64 * 1024 * 1024;
 const METHODS = new Set(["rotate", "flatten", "resize", "png", "jpeg", "webp", "raw", "extract", "composite", "greyscale", "grayscale", "toColourspace", "toColorspace"]);
@@ -45,7 +46,7 @@ async function boundedRead(file: string): Promise<Buffer> {
 }
 
 async function execute(input: unknown, options: unknown, operations: Operation[], terminal: string, args: unknown[]): Promise<unknown> {
-  if (process.env.NODE_ENV !== "production") {
+  if (!vmOnlyParsing()) {
     const { default: localSharp } = await import("sharp");
     let image = localSharp(input as never, options as never);
     for (const op of operations) image = Reflect.apply(Reflect.get(image, op.method), image, op.args);

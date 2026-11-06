@@ -8,7 +8,7 @@ import { withApiErrorDetails } from "../lib/api-error.js";
 
 export const DEFAULT_WORKSPACE_NAME = "Default";
 
-export type WorkspaceAccessErrorCode = Extract<ApiErrorCode, "organization_not_found" | "workspace_not_found" | "workspace_forbidden" | "invalid_request" | "forbidden">;
+export type WorkspaceAccessErrorCode = Extract<ApiErrorCode, "organization_not_found" | "workspace_not_found" | "workspace_forbidden" | "workspace_ambiguous" | "invalid_request" | "forbidden">;
 
 /**
  * A workspace reference that cannot be served to the caller. Extends Hono's
@@ -19,7 +19,7 @@ export type WorkspaceAccessErrorCode = Extract<ApiErrorCode, "organization_not_f
  */
 export class WorkspaceAccessError extends HTTPException {
   constructor(
-    status: 400 | 403 | 404,
+    status: 400 | 403 | 404 | 409,
     readonly code: WorkspaceAccessErrorCode,
     message: string,
     readonly details?: ApiErrorDetails,

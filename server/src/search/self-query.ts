@@ -32,7 +32,6 @@ type SelfQueryModelResponse = {
   mimeTypes?: string[];
   pageFrom?: number;
   pageTo?: number;
-  language?: string;
   heading?: string;
   dateFrom?: string;
   dateTo?: string;
@@ -49,68 +48,70 @@ function uniqueStrings(values: Array<string | undefined>): string[] {
   );
 }
 
-function mergePageRange(
-  left: SearchFilters["pageRange"],
-  right: SearchFilters["pageRange"],
+function intersectPageRange(
+  base: SearchFilters["pageRange"],
+  derived: SearchFilters["pageRange"],
 ): SearchFilters["pageRange"] | undefined {
-  if (!left && !right) {
-    return undefined;
-  }
-
-  return {
-    from: right?.from ?? left?.from,
-    to: right?.to ?? left?.to,
-  };
+  if (!base) return derived;
+  if (!derived) return base;
+  const from = Math.max(base.from ?? -Infinity, derived.from ?? -Infinity);
+  const to = Math.min(base.to ?? Infinity, derived.to ?? Infinity);
+  // Disjoint ranges: the derived hint cannot override the caller's, so the caller's stands.
+  if (from > to) return base;
+  return { ...(Number.isFinite(from) ? { from } : {}), ...(Number.isFinite(to) ? { to } : {}) };
 }
 
-function mergeFilters(
+function intersectDateRange(
+  base: SearchFilters["dateRange"],
+  derived: SearchFilters["dateRange"],
+): SearchFilters["dateRange"] | undefined {
+  if (!base) return derived;
+  if (!derived) return base;
+  const later = (a?: string, b?: string) => (a && b ? (a > b ? a : b) : a ?? b);
+  const earlier = (a?: string, b?: string) => (a && b ? (a < b ? a : b) : a ?? b);
+  const from = later(base.from, derived.from);
+  const to = earlier(base.to, derived.to);
+  if (from && to && from > to) return base;
+  return { from, to };
+}
+
+/**
+ * Apply derived filters to the caller's. Derived filters (explicit `tag:` syntax, page numbers, a model's reading
+ * of the query) may only narrow: every scope the caller set (documents, run, workspace, geo, filename, tags) is
+ * kept exactly, and for the filters that have values on both sides the result is the intersection, never a union.
+ * A derived value that would leave nothing (disjoint types or pages) is dropped, so a misreading can
+ * neither widen the search nor empty it.
+ */
+export function narrowFilters(
   base: SearchFilters | undefined,
   derived: SearchFilters,
 ): SearchFilters {
-  return {
-    ...base,
-    ...derived,
-    documentIds: base?.documentIds !== undefined
-      ? base.documentIds
-      : derived.documentIds,
-    tags: base?.tags?.length ? base.tags : derived.tags,
-    mimeTypes: uniqueStrings([
-      ...(base?.mimeTypes ?? []),
-      ...(derived.mimeTypes ?? []),
-    ]),
-    pageRange: mergePageRange(base?.pageRange, derived.pageRange),
-  };
+  const merged: SearchFilters = { ...(base ?? {}) };
+  if (!base?.tags?.length && derived.tags?.length) merged.tags = derived.tags;
+  if (base?.filenameContains === undefined && base?.filenameEquals === undefined && derived.filenameContains) {
+    merged.filenameContains = derived.filenameContains;
+  }
+  if (derived.mimeTypes?.length) {
+    if (!base?.mimeTypes?.length) merged.mimeTypes = derived.mimeTypes;
+    else {
+      const allowed = new Set(base.mimeTypes);
+      const overlap = derived.mimeTypes.filter((type) => allowed.has(type));
+      if (overlap.length > 0) merged.mimeTypes = overlap;
+    }
+  }
+  const pageRange = intersectPageRange(base?.pageRange, derived.pageRange);
+  if (pageRange) merged.pageRange = pageRange;
+  const dateRange = intersectDateRange(base?.dateRange, derived.dateRange);
+  if (dateRange) merged.dateRange = dateRange;
+  if (!base?.headingPath?.length && derived.headingPath?.length) merged.headingPath = derived.headingPath;
+  return merged;
 }
 
-function mimeTypesForQuery(query: string): string[] {
-  const normalized = query.toLowerCase();
-  const matches: string[] = [];
-
-  if (/\b(slide|slides|deck|powerpoint|pptx?)\b/.test(normalized)) {
-    matches.push(
-      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    );
-  }
-  if (/\b(sheet|spreadsheet|xlsx?|csv|tsv)\b/.test(normalized)) {
-    matches.push(
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      "text/csv",
-      "text/tab-separated-values",
-    );
-  }
-  if (/\b(pdf|scan|scanned)\b/.test(normalized)) {
-    matches.push("application/pdf");
-  }
-  if (/\b(image|png|jpeg|jpg|tiff|photo)\b/.test(normalized)) {
-    matches.push("image/png", "image/jpeg", "image/tiff");
-  }
-  if (/\b(json|jsonl)\b/.test(normalized)) {
-    matches.push("application/json", "application/x-ndjson");
-  }
-
-  return uniqueStrings(matches);
-}
-
+/**
+ * Only structure the caller wrote is read without a model: explicit `tag:` labels and page numbers
+ * ("page 4", "slides 3-5"). Document types, filenames and languages are not guessed from words
+ * ("image sensor" is not a request for images; "in the meeting" is not a filename).
+ */
 function deriveHeuristicPlan(query: string): SelfQueryPlan {
   const filters: SearchFilters = {};
   const reasons: string[] = [];
@@ -123,53 +124,17 @@ function deriveHeuristicPlan(query: string): SelfQueryPlan {
   }
 
   const pageRange = query.match(
-    /\b(?:page|pages|slide|slides)\s+(\d+)(?:\s*[-–to]+\s*(\d+))?/i,
+    /\b(?:page|pages|slide|slides)\s+(\d+)(?:\s*(?:[-–]|to)\s*(\d+))?/i,
   );
   if (pageRange) {
     const from = Number(pageRange[1]);
     const to = Number(pageRange[2] ?? pageRange[1]);
-    if (Number.isFinite(from)) {
-      filters.pageRange = {
-        from,
-        to: Number.isFinite(to) ? to : from,
-      };
+    if (Number.isFinite(from) && Number.isFinite(to) && from <= to) {
+      filters.pageRange = { from, to };
       reasons.push(
         `Scoped retrieval to page range ${from}${to !== from ? `-${to}` : ""}.`,
       );
     }
-  }
-
-  const quotedDocument = query.match(/["“](.+?)["”]/);
-  if (quotedDocument?.[1]) {
-    filters.filenameContains = quotedDocument[1];
-    reasons.push(`Detected quoted document reference "${quotedDocument[1]}".`);
-  } else {
-    const namedDocument = query.match(
-      /\bin\s+the\s+([a-z0-9][a-z0-9 ._-]{2,80}?)(?:,|\?|$)/i,
-    );
-    if (namedDocument?.[1]) {
-      const candidate = namedDocument[1].trim();
-      if (!/\b(page|pages|slide|slides|section)\b/i.test(candidate)) {
-        filters.filenameContains = candidate;
-        reasons.push(`Detected document title hint "${candidate}".`);
-      }
-    }
-  }
-
-  const mimeTypes = mimeTypesForQuery(query);
-  if (mimeTypes.length > 0) {
-    filters.mimeTypes = mimeTypes;
-    reasons.push(
-      "Detected document-type terms and converted them into MIME filters.",
-    );
-  }
-
-  const language = query.match(
-    /\b(in|translated to)\s+(english|spanish|french|german|portuguese|italian|japanese|chinese)\b/i,
-  );
-  if (language?.[2]) {
-    filters.language = language[2].toLowerCase();
-    reasons.push(`Detected language hint "${filters.language}".`);
   }
 
   return { filters, reasons };
@@ -190,9 +155,6 @@ function parseModelPlan(text: string): SelfQueryPlan | null {
         from: parsed.pageFrom,
         to: parsed.pageTo,
       };
-    }
-    if (parsed.language) {
-      filters.language = parsed.language;
     }
     if (parsed.heading) {
       filters.headingPath = parsed.heading
@@ -236,7 +198,7 @@ export async function deriveSelfQueryFilters(args: {
         maxOutputTokens: 220,
         prompt: [
           "Extract only explicit metadata filters from the query and return pure JSON.",
-          "Allowed keys: filenameContains, mimeTypes, pageFrom, pageTo, language, heading, dateFrom, dateTo, reasons.",
+          "Allowed keys: filenameContains, mimeTypes, pageFrom, pageTo, heading, dateFrom, dateTo, reasons.",
           "If a filter is not explicit, omit it.",
           `Query: ${parseSelfQuerySyntax(args.query).query}`,
         ].join("\n"),
@@ -250,7 +212,7 @@ export async function deriveSelfQueryFilters(args: {
       });
       const parsed = parseModelPlan(result.text.trim());
       if (parsed) {
-        derived = mergeFilters(derived, parsed.filters);
+        derived = narrowFilters(derived, parsed.filters);
         reasons.push(...parsed.reasons);
       }
     } catch {
@@ -259,7 +221,7 @@ export async function deriveSelfQueryFilters(args: {
   }
 
   return {
-    filters: mergeFilters(args.baseFilters, derived),
+    filters: narrowFilters(args.baseFilters, derived),
     reasons: uniqueStrings(reasons),
   };
 }

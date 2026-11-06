@@ -270,3 +270,144 @@ describe("an interrupted Document stage", () => {
     expect(failedDocumentEvents(store)).toEqual([]);
   });
 });
+
+describe("sandbox infrastructure failures retry instead of failing the document (real-Modal check F1)", () => {
+  async function runIndex(store: MemoryStore, stage: Stage) {
+    const execution = createStageExecution({ store, config, stages: [stage] });
+    const rt = { signal: new AbortController().signal, heartbeat: () => undefined, attempt: 1, progressFromProcessCpu: false };
+    await execution.runStage({ stageName: "index", runId: "run-1", totalStages: 1, artifacts: {} }, rt);
+    return execution;
+  }
+
+  it("a VM creation failure inside the per-document loop fails the activity, retryably, and persists no document failure", async () => {
+    const { SandboxInfrastructureError } = await import("../sandbox/types.js");
+    const { isDocumentLevelFailure } = await import("../lib/document-failure.js");
+    const store = new MemoryStore(["b"]);
+    const stage: Stage = {
+      name: "index",
+      async run(state) {
+        await runDocumentStage(state, state.documents[0]!, "index", "b:index", "index done", async () => {
+          throw new SandboxInfrastructureError("modal sandbox creation failed: parser VM kernel link protections could not be turned on");
+        });
+      },
+    };
+    const error = await runIndex(store, stage).catch((e: unknown) => e);
+    expect((error as Error).name).toBe("SandboxInfrastructureError");
+    expect(isDocumentLevelFailure(error)).toBe(false);
+    expect(store.documentFailures).toEqual([]);
+    expect(store.docStages.get("b:index")?.status).not.toBe("failed");
+    expect(failedDocumentEvents(store)).toEqual([]);
+  });
+
+  it("a stage that catches the sandbox failure and falls back neither completes nor fails the document", async () => {
+    const { SandboxInfrastructureError } = await import("../sandbox/types.js");
+    const { noteSandboxInfrastructureError } = await import("../sandbox/session-context.js");
+    const store = new MemoryStore(["b"]);
+    const stage: Stage = {
+      name: "index",
+      async run(state) {
+        await runDocumentStage(state, state.documents[0]!, "index", "b:index", "index done", async () => {
+          try {
+            // What the runner does with a command's sandbox failure, before the stage's own fallback swallows it.
+            const failure = new SandboxInfrastructureError("modal sandbox command failed: control deadline exceeded");
+            noteSandboxInfrastructureError(failure);
+            throw failure;
+          } catch {
+            return { artifactUri: "memory://fallback", stats: { extractor: "fallback" } };
+          }
+        });
+      },
+    };
+    const error = await runIndex(store, stage).catch((e: unknown) => e);
+    expect((error as Error).name).toBe("SandboxInfrastructureError");
+    expect(store.documentFailures).toEqual([]);
+    expect(store.docStages.get("b:index")?.status).not.toBe("completed");
+    expect(store.docStages.get("b:index")?.status).not.toBe("failed");
+  });
+
+  it("documents sharing a session that could not be created each see the failure, even when they swallow it (recheck R #2)", async () => {
+    const { SandboxInfrastructureError } = await import("../sandbox/types.js");
+    const { SandboxSessionScope, runWithSandboxScope } = await import("../sandbox/session-context.js");
+    const store = new MemoryStore(["b", "c"]);
+    let opens = 0;
+    const scope = new SandboxSessionScope(async () => {
+      opens++;
+      throw new SandboxInfrastructureError("modal sandbox creation failed: parser VM kernel link protections could not be turned on");
+    });
+    const stage: Stage = {
+      name: "index",
+      async run(state) {
+        await Promise.allSettled(state.documents.map((document) =>
+          runDocumentStage(state, document, "index", `${document.id}:index`, "index done", async () => {
+            // A parser fallback: the stage swallows the sandbox error and would otherwise complete on a degraded result.
+            await scope.get().catch(() => undefined);
+            return { artifactUri: "memory://fallback", stats: { extractor: "fallback" } };
+          })));
+        // Both documents' watches saw it: neither completed nor failed.
+        for (const id of ["b", "c"]) {
+          expect(store.docStages.get(`${id}:index`)?.status, id).not.toBe("completed");
+          expect(store.docStages.get(`${id}:index`)?.status, id).not.toBe("failed");
+        }
+        throw new SandboxInfrastructureError("activity retries");
+      },
+    };
+    const error = await runWithSandboxScope(scope, () => runIndex(store, stage)).catch((e: unknown) => e);
+    expect((error as Error).name).toBe("SandboxInfrastructureError");
+    expect(opens).toBe(1); // the rejection is cached, not retried per document
+    expect(store.documentFailures).toEqual([]);
+    expect(failedDocumentEvents(store)).toEqual([]);
+  });
+
+  it("a command on a session closed by a failed cleanup is a retryable infrastructure failure, not the document's", async () => {
+    const { SandboxInfrastructureError } = await import("../sandbox/types.js");
+    const { isDocumentLevelFailure } = await import("../lib/document-failure.js");
+    const { createModalProvider } = await import("../sandbox/providers/modal/index.js");
+    const sdk = {
+      ModalClient: class {
+        apps = { fromName: async () => ({}) };
+        images = { fromRegistry: () => ({}) };
+        secrets = { fromName: async () => ({}) };
+        sandboxes = { create: async () => ({ sandboxId: "sb", terminate: async () => {}, filesystem: { makeDirectory: async () => {} }, exec: async () => ({ stdout: new ReadableStream({ start(c) { c.close(); } }), stderr: new ReadableStream({ start(c) { c.close(); } }), wait: async () => 0 }) }) };
+        close() {}
+      },
+      Sandbox: class { async terminate() {} },
+    } as unknown as typeof import("modal");
+    const provider = createModalProvider(async () => sdk);
+    const session = await provider.openSession({ tokenId: "t", tokenSecret: "s", app: "a", image: "i", cpu: 1, memoryMb: 512, sessionTimeoutSeconds: 60 }, { activityId: "x", unmetered: true });
+    await session.close();
+    const failure = await session.run!({ binary: "/bin/true", args: [], env: {}, readablePaths: [], inputPaths: [], writablePaths: [], limits: { timeoutMs: 1_000 } }).catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(SandboxInfrastructureError);
+    expect(isDocumentLevelFailure(failure)).toBe(false);
+  });
+
+  it("an output over the staging limit fails only that document, once; the other documents complete (recheck Q #1)", async () => {
+    const { SandboxOutputError } = await import("../sandbox/types.js");
+    const store = new MemoryStore(["b", "c"]);
+    let attempts = 0;
+    const stage: Stage = {
+      name: "index",
+      async run(state) {
+        await Promise.allSettled(state.documents.map((document) =>
+          runDocumentStage(state, document, "index", `${document.id}:index`, "index done", async () => {
+            if (document.id === "b") { attempts++; throw new SandboxOutputError("parser VM output entry/depth limit exceeded"); }
+            return { artifactUri: "memory://ok", stats: {} };
+          })));
+      },
+    };
+    await expect(runIndex(store, stage)).resolves.toBeDefined();
+    expect(attempts).toBe(1);
+    expect(store.docStages.get("b:index")?.status).toBe("failed");
+    expect(store.docStages.get("c:index")?.status).toBe("completed");
+  });
+
+  it("every stage with a per-document loop runs it through runDocumentStage, which applies the watch", async () => {
+    const { readdirSync, readFileSync } = await import("node:fs");
+    const dir = new URL("../stages/", import.meta.url);
+    for (const file of readdirSync(dir).filter((name) => name.endsWith(".ts") && !name.endsWith(".test.ts"))) {
+      const source = readFileSync(new URL(file, dir), "utf8");
+      if (!/runDocuments\(|for \(const document of/.test(source)) continue;
+      if (file === "lancedb-relocate.ts") continue; // maintenance: no parser command, no document verdict
+      expect(source, file).toMatch(/runDocumentStage\(/);
+    }
+  });
+});

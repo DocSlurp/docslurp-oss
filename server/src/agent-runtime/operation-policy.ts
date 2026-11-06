@@ -27,12 +27,9 @@ export function createNativeOperationPolicy(resolveActor: () => Promise<RequestA
       return sql.begin(async tx=>{
         const [root]=await tx`select id,tree_cancel_requested from chat_operations where id=${binding.rootId} and user_id=${binding.userId} for update`;
         if(!await revalidateRealtimeSession(actor,AbortSignal.timeout(5000),tx))throw new Error("operation_forbidden");
-        const [access]=await tx`select w.id from workspaces w join organizations o on o.id=w.org_id
-          left join org_memberships om on om.org_id=w.org_id and om.user_id=${actor.userId}
-          left join workspace_members wm on wm.workspace_id=w.id and wm.user_id=${actor.userId}
-          where w.id=${binding.workspaceId} and w.org_id=${binding.orgId} and (
-            (om.user_id is not null and (w.user_id=${actor.userId} or w.is_default or om.role in ('owner','admin') or wm.user_id is not null))
-            or (wm.user_id is not null and o.is_personal))`;
+        const [access]=await tx`select w.id from workspaces w
+          where w.id=${binding.workspaceId} and w.org_id=${binding.orgId}
+            and docslurp_workspace_access(w.id,${actor.userId})`;
         if(!access)throw new Error("operation_forbidden");
         const [current]=await tx`select id from chat_operations where id=${binding.id} and user_id=${binding.userId}
           and not cancel_requested and deadline>clock_timestamp() and expires_at>clock_timestamp()`;

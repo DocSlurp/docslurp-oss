@@ -1,4 +1,6 @@
 import { realtimeMetrics } from "./realtime/broker.js";
+import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
+import { sql as pricingStateSql } from "./db.js";
 import { closeDirectUploadLockPool } from "./lib/direct-upload-locks.js";
 import { tigrisUploadWebhookRoutes } from "./routes/tigris-upload-webhook.js";
 import { startDirectUploadReconciler, stopDirectUploadReconciler } from "./services/direct-upload-reconciler.js";
@@ -9,7 +11,7 @@ import { existsSync } from "node:fs";
 import { initializeObservability } from "@docslurp/shared/observability";
 import { startRevisionMaintenance } from "./realtime/revision-maintenance.js";
 import { envFlags, formatEnvFlags } from "@docslurp/shared/env-flags";
-import { startLiveModelPriceRefresh } from "@docslurp/shared";
+import { QuoteSettingsError, startLiveModelPriceRefresh } from "@docslurp/shared";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { dirname, resolve } from "node:path";
@@ -31,17 +33,19 @@ import { sessionAuth } from "./middleware/session-auth.js";
 import { chatCompletionsRoutes } from "./routes/chat-completions.js";
 import { documentsRoutes } from "./routes/documents.js";
 import { exportsRoutes } from "./routes/exports.js";
-import { extractorRoutes } from "./routes/extractors.js";
+import { configureApiExtractorIdAliases, extractorRoutes } from "./routes/extractors.js";
 import { docsRoutes } from "./routes/docs.js";
 import { healthRoutes } from "./routes/health.js";
 import { organizationsRoutes } from "./routes/organizations.js";
 import { runsRoutes } from "./routes/runs.js";
 import { jobsRoutes } from "./routes/jobs.js";
 import { uploadEstimateRoutes, uploadsRoutes } from "./routes/uploads.js";
+import { estimateRoutes } from "./routes/estimate.js";
 import { webhooksRoutes } from "./routes/webhooks.js";
 import { workspacesRoutes } from "./routes/workspaces.js";
 import { chatInstructionsRoutes } from "./routes/chat-instructions.js";
 import { assertOutputModerationConfig } from "./services/chat-output-moderation.js";
+import { warnOrgLimitAboveOneWithUniqueIndex } from "./services/org-membership-limit.js";
 import { apiKeysRoutes } from "./routes/api-keys.js";
 import { searchRoutes, searchesRoutes, workspaceChatRoutes } from "./routes/search.js";
 import { webRoutes } from "./routes/web.js";
@@ -125,6 +129,7 @@ export function createApiApp(): Hono {
   app.onError(nativeErrorHandler((error, c) => {
     // The request span records it (message, stack) once the response is sent.
     setCurrentRequestError(error);
+    if (error instanceof QuoteSettingsError) return c.json({ error: error.message, code: "invalid_request" }, 400);
     return error instanceof UnreadableSourceError
       ? c.json({ error: error.message, code: error.code }, error.statusCode)
       : spendAwareErrorHandler(error, c);
@@ -198,6 +203,7 @@ export function createApiApp(): Hono {
   app.route("/v1/extractors", extractorRoutes);
   // Deprecated alias of /v1/uploads, kept while browser-key uploads depend on its widget CORS policy (middleware/widget-cors.ts).
   app.route("/v1/ingest", uploadsRoutes);
+  app.route("/v1/estimate", estimateRoutes);
   app.route("/v1/uploads", uploadEstimateRoutes);
   app.route("/v1/uploads", uploadsRoutes);
   app.route("/v1/extracts", extractsRoutes);
@@ -285,8 +291,15 @@ export function ensureApiStartup(): Promise<void> {
   if (!startupPromise) {
     startupPromise = (async () => {
       initializeObservability({ serviceName: "docslurp-api" });
+      // The pricing provider (DOCSLURP_PRICING_PLUGIN) prices every quote and charge; the service profile refuses to
+      // start without one rather than price with the open default.
+      // Its durable state (pricing_provider_state, 0131) is read-only through this process's pool; only the operator raises it.
+      // It also refuses to start when this process's role could move the mark (refusePricingStateWriter, council M #1).
+      await loadPricingProvider(process.env, { durableState: pricingDurableStateFromSql(pricingStateSql), sql: pricingStateSql });
       // Invalid private endpoint config fails startup; the /models probe never blocks it.
       initializePrivateModelEndpoints();
+      // Legacy extractor ids must be installed before any stored or incoming config is parsed; a bad alias fails startup.
+      configureApiExtractorIdAliases();
       if (shouldRunStartupMigrations()) {
         await runStartupMigrations();
       }
@@ -341,6 +354,12 @@ export function ensureApiStartup(): Promise<void> {
       logRateLimitBackendAtStartup();
       // A bad CHAT_OUTPUT_MODERATION value fails the boot, not a chat turn.
       assertOutputModerationConfig();
+      // DOCSLURP_MAX_ORGS_PER_USER above 1 while migration 0127's unique index still refuses a second membership.
+      void warnOrgLimitAboveOneWithUniqueIndex(async () => {
+        const { sql } = await import("./db.js");
+        const [row] = await sql<{ present: boolean }[]>`select to_regclass('public.org_memberships_one_org_per_user') is not null as present`;
+        return Boolean(row?.present);
+      });
       void warnSelfHostedBrowserKeysWithoutTrustedProxy(async () => {
         const { sql } = await import("./db.js");
         return (await sql`select 1 from api_keys where key_type = 'client' and revoked_at is null limit 1`).length > 0;

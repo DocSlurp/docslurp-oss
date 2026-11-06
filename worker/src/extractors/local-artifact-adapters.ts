@@ -1,10 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { access, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { ExtractionArtifactRef } from "@docslurp/shared";
+import { embeddedImageFactsSchema, type EmbeddedImageFacts, type ExtractionArtifactRef } from "@docslurp/shared";
+import { buildMediaMap, mediaMapEntries } from "./embedded-images.js";
+import { parsePdfImagesList, pdfImagesFacts, pngDimensions } from "./pdfimages-list.js";
 import type { ArtifactGraphAdapter } from "./artifact-graph.js";
 import { CommandRunner, resolveVenvBin } from "../tools/runner.js";
 import { ensureBinary } from "../tools/python-deps.js";
+import { readWithOcr } from "../ocr/engine.js";
+import { resolveOcrMode } from "../ocr/mode.js";
 
 /** The caller owns outputDir and its lifetime. Each run writes immutable files there. */
 export interface LocalArtifactAdapterOptions {
@@ -12,6 +16,13 @@ export interface LocalArtifactAdapterOptions {
   maxBytes?: number;
   timeoutMs?: number;
   imageScaleTo?: number;
+  /**
+   * OCR language: `auto` (the default; DOCSLURP_OCR_LANGUAGE overrides it) tries the recognisers in order, or codes such
+   * as `eng+deu` from the workspace (ocr/languages.ts).
+   */
+  ocrLanguage?: string;
+  /** Called with a page's number when `ppocr-page-ocr` produced text for it: a model read that bills as a Rich page. */
+  onOcrRead?: (pageNumber: number) => void;
 }
 
 const defaultMaxBytes = 32 * 1024 * 1024;
@@ -74,7 +85,7 @@ function filePath(ref: ExtractionArtifactRef): string {
 }
 
 export async function localArtifactToolAvailability(): Promise<Record<string, boolean>> {
-  const binaries = ["pdftoppm", "pdftotext", "pdftohtml", "pdfinfo", "pdfimages", "tesseract", "pandoc"];
+  const binaries = ["pdftoppm", "pdftotext", "pdftohtml", "pdfinfo", "pdfimages", "pandoc"];
   // Commands spawn with the venv bin first on PATH, so binaries provisioned there count.
   const venvBin = resolveVenvBin(process.env.PYTHON_VENV);
   return Object.fromEntries(await Promise.all(binaries.map(async (binary) => {
@@ -147,22 +158,42 @@ export function createLocalArtifactAdapters(options: LocalArtifactAdapterOptions
       const input = one(inputs), number = page(ctx.pageNumber);
       await mkdir(outputDir, { recursive: true });
       const prefix = `embedded-${randomUUID()}-${number}`;
-      await runLocalArtifactCommand("pdfimages", ["-f", String(number), "-l", String(number), "-png", filePath(input), path.join(outputDir, prefix)], maxBytes, timeoutMs, ctx.signal);
+      const range = ["-f", String(number), "-l", String(number)];
+      const listing = parsePdfImagesList((await runLocalArtifactCommand("pdfimages", ["-list", ...range, filePath(input)], maxBytes, timeoutMs, ctx.signal)).toString("utf8"));
+      if (listing.length > 128) throw new Error("Too many embedded images on page");
+      await runLocalArtifactCommand("pdfimages", [...range, "-png", filePath(input), path.join(outputDir, prefix)], maxBytes, timeoutMs, ctx.signal);
       const files = (await readdir(outputDir)).filter(name => name.startsWith(`${prefix}-`) && name.endsWith(".png")).sort();
       if (files.length > 128) throw new Error("Too many embedded images on page");
       const images = await Promise.all(files.map(async (name, index) => {
         const imagePath = path.join(outputDir, name);
         if ((await stat(imagePath)).size > maxBytes) throw new Error("Embedded image exceeds output limit");
-        return emit("poppler-embedded-images", "page/embedded-image", input, await readFile(imagePath), "image/png", "png", number, index);
+        const bytes = await readFile(imagePath);
+        const size = pngDimensions(bytes);
+        if (!size) throw new Error("Embedded image is not a PNG");
+        return { ref: await emit("poppler-embedded-images", "page/embedded-image", input, bytes, "image/png", "png", number, index), ...size };
       }));
-      const imageRefs = images.map((image) => ({ pageNumber: number, artifactId: image.id, mediaType: image.mediaType, sha256: image.sha256, placement: "page-only" }));
-      const set = await emit("poppler-embedded-images", "page/embedded-image-set", input, Buffer.from(JSON.stringify({ pageNumber: number, images: imageRefs })), "application/json", "json", number);
-      return [set, ...images];
+      // Placement is unknown: pdfimages lists what is stored, not where it is drawn.
+      const facts = pdfImagesFacts(listing, images.map(image => ({ sha256: image.ref.sha256, width: image.width, height: image.height })), number);
+      const pageSet = { pageNumber: number, images: facts.map((fact, index) => ({ ...fact, artifactId: images[index]!.ref.id, mediaType: "image/png" })) };
+      const set = await emit("poppler-embedded-images", "page/embedded-image-set", input, Buffer.from(JSON.stringify(pageSet)), "application/json", "json", number);
+      return [set, ...images.map(image => image.ref)];
     } },
-    { id: "tesseract-page-ocr", accepts: ["page/image"], emits: ["page/text"], scope: "page", cost: 4, async run(inputs, ctx) {
+    { id: "ppocr-page-ocr", accepts: ["page/image"], emits: ["page/text"], scope: "page", cost: 4, async run(inputs, ctx) {
       const input = one(inputs), number = page(ctx.pageNumber);
-      const bytes = await runLocalArtifactCommand("tesseract", [filePath(input), "stdout", "-l", "eng"], maxBytes, timeoutMs, ctx.signal);
-      return [await emit("tesseract-page-ocr", "page/text", input, bytes, "text/plain; charset=utf-8", "txt", number)];
+      // The page image is read in the configured OCR boundary (the VM in production); nothing is decoded here.
+      const ocr = await readWithOcr(localArtifactRunner(), {
+        source: filePath(input), kind: "image", pages: [1], escalation: false,
+        ...(options.ocrLanguage ? { languageSetting: options.ocrLanguage } : {}),
+        ...(ctx.signal ? { signal: ctx.signal } : {}),
+      });
+      try {
+        const text = ocr.pages[0]?.text ?? "";
+        const emitted = await emit("ppocr-page-ocr", "page/text", input, Buffer.from(text, "utf8"), "text/plain; charset=utf-8", "txt", number);
+        if (/[\p{L}\p{N}]/u.test(text)) options.onOcrRead?.(number);
+        return [emitted];
+      } finally {
+        await ocr.dispose();
+      }
     } },
     { id: "pandoc-text-markdown", accepts: ["page/text"], emits: ["page/markdown"], scope: "page", cost: 1, async run(inputs, ctx) {
       const input = one(inputs), number = page(ctx.pageNumber);
@@ -189,15 +220,28 @@ export function createLocalArtifactAdapters(options: LocalArtifactAdapterOptions
     { id: "assemble-media-map", accepts: ["page/embedded-image-set"], emits: ["document/media-map"], scope: "aggregate", cost: 1, async run(inputs, ctx) {
       ctx.signal?.throwIfAborted();
       const refs = ordered(inputs);
-      const images: Array<{ pageNumber: number; artifactId: string; mediaType: string; sha256: string; placement: "page-only" }> = [];
+      const facts: EmbeddedImageFacts[] = [];
+      const artifactIds: string[] = [];
       for (const ref of refs) {
         const pageNumber = ref.placements[0]?.pageNumber;
         if (!pageNumber) throw new Error("Image set lacks page placement");
-        const set = JSON.parse(await readFile(filePath(ref), "utf8")) as { pageNumber: number; images: typeof images };
-        if (set.pageNumber !== pageNumber || !Array.isArray(set.images) || set.images.some((image) => image.pageNumber !== pageNumber || image.placement !== "page-only")) throw new Error("Invalid page image set");
-        images.push(...set.images);
+        const set = JSON.parse(await readFile(filePath(ref), "utf8")) as { pageNumber: number; images: Array<EmbeddedImageFacts & { artifactId: string; mediaType: string }> };
+        if (set.pageNumber !== pageNumber || !Array.isArray(set.images)) throw new Error("Invalid page image set");
+        for (const image of set.images) {
+          const { artifactId, mediaType, ...fact } = image;
+          const parsed = embeddedImageFactsSchema.parse(fact);
+          if (parsed.pageNumber !== pageNumber || mediaType !== "image/png" || typeof artifactId !== "string" || !artifactId) throw new Error("Invalid page image set");
+          if (parsed.placement.status !== "unknown") throw new Error("Local image placements must be unknown");
+          facts.push(parsed);
+          artifactIds.push(artifactId);
+        }
       }
-      return aggregate("assemble-media-map", "document/media-map", refs, Buffer.from(JSON.stringify({ images }, null, 2)), "application/json", "json");
+      const pageCount = Math.max(refs.length, ...refs.map(ref => ref.placements[0]!.pageNumber));
+      const index = new Map(facts.map((fact, i) => [fact, artifactIds[i]!]));
+      // Nothing was inserted into the Markdown: the local graph has no position to put a reference at.
+      const mapped = mediaMapEntries(facts, { pageCount, referencesInserted: false, artifactId: fact => index.get(fact)!, mediaType: () => "image/png" });
+      const map = buildMediaMap({ pageCount, encoding: "png", placementSource: "none", minWidth: 1, minHeight: 1, ...mapped });
+      return aggregate("assemble-media-map", "document/media-map", refs, Buffer.from(JSON.stringify(map, null, 2)), "application/json", "json");
     } },
   ];
   return adapters;
@@ -209,8 +253,11 @@ export async function availableLocalArtifactAdapters(options: LocalArtifactAdapt
   const binary: Record<string, string> = {
     "poppler-page-image": "pdftoppm", "poppler-page-text": "pdftotext",
     "poppler-page-html": "pdftohtml", "poppler-pdf-metadata": "pdfinfo",
-    "poppler-embedded-images": "pdfimages", "tesseract-page-ocr": "tesseract",
+    "poppler-embedded-images": "pdfimages",
     "pandoc-text-markdown": "pandoc", "pandoc-html-markdown": "pandoc",
   };
-  return createLocalArtifactAdapters(options).filter((adapter) => !binary[adapter.id] || available[binary[adapter.id]]);
+  // OCR is available when DOCSLURP_OCR_MODE puts it in a VM or the self-hosted sandbox; never a host binary.
+  const ocr = resolveOcrMode() === "vm" || resolveOcrMode() === "local";
+  return createLocalArtifactAdapters(options).filter((adapter) =>
+    adapter.id === "ppocr-page-ocr" ? ocr : !binary[adapter.id] || available[binary[adapter.id]]);
 }

@@ -21,7 +21,6 @@ vi.mock("../stages/embedding-runtime.js", () => ({
   embeddingCallCostCents: (_profile: unknown, embedded: { costCents?: number }) => embedded.costCents ?? 0,
 }));
 vi.mock("../embeddings/resolver.js", () => ({
-  detectLanguage: () => "en",
   resolveEmbeddingModel: () => ({ model: "local-embedding", provider: "local", runtime: "local", dimensions: 2 }),
 }));
 

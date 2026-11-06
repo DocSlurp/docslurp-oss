@@ -6,7 +6,7 @@ import { apiErrorResponse, nativeBodyLimit } from "../lib/api-error.js";
 import { getRequestActor, loadActorScopedWorkspace } from "../lib/request-actor.js";
 import { requestUserAgent, setCurrentRequestOrgId } from "../lib/request-context.js";
 import { validationHook } from "../lib/validation.js";
-import { ensurePersonalOrganization, getOrganization } from "../services/organizations.js";
+import { resolveDefaultOrganization, getOrganization } from "../services/organizations.js";
 import {
   FEEDBACK_CATEGORIES,
   FEEDBACK_LIMITS,
@@ -91,7 +91,7 @@ export function createFeedbackRoutes(deps: FeedbackDeps = {}) {
       const workspace = body.workspaceId ? await loadActorScopedWorkspace(body.workspaceId, actor).catch(() => null) : null;
       const org = workspace
         ? { id: workspace.orgId }
-        : (body.orgId ? await getOrganization(body.orgId, actor.userId) : null) ?? await ensurePersonalOrganization(actor.userId);
+        : (body.orgId ? await getOrganization(body.orgId, actor.userId) : null) ?? await resolveDefaultOrganization(actor.userId);
       setCurrentRequestOrgId(org.id);
 
       const result = await submitFeedbackReport({

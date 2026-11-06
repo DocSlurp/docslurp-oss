@@ -5,6 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { defaultPipelineFeatures, workspaceTemplates } from "@docslurp/shared";
 
 import { startMigratedPostgres } from "@docslurp/worker/testing";
+import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
 
 /**
  * Real routes over a migrated database: each work-creating mutation reports the same `job.estimate` its
@@ -26,6 +27,7 @@ type Key = { orgId: string | null; scopes: string[]; keyType?: string; workspace
 
 beforeAll(async () => {
   const pg = await startMigratedPostgres();
+  await pg.db.exec(LIFT_ONE_ORG_PER_USER_POLICY);
   stop = pg.stop;
   sql = postgres(pg.url, {
     max: 1, prepare: false, onnotice: () => {},
@@ -99,9 +101,10 @@ async function seed() {
   await sql`insert into workspace_search_settings(workspace_id, user_id) values ('w', 'u1') on conflict do nothing`.catch(() => undefined);
   await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total, artifacts)
     values ('run', 'o1', 'u1', 'w', 'upload', 'completed', 'index', ${sql.json(JSON.parse(JSON.stringify(graphPipeline)))}, 2, 9, '{}')`;
-  await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id, indexing_mode)
-    values ('d1', 'o1', 'u1', 'w', 'run', 'a.pdf', 'application/pdf', 'k1', 'completed', 4, 'c1', 'map'),
-           ('d2', 'o1', 'u1', 'w', 'run', 'b.pdf', 'application/pdf', 'k2', 'completed', 5, 'c2', 'map')`;
+  // Completed PDFs: the worker counted their page trees.
+  await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, canonical_id, indexing_mode)
+    values ('d1', 'o1', 'u1', 'w', 'run', 'a.pdf', 'application/pdf', 'k1', 'completed', 4, 'counted', 'c1', 'map'),
+           ('d2', 'o1', 'u1', 'w', 'run', 'b.pdf', 'application/pdf', 'k2', 'completed', 5, 'counted', 'c2', 'map')`;
 }
 
 describe("estimate twins equal the mutation's job.estimate", () => {
@@ -184,6 +187,88 @@ describe("estimate twins equal the mutation's job.estimate", () => {
   });
 });
 
+describe("estimate twins answer the unified quote from measured documents", () => {
+  beforeEach(seed);
+
+  type Quote = { kind: string; pricingVersion: string; pages: { low: number; high: number }; ingest: { credits: { low: number; high: number } | null }; hosting: { bytes: { low: number } }; settings: { indexing: string } };
+
+  it("each work estimate carries a quote whose ingest is the work's own estimate", async () => {
+    const app = appFor("u1");
+    for (const [path, body] of [
+      ["/v1/runs/run/reprocess/estimate", {}],
+      ["/v1/workspaces/w/documents/bulk/estimate", { action: "reprocess", documentIds: ["d1", "d2"] }],
+      ["/v1/workspaces/w/full-index/estimate", {}],
+    ] as const) {
+      const out = await (await post(app, path, body)).json() as { estimate: { credits: { low: number; high: number } }; quote: Quote };
+      expect(out.quote, path).toMatchObject({ kind: "estimate", pricingVersion: expect.any(String), pages: { low: 9, high: 9 } });
+      expect(out.quote.ingest.credits).toEqual({ low: Math.round(out.estimate.credits.low * 100) / 100, high: Math.round(out.estimate.credits.high * 100) / 100 });
+    }
+    const one = await (await post(app, "/v1/documents/d1/full-index/estimate")).json() as { quote: Quote };
+    expect(one.quote).toMatchObject({ pages: { low: 4, high: 4 }, settings: { indexing: "full" } });
+  });
+
+  it("a config change that reprocesses nothing quotes no ingest, only hosting under the new settings", async () => {
+    const out = await (await post(appFor("u1"), "/v1/workspaces/w/estimate", { name: "Renamed" })).json() as { estimate: unknown; quote: Quote };
+    expect(out.estimate).toBeNull();
+    expect(out.quote.ingest.credits).toEqual({ low: 0, high: 0 });
+    expect(out.quote.pages).toEqual({ low: 9, high: 9 });
+  });
+
+  it("the stored scope never reaches another organization's or workspace's documents", async () => {
+    const { storedQuoteFiles } = await import("../services/stored-quote.js");
+    await sql`insert into workspaces(id, org_id, user_id, name, slug, pipeline, is_default) values ('w2', 'o2', 'u2', 'Theirs', 'theirs', ${sql.json(JSON.parse(JSON.stringify(defaultPipelineFeatures)))}, true)`;
+    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total, artifacts)
+      values ('run2', 'o2', 'u2', 'w2', 'upload', 'completed', 'index', ${sql.json(JSON.parse(JSON.stringify(defaultPipelineFeatures)))}, 1, 50, '{}')`;
+    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, canonical_id)
+      values ('x1', 'o2', 'u2', 'w2', 'run2', 'x.pdf', 'application/pdf', 'kx', 'completed', 50, 'counted', 'cx')`;
+    // Another org's document ids, workspace or run under this org's scope: nothing.
+    expect(await storedQuoteFiles({ orgId: "o1", documentIds: ["x1"] })).toEqual([]);
+    expect(await storedQuoteFiles({ orgId: "o1", workspaceId: "w2" })).toEqual([]);
+    expect(await storedQuoteFiles({ orgId: "o1", runId: "run2" })).toEqual([]);
+    expect(await storedQuoteFiles({ orgId: "o1", documentIds: [] })).toEqual([]);
+    // Mixed ids keep only this org's own.
+    const own = await storedQuoteFiles({ orgId: "o1", documentIds: ["d1", "x1"] });
+    expect(own.map((file) => file.pages)).toEqual([4]);
+    // The bulk twin cannot quote another org's document through this workspace either.
+    const out = await (await post(appFor("u1"), "/v1/workspaces/w/documents/bulk/estimate", { action: "reprocess", documentIds: ["x1"] })).json() as { quote: Quote | null };
+    expect(out.quote?.pages.high ?? 0).toBe(0);
+  });
+
+  it("pages a model read are the measured mix", async () => {
+    const { storedQuoteFiles } = await import("../services/stored-quote.js");
+    await sql`insert into document_page_facts (document_id, page_number, vision_status) values ('d1', 1, 'extracted'), ('d1', 2, 'not-selected'), ('d2', 1, 'extracted')`;
+    const [file] = await storedQuoteFiles({ orgId: "o1", workspaceId: "w" });
+    expect(file).toMatchObject({ pages: 9, measured: { pages: 9, readPages: 2 }, type: "application/pdf" });
+  });
+
+  it("keeps measured, assumed and measured-empty documents apart (council F #3)", async () => {
+    const { storedQuoteFiles } = await import("../services/stored-quote.js");
+    const docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, billing_pages, file_size, canonical_id)
+      values ('m1', 'o1', 'u1', 'w', 'run', 'measured.docx', ${docx}, 'km1', 'completed', 1, 'assumed', 7, 40000, 'cm1'),
+             ('a1', 'o1', 'u1', 'w', 'run', 'assumed.docx', ${docx}, 'ka1', 'completed', 30, 'assumed', null, 900000, 'ca1'),
+             ('e1', 'o1', 'u1', 'w', 'run', 'empty.docx', ${docx}, 'ke1', 'completed', 1, 'assumed', 0, 5000, 'ce1')`;
+    const files = await storedQuoteFiles({ orgId: "o1", documentIds: ["m1", "a1", "e1"] });
+    const byName = (word: string) => files.find((file) => file.name.includes(word))!;
+    // Measured: billing_pages, as measured pages.
+    expect(byName("(measured)")).toMatchObject({ pages: 7, measured: { pages: 7, readPages: 0 }, size: 40000 });
+    // Assumed: intake's 30 is never passed as pages, measured or otherwise; the quote prices the size as a range.
+    const assumed = byName("pages not measured");
+    expect(assumed).toEqual({ name: expect.any(String), size: 900000, type: docx });
+    // Measured empty: 0 kept, not dropped and not priced as one page.
+    expect(byName("no pages")).toMatchObject({ measured: { pages: 0, readPages: 0 }, size: 5000 });
+    expect(byName("no pages").pages).toBeUndefined();
+
+    const { quoteFilePageRange } = await import("@docslurp/shared");
+    expect(quoteFilePageRange(byName("no pages"))).toEqual({ low: 0, central: 0, high: 0, measured: true });
+    expect(quoteFilePageRange(byName("(measured)"))).toEqual({ low: 7, central: 7, high: 7, measured: true });
+    expect(quoteFilePageRange(assumed).measured).toBe(false);
+    // The empty document alone quotes no pages through the twin.
+    const out = await (await post(appFor("u1"), "/v1/workspaces/w/documents/bulk/estimate", { action: "reprocess", documentIds: ["e1"] })).json() as { quote: Quote | null };
+    expect(out.quote?.pages.high ?? 0).toBe(0);
+  });
+});
+
 describe("estimate twins enforce the mutation's authorization", () => {
   beforeEach(seed);
 
@@ -231,6 +316,25 @@ describe("estimate twins enforce the mutation's authorization", () => {
     expect((await post(appFor("u2"), "/v1/uploads/estimate", files)).status).toBe(404);
     expect((await sql<{ n: number }[]>`select count(*)::int n from workspaces`)[0]!.n).toBe(before);
   });
+
+  it("upload estimate is labelled an estimate, names its pricing version, and uses a file profile's counted pages", async () => {
+    const pdf = { name: "a.pdf", size: 100_000 };
+    const unknown = await (await post(appFor("u1"), "/v1/uploads/estimate", { files: [pdf] })).json() as {
+      kind: string; estimate: { pages: number; pagesRange?: unknown }; profile: { quality: string; pricingVersion: string }; pricingVersion: string;
+    };
+    expect(unknown).toMatchObject({ kind: "estimate", pricingVersion: expect.any(String), profile: { quality: expect.any(String), pricingVersion: expect.any(String) } });
+    expect(unknown.estimate.pagesRange).toBeDefined();
+    const profile = { schema: 1, profiler: "test", kind: "pdf", format: "pdf", bytes: 100_000, pages: 12 };
+    const profiled = await (await post(appFor("u1"), "/v1/uploads/estimate", { files: [{ ...pdf, profile }] })).json() as { estimate: { pages: number; pagesRange?: unknown } };
+    expect(profiled.estimate.pages).toBe(12);
+    expect(profiled.estimate.pagesRange).toBeUndefined();
+    // A profile measured on another file size is dropped, never trusted.
+    const mismatched = await (await post(appFor("u1"), "/v1/uploads/estimate", { files: [{ ...pdf, profile: { ...profile, bytes: 5 } }] })).json() as { estimate: { pages: number } };
+    expect(mismatched.estimate.pages).toBe(unknown.estimate.pages);
+    // A hostile profile (unknown fields, pricing hints) is refused outright.
+    expect((await post(appFor("u1"), "/v1/uploads/estimate", { files: [{ ...pdf, profile: { ...profile, credits: 0 } }] })).status).toBe(400);
+  });
+
 
   it("a workspace-restricted key cannot read another workspace through any estimate or job route", async () => {
     const created = await (await post(appFor("u1"), "/v1/runs/run/reprocess", {})).json() as { job: { id: string } };

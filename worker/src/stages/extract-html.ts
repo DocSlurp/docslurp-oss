@@ -115,7 +115,7 @@ export class ExtractHtmlStage implements Stage {
             let htmlUploaded = false;
 
             try {
-              const plan = await this.runner.extractHtml(tempFile);
+              const plan = await this.runner.extractHtml(tempFile, pageCount);
               console.log(
                 `[extract-debug] document=${document.id} planAvailable=${plan.available} tool=${plan.binary}`,
               );

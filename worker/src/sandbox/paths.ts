@@ -138,6 +138,19 @@ export function inferDocslurpTempAncestor(candidate: string): string | null {
   return null;
 }
 
+/**
+ * The install prefixes a venv interpreter needs inside the sandbox: the prefix its symlink chain names (which may itself
+ * be a symlinked directory, as uv's `cpython-3.13-...` is) and the real one. Empty when the interpreter is missing.
+ */
+export function interpreterRoots(python: string): string[] {
+  if (!existsSync(python)) return [];
+  let interpreter = python;
+  while (lstatSync(interpreter).isSymbolicLink()) {
+    interpreter = path.resolve(path.dirname(interpreter), readlinkSync(interpreter));
+  }
+  return [path.dirname(path.dirname(interpreter)), path.dirname(path.dirname(realpathSync(python)))];
+}
+
 export function resolveSandboxReadablePaths(args: {
   plan: CommandPlan;
   venvBin: string;
@@ -152,14 +165,7 @@ export function resolveSandboxReadablePaths(args: {
     ...(path.isAbsolute(args.plan.binary) ? [args.plan.binary] : []),
     ...args.plan.args.filter((arg) => path.isAbsolute(arg) && existsSync(arg) && statSync(arg).isFile()),
     ...(args.plan.bundleRoots ?? [])];
-  const python = path.join(args.venvBin, "python3");
-  if (existsSync(python)) {
-    let interpreter = python;
-    while (lstatSync(interpreter).isSymbolicLink()) {
-      interpreter = path.resolve(path.dirname(interpreter), readlinkSync(interpreter));
-    }
-    candidates.push(path.dirname(path.dirname(interpreter)), path.dirname(path.dirname(realpathSync(python))));
-  }
+  candidates.push(...interpreterRoots(path.join(args.venvBin, "python3")));
   // Isolated worktrees can link packages through a different checkout's
   // node_modules. Include code-only link targets, never that checkout itself.
   for (const modules of [path.join(workerDir, "node_modules"), path.join(projectDir, "node_modules")]) {

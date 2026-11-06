@@ -64,7 +64,14 @@ it.skipIf(!url)("keeps already-connected restricted sessions working at migratio
     await expect(app.query("delete from realtime_revision_counters")).rejects.toMatchObject({ code: "42501" });
   } finally {
     await Promise.all([migration.end(), app.end(), worker.end()]);
-    await owner.query(`drop database ${name} with (force)`);
+    // Cleanup, not the behaviour under test: dropping a fully migrated database can outlast the session's 3 s statement
+    // timeout on a busy runner (it failed CI on 2f1fbafa), so the drop alone gets a longer one.
+    await owner.query("set statement_timeout = '60s'");
+    try {
+      await owner.query(`drop database ${name} with (force)`);
+    } finally {
+      await owner.query("set statement_timeout = '3s'");
+    }
   }
 }, 30_000);
 

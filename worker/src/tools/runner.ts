@@ -1,5 +1,11 @@
-import { VM_TIMEOUT_MS, type DopplerVmJob } from "../sandbox/providers/modal/doppler-vm.js";
-import { dopplerShardSettings, executeDopplerShards, type DopplerShardDeps } from "../sandbox/providers/modal/doppler-shards.js";
+import { dopplerBinDir } from "./doppler.js";
+import {
+  acceptSandboxedPdfResult, requireSandboxedOcrProvider, requireSandboxedPdfProvider, type SandboxedOcrJob, type SandboxedPdfJob,
+  type SandboxedPdfRunContext,
+} from "../extractors/plugins.js";
+import { dopplerConverterPath } from "./doppler.js";
+import { localOcrCommandArgs, localOcrPaths } from "../ocr/local.js";
+import { localOcrRefusal, resolveOcrMode, OcrRefusedError } from "../ocr/mode.js";
 import { recordShardTimingInContext, type ShardCalibration } from "../pipeline/shard-calibration.js";
 import { ensurePythonDistributions, parseMissingPythonDependency, parseMissingPythonModule } from "./python-deps.js";
 import {
@@ -9,10 +15,12 @@ import {
   vendorBundlesEnabled,
   type InstalledVendorBundle,
 } from "./vendor-bundles.js";
-import { withObservation } from "@docslurp/shared/observability";
+import { recordUnrecordedUsageTelemetry, withObservation } from "@docslurp/shared/observability";
 import { DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@docslurp/shared";
 import { existsSync, readFileSync, readdirSync, readlinkSync, lstatSync, realpathSync, statSync } from "node:fs";
-import { access, copyFile, mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { access, chmod, copyFile, lstat, mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { AsyncResource } from "node:async_hooks";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -22,8 +30,8 @@ import { pipeline } from "node:stream/promises";
 import { finished } from "node:stream";
 import type { Writable } from "node:stream";
 
-import { resolveCommandPaths } from "../sandbox/paths.js";
-import { latchedTeardownError, sandboxScopeStorage } from "../sandbox/session-context.js";
+import { interpreterRoots, resolveCommandPaths } from "../sandbox/paths.js";
+import { latchedTeardownError, noteSandboxInfrastructureError, sandboxScopeStorage } from "../sandbox/session-context.js";
 import { admitCommandSource } from "../sandbox/source-quarantine.js";
 import { assertTeardownBreakerClosed } from "../sandbox/teardown-breaker.js";
 import { defaultParserSandbox, registeredParserSandbox } from "../sandbox/startup.js";
@@ -54,15 +62,24 @@ import {
   buildLocalComputeUsageEvent,
   resolveWorkerDeploymentProfile,
 } from "../pipeline/local-compute-cost.js";
+import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 
 export interface CommandPlan {
-  /** Fixed dedicated-VM job; dispatched before any local provider or backend. */
-  dopplerVm?: DopplerVmJob;
+  /** Isolated-VM PDF extraction through the registered provider plugin; dispatched before any local provider or backend. */
+  sandboxedPdf?: SandboxedPdfJob;
+  /** Isolated-VM OCR through the registered provider plugin (DOCSLURP_OCR_MODE=vm); never runs on the worker host. */
+  sandboxedOcr?: SandboxedOcrJob;
   binary: string;
   args: string[];
   available: boolean;
   /** Auxiliary regular files under a private DocSlurp temp workspace, staged read-only. */
   stagedInputs?: string[];
+  /**
+   * A host directory of read-only reference files the command reads (ClamAV definitions), named by its content's hash. A
+   * remote provider stages it once per VM where the parser user can read but not change it, and maps paths under it; it
+   * is never uploaded into the command's job tree (real-Modal P1).
+   */
+  readOnlyAssetDir?: string;
   /** Page count for the wall-clock budget; defaults to the document in the perf context. */
   pages?: number;
   /** Explicit wall-clock budget, overriding the page-based one. */
@@ -89,6 +106,30 @@ export interface CommandPlan {
   readOnlyInputs?: boolean;
 }
 
+/** Budgets for one `pdfpagecount` run (lib/pdf-page-count.ts PDF_PAGE_COUNT_LIMITS). */
+export interface PdfPageCountLimits {
+  maxPages: number;
+  maxDepth: number;
+  /** The tool's own address-space limit (`-max-memory`). */
+  toolMemoryMiB: number;
+  /** The external hard limit (`prlimit --as`), above the tool's own so the tool's clean refusal comes first. */
+  addressSpaceMiB: number;
+  cpuSeconds: number;
+  wallMs: number;
+}
+
+/**
+ * `-f first -l last` for a Poppler/Doppler utility that takes a page range. Every such call passes an explicit range ending at the
+ * billed page count: without `-l` (or with `-l 0`, which the utilities read as "all pages") an inflated `/Count` makes them
+ * process, render or list pages up to the number the file claims. Throws on anything but 1 <= first <= last.
+ */
+export function pdfPageRangeArgs(first: number, last: number): string[] {
+  if (!Number.isSafeInteger(first) || !Number.isSafeInteger(last) || first < 1 || last < first) {
+    throw new Error(`invalid PDF page range ${first}..${last}: a page-range utility needs 1 <= first <= last`);
+  }
+  return ["-f", String(first), "-l", String(last)];
+}
+
 export interface CommandResult {
   stdout: string;
   stderr: string;
@@ -100,14 +141,20 @@ export interface CommandRunnerOptions {
    * (registered by the worker with setDefaultParserSandbox, else initialized from the env).
    */
   openSession?: (activityId: string) => Promise<SandboxSession>;
-  /** Measured shard profiles (DB-backed); without it Doppler shards plan from the priors. */
+  /** Measured shard profiles (DB-backed); without it a provider's shards plan from its prior. */
   shardCalibration?: Pick<ShardCalibration, "profile">;
 }
 
 /** A started command: a local child process to monitor, or a remote run that completes on its own. */
 export type LaunchedCommand =
   | { child: ChildProcess; supervised: SupervisedChild; release(): Promise<void> }
-  | { remote: Promise<SandboxResult>; timeoutMs: number; release(): Promise<void> };
+  | {
+      remote: Promise<SandboxResult>;
+      timeoutMs: number;
+      release(): Promise<void>;
+      /** Resolves when the provider admits the command (it may queue it first); absent means it starts at once. */
+      started?: Promise<void>;
+    };
 
 const DEFAULT_SCRATCH_ROOT = "/tmp/docslurp-parser-sandbox";
 
@@ -154,6 +201,17 @@ export interface ClamDatabaseHealth {
   ageHours: number | null;
   source: string | null;
 }
+
+/** A command that ran to completion and exited non-zero (local or remote). The message keeps its historical shape. */
+export class CommandExitError extends Error {
+  constructor(message: string, readonly exitCode: number | null) {
+    super(message);
+    this.name = "CommandExitError";
+  }
+}
+
+/** External limits on the layout walker (pdfLayoutFacts): generous for its own budgets (8-16 MiB windows), fatal for a bomb. */
+export const PDF_LAYOUT_FACTS_LIMITS = Object.freeze({ addressSpaceMiB: 1024, cpuSeconds: 60, wallMs: 120_000 });
 
 export class CommandRunner {
   private readonly scriptsDir: string;
@@ -258,7 +316,7 @@ export class CommandRunner {
           if ("remote" in launched) {
             const result = await this.settleRemote(plan, launched);
             if (result.exitCode === 0) return { stdout: result.stdout, stderr: result.stderr };
-            throw new Error(`${plan.binary} (${result.exitCode ?? "unknown"}): ${result.stderr || result.stdout}`.trim());
+            throw new CommandExitError(`${plan.binary} (${result.exitCode ?? "unknown"}): ${result.stderr || result.stdout}`.trim(), result.exitCode);
           }
           const { child, supervised } = launched;
           return await new Promise<CommandResult>((resolve, reject) => {
@@ -316,8 +374,9 @@ export class CommandRunner {
             }
 
             reject(
-              new Error(
+              new CommandExitError(
                 `${plan.binary} (${code ?? "unknown"}): ${stderr || stdout}`.trim(),
+                code ?? null,
               ),
             );
           }, (error: Error) => reject(commandFailure(error, monitor.finish())));
@@ -534,11 +593,48 @@ export class CommandRunner {
     });
   }
 
-  async splitPages(source: string, pattern: string): Promise<CommandPlan> {
+  /**
+   * Whether page `page` exists in the PDF's page tree as Poppler walks it: `pdftotext -f page -l page` exits 0 for an existing
+   * page; past the last page it exits 99 with Poppler's own "Wrong page range given" line (pdf-page-count.ts reads only that
+   * tool-authored line and the exit code, never the document's text or metadata). The page's text goes to /dev/null.
+   */
+  /**
+   * Doppler's `pdfpagecount` (the page tree walked as Poppler builds its page list; never `/Count`, Info or XMP) under an external
+   * hard limit on top of its own: `prlimit` caps its address space and CPU time, the plan its wall clock, and the tool gets explicit
+   * page, depth and memory budgets. Stdout is one integer on success; lib/pdf-page-count.ts maps every exit code.
+   */
+  async pdfPageCount(source: string, limits: PdfPageCountLimits): Promise<CommandPlan> {
+    const tool = path.join(dopplerBinDir(), "pdfpagecount");
+    const planned = planDocumentToolInvocation({
+      binary: tool,
+      args: ["-max-pages", String(limits.maxPages), "-max-depth", String(limits.maxDepth), "-max-memory", String(limits.toolMemoryMiB), source],
+      fileArgIndexes: [6],
+      supportsDoubleDash: true,
+    });
+    const plan = await this.plan("prlimit", `--as=${limits.addressSpaceMiB * 1024 * 1024}`, `--cpu=${limits.cpuSeconds}`, "--", planned.binary, ...planned.args);
+    return { ...plan, available: plan.available && existsSync(tool), timeoutMs: limits.wallMs, readOnlyInputs: true };
+  }
+
+  /**
+   * Whether Poppler (Doppler's pdftotext, the extractor's own) can open page 1 after pdfpagecount walked the tree: exit 99
+   * means it sees no pages (a claimed /Count beyond the file's objects makes it refuse the tree), so extraction would read
+   * nothing. Output is discarded; only the exit code is read.
+   */
+  async pdfPopplerAcceptance(source: string): Promise<CommandPlan> {
+    const plan = await this.planDocumentTool({
+      binary: path.join(dopplerBinDir(), "pdftotext"),
+      args: ["-q", ...pdfPageRangeArgs(1, 1), source, "/dev/null"],
+      fileArgIndexes: [5],
+      supportsDoubleDash: true,
+    });
+    return { ...plan, available: plan.available && existsSync(plan.binary), timeoutMs: 60_000, readOnlyInputs: true };
+  }
+
+  async splitPages(source: string, pattern: string, pages: number): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pdfseparate",
-      args: [source, pattern],
-      fileArgIndexes: [0, 1],
+      args: [...pdfPageRangeArgs(1, pages), source, pattern],
+      fileArgIndexes: [4, 5],
       supportsDoubleDash: true,
     });
   }
@@ -551,7 +647,7 @@ export class CommandRunner {
   ): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pdfseparate",
-      args: ["-f", String(firstPage), "-l", String(lastPage), source, pattern],
+      args: [...pdfPageRangeArgs(firstPage, lastPage), source, pattern],
       fileArgIndexes: [4, 5],
       supportsDoubleDash: true,
     });
@@ -579,11 +675,11 @@ export class CommandRunner {
     });
   }
 
-  async renderPageImages(source: string, prefix: string): Promise<CommandPlan> {
+  async renderPageImages(source: string, prefix: string, pages: number): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pdftoppm",
-      args: ["-png", "-r", "150", source, prefix],
-      fileArgIndexes: [3, 4],
+      args: ["-png", "-r", "150", ...pdfPageRangeArgs(1, pages), source, prefix],
+      fileArgIndexes: [7, 8],
       supportsDoubleDash: true,
     });
   }
@@ -610,10 +706,7 @@ export class CommandRunner {
         String(maxEdgePx),
         "-r",
         String(dpi),
-        "-f",
-        String(firstPage),
-        "-l",
-        String(lastPage),
+        ...pdfPageRangeArgs(firstPage, lastPage),
         source,
         prefix,
       ],
@@ -622,31 +715,52 @@ export class CommandRunner {
     });
   }
 
-  async extractMarkdown(source: string): Promise<CommandPlan> {
+  /**
+   * Pandoc to GFM. `reader` names the input format (PANDOC_READERS) so the bytes are never read by a reader the file
+   * name picked; `--sandbox` keeps every reader from reading any other file or the network (LaTeX `\input`, EPUB and
+   * HTML resources). A format Pandoc has no reader for (legacy .doc) plans as unavailable.
+   */
+  async extractMarkdown(source: string, reader?: string | null): Promise<CommandPlan> {
+    if (reader === null) return { binary: "pandoc", args: [], available: false };
+    if (reader !== undefined && !PANDOC_READERS.has(reader)) throw new Error(`unsupported pandoc reader ${reader}`);
+    const args = ["--sandbox", ...(reader ? ["-f", reader] : []), "-t", "gfm", "--wrap=none", source];
     return await this.planDocumentTool({
       binary: "pandoc",
-      args: ["-t", "gfm", source],
-      fileArgIndexes: [2],
+      args,
+      fileArgIndexes: [args.length - 1],
       supportsDoubleDash: true,
     });
   }
 
-  /** Private PDF tools execute only in a fresh, offline VM; never probe or load them on the host. */
-  async dopplerMarkdown(source: string, output: string): Promise<CommandPlan> {
-    if (!path.isAbsolute(source) || !path.isAbsolute(output) || source === output) {
-      throw new Error("Doppler requires distinct absolute input and output paths");
-    }
-    if (!/^[^@]+@sha256:[0-9a-f]{64}$/.test(process.env.DOCSLURP_DOPPLER_VM_IMAGE ?? "")) {
-      throw new Error("Doppler requires a digest-pinned DOCSLURP_DOPPLER_VM_IMAGE; refusing local fallback");
-    }
-    return { binary: "doppler-vm", args: [], available: true,
-      dopplerVm: { operation: "doppler-markdown", input: source, output } };
+  /**
+   * PDF to Markdown with Doppler's `pdftomarkdown` (it runs the fork's own `pdftotext -bbox-layout` from beside itself and
+   * converts the XHTML), pages joined by form feeds. A separate executable in the parser sandbox, at its absolute path off PATH
+   * (tools/doppler.ts); customer-owned local PDF mode only.
+   */
+  async dopplerMarkdown(source: string, pages: number): Promise<CommandPlan> {
+    return await this.planDocumentTool({ binary: dopplerConverterPath(), args: [...pdfPageRangeArgs(1, pages), source], fileArgIndexes: [4], supportsDoubleDash: true });
   }
 
-  async extractText(source: string, preservePageBreaks = false): Promise<CommandPlan> {
+  /** Markdown from a .docx, .pptx or .xlsx file (scripts/office_markdown.py, run in the parser sandbox). */
+  async officeMarkdown(kind: "docx" | "pptx" | "xlsx", source: string, output: string): Promise<CommandPlan> {
+    return await this.planScript("python3", "office_markdown.py", "--kind", kind, "--input", source, "--output", output);
+  }
+
+  /** A provider's PDF tools execute only in its fresh, offline VM; never probe or load them on the host. */
+  async sandboxedPdfMarkdown(source: string, output: string): Promise<CommandPlan> {
+    if (!path.isAbsolute(source) || !path.isAbsolute(output) || source === output) {
+      throw new Error("The VM PDF extractor requires distinct absolute input and output paths");
+    }
+    const provider = requireSandboxedPdfProvider();
+    provider.assertConfigured();
+    return { binary: provider.id, args: [], available: true, sandboxedPdf: { input: source, output } };
+  }
+
+  async extractText(source: string, pages: number, preservePageBreaks = false): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pdftotext",
       args: [
+        ...pdfPageRangeArgs(1, pages),
         "-layout",
         "-enc",
         "UTF-8",
@@ -656,25 +770,25 @@ export class CommandRunner {
         source,
         "-",
       ],
-      fileArgIndexes: [preservePageBreaks ? 5 : 6],
+      fileArgIndexes: [preservePageBreaks ? 9 : 10],
       supportsDoubleDash: true,
     });
   }
 
-  async extractHtml(source: string): Promise<CommandPlan> {
+  async extractHtml(source: string, pages: number): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pdftohtml",
-      args: ["-stdout", "-hidden", "-nodrm", source],
-      fileArgIndexes: [3],
+      args: ["-stdout", "-hidden", "-nodrm", ...pdfPageRangeArgs(1, pages), source],
+      fileArgIndexes: [7],
       supportsDoubleDash: true,
     });
   }
 
-  async extractImages(source: string, prefix: string): Promise<CommandPlan> {
+  async extractImages(source: string, prefix: string, pages: number): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pdfimages",
-      args: ["-png", "-j", source, prefix],
-      fileArgIndexes: [2, 3],
+      args: ["-png", "-j", ...pdfPageRangeArgs(1, pages), source, prefix],
+      fileArgIndexes: [6, 7],
       supportsDoubleDash: true,
     });
   }
@@ -683,8 +797,8 @@ export class CommandRunner {
   async listImages(source: string, lastPage: number): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pdfimages",
-      args: ["-list", "-l", String(Math.max(1, Math.trunc(lastPage))), source],
-      fileArgIndexes: [3],
+      args: ["-list", ...pdfPageRangeArgs(1, lastPage), source],
+      fileArgIndexes: [5],
       supportsDoubleDash: true,
     });
   }
@@ -693,17 +807,48 @@ export class CommandRunner {
   async listPdfImages(source: string, firstPage: number, lastPage: number): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pdfimages",
-      args: ["-list", "-f", String(firstPage), "-l", String(lastPage), source],
+      args: ["-list", ...pdfPageRangeArgs(firstPage, lastPage), source],
       fileArgIndexes: [5],
       supportsDoubleDash: true,
     });
+  }
+
+  /**
+   * `pdftotext -bbox-layout` for a page range: the text layer's word boxes, as XHTML, written to `output`. Doppler's build
+   * (customer-owned local mode installs it) adds its ruling lines (`-rules`, ruled table grids); Debian's has no rules.
+   */
+  async pdfWordBoxes(source: string, firstPage: number, lastPage: number, output: string): Promise<CommandPlan> {
+    const doppler = path.join(dopplerBinDir(), "pdftotext");
+    const rules = existsSync(doppler);
+    return await this.planDocumentTool({
+      binary: rules ? doppler : "pdftotext",
+      args: [...(rules ? ["-rules"] : []), "-bbox-layout", ...pdfPageRangeArgs(firstPage, lastPage), source, output],
+      fileArgIndexes: rules ? [6, 7] : [5, 6],
+      supportsDoubleDash: true,
+    });
+  }
+
+  /**
+   * The layout walker (scripts/pdf_layout_facts.py, pdf-layout-facts@1) over files this worker already produced: the PDF,
+   * its `pdfimages -list` output, its word boxes and the extractor's Markdown. Prints JSON; reads only the named files. It
+   * parses the customer's PDF in Python, so it runs under external limits (PDF_LAYOUT_FACTS_LIMITS: address space and CPU
+   * through prlimit, and a wall-clock timeout) on top of its own decode budgets: a decode bomb it does not anticipate is
+   * killed, not allowed to exhaust the worker. Unavailable without prlimit (the facts are optional evidence).
+   */
+  async pdfLayoutFacts(args: { source: string; lastPage: number; listing: string; wordBoxes: string; markdown: string }): Promise<CommandPlan> {
+    const script = await this.planScript("python3", "pdf_layout_facts.py");
+    const limits = PDF_LAYOUT_FACTS_LIMITS;
+    const plan = await this.plan("prlimit", `--as=${limits.addressSpaceMiB * 1024 * 1024}`, `--cpu=${limits.cpuSeconds}`, "--",
+      script.binary, ...script.args, "--input", args.source, "--first", "1", "--last", String(args.lastPage),
+      "--listing", args.listing, "--xhtml", args.wordBoxes, "--markdown", args.markdown);
+    return { ...plan, available: plan.available && script.available, timeoutMs: limits.wallMs, readOnlyInputs: true };
   }
 
   /** `pdfinfo -f -l`: per-page size lines ("Page N size: W x H pts") for a page range. */
   async pdfPageSizes(source: string, firstPage: number, lastPage: number): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pdfinfo",
-      args: ["-f", String(firstPage), "-l", String(lastPage), source],
+      args: [...pdfPageRangeArgs(firstPage, lastPage), source],
       fileArgIndexes: [4],
       supportsDoubleDash: true,
     });
@@ -713,17 +858,8 @@ export class CommandRunner {
   async pageText(source: string, lastPage: number): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pdftotext",
-      args: ["-l", String(Math.max(1, Math.trunc(lastPage))), "-enc", "UTF-8", "-eol", "unix", source, "-"],
-      fileArgIndexes: [6],
-      supportsDoubleDash: true,
-    });
-  }
-
-  async ocrPdf(source: string, output: string): Promise<CommandPlan> {
-    return await this.planDocumentTool({
-      binary: "ocrmypdf",
-      args: ["--skip-text", "--redo-ocr", source, output],
-      fileArgIndexes: [2, 3],
+      args: [...pdfPageRangeArgs(1, lastPage), "-enc", "UTF-8", "-eol", "unix", source, "-"],
+      fileArgIndexes: [8],
       supportsDoubleDash: true,
     });
   }
@@ -768,28 +904,6 @@ export class CommandRunner {
       "--output",
       output,
     );
-  }
-
-  async kreuzbergMarkdown(
-    source: string,
-    output: string,
-    configJson?: string,
-  ): Promise<CommandPlan> {
-    const args = ["--input", source, "--output", output];
-    if (configJson) {
-      args.push("--config-json", configJson);
-    }
-    return await this.planScript("node", "kreuzberg_extract.mjs", ...args);
-  }
-
-  async liteParseExtract(
-    source: string,
-    output: string,
-    ocrEnabled = false,
-  ): Promise<CommandPlan> {
-    const args = ["--input", source, "--output", output];
-    if (ocrEnabled) args.push("--ocr");
-    return await this.planScript("node", "liteparse_extract.mjs", ...args);
   }
 
   async dolphinMarkdown(
@@ -892,7 +1006,7 @@ export class CommandRunner {
   }
 
   async latexToMarkdown(source: string): Promise<CommandPlan> {
-    return await this.plan("pandoc", "-f", "latex", "-t", "gfm", source);
+    return await this.plan("pandoc", "--sandbox", "-f", "latex", "-t", "gfm", "--", source);
   }
 
   async epubExtract(source: string, output: string): Promise<CommandPlan> {
@@ -983,20 +1097,41 @@ export class CommandRunner {
     return await this.plan("catdoc", source);
   }
 
-  async tesseractOcr(
-    source: string,
-    outputBase: string,
-    langs?: string,
-  ): Promise<CommandPlan> {
-    const langArg = langs ?? "eng";
-    return await this.plan(
-      "tesseract",
-      source,
-      outputBase,
-      "-l",
-      langArg,
-      "txt",
-    );
+  /**
+   * OCR in a fresh VM through the registered provider (DOCSLURP_OCR_MODE=vm). Refuses without one: VM OCR never falls back
+   * to the worker host or to another reader.
+   */
+  async sandboxedOcrRead(job: SandboxedOcrJob): Promise<CommandPlan> {
+    for (const value of [job.input, job.output, job.imageDir]) {
+      if (!path.isAbsolute(value)) throw new Error("VM OCR requires absolute input, output and image paths");
+    }
+    if (new Set([job.input, job.output, job.imageDir]).size !== 3) throw new Error("VM OCR requires distinct input, output and image paths");
+    const provider = requireSandboxedOcrProvider();
+    provider.assertConfigured();
+    return { binary: provider.id, args: [], available: true, sandboxedOcr: job, pages: job.pages?.length ?? job.maxFrames };
+  }
+
+  /**
+   * The fixed OCR CLI under the parser sandbox (DOCSLURP_OCR_MODE=local). Customer-owned execution only: refused unless
+   * DOCSLURP_SERVICE_PROFILE=self-hosted, so a service deployment can never run OCR on the worker host.
+   */
+  async localOcrRead(job: SandboxedOcrJob, env: NodeJS.ProcessEnv = process.env): Promise<CommandPlan> {
+    if (resolveOcrMode(env) !== "local") throw new OcrRefusedError("local OCR is refused: DOCSLURP_OCR_MODE is not local", "mode");
+    const refusal = localOcrRefusal(env);
+    if (refusal) throw new OcrRefusedError(refusal, "profile");
+    const paths = localOcrPaths(this.scriptsDir, env);
+    const plan = await this.plan(paths.python, "-I", path.join(this.scriptsDir, "docslurp_ocr.py"), ...localOcrCommandArgs(job, paths, env));
+    return {
+      ...plan,
+      available: plan.available && existsSync(paths.modelDir) && existsSync(path.join(this.scriptsDir, "docslurp_ocr.py")),
+      // The venv's interpreter may be a symlink into a Python install outside the venv (uv, pyenv): bind its prefix too.
+      bundleRoots: [...new Set([paths.venvRoot, paths.modelDir, ...interpreterRoots(paths.python)])],
+      bundleEnv: { OMP_NUM_THREADS: "1", OMP_THREAD_LIMIT: "1" },
+      // The CLI opens no sockets (it replaces socket creation before importing the engine).
+      denyUnixSockets: true,
+      readOnlyInputs: true,
+      pages: job.pages?.length ?? job.maxFrames,
+    };
   }
 
   async tiffSplit(source: string, outputPattern: string): Promise<CommandPlan> {
@@ -1020,52 +1155,50 @@ export class CommandRunner {
     );
   }
 
-  private async clamVmDatabaseHealth(policy: MalwareScanPolicy, signal: AbortSignal | undefined, databaseArgs: string[]): Promise<ClamDatabaseHealth> {
+  private async clamVmDatabaseHealth(policy: MalwareScanPolicy, signal: AbortSignal | undefined, databaseArgs: string[], assetDir?: string): Promise<ClamDatabaseHealth> {
     try {
       const signatureFiles = databaseArgs.filter((_, index) => index % 2 === 1);
       if (!signatureFiles.length) throw new Error("No staged signature files");
-      // ClamAV print_version accepts a directory and reads its daily.cvd/cld header.
+      // ClamAV print_version accepts a directory and reads its daily.cvd/cld header: the same staged definitions the scan
+      // uses, so the freshness check still covers what scans.
       const plan = await this.plan("clamscan", "--database", path.dirname(signatureFiles[0]!), "--version");
-      plan.stagedInputs = signatureFiles;
+      if (assetDir) plan.readOnlyAssetDir = assetDir;
+      else plan.stagedInputs = signatureFiles;
       plan.readOnlyInputs = true;
       const result = await this.run(plan, signal);
       return parseClamVmDatabaseHealth(result.stdout, policy.maxSignatureAgeHours);
-    } catch {
+    } catch (error) {
+      // The sandbox's own verdict (a document's broken job tree, an infrastructure failure, an abort) is the outcome, never
+      // "signature database is missing" (real-Modal S2c): only a check that ran and could not read the definitions is that.
+      if (error instanceof SandboxRunError || signal?.aborted) throw error;
       return { status: "missing", updatedAt: null, ageHours: null, source: null };
     }
   }
 
   async scanForMalware(source: string, signal?: AbortSignal): Promise<MalwareScanResult> {
-    if (process.env.NODE_ENV !== "production") return this.scanForMalwareWithDefinitions(source, signal);
+    if (!vmOnlyParsing()) return this.scanForMalwareWithDefinitions(source, signal);
     // Copy only named signature assets, never host configuration or credentials. The host
     // updater keeps these fresh; the VM verifies the same staged definitions it will scan with.
     const policy = resolveMalwareScanPolicy();
-    const dir = await mkdtemp(path.join(tmpdir(), "docslurp-clam-definitions-"));
+    // Staged once per definitions content and reused by every document (real-Modal P1): a remote VM receives them once.
+    const staged = await stageClamDefinitions(policy.databaseDirectory);
     try {
-      const databaseArgs: string[] = [];
-      let totalBytes = 0;
-      for (const entry of await readdir(policy.databaseDirectory, { withFileTypes: true })) {
-        if (!entry.isFile() || !/^(?:main|daily|bytecode)\.(?:cvd|cld)$/.test(entry.name)) continue;
-        const sourceFile = path.join(policy.databaseDirectory, entry.name);
-        totalBytes += (await stat(sourceFile)).size;
-        if (totalBytes > 512 * 1024 * 1024) throw new Error("ClamAV signature assets exceed transfer limit");
-        const target = path.join(dir, entry.name);
-        await copyFile(sourceFile, target);
-        databaseArgs.push("--database", target);
-      }
-      if (databaseArgs.length === 0) throw new Error("ClamAV signature assets unavailable; refusing VM scan");
-      return await this.scanForMalwareWithDefinitions(source, signal, databaseArgs);
-    } finally { await rm(dir, { recursive: true, force: true }); }
+      const databaseArgs = staged.files.flatMap((file) => ["--database", file]);
+      return await this.scanForMalwareWithDefinitions(source, signal, databaseArgs, staged.dir);
+    } finally {
+      await staged.release();
+    }
   }
 
   private async scanForMalwareWithDefinitions(
     source: string,
     signal?: AbortSignal,
     databaseArgs: string[] = [],
+    assetDir?: string,
   ): Promise<MalwareScanResult> {
     const policy = resolveMalwareScanPolicy();
     const databaseHealth = process.env.NODE_ENV === "production"
-      ? await this.clamVmDatabaseHealth(policy, signal, databaseArgs)
+      ? await this.clamVmDatabaseHealth(policy, signal, databaseArgs, assetDir)
       : inspectClamDatabaseHealth(policy);
     const daemonPlan = process.env.NODE_ENV === "production"
       ? { binary: "clamdscan", args: [], available: false }
@@ -1073,6 +1206,7 @@ export class CommandRunner {
     const directPlan = await this.clamScan(source);
     directPlan.args.unshift(...databaseArgs);
     directPlan.readOnlyInputs = true;
+    if (assetDir) directPlan.readOnlyAssetDir = assetDir;
     const healthWarnings: string[] = [];
 
     const databaseWarning = describeClamDatabaseHealth(
@@ -1317,6 +1451,10 @@ export class CommandRunner {
   }
 
   private async isAvailable(binary: string): Promise<boolean> {
+    // Commands run in a remote VM: a bare tool name is available when the VM image reports it (the startup probe), never
+    // because the worker host happens to have it on its PATH (validation N7).
+    const vm = registeredParserSandbox();
+    if (vm?.isolation.location === "remote" && vm.tools && !binary.includes(path.sep)) return vm.tools.includes(binary);
     if (binary.includes(path.sep)) {
       try {
         await access(binary);
@@ -1377,26 +1515,31 @@ export class CommandRunner {
    * Start a command through the activity's sandbox session. Vector-writer commands hold
    * backend credentials and run outside the sandbox. Callers must `release()` when done.
    */
-  private dopplerShardDeps(): DopplerShardDeps {
+  private sandboxedPdfContext(pages: number, profileKey: string | undefined): SandboxedPdfRunContext {
     const calibration = this.shardCalibration;
     return {
-      ...(calibration ? { profile: () => calibration.profile("extract-markdown:doppler-vm") } : {}),
+      pages,
+      ...(calibration && profileKey ? { profile: () => calibration.profile(profileKey) } : {}),
       recordTiming: (timing) => recordShardTimingInContext(timing),
-      onProgress: () => noteWorkProgress("command:doppler-shard"),
+      onProgress: () => noteWorkProgress("command:vm-pdf-shard"),
     };
   }
 
   async launch(plan: CommandPlan, signal?: AbortSignal): Promise<LaunchedCommand> {
     await admitCommand();
-    if (plan.dopplerVm) {
-      // DOCSLURP_DOPPLER_SHARDS=on fans long PDFs out across parallel VMs (needs a doppler-vm@3 image).
-      const settings = dopplerShardSettings();
+    if (plan.sandboxedOcr) {
+      const provider = requireSandboxedOcrProvider();
+      const frames = plan.pages ?? plan.sandboxedOcr.maxFrames;
+      return { remote: provider.run(plan.sandboxedOcr, signal), timeoutMs: provider.timeoutMs(frames), release: async () => {} };
+    }
+    if (plan.sandboxedPdf) {
+      const provider = requireSandboxedPdfProvider();
       const pages = plan.pages ?? currentPerfContext()?.pageCount ?? 0;
-      // Long documents split even with optional sharding off; shards also note progress as they finish.
-      const waves = settings.rangesSupported ? Math.ceil(settings.maxShards / settings.vmParallel) + 1 : 1;
+      // The provider shards long documents itself and notes progress as shards finish.
       return {
-        remote: executeDopplerShards(plan.dopplerVm, pages, signal, settings, this.dopplerShardDeps()),
-        timeoutMs: VM_TIMEOUT_MS * waves,
+        remote: provider.run(plan.sandboxedPdf, this.sandboxedPdfContext(pages, provider.shardProfile?.key), signal)
+          .then((result) => acceptSandboxedPdfResult(plan.sandboxedPdf!, result, pages)),
+        timeoutMs: provider.timeoutMs(pages),
         release: async () => {},
       };
     }
@@ -1443,7 +1586,15 @@ export class CommandRunner {
             `parser sandbox provider '${session.providerId}' offers run() but is not remote; refusing to run a command it does not contain`,
           );
         }
-        return { remote: session.run(command, signal), timeoutMs: command.limits.timeoutMs, release };
+        const documentId = currentPerfContext()?.documentId;
+        let onStart!: () => void;
+        const started = new Promise<void>((resolve) => (onStart = resolve));
+        // Bound to this stage's context: a pooled VM's idle time is recorded in this stage's ledger when the VM is reaped.
+        const recordUsage = AsyncResource.bind((event: UsageEvent) => recordRemoteUsage(event));
+        const remote = session.run(documentId ? { ...command, affinityKey: documentId } : command, signal, { onStart, recordUsage });
+        if (!session.reportsStart) return { remote, timeoutMs: command.limits.timeoutMs, release };
+        void remote.then(onStart, onStart); // a run that settles without admission (closed, aborted) ends the wait
+        return { remote, timeoutMs: command.limits.timeoutMs, release, started };
       }
       throw new Error(`Sandbox session '${session.providerId}' offers neither spawn nor run`);
     } catch (error) {
@@ -1459,14 +1610,18 @@ export class CommandRunner {
    */
   async settleRemote(
     plan: CommandPlan,
-    launched: { remote: Promise<SandboxResult>; timeoutMs: number },
+    launched: { remote: Promise<SandboxResult>; timeoutMs: number; started?: Promise<void> },
     metricPrefix = "command",
   ): Promise<SandboxResult> {
     const startedAt = Date.now();
+    // The command's time limit runs from its admission: while the provider queues it (another command holds the VM),
+    // it is healthy and waiting, and the stall watchdog must not fire on it (recheck Q #4).
+    let windowStart: number | null = launched.started ? null : startedAt;
+    void launched.started?.then(() => { windowStart = Date.now(); });
     // Bound to this stage's async context so the note reaches its progress tracker.
     const progress = setInterval(AsyncResource.bind(() => {
-      if (Date.now() - startedAt > launched.timeoutMs) clearInterval(progress);
-      else noteWorkProgress(`command:${path.basename(plan.binary)}`);
+      if (windowStart !== null && Date.now() - windowStart > launched.timeoutMs) clearInterval(progress);
+      else noteWorkProgress(`command${windowStart === null ? "-queued" : ""}:${path.basename(plan.binary)}`);
     }), REMOTE_PROGRESS_INTERVAL_MS);
     progress.unref();
     let result: SandboxResult;
@@ -1474,6 +1629,7 @@ export class CommandRunner {
       result = await launched.remote;
     } catch (error) {
       if (error instanceof SandboxRunError && error.usage) recordRemoteUsage(error.usage);
+      noteSandboxInfrastructureError(error);
       throw error;
     } finally {
       clearInterval(progress);
@@ -1939,17 +2095,19 @@ function assertProcessTeardown(session: SandboxSession): void {
  * every other command gets it. Audited 2026-10-29 against every binary the runner plans:
  * - clamdscan talks to clamd over its LocalSocket.
  * - LibreOffice (soffice, soffice.bin, libreoffice, unoconv) uses one for its own IPC.
- * - Python interpreters and Python entry points (docling, ocrmypdf, xlsx2csv): asyncio's self-pipe
+ * - Python interpreters and Python entry points (docling, xlsx2csv): asyncio's self-pipe
  *   and multiprocessing (forkserver, Manager, duplex Pipe) use socketpair(AF_UNIX).
  * - node: libuv's child-process stdio and IPC use socketpair(AF_UNIX).
- * - kreuzberg: a tokio runtime's signal driver uses a UNIX socket pair.
- * Poppler, qpdf, tesseract, pandoc, unrtf, catdoc, tiffcp and clamscan do not use one. A tool not
+ * Poppler, qpdf, pandoc, unrtf, catdoc, tiffcp and clamscan do not use one. A tool not
  * listed here gets the filter: add it only after checking that it needs a socket.
  */
 const UNIX_SOCKET_CLIENTS = new Set([
   "clamdscan", "soffice", "soffice.bin", "libreoffice", "unoconv",
-  "docling", "ocrmypdf", "xlsx2csv", "node", "kreuzberg",
+  "docling", "xlsx2csv", "node",
 ]);
+
+/** Pandoc input formats the worker uses (extractMarkdown). */
+export const PANDOC_READERS: ReadonlySet<string> = new Set(["docx", "odt", "rtf", "epub", "html", "markdown", "csv", "tsv", "latex"]);
 
 export function needsUnixSockets(binary: string): boolean {
   const name = path.basename(binary);
@@ -1975,7 +2133,7 @@ export function assertUnixSocketFilter(session: Pick<SandboxSession, "providerId
   // Landlock must scope even parsers that need sockets to their own domain.
   if (session.providerId !== "landlock" && !command.denyUnixSockets) return;
   const optIn = ["1", "true"].includes(process.env.DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS?.trim().toLowerCase() ?? "");
-  const production = process.env.NODE_ENV === "production";
+  const production = vmOnlyParsing();
   if (optIn && !production) {
     if (!warnedUnfilteredSockets) {
       warnedUnfilteredSockets = true;
@@ -2114,6 +2272,116 @@ export function buildCommandEnv(args: {
 }
 
 /** Provider-neutral description of a parser command: allowlisted env plus the paths it may read and write. */
+/** The ClamAV definitions currently staged on this host, by the source files' name, size and mtime. */
+let stagedDefinitions: { signature: string; staging: Promise<StagedClamDefinitions> } | null = null;
+/** Users of each staged directory, and whether a newer staging replaced it (council W #8: removed only when unused). */
+const stagedDefinitionUse = new Map<string, { refs: number; retired: boolean }>();
+
+export interface StagedClamDefinitions {
+  dir: string;
+  files: string[];
+  /** Done with the directory: a replaced one is removed once nobody uses it. Idempotent. */
+  release: () => Promise<void>;
+}
+
+/** A staged directory is reused only while it is still the private, read-only copy this process made (council W #8). */
+async function verifyStagedDefinitions(dir: string, names: string[], sourceDirectory: string): Promise<boolean> {
+  try {
+    const uid = process.getuid?.();
+    const info = await lstat(dir);
+    if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o700 || (uid !== undefined && info.uid !== uid)) return false;
+    if ((await readdir(dir)).sort().join("\0") !== [...names].sort().join("\0")) return false;
+    for (const name of names) {
+      const file = await lstat(path.join(dir, name));
+      const source = await stat(path.join(sourceDirectory, name));
+      if (!file.isFile() || (file.mode & 0o777) !== 0o444 || (uid !== undefined && file.uid !== uid) || file.size !== source.size) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function removeIfUnused(dir: string): Promise<void> {
+  const use = stagedDefinitionUse.get(dir);
+  if (use && (!use.retired || use.refs > 0)) return;
+  stagedDefinitionUse.delete(dir);
+  await rm(dir, { recursive: true, force: true }).catch(() => {});
+}
+
+function acquireStaged(staged: { dir: string; files: string[] }): StagedClamDefinitions {
+  const use = stagedDefinitionUse.get(staged.dir) ?? { refs: 0, retired: false };
+  use.refs += 1;
+  stagedDefinitionUse.set(staged.dir, use);
+  let released = false;
+  return {
+    ...staged,
+    release: async () => {
+      if (released) return;
+      released = true;
+      use.refs -= 1;
+      await removeIfUnused(staged.dir);
+    },
+  };
+}
+
+/**
+ * Copy the named ClamAV definition files once into a private directory (mkdtemp, mode 0700, files 0444) named by their
+ * content's sha256 plus a random suffix (real-Modal P1, council W #8), and reuse it while the host updater leaves them
+ * unchanged and it still has that owner and those modes. A replaced directory is removed once no command still uses it
+ * (each caller releases its copy). Only the signature databases travel, never host configuration or credentials.
+ */
+export async function stageClamDefinitions(directory: string): Promise<StagedClamDefinitions> {
+  const names: string[] = [];
+  const parts: string[] = [];
+  let totalBytes = 0;
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    if (!entry.isFile() || !/^(?:main|daily|bytecode)\.(?:cvd|cld)$/.test(entry.name)) continue;
+    const info = await stat(path.join(directory, entry.name));
+    totalBytes += info.size;
+    if (totalBytes > 512 * 1024 * 1024) throw new Error("ClamAV signature assets exceed transfer limit");
+    names.push(entry.name);
+    parts.push(`${entry.name}:${info.size}:${info.mtimeMs}`);
+  }
+  if (!names.length) throw new Error("ClamAV signature assets unavailable; refusing VM scan");
+  names.sort();
+  const signature = `${directory}|${parts.sort().join("|")}`;
+  if (stagedDefinitions?.signature === signature) {
+    const current = await stagedDefinitions.staging.catch(() => null);
+    if (current && await verifyStagedDefinitions(current.dir, names, directory)) return acquireStaged(current);
+  }
+  const previous = stagedDefinitions;
+  const staging = (async () => {
+    const hash = createHash("sha256");
+    for (const name of names) {
+      hash.update(`${name}\0`);
+      for await (const chunk of createReadStream(path.join(directory, name))) hash.update(chunk as Buffer);
+    }
+    const dir = await mkdtemp(path.join(tmpdir(), `docslurp-clam-definitions-${hash.digest("hex").slice(0, 32)}-`));
+    try {
+      await chmod(dir, 0o700);
+      for (const name of names) {
+        await copyFile(path.join(directory, name), path.join(dir, name));
+        await chmod(path.join(dir, name), 0o444);
+      }
+    } catch (error) {
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+      throw error;
+    }
+    stagedDefinitionUse.set(dir, { refs: 0, retired: false });
+    return { dir, files: names.map((name) => path.join(dir, name)), release: async () => {} };
+  })();
+  stagedDefinitions = { signature, staging };
+  const result = await staging;
+  const old = await previous?.staging.catch(() => null);
+  if (old && old.dir !== result.dir) {
+    const use = stagedDefinitionUse.get(old.dir);
+    if (use) use.retired = true;
+    await removeIfUnused(old.dir);
+  }
+  return acquireStaged(result);
+}
+
 export function buildSandboxCommand(args: {
   plan: CommandPlan;
   venvBin: string;
@@ -2130,22 +2398,37 @@ export function buildSandboxCommand(args: {
     configuredWritablePaths: args.configuredWritablePaths,
     scriptsDir: args.scriptsDir,
   });
+  const assetDir = args.plan.readOnlyAssetDir ? path.resolve(args.plan.readOnlyAssetDir) : null;
+  const underAssets = (p: string) => assetDir !== null && (p === assetDir || p.startsWith(`${assetDir}${path.sep}`));
   return {
     binary: args.plan.binary,
     args: args.plan.args,
     env: buildCommandEnv({ plan: args.plan, venvBin: args.venvBin, isVectorBackend: false, env: args.env }),
-    readablePaths: paths.readablePaths,
-    inputPaths: paths.inputPaths,
+    // Read-only assets are readable (local providers bind them) and never uploaded into the job tree (remote providers).
+    readablePaths: assetDir ? [...paths.readablePaths.filter((p) => !underAssets(p)), assetDir] : paths.readablePaths,
+    inputPaths: paths.inputPaths.filter((p) => !underAssets(p)),
+    ...(assetDir ? { readOnlyAssetDir: assetDir } : {}),
     writablePaths: paths.writablePaths,
     limits: args.limits,
     ...(deniesUnixSockets(args.plan) ? { denyUnixSockets: true } : {}),
   };
 }
 
-/** Record a remote provider's cost in the enclosing stage's usage ledger, tagged with its scope. */
-function recordRemoteUsage(usage: UsageEvent): void {
+/**
+ * Record a remote provider's cost in the enclosing stage's usage ledger, tagged with its scope. Without a stage context
+ * there is no ledger to hold it: the cost would vanish from `usage_events`, so it is logged loudly and counted
+ * (`docslurp.usage.unrecorded`) for the provider-cost loss alert.
+ */
+export function recordRemoteUsage(usage: UsageEvent): void {
   const context = currentPerfContext();
-  if (!context) return;
+  if (!context) {
+    console.error(
+      `[usage-unrecorded] provider=${usage.provider} model=${usage.model} metric=${usage.metric} amount=${usage.amount} ` +
+        `unit=${usage.unit} costCents=${usage.costCents}: remote usage outside a stage context has no usage ledger`,
+    );
+    recordUnrecordedUsageTelemetry({ provider: usage.provider, model: usage.model, metric: usage.metric, costCents: Number(usage.costCents) || 0, reason: "no-perf-context" });
+    return;
+  }
   pushUsageEvent({ ...usage, metadata: { ...usage.metadata, scope: context.scope, stage: context.stageName } });
 }
 
@@ -2185,9 +2468,23 @@ export function resolveMalwareScanPolicy(
 }
 
 /** ClamAV reports the database version and signature timestamp from the scanner's own image. */
+const CLAM_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/**
+ * `clamscan --version`'s signature date (`Thu Nov  6 08:21:02 2026`), which the parser VM prints in UTC, as epoch ms; NaN
+ * when malformed. Parsed explicitly as UTC: Date.parse reads it in the worker host's zone, so on a non-UTC host the date
+ * landed hours in the future and every upload was quarantined as "definitions missing" (validation N6).
+ */
+export function parseClamSignatureDateUtc(text: string): number {
+  const match = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) ([A-Z][a-z]{2}) +(\d{1,2}) (\d{2}):(\d{2}):(\d{2}) (\d{4})$/.exec(text.trim());
+  const month = match ? CLAM_MONTHS.indexOf(match[1]!) : -1;
+  if (!match || month < 0) return NaN;
+  return Date.UTC(Number(match[6]), month, Number(match[2]), Number(match[3]), Number(match[4]), Number(match[5]));
+}
+
 export function parseClamVmDatabaseHealth(output: string, maxSignatureAgeHours: number): ClamDatabaseHealth {
   const parts = output.trim().split("/");
-  const updatedAtMs = parts.length === 3 && /^ClamAV [0-9.]+$/.test(parts[0]!) && /^\d+$/.test(parts[1]!) ? Date.parse(parts[2]!) : NaN;
+  const updatedAtMs = parts.length === 3 && /^ClamAV [0-9.]+$/.test(parts[0]!) && /^\d+$/.test(parts[1]!) ? parseClamSignatureDateUtc(parts[2]!) : NaN;
   return assessClamDatabaseHealth({ maxSignatureAgeHours, entries: Number.isFinite(updatedAtMs) && updatedAtMs <= Date.now() + 3_600_000 ? [{ path: "parser-vm:clamav-signatures", updatedAtMs }] : [] });
 }
 

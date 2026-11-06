@@ -15,6 +15,9 @@ import {
 } from "../lib/api-key-authorization.js";
 import { apiKeyAuth } from "../middleware/api-key-auth.js";
 import { hybridSearch } from "../services/search.js";
+import { cacheableApiKeyId, readCachedResponse, responseCacheTicket, searchResponseCacheTtlMs, storeResponse } from "../search/response-cache.js";
+import { highlightMatches } from "../search/highlight.js";
+import { currentRequestApiKeyId } from "../lib/request-context.js";
 import type { ValidatedKey } from "../services/api-keys.js";
 import type { SearchFilters } from "../search/filters.js";
 import { AlgoliaFilterError, parseAlgoliaCompatFilters } from "../search/algolia-compat-filters.js";
@@ -37,6 +40,23 @@ const queryBodySchema = z.object({
   highlightPreTag: z.string().optional(),
   highlightPostTag: z.string().optional(),
 }).passthrough();
+
+/** Ranked passages retrieved per compat query, so counts describe a real window (the SDK search adapters use the same 100). */
+const COMPAT_COUNT_WINDOW = 100;
+const COMPAT_MAX_FETCH = 1000;
+
+/** The window covers the requested page plus one passage, and at least COMPAT_COUNT_WINDOW passages. */
+function compatFetchLimit(pageStart: number, hitsPerPage: number): number {
+  return Math.max(1, Math.min(COMPAT_MAX_FETCH, Math.max(COMPAT_COUNT_WINDOW, pageStart + hitsPerPage + 1)));
+}
+
+/**
+ * nbHits is the number of passages found in the retrieved window. A window that came back full may have more
+ * beyond it, so the count is only a floor and `exhaustive` is false; a short window is the whole result set.
+ */
+function compatHitCount(found: number, fetchLimit: number): { nbHits: number; exhaustive: boolean } {
+  return { nbHits: found, exhaustive: found < fetchLimit };
+}
 
 const batchQuerySchema = z.object({
   requests: z.array(queryBodySchema.extend({ indexName: z.string().min(1) })).max(10),
@@ -119,6 +139,8 @@ function selectAlgoliaHitFields(hit: Record<string, unknown>, attributesToRetrie
 
 function buildAlgoliaHit(args: {
   result: Awaited<ReturnType<typeof hybridSearch>>["results"][number];
+  /** The query the hit answers, so matched words can be highlighted. */
+  query?: string;
   highlightPreTag?: string;
   highlightPostTag?: string;
   attributesToRetrieve?: string[];
@@ -141,18 +163,58 @@ function buildAlgoliaHit(args: {
       regionCoordinateSpace: args.result.citation.regionCoordinateSpace ?? null,
       locator: args.result.citation.locator ?? null,
     },
+    // Real highlights (the query's words wrapped in the requested tags), not an always-"none" placeholder.
     _highlightResult: args.highlightPreTag && args.highlightPostTag
       ? {
-          text: {
-            value: args.result.text,
-            matchLevel: "none",
-            matchedWords: [],
-          },
+          text: highlightMatches(args.result.text, args.query ?? "", args.highlightPreTag, args.highlightPostTag),
+          filename: highlightMatches(args.result.citation.filename, args.query ?? "", args.highlightPreTag, args.highlightPostTag),
         }
       : undefined,
   };
 
   return selectAlgoliaHitFields(hit, args.attributesToRetrieve);
+}
+
+/**
+ * Rows to fetch for a page. Fetching `pageStart + hitsPerPage + 1` made every page a different request, so
+ * paging a result list re-ran (and re-billed) the whole search for each page. The size is rounded up to a
+ * stable bucket, so pages 1-5 of ten share one search and one cache entry.
+ */
+export function stableFetchLimit(needed: number): number {
+  let limit = 50;
+  while (limit < needed && limit < 1000) limit *= 2;
+  return Math.min(1000, limit);
+}
+
+type CompatSearchResponse = Awaited<ReturnType<typeof hybridSearch>>;
+
+/**
+ * One compat search, served from the tenant-scoped response cache when an identical request (same key, user,
+ * workspace, query, filters and fetch size) ran moments ago. Authorization (scope, workspace) happened before
+ * this call; the cache re-checks workspace access and never stores strict-privacy workspaces.
+ */
+async function compatSearch(args: { query: string; apiKey: ValidatedKey; workspaceId: string; filters: SearchFilters; limit: number }): Promise<Pick<CompatSearchResponse, "results" | "sessionId">> {
+  const ttl = searchResponseCacheTtlMs();
+  const apiKeyId = cacheableApiKeyId(args.apiKey.keyId, currentRequestApiKeyId());
+  const ticket = ttl > 0 && apiKeyId !== undefined
+    ? await responseCacheTicket({
+        userId: args.apiKey.userId, apiKeyId, workspaceIds: [args.workspaceId],
+        request: { surface: "algolia-compat", query: args.query, limit: args.limit, filters: args.filters, retrieval: compatRetrievalOptions },
+      })
+    : null;
+  const cached = ticket ? readCachedResponse(ticket, ttl) as Pick<CompatSearchResponse, "results" | "sessionId"> | undefined : undefined;
+  if (cached) return cached;
+  const response = await hybridSearch(args.query, args.apiKey.userId, {
+    runId: undefined,
+    limit: args.limit,
+    filters: args.filters,
+    variant: "algolia-compat",
+    ...compatRetrievalOptions,
+    mmrLambda: undefined,
+  } as never);
+  const data = { results: response.results, sessionId: response.sessionId };
+  if (ticket && response.availability?.status === "complete") await storeResponse(ticket, data, args.workspaceId);
+  return data;
 }
 
 function toAlgoliaSynonymEntries(synonyms: Record<string, string[]>) {
@@ -413,22 +475,15 @@ export const algoliaCompatRoutes = new Hono()
     const hitsPerPage = Math.max(1, Math.min(1000, body.hitsPerPage ?? Number(settings.compatSettings.hitsPerPage ?? 10)));
     const page = Math.max(0, body.page ?? 0);
     const pageStart = page * hitsPerPage;
-    const fetchLimit = Math.max(1, Math.min(1000, pageStart + hitsPerPage + 1));
+    const fetchLimit = stableFetchLimit(compatFetchLimit(pageStart, hitsPerPage));
     filters.workspaceId = workspace.id;
 
-    const { results, sessionId } = await hybridSearch(query, apiKey.userId, {
-      runId: undefined,
-      limit: fetchLimit,
-      filters,
-      variant: "algolia-compat",
-      ...compatRetrievalOptions,
-      mmrLambda: undefined,
-    } as never);
+    const { results, sessionId } = await compatSearch({ query, apiKey, workspaceId: workspace.id, filters, limit: fetchLimit });
 
-    const hasMore = results.length > pageStart + hitsPerPage;
     const pageResults = results.slice(pageStart, pageStart + hitsPerPage);
     const mappedHits = pageResults.map((result) => buildAlgoliaHit({
       result,
+      query,
       highlightPreTag: body.highlightPreTag,
       highlightPostTag: body.highlightPostTag,
       attributesToRetrieve: body.attributesToRetrieve
@@ -436,9 +491,9 @@ export const algoliaCompatRoutes = new Hono()
     const facetHits = results
       .slice(0, Math.min(results.length, pageStart + hitsPerPage))
       .map((result) => buildAlgoliaHit({ result }));
-    const nbHits = hasMore
-      ? pageStart + mappedHits.length + 1
-      : Math.min(results.length, pageStart + mappedHits.length);
+    // The hits found in the ranked window we asked for. Full means more may exist beyond it: nbHits is then a
+    // floor, and exhaustiveNbHits says so, instead of inventing "one more hit" for the next page.
+    const { nbHits, exhaustive } = compatHitCount(results.length, fetchLimit);
 
     const response = {
       hits: mappedHits,
@@ -451,7 +506,7 @@ export const algoliaCompatRoutes = new Hono()
       queryID: sessionId,
       params: "",
       facets: buildFacetResponse(body.facets ?? [], facetHits),
-      exhaustiveNbHits: !hasMore && fetchLimit < 1000
+      exhaustiveNbHits: exhaustive
     };
 
     return c.json(response);
@@ -481,22 +536,15 @@ export const algoliaCompatRoutes = new Hono()
       const hitsPerPage = Math.max(1, Math.min(1000, request.hitsPerPage ?? 10));
       const page = Math.max(0, request.page ?? 0);
       const pageStart = page * hitsPerPage;
-      const fetchLimit = Math.max(1, Math.min(1000, pageStart + hitsPerPage + 1));
+      const fetchLimit = stableFetchLimit(compatFetchLimit(pageStart, hitsPerPage));
       const filters = { ...requestFilters[index]!, workspaceId: workspace.id };
-      const response = await hybridSearch(request.query, apiKey.userId, {
-        limit: fetchLimit,
-        filters,
-        variant: "algolia-compat",
-        ...compatRetrievalOptions,
-      });
-      const hasMore = response.results.length > pageStart + hitsPerPage;
+      const response = await compatSearch({ query: request.query, apiKey, workspaceId: workspace.id, filters, limit: fetchLimit });
       const pageResults = response.results.slice(pageStart, pageStart + hitsPerPage);
-      const nbHits = hasMore
-        ? pageStart + pageResults.length + 1
-        : Math.min(response.results.length, pageStart + pageResults.length);
+      const { nbHits, exhaustive } = compatHitCount(response.results.length, fetchLimit);
       results.push({
         hits: pageResults.map((result) => buildAlgoliaHit({
           result,
+          query: request.query,
           highlightPreTag: request.highlightPreTag,
           highlightPostTag: request.highlightPostTag,
           attributesToRetrieve: request.attributesToRetrieve
@@ -515,7 +563,7 @@ export const algoliaCompatRoutes = new Hono()
             .slice(0, Math.min(response.results.length, pageStart + hitsPerPage))
             .map((result) => buildAlgoliaHit({ result }))
         ),
-        exhaustiveNbHits: !hasMore && fetchLimit < 1000
+        exhaustiveNbHits: exhaustive
       });
     }
 

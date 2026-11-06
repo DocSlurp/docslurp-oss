@@ -7,7 +7,7 @@ import { dbTraceStatementHook } from "../lib/db-trace.js";
 import { pipelineTransaction, pipelineInTransaction } from "./transaction-pipeline.js";
 import { PostgresCapacityLeaseStore } from "../media/capacity/store.js";
 import { PostgresMediaJournal } from "../media/journal.js";
-import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
+import { BILLABLE_UNIT_METRICS, DOCUMENT_FAILURE_MARKERS, INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT, PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 import { DocumentNotFoundError, isMissingDocumentError } from "./missing-document.js";
 import { recordPageBaseFee } from "./page-base-fee.js";
 import { reserveFastPageImageRenders } from "./fast-page-image-budget.js";
@@ -54,7 +54,8 @@ import {
   type SupersededPurgeOptions,
   type SupersededPurgeResult,
 } from "./superseded-purge.js";
-import { enforceRunSpend, spendCounterSql } from "./spend-check.js";
+import { recordPageEquivalents, recordWholeDocumentPages } from "./page-equivalents.js";
+import { enforceRunSpend, enforceRunSpendForCharge, largestFundedCharge, pauseRunForSpend, SpendCheckUnavailableError, spendCounterSql } from "./spend-check.js";
 import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
 import { PostgresVisionAttemptBackend } from "./vision-attempt-store.js";
@@ -120,6 +121,11 @@ type DocumentRow = {
   status: string;
   extraction_mode: string;
   page_count: number;
+  billing_pages?: number | null;
+  billing_pages_method?: string | null;
+  page_count_source?: string | null;
+  intake_page_count?: number | null;
+  file_facts?: import("@docslurp/shared").FileFacts | null;
   created_at: string | Date;
   updated_at: string | Date;
   /** Joined by the run document loaders: the run's extract storage prefix. */
@@ -1145,13 +1151,16 @@ export class Store {
         }
         state.refreshStats();
         await this.writeProgressNow(state, undefined, {}, { client, afterCommit });
-        await recordPageBaseFee(client, state, { afterCommit });
+        const pageCharges = await recordPageBaseFee(client, state, { afterCommit });
+        // Reported in the run's stats: the Fast pages charged now and the Rich pages their reads charged as they happened.
+        state.run.stats = { ...state.run.stats, pageCharges };
         const adopted = state.run.kind === "full-index" ? new Set(await adoptBackfillDocuments(client, state.run.id)) : new Set<string>();
         const completed = await completeRunDocuments(client, state.run.id);
         const replacements = await supersededInThisTransaction(client, completed.filter(id => !adopted.has(id)));
         await this.announceReplacements(state, replacements, client, logicalId);
         await client`update workspace_runs set status = 'completed', stage = 'completed',
           processed_documents = total_documents, pages_processed = pages_total,
+          stats = coalesce(stats, '{}'::jsonb) || ${this.toJson({ pageCharges })}::jsonb,
           lease_expires_at = null, updated_at = now() where id = ${state.run.id}`;
         await insertWorkspaceRunEvents({ sql: client, events: [{ ...buildRunCompletedEvent(state, "pipeline completed"), id: logicalId }] });
         await this.triggerWebhooks(state.run.id, "run.completed", client, logicalId);
@@ -1204,7 +1213,7 @@ export class Store {
     });
   }
 
-  async failRun(runId: string, stage: string, message: string, owner: ExecutionOwner): Promise<void> {
+  async failRun(runId: string, stage: string, message: string, owner: ExecutionOwner, options: { infrastructureRetriesExhausted?: boolean } = {}): Promise<void> {
     if (owner.runId !== runId) throw new StaleExecutionError();
     await this.finalizeRun(owner, "failed", async (client, logicalId) => {
       const [current] = await client<
@@ -1257,7 +1266,10 @@ export class Store {
       }
 
       await client`select retire_replaced_pending_documents(${runId})`;
-      await this.failProcessingDocumentStages(runId, stage, message, client);
+      // Exhausted infrastructure retries: each unfinished document gets the public reason marker (real-Modal P3); the raw
+      // run error after it is for operators only (public APIs map stored errors to reviewed copy).
+      await this.failProcessingDocumentStages(runId, stage,
+        options.infrastructureRetriesExhausted ? `${INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT}: ${message}` : message, client);
       await this.failUnfinishedDocumentsForRun(runId, client);
 
       await insertWorkspaceRunEvents({ sql: client, events: [{
@@ -1578,6 +1590,39 @@ export class Store {
       stats: state.run.stats,
     });
     return Number(counted?.ordinary_failures ?? increment);
+  }
+
+  /**
+   * A strike another document's failure blames on `documentId` (council X #1): on that document's own row in this run, for
+   * the stage it last ran. Returns its strikes, or null when it has no stage row in this run (nothing struck).
+   */
+  async noteBlamedSandboxStrike(state: WorkflowState, documentId: string): Promise<number | null> {
+    const [row] = await this.sql<{ strikes: number }[]>`
+      update document_run_stage_states s
+      set stats = jsonb_set(s.stats, '{sandboxInfrastructureStrikes}',
+            to_jsonb(coalesce((s.stats->>'sandboxInfrastructureStrikes')::int, 0) + 1)),
+          updated_at = now()
+      where s.run_id = ${state.run.id} and s.document_id = ${documentId}
+        and s.stage_name = (
+          select stage_name from document_run_stage_states
+          where run_id = ${state.run.id} and document_id = ${documentId}
+          order by started_at desc nulls last, updated_at desc limit 1)
+      returning (s.stats->>'sandboxInfrastructureStrikes')::int as strikes
+    `;
+    return row ? Number(row.strikes) : null;
+  }
+
+  async noteSandboxInfrastructureStrike(state: WorkflowState, documentId: string, stage: string): Promise<number> {
+    // In the stage checkpoint's stats, which startDocumentStage keeps across retries.
+    const [row] = await this.sql<{ strikes: number }[]>`
+      update document_run_stage_states
+      set stats = jsonb_set(stats, '{sandboxInfrastructureStrikes}',
+            to_jsonb(coalesce((stats->>'sandboxInfrastructureStrikes')::int, 0) + 1)),
+          updated_at = now()
+      where run_id = ${state.run.id} and document_id = ${documentId} and stage_name = ${stage}
+      returning (stats->>'sandboxInfrastructureStrikes')::int as strikes
+    `;
+    return Number(row?.strikes ?? 0);
   }
 
   async startDocumentStage(
@@ -2010,6 +2055,9 @@ export class Store {
    * signed, SSRF-checked dispatcher; the worker never calls subscriber URLs.
    */
   async triggerWebhooks(runId: string, event: string, client: Sql<Record<string, unknown>> = this.sql, logicalId?: string): Promise<void> {
+    // One statement: the run is read inside the outbox insert. Subscribers include teammates and external systems, so the
+    // raw worker error (stack frames, hosts, provider text) stays in the run record and telemetry; the payload carries its
+    // public copy, the same mapping as publicDocumentError (reviewed copy for known markers, else the generic message).
     await this.enqueueWebhookEvent(event, client`
       select r.user_id, jsonb_build_object(
         'event', ${event}::text,
@@ -2020,7 +2068,7 @@ export class Store {
         'processedDocuments', r.processed_documents,
         'pagesProcessed', r.pages_processed,
         'failedDocuments', coalesce((r.stats->>'failedDocuments')::int, 0),
-        'error', r.error
+        'error', ${publicErrorSql(client, "r.error")}
       ) as payload
       from workspace_runs r
       where r.id = ${runId}
@@ -2046,7 +2094,7 @@ export class Store {
     }
   }
 
-  /** Inserts one outbox row per source row, only for users subscribed to the event, and wakes the API. */
+  /** Inserts one outbox row per source row, only when its run's organization has a webhook subscribed to the event, and wakes the API. */
   private async enqueueWebhookEvent(
     event: string,
     source: postgres.PendingQuery<postgres.Row[]>,
@@ -2060,8 +2108,13 @@ export class Store {
         select coalesce(${logicalId ?? null}::text, gen_random_uuid()::text), source.user_id, ${event}, source.payload
         from source
         where exists (
+          -- Webhooks belong to the run's organization, not to the user who started the run, so a
+          -- teammate's run reaches the team's webhook. user_id is attribution only; the API routes
+          -- each event by its run and checks the webhook's creator still administers the organization.
           select 1 from webhooks w
-          where w.user_id = source.user_id and w.active = true and ${event} = any(w.events)
+          join workspace_runs r on r.org_id = w.org_id
+          where r.id = source.payload->>'runId'
+            and w.active = true and ${event} = any(w.events)
         )
         returning id
       )
@@ -2676,6 +2729,140 @@ export class Store {
             updated_at = now()
       `;
     }
+  }
+
+  /**
+   * Records the pages the worker measured for an Office, slide, sheet or EPUB document (documents.billing_pages), so the completion
+   * charge and the optional features bill what the file really holds. `page_count`, the page basis the text splits into, is not
+   * touched: those formats' text has no page breaks. Scoped to the run's own document.
+   */
+  async setDocumentBillingPages(runId: string, documentId: string, billingPages: number, method: string): Promise<boolean> {
+    const rows = await this.sql`
+      update documents set billing_pages = ${billingPages}, billing_pages_method = ${method}, updated_at = now()
+      where id = ${documentId} and run_id = ${runId} and deduped_from_document_id is null
+      returning id
+    `;
+    return rows.length > 0;
+  }
+
+  /**
+   * Records the frames the OCR engine read from a multi-frame image (a TIFF) as the document's page basis (documents.page_count), so
+   * page rows, citations, strict page splitting and the completion charge count the pages the Markdown holds. Intake counts every
+   * image as one page. Scoped to the run's own document.
+   */
+  async setDocumentPageCount(runId: string, documentId: string, pageCount: number): Promise<boolean> {
+    const rows = await this.sql`
+      update documents set page_count = ${pageCount}, page_count_source = 'counted', updated_at = now()
+      where id = ${documentId} and run_id = ${runId} and deduped_from_document_id is null
+      returning id
+    `;
+    return rows.length > 0;
+  }
+
+  /**
+   * The run's multi-frame images (TIFF) whose counted frames raised their page basis above intake's one page, with the distinct
+   * pages a Rich charge of this run already covers (read through usage_attribution). The frame-count spend check adds up the
+   * frames not yet charged, so concurrent documents of one run cannot each fit the balance alone and together overdraw it.
+   */
+  async countedImageFrames(runId: string): Promise<Array<{ documentId: string; pageCount: number; chargedPages: number }>> {
+    const rows = await this.sql<{ id: string; page_count: number; charged: number }[]>`
+      select d.id, d.page_count,
+        coalesce((select count(distinct (au.metadata ->> 'pageNumber')) from usage_attribution au
+          where au.run_id = ${runId} and au.metric = ${BILLABLE_UNIT_METRICS.richPage} and au.metadata ->> 'documentId' = d.id), 0)::int as charged
+      from documents d
+      where d.run_id = ${runId} and d.deduped_from_document_id is null and d.page_count > 1
+        and lower(split_part(coalesce(d.mime_type, ''), ';', 1)) in ('image/tiff', 'image/tiff-fx')
+    `;
+    return rows.map((row) => ({ documentId: row.id, pageCount: Number(row.page_count) || 0, chargedPages: Number(row.charged) || 0 }));
+  }
+
+  /**
+   * The run's own documents the worker measured (billing_pages set) and that still bill at completion: their intake count, the measured
+   * count and its method. The page-count re-check adds up their extra pages, whose Fast fee is charged only when the run completes.
+   */
+  async measuredRunDocuments(runId: string): Promise<Array<{ pageCount: number; billingPages: number; method: string | null }>> {
+    const rows = await this.sql<{ page_count: number; billing_pages: number; billing_pages_method: string | null }[]>`
+      select page_count, billing_pages, billing_pages_method from documents
+      where run_id = ${runId} and billing_pages is not null and deduped_from_document_id is null and status <> 'failed'
+    `;
+    return rows.map((row) => ({ pageCount: Number(row.page_count) || 0, billingPages: Number(row.billing_pages) || 0, method: row.billing_pages_method }));
+  }
+
+  /** Pauses the run when `credits` it newly owes (more pages than intake counted) no longer fit the org's balance (spend-check.ts). */
+  /** Fails closed: throws SpendCheckUnavailableError (retryable) when it cannot decide. */
+  /**
+   * Fast pages of the run measured above what admission priced (durable: documents.intake_page_count, migration 0130), over
+   * every paged document still in the run: none of them is charged before the run's completion fee. Images are excluded:
+   * their frames bill Rich as they are read (ocr/image-frames.ts).
+   */
+  async recordPageEquivalents(runId: string, documentId: string, rows: import("./page-equivalents.js").PageEquivalentRow[], allowance?: number): Promise<number | null> {
+    return await recordPageEquivalents(this.sql, { runId, documentId, rows, ...(allowance === undefined ? {} : { allowance }) });
+  }
+
+  async recordWholeDocumentPages(runId: string, documentId: string, pages: number): Promise<number | null> {
+    return await recordWholeDocumentPages(this.sql, { runId, documentId, pages });
+  }
+
+  async measuredPagesAboveIntake(runId: string): Promise<number> {
+    const [row] = await this.sql<{ pages: number }[]>`
+      select coalesce(sum(greatest(0, coalesce(billing_pages, page_count) - coalesce(intake_page_count, page_count))), 0)::int as pages
+      from documents
+      where run_id = ${runId} and deduped_from_document_id is null and status <> 'failed'
+        and coalesce(mime_type, '') not like 'image/%' and coalesce(mime_type, '') not like 'audio/%' and coalesce(mime_type, '') not like 'video/%'`;
+    return Number(row?.pages) || 0;
+  }
+
+  async pauseRunForSpend(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, reason: string): Promise<{ paused: boolean; blocked: boolean }> {
+    const result = await pauseRunForSpend(this.sql, run, reason, "stage-boundary", Number.NaN);
+    if (result.pauseFailed) throw new SpendCheckUnavailableError(`could not pause run ${run.id} for ${reason}`);
+    return { paused: result.paused, blocked: result.blocked };
+  }
+
+  async enforceSpendForCharge(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean; blocked: boolean }> {
+    const result = await enforceRunSpendForCharge(this.sql, run, credits, "stage-boundary");
+    return { paused: result.paused, blocked: result.blocked };
+  }
+
+  async ocrEscalationReads(runId: string, documentId: string, pageNumber: number): Promise<import("../pipeline/pipeline.js").OcrEscalationReadRow[]> {
+    const rows = await this.sql<{ attempt: number; status: "completed" | "failed"; text: string | null; model: string; usage_events: unknown }[]>`
+      select attempt, status, text, model, usage_events from ocr_escalation_reads
+      where run_id = ${runId} and document_id = ${documentId} and page_number = ${pageNumber}
+      order by attempt`;
+    return rows.map((row) => ({
+      attempt: Number(row.attempt), status: row.status, text: row.text, model: row.model,
+      usageEvents: Array.isArray(row.usage_events) ? row.usage_events as import("../models.js").UsageEvent[] : [],
+    }));
+  }
+
+  async recordOcrEscalationRead(row: Omit<import("../pipeline/pipeline.js").OcrEscalationReadRow, "attempt"> & { runId: string; documentId: string; pageNumber: number }): Promise<number> {
+    const events = this.sql.json(JSON.parse(JSON.stringify(row.usageEvents)));
+    // The next attempt number in the same statement as the insert; a concurrent call that took it first makes this insert a
+    // no-op, and the loop takes the one after. Each call's usage events carry their own unique ids, so none is lost either way.
+    for (let tries = 0; tries < 16; tries += 1) {
+      const inserted = await this.sql<{ attempt: number }[]>`
+        insert into ocr_escalation_reads (run_id, document_id, page_number, attempt, status, text, model, usage_events)
+        select ${row.runId}, ${row.documentId}, ${row.pageNumber},
+          coalesce((select max(attempt) from ocr_escalation_reads where run_id = ${row.runId} and document_id = ${row.documentId} and page_number = ${row.pageNumber}), 0) + 1,
+          ${row.status}, ${row.text}, ${row.model}, ${events}
+        on conflict (run_id, document_id, page_number, attempt) do nothing
+        returning attempt`;
+      if (inserted.length > 0) return Number(inserted[0]!.attempt);
+    }
+    throw new Error(`could not persist an OCR escalation read for ${row.documentId} page ${row.pageNumber}: attempt numbers kept colliding`);
+  }
+
+  /** The largest n in 1..max whose `creditsFor(n)` the org's balance covers (spend-check.ts largestFundedCharge); read-only. */
+  async largestFundedCharge(run: { id: string; orgId: string | null; workspaceId?: string | null }, max: number, creditsFor: (n: number) => number): Promise<number> {
+    return await largestFundedCharge(this.sql, run, max, creditsFor);
+  }
+
+  async setDocumentFileFacts(runId: string, documentId: string, facts: import("@docslurp/shared").FileFacts): Promise<boolean> {
+    const rows = await this.sql`
+      update documents set file_facts = ${this.sql.json(JSON.parse(JSON.stringify(facts)))}, mime_type = ${facts.mimeType}, updated_at = now()
+      where id = ${documentId} and run_id = ${runId} and deduped_from_document_id is null
+      returning id
+    `;
+    return rows.length > 0;
   }
 
   async setDocumentTitleIfAbsent(documentId: string, title: DerivedDocumentTitle): Promise<boolean> {
@@ -4253,6 +4440,11 @@ function mapDocument(row: DocumentRow): Document {
     status: row.status,
     extractionMode: row.extraction_mode,
     pageCount: row.page_count,
+    billingPages: row.billing_pages ?? null,
+    billingPagesMethod: row.billing_pages_method ?? null,
+    pageCountSource: row.page_count_source === "assumed" || row.page_count_source === "counted" ? row.page_count_source : null,
+    intakePageCount: row.intake_page_count === null || row.intake_page_count === undefined ? null : Number(row.intake_page_count),
+    fileFacts: row.file_facts ?? null,
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.updated_at),
     ...(row.run_storage_prefix ? { artifactRoot: row.run_storage_prefix } : {}),
@@ -4296,4 +4488,18 @@ export function groupReferencesByRunPrefix(keys: string[]): { byPrefix: Map<stri
     else byPrefix.set(prefix, [key]);
   }
   return { byPrefix, ungrouped };
+}
+
+/**
+ * SQL for publicDocumentError over a text column: null stays null, a known failure marker maps to its reviewed public
+ * copy, anything else to the generic processing message. Built from the same tables, so the two cannot drift.
+ */
+export function publicErrorSql(client: Sql<Record<string, unknown>>, column: "r.error"): postgres.PendingQuery<postgres.Row[]> {
+  const value = client.unsafe(column);
+  let expression = client`case when ${value} is null or ${value} = '' then null::text`;
+  for (const [key, marker] of Object.entries(DOCUMENT_FAILURE_MARKERS)) {
+    const message = PUBLIC_ERROR_MESSAGES[key as keyof typeof DOCUMENT_FAILURE_MARKERS];
+    expression = client`${expression} when strpos(${value}, ${marker}::text) > 0 then ${message}::text`;
+  }
+  return client`${expression} else ${PUBLIC_ERROR_MESSAGES.processing}::text end`;
 }

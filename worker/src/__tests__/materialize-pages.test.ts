@@ -6,7 +6,7 @@ import type { PGlite } from "@electric-sql/pglite";
 import { connect } from "@lancedb/lancedb";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import type { Sql } from "postgres";
-import { defaultPipelineFeatures } from "@docslurp/shared";
+import { defaultPipelineFeatures, pageCredits, speedBoostMultiplier } from "@docslurp/shared";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Config } from "../config.js";
@@ -94,7 +94,7 @@ function harness(pageTexts: Record<number, string>, overrides: Partial<PageMater
     async embed(args) {
       h.embedCalls.push(args.chunks);
       await args.onRemoteUsage?.({ inputTokens: 111 * h.embedCalls.length, chunks: args.chunks.length, costCents: 1 });
-      return { vectors: args.chunks.map(() => [0.1, 0.2, 0.3]), usage: {}, totalTokens: 111 };
+      return { vectors: args.chunks.map(() => Array.from({ length: args.profile.dimensions }, () => 0.1)), usage: {}, totalTokens: 111 };
     },
     async writeVectors(_uri, _table, records) {
       h.lanceWrites.push(records.map((r) => ({ id: r.id, text: r.text })));
@@ -143,7 +143,7 @@ describe("materializePageRange", () => {
     h.usage.runId = runId;
     const range = { ...input(h, [1, 2], { ...defaultPipelineFeatures, speedBoost }), runId };
     const first = await claimAndMaterialize(h.deps, range);
-    expect(first.costCredits).toBeCloseTo((0.005 + 0.25) * (speedBoost ? 4 : 1), 6);
+    expect(first.costCredits).toBeCloseTo((pageCredits("fast", 1) + pageCredits("rich", 1)) * speedBoostMultiplier(speedBoost), 6);
     const firstRows = await sql`select id, cost_cents, metadata from usage_events where run_id = ${runId}`;
     const billed = firstRows.reduce((sum, row) => sum + Number(row.cost_cents), 0);
     expect(billed).toBeCloseTo(first.costCredits, 6);
@@ -183,7 +183,7 @@ describe("materializePageRange", () => {
     const h = harness({ 1: LONG, 2: `${LONG} SSN 123-45-6789 is on file for this customer.` });
     const pipeline = {
       ...defaultPipelineFeatures,
-      piiPolicy: { ...defaultPipelineFeatures.piiPolicy, enabled: true, patterns: ["ssn"], action: "block_indexing" as const, allowlistPatterns: [] },
+      piiPolicy: { ...defaultPipelineFeatures.piiPolicy, enabled: true, patterns: ["ssn" as const], action: "block_indexing" as const, allowlistPatterns: [] },
     };
     const result = await claimAndMaterialize(h.deps, input(h, [1, 2], pipeline));
     expect(result.blocked).toEqual([2]);
@@ -200,7 +200,7 @@ describe("materializePageRange", () => {
     const h = harness({ 1: `${LONG} SSN 123-45-6789 on file.` });
     const pipeline = {
       ...defaultPipelineFeatures,
-      piiPolicy: { ...defaultPipelineFeatures.piiPolicy, enabled: true, patterns: ["ssn"], action: "redact_artifacts" as const, allowlistPatterns: [] },
+      piiPolicy: { ...defaultPipelineFeatures.piiPolicy, enabled: true, patterns: ["ssn" as const], action: "redact_artifacts" as const, allowlistPatterns: [] },
     };
     const result = await claimAndMaterialize(h.deps, input(h, [1], pipeline));
     expect(result.indexed).toEqual([1]);
@@ -262,6 +262,16 @@ describe("materializePageRange", () => {
     expect(result.failed).toEqual([{ page: 2, reason: "vision down" }]);
     const state = await db.query<{ state: string; failure_reason: string }>(`select state, failure_reason from document_page_states where page_number = 2`);
     expect(state.rows[0]).toEqual({ state: "failed", failure_reason: "vision down" });
+  });
+
+  it("fails the pages instead of writing vectors whose size differs from the recorded model", async () => {
+    const h = harness({ 1: LONG }, {
+      async embed(args) { return { vectors: args.chunks.map(() => [0.1, 0.2, 0.3]), totalTokens: 1 }; },
+    });
+    const result = await claimAndMaterialize(h.deps, input(h, [1]));
+    expect(result.indexed).toEqual([]);
+    expect(result.failed[0]).toMatchObject({ page: 1, reason: expect.stringContaining("embedding dimension mismatch") });
+    expect(h.lanceWrites).toEqual([]);
   });
 
   it("records the summed spend of a page rejected on every attempt in the usage ledger", async () => {
@@ -426,7 +436,7 @@ describe("materializePageRange", () => {
     expect(await orphanQueue()).toEqual([before]);
     const [row] = (await db.query<{ org_id: string; payload: Record<string, unknown>; due: boolean }>(
       `select org_id, payload, not_before > now() as due from storage_cleanup_queue where kind = 'vector_rows'`)).rows;
-    expect(row).toMatchObject({ org_id: "o1", due: true, payload: { workspaceId: "w", documentId: "d1", dimension: 3 } });
+    expect(row).toMatchObject({ org_id: "o1", due: true, payload: { workspaceId: "w", documentId: "d1", dimension: expect.any(Number) } });
   });
 
   it("reports total spend including failed pages and completed batches", async () => {
@@ -441,7 +451,7 @@ describe("materializePageRange", () => {
         calls += 1;
         await args.onRemoteUsage({ inputTokens: 50, chunks: args.chunks.length, costCents: 7 });
         if (calls === 2) throw new Error("embed down");
-        return { vectors: args.chunks.map(() => [0.1]), totalTokens: 50 };
+        return { vectors: args.chunks.map(() => Array.from({ length: args.profile.dimensions }, () => 0.1)), totalTokens: 50 };
       },
     });
     const result = await claimAndMaterialize(h.deps, input(h, [1, 2, 3]));

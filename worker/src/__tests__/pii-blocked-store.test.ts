@@ -56,7 +56,7 @@ describe("PII-blocked documents in the run lifecycle", () => {
     });
 
     const sink = createPostgresPiiDetectionSink(url);
-    const match = { patternType: "ssn" as const, matchedPrefix: fingerprintPiiMatch("ssn", "123-45-6789"), pageNumber: 2, byteOffset: 4, length: 11 };
+    const match = { patternType: "ssn" as const, matchedPrefix: fingerprintPiiMatch("ssn", "123-45-6789"), pageNumber: 2, byteOffset: 4, charOffset: 4, length: 11 };
     // Recording twice (a retried stage) must not duplicate detections.
     await sink.recordDetections("d-block", "run-1", [match], false);
     await sink.recordDetections("d-block", "run-1", [match], false);

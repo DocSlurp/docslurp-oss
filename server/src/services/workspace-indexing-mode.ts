@@ -93,10 +93,15 @@ export function assertVisualModeAllowed(pipeline: Pick<PipelineFeatures, "privac
 type PageCountRow = { pages: number; documents: number };
 
 /** Pages of live deferred documents that are not yet searchable (state indexed). */
-async function unindexedPages(workspaceId: string, documentIds?: string[]): Promise<Array<{ id: string; unindexed: number }>> {
-  return await sql<{ id: string; unindexed: number }[]>`
+/**
+ * Pages of each deferred document a full index still has to index (`unindexed`, in the page basis its page rows use) and to bill
+ * (`billable`: the worker's measured count of an Office, slide, sheet or EPUB file, else the page count, less the pages indexed).
+ */
+async function unindexedPages(workspaceId: string, documentIds?: string[]): Promise<Array<{ id: string; unindexed: number; billable: number }>> {
+  return await sql<{ id: string; unindexed: number; billable: number }[]>`
     select d.id,
-      greatest(d.page_count - coalesce(ps.indexed, 0), 0)::int as unindexed
+      greatest(d.page_count - coalesce(ps.indexed, 0), 0)::int as unindexed,
+      greatest(coalesce(d.billing_pages, d.page_count) - coalesce(ps.indexed, 0), 0)::int as billable
     from documents d
     left join lateral (
       select count(*) filter (where state in ('indexed', 'blocked-pii'))::int as indexed
@@ -139,8 +144,10 @@ export async function estimateModeSwitch(
   const from = effectiveIndexingMode(ws?.pipeline?.indexingMode);
   if (from === to || !deferredProfilesEnabled()) return { pages: 0, estimatedCredits: priceOrNull(0), billing: billingMode(), job: "none" };
   if (to === "full") {
-    const pages = (await unindexedPages(workspaceId)).reduce((sum, row) => sum + row.unindexed, 0);
-    return { pages, estimatedCredits: priceOrNull(round(pages * fullIndexCreditsPerPage() * speedBoostMultiplier(speedBoost))), billing: billingMode(), job: pages > 0 ? "full-index" : "none" };
+    const rows = await unindexedPages(workspaceId);
+    const pages = rows.reduce((sum, row) => sum + row.unindexed, 0);
+    const billable = rows.reduce((sum, row) => sum + (row.unindexed > 0 ? row.billable : 0), 0);
+    return { pages, estimatedCredits: priceOrNull(round(billable * fullIndexCreditsPerPage() * speedBoostMultiplier(speedBoost))), billing: billingMode(), job: pages > 0 ? "full-index" : "none" };
   }
   if (from === "full") return { pages: 0, estimatedCredits: priceOrNull(0), billing: billingMode(), job: "none" };
   const [row] = await sql<PageCountRow[]>`
@@ -168,6 +175,8 @@ type SourceDoc = {
   id: string; org_id: string; user_id: string; workspace_id: string; filename: string; mime_type: string;
   source_key: string; extraction_mode: string; page_count: number; canonical_id: string | null;
   version_number: number | null; source_sha256: string | null; run_id: string;
+  /** Copied to the new version so it bills what the source measured (migration 0126) and keeps its file facts. */
+  billing_pages: number | null; billing_pages_method: string | null; page_count_source: string | null; file_facts: unknown;
 };
 
 /** Documents one switch or full-index request may fan out to; larger corpora go in batches. */
@@ -199,7 +208,8 @@ async function liveDocs(workspaceId: string, ids: string[]): Promise<SourceDoc[]
   if (ids.length === 0) return [];
   return await sql<SourceDoc[]>`
     select d.id, d.org_id, d.user_id, d.workspace_id, d.filename, d.mime_type, d.source_key, d.extraction_mode,
-      d.page_count, d.canonical_id, d.version_number, d.source_sha256, d.run_id
+      d.page_count, d.canonical_id, d.version_number, d.source_sha256, d.run_id,
+      d.billing_pages, d.billing_pages_method, d.page_count_source, d.file_facts
     from documents d where d.workspace_id = ${workspaceId} and d.id = any(${ids})
       -- Never a source for new versions: extract documents expire with their extract.
       and not exists (select 1 from workspace_runs xr where xr.id = d.run_id and xr.extract_id is not null)
@@ -279,10 +289,13 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
         const versionNumber = await nextVersionNumber(tx as unknown as typeof sql, prepared.workspaceId, canonicalId);
         await tx`
           insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status,
-            extraction_mode, page_count, canonical_id, version_number, previous_version_id, reused_from_document_id,
+            extraction_mode, page_count, billing_pages, billing_pages_method, page_count_source, file_facts,
+            canonical_id, version_number, previous_version_id, reused_from_document_id,
             source_sha256, indexing_mode, reindex_of)
           values (${randomUUID()}, ${doc.org_id}, ${doc.user_id}, ${doc.workspace_id}, ${runId}, ${doc.filename},
             ${doc.mime_type}, ${doc.source_key}, 'queued', ${doc.extraction_mode}, ${doc.page_count},
+            ${doc.billing_pages ?? null}, ${doc.billing_pages_method ?? null}, ${doc.page_count_source ?? "assumed"},
+            ${doc.file_facts ? tx.json(doc.file_facts as never) : null},
             ${canonicalId}, ${versionNumber}, ${doc.id},
             ${batch.partial ? doc.id : null}, ${doc.source_sha256 ?? null}, ${batch.mode}, ${doc.id})
         `;
@@ -338,9 +351,10 @@ export async function prepareFullIndex(args: FullIndexArgs): Promise<PreparedInd
   const batches: RunBatch[] = [{ docs, pipeline, mode: "full", partial: false }];
   await validateBatches(batches);
   const unindexed = todo.reduce((sum, row) => sum + row.unindexed, 0);
+  const billable = todo.reduce((sum, row) => sum + row.billable, 0);
   return {
     orgId: args.orgId, workspaceId: args.workspaceId, batches, pages: unindexed,
-    unindexedPages: unindexed, estimatedCredits: priceOrNull(round(unindexed * fullIndexCreditsPerPage() * speedBoostMultiplier(args.speedBoost))), billing: billingMode(),
+    unindexedPages: unindexed, estimatedCredits: priceOrNull(round(billable * fullIndexCreditsPerPage() * speedBoostMultiplier(args.speedBoost))), billing: billingMode(),
   };
 }
 

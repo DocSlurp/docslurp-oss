@@ -4,6 +4,7 @@ import type { Pool } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createMigratedDatabase, serveOnRandomPort } from "@docslurp/worker/testing";
+import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
 
 /**
  * Passkeys and two-factor auth against the real Better Auth configuration
@@ -25,6 +26,7 @@ const sentEmails: Array<{ to: string; code: string }> = [];
 
 beforeAll(async () => {
   const database = await createMigratedDatabase();
+  await database.exec(LIFT_ONE_ORG_PER_USER_POLICY);
   const serving = await serveOnRandomPort(database, { maxConnections: 8 });
   const url = `postgres://postgres@127.0.0.1:${serving.port}/postgres`;
   stop = async () => { await serving.server.stop(); await database.close(); };

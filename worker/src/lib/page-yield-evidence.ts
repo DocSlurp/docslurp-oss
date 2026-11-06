@@ -19,6 +19,18 @@ export function pageTextYield(text: string, expectedCharacters: number) {
   };
 }
 
+/**
+ * Splits one `pdfimages -list` row into its 16 columns (page num type width height color comp bpc
+ * enc interp object ID x-ppi y-ppi size ratio). poppler prints the object and ID columns as one
+ * token for an inline image (`[inline]`) or an image without an object reference (`[none]`); it
+ * becomes `<token> -` so every column keeps its index.
+ */
+export function pdfImagesListFields(line: string): string[] {
+  const fields = line.trim().split(/\s+/);
+  if ((fields[10] === "[inline]" || fields[10] === "[none]") && fields.length === 15) fields.splice(11, 0, "-");
+  return fields;
+}
+
 /** Rounded, embedded stream sizes from pdfimages -list, never exported PNG/PPM sizes.
  * Masks count as storage; repeated object references count once per page. Shared images
  * on different pages are attributed to each page, so these totals must not be summed
@@ -28,7 +40,7 @@ export function embeddedImageBytesByPage(stdout: string): Map<number, number | n
   const pages = new Map<number, { bytes: number; seen: Set<string>; unknown: boolean }>();
   let count = 0;
   for (const line of stdout.split("\n")) {
-    const f = line.trim().split(/\s+/);
+    const f = pdfImagesListFields(line);
     if (!/^\d+$/.test(f[0] ?? "")) continue;
     // Do not return apparently complete totals for a truncated hostile listing.
     if (++count > 100_000) return new Map();
@@ -42,7 +54,7 @@ export function embeddedImageBytesByPage(stdout: string): Map<number, number | n
       entry.unknown = true;
       continue;
     }
-    // Inline images have no reusable object identity: count each occurrence.
+    // Inline and unreferenced images have no reusable object identity: count each occurrence.
     const id = /^\d+$/.test(f[10] ?? "") && /^\d+$/.test(f[11] ?? "")
       ? `${f[10]}:${f[11]}` : `inline:${count}`;
     if (!entry.seen.has(id)) {

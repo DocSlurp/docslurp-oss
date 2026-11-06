@@ -65,12 +65,17 @@ describe("estimate parity", () => {
     expect(estimate!.seconds).not.toBeNull();
   });
 
-  it("upload estimate assumes pages from size when the client does not know them", async () => {
+  it("upload estimate centres on pages assumed from size, and says the count is a range, when the client does not know them", async () => {
     const workspace = { pipeline: defaultPipelineFeatures, orgId: "o1" };
-    const sized = await work.estimateUpload({ files: [{ name: "a.pdf", size: 75 * 1024 * 10 }], workspace });
-    const known = await work.estimateUpload({ files: [{ name: "a.pdf", size: 1, pages: 10 }], workspace });
+    // An explicit empty environment: billing off, whatever STRIPE_SECRET_KEY the machine running the test has.
+    const sized = await work.estimateUpload({ files: [{ name: "a.pdf", size: 75 * 1024 * 10 }], workspace, env: {} });
+    const known = await work.estimateUpload({ files: [{ name: "a.pdf", size: 1, pages: 10 }], workspace, env: {} });
     expect(sized.estimate.pages).toBe(10);
-    expect(sized).toEqual(known);
+    // Counted pages are exact; uncounted ones span the pages the size allows, so the range is wider and says so.
+    expect(known.estimate.pagesRange).toBeUndefined();
+    expect(sized.estimate).toMatchObject({ unmeasuredFiles: 1, pagesRange: { low: 3, high: 47 } });
+    expect(sized.estimate.credits).toBeNull();
+    expect(sized.profile).toEqual(known.profile);
     expect(sized.media).toBeNull();
   });
 
@@ -122,10 +127,13 @@ describe("retained version storage", () => {
 
 it("upload estimates require explicit boost even when the workspace snapshot was boosted", async () => {
   const args = { files: [{ name: "a.pdf", size: 1, pages: 10 }], workspace: { orgId: "o1", pipeline: { ...defaultPipelineFeatures, speedBoost: true } }, env: BILLED };
+  // The quote's validity window moves with the clock; compare everything else.
+  const timeless = <T extends { quote: { validUntil: string } }>(value: T) => ({ ...value, quote: { ...value.quote, validUntil: "" } });
   const omitted = await work.estimateUpload(args);
   const off = await work.estimateUpload({ ...args, speedBoost: false });
   const on = await work.estimateUpload({ ...args, speedBoost: true });
-  expect(omitted).toEqual(off);
+  expect(timeless(omitted)).toEqual(timeless(off));
+  expect(on.quote.ingest.credits!.high).toBeGreaterThan(off.quote.ingest.credits!.high);
   expect(on.estimate.credits!.low).toBe(off.estimate.credits!.low * 4);
   expect(on.estimate.credits!.high).toBe(off.estimate.credits!.high * 4);
   expect(on.estimate.seconds).toEqual(off.estimate.seconds);
@@ -134,7 +142,8 @@ it("upload estimates require explicit boost even when the workspace snapshot was
 it('scales both video and audio-only alternative credits only for explicit boost', async () => {
  const args = { files: [{ name: 'clip.mp4', size: 100, durationSeconds: 600 }], workspace: { pipeline: defaultPipelineFeatures, orgId:'o1' }, env: BILLED };
  const base = await work.estimateUpload(args);
- expect(await work.estimateUpload({ ...args, speedBoost: false })).toEqual(base);
+ const timeless = <T extends { quote: { validUntil: string } }>(value: T) => ({ ...value, quote: { ...value.quote, validUntil: "" } });
+ expect(timeless(await work.estimateUpload({ ...args, speedBoost: false }))).toEqual(timeless(base));
  const boosted = await work.estimateUpload({ ...args, speedBoost: true });
  expect(base.media?.lighter).toBeTruthy();
  for (const bound of ['low', 'high'] as const) {

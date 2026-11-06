@@ -18,12 +18,18 @@ export interface LocalPdfGraphInput {
   maxOutputs?: number;
   maxSourceBytes?: number;
   maxArtifactBytes?: number;
+  /** OCR language setting (`auto` or language codes); the workspace's documentExtraction.ocr.language. */
+  ocrLanguage?: string;
 }
 
 export interface LocalPdfGraphOutput {
   artifacts: readonly ExtractionArtifactRef[];
   targets: readonly ExtractionArtifactRef[];
   steps: readonly string[];
+  /** Pages the OCR adapter (ppocr-page-ocr) OCR'd to text (one model read each, billed as a Rich page by the caller). */
+  ocrPages?: readonly number[];
+  /** Per-run measurements the stage records beside the graph (image counts by class and route, for example). */
+  stats?: Readonly<Record<string, unknown>>;
 }
 
 async function hashFile(filePath: string, signal?: AbortSignal): Promise<string> {
@@ -65,7 +71,8 @@ export async function runLocalPdfArtifactGraph(input: LocalPdfGraphInput): Promi
     placements: [],
     producer: { id: "source", optionsDigest: actualHash },
   };
-  const adapters = await availableLocalArtifactAdapters({ outputDir: scratchDir, maxBytes: maxArtifactBytes });
+  const ocrPages = new Set<number>();
+  const adapters = await availableLocalArtifactAdapters({ outputDir: scratchDir, maxBytes: maxArtifactBytes, ocrLanguage: input.ocrLanguage, onOcrRead: (page) => ocrPages.add(page) });
   const result = await executeArtifactGraph({
     sourceDocumentId: input.sourceDocumentId,
     initial: [source],
@@ -81,5 +88,5 @@ export async function runLocalPdfArtifactGraph(input: LocalPdfGraphInput): Promi
     const available = adapters.map((adapter) => adapter.id).join(", ") || "none";
     throw new Error(`Local PDF artifact graph ${result.reason}; missing: ${result.missing.join(", ") || "unknown"}. Available adapters: ${available}`);
   }
-  return { artifacts: result.artifacts, targets: result.targets, steps: result.steps };
+  return { artifacts: result.artifacts, targets: result.targets, steps: result.steps, ocrPages: [...ocrPages].sort((a, b) => a - b) };
 }

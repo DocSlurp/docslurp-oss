@@ -142,13 +142,40 @@ export const embeddingProviderSchema = z.enum([
 ]);
 export type EmbeddingProvider = z.infer<typeof embeddingProviderSchema>;
 
-export const vectorBackendSchema = z.enum([
-  "lancedb",
-  "orama",
-  "chroma",
-  "milvus",
-]);
+/** The vector backends this build writes. Chroma was removed (2026-11-05): a config naming it is refused, never rerouted. */
+export const SUPPORTED_VECTOR_BACKENDS = ["lancedb", "orama", "milvus"] as const;
+
+/** Why `value` is not a vector backend this build accepts. */
+export function unsupportedVectorBackendMessage(value: unknown): string {
+  const name = typeof value === "string" ? value : JSON.stringify(value);
+  return `unsupported vector backend: ${name} (supported: ${SUPPORTED_VECTOR_BACKENDS.join(", ")}${name === "chroma" ? "; Chroma support was removed" : ""})`;
+}
+
+export const vectorBackendSchema = z.enum(SUPPORTED_VECTOR_BACKENDS, { error: (issue) => unsupportedVectorBackendMessage(issue.input) });
 export type VectorBackend = z.infer<typeof vectorBackendSchema>;
+
+/** A vector backend list from configuration (env or a stored pipeline) that names one this build does not write. */
+export class UnsupportedVectorBackendError extends Error {
+  override name = "UnsupportedVectorBackendError";
+}
+
+/**
+ * The backends named in `values` (trimmed, lowercased, de-duplicated, in order), refusing any this build does not write. Never
+ * filters an unknown one out or falls back to another backend: a config that names one fails loudly. `source` names where the
+ * list came from, for the error.
+ */
+export function assertSupportedVectorBackends(values: readonly string[], source: string): VectorBackend[] {
+  const out: VectorBackend[] = [];
+  for (const raw of values) {
+    const value = raw.trim().toLowerCase();
+    if (!value) continue;
+    if (!(SUPPORTED_VECTOR_BACKENDS as readonly string[]).includes(value)) {
+      throw new UnsupportedVectorBackendError(`${source}: ${unsupportedVectorBackendMessage(value)}`);
+    }
+    if (!out.includes(value as VectorBackend)) out.push(value as VectorBackend);
+  }
+  return out;
+}
 export const inferenceLaneSchema = z.enum(["realtime", "standard", "backfill"]);
 export type InferenceLane = z.infer<typeof inferenceLaneSchema>;
 export const inferenceLaneOptions = inferenceLaneSchema.options;
@@ -506,6 +533,8 @@ export const visionRuntimeSchema = z.enum([
 ]);
 export type VisionRuntime = z.infer<typeof visionRuntimeSchema>;
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+/** DeepInfra's OpenAI-compatible endpoint: the only destination of a `deepinfra` vision route (and its key). */
+export const DEEPINFRA_VISION_BASE_URL = DEEPINFRA_EMBEDDING_BASE_URL;
 /**
  * The hosted vision model behind the default profile (`good-fast-hosted`). Switching the default is a one-line
  * change here: the profile label and description, the default config and the default-derived values follow.
@@ -514,6 +543,11 @@ export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 // Tuned DeepSeek V4.1 Flash 1017 (US-hosted routes): best quality tier, fastest and cheaper per page than Gemini 3.1
 // Flash Lite on the 2026-10-22 vision holdout. Roll back without a deploy via DOCSLURP_VISION_MODEL_URI (app and worker).
 export const DEFAULT_OPENROUTER_VISION_MODEL = "deepseek/deepseek-v4.1-flash-1017";
+/**
+ * Hosted escalation read on DeepInfra's official endpoint (`llm://deepinfra/...`), billed per token like the
+ * OpenRouter and OpenAI routes. DeepInfra list price checked 2026-11-04: $0.15/M input, $0.60/M output.
+ */
+export const QWEN3_VL_30B_DEEPINFRA_VISION_MODEL = "Qwen/Qwen3-VL-30B-A3B-Instruct";
 /** Opt-in hosted vision route; OpenRouter list price verified 2026-10-20 ($0.15/M input, $0.50/M output). */
 export const NEMOTRON_SUPER_VL_VISION_MODEL = "nvidia/nemotron-3.5-super-vl";
 export const DEFAULT_LOCAL_OCR_MODEL = "microsoft/Florence-2-base-ft";
@@ -706,6 +740,23 @@ export const visionModelCatalog = [
     imageTokens: { kind: "fixed", tokens: 8_002, basis: "processor-max:glm5-next" },
   },
   {
+    id: QWEN3_VL_30B_DEEPINFRA_VISION_MODEL,
+    uri: `llm://deepinfra/${QWEN3_VL_30B_DEEPINFRA_VISION_MODEL}`,
+    label: "Qwen3-VL 30B A3B (DeepInfra)",
+    target: "hosted",
+    tags: ["hosted", "cost", "open-weights"],
+    runtime: "openai-compatible",
+    description:
+      "Open-weights (Apache-2.0) Qwen3-VL MoE on DeepInfra's official endpoint; one escalation read for pages the local OCR reads poorly.",
+    // Computed, not measured on this route: ~2,179 input + 746 output tokens per page at list price = 0.077 cents.
+    estimatedCostPerPageCents: 0.077,
+    // DeepInfra list price from https://api.deepinfra.com/models/list (`cents_per_input_token` 0.000015,
+    // `cents_per_output_token` 0.00006), checked 2026-11-04; retained in docs/evals/deepinfra-vision-prices-2026-11-04.json.
+    // Standard tier only: the listing's priority tier bills 1.5x, and the worker never requests a service tier.
+    tokenPricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.6, checked: "2026-11-04", basis: "provider-list", providers: ["deepinfra"] },
+    imageTokens: { kind: "patch", patchPx: 32, tokensPerPatch: 1, minTokens: 180, framingTokens: 2, basis: "processor-max:qwen3-vl" },
+  },
+  {
     id: "gpt-4.1-mini",
     uri: "llm://openai/gpt-4.1-mini",
     label: "GPT-4.1 Mini",
@@ -757,9 +808,10 @@ export type VisionTokenPricing = {
   /**
    * `pinned-route`: the highest price among the OpenRouter providers the model's vision profile restricts it to
    * (`providers`: its pinned `order` with fallbacks off, or its `only` allowlist), used when that route costs more than
-   * the model's list price. Absent: the OpenRouter list price.
+   * the model's list price. `provider-list`: the list price of the direct provider the route's URI names
+   * (`providers`: that one provider, e.g. DeepInfra's /models/list). Absent: the OpenRouter list price.
    */
-  basis?: "pinned-route";
+  basis?: "pinned-route" | "provider-list";
   providers?: readonly string[];
 };
 
@@ -784,7 +836,8 @@ export function visionListPriceCents(
  * priced catalog model must carry one: the vision guard weighs requests with it and refuses a model without it.
  *
  * - `patch`: ceil(width / patchPx) × ceil(height / patchPx) × tokensPerPatch, with no credit for the provider's
- *   own downscaling, so it bounds any resize.
+ *   own downscaling, so it bounds any resize; at least `minTokens` (a processor's minimum-size upscaling), plus
+ *   `framingTokens` (image start/end markers) when set.
  * - `fixed`: a constant per image, the family's largest documented per-image count.
  *
  * A hosted entry with `refusedReason` (MiMo V2.6 Flash: processor maximum 8,194, `qwen2-vl`; Nemotron 3.5 Super VL:
@@ -808,9 +861,16 @@ export function visionListPriceCents(
  *     weight correction absorbs (worker/src/lib/vision-attempt-guard.ts).
  *   - `glm5-next` (zai-org/GLM-5.3-Flash, `Glm5NextImageProcessor`): `smart_resize` to at most `max_image_tokens`
  *     8,000 merged 28-px tokens, plus the image start and end tokens: 8,002.
+ *   - `qwen3-vl` (Qwen/Qwen3-VL-30B-A3B-Instruct, `preprocessor_config.json` checked 2026-11-04: `Qwen2VLImageProcessorFast`,
+ *     16-px patches, 2x2 merge, `shortest_edge` 65,536 and `longest_edge` 16,777,216 pixels): `smart_resize` rounds
+ *     each side to a multiple of 32 px (never above the ceiling), so one merged token per 32-px cell, plus the vision
+ *     start and end tokens. Images under 65,536 px are upscaled to about 64 tokens; with ceil rounding at the 200:1
+ *     aspect limit that is under 180. The published maximum (16,777,216 px) equals the largest raster the worker
+ *     renders, so a provider raising it cannot add tokens; only a raised minimum (upscaling) could, and the vision
+ *     guard's per-route weight correction absorbs that overrun (worker/src/lib/vision-attempt-guard.ts).
  */
 export type VisionImageTokenBound =
-  | { kind: "patch"; patchPx: number; tokensPerPatch: number; basis: string }
+  | { kind: "patch"; patchPx: number; tokensPerPatch: number; minTokens?: number; framingTokens?: number; basis: string }
   | { kind: "fixed"; tokens: number; basis: string };
 
 /** Why a cataloged vision model is refused (no request is admitted on it), or null. */
@@ -839,14 +899,18 @@ export function visionImageTokens(idOrUri: string, image: { widthPx: number | nu
   const known = Boolean(image?.widthPx && image.heightPx && image.widthPx > 0 && image.heightPx > 0);
   const width = known ? image!.widthPx! : VISION_MAX_IMAGE_EDGE_PX;
   const height = known ? image!.heightPx! : VISION_MAX_IMAGE_EDGE_PX;
-  return Math.ceil(Math.ceil(width / bound.patchPx) * Math.ceil(height / bound.patchPx) * bound.tokensPerPatch);
+  const tokens = Math.ceil(Math.ceil(width / bound.patchPx) * Math.ceil(height / bound.patchPx) * bound.tokensPerPatch);
+  return Math.max(tokens, bound.minTokens ?? 0) + (bound.framingTokens ?? 0);
 }
 
 /** Output price at or above which a model is never offered or called (repository model-cost rule). */
 export const VISION_MAX_OUTPUT_USD_PER_MILLION = 50;
 
-/** Hosted providers a vision route may use: both bill per token and are priced from the catalog. */
-export const HOSTED_VISION_PROVIDERS = ["openai", "openrouter"] as const;
+/**
+ * Hosted providers a vision route may use: each bills per token, is priced from the catalog and is reached only at
+ * its fixed official endpoint (OpenAI: the configured OpenAI base URL; `DEEPINFRA_VISION_BASE_URL`; `OPENROUTER_BASE_URL`).
+ */
+export const HOSTED_VISION_PROVIDERS = ["openai", "openrouter", "deepinfra"] as const;
 /** Local providers a vision route may use: in-process, or a loopback OpenAI-compatible server. */
 export const LOCAL_VISION_PROVIDERS = ["local-cli", "ollama", "vllm", "lmstudio"] as const;
 /** Local providers whose server address a `baseUrl` parameter may set (loopback hosts only). */
@@ -860,7 +924,7 @@ export function isProhibitedPremiumModelId(model: string): boolean {
 /**
  * Why `uri` cannot be a vision route, or null. Hosted vision is limited to the priced catalog: an `openai` or
  * `openrouter` route must be a catalog entry with a token price and an image-token bound, so every hosted request
- * is priced, capped and billed. Other providers are `private` (operator registry) or local (`LOCAL_VISION_PROVIDERS`);
+ * is priced, capped and billed (likewise a `deepinfra` route, always at DeepInfra's official endpoint). Other providers are `private` (operator registry) or local (`LOCAL_VISION_PROVIDERS`);
  * any other provider would resolve to an OpenAI-compatible route with no base URL, which is api.openai.com.
  * Pro/Ultra ids and models at or above `VISION_MAX_OUTPUT_USD_PER_MILLION` output are refused on every provider.
  */
@@ -876,7 +940,7 @@ export function visionModelUriProblem(uri: string): string | null {
   if (provider === PRIVATE_MODEL_PROVIDER) return null;
   if ((LOCAL_VISION_PROVIDERS as readonly string[]).includes(provider)) return null;
   if (!(HOSTED_VISION_PROVIDERS as readonly string[]).includes(provider)) {
-    return `Vision provider ${provider} is not supported: use openai, openrouter, private or a local provider (${LOCAL_VISION_PROVIDERS.join(", ")})`;
+    return `Vision provider ${provider} is not supported: use ${HOSTED_VISION_PROVIDERS.join(", ")}, private or a local provider (${LOCAL_VISION_PROVIDERS.join(", ")})`;
   }
   const entry = visionModelCatalogByUri[uri];
   const refusal = visionModelRefusal(uri);
@@ -1118,7 +1182,6 @@ export const adaptiveRoutingEvidenceSchema = z.object({
     "canonical-document",
     "markdown-manifest",
     "extraction-contract",
-    "liteparse-structured",
     "page-image-evidence",
   ]),
   artifactUri: z.string(),
@@ -1179,7 +1242,7 @@ export const parserPlaybookCatalog: Record<
   "layout-aware": {
     label: "Dynamic",
     description:
-      "Prefer kreuzberg/native-pdf; align blocks with parser geometry.",
+      "Prefer layout-aware PDF Markdown; align blocks with parser geometry.",
     est: { costCentsPer100Pages: 10, latencySecPer100Pages: 180 },
     guidance: {
       preferLayoutMarkdown: true,
@@ -1429,6 +1492,21 @@ export function resolveVisionRoute(config: VisionConfig): VisionExecutionConfig 
       runtime: "openai-compatible",
       model: parsed.model,
       baseUrl: lookup.ok ? lookup.route.baseUrl : null,
+      prompt: config.prompt,
+      remoteFallbackModelUri: config.remoteFallbackModelUri,
+      benchmarkProfile: config.benchmarkProfile,
+    };
+  }
+  // DeepInfra is reached only at its official endpoint: a `baseUrl` parameter (refused by `visionModelUriProblem`)
+  // is ignored here too, so neither the route's billing nor its key can follow a URI to another host.
+  if (provider === "deepinfra") {
+    return {
+      target: config.target,
+      modelUri: config.modelUri,
+      provider,
+      runtime,
+      model: preset?.id ?? parsed.model,
+      baseUrl: DEEPINFRA_VISION_BASE_URL,
       prompt: config.prompt,
       remoteFallbackModelUri: config.remoteFallbackModelUri,
       benchmarkProfile: config.benchmarkProfile,

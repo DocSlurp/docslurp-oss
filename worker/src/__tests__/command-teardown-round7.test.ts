@@ -464,10 +464,10 @@ describe("M2: the shared PDF source is read-only for every command", () => {
     expect(paths.writablePaths).toEqual([]);
     expect(paths.readablePaths).toContain(cached.path);
     // An output beside the shared source would make its directory writable: fail closed.
-    expect(() => resolve([cached.path, `${cached.path}.doppler.md`])).toThrow(/shared source/);
+    expect(() => resolve([cached.path, `${cached.path}.vm-pdf.md`])).toThrow(/shared source/);
     await cache.clear();
     // Once evicted the path is an ordinary file again.
-    expect(() => resolve([cached.path, `${cached.path}.doppler.md`])).not.toThrow();
+    expect(() => resolve([cached.path, `${cached.path}.vm-pdf.md`])).not.toThrow();
   });
 });
 
@@ -479,7 +479,7 @@ describe("Low: candidate isolation settles every sibling before failing", () => 
     writeFileSync(source, "%PDF-1.4");
     let siblingSettled = false;
     vi.spyOn(documentExtractorRegistry, "prepare").mockImplementation(async (id: string) => {
-      if (id === "kreuzberg") throw new Error("prepare failed");
+      if (id === "native-pdf") throw new Error("prepare failed");
       await new Promise((resolve) => setTimeout(resolve, 150));
       siblingSettled = true;
       return { label: id, plan: { binary: "pdftotext", args: [], available: true } } as never;
@@ -488,7 +488,7 @@ describe("Low: candidate isolation settles every sibling before failing", () => 
     const dirs: string[] = [];
     const error = await (stage as unknown as { isolateConcurrentCandidates(args: object): Promise<unknown> })
       .isolateConcurrentCandidates({
-        primary: { label: "kreuzberg" },
+        primary: { label: "native-pdf" },
         secondary: { label: "poppler-text" },
         sourcePath: source,
         format: "pdf",
@@ -596,8 +596,9 @@ describe("M1: every sandboxed command is denied namespaces and kernel attack sur
   );
 
   const has = (binary: string) => spawnSync("sh", ["-c", `command -v ${binary}`]).status === 0;
-  it.skipIf(!bwrapAvailable || !pidNamespace || !filterArch || !has("pdftoppm") || !has("qpdf") || !has("tesseract"))(
-    "poppler, qpdf, tesseract and python still run under the filters with real bwrap",
+  it.skipIf(!bwrapAvailable || !pidNamespace || !filterArch || !has("pdftoppm") || !has("qpdf"))(
+    // OCR no longer runs a host binary: the PP-OCR CLI is python under the same sandbox (ocr/__tests__/local-cli.integration.test.ts).
+    "poppler, qpdf and python still run under the filters with real bwrap",
     async () => {
       const root = scratch("docslurp-bwrap-tools-");
       const config = { scratchRoot: path.join(root, "sandbox"), writablePaths: [] };
@@ -614,8 +615,6 @@ describe("M1: every sandboxed command is denied namespaces and kernel attack sur
       expect(png).toBeTruthy();
       expect((await runner.run({ binary: bin("pdftotext"), args: [source, "-"], available: true })).stdout.length).toBeGreaterThan(20);
       expect((await runner.run({ binary: bin("qpdf"), args: ["--check", source], available: true })).stdout).toMatch(/No syntax or stream encoding errors/);
-      const ocr = await runner.run({ binary: bin("tesseract"), args: [path.join(outDir, png), "-", "--psm", "6"], available: true });
-      expect(ocr.stdout.trim().length).toBeGreaterThan(0);
       const py = await runner.run({ binary: python, args: ["-I", "-c", "import multiprocessing as m, concurrent.futures as f\nwith f.ThreadPoolExecutor(2) as e: print(sum(e.map(abs, [-1, -2])))"], available: true });
       expect(py.stdout.trim()).toBe("3");
     },

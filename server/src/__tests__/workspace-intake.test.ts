@@ -14,6 +14,7 @@ import {
 import { remoteUrlIntakeItems } from "../services/remote-ingest.js";
 import { WorkspaceAccessError } from "../services/default-workspace.js";
 import { createWorkspaceIntakeFakes, fakeWorkspace } from "./helpers/workspace-intake-fakes.js";
+import { configureApiExtractorIdAliases } from "../routes/extractors.js";
 
 // URL safety checks resolve hosts; keep them independent of live DNS.
 vi.mock("node:dns/promises", () => ({
@@ -615,9 +616,9 @@ describe("Workspace Intake from remote URLs", () => {
 });
 
 
-describe("Doppler PDF admission contract", () => {
+describe("VM PDF admission contract", () => {
   it("admits the large PDFs supported by the chunked VM route and refuses excess before storage", () => {
-    vi.stubEnv("DOCSLURP_DOPPLER_INSTALLED", "1");
+    vi.stubEnv("DOCSLURP_VM_PDF_INSTALLED", "1");
     (env as { maxUploadBytes: number }).maxUploadBytes = 1024 * 1024 * 1024;
     for (const mib of [64, 65, 80, 500]) {
       expect(screenIntakeFile({ filename: "document.pdf", sizeBytes: mib * 1024 * 1024 }, "bulk-upload").ok).toBe(true);
@@ -627,9 +628,23 @@ describe("Doppler PDF admission contract", () => {
     expect(screenIntakeFile({ filename: "data.txt", sizeBytes: 600 * 1024 * 1024 }, "bulk-upload").ok).toBe(true);
   });
   it("keeps an operator's smaller limit", () => {
-    vi.stubEnv("DOCSLURP_DOPPLER_INSTALLED", "1");
+    vi.stubEnv("DOCSLURP_VM_PDF_INSTALLED", "1");
     (env as { maxUploadBytes: number }).maxUploadBytes = 10;
     expect(screenIntakeFile({ filename: "document.pdf", sizeBytes: 11 }, "bulk-upload"))
       .toMatchObject({ ok: false, statusCode: 413 });
+  });
+  it("keeps the sandboxed provider cap when only DOCSLURP_PDF_EXTRACTOR selects it, trimmed", () => {
+    vi.stubEnv("DOCSLURP_VM_PDF_INSTALLED", "");
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", " vm-pdf ");
+    (env as { maxUploadBytes: number }).maxUploadBytes = 1024 * 1024 * 1024;
+    expect(screenIntakeFile({ filename: "document.pdf", sizeBytes: 500 * 1024 * 1024 + 1 }, "bulk-upload"))
+      .toMatchObject({ ok: false, reason: "size", statusCode: 413 });
+  });
+  it("refuses an unknown DOCSLURP_PDF_EXTRACTOR instead of dropping the cap", () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm_pdf");
+    (env as { maxUploadBytes: number }).maxUploadBytes = 1024 * 1024 * 1024;
+    expect(() => screenIntakeFile({ filename: "document.pdf", sizeBytes: 600 * 1024 * 1024 }, "bulk-upload")).toThrow("DOCSLURP_PDF_EXTRACTOR");
+    expect(() => configureApiExtractorIdAliases({ DOCSLURP_PDF_EXTRACTOR: "vm_pdf" })).toThrow("DOCSLURP_PDF_EXTRACTOR");
+    expect(() => configureApiExtractorIdAliases({ DOCSLURP_PDF_EXTRACTOR: "vm-pdf" })).not.toThrow();
   });
 });

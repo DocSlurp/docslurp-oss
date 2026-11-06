@@ -15,7 +15,7 @@ import {
  * A command whose teardown could not be verified (CommandTeardownError) may have left processes
  * running on this machine: parsers holding customer bytes and CPU, outside any slot. Raster
  * commands keep their semaphore slot poisoned, but every other parser (pandoc, LibreOffice,
- * tesseract, local-artifact adapters) runs in an activity slot that Temporal frees as soon as the
+ * OCR, local-artifact adapters) runs in an activity slot that Temporal frees as soon as the
  * activity fails. So once `WORKER_UNVERIFIED_TEARDOWN_LIMIT` (default 1) such commands happened in
  * this process, the worker is quarantined:
  *

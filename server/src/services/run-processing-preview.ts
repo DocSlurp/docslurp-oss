@@ -1,16 +1,18 @@
 import {
   defaultPipelineFeatures,
-  estimateIngest,
-  speedBoostMultiplier,
+  detectFileFormat,
+  estimateProfileFor,
   parserPlaybookCatalog,
   parserPlaybookForQuality,
   QUALITY_MODE_ORDER,
   QUALITY_MODES,
   qualityModeSchema,
+  quoteFilePages,
+  quoteUpload,
   runProcessingPreviewRequestSchema,
   runProcessingPreviewSchema,
-  type PageMix,
   type PipelineFeatures,
+  type QuoteFile,
   type QualityMode,
   type RunProcessingPreview,
   type RunProcessingPreviewRequest,
@@ -20,12 +22,22 @@ import {
 import { sql } from "../db.js";
 import { getWorkspaceAccess } from "./organizations.js";
 
+function uploadMediaKindOf(file: QuoteFile): boolean {
+  const format = detectFileFormat({ filename: file.name, mimeType: file.type });
+  return format === "audio" || format === "video";
+}
+
 type PreviewSourceDescriptor = {
   filename: string;
   mimeType: string;
   sizeBytes: number;
+  /** Counted pages, when the caller has them. */
+  pages?: number;
   kind: "file" | "url";
 };
+
+/** A web page ingested from a URL: its size is unknown until fetched, so it is priced as a few pages of HTML. */
+const ASSUMED_URL_PAGES = 4;
 
 export type RunPreviewHistoryRow = {
   quality: string | null;
@@ -42,6 +54,7 @@ function normalizePreviewSources(
     filename: file.filename,
     mimeType: file.mimeType,
     sizeBytes: file.sizeBytes,
+    ...(file.pages !== undefined ? { pages: file.pages } : {}),
     kind: "file" as const,
   }));
   const urls = request.urls.map((entry) => {
@@ -58,62 +71,15 @@ function normalizePreviewSources(
   return [...files, ...urls];
 }
 
-function estimatePreviewPageCount(source: PreviewSourceDescriptor): number {
-  const name = source.filename.toLowerCase();
-  const mimeType = source.mimeType.toLowerCase();
-  const sizeBytes = Math.max(0, source.sizeBytes);
-  const sizeKb = sizeBytes / 1024;
-  const sizeMb = sizeBytes / (1024 * 1024);
-
-  if (source.kind === "url") {
-    return 4;
-  }
-
-  if (mimeType === "application/pdf" || name.endsWith(".pdf")) {
-    return Math.max(1, Math.round(sizeKb / 180));
-  }
-
-  if (mimeType.startsWith("image/")) {
-    return 1;
-  }
-
-  if (mimeType.startsWith("audio/") || mimeType.startsWith("video/")) {
-    return 1;
-  }
-
-  if (
-    mimeType.includes("spreadsheet") ||
-    mimeType.includes("excel") ||
-    name.endsWith(".csv") ||
-    name.endsWith(".tsv") ||
-    name.endsWith(".xlsx")
-  ) {
-    return Math.max(1, Math.round(sizeKb / 80));
-  }
-
-  if (
-    mimeType.includes("word") ||
-    mimeType.includes("officedocument.wordprocessingml") ||
-    name.endsWith(".docx") ||
-    name.endsWith(".doc") ||
-    name.endsWith(".epub")
-  ) {
-    return Math.max(1, Math.round(Math.max(sizeMb, 0.1) * 6));
-  }
-
-  if (
-    mimeType.startsWith("text/") ||
-    mimeType === "application/json" ||
-    mimeType === "application/x-ndjson" ||
-    mimeType === "application/xml" ||
-    mimeType === "application/x-yaml" ||
-    name.endsWith(".md") ||
-    name.endsWith(".txt")
-  ) {
-    return Math.max(1, Math.round(sizeKb / 24));
-  }
-
-  return Math.max(1, Math.round(Math.max(sizeMb, 0.1) * 3));
+/** The quote's view of a source: pricing, pages and ranges all come from `quoteUpload`, the one place upload prices are decided. */
+function quoteFileOf(source: PreviewSourceDescriptor): QuoteFile {
+  if (source.kind === "url") return { name: source.filename, size: source.sizeBytes, type: "text/html", pages: ASSUMED_URL_PAGES };
+  return {
+    name: source.filename,
+    size: source.sizeBytes,
+    type: source.mimeType,
+    ...(source.pages !== undefined ? { pages: source.pages } : {}),
+  };
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -135,6 +101,12 @@ function qualityLabel(
   return "risky";
 }
 
+/**
+ * What the sources are, from their format (the same table intake uses), never from words in a filename. A PDF is
+ * scan-like only when its counted pages carry a photograph's worth of bytes each.
+ */
+const SCAN_LIKE_BYTES_PER_PAGE = 200 * 1024;
+
 function estimateComplexitySignals(sources: PreviewSourceDescriptor[]): {
   targetQuality: number;
   topSignals: string[];
@@ -150,51 +122,33 @@ function estimateComplexitySignals(sources: PreviewSourceDescriptor[]): {
   const signalSet = new Set<string>();
 
   for (const source of sources) {
-    const name = source.filename.toLowerCase();
-    const mimeType = source.mimeType.toLowerCase();
+    if (source.kind === "url") continue;
+    const format = detectFileFormat({ filename: source.filename, mimeType: source.mimeType });
 
-    if (
-      mimeType.includes("spreadsheet") ||
-      mimeType.includes("excel") ||
-      name.endsWith(".csv") ||
-      name.endsWith(".tsv") ||
-      /invoice|statement|ledger|form|schedule|table/.test(name)
-    ) {
+    if (format === "structured-csv" || format === "office-excel") {
       tableHeavy = true;
       signalSet.add("table-heavy inputs favor layout-aware extraction");
     }
 
-    if (
-      mimeType.startsWith("image/") ||
-      /scan|ocr|receipt|fax|handwritten/.test(name) ||
-      (mimeType === "application/pdf" && source.sizeBytes > 8 * 1024 * 1024)
-    ) {
+    if (format === "image" || (format === "pdf" && source.pages && source.sizeBytes / source.pages > SCAN_LIKE_BYTES_PER_PAGE)) {
       scanHeavy = true;
       signalSet.add(
         "scan-like inputs raise the quality bar for fallback vision",
       );
     }
 
-    if (mimeType.startsWith("audio/") || mimeType.startsWith("video/")) {
+    if (format === "audio" || format === "video") {
       mediaHeavy = true;
       signalSet.add("media sources typically need richer multimodal handling");
     }
 
-    if (
-      mimeType.startsWith("text/") ||
-      name.endsWith(".docx") ||
-      name.endsWith(".md") ||
-      name.endsWith(".html")
-    ) {
+    if (format === "plain-text" || format === "markdown" || format === "html" || format === "office-word") {
       proseHeavy = true;
     }
 
-    if (
-      /(^|\.)(ts|tsx|js|jsx|py|java|go|rs|rb|json|yaml|yml)$/.test(name) ||
-      /api|schema|spec|code/.test(name)
-    ) {
+    if (format === "structured-json") {
       codeHeavy = true;
-      signalSet.add("code-like sources benefit from preserving syntax exactly");
+      signalSet.add("structured data sources benefit from preserving syntax exactly");
     }
   }
 
@@ -292,29 +246,24 @@ function summarizePreviewHistory(
 
 const BASE_QUALITY: Record<QualityMode, number> = { fast: 0.57, auto: 0.76, good: 0.9 };
 
-/** Page mix the file signals suggest, for the high end of a price range. */
-function signalPageMix(signals: ReturnType<typeof estimateComplexitySignals>): PageMix {
-  if (signals.scanHeavy) return { text: 0.3, complex: 0.1, scanned: 0.6 };
-  if (signals.tableHeavy) return { text: 0.6, complex: 0.35, scanned: 0.05 };
-  return { text: 0.85, complex: 0.1, scanned: 0.05 };
-}
-
 function estimateScenario(args: {
   quality: QualityMode;
   pipeline: PipelineFeatures;
   estimatedPages: number;
   documentCount: number;
+  files: QuoteFile[];
   signals: ReturnType<typeof estimateComplexitySignals>;
   history: PreviewHistorySummary;
 }): RunProcessingPreviewScenario {
   const mode = QUALITY_MODES[args.quality];
   const playbook = parserPlaybookCatalog[parserPlaybookForQuality(args.quality)];
   const historyForQuality = args.history.byQuality[args.quality];
-  // Customer price in credits (= cents) from PRICE_CARD: a text-only corpus at the low end, the signal mix at the high end.
-  const priced = (mix: Partial<PageMix>) =>
-    estimateIngest({ pages: args.estimatedPages, documents: args.documentCount, mix, profile: args.quality }).credits.totalCredits * speedBoostMultiplier(args.pipeline.speedBoost);
-  const minCents = priced({ text: 1 });
-  const maxCents = Math.max(minCents, priced(signalPageMix(args.signals)));
+  // Customer price in credits (= cents) from the pricing provider, by the same quote an upload gets: counted pages price exactly, uncounted
+  // ones over the range their size allows, with the high end every page read by a vision model.
+  const profile = { ...estimateProfileFor({ ...args.pipeline, quality: args.quality }, { env: process.env }), billing: "enforced" as const };
+  const quoted = quoteUpload({ files: args.files, profile, speedBoost: args.pipeline.speedBoost }).estimate.credits ?? { low: 0, high: 0 };
+  const minCents = quoted.low;
+  const maxCents = Math.max(minCents, quoted.high);
 
   let quality = BASE_QUALITY[args.quality];
   if (args.signals.tableHeavy) quality += args.quality === "fast" ? -0.08 : args.quality === "good" ? 0.05 : 0.02;
@@ -370,12 +319,10 @@ export function buildRunProcessingPreview(args: {
 }): RunProcessingPreview {
   const request = runProcessingPreviewRequestSchema.parse(args.request);
   const sources = normalizePreviewSources(request);
+  const files = sources.map(quoteFileOf);
   const estimatedPages = Math.max(
     1,
-    sources.reduce(
-      (total, source) => total + estimatePreviewPageCount(source),
-      0,
-    ),
+    files.reduce((total, file) => total + (uploadMediaKindOf(file) ? 1 : quoteFilePages(file)), 0),
   );
   const totalBytes = sources.reduce(
     (total, source) => total + source.sizeBytes,
@@ -391,6 +338,7 @@ export function buildRunProcessingPreview(args: {
       pipeline,
       estimatedPages,
       documentCount: sources.length,
+      files,
       signals,
       history,
     }),

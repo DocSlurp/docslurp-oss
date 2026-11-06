@@ -6,7 +6,7 @@ export interface VideoPolicy {
   duration: number; frames: number; images: number; scanFps: number;
   selectedFps: number; clipSeconds: number; visualTokens: number; maxCostCents: number;
 }
-// One policy for every organization: up to 2 hours at the frame density PRICE_CARD.videoMinuteRichPages is priced for
+// One policy for every organization: up to 2 hours at the frame density the video minute price assumes
 // (<= 12 frames/minute). A workspace or upload can only ask for less (`mediaVideo`), never more; credits, budgets and the
 // per-document cost cap below bound spend.
 const preset = { duration: 7200, frames: 1440, images: 24, scanFps: 2, selectedFps: 2, interval: 5, minimum: 24, clipSeconds: 120, visualTokens: 16384, maxCostCents: 1000 };

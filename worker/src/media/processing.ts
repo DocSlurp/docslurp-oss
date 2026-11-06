@@ -1,4 +1,4 @@
-import { PRICE_CARD, pageCredits, priceAiUsageEvent } from "@docslurp/shared";
+import { mediaRichPages, pageCredits, priceAiUsageEvent } from "@docslurp/shared";
 import { emitTelemetryLog } from "./telemetry.js";
 import { createHash } from "node:crypto";
 import { withObservation, recordMediaTelemetry } from "@docslurp/shared/observability";
@@ -31,7 +31,7 @@ export async function transcribeChunk(args: {
   await provider.prepare?.();
   const admission = await journal.admit({ scope, key, provider: provider.id, model: provider.model,
     // Reserve what the customer is billed for these seconds (media minutes as Rich pages); provider cost is ours.
-    reserveCents: operation === "diarize" ? 0.001 : Math.max(0.001, pageCredits("rich", input.durationSeconds / 60 * PRICE_CARD.audioMinuteRichPages)),
+    reserveCents: operation === "diarize" ? 0.001 : Math.max(0.001, pageCredits("rich", mediaRichPages("audio", input.durationSeconds))),
     maxRunCostCents: state.run.pipeline.maxCostCents ?? null, maxDocumentCostCents: args.maxDocumentCostCents, maxConcurrent: config.maxConcurrent, dailyBudgetCents: config.dailyBudgetCents });
   const id = admission.receipt.id;
   if (!admission.acquired && admission.receipt.status !== "completed") {

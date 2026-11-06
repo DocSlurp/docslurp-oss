@@ -5,14 +5,15 @@ import path from "node:path";
 import { resolveScriptsDir } from "../tools/scripts-dir.js";
 import { CommandRunner } from "../tools/runner.js";
 import { extractStructuredJsonFile as localExtract, structuredJsonToMarkdown as localConvert, STRUCTURED_JSON_MAX_INPUT_BYTES, StructuredJsonError, type StructuredJsonOptions, type StructuredJsonResult } from "./structured-json-guest.js";
+import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 export { STRUCTURED_JSON_DEFAULTS, STRUCTURED_JSON_MAX_INPUT_BYTES, StructuredJsonError } from "./structured-json-guest.js";
 export type { StructuredJsonOptions, StructuredJsonResult } from "./structured-json-guest.js";
 export function structuredJsonToMarkdown(input: string, options: StructuredJsonOptions = {}): StructuredJsonResult {
-  if (process.env.NODE_ENV === "production") throw new StructuredJsonError("structured JSON source parsing requires the parser VM");
+  if (vmOnlyParsing()) throw new StructuredJsonError("structured JSON source parsing requires the parser VM");
   return localConvert(input, options);
 }
 export async function extractStructuredJsonFile(sourcePath: string, outputPath: string, options: StructuredJsonOptions = {}, signal?: AbortSignal): Promise<StructuredJsonResult> {
-  if (process.env.NODE_ENV !== "production") return localExtract(sourcePath, outputPath, options, signal);
+  if (!vmOnlyParsing()) return localExtract(sourcePath, outputPath, options, signal);
   if ((await stat(sourcePath)).size > STRUCTURED_JSON_MAX_INPUT_BYTES) throw new StructuredJsonError("structured JSON input exceeds VM transfer limit");
   const dir = await mkdtemp(path.join(tmpdir(), "docslurp-structured-json-"));
   try {

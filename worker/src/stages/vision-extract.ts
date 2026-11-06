@@ -1,3 +1,10 @@
+import { createHostedOcrReader } from "../ocr/hosted-reader.js";
+import { recordOcrReads } from "../ocr/ledger.js";
+import { OcrInfrastructureError, ocrFailedPages, recordOcrFailedPages, resolveOcrMode } from "../ocr/mode.js";
+import { authorizeOcrRead } from "../ocr/image-frames.js";
+import { ocrDocument } from "../ocr/read-document.js";
+import { OCR_PDF_BATCH_PAGES } from "./extract-markdown.js";
+import { OCR_BOUNDARY_FAILED } from "../routing/executors/run.js";
 import { imageOrientationEnabled, normalizeImageOrientation, withOrientationAdmission, reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { rm } from "node:fs/promises";
 import {
@@ -70,6 +77,7 @@ import {
   type RoutedExecution,
 } from "../routing/runtime.js";
 import type { PlanValidation, RoutePlan } from "@docslurp/shared";
+import { MIXED_SCAN_IMAGE_SIGNAL } from "@docslurp/shared";
 import { buildVisionPageFacts, recordPageFacts, type VisionPageOutcome } from "../pipeline/page-facts.js";
 
 export interface VisionPageOutput {
@@ -90,7 +98,7 @@ export interface VisionPageOutput {
   finishReason?: string | null;
   /** Model id the provider reports having served, when it differs in form from `model` or is the only report. */
   servedModel?: string;
-  orientation?: import("../sandbox/providers/modal/image-orientation.js").OrientationResult | { status: "skipped-limit" };
+  orientation?: import("../lib/image-orientation.js").OrientationResult | { status: "skipped-limit" };
   /** Present when the served model differs from the requested one (see `VISION_MODEL_SWAP_POLICY`). */
   modelSwap?: { requested: string; served: string; provider: string | null };
 }
@@ -109,6 +117,11 @@ export interface LegacyPageHints {
   inkCheckPages: ReadonlySet<number>;
   /** Pages with usable native or OCR text to keep when vision gives nothing. */
   fallbackTextPages: ReadonlySet<number>;
+  /**
+   * Scans beside native text (MIXED_SCAN_IMAGE_SIGNAL): in `vm` OCR mode these are read by the OCR engine in its VM, as
+   * scanned pages are, never rasterized on the host for a hosted vision model.
+   */
+  vmOcrPages?: ReadonlySet<number>;
 }
 
 export { VisionGuardStopError } from "../lib/vision-attempt-guard.js";
@@ -125,13 +138,15 @@ export function legacyPageHints(pages: Array<{ pageNumber: number; textDensitySc
   ocrDecision?: { signals: string[] } }>): LegacyPageHints {
   const inkCheckPages = new Set<number>();
   const fallbackTextPages = new Set<number>();
+  const vmOcrPages = new Set<number>();
   for (const page of pages) {
     if (page.ocrDecision?.signals.includes(DRAWN_CONTENT_SIGNAL)) inkCheckPages.add(page.pageNumber);
+    if (page.ocrDecision?.signals.includes(MIXED_SCAN_IMAGE_SIGNAL)) vmOcrPages.add(page.pageNumber);
     if (page.textDensityScore >= USABLE_FALLBACK_DENSITY && !page.signals.includes("garbled-text")) {
       fallbackTextPages.add(page.pageNumber);
     }
   }
-  return { inkCheckPages, fallbackTextPages };
+  return { inkCheckPages, fallbackTextPages, vmOcrPages };
 }
 
 /** Errors whose vision attempt `recordFailedVisionAttempt` already recorded (once per call). */
@@ -206,6 +221,7 @@ export class VisionExtractStage implements Stage {
           runId: state.run.id, documentId: document.id, pageNumber, pageCount: pages.length, vision,
           ...(routing.hints.inkCheckPages.has(pageNumber) ? { inkCheck: true } : {}),
           ...(routing.hints.fallbackTextPages.has(pageNumber) ? { fallbackText: true } : {}),
+          ...(routing.hints.vmOcrPages?.has(pageNumber) ? { vmOcr: true } : {}),
         });
       }
     }
@@ -220,6 +236,7 @@ export class VisionExtractStage implements Stage {
     const hints: LegacyPageHints = {
       inkCheckPages: new Set(task.inkCheck ? [task.pageNumber] : []),
       fallbackTextPages: new Set(task.fallbackText ? [task.pageNumber] : []),
+      vmOcrPages: new Set(task.vmOcr ? [task.pageNumber] : []),
     };
     const outputs = await this.extractVisionPagesFromCache(state, document, task.vision, [task.pageNumber], signal,
       undefined, undefined, false, { hints, skips });
@@ -566,6 +583,8 @@ export class VisionExtractStage implements Stage {
 
             console.log(
               `[extract-debug] document=${document.id} visionCompleted ` +
+                `documentPages=${pages} selectedPages=${needsVision.selectedPages.length} failedPages=${failedPages.length} ` +
+                `routingVersion=${routingVersion(routingV2)} ` +
                 `processedPages=${outputs.length} inputTokens=${inputTokens} ` +
                 `outputTokens=${outputTokens} costCents=${costCents}`,
             );
@@ -581,6 +600,10 @@ export class VisionExtractStage implements Stage {
                 score: needsVision.score,
                 latencyMs: totalLatencyMs,
                 selectedPages: needsVision.selectedPages,
+                // Counts beside the page lists, so dashboards read selected vs read vs failed without unpacking arrays.
+                documentPages: pages,
+                selectedPageCount: needsVision.selectedPages.length,
+                failedPageCount: failedPages.length,
                 routingPolicy: needsVision.routing?.visionPolicy ?? null,
                 routingVersion: routingVersion(routingV2),
                 failedPages: failedPages.map((page) => ({ pageNumber: page.pageNumber, reason: page.outcome, fallbackText: page.fallbackText })),
@@ -647,7 +670,9 @@ export class VisionExtractStage implements Stage {
         parserPlaybookCatalog[playbook]?.guidance?.visionDensityThreshold ??
         this.cfg.visionDensityThreshold;
       score = this.scoreTextDensity(text ?? "", pageCount);
-      needed = !text || this.needsVision(text, pageCount, threshold);
+      // Without routing evidence, a document that has text keeps it under evidence routing: characters per page say
+      // nothing about whether a page's content is pixels. Only a document with no text at all has no other reader.
+      needed = !text || (!routingV2 && this.needsVision(text, pageCount, threshold));
       reason = !text
         ? "routing-and-extraction-evidence-unavailable"
         : needed
@@ -665,6 +690,15 @@ export class VisionExtractStage implements Stage {
     } else if (needed && !this.visionAllowed_(state, document.id)) {
       needed = false;
       reason = "playbook-disallows-vision";
+    }
+
+    // Pages whose OCR read failed in its boundary stay failed: vision never reads them in OCR's place. (Good reads every
+    // page with vision by the workspace's own choice, so it keeps them.)
+    const ocrFailed = qualityReadsEveryPage(state.run.pipeline.quality) ? new Set<number>() : ocrFailedPages(state.artifactLedger, document.id);
+    if (ocrFailed.size > 0) {
+      selectedPages = selectedPages.filter((page) => !ocrFailed.has(page));
+      needed = needed && selectedPages.length > 0;
+      console.warn(`[ocr] vision skips pages whose OCR failed document=${document.id} pages=${[...ocrFailed].join(",")}`);
     }
 
     if (!needed) {
@@ -754,6 +788,7 @@ export class VisionExtractStage implements Stage {
     return visionAllowedForDocument(
       state.run.pipeline,
       state.artifactLedger.readDocument(documentId, "parser-playbook"),
+      { evidenceRouting: resolveRunRoutingV2(state) },
     );
   }
 
@@ -802,7 +837,17 @@ export class VisionExtractStage implements Stage {
     const plan = await loadActiveRoutePlan(state, this.storage, document.id, this.cfg);
     if (!plan) return null;
     const catalog = buildRuntimeCatalog({ privacyMode: state.run.pipeline.privacyMode }).allTargets;
-    return { plan, execution: groupAssignmentsByTarget(plan, catalog), catalog };
+    const execution = groupAssignmentsByTarget(plan, catalog);
+    // Pages whose OCR read failed in its boundary are read by no routed target either.
+    const failed = ocrFailedPages(state.artifactLedger, document.id);
+    if (failed.size > 0) {
+      for (const group of execution.groups) group.pages = group.pages.filter((page) => !failed.has(page));
+      execution.groups = execution.groups.filter((group) => group.pages.length > 0);
+      execution.requests = execution.requests.filter((request) => !failed.has(request.assignment.pageNumber));
+      execution.fallbackPages = execution.fallbackPages.filter((page) => !failed.has(page));
+      console.warn(`[ocr] routed vision skips pages whose OCR failed document=${document.id} pages=${[...failed].join(",")}`);
+    }
+    return { plan, execution, catalog };
   }
 
   private routedSelection(routed: { execution: RoutedExecution }): Awaited<ReturnType<VisionExtractStage["checkNeedsVision"]>> {
@@ -853,6 +898,7 @@ export class VisionExtractStage implements Stage {
           storage: this.storage,
           rasters: this.rasters,
           runner: this.runner,
+          ocrLanguage: state.run.pipeline.documentExtraction?.ocr?.language,
           canonicalUri: () => state.artifactLedger.readDocument(document.id, "canonical-document") ?? null,
           selection,
           allow,
@@ -865,6 +911,12 @@ export class VisionExtractStage implements Stage {
               throw error;
             }
           },
+          // Router OCR is billed like every OCR read (ocr/ledger.ts: an uploaded image per read, a PDF page with words), not
+          // as a local model.
+          recordOcrRead: (outcome) => {
+            recordOcrReads(state.usageLedger, document.id, outcome, { stage: this.name, kind: document.mimeType.startsWith("image/") ? "image" : "pdf" });
+          },
+          hostedReader: createHostedOcrReader({ state, cfg: this.cfg, runner: this.runner }),
           recordLocalUsage: (event) => {
             state.usageLedger.record({
                 provider: "vision-runtime",
@@ -906,6 +958,9 @@ export class VisionExtractStage implements Stage {
         },
       });
       for (const warning of result.executorWarnings) console.warn(`[page-router] document=${document.id} ${warning}`);
+      // Pages whose router OCR failed in its boundary are OCR-failed pages, like scan fill's: no reader serves them.
+      const ocrFailed = result.executorFailures.filter((failure) => failure.reason === OCR_BOUNDARY_FAILED).map((failure) => failure.pageNumber);
+      if (ocrFailed.length) recordOcrFailedPages(state, document.id, ocrFailed);
       // Executor pages that failed for a reason other than a vision call (no raster, crop, local tool).
       for (const failure of result.executorFailures) {
         if (!executorOutcomes.has(failure.pageNumber)) {
@@ -1029,6 +1084,53 @@ export class VisionExtractStage implements Stage {
     };
   }
 
+  /**
+   * Read `pages` of a PDF with the OCR engine in its VM boundary (the VM renders them from the stored PDF; the host renders
+   * nothing): each batch's Rich pages authorized before its VM starts, every page read charged once by the OCR ledger.
+   * A boundary that cannot run is retried (OcrInfrastructureError); a refused or unread page is skipped with the reason,
+   * never handed to a hosted model instead.
+   */
+  private async readPagesWithVmOcr(
+    state: WorkflowState,
+    document: import("../models.js").Document,
+    pages: number[],
+    skip: (pageNumber: number, outcome: VisionPageSkip["outcome"]) => VisionPageSkip,
+    signal?: AbortSignal,
+  ): Promise<VisionPageOutput[]> {
+    const source = await this.rasters.sourcePath(document);
+    const hostedReader = createHostedOcrReader({ state, cfg: this.cfg, runner: this.runner });
+    const outputs: VisionPageOutput[] = [];
+    for (let start = 0; start < pages.length; start += OCR_PDF_BATCH_PAGES) {
+      const batch = pages.slice(start, start + OCR_PDF_BATCH_PAGES);
+      await authorizeOcrRead(state, document.id, batch.length, "pdf-batch");
+      const started = Date.now();
+      let result: Awaited<ReturnType<typeof ocrDocument>>;
+      try {
+        result = await ocrDocument({ runner: this.runner, state, documentId: document.id, source, kind: "pdf", pages: batch, hostedReader,
+          stage: this.name, ...(signal ? { signal } : {}) });
+      } catch (error) {
+        if (signal?.aborted || error instanceof OcrInfrastructureError) throw error;
+        console.error(`[ocr] mixed-scan-pages-failed document=${document.id} pages=${batch.join(",")} reason=${toError(error).message.slice(0, 300)}`);
+        for (const page of batch) skip(page, "failed");
+        continue;
+      }
+      const latencyMs = Date.now() - started;
+      const read = new Set<number>();
+      for (const page of result.pages) {
+        if (!batch.includes(page.pageNumber)) continue;
+        read.add(page.pageNumber);
+        outputs.push({
+          pageNumber: page.pageNumber, runtime: "ocr-vm", model: "page-ocr", prompt: "", baseUrl: null,
+          latencyMs: Math.round(latencyMs / batch.length), inputTokens: 0, outputTokens: 0, usageSource: "ocr-ledger",
+          fallbackUsed: false, fallbackReason: null, text: page.text, costCents: 0,
+        });
+      }
+      for (const page of batch) if (!read.has(page)) skip(page, "failed");
+    }
+    console.log(`[ocr] mixed-scan-pages document=${document.id} read=${outputs.length}/${pages.length} boundary=vm`);
+    return outputs;
+  }
+
   private async extractVisionPagesFromCache(
     state: WorkflowState,
     document: import("../models.js").Document,
@@ -1102,6 +1204,15 @@ export class VisionExtractStage implements Stage {
         }
         return completed.sort((a, b) => a.pageNumber - b.pageNumber);
       }
+    }
+    // Scans beside native text go to the OCR engine in its VM (as scanned pages do in extract-markdown), not to the host
+    // raster and a hosted vision model. Escalation follows the OCR boundary's own rules.
+    const vmOcr = resolveOcrMode() === "vm" && document.mimeType === "application/pdf" ? missing.filter((page) => hints.vmOcrPages?.has(page)) : [];
+    if (vmOcr.length > 0) {
+      completed.push(...await this.readPagesWithVmOcr(state, document, vmOcr, skip, signal));
+      const rest = missing.filter((page) => !vmOcr.includes(page));
+      if (rest.length === 0) return completed.sort((a, b) => a.pageNumber - b.pageNumber);
+      missing.splice(0, missing.length, ...rest);
     }
     const rasterPages = await this.rasters.renderSelectedPages({
       document,

@@ -26,6 +26,7 @@ import { sql } from "../db.js";
 import { insertDefaultWorkspace } from "./default-workspace.js";
 import { sendOrganizationInviteEmail, sendWorkspaceInviteEmail } from "./notifications.js";
 import { currentRequestApiKeyWorkspaceIds } from "../lib/request-context.js";
+import { assertUserMayJoinOrg, UserAlreadyInOrgError } from "./org-membership-limit.js";
 import { forgetProviderPolicy } from "../lib/provider-policy.js";
 
 /** Narrows workspace IDs to the current API key request's allowlist, if any. */
@@ -175,7 +176,12 @@ function personalOrgName(name: string): string {
   return `${name.split(" ")[0] ?? "Personal"} Workspace`;
 }
 
-export async function ensurePersonalOrganization(userId: string): Promise<OrganizationRecord> {
+/**
+ * The organization a request that names none acts in: the user's personal organization, else their oldest membership,
+ * else (a user with no organization at all) a personal organization provisioned now. Callers still check membership of
+ * whatever organization they then use; this only picks the default, as an org picker would.
+ */
+export async function resolveDefaultOrganization(userId: string): Promise<OrganizationRecord> {
   const [existing] = await sql<OrganizationRow[]>`
     select
       o.id,
@@ -192,7 +198,8 @@ export async function ensurePersonalOrganization(userId: string): Promise<Organi
       o.updated_at::text
     from organizations o
     join org_memberships om on om.org_id = o.id and om.user_id = ${userId}
-    where o.personal_owner_user_id = ${userId}
+    where o.deleted_at is null
+    order by (o.personal_owner_user_id = ${userId}) desc, om.created_at, o.id
     limit 1
   `;
 
@@ -200,42 +207,72 @@ export async function ensurePersonalOrganization(userId: string): Promise<Organi
     return mapOrganization(existing);
   }
 
-  const user = await getUser(userId);
-  if (!user) {
+  if (!(await getUser(userId))) {
     throw new Error("User not found");
   }
+  await sql.begin(async (tx) => {
+    await provisionPersonalOrganization(tx, userId);
+  });
+  return await resolveDefaultOrganization(userId);
+}
 
-  const organizationId = randomUUID();
-  await sql`
-    insert into organizations (
-      id,
-      name,
-      slug,
-      is_personal,
-      personal_owner_user_id,
-      created_by_user_id,
-      credit_balance_cents
-    )
-    values (
-      ${organizationId},
-      ${personalOrgName(user.name)},
-      ${`${user.id}-personal`},
-      true,
-      ${user.id},
-      ${user.id},
-      0
-    )
+/**
+ * Gives a user who has no organization their personal one: re-joins it when it still exists (memberships removed by
+ * 0127 or by leaving keep the row and its data), else creates it with a default workspace. Runs inside the caller's
+ * transaction; the caller has established that the user may join (they have no other membership while
+ * DOCSLURP_MAX_ORGS_PER_USER is 1).
+ */
+async function provisionPersonalOrganization(tx: OrgTransaction, userId: string): Promise<string> {
+  const [user] = await tx<{ id: string; name: string }[]>`select id, name from "user" where id = ${userId} and deleted_at is null`;
+  if (!user) throw new OrganizationError(404, "user_not_found", "User not found");
+  const [existing] = await tx<{ id: string }[]>`
+    select id from organizations where personal_owner_user_id = ${userId} and deleted_at is null limit 1
   `;
-
-  await sql`
-    insert into org_memberships (org_id, user_id, role)
-    values (${organizationId}, ${user.id}, 'owner')
+  const organizationId = existing?.id ?? randomUUID();
+  if (!existing) {
+    await tx`
+      insert into organizations (id, name, slug, is_personal, personal_owner_user_id, created_by_user_id, credit_balance_cents)
+      values (${organizationId}, ${personalOrgName(user.name)}, ${`${user.id}-personal`}, true, ${user.id}, ${user.id}, 0)
+    `;
+  }
+  await tx`
+    insert into org_memberships (org_id, user_id, role) values (${organizationId}, ${user.id}, 'owner')
+    on conflict (org_id, user_id) do nothing
   `;
   // Every organization starts with a default workspace, so dashboard-only
   // users and requests that omit workspaceId have somewhere to land.
-  await insertDefaultWorkspace(sql, { orgId: organizationId, userId: user.id });
+  await insertDefaultWorkspace(tx, { orgId: organizationId, userId: user.id });
+  return organizationId;
+}
 
-  return await ensurePersonalOrganization(userId);
+/**
+ * The membership-limit check for a join or create (org-membership-limit.ts), translated to this module's error. When the
+ * user's empty personal organization is all that stands in the way, it is deleted here and the new membership replaces it.
+ */
+async function admitToOrganization(tx: OrgTransaction, userId: string, targetOrgId: string | null): Promise<void> {
+  let replacePersonalOrgId: string | null;
+  try {
+    ({ replacePersonalOrgId } = await assertUserMayJoinOrg(tx, userId, targetOrgId));
+  } catch (error) {
+    if (error instanceof UserAlreadyInOrgError) throw new OrganizationError(409, error.code, error.message);
+    throw error;
+  }
+  if (!replacePersonalOrgId) return;
+  // Lock the organization and its workspaces (a concurrent API key, run, chat or upload that references them now waits),
+  // then re-check under the locks that it is still empty. workspaces.org_id has no foreign key, so its workspaces are deleted
+  // explicitly; anything else that hangs off them is empty by docslurp_personal_org_is_empty. Fails closed: an organization
+  // that gained data keeps the user in it and the join is refused.
+  await tx`select id from organizations where id = ${replacePersonalOrgId} for update`;
+  await tx`select id from workspaces where org_id = ${replacePersonalOrgId} for update`;
+  const [stillEmpty] = await tx<{ empty: boolean }[]>`
+    select is_personal and personal_owner_user_id = ${userId} and docslurp_personal_org_is_empty(id) as empty
+    from organizations where id = ${replacePersonalOrgId}
+  `;
+  if (!stillEmpty?.empty) throw new OrganizationError(409, "user_already_in_org", new UserAlreadyInOrgError().message);
+  await tx`delete from workspaces where org_id = ${replacePersonalOrgId}`;
+  await tx`delete from organizations where id = ${replacePersonalOrgId}`;
+  await tx`insert into audit_log (id, user_id, action, resource_type, resource_id, metadata)
+    values (${randomUUID()}, ${userId}, 'organization.personal.replaced', 'organization', ${replacePersonalOrgId}, ${tx.json({ joinedOrgId: targetOrgId })})`;
 }
 
 export async function listOrganizations(userId: string): Promise<OrganizationRecord[]> {
@@ -308,6 +345,7 @@ export async function createOrganization(input: CreateOrganizationInput): Promis
     await sql.begin(async tx => {
       const [user] = await tx`select id from "user" where id = ${parsed.userId}`;
       if (!user) throw new OrganizationError(404, "user_not_found", "User not found");
+      await admitToOrganization(tx, parsed.userId, null);
       await tx`insert into organizations (id, name, slug, is_personal, created_by_user_id, credit_balance_cents)
         values (${orgId}, ${parsed.name}, ${parsed.slug ?? null}, false, ${parsed.userId}, 0)`;
       await tx`insert into org_memberships (org_id, user_id, role) values (${orgId}, ${parsed.userId}, 'owner')`;
@@ -319,6 +357,10 @@ export async function createOrganization(input: CreateOrganizationInput): Promis
 }
 
 function organizationConflict(error: unknown): unknown {
+  // The unique index behind the one-organization-per-user policy (migration 0127), hit by a concurrent join.
+  if (error && typeof error === "object" && "constraint_name" in error && error.constraint_name === "org_memberships_one_org_per_user") {
+    return new OrganizationError(409, "user_already_in_org", new UserAlreadyInOrgError().message);
+  }
   if (error && typeof error === "object" && "code" in error && error.code === "23505") {
     return new OrganizationError(409, "organization_conflict", "Organization slug or membership already exists");
   }
@@ -335,13 +377,10 @@ export async function getOrganizationAccess(orgId: string, userId: string): Prom
 export async function getOrganizationDetails(orgId: string, userId: string): Promise<OrganizationDetails> {
   const organization = await getOrganization(orgId, userId);
   if (!organization) throw new OrganizationError(404, "organization_not_found", "Organization not found");
-  const elevated = organization.memberRole === "owner" || organization.memberRole === "admin";
   const [counts] = await sql<{ members: number; workspaces: number; owners: number }[]>`
     select (select count(*)::int from org_memberships where org_id = ${orgId}) as members,
       (select count(*)::int from org_memberships where org_id = ${orgId} and role = 'owner') as owners,
-      (select count(*)::int from workspaces w where w.org_id = ${orgId} and
-        (${elevated} or w.user_id = ${userId} or exists
-          (select 1 from workspace_members wm where wm.workspace_id = w.id and wm.user_id = ${userId}))) as workspaces`;
+      (select count(*)::int from workspaces w where w.org_id = ${orgId} and docslurp_workspace_access(w.id, ${userId})) as workspaces`;
   return { organization, access: { orgId, userId, role: organization.memberRole, capabilities: organizationCapabilities(organization.memberRole, organization.isPersonal, counts!.owners) }, counts: { members: counts!.members, workspaces: counts!.workspaces } };
 }
 
@@ -411,8 +450,11 @@ async function mutateMembership(orgId: string, userId: string, memberUserId: str
           ), updated_at = now()
           where org_id = ${orgId} and user_id = ${memberUserId}`;
         await tx`delete from workspace_members where user_id = ${memberUserId} and workspace_id in (select id from workspaces where org_id = ${orgId})`;
-        // Webhooks are per user, not per org: deliveries re-check workspace
-        // access (services/webhooks.ts), so this org's events stop reaching them.
+        // Webhooks they created here stop delivering: a webhook delivers only while its creator
+        // administers its organization (services/webhooks.ts).
+        // Nobody is left without an organization: one who has none now gets their personal one back.
+        const [remaining] = await tx`select 1 from org_memberships where user_id = ${memberUserId} limit 1`;
+        if (!remaining) await provisionPersonalOrganization(tx, memberUserId);
         result = true;
       } else {
         const rows = await tx<MembershipRow[]>`update org_memberships set role = ${role} where org_id = ${orgId} and user_id = ${memberUserId} returning org_id, user_id, role, created_at::text`;
@@ -556,6 +598,7 @@ export async function acceptOrganizationInvite(token: string, userId: string): P
       const [locked] = await tx<{ status: string }[]>`select status from org_invites where id = ${invite.id} for update`;
       if (locked?.status !== "pending") throw new OrganizationError(409, "invite_inactive", "Invite is no longer active");
       const [existing] = await tx<MembershipRow[]>`select org_id, user_id, role, created_at::text from org_memberships where org_id = ${invite.org_id} and user_id = ${userId}`;
+      if (!existing) await admitToOrganization(tx, userId, invite.org_id);
       const [row] = existing
         ? [existing]
         : await tx<MembershipRow[]>`insert into org_memberships (org_id, user_id, role) values (${invite.org_id}, ${userId}, ${invite.role}) returning org_id, user_id, role, created_at::text`;
@@ -600,24 +643,16 @@ export async function removeOrganizationMember(args: { orgId: string; userId: st
 
 export async function listAccessibleWorkspaceIds(userId: string): Promise<string[]> {
   const rows = await sql<{ workspace_id: string }[]>`
-    with accessible as (
-      -- G-06: every team-org branch requires an org membership, so a removed
-      -- member keeps neither owned workspaces nor direct shares.
-      select w.id as workspace_id
-      from workspaces w
-      join org_memberships om on om.org_id = w.org_id and om.user_id = ${userId}
-      left join workspace_members wm on wm.workspace_id = w.id and wm.user_id = ${userId}
-      where om.role in ('owner', 'admin') or w.is_default or w.user_id = ${userId} or wm.user_id is not null
-      union
-      -- Direct shares out of a personal org (its one member can't be removed).
-      select wm.workspace_id
-      from workspace_members wm
-      join workspaces w on w.id = wm.workspace_id
-      join organizations o on o.id = w.org_id and o.is_personal
-      where wm.user_id = ${userId}
-    )
-    select workspace_id
-    from accessible
+    -- The rule itself lives in docslurp_workspace_access (migration 0124). The
+    -- candidate filter only narrows the scan to workspaces in the user's orgs or
+    -- shared with them, which is a superset of what the function can grant.
+    select w.id as workspace_id
+    from workspaces w
+    where (
+        w.org_id in (select om.org_id from org_memberships om where om.user_id = ${userId})
+        or w.id in (select wm.workspace_id from workspace_members wm where wm.user_id = ${userId})
+      )
+      and docslurp_workspace_access(w.id, ${userId})
   `;
 
   return withinRequestKeyAllowlist(rows.map((row) => row.workspace_id));
@@ -689,10 +724,7 @@ async function workspaceAccessRow(workspaceId: string, userId: string, client: p
       on wm.workspace_id = w.id
       and wm.user_id = ${userId}
     where w.id = ${workspaceId}
-      and (
-        (om.user_id is not null and (w.user_id = ${userId} or wm.user_id is not null or om.role in ('owner', 'admin') or w.is_default))
-        or (wm.user_id is not null and o.is_personal)
-      )
+      and docslurp_workspace_access(w.id, ${userId})
     limit 1
   `;
 
@@ -1075,7 +1107,7 @@ export async function acceptWorkspaceInvite(token: string, userId: string): Prom
     throw new Error("Invite email does not match the accepting user");
   }
 
-  await sql.begin(async (tx) => {
+  try { await sql.begin(async (tx) => {
     const [org] = await tx<{ is_personal: boolean }[]>`select is_personal from organizations where id = ${invite.org_id}`;
     if (org && !org.is_personal) {
       // Team-org workspace access requires org membership. An outsider joins
@@ -1087,7 +1119,10 @@ export async function acceptWorkspaceInvite(token: string, userId: string): Prom
         if (inviter?.role !== "owner" && inviter?.role !== "admin") {
           throw new Error("This invite can no longer add you to the organization; ask an organization admin to invite you");
         }
-        await tx`insert into org_memberships (org_id, user_id, role) values (${invite.org_id}, ${userId}, 'member') on conflict do nothing`;
+        await admitToOrganization(tx, userId, invite.org_id);
+        // Only this exact membership may already exist. A target-less ON CONFLICT would also swallow the one-organization
+        // index (a concurrent join that committed first) and accept the invite without a membership.
+        await tx`insert into org_memberships (org_id, user_id, role) values (${invite.org_id}, ${userId}, 'member') on conflict (org_id, user_id) do nothing`;
         await auditOrganization(tx, invite.org_id, userId, "organization.member.joined_via_workspace_invite", { inviteId: invite.id, workspaceId: invite.workspace_id });
       }
     }
@@ -1106,7 +1141,12 @@ export async function acceptWorkspaceInvite(token: string, userId: string): Prom
         accepted_at = now()
       where id = ${invite.id} and status = 'pending'
     `;
-  });
+  }); } catch (error) {
+    // The one-organization index refusing a join that passed the check (a race) is the policy's 409, not a 500.
+    const conflict = organizationConflict(error);
+    if (conflict instanceof OrganizationError && conflict.code === "user_already_in_org") throw conflict;
+    throw error;
+  }
 
   const [row] = await sql<WorkspaceMemberRow[]>`
     select

@@ -25,8 +25,8 @@ export type IndexingMode = "full" | "map" | "visual";
 
 /**
  * Processing quality (`pipeline.quality`): `fast` reads the text layer only and keeps scanned pages as page
- * images, never read ($0.05 per 1,000 pages); `auto` (default) reads each page the cheapest faithful way ($0.05 to
- * $2.50 per 1,000 pages, depending on the mix); `good` reads every page with a vision model ($2.50 per 1,000 pages).
+ * images, never read (lowest price); `auto` (default) reads each page the cheapest faithful way (its price depends on
+ * the mix of pages); `good` reads every page with a vision model (highest price). Prices: https://docslurp.io/pricing
  */
 export type QualityMode = "fast" | "auto" | "good";
 
@@ -90,7 +90,7 @@ export type CostEstimate = {
   basis: string;
 };
 
-/** A background job queued by a mutation. `estimate` is null when it took over 150 ms; fetch `estimateUrl`. */
+/** A background job queued by a mutation. `estimate` is the same estimate `estimateUrl` returns (null when the work has none). */
 export type JobStatus = {
   id: string;
   kind: JobKind;
@@ -129,7 +129,42 @@ export type UploadMediaEstimate = {
 };
 
 /** Response of every `…/estimate` route. `impact` is present for configuration changes; `media` for upload estimates with audio or video. */
-export type EstimateResponse = { estimate: CostEstimate; billing: "enforced" | "disabled"; impact?: ConfigChangeImpact; media?: UploadMediaEstimate | null; orgId?: string; billingExempt?: boolean };
+export type EstimateResponse = {
+  estimate: CostEstimate; billing: "enforced" | "disabled"; impact?: ConfigChangeImpact; media?: UploadMediaEstimate | null; orgId?: string; billingExempt?: boolean;
+  /** Upload estimates only: always `"estimate"`; an upload is billed by what the worker measures. */
+  kind?: "estimate";
+  /** Upload estimates only: the workspace settings the estimate priced with, and the pricing version that priced it. */
+  profile?: EstimateProfile; pricingVersion?: string;
+  /** Upload estimates only: the full quote (ingest, monthly hosting and usage) for the workspace's settings. */
+  quote?: EstimateQuote;
+};
+
+/**
+ * What the offline profiler (`@docslurp/estimate`) measured about one file: neutral, aggregate facts only. The server
+ * validates and clamps it, and uses it only to estimate. See the profiler's README for the fields.
+ */
+export type FileProfile = {
+  schema: 1; profiler: string;
+  kind: "pdf" | "image" | "office" | "ebook" | "text" | "audio" | "video" | "unknown";
+  format: string; mimeType?: string; bytes: number; pages?: number; encrypted?: boolean; durationSeconds?: number;
+  pdf?: {
+    sampledPages: number; textLayerPages: number; wordsPerPage: number[]; lowTextPages: number; blankPages: number;
+    rasterPages: number; imagePages: number; images: number; imageCoverage: number[]; furnitureImages: number;
+    layoutHeavyPages: number; vectorHeavyPages: number; unmappedFontPages: number; drawnContent: boolean; budgetExhausted: boolean;
+    sampledWords: number; medianPageAreaSqIn: number; maxPageAreaSqIn: number;
+    sampledChars: number; sampledTextLines: number; charsByFontSize: number[]; invisibleChars: number; offCropChars: number;
+    sampledTextEquivalents: number; sampledAreaEquivalents: number; sampledPageEquivalents: number; maxPageEquivalents: number;
+    textEquivalentsPerPage: number[]; areaEquivalentsPerPage: number[]; densePages: number;
+    medianPageWidthPt: number; medianPageHeightPt: number; maxPageWidthPt: number; maxPageHeightPt: number;
+    offPageChars: number; tinyCharsDropped: number; textEstimatedPages: number;
+    pageEquivalentsByAllowance: number[]; maxPageEquivalentsByAllowance: number[];
+    imagePpi: number[]; imageBytesPerPixel: number[]; glyphsOverImages: number; textOverImagePages: number; scanBesideTextPages: number; scanBesideTextUnknownPages: number; ruledTablePages: number;
+  };
+  /** Package structure; `declaredPages` is the document's own metadata claim: informational only, never counted or priced. */
+  office?: { embeddedImages: number; slides?: number; sheets?: number; bodyBytes: number; declaredPages?: number };
+  textChars?: number;
+  notes?: string[];
+};
 
 /** Settings accepted by workspace PATCH; `apply` and `autoConfirmReindex` control re-index queuing. */
 export type UpdateWorkspaceInput = JsonObject & {
@@ -146,8 +181,59 @@ export type WorkspaceSearchSettingsResponse = { workspaceId: string; retrievalDe
 
 /** `workspace`: ID, slug or name (see {@link DocSlurpClientOptions.workspace}); omitted: the client workspace. */
 export type UploadEstimateInput = {
-  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
-  speedBoost?: boolean; files: Array<{ name: string; size: number; pages?: number; type?: string; durationSeconds?: number }>; workspace?: string };
+  /** Explicit opt-in: speed-boosted processing, billed at the speed-boost rate (docslurp.io/pricing); omitted/false keeps standard routing. */
+  speedBoost?: boolean;
+  files: Array<{
+    name: string; size: number; pages?: number; type?: string; durationSeconds?: number;
+    /** The file's profile from `@docslurp/estimate`, measured locally; narrows the estimate. Never billed. */
+    profile?: FileProfile;
+  }>;
+  /** Knobs to quote with instead of the workspace's own; the answer's `quote` reflects them. */
+  settings?: Partial<QuoteSettings>;
+  workspace?: string };
+
+/** The knobs of a quote, in customer terms; omitted ones take a new workspace's defaults. */
+export type QuoteSettings = {
+  quality: "fast" | "auto" | "good";
+  /**
+   * `full` indexes every page on upload; `on-demand` indexes pages when a query first needs them; `visual` embeds every
+   * page image on upload (a read of every page; not with `fast` quality).
+   */
+  indexing: "full" | "on-demand" | "visual";
+  documentSummary: boolean; structuredFields: boolean; knowledgeGraph: boolean; propositions: boolean;
+  videoFrames: boolean; speedBoost: boolean;
+  /** Months the files stay hosted (1 to 60). */
+  hostingMonths: number;
+  searchesPerMonth: number; chatAnswersPerMonth: number;
+  chatTier: "standard" | "advanced" | "premium";
+};
+export type EstimateInput = {
+  files: Array<{ name: string; size: number; type?: string; pages?: number; durationSeconds?: number; profile?: FileProfile }>;
+  settings?: Partial<QuoteSettings>;
+};
+export type CreditRange = { low: number; high: number };
+/** `POST /v1/estimate`. Every credit figure is null where the deployment does not bill. */
+export type EstimateQuote = {
+  kind: "estimate"; pricingVersion: string; validUntil: string; billing: "enforced" | "disabled"; settings: QuoteSettings;
+  files: { total: number; profiled: number }; pages: CreditRange; mediaMinutes: number;
+  ingest: { credits: CreditRange | null; seconds: CreditRange };
+  hosting: { bytes: CreditRange; creditsPerMonth: CreditRange | null; months: number; credits: CreditRange | null };
+  usage: { creditsPerMonth: CreditRange | null };
+  lines: Array<{ id: string; label: string; period: "once" | "month"; credits: CreditRange }>;
+  rates: { pagesPerDollar: CreditRange | null; pagesPerMinute: CreditRange };
+  basis: string;
+};
+
+/** What upload pricing reads from a workspace; returned by `uploadEstimate`. */
+export type EstimateProfile = {
+  pricingVersion: string;
+  quality: "fast" | "auto" | "good";
+  documentFeatures: { documentSummary: boolean; structuredFields: boolean; knowledgeGraph: boolean; propositions: boolean };
+  videoFrames: boolean;
+  workerSlots?: number;
+  stageCount: number;
+  billing: "enforced" | "disabled";
+};
 
 /** Counts across a job's runs. */
 export type JobProgress = { documents: number; documentsTotal: number; pages: number; pagesTotal: number };
@@ -163,6 +249,8 @@ export type WorkspaceRun = JsonObject & {
   id: string;
   status: "queued" | "processing" | "completed" | "failed";
   controlState?: string | null;
+  /** Why the worker paused the run for spend (credit_exhausted, workspace_budget_paused, org_budget_paused, plan_not_entitled); it resumes by itself once the org may spend. */
+  pauseReason?: string | null;
   error?: string | null;
 };
 
@@ -343,7 +431,7 @@ export type UploadByteStream = AsyncIterable<Uint8Array | string> & {
 };
 
 export type UploadOptions = RequestOptions & {
-  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
+  /** Explicit opt-in: speed-boosted processing, billed at the speed-boost rate (docslurp.io/pricing); omitted/false keeps standard routing. */
   speedBoost?: boolean;
   /** Labels applied to every accepted document in this upload. */
   tags?: string[];
@@ -358,7 +446,8 @@ export type UploadOptions = RequestOptions & {
    * "auto" (default) uses presigned storage PUTs: single PUT for small files,
    * multipart for large files and unknown-size streams. The server starts
    * ingestion automatically. false uses the size-limited /v1/uploads/bulk
-   * compatibility transport. Direct sessions ignore idempotencyKey.
+   * compatibility transport. Direct sessions send `idempotencyKey` (or a generated one) as an Idempotency-Key header, so a
+   * create that timed out is retried safely and never makes a second session.
    */
   directUpload?: "auto" | boolean;
   filename?: string;
@@ -373,7 +462,7 @@ export type UploadOptions = RequestOptions & {
 };
 
 export type UploadInput = {
-  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
+  /** Explicit opt-in: speed-boosted processing, billed at the speed-boost rate (docslurp.io/pricing); omitted/false keeps standard routing. */
   speedBoost?: boolean;
   /** Labels applied to every accepted document in this upload. */
   tags?: string[];
@@ -391,6 +480,10 @@ export type UploadInput = {
 };
 
 export type RejectedUpload = {
+  /** Position of the file in the request, when the server reports it. Match by this, never by filename. */
+  index?: number;
+  /** The id this client sent for the file (the request index as a string), echoed by the server. */
+  clientId?: string;
   filename: string;
   /** HTTP status the file would have produced on its own. */
   statusCode: 400 | 409 | 413 | 415 | 422;
@@ -443,7 +536,7 @@ export type ExtractRecord = {
 export type ExtractResponse = UploadResponse & { extract: ExtractRecord };
 
 export type UploadUrlsInput = {
-  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
+  /** Explicit opt-in: speed-boosted processing, billed at the speed-boost rate (docslurp.io/pricing); omitted/false keeps standard routing. */
   speedBoost?: boolean;
   /** Labels applied to every accepted document in this upload. */
   tags?: string[];
@@ -539,7 +632,7 @@ export function formatSearchContext(response: SearchResponse): string {
 
 export type ChatInput = {
   filters?: {geo?:GeoPredicate;documentIds?:string[];mimeTypes?:string[];tags?:string[];dateFrom?:string;dateTo?:string};
-  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
+  /** Explicit opt-in: speed-boosted processing, billed at the speed-boost rate (docslurp.io/pricing); omitted/false keeps standard routing. */
   speedBoost?: boolean;
   q: string;
   sessionId?: string;
@@ -608,7 +701,21 @@ export type ChatStreamEvent =
   | { event: "message"; data: ChatResponse }
   | { event: "done"; data: { id: string; sessionId: string; sessionToken?: string; searchSessionId: string | null } };
 
-export type ListDocumentsInput = {
+/** One page of a list: `hasMore` says whether `nextCursor` leads to more. Pass `nextCursor` back as `cursor`. */
+export type ListPage<Key extends string, T> = { [K in Key]: T[] } & { hasMore: boolean; nextCursor: string | null };
+export type PageInput = { limit?: number; cursor?: string };
+
+/** A list that would not fit under `maxItems` was cut off; page through it with the *Page or iterate* methods. */
+export class DocSlurpTruncatedError extends Error {
+  constructor(message: string, readonly partial: unknown[]) {
+    super(message);
+    this.name = "DocSlurpTruncatedError";
+  }
+}
+
+export type ListDocumentsInput = PageInput & {
+  /** listDocuments() reads every page up to this many documents (default 10,000), then throws DocSlurpTruncatedError instead of returning a cut-off list. */
+  maxItems?: number;
   /** Workspace ID, slug or name; omitted: the client workspace. */
   workspace?: string;
   runId?: string;
@@ -630,7 +737,7 @@ export type ReprocessRunInput = { stageFrom?: string; stages?: string[]; speedBo
 /** The run created by {@link DocSlurpClient.reprocessRun}, its job, and warnings when its start was deferred. */
 export type ReprocessRunResult = { run: WorkspaceRun; job?: JobStatus; warnings: string[] };
 export type BulkDocumentsInput = {
-  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
+  /** Explicit opt-in: speed-boosted processing, billed at the speed-boost rate (docslurp.io/pricing); omitted/false keeps standard routing. */
   speedBoost?: boolean;
   action: "reprocess" | "apply-tags" | "remove-tags" | "delete" | "export-artifacts";
   documentIds: string[];
@@ -707,6 +814,26 @@ export class DocSlurpTimeoutError extends Error {
     super(message);
     this.name = "DocSlurpTimeoutError";
   }
+}
+
+const DEFAULT_MAX_LIST_ITEMS = 10_000;
+
+/** Reads a paged list to the end; more than `maxItems` is an error, never a silently shortened list. */
+async function collectPages<T>(items: AsyncGenerator<T>, maxItems = DEFAULT_MAX_LIST_ITEMS): Promise<T[]> {
+  const collected: T[] = [];
+  for await (const item of items) {
+    if (collected.length >= maxItems) {
+      await items.return(undefined);
+      throw new DocSlurpTruncatedError(`The list has more than ${maxItems} items. Page through it with the *Page methods or iterate*, or raise maxItems.`, collected);
+    }
+    collected.push(item);
+  }
+  return collected;
+}
+
+/** True for a run the worker paused for spend: it resumes on its own once credits or budget allow. */
+export function isSpendPaused(run: Pick<WorkspaceRun, "controlState" | "pauseReason">): boolean {
+  return run.controlState === "paused" && typeof run.pauseReason === "string" && run.pauseReason.length > 0;
 }
 
 function positiveDuration(value: number, name: string): number {
@@ -829,6 +956,10 @@ function apiErrorEnvelope(body: unknown): { code?: string; requestId?: string; l
 export const DIRECT_UPLOAD_THRESHOLD_BYTES = 20 * 1024 * 1024;
 
 export type DirectUploadDescriptor = {
+  /** Position of the file in the create request; the server sanitizes filenames, so match by this, never by name. */
+  index?: number | null;
+  /** The client id sent with the file, echoed back. */
+  clientId?: string | null;
   id: string;
   filename: string;
   mimeType: string;
@@ -843,9 +974,16 @@ export type DirectUploadDescriptor = {
 };
 
 export type UploadSessionInput = Omit<UploadInput, "files" | "idempotencyKey"> & {
-  files: Array<{ filename: string; mimeType: string; sizeBytes?: number; canonicalId?: string; singlePart?: boolean }>;
+  files: Array<{ clientId?: string; filename: string; mimeType: string; sizeBytes?: number; canonicalId?: string; singlePart?: boolean }>;
 };
-export type UploadSession = { sessionId: string; status: string; files: DirectUploadDescriptor[]; result?: UploadResponse | null };
+export type UploadSession = {
+  sessionId: string;
+  status: string;
+  files: DirectUploadDescriptor[];
+  result?: UploadResponse | null;
+  /** Files the server left out of the session (the others were accepted), keyed by request index. */
+  rejected?: RejectedUpload[];
+};
 export type CompleteUploadFileInput = { fileId: string; sizeBytes?: number; etag?: string; parts?: Array<{ partNumber: number; etag: string }> };
 
 function normalizeApiUrl(apiUrl: string): string {
@@ -1089,24 +1227,27 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     }
   }
 
-  async function* streamEventsAt(path: string, streamOptions: RequestOptions = {}, extraHeaders: Record<string, string> = {}): AsyncGenerator<RunStreamEvent> {
+  async function* streamEventsAt(path: string, streamOptions: RequestOptions = {}, extraHeaders: Record<string, string> = {}, jsonBody?: string): AsyncGenerator<RunStreamEvent> {
     const bound = deadline(positiveDuration(streamOptions.timeoutMs ?? 300_000, "timeoutMs"), streamOptions.signal);
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     const onAbort = () => { void reader?.cancel().catch(() => {}); };
     try {
       bound.signal.throwIfAborted();
       const headers = new Headers({ ...extraHeaders, Accept: "text/event-stream" });
+      // A POST carries its input in the body (never the URL); a refused token is retried with the same body.
+      const method = jsonBody === undefined ? {} : { method: "POST", body: jsonBody };
+      if (jsonBody !== undefined) headers.set("Content-Type", "application/json");
       const credential = await bearer();
       if (credential) headers.set("Authorization", `Bearer ${credential}`);
       if (SEND_CLIENT_TAG) headers.set(CLIENT_HEADER, CLIENT_TAG);
       let response = await fetchImpl(`${apiUrl}${path}`, {
-        headers, credentials: hasBearer ? "omit" : "include", signal: bound.signal,
+        ...method, headers, credentials: hasBearer ? "omit" : "include", signal: bound.signal,
       });
-      // A refused token before the stream opens: refresh once and reconnect (GET, nothing to replay).
+      // A refused token before the stream opens: refresh once and reconnect (the server refused it before doing any work, so nothing replays).
       if (response.status === 401 && typeof tokenSource === "function") {
         await response.body?.cancel();
         headers.set("Authorization", `Bearer ${await bearer(true)}`);
-        response = await fetchImpl(`${apiUrl}${path}`, { headers, credentials: "omit", signal: bound.signal });
+        response = await fetchImpl(`${apiUrl}${path}`, { ...method, headers, credentials: "omit", signal: bound.signal });
       }
       if (!response.ok) {
         const body = await readErrorBody(response);
@@ -1309,6 +1450,41 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     }
   }
 
+  async function listRunsPage(input: PageInput = {}, options?: RequestOptions): Promise<ListPage<"runs", WorkspaceRun>> {
+    const params = new URLSearchParams();
+    if (input.limit !== undefined) params.set("limit", String(input.limit));
+    if (input.cursor) params.set("cursor", input.cursor);
+    const query = params.toString();
+    return await request<ListPage<"runs", WorkspaceRun>>(`/v1/runs${query ? `?${query}` : ""}`, {}, options, true);
+  }
+
+  async function* iterateRuns(input: Omit<PageInput, "cursor"> = {}, options?: RequestOptions): AsyncGenerator<WorkspaceRun> {
+    let cursor: string | undefined;
+    do {
+      const page = await listRunsPage({ ...input, cursor }, options);
+      yield* page.runs;
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+  }
+
+  async function listDocumentsPage(input: ListDocumentsInput = {}, requestOptions?: RequestOptions): Promise<ListPage<"documents", DocumentRecord>> {
+    const params = new URLSearchParams({ workspace: input.workspace?.trim() || clientWorkspace });
+    if (input.runId) params.set("runId", input.runId);
+    if (input.tags) params.set("tags", input.tags);
+    if (input.limit !== undefined) params.set("limit", String(input.limit));
+    if (input.cursor) params.set("cursor", input.cursor);
+    return await request<ListPage<"documents", DocumentRecord>>(`/v1/documents?${params.toString()}`, {}, requestOptions, true);
+  }
+
+  async function* iterateDocuments(input: Omit<ListDocumentsInput, "cursor" | "maxItems"> = {}, requestOptions?: RequestOptions): AsyncGenerator<DocumentRecord> {
+    let cursor: string | undefined;
+    do {
+      const page = await listDocumentsPage({ ...input, cursor }, requestOptions);
+      yield* page.documents;
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+  }
+
   async function waitForRun(runId: string, waitOptions: WaitForRunOptions = {}): Promise<WorkspaceRun> {
     const timeoutMs = positiveDuration(waitOptions.timeoutMs ?? 300_000, "timeoutMs");
     const pollIntervalMs = positiveDuration(waitOptions.pollIntervalMs ?? 1_000, "pollIntervalMs");
@@ -1318,7 +1494,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     try {
       while (true) {
         run = await getRun(runId, { signal: bound.signal, timeoutMs: Math.max(1, expiresAt - Date.now()) });
-        if (run.status === "failed" || ["paused", "cancelled", "dead-letter"].includes(run.controlState ?? "")) {
+        // A run the worker paused for spend (credits, a budget, a plan) resumes by itself once the org may spend,
+        // so it is waiting, not failed; the timeout carries it with its pauseReason. Any other pause, a
+        // cancellation or a dead letter will not move without someone acting, so those end the wait.
+        if (run.status === "failed" || (!isSpendPaused(run) && ["paused", "cancelled", "dead-letter"].includes(run.controlState ?? ""))) {
           throw new DocSlurpRunError("We couldn’t finish processing this run. Check its status and try again.", run);
         }
         if (run.status === "completed") return run;
@@ -1326,7 +1505,12 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       }
     } catch (error) {
       if (bound.signal.aborted && bound.signal.reason instanceof DocSlurpTimeoutError) {
-        throw new DocSlurpTimeoutError(`Run ${runId} did not complete within ${timeoutMs}ms; it may still be queued or processing`, run);
+        throw new DocSlurpTimeoutError(
+          run && isSpendPaused(run)
+            ? `Run ${runId} is paused (${run.pauseReason}) and resumes when the organization can spend again; stopped waiting after ${timeoutMs}ms`
+            : `Run ${runId} did not complete within ${timeoutMs}ms; it may still be queued or processing`,
+          run,
+        );
       }
       // The request's remaining-budget timer can fire before the outer deadline.
       if (error instanceof DocSlurpTimeoutError && !error.run) {
@@ -1517,12 +1701,12 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     let failure: unknown;
     try {
       signal.throwIfAborted();
-      const session = await request<UploadSession>(`${intakeBase(options)}/direct/sessions`, jsonRequest("POST", {
+      const session = await postUploadSession<UploadSession>(`${intakeBase(options)}/direct/sessions`, {
         ...intakeTarget(metadata), ...extractFields(options), orgId: metadata.orgId, tags: metadata.tags,
         templateKey: metadata.templateKey, indexingMode: metadata.indexingMode, ...pipelineFields(metadata),
-        files: [{ filename: options.filename ?? streamFilename(source), mimeType: "application/octet-stream",
+        files: [{ clientId: "0", filename: options.filename ?? streamFilename(source), mimeType: "application/octet-stream",
           canonicalId: options.canonicalId, path: options.path }],
-      }), transferOptions);
+      }, transferOptions, metadata.idempotencyKey ?? newIdempotencyKey());
       sessionPath = `/v1/uploads/direct/sessions/${encodeURIComponent(session.sessionId)}`;
       const descriptor = session.files[0];
       if (!descriptor || descriptor.mode !== "multipart") throw new Error("Stream upload requires a multipart session");
@@ -1616,6 +1800,87 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     }
   }
 
+  /** True for failures worth another attempt: a timeout, a dropped connection, or a transient or expired-URL response. */
+  function isTransientTransferError(error: unknown): boolean {
+    if (error instanceof DocSlurpTimeoutError) return true;
+    if (error instanceof DocSlurpApiError) return [403, 408, 429, 500, 502, 503, 504].includes(error.status);
+    return error instanceof TypeError;
+  }
+
+  /**
+   * Creates a direct-upload session with an Idempotency-Key. A request that timed out or lost its connection is sent again with the
+   * same key, so the server returns the session the first attempt made instead of creating (and charging for) another.
+   */
+  async function postUploadSession<T>(path: string, body: unknown, options: UploadOptions, key: string): Promise<T> {
+    const init = jsonRequest("POST", body);
+    const headers = new Headers(init.headers);
+    headers.set("Idempotency-Key", key);
+    // The server answers a coded 409 while the first request with this key is still being processed (a retry that raced it). The
+    // session it makes is the one this call wants, so wait and send the same key again until the request timeout, instead of
+    // failing and orphaning that session.
+    const giveUpAt = Date.now() + (options.timeoutMs ?? defaultTimeoutMs);
+    let inFlight = 0;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await request<T>(path, { ...init, headers }, options, true);
+      } catch (error) {
+        if (error instanceof DocSlurpApiError && error.status === 409 && error.code === "idempotency_in_flight" && !options.signal?.aborted) {
+          const wait = Math.min(2_000, 250 * 2 ** inFlight++);
+          if (Date.now() + wait >= giveUpAt) throw error;
+          await sleep(wait, options.signal ?? new AbortController().signal);
+          attempt--; // Waiting on the first request is not one of the lost-response retries.
+          continue;
+        }
+        // HTTP statuses were already retried by request(); only a lost response or a timeout needs the same key sent again.
+        if (attempt >= 3 || options.signal?.aborted || !(error instanceof DocSlurpTimeoutError || error instanceof TypeError)) throw error;
+        await sleep(250 * 2 ** attempt, options.signal ?? new AbortController().signal);
+      }
+    }
+  }
+
+  /**
+   * Sends one file's bytes. When a part or the single PUT fails after its own retries, the session is read again: storage knows which
+   * parts arrived, so the transfer resumes from the server's pendingParts (with fresh signed URLs) instead of restarting.
+   */
+  async function transferFile(sessionPath: string, first: DirectUploadDescriptor, blob: Blob, options: UploadOptions): Promise<void> {
+    let descriptor = first;
+    for (let round = 0; ; round++) {
+      try {
+        if (descriptor.mode === "single") {
+          await putToStorage(descriptor.putUrl ?? "", blob, descriptor.mimeType, options);
+          return;
+        }
+        for (const part of descriptor.pendingParts ?? []) {
+          const start = (part.partNumber - 1) * (descriptor.partSize ?? part.sizeBytes);
+          await putToStorage(part.url, blob.slice(start, start + part.sizeBytes), undefined, options);
+        }
+        return;
+      } catch (error) {
+        if (round >= 2 || options.signal?.aborted || !isTransientTransferError(error)) throw error;
+        let refreshed: DirectUploadDescriptor | undefined;
+        try {
+          await sleep(250 * 2 ** round, options.signal ?? new AbortController().signal);
+          const session = await request<UploadSession>(sessionPath, {}, options, true);
+          refreshed = session.files.find((file) => file.id === descriptor.id);
+        } catch { throw error; }
+        if (!refreshed) throw error;
+        if ((refreshed as { status?: string }).status === "completed") return;
+        descriptor = refreshed;
+      }
+    }
+  }
+
+  /** The local file a session descriptor belongs to: by request index, then the client id, and only for older servers by name and size. */
+  function sourceForDescriptor<T extends { name: string; blob: Blob }>(descriptor: DirectUploadDescriptor, sources: T[], claimed: Set<number>): { source: T; index: number } | undefined {
+    const byIndex = typeof descriptor.index === "number" ? descriptor.index
+      : descriptor.clientId != null && /^\d+$/.test(descriptor.clientId) ? Number(descriptor.clientId) : -1;
+    const index = byIndex >= 0 ? byIndex : sources.findIndex((source, at) => !claimed.has(at) && source.name === descriptor.filename && source.blob.size === descriptor.sizeBytes);
+    const source = sources[index];
+    if (!source || claimed.has(index)) return undefined;
+    claimed.add(index);
+    return { source, index };
+  }
+
   /** Transfer known-size files; the server reconciles storage and starts ingestion. */
   async function uploadDirect(args: {
     blobs: Blob[];
@@ -1626,7 +1891,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     target: { newWorkspace: boolean; workspace?: string };
   }, options: UploadOptions): Promise<UploadResponse> {
     const { metadata } = args;
-    const session = await request<{ sessionId: string; files: DirectUploadDescriptor[] }>(`${intakeBase(options)}/direct/sessions`, jsonRequest("POST", {
+    const idempotencyKey = metadata.idempotencyKey ?? newIdempotencyKey();
+    const session = await postUploadSession<UploadSession>(`${intakeBase(options)}/direct/sessions`, {
       ...extractFields(options),
       ...(metadata.orgId ? { orgId: metadata.orgId } : {}),
       ...(metadata.tags ? { tags: metadata.tags } : {}),
@@ -1636,31 +1902,31 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       ...(args.target.newWorkspace ? { newWorkspace: true } : {}),
       ...(metadata.templateKey ? { templateKey: metadata.templateKey } : {}),
       files: args.blobs.map((blob, index) => ({
+        // The request index doubles as the client id: the server sanitizes filenames, so the reply is matched by index.
+        clientId: String(index),
         filename: args.names[index],
         mimeType: blob.type || "application/octet-stream",
         sizeBytes: blob.size,
         ...(args.canonicalIds[index] ? { canonicalId: args.canonicalIds[index] } : {}),
         ...(args.paths[index] ? { path: args.paths[index] } : {}),
       })),
-    }), options);
+    }, options, idempotencyKey);
     const sessionPath = `/v1/uploads/direct/sessions/${encodeURIComponent(session.sessionId)}`;
-    const remaining = args.blobs.map((blob, index) => ({ blob, name: args.names[index] }));
+    const sources = args.blobs.map((blob, index) => ({ blob, name: args.names[index]! }));
+    const claimed = new Set<number>();
+    // Files the server left out come back by request index; report them under the names the caller gave.
+    const leftOut = (session.rejected ?? []).map((rejection) => ({
+      ...rejection,
+      filename: typeof rejection.index === "number" ? args.names[rejection.index] ?? rejection.filename : rejection.filename,
+    }));
     try {
       for (const descriptor of session.files) {
-        const at = remaining.findIndex((source) => source.name === descriptor.filename && source.blob.size === descriptor.sizeBytes);
-        const source = at < 0 ? undefined : remaining.splice(at, 1)[0];
-        if (!source) throw new Error(`Direct upload session returned an unknown file: ${descriptor.filename}`);
-        if (descriptor.mode === "single") {
-          await putToStorage(descriptor.putUrl ?? "", source.blob, descriptor.mimeType, options);
-          continue;
-        }
-        for (const part of descriptor.pendingParts ?? []) {
-          const start = (part.partNumber - 1) * (descriptor.partSize ?? part.sizeBytes);
-          await putToStorage(part.url, source.blob.slice(start, start + part.sizeBytes), undefined, options);
-        }
-
+        const match = sourceForDescriptor(descriptor, sources, claimed);
+        if (!match) throw new Error(`Direct upload session returned a file this upload did not send: ${descriptor.filename}`);
+        await transferFile(sessionPath, descriptor, match.source.blob, options);
       }
-      return await waitUploadSession(sessionPath, options);
+      const result = await waitUploadSession(sessionPath, options);
+      return leftOut.length ? { ...result, rejected: [...leftOut, ...(result.rejected ?? [])] } : result;
     } catch (error) {
       await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
       throw error;
@@ -1675,10 +1941,15 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     streamActivity,
     waitForRun,
 
-    /** The caller's recent runs, newest first. */
-    async listRuns(options?: RequestOptions): Promise<WorkspaceRun[]> {
-      return (await request<{ runs: WorkspaceRun[] }>("/v1/runs", {}, options, true)).runs;
+    /** One page of run history (highest priority, then newest first). Follow `nextCursor` for the rest. */
+    listRunsPage,
 
+    /** Every run, page by page. */
+    iterateRuns,
+
+    /** All of the caller's runs, newest first; throws DocSlurpTruncatedError past `maxItems` (default 10,000) rather than returning a cut-off list. */
+    async listRuns(options?: RequestOptions & { maxItems?: number }): Promise<WorkspaceRun[]> {
+      return await collectPages(iterateRuns({}, options), options?.maxItems);
     },
 
     getJob,
@@ -1734,6 +2005,14 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     /** Cost of an upload before sending any bytes. */
     uploadEstimate(input: UploadEstimateInput, requestOptions?: RequestOptions): Promise<EstimateResponse> {
       return estimateAt("/v1/uploads/estimate", inWorkspace(input), requestOptions);
+    },
+    /**
+     * `POST /v1/estimate`: the public quote for profiled files (no account needed): ingest credits, monthly hosting and
+     * usage, neutral lines and ranges, the pricing version and until when it holds. Profile files locally with
+     * `@docslurp/estimate`; only profiles are sent. Re-send with other `settings` to see the price move. Never a charge.
+     */
+    estimate(input: EstimateInput, requestOptions?: RequestOptions): Promise<EstimateQuote> {
+      return request<EstimateQuote>("/v1/estimate", jsonRequest("POST", input as unknown as JsonObject), requestOptions);
     },
     /**
      * Sets how many versions of each document are kept (1–100; null clears the override).
@@ -1837,24 +2116,19 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
      * Streamed grounded answer, as a streaming companion to chat(). Yields a
      * retrieval `status`, the `message` (a full ChatResponse) and a final `done`
      * envelope. Throws if the stream ends before `done`, so a truncated answer
-     * is never mistaken for success. Reads GET /v1/chat/stream; for OpenAI-style
-     * token streaming use POST /v1/chat/completions with stream: true.
+     * is never mistaken for success. Posts the question in the body of
+     * POST /v1/chat/stream, so it never sits in a URL, proxy log or browser
+     * history; for OpenAI-style token streaming use POST /v1/chat/completions
+     * with stream: true.
      */
     async *chatStream(input: ChatInput, requestOptions: RequestOptions = {}): AsyncGenerator<ChatStreamEvent> {
       const target = inWorkspace(input);
-      const params = new URLSearchParams({ q: target.q, workspace: target.workspace ?? clientWorkspace });
-      if (target.sessionId) params.set("sessionId", target.sessionId);
-      if (target.model) params.set("model", target.model);
-      if (target.speedBoost !== undefined) params.set("speedBoost", String(target.speedBoost));
-      if (target.filters !== undefined) {
-        const filters = JSON.stringify(target.filters);
-        if (filters.length > 16384) throw new Error("Chat stream filters exceed 16384 characters; use chat() for larger requests");
-        params.set("filters", filters);
-      }
+      // The session grant goes in a header, never the URL or the body, as before.
+      const { sessionToken, ...body } = target;
+      const payload = JSON.stringify({ ...body, workspace: target.workspace ?? clientWorkspace });
       let completed = false;
-      // The session grant goes in a header, never the URL.
-      const grant: Record<string, string> = target.sessionToken ? { "X-DocSlurp-Chat-Session-Token": target.sessionToken } : {};
-      for await (const frame of streamEventsAt(`/v1/chat/stream?${params.toString()}`, requestOptions, grant)) {
+      const grant: Record<string, string> = sessionToken ? { "X-DocSlurp-Chat-Session-Token": sessionToken } : {};
+      for await (const frame of streamEventsAt("/v1/chat/stream", requestOptions, grant, payload)) {
         if (frame.event === "status" || frame.event === "message" || frame.event === "done") {
           if (frame.event === "done") completed = true;
           yield { event: frame.event, data: frame.data } as ChatStreamEvent;
@@ -1867,13 +2141,16 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       return request<DocumentViewerPayload>(`/v1/documents/${encodeURIComponent(documentId)}`, {}, requestOptions, true);
     },
 
-    /** Documents in a workspace (the client default unless one is passed), newest first. */
-    async listDocuments(input: ListDocumentsInput = {}, requestOptions?: RequestOptions): Promise<DocumentRecord[]> {
-      const params = new URLSearchParams({ workspace: input.workspace?.trim() || clientWorkspace });
-      if (input.runId) params.set("runId", input.runId);
-      if (input.tags) params.set("tags", input.tags);
-      return (await request<{ documents: DocumentRecord[] }>(`/v1/documents?${params.toString()}`, {}, requestOptions, true)).documents;
+    /** One page of documents in a workspace (the client default unless one is passed), newest first. Follow `nextCursor` for the rest. */
+    listDocumentsPage,
 
+    /** Every document in a workspace, page by page. */
+    iterateDocuments,
+
+    /** All documents in a workspace, newest first; throws DocSlurpTruncatedError past `maxItems` (default 10,000) rather than returning a cut-off list. */
+    async listDocuments(input: Omit<ListDocumentsInput, "cursor"> = {}, requestOptions?: RequestOptions): Promise<DocumentRecord[]> {
+      const { maxItems, ...rest } = input;
+      return await collectPages(iterateDocuments(rest, requestOptions), maxItems);
     },
 
     /** Every version of a document (newest first), including archived versions and purged tombstones. */
@@ -1913,9 +2190,10 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     getWorkspace(id: string, options?: RequestOptions): Promise<WorkspaceRecord> {
       return request(`/v1/workspaces/${encodeURIComponent(id)}`, {}, options, true);
     },
-    createUploadSession(input: UploadSessionInput, options?: RequestOptions): Promise<UploadSession> {
+    /** Creates a direct-upload session. Sends an Idempotency-Key (yours, else a generated one) and retries a lost create with it. */
+    createUploadSession(input: UploadSessionInput, options?: RequestOptions & { idempotencyKey?: string }): Promise<UploadSession> {
       assertClientCanonicalIds(canonicalIdsOf(input, undefined));
-      return request("/v1/uploads/direct/sessions", jsonRequest("POST", { ...input, ...intakeTarget(input) }), options);
+      return postUploadSession<UploadSession>("/v1/uploads/direct/sessions", { ...input, ...intakeTarget(input) }, options ?? {}, options?.idempotencyKey ?? newIdempotencyKey());
     },
     getUploadSession(sessionId: string, options?: RequestOptions): Promise<UploadSession> {
       return request(`/v1/uploads/direct/sessions/${encodeURIComponent(sessionId)}`, {}, options, true);
@@ -1994,6 +2272,14 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 }
 
 export type DocSlurpClient = ReturnType<typeof createDocSlurpClient>;
+
+/** A fresh Idempotency-Key for one upload: the same key accompanies every attempt to create its session. */
+function newIdempotencyKey(): string {
+  const crypto = globalThis.crypto;
+  if (typeof crypto?.randomUUID === "function") return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
 
 function jsonRequest(method: string, body: unknown): RequestInit {
   return { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };

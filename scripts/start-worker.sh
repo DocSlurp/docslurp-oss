@@ -453,6 +453,13 @@ bootstrap_deferred_python() {
     return
   fi
 
+  # The image's venv is root-owned (council W #1: a parser must not rewrite it). Deferred installs need a venv this user
+  # owns: point DOCSLURP_WORKER_VENV at one. Without it the heavy parsers stay unavailable, loudly.
+  if [[ ! -w "${VENV}" ]]; then
+    echo "[worker-start] WARNING: ${VENV} is not writable by $(id -un); deferred Python deps NOT installed. Set DOCSLURP_WORKER_VENV to a writable venv to install them." >&2
+    return
+  fi
+
   echo "[worker-start] installing deferred Python deps from ${STARTUP_REQUIREMENTS} (mode=${REQUIREMENTS_MODE})"
   DOCSLURP_ROOT_DIR="${ROOT_DIR}" \
   DOCSLURP_WORKER_VENV="${VENV}" \

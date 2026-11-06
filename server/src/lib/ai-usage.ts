@@ -150,7 +150,7 @@ export interface UnitChargeInput {
 }
 
 /**
- * Log and persist one billable unit charge (PRICE_CARD): the only kind of
+ * Log and persist one billable unit charge (priced by the pricing provider): the only kind of
  * event that debits customer credits, besides the worker's page charges and
  * the storage meter. Written through the same path as AI events, so a chat
  * turn's charges are stamped with the turn and refunded with it when the

@@ -143,6 +143,12 @@ export async function seedNonProductionUsers({ includeFixtures = false } = {}): 
         updated_at = now()
     `;
 
+    // One organization per user (DOCSLURP_MAX_ORGS_PER_USER, migration 0127): the seed users live in the shared org, so
+    // any other membership they picked up (a personal org from sign-up) is dropped first.
+    await sql`
+      delete from org_memberships
+      where user_id in (${adminUserId}, ${memberUserId}) and org_id <> 'seed-shared-org'
+    `;
     await sql`
       insert into org_memberships (org_id, user_id, role)
       values

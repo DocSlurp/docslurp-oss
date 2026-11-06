@@ -4,14 +4,15 @@ import path from "node:path";
 import { resolveScriptsDir } from "../tools/scripts-dir.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { detectHtmlEmbeds as localDetect, type HtmlEmbedReport } from "./html-embeds-guest.js";
+import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 export type { HtmlEmbedReport, HtmlEmbeddedItem, HtmlEmbedKind } from "./html-embeds-guest.js";
 export function detectHtmlEmbeds(html: string): HtmlEmbedReport {
-  if (process.env.NODE_ENV === "production") throw new Error("HTML source inspection requires the parser VM");
+  if (vmOnlyParsing()) throw new Error("HTML source inspection requires the parser VM");
   return localDetect(html);
 }
 export async function detectHtmlEmbedsFile(input: string, runner: Pick<CommandRunner, "run">, signal?: AbortSignal): Promise<HtmlEmbedReport> {
   if ((await stat(input)).size > 16 * 1024 * 1024) throw new Error("HTML embed source exceeds 16 MiB");
-  if (process.env.NODE_ENV !== "production") return localDetect(await readFile(input, "utf8"));
+  if (!vmOnlyParsing()) return localDetect(await readFile(input, "utf8"));
   const dir = await mkdtemp(path.join(tmpdir(), "docslurp-html-embeds-"));
   try {
     const output = path.join(dir, "report.json");

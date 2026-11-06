@@ -1,8 +1,7 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { afterAll, describe, expect, it } from "vitest";
@@ -13,12 +12,11 @@ import { buildExtractionContract } from "../lib/extraction-contract.js";
 import { normalizeExtractedMarkdown } from "../lib/extracted-markdown.js";
 import { buildTestPdf, proseLines } from "../test/make-pdf.js";
 
-const kreuzbergScript = fileURLToPath(new URL("../../scripts/kreuzberg_extract.mjs", import.meta.url));
 const squash = (text: string) => text.replace(/\s+/g, " ");
 
 /**
- * Regression: native-text PDFs lost lines at page boundaries. Kreuzberg Markdown had no page
- * breaks, so the canonical document sliced it into equal-length "pages", cutting a heading
+ * Regression: native-text PDFs lost lines at page boundaries. Extractor Markdown without page
+ * breaks made the canonical document slice it into equal-length "pages", cutting a heading
  * mid-word; a page-level replacement (vision reconciliation) then dropped the misplaced lines.
  */
 describe("native text keeps every line on its own page", () => {
@@ -37,24 +35,24 @@ describe("native text keeps every line on its own page", () => {
     const dir = await mkdtemp(path.join(tmpdir(), "native-lines-"));
     dirs.push(dir);
     const input = path.join(dir, "doc.pdf");
-    const output = path.join(dir, "doc.md");
     await writeFile(input, buildTestPdf(pages.map((page) => ({ kind: "text" as const, ...page }))));
-    await promisify(execFile)(process.execPath, [kreuzbergScript, "--input", input, "--output", output], { timeout: 60_000 });
-    const markdown = normalizeExtractedMarkdown({ markdown: await readFile(output, "utf8"), preserveTables: true });
+    // The default host PDF extractor (poppler-text): the text layer with form-feed page breaks.
+    const { stdout } = await promisify(execFile)("pdftotext", ["-layout", "-enc", "UTF-8", "-eol", "unix", input, "-"], { timeout: 60_000 });
+    const markdown = normalizeExtractedMarkdown({ markdown: stdout, preserveTables: true });
 
-    const canonicalDocument = buildCanonicalDocumentFromMarkdown({ documentId: "doc", text: markdown, pageCount, extractor: "kreuzberg" });
+    const canonicalDocument = buildCanonicalDocumentFromMarkdown({ documentId: "doc", text: markdown, pageCount, extractor: "poppler-text" });
     const pageText = (document: typeof canonicalDocument, pageNumber: number) =>
       squash(document.blocks.filter((block) => block.pageNumber === pageNumber).map((block) => block.text).join("\n"));
     pages.forEach((page, index) => {
       const text = pageText(canonicalDocument, index + 1);
-      expect(text).toContain(`# ${page.heading}`);
+      expect(text).toContain(page.heading);
       expect(text).toContain(page.lines[0]);
       expect(text).toContain(page.lines[page.lines.length - 1]);
     });
 
     // Replace one page with a faithful re-read of that page (what vision reconciliation does).
     const extractionContract = buildExtractionContract({
-      documentId: "doc", markdown, extractor: "kreuzberg", strategy: "fast", extractionTimeMs: 1, pageCount, canonicalDocument,
+      documentId: "doc", markdown, extractor: "poppler-text", strategy: "fast", extractionTimeMs: 1, pageCount, canonicalDocument,
     });
     const replaced = 4;
     const result = reconcileCanonicalArtifacts({

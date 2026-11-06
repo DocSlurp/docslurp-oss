@@ -28,7 +28,7 @@ import {
 
 const pass = { text: 0.9, math: 0.5, tables: 0.7, overall: 0.6 };
 const estimate = {
-  targetId: "native:kreuzberg",
+  targetId: "native:pdf-markdown",
   pPass: pass,
   qualityMean: 0.8,
   qualityCi: [0.7, 0.9] as [number, number],
@@ -212,7 +212,7 @@ const pack = {
   ],
   targets: [
     {
-      targetId: "native:kreuzberg",
+      targetId: "native:pdf-markdown",
       pass: { text: mapping, math: mapping, tables: mapping, overall: mapping },
       cost: { meanUsd: 0, p90Usd: 0 },
       latency: { p50Ms: 100, p95Ms: 200 },

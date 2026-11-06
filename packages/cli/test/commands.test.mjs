@@ -123,7 +123,7 @@ test("upload over the multipart cap goes straight to storage through a direct se
       "POST /v1/uploads/direct/sessions/s1/files/complete",
       "POST /v1/uploads/direct/sessions/s1/confirm",
     ]);
-    assert.deepEqual(JSON.parse(result.requests[0].body), { workspace: "workspace", files: [{ filename: "scan.pdf", mimeType: "application/pdf", sizeBytes: size }] });
+    assert.deepEqual(JSON.parse(result.requests[0].body), { workspace: "workspace", files: [{ clientId: "0", filename: "scan.pdf", mimeType: "application/octet-stream", sizeBytes: size }] });
     assert.equal(result.requests[1].headers.authorization, undefined, "storage never receives the API key");
     assert.equal(result.requests[1].body.length, size);
     assert.match(result.stdout, /Run ID:\s+run/);
@@ -149,10 +149,34 @@ test("watch exits on failed requests and failed or paused runs", async () => {
   }
 });
 
+test("watch keeps waiting on a run paused for credits instead of stopping at once", async () => {
+  const result = await invoke(["status", "run", "--watch", "--timeout", "0.15"], () => ({
+    body: { run: run("processing", { controlState: "paused", pauseReason: "credit_exhausted" }) },
+  }));
+  // It ran until its own deadline (an operator pause or failure would have ended after one request, with "Stopped").
+  assert.match(result.stdout, /paused \(out of credits; resumes after a top-up\)/);
+  assert.doesNotMatch(result.stdout, /Stopped/);
+  assert.match(result.stderr, /did not complete within/);
+  assert.equal(result.code, 1);
+});
+
+test("a single status of a credit-paused run is not a failure", async () => {
+  const result = await invoke(["status", "run"], () => ({ body: { run: run("processing", { controlState: "paused", pauseReason: "org_budget_paused" }) } }));
+  assert.equal(result.code, 0, result.stderr);
+  assert.doesNotMatch(result.stdout, /Stopped/);
+});
+
 test("deferred queued watch is bounded", async () => {
   const result = await invoke(["status", "run", "--watch", "--timeout", "0.15"], () => ({ body: { run: run("queued") } }));
   assert.equal(result.code, 1, result.stderr);
   assert.ok(result.requests.length >= 1);
+});
+
+test("runs prints the cursor for the next page and forwards --limit and --cursor", async () => {
+  const result = await invoke(["runs", "--limit", "1", "--cursor", "abc"], () => ({ body: { runs: [run("completed", { createdAt: "2026-10-02" })], hasMore: true, nextCursor: "next-page" } }));
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.requests[0].url, "/v1/runs?limit=1&cursor=abc");
+  assert.match(result.stdout, /More runs exist\. Next page: docslurp runs --cursor next-page/);
 });
 
 test("runs list authenticates and prints run summary", async () => {

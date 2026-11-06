@@ -249,7 +249,7 @@ curl -X PATCH "$api_url/v1/workspaces/amber-falcon-ridge" \
 | Live progress snapshots | `GET /v1/runs/:runId/progress/stream` | `streamProgress` | Watch uses polling |
 | Raw run/stage/document events | `GET /v1/runs/:runId/events/stream` | `streamRun` | Use SDK/HTTP |
 | Wait for successful run | Poll `GET /v1/runs/:runId/progress` | `waitForRun` | `status --watch` |
-| List runs | `GET /v1/runs` | `listRuns` | `runs` |
+| List runs (paged: `limit` 1-100, `cursor`; returns `hasMore`, `nextCursor`) | `GET /v1/runs` | `listRunsPage`, `iterateRuns`, `listRuns` (all pages) | `runs` |
 | Account activity (SSE) | `GET /v1/runs/activity/stream` | `streamActivity` | Use SDK/HTTP |
 | Workspace state | `GET /v1/workspaces/:workspace/state` | `getWorkspaceState` | Use SDK/HTTP |
 | Ingest report | `GET /v1/workspaces/:workspace/ingest-report` (also MCP `getUploadStatus`, chat `/status`) | `getIngestReport` | Use SDK/HTTP |
@@ -261,7 +261,7 @@ curl -X PATCH "$api_url/v1/workspaces/amber-falcon-ridge" \
 | Grounded chat | `POST /v1/chat` | `chat` | `chat` |
 | Grounded chat over SSE | `GET /v1/chat/stream` | `chatStream` | Use SDK/HTTP |
 | OpenAI-compatible chat | `POST /v1/chat/completions`, `GET /v1/models` ([chat](https://docslurp.io/docs/chat)) | Use an OpenAI SDK | Use HTTP |
-| List documents | `GET /v1/documents` | `listDocuments` | Use SDK/HTTP |
+| List documents (paged: `limit` 1-250, default 250, `cursor`; always returns `hasMore` and `nextCursor`, so a client that reads only `documents` sees one page and must follow `nextCursor` while `hasMore` is true; a malformed `cursor` is a 400) | `GET /v1/documents` | `listDocumentsPage`, `iterateDocuments`, `listDocuments` (all pages) | Use SDK/HTTP |
 | Read a document | `GET /v1/documents/:id` | `getDocument` | Use SDK/HTTP |
 | Read structured fields | `GET /v1/documents/:id/structured` | Use HTTP | Use HTTP |
 | List document versions | `GET /v1/documents/:id/versions` | `listDocumentVersions` | Use SDK/HTTP |
@@ -341,13 +341,44 @@ The server verifies the stored parts. It cannot infer EOF from an idle stream
 or from its current byte total. The `/confirm` endpoint remains available as an
 explicit fallback, but automatic ingestion does not require it.
 
+### Matching files, partial acceptance and idempotency
+
+`POST /v1/uploads/direct/sessions` takes `files[]`, each with an optional
+`clientId` (up to 128 characters) that the server echoes back. The server
+sanitizes filenames (`What is RAG?.pdf` is stored as `What is RAG-.pdf`), so
+**match the response to your files by `index` (the position in your request) or
+`clientId`, never by filename.** Each entry of the response's `files[]` carries
+`index` and `clientId`.
+
+One bad file never fails the request. Accepted files get session entries; the
+others come back in a top-level `rejected[]` with the same `index` and
+`clientId`, plus `filename`, `statusCode` (`415` unsupported type, `413` too
+large), `code` and `message`. The request fails (with every file named) only
+when nothing can be accepted. A file whose bytes contradict its declared type
+(text declared as a PDF, a plain ZIP declared as a DOCX) is refused for that
+file when its session is confirmed, under `rejected[]` with `unreadable_source`.
+
+Send an `Idempotency-Key` header (1-255 printable ASCII characters) with the
+create request. A repeated create with the same key and body returns the first
+session (`200` with `Idempotency-Replayed: true`, fresh signed URLs and the
+original `rejected[]`) instead of making a second session. The same key with a
+different body is `409`; a second request while the first is still being
+processed is `409` too (retry shortly). Keys are scoped to your organization
+and user, so another tenant's identical key never matches yours. The SDK and CLI
+always send one, and send it again after a timeout or dropped connection.
+
 ### Timeouts, retries and abandoned uploads
 
 Keep the session ID when implementing your own transfer. A polling timeout is
 not proof that ingestion failed: check the same session before creating another
 upload. Repeated status reads and duplicate notifications reuse that session's
-accepted result. A new session is a new upload, not a retry of the old one. Direct sessions do
-not support `Idempotency-Key`; that key applies to HTTP bulk and URL ingestion.
+accepted result. A new session without the original `Idempotency-Key` is a new
+upload, not a retry of the old one.
+
+A part or file that fails mid-transfer resumes: read the session without
+`statusOnly=true`. For a multipart file, `pendingParts` lists only the parts
+storage does not yet hold at their expected size, with fresh signed URLs, and
+`completedParts` the ones it does.
 
 Signed URLs expire after 15 minutes. A session GET without `statusOnly=true`
 returns fresh transfer URLs for pending files; use `statusOnly=true` when you only
@@ -689,6 +720,17 @@ Use these endpoints to read and manage an organization, its members and its API 
 
 Signed-in sessions don't need key scopes. Demoting, removing or leaving as the last owner returns 409, and this check is safe against concurrent membership changes. Personal organization memberships can't be added, changed or removed. Removing a member revokes their keys for that organization; workspaces shared with them directly stay shared.
 
+### One organization per user
+
+For now a user belongs to exactly one organization. Everything tenant-scoped (runs, documents, API keys, webhooks, search) still names its organization explicitly, and organization IDs stay in every API, so several organizations per user can be enabled later without API changes.
+
+- Sign-up creates your personal organization.
+- Accepting an organization or workspace invite into another organization, or creating an organization, works only while your current organization is a personal one with no data (no documents, runs, unrevoked API keys or webhooks, never paid). That personal organization is then deleted and replaced. Otherwise the request returns 409 `user_already_in_org`: leave your current organization first.
+- Leaving an organization, or being removed from one, gives you your personal organization back, so you always have exactly one. Access to the organization you left ends at once.
+- While the limit is 1, `orgId` on requests made with a session can only name your own organization, and `workspace_ambiguous` cannot occur.
+
+Self-hosters: the limit is `DOCSLURP_MAX_ORGS_PER_USER` (default and current maximum `1`) and the unique index `org_memberships_one_org_per_user` (migration 0127). Lifting it means dropping that index in a new migration and raising the variable; nothing else in the server assumes one organization per user. Raising the variable while the index exists has no effect, and the API logs `[org-limit]` at startup.
+
 ### Grant organization scopes explicitly
 
 Create the key while signed in, on the [API keys](https://docslurp.io/app/api-keys) page or over HTTP with your session cookie. Below, `DOCSLURP_COOKIE_JAR` is a cookie jar file from a signed-in session. Granting `organizations:manage` needs an owner or admin; any member can grant read access. Pass the real organization ID: without `orgId`, the key is created in your personal organization.
@@ -861,7 +903,7 @@ curl --fail-with-body --silent --show-error -X POST "$api_url/v1/organizations/$
   -H "Authorization: Bearer $DOCSLURP_API_KEY"
 ```
 
-No request body is needed. Success returns `{ "ok": true }` with 200, and the SDK's `leaveOrganization(org_id)` resolves to `undefined`. A key needs `organizations:manage` to leave; any member can leave from a signed-in session. You can't leave a personal organization, or leave as the last owner. Leaving revokes your keys for that organization, so later calls with the same key fail.
+No request body is needed. Success returns `{ "ok": true }` with 200, and the SDK's `leaveOrganization(org_id)` resolves to `undefined`. A key needs `organizations:manage` to leave; any member can leave from a signed-in session. You can't leave a personal organization, or leave as the last owner. Leaving revokes your keys for that organization, so later calls with the same key fail, and makes your personal organization your organization again ([one organization per user](#one-organization-per-user)).
 
 ### List and revoke organization keys
 
@@ -919,7 +961,7 @@ const result = await client.revokeOrganizationApiKeys(org_id); // {keys, revoked
 | 401 | No valid authentication. |
 | 403 | Missing organization scope, a browser key, creating without a session, or a role that isn't high enough. |
 | 404 | The organization or membership doesn't exist or you can't access it, or the target user is unknown. A key asking about another organization gets 404, so it can't tell whether that organization exists. |
-| 409 | Duplicate membership or slug, a personal membership, or removing, demoting or leaving as the last owner. |
+| 409 | Duplicate membership or slug, a personal membership, removing, demoting or leaving as the last owner, or `user_already_in_org` (joining or creating a second organization). |
 | 429 | Rate limit reached. Wait for `Retry-After`, and cap your retries. |
 
 Organization errors use the [error envelope](https://docslurp.io/docs/search-reference#errors). For example, removing the last owner returns:
@@ -934,7 +976,20 @@ Organization errors use the [error envelope](https://docslurp.io/docs/search-ref
 }
 ```
 
-Other codes include `personal_organization`, `membership_exists`, `membership_forbidden`, `membership_not_found`, `organization_not_found`, `organization_forbidden`, `organization_conflict`, `session_required` and `user_not_found`. In the SDK, HTTP failures throw `DocSlurpApiError` with `status`, `code`, `requestId` and the response in `body`; branch on `code`. The SDK never retries organization writes, so keep earlier successful responses when a later call fails.
+Other codes include `user_already_in_org`, `personal_organization`, `membership_exists`, `membership_forbidden`, `membership_not_found`, `organization_not_found`, `organization_forbidden`, `organization_conflict`, `session_required` and `user_not_found`. In the SDK, HTTP failures throw `DocSlurpApiError` with `status`, `code`, `requestId` and the response in `body`; branch on `code`. The SDK never retries organization writes, so keep earlier successful responses when a later call fails.
+
+## Webhooks
+
+A webhook belongs to one organization and receives that organization's run events (`run.completed`, `run.failed`, `document.replaced`; `GET /v1/webhooks/catalog` lists them), whoever started the run. There is no per-workspace webhook; a workspace can switch its own events off in its pipeline settings. Webhook routes take a signed-in session, not an API key.
+
+| Operation | Route | Who |
+| --- | --- | --- |
+| List | `GET /v1/webhooks?orgId=` | Owners and admins of the organization. |
+| Create | `POST /v1/webhooks` with `{ url, secret, events?, orgId? }` | Owners and admins. Any other field (such as `workspaceId`) is a 400. |
+| Update, delete, rotate secret, send a test event | `PATCH`, `DELETE /v1/webhooks/:id`, `POST /v1/webhooks/:id/rotate-secret`, `POST /v1/webhooks/:id/test` | Owners and admins of the webhook's organization. |
+| Delivery log and replay | `GET /v1/webhooks/deliveries?orgId=&webhookId=`, `POST /v1/webhooks/deliveries/:deliveryId/replay` | Owners and admins of the webhook's organization. |
+
+An omitted `orgId` means your [organization](#one-organization-per-user) (your personal one when you have it). Not a member answers 404, a member who is not an owner or admin 403; a webhook of an organization you do not administer answers 404. A webhook delivers only while the user who created it is still an owner or admin of its organization: demoting or removing that user stops it (another admin can recreate it). Each delivery is signed with `X-DocSlurp-Signature: t=<unix>,id=<delivery id>,v1=<hex HMAC-SHA256 of "<t>.<id>.<body>">` under the webhook secret.
 
 ## Make failures recoverable
 
@@ -1023,36 +1078,28 @@ Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/se
 
 `pipeline.quality` is the one extraction setting: set it on the workspace (`PATCH /v1/workspaces/:workspace` with `{ "pipeline": { "quality": "fast" } }`) or per upload in the request's `pipeline` overrides (SDK `quality`, CLI `--quality`, MCP `upload`/`extract` `quality`). Indexing mode (`pipeline.indexingMode`, full or on demand) is a separate, advanced setting.
 
-| Quality | What it does | Price per 1,000 pages |
+| Quality | What it does | How pages bill |
 | --- | --- | --- |
-| `fast` | Reads the text layer only, never OCR or a vision model. Request or workspace extraction settings that could read a page (OCR options, `forceOcr`, model or OCR extractors in `documentExtraction.order`, artifact-graph `enrich`) are removed for the run and logged; Kreuzberg gets no OCR options and never receives an image (it would OCR one regardless of settings); extractor options are validated per extractor and unknown extractors or keys are rejected. A page without a usable text layer keeps its stored page image, and its Markdown is `![Page N: scanned page image, no text layer](images/page-NNNN.png)` (the export's page-image path; the extension follows the stored image, so a JPEG upload links `images/page-0001.jpg`). Markdown-only exports include these page images. Renders are capped at `WORKER_FAST_PAGE_IMAGE_MAX_PER_DOCUMENT` (default 1,000) per document and `WORKER_FAST_PAGE_IMAGE_MAX_PER_RUN` (default 10,000) per run, a budget shared by every worker. A page counts against the budget when it is granted, so a render that then fails still uses its share and is not retried from the budget; pages past a cap, and pages whose render failed, stay unread with no reference (previews still render them on demand). On-demand indexing (search-triggered, index-all, map mode) follows the same rule: text layer only. Such a page has no text, adds no chunks and is not searchable; the ingest report lists it as `kept-as-image`. | $0.05 (pages bill Fast; a page bills Rich only when a model actually reads it, and Fast cannot be combined with visual indexing mode) |
-| `auto` (default) | Reads each page the cheapest faithful way: the text layer for born-digital pages, a vision model for scans and complex layouts. | $0.05 to $2.50, depending on the mix |
-| `good` | A vision model reads every page, for the most faithful tables, figures and layout. Good turns `visionFallback` on. A run cost cap (`maxCostCents`) can still stop vision early; pages it did not read bill as in Auto. | $2.50 (every page a vision model reads bills Rich, plus the extra-output-token rule) |
+| `fast` | Reads the text layer only, never OCR or a vision model. Request or workspace extraction settings that could read a page (OCR options, `forceOcr`, model or OCR extractors in `documentExtraction.order`, artifact-graph `enrich`) are removed for the run and logged; extractor options are validated per extractor and unknown extractors or keys are rejected. A page without a usable text layer keeps its stored page image, and its Markdown is `![Page N: scanned page image, no text layer](images/page-NNNN.png)` (the export's page-image path; the extension follows the stored image, so a JPEG upload links `images/page-0001.jpg`). Markdown-only exports include these page images. Renders are capped at `WORKER_FAST_PAGE_IMAGE_MAX_PER_DOCUMENT` (default 1,000) per document and `WORKER_FAST_PAGE_IMAGE_MAX_PER_RUN` (default 10,000) per run, a budget shared by every worker. A page counts against the budget when it is granted, so a render that then fails still uses its share and is not retried from the budget; pages past a cap, and pages whose render failed, stay unread with no reference (previews still render them on demand). On-demand indexing (search-triggered, index-all, map mode) follows the same rule: text layer only. Such a page has no text, adds no chunks and is not searchable; the ingest report lists it as `kept-as-image`. | Fast pages (a page bills Rich only when a model actually reads it, and Fast cannot be combined with visual indexing mode) |
+| `auto` (default) | Reads each page the cheapest faithful way: the text layer for born-digital pages, a vision model for scans and complex layouts. | Fast or Rich per page, by what read it |
+| `good` | A vision model reads every page, for the most faithful tables, figures and layout. Good turns `visionFallback` on. A run cost cap (`maxCostCents`) can still stop vision early; pages it did not read bill as in Auto. | Rich for every page a vision model reads |
 
-`QUALITY_MODES` in `@docslurp/shared` holds these labels, descriptions and prices (from `PRICE_CARD`), and `estimateIngest` takes the same three ids as its `profile`. The internal parser playbooks are not a setting: requests and stored pipelines that still send the retired `parserPlaybook` or `vision.forceAllPages` are accepted and mapped (`fast` to fast, `forceAllPages: true` to good, and every other playbook, `review-grade` and `agentic` included, to auto: those playbooks never read every page). Run previews (`POST /v1/runs/preview`) return one option per quality.
+Current Fast and Rich page prices are on [docslurp.io/pricing](https://docslurp.io/pricing) (and `GET /v1/billing/prices`); they are set by the hosted price card and can change.
+
+`QUALITY_MODES` in `@docslurp/shared` holds these labels and descriptions; prices come from the deployment's pricing provider (`qualityModeInfo`), and `estimateIngest` takes the same three ids as its `profile`. The internal parser playbooks are not a setting: requests and stored pipelines that still send the retired `parserPlaybook` or `vision.forceAllPages` are accepted and mapped (`fast` to fast, `forceAllPages: true` to good, and every other playbook, `review-grade` and `agentic` included, to auto: those playbooks never read every page). Run previews (`POST /v1/runs/preview`) return one option per quality.
 
 ### Credits and budgets
 
 DocSlurp is prepaid: there are no plans or subscriptions. 1 credit = 1 US cent. Buy a credit pack ($25, $50 or $100) or any amount from $10 to $10,000 on the billing page; credits do not expire while the account exists. Every new account starts with 250 free credits, no card needed. You pay per unit:
 
-| Unit | Credits |
+| Unit | What counts |
 | --- | --- |
-| Fast page (text-layer PDF, Office, HTML, Markdown, EPUB, text) | 5 per 1,000 pages |
-| Rich page (scanned page, image, or a page read by a vision model) | 250 per 1,000 pages; a page whose model output runs past 1,000 tokens counts once more per extra 1,000 tokens. In Fast quality nothing is read, so scans and images bill as Fast pages |
-| Audio | 1 Rich page per minute |
-| Video (frames read) | 3 Rich pages per minute |
-| Storage (originals, page images, indexes) | 25 per GB-month, accrued daily |
-| Search | 10 per 1,000 searches; a search that uses LLM query strategies (HyDE, rewrite, stepback, compression, self-query) counts as 10 |
-| Chat answer | 1 (standard models), 7.5 (advanced) or 50 (premium) per answer; an answer above 100,000 total tokens counts once more per extra 100,000 |
-| Document summary (`summarize`) | 0.5 per document |
-| Structured fields (`outputSchema`) | 1 per started 10 pages per document |
-| Knowledge graph (`graphRag`, community summaries included) | 1.5 per started 10 pages per document |
-| Propositions (`propositionIndex`, provisional) | 1 per started 10 pages per document |
-| Web search (web tools) | 1 per search; a deep search, or one that returns page content, counts as 2 |
-| Web page read (fetch or crawl) | 0.25 per page |
-| Site map | 1 per started 50 discovered URLs |
+| Fast page | Any page no vision or OCR model read: a text-layer PDF page, Office, HTML, Markdown, EPUB, text, an unread scan or image |
+| Rich page | A page a vision or OCR model read: a scanned page the extractor OCR'd, an image read by OCR, a page read by a vision model. In Fast quality nothing is read, so scans and images bill as Fast pages |
 
-Optional features are charged once per document each time their stage actually runs (a reprocess that skips the stage pays nothing for it); an audio or video file counts its Rich pages (minutes) as pages: an audio minute is 1 Rich page, a video minute whose frames are read is 3, and a video read from its audio track alone (`mediaVideo.enabled: false`, which an upload can set for itself through its `pipeline` overrides) is billed as audio. `POST /v1/uploads/estimate` prices audio and video before any bytes are sent: pass each file's `durationSeconds` (and `type`), and read `media` for the credits, the cheaper audio-track-only option (`media.lighter.pipeline`) and whether durations were guessed from file sizes. Contextual chunk preambles are part of the page price. A file pays only for its pages and the features it uses: there is no per-file minimum. Reprocessing pays again only for the share of stages that run, and a re-index that only rebuilds indexes pays nothing per page. Searches inside a chat answer are part of the answer. An answer that never reaches you because of an error on our side is refunded. `GET /v1/billing/prices` returns the price card, packs, top-up limits and the tier of each chat model; it needs no authentication.
+The credits per Fast and Rich page are on [docslurp.io/pricing](https://docslurp.io/pricing) and in `GET /v1/billing/prices`.
+
+Audio and video minutes, storage, searches, chat answers, optional document features (summaries, structured fields, knowledge graph, propositions) and web tools are also charged per unit; [docslurp.io/pricing](https://docslurp.io/pricing) and `GET /v1/billing/prices` (no authentication) list the current prices, packs, top-up limits and the tier of each chat model. Optional features are charged when their stage actually runs. `POST /v1/uploads/estimate` estimates an upload before any bytes are sent: pass each file's page count, `durationSeconds` and `type` when known, or the file's profile from the offline profiler (`@docslurp/estimate`), and read `media` for audio and video. An estimate is never a charge: an upload is billed by what the worker measures. A file pays only for what it uses: there is no per-file minimum. A Word, slide, sheet or EPUB file arrives counted as one page; the worker measures its real pages after converting it and bills those. Searches inside a chat answer are part of the answer. An answer that never reaches you because of an error on our side is refunded.
 
 Organizations that have bought credits (funded) run up to 250 workers at once; starter organizations run up to 50. Rate limits are the same for both. Larger ceilings and dedicated (private) machines are sold by sales.
 

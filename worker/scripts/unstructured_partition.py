@@ -9,11 +9,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Partition a PDF with unstructured.")
     parser.add_argument("--input", required=True, help="Path to the source PDF.")
     parser.add_argument("--output", required=True, help="Path to the output file.")
+    # Only `fast` (the PDF's own text layer): `hi_res`, `ocr_only` and `auto` OCR page regions inside this process,
+    # and OCR runs only in the worker's OCR boundary (worker/src/ocr, docs/extraction/ocr.md).
     parser.add_argument(
         "--strategy",
         default="fast",
-        choices=["auto", "fast", "hi_res", "ocr_only"],
-        help="Unstructured partitioning strategy.",
+        choices=["fast"],
+        help="Unstructured partitioning strategy (text layer only; no OCR).",
     )
     parser.add_argument(
         "--format",

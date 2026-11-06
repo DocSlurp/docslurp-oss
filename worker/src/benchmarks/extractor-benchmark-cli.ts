@@ -8,7 +8,6 @@ import { fileURLToPath } from "node:url";
 type ExtractorId =
   | "pdftotext"
   | "native-pdf"
-  | "kreuzberg"
   | "docling"
   | "unstructured-fast"
   | "unstructured-hi-res";
@@ -88,7 +87,7 @@ Options:
   --input <pdf>              PDF to benchmark. Defaults to the generated pdf-smoke fixture.
   --timeout-ms <n>           Per-extractor timeout. Default 60000.
   --output-dir <dir>         Keep outputs in this directory instead of a temp directory.
-  --extractors <csv>         Restrict extractors, e.g. kreuzberg,native-pdf,docling.
+  --extractors <csv>         Restrict extractors, e.g. pdftotext,native-pdf,docling.
   --json                     Emit JSON only.
 `);
 }
@@ -97,7 +96,6 @@ function extractorIds(): ExtractorId[] {
   return [
     "pdftotext",
     "native-pdf",
-    "kreuzberg",
     "docling",
     "unstructured-fast",
     "unstructured-hi-res",
@@ -125,18 +123,6 @@ function commandFor(extractor: ExtractorId, input: string, outputDir: string) {
           path.join(outputDir, "native-pdf.md"),
         ],
         outputPath: path.join(outputDir, "native-pdf.md"),
-      };
-    case "kreuzberg":
-      return {
-        binary: "node",
-        args: [
-          path.join(scriptsDir, "kreuzberg_extract.mjs"),
-          "--input",
-          input,
-          "--output",
-          path.join(outputDir, "kreuzberg.md"),
-        ],
-        outputPath: path.join(outputDir, "kreuzberg.md"),
       };
     case "docling":
       return {
@@ -166,11 +152,11 @@ function commandFor(extractor: ExtractorId, input: string, outputDir: string) {
           "--input",
           input,
           "--output",
-          path.join(outputDir, "unstructured-hi-res.json"),
+          path.join(outputDir, "unstructured-fast.json"),
           "--strategy",
-          "hi_res",
+          "fast",
         ],
-        outputPath: path.join(outputDir, "unstructured-hi-res.json"),
+        outputPath: path.join(outputDir, "unstructured-fast.json"),
       };
   }
 }

@@ -157,8 +157,8 @@ async function seedRun(runId: string): Promise<void> {
   await db.exec(`
     insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total, execution_generation)
       values ('${runId}', 'o1', 'u1', 'w', 'bulk-upload', 'queued', 'queued', '${JSON.stringify(defaultPipelineFeatures)}', 1, ${PAGES}, '${runId}-generation');
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
-      values ('${runId}-doc', 'o1', 'u1', 'w', '${runId}', 'a.pdf', 'application/pdf', 'raw/a.pdf', 'queued', ${PAGES});
+    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source)
+      values ('${runId}-doc', 'o1', 'u1', 'w', '${runId}', 'a.pdf', 'application/pdf', 'raw/a.pdf', 'queued', ${PAGES}, 'counted');
   `);
 }
 

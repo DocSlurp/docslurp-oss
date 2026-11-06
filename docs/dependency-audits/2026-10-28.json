@@ -363,7 +363,7 @@
       "Pre-existing: SAML request cache accepts unconsumed-or-consumed unexpired rows and has a no-op removeAsync, so a captured signed response can be replayed within the request window; implement consumeAsync/saveIfAbsentAsync, set rejectReplayedAssertions, bind InResponseTo to RelayState (sso.ts:517-560)",
       "Pre-existing: idpIssuer is undefined when IdP metadata lacks entityID, disabling the issuer check; treat missing entityID as an error (sso.ts:364, :968)",
       "Add a signed SAMLResponse round-trip test with wrong-issuer, multiple-Issuer and unsigned negatives",
-      "Rebuild worker images and run the Doppler guest and corrupt/oversized-PDF smoke tests before deploying"
+      "Rebuild worker images and run the VM extractor and corrupt/oversized-PDF smoke tests before deploying"
     ]
   }
 }

@@ -20,7 +20,7 @@ export interface ExecutorDeps {
   pageText(pageNumber: number): Promise<string | null>;
   /** One page from a native extractor, or null when that extractor cannot run per page. */
   nativePageText(extractorId: string, pageNumber: number): Promise<string | null>;
-  /** NATIVE_PDF_OCR policy for page OCR (default `scripts`: tesseract first, see ocr-policy.ts). */
+  /** NATIVE_PDF_OCR policy for page OCR (default `scripts`: PP-OCR first, see ocr-policy.ts). */
   nativeOcrPolicy?: NativeOcrPolicy;
   /**
    * Native-pdf OCR for one page (`fill`: recognise only regions the text layer lacks; `full`: adaptive whole-page OCR).
