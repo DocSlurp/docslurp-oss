@@ -433,7 +433,7 @@ describe("runtime database identity gate (council N #1)", () => {
   it("refuses the owner or a superuser, whatever role it claims", async () => {
     const problems = (await check(null, app)).join("\n");
     expect(problems).toMatch(/superuser/);
-    expect(problems).toMatch(/owns \d+ relation/);
+    expect(problems).toMatch(/owns \d+ object/);
   });
 
   it("refuses a role that is not the expected least-privilege role", async () => {
@@ -459,7 +459,7 @@ describe("runtime database identity gate (council N #1)", () => {
     await db.exec(`create table public.runtime_owned_probe (id int)`);
     await db.exec(`alter table public.runtime_owned_probe owner to ${worker}`);
     try {
-      expect((await check(worker, worker)).join("\n")).toMatch(/owns 1 relation/);
+      expect((await check(worker, worker)).join("\n")).toMatch(/owns \d+ object/);
     } finally {
       await db.exec(`drop table public.runtime_owned_probe`);
     }
@@ -469,7 +469,7 @@ describe("runtime database identity gate (council N #1)", () => {
 describe("runtime database identity gate before the role rollout", () => {
   it("refuses with a rollout pointer when the least-privilege role does not exist", async () => {
     const { runtimeIdentityProblems } = await import("../../db/runtime-role-check.mjs");
-    expect(runtimeIdentityProblems({ role: "docslurp", superuser: false, owned_relations: 40, expected_exists: false }, app).join("\n"))
+    expect(runtimeIdentityProblems({ role: "docslurp", allowed_held: "", owned_objects: 40 }, app, { expectedExists: false }).join("\n"))
       .toMatch(/owner role docslurp[\s\S]*role docslurp_app does not exist: roll out the least-privilege roles/);
   });
 });
@@ -500,7 +500,9 @@ describe("runtime processes refuse to start as a pricing-state writer (council M
     expect(refusePricingStateWriter({ DOCSLURP_SERVICE_PROFILE: "service" })).toBe(true);
     expect(refusePricingStateWriter({ DOCSLURP_PRICING_REQUIRED: "1" })).toBe(true);
     expect(refusePricingStateWriter({})).toBe(false);
-    expect(refusePricingStateWriter({ DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_REFUSE_PRICING_STATE_WRITER: "0" })).toBe(false);
+    // Where pricing is required the check cannot be turned off (council O #3).
+    expect(refusePricingStateWriter({ DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_REFUSE_PRICING_STATE_WRITER: "0" })).toBe(true);
+    expect(refusePricingStateWriter({ DOCSLURP_PRICING_REQUIRED: "1", DOCSLURP_REFUSE_PRICING_STATE_WRITER: "false" })).toBe(true);
     expect(refusePricingStateWriter({ DOCSLURP_REFUSE_PRICING_STATE_WRITER: "1" })).toBe(true);
     const importModule = vi.fn();
     resetPricingLoaderForTests();
@@ -548,24 +550,21 @@ describe("one pricing-state writer rule for startup and the deploy gate (council
   });
 });
 
-describe("the emergency override is loud (council P #2)", () => {
-  it("starts with DOCSLURP_REFUSE_PRICING_STATE_WRITER=0 where pricing is required, logging an error that names the role's powers", async () => {
+describe("no override where pricing is required (council O #3)", () => {
+  it("DOCSLURP_REFUSE_PRICING_STATE_WRITER=0 is ignored under the service profile: the owner still refuses to start, with an error naming the ignored flag", async () => {
     const { loadPricingProvider, resetPricingLoaderForTests } = await import("@docslurp/shared/pricing-loader");
-    const { resetPricingProviderForTests, installTestPricing, DISTINCT_TEST_PRICING } = await import("@docslurp/shared");
     const errors: string[] = [];
     const spy = vi.spyOn(console, "error").mockImplementation((message: unknown) => { errors.push(String(message)); });
+    const importModule = vi.fn();
     resetPricingLoaderForTests();
-    resetPricingProviderForTests();
     try {
       const sql = { unsafe: async (query: string, params?: unknown[]) => (await db.query<Record<string, unknown>>(query, params as unknown[])).rows };
-      const importModule = async () => ({ register: (host: { shared: { OPEN_PRICING: object } }) => ({ ...host.shared.OPEN_PRICING, id: "override-fixture", version: "1" }) });
-      await expect(loadPricingProvider({ DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_PRICING_PLUGIN: "/p.mjs", DOCSLURP_REFUSE_PRICING_STATE_WRITER: "0" }, { sql, importModule })).resolves.toBe("override-fixture");
-      expect(errors.join("\n")).toMatch(/EMERGENCY OVERRIDE: .*is a superuser.*deploys still refuse this role/);
+      await expect(loadPricingProvider({ DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_PRICING_PLUGIN: "/p.mjs", DOCSLURP_REFUSE_PRICING_STATE_WRITER: "0" }, { sql, importModule })).rejects.toThrow(/refusing to start/);
+      expect(importModule).not.toHaveBeenCalled();
+      expect(errors.join("\n")).toMatch(/DOCSLURP_REFUSE_PRICING_STATE_WRITER=0 is ignored where pricing is required/);
     } finally {
       spy.mockRestore();
       resetPricingLoaderForTests();
-      resetPricingProviderForTests();
-      installTestPricing(DISTINCT_TEST_PRICING);
     }
   });
 });

@@ -10,39 +10,27 @@
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 
-import { PRICING_STATE_WRITER_SQL, pricingStateWriterReasons } from "@docslurp/shared/pricing-loader";
+import { RUNTIME_IDENTITY_SQL, runtimeIdentityReasons } from "@docslurp/shared/pricing-loader";
 
 import { DEFAULT_DB_ROLES } from "./roles.mjs";
 
 /** The roles a runtime app may connect as (roles.mjs): the API and executor as `app`, the worker as `worker`. */
 export const RUNTIME_ROLES = Object.freeze([DEFAULT_DB_ROLES.app, DEFAULT_DB_ROLES.worker]);
 
-/** What the connected role can do; one row, read-only. */
-export const RUNTIME_IDENTITY_SQL = `
-  select current_user as role,
-    coalesce((select rolsuper from pg_roles where rolname = current_user), false) as superuser,
-    coalesce((select rolcreaterole or rolcreatedb or rolreplication or rolbypassrls from pg_roles where rolname = current_user), false) as elevated,
-    (select count(*)::int from pg_class c join pg_namespace n on n.oid = c.relnamespace
-      where n.nspname = 'public' and c.relkind in ('r', 'p', 'v', 'm', 'S') and pg_has_role(current_user, c.relowner, 'USAGE')) as owned_relations,
-    has_schema_privilege(current_user, 'public', 'CREATE') as can_create,
-    exists (select 1 from pg_roles where rolname = $1::text) as expected_exists,
-    case when exists (select 1 from pg_roles where rolname = $1::text) then pg_has_role(current_user, $1::text, 'MEMBER') else false end as member_of_expected
-`;
+export { RUNTIME_IDENTITY_SQL };
 
-/** Pure: why `row` (RUNTIME_IDENTITY_SQL) is not a safe runtime identity for `expected`; empty when it is. */
-export function runtimeIdentityProblems(row, expected) {
+/**
+ * Pure: why `row` (RUNTIME_IDENTITY_SQL over [expected]) is not a safe runtime identity for `expected`; empty when it is.
+ * The rule itself is @docslurp/shared's runtimeIdentityReasons, shared with every runtime process's startup check
+ * (councils P #1, O #1); this adds the owner's name and a pointer when the expected role does not exist yet.
+ */
+export function runtimeIdentityProblems(row, expected, { expectedExists = true } = {}) {
   if (!RUNTIME_ROLES.includes(expected)) return [`unknown expected role ${JSON.stringify(expected)}; expected one of ${RUNTIME_ROLES.join(", ")}`];
+  const role = String(row?.role ?? "?");
   const problems = [];
-  const role = String(row.role);
   if (role === DEFAULT_DB_ROLES.owner) problems.push(`connected as the owner role ${role}`);
-  if (row.superuser) problems.push(`connected role ${role} is a superuser`);
-  if (row.elevated) problems.push(`connected role ${role} can create roles or databases, replicate or bypass row security`);
-  if (row.owned_relations > 0) problems.push(`connected role ${role} owns ${row.owned_relations} relation(s) in schema public`);
-  if (row.can_create) problems.push(`connected role ${role} can create objects in schema public`);
-  if (!row.expected_exists) problems.push(`role ${expected} does not exist: roll out the least-privilege roles (docs/releases.md#runtime-database-roles)`);
-  else if (!row.member_of_expected) problems.push(`connected role ${role} is not a member of ${expected}`);
-  // The pricing-state rule is shared with the startup check (council P #1): ownership, any write, pg_write_all_data, the raise.
-  if (row.pricing) for (const reason of pricingStateWriterReasons(row.pricing)) if (reason !== "is a superuser") problems.push(`connected role ${role} ${reason}`);
+  for (const reason of runtimeIdentityReasons(row, [expected])) problems.push(`connected role ${role} ${reason}`);
+  if (!expectedExists) problems.push(`role ${expected} does not exist: roll out the least-privilege roles (docs/releases.md#runtime-database-roles)`);
   return problems;
 }
 
@@ -52,9 +40,9 @@ export async function checkRuntimeIdentity(client, expected) {
   await client.query("begin read only");
   try {
     await client.query("set local statement_timeout = '15s'");
-    const { rows: [row] } = await client.query(RUNTIME_IDENTITY_SQL, [expected]);
-    const { rows: [pricing] } = await client.query(PRICING_STATE_WRITER_SQL);
-    return runtimeIdentityProblems({ ...row, pricing }, expected);
+    const { rows: [row] } = await client.query(RUNTIME_IDENTITY_SQL, [[expected]]);
+    const { rows: [exists] } = await client.query("select exists (select 1 from pg_roles where rolname = $1) as exists", [expected]);
+    return runtimeIdentityProblems(row, expected, { expectedExists: exists?.exists === true });
   } finally {
     await client.query("rollback");
   }

@@ -90,66 +90,97 @@ export function pricingStateAdminFromSql(sql: DurableStateSql): PricingStateAdmi
   };
 }
 
+/** The least-privilege roles a runtime process may connect as (core server/db/roles.mjs: app and worker). */
+export const RUNTIME_DATABASE_ROLES: readonly string[] = Object.freeze(["docslurp_app", "docslurp_worker"]);
+
 /**
- * Whether this process refuses to start when its database role could move the pricing high-water mark (council M #1):
- * DOCSLURP_REFUSE_PRICING_STATE_WRITER=1/0, defaulting to on wherever pricing is required (the service profile, or
- * DOCSLURP_PRICING_REQUIRED=1).
+ * Whether this process refuses to start unless its database role is a safe runtime identity (assertRuntimeDatabaseIdentity).
+ * Always on wherever pricing is required (the service profile, or DOCSLURP_PRICING_REQUIRED=1): there,
+ * DOCSLURP_REFUSE_PRICING_STATE_WRITER=0 is ignored (council O #3). Elsewhere it is opt-in with
+ * DOCSLURP_REFUSE_PRICING_STATE_WRITER=1.
  */
 export function refusePricingStateWriter(env: Record<string, string | undefined> = process.env): boolean {
+  if (pricingRequired(env)) return true;
   const raw = env.DOCSLURP_REFUSE_PRICING_STATE_WRITER?.trim().toLowerCase();
-  if (raw === "1" || raw === "true") return true;
-  if (raw === "0" || raw === "false") return false;
-  return pricingRequired(env);
+  return raw === "1" || raw === "true";
 }
 
 /**
- * One row: every way the connected role could move the pricing high-water mark. The single definition the startup check
- * (assertRuntimeCannotMovePricingState) and the deploy gate (server/db/runtime-role-check.mjs) share (council P #1):
- * superuser; ownership of pricing_provider_state (direct or inherited); INSERT, UPDATE, DELETE or TRUNCATE on it (has_table_privilege
- * counts direct and inherited grants and PUBLIC); membership of pg_write_all_data; EXECUTE on pricing_state_raise.
+ * One row describing the connected role, $1 the roles it may hold (text[]). The single identity definition the deploy gate
+ * (server/db/runtime-role-check.mjs, one expected role) and startup (both runtime roles) share (councils P #1, O #1):
+ *
+ * - superuser, or create-role/create-db/replication/bypass-RLS, on the role or any allowed role it holds;
+ * - any role membership other than the allowed roles, direct or indirect and whatever its INHERIT or SET option
+ *   (a SET ROLE to the owner or postgres; pg_execute_server_program; pg_write_all_data; pg_database_owner);
+ * - CREATE on the database (a schema that shadows another role's search_path) or on schema public;
+ * - owned relations, functions, types or schemas outside the system schemas;
+ * - ownership of pricing_provider_state, INSERT/UPDATE/DELETE/TRUNCATE on it, or EXECUTE on pricing_state_raise.
  */
-export const PRICING_STATE_WRITER_SQL = `
-  select current_user::text as role,
-    coalesce((select rolsuper from pg_roles where rolname = current_user), false) as superuser,
+export const RUNTIME_IDENTITY_SQL = `
+  with me as (select * from pg_roles where rolname = current_user),
+  held as (select r.* from pg_roles r, me where r.oid = me.oid or (r.rolname = any($1::text[]) and pg_has_role(me.oid, r.oid, 'MEMBER'))),
+  system_ns as (select oid from pg_namespace where nspname in ('pg_catalog', 'information_schema') or nspname like 'pg_toast%' or nspname like 'pg_temp%')
+  select me.rolname::text as role,
+    (select bool_or(rolsuper) from held) as superuser,
+    (select bool_or(rolcreaterole or rolcreatedb or rolreplication or rolbypassrls) from held) as elevated,
+    coalesce((select string_agg(r.rolname::text, ',' order by r.rolname) from pg_roles r
+      where r.oid <> me.oid and not (r.rolname = any($1::text[])) and pg_has_role(me.oid, r.oid, 'MEMBER')), '') as other_memberships,
+    coalesce((select string_agg(rolname::text, ',' order by rolname) from held where rolname = any($1::text[])), '') as allowed_held,
+    has_database_privilege(me.oid, current_database(), 'CREATE') as can_create_in_database,
+    has_schema_privilege(me.oid, 'public', 'CREATE') as can_create_in_public,
+    ((select count(*) from pg_class where relowner in (select oid from held) and relnamespace not in (select oid from system_ns))
+      + (select count(*) from pg_proc where proowner in (select oid from held) and pronamespace not in (select oid from system_ns))
+      + (select count(*) from pg_type where typowner in (select oid from held) and typnamespace not in (select oid from system_ns))
+      + (select count(*) from pg_namespace where nspowner in (select oid from held) and oid not in (select oid from system_ns)))::int as owned_objects,
     case when to_regclass('public.pricing_provider_state') is null then false
-      else pg_has_role(current_user, (select relowner from pg_class where oid = to_regclass('public.pricing_provider_state')), 'USAGE') end as owns_state,
+      else (select relowner from pg_class where oid = to_regclass('public.pricing_provider_state')) in (select oid from held) end as owns_state,
     case when to_regclass('public.pricing_provider_state') is null then ''
       else concat_ws(',',
-        case when has_table_privilege(current_user, 'public.pricing_provider_state', 'INSERT') then 'insert' end,
-        case when has_table_privilege(current_user, 'public.pricing_provider_state', 'UPDATE') then 'update' end,
-        case when has_table_privilege(current_user, 'public.pricing_provider_state', 'DELETE') then 'delete' end,
-        case when has_table_privilege(current_user, 'public.pricing_provider_state', 'TRUNCATE') then 'truncate' end) end as writes_state,
-    case when exists (select 1 from pg_roles where rolname = 'pg_write_all_data') then pg_has_role(current_user, 'pg_write_all_data', 'USAGE') else false end as write_all_data,
+        case when has_table_privilege(me.oid, 'public.pricing_provider_state', 'INSERT') then 'insert' end,
+        case when has_table_privilege(me.oid, 'public.pricing_provider_state', 'UPDATE') then 'update' end,
+        case when has_table_privilege(me.oid, 'public.pricing_provider_state', 'DELETE') then 'delete' end,
+        case when has_table_privilege(me.oid, 'public.pricing_provider_state', 'TRUNCATE') then 'truncate' end) end as writes_state,
     case when to_regprocedure('public.pricing_state_raise(text, bigint)') is null then false
-      else has_function_privilege(current_user, 'public.pricing_state_raise(text, bigint)', 'EXECUTE') end as raises_state
+      else has_function_privilege(me.oid, 'public.pricing_state_raise(text, bigint)', 'EXECUTE') end as raises_state
+  from me
 `;
 
-/** Pure: why a PRICING_STATE_WRITER_SQL row could move the mark; empty when it cannot. */
-export function pricingStateWriterReasons(row: Record<string, unknown> | undefined): string[] {
-  if (!row) return ["the pricing state writer check returned no row"];
-  const writes = typeof row.writes_state === "string" ? row.writes_state.split(",").filter(Boolean) : [];
+/** Pure: why a RUNTIME_IDENTITY_SQL row is not a safe runtime identity for `allowed`; empty when it is. */
+export function runtimeIdentityReasons(row: Record<string, unknown> | undefined, allowed: readonly string[] = RUNTIME_DATABASE_ROLES): string[] {
+  if (!row) return ["the runtime identity check returned no row"];
+  const list = (value: unknown) => (typeof value === "string" ? value.split(",").filter(Boolean) : []);
+  const others = list(row.other_memberships);
+  const held = list(row.allowed_held);
+  const writes = list(row.writes_state);
   return [
-    row.superuser === true ? "is a superuser" : null,
+    row.superuser === true ? "is (or can become) a superuser" : null,
+    row.elevated === true ? "can create roles or databases, replicate or bypass row security" : null,
+    others.length ? `is a member of ${others.join(", ")} (SET ROLE or inherited privileges)` : null,
+    held.length ? null : `is not a member of ${allowed.join(" or ")}`,
+    row.can_create_in_database === true ? "can CREATE in the database (a schema could shadow another role's search_path)" : null,
+    row.can_create_in_public === true ? "can CREATE in schema public" : null,
+    Number(row.owned_objects) > 0 ? `owns ${Number(row.owned_objects)} object(s) (relations, functions, types or schemas)` : null,
     row.owns_state === true ? "owns pricing_provider_state" : null,
     writes.length ? `can ${writes.join(", ")} pricing_provider_state` : null,
-    row.write_all_data === true ? "is a member of pg_write_all_data" : null,
     row.raises_state === true ? "may execute pricing_state_raise" : null,
   ].filter((reason): reason is string => reason !== null);
 }
 
 /**
- * Throw when this process's database role could move the pricing high-water mark (pricingStateWriterReasons). A runtime
- * process (API, worker, chat executor) must connect as its least-privilege role; the deploy gates the same rule
- * (runtime-role-check.mjs), and this refuses at startup as well.
+ * Throw unless this process's database role is a safe runtime identity (runtimeIdentityReasons over `allowed`): a runtime
+ * process (API, worker, chat executor) must connect as its least-privilege role. The deploy gates the same rule.
  */
-export async function assertRuntimeCannotMovePricingState(sql: DurableStateSql): Promise<void> {
-  const rows = await sql.unsafe(PRICING_STATE_WRITER_SQL);
+export async function assertRuntimeDatabaseIdentity(sql: DurableStateSql, allowed: readonly string[] = RUNTIME_DATABASE_ROLES): Promise<void> {
+  const rows = await sql.unsafe(RUNTIME_IDENTITY_SQL, [allowed as string[]]);
   const row = rows[0] as Record<string, unknown> | undefined;
-  const reasons = pricingStateWriterReasons(row);
+  const reasons = runtimeIdentityReasons(row, allowed);
   if (reasons.length) {
-    throw new Error(`database role ${String(row?.role ?? "?")} ${reasons.join("; ")}: a runtime process must connect as its least-privilege role (docslurp_app or docslurp_worker); refusing to start (DOCSLURP_REFUSE_PRICING_STATE_WRITER=0 is an emergency override only)`);
+    throw new Error(`database role ${String(row?.role ?? "?")} ${reasons.join("; ")}: a runtime process must connect as its least-privilege role (${allowed.join(" or ")}); refusing to start`);
   }
 }
+
+/** The startup check's earlier name. */
+export const assertRuntimeCannotMovePricingState = (sql: DurableStateSql): Promise<void> => assertRuntimeDatabaseIdentity(sql);
 
 /** A process that has no database: every call throws, so a provider that needs durable state fails closed there. */
 export const UNAVAILABLE_PRICING_DURABLE_STATE: PricingDurableState = {
@@ -203,14 +234,12 @@ export async function loadPricingProvider(
   options: LoadPricingProviderOptions = {},
 ): Promise<string> {
   const importModule = options.importModule ?? ((specifier: string) => import(specifier));
-  // Before anything prices: a runtime role that could move the mark refuses to start (council M #1, P #1).
-  if (options.sql && refusePricingStateWriter(env)) await assertRuntimeCannotMovePricingState(options.sql);
-  else if (options.sql && pricingRequired(env)) {
-    // The emergency override (DOCSLURP_REFUSE_PRICING_STATE_WRITER=0 where pricing is required, for a role rollback):
-    // loud on every start, and the check still runs so the log names what this role could do (council P #2).
-    const reasons = await options.sql.unsafe(PRICING_STATE_WRITER_SQL).then((rows) => pricingStateWriterReasons(rows[0] as Record<string, unknown> | undefined), (error: unknown) => [`could not be checked: ${error instanceof Error ? error.message : String(error)}`]);
-    console.error(`[pricing] EMERGENCY OVERRIDE: DOCSLURP_REFUSE_PRICING_STATE_WRITER=0 lets this process start as a role that ${reasons.length ? reasons.join("; ") : "cannot move the pricing mark"}. Remove the override once the least-privilege roles are restored; deploys still refuse this role.`);
+  // Before anything prices: a runtime process refuses to start unless its role is a safe runtime identity (councils M #1,
+  // P #1, O #1). Where pricing is required this cannot be turned off (council O #3).
+  if (pricingRequired(env) && /^(0|false)$/i.test(env.DOCSLURP_REFUSE_PRICING_STATE_WRITER?.trim() ?? "")) {
+    console.error("[pricing] DOCSLURP_REFUSE_PRICING_STATE_WRITER=0 is ignored where pricing is required; the runtime identity check still runs");
   }
+  if (options.sql && refusePricingStateWriter(env)) await assertRuntimeDatabaseIdentity(options.sql);
   const specifier = pricingPluginSpecifier(env);
   if (loadedFrom !== undefined) {
     if (loadedFrom !== specifier) throw new Error("A pricing provider is already loaded from a different DOCSLURP_PRICING_PLUGIN");
