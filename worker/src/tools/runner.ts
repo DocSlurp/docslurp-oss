@@ -193,6 +193,9 @@ export class CommandExitError extends Error {
   }
 }
 
+/** External limits on the layout walker (pdfLayoutFacts): generous for its own budgets (8-16 MiB windows), fatal for a bomb. */
+export const PDF_LAYOUT_FACTS_LIMITS = Object.freeze({ addressSpaceMiB: 1024, cpuSeconds: 60, wallMs: 120_000 });
+
 export class CommandRunner {
   private readonly scriptsDir: string;
   private readonly venvBin: string;
@@ -810,11 +813,18 @@ export class CommandRunner {
 
   /**
    * The layout walker (scripts/pdf_layout_facts.py, pdf-layout-facts@1) over files this worker already produced: the PDF,
-   * its `pdfimages -list` output, its word boxes and the extractor's Markdown. Prints JSON; reads only the named files.
+   * its `pdfimages -list` output, its word boxes and the extractor's Markdown. Prints JSON; reads only the named files. It
+   * parses the customer's PDF in Python, so it runs under external limits (PDF_LAYOUT_FACTS_LIMITS: address space and CPU
+   * through prlimit, and a wall-clock timeout) on top of its own decode budgets: a decode bomb it does not anticipate is
+   * killed, not allowed to exhaust the worker. Unavailable without prlimit (the facts are optional evidence).
    */
   async pdfLayoutFacts(args: { source: string; lastPage: number; listing: string; wordBoxes: string; markdown: string }): Promise<CommandPlan> {
-    return await this.planScript("python3", "pdf_layout_facts.py", "--input", args.source, "--first", "1", "--last", String(args.lastPage),
+    const script = await this.planScript("python3", "pdf_layout_facts.py");
+    const limits = PDF_LAYOUT_FACTS_LIMITS;
+    const plan = await this.plan("prlimit", `--as=${limits.addressSpaceMiB * 1024 * 1024}`, `--cpu=${limits.cpuSeconds}`, "--",
+      script.binary, ...script.args, "--input", args.source, "--first", "1", "--last", String(args.lastPage),
       "--listing", args.listing, "--xhtml", args.wordBoxes, "--markdown", args.markdown);
+    return { ...plan, available: plan.available && script.available, timeoutMs: limits.wallMs, readOnlyInputs: true };
   }
 
   /** `pdfinfo -f -l`: per-page size lines ("Page N size: W x H pts") for a page range. */

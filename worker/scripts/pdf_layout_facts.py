@@ -258,6 +258,10 @@ def _unpredict(data, params):
         raise Unknown('predictor')
     bpp = max(1, colors * bits // 8)
     row = (columns * colors * bits + 7) // 8
+    # One row is allocated (the previous row, the SWAR masks) before any data is read: a tiny stream claiming
+    # Columns=16384 Colors=65536 would ask for gigabytes. A row larger than the decoded limit can never fit in it anyway.
+    if row > MAX_STREAM_DECODED:
+        raise Unknown('stream-too-large')
     if predictor == 2:
         if bits != 8:
             raise Unknown('tiff-predictor')

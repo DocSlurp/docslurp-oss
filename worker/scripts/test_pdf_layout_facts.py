@@ -245,6 +245,30 @@ class HostileInputTest(Scratch):
         self.assertIn(walk.unknown, ('content-too-large', 'stream-too-large'))
         self.assertEqual(walk.draws, [])
 
+    def test_predictor_row_bombs_are_refused_before_allocating(self):
+        # 65 bytes of Flate data claiming 16384 columns of 65536 colors: one predictor row would be 1 GiB, and the row
+        # buffers over 3 GB. Refused from the parameters alone, cheaply, under a 512 MiB address-space cap.
+        tiny = zlib.compress(b'\x02' + b'\x00' * 64)
+        params = {'Predictor': 12, 'Columns': 16384, 'Colors': 65536, 'BitsPerComponent': 8}
+        script = '\n'.join([
+            'import importlib.util, resource, zlib',
+            'resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))',
+            f'spec = importlib.util.spec_from_file_location("f", {str(HERE / "pdf_layout_facts.py")!r})',
+            'f = importlib.util.module_from_spec(spec)',
+            'spec.loader.exec_module(f)',
+            'try:',
+            f'    f.decode_filters(zlib.compress(bytes(65)), {{"Filter": "FlateDecode", "DecodeParms": {params!r}}})',
+            'except f.Unknown as error:',
+            '    print("refused", error)',
+        ])
+        started = time.monotonic()
+        result = subprocess.run([sys.executable, '-I', '-c', script], capture_output=True, text=True, timeout=60)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('refused stream-too-large', result.stdout)
+        with self.assertRaises(facts.Unknown):
+            facts.decode_filters(tiny, {'Filter': 'FlateDecode', 'DecodeParms': params})
+
     def test_page_tree_cycles_and_wrong_counts_do_not_loop(self):
         b = PdfBuilder()
         pages_num = b.reserve()
