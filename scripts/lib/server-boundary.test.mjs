@@ -76,3 +76,16 @@ test("keeps the offline estimator's file probes out of the API, worker, shared c
   });
   try { assert.equal(checkEstimatorBoundary(root).length, 4); } finally { rmSync(root, { recursive: true }); }
 });
+
+test("a test may read the neutral profiler rules file to check it against its generator; nothing else in the estimator", () => {
+  const root = fixture({
+    "packages/shared/src/rules.test.ts": 'const RULES = new URL("../../estimate/profiler-rules.json", import.meta.url);',
+    "packages/shared/src/rules.ts": 'import rules from "../../estimate/profiler-rules.json";',
+    "packages/shared/src/other.test.ts": 'const probe = new URL("../../estimate/src/probe/pdf.rs", import.meta.url);',
+  });
+  try {
+    const violations = checkEstimatorBoundary(root);
+    assert.equal(violations.length, 2);
+    assert.ok(!violations.some((v) => v.startsWith("packages/shared/src/rules.test.ts")));
+  } finally { rmSync(root, { recursive: true }); }
+});
