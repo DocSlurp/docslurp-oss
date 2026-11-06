@@ -429,12 +429,7 @@ A provider whose probe fails is skipped, with the reason printed.
 
 ## Limits
 
-Not every code path goes through a provider:
-
-- **In-process parsers** (Kreuzberg, LiteParse and, when installed, the private native PDF engine) run inside the worker process. No provider sandboxes them.
-- **The vector writer and the embedding pool** run outside the sandbox. The writer needs object storage access.
-
-They run with the worker's privileges and secrets. [Security](security.md#commands-that-skip-the-sandbox) has details.
+Production source-file parsers run through the VM provider. Native in-process parsers refuse production work. The vector writer and embedding pool remain trusted host processes; they must not decode customer files locally. [Security](security.md#trusted-host-processes) describes these host responsibilities.
 
 ## Adding a provider
 
