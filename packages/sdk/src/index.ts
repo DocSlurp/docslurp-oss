@@ -25,8 +25,8 @@ export type IndexingMode = "full" | "map" | "visual";
 
 /**
  * Processing quality (`pipeline.quality`): `fast` reads the text layer only and keeps scanned pages as page
- * images, never read ($0.05 per 1,000 pages); `auto` (default) reads each page the cheapest faithful way ($0.05 to
- * $2.50 per 1,000 pages, depending on the mix); `good` reads every page with a vision model ($2.50 per 1,000 pages).
+ * images, never read (lowest price); `auto` (default) reads each page the cheapest faithful way (its price depends on
+ * the mix of pages); `good` reads every page with a vision model (highest price). Prices: https://docslurp.io/pricing
  */
 export type QualityMode = "fast" | "auto" | "good";
 

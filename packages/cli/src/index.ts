@@ -100,9 +100,9 @@ the same workspace. Uploads and URL ingests into a name that matches no workspac
 it with that name (and --template, if given); other commands answer workspace not found.
 --new-workspace (or --template alone) uploads into a fresh self-titled workspace.
 --quality sets processing quality for the upload (default: the workspace's, auto unless changed):
-fast reads the text layer only and keeps scanned pages as images, not read ($0.05 per 1,000 pages);
-auto reads each page the cheapest faithful way ($0.05 to $2.50 per 1,000 pages, depending on the mix);
-good reads every page with a vision model ($2.50 per 1,000 pages).
+fast reads the text layer only and keeps scanned pages as images, not read (lowest price);
+auto reads each page the cheapest faithful way (its price depends on the mix of pages);
+good reads every page with a vision model (highest price). Prices: https://docslurp.io/pricing
 --estimate prints the work estimate (pages, documents, credits, time) for the operation and exits without doing it.
 Mutations that queue background work print their job; follow it with docslurp jobs watch <jobId>.
 --watch waits up to five minutes by default; --timeout sets its limit.
