@@ -171,7 +171,7 @@ const FAILURE_PATTERNS: Array<[IngestReportFailureReason, RegExp]> = [
   // before the cutover keep that text, and reports over those runs must still say OCR was unavailable.
   ["ocr_unavailable", /model-refused|DOCSLURP_OCR_MODE|OCR provider plugin|tessdata|traineddata|tesseract|leptonica|\bocr\b.*(?:unavailable|refused|is off|not (?:installed|found|available)|failed to (?:init|load))/i],
   ["unsupported_format", /unsupported (?:file|format|media|mime|content)|(?:unknown|unrecognized|unrecognised) (?:file )?(?:format|type)|no (?:parser|handler) (?:for|available for)/i],
-  ["unreadable_file", /password|encrypted|corrupt|truncated|malformed|damaged|invalid (?:pdf|zip|xref|header|image)|cross-reference|xref|not a valid|bad (?:zip|header)|unexpected end of file|premature end/i],
+  ["unreadable_file", /password[- ]protected|requires? a password|(?:incorrect|wrong|missing) password|\bencrypted\b|corrupt|truncated|malformed|damaged|invalid (?:pdf|zip|xref|header|image)|cross-reference|xref|not a valid|bad (?:zip|header)|unexpected end of file|premature end/i],
   ["timeout", /timed? ?out|timeout|deadline exceeded|ETIMEDOUT/i],
   ["policy_blocked", /privacy mode|local-only|strict-privacy|cost cap|spend cap|maxCostCents|budget|\bpii\b|policy/i],
   ["provider_failed", /rate.?limit|\b429\b|\bprovider\b|openrouter|upstream|overloaded|quota|\b50[0234]\b/i],
