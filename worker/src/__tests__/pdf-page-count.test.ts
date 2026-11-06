@@ -245,7 +245,7 @@ describe.skipIf(!realTool)("walked vs extracted with the real tools (owner decis
     expect(await countPdfPages(runner, source)).toBe(50);
     await assertPopplerAcceptsPdf(runner, source); // Poppler opens it (it sees one page)
     const text = (await runner.run({ ...(await runner.extractText(source, 50, true)), binary: `${dopplerBin}/pdftotext` })).stdout;
-    const processed = processedPdfPages(text);
+    const processed = processedPdfPages(text, "poppler-text");
     expect(processed).toBe(1);
     await db.exec(`
       insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
@@ -292,8 +292,8 @@ describe.skipIf(!realTool)("an inflated /Count: no utility processes more than t
     const split = await out("split");
     await runner.run({ ...(await runner.splitPages(source, path.join(split, "p-%d.pdf"), pages)), binary: tool("pdfseparate") });
     expect((await readdir(split)).length).toBe(3);
-    expect(processedPdfPages((await runner.run({ ...(await runner.extractText(source, pages, true)), binary: tool("pdftotext") })).stdout)).toBe(3);
-    expect(processedPdfPages((await runner.run({ ...(await runner.pageText(source, pages)), binary: tool("pdftotext") })).stdout)).toBe(3);
+    expect(processedPdfPages((await runner.run({ ...(await runner.extractText(source, pages, true)), binary: tool("pdftotext") })).stdout, "poppler-text")).toBe(3);
+    expect(processedPdfPages((await runner.run({ ...(await runner.pageText(source, pages)), binary: tool("pdftotext") })).stdout, "poppler-text")).toBe(3);
     const sizes = (await runner.run({ ...(await runner.pdfPageSizes(source, 1, pages)), binary: tool("pdfinfo") })).stdout;
     expect(sizes.match(/^Page +\d+ size:/gm)?.length).toBe(3);
   }, 120_000);
@@ -513,13 +513,16 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
       insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts)
         values ('x-more', 'o1', 'u1', 'w1', 'run-x', 'm.pdf', 'application/pdf', 'raw/m', 'processing', 3, 'counted', '${JSON.stringify(pdfFacts)}'),
                ('x-less', 'o1', 'u1', 'w1', 'run-x', 'l.pdf', 'application/pdf', 'raw/l', 'processing', 10, 'counted', '${JSON.stringify(pdfFacts)}');`);
-    expect(processedPdfPages("a\fb\fc\fd\fe\f")).toBe(5);
+    expect(processedPdfPages("a\fb\fc\fd\fe\f", "poppler-text")).toBe(5);
     // Blank pages count, trailing ones included (pdftotext ends every page with a form feed).
-    expect(processedPdfPages("text one\f\ftext three\f\f")).toBe(4);
-    expect(processedPdfPages("a\f\f\f\n")).toBe(3);
-    expect(processedPdfPages("a\fb")).toBe(2);
+    expect(processedPdfPages("text one\f\ftext three\f\f", "poppler-text")).toBe(4);
+    expect(processedPdfPages("a\f\f\f\n", "poppler-text")).toBe(3);
+    expect(processedPdfPages("a\fb", "poppler-text")).toBe(2);
+    // Separator style (doppler-md, vm-pdf, native-pdf): N pages are N-1 form feeds, so a trailing one is a blank last page.
+    expect(processedPdfPages("a\fb", "doppler-md")).toBe(2);
+    expect(processedPdfPages("a\fb\f", "vm-pdf")).toBe(3);
     const more = await stateFor("run-x", "x-more");
-    expect(await reconcileProcessedPdfPages(more.state, more.document, processedPdfPages("a\fb\fc\fd\fe"))).toEqual({ measured: 3, processed: 5, mismatch: "processed-above-measured" });
+    expect(await reconcileProcessedPdfPages(more.state, more.document, processedPdfPages("a\fb\fc\fd\fe", "doppler-md"))).toEqual({ measured: 3, processed: 5, mismatch: "processed-above-measured" });
     expect(await pageRow("x-more")).toEqual({ page_count: 5, page_count_source: "counted" });
     const less = await stateFor("run-x", "x-less");
     expect(await reconcileProcessedPdfPages(less.state, less.document, 1)).toEqual({ measured: 10, processed: 1, mismatch: "processed-below-measured" });
@@ -533,5 +536,25 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
     retry.artifactLedger.recordDocument("x-less", PDF_WALKED_PAGES_SLOT, "10");
     expect(await reconcileProcessedPdfPages(retry, retry.documents[0]!, 1)).toEqual({ measured: 10, processed: 1, mismatch: "processed-below-measured" });
     expect(await pageRow("x-less")).toEqual({ page_count: 1, page_count_source: "counted" });
+  }, 60_000);
+
+  it("a blank last page counts N under both form-feed conventions, with no false partial-extraction flag (council E #4)", async () => {
+    await db.exec(`
+      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+        values ('run-blank', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 2, 6);
+      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts)
+        values ('blank-term', 'o1', 'u1', 'w1', 'run-blank', 't.pdf', 'application/pdf', 'raw/t', 'processing', 3, 'counted', '${JSON.stringify(pdfFacts)}'),
+               ('blank-sep', 'o1', 'u1', 'w1', 'run-blank', 's.pdf', 'application/pdf', 'raw/s', 'processing', 3, 'counted', '${JSON.stringify(pdfFacts)}');`);
+    // Three pages, the third blank: pdftotext terminates each page; Doppler, vm-pdf and native-pdf separate them.
+    const outputs: Array<[string, string, string]> = [["blank-term", "poppler-text", "one\ftwo\f\f"], ["blank-sep", "doppler-md", "one\ftwo\f"]];
+    for (const [id, extractor, markdown] of outputs) {
+      expect(processedPdfPages(markdown, extractor), extractor).toBe(3);
+      const { state, document } = await stateFor("run-blank", id);
+      expect(await reconcileProcessedPdfPages(state, document, processedPdfPages(markdown, extractor))).toEqual({ measured: 3, processed: 3, mismatch: "none" });
+      expect(state.artifactLedger.readDocument(id, PDF_WALKED_PAGES_SLOT)).toBeUndefined();
+      expect(await pageRow(id)).toEqual({ page_count: 3, page_count_source: "counted" });
+    }
+    // The old single rule read Doppler's blank last page as a terminator: 2 of 3, a false partial extraction.
+    expect("one\ftwo\f".replace(/\f[ \t\r\n]*$/, "").split("\f").length).toBe(2);
   }, 60_000);
 });

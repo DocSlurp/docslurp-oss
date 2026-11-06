@@ -632,7 +632,7 @@ export class ExtractMarkdownStage implements Stage {
 
                   let winningText = policyDecision.selectedMarkdown;
                   // The page tree's count (format-detect) against the pages extraction processed: bill and authorize the larger.
-                  const pdfPageCheck = isPdf ? await reconcileProcessedPdfPages(state, document, processedPdfPages(winningText)) : null;
+                  const pdfPageCheck = isPdf ? await reconcileProcessedPdfPages(state, document, processedPdfPages(winningText, winningCandidate.label)) : null;
                   // What each extracted page holds, by the text rule: a page carrying many pages of text (tiny, invisible or
                   // off-page text included, which is indexed like any other) bills as that many (lib/page-equivalents.ts).
                   const pageEquivalents = await recordExtractedPageEquivalents(state, document, format, winningText);

@@ -166,11 +166,20 @@ export async function recordMeasuredPdfPageCount(args: {
   return { pages, method: mode, estimate };
 }
 
-/** Pages a PDF extractor's output holds: every PDF extractor writes one form-feed-separated page per page it processed. */
-export function processedPdfPages(markdown: string): number {
-  // Only the last page's own terminator is dropped (one form feed, then any spaces or newlines): trailing blank pages are
-  // pages, and `\s` would swallow their form feeds too.
-  return markdown.replace(/\f[ \t\r\n]*$/, "").split("\f").length;
+/** PDF extractors whose output ends every page, the last included, with a form feed: pdftotext's convention. */
+const PAGE_TERMINATED_PDF_EXTRACTORS: ReadonlySet<string> = new Set(["poppler-text"]);
+
+/**
+ * Pages a PDF extractor's output holds, by that extractor's form-feed convention:
+ * - terminated (pdftotext, `poppler-text`): every page ends with a form feed, so only the last page's own terminator (one
+ *   form feed, then any spaces or newlines) is dropped; trailing blank pages are pages, and `\s` would swallow their form
+ *   feeds too;
+ * - separated (Doppler's `doppler-md`, `vm-pdf`, `native-pdf` and any other extractor): N pages are joined by N-1 form feeds
+ *   with no terminator, so a trailing form feed is a blank last page.
+ */
+export function processedPdfPages(markdown: string, extractor: string): number {
+  if (PAGE_TERMINATED_PDF_EXTRACTORS.has(extractor)) return markdown.replace(/\f[ \t\r\n]*$/, "").split("\f").length;
+  return markdown.split("\f").length;
 }
 
 /** Run-ledger slot holding a PDF's walked page count when extraction processed fewer pages (so a retry still knows N of M). */
