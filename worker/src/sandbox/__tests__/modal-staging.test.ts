@@ -75,6 +75,14 @@ describe("SessionStaging", () => {
     expect(Buffer.from(remote.files.get(file)!.data).toString()).toBe("hello");
   });
 
+  it("refreshes a reused input path when its contents change, including same-size edits", async () => {
+    const file = path.join(root, "a.txt");
+    writeFileSync(file, "first"); await staging.ensureUploaded([file]);
+    writeFileSync(file, "other"); await staging.ensureUploaded([file]);
+    expect(remote.writes).toEqual([file, file]);
+    expect(Buffer.from(remote.files.get(file)!.data).toString()).toBe("other");
+  });
+
   it("uploads directories recursively at the same absolute path", async () => {
     mkdirSync(path.join(root, "in", "nested"), { recursive: true });
     writeFileSync(path.join(root, "in", "one.txt"), "1");
@@ -260,18 +268,14 @@ const lifecycleConfig = {
 
 class NotFound extends Error {}
 
-type FakeProcess = { stdout: { readText(): Promise<string> }; stderr: { readText(): Promise<string> }; wait(): Promise<number> };
-
-function finished(stdout = "out", exitCode = 0): FakeProcess {
-  return { stdout: { readText: async () => stdout }, stderr: { readText: async () => "" }, wait: async () => exitCode };
-}
-
-/** A process that runs until the test's kill handler (or the test) ends it. */
+type FakeProcess = { stdout: ReadableStream<Uint8Array>; stderr: ReadableStream<Uint8Array>; wait(): Promise<number> };
+function stream(text: string | Uint8Array): ReadableStream<Uint8Array> { return new ReadableStream({ start(c) { c.enqueue(typeof text === "string" ? Buffer.from(text) : text); c.close(); } }); }
+function finished(stdout = "out", exitCode = 0): FakeProcess { return { stdout: stream(stdout), stderr: stream(""), wait: async () => exitCode }; }
 function running(): { process: FakeProcess; end(exitCode: number): void } {
   let end!: (exitCode: number) => void;
   const exited = new Promise<number>((resolve) => (end = resolve));
-  const process = { stdout: { readText: async () => (await exited, "") }, stderr: { readText: async () => (await exited, "") }, wait: () => exited };
-  return { process, end };
+  const pending = () => new ReadableStream<Uint8Array>({ async start(c) { await exited; c.close(); } });
+  return { process: { stdout: pending(), stderr: pending(), wait: () => exited }, end };
 }
 
 /** The provider launches commands as [sh, -c, launch, sh, start, control, binary, ...args] and kills as [sh, -c, kill, sh, control]. */
@@ -286,6 +290,7 @@ const controlOf = (argv: string[]) => (isKill(argv) ? argv[4] : argv[5]);
 function fakeSdk(
   opts: {
     createFails?: boolean;
+    createGate?: Promise<void>;
     exec?: (command: string[], control: string) => Promise<FakeProcess>;
     onKill?: (control: string) => void;
   } = {},
@@ -300,6 +305,7 @@ function fakeSdk(
     commands: [] as string[][],
     commandTimeouts: [] as Array<number | undefined>,
     kills: [] as string[],
+    createOptions: [] as unknown[],
     remote,
   };
   const info = (entry: { path: string; isDir: boolean; size: number; mtime: number }) => ({
@@ -309,6 +315,7 @@ function fakeSdk(
     modifiedTime: entry.mtime,
   });
   const sandbox = {
+    sandboxId: "sb-test",
     terminate: async () => void state.terminate++,
     filesystem: {
       makeDirectory: async (p: string) => {
@@ -327,6 +334,8 @@ function fakeSdk(
       listFiles: async (p: string) => (await remote.list(p)).map(info),
     },
     exec: async (argv: string[], params?: { timeoutMs?: number }) => {
+      if (argv[0] === "/bin/cat") return { stdout: stream(await remote.readFile(argv[2]!)), stderr: stream(""), wait: async () => 0 };
+      if (argv[0] === "python3" && argv[1] === "-I") return finished((await remote.list(argv[4]!)).map((entry) => JSON.stringify(entry)).join("\n"));
       if (isKill(argv)) {
         state.kills.push(controlOf(argv));
         opts.onKill?.(controlOf(argv));
@@ -339,12 +348,15 @@ function fakeSdk(
   };
   const sdk = {
     SandboxFilesystemNotFoundError: NotFound,
+    Sandbox: class { constructor(_client: unknown, _id: string) {} async terminate() { state.terminate++; } },
     ModalClient: class {
       apps = { fromName: async () => ({}) };
       images = { fromRegistry: (tag: string, secret?: unknown) => void state.images.push([tag, secret]) };
       secrets = { fromName: async (name: string) => ({ secret: name }) };
       sandboxes = {
-        create: async () => {
+        create: async (_app: unknown, _image: unknown, options: unknown) => {
+          state.createOptions.push(options);
+          await opts.createGate;
           if (opts.createFails) throw new Error("no capacity");
           return sandbox;
         },
@@ -380,6 +392,21 @@ describe("modal provider session lifecycle", () => {
     return { state, provider, session: () => provider.openSession(config, { activityId: "a" }) };
   }
 
+  it("closes a creation deadline promptly and terminates a late VM with a fresh client", async () => {
+    vi.useFakeTimers();
+    try {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const { state, session } = await open({ createGate: gate });
+      const pending = session().catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(await pending).toBeInstanceOf(Error);
+      expect(state.clientClose).toBe(1);
+      release(); await vi.advanceTimersByTimeAsync(1);
+      expect(state.terminate).toBe(1); expect(state.clientClose).toBe(2);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("close terminates the sandbox once and is idempotent", async () => {
     const { state, session } = await open();
     const opened = await session();
@@ -387,6 +414,7 @@ describe("modal provider session lifecycle", () => {
     await opened.close();
     expect(state.terminate).toBe(1);
     expect(state.clientClose).toBe(1);
+    expect(state.createOptions[0]).toMatchObject({ runtime: "vm", blockNetwork: true, includeOidcIdentityToken: false, env: {}, secrets: [], volumes: {}, cloudBucketMounts: {} });
   });
 
   /** Usage lines logged for this test's commands. */

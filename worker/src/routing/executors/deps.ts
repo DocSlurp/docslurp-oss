@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import sharp from "sharp";
+import sharp from "../../tools/isolated-image.js";
 import {
   canonicalDocumentSchema,
   type BBox,

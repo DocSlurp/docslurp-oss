@@ -86,6 +86,9 @@ function candidates(env: NodeJS.ProcessEnv): Array<{ specifier: string; from: st
 
 export type NativePdfModuleLoad = { ok: true; module: unknown; source: string } | { ok: false; reason: string };
 
+const PRODUCTION_NATIVE_PDF_REFUSAL =
+  "in-process native PDF parsing lacks a VM boundary; production must use isolated parser commands";
+
 let moduleCache: NativePdfModuleLoad | null = null;
 
 /**
@@ -93,6 +96,7 @@ let moduleCache: NativePdfModuleLoad | null = null;
  * normal, reported state. `env` is only read on the first call.
  */
 export function loadNativePdfModule(env: NodeJS.ProcessEnv = process.env): NativePdfModuleLoad {
+  if ((env.NODE_ENV === "production" || process.env.NODE_ENV === "production")) return { ok: false, reason: PRODUCTION_NATIVE_PDF_REFUSAL };
   if (moduleCache) return moduleCache;
   applyNativePdfEngineEnv(env);
   const tried: string[] = [];
@@ -120,6 +124,7 @@ let override: NativePdfEngineLoad | null = null;
 
 /** The engine adapter over the binding, once per process. */
 export async function loadNativePdfEngine(env: NodeJS.ProcessEnv = process.env): Promise<NativePdfEngineLoad> {
+  if ((env.NODE_ENV === "production" || process.env.NODE_ENV === "production")) return { ok: false, reason: PRODUCTION_NATIVE_PDF_REFUSAL };
   if (override) return override;
   if (engineCache) return engineCache;
   const loaded = loadNativePdfModule(env);
@@ -162,6 +167,9 @@ export function nativePdfEngineRequired(env: NodeJS.ProcessEnv = process.env): b
  * required but missing instead of silently serving every PDF without it.
  */
 export async function assertNativePdfEngineAtStartup(env: NodeJS.ProcessEnv = process.env): Promise<NativePdfEngineLoad> {
+  if ((env.NODE_ENV === "production" || process.env.NODE_ENV === "production") && nativePdfEngineRequired(env)) {
+    throw new Error(PRODUCTION_NATIVE_PDF_REFUSAL + "; build without DOCSLURP_NATIVE_PDF and set DOCSLURP_PDF_ENGINE=off");
+  }
   const loaded = await loadNativePdfEngine(env);
   // An image that claims to ship the binding must load it; a mode alone accepts the explicit poppler subset.
   const installed = /^(1|true)$/i.test(env.DOCSLURP_NATIVE_PDF_INSTALLED?.trim() ?? "");

@@ -707,7 +707,7 @@ export function createRunCreation(deps: RunCreationDeps) {
       const documentId = randomUUID();
       let metadata: Awaited<ReturnType<typeof resolveSourceMetadata>>;
       try {
-        metadata = await resolveSourceMetadata({ ...file, filename });
+        metadata = await resolveSourceMetadata({ ...file, filename }, { userId: input.userId, orgId, workspaceId: input.workspaceId, runId, apiKeyId: input.apiKeyId });
       } catch (error) {
         if (error instanceof UnreadableSourceError) {
           unreadable.push({ sourceKey: file.sourceKey, filename, error });

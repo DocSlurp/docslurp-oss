@@ -103,6 +103,21 @@ describe("sandbox command construction", () => {
     }
   });
 
+  it("stages signature files for directory-based health checks without writable input access", () => {
+    const workspace = mkdtempSync(path.join(tmpdir(), "docslurp-signatures-test-"));
+    try {
+      const signature = path.join(workspace, "daily.cvd");
+      writeFileSync(signature, "synthetic signature header");
+      const spec = command({ plan: { binary: "clamscan", args: ["--database", workspace, "--version"], available: true, stagedInputs: [signature], readOnlyInputs: true } });
+      expect(spec.inputPaths).toEqual([signature]);
+      expect(spec.writablePaths).toEqual([]);
+    } finally { rmSync(workspace, { recursive: true, force: true }); }
+  });
+
+  it("refuses auxiliary inputs outside private staging", () => {
+    expect(() => command({ plan: { ...samplePlan, stagedInputs: ["/etc/passwd"] } })).toThrow(/Auxiliary parser inputs/);
+  });
+
   it("does not infer a writable checkout from scripts in a temporary worktree", () => {
     const project = path.join(tmpdir(), "docslurp-worktree-test");
     const spec = command({

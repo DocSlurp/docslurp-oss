@@ -1,6 +1,8 @@
 import { instrumentS3Client } from "@docslurp/shared/observability";
-import { createHash } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { spawn } from "node:child_process";
+import { pdfInfoInVm, PdfMetadataVmError } from "./pdf-metadata-vm.js";
+import { recordCostEvent } from "../lib/ai-usage.js";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -61,7 +63,7 @@ export function parsePdfInfoPageCount(output: string): number | null {
   }
 
   const value = Number.parseInt(match[1], 10);
-  return Number.isFinite(value) && value > 0 ? value : null;
+  return Number.isSafeInteger(value) && value > 0 && value <= 1_000_000 ? value : null;
 }
 
 export function estimateNonPdfPageCount(
@@ -144,7 +146,11 @@ async function downloadSourceBytes(sourceKey: string): Promise<Uint8Array> {
     }),
   );
 
+  const maxBytes = 500 * 1024 * 1024;
+  if (response.ContentLength !== undefined && (!Number.isSafeInteger(response.ContentLength) || response.ContentLength < 0 || response.ContentLength > maxBytes)) throw new Error("source object exceeds metadata byte limit");
+  if (process.env.NODE_ENV === "production" && response.ContentLength === undefined) throw new Error("source object size unavailable; refusing unbounded metadata download");
   const bytes = await response.Body?.transformToByteArray();
+  if (bytes && bytes.byteLength > maxBytes) throw new Error("source object exceeds metadata byte limit");
   return bytes ?? new Uint8Array();
 }
 
@@ -152,10 +158,11 @@ export async function resolveSourceMetadata(file: {
   mimeType: string;
   sourceKey: string;
   filename: string;
-}): Promise<SourceMetadata> {
+}, scope?: { userId: string; orgId: string; workspaceId: string; runId: string; apiKeyId?: string | null }): Promise<SourceMetadata> {
   const bytes = await downloadSourceBytes(file.sourceKey);
   const sourceSha256 = sha256Hex(bytes);
   if (file.mimeType === "application/pdf") {
+    if (process.env.NODE_ENV === "production" && !scope) throw new Error("PDF metadata requires an explicit tenant scope");
     const directory = await mkdtemp(path.join(tmpdir(), "docslurp-pagecount-"));
     const tempFile = path.join(
       directory,
@@ -163,12 +170,20 @@ export async function resolveSourceMetadata(file: {
     );
 
     try {
-      await writeFile(tempFile, bytes);
+      if (process.env.NODE_ENV !== "production") await writeFile(tempFile, bytes);
       let output: string;
       try {
-        output = await runPdfInfo(tempFile);
+        output = process.env.NODE_ENV === "production" ? await pdfInfoInVm(bytes, async (seconds) => {
+          if (!scope) throw new Error("PDF metadata usage requires an explicit tenant scope");
+          // Modal Sandbox non-preemptible list prices, verified 2026-11-06 https://modal.com/pricing.
+          await recordCostEvent({ userId: scope.userId, scope, event: {
+            id: randomUUID(), provider: "modal", model: "metadata-vm", metric: "parser-sandbox-api", amount: seconds, unit: "seconds",
+            costCents: seconds * (0.5 * 0.00003942 + 0.00000667) * 100,
+            metadata: { billable: false, estimated: true, estimateBasis: "requested CPU ceiling and memory over control-plane wall time", rateObservedAt: "2026-11-06", rateSource: "https://modal.com/pricing", excludes: ["image import", "egress", "regional multipliers"] },
+          } });
+        }) : await runPdfInfo(tempFile);
       } catch (error) {
-        if (error instanceof PdfInfoExitError && PDFINFO_UNREADABLE_EXIT_CODES.has(error.exitCode)) {
+        if ((error instanceof PdfInfoExitError || error instanceof PdfMetadataVmError) && error.exitCode !== undefined && PDFINFO_UNREADABLE_EXIT_CODES.has(error.exitCode)) {
           throw new UnreadableSourceError(file.filename, (error.message.replace(/^pdfinfo exited with (?:\d+|unknown):\s*/, "").split("\n")[0] || "invalid PDF").slice(0, 200));
         }
         throw error;

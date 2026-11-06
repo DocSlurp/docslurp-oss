@@ -2,7 +2,7 @@
 
 The worker runs file parsers (poppler, pandoc, LibreOffice and similar) on untrusted input. A sandbox provider decides where and how those commands run. This page covers the four providers, how one is chosen, what production requires, and how to set up each. For what the sandbox protects and where it stops, see [Security](security.md#parser-sandbox).
 
-No provider here is a VM boundary between a parser and the worker's secrets. Bubblewrap and landlock confine a parser on the worker's own kernel, and Modal moves command-line parsers off the host while in-process parsers stay in the worker. Treat them as defense in depth; [Security](security.md#what-the-sandbox-does-not-give-you) explains what that leaves exposed.
+Production uses Modal's explicit VM runtime with filesystem and full network isolation. Local providers remain available for trusted development fixtures. In-process native PDF parsing is refused in production; image, PDF.js and quarantine byte inspection use VM entrypoints. See [Security](security.md#parser-sandbox) for the required image contract and credential boundary. Historical platform measurements below predate this VM-only production policy.
 
 ## Providers
 
@@ -28,7 +28,7 @@ No provider here is a VM boundary between a parser and the worker's secrets. Bub
 - **Staged sources are verified.** Every source the worker stages (the PDF source cache, the quarantine scan, media, embedding fallbacks) is hashed as staged and compared with the server's `documents.source_sha256`. A mismatch refuses the document for good, before any parser runs: `[worker-source] status=source-hash-mismatch metric=source_hash_mismatch` with the expected and staged hashes. A document without a server hash is keyed by its staged hash. On the server, a completed single-part direct upload is copied (`CopyObject` conditional on the verified ETag) to a server-chosen `sealed-<file id>-<name>` key beside it, and that copy is what is hashed and ingested; the presigned key is deleted. A PUT that lands between verification and the copy fails completion with 409. A PUT after completion, while the URL is still valid, only recreates an object nothing reads.
 - **Organization breaker.** Every unverified teardown with a document, attributable or not, is counted against the document's organization in `org_teardown_failures`. When an organization reaches `WORKER_ORG_TEARDOWN_LIMIT` (default 3) within `WORKER_ORG_TEARDOWN_WINDOW_HOURS` (default 24), the recording worker logs `[worker-quarantine] status=org-breaker-open metric=org_teardown_breaker_open` (alert on it), and every worker refuses that organization's parser work: `status=org-refused metric=org_parser_refused`, and the document fails without another strategy. Byte-varied files therefore cannot walk the fleet one worker at a time. The window slides, so the refusal lifts on its own; delete the organization's rows to lift it sooner.
 - **Seccomp filter for every bubblewrap command.** The worker generates the filters (`sandbox/seccomp.ts`, no libseccomp) and bwrap installs one for every command. All of them make `io_uring_setup`, `io_uring_enter` and `io_uring_register` fail with ENOSYS (io_uring runs operations, such as `IORING_OP_SOCKET`, that a syscall filter never sees) and kill a process that makes a foreign-ABI system call (x32 or 32-bit compat). Commands that do not need a UNIX socket also get `socket(AF_UNIX)` and `socketpair(AF_UNIX)` failing with EAFNOSUPPORT, so two concurrent commands cannot meet on a socket and pass file descriptors (for example to hold each other's stdout and trip the breaker). That rule is the default: only the audited socket clients in `tools/runner.ts` (`UNIX_SOCKET_CLIENTS`: clamdscan, LibreOffice, Python interpreters and Python entry points, node, kreuzberg) run without it. The filters cover x86_64 and arm64; on another architecture the bubblewrap probe fails and the worker does not start. Concurrent pdftoppm lanes write to separate directories and read the source read-only, and two extractor candidates that run at once each get a private copy of the source in their own directory. Every filter also denies, with EPERM, `unshare`, `setns`, `clone` with any `CLONE_NEW*` flag (a nested user namespace would grant `CAP_NET_ADMIN` over a new network namespace, and with it nf_tables), the mount API (`mount`, `umount2`, `pivot_root`, `open_tree`, `move_mount`, `fsopen`, `fsconfig`, `fsmount`, `fspick`, `mount_setattr`), `bpf`, `perf_event_open`, `userfaultfd`, `keyctl`, `add_key`, `request_key`, `process_vm_readv`/`writev`, `open_by_handle_at`, kexec, module loading, `reboot`, `swapon`/`swapoff` and `acct`; `clone3` fails with ENOSYS so libc falls back to `clone`, whose flags the filter can read. fork, threads and subprocesses keep working.
-- **Providers that cannot filter UNIX sockets refuse those commands.** bubblewrap filters them with seccomp; landlock with landrun's scoping (landrun 0.1.17 or newer; an older landrun is not trusted). `none` refuses every command that asks for the AF_UNIX rule: `[parser-sandbox] status=refused reason=no-unix-socket-filter`. For local development, `DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS=1` runs them anyway with a one-time `status=degraded reason=unfiltered-unix-sockets` warning; it is ignored when `NODE_ENV=production`. landlock has no seccomp filter, so the namespace and kernel-surface deny list above applies to bubblewrap only; prefer bubblewrap in production. Modal is exempt: its commands run in the activity's own remote Modal sandbox (gVisor by default; see [Choosing isolation per platform](platform-isolation.md)), which is terminated with the session and never holds a worker-side teardown. A local session that offers only `run()` (no `spawn()`) is refused.
+- **Providers that cannot filter UNIX sockets refuse those commands.** bubblewrap filters them with seccomp; landlock with landrun's scoping (landrun 0.1.17 or newer; an older landrun is not trusted). `none` refuses every command that asks for the AF_UNIX rule: `[parser-sandbox] status=refused reason=no-unix-socket-filter`. For local development, `DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS=1` runs them anyway with a one-time `status=degraded reason=unfiltered-unix-sockets` warning; it is ignored when `NODE_ENV=production`. landlock has no seccomp filter, so the namespace and kernel-surface deny list above applies to bubblewrap only; local providers are restricted to trusted development fixtures. Modal is exempt: its commands run in the activity's own remote Modal sandbox (explicit VM runtime), which is terminated with the session and never holds a worker-side teardown. A local session that offers only `run()` (no `spawn()`) is refused.
 - **A quarantined worker always exits.** Temporal's `shutdownForceTime` is the drain grace plus `WORKER_COMMAND_TEARDOWN_VERIFY_MS` plus 10 s. If the process is still running 30 s after that, a timer started when the breaker opened logs `[worker-fatal] reason=teardown-unverified phase=force` and exits 1.
 - A sweep (at session start, then every 10 minutes) removes per-command directories under `DOCSLURP_PARSER_SANDBOX_ROOT` whose owning command has exited, for example after a worker crash. The owner file is written before the command starts (the worker's pid, then the command's), each time atomically (a temporary file renamed over it). The sweep is a heuristic: a directory whose owner file is missing is removed by age alone, after 3 hours (longer than any command's wall-clock budget); one whose owner file exists but cannot be read or parsed is kept and logged (`status=sweep-skipped`). Age never comes from the directory's modification time, which the parser can set: it is the owner file's, or without one the directory's change time (ctime). Symlinked entries are skipped, never followed.
 
@@ -55,7 +55,7 @@ The pinned landrun version, download URLs and sha256 sums are in `worker/sandbox
 
 Set `DOCSLURP_PARSER_SANDBOX` to `bubblewrap`, `landlock`, `modal` or `none`. An unknown value stops the worker at start.
 
-Unset, the default is `bubblewrap` on Linux, and `none` on other platforms outside production. Existing installs that never set the variable keep running under bubblewrap.
+Unset, production defaults to `modal`; outside production Linux defaults to `bubblewrap` and other platforms to `none`. Upgrades need a pinned parser image and Modal control credentials before production startup.
 
 At start the worker loads the provider, probes it and checks the policy below. If any step fails, the worker exits. It never falls back to running parsers unsandboxed. On success it logs one line:
 
@@ -67,19 +67,9 @@ Each Temporal activity opens its own sandbox session, and the session closes whe
 
 ## Production policy
 
-With `NODE_ENV=production` (which Compose sets), the provider must report:
+With `NODE_ENV=production` (which Compose sets), the audited `modal` provider must report a remote VM with filesystem isolation, full network isolation and process teardown. Bubblewrap, landlock, `none` and unknown remote providers are refused. `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED` never bypasses this production requirement.
 
-- filesystem isolation,
-- network isolation of `tcp-only` or `full`, and
-- process teardown (`processes=true`, see [Process teardown](#process-teardown)). This one is required in every environment.
-
-Landlock reports `tcp-only`, so it passes. On a kernel without Landlock ABI v9 it never gets that far: the probe fails (see [Landlock](#landlock)). Provider `none` is refused unless you set `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true`. With that override, every start logs:
-
-```text
-[parser-sandbox] status=unisolated
-```
-
-Outside production only the process-teardown requirement is enforced, and the probe still has to pass.
+Outside production, the process-teardown requirement remains enforced and the probe must pass. These local modes are for trusted development fixtures.
 
 ## Configuration
 
@@ -307,7 +297,7 @@ Do not assume landlock works on Cloud Run until it has been checked. [Choosing i
 node worker/dist/sandbox/probe-cli.js
 ```
 
-It prints `ok <provider>` and exits 0, or prints the failure detail and exits 1. After the probe succeeds it also opens one session and runs `ffprobe -version`, `ffmpeg -version`, `pdftoppm -v` and `pandoc --version` inside it, for each of those that is installed. A library the sandbox cannot see then fails the check, not every upload of that format. If one fails, the probe prints `<name> fails inside the parser sandbox (exit <status>): <first line of stderr>` and exits 2. For a remote provider such as Modal it skips these checks without opening a sandbox, because the binaries live in the provider's image, and prints `parser binary checks skipped: remote provider`. The Modal probe also does not pull the image, so a wrong or unpullable `DOCSLURP_MODAL_IMAGE` first shows up as `modal sandbox creation failed` in the first activity that runs a parser.
+It prints `ok <provider>` and exits 0, or prints the failure detail and exits 1. After the probe succeeds it also opens one session and runs `ffprobe -version`, `ffmpeg -version`, `pdftoppm -v` and `pandoc --version` inside it, for each of those that is installed. A library the sandbox cannot see then fails the check, not every upload of that format. If one fails, the probe prints `<name> fails inside the parser sandbox (exit <status>): <first line of stderr>` and exits 2. For a remote provider such as Modal it skips these checks without opening a sandbox, because the binaries live in the provider's image, and prints `parser binary checks skipped: remote provider`. The Modal startup probe creates a VM and executes the guest image contract, so a missing, unpullable or outdated image refuses worker startup.
 
 ## Running parsers in a separate Fargate task (no bubblewrap or landlock)
 
@@ -439,12 +429,7 @@ A provider whose probe fails is skipped, with the reason printed.
 
 ## Limits
 
-Not every code path goes through a provider:
-
-- **In-process parsers** (Kreuzberg, LiteParse and, when installed, the private native PDF engine) run inside the worker process. No provider sandboxes them.
-- **The vector writer and the embedding pool** run outside the sandbox. The writer needs object storage access.
-
-They run with the worker's privileges and secrets. [Security](security.md#commands-that-skip-the-sandbox) has details.
+Production source-file parsers run through the VM provider. Native in-process parsers refuse production work. The vector writer and embedding pool remain trusted host processes; they must not decode customer files locally. [Security](security.md#trusted-host-processes) describes these host responsibilities.
 
 ## Adding a provider
 
@@ -457,3 +442,18 @@ Providers live in `worker/src/sandbox/providers/<id>/index.ts`.
 5. Never put secret values in probe details or error messages.
 
 Source: `worker/src/sandbox/`, `worker/sandbox-tools.json`, [Security](security.md#parser-sandbox).
+
+## Large data tables in production
+
+HTML table geometry is prepared in the parser VM and validated before chunking.
+The limits accommodate 5,000 data rows by 20 columns plus headers: 4 MiB of source
+characters, 128,000 cells per table and byte-aware batches capped at 32 MiB.
+Across a document, table source and cell text each have a 32 MiB character budget,
+and validated cells are capped at 256,000. Wider or verbose tables can hit those
+independent limits before the row count; unsupported geometry retains source text
+without inferred cell coordinates. Source beyond a document budget refuses work.
+
+JSON record arrays are not truncated by the default 100-row Markdown block size;
+the renderer repeats tables for subsequent rows until its explicit output budget.
+For exhaustive numerical aggregation or complete dataset export, use the original
+data: RAG chunks provide cited retrieval, not a substitute for a dataframe engine.
