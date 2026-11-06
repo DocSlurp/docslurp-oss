@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import { countMarkdownTables, normalizeExtractedMarkdown, sanitizeExtractedMarkdown } from "../lib/extracted-markdown.js";
-import { stripLeadingFrontmatter } from "../lib/markdown-structure.js";
+import { HEADING_MAX_LINE_CHARS, parseAtxHeading, plainHeadingText, stripLeadingFrontmatter } from "../lib/markdown-structure.js";
+import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
+import { chunkText } from "../pipeline/chunking.js";
 import { stripTrailingPageBreak } from "../lib/page-equivalents.js";
 import { splitProcessedPdfPages } from "../lib/pdf-page-count.js";
 
@@ -51,16 +53,44 @@ describe("table normalization is one forward pass over many small tables (counci
     expect(elapsed(convert(text))).toBeLessThan(250);
   });
 
-  it("4 MB is linear in 1 MB (a splice per table took 110 s at 4 MB)", () => {
-    const one = elapsed(convert(tables(1)));
-    const four = elapsed(convert(tables(4)));
-    expect(four).toBeLessThan(Math.max(6 * one, 50));
-    expect(four).toBeLessThan(1_000);
+  it("4 MB of small pipe tables converts in under 2 s (a splice per table took 110 s; about 190 ms unloaded)", () => {
+    expect(elapsed(convert(tables(4)))).toBeLessThan(2_000);
   });
 
   it("a row holding a form feed is never a table row, so the page break survives (council K #7)", () => {
     const text = "| a | b |\n| --- | --- |\n| 1 |\f2 |\n\n";
     const out = normalizeExtractedMarkdown({ markdown: text, preserveTables: true });
     expect(out.split("\f")).toHaveLength(2);
+  });
+});
+
+describe("heading detection and cleanup are linear on hostile heading lines (council K #3)", () => {
+  // Each shape at the 8 KB heading line cap: whitespace and NBSP runs, unclosed image/link/tag/autolink openers,
+  // backtick runs and unclosed bold, underscore-bold and strikethrough. Each took 30-100 ms per 8 KB line before.
+  const shapes: Record<string, (n: number) => string> = {
+    whitespace: (n) => `a${" ".repeat(n)}x`, nbsp: (n) => `a${" ".repeat(n)}x`, image: (n) => "![".repeat(n / 2), link: (n) => "[".repeat(n),
+    tag: (n) => "<a".repeat(n / 2), autolink: (n) => "<http:".repeat(n / 6), target: (n) => "[a](".repeat(n / 4), backticks: (n) => `${"`".repeat(n)}a`,
+    bold: (n) => "**a ".repeat(n / 4), underscoreBold: (n) => "__a ".repeat(n / 4), strike: (n) => "~~a ".repeat(n / 4), closingHashes: (n) => `a${" #".repeat(n / 2)} x`,
+  };
+
+  it.each(Object.keys(shapes))("an 8 KB %s heading parses and cleans in under 20 ms", (shape) => {
+    const text = shapes[shape]!(HEADING_MAX_LINE_CHARS - 16);
+    expect(elapsed(() => { plainHeadingText(text); parseAtxHeading(`# ${text}`); })).toBeLessThan(20);
+  });
+
+  // About 13 s per MB before; the bound leaves room for a loaded CI runner.
+  it.each(Object.keys(shapes))("1 MB of 8 KB %s headings goes through the canonical builder and the chunker in under 1 s", (shape) => {
+    const line = `# ${shapes[shape]!(HEADING_MAX_LINE_CHARS - 16)}`;
+    const text = `${line}\n`.repeat(Math.floor(MB / (line.length + 1)));
+    expect(elapsed(() => { buildCanonicalDocumentFromMarkdown({ documentId: "d", text, pageCount: 1 } as never); [...chunkText(text, 1800)]; })).toBeLessThan(1_000);
+  });
+
+  it("keeps ordinary headings as before; longer lines are body text", () => {
+    expect(parseAtxHeading("## Title ##")).toEqual({ level: 2, text: "Title ##" });
+    expect(plainHeadingText("Title ##")).toBe("Title");
+    expect(plainHeadingText("![logo](x.png) **Revenue** [notes](#n) <b>Q1</b> ~~old~~ `code`")).toBe("logo Revenue notes Q1 old code");
+    expect(parseAtxHeading("####### seven")).toBeNull();
+    expect(parseAtxHeading("#nospace")).toBeNull();
+    expect(parseAtxHeading(`# ${"a".repeat(HEADING_MAX_LINE_CHARS)}`)).toBeNull();
   });
 });

@@ -469,5 +469,21 @@ class LayoutFactsTest(unittest.TestCase):
         self.assertIsNone(page['words'])
 
 
+class LinearRegexTest(unittest.TestCase):
+    """Council K #3: regexes over extracted text stay linear on unclosed `<`, `](` and `<page` runs (and pipe lines)."""
+
+    def test_hostile_runs_scan_quickly(self):
+        import time
+        n = 256 * 1024
+        for regex, text in [(facts._TAG, '<' * n), (facts._LINK_TARGET, '](' * (n // 2)),
+                            (facts._PAGE, '<page ' * (n // 6))]:
+            started = time.monotonic()
+            regex.sub('', text)
+            self.assertLess(time.monotonic() - started, 0.25, regex.pattern)
+        started = time.monotonic()
+        facts.markdown_tables('|' + ' ' * (8 * 1024 - 2) + 'x\n' + '| a |\n' * 4)
+        self.assertLess(time.monotonic() - started, 0.25)
+
+
 if __name__ == '__main__':
     unittest.main()

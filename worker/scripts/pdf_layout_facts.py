@@ -1332,13 +1332,14 @@ _FENCE_CLOSE = re.compile(r'^ {0,3}(`{3,}|~{3,})\s*$')
 _TABLE_OPEN = re.compile(r'^ {0,3}<table(?=\s|>|$)', re.IGNORECASE)
 _TABLE_CLOSE = re.compile(r'</table\s*>', re.IGNORECASE)
 _TOKEN = re.compile(r'[^\W_]+', re.UNICODE)
-_LINK_TARGET = re.compile(r'\]\([^)]*\)')
-_TAG = re.compile(r'<[^>]*>')
+# Each class excludes its own opening delimiter, so an attempt stops at the next opener: linear on unclosed runs.
+_LINK_TARGET = re.compile(r'\]\([^()]*\)')
+_TAG = re.compile(r'<[^<>]*>')
 MAX_ANCHOR_WORDS = 20_000   # words considered per page; more than that is not a prose page worth aligning
 MAX_ANCHOR_BLOCKS = 4_000
 ANCHOR_COLUMN_OVERLAP = 0.3
 ANCHOR_TOLERANCE_PT = 2.0
-_PAGE = re.compile(r'<page\b([^>]*)>', re.IGNORECASE)
+_PAGE = re.compile(r'<page\b([^<>]*)>', re.IGNORECASE)
 _WORD = re.compile(r'<word\s+xMin="(-?[0-9.]+)"\s+yMin="(-?[0-9.]+)"\s+xMax="(-?[0-9.]+)"\s+yMax="(-?[0-9.]+)"[^>]*>([^<]*)</word>')
 
 

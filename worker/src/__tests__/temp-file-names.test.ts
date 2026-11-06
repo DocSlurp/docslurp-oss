@@ -75,5 +75,5 @@ describe("every accepted format reaches its reader with its extension (validatio
       expect(commands[0]!.binary).toBe("pandoc");
       expect(commands[0]!.args).toEqual(expect.arrayContaining(["-f", "odt"]));
     } finally { setDefaultParserSandbox(undefined); }
-  });
+  }, 60_000); // a cold import of the extractor registry and runner (council K #7)
 });
