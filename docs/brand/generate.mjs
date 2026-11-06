@@ -17,9 +17,10 @@ const L = `<rect x="22" y="42" width="20" height="3.5" rx="1.75"/><rect x="23" y
 const PAPER = { body: P.paper, fold: P.crease, text: P.ink };
 const INK = { body: P.ink, fold: P.slate, text: P.paper };
 
-const straw = (c) => `<path d="${STRAW}" fill="none" stroke="${c}" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>`;
-const cup = (c) =>
-  `${straw(P.straw)}<path class="b" d="${BODY}" fill="${c.body}"/><path class="f" d="${FOLD}" fill="${c.fold}"/><g class="t" fill="${c.text}">${H}${L}</g>`;
+const straw = (c, w = 4.5) => `<path d="${STRAW}" fill="none" stroke="${c}" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round"/>`;
+// `strawWidth` is only raised for the favicon, where the 4.5 stroke drops to about one pixel.
+const cup = (c, strawWidth) =>
+  `${straw(P.straw, strawWidth)}<path class="b" d="${BODY}" fill="${c.body}"/><path class="f" d="${FOLD}" fill="${c.fold}"/><g class="t" fill="${c.text}">${H}${L}</g>`;
 // Single colour: text lines are knocked out, the fold is split off by a hairline gap,
 // and the straw stops short of the cup so the two shapes stay distinct.
 const mono = (fill, id) =>
@@ -36,9 +37,9 @@ const adaptive =
   `@media (prefers-color-scheme:dark){.b{fill:${P.paper}}.f{fill:${P.crease}}.t{fill:${P.ink}}.w{fill:${P.paper}}}</style>`;
 
 // Dark rounded or full-bleed square with the paper cup scaled to `s` and centred.
-const tile = (s, r = 0) => {
+const tile = (s, r = 0, strawWidth) => {
   const o = (64 - 64 * s) / 2;
-  return `<rect width="64" height="64" rx="${r}" fill="${P.deck}"/><g transform="translate(${o} ${o}) scale(${s})">${cup(PAPER)}</g>`;
+  return `<rect width="64" height="64" rx="${r}" fill="${P.deck}"/><g transform="translate(${o} ${o}) scale(${s})">${cup(PAPER, strawWidth)}</g>`;
 };
 
 // Product listing images (store and agent catalogs): the mark with generous clear space.
@@ -55,8 +56,11 @@ const wordmark = (fill) =>
 const lock = (c, fill) => `${cup(c)}${wordmark(fill)}`;
 
 // The primary icon: the paper cup inside the 80% maskable safe zone on a full-bleed
-// Deck square. App, PWA, plugin and favicon artwork all use it.
+// Deck square. App, PWA and plugin artwork use it.
 const primary = svg(tile(0.6));
+// Browser tabs show the icon at 16-32 px and never mask it, so the favicon fills a rounded
+// tile with a heavier straw instead of sitting inside the maskable safe zone.
+const favicon = svg(tile(0.96, 14, 6));
 
 const files = {
   "docslurp-mark.svg": svg(adaptive + cup(INK)),
@@ -69,7 +73,7 @@ const files = {
   "docslurp-app-icon-maskable.svg": primary,
   "docslurp-product-plan.svg": svg(product(P.deck, PAPER)),
   "docslurp-product-credits.svg": svg(product(P.paper, INK)),
-  "favicon.svg": primary,
+  "favicon.svg": favicon,
   "docslurp-lockup.svg": svg(adaptive + lock(INK), LOCK_VB),
   "docslurp-lockup-dark.svg": svg(lock(INK, P.ink), LOCK_VB),
   "docslurp-lockup-white.svg": svg(lock(PAPER, "#fff"), LOCK_VB),
