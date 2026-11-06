@@ -1,0 +1,3 @@
+The committee reviewed the quarterly report and agreed the revised schedule for the district program. Members noted that the field survey was completed on time and that the archive copy of the original inspection notes is reproduced below for reference by the planning office. Questions about the survey method should be sent to the records desk before the next meeting.
+
+Figure 1: archive copy of the inspection notes (scan).

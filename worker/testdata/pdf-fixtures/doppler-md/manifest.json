@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "description": "Doppler's Markdown for the routing-eval fixtures: the PDF extractor's output the eval routes on (doppler-md evidence). Regenerate with Doppler built from the pinned commit: pdftotext -q -bbox-layout -wordmeta -rules -compact-layout FILE - | doppler-md (what pdftomarkdown runs).",
+  "description": "Doppler's Markdown for the routing-eval fixtures: the PDF extractor's output the eval routes on (doppler-md evidence). Regenerate with Doppler built from the pinned commit: pdftotext -q -bbox-layout -wordmeta -rules -compact-layout FILE - | doppler-md (what pdftomarkdown runs). Each fixture also has its -bbox-layout -rules XHTML (.xhtml): the word boxes and ruling lines the layout walker reads.",
   "doppler": {
     "repository": "https://github.com/DocSlurp/doppler",
     "commit": "827b3cccecfdcfe61ad89335ec2fb5476df014da"
@@ -35,6 +35,106 @@
       "source": "tables-multipage-financials.pdf",
       "sourceSha256": "e8575371b043ca42ae2b5dd1b36be445686d2fe89bb718846a8f4e38820cc788",
       "sha256": "bb380eabff1040396eabc52da1151c2a67b2aafe89e5631473a1e6bdff1954ea"
+    },
+    "academic-latex-ligatures.pdf.xhtml": {
+      "source": "academic-latex-ligatures.pdf",
+      "sourceSha256": "252890ab640cf226e6a4eb996ad235c5c8a7ba2e8b1ac1f15e31eac70ce9fa2d",
+      "sha256": "2e384b7c1ec971c23af74ba4519859043b51497ad1ee267077ef3f695e8a7121"
+    },
+    "form-rotated-notes.pdf.xhtml": {
+      "source": "form-rotated-notes.pdf",
+      "sourceSha256": "d017d60ed8db68950e2603eec076987e9405b6ab62a8dc18335cddf617c99fc6",
+      "sha256": "0a692d2f35620a84fce776a5f4a2b6561dd6add9b712e16e897aecf47e09fcc0"
+    },
+    "image-heavy-ocr.pdf.xhtml": {
+      "source": "image-heavy-ocr.pdf",
+      "sourceSha256": "b990112b189f19b42f20e39a97ce66804610ba3ba4e8b2284c1c03ac288f6ad2",
+      "sha256": "5b35ba8795fb3c49f5d4cf3de56b779fec0db4ac3bb4ab24629dc8e6edeb88ef"
+    },
+    "kreuzberg-handwriting-notes.pdf.xhtml": {
+      "source": "kreuzberg-handwriting-notes.pdf",
+      "sourceSha256": "a09310cba8b88a052dd98c6cf85744775690d355c956c1b8809a2b9b2e9067f4",
+      "sha256": "f7c2eca2a768676a12f482b12ad26624a8e065587b252f6ecf57ad5bdf990490"
+    },
+    "kreuzberg-metadata-document.pdf.xhtml": {
+      "source": "kreuzberg-metadata-document.pdf",
+      "sourceSha256": "afd17ccd40b3e2e0f5a6f0ef2dd19dce8d59a59038df7f98d9a41164eaa63bcc",
+      "sha256": "1ef9849b2561687c34ae7292bf6c98ab788c8379af0bf32d5eed62dd5fc2535a"
+    },
+    "routing-letterhead-logo.pdf.md": {
+      "source": "routing-letterhead-logo.pdf",
+      "sourceSha256": "ff5987820550d7e3159bdb5b85d93950dddf39e15b2759b9632a45327dff3529",
+      "sha256": "ded1f52b0fbc011cf483a8e32db6d271471460f9a67a112ff364e8ec256f752f"
+    },
+    "routing-letterhead-logo.pdf.xhtml": {
+      "source": "routing-letterhead-logo.pdf",
+      "sourceSha256": "ff5987820550d7e3159bdb5b85d93950dddf39e15b2759b9632a45327dff3529",
+      "sha256": "40bf1e1614b8f3c772d1baf585cde4289d895ff7852687d125555a0180ec765e"
+    },
+    "routing-photo-overlaid-caption.pdf.md": {
+      "source": "routing-photo-overlaid-caption.pdf",
+      "sourceSha256": "b9342d49ae8ba1f5f383313553e534372790a1872104ac88d7d57bb975362eba",
+      "sha256": "e3d8dd676a7d4c94de4a672ca27f025de512bdae7a36bb0857998e76c6fa6a79"
+    },
+    "routing-photo-overlaid-caption.pdf.xhtml": {
+      "source": "routing-photo-overlaid-caption.pdf",
+      "sourceSha256": "b9342d49ae8ba1f5f383313553e534372790a1872104ac88d7d57bb975362eba",
+      "sha256": "642f88cdfa151f2f320063c72fd77389e43ae32b3a7bc72f18e7e8cb9595f939"
+    },
+    "routing-scan-beside-caption.pdf.md": {
+      "source": "routing-scan-beside-caption.pdf",
+      "sourceSha256": "2d4dceafadf062be4129fbc3cba8b2fbc6a02ea00cf4924bb6c2b71e10c9854e",
+      "sha256": "ac1bdf538f7a08208c822097d9a462bd276d068a6b0855958d6420522f7571a5"
+    },
+    "routing-scan-beside-caption.pdf.xhtml": {
+      "source": "routing-scan-beside-caption.pdf",
+      "sourceSha256": "2d4dceafadf062be4129fbc3cba8b2fbc6a02ea00cf4924bb6c2b71e10c9854e",
+      "sha256": "f8f3f5038725548d3be81cce4afa0addb5c5dae165986b1b1ccabc70128140e0"
+    },
+    "routing-scan-with-text-layer.pdf.md": {
+      "source": "routing-scan-with-text-layer.pdf",
+      "sourceSha256": "bb5b5187c928801a59fc8491b65d54a7f1fe7229bfdec4b4ebfe0bcb77aa7213",
+      "sha256": "1c765c6f8688c2fedcaabd9ecb9f63216daf63ac4b9e1d116f30fe449917c884"
+    },
+    "routing-scan-with-text-layer.pdf.xhtml": {
+      "source": "routing-scan-with-text-layer.pdf",
+      "sourceSha256": "bb5b5187c928801a59fc8491b65d54a7f1fe7229bfdec4b4ebfe0bcb77aa7213",
+      "sha256": "58131f63fb98d89e5a998d48199197fa32a9e170a47e8d2fbc171f4830a2b156"
+    },
+    "routing-table-4-rows.pdf.md": {
+      "source": "routing-table-4-rows.pdf",
+      "sourceSha256": "650af1bcf4e922adfb1296aa6ccaf655ec2be537970516998e49602e86a0da8b",
+      "sha256": "f4cabd47a907dcf5fe5e593126a06cf9c6099087a0c655692d51ce9d0f846e37"
+    },
+    "routing-table-4-rows.pdf.xhtml": {
+      "source": "routing-table-4-rows.pdf",
+      "sourceSha256": "650af1bcf4e922adfb1296aa6ccaf655ec2be537970516998e49602e86a0da8b",
+      "sha256": "1ccf80b0205331648ab70557422a953b0e4b6bb21f93ac83a2311896ce82c869"
+    },
+    "routing-table-6-rows.pdf.md": {
+      "source": "routing-table-6-rows.pdf",
+      "sourceSha256": "1ccaf52d29c9bd626308f310b712c6db8ff8e83614e0081696d8d6ea7cfbf030",
+      "sha256": "bd515616978846da7391338bef3029d986cbbb80970650572662aac65d68138e"
+    },
+    "routing-table-6-rows.pdf.xhtml": {
+      "source": "routing-table-6-rows.pdf",
+      "sourceSha256": "1ccaf52d29c9bd626308f310b712c6db8ff8e83614e0081696d8d6ea7cfbf030",
+      "sha256": "533a072f71e7aee5222d5dc514d089e4526a6e84c9a05312e525e7d404738db0"
+    },
+    "routing-table-large-coverage.pdf.md": {
+      "source": "routing-table-large-coverage.pdf",
+      "sourceSha256": "e2b18405ac2bbf6c3d2e24e30e44cc669d1a31cd83b2d97ca884fbaa09ea8565",
+      "sha256": "6d11a410f18318823c4d62fe5cbb2df7970393ff7e71ec53ff6cac7d629ed23b"
+    },
+    "routing-table-large-coverage.pdf.xhtml": {
+      "source": "routing-table-large-coverage.pdf",
+      "sourceSha256": "e2b18405ac2bbf6c3d2e24e30e44cc669d1a31cd83b2d97ca884fbaa09ea8565",
+      "sha256": "5058f7326b17e92141f557cfe0c69e18047cfb275d7d9057ee67b858404f77c2"
+    },
+    "tables-multipage-financials.pdf.xhtml": {
+      "source": "tables-multipage-financials.pdf",
+      "sourceSha256": "e8575371b043ca42ae2b5dd1b36be445686d2fe89bb718846a8f4e38820cc788",
+      "sha256": "367b4e5c18f8ddb31d096c6d2684b281cfda33efce5541fd9980d2a9fb3ad799"
     }
   }
 }

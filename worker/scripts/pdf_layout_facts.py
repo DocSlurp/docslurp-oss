@@ -1550,6 +1550,94 @@ def table_box(tokens, words, used):
     return [min(w[0] for w in chosen), min(w[1] for w in chosen), max(w[2] for w in chosen), max(w[3] for w in chosen)]
 
 
+_RULE = re.compile(r'<rule\s+xMin="(-?[0-9.]+)"\s+yMin="(-?[0-9.]+)"\s+xMax="(-?[0-9.]+)"\s+yMax="(-?[0-9.]+)"')
+MAX_RULES_PER_PAGE = 5_000
+RULE_THICKNESS_PT = 3.0      # a rule thinner than this along one axis is a line, not a filled box
+RULE_MIN_LENGTH_PT = 8.0
+RULE_TOUCH_PT = 2.5          # rules within this distance meet (grid joints are rarely exact)
+COVERAGE_RASTER = 200        # union coverage is measured on a COVERAGE_RASTER x COVERAGE_RASTER grid of the page
+
+
+def page_rules(xhtml, wanted):
+    """{page_offset: [(x0, y0, x1, y1), ...]}: Doppler's ruling lines (`pdftotext -rules`) for the pages in `wanted`.
+    Debian's pdftotext has no -rules: its output simply has none, and grids are then unknown (absent pages)."""
+    if '<rule ' not in xhtml:
+        return {}
+    starts = [m.start() for m in _PAGE.finditer(xhtml)]
+    out = {}
+    for offset in wanted:
+        if offset >= len(starts):
+            continue
+        end = starts[offset + 1] if offset + 1 < len(starts) else len(xhtml)
+        rules = []
+        for m in _RULE.finditer(xhtml, starts[offset], end):
+            if len(rules) >= MAX_RULES_PER_PAGE:
+                break
+            rules.append((float(m[1]), float(m[2]), float(m[3]), float(m[4])))
+        out[offset] = rules
+    return out
+
+
+def ruled_grids(rules):
+    """Tables drawn as ruled grids: connected sets of horizontal and vertical rules with at least two distinct horizontals
+    and three distinct verticals (two columns). Rows and columns are the gaps between distinct lines. Structure only."""
+    horizontal = [r for r in rules if r[3] - r[1] <= RULE_THICKNESS_PT and r[2] - r[0] >= RULE_MIN_LENGTH_PT]
+    vertical = [r for r in rules if r[2] - r[0] <= RULE_THICKNESS_PT and r[3] - r[1] >= RULE_MIN_LENGTH_PT]
+    lines = [('h', r) for r in horizontal] + [('v', r) for r in vertical]
+    parent = list(range(len(lines)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def meet(a, b):
+        t = RULE_TOUCH_PT
+        return a[0] - t <= b[2] and b[0] - t <= a[2] and a[1] - t <= b[3] and b[1] - t <= a[3]
+
+    for i in range(len(lines)):
+        for j in range(i + 1, len(lines)):
+            if lines[i][0] != lines[j][0] and meet(lines[i][1], lines[j][1]):
+                parent[find(i)] = find(j)
+    groups = collections.defaultdict(list)
+    for i, line in enumerate(lines):
+        groups[find(i)].append(line)
+    grids = []
+    for members in groups.values():
+        ys = _distinct([(r[1] + r[3]) / 2 for kind, r in members if kind == 'h'])
+        xs = _distinct([(r[0] + r[2]) / 2 for kind, r in members if kind == 'v'])
+        if len(ys) < 2 or len(xs) < 3:
+            continue
+        boxes = [r for _, r in members]
+        grids.append({'rows': len(ys) - 1, 'columns': len(xs) - 1,
+                      'bbox': [min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes)]})
+    return grids
+
+
+def _distinct(values, tolerance=RULE_TOUCH_PT):
+    out = []
+    for value in sorted(values):
+        if not out or value - out[-1] > tolerance:
+            out.append(value)
+    return out
+
+
+def union_coverage(boxes, visible_box_):
+    """Share of the visible page covered by the union of `boxes` (measured on a coarse raster, so overlaps count once)."""
+    vx0, vy0, vx1, vy1 = visible_box_
+    width, height = max(vx1 - vx0, 1e-9), max(vy1 - vy0, 1e-9)
+    n = COVERAGE_RASTER
+    covered = set()
+    for x0, y0, x1, y1 in boxes:
+        c0, c1 = max(0, int((x0 - vx0) / width * n)), min(n, int(math.ceil((x1 - vx0) / width * n)))
+        r0, r1 = max(0, int((y0 - vy0) / height * n)), min(n, int(math.ceil((y1 - vy0) / height * n)))
+        for r in range(r0, r1):
+            for c in range(c0, c1):
+                covered.add(r * n + c)
+    return round(len(covered) / (n * n), 4)
+
+
 def layout_facts(path, listing_text, xhtml_text, page_markdowns, first, last, deadline=None):
     """Structural layout facts for routing, per page in [first, last]:
 
@@ -1585,6 +1673,7 @@ def layout_facts(path, listing_text, xhtml_text, page_markdowns, first, last, de
     placed = match_placements(rows, walks) if listing_text is not None else {}
     repeated = repeated_objects(rows, last - first + 1)
     words = page_words(xhtml_text, range(last - first + 1)) if xhtml_text is not None else {}
+    rules = page_rules(xhtml_text, range(last - first + 1)) if xhtml_text is not None else {}
     pages = []
     for number in range(first, last + 1):
         walk = walks.get(number)
@@ -1629,11 +1718,24 @@ def layout_facts(path, listing_text, xhtml_text, page_markdowns, first, last, de
             if walk is not None:
                 vx0, vy0, vx1, vy1 = visible_box(walk)
                 visible = max((vx1 - vx0) * (vy1 - vy0), 1e-9)
+            boxes = []
             for table in markdown_tables(markdown):
                 box = table_box(table['tokens'], page_words_list, used) if page_words_list is not None else None
+                if box is not None:
+                    boxes.append(box)
                 tables.append({'rows': table['rows'], 'columns': table['columns'],
                                'coverage': round(min(1.0, _area(box) / visible), 4) if box is not None and visible else None})
             entry['tables'] = tables
+        # Ruled grids (Doppler's -rules): a drawn table the extractor may have flattened to prose. Unknown without rules.
+        page_rule_list = rules.get(number - first)
+        if page_rule_list is None or walk is None:
+            entry['grids'] = None
+            entry['tableCoverage'] = None
+        else:
+            grids = ruled_grids(page_rule_list)[:MAX_LAYOUT_TABLES_PER_PAGE]
+            box_of_page = visible_box(walk)
+            entry['grids'] = [{'rows': g['rows'], 'columns': g['columns'], 'coverage': union_coverage([g['bbox']], box_of_page)} for g in grids]
+            entry['tableCoverage'] = union_coverage(([] if markdown is None else boxes) + [g['bbox'] for g in grids], box_of_page)
         pages.append(entry)
     return {'version': LAYOUT_VERSION, 'pages': pages}
 

@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
 import { normalizeExtractedMarkdown } from "../lib/extracted-markdown.js";
+import { collectPageLayoutFacts } from "../lib/page-layout-evidence.js";
 import { collectPageImageEvidence, drawnBytesPerPage, pageAlignedTexts, totalEmbeddedImageBytes, type PageImageEvidence } from "../lib/page-image-evidence.js";
 import { buildAdaptiveRoutingDecisionSurface, canonicalBlocksToPageText } from "../stages/classify-route.js";
 import { CommandRunner } from "../tools/runner.js";
@@ -42,6 +43,19 @@ function pdfInfoPages(stdout: string): number {
 type Evidence = "doppler-recorded" | "doppler-live" | "poppler-text";
 const EVIDENCE: readonly Evidence[] = ["doppler-recorded", "doppler-live", "poppler-text"];
 
+/** A recorded Doppler file for a fixture (`.md` output or `.xhtml` word boxes and rules), checked against its manifest. */
+async function recordedDopplerFile(inputPath: string, fixtureRoot: string, extension: ".md" | ".xhtml"): Promise<string> {
+  const recordedDir = path.join(fixtureRoot, "doppler-md");
+  const manifest = JSON.parse(await readFile(path.join(recordedDir, "manifest.json"), "utf8")) as { files: Record<string, { sha256: string; sourceSha256: string }> };
+  const name = `${path.basename(inputPath)}${extension}`;
+  const entry = manifest.files[name];
+  if (!entry) throw new Error(`no recorded Doppler ${extension} for ${path.basename(inputPath)}`);
+  const sha = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+  if (sha(await readFile(inputPath)) !== entry.sourceSha256) throw new Error(`${path.basename(inputPath)} changed since its Doppler output was recorded; regenerate doppler-md/`);
+  if (sha(await readFile(path.join(recordedDir, name))) !== entry.sha256) throw new Error(`recorded Doppler file ${name} does not match its manifest`);
+  return path.join(recordedDir, name);
+}
+
 async function extractedText(evidence: Evidence, inputPath: string, fixtureRoot: string, runner: CommandRunner): Promise<{ text: string; extractor: string }> {
   if (evidence === "poppler-text") return { text: (await runner.run(await runner.extractText(inputPath, true))).stdout, extractor: "poppler-text" };
   if (evidence === "doppler-live") {
@@ -49,15 +63,7 @@ async function extractedText(evidence: Evidence, inputPath: string, fixtureRoot:
     if (!plan.available) throw new Error(`doppler-live evidence needs pdftomarkdown at ${dopplerConverterPath()}`);
     return { text: (await runner.run(plan)).stdout, extractor: "doppler-md" };
   }
-  const recordedDir = path.join(fixtureRoot, "doppler-md");
-  const manifest = JSON.parse(await readFile(path.join(recordedDir, "manifest.json"), "utf8")) as { files: Record<string, { sha256: string; sourceSha256: string }> };
-  const name = `${path.basename(inputPath)}.md`;
-  const entry = manifest.files[name];
-  if (!entry) throw new Error(`no recorded Doppler output for ${path.basename(inputPath)}`);
-  const sha = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
-  if (sha(await readFile(inputPath)) !== entry.sourceSha256) throw new Error(`${path.basename(inputPath)} changed since its Doppler output was recorded; regenerate doppler-md/`);
-  const recorded = await readFile(path.join(recordedDir, name));
-  if (sha(recorded) !== entry.sha256) throw new Error(`recorded Doppler output ${name} does not match its manifest`);
+  const recorded = await readFile(await recordedDopplerFile(inputPath, fixtureRoot, ".md"));
   return { text: recorded.toString("utf8"), extractor: "doppler-md" };
 }
 
@@ -89,6 +95,10 @@ async function evaluateFixture(args: {
     const listing = (await args.runner.run(await args.runner.listPdfImages(inputPath, 1, pageCount))).stdout;
     drawnBytes = drawnBytesPerPage((await stat(inputPath)).size, totalEmbeddedImageBytes(listing), pageCount);
   }
+  // Structural layout (the open walker over the same files local mode uses): placed images and table geometry.
+  // Doppler's word boxes and ruling lines: recorded with its Markdown, or extracted here for live evidence.
+  const wordBoxesFile = args.evidence === "doppler-recorded" ? await recordedDopplerFile(inputPath, args.fixtureRoot, ".xhtml") : undefined;
+  const pageLayout = await collectPageLayoutFacts({ runner: args.runner, sourcePath: inputPath, pageCount, markdown: winningText, wordBoxesFile }) ?? undefined;
   const routing = buildAdaptiveRoutingDecisionSurface({
     documentId: args.fixture.id,
     filename: path.basename(args.fixture.path),
@@ -96,7 +106,10 @@ async function evaluateFixture(args: {
     pageCount,
     evidence: { source: "canonical-document", artifactUri: `file://${inputPath}` },
     pageImageEvidence,
+    pageLayout,
     drawnBytesPerPage: drawnBytes,
+    // Evidence routing: what every new run pins (lib/vision-routing-v2.ts pinRunRoutingVersion, v3).
+    routingV2: true,
   });
   if (routing.status !== "ready") {
     throw new Error(`routing stayed deferred for fixture ${args.fixture.id}`);
@@ -179,7 +192,7 @@ async function main(): Promise<void> {
   console.log(
     `[routing-eval] status=${report.passed ? "pass" : "fail"} fixtures=${report.fixtureCount} ` +
       `pass_rate=${report.fixturePassRate.toFixed(3)} quality=${report.qualityScore.toFixed(3)} ` +
-      `p95_latency_ms=${report.p95LatencyMs.toFixed(1)} evidence=${evidence}+page-image-evidence hosted_ai_calls=0 estimated_cost_usd=0`,
+      `p95_latency_ms=${report.p95LatencyMs.toFixed(1)} evidence=${evidence}+page-image-evidence+layout-facts hosted_ai_calls=0 estimated_cost_usd=0`,
   );
   console.log(
     `[routing-eval] all_fixtures=${report.allFixtures.fixtureCount} all_pass_rate=${report.allFixtures.fixturePassRate.toFixed(3)} ` +

@@ -10,7 +10,11 @@ import {
   TEXT_LAYER_DISAGREES_SIGNAL,
   assessTextLayer,
   decidePageRaster,
+  isTableHeavy,
+  markdownTables,
   rasterPageSignal,
+  type PageLayoutImage,
+  type PageTable,
   splitTextIntoPages,
   type AdaptiveDocumentComplexity,
   type AdaptivePageRoute,
@@ -299,6 +303,8 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
   structuredComplexity?: Map<number, StructuredPageComplexityEvidence>;
   /** Raster evidence for sparse-text PDF pages (lib/page-image-evidence.ts). */
   pageImageEvidence?: Map<number, PageImageEvidence>;
+  /** Structural page layout (pdf-layout-facts@1: placed images with stream facts and text overlap, tables with geometry). */
+  pageLayout?: Map<number, PageLayoutFacts>;
   /** (File bytes - all embedded image bytes) / pages, from the raster evidence artifact. */
   drawnBytesPerPage?: number | null;
   /** Legacy vision routing v2 (lib/vision-routing-v2.ts). Off reproduces v1 routing. */
@@ -306,7 +312,7 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
 }): AdaptiveRoutingDecisionSurface {
   const routingV2 = args.routingV2 === true;
   const hasPageEvidence =
-    (args.structuredComplexity?.size ?? 0) > 0 || (args.pageImageEvidence?.size ?? 0) > 0;
+    (args.structuredComplexity?.size ?? 0) > 0 || (args.pageImageEvidence?.size ?? 0) > 0 || (args.pageLayout?.size ?? 0) > 0;
   if ((!args.text.trim() && !hasPageEvidence) || !args.evidence) {
     return adaptiveRoutingDecisionSurfaceSchema.parse({
       status: "deferred",
@@ -350,6 +356,51 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
   });
 }
 
+
+/** One page of pdf-layout-facts@1 as routing reads it (worker/scripts/pdf_layout_facts.py `layout_facts`). */
+export interface PageLayoutFacts {
+  /** Placed images; null when the image listing or the walk is unknown for the page. */
+  images: PageLayoutImage[] | null;
+  /** The extractor's tables with their geometry; null when the page's Markdown was not given. */
+  tables: PageTable[] | null;
+  /** The text layer's word count; null when its word boxes are unknown. */
+  words: number | null;
+  /** Ruled grids (Doppler's ruling lines); null when the rules are unknown. */
+  grids: PageTable[] | null;
+  /** Share of the page covered by the union of its table boxes and grids; null when unknown. */
+  tableCoverage: number | null;
+}
+
+/** Parse a pdf-layout-facts@1 payload into per-page facts; malformed pages are dropped (unknown), never guessed. */
+export function parsePageLayoutFacts(payload: unknown): Map<number, PageLayoutFacts> {
+  const out = new Map<number, PageLayoutFacts>();
+  const root = payload as { version?: unknown; pages?: unknown } | null;
+  if (!root || root.version !== "pdf-layout-facts@1" || !Array.isArray(root.pages)) return out;
+  const num = (value: unknown): number | null => typeof value === "number" && Number.isFinite(value) ? value : null;
+  for (const entry of root.pages.slice(0, 100_000)) {
+    const page = entry as Record<string, unknown> | null;
+    const pageNumber = num(page?.pageNumber);
+    if (!page || pageNumber === null || !Number.isSafeInteger(pageNumber) || pageNumber < 1 || page.known !== true) continue;
+    const images = Array.isArray(page.images) ? (page.images as Array<Record<string, unknown>>).slice(0, 64).map((image) => {
+      const bbox = Array.isArray(image.bbox) && image.bbox.length === 4 && image.bbox.every((v) => num(v) !== null) ? image.bbox as [number, number, number, number] : null;
+      const ppi = Array.isArray(image.ppi) ? [num(image.ppi[0]), num(image.ppi[1])] as [number | null, number | null] : [null, null] as [null, null];
+      return {
+        bbox, coverage: num(image.coverage), widthPx: num(image.widthPx) ?? 0, heightPx: num(image.heightPx) ?? 0,
+        bitsPerComponent: num(image.bitsPerComponent), colorSpace: typeof image.colorSpace === "string" ? image.colorSpace : "other",
+        encoding: typeof image.encoding === "string" ? image.encoding : "other", ppi, bytesPerPixel: num(image.bytesPerPixel),
+        repeated: image.repeated === true, wordsInside: num(image.wordsInside),
+      } satisfies PageLayoutImage;
+    }) : null;
+    const tables = Array.isArray(page.tables) ? (page.tables as Array<Record<string, unknown>>).slice(0, 64).map((table) => ({
+      rows: num(table.rows) ?? 0, columns: num(table.columns) ?? 0, coverage: num(table.coverage),
+    })) : null;
+    const grids = Array.isArray(page.grids) ? (page.grids as Array<Record<string, unknown>>).slice(0, 64).map((grid) => ({
+      rows: num(grid.rows) ?? 0, columns: num(grid.columns) ?? 0, coverage: num(grid.coverage),
+    })) : null;
+    out.set(pageNumber, { images, tables, words: num(page.words), grids, tableCoverage: num(page.tableCoverage) });
+  }
+  return out;
+}
 
 /** Routing v1 (runs started before evidence routing): text heuristics plus raster evidence, as it has always been. */
 function buildLegacyPages(
@@ -417,12 +468,14 @@ function buildEvidencePages(
   const drawnBytes = args.drawnBytesPerPage != null && args.drawnBytesPerPage >= DRAWN_CONTENT_MIN_BYTES_PER_PAGE;
   return texts.map((text, index) => {
     const pageNumber = index + 1;
-    const page = classifyAdaptivePage(pageNumber, text, { routingV2: true });
+    const layout = args.pageLayout?.get(pageNumber);
+    const page = classifyAdaptivePage(pageNumber, text, { routingV2: true, layout: layout ?? null });
     const complexity = args.structuredComplexity?.get(pageNumber);
     const imageEvidence = evidence?.get(pageNumber);
-    if (!complexity && !imageEvidence) return aligned ? page : { ...page, signals: [...page.signals, "page-text-unknown"] };
+    const layoutKnown = layout !== undefined && layout.images !== null;
+    if (!complexity && !imageEvidence && !layoutKnown) return aligned ? page : { ...page, signals: [...page.signals, "page-text-unknown"] };
     const nativeText = aligned ? text : "";
-    const words = imageEvidence?.wordCount ?? (complexity ? pageEvidenceWordCount(nativeText) : null);
+    const words = imageEvidence?.wordCount ?? (complexity || layoutKnown ? (layout?.words ?? pageEvidenceWordCount(nativeText)) : null);
     // OCR of a render found words on a page whose layer has none and that holds no image: the words are drawn.
     const ocrWordsOnBarePage = aligned !== null && imageEvidence !== undefined && imageEvidence.wordCount === 0 &&
       imageEvidence.imageCount === 0 && pageEvidenceWordCount(text) >= DRAWN_TEXT_MIN_WORDS;
@@ -439,6 +492,7 @@ function buildEvidencePages(
       images,
       textLayer: textLayer ? { verdict: textLayer.verdict, matchesOcr: textLayer.matchesOcr ?? null } : null,
       drawnContent: ocrWordsOnBarePage || uncoveredVectors || (documentWithoutText && drawnBytes),
+      layoutImages: layout?.images ?? null,
     });
     const yieldEvidence = complexity && aligned !== null && !decision.read
       ? pageTextYield(nativeText, complexity.textLength) : null;
@@ -908,6 +962,23 @@ function buildAdaptivePageRoutesFromTexts(
 /** Rows of a whitespace-aligned table that make a page a table page, like two Markdown table rows do. */
 const ALIGNED_TABLE_MIN_ROWS = 3;
 
+/**
+ * Owner rule: a page is table-heavy only when some table has PAGE_TABLE_ROUTING.tableHeavyMinRows rows or its tables cover
+ * PAGE_TABLE_ROUTING.tableHeavyMinCoverage of the page (shared isTableHeavy). Tables are the extractor's own (pipe and
+ * HTML tables), rows a layout-preserving extractor or OCR kept aligned, and, when known, the layout walker's tables with
+ * their coverage. Never words that name a table ("total", "amount").
+ */
+function pageIsTableHeavy(args: { text: string; alignedRows: number; numericRows: number; layout?: PageLayoutFacts | null }): boolean {
+  const tables: PageTable[] = args.layout?.tables
+    ? [...args.layout.tables]
+    : markdownTables(args.text).map((table) => ({ ...table, coverage: null }));
+  // Ruled grids: a drawn table the extractor flattened still counts by its rows.
+  tables.push(...(args.layout?.grids ?? []));
+  if (args.alignedRows >= ALIGNED_TABLE_MIN_ROWS) tables.push({ rows: args.alignedRows, columns: 3, coverage: null });
+  if (args.numericRows > 0) tables.push({ rows: args.numericRows, columns: 3, coverage: null });
+  return isTableHeavy(tables, args.layout?.tableCoverage ?? null);
+}
+
 /** Cells separated by a run of two or more spaces (or a tab) after the line's own indentation. */
 function alignedCells(line: string): string[] {
   return line.trim().split(/ {2,}|\t+/).filter(Boolean);
@@ -927,7 +998,7 @@ function isAlignedNumericRow(line: string): boolean {
 export function classifyAdaptivePage(
   pageNumber: number,
   text: string,
-  options: RoutingVersionOptions = {},
+  options: RoutingVersionOptions & { layout?: PageLayoutFacts | null } = {},
 ): AdaptivePageRoutingEntry {
   const routingV2 = options.routingV2 === true;
   const normalized = text.trim();
@@ -941,9 +1012,7 @@ export function classifyAdaptivePage(
   const scanLines = scanText ? scanText.split(/\n+/).filter(Boolean) : [];
   const colonLineCount = lines.filter((line) => line.includes(":")).length;
   // Tables reach routing as GFM pipe rows or, with preserveTables (the default), as the HTML tables normalizeExtractedMarkdown
-  // writes: both count as table rows, and neither is read as code, formula or chemistry markup below.
-  const htmlTableRowCount = countMatches(normalized, /<tr[\s>]/gi);
-  const markdownTableLineCount = lines.filter((line) => /^\s*\|.*\|\s*$/.test(line)).length + htmlTableRowCount;
+  // writes (pageIsTableHeavy counts both); neither is read as code, formula or chemistry markup below.
   // A layout-preserving extractor (pdftotext -layout) keeps a table as rows of cells aligned by runs of spaces, not pipes.
   const alignedTableRowLines = lines.filter(isAlignedNumericRow).length;
   // v2: OCR flattens a table into rows of space-separated cells; several rows with two or more
@@ -952,12 +1021,6 @@ export function classifyAdaptivePage(
     const cells = line.trim().split(/\s+/);
     return cells.length >= 3 && cells.filter((cell) => /^[-+(]?[$€£¥]?\d[\d,.:/%)]*$/.test(cell)).length >= 2;
   }).length;
-  const tableMarkers = [
-    /\|.+\|/.test(normalized),
-    /\t/.test(text),
-    /table\s+\d+|subtotal|total|amount|qty|balance|debit|credit/i.test(normalized),
-    numericRowLines >= 3,
-  ].filter(Boolean).length;
   const formFieldLineCount = lines.filter((line) =>
     /^(?:#{1,6}\s*)?(?:name|address|date|signature|phone|email|case\s+id|submitted\s+by|preferred\s+contact|reviewer\s+notes)\b/i.test(line.trim()),
   ).length;
@@ -1019,7 +1082,7 @@ export function classifyAdaptivePage(
     extractorHint = "layout-aware";
     confidence = 0.79;
     signals.push("field-markers", "label-value-layout");
-  } else if (tableMarkers >= 2 || markdownTableLineCount >= 2 || alignedTableRowLines >= ALIGNED_TABLE_MIN_ROWS) {
+  } else if (pageIsTableHeavy({ text, alignedRows: alignedTableRowLines, numericRows: numericRowLines, layout: options.layout })) {
     route = "table-heavy";
     extractorHint = "layout-aware";
     confidence = 0.76;

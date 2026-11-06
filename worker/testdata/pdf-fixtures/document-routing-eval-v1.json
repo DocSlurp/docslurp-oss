@@ -12,10 +12,11 @@
     {
       "id": "handwriting-with-native-context",
       "path": "kreuzberg-handwriting-notes.pdf",
-      "tags": ["handwriting", "scanned", "mixed-raster-text"],
-      "expectedFailure": {
-        "reason": "Policy, not evidence. Page 1 has about 60 native words (Doppler and Poppler read the same text) beside a 560x420 scanned image. OCR was authorized only by LiteParse's structured-complexity path (authorizeStructuredOcr), which no shipped extractor feeds. The shared raster rule (decidePageRaster, mirrored by the offline estimator) reads a page with 30 or more native words as a Fast text page and never OCRs it. Passing needs an owner decision to OCR text pages that also carry a large image (Rich billing on such pages), not a routing fix."
-      },
+      "tags": [
+        "handwriting",
+        "scanned",
+        "mixed-raster-text"
+      ],
       "expected": {
         "suggestedPlaybook": "review-grade",
         "visionPolicy": "aggressive",
@@ -27,12 +28,18 @@
             "ocrAuthorized": true
           }
         ]
-      }
+      },
+      "notes": "Owner rule 2026-11-05: a page with native text that places a large, scan-like, non-repeated image with no native text over it is read (pdf-layout-facts image evidence)."
     },
     {
       "id": "image-only-multipage-scan",
       "path": "image-heavy-ocr.pdf",
-      "tags": ["handwriting", "scanned", "image-only", "multipage"],
+      "tags": [
+        "handwriting",
+        "scanned",
+        "image-only",
+        "multipage"
+      ],
       "expected": {
         "suggestedPlaybook": "review-grade",
         "visionPolicy": "aggressive",
@@ -55,7 +62,11 @@
     {
       "id": "structured-form-with-annotations",
       "path": "form-rotated-notes.pdf",
-      "tags": ["forms", "annotations", "rotated-text"],
+      "tags": [
+        "forms",
+        "annotations",
+        "rotated-text"
+      ],
       "expected": {
         "suggestedPlaybook": "layout-aware",
         "pages": [
@@ -71,7 +82,11 @@
     {
       "id": "contiguous-multipage-table",
       "path": "tables-multipage-financials.pdf",
-      "tags": ["tables", "multipage", "structured-data"],
+      "tags": [
+        "tables",
+        "multipage",
+        "structured-data"
+      ],
       "expected": {
         "suggestedPlaybook": "layout-aware",
         "pages": [
@@ -99,7 +114,11 @@
     {
       "id": "formula-heavy-academic-document",
       "path": "academic-latex-ligatures.pdf",
-      "tags": ["formulas", "latex", "born-digital"],
+      "tags": [
+        "formulas",
+        "latex",
+        "born-digital"
+      ],
       "expected": {
         "suggestedPlaybook": "agentic",
         "pages": [
@@ -121,10 +140,11 @@
     {
       "id": "born-digital-metadata-prose",
       "path": "kreuzberg-metadata-document.pdf",
-      "tags": ["born-digital", "metadata", "negative-control"],
-      "expectedFailure": {
-        "reason": "Expectation predates an extractor that sees this page's table. Doppler extracts its 4-row revision-history table as a real table (LiteParse and Kreuzberg did not), so the page routes table-heavy: layout-aware, and, as the only page, aggressive vision. Whether one small table on a prose page should route as table-heavy is routing policy for the owner and council; tuning the table rule to this page would fit production routing to the fixture."
-      },
+      "tags": [
+        "born-digital",
+        "metadata",
+        "negative-control"
+      ],
       "expected": {
         "suggestedPlaybook": "fast",
         "visionPolicy": "skip",
@@ -133,6 +153,157 @@
             "pageNumber": 1,
             "route": "straightforward-text",
             "extractorHint": "cheap-text",
+            "ocrAuthorized": false
+          }
+        ]
+      },
+      "notes": "Owner rule 2026-11-05: table-heavy only with a 5+ row table or 40%+ table coverage; this page's 4-row table (14% of the page) is prose."
+    },
+    {
+      "id": "generated-scan-beside-caption",
+      "path": "routing-scan-beside-caption.pdf",
+      "tags": [
+        "generated",
+        "image-evidence"
+      ],
+      "expected": {
+        "suggestedPlaybook": "review-grade",
+        "visionPolicy": "aggressive",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "handwriting-or-degraded",
+            "extractorHint": "vision-rescue",
+            "ocrAuthorized": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "generated-letterhead-logo",
+      "path": "routing-letterhead-logo.pdf",
+      "tags": [
+        "generated",
+        "image-evidence"
+      ],
+      "expected": {
+        "suggestedPlaybook": "fast",
+        "visionPolicy": "skip",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "straightforward-text",
+            "extractorHint": "cheap-text",
+            "ocrAuthorized": false
+          },
+          {
+            "pageNumber": 2,
+            "route": "straightforward-text",
+            "extractorHint": "cheap-text",
+            "ocrAuthorized": false
+          },
+          {
+            "pageNumber": 3,
+            "route": "straightforward-text",
+            "extractorHint": "cheap-text",
+            "ocrAuthorized": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "generated-photo-overlaid-caption",
+      "path": "routing-photo-overlaid-caption.pdf",
+      "tags": [
+        "generated",
+        "image-evidence"
+      ],
+      "expected": {
+        "suggestedPlaybook": "fast",
+        "visionPolicy": "skip",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "straightforward-text",
+            "extractorHint": "cheap-text",
+            "ocrAuthorized": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "generated-scan-with-text-layer",
+      "path": "routing-scan-with-text-layer.pdf",
+      "tags": [
+        "generated",
+        "image-evidence"
+      ],
+      "expected": {
+        "suggestedPlaybook": "fast",
+        "visionPolicy": "skip",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "straightforward-text",
+            "extractorHint": "cheap-text",
+            "ocrAuthorized": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "generated-table-4-rows",
+      "path": "routing-table-4-rows.pdf",
+      "tags": [
+        "generated",
+        "table-threshold"
+      ],
+      "expected": {
+        "suggestedPlaybook": "fast",
+        "visionPolicy": "skip",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "straightforward-text",
+            "extractorHint": "cheap-text",
+            "ocrAuthorized": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "generated-table-6-rows",
+      "path": "routing-table-6-rows.pdf",
+      "tags": [
+        "generated",
+        "table-threshold"
+      ],
+      "expected": {
+        "suggestedPlaybook": "layout-aware",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "table-heavy",
+            "extractorHint": "layout-aware",
+            "ocrAuthorized": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "generated-table-large-coverage",
+      "path": "routing-table-large-coverage.pdf",
+      "tags": [
+        "generated",
+        "table-threshold"
+      ],
+      "expected": {
+        "suggestedPlaybook": "layout-aware",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "table-heavy",
+            "extractorHint": "layout-aware",
             "ocrAuthorized": false
           }
         ]
