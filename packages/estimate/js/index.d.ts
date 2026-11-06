@@ -11,6 +11,8 @@ export type FileProfile = {
   pages?: number;
   encrypted?: boolean;
   durationSeconds?: number;
+  /** Characters of a text file read whole (text volume). */
+  textChars?: number;
   /** Facts over up to 24 sampled pages of a PDF. */
   pdf?: {
     sampledPages: number;
@@ -31,8 +33,14 @@ export type FileProfile = {
     unmappedFontPages: number;
     drawnContent: boolean;
     budgetExhausted: boolean;
+    /** Native words on the sampled pages in total. */
+    sampledWords: number;
+    /** Median and largest visible page area, in square inches. */
+    medianPageAreaSqIn: number;
+    maxPageAreaSqIn: number;
   };
-  office?: { embeddedImages: number };
+  /** Package structure: slide and worksheet parts, body bytes; `declaredPages` is authored metadata, informational only. */
+  office?: { embeddedImages: number; slides?: number; sheets?: number; bodyBytes: number; declaredPages?: number };
   notes?: string[];
 };
 
