@@ -258,6 +258,17 @@ class CommandAborted extends Error {}
 /** A command waiting for a worker VM token gives up its empty lane for an idle VM of its own activity (real-Modal P2). */
 class HandOver extends Error {}
 
+/**
+ * Read-only asset staging holds whole files in memory (the SDK writes from a buffer): one VM stages at a time per worker
+ * process, so the peak is one definitions file, not one per VM starting at once (council W #7).
+ */
+let assetStagingTail: Promise<unknown> = Promise.resolve();
+function withAssetStagingSlot<T>(work: () => Promise<T>): Promise<T> {
+  const run = assetStagingTail.then(work, work);
+  assetStagingTail = run.catch(() => {});
+  return run;
+}
+
 /** How long the worker's read-only assets (the ClamAV definitions) may take to reach a VM, apart from any command. */
 const ASSET_STAGING_DEADLINE_MS = 10 * 60_000;
 
@@ -944,7 +955,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name)) return Promise.reject(new Error("invalid read-only asset directory name"));
           let staged = assetDirs.get(name);
           if (!staged) {
-            staged = (async () => {
+            // One VM at a time per worker reads the definitions into memory, file by file (council W #7).
+            staged = withAssetStagingSlot(async () => {
               const vmDir = `${ASSET_ROOT}/${name}`;
               await withDeadline(sandbox!.filesystem.makeDirectory(vmDir), 30_000);
               const files: string[] = [];
@@ -960,7 +972,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
               await runChecked(sandbox!, ["/bin/chmod", "0755", "--", ASSET_ROOT, vmDir], "parser VM asset directory setup failed");
               if (files.length) await runChecked(sandbox!, ["/bin/chmod", "0444", "--", ...files], "parser VM asset setup failed");
               return vmDir;
-            })();
+            });
             assetDirs.set(name, staged);
             staged.catch(() => assetDirs.delete(name));
           }

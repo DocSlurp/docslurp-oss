@@ -18,7 +18,7 @@ import {
 import { recordUnrecordedUsageTelemetry, withObservation } from "@docslurp/shared/observability";
 import { DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@docslurp/shared";
 import { existsSync, readFileSync, readdirSync, readlinkSync, lstatSync, realpathSync, statSync } from "node:fs";
-import { access, chmod, copyFile, mkdtemp, readdir, rename, rm, stat } from "node:fs/promises";
+import { access, chmod, copyFile, lstat, mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
@@ -1182,8 +1182,12 @@ export class CommandRunner {
     const policy = resolveMalwareScanPolicy();
     // Staged once per definitions content and reused by every document (real-Modal P1): a remote VM receives them once.
     const staged = await stageClamDefinitions(policy.databaseDirectory);
-    const databaseArgs = staged.files.flatMap((file) => ["--database", file]);
-    return await this.scanForMalwareWithDefinitions(source, signal, databaseArgs, staged.dir);
+    try {
+      const databaseArgs = staged.files.flatMap((file) => ["--database", file]);
+      return await this.scanForMalwareWithDefinitions(source, signal, databaseArgs, staged.dir);
+    } finally {
+      await staged.release();
+    }
   }
 
   private async scanForMalwareWithDefinitions(
@@ -2269,14 +2273,65 @@ export function buildCommandEnv(args: {
 
 /** Provider-neutral description of a parser command: allowlisted env plus the paths it may read and write. */
 /** The ClamAV definitions currently staged on this host, by the source files' name, size and mtime. */
-let stagedDefinitions: { signature: string; staging: Promise<{ dir: string; files: string[] }> } | null = null;
+let stagedDefinitions: { signature: string; staging: Promise<StagedClamDefinitions> } | null = null;
+/** Users of each staged directory, and whether a newer staging replaced it (council W #8: removed only when unused). */
+const stagedDefinitionUse = new Map<string, { refs: number; retired: boolean }>();
+
+export interface StagedClamDefinitions {
+  dir: string;
+  files: string[];
+  /** Done with the directory: a replaced one is removed once nobody uses it. Idempotent. */
+  release: () => Promise<void>;
+}
+
+/** A staged directory is reused only while it is still the private, read-only copy this process made (council W #8). */
+async function verifyStagedDefinitions(dir: string, names: string[], sourceDirectory: string): Promise<boolean> {
+  try {
+    const uid = process.getuid?.();
+    const info = await lstat(dir);
+    if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o700 || (uid !== undefined && info.uid !== uid)) return false;
+    if ((await readdir(dir)).sort().join("\0") !== [...names].sort().join("\0")) return false;
+    for (const name of names) {
+      const file = await lstat(path.join(dir, name));
+      const source = await stat(path.join(sourceDirectory, name));
+      if (!file.isFile() || (file.mode & 0o777) !== 0o444 || (uid !== undefined && file.uid !== uid) || file.size !== source.size) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function removeIfUnused(dir: string): Promise<void> {
+  const use = stagedDefinitionUse.get(dir);
+  if (use && (!use.retired || use.refs > 0)) return;
+  stagedDefinitionUse.delete(dir);
+  await rm(dir, { recursive: true, force: true }).catch(() => {});
+}
+
+function acquireStaged(staged: { dir: string; files: string[] }): StagedClamDefinitions {
+  const use = stagedDefinitionUse.get(staged.dir) ?? { refs: 0, retired: false };
+  use.refs += 1;
+  stagedDefinitionUse.set(staged.dir, use);
+  let released = false;
+  return {
+    ...staged,
+    release: async () => {
+      if (released) return;
+      released = true;
+      use.refs -= 1;
+      await removeIfUnused(staged.dir);
+    },
+  };
+}
 
 /**
- * Copy the named ClamAV definition files once into a directory named by their content's sha256 (real-Modal P1), read-only,
- * and reuse it until the host updater changes them; the previous directory is removed then. Only the signature databases
- * travel, never host configuration or credentials.
+ * Copy the named ClamAV definition files once into a private directory (mkdtemp, mode 0700, files 0444) named by their
+ * content's sha256 plus a random suffix (real-Modal P1, council W #8), and reuse it while the host updater leaves them
+ * unchanged and it still has that owner and those modes. A replaced directory is removed once no command still uses it
+ * (each caller releases its copy). Only the signature databases travel, never host configuration or credentials.
  */
-export async function stageClamDefinitions(directory: string): Promise<{ dir: string; files: string[] }> {
+export async function stageClamDefinitions(directory: string): Promise<StagedClamDefinitions> {
   const names: string[] = [];
   const parts: string[] = [];
   let totalBytes = 0;
@@ -2293,7 +2348,7 @@ export async function stageClamDefinitions(directory: string): Promise<{ dir: st
   const signature = `${directory}|${parts.sort().join("|")}`;
   if (stagedDefinitions?.signature === signature) {
     const current = await stagedDefinitions.staging.catch(() => null);
-    if (current && existsSync(current.dir)) return current;
+    if (current && await verifyStagedDefinitions(current.dir, names, directory)) return acquireStaged(current);
   }
   const previous = stagedDefinitions;
   const staging = (async () => {
@@ -2302,28 +2357,29 @@ export async function stageClamDefinitions(directory: string): Promise<{ dir: st
       hash.update(`${name}\0`);
       for await (const chunk of createReadStream(path.join(directory, name))) hash.update(chunk as Buffer);
     }
-    const dir = path.join(tmpdir(), `docslurp-clam-definitions-${hash.digest("hex").slice(0, 32)}`);
-    if (!existsSync(dir)) {
-      const temp = await mkdtemp(`${dir}.staging-`);
-      try {
-        for (const name of names) {
-          await copyFile(path.join(directory, name), path.join(temp, name));
-          await chmod(path.join(temp, name), 0o444);
-        }
-        await rename(temp, dir).catch(async (error: NodeJS.ErrnoException) => {
-          if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") throw error;
-        });
-      } finally {
-        await rm(temp, { recursive: true, force: true });
+    const dir = await mkdtemp(path.join(tmpdir(), `docslurp-clam-definitions-${hash.digest("hex").slice(0, 32)}-`));
+    try {
+      await chmod(dir, 0o700);
+      for (const name of names) {
+        await copyFile(path.join(directory, name), path.join(dir, name));
+        await chmod(path.join(dir, name), 0o444);
       }
+    } catch (error) {
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+      throw error;
     }
-    return { dir, files: names.map((name) => path.join(dir, name)) };
+    stagedDefinitionUse.set(dir, { refs: 0, retired: false });
+    return { dir, files: names.map((name) => path.join(dir, name)), release: async () => {} };
   })();
   stagedDefinitions = { signature, staging };
   const result = await staging;
   const old = await previous?.staging.catch(() => null);
-  if (old && old.dir !== result.dir) await rm(old.dir, { recursive: true, force: true }).catch(() => {});
-  return result;
+  if (old && old.dir !== result.dir) {
+    const use = stagedDefinitionUse.get(old.dir);
+    if (use) use.retired = true;
+    await removeIfUnused(old.dir);
+  }
+  return acquireStaged(result);
 }
 
 export function buildSandboxCommand(args: {

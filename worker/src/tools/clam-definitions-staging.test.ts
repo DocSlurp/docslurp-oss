@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -18,20 +18,41 @@ describe("ClamAV definitions staging", () => {
   });
   afterEach(async () => { await rm(source, { recursive: true, force: true }); });
 
-  it("reuses one content-named, read-only copy until the definitions change, then replaces it", async () => {
+  it("reuses one private, content-named, read-only copy until the definitions change, then replaces it once unused (council W #8)", async () => {
     const first = await stageClamDefinitions(source);
     const again = await stageClamDefinitions(source);
     expect(again.dir).toBe(first.dir);
-    expect(path.basename(first.dir)).toMatch(/^docslurp-clam-definitions-[0-9a-f]{32}$/);
+    expect(path.basename(first.dir)).toMatch(/^docslurp-clam-definitions-[0-9a-f]{32}-[A-Za-z0-9]{6}$/);
+    expect((await stat(first.dir)).mode & 0o777).toBe(0o700);
     expect((await readdir(first.dir)).sort()).toEqual(["daily.cvd", "main.cvd"]);
     expect((await stat(first.files[0]!)).mode & 0o777).toBe(0o444);
-    // The updater rewrites daily.cvd: a new directory, and the old one goes.
+    // The updater rewrites daily.cvd: a new directory. The old one stays while a command still uses it.
     await writeFile(path.join(source, "daily.cvd"), "daily v2");
     await utimes(path.join(source, "daily.cvd"), new Date(), new Date(Date.now() + 5_000));
     const next = await stageClamDefinitions(source);
     expect(next.dir).not.toBe(first.dir);
+    await first.release();
+    expect(existsSync(first.dir)).toBe(true); // `again` still holds it
+    await again.release();
     expect(existsSync(first.dir)).toBe(false);
+    await next.release();
     await rm(next.dir, { recursive: true, force: true });
+  });
+
+  it("restages instead of reusing a copy whose mode or contents changed (council W #8)", async () => {
+    const first = await stageClamDefinitions(source);
+    await chmod(first.dir, 0o777);
+    const second = await stageClamDefinitions(source);
+    expect(second.dir).not.toBe(first.dir);
+    expect((await stat(second.dir)).mode & 0o777).toBe(0o700);
+    await chmod(second.dir, 0o700);
+    await chmod(second.dir, 0o755);
+    await chmod(second.dir, 0o700);
+    await writeFile(path.join(second.dir, "extra.cvd"), "planted").catch(() => {});
+    const third = await stageClamDefinitions(source);
+    expect(third.dir).not.toBe(second.dir);
+    for (const staged of [first, second, third]) await staged.release();
+    for (const staged of [first, second, third]) await rm(staged.dir, { recursive: true, force: true });
   });
 
   it("a command with read-only assets reads them but never uploads them into its job tree", async () => {

@@ -304,6 +304,8 @@ function fakeSdk(
     resetUnhealthyInVm?: number;
     /** The VM-start image lock finds paths the parser user can write (exit 6). */
     lockFails?: boolean;
+    /** Each read-only asset write takes this long (council W #7). */
+    assetWriteDelayMs?: number;
     /** A create that fails left a VM behind anyway, found by name (council W #6). */
     orphanOnFailedCreate?: boolean;
     /** A root file write (an upload or an asset) fails with this message, by target path. */
@@ -337,6 +339,8 @@ function fakeSdk(
     leftoverKills: 0,
     locks: 0,
     lookups: [] as string[],
+    assetWritesInFlight: 0,
+    maxAssetWritesInFlight: 0,
     orphanTerminates: [] as string[],
     resets: [] as Array<{ vm: number; roots: string[] }>,
     rootWrites: [] as string[],
@@ -383,6 +387,11 @@ function fakeSdk(
         state.rootWrites.push(p);
         const failure = typeof opts.writeFails === "function" ? opts.writeFails(p) : undefined;
         if (failure) return Promise.reject(new Error(failure));
+        if (opts.assetWriteDelayMs && p.startsWith("/opt/docslurp-assets/")) {
+          state.assetWritesInFlight++;
+          state.maxAssetWritesInFlight = Math.max(state.maxAssetWritesInFlight, state.assetWritesInFlight);
+          return new Promise((resolve) => setTimeout(resolve, opts.assetWriteDelayMs)).then(() => { state.assetWritesInFlight--; return remote.writeFile(p, data); });
+        }
         return remote.writeFile(p, data);
       },
       readBytes: (p: string) => remote.readFile(p),
@@ -669,6 +678,24 @@ describe("modal provider session lifecycle", () => {
     expect((theirs as SandboxInfrastructureError).blameDocumentId).toBe("doc-a");
     expect((theirs as SandboxInfrastructureError).afterCommand).toBe(false);
     await opened.close();
+  });
+
+  it("stages the read-only assets into one VM at a time per worker, never into several at once (council W #7)", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "docslurp-w7-"));
+    try {
+      const assets = path.join(dir, "docslurp-clam-definitions-0123");
+      await mkdir(assets);
+      for (const name of ["main.cvd", "daily.cvd"]) await writeFile(path.join(assets, name), name);
+      const { sdk, state } = fakeSdk({ assetWriteDelayMs: 40, exec: async () => finished() });
+      const provider = createModalProvider(async () => sdk);
+      const sessions = await Promise.all(["a", "b", "c"].map((activityId) => provider.openSession({ ...config, vmsPerWorker: 3 }, { activityId })));
+      await Promise.all(sessions.map((session) => session.run!({ ...command, readOnlyAssetDir: assets })));
+      expect(state.createOptions).toHaveLength(3);
+      expect(state.maxAssetWritesInFlight).toBe(1);
+      for (const session of sessions) await session.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("only a failure after the document's own command ran counts toward its strikes (council U #4)", async () => {
