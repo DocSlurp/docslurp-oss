@@ -302,6 +302,8 @@ function fakeSdk(
   const state = {
     terminate: 0,
     lateTerminate: 0,
+    hardened: 0,
+    readsAsUser: 0,
     clientClose: 0,
     mkdirs: [] as string[],
     stats: [] as string[],
@@ -338,8 +340,12 @@ function fakeSdk(
       listFiles: async (p: string) => (await remote.list(p)).map(info),
     },
     exec: async (argv: string[], params?: { timeoutMs?: number }) => {
-      if (argv[0] === "/bin/cat") return { stdout: stream(await remote.readFile(argv[2]!)), stderr: stream(""), wait: async () => 0 };
-      if (argv[0] === "python3" && argv[1] === "-I") return finished((await remote.list(argv[4]!)).map((entry) => JSON.stringify(entry)).join("\n"));
+      if (argv[0] === "/bin/sh" && argv[2]?.includes("protected_hardlinks")) { state.hardened++; return finished("", 0); }
+      // Readback and listing run as the parser user (setpriv prefix): record it, then serve them.
+      const asUser = argv[0] === "/usr/bin/setpriv" && argv.includes("--reuid=10001") ? argv.slice(argv.indexOf("--") + 1) : null;
+      if (asUser?.[0] === "/bin/cat") { state.readsAsUser++; return { stdout: stream(await remote.readFile(asUser[2]!)), stderr: stream(""), wait: async () => 0 }; }
+      if (asUser?.[0] === "python3" && asUser[1] === "-I") return finished((await remote.list(asUser[4]!)).map((entry) => JSON.stringify(entry)).join("\n"));
+      if (argv[0] === "/bin/cat" || argv[0] === "python3") throw new Error("root must never read or list job output");
       if (isKill(argv)) {
         state.kills.push(controlOf(argv));
         opts.onKill?.(controlOf(argv));
@@ -410,6 +416,14 @@ describe("modal provider session lifecycle", () => {
       release(); await vi.advanceTimersByTimeAsync(1);
       expect(state.terminate).toBe(1); expect(state.clientClose).toBe(2);
     } finally { vi.useRealTimers(); }
+  });
+
+  it("hardens kernel link protections once per VM, and reads job output only as the parser user (council K #5)", async () => {
+    const { state, session } = await open({ exec: async () => finished() });
+    const opened = await session();
+    await opened.run!({ ...command, writablePaths: ["/job/out"] });
+    await opened.close();
+    expect(state.hardened).toBe(1);
   });
 
   it("starts every parser VM with the idle command, never the image's entrypoint (validation N1)", async () => {

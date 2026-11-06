@@ -14,5 +14,9 @@ for (const tool of TOOLS) {
     try { await access(path.join(dir, tool), constants.X_OK); tools.push(tool); break; } catch { /* next */ }
   }
 }
+// links: the kernel's hardlink and symlink protections (1 on, 0 off, null unknown); the host refuses 0.
+import { readFile } from "node:fs/promises";
+const sysctl = async (name) => { try { const value = Number((await readFile(`/proc/sys/fs/${name}`, "utf8")).trim()); return Number.isInteger(value) ? value : null; } catch { return null; } };
+const links = { hardlinks: await sysctl("protected_hardlinks"), symlinks: await sysctl("protected_symlinks") };
 // uid: the user the host launched this as; the host refuses root (parser commands drop privileges in the VM).
-console.log(JSON.stringify({ protocol: "parser-vm@2", uid: process.getuid?.() ?? null, tools }));
+console.log(JSON.stringify({ protocol: "parser-vm@2", uid: process.getuid?.() ?? null, tools, links }));

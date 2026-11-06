@@ -15,7 +15,7 @@ import {
   type SandboxResult,
   type SandboxSession,
 } from "../../types.js";
-import { CONTROL_DIR, killArgv, launchArgv } from "./control.js";
+import { asParserUser, CONTROL_DIR, HARDEN_LINKS_ARGV, killArgv, launchArgv } from "./control.js";
 import { SessionStaging, type RemoteEntry, type RemoteFs, type RemoteSnapshot } from "./staging.js";
 import { vmOnlyParsing } from "../../../lib/vm-only-parsing.js";
 
@@ -239,7 +239,8 @@ function buildRemoteFs(sdk: ModalSdk, sandbox: import("modal").Sandbox): RemoteF
     },
     writeFile: (p, data) => fs.writeBytes(data, p),
     async readFile(p) {
-      const proc = await sandbox.exec(["/bin/cat", "--", p], { mode: "binary", timeoutMs: 30_000 });
+      // Read as the parser user: root never follows a link the job left in its own output (council K #5).
+      const proc = await sandbox.exec([...asParserUser(), "/bin/cat", "--", p], { mode: "binary", timeoutMs: 30_000 });
       const [data, , code] = await Promise.all([boundedVmStream(proc.stdout, 128 * 1024 * 1024), boundedVmStream(proc.stderr, 64 * 1024), proc.wait()]);
       if (code !== 0) throw new Error("parser VM file transfer failed");
       return data;
@@ -247,7 +248,7 @@ function buildRemoteFs(sdk: ModalSdk, sandbox: import("modal").Sandbox): RemoteF
     async list(p) {
       // Do not ask the SDK to allocate an unbounded directory listing from the guest.
       const code = "import os,sys,json\np=sys.argv[1]\nwith os.scandir(p) as entries:\n for i,e in enumerate(entries):\n  if i>=8192: raise RuntimeError('directory entry limit')\n  if e.is_symlink(): continue\n  st=e.stat(follow_symlinks=False)\n  print(json.dumps(dict(path=e.path,isDir=e.is_dir(follow_symlinks=False),size=st.st_size,mtime=st.st_mtime)))";
-      const proc = await sandbox.exec(["python3", "-I", "-c", code, p], { mode: "binary", timeoutMs: 30_000 });
+      const proc = await sandbox.exec([...asParserUser(), "python3", "-I", "-c", code, p], { mode: "binary", timeoutMs: 30_000 });
       const [data, , status] = await Promise.all([boundedVmStream(proc.stdout, 4 * 1024 * 1024), boundedVmStream(proc.stderr, 64 * 1024), proc.wait()]);
       if (status !== 0) throw new Error("parser VM directory listing failed");
       return data.toString("utf8").split("\n").filter(Boolean).map((line) => {
@@ -345,10 +346,12 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
       try {
         session = await provider.openSession({ ...config, sessionTimeoutSeconds: Math.min(config.sessionTimeoutSeconds, PROBE_SESSION_TIMEOUT_SECONDS) }, { activityId: "startup-probe", unmetered: true });
         const result = await session.run!({ binary: "node", args: ["/app/worker/scripts/parser-vm-contract.mjs"], env: { PATH: "/usr/local/bin:/usr/bin:/bin" }, readablePaths: [], inputPaths: [], writablePaths: [], limits: { timeoutMs: 30_000 } });
-        const contract = result.exitCode === 0 ? JSON.parse(result.stdout) as { protocol?: unknown; uid?: unknown; tools?: unknown } : null;
+        const contract = result.exitCode === 0 ? JSON.parse(result.stdout) as { protocol?: unknown; uid?: unknown; tools?: unknown; links?: { hardlinks?: unknown; symlinks?: unknown } } : null;
         if (contract?.protocol !== "parser-vm@2") throw new Error("parser VM image contract unavailable");
         // Parser commands drop root in the VM (control.ts); a contract run as root means they would parse as root (N10).
         if (typeof contract.uid !== "number" || contract.uid === 0) throw new Error("parser VM commands do not drop root privileges");
+        // Kernel link protections (council K #5): refused when the VM reports them off.
+        if (contract.links?.hardlinks === 0 || contract.links?.symlinks === 0) throw new Error("parser VM kernel link protections are off");
         const tools = Array.isArray(contract.tools) ? contract.tools.filter((tool): tool is string => typeof tool === "string" && /^[a-z0-9][a-z0-9_.-]{0,63}$/.test(tool)) : undefined;
         return { ok: true, isolation: ISOLATION, detail: `VM image contract verified for '${config.app}'`, ...(tools ? { tools } : {}) };
       } catch (error) {
@@ -418,6 +421,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           }), 30_000);
           if (!opened) throw new Error("parser VM creation returned no sandbox");
           sandbox = opened;
+          // As root, once: kernel link protections on (best effort; the contract reports them and the probe refuses 0).
+          await withDeadline(opened.exec(HARDEN_LINKS_ARGV, { timeoutMs: 10_000 }).then((proc) => proc.wait()), 15_000);
           await withDeadline(opened.filesystem.makeDirectory(CONTROL_DIR), 30_000);
           staging = new SessionStaging(buildRemoteFs(sdk, opened));
         })();
