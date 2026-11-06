@@ -14,4 +14,4 @@ export type RuntimeIdentityRow = {
 export declare const RUNTIME_ROLES: readonly string[];
 export declare const RUNTIME_IDENTITY_SQL: string;
 export declare function runtimeIdentityProblems(row: RuntimeIdentityRow, expected: string): string[];
-export declare function checkRuntimeIdentity(client: { query(query: string, params?: unknown[]): Promise<{ rows: RuntimeIdentityRow[] }> }, expected: string): Promise<string[]>;
+export declare function checkRuntimeIdentity(client: { query(query: string, params?: unknown[]): Promise<{ rows: unknown[] }> }, expected: string): Promise<string[]>;

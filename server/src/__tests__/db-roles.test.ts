@@ -421,7 +421,7 @@ describe("pricing_provider_state (migration 0131)", () => {
 describe("runtime database identity gate (council N #1)", () => {
   const check = async (role: string | null, expected: string) => {
     const { checkRuntimeIdentity } = await import("../../db/runtime-role-check.mjs");
-    const client = { query: (query: string, params?: unknown[]) => db.query(query, params) };
+    const client = { query: (query: string, params?: unknown[]) => db.query<Record<string, unknown>>(query, params) };
     return role ? as(role, () => checkRuntimeIdentity(client, expected)) : checkRuntimeIdentity(client, expected);
   };
 
