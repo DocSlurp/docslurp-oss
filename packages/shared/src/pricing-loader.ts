@@ -234,12 +234,6 @@ export async function loadPricingProvider(
   options: LoadPricingProviderOptions = {},
 ): Promise<string> {
   const importModule = options.importModule ?? ((specifier: string) => import(specifier));
-  // Before anything prices: a runtime process refuses to start unless its role is a safe runtime identity (councils M #1,
-  // P #1, O #1). Where pricing is required this cannot be turned off (council O #3).
-  if (pricingRequired(env) && /^(0|false)$/i.test(env.DOCSLURP_REFUSE_PRICING_STATE_WRITER?.trim() ?? "")) {
-    console.error("[pricing] DOCSLURP_REFUSE_PRICING_STATE_WRITER=0 is ignored where pricing is required; the runtime identity check still runs");
-  }
-  if (options.sql && refusePricingStateWriter(env)) await assertRuntimeDatabaseIdentity(options.sql);
   const specifier = pricingPluginSpecifier(env);
   if (loadedFrom !== undefined) {
     if (loadedFrom !== specifier) throw new Error("A pricing provider is already loaded from a different DOCSLURP_PRICING_PLUGIN");
@@ -253,6 +247,12 @@ export async function loadPricingProvider(
     console.warn("[pricing] provider=open: no DOCSLURP_PRICING_PLUGIN; charges follow the open default's flat per-page rule");
     return pricing().id;
   }
+  // Before any plugin loads or anything prices: a runtime process refuses to start unless its role is a safe runtime
+  // identity (councils M #1, P #1, O #1). Where pricing is required this cannot be turned off (council O #3).
+  if (pricingRequired(env) && /^(0|false)$/i.test(env.DOCSLURP_REFUSE_PRICING_STATE_WRITER?.trim() ?? "")) {
+    console.error("[pricing] DOCSLURP_REFUSE_PRICING_STATE_WRITER=0 is ignored where pricing is required; the runtime identity check still runs");
+  }
+  if (options.sql && refusePricingStateWriter(env)) await assertRuntimeDatabaseIdentity(options.sql);
   let module: Partial<PricingPluginModule>;
   try {
     module = (await importModule(specifier)) as Partial<PricingPluginModule>;
