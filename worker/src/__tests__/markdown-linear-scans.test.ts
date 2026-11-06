@@ -120,3 +120,31 @@ describe("the remaining host regexes the audit found superlinear are linear (cou
     expect(typeColumn(["12 %", "3.5%"]).columnType).toBe("percentage");
   });
 });
+
+describe("links with one level of parentheses in the target still parse (council M #6)", () => {
+  it("cleans Wikipedia-style targets out of headings and counts them in the scorer, linearly", () => {
+    expect(plainHeadingText("[Foo](https://en.wikipedia.org/wiki/Foo_(bar)) and ![img](a_(b).png)")).toBe("Foo and img");
+    const scored = (markdown: string) => scoreMarkdownCandidate({ markdown }).formattingScore;
+    expect(scored("[Foo](https://en.wikipedia.org/wiki/Foo_(bar))\n")).toBe(scored("[Foo](https://example.com/foo)\n"));
+    for (const unit of ["[a](", "[a](x(", "[a]((((", "[a](x(y)"]) {
+      const text = unit.repeat(Math.floor(MB / unit.length));
+      expect(elapsed(() => { plainHeadingText(text.slice(0, HEADING_MAX_LINE_CHARS)); scoreMarkdownCandidate({ markdown: text }); })).toBeLessThan(1_000);
+    }
+  });
+
+  it("the extraction contract lists a Wikipedia-style link with its full target", async () => {
+    const { buildExtractionContract } = await import("../lib/extraction-contract.js");
+    const contract = buildExtractionContract({ documentId: "d", markdown: "See [Foo](https://en.wikipedia.org/wiki/Foo_(bar)).", extractor: "x", strategy: "s", extractionTimeMs: 1, pageCount: 1 });
+    expect(JSON.stringify(contract)).toContain("https://en.wikipedia.org/wiki/Foo_(bar)");
+  });
+});
+
+describe("CRLF headings (council M #7)", () => {
+  it("a heading line ending in \\r is a heading for the canonical builder and the chunker, its text without the \\r", () => {
+    expect(parseAtxHeading("## Results\r")).toEqual({ level: 2, text: "Results" });
+    const text = "# Title\r\n\r\nBody text of the first section.\r\n\r\n## Results\r\n\r\nMore text.\r\n";
+    const doc = buildCanonicalDocumentFromMarkdown({ documentId: "d", text, pageCount: 1 } as never);
+    expect(JSON.stringify(doc)).toContain("Results");
+    expect(JSON.stringify(doc)).not.toContain("Results\\r");
+  });
+});

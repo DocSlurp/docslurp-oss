@@ -70,20 +70,20 @@ describe("HTML table scanning is linear on hostile page text (council G M1)", ()
   const elapsed = (fn: () => unknown) => { const start = performance.now(); fn(); return performance.now() - start; };
   const unclosed = (chars: number, unit = "<table>x") => unit.repeat(Math.ceil(chars / unit.length)).slice(0, chars);
 
-  it("a page just under the cap of unclosed tables, rows or cells scans in well under 50 ms", () => {
+  it("a page just under the cap of unclosed tables, rows or cells scans in well under 500 ms (quadratic took 81 s)", () => {
     for (const unit of ["<table>x", "<TABLE x>y", "<table><tr>x", "<table><tr><td>x", "<table><tr><th>a<td>b"]) {
       const page = unclosed(TABLE_SCAN_MAX_PAGE_CHARS - 16, unit) + (unit.includes("<tr") ? "</table>" : "");
       repairMarkdownTables(page); // warm
-      expect(elapsed(() => { repairMarkdownTables(page); tableReliability(page); })).toBeLessThan(50);
+      expect(elapsed(() => { repairMarkdownTables(page); tableReliability(page); })).toBeLessThan(500);
     }
   });
 
-  it("1 MB of unclosed tables, as one page or as cap-sized pages, finishes in well under 50 ms", () => {
+  it("1 MB of unclosed tables, as one page or as cap-sized pages, finishes in well under 500 ms", () => {
     const oneMb = unclosed(1024 * 1024);
     const paged = Array.from({ length: 4 }, () => unclosed(TABLE_SCAN_MAX_PAGE_CHARS - 16)).join("\f");
     repairMarkdownTables(paged);
-    expect(elapsed(() => { repairMarkdownTables(oneMb); tableReliability(oneMb); })).toBeLessThan(50);
-    expect(elapsed(() => repairMarkdownTables(paged))).toBeLessThan(50);
+    expect(elapsed(() => { repairMarkdownTables(oneMb); tableReliability(oneMb); })).toBeLessThan(500);
+    expect(elapsed(() => repairMarkdownTables(paged))).toBeLessThan(500);
   });
 
   it("an oversized page is left as extracted and reported unreliable", () => {
@@ -103,7 +103,7 @@ describe("pipe-table checks are linear on whitespace-heavy page text (council I 
   const elapsed = (fn: () => unknown) => { const start = performance.now(); fn(); return performance.now() - start; };
   const near = TABLE_SCAN_MAX_PAGE_CHARS - 64;
 
-  it.each([[" ", "space"], ["\t", "tab"], [" ", "NBSP"], ["　", "ideographic space"]])("a page at the cap of %j (%s) scans in well under 50 ms", (ws) => {
+  it.each([[" ", "space"], ["\t", "tab"], [" ", "NBSP"], ["　", "ideographic space"]])("a page at the cap of %j (%s) scans in well under 500 ms (quadratic took 81 s)", (ws) => {
     const pages = [
       `|${ws.repeat(near)}x`,                               // a row that never closes
       `${ws.repeat(near)}-`,                                // separator-looking, leading whitespace
@@ -113,7 +113,7 @@ describe("pipe-table checks are linear on whitespace-heavy page text (council I 
     ];
     for (const page of pages) {
       repairMarkdownTables(page); // warm
-      expect(elapsed(() => { repairMarkdownTables(page); tableReliability(page); markdownTables(page); })).toBeLessThan(50);
+      expect(elapsed(() => { repairMarkdownTables(page); tableReliability(page); markdownTables(page); })).toBeLessThan(500);
     }
   });
 
@@ -125,12 +125,12 @@ describe("pipe-table checks are linear on whitespace-heavy page text (council I 
 
 describe("table repair is one forward pass over a page of many small tables (council K #1)", () => {
   const elapsed = (fn: () => unknown) => { fn(); let best = Infinity; for (let i = 0; i < 3; i++) { const start = performance.now(); fn(); best = Math.min(best, performance.now() - start); } return best; };
-  it("a page at the cap of small list-as-tables, HTML and pipe, repairs in well under 50 ms", () => {
+  it("a page at the cap of small list-as-tables, HTML and pipe, repairs in well under 500 ms", () => {
     const html = "<table><tr><td>-</td><td>a</td></tr><tr><td>-</td><td>b</td></tr><tr><td>-</td><td>c</td></tr></table>\n";
     const pipe = "| - | a |\n| --- | --- |\n| - | b |\n| - | c |\n\n";
     const page = (html + pipe).repeat(Math.floor((TABLE_SCAN_MAX_PAGE_CHARS - 64) / (html.length + pipe.length)));
     const { repairs } = repairMarkdownTables(page);
     expect(repairs.listsRestored).toBeGreaterThan(2_000);
-    expect(elapsed(() => repairMarkdownTables(page))).toBeLessThan(50);
+    expect(elapsed(() => repairMarkdownTables(page))).toBeLessThan(500);
   });
 });

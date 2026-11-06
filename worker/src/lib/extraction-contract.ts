@@ -149,7 +149,8 @@ export function buildExtractionContract(args: {
 
     // Extract links
     // Classes exclude their own opener: linear on unclosed `[` or `(` runs (council K #3 audit).
-    const linkRegex = /\[([^\][]+)\]\(([^()]+)\)/g;
+    // One level of balanced parentheses in the target (Wikipedia-style `Foo_(bar)`) still parses (council M #6).
+    const linkRegex = /\[([^\][]+)\]\(((?:[^()]|\([^()]*\))+)\)/g;
     let linkMatch: RegExpExecArray | null = linkRegex.exec(pageText);
     while (linkMatch) {
       links.push({

@@ -77,9 +77,10 @@ export function plainHeadingText(text: string): string {
   let out = stripClosingAtxSequence(text.trim());
   // Images first (`![alt](src)`), then inline links and reference links. Every class excludes its own opening delimiter,
   // so an attempt stops at the next opener: linear on unclosed `![`, `[`, `(` or `<` runs (council K #3).
-  out = out.replace(/!\[([^\][]*)\]\([^()]*\)/g, "$1");
+  // A link target may hold one level of balanced parentheses (Wikipedia-style `Foo_(bar)`, council M #6).
+  out = out.replace(/!\[([^\][]*)\]\((?:[^()]|\([^()]*\))*\)/g, "$1");
   out = out.replace(/!\[([^\][]*)\]\[[^\][]*\]/g, "$1");
-  out = out.replace(/\[([^\][]*)\]\([^()]*\)/g, "$1");
+  out = out.replace(/\[([^\][]*)\]\((?:[^()]|\([^()]*\))*\)/g, "$1");
   out = out.replace(/\[([^\][]+)\]\[[^\][]*\]/g, "$1");
   // Autolinks `<https://…>` keep their address; other tags are removed.
   out = out.replace(/<((?:https?|mailto):[^<>\s]+)>/gi, "$1");
