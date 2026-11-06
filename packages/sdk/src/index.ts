@@ -1084,8 +1084,13 @@ function rejectUncopyableFields(input: object, keys: readonly string[]): void {
 
 // Copies and JSON omit inherited/non-enumerable selectors. Refuse that loss
 // before it can select a default target or widen a delegated capability.
+const INTAKE_SELECTION_FIELDS = ["project", "projectId", "projectIds", "projectName", "project_id", "project_ids", "newProject", "templateKey", "orgId"] as const;
+
 function rejectUncopyableIntakeSelection(input: object): void {
-  rejectUncopyableFields(input, ["project", "projectId", "projectIds", "projectName", "project_id", "project_ids", "newProject", "templateKey", "orgId"]);
+  rejectUncopyableFields(input, INTAKE_SELECTION_FIELDS);
+  // A copied hook can replace the entire protocol object after scope validation.
+  // Refuse it at the original-input boundary, including batch query children.
+  if ("toJSON" in input) throw new TypeError("Request selections cannot use custom toJSON serialization.");
 }
 
 // Scope belongs to a URL/file-list envelope or upload options, never a file.
@@ -2321,7 +2326,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     /** Mints a sealed `X-DocSlurp-Capability` token a browser can use; needs a server key. */
     createCapability(input: CreateCapabilityInput = {}, requestOptions?: RequestOptions): Promise<{ token: string; expiresAt: string } & JsonObject> {
       rejectLegacyProjectOptions(input);
-      rejectUncopyableIntakeSelection(input);
+      // This endpoint explicitly projects plain protocol values below.
+      rejectUncopyableFields(input, INTAKE_SELECTION_FIELDS);
       rejectUncopyableFields(input, ["policy", "ttlSeconds", "boundClientKeyId", "allowedOrigins"]);
       const policy = input.policy;
       const policyFields = ["maxPagesPerQuery", "maxCreditsPerQuery", "maxPagesPerDay", "deadlineMs", "allowFullIndexRequest", "allowAgentDiscovery", "mapRouter"] as const;

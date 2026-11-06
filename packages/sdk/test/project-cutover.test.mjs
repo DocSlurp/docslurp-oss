@@ -197,3 +197,22 @@ test("capability requests retain explicit restrictions despite custom serializat
   await client.createCapability({ projectIds, allowedOrigins, policy: { allowAgentDiscovery: false, toJSON: () => ({}) }, ttlSeconds: 60, boundClientKeyId: "client", toJSON: () => ({}) });
   assert.deepEqual(captured, { projectIds: ["restricted-project"], allowedOrigins: ["https://example.test"], policy: { allowAgentDiscovery: false }, ttlSeconds: 60, boundClientKeyId: "client" });
 });
+
+
+test("request serialization hooks cannot erase explicit project or organization scope", async () => {
+  let requests = 0;
+  const client = createDocSlurpClient({ project: "client-default", fetch: async () => { requests++; throw new Error("network must not run"); } });
+  const calls = [
+    input => client.createUploadSession({ files: [{ filename: "x", sizeBytes: 1, mimeType: "text/plain" }], ...input }),
+    input => client.search({ q: "question", ...input }),
+    input => client.search({ queries: [{ q: "question", ...input }] }),
+    input => client.chat({ q: "question", ...input }),
+    async input => { for await (const _ of client.chatStream({ q: "question", ...input })) {} },
+    input => client.upload({ urls: ["https://example.test/a.pdf"], ...input }),
+    input => client.extract({ urls: ["https://example.test/a.pdf"], ...input }),
+  ];
+  for (const call of calls) {
+    await assert.rejects(async () => call({ project: "intended", orgId: "intended-org", toJSON: () => ({}) }), /custom toJSON serialization/);
+  }
+  assert.equal(requests, 0);
+});
