@@ -254,6 +254,14 @@ class CommandAborted extends Error {}
 /** A command waiting for a worker VM token gives up its empty lane for an idle VM of its own activity (real-Modal P2). */
 class HandOver extends Error {}
 
+/** How long the worker's read-only assets (the ClamAV definitions) may take to reach a VM, apart from any command. */
+const ASSET_STAGING_DEADLINE_MS = 10 * 60_000;
+
+/** A staging failure the VM reports for the document's own data (no space, quota), not a Modal API or transport error. */
+function isOwnStagingFailure(error: unknown): boolean {
+  return /\bENOSPC\b|no space left|\bEDQUOT\b|disk quota exceeded|file too large|\bEFBIG\b/i.test(error instanceof Error ? error.message : String(error));
+}
+
 async function withDeadline<T>(work: Promise<T>, timeoutMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -854,19 +862,35 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
 
         let commandCount = 0;
 
-        /** Whether the current command's own process has started (council U #4: only failures after that are strikes). */
+        /**
+         * Whether the current document caused what failed: its own command started (council U #4), or the staging of its
+         * own inputs and job tree had begun (council W #2). Only such failures are its strikes.
+         */
         let commandRan = false;
+        let ownStaging = false;
 
         async function execute(command: SandboxCommand, started: number, signal?: AbortSignal): Promise<SandboxResult> {
           let cleaned = false;
           commandRan = false;
+          ownStaging = false;
           try {
+            // Read-only assets (the ClamAV definitions) are the worker's, not the document's: staged under their own
+            // deadline, outside the command's control deadline, and their failure strikes no one (council W #2).
+            if (command.readOnlyAssetDir) {
+              try {
+                await ensureSandbox();
+                command = await withDeadline(withAssets(command), ASSET_STAGING_DEADLINE_MS);
+              } catch (error) {
+                if (error instanceof SandboxRunError) throw error;
+                throw new SandboxInfrastructureError(`modal sandbox read-only asset staging failed: ${safeMessage(config, error)}`, meterLane(lane), { cause: error });
+              }
+            }
             try {
               return await withDeadline(executeCommand(command, started, signal, () => { cleaned = true; }), command.limits.timeoutMs + 60_000);
             } catch (error) {
               if (error instanceof Error && error.message === "parser VM control deadline exceeded") {
                 await terminate().catch(() => {});
-                throw new SandboxInfrastructureError(error.message, meterLane(lane), { cause: error, afterCommand: commandRan });
+                throw new SandboxInfrastructureError(error.message, meterLane(lane), { cause: error, afterCommand: commandRan || ownStaging });
               }
               throw error;
             }
@@ -935,7 +959,9 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             await ensureSandbox();
             throwIfAborted(signal);
             command = await withAssets(command);
-            // Only the command's inputs travel; the parser runtime comes from the image.
+            // Only the command's inputs travel; the parser runtime comes from the image. From here a failure the VM itself
+            // reports (no space, the document's own staging timing out) is this document's doing (council W #2).
+            ownStaging = true;
             await staging!.ensureUploaded(command.inputPaths);
             throwIfAborted(signal);
             await staging!.ensureDirectories(command.writablePaths);
@@ -986,7 +1012,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
               // Before this command ran, on a VM another document used last, the tree was that document's: the sandbox's
               // failure for this one (a retry on a fresh VM; the strike limit stops a document that keeps doing it).
               if (!ran && lane.previousKey !== undefined && lane.previousKey !== command.affinityKey) {
-                throw new SandboxInfrastructureError(`modal sandbox job tree left unusable by an earlier command: ${error.message}; VM terminated`, meterLane(lane), { cause: error });
+                // The previous command's document (same activity, so the same run) takes the strike (council W #2).
+                throw new SandboxInfrastructureError(`modal sandbox job tree left unusable by an earlier command: ${error.message}; VM terminated`, meterLane(lane), { cause: error, blameDocumentId: lane.previousKey });
               }
               // The document's own files broke a staging rule: its verdict, never retried (recheck Q #1).
               throw new SandboxOutputError(error.message, meterLane(lane), { cause: error });
@@ -995,7 +1022,9 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             // hardening, the leftover kill, a closed session (a document's own failure is a non-zero exit or the above).
             // It counts toward the document's strikes only after its own command ran (council U #4); an error that already
             // says whether it does (a leftover kill that could not run is Modal's) keeps that.
-            const afterCommand = error instanceof SandboxInfrastructureError ? error.afterCommand : ran;
+            // Staging the document's own inputs that the VM refuses for lack of space is the document's too (council W #2);
+            // a Modal API or transport error during staging is not.
+            const afterCommand = error instanceof SandboxInfrastructureError ? error.afterCommand : ran || (ownStaging && isOwnStagingFailure(error));
             throw new SandboxInfrastructureError(`modal sandbox command failed: ${safeMessage(config, error)}`, meterLane(lane), { cause: error, afterCommand });
           }
         }

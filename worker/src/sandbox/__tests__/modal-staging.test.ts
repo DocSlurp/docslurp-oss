@@ -1,6 +1,6 @@
 import { pricing } from "@docslurp/shared";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -303,6 +303,8 @@ function fakeSdk(
     resetUnhealthyInVm?: number;
     /** The VM-start image lock finds paths the parser user can write (exit 6). */
     lockFails?: boolean;
+    /** A root file write (an upload or an asset) fails with this message, by target path. */
+    writeFails?: (target: string) => string | undefined;
     /** The leftover kill exec throws: a deadline (held up inside the VM) or a transport error. */
     killThrows?: "deadline" | "transport";
     /** The app lookup before each create takes this long (a slow Modal API). */
@@ -372,7 +374,12 @@ function fakeSdk(
         state.rootWrites.push(p);
         await remote.mkdir(p);
       },
-      writeBytes: (data: Uint8Array, p: string) => { state.rootWrites.push(p); return remote.writeFile(p, data); },
+      writeBytes: (data: Uint8Array, p: string) => {
+        state.rootWrites.push(p);
+        const failure = typeof opts.writeFails === "function" ? opts.writeFails(p) : undefined;
+        if (failure) return Promise.reject(new Error(failure));
+        return remote.writeFile(p, data);
+      },
       readBytes: (p: string) => remote.readFile(p),
       remove: (p: string) => { state.rootWrites.push(p); return remote.remove(p); },
       stat: async (p: string) => {
@@ -614,6 +621,43 @@ describe("modal provider session lifecycle", () => {
     await expect(session()).rejects.toThrow(/creation failed: parser VM image paths are writable by the parser user/);
     expect(state.locks).toBe(1);
     expect(state.commands).toEqual([]);
+  });
+
+  it("staging the document's own inputs strikes it only when the VM refuses them; a broken tree blames the previous document (council W #2)", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "docslurp-w2-"));
+    try {
+      const input = path.join(dir, "in.pdf");
+      await writeFile(input, "%PDF");
+      const isUpload = (target: string) => target.includes("/upload-");
+      const full = await open({ writeFails: (target) => (isUpload(target) ? "ENOSPC: no space left on device" : undefined), exec: async () => finished() });
+      const noSpace = await (await full.session()).run!({ ...command, affinityKey: "doc-a", inputPaths: [input] }).catch((error: unknown) => error);
+      expect(noSpace).toBeInstanceOf(SandboxInfrastructureError);
+      expect((noSpace as SandboxInfrastructureError).afterCommand).toBe(true);
+      const flaky = await open({ writeFails: (target) => (isUpload(target) ? "stream reset by peer" : undefined), exec: async () => finished() });
+      const transport = await (await flaky.session()).run!({ ...command, affinityKey: "doc-a", inputPaths: [input] }).catch((error: unknown) => error);
+      expect((transport as SandboxInfrastructureError).afterCommand).toBe(false);
+      expect((transport as SandboxInfrastructureError).strikes).toBe(false);
+      // The worker's read-only assets failing to reach the VM is no document's strike.
+      const assets = path.join(dir, "docslurp-clam-definitions-0123");
+      await mkdir(assets);
+      await writeFile(path.join(assets, "daily.cvd"), "defs");
+      const noAssets = await open({ writeFails: (target) => (target.startsWith("/opt/docslurp-assets/") ? "ENOSPC: no space left on device" : undefined), exec: async () => finished() });
+      const assetFailure = await (await noAssets.session()).run!({ ...command, affinityKey: "doc-a", readOnlyAssetDir: assets }).catch((error: unknown) => error);
+      expect(assetFailure).toBeInstanceOf(SandboxInfrastructureError);
+      expect(String((assetFailure as Error).message)).toMatch(/read-only asset staging failed/);
+      expect((assetFailure as SandboxInfrastructureError).strikes).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+    let broken = false;
+    const shared = await open({ mkdirFails: () => broken, exec: async () => finished() });
+    const opened = await shared.session();
+    await opened.run!({ ...command, affinityKey: "doc-a" });
+    broken = true;
+    const theirs = await opened.run!({ ...command, affinityKey: "doc-b", writablePaths: ["/job/out"] }).catch((error: unknown) => error);
+    expect((theirs as SandboxInfrastructureError).blameDocumentId).toBe("doc-a");
+    expect((theirs as SandboxInfrastructureError).afterCommand).toBe(false);
+    await opened.close();
   });
 
   it("only a failure after the document's own command ran counts toward its strikes (council U #4)", async () => {

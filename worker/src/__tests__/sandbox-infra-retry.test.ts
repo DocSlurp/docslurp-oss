@@ -169,6 +169,64 @@ describe("sandbox infrastructure failures retry the stage without failing the do
     expect(await visionEvents()).toBe(2);
   });
 
+  it("a document whose own input staging keeps failing for lack of space reaches the strike limit (council W #2)", async () => {
+    const attempts = { n: 0 };
+    // An earlier no-strike error in the same stage (a Modal API hiccup) must not hide the later strike.
+    const execution = createStageExecution({ store, stages: [{
+      name: "extract",
+      run: async (state) => {
+        attempts.n += 1;
+        for (const document of [...state.documents]) {
+          await runDocumentStage(state, document, "extract", `${document.id}:extract`, "x", async () => {
+            if (document.id === "y") {
+              noteSandboxInfrastructureError(new SandboxInfrastructureError("modal sandbox command failed: stream reset by peer"));
+              const failure = new SandboxInfrastructureError("modal sandbox command failed: ENOSPC: no space left on device", undefined, { afterCommand: true });
+              noteSandboxInfrastructureError(failure);
+              throw failure;
+            }
+            return { stats: {} };
+          });
+        }
+      },
+    }], config });
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      expect((await settle(execution.runStage(input, runtime(attempt))) as Error).name).toBe("SandboxInfrastructureError");
+    }
+    expect(await settle(execution.runStage(input, runtime(3)))).toBeNull();
+    expect(await documentStages()).toEqual({ x: "completed", y: "failed" });
+  });
+
+  it("a document that leaves the job tree unusable takes the strikes, not the next document; it fails at the limit (council W #2)", async () => {
+    // x's stage started earlier in this run (its command broke the tree); y inherits the VM.
+    await db.query(`insert into document_run_stage_states (run_id, document_id, stage_name, status, attempts, stats) values ('r1', 'x', 'extract', 'processing', 1, '{}')`);
+    const attempts = { n: 0 };
+    const execution = createStageExecution({ store, stages: [{
+      name: "extract",
+      run: async (state) => {
+        attempts.n += 1;
+        for (const document of [...state.documents].reverse()) {
+          await runDocumentStage(state, document, "extract", `${document.id}:extract`, "x", async () => {
+            if (document.id === "y" && attempts.n <= 3) {
+              const failure = new SandboxInfrastructureError("modal sandbox job tree left unusable by an earlier command: mkdir exited 1; VM terminated", undefined, { blameDocumentId: "x" });
+              noteSandboxInfrastructureError(failure);
+              throw failure;
+            }
+            return { stats: {} };
+          });
+        }
+      },
+    }], config });
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      expect((await settle(execution.runStage(input, runtime(attempt))) as Error).name).toBe("SandboxInfrastructureError");
+    }
+    const strikes = async (id: string) => (await db.query<{ n: number | null }>(`select (stats->>'sandboxInfrastructureStrikes')::int as n from document_run_stage_states where document_id = $1`, [id])).rows[0]?.n ?? 0;
+    expect(await strikes("x")).toBe(3);
+    expect(await strikes("y")).toBe(0);
+    // Next attempt: y runs on a fresh VM and completes; x, over the limit, fails without running.
+    expect(await settle(execution.runStage(input, runtime(4)))).toBeNull();
+    expect(await documentStages()).toEqual({ x: "failed", y: "completed" });
+  });
+
   it("a document's own staging violation fails only that document, once; the other completes (recheck Q #1)", async () => {
     const attempts = { n: 0 };
     const execution = createStageExecution({ store, stages: [extractStage(() => new SandboxOutputError("parser VM output entry/depth limit exceeded"), attempts)], config });

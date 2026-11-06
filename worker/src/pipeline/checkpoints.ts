@@ -286,6 +286,9 @@ export async function runDocumentStage(
         `attempt=${attempt.attempt}/${attempt.totalAttempts} strategy=${attempt.strategy ?? "default"}`,
     );
     try {
+      // Strikes other documents' failures put on this one (council W #2: it broke the job tree they inherited) count too.
+      const recorded = Number((checkpoint?.stats as { sandboxInfrastructureStrikes?: unknown } | undefined)?.sandboxInfrastructureStrikes ?? 0);
+      if (recorded > SANDBOX_INFRASTRUCTURE_RETRIES) throw new SandboxRepeatedFailureError(recorded, "strikes recorded against this document");
       const watched = await watchSandboxInfrastructure(() => runWithPerfContext({
         runId: state.run.id,
         documentId: document.id,
@@ -304,8 +307,17 @@ export async function runDocumentStage(
         // Counted durably, and only when the failure followed this document's own command on its VM (council U #4): a
         // document that breaks a fresh VM every time cannot keep the whole stage retrying (recheck S #2), while a provider
         // outage (session open, VM creation, API errors) is a plain retry and never fails a document.
-        const ownCommand = (watched.infrastructure as { afterCommand?: unknown }).afterCommand === true;
-        const strikes = ownCommand && state.store?.noteSandboxInfrastructureStrike
+        const failure = watched.infrastructure as { afterCommand?: unknown; blameDocumentId?: unknown };
+        const ownCommand = failure.afterCommand === true;
+        // A job tree the previous document of this run left unusable is that document's strike (council W #2); it fails
+        // at the limit the next time its stage runs.
+        const blamed = typeof failure.blameDocumentId === "string" && failure.blameDocumentId !== document.id ? failure.blameDocumentId : null;
+        if (!ownCommand && blamed && state.store?.noteSandboxInfrastructureStrike) {
+          await state.store.noteSandboxInfrastructureStrike(state, blamed, stageName).catch((error: unknown) => {
+            console.warn(`[checkpoint-debug] document=${blamed} stage=${stageName} blamed sandbox strike not recorded: ${error instanceof Error ? error.message : String(error)}`);
+          });
+        }
+        const strikes = (ownCommand || failure.blameDocumentId === document.id) && state.store?.noteSandboxInfrastructureStrike
           ? await state.store.noteSandboxInfrastructureStrike(state, document.id, stageName).catch((error: unknown) => {
             console.warn(`[checkpoint-debug] document=${document.id} stage=${stageName} sandbox strike not recorded: ${error instanceof Error ? error.message : String(error)}`);
             return 0;

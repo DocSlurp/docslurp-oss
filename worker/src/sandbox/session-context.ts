@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
-import { findSandboxInfrastructureError, type SandboxSession } from "./types.js";
+import { findSandboxInfrastructureError, type SandboxInfrastructureError, type SandboxSession } from "./types.js";
 
 /**
  * One sandbox session per scope (one Temporal activity). The session opens
@@ -78,7 +78,11 @@ export function noteSandboxInfrastructureError(error: unknown): void {
   const infrastructure = findSandboxInfrastructureError(error);
   if (!infrastructure) return;
   const holder = infrastructureWatch.getStore();
-  if (holder) holder.error ??= infrastructure;
+  if (!holder) return;
+  // The first failure wins, except that one which strikes a document replaces one which strikes no one (council W #2):
+  // an earlier Modal API error must not hide a later failure the document caused.
+  const current = holder.error as SandboxInfrastructureError | null;
+  if (!current || (!current.strikes && infrastructure.strikes)) holder.error = infrastructure;
 }
 
 /** The current activity's latched teardown failure, if any (see SandboxSessionScope.teardownError). */

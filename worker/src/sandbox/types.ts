@@ -110,16 +110,28 @@ export class SandboxOutputError extends SandboxRunError {
  */
 export class SandboxInfrastructureError extends SandboxRunError {
   /**
-   * The failure came after the document's own command ran on its VM (council U #4): only then may it count toward the
-   * document's strike limit. Session-open, VM creation and hardening, a closed session and Modal API failures before the
+   * The running document caused the failure (council U #4, W #2): its own command ran on its VM, or the VM refused the
+   * staging of its own inputs (no space, its staging timing out). Only then does it count toward the document's strike
+   * limit. Session-open, VM creation and hardening, a closed session and Modal API or transport failures before the
    * command ran are plain retries, so a provider outage never fails documents.
    */
   readonly afterCommand: boolean;
+  /**
+   * Another document of the same run that caused this failure (council W #2): the previous command's document on a VM
+   * whose job tree was found unusable. It takes the strike; the running document does not.
+   */
+  readonly blameDocumentId: string | undefined;
 
-  constructor(message: string, usage?: UsageEvent, options?: { cause?: unknown; afterCommand?: boolean }) {
+  constructor(message: string, usage?: UsageEvent, options?: { cause?: unknown; afterCommand?: boolean; blameDocumentId?: string }) {
     super(message, usage, options);
     this.name = "SandboxInfrastructureError";
     this.afterCommand = options?.afterCommand === true;
+    this.blameDocumentId = options?.blameDocumentId;
+  }
+
+  /** Whether this failure strikes some document (the running one, or the one it blames). */
+  get strikes(): boolean {
+    return this.afterCommand || this.blameDocumentId !== undefined;
   }
 }
 
