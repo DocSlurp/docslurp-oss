@@ -66,7 +66,8 @@ export function assembleEstimateQuote(args: ProviderEstimateArgs & {
   const pageRanges = new Map(paged.map((file) => {
     const range = quoteFilePageRange(file);
     const extra = Math.max(0, (file.pageEquivalents ?? range.central) - range.central);
-    return [file, { ...range, low: range.low + extra, central: range.central + extra, high: range.high + extra }] as const;
+    const extraHigh = Math.max(extra, (file.pageEquivalentsHigh ?? file.pageEquivalents ?? range.central) - range.central);
+    return [file, { ...range, low: range.low + extra, central: range.central + extra, high: range.high + extraHigh }] as const;
   }));
   const pages = sum([...pageRanges.values()].map((range) => ({ low: range.low, high: range.high })));
   const stored = ordered(sum(files.map((file) => args.bytes(file, pageRanges.get(file) ?? { low: 0, high: 0 }, settings))));

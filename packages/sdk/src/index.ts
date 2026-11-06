@@ -157,6 +157,7 @@ export type FileProfile = {
     textEquivalentsPerPage: number[]; areaEquivalentsPerPage: number[]; densePages: number;
     medianPageWidthPt: number; medianPageHeightPt: number; maxPageWidthPt: number; maxPageHeightPt: number;
     offPageChars: number; tinyCharsDropped: number; textEstimatedPages: number;
+    imagePpi: number[]; imageBytesPerPixel: number[]; glyphsOverImages: number; textOverImagePages: number;
   };
   /** Package structure; `declaredPages` is the document's own metadata claim: informational only, never counted or priced. */
   office?: { embeddedImages: number; slides?: number; sheets?: number; bodyBytes: number; declaredPages?: number };

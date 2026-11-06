@@ -295,3 +295,18 @@ fn a_page_read_only_in_part_estimates_its_text_from_content_size() {
     assert!(pdf.sampled_chars >= 400_000, "{}", pdf.sampled_chars);
     assert!(pdf.sampled_text_equivalents >= 100);
 }
+
+#[test]
+fn reports_the_layout_walkers_image_facts_and_text_drawn_over_images() {
+    // A scan with an invisible OCR text layer: its words sit inside the page image.
+    let ocr = probe_fixture("scan_ocr_invisible_wrapped.pdf");
+    let ocr = pdf(&ocr);
+    assert!(ocr.glyphs_over_images > 0, "{ocr:?}");
+    assert_eq!(ocr.text_over_image_pages, 1);
+    assert_eq!(ocr.image_ppi.iter().sum::<u32>(), ocr.images);
+    assert_eq!(ocr.image_bytes_per_pixel.iter().sum::<u32>(), ocr.images);
+    // A plain scan has no text layer at all.
+    let plain = probe_fixture("scan_plain.pdf");
+    assert_eq!((pdf(&plain).glyphs_over_images, pdf(&plain).text_over_image_pages), (0, 0));
+    assert_eq!(pdf(&plain).image_ppi.iter().sum::<u32>(), 1);
+}

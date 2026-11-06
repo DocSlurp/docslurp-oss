@@ -163,6 +163,21 @@ fn probe_document(rules: &Rules, document: &Document, file_bytes: usize, mut res
         if volume.estimated {
             profile.text_estimated_pages += 1;
         }
+        let images: Vec<&ImageUse> = reading.images.iter().filter(|image| !image.id.is_some_and(|id| repeated.contains(&id))).collect();
+        for image in &images {
+            let ppi = [0.0, 100.0, 200.0, 300.0].iter().rposition(|bound| image.ppi >= *bound).unwrap_or(0);
+            profile.image_ppi[ppi] = profile.image_ppi[ppi].saturating_add(1);
+            let bpp = [0.0, 0.05, 0.2, 0.5, 1.0].iter().rposition(|bound| image.bytes_per_pixel >= *bound).unwrap_or(0);
+            profile.image_bytes_per_pixel[bpp] = profile.image_bytes_per_pixel[bpp].saturating_add(1);
+        }
+        let over: f64 = reading.runs.iter()
+            .filter(|run| images.iter().any(|image| run.x >= image.bbox[0] && run.x <= image.bbox[2] && run.y >= image.bbox[1] && run.y <= image.bbox[3]))
+            .map(|run| run.glyphs)
+            .sum();
+        profile.glyphs_over_images = profile.glyphs_over_images.saturating_add(count(over));
+        if over >= 20.0 {
+            profile.text_over_image_pages += 1;
+        }
     }
     let points = |value: f64| value.round().clamp(0.0, 10_000_000.0) as u32;
     let median = |mut values: Vec<f64>| { values.sort_by(f64::total_cmp); values[values.len() / 2] };
@@ -428,6 +443,8 @@ struct PageStats {
     unmapped_text: bool,
     /// Text volume: glyphs shown and text lines started (both as extraction would see them).
     text: TextVolume,
+    /// Where kept glyphs were shown, for the text-over-image count.
+    runs: Vec<GlyphRun>,
     /// Significant images (pixels and placed area over the rules' floors), at most `MAX_TRACKED_IMAGES_PER_PAGE`; the
     /// totals the class is read from are taken after repeated objects are dropped (`ImageTotals`).
     images: Vec<ImageUse>,
@@ -440,7 +457,30 @@ struct ImageUse {
     /// The image XObject, or none for an inline image (which has no identity to repeat).
     id: Option<ObjectId>,
     coverage: f64,
+    /// Placement box in default user space, effective pixels per inch on the page, and stream bytes per pixel (the
+    /// layout walker's image facts, `worker/scripts/pdf_layout_facts.py`).
+    bbox: [f64; 4],
+    ppi: f64,
+    bytes_per_pixel: f64,
 }
+
+impl ImageUse {
+    #[cfg(test)]
+    fn plain(id: Option<ObjectId>, coverage: f64) -> Self {
+        Self { id, coverage, bbox: [0.0, 0.0, 612.0, 792.0], ppi: 150.0, bytes_per_pixel: 0.2 }
+    }
+}
+
+/// A text position with the glyphs shown there, kept to count text drawn over images.
+#[derive(Debug, Clone, Copy)]
+struct GlyphRun {
+    x: f64,
+    y: f64,
+    glyphs: f64,
+}
+
+/// Text positions kept per page for the text-over-image count; beyond it the count covers the first runs only.
+const MAX_GLYPH_RUNS_PER_PAGE: usize = 16_384;
 
 /// Significant, non-repeated image totals of one page.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -616,6 +656,7 @@ struct PageReading {
     width: f64,
     height: f64,
     text: TextVolume,
+    runs: Vec<GlyphRun>,
 }
 
 impl PageReading {
@@ -652,7 +693,7 @@ fn classify_page(routing: &PageRasterRouting, document: &Document, page_id: Obje
         stats.text.estimated = true;
     }
     let (width, height) = ((visible[2] - visible[0]).max(0.0), (visible[3] - visible[1]).max(0.0));
-    Some(PageReading { words: stats.words.words(), path_operations: stats.path_operations, images: stats.images, exhausted: stats.exhausted, unmapped_text: stats.unmapped_text, area, width, height, text: stats.text })
+    Some(PageReading { words: stats.words.words(), path_operations: stats.path_operations, images: stats.images, exhausted: stats.exhausted, unmapped_text: stats.unmapped_text, area, width, height, text: stats.text, runs: stats.runs })
 }
 
 /// The worker's drawn-content rule (`classify-route.ts`): a document with no extractable text anywhere whose bytes,
@@ -781,6 +822,10 @@ impl<'a> Context<'a, '_> {
             return;
         }
         volume.chars += glyphs;
+        if stats.runs.len() < MAX_GLYPH_RUNS_PER_PAGE {
+            stats.runs.push(GlyphRun { x, y, glyphs });
+        }
+        let volume = &mut stats.text;
         if text.new_line {
             volume.lines += 1.0;
             text.new_line = false;
@@ -795,7 +840,7 @@ impl<'a> Context<'a, '_> {
         }
     }
 
-    fn record_image(&self, stats: &mut PageStats, id: Option<ObjectId>, ctm: &Matrix, width: f64, height: f64) {
+    fn record_image(&self, stats: &mut PageStats, id: Option<ObjectId>, ctm: &Matrix, width: f64, height: f64, stream_bytes: usize) {
         let placed = (ctm[0] * ctm[3] - ctm[1] * ctm[2]).abs();
         let coverage = (placed / self.area).min(1.0);
         if !coverage.is_finite()
@@ -804,12 +849,25 @@ impl<'a> Context<'a, '_> {
         {
             return;
         }
+        // The unit square through the image matrix: its corners give the placement box.
+        let corners = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)].map(|(u, v)| (u * ctm[0] + v * ctm[2] + ctm[4], u * ctm[1] + v * ctm[3] + ctm[5]));
+        let bbox = [
+            corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min),
+            corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min),
+            corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max),
+            corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max),
+        ];
+        // Pixels per inch as placed: the image's pixels over its placed size (the walker's ppi, from `pdfimages -list`).
+        let placed_inches = ((ctm[0].hypot(ctm[1])) / 72.0).max(1e-9);
+        let ppi = width / placed_inches;
+        let bytes_per_pixel = if width * height > 0.0 { stream_bytes as f64 / (width * height) } else { 0.0 };
+        let image = ImageUse { id, coverage, bbox, ppi, bytes_per_pixel };
         if stats.images.len() < MAX_TRACKED_IMAGES_PER_PAGE {
-            stats.images.push(ImageUse { id, coverage });
+            stats.images.push(image);
         } else if let Some(smallest) = stats.images.iter_mut().min_by(|a, b| a.coverage.total_cmp(&b.coverage)) {
             // A page of hundreds of images keeps the largest ones: they decide the class.
             if coverage > smallest.coverage {
-                *smallest = ImageUse { id, coverage };
+                *smallest = image;
             }
         }
     }
@@ -929,7 +987,7 @@ impl<'a> Context<'a, '_> {
                         if width == 0.0 {
                             (width, height) = self.image_size(&image.dict, b"Width", b"Height");
                         }
-                        self.record_image(stats, None, &ctm, width, height);
+                        self.record_image(stats, None, &ctm, width, height, image.content.len());
                     }
                 }
                 "Do" => {
@@ -939,7 +997,7 @@ impl<'a> Context<'a, '_> {
                     match subtype {
                         Some(Object::Name(kind)) if kind == b"Image" => {
                             let (width, height) = self.image_size(&xobject.dict, b"Width", b"Height");
-                            self.record_image(stats, id, &ctm, width, height);
+                            self.record_image(stats, id, &ctm, width, height, xobject.content.len());
                         }
                         Some(Object::Name(kind)) if kind == b"Form" && depth < MAX_FORM_DEPTH => {
                             stats.form_calls += 1;
@@ -1038,13 +1096,14 @@ mod tests {
         let page = |ids: &[u32]| PageReading {
             words: 0.0,
             path_operations: 0,
-            images: ids.iter().map(|number| ImageUse { id: Some(id(*number)), coverage: 0.9 }).collect(),
+            images: ids.iter().map(|number| ImageUse::plain(Some(id(*number)), 0.9)).collect(),
             exhausted: false,
             unmapped_text: false,
             area: DEFAULT_PAGE_AREA,
             width: 612.0,
             height: 792.0,
             text: TextVolume::default(),
+            runs: Vec::new(),
         };
         // The same full-bleed background on four pages: furniture, so the pages are blank.
         let slides = vec![page(&[7]), page(&[7]), page(&[7]), page(&[7])];
@@ -1060,7 +1119,7 @@ mod tests {
         assert!(repeated_images(&routing, &[page(&[9]), page(&[9])]).is_empty());
         let mut hundred: Vec<PageReading> = (0..100).map(|number| page(&[100 + number])).collect();
         for reading in hundred.iter_mut().take(3) {
-            reading.images = vec![ImageUse { id: Some(id(9)), coverage: 0.9 }];
+            reading.images = vec![ImageUse::plain(Some(id(9)), 0.9)];
         }
         assert!(repeated_images(&routing, &hundred).is_empty());
     }

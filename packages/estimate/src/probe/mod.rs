@@ -111,6 +111,14 @@ pub struct PdfProfile {
     /// Sampled pages whose text could not be read to the end (a content budget): their glyphs are estimated from the
     /// content-stream size, so the text facts above are estimates for them.
     pub text_estimated_pages: u32,
+    /// The layout walker's image facts over significant, non-furniture images: images per placed resolution (under 100,
+    /// 100-199, 200-299, 300 ppi and up) and per stream bytes per pixel (under 0.05, 0.05-0.2, 0.2-0.5, 0.5-1, 1 and up).
+    pub image_ppi: [u32; 4],
+    pub image_bytes_per_pixel: [u32; 5],
+    /// Glyphs shown inside such an image's box (a text layer over a scan, or captions over a figure), and sampled pages
+    /// with at least 20 such glyphs.
+    pub glyphs_over_images: u64,
+    pub text_over_image_pages: u32,
 }
 
 /// Facts about an Office or EPUB package.

@@ -188,6 +188,26 @@ export function profilePageEquivalents(file: { pages?: number; profile?: { pages
   return Math.max(pages, Math.ceil(pages * (pdf.sampledPageEquivalents / pdf.sampledPages)));
 }
 
+/**
+ * The page equivalents as a range: `low` is profilePageEquivalents; the high end widens with the share of sampled pages
+ * whose text was estimated (read only in part: up to twice their estimated volume) and of pages not sampled at all when
+ * the sampled pages were dense (up to the largest sampled page each).
+ */
+export function profilePageEquivalentRange(file: Parameters<typeof profilePageEquivalents>[0] & {
+  profile?: { pdf?: { sampledPages: number; sampledPageEquivalents: number; textEstimatedPages?: number; maxPageEquivalents?: number } };
+}): { low: number; high: number } | undefined {
+  const low = profilePageEquivalents(file);
+  const pdf = file.profile?.pdf;
+  const pages = file.pages ?? file.profile?.pages;
+  if (low === undefined || !pdf || !pages) return low === undefined ? undefined : { low, high: low };
+  const estimatedShare = Math.min(1, (pdf.textEstimatedPages ?? 0) / pdf.sampledPages);
+  let high = Math.ceil(low * (1 + estimatedShare));
+  if (pages > pdf.sampledPages && (pdf.maxPageEquivalents ?? 1) > 1) {
+    high = Math.max(high, Math.ceil(low + (pages - pdf.sampledPages) * ((pdf.maxPageEquivalents ?? 1) - pdf.sampledPageEquivalents / pdf.sampledPages)));
+  }
+  return { low, high: Math.max(low, high) };
+}
+
 /** Pages of a file over the range its size allows when the client has not counted them; one value when they are known. */
 export function quoteFilePageRange(file: { name: string; type?: string | null; size: number; pages?: number }): PageRange {
   const central = quoteFilePages(file);

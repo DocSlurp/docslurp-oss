@@ -63,7 +63,7 @@ function pdfProfile(overrides: Partial<FileProfile> = {}, pdf: Partial<NonNullab
       budgetExhausted: false,
       sampledWords: 1_800,
       sampledChars: 0, sampledTextLines: 0, charsByFontSize: [0, 0, 0, 0, 0], invisibleChars: 0, offCropChars: 0,
-      sampledTextEquivalents: 10, sampledAreaEquivalents: 10, sampledPageEquivalents: 10, maxPageEquivalents: 1, textEquivalentsPerPage: [10, 0, 0, 0, 0, 0, 0], areaEquivalentsPerPage: [10, 0, 0, 0, 0, 0, 0, 0], densePages: 0, medianPageWidthPt: 612, medianPageHeightPt: 792, maxPageWidthPt: 612, maxPageHeightPt: 792, offPageChars: 0, tinyCharsDropped: 0, textEstimatedPages: 0,
+      sampledTextEquivalents: 10, sampledAreaEquivalents: 10, sampledPageEquivalents: 10, maxPageEquivalents: 1, textEquivalentsPerPage: [10, 0, 0, 0, 0, 0, 0], areaEquivalentsPerPage: [10, 0, 0, 0, 0, 0, 0, 0], densePages: 0, medianPageWidthPt: 612, medianPageHeightPt: 792, maxPageWidthPt: 612, maxPageHeightPt: 792, offPageChars: 0, tinyCharsDropped: 0, textEstimatedPages: 0, imagePpi: [0, 0, 4, 0], imageBytesPerPixel: [0, 0, 4, 0, 0], glyphsOverImages: 0, textOverImagePages: 0,
       medianPageAreaSqIn: 94,
       maxPageAreaSqIn: 94,
       ...pdf,
@@ -170,11 +170,21 @@ describe("file profiles are untrusted", () => {
   });
 
   it("clamps counts to the pages sampled and the duration to a day", () => {
-    const clamped = normalizeFileProfile(pdfProfile({}, { rasterPages: 999, images: 10_000 }), { size: 100_000 })!;
+    const clamped = normalizeFileProfile(pdfProfile({}, { rasterPages: 999, images: 10_000, imagePpi: [0, 0, 10_000, 0], imageBytesPerPixel: [0, 0, 10_000, 0, 0] }), { size: 100_000 })!;
     expect(clamped.pdf?.rasterPages).toBe(10);
     expect(clamped.pdf?.images).toBe(640);
     const media = normalizeFileProfile({ schema: 1, profiler: "t", kind: "video", format: "mp4", bytes: 5, durationSeconds: 6 * 24 * 3600 }, { size: 5 })!;
     expect(media.durationSeconds).toBe(24 * 3600);
+  });
+
+  it("widens the page-equivalent high end for estimated text and dense unsampled pages", () => {
+    const exact = applyFileProfile({ name: "a.pdf", size: 100_000, profile: pdfProfile() });
+    expect([exact.pageEquivalents, exact.pageEquivalentsHigh]).toEqual([10, 10]);
+    const estimated = applyFileProfile({ name: "a.pdf", size: 100_000, profile: pdfProfile({}, { textEstimatedPages: 5 }) });
+    expect([estimated.pageEquivalents, estimated.pageEquivalentsHigh]).toEqual([10, 15]);
+    const partial = applyFileProfile({ name: "a.pdf", size: 100_000, profile: pdfProfile({ pages: 20 }, { sampledPageEquivalents: 12, maxPageEquivalents: 3, textEquivalentsPerPage: [8, 1, 0, 1, 0, 0, 0] }) });
+    expect(partial.pageEquivalents).toBe(24);
+    expect(partial.pageEquivalentsHigh).toBe(42);
   });
 
   it("merges counts only where the caller gave none", () => {

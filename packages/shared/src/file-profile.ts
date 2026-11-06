@@ -24,6 +24,10 @@ export const FILE_PROFILE_MAX_SAMPLED_PAGES = 24;
  * edges are the page raster rule's stamp-text and sparse-page word limits (PAGE_RASTER_ROUTING).
  */
 export const WORDS_PER_PAGE_BUCKETS = [0, 1, 11, 30, 200, 500] as const;
+/** Placed image resolution, pixels per inch, bucket lower bounds. */
+export const IMAGE_PPI_BUCKETS = [0, 100, 200, 300] as const;
+/** Image stream bytes per pixel, bucket lower bounds. */
+export const IMAGE_BYTES_PER_PIXEL_BUCKETS = [0, 0.05, 0.2, 0.5, 1] as const;
 /** Per-page text equivalents, histogram bucket lower bounds: 1, 2, 3, 4-8, 9-16, 17-64, 65 and up. */
 export const TEXT_EQUIVALENT_BUCKETS = [1, 2, 3, 4, 9, 17, 65] as const;
 /** Effective font size (font size times text and page scaling), in points, bucket lower bounds: under 1, 1, 4, 6, 20. */
@@ -105,6 +109,15 @@ export const pdfProfileSchema = z.strictObject({
   tinyCharsDropped: z.number().int().nonnegative().max(10 ** 12),
   /** Sampled pages whose text could not be read to the end: their text facts are estimates from content size. */
   textEstimatedPages: count,
+  /**
+   * The layout walker's image facts (worker/scripts/pdf_layout_facts.py) over significant, non-furniture images: images
+   * per placed resolution (IMAGE_PPI_BUCKETS) and per stream bytes per pixel (IMAGE_BYTES_PER_PIXEL_BUCKETS).
+   */
+  imagePpi: z.array(count).length(4),
+  imageBytesPerPixel: z.array(count).length(5),
+  /** Glyphs shown inside such an image's box (a text layer over a scan, captions over a figure), and pages with 20 or more. */
+  glyphsOverImages: z.number().int().nonnegative().max(10 ** 12),
+  textOverImagePages: count,
 });
 export type PdfProfile = z.infer<typeof pdfProfileSchema>;
 
@@ -170,7 +183,8 @@ export function normalizeFileProfile(profile: FileProfile, file: { size: number 
     if (normalized.kind !== "pdf" || sum(pdf.wordsPerPage) !== pdf.sampledPages || sum(pdf.imageCoverage) !== pdf.sampledPages
       // Estimated pages add glyphs no size was measured for: the histogram may then hold fewer, never more.
       || (pdf.textEstimatedPages > 0 ? sum(pdf.charsByFontSize) > pdf.sampledChars : sum(pdf.charsByFontSize) !== pdf.sampledChars)
-      || sum(pdf.textEquivalentsPerPage) !== pdf.sampledPages || sum(pdf.areaEquivalentsPerPage) !== pdf.sampledPages) {
+      || sum(pdf.textEquivalentsPerPage) !== pdf.sampledPages || sum(pdf.areaEquivalentsPerPage) !== pdf.sampledPages
+      || sum(pdf.imagePpi) !== pdf.images || sum(pdf.imageBytesPerPixel) !== pdf.images) {
       delete normalized.pdf;
     } else {
       const clamp = (value: number) => Math.min(sampled, value);
@@ -207,6 +221,8 @@ export function normalizeFileProfile(profile: FileProfile, file: { size: number 
         // Dense pages are the text histogram's pages over 3 equivalents.
         densePages: pdf.textEquivalentsPerPage.slice(3).reduce((total, pages) => total + pages, 0),
         textEstimatedPages: Math.min(pdf.textEstimatedPages, sampled),
+        glyphsOverImages: Math.min(pdf.glyphsOverImages, pdf.sampledChars),
+        textOverImagePages: Math.min(pdf.textOverImagePages, sampled),
         medianPageWidthPt: Math.min(pdf.medianPageWidthPt, pdf.maxPageWidthPt),
         medianPageHeightPt: Math.min(pdf.medianPageHeightPt, pdf.maxPageHeightPt),
         // Histograms are kept as measured: their totals were checked above.

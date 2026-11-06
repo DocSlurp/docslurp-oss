@@ -26,7 +26,7 @@ function scan(pages: number, bytes = pages * 200_000): { name: string; size: num
         layoutHeavyPages: 0, vectorHeavyPages: 0, unmappedFontPages: 0, drawnContent: false, budgetExhausted: false,
         sampledWords: 0, medianPageAreaSqIn: 94, maxPageAreaSqIn: 94,
       sampledChars: 0, sampledTextLines: 0, charsByFontSize: [0, 0, 0, 0, 0], invisibleChars: 0, offCropChars: 0,
-      sampledTextEquivalents: sampled, sampledAreaEquivalents: sampled, sampledPageEquivalents: sampled, maxPageEquivalents: 1, textEquivalentsPerPage: [sampled, 0, 0, 0, 0, 0, 0], areaEquivalentsPerPage: [sampled, 0, 0, 0, 0, 0, 0, 0], densePages: 0, medianPageWidthPt: 612, medianPageHeightPt: 792, maxPageWidthPt: 612, maxPageHeightPt: 792, offPageChars: 0, tinyCharsDropped: 0, textEstimatedPages: 0,
+      sampledTextEquivalents: sampled, sampledAreaEquivalents: sampled, sampledPageEquivalents: sampled, maxPageEquivalents: 1, textEquivalentsPerPage: [sampled, 0, 0, 0, 0, 0, 0], areaEquivalentsPerPage: [sampled, 0, 0, 0, 0, 0, 0, 0], densePages: 0, medianPageWidthPt: 612, medianPageHeightPt: 792, maxPageWidthPt: 612, maxPageHeightPt: 792, offPageChars: 0, tinyCharsDropped: 0, textEstimatedPages: 0, imagePpi: [0, 0, sampled, 0], imageBytesPerPixel: [0, 0, sampled, 0, 0], glyphsOverImages: 0, textOverImagePages: 0,
       },
     },
   };

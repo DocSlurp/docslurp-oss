@@ -7,7 +7,7 @@ import type { UploadMediaEstimate, UploadMediaFile } from "./media-upload-estima
 import { pricing } from "./pricing-provider.js";
 
 export * from "./upload-pages.js";
-import { profilePageEquivalents } from "./upload-pages.js";
+import { profilePageEquivalentRange } from "./upload-pages.js";
 import { compilePipelinePlan, type PipelineFeatures } from "./pipeline.js";
 
 /*
@@ -84,6 +84,8 @@ export type QuoteFile = UploadMediaFile & {
    * them: the structural pages plus what stuffed pages hold beyond one page each. Never below `pages`.
    */
   pageEquivalents?: number;
+  /** The high end of the page equivalents (profilePageEquivalentRange): wider when text was estimated or pages unsampled. */
+  pageEquivalentsHigh?: number;
   profile?: FileProfile;
 };
 
@@ -102,8 +104,8 @@ export function applyFileProfile(file: QuoteFile): QuoteFile {
     ...file,
     ...(file.pages === undefined && profile.pages !== undefined ? { pages: profile.pages } : {}),
     ...(() => {
-      const equivalents = profilePageEquivalents({ ...(file.pages !== undefined ? { pages: file.pages } : {}), profile });
-      return equivalents !== undefined ? { pageEquivalents: equivalents } : {};
+      const range = profilePageEquivalentRange({ ...(file.pages !== undefined ? { pages: file.pages } : {}), profile });
+      return range !== undefined ? { pageEquivalents: range.low, pageEquivalentsHigh: range.high } : {};
     })(),
     ...(file.durationSeconds === undefined && profile.durationSeconds !== undefined ? { durationSeconds: profile.durationSeconds } : {}),
     ...(!file.type && profile.mimeType ? { type: profile.mimeType } : {}),

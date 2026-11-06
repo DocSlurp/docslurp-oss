@@ -66,6 +66,13 @@ export type FileProfile = {
     tinyCharsDropped: number;
     /** Sampled pages whose text was estimated from content size (read only in part). */
     textEstimatedPages: number;
+    /** Significant images per placed resolution: under 100, 100-200, 200-300, 300+ ppi. */
+    imagePpi: [number, number, number, number];
+    /** Significant images per stream bytes per pixel: under 0.05, 0.05-0.2, 0.2-0.5, 0.5-1, 1+. */
+    imageBytesPerPixel: [number, number, number, number, number];
+    /** Glyphs drawn inside a significant image's box, and pages with 20 or more. */
+    glyphsOverImages: number;
+    textOverImagePages: number;
   };
   /** Package structure: slide and worksheet parts, body bytes; `declaredPages` is authored metadata, informational only. */
   office?: { embeddedImages: number; slides?: number; sheets?: number; bodyBytes: number; declaredPages?: number };

@@ -18,7 +18,7 @@ function profile(bytes: number, pages: number) {
       imagePages: 0, images: 0, imageCoverage: [2, 0, 0, 0, 0], furnitureImages: 0, layoutHeavyPages: 0, vectorHeavyPages: 0,
       unmappedFontPages: 0, drawnContent: false, budgetExhausted: false, sampledWords: 700, medianPageAreaSqIn: 94, maxPageAreaSqIn: 94,
       sampledChars: 4_200, sampledTextLines: 80, charsByFontSize: [0, 0, 0, 4_200, 0], invisibleChars: 0, offCropChars: 0,
-      sampledTextEquivalents: 2, sampledAreaEquivalents: 2, sampledPageEquivalents: 2, maxPageEquivalents: 1, textEquivalentsPerPage: [2, 0, 0, 0, 0, 0, 0], areaEquivalentsPerPage: [2, 0, 0, 0, 0, 0, 0, 0], densePages: 0, medianPageWidthPt: 612, medianPageHeightPt: 792, maxPageWidthPt: 612, maxPageHeightPt: 792, offPageChars: 0, tinyCharsDropped: 0, textEstimatedPages: 0,
+      sampledTextEquivalents: 2, sampledAreaEquivalents: 2, sampledPageEquivalents: 2, maxPageEquivalents: 1, textEquivalentsPerPage: [2, 0, 0, 0, 0, 0, 0], areaEquivalentsPerPage: [2, 0, 0, 0, 0, 0, 0, 0], densePages: 0, medianPageWidthPt: 612, medianPageHeightPt: 792, maxPageWidthPt: 612, maxPageHeightPt: 792, offPageChars: 0, tinyCharsDropped: 0, textEstimatedPages: 0, imagePpi: [0, 0, 0, 0], imageBytesPerPixel: [0, 0, 0, 0, 0], glyphsOverImages: 0, textOverImagePages: 0,
     },
   };
 }

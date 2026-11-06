@@ -76,6 +76,10 @@ PDF facts (counts are over the sampled pages):
 | `medianPageWidthPt`, `medianPageHeightPt`, `maxPageWidthPt`, `maxPageHeightPt` | Visible (CropBox) page dimensions in points |
 | `offPageChars`, `tinyCharsDropped` | Glyphs the text extraction drops, as observed with Poppler, and so not counted: placed outside the MediaBox, and glyphs under 3 pt beyond 50,000 a page |
 | `textEstimatedPages` | Pages with text the profiler could not read to the end (a content budget): their glyphs are estimated from the content stream's size (2 bytes a glyph) and the text facts are estimates |
+| `imagePpi` | Significant, non-repeated images per placed resolution (pixels over the placed inches): under 100, 100-200, 200-300, 300+ ppi |
+| `imageBytesPerPixel` | The same images per stream bytes per pixel, a compression signal (scans are dense, flat art is not): under 0.05, 0.05-0.2, 0.2-0.5, 0.5-1, 1+ |
+| `glyphsOverImages` | Glyphs whose run starts inside one of those images' boxes: a text layer over a scan, or captions over a figure |
+| `textOverImagePages` | Pages with 20 or more such glyphs |
 | `sampledTextEquivalents`, `sampledAreaEquivalents`, `sampledPageEquivalents`, `maxPageEquivalents` | Page equivalents of the sampled pages by the rule billing measures with (`page-equivalents.ts`): a page counts as the larger of 1, its text pages (60 lines or 3,500 characters a page) and its area in Letter pages (capped at 8). A page packed with tiny, invisible or off-page text, or an oversized page, counts as the pages it holds |
 
 The thresholds (significant image size, the raster rule, repeated-image detection, the text page rule) come from
