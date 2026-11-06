@@ -3,13 +3,11 @@
     "version": "0.1.17",
     "license": "MIT",
     "source": "https://github.com/Zouuup/landrun",
-    "linux-amd64": {
-      "url": "https://github.com/Zouuup/landrun/releases/download/v0.1.17/landrun-linux-amd64",
-      "sha256": "6ada66a06669e8994e174a7271af2db636308e55a0d6ec896cc7d326b46727f6"
-    },
-    "linux-arm64": {
-      "url": "https://github.com/Zouuup/landrun/releases/download/v0.1.17/landrun-linux-arm64",
-      "sha256": "365d8c8656c732b14d70e621d972cb733e490621fb5b9c0876376bcf457dbb5d"
+    "commit": "62823c05e58ec22c1f91b4c8468318c1f97f2d32",
+    "build": {
+      "go": "go1.27.3",
+      "image": "golang:1.27-trixie@sha256:af1bfc2614ebb1dbd31af514b78740fd678850e76498762b425ecee4c5c6ea80",
+      "note": "built from the pinned commit (tag v0.1.17) with CGO_ENABLED=0 -trimpath; the release binaries were built with Go 1.26.5"
     }
   }
 }
