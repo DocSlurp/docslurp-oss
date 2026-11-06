@@ -9,7 +9,8 @@ export interface PageEquivalentRow { pageNumber: number; text?: number; area?: n
  * Records pages that measured above one page (document_page_facts.text_equivalents / area_equivalents, migration 0130; a
  * stored value is never lowered; the measurement is kept whole) and raises documents.billing_pages to page_count plus every
  * page's extra billed equivalents: its text above `allowance` (shared billedPageEquivalents: 1 up to the allowance, its full
- * volume above it; 1 for formats billed by the whole-document text rule) or its area, whichever is larger. The
+ * volume above it) or its area, whichever is larger. For PDF pages and image frames only: whole-document text formats bill
+ * through recordWholeDocumentPages, whose total is never added to page_count. The
  * page fee, feature charges and spend authorization all read billing_pages, so a stuffed page bills the pages it holds.
  * Monotone and idempotent: a retry or a second measurement of the same page changes nothing unless it measured more.
  * Scoped to the run's own document. Returns the document's billing_pages after the update (null when it is not the run's).
@@ -55,6 +56,31 @@ export async function recordPageEquivalents(
       and extra.pages > 0
     returning d.billing_pages`;
   if (updated) return updated.billing_pages === null ? null : Number(updated.billing_pages);
+  const [current] = await sql<{ billing_pages: number | null }[]>`
+    select billing_pages from documents where id = ${args.documentId} and run_id = ${args.runId}`;
+  return current ? (current.billing_pages === null ? null : Number(current.billing_pages)) : null;
+}
+
+/**
+ * Bills a whole-document text format (plain text, Markdown, HTML, CSV, JSON, LaTeX) on the text rule over everything its
+ * extraction produced. These files have no structural pages: their page_count is already that rule over the source text
+ * (intake, or format-detect's full count), so the extracted total is the same measurement, never pages on top of it. Raises
+ * billing_pages to `pages` when it measured above both page_count and the current billing_pages, and stores no per-page facts
+ * (a form-feed page of a text file is not a page). Monotone and idempotent; scoped to the run's own document. Returns the
+ * document's billing_pages after the update (null when unset or not the run's).
+ */
+export async function recordWholeDocumentPages(
+  sql: Sql<Record<string, unknown>>,
+  args: { runId: string; documentId: string; pages: number },
+): Promise<number | null> {
+  const pages = Number.isSafeInteger(args.pages) && args.pages > 0 ? args.pages : 0;
+  const [updated] = await sql<{ billing_pages: number | null }[]>`
+    update documents d
+    set billing_pages = ${pages}, billing_pages_method = 'page-equivalents', updated_at = now()
+    where d.id = ${args.documentId} and d.run_id = ${args.runId} and d.deduped_from_document_id is null
+      and ${pages} > greatest(coalesce(d.billing_pages, 0), d.page_count)
+    returning d.billing_pages`;
+  if (updated) return Number(updated.billing_pages);
   const [current] = await sql<{ billing_pages: number | null }[]>`
     select billing_pages from documents where id = ${args.documentId} and run_id = ${args.runId}`;
   return current ? (current.billing_pages === null ? null : Number(current.billing_pages)) : null;

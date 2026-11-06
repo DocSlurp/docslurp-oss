@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   DENSE_PAGE_EQUIVALENTS, PAGE_AREA_EQUIVALENTS_CAP, defaultPipelineFeatures, imageAreaEquivalents, measuredTextPages, pageAreaEquivalentsPt,
-  pageTextEquivalents, stripHtmlMarkup, billedPageEquivalents, billedPagePageEquivalents, DEFAULT_PAGE_EQUIVALENT_ALLOWANCE, DISTINCT_TEST_PRICING, installTestPricing,
+  pageTextEquivalents, stripHtmlMarkup, textPageCount, billedPageEquivalents, billedPagePageEquivalents, DEFAULT_PAGE_EQUIVALENT_ALLOWANCE, DISTINCT_TEST_PRICING, installTestPricing,
 } from "@docslurp/shared";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -15,6 +15,7 @@ import { Store } from "../db/store.js";
 import { recordPageEquivalents } from "../db/page-equivalents.js";
 import { measureExtractedPages } from "../lib/office-page-count.js";
 import { MAX_PAGE_EQUIVALENTS, recordExtractedPageEquivalents } from "../lib/page-equivalents.js";
+import { recordMeasuredTextPageCount } from "../lib/text-page-count.js";
 import { configurePageAreaSink, recordRenderedPageAreas } from "../pipeline/page-area-sink.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
@@ -312,5 +313,65 @@ describe("dense-page allowance (owner decision 2026-11-05): paged pages bill 1 u
     // The core default (3) again: the same page bills 1.
     const again = await documentRun(1);
     expect((await recordExtractedPageEquivalents(again.state, again.document, "pdf", "u".repeat(2 * 3_500)))!.billed).toBe(1);
+  });
+});
+
+describe("whole-document text formats bill their true count from intake through completion (council F #1)", () => {
+  const sentence = "The supplier shall deliver the goods to the buyer at the agreed place and time, as set out in schedule one. ";
+  /** 35,000 characters of prose on one line: the text rule counts it as exactly 10 pages. */
+  const text = sentence.repeat(Math.ceil(35_000 / sentence.length)).slice(0, 35_000);
+  const textFacts = { declaredMimeType: "text/plain", sniffedMimeType: null, mimeType: "text/plain", format: "plain-text", container: null, encoding: "utf-8", mismatch: "none" };
+  const htmlFacts = { declaredMimeType: "text/html", sniffedMimeType: null, mimeType: "text/html", format: "html", container: null, encoding: "utf-8", mismatch: "none" };
+
+  it("a 35,000-character text file: intake counts 10, extraction measures 10, billing_pages is 10, never 19", async () => {
+    // Intake (server source-metadata.ts nonPdfPageCount, under its sample size): the text rule over the decoded text, counted.
+    const intake = textPageCount(text);
+    expect(intake).toBe(10);
+    const { state, document, runId, documentId } = await documentRun(intake, "text/plain", textFacts);
+    const measured = (await recordExtractedPageEquivalents(state, document, "plain-text", text))!;
+    expect(measured).toMatchObject({ pages: 1, equivalents: 10, billed: 10 });
+    const stored = (await store.loadDocument(documentId))!;
+    expect(stored.billingPages ?? stored.pageCount).toBe(10);
+    expect(await billedFastPages(runId, documentId)).toBe(10);
+    // A retry measures the same and changes nothing.
+    await recordExtractedPageEquivalents(state, (await store.loadDocument(documentId))!, "plain-text", text);
+    expect(await billedFastPages(runId, documentId)).toBe(10);
+    // No per-page facts: a later rendered-area record cannot add the text a second time.
+    expect((await db.query(`select count(*)::int as n from document_page_facts where document_id = '${documentId}' and text_equivalents is not null`)).rows).toEqual([{ n: 0 }]);
+  });
+
+  it("HTML: intake's markup-free count and the extracted text agree; billing_pages is the true count", async () => {
+    const html = `<html><head><title>T</title></head><body>${Array.from({ length: 100 }, () => `<p>${sentence.repeat(3)}</p>`).join("")}</body></html>`;
+    const intake = textPageCount(html, { markup: true });
+    expect(intake).toBeGreaterThan(5);
+    const { state, document, runId, documentId } = await documentRun(intake, "text/html", htmlFacts);
+    const measured = (await recordExtractedPageEquivalents(state, document, "html", stripHtmlMarkup(html)))!;
+    expect(measured.equivalents).toBe(intake);
+    expect(await billedFastPages(runId, documentId)).toBe(intake);
+  });
+
+  it("a text file over intake's sample: format-detect counts it in full, extraction adds nothing on top", async () => {
+    const { state, document, runId, documentId } = await documentRun(2, "text/plain", textFacts);
+    await db.exec(`update documents set page_count_source = 'assumed' where id = '${documentId}'`);
+    document.pageCountSource = "assumed";
+    await recordMeasuredTextPageCount({ state, document, format: "plain-text", readSource: async () => new Uint8Array(Buffer.from(text)) });
+    expect(document.pageCount).toBe(10);
+    await recordExtractedPageEquivalents(state, document, "plain-text", text);
+    expect(await billedFastPages(runId, documentId)).toBe(10);
+  });
+
+  it("extracted text that measures more than page_count bills the measured total, not page_count plus it", async () => {
+    const { state, document, runId, documentId } = await documentRun(4, "text/plain", textFacts);
+    const measured = (await recordExtractedPageEquivalents(state, document, "plain-text", text))!;
+    expect(measured.billed).toBe(10);
+    expect((await store.loadDocument(documentId))!.billingPages).toBe(10);
+    expect(await billedFastPages(runId, documentId)).toBe(10);
+  });
+
+  it("form feeds in a text file are not pages: the text rule runs over the whole text", async () => {
+    const { state, document, runId, documentId } = await documentRun(1, "text/plain", textFacts);
+    await recordExtractedPageEquivalents(state, document, "plain-text", "a\fb\fc\fd");
+    expect((await store.loadDocument(documentId))!.billingPages).toBeNull();
+    expect(await billedFastPages(runId, documentId)).toBe(1);
   });
 });

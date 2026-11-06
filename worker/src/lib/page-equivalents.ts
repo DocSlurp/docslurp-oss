@@ -28,7 +28,9 @@ export interface ExtractedPageEquivalents {
 /**
  * Measures what each extracted page holds and bills it: the text rule over each form-feed page of the extractor's output
  * (and, for an uploaded image, each frame's decoded area), recorded as page equivalents (db/page-equivalents.ts), which
- * raise billing_pages; the extra pages are then authorized against the balance. Office, slide, sheet and EPUB formats are
+ * raise billing_pages (PDF pages and image frames: page_count plus each page's extra equivalents; whole-document text formats:
+ * the text rule over all of their text, reconciled with page_count, which is that rule over the source); the extra pages are
+ * then authorized against the balance. Office, slide, sheet and EPUB formats are
  * measured from their extractor output already (office-page-count.ts) and are left to that. Text that is tiny, invisible or
  * outside the visible box is extracted and indexed like any other, so it is counted here like any other: never dropped.
  * A document that measures above MAX_PAGE_EQUIVALENTS is refused.
@@ -41,26 +43,35 @@ export async function recordExtractedPageEquivalents(
   frames: ReadonlyArray<{ pageNumber: number; sourceWidth?: number; sourceHeight?: number }> = [],
 ): Promise<ExtractedPageEquivalents | null> {
   if (formatNeedsMeasuredPages(format)) return null;
-  // The dense-page allowance applies to paged documents only (PDF pages, image frames); HTML and text files keep the
-  // whole-document text rule, so every equivalent they hold bills.
-  // The installed pricing provider's allowance (core's default: DEFAULT_PAGE_EQUIVALENT_ALLOWANCE).
-  const allowance = PAGED_FORMATS.has(format) ? pricing().pageEquivalentAllowance : 1;
+  const paged = PAGED_FORMATS.has(format);
+  // The installed pricing provider's dense-page allowance (core's default: DEFAULT_PAGE_EQUIVALENT_ALLOWANCE) for paged documents.
+  const allowance = paged ? pricing().pageEquivalentAllowance : 1;
   const pages = markdown.replace(/\f\s*$/, "").split("\f");
   const area = new Map(frames.filter((frame) => frame.sourceWidth && frame.sourceHeight)
     .map((frame) => [frame.pageNumber, imageAreaEquivalents(frame.sourceWidth!, frame.sourceHeight!)]));
   const rows = pages.map((text, index) => ({ pageNumber: index + 1, text: pageTextEquivalents(text), area: area.get(index + 1) ?? 1 }));
-  const equivalents = rows.reduce((sum, row) => sum + Math.max(row.text, row.area), 0);
+  // HTML, text, CSV, JSON and LaTeX have no structural pages: the text rule over all of their extracted text is the whole
+  // count (the rule their page_count already is), never pages added to page_count.
+  const equivalents = paged ? rows.reduce((sum, row) => sum + Math.max(row.text, row.area), 0) : pageTextEquivalents(pages.join("\n"));
   if (equivalents > MAX_PAGE_EQUIVALENTS) {
     console.error(`[page-equivalents] refused document=${document.id}: ${equivalents} page equivalents over ${pages.length} pages exceeds ${MAX_PAGE_EQUIVALENTS}`);
     throw new Error(`document exceeds ${MAX_PAGE_EQUIVALENTS} page equivalents`);
   }
   const densePages = rows.filter((row) => row.text > DENSE_PAGE_EQUIVALENTS).map((row) => row.pageNumber);
-  const billed = rows.reduce((sum, row) => sum + billedPagePageEquivalents(row.text, row.area, allowance), 0);
+  const billed = paged ? rows.reduce((sum, row) => sum + billedPagePageEquivalents(row.text, row.area, allowance), 0) : equivalents;
   const above = rows.filter((row) => row.text > 1 || row.area > 1);
   let billingPages: number | null = null;
-  if (above.length > 0) {
-    if (!state.store?.recordPageEquivalents) throw new Error("page equivalents measured but the store cannot persist them");
-    billingPages = await state.store.recordPageEquivalents(state.run.id, document.id, above, allowance);
+  const measuredAbove = paged
+    ? above.length > 0
+    : equivalents > Math.max(Number(document.billingPages) || 0, Math.trunc(Number(document.pageCount)) || 0);
+  if (measuredAbove) {
+    if (paged) {
+      if (!state.store?.recordPageEquivalents) throw new Error("page equivalents measured but the store cannot persist them");
+      billingPages = await state.store.recordPageEquivalents(state.run.id, document.id, above, allowance);
+    } else {
+      if (!state.store?.recordWholeDocumentPages) throw new Error("page equivalents measured but the store cannot persist them");
+      billingPages = await state.store.recordWholeDocumentPages(state.run.id, document.id, equivalents);
+    }
     if (billingPages !== null && billingPages > (Number(document.billingPages) || 0)) {
       document.billingPages = billingPages;
       document.billingPagesMethod = "page-equivalents";

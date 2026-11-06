@@ -54,7 +54,7 @@ import {
   type SupersededPurgeOptions,
   type SupersededPurgeResult,
 } from "./superseded-purge.js";
-import { recordPageEquivalents } from "./page-equivalents.js";
+import { recordPageEquivalents, recordWholeDocumentPages } from "./page-equivalents.js";
 import { enforceRunSpend, enforceRunSpendForCharge, largestFundedCharge, pauseRunForSpend, SpendCheckUnavailableError, spendCounterSql } from "./spend-check.js";
 import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
@@ -2761,6 +2761,10 @@ export class Store {
    */
   async recordPageEquivalents(runId: string, documentId: string, rows: import("./page-equivalents.js").PageEquivalentRow[], allowance?: number): Promise<number | null> {
     return await recordPageEquivalents(this.sql, { runId, documentId, rows, ...(allowance === undefined ? {} : { allowance }) });
+  }
+
+  async recordWholeDocumentPages(runId: string, documentId: string, pages: number): Promise<number | null> {
+    return await recordWholeDocumentPages(this.sql, { runId, documentId, pages });
   }
 
   async measuredPagesAboveIntake(runId: string): Promise<number> {
