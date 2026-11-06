@@ -109,6 +109,7 @@ import { affordableImageFrames, authorizeImageFrames, authorizeImageRead, refuse
 import { OCR_FAILED_PAGES_KEY, OcrInfrastructureError, OcrRefusedError, ocrFailedPages, recordOcrFailedPages, resolveOcrMode } from "../ocr/mode.js";
 import { ocrDocument } from "../ocr/read-document.js";
 import { recordMeasuredPageCount, type PageCountResult } from "../lib/office-page-count.js";
+import { processedPdfPages, reconcileProcessedPdfPages } from "../lib/pdf-page-count.js";
 import { PAGE_RENDITION, pageRenditionKey } from "../lib/page-rendition.js";
 import { extractorFailureReason, extractorFallbackFor, recordExtractorFallback } from "../lib/extractor-fallback.js";
 
@@ -622,6 +623,8 @@ export class ExtractMarkdownStage implements Stage {
                   );
 
                   let winningText = policyDecision.selectedMarkdown;
+                  // The page tree's count (format-detect) against the pages extraction processed: bill and authorize the larger.
+                  const pdfPageCheck = isPdf ? await reconcileProcessedPdfPages(state, document, processedPdfPages(winningText)) : null;
                   // Office, EPUB and spreadsheet files arrive counted as one page. Count what the extractor read, from its own
                   // output (no other parser runs and the source is not read again), and record it as documents.billing_pages
                   // before features and the completion charge read it (page-base-fee.ts). The page basis (page_count) stays what
@@ -1119,6 +1122,7 @@ export class ExtractMarkdownStage implements Stage {
                       // Office, EPUB and spreadsheet files: the pages they bill (counted from the extractor's output) and how.
                       billingPages: measuredPages.pages,
                       billingPagesMethod: measuredPages.method,
+                      ...(pdfPageCheck ? { pdfPagesMeasured: pdfPageCheck.measured, pdfPagesProcessed: pdfPageCheck.processed, pdfPagesMismatch: pdfPageCheck.mismatch } : {}),
                       // Which extractor served the document, what else was planned or tried, and how the
                       // native PDF engine took part: queryable from stage stats without fetching the manifest.
                       extractor: winningCandidate.label,

@@ -548,6 +548,21 @@ export class CommandRunner {
     });
   }
 
+  /**
+   * Whether page `page` exists in the PDF's page tree as Poppler walks it: `pdftotext -f page -l page` exits 0 for an existing
+   * page; past the last page it exits 99 with Poppler's own "Wrong page range given" line (pdf-page-count.ts reads only that
+   * tool-authored line and the exit code, never the document's text or metadata). The page's text goes to /dev/null.
+   */
+  async pdfPageProbe(source: string, page: number): Promise<CommandPlan> {
+    if (!Number.isSafeInteger(page) || page < 1) throw new Error("pdfPageProbe needs a page number of at least 1");
+    return await this.planDocumentTool({
+      binary: "pdftotext",
+      args: ["-f", String(page), "-l", String(page), source, "/dev/null"],
+      fileArgIndexes: [4],
+      supportsDoubleDash: true,
+    });
+  }
+
   async splitPages(source: string, pattern: string): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pdfseparate",
