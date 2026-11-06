@@ -195,6 +195,18 @@ export const WORKER_DENIED_TABLES = Object.freeze({
 });
 
 /** `"name"` with embedded quotes doubled. */
+/**
+ * SECURITY DEFINER functions a runtime role may reach: the realtime revision triggers and the API's compaction call
+ * (0120). Keep equal to @docslurp/shared's RUNTIME_SECURITY_DEFINER_ALLOWLIST (db-roles.test.ts checks); reconcile
+ * revokes EXECUTE on every other owner definer function, and the runtime identity rule refuses one a runtime role reaches.
+ */
+export const RUNTIME_SECURITY_DEFINER_ALLOWLIST = Object.freeze([
+  "public.realtime_changed()",
+  "public.realtime_search_session_changed()",
+  "public.realtime_materialization_changed()",
+  "public.realtime_compact_revisions(text)",
+]);
+
 export function quoteIdent(name) {
   return `"${String(name).replaceAll('"', '""')}"`;
 }
@@ -344,6 +356,13 @@ export async function reconcileRoleGrants(client, { roles = DEFAULT_DB_ROLES, lo
   const { rows: columnRows } = await client.query(
     "select c.relname, array_agg(a.attname::text) as columns from pg_attribute a join pg_class c on c.oid = a.attrelid join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relkind in ('r','p') and a.attnum > 0 and not a.attisdropped group by c.relname",
   );
+  // Owner SECURITY DEFINER functions outside the runtime allowlist (recheck Q #5): nobody but the owner executes them.
+  const { rows: definerRows } = await client.query(`
+    select p.oid::regprocedure::text as signature from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where p.prosecdef and n.nspname not in ('pg_catalog', 'information_schema') and n.nspname not like 'pg_toast%'
+      and not exists (select 1 from pg_depend d where d.objid = p.oid and d.deptype = 'e')
+      and not (p.oid = any (array(select to_regprocedure(a) from unnest($1::text[]) a where to_regprocedure(a) is not null)))`,
+    [RUNTIME_SECURITY_DEFINER_ALLOWLIST]);
   const { rows: [{ migrations }] } = await client.query("select to_regclass('drizzle.__drizzle_migrations') is not null as migrations");
   const { rows: [{ native }] } = await client.query("select to_regnamespace('docslurp_mastra') is not null as native");
   const statements = roleGrantStatements({
@@ -356,6 +375,10 @@ export async function reconcileRoleGrants(client, { roles = DEFAULT_DB_ROLES, lo
     columns: Object.fromEntries(columnRows.map((row) => [row.relname, row.columns])),
     sequences: Object.fromEntries(sequenceRows.map((row) => [row.sequence, row.table])),
   });
+  for (const { signature } of definerRows) {
+    statements.push(`revoke all on function ${signature} from public`);
+    for (const role of present) statements.push(`revoke all on function ${signature} from ${quoteIdent(role)}`);
+  }
   await client.query("begin");
   try {
     for (const statement of statements) await client.query(statement);

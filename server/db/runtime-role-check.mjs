@@ -10,7 +10,7 @@
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 
-import { RUNTIME_IDENTITY_SQL, runtimeIdentityReasons } from "@docslurp/shared/pricing-loader";
+import { RUNTIME_IDENTITY_SQL, RUNTIME_SECURITY_DEFINER_ALLOWLIST, runtimeIdentityReasons } from "@docslurp/shared/pricing-loader";
 
 import { DEFAULT_DB_ROLES } from "./roles.mjs";
 
@@ -40,7 +40,7 @@ export async function checkRuntimeIdentity(client, expected) {
   await client.query("begin read only");
   try {
     await client.query("set local statement_timeout = '15s'");
-    const { rows: [row] } = await client.query(RUNTIME_IDENTITY_SQL, [[expected]]);
+    const { rows: [row] } = await client.query(RUNTIME_IDENTITY_SQL, [[expected], RUNTIME_SECURITY_DEFINER_ALLOWLIST]);
     const { rows: [exists] } = await client.query("select exists (select 1 from pg_roles where rolname = $1) as exists", [expected]);
     return runtimeIdentityProblems(row, expected, { expectedExists: exists?.exists === true });
   } finally {

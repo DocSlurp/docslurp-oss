@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, expect, it } from "vitest";
 
-import { assertRuntimeDatabaseIdentity, RUNTIME_IDENTITY_SQL, runtimeIdentityReasons } from "@docslurp/shared/pricing-loader";
+import { assertRuntimeDatabaseIdentity, RUNTIME_IDENTITY_SQL, RUNTIME_SECURITY_DEFINER_ALLOWLIST, runtimeIdentityReasons } from "@docslurp/shared/pricing-loader";
 
 // Real Postgres (scripts/run-database-tests.mjs: a fresh migrated database, connected as a superuser): each way council O
 // found to slip past the runtime identity check is refused, by the rule the deploy gate and startup share (council O #1).
@@ -16,7 +16,7 @@ let admin: Client;
 async function reasonsAs(role: string): Promise<string[]> {
   await admin.query(`set role ${role}`);
   try {
-    const { rows: [row] } = await admin.query(RUNTIME_IDENTITY_SQL, [[runtime]]);
+    const { rows: [row] } = await admin.query(RUNTIME_IDENTITY_SQL, [[runtime], RUNTIME_SECURITY_DEFINER_ALLOWLIST]);
     return runtimeIdentityReasons(row, [runtime]);
   } finally {
     await admin.query("reset role");
@@ -130,6 +130,57 @@ it.skipIf(!url)("refuses a column-level INSERT or UPDATE, at startup and at the 
   } finally {
     await admin.query(`revoke docslurp_app from ${runtime}`);
   }
+});
+
+it.skipIf(!url)("evaluates privileges for every role held, so a SET ROLE into the allowed role is covered (recheck Q #5a)", async () => {
+  const login = `rt_login_${suffix}`;
+  await admin.query(`create role ${login} nologin`);
+  await admin.query(`grant ${runtime} to ${login} with inherit false`);
+  await admin.query(`grant update (value) on public.pricing_provider_state to ${runtime}`);
+  try {
+    await admin.query(`set role ${login}`);
+    let reasons: string[];
+    try {
+      const { rows: [row] } = await admin.query(RUNTIME_IDENTITY_SQL, [[runtime], RUNTIME_SECURITY_DEFINER_ALLOWLIST]);
+      reasons = runtimeIdentityReasons(row, [runtime]);
+    } finally { await admin.query("reset role"); }
+    expect(reasons.join("\n")).toMatch(/can update pricing_provider_state/);
+  } finally {
+    await admin.query(`revoke update (value) on public.pricing_provider_state from ${runtime}`);
+    await admin.query(`drop role ${login}`);
+  }
+});
+
+it.skipIf(!url)("refuses CREATE on any non-system schema, not only public (recheck Q #5b)", async () => {
+  await admin.query(`create schema rt_side_${suffix}`);
+  await admin.query(`grant create on schema rt_side_${suffix} to ${runtime}`);
+  try { expect((await reasonsAs(runtime)).join("\n")).toMatch(new RegExp(`can CREATE in schema rt_side_${suffix}`)); }
+  finally { await admin.query(`drop schema rt_side_${suffix} cascade`); }
+});
+
+it.skipIf(!url)("refuses an owner SECURITY DEFINER function it can execute or fire, and a writable view over the pricing state (recheck Q #5c)", async () => {
+  await admin.query(`create function public.rt_def_${suffix}(bigint) returns void language sql security definer set search_path = pg_catalog
+    as $$ update public.pricing_provider_state set value = $1 $$`);
+  await admin.query(`revoke all on function public.rt_def_${suffix}(bigint) from public`);
+  await admin.query(`grant execute on function public.rt_def_${suffix}(bigint) to ${runtime}`);
+  try { expect((await reasonsAs(runtime)).join("\n")).toMatch(new RegExp(`SECURITY DEFINER function\\(s\\) outside the allowlist: rt_def_${suffix}\\(bigint\\)`)); }
+  finally { await admin.query(`drop function public.rt_def_${suffix}(bigint)`); }
+
+  // Fired as a trigger on a table the runtime role writes: no EXECUTE needed.
+  await admin.query(`create table public.rt_trig_${suffix} (v bigint)`);
+  await admin.query(`create function public.rt_trigfn_${suffix}() returns trigger language plpgsql security definer set search_path = pg_catalog
+    as $$ begin update public.pricing_provider_state set value = new.v; return new; end $$`);
+  await admin.query(`revoke all on function public.rt_trigfn_${suffix}() from public`);
+  await admin.query(`create trigger rt_t after insert on public.rt_trig_${suffix} for each row execute function public.rt_trigfn_${suffix}()`);
+  await admin.query(`grant insert on public.rt_trig_${suffix} to ${runtime}`);
+  try { expect((await reasonsAs(runtime)).join("\n")).toMatch(new RegExp(`rt_trigfn_${suffix}`)); }
+  finally { await admin.query(`drop table public.rt_trig_${suffix}`); await admin.query(`drop function public.rt_trigfn_${suffix}()`); }
+
+  await admin.query(`create view public.rt_view_${suffix} as select * from public.pricing_provider_state`);
+  await admin.query(`grant update on public.rt_view_${suffix} to ${runtime}`);
+  try { expect((await reasonsAs(runtime)).join("\n")).toMatch(new RegExp(`can write rt_view_${suffix}, a view or rule over pricing_provider_state`)); }
+  finally { await admin.query(`drop view public.rt_view_${suffix}`); }
+  expect(await reasonsAs(runtime)).toEqual([]);
 });
 
 it.skipIf(!url)("startup refuses the same way (assertRuntimeDatabaseIdentity)", async () => {

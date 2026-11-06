@@ -466,6 +466,26 @@ describe("runtime database identity gate (council N #1)", () => {
   });
 });
 
+describe("owner SECURITY DEFINER functions (recheck Q #5c)", () => {
+  it("reconcile revokes EXECUTE on every one outside the allowlist, and the allowlist matches the shared rule's", async () => {
+    const { RUNTIME_SECURITY_DEFINER_ALLOWLIST } = await import("../../db/roles.mjs");
+    const shared = await import("@docslurp/shared/pricing-loader");
+    expect([...RUNTIME_SECURITY_DEFINER_ALLOWLIST]).toEqual([...shared.RUNTIME_SECURITY_DEFINER_ALLOWLIST]);
+    await db.exec("create function public.definer_probe() returns int language sql security definer as 'select 1'");
+    await db.exec(`grant execute on function public.definer_probe() to ${app}`);
+    try {
+      await reconcileRoleGrants(db, { log: silent });
+      const { rows: [row] } = await db.query<{ probe: boolean; pub: boolean; compact: boolean }>(`select
+        has_function_privilege('${app}', 'public.definer_probe()', 'EXECUTE') as probe,
+        exists (select 1 from pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a where p.oid = 'public.definer_probe()'::regprocedure and a.grantee = 0) as pub,
+        has_function_privilege('${app}', 'public.realtime_compact_revisions(text)', 'EXECUTE') as compact`);
+      expect(row).toEqual({ probe: false, pub: false, compact: true });
+    } finally {
+      await db.exec("drop function public.definer_probe()");
+    }
+  });
+});
+
 describe("runtime database identity gate before the role rollout", () => {
   it("refuses with a rollout pointer when the least-privilege role does not exist", async () => {
     const { runtimeIdentityProblems } = await import("../../db/runtime-role-check.mjs");

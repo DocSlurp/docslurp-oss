@@ -106,44 +106,75 @@ export function refusePricingStateWriter(env: Record<string, string | undefined>
 }
 
 /**
- * One row describing the connected role, $1 the roles it may hold (text[]). The single identity definition the deploy gate
- * (server/db/runtime-role-check.mjs, one expected role) and startup (both runtime roles) share (councils P #1, O #1):
+ * SECURITY DEFINER functions a runtime role may reach (execute, or fire as a trigger on a table it writes): the realtime
+ * revision triggers and the API's compaction call (migration 0120). Any other owner-privileged function a runtime role
+ * can reach refuses the identity (recheck Q #5); core server/db/roles.mjs revokes PUBLIC EXECUTE on the rest.
+ */
+export const RUNTIME_SECURITY_DEFINER_ALLOWLIST: readonly string[] = Object.freeze([
+  "public.realtime_changed()",
+  "public.realtime_search_session_changed()",
+  "public.realtime_materialization_changed()",
+  "public.realtime_compact_revisions(text)",
+]);
+
+/**
+ * One row describing the connected role, $1 the roles it may hold (text[]), $2 RUNTIME_SECURITY_DEFINER_ALLOWLIST. The
+ * single identity definition the deploy gate (server/db/runtime-role-check.mjs, one expected role) and startup (both
+ * runtime roles) share (councils P #1, O #1, recheck Q #5). Every privilege is evaluated for each role the connection
+ * holds (itself and the allowed roles it is a member of, so a SET ROLE into an allowed role is covered):
  *
- * - superuser, or create-role/create-db/replication/bypass-RLS, on the role or any allowed role it holds;
+ * - superuser, or create-role/create-db/replication/bypass-RLS;
  * - any role membership other than the allowed roles, direct or indirect and whatever its INHERIT or SET option
  *   (a SET ROLE to the owner or postgres; pg_execute_server_program; pg_write_all_data; pg_database_owner);
- * - CREATE on the database (a schema that shadows another role's search_path) or on schema public;
+ * - CREATE on the database, or on any schema outside the system schemas (public, docslurp_mastra, drizzle, ...);
  * - owned relations, functions, types or schemas outside the system schemas;
- * - ownership of pricing_provider_state, INSERT/UPDATE/DELETE/TRUNCATE on it, or EXECUTE on pricing_state_raise. INSERT and
- *   UPDATE count a grant on any one column (has_any_column_privilege): GRANT UPDATE (value) moves the mark as well as a
- *   table grant does (recheck R #1).
+ * - ownership of pricing_provider_state, INSERT/UPDATE (any column)/DELETE/TRUNCATE on it, or EXECUTE on
+ *   pricing_state_raise;
+ * - a SECURITY DEFINER function outside the allowlist that it may execute, or that fires as a trigger on a table it
+ *   may write;
+ * - a view or rule over pricing_provider_state on a relation it may write (writes through it run as the owner).
  */
 export const RUNTIME_IDENTITY_SQL = `
   with me as (select * from pg_roles where rolname = current_user),
   held as (select r.* from pg_roles r, me where r.oid = me.oid or (r.rolname = any($1::text[]) and pg_has_role(me.oid, r.oid, 'MEMBER'))),
-  system_ns as (select oid from pg_namespace where nspname in ('pg_catalog', 'information_schema') or nspname like 'pg_toast%' or nspname like 'pg_temp%')
+  system_ns as (select oid from pg_namespace where nspname in ('pg_catalog', 'information_schema') or nspname like 'pg_toast%' or nspname like 'pg_temp%'),
+  extension_members as (select objid from pg_depend where deptype = 'e'),
+  state as (select to_regclass('public.pricing_provider_state') as oid),
+  writable as (select c.oid from pg_class c, held h where c.relkind in ('r', 'p', 'v', 'f', 'm') and c.relnamespace not in (select oid from system_ns)
+    and (has_any_column_privilege(h.oid, c.oid, 'INSERT, UPDATE') or has_table_privilege(h.oid, c.oid, 'DELETE, TRUNCATE')))
   select me.rolname::text as role,
     (select bool_or(rolsuper) from held) as superuser,
     (select bool_or(rolcreaterole or rolcreatedb or rolreplication or rolbypassrls) from held) as elevated,
     coalesce((select string_agg(r.rolname::text, ',' order by r.rolname) from pg_roles r
       where r.oid <> me.oid and not (r.rolname = any($1::text[])) and pg_has_role(me.oid, r.oid, 'MEMBER')), '') as other_memberships,
     coalesce((select string_agg(rolname::text, ',' order by rolname) from held where rolname = any($1::text[])), '') as allowed_held,
-    has_database_privilege(me.oid, current_database(), 'CREATE') as can_create_in_database,
-    has_schema_privilege(me.oid, 'public', 'CREATE') as can_create_in_public,
+    (select bool_or(has_database_privilege(h.oid, current_database(), 'CREATE')) from held h) as can_create_in_database,
+    coalesce((select string_agg(distinct n.nspname::text, ',' order by n.nspname::text) from pg_namespace n, held h
+      where n.oid not in (select oid from system_ns) and has_schema_privilege(h.oid, n.oid, 'CREATE')), '') as create_schemas,
     ((select count(*) from pg_class where relowner in (select oid from held) and relnamespace not in (select oid from system_ns))
       + (select count(*) from pg_proc where proowner in (select oid from held) and pronamespace not in (select oid from system_ns))
       + (select count(*) from pg_type where typowner in (select oid from held) and typnamespace not in (select oid from system_ns))
       + (select count(*) from pg_namespace where nspowner in (select oid from held) and oid not in (select oid from system_ns)))::int as owned_objects,
-    case when to_regclass('public.pricing_provider_state') is null then false
-      else (select relowner from pg_class where oid = to_regclass('public.pricing_provider_state')) in (select oid from held) end as owns_state,
-    case when to_regclass('public.pricing_provider_state') is null then ''
+    case when (select oid from state) is null then false
+      else (select relowner from pg_class where oid = (select oid from state)) in (select oid from held) end as owns_state,
+    case when (select oid from state) is null then ''
       else concat_ws(',',
-        case when has_any_column_privilege(me.oid, 'public.pricing_provider_state', 'INSERT') then 'insert' end,
-        case when has_any_column_privilege(me.oid, 'public.pricing_provider_state', 'UPDATE') then 'update' end,
-        case when has_table_privilege(me.oid, 'public.pricing_provider_state', 'DELETE') then 'delete' end,
-        case when has_table_privilege(me.oid, 'public.pricing_provider_state', 'TRUNCATE') then 'truncate' end) end as writes_state,
+        case when (select bool_or(has_any_column_privilege(h.oid, 'public.pricing_provider_state', 'INSERT')) from held h) then 'insert' end,
+        case when (select bool_or(has_any_column_privilege(h.oid, 'public.pricing_provider_state', 'UPDATE')) from held h) then 'update' end,
+        case when (select bool_or(has_table_privilege(h.oid, 'public.pricing_provider_state', 'DELETE')) from held h) then 'delete' end,
+        case when (select bool_or(has_table_privilege(h.oid, 'public.pricing_provider_state', 'TRUNCATE')) from held h) then 'truncate' end) end as writes_state,
     case when to_regprocedure('public.pricing_state_raise(text, bigint)') is null then false
-      else has_function_privilege(me.oid, 'public.pricing_state_raise(text, bigint)', 'EXECUTE') end as raises_state
+      else (select bool_or(has_function_privilege(h.oid, 'public.pricing_state_raise(text, bigint)', 'EXECUTE')) from held h) end as raises_state,
+    coalesce((select string_agg(distinct p.oid::regprocedure::text, ',' order by p.oid::regprocedure::text) from pg_proc p
+      where p.prosecdef and p.pronamespace not in (select oid from system_ns) and p.oid not in (select objid from extension_members)
+        and not (p.oid = any (array(select to_regprocedure(a) from unnest($2::text[]) a where to_regprocedure(a) is not null)))
+        and (exists (select 1 from held h where has_function_privilege(h.oid, p.oid, 'EXECUTE'))
+          or exists (select 1 from pg_trigger t where t.tgfoid = p.oid and t.tgrelid in (select oid from writable)))), '') as definer_functions,
+    case when (select oid from state) is null then ''
+      else coalesce((select string_agg(distinct rw.ev_class::regclass::text, ',' order by rw.ev_class::regclass::text) from pg_rewrite rw
+        join pg_depend d on d.classid = 'pg_rewrite'::regclass and d.objid = rw.oid
+        where d.refobjid = (select oid from state) and rw.ev_class <> (select oid from state)
+          and rw.ev_class in (select oid from writable)), '') end as state_write_paths
   from me
 `;
 
@@ -154,17 +185,22 @@ export function runtimeIdentityReasons(row: Record<string, unknown> | undefined,
   const others = list(row.other_memberships);
   const held = list(row.allowed_held);
   const writes = list(row.writes_state);
+  const schemas = list(row.create_schemas);
+  const definers = list(row.definer_functions);
+  const paths = list(row.state_write_paths);
   return [
     row.superuser === true ? "is (or can become) a superuser" : null,
     row.elevated === true ? "can create roles or databases, replicate or bypass row security" : null,
     others.length ? `is a member of ${others.join(", ")} (SET ROLE or inherited privileges)` : null,
     held.length ? null : `is not a member of ${allowed.join(" or ")}`,
     row.can_create_in_database === true ? "can CREATE in the database (a schema could shadow another role's search_path)" : null,
-    row.can_create_in_public === true ? "can CREATE in schema public" : null,
+    schemas.length ? `can CREATE in schema ${schemas.join(", ")}` : null,
     Number(row.owned_objects) > 0 ? `owns ${Number(row.owned_objects)} object(s) (relations, functions, types or schemas)` : null,
     row.owns_state === true ? "owns pricing_provider_state" : null,
     writes.length ? `can ${writes.join(", ")} pricing_provider_state` : null,
     row.raises_state === true ? "may execute pricing_state_raise" : null,
+    definers.length ? `can reach SECURITY DEFINER function(s) outside the allowlist: ${definers.join(", ")}` : null,
+    paths.length ? `can write ${paths.join(", ")}, a view or rule over pricing_provider_state` : null,
   ].filter((reason): reason is string => reason !== null);
 }
 
@@ -173,7 +209,7 @@ export function runtimeIdentityReasons(row: Record<string, unknown> | undefined,
  * process (API, worker, chat executor) must connect as its least-privilege role. The deploy gates the same rule.
  */
 export async function assertRuntimeDatabaseIdentity(sql: DurableStateSql, allowed: readonly string[] = RUNTIME_DATABASE_ROLES): Promise<void> {
-  const rows = await sql.unsafe(RUNTIME_IDENTITY_SQL, [allowed as string[]]);
+  const rows = await sql.unsafe(RUNTIME_IDENTITY_SQL, [allowed as string[], RUNTIME_SECURITY_DEFINER_ALLOWLIST as string[]]);
   const row = rows[0] as Record<string, unknown> | undefined;
   const reasons = runtimeIdentityReasons(row, allowed);
   if (reasons.length) {
@@ -253,6 +289,10 @@ export async function loadPricingProvider(
   // identity (councils M #1, P #1, O #1). Where pricing is required this cannot be turned off (council O #3).
   if (pricingRequired(env) && /^(0|false)$/i.test(env.DOCSLURP_REFUSE_PRICING_STATE_WRITER?.trim() ?? "")) {
     console.error("[pricing] DOCSLURP_REFUSE_PRICING_STATE_WRITER=0 is ignored where pricing is required; the runtime identity check still runs");
+  }
+  // A process that must check its identity but was handed no database cannot skip the check (recheck Q #6).
+  if (pricingRequired(env) && !options.sql) {
+    throw new Error("pricing is required but the runtime identity check has no database connection (options.sql); refusing to start");
   }
   if (options.sql && refusePricingStateWriter(env)) await assertRuntimeDatabaseIdentity(options.sql);
   let module: Partial<PricingPluginModule>;

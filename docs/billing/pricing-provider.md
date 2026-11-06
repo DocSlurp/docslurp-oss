@@ -62,9 +62,13 @@ only read the table: neither can execute `pricing_state_raise`, insert, update, 
 mark only when each runtime process actually connects as its least-privilege role. A process connected as the table
 owner or a superuser can move or reset the value. Two checks enforce the roles:
 
-- **At startup:** wherever pricing is required, the API, worker and chat executor refuse to start if their role owns
-  `pricing_provider_state`, may execute `pricing_state_raise` or is a superuser (`DOCSLURP_REFUSE_PRICING_STATE_WRITER`,
-  on by default there).
+- **At startup:** wherever pricing is required, the API, worker and chat executor refuse to start if their role, or an
+  allowed role it can `SET ROLE` into, could move the mark or act as the owner: a superuser or elevated role, another
+  role membership, `CREATE` on the database or any non-system schema, owned objects, ownership of
+  `pricing_provider_state`, a table or column write on it, `EXECUTE` on `pricing_state_raise`, a reachable SECURITY
+  DEFINER function outside a short allowlist, or a writable view or rule over the table
+  (`DOCSLURP_REFUSE_PRICING_STATE_WRITER`, always on there). A process that must check but has no database connection
+  refuses to start.
 - **At deploy:** `server/db/runtime-role-check.mjs` gates deploys on the same rule.
 
 Until a deployment's runtime roles are rolled out, its runtime processes can still move the mark. The operator's activation tool raises values with the table owner's credential through

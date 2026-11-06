@@ -60,7 +60,10 @@ const client = new Client({ connectionString: databaseUrl });
 await client.connect();
 // The owner's session resolves names only in public (where migrations create objects) and pg_catalog, never "$user": a
 // schema another role created (one named after the owner, say) cannot shadow a table or function a migration or the
-// role reconciliation uses (council O #1). Only the owner can create in public: runtime roles are refused CREATE there.
+// role reconciliation uses (council O #1). Only the owner can create in public: runtime roles are refused CREATE in every
+// non-system schema (the runtime identity rule, recheck Q #5). public stays first on purpose (recheck Q #7): migrations
+// create unqualified objects in the first schema listed, and "pg_catalog, public" fails each with "permission denied to
+// create pg_catalog.<name>".
 await client.query("set search_path = public, pg_catalog");
 try {
   const started = Date.now();

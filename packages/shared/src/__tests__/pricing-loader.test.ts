@@ -27,7 +27,13 @@ describe("loadPricingProvider", () => {
   it("installs the plugin's provider and uses it under the service profile", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const env = { DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_PRICING_PLUGIN: "/opt/pricing/plugin.mjs" };
-    expect(await loadPricingProvider(env, { importModule: plugin({ ...OPEN_PRICING, id: "deployment", version: "d-1" }) })).toBe("deployment");
+    const importModule = plugin({ ...OPEN_PRICING, id: "deployment", version: "d-1" });
+    // Pricing required: no database handle means no identity check, so it refuses before importing (recheck Q #6).
+    await expect(loadPricingProvider(env, { importModule })).rejects.toThrow(/no database connection.*refusing to start/);
+    expect(pricing().id).toBe("open");
+    const clean = { role: "docslurp_app", allowed_held: "docslurp_app", owned_objects: 0 };
+    const sql = { unsafe: async () => [clean] };
+    expect(await loadPricingProvider(env, { importModule, sql })).toBe("deployment");
     expect(pricing().version).toBe("d-1");
   });
 
