@@ -196,7 +196,7 @@ it.skipIf(!url)("refuses a grant option on any object, and an owned large object
   expect(await reasonsAs(runtime)).toEqual([]);
   const { rows: [{ oid }] } = await admin.query("select lo_create(0)::text as oid");
   await admin.query(`alter large object ${oid} owner to ${runtime}`);
-  try { expect((await reasonsAs(runtime)).join("\n")).toMatch(/owns 1 object\(s\) \(relations, functions, types, schemas or large objects\)/); }
+  try { expect((await reasonsAs(runtime)).join("\n")).toMatch(/owns 1 object\(s\) \(relations, functions, types, schemas, large objects, operators, foreign servers, publications or other schema objects\)/); }
   finally { await admin.query(`select lo_unlink(${oid})`); }
   expect(await reasonsAs(runtime)).toEqual([]);
 });
@@ -239,6 +239,52 @@ it.skipIf(!url)("refuses grant options on types, languages, FDWs, foreign server
     expect(runtimeIdentityReasons(clean, [runtime])).toEqual([]);
   } finally {
     await admin.query(`drop role if exists ${login}`).catch(() => {});
+  }
+});
+
+it.skipIf(!url)("refuses a write path through views of views, owned operators, servers and publications, default-ACL grant options and non-allowlisted extension definers (council W #10)", async () => {
+  // A view over a view over pricing_provider_state: writable only at the second level.
+  await admin.query(`create view public.rt_v1_${suffix} as select * from public.pricing_provider_state`);
+  await admin.query(`create view public.rt_v2_${suffix} as select * from public.rt_v1_${suffix}`);
+  await admin.query(`grant update on public.rt_v2_${suffix} to ${runtime}`);
+  try { expect((await reasonsAs(runtime)).join("\n")).toMatch(new RegExp(`can write rt_v2_${suffix}, a view or rule over pricing_provider_state`)); }
+  finally { await admin.query(`drop view public.rt_v2_${suffix}; drop view public.rt_v1_${suffix}`); }
+  expect(await reasonsAs(runtime)).toEqual([]);
+
+  const owned = [
+    [`create function public.rt_opf_${suffix}(int, int) returns boolean language sql immutable as 'select $1 = $2'`, `create operator public.=== (leftarg = int, rightarg = int, function = public.rt_opf_${suffix})`, `alter operator public.=== (int, int) owner to ${runtime}`, `drop operator public.=== (int, int); drop function public.rt_opf_${suffix}(int, int)`],
+    [`create foreign data wrapper rt_ofdw_${suffix}`, `create server rt_osrv_${suffix} foreign data wrapper rt_ofdw_${suffix}`, `alter server rt_osrv_${suffix} owner to ${runtime}`, `drop server rt_osrv_${suffix}; drop foreign data wrapper rt_ofdw_${suffix}`],
+    [`select 1`, `create publication rt_pub_${suffix}`, `alter publication rt_pub_${suffix} owner to ${runtime}`, `drop publication rt_pub_${suffix}`],
+  ];
+  for (const [setup, create, own, cleanup] of owned) {
+    await admin.query(setup!); await admin.query(create!);
+    try {
+      await admin.query(`grant create on database ${(await admin.query("select current_database() as d")).rows[0].d} to ${runtime}`);
+      await admin.query(own!);
+      await admin.query(`revoke create on database ${(await admin.query("select current_database() as d")).rows[0].d} from ${runtime}`);
+      expect((await reasonsAs(runtime)).join("\n")).toMatch(/owns 1 object\(s\)/);
+    } finally { await admin.query(cleanup!); }
+  }
+  expect(await reasonsAs(runtime)).toEqual([]);
+
+  await admin.query(`alter default privileges in schema public grant select on tables to ${runtime} with grant option`);
+  try { expect((await reasonsAs(runtime)).join("\n")).toMatch(/holds grant options \(WITH GRANT OPTION\) on default privileges/); }
+  finally { await admin.query(`alter default privileges in schema public revoke all on tables from ${runtime}`); }
+  expect(await reasonsAs(runtime)).toEqual([]);
+
+  // A SECURITY DEFINER function that belongs to an extension is excused only for pgcrypto and plpgsql.
+  await admin.query(`create function public.rt_secdef_${suffix}() returns int language sql security definer as 'select 1'`);
+  await admin.query(`create extension if not exists pg_trgm`);
+  try {
+    await admin.query(`alter extension pg_trgm add function public.rt_secdef_${suffix}()`);
+    expect((await reasonsAs(runtime)).join("\n")).toMatch(new RegExp(`SECURITY DEFINER function\\(s\\) outside the allowlist: [^\\n]*rt_secdef_${suffix}`));
+    await admin.query(`alter extension pg_trgm drop function public.rt_secdef_${suffix}()`);
+    await admin.query(`alter extension plpgsql add function public.rt_secdef_${suffix}()`);
+    expect((await reasonsAs(runtime)).join("\n")).not.toMatch(new RegExp(`rt_secdef_${suffix}`));
+    await admin.query(`alter extension plpgsql drop function public.rt_secdef_${suffix}()`);
+  } finally {
+    await admin.query(`drop function public.rt_secdef_${suffix}()`);
+    await admin.query(`drop extension if exists pg_trgm`);
   }
 });
 

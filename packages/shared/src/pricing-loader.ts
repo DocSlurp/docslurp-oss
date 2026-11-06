@@ -140,10 +140,19 @@ export const RUNTIME_IDENTITY_SQL = `
   with me as (select * from pg_roles where rolname = current_user),
   held as (select r.* from pg_roles r, me where r.oid = me.oid or (r.rolname = any($1::text[]) and pg_has_role(me.oid, r.oid, 'MEMBER'))),
   system_ns as (select oid from pg_namespace where nspname in ('pg_catalog', 'information_schema') or nspname like 'pg_toast%' or nspname like 'pg_temp%'),
-  extension_members as (select objid from pg_depend where deptype = 'e'),
+  extension_members as (select d.objid from pg_depend d join pg_extension e on e.oid = d.refobjid
+    where d.deptype = 'e' and d.classid = 'pg_proc'::regclass and e.extname = any (array['pgcrypto', 'plpgsql'])),
   state as (select to_regclass('public.pricing_provider_state') as oid),
   writable as (select c.oid from pg_class c, held h where c.relkind in ('r', 'p', 'v', 'f', 'm') and c.relnamespace not in (select oid from system_ns)
-    and (has_any_column_privilege(h.oid, c.oid, 'INSERT, UPDATE') or has_table_privilege(h.oid, c.oid, 'DELETE, TRUNCATE')))
+    and (has_any_column_privilege(h.oid, c.oid, 'INSERT, UPDATE') or has_table_privilege(h.oid, c.oid, 'DELETE, TRUNCATE'))),
+  over_state as (
+    with recursive reach(oid) as (
+      select oid from state where oid is not null
+      union
+      select rw.ev_class from pg_rewrite rw join pg_depend d on d.classid = 'pg_rewrite'::regclass and d.objid = rw.oid
+        join reach on d.refobjid = reach.oid where rw.ev_class <> reach.oid
+    )
+    select oid from reach where oid <> (select oid from state))
   select me.rolname::text as role,
     (select bool_or(rolsuper) from held) as superuser,
     (select bool_or(rolcreaterole or rolcreatedb or rolreplication or rolbypassrls) from held) as elevated,
@@ -159,7 +168,20 @@ export const RUNTIME_IDENTITY_SQL = `
       + (select count(*) from pg_proc where proowner in (select oid from held) and pronamespace not in (select oid from system_ns))
       + (select count(*) from pg_type where typowner in (select oid from held) and typnamespace not in (select oid from system_ns))
       + (select count(*) from pg_namespace where nspowner in (select oid from held) and oid not in (select oid from system_ns))
-      + (select count(*) from pg_largeobject_metadata where lomowner in (select oid from held)))::int as owned_objects,
+      + (select count(*) from pg_largeobject_metadata where lomowner in (select oid from held))
+      + (select count(*) from pg_operator where oprowner in (select oid from held) and oprnamespace not in (select oid from system_ns))
+      + (select count(*) from pg_opclass where opcowner in (select oid from held) and opcnamespace not in (select oid from system_ns))
+      + (select count(*) from pg_opfamily where opfowner in (select oid from held) and opfnamespace not in (select oid from system_ns))
+      + (select count(*) from pg_collation where collowner in (select oid from held) and collnamespace not in (select oid from system_ns))
+      + (select count(*) from pg_conversion where conowner in (select oid from held) and connamespace not in (select oid from system_ns))
+      + (select count(*) from pg_ts_config where cfgowner in (select oid from held) and cfgnamespace not in (select oid from system_ns))
+      + (select count(*) from pg_ts_dict where dictowner in (select oid from held) and dictnamespace not in (select oid from system_ns))
+      + (select count(*) from pg_statistic_ext where stxowner in (select oid from held))
+      + (select count(*) from pg_foreign_data_wrapper where fdwowner in (select oid from held))
+      + (select count(*) from pg_foreign_server where srvowner in (select oid from held))
+      + (select count(*) from pg_publication where pubowner in (select oid from held))
+      + (select count(*) from pg_event_trigger where evtowner in (select oid from held))
+      + (select count(*) from pg_extension where extowner in (select oid from held)))::int as owned_objects,
     coalesce((select string_agg(distinct kind, ',' order by kind) from (
       select 'relation' as kind from pg_class c, aclexplode(c.relacl) a
         where c.relnamespace not in (select oid from system_ns) and a.is_grantable and a.grantee in (select oid from held)
@@ -180,6 +202,7 @@ export const RUNTIME_IDENTITY_SQL = `
       union all select 'foreign server' from pg_foreign_server f, aclexplode(f.srvacl) a where a.is_grantable and a.grantee in (select oid from held)
       union all select 'tablespace' from pg_tablespace t, aclexplode(t.spcacl) a where a.is_grantable and a.grantee in (select oid from held)
       union all select 'parameter' from pg_parameter_acl p, aclexplode(p.paracl) a where a.is_grantable and a.grantee in (select oid from held)
+      union all select 'default privileges' from pg_default_acl p, aclexplode(p.defaclacl) a where a.is_grantable and a.grantee in (select oid from held)
     ) grantable), '') as grant_options,
     case when (select oid from state) is null then false
       else (select relowner from pg_class where oid = (select oid from state)) in (select oid from held) end as owns_state,
@@ -197,10 +220,8 @@ export const RUNTIME_IDENTITY_SQL = `
         and (exists (select 1 from held h where has_function_privilege(h.oid, p.oid, 'EXECUTE'))
           or exists (select 1 from pg_trigger t where t.tgfoid = p.oid and t.tgrelid in (select oid from writable)))), '') as definer_functions,
     case when (select oid from state) is null then ''
-      else coalesce((select string_agg(distinct rw.ev_class::regclass::text, ',' order by rw.ev_class::regclass::text) from pg_rewrite rw
-        join pg_depend d on d.classid = 'pg_rewrite'::regclass and d.objid = rw.oid
-        where d.refobjid = (select oid from state) and rw.ev_class <> (select oid from state)
-          and rw.ev_class in (select oid from writable)), '') end as state_write_paths
+      else coalesce((select string_agg(distinct o.oid::regclass::text, ',' order by o.oid::regclass::text) from over_state o
+        where o.oid in (select oid from writable)), '') end as state_write_paths
   from me
 `;
 
@@ -223,7 +244,7 @@ export function runtimeIdentityReasons(row: Record<string, unknown> | undefined,
     held.length ? null : `is not a member of ${allowed.join(" or ")}`,
     row.can_create_in_database === true ? "can CREATE in the database (a schema could shadow another role's search_path)" : null,
     schemas.length ? `can CREATE in schema ${schemas.join(", ")}` : null,
-    Number(row.owned_objects) > 0 ? `owns ${Number(row.owned_objects)} object(s) (relations, functions, types, schemas or large objects)` : null,
+    Number(row.owned_objects) > 0 ? `owns ${Number(row.owned_objects)} object(s) (relations, functions, types, schemas, large objects, operators, foreign servers, publications or other schema objects)` : null,
     admins.length ? `holds ADMIN OPTION on ${admins.join(", ")}: it could grant that role to others` : null,
     grantable.length ? `holds grant options (WITH GRANT OPTION) on ${grantable.join(", ")}: it could pass privileges on` : null,
     row.owns_state === true ? "owns pricing_provider_state" : null,
