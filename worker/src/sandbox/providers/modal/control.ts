@@ -283,7 +283,18 @@ const RESET_SCRIPT = [
   "import os, shutil, stat, sys, tempfile",
   `uid = ${PARSER_VM_UID}`,
   "if os.geteuid() != 0: sys.exit(7)",
-  `roots = ${JSON.stringify(PARSER_SCRATCH_ROOTS)} + [os.path.normpath(r) for r in sys.argv[1:]]`,
+  // Arguments: the job roots, then optionally `--keep` and the current document's uploaded inputs (council X #7). Those
+  // stay (and their parent directories) only when under a job root; everything else the parser user owns goes.
+  "args = sys.argv[1:]",
+  "keep_args = args[args.index('--keep') + 1:] if '--keep' in args else []",
+  "job_roots = [os.path.normpath(r) for r in (args[:args.index('--keep')] if '--keep' in args else args)]",
+  `roots = ${JSON.stringify(PARSER_SCRATCH_ROOTS)} + job_roots`,
+  "under = lambda p, r: p == r or p.startswith(r.rstrip('/') + '/')",
+  "keep = {os.path.normpath(k) for k in keep_args if any(under(os.path.normpath(k), r) and os.path.normpath(k) != r for r in job_roots)}",
+  "parents = set()",
+  "for k in keep:",
+  "    q = os.path.dirname(k)",
+  "    while q not in parents and q != '/': parents.add(q); q = os.path.dirname(q)",
   "def clean(d):",
   "    try: entries = list(os.scandir(d))",
   "    except FileNotFoundError: return",
@@ -291,6 +302,10 @@ const RESET_SCRIPT = [
   "        p = e.path",
   "        try: st = os.lstat(p)",
   "        except FileNotFoundError: continue",
+  "        if p in keep or p in parents:",
+  "            if stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode): clean(p)",
+  "            elif p not in keep: os.unlink(p)",
+  "            continue",
   "        if st.st_uid != 0:",
   "            if stat.S_ISDIR(st.st_mode): shutil.rmtree(p)",
   "            else: os.unlink(p)",
@@ -302,6 +317,9 @@ const RESET_SCRIPT = [
   "    except FileNotFoundError: return",
   "    for e in entries:",
   "        st = os.lstat(e.path)",
+  "        if e.path in keep or e.path in parents:",
+  "            if stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode): residue(e.path, found)",
+  "            continue",
   "        if st.st_uid != 0: found.append(e.path)",
   "        elif stat.S_ISDIR(st.st_mode) and st.st_mode & 0o022: residue(e.path, found)",
   "for root in roots:",
@@ -338,7 +356,7 @@ const RESET_SCRIPT = [
   "pid = os.fork()",
   "if pid == 0:",
   "    os.setgroups([]); os.setresgid(uid, uid, uid); os.setresuid(uid, uid, uid)",
-  "    for root in sys.argv[1:] + ['/dev/shm']:",
+  "    for root in job_roots + ['/dev/shm']:",
   "        probe = root",
   "        while probe != '/' and not os.path.isdir(probe): probe = os.path.dirname(probe) or '/'",
   "        if root == '/dev/shm' and probe != root: continue",
@@ -357,8 +375,8 @@ const RESET_SCRIPT = [
 ].join("\n");
 
 /** argv for the post-command reset (RESET_SCRIPT) over these job roots. */
-export function resetArgv(jobRoots: readonly string[]): string[] {
-  return ["python3", "-I", "-c", RESET_SCRIPT, ...jobRoots];
+export function resetArgv(jobRoots: readonly string[], keep: readonly string[] = []): string[] {
+  return ["python3", "-I", "-c", RESET_SCRIPT, ...jobRoots, ...(keep.length ? ["--keep", ...keep] : [])];
 }
 
 /** Per-command HOME, temp and XDG directories under `scratch` (council W #1): nothing a command writes there outlives it. */

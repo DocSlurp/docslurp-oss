@@ -22,6 +22,8 @@ export interface RemoteFs {
   /** Direct children of a directory, symlinks excluded. */
   list(p: string): Promise<RemoteEntry[]>;
   mkdir(p: string): Promise<void>;
+  /** Create several directories (with parents) in one call, when the transport can (council X #7). */
+  mkdirAll?(paths: string[]): Promise<void>;
   /** Remove a file, or a directory and everything under it. */
   remove(p: string): Promise<void>;
 }
@@ -60,11 +62,15 @@ export class SessionStaging {
 
   /** Create remote directories (with parents). */
   async ensureDirectories(paths: string[]): Promise<void> {
-    for (const p of paths) {
-      const abs = path.resolve(p);
-      await this.remote.mkdir(abs);
-      this.claim(abs, "directory");
-    }
+    const resolved = paths.map((p) => path.resolve(p));
+    if (resolved.length > 1 && this.remote.mkdirAll) await this.remote.mkdirAll(resolved);
+    else for (const abs of resolved) await this.remote.mkdir(abs);
+    for (const abs of resolved) this.claim(abs, "directory");
+  }
+
+  /** Paths uploaded and still assumed present (kept across the same document's commands, council X #7). */
+  uploadedPaths(): string[] {
+    return [...this.uploaded];
   }
 
   /** Record the current state of `roots` so a command's own changes can be told apart later. */

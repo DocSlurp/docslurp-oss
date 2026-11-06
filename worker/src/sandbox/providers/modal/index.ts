@@ -421,6 +421,7 @@ function buildRemoteFs(sdk: ModalSdk, sandbox: import("modal").Sandbox): RemoteF
       });
     },
     mkdir: (p) => runInJobTree(sandbox, [...asParserUser(), "/bin/mkdir", "-p", "--", p], "parser VM directory creation in the job tree failed"),
+    mkdirAll: (paths) => runInJobTree(sandbox, [...asParserUser(), "/bin/mkdir", "-p", "--", ...paths], "parser VM directory creation in the job tree failed"),
     remove: (p) => runInJobTree(sandbox, [...asParserUser(), "/bin/rm", "-rf", "--", p], "parser VM removal in the job tree failed"),
   };
 }
@@ -913,12 +914,17 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
          * of any document, starts from the image. A VM that cannot be wiped or is left unusable is terminated, and the
          * command that just ran takes the strike; a reset that cannot run at all is Modal's.
          */
-        async function resetVm(): Promise<void> {
+        /** The document whose uploaded inputs the last reset kept on this VM (council X #7). */
+        let keptFor: string | undefined;
+
+        async function resetVm(keepFor?: string): Promise<void> {
+          // The same document's next command reuses its inputs; any other document gets a full wipe first (W #3 holds).
+          const keep = keepFor !== undefined ? staging?.uploadedPaths() ?? [] : [];
           let code: number | null = null;
           let transport: unknown;
           let overran = false;
           try {
-            const proc = await sandbox!.exec(resetArgv(parserJobRoots()), { timeoutMs: RESET_DEADLINE_MS });
+            const proc = await sandbox!.exec(resetArgv(parserJobRoots(), keep), { timeoutMs: RESET_DEADLINE_MS });
             code = await withDeadline(proc.wait(), RESET_DEADLINE_MS + 5_000);
           } catch (error) {
             console.error(`[parser-sandbox] provider=modal reset failed: ${safeMessage(config, error)}`);
@@ -927,8 +933,9 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             if (isExecTimeout(sdk, error) || isControlDeadline(error)) overran = true;
             else transport = error;
           }
-          // Whatever happened, nothing staged earlier may be assumed present any more.
-          staging?.forgetUploads();
+          // Unless kept for the same document, nothing staged earlier may be assumed present any more.
+          keptFor = code === 0 && keep.length ? keepFor : undefined;
+          if (keptFor === undefined) staging?.forgetUploads();
           if (code === 0) return;
           await terminate().catch(() => {});
           if (transport !== undefined) throw new SandboxInfrastructureError("parser VM reset could not run; VM terminated", undefined, { cause: transport });
@@ -989,7 +996,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             // then an abandoned command's partial outputs are removed.
             if (sandbox && !lane.dead && !closed && !cleaned) await killParserUserProcesses();
             if (pendingDiscards.length > 0 && !lane.dead && !closed) await runDiscards();
-            if (sandbox && !lane.dead && !closed) await resetVm();
+            if (sandbox && !lane.dead && !closed) await resetVm(command.affinityKey);
           }
         }
 
@@ -1053,16 +1060,18 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             command = await withAssets(command);
             // On a VM another document used last, check its job roots first (council X #1): missing-and-uncreatable,
             // replaced (not a directory, a link) or owned by someone else is the previous document's doing.
+            // Another document's inputs kept on this VM go first: the next document sees nothing of them (council X #7, W #3).
+            if (keptFor !== undefined && keptFor !== command.affinityKey) await resetVm();
             if (lane.previousKey !== undefined && lane.previousKey !== command.affinityKey) await probeJobTree(lane.previousKey);
             // Only the command's inputs travel; the parser runtime comes from the image. From here a failure the VM itself
             // reports (no space, the document's own staging timing out) is this document's doing (council W #2).
             ownStaging = true;
             await staging!.ensureUploaded(command.inputPaths);
             throwIfAborted(signal);
-            await staging!.ensureDirectories(command.writablePaths);
-            // Its own HOME, temp and XDG directories, outside its writable paths (never downloaded) and wiped after it.
+            // Its writable paths and its own HOME, temp and XDG directories (outside its writable paths, so never downloaded,
+            // and wiped after it), in one exec (council X #7).
             const scratch = `${parserJobRoots()[1] ?? "/tmp/docslurp-parser-sandbox"}/.cmd-${lane.id}-${commandCount}`;
-            await staging!.ensureDirectories(commandScratchDirs(scratch));
+            await staging!.ensureDirectories([...command.writablePaths, ...commandScratchDirs(scratch)]);
             command = { ...command, env: { ...command.env, ...commandScratchEnv(scratch) } };
             throwIfAborted(signal);
             const snapshot = await staging!.snapshot(command.writablePaths);

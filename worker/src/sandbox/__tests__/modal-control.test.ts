@@ -231,6 +231,23 @@ describe.skipIf(!dockerKillTest)("parser VM image lock and reset (council W #1)"
     expect(run.stdout).toContain("ipc-after=0/0/0");
   }, 150_000);
 
+  it("the reset keeps only the current document's uploaded inputs under a job root, and a full reset removes them (council X #7)", () => {
+    const keepReset = resetArgv(["/tmp/docslurp-parser-sandbox", "/tmp"], ["/tmp/docslurp-job-a/in.pdf", "/var/tmp/sneaky"]).slice(4).map((arg) => `'${arg}'`).join(" ");
+    const run = docker([
+      ...setup,
+      `${asUser("os.makedirs('/tmp/docslurp-job-a/out'); open('/tmp/docslurp-job-a/in.pdf','w').write('%PDF'); open('/tmp/docslurp-job-a/out/page.md','w').write('a'); open('/tmp/docslurp-job-a/extra','w').write('a'); open('/var/tmp/sneaky','w').write('a'); open('/tmp/other','w').write('a')")}`,
+      `python3 -I -c "$RESET" ${keepReset}; echo "keep-reset=$?"`,
+      'for p in /tmp/docslurp-job-a/in.pdf /tmp/docslurp-job-a/out /tmp/docslurp-job-a/extra /var/tmp/sneaky /tmp/other; do [ -e "$p" ] && echo "present $p" || echo "absent $p"; done',
+      'python3 -I -c "$RESET" /tmp/docslurp-parser-sandbox /tmp; echo "full-reset=$?"',
+      '[ -e /tmp/docslurp-job-a ] && echo "job-a present" || echo "job-a absent"',
+    ].join("\n"));
+    expect(run.stdout).toContain("keep-reset=0");
+    expect(run.stdout).toContain("present /tmp/docslurp-job-a/in.pdf");
+    for (const gone of ["/tmp/docslurp-job-a/out", "/tmp/docslurp-job-a/extra", "/var/tmp/sneaky", "/tmp/other"]) expect(run.stdout).toContain(`absent ${gone}`);
+    expect(run.stdout).toContain("full-reset=0");
+    expect(run.stdout).toContain("job-a absent");
+  }, 150_000);
+
   it("refuses an image path the parser user can still write, and reports a full job root or /dev/shm", () => {
     const run = docker([
       ...setup,

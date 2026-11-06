@@ -270,6 +270,7 @@ const lifecycleConfig = {
 
 class NotFound extends Error {}
 class ModalNotFound extends Error {}
+class ModalFsError extends Error {}
 
 type FakeProcess = { stdout: ReadableStream<Uint8Array>; stderr: ReadableStream<Uint8Array>; wait(): Promise<number> };
 function stream(text: string | Uint8Array): ReadableStream<Uint8Array> { return new ReadableStream({ start(c) { c.enqueue(typeof text === "string" ? Buffer.from(text) : text); c.close(); } }); }
@@ -347,6 +348,7 @@ function fakeSdk(
     leftoverKills: 0,
     locks: 0,
     lookups: [] as string[],
+    mkdirExecs: 0,
     probes: 0,
     assetWritesInFlight: 0,
     maxAssetWritesInFlight: 0,
@@ -395,7 +397,8 @@ function fakeSdk(
       writeBytes: (data: Uint8Array, p: string) => {
         state.rootWrites.push(p);
         const failure = typeof opts.writeFails === "function" ? opts.writeFails(p) : undefined;
-        if (failure) return Promise.reject(new Error(failure));
+        // Modal's filesystem API rejects with a SandboxFilesystemError carrying only the message (real-Modal W2a).
+        if (failure) return Promise.reject(Object.assign(new ModalFsError(failure), { name: "SandboxFilesystemError" }));
         if (opts.assetWriteHangs?.() && p.startsWith("/opt/docslurp-assets/")) return new Promise<void>(() => {});
         if (opts.assetWriteDelayMs && p.startsWith("/opt/docslurp-assets/")) {
           state.assetWritesInFlight++;
@@ -426,7 +429,7 @@ function fakeSdk(
       }
       if (asUser?.[0] === "python3" && asUser[1] === "-I") return finished((await remote.list(asUser[4]!)).map((entry) => JSON.stringify(entry)).join("\n"));
       // Staging in job trees, as the parser user (council M #3).
-      if (asUser?.[0] === "/bin/mkdir") { if (typeof opts.mkdirFails === "function" ? opts.mkdirFails() : opts.mkdirFails) return finished("", 1); state.mkdirs.push(asUser[3]!); await remote.mkdir(asUser[3]!); return finished("", 0); }
+      if (asUser?.[0] === "/bin/mkdir") { if (typeof opts.mkdirFails === "function" ? opts.mkdirFails() : opts.mkdirFails) return finished("", 1); state.mkdirExecs++; for (const dir of asUser.slice(3)) { state.mkdirs.push(dir); await remote.mkdir(dir); } return finished("", 0); }
       if (asUser?.[0] === "/bin/rm") { await remote.remove(asUser[3]!); return finished("", 0); }
       if (asUser?.[0] === "/bin/sh" && asUser[2]?.includes(".docslurp-probe.")) { state.probes++; return finished("", (typeof opts.treeBroken === "function" ? opts.treeBroken() : opts.treeBroken) ? 3 : 0); }
       if (asUser?.[0] === "/bin/sh" && asUser[2]?.includes("cp --")) { if (opts.cpFails) return finished("cp: error writing: No space left on device", 1); await remote.writeFile(asUser[5]!, await remote.readFile(asUser[4]!)); return finished("", 0); }
@@ -623,6 +626,28 @@ describe("modal provider session lifecycle", () => {
     await expect(opened.run!({ ...command, affinityKey: "doc-b" })).resolves.toMatchObject({ exitCode: 0 });
     expect(state.commandVms).toEqual([1, 2]);
     await opened.close();
+  });
+
+  it("creates a command's directories in one exec and keeps a document's inputs only across its own commands (council X #7)", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "docslurp-x7-"));
+    try {
+      const input = path.join(dir, "in.pdf");
+      await writeFile(input, "%PDF");
+      const { state, session } = await open({ exec: async () => finished() });
+      const opened = await session();
+      await opened.run!({ ...command, affinityKey: "doc-a", inputPaths: [input], writablePaths: [path.join(dir, "out")] });
+      expect(state.mkdirExecs).toBe(1); // writable path and the 7 scratch directories together
+      await opened.run!({ ...command, affinityKey: "doc-a", inputPaths: [input] });
+      // After each doc-a command, the reset keeps doc-a's uploaded input.
+      expect(state.resets.map((reset: { roots: string[] }) => reset.roots.slice(reset.roots.indexOf("--keep")))).toEqual([["--keep", input], ["--keep", input]]);
+      await opened.run!({ ...command, affinityKey: "doc-b" });
+      // doc-b's command was preceded by a full reset (no --keep), then its own reset kept nothing (it uploaded nothing).
+      const tail = state.resets.slice(2).map((reset: { roots: string[] }) => reset.roots.includes("--keep"));
+      expect(tail).toEqual([false, false]);
+      await opened.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("each command gets its own HOME, temp and XDG directories outside its writable paths, wiped after it (council W #1)", async () => {
@@ -985,13 +1010,13 @@ describe("modal provider session lifecycle", () => {
       const uploads = () => new Set(state.rootWrites.filter((target) => target.includes("/upload-"))).size;
       await opened.run!({ ...command, affinityKey: "doc-a", inputPaths: [input] });
       await opened.run!({ ...command, affinityKey: "doc-a", inputPaths: [input] });
-      // Every command's uploads are wiped after it (council W #1, W #3): the same document re-uploads too.
-      expect(uploads()).toBe(2);
+      // The same document's inputs are kept across its own commands (council X #7): no re-upload.
+      expect(uploads()).toBe(1);
       // doc-b's parser rewrites doc-a's remote copy.
       await opened.run!({ ...command, affinityKey: "doc-b" });
       await state.remote.writeFile(input, Buffer.from("tampered"));
       await opened.run!({ ...command, affinityKey: "doc-a", inputPaths: [input] });
-      expect(uploads()).toBe(3);
+      expect(uploads()).toBe(2);
       expect(Buffer.from(await state.remote.readFile(input)).toString()).toBe("doc-a input");
       await opened.close();
     } finally {
