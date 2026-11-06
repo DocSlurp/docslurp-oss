@@ -33,6 +33,7 @@ import {
   sandboxedPdfConfigured,
   type ExtractionContract,
   type ExtractionArtifactRef,
+  repairMarkdownTables,
 } from "@docslurp/shared";
 import { readJsonFile } from "../tools/storage.js";
 import { documentArtifactRoot, runArtifactRoot } from "../lib/artifact-root.js";
@@ -272,6 +273,9 @@ function measuredPagesOf(value: string | undefined): PageCountResult | null {
     return null;
   }
 }
+
+/** PDF extractors whose Markdown is Doppler's (local doppler-md, the sandboxed vm-pdf): their tables get repairMarkdownTables. */
+const DOPPLER_PDF_EXTRACTORS = new Set(["doppler-md", VM_PDF_EXTRACTOR_ID]);
 
 export class ExtractMarkdownStage implements Stage {
   readonly name = "extract-markdown";
@@ -1958,7 +1962,12 @@ export class ExtractMarkdownStage implements Stage {
   ): Promise<string> {
     const original = await readFile(candidate.tempTextPath, "utf8");
     const sanitized = sanitizeExtractedMarkdown(original);
-    if (sanitized.strippedDataUriCount === 0 && sanitized.strippedFrontmatterLines === 0) {
+    // Doppler's tables: a two-line header it split becomes one header row, a list it laid out in columns a list again.
+    const tables = DOPPLER_PDF_EXTRACTORS.has(candidate.label) ? repairMarkdownTables(sanitized.markdown) : null;
+    if (tables && (tables.repairs.mergedHeaders > 0 || tables.repairs.listsRestored > 0)) {
+      sanitized.markdown = tables.markdown;
+      console.log(`[extract-tables] extractor=${candidate.label} mergedHeaders=${tables.repairs.mergedHeaders} listsRestored=${tables.repairs.listsRestored}`);
+    } else if (sanitized.strippedDataUriCount === 0 && sanitized.strippedFrontmatterLines === 0) {
       return original;
     }
 

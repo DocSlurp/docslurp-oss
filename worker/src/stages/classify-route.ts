@@ -24,7 +24,8 @@ import {
   type AdaptiveSpecializedContentEntry,
   type AdaptiveSpecializedContentKind,
   type AdaptiveSpecializedContentSummary,
-  type ParserPlaybookKey
+  type ParserPlaybookKey,
+  tableReliability,
 } from "@docslurp/shared";
 import type { Stage } from "../pipeline/pipeline.js";
 import { runDocumentStage, runDocuments, } from "../pipeline/checkpoints.js";
@@ -38,6 +39,9 @@ import { resolveRunRoutingV2, routingVersion, type RoutingVersionOptions } from 
 
 // Lightweight document-type classification using filename + extracted/canonical text heuristics.
 // Emits a classification artifact and (optionally) a suggested parser playbook override per document.
+
+/** A table-heavy page whose extracted table is unreliable (tableReliability): a model reads it, billed Rich. */
+export const TABLE_UNRELIABLE_SIGNAL = "ocr-authorized:table-unreliable";
 
 export class ClassifyRouteStage implements Stage {
   readonly name = "classify-route";
@@ -482,6 +486,17 @@ function buildEvidencePages(
           ],
         }
       : { authorized: decision.read, confidence: decision.confidence, signals: decision.signals };
+    // A born-digital table page is served from the extractor's table unless that table is unreliable (after the structural
+    // repairs extract-markdown made): then a model reads the page.
+    const tableSignals = !ocrDecision.authorized && page.route === "table-heavy" && aligned !== null ? tableReliability(text) : [];
+    if (tableSignals.length > 0) {
+      return {
+        ...page,
+        extractorHint: "vision-rescue" as const,
+        signals: [...page.signals, ...ocrDecision.signals, ...tableSignals],
+        ocrDecision: { authorized: true, confidence: 0.7, signals: [TABLE_UNRELIABLE_SIGNAL, ...tableSignals] },
+      };
+    }
     if (!ocrDecision.authorized) {
       return { ...page, signals: [...page.signals, ...ocrDecision.signals], ocrDecision };
     }

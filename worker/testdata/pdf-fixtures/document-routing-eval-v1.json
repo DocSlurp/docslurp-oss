@@ -308,6 +308,84 @@
           }
         ]
       }
+    },
+    {
+      "id": "generated-table-clean-financial",
+      "path": "routing-table-clean-financial.pdf",
+      "tags": [
+        "generated",
+        "born-digital-table"
+      ],
+      "notes": "Owner policy 2026-11-05: a born-digital table Doppler extracts soundly is served from Doppler's table (Fast), every row kept; no model read.",
+      "expected": {
+        "suggestedPlaybook": "layout-aware",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "table-heavy",
+            "extractorHint": "layout-aware",
+            "ocrAuthorized": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "generated-table-two-line-header",
+      "path": "routing-table-two-line-header.pdf",
+      "tags": [
+        "generated",
+        "born-digital-table"
+      ],
+      "notes": "Doppler splits the grouped two-line header; repairMarkdownTables merges it into one header row, so the table is sound and stays Fast.",
+      "expected": {
+        "suggestedPlaybook": "layout-aware",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "table-heavy",
+            "extractorHint": "layout-aware",
+            "ocrAuthorized": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "generated-table-bullet-list",
+      "path": "routing-table-bullet-list.pdf",
+      "tags": [
+        "generated",
+        "born-digital-table"
+      ],
+      "notes": "A bulleted agenda Doppler lays out as a table is restored to a list: not table-heavy, not escalated.",
+      "expected": {
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "straightforward-text",
+            "extractorHint": "cheap-text",
+            "ocrAuthorized": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "generated-table-scanned",
+      "path": "routing-table-scanned.pdf",
+      "tags": [
+        "generated",
+        "scanned-table"
+      ],
+      "notes": "A table only as a page scan keeps the OCR/vision path.",
+      "expected": {
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "handwriting-or-degraded",
+            "extractorHint": "vision-rescue",
+            "ocrAuthorized": true
+          }
+        ]
+      }
     }
   ]
 }

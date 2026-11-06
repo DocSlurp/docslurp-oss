@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { PAGE_TABLE_ROUTING, isTableHeavy, markdownTables } from "./page-table-routing.js";
+import { PAGE_TABLE_ROUTING, isTableHeavy, markdownTables, repairMarkdownTables, tableReliability } from "./page-table-routing.js";
 
 const pipe = (rows: number) => ["| a | b | c |", "| --- | --- | --- |", ...Array.from({ length: rows - 1 }, (_, i) => `| ${i} | x | y |`)].join("\n");
 
@@ -21,5 +21,47 @@ describe("table-heavy pages (owner rule 2026-11-05)", () => {
     expect(isTableHeavy([{ rows: 2, columns: 2, coverage: 0.25 }, { rows: 2, columns: 2, coverage: 0.2 }])).toBe(true);
     expect(isTableHeavy([{ rows: 2, columns: 2, coverage: 0.25 }, { rows: 2, columns: 2, coverage: 0.25 }], 0.3)).toBe(false);
     expect(isTableHeavy([{ rows: 4, columns: 3, coverage: null }])).toBe(false);
+  });
+});
+
+describe("born-digital tables: structural repairs and reliability", () => {
+  const table = (...rows: string[][]) => [`| ${rows[0]!.join(" | ")} |`, `| ${rows[0]!.map(() => "---").join(" | ")} |`, ...rows.slice(1).map((r) => `| ${r.join(" | ")} |`)].join("\n");
+
+  it("merges a two-line header Doppler split into one header row", () => {
+    const split = table(["", "Revenue", "", "Margin", ""], ["Region", "Q1", "Q2", "Q1", "Q2"], ["North", "1,200", "1,310", "18.0%", "19.2%"], ["South", "1,287", "1,401", "19.1%", "20.3%"]);
+    const { markdown, repairs } = repairMarkdownTables(`Intro\n\n${split}\n`);
+    expect(repairs).toEqual({ mergedHeaders: 1, listsRestored: 0 });
+    expect(markdown).toContain("| Region | Revenue Q1 | Revenue Q2 | Margin Q1 | Margin Q2 |");
+    expect(markdown).toContain("| North | 1,200 | 1,310 | 18.0% | 19.2% |");
+    expect(markdown).not.toContain("| Region | Q1 |");
+    expect(tableReliability(markdown)).toEqual([]);
+  });
+
+  it("restores a bulleted or numbered list Doppler laid out as a table", () => {
+    const bullets = table(["-", "Approve the minutes", "Chair", "5 min"], ["-", "Review the results", "Planning", "20 min"], ["-", "Any other business", "All", "10 min"]);
+    expect(repairMarkdownTables(bullets).markdown.split("\n")).toEqual(["- Approve the minutes — Chair — 5 min", "- Review the results — Planning — 20 min", "- Any other business — All — 10 min"]);
+    const numbered = table(["1.", "Open", "Chair"], ["2.", "Review", "Planning"], ["3)", "Close", "Chair"]);
+    expect(repairMarkdownTables(numbered).markdown.split("\n")).toEqual(["1. Open — Chair", "2. Review — Planning", "3. Close — Chair"]);
+  });
+
+  it("leaves sound tables, and tables that only look similar, as they are", () => {
+    const sound = table(["Account", "2024", "2025"], ["Revenue", "48,210", "52,934"], ["Cost", "21,877", "23,015"]);
+    // One dash row among real rows is a value, not a list.
+    const dash = table(["Item", "Qty"], ["-", "3"], ["Bolts", "12"], ["Nuts", "30"]);
+    // An empty header cell over numbers is not a split header (its next row is numbers, not labels).
+    const corner = table(["", "2024", "2025"], ["Revenue", "48,210", "52,934"], ["Cost", "21,877", "23,015"]);
+    for (const markdown of [sound, dash, corner]) {
+      expect(repairMarkdownTables(markdown)).toEqual({ markdown, repairs: { mergedHeaders: 0, listsRestored: 0 } });
+    }
+    // Page breaks survive.
+    expect(repairMarkdownTables(`a\f${sound}\fb`).markdown.split("\f")).toHaveLength(3);
+  });
+
+  it("flags tables that stay unreliable: inconsistent column counts, mostly empty cells", () => {
+    expect(tableReliability(table(["A", "B", "C"], ["1", "2"], ["3", "4", "5"]))).toEqual(["table:inconsistent-columns"]);
+    expect(tableReliability(table(["A", "B", "C"], ["1", "", ""], ["", "", "6"], ["", "", ""]))).toEqual(["table:mostly-empty-cells"]);
+    expect(tableReliability("Prose only.")).toEqual([]);
+    // Row-spanning labels (blank first cells under a filled one, the rest of each row filled) are sound.
+    expect(tableReliability(table(["Italian B", "Higher", "7", "ITAL 2110"], ["", "Higher", "4", "ITAL 2110"], ["", "Standard", "6", "ITAL 1020"], ["", "Standard", "5", "ITAL 1010"]))).toEqual([]);
   });
 });

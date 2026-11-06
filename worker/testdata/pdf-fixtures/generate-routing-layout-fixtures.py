@@ -147,6 +147,78 @@ def tall_table():
     return b.build()
 
 
+FINANCIAL = [('Account', '2024', '2025', 'Change')] + [
+    (name, f'{a:,}', f'{b:,}', f'{(b - a) / a * 100:+.1f}%') for name, a, b in (
+        ('Revenue', 48210, 52934), ('Cost of sales', 21877, 23015), ('Gross profit', 26333, 29919), ('Operating expenses', 15012, 15890),
+        ('Operating income', 11321, 14029), ('Interest expense', 1204, 1187), ('Pre-tax income', 10117, 12842), ('Income tax', 2529, 3211))]
+
+
+def clean_financial_table():
+    """A born-digital financial statement: one header row, eight data rows, a ruled grid. Doppler's table is sound."""
+    b = PdfBuilder()
+    table = ruled_table(len(FINANCIAL), top=600, widths=(170, 100, 100, 98), cell_text=lambda r, c: FINANCIAL[r][c])
+    b.page(text_lines(['Consolidated statement of income (in thousands)'], x=72, y=700, font='F2') + text_lines(PROSE[:2], x=72, y=670) + table, {})
+    return b.build()
+
+
+def two_line_header_table():
+    """A grouped header over two lines: 'Revenue' and 'Margin' each span two quarter columns. Unruled, so only alignment says
+    which cells belong together."""
+    rows = [('', 'Revenue', '', 'Margin', ''), ('Region', 'Q1', 'Q2', 'Q1', 'Q2')] + [
+        (region, f'{1200 + i * 87:,}', f'{1310 + i * 91:,}', f'{18 + i}.{i}%', f'{19 + i}.{i + 2}%')
+        for i, region in enumerate(('North', 'South', 'East', 'West', 'Central', 'Overseas'))]
+    xs = (72, 200, 280, 360, 440)
+    out = ['BT /F1 9 Tf']
+    y = 600
+    for row in rows:
+        for x, text in zip(xs, row):
+            if text:
+                out.append(f'1 0 0 1 {x + (20 if row is rows[0] and text else 0)} {y} Tm ({text}) Tj')
+        y -= 16
+    out.append('ET')
+    b = PdfBuilder()
+    b.page(text_lines(['Regional results'], x=72, y=700, font='F2') + text_lines(PROSE[:2], x=72, y=670) + '\n'.join(out) + '\n', {})
+    return b.build()
+
+
+def bullet_list_in_columns():
+    """A bulleted agenda laid out in aligned columns (bullet, item, owner, minutes): a list, though it lines up like a table."""
+    items = [('Approve the minutes of the last meeting', 'Chair', '5'), ('Review the quarterly survey results', 'Planning', '20'),
+             ('Agree the revised district schedule', 'Committee', '15'), ('Archive the inspection notes', 'Records', '5'),
+             ('Confirm the next meeting date', 'Secretary', '5'), ('Any other business', 'All', '10')]
+    out = ['BT /F1 10 Tf']
+    y = 600
+    for item, owner, minutes in items:
+        out.append(f'1 0 0 1 80 {y} Tm (-) Tj')
+        out.append(f'1 0 0 1 96 {y} Tm ({item}) Tj')
+        out.append(f'1 0 0 1 380 {y} Tm ({owner}) Tj')
+        out.append(f'1 0 0 1 500 {y} Tm ({minutes} min) Tj')
+        y -= 18
+    out.append('ET')
+    b = PdfBuilder()
+    b.page(text_lines(['Agenda'], x=72, y=700, font='F2') + text_lines(PROSE[:2], x=72, y=670) + '\n'.join(out) + '\n', {})
+    return b.build()
+
+
+def scanned_table():
+    """The financial table as a page scan: no text layer, the table only as pixels."""
+    from PIL import Image as PILImage, ImageDraw as PILDraw
+    width, height = 1700, 2200
+    image = PILImage.new('L', (width, height), 255)
+    draw = PILDraw.Draw(image)
+    x0, y0, row, widths = 150, 400, 70, (560, 330, 330, 330)
+    for r, cells in enumerate(FINANCIAL):
+        x = x0
+        for c, w in enumerate(widths):
+            draw.rectangle([x, y0 + r * row, x + w, y0 + (r + 1) * row], outline=0, width=3)
+            draw.text((x + 14, y0 + r * row + 22), cells[c], fill=0)
+            x += w
+    b = PdfBuilder()
+    im = add_image(b, image)
+    b.page(place(612, 792, 0, 0), {'Im': im})
+    return b.build()
+
+
 FIXTURES = {
     'routing-scan-beside-caption.pdf': scan_beside_caption,
     'routing-letterhead-logo.pdf': letterhead_logo,
@@ -155,6 +227,10 @@ FIXTURES = {
     'routing-table-4-rows.pdf': lambda: table_page(4),
     'routing-table-6-rows.pdf': lambda: table_page(6),
     'routing-table-large-coverage.pdf': tall_table,
+    'routing-table-clean-financial.pdf': clean_financial_table,
+    'routing-table-two-line-header.pdf': two_line_header_table,
+    'routing-table-bullet-list.pdf': bullet_list_in_columns,
+    'routing-table-scanned.pdf': scanned_table,
 }
 
 if __name__ == '__main__':

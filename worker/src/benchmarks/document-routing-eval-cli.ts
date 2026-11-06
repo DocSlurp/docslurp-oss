@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { repairMarkdownTables } from "@docslurp/shared";
 import { countPdfPages } from "../lib/pdf-page-count.js";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -62,10 +63,11 @@ async function extractedText(evidence: Evidence, inputPath: string, fixtureRoot:
   if (evidence === "doppler-live") {
     const plan = await runner.dopplerMarkdown(inputPath, await countPdfPages(runner, inputPath));
     if (!plan.available) throw new Error(`doppler-live evidence needs pdftomarkdown at ${dopplerConverterPath()}`);
-    return { text: (await runner.run(plan)).stdout, extractor: "doppler-md" };
+    return { text: repairMarkdownTables((await runner.run(plan)).stdout).markdown, extractor: "doppler-md" };
   }
+  // Doppler's tables are repaired as extract-markdown repairs them (repairMarkdownTables) before routing reads them.
   const recorded = await readFile(await recordedDopplerFile(inputPath, fixtureRoot, ".md"));
-  return { text: recorded.toString("utf8"), extractor: "doppler-md" };
+  return { text: repairMarkdownTables(recorded.toString("utf8")).markdown, extractor: "doppler-md" };
 }
 
 /**
