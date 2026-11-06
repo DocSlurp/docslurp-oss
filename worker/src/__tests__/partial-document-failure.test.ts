@@ -325,6 +325,61 @@ describe("sandbox infrastructure failures retry instead of failing the document 
     expect(store.docStages.get("b:index")?.status).not.toBe("failed");
   });
 
+  it("documents sharing a session that could not be created each see the failure, even when they swallow it (recheck R #2)", async () => {
+    const { SandboxInfrastructureError } = await import("../sandbox/types.js");
+    const { SandboxSessionScope, runWithSandboxScope } = await import("../sandbox/session-context.js");
+    const store = new MemoryStore(["b", "c"]);
+    let opens = 0;
+    const scope = new SandboxSessionScope(async () => {
+      opens++;
+      throw new SandboxInfrastructureError("modal sandbox creation failed: parser VM kernel link protections could not be turned on");
+    });
+    const stage: Stage = {
+      name: "index",
+      async run(state) {
+        await Promise.allSettled(state.documents.map((document) =>
+          runDocumentStage(state, document, "index", `${document.id}:index`, "index done", async () => {
+            // A parser fallback: the stage swallows the sandbox error and would otherwise complete on a degraded result.
+            await scope.get().catch(() => undefined);
+            return { artifactUri: "memory://fallback", stats: { extractor: "fallback" } };
+          })));
+        // Both documents' watches saw it: neither completed nor failed.
+        for (const id of ["b", "c"]) {
+          expect(store.docStages.get(`${id}:index`)?.status, id).not.toBe("completed");
+          expect(store.docStages.get(`${id}:index`)?.status, id).not.toBe("failed");
+        }
+        throw new SandboxInfrastructureError("activity retries");
+      },
+    };
+    const error = await runWithSandboxScope(scope, () => runIndex(store, stage)).catch((e: unknown) => e);
+    expect((error as Error).name).toBe("SandboxInfrastructureError");
+    expect(opens).toBe(1); // the rejection is cached, not retried per document
+    expect(store.documentFailures).toEqual([]);
+    expect(failedDocumentEvents(store)).toEqual([]);
+  });
+
+  it("a command on a session closed by a failed cleanup is a retryable infrastructure failure, not the document's", async () => {
+    const { SandboxInfrastructureError } = await import("../sandbox/types.js");
+    const { isDocumentLevelFailure } = await import("../lib/document-failure.js");
+    const { createModalProvider } = await import("../sandbox/providers/modal/index.js");
+    const sdk = {
+      ModalClient: class {
+        apps = { fromName: async () => ({}) };
+        images = { fromRegistry: () => ({}) };
+        secrets = { fromName: async () => ({}) };
+        sandboxes = { create: async () => ({ sandboxId: "sb", terminate: async () => {}, filesystem: { makeDirectory: async () => {} }, exec: async () => ({ stdout: new ReadableStream({ start(c) { c.close(); } }), stderr: new ReadableStream({ start(c) { c.close(); } }), wait: async () => 0 }) }) };
+        close() {}
+      },
+      Sandbox: class { async terminate() {} },
+    } as unknown as typeof import("modal");
+    const provider = createModalProvider(async () => sdk);
+    const session = await provider.openSession({ tokenId: "t", tokenSecret: "s", app: "a", image: "i", cpu: 1, memoryMb: 512, sessionTimeoutSeconds: 60 }, { activityId: "x", unmetered: true });
+    await session.close();
+    const failure = await session.run!({ binary: "/bin/true", args: [], env: {}, readablePaths: [], inputPaths: [], writablePaths: [], limits: { timeoutMs: 1_000 } }).catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(SandboxInfrastructureError);
+    expect(isDocumentLevelFailure(failure)).toBe(false);
+  });
+
   it("every stage with a per-document loop runs it through runDocumentStage, which applies the watch", async () => {
     const { readdirSync, readFileSync } = await import("node:fs");
     const dir = new URL("../stages/", import.meta.url);

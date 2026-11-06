@@ -13,9 +13,10 @@ export class SandboxSessionScope {
   constructor(private readonly open: () => Promise<SandboxSession>) {}
 
   get(): Promise<SandboxSession> {
-    // A session that could not be created is the sandbox's failure: noted for the document that asked (real-Modal F1).
-    this.opening ??= this.open().catch((error: unknown) => { noteSandboxInfrastructureError(error); throw error; });
-    return this.opening;
+    this.opening ??= this.open();
+    // A session that could not be created is the sandbox's failure, noted for every document that asks, not only the
+    // first (real-Modal F1, recheck R #2): the rejection is cached, and each caller's watch must see it.
+    return this.opening.catch((error: unknown) => { noteSandboxInfrastructureError(error); throw error; });
   }
 
   /**

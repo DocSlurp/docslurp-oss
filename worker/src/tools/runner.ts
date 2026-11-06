@@ -1573,7 +1573,9 @@ export class CommandRunner {
             `parser sandbox provider '${session.providerId}' offers run() but is not remote; refusing to run a command it does not contain`,
           );
         }
-        return { remote: session.run(command, signal), timeoutMs: command.limits.timeoutMs, release };
+        const documentId = currentPerfContext()?.documentId;
+        const remote = session.run(documentId ? { ...command, affinityKey: documentId } : command, signal);
+        return { remote, timeoutMs: command.limits.timeoutMs, release };
       }
       throw new Error(`Sandbox session '${session.providerId}' offers neither spawn nor run`);
     } catch (error) {

@@ -55,6 +55,11 @@ export interface SandboxCommand {
    * with `filtersUnixSockets` may run such a command; the runner refuses it on any other.
    */
   denyUnixSockets?: boolean;
+  /**
+   * Which unit of work the command belongs to (the document): a provider that pools VMs prefers the one that already
+   * holds this key's inputs. Never a security boundary; any idle VM of the activity may run it.
+   */
+  affinityKey?: string;
 }
 
 export interface SandboxResult {

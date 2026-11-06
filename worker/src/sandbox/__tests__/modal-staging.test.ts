@@ -7,9 +7,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CommandRunner, resolveVenvBin } from "../../tools/runner.js";
 import { resolveScriptsDir } from "../../tools/scripts-dir.js";
-import { buildModalUsageEvent, createModalProvider, type ModalSdk } from "../providers/modal/index.js";
+import { buildModalUsageEvent, createModalProvider, modalVmsPerActivity, type ModalSdk } from "../providers/modal/index.js";
 import { SessionStaging, type RemoteFs } from "../providers/modal/staging.js";
-import { SandboxConfigError, SandboxRunError } from "../types.js";
+import { SandboxConfigError, SandboxInfrastructureError, SandboxRunError } from "../types.js";
 
 /** In-memory remote filesystem; every write gets a fresh mtime so changes are always visible. */
 class MemoryRemoteFs implements RemoteFs {
@@ -293,8 +293,12 @@ function fakeSdk(
   opts: {
     createFails?: boolean;
     createGate?: Promise<void>;
-    exec?: (command: string[], control: string) => Promise<FakeProcess>;
+    exec?: (command: string[], control: string, vm: number) => Promise<FakeProcess>;
     onKill?: (control: string) => void;
+    /** VM creation (the nth create and later) fails. */
+    createFailsFrom?: number;
+    /** The leftover kill fails only in this VM. */
+    killFailsInVm?: number;
     /** The first client's terminate request never answers (a stuck connection). */
     terminateHangs?: boolean;
     /** The VM's link hardening fails (a sysctl that cannot be written or reads back 0). */
@@ -322,6 +326,8 @@ function fakeSdk(
     commandTimeouts: [] as Array<number | undefined>,
     kills: [] as string[],
     createOptions: [] as unknown[],
+    /** Which VM ran each parser command, in start order. */
+    commandVms: [] as number[],
     remote,
   };
   const info = (entry: { path: string; isDir: boolean; size: number; mtime: number }) => ({
@@ -351,7 +357,7 @@ function fakeSdk(
       },
       listFiles: async (p: string) => (await remote.list(p)).map(info),
     },
-    exec: async (argv: string[], params?: { timeoutMs?: number }) => {
+    exec: async (argv: string[], params?: { timeoutMs?: number }, vm = 1) => {
       if (argv[0] === "/bin/sh" && argv[2]?.includes("protected_hardlinks")) { state.hardened++; return finished("", opts.hardeningFails ? 3 : 0); }
       // Readback and listing run as the parser user (setpriv prefix): record it, then serve them.
       const asUser = argv[0] === "/usr/bin/setpriv" && argv.includes("--reuid=10001") ? argv.slice(argv.indexOf("--") + 1) : null;
@@ -367,7 +373,7 @@ function fakeSdk(
         state.events.push("kill-start");
         await opts.killGate;
         state.events.push("kill-end");
-        return finished("", opts.killFails ? 4 : 0);
+        return finished("", opts.killFails || opts.killFailsInVm === vm ? 4 : 0);
       }
       if (argv[0] === "/bin/chmod") return finished("", 0);
       if (argv[0] === "/bin/cat" || argv[0] === "python3") throw new Error("root must never read or list job output");
@@ -380,7 +386,8 @@ function fakeSdk(
       state.commands.push(command);
       state.events.push(`exec:${command.join(" ")}`);
       state.commandTimeouts.push(params?.timeoutMs);
-      return (opts.exec ?? (async () => finished()))(command, controlOf(argv));
+      state.commandVms.push(vm);
+      return (opts.exec ?? (async () => finished()))(command, controlOf(argv), vm);
     },
   };
   const sdk = {
@@ -395,7 +402,9 @@ function fakeSdk(
           state.createOptions.push(options);
           await opts.createGate;
           if (opts.createFails) throw new Error("no capacity");
-          return sandbox;
+          const vm = state.createOptions.length;
+          if (opts.createFailsFrom !== undefined && vm >= opts.createFailsFrom) throw new Error("no capacity");
+          return { ...sandbox, sandboxId: `sb-${vm}`, exec: (argv: string[], params?: { timeoutMs?: number }) => sandbox.exec(argv, params, vm) };
         },
       };
       close() {
@@ -497,15 +506,149 @@ describe("modal provider session lifecycle", () => {
     await opened.close();
   });
 
-  it("a leftover kill that leaves a parser-user process alive fails the command and closes the session (council O #4)", async () => {
-    const { state, session } = await open({ killFails: true, exec: async () => finished() });
+  it("a leftover kill that leaves a parser-user process alive fails the command and terminates its VM (council O #4)", async () => {
+    const { state, session } = await open({ killFailsInVm: 1, exec: async () => finished() });
     const opened = await session();
-    await expect(opened.run!(command)).rejects.toThrow(/leftover processes could not be killed/);
-    expect(state.terminate).toBeGreaterThanOrEqual(1);
-    await expect(opened.run!(command)).rejects.toThrow();
+    const failure = await opened.run!(command).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(SandboxInfrastructureError);
+    expect(String((failure as Error).message)).toMatch(/leftover processes could not be killed/);
+    expect(state.terminate).toBe(1);
+    // That VM never runs another command: the next one gets a fresh VM, hardened like the first.
+    await expect(opened.run!(command)).resolves.toMatchObject({ exitCode: 0 });
+    expect(state.createOptions).toHaveLength(2);
+    expect(state.commandVms).toEqual([1, 2]);
+    expect(state.hardened).toBe(2);
+    await opened.close();
+  });
+
+  it("a command after close, or queued when the session closes, is a retryable infrastructure failure (recheck R #2)", async () => {
+    const slow = running();
+    const { session } = await open({ exec: async () => slow.process });
+    const opened = await session();
+    const busy = opened.run!(command).catch((error: unknown) => error);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const queued = opened.run!(command).catch((error: unknown) => error);
+    await opened.close();
+    slow.end(0);
+    await busy;
+    expect(await queued).toBeInstanceOf(SandboxInfrastructureError);
+    const after = await opened.run!(command).catch((error: unknown) => error);
+    expect(after).toBeInstanceOf(SandboxInfrastructureError);
+    expect(String((after as Error).message)).toMatch(/session is closed/);
+  });
+
+  it("meters each command from its admission, not from its wait in the queue (recheck R #3)", async () => {
+    const { session } = await open({ exec: async () => { await new Promise((resolve) => setTimeout(resolve, 300)); return finished(); } });
+    const opened = await session();
+    const startedAt = Date.now();
+    const results = await Promise.all([opened.run!(command), opened.run!(command)]);
+    const elapsed = (Date.now() - startedAt) / 1000;
+    const metered = results.map((result) => Number(result.usage?.metadata?.wallSeconds));
+    // One VM, so the two run back to back: together they bill the session's busy time, not 0.3 + 0.6 seconds.
+    expect(metered.every((seconds) => seconds >= 0.29 && seconds < 0.45)).toBe(true);
+    expect(metered[0]! + metered[1]!).toBeLessThanOrEqual(elapsed + 0.01);
+    expect(metered[0]! + metered[1]!).toBeGreaterThanOrEqual(0.58);
+    await opened.close();
   });
 
 
+
+  describe("a pool of parser VMs per activity (recheck R #5)", () => {
+    async function pooled(vmsPerActivity: number, opts: Parameters<typeof fakeSdk>[0] = {}) {
+      const { sdk, state } = fakeSdk(opts);
+      const provider = createModalProvider(async () => sdk);
+      return { state, opened: await provider.openSession({ ...config, vmsPerActivity }, { activityId: "a" }) };
+    }
+
+    it("runs concurrent documents in parallel on separate VMs, each VM one command at a time with its own leftover kill", async () => {
+      const runs = new Map<number, ReturnType<typeof running>>();
+      let active = 0;
+      let peak = 0;
+      const { state, opened } = await pooled(2, {
+        exec: async () => {
+          active++; peak = Math.max(peak, active);
+          const proc = running();
+          runs.set(state.commands.length, proc);
+          void proc.process.wait().then(() => active--);
+          return proc.process;
+        },
+      });
+      const first = opened.run!({ ...command, affinityKey: "doc-a" });
+      const second = opened.run!({ ...command, affinityKey: "doc-b" });
+      await vi.waitFor(() => expect(state.commands).toHaveLength(2));
+      expect(peak).toBe(2); // both documents' commands run at once
+      expect(new Set(state.commandVms)).toEqual(new Set([1, 2]));
+      // A third command waits for a VM: the pool never exceeds its cap.
+      const third = opened.run!({ ...command, affinityKey: "doc-a" });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(state.commands).toHaveLength(2);
+      expect(state.createOptions).toHaveLength(2);
+      runs.get(1)!.end(0);
+      runs.get(2)!.end(0);
+      await Promise.all([first, second]);
+      await vi.waitFor(() => expect(state.commands).toHaveLength(3));
+      runs.get(3)!.end(0);
+      await third;
+      // doc-a's later command went back to the VM that ran doc-a, which already holds its inputs.
+      expect(state.commandVms[2]).toBe(state.commandVms[0]);
+      // Every command was followed by its VM's root leftover kill.
+      expect(state.leftoverKills).toBe(3);
+      expect(state.hardened).toBe(2);
+      await opened.close();
+      expect(state.terminate).toBe(2);
+    });
+
+    it("opens a second VM only when the first is busy", async () => {
+      const { state, opened } = await pooled(4, { exec: async () => finished() });
+      for (const key of ["a", "b", "c"]) await opened.run!({ ...command, affinityKey: key });
+      expect(state.createOptions).toHaveLength(1);
+      await opened.close();
+    });
+
+    it("a VM that cannot be created for a concurrent command is a retryable infrastructure failure, and the pool recovers", async () => {
+      const slow = running();
+      let calls = 0;
+      const { state, opened } = await pooled(2, { createFailsFrom: 2, exec: async () => (++calls === 1 ? slow.process : finished()) });
+      const busy = opened.run!({ ...command, affinityKey: "a" });
+      await vi.waitFor(() => expect(state.commands).toHaveLength(1));
+      const failure = await opened.run!({ ...command, affinityKey: "b" }).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(SandboxInfrastructureError);
+      expect(String((failure as Error).message)).toMatch(/modal sandbox command failed: no capacity/);
+      slow.end(0);
+      await busy;
+      // The failed lane is gone; the next command runs on the healthy VM.
+      await expect(opened.run!({ ...command, affinityKey: "b" })).resolves.toMatchObject({ exitCode: 0 });
+      expect(state.commandVms).toEqual([1, 1]);
+      await opened.close();
+    });
+
+    it("a command waiting for a VM can be aborted, and close fails waiting commands as infrastructure", async () => {
+      const slow = running();
+      const { opened } = await pooled(1, { exec: async () => slow.process });
+      const busy = opened.run!(command).catch((error: unknown) => error);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const controller = new AbortController();
+      const aborted = opened.run!(command, controller.signal).catch((error: unknown) => error);
+      controller.abort();
+      const abortedError = await aborted;
+      expect(abortedError).toBeInstanceOf(SandboxRunError);
+      expect(abortedError).not.toBeInstanceOf(SandboxInfrastructureError);
+      const waiting = opened.run!(command).catch((error: unknown) => error);
+      await opened.close();
+      slow.end(0);
+      await busy;
+      expect(await waiting).toBeInstanceOf(SandboxInfrastructureError);
+    });
+
+    it("sizes the pool from the document and candidate concurrency settings", () => {
+      expect(modalVmsPerActivity({ WORKER_DOC_CONCURRENCY: "4" })).toBe(8);
+      expect(modalVmsPerActivity({ WORKER_DOC_CONCURRENCY: "4", WORKER_SERIALIZE_PDF_CANDIDATES: "1" })).toBe(4);
+      expect(modalVmsPerActivity({ WORKER_DOC_CONCURRENCY: "1", WORKER_SERIALIZE_PDF_CANDIDATES: "true" })).toBe(1);
+      expect(modalVmsPerActivity({ WORKER_DOC_CONCURRENCY: "4", DOCSLURP_MODAL_VMS_PER_ACTIVITY: "3" })).toBe(3);
+      expect(modalVmsPerActivity({ WORKER_DOC_CONCURRENCY: "64" })).toBe(16);
+      expect(modalVmsPerActivity({ DOCSLURP_MODAL_VMS_PER_ACTIVITY: "0", WORKER_DOC_CONCURRENCY: "2" })).toBe(4);
+    });
+  });
 
   it("a job VM whose link hardening fails runs nothing and is terminated (Modal check)", async () => {
     const commands: string[][] = [];

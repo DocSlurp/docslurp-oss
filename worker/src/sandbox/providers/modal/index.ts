@@ -21,6 +21,7 @@ import {
 import { asParserUser, CONTROL_DIR, HARDEN_LINKS_ARGV, KILL_PARSER_USER_ARGV, killArgv, launchArgv } from "./control.js";
 import { SessionStaging, type RemoteEntry, type RemoteFs, type RemoteSnapshot } from "./staging.js";
 import { vmOnlyParsing } from "../../../lib/vm-only-parsing.js";
+import { defaultDocConcurrency } from "../../../concurrency.js";
 
 export type ModalSdk = typeof import("modal");
 
@@ -37,6 +38,8 @@ export interface ModalConfig {
   cpu: number;
   memoryMb: number;
   sessionTimeoutSeconds: number;
+  /** Parser VMs one activity may run at once (modalVmsPerActivity); each runs one command at a time. */
+  vmsPerActivity?: number;
 }
 
 /**
@@ -57,6 +60,21 @@ const JOB_ROOT_WRITABLE_SCRIPT = 'mkdir -p -- "$1" && d=$(mktemp -d "$1/.docslur
 export function parserJobRoots(env: NodeJS.ProcessEnv = process.env): string[] {
   const roots = [os.tmpdir(), env.DOCSLURP_PARSER_SANDBOX_ROOT?.trim() || "/tmp/docslurp-parser-sandbox"];
   return [...new Set(roots.map((root) => path.resolve(root)))];
+}
+
+/**
+ * Parser VMs one activity may run at once (recheck R #5): one per concurrent unit of parser work, so the documents an
+ * activity processes at once (WORKER_DOC_CONCURRENCY) and, unless WORKER_SERIALIZE_PDF_CANDIDATES is on, their two PDF
+ * candidates each get a VM. DOCSLURP_MODAL_VMS_PER_ACTIVITY overrides it (1 to 16). VMs open only when every open one is
+ * busy, so a one-document activity still starts one.
+ */
+export function modalVmsPerActivity(env: NodeJS.ProcessEnv = process.env): number {
+  const explicit = Number.parseInt(env.DOCSLURP_MODAL_VMS_PER_ACTIVITY ?? "", 10);
+  if (Number.isSafeInteger(explicit) && explicit >= 1) return Math.min(explicit, 16);
+  const configured = Number.parseInt(env.WORKER_DOC_CONCURRENCY ?? "", 10);
+  const documents = Number.isSafeInteger(configured) && configured >= 1 ? configured : defaultDocConcurrency();
+  const serialized = ["1", "true", "yes", "on"].includes((env.WORKER_SERIALIZE_PDF_CANDIDATES ?? "").trim().toLowerCase());
+  return Math.min(16, documents * (serialized ? 1 : 2));
 }
 
 /** Lifetime of the startup probe's VM: a backstop if its terminate request is lost. */
@@ -370,7 +388,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         throw new SandboxConfigError("production parser VM images must be pinned by sha256 digest");
       }
       if (config.imageId && !/^im-[A-Za-z0-9]+$/.test(config.imageId)) throw new SandboxConfigError("invalid DOCSLURP_MODAL_IMAGE_ID");
-      return { ...config, image };
+      return { ...config, image, vmsPerActivity: modalVmsPerActivity(env) };
     },
     async probe(config) {
       let session: SandboxSession | undefined;
@@ -405,72 +423,15 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
     },
     async openSession(config, context) {
       const { sdk, client } = await loadClient(config);
-      let sandbox: Awaited<ReturnType<typeof client.sandboxes.create>> | undefined;
-      let staging: SessionStaging | undefined;
-      let creating: Promise<void> | undefined;
+      const maxLanes = Math.max(1, Math.floor(config.vmsPerActivity ?? 1));
       let closed = false;
       let clientClosed = false;
 
-      let terminating: Promise<void> | undefined;
-      function terminate(): Promise<void> {
-        closed = true;
-        terminating ??= doTerminate();
-        return terminating;
-      }
-      async function doTerminate(): Promise<void> {
-        let failure: unknown;
-        try {
-          // Ask Modal to stop the VM; waiting for its exit is not needed (and an image process that ignores signals could
-          // hold a wait for tens of seconds).
-          if (sandbox) await withDeadline(sandbox.terminate(), TERMINATE_REQUEST_MS);
-        } catch (error) {
-          failure = error;
-        } finally {
-          clientClosed = true;
-          client.close();
-        }
-        if (failure !== undefined && sandbox) {
-          // Retry once on a fresh client so a stuck connection cannot leave the VM running.
-          if (await terminateLate(sandbox)) return;
-          throw new Error(`modal sandbox terminate failed: ${safeMessage(config, failure)}`);
-        }
-      }
-      async function terminateLate(created: import("modal").Sandbox): Promise<boolean> {
-        const cleanupClient = clientClosed ? new sdk.ModalClient({ tokenId: config.tokenId, tokenSecret: config.tokenSecret }) : client;
+      async function terminateLate(created: import("modal").Sandbox, freshClient = clientClosed): Promise<boolean> {
+        const cleanupClient = freshClient ? new sdk.ModalClient({ tokenId: config.tokenId, tokenSecret: config.tokenSecret }) : client;
         try { await withDeadline(new sdk.Sandbox(cleanupClient, created.sandboxId).terminate(), TERMINATE_REQUEST_MS); return true; }
         catch { console.warn("[parser-sandbox] late VM cleanup failed; provider lifetime limit remains enforced"); return false; }
         finally { if (cleanupClient !== client) cleanupClient.close(); }
-      }
-
-      function ensureSandbox(): Promise<void> {
-        creating ??= (async () => {
-          const app = await withDeadline(client.apps.fromName(config.app, { createIfMissing: true }), 30_000);
-          const registrySecret = config.registrySecret && !config.imageId ? await withDeadline(client.secrets.fromName(config.registrySecret), 30_000) : undefined;
-          const image = config.imageId ? await withDeadline(client.images.fromId(config.imageId), 30_000) : client.images.fromRegistry(config.image, registrySecret);
-          const opened = await withDeadline(client.sandboxes.create(app, image, {
-            runtime: "vm",
-            command: [...PARSER_VM_IDLE_COMMAND],
-            includeOidcIdentityToken: false,
-            env: {}, secrets: [], volumes: {}, cloudBucketMounts: {},
-            cpu: config.cpu, cpuLimit: config.cpu,
-            memoryMiB: config.memoryMb, memoryLimitMiB: config.memoryMb,
-            timeoutMs: config.sessionTimeoutSeconds * 1000,
-            blockNetwork: true,
-          }).then(async (created) => {
-            if (closed) { await terminateLate(created); throw new Error("parser VM session closed during creation"); }
-            return created;
-          }), 30_000);
-          if (!opened) throw new Error("parser VM creation returned no sandbox");
-          sandbox = opened;
-          // As root, once: kernel link protections on and read back as 1, or this VM runs nothing (council K #5, Modal check).
-          const hardened = await withDeadline(opened.exec(HARDEN_LINKS_ARGV, { timeoutMs: 10_000 }).then((proc) => proc.wait()), 15_000);
-          if (hardened !== 0) throw new Error("parser VM kernel link protections could not be turned on");
-          await withDeadline(opened.filesystem.makeDirectory(CONTROL_DIR), 30_000);
-          // Root-owned and not writable by the parser user; uploads staged here are copied into place as uid 10001.
-          await withDeadline(runChecked(opened, ["/bin/chmod", "0711", "--", CONTROL_DIR], "parser VM control directory setup failed"), 30_000);
-          staging = new SessionStaging(buildRemoteFs(sdk, opened));
-        })();
-        return creating;
       }
 
       /** Log the command's Modal time and return it as a provider-cost usage event (none for an unmetered session). */
@@ -484,224 +445,336 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
       }
 
       /**
-       * Kill a command's remote process group, then wait (bounded) for its exec to end. Best
-       * effort: a sandbox that is already gone has nothing left to kill.
-       *
-       * The caller settles (and releases its local slot) after this, even if a remote descendant
-       * that started its own session survived the group kill. That is safe for the worker host:
-       * the survivor runs only inside this activity's Modal sandbox, cannot reach local scratch,
-       * and ends when the session closes or sessionTimeoutSeconds expires. What it can still do is
-       * burn remote CPU and write into this session's remote working directories.
+       * One parser VM of this activity's pool (recheck R #5). A lane runs one command at a time (council O #4): staging,
+       * the run, the root leftover kill and the download never overlap another command in the same VM, so the user-wide
+       * kill can never hit a command that is starting or running. Concurrent work gets its own lane, up to maxLanes.
        */
-      async function kill(control: string, settled: Promise<unknown>): Promise<void> {
-        try {
-          const killer = await sandbox!.exec(killArgv(control), { timeoutMs: KILL_SETTLE_MS });
-          await killer.wait();
-        } catch (error) {
-          console.warn(`[parser-sandbox] provider=modal kill failed: ${safeMessage(config, error)}`);
-        }
-        let timer: NodeJS.Timeout | undefined;
-        await Promise.race([
-          settled.catch(() => {}),
-          new Promise((resolve) => (timer = setTimeout(resolve, KILL_SETTLE_MS))),
-        ]);
-        clearTimeout(timer);
+      interface Lane {
+        id: number;
+        /** Leased to a command (acquireLane); a lane is never shared by two commands at once. */
+        busy: boolean;
+        /** Terminated (a failed leftover kill or deadline, or close): never leased again. */
+        dead: boolean;
+        /** The affinity key of its last command: a document's later commands prefer the VM that holds its inputs. */
+        lastKey: string | undefined;
+        ensureSandbox(): Promise<void>;
+        execute(command: SandboxCommand, started: number, signal?: AbortSignal): Promise<SandboxResult>;
+        terminate(): Promise<void>;
       }
 
-      async function runRemote(command: SandboxCommand, control: string, signal?: AbortSignal): Promise<RemoteOutcome> {
-        const env: Record<string, string> = {};
-        for (const [key, value] of Object.entries(command.env)) if (value !== undefined) env[key] = value;
-        const argv = launchArgv(control, command.binary, command.args, command.writablePaths);
-        let settled: Promise<{ stdout: string; stderr: string; exitCode: number | null }> = Promise.reject(
-          new Error("exec did not start"),
-        );
-        settled.catch(() => {});
-        const aborted = whenAborted(signal);
-        try {
-          const process = await sandbox!.exec(argv, { env, timeoutMs: execTimeoutMs(command.limits.timeoutMs), mode: "text" });
-          settled = Promise.all([boundedVmStream(process.stdout, 8 * 1024 * 1024).then((bytes) => bytes.toString("utf8")), boundedVmStream(process.stderr, 1024 * 1024).then((bytes) => bytes.toString("utf8")), process.wait()]).then(
-            ([stdout, stderr, exitCode]) => ({ stdout, stderr, exitCode }),
+      let laneCount = 0;
+      function createLane(): Lane {
+        let sandbox: Awaited<ReturnType<typeof client.sandboxes.create>> | undefined;
+        let staging: SessionStaging | undefined;
+        let creating: Promise<void> | undefined;
+        let terminating: Promise<void> | undefined;
+        const lane: Lane = { id: ++laneCount, busy: false, dead: false, lastKey: undefined, ensureSandbox, execute, terminate };
+
+        function terminate(): Promise<void> {
+          lane.dead = true;
+          terminating ??= (async () => {
+            let failure: unknown;
+            try {
+              // Ask Modal to stop the VM; waiting for its exit is not needed (and an image process that ignores signals could
+              // hold a wait for tens of seconds).
+              if (sandbox) await withDeadline(sandbox.terminate(), TERMINATE_REQUEST_MS);
+            } catch (error) {
+              failure = error;
+            }
+            if (failure !== undefined && sandbox) {
+              // Retry once on a fresh client so a stuck connection cannot leave the VM running.
+              if (await terminateLate(sandbox, true)) return;
+              throw new Error(`modal sandbox terminate failed: ${safeMessage(config, failure)}`);
+            }
+          })();
+          return terminating;
+        }
+
+        function ensureSandbox(): Promise<void> {
+          creating ??= (async () => {
+            const app = await withDeadline(client.apps.fromName(config.app, { createIfMissing: true }), 30_000);
+            const registrySecret = config.registrySecret && !config.imageId ? await withDeadline(client.secrets.fromName(config.registrySecret), 30_000) : undefined;
+            const image = config.imageId ? await withDeadline(client.images.fromId(config.imageId), 30_000) : client.images.fromRegistry(config.image, registrySecret);
+            const opened = await withDeadline(client.sandboxes.create(app, image, {
+              runtime: "vm",
+              command: [...PARSER_VM_IDLE_COMMAND],
+              includeOidcIdentityToken: false,
+              env: {}, secrets: [], volumes: {}, cloudBucketMounts: {},
+              cpu: config.cpu, cpuLimit: config.cpu,
+              memoryMiB: config.memoryMb, memoryLimitMiB: config.memoryMb,
+              timeoutMs: config.sessionTimeoutSeconds * 1000,
+              blockNetwork: true,
+            }).then(async (created) => {
+              if (closed || lane.dead) { await terminateLate(created); throw new Error("parser VM session closed during creation"); }
+              return created;
+            }), 30_000);
+            if (!opened) throw new Error("parser VM creation returned no sandbox");
+            sandbox = opened;
+            // As root, once: kernel link protections on and read back as 1, or this VM runs nothing (council K #5, Modal check).
+            const hardened = await withDeadline(opened.exec(HARDEN_LINKS_ARGV, { timeoutMs: 10_000 }).then((proc) => proc.wait()), 15_000);
+            if (hardened !== 0) throw new Error("parser VM kernel link protections could not be turned on");
+            await withDeadline(opened.filesystem.makeDirectory(CONTROL_DIR), 30_000);
+            // Root-owned and not writable by the parser user; uploads staged here are copied into place as uid 10001.
+            await withDeadline(runChecked(opened, ["/bin/chmod", "0711", "--", CONTROL_DIR], "parser VM control directory setup failed"), 30_000);
+            staging = new SessionStaging(buildRemoteFs(sdk, opened));
+          })();
+          // A VM that could not be created or hardened is never used: terminate it and let the pool replace the lane.
+          creating.catch(() => { terminate().catch(() => {}); });
+          return creating;
+        }
+
+        /**
+         * Kill a command's remote process group, then wait (bounded) for its exec to end. Best
+         * effort: a sandbox that is already gone has nothing left to kill.
+         *
+         * The caller settles (and releases its local slot) after this, even if a remote descendant
+         * that started its own session survived the group kill. That is safe for the worker host:
+         * the survivor runs only inside this lane's Modal VM, cannot reach local scratch, and is
+         * killed by the root leftover kill before the lane takes another command.
+         */
+        async function kill(control: string, settled: Promise<unknown>): Promise<void> {
+          try {
+            const killer = await sandbox!.exec(killArgv(control), { timeoutMs: KILL_SETTLE_MS });
+            await killer.wait();
+          } catch (error) {
+            console.warn(`[parser-sandbox] provider=modal kill failed: ${safeMessage(config, error)}`);
+          }
+          let timer: NodeJS.Timeout | undefined;
+          await Promise.race([
+            settled.catch(() => {}),
+            new Promise((resolve) => (timer = setTimeout(resolve, KILL_SETTLE_MS))),
+          ]);
+          clearTimeout(timer);
+        }
+
+        async function runRemote(command: SandboxCommand, control: string, signal?: AbortSignal): Promise<RemoteOutcome> {
+          const env: Record<string, string> = {};
+          for (const [key, value] of Object.entries(command.env)) if (value !== undefined) env[key] = value;
+          const argv = launchArgv(control, command.binary, command.args, command.writablePaths);
+          let settled: Promise<{ stdout: string; stderr: string; exitCode: number | null }> = Promise.reject(
+            new Error("exec did not start"),
           );
           settled.catch(() => {});
-          const first = await Promise.race([settled, aborted.promise]);
-          if (first !== "aborted") return { kind: "exited", output: first };
-        } catch (error) {
-          // Modal enforces the exec timeout provider-side, but may stop only the top process.
-          // Every other failure is a provider error and propagates.
+          const aborted = whenAborted(signal);
+          try {
+            const process = await sandbox!.exec(argv, { env, timeoutMs: execTimeoutMs(command.limits.timeoutMs), mode: "text" });
+            settled = Promise.all([boundedVmStream(process.stdout, 8 * 1024 * 1024).then((bytes) => bytes.toString("utf8")), boundedVmStream(process.stderr, 1024 * 1024).then((bytes) => bytes.toString("utf8")), process.wait()]).then(
+              ([stdout, stderr, exitCode]) => ({ stdout, stderr, exitCode }),
+            );
+            settled.catch(() => {});
+            const first = await Promise.race([settled, aborted.promise]);
+            if (first !== "aborted") return { kind: "exited", output: first };
+          } catch (error) {
+            // Modal enforces the exec timeout provider-side, but may stop only the top process.
+            // Every other failure is a provider error and propagates.
+            await kill(control, settled);
+            // An abort that lands while the exec is starting can surface as an exec error.
+            if (signal?.aborted) return { kind: "aborted" };
+            if (isExecTimeout(sdk, error)) return { kind: "timeout" };
+            throw error;
+          } finally {
+            aborted.dispose();
+          }
           await kill(control, settled);
-          // An abort that lands while the exec is starting can surface as an exec error.
-          if (signal?.aborted) return { kind: "aborted" };
-          if (isExecTimeout(sdk, error)) return { kind: "timeout" };
-          throw error;
-        } finally {
-          aborted.dispose();
+          return { kind: "aborted" };
         }
-        await kill(control, settled);
-        return { kind: "aborted" };
-      }
 
-      /**
-       * Changes left by aborted and timed-out commands, removed once no command is in flight:
-       * a command still running may be writing into the same directories, and its files
-       * cannot be told apart from the abandoned command's until it has finished and claimed them.
-       */
-      const pendingDiscards: RemoteSnapshot[] = [];
-      let inFlight = 0;
-      let discarding: Promise<void> | undefined;
+        /** Changes left by aborted and timed-out commands, removed before the lane takes another command. */
+        const pendingDiscards: RemoteSnapshot[] = [];
 
-      async function runDiscards(): Promise<void> {
-        try {
-          // A closed session's sandbox is gone, and its changes with it.
-          while (pendingDiscards.length > 0 && !closed) {
+        async function runDiscards(): Promise<void> {
+          // A terminated VM's changes are gone with it.
+          while (pendingDiscards.length > 0 && !lane.dead) {
             try {
               await staging!.discard(pendingDiscards.shift()!);
             } catch (error) {
               console.warn(`[parser-sandbox] provider=modal discard failed: ${safeMessage(config, error)}`);
             }
           }
-        } finally {
-          discarding = undefined;
         }
-      }
 
-      /**
-       * Kill every process the parser user still runs (council M #3): a daemon a command left behind could otherwise act
-       * between commands. Only when no other command is in flight, since they share the user. Best effort: an empty VM
-       * has nothing to kill.
-       */
-      async function killParserUserProcesses(): Promise<void> {
-        // As root, so it needs no fork as the parser user (RLIMIT_NPROC cannot stop it), and verified: a parser-user process
-        // left alive fails the session closed (council O #4).
-        let code: number | null = null;
-        try {
-          const proc = await sandbox!.exec(KILL_PARSER_USER_ARGV, { timeoutMs: KILL_SETTLE_MS * 3 });
-          code = await proc.wait();
-        } catch (error) {
-          console.error(`[parser-sandbox] provider=modal leftover kill failed: ${safeMessage(config, error)}`);
-        }
-        if (code !== 0) {
-          await terminate().catch(() => {});
-          throw new SandboxInfrastructureError("parser VM leftover processes could not be killed; session closed");
-        }
-      }
-
-      /**
-       * The leftover kill as a barrier (council P #3): claimed in the same synchronous step that sees no other command in
-       * flight, and admission waits for it, so no command stages or starts while the parser user's processes are killed.
-       */
-      let cleaning: Promise<void> | undefined;
-      function cleanLeftovers(): Promise<void> {
-        cleaning ??= killParserUserProcesses().finally(() => { cleaning = undefined; });
-        return cleaning;
-      }
-
-      /**
-       * One command at a time per session (council O #4): staging, the run, the leftover kill and the download never
-       * overlap another command's, so a user-wide kill can never hit a command that is starting or running.
-       */
-      let sessionQueue: Promise<unknown> = Promise.resolve();
-      function execute(command: SandboxCommand, started: number, signal?: AbortSignal): Promise<SandboxResult> {
-        const turn = sessionQueue.then(() => executeExclusive(command, started, signal));
-        sessionQueue = turn.catch(() => {});
-        return turn;
-      }
-
-      /** Whether the running command already killed the parser user's leftovers (before its download). */
-      let cleanedAfterRun = false;
-
-      async function executeExclusive(command: SandboxCommand, started: number, signal?: AbortSignal): Promise<SandboxResult> {
-        // A command queued behind one that closed the session never starts.
-        if (closed) throw new SandboxInfrastructureError("modal sandbox session is closed");
-        while (discarding || cleaning) await (discarding ?? cleaning);
-        cleanedAfterRun = false;
-        inFlight++;
-        try {
-          try { return await withDeadline(executeCommand(command, started, signal), command.limits.timeoutMs + 60_000); }
-          catch (error) {
-            if (error instanceof Error && error.message === "parser VM control deadline exceeded") {
-              await terminate().catch(() => {});
-              throw new SandboxInfrastructureError(error.message, meter(started), { cause: error });
-            }
-            throw error;
-          }
-        } finally {
-          inFlight--;
-          if (inFlight === 0 && sandbox && !closed && !cleanedAfterRun) await cleanLeftovers();
-          if (inFlight === 0 && pendingDiscards.length > 0 && !closed) {
-            discarding ??= runDiscards();
-            await discarding;
-          }
-        }
-      }
-
-      let commandCount = 0;
-
-      async function executeCommand(command: SandboxCommand, started: number, signal?: AbortSignal): Promise<SandboxResult> {
-        const control = `${CONTROL_DIR}/${++commandCount}`;
-        try {
-          await ensureSandbox();
-          throwIfAborted(signal);
-          // Only the command's inputs travel; the parser runtime comes from the image.
-          await staging!.ensureUploaded(command.inputPaths);
-          throwIfAborted(signal);
-          await staging!.ensureDirectories(command.writablePaths);
-          throwIfAborted(signal);
-          const snapshot = await staging!.snapshot(command.writablePaths);
-          throwIfAborted(signal);
-          let outcome: RemoteOutcome;
+        /**
+         * Kill every process the parser user still runs (council M #3): a daemon a command left behind could otherwise act
+         * on the next command. As root, so it needs no fork as the parser user (RLIMIT_NPROC cannot stop it), and verified:
+         * a parser-user process left alive terminates this VM (council O #4).
+         */
+        async function killParserUserProcesses(): Promise<void> {
+          let code: number | null = null;
           try {
-            outcome = await runRemote(command, control, signal);
+            const proc = await sandbox!.exec(KILL_PARSER_USER_ARGV, { timeoutMs: KILL_SETTLE_MS * 3 });
+            code = await proc.wait();
           } catch (error) {
+            console.error(`[parser-sandbox] provider=modal leftover kill failed: ${safeMessage(config, error)}`);
+          }
+          if (code !== 0) {
+            await terminate().catch(() => {});
+            throw new SandboxInfrastructureError("parser VM leftover processes could not be killed; VM terminated");
+          }
+        }
+
+        let commandCount = 0;
+
+        async function execute(command: SandboxCommand, started: number, signal?: AbortSignal): Promise<SandboxResult> {
+          let cleaned = false;
+          try {
+            try {
+              return await withDeadline(executeCommand(command, started, signal, () => { cleaned = true; }), command.limits.timeoutMs + 60_000);
+            } catch (error) {
+              if (error instanceof Error && error.message === "parser VM control deadline exceeded") {
+                await terminate().catch(() => {});
+                throw new SandboxInfrastructureError(error.message, meter(started), { cause: error });
+              }
+              throw error;
+            }
+          } finally {
+            // Before the lane is leased again: leftovers die (unless the command already killed them before its download),
+            // then an abandoned command's partial outputs are removed.
+            if (sandbox && !lane.dead && !closed && !cleaned) await killParserUserProcesses();
+            if (pendingDiscards.length > 0 && !lane.dead && !closed) await runDiscards();
+          }
+        }
+
+        async function executeCommand(command: SandboxCommand, started: number, signal: AbortSignal | undefined, markCleaned: () => void): Promise<SandboxResult> {
+          const control = `${CONTROL_DIR}/${++commandCount}`;
+          try {
+            await ensureSandbox();
+            throwIfAborted(signal);
+            // Only the command's inputs travel; the parser runtime comes from the image.
+            await staging!.ensureUploaded(command.inputPaths);
+            throwIfAborted(signal);
+            await staging!.ensureDirectories(command.writablePaths);
+            throwIfAborted(signal);
+            const snapshot = await staging!.snapshot(command.writablePaths);
+            throwIfAborted(signal);
+            let outcome: RemoteOutcome;
+            try {
+              outcome = await runRemote(command, control, signal);
+            } catch (error) {
+              pendingDiscards.push(snapshot);
+              throw error;
+            }
+            if (outcome.kind === "exited" && !signal?.aborted) {
+              // Leftover processes die before anything is read back (council M #3).
+              await killParserUserProcesses();
+              markCleaned();
+              // Only what this command created or changed comes back.
+              if (closed || lane.dead) throw new Error("parser VM session closed before download");
+              await staging!.download(snapshot);
+              const usage = meter(started);
+              return { ...outcome.output, cpuSeconds: config.cpu * ((Date.now() - started) / 1000), usage };
+            }
+            // Aborted or timed out: its outputs may be partial. Never download them, and remove
+            // them remotely so no later command's download copies them back.
             pendingDiscards.push(snapshot);
-            throw error;
-          }
-          if (outcome.kind === "exited" && !signal?.aborted) {
-            // Leftover processes die before anything is read back or staged (council M #3), when this is the only command.
-            if (inFlight === 1) { await cleanLeftovers(); cleanedAfterRun = true; }
-            // Only what this command created or changed comes back.
-            if (closed) throw new Error("parser VM session closed before download");
-            await staging!.download(snapshot);
+            if (outcome.kind !== "timeout") throw new CommandAborted();
             const usage = meter(started);
-            return { ...outcome.output, cpuSeconds: config.cpu * ((Date.now() - started) / 1000), usage };
+            return {
+              stdout: "",
+              stderr: "command exceeded its time limit",
+              exitCode: null,
+              cpuSeconds: config.cpu * ((Date.now() - started) / 1000),
+              usage,
+            };
+          } catch (error) {
+            // Elapsed Modal time is billed even when staging or exec failed.
+            if (error instanceof CommandAborted) throw new SandboxRunError("modal sandbox command aborted", meter(started));
+            // Anything else that throws here is the sandbox's (a document's own failure is a non-zero exit, not a throw).
+            throw new SandboxInfrastructureError(`modal sandbox command failed: ${safeMessage(config, error)}`, meter(started), { cause: error });
           }
-          // Aborted or timed out: its outputs may be partial. Never download them, and remove
-          // them remotely so no later command's download copies them back.
-          pendingDiscards.push(snapshot);
-          if (outcome.kind !== "timeout") throw new CommandAborted();
-          const usage = meter(started);
-          return {
-            stdout: "",
-            stderr: "command exceeded its time limit",
-            exitCode: null,
-            cpuSeconds: config.cpu * ((Date.now() - started) / 1000),
-            usage,
-          };
-        } catch (error) {
-          // Elapsed Modal time is billed even when staging or exec failed.
-          if (error instanceof CommandAborted) throw new SandboxRunError("modal sandbox command aborted", meter(started));
-          // Anything else that throws here is the sandbox's (a document's own failure is a non-zero exit, not a throw).
-          throw new SandboxInfrastructureError(`modal sandbox command failed: ${safeMessage(config, error)}`, meter(started), { cause: error });
+        }
+
+        return lane;
+      }
+
+      /** The pool: lanes in creation order, and commands waiting for one (FIFO). */
+      const lanes: Lane[] = [];
+      const waiting: Array<() => void> = [];
+
+      function addLane(): Lane {
+        const lane = createLane();
+        lanes.push(lane);
+        return lane;
+      }
+
+      function pickLane(key: string | undefined): Lane | undefined {
+        const idle = lanes.filter((lane) => !lane.busy && !lane.dead);
+        const lane = (key ? idle.find((candidate) => candidate.lastKey === key) : undefined) ?? idle[0]
+          ?? (lanes.filter((candidate) => !candidate.dead).length < maxLanes ? addLane() : undefined);
+        if (lane) { lane.busy = true; lane.lastKey = key; }
+        return lane;
+      }
+
+      /** Lease a lane for one command: an idle one (its key's first), a new one under the cap, or wait for a release. */
+      async function acquireLane(key: string | undefined, signal?: AbortSignal): Promise<Lane> {
+        for (;;) {
+          if (closed) throw new SandboxInfrastructureError("modal sandbox session is closed");
+          if (signal?.aborted) throw new SandboxRunError("modal sandbox command aborted");
+          if (waiting.length === 0) {
+            const lane = pickLane(key);
+            if (lane) return lane;
+          }
+          await new Promise<void>((resolve) => {
+            const wake = () => { signal?.removeEventListener("abort", onAbort); resolve(); };
+            const onAbort = () => { const index = waiting.indexOf(wake); if (index >= 0) waiting.splice(index, 1); resolve(); };
+            signal?.addEventListener("abort", onAbort, { once: true });
+            waiting.push(wake);
+          });
+          if (!closed && !signal?.aborted) {
+            const lane = pickLane(key);
+            if (lane) { wakeNext(); return lane; }
+            // Woken but nothing free (a release raced another lease): wait again.
+          }
         }
       }
 
-      await ensureSandbox().catch(async (error: unknown) => {
-        await terminate().catch(() => {});
+      function wakeNext(): void {
+        const live = lanes.filter((lane) => !lane.dead);
+        if (waiting.length > 0 && (live.some((lane) => !lane.busy) || live.length < maxLanes)) waiting.shift()!();
+      }
+
+      function releaseLane(lane: Lane): void {
+        lane.busy = false;
+        if (lane.dead) lanes.splice(lanes.indexOf(lane), 1);
+        wakeNext();
+      }
+
+      // The first VM opens with the session, so a session that cannot create or harden a VM fails here (real-Modal F1).
+      const first = addLane();
+      await first.ensureSandbox().catch(async (error: unknown) => {
+        closed = true;
+        await first.terminate().catch(() => {});
+        clientClosed = true;
+        client.close();
         throw new SandboxInfrastructureError(`modal sandbox creation failed: ${safeMessage(config, error)}`, undefined, { cause: error });
       });
 
+      let closing: Promise<void> | undefined;
       const session: SandboxSession = {
         providerId: "modal",
         isolation: ISOLATION,
         async run(command, signal) {
-          if (closed) throw new Error("modal sandbox session is closed");
+          // A closed session is the sandbox's failure, never the document's (recheck R #2).
+          if (closed) throw new SandboxInfrastructureError("modal sandbox session is closed");
           if (signal?.aborted) throw new SandboxRunError("modal sandbox command aborted");
-          // An abort ends this command only: other commands in the activity share the sandbox,
-          // which only close() terminates. The command's process group is killed and its
-          // partial outputs removed before the abort is reported.
-          return execute(command, Date.now(), signal);
+          const lane = await acquireLane(command.affinityKey, signal);
+          try {
+            // Metered from admission (recheck R #3): time spent waiting for a lane is not Modal time for this command.
+            return await lane.execute(command, Date.now(), signal);
+          } finally {
+            releaseLane(lane);
+          }
         },
-        async close() {
-          await terminate();
+        close() {
+          closing ??= (async () => {
+            closed = true;
+            while (waiting.length > 0) waiting.shift()!();
+            const results = await Promise.allSettled(lanes.map((lane) => lane.terminate()));
+            clientClosed = true;
+            client.close();
+            const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+            if (failed) throw failed.reason;
+          })();
+          return closing;
         },
       };
       return session;
