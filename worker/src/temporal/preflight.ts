@@ -19,6 +19,7 @@ import { ocrLanguageSettingFromEnv } from "../ocr/languages.js";
 import { assertOcrConfiguration } from "../ocr/mode.js";
 import { pinnedOcrModels } from "../ocr/models.js";
 import { initializeParserSandbox } from "../sandbox/startup.js";
+import { assertServiceProfileRuntime, vmOnlyParsing } from "../lib/vm-only-parsing.js";
 
 export interface PreflightStepResult {
   step: string;
@@ -71,6 +72,10 @@ export async function runWorkerPreflight(env: NodeJS.ProcessEnv = process.env, d
     }
   };
 
+  await step("runtime environment", () => {
+    assertServiceProfileRuntime(env);
+    return `NODE_ENV=${env.NODE_ENV?.trim() || "unset"} vmOnlyParsing=${vmOnlyParsing(env)}`;
+  });
   await step("parser sandbox", async () => {
     const sandbox = await d.initializeParserSandbox(env, d.platform);
     return `provider=${sandbox.provider.id}`;

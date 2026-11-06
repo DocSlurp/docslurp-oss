@@ -4,6 +4,7 @@ import path from "node:path";
 import { CommandRunner } from "../tools/runner.js";
 import { resolveScriptsDir } from "../tools/scripts-dir.js";
 import type { MapDraft, MapNode } from "./siphon-agent.js";
+import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 
 export interface OutlineNode { title: string; level: number; physicalPage: number | null; children: OutlineNode[] }
 
@@ -11,7 +12,7 @@ export interface PdfStructure { pageCount: number; outline: OutlineNode[]; pageL
 
 /** PDF.js runs in the parser VM; only typed structure JSON returns to the worker. */
 export async function readPdfStructure(bytes: Uint8Array): Promise<PdfStructure> {
-  if (process.env.NODE_ENV !== "production") {
+  if (!vmOnlyParsing()) {
     return (await import("./pdf-structure-guest.js")).readPdfStructure(bytes);
   }
   if (bytes.byteLength > 500 * 1024 * 1024) throw new Error("PDF structure input exceeds 500 MiB");

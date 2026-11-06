@@ -6,11 +6,12 @@ import path from "node:path";
 import { resolveScriptsDir } from "../tools/scripts-dir.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { HtmlTableCell } from "./table-cells-guest.js";
+import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 const cellsContext = new AsyncLocalStorage<Map<string, HtmlTableCell[] | null>>();
 export function preparedHtmlTableCells(source: string): HtmlTableCell[] | null | undefined { return cellsContext.getStore()?.get(source); }
 /** Prepare flat typed records in the VM, then keep synchronous chunking scoped to this document. */
 export async function withPreparedHtmlTables<T>(sources: string[], runner: Pick<CommandRunner, "run">, fn: () => T, signal?: AbortSignal): Promise<T> {
-  if (process.env.NODE_ENV !== "production") return fn();
+  if (!vmOnlyParsing()) return fn();
   const unique = [...new Set(sources.map(s => s.trim()).filter(s => /^<table(?=\s|>|$)/i.test(s) && s.length > 0 && s.length <= HTML_TABLE_MAX_SOURCE_CHARS))];
   if (unique.length > 1024) throw new Error("HTML table count exceeds VM limit");
   if (unique.reduce((total, source) => total + source.length, 0) > 32 * 1024 * 1024) throw new Error("HTML table document source exceeds limit");

@@ -60,6 +60,7 @@ import {
   buildLocalComputeUsageEvent,
   resolveWorkerDeploymentProfile,
 } from "../pipeline/local-compute-cost.js";
+import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 
 export interface CommandPlan {
   /** Isolated-VM PDF extraction through the registered provider plugin; dispatched before any local provider or backend. */
@@ -1156,7 +1157,7 @@ export class CommandRunner {
   }
 
   async scanForMalware(source: string, signal?: AbortSignal): Promise<MalwareScanResult> {
-    if (process.env.NODE_ENV !== "production") return this.scanForMalwareWithDefinitions(source, signal);
+    if (!vmOnlyParsing()) return this.scanForMalwareWithDefinitions(source, signal);
     // Copy only named signature assets, never host configuration or credentials. The host
     // updater keeps these fresh; the VM verifies the same staged definitions it will scan with.
     const policy = resolveMalwareScanPolicy();
@@ -2102,7 +2103,7 @@ export function assertUnixSocketFilter(session: Pick<SandboxSession, "providerId
   // Landlock must scope even parsers that need sockets to their own domain.
   if (session.providerId !== "landlock" && !command.denyUnixSockets) return;
   const optIn = ["1", "true"].includes(process.env.DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS?.trim().toLowerCase() ?? "");
-  const production = process.env.NODE_ENV === "production";
+  const production = vmOnlyParsing();
   if (optIn && !production) {
     if (!warnedUnfilteredSockets) {
       warnedUnfilteredSockets = true;

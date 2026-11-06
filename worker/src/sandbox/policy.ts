@@ -1,4 +1,5 @@
 import { SandboxPolicyError, type SandboxIsolation } from "./types.js";
+import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 
 const UNISOLATED_WARNING = "[parser-sandbox] status=unisolated";
 
@@ -26,7 +27,7 @@ export function assertSandboxPolicy(args: {
     );
   }
 
-  if (env.NODE_ENV !== "production" && process.env.NODE_ENV !== "production") return { warnings };
+  if (!vmOnlyParsing(env)) return { warnings };
 
   // Provider identity matters: `remote` alone does not attest a VM boundary. Keep this
   // allowlist closed until a new provider has independent security review.

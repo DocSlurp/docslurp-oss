@@ -51,7 +51,7 @@ describe("worker preflight", () => {
   it("passes a valid configuration through the real checks and starts nothing", async () => {
     const results = await runWorkerPreflight({ DOCSLURP_OCR_MODE: "off" }, stubs);
     expect(results.map((r) => r.step)).toEqual([
-      "parser sandbox", "extractor plugins", "extractor id aliases", "ocr configuration", "ocr model pins", "native pdf engine",
+      "runtime environment", "parser sandbox", "extractor plugins", "extractor id aliases", "ocr configuration", "ocr model pins", "native pdf engine",
       ...PREFLIGHT_SKIPPED_DATABASE_CHECKS,
     ]);
     expect(results.find((r) => r.step === PREFLIGHT_SKIPPED_DATABASE_CHECKS[0])?.status).toBe("skipped");
@@ -86,7 +86,7 @@ describe("worker preflight", () => {
     expect((await runWorkerPreflight({ DOCSLURP_OCR_MODE: "vm" }, stubs).catch((e) => e)).step).toBe("ocr configuration");
     resetExtractorPluginsForTest();
     // The plugin step passes here (as with a VM PDF provider loaded) so the OCR step is the one under test.
-    expect((await runWorkerPreflight({ DOCSLURP_OCR_MODE: "local", DOCSLURP_SERVICE_PROFILE: "service" }, { ...stubs, loadExtractorPlugins: async () => [] }).catch((e) => e)).step).toBe("ocr configuration");
+    expect((await runWorkerPreflight({ DOCSLURP_OCR_MODE: "local", DOCSLURP_SERVICE_PROFILE: "service", NODE_ENV: "production" }, { ...stubs, loadExtractorPlugins: async () => [] }).catch((e) => e)).step).toBe("ocr configuration");
     expectNothingStarted();
   });
 
@@ -115,7 +115,7 @@ describe("worker preflight", () => {
   });
 
   it("refuses a service profile without a VM PDF provider at the plugin step: PDFs never fall back to the worker host", async () => {
-    const error = await runWorkerPreflight({ DOCSLURP_OCR_MODE: "off", DOCSLURP_SERVICE_PROFILE: "service" }, stubs).catch((e) => e);
+    const error = await runWorkerPreflight({ DOCSLURP_OCR_MODE: "off", DOCSLURP_SERVICE_PROFILE: "service", NODE_ENV: "production" }, stubs).catch((e) => e);
     expect(error).toBeInstanceOf(WorkerPreflightError);
     expect(error.step).toBe("extractor plugins");
     expect(error.message).toMatch(/DOCSLURP_SERVICE_PROFILE=service needs a sandboxed PDF provider/);
@@ -127,6 +127,13 @@ describe("worker preflight", () => {
       ...stubs, assertOcrConfiguration: () => "local", pinnedOcrModels: () => { throw new Error("OCR model manifest is malformed"); },
     }).catch((e) => e);
     expect(error.step).toBe("ocr model pins");
+  });
+
+  it("refuses the service profile without NODE_ENV=production before anything else (council G L3)", async () => {
+    const error = await runWorkerPreflight({ DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_OCR_MODE: "off" }, stubs).catch((e) => e);
+    expect(error).toBeInstanceOf(WorkerPreflightError);
+    expect(error.step).toBe("runtime environment");
+    expect(error.message).toMatch(/requires NODE_ENV=production/);
   });
 
   it("stops at a failing sandbox or native engine check", async () => {

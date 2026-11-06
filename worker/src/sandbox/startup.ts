@@ -1,3 +1,4 @@
+import { assertServiceProfileRuntime } from "../lib/vm-only-parsing.js";
 import { assertSandboxPolicy } from "./policy.js";
 import { loadSandboxProvider, resolveSandboxProviderId } from "./registry.js";
 import { type ParserSandboxProvider, type SandboxIsolation } from "./types.js";
@@ -16,6 +17,7 @@ export async function initializeParserSandbox(
   env: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
 ): Promise<InitializedParserSandbox> {
+  assertServiceProfileRuntime(env);
   const id = resolveSandboxProviderId(env, platform);
   const provider = await loadSandboxProvider(id);
   const config = provider.readConfig(env) as Record<string, unknown>;

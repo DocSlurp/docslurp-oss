@@ -11,6 +11,7 @@ import type { Config } from "../config.js";
 import { DocumentStageError } from "../pipeline/checkpoints.js";
 import type { MalwareScanResult } from "../tools/runner.js";
 import type { CommandRunner } from "../tools/runner.js";
+import { vmOnlyParsing } from "./vm-only-parsing.js";
 
 export interface QuarantineReason {
   code: string;
@@ -249,7 +250,7 @@ export function buildQuarantineStats(artifact: QuarantineArtifact): Record<strin
  * the intake verification and the scan.
  */
 export async function inspectQuarantine(args: { bytes: Buffer; filename: string; tempFile: string; runner: CommandRunner; policy: QuarantinePolicy; signal?: AbortSignal }): Promise<QuarantineInspection> {
-  return process.env.NODE_ENV === "production" ? await inspectInVm(args) : inspectQuarantineBytes(args.bytes, args.filename, args.policy);
+  return vmOnlyParsing() ? await inspectInVm(args) : inspectQuarantineBytes(args.bytes, args.filename, args.policy);
 }
 
 const SNIFF_CONTAINERS = new Set(["zip", "ole"]);

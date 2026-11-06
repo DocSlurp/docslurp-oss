@@ -17,6 +17,7 @@ import {
 } from "../../types.js";
 import { CONTROL_DIR, killArgv, launchArgv } from "./control.js";
 import { SessionStaging, type RemoteEntry, type RemoteFs, type RemoteSnapshot } from "./staging.js";
+import { vmOnlyParsing } from "../../../lib/vm-only-parsing.js";
 
 export type ModalSdk = typeof import("modal");
 
@@ -323,7 +324,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         Omit<ModalConfig, "image"> & { image?: string; imageDigest?: string }
       >(configSchema, env);
       const image = resolveModalImage(config.image ?? defaultModalImage(env), imageDigest);
-      if ((env.NODE_ENV === "production" || process.env.NODE_ENV === "production") && !/@sha256:[a-f0-9]{64}$/i.test(image)) {
+      if (vmOnlyParsing(env) && !/@sha256:[a-f0-9]{64}$/i.test(image)) {
         throw new SandboxConfigError("production parser VM images must be pinned by sha256 digest");
       }
       if (config.imageId && !/^im-[A-Za-z0-9]+$/.test(config.imageId)) throw new SandboxConfigError("invalid DOCSLURP_MODAL_IMAGE_ID");

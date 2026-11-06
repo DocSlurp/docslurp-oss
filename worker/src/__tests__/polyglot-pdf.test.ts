@@ -83,7 +83,7 @@ describe("the in-process native engine is refused wherever PDFs run only in vm-p
       setNativePdfEngineForTesting(engine);
       for (const [name, value] of Object.entries(env)) vi.stubEnv(name, value);
       vi.stubEnv("DOCSLURP_NATIVE_PDF_POPPLER", "1");
-      expect(await loadNativePdfEngine()).toMatchObject({ ok: false, reason: expect.stringContaining("refused") });
+      expect(await loadNativePdfEngine()).toMatchObject({ ok: false, reason: expect.stringMatching(/refused|lacks a VM boundary/) });
       expect(await resolveNativePdfEngine({ extractText: vi.fn(), run: vi.fn() } as never)).toBeNull();
       expect(openPath).not.toHaveBeenCalled();
     });
@@ -91,7 +91,7 @@ describe("the in-process native engine is refused wherever PDFs run only in vm-p
 
   it("refuses to start when the image ships the engine (or a mode asks for it) beside vm-pdf", async () => {
     await expect(assertNativePdfEngineAtStartup({ DOCSLURP_PDF_EXTRACTOR: "vm-pdf", DOCSLURP_NATIVE_PDF_INSTALLED: "1" })).rejects.toThrow(/runs PDFs only in vm-pdf/);
-    await expect(assertNativePdfEngineAtStartup({ DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_PDF_ENGINE: "shadow" })).rejects.toThrow(/runs PDFs only in vm-pdf/);
+    await expect(assertNativePdfEngineAtStartup({ DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_PDF_ENGINE: "shadow" })).rejects.toThrow(/lacks a VM boundary/);
     await expect(assertNativePdfEngineAtStartup({ DOCSLURP_PDF_EXTRACTOR: "vm-pdf" })).resolves.toMatchObject({ ok: false });
   });
 });
