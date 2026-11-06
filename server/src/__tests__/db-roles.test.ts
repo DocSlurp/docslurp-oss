@@ -530,6 +530,12 @@ describe("one pricing-state writer rule for startup and the deploy gate (council
     finally { await db.exec(`revoke ${privilege} on public.pricing_provider_state from ${app}`); }
   });
 
+  it.each([["update", "value"], ["insert", "key"]])("refuses a runtime role granted column-level %s (%s) on pricing_provider_state (recheck R #1)", async (privilege, column) => {
+    await db.exec(`grant ${privilege} (${column}) on public.pricing_provider_state to ${worker}`);
+    try { await refusedBoth(worker, worker, new RegExp(`can ${privilege} pricing_provider_state`)); }
+    finally { await db.exec(`revoke ${privilege} (${column}) on public.pricing_provider_state from ${worker}`); }
+  });
+
   it("refuses an inherited grant (through another role) and pg_write_all_data membership", async () => {
     await db.exec("create role pricing_state_writer_probe nologin");
     await db.exec("grant update on public.pricing_provider_state to pricing_state_writer_probe");

@@ -90,6 +90,48 @@ it.skipIf(!url)("refuses each direct write privilege and EXECUTE on the raise", 
   finally { await admin.query(`revoke execute on function public.pricing_state_raise(text, bigint) from ${runtime}`); }
 });
 
+it.skipIf(!url)("refuses a column-level INSERT or UPDATE, at startup and at the deploy gate (recheck R #1)", async () => {
+  const { checkRuntimeIdentity } = await import("../../db/runtime-role-check.mjs");
+  const sql = { unsafe: async (query: string, params?: unknown[]) => (await admin.query(query, params as unknown[])).rows };
+  // The deploy gate only accepts the real runtime role names: make the fixture role a member of docslurp_app (cluster-wide,
+  // so created if missing and never dropped; the database test runner runs one file at a time).
+  await admin.query(`do $$ begin if not exists (select 1 from pg_roles where rolname = 'docslurp_app') then create role docslurp_app nologin; end if; end $$`);
+  await admin.query(`grant docslurp_app to ${runtime}`);
+  const asRuntime = async <T>(run: () => Promise<T>): Promise<T> => {
+    await admin.query(`set role ${runtime}`);
+    try { return await run(); } finally { await admin.query("reset role"); }
+  };
+  try {
+    expect(await asRuntime(() => checkRuntimeIdentity(admin, "docslurp_app"))).toEqual([]);
+    for (const [privilege, column] of [["update", "value"], ["update", "updated_at"], ["insert", "key"], ["insert", "value"]] as const) {
+      await admin.query(`grant ${privilege} (${column}) on public.pricing_provider_state to ${runtime}`);
+      try {
+        const pattern = new RegExp(`can ${privilege} pricing_provider_state`);
+        expect((await reasonsAs(runtime)).join("\n")).toMatch(pattern);
+        await asRuntime(() => expect(assertRuntimeDatabaseIdentity(sql, [runtime])).rejects.toThrow(/refusing to start/));
+        await asRuntime(() => expect(assertRuntimeDatabaseIdentity(sql, [runtime])).rejects.toThrow(pattern));
+        expect((await asRuntime(() => checkRuntimeIdentity(admin, "docslurp_app"))).join("\n")).toMatch(pattern);
+      } finally {
+        await admin.query(`revoke ${privilege} (${column}) on public.pricing_provider_state from ${runtime}`);
+      }
+    }
+    // A column grant held through another role counts too.
+    await admin.query(`create role rt_colwriter_${suffix} nologin`);
+    await admin.query(`grant update (value) on public.pricing_provider_state to rt_colwriter_${suffix}`);
+    await admin.query(`grant rt_colwriter_${suffix} to ${runtime}`);
+    try {
+      expect((await asRuntime(() => checkRuntimeIdentity(admin, "docslurp_app"))).join("\n")).toMatch(/can update pricing_provider_state/);
+    } finally {
+      await admin.query(`revoke rt_colwriter_${suffix} from ${runtime}`);
+      await admin.query(`drop owned by rt_colwriter_${suffix}`);
+      await admin.query(`drop role rt_colwriter_${suffix}`);
+    }
+    expect(await asRuntime(() => checkRuntimeIdentity(admin, "docslurp_app"))).toEqual([]);
+  } finally {
+    await admin.query(`revoke docslurp_app from ${runtime}`);
+  }
+});
+
 it.skipIf(!url)("startup refuses the same way (assertRuntimeDatabaseIdentity)", async () => {
   const sql = { unsafe: async (query: string, params?: unknown[]) => (await admin.query(query, params as unknown[])).rows };
   await expect(assertRuntimeDatabaseIdentity(sql, [runtime])).rejects.toThrow(/superuser[\s\S]*refusing to start/);

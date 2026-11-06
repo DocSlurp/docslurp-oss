@@ -114,7 +114,9 @@ export function refusePricingStateWriter(env: Record<string, string | undefined>
  *   (a SET ROLE to the owner or postgres; pg_execute_server_program; pg_write_all_data; pg_database_owner);
  * - CREATE on the database (a schema that shadows another role's search_path) or on schema public;
  * - owned relations, functions, types or schemas outside the system schemas;
- * - ownership of pricing_provider_state, INSERT/UPDATE/DELETE/TRUNCATE on it, or EXECUTE on pricing_state_raise.
+ * - ownership of pricing_provider_state, INSERT/UPDATE/DELETE/TRUNCATE on it, or EXECUTE on pricing_state_raise. INSERT and
+ *   UPDATE count a grant on any one column (has_any_column_privilege): GRANT UPDATE (value) moves the mark as well as a
+ *   table grant does (recheck R #1).
  */
 export const RUNTIME_IDENTITY_SQL = `
   with me as (select * from pg_roles where rolname = current_user),
@@ -136,8 +138,8 @@ export const RUNTIME_IDENTITY_SQL = `
       else (select relowner from pg_class where oid = to_regclass('public.pricing_provider_state')) in (select oid from held) end as owns_state,
     case when to_regclass('public.pricing_provider_state') is null then ''
       else concat_ws(',',
-        case when has_table_privilege(me.oid, 'public.pricing_provider_state', 'INSERT') then 'insert' end,
-        case when has_table_privilege(me.oid, 'public.pricing_provider_state', 'UPDATE') then 'update' end,
+        case when has_any_column_privilege(me.oid, 'public.pricing_provider_state', 'INSERT') then 'insert' end,
+        case when has_any_column_privilege(me.oid, 'public.pricing_provider_state', 'UPDATE') then 'update' end,
         case when has_table_privilege(me.oid, 'public.pricing_provider_state', 'DELETE') then 'delete' end,
         case when has_table_privilege(me.oid, 'public.pricing_provider_state', 'TRUNCATE') then 'truncate' end) end as writes_state,
     case when to_regprocedure('public.pricing_state_raise(text, bigint)') is null then false
