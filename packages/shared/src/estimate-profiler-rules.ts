@@ -9,6 +9,7 @@ import {
   VIDEO_EXTENSIONS,
 } from "./media-upload-estimate.js";
 import { DENSE_PAGE_EQUIVALENTS, PAGE_AREA_EQUIVALENTS_CAP, STANDARD_PAGE_AREA_PT2 } from "./page-equivalents.js";
+import { sha256Hex } from "./hash.js";
 import { PAGE_RASTER_ROUTING } from "./page-raster-routing.js";
 import { PAGE_TABLE_ROUTING } from "./page-table-routing.js";
 import { IMAGE_MAX_FRAMES, MULTI_FRAME_IMAGE_EXTENSIONS, MULTI_FRAME_IMAGE_MIME_TYPES } from "./upload-pages.js";
@@ -38,8 +39,12 @@ export const LAYOUT_GRID_RULES = { ruleThicknessPt: 3, ruleMinLengthPt: 8, ruleT
 /** Content-stream bytes per glyph assumed when a page's text could not be read to the end (an estimate, flagged). */
 export const ESTIMATED_CONTENT_BYTES_PER_GLYPH = 2;
 
+/** The rules file's own schema (`profiler-rules.json`), separate from the file profile's. */
+export const PROFILER_RULES_SCHEMA = 1;
+
 export function buildProfilerRules() {
-  return {
+  const body = {
+    schema: PROFILER_RULES_SCHEMA,
     profileSchema: FILE_PROFILE_SCHEMA,
     maxSampledPages: FILE_PROFILE_MAX_SAMPLED_PAGES,
     wordsPerPageBuckets: [...WORDS_PER_PAGE_BUCKETS],
@@ -52,12 +57,16 @@ export function buildProfilerRules() {
     multiFrameImages: { maxFrames: IMAGE_MAX_FRAMES, mimeTypes: [...MULTI_FRAME_IMAGE_MIME_TYPES], extensions: [...MULTI_FRAME_IMAGE_EXTENSIONS] },
     /** PDF page raster thresholds the worker routes with. */
     pageRasterRouting: { ...PAGE_RASTER_ROUTING },
+    /** The table-heavy thresholds the worker routes with (page-table-routing.ts `isTableHeavy`). */
+    pageTableRouting: { ...PAGE_TABLE_ROUTING },
     /** The page-equivalent measurement billing uses (page-equivalents.ts): area against a standard page, capped per page. */
     pageEquivalents: { standardPageAreaPt2: STANDARD_PAGE_AREA_PT2, areaEquivalentsCap: PAGE_AREA_EQUIVALENTS_CAP, densePageEquivalents: DENSE_PAGE_EQUIVALENTS },
-    /** Ruled grids and table coverage as the layout walker builds them, and the table-heavy thresholds routing applies. */
-    layout: { ...LAYOUT_GRID_RULES, tableHeavyMinRows: PAGE_TABLE_ROUTING.tableHeavyMinRows, tableHeavyMinCoverage: PAGE_TABLE_ROUTING.tableHeavyMinCoverage },
+    /** Ruled grids and table coverage as the layout walker builds them. */
+    layout: { ...LAYOUT_GRID_RULES },
     /** What the PDF text extractor keeps, so the profiler counts the text billing will measure (EXTRACTION_LIMITS). */
     extraction: { ...EXTRACTION_LIMITS, estimatedContentBytesPerGlyph: ESTIMATED_CONTENT_BYTES_PER_GLYPH },
   };
+  // A content hash of everything above, so a profile can name the rules it was measured with.
+  return { ...body, revision: sha256Hex(JSON.stringify(body)) };
 }
 export type ProfilerRules = ReturnType<typeof buildProfilerRules>;

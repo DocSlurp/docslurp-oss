@@ -124,8 +124,8 @@ fn the_profiler_reproduces_the_layout_walkers_facts_on_the_routing_fixtures() {
                     assert_eq!((grid.0, grid.1), (theirs["rows"].as_u64().unwrap() as u32, theirs["columns"].as_u64().unwrap() as u32), "{at}: grid shape");
                     assert!((grid.2 - num(&theirs["coverage"]).unwrap()).abs() <= 0.005, "{at}: grid coverage {} vs {}", grid.2, theirs["coverage"]);
                 }
-                let heavy = grids.iter().any(|grid| grid["rows"].as_u64().unwrap() >= u64::from(rules.layout.table_heavy_min_rows))
-                    || grids.iter().map(|grid| num(&grid["coverage"]).unwrap()).sum::<f64>() >= rules.layout.table_heavy_min_coverage;
+                let heavy = grids.iter().any(|grid| grid["rows"].as_u64().unwrap() >= u64::from(rules.page_table_routing.table_heavy_min_rows))
+                    || grids.iter().map(|grid| num(&grid["coverage"]).unwrap()).sum::<f64>() >= rules.page_table_routing.table_heavy_min_coverage;
                 assert_eq!(page.ruled_table_heavy, heavy, "{at}: table-heavy from grids");
                 assert!(page.grid_coverage.unwrap() <= num(&walker["tableCoverage"]).unwrap() + 0.005, "{at}: grid coverage over the walker's table coverage");
             }

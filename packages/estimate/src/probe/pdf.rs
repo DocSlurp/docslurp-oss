@@ -864,8 +864,9 @@ fn page_layout(rules: &Rules, reading: &PageReading, repeated: &HashSet<ObjectId
             .collect();
         (Some(grids), Some(coverage))
     };
-    let ruled_table_heavy = grids.as_ref().is_some_and(|grids: &Vec<(u32, u32, f64)>| grids.iter().any(|grid| grid.0 >= limits.table_heavy_min_rows))
-        || grid_coverage.is_some_and(|coverage| coverage >= limits.table_heavy_min_coverage);
+    let tables = &rules.page_table_routing;
+    let ruled_table_heavy = grids.as_ref().is_some_and(|grids: &Vec<(u32, u32, f64)>| grids.iter().any(|grid| grid.0 >= tables.table_heavy_min_rows))
+        || grid_coverage.is_some_and(|coverage| coverage >= tables.table_heavy_min_coverage);
     LayoutPage {
         words: (!reading.exhausted).then_some(reading.words),
         width_pt: reading.display_visible[2] - reading.display_visible[0],

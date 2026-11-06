@@ -59,6 +59,8 @@ pub struct PageRasterRouting {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Rules {
+    /// The rules file's schema, and the content hash of everything else in it.
+    pub schema: u32,
     pub profile_schema: u32,
     pub max_sampled_pages: usize,
     pub words_per_page_buckets: Vec<f64>,
@@ -67,12 +69,22 @@ pub struct Rules {
     pub text_pages: TextPages,
     pub multi_frame_images: MultiFrameImages,
     pub page_raster_routing: PageRasterRouting,
+    pub page_table_routing: PageTableRouting,
     pub page_equivalents: PageEquivalentRules,
     pub extraction: ExtractionLimits,
     pub layout: LayoutRules,
+    pub revision: String,
 }
 
-/// The layout walker's ruled-grid geometry and routing's table-heavy thresholds (`LAYOUT_GRID_RULES`, `PAGE_TABLE_ROUTING`).
+/// The table-heavy thresholds the worker routes with (`PAGE_TABLE_ROUTING`, page-table-routing.ts `isTableHeavy`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PageTableRouting {
+    pub table_heavy_min_rows: u32,
+    pub table_heavy_min_coverage: f64,
+}
+
+/// The layout walker's ruled-grid geometry and word cap (`LAYOUT_GRID_RULES`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LayoutRules {
@@ -82,8 +94,6 @@ pub struct LayoutRules {
     pub coverage_raster: u32,
     pub max_rules_per_page: u32,
     pub max_words_per_page: u32,
-    pub table_heavy_min_rows: u32,
-    pub table_heavy_min_coverage: f64,
 }
 
 /// The page-equivalent rule billing measures with: area against a standard page, capped per page; text by the text rule.
@@ -133,6 +143,8 @@ impl Rules {
         RULES.get_or_init(|| {
             let rules: Rules = serde_json::from_str(BUNDLED).expect("bundled profiler-rules.json is valid");
             assert_eq!(rules.profile_schema, PROFILE_SCHEMA, "profiler-rules.json is for another profile schema");
+            assert_eq!(rules.schema, 1, "profiler-rules.json has another rules schema");
+            assert!(rules.revision.len() == 64 && rules.revision.bytes().all(|byte| byte.is_ascii_hexdigit()), "profiler-rules.json revision");
             assert_eq!(rules.words_per_page_buckets.len(), crate::probe::WORDS_BUCKETS, "words-per-page buckets");
             assert_eq!(rules.image_coverage_buckets.len(), crate::probe::COVERAGE_BUCKETS, "image coverage buckets");
             rules
