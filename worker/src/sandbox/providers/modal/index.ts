@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { pricing } from "@docslurp/shared";
 
 import { boundedVmStream } from "./transfer.js";
+import os from "node:os";
 import path from "node:path";
 import { resolveWorkerDeploymentProfile, buildLocalComputeUsageEvent } from "../../../pipeline/local-compute-cost.js";
 import type { UsageEvent } from "../../../models.js";
@@ -49,6 +50,15 @@ export interface ModalConfig {
  * (`start-worker.sh`, with a first-boot network install) and would run beside the customer job (real-Modal validation N1).
  */
 export const PARSER_VM_IDLE_COMMAND = ["sleep", "infinity"] as const;
+/** Creates a directory under $1 and removes it, as the parser user (the launch drops root): exit 0 when $1 is a usable job root. */
+const JOB_ROOT_WRITABLE_SCRIPT = 'mkdir -p -- "$1" && d=$(mktemp -d "$1/.docslurp-probe.XXXXXX") && rmdir -- "$d"';
+
+/** The roots parser job paths sit under: the worker's temp directory and the parser scratch root (tools/runner.ts). */
+export function parserJobRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+  const roots = [os.tmpdir(), env.DOCSLURP_PARSER_SANDBOX_ROOT?.trim() || "/tmp/docslurp-parser-sandbox"];
+  return [...new Set(roots.map((root) => path.resolve(root)))];
+}
+
 /** Lifetime of the startup probe's VM: a backstop if its terminate request is lost. */
 export const PROBE_SESSION_TIMEOUT_SECONDS = 120;
 /** Deadline for the terminate request. Modal stops the VM once it accepts the request; exit is not awaited. */
@@ -374,6 +384,14 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         // Kernel link protections (council K #5, N #2): both must be reported exactly 1; off, absent, null or malformed fails.
         if (contract.links?.hardlinks !== 1 || contract.links?.symlinks !== 1) {
           throw new Error(`parser VM kernel link protections are not confirmed on (hardlinks=${JSON.stringify(contract.links?.hardlinks ?? null)}, symlinks=${JSON.stringify(contract.links?.symlinks ?? null)})`);
+        }
+        // Job paths are the worker's own temp paths, staged by the parser user (council M #3): every root must be creatable
+        // and writable by uid 10001 in the VM, or every parser command would fail (real-Modal check F4).
+        for (const root of parserJobRoots()) {
+          const writable = await session.run!({ binary: "/bin/sh", args: ["-c", JOB_ROOT_WRITABLE_SCRIPT, "sh", root], env: { PATH: "/usr/local/bin:/usr/bin:/bin" }, readablePaths: [], inputPaths: [], writablePaths: [], limits: { timeoutMs: 30_000 } });
+          if (writable.exitCode !== 0) {
+            throw new Error(`parser VM job root ${root} is not writable by the parser user (uid 10001); put TMPDIR and DOCSLURP_PARSER_SANDBOX_ROOT under a directory it can write, such as /tmp (docs/self-host/sandbox-providers.md)`);
+          }
         }
         const tools = Array.isArray(contract.tools) ? contract.tools.filter((tool): tool is string => typeof tool === "string" && /^[a-z0-9][a-z0-9_.-]{0,63}$/.test(tool)) : undefined;
         return { ok: true, isolation: ISOLATION, detail: `VM image contract verified for '${config.app}'`, ...(tools ? { tools } : {}) };

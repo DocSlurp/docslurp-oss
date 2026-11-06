@@ -49,3 +49,19 @@ describe("modal startup probe requires the parser-vm@2 contract", () => {
     await expect(initializeParserSandbox(env, "linux")).resolves.toMatchObject({ provider: modal });
   });
 });
+
+describe("modal startup probe requires a job root the parser user can write (real-Modal check F4)", () => {
+  it("refuses with a clear message when uid 10001 cannot create a directory under a job root", async () => {
+    const good = JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: 1, symlinks: 1 } });
+    const close = vi.fn(async () => {});
+    const run = vi.fn(async (command: { binary: string; args: string[] }) => command.binary === "/bin/sh"
+      ? { exitCode: 1, stdout: "", stderr: "mkdir: Permission denied" }
+      : { exitCode: 0, stdout: good, stderr: "" });
+    vi.spyOn(modal, "openSession").mockResolvedValue({ run, close } as unknown as SandboxSession);
+    const probe = await modal.probe(modal.readConfig(env));
+    expect(probe.ok).toBe(false);
+    expect(probe.detail).toMatch(/job root .* is not writable by the parser user \(uid 10001\).*TMPDIR/);
+    const roots = run.mock.calls.filter(([command]) => command.binary === "/bin/sh").map(([command]) => command.args[3]);
+    expect(roots.length).toBeGreaterThan(0);
+  });
+});
