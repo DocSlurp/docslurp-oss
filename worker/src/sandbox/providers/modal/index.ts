@@ -675,7 +675,6 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           creating ??= (async () => {
             if (!holdsToken) { await vmBudget.acquire(() => closed || lane.dead); holdsToken = true; }
             if (closed || lane.dead) throw new Error("parser VM session closed during creation");
-            lane.accountedAt = Date.now();
             const app = await withDeadline(client.apps.fromName(config.app, { createIfMissing: true }), 30_000);
             const registrySecret = config.registrySecret && !config.imageId ? await withDeadline(client.secrets.fromName(config.registrySecret), 30_000) : undefined;
             const image = config.imageId ? await withDeadline(client.images.fromId(config.imageId), 30_000) : client.images.fromRegistry(config.image, registrySecret);
@@ -690,6 +689,10 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
               blockNetwork: true,
             }).then(async (created) => {
               lifetimeStart = Date.now();
+              // Billing starts when Modal's create returns, as Modal bills it (real-Modal M1: metering from the request
+              // overstated 4-9 s VMs by about a second each). Capacity accounting is unchanged: the token is held from the
+              // request, and quarantine still bounds a VM's life from lifetimeStart (council V #1).
+              lane.accountedAt = lifetimeStart;
               // A VM that arrives after this lane's terminate finished is stopped here (its capacity was held for it); any
               // other is the lane's own, and terminate() stops it (it waits for this call first).
               if (terminateDone) {

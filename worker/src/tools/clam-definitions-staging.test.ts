@@ -2,9 +2,10 @@ import { mkdtemp, readdir, rm, stat, utimes, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { buildSandboxCommand, stageClamDefinitions } from "./runner.js";
+import { SandboxOutputError } from "../sandbox/types.js";
+import { buildSandboxCommand, CommandRunner, stageClamDefinitions } from "./runner.js";
 
 // Real-Modal P1: the ClamAV definitions are staged once per content, not per document, and travel as a read-only asset.
 describe("ClamAV definitions staging", () => {
@@ -45,5 +46,24 @@ describe("ClamAV definitions staging", () => {
     expect(command.readablePaths).toContain(staged.dir);
     expect(command.writablePaths.some((p) => p.startsWith(staged.dir))).toBe(false);
     await rm(staged.dir, { recursive: true, force: true });
+  });
+
+  it("a broken job tree under the definitions check fails with the staging error, not a missing database (real-Modal S2c)", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    try {
+      const runner = new CommandRunner();
+      const staging = new SandboxOutputError("parser VM job tree staging failed: mkdir: cannot create directory: File exists");
+      const run = vi.spyOn(runner, "run").mockRejectedValue(staging);
+      const scan = (runner as unknown as { scanForMalwareWithDefinitions(source: string, signal: AbortSignal | undefined, args: string[], dir: string): Promise<unknown> })
+        .scanForMalwareWithDefinitions.bind(runner);
+      await expect(scan("/job/in.pdf", undefined, ["--database", "/defs/daily.cvd"], "/defs")).rejects.toBe(staging);
+      // A check that ran but could not read the definitions is still "missing", and blocks scanning.
+      run.mockResolvedValue({ stdout: "not a version", stderr: "", exitCode: 0 } as never);
+      const result = await scan("/job/in.pdf", undefined, ["--database", "/defs/daily.cvd"], "/defs") as { status: string; databaseStatus: string };
+      expect(result.databaseStatus).toBe("missing");
+      expect(result.status).not.toBe("clean");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

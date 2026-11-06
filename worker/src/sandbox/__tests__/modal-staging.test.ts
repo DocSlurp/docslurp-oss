@@ -939,6 +939,23 @@ describe("modal provider session lifecycle", () => {
       await opened.close();
     });
 
+    it("bills a VM from when Modal's create returns, not from the request (real-Modal M1)", async () => {
+      // A slow app lookup before the create returns: about 0.2 s Modal never bills.
+      const createGate = new Promise<void>((resolve) => setTimeout(resolve, 200));
+      const { sdk, state } = fakeSdk({ lookupDelayMs: 200, createGate, exec: async () => finished() });
+      const provider = createModalProvider(async () => sdk);
+      const requested = Date.now();
+      const opened = await provider.openSession({ ...config, vmsPerActivity: 1, vmIdleSeconds: 60 }, { activityId: "a" });
+      const tails: number[] = [];
+      const result = await opened.run!(command, undefined, { recordUsage: (event) => tails.push(Number(event.metadata?.wallSeconds)) });
+      await opened.close();
+      expect(state.createdAt[0]! - requested).toBeGreaterThanOrEqual(190);
+      const lifetime = (state.terminatedAt[0]! - state.createdAt[0]!) / 1000;
+      const billed = Number(result.usage?.metadata?.wallSeconds) + tails.reduce((total, seconds) => total + seconds, 0);
+      expect(Math.abs(billed - lifetime)).toBeLessThan(0.05);
+      expect(billed).toBeLessThan((state.terminatedAt[0]! - requested) / 1000 - 0.15);
+    });
+
     it("settle terminates idle VMs and records their remaining time before the stage's checkpoint", async () => {
       const { sdk, state } = fakeSdk({ exec: async () => finished() });
       const provider = createModalProvider(async () => sdk);

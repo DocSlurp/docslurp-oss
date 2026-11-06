@@ -1167,7 +1167,10 @@ export class CommandRunner {
       plan.readOnlyInputs = true;
       const result = await this.run(plan, signal);
       return parseClamVmDatabaseHealth(result.stdout, policy.maxSignatureAgeHours);
-    } catch {
+    } catch (error) {
+      // The sandbox's own verdict (a document's broken job tree, an infrastructure failure, an abort) is the outcome, never
+      // "signature database is missing" (real-Modal S2c): only a check that ran and could not read the definitions is that.
+      if (error instanceof SandboxRunError || signal?.aborted) throw error;
       return { status: "missing", updatedAt: null, ageHours: null, source: null };
     }
   }
