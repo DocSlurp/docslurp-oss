@@ -3,6 +3,8 @@ import type { QueryClient } from "./folded-search-index.mjs";
 export type ReportLevel = "ok" | "warn" | "blocker";
 export type ReportSection = { title: string; level: ReportLevel; lines: string[] };
 export type MigrationJournal = { entries?: Array<{ tag: string; when: number }> };
+/** Vector backends this build writes (shared SUPPORTED_VECTOR_BACKENDS; pinned by rollout-ops-scripts.db.test.ts). */
+export declare const SUPPORTED_VECTOR_BACKENDS: readonly string[];
 export declare function pendingMigrations(journal: MigrationJournal, newestAppliedMs: number): string[];
 export declare function section(title: string, level: ReportLevel, lines: string[]): ReportSection;
 export declare function render(sections: ReportSection[]): string;
