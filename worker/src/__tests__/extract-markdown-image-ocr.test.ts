@@ -58,6 +58,8 @@ async function harness(args: {
   frames?: (job: SandboxedOcrJob) => FakeFrame[];
   /** The whole result the fake boundary writes, when a case needs more than its frames. */
   result?: (job: SandboxedOcrJob) => unknown;
+  /** Doppler's converter is installed (its separator-style output wins); default: not installed. */
+  doppler?: boolean;
 }) {
   const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-image-ocr-test-"));
   const attempted: string[] = [];
@@ -90,7 +92,7 @@ async function harness(args: {
       configs.dolphin = configJson;
       return { binary: "python", args: [], available: true };
     },
-    dopplerMarkdown: async () => ({ binary: "pdftomarkdown", args: [], available: false }),
+    dopplerMarkdown: async () => ({ binary: "pdftomarkdown", args: [], available: args.doppler === true }),
     extractText: async () => ({ binary: "pdftotext", args: [], available: true }),
   } as unknown as CommandRunner & typeof ocr.runner;
   const stage = new ExtractMarkdownStage(runner, storage as any, {} as any);
@@ -599,6 +601,29 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
       expect(h.text().some((text) => text === "Native text layer page\fScanned words 2\fThird page native\fScanned words 4")).toBe(true);
       expect(h.richIds()).toEqual(["rich:run-1:doc-1:2", "rich:run-1:doc-1:4"]);
       expect(new Set(h.richEvents().map((event) => event.metadata?.readBy))).toEqual(new Set(["page-ocr"]));
+    } finally { await h.cleanup(); }
+  });
+
+  it("a separating extractor's blank last page is OCR'd and billed: a 30-page image-only scan bills 30 (F1)", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    // Doppler / vm-pdf output: 30 page slots, 29 separators, no terminator; text on page 1 only, pages 2-30 scans.
+    const h = await harness({
+      format: "pdf", pageCount: 30, doppler: true,
+      extract: async (label) => {
+        if (label !== "doppler-md") throw new Error(`only Doppler's converter is expected, not ${label}`);
+        return { text: `Cover page native text${"\f".repeat(29)}` };
+      },
+      frames: (job) => job.pages!.map((frame) => ({ frame, text: `Scan ${frame}` })),
+    });
+    try {
+      await h.stage.run(h.state);
+      expect(h.checkpoint()?.status).toBe("completed");
+      expect(h.jobs.flatMap((job) => job.pages)).toEqual(Array.from({ length: 29 }, (_, i) => i + 2));
+      expect(h.richIds()).toHaveLength(29);
+      expect(h.richIds()).toContain("rich:run-1:doc-1:30");
+      const text = h.text().find((value) => value.startsWith("Cover page native text"))!;
+      expect(text.split("\f")).toHaveLength(30);
+      expect(text.split("\f")[29]).toBe("Scan 30");
     } finally { await h.cleanup(); }
   });
 
