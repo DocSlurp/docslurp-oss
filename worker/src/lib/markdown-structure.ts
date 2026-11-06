@@ -21,8 +21,18 @@ const MAX_FRONTMATTER_LINES = 80;
  * with one. Leading blank lines before the opening fence are included.
  * Metadata is not body content: it must not become a heading, a chunk or
  * chunk context.
+ *
+ * Never across a page break: a block that contains a form feed, or follows a
+ * blank page, is 0. Removing a form feed would shift every later page's slot
+ * (and its billed area) one page earlier (council I #2).
  */
 export function leadingFrontmatterLineCount(lines: readonly string[]): number {
+  const count = frontmatterLineCount(lines);
+  for (let index = 0; index < count; index++) if ((lines[index] ?? "").includes("\f")) return 0;
+  return count;
+}
+
+function frontmatterLineCount(lines: readonly string[]): number {
   let index = 0;
   while (index < lines.length && (lines[index] ?? "").trim() === "") index++;
   if (index >= lines.length || !FRONTMATTER_OPEN.test(lines[index] ?? "")) return 0;
@@ -54,7 +64,8 @@ export function stripLeadingFrontmatter(markdown: string): { markdown: string; s
   const lines = markdown.split("\n");
   const count = leadingFrontmatterLineCount(lines);
   if (count === 0) return { markdown, strippedLines: 0 };
-  return { markdown: lines.slice(count).join("\n").replace(/^\s*\n/, ""), strippedLines: count };
+  // Blank lines after the block, never a form feed (a page break) or anything after one.
+  return { markdown: lines.slice(count).join("\n").replace(/^(?:[ \t\r]*\n)+/, ""), strippedLines: count };
 }
 
 /**

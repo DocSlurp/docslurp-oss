@@ -21,6 +21,7 @@ import { MAX_PAGE_EQUIVALENTS, recordExtractedPageEquivalents } from "../lib/pag
 import { recordMeasuredTextPageCount } from "../lib/text-page-count.js";
 import { parsePageLayoutFacts } from "../lib/page-layout-facts.js";
 import { processedPdfPages, splitProcessedPdfPages } from "../lib/pdf-page-count.js";
+import { sanitizeExtractedMarkdown } from "../lib/extracted-markdown.js";
 import { configurePageAreaSink, createPageAreaSink, recordRenderedPageAreas } from "../pipeline/page-area-sink.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
@@ -601,6 +602,18 @@ describe("VM-extracted page areas bill from the layout facts' page boxes (real-M
     expect(measured).toMatchObject({ pages: 2, billed: 5 });
     expect((await store.loadDocument(documentId))!.billingPages).toBe(5);
     expect(await billedFastPages(runId, documentId)).toBe(5);
+  });
+
+  it("leading blank pages before a frontmatter-looking page keep their slots through the sanitizer: every page's area bills (council I #2)", async () => {
+    const { state, document, documentId } = await documentRun(5);
+    const raw = "\n\f\n\f\n---\ntitle: x\n---\nbody\fBIG\fBIG";
+    const { markdown, strippedFrontmatterLines } = sanitizeExtractedMarkdown(raw);
+    expect(strippedFrontmatterLines).toBe(0);
+    expect(processedPdfPages(markdown, "vm-pdf")).toBe(5);
+    const sizes = facts([4, 5].map((pageNumber) => ({ pageNumber, widthPt: 1224, heightPt: 1584 })));
+    const measured = (await recordExtractedPageEquivalents(state, document, "pdf", markdown, [], { extractor: "vm-pdf", pageSizesPt: sizes }))!;
+    expect(measured).toMatchObject({ pages: 5, billed: 1 + 1 + 1 + 4 + 4 });
+    expect((await store.loadDocument(documentId))!.billingPages).toBe(11);
   });
 
   it("several trailing blank pages each keep their slot and area; the rows match the processed count", async () => {
