@@ -344,22 +344,32 @@ describe("pricing_provider_state (migration 0131)", () => {
     }
   });
 
-  it("the owner raises monotonically, never lowering a value, at most 1000 per raise", async () => {
+  it("the owner raises monotonically, never lowering a value, at most 1000 per raise of an existing key", async () => {
     const admin = await owner();
     expect(await admin.read("card.sequence.owner")).toBeNull();
     expect(await admin.raise("card.sequence.owner", 5n)).toBe(5n);
     expect(await admin.raise("card.sequence.owner", 3n)).toBe(5n);
     expect(await admin.raise("card.sequence.owner", 9n)).toBe(9n);
-    expect(await admin.raise("card.sequence.owner", -(2n ** 62n))).toBe(9n);
     await expect(admin.raise("card.sequence.owner", 1010n)).rejects.toThrow(/more than 1000/);
-    await expect(admin.raise("card.jump.owner", 1001n)).rejects.toThrow(/more than 1000/);
-    expect(await admin.read("card.jump.owner")).toBeNull();
     expect(await admin.raise("card.sequence.owner", 1009n)).toBe(1009n);
+  });
+
+  it("refuses candidates below 1 and negative values; seeds a missing key at any value, as after a reset (council I #3)", async () => {
+    const admin = await owner();
+    for (const candidate of [0n, -1n, -(2n ** 62n)]) {
+      await expect(admin.raise("card.low", candidate)).rejects.toThrow(/at least 1/);
+      await expect(admin.raise("card.sequence.owner", candidate)).rejects.toThrow(/at least 1/);
+    }
+    expect(await admin.read("card.low")).toBeNull();
+    await expect(db.query("insert into pricing_provider_state (key, value) values ('neg', -1)")).rejects.toThrow(/check constraint/);
+    expect(await admin.raise("card.reset.seed", 4_321n)).toBe(4_321n);
+    await expect(admin.raise("card.reset.seed", 5_322n)).rejects.toThrow(/more than 1000/);
+    expect(await admin.raise("card.reset.seed", 5_321n)).toBe(5_321n);
   });
 
   it("keeps the largest of concurrent owner raises and never returns less than a raise's own candidate", async () => {
     const admin = await owner();
-    const candidates = Array.from({ length: 40 }, (_, index) => BigInt((index * 7919) % 1000));
+    const candidates = Array.from({ length: 40 }, (_, index) => BigInt(((index * 7919) % 1000) + 1));
     const results = await Promise.all(candidates.map((candidate) => admin.raise("concurrent.key", candidate)));
     results.forEach((value, index) => expect(value >= candidates[index]!).toBe(true));
     expect(await admin.read("concurrent.key")).toBe(candidates.reduce((max, value) => (value > max ? value : max)));

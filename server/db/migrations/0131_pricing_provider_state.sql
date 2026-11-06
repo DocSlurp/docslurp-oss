@@ -5,8 +5,9 @@
 --
 -- Runtime roles only read it. A value rises only through pricing_state_raise(key, candidate), run by the table owner (the
 -- operator's credential, never a runtime role): it inserts the key or keeps the larger of the stored and candidate values
--- (concurrent raises serialize on the row) and returns the stored value, and refuses a candidate more than 1000 above the
--- stored value (a missing key counts as 0) as a guard against an operator's typo. The function is SECURITY INVOKER and no
+-- (concurrent raises serialize on the row) and returns the stored value. Candidates are at least 1 and values never
+-- negative. A missing key is seeded at any candidate (after a database reset the operator restores the current value);
+-- an existing key rises by at most 1000 per raise, a guard against an operator's typo. The function is SECURITY INVOKER and no
 -- runtime role may EXECUTE it, INSERT, UPDATE, DELETE or TRUNCATE the table, so no runtime role can raise, lower or reset a
 -- value: a per-call cap alone could not stop a caller allowed unlimited calls (council J). The grants below hold at commit
 -- for the roles that exist, and server/db/roles.mjs reconciles them after every migration. Pre-release: this migration was
@@ -16,7 +17,7 @@
 -- rollout-0121-0127-locks.test.ts, which covers this release).
 CREATE TABLE IF NOT EXISTS pricing_provider_state (
   key text PRIMARY KEY CHECK (key ~ '^[a-z0-9][a-z0-9._:-]{0,127}$'),
-  value bigint NOT NULL,
+  value bigint NOT NULL CHECK (value >= 0),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 --> statement-breakpoint
@@ -24,9 +25,12 @@ CREATE OR REPLACE FUNCTION pricing_state_raise(p_key text, p_candidate bigint) R
 LANGUAGE plpgsql SECURITY INVOKER SET search_path = pg_catalog, public AS $$
 DECLARE stored bigint;
 BEGIN
+  IF p_candidate IS NULL OR p_candidate < 1 THEN
+    RAISE EXCEPTION 'pricing_state_raise: candidate must be at least 1' USING ERRCODE = '22003';
+  END IF;
   SELECT s.value INTO stored FROM public.pricing_provider_state s WHERE s.key = p_key FOR UPDATE;
-  -- A counter rises by at most 1000 per raise (a missing key counts as 0), so no role can wedge it near the bigint limit.
-  IF p_candidate::numeric > coalesce(stored, 0)::numeric + 1000 THEN
+  -- An existing counter rises by at most 1000 per raise (an operator's typo); a missing key is seeded at the candidate.
+  IF stored IS NOT NULL AND p_candidate::numeric > stored::numeric + 1000 THEN
     RAISE EXCEPTION 'pricing_state_raise: candidate exceeds the stored value by more than 1000' USING ERRCODE = '22003';
   END IF;
   INSERT INTO public.pricing_provider_state AS s (key, value) VALUES (p_key, p_candidate)

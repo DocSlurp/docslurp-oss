@@ -497,7 +497,7 @@ export async function collectReport(client, { journal, acceptedPiiPatterns, extr
   const [{ has_state: hasState }] = await q("select to_regclass('public.pricing_provider_state') is not null as has_state");
   if (!hasState) {
     sections.push(section("Pricing-provider state (0131): pending", "ok", [
-      "0131 creates pricing_provider_state and pricing_state_raise(key, candidate) (SECURITY INVOKER; each raise lifts a value by at most 1000). It locks no existing table.",
+      "0131 creates pricing_provider_state and pricing_state_raise(key, candidate) (SECURITY INVOKER; candidates of at least 1, an existing key rising by at most 1000 per raise). It locks no existing table.",
       "API, worker and chat-executor roles get SELECT only; values rise only through pricing_state_raise run by the table owner (the operator's activation credential).",
     ]));
   } else {

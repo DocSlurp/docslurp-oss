@@ -37,7 +37,8 @@ export interface PricingDurableState {
 
 /**
  * The operator's side of the durable state: `raise` stores max(stored, candidate) atomically through pricing_state_raise
- * and returns the stored value, which is never lowered; a candidate more than 1000 above the stored value is refused.
+ * and returns the stored value, which is never lowered. A candidate below 1 is refused; a missing key is seeded at any
+ * candidate, and an existing key rises by at most 1000 per raise.
  * Needs the table owner's credential: no runtime role may execute pricing_state_raise (migration 0131).
  */
 export interface PricingStateAdmin extends PricingDurableState {
