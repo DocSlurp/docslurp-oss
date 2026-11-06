@@ -42,14 +42,16 @@ estimates show no credits. The open default is not DocSlurp's hosted pricing.
 ## Loading a provider
 
 `DOCSLURP_PRICING_PLUGIN` names one module (an absolute path or a `file:` URL) that exports `register(host)` and returns
-a `PricingProvider` with `apiVersion: 1`. The API server and the worker load it at startup
+a `PricingProvider` with `apiVersion: 1`. `host.shared` is the host's own `@docslurp/shared`: call anything that reads the
+installed provider (such as `assembleEstimateQuote`) through it, not through a bundled copy. The API server and the worker load it at startup
 (`@docslurp/shared/pricing-loader`), before serving requests or polling task queues.
 
 Fail closed:
 
 - a named plugin that does not load, exports no `register`, or returns an incomplete provider is a startup error;
-- `DOCSLURP_SERVICE_PROFILE=service` without `DOCSLURP_PRICING_PLUGIN` is a startup error, and `pricing()` throws in
-  that profile until a provider is installed, so the hosted service never prices with the open default;
+- `DOCSLURP_SERVICE_PROFILE=service` (or `DOCSLURP_PRICING_REQUIRED=1`) without `DOCSLURP_PRICING_PLUGIN` is a startup
+  error, and `pricing()` throws in the service profile until a provider is installed, so a billing deployment never prices
+  with the open default;
 - the id `open` is reserved for the open default; a second, different provider in one process is refused.
 
 ## Estimates and file profiles
