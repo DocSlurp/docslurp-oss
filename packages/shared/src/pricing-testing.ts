@@ -22,7 +22,7 @@ export function installTestPricing(overrides: Partial<PricingProvider> = {}): Pr
  * docslurp.io/pricing); everything else is arbitrary and distinct, not any deployment's rule: one more Rich page per
  * started 800 output tokens past the first 800, a video minute two pages and an audio minute one, a feature 0.4 per started
  * 8 pages, storage 7 credits per GB-month, an LLM search three searches, speed boost 4x (the published opt-in rate), a reindex-only run half the page
- * charge, and Modal-style sandboxes at 0.002 cents per core-second plus 0.0005 per GiB-second.
+ * charge, and remote sandboxes at 0.002 cents per core-second plus 0.0005 per GiB-second.
  */
 export const DISTINCT_TEST_PRICING: Partial<PricingProvider> = {
   pageCredits: (mode, pages) => Math.max(0, Number.isFinite(pages) ? pages : 0) * (mode === "rich" ? 0.25 : 0.005),
