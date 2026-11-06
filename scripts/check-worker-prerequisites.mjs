@@ -73,13 +73,6 @@ if ((process.env.DOCSLURP_DOPPLER_REQUIRED ?? '').trim() === '1') {
   if (!(await binaryPath('prlimit'))) failures.push('missing prlimit (util-linux): the PDF page count runs under it');
   if (spawnSync(path.join(dopplerBin, 'pdfpagecount'), ['-v'], { timeout: 30000 }).status !== 0) failures.push(`${dopplerBin}/pdfpagecount does not run`);
 }
-// Every worker profile counts PDF pages with Doppler's pdfpagecount under prlimit (worker/src/lib/pdf-page-count.ts); a
-// missing tool refuses every PDF, so a worker test or image environment without it is not ready.
-if (profile === 'full' || profile === 'test' || profile === 'lean') {
-  const dopplerBin = (process.env.DOCSLURP_DOPPLER_BIN_DIR ?? '').trim() || '/usr/lib/doppler/bin';
-  if (spawnSync(path.join(dopplerBin, 'pdfpagecount'), ['-v'], { timeout: 30000 }).status !== 0) failures.push(`missing Doppler pdfpagecount at ${dopplerBin} (bash scripts/install-doppler.sh)`);
-  if (!(await binaryPath('prlimit'))) failures.push('missing prlimit (util-linux): the PDF page count runs under it');
-}
 if (profile === 'full' || profile === 'test' || profile === 'lean') {
   // Every image bakes the base parsers into its venv (runtime pip installs are off).
   const python = existsSync(path.join(venv, 'bin/python3')) ? path.join(venv, 'bin/python3') : await binaryPath('python3');
