@@ -8,14 +8,16 @@ const seed = `
   insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents)
   values ('r', 'o', 'u', 'w', 'bulk-upload', 'queued', 'queued', 2);
 `;
+// This seed precedes 0130 and therefore also precedes the 0132 rename.
+const historicalSeed = seed.replaceAll("project_runs", "workspace_runs").replaceAll("projects", "workspaces").replaceAll("project_id", "workspace_id");
 
 // Migration 0130: a document inserted without provenance is `assumed` (an estimate the worker replaces), never `counted`. Rows
 // written before it keep the value they were given.
 it("defaults page_count_source to assumed when an insert omits it, and leaves existing rows alone", async () => {
   const db = await createMigratedDatabase({ stopBefore: "0130_page_count_provenance" });
   try {
-    await db.exec(`${seed}
-      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status)
+    await db.exec(`${historicalSeed}
+      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status)
       values ('before', 'o', 'u', 'w', 'r', 'a.pdf', 'application/pdf', 'raw/a.pdf', 'queued');
     `);
     await applyRemainingMigrations(db, "0130_page_count_provenance");
@@ -35,8 +37,8 @@ it("defaults page_count_source to assumed when an insert omits it, and leaves ex
 it("captures intake_page_count at insert and keeps it immutable through measurements and direct writes", async () => {
   const db = await createMigratedDatabase({ stopBefore: "0130_page_count_provenance" });
   try {
-    await db.exec(`${seed}
-      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
+    await db.exec(`${historicalSeed}
+      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
       values ('legacy', 'o', 'u', 'w', 'r', 'a.pdf', 'application/pdf', 'raw/a.pdf', 'queued', 4);
     `);
     await applyRemainingMigrations(db, "0130_page_count_provenance");
