@@ -90,7 +90,7 @@ export type CostEstimate = {
   basis: string;
 };
 
-/** A background job queued by a mutation. `estimate` is null when it took over 150 ms; fetch `estimateUrl`. */
+/** A background job queued by a mutation. `estimate` is the same estimate `estimateUrl` returns (null when the work has none). */
 export type JobStatus = {
   id: string;
   kind: JobKind;

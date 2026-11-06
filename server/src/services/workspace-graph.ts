@@ -343,17 +343,14 @@ export async function estimateGraphRebuild(
   return costEstimateFromGraph((await planGraphRebuild(workspace, input.mode)).estimate, env);
 }
 
-/** Queues a rebuild; one active job per workspace. `onEstimateTimed` receives the estimate's compute time (ms). */
+/** Queues a rebuild; one active job per workspace. */
 export async function startGraphRebuild(
   workspaceRef: string,
   userId: string,
   input: StartGraphRebuildInput,
-  options: { onEstimateTimed?: (ms: number) => void } = {},
 ): Promise<GraphJob> {
   const workspace = await requireWorkspace(workspaceRef, userId, true);
-  const started = performance.now();
   const { config, model, configHash, estimate, documentsTotal } = await planGraphRebuild(workspace, input.mode);
-  options.onEstimateTimed?.(performance.now() - started);
   if (documentsTotal === 0) {
     throw new WorkspaceGraphError(
       input.mode === "full" ? "This workspace has no documents to extract" : "Every document is already extracted with the current settings",

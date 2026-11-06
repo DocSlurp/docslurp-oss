@@ -34,7 +34,6 @@ import { admissionBlock, requireRunCreditLease, isSpendBlockedError, spendBlockJ
 import { creditLeasesEnabled } from "./billing/credit-leases.js";
 import { getWorkspaceAccess, canEditWorkspace } from "./organizations.js";
 import {
-  INLINE_ESTIMATE_BUDGET_MS,
   jobStatusForMutation,
   recordJobMeta,
   type JobMeta,
@@ -104,7 +103,6 @@ export type WorkspaceChangePlan = {
   targets: ReindexTarget[];
   /** Estimate of the re-index work; null when the change creates none. */
   estimate: CostEstimate | null;
-  estimateWithinBudget: boolean;
   /** The workspace row's `updated_at` when planned; apply re-plans if another change landed since. */
   rowVersion: string | null;
 };
@@ -232,8 +230,6 @@ export async function planWorkspaceChange(args: {
   input: UpdateWorkspaceInput;
   indexingMode?: PipelineFeatures["indexingMode"];
   env?: EstimateEnv;
-  /** Inline-estimate budget in ms (default 150). */
-  budgetMs?: number;
   /** Merge a narrow trusted proposal against the same workspace snapshot this plan versions. */
   pipelineOverrides?: PipelineFeatureOverrides;
 }): Promise<WorkspaceChangePlan | null> {
@@ -251,8 +247,6 @@ export async function planWorkspaceChange(args: {
   const beforeConfig = indexConfigOf(workspace.pipeline);
   const afterConfig = indexConfigOf(nextPipeline);
   const hashChanged = indexConfigHash(beforeConfig) !== indexConfigHash(afterConfig);
-  // The whole estimate (target loading included) counts against the inline budget.
-  const started = performance.now();
   let targets: ReindexTarget[] = [];
   if (reindex) {
     // Only an index-config change makes documents' stored hash meaningful; other changes (PII policy,
@@ -292,11 +286,10 @@ export async function planWorkspaceChange(args: {
     }
     estimate = parts.length === 1 ? parts[0]! : sumEstimates(parts);
   }
-  const estimateWithinBudget = performance.now() - started <= (args.budgetMs ?? INLINE_ESTIMATE_BUDGET_MS);
   return {
     workspace, input, nextPipeline, impact, reindex,
     willReindex: willReindex && targets.length > 0 && impact.stages.length > 0,
-    hashChanged, recordsIndexChange, beforeConfig, afterConfig, targets, estimate, estimateWithinBudget, rowVersion,
+    hashChanged, recordsIndexChange, beforeConfig, afterConfig, targets, estimate, rowVersion,
   };
 }
 
@@ -626,8 +619,9 @@ async function applyPlannedChange(args: {
 
   const jobMeta: Omit<JobMeta, "id"> = {
     kind: "reindex",
-    estimate: plan.estimateWithinBudget ? plan.estimate : null,
-    ...(plan.estimateWithinBudget ? {} : { estimateUrl: `/v1/workspaces/${workspace.id}/estimate` }),
+    // The same estimate the estimate route returns (null when the change creates no work).
+    estimate: plan.estimate,
+    estimateUrl: `/v1/workspaces/${workspace.id}/estimate`,
   };
 
   // Everything that reads on other connections happens before the transaction opens.
@@ -763,7 +757,7 @@ export async function canChangeWorkspace(workspaceId: string, userId: string): P
   return Boolean(access && canEditWorkspace(access, userId));
 }
 
-export { INLINE_ESTIMATE_BUDGET_MS, recordJobMeta };
+export { recordJobMeta };
 
 /** Frozen approval work identity; ignores index hashes which this transaction intentionally stamps. */
 export function reindexTargetSignature(targets: readonly ReindexTarget[]): string {

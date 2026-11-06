@@ -34,7 +34,7 @@ export const jobStatusSchema = z.object({
   reason: z.enum(["credits", "budget", "policy"]).optional(),
   queue: z.object({ position: z.number().int().nullable(), ahead: z.number().int().nullable() }),
   runIds: z.array(z.string()),
-  /** Null when not computable within 150 ms; then `estimateUrl` is set. */
+  /** The same estimate `estimateUrl` returns; null when the work has none. */
   estimate: costEstimateSchema.nullable(),
   estimateUrl: z.string().optional(),
   statusUrl: z.string(),
