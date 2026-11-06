@@ -166,8 +166,10 @@ export async function generateOpenRouterText(args: {
       });
 
       noteWorkProgress(`ai:${args.operation}`);
-      const usage = await resolveOpenRouterUsage({ apiKey: args.apiKey, model: args.model, providerName: accounting.providerName(), generationId: result.response.id, receiptRetryDelaysMs: [0, 1_500], usage: { ...result.usage, raw: accounting.usage() ?? result.usage.raw } });
-      const recordedUsage: TextGenerationUsage = { ...usage, metadata: { ...usage.metadata, routedModel: args.model, reasoningTokens: result.usage.outputTokenDetails?.reasoningTokens ?? usage.metadata?.reasoningTokens } };
+      // A restricted request may have been re-targeted at the fallback model: price and record what was sent.
+      const sentModel = accounting.sentModel() ?? args.model;
+      const usage = await resolveOpenRouterUsage({ apiKey: args.apiKey, model: sentModel, providerName: accounting.providerName(), generationId: result.response.id, receiptRetryDelaysMs: [0, 1_500], usage: { ...result.usage, raw: accounting.usage() ?? result.usage.raw } });
+      const recordedUsage: TextGenerationUsage = { ...usage, metadata: { ...usage.metadata, routedModel: sentModel, reasoningTokens: result.usage.outputTokenDetails?.reasoningTokens ?? usage.metadata?.reasoningTokens } };
       return { text: result.text, finishReason: result.finishReason, usage: recordedUsage };
     },
   );

@@ -62,9 +62,13 @@ The vision route retains the same three hosts with either setting. Turning the s
 some text models unavailable:
 
 - **`qwen/qwen3.5-flash-02-23` (the default pipeline text model) is served only by Alibaba.** With China-based
-  providers off, text stages that use it (summaries, document maps, propositions, structured extraction) have no
-  allowed host and fail. Choose a text model with non-China hosts for such workspaces
-  (`pipeline.textGeneration.model`). This was already the case before this change.
+  providers off, OpenRouter answers its requests with 404 "No allowed providers". Text-only requests then fall
+  back automatically to an open-weight model with non-China hosts, `openai/gpt-oss-120b` (Apache-2.0; 21 of 26
+  endpoints outside China on 2026-11-06), still under the same host restriction and at its lowest reasoning
+  (`minimal`). A model found unservable is remembered for an hour, so later requests go straight to the
+  fallback; each fallback logs `[openrouter] region_fallback`. Requests with images, files or audio are never
+  re-targeted. Set `OPENROUTER_RESTRICTED_FALLBACK_MODEL` to another model, or to `none` to turn the fallback
+  off and fail instead. To pick the model yourself, set `pipeline.textGeneration.model` for such workspaces.
 - Providers whose region is unknown (for example Relace, Typesafe, Liquid, NEAR AI, Makora) are never used
   while the setting is off.
 
@@ -100,7 +104,9 @@ changed row, and update the date. A provider missing from the table is `unknown`
 
 Vision and OpenRouter text usage records carry `servedProvider` (the host OpenRouter reported),
 `servedProviderSlug` and `servedProviderRegion` in their metadata, so spend can be broken down by host region.
-Billing still uses the served host's reported charge (`usage.cost`); list prices only bound requests.
+Billing still uses the served host's reported charge (`usage.cost`); list prices only bound requests. A
+request re-targeted at the restricted fallback is priced as the fallback model, and worker text usage records it as
+`routedModel`.
 
 ## Public disclosures
 

@@ -227,7 +227,8 @@ export async function generateOpenRouterText(args: {
 
       return {
         text: result.text,
-        usage: await resolveOpenRouterUsage({ apiKey: args.apiKey, model: args.model ?? SEARCH_OPENROUTER_MODEL, generationId: result.response.id, usage: { ...result.usage, raw: accounting.usage() ?? result.usage.raw } }),
+        // A restricted request may have been re-targeted at the fallback model: price what was sent.
+        usage: await resolveOpenRouterUsage({ apiKey: args.apiKey, model: accounting.sentModel() ?? args.model ?? SEARCH_OPENROUTER_MODEL, generationId: result.response.id, usage: { ...result.usage, raw: accounting.usage() ?? result.usage.raw } }),
       };
     },
   );
@@ -305,7 +306,7 @@ export async function generateOpenRouterDocumentText(args: {
     return {
       text,
       finishReason,
-      usage: await resolveOpenRouterUsage({ apiKey: args.apiKey, model, generationId: response.id, usage: { ...usage, raw: accounting.usage() ?? usage.raw } }),
+      usage: await resolveOpenRouterUsage({ apiKey: args.apiKey, model: accounting.sentModel() ?? model, generationId: response.id, usage: { ...usage, raw: accounting.usage() ?? usage.raw } }),
       sources,
     };
   }
