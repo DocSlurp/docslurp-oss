@@ -24,6 +24,8 @@ export interface ExtractedCandidate {
    * its own reads (ocr/ledger.ts); the stage only records the reads an extractor reports without having charged them.
    */
   ocrPages?: number[];
+  /** Layout facts the sandboxed PDF provider returned from the same VM job (validated; see SandboxedPdfResult). */
+  layoutFacts?: Map<number, import("../lib/page-layout-facts.js").PageLayoutFacts>;
   /** The extractor already charged its OCR reads through the ledger (the OCR engine does); the stage must not again. */
   ocrCharged?: boolean;
 }

@@ -412,6 +412,22 @@ class LayoutFactsTest(unittest.TestCase):
         for page in run('tables-multipage-financials.pdf', 3):
             self.assertGreaterEqual(page['tables'][0]['rows'], 5)
 
+    @unittest.skipUnless(shutil.which('pdfimages'), 'needs poppler-utils')
+    def test_chunks_share_the_whole_range_furniture(self):
+        source = self.FIXTURES / 'routing-letterhead-logo.pdf'
+        listing = subprocess.run(['pdfimages', '-list', str(source)], capture_output=True, text=True, check=True).stdout
+        rows = []
+        for line in listing.split('\n')[2:]:
+            if line.split():
+                rows.append(facts.parse_listing_row(line.split()))
+        pages = max(row['pageNumber'] for row in rows)
+        whole = facts.layout_facts(str(source), listing, None, None, 1, pages)['pages']
+        furniture = facts.repeated_objects(rows, pages)
+        chunk = facts.layout_facts(str(source), listing, None, None, 2, 2, repeated=furniture)['pages']
+        self.assertTrue(whole[1]['images'][0]['repeated'])
+        self.assertEqual(chunk[0]['images'], whole[1]['images'])
+        self.assertFalse(facts.layout_facts(str(source), listing, None, None, 2, 2, repeated=set())['pages'][0]['images'][0]['repeated'])
+
     def test_unknown_inputs_are_null_never_zero(self):
         data = PdfBuilder().build() if hasattr(PdfBuilder(), 'build') else None
         if data is None:

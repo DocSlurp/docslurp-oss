@@ -27,6 +27,7 @@ import {
 import { SandboxRunError, type SandboxResult } from "../sandbox/types.js";
 import type { UsageEvent } from "../models.js";
 import { currentPerfContext } from "../lib/perf-context.js";
+import { parsePageLayoutFacts, type PageLayoutFacts } from "../lib/page-layout-facts.js";
 import { planPageShards, type ShardCostProfile } from "../temporal/page-shards.js";
 import { registerShardProfile } from "../temporal/page-shard-profiles.js";
 import { resolveModalImage, type ModalSdk } from "../sandbox/providers/modal/index.js";
@@ -83,6 +84,12 @@ export interface SandboxedPdfResult extends SandboxResult {
    * fact never raises a charge. Validated by the host: unique integers within the document's page count.
    */
   ocrPages?: number[];
+  /**
+   * Structural page layout from the same VM job (pdf-layout-facts@1, the open walker worker/scripts/pdf_layout_facts.py,
+   * page numbers of the whole document). Untrusted: the host parses it with its bounded reader and drops pages outside the
+   * document. Omit when unknown; missing or malformed facts never authorize a read.
+   */
+  layoutFacts?: unknown;
 }
 
 /** Upper bound on a provider's Markdown output, checked before the host reads it. */
@@ -269,6 +276,7 @@ export function requireSandboxedPdfProvider(): SandboxedPdfExtractorProvider {
 }
 
 const reportedOcrPages = new WeakMap<SandboxedPdfJob, number[]>();
+const reportedLayoutFacts = new WeakMap<SandboxedPdfJob, Map<number, PageLayoutFacts>>();
 
 /**
  * Validate a provider run's `ocrPages` against the page count and keep them for the job. A malformed list refuses the
@@ -276,6 +284,14 @@ const reportedOcrPages = new WeakMap<SandboxedPdfJob, number[]>();
  */
 export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: SandboxedPdfResult, pages: number): SandboxedPdfResult {
   reportedOcrPages.delete(job);
+  reportedLayoutFacts.delete(job);
+  if (result.layoutFacts !== undefined) {
+    // Routing evidence, not billing evidence: a malformed payload is dropped (routing then has no layout facts), never repaired.
+    const layout = parsePageLayoutFacts(result.layoutFacts, Number.isSafeInteger(pages) && pages > 0 ? pages : MAX_REPORTED_PAGES);
+    if (layout.size > 0) reportedLayoutFacts.set(job, layout);
+    else console.warn("[vm-pdf] layout facts unusable; routing continues without them");
+    result = { ...result, layoutFacts: undefined };
+  }
   const raw: unknown = result.ocrPages;
   if (raw === undefined) return result;
   const bound = Number.isSafeInteger(pages) && pages > 0 ? pages : MAX_REPORTED_PAGES;
@@ -286,6 +302,11 @@ export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: Sandboxed
   const ocrPages = [...(raw as number[])].sort((a, b) => a - b);
   reportedOcrPages.set(job, ocrPages);
   return { ...result, ocrPages };
+}
+
+/** The validated layout facts a finished job returned, or undefined when it returned none usable. */
+export function sandboxedPdfLayoutFacts(job: SandboxedPdfJob): Map<number, PageLayoutFacts> | undefined {
+  return reportedLayoutFacts.get(job);
 }
 
 /** The validated pages a finished job reported it OCR'd, or undefined when the provider did not say. */

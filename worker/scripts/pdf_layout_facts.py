@@ -1638,7 +1638,7 @@ def union_coverage(boxes, visible_box_):
     return round(len(covered) / (n * n), 4)
 
 
-def layout_facts(path, listing_text, xhtml_text, page_markdowns, first, last, deadline=None):
+def layout_facts(path, listing_text, xhtml_text, page_markdowns, first, last, deadline=None, repeated=None):
     """Structural layout facts for routing, per page in [first, last]:
 
     * images: each listed image drawn on the page with its placement (walker), stream facts (`pdfimages -list`: pixel
@@ -1650,7 +1650,9 @@ def layout_facts(path, listing_text, xhtml_text, page_markdowns, first, last, de
 
     `listing_text` is `pdfimages -list` output, `xhtml_text` is `pdftotext -bbox-layout` output for the same range, and
     `page_markdowns` maps page numbers to the extractor's Markdown. Any of them may be None: the facts that need it are
-    then reported as unknown (null), never as zero.
+    then reported as unknown (null), never as zero. `repeated` is the set of page-furniture object ids when the caller
+    works through a longer range in chunks (`repeated_objects` over the whole range's listing rows); by default it is
+    computed from `listing_text` over [first, last].
     """
     if last - first + 1 > MAX_LAYOUT_PAGES:
         raise Unknown('range')
@@ -1671,7 +1673,8 @@ def layout_facts(path, listing_text, xhtml_text, page_markdowns, first, last, de
             except ValueError:
                 continue
     placed = match_placements(rows, walks) if listing_text is not None else {}
-    repeated = repeated_objects(rows, last - first + 1)
+    if repeated is None:
+        repeated = repeated_objects(rows, last - first + 1)
     words = page_words(xhtml_text, range(last - first + 1)) if xhtml_text is not None else {}
     rules = page_rules(xhtml_text, range(last - first + 1)) if xhtml_text is not None else {}
     pages = []

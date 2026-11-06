@@ -2,7 +2,7 @@ import { BLANK_PAGE_SIGNAL, DRAWN_CONTENT_SIGNAL, GARBLED_TEXT_LAYER_SIGNAL, TEX
 import { describe, expect, it } from "vitest";
 
 import type { PageImageEvidence } from "../lib/page-image-evidence.js";
-import { classifyAdaptivePage, pageReadReason, summarizeRoutingDecisions } from "./classify-route.js";
+import { classifyAdaptivePage, pageReadReason, parsePageLayoutFacts, summarizeRoutingDecisions } from "./classify-route.js";
 
 const page = (pageNumber: number, ocrDecision?: { authorized: boolean; signals: string[] }) =>
   ({ pageNumber, ocrDecision: ocrDecision && { confidence: 0.9, ...ocrDecision } }) as unknown as AdaptivePageRoutingEntry;
@@ -138,5 +138,29 @@ describe("tables in the shapes extraction writes them", () => {
   it("still reads real code beside a table as code", () => {
     const text = [htmlTable([["a", "b"], ["1", "2"]]), "export function total(items) {", "  const sum = items.reduce((acc, item) => acc + item, 0);", "  return sum;", "}", "import { total } from './total';"].join("\n");
     expect(classifyAdaptivePage(1, text).route).toBe("code-heavy");
+  });
+});
+
+describe("layout facts artifact (pdf-layout-facts@1)", () => {
+  const image = { bbox: [0, 0, 300, 400], coverage: 0.3, widthPx: 1200, heightPx: 1600, bitsPerComponent: 1, colorSpace: "gray", encoding: "ccitt", ppi: [300, 300], bytesPerPixel: null, repeated: false, wordsInside: 0 };
+
+  it("reads only the walker's version, known pages and well-formed numbers", () => {
+    expect(parsePageLayoutFacts({ version: "pdf-layout-facts@2", pages: [{ pageNumber: 1, known: true, images: [image] }] }).size).toBe(0);
+    expect(parsePageLayoutFacts(null).size).toBe(0);
+    const pages = parsePageLayoutFacts({ version: "pdf-layout-facts@1", pages: [
+      { pageNumber: 1, known: false, images: [image] },
+      { pageNumber: 0, known: true, images: [image] },
+      { pageNumber: 2.5, known: true, images: [image] },
+      { pageNumber: 3, known: true, words: 80, images: [{ ...image, bbox: [0, 0, "x", 1], coverage: Number.NaN, wordsInside: "0" }], tables: null },
+    ] });
+    expect([...pages.keys()]).toEqual([3]);
+    // An unplaced image with unknown words inside never authorizes a read.
+    expect(pages.get(3)!.images![0]).toMatchObject({ bbox: null, coverage: null, wordsInside: null });
+  });
+
+  it("caps images and tables per page", () => {
+    const pages = parsePageLayoutFacts({ version: "pdf-layout-facts@1", pages: [{ pageNumber: 1, known: true, images: Array(500).fill(image), tables: Array(500).fill({ rows: 2, columns: 2, coverage: 0.01 }) }] });
+    expect(pages.get(1)!.images).toHaveLength(64);
+    expect(pages.get(1)!.tables).toHaveLength(64);
   });
 });

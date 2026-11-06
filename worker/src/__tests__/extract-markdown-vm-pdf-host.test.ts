@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { defaultPipelineFeatures, normalizeStoredPipelineFeatures } from "@docslurp/shared";
 
 import { acceptSandboxedPdfResult, type SandboxedPdfJob } from "../extractors/plugins.js";
+import { VISION_ROUTING_VERSION_SLOT } from "../lib/vision-routing-v2.js";
 import type { Document, WorkspaceRun } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
@@ -27,10 +28,11 @@ function run(documentExtraction: Record<string, unknown> = {}): WorkspaceRun {
   } as WorkspaceRun;
 }
 
-async function harness(providerResult: { ocrPages?: unknown; markdown: string }, documentExtraction: Record<string, unknown> = {}) {
+async function harness(providerResult: { ocrPages?: unknown; layoutFacts?: unknown; markdown: string }, documentExtraction: Record<string, unknown> = {}) {
   const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-vm-pdf-host-test-"));
   const calls: string[] = [];
   const commands: CommandPlan[] = [];
+  const json = new Map<string, unknown>();
   const plan = (binary: string): CommandPlan => ({ binary, args: [], available: true });
   const target: Record<string, unknown> = {
     sandboxedPdfMarkdown: async (input: string, output: string) =>
@@ -41,7 +43,8 @@ async function harness(providerResult: { ocrPages?: unknown; markdown: string },
       // What the runner does for a provider job: the provider writes Markdown, the host validates its result.
       await writeFile(command.sandboxedPdf.output, providerResult.markdown);
       acceptSandboxedPdfResult(command.sandboxedPdf as SandboxedPdfJob,
-        { exitCode: 0, stdout: "", stderr: "", ...(providerResult.ocrPages !== undefined ? { ocrPages: providerResult.ocrPages as number[] } : {}) }, 3);
+        { exitCode: 0, stdout: "", stderr: "", ...(providerResult.ocrPages !== undefined ? { ocrPages: providerResult.ocrPages as number[] } : {}),
+          ...(providerResult.layoutFacts !== undefined ? { layoutFacts: providerResult.layoutFacts } : {}) }, 3);
       return { stdout: "", stderr: "" };
     },
   };
@@ -57,7 +60,7 @@ async function harness(providerResult: { ocrPages?: unknown; markdown: string },
   const storage = {
     uri: (key: string) => `s3://test/${key}`,
     putBytes: async () => undefined,
-    putJson: async () => undefined,
+    putJson: async (key: string, value: unknown) => { json.set(key, value); },
     streamText: async () => undefined,
     createMultipartUploadStream: () => ({ writable: new Writable({ write(_chunk, _encoding, done) { done(); } }), done: Promise.resolve() }),
   };
@@ -84,7 +87,7 @@ async function harness(providerResult: { ocrPages?: unknown; markdown: string },
     ...calls.filter((name) => /^pdf|pageText|extractText|ocrPdf|images|info|render|rasteri[sz]e/i.test(name)),
     ...commands.filter((command) => !command.sandboxedPdf).map((command) => command.binary),
   ];
-  return { stage, state, calls, commands, hostPdf, richIds, upsertPageFacts, cleanup: () => rm(scratch, { recursive: true, force: true }) };
+  return { stage, state, calls, commands, json, hostPdf, richIds, upsertPageFacts, cleanup: () => rm(scratch, { recursive: true, force: true }) };
 }
 
 describe("the sandboxed PDF route on the worker host", () => {
@@ -158,6 +161,43 @@ describe("the sandboxed PDF route on the worker host", () => {
       expect(h.hostPdf()).toEqual([]);
       expect(h.richIds()).toEqual([]);
     } finally { await h.cleanup(); }
+  });
+
+  it("stores the VM's layout facts for routing without probing the host; drops pages outside the document", async () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
+    const scan = { bbox: [72, 200, 540, 600], coverage: 0.4, widthPx: 1700, heightPx: 1450, bitsPerComponent: 1, colorSpace: "gray",
+      encoding: "ccitt", ppi: [260, 260], bytesPerPixel: null, repeated: false, wordsInside: 0 };
+    const layoutFacts = { version: "pdf-layout-facts@1", pages: [
+      { pageNumber: 2, known: true, words: 90, images: [scan], tables: [], grids: [], tableCoverage: 0 },
+      { pageNumber: 9, known: true, words: 90, images: [scan] },
+    ] };
+    const h = await harness({ markdown: "OneTwo with a scan beside itThree", layoutFacts });
+    h.state.artifactLedger.record(VISION_ROUTING_VERSION_SLOT, "v3");
+    try {
+      await h.stage.run(h.state);
+      expect(h.state.documentStage("doc-1", "extract-markdown")?.status).toBe("completed");
+      expect(h.hostPdf()).toEqual([]);
+      const uri = h.state.artifactLedger.readDocument("doc-1", "page-layout-facts");
+      expect(uri).toMatch(/page-layout-facts\/doc-1\.json$/);
+      const stored = [...h.json.entries()].find(([key]) => key.includes("page-layout-facts/"))![1] as { source: string; pages: Array<{ pageNumber: number }> };
+      expect(stored.source).toBe("vm-pdf");
+      expect(stored.pages.map((page) => page.pageNumber)).toEqual([2]);
+    } finally { await h.cleanup(); }
+  });
+
+  it("ignores malformed VM layout facts: no artifact, the run completes", async () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    for (const layoutFacts of [{ version: "pdf-layout-facts@9", pages: [] }, "garbage", { version: "pdf-layout-facts@1", pages: [{ pageNumber: 99, known: true }] }]) {
+      const h = await harness({ markdown: "OneTwoThree", layoutFacts });
+      h.state.artifactLedger.record(VISION_ROUTING_VERSION_SLOT, "v3");
+      try {
+        await h.stage.run(h.state);
+        expect(h.state.documentStage("doc-1", "extract-markdown")?.status).toBe("completed");
+        expect(h.state.artifactLedger.readDocument("doc-1", "page-layout-facts")).toBeUndefined();
+      } finally { await h.cleanup(); }
+    }
+    vi.restoreAllMocks();
   });
 
   it("refuses a provider result whose ocrPages fall outside the page count or repeat", () => {

@@ -81,7 +81,7 @@ describe("OCR provenance in page triage", () => {
   });
 
   it("keeps a table route for an OCR'd scan whose text keeps numeric rows", () => {
-    const rows = ["Item Qty Price", "Bolts 12 4.50", "Nuts 30 2.10", "Washers 100 1.25", "Total 142 7.85"].join("\n");
+    const rows = ["Item Qty Price", "Bolts 12 4.50", "Nuts 30 2.10", "Washers 100 1.25", "Pins 40 0.60", "Total 182 8.45"].join("\n");
     const routed = surface({
       text: rows,
       evidence: [{ pageNumber: 1, wordCount: 0, imageCount: 1, imageCoverage: 1, largestImageCoverage: 1 }],

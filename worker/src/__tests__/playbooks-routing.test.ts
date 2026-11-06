@@ -173,11 +173,13 @@ describe("classifyTextAndFilename", () => {
   it("recognizes Markdown tables without requiring chart-like terms", () => {
     const page = classifyAdaptivePage(
       1,
-      "| Region | Product | Q1 | Q2 |\n|---|---|---|---|\n| North | Crawler | 120 | 124 |",
+      "| Region | Product | Q1 | Q2 |\n|---|---|---|---|\n| North | Crawler | 120 | 124 |\n| South | Crawler | 98 | 101 |\n| East | Loader | 77 | 80 |\n| West | Loader | 64 | 70 |",
     );
 
     expect(page.route).toBe("table-heavy");
     expect(page.extractorHint).toBe("layout-aware");
+    // Owner rule (2026-11-05): a two-row table is not a table-heavy page.
+    expect(classifyAdaptivePage(1, "| Region | Product | Q1 | Q2 |\n|---|---|---|---|\n| North | Crawler | 120 | 124 |").route).not.toBe("table-heavy");
   });
 
   it("recognizes extracted form fields expressed as Markdown headings", () => {
