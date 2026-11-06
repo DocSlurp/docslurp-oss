@@ -27,9 +27,14 @@ describe("modal startup probe requires the parser-vm@2 contract", () => {
     ["parser-vm@1", JSON.stringify({ protocol: "parser-vm@1" }), 0],
     ["empty output", "", 0],
     ["no protocol", "{}", 0],
+    ["link protections off", JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: 0, symlinks: 0 } }), 0],
+    ["hardlink protection off", JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: 0, symlinks: 1 } }), 0],
+    ["link protections absent", JSON.stringify({ protocol: "parser-vm@2", uid: 10001 }), 0],
+    ["link protections null", JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: null, symlinks: null } }), 0],
+    ["link protections malformed", JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: "1", symlinks: 2 } }), 0],
     ["parser-vm@2 run as root", JSON.stringify({ protocol: "parser-vm@2", uid: 0 }), 0],
     ["parser-vm@2 without a uid", JSON.stringify({ protocol: "parser-vm@2" }), 0],
-    ["a failed run", JSON.stringify({ protocol: "parser-vm@2", uid: 10001 }), 1],
+    ["a failed run", JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: 1, symlinks: 1 } }), 1],
   ])("%s fails the probe and refuses startup", async (_, stdout, exitCode) => {
     const close = fakeSession(stdout, exitCode);
     const probe = await modal.probe(modal.readConfig(env));
@@ -39,7 +44,7 @@ describe("modal startup probe requires the parser-vm@2 contract", () => {
   });
 
   it("parser-vm@2 passes", async () => {
-    fakeSession(JSON.stringify({ protocol: "parser-vm@2", uid: 10001 }));
+    fakeSession(JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: 1, symlinks: 1 } }));
     expect((await modal.probe(modal.readConfig(env))).ok).toBe(true);
     await expect(initializeParserSandbox(env, "linux")).resolves.toMatchObject({ provider: modal });
   });

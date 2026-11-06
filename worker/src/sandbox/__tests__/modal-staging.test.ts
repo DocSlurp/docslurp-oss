@@ -449,7 +449,7 @@ describe("modal provider session lifecycle", () => {
     vi.useFakeTimers();
     try {
       vi.spyOn(console, "warn").mockImplementation(() => {});
-      const { sdk, state } = fakeSdk({ terminateHangs: true, exec: async () => finished(JSON.stringify({ protocol: "parser-vm@2", uid: 10001 })) });
+      const { sdk, state } = fakeSdk({ terminateHangs: true, exec: async () => finished(JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: 1, symlinks: 1 } })) });
       const provider = createModalProvider(async () => sdk);
       const probing = provider.probe(config);
       await vi.advanceTimersByTimeAsync(10_001);

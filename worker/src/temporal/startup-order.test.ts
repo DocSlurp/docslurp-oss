@@ -18,7 +18,7 @@ function fakeSdk(): ModalSdk {
     sandboxId: "sb-test",
     terminate: async () => {},
     filesystem: { makeDirectory: async () => {}, stat: async () => { throw new Error("absent"); }, listFiles: async () => [] },
-    exec: async () => ({ stdout: stream(JSON.stringify({ protocol: "parser-vm@2", uid: 10001 })), stderr: stream(""), wait: async () => 0 }),
+    exec: async () => ({ stdout: stream(JSON.stringify({ protocol: "parser-vm@2", uid: 10001, links: { hardlinks: 1, symlinks: 1 } })), stderr: stream(""), wait: async () => 0 }),
   };
   return {
     SandboxFilesystemNotFoundError: class extends Error {},
