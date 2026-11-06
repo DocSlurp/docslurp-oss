@@ -51,6 +51,33 @@ describe("POST /v1/estimate (public)", () => {
     expect(huge.status).toBe(413);
   });
 
+  it("never lets a quote, refusal or rate-limit answer be cached (council E #7)", async () => {
+    const good = { name: "a.pdf", size: 40_000, profile: profile(40_000, 12) };
+    const responses = [
+      await post({ files: [{ ...good, profile: { ...good.profile, credits: 0 } }] }),
+      await post({ files: [good], workspace: "ws-1" }),
+      await post({ files: Array.from({ length: 201 }, () => good) }),
+      await app().request("/v1/estimate", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ files: [good], pad: "x".repeat(1_100_000) }) }),
+    ];
+    expect(responses.map((response) => response.status)).toEqual([400, 400, 413, 413]);
+    for (const response of responses) expect(response.headers.get("cache-control")).toBe("no-store");
+    vi.stubEnv("ESTIMATE_RATE_LIMIT_PER_MINUTE", "0");
+    const limited = await post({ files: [good] }, { "x-forwarded-for": "203.0.113.99" });
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("marks the session cookie Secure from configuration, never from the request URL behind TLS termination (council E #7)", async () => {
+    const { estimateCookieSecure } = await import("../routes/estimate.js");
+    expect(estimateCookieSecure({ NODE_ENV: "production", APP_URL: "http://internal:3000" })).toBe(true);
+    expect(estimateCookieSecure({ NODE_ENV: "development", APP_URL: "https://docslurp.io" })).toBe(true);
+    expect(estimateCookieSecure({ NODE_ENV: "development", APP_URL: "http://localhost:4321" })).toBe(false);
+    vi.stubEnv("NODE_ENV", "production");
+    // The proxy forwards plain http to the app; the cookie is still Secure.
+    const response = await app().request("http://internal/v1/estimate", { method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": "203.0.113.50" }, body: JSON.stringify({ files: [{ name: "a.pdf", size: 40_000, profile: profile(40_000, 12) }] }) });
+    expect(response.headers.get("set-cookie")).toMatch(/ds_estimate_session=[^;]+;.*Secure/);
+  });
+
   it("clamps a profile that lies about its file: another size is ignored, counts are bounded", async () => {
     const lying = await (await post({ files: [{ name: "a.pdf", size: 40_000, profile: profile(9, 9_999_999) }] })).json() as { files: { profiled: number }; pages: { high: number } };
     expect(lying.files.profiled).toBe(0);

@@ -32,6 +32,16 @@ const WINDOW_MS = 60_000;
 const SESSION_COOKIE = "ds_estimate_session";
 const SESSION_PATTERN = /^[A-Za-z0-9_-]{22}$/;
 
+/**
+ * Whether the quote-session cookie is marked Secure: always in production and whenever the configured public URL is https.
+ * Never from the request: behind TLS termination the request URL reads http, and a forwarded-proto header is the client's to
+ * forge where no trusted proxy rewrites it.
+ */
+export function estimateCookieSecure(env: Record<string, string | undefined> = process.env): boolean {
+  if (env.NODE_ENV === "production") return true;
+  return [env.APP_URL, env.API_URL].some((url) => url?.trim().toLowerCase().startsWith("https://"));
+}
+
 function perMinuteLimit(name: string, fallback: number, env: Record<string, string | undefined> = process.env): number {
   const parsed = Number.parseInt(env[name] ?? "", 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
@@ -39,6 +49,13 @@ function perMinuteLimit(name: string, fallback: number, env: Record<string, stri
 
 export const estimateRoutes = new Hono().post(
   "/",
+  // No quote, refusal or rate-limit answer is ever cached: set before anything else answers (the body limit's 413, the
+  // schema's 400, the limiter's 429) and again on whatever response the chain produced.
+  async (c, next) => {
+    c.header("Cache-Control", "no-store");
+    await next();
+    c.res.headers.set("Cache-Control", "no-store");
+  },
   nativeBodyLimit(ESTIMATE_MAX_BODY_BYTES),
   zValidator("json", estimateRequestSchema),
   async (c) => {
@@ -47,7 +64,7 @@ export const estimateRoutes = new Hono().post(
     let session = getCookie(c, SESSION_COOKIE);
     if (!session || !SESSION_PATTERN.test(session)) {
       session = randomBytes(16).toString("base64url");
-      setCookie(c, SESSION_COOKIE, session, { httpOnly: true, sameSite: "Lax", secure: new URL(c.req.url).protocol === "https:", path: "/", maxAge: 24 * 3600 });
+      setCookie(c, SESSION_COOKIE, session, { httpOnly: true, sameSite: "Lax", secure: estimateCookieSecure(), path: "/", maxAge: 24 * 3600 });
     }
     let retryAfter = await consumeFeatureRateLimit({
       feature: "public-estimate",
@@ -72,7 +89,6 @@ export const estimateRoutes = new Hono().post(
     if (body.files.length > ESTIMATE_MAX_FILES_ANONYMOUS) {
       return apiErrorResponse(c, 413, "payload_too_large", `Send at most ${ESTIMATE_MAX_FILES_ANONYMOUS} files per estimate`);
     }
-    c.header("Cache-Control", "no-store");
     try {
       return c.json(quoteEstimate(body));
     } catch (error) {
