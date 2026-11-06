@@ -146,8 +146,8 @@ RUN cmake -S /src/doppler -B /src/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
     && rm -rf /out/usr/lib/doppler/include /out/usr/lib/doppler/lib/pkgconfig /out/usr/lib/doppler/lib/cmake /out/usr/lib/doppler/share/man \
     && install -D -m 0644 /src/doppler/COPYING /out/usr/lib/doppler/share/doc/doppler/COPYING \
     && install -D -m 0644 /src/doppler/COPYING3 /out/usr/lib/doppler/share/doc/doppler/COPYING3 \
-    && printf 'Doppler (GPL-2.0-or-later). Corresponding source: https://github.com/DocSlurp/doppler/tree/827b3cccecfdcfe61ad89335ec2fb5476df014da (tarball: https://github.com/DocSlurp/doppler/releases/download/docslurp-827b3cc/doppler-827b3cc-src.tar.gz)\n' > /out/usr/lib/doppler/share/doc/doppler/SOURCE \
-    && for tool in pdftotext pdftohtml pdfinfo pdfimages pdftoppm pdfseparate pdfunite; do test -x "/out/usr/lib/doppler/bin/$tool"; done
+    && printf 'Doppler (GPL-2.0-or-later). Corresponding source: https://github.com/DocSlurp/doppler/tree/c69df42525eb44a803435086f520c7255d741b0a (tarball: https://github.com/DocSlurp/doppler/releases/download/docslurp-c69df42/doppler-c69df42-src.tar.gz)\n' > /out/usr/lib/doppler/share/doc/doppler/SOURCE \
+    && for tool in pdftotext pdftohtml pdfinfo pdfimages pdftoppm pdfseparate pdfunite pdfpagecount; do test -x "/out/usr/lib/doppler/bin/$tool"; done
 
 FROM rust:1.99-slim-trixie@sha256:7eab7ce19273ce785e0ca7578bdf7bc1fcbae621775a8197379a04c9f6e03cd5 AS doppler-md
 COPY --from=doppler-src /src/doppler/docslurp/doppler-md /src/doppler-md
@@ -222,6 +222,7 @@ COPY --from=doppler-md /out/usr/lib/doppler/bin/ /usr/lib/doppler/bin/
 ENV DOCSLURP_DOPPLER_BIN_DIR=/usr/lib/doppler/bin
 ENV DOCSLURP_DOPPLER_REQUIRED=1
 RUN /usr/lib/doppler/bin/pdftotext -v && test -x /usr/lib/doppler/bin/pdftomarkdown \
+    && /usr/lib/doppler/bin/pdfpagecount -v && command -v prlimit \
     && test "$(command -v pdftotext)" = /usr/bin/pdftotext && ! command -v pdftomarkdown
 # Owned by the worker user so the optional first-boot install can extend it.
 COPY --from=python-venv --chown=10001:10001 /app/.venv /app/.venv
@@ -279,9 +280,9 @@ RUN node scripts/write-component-provenance.mjs \
       --doppler worker/doppler.json --doppler-prefix /usr/lib/doppler \
       --engine-manifest /app/vendor-artifacts/native-pdf/manifest.json
 LABEL io.docslurp.doppler.source="https://github.com/DocSlurp/doppler" \
-      io.docslurp.doppler.commit="827b3cccecfdcfe61ad89335ec2fb5476df014da" \
+      io.docslurp.doppler.commit="c69df42525eb44a803435086f520c7255d741b0a" \
       io.docslurp.doppler.license="GPL-2.0-or-later" \
-      io.docslurp.doppler.corresponding-source="https://github.com/DocSlurp/doppler/tree/827b3cccecfdcfe61ad89335ec2fb5476df014da" \
+      io.docslurp.doppler.corresponding-source="https://github.com/DocSlurp/doppler/tree/c69df42525eb44a803435086f520c7255d741b0a" \
       io.docslurp.sbom.native-components="/usr/share/doc/docslurp/sbom/native-components.spdx.json"
 ENV NATIVE_PDF_OCR_MODEL_DIR=${DOCSLURP_NATIVE_PDF_OCR_MODELS:+/opt/native-pdf/ocr-models}
 ENV NATIVE_PDF_FONTS_DIR=${DOCSLURP_NATIVE_PDF_CJK_FONTS:+/opt/native-pdf/fonts}

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { countPdfPages } from "../lib/pdf-page-count.js";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -57,9 +58,9 @@ async function recordedDopplerFile(inputPath: string, fixtureRoot: string, exten
 }
 
 async function extractedText(evidence: Evidence, inputPath: string, fixtureRoot: string, runner: CommandRunner): Promise<{ text: string; extractor: string }> {
-  if (evidence === "poppler-text") return { text: (await runner.run(await runner.extractText(inputPath, true))).stdout, extractor: "poppler-text" };
+  if (evidence === "poppler-text") return { text: (await runner.run(await runner.extractText(inputPath, await countPdfPages(runner, inputPath), true))).stdout, extractor: "poppler-text" };
   if (evidence === "doppler-live") {
-    const plan = await runner.dopplerMarkdown(inputPath);
+    const plan = await runner.dopplerMarkdown(inputPath, await countPdfPages(runner, inputPath));
     if (!plan.available) throw new Error(`doppler-live evidence needs pdftomarkdown at ${dopplerConverterPath()}`);
     return { text: (await runner.run(plan)).stdout, extractor: "doppler-md" };
   }

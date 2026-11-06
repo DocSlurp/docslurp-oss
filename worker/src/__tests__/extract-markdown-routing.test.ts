@@ -69,7 +69,7 @@ describe("extract markdown PDF routing", () => {
     );
 
     const planned = await (stage as any).planExtractors({
-      tempFile: "/tmp/sample.pdf",
+      tempFile: "/tmp/sample.pdf", pageCount: 3,
       format: "pdf",
       order: {},
       options: {},
@@ -96,7 +96,7 @@ describe("extract markdown PDF routing", () => {
 
     setNativePdfEngineForTesting(fakeNativeEngine());
     const planned = await (stage as any).planExtractors({
-      tempFile: "/tmp/sample.pdf",
+      tempFile: "/tmp/sample.pdf", pageCount: 3,
       format: "pdf",
       order: {},
       options: {},
@@ -122,7 +122,7 @@ describe("extract markdown PDF routing", () => {
     );
     setNativePdfEngineForTesting(fakeNativeEngine());
     const planned = await (stage as any).planExtractors({
-      tempFile: "/tmp/sample.pdf", format: "pdf", order: {}, options: {}, multiStrategyVoting: true,
+      tempFile: "/tmp/sample.pdf", pageCount: 3, format: "pdf", order: {}, options: {}, multiStrategyVoting: true,
       secondaryId: "next-in-order", attemptLedger: new ExtractorAttemptLedger(),
     });
     expect(planned.primary.label).toBe("doppler-md");
@@ -135,7 +135,7 @@ describe("extract markdown PDF routing", () => {
   it("in local mode, plans a missing pdftomarkdown as unavailable with an error (startup refuses local mode without it)", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const runner = { dopplerMarkdown: async () => ({ binary: "/usr/lib/doppler/bin/pdftomarkdown", args: [], available: false }) } as any;
-    const prepared = await documentExtractorRegistry.prepare("doppler-md", runner, "/tmp/sample.pdf", undefined, { format: "pdf", env: { DOCSLURP_PDF_MODE: "local" } });
+    const prepared = await documentExtractorRegistry.prepare("doppler-md", runner, "/tmp/sample.pdf", undefined, { format: "pdf", pageCount: 3, env: { DOCSLURP_PDF_MODE: "local" } });
     expect(prepared.plan.available).toBe(false);
     expect(error.mock.calls.flat().join(" ")).toContain("doppler-md unavailable");
   });
@@ -174,7 +174,7 @@ describe("extract markdown PDF routing", () => {
     const attemptLedger = new ExtractorAttemptLedger();
     attemptLedger.reserve("native-pdf");
     const planned = await (stage as any).planExtractors({
-      tempFile: "/tmp/sample.pdf",
+      tempFile: "/tmp/sample.pdf", pageCount: 3,
       format: "pdf",
       order: { pdf: ["native-pdf", "poppler-text"] },
       options: {},
@@ -199,7 +199,7 @@ describe("extract markdown PDF routing", () => {
     const attemptLedger = new ExtractorAttemptLedger();
     // doppler-md is unavailable here (pdftomarkdown not installed), so it is recorded and never planned.
     const args = {
-      tempFile: "/tmp/sample.pdf", format: "pdf", order: { pdf: ["doppler-md", "native-pdf", "poppler-text"] }, options: {},
+      tempFile: "/tmp/sample.pdf", pageCount: 3, format: "pdf", order: { pdf: ["doppler-md", "native-pdf", "poppler-text"] }, options: {},
       multiStrategyVoting: true, secondaryId: "next-in-order", attemptLedger,
     };
     setNativePdfEngineForTesting(fakeNativeEngine());
@@ -224,7 +224,7 @@ describe("extract markdown PDF routing", () => {
     setNativePdfEngineForTesting(fakeNativeEngine());
     const attemptLedger = new ExtractorAttemptLedger();
     const args = {
-      tempFile: "/tmp/sample.pdf", format: "pdf",
+      tempFile: "/tmp/sample.pdf", pageCount: 3, format: "pdf",
       order: { pdf: ["native-pdf", "poppler-text"] }, options: {},
       multiStrategyVoting: true, secondaryId: "poppler-text", attemptLedger,
     };

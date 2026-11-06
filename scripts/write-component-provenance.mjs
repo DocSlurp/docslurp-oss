@@ -34,7 +34,7 @@ function filesUnder(root, filter) {
 
 export function dopplerComponent(pin, prefix) {
   if (!PUBLIC_REPO.test(pin.repository) || !COMMIT.test(pin.commit)) throw new Error("worker/doppler.json needs a public repository URL and a 40-hex commit");
-  const tools = ["pdftotext", "pdftohtml", "pdfinfo", "pdfimages", "pdftoppm", "pdfseparate", "pdfunite", "pdfattach", "pdfdetach", "pdffonts", "pdftops", "doppler-md", "pdftomarkdown"];
+  const tools = ["pdftotext", "pdftohtml", "pdfinfo", "pdfpagecount", "pdfimages", "pdftoppm", "pdfseparate", "pdfunite", "pdfattach", "pdfdetach", "pdffonts", "pdftops", "doppler-md", "pdftomarkdown"];
   const files = [
     ...tools.map((tool) => path.join(prefix, "bin", tool)).filter(existsSync),
     ...filesUnder(path.join(prefix, "lib"), (file) => /libpoppler\.so/.test(path.basename(file))),

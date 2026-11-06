@@ -5,8 +5,8 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
-  DENSE_PAGE_EQUIVALENTS, DISTINCT_TEST_PRICING, PAGE_AREA_EQUIVALENTS_CAP, installTestPricing, defaultPipelineFeatures, imageAreaEquivalents, measuredTextPages, pageAreaEquivalentsPt,
-  pageTextEquivalents, stripHtmlMarkup,
+  DENSE_PAGE_EQUIVALENTS, PAGE_AREA_EQUIVALENTS_CAP, defaultPipelineFeatures, imageAreaEquivalents, measuredTextPages, pageAreaEquivalentsPt,
+  pageTextEquivalents, stripHtmlMarkup, billedPageEquivalents, billedPagePageEquivalents, DEFAULT_PAGE_EQUIVALENT_ALLOWANCE,
 } from "@docslurp/shared";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -126,9 +126,11 @@ describe("stuffed PDFs bill the text extraction actually produced", () => {
     const { state, document, runId, documentId } = await documentRun(1);
     const measured = (await recordExtractedPageEquivalents(state, document, "pdf", text))!;
     expect(measured.equivalents).toBe(pageTextEquivalents(text));
-    expect(measured.equivalents).toBeGreaterThanOrEqual(14);
+    expect(measured.equivalents).toBe(15);
     expect(measured.densePages).toEqual([1]);
-    expect(await billedFastPages(runId, documentId)).toBe(measured.equivalents);
+    // Far above the dense-page allowance: it bills every page it holds.
+    expect(measured.billed).toBe(15);
+    expect(await billedFastPages(runId, documentId)).toBe(15);
   });
 
   it.skipIf(!pdftotext)("invisible text (render mode 3) is extracted, indexed and billed by its volume", async () => {
@@ -161,25 +163,6 @@ describe("stuffed PDFs bill the text extraction actually produced", () => {
     // A second render of the same page records nothing more.
     await recordRenderedPageAreas(runId, documentId, [{ pageNumber: 1, area: PAGE_AREA_EQUIVALENTS_CAP }]);
     expect((await store.loadDocument(documentId))!.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
-  });
-
-  it("bills a page 1 up to the provider's per-page allowance and its full volume above it", async () => {
-    const { runId, documentId } = await documentRun(3);
-    // Allowance 3: a 2-page tabloid and a 3-equivalent page bill 1 each; an 8-equivalent page bills 8.
-    const rows = [{ pageNumber: 1, area: 2 }, { pageNumber: 2, text: 3 }, { pageNumber: 3, area: 8 }];
-    expect(await recordPageEquivalents(sql(), { runId, documentId, rows, allowance: 3 })).toBe(1 + 1 + 8);
-    // The provider's allowance is the default: the open default (1) bills every page's full volume.
-    const full = await documentRun(3);
-    expect(await recordPageEquivalents(sql(), { runId: full.runId, documentId: full.documentId, rows })).toBe(2 + 3 + 8);
-    const installed = installTestPricing({ pageEquivalentAllowance: 3 });
-    try {
-      const allowed = await documentRun(3);
-      expect(installed.pageEquivalentAllowance).toBe(3);
-      expect(await recordPageEquivalents(sql(), { runId: allowed.runId, documentId: allowed.documentId, rows: rows.slice(0, 2) })).toBeNull();
-      expect((await store.loadDocument(allowed.documentId))!.billingPages).toBeNull();
-    } finally {
-      installTestPricing(DISTINCT_TEST_PRICING);
-    }
   });
 
   it("an uploaded image's frames count their decoded area as well as their text", async () => {
@@ -244,5 +227,61 @@ describe("stuffed Office, HTML and sheet files bill their extracted text", () =>
 
   it("dense pages are those holding more than DENSE_PAGE_EQUIVALENTS pages of text", () => {
     expect(DENSE_PAGE_EQUIVALENTS).toBe(3);
+  });
+});
+
+describe("dense-page allowance (owner decision 2026-11-05): paged pages bill 1 up to 3 text equivalents, their full volume above", () => {
+  /** A two-column Letter page: `perColumn` lines of `chars` characters in each column, 10 pt type. */
+  const twoColumns = (perColumn: number, chars: number) => [
+    textBody({ size: 7, lead: 9, lines: perColumn, chars, x: 36, y: 760 }),
+    textBody({ size: 7, lead: 9, lines: perColumn, chars, x: 316, y: 760 }),
+  ].join("\n");
+
+  it("the rule: text at or under the allowance bills 1, above it its full volume (rounded up); area always in full", () => {
+    expect(DEFAULT_PAGE_EQUIVALENT_ALLOWANCE).toBe(3);
+    expect([1, 2, 3].map((text) => billedPageEquivalents(text))).toEqual([1, 1, 1]);
+    expect(billedPageEquivalents(4)).toBe(4);
+    expect(billedPageEquivalents(pageTextEquivalents("x".repeat(Math.round(3.5 * 3_500))))).toBe(4);
+    expect(billedPageEquivalents(2, 1)).toBe(2); // a provider allowance of 1: full volume
+    expect(billedPagePageEquivalents(3, 2)).toBe(2); // a large page still bills its area
+    expect(billedPagePageEquivalents(5, 2)).toBe(5);
+  });
+
+  it.skipIf(!pdftotext)("a ~7,000-character two-column page (a dense paper) bills 1", async () => {
+    const text = await extract(pdfPage(twoColumns(40, 82)));
+    expect(text.length).toBeGreaterThan(6_500);
+    expect(text.length).toBeLessThan(8_000);
+    // What it holds by the text rule: more than a page (two columns of short lines), within the allowance.
+    const holds = pageTextEquivalents(text);
+    expect(holds).toBeGreaterThan(1);
+    expect(holds).toBeLessThanOrEqual(DEFAULT_PAGE_EQUIVALENT_ALLOWANCE);
+    const { state, document, runId, documentId } = await documentRun(1);
+    const measured = (await recordExtractedPageEquivalents(state, document, "pdf", text))!;
+    expect(measured).toMatchObject({ equivalents: holds, billed: 1, densePages: [] });
+    expect(await billedFastPages(runId, documentId)).toBe(1);
+  });
+
+  it("a page at about 3.5 equivalents bills 4; a 3-equivalent page beside it bills 1", async () => {
+    const { state, document, runId, documentId } = await documentRun(2);
+    const measured = (await recordExtractedPageEquivalents(state, document, "pdf", `${"y".repeat(Math.round(3.5 * 3_500))}\f${"z".repeat(3 * 3_500)}`))!;
+    expect(measured).toMatchObject({ equivalents: 7, billed: 5, densePages: [1] });
+    expect((await store.loadDocument(documentId))!.billingPages).toBe(5);
+    expect(await billedFastPages(runId, documentId)).toBe(5);
+  });
+
+  it("image frames get the same allowance; area still bills in full", async () => {
+    const { state, document, documentId } = await documentRun(2, "image/tiff");
+    const measured = (await recordExtractedPageEquivalents(state, document, "image", `${"w".repeat(2 * 3_500)}\fshort`, [
+      { pageNumber: 2, sourceWidth: 2_550, sourceHeight: 3_300 }, // Letter at 300 dpi read at 150: 4 standard pages of area
+    ]))!;
+    expect(measured.billed).toBe(1 + 4);
+    expect((await store.loadDocument(documentId))!.billingPages).toBe(5);
+  });
+
+  it("HTML and text keep the whole-document text rule: no allowance", async () => {
+    const { state, document, documentId } = await documentRun(1, "text/html", { declaredMimeType: "text/html", sniffedMimeType: null, mimeType: "text/html", format: "html", container: null, encoding: "utf-8", mismatch: "none" });
+    const measured = (await recordExtractedPageEquivalents(state, document, "html", "v".repeat(2 * 3_500)))!;
+    expect(measured).toMatchObject({ equivalents: 2, billed: 2 });
+    expect((await store.loadDocument(documentId))!.billingPages).toBe(2);
   });
 });

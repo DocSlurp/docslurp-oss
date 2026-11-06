@@ -247,7 +247,7 @@ async function extractTextForEmbeddingRaw(
     if (isPdf) {
       try {
         const result = await runner.run(
-          await runner.extractText(tempFile),
+          await runner.extractText(tempFile, Math.max(1, Math.trunc(Number(document.pageCount)) || 1)),
           signal,
         );
         if (result.stdout.trim()) {

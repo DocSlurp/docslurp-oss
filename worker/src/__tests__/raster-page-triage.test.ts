@@ -71,7 +71,7 @@ describe.skipIf(!hasPoppler)("raster page triage on generated PDFs", () => {
     const input = path.join(dir, "doc.pdf");
     await writeFile(input, buildTestPdf(pages));
     const runner = new CommandRunner();
-    const markdown = (await runner.run(await runner.extractText(input, true))).stdout;
+    const markdown = (await runner.run(await runner.extractText(input, pages.length, true))).stdout;
 
     const pageTexts = pageAlignedTexts(markdown, pages.length);
     expect(pageTexts, "extracted text should be page-aligned").not.toBeNull();

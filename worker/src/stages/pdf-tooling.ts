@@ -196,6 +196,8 @@ export class PdfToolingStage implements Stage {
   }
 
   private async buildToolchains(document: import("../models.js").Document, runId: string): Promise<ToolchainManifest[]> {
+    // Catalogued plans carry the billed page count as their range, as every run does (runner.pdfPageRangeArgs).
+    const toolPages = Math.max(1, Math.trunc(Number(document.pageCount)) || 1);
     const [
       pdfInfo,
       extractText,
@@ -210,11 +212,11 @@ export class PdfToolingStage implements Stage {
       florence2
     ] = await Promise.all([
       this.runner.pdfInfo(document.sourceKey),
-      this.runner.extractText(document.sourceKey),
-      this.runner.extractHtml(document.sourceKey),
-      this.runner.extractImages(document.sourceKey, "page"),
-      this.runner.splitPages(document.sourceKey, "page-%d.pdf"),
-      this.runner.renderPageImages(document.sourceKey, "page"),
+      this.runner.extractText(document.sourceKey, toolPages),
+      this.runner.extractHtml(document.sourceKey, toolPages),
+      this.runner.extractImages(document.sourceKey, "page", toolPages),
+      this.runner.splitPages(document.sourceKey, "page-%d.pdf", toolPages),
+      this.runner.renderPageImages(document.sourceKey, "page", toolPages),
       this.runner.unstructuredPartition(document.sourceKey, "unstructured-fast.json", "fast"),
       this.nativePdfPlan(),
       this.runner.unpdfExtract(document.sourceKey, "unpdf.json"),

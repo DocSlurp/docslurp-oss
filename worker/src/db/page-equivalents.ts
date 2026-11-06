@@ -1,15 +1,15 @@
 import type { JSONValue, Sql } from "postgres";
 
-import { pricing } from "@docslurp/shared";
+import { DEFAULT_PAGE_EQUIVALENT_ALLOWANCE } from "@docslurp/shared";
 
 /** One page's measured equivalents (shared page-equivalents.ts): from its extracted text, its rendered area, or both. */
 export interface PageEquivalentRow { pageNumber: number; text?: number; area?: number }
 
 /**
  * Records pages that measured above one page (document_page_facts.text_equivalents / area_equivalents, migration 0130; a
- * stored value is never lowered) and raises documents.billing_pages to page_count plus the extra equivalents of every page
- * above the pricing provider's per-page allowance (billedPageEquivalents: a page bills 1 up to the allowance, its full
- * volume above it; the card in force when the page is measured). The
+ * stored value is never lowered; the measurement is kept whole) and raises documents.billing_pages to page_count plus every
+ * page's extra billed equivalents: its text above `allowance` (shared billedPageEquivalents: 1 up to the allowance, its full
+ * volume above it; 1 for formats billed by the whole-document text rule) or its area, whichever is larger. The
  * page fee, feature charges and spend authorization all read billing_pages, so a stuffed page bills the pages it holds.
  * Monotone and idempotent: a retry or a second measurement of the same page changes nothing unless it measured more.
  * Scoped to the run's own document. Returns the document's billing_pages after the update (null when it is not the run's).
@@ -18,7 +18,7 @@ export async function recordPageEquivalents(
   sql: Sql<Record<string, unknown>>,
   args: { runId: string; documentId: string; rows: readonly PageEquivalentRow[]; allowance?: number },
 ): Promise<number | null> {
-  const allowance = Math.max(1, Math.floor(args.allowance ?? pricing().pageEquivalentAllowance));
+  const allowance = Math.max(1, Math.floor(args.allowance ?? DEFAULT_PAGE_EQUIVALENT_ALLOWANCE) || 1);
   const rows = args.rows
     .filter((row) => Number.isSafeInteger(row.pageNumber) && row.pageNumber >= 1)
     .map((row) => ({
@@ -39,10 +39,11 @@ export async function recordPageEquivalents(
   }
   const [updated] = await sql<{ billing_pages: number | null }[]>`
     with extra as (
-      select coalesce(sum(greatest(coalesce(f.text_equivalents, 1), coalesce(f.area_equivalents, 1)) - 1), 0)::int as pages
+      select coalesce(sum(greatest(
+        case when coalesce(f.text_equivalents, 1) > ${allowance} then f.text_equivalents else 1 end,
+        coalesce(f.area_equivalents, 1)) - 1), 0)::int as pages
       from document_page_facts f join documents d on d.id = f.document_id
       where f.document_id = ${args.documentId} and f.page_number between 1 and greatest(d.page_count, 1)
-        and greatest(coalesce(f.text_equivalents, 1), coalesce(f.area_equivalents, 1)) > ${allowance}
     )
     update documents d
     set billing_pages = greatest(coalesce(d.billing_pages, 0), d.page_count + extra.pages),

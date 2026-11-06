@@ -251,11 +251,12 @@ describe("M2: concurrent extractor candidates share no writable directory", () =
     const runner = new CommandRunner();
     const stage = new ExtractMarkdownStage(runner, {} as never, { serializePdfCandidateExtraction: false } as never);
     const { documentExtractorRegistry } = await import("../extractors/registry.js");
-    const prepare = (id: string) => documentExtractorRegistry.prepare(id, runner, source, undefined, { format: "pdf" });
+    const prepare = (id: string) => documentExtractorRegistry.prepare(id, runner, source, undefined, { format: "pdf", pageCount: 3 });
     const dirs: string[] = [];
     const isolated = await (stage as unknown as {
       isolateConcurrentCandidates(args: object): Promise<{ primary: { extractor: { plan: { args: string[]; binary: string } }; source: string }; secondary: { extractor: { plan: { args: string[]; binary: string } }; source: string } }>;
     }).isolateConcurrentCandidates({
+      pageCount: 3,
       primary: await prepare("pptx"),
       secondary: await prepare("poppler-text"),
       sourcePath: source,
@@ -290,12 +291,12 @@ describe("M2: concurrent extractor candidates share no writable directory", () =
     writeFileSync(source, "%PDF-1.4");
     const runner = new CommandRunner();
     const { documentExtractorRegistry } = await import("../extractors/registry.js");
-    const candidate = await documentExtractorRegistry.prepare("poppler-text", runner, source, undefined, { format: "pdf" });
+    const candidate = await documentExtractorRegistry.prepare("poppler-text", runner, source, undefined, { format: "pdf", pageCount: 3 });
     for (const [serialize, secondary] of [[false, null], [true, candidate]] as const) {
       const stage = new ExtractMarkdownStage(runner, {} as never, { serializePdfCandidateExtraction: serialize } as never);
       const dirs: string[] = [];
       const isolated = await (stage as unknown as { isolateConcurrentCandidates(args: object): Promise<{ primary: { source: string } }> })
-        .isolateConcurrentCandidates({ primary: candidate, secondary, sourcePath: source, format: "pdf", options: {}, dirs });
+        .isolateConcurrentCandidates({ pageCount: 3, primary: candidate, secondary, sourcePath: source, format: "pdf", options: {}, dirs });
       roots.push(...dirs);
       expect(isolated.primary.source).not.toBe(source);
       // Both candidates' directories are created concurrently: `dirs` (the cleanup list) is in completion order.

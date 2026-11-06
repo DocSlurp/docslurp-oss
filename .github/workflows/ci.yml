@@ -269,9 +269,43 @@ jobs:
       - name: Python package tests (wasmtime)
         run: pnpm --filter @docslurp/estimate test:python
 
+  # The structural PDF page count (Doppler pdfpagecount, worker/doppler.json) and the page-range contract, against the real
+  # tools: Doppler is built from the pinned source with the worker image's own stage, and the tests run inside it. Billing
+  # and authorization read this count, so its hostile-tree tests must run, not skip.
+  doppler-pagecount:
+    name: Doppler page count
+    timeout-minutes: 40
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @docslurp/shared build
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build Doppler from the pinned source (worker image stage doppler-utils)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: worker/Dockerfile.lean
+          target: doppler-utils
+          load: true
+          tags: docslurp-doppler-utils:ci
+          cache-from: type=gha,scope=doppler-utils
+          cache-to: type=gha,scope=doppler-utils,mode=max
+      - name: Page count and page-range tests against the real tools (no skips)
+        run: |
+          docker run --rm --privileged -v "$PWD:$PWD" -w "$PWD/worker" -e TMPDIR=/tmp -e HOME=/tmp -e DOCSLURP_REQUIRE_DOPPLER_TOOLS=1 \
+            docslurp-doppler-utils:ci sh -c 'cp -a /out/usr/lib/doppler /usr/lib/ && npx vitest run src/__tests__/pdf-page-count.test.ts --reporter=verbose'
+
   ci-success:
     # A stable required check. Never mask failures.
-    needs: [test, database, estimate, ocr-cli]
+    needs: [test, database, estimate, ocr-cli, doppler-pagecount]
     if: always()
     runs-on: ubuntu-slim
     timeout-minutes: 1

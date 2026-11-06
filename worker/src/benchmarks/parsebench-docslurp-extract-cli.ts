@@ -1,4 +1,5 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { countPdfPages } from "../lib/pdf-page-count.js";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -140,7 +141,7 @@ async function runSingleExtractor(args: {
     }
 
     case "pdftotext": {
-      const plan = await args.runner.extractText(args.inputPath);
+      const plan = await args.runner.extractText(args.inputPath, await countPdfPages(args.runner, args.inputPath));
       if (!plan.available) throw new Error("pdftotext unavailable");
       const result = await args.runner.run(plan);
       markdown = result.stdout;

@@ -9,7 +9,7 @@ import type { NativePdfEngine } from "./types.js";
  * text/markdown subset instead of reporting the extractor unavailable.
  */
 export async function resolveNativePdfEngine(
-  runner: Pick<CommandRunner, "extractText" | "run">,
+  runner: Pick<CommandRunner, "extractText" | "pdfPageCount" | "run">,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<NativePdfEngine | null> {
   // Under a VM-only PDF deployment neither the binding nor the host Poppler subset serves PDFs.
