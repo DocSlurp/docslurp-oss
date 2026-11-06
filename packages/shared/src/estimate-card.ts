@@ -106,9 +106,20 @@ function cardBody() {
     /** Text files: MIME prefixes counted from their text, and the lines and characters per page. */
     textPages: { mimePrefixes: [...TEXT_PAGE_MIME_PREFIXES], lines: TEXT_PAGE_LINES, chars: TEXT_PAGE_CHARS },
     /** PDF page classification thresholds the worker routes with. */
-    pageRasterRouting: { ...PAGE_RASTER_ROUTING },
+    // Frozen at the card's published subset: the card carries pricing and is not regenerated in OSS (it moves behind the
+    // pricing provider). The router's full, current thresholds are the neutral profiler rules (estimate-profiler-rules.ts).
+    pageRasterRouting: CARD_PAGE_RASTER_ROUTING,
   };
 }
+
+/** The page raster routing keys the card was last published with; later evidence thresholds live only in the profiler rules. */
+const CARD_PAGE_RASTER_ROUTING_KEYS = [
+  "sparsePageWords", "minSignificantImageCoverage", "minSignificantImagePixels", "rasterPageMinLargestImageCoverage",
+  "rasterPageMinTotalImageCoverage", "stampTextMaxWords", "stampedScanMinImageCoverage", "sparseTextFullPageImageCoverage",
+  "drawnContentMinBytesPerPage", "repeatedImageMinPages", "repeatedImageMinShare", "unspacedCharsPerWord",
+] as const;
+const CARD_PAGE_RASTER_ROUTING = Object.fromEntries(CARD_PAGE_RASTER_ROUTING_KEYS.map((key) => [key, PAGE_RASTER_ROUTING[key]])) as
+  { [K in (typeof CARD_PAGE_RASTER_ROUTING_KEYS)[number]]: (typeof PAGE_RASTER_ROUTING)[K] };
 
 /** The card plus `revision`, a sha256 of its content, so a change to any constant is visible to clients. */
 export function buildEstimateCard() {

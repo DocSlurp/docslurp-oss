@@ -18,7 +18,8 @@ use lopdf::content::Content;
 use lopdf::{Dictionary, Document, LoadOptions, Object, ObjectId};
 
 use super::{ProbeInput, ProbeKind, ProbeResult, WHOLE_FILE_MAX_BYTES};
-use crate::card::{Card, PageMix, PageRasterRouting};
+use crate::card::{Card, PageMix};
+use crate::rules::{PageRasterRouting, ProfilerRules};
 
 /// Pages whose content is inspected; larger documents are sampled evenly.
 const MAX_SAMPLED_PAGES: usize = 24;
@@ -51,7 +52,8 @@ enum PageClass {
     Scanned,
 }
 
-pub(super) fn probe(card: &Card, input: &ProbeInput<'_>) -> ProbeResult {
+// The card no longer drives PDF routing (profiler rules do); kept so every format probe has one signature.
+pub(super) fn probe(_card: &Card, input: &ProbeInput<'_>) -> ProbeResult {
     let result = ProbeResult::new(ProbeKind::Pdf, "pdf", Some("application/pdf"));
     if input.size > WHOLE_FILE_MAX_BYTES {
         return result.note("PDF larger than the probe limit; priced from size");
@@ -77,7 +79,8 @@ pub(super) fn probe(card: &Card, input: &ProbeInput<'_>) -> ProbeResult {
             .note("compressed object streams exceed the probe's budget; page mix not measured");
     }
     match loaded {
-        Ok(document) => probe_document(&card.page_raster_routing, &document, input.head.len(), result),
+        // Routing evidence comes from the neutral profiler rules, never the (priced) card.
+        Ok(document) => probe_document(&ProfilerRules::bundled().page_raster_routing, &document, input.head.len(), result),
         Err(error) => fallback_page_count(input.head, result).note(format!("PDF did not parse ({error})")),
     }
 }
@@ -726,7 +729,7 @@ mod tests {
     use super::*;
 
     fn routing() -> PageRasterRouting {
-        Card::bundled().page_raster_routing.clone()
+        ProfilerRules::bundled().page_raster_routing.clone()
     }
 
     #[test]

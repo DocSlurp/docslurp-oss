@@ -92,6 +92,10 @@ export async function createEstimator(options = {}) {
   const meta = (file) => ({ name: file.name, ...(file.type ? { type: file.type } : {}), size: file.size });
 
   const estimator = {
+    /** The neutral evidence and routing rules the probe classifies pages with (profiler-rules.json); never priced. */
+    rules() {
+      return call("ds_rules");
+    },
     /** The price card quotes use: the supplied card, else the bundled one. */
     card() {
       return options.card ? (typeof options.card === "string" ? JSON.parse(options.card) : options.card) : call("ds_card");

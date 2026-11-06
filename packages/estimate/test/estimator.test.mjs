@@ -10,6 +10,7 @@ import { lazyObjectStreamBomb } from "./hostile.mjs";
 
 const fixture = (name) => new URL(`../tests/fixtures/${name}`, import.meta.url).pathname;
 const bundledCard = JSON.parse(readFileSync(new URL("../card.json", import.meta.url), "utf8"));
+const bundledRules = JSON.parse(readFileSync(new URL("../profiler-rules.json", import.meta.url), "utf8"));
 const estimator = await createEstimator();
 
 function sequence(seed) {
@@ -27,6 +28,11 @@ function sequence(seed) {
 }
 
 describe("@docslurp/estimate (wasm)", () => {
+  it("bundles the neutral profiler rules @docslurp/shared generated, exactly", () => {
+    assert.deepEqual(estimator.rules(), bundledRules);
+    assert.equal(estimator.rules().pageRasterRouting.mixedScanMinCoverage, bundledRules.pageRasterRouting.mixedScanMinCoverage);
+  });
+
   it("bundles the card @docslurp/shared generated", () => {
     const card = estimator.card();
     assert.equal(card.revision, bundledCard.revision);

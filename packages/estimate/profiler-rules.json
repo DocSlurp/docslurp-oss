@@ -1,0 +1,27 @@
+{
+ "schema": 1,
+ "pageRasterRouting": {
+  "sparsePageWords": 30,
+  "minSignificantImageCoverage": 0.02,
+  "minSignificantImagePixels": 32,
+  "rasterPageMinLargestImageCoverage": 0.25,
+  "rasterPageMinTotalImageCoverage": 0.35,
+  "stampTextMaxWords": 10,
+  "stampedScanMinImageCoverage": 0.5,
+  "sparseTextFullPageImageCoverage": 0.85,
+  "drawnContentMinBytesPerPage": 16384,
+  "repeatedImageMinPages": 3,
+  "repeatedImageMinShare": 0.2,
+  "unspacedCharsPerWord": 2,
+  "mixedScanMinCoverage": 0.2,
+  "mixedScanMaxWordsInside": 2,
+  "mixedScanMinShortSidePx": 200,
+  "mixedScanMinPpi": 50,
+  "scanLikeMaxBytesPerPixel": 0.15
+ },
+ "pageTableRouting": {
+  "tableHeavyMinRows": 5,
+  "tableHeavyMinCoverage": 0.4
+ },
+ "revision": "8f4ee02d8067d71a91f68a5dd39365020966b1bd8613ecee373aa6f9669b9ed3"
+}

@@ -59,6 +59,8 @@ export class EstimatorError extends Error {
 }
 
 export type Estimator = {
+  /** The neutral evidence and routing rules the probe classifies pages with (`profiler-rules.json`); never priced. */
+  rules(): { schema: number; pageRasterRouting: Record<string, number>; pageTableRouting: Record<string, number>; revision: string };
   card(): EstimateCard;
   readPlan(file: FileMeta): ReadPlan;
   probe(file: FileMeta, head: Uint8Array, tail?: Uint8Array): ProbeResult;

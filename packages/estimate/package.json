@@ -37,6 +37,7 @@
     "js",
     "dist",
     "card.json",
+    "profiler-rules.json",
     "README.md",
     "LICENSE"
   ],

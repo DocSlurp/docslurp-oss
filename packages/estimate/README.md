@@ -98,6 +98,11 @@ After changing prices or rules there, run `UPDATE_ESTIMATE_CARD=1 pnpm --filter 
 to regenerate `card.json` and the golden cases, then update the Rust port until `cargo test` passes. Bump
 `ESTIMATE_RULES` (TypeScript) and `CARD_RULES` (Rust) together when a formula changes. See `DESIGN.md`.
 
+Routing and evidence thresholds (`PAGE_RASTER_ROUTING`, `PAGE_TABLE_ROUTING`) are not priced and live in
+`profiler-rules.json`: after changing them, run `UPDATE_PROFILER_RULES=1 pnpm --filter @docslurp/shared test estimate-profiler-rules`.
+The probe routes with these rules (`src/rules.rs`, `estimator.rules()`); `cargo test` and `pnpm test:wasm` check that Rust and
+the WASM module read the committed file exactly.
+
 - `cargo test`: Rust unit, golden-parity and probe-fixture tests.
 - `pnpm test:wasm`: build `dist/docslurp_estimate.wasm` (size budget) and run the JS tests, including progress,
   cancellation, bounds and the worker's event-loop delay against an inline run.

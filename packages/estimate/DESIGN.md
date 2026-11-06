@@ -32,7 +32,9 @@ The `complex` page class changes only the time estimate. Probe effort goes where
   - An image file (by MIME type or extension) counts as 1 scanned page unless `pages` is given (today a 4 MB photo
     is quoted as ~55 pages).
 - The worker's routing thresholds the PDF probe mirrors (raster coverage, stamp and sparse word limits) move into
-  shared, so the card carries them and the worker and the probe read the same numbers **[A]**.
+  shared, so the worker and the probe read the same numbers **[A]**. They now live in the neutral `profiler-rules.json`
+  (`buildProfilerRules`: page raster and table routing, no prices), which the probe reads; the card keeps only its frozen,
+  published copy of the first twelve thresholds and is not regenerated with new routing fields.
 
 ## The card
 

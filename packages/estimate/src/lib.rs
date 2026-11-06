@@ -14,6 +14,7 @@ pub mod error;
 pub mod price;
 pub mod probe;
 pub mod quote;
+pub mod rules;
 
 use serde::{Deserialize, Serialize};
 

@@ -75,6 +75,11 @@ pub fn card_json() -> String {
     envelope(Ok(Card::bundled()))
 }
 
+/// `ds_rules` without the memory plumbing: the neutral profiler rules the probe routes with (`profiler-rules.json`).
+pub fn rules_json() -> String {
+    envelope(Ok(crate::rules::ProfilerRules::bundled()))
+}
+
 #[cfg(target_arch = "wasm32")]
 fn into_host(json: String) -> u64 {
     let mut bytes = json.into_bytes().into_boxed_slice();
@@ -118,6 +123,12 @@ pub unsafe extern "C" fn ds_free(ptr: *mut u8, len: usize) {
 #[no_mangle]
 pub extern "C" fn ds_card() -> u64 {
     into_host(card_json())
+}
+
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn ds_rules() -> u64 {
+    into_host(rules_json())
 }
 
 /// # Safety
