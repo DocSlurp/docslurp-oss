@@ -301,6 +301,10 @@ function fakeSdk(
     killFailsInVm?: number;
     /** The first client's terminate request never answers (a stuck connection). */
     terminateHangs?: boolean;
+    /** Terminate requests wait on this (a slow acknowledgement). */
+    terminateGate?: Promise<void>;
+    /** Every terminate request fails, the late retry on a fresh client too. */
+    terminateFails?: boolean;
     /** The VM's link hardening fails (a sysctl that cannot be written or reads back 0). */
     hardeningFails?: boolean;
     /** The leftover kill waits on this (a slow kill). */
@@ -341,7 +345,12 @@ function fakeSdk(
   });
   const sandbox = {
     sandboxId: "sb-test",
-    terminate: async () => { state.terminate++; if (opts.terminateHangs) await new Promise(() => {}); },
+    terminate: async () => {
+      state.terminate++;
+      if (opts.terminateHangs) await new Promise(() => {});
+      await opts.terminateGate;
+      if (opts.terminateFails) throw new Error("terminate refused");
+    },
     filesystem: {
       // Root's filesystem API: recorded, so a test can require that root writes only its own control directory.
       makeDirectory: async (p: string) => {
@@ -400,7 +409,7 @@ function fakeSdk(
   };
   const sdk = {
     SandboxFilesystemNotFoundError: NotFound,
-    Sandbox: class { constructor(_client: unknown, _id: string) {} async terminate() { state.terminate++; state.lateTerminate++; } },
+    Sandbox: class { constructor(_client: unknown, _id: string) {} async terminate() { state.terminate++; state.lateTerminate++; if (opts.terminateFails) throw new Error("terminate refused"); } },
     ModalClient: class {
       apps = { fromName: async () => ({}) };
       images = { fromRegistry: (tag: string, secret?: unknown) => void state.images.push([tag, secret]) };
@@ -413,7 +422,7 @@ function fakeSdk(
           const vm = state.createOptions.length;
           if (opts.createFailsFrom !== undefined && vm >= opts.createFailsFrom) throw new Error("no capacity");
           state.createdAt[vm - 1] = Date.now();
-          return { ...sandbox, sandboxId: `sb-${vm}`, terminate: async () => { state.terminatedAt[vm - 1] = Date.now(); return sandbox.terminate(); }, exec: (argv: string[], params?: { timeoutMs?: number }) => sandbox.exec(argv, params, vm) };
+          return { ...sandbox, sandboxId: `sb-${vm}`, terminate: async () => { await sandbox.terminate(); state.terminatedAt[vm - 1] = Date.now(); }, exec: (argv: string[], params?: { timeoutMs?: number }) => sandbox.exec(argv, params, vm) };
         },
       };
       close() {
@@ -454,7 +463,10 @@ describe("modal provider session lifecycle", () => {
       const gate = new Promise<void>((resolve) => { release = resolve; });
       const { state, session } = await open({ createGate: gate });
       const pending = session().catch((error: unknown) => error);
+      // The 30 s creation deadline, then up to 5 s for the create call to settle before its capacity is quarantined
+      // (recheck T #1).
       await vi.advanceTimersByTimeAsync(30_001);
+      await vi.advanceTimersByTimeAsync(5_001);
       expect(await pending).toBeInstanceOf(Error);
       expect(state.clientClose).toBe(1);
       release(); await vi.advanceTimersByTimeAsync(1);
@@ -776,6 +788,89 @@ describe("modal provider session lifecycle", () => {
       await busy;
       await Promise.all([a.close(), b.close()]);
       expect(state.terminate).toBe(3);
+    });
+
+    it("holds the worker's VM capacity and keeps metering until Modal acknowledges a slow terminate (recheck T #1)", async () => {
+      let ack!: () => void;
+      const terminateGate = new Promise<void>((resolve) => (ack = resolve));
+      const { sdk, state } = fakeSdk({ terminateGate, exec: async () => finished() });
+      const provider = createModalProvider(async () => sdk);
+      const pooled = { ...config, vmsPerActivity: 1, vmsPerWorker: 1, vmIdleSeconds: 60 };
+      const a = await provider.openSession(pooled, { activityId: "a" });
+      const tails: number[] = [];
+      await a.run!(command, undefined, { recordUsage: (event) => tails.push(Number(event.metadata?.wallSeconds)) });
+      const settling = a.settle!(); // terminate requested, not yet acknowledged
+      const opening = provider.openSession(pooled, { activityId: "b" });
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      expect(state.createOptions).toHaveLength(1); // no second VM while the first may still run
+      expect(tails).toEqual([]); // still metering
+      ack();
+      await settling;
+      const b = await opening;
+      expect(state.createOptions).toHaveLength(2);
+      expect(tails).toHaveLength(1);
+      expect(tails[0]!).toBeGreaterThanOrEqual(0.11); // metered through the acknowledgement
+      expect(state.createdAt[1]!).toBeGreaterThanOrEqual(state.terminatedAt[0]!); // never two at once
+      await b.close();
+    });
+
+    it("quarantines capacity after a terminate that cannot be confirmed, billed to the VM's lifetime limit (recheck T #1)", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const { sdk, state } = fakeSdk({ terminateFails: true, exec: async () => finished() });
+      const provider = createModalProvider(async () => sdk);
+      const pooled = { ...config, vmsPerActivity: 1, vmsPerWorker: 1, vmIdleSeconds: 60, sessionTimeoutSeconds: 0.4 };
+      const a = await provider.openSession(pooled, { activityId: "a" });
+      const tails: number[] = [];
+      await a.run!(command, undefined, { recordUsage: (event) => tails.push(Number(event.metadata?.wallSeconds)) });
+      await a.settle!();
+      expect(state.lateTerminate).toBe(1); // retried on a fresh client, refused too
+      expect(tails).toHaveLength(1);
+      // Billed to the lifetime limit counted from creation (0.4 s), not to the failed request.
+      const created = state.createdAt[0]!;
+      expect(tails[0]!).toBeGreaterThan(0.3);
+      const started = Date.now();
+      const b = provider.openSession(pooled, { activityId: "b" });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(state.createOptions).toHaveLength(1); // the quarantined token is still taken
+      await b.then((session) => session.close().catch(() => {}));
+      expect(state.createdAt[1]!).toBeGreaterThanOrEqual(created + 400 - 5); // only after the limit
+      expect(Date.now() - started).toBeLessThan(2_500);
+    });
+
+    it("waits for a worker VM before admitting a command, and an abort ends that wait (recheck T #2)", async () => {
+      const slow = running();
+      let calls = 0;
+      const { sdk, state } = fakeSdk({ exec: async (argv) => (argv[0] === "/bin/slow" && ++calls === 1 ? slow.process : finished()) });
+      const provider = createModalProvider(async () => sdk);
+      const pooled = { ...config, vmsPerActivity: 2, vmsPerWorker: 1, vmIdleSeconds: 60 };
+      const b = await provider.openSession(pooled, { activityId: "b" });
+      await b.run!(command); // B's VM, now idle
+      const a = await provider.openSession(pooled, { activityId: "a" }); // the worker is full: B's idle VM is reaped for A
+      expect(state.terminate).toBe(1);
+      const busy = a.run!({ ...command, binary: "/bin/slow" });
+      await vi.waitFor(() => expect(state.commands.some(([binary]) => binary === "/bin/slow")).toBe(true));
+
+      // B has no VM and the worker no token: B's command is queued, not admitted, and its abort ends the wait.
+      const events: string[] = [];
+      const controller = new AbortController();
+      const waiting = b.run!(command, controller.signal, { onStart: () => events.push("aborted") }).catch((error: unknown) => error);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(events).toEqual([]);
+      controller.abort();
+      const aborted = await waiting;
+      expect(aborted).toBeInstanceOf(SandboxRunError);
+      expect(aborted).not.toBeInstanceOf(SandboxInfrastructureError);
+
+      // Another waits the same way, and is admitted once A's VM is idle and handed over.
+      const later = b.run!(command, undefined, { onStart: () => events.push("later") });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(events).toEqual([]);
+      slow.end(0);
+      await Promise.all([busy, later]);
+      expect(events).toEqual(["later"]);
+      expect(state.createOptions).toHaveLength(3); // B, A, then B again: never two at once (worker cap 1)
+      for (let vm = 1; vm < 3; vm++) expect(state.createdAt[vm]!).toBeGreaterThanOrEqual(state.terminatedAt[vm - 1]!);
+      await Promise.all([a.close(), b.close()]);
     });
 
     it("sizes the pool from the document and candidate concurrency settings", () => {

@@ -110,6 +110,8 @@ export function modalVmIdleSeconds(env: NodeJS.ProcessEnv = process.env): number
 export const PROBE_SESSION_TIMEOUT_SECONDS = 120;
 /** Deadline for the terminate request. Modal stops the VM once it accepts the request; exit is not awaited. */
 const TERMINATE_REQUEST_MS = 10_000;
+/** How long a terminate waits for a create call still in flight before quarantining its capacity. */
+const CREATE_SETTLE_MS = 5_000;
 
 const ISOLATION: SandboxIsolation = { filesystem: true, network: "full", processes: true, location: "remote" };
 
@@ -475,8 +477,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
        * of one VM tile its life from creation to terminate, which is what Modal bills. Logged, and returned as a
        * provider-cost usage event (none for an unmetered session).
        */
-      function meterLane(lane: { accountedAt: number | undefined }, kind = "command"): UsageEvent | undefined {
-        const now = Date.now();
+      function meterLane(lane: { accountedAt: number | undefined }, kind = "command", now = Date.now()): UsageEvent | undefined {
         const wallSeconds = lane.accountedAt === undefined ? 0 : Math.max(0, now - lane.accountedAt) / 1000;
         if (lane.accountedAt !== undefined) lane.accountedAt = now;
         console.log(
@@ -504,6 +505,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         /** Records the VM's last metered stretch into the usage ledger of the stage that ran its last command. */
         recorder: ((event: UsageEvent) => void) | undefined;
         idleTimer: NodeJS.Timeout | undefined;
+        /** Take this lane's worker VM token before the command is admitted (abortable; a no-op once it holds one). */
+        reserve(signal?: AbortSignal): Promise<void>;
         ensureSandbox(): Promise<void>;
         execute(command: SandboxCommand, started: number, signal?: AbortSignal): Promise<SandboxResult>;
         terminate(): Promise<void>;
@@ -515,42 +518,82 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         let staging: SessionStaging | undefined;
         let creating: Promise<void> | undefined;
         let terminating: Promise<void> | undefined;
-        const lane: Lane = { id: ++laneCount, busy: false, dead: false, lastKey: undefined, accountedAt: undefined, recorder: undefined, idleTimer: undefined, ensureSandbox, execute, terminate };
+        const lane: Lane = { id: ++laneCount, busy: false, dead: false, lastKey: undefined, accountedAt: undefined, recorder: undefined, idleTimer: undefined, reserve, ensureSandbox, execute, terminate };
         let holdsToken = false;
+        /** When creation was requested (Modal bills from then at the latest), and the raw create call. */
+        let createdAt: number | undefined;
+        let rawCreate: Promise<unknown> | undefined;
+        let terminateDone = false;
 
+        async function reserve(signal?: AbortSignal): Promise<void> {
+          if (holdsToken || sandbox || lane.dead) return;
+          await vmBudget.acquire(() => closed || lane.dead, signal);
+          if (closed || lane.dead) { vmBudget.release(); throw new SandboxInfrastructureError("modal sandbox session is closed"); }
+          holdsToken = true;
+        }
+
+        /** Record the VM's time since it was last metered, up to `until`, where its last command's stage can see it. */
+        function recordTail(until: number): void {
+          // Metering never stands in the way of the terminate (a pricing failure is logged, the VM still stops).
+          if (lane.accountedAt === undefined) return;
+          try {
+            const tail = meterLane(lane, "idle", Math.max(until, lane.accountedAt));
+            if (tail) {
+              if (lane.recorder) lane.recorder(tail);
+              else console.warn(`[sandbox-usage] provider=modal status=unrecorded reason=no-stage activity=${context.activityId} wall_seconds=${tail.metadata?.wallSeconds ?? "?"}`);
+            }
+          } catch (error) {
+            console.error(`[sandbox-usage] provider=modal status=unrecorded reason=meter-failed activity=${context.activityId}: ${safeMessage(config, error)}`);
+          }
+        }
+
+        function releaseToken(): void {
+          if (holdsToken) { holdsToken = false; vmBudget.release(); }
+        }
+
+        /**
+         * Termination could not be confirmed (recheck T #1): the VM may run until Modal's own lifetime limit ends it, so it
+         * is billed to that bound and its worker token stays taken until then; the worker never runs past its cap.
+         */
+        function quarantine(reason: string): void {
+          const expiry = (createdAt ?? Date.now()) + config.sessionTimeoutSeconds * 1000;
+          console.error(`[parser-sandbox] provider=modal status=vm-quarantined reason=${reason} activity=${context.activityId} release_in_ms=${Math.max(0, expiry - Date.now())}`);
+          recordTail(expiry);
+          if (holdsToken) setTimeout(releaseToken, Math.max(0, expiry - Date.now())).unref();
+        }
+
+        /**
+         * Stop the VM. Its metering and its worker token run until Modal acknowledges the terminate (recheck T #1): a VM
+         * still being created is waited for first, and one whose terminate (or creation) cannot be confirmed is quarantined.
+         */
         function terminate(): Promise<void> {
           lane.dead = true;
           if (lane.idleTimer) { clearTimeout(lane.idleTimer); lane.idleTimer = undefined; }
-          if (!terminating) {
-            // The time since its last command, until now, is the VM's too: billed where its last command was.
-            // Metering never stands in the way of the terminate (a pricing failure is logged, the VM still stops).
-            if (lane.accountedAt !== undefined) {
-              try {
-                const tail = meterLane(lane, "idle");
-                if (tail) {
-                  if (lane.recorder) lane.recorder(tail);
-                  else console.warn(`[sandbox-usage] provider=modal status=unrecorded reason=no-stage activity=${context.activityId} wall_seconds=${tail.metadata?.wallSeconds ?? "?"}`);
-                }
-              } catch (error) {
-                console.error(`[sandbox-usage] provider=modal status=unrecorded reason=meter-failed activity=${context.activityId}: ${safeMessage(config, error)}`);
-              }
-            }
-            // Its budget token returns now: the terminate request below stops Modal billing.
-            if (holdsToken) { holdsToken = false; vmBudget.release(); }
-          }
           terminating ??= (async () => {
-            let failure: unknown;
             try {
-              // Ask Modal to stop the VM; waiting for its exit is not needed (and an image process that ignores signals could
-              // hold a wait for tens of seconds).
-              if (sandbox) await withDeadline(sandbox.terminate(), TERMINATE_REQUEST_MS);
-            } catch (error) {
-              failure = error;
-            }
-            if (failure !== undefined && sandbox) {
-              // Retry once on a fresh client so a stuck connection cannot leave the VM running.
-              if (await terminateLate(sandbox, true)) return;
-              throw new Error(`modal sandbox terminate failed: ${safeMessage(config, failure)}`);
+              if (creating) await creating.catch(() => {});
+              if (rawCreate) {
+                let settled = false;
+                await Promise.race([rawCreate.then(() => { settled = true; }), new Promise((resolve) => setTimeout(resolve, CREATE_SETTLE_MS).unref())]);
+                if (!settled) { quarantine("creation-unconfirmed"); throw new Error("modal sandbox creation did not settle; VM quarantined until its lifetime limit"); }
+              }
+              if (sandbox) {
+                try {
+                  // Ask Modal to stop the VM; waiting for its exit is not needed (and an image process that ignores signals
+                  // could hold a wait for tens of seconds).
+                  await withDeadline(sandbox.terminate(), TERMINATE_REQUEST_MS);
+                } catch (failure) {
+                  // Retry once on a fresh client so a stuck connection cannot leave the VM running.
+                  if (!(await terminateLate(sandbox, true))) {
+                    quarantine("terminate-unconfirmed");
+                    throw new Error(`modal sandbox terminate failed: ${safeMessage(config, failure)}`);
+                  }
+                }
+              }
+              recordTail(Date.now());
+              releaseToken();
+            } finally {
+              terminateDone = true;
             }
           })();
           return terminating;
@@ -558,14 +601,13 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
 
         function ensureSandbox(): Promise<void> {
           creating ??= (async () => {
-            await vmBudget.acquire(() => closed || lane.dead);
-            holdsToken = true;
-            if (closed || lane.dead) { holdsToken = false; vmBudget.release(); throw new Error("parser VM session closed during creation"); }
-            lane.accountedAt = Date.now();
+            if (!holdsToken) { await vmBudget.acquire(() => closed || lane.dead); holdsToken = true; }
+            if (closed || lane.dead) throw new Error("parser VM session closed during creation");
+            lane.accountedAt = createdAt = Date.now();
             const app = await withDeadline(client.apps.fromName(config.app, { createIfMissing: true }), 30_000);
             const registrySecret = config.registrySecret && !config.imageId ? await withDeadline(client.secrets.fromName(config.registrySecret), 30_000) : undefined;
             const image = config.imageId ? await withDeadline(client.images.fromId(config.imageId), 30_000) : client.images.fromRegistry(config.image, registrySecret);
-            const opened = await withDeadline(client.sandboxes.create(app, image, {
+            const create = client.sandboxes.create(app, image, {
               runtime: "vm",
               command: [...PARSER_VM_IDLE_COMMAND],
               includeOidcIdentityToken: false,
@@ -575,11 +617,16 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
               timeoutMs: config.sessionTimeoutSeconds * 1000,
               blockNetwork: true,
             }).then(async (created) => {
-              if (closed || lane.dead) { await terminateLate(created); throw new Error("parser VM session closed during creation"); }
+              // A VM that arrives after this lane's terminate finished is stopped here; any other is the lane's own, and
+              // terminate() stops it (it waits for this call first).
+              if (terminateDone) { await terminateLate(created); throw new Error("parser VM session closed during creation"); }
+              sandbox = created;
               return created;
-            }), 30_000);
+            });
+            rawCreate = create.catch(() => {});
+            const opened = await withDeadline(create, 30_000);
+            if (closed || lane.dead) throw new Error("parser VM session closed during creation");
             if (!opened) throw new Error("parser VM creation returned no sandbox");
-            sandbox = opened;
             // As root, once: kernel link protections on and read back as 1, or this VM runs nothing (council K #5, Modal check).
             const hardened = await withDeadline(opened.exec(HARDEN_LINKS_ARGV, { timeoutMs: 10_000 }).then((proc) => proc.wait()), 15_000);
             if (hardened !== 0) throw new Error("parser VM kernel link protections could not be turned on");
@@ -773,10 +820,22 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         return lane;
       }
 
+      /**
+       * A new lane only under the activity's cap, and, unless the pool has no live lane, only while the worker has a free
+       * VM token or another activity holds an idle VM to give up: otherwise the command waits for one of this pool's own
+       * VMs (recheck T #2).
+       */
+      function canGrow(): boolean {
+        const live = lanes.filter((candidate) => !candidate.dead).length;
+        return live < maxLanes && (live === 0 || vmBudget.available(budgetMember));
+      }
+
       function pickLane(key: string | undefined): Lane | undefined {
         const idle = lanes.filter((lane) => !lane.busy && !lane.dead);
-        const lane = (key ? idle.find((candidate) => candidate.lastKey === key) : undefined) ?? idle[0]
-          ?? (lanes.filter((candidate) => !candidate.dead).length < maxLanes ? addLane() : undefined);
+        // Its key's VM first, then any idle lane that already has a VM (one without would need a new VM and a token).
+        const lane = (key ? idle.find((candidate) => candidate.lastKey === key && candidate.accountedAt !== undefined) : undefined)
+          ?? idle.find((candidate) => candidate.accountedAt !== undefined) ?? idle[0]
+          ?? (canGrow() ? addLane() : undefined);
         if (lane) {
           lane.busy = true;
           lane.lastKey = key;
@@ -810,7 +869,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
 
       function wakeNext(): void {
         const live = lanes.filter((lane) => !lane.dead);
-        if (waiting.length > 0 && (live.some((lane) => !lane.busy) || live.length < maxLanes)) waiting.shift()!();
+        if (waiting.length > 0 && (live.some((lane) => !lane.busy) || canGrow())) waiting.shift()!();
       }
 
       function releaseLane(lane: Lane): void {
@@ -818,27 +877,33 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         if (lane.dead) lanes.splice(lanes.indexOf(lane), 1);
         else if (!closed) {
           // Idle VMs are reaped: Modal bills them until terminated (VM pool follow-up).
-          lane.idleTimer = setTimeout(() => { lane.idleTimer = undefined; if (!lane.busy && !lane.dead) reap(lane); }, idleMs);
+          lane.idleTimer = setTimeout(() => { lane.idleTimer = undefined; if (!lane.busy && !lane.dead) void reap(lane); }, idleMs);
           lane.idleTimer.unref();
         }
         wakeNext();
       }
 
       /** Terminate an idle VM and drop it from the pool; a later command opens a fresh one. */
-      function reap(lane: Lane): void {
-        void lane.terminate().catch((error: unknown) => console.warn(`[parser-sandbox] provider=modal idle VM terminate: ${safeMessage(config, error)}`));
+      function reap(lane: Lane): Promise<void> {
+        const terminated = lane.terminate().catch((error: unknown) => console.warn(`[parser-sandbox] provider=modal idle VM terminate: ${safeMessage(config, error)}`));
         const index = lanes.indexOf(lane);
         if (index >= 0) lanes.splice(index, 1);
         wakeNext();
+        return terminated;
       }
 
       // Another activity on this worker needs a VM and none is free: give up one idle VM of this pool.
-      const unregisterReaper = vmBudget.register(() => {
-        const idle = lanes.find((lane) => !lane.busy && !lane.dead && lane.accountedAt !== undefined);
-        if (!idle) return false;
-        reap(idle);
-        return true;
-      });
+      const idleWithVm = () => lanes.find((lane) => !lane.busy && !lane.dead && lane.accountedAt !== undefined);
+      const budgetMember = {
+        hasIdle: () => idleWithVm() !== undefined,
+        reapIdle: () => {
+          const idle = idleWithVm();
+          if (!idle) return false;
+          void reap(idle);
+          return true;
+        },
+      };
+      const unregisterReaper = vmBudget.register(budgetMember);
 
       // The first VM opens with the session, so a session that cannot create or harden a VM fails here (real-Modal F1).
       const first = addLane();
@@ -861,9 +926,12 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           if (closed) throw new SandboxInfrastructureError("modal sandbox session is closed");
           if (signal?.aborted) throw new SandboxRunError("modal sandbox command aborted");
           const lane = await acquireLane(command.affinityKey, signal);
-          hooks?.onStart?.();
-          if (hooks?.recordUsage) lane.recorder = hooks.recordUsage;
           try {
+            // The worker VM token too, before admission: a command waiting for capacity is still queued, its time limit not
+            // yet running, and an abort ends the wait (recheck T #2).
+            await lane.reserve(signal);
+            hooks?.onStart?.();
+            if (hooks?.recordUsage) lane.recorder = hooks.recordUsage;
             // Metered as the VM's time since it was last metered (recheck R #3, VM pool follow-up): never this command's
             // wait for a VM, which is another command's time on it.
             return await lane.execute(command, Date.now(), signal);
@@ -874,7 +942,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         async settle() {
           // The stage is done with the pool (VM pool follow-up): terminate idle VMs now, so their time after the last
           // command is recorded in the stage's ledger before its final checkpoint, and Modal stops billing them.
-          for (const lane of lanes.filter((candidate) => !candidate.busy && !candidate.dead)) reap(lane);
+          // Awaited: the terminate is acknowledged and the time recorded before the checkpoint (recheck T #1).
+          await Promise.all(lanes.filter((candidate) => !candidate.busy && !candidate.dead).map(reap));
         },
         close() {
           closing ??= (async () => {
