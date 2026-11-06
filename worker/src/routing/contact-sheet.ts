@@ -6,7 +6,8 @@
  */
 
 import type { DecisionFormat, PageInput } from "@docslurp/shared";
-import sharp, { type OverlayOptions } from "sharp";
+import type { OverlayOptions } from "sharp";
+import sharp from "../tools/isolated-image.js";
 
 import { imageDataUrlPart, type DecisionStatePart } from "./decision-client.js";
 

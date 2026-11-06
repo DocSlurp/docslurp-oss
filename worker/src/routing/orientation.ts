@@ -25,7 +25,7 @@
  * Wiring it (behind a default-off flag in executors/deps.ts `vlm`) needs a fresh-corpus A/B first.
  */
 
-import sharp from "sharp";
+import sharp from "../tools/isolated-image.js";
 
 import type { RasterRef } from "./executors/types.js";
 

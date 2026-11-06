@@ -4,9 +4,8 @@ const UNISOLATED_WARNING = "[parser-sandbox] status=unisolated";
 
 /**
  * Every environment requires process teardown (a PID namespace, so a parser's descendants die with
- * it); only `none` with the explicit unisolated override may run without it. Production also
- * requires filesystem isolation and at least tcp-only network isolation. Provider `none` is allowed
- * there only with an explicit override.
+ * it); only `none` with the explicit unisolated override may run without it. Production requires the audited remote VM provider, full network isolation and filesystem isolation.
+ * Local namespace providers and the unisolated development override never qualify in production.
  */
 export function assertSandboxPolicy(args: {
   providerId: string;
@@ -27,23 +26,19 @@ export function assertSandboxPolicy(args: {
     );
   }
 
-  if (env.NODE_ENV !== "production") return { warnings };
+  if (env.NODE_ENV !== "production" && process.env.NODE_ENV !== "production") return { warnings };
 
-  if (providerId === "none") {
-    if (!allowUnisolated) {
-      throw new SandboxPolicyError(
-        "parser sandbox provider 'none' is not allowed in production; choose another provider " +
-          "or set DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true to run parsers unisolated",
-      );
-    }
-    return { warnings };
+  // Provider identity matters: `remote` alone does not attest a VM boundary. Keep this
+  // allowlist closed until a new provider has independent security review.
+  if (providerId !== "modal" || isolation.location !== "remote") {
+    throw new SandboxPolicyError(
+      `parser sandbox provider '${providerId}' lacks the required production VM boundary; ` +
+        "configure DOCSLURP_PARSER_SANDBOX=modal. Local namespaces and " +
+        "DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED cannot bypass this requirement",
+    );
   }
-
-  if (!isolation.filesystem) {
-    throw new SandboxPolicyError(`parser sandbox provider '${providerId}' does not isolate the filesystem`);
-  }
-  if (isolation.network === "none") {
-    throw new SandboxPolicyError(`parser sandbox provider '${providerId}' does not isolate the network`);
+  if (!isolation.filesystem || isolation.network !== "full") {
+    throw new SandboxPolicyError("production parser VMs require filesystem isolation and full network isolation");
   }
   return { warnings };
 }

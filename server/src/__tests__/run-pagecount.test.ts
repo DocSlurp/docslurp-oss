@@ -19,6 +19,10 @@ Encrypted:      no`)
     ).toBe(14);
   });
 
+  it.each(["Pages: 9007199254740992", "Pages: 1000001", "Pages: 0"])("rejects unsafe or oversized guest page count %s", (output) => {
+    expect(parsePdfInfoPageCount(output)).toBeNull();
+  });
+
   it("returns null when pdfinfo output has no page count", () => {
     expect(parsePdfInfoPageCount("Title: sample.pdf")).toBeNull();
   });

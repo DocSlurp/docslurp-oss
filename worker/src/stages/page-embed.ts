@@ -1,5 +1,5 @@
 import type postgres from "postgres";
-import sharp from "sharp";
+import sharp from "../tools/isolated-image.js";
 import { l2Normalize, packSignBits, pageCredits, qualityAllowsPageReading, quantizeInt8 } from "@docslurp/shared";
 
 import { ensurePageRows, markPagesEmbedded } from "../deferred/page-ledger.js";

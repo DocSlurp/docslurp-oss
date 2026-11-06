@@ -44,11 +44,11 @@ default_bool_for_env() {
 }
 
 if [[ -z "${CLAMAV_MANAGE_DAEMON}" ]]; then
-  CLAMAV_MANAGE_DAEMON="$(default_bool_for_env true false)"
+  CLAMAV_MANAGE_DAEMON="false"
 fi
 
 if [[ -z "${CLAMAV_REQUIRE_DAEMON}" ]]; then
-  CLAMAV_REQUIRE_DAEMON="$(default_bool_for_env true false)"
+  CLAMAV_REQUIRE_DAEMON="false"
 fi
 
 if [[ -z "${CLAMAV_FAIL_OPEN_ON_STALE_DB}" ]]; then

@@ -5,7 +5,7 @@
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import sharp from "sharp";
+import sharp from "../../tools/isolated-image.js";
 
 import type { ProbeRow } from "../page-input.js";
 import { NATIVE_PDF_OPEN_LIMITS } from "../../native-pdf/binding-engine.js";

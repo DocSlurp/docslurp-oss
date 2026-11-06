@@ -76,13 +76,25 @@ export class SessionStaging {
    */
   async download(snapshot: RemoteSnapshot): Promise<void> {
     const changed = this.changes(snapshot, await this.walk(snapshot.roots));
+    let totalBytes = 0;
+    for (const entry of changed) {
+      if (!entry.isDir) {
+        if (!Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > 128 * 1024 * 1024) throw new Error("parser VM output file exceeds limit");
+        totalBytes += entry.size;
+        if (totalBytes > 512 * 1024 * 1024) throw new Error("parser VM aggregate output exceeds limit");
+      }
+    }
+    let downloadedBytes = 0;
     for (const entry of changed) {
       const claim = this.claims.get(entry.path);
       if (claim?.kind === "upload" && claim.seq > snapshot.seq) continue;
       if (entry.isDir) await mkdir(entry.path, { recursive: true });
       else {
         await mkdir(path.dirname(entry.path), { recursive: true });
-        await writeFile(entry.path, await this.remote.readFile(entry.path));
+        const data = await this.remote.readFile(entry.path);
+        downloadedBytes += data.byteLength;
+        if (data.byteLength > 128 * 1024 * 1024 || downloadedBytes > 512 * 1024 * 1024) throw new Error("parser VM actual output exceeds limit");
+        await writeFile(entry.path, data);
       }
       this.claim(entry.path, "download");
     }
@@ -139,7 +151,9 @@ export class SessionStaging {
   private async walk(roots: string[]): Promise<Map<string, RemoteEntry>> {
     const entries = new Map<string, RemoteEntry>();
     const visit = async (entry: RemoteEntry): Promise<void> => {
+      if (!roots.some((root) => entry.path === root || entry.path.startsWith(root + path.sep))) throw new Error("parser VM output escaped staging roots");
       if (entries.has(entry.path)) return;
+      if (entries.size >= 8192 || entry.path.split(path.sep).length > 64) throw new Error("parser VM output entry/depth limit exceeded");
       entries.set(entry.path, entry);
       if (entry.isDir) for (const child of await this.remote.list(entry.path)) await visit(child);
     };

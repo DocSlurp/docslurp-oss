@@ -16,7 +16,7 @@
  */
 
 import type { AssignmentRole, BBox, DecisionModel, ImageFact, ImageKind } from "@docslurp/shared";
-import sharp from "sharp";
+import sharp from "../tools/isolated-image.js";
 
 import { prepareThumbnail, type TileLongEdge } from "./contact-sheet.js";
 import {
