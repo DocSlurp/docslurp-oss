@@ -92,6 +92,10 @@ export interface IngestReportStageRow {
   error?: string | null;
   /** extract-markdown's recorded extractor fallback (stats.extractorFallback), validated before use. */
   extractorFallback?: unknown;
+  /** extract-markdown's page equivalents and dense pages (stats.pageEquivalents, densePages, densePageCount). */
+  pageEquivalents?: number | null;
+  densePages?: number[] | null;
+  densePageCount?: number | null;
 }
 
 export interface IngestReportRunRow {
@@ -489,6 +493,7 @@ export function buildIngestReport(input: IngestReportInput): IngestReport {
     },
     failures: summarizeFailures(failureList),
     extractionWarnings: listExtractionWarnings(docs, stagesByDoc),
+    denseText: listDenseText(docs, stagesByDoc),
     focus,
     languages: [...languageCounts].sort((a, b) => b[1] - a[1]).map(([code, documents]) => ({ code, documents })),
     stages: {
@@ -550,6 +555,21 @@ const fallbackStatsSchema = z.object({
   served: z.string(),
   reasons: z.array(z.object({ extractor: z.string(), reason: ingestReportExtractorFallbackReasonSchema })).min(1).max(16),
 });
+
+/** Files whose extraction measured pages holding more than DENSE_PAGE_EQUIVALENTS pages of text (stats.densePages). */
+function listDenseText(docs: IngestReportDocumentRow[], stagesByDoc: Map<string, IngestReportStageRow[]>): IngestReport["denseText"] {
+  const examples: IngestReport["denseText"]["examples"] = [];
+  let total = 0;
+  for (const doc of docs) {
+    const stage = stagesByDoc.get(doc.id)?.findLast((row) => row.stage === "extract-markdown" && (row.densePageCount ?? 0) > 0);
+    if (!stage) continue;
+    total += 1;
+    if (examples.length < FAILURE_EXAMPLE_LIMIT) {
+      examples.push({ documentId: doc.id, filename: doc.filename, densePages: stage.densePages ?? [], densePageCount: stage.densePageCount ?? 0, pageEquivalents: stage.pageEquivalents ?? 0 });
+    }
+  }
+  return { total, examples };
+}
 
 /** Completed files a fallback extractor served (extract-markdown's stats.extractorFallback): wanted, served, public reason codes. */
 function listExtractionWarnings(docs: IngestReportDocumentRow[], stagesByDoc: Map<string, IngestReportStageRow[]>): IngestReport["extractionWarnings"] {
@@ -1007,6 +1027,10 @@ export function summarizeIngestReport(report: IngestReport): string {
   const evaluated = report.searchability.searchablePages + report.searchability.unsearchablePages;
   lines.push(`**Ingest report** for ${scope}: ${plural(report.files.total, "file")}, ${plural(pages, "page")}${evaluated ? `, ${searchable.toLocaleString("en-US")} of ${plural(evaluated, "checked page")} searchable` : ""}.`);
   if (report.failures.total > 0) lines.push(summarizeFailureLine(report.failures));
+  if (report.denseText.total > 0) {
+    const shown = report.denseText.examples.slice(0, 3).map((file) => `${escapeMarkdown(file.filename)} (${plural(file.densePageCount, "page")})`);
+    lines.push(`${plural(report.denseText.total, "file")} ${agree(report.denseText.total, "has", "have")} pages holding several pages of text each (very dense, tiny, hidden or off-page text): ${shown.join(", ")}. That text is searchable and counted by its volume; check it if you did not expect it.`);
+  }
   if (report.images.scannedLookingPages > 0) {
     lines.push(`${plural(report.images.scannedLookingPages, "page")} ${agree(report.images.scannedLookingPages, "looks", "look")} scanned (images, almost no text layer); vision read ${plural(report.extraction.visionPages, "page")}.`);
   }
@@ -1166,6 +1190,7 @@ export async function loadIngestReport(args: {
       document_id: string; stage_name: string; status: string; skipped: boolean; reason: string | null;
       selected_pages: number | null; pages: string | number | null; cost_cents: string | number | null;
       table_pages: string | number | null; duration_seconds: string | number | null; error: string | null; extractor_fallback: unknown;
+      page_equivalents: string | number | null; dense_pages: unknown; dense_page_count: string | number | null;
     }[]>`
       select s.document_id, s.stage_name, s.status, left(s.error, 1000) as error,
         coalesce(s.stats -> 'skipped' = 'true'::jsonb, false) as skipped,
@@ -1175,7 +1200,10 @@ export async function loadIngestReport(args: {
         case when jsonb_typeof(s.stats -> 'costCents') = 'number' then (s.stats ->> 'costCents')::numeric end as cost_cents,
         case when jsonb_typeof(s.stats -> 'tablePages') = 'number' then (s.stats ->> 'tablePages')::numeric end as table_pages,
         case when jsonb_typeof(s.stats -> 'durationSeconds') = 'number' then (s.stats ->> 'durationSeconds')::numeric end as duration_seconds,
-        case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'extractorFallback') = 'object' then s.stats -> 'extractorFallback' end as extractor_fallback
+        case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'extractorFallback') = 'object' then s.stats -> 'extractorFallback' end as extractor_fallback,
+        case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'pageEquivalents') = 'number' then (s.stats ->> 'pageEquivalents')::numeric end as page_equivalents,
+        case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'densePages') = 'array' then s.stats -> 'densePages' end as dense_pages,
+        case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'densePageCount') = 'number' then (s.stats ->> 'densePageCount')::numeric end as dense_page_count
       from document_run_stage_states s
       join documents d on d.id = s.document_id and d.run_id = s.run_id
       where d.workspace_id = ${workspaceId} and d.id = any(${client.array(ids)}::text[])
@@ -1227,6 +1255,9 @@ export async function loadIngestReport(args: {
       tablePages: numOrNull(row.table_pages), durationSeconds: numOrNull(row.duration_seconds),
       error: row.status === "failed" ? row.error : null,
       extractorFallback: row.extractor_fallback ?? null,
+      pageEquivalents: numOrNull(row.page_equivalents),
+      densePages: Array.isArray(row.dense_pages) ? row.dense_pages.filter((page): page is number => Number.isSafeInteger(page) && page >= 1).slice(0, 50) : null,
+      densePageCount: numOrNull(row.dense_page_count),
     })),
     runs: runRows.map((row) => ({ id: row.id, status: row.status, pagesProcessed: num(row.pages_processed), durationMs: num(row.duration_ms) })),
     costCents: cost?.costCents ?? null,

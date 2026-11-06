@@ -387,6 +387,17 @@ describe("extract sweep", () => {
     expect(await getOrgStorage("o2", sql as never, { excludeExtracts: true })).toMatchObject({ sourceBytes: 0, pages: 0 });
   });
 
+  it("counts a stuffed document's measured page equivalents in the storage estimate", async () => {
+    // A 1-page PDF whose extraction measured 50 page equivalents (billing_pages): its chunks and vectors scale with that.
+    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline) values ('stuffed', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', '{}')`;
+    const { getOrgStorage } = await import("../services/billing/overview.js");
+    const before = await getOrgStorage("o", sql as never, { excludeExtracts: true });
+    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, file_size, page_count, page_count_source, billing_pages, billing_pages_method)
+      values ('stuffed-1', 'o', 'u', 'w', 'stuffed', 'Stuffed.pdf', 'application/pdf', 'u/stuffed/raw/s.pdf', 'completed', 1000, 1, 'counted', 50, 'page-equivalents')`;
+    const after = await getOrgStorage("o", sql as never, { excludeExtracts: true });
+    expect(after.pages - before.pages).toBe(50);
+  });
+
   it("removes chat evidence spans quoting an extract's documents, and keeps the chat turn", async () => {
     const extract = await newExtract();
     const runId = await seedRun(extract);

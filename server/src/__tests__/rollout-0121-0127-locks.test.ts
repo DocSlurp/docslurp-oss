@@ -66,10 +66,12 @@ describe("0121-0130 lock prelude", () => {
     expect(all[PRELUDE.length]).toBe("LOCK TABLE workspace_runs IN SHARE ROW EXCLUSIVE MODE;");
   });
 
-  it("0130 alters only documents (its default, a nullable column and its trigger), under the prelude", () => {
+  it("0130 alters only documents and document_page_facts (defaults, nullable columns, a trigger), under the prelude", () => {
     const all = statements(release.find((name) => name.startsWith("0130_"))!).slice(PRELUDE.length);
-    expect(all[0]).toBe("ALTER TABLE documents ALTER COLUMN page_count_source SET DEFAULT 'assumed';");
-    expect(all[1]).toMatch(/^ALTER TABLE documents ADD COLUMN IF NOT EXISTS intake_page_count integer CHECK/);
+    // document_page_facts (its equivalents columns) is locked right after the prelude.
+    expect(all[0]).toBe("LOCK TABLE document_page_facts IN ACCESS EXCLUSIVE MODE;");
+    expect(all[1]).toBe("ALTER TABLE documents ALTER COLUMN page_count_source SET DEFAULT 'assumed';");
+    expect(all[2]).toMatch(/^ALTER TABLE documents ADD COLUMN IF NOT EXISTS intake_page_count integer CHECK/);
     for (const statement of all) expect(statement).not.toMatch(/\b(?:UPDATE|DELETE|INSERT)\s+(?:INTO\s+|FROM\s+)?(?!.*\bTG_OP\b)\w+\s+SET\b/i);
     expect(all.some((statement) => /CREATE TRIGGER documents_intake_page_count BEFORE INSERT OR UPDATE OF intake_page_count ON documents/.test(statement))).toBe(true);
   });

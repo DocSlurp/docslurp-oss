@@ -15,6 +15,9 @@ import { logNativePdfFallback, NativePdfError } from "../native-pdf/types.js";
 import { renderClipNative, renderPagesNative } from "../native-pdf/render.js";
 import type { Bbox, NativePdfEngine } from "../native-pdf/types.js";
 import { boundedRasterDpi, boundedRasterEdge } from "../lib/raster-bounds.js";
+import { pageAreaEquivalents, pageAreaEquivalentsPt } from "@docslurp/shared";
+import type { PageEquivalentRow } from "../db/page-equivalents.js";
+import { recordRenderedPageAreas } from "./page-area-sink.js";
 import { pushPerfMetric } from "../lib/perf-context.js";
 import { isCommandTeardownError } from "../sandbox/teardown.js";
 import { SourceIntegrityError, verifyStagedSource } from "../sandbox/source-integrity.js";
@@ -421,6 +424,8 @@ export class PdfRasterCache {
     }));
     const missing = pageNumbers.filter((pageNumber) => existing.get(pageNumber) === null);
     const generated = new Map<number, { sizeBytes: number; widthPx: number | null; heightPx: number | null }>();
+    // Each rendered page's area in standard pages (capped per page): a giant page costs the pixels it renders to.
+    const areas: PageEquivalentRow[] = [];
 
     if (missing.length > 0) {
       const source = await this.sources.get(args.document);
@@ -441,6 +446,7 @@ export class PdfRasterCache {
             for (const [pageNumber, page] of rendered) {
               await this.storage.putBytes(keys.get(pageNumber)!, page.bytes, "image/png");
               generated.set(pageNumber, { sizeBytes: page.bytes.byteLength, widthPx: page.widthPx, heightPx: page.heightPx });
+              if (page.widthPx && page.heightPx) areas.push({ pageNumber, area: pageAreaEquivalents(page.widthPx, page.heightPx, dpi) });
             }
             nativeDone = true;
           }
@@ -475,6 +481,7 @@ export class PdfRasterCache {
         await runLanes(pdftoppmPages, lanes, args.signal, async (selectedPage, signal) => {
           const size = sizes.get(selectedPage);
           if (!size) throw new Error("PDF page dimensions unavailable; refusing unbounded rasterization");
+          areas.push({ pageNumber: selectedPage, area: pageAreaEquivalentsPt(size.widthPt, size.heightPt) });
           const renderDpi = boundedRasterDpi(size.widthPt, size.heightPt, dpi);
           // Each command writes only to its own directory and reads the source read-only: concurrent
           // lanes share no writable path (so no socket or file to meet on), and one lane cannot touch
@@ -512,6 +519,7 @@ export class PdfRasterCache {
       }
     }
 
+    await recordRenderedPageAreas(args.runId, args.document.id, areas);
     return await Promise.all(pageNumbers.map(async (pageNumber) => {
       const key = keys.get(pageNumber)!;
       const generatedPage = generated.get(pageNumber);

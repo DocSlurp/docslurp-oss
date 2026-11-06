@@ -11,6 +11,11 @@
 --    bills neither a page fee nor a feature (never intake's assumed page). The CHECK is re-added NOT VALID (no scan); every
 --    existing row satisfies it by construction (the old CHECK required >= 1).
 --
+-- 4. document_page_facts.text_equivalents / area_equivalents: what one page costs to process, measured by the worker from
+--    the text it extracted (the text rule) and the area it rendered (capped per page); written only for pages above 1. The
+--    worker raises documents.billing_pages to page_count plus every page's extra equivalents, so a page stuffed with text
+--    (tiny, invisible or off-page text, a giant page) bills the pages it holds. Nullable columns, no default: no rewrite.
+--
 -- Catalog-only changes (no rewrite, no scan; a nullable column with no default), under ACCESS EXCLUSIVE on documents,
 -- which the release's lock prelude already holds in its order (see 0122). The trigger's function touches only NEW/OLD.
 SET LOCAL lock_timeout = '10s';
@@ -28,6 +33,8 @@ LOCK TABLE api_keys IN ACCESS EXCLUSIVE MODE;
 SET LOCAL lock_timeout = '10s';
 --> statement-breakpoint
 LOCK TABLE webhooks IN ACCESS EXCLUSIVE MODE;
+--> statement-breakpoint
+LOCK TABLE document_page_facts IN ACCESS EXCLUSIVE MODE;
 --> statement-breakpoint
 ALTER TABLE documents ALTER COLUMN page_count_source SET DEFAULT 'assumed';
 --> statement-breakpoint
@@ -53,3 +60,7 @@ CREATE TRIGGER documents_intake_page_count BEFORE INSERT OR UPDATE OF intake_pag
 ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_billing_pages_check;
 --> statement-breakpoint
 ALTER TABLE documents ADD CONSTRAINT documents_billing_pages_check CHECK (billing_pages IS NULL OR billing_pages >= 0) NOT VALID;
+--> statement-breakpoint
+ALTER TABLE document_page_facts ADD COLUMN IF NOT EXISTS text_equivalents integer CHECK (text_equivalents IS NULL OR text_equivalents >= 1);
+--> statement-breakpoint
+ALTER TABLE document_page_facts ADD COLUMN IF NOT EXISTS area_equivalents integer CHECK (area_equivalents IS NULL OR area_equivalents >= 1);

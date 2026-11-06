@@ -137,6 +137,25 @@ export const ingestReportExtractionWarningsSchema = z.object({
   examples: z.array(ingestReportExtractionWarningSchema),
 });
 
+/**
+ * Files with pages whose extracted text counts as more than DENSE_PAGE_EQUIVALENTS pages (page-equivalents.ts): text that is
+ * tiny, invisible, outside the visible page or layered, or simply very dense. It is indexed and billed by its volume; it is
+ * reported because hidden text is also a prompt-injection and search-stuffing vector.
+ */
+export const ingestReportDenseTextSchema = z.object({
+  total: count,
+  /** Up to 20 files, with up to 50 of their dense pages. */
+  examples: z.array(z.object({
+    documentId: z.string(),
+    filename: z.string(),
+    densePages: z.array(count),
+    densePageCount: count,
+    /** The file's measured page equivalents. */
+    pageEquivalents: count,
+  })),
+});
+export type IngestReportDenseText = z.infer<typeof ingestReportDenseTextSchema>;
+
 const FALLBACK_COPY: Record<IngestReportExtractorFallbackReason, string> = {
   unavailable: "was not available on the processing server",
   failed: "failed on this file",
@@ -344,6 +363,8 @@ export const ingestReportSchema = z.object({
   failures: ingestReportFailuresSchema.default({ total: 0, byReason: [], examples: [] }),
   /** Files that completed with a fallback extractor. Defaults to none for reports stored before this field existed. */
   extractionWarnings: ingestReportExtractionWarningsSchema.default({ total: 0, examples: [] }),
+  /** Files with pages holding many pages of text (possible hidden or stuffed text). Defaults to none for older reports. */
+  denseText: ingestReportDenseTextSchema.default({ total: 0, examples: [] }),
   focus: ingestReportPageSchema.array().nullable(),
   languages: z.array(z.object({ code: z.string(), documents: count })),
   stages: z.object({

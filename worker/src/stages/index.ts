@@ -31,6 +31,8 @@ import { QuarantineStage } from "./quarantine.js";
 import { GraphEnrichStage } from "./graph-enrich.js";
 import { PiiDetectStage } from "./pii-detect.js";
 import { PageEmbedStage } from "./page-embed.js";
+import { recordPageEquivalents } from "../db/page-equivalents.js";
+import { configurePageAreaSink } from "../pipeline/page-area-sink.js";
 
 /** Placeholder until the deferred-indexing stage lands; only reachable when a workspace opts into that mode. */
 
@@ -43,6 +45,11 @@ export function createStages(args: {
   /** Database client for the deferred-indexing stages. */
   sql?: Sql<Record<string, unknown>>;
 }): Stage[] {
+  // Rendered page areas raise the page's measured equivalents (db/page-equivalents.ts), from every raster cache instance.
+  if (args.sql) {
+    const sql = args.sql;
+    configurePageAreaSink((rows) => recordPageEquivalents(sql, rows));
+  }
   const sourceCache = new PdfSourceCache(args.storage);
   const rasterCache = new PdfRasterCache(args.runner, args.storage, sourceCache);
   const stages: Record<PipelineRunStage, () => Stage> = {

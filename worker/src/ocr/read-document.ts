@@ -53,6 +53,9 @@ export interface OcrDocumentPage {
   reader: string;
   /** The boundary's validated rendition of the frame (raw RGB with its header), read before its scratch directory is removed. */
   rendition?: { bytes: Buffer; width: number; height: number };
+  /** The frame's decoded pixel size (page area equivalents of an uploaded image). */
+  sourceWidth?: number;
+  sourceHeight?: number;
 }
 
 export interface OcrDocumentResult {
@@ -111,7 +114,8 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
       // The rendition was validated by header and exact size (engine.ts); its bytes are carried as-is.
       const rendition = page.rendition ? { bytes: await readFile(page.rendition.imagePath), width: page.rendition.width, height: page.rendition.height } : undefined;
       if (rendition && input.rendition && rendition.bytes.length > input.rendition.maxBytes) throw new Error("OCR rendition grew past its cap");
-      pages.push({ pageNumber: page.pageNumber, text: page.text, reader: page.recogniser, ...(rendition ? { rendition } : {}) });
+      pages.push({ pageNumber: page.pageNumber, text: page.text, reader: page.recogniser, ...(rendition ? { rendition } : {}),
+        ...(page.sourceWidth && page.sourceHeight ? { sourceWidth: page.sourceWidth, sourceHeight: page.sourceHeight } : {}) });
     }
     return {
       mode: outcome.mode,

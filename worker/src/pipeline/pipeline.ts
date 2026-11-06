@@ -78,6 +78,8 @@ export interface CheckpointStore {
   countedImageFrames?(runId: string): Promise<Array<{ documentId: string; pageCount: number; chargedPages: number }>>;
   /** Pauses the run when credits it newly owes (a measured page count above intake's) no longer fit the org's balance. */
   enforceSpendForCharge?(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean; blocked?: boolean }>;
+  /** Records pages measured above one page (text or area equivalents) and raises billing_pages; returns it (db/page-equivalents.ts). */
+  recordPageEquivalents?(runId: string, documentId: string, rows: import("../db/page-equivalents.js").PageEquivalentRow[]): Promise<number | null>;
   /** Fast pages of the run measured above admission's priced counts (documents.intake_page_count); durable, recomputed per call. */
   measuredPagesAboveIntake?(runId: string): Promise<number>;
   /** Pauses the run for funds (pause_reason `reason`) without a balance check; `blocked` without `paused`: already paused or stopped. */
