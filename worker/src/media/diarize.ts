@@ -54,7 +54,7 @@ export async function diarize(args: {
     if (!(await allowHostedCall(state, { provider: provider.id, model: provider.model, operation: "media.diarize", target: "hosted" }, [document.id]))) {
       return outcome("skipped", "privacy-mode");
     }
-    const bytes = await prepareDiarizationAudio(args.runner, args.source, args.signal);
+    const bytes = await prepareDiarizationAudio(args.runner, args.source, Math.max(args.durationSeconds, 1), args.signal);
     const result = await transcribeChunk({ state, scope, provider, journal: args.journal, storage: args.storage,
       input: { bytes, durationSeconds: Math.max(args.durationSeconds, 1), format: "mp3" }, offset: 0, metric: "media-diarization",
       maxDocumentCostCents: args.maxDocumentCostCents, config, signal: args.signal });
