@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DISTINCT_TEST_PRICING, installTestPricing, resetPricingProviderForTests } from "@docslurp/shared";
 
 import { createModalProvider, type ModalSdk } from "../sandbox/providers/modal/index.js";
+import type { ParserSandboxProvider } from "../sandbox/types.js";
 import { loadPricingThenParserSandbox } from "./startup-order.js";
 
 // Real-Modal validation N2: under the service profile the worker probed the parser VM before loading pricing, and the
@@ -56,7 +57,7 @@ describe("service-profile worker boot: pricing, then the parser probe (validatio
         order.push("parser sandbox");
         const probe = await provider.probe(config);
         expect(probe).toMatchObject({ ok: true });
-        return { provider, config, isolation: probe.isolation };
+        return { provider: provider as unknown as ParserSandboxProvider, config, isolation: probe.isolation };
       },
     });
     expect(order).toEqual(["pricing", "parser sandbox"]);
