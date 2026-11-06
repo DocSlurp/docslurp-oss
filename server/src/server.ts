@@ -294,7 +294,8 @@ export function ensureApiStartup(): Promise<void> {
       // The pricing provider (DOCSLURP_PRICING_PLUGIN) prices every quote and charge; the service profile refuses to
       // start without one rather than price with the open default.
       // Its durable state (pricing_provider_state, 0131) is read-only through this process's pool; only the operator raises it.
-      await loadPricingProvider(process.env, { durableState: pricingDurableStateFromSql(pricingStateSql) });
+      // It also refuses to start when this process's role could move the mark (refusePricingStateWriter, council M #1).
+      await loadPricingProvider(process.env, { durableState: pricingDurableStateFromSql(pricingStateSql), sql: pricingStateSql });
       // Invalid private endpoint config fails startup; the /models probe never blocks it.
       initializePrivateModelEndpoints();
       // Legacy extractor ids must be installed before any stored or incoming config is parsed; a bad alias fails startup.

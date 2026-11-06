@@ -371,7 +371,9 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         // Parser commands drop root in the VM (control.ts); a contract run as root means they would parse as root (N10).
         if (typeof contract.uid !== "number" || contract.uid === 0) throw new Error("parser VM commands do not drop root privileges");
         // Kernel link protections (council K #5, N #2): both must be reported exactly 1; off, absent, null or malformed fails.
-        if (contract.links?.hardlinks !== 1 || contract.links?.symlinks !== 1) throw new Error("parser VM kernel link protections are not confirmed on");
+        if (contract.links?.hardlinks !== 1 || contract.links?.symlinks !== 1) {
+          throw new Error(`parser VM kernel link protections are not confirmed on (hardlinks=${JSON.stringify(contract.links?.hardlinks ?? null)}, symlinks=${JSON.stringify(contract.links?.symlinks ?? null)})`);
+        }
         const tools = Array.isArray(contract.tools) ? contract.tools.filter((tool): tool is string => typeof tool === "string" && /^[a-z0-9][a-z0-9_.-]{0,63}$/.test(tool)) : undefined;
         return { ok: true, isolation: ISOLATION, detail: `VM image contract verified for '${config.app}'`, ...(tools ? { tools } : {}) };
       } catch (error) {

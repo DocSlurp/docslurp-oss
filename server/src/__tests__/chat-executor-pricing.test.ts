@@ -18,7 +18,9 @@ function runExecutor(env: Record<string, string>) {
   const result = spawnSync(process.execPath, ["--import", "tsx", executor], {
     cwd: serverDir,
     env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", TMPDIR: process.env.TMPDIR ?? tmpdir(), NODE_ENV: "development",
-      DOCSLURP_DURABLE_CHAT: "1", DOCSLURP_PRICING_REQUIRED: "1", DATABASE_URL: "postgres://nobody@127.0.0.1:1/none", ...env },
+      // These cases test plugin loading against an unreachable database; the role check (council M #1) is off here and
+      // covered by its own case below and by db-roles.test.ts.
+      DOCSLURP_DURABLE_CHAT: "1", DOCSLURP_PRICING_REQUIRED: "1", DOCSLURP_REFUSE_PRICING_STATE_WRITER: "0", DATABASE_URL: "postgres://nobody@127.0.0.1:1/none", ...env },
     encoding: "utf8",
     timeout: 90_000,
   });
@@ -26,6 +28,12 @@ function runExecutor(env: Record<string, string>) {
 }
 
 describe("chat executor pricing startup (council E #2)", () => {
+  it("with the role check on (the default where pricing is required), refuses to start when it cannot verify its role", () => {
+    const run = runExecutor({ DOCSLURP_REFUSE_PRICING_STATE_WRITER: "1" });
+    expect(run.status).toBe(1);
+    expect(run.output).toMatch(/startup_refused pricing: .*ECONNREFUSED/);
+  }, 120_000);
+
   // The executor runs against the built packages, as in the app image: build @docslurp/shared once when it is not built
   // (the vitest suites read its sources and never need the build).
   beforeAll(() => {

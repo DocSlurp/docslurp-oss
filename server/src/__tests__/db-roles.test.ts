@@ -1,5 +1,5 @@
 import { applyRemainingMigrations, createMigratedDatabase } from "@docslurp/worker/testing";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
   DEFAULT_DB_ROLES,
@@ -471,5 +471,41 @@ describe("runtime database identity gate before the role rollout", () => {
     const { runtimeIdentityProblems } = await import("../../db/runtime-role-check.mjs");
     expect(runtimeIdentityProblems({ role: "docslurp", superuser: false, owned_relations: 40, expected_exists: false }, app).join("\n"))
       .toMatch(/owner role docslurp[\s\S]*role docslurp_app does not exist: roll out the least-privilege roles/);
+  });
+});
+
+describe("runtime processes refuse to start as a pricing-state writer (council M #1)", () => {
+  const sqlAs = (role: string | null) => ({ unsafe: async (query: string, params?: unknown[]) =>
+    (role ? await as(role, () => db.query<Record<string, unknown>>(query, params as unknown[])) : await db.query<Record<string, unknown>>(query, params as unknown[])).rows });
+
+  it("passes the least-privilege runtime roles", async () => {
+    const { assertRuntimeCannotMovePricingState } = await import("@docslurp/shared/pricing-loader");
+    await expect(assertRuntimeCannotMovePricingState(sqlAs(app))).resolves.toBeUndefined();
+    await expect(assertRuntimeCannotMovePricingState(sqlAs(worker))).resolves.toBeUndefined();
+  });
+
+  it("refuses the owner or superuser, and a runtime role granted EXECUTE on the raise", async () => {
+    const { assertRuntimeCannotMovePricingState } = await import("@docslurp/shared/pricing-loader");
+    await expect(assertRuntimeCannotMovePricingState(sqlAs(null))).rejects.toThrow(/superuser.*owns pricing_provider_state|superuser, owns pricing_provider_state/);
+    await db.exec(`grant execute on function public.pricing_state_raise(text, bigint) to ${app}`);
+    try {
+      await expect(assertRuntimeCannotMovePricingState(sqlAs(app))).rejects.toThrow(/may execute pricing_state_raise; .*refusing to start|may execute pricing_state_raise/);
+    } finally {
+      await db.exec(`revoke execute on function public.pricing_state_raise(text, bigint) from ${app}`);
+    }
+  });
+
+  it("is on by default wherever pricing is required, and loadPricingProvider refuses before loading any plugin", async () => {
+    const { loadPricingProvider, refusePricingStateWriter, resetPricingLoaderForTests } = await import("@docslurp/shared/pricing-loader");
+    expect(refusePricingStateWriter({ DOCSLURP_SERVICE_PROFILE: "service" })).toBe(true);
+    expect(refusePricingStateWriter({ DOCSLURP_PRICING_REQUIRED: "1" })).toBe(true);
+    expect(refusePricingStateWriter({})).toBe(false);
+    expect(refusePricingStateWriter({ DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_REFUSE_PRICING_STATE_WRITER: "0" })).toBe(false);
+    expect(refusePricingStateWriter({ DOCSLURP_REFUSE_PRICING_STATE_WRITER: "1" })).toBe(true);
+    const importModule = vi.fn();
+    resetPricingLoaderForTests();
+    await expect(loadPricingProvider({ DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_PRICING_PLUGIN: "/p.mjs" }, { sql: sqlAs(null), importModule })).rejects.toThrow(/refusing to start/);
+    expect(importModule).not.toHaveBeenCalled();
+    resetPricingLoaderForTests();
   });
 });

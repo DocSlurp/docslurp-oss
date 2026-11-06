@@ -57,9 +57,17 @@ operator has activated, so it can refuse an older one replayed later.
 - it throws when the database is unavailable, and in a process started without one. What the provider does then is its
   own rule; a provider that depends on the state should refuse to price (fail closed).
 
-Runtime processes never raise a value. Runtime database roles can only read the table: none can execute
-`pricing_state_raise`, insert, update, delete or truncate it, so a compromised API, worker or executor cannot move a
-value however often it tries. The operator's activation tool raises values with the table owner's credential through
+The runtime seam never raises a value, and the least-privilege runtime roles (`docslurp_app`, `docslurp_worker`) can
+only read the table: neither can execute `pricing_state_raise`, insert, update, delete or truncate it. That protects the
+mark only when each runtime process actually connects as its least-privilege role. A process connected as the table
+owner or a superuser can move or reset the value. Two checks enforce the roles:
+
+- **At startup:** wherever pricing is required, the API, worker and chat executor refuse to start if their role owns
+  `pricing_provider_state`, may execute `pricing_state_raise` or is a superuser (`DOCSLURP_REFUSE_PRICING_STATE_WRITER`,
+  on by default there).
+- **At deploy:** `server/db/runtime-role-check.mjs` gates deploys on the same rule.
+
+Until a deployment's runtime roles are rolled out, its runtime processes can still move the mark. The operator's activation tool raises values with the table owner's credential through
 `pricingStateAdminFromSql(sql).raise(key, candidate)`, which calls `pricing_state_raise(key, candidate)` (SECURITY
 INVOKER). It is a strict compare-and-set: it seeds a missing key or sets an existing one to a `candidate` strictly above
 the stored value and returns it, and fails for a candidate at or below the stored value, so of concurrent raises to one

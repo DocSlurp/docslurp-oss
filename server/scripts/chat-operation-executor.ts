@@ -17,7 +17,7 @@ process.once("SIGTERM", stop);
 // claiming any operation. DOCSLURP_PRICING_REQUIRED=1 (fly.chat-executor.toml) without a provider refuses to start, so
 // the executor never prices an answer with the open default (or at 0).
 try {
-  await loadPricingProvider(process.env, { durableState: pricingDurableStateFromSql(sql) });
+  await loadPricingProvider(process.env, { durableState: pricingDurableStateFromSql(sql), sql });
 } catch (error) {
   console.error("[native-chat] startup_refused pricing:", error instanceof Error ? error.message : String(error));
   await sql.end({ timeout: 1 }).catch(() => undefined);

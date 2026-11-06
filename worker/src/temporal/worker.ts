@@ -131,7 +131,7 @@ async function main(): Promise<void> {
   // 0131) is read-only through the worker's pool; only the operator raises it. Then fail before connecting if the parser sandbox is unavailable
   // or violates the production policy.
   const sandbox = await loadPricingThenParserSandbox({
-    loadPricing: () => loadPricingProvider(process.env, { durableState: pricingDurableStateFromSql(store.stageSql) }).catch((error) => {
+    loadPricing: () => loadPricingProvider(process.env, { durableState: pricingDurableStateFromSql(store.stageSql), sql: store.stageSql }).catch((error) => {
       throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
     }),
     initializeParserSandbox: () => initializeParserSandbox(process.env, process.platform).catch((error) => {

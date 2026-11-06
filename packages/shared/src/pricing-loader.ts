@@ -90,6 +90,44 @@ export function pricingStateAdminFromSql(sql: DurableStateSql): PricingStateAdmi
   };
 }
 
+/**
+ * Whether this process refuses to start when its database role could move the pricing high-water mark (council M #1):
+ * DOCSLURP_REFUSE_PRICING_STATE_WRITER=1/0, defaulting to on wherever pricing is required (the service profile, or
+ * DOCSLURP_PRICING_REQUIRED=1).
+ */
+export function refusePricingStateWriter(env: Record<string, string | undefined> = process.env): boolean {
+  const raw = env.DOCSLURP_REFUSE_PRICING_STATE_WRITER?.trim().toLowerCase();
+  if (raw === "1" || raw === "true") return true;
+  if (raw === "0" || raw === "false") return false;
+  return pricingRequired(env);
+}
+
+/** One row: whether the connected role owns pricing_provider_state or may execute pricing_state_raise. */
+const PRICING_STATE_WRITER_SQL = `
+  select current_user::text as role,
+    coalesce((select rolsuper from pg_roles where rolname = current_user), false) as superuser,
+    case when to_regclass('public.pricing_provider_state') is null then false
+      else pg_has_role(current_user, (select relowner from pg_class where oid = to_regclass('public.pricing_provider_state')), 'USAGE') end as owns_state,
+    case when to_regprocedure('public.pricing_state_raise(text, bigint)') is null then false
+      else has_function_privilege(current_user, 'public.pricing_state_raise(text, bigint)', 'EXECUTE') end as raises_state
+`;
+
+/**
+ * Throw when this process's database role could move the pricing high-water mark: it owns pricing_provider_state, may
+ * execute pricing_state_raise, or is a superuser. A runtime process (API, worker, chat executor) must connect as its
+ * least-privilege role; the deploy gates this too (runtime-role-check.mjs), and this refuses at startup as well.
+ */
+export async function assertRuntimeCannotMovePricingState(sql: DurableStateSql): Promise<void> {
+  const rows = await sql.unsafe(PRICING_STATE_WRITER_SQL);
+  const row = rows[0] as { role?: unknown; superuser?: unknown; owns_state?: unknown; raises_state?: unknown } | undefined;
+  if (!row) throw new Error("pricing state writer check returned no row");
+  const reasons = [row.superuser === true ? "is a superuser" : null, row.owns_state === true ? "owns pricing_provider_state" : null,
+    row.raises_state === true ? "may execute pricing_state_raise" : null].filter(Boolean);
+  if (reasons.length) {
+    throw new Error(`database role ${String(row.role)} ${reasons.join(", ")}: a runtime process must connect as its least-privilege role (docslurp_app or docslurp_worker); refusing to start (set DOCSLURP_REFUSE_PRICING_STATE_WRITER=0 only for local development)`);
+  }
+}
+
 /** A process that has no database: every call throws, so a provider that needs durable state fails closed there. */
 export const UNAVAILABLE_PRICING_DURABLE_STATE: PricingDurableState = {
   async read() { throw new Error("pricing durable state is not available in this process"); },
@@ -111,6 +149,8 @@ export interface PricingPluginHost {
 export interface LoadPricingProviderOptions {
   /** The entrypoint's durable state (pricingDurableStateFromSql over its pool); omitted gives one that always throws. */
   durableState?: PricingDurableState;
+  /** The entrypoint's pool: with refusePricingStateWriter(env), startup refuses a role that could move the mark. */
+  sql?: DurableStateSql;
   /** Tests: how the plugin module is imported. */
   importModule?: (specifier: string) => Promise<unknown>;
 }
@@ -140,6 +180,8 @@ export async function loadPricingProvider(
   options: LoadPricingProviderOptions = {},
 ): Promise<string> {
   const importModule = options.importModule ?? ((specifier: string) => import(specifier));
+  // Before anything prices: a runtime role that owns or can raise the mark refuses to start (council M #1).
+  if (options.sql && refusePricingStateWriter(env)) await assertRuntimeCannotMovePricingState(options.sql);
   const specifier = pricingPluginSpecifier(env);
   if (loadedFrom !== undefined) {
     if (loadedFrom !== specifier) throw new Error("A pricing provider is already loaded from a different DOCSLURP_PRICING_PLUGIN");
