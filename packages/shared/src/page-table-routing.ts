@@ -116,9 +116,42 @@ export interface TableRepairs { mergedHeaders: number; listsRestored: number }
  */
 interface HtmlTable { start: number; end: number; header: string[]; body: string[][]; simple: boolean }
 
-const HTML_TABLE = /<table(?:\s[^>]*)?>[\s\S]*?<\/table>/gi;
-const HTML_ROW = /<tr(?:\s[^>]*)?>([\s\S]*?)<\/tr>/gi;
-const HTML_CELL = /<(t[dh])(\s[^>]*)?>([\s\S]*?)<\/\1>/gi;
+/** Pages larger than this skip HTML table repair and are reported unreliable: their text is not scanned for tables. */
+export const TABLE_SCAN_MAX_PAGE_CHARS = 256 * 1024;
+
+/** ASCII-only lower case, so indexes stay aligned with the original text (String#toLowerCase can change its length). */
+const asciiLower = (value: string) => value.replace(/[A-Z]+/g, (letters) => letters.toLowerCase());
+
+/**
+ * Elements `<tag ...>inner</tag>` of one of `tags` in `text`, left to right, each closed by the first matching close tag (no
+ * nesting). Linear: each search resumes after the previous element, and a tag with no close tag after some position has
+ * none after any later one, so it is never searched for again. The page is customer text (Doppler passes PDF prose
+ * through `--html` unescaped), so a lazy regex here would be quadratic on `<table>` repeated without a close.
+ */
+function htmlElements(text: string, tags: readonly string[]): Array<{ tag: string; start: number; end: number; attributes: string; inner: string }> {
+  const lower = asciiLower(text);
+  const open = new Set(tags);
+  const elements: Array<{ tag: string; start: number; end: number; attributes: string; inner: string }> = [];
+  let cursor = 0;
+  while (open.size > 0) {
+    let start = -1, tag = "";
+    for (let at = lower.indexOf("<", cursor); at !== -1; at = lower.indexOf("<", at + 1)) {
+      const name = [...open].find((candidate) => lower.startsWith(candidate, at + 1));
+      const next = name === undefined ? "" : lower[at + 1 + name.length] ?? "";
+      if (name !== undefined && (next === ">" || /\s/.test(next))) { start = at; tag = name; break; }
+    }
+    if (start === -1) break;
+    const openEnd = lower.indexOf(">", start);
+    if (openEnd === -1) break;
+    const close = lower.indexOf(`</${tag}>`, openEnd + 1);
+    if (close === -1) { open.delete(tag); cursor = start + 1; continue; }
+    const end = close + tag.length + 3;
+    elements.push({ tag, start, end, attributes: text.slice(start + 1 + tag.length, openEnd), inner: text.slice(openEnd + 1, close) });
+    cursor = end;
+  }
+  return elements;
+}
+
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: "\"", "#39": "'", apos: "'", nbsp: " " };
 
 function htmlText(value: string): string {
@@ -130,14 +163,14 @@ const escapeHtml = (value: string) => value.replace(/&/g, "&amp;").replace(/</g,
 
 function htmlTables(page: string): HtmlTable[] {
   const tables: HtmlTable[] = [];
-  for (const match of page.matchAll(HTML_TABLE)) {
+  for (const table of htmlElements(page, ["table"])) {
     let simple = true;
-    const rows = [...match[0].matchAll(HTML_ROW)].map((row) => [...row[1]!.matchAll(HTML_CELL)].map((cell) => {
-      if (/\b(?:colspan|rowspan)\s*=/i.test(cell[2] ?? "") || /<(?!br\s*\/?>)[a-z]/i.test(cell[3]!)) simple = false;
-      return htmlText(cell[3]!);
+    const rows = htmlElements(table.inner, ["tr"]).map((row) => htmlElements(row.inner, ["td", "th"]).map((cell) => {
+      if (/\b(?:colspan|rowspan)\s*=/i.test(cell.attributes) || /<(?!br\s*\/?>)[a-z]/i.test(cell.inner)) simple = false;
+      return htmlText(cell.inner);
     }));
     if (rows.length === 0) continue;
-    tables.push({ start: match.index!, end: match.index! + match[0].length, header: rows[0]!, body: rows.slice(1), simple });
+    tables.push({ start: table.start, end: table.end, header: rows[0]!, body: rows.slice(1), simple });
   }
   return tables;
 }
@@ -152,6 +185,8 @@ const htmlRow = (values: string[], cell: "td" | "th") => `<tr>${values.map((valu
 export function repairMarkdownTables(markdown: string): { markdown: string; repairs: TableRepairs } {
   const repairs: TableRepairs = { mergedHeaders: 0, listsRestored: 0 };
   const pages = markdown.split("\f").map((raw) => {
+    // An oversized page is left as extracted; tableReliability reports it unreliable.
+    if (raw.length > TABLE_SCAN_MAX_PAGE_CHARS) return raw;
     // HTML tables (Doppler --html, the VM guest's output) get the same repairs as pipe tables, as HTML.
     let page = raw;
     for (const table of htmlTables(raw).reverse()) {
@@ -203,6 +238,8 @@ export const TABLE_UNRELIABLE_EMPTY_CELL_SHARE = 0.4;
  * model (classify-route); otherwise Doppler's table is served.
  */
 export function tableReliability(page: string): string[] {
+  // An oversized page is not scanned (customer text; bounded work): its tables are unknown, so it is a model's to read.
+  if (page.length > TABLE_SCAN_MAX_PAGE_CHARS) return ["table:oversized-page"];
   const signals = new Set<string>();
   // A spanning HTML table's row lengths do not show its columns; it is judged only by its empty cells.
   const tables = [...pipeTables(page.split("\n")).map((table) => ({ ...table, simple: true })), ...htmlTables(page)];

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { PAGE_TABLE_ROUTING, isTableHeavy, markdownTables, repairMarkdownTables, tableReliability } from "./page-table-routing.js";
+import { PAGE_TABLE_ROUTING, TABLE_SCAN_MAX_PAGE_CHARS, isTableHeavy, markdownTables, repairMarkdownTables, tableReliability } from "./page-table-routing.js";
 
 const pipe = (rows: number) => ["| a | b | c |", "| --- | --- | --- |", ...Array.from({ length: rows - 1 }, (_, i) => `| ${i} | x | y |`)].join("\n");
 
@@ -63,5 +63,38 @@ describe("born-digital tables: structural repairs and reliability", () => {
     expect(tableReliability("Prose only.")).toEqual([]);
     // Row-spanning labels (blank first cells under a filled one, the rest of each row filled) are sound.
     expect(tableReliability(table(["Italian B", "Higher", "7", "ITAL 2110"], ["", "Higher", "4", "ITAL 2110"], ["", "Standard", "6", "ITAL 1020"], ["", "Standard", "5", "ITAL 1010"]))).toEqual([]);
+  });
+});
+
+describe("HTML table scanning is linear on hostile page text (council G M1)", () => {
+  const elapsed = (fn: () => unknown) => { const start = performance.now(); fn(); return performance.now() - start; };
+  const unclosed = (chars: number, unit = "<table>x") => unit.repeat(Math.ceil(chars / unit.length)).slice(0, chars);
+
+  it("a page just under the cap of unclosed tables, rows or cells scans in well under 50 ms", () => {
+    for (const unit of ["<table>x", "<TABLE x>y", "<table><tr>x", "<table><tr><td>x", "<table><tr><th>a<td>b"]) {
+      const page = unclosed(TABLE_SCAN_MAX_PAGE_CHARS - 16, unit) + (unit.includes("<tr") ? "</table>" : "");
+      repairMarkdownTables(page); // warm
+      expect(elapsed(() => { repairMarkdownTables(page); tableReliability(page); })).toBeLessThan(50);
+    }
+  });
+
+  it("1 MB of unclosed tables, as one page or as cap-sized pages, finishes in well under 50 ms", () => {
+    const oneMb = unclosed(1024 * 1024);
+    const paged = Array.from({ length: 4 }, () => unclosed(TABLE_SCAN_MAX_PAGE_CHARS - 16)).join("\f");
+    repairMarkdownTables(paged);
+    expect(elapsed(() => { repairMarkdownTables(oneMb); tableReliability(oneMb); })).toBeLessThan(50);
+    expect(elapsed(() => repairMarkdownTables(paged))).toBeLessThan(50);
+  });
+
+  it("an oversized page is left as extracted and reported unreliable", () => {
+    const page = `<table><tr><td>-</td><td>a</td></tr><tr><td>-</td><td>b</td></tr><tr><td>-</td><td>c</td></tr></table>\n${"x".repeat(TABLE_SCAN_MAX_PAGE_CHARS)}`;
+    expect(repairMarkdownTables(page)).toEqual({ markdown: page, repairs: { mergedHeaders: 0, listsRestored: 0 } });
+    expect(tableReliability(page)).toEqual(["table:oversized-page"]);
+  });
+
+  it("an unclosed element does not hide a later closed one of another kind, as the regex did not", () => {
+    const page = "<table><tr><td>-<th>x</th><td>y</td></tr><tr><td>-</td><td>z</td></tr><tr><td>-</td><td>w</td></tr></table>";
+    expect(repairMarkdownTables(page).repairs.listsRestored).toBe(0);
+    expect(tableReliability("<table><tr><th>a</th><th>b</th></tr><tr><td>1</td></tr></table> <table>unclosed")).toEqual(["table:inconsistent-columns"]);
   });
 });
