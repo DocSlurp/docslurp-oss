@@ -31,6 +31,7 @@ import { createSandboxActivityInterceptor } from "../sandbox/activity-intercepto
 import { configureSourceQuarantine, postgresSourceQuarantine } from "../sandbox/source-quarantine.js";
 import { onTeardownBreakerOpen, quarantineForceExitMs, scheduleQuarantineForceExit, workerShutdownForceMs } from "../sandbox/teardown-breaker.js";
 import { initializeParserSandbox, setDefaultParserSandbox } from "../sandbox/startup.js";
+import { loadPricingThenParserSandbox } from "./startup-order.js";
 import { loadExtractorPlugins } from "../extractors/plugins.js";
 import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
 import { ocrLanguageSettingFromEnv } from "../ocr/languages.js";
@@ -124,15 +125,18 @@ async function main(): Promise<void> {
   }
   // Live OpenRouter list prices for receipt-less usage; hardcoded tables until (or unless) they load.
   startLiveModelPriceRefresh();
-  // Fail before connecting if the parser sandbox is unavailable or violates the production policy.
-  const sandbox = await initializeParserSandbox(process.env, process.platform).catch((error) => {
-    throw new FatalWorkerError("startup", `parser sandbox unavailable: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
-  });
-  // The pricing provider (DOCSLURP_PRICING_PLUGIN) loads before taking work: every charge the worker records is priced
-  // by it. The service profile refuses to start without one rather than price with the open default.
-  // Its durable state (pricing_provider_state, 0131) reads and raises through the worker's pool.
-  await loadPricingProvider(process.env, { durableState: pricingDurableStateFromSql(store.stageSql) }).catch((error) => {
-    throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
+  // The pricing provider (DOCSLURP_PRICING_PLUGIN) loads first: every charge the worker records is priced by it, including
+  // the parser sandbox probe's VM time, so it must be installed before the probe (validation N2). The service profile
+  // refuses to start without one rather than price with the open default. Its durable state (pricing_provider_state,
+  // 0131) reads and raises through the worker's pool. Then fail before connecting if the parser sandbox is unavailable
+  // or violates the production policy.
+  const sandbox = await loadPricingThenParserSandbox({
+    loadPricing: () => loadPricingProvider(process.env, { durableState: pricingDurableStateFromSql(store.stageSql) }).catch((error) => {
+      throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
+    }),
+    initializeParserSandbox: () => initializeParserSandbox(process.env, process.platform).catch((error) => {
+      throw new FatalWorkerError("startup", `parser sandbox unavailable: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    }),
   });
   // Extractor plugins named by DOCSLURP_EXTRACTOR_PLUGINS load before taking work; a missing or broken one, or a
   // configuration that selects the VM PDF extractor without a provider, refuses to start.

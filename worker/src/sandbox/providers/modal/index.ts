@@ -343,7 +343,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
     async probe(config) {
       let session: SandboxSession | undefined;
       try {
-        session = await provider.openSession({ ...config, sessionTimeoutSeconds: Math.min(config.sessionTimeoutSeconds, PROBE_SESSION_TIMEOUT_SECONDS) }, { activityId: "startup-probe" });
+        session = await provider.openSession({ ...config, sessionTimeoutSeconds: Math.min(config.sessionTimeoutSeconds, PROBE_SESSION_TIMEOUT_SECONDS) }, { activityId: "startup-probe", unmetered: true });
         const result = await session.run!({ binary: "node", args: ["/app/worker/scripts/parser-vm-contract.mjs"], env: { PATH: "/usr/local/bin:/usr/bin:/bin" }, readablePaths: [], inputPaths: [], writablePaths: [], limits: { timeoutMs: 30_000 } });
         const contract = result.exitCode === 0 ? JSON.parse(result.stdout) as { protocol?: unknown; uid?: unknown } : null;
         if (contract?.protocol !== "parser-vm@2") throw new Error("parser VM image contract unavailable");
@@ -423,12 +423,13 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         return creating;
       }
 
-      /** Log the command's Modal time and return it as a provider-cost usage event. */
-      function meter(started: number): UsageEvent {
+      /** Log the command's Modal time and return it as a provider-cost usage event (none for an unmetered session). */
+      function meter(started: number): UsageEvent | undefined {
         const wallSeconds = (Date.now() - started) / 1000;
         console.log(
           `[sandbox-usage] provider=modal cpu_seconds=${(config.cpu * wallSeconds).toFixed(3)} memory_gb_seconds=${((config.memoryMb / 1024) * wallSeconds).toFixed(3)} activity=${context.activityId}`,
         );
+        if (context.unmetered) return undefined;
         return buildModalUsageEvent(config, context.activityId, wallSeconds);
       }
 

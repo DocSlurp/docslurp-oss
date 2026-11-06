@@ -119,7 +119,11 @@ export interface ParserSandboxProvider<C = Record<string, unknown>> {
   configSchema: SandboxConfigSchema;
   readConfig(env: NodeJS.ProcessEnv): C;
   probe(config: C): Promise<SandboxProbeResult>;
-  openSession(config: C, context: { activityId: string }): Promise<SandboxSession>;
+  /**
+   * `unmetered`: the session's VM time is never recorded (the startup probe), so it is not priced; pricing may not be
+   * loaded yet, and under the service profile pricing() refuses until it is.
+   */
+  openSession(config: C, context: { activityId: string; unmetered?: boolean }): Promise<SandboxSession>;
 }
 
 export class SandboxConfigError extends Error {
