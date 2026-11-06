@@ -3,6 +3,8 @@ import path from "node:path";
 import { createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
 
+import { SandboxOutputError } from "../../types.js";
+
 /** One remote filesystem entry. `mtime` is in the remote clock's units (Modal reports whole seconds). */
 export interface RemoteEntry {
   path: string;
@@ -82,9 +84,9 @@ export class SessionStaging {
     let totalBytes = 0;
     for (const entry of changed) {
       if (!entry.isDir) {
-        if (!Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > 128 * 1024 * 1024) throw new Error("parser VM output file exceeds limit");
+        if (!Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > 128 * 1024 * 1024) throw new SandboxOutputError("parser VM output file exceeds limit");
         totalBytes += entry.size;
-        if (totalBytes > 512 * 1024 * 1024) throw new Error("parser VM aggregate output exceeds limit");
+        if (totalBytes > 512 * 1024 * 1024) throw new SandboxOutputError("parser VM aggregate output exceeds limit");
       }
     }
     let downloadedBytes = 0;
@@ -96,7 +98,7 @@ export class SessionStaging {
         await mkdir(path.dirname(entry.path), { recursive: true });
         const data = await this.remote.readFile(entry.path);
         downloadedBytes += data.byteLength;
-        if (data.byteLength > 128 * 1024 * 1024 || downloadedBytes > 512 * 1024 * 1024) throw new Error("parser VM actual output exceeds limit");
+        if (data.byteLength > 128 * 1024 * 1024 || downloadedBytes > 512 * 1024 * 1024) throw new SandboxOutputError("parser VM actual output exceeds limit");
         await writeFile(entry.path, data);
       }
       this.claim(entry.path, "download");
@@ -154,9 +156,9 @@ export class SessionStaging {
   private async walk(roots: string[]): Promise<Map<string, RemoteEntry>> {
     const entries = new Map<string, RemoteEntry>();
     const visit = async (entry: RemoteEntry): Promise<void> => {
-      if (!roots.some((root) => entry.path === root || entry.path.startsWith(root + path.sep))) throw new Error("parser VM output escaped staging roots");
+      if (!roots.some((root) => entry.path === root || entry.path.startsWith(root + path.sep))) throw new SandboxOutputError("parser VM output escaped staging roots");
       if (entries.has(entry.path)) return;
-      if (entries.size >= 8192 || entry.path.split(path.sep).length > 64) throw new Error("parser VM output entry/depth limit exceeded");
+      if (entries.size >= 8192 || entry.path.split(path.sep).length > 64) throw new SandboxOutputError("parser VM output entry/depth limit exceeded");
       entries.set(entry.path, entry);
       if (entry.isDir) for (const child of await this.remote.list(entry.path)) await visit(child);
     };
@@ -182,12 +184,12 @@ export class SessionStaging {
       this.claim(abs, "upload");
       for (const name of await readdir(abs)) await this.upload(path.join(abs, name));
     } else if (stats.isFile()) {
-      if (stats.size > 512 * 1024 * 1024) throw new Error("parser VM input file exceeds limit");
+      if (stats.size > 512 * 1024 * 1024) throw new SandboxOutputError("parser VM input file exceeds limit");
       const chunks: Buffer[] = []; let bytes = 0;
       // Bound allocation while reading, including growth after the initial stat.
       for await (const chunk of createReadStream(abs)) {
         bytes += chunk.length;
-        if (bytes > 512 * 1024 * 1024) throw new Error("parser VM actual input file exceeds limit");
+        if (bytes > 512 * 1024 * 1024) throw new SandboxOutputError("parser VM actual input file exceeds limit");
         chunks.push(chunk as Buffer);
       }
       const data = Buffer.concat(chunks, bytes);

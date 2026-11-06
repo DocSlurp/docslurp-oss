@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { killArgv, launchArgv } from "../providers/modal/control.js";
+import { KILL_PARSER_USER_ARGV, killArgv, launchArgv } from "../providers/modal/control.js";
 
 /** Run an argv locally, the way Modal runs it remotely, and collect its exit status and output. */
 function run(argv: string[]): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
@@ -149,3 +149,31 @@ describe("parser commands drop root in the VM (validation N10, council K #4/#5)"
 });
 
 function spawnSyncShell(script: string): void { spawnSync("/bin/sh", ["-c", script], { stdio: "ignore" }); }
+
+// The leftover kill against a process that keeps forking and exiting its parent (recheck Q #2), in a real (unprivileged)
+// container as root: the /proc scan it replaced exited 0 with this process alive. Needs docker and the image below.
+const dockerKillTest = process.env.DOCSLURP_DOCKER_TESTS === "1";
+describe.skipIf(!dockerKillTest)("leftover kill in a container (recheck Q #2)", () => {
+  it("kills a fork-hopping parser-user process and verifies it is gone", async () => {
+    const hopper = [
+      "import os, sys",
+      "os.setgroups([]); os.setresgid(10001, 10001, 10001); os.setresuid(10001, 10001, 10001)",
+      "if os.fork(): os._exit(0)",
+      "os.setsid(); n = 0",
+      "while True:",
+      "    n += 1",
+      "    if n % 50 == 0: open('/w/hb', 'w').write(str(n))",
+      "    if os.fork(): os._exit(0)",
+    ].join("\n");
+    const script = [
+      "mkdir -p /w && chmod 1777 /w",
+      'python3 -c "$HOPPER"; python3 -c "$HOPPER"; sleep 0.5',
+      'a=$(cat /w/hb); sleep 0.3; b=$(cat /w/hb); [ "$a" != "$b" ] || { echo not-started; exit 1; }',
+      '"$@"; echo "kill=$?"; sleep 0.3',
+      'a=$(cat /w/hb); sleep 0.5; b=$(cat /w/hb); [ "$a" = "$b" ] && echo dead || echo alive',
+    ].join("\n");
+    const run = spawnSync("docker", ["run", "--rm", "--network", "none", "-e", `HOPPER=${hopper}`, "python:3.11-slim-bookworm", "sh", "-c", script, "sh", ...KILL_PARSER_USER_ARGV], { encoding: "utf8", timeout: 120_000 });
+    expect(run.stdout).toContain("kill=0");
+    expect(run.stdout.trim().split("\n").at(-1)).toBe("dead");
+  }, 150_000);
+});

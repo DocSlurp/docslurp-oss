@@ -100,21 +100,42 @@ export function killArgv(control: string): string[] {
 }
 
 /**
- * Run as root between commands (council M #3, O #4): SIGKILL every live process of PARSER_VM_UID, found by scanning
- * /proc (zombies skipped: the VM's idle main process does not reap them), until none is left. Exits 4 when some survive
- * 50 rounds; the session then fails closed.
+ * The leftover kill (council M #3, O #4, recheck Q #2), run as root between commands. A /proc scan can miss a process
+ * that keeps forking and exiting its parent (its new pid is never in the snapshot), so the kill is atomic: the script
+ * drops to PARSER_VM_UID in-process (setgroups, setresgid, setresuid; no fork, so RLIMIT_NPROC cannot stop it) and calls
+ * kill(-1, SIGKILL), which the kernel delivers to every process that user may signal while walking the task list under
+ * its lock, so no fork slips past. It then reads the Uid: line of every /proc/<pid>/status and needs two consecutive
+ * rounds with no live (non-zombie) process holding the uid, other than itself, repeating the kill otherwise. Exits 0
+ * when clean, 4 when processes survive 50 rounds or it is not root; a job that kills the killer makes it exit non-zero.
+ * The session fails closed on anything but 0.
  */
-export const KILL_PARSER_USER_ARGV = ["/bin/sh", "-c", [
-  "i=0",
-  'while [ "$i" -lt 50 ]; do',
-  "  found=",
-  "  for d in /proc/[0-9]*; do",
-  `    [ "$(stat -c %u "$d" 2>/dev/null)" = ${PARSER_VM_UID} ] || continue`,
-  '    grep -q "^State:[[:space:]]*Z" "$d/status" 2>/dev/null && continue',
-  '    found=1; kill -9 "${d#/proc/}" 2>/dev/null',
-  "  done",
-  '  [ -z "$found" ] && exit 0',
-  "  i=$((i + 1))",
-  "done",
-  "exit 4",
-].join("\n")];
+const KILL_PARSER_USER_SCRIPT = [
+  "import os, signal, sys, time",
+  "uid = int(sys.argv[1])",
+  "if os.geteuid() != 0: sys.exit(4)",
+  "os.setgroups([]); os.setresgid(uid, uid, uid); os.setresuid(uid, uid, uid)",
+  "me = str(os.getpid())",
+  "def live():",
+  "    n = 0",
+  "    for pid in os.listdir('/proc'):",
+  "        if not pid.isdigit() or pid == me: continue",
+  "        try:",
+  "            with open('/proc/%s/status' % pid) as f: status = f.read()",
+  "        except OSError: continue",
+  "        uids, zombie = [], False",
+  "        for line in status.splitlines():",
+  "            if line.startswith('Uid:'): uids = line.split()[1:]",
+  "            elif line.startswith('State:'): zombie = line.split()[1:2] == ['Z']",
+  "        if str(uid) in uids and not zombie: n += 1",
+  "    return n",
+  "clean = 0",
+  "for _ in range(50):",
+  "    try: os.kill(-1, signal.SIGKILL)",
+  "    except ProcessLookupError: pass",
+  "    time.sleep(0.01)",
+  "    clean = clean + 1 if live() == 0 else 0",
+  "    if clean >= 2: sys.exit(0)",
+  "sys.exit(4)",
+].join("\n");
+
+export const KILL_PARSER_USER_ARGV = ["python3", "-I", "-c", KILL_PARSER_USER_SCRIPT, String(PARSER_VM_UID)];

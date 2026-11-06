@@ -85,6 +85,19 @@ export class SandboxRunError extends Error {
 }
 
 /**
+ * The document's own files broke a staging rule (recheck Q #1): an input or output over its size limit, too many output
+ * entries or too deep a tree, an output that escapes its roots (a symlink), or output the job made unreadable. A verdict
+ * on the document, never retried: a zip bomb or a PDF with tens of thousands of images fails that document once, and
+ * the run's other documents go on (partial ingest).
+ */
+export class SandboxOutputError extends SandboxRunError {
+  constructor(message: string, usage?: UsageEvent, options?: { cause?: unknown }) {
+    super(message, usage, options);
+    this.name = "SandboxOutputError";
+  }
+}
+
+/**
  * The sandbox, not the document, failed: a VM that could not be created or hardened, a leftover kill that did not
  * verify, a control deadline, a transport error. Infrastructure (lib/document-failure.ts): retried, never a verdict on
  * the document (real-Modal check F1). The runner notes it per document (session-context.ts), so a stage that catches it
@@ -122,8 +135,13 @@ export interface SandboxSession {
    * refuses any other. The caller owns abort, limits and teardown through `superviseChild`.
    */
   spawn?(command: SandboxCommand): ChildProcess;
-  /** Remote providers run to completion and enforce limits provider-side. */
-  run?(command: SandboxCommand, signal?: AbortSignal): Promise<SandboxResult>;
+  /**
+   * Remote providers run to completion and enforce limits provider-side. A provider that may queue the command calls
+   * `hooks.onStart` when it is admitted (the runner's stall window starts there, recheck Q #4).
+   */
+  run?(command: SandboxCommand, signal?: AbortSignal, hooks?: { onStart?(): void }): Promise<SandboxResult>;
+  /** `run` calls `hooks.onStart` on admission (it may queue commands); without it the window starts at launch. */
+  readonly reportsStart?: boolean;
   close(): Promise<void>;
 }
 

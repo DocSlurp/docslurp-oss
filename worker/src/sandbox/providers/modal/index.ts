@@ -10,6 +10,7 @@ import { readSandboxConfig } from "../../config-schema.js";
 import {
   SandboxConfigError,
   SandboxInfrastructureError,
+  SandboxOutputError,
   SandboxRunError,
   type ParserSandboxProvider,
   type SandboxCommand,
@@ -291,7 +292,8 @@ function buildRemoteFs(sdk: ModalSdk, sandbox: import("modal").Sandbox): RemoteF
       // Read as the parser user: root never follows a link the job left in its own output (council K #5).
       const proc = await sandbox.exec([...asParserUser(), "/bin/cat", "--", p], { mode: "binary", timeoutMs: 30_000 });
       const [data, , code] = await Promise.all([boundedVmStream(proc.stdout, 128 * 1024 * 1024), boundedVmStream(proc.stderr, 64 * 1024), proc.wait()]);
-      if (code !== 0) throw new Error("parser VM file transfer failed");
+      // Run as the parser user: a non-zero exit is the job's own output (made unreadable, a fifo), the document's fault.
+      if (code !== 0) throw new SandboxOutputError("parser VM output could not be read back");
       return data;
     },
     async list(p) {
@@ -299,10 +301,10 @@ function buildRemoteFs(sdk: ModalSdk, sandbox: import("modal").Sandbox): RemoteF
       const code = "import os,sys,json\np=sys.argv[1]\nwith os.scandir(p) as entries:\n for i,e in enumerate(entries):\n  if i>=8192: raise RuntimeError('directory entry limit')\n  if e.is_symlink(): continue\n  st=e.stat(follow_symlinks=False)\n  print(json.dumps(dict(path=e.path,isDir=e.is_dir(follow_symlinks=False),size=st.st_size,mtime=st.st_mtime)))";
       const proc = await sandbox.exec([...asParserUser(), "python3", "-I", "-c", code, p], { mode: "binary", timeoutMs: 30_000 });
       const [data, , status] = await Promise.all([boundedVmStream(proc.stdout, 4 * 1024 * 1024), boundedVmStream(proc.stderr, 64 * 1024), proc.wait()]);
-      if (status !== 0) throw new Error("parser VM directory listing failed");
+      if (status !== 0) throw new SandboxOutputError("parser VM output directory could not be listed (unreadable, or over the entry limit)");
       return data.toString("utf8").split("\n").filter(Boolean).map((line) => {
         const entry = JSON.parse(line) as RemoteEntry;
-        if (typeof entry.path !== "string" || path.dirname(entry.path) !== p || !Number.isSafeInteger(entry.size) || entry.size < 0 || typeof entry.isDir !== "boolean" || !Number.isFinite(entry.mtime)) throw new Error("invalid parser VM directory entry");
+        if (typeof entry.path !== "string" || path.dirname(entry.path) !== p || !Number.isSafeInteger(entry.size) || entry.size < 0 || typeof entry.isDir !== "boolean" || !Number.isFinite(entry.mtime)) throw new SandboxOutputError("invalid parser VM directory entry");
         return entry;
       });
     },
@@ -588,7 +590,11 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             try {
               await staging!.discard(pendingDiscards.shift()!);
             } catch (error) {
-              console.warn(`[parser-sandbox] provider=modal discard failed: ${safeMessage(config, error)}`);
+              // Partial outputs that could not be removed must never reach a later command's download: the VM is
+              // terminated instead, and the next command gets a fresh one (recheck Q #8).
+              console.error(`[parser-sandbox] provider=modal discard failed; terminating the VM: ${safeMessage(config, error)}`);
+              pendingDiscards.length = 0;
+              await terminate().catch(() => {});
             }
           }
         }
@@ -678,7 +684,10 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           } catch (error) {
             // Elapsed Modal time is billed even when staging or exec failed.
             if (error instanceof CommandAborted) throw new SandboxRunError("modal sandbox command aborted", meter(started));
-            // Anything else that throws here is the sandbox's (a document's own failure is a non-zero exit, not a throw).
+            // The document's own files broke a staging rule: its verdict, never retried (recheck Q #1).
+            if (error instanceof SandboxOutputError) throw new SandboxOutputError(error.message, meter(started), { cause: error });
+            // Anything else that throws here is the sandbox's: SDK and transport errors, control commands, VM creation and
+            // hardening, the leftover kill, a closed session (a document's own failure is a non-zero exit or the above).
             throw new SandboxInfrastructureError(`modal sandbox command failed: ${safeMessage(config, error)}`, meter(started), { cause: error });
           }
         }
@@ -752,11 +761,13 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
       const session: SandboxSession = {
         providerId: "modal",
         isolation: ISOLATION,
-        async run(command, signal) {
+        reportsStart: true,
+        async run(command, signal, hooks) {
           // A closed session is the sandbox's failure, never the document's (recheck R #2).
           if (closed) throw new SandboxInfrastructureError("modal sandbox session is closed");
           if (signal?.aborted) throw new SandboxRunError("modal sandbox command aborted");
           const lane = await acquireLane(command.affinityKey, signal);
+          hooks?.onStart?.();
           try {
             // Metered from admission (recheck R #3): time spent waiting for a lane is not Modal time for this command.
             return await lane.execute(command, Date.now(), signal);

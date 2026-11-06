@@ -140,7 +140,13 @@ export interface CommandRunnerOptions {
 /** A started command: a local child process to monitor, or a remote run that completes on its own. */
 export type LaunchedCommand =
   | { child: ChildProcess; supervised: SupervisedChild; release(): Promise<void> }
-  | { remote: Promise<SandboxResult>; timeoutMs: number; release(): Promise<void> };
+  | {
+      remote: Promise<SandboxResult>;
+      timeoutMs: number;
+      release(): Promise<void>;
+      /** Resolves when the provider admits the command (it may queue it first); absent means it starts at once. */
+      started?: Promise<void>;
+    };
 
 const DEFAULT_SCRATCH_ROOT = "/tmp/docslurp-parser-sandbox";
 
@@ -1574,8 +1580,12 @@ export class CommandRunner {
           );
         }
         const documentId = currentPerfContext()?.documentId;
-        const remote = session.run(documentId ? { ...command, affinityKey: documentId } : command, signal);
-        return { remote, timeoutMs: command.limits.timeoutMs, release };
+        let onStart!: () => void;
+        const started = new Promise<void>((resolve) => (onStart = resolve));
+        const remote = session.run(documentId ? { ...command, affinityKey: documentId } : command, signal, { onStart });
+        if (!session.reportsStart) return { remote, timeoutMs: command.limits.timeoutMs, release };
+        void remote.then(onStart, onStart); // a run that settles without admission (closed, aborted) ends the wait
+        return { remote, timeoutMs: command.limits.timeoutMs, release, started };
       }
       throw new Error(`Sandbox session '${session.providerId}' offers neither spawn nor run`);
     } catch (error) {
@@ -1591,14 +1601,18 @@ export class CommandRunner {
    */
   async settleRemote(
     plan: CommandPlan,
-    launched: { remote: Promise<SandboxResult>; timeoutMs: number },
+    launched: { remote: Promise<SandboxResult>; timeoutMs: number; started?: Promise<void> },
     metricPrefix = "command",
   ): Promise<SandboxResult> {
     const startedAt = Date.now();
+    // The command's time limit runs from its admission: while the provider queues it (another command holds the VM),
+    // it is healthy and waiting, and the stall watchdog must not fire on it (recheck Q #4).
+    let windowStart: number | null = launched.started ? null : startedAt;
+    void launched.started?.then(() => { windowStart = Date.now(); });
     // Bound to this stage's async context so the note reaches its progress tracker.
     const progress = setInterval(AsyncResource.bind(() => {
-      if (Date.now() - startedAt > launched.timeoutMs) clearInterval(progress);
-      else noteWorkProgress(`command:${path.basename(plan.binary)}`);
+      if (windowStart !== null && Date.now() - windowStart > launched.timeoutMs) clearInterval(progress);
+      else noteWorkProgress(`command${windowStart === null ? "-queued" : ""}:${path.basename(plan.binary)}`);
     }), REMOTE_PROGRESS_INTERVAL_MS);
     progress.unref();
     let result: SandboxResult;

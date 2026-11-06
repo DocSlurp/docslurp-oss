@@ -380,6 +380,26 @@ describe("sandbox infrastructure failures retry instead of failing the document 
     expect(isDocumentLevelFailure(failure)).toBe(false);
   });
 
+  it("an output over the staging limit fails only that document, once; the other documents complete (recheck Q #1)", async () => {
+    const { SandboxOutputError } = await import("../sandbox/types.js");
+    const store = new MemoryStore(["b", "c"]);
+    let attempts = 0;
+    const stage: Stage = {
+      name: "index",
+      async run(state) {
+        await Promise.allSettled(state.documents.map((document) =>
+          runDocumentStage(state, document, "index", `${document.id}:index`, "index done", async () => {
+            if (document.id === "b") { attempts++; throw new SandboxOutputError("parser VM output entry/depth limit exceeded"); }
+            return { artifactUri: "memory://ok", stats: {} };
+          })));
+      },
+    };
+    await expect(runIndex(store, stage)).resolves.toBeDefined();
+    expect(attempts).toBe(1);
+    expect(store.docStages.get("b:index")?.status).toBe("failed");
+    expect(store.docStages.get("c:index")?.status).toBe("completed");
+  });
+
   it("every stage with a per-document loop runs it through runDocumentStage, which applies the watch", async () => {
     const { readdirSync, readFileSync } = await import("node:fs");
     const dir = new URL("../stages/", import.meta.url);

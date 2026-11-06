@@ -9,7 +9,7 @@ import { CommandRunner, resolveVenvBin } from "../../tools/runner.js";
 import { resolveScriptsDir } from "../../tools/scripts-dir.js";
 import { buildModalUsageEvent, createModalProvider, modalVmsPerActivity, type ModalSdk } from "../providers/modal/index.js";
 import { SessionStaging, type RemoteFs } from "../providers/modal/staging.js";
-import { SandboxConfigError, SandboxInfrastructureError, SandboxRunError } from "../types.js";
+import { SandboxConfigError, SandboxInfrastructureError, SandboxOutputError, SandboxRunError } from "../types.js";
 
 /** In-memory remote filesystem; every write gets a fresh mtime so changes are always visible. */
 class MemoryRemoteFs implements RemoteFs {
@@ -361,14 +361,19 @@ function fakeSdk(
       if (argv[0] === "/bin/sh" && argv[2]?.includes("protected_hardlinks")) { state.hardened++; return finished("", opts.hardeningFails ? 3 : 0); }
       // Readback and listing run as the parser user (setpriv prefix): record it, then serve them.
       const asUser = argv[0] === "/usr/bin/setpriv" && argv.includes("--reuid=10001") ? argv.slice(argv.indexOf("--") + 1) : null;
-      if (asUser?.[0] === "/bin/cat") { state.readsAsUser++; return { stdout: stream(await remote.readFile(asUser[2]!)), stderr: stream(""), wait: async () => 0 }; }
+      if (asUser?.[0] === "/bin/cat") {
+        state.readsAsUser++;
+        // cat exits 1 on a file it cannot read (EACCES, a fifo the job left).
+        const data = await remote.readFile(asUser[2]!).catch(() => null);
+        return data ? { stdout: stream(data), stderr: stream(""), wait: async () => 0 } : finished("", 1);
+      }
       if (asUser?.[0] === "python3" && asUser[1] === "-I") return finished((await remote.list(asUser[4]!)).map((entry) => JSON.stringify(entry)).join("\n"));
       // Staging in job trees, as the parser user (council M #3).
       if (asUser?.[0] === "/bin/mkdir") { state.mkdirs.push(asUser[3]!); await remote.mkdir(asUser[3]!); return finished("", 0); }
       if (asUser?.[0] === "/bin/rm") { await remote.remove(asUser[3]!); return finished("", 0); }
       if (asUser?.[0] === "/bin/sh" && asUser[2]?.includes("cp --")) { await remote.writeFile(asUser[5]!, await remote.readFile(asUser[4]!)); return finished("", 0); }
-      // The root leftover kill (KILL_PARSER_USER_ARGV): scans /proc for the parser user, verified.
-      if (argv[0] === "/bin/sh" && argv[2]?.includes("stat -c %u")) {
+      // The root leftover kill (KILL_PARSER_USER_ARGV): kill(-1) as the parser user, verified.
+      if (argv[0] === "python3" && argv[3]?.includes("os.kill(-1")) {
         state.leftoverKills++;
         state.events.push("kill-start");
         await opts.killGate;
@@ -535,6 +540,63 @@ describe("modal provider session lifecycle", () => {
     const after = await opened.run!(command).catch((error: unknown) => error);
     expect(after).toBeInstanceOf(SandboxInfrastructureError);
     expect(String((after as Error).message)).toMatch(/session is closed/);
+  });
+
+  it("an output over the staging limit is the document's failure, metered and never retried as infrastructure (recheck Q #1)", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "docslurp-q1-"));
+    const out = path.join(dir, "out");
+    try {
+      const { state, session } = await open({ exec: async () => { state.remote.put(path.join(out, "bomb.bin"), "x"); return finished(); } });
+      const stat = state.remote.stat.bind(state.remote);
+      state.remote.stat = async (p: string) => { const entry = await stat(p); return entry && p.endsWith("bomb.bin") ? { ...entry, size: 200 * 1024 * 1024 } : entry; };
+      const opened = await session();
+      const failure = await opened.run!({ ...command, writablePaths: [out] }).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(SandboxOutputError);
+      expect(failure).not.toBeInstanceOf(SandboxInfrastructureError);
+      expect((failure as SandboxOutputError).usage).toBeDefined();
+      const { isDocumentLevelFailure } = await import("../../lib/document-failure.js");
+      expect(isDocumentLevelFailure(failure)).toBe(true);
+      // The VM stays usable for the next document.
+      state.remote.stat = stat;
+      await expect(opened.run!(command)).resolves.toMatchObject({ exitCode: 0 });
+      await opened.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("output the job made unreadable is the document's failure; a transport error is infrastructure (recheck Q #1)", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "docslurp-q1-"));
+    const out = path.join(dir, "out");
+    try {
+      const { state, session } = await open({ exec: async () => { state.remote.put(path.join(out, "locked.txt"), "x"); return finished(); } });
+      state.remote.readFile = async () => { throw new Error("EACCES"); };
+      const opened = await session();
+      expect(await opened.run!({ ...command, writablePaths: [out] }).catch((error: unknown) => error)).toBeInstanceOf(SandboxOutputError);
+      await opened.close();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+    const { session } = await open({ exec: async () => { throw new Error("stream reset by peer"); } });
+    const opened = await session();
+    expect(await opened.run!(command).catch((error: unknown) => error)).toBeInstanceOf(SandboxInfrastructureError);
+    await opened.close();
+  });
+
+  it("tells the runner when a queued command is admitted (recheck Q #4)", async () => {
+    const slow = running();
+    let calls = 0;
+    const { session } = await open({ exec: async () => (++calls === 1 ? slow.process : finished()) });
+    const opened = await session();
+    const events: string[] = [];
+    const first = opened.run!(command, undefined, { onStart: () => events.push("first") });
+    const second = opened.run!(command, undefined, { onStart: () => events.push("second") });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(events).toEqual(["first"]); // the second waits for the VM, not yet started
+    slow.end(0);
+    await Promise.all([first, second]);
+    expect(events).toEqual(["first", "second"]);
+    await opened.close();
   });
 
   it("meters each command from its admission, not from its wait in the queue (recheck R #3)", async () => {
@@ -821,6 +883,34 @@ describe("modal provider session lifecycle", () => {
       expect(state.remote.files.has(partial)).toBe(false);
       expect(existsSync(partial)).toBe(false);
       expect(usageLines()).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a discard that fails terminates the VM; the next command runs on a fresh one (recheck Q #8)", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "docslurp-modal-discard-"));
+    try {
+      const partial = path.join(dir, "partial.json");
+      let calls = 0;
+      const { state, session } = await open({
+        exec: async () => {
+          if (++calls > 1) return finished();
+          state.remote.put(partial, "{");
+          throw new Error("Deadline exceeded while streaming stdio for exec x");
+        },
+      });
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const remove = state.remote.remove.bind(state.remote);
+      state.remote.remove = async () => { throw new Error("rm failed"); };
+      const opened = await session();
+      expect((await opened.run!({ ...command, writablePaths: [dir] })).exitCode).toBeNull();
+      expect(state.terminate).toBe(1);
+      state.remote.remove = remove;
+      await expect(opened.run!({ ...command, writablePaths: [dir] })).resolves.toMatchObject({ exitCode: 0 });
+      expect(state.createOptions).toHaveLength(2);
+      expect(state.commandVms).toEqual([1, 2]);
+      await opened.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
