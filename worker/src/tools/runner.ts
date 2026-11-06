@@ -2328,9 +2328,23 @@ export function resolveMalwareScanPolicy(
 }
 
 /** ClamAV reports the database version and signature timestamp from the scanner's own image. */
+const CLAM_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/**
+ * `clamscan --version`'s signature date (`Thu Nov  6 08:21:02 2026`), which the parser VM prints in UTC, as epoch ms; NaN
+ * when malformed. Parsed explicitly as UTC: Date.parse reads it in the worker host's zone, so on a non-UTC host the date
+ * landed hours in the future and every upload was quarantined as "definitions missing" (validation N6).
+ */
+export function parseClamSignatureDateUtc(text: string): number {
+  const match = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) ([A-Z][a-z]{2}) +(\d{1,2}) (\d{2}):(\d{2}):(\d{2}) (\d{4})$/.exec(text.trim());
+  const month = match ? CLAM_MONTHS.indexOf(match[1]!) : -1;
+  if (!match || month < 0) return NaN;
+  return Date.UTC(Number(match[6]), month, Number(match[2]), Number(match[3]), Number(match[4]), Number(match[5]));
+}
+
 export function parseClamVmDatabaseHealth(output: string, maxSignatureAgeHours: number): ClamDatabaseHealth {
   const parts = output.trim().split("/");
-  const updatedAtMs = parts.length === 3 && /^ClamAV [0-9.]+$/.test(parts[0]!) && /^\d+$/.test(parts[1]!) ? Date.parse(parts[2]!) : NaN;
+  const updatedAtMs = parts.length === 3 && /^ClamAV [0-9.]+$/.test(parts[0]!) && /^\d+$/.test(parts[1]!) ? parseClamSignatureDateUtc(parts[2]!) : NaN;
   return assessClamDatabaseHealth({ maxSignatureAgeHours, entries: Number.isFinite(updatedAtMs) && updatedAtMs <= Date.now() + 3_600_000 ? [{ path: "parser-vm:clamav-signatures", updatedAtMs }] : [] });
 }
 
