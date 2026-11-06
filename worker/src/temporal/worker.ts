@@ -171,7 +171,7 @@ async function main(): Promise<void> {
   const openSession = (activityId: string) => sandbox.provider.openSession(sandbox.config, { activityId });
   const runner = new CommandRunner({ openSession, shardCalibration: createShardCalibration(store) });
   const storage = new ArtifactStore(cfg);
-  const stages = createStages({ runner, storage, config: cfg, mediaJournal: store.mediaJournal, capacityStore: store.capacityLeaseStore([]), sql: store.stageSql });
+  const stages = createStages({ runner, storage, config: cfg, mediaJournal: store.mediaJournal, capacityStore: store.capacityLeaseStore([]), sql: store.stageSql, store });
 
   // Create activity implementations with injected dependencies
   const activities = createActivities({ store, storage, stages, config: cfg, runner });

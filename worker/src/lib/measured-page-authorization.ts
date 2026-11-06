@@ -1,7 +1,7 @@
 import { pageCredits, speedBoostMultiplier } from "@docslurp/shared";
 
 import type { Document } from "../models.js";
-import type { WorkflowState } from "../pipeline/pipeline.js";
+import type { CheckpointStore, WorkflowState } from "../pipeline/pipeline.js";
 import { RunPolicyError } from "./document-failure.js";
 
 /** The page count admission priced for a document: durable (migration 0130), never the count a measurement wrote. */
@@ -18,7 +18,10 @@ export function intakePagesOf(document: Pick<Document, "pageCount" | "intakePage
  * still be authorized. Fails closed: an unfunded run is paused and the document stopped (RunPolicyError); a check that
  * cannot decide throws SpendCheckUnavailableError (retryable).
  */
-export async function authorizeMeasuredPages(state: WorkflowState, document: Document): Promise<{ checkedPages: number } | null> {
+export async function authorizeMeasuredPages(
+  state: { run: WorkflowState["run"]; store?: Pick<CheckpointStore, "enforceSpendForCharge" | "measuredPagesAboveIntake"> },
+  document: Document,
+): Promise<{ checkedPages: number } | null> {
   const measured = Math.max(Number(document.billingPages) || 0, Math.trunc(Number(document.pageCount)) || 0);
   if (!(measured > intakePagesOf(document))) return null;
   const store = state.store;

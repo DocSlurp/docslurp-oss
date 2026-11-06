@@ -11,12 +11,15 @@ import {
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { recordPageBaseFee } from "../db/page-base-fee.js";
+import { setSpendCheckConfig } from "../db/spend-check.js";
+import type { Document } from "../models.js";
+import { PdfRasterCache, PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import { Store } from "../db/store.js";
 import { recordPageEquivalents } from "../db/page-equivalents.js";
 import { measureExtractedPages } from "../lib/office-page-count.js";
 import { MAX_PAGE_EQUIVALENTS, recordExtractedPageEquivalents } from "../lib/page-equivalents.js";
 import { recordMeasuredTextPageCount } from "../lib/text-page-count.js";
-import { configurePageAreaSink, recordRenderedPageAreas } from "../pipeline/page-area-sink.js";
+import { configurePageAreaSink, createPageAreaSink, recordRenderedPageAreas } from "../pipeline/page-area-sink.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
@@ -36,8 +39,8 @@ beforeAll(async () => {
   db = await createMigratedDatabase();
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com');
-    insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 100000000);
-    insert into workspaces(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W');
+    insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 100000000), ('o3', 'Empty', 'empty', 'u1', 8, 0);
+    insert into workspaces(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W'), ('w3', 'o3', 'u1', 'E');
   `);
   const served = await serveOnRandomPort(db);
   server = served.server;
@@ -50,14 +53,14 @@ afterAll(async () => { await store?.close(); await server?.stop(); await db?.clo
 
 let seq = 0;
 /** A run with one counted document of `pages` pages; returns its state. */
-async function documentRun(pages: number, mime = "application/pdf", facts: object = pdfFacts) {
+async function documentRun(pages: number, mime = "application/pdf", facts: object = pdfFacts, org: { org: string; workspace: string } = { org: "o1", workspace: "w1" }) {
   seq += 1;
   const runId = `run-${seq}`, documentId = `doc-${seq}`;
   await db.exec(`
     insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
-      values ('${runId}', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 1, ${pages});
+      values ('${runId}', '${org.org}', 'u1', '${org.workspace}', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 1, ${pages});
     insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts)
-      values ('${documentId}', 'o1', 'u1', 'w1', '${runId}', 'f', '${mime}', 'raw/${documentId}', 'processing', ${pages}, 'counted', '${JSON.stringify(facts)}');`);
+      values ('${documentId}', '${org.org}', 'u1', '${org.workspace}', '${runId}', 'f', '${mime}', 'raw/${documentId}', 'processing', ${pages}, 'counted', '${JSON.stringify(facts)}');`);
   const document = (await store.loadDocument(documentId))!;
   const state = WorkflowState.create(await store.loadRun(runId), [document]);
   state.store = store;
@@ -156,13 +159,15 @@ describe("stuffed PDFs bill the text extraction actually produced", () => {
 
   it("a 200-inch page bills its rendered area, capped per page, through the raster cache's sink", async () => {
     const { runId, documentId } = await documentRun(2);
-    configurePageAreaSink((rows) => recordPageEquivalents(sql(), rows));
-    await recordRenderedPageAreas(runId, documentId, [{ pageNumber: 1, area: pageAreaEquivalentsPt(14_400, 14_400) }, { pageNumber: 2, area: pageAreaEquivalentsPt(612, 792) }]);
+    configurePageAreaSink(createPageAreaSink(sql(), store));
+    const document = (await store.loadDocument(documentId))!;
+    await recordRenderedPageAreas(runId, document, [{ pageNumber: 1, area: pageAreaEquivalentsPt(14_400, 14_400) }, { pageNumber: 2, area: pageAreaEquivalentsPt(612, 792) }]);
+    expect(document.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
     // Page 1 counts as the cap, page 2 as one page.
     expect((await store.loadDocument(documentId))!.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
     expect(await billedFastPages(runId, documentId)).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
     // A second render of the same page records nothing more.
-    await recordRenderedPageAreas(runId, documentId, [{ pageNumber: 1, area: PAGE_AREA_EQUIVALENTS_CAP }]);
+    await recordRenderedPageAreas(runId, document, [{ pageNumber: 1, area: PAGE_AREA_EQUIVALENTS_CAP }]);
     expect((await store.loadDocument(documentId))!.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
   });
 
@@ -287,8 +292,8 @@ describe("dense-page allowance (owner decision 2026-11-05): paged pages bill 1 u
     const measured = (await recordExtractedPageEquivalents(state, document, "pdf", "A short caption on a tabloid page."))!;
     expect(measured).toMatchObject({ equivalents: 1, billed: 1 });
     // Its area arrives when the page is rendered (the raster cache's sink), under the same allowance.
-    configurePageAreaSink((args) => recordPageEquivalents(sql(), { ...args, allowance: DEFAULT_PAGE_EQUIVALENT_ALLOWANCE }));
-    await recordRenderedPageAreas(runId, documentId, [{ pageNumber: 1, area: pageAreaEquivalentsPt(792, 1_224) }]);
+    configurePageAreaSink(createPageAreaSink(sql(), store));
+    await recordRenderedPageAreas(runId, document, [{ pageNumber: 1, area: pageAreaEquivalentsPt(792, 1_224) }]);
     expect((await store.loadDocument(documentId))!.billingPages).toBe(2);
     expect(await billedFastPages(runId, documentId)).toBe(2);
   });
@@ -373,5 +378,173 @@ describe("whole-document text formats bill their true count from intake through 
     await recordExtractedPageEquivalents(state, document, "plain-text", "a\fb\fc\fd");
     expect((await store.loadDocument(documentId))!.billingPages).toBeNull();
     expect(await billedFastPages(runId, documentId)).toBe(1);
+  });
+});
+
+describe("rendered-area equivalents are authorized like every measured page (council F #2)", () => {
+  afterEach(() => { setSpendCheckConfig(null); });
+
+  /** A raster cache over a fake pdfinfo/pdftoppm: page 1 is 200 inches square, the rest Letter. Counts each command. */
+  function rasterHarness() {
+    const calls = { pdfinfo: 0, pdftoppm: 0 };
+    const artifacts = new Map<string, Uint8Array>();
+    const sources = new PdfSourceCache({
+      async downloadToTempFile(_key: string, pattern: string) {
+        const dir = await mkdtemp(path.join(process.env.TMPDIR || tmpdir(), "area-auth-"));
+        const file = path.join(dir, pattern.replace("*", "src"));
+        await writeFile(file, "pdf bytes");
+        return file;
+      },
+    } as never);
+    const runner = {
+      async pdfPageSizes(_source: string, first: number, last: number) { return { binary: "pdfinfo", args: [String(first), String(last)], available: true }; },
+      async renderPdfPageRange(_source: string, prefix: string, first: number, last: number) { return { binary: "pdftoppm", args: [prefix, String(first), String(last)], available: true }; },
+      async run(plan: { binary?: string; args: string[] }) {
+        if (plan.binary === "pdfinfo") {
+          calls.pdfinfo += 1;
+          const [first, last] = plan.args.map(Number) as [number, number];
+          const lines = [`Pages:           ${last}`];
+          for (let page = first; page <= last; page += 1) lines.push(`Page ${String(page).padStart(4)} size: ${page === 1 ? "14400 x 14400" : "612 x 792"} pts`);
+          return { stdout: lines.join("\n"), stderr: "" };
+        }
+        calls.pdftoppm += 1;
+        const [prefix, first] = plan.args;
+        await writeFile(`${prefix}-${first}.png`, "png");
+        return { stdout: "", stderr: "" };
+      },
+    };
+    const storage = {
+      async objectSize(key: string) { return artifacts.get(key)?.byteLength ?? null; },
+      async putBytes(key: string, bytes: Uint8Array) { artifacts.set(key, bytes); },
+      uri(key: string) { return `s3://test/${key}`; },
+    };
+    return { calls, artifacts, cache: new PdfRasterCache(runner as never, storage as never, sources) };
+  }
+  const usageEvents = async (runId: string) => (await db.query<{ n: number }>(`select count(*)::int as n from usage_events where run_id = '${runId}'`)).rows[0]!.n;
+  const runControl = async (runId: string) => (await db.query<{ control_state: string | null }>(`select control_state from workspace_runs where id = '${runId}'`)).rows[0]!.control_state;
+  const balance = async (org: string) => Number((await db.query<{ c: string }>(`select credit_balance_cents::text as c from organizations where id = '${org}'`)).rows[0]!.c);
+
+  it("an area-only increase on an unfunded run pauses it before anything renders, caches or charges", async () => {
+    setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
+    configurePageAreaSink(createPageAreaSink(sql(), store));
+    const { document, runId, documentId } = await documentRun(2, "application/pdf", pdfFacts, { org: "o3", workspace: "w3" });
+    const before = await balance("o3");
+    const { calls, artifacts, cache } = rasterHarness();
+    await expect(cache.renderSelectedPages({ document, runId, pageNumbers: [1, 2] })).rejects.toMatchObject({ name: "RunPolicyError" });
+    expect(await runControl(runId)).toBe("paused");
+    expect(calls.pdftoppm).toBe(0);
+    expect(artifacts.size).toBe(0);
+    expect(await usageEvents(runId)).toBe(0);
+    expect(await balance("o3")).toBe(before);
+    // The measurement is durable and the in-memory document carries it: page 1 at the cap plus page 2.
+    expect(document.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
+    expect((await store.loadDocument(documentId))!.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
+  });
+
+  it("a retry after a failed authorization authorizes again, though the count is already stored", async () => {
+    const authorize = vi.fn();
+    const real = createPageAreaSink(sql(), store);
+    let failNext = true;
+    configurePageAreaSink({
+      record: real.record,
+      authorize: async (runId: string, document: Document) => {
+        authorize(document.billingPages);
+        if (failNext) { failNext = false; throw new Error("spend check unavailable"); }
+        await real.authorize(runId, document);
+      },
+    });
+    const { runId, documentId } = await documentRun(2);
+    const { calls, artifacts, cache } = rasterHarness();
+    await expect(cache.renderSelectedPages({ document: (await store.loadDocument(documentId))!, runId, pageNumbers: [1, 2] })).rejects.toThrow("spend check unavailable");
+    expect(artifacts.size).toBe(0);
+    expect(calls.pdftoppm).toBe(0);
+    // The retry loads the document with billing_pages already raised; it is authorized anyway, then renders.
+    const retried = (await store.loadDocument(documentId))!;
+    expect(retried.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
+    const pages = await cache.renderSelectedPages({ document: retried, runId, pageNumbers: [1, 2] });
+    expect(authorize).toHaveBeenCalledTimes(2);
+    expect(pages.map((page) => page.cacheHit)).toEqual([false, false]);
+    expect(artifacts.size).toBe(2);
+  });
+
+  it("a cached render was authorized when it was cached: a hit measures and authorizes nothing again", async () => {
+    const authorize = vi.fn();
+    const real = createPageAreaSink(sql(), store);
+    configurePageAreaSink({ record: real.record, authorize: async (runId: string, document: Document) => { authorize(); await real.authorize(runId, document); } });
+    const { runId, documentId } = await documentRun(2);
+    const { calls, cache } = rasterHarness();
+    await cache.renderSelectedPages({ document: (await store.loadDocument(documentId))!, runId, pageNumbers: [1, 2] });
+    expect(authorize).toHaveBeenCalledTimes(1);
+    const again = await cache.renderSelectedPages({ document: (await store.loadDocument(documentId))!, runId, pageNumbers: [1, 2] });
+    expect(again.every((page) => page.cacheHit)).toBe(true);
+    expect(authorize).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual({ pdfinfo: 1, pdftoppm: 2 });
+    expect(await billedFastPages(runId, documentId)).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
+  });
+
+  it("a page area that cannot be recorded leaves nothing cached, so the retry measures it", async () => {
+    const real = createPageAreaSink(sql(), store);
+    let failNext = true;
+    configurePageAreaSink({
+      record: async (args) => { if (failNext) { failNext = false; throw new Error("database unavailable"); } return await real.record(args); },
+      authorize: real.authorize,
+    });
+    const { runId, documentId } = await documentRun(2);
+    const { artifacts, cache } = rasterHarness();
+    await expect(cache.renderSelectedPages({ document: (await store.loadDocument(documentId))!, runId, pageNumbers: [1, 2] })).rejects.toThrow("database unavailable");
+    expect(artifacts.size).toBe(0);
+    await cache.renderSelectedPages({ document: (await store.loadDocument(documentId))!, runId, pageNumbers: [1, 2] });
+    expect((await store.loadDocument(documentId))!.billingPages).toBe(PAGE_AREA_EQUIVALENTS_CAP + 1);
+  });
+
+  it("the native engine's renders are authorized the same way: an unfunded run caches nothing", async () => {
+    setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
+    configurePageAreaSink(createPageAreaSink(sql(), store));
+    const { document, runId } = await documentRun(2, "application/pdf", pdfFacts, { org: "o3", workspace: "w3" });
+    const png = (width: number, height: number) => {
+      const buf = Buffer.alloc(33);
+      buf.write("\x89PNG\r\n\x1a\n", 0, "latin1");
+      buf.writeUInt32BE(width, 16);
+      buf.writeUInt32BE(height, 20);
+      return buf;
+    };
+    const engine = {
+      id: "fake",
+      version: () => ({ engine: "native-pdf", version: "0", gitSha: "x", features: [] }),
+      async openPath() {
+        return {
+          pageCount: async () => 2,
+          metadata: async () => ({ encrypted: false }),
+          close: async () => undefined,
+          page: (index: number) => ({
+            size: async () => ({ widthPt: index === 0 ? 14_400 : 612, heightPt: index === 0 ? 14_400 : 792, rotation: 0 }),
+            render: async () => (index === 0 ? png(6_000, 6_000) : png(1_275, 1_650)),
+          }),
+        };
+      },
+    };
+    const artifacts = new Map<string, Uint8Array>();
+    const sources = new PdfSourceCache({
+      async downloadToTempFile(_key: string, pattern: string) {
+        const dir = await mkdtemp(path.join(process.env.TMPDIR || tmpdir(), "area-native-"));
+        const file = path.join(dir, pattern.replace("*", "src"));
+        await writeFile(file, "pdf bytes");
+        return file;
+      },
+    } as never);
+    const cache = new PdfRasterCache({} as never, {
+      async objectSize(key: string) { return artifacts.get(key)?.byteLength ?? null; },
+      async putBytes(key: string, bytes: Uint8Array) { artifacts.set(key, bytes); },
+      uri(key: string) { return `s3://test/${key}`; },
+    } as never, sources, { engine: "native-pdf", loadEngine: async () => engine as never });
+    await expect(cache.renderSelectedPages({ document, runId, dpi: 150, pageNumbers: [1, 2] })).rejects.toMatchObject({ name: "RunPolicyError" });
+    expect(artifacts.size).toBe(0);
+    expect(await runControl(runId)).toBe("paused");
+    expect(document.billingPages).toBeGreaterThan(2);
+  });
+
+  it("the worker refuses to start with a database but no store to authorize rendered areas", async () => {
+    const { createStages } = await import("../stages/index.js");
+    expect(() => createStages({ runner: {} as never, storage: {} as never, config: {} as never, sql: sql() as never })).toThrow(/need a store/);
   });
 });
