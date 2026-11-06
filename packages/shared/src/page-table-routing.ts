@@ -17,8 +17,42 @@ export interface PageTable {
   coverage: number | null;
 }
 
-const PIPE_ROW = /^\s*\|(.*)\|\s*$/;
-const PIPE_SEPARATOR = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/;
+/**
+ * Longest line read as a table row. Page text is customer text: the row and separator checks below are hand-written and
+ * linear (trim, then fixed-shape tests), never regexes with adjacent optional whitespace, which backtrack quadratically on
+ * long whitespace lines (council I: 81 s on a 256 KB page of spaces, worse with NBSP or U+3000).
+ */
+export const TABLE_MAX_LINE_CHARS = 8 * 1024;
+
+/** `| a | b |` (after trimming): the text between the outer pipes, or null when the line is not a pipe row. */
+function pipeRowInner(line: string): string | null {
+  if (line.length > TABLE_MAX_LINE_CHARS) return null;
+  const trimmed = line.trim();
+  return trimmed.length >= 2 && trimmed.startsWith("|") && trimmed.endsWith("|") ? trimmed.slice(1, -1) : null;
+}
+
+const SEPARATOR_CELL = /^:?-{3,}:?$/;
+
+/** A GFM separator line (`|---|:---:|`, outer pipes optional): every pipe-separated cell, trimmed, is 3+ dashes with optional colons. */
+function isSeparatorLine(line: string): boolean {
+  if (line.length > TABLE_MAX_LINE_CHARS) return false;
+  let trimmed = line.trim();
+  if (trimmed.startsWith("|")) trimmed = trimmed.slice(1);
+  if (trimmed.endsWith("|")) trimmed = trimmed.slice(0, -1);
+  return trimmed.split("|").every((cell) => SEPARATOR_CELL.test(cell.trim()));
+}
+
+/** Blocks of lines separated by blank (whitespace-only) lines, without a regex over the page. */
+function blankLineBlocks(page: string): string[] {
+  const blocks: string[] = [];
+  let current: string[] = [];
+  for (const line of page.split("\n")) {
+    if (line.trim()) current.push(line);
+    else if (current.length) { blocks.push(current.join("\n")); current = []; }
+  }
+  if (current.length) blocks.push(current.join("\n"));
+  return blocks;
+}
 
 /**
  * Tables in one page's Markdown: GFM pipe tables (a block of two or more pipe rows, the separator not counted) and HTML
@@ -26,7 +60,7 @@ const PIPE_SEPARATOR = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/;
  */
 export function markdownTables(page: string): Array<{ rows: number; columns: number }> {
   const tables: Array<{ rows: number; columns: number }> = [];
-  for (const block of page.split(/\n\s*\n/)) {
+  for (const block of blankLineBlocks(page)) {
     const html = /^\s{0,3}<table(?=\s|>|$)/i.exec(block);
     if (html) {
       const rows = block.split(/<tr[\s>]/i).slice(1);
@@ -34,9 +68,9 @@ export function markdownTables(page: string): Array<{ rows: number; columns: num
       continue;
     }
     const lines = block.split("\n").filter((line) => line.trim());
-    const pipe = lines.filter((line) => PIPE_ROW.test(line) && !PIPE_SEPARATOR.test(line));
+    const pipe = lines.filter((line) => pipeRowInner(line) !== null && !isSeparatorLine(line));
     if (pipe.length >= 2 && pipe.length >= lines.length - 1) {
-      tables.push({ rows: pipe.length, columns: Math.max(...pipe.map((line) => PIPE_ROW.exec(line)![1]!.split("|").length)) });
+      tables.push({ rows: pipe.length, columns: Math.max(...pipe.map((line) => pipeRowInner(line)!.split("|").length)) });
     }
   }
   return tables;
@@ -58,21 +92,19 @@ export function isTableHeavy(tables: readonly PageTable[], coverage: number | nu
 /** A GFM pipe table in one page's Markdown: its line span and its rows' cells (the separator line excluded). */
 interface PipeTable { start: number; end: number; header: string[]; body: string[][] }
 
-const SEPARATOR_LINE = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/;
-const ROW_LINE = /^\s*\|(.*)\|\s*$/;
 const NUMERIC_CELL = /^[-+(]?[$€£¥]?\d[\d,.:/%)]*$/;
 const BULLET_CELL = /^(?:[-•*·▪◦–]|\d{1,2}[.)])$/;
 
 function cells(line: string): string[] {
-  return ROW_LINE.exec(line)![1]!.split("|").map((cell) => cell.trim());
+  return pipeRowInner(line)!.split("|").map((cell) => cell.trim());
 }
 
 function pipeTables(lines: string[]): PipeTable[] {
   const tables: PipeTable[] = [];
   for (let i = 0; i + 1 < lines.length; i += 1) {
-    if (!ROW_LINE.test(lines[i]!) || !SEPARATOR_LINE.test(lines[i + 1]!)) continue;
+    if (pipeRowInner(lines[i]!) === null || !isSeparatorLine(lines[i + 1]!)) continue;
     let end = i + 2;
-    while (end < lines.length && ROW_LINE.test(lines[end]!) && !SEPARATOR_LINE.test(lines[end]!)) end += 1;
+    while (end < lines.length && pipeRowInner(lines[end]!) !== null && !isSeparatorLine(lines[end]!)) end += 1;
     tables.push({ start: i, end, header: cells(lines[i]!), body: lines.slice(i + 2, end).map(cells) });
     i = end - 1;
   }

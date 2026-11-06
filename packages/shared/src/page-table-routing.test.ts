@@ -98,3 +98,27 @@ describe("HTML table scanning is linear on hostile page text (council G M1)", ()
     expect(tableReliability("<table><tr><th>a</th><th>b</th></tr><tr><td>1</td></tr></table> <table>unclosed")).toEqual(["table:inconsistent-columns"]);
   });
 });
+
+describe("pipe-table checks are linear on whitespace-heavy page text (council I #1)", () => {
+  const elapsed = (fn: () => unknown) => { const start = performance.now(); fn(); return performance.now() - start; };
+  const near = TABLE_SCAN_MAX_PAGE_CHARS - 64;
+
+  it.each([[" ", "space"], ["\t", "tab"], [" ", "NBSP"], ["　", "ideographic space"]])("a page at the cap of %j (%s) scans in well under 50 ms", (ws) => {
+    const pages = [
+      `|${ws.repeat(near)}x`,                               // a row that never closes
+      `${ws.repeat(near)}-`,                                // separator-looking, leading whitespace
+      `|---${ws.repeat(near)}x`,                            // separator-looking, trailing whitespace
+      `| a |\n|${ws.repeat(near / 2)}---${ws.repeat(near / 2)}x`,
+      Array.from({ length: 64 }, () => `|${ws.repeat(near / 64 - 8)}:---${ws.repeat(2)}x`).join("\n"),
+    ];
+    for (const page of pages) {
+      repairMarkdownTables(page); // warm
+      expect(elapsed(() => { repairMarkdownTables(page); tableReliability(page); markdownTables(page); })).toBeLessThan(50);
+    }
+  });
+
+  it("still reads pipe tables padded with any whitespace", () => {
+    const page = ["　| a | b |\t", " |:---:| ---| ", "| 1 | 2 |"].join("\n");
+    expect(markdownTables(page)).toEqual([{ rows: 2, columns: 2 }]);
+  });
+});

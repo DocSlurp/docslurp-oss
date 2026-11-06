@@ -1,10 +1,56 @@
 import { assessTextLayer, pageWordCount } from "@docslurp/shared";
 import { stripLeadingFrontmatter } from "./markdown-structure.js";
 
-const MARKDOWN_TABLE_BLOCK =
-  /(^|\n)(?<table>(?:\|.*\|\n)+)(?=\n|$)/g;
+/**
+ * Pipe-table blocks: maximal runs of lines that start and end with `|`, each ended by a newline and followed by a blank
+ * line or the end of the text. Line-based and linear: the regex this replaces (`(^|\n)((?:\|.*\|\n)+)(?=\n|$)`)
+ * backtracked quadratically over a long pipe block that was not followed by a blank line (council I audit). Returns the
+ * runs as line index ranges [first, last].
+ */
+function markdownTableBlocks(lines: readonly string[]): Array<[number, number]> {
+  const isPipeLine = (line: string) => line.length >= 2 && line.charCodeAt(0) === 124 && line.charCodeAt(line.length - 1) === 124 && !/[\r\u2028\u2029]/.test(line);
+  const blocks: Array<[number, number]> = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!isPipeLine(lines[i]!)) continue;
+    let j = i;
+    while (j + 1 < lines.length && isPipeLine(lines[j + 1]!)) j += 1;
+    if (j + 1 < lines.length && lines[j + 1] === "") blocks.push([i, j]);
+    i = j;
+  }
+  return blocks;
+}
 
-const DATA_URI = /data:[^,\s)"']+;base64,[a-z0-9+/=]+/gi;
+/** `,`, `)`, quotes or whitespace end a data: URI's type. */
+const isDataUriStop = (code: number) => code === 44 || code === 41 || code === 34 || code === 39 || code === 32 || (code >= 9 && code <= 13) || (code > 127 && /\s/.test(String.fromCharCode(code)));
+const isBase64Char = (code: number) => (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 43 || code === 47 || code === 61;
+
+/**
+ * Replace each `data:<type>;base64,<payload>` URI (case-insensitive; the type has no `,`, whitespace, `)` or quote and
+ * ends with `;base64`) via `replace`. A linear scan: the regex this replaces backtracked quadratically on `data:data:…`
+ * runs (council I audit), so a run's end is found once and shared by every `data:` inside it.
+ */
+function replaceDataUris(text: string, replace: (match: string) => string): string {
+  const lower = text.replace(/[A-Z]+/g, (letters) => letters.toLowerCase());
+  let out = "", from = 0, search = 0, runEnd = -1;
+  for (let at = lower.indexOf("data:", search); at !== -1; at = lower.indexOf("data:", search)) {
+    const typeStart = at + 5;
+    if (runEnd < typeStart) {
+      runEnd = typeStart;
+      while (runEnd < text.length && !isDataUriStop(text.charCodeAt(runEnd))) runEnd += 1;
+    }
+    if (text.charCodeAt(runEnd) === 44 && runEnd - typeStart > 7 && lower.startsWith(";base64", runEnd - 7)) {
+      let end = runEnd + 1;
+      while (end < text.length && isBase64Char(text.charCodeAt(end))) end += 1;
+      if (end > runEnd + 1) {
+        out += text.slice(from, at) + replace(text.slice(at, end));
+        from = search = end;
+        continue;
+      }
+    }
+    search = at + 1;
+  }
+  return out + text.slice(from);
+}
 
 export type ExtractionPlausibilitySignals = {
   plausibilityScore: number;
@@ -36,7 +82,7 @@ export function sanitizeExtractedMarkdown(
   let strippedDataUriCount = 0;
   let strippedDataUriBytes = 0;
   const body = stripLeadingFrontmatter(markdown);
-  const sanitized = body.markdown.replace(DATA_URI, (match) => {
+  const sanitized = replaceDataUris(body.markdown, (match) => {
     strippedDataUriCount += 1;
     strippedDataUriBytes += Buffer.byteLength(match);
     return "artifact://externalized-data-uri";
@@ -108,7 +154,7 @@ export function scoreExtractionPlausibility(
 }
 
 export function countMarkdownTables(markdown: string): number {
-  return [...markdown.matchAll(MARKDOWN_TABLE_BLOCK)].length;
+  return markdownTableBlocks(markdown.split("\n")).length;
 }
 
 export function countHtmlTables(markdown: string): number {
@@ -183,13 +229,12 @@ export function normalizeExtractedMarkdown(args: {
     return args.markdown;
   }
 
-  return args.markdown.replace(
-    MARKDOWN_TABLE_BLOCK,
-    (fullMatch, prefix, table) => {
-      const html = markdownTableToHtml(table);
-      return html ? `${prefix}${html}\n` : fullMatch;
-    },
-  );
+  const lines = args.markdown.split("\n");
+  for (const [first, last] of markdownTableBlocks(lines).reverse()) {
+    const html = markdownTableToHtml(`${lines.slice(first, last + 1).join("\n")}\n`);
+    if (html) lines.splice(first, last - first + 1, html);
+  }
+  return lines.join("\n");
 }
 
 export function scoreMarkdownCandidate(args: {

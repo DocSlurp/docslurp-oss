@@ -64,7 +64,7 @@ export async function recordExtractedPageEquivalents(
   // A PDF splits by its extractor's convention; an image's OCR frames are separated; whole-document text is measured joined.
   const pages = format === "pdf" ? splitProcessedPdfPages(markdown, options.extractor ?? "poppler-text")
     : format === "image" ? markdown.split("\f")
-    : markdown.replace(/\f\s*$/, "").split("\f");
+    : stripTrailingPageBreak(markdown).split("\f");
   const area = new Map(frames.filter((frame) => frame.sourceWidth && frame.sourceHeight)
     // As the OCR read takes the frame (its long-edge cap): the work a frame costs, not the size it was uploaded at.
     .map((frame) => [frame.pageNumber, imageAreaEquivalents(frame.sourceWidth!, frame.sourceHeight!, ocrMaxLongEdge())]));
@@ -104,4 +104,13 @@ export async function recordExtractedPageEquivalents(
     await authorizeMeasuredPages(state, document);
   }
   return { pages: pages.length, equivalents, billed, densePages, billingPages };
+}
+
+/**
+ * The text without a trailing page break: everything from the first form feed in its whitespace-only tail. Linear; the
+ * regex this replaces (`/\f\s*$/`) was quadratic on long form-feed runs (council I audit).
+ */
+export function stripTrailingPageBreak(text: string): string {
+  const breakAt = text.indexOf("\f", text.trimEnd().length);
+  return breakAt === -1 ? text : text.slice(0, breakAt);
 }

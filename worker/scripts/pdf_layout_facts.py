@@ -1479,8 +1479,30 @@ LAYOUT_VERSION = 'pdf-layout-facts@1'
 MAX_LAYOUT_PAGES = 5_000
 MAX_LAYOUT_IMAGES_PER_PAGE = 64
 MAX_LAYOUT_TABLES_PER_PAGE = 64
-_PIPE_ROW = re.compile(r'^\s*\|(.*)\|\s*$')
-_PIPE_SEPARATOR = re.compile(r'^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$')
+# Linear pipe-row and separator checks (trim, then fixed shapes), never regexes with adjacent optional whitespace, which
+# backtrack quadratically on long whitespace lines. Mirrors pipeRowInner/isSeparatorLine in page-table-routing.ts.
+TABLE_MAX_LINE_CHARS = 8 * 1024
+_SEPARATOR_CELL = re.compile(r':?-{3,}:?\Z')
+
+
+def _pipe_row_inner(line):
+    if len(line) > TABLE_MAX_LINE_CHARS:
+        return None
+    trimmed = line.strip()
+    return trimmed[1:-1] if len(trimmed) >= 2 and trimmed.startswith('|') and trimmed.endswith('|') else None
+
+
+def _is_separator_line(line):
+    if len(line) > TABLE_MAX_LINE_CHARS:
+        return False
+    trimmed = line.strip()
+    if trimmed.startswith('|'):
+        trimmed = trimmed[1:]
+    if trimmed.endswith('|'):
+        trimmed = trimmed[:-1]
+    return all(_SEPARATOR_CELL.match(cell.strip()) for cell in trimmed.split('|'))
+
+
 _TR = re.compile(r'<tr[\s>]', re.IGNORECASE)
 _CELL = re.compile(r'<t[dh][\s>]', re.IGNORECASE)
 
@@ -1511,9 +1533,9 @@ def markdown_tables(page_markdown):
             tables.append({'rows': len(rows), 'columns': max(len(_CELL.findall(row)) for row in rows),
                            'tokens': _tokens(_TAG.sub(' ', html))})
             continue
-        pipe = [line for line in block if _PIPE_ROW.match(line) and not _PIPE_SEPARATOR.match(line)]
+        pipe = [line for line in block if _pipe_row_inner(line) is not None and not _is_separator_line(line)]
         if len(pipe) >= 2 and len(pipe) >= len([line for line in block if line.strip()]) - 1:
-            tables.append({'rows': len(pipe), 'columns': max(len(_PIPE_ROW.match(line)[1].split('|')) for line in pipe),
+            tables.append({'rows': len(pipe), 'columns': max(len(_pipe_row_inner(line).split('|')) for line in pipe),
                            'tokens': _tokens(' '.join(block))})
         if len(tables) >= MAX_LAYOUT_TABLES_PER_PAGE:
             break
