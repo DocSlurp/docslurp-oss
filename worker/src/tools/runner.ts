@@ -595,6 +595,21 @@ export class CommandRunner {
     return { ...plan, available: plan.available && existsSync(tool), timeoutMs: limits.wallMs, readOnlyInputs: true };
   }
 
+  /**
+   * Whether Poppler (Doppler's pdftotext, the extractor's own) can open page 1 after pdfpagecount walked the tree: exit 99
+   * means it sees no pages (a claimed /Count beyond the file's objects makes it refuse the tree), so extraction would read
+   * nothing. Output is discarded; only the exit code is read.
+   */
+  async pdfPopplerAcceptance(source: string): Promise<CommandPlan> {
+    const plan = await this.planDocumentTool({
+      binary: path.join(dopplerBinDir(), "pdftotext"),
+      args: ["-q", ...pdfPageRangeArgs(1, 1), source, "/dev/null"],
+      fileArgIndexes: [5],
+      supportsDoubleDash: true,
+    });
+    return { ...plan, available: plan.available && existsSync(plan.binary), timeoutMs: 60_000, readOnlyInputs: true };
+  }
+
   async splitPages(source: string, pattern: string, pages: number): Promise<CommandPlan> {
     return await this.planDocumentTool({
       binary: "pdfseparate",

@@ -10,8 +10,9 @@ import { recordPageBaseFee } from "../db/page-base-fee.js";
 import { setSpendCheckConfig } from "../db/spend-check.js";
 import { Store } from "../db/store.js";
 import { registerExtractorPlugin, resetExtractorPluginsForTest, type SandboxedPdfExtractorProvider } from "../extractors/plugins.js";
-import { countPdfPages, MAX_MEASURED_PDF_PAGES, parsePdfPageCount, PDF_PAGE_COUNT_LIMITS, PdfPageCountError, processedPdfPages, reconcileProcessedPdfPages, recordMeasuredPdfPageCount } from "../lib/pdf-page-count.js";
+import { assertPopplerAcceptsPdf, countPdfPages, MAX_MEASURED_PDF_PAGES, PDF_STRUCTURE_REJECTED, PDF_WALKED_PAGES_SLOT, parsePdfPageCount, PDF_PAGE_COUNT_LIMITS, PdfPageCountError, processedPdfPages, reconcileProcessedPdfPages, recordMeasuredPdfPageCount } from "../lib/pdf-page-count.js";
 import { isDocumentLevelFailure } from "../lib/document-failure.js";
+import { classifyIngestFailure } from "@docslurp/shared";
 import { HungWorkError } from "../lib/hung-work.js";
 import { CommandExitError, CommandRunner, pdfPageRangeArgs } from "../tools/runner.js";
 import { cyclicTreePdf, deepTreePdf, encryptedPdf, flatTreePdf, memoryBombPdf, zeroPagePdf } from "../test/page-tree-pdf.js";
@@ -71,9 +72,15 @@ async function stateFor(runId: string, documentId: string) {
   return { state, document };
 }
 /** A runner whose pdfpagecount reports `pages` (0: the tool refuses the file as malformed, exit 4). */
-const runner = (pages: number) => ({
+const runner = (pages: number, popplerExit = 0) => ({
   pdfPageCount: vi.fn(async (source: string) => ({ binary: "prlimit", args: [source], available: true })),
-  run: vi.fn(async () => {
+  // Poppler's acceptance check after the walk (pdftotext on page 1): exit 0 accepts, 99 sees no pages.
+  pdfPopplerAcceptance: vi.fn(async (source: string) => ({ binary: "pdftotext", args: [source], available: true })),
+  run: vi.fn(async (plan: { binary: string }) => {
+    if (plan.binary === "pdftotext") {
+      if (popplerExit === 0) return { stdout: "", stderr: "" };
+      throw new CommandExitError(`pdftotext (${popplerExit}): Command Line Error: Wrong page range given`, popplerExit);
+    }
     if (pages >= 1) return { stdout: `${pages}\n`, stderr: "" };
     throw new CommandExitError("prlimit (4): pdfpagecount: malformed page tree: no pages", 4);
   }),
@@ -229,6 +236,37 @@ describe.skipIf(!realTool)("pdfpagecount on hostile page trees (real tool)", () 
   }, 120_000);
 });
 
+describe.skipIf(!realTool)("walked vs extracted with the real tools (owner decisions 2026-11-05)", () => {
+  it("/Count 1 over 50 kids: the walk counts 50, extraction reads 1 page, and the file bills 1 with a partial-extraction flag", async () => {
+    const dir = await mkdtemp(path.join(process.env.TMPDIR || tmpdir(), "partial-"));
+    const source = path.join(dir, "in.pdf");
+    await writeFile(source, flatTreePdf(50, { claimedCount: 1 }));
+    const runner = new CommandRunner();
+    expect(await countPdfPages(runner, source)).toBe(50);
+    await assertPopplerAcceptsPdf(runner, source); // Poppler opens it (it sees one page)
+    const text = (await runner.run({ ...(await runner.extractText(source, 50, true)), binary: `${dopplerBin}/pdftotext` })).stdout;
+    const processed = processedPdfPages(text);
+    expect(processed).toBe(1);
+    await db.exec(`
+      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+        values ('run-p', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 1, 50);
+      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts)
+        values ('partial', 'o1', 'u1', 'w1', 'run-p', 'p.pdf', 'application/pdf', 'raw/p', 'processing', 50, 'counted', '${JSON.stringify(pdfFacts)}');`);
+    const { state, document } = await stateFor("run-p", "partial");
+    expect(await reconcileProcessedPdfPages(state, document, processed)).toEqual({ measured: 50, processed: 1, mismatch: "processed-below-measured" });
+    expect(await pageRow("partial")).toEqual({ page_count: 1, page_count_source: "counted" });
+  }, 120_000);
+
+  it("a claimed /Count beyond the file's objects: the walk counts the real pages, Poppler refuses the tree: structure-rejected", async () => {
+    const dir = await mkdtemp(path.join(process.env.TMPDIR || tmpdir(), "rejected-"));
+    const source = path.join(dir, "in.pdf");
+    await writeFile(source, flatTreePdf(3, { claimedCount: 1000 }));
+    const runner = new CommandRunner();
+    expect(await countPdfPages(runner, source)).toBe(3);
+    await expect(assertPopplerAcceptsPdf(runner, source)).rejects.toMatchObject({ outcome: "structure-rejected" });
+  }, 120_000);
+});
+
 describe.skipIf(!realTool)("an inflated /Count: no utility processes more than the walked count (real tools)", () => {
   it("pdftoppm renders /Count's 8 pages without a range; every planned utility stops at the walked 3", async () => {
     const dir = await mkdtemp(path.join(process.env.TMPDIR || tmpdir(), "inflated-count-"));
@@ -283,8 +321,24 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
     expect(host.run).not.toHaveBeenCalled();
   }, 60_000);
 
+  it("local mode: a PDF whose tree walks but which Poppler refuses (it sees no pages) fails as structure-rejected, nothing persisted", async () => {
+    await db.exec(`update documents set page_count = 3, page_count_source = 'assumed' where id = 'local'`);
+    const { state, document } = await stateFor("run1", "local");
+    const error = await recordMeasuredPdfPageCount({ state, document, runner: runner(9, 99), sourcePath: async () => "/tmp/a.pdf", env: { DOCSLURP_PDF_MODE: "local" } })
+      .catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ outcome: "structure-rejected" });
+    expect((error as Error).message).toContain(PDF_STRUCTURE_REJECTED);
+    expect(isDocumentLevelFailure(error)).toBe(true);
+    expect(classifyIngestFailure((error as Error).message)).toMatchObject({ reason: "pdf-structure-rejected", retryable: false });
+    expect(await pageRow("local")).toEqual({ page_count: 3, page_count_source: "assumed" });
+    // Another exit of the check is left to extraction (it reports its own failure); the count stands.
+    expect(await recordMeasuredPdfPageCount({ state, document, runner: runner(7, 1), sourcePath: async () => "/tmp/a.pdf", env: { DOCSLURP_PDF_MODE: "local" } }))
+      .toMatchObject({ pages: 7 });
+    await db.exec(`update documents set page_count = 7, page_count_source = 'counted' where id = 'local'`);
+  }, 60_000);
+
   it("vm mode: the VM's pdfpagecount outcome becomes the same refusal or retry as local mode, its cost still recorded", async () => {
-    for (const [outcome, documentLevel] of [["encrypted", true], ["malformed", true], ["limit", true], ["killed", true], ["unavailable", false]] as const) {
+    for (const [outcome, documentLevel] of [["encrypted", true], ["malformed", true], ["limit", true], ["killed", true], ["structure-rejected", true], ["unavailable", false]] as const) {
       const usage = { provider: "modal", model: "doppler-document-vm", metric: "sandbox_compute", amount: 1, unit: "cent", costCents: 1 };
       const pageCount = vi.fn(async () => { throw Object.assign(new Error(`Document VM page count refused: ${outcome}`), { usage, pageCountOutcome: outcome }); });
       registerExtractorPlugin({ apiVersion: 1, name: "vm", sandboxedPdf: { id: "test-vm", maxSourceBytes: 1e9, assertConfigured() {}, run: vi.fn(), timeoutMs: () => 1, pageCount } as unknown as SandboxedPdfExtractorProvider });
@@ -452,7 +506,7 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
     expect((storage as unknown as { downloadSourceToTempFile: ReturnType<typeof vi.fn> }).downloadSourceToTempFile).not.toHaveBeenCalled();
   }, 60_000);
 
-  it("bills and authorizes the larger of the page-tree count and the pages extraction processed, and flags a disagreement", async () => {
+  it("bills what was processed: raised when extraction processed more than the tree, lowered (and flagged) when fewer", async () => {
     await db.exec(`
       insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
         values ('run-x', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 2, 13);
@@ -465,7 +519,15 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
     expect(await pageRow("x-more")).toEqual({ page_count: 5, page_count_source: "counted" });
     const less = await stateFor("run-x", "x-less");
     expect(await reconcileProcessedPdfPages(less.state, less.document, 1)).toEqual({ measured: 10, processed: 1, mismatch: "processed-below-measured" });
-    // Never lowered: the larger count stands.
-    expect(await pageRow("x-less")).toEqual({ page_count: 10, page_count_source: "counted" });
+    // Owner decision 2026-11-05: pages not extracted are not billed; the walked count is kept for the report's N of M.
+    expect(await pageRow("x-less")).toEqual({ page_count: 1, page_count_source: "counted" });
+    expect(less.document.pageCount).toBe(1);
+    expect(less.state.artifactLedger.readDocument("x-less", PDF_WALKED_PAGES_SLOT)).toBe("10");
+    // A retried stage (the row already lowered) reports the same 1 of 10 and changes nothing.
+    const retry = WorkflowState.create(await store.loadRun("run-x"), [(await store.loadDocument("x-less"))!]);
+    retry.store = store;
+    retry.artifactLedger.recordDocument("x-less", PDF_WALKED_PAGES_SLOT, "10");
+    expect(await reconcileProcessedPdfPages(retry, retry.documents[0]!, 1)).toEqual({ measured: 10, processed: 1, mismatch: "processed-below-measured" });
+    expect(await pageRow("x-less")).toEqual({ page_count: 1, page_count_source: "counted" });
   }, 60_000);
 });

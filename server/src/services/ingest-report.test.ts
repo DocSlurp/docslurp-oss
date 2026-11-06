@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_OPENROUTER_VISION_MODEL, defaultPipelineFeatures, visionModelCatalogById, ingestReportSchema, mergePipelineFeatures, requestsIngestReport, ingestReportFocusPages, type PipelineFeatures } from "@docslurp/shared";
+import { DEFAULT_OPENROUTER_VISION_MODEL, defaultPipelineFeatures, visionModelCatalogById, ingestReportSchema, mergePipelineFeatures, requestsIngestReport, ingestReportFocusPages, partialExtractionMessage, type PipelineFeatures } from "@docslurp/shared";
 
 vi.mock("../db.js", () => ({ sql: vi.fn() }));
 vi.mock("./usage-attribution.js", () => ({ workspaceRunsUsageCost: vi.fn(async () => ({ costCents: 0, billedCostCents: 0, computeEstimated: false })) }));
@@ -335,6 +335,30 @@ describe("ingest report: failed files", () => {
     });
     expect(report.denseText).toEqual({ total: 1, examples: [{ documentId: "stuffed", filename: "stuffed.pdf", densePages: [1], densePageCount: 1, pageEquivalents: 52 }] });
     expect(summarizeIngestReport(report)).toMatch(/1 file has pages holding several pages of text each .*stuffed\.pdf \(1 page\)/);
+  });
+
+  it("flags a PDF extracted short of its page tree (pdf-partially-extracted, N of M), loudly, with no tool text", () => {
+    const report = build({
+      documents: [doc("partial", { filename: "partial.pdf", mimeType: "application/pdf", status: "completed", pageCount: 1 }), doc("whole", { filename: "whole.pdf", mimeType: "application/pdf", status: "completed", pageCount: 3 })],
+      stages: [
+        { documentId: "partial", stage: "extract-markdown", status: "completed", skipped: false, reason: null, selectedPages: null, pages: 1, costCents: null, tablePages: null, durationSeconds: null, pdfPagesMeasured: 50, pdfPagesProcessed: 1, pdfPagesMismatch: "processed-below-measured" },
+        { documentId: "whole", stage: "extract-markdown", status: "completed", skipped: false, reason: null, selectedPages: null, pages: 3, costCents: null, tablePages: null, durationSeconds: null, pdfPagesMeasured: 3, pdfPagesProcessed: 3, pdfPagesMismatch: "none" },
+      ],
+    });
+    expect(report.partialExtraction).toEqual({ total: 1, examples: [{ documentId: "partial", filename: "partial.pdf", reason: "pdf-partially-extracted", pagesExtracted: 1, pagesInFile: 50,
+      message: partialExtractionMessage(1, 50) }] });
+    expect(report.partialExtraction.examples[0]!.message).toContain("Only 1 of this PDF's 50 pages could be extracted");
+    expect(summarizeIngestReport(report)).toMatch(/\*\*1 PDF was only partly extracted\*\*.*partial\.pdf \(1 of 50 pages\)/);
+  });
+
+  it("classifies a PDF its reader rejects after the walk as pdf-structure-rejected, not retryable, with reviewed copy", () => {
+    const report = build({
+      documents: [doc("rejected", { filename: "rejected.pdf", mimeType: "application/pdf", status: "failed", pageCount: 3 })],
+      stages: [{ documentId: "rejected", stage: "format-detect", status: "failed", skipped: false, reason: null, selectedPages: null, pages: null, costCents: null, tablePages: null, durationSeconds: null,
+        error: "PdfPageCountError: PDF structure rejected: the page tree was walked but the PDF reader sees no pages" }],
+    });
+    expect(report.failures.examples[0]).toMatchObject({ reason: "pdf-structure-rejected", retryable: false });
+    expect(report.failures.examples[0]!.message).toContain("Nothing was charged");
   });
 
   it("does not blame page triage or recommend vision for a file that crashed in extraction", () => {

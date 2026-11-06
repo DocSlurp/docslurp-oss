@@ -31,6 +31,7 @@ import {
   type PipelineFeatureOverrides,
   type PipelineFeatures,
   type WorkspaceRecord,
+  partialExtractionMessage,
 } from "@docslurp/shared";
 import { z } from "zod";
 import type { BulkReprocessResult } from "./documents.js";
@@ -96,6 +97,10 @@ export interface IngestReportStageRow {
   pageEquivalents?: number | null;
   densePages?: number[] | null;
   densePageCount?: number | null;
+  /** extract-markdown's PDF page check (stats.pdfPagesMeasured, pdfPagesProcessed, pdfPagesMismatch). */
+  pdfPagesMeasured?: number | null;
+  pdfPagesProcessed?: number | null;
+  pdfPagesMismatch?: string | null;
 }
 
 export interface IngestReportRunRow {
@@ -494,6 +499,7 @@ export function buildIngestReport(input: IngestReportInput): IngestReport {
     failures: summarizeFailures(failureList),
     extractionWarnings: listExtractionWarnings(docs, stagesByDoc),
     denseText: listDenseText(docs, stagesByDoc),
+    partialExtraction: listPartialExtraction(docs, stagesByDoc),
     focus,
     languages: [...languageCounts].sort((a, b) => b[1] - a[1]).map(([code, documents]) => ({ code, documents })),
     stages: {
@@ -566,6 +572,24 @@ function listDenseText(docs: IngestReportDocumentRow[], stagesByDoc: Map<string,
     total += 1;
     if (examples.length < FAILURE_EXAMPLE_LIMIT) {
       examples.push({ documentId: doc.id, filename: doc.filename, densePages: stage.densePages ?? [], densePageCount: stage.densePageCount ?? 0, pageEquivalents: stage.pageEquivalents ?? 0 });
+    }
+  }
+  return { total, examples };
+}
+
+/** PDFs extracted short of their page tree (stats.pdfPagesMismatch = processed-below-measured): `pdf-partially-extracted`. */
+function listPartialExtraction(docs: IngestReportDocumentRow[], stagesByDoc: Map<string, IngestReportStageRow[]>): IngestReport["partialExtraction"] {
+  const examples: IngestReport["partialExtraction"]["examples"] = [];
+  let total = 0;
+  for (const doc of docs) {
+    const stage = stagesByDoc.get(doc.id)?.findLast((row) => row.stage === "extract-markdown" && row.pdfPagesMismatch === "processed-below-measured");
+    const extracted = stage?.pdfPagesProcessed ?? null;
+    const inFile = stage?.pdfPagesMeasured ?? null;
+    if (!stage || extracted === null || inFile === null || extracted >= inFile) continue;
+    total += 1;
+    if (examples.length < FAILURE_EXAMPLE_LIMIT) {
+      examples.push({ documentId: doc.id, filename: doc.filename, reason: "pdf-partially-extracted", pagesExtracted: extracted, pagesInFile: inFile,
+        message: partialExtractionMessage(extracted, inFile) });
     }
   }
   return { total, examples };
@@ -1027,6 +1051,10 @@ export function summarizeIngestReport(report: IngestReport): string {
   const evaluated = report.searchability.searchablePages + report.searchability.unsearchablePages;
   lines.push(`**Ingest report** for ${scope}: ${plural(report.files.total, "file")}, ${plural(pages, "page")}${evaluated ? `, ${searchable.toLocaleString("en-US")} of ${plural(evaluated, "checked page")} searchable` : ""}.`);
   if (report.failures.total > 0) lines.push(summarizeFailureLine(report.failures));
+  if (report.partialExtraction.total > 0) {
+    const shown = report.partialExtraction.examples.slice(0, 3).map((file) => `${escapeMarkdown(file.filename)} (${file.pagesExtracted} of ${file.pagesInFile} pages)`);
+    lines.push(`**${plural(report.partialExtraction.total, "PDF")} ${agree(report.partialExtraction.total, "was", "were")} only partly extracted** because ${agree(report.partialExtraction.total, "its", "their")} page structure is inconsistent: ${shown.join(", ")}. Only the extracted pages are searchable and billed; re-save or re-export ${agree(report.partialExtraction.total, "it", "them")} to recover the rest.`);
+  }
   if (report.denseText.total > 0) {
     const shown = report.denseText.examples.slice(0, 3).map((file) => `${escapeMarkdown(file.filename)} (${plural(file.densePageCount, "page")})`);
     lines.push(`${plural(report.denseText.total, "file")} ${agree(report.denseText.total, "has", "have")} pages holding several pages of text each (very dense, tiny, hidden or off-page text): ${shown.join(", ")}. That text is searchable and counted by its volume; check it if you did not expect it.`);
@@ -1191,6 +1219,7 @@ export async function loadIngestReport(args: {
       selected_pages: number | null; pages: string | number | null; cost_cents: string | number | null;
       table_pages: string | number | null; duration_seconds: string | number | null; error: string | null; extractor_fallback: unknown;
       page_equivalents: string | number | null; dense_pages: unknown; dense_page_count: string | number | null;
+      pdf_pages_measured: string | number | null; pdf_pages_processed: string | number | null; pdf_pages_mismatch: string | null;
     }[]>`
       select s.document_id, s.stage_name, s.status, left(s.error, 1000) as error,
         coalesce(s.stats -> 'skipped' = 'true'::jsonb, false) as skipped,
@@ -1203,7 +1232,10 @@ export async function loadIngestReport(args: {
         case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'extractorFallback') = 'object' then s.stats -> 'extractorFallback' end as extractor_fallback,
         case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'pageEquivalents') = 'number' then (s.stats ->> 'pageEquivalents')::numeric end as page_equivalents,
         case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'densePages') = 'array' then s.stats -> 'densePages' end as dense_pages,
-        case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'densePageCount') = 'number' then (s.stats ->> 'densePageCount')::numeric end as dense_page_count
+        case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'densePageCount') = 'number' then (s.stats ->> 'densePageCount')::numeric end as dense_page_count,
+        case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'pdfPagesMeasured') = 'number' then (s.stats ->> 'pdfPagesMeasured')::numeric end as pdf_pages_measured,
+        case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'pdfPagesProcessed') = 'number' then (s.stats ->> 'pdfPagesProcessed')::numeric end as pdf_pages_processed,
+        case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'pdfPagesMismatch') = 'string' then left(s.stats ->> 'pdfPagesMismatch', 40) end as pdf_pages_mismatch
       from document_run_stage_states s
       join documents d on d.id = s.document_id and d.run_id = s.run_id
       where d.workspace_id = ${workspaceId} and d.id = any(${client.array(ids)}::text[])
@@ -1258,6 +1290,9 @@ export async function loadIngestReport(args: {
       pageEquivalents: numOrNull(row.page_equivalents),
       densePages: Array.isArray(row.dense_pages) ? row.dense_pages.filter((page): page is number => Number.isSafeInteger(page) && page >= 1).slice(0, 50) : null,
       densePageCount: numOrNull(row.dense_page_count),
+      pdfPagesMeasured: numOrNull(row.pdf_pages_measured),
+      pdfPagesProcessed: numOrNull(row.pdf_pages_processed),
+      pdfPagesMismatch: row.pdf_pages_mismatch,
     })),
     runs: runRows.map((row) => ({ id: row.id, status: row.status, pagesProcessed: num(row.pages_processed), durationMs: num(row.duration_ms) })),
     costCents: cost?.costCents ?? null,

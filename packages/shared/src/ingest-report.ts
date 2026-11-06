@@ -83,6 +83,8 @@ export const ingestReportFailureReasonSchema = z.enum([
   "provider_failed",
   "policy_blocked",
   "cancelled",
+  /** The PDF's page tree was walked, but the PDF reader refuses it and sees no pages (a page count claimed beyond the file). */
+  "pdf-structure-rejected",
   "unknown",
 ]);
 export type IngestReportFailureReason = z.infer<typeof ingestReportFailureReasonSchema>;
@@ -156,6 +158,30 @@ export const ingestReportDenseTextSchema = z.object({
 });
 export type IngestReportDenseText = z.infer<typeof ingestReportDenseTextSchema>;
 
+/**
+ * Files whose PDF reader extracted fewer pages than the page tree holds (its page tree is inconsistent, for example a page
+ * count that under-claims its pages): only the extracted pages are searchable and billed. Public reason code only.
+ */
+export const ingestReportPartialExtractionSchema = z.object({
+  total: count,
+  /** Up to 20 files. */
+  examples: z.array(z.object({
+    documentId: z.string(),
+    filename: z.string(),
+    reason: z.literal("pdf-partially-extracted"),
+    pagesExtracted: count,
+    pagesInFile: count,
+    /** Reviewed, user-facing explanation (partialExtractionMessage). */
+    message: z.string(),
+  })),
+});
+export type IngestReportPartialExtraction = z.infer<typeof ingestReportPartialExtractionSchema>;
+
+/** The warning for a partially extracted PDF: N of M pages, why, and what was billed. Never tool text. */
+export function partialExtractionMessage(extracted: number, inFile: number): string {
+  return `Only ${extracted} of this PDF's ${inFile} pages could be extracted because its page structure is inconsistent. Only the extracted pages are searchable and billed; re-save or re-export the PDF to recover the rest.`;
+}
+
 const FALLBACK_COPY: Record<IngestReportExtractorFallbackReason, string> = {
   unavailable: "was not available on the processing server",
   failed: "failed on this file",
@@ -181,11 +207,20 @@ const FAILURE_COPY: Record<IngestReportFailureReason, { message: string; retryab
   provider_failed: { message: "An AI provider call failed or was rate-limited while processing this file.", retryable: true },
   policy_blocked: { message: "Workspace or server policy (privacy mode, spend cap or PII rules) stopped processing this file.", retryable: false },
   cancelled: { message: "Processing of this file was cancelled.", retryable: true },
+  "pdf-structure-rejected": {
+    message: "This PDF's internal page structure is inconsistent, so its pages could not be read. Nothing was charged for it. Re-save or re-export the PDF and upload it again.",
+    retryable: false,
+  },
   unknown: { message: "Processing failed and the cause was not recorded.", retryable: true },
 };
 
 /** Most specific, least recoverable causes first: an OCR crash arrives wrapped in "no extractor produced output". */
+/** The worker's fixed refusal text for a PDF its reader rejects after the page tree was walked (lib/pdf-page-count.ts). */
+const PDF_STRUCTURE_REJECTED_TEXT = "PDF structure rejected";
+
 const FAILURE_PATTERNS: Array<[IngestReportFailureReason, RegExp]> = [
+  // First: its text also says "PDF", "page" and "structure", which later patterns would claim.
+  ["pdf-structure-rejected", new RegExp(PDF_STRUCTURE_REJECTED_TEXT)],
   // Current OCR (sandboxed VM provider) failures, plus the markers of the retired local OCR engine: stage errors stored
   // before the cutover keep that text, and reports over those runs must still say OCR was unavailable.
   ["ocr_unavailable", /model-refused|DOCSLURP_OCR_MODE|OCR provider plugin|tessdata|traineddata|tesseract|leptonica|\bocr\b.*(?:unavailable|refused|is off|not (?:installed|found|available)|failed to (?:init|load))/i],
@@ -365,6 +400,8 @@ export const ingestReportSchema = z.object({
   extractionWarnings: ingestReportExtractionWarningsSchema.default({ total: 0, examples: [] }),
   /** Files with pages holding many pages of text (possible hidden or stuffed text). Defaults to none for older reports. */
   denseText: ingestReportDenseTextSchema.default({ total: 0, examples: [] }),
+  /** PDFs extracted short of their page tree (`pdf-partially-extracted`). Defaults to none for older reports. */
+  partialExtraction: ingestReportPartialExtractionSchema.default({ total: 0, examples: [] }),
   focus: ingestReportPageSchema.array().nullable(),
   languages: z.array(z.object({ code: z.string(), documents: count })),
   stages: z.object({

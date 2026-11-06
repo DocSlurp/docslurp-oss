@@ -32,6 +32,7 @@ export type PdfPageCountOutcome =
   | "limit"             // exit 3: pages, depth, work or memory over budget
   | "malformed"         // exit 4: no pages, a cycle, a broken page tree
   | "killed"            // killed by the external limit, the wall clock, or a crash (an abort, a signal, any other exit code)
+  | "structure-rejected" // the tree was walked, but Poppler (the extractor) refuses it and sees no pages: nothing to extract
   | "unavailable";      // the tool is missing, exit 99 (usage), or exit 0 without exactly one count
 
 /** The page count could not be measured. Never read as a count. Refused outcomes fail the document; `unavailable` retries. */
@@ -42,7 +43,29 @@ export class PdfPageCountError extends Error {
   }
 }
 
-const PDF_PAGE_COUNT_OUTCOMES = new Set<PdfPageCountOutcome>(["open-failed", "encrypted", "limit", "malformed", "killed", "unavailable"]);
+const PDF_PAGE_COUNT_OUTCOMES = new Set<PdfPageCountOutcome>(["open-failed", "encrypted", "limit", "malformed", "killed", "structure-rejected", "unavailable"]);
+
+/** The fixed text a structure-rejected refusal carries; the ingest report classifies it as `pdf-structure-rejected`. */
+export const PDF_STRUCTURE_REJECTED = "PDF structure rejected";
+
+/**
+ * After a successful walk, whether Poppler (the extractor) accepts the file: pdftotext on page 1 exiting 99 means it sees no
+ * pages (its own sanity check refused the tree, for example a /Count beyond the file's objects), so nothing could be
+ * extracted. That refuses the document (`structure-rejected`) before anything bills. Other exits are left to extraction,
+ * which reports them itself; a missing tool is the platform's (unavailable).
+ */
+export async function assertPopplerAcceptsPdf(runner: Pick<CommandRunner, "pdfPopplerAcceptance" | "run">, source: string, signal?: AbortSignal): Promise<void> {
+  const plan = await runner.pdfPopplerAcceptance(source);
+  if (!plan.available) throw new PdfPageCountError("PDF page count unavailable: Doppler pdftotext is not installed", "unavailable");
+  try {
+    await runner.run(plan, signal);
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    if (error instanceof CommandExitError && error.exitCode === 99) {
+      throw new PdfPageCountError(`${PDF_STRUCTURE_REJECTED}: the page tree was walked but the PDF reader sees no pages`, "structure-rejected");
+    }
+  }
+}
 const EXIT_OUTCOMES: Record<number, PdfPageCountOutcome> = { 1: "open-failed", 2: "encrypted", 3: "limit", 4: "malformed", 99: "unavailable" };
 
 /** Exactly one decimal integer, at least 1, and a newline: anything else is not a count. */
@@ -94,7 +117,7 @@ export async function countPdfPages(
 export async function recordMeasuredPdfPageCount(args: {
   state: WorkflowState;
   document: Document;
-  runner: Pick<CommandRunner, "pdfPageCount" | "run">;
+  runner: Pick<CommandRunner, "pdfPageCount" | "pdfPopplerAcceptance" | "run">;
   sourcePath: () => Promise<string>;
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
@@ -128,7 +151,9 @@ export async function recordMeasuredPdfPageCount(args: {
     if (counted.usage) state.usageLedger.enqueue(counted.usage);
     pages = Number.isSafeInteger(counted.pages) && counted.pages >= 1 && counted.pages <= MAX_MEASURED_PDF_PAGES ? counted.pages : null;
   } else {
-    pages = await countPdfPages(args.runner, await args.sourcePath(), args.signal);
+    const source = await args.sourcePath();
+    pages = await countPdfPages(args.runner, source, args.signal);
+    await assertPopplerAcceptsPdf(args.runner, source, args.signal);
   }
   if (pages === null) throw new Error("unreadable PDF: no valid page count");
   if (!state.store?.setDocumentPageCount) throw new Error("PDF page count measured but the store cannot persist it");
@@ -146,17 +171,25 @@ export function processedPdfPages(markdown: string): number {
   return markdown.replace(/\f\s*$/, "").split("\f").length;
 }
 
+/** Run-ledger slot holding a PDF's walked page count when extraction processed fewer pages (so a retry still knows N of M). */
+export const PDF_WALKED_PAGES_SLOT = "pdf-walked-pages";
+
 /**
- * Cross-checks the structural count against the pages extraction actually processed, and bills and authorizes the larger: when
- * the extractor processed more pages than the page tree reported, the page count is raised to that (recorded `counted`) and the
- * extra pages are authorized (authorizeMeasuredPages). Any disagreement either way is flagged in the stage stats and logs.
+ * Cross-checks the structural count against the pages extraction actually processed, and bills what was done:
+ * - processed above walked (the tree under-claimed): the page count is raised to what was processed, billed and authorized;
+ * - processed below walked (the reader stopped short, e.g. a /Count that under-claims the kids): the page count is lowered to
+ *   what was processed, so only extracted pages bill, and the file is flagged `pdf-partially-extracted` (N of M pages) in the
+ *   ingest report (owner decision 2026-11-05).
+ * The walked count is kept in the run ledger so a retried stage reports the same N of M.
  */
 export async function reconcileProcessedPdfPages(
   state: WorkflowState,
   document: Document,
   processed: number,
 ): Promise<{ measured: number; processed: number; mismatch: "none" | "processed-above-measured" | "processed-below-measured" }> {
-  const measured = Math.max(1, Math.trunc(Number(document.pageCount)) || 1);
+  const current = Math.max(1, Math.trunc(Number(document.pageCount)) || 1);
+  const walked = Number(state.artifactLedger.readDocument(document.id, PDF_WALKED_PAGES_SLOT));
+  const measured = Number.isSafeInteger(walked) && walked > current ? walked : current;
   if (!Number.isSafeInteger(processed) || processed < 1) return { measured, processed, mismatch: "none" };
   if (processed > measured) {
     console.warn(`[pdf-pages] document=${document.id} extraction processed ${processed} pages, the page tree reported ${measured}: billing and authorizing ${processed}`);
@@ -169,8 +202,16 @@ export async function reconcileProcessedPdfPages(
     return { measured, processed, mismatch: "processed-above-measured" };
   }
   if (processed < measured) {
-    // Billing stays on the walked count (the larger); the disagreement is flagged, never silently absorbed.
-    console.warn(`[pdf-pages] document=${document.id} extraction processed ${processed} of ${measured} measured pages`);
+    // Bill what was extracted: lower the page count to the pages processed, and keep the walked count for the report.
+    console.warn(`[pdf-pages] document=${document.id} extraction processed ${processed} of ${measured} walked pages: billing ${processed}`);
+    state.artifactLedger.recordDocument(document.id, PDF_WALKED_PAGES_SLOT, String(measured));
+    if (current > processed) {
+      if (!state.store?.setDocumentPageCount) throw new Error("processed PDF pages are below the measured count but the store cannot persist it");
+      await state.store.setDocumentPageCount(state.run.id, document.id, processed);
+      state.run.pagesTotal = Math.max(0, (Number(state.run.pagesTotal) || 0) + processed - current);
+      document.pageCount = processed;
+      document.pageCountSource = "counted";
+    }
     return { measured, processed, mismatch: "processed-below-measured" };
   }
   return { measured, processed, mismatch: "none" };

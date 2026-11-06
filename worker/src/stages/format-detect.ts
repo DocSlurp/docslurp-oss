@@ -25,7 +25,7 @@ function detectFormat(document: Document): { format: NormalizedFormat; detectedB
 export class FormatDetectStage implements Stage {
   readonly name = "format-detect";
 
-  constructor(private readonly storage: ArtifactStore, private readonly runner?: Pick<CommandRunner, "pdfPageCount" | "run">) {}
+  constructor(private readonly storage: ArtifactStore, private readonly runner?: Pick<CommandRunner, "pdfPageCount" | "pdfPopplerAcceptance" | "run">) {}
 
   async run(state: import("../pipeline/pipeline.js").WorkflowState, signal?: AbortSignal): Promise<void> {
     for (const document of healthyDocuments(state)) {
