@@ -130,6 +130,13 @@ export const pdfProfileSchema = z.strictObject({
    * native words inside it.
    */
   scanBesideTextPages: count,
+  /** Sampled pages where that rule could not be decided (the words on the page or inside a candidate image are unknown). */
+  scanBesideTextUnknownPages: count,
+  /**
+   * Sampled pages table-heavy from their ruled grids alone (page-table-routing.ts `isTableHeavy` over the layout walker's
+   * grids). The extractor's own tables can make more pages table-heavy.
+   */
+  ruledTablePages: count,
 });
 export type PdfProfile = z.infer<typeof pdfProfileSchema>;
 
@@ -239,6 +246,8 @@ export function normalizeFileProfile(profile: FileProfile, file: { size: number 
         glyphsOverImages: Math.min(pdf.glyphsOverImages, pdf.sampledChars),
         textOverImagePages: Math.min(pdf.textOverImagePages, sampled),
         // Only pages with native text, and never a page already held by a full-page image.
+        scanBesideTextUnknownPages: Math.min(pdf.scanBesideTextUnknownPages, sampled),
+        ruledTablePages: Math.min(pdf.ruledTablePages, sampled),
         scanBesideTextPages: Math.min(pdf.scanBesideTextPages, Math.max(0, sampled - Math.min(sampled, pdf.rasterPages)), pdf.textLayerPages),
         medianPageWidthPt: Math.min(pdf.medianPageWidthPt, pdf.maxPageWidthPt),
         medianPageHeightPt: Math.min(pdf.medianPageHeightPt, pdf.maxPageHeightPt),

@@ -1,0 +1,36 @@
+{
+ "walker": "pdf-layout-facts@1",
+ "pages": [
+  {
+   "pageNumber": 1,
+   "known": true,
+   "words": 63,
+   "widthPt": 612,
+   "heightPt": 792,
+   "images": [
+    {
+     "bbox": [
+      48,
+      144,
+      564,
+      531
+     ],
+     "coverage": 0.412,
+     "widthPx": 560,
+     "heightPx": 420,
+     "bitsPerComponent": 8,
+     "encoding": "image",
+     "ppi": [
+      78,
+      78
+     ],
+     "bytesPerPixel": 0.02617,
+     "repeated": false,
+     "wordsInside": 0
+    }
+   ],
+   "grids": [],
+   "tableCoverage": 0
+  }
+ ]
+}

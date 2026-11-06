@@ -69,6 +69,21 @@ pub struct Rules {
     pub page_raster_routing: PageRasterRouting,
     pub page_equivalents: PageEquivalentRules,
     pub extraction: ExtractionLimits,
+    pub layout: LayoutRules,
+}
+
+/// The layout walker's ruled-grid geometry and routing's table-heavy thresholds (`LAYOUT_GRID_RULES`, `PAGE_TABLE_ROUTING`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LayoutRules {
+    pub rule_thickness_pt: f64,
+    pub rule_min_length_pt: f64,
+    pub rule_touch_pt: f64,
+    pub coverage_raster: u32,
+    pub max_rules_per_page: u32,
+    pub max_words_per_page: u32,
+    pub table_heavy_min_rows: u32,
+    pub table_heavy_min_coverage: f64,
 }
 
 /// The page-equivalent rule billing measures with: area against a standard page, capped per page; text by the text rule.

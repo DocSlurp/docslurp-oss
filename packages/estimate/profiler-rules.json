@@ -104,6 +104,16 @@
   "areaEquivalentsCap": 8,
   "densePageEquivalents": 3
  },
+ "layout": {
+  "ruleThicknessPt": 3,
+  "ruleMinLengthPt": 8,
+  "ruleTouchPt": 2.5,
+  "coverageRaster": 200,
+  "maxRulesPerPage": 5000,
+  "maxWordsPerPage": 20000,
+  "tableHeavyMinRows": 5,
+  "tableHeavyMinCoverage": 0.4
+ },
  "extraction": {
   "tinyGlyphPoints": 3,
   "tinyGlyphsPerPage": 50000,

@@ -17,6 +17,7 @@ use lopdf::content::Content;
 use lopdf::{Dictionary, Document, LoadOptions, Object, ObjectId};
 
 use super::{PdfProfile, ProbeInput, ProbeKind, ProbeResult, AREA_EQUIVALENT_BUCKETS, COVERAGE_BUCKETS, TEXT_EQUIVALENT_BOUNDS, WHOLE_FILE_MAX_BYTES, WORDS_BUCKETS};
+use super::layout;
 use crate::rules::{PageRasterRouting, Rules};
 
 /// Decompressed bytes of one content stream or form XObject.
@@ -170,22 +171,24 @@ fn probe_document(rules: &Rules, document: &Document, file_bytes: usize, mut res
         }
         let images: Vec<&ImageUse> = reading.images.iter().filter(|image| !image.id.is_some_and(|id| repeated.contains(&id))).collect();
         for image in &images {
-            let ppi = [0.0, 100.0, 200.0, 300.0].iter().rposition(|bound| image.ppi >= *bound).unwrap_or(0);
+            let ppi = [0.0, 100.0, 200.0, 300.0].iter().rposition(|bound| image.ppi[0].min(image.ppi[1]) >= *bound).unwrap_or(0);
             profile.image_ppi[ppi] = profile.image_ppi[ppi].saturating_add(1);
             let bpp = [0.0, 0.05, 0.2, 0.5, 1.0].iter().rposition(|bound| image.bytes_per_pixel >= *bound).unwrap_or(0);
             profile.image_bytes_per_pixel[bpp] = profile.image_bytes_per_pixel[bpp].saturating_add(1);
         }
-        let over: f64 = reading.runs.iter()
-            .filter(|run| images.iter().any(|image| run.x >= image.bbox[0] && run.x <= image.bbox[2] && run.y >= image.bbox[1] && run.y <= image.bbox[3]))
-            .map(|run| run.glyphs)
-            .sum();
-        profile.glyphs_over_images = profile.glyphs_over_images.saturating_add(count(over));
-        if over >= 20.0 {
+        let facts = page_layout(rules, reading, &repeated);
+        profile.glyphs_over_images = profile.glyphs_over_images.saturating_add(count(facts.glyphs_over_images));
+        if facts.glyphs_over_images >= 20.0 {
             profile.text_over_image_pages += 1;
         }
-        // `mixedScanImage`: a page with native text the router reads for a scan placed beside its text.
-        if !raster && reading.words > 0.0 && images.iter().any(|image| is_mixed_scan(routing, image, &reading.runs)) {
-            profile.scan_beside_text_pages += 1;
+        // `mixedScanImage`: read for a scan beside native text; unknown evidence never authorizes a read.
+        match facts.scan_beside_text {
+            Some(true) => profile.scan_beside_text_pages += 1,
+            None => profile.scan_beside_text_unknown_pages += 1,
+            Some(false) => {}
+        }
+        if facts.ruled_table_heavy {
+            profile.ruled_table_pages += 1;
         }
     }
     let points = |value: f64| value.round().clamp(0.0, 10_000_000.0) as u32;
@@ -452,8 +455,11 @@ struct PageStats {
     unmapped_text: bool,
     /// Text volume: glyphs shown and text lines started (both as extraction would see them).
     text: TextVolume,
-    /// Where kept glyphs were shown, for the text-over-image count.
-    runs: Vec<GlyphRun>,
+    /// The text layer's words at their box centres (displayed coordinates); `words_overflow` past the walker's cap.
+    words_at: Vec<WordAt>,
+    words_overflow: bool,
+    /// Ruling lines (stroked horizontal and vertical segments and rectangle edges, thin filled rectangles).
+    rules: layout::RuleSet,
     /// Significant images (pixels and placed area over the rules' floors), at most `MAX_TRACKED_IMAGES_PER_PAGE`; the
     /// totals the class is read from are taken after repeated objects are dropped (`ImageTotals`).
     images: Vec<ImageUse>,
@@ -466,57 +472,55 @@ struct ImageUse {
     /// The image XObject, or none for an inline image (which has no identity to repeat).
     id: Option<ObjectId>,
     coverage: f64,
-    /// Placement box in default user space, effective pixels per inch on the page, and stream bytes per pixel (the
-    /// layout walker's image facts, `worker/scripts/pdf_layout_facts.py`).
-    bbox: [f64; 4],
-    ppi: f64,
+    /// The layout walker's image facts (`worker/scripts/pdf_layout_facts.py`, docs/page-layout-facts.md): the placed box
+    /// in displayed coordinates and its clipped share of the visible page (None when the draw could not be placed), pixel
+    /// size, pixels per inch on each axis as `pdfimages -list` rounds them, stream bytes per pixel, and a bilevel or fax
+    /// encoding (CCITT, JBIG2, 1 bit per component, an image mask).
+    placement: Option<([f64; 4], f64)>,
+    width_px: f64,
+    height_px: f64,
+    ppi: [f64; 2],
     bytes_per_pixel: f64,
-    /// The shorter side in pixels, and a bilevel or fax encoding (CCITT, JBIG2, 1 bit per component, an image mask).
-    short_side_px: f64,
     bilevel: bool,
 }
 
 impl ImageUse {
     #[cfg(test)]
     fn plain(id: Option<ObjectId>, coverage: f64) -> Self {
-        Self { id, coverage, bbox: [0.0, 0.0, 612.0, 792.0], ppi: 150.0, bytes_per_pixel: 0.2, short_side_px: 1_000.0, bilevel: false }
+        Self { id, coverage, placement: Some(([0.0, 0.0, 612.0, 792.0], coverage)), width_px: 1_000.0, height_px: 1_000.0, ppi: [150.0, 150.0], bytes_per_pixel: 0.2, bilevel: false }
     }
 }
 
-/// A text position with the glyphs shown there, kept to count text drawn over images.
+/// One text-layer word at the centre of its box, in displayed coordinates, with its glyphs.
 #[derive(Debug, Clone, Copy)]
-struct GlyphRun {
+struct WordAt {
     x: f64,
     y: f64,
     glyphs: f64,
-    /// Words the run starts or holds (the word counter's rule over the run alone).
-    words: f64,
 }
 
-/// Words in one shown string: alphanumeric runs of two or more, or for two-byte (CID) strings a word per
-/// `unspaced` glyphs.
-fn run_words(bytes: &[u8], glyphs: f64, unspaced: f64) -> f64 {
+/// Words in one shown string as text extraction splits them, as (first glyph, glyph count): whitespace-separated runs,
+/// or for a two-byte (CID) string, a word per `unspaced` glyphs.
+fn string_words(bytes: &[u8], unspaced: f64) -> Vec<(usize, usize)> {
     let zero_high_bytes = bytes.iter().step_by(2).filter(|byte| **byte == 0).count();
     if bytes.len() >= 4 && zero_high_bytes * 2 >= bytes.len() / 2 {
-        return (glyphs / unspaced.max(1.0)).ceil();
+        let glyphs = bytes.len() / 2;
+        let step = (unspaced.max(1.0)) as usize;
+        return (0..glyphs).step_by(step).map(|start| (start, step.min(glyphs - start))).collect();
     }
-    let mut words = 0.0;
-    let mut length = 0;
-    for byte in bytes.iter().chain(std::iter::once(&b' ')) {
-        if byte.is_ascii_alphanumeric() || *byte >= 0xC0 {
-            length += 1;
-        } else {
-            if length >= 2 {
-                words += 1.0;
+    let mut words = Vec::new();
+    let mut start: Option<usize> = None;
+    for (index, byte) in bytes.iter().chain(std::iter::once(&b' ')).enumerate() {
+        if byte.is_ascii_whitespace() {
+            if let Some(first) = start.take() {
+                words.push((first, index - first));
             }
-            length = 0;
+        } else if start.is_none() {
+            start = Some(index);
         }
     }
     words
 }
-
-/// Text positions kept per page for the text-over-image count; beyond it the count covers the first runs only.
-const MAX_GLYPH_RUNS_PER_PAGE: usize = 16_384;
 
 /// Significant, non-repeated image totals of one page.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -632,6 +636,19 @@ fn visible_box(document: &Document, page_id: ObjectId) -> Option<[f64; 4]> {
     }
 }
 
+/// The page's /Rotate (inherited), a multiple of 90; anything else is 0, as the walker reads it.
+fn page_rotate(document: &Document, page_id: ObjectId) -> i64 {
+    let mut node = document.get_dictionary(page_id).ok();
+    for _ in 0..32 {
+        let Some(current) = node else { break };
+        if let Some((_, value)) = current.get(b"Rotate").ok().and_then(|object| deref(document, object)) {
+            return number(value).map(|rotate| rotate as i64).filter(|rotate| rotate % 90 == 0).map_or(0, |rotate| rotate.rem_euclid(360));
+        }
+        node = current.get(b"Parent").ok().and_then(|parent| dictionary(document, parent));
+    }
+    0
+}
+
 fn page_area(document: &Document, page_id: ObjectId) -> f64 {
     let media = page_box(document, page_id, b"MediaBox");
     let crop = page_box(document, page_id, b"CropBox");
@@ -692,7 +709,11 @@ struct PageReading {
     width: f64,
     height: f64,
     text: TextVolume,
-    runs: Vec<GlyphRun>,
+    words_at: Vec<WordAt>,
+    words_overflow: bool,
+    rules: layout::RuleSet,
+    /// The visible box in displayed coordinates.
+    display_visible: [f64; 4],
 }
 
 impl PageReading {
@@ -713,10 +734,12 @@ fn classify_page(routing: &PageRasterRouting, document: &Document, page_id: Obje
     let area = page_area(document, page_id);
     let visible = visible_box(document, page_id).unwrap_or([0.0, 0.0, 612.0, 792.0]);
     let media = page_box(document, page_id, b"MediaBox").unwrap_or(visible);
-    let rules = &crate::rules::Rules::bundled().extraction;
+    let bundled = crate::rules::Rules::bundled();
+    let rules = &bundled.extraction;
     let limits = ExtractionLimitsCopy { tiny_points: rules.tiny_glyph_points, tiny_per_page: rules.tiny_glyphs_per_page };
     let mut stats = PageStats::default();
-    let mut context = Context { document, routing, forms, area, visible, media, limits };
+    let display = layout::DisplaySpace::new(media, visible, page_rotate(document, page_id));
+    let mut context = Context { document, routing, forms, area, visible, media, limits, display, layout: &bundled.layout };
     context.interpret(&content, &resources, IDENTITY, 0, &mut stats);
     if stats.exhausted && stats.text.chars > 0.0 {
         // A page with text that was not read to the end: estimate its glyphs from its own content stream's size (forms it
@@ -729,7 +752,7 @@ fn classify_page(routing: &PageRasterRouting, document: &Document, page_id: Obje
         stats.text.estimated = true;
     }
     let (width, height) = ((visible[2] - visible[0]).max(0.0), (visible[3] - visible[1]).max(0.0));
-    Some(PageReading { words: stats.words.words(), path_operations: stats.path_operations, images: stats.images, exhausted: stats.exhausted, unmapped_text: stats.unmapped_text, area, width, height, text: stats.text, runs: stats.runs })
+    Some(PageReading { words: stats.words.words(), path_operations: stats.path_operations, images: stats.images, exhausted: stats.exhausted, unmapped_text: stats.unmapped_text, area, width, height, text: stats.text, words_at: stats.words_at, words_overflow: stats.words_overflow, rules: stats.rules, display_visible: display.visible })
 }
 
 /// The worker's drawn-content rule (`classify-route.ts`): a document with no extractable text anywhere whose bytes,
@@ -749,17 +772,125 @@ fn drawn_document(routing: &PageRasterRouting, document: &Document, file_bytes: 
     drawn_per_page >= routing.drawn_content_min_bytes_per_page
 }
 
-/// `mixedScanImage` (shared page-raster-routing.ts) for one non-repeated image: placed over a fifth of the page or more,
-/// readable, scan-like (bilevel or fax, or compressed like ink on paper) and with almost no native words inside its box.
-fn is_mixed_scan(routing: &PageRasterRouting, image: &ImageUse, runs: &[GlyphRun]) -> bool {
-    let inside = |run: &&GlyphRun| run.x >= image.bbox[0] && run.x <= image.bbox[2] && run.y >= image.bbox[1] && run.y <= image.bbox[3];
-    let words_inside: f64 = runs.iter().filter(inside).map(|run| run.words).sum();
-    image.coverage >= routing.mixed_scan_min_coverage
-        && words_inside <= routing.mixed_scan_max_words_inside
-        && image.short_side_px >= routing.mixed_scan_min_short_side_px
-        && image.ppi.is_finite()
-        && image.ppi >= routing.mixed_scan_min_ppi
-        && (image.bilevel || image.bytes_per_pixel <= routing.scan_like_max_bytes_per_pixel)
+/// One image in the walker's terms (`pdf-layout-facts@1` `images[]`), for the cross-check and the page decision.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutImage {
+    pub bbox: Option<[f64; 4]>,
+    pub coverage: Option<f64>,
+    pub width_px: f64,
+    pub height_px: f64,
+    pub ppi: [f64; 2],
+    pub bytes_per_pixel: f64,
+    pub bilevel: bool,
+    pub repeated: bool,
+    /// Text-layer words whose box centre lies inside the image's box; None when either is unknown.
+    pub words_inside: Option<u32>,
+}
+
+/// One page's layout facts as the profiler measures them (the walker's fields it can reproduce).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutPage {
+    /// Native words (the worker's count), None when the page was not read to the end.
+    pub words: Option<f64>,
+    pub width_pt: f64,
+    pub height_pt: f64,
+    pub images: Vec<LayoutImage>,
+    /// Ruled grids as (rows, columns, coverage); None when the page was not read to the end or had more rules than kept.
+    pub grids: Option<Vec<(u32, u32, f64)>>,
+    /// The union of the grid boxes as a share of the visible page (the walker adds the extractor's tables, which the
+    /// profiler cannot see).
+    pub grid_coverage: Option<f64>,
+    /// `mixedScanImage`: Some(true) read, Some(false) not, None unknown (never read).
+    pub scan_beside_text: Option<bool>,
+    /// Table-heavy from the grids alone (a grid of `tableHeavyMinRows` rows, or grids covering `tableHeavyMinCoverage`).
+    pub ruled_table_heavy: bool,
+    pub glyphs_over_images: f64,
+}
+
+/// The walker's facts for one sampled page, and the two routing rules that read them.
+fn page_layout(rules: &Rules, reading: &PageReading, repeated: &HashSet<ObjectId>) -> LayoutPage {
+    let routing = &rules.page_raster_routing;
+    let limits = &rules.layout;
+    let words_known = !reading.exhausted && !reading.words_overflow;
+    let images: Vec<LayoutImage> = reading.images.iter().map(|image| {
+        let bbox = image.placement.map(|(bbox, _)| bbox);
+        let words_inside = match (bbox, words_known) {
+            (Some(b), true) => Some(reading.words_at.iter().filter(|w| w.x >= b[0] && w.x <= b[2] && w.y >= b[1] && w.y <= b[3]).count() as u32),
+            _ => None,
+        };
+        LayoutImage {
+            bbox,
+            coverage: image.placement.map(|(_, coverage)| coverage),
+            width_px: image.width_px,
+            height_px: image.height_px,
+            ppi: image.ppi,
+            bytes_per_pixel: image.bytes_per_pixel,
+            bilevel: image.bilevel,
+            repeated: image.id.is_some_and(|id| repeated.contains(&id)),
+            words_inside,
+        }
+    }).collect();
+    let glyphs_over_images: f64 = reading.words_at.iter()
+        .filter(|w| images.iter().any(|image| !image.repeated && image.bbox.is_some_and(|b| w.x >= b[0] && w.x <= b[2] && w.y >= b[1] && w.y <= b[3])))
+        .map(|w| w.glyphs)
+        .sum();
+    // Scan beside native text: only on a page with at least the sparse-page word count.
+    let scan_beside_text = if words_known && reading.words < routing.sparse_page_words {
+        Some(false)
+    } else {
+        let candidate = |image: &&LayoutImage| {
+            !image.repeated
+                && image.coverage.is_some_and(|coverage| coverage >= routing.mixed_scan_min_coverage)
+                && image.width_px.min(image.height_px) >= routing.mixed_scan_min_short_side_px
+                && image.ppi[0].min(image.ppi[1]) >= routing.mixed_scan_min_ppi
+                && (image.bilevel || image.bytes_per_pixel <= routing.scan_like_max_bytes_per_pixel)
+        };
+        let candidates: Vec<&LayoutImage> = images.iter().filter(candidate).collect();
+        if candidates.iter().any(|image| image.words_inside.is_some_and(|inside| f64::from(inside) <= routing.mixed_scan_max_words_inside)) {
+            if words_known { Some(true) } else { None }
+        } else if candidates.iter().any(|image| image.words_inside.is_none()) || (!words_known && !candidates.is_empty()) {
+            None
+        } else {
+            Some(false)
+        }
+    };
+    let (grids, grid_coverage) = if reading.exhausted || reading.rules.overflow {
+        (None, None)
+    } else {
+        let found = layout::ruled_grids(&reading.rules.rules, limits);
+        let coverage = layout::union_coverage(&found.iter().map(|grid| grid.bbox).collect::<Vec<_>>(), reading.display_visible, limits.coverage_raster);
+        let grids = found.iter()
+            .map(|grid| (grid.rows, grid.columns, layout::union_coverage(&[grid.bbox], reading.display_visible, limits.coverage_raster)))
+            .collect();
+        (Some(grids), Some(coverage))
+    };
+    let ruled_table_heavy = grids.as_ref().is_some_and(|grids: &Vec<(u32, u32, f64)>| grids.iter().any(|grid| grid.0 >= limits.table_heavy_min_rows))
+        || grid_coverage.is_some_and(|coverage| coverage >= limits.table_heavy_min_coverage);
+    LayoutPage {
+        words: (!reading.exhausted).then_some(reading.words),
+        width_pt: reading.display_visible[2] - reading.display_visible[0],
+        height_pt: reading.display_visible[3] - reading.display_visible[1],
+        images,
+        grids,
+        grid_coverage,
+        scan_beside_text,
+        ruled_table_heavy,
+        glyphs_over_images,
+    }
+}
+
+/// Every page's layout facts (up to the sample size), for the cross-check against the walker (`tests/layout_walker.rs`).
+#[doc(hidden)]
+pub fn layout_pages(bytes: &[u8]) -> Vec<LayoutPage> {
+    let rules = Rules::bundled();
+    let Ok(document) = Document::load_mem(bytes) else { return Vec::new() };
+    let pages: Vec<ObjectId> = document.get_pages().into_values().collect();
+    let mut forms = FormCache::default();
+    let readings: Vec<PageReading> = pages.iter().take(rules.max_sampled_pages)
+        .filter_map(|page| classify_page(&rules.page_raster_routing, &document, *page, &mut forms))
+        .collect();
+    let repeated = repeated_images(&rules.page_raster_routing, &readings);
+    readings.iter().map(|reading| page_layout(rules, reading, &repeated)).collect()
 }
 
 /// `decidePageRaster` for the sampled page: a sparse page (fewer than `sparsePageWords` words) whose content is held by
@@ -781,6 +912,8 @@ struct Context<'a, 'f> {
     visible: [f64; 4],
     media: [f64; 4],
     limits: ExtractionLimitsCopy,
+    display: layout::DisplaySpace,
+    layout: &'a crate::rules::LayoutRules,
 }
 
 /// The extraction limits a page is read with (from the profiler rules).
@@ -823,11 +956,13 @@ struct TextState {
     leading: f64,
     render_mode: i64,
     new_line: bool,
+    /// The last string shown ended inside a word: a kerned continuation (TJ) does not start a new one.
+    word_open: bool,
 }
 
 impl Default for TextState {
     fn default() -> Self {
-        Self { matrix: IDENTITY, line: IDENTITY, leading: 0.0, render_mode: 0, new_line: true }
+        Self { matrix: IDENTITY, line: IDENTITY, leading: 0.0, render_mode: 0, new_line: true, word_open: false }
     }
 }
 
@@ -871,9 +1006,22 @@ impl<'a> Context<'a, '_> {
             return;
         }
         volume.chars += glyphs;
-        if stats.runs.len() < MAX_GLYPH_RUNS_PER_PAGE {
-            let words = run_words(bytes, all, self.routing.unspaced_chars_per_word);
-            stats.runs.push(GlyphRun { x, y, glyphs, words });
+        // Words at their box centres: half an em a glyph along the baseline, a third of an em above it.
+        let continues = text.word_open && bytes.first().is_some_and(|byte| !byte.is_ascii_whitespace());
+        text.word_open = bytes.last().is_some_and(|byte| !byte.is_ascii_whitespace());
+        for (index, (first, count)) in string_words(bytes, self.routing.unspaced_chars_per_word).into_iter().enumerate() {
+            if index == 0 && continues {
+                continue;
+            }
+            if stats.words_at.len() >= self.layout.max_words_per_page as usize {
+                stats.words_overflow = true;
+                break;
+            }
+            let u = (first as f64 + count as f64 / 2.0) * 0.5 * font_size;
+            let v = 0.3 * font_size;
+            let (ux, uy) = (u * device[0] + v * device[2] + device[4], u * device[1] + v * device[3] + device[5]);
+            let (dx, dy) = self.display.point(ux, uy);
+            stats.words_at.push(WordAt { x: dx, y: dy, glyphs: count as f64 });
         }
         let volume = &mut stats.text;
         if text.new_line {
@@ -891,6 +1039,7 @@ impl<'a> Context<'a, '_> {
     }
 
     fn record_image(&self, stats: &mut PageStats, id: Option<ObjectId>, ctm: &Matrix, width: f64, height: f64, stream_bytes: usize, bilevel: bool) {
+        let placement = self.display.placement(ctm);
         let placed = (ctm[0] * ctm[3] - ctm[1] * ctm[2]).abs();
         let coverage = (placed / self.area).min(1.0);
         if !coverage.is_finite()
@@ -899,21 +1048,11 @@ impl<'a> Context<'a, '_> {
         {
             return;
         }
-        // The unit square through the image matrix: its corners give the placement box.
-        let corners = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)].map(|(u, v)| (u * ctm[0] + v * ctm[2] + ctm[4], u * ctm[1] + v * ctm[3] + ctm[5]));
-        let bbox = [
-            corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min),
-            corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min),
-            corners.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max),
-            corners.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max),
-        ];
-        // Pixels per inch as placed, the lower of the two axes: the image's pixels over its placed size (the walker's
-        // ppi, from `pdfimages -list`).
-        let x_ppi = width / ((ctm[0].hypot(ctm[1])) / 72.0).max(1e-9);
-        let y_ppi = height / ((ctm[2].hypot(ctm[3])) / 72.0).max(1e-9);
-        let ppi = x_ppi.min(y_ppi);
+        // Pixels per inch as placed on each axis, rounded as `pdfimages -list` prints them.
+        let x_ppi = (width / ((ctm[0].hypot(ctm[1])) / 72.0).max(1e-9)).round();
+        let y_ppi = (height / ((ctm[2].hypot(ctm[3])) / 72.0).max(1e-9)).round();
         let bytes_per_pixel = if width * height > 0.0 { stream_bytes as f64 / (width * height) } else { 0.0 };
-        let image = ImageUse { id, coverage, bbox, ppi, bytes_per_pixel, short_side_px: width.min(height), bilevel };
+        let image = ImageUse { id, coverage, placement, width_px: width, height_px: height, ppi: [x_ppi, y_ppi], bytes_per_pixel, bilevel };
         if stats.images.len() < MAX_TRACKED_IMAGES_PER_PAGE {
             stats.images.push(image);
         } else if let Some(smallest) = stats.images.iter_mut().min_by(|a, b| a.coverage.total_cmp(&b.coverage)) {
@@ -950,7 +1089,9 @@ impl<'a> Context<'a, '_> {
             return;
         }
         let mut ctm = base;
-        let mut stack: Vec<Matrix> = Vec::new();
+        let mut stack: Vec<(Matrix, f64)> = Vec::new();
+        let mut line_width = 1.0_f64;
+        let mut path = layout::PathBuilder::default();
         let mut font_size = 12.0;
         let mut font_unmapped = false;
         let mut text = TextState::default();
@@ -963,8 +1104,9 @@ impl<'a> Context<'a, '_> {
             }
             let operands = &operation.operands;
             match operation.operator.as_str() {
-                "q" if stack.len() < 256 => stack.push(ctm),
-                "Q" => ctm = stack.pop().unwrap_or(base),
+                "q" if stack.len() < 256 => stack.push((ctm, line_width)),
+                "Q" => (ctm, line_width) = stack.pop().unwrap_or((base, line_width)),
+                "w" => line_width = operands.first().and_then(number).filter(|width| width.is_finite()).unwrap_or(line_width),
                 "cm" => {
                     if let Some(matrix) = matrix_from(operands) {
                         ctm = multiply(&matrix, &ctm);
@@ -977,12 +1119,14 @@ impl<'a> Context<'a, '_> {
                 "ET" => stats.words.gap(),
                 "T*" => {
                     stats.words.gap();
+                    text.word_open = false;
                     text.line = multiply(&[1.0, 0.0, 0.0, 1.0, 0.0, -text.leading], &text.line);
                     text.matrix = text.line;
                     text.new_line = true;
                 }
                 "Tm" => {
                     stats.words.gap();
+                    text.word_open = false;
                     if let Some(matrix) = matrix_from(operands) {
                         if (matrix[5] - text.line[5]).abs() > 0.01 || (matrix[3] - text.line[3]).abs() > 0.01 {
                             text.new_line = true;
@@ -1001,6 +1145,7 @@ impl<'a> Context<'a, '_> {
                 }
                 "Td" | "TD" => {
                     let tx = operands.first().and_then(number).unwrap_or(0.0);
+                    text.word_open = false;
                     let ty = operands.get(1).and_then(number).unwrap_or(0.0);
                     stats.words.moved(tx, ty, font_size);
                     if operation.operator == "TD" {
@@ -1021,6 +1166,7 @@ impl<'a> Context<'a, '_> {
                 }
                 "'" | "\"" => {
                     stats.words.gap();
+                    text.word_open = false;
                     text.line = multiply(&[1.0, 0.0, 0.0, 1.0, 0.0, -text.leading], &text.line);
                     text.matrix = text.line;
                     text.new_line = true;
@@ -1040,13 +1186,42 @@ impl<'a> Context<'a, '_> {
                                     self.text_shown(stats, &mut text, bytes, font_size, &ctm);
                                 }
                                 // A large negative adjustment is a word gap in kerned text.
-                                other if number(other).is_some_and(|gap| gap <= -200.0) => stats.words.gap(),
+                                other if number(other).is_some_and(|gap| gap <= -200.0) => {
+                                    stats.words.gap();
+                                    text.word_open = false;
+                                }
                                 _ => {}
                             }
                         }
                     }
                 }
-                "re" | "m" | "l" | "c" | "v" | "y" => stats.path_operations += 1,
+                "re" | "m" | "l" | "c" | "v" | "y" => {
+                    stats.path_operations += 1;
+                    let values: Vec<f64> = operands.iter().filter_map(number).collect();
+                    let shown = |x: f64, y: f64| {
+                        let (ux, uy) = (x * ctm[0] + y * ctm[2] + ctm[4], x * ctm[1] + y * ctm[3] + ctm[5]);
+                        self.display.point(ux, uy)
+                    };
+                    match (operation.operator.as_str(), values.as_slice()) {
+                        ("m", [x, y]) => path.move_to(shown(*x, *y)),
+                        ("l", [x, y]) => path.line_to(shown(*x, *y)),
+                        ("c", [.., x, y]) | ("v", [.., x, y]) | ("y", [.., x, y]) => path.curve_to(shown(*x, *y)),
+                        ("re", [x, y, w, h]) => path.rectangle([shown(*x, *y), shown(x + w, *y), shown(x + w, y + h), shown(*x, y + h)]),
+                        _ => {}
+                    }
+                }
+                "h" => path.close(),
+                "S" | "s" | "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" | "n" => {
+                    let op = operation.operator.as_str();
+                    if matches!(op, "s" | "b" | "b*") {
+                        path.close();
+                    }
+                    let stroke = matches!(op, "S" | "s" | "B" | "B*" | "b" | "b*");
+                    let fill = matches!(op, "f" | "F" | "f*" | "B" | "B*" | "b" | "b*");
+                    // The line's width as drawn: scaled by the transformation in force.
+                    let width = line_width.abs() * (ctm[0] * ctm[3] - ctm[1] * ctm[2]).abs().sqrt();
+                    path.paint(stroke, fill, width, self.display.visible, &mut stats.rules, self.layout);
+                }
                 "BI" => {
                     if let Some(Object::Stream(image)) = operands.first() {
                         let (mut width, mut height) = self.image_size(&image.dict, b"W", b"H");
@@ -1171,7 +1346,10 @@ mod tests {
             width: 612.0,
             height: 792.0,
             text: TextVolume::default(),
-            runs: Vec::new(),
+            words_at: Vec::new(),
+            words_overflow: false,
+            rules: layout::RuleSet::default(),
+            display_visible: [0.0, 0.0, 612.0, 792.0],
         };
         // The same full-bleed background on four pages: furniture, so the pages are blank.
         let slides = vec![page(&[7]), page(&[7]), page(&[7]), page(&[7])];

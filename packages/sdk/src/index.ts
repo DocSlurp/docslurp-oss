@@ -158,7 +158,7 @@ export type FileProfile = {
     medianPageWidthPt: number; medianPageHeightPt: number; maxPageWidthPt: number; maxPageHeightPt: number;
     offPageChars: number; tinyCharsDropped: number; textEstimatedPages: number;
     pageEquivalentsPerPage: number[]; densePageEquivalents: number;
-    imagePpi: number[]; imageBytesPerPixel: number[]; glyphsOverImages: number; textOverImagePages: number; scanBesideTextPages: number;
+    imagePpi: number[]; imageBytesPerPixel: number[]; glyphsOverImages: number; textOverImagePages: number; scanBesideTextPages: number; scanBesideTextUnknownPages: number; ruledTablePages: number;
   };
   /** Package structure; `declaredPages` is the document's own metadata claim: informational only, never counted or priced. */
   office?: { embeddedImages: number; slides?: number; sheets?: number; bodyBytes: number; declaredPages?: number };

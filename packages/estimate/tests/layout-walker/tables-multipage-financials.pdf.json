@@ -1,0 +1,53 @@
+{
+ "walker": "pdf-layout-facts@1",
+ "pages": [
+  {
+   "pageNumber": 1,
+   "known": true,
+   "words": 121,
+   "widthPt": 612,
+   "heightPt": 792,
+   "images": [],
+   "grids": [
+    {
+     "rows": 11,
+     "columns": 7,
+     "coverage": 0.3099
+    }
+   ],
+   "tableCoverage": 0.3099
+  },
+  {
+   "pageNumber": 2,
+   "known": true,
+   "words": 121,
+   "widthPt": 612,
+   "heightPt": 792,
+   "images": [],
+   "grids": [
+    {
+     "rows": 11,
+     "columns": 7,
+     "coverage": 0.3099
+    }
+   ],
+   "tableCoverage": 0.3099
+  },
+  {
+   "pageNumber": 3,
+   "known": true,
+   "words": 121,
+   "widthPt": 612,
+   "heightPt": 792,
+   "images": [],
+   "grids": [
+    {
+     "rows": 11,
+     "columns": 7,
+     "coverage": 0.3099
+    }
+   ],
+   "tableCoverage": 0.3099
+  }
+ ]
+}

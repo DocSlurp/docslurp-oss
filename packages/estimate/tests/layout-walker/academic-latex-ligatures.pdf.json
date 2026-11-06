@@ -1,0 +1,25 @@
+{
+ "walker": "pdf-layout-facts@1",
+ "pages": [
+  {
+   "pageNumber": 1,
+   "known": true,
+   "words": 119,
+   "widthPt": 612,
+   "heightPt": 792,
+   "images": [],
+   "grids": [],
+   "tableCoverage": 0
+  },
+  {
+   "pageNumber": 2,
+   "known": true,
+   "words": 83,
+   "widthPt": 612,
+   "heightPt": 792,
+   "images": [],
+   "grids": [],
+   "tableCoverage": 0
+  }
+ ]
+}

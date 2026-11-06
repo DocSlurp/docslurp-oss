@@ -53,8 +53,16 @@ for very long documents.
 ## The offline profiler
 
 `@docslurp/estimate` (`packages/estimate`) applies the scan-beside-text rule in the browser from the same thresholds:
-it reads `pageRasterRouting` from the neutral `profiler-rules.json`, which is generated from `PAGE_RASTER_ROUTING` and
-checked against it (`estimate-profiler-rules.test.ts`). The Rust parser refuses unknown fields, so a new threshold
-fails the build until the profiler handles it. It reports `scanBesideTextPages`. There, `wordsInside` counts the words of
-text runs that start inside the image's box, not word centres. Table-heavy is not profiled: it needs the extractor's
-tables and ruled grids.
+it reads `pageRasterRouting` and `layout` (these grid constants, and `MAX_ANCHOR_WORDS`) from the neutral
+`profiler-rules.json`, generated from `PAGE_RASTER_ROUTING`, `PAGE_TABLE_ROUTING` and `LAYOUT_GRID_RULES` and checked
+against them and against this walker's constants (`estimate-profiler-rules.test.ts`). The Rust parser refuses unknown
+fields, so a new threshold fails the build until the profiler handles it.
+
+It computes the same geometry from the content stream: the displayed page space, each image's clipped coverage, pixel
+size, per-axis ppi and stream bytes per pixel, words at their box centres (half an em a glyph along the baseline, so
+`wordsInside` is an estimate of the text layer's), and ruling lines from stroked horizontal and vertical segments,
+rectangle edges and thin filled rectangles, clipped to the page, built into grids exactly as above. It reports
+`scanBesideTextPages`, `scanBesideTextUnknownPages` (undecided: never read, a wider quote) and `ruledTablePages`
+(table-heavy from grids alone; tables only the extractor finds stay unknown in the browser).
+`packages/estimate/tests/layout_walker.rs` cross-checks it against this walker's output on the routing fixtures, recorded by
+`scripts/layout-walker-snapshots.mjs`; `test/layout-walker-snapshots.test.mjs` fails when a recording is stale.

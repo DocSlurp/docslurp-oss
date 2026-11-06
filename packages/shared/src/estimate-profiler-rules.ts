@@ -10,6 +10,7 @@ import {
 } from "./media-upload-estimate.js";
 import { DENSE_PAGE_EQUIVALENTS, PAGE_AREA_EQUIVALENTS_CAP, STANDARD_PAGE_AREA_PT2 } from "./page-equivalents.js";
 import { PAGE_RASTER_ROUTING } from "./page-raster-routing.js";
+import { PAGE_TABLE_ROUTING } from "./page-table-routing.js";
 import { IMAGE_MAX_FRAMES, MULTI_FRAME_IMAGE_EXTENSIONS, MULTI_FRAME_IMAGE_MIME_TYPES } from "./upload-pages.js";
 
 /*
@@ -25,6 +26,14 @@ import { IMAGE_MAX_FRAMES, MULTI_FRAME_IMAGE_EXTENSIONS, MULTI_FRAME_IMAGE_MIME_
  * MediaBox is kept. The profiler mirrors these so a stuffed page is counted as billing will count it.
  */
 export const EXTRACTION_LIMITS = { tinyGlyphPoints: 3, tinyGlyphsPerPage: 50_000 } as const;
+
+/**
+ * The layout walker's ruled-grid geometry (`worker/scripts/pdf_layout_facts.py`: RULE_THICKNESS_PT, RULE_MIN_LENGTH_PT,
+ * RULE_TOUCH_PT, COVERAGE_RASTER, MAX_RULES_PER_PAGE, and MAX_ANCHOR_WORDS, past which a page's word boxes are unknown;
+ * core docs/page-layout-facts.md). The profiler builds grids the same
+ * way; `estimate-profiler-rules.test.ts` holds these to the walker's constants.
+ */
+export const LAYOUT_GRID_RULES = { ruleThicknessPt: 3, ruleMinLengthPt: 8, ruleTouchPt: 2.5, coverageRaster: 200, maxRulesPerPage: 5_000, maxWordsPerPage: 20_000 } as const;
 
 /** Content-stream bytes per glyph assumed when a page's text could not be read to the end (an estimate, flagged). */
 export const ESTIMATED_CONTENT_BYTES_PER_GLYPH = 2;
@@ -45,6 +54,8 @@ export function buildProfilerRules() {
     pageRasterRouting: { ...PAGE_RASTER_ROUTING },
     /** The page-equivalent measurement billing uses (page-equivalents.ts): area against a standard page, capped per page. */
     pageEquivalents: { standardPageAreaPt2: STANDARD_PAGE_AREA_PT2, areaEquivalentsCap: PAGE_AREA_EQUIVALENTS_CAP, densePageEquivalents: DENSE_PAGE_EQUIVALENTS },
+    /** Ruled grids and table coverage as the layout walker builds them, and the table-heavy thresholds routing applies. */
+    layout: { ...LAYOUT_GRID_RULES, tableHeavyMinRows: PAGE_TABLE_ROUTING.tableHeavyMinRows, tableHeavyMinCoverage: PAGE_TABLE_ROUTING.tableHeavyMinCoverage },
     /** What the PDF text extractor keeps, so the profiler counts the text billing will measure (EXTRACTION_LIMITS). */
     extraction: { ...EXTRACTION_LIMITS, estimatedContentBytesPerGlyph: ESTIMATED_CONTENT_BYTES_PER_GLYPH },
   };

@@ -8,7 +8,9 @@
 
 mod media;
 mod office;
+pub mod layout;
 mod pdf;
+pub use pdf::{layout_pages, LayoutImage, LayoutPage};
 
 use serde::{Deserialize, Serialize};
 
@@ -127,6 +129,12 @@ pub struct PdfProfile {
     /// Sampled pages with native text that also place a scan the router reads (`mixedScanImage`): a non-repeated,
     /// scan-like image covering a fifth of the page or more, of readable size, with at most two native words inside it.
     pub scan_beside_text_pages: u32,
+    /// Sampled pages where that rule could not be decided (a candidate image, but the words inside it or on the page are
+    /// unknown): never read, and a quote widens for them.
+    pub scan_beside_text_unknown_pages: u32,
+    /// Sampled pages table-heavy from their ruled grids alone (a grid of 5+ rows, or grids covering 40% of the page). The
+    /// extractor's own tables can make more pages table-heavy; the profiler cannot see them.
+    pub ruled_table_pages: u32,
 }
 
 /// Facts about an Office or EPUB package.
