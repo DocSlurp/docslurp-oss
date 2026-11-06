@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { KILL_PARSER_USER_ARGV, killArgv, launchArgv } from "../providers/modal/control.js";
+import { KILL_PARSER_USER_ARGV, killArgv, launchArgv, lockImageArgv, resetArgv } from "../providers/modal/control.js";
 
 /** Run an argv locally, the way Modal runs it remotely, and collect its exit status and output. */
 function run(argv: string[]): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
@@ -178,21 +178,50 @@ describe.skipIf(!dockerKillTest)("leftover kill in a container (recheck Q #2)", 
   }, 150_000);
 });
 
-// Council U #8: the health check after the leftover kill. A job root on a nearly full filesystem exits 5 (that command's
-// failure); a healthy root exits 0. Real script, real statvfs and mkdtemp as uid 10001.
-describe.skipIf(!dockerKillTest)("leftover kill health check (council U #8)", () => {
-  it("exits 5 for a job root on a full filesystem and 0 for a healthy one", () => {
-    const script = [
-      "mkdir -p /healthy && chmod 1777 /healthy",
-      '"$@" /healthy; echo "healthy=$?"',
-      '"$@" /full; echo "full=$?"',
-      '"$@" /healthy/not-yet-created; echo "absent=$?"',
-    ].join("\n");
-    const run = spawnSync("docker", ["run", "--rm", "--network", "none", "--tmpfs", "/full:size=1m,mode=1777", "python:3.11-slim-bookworm", "sh", "-c", script, "sh", ...KILL_PARSER_USER_ARGV], { encoding: "utf8", timeout: 120_000 });
-    expect(run.stdout).toContain("healthy=0");
-    expect(run.stdout).toContain("full=5");
-    expect(run.stdout).toContain("[leftover-kill] unhealthy root=/full");
-    expect(run.stdout).toContain("absent=0");
+// Council W #1, W #3, U #8: the real image lock and post-command reset, as root in a container. Document A (uid 10001)
+// tries to rewrite the venv and leaves files in every scratch root; after the reset, document B sees none of it.
+describe.skipIf(!dockerKillTest)("parser VM image lock and reset (council W #1)", () => {
+  const asUser = (code: string) => `python3 -c "import os; os.setgroups([]); os.setresgid(10001,10001,10001); os.setresuid(10001,10001,10001); ${code}"`;
+  const docker = (script: string, extra: string[] = []) => spawnSync("docker", ["run", "--rm", "--network", "none", ...extra, "-e", `LOCK=${lockImageArgv([])[3]}`, "-e", `RESET=${resetArgv([])[3]}`,
+    "python:3.11-slim-bookworm", "sh", "-c", script], { encoding: "utf8", timeout: 120_000 });
+  const setup = [
+    "mkdir -p /app/.venv/bin /home/docslurp /tmp/docslurp-parser-sandbox",
+    "echo original > /app/.venv/bin/python3 && chmod 755 /app/.venv/bin/python3",
+    "chown -R 10001:10001 /app/.venv /home/docslurp /tmp/docslurp-parser-sandbox",
+  ];
+
+  it("document A can neither poison the venv nor leave files that document B sees", () => {
+    const run = docker([
+      ...setup,
+      'python3 -I -c "$LOCK" /tmp/docslurp-parser-sandbox; echo "lock=$?"',
+      `${asUser("open('/app/.venv/bin/python3','w').write('evil')")} 2>/dev/null; echo "venv-write=$?"`,
+      `${asUser("[open(p,'w').write('a') for p in ['/tmp/a','/var/tmp/a','/dev/shm/a','/home/docslurp/.a','/tmp/docslurp-parser-sandbox/a']]; os.makedirs('/tmp/d/e'); open('/tmp/d/e/f','w').write('a')")}; echo "a-writes=$?"`,
+      'python3 -I -c "$RESET" /tmp/docslurp-parser-sandbox; echo "reset=$?"',
+      `${asUser("import glob; print('b-sees=' + ','.join(p for p in ['/tmp/a','/var/tmp/a','/dev/shm/a','/home/docslurp/.a','/tmp/docslurp-parser-sandbox/a','/tmp/d'] if os.path.lexists(p)))")}`,
+      "echo \"venv=$(cat /app/.venv/bin/python3) owner=$(stat -c %u /app/.venv/bin/python3)\"",
+    ].join("\n"));
+    expect(run.stdout).toContain("lock=0");
+    expect(run.stdout).toContain("venv-write=1");
+    expect(run.stdout).toContain("a-writes=0");
+    expect(run.stdout).toContain("reset=0");
+    expect(run.stdout).toMatch(/^b-sees=$/m);
+    expect(run.stdout).toContain("venv=original owner=0");
+  }, 150_000);
+
+  it("refuses an image path the parser user can still write, and reports a full job root or /dev/shm", () => {
+    const run = docker([
+      ...setup,
+      "mkdir -p /srv/open && chmod 0777 /srv/open",
+      'python3 -I -c "$LOCK" /tmp/docslurp-parser-sandbox 2>&1; echo "lock=$?"',
+      "mkdir -p /full && chmod 1777 /full",
+      'python3 -I -c "$RESET" /full; echo "reset-full=$?"',
+      'python3 -I -c "$RESET" /tmp/docslurp-parser-sandbox; echo "reset-ok=$?"',
+    ].join("\n"), ["--tmpfs", "/full:size=1m,mode=1777"]);
+    expect(run.stdout).toMatch(/writable by uid 10001 outside scratch and job roots: \/srv\/open/);
+    expect(run.stdout).toContain("lock=6");
+    expect(run.stdout).toContain("[parser-reset] unhealthy root=/full");
+    expect(run.stdout).toContain("reset-full=5");
+    expect(run.stdout).toContain("reset-ok=0");
   }, 150_000);
 });
 

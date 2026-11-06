@@ -233,8 +233,9 @@ ENV DOCSLURP_DOPPLER_REQUIRED=1
 RUN /usr/lib/doppler/bin/pdftotext -v && test -x /usr/lib/doppler/bin/pdftomarkdown \
     && /usr/lib/doppler/bin/pdfpagecount -v && command -v prlimit \
     && test "$(command -v pdftotext)" = /usr/bin/pdftotext && ! command -v pdftomarkdown
-# Owned by the worker user so the optional first-boot install can extend it.
-COPY --from=python-venv --chown=10001:10001 /app/.venv /app/.venv
+# Root-owned (council W #1): a parser running as uid 10001 must not rewrite the interpreter or site-packages for the next
+# document. The first-boot install needs DOCSLURP_WORKER_VENV pointing at a writable venv (scripts/start-worker.sh).
+COPY --from=python-venv /app/.venv /app/.venv
 COPY --from=builder /prod/worker/package.json ./worker/package.json
 COPY --from=builder /prod/worker/node_modules ./worker/node_modules
 COPY --from=native-pdf /app/vendor-artifacts ./vendor-artifacts

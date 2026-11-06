@@ -299,8 +299,10 @@ function fakeSdk(
     createFailsFrom?: number;
     /** The leftover kill fails only in this VM. */
     killFailsInVm?: number;
-    /** The leftover kill's health check finds the VM's disk or job roots unusable (exit 5) in this VM. */
-    killUnhealthyInVm?: number;
+    /** The post-command reset finds the VM's disk or job roots unusable (exit 5) in this VM. */
+    resetUnhealthyInVm?: number;
+    /** The VM-start image lock finds paths the parser user can write (exit 6). */
+    lockFails?: boolean;
     /** The leftover kill exec throws: a deadline (held up inside the VM) or a transport error. */
     killThrows?: "deadline" | "transport";
     /** The app lookup before each create takes this long (a slow Modal API). */
@@ -328,7 +330,8 @@ function fakeSdk(
     hardened: 0,
     readsAsUser: 0,
     leftoverKills: 0,
-    killArgs: [] as string[][],
+    locks: 0,
+    resets: [] as Array<{ vm: number; roots: string[] }>,
     rootWrites: [] as string[],
     events: [] as string[],
     clientClose: 0,
@@ -341,6 +344,7 @@ function fakeSdk(
     createOptions: [] as unknown[],
     /** Which VM ran each parser command, in start order. */
     commandVms: [] as number[],
+    commandEnvs: [] as Array<Record<string, string>>,
     chmods: [] as string[][],
     /** When each VM was created and terminated (index = VM number - 1). */
     createdAt: [] as number[],
@@ -394,6 +398,14 @@ function fakeSdk(
       if (asUser?.[0] === "/bin/mkdir") { if (typeof opts.mkdirFails === "function" ? opts.mkdirFails() : opts.mkdirFails) return finished("", 1); state.mkdirs.push(asUser[3]!); await remote.mkdir(asUser[3]!); return finished("", 0); }
       if (asUser?.[0] === "/bin/rm") { await remote.remove(asUser[3]!); return finished("", 0); }
       if (asUser?.[0] === "/bin/sh" && asUser[2]?.includes("cp --")) { await remote.writeFile(asUser[5]!, await remote.readFile(asUser[4]!)); return finished("", 0); }
+      // VM start: the image lock and writable check (council W #1).
+      if (argv[0] === "python3" && argv[3]?.startsWith("# docslurp-image-lock")) { state.locks++; return finished("", opts.lockFails ? 6 : 0); }
+      // After every command: the root wipe of the parser user's scratch and the health check (council W #1, U #8).
+      if (argv[0] === "python3" && argv[3]?.startsWith("# docslurp-reset")) {
+        state.resets.push({ vm, roots: argv.slice(4) });
+        state.events.push("reset");
+        return finished("", opts.resetUnhealthyInVm === vm ? 5 : 0);
+      }
       // The root leftover kill (KILL_PARSER_USER_ARGV): kill(-1) as the parser user, verified.
       if (argv[0] === "python3" && argv[3]?.includes("os.kill(-1")) {
         state.leftoverKills++;
@@ -402,8 +414,6 @@ function fakeSdk(
         state.events.push("kill-end");
         if (opts.killThrows === "deadline") throw new Error("Deadline exceeded while waiting for the exec");
         if (opts.killThrows === "transport") throw new Error("stream reset by peer");
-        state.killArgs.push(argv.slice(5));
-        if (opts.killUnhealthyInVm === vm) return finished("[leftover-kill] unhealthy", 5);
         return finished("", opts.killFails || opts.killFailsInVm === vm ? 4 : 0);
       }
       if (argv[0] === "/bin/chmod") { state.chmods.push(argv.slice(1)); return finished("", 0); }
@@ -418,6 +428,7 @@ function fakeSdk(
       state.events.push(`exec:${command.join(" ")}`);
       state.commandTimeouts.push(params?.timeoutMs);
       state.commandVms.push(vm);
+      state.commandEnvs.push((params as { env?: Record<string, string> } | undefined)?.env ?? {});
       return (opts.exec ?? (async () => finished()))(command, controlOf(argv), vm);
     },
   };
@@ -559,19 +570,50 @@ describe("modal provider session lifecycle", () => {
   });
 
   it("a VM whose disk or job roots a command left unusable is that command's strike, never the next document's (council U #8)", async () => {
-    const { state, session } = await open({ killUnhealthyInVm: 1, exec: async () => finished() });
+    const { state, session } = await open({ resetUnhealthyInVm: 1, exec: async () => finished() });
     const opened = await session();
     const failure = await opened.run!({ ...command, affinityKey: "doc-a" }).catch((error: unknown) => error);
     // Checked right after doc-a's own command, as part of the leftover kill, with the job roots to check.
     expect(failure).toBeInstanceOf(SandboxInfrastructureError);
     expect((failure as SandboxInfrastructureError).afterCommand).toBe(true);
     expect(String((failure as Error).message)).toMatch(/unusable after this document's command; VM terminated/);
-    expect(state.killArgs[0]!.length).toBeGreaterThan(0);
+    expect(state.resets[0]!.roots.length).toBeGreaterThan(0);
     expect(state.terminate).toBe(1);
     // doc-b runs on a fresh VM and never sees the broken one.
     await expect(opened.run!({ ...command, affinityKey: "doc-b" })).resolves.toMatchObject({ exitCode: 0 });
     expect(state.commandVms).toEqual([1, 2]);
     await opened.close();
+  });
+
+  it("each command gets its own HOME, temp and XDG directories outside its writable paths, wiped after it (council W #1)", async () => {
+    const { state, session } = await open({ exec: async () => finished() });
+    const opened = await session();
+    await opened.run!({ ...command, affinityKey: "doc-a", env: { PATH: "/usr/bin", HOME: "/home/docslurp", TMPDIR: "/tmp" } });
+    await opened.run!({ ...command, affinityKey: "doc-b" });
+    const [first, second] = state.commandEnvs;
+    const scratchOf = (env: Record<string, string>) => env.HOME!.replace(/\/home$/, "");
+    for (const env of [first!, second!]) {
+      const scratch = scratchOf(env);
+      expect(scratch).toMatch(/^\/tmp\/docslurp-parser-sandbox\/\.cmd-\d+-\d+$/);
+      expect(env).toMatchObject({ TMPDIR: `${scratch}/tmp`, TMP: `${scratch}/tmp`, TEMP: `${scratch}/tmp`, XDG_CACHE_HOME: `${scratch}/xdg/cache`, XDG_CONFIG_HOME: `${scratch}/xdg/config`, XDG_DATA_HOME: `${scratch}/xdg/data`, XDG_STATE_HOME: `${scratch}/xdg/state`, XDG_RUNTIME_DIR: `${scratch}/xdg/runtime` });
+      for (const dir of [env.HOME!, env.TMPDIR!, env.XDG_RUNTIME_DIR!]) expect(state.mkdirs).toContain(dir);
+      expect(command.writablePaths.some((w: string) => env.HOME!.startsWith(w))).toBe(false);
+    }
+    // The caller's own PATH survives; its HOME and TMPDIR do not.
+    expect(first!.PATH).toBe("/usr/bin");
+    expect(scratchOf(first!)).not.toBe(scratchOf(second!));
+    // A root reset ran after each command, on the same VM, before the next one.
+    expect(state.resets.map((reset: { vm: number }) => reset.vm)).toEqual([1, 1]);
+    const order = state.events.filter((event: string) => event === "reset" || event.startsWith("exec:"));
+    expect(order).toEqual([expect.stringMatching(/^exec:/), "reset", expect.stringMatching(/^exec:/), "reset"]);
+    await opened.close();
+  });
+
+  it("a VM whose image the parser user can write runs nothing (council W #1)", async () => {
+    const { state, session } = await open({ lockFails: true, exec: async () => finished() });
+    await expect(session()).rejects.toThrow(/creation failed: parser VM image paths are writable by the parser user/);
+    expect(state.locks).toBe(1);
+    expect(state.commands).toEqual([]);
   });
 
   it("only a failure after the document's own command ran counts toward its strikes (council U #4)", async () => {
@@ -762,12 +804,13 @@ describe("modal provider session lifecycle", () => {
       const uploads = () => new Set(state.rootWrites.filter((target) => target.includes("/upload-"))).size;
       await opened.run!({ ...command, affinityKey: "doc-a", inputPaths: [input] });
       await opened.run!({ ...command, affinityKey: "doc-a", inputPaths: [input] });
-      expect(uploads()).toBe(1); // same document, unchanged input: cached
+      // Every command's uploads are wiped after it (council W #1, W #3): the same document re-uploads too.
+      expect(uploads()).toBe(2);
       // doc-b's parser rewrites doc-a's remote copy.
       await opened.run!({ ...command, affinityKey: "doc-b" });
       await state.remote.writeFile(input, Buffer.from("tampered"));
       await opened.run!({ ...command, affinityKey: "doc-a", inputPaths: [input] });
-      expect(uploads()).toBe(2);
+      expect(uploads()).toBe(3);
       expect(Buffer.from(await state.remote.readFile(input)).toString()).toBe("doc-a input");
       await opened.close();
     } finally {
@@ -1576,7 +1619,10 @@ describe("CommandRunner through the modal provider", () => {
 
     // Root stages the bytes in its control directory; the parser user copies them to the input path (council M #3).
     expect(state.remote.writes.filter((p: string) => !p.startsWith("/tmp/.docslurp-modal-control/"))).toEqual([input]);
-    expect(state.mkdirs).toEqual(["/tmp/.docslurp-modal-control", workspace]);
+    // Besides the job tree, only the command's own HOME/temp/XDG scratch (council W #1).
+    const scratchDirs = state.mkdirs.filter((p: string) => /\/\.cmd-\d+-\d+\//.test(p));
+    expect(scratchDirs.length).toBe(7);
+    expect(state.mkdirs.filter((p: string) => !scratchDirs.includes(p))).toEqual(["/tmp/.docslurp-modal-control", workspace]);
     const staged = [...state.remote.writes.filter((p: string) => !p.startsWith("/tmp/.docslurp-modal-control/")), ...state.mkdirs.slice(1)].join("\n");
     for (const host of ["node_modules", ".venv", process.execPath, resolveScriptsDir()]) expect(staged).not.toContain(host);
     expect(staged.split("\n").some((p) => p === "/usr" || p.startsWith("/usr/"))).toBe(false);

@@ -20,7 +20,7 @@ import {
   type SandboxResult,
   type SandboxSession,
 } from "../../types.js";
-import { asParserUser, CONTROL_DIR, HARDEN_LINKS_ARGV, killArgv, launchArgv, leftoverKillArgv } from "./control.js";
+import { asParserUser, commandScratchDirs, commandScratchEnv, CONTROL_DIR, HARDEN_LINKS_ARGV, KILL_PARSER_USER_ARGV, killArgv, launchArgv, lockImageArgv, resetArgv } from "./control.js";
 import { SessionStaging, type RemoteEntry, type RemoteFs, type RemoteSnapshot } from "./staging.js";
 import { vmOnlyParsing } from "../../../lib/vm-only-parsing.js";
 import { defaultDocConcurrency, resolveActivityConcurrency } from "../../../concurrency.js";
@@ -714,6 +714,10 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             // As root, once: kernel link protections on and read back as 1, or this VM runs nothing (council K #5, Modal check).
             const hardened = await withDeadline(opened.exec(HARDEN_LINKS_ARGV, { timeoutMs: 10_000 }).then((proc) => proc.wait()), 15_000);
             if (hardened !== 0) throw new Error("parser VM kernel link protections could not be turned on");
+            // As root, once: the image's runtime root-owned, then nothing outside scratch writable by the parser user
+            // (council W #1), or this VM runs nothing.
+            const locked = await withDeadline(opened.exec(lockImageArgv(parserJobRoots()), { timeoutMs: 120_000 }).then((proc) => proc.wait()), 125_000);
+            if (locked !== 0) throw new Error("parser VM image paths are writable by the parser user");
             await withDeadline(opened.filesystem.makeDirectory(CONTROL_DIR), 30_000);
             // Root-owned and not writable by the parser user; uploads staged here are copied into place as uid 10001.
             await withDeadline(runChecked(opened, ["/bin/chmod", "0711", "--", CONTROL_DIR], "parser VM control directory setup failed"), 30_000);
@@ -808,7 +812,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           let code: number | null = null;
           let transport: unknown;
           try {
-            const proc = await sandbox!.exec(leftoverKillArgv(parserJobRoots()), { timeoutMs: KILL_SETTLE_MS * 3 });
+            const proc = await sandbox!.exec(KILL_PARSER_USER_ARGV, { timeoutMs: KILL_SETTLE_MS * 3 });
             code = await proc.wait();
           } catch (error) {
             console.error(`[parser-sandbox] provider=modal leftover kill failed: ${safeMessage(config, error)}`);
@@ -820,11 +824,32 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             // Only the exec failing to run is the sandbox's. Processes the command left that survive the kill, or that stall
             // it, are its document's doing (recheck S #2b): that document fails, once; the VM is gone either way.
             if (transport !== undefined) throw new SandboxInfrastructureError("parser VM leftover kill could not run; VM terminated", undefined, { cause: transport });
-            // The command that just ran left the VM's disk or job roots unusable (council U #8): its document takes the
-            // strike, on a fresh VM next time, and the next document never inherits the broken VM.
-            if (code === 5) throw new SandboxInfrastructureError("parser VM disk or job root unusable after this document's command; VM terminated", undefined, { afterCommand: true });
             throw new SandboxOutputError("processes this document's parser command left in the VM could not be killed; VM terminated");
           }
+        }
+
+        /**
+         * After every command, as root (council W #1, W #3, U #8): wipe everything the parser user wrote outside the image
+         * (scratch roots and job roots, so the command's uploads and outputs too), then check the disk. The next command,
+         * of any document, starts from the image. A VM that cannot be wiped or is left unusable is terminated, and the
+         * command that just ran takes the strike; a reset that cannot run at all is Modal's.
+         */
+        async function resetVm(): Promise<void> {
+          let code: number | null = null;
+          let transport: unknown;
+          try {
+            const proc = await sandbox!.exec(resetArgv(parserJobRoots()), { timeoutMs: 60_000 });
+            code = await proc.wait();
+          } catch (error) {
+            console.error(`[parser-sandbox] provider=modal reset failed: ${safeMessage(config, error)}`);
+            transport = error;
+          }
+          // Whatever happened, nothing staged earlier may be assumed present any more.
+          staging?.forgetUploads();
+          if (code === 0) return;
+          await terminate().catch(() => {});
+          if (transport !== undefined) throw new SandboxInfrastructureError("parser VM reset could not run; VM terminated", undefined, { cause: transport });
+          throw new SandboxInfrastructureError(`parser VM ${code === 5 ? "disk or job root unusable" : "scratch could not be wiped"} after this document's command; VM terminated`, undefined, { afterCommand: true });
         }
 
         let commandCount = 0;
@@ -850,6 +875,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             // then an abandoned command's partial outputs are removed.
             if (sandbox && !lane.dead && !closed && !cleaned) await killParserUserProcesses();
             if (pendingDiscards.length > 0 && !lane.dead && !closed) await runDiscards();
+            if (sandbox && !lane.dead && !closed) await resetVm();
           }
         }
 
@@ -913,6 +939,10 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             await staging!.ensureUploaded(command.inputPaths);
             throwIfAborted(signal);
             await staging!.ensureDirectories(command.writablePaths);
+            // Its own HOME, temp and XDG directories, outside its writable paths (never downloaded) and wiped after it.
+            const scratch = `${parserJobRoots()[1] ?? "/tmp/docslurp-parser-sandbox"}/.cmd-${lane.id}-${commandCount}`;
+            await staging!.ensureDirectories(commandScratchDirs(scratch));
+            command = { ...command, env: { ...command.env, ...commandScratchEnv(scratch) } };
             throwIfAborted(signal);
             const snapshot = await staging!.snapshot(command.writablePaths);
             throwIfAborted(signal);

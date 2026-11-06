@@ -71,8 +71,8 @@ COPY worker/requirements-heavy.txt ./worker/requirements-heavy.txt
 COPY scripts/setup-cli-docker.sh /tmp/setup-cli-docker.sh
 COPY scripts/uv-installer.lock.txt /tmp/uv-installer.lock.txt
 COPY scripts/setup-worker-python-venv.sh /tmp/setup-worker-python-venv.sh
+# The venv stays root-owned (council W #1): parsers run as uid 10001 and must not rewrite it for the next document.
 RUN sh /tmp/setup-cli-docker.sh \
-    && chown -R 10001:10001 /app/.venv \
     && rm -f /tmp/setup-cli-docker.sh /tmp/uv-installer.lock.txt
 
 # Install production Node.js dependencies only

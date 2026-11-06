@@ -127,10 +127,7 @@ export function killArgv(control: string): string[] {
  * its lock, so no fork slips past. It then reads the Uid: line of every /proc/<pid>/status and needs two consecutive
  * rounds with no live (non-zombie) process holding the uid, other than itself, repeating the kill otherwise. Exits 0
  * when clean, 4 when processes survive 50 rounds or it is not root; a job that kills the killer makes it exit non-zero.
- * Then a health check, still as the parser user (council U #8): every job root given after the uid must sit on a
- * filesystem with at least 64 MiB and (where it counts inodes) 1024 inodes free, and an existing root must take a new directory. Exits 5 when it
- * does not, so the command that just ran is blamed for the VM it left unusable, never the next document. The session
- * fails closed on anything but 0.
+ * The session fails closed on anything but 0. The health check and the scratch wipe run after it (RESET_SCRIPT).
  */
 const KILL_PARSER_USER_SCRIPT = [
   "import os, signal, sys, time",
@@ -180,25 +177,174 @@ const KILL_PARSER_USER_SCRIPT = [
   "    except ProcessLookupError: pass",
   "    time.sleep(0.01)",
   "    clean = clean + 1 if live() == 0 else 0",
-    "    if clean >= 2: break",
-  "else: sys.exit(4)",
-  "import tempfile",
-  "for root in sys.argv[2:]:",
-  "    probe = root",
-  "    while probe != '/' and not os.path.isdir(probe): probe = os.path.dirname(probe) or '/'",
-  "    try:",
-  "        st = os.statvfs(probe)",
-  "        if st.f_bavail * st.f_frsize < 64 * 1024 * 1024 or (st.f_files and st.f_favail < 1024): raise OSError('filesystem nearly full')",
-  "        if probe == root: os.rmdir(tempfile.mkdtemp(prefix='.docslurp-health.', dir=root))",
-  "    except OSError as error:",
-  "        print('[leftover-kill] unhealthy root=' + root + ': ' + str(error), flush=True)",
-  "        sys.exit(5)",
-  "sys.exit(0)",
+  "    if clean >= 2: sys.exit(0)",
+  "sys.exit(4)",
 ].join("\n");
 
 export const KILL_PARSER_USER_ARGV = ["python3", "-I", "-c", KILL_PARSER_USER_SCRIPT, String(PARSER_VM_UID)];
 
-/** The leftover kill plus the health check of these job roots (council U #8). */
-export function leftoverKillArgv(jobRoots: readonly string[]): string[] {
-  return [...KILL_PARSER_USER_ARGV, ...jobRoots];
+
+/** The parser user's home in the image; wiped after every command like the other scratch roots. */
+export const PARSER_VM_HOME = "/home/docslurp";
+
+/** Directories uid 10001 may write outside job trees. Every one is wiped after each command (council W #1). */
+export const PARSER_SCRATCH_ROOTS: readonly string[] = ["/tmp", "/var/tmp", "/dev/shm", "/run/lock", PARSER_VM_HOME];
+
+/**
+ * Paths parser images (worker/Dockerfile*) have shipped owned by uid 10001: made root-owned and not group- or
+ * world-writable at VM start, so an image built before the ownership fix still cannot be rewritten by a parser.
+ */
+const IMAGE_LOCK_PATHS = ["/app", "/opt", "/usr/local", "/var/lib/clamav", "/var/log/clamav"];
+
+/**
+ * Run once as root when a parser VM starts, after HARDEN_LINKS_ARGV (council W #1). First it makes every path under
+ * IMAGE_LOCK_PATHS that uid 10001 owns, or that is group- or world-writable, root-owned and not writable by others.
+ * Then a child drops to uid 10001 and walks the root filesystem (one device, symlinks not followed): any file or
+ * directory it can write outside the scratch roots and the job roots given as arguments is printed and the script exits
+ * 6, and the session runs nothing on that VM. Arguments: the job roots.
+ */
+const LOCK_IMAGE_SCRIPT = [
+  "# docslurp-image-lock",
+  "import os, stat, sys",
+  `uid = ${PARSER_VM_UID}`,
+  "if os.geteuid() != 0: sys.exit(6)",
+  `for top in ${JSON.stringify(IMAGE_LOCK_PATHS)}:`,
+  "    if not os.path.lexists(top): continue",
+  "    dev = os.lstat(top).st_dev",
+  "    for base, dirs, files in os.walk(top):",
+  "        dirs[:] = [d for d in dirs if os.lstat(os.path.join(base, d)).st_dev == dev]",
+  "        for name in [None] + dirs + files:",
+  "            p = base if name is None else os.path.join(base, name)",
+  "            st = os.lstat(p)",
+  "            if stat.S_ISLNK(st.st_mode): continue",
+  "            if st.st_uid == uid or st.st_gid == uid: os.lchown(p, 0, 0)",
+  "            if st.st_mode & 0o022: os.chmod(p, stat.S_IMODE(st.st_mode) & ~0o022)",
+  `allowed = set(${JSON.stringify(PARSER_SCRATCH_ROOTS)} + [os.path.normpath(r) for r in sys.argv[1:]])`,
+  "allowed |= {'/proc', '/sys', '/dev'}",
+  "r, w = os.pipe()",
+  "pid = os.fork()",
+  "if pid == 0:",
+  "    os.close(r)",
+  "    os.setgroups([]); os.setresgid(uid, uid, uid); os.setresuid(uid, uid, uid)",
+  "    found = []",
+  "    rootdev = os.lstat('/').st_dev",
+  "    for base, dirs, files in os.walk('/'):",
+  "        keep = []",
+  "        for d in dirs:",
+  "            p = os.path.join(base, d)",
+  "            try: st = os.lstat(p)",
+  "            except OSError: continue",
+  "            if p in allowed or st.st_dev != rootdev or stat.S_ISLNK(st.st_mode): continue",
+  "            if os.access(p, os.W_OK): found.append(p)",
+  "            keep.append(d)",
+  "        dirs[:] = keep",
+  "        for f in files:",
+  "            p = os.path.join(base, f)",
+  "            try: st = os.lstat(p)",
+  "            except OSError: continue",
+  "            if stat.S_ISREG(st.st_mode) and os.access(p, os.W_OK): found.append(p)",
+  "        if len(found) >= 5: break",
+  "    os.write(w, '\\n'.join(found[:5]).encode())",
+  "    os._exit(6 if found else 0)",
+  "os.close(w)",
+  "out = b''",
+  "while True:",
+  "    chunk = os.read(r, 65536)",
+  "    if not chunk: break",
+  "    out += chunk",
+  "_, status = os.waitpid(pid, 0)",
+  "code = os.waitstatus_to_exitcode(status)",
+  "if code != 0:",
+  "    print('parser VM: writable by uid %d outside scratch and job roots: %s' % (uid, out.decode(errors='replace').replace('\\n', ', ') or 'check failed'), file=sys.stderr, flush=True)",
+  "    sys.exit(6)",
+  "sys.exit(0)",
+].join("\n");
+
+/** argv that locks the image paths and checks what uid 10001 can write (LOCK_IMAGE_SCRIPT). */
+export function lockImageArgv(jobRoots: readonly string[]): string[] {
+  return ["python3", "-I", "-c", LOCK_IMAGE_SCRIPT, ...jobRoots];
+}
+
+/**
+ * Run as root after every command, once its leftovers are dead and its outputs downloaded (council W #1, W #3, U #8).
+ * Wipes everything uid 10001 wrote in the scratch roots and the job roots given as arguments: every entry not owned by
+ * root is removed (directories without following links); a root-owned directory that others may write is cleaned the
+ * same way, recursively; a root-owned file others may write is removed. What remains is checked again: an entry not owned
+ * by root exits 7. Then a child as uid 10001 checks each job root and /dev/shm: at least 64 MiB free (for /dev/shm, the
+ * lesser of that and 90% of its size), 1024 inodes where the filesystem counts them, and an existing job root takes a
+ * new directory; exits 5 otherwise. Either way the session terminates the VM and strikes the command that just ran.
+ */
+const RESET_SCRIPT = [
+  "# docslurp-reset",
+  "import os, shutil, stat, sys, tempfile",
+  `uid = ${PARSER_VM_UID}`,
+  "if os.geteuid() != 0: sys.exit(7)",
+  `roots = ${JSON.stringify(PARSER_SCRATCH_ROOTS)} + [os.path.normpath(r) for r in sys.argv[1:]]`,
+  "def clean(d):",
+  "    try: entries = list(os.scandir(d))",
+  "    except FileNotFoundError: return",
+  "    for e in entries:",
+  "        p = e.path",
+  "        try: st = os.lstat(p)",
+  "        except FileNotFoundError: continue",
+  "        if st.st_uid != 0:",
+  "            if stat.S_ISDIR(st.st_mode): shutil.rmtree(p)",
+  "            else: os.unlink(p)",
+  "        elif stat.S_ISDIR(st.st_mode):",
+  "            if st.st_mode & 0o022: clean(p)",
+  "        elif st.st_mode & 0o022 and not stat.S_ISLNK(st.st_mode): os.unlink(p)",
+  "def residue(d, found):",
+  "    try: entries = list(os.scandir(d))",
+  "    except FileNotFoundError: return",
+  "    for e in entries:",
+  "        st = os.lstat(e.path)",
+  "        if st.st_uid != 0: found.append(e.path)",
+  "        elif stat.S_ISDIR(st.st_mode) and st.st_mode & 0o022: residue(e.path, found)",
+  "for root in roots:",
+  "    try: clean(root)",
+  "    except OSError as error: print('[parser-reset] wipe failed in %s: %s' % (root, error), flush=True)",
+  "left = []",
+  "for root in roots: residue(root, left)",
+  "if left:",
+  "    print('[parser-reset] residue after wipe: ' + ', '.join(left[:5]), flush=True)",
+  "    sys.exit(7)",
+  "pid = os.fork()",
+  "if pid == 0:",
+  "    os.setgroups([]); os.setresgid(uid, uid, uid); os.setresuid(uid, uid, uid)",
+  "    for root in sys.argv[1:] + ['/dev/shm']:",
+  "        probe = root",
+  "        while probe != '/' and not os.path.isdir(probe): probe = os.path.dirname(probe) or '/'",
+  "        if root == '/dev/shm' and probe != root: continue",
+  "        try:",
+  "            st = os.statvfs(probe)",
+  "            need = 64 * 1024 * 1024",
+  "            if root == '/dev/shm': need = min(need, int(st.f_blocks * st.f_frsize * 0.9))",
+  "            if st.f_bavail * st.f_frsize < need or (st.f_files and st.f_favail < 1024): raise OSError('filesystem nearly full')",
+  "            if probe == root and root != '/dev/shm': os.rmdir(tempfile.mkdtemp(prefix='.docslurp-health.', dir=root))",
+  "        except OSError as error:",
+  "            print('[parser-reset] unhealthy root=' + root + ': ' + str(error), flush=True)",
+  "            os._exit(5)",
+  "    os._exit(0)",
+  "_, status = os.waitpid(pid, 0)",
+  "sys.exit(os.waitstatus_to_exitcode(status))",
+].join("\n");
+
+/** argv for the post-command reset (RESET_SCRIPT) over these job roots. */
+export function resetArgv(jobRoots: readonly string[]): string[] {
+  return ["python3", "-I", "-c", RESET_SCRIPT, ...jobRoots];
+}
+
+/** Per-command HOME, temp and XDG directories under `scratch` (council W #1): nothing a command writes there outlives it. */
+export function commandScratchEnv(scratch: string): Record<string, string> {
+  return {
+    HOME: `${scratch}/home`,
+    TMPDIR: `${scratch}/tmp`, TMP: `${scratch}/tmp`, TEMP: `${scratch}/tmp`,
+    XDG_CACHE_HOME: `${scratch}/xdg/cache`, XDG_CONFIG_HOME: `${scratch}/xdg/config`, XDG_DATA_HOME: `${scratch}/xdg/data`,
+    XDG_STATE_HOME: `${scratch}/xdg/state`, XDG_RUNTIME_DIR: `${scratch}/xdg/runtime`,
+  };
+}
+
+/** The directories commandScratchEnv names, to create (as the parser user) before the command runs. */
+export function commandScratchDirs(scratch: string): string[] {
+  return [`${scratch}/home`, `${scratch}/tmp`, ...["cache", "config", "data", "state", "runtime"].map((name) => `${scratch}/xdg/${name}`)];
 }
