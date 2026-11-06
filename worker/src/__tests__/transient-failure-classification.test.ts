@@ -37,3 +37,14 @@ describe("transient infrastructure errors are not document failures", () => {
   });
 });
 
+
+describe("parser sandbox failures (real-Modal F5, recheck Q #1)", () => {
+  it("an infrastructure failure is an interruption, wrapped or not; a document's staging violation stays ordinary", async () => {
+    const { SandboxInfrastructureError, SandboxOutputError } = await import("../sandbox/types.js");
+    const notShuttingDown = { shuttingDown: () => false };
+    const vm = new SandboxInfrastructureError("modal sandbox creation failed: parser VM kernel link protections could not be turned on");
+    expect(classifyActivityError(vm, notShuttingDown)).toBe("interruption");
+    expect(classifyActivityError(new Error("extract failed", { cause: vm }), notShuttingDown)).toBe("interruption");
+    expect(classifyActivityError(new SandboxOutputError("parser VM output entry/depth limit exceeded"), notShuttingDown)).toBe("ordinary");
+  });
+});
