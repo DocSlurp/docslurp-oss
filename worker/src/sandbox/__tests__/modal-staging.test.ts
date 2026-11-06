@@ -1,3 +1,4 @@
+import { pricing } from "@docslurp/shared";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -720,18 +721,18 @@ describe("modal usage event", () => {
     expect(Number(event.metadata?.effectiveCostCents)).toBeGreaterThan(0);
   });
 
-  it("records the provider cost at Modal's sandbox core-second and GiB-second rates, on the sandbox's own size", () => {
-    const core = 0.00003942;
-    const gib = 0.00000667;
+  it("records the provider cost at the pricing provider's sandbox rates, on the sandbox's own size", () => {
     for (const [cpu, memoryMb] of [[2, 2048], [2, 3072]] as const) {
       const event = buildModalUsageEvent({ ...lifecycleConfig, cpu, memoryMb }, "activity-1", 10);
-      const expected = 10 * (cpu * core + (memoryMb / 1024) * gib) * 100;
-      // 2 cores / 2 GiB for 10 s: 0.0922 cents; 3 GiB: 0.0988 cents.
+      const expected = pricing().internalCost.sandboxCostCents({ provider: "modal", cores: cpu, memoryGib: memoryMb / 1024, seconds: 10 });
+      expect(expected).toBeGreaterThan(0);
       expect(Number(event.metadata?.providerCostCents)).toBeCloseTo(expected, 10);
       expect(event.metadata).toMatchObject({ physicalCores: cpu, memoryGib: memoryMb / 1024, rateSource: "modal-sandbox", costRole: "provider" });
       expect(event.costCents).toBe(0);
     }
-    expect(Number(buildModalUsageEvent({ ...lifecycleConfig, cpu: 2, memoryMb: 2048 }, "a", 10).metadata?.providerCostCents)).toBeCloseTo(0.09218, 6);
+    // A larger sandbox costs more.
+    expect(Number(buildModalUsageEvent({ ...lifecycleConfig, cpu: 2, memoryMb: 3072 }, "a", 10).metadata?.providerCostCents))
+      .toBeGreaterThan(Number(buildModalUsageEvent({ ...lifecycleConfig, cpu: 2, memoryMb: 2048 }, "a", 10).metadata?.providerCostCents));
   });
 });
 

@@ -135,7 +135,7 @@ describe.skipIf(!isLocal)("usage attribution (local Postgres)", () => {
       batch.commit();
 
       const after = await orgUsageTotals(ids.org2, "month", tx);
-      // AI receipts are internal cost events: customers pay PRICE_CARD units
+      // AI receipts are internal cost events: customers pay unit charges
       // instead, so they debit 0 credits (#100, priceAiUsageEvent) while their
       // tokens and events still count against the org.
       expect(after.costCents - before.costCents).toBeCloseTo(0);

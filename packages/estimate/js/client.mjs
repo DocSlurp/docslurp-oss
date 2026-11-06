@@ -1,5 +1,5 @@
 // Page-side client for the estimate Web Worker (worker.mjs). The page posts File handles and renders events; the
-// module, reads and probes stay on the worker thread.
+// module, reads and profiles stay on the worker thread.
 
 import { EstimatorError } from "./error.mjs";
 
@@ -41,10 +41,9 @@ export function createEstimateWorker(worker, defaults = {}) {
 
   const client = {
     /**
-     * `estimateFiles` on the worker thread: same options (minus `module`/`card`, which go in `defaults` or here),
-     * same events through `onProgress`, same result. After an abort the worker gets `abortGraceMs` to return its
-     * partial result; if it does not, it is terminated and the result is rebuilt from the events already received
-     * (`quote: null`, the caller falls back to a size-only quote).
+     * `estimateFiles` on the worker thread: same options (`module` goes in `defaults` or here), same events through
+     * `onProgress`, same result. After an abort the worker gets `abortGraceMs` to return its partial result; if it does
+     * not, it is terminated and the result is rebuilt from the events already received (`stats: null`).
      */
     estimate(files, options = {}) {
       if (dead) return Promise.reject(dead);
@@ -108,9 +107,9 @@ function partialFromEvents(files, seen, lastEvent) {
     size: file.size,
     ...(file.type ? { type: file.type } : {}),
     status: "skipped",
-    reason: { code: "cancelled", message: "Not probed before the estimate was cancelled; priced from name, type and size." },
-    probe: null,
-    quoteFile: { name: file.name, size: file.size, ...(file.type ? { type: file.type } : {}) },
+    reason: { code: "cancelled", message: "Not profiled before the run was cancelled; sent with name, type and size only." },
+    profile: null,
+    requestFile: { name: file.name, size: file.size, ...(file.type ? { type: file.type } : {}) },
     measured: false,
     bytesRead: 0,
     plannedBytes: 0,
@@ -118,6 +117,6 @@ function partialFromEvents(files, seen, lastEvent) {
     probeMs: null,
     elapsedMs: 0,
   });
-  const sizeOnlyFiles = results.filter((result) => !result.measured).length;
-  return { quote: null, files: results, stats: null, partial: true, cancelled: true, sizeOnlyFiles, lastEvent };
+  const unprofiledFiles = results.filter((result) => !result.measured).length;
+  return { files: results, request: { files: results.map((result) => result.requestFile) }, stats: null, partial: true, cancelled: true, unprofiledFiles, lastEvent };
 }

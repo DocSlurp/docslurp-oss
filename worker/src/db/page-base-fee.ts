@@ -6,7 +6,8 @@ import {
   compilePipelinePlan,
   deferredProfilesEnabled,
   pageCredits,
-  PRICE_CARD_VERSION,
+  pricing,
+  pricingVersion,
   qualityAllowsPageReading,
   unitChargeMetadata,
   type CompiledPipelinePlan,
@@ -20,7 +21,7 @@ import { pipelineTransaction, pipelineInTransaction } from "./transaction-pipeli
 import { debitRunUsageCredits, persistRunUsageEvents, runUsageEventStatements, type RunUsageState } from "./usage-event-store.js";
 
 /**
- * Ingest page charges (PRICE_CARD). Runs started by this release pin the per-read rule below
+ * Ingest page charges (priced by the pricing provider). Runs started by this release pin the per-read rule below
  * (`pinRunPageBillingRules`, from `startRun`). One rule, per page: a page bills Rich only when a vision/OCR model read it, and
  * the usage ledger records that read per page (pipeline/usage-ledger.ts, charged as the page is read). When the run
  * completes, every other page of its completed documents is charged here, Fast. Nothing about a page's content
@@ -32,25 +33,17 @@ import { debitRunUsageCredits, persistRunUsageEvents, runUsageEventStatements, t
  * A run without the pin was started by an earlier release and may have read its pages with that release's code, which
  * charged image files and scanned pages Rich here, at completion, rather than per read: it keeps that rule
  * (`splitLegacyRemainingPages`) so a run in flight at the cutover is not under-billed. Delete it once those runs drain.
- *
- * Stages that only rebuild indexes from existing content. A partial run that
- * executes nothing else is a reindex: its embeddings are mostly reused, so it
- * pays no page charge.
  */
-const INDEX_ONLY_STAGES: ReadonlySet<PipelineRunStage> = new Set([
-  "pii-detect", "embed", "graph-enrich", "page-index", "index",
-]);
 
 /**
- * Share of the completion page charge a run pays. Full runs pay 1. Partial
- * reprocess runs pay the fraction of enabled stages they execute (reused
- * stages are free), and reindex-only runs pay 0.
+ * Share of the completion page charge a run pays, from the pricing provider: a full run's share, and a partial
+ * reprocess run's for the stages it executes and reuses. Clamped to [0, 1]: a provider can lower a run's page
+ * charge, never raise it above a full run's.
  */
 export function pageBaseFeeMultiplier(plan: Pick<CompiledPipelinePlan, "stageOrder" | "reusedStages">): number {
-  if (plan.reusedStages.length === 0) return 1;
-  if (plan.stageOrder.every((stage) => INDEX_ONLY_STAGES.has(stage))) return 0;
-  const enabled = plan.stageOrder.length + plan.reusedStages.length;
-  return Math.round((plan.stageOrder.length / enabled) * 100) / 100;
+  const share = pricing().pageChargeShare({ stageOrder: plan.stageOrder, reusedStages: plan.reusedStages });
+  if (!Number.isFinite(share)) throw new Error("pricing provider returned an invalid page charge share");
+  return Math.min(1, Math.max(0, share));
 }
 
 /**
@@ -62,7 +55,7 @@ export function remainingFastPages(row: { pages: number; richRead: number }): nu
   return Math.max(0, row.pages - Math.min(row.richRead, row.pages));
 }
 
-/** Run artifact slot holding the page billing rules the run started under: the PRICE_CARD_VERSION of the per-read rule. */
+/** Run artifact slot holding the page billing rules the run started under: the pricing version of the per-read rule. */
 export const PAGE_BILLING_RULES_SLOT = "run:page-billing-rules";
 
 type RunArtifactsState = { artifactLedger: Pick<WorkflowState["artifactLedger"], "read" | "record"> };
@@ -74,8 +67,9 @@ type RunArtifactsState = { artifactLedger: Pick<WorkflowState["artifactLedger"],
 export function pinRunPageBillingRules(state: RunArtifactsState): string {
   const stored = state.artifactLedger.read(PAGE_BILLING_RULES_SLOT);
   if (stored) return stored;
-  state.artifactLedger.record(PAGE_BILLING_RULES_SLOT, PRICE_CARD_VERSION);
-  return PRICE_CARD_VERSION;
+  const version = pricingVersion();
+  state.artifactLedger.record(PAGE_BILLING_RULES_SLOT, version);
+  return version;
 }
 
 /** Whether the run started before the per-read rule (no pin): it bills image files and scanned pages at completion. */

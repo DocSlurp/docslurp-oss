@@ -220,7 +220,7 @@ async function runClaimedJob(sql: Client, job: GraphJobRow, options: GraphJobRun
           // Stored with a fallback hash, so the next stale rebuild retries the model.
           if (graph.llmFailed) console.warn(`[graph-job] llm_fallback job=${job.id} document=${document.id} model=${job.model}`);
           if (graph.charsAttempted > 0) {
-            // Price card: knowledge graph per started 10 pages, once per document per rebuild job.
+            // Pricing provider: the knowledge graph feature charge, once per document per rebuild job.
             // Billed on the text the model read: the document's pages pro rata on every window it answered, and at least the pages of
             // text read (3,500 characters a page). A window whose answer did not parse was still read, even when none parsed.
             // The same pages a run's feature charge uses: a measured count capped by the text, never a size estimate.

@@ -6,7 +6,7 @@ import type { PGlite } from "@electric-sql/pglite";
 import { connect } from "@lancedb/lancedb";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import type { Sql } from "postgres";
-import { defaultPipelineFeatures } from "@docslurp/shared";
+import { defaultPipelineFeatures, pageCredits, speedBoostMultiplier } from "@docslurp/shared";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Config } from "../config.js";
@@ -143,7 +143,7 @@ describe("materializePageRange", () => {
     h.usage.runId = runId;
     const range = { ...input(h, [1, 2], { ...defaultPipelineFeatures, speedBoost }), runId };
     const first = await claimAndMaterialize(h.deps, range);
-    expect(first.costCredits).toBeCloseTo((0.005 + 0.25) * (speedBoost ? 4 : 1), 6);
+    expect(first.costCredits).toBeCloseTo((pageCredits("fast", 1) + pageCredits("rich", 1)) * speedBoostMultiplier(speedBoost), 6);
     const firstRows = await sql`select id, cost_cents, metadata from usage_events where run_id = ${runId}`;
     const billed = firstRows.reduce((sum, row) => sum + Number(row.cost_cents), 0);
     expect(billed).toBeCloseTo(first.costCredits, 6);

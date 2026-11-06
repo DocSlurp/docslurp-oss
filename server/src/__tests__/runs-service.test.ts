@@ -56,7 +56,7 @@ const {
   summarizeRunUsageCost,
   summarizeStageResources,
 } = await import("../services/runs.js");
-const { defaultPipelineFeatures, pageCredits, QUOTE_HIGH_RICH_PAGE_FACTOR } = await import("@docslurp/shared");
+const { defaultPipelineFeatures, estimateProfileFor, quoteUpload } = await import("@docslurp/shared");
 const { createRunCreation } = await import("../services/run-creation.js");
 
 // Spend admission is exercised through Run creation with no files: it fails or
@@ -243,23 +243,22 @@ describe("run preview", () => {
     expect(preview.topSignals).toContain("table-heavy inputs favor layout-aware extraction");
   });
 
-  it("prices PRICE_CARD units per quality, whichever vision model runs", () => {
+  it("prices each quality with the upload quote, whichever vision model runs", () => {
     const request = {
       workspaceId: "ws-1",
       pipeline: defaultPipelineFeatures,
-      // Counted pages price exactly; the mix of a PDF is unknown, so auto spans text to every page read by vision.
       files: [{ filename: "scan.pdf", mimeType: "application/pdf", sizeBytes: 3_000_000, pages: 20 }],
       urls: [],
     };
     const preview = () => buildRunProcessingPreview({ request, historyRows: [] });
     const byQuality = Object.fromEntries(preview().options.map((option) => [option.quality, option.estimatedCost]));
-    const pages = preview().estimatedPages;
-    expect(pages).toBe(20);
-    // fast is flat Fast, good Rich with the dense-page surcharge at the top, auto spans Fast to that (credits are cents).
-    expect(byQuality.fast).toEqual({ minCents: pageCredits("fast", pages), maxCents: pageCredits("fast", pages) });
-    expect(byQuality.good).toEqual({ minCents: pageCredits("rich", pages), maxCents: pageCredits("rich", pages * QUOTE_HIGH_RICH_PAGE_FACTOR) });
-    expect(byQuality.auto!.minCents).toBe(pageCredits("fast", pages));
-    expect(byQuality.auto!.maxCents).toBe(pageCredits("rich", pages * QUOTE_HIGH_RICH_PAGE_FACTOR));
+    expect(preview().estimatedPages).toBe(20);
+    // Each quality's price is the pricing provider's quote for the same files, billing enforced.
+    for (const quality of ["fast", "auto", "good"] as const) {
+      const profile = { ...estimateProfileFor({ ...defaultPipelineFeatures, quality }, { env: {} }), billing: "enforced" as const };
+      const credits = quoteUpload({ files: [{ name: "scan.pdf", type: "application/pdf", size: 3_000_000, pages: 20 }], profile }).estimate.credits!;
+      expect(byQuality[quality]).toEqual({ minCents: credits.low, maxCents: Math.max(credits.low, credits.high) });
+    }
     vi.stubEnv("DOCSLURP_VISION_MODEL_URI", "llm://openrouter/z-ai/glm-5.3-flash");
     try {
       expect(preview().options.map((option) => option.estimatedCost)).toEqual(Object.values(byQuality));

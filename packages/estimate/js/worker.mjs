@@ -1,4 +1,4 @@
-// Web Worker entry for @docslurp/estimate: the module, file reads and probes run on this thread, and progress is
+// Web Worker entry for @docslurp/estimate: the module, file reads and profiles run on this thread, and progress is
 // posted to the page, which only renders it. Use it through `createEstimateWorker` (client.mjs).
 //
 //   page -> worker  { type: "estimate", id, files: File[], options }   Files are handles: no bytes are copied.
@@ -8,16 +8,16 @@
 import { createEstimator, estimateFiles } from "./index.mjs";
 
 /**
- * Serve estimate requests on `port` (a worker global, or any object with `postMessage` and `addEventListener`).
- * One estimator, and so one wasm memory, per worker; a different price card or module replaces it.
+ * Serve profile requests on `port` (a worker global, or any object with `postMessage` and `addEventListener`).
+ * One estimator, and so one wasm memory, per worker; a different module replaces it.
  */
 export function attachEstimateWorker(port) {
   let current = null;
   const runs = new Map();
 
   async function estimatorFor(options) {
-    const key = JSON.stringify([options.module ?? null, options.card ?? null]);
-    if (!current || current.key !== key) current = { key, estimator: createEstimator({ ...(options.module ? { module: options.module } : {}), ...(options.card ? { card: options.card } : {}) }) };
+    const key = JSON.stringify([options.module ?? null]);
+    if (!current || current.key !== key) current = { key, estimator: createEstimator({ ...(options.module ? { module: options.module } : {}) }) };
     try {
       return await current.estimator;
     } catch (error) {
@@ -35,15 +35,15 @@ export function attachEstimateWorker(port) {
     if (data?.type !== "estimate") return;
     const controller = new AbortController();
     runs.set(data.id, controller);
-    const { module, card, ...options } = data.options ?? {};
+    const { module, ...options } = data.options ?? {};
     try {
-      const estimator = await estimatorFor({ module, card });
+      const estimator = await estimatorFor({ module });
       const result = await estimateFiles(estimator, data.files, {
         ...options,
         signal: controller.signal,
         onProgress: (event) => {
           // The final result travels once, in the "result" message.
-          if (event.type === "quote-done") {
+          if (event.type === "done") {
             const { result: _result, ...rest } = event;
             port.postMessage({ type: "event", id: data.id, event: rest });
           } else port.postMessage({ type: "event", id: data.id, event });

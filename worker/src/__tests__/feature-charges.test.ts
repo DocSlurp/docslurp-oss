@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { featureCredits, mediaRichPages } from "@docslurp/shared";
 
 import { chargeDocumentFeature, chargeFeatureForTextRead, featurePages, textPagesOfText, textReadPages } from "../pipeline/feature-charges.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
@@ -18,21 +19,21 @@ describe("optional per-document feature charges", () => {
     chargeDocumentFeature(state, document, "propositions");
     const events = state.usageLedger.snapshot();
     expect(events.map((event) => [event.id, event.metric, event.costCents])).toEqual([
-      ["feature:documentSummary:run-1:doc-1", "feature-document-summary", 0.5],
-      ["feature:knowledgeGraph:run-1:doc-1", "feature-knowledge-graph", 4.5],
-      ["feature:structuredFields:run-1:doc-1", "feature-structured-fields", 3],
-      ["feature:propositions:run-1:doc-1", "feature-propositions", 3],
+      ["feature:documentSummary:run-1:doc-1", "feature-document-summary", featureCredits("documentSummary", 23)],
+      ["feature:knowledgeGraph:run-1:doc-1", "feature-knowledge-graph", featureCredits("knowledgeGraph", 23)],
+      ["feature:structuredFields:run-1:doc-1", "feature-structured-fields", featureCredits("structuredFields", 23)],
+      ["feature:propositions:run-1:doc-1", "feature-propositions", featureCredits("propositions", 23)],
     ]);
     expect(events.every((event) => event.metadata?.unitCharge === true && event.metadata?.billable === true)).toBe(true);
-    expect(state.usageLedger.pendingBillableCents).toBeCloseTo(11);
+    expect(state.usageLedger.pendingBillableCents).toBeCloseTo((["documentSummary", "knowledgeGraph", "structuredFields", "propositions"] as const).reduce((sum, feature) => sum + featureCredits(feature, 23), 0));
   });
 
   it("prices a media file on its Rich-equivalent pages (minutes x factor)", () => {
     const state = WorkflowState.create(run, []);
     chargeMediaMinutes(state, "talk", "video", 30 * 60);
-    expect(featurePages(state, { id: "talk", pageCount: 1 })).toBe(90);
+    expect(featurePages(state, { id: "talk", pageCount: 1 })).toBe(mediaRichPages("video", 30 * 60));
     chargeDocumentFeature(state, { id: "talk", pageCount: 1 }, "structuredFields");
-    expect(state.usageLedger.snapshot().find((event) => event.metric === "feature-structured-fields")?.costCents).toBe(9);
+    expect(state.usageLedger.snapshot().find((event) => event.metric === "feature-structured-fields")?.costCents).toBe(featureCredits("structuredFields", mediaRichPages("video", 30 * 60)));
   });
 });
 
@@ -58,14 +59,14 @@ describe("features priced on text read", () => {
   it("raises a charge to the text read and never lowers it; a repeat adds nothing, a larger read adds the difference under a new id", () => {
     const state = WorkflowState.create(run, []);
     const document = { id: "doc-1", pageCount: 1 };
-    // 800,000 characters: 229 pages of text, 23 started blocks of 10 pages. By page count: 1 credit.
+    // 800,000 characters: 229 pages of text. The charge follows the text read, not the 1-page count.
     chargeFeatureForTextRead(state, document, "structuredFields", { chars: 300_000, floorPages: false });
     chargeFeatureForTextRead(state, document, "structuredFields", { chars: 300_000, floorPages: false });
     chargeFeatureForTextRead(state, document, "structuredFields", { chars: 800_000 });
     chargeFeatureForTextRead(state, document, "structuredFields", { chars: 100_000 }); // a smaller read lowers nothing
     const events = state.usageLedger.snapshot();
     expect(events.map((event) => event.id)).toEqual(["feature:structuredFields:run-1:doc-1", expect.stringContaining("feature:structuredFields:run-1:doc-1:topup:")]);
-    expect(events.reduce((sum, event) => sum + event.costCents, 0)).toBe(23);
+    expect(events.reduce((sum, event) => sum + event.costCents, 0)).toBeCloseTo(featureCredits("structuredFields", 229), 9);
     expect(textReadPages(800_000)).toBe(229);
   });
 

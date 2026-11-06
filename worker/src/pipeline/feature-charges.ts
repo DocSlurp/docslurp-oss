@@ -98,7 +98,7 @@ function raiseFeatureCharge(state: WorkflowState, document: FeatureDocument, fea
 }
 
 /**
- * Charge one optional per-document feature (PRICE_CARD: summary, structured
+ * Charge one optional per-document feature (pricing provider: summary, structured
  * fields, knowledge graph, propositions) once per document per run. Called by
  * the feature's stage after it actually did the work, so a partial reprocess
  * that skips the stage pays nothing for it. The id makes a retried checkpoint

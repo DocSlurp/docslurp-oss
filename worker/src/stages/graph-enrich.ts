@@ -159,7 +159,7 @@ export class GraphEnrichStage implements Stage {
       if (graph.llmFailed) fallbackDocuments += 1;
       if (graph.source === "llm") llmDocuments += 1;
       if (graph.charsAttempted > 0) {
-        // Price card: knowledge graph per started 10 pages, once per document per run, when the model read the document.
+        // Pricing provider: the knowledge graph feature charge, once per document per run, when the model read the document.
         // Community summaries are included. The price follows the text the model read: every window it answered, even when no
         // answer parsed and the graph fell back to heuristics (the provider was paid to read them), the document's pages pro rata
         // on that share, and at least the pages of text read (3,500 characters a page). A graph no model answered for is free.

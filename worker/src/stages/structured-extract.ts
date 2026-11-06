@@ -618,7 +618,7 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
 
             const inputTokens = usageInputTokens;
             const outputTokens = usageOutputTokens;
-            // Price card: structured fields per started 10 pages, once per document per run (charged even on a policy
+            // Pricing provider: the structured fields feature charge, once per document per run (charged even on a policy
             // reject: the extraction ran), on the text the model read: the document's pages at least, or their share when
             // only part was read, and never fewer than the pages of text read (3,500 characters a page).
             billRead(true);

@@ -1,5 +1,86 @@
 {
  "schema": 1,
+ "profileSchema": 1,
+ "maxSampledPages": 24,
+ "wordsPerPageBuckets": [
+  0,
+  1,
+  11,
+  30,
+  200,
+  500
+ ],
+ "imageCoverageBuckets": [
+  0,
+  0,
+  0.15,
+  0.5,
+  0.9
+ ],
+ "extensions": {
+  "audio": [
+   "mp3",
+   "wav",
+   "flac",
+   "ogg",
+   "opus",
+   "m4a",
+   "aac",
+   "weba"
+  ],
+  "video": [
+   "mp4",
+   "webm",
+   "mov",
+   "mkv",
+   "avi"
+  ],
+  "image": [
+   "png",
+   "jpg",
+   "jpeg",
+   "tiff",
+   "tif",
+   "webp"
+  ],
+  "text": [
+   "txt",
+   "md",
+   "markdown",
+   "html",
+   "htm",
+   "mhtml",
+   "csv",
+   "tsv",
+   "json",
+   "jsonl",
+   "ndjson",
+   "tex"
+  ]
+ },
+ "textPages": {
+  "mimePrefixes": [
+   "text/",
+   "application/json",
+   "application/x-ndjson",
+   "application/xml",
+   "application/javascript",
+   "application/x-yaml"
+  ],
+  "lines": 60,
+  "chars": 3500
+ },
+ "multiFrameImages": {
+  "maxFrames": 64,
+  "mimeTypes": [
+   "image/tiff",
+   "image/tiff-fx"
+  ],
+  "extensions": [
+   "tif",
+   "tiff"
+  ]
+ },
  "pageRasterRouting": {
   "sparsePageWords": 30,
   "minSignificantImageCoverage": 0.02,
@@ -23,5 +104,23 @@
   "tableHeavyMinRows": 5,
   "tableHeavyMinCoverage": 0.4
  },
- "revision": "8f4ee02d8067d71a91f68a5dd39365020966b1bd8613ecee373aa6f9669b9ed3"
+ "pageEquivalents": {
+  "standardPageAreaPt2": 484704,
+  "areaEquivalentsCap": 8,
+  "densePageEquivalents": 3
+ },
+ "layout": {
+  "ruleThicknessPt": 3,
+  "ruleMinLengthPt": 8,
+  "ruleTouchPt": 2.5,
+  "coverageRaster": 200,
+  "maxRulesPerPage": 5000,
+  "maxWordsPerPage": 20000
+ },
+ "extraction": {
+  "tinyGlyphPoints": 3,
+  "tinyGlyphsPerPage": 50000,
+  "estimatedContentBytesPerGlyph": 2
+ },
+ "revision": "5b801766a1bad3717080e9c57dcef80d932fcf8affb6fd1b9b6abc0efb22e2ef"
 }

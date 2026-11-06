@@ -202,7 +202,7 @@ The per-page base fee (`DOCSLURP_PAGE_BASE_FEE_USD`) is charged per
 **materialized** page, not per uploaded page. Deferred profiles add two small
 priced events: `page-mapped` (Index Map, per page actually read) and
 `page-embedded` (Visual Pages, per page image embedded). Rates go in
-`CREDIT_RATE_CARD` only after `pnpm pricing:validate` and a load-test comparison
+the pricing provider only after its own validation and a load-test comparison
 (CLAUDE.md "Pricing & Capacity Changes").
 
 ### 2.6 Per-batch PII and privacy gates (gotcha 5)

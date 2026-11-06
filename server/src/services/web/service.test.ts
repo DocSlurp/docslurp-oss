@@ -1,3 +1,4 @@
+import { webSearchCredits } from "@docslurp/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { env } from "../../config.js";
@@ -96,8 +97,8 @@ describe("runWebCapability", () => {
 
   it("charges deep searches double", async () => {
     const t = setup();
-    expect((await runWebCapability("search", { ...search, depth: "deep" }, ctx)).usage.credits).toBe(2);
-    expect(t.recordCharge).toHaveBeenCalledWith(expect.objectContaining({ charge: expect.objectContaining({ credits: 2 }) }));
+    expect((await runWebCapability("search", { ...search, depth: "deep" }, ctx)).usage.credits).toBe(webSearchCredits({ deep: true }));
+    expect(t.recordCharge).toHaveBeenCalledWith(expect.objectContaining({ charge: expect.objectContaining({ credits: webSearchCredits({ deep: true }) }) }));
   });
 
   it("refuses when disabled, for private URLs, for opted-out or privacy-restricted workspaces and over the org rate limit", async () => {

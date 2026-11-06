@@ -91,8 +91,18 @@ export const configChangePaths = {
     post: {
       tags: ["ingest"],
       summary: "Estimate an upload",
-      description: "Body `{ files: [{ name, size, pages?, type?, durationSeconds?, mix?, mixConfidence? }], workspace? }` (workspace ID, slug or name; omitted: the default workspace). Pages default to one for an image file and about one per 75 KB otherwise. `mix` (`{ text, complex, scanned }` page weights, measured locally, for example by `@docslurp/estimate`) narrows the price range by `mixConfidence` (0-1, default 1); it is an estimate input only and never billed. Image files are priced as scanned pages. Audio and video files (by `type` or extension) are priced by duration: pass `durationSeconds` when known, otherwise it is guessed from the size. The response names the `orgId` whose credits the upload would spend (and `billingExempt` when that organization is never charged) and adds `media` when any file is audio or video: its credits (`low` reads video from the audio track only, `high` also reads frames), whether durations were assumed, and `lighter`, the upload pipeline override that skips video frames for the lower price. `profile` is the workspace's estimate profile and `cardRevision` the price card revision, for offline quotes (`GET /v1/billing/estimate-card`).",
+      description: "Body `{ files: [{ name, size, pages?, type?, durationSeconds?, profile? }], workspace? }` (workspace ID, slug or name; omitted: the default workspace; at most 1,000 files). Pages default to one for an image file and about one per 75 KB otherwise. `profile` is the file profile the offline profiler (`@docslurp/estimate`) measured on the caller's machine: neutral facts (page counts, PDF page facts, media duration). It is validated, clamped against `size` and used only to narrow the estimate; it never affects what an upload is charged. Audio and video files (by `type` or extension) are priced by duration: pass `durationSeconds` when known, otherwise it is guessed from the size. The response names the `orgId` whose credits the upload would spend (and `billingExempt` when that organization is never charged) and adds `media` when any file is audio or video: its credits (`low` reads video from the audio track only, `high` also reads frames), whether durations were assumed, and `lighter`, the upload pipeline override that skips video frames for the lower price. `kind` is always `estimate`; `profile` is the workspace's estimate profile and `pricingVersion` the pricing version that priced it.",
       security,
+      requestBody: body,
+      responses: estimateResponses,
+    },
+  },
+  "/v1/estimate": {
+    post: {
+      tags: ["ingest"],
+      summary: "Quote files before uploading (public)",
+      description: "No account needed. Body `{ files: [{ name, size, type?, pages?, durationSeconds?, profile? }], settings? }` with at most 200 files, each `profile` from the offline profiler `@docslurp/estimate` (files never leave the caller's machine). `settings` are the quote's knobs: `quality` (fast, auto, good), `indexing` (full, on-demand, visual; visual cannot be combined with fast), `documentSummary`, `structuredFields`, `knowledgeGraph`, `propositions`, `videoFrames`, `speedBoost`, `hostingMonths` (1-60), `searchesPerMonth`, `chatAnswersPerMonth`, `chatTier`. Answers an estimate (`kind: estimate`, never a charge): ingest credits, monthly hosting and usage credits, neutral `lines`, page and byte ranges, `pricingVersion` and `validUntil`. Rate limited per client IP and per quote session (an opaque `ds_estimate_session` cookie); reads no account data and stores nothing. Signed-in callers quote a workspace with `POST /v1/uploads/estimate`.",
+      security: [],
       requestBody: body,
       responses: estimateResponses,
     },

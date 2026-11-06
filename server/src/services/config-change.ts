@@ -727,8 +727,15 @@ async function applyPlannedChange(args: {
 export type WorkspaceEstimateResponse = {
   impact: ConfigChangeImpact;
   estimate: CostEstimate | null;
+  /** The workspace's documents under the new configuration, in the `POST /v1/estimate` shape (ingest = this change's work). */
+  quote: import("@docslurp/shared").EstimateQuote | null;
   billing: "enforced" | "disabled";
 };
+
+/** The estimate of a change that reprocesses nothing. */
+function noWork(billing: "enforced" | "disabled"): CostEstimate {
+  return { pages: 0, documents: 0, billing, credits: billing === "enforced" ? { low: 0, high: 0 } : null, seconds: { low: 0, high: 0 }, basis: "No documents are reprocessed by this change." };
+}
 
 export function billingState(env: EstimateEnv = process.env): "enforced" | "disabled" {
   return isBillingEnforced(env) ? "enforced" : "disabled";
@@ -742,7 +749,12 @@ export async function estimateWorkspaceChange(args: {
 }): Promise<WorkspaceEstimateResponse | null> {
   const plan = await planWorkspaceChange(args);
   if (!plan) return null;
-  return { impact: plan.impact, estimate: plan.estimate, billing: billingState(args.env) };
+  // The same quote shape as POST /v1/estimate: the workspace's measured documents under the new configuration.
+  const { quoteStoredDocuments } = await import("./stored-quote.js");
+  const quote = plan.workspace.orgId
+    ? await quoteStoredDocuments({ scope: { orgId: plan.workspace.orgId, workspaceId: plan.workspace.id }, pipeline: plan.nextPipeline, estimate: plan.estimate ?? noWork(billingState(args.env)), env: args.env })
+    : null;
+  return { impact: plan.impact, estimate: plan.estimate, quote, billing: billingState(args.env) };
 }
 
 /** Whether the caller may change the workspace at all (used before planning writes). */

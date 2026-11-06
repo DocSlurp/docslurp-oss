@@ -1,10 +1,8 @@
-import type { EstimateOptions, EstimateProfile, EstimateCard, EstimateResult } from "./index.js";
+import type { EstimateOptions, EstimateResult } from "./index.js";
 
-export type EstimateWorkerOptions = Omit<EstimateOptions, "profile"> & {
-  profile?: EstimateProfile;
+export type EstimateWorkerOptions = EstimateOptions & {
   /** URL of the wasm module, resolved inside the worker; default: the bundled file. */
   module?: string;
-  card?: EstimateCard;
   /** How long an aborted run may take to return its partial result before the worker is terminated. Default 1500 ms. */
   abortGraceMs?: number;
 };

@@ -42,7 +42,7 @@ const TERMINAL_FAILED = new Set(["failed", "blocked-pii"]);
 
 /**
  * Credits one materialized page may cost the customer, for per-query budgets: a page read by OCR
- * bills as a Rich page (PRICE_CARD), the worst case; text-layer pages bill less (Fast).
+ * bills as a Rich page (pricing provider), the worst case; text-layer pages bill less (Fast).
  */
 export function estimatedPageMaterializeCredits(env: NodeJS.ProcessEnv = process.env): number {
   const estimate = Number.parseFloat(env.DOCSLURP_EST_PAGE_MATERIALIZE_CREDITS ?? "");

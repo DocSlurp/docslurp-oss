@@ -177,7 +177,7 @@ export async function enforceLiveBudgetCaps(
 
   // Credits are checked atomically when the run row is inserted
   // (admitRunSpend). An admitted run is paused, not failed, once the org
-  // balance goes negative mid-run (docs/pricing-and-credits.md, gotcha 7).
+  // balance goes negative mid-run (docs/billing/credits.md, run admission).
 
   // Budgets first: summing a month of attributed usage is the most expensive
   // statement on the ingest path (67% of app-database time at 576 slots in the

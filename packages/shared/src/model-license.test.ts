@@ -2,13 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 
 import { buildDecisionModelCatalog, buildRoutingTargetCatalog } from "./routing-targets.js";
 import { licenseClassOfModel, lookupModelLicense, readDisableNonFreeSoftware, resetDisableNonFreeSoftwareWarnings } from "./model-license.js";
-import {
-  MEASURED_OCR_ROUTES,
-  filterFlatTierRoutes,
-  flatOcrDefaultRoutes,
-  isMeasuredOcrRouteEligible,
-  isRouteEligibleForFlatTier,
-} from "./extract-pricing.js";
 
 const prices = {
   asOf: "2026-10-13",
@@ -126,27 +119,7 @@ describe("licence classes in the decision model catalog", () => {
   });
 });
 
-describe("flat tier route policy", () => {
-  it("excludes non-free routes only when the flag is on", () => {
-    const dots = MEASURED_OCR_ROUTES.find((r) => r.id === "dots.ocr")!;
-    expect(isMeasuredOcrRouteEligible(dots)).toBe(true);
-    expect(isMeasuredOcrRouteEligible(dots, { disableNonFree: true })).toBe(false);
-    expect(isRouteEligibleForFlatTier("ocr", { kind: "self-hosted", licenseClass: "non-free" })).toBe(true);
-    expect(isRouteEligibleForFlatTier("ocr", { kind: "self-hosted", licenseClass: "non-free" }, { disableNonFree: true })).toBe(false);
-    expect(isRouteEligibleForFlatTier("ocr", { kind: "self-hosted", licenseClass: "free" }, { disableNonFree: true })).toBe(true);
-    const kept = filterFlatTierRoutes(
-      "ocr",
-      [{ route: { kind: "self-hosted", licenseClass: "non-free" } as const }, { route: { kind: "native" } as const }],
-      { disableNonFree: true },
-    );
-    expect(kept).toHaveLength(1);
-  });
-
-  it("drops dots.ocr from the math-page defaults when the flag is on", () => {
-    expect(flatOcrDefaultRoutes().mathPages).toEqual(["dots.ocr", "olmocr-2"]);
-    expect(flatOcrDefaultRoutes({ disableNonFree: true }).mathPages).toEqual(["olmocr-2"]);
-  });
-
+describe("model licence classes", () => {
   it("classifies research-only and non-commercial models by id or uri", () => {
     expect(licenseClassOfModel("llm://vllm/Qwen/Qwen2.5-VL-3B-Instruct")).toBe("non-free");
     expect(licenseClassOfModel("Qwen/Qwen3-VL-8B-Instruct")).toBe("free");

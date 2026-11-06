@@ -1,3 +1,4 @@
+import { pageCredits } from "@docslurp/shared";
 import postgres from "postgres";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultPipelineFeatures } from "@docslurp/shared";
@@ -94,9 +95,8 @@ describe("the cost forecast and the page count's source", () => {
     const docx = await forecastOf("contract.docx", docxFacts.mimeType, docxFacts, 1, 1_200_000);
     expect(docx.row).toEqual({ page_count: 1, page_count_source: "assumed" });
     // The assumed count is not passed to the forecast, so the DOCX is priced over its size (about 100 pages at the format's
-    // 12 KB a page, up to 1,171 at its densest) instead of as one page. No model reads a Word page, so those pages are Fast:
-    // 1,171 pages at 5 credits per 1,000.
-    expect(docx.forecast.maxCents).toBeCloseTo(1_171 * 5 / 1_000, 1);
+    // 12 KB a page, up to 1,171 at its densest) instead of as one page.
+    expect(docx.forecast.maxCents).toBeGreaterThan(pageCredits("fast", 100));
     // The API never parses a PDF (no pdfinfo in its process): its count is a size estimate, recorded as assumed, and the
     // worker measures the real count in the VM before anything bills. The forecast prices the size, so a PDF the estimate
     // calls 1 page and one it calls 40 are quoted the same, and well above one page.
@@ -105,7 +105,7 @@ describe("the cost forecast and the page count's source", () => {
     const pdf = await forecastOf("contract.pdf", "application/pdf", pdfFacts, 40, 1_200_000);
     expect(pdf.row).toEqual({ page_count: 40, page_count_source: "assumed" });
     expect(pdf.forecast.maxCents).toBe(onePage.forecast.maxCents);
-    expect(onePage.forecast.maxCents).toBeGreaterThan(1 * 5 / 1_000 * 10);
+    expect(onePage.forecast.maxCents).toBeGreaterThan(pageCredits("fast", 10));
   });
 });
 

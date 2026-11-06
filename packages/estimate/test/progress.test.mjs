@@ -5,9 +5,9 @@ import { describe, it } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Worker } from "node:worker_threads";
 
-import { applyProbe, createEstimator, estimateEvents, estimateFiles, EstimatorError } from "../js/index.mjs";
+import { createEstimator, estimateEvents, estimateFiles, EstimatorError } from "../js/index.mjs";
 import { createEstimateWorker } from "../js/client.mjs";
-import { estimatePaths, quotePaths } from "../js/node.mjs";
+import { estimatePaths, profilePath } from "../js/node.mjs";
 import { READ_CHUNK_BYTES } from "../js/run.mjs";
 import { lazyObjectStreamBomb } from "./hostile.mjs";
 
@@ -51,13 +51,13 @@ function eventsByFile(events) {
 }
 
 describe("estimateFiles: events", () => {
-  it("emits start, read, probe and done per file, batch-done per batch and quote-done last", async () => {
+  it("emits start, read, probe and done per file, batch-done per batch and done last", async () => {
     const files = [fixture("scan_plain.pdf"), fixture("text_wrapped_with_photo.pdf"), new File(["hello world\n".repeat(50)], "notes.txt"), fixture("scan_glyph_title.pdf")];
     const events = [];
     const result = await estimateFiles(estimator, files, { batchSize: 3, onProgress: (event) => events.push(event) });
 
-    assert.equal(events.at(-1).type, "quote-done");
-    assert.equal(events.filter((event) => event.type === "quote-done").length, 1);
+    assert.equal(events.at(-1).type, "done");
+    assert.equal(events.filter((event) => event.type === "done").length, 1);
     assert.equal(events.filter((event) => event.type === "batch-done").length, 2);
     for (const [index, types] of eventsByFile(events)) {
       const compact = types.filter((type, at) => type !== "read-progress" || types[at - 1] !== "read-progress");
@@ -81,7 +81,7 @@ describe("estimateFiles: events", () => {
     const events = [];
     const result = await estimateFiles(estimator, files, { onProgress: (event) => events.push(event) });
     for (const event of events) {
-      const json = JSON.stringify(event, (key, value) => (key === "result" || key === "quote" ? undefined : value));
+      const json = JSON.stringify(event, (key, value) => (key === "result" ? undefined : value));
       assert.doesNotMatch(json, /"[a-z]*(percent|ratio|fraction)[a-z]*":/i, `${event.type} carries no invented percentage`);
     }
     for (const event of events.filter((candidate) => candidate.type === "probe-start" || candidate.type === "probe-done")) assert.equal(event.stage, "probe");
@@ -111,25 +111,23 @@ describe("estimateFiles: events", () => {
     assert.equal(log.reads.at(-1)[1] + log.reads.at(-1)[2], 2e9, "the tail ends at the end of the file");
   });
 
-  it("quotes exactly what the simple API quotes for the same files", async () => {
+  it("profiles exactly what the simple API profiles for the same files", async () => {
     const files = [fixture("scan_plain.pdf"), fixture("text_wrapped_with_photo.pdf"), new File(["a,b\n1,2\n"], "rows.csv")];
-    const simple = await estimator.quoteFiles(files);
+    const simple = await Promise.all(files.map((file) => estimator.profileBlob(file)));
     const result = await estimateFiles(estimator, files);
-    assert.deepEqual(result.quote.estimate, simple.estimate);
-    assert.deepEqual(result.files.map((file) => file.probe), simple.probes);
-    assert.deepEqual(result.files.map((file) => file.quoteFile), files.map((file, index) => applyProbe({ name: file.name, size: file.size, ...(file.type ? { type: file.type } : {}) }, simple.probes[index])));
+    assert.deepEqual(result.files.map((file) => file.profile), simple);
+    assert.deepEqual(result.request.files, files.map((file, index) => ({ name: file.name, size: file.size, ...(file.type ? { type: file.type } : {}), profile: simple[index] })));
     const paths = await estimatePaths(estimator, [fixturePath("scan_plain.pdf"), fixturePath("text_wrapped_with_photo.pdf")]);
-    const viaPaths = await quotePaths(estimator, [fixturePath("scan_plain.pdf"), fixturePath("text_wrapped_with_photo.pdf")]);
-    assert.deepEqual(paths.quote.estimate, viaPaths.estimate);
+    const viaPath = await profilePath(estimator, fixturePath("scan_plain.pdf"));
+    assert.deepEqual(paths.files[0].profile, viaPath.profile);
   });
 
-  it("summarizes pages, mix confidence, timing and throughput", async () => {
+  it("summarizes pages, PDF facts, timing and throughput", async () => {
     const files = [fixture("scan_plain.pdf"), fixture("text_wrapped_with_photo.pdf")];
     const { stats } = await estimateFiles(estimator, files);
     assert.equal(stats.pages.found, 2);
     assert.equal(stats.pages.files, 2);
-    assert.equal(stats.mixConfidence.files, 2);
-    assert.ok(stats.mixConfidence.min > 0 && stats.mixConfidence.max <= 1);
+    assert.deepEqual(stats.pdf, { files: 2, sampledPages: 2, rasterPages: 1, textLayerPages: 1 });
     assert.ok(stats.probeMs.p50 <= stats.probeMs.p95 && stats.probeMs.p95 <= stats.probeMs.max);
     assert.ok(stats.throughput.filesPerSecond > 0 && stats.throughput.megabytesPerSecond > 0);
     assert.deepEqual(stats.estimator, { crashes: 0, resets: 0 });
@@ -140,25 +138,16 @@ describe("estimateFiles: events", () => {
     let result;
     for await (const event of estimateEvents(estimator, [fixture("scan_plain.pdf")])) {
       types.push(event.type);
-      if (event.type === "quote-done") result = event.result;
+      if (event.type === "done") result = event.result;
     }
-    assert.deepEqual(types, ["file-start", "read-progress", "probe-start", "probe-done", "file-done", "batch-done", "quote-done"]);
+    assert.deepEqual(types, ["file-start", "read-progress", "probe-start", "probe-done", "file-done", "batch-done", "done"]);
     assert.equal(result.stats.files.probed, 1);
   });
 
-  it("refuses a profile from a newer card before reading anything", async () => {
-    const log = { opens: [], reads: [], open: 0 };
-    const card = estimator.card();
-    await assert.rejects(
-      estimateFiles(estimator, [synthetic("a.pdf", 10, { log })], { profile: { ...card.defaultProfile, quality: "ultra" } }),
-      (error) => error instanceof EstimatorError && error.code === "unsupported_rules",
-    );
-    assert.equal(log.opens.length, 0);
-  });
 });
 
 describe("estimateFiles: cancellation", () => {
-  it("stops between files and quotes the finished ones plus size-only assumptions for the rest", async () => {
+  it("stops between files and keeps the finished profiles, sending the rest by name and size", async () => {
     const controller = new AbortController();
     const files = Array.from({ length: 200 }, (_, index) => synthetic(`doc-${index}.txt`, 4_000, { delayMs: 2 }));
     const events = [];
@@ -180,15 +169,15 @@ describe("estimateFiles: cancellation", () => {
     assert.equal(result.partial, true);
     assert.ok(result.stats.files.probed >= 10 && result.stats.files.probed <= 11, `probed ${result.stats.files.probed}`);
     assert.equal(result.stats.files.probed + result.stats.files.skipped, 200);
-    assert.equal(result.sizeOnlyFiles, result.stats.files.skipped);
-    // No file starts after the abort; every file is in the quote, measured or not.
+    assert.equal(result.unprofiledFiles, result.stats.files.skipped);
+    // No file starts after the abort; every file is in the request, profiled or not.
     const abortIndex = events.findIndex((event) => event.type === "file-done" && event.files.completed === 10);
     assert.ok(events.slice(abortIndex + 1).filter((event) => event.type === "file-start").length <= 1);
-    assert.equal(result.quote.estimate.documents, 200);
+    assert.equal(result.request.files.length, 200);
     const skipped = result.files.filter((file) => file.status === "skipped");
-    assert.ok(skipped.every((file) => file.reason.code === "cancelled" && !file.measured && file.quoteFile.pages === undefined));
-    assert.ok(result.files.slice(0, 10).every((file) => file.status === "probed" && file.measured && file.quoteFile.pages > 0));
-    assert.equal(events.at(-1).type, "quote-done");
+    assert.ok(skipped.every((file) => file.reason.code === "cancelled" && !file.measured && file.requestFile.profile === undefined));
+    assert.ok(result.files.slice(0, 10).every((file) => file.status === "probed" && file.measured && file.requestFile.profile.pages > 0));
+    assert.equal(events.at(-1).type, "done");
     assert.equal(events.at(-1).cancelled, true);
   });
 
@@ -205,7 +194,7 @@ describe("estimateFiles: cancellation", () => {
     assert.ok(result.files[0].bytesRead > 0 && result.files[0].bytesRead < 60 * MiB);
     assert.equal(log.open, 0, "the file was closed");
     assert.equal(result.files[1].status, "skipped");
-    assert.ok(result.quote, "still quoted from sizes");
+    assert.equal(result.request.files.length, 2, "still sent by name and size");
   });
 
   it("returns at once for a signal that is already aborted", async () => {
@@ -217,7 +206,7 @@ describe("estimateFiles: cancellation", () => {
 });
 
 describe("estimateFiles: failures stay per file", () => {
-  it("prices corrupt, unreadable and crashing files from their size and finishes the batch", async () => {
+  it("sends corrupt, unreadable and crashing files by name and size and finishes the batch", async () => {
     const fresh = await createEstimator();
     const bomb = lazyObjectStreamBomb();
     const files = [
@@ -233,7 +222,7 @@ describe("estimateFiles: failures stay per file", () => {
     assert.equal(result.files[4].status, "probed");
     assert.equal(result.files[2].status, "failed");
     assert.equal(result.files[2].reason.code, "read_failed");
-    assert.deepEqual(result.files[2].quoteFile, { name: "gone.pdf", size: 5_000 });
+    assert.deepEqual(result.files[2].requestFile, { name: "gone.pdf", size: 5_000 });
     // The first oversized parse on a fresh memory traps; the estimator resets and the next file still probes.
     const crashed = result.files[3];
     assert.equal(result.stats.estimator.crashes, fresh.health().crashes);
@@ -241,21 +230,21 @@ describe("estimateFiles: failures stay per file", () => {
       assert.equal(crashed.reason.code, "crashed");
       assert.equal(result.stats.estimator.resets, 1);
     }
-    assert.ok(result.quote.estimate.credits.high > 0);
+    assert.equal(result.request.files.length, 5);
     assert.equal(result.partial, result.files.some((file) => !file.measured));
   });
 
   it("isolates an estimator crash with a reason", async () => {
     const crashing = Object.create(estimator);
-    crashing.probe = (file, head, tail) => {
+    crashing.profile = (file, head, tail) => {
       if (file.name === "trap.pdf") throw new EstimatorError("crashed", "the estimator stopped on this input (unreachable)");
-      return estimator.probe(file, head, tail);
+      return estimator.profile(file, head, tail);
     };
     const events = [];
     const result = await estimateFiles(crashing, [fixture("trap.pdf".replace("trap", "scan_plain"), "trap.pdf"), fixture("scan_plain.pdf")], { onProgress: (event) => events.push(event) });
     assert.equal(result.files[0].status, "failed");
     assert.equal(result.files[0].reason.code, "crashed");
-    assert.match(result.files[0].reason.message, /priced from name, type and size/);
+    assert.match(result.files[0].reason.message, /sent with name, type and size only/);
     assert.equal(result.files[1].status, "probed");
     const done = events.find((event) => event.type === "probe-done" && event.file.index === 0);
     assert.equal(done.ok, false);
@@ -283,7 +272,7 @@ describe("estimateFiles: bounds", () => {
     assert.ok(result.stats.bounds.peakInFlight <= 3);
     assert.ok(maxOpen <= 3, `max open ${maxOpen}`);
     assert.ok(result.stats.bounds.peakBufferedBytes <= 2 * MiB, `peak ${result.stats.bounds.peakBufferedBytes}`);
-    // Five events per one-chunk file, one per batch, one quote-done.
+    // Five events per one-chunk file, one per batch, one done.
     assert.equal(events, 600 * 5 + 12 + 1);
   });
 
@@ -312,9 +301,9 @@ describe("estimate worker", () => {
       const events = [];
       const result = await client.estimate([fixture("scan_plain.pdf"), fixture("text_wrapped_with_photo.pdf")], { onProgress: (event) => events.push(event) });
       assert.equal(result.stats.files.probed, 2);
-      assert.equal(events.at(-1).type, "quote-done");
+      assert.equal(events.at(-1).type, "done");
       assert.equal(events.at(-1).result, undefined, "the result travels once");
-      assert.deepEqual(result.quote.estimate, (await estimateFiles(estimator, [fixture("scan_plain.pdf"), fixture("text_wrapped_with_photo.pdf")])).quote.estimate);
+      assert.deepEqual(result.request, (await estimateFiles(estimator, [fixture("scan_plain.pdf"), fixture("text_wrapped_with_photo.pdf")])).request);
     } finally {
       client.terminate();
     }
@@ -360,7 +349,7 @@ describe("estimate worker", () => {
         },
       });
       assert.equal(result.cancelled, true);
-      assert.ok(result.quote, "the worker answered with its own partial quote");
+      assert.ok(result.stats, "the worker answered with its own partial result");
       assert.ok(result.stats.files.skipped > 0 && result.stats.files.probed >= 3);
     } finally {
       client.terminate();
@@ -380,7 +369,7 @@ describe("estimate worker", () => {
     const started = performance.now();
     const result = await pending;
     assert.ok(performance.now() - started < 400, "a stuck worker is stopped after the grace period");
-    assert.equal(result.quote, null);
+    assert.equal(result.stats, null);
     assert.equal(result.files[0].status, "probed", "files finished before the abort are kept");
     assert.equal(result.files[1].status, "skipped");
     await assert.rejects(stuck.estimate([fixture("scan_plain.pdf")]), (error) => error.code === "worker_failed");

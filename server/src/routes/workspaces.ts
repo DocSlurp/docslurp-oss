@@ -1,3 +1,4 @@
+import { quoteStoredDocuments } from "../services/stored-quote.js";
 import { workspaceRecommendationVisitsRoutes } from "./workspace-recommendation-visits.js";
 import { ChatToolBlockedError } from "../services/chat-tool-error.js";
 import { applyWorkspaceSettingsProposalSchema } from "@docslurp/shared";
@@ -1704,8 +1705,12 @@ export const workspacesRoutes = new Hono()
       if (!resolved.policy.allowFullIndexRequest) {
         return apiErrorResponse(c, 403, "forbidden", "This key or capability may not request a full index.", { category: "full_index_not_allowed" });
       }
-      const estimate = await estimateFullIndex({ speedBoost: c.req.valid("json").speedBoost === true, workspaceId: workspace.id, orgId: workspace.orgId, documentIds: c.req.valid("json").documentIds });
-      return c.json({ estimate, billing: billingState() });
+      const documentIds = c.req.valid("json").documentIds;
+      const estimate = await estimateFullIndex({ speedBoost: c.req.valid("json").speedBoost === true, workspaceId: workspace.id, orgId: workspace.orgId, documentIds });
+      const quote = estimate
+        ? await quoteStoredDocuments({ scope: { orgId: workspace.orgId, workspaceId: workspace.id, ...(documentIds ? { documentIds } : {}) }, pipeline: workspace.pipeline, estimate, settings: { indexing: "full" } })
+        : null;
+      return c.json({ estimate, quote, billing: billingState() });
     },
   )
   .post(
@@ -1726,7 +1731,11 @@ export const workspacesRoutes = new Hono()
       const estimate = body.action === "reprocess"
         ? await estimateDocumentReprocess({ speedBoost: body.speedBoost === true, documentIds: body.documentIds, userId, workspaceId: workspace.id })
         : null;
-      return c.json({ estimate, billing: billingState() });
+      // Scoped to this workspace's documents: estimateDocumentReprocess already dropped any the caller cannot edit.
+      const quote = estimate
+        ? await quoteStoredDocuments({ scope: { orgId: workspace.orgId, workspaceId: workspace.id, documentIds: body.documentIds }, pipeline: workspace.pipeline, estimate, settings: { speedBoost: body.speedBoost === true } })
+        : null;
+      return c.json({ estimate, quote, billing: billingState() });
     },
   )
   .delete(

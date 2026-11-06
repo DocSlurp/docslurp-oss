@@ -131,8 +131,39 @@ export type UploadMediaEstimate = {
 /** Response of every `…/estimate` route. `impact` is present for configuration changes; `media` for upload estimates with audio or video. */
 export type EstimateResponse = {
   estimate: CostEstimate; billing: "enforced" | "disabled"; impact?: ConfigChangeImpact; media?: UploadMediaEstimate | null; orgId?: string; billingExempt?: boolean;
-  /** Upload estimates only: the workspace's estimate profile and the price card revision, for offline quotes. */
-  profile?: EstimateProfile; cardRevision?: string;
+  /** Upload estimates only: always `"estimate"`; an upload is billed by what the worker measures. */
+  kind?: "estimate";
+  /** Upload estimates only: the workspace settings the estimate priced with, and the pricing version that priced it. */
+  profile?: EstimateProfile; pricingVersion?: string;
+  /** Upload estimates only: the full quote (ingest, monthly hosting and usage) for the workspace's settings. */
+  quote?: EstimateQuote;
+};
+
+/**
+ * What the offline profiler (`@docslurp/estimate`) measured about one file: neutral, aggregate facts only. The server
+ * validates and clamps it, and uses it only to estimate. See the profiler's README for the fields.
+ */
+export type FileProfile = {
+  schema: 1; profiler: string;
+  kind: "pdf" | "image" | "office" | "ebook" | "text" | "audio" | "video" | "unknown";
+  format: string; mimeType?: string; bytes: number; pages?: number; encrypted?: boolean; durationSeconds?: number;
+  pdf?: {
+    sampledPages: number; textLayerPages: number; wordsPerPage: number[]; lowTextPages: number; blankPages: number;
+    rasterPages: number; imagePages: number; images: number; imageCoverage: number[]; furnitureImages: number;
+    layoutHeavyPages: number; vectorHeavyPages: number; unmappedFontPages: number; drawnContent: boolean; budgetExhausted: boolean;
+    sampledWords: number; medianPageAreaSqIn: number; maxPageAreaSqIn: number;
+    sampledChars: number; sampledTextLines: number; charsByFontSize: number[]; invisibleChars: number; offCropChars: number;
+    sampledTextEquivalents: number; sampledAreaEquivalents: number; sampledPageEquivalents: number; maxPageEquivalents: number;
+    textEquivalentsPerPage: number[]; areaEquivalentsPerPage: number[]; densePages: number;
+    medianPageWidthPt: number; medianPageHeightPt: number; maxPageWidthPt: number; maxPageHeightPt: number;
+    offPageChars: number; tinyCharsDropped: number; textEstimatedPages: number;
+    pageEquivalentsByAllowance: number[]; maxPageEquivalentsByAllowance: number[];
+    imagePpi: number[]; imageBytesPerPixel: number[]; glyphsOverImages: number; textOverImagePages: number; scanBesideTextPages: number; scanBesideTextUnknownPages: number; ruledTablePages: number;
+  };
+  /** Package structure; `declaredPages` is the document's own metadata claim: informational only, never counted or priced. */
+  office?: { embeddedImages: number; slides?: number; sheets?: number; bodyBytes: number; declaredPages?: number };
+  textChars?: number;
+  notes?: string[];
 };
 
 /** Settings accepted by workspace PATCH; `apply` and `autoConfirmReindex` control re-index queuing. */
@@ -150,20 +181,52 @@ export type WorkspaceSearchSettingsResponse = { workspaceId: string; retrievalDe
 
 /** `workspace`: ID, slug or name (see {@link DocSlurpClientOptions.workspace}); omitted: the client workspace. */
 export type UploadEstimateInput = {
-  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
+  /** Explicit opt-in: speed-boosted processing, billed at the speed-boost rate (docslurp.io/pricing); omitted/false keeps standard routing. */
   speedBoost?: boolean;
   files: Array<{
     name: string; size: number; pages?: number; type?: string; durationSeconds?: number;
-    /** Page weights measured locally (for example by `@docslurp/estimate`); narrows the range. Never billed. */
-    mix?: { text: number; complex: number; scanned: number };
-    /** 0-1 trust in `mix`; default 1. */
-    mixConfidence?: number;
+    /** The file's profile from `@docslurp/estimate`, measured locally; narrows the estimate. Never billed. */
+    profile?: FileProfile;
   }>;
+  /** Knobs to quote with instead of the workspace's own; the answer's `quote` reflects them. */
+  settings?: Partial<QuoteSettings>;
   workspace?: string };
 
-/** What upload pricing reads from a workspace; returned by `uploadEstimate` for offline quotes. */
+/** The knobs of a quote, in customer terms; omitted ones take a new workspace's defaults. */
+export type QuoteSettings = {
+  quality: "fast" | "auto" | "good";
+  /**
+   * `full` indexes every page on upload; `on-demand` indexes pages when a query first needs them; `visual` embeds every
+   * page image on upload (a read of every page; not with `fast` quality).
+   */
+  indexing: "full" | "on-demand" | "visual";
+  documentSummary: boolean; structuredFields: boolean; knowledgeGraph: boolean; propositions: boolean;
+  videoFrames: boolean; speedBoost: boolean;
+  /** Months the files stay hosted (1 to 60). */
+  hostingMonths: number;
+  searchesPerMonth: number; chatAnswersPerMonth: number;
+  chatTier: "standard" | "advanced" | "premium";
+};
+export type EstimateInput = {
+  files: Array<{ name: string; size: number; type?: string; pages?: number; durationSeconds?: number; profile?: FileProfile }>;
+  settings?: Partial<QuoteSettings>;
+};
+export type CreditRange = { low: number; high: number };
+/** `POST /v1/estimate`. Every credit figure is null where the deployment does not bill. */
+export type EstimateQuote = {
+  kind: "estimate"; pricingVersion: string; validUntil: string; billing: "enforced" | "disabled"; settings: QuoteSettings;
+  files: { total: number; profiled: number }; pages: CreditRange; mediaMinutes: number;
+  ingest: { credits: CreditRange | null; seconds: CreditRange };
+  hosting: { bytes: CreditRange; creditsPerMonth: CreditRange | null; months: number; credits: CreditRange | null };
+  usage: { creditsPerMonth: CreditRange | null };
+  lines: Array<{ id: string; label: string; period: "once" | "month"; credits: CreditRange }>;
+  rates: { pagesPerDollar: CreditRange | null; pagesPerMinute: CreditRange };
+  basis: string;
+};
+
+/** What upload pricing reads from a workspace; returned by `uploadEstimate`. */
 export type EstimateProfile = {
-  cardVersion: string;
+  pricingVersion: string;
   quality: "fast" | "auto" | "good";
   documentFeatures: { documentSummary: boolean; structuredFields: boolean; knowledgeGraph: boolean; propositions: boolean };
   videoFrames: boolean;
@@ -368,7 +431,7 @@ export type UploadByteStream = AsyncIterable<Uint8Array | string> & {
 };
 
 export type UploadOptions = RequestOptions & {
-  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
+  /** Explicit opt-in: speed-boosted processing, billed at the speed-boost rate (docslurp.io/pricing); omitted/false keeps standard routing. */
   speedBoost?: boolean;
   /** Labels applied to every accepted document in this upload. */
   tags?: string[];
@@ -399,7 +462,7 @@ export type UploadOptions = RequestOptions & {
 };
 
 export type UploadInput = {
-  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
+  /** Explicit opt-in: speed-boosted processing, billed at the speed-boost rate (docslurp.io/pricing); omitted/false keeps standard routing. */
   speedBoost?: boolean;
   /** Labels applied to every accepted document in this upload. */
   tags?: string[];
@@ -473,7 +536,7 @@ export type ExtractRecord = {
 export type ExtractResponse = UploadResponse & { extract: ExtractRecord };
 
 export type UploadUrlsInput = {
-  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
+  /** Explicit opt-in: speed-boosted processing, billed at the speed-boost rate (docslurp.io/pricing); omitted/false keeps standard routing. */
   speedBoost?: boolean;
   /** Labels applied to every accepted document in this upload. */
   tags?: string[];
@@ -569,7 +632,7 @@ export function formatSearchContext(response: SearchResponse): string {
 
 export type ChatInput = {
   filters?: {geo?:GeoPredicate;documentIds?:string[];mimeTypes?:string[];tags?:string[];dateFrom?:string;dateTo?:string};
-  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
+  /** Explicit opt-in: speed-boosted processing, billed at the speed-boost rate (docslurp.io/pricing); omitted/false keeps standard routing. */
   speedBoost?: boolean;
   q: string;
   sessionId?: string;
@@ -674,7 +737,7 @@ export type ReprocessRunInput = { stageFrom?: string; stages?: string[]; speedBo
 /** The run created by {@link DocSlurpClient.reprocessRun}, its job, and warnings when its start was deferred. */
 export type ReprocessRunResult = { run: WorkspaceRun; job?: JobStatus; warnings: string[] };
 export type BulkDocumentsInput = {
-  /** Explicit opt-in: 4× service credits; omitted/false keeps standard routing. */
+  /** Explicit opt-in: speed-boosted processing, billed at the speed-boost rate (docslurp.io/pricing); omitted/false keeps standard routing. */
   speedBoost?: boolean;
   action: "reprocess" | "apply-tags" | "remove-tags" | "delete" | "export-artifacts";
   documentIds: string[];
@@ -1942,6 +2005,14 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     /** Cost of an upload before sending any bytes. */
     uploadEstimate(input: UploadEstimateInput, requestOptions?: RequestOptions): Promise<EstimateResponse> {
       return estimateAt("/v1/uploads/estimate", inWorkspace(input), requestOptions);
+    },
+    /**
+     * `POST /v1/estimate`: the public quote for profiled files (no account needed): ingest credits, monthly hosting and
+     * usage, neutral lines and ranges, the pricing version and until when it holds. Profile files locally with
+     * `@docslurp/estimate`; only profiles are sent. Re-send with other `settings` to see the price move. Never a charge.
+     */
+    estimate(input: EstimateInput, requestOptions?: RequestOptions): Promise<EstimateQuote> {
+      return request<EstimateQuote>("/v1/estimate", jsonRequest("POST", input as unknown as JsonObject), requestOptions);
     },
     /**
      * Sets how many versions of each document are kept (1–100; null clears the override).

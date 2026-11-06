@@ -1,3 +1,4 @@
+import { pageCredits, speedBoostMultiplier } from "@docslurp/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -78,9 +79,9 @@ describe("worker AI usage Module", () => {
       provider: "openrouter", model: "google/gemini-3.1-flash-lite", metric: "page-analysis",
       inputTokens: 1_149, outputTokens, costCents: 0.12, metadata: { documentId: "doc-1", pageNumber },
     });
-    read(1, 884);
-    read(1, 900); // a retry of the same page in the same run: not charged again
-    read(2, 2_035); // dense page: 3 Rich pages
+    read(1, 700);
+    read(1, 750); // a retry of the same page in the same run: not charged again
+    read(2, 2_035); // dense page: 3 Rich pages under the test provider's output rule
     const charges = ledger.snapshot().filter((event) => event.metric === "ingest-page-rich");
     // Page 2 is three Rich units, each its own event so a retried read can never charge one twice.
     expect(charges.map((event) => [event.id, event.amount, event.costCents])).toEqual([
@@ -106,25 +107,25 @@ describe("worker AI usage Module", () => {
       inputTokens: 1_149, outputTokens, costCents: 0.12, metadata: { documentId: "img", pageNumber: 1 },
     });
     // An uploaded image: OCR reads it (no output tokens) and charges the page as one Rich page; vision then reads it for
-    // 2,500 output tokens, which the page's first charge did not cover (3 Rich pages in all).
+    // 2,000 output tokens, which the page's first charge did not cover (3 Rich pages in all under the test provider).
     ledger.chargeRichPage({ documentId: "img", pageNumber: 1, readBy: "page-ocr" });
     expect(ledger.pendingBillableCents).toBeCloseTo(0.25);
-    vision(2_500);
+    vision(2_000);
     const charges = () => ledger.snapshot().filter((event) => event.metric === "ingest-page-rich");
     expect(charges().map((event) => event.id)).toEqual(["rich:run-1:img:1", "rich:run-1:img:1:unit:2", "rich:run-1:img:1:unit:3"]);
     expect(ledger.pendingBillableCents).toBeCloseTo(0.75);
     expect(ledger.richPagesCharged("img", 1)).toBe(3);
     // The same vision read recorded again (a retry in the same run) adds nothing; a bigger one adds only the difference.
-    vision(2_400);
+    vision(1_900);
     expect(charges()).toHaveLength(3);
-    vision(3_100);
+    vision(2_500);
     expect(charges().map((event) => event.id).at(-1)).toBe("rich:run-1:img:1:unit:4");
     expect(ledger.pendingBillableCents).toBeCloseTo(1);
     // A retry in a new ledger (a restarted activity) reading the same page emits the same ids, which insert nothing twice.
     const retry = new PipelineUsageEventLedger();
     retry.runId = "run-1";
     retry.chargeRichPage({ documentId: "img", pageNumber: 1, readBy: "page-ocr" });
-    retry.record({ provider: "openrouter", model: "google/gemini-3.1-flash-lite", metric: "page-analysis", inputTokens: 1, outputTokens: 3_100, costCents: 0, metadata: { documentId: "img", pageNumber: 1 } });
+    retry.record({ provider: "openrouter", model: "google/gemini-3.1-flash-lite", metric: "page-analysis", inputTokens: 1, outputTokens: 2_500, costCents: 0, metadata: { documentId: "img", pageNumber: 1 } });
     expect(retry.snapshot().filter((event) => event.metric === "ingest-page-rich").map((event) => event.id)).toEqual(charges().map((event) => event.id));
   });
 
@@ -312,8 +313,9 @@ describe("Speed boost worker accounting", () => {
     ledger.record(input);
     const charges = ledger.snapshot().filter(event => event.metric === "ingest-page-rich");
     expect(charges).toHaveLength(1);
-    expect(charges[0]).toMatchObject({ costCents: 1, metadata: { speedBoost: true } });
-    expect(ledger.pendingBillableCents).toBe(1);
+    const boosted = pageCredits("rich", 1) * speedBoostMultiplier(true);
+    expect(charges[0]).toMatchObject({ costCents: boosted, metadata: { speedBoost: true } });
+    expect(ledger.pendingBillableCents).toBe(boosted);
     expect(ledger.snapshot().filter(event => event.metric === "page-analysis").every(event => event.metadata?.providerCostCents === 0.37)).toBe(true);
     expect(Reflect.set(ledger, "speedBoost", false)).toBe(false);
     const first = ledger.checkpoint();

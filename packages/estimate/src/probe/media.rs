@@ -49,7 +49,7 @@ pub(super) fn probe(input: &ProbeInput<'_>) -> Option<ProbeResult> {
 fn finish(mut result: ProbeResult, duration: Option<f64>) -> ProbeResult {
     match duration.filter(|seconds| seconds.is_finite() && *seconds > 0.0 && *seconds <= MAX_DURATION_SECONDS) {
         Some(seconds) => result.duration_seconds = Some(seconds),
-        None => result.notes.push("duration not found in the headers; priced from size".into()),
+        None => result.notes.push("duration not found in the headers".into()),
     }
     result
 }

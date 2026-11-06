@@ -281,8 +281,8 @@ async function generateAggregateAnswer(args: {
       },
     },
   });
-  // A generated answer bills as a chat answer does (PRICE_CARD.chatAnswerTiers at the model's tier, once more per started
-  // 100k total tokens). Inside a chat turn the turn's own answer already covers it.
+  // A generated answer bills as a chat answer does (the pricing provider's price at the model's tier and its answer units).
+  // Inside a chat turn the turn's own answer already covers it.
   if (!turn) {
     const totalTokens = generated.usage.inputTokens + generated.usage.outputTokens;
     const tier = chatModelTier(SEARCH_OPENROUTER_MODEL);

@@ -1,9 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { applySpeedBoostUnitCharge, speedBoostMultiplier, priceAiUsageEvent, unitChargeMetadata } from "../billing.js";
+import { resetPricingProviderForTests } from "../pricing-provider.js";
+import { installTestPricing } from "../pricing-testing.js";
 
 const unit = () => ({ provider: "docslurp", metric: "chat-answer", costCents: 2, metadata: unitChargeMetadata() });
 describe("Speed boost credit policy", () => {
-  it("is off on omission and applies exactly four times only on opt-in", () => {
+  // An arbitrary provider multiplier: the seam, not any deployment's price, is under test.
+  beforeEach(() => { installTestPricing({ speedBoostMultiplier: (boost) => (boost ? 4 : 1) }); });
+  afterEach(() => resetPricingProviderForTests());
+  it("is off on omission and applies the provider multiplier only on opt-in", () => {
     expect(speedBoostMultiplier()).toBe(1);
     expect(speedBoostMultiplier(false)).toBe(1);
     expect(speedBoostMultiplier(true)).toBe(4);

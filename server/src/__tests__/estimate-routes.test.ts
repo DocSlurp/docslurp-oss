@@ -186,6 +186,61 @@ describe("estimate twins equal the mutation's job.estimate", () => {
   });
 });
 
+describe("estimate twins answer the unified quote from measured documents", () => {
+  beforeEach(seed);
+
+  type Quote = { kind: string; pricingVersion: string; pages: { low: number; high: number }; ingest: { credits: { low: number; high: number } | null }; hosting: { bytes: { low: number } }; settings: { indexing: string } };
+
+  it("each work estimate carries a quote whose ingest is the work's own estimate", async () => {
+    const app = appFor("u1");
+    for (const [path, body] of [
+      ["/v1/runs/run/reprocess/estimate", {}],
+      ["/v1/workspaces/w/documents/bulk/estimate", { action: "reprocess", documentIds: ["d1", "d2"] }],
+      ["/v1/workspaces/w/full-index/estimate", {}],
+    ] as const) {
+      const out = await (await post(app, path, body)).json() as { estimate: { credits: { low: number; high: number } }; quote: Quote };
+      expect(out.quote, path).toMatchObject({ kind: "estimate", pricingVersion: expect.any(String), pages: { low: 9, high: 9 } });
+      expect(out.quote.ingest.credits).toEqual({ low: Math.round(out.estimate.credits.low * 100) / 100, high: Math.round(out.estimate.credits.high * 100) / 100 });
+    }
+    const one = await (await post(app, "/v1/documents/d1/full-index/estimate")).json() as { quote: Quote };
+    expect(one.quote).toMatchObject({ pages: { low: 4, high: 4 }, settings: { indexing: "full" } });
+  });
+
+  it("a config change that reprocesses nothing quotes no ingest, only hosting under the new settings", async () => {
+    const out = await (await post(appFor("u1"), "/v1/workspaces/w/estimate", { name: "Renamed" })).json() as { estimate: unknown; quote: Quote };
+    expect(out.estimate).toBeNull();
+    expect(out.quote.ingest.credits).toEqual({ low: 0, high: 0 });
+    expect(out.quote.pages).toEqual({ low: 9, high: 9 });
+  });
+
+  it("the stored scope never reaches another organization's or workspace's documents", async () => {
+    const { storedQuoteFiles } = await import("../services/stored-quote.js");
+    await sql`insert into workspaces(id, org_id, user_id, name, slug, pipeline, is_default) values ('w2', 'o2', 'u2', 'Theirs', 'theirs', ${sql.json(JSON.parse(JSON.stringify(defaultPipelineFeatures)))}, true)`;
+    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total, artifacts)
+      values ('run2', 'o2', 'u2', 'w2', 'upload', 'completed', 'index', ${sql.json(JSON.parse(JSON.stringify(defaultPipelineFeatures)))}, 1, 50, '{}')`;
+    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id)
+      values ('x1', 'o2', 'u2', 'w2', 'run2', 'x.pdf', 'application/pdf', 'kx', 'completed', 50, 'cx')`;
+    // Another org's document ids, workspace or run under this org's scope: nothing.
+    expect(await storedQuoteFiles({ orgId: "o1", documentIds: ["x1"] })).toEqual([]);
+    expect(await storedQuoteFiles({ orgId: "o1", workspaceId: "w2" })).toEqual([]);
+    expect(await storedQuoteFiles({ orgId: "o1", runId: "run2" })).toEqual([]);
+    expect(await storedQuoteFiles({ orgId: "o1", documentIds: [] })).toEqual([]);
+    // Mixed ids keep only this org's own.
+    const own = await storedQuoteFiles({ orgId: "o1", documentIds: ["d1", "x1"] });
+    expect(own.map((file) => file.pages)).toEqual([4]);
+    // The bulk twin cannot quote another org's document through this workspace either.
+    const out = await (await post(appFor("u1"), "/v1/workspaces/w/documents/bulk/estimate", { action: "reprocess", documentIds: ["x1"] })).json() as { quote: Quote | null };
+    expect(out.quote?.pages.high ?? 0).toBe(0);
+  });
+
+  it("pages a model read are the measured mix", async () => {
+    const { storedQuoteFiles } = await import("../services/stored-quote.js");
+    await sql`insert into document_page_facts (document_id, page_number, vision_status) values ('d1', 1, 'extracted'), ('d1', 2, 'not-selected'), ('d2', 1, 'extracted')`;
+    const [file] = await storedQuoteFiles({ orgId: "o1", workspaceId: "w" });
+    expect(file).toMatchObject({ pages: 9, measured: { pages: 9, readPages: 2 }, type: "application/pdf" });
+  });
+});
+
 describe("estimate twins enforce the mutation's authorization", () => {
   beforeEach(seed);
 
@@ -234,24 +289,24 @@ describe("estimate twins enforce the mutation's authorization", () => {
     expect((await sql<{ n: number }[]>`select count(*)::int n from workspaces`)[0]!.n).toBe(before);
   });
 
-  it("upload estimate returns the profile and card revision, and narrows the range with a measured mix", async () => {
-    const pdf = { name: "a.pdf", size: 1, pages: 100 };
+  it("upload estimate is labelled an estimate, names its pricing version, and uses a file profile's counted pages", async () => {
+    const pdf = { name: "a.pdf", size: 100_000 };
     const unknown = await (await post(appFor("u1"), "/v1/uploads/estimate", { files: [pdf] })).json() as {
-      estimate: { credits: { low: number; high: number } | null }; profile: { quality: string; cardVersion: string }; cardRevision: string;
+      kind: string; estimate: { pages: number; pagesRange?: unknown }; profile: { quality: string; pricingVersion: string }; pricingVersion: string;
     };
-    expect(unknown.profile).toMatchObject({ quality: expect.any(String), cardVersion: expect.any(String) });
-    expect(unknown.cardRevision).toMatch(/^[0-9a-f]{64}$/);
-    const measured = await (await post(appFor("u1"), "/v1/uploads/estimate", {
-      files: [{ ...pdf, mix: { text: 1, complex: 0, scanned: 0 } }],
-    })).json() as { estimate: { credits: { low: number; high: number } | null } };
-    if (unknown.estimate.credits && measured.estimate.credits) {
-      expect(measured.estimate.credits.high).toBeLessThanOrEqual(unknown.estimate.credits.high);
-      expect(measured.estimate.credits.low).toBe(measured.estimate.credits.high);
-    }
-    // A partial or over-trusted mix is a 400, never a silent under-quote.
-    expect((await post(appFor("u1"), "/v1/uploads/estimate", { files: [{ ...pdf, mix: { text: 1 } }] })).status).toBe(400);
-    expect((await post(appFor("u1"), "/v1/uploads/estimate", { files: [{ ...pdf, mix: { text: 1, complex: 0, scanned: 0 }, mixConfidence: 2 }] })).status).toBe(400);
+    expect(unknown).toMatchObject({ kind: "estimate", pricingVersion: expect.any(String), profile: { quality: expect.any(String), pricingVersion: expect.any(String) } });
+    expect(unknown.estimate.pagesRange).toBeDefined();
+    const profile = { schema: 1, profiler: "test", kind: "pdf", format: "pdf", bytes: 100_000, pages: 12 };
+    const profiled = await (await post(appFor("u1"), "/v1/uploads/estimate", { files: [{ ...pdf, profile }] })).json() as { estimate: { pages: number; pagesRange?: unknown } };
+    expect(profiled.estimate.pages).toBe(12);
+    expect(profiled.estimate.pagesRange).toBeUndefined();
+    // A profile measured on another file size is dropped, never trusted.
+    const mismatched = await (await post(appFor("u1"), "/v1/uploads/estimate", { files: [{ ...pdf, profile: { ...profile, bytes: 5 } }] })).json() as { estimate: { pages: number } };
+    expect(mismatched.estimate.pages).toBe(unknown.estimate.pages);
+    // A hostile profile (unknown fields, pricing hints) is refused outright.
+    expect((await post(appFor("u1"), "/v1/uploads/estimate", { files: [{ ...pdf, profile: { ...profile, credits: 0 } }] })).status).toBe(400);
   });
+
 
   it("a workspace-restricted key cannot read another workspace through any estimate or job route", async () => {
     const created = await (await post(appFor("u1"), "/v1/runs/run/reprocess", {})).json() as { job: { id: string } };

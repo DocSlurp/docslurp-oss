@@ -1,4 +1,4 @@
-import { modalSandboxCostCents, modalSandboxRatesObservedAt } from "@docslurp/shared";
+import { pricing } from "@docslurp/shared";
 
 import { resolveWorkerDeploymentProfile, buildLocalComputeUsageEvent } from "../../../pipeline/local-compute-cost.js";
 import type { UsageEvent } from "../../../models.js";
@@ -225,8 +225,8 @@ function buildRemoteFs(sdk: ModalSdk, fs: import("modal").SandboxFilesystem): Re
 /**
  * Provider cost of one command as a usage event. The SDK reports no cpu/memory consumption
  * for a sandbox, so usage is the requested cpu x wall seconds and requested memory GiB x wall
- * seconds (what Modal bills for, at max(request, usage)). It is priced at Modal's sandbox rates
- * (`modalSandboxCostCents`, the verified INFRA_COST_OBSERVATIONS), not the worker host's, and the
+ * seconds (what Modal bills for, at max(request, usage)). It is priced at the pricing provider's sandbox
+ * rates (`internalCost.sandboxCostCents`; 0 under the open default), not the worker host's, and the
  * cost rides as `providerCostCents` so the provider-cost loss alert sees it. It is provider cost only:
  * `costRollup: "included"` and `billable: false` keep it out of customer credits.
  */
@@ -250,7 +250,7 @@ export function buildModalUsageEvent(config: ModalConfig, activityId: string, wa
     metadata: { activityId, sandboxProvider: "modal", billable: false },
   });
   const memoryGib = config.memoryMb / 1024;
-  const providerCostCents = modalSandboxCostCents({ cores: config.cpu, memoryGib, seconds: wallSeconds });
+  const providerCostCents = pricing().internalCost.sandboxCostCents({ provider: "modal", cores: config.cpu, memoryGib, seconds: wallSeconds });
   return {
     ...event,
     provider: "modal",
@@ -261,7 +261,7 @@ export function buildModalUsageEvent(config: ModalConfig, activityId: string, wa
       infraCostCents: providerCostCents,
       costSource: "estimate",
       rateSource: "modal-sandbox",
-      rateObservedAt: modalSandboxRatesObservedAt(),
+      rateObservedAt: pricing().internalCost.sandboxRatesObservedAt("modal"),
       physicalCores: config.cpu,
       memoryGib,
       wallSeconds,

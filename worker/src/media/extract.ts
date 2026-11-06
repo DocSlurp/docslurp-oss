@@ -52,9 +52,9 @@ export function chunkPlan(state: WorkflowState, documentId: string, provider: { 
 }
 
 /**
- * Bill a transcribed media file by its duration (PRICE_CARD): an audio minute
- * is one Rich page, a video minute whose frames were read is three, rounded up
- * per file. Provider transcription and frame costs are recorded but bill 0.
+ * Bill a transcribed media file by its duration: the pricing provider's Rich pages
+ * for an audio minute, or a video minute whose frames were read, rounded up per
+ * file. Provider transcription and frame costs are recorded but bill 0.
  * One charge per (run, document); the id makes a retried checkpoint a no-op.
  */
 export function chargeMediaMinutes(state: WorkflowState, documentId: string, kind: "audio" | "video", durationSeconds: number): void {

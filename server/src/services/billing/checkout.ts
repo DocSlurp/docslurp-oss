@@ -1,4 +1,4 @@
-import { CREDIT_PACK_CENTS, MAX_TOPUP_CENTS, MIN_TOPUP_CENTS } from "@docslurp/shared";
+import { creditPackCents, MAX_TOPUP_CENTS, MIN_TOPUP_CENTS } from "@docslurp/shared";
 
 import { ensureStripeCustomer } from "./customers.js";
 import {
@@ -50,7 +50,7 @@ export async function createTopUpCheckout(args: {
   const stripe = getStripe();
   const customerId = await ensureStripeCustomer(args.orgId);
   const credits = String(args.amountCents);
-  const pack = (CREDIT_PACK_CENTS as readonly number[]).includes(args.amountCents);
+  const pack = creditPackCents().includes(args.amountCents);
   const metadata = { orgId: args.orgId, purpose: "credit_topup", credits, pack: pack ? "true" : "false" };
   const session = await stripe.checkout.sessions.create(
     {

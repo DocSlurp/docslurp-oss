@@ -1,4 +1,5 @@
 import { realtimeMetrics } from "./realtime/broker.js";
+import { loadPricingProvider } from "@docslurp/shared/pricing-loader";
 import { closeDirectUploadLockPool } from "./lib/direct-upload-locks.js";
 import { tigrisUploadWebhookRoutes } from "./routes/tigris-upload-webhook.js";
 import { startDirectUploadReconciler, stopDirectUploadReconciler } from "./services/direct-upload-reconciler.js";
@@ -9,7 +10,7 @@ import { existsSync } from "node:fs";
 import { initializeObservability } from "@docslurp/shared/observability";
 import { startRevisionMaintenance } from "./realtime/revision-maintenance.js";
 import { envFlags, formatEnvFlags } from "@docslurp/shared/env-flags";
-import { startLiveModelPriceRefresh } from "@docslurp/shared";
+import { QuoteSettingsError, startLiveModelPriceRefresh } from "@docslurp/shared";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { dirname, resolve } from "node:path";
@@ -38,6 +39,7 @@ import { organizationsRoutes } from "./routes/organizations.js";
 import { runsRoutes } from "./routes/runs.js";
 import { jobsRoutes } from "./routes/jobs.js";
 import { uploadEstimateRoutes, uploadsRoutes } from "./routes/uploads.js";
+import { estimateRoutes } from "./routes/estimate.js";
 import { webhooksRoutes } from "./routes/webhooks.js";
 import { workspacesRoutes } from "./routes/workspaces.js";
 import { chatInstructionsRoutes } from "./routes/chat-instructions.js";
@@ -126,6 +128,7 @@ export function createApiApp(): Hono {
   app.onError(nativeErrorHandler((error, c) => {
     // The request span records it (message, stack) once the response is sent.
     setCurrentRequestError(error);
+    if (error instanceof QuoteSettingsError) return c.json({ error: error.message, code: "invalid_request" }, 400);
     return error instanceof UnreadableSourceError
       ? c.json({ error: error.message, code: error.code }, error.statusCode)
       : spendAwareErrorHandler(error, c);
@@ -199,6 +202,7 @@ export function createApiApp(): Hono {
   app.route("/v1/extractors", extractorRoutes);
   // Deprecated alias of /v1/uploads, kept while browser-key uploads depend on its widget CORS policy (middleware/widget-cors.ts).
   app.route("/v1/ingest", uploadsRoutes);
+  app.route("/v1/estimate", estimateRoutes);
   app.route("/v1/uploads", uploadEstimateRoutes);
   app.route("/v1/uploads", uploadsRoutes);
   app.route("/v1/extracts", extractsRoutes);
@@ -286,6 +290,9 @@ export function ensureApiStartup(): Promise<void> {
   if (!startupPromise) {
     startupPromise = (async () => {
       initializeObservability({ serviceName: "docslurp-api" });
+      // The pricing provider (DOCSLURP_PRICING_PLUGIN) prices every quote and charge; the service profile refuses to
+      // start without one rather than price with the open default.
+      await loadPricingProvider(process.env);
       // Invalid private endpoint config fails startup; the /models probe never blocks it.
       initializePrivateModelEndpoints();
       // Legacy extractor ids must be installed before any stored or incoming config is parsed; a bad alias fails startup.

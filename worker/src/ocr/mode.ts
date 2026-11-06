@@ -176,7 +176,7 @@ export function assertOcrConfiguration(env: NodeJS.ProcessEnv = process.env): Oc
   if (longEdge !== null) {
     console.warn(
       `[ocr] long-edge-opt-in DOCSLURP_OCR_MAX_LONG_EDGE=${longEdge} (default ${OCR_LONG_EDGE_DEFAULT}): more VM time and memory per page; ` +
-        "with escalation a dense page can cost more than the Rich page it bills (pricing:validate, docs/extraction/ocr.md)",
+        "with escalation a dense page can cost more than the Rich page it bills (docs/extraction/ocr.md)",
     );
   }
   return mode;

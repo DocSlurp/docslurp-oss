@@ -17,6 +17,21 @@ export const IMAGE_AREA_DPI = 150;
 /** A page whose text counts as more than this many pages is reported as dense (possible hidden or stuffed text). */
 export const DENSE_PAGE_EQUIVALENTS = 3;
 
+/**
+ * The dense-page allowance for paged documents (PDF pages, image frames), owner decision 2026-11-05: a page whose text counts
+ * as this many pages or fewer bills as 1; above it, the page bills its full text volume (the text rule, rounded up). Dense
+ * papers, contracts and statements stay one page each; stuffed pages are still caught. Area equivalents and their cap are not
+ * affected, and Office, EPUB, HTML and text files keep the whole-document text rule (no allowance). The pricing provider may
+ * set its own (`pageEquivalentAllowance`); this is core's default.
+ */
+export const DEFAULT_PAGE_EQUIVALENT_ALLOWANCE = 3;
+
+/** Text equivalents one paged-document page bills under `allowance`: 1 up to the allowance, its full volume above it. */
+export function billedPageEquivalents(textEquivalents: number, allowance: number = DEFAULT_PAGE_EQUIVALENT_ALLOWANCE): number {
+  const text = Math.max(1, Math.floor(textEquivalents) || 1);
+  return text > Math.max(1, Math.floor(allowance) || 1) ? text : 1;
+}
+
 /** Pages of text on one extracted page by the text rule (never sampled), at least 1. */
 export function pageTextEquivalents(pageText: string): number {
   return pageText.trim() ? Math.max(1, measuredTextPages(pageText)) : 1;
@@ -42,4 +57,9 @@ export function imageAreaEquivalents(widthPx: number, heightPx: number): number 
 /** One page's equivalents: the larger of its text and its area, at least 1. */
 export function pageEquivalents(text: number, area = 1): number {
   return Math.max(1, Math.floor(text) || 1, Math.floor(area) || 1);
+}
+
+/** What one paged-document page bills: the larger of its billed text (under the allowance) and its full area, at least 1. */
+export function billedPagePageEquivalents(text: number, area = 1, allowance: number = DEFAULT_PAGE_EQUIVALENT_ALLOWANCE): number {
+  return Math.max(billedPageEquivalents(text, allowance), Math.floor(area) || 1, 1);
 }

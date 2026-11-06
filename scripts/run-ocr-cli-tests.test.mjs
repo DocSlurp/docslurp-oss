@@ -33,7 +33,7 @@ test("the OCR CLI job runs on every PR into main and feat/offline-credit-estimat
   assert.match(pullRequest, /branches: \[main, feat\/offline-credit-estimator\]/);
   // Neither a path filter on the trigger nor a condition on the job may skip it.
   assert.doesNotMatch(on, /paths(-ignore)?:/);
-  const job = ci.slice(ci.indexOf("\n  ocr-cli:"), ci.indexOf("\n  # The offline estimator"));
+  const job = ci.slice(ci.indexOf("\n  ocr-cli:"), ci.indexOf("\n  # The offline file profiler"));
   assert.ok(job.length > 0);
   assert.doesNotMatch(job, /^\s{4}if:/m);
   assert.match(job, /node scripts\/run-ocr-cli-tests\.mjs/);

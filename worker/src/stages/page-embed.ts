@@ -157,7 +157,7 @@ export async function embedPageImages(
     }
   };
 
-  // Customer credits: a page embedded as an image is read by a model, so it bills as a Rich page (PRICE_CARD).
+  // Customer credits: a page embedded as an image is read by a model, so it bills as a Rich page (pricing provider).
   const estimate = (windowPages: number) => pageCredits("rich", windowPages);
   if (args.canAfford && !args.canAfford(estimate(windows[0]!.length))) {
     result.stoppedBy = "cost-cap";

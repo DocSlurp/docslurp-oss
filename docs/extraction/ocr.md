@@ -88,7 +88,7 @@ mode the memory is the VM's, not the worker's.
 A cap above the 2000 px default is an operator opt-in, off unless set. It buys detail on small print at the cost of more
 VM time and memory per page (a VM provider may need a larger size above 3000 px). A page still bills one Rich page,
 so with escalation on a dense page at a high cap can cost more than it bills: slightly loss-making. The worker logs
-`[ocr] long-edge-opt-in` at startup when it is set, `pricing:validate` reports the case as a warning, and the provider
+`[ocr] long-edge-opt-in` at startup when it is set, and the provider
 cost is recorded at the VM's real rate, so the provider-cost loss alert flags runs that lose money.
 
 ## Languages
@@ -133,7 +133,7 @@ Escalation reads survive activity retries. Each hosted call is persisted as it r
   actual input and output tokens and cost. An escalated page bills at most one Rich page, whatever the output length
   (escalation output tokens add no Rich pages), and an escalation that returned no text charges nothing; its provider
   cost is still recorded.
-- Quotes price a TIFF at its frames, up to 64 ([Pricing and credits](../pricing-and-credits.md#quotes-for-tiff-files)).
+- Quotes count a TIFF's frames as its pages, up to 64.
 
 ## Host phases outside OCR
 

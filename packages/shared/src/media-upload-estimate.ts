@@ -213,9 +213,9 @@ export type UploadMediaEstimate = z.infer<typeof uploadMediaEstimateSchema>;
 export type UploadMediaFile = { name: string; size: number; type?: string | null; durationSeconds?: number };
 
 /**
- * What the audio and video among `files` will cost. Prices follow PRICE_CARD: an audio minute is one Rich page, a
- * video minute whose frames are read is three, rounded up per file. A video read from its audio track alone bills as
- * audio, which is the cheaper option offered as `lighter`. Null when no file is media.
+ * What the audio and video among `files` will cost, at the pricing provider's media prices (`mediaRichPages`), rounded
+ * up per file. A video read from its audio track alone bills as audio, which is the cheaper option offered as `lighter`
+ * when the provider prices frames higher. Null when no file is media.
  */
 export function estimateUploadMedia(files: readonly UploadMediaFile[], options: { videoFrames: boolean }): UploadMediaEstimate | null {
   let audioFiles = 0;

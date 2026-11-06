@@ -7,35 +7,30 @@ from docslurp_estimate import Estimator, EstimatorError
 
 PACKAGE = pathlib.Path(__file__).resolve().parents[2]
 FIXTURES = PACKAGE / "tests" / "fixtures"
-CARD = json.loads((PACKAGE / "card.json").read_text())
-GOLDEN = json.loads((PACKAGE / "golden" / "cases.json").read_text())
+PRICING_WORDS = ("credit", "price", "priced", "bill", "rich", "fast", "cost", "free", "mix", "quote")
 
 
 class EstimatorTest(unittest.TestCase):
     estimator = Estimator()
 
-    def test_bundles_the_generated_card(self):
-        self.assertEqual(self.estimator.card()["revision"], CARD["revision"])
+    def test_reports_its_profile_schema(self):
+        self.assertEqual(self.estimator.info()["profileSchema"], 1)
 
-    def test_quotes_match_the_typescript_golden_cases(self):
-        for index, case in enumerate(GOLDEN["quote"]):
-            request = case["input"]
-            files = [{**file, "mixConfidence": min(1, max(0, file["mixConfidence"]))} if "mixConfidence" in file else file for file in request["files"]]
-            if files != request["files"]:
-                continue  # out-of-range confidences are a 400 at the API; the Rust port tests them directly
-            quote = self.estimator.quote(files, request["profile"], request.get("speedBoost"))
-            self.assertEqual({"estimate": quote["estimate"], "media": quote["media"]}, case["output"], f"quote[{index}]")
-
-    def test_probes_and_prices_files_on_disk(self):
-        quote = self.estimator.quote_paths([FIXTURES / "scan_plain.pdf", FIXTURES / "text_wrapped_with_photo.pdf"])
-        self.assertEqual(quote["estimate"]["pages"], 2)
-        self.assertEqual([probe["mix"]["scanned"] for probe in quote["probes"]], [1, 0])
-        self.assertIn("page mix known for every file", quote["estimate"]["basis"])
+    def test_profiles_files_on_disk_with_neutral_facts_only(self):
+        scan = self.estimator.profile_path(FIXTURES / "scan_plain.pdf")
+        text = self.estimator.profile_path(FIXTURES / "text_wrapped_with_photo.pdf")
+        self.assertEqual((scan["kind"], scan["pages"], scan["pdf"]["rasterPages"]), ("pdf", 1, 1))
+        self.assertEqual((text["pdf"]["rasterPages"], text["pdf"]["layoutHeavyPages"]), (0, 1))
+        for profile in (scan, text):
+            encoded = json.dumps(profile).lower()
+            self.assertLessEqual(len(encoded), 4096)
+            for word in PRICING_WORDS:
+                self.assertNotIn(word, encoded)
 
     def test_estimate_paths_reports_progress_in_order(self):
         events = []
         result = self.estimator.estimate_paths([FIXTURES / "scan_plain.pdf", FIXTURES / "missing.pdf", FIXTURES / "text_wrapped_with_photo.pdf"], on_progress=events.append)
-        self.assertEqual(events[-1]["type"], "quote-done")
+        self.assertEqual(events[-1]["type"], "done")
         first = [event["type"] for event in events if event.get("file", {}).get("index") == 0]
         self.assertEqual(first, ["file-start", "read-progress", "probe-start", "probe-done", "file-done"])
         self.assertEqual([file["status"] for file in result["files"]], ["probed", "failed", "probed"])
@@ -44,9 +39,10 @@ class EstimatorTest(unittest.TestCase):
         self.assertTrue(result["partial"])
         self.assertFalse(result["cancelled"])
         self.assertFalse(any("percent" in key for event in events for key in event))
-        expected = self.estimator.quote_paths([FIXTURES / "scan_plain.pdf", FIXTURES / "text_wrapped_with_photo.pdf"])
         self.assertEqual(result["stats"]["bytes"]["read"], result["stats"]["bytes"]["planned"])
-        self.assertEqual(result["quote"]["estimate"]["pages"], expected["estimate"]["pages"] + 1)
+        request = result["request"]["files"]
+        self.assertEqual([("profile" in file) for file in request], [True, False, True])
+        self.assertEqual(request[1], {"name": "missing.pdf", "size": 0})
 
     def test_estimate_paths_stops_when_cancelled(self):
         cancel = threading.Event()
@@ -60,19 +56,12 @@ class EstimatorTest(unittest.TestCase):
         self.assertTrue(result["cancelled"])
         self.assertEqual(result["stats"]["files"]["probed"], 3)
         self.assertEqual(result["stats"]["files"]["skipped"], 17)
-        self.assertEqual(result["quote"]["estimate"]["documents"], 20)
+        self.assertEqual(len(result["request"]["files"]), 20)
 
-    def test_refuses_what_it_cannot_price(self):
+    def test_refuses_malformed_requests(self):
         with self.assertRaises(EstimatorError) as caught:
-            self.estimator.quote([{"name": "a.pdf", "size": 1}], {**CARD["defaultProfile"], "quality": "ultra"})
-        self.assertEqual(caught.exception.code, "unsupported_rules")
-        with self.assertRaises(EstimatorError) as caught:
-            Estimator(card={**CARD, "rules": CARD["rules"] + 1}).quote([{"name": "a.pdf", "size": 1}])
-        self.assertEqual(caught.exception.code, "unsupported_rules")
-
-    def test_supplied_cards_are_reported(self):
-        quote = Estimator(card=CARD).quote([{"name": "a.pdf", "size": 1}])
-        self.assertEqual(quote["card"]["source"], "supplied")
+            self.estimator._call("ds_read_plan", b"{not json")
+        self.assertEqual(caught.exception.code, "invalid_request")
 
 
 if __name__ == "__main__":
