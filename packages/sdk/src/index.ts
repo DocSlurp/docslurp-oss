@@ -1076,9 +1076,10 @@ function isStreamBody(body: unknown): boolean {
 
 function rejectUncopyableFields(input: object, keys: readonly string[]): void {
   for (const key of keys) {
-    if (key in input && !Object.prototype.propertyIsEnumerable.call(input, key)) {
-      throw new TypeError(`Selection ${key} must be an enumerable own property.`);
-    }
+    if (!(key in input)) continue;
+    const field = Object.getOwnPropertyDescriptor(input, key);
+    if (!field?.enumerable) throw new TypeError(`Selection ${key} must be an enumerable own property.`);
+    if (!("value" in field)) throw new TypeError(`Selection ${key} must be a data property.`);
   }
 }
 
@@ -1086,11 +1087,30 @@ function rejectUncopyableFields(input: object, keys: readonly string[]): void {
 // before it can select a default target or widen a delegated capability.
 const INTAKE_SELECTION_FIELDS = ["project", "projectId", "projectIds", "projectName", "project_id", "project_ids", "newProject", "templateKey", "orgId"] as const;
 
-function rejectUncopyableIntakeSelection(input: object): void {
+function rejectUncopyableIntakeSelection(input: object, plainProjection = false): void {
   rejectUncopyableFields(input, INTAKE_SELECTION_FIELDS);
+  for (const key of INTAKE_SELECTION_FIELDS) {
+    const value = Object.getOwnPropertyDescriptor(input, key)?.value;
+    if (value === undefined) continue;
+    if (key === "projectIds" || key === "project_ids") { copyStringRestriction(value, key); continue; }
+    if (typeof value !== (key === "newProject" ? "boolean" : "string")) throw new TypeError(`Selection ${key} has an invalid value type.`);
+  }
   // A copied hook can replace the entire protocol object after scope validation.
   // Refuse it at the original-input boundary, including batch query children.
-  if ("toJSON" in input) throw new TypeError("Request selections cannot use custom toJSON serialization.");
+  if (!plainProjection && "toJSON" in input) throw new TypeError("Request selections cannot use custom toJSON serialization.");
+}
+
+// Read array data slots once; custom iterators and element serializers cannot
+// replace a capability allowlist or its origin restrictions.
+function copyStringRestriction(value: unknown, key: string): string[] {
+  if (!Array.isArray(value)) throw new TypeError(`Selection ${key} must be an array of strings.`);
+  const result: string[] = [];
+  for (let i = 0; i < value.length; i++) {
+    const field = Object.getOwnPropertyDescriptor(value, String(i));
+    if (!field || !("value" in field) || typeof field.value !== "string") throw new TypeError(`Selection ${key} must contain string data properties.`);
+    result.push(field.value);
+  }
+  return result;
 }
 
 // Scope belongs to a URL/file-list envelope or upload options, never a file.
@@ -1622,6 +1642,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   function search(input: SearchInput | SearchBatchInput, options?: RequestOptions): SearchRequest | Promise<SearchBatchResponse> {
     rejectLegacyProjectOptions(input);
     if ("queries" in input) {
+      for (const key of INTAKE_SELECTION_FIELDS) if (key in input) throw new TypeError("Pass batch search selections in each query.");
       if (input.queries.length < 1 || input.queries.length > 20) throw new RangeError("search accepts 1–20 queries.");
       const concurrency = input.concurrency ?? 4;
       if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4) throw new RangeError("Search concurrency must be an integer from 1 to 4.");
@@ -2327,22 +2348,32 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     createCapability(input: CreateCapabilityInput = {}, requestOptions?: RequestOptions): Promise<{ token: string; expiresAt: string } & JsonObject> {
       rejectLegacyProjectOptions(input);
       // This endpoint explicitly projects plain protocol values below.
-      rejectUncopyableFields(input, INTAKE_SELECTION_FIELDS);
+      rejectUncopyableIntakeSelection(input, true);
       rejectUncopyableFields(input, ["policy", "ttlSeconds", "boundClientKeyId", "allowedOrigins"]);
+      if (input.ttlSeconds !== undefined && (typeof input.ttlSeconds !== "number" || !Number.isFinite(input.ttlSeconds))) throw new TypeError("Capability ttlSeconds must be a finite number.");
+      if (input.boundClientKeyId !== undefined && typeof input.boundClientKeyId !== "string") throw new TypeError("Capability boundClientKeyId must be a string.");
       const policy = input.policy;
       const policyFields = ["maxPagesPerQuery", "maxCreditsPerQuery", "maxPagesPerDay", "deadlineMs", "allowFullIndexRequest", "allowAgentDiscovery", "mapRouter"] as const;
       if (policy !== undefined) {
         if (!policy || typeof policy !== "object" || Array.isArray(policy)) throw new TypeError("Capability policy must be an object.");
         rejectUncopyableFields(policy, policyFields);
+        for (const key of policyFields) {
+          const value = policy[key];
+          if (value === undefined) continue;
+          const valid = key === "mapRouter" ? ["off", "auto", "always"].includes(value as string)
+            : key === "allowFullIndexRequest" || key === "allowAgentDiscovery" ? typeof value === "boolean"
+            : typeof value === "number" && Number.isFinite(value);
+          if (!valid) throw new TypeError(`Capability policy ${key} has an invalid value type.`);
+        }
       }
       // Build plain protocol values, so custom serialization cannot erase a
       // restriction and activate the server's broader omission defaults.
       const body = {
-        projectIds: input.projectIds === undefined ? undefined : Array.from(input.projectIds),
+        projectIds: input.projectIds === undefined ? undefined : copyStringRestriction(input.projectIds, "projectIds"),
         policy: policy === undefined ? undefined : Object.fromEntries(policyFields.map(key => [key, policy[key]])),
         ttlSeconds: input.ttlSeconds,
         boundClientKeyId: input.boundClientKeyId,
-        allowedOrigins: input.allowedOrigins === undefined ? undefined : Array.from(input.allowedOrigins),
+        allowedOrigins: input.allowedOrigins === undefined ? undefined : copyStringRestriction(input.allowedOrigins, "allowedOrigins"),
       };
       return request("/v1/capabilities", jsonRequest("POST", body), requestOptions);
     },

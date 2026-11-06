@@ -109,10 +109,10 @@ for (const method of ["upload", "extract"]) test(`${method} refuses scope fields
         await assert.rejects(() => client[method](input, { directUpload, project: "explicit-options" }), /Pass intake selection/);
       }
     }
-    const file = Object.assign(new Blob(["test"]), { [key]: "intended" });
+    const file = Object.assign(new Blob(["test"]), { [key]: key === "newProject" ? true : "intended" });
     await assert.rejects(() => client[method]([file]), /Pass intake selection/);
     await assert.rejects(() => client[method]({ files: [file] }), /Pass intake selection/);
-    await assert.rejects(() => client[method](Object.assign([new Blob(["test"])], { [key]: "intended" })), /Pass intake selection/);
+    await assert.rejects(() => client[method](Object.assign([new Blob(["test"])], { [key]: key === "newProject" ? true : "intended" })), /Pass intake selection/);
   }
   const staleFile = Object.assign(new Blob(["test"]), { workspace: "intended" });
   await assert.rejects(() => client[method]({ files: [staleFile] }), /Legacy workspace selection/);
@@ -215,4 +215,43 @@ test("request serialization hooks cannot erase explicit project or organization 
     await assert.rejects(async () => call({ project: "intended", orgId: "intended-org", toJSON: () => ({}) }), /custom toJSON serialization/);
   }
   assert.equal(requests, 0);
+});
+
+test("selection and capability restrictions require stable protocol values", async () => {
+  let requests = 0;
+  let reads = 0;
+  const client = createDocSlurpClient({ project: "client-default", fetch: async () => { requests++; throw new Error("network must not run"); } });
+  const erased = { toJSON: () => undefined };
+  for (const value of [erased, null, 42, ["org"]]) {
+    await assert.rejects(async () => client.createUploadSession({ files: [{ filename: "x", sizeBytes: 1, mimeType: "text/plain" }], project: "intended", orgId: value }), /invalid value type/);
+    await assert.rejects(async () => client.search({ q: "question", project: "intended", orgId: value }), /invalid value type/);
+  }
+  const input = { q: "question" };
+  Object.defineProperty(input, "project", { enumerable: true, get() { reads++; return reads === 1 ? "intended" : "default"; } });
+  await assert.rejects(async () => client.search(input), /must be a data property/);
+  for (const key of ["project", "orgId", "projectIds", "newProject", "templateKey"]) {
+    await assert.rejects(async () => client.search({ queries: [{ q: "question" }], [key]: "intended" }), /batch search selections in each query/);
+  }
+  for (const input of [
+    { boundClientKeyId: erased }, { ttlSeconds: erased }, { allowedOrigins: [erased] },
+    { projectIds: [erased] }, { policy: { maxCreditsPerQuery: erased } },
+    { policy: { allowAgentDiscovery: erased } }, { policy: { mapRouter: erased } },
+  ]) await assert.rejects(async () => client.createCapability({ projectIds: ["restricted"], ...input }), /must be|must contain|invalid value type/);
+  const policy = {};
+  Object.defineProperty(policy, "maxCreditsPerQuery", { enumerable: true, get() { reads++; return 1; } });
+  await assert.rejects(async () => client.createCapability({ projectIds: ["restricted"], policy }), /must be a data property/);
+  assert.equal(reads, 0);
+  assert.equal(requests, 0);
+});
+
+test("capability arrays use validated data slots rather than custom iterators", async () => {
+  let captured;
+  const client = createDocSlurpClient({ fetch: async (_url, init) => {
+    captured = JSON.parse(init.body);
+    return new Response(JSON.stringify({ token: "sealed", expiresAt: "later" }), { headers: { "content-type": "application/json" } });
+  } });
+  const projectIds = ["restricted"];
+  projectIds[Symbol.iterator] = function* () { yield "broader"; };
+  await client.createCapability({ projectIds });
+  assert.deepEqual(captured.projectIds, ["restricted"]);
 });
