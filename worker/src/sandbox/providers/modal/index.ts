@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { pricing } from "@docslurp/shared";
 
 import { boundedVmStream } from "./transfer.js";
@@ -49,6 +49,8 @@ export interface ModalConfig {
   vmIdleSeconds?: number;
   /** Tests only: how long a terminate waits for a create call in flight (CREATE_SETTLE_MS). */
   createSettleMs?: number;
+  /** Tests only: when an unconfirmed creation's token is released at the latest (default: lifetime plus margins). */
+  unconfirmedBackstopMs?: number;
 }
 
 /**
@@ -117,6 +119,8 @@ const TERMINATE_REQUEST_MS = 10_000;
 const ASSET_ROOT = "/opt/docslurp-assets";
 /** How long a terminate waits for a create call still in flight before leaving it to settle on its own. */
 const CREATE_SETTLE_MS = 5_000;
+/** The deadline on Modal's create call (ensureSandbox). */
+const CREATE_DEADLINE_MS = 30_000;
 /** Added to a quarantined VM's lifetime bound (at most 10% of the lifetime): Modal's stop is not instantaneous. */
 const LIFETIME_MARGIN_MS = 60_000;
 
@@ -581,8 +585,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         let holdsToken = false;
         /**
          * When Modal's create call returned (council V #1): the VM's own lifetime limit started no later than this, so a VM
-         * whose terminate is unconfirmed is gone by lifetimeStart + sessionTimeoutSeconds (+ margin). Metering starts
-         * earlier, at the creation request (lane.accountedAt): each bound errs on its own safe side.
+         * whose terminate is unconfirmed is gone by lifetimeStart + sessionTimeoutSeconds (+ margin). Metering starts at
+         * the same moment (lane.accountedAt, real-Modal M1); the worker token is held from the creation request.
          */
         let lifetimeStart: number | undefined;
         let rawCreate: Promise<unknown> | undefined;
@@ -620,6 +624,18 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           }
         }
 
+        /** After a failed create: stop a VM Modal may have made under `name` anyway. Logged; never throws. */
+        async function reapOrphan(name: string, createError: unknown): Promise<void> {
+          try {
+            const orphan = await withDeadline(client.sandboxes.fromName(config.app, name), 10_000);
+            await withDeadline(orphan.terminate(), TERMINATE_REQUEST_MS);
+            console.error(`[parser-sandbox] provider=modal status=orphan-vm-terminated activity=${context.activityId} after a failed create: ${safeMessage(config, createError)}`);
+          } catch (lookup) {
+            if (typeof sdk.NotFoundError === "function" && lookup instanceof sdk.NotFoundError) return;
+            console.warn(`[parser-sandbox] provider=modal status=orphan-vm-lookup-failed activity=${context.activityId}: ${safeMessage(config, lookup)}`);
+          }
+        }
+
         function releaseToken(): void {
           if (holdsToken) { holdsToken = false; vmBudget.release(); }
         }
@@ -654,6 +670,15 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
                   // create's own handlers then stop a late VM and release the token, or quarantine it from its real start.
                   terminateDone = true;
                   console.error(`[parser-sandbox] provider=modal status=vm-creation-unconfirmed activity=${context.activityId}; holding its capacity until the create call settles`);
+                  // Backstop (council W #6): a create call that never settles cannot hold the token forever. Any VM it made
+                  // started before now and Modal stops it within its lifetime, so the token is free after that and margins.
+                  const lifetimeMs = config.sessionTimeoutSeconds * 1000;
+                  const backstopMs = config.unconfirmedBackstopMs ?? lifetimeMs + Math.min(LIFETIME_MARGIN_MS, lifetimeMs * 0.1) + CREATE_DEADLINE_MS;
+                  setTimeout(() => {
+                    if (!holdsToken) return;
+                    console.error(`[parser-sandbox] provider=modal status=vm-creation-backstop activity=${context.activityId}; releasing capacity after the VM lifetime`);
+                    releaseToken();
+                  }, backstopMs).unref();
                   throw new Error("modal sandbox creation did not settle; its capacity stays held until it does");
                 }
               }
@@ -686,7 +711,10 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             const app = await withDeadline(client.apps.fromName(config.app, { createIfMissing: true }), 30_000);
             const registrySecret = config.registrySecret && !config.imageId ? await withDeadline(client.secrets.fromName(config.registrySecret), 30_000) : undefined;
             const image = config.imageId ? await withDeadline(client.images.fromId(config.imageId), 30_000) : client.images.fromRegistry(config.image, registrySecret);
+            // A unique name, so a VM whose create call failed in transit can be found and stopped (council W #6).
+            const name = `docslurp-parser-${randomBytes(12).toString("hex")}`;
             const create = client.sandboxes.create(app, image, {
+              name,
               runtime: "vm",
               command: [...PARSER_VM_IDLE_COMMAND],
               includeOidcIdentityToken: false,
@@ -710,13 +738,15 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
               }
               sandbox = created;
               return created;
-            }, (error: unknown) => {
-              // The create failed: no VM exists. A capacity held for an unconfirmed creation is free again.
+            }, async (error: unknown) => {
+              // The create failed, but a transport failure can hide a VM Modal made: look it up by name and stop it
+              // (council W #6), best effort. Then no VM is assumed, and a capacity held for an unconfirmed creation is free.
+              await reapOrphan(name, error);
               if (terminateDone) { recordTail(Date.now()); releaseToken(); }
               throw error;
             });
             rawCreate = create.catch(() => {});
-            const opened = await withDeadline(create, 30_000);
+            const opened = await withDeadline(create, CREATE_DEADLINE_MS);
             if (closed || lane.dead) throw new Error("parser VM session closed during creation");
             if (!opened) throw new Error("parser VM creation returned no sandbox");
             // As root, once: kernel link protections on and read back as 1, or this VM runs nothing (council K #5, Modal check).

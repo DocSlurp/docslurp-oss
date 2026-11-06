@@ -269,6 +269,7 @@ const lifecycleConfig = {
 };
 
 class NotFound extends Error {}
+class ModalNotFound extends Error {}
 
 type FakeProcess = { stdout: ReadableStream<Uint8Array>; stderr: ReadableStream<Uint8Array>; wait(): Promise<number> };
 function stream(text: string | Uint8Array): ReadableStream<Uint8Array> { return new ReadableStream({ start(c) { c.enqueue(typeof text === "string" ? Buffer.from(text) : text); c.close(); } }); }
@@ -303,6 +304,8 @@ function fakeSdk(
     resetUnhealthyInVm?: number;
     /** The VM-start image lock finds paths the parser user can write (exit 6). */
     lockFails?: boolean;
+    /** A create that fails left a VM behind anyway, found by name (council W #6). */
+    orphanOnFailedCreate?: boolean;
     /** A root file write (an upload or an asset) fails with this message, by target path. */
     writeFails?: (target: string) => string | undefined;
     /** The leftover kill exec throws: a deadline (held up inside the VM) or a transport error. */
@@ -333,6 +336,8 @@ function fakeSdk(
     readsAsUser: 0,
     leftoverKills: 0,
     locks: 0,
+    lookups: [] as string[],
+    orphanTerminates: [] as string[],
     resets: [] as Array<{ vm: number; roots: string[] }>,
     rootWrites: [] as string[],
     events: [] as string[],
@@ -441,12 +446,18 @@ function fakeSdk(
   };
   const sdk = {
     SandboxFilesystemNotFoundError: NotFound,
+    NotFoundError: ModalNotFound,
     Sandbox: class { constructor(_client: unknown, _id: string) {} async terminate() { state.terminate++; state.lateTerminate++; if (opts.terminateFails) throw new Error("terminate refused"); } },
     ModalClient: class {
       apps = { fromName: async () => { if (opts.lookupDelayMs) await new Promise((resolve) => setTimeout(resolve, opts.lookupDelayMs)); return {}; } };
       images = { fromRegistry: (tag: string, secret?: unknown) => void state.images.push([tag, secret]) };
       secrets = { fromName: async (name: string) => ({ secret: name }) };
       sandboxes = {
+        fromName: async (_app: string, name: string) => {
+          state.lookups.push(name);
+          if (!opts.orphanOnFailedCreate) throw new ModalNotFound(`no sandbox named ${name}`);
+          return { terminate: async () => { state.orphanTerminates.push(name); } };
+        },
         create: async (_app: unknown, _image: unknown, options: unknown) => {
           state.createOptions.push(options);
           await opts.createGate;
@@ -1199,6 +1210,46 @@ describe("modal provider session lifecycle", () => {
         await vi.advanceTimersByTimeAsync(31_000);
         await b;
       } finally { vi.useRealTimers(); }
+    });
+
+    it("releases an unconfirmed creation's capacity at the lifetime backstop if its create call never settles (council W #6)", async () => {
+      vi.useFakeTimers();
+      try {
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        const never = new Promise<void>(() => {});
+        const { sdk, state } = fakeSdk({ createGate: never, exec: async () => finished() });
+        const provider = createModalProvider(async () => sdk);
+        const pooled = { ...config, vmsPerActivity: 1, vmsPerWorker: 1, vmIdleSeconds: 60, createSettleMs: 30, unconfirmedBackstopMs: 120_000 };
+        const failed = provider.openSession(pooled, { activityId: "a" }).catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(30_001);
+        await vi.advanceTimersByTimeAsync(31);
+        expect(await failed).toBeInstanceOf(Error);
+        const b = provider.openSession(pooled, { activityId: "b" }).catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(state.createOptions).toHaveLength(1); // still held
+        await vi.advanceTimersByTimeAsync(61_000);
+        expect(state.createOptions).toHaveLength(2); // the backstop freed it for B
+        await vi.advanceTimersByTimeAsync(31_000);
+        await b;
+      } finally { vi.useRealTimers(); }
+    });
+
+    it("after a create that fails in transit, finds a VM Modal made anyway by its name and stops it (council W #6)", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const orphaned = fakeSdk({ createFails: true, orphanOnFailedCreate: true, exec: async () => finished() });
+      await expect(createModalProvider(async () => orphaned.sdk).openSession(config, { activityId: "a" })).rejects.toThrow(/creation failed/);
+      const name = (orphaned.state.createOptions[0] as { name?: string }).name!;
+      expect(name).toMatch(/^docslurp-parser-[0-9a-f]{24}$/);
+      expect(orphaned.state.lookups).toEqual([name]);
+      expect(orphaned.state.orphanTerminates).toEqual([name]);
+      // No VM by that name: nothing to stop, nothing logged as a failure.
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const clean = fakeSdk({ createFails: true, exec: async () => finished() });
+      await expect(createModalProvider(async () => clean.sdk).openSession(config, { activityId: "a" })).rejects.toThrow(/creation failed/);
+      expect(clean.state.lookups).toHaveLength(1);
+      expect(clean.state.orphanTerminates).toEqual([]);
+      expect(warn.mock.calls.some((call) => String(call[0]).includes("orphan-vm-lookup-failed"))).toBe(false);
     });
 
     it("waits for a worker VM before admitting a command, and an abort ends that wait (recheck T #2)", async () => {
