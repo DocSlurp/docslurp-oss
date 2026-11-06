@@ -85,6 +85,10 @@ jobs:
         run: pnpm worker:check --profile=test --sandbox
       - run: ${{ matrix.run }}
         if: matrix.run
+      # The page layout walker (image placement, table geometry) that local mode, the routing eval and the PDF VM share.
+      - name: PDF layout facts walker tests
+        if: matrix.suite == 'worker 1/2'
+        run: '"${PYTHON_VENV}/bin/python" -I worker/scripts/test_pdf_layout_facts.py'
       # Deterministic, local-only routing regression gate: no hosted AI calls, no spend.
       - name: Document routing regression eval
         if: matrix.suite == 'worker 1/2'
