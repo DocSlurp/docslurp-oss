@@ -69,7 +69,7 @@ test("keeps the offline estimator's file probes out of the API, worker, shared c
   const root = fixture({
     "server/src/a.ts": 'import { createEstimator } from "@docslurp/estimate";',
     "worker/src/b.ts": 'const probe = await import("@docslurp/estimate/node");',
-    "packages/shared/src/c.ts": 'import card from "../../estimate/card.json";',
+    "packages/shared/src/c.ts": 'import rules from "../../estimate/profiler-rules.json";',
     "packages/shared/src/d.ts": 'import { quoteUpload } from "./upload-quote.js";',
     "packages/sdk/src/e.ts": 'export { createEstimator } from "@docslurp/estimate";',
     "packages/cli/src/f.ts": 'import { createEstimator } from "@docslurp/estimate";',

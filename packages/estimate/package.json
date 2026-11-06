@@ -1,8 +1,8 @@
 {
   "name": "@docslurp/estimate",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
-  "description": "Offline DocSlurp credit estimates: probe files locally and quote an upload with the published price card.",
+  "description": "Offline DocSlurp file profiler: measure files locally (type, pages, PDF page facts, media duration) and send the profiles to the server for a quote.",
   "type": "module",
   "license": "MIT",
   "homepage": "https://docslurp.io/docs/packages/estimate",
@@ -36,9 +36,9 @@
   "files": [
     "js",
     "dist",
-    "card.json",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "profiler-rules.json"
   ],
   "engines": {
     "node": ">=20"

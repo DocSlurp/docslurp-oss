@@ -1,0 +1,97 @@
+{
+ "profileSchema": 1,
+ "maxSampledPages": 24,
+ "wordsPerPageBuckets": [
+  0,
+  1,
+  11,
+  30,
+  200,
+  500
+ ],
+ "imageCoverageBuckets": [
+  0,
+  0,
+  0.15,
+  0.5,
+  0.9
+ ],
+ "extensions": {
+  "audio": [
+   "mp3",
+   "wav",
+   "flac",
+   "ogg",
+   "opus",
+   "m4a",
+   "aac",
+   "weba"
+  ],
+  "video": [
+   "mp4",
+   "webm",
+   "mov",
+   "mkv",
+   "avi"
+  ],
+  "image": [
+   "png",
+   "jpg",
+   "jpeg",
+   "tiff",
+   "tif",
+   "webp"
+  ],
+  "text": [
+   "txt",
+   "md",
+   "markdown",
+   "html",
+   "htm",
+   "mhtml",
+   "csv",
+   "tsv",
+   "json",
+   "jsonl",
+   "ndjson",
+   "tex"
+  ]
+ },
+ "textPages": {
+  "mimePrefixes": [
+   "text/",
+   "application/json",
+   "application/x-ndjson",
+   "application/xml",
+   "application/javascript",
+   "application/x-yaml"
+  ],
+  "lines": 60,
+  "chars": 3500
+ },
+ "multiFrameImages": {
+  "maxFrames": 64,
+  "mimeTypes": [
+   "image/tiff",
+   "image/tiff-fx"
+  ],
+  "extensions": [
+   "tif",
+   "tiff"
+  ]
+ },
+ "pageRasterRouting": {
+  "sparsePageWords": 30,
+  "minSignificantImageCoverage": 0.02,
+  "minSignificantImagePixels": 32,
+  "rasterPageMinLargestImageCoverage": 0.25,
+  "rasterPageMinTotalImageCoverage": 0.35,
+  "stampTextMaxWords": 10,
+  "stampedScanMinImageCoverage": 0.5,
+  "sparseTextFullPageImageCoverage": 0.85,
+  "drawnContentMinBytesPerPage": 16384,
+  "repeatedImageMinPages": 3,
+  "repeatedImageMinShare": 0.2,
+  "unspacedCharsPerWord": 2
+ }
+}

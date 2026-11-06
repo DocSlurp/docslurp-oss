@@ -1,6 +1,6 @@
-// @docslurp/estimate: offline DocSlurp credit estimates. Probe files on this machine and quote an upload with the
-// published price card, as POST /v1/uploads/estimate would. One WebAssembly module with a plain JSON ABI
-// (src/abi.rs); this file loads it in browsers, Node, Deno and edge runtimes and wraps the calls.
+// @docslurp/estimate: the offline DocSlurp file profiler. Measure files on this machine (type, pages, PDF page facts,
+// media duration) and send the profiles to POST /v1/uploads/estimate for a quote; nothing here prices anything. One
+// WebAssembly module with a plain JSON ABI (src/abi.rs); this file loads it in browsers, Node, Deno and edge runtimes.
 
 import { blobSource, eventStream, runEstimate } from "./run.mjs";
 
@@ -35,8 +35,7 @@ async function compile(source) {
 /**
  * Create an estimator. `module` is a compiled `WebAssembly.Module` (Cloudflare Workers: `import wasm from
  * "@docslurp/estimate/docslurp_estimate.wasm"`), the module's bytes, or a URL; by default the bundled file next to
- * this package. `card` is a price card from `GET /v1/billing/estimate-card` (see `fetchEstimateCard`); by default
- * the card bundled into the module.
+ * this package.
  */
 export async function createEstimator(options = {}) {
   const module = await compile(options.module);
@@ -46,7 +45,6 @@ export async function createEstimator(options = {}) {
   const instantiate = () => new WebAssembly.Instance(module, { env: { memory } });
   let instance = instantiate();
   const health = { calls: 0, crashes: 0, resets: 0 };
-  const cardBytes = options.card ? encoder.encode(typeof options.card === "string" ? options.card : JSON.stringify(options.card)) : null;
 
   function call(name, ...inputs) {
     const exports = instance.exports;
@@ -92,47 +90,27 @@ export async function createEstimator(options = {}) {
   const meta = (file) => ({ name: file.name, ...(file.type ? { type: file.type } : {}), size: file.size });
 
   const estimator = {
-    /** The price card quotes use: the supplied card, else the bundled one. */
-    card() {
-      return options.card ? (typeof options.card === "string" ? JSON.parse(options.card) : options.card) : call("ds_card");
+    /** `{ profileSchema, profiler }`: the profile shape and profiler version this module emits. */
+    info() {
+      return call("ds_info");
     },
-    /** Bytes `probe` needs of a file: `{ head, tail }` (head === size means the whole file). */
+    /** Bytes `profile` needs of a file: `{ head, tail }` (head === size means the whole file). */
     readPlan(file) {
       return call("ds_read_plan", json(meta(file)));
     },
-    /** Probe a file from its first bytes (`head`) and, for large media, its last bytes (`tail`). */
-    probe(file, head, tail) {
+    /** Profile a file from its first bytes (`head`) and, for large media, its last bytes (`tail`). */
+    profile(file, head, tail) {
       return call("ds_probe", json(meta(file)), head, tail);
     },
-    /** Quote `{ files, profile?, speedBoost? }`. Without a profile, a new hosted workspace with default settings. */
-    quote(request) {
-      return call("ds_quote", json(request), cardBytes);
-    },
-    /** Read and probe a `Blob`/`File` (browsers, Deno, Node 20+), reading only the bytes the probe needs. */
-    async probeBlob(blob, name = blob.name) {
+    /** Read and profile a `Blob`/`File` (browsers, Deno, Node 20+), reading only the bytes the profile needs. */
+    async profileBlob(blob, name = blob.name) {
       const file = { name, type: blob.type, size: blob.size };
       const plan = estimator.readPlan(file);
       const head = new Uint8Array(await blob.slice(0, plan.head).arrayBuffer());
       const tail = plan.tail > 0 ? new Uint8Array(await blob.slice(blob.size - plan.tail).arrayBuffer()) : undefined;
-      return estimator.probe(file, head, tail);
+      return estimator.profile(file, head, tail);
     },
-    /** Probe each file and quote them together. Files the probe cannot read are priced from name, type and size. */
-    async quoteFiles(blobs, request = {}) {
-      const files = [];
-      const probes = [];
-      for (const blob of blobs) {
-        let probed = null;
-        try {
-          probed = await estimator.probeBlob(blob);
-        } catch (error) {
-          if (!(error instanceof EstimatorError)) throw error;
-        }
-        probes.push(probed);
-        files.push(applyProbe({ name: blob.name, size: blob.size, ...(blob.type ? { type: blob.type } : {}) }, probed));
-      }
-      return { ...estimator.quote({ ...request, files }), probes };
-    },
-    /** Probe and quote with progress events, cancellation and per-file fallbacks; see `estimateFiles`. */
+    /** Profile files with progress events, cancellation and per-file fallbacks; see `estimateFiles`. */
     estimateFiles(blobs, options) {
       return estimateFiles(estimator, blobs, options);
     },
@@ -147,11 +125,10 @@ export async function createEstimator(options = {}) {
 const sourcesOf = (files) => Array.from(files, (file) => (typeof file?.open === "function" ? file : blobSource(file)));
 
 /**
- * Probe `files` (Blobs/Files) in bounded batches and quote them, with progress events. Never rejects for one
- * file: a file that cannot be read or probed is priced from name, type and size, with a `reason`. When
- * `options.signal` aborts, work stops between files and between 1 MiB reads, and the result is `partial`, quoting the
- * finished files plus size-only assumptions for the rest. Rejects only for a request the module refuses (e.g. a
- * profile from a newer price card).
+ * Profile `files` (Blobs/Files) in bounded batches, with progress events. Never rejects for one file: a file that cannot
+ * be read or profiled is sent with its name, type and size only, with a `reason`. When `options.signal` aborts, work
+ * stops between files and between 1 MiB reads, and the result is `partial`. `result.request.files` is the body for
+ * `POST /v1/uploads/estimate` (see `requestQuote`).
  */
 export async function estimateFiles(estimator, files, options = {}) {
   const onProgress = options.onProgress;
@@ -159,34 +136,26 @@ export async function estimateFiles(estimator, files, options = {}) {
 }
 
 /**
- * The same run as an async iterator of events, ending with `quote-done` (whose `result` is what `estimateFiles`
- * returns). A slow consumer pauses the run once `highWaterMark` events are waiting, so events never pile up.
+ * The same run as an async iterator of events, ending with `done` (whose `result` is what `estimateFiles` returns). A
+ * slow consumer pauses the run once `highWaterMark` events are waiting, so events never pile up.
  */
 export function estimateEvents(estimator, files, options = {}) {
   const sources = sourcesOf(files);
   return eventStream((emit) => runEstimate(estimator, sources, options, emit), options.highWaterMark);
 }
 
-/** Copy a probe's measurements into a quote file, keeping fields the file already has (ProbeResult::apply). */
-export function applyProbe(file, probe) {
-  if (!probe) return file;
-  const next = { ...file };
-  if (next.type === undefined && probe.mimeType) next.type = probe.mimeType;
-  if (next.pages === undefined && probe.pages !== undefined) next.pages = probe.pages;
-  if (next.durationSeconds === undefined && probe.durationSeconds !== undefined) next.durationSeconds = probe.durationSeconds;
-  if (next.mix === undefined && probe.mix) {
-    next.mix = probe.mix;
-    if (probe.mixConfidence !== undefined) next.mixConfidence = probe.mixConfidence;
-  }
-  return next;
-}
-
 /**
- * The current price card from a DocSlurp server (public, no key). Pass it to `createEstimator({ card })` so a
- * long-lived offline build quotes current prices; quotes report which card they used.
+ * Ask a DocSlurp server to quote profiled files: `POST /v1/uploads/estimate` with `files` (each `{ name, size, type?,
+ * profile? }`, e.g. `result.request.files`). Needs an API key with the `ingest` scope (or a session). The response is
+ * the server's estimate; profiles never change what an upload is charged. Offline, show the profiles without credits.
  */
-export async function fetchEstimateCard(origin = "https://docslurp.io", init) {
-  const response = await fetch(new URL("/v1/billing/estimate-card", origin), init);
-  if (!response.ok) throw new EstimatorError("invalid_card", `could not fetch the price card (${response.status})`);
+export async function requestQuote({ files, workspace, speedBoost, apiKey, origin = "https://docslurp.io", fetch: fetchImpl = globalThis.fetch, init = {} }) {
+  const response = await fetchImpl(new URL("/v1/uploads/estimate", origin), {
+    ...init,
+    method: "POST",
+    headers: { "content-type": "application/json", ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}), ...(init.headers ?? {}) },
+    body: JSON.stringify({ files, ...(workspace ? { workspace } : {}), ...(speedBoost !== undefined ? { speedBoost } : {}) }),
+  });
+  if (!response.ok) throw new EstimatorError("quote_failed", `the server did not quote these files (${response.status})`);
   return response.json();
 }

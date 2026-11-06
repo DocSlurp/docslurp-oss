@@ -233,8 +233,8 @@ jobs:
           DOCSLURP_OCR_TEST_MODELS="$OCR_PREFIX/models" \
           node scripts/run-ocr-cli-tests.mjs
 
-  # The offline estimator (packages/estimate): Rust unit, golden-parity and probe-fixture tests, then the wasm build
-  # (size budget), its JS tests (random quotes against @docslurp/shared's quoteUpload) and the Python package tests.
+  # The offline file profiler (packages/estimate): Rust unit and profile-fixture tests, then the wasm build
+  # (size budget), its JS tests (profiles accepted by @docslurp/shared's fileProfileSchema) and the Python package tests.
   estimate:
     name: offline estimator
     timeout-minutes: 20

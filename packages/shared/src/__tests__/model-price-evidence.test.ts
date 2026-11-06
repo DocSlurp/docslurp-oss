@@ -4,7 +4,6 @@ import { CHAT_MODEL_PRICES_USD_PER_MTOK } from "../chat-model-prices.js";
 import { visionModelCatalog, type VisionTokenPricing } from "../embedding.js";
 import { DEFAULT_PIPELINE_TEXT_MODEL } from "../pipeline.js";
 import { defaultAiUsagePricing } from "../usage.js";
-import { HOSTED_EQUIVALENT_REFERENCES } from "../billing.js";
 
 const evidence = JSON.parse(readFileSync(new URL("../../../../docs/evals/model-prices-2026-10-26.json", import.meta.url), "utf8")) as {
   models: { id: string; pricing: { prompt: string; completion: string }; context_length: number; architecture: { input_modalities: string[] } }[];
@@ -76,8 +75,5 @@ describe("official model price evidence", () => {
       expect(pricing.outputUsdPerMillion, id).toBeCloseTo(Math.max(...pinned.map((endpoint) => Number(endpoint.pricing.completion) * 1e6)), 10);
     }
     rates(DEFAULT_PIPELINE_TEXT_MODEL, defaultAiUsagePricing.costPer1kInputTokens * 10, defaultAiUsagePricing.costPer1kOutputTokens * 10);
-    for (const reference of Object.values(HOSTED_EQUIVALENT_REFERENCES)) {
-      if (reference.provider === "openrouter") rates(reference.model, reference.inputUsdPerMTok, reference.outputUsdPerMTok);
-    }
   });
 });

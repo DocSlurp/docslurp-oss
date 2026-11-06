@@ -1,13 +1,11 @@
-// Incremental estimates with progress: probe files in bounded batches, report what was measured as it happens, and
-// quote whatever finished when the caller stops early. Used by `estimateFiles` (index.mjs), `estimatePaths`
-// (node.mjs) and the Web Worker entry (worker.mjs). The wasm calls are synchronous, so one estimator probes one file
-// at a time; concurrency only overlaps reading the next files with probing the current one.
-
-import { applyProbe } from "./index.mjs";
+// Incremental profiles with progress: profile files in bounded batches, report what was measured as it happens, and
+// return whatever finished when the caller stops early. Used by `estimateFiles` (index.mjs), `estimatePaths`
+// (node.mjs) and the Web Worker entry (worker.mjs). The wasm calls are synchronous, so one estimator profiles one file
+// at a time; concurrency only overlaps reading the next files with profiling the current one.
 
 /** Bytes read per `read-progress` step; also how often a read checks for cancellation. */
 export const READ_CHUNK_BYTES = 1024 * 1024;
-const DEFAULTS = { concurrency: 2, batchSize: 16, maxBufferedBytes: 128 * 1024 * 1024, quoteIntervalMs: 250 };
+const DEFAULTS = { concurrency: 2, batchSize: 16, maxBufferedBytes: 128 * 1024 * 1024 };
 
 const now = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
 
@@ -58,25 +56,21 @@ function percentile(sorted, p) {
 
 const round = (value, digits = 1) => Math.round(value * 10 ** digits) / 10 ** digits;
 
-/** Size-only quote fields: what the server would price from name, type and size alone. */
+/** A file as `POST /v1/uploads/estimate` takes it without a profile: name, type and size. */
 const sizeOnly = (source) => ({ name: source.name, size: source.size, ...(source.type ? { type: source.type } : {}) });
 
 /**
- * Probe `sources` and quote them, reporting progress through `emit(event)` (awaited, so a slow consumer applies
- * backpressure). Returns `{ quote, files, stats, partial, cancelled, sizeOnlyFiles }`.
+ * Profile `sources`, reporting progress through `emit(event)` (awaited, so a slow consumer applies backpressure).
+ * Returns `{ files, request, stats, partial, cancelled, unprofiledFiles }`; `request.files` is the body to send to
+ * `POST /v1/uploads/estimate` for a quote.
  */
 export async function runEstimate(estimator, sources, options = {}, emit = () => {}) {
   const concurrency = Math.max(1, Math.floor(options.concurrency ?? DEFAULTS.concurrency));
   const batchSize = Math.max(1, Math.floor(options.batchSize ?? DEFAULTS.batchSize));
   const maxBufferedBytes = Math.max(1, options.maxBufferedBytes ?? DEFAULTS.maxBufferedBytes);
-  const quoteIntervalMs = options.quoteIntervalMs ?? DEFAULTS.quoteIntervalMs;
   const signal = options.signal;
-  const request = { ...(options.profile ? { profile: options.profile } : {}), ...(options.speedBoost !== undefined ? { speedBoost: options.speedBoost } : {}) };
   const started = now();
   const total = sources.length;
-
-  // A request the module refuses (a profile for a newer card) fails now, before any file is read.
-  if (total > 0 && request.profile) estimator.quote({ ...request, files: [sizeOnly(sources[0])] });
 
   // Read plans up front (cheap, no bytes read) so progress has a true denominator from the first event.
   const plans = new Array(total);
@@ -103,7 +97,6 @@ export async function runEstimate(estimator, sources, options = {}, emit = () =>
   let peakBuffered = 0;
   let inFlight = 0;
   let peakInFlight = 0;
-  let lastQuoteAt = -Infinity;
   const healthBefore = estimator.health?.() ?? { crashes: 0, resets: 0 };
   const waiters = [];
 
@@ -125,8 +118,7 @@ export async function runEstimate(estimator, sources, options = {}, emit = () =>
     while (waiters.length) waiters.shift()();
   };
 
-  const quoteFiles = () => results.map((result, index) => result?.quoteFile ?? sizeOnly(sources[index]));
-  const quoteNow = () => estimator.quote({ ...request, files: quoteFiles() });
+  const requestFiles = () => results.map((result, index) => result?.requestFile ?? sizeOnly(sources[index]));
 
   async function readRange(handle, file, position, length, into, offset) {
     let done = 0;
@@ -156,8 +148,8 @@ export async function runEstimate(estimator, sources, options = {}, emit = () =>
         name: source.name,
         size: source.size,
         ...(source.type ? { type: source.type } : {}),
-        probe: null,
-        quoteFile: sizeOnly(source),
+        profile: null,
+        requestFile: sizeOnly(source),
         measured: false,
         bytesRead: file.bytesRead,
         plannedBytes: file.plannedBytes,
@@ -207,20 +199,20 @@ export async function runEstimate(estimator, sources, options = {}, emit = () =>
       const cancelled = isAbort(error);
       const result = finish({
         status: cancelled ? "skipped" : "failed",
-        reason: cancelled ? { code: "cancelled", message: "Cancelled while reading; priced from name, type and size." } : { code: "read_failed", message: error?.message ?? String(error) },
+        reason: cancelled ? { code: "cancelled", message: "Cancelled while reading; sent with name, type and size only." } : { code: "read_failed", message: error?.message ?? String(error) },
         readMs: round(now() - fileStarted),
       });
       await send("file-done", { file: { index, name: source.name }, result });
       return;
     }
 
-    // Probing is one synchronous wasm call: it cannot report a percentage, only that it started and how long it took.
+    // Profiling is one synchronous wasm call: it cannot report a percentage, only that it started and how long it took.
     await send("probe-start", { file: { index, name: source.name }, stage: "probe", readMs });
     const probeStarted = now();
-    let probe = null;
+    let profile = null;
     let failure = null;
     try {
-      probe = estimator.probe(sizeOnly(source), head, tail);
+      profile = estimator.profile(sizeOnly(source), head, tail);
     } catch (error) {
       failure = { code: error?.code ?? "probe_failed", message: error?.message ?? String(error) };
     }
@@ -229,8 +221,8 @@ export async function runEstimate(estimator, sources, options = {}, emit = () =>
     release(bytes);
     await send("probe-done", { file: { index, name: source.name }, stage: "probe", probeMs, ok: failure === null });
     const result = failure
-      ? finish({ status: "failed", reason: { ...failure, message: `${failure.message}; priced from name, type and size.` }, readMs, probeMs })
-      : finish({ status: "probed", probe, quoteFile: applyProbe(sizeOnly(source), probe), measured: true, readMs, probeMs });
+      ? finish({ status: "failed", reason: { ...failure, message: `${failure.message}; sent with name, type and size only.` }, readMs, probeMs })
+      : finish({ status: "probed", profile, requestFile: { ...sizeOnly(source), profile }, measured: true, readMs, probeMs });
     await send("file-done", { file: { index, name: source.name }, result });
   }
 
@@ -255,14 +247,7 @@ export async function runEstimate(estimator, sources, options = {}, emit = () =>
       }
     };
     await Promise.all(Array.from({ length: Math.min(concurrency, end - start) }, lane));
-    const last = end >= total || signal?.aborted;
-    const quoted = last || now() - lastQuoteAt >= quoteIntervalMs;
-    let quote;
-    if (quoted && counts.completed < total) {
-      quote = quoteNow();
-      lastQuoteAt = now();
-    }
-    await send("batch-done", { batch: { index: batchIndex, start, end }, ...(quote ? { quote, provisional: true } : {}) });
+    await send("batch-done", { batch: { index: batchIndex, start, end } });
     batchIndex += 1;
   }
 
@@ -275,9 +260,9 @@ export async function runEstimate(estimator, sources, options = {}, emit = () =>
       size: sources[index].size,
       ...(sources[index].type ? { type: sources[index].type } : {}),
       status: "skipped",
-      reason: { code: "cancelled", message: "Not probed before the estimate was cancelled; priced from name, type and size." },
-      probe: null,
-      quoteFile: sizeOnly(sources[index]),
+      reason: { code: "cancelled", message: "Not profiled before the run was cancelled; sent with name, type and size only." },
+      profile: null,
+      requestFile: sizeOnly(sources[index]),
       measured: false,
       bytesRead: 0,
       plannedBytes: plans[index] && !plans[index].error ? plans[index].head + plans[index].tail : 0,
@@ -288,40 +273,38 @@ export async function runEstimate(estimator, sources, options = {}, emit = () =>
     counts.skipped += 1;
   }
 
-  const quote = total > 0 ? quoteNow() : null;
   const elapsedMs = now() - started;
   const probeTimes = results.filter((result) => result.probeMs !== null).map((result) => result.probeMs).sort((a, b) => a - b);
-  const mixed = results.filter((result) => result.probe?.mix);
-  const confidences = mixed.map((result) => result.probe.mixConfidence ?? 1);
+  const pdfs = results.filter((result) => result.profile?.pdf);
   const healthAfter = estimator.health?.() ?? { crashes: 0, resets: 0 };
-  const sizeOnlyFiles = results.filter((result) => !result.measured).length;
+  const unprofiledFiles = results.filter((result) => !result.measured).length;
   const seconds = Math.max(elapsedMs, 1) / 1000;
   const stats = {
     elapsedMs: round(elapsedMs),
-    files: { total, probed: counts.probed, failed: counts.failed, skipped: counts.skipped, sizeOnly: sizeOnlyFiles },
+    files: { total, probed: counts.probed, failed: counts.failed, skipped: counts.skipped, unprofiled: unprofiledFiles },
     bytes: { read: bytesRead, planned: plannedBytes, files: fileBytes, readShare: fileBytes > 0 ? round(bytesRead / fileBytes, 4) : 0 },
     probeMs: { total: round(probeTimes.reduce((sum, ms) => sum + ms, 0), 2), p50: percentile(probeTimes, 50), p95: percentile(probeTimes, 95), max: probeTimes.at(-1) ?? 0 },
     readMs: round(results.reduce((sum, result) => sum + result.readMs, 0)),
     throughput: { filesPerSecond: round((counts.probed + counts.failed) / seconds, 2), megabytesPerSecond: round(bytesRead / 1e6 / seconds, 2) },
-    pages: { found: results.reduce((sum, result) => sum + (result.probe?.pages ?? 0), 0), files: results.filter((result) => result.probe?.pages !== undefined).length },
-    durationSeconds: round(results.reduce((sum, result) => sum + (result.probe?.durationSeconds ?? 0), 0), 2),
-    mixConfidence: {
-      files: mixed.length,
-      min: confidences.length ? Math.min(...confidences) : null,
-      mean: confidences.length ? round(confidences.reduce((sum, value) => sum + value, 0) / confidences.length, 3) : null,
-      max: confidences.length ? Math.max(...confidences) : null,
+    pages: { found: results.reduce((sum, result) => sum + (result.profile?.pages ?? 0), 0), files: results.filter((result) => result.profile?.pages !== undefined).length },
+    durationSeconds: round(results.reduce((sum, result) => sum + (result.profile?.durationSeconds ?? 0), 0), 2),
+    pdf: {
+      files: pdfs.length,
+      sampledPages: pdfs.reduce((sum, result) => sum + result.profile.pdf.sampledPages, 0),
+      rasterPages: pdfs.reduce((sum, result) => sum + result.profile.pdf.rasterPages, 0),
+      textLayerPages: pdfs.reduce((sum, result) => sum + result.profile.pdf.textLayerPages, 0),
     },
     estimator: { crashes: healthAfter.crashes - healthBefore.crashes, resets: healthAfter.resets - healthBefore.resets },
     bounds: { concurrency, batchSize, maxBufferedBytes, peakInFlight, peakBufferedBytes: peakBuffered },
   };
-  const result = { quote, files: results, stats, partial: sizeOnlyFiles > 0, cancelled, sizeOnlyFiles };
-  await send("quote-done", { quote, partial: result.partial, cancelled, result });
+  const result = { files: results, request: { files: requestFiles() }, stats, partial: unprofiledFiles > 0, cancelled, unprofiledFiles };
+  await send("done", { partial: result.partial, cancelled, result });
   return result;
 }
 
 /**
  * Turn a run into an async iterator of events with a bounded buffer: when the consumer falls `highWaterMark` events
- * behind, the run waits for it rather than queueing without limit. The last event is `quote-done` (its `result`).
+ * behind, the run waits for it rather than queueing without limit. The last event is `done` (its `result`).
  */
 export function eventStream(start, highWaterMark = 64) {
   const buffer = [];

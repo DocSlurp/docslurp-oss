@@ -1,6 +1,6 @@
 /**
- * An estimator error with a stable `code`: invalid_request, invalid_card, unsupported_rules or crashed, and from the
- * Web Worker client, worker_failed.
+ * An estimator error with a stable `code`: invalid_request or crashed; from the Web Worker client, worker_failed; from
+ * `requestQuote`, quote_failed.
  */
 export class EstimatorError extends Error {
   constructor(code, message) {

@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  PRICE_CARD,
+  OPEN_CREDITS_PER_PAGE,
   QUALITY_MODES,
+  qualityModeInfo,
   defaultPipelineFeatures,
   blankPages,
   defaultDocumentExtractionConfig,
@@ -158,10 +159,6 @@ describe("quality good turns vision on", () => {
     expect(mergePipelineFeatures(merged, { quality: "auto", visionFallback: false }).visionFallback).toBe(false);
   });
 
-  it("says a cost cap can stop vision in Good's price note", () => {
-    expect(QUALITY_MODES.good.priceNote).toMatch(/cost cap can stop vision/);
-    expect(QUALITY_MODES.good.priceNote).not.toMatch(/^Every page bills Rich/);
-  });
 });
 
 describe("documentExtractionForQuality", () => {
@@ -346,16 +343,15 @@ describe("stored pipelines with settings the strict schemas reject (round 4 M2)"
 });
 
 describe("QUALITY_MODES", () => {
-  it("prices each mode from PRICE_CARD", () => {
-    expect(QUALITY_MODES.fast.creditsPer1kPages).toEqual({ min: PRICE_CARD.fastPer1kPages, max: PRICE_CARD.fastPer1kPages });
-    expect(QUALITY_MODES.auto.creditsPer1kPages).toEqual({ min: PRICE_CARD.fastPer1kPages, max: PRICE_CARD.richPer1kPages });
-    expect(QUALITY_MODES.good.creditsPer1kPages).toEqual({ min: PRICE_CARD.richPer1kPages, max: PRICE_CARD.richPer1kPages });
+  it("prices each mode from the pricing provider (the open default here)", () => {
+    for (const mode of ["fast", "auto", "good"] as const) {
+      expect(qualityModeInfo(mode)).toMatchObject({ ...QUALITY_MODES[mode], creditsPer1kPages: { min: OPEN_CREDITS_PER_PAGE * 1000, max: OPEN_CREDITS_PER_PAGE * 1000 } });
+    }
   });
 
   it("formats the price per 1,000 pages", () => {
-    expect(qualityModePriceRange("fast")).toBe("$0.05");
-    expect(qualityModePriceRange("auto")).toBe("$0.05 to $2.50");
-    expect(qualityModePriceRange("good")).toBe("$2.50");
+    expect(qualityModePriceRange("fast")).toBe("$1.00");
+    expect(qualityModePriceRange("good")).toBe("$1.00");
   });
 
   it("says Fast keeps scans as images", () => {

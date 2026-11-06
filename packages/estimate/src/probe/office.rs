@@ -3,19 +3,17 @@
 //!
 //! Word and PowerPoint store the count from the last save (`<Pages>`, `<Slides>`). The worker counts pages after
 //! converting the document, so for Word this is an approximation: a count the body of the document contradicts is
-//! dropped (generated files keep a stale `1`), and a document that embeds images does not claim an all-text mix.
-//! Slides map one to one.
+//! dropped (generated files keep a stale `1`). Slides map one to one. Images embedded in the package are counted.
 
-use super::{u16_le, u32_le, ProbeInput, ProbeKind, ProbeResult, WHOLE_FILE_MAX_BYTES};
-use crate::card::PageMix;
+use super::{u16_le, u32_le, OfficeProfile, ProbeInput, ProbeKind, ProbeResult, WHOLE_FILE_MAX_BYTES};
 
 /// Inflated bytes of one entry read; `docProps/app.xml` and `mimetype` are a few KB at most.
 const MAX_ENTRY_BYTES: usize = 256 * 1024;
 /// Central directory entries considered; a document has dozens to a few thousand.
 const MAX_ENTRIES: usize = 50_000;
 
-/// Embedded raster images beyond this many compressed bytes may be pages scanned into the document, so the page mix stays unknown.
-const DOCX_EMBEDDED_IMAGE_BYTES: usize = 64 * 1024;
+/// Image file extensions counted as embedded images inside a package.
+const IMAGE_ENTRY_EXTENSIONS: [&str; 10] = ["png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp", "emf", "wmf"];
 /// Uncompressed `word/document.xml` bytes one page can hold at most (verbose Word XML runs 10-40 KB per page; this is a very dense page).
 /// A claimed count whose pages could not hold the body is a stale one.
 const DOCX_MAX_XML_BYTES_PER_PAGE: usize = 120 * 1024;
@@ -28,15 +26,14 @@ pub(super) fn probe(input: &ProbeInput<'_>, extension: &str) -> ProbeResult {
     let unknown = |format: &str| ProbeResult::new(ProbeKind::Unknown, format, None);
     if input.size > WHOLE_FILE_MAX_BYTES || !input.is_whole() {
         return unknown(if extension.is_empty() { "zip" } else { extension })
-            .note("archive probes need the whole file; priced from size");
+            .note("archive profiles need the whole file");
     }
     let Some(archive) = Archive::open(input.head) else {
         return unknown("zip").note("archive did not open");
     };
     if archive.read("mimetype").is_some_and(|value| value.trim_ascii() == b"application/epub+zip") {
         let mut result = ProbeResult::new(ProbeKind::Ebook, "epub", Some("application/epub+zip"));
-        result.mix = Some(PageMix::new(1.0, 0.0, 0.0));
-        result.mix_confidence = Some(0.7);
+        result.office = Some(OfficeProfile { embedded_images: archive.images_under("") });
         return result;
     }
     let (format, mime, count_tag) = if archive.has("word/document.xml") {
@@ -49,29 +46,25 @@ pub(super) fn probe(input: &ProbeInput<'_>, extension: &str) -> ProbeResult {
         return unknown("zip").note("zip archive is not a recognized document");
     };
     let mut result = ProbeResult::new(ProbeKind::Office, format, Some(mime));
+    let media = match format {
+        "docx" => "word/media/",
+        "pptx" => "ppt/media/",
+        _ => "xl/media/",
+    };
+    result.office = Some(OfficeProfile { embedded_images: archive.images_under(media) });
     let Some(tag) = count_tag else {
-        return result.note("spreadsheets have no page count; priced from size");
+        return result.note("spreadsheets have no page count");
     };
     match archive.read("docProps/app.xml").and_then(|xml| element_number(&xml, tag)) {
         Some(count) if count > 0 => {
             let body = if format == "docx" { archive.uncompressed("word/document.xml") } else { None };
             if body.is_some_and(|bytes| usize::try_from(count).map_or(true, |pages| pages.saturating_mul(DOCX_MAX_XML_BYTES_PER_PAGE) < bytes)) {
-                result.notes.push(format!("<{tag}> count in docProps/app.xml is smaller than the document body allows; priced from size"));
+                result.notes.push(format!("<{tag}> count in docProps/app.xml is smaller than the document body allows; pages not counted"));
             } else {
                 result.pages = Some(count as f64);
             }
         }
-        _ => result.notes.push(format!("no <{tag}> count in docProps/app.xml; priced from size")),
-    }
-    if format == "docx" {
-        // Word documents are mostly text-layer pages, but pages scanned into the document are images: with embedded
-        // rasters the mix is left unknown instead of asserting all text.
-        if archive.compressed_under("word/media/") > DOCX_EMBEDDED_IMAGE_BYTES {
-            result.notes.push("document embeds images; page mix not assumed".to_string());
-        } else {
-            result.mix = Some(PageMix::new(1.0, 0.0, 0.0));
-            result.mix_confidence = Some(0.6);
-        }
+        _ => result.notes.push(format!("no <{tag}> count in docProps/app.xml; pages not counted")),
     }
     result
 }
@@ -127,6 +120,18 @@ impl<'a> Archive<'a> {
     }
 
     /// Compressed bytes of every entry under `prefix`.
+    /// Entries under `prefix` whose name ends in an image extension.
+    fn images_under(&self, prefix: &str) -> u32 {
+        let count = self.entries.iter().filter(|entry| {
+            entry.name.starts_with(prefix.as_bytes())
+                && std::str::from_utf8(entry.name).ok().and_then(|name| name.rsplit_once('.')).is_some_and(|(_, extension)| {
+                    IMAGE_ENTRY_EXTENSIONS.iter().any(|known| extension.eq_ignore_ascii_case(known))
+                })
+        }).count();
+        u32::try_from(count).unwrap_or(u32::MAX)
+    }
+
+    #[allow(dead_code)]
     fn compressed_under(&self, prefix: &str) -> usize {
         self.entries.iter().filter(|entry| entry.name.starts_with(prefix.as_bytes())).fold(0usize, |sum, entry| sum.saturating_add(entry.compressed))
     }
@@ -207,18 +212,18 @@ mod tests {
     }
 
     #[test]
-    fn drops_a_page_count_the_document_body_contradicts_and_does_not_assume_text_around_images() {
+    fn drops_a_page_count_the_document_body_contradicts_and_counts_embedded_images() {
         // A generated file keeps a stale <Pages>1</Pages> while its body would fill dozens of pages.
         let body = "<w:p>x</w:p>".repeat(40_000); // ~480 KB of body XML
         let stale = archive(&[("word/document.xml", &body), ("docProps/app.xml", "<Properties><Pages>1</Pages></Properties>")]);
         let result = probe(&ProbeInput::whole("a.docx", None, &stale), "docx");
         assert_eq!(result.pages, None);
         assert!(result.notes.iter().any(|note| note.contains("smaller than the document body allows")));
-        // A plausible count is kept, with an all-text mix at reduced trust.
+        // A plausible count is kept; a document without images says so.
         let honest = archive(&[("word/document.xml", "<w:document/>"), ("docProps/app.xml", "<Properties><Pages>3</Pages></Properties>")]);
         let kept = probe(&ProbeInput::whole("a.docx", None, &honest), "docx");
-        assert_eq!((kept.pages, kept.mix_confidence), (Some(3.0), Some(0.6)));
-        // Scanned pages pasted into the document are images: the mix is not asserted.
+        assert_eq!((kept.pages, kept.office.as_ref().map(|office| office.embedded_images)), (Some(3.0), Some(0)));
+        // Images pasted into the document are counted.
         let mut state = 0x9E37_79B9u32;
         let noise: String = (0..400_000)
             .map(|_| {
@@ -235,8 +240,7 @@ mod tests {
         ]);
         let result = probe(&ProbeInput::whole("a.docx", None, &scanned), "docx");
         assert_eq!(result.pages, Some(4.0));
-        assert_eq!(result.mix, None);
-        assert!(result.notes.iter().any(|note| note.contains("embeds images")));
+        assert_eq!(result.office.map(|office| office.embedded_images), Some(1));
     }
 
     #[test]

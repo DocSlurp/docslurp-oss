@@ -1,11 +1,10 @@
-//! PDF probe: page count, and a page mix measured on sampled pages.
+//! PDF profile: page count, and facts measured on sampled pages.
 //!
-//! Each sampled page is classified the way the worker routes it (`decidePageRaster` in
+//! Each sampled page is measured the way the worker reads its evidence (`decidePageRaster` in
 //! `packages/shared/src/page-raster-routing.ts`, evidence from `worker/src/lib/page-image-evidence.ts`), with the
-//! thresholds the card carries: a page with no or almost no native words whose content is a large placed image is
-//! `scanned` (read by a vision model, billed Rich); a text page with sizeable images or heavy vector drawing is
-//! `complex`; the rest, blank pages included, are `text`. Words come from text runs, image coverage from each image's
-//! placement matrix over the page's CropBox, so nothing is rendered. An image object drawn on at least
+//! thresholds the profiler rules carry: native words, significant image placements and their coverage, vector drawing,
+//! fonts without a Unicode mapping, and whether the page raster rule finds the page held by a full-page image. Words come
+//! from text runs, image coverage from each image's placement matrix over the page's CropBox, so nothing is rendered. An image object drawn on at least
 //! `repeatedImageMinPages` sampled pages and `repeatedImageMinShare` of them is page furniture (a logo, a letterhead,
 //! a slide background) and counts for nothing, as in the worker; an image no bigger than `minSignificantImagePixels`
 //! or `minSignificantImageCoverage` counts for nothing either, so a blank page with a 1x1 image is blank.
@@ -17,11 +16,9 @@ use std::rc::Rc;
 use lopdf::content::Content;
 use lopdf::{Dictionary, Document, LoadOptions, Object, ObjectId};
 
-use super::{ProbeInput, ProbeKind, ProbeResult, WHOLE_FILE_MAX_BYTES};
-use crate::card::{Card, PageMix, PageRasterRouting};
+use super::{PdfProfile, ProbeInput, ProbeKind, ProbeResult, COVERAGE_BUCKETS, WHOLE_FILE_MAX_BYTES, WORDS_BUCKETS};
+use crate::rules::{PageRasterRouting, Rules};
 
-/// Pages whose content is inspected; larger documents are sampled evenly.
-const MAX_SAMPLED_PAGES: usize = 24;
 /// Decompressed bytes of one content stream or form XObject.
 const MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
 /// Content bytes interpreted per page, page content and every form invocation together.
@@ -39,30 +36,25 @@ const MAX_LOAD_STREAM_BYTES: usize = 16 * 1024 * 1024;
 const MAX_OBJECT_STREAM_BYTES: usize = 64 * 1024 * 1024;
 /// Decompressed page content and form bytes per document, cached forms included.
 const MAX_DOCUMENT_CONTENT_BYTES: usize = 32 * 1024 * 1024;
-/// Estimator-only: what makes a text page `complex` (layout-aware extraction) rather than prose. Time, not credits.
-const COMPLEX_MIN_IMAGE_COVERAGE: f64 = 0.15;
-const COMPLEX_MIN_PATH_OPERATIONS: usize = 60;
+/// A page with this much image coverage or this many path operations is layout-heavy (figures, charts, tables).
+const LAYOUT_MIN_IMAGE_COVERAGE: f64 = 0.15;
+const LAYOUT_MIN_PATH_OPERATIONS: usize = 60;
 const DEFAULT_PAGE_AREA: f64 = 612.0 * 792.0;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum PageClass {
-    Text,
-    Complex,
-    Scanned,
-}
-
-pub(super) fn probe(card: &Card, input: &ProbeInput<'_>) -> ProbeResult {
+pub(super) fn probe(rules: &Rules, input: &ProbeInput<'_>) -> ProbeResult {
     let result = ProbeResult::new(ProbeKind::Pdf, "pdf", Some("application/pdf"));
     if input.size > WHOLE_FILE_MAX_BYTES {
-        return result.note("PDF larger than the probe limit; priced from size");
+        return result.note("PDF larger than the probe limit; pages not counted");
     }
     if !input.is_whole() {
-        return result.note("PDF probes need the whole file; priced from size");
+        return result.note("PDF profiles need the whole file; pages not counted");
     }
     // lopdf's encrypted-document path decodes object streams without the budget hook below, and the probe does not
     // measure encrypted content anyway: count pages from the raw objects instead of loading.
     if has_name(input.head, b"Encrypt") {
-        return fallback_page_count(input.head, result).note("encrypted PDF; page mix not measured");
+        let mut result = fallback_page_count(input.head, result).note("encrypted PDF; page facts not measured");
+        result.encrypted = Some(true);
+        return result;
     }
     OBJECT_STREAM_BUDGET.with(|budget| budget.set(MAX_OBJECT_STREAM_BYTES));
     OBJECT_STREAM_BUDGET_EXCEEDED.with(|exceeded| exceeded.set(false));
@@ -74,26 +66,28 @@ pub(super) fn probe(card: &Card, input: &ProbeInput<'_>) -> ProbeResult {
     let loaded = Document::load_mem_with_options(input.head, options);
     if OBJECT_STREAM_BUDGET_EXCEEDED.with(Cell::get) {
         return fallback_page_count(input.head, result)
-            .note("compressed object streams exceed the probe's budget; page mix not measured");
+            .note("compressed object streams exceed the profiler's budget; page facts not measured");
     }
     match loaded {
-        Ok(document) => probe_document(&card.page_raster_routing, &document, input.head.len(), result),
+        Ok(document) => probe_document(rules, &document, input.head.len(), result),
         Err(error) => fallback_page_count(input.head, result).note(format!("PDF did not parse ({error})")),
     }
 }
 
-fn probe_document(routing: &PageRasterRouting, document: &Document, file_bytes: usize, mut result: ProbeResult) -> ProbeResult {
+fn probe_document(rules: &Rules, document: &Document, file_bytes: usize, mut result: ProbeResult) -> ProbeResult {
+    let routing = &rules.page_raster_routing;
     let pages: Vec<ObjectId> = document.get_pages().into_values().collect();
     if pages.is_empty() {
         return result.note("PDF has no pages");
     }
     result.pages = Some(pages.len() as f64);
     if document.is_encrypted() {
-        return result.note("encrypted PDF; page mix not measured");
+        result.encrypted = Some(true);
+        return result.note("encrypted PDF; page facts not measured");
     }
     let mut forms = FormCache::default();
     let mut readings: Vec<PageReading> = Vec::new();
-    for index in sample_indices(pages.len(), MAX_SAMPLED_PAGES) {
+    for index in sample_indices(pages.len(), rules.max_sampled_pages) {
         if forms.document_budget_spent() {
             break;
         }
@@ -101,39 +95,64 @@ fn probe_document(routing: &PageRasterRouting, document: &Document, file_bytes: 
             readings.push(reading);
         }
     }
+    if readings.is_empty() {
+        return result.note("no page content could be read; page facts not measured");
+    }
     let budget_hit = readings.iter().any(|reading| reading.exhausted) || forms.document_budget_spent();
     let repeated = repeated_images(routing, &readings);
-    let drawn = !readings.is_empty()
-        && readings.iter().all(|reading| reading.blank(&repeated))
-        && drawn_document(routing, document, file_bytes, pages.len());
-    let mut counts = [0usize; 3];
+    let drawn = readings.iter().all(|reading| reading.blank(&repeated)) && drawn_document(routing, document, file_bytes, pages.len());
+    let mut profile = PdfProfile { sampled_pages: readings.len() as u32, drawn_content: drawn, budget_exhausted: budget_hit, ..PdfProfile::default() };
+    profile.furniture_images = repeated.len() as u32;
     for reading in &readings {
-        let class = if drawn { PageClass::Scanned } else { classify(routing, reading.words, &reading.totals(&repeated), reading.path_operations) };
-        counts[class as usize] += 1;
+        let totals = reading.totals(&repeated);
+        let raster = is_raster_page(routing, reading.words, &totals);
+        profile.words_per_page[bucket(&rules.words_per_page_buckets, reading.words, WORDS_BUCKETS)] += 1;
+        profile.image_coverage[coverage_bucket(&rules.image_coverage_buckets, totals.coverage)] += 1;
+        if reading.words > 0.0 {
+            profile.text_layer_pages += 1;
+        }
+        if reading.words < routing.sparse_page_words {
+            profile.low_text_pages += 1;
+        }
+        if reading.blank(&repeated) {
+            profile.blank_pages += 1;
+        }
+        if raster {
+            profile.raster_pages += 1;
+        }
+        if totals.count > 0 {
+            profile.image_pages += 1;
+        }
+        profile.images += totals.count as u32;
+        let vector_heavy = reading.path_operations >= LAYOUT_MIN_PATH_OPERATIONS;
+        if vector_heavy {
+            profile.vector_heavy_pages += 1;
+        }
+        if !raster && (totals.coverage >= LAYOUT_MIN_IMAGE_COVERAGE || vector_heavy) {
+            profile.layout_heavy_pages += 1;
+        }
+        if reading.unmapped_text {
+            profile.unmapped_font_pages += 1;
+        }
     }
-    let measured = counts.iter().sum::<usize>();
-    if measured == 0 {
-        return result.note("no page content could be read; page mix not measured");
-    }
-    let total = measured as f64;
-    result.mix = Some(PageMix::new(counts[0] as f64 / total, counts[1] as f64 / total, counts[2] as f64 / total));
-    // Classification approximates the worker's routing, which also sends some sparse form and table pages to vision
-    // and bills dense scans as several Rich pages; a full read is therefore not certain, and sampling part of a long
-    // document lowers trust further.
-    let coverage = measured as f64 / pages.len() as f64;
-    let mut confidence = 0.6 + 0.25 * coverage.sqrt();
     if budget_hit {
-        confidence -= 0.2;
-        result.notes.push("a page hit the probe's content budget; its class is approximate".into());
+        result.notes.push("a page hit the profiler's content budget; its facts are approximate".into());
     }
-    if drawn {
-        // Newer worker routing also requires OCR to find words on drawn pages before billing them Rich.
-        confidence -= 0.25;
-        result.notes.push("no text layer and heavy vector content: priced as drawn text read by vision".into());
-    }
-    result.mix_confidence = Some((confidence * 1000.0).round() / 1000.0);
-    result.sampled_pages = Some(measured as u32);
+    result.pdf = Some(profile);
     result
+}
+
+/// Histogram bucket of `value` for ascending lower bounds `bounds` (the first bound is 0).
+fn bucket(bounds: &[f64], value: f64, buckets: usize) -> usize {
+    bounds.iter().take(buckets).rposition(|bound| value >= *bound).unwrap_or(0)
+}
+
+/// Coverage bucket: none, then the rules' lower bounds over (0, 1]; the second bound (0) is exclusive.
+fn coverage_bucket(bounds: &[f64], coverage: f64) -> usize {
+    if !(coverage > 0.0) {
+        return 0;
+    }
+    bounds.iter().take(COVERAGE_BUCKETS).rposition(|bound| coverage >= *bound && (*bound > 0.0)).unwrap_or(1).max(1)
 }
 
 /// Image objects that are page furniture: drawn on at least `repeatedImageMinPages` of the sampled pages and on at least
@@ -365,7 +384,9 @@ struct PageStats {
     interpreted_bytes: usize,
     form_calls: usize,
     exhausted: bool,
-    /// Significant images (pixels and placed area over the card's floors), at most `MAX_TRACKED_IMAGES_PER_PAGE`; the
+    /// Text was shown in a font with no Unicode mapping (`unmapped_font`).
+    unmapped_text: bool,
+    /// Significant images (pixels and placed area over the rules' floors), at most `MAX_TRACKED_IMAGES_PER_PAGE`; the
     /// totals the class is read from are taken after repeated objects are dropped (`ImageTotals`).
     images: Vec<ImageUse>,
 }
@@ -504,6 +525,25 @@ fn page_resources(document: &Document, page_id: ObjectId) -> Vec<&Dictionary> {
     resources
 }
 
+/// A composite (Type0) font, or a simple font with an Identity encoding, that has no ToUnicode map: its shown bytes are
+/// glyph ids, so the page's extracted text is likely unreadable.
+fn unmapped_font(document: &Document, resources: &[&Dictionary], name: &[u8]) -> bool {
+    let font = resources.iter().find_map(|resource| {
+        let fonts = resource.get(b"Font").ok().and_then(|object| dictionary(document, object))?;
+        fonts.get(name).ok().and_then(|object| dictionary(document, object))
+    });
+    let Some(font) = font else { return false };
+    if font.get(b"ToUnicode").is_ok() {
+        return false;
+    }
+    let name_of = |key: &[u8]| match font.get(key).ok().and_then(|object| deref(document, object)).map(|(_, value)| value) {
+        Some(Object::Name(value)) => Some(value.clone()),
+        _ => None,
+    };
+    name_of(b"Subtype").is_some_and(|subtype| subtype == b"Type0")
+        || name_of(b"Encoding").is_some_and(|encoding| encoding.starts_with(b"Identity"))
+}
+
 fn lookup_xobject<'a>(document: &'a Document, resources: &[&'a Dictionary], name: &[u8]) -> Option<(Option<ObjectId>, &'a Object)> {
     resources.iter().find_map(|resource| {
         let xobjects = resource.get(b"XObject").ok().and_then(|object| dictionary(document, object))?;
@@ -516,6 +556,8 @@ struct PageReading {
     path_operations: usize,
     images: Vec<ImageUse>,
     exhausted: bool,
+    /// Text was shown in a font with no Unicode mapping.
+    unmapped_text: bool,
 }
 
 impl PageReading {
@@ -537,7 +579,7 @@ fn classify_page(routing: &PageRasterRouting, document: &Document, page_id: Obje
     let mut stats = PageStats::default();
     let mut context = Context { document, routing, forms, area };
     context.interpret(&content, &resources, IDENTITY, 0, &mut stats);
-    Some(PageReading { words: stats.words.words(), path_operations: stats.path_operations, images: stats.images, exhausted: stats.exhausted })
+    Some(PageReading { words: stats.words.words(), path_operations: stats.path_operations, images: stats.images, exhausted: stats.exhausted, unmapped_text: stats.unmapped_text })
 }
 
 /// The worker's drawn-content rule (`classify-route.ts`): a document with no extractable text anywhere whose bytes,
@@ -557,23 +599,14 @@ fn drawn_document(routing: &PageRasterRouting, document: &Document, file_bytes: 
     drawn_per_page >= routing.drawn_content_min_bytes_per_page
 }
 
-/// `decidePageRaster` for the sampled page: a page of `sparsePageWords` or more words is text; a sparse page is a scan
-/// when significant, non-repeated images hold its content; everything else is text, blank pages included (a page bills
-/// Rich only when a model reads it, and only scans are read).
-fn classify(routing: &PageRasterRouting, words: f64, images: &ImageTotals, path_operations: usize) -> PageClass {
-    if words < routing.sparse_page_words {
-        let raster = (words == 0.0
+/// `decidePageRaster` for the sampled page: a sparse page (fewer than `sparsePageWords` words) whose content is held by
+/// significant, non-repeated images is a full-page raster (a scan or a photo of the page).
+fn is_raster_page(routing: &PageRasterRouting, words: f64, images: &ImageTotals) -> bool {
+    words < routing.sparse_page_words
+        && ((words == 0.0
             && (images.largest >= routing.raster_page_min_largest_image_coverage || images.coverage >= routing.raster_page_min_total_image_coverage))
             || (words <= routing.stamp_text_max_words && images.largest >= routing.stamped_scan_min_image_coverage)
-            || images.largest >= routing.sparse_text_full_page_image_coverage;
-        if raster {
-            return PageClass::Scanned;
-        }
-    }
-    if images.coverage >= COMPLEX_MIN_IMAGE_COVERAGE || path_operations >= COMPLEX_MIN_PATH_OPERATIONS {
-        return PageClass::Complex;
-    }
-    PageClass::Text
+            || images.largest >= routing.sparse_text_full_page_image_coverage)
 }
 
 struct Context<'a, 'f> {
@@ -617,6 +650,7 @@ impl<'a> Context<'a, '_> {
         let mut ctm = base;
         let mut stack: Vec<Matrix> = Vec::new();
         let mut font_size = 12.0;
+        let mut font_unmapped = false;
         for operation in Content::decode_iter(content) {
             let Ok(operation) = operation else { break };
             stats.operations += 1;
@@ -634,7 +668,12 @@ impl<'a> Context<'a, '_> {
                     }
                 }
                 "BT" | "ET" | "T*" | "Tm" => stats.words.gap(),
-                "Tf" => font_size = operands.get(1).and_then(number).unwrap_or(font_size),
+                "Tf" => {
+                    font_size = operands.get(1).and_then(number).unwrap_or(font_size);
+                    if let Some(Object::Name(name)) = operands.first() {
+                        font_unmapped = unmapped_font(self.document, resources, name);
+                    }
+                }
                 "Td" | "TD" => {
                     let tx = operands.first().and_then(number).unwrap_or(0.0);
                     let ty = operands.get(1).and_then(number).unwrap_or(0.0);
@@ -643,19 +682,24 @@ impl<'a> Context<'a, '_> {
                 "Tj" => {
                     if let Some(Object::String(bytes, _)) = operands.last() {
                         stats.words.show(bytes);
+                        stats.unmapped_text |= font_unmapped && !bytes.is_empty();
                     }
                 }
                 "'" | "\"" => {
                     stats.words.gap();
                     if let Some(Object::String(bytes, _)) = operands.last() {
                         stats.words.show(bytes);
+                        stats.unmapped_text |= font_unmapped && !bytes.is_empty();
                     }
                 }
                 "TJ" => {
                     if let Some(Object::Array(parts)) = operands.first() {
                         for part in parts {
                             match part {
-                                Object::String(bytes, _) => stats.words.show(bytes),
+                                Object::String(bytes, _) => {
+                                    stats.words.show(bytes);
+                                    stats.unmapped_text |= font_unmapped && !bytes.is_empty();
+                                }
                                 // A large negative adjustment is a word gap in kerned text.
                                 other if number(other).is_some_and(|gap| gap <= -200.0) => stats.words.gap(),
                                 _ => {}
@@ -726,7 +770,7 @@ mod tests {
     use super::*;
 
     fn routing() -> PageRasterRouting {
-        Card::bundled().page_raster_routing.clone()
+        Rules::bundled().page_raster_routing.clone()
     }
 
     #[test]
@@ -747,23 +791,29 @@ mod tests {
     }
 
     #[test]
-    fn classifies_like_the_worker_router() {
+    fn applies_the_page_raster_rule_like_the_worker_router() {
         let routing = routing();
         let images = |count: usize, largest: f64, total: f64| ImageTotals { count, coverage: total, largest };
-        assert_eq!(classify(&routing, 0.0, &images(1, 0.9, 0.9), 0), PageClass::Scanned);
-        assert_eq!(classify(&routing, 8.0, &images(1, 0.6, 0.6), 0), PageClass::Scanned);
-        assert_eq!(classify(&routing, 25.0, &images(1, 0.9, 0.9), 0), PageClass::Scanned);
-        // A caption-sized amount of text over a mid-size image is a text page, not a scan.
-        assert_eq!(classify(&routing, 25.0, &images(1, 0.6, 0.6), 0), PageClass::Complex);
-        assert_eq!(classify(&routing, 400.0, &images(1, 0.9, 0.9), 0), PageClass::Complex);
-        assert_eq!(classify(&routing, 400.0, &images(0, 0.0, 0.0), 0), PageClass::Text);
-        // Blank or vector-only pages bill Fast in the worker.
-        assert_eq!(classify(&routing, 0.0, &images(0, 0.0, 0.0), 5_000), PageClass::Complex);
-        assert_eq!(classify(&routing, 0.0, &images(0, 0.0, 0.0), 0), PageClass::Text);
-        // Minor images alone never make a scan, and neither does a logo (no significant image at all).
-        assert_eq!(classify(&routing, 0.0, &images(1, 0.1, 0.1), 0), PageClass::Text);
-        assert_eq!(classify(&routing, 0.0, &images(4, 0.1, 0.34), 0), PageClass::Complex);
-        assert_eq!(classify(&routing, 0.0, &images(4, 0.1, 0.36), 0), PageClass::Scanned);
+        assert!(is_raster_page(&routing, 0.0, &images(1, 0.9, 0.9)));
+        assert!(is_raster_page(&routing, 8.0, &images(1, 0.6, 0.6)));
+        assert!(is_raster_page(&routing, 25.0, &images(1, 0.9, 0.9)));
+        // A caption-sized amount of text over a mid-size image is not a full-page raster.
+        assert!(!is_raster_page(&routing, 25.0, &images(1, 0.6, 0.6)));
+        assert!(!is_raster_page(&routing, 400.0, &images(1, 0.9, 0.9)));
+        assert!(!is_raster_page(&routing, 0.0, &images(0, 0.0, 0.0)));
+        // Minor images alone never make a raster page.
+        assert!(!is_raster_page(&routing, 0.0, &images(1, 0.1, 0.1)));
+        assert!(!is_raster_page(&routing, 0.0, &images(4, 0.1, 0.34)));
+        assert!(is_raster_page(&routing, 0.0, &images(4, 0.1, 0.36)));
+    }
+
+    #[test]
+    fn buckets_words_and_coverage_on_the_rules_edges() {
+        let rules = Rules::bundled();
+        let words = |value: f64| bucket(&rules.words_per_page_buckets, value, WORDS_BUCKETS);
+        assert_eq!([words(0.0), words(1.0), words(10.0), words(11.0), words(29.0), words(30.0), words(499.0), words(500.0), words(1e9)], [0, 1, 1, 2, 2, 3, 4, 5, 5]);
+        let coverage = |value: f64| coverage_bucket(&rules.image_coverage_buckets, value);
+        assert_eq!([coverage(0.0), coverage(0.01), coverage(0.15), coverage(0.49), coverage(0.5), coverage(0.9), coverage(1.0), coverage(f64::NAN)], [0, 1, 2, 2, 3, 4, 4, 0]);
     }
 
     #[test]
@@ -775,6 +825,7 @@ mod tests {
             path_operations: 0,
             images: ids.iter().map(|number| ImageUse { id: Some(id(*number)), coverage: 0.9 }).collect(),
             exhausted: false,
+            unmapped_text: false,
         };
         // The same full-bleed background on four pages: furniture, so the pages are blank.
         let slides = vec![page(&[7]), page(&[7]), page(&[7]), page(&[7])];
