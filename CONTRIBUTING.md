@@ -24,6 +24,14 @@ pnpm dev:api        # standalone API on http://localhost:8787
 pnpm dev:worker     # worker, in a second terminal
 ```
 
+Worker tests and local PDF mode count PDF pages with Doppler's `pdfpagecount` (under `prlimit`, from util-linux). Install the
+pinned Doppler utilities once per pin with `bash scripts/install-doppler.sh`: it verifies the source tarball pinned in
+`worker/doppler.json`, builds it with the worker images' recipe and installs it under `/usr/lib/doppler` (off `PATH`;
+`DOCSLURP_DOPPLER_BIN_DIR` points elsewhere if you install it there). On Debian or Ubuntu it installs the build dependencies
+itself; elsewhere install a C++ toolchain, CMake, Ninja and the FreeType, Fontconfig, libjpeg, OpenJPEG, libpng, libtiff,
+Little CMS and zlib development packages first. Without it, PDF page counts refuse ("pdfpagecount ... is not installed")
+and the real-tool tests skip; CI sets `DOCSLURP_REQUIRE_DOPPLER_TOOLS=1` so they cannot.
+
 The web dashboard is not part of this repository, so there is no `pnpm dev` UI host here. Exercise changes through the REST API, the CLI, the SDK or MCP.
 
 ## Before you open a pull request

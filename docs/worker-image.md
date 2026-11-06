@@ -31,7 +31,8 @@ and from the deploy error text. The CI image budget (below) is set well under it
 
 Doppler ([DocSlurp/doppler](https://github.com/DocSlurp/doppler), GPL-2.0-or-later, the DocSlurp Poppler fork) is the PDF
 extractor. Both images build it from the source pinned in `worker/doppler.json` and install it under `/usr/lib/doppler`
-(`bin/pdftomarkdown`, `bin/doppler-md`, the fork's `pdftotext` and other utilities, `lib/libpoppler`), off `PATH`:
+(`bin/pdftomarkdown`, `bin/doppler-md`, `bin/pdfpagecount`, the fork's `pdftotext` and other utilities, `lib/libpoppler`),
+off `PATH`. `pdfpagecount` is the structural PDF page count (run under `prlimit`, which both images and local mode require);
 `pdftomarkdown` runs the fork's `pdftotext` from beside itself, and every other host PDF tool (`pdfinfo`, `pdfimages`,
 `pdftoppm`) stays Debian's `poppler-utils`. The images set `DOCSLURP_DOPPLER_BIN_DIR=/usr/lib/doppler/bin`.
 

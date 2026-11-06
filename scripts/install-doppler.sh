@@ -21,6 +21,7 @@ URL="$(pin source.url)"
 SHA256="$(pin source.sha256)"
 SRC_PREFIX="$(pin source.prefix)"
 STAGE="${DOCSLURP_DOPPLER_STAGE:-$HOME/.cache/docslurp/doppler-$COMMIT}"
+WORK=""
 BUILD_DEPS=(build-essential cmake ninja-build pkg-config ca-certificates curl libfreetype-dev libfontconfig-dev libjpeg-dev
   libopenjp2-7-dev libpng-dev libtiff-dev liblcms2-dev zlib1g-dev libboost-dev)
 TOOLS=(pdftotext pdftohtml pdfinfo pdfimages pdftoppm pdfseparate pdfunite pdfpagecount)
@@ -37,9 +38,9 @@ build() {
     as_root env DEBIAN_FRONTEND=noninteractive apt-get update -o Acquire::Retries=2
     as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${BUILD_DEPS[@]}"
   fi
-  local work
-  work="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/doppler-build.XXXXXX")"
-  trap 'rm -rf -- "$work"' RETURN
+  WORK="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/doppler-build.XXXXXX")"
+  trap 'rm -rf -- "$WORK"' EXIT
+  local work="$WORK"
   curl -fsSL --retry 3 -o "$work/src.tar.gz" "$URL"
   echo "$SHA256  $work/src.tar.gz" | sha256sum -c --quiet - || { echo "doppler source sha256 mismatch" >&2; return 1; }
   tar -xzf "$work/src.tar.gz" -C "$work"
