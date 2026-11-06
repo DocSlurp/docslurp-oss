@@ -8,19 +8,18 @@ Production (`NODE_ENV=production`) requires the Modal provider with an explicit 
 
 The trusted API and worker coordinate storage, database operations and model calls. The parser VM receives only staged inputs and outputs. It has no database, storage, model-provider, authentication or encryption keys, no identity token or mounted volumes, and no network access. Registry pull credentials remain in the provider control plane. Each activity owns a separate VM session, terminated when the activity ends; commands have deadlines and bounded logs and file transfers.
 
-Configure both the worker and API:
+Configure the worker (the API runs no parser and needs no VM credentials):
 
 ```dotenv
 DOCSLURP_PARSER_SANDBOX=modal
 MODAL_TOKEN_ID=...
 MODAL_TOKEN_SECRET=...
 DOCSLURP_MODAL_IMAGE=ghcr.io/docslurp/worker-full@sha256:<verified-digest>
-DOCSLURP_METADATA_VM_IMAGE=ghcr.io/docslurp/worker-full@sha256:<verified-digest>
 DOCSLURP_PDF_ENGINE=off
 PAGE_ROUTER_MODE=off
 ```
 
-Build the parser runtime from the same source revision as the worker. It must contain `worker/scripts/parser-vm-contract.mjs`, image, PDF structure and quarantine entrypoints, and their compiled guest modules. Worker startup runs this contract in a VM. An older image fails startup. For a private registry, import the pinned image during deployment and provide the returned immutable IDs as `DOCSLURP_MODAL_IMAGE_ID` and `DOCSLURP_METADATA_VM_IMAGE_ID`, together with the registry digest. Alternatively set `DOCSLURP_MODAL_REGISTRY_SECRET` to a provider-side registry pull secret; it is never attached to the guest environment. Verify image signatures as described below.
+Build the parser runtime from the same source revision as the worker. It must contain `worker/scripts/parser-vm-contract.mjs`, image, PDF structure and quarantine entrypoints, and their compiled guest modules. Worker startup runs this contract in a VM. An older image fails startup. For a private registry, import the pinned image during deployment and provide the returned immutable IDs as `DOCSLURP_MODAL_IMAGE_ID`, together with the registry digest. Alternatively set `DOCSLURP_MODAL_REGISTRY_SECRET` to a provider-side registry pull secret; it is never attached to the guest environment. Verify image signatures as described below.
 
 Command-line parsers, native image codecs, PDF.js structure extraction and ZIP/MIME quarantine inspection execute in the VM. The API never parses a PDF: intake estimates its page count from the size, and the worker replaces it with Doppler `pdfpagecount`, run in its boundary, before anything bills. The in-process native PDF binding, its page probe and local image decision sidecars are refused in production. Build the trusted worker without the native binding (`DOCSLURP_NATIVE_PDF=0`); shadow mode is also parsing and is refused.
 

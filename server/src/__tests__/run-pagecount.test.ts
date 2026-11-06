@@ -17,25 +17,6 @@ vi.mock("@aws-sdk/client-s3", () => ({
 
 import { ASSUMED_BYTES_PER_PAGE, intakePageCountSource } from "@docslurp/shared";
 import { estimateNonPdfPageCount, resolveSourceMetadata, UnreadableSourceError } from "../services/source-metadata.js";
-import { parsePdfInfoPageCount } from "../services/pdf-metadata-vm.js";
-
-describe("parsePdfInfoPageCount", () => {
-  it("extracts the page count from pdfinfo output", () => {
-    expect(
-      parsePdfInfoPageCount(`Title: sample.pdf
-Pages:          14
-Encrypted:      no`)
-    ).toBe(14);
-  });
-
-  it.each(["Pages: 9007199254740992", "Pages: 1000001", "Pages: 0"])("rejects unsafe or oversized guest page count %s", (output) => {
-    expect(parsePdfInfoPageCount(output)).toBeNull();
-  });
-
-  it("returns null when pdfinfo output has no page count", () => {
-    expect(parsePdfInfoPageCount("Title: sample.pdf")).toBeNull();
-  });
-});
 
 describe("estimateNonPdfPageCount", () => {
   it("uses line and character heuristics for text formats", () => {

@@ -120,9 +120,6 @@ services:
         required: false
     environment:
       <<: *server-environment
-      MODAL_TOKEN_ID: ${MODAL_TOKEN_ID:?Configure parser VM credentials}
-      MODAL_TOKEN_SECRET: ${MODAL_TOKEN_SECRET:?Configure parser VM credentials}
-      DOCSLURP_METADATA_VM_IMAGE: ${DOCSLURP_METADATA_VM_IMAGE:?Configure a pinned metadata VM image}
     depends_on:
       migrate:
         condition: service_completed_successfully
