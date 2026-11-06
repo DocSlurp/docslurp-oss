@@ -1,3 +1,4 @@
+import { quoteStoredDocuments } from "../services/stored-quote.js";
 import { requestDocumentPageRender } from "../services/document-page-render.js";
 import { isSpendBlockedError, spendBlockedResponse } from "../services/billing/spend-guard.js";
 import { Hono } from "hono";
@@ -249,7 +250,10 @@ export const documentsRoutes = new Hono()
     const access = await getProjectAccess(project.id, userId);
     if (!access || !canEditProject(access, userId)) return apiErrorResponse(c, 404, "not_found", "Document not found");
     const estimate = await estimateFullIndex({ speedBoost: c.req.valid("json").speedBoost === true, projectId: project.id, orgId: project.orgId, documentIds: [viewer.document.id] });
-    return c.json({ estimate, billing: billingState() });
+    const quote = estimate
+      ? await quoteStoredDocuments({ scope: { orgId: project.orgId, projectId: project.id, documentIds: [viewer.document.id] }, pipeline: project.pipeline, estimate, settings: { indexing: "full" } })
+      : null;
+    return c.json({ estimate, quote, billing: billingState() });
   })
   .get("/index", async (c) => {
     const userId = c.get("sessionUser").id;

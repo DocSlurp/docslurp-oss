@@ -1,4 +1,5 @@
 import {
+  assertSupportedVectorBackends,
   embeddingProfileCatalog,
   resolveEmbeddingRoute,
   type InferenceLane,
@@ -8,7 +9,6 @@ import {
 import type { Config } from "../config.js";
 import type { EmbeddingProfile } from "../models.js";
 
-const supportedVectorBackends = new Set(["lancedb", "orama", "chroma", "milvus"]);
 
 /**
  * Dominant script of a text sample: `latin`, `cjk`, `cyrillic`, `arabic`, ... or
@@ -127,21 +127,13 @@ export function resolveEmbeddingModel(cfg: Config, pipeline: PipelineFeatures): 
   };
 }
 
+/**
+ * The run's vector backends: the pipeline's, else VECTOR_BACKENDS, else lancedb. A backend this build does not write (Chroma,
+ * removed, or any unknown name) is refused (UnsupportedVectorBackendError), never filtered out or replaced by another.
+ */
 export function resolveVectorBackends(cfg: Config, pipeline: PipelineFeatures): string[] {
-  const raw = pipeline.vectorBackends.length > 0 ? pipeline.vectorBackends : cfg.vectorBackends;
-  const seen = new Set<string>();
-  const backends = raw
-    .map((item) => item.trim().toLowerCase())
-    .filter(Boolean)
-    .filter((item) => supportedVectorBackends.has(item))
-    .filter((item) => {
-      if (seen.has(item)) {
-        return false;
-      }
-      seen.add(item);
-      return true;
-    });
-
+  const fromPipeline = pipeline.vectorBackends.length > 0;
+  const backends = assertSupportedVectorBackends(fromPipeline ? pipeline.vectorBackends : cfg.vectorBackends, fromPipeline ? "pipeline.vectorBackends" : "VECTOR_BACKENDS");
   return backends.length > 0 ? backends : ["lancedb"];
 }
 
@@ -150,7 +142,6 @@ export function backendRuntime(backend: string): string {
     case "lancedb":
       return "object-layout";
     case "orama":
-    case "chroma":
     case "milvus":
       return "service";
     default:

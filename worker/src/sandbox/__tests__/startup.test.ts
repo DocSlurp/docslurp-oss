@@ -19,18 +19,10 @@ describe("initializeParserSandbox", () => {
     ).rejects.toBeInstanceOf(SandboxPolicyError);
   });
 
-  it("warns and logs the startup line for an explicitly unisolated production run", async () => {
+  it("refuses explicitly unisolated production startup before reporting readiness", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const result = await initializeParserSandbox(
-      { DOCSLURP_PARSER_SANDBOX: "none", NODE_ENV: "production", DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED: "true" },
-      "linux",
-    );
-    expect(result.provider.id).toBe("none");
-    expect(warn).toHaveBeenCalledWith("[parser-sandbox] status=unisolated");
-    expect(log).toHaveBeenCalledWith(
-      `[parser-sandbox] provider=none filesystem=false network=none processes=${probePidNamespace().ok} location=local`,
-    );
+    await expect(initializeParserSandbox({ DOCSLURP_PARSER_SANDBOX: "none", NODE_ENV: "production", DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED: "true" }, "linux")).rejects.toThrow(/VM boundary/);
+    expect(log).not.toHaveBeenCalled();
   });
 
   it("fails with the probe detail when isolation is unavailable", async () => {

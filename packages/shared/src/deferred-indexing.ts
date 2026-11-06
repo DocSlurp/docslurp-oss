@@ -114,7 +114,7 @@ export function pageEmbedRoutesPrivate(route: "auto" | "jina-private" | "gemini"
 
 /**
  * Estimated credits to embed `pages` page images. A page a model reads as an image is a Rich page
- * (PRICE_CARD), whichever route (hosted Gemini or a private endpoint) embeds it.
+ * (pricing provider), whichever route (hosted Gemini or a private endpoint) embeds it.
  */
 export function estimatePageEmbedCredits(pages: number, _route: "auto" | "jina-private" | "gemini" = "auto"): number {
   return pageCredits("rich", Math.max(0, pages));

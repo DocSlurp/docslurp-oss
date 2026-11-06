@@ -24,6 +24,10 @@ function memoryStorage(initial: Record<string, string>) {
       return Buffer.from(String(objects.get(key)), "utf8");
     },
     putJson: async (key: string, value: unknown) => void objects.set(key, value),
+    getJson: async (key: string) => {
+      if (!objects.has(key)) throw Object.assign(new Error(`missing ${key}`), { name: "NoSuchKey" });
+      return objects.get(key);
+    },
   };
   return { storage: storage as unknown as ArtifactStore, objects };
 }
@@ -60,7 +64,7 @@ describe("structured extraction of long documents", () => {
     pages[1] = "The total due is 4,200 euros. " + pages[1];
     pages[290] = "Signed by Ada Lovelace on behalf of the supplier. " + pages[290];
     const markdown = pages.join("\f");
-    const document = { id: "doc", userId: "user", runId: "run", filename: "contract.pdf", mimeType: "application/pdf", pageCount: 300, sourceKey: "s" } as Document;
+    const document = { id: "doc", userId: "user", runId: "run", filename: "contract.pdf", mimeType: "application/pdf", pageCount: 300, sourceKey: "s", pageCountSource: "counted" } as Document;
     const { storage, objects } = memoryStorage({ "markdown/doc.md": markdown });
     const state = stateFor(document, schema);
     const enqueue = vi.spyOn(state.usageLedger, "enqueue");
@@ -104,7 +108,7 @@ describe("structured extraction of long documents", () => {
 
   it("flags truncation and bills only the pages read when the document exceeds the windows read", async () => {
     const pages = Array.from({ length: 300 }, (_, index) => `Page ${index + 1}. ` + "Dense clause text here. ".repeat(180));
-    const document = { id: "doc", userId: "user", runId: "run", filename: "contract.pdf", mimeType: "application/pdf", pageCount: 300, sourceKey: "s" } as Document;
+    const document = { id: "doc", userId: "user", runId: "run", filename: "contract.pdf", mimeType: "application/pdf", pageCount: 300, sourceKey: "s", pageCountSource: "counted" } as Document;
     const { storage, objects } = memoryStorage({ "markdown/doc.md": pages.join("\f") });
     const state = stateFor(document, schema);
     const enqueue = vi.spyOn(state.usageLedger, "enqueue");
@@ -130,7 +134,7 @@ describe("structured extraction of long documents", () => {
   });
 
   it("makes one call for a short document and bills its pages", async () => {
-    const document = { id: "doc", userId: "user", runId: "run", filename: "invoice.pdf", mimeType: "application/pdf", pageCount: 2, sourceKey: "s" } as Document;
+    const document = { id: "doc", userId: "user", runId: "run", filename: "invoice.pdf", mimeType: "application/pdf", pageCount: 2, sourceKey: "s", pageCountSource: "counted" } as Document;
     const { storage, objects } = memoryStorage({ "markdown/doc.md": "Invoice\nTotal: 12,50 €\f2nd page" });
     const state = stateFor(document, schema);
     const enqueue = vi.spyOn(state.usageLedger, "enqueue");
@@ -148,32 +152,34 @@ describe("structured extraction of long documents", () => {
   it("bills a 1-page PDF holding 800,000 characters for the text its 8 windows read, not for 1 page", async () => {
     // 800,000 characters of prose on one page: 8 windows of 100,000 characters. By page count that was 1 credit.
     const prose = "Clause text with several words in it. ".repeat(21_200).slice(0, 8 * STRUCTURED_WINDOW_CHARS);
-    const document = { id: "doc", userId: "user", runId: "run", filename: "dump.pdf", mimeType: "application/pdf", pageCount: 1, sourceKey: "s" } as Document;
+    const document = { id: "doc", userId: "user", runId: "run", filename: "dump.pdf", mimeType: "application/pdf", pageCount: 1, sourceKey: "s", pageCountSource: "counted" } as Document;
     const { storage } = memoryStorage({ "markdown/doc.md": prose });
     const state = stateFor(document, schema);
     const enqueue = vi.spyOn(state.usageLedger, "enqueue");
     vi.mocked(generateOpenRouterText).mockResolvedValue(answer({ total: { value: 1, confidence: 0.9, evidence: [] }, signer: { value: null, confidence: 0.1, evidence: [] } }) as never);
     await new StructuredExtractStage(storage, config).run(state);
     expect(vi.mocked(generateOpenRouterText)).toHaveBeenCalledTimes(8);
-    // 800,000 characters is 229 pages of text: 23 started 10-page blocks (23 credits), where the page count billed 1.
-    expect(featureCredits("structuredFields", 1)).toBe(1);
+    // 800,000 characters is 229 pages of text, charged on those pages rather than the 1-page count.
     expect(structuredCredits(enqueue)).toBe(featureCredits("structuredFields", 229));
-    expect(structuredCredits(enqueue)).toBe(23);
+    expect(structuredCredits(enqueue)).toBeGreaterThan(featureCredits("structuredFields", 1));
   });
 
   it("bills the windows that finished when a later one fails, and a retry that re-reads them bills only what is new", async () => {
     const window = (index: number) => `Window ${index} ` + "text ".repeat(19_000);
     const markdown = Array.from({ length: 4 }, (_, index) => window(index)).join("\f");
-    const document = { id: "doc", userId: "user", runId: "run", filename: "long.pdf", mimeType: "application/pdf", pageCount: 4, sourceKey: "s" } as Document;
+    const document = { id: "doc", userId: "user", runId: "run", filename: "long.pdf", mimeType: "application/pdf", pageCount: 4, sourceKey: "s", pageCountSource: "counted" } as Document;
     const { storage } = memoryStorage({ "markdown/doc.md": markdown });
     const state = stateFor(document, schema);
     const enqueue = vi.spyOn(state.usageLedger, "enqueue");
     const ok = answer({ total: { value: 1, confidence: 0.9, evidence: [] }, signer: { value: null, confidence: 0.1, evidence: [] } });
-    // Window 3 of 4 fails on the first attempt (calls are concurrent, so fail the third started call).
+    // Window 3 of 4 fails on the first attempt (calls are concurrent, so fail the third started call, after the others answered).
     let started = 0;
     vi.mocked(generateOpenRouterText).mockImplementation((async () => {
       started += 1;
-      if (started === 3) throw new Error("provider 500");
+      if (started === 3) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        throw new Error("provider 500");
+      }
       return ok;
     }) as never);
     await new StructuredExtractStage(storage, config).run(state);
@@ -182,14 +188,17 @@ describe("structured extraction of long documents", () => {
     // Three windows were read (about 285,000 characters, 82 pages of text): billed, not 0.
     expect(afterFailure).toBeGreaterThan(0);
     expect(afterFailure).toBe(featureCredits("structuredFields", Math.ceil(3 * 95_000 / 3_500)));
-    // The retry (a new attempt: its state is rebuilt from the persisted artifacts) reads every window again; the document is
-    // 4 pages of 95,000 characters. It adds only the difference to what the failed attempt already billed.
+    // The retry (a new attempt: its state is rebuilt from the persisted artifacts) asks the model only for the window that failed:
+    // the three that finished are read back from the run's artifacts. The document is 4 pages of 95,000 characters; the retry adds
+    // only the difference to what the failed attempt already billed.
     const retry = stateFor(document, schema);
     retry.artifactLedger.record("feature-charge:structuredFields:doc", String(afterFailure));
     const retryEnqueue = vi.spyOn(retry.usageLedger, "enqueue");
     vi.mocked(generateOpenRouterText).mockReset();
     vi.mocked(generateOpenRouterText).mockResolvedValue(ok as never);
     await new StructuredExtractStage(storage, config).run(retry);
+    expect(generateOpenRouterText).toHaveBeenCalledTimes(1);
+    expect(retry.documentStage("doc", "structured-extract")?.status).not.toBe("failed");
     const total = featureCredits("structuredFields", Math.ceil(4 * 95_000 / 3_500));
     expect(structuredCredits(retryEnqueue)).toBeCloseTo(total - afterFailure);
     expect(afterFailure + structuredCredits(retryEnqueue)).toBeCloseTo(total);
@@ -199,7 +208,7 @@ describe("structured extraction of long documents", () => {
 
   it("stops reading windows once the run's cost cap is reached, by the stage's own spend", async () => {
     const markdown = Array.from({ length: 8 }, (_, index) => `Window ${index} ` + "text ".repeat(19_000)).join("\f");
-    const document = { id: "doc", userId: "user", runId: "run", filename: "long.pdf", mimeType: "application/pdf", pageCount: 8, sourceKey: "s" } as Document;
+    const document = { id: "doc", userId: "user", runId: "run", filename: "long.pdf", mimeType: "application/pdf", pageCount: 8, sourceKey: "s", pageCountSource: "counted" } as Document;
     const { storage, objects } = memoryStorage({ "markdown/doc.md": markdown });
     const state = stateFor(document, schema);
     state.run.pipeline = { ...state.run.pipeline, maxCostCents: 5 } as typeof state.run.pipeline;
@@ -223,7 +232,7 @@ describe("structured extraction of long documents", () => {
   });
 
   it("records a permanent failure for the document when the markdown artifact does not exist", async () => {
-    const document = { id: "doc", userId: "user", runId: "run", filename: "invoice.pdf", mimeType: "application/pdf", pageCount: 1, sourceKey: "s" } as Document;
+    const document = { id: "doc", userId: "user", runId: "run", filename: "invoice.pdf", mimeType: "application/pdf", pageCount: 1, sourceKey: "s", pageCountSource: "counted" } as Document;
     const { storage } = memoryStorage({});
     const state = stateFor(document, schema);
     await new StructuredExtractStage(storage, config).run(state);
@@ -237,7 +246,7 @@ describe("structured extraction of long documents", () => {
 describe("structured extraction when storage fails", () => {
   const schema = { type: "object", properties: { total: { type: "number" } } };
   it("rethrows a failed read so the stage retries instead of failing the document", async () => {
-    const document = { id: "doc", userId: "user", runId: "run", filename: "invoice.pdf", mimeType: "application/pdf", pageCount: 1, sourceKey: "s" } as Document;
+    const document = { id: "doc", userId: "user", runId: "run", filename: "invoice.pdf", mimeType: "application/pdf", pageCount: 1, sourceKey: "s", pageCountSource: "counted" } as Document;
     const { storage } = memoryStorage({ "markdown/doc.md": "Invoice" });
     (storage as unknown as { getBytes: unknown }).getBytes = async () => { throw new Error("503 Service Unavailable"); };
     const state = stateFor(document, schema);

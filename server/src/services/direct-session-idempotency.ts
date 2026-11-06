@@ -1,6 +1,8 @@
 import { getCachedIdempotentResponse, hashIdempotencyPayload, IdempotencyConflictError, scopedIdempotencyKey, storeIdempotentResponse, type IdempotencyScope } from "./idempotency.js";
 import { withDirectUploadLock } from "./direct-upload-session.js";
 import { ProjectIntakeError } from "./project-intake.js";
+import { sql } from "../db.js";
+import { canContributeToProject, getProjectAccess } from "./organizations.js";
 
 export const DIRECT_SESSION_ROUTE_KEY = "uploads.direct-session";
 
@@ -32,6 +34,41 @@ export function assertSessionReplayable(
   }
   if (["failed", "aborted"].includes(session.status)) {
     throw new ProjectIntakeError(`The upload session created with this Idempotency-Key was ${session.status}; create a new one with a new Idempotency-Key`, 409, undefined, "upload_session_closed");
+  }
+}
+
+/** May `userId` upload into `projectId` now (a live share or membership with contribute rights)? */
+async function mayContributeNow(projectId: string, userId: string): Promise<boolean> {
+  const access = await getProjectAccess(projectId, userId);
+  return access !== null && canContributeToProject(access, userId);
+}
+
+/** Is `userId` still a member of `orgId` (a session whose confirm creates its project there)? */
+async function isOrgMemberNow(orgId: string, userId: string): Promise<boolean> {
+  const rows = await sql<{ one: number }[]>`
+    select 1 as one from org_memberships om join organizations o on o.id = om.org_id and o.deleted_at is null
+    where om.org_id = ${orgId} and om.user_id = ${userId} limit 1`;
+  return rows.length > 0;
+}
+
+/**
+ * The live access check before anything hands out upload URLs for, or ingests into, an existing session (the idempotent replay,
+ * GET /direct/sessions/:id, part signing, file completion, confirm): the session's project must still accept uploads from
+ * this user, or, for a session whose confirm creates its project, the user must still belong to the session's organization.
+ * A share or membership revoked or demoted since the session was made gets no URLs (403). Fails closed on a session with
+ * neither a project nor an organization.
+ */
+export async function assertSessionProjectStillContributable(
+  session: { project_id: string | null; org_id?: string | null },
+  userId: string,
+  mayContribute: (projectId: string, userId: string) => Promise<boolean> = mayContributeNow,
+  isMember: (orgId: string, userId: string) => Promise<boolean> = isOrgMemberNow,
+): Promise<void> {
+  const allowed = session.project_id
+    ? await mayContribute(session.project_id, userId)
+    : session.org_id === undefined ? true : session.org_id !== null && await isMember(session.org_id, userId);
+  if (!allowed) {
+    throw new ProjectIntakeError("You can no longer upload into this upload session's project", 403);
   }
 }
 

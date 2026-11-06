@@ -1,6 +1,6 @@
 /**
  * Production ExecutorDeps: page text from the canonical document, per-page native-pdf text/Markdown, page
- * rasters from the shared raster cache, sharp crops, the worker's tesseract and Florence
+ * rasters from the shared raster cache, sharp crops, the OCR engine (in its VM, or the self-hosted sandbox) and Florence
  * tooling, and the vision stage's own per-image model call (usage ledger, cost, privacy gate).
  */
 
@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import sharp from "sharp";
+import sharp from "../../tools/isolated-image.js";
 import {
   canonicalDocumentSchema,
   type BBox,
@@ -21,7 +21,10 @@ import type { VisionPageOutput } from "../../stages/vision-extract.js";
 import type { CommandRunner } from "../../tools/runner.js";
 import { cleanupTempFile, keyFromStorageUri, readJsonFile, type ArtifactStore } from "../../tools/storage.js";
 import { trustedTempDownloadPattern } from "../../lib/temp-file-names.js";
-import { OcrLowConfidenceError, ocrImageText } from "../../lib/ocr-language.js";
+import { readWithOcr, type OcrReadOutcome } from "../../ocr/engine.js";
+import { escalateOcrPages } from "../../ocr/escalation.js";
+import { ocrEscalationEnabled, type HostedOcrReader } from "../../ocr/hosted-reader.js";
+import { OcrBoundaryFailure, OcrRefusedError, resolveOcrMode } from "../../ocr/mode.js";
 import { extractNativePdfDocument } from "../../native-pdf/extract.js";
 import { loadNativePdfEngine } from "../../native-pdf/loader.js";
 import { logNativePdfFallback } from "../../native-pdf/types.js";
@@ -31,14 +34,15 @@ import { visionConfigForModel } from "../routed-vision.js";
 import { RASTER_PX_PER_POINT } from "./merge.js";
 import { NATIVE_PDF_MARKDOWN_EXTRACTOR, NATIVE_PDF_TEXT_EXTRACTOR } from "./native-pdf.js";
 import type { ExecutorDeps, NativePdfOcrResult, RasterRef } from "./types.js";
+import { sniffedPdf } from "../../lib/sniffed-pdf.js";
 
 export interface ProductionExecutorDepsInput {
   runId: string;
   document: Document;
   storage: Pick<ArtifactStore, "bucket" | "getJson" | "downloadToTempFile">;
   rasters: Pick<PdfRasterCache, "renderSelectedPages" | "sourcePath"> & Partial<Pick<PdfRasterCache, "renderClip">>;
-  runner: Pick<CommandRunner, "plan" | "florence2" | "run">;
-  /** The project OCR language setting (`auto` or Tesseract codes); unset reads the environment default. */
+  runner: Pick<CommandRunner, "plan" | "florence2" | "run" | "sandboxedOcrRead" | "localOcrRead">;
+  /** The project OCR language setting (`auto` or language codes); unset reads the environment default. */
   ocrLanguage?: string;
   /** Ledger lookup for the document's canonical-document artifact uri. */
   canonicalUri: () => string | null;
@@ -47,10 +51,20 @@ export interface ProductionExecutorDepsInput {
   allow: (vision: VisionConfig) => Promise<boolean>;
   /** Runs one image through a vision config, recording usage like any vision call. */
   callVision: (vision: VisionConfig, image: { imagePath: string; mimeType: string; pageNumber: number }, signal?: AbortSignal) => Promise<VisionPageOutput>;
-  /** Cost-only usage row for a local model (labeler / OCR). */
+  /** Cost-only usage row for a local model (the labeler). */
   recordLocalUsage: (event: { model: string; metric: string; pageNumber: number; latencyMs: number; outputChars: number }) => void;
+  /**
+   * Bills one router OCR read like every other OCR read (ocr/ledger.ts `recordOcrReads`): a Rich page for a page with
+   * words, plus the job's compute event. `outcome.pages` carry the document page number.
+   */
+  recordOcrRead: (outcome: OcrReadOutcome) => void;
+  /** The hosted escalation reader (ocr/hosted-reader.ts) for a page OCR read poorly; null disables escalation. */
+  hostedReader?: HostedOcrReader | null;
   labelerModel?: string;
 }
+
+/** Model label for router OCR reads in usage rows and route outputs. */
+const OCR_MODEL = "ppocr-v6-small";
 
 export interface ProductionExecutorDeps extends ExecutorDeps {
   /** Page height in points for pages whose raster was fetched (null otherwise). */
@@ -129,7 +143,7 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
   /** The native-pdf engine's open document for this run's source, or null when no engine/PDF. */
   const openNativePdf = (): Promise<NativePdfDocument | null> => {
     nativePdfDoc ??= (async () => {
-      if (input.document.mimeType !== "application/pdf") return null;
+      if (!sniffedPdf(input.document)) return null;
       const loaded = await loadNativePdfEngine();
       if (!loaded.ok) return null;
       return await loaded.engine.openPath(await input.rasters.sourcePath(input.document));
@@ -180,6 +194,8 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
     nativeOcrPolicy: readRoutingFlags().nativeOcr,
 
     async nativePdfOcr({ pageNumber, mode, dpi }): Promise<NativePdfOcrResult | null> {
+      // The native engine OCRs inside the worker process: only customer-owned self-hosting (local mode) may use it.
+      if (resolveOcrMode() !== "local") return null;
       const doc = await openNativePdf();
       if (!doc) return null;
       // One engine OCR at a time per process: each call holds ~400-500 MB outside WORKER_COMMAND_MAX_RSS_MB.
@@ -240,28 +256,42 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
 
     async ocr(raster, { pageNumber, signal }) {
       const started = Date.now();
-      // Script detection and the matching language packs, as in page OCR (lib/ocr-language.ts).
+      // The router's raster (already rendered for routing) is read in the OCR boundary; OCR itself renders and decodes
+      // nothing on the host. In vm/local mode a failed or refused read throws OcrBoundaryFailure, which the executor
+      // loop records as a failed page: neither the project-model fallback nor a cascade reads the page in OCR's place.
+      // With OCR off or hosted (operator choices with no recogniser) the read is empty.
+      const mode = resolveOcrMode();
+      const hostedReader = input.hostedReader ?? null;
+      let outcome: OcrReadOutcome;
       try {
-        const ocr = await ocrImageText({
-          image: raster.path,
-          setting: input.ocrLanguage,
-          run: async (args) => {
-            const plan = await input.runner.plan("tesseract", ...args);
-            if (!plan.available) throw new Error("tesseract unavailable");
-            return (await input.runner.run(plan, signal)).stdout;
-          },
+        outcome = await readWithOcr(input.runner, {
+          source: raster.path, kind: "image", pages: [1], escalation: Boolean(hostedReader) && ocrEscalationEnabled(),
+          ...(input.ocrLanguage ? { languageSetting: input.ocrLanguage } : {}),
+          ...(signal ? { signal } : {}),
         });
-        const latencyMs = Date.now() - started;
-        const text = ocr.text.trim();
-        // Tesseract read this page (or a crop of it): a model read, billed as a Rich page once per page per run by the ledger.
-        if (/[\p{L}\p{N}]/u.test(text)) input.recordLocalUsage({ model: "tesseract", metric: "tesseract-page-ocr", pageNumber, latencyMs, outputChars: text.length });
-        return { text, latencyMs, model: "tesseract" };
       } catch (error) {
-        if (!(error instanceof OcrLowConfidenceError)) throw error;
-        // No installed pack read the page: empty output, so the route falls back to the next, stronger reader
-        // instead of indexing junk or failing the document.
-        console.warn(`[ocr] page=${pageNumber} unreadable by tesseract: ${error.message}`);
-        return { text: "", latencyMs: Date.now() - started, model: "tesseract" };
+        if (signal?.aborted) throw error;
+        if (mode === "vm" || mode === "local") {
+          console.error(`[ocr] page=${pageNumber} router OCR failed in the ${mode} boundary: ${error instanceof Error ? error.message.slice(0, 300) : String(error)}`);
+          throw new OcrBoundaryFailure(`OCR of page ${pageNumber} failed in the ${mode} boundary`, { cause: error });
+        }
+        if (!(error instanceof OcrRefusedError)) throw error;
+        console.error(`[ocr] page=${pageNumber} router OCR refused (${error.reason}): ${error.message}`);
+        return { text: "", latencyMs: Date.now() - started, model: OCR_MODEL };
+      }
+      try {
+        // The raster is one frame; ledger rows and escalation name the document page.
+        const read: OcrReadOutcome = { ...outcome, pages: outcome.pages.map((page) => Object.assign(page, { pageNumber })) };
+        input.recordOcrRead(read);
+        const page = read.pages[0];
+        // A degraded or empty read goes to the hosted escalation reader, which applies the escalation opt-in and its
+        // budget; never to the route's cascade or the project model. Without escalation the recogniser's read stands.
+        if (page?.escalation && hostedReader) await escalateOcrPages(read, hostedReader, input.document.id, signal);
+        const text = page?.text.trim() ?? "";
+        const model = page?.recogniser.startsWith("escalated:") ? page.recogniser.slice("escalated:".length) : OCR_MODEL;
+        return { text, latencyMs: Date.now() - started, model };
+      } finally {
+        await outcome.dispose();
       }
     },
 

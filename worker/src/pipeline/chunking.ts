@@ -1,5 +1,5 @@
 import { tableChunks, TableBoundary } from "./table-chunking.js";
-import { leadingFrontmatterLineCount, plainHeadingText } from "../lib/markdown-structure.js";
+import { leadingFrontmatterLineCount, parseAtxHeading, plainHeadingText } from "../lib/markdown-structure.js";
 import { atomizeSized, fitsLimits, headWords, normalizeNfc, tailWords, type SizeLimits } from "../lib/unicode-text.js";
 
 export interface ChunkMeta {
@@ -92,6 +92,9 @@ interface Section {
   tableIndex?: number;
 }
 
+/** Bounded lexical section scan; DOM parsing is performed separately in the VM. */
+export function htmlTableSources(text: string): string[] { return parseSections(text.trim()).filter(s => s.tableIndex !== undefined).map(s => s.body.trim()); }
+
 function parseSections(text: string): Section[] {
   const lines = text.split("\n");
   const sections: Section[] = [];
@@ -139,10 +142,10 @@ function parseSections(text: string): Section[] {
       if (fence === null) fence = marker;
       else if (marker[0] === fence[0] && marker.length >= fence.length) fence = null;
     }
-    const headingMatch = fence === null && !fenceMatch ? line.match(/^(#{1,6})\s+(.+)$/) : null;
-    if (headingMatch && plainHeadingText(headingMatch[2]!)) {
-      const level = headingMatch[1]!.length;
-      const headingText = plainHeadingText(headingMatch[2]!);
+    const headingMatch = fence === null && !fenceMatch ? parseAtxHeading(line) : null;
+    if (headingMatch && plainHeadingText(headingMatch.text)) {
+      const level = headingMatch.level;
+      const headingText = plainHeadingText(headingMatch.text);
 
       // Determine if this heading starts a new section
       const isTopLevel = level <= 2;

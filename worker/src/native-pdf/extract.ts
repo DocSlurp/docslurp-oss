@@ -14,7 +14,7 @@ import {
  * output/text-layer ratio 0.99-1.01 on every real page). A page whose text layer holds at least
  * DROPOUT_MIN_EXPECTED_CHARS non-space characters but whose output keeps under DROPOUT_MIN_RATIO of
  * them lost its text (e.g. an invisible OCR layer the engine skipped); the document is rejected so
- * the next extractor (kreuzberg) serves it.
+ * the next extractor (poppler-text) serves it.
  */
 export const DROPOUT_MIN_RATIO = 0.5;
 export const DROPOUT_MIN_EXPECTED_CHARS = 80;

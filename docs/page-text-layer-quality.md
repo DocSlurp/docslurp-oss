@@ -19,7 +19,7 @@ count; nothing reads ASCII classes, keywords or file names.
 | 3b. Symbol soup | ASCII punctuation at 40 % of the page over 10 or more distinct marks with few letters (a shift that lands on punctuation) | `garbled` |
 | 4. Letter pairs | Mean log-probability per letter pair of the page's words under a pooled letter-bigram table for the page's dominant alphabetic script (Latin, Cyrillic, Greek). The script must hold half the page's letters, so a Latin unit inside Korean text is not judged as a Latin page. Acronyms and words under 3 letters are skipped. | `suspect` below -6.85, `garbled` below -8.2 with 60+ words |
 | 5. Script mixing | One word with letters of two alphabetic scripts, in a fifth of the words | `suspect` |
-| OCR cross-check | A sample of the suspect pages is rendered at 100 dpi, read by Tesseract in the layer's script and compared with the layer in reading order, **precision and recall**, both at least 0.5 (`tokenAgreement`) | decides `suspect` pages: a mismatch reads the page, a match keeps the layer, no result keeps the layer and is reported |
+| OCR cross-check (**off**) | A sample of the suspect pages is rendered at 100 dpi, read by OCR in the layer's script and compared with the layer in reading order, **precision and recall**, both at least 0.5 (`tokenAgreement`). The 0.5 threshold was tuned against the previous local recogniser; the check is off until it is re-tuned for PP-OCR ([OCR](extraction/ocr.md)). | would decide `suspect` pages: a mismatch reads the page, a match keeps the layer. While it is off, suspect pages stay unchecked: they keep their layer and are not read or billed |
 
 Only unmapped glyphs (layer 1), symbol soup and letters far outside the script's pairs make a page `garbled`, which is read
 without a check. Mojibake and glyph-shift signatures are `suspect`: both can be produced by real text and data (a Ukrainian
@@ -69,8 +69,9 @@ Data: Wikipedia plain-text extracts in 21 languages (en de fr es pl fi sv it tr 
 
 Limits, stated plainly: the calibration language set is nine Latin-script languages plus Cyrillic and Greek, not all
 alphabets; the page sample is encyclopedic prose, so tables of part numbers or names score lower and become `suspect`
-(the cross-check then clears them, at about 1 CPU second per checked page); the bigram thresholds should be re-fitted if a
-language outside the set shows false `suspect` verdicts. The cross-check is capped at 6 pages per document.
+(the cross-check cleared them, at about 1 CPU second per checked page with the previous recogniser; it is off until
+re-tuned for PP-OCR, so they keep their layer); the bigram thresholds should be re-fitted if a language outside the set
+shows false `suspect` verdicts. The cross-check is capped at 6 pages per document.
 
 ## Sources and prior art
 

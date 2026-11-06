@@ -5,7 +5,7 @@ import {
   isPageImageReferenceBlock,
   normalizePageNumbers,
   parseImageAnchorLine,
-  stripImageAnchors,
+  imageAnchorsToAltText,
   splitTextIntoPagesStrict,
   type CanonicalBlock,
   type CanonicalBlockType,
@@ -19,7 +19,7 @@ import {
   type CitationLocator
 } from "@docslurp/shared";
 import { buildChunkLocator, evidenceBoundary, mergeLocators } from "./chunk-locator.js";
-import { leadingFrontmatterLineCount, plainHeadingText } from "./markdown-structure.js";
+import { leadingFrontmatterLineCount, parseAtxHeading, plainHeadingText } from "./markdown-structure.js";
 
 export interface CanonicalChunk {
   text: string;
@@ -47,7 +47,6 @@ export interface CanonicalChunk {
 }
 
 const CODE_FENCE_RE = /^```/;
-const HEADING_RE = /^(#{1,6})\s+(.+?)\s*$/;
 const ORDERED_LIST_RE = /^\s*\d+\.\s+/;
 const UNORDERED_LIST_RE = /^\s*[-*+]\s+/;
 const TABLE_LINE_RE = /^\s*\|.*\|\s*$/;
@@ -134,10 +133,10 @@ export function buildCanonicalDocumentFromMarkdown(args: {
         continue;
       }
 
-      const headingMatch = line.match(HEADING_RE);
+      const headingMatch = parseAtxHeading(line);
       if (headingMatch) {
-        const level = headingMatch[1]?.length ?? 1;
-        const headingText = plainHeadingText(headingMatch[2] ?? line);
+        const level = headingMatch.level;
+        const headingText = plainHeadingText(headingMatch.text);
         while (headingStack.length > 0 && headingStack[headingStack.length - 1]!.level >= level) {
           headingStack.pop();
         }
@@ -249,7 +248,7 @@ export function buildCanonicalDocumentFromMarkdown(args: {
         }
         if (
           CODE_FENCE_RE.test(nextLine.trim()) ||
-          HEADING_RE.test(nextLine) ||
+          parseAtxHeading(nextLine) !== null ||
           isTableStart(lines, lineIndex) ||
           /^ {0,3}<table(?=\s|>|$)/i.test(nextLine) ||
           isListLine(nextLine) ||
@@ -343,7 +342,7 @@ export function buildCanonicalChunksFromDocument(
 
   if (meaningfulBlocks.length === 0) {
     return [{
-      text: stripImageAnchors(fallback),
+      text: imageAnchorsToAltText(fallback),
       headingPath: [],
       pageNumber: null,
       pageNumbers: [],

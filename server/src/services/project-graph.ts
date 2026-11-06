@@ -343,17 +343,14 @@ export async function estimateGraphRebuild(
   return costEstimateFromGraph((await planGraphRebuild(project, input.mode)).estimate, env);
 }
 
-/** Queues a rebuild; one active job per project. `onEstimateTimed` receives the estimate's compute time (ms). */
+/** Queues a rebuild; one active job per project. */
 export async function startGraphRebuild(
   projectRef: string,
   userId: string,
   input: StartGraphRebuildInput,
-  options: { onEstimateTimed?: (ms: number) => void } = {},
 ): Promise<GraphJob> {
   const project = await requireProject(projectRef, userId, true);
-  const started = performance.now();
   const { config, model, configHash, estimate, documentsTotal } = await planGraphRebuild(project, input.mode);
-  options.onEstimateTimed?.(performance.now() - started);
   if (documentsTotal === 0) {
     throw new ProjectGraphError(
       input.mode === "full" ? "This project has no documents to extract" : "Every document is already extracted with the current settings",

@@ -1,3 +1,12 @@
+## Page equivalents: stuffed pages bill what they hold (2026-11-05)
+
+- Billable pages are measured page equivalents: per page, the larger of 1, the text rule over the text extracted from it, and (for rendered and OCR'd pages) its area against a Letter page, capped per page (`packages/shared/src/page-equivalents.ts`). Pages above one are recorded in `document_page_facts` (migration 0130) and raise `documents.billing_pages`, which the page fee, feature charges, spend authorization and the storage estimate read. Tiny, invisible or off-page text is indexed like any other and so counted by volume; files with pages over three equivalents are listed in the ingest report (`denseText`). A document over 100,000 equivalents is refused. Prices stay out of core.
+
+## API never parses PDFs; image visual indexing from VM renditions (2026-11-05)
+
+- Council A High: the API no longer runs `pdfinfo`. A PDF's intake count is a size estimate (`page_count_source = assumed`, documents show `pageCountSource: "estimated"`); the worker measures it at format-detect through `sandboxedPdf.pageCount` (VM `--pdf-facts`, guest protocol 8) or, in local mode, the page tree walked by sandboxed `pdftotext` page probes (exit codes and Poppler's own range line, never document metadata), records it `counted`, and re-checks spend. The completion page fee reads only measured counts (`worker/src/db/page-base-fee.ts`): `billing_pages` or a `counted` page count; text files over 2 MB are counted in full at format-detect (`worker/src/lib/text-page-count.ts`), and `page_count_source` defaults to `assumed` (migration 0130). Per-page features use the same measured counts: an Office or EPUB file is always measured (the text rule, or 0 pages when nothing was extracted), and an `assumed` count never bills a feature. A PDF bills the larger of its page-tree count and the pages extraction processed.
+- Image uploads are visually indexed only from a bounded, normalized PNG rendition the VM OCR guest returns per frame (protocol 8); the worker never decodes the upload. Without one, page-embed skips loudly (`image-without-vm-rendition`).
+
 ## Actual provider charges, live list prices and loss alerts (2026-11-04)
 
 - Record the provider-reported charge for OpenRouter embeddings, moderation, decision calls and consistent media receipts; price receipt-less usage from live OpenRouter list prices (hourly, hardcoded fallback); alert per org when hourly provider cost exceeds credits charged. Credits are unchanged. See `docs/pricing-and-credits.md#provider-cost`.

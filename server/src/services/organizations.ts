@@ -258,7 +258,19 @@ async function admitToOrganization(tx: OrgTransaction, userId: string, targetOrg
     throw error;
   }
   if (!replacePersonalOrgId) return;
-  await tx`delete from organizations where id = ${replacePersonalOrgId} and is_personal and docslurp_personal_org_is_empty(id)`;
+  // Lock the organization and its projects (a concurrent API key, run, chat or upload that references them now waits),
+  // then re-check under the locks that it is still empty. projects.org_id has no foreign key, so its projects are deleted
+  // explicitly; anything else that hangs off them is empty by docslurp_personal_org_is_empty. Fails closed: an organization
+  // that gained data keeps the user in it and the join is refused.
+  await tx`select id from organizations where id = ${replacePersonalOrgId} for update`;
+  await tx`select id from projects where org_id = ${replacePersonalOrgId} for update`;
+  const [stillEmpty] = await tx<{ empty: boolean }[]>`
+    select is_personal and personal_owner_user_id = ${userId} and docslurp_personal_org_is_empty(id) as empty
+    from organizations where id = ${replacePersonalOrgId}
+  `;
+  if (!stillEmpty?.empty) throw new OrganizationError(409, "user_already_in_org", new UserAlreadyInOrgError().message);
+  await tx`delete from projects where org_id = ${replacePersonalOrgId}`;
+  await tx`delete from organizations where id = ${replacePersonalOrgId}`;
   await tx`insert into audit_log (id, user_id, action, resource_type, resource_id, metadata)
     values (${randomUUID()}, ${userId}, 'organization.personal.replaced', 'organization', ${replacePersonalOrgId}, ${tx.json({ joinedOrgId: targetOrgId })})`;
 }
@@ -1095,7 +1107,7 @@ export async function acceptProjectInvite(token: string, userId: string): Promis
     throw new Error("Invite email does not match the accepting user");
   }
 
-  await sql.begin(async (tx) => {
+  try { await sql.begin(async (tx) => {
     const [org] = await tx<{ is_personal: boolean }[]>`select is_personal from organizations where id = ${invite.org_id}`;
     if (org && !org.is_personal) {
       // Team-org project access requires org membership. An outsider joins
@@ -1108,7 +1120,9 @@ export async function acceptProjectInvite(token: string, userId: string): Promis
           throw new Error("This invite can no longer add you to the organization; ask an organization admin to invite you");
         }
         await admitToOrganization(tx, userId, invite.org_id);
-        await tx`insert into org_memberships (org_id, user_id, role) values (${invite.org_id}, ${userId}, 'member') on conflict do nothing`;
+        // Only this exact membership may already exist. A target-less ON CONFLICT would also swallow the one-organization
+        // index (a concurrent join that committed first) and accept the invite without a membership.
+        await tx`insert into org_memberships (org_id, user_id, role) values (${invite.org_id}, ${userId}, 'member') on conflict (org_id, user_id) do nothing`;
         await auditOrganization(tx, invite.org_id, userId, "organization.member.joined_via_project_invite", { inviteId: invite.id, projectId: invite.project_id });
       }
     }
@@ -1127,7 +1141,12 @@ export async function acceptProjectInvite(token: string, userId: string): Promis
         accepted_at = now()
       where id = ${invite.id} and status = 'pending'
     `;
-  });
+  }); } catch (error) {
+    // The one-organization index refusing a join that passed the check (a race) is the policy's 409, not a 500.
+    const conflict = organizationConflict(error);
+    if (conflict instanceof OrganizationError && conflict.code === "user_already_in_org") throw conflict;
+    throw error;
+  }
 
   const [row] = await sql<ProjectMemberRow[]>`
     select

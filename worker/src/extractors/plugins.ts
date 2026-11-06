@@ -2,12 +2,13 @@
  * Extractor plugins: optional providers a deployment loads by configuration, never by import.
  *
  * DocSlurp ships an open default for everything here. A deployment may add one sandboxed PDF extractor (served as the
- * `vm-pdf` extractor id) and one image orientation provider by naming plugin modules in DOCSLURP_EXTRACTOR_PLUGINS
- * (comma-separated absolute paths or file: URLs). Each module exports `register(host)`, which returns the plugin.
+ * `vm-pdf` extractor id), one image orientation provider and one sandboxed OCR provider (`DOCSLURP_OCR_MODE=vm`) by naming
+ * plugin modules in DOCSLURP_EXTRACTOR_PLUGINS (comma-separated absolute paths or file: URLs). Each module exports
+ * `register(host)`, which returns the plugin.
  *
  * Rules the host enforces:
  * - Fail closed. A named plugin that cannot load is a startup error, and a deployment that asks for the VM extractor
- *   (DOCSLURP_PDF_EXTRACTOR=vm-pdf or DOCSLURP_VM_PDF_INSTALLED=1) without a provider is a startup error. The VM route
+ *   (DOCSLURP_PDF_EXTRACTOR=vm-pdf, DOCSLURP_VM_PDF_INSTALLED=1 or DOCSLURP_SERVICE_PROFILE=service) without a provider is a startup error. The VM route
  *   never falls back to parsing on the worker host.
  * - A sandboxed PDF provider must isolate every job in a fresh VM or microVM. The worker holds secrets; providers
  *   receive file paths, not credentials, and return only bounded, validated output.
@@ -15,13 +16,18 @@
  *
  * Contract details: docs/extraction/extractor-plugins.md.
  */
+import { accessSync, constants as fsConstants } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { dopplerBinDir, dopplerConverterPath } from "../tools/doppler.js";
 import path from "node:path";
-import type { EmbeddedImageFacts, EmbeddedImageMediaType, MediaMap } from "@docslurp/shared";
+import {
+  localPdfModeRequested, PDF_EXTRACTION_UNCONFIGURED, resolvePdfMode, sandboxedPdfConfigured, type EmbeddedImageFacts, type EmbeddedImageMediaType, type MediaMap, type OrientationResultRecord,
+} from "@docslurp/shared";
 
 import { SandboxRunError, type SandboxResult } from "../sandbox/types.js";
 import type { UsageEvent } from "../models.js";
 import { currentPerfContext } from "../lib/perf-context.js";
+import { parsePageLayoutFacts, type PageLayoutFacts } from "../lib/page-layout-facts.js";
 import { planPageShards, type ShardCostProfile } from "../temporal/page-shards.js";
 import { registerShardProfile } from "../temporal/page-shard-profiles.js";
 import { resolveModalImage, type ModalSdk } from "../sandbox/providers/modal/index.js";
@@ -71,6 +77,26 @@ export interface EmbeddedImageSet {
   placements: EmbeddedImageFacts[];
 }
 
+/** What a sandboxed PDF run returns: the command result, plus the pages the provider OCR'd, when it knows. */
+export interface SandboxedPdfResult extends SandboxResult {
+  /**
+   * 1-based pages whose text the provider read with OCR (each is billed as a Rich read). Omit when unknown: an unknown
+   * fact never raises a charge. Validated by the host: unique integers within the document's page count.
+   */
+  ocrPages?: number[];
+  /**
+   * Structural page layout from the same VM job (pdf-layout-facts@1, the open walker worker/scripts/pdf_layout_facts.py,
+   * page numbers of the whole document). Untrusted: the host parses it with its bounded reader and drops pages outside the
+   * document. Omit when unknown; missing or malformed facts never authorize a read.
+   */
+  layoutFacts?: unknown;
+}
+
+/** Upper bound on a provider's Markdown output, checked before the host reads it. */
+export const SANDBOXED_PDF_MAX_MARKDOWN_BYTES = 256 * 1024 * 1024;
+/** Page bound for `ocrPages` when the host's page count is unknown. */
+const MAX_REPORTED_PAGES = 100_000;
+
 export interface SandboxedPdfExtractorProvider {
   /** Stable id for telemetry and command metrics, chosen by the plugin. */
   id: string;
@@ -79,7 +105,7 @@ export interface SandboxedPdfExtractorProvider {
   /** Throw when the deployment is not ready (unpinned image, missing control credentials). Never fall back. */
   assertConfigured(): void;
   /** Write Markdown (pages joined by form feeds, one slot per page) to `job.output`. */
-  run(job: SandboxedPdfJob, context: SandboxedPdfRunContext, signal?: AbortSignal): Promise<SandboxResult>;
+  run(job: SandboxedPdfJob, context: SandboxedPdfRunContext, signal?: AbortSignal): Promise<SandboxedPdfResult>;
   /** Upper bound on one run's wall time for this many pages: the remote command budget. */
   timeoutMs(pages: number): number;
   /** Present when the provider can return embedded images beside the Markdown. */
@@ -92,25 +118,21 @@ export interface SandboxedPdfExtractorProvider {
   };
   /** Page-shard cost profile: calibration refines the prior from observed shard timings under `key`. */
   shardProfile?: { key: string; prior: ShardCostProfile };
+  /**
+   * Count a PDF's pages in a fresh VM (the guest's own pdfinfo), for documents whose count intake only estimated (the API never
+   * parses PDFs). The worker records it before any stage uses the count or anything bills; without it a VM deployment refuses
+   * such PDFs. `usage` is the VM's provider cost. A count the VM could not make throws an error carrying `pageCountOutcome`
+   * (lib/pdf-page-count.ts PdfPageCountOutcome: open-failed, encrypted, limit, malformed, killed, unavailable), so a refused
+   * document fails the same way in both modes.
+   */
+  pageCount?(job: { input: string }, signal?: AbortSignal): Promise<{ pages: number; usage?: UsageEvent }>;
 }
 
-/** What orientation decided for one image. The provider decodes pixels; the host only reads this record. */
-export interface OrientationResult {
-  model: string;
-  modelSha256: string;
-  status: "upright" | "uncertain" | "corrected";
-  inputClockwiseDegrees: number;
-  correctionClockwiseDegrees: number;
-  confidence: number;
-  margin: number;
-  width: number;
-  height: number;
-  sourceWidth: number;
-  sourceHeight: number;
-  exifOrientation: number;
-  exifApplied: boolean;
-  mimeType: "image/png";
-}
+/**
+ * What orientation decided for one image. The provider decodes pixels; the host only reads this record, after
+ * validating it against `orientationResultSchema` and checking `model` equals the provider's id.
+ */
+export type OrientationResult = OrientationResultRecord;
 
 export interface ImageOrientationProvider {
   id: string;
@@ -120,11 +142,61 @@ export interface ImageOrientationProvider {
   orient(input: string, output: string, signal?: AbortSignal): Promise<{ result: OrientationResult; usage?: UsageEvent }>;
 }
 
+/**
+ * One OCR job in an isolated VM. The provider stages `input` (the stored customer file, never decoded on the host) into a
+ * fresh VM, runs the fixed `docslurp_ocr.py` CLI there with exactly these settings, and copies back `output` (the CLI's
+ * JSON result) and the PNGs it wrote into `imageDir`. Paths are absolute and distinct; `imageDir` exists and is empty.
+ */
+export interface SandboxedOcrJob {
+  input: string;
+  kind: "image" | "pdf";
+  /** 1-based pages (PDF) or frames (multi-frame image) to read; absent reads every frame up to `maxFrames`. */
+  pages?: number[];
+  output: string;
+  imageDir: string;
+  /** Recogniser families to try, in order, while a frame's confidence stays below `retryBelow`. */
+  recognisers: string[];
+  maxAttempts: number;
+  retryBelow: number;
+  maxFrames: number;
+  maxLongEdge: number;
+  /** Frames to keep as PNG for an escalation read: below this confidence, or read by one of these recognisers. */
+  escalation: { belowConfidence: number; recognisers: string[] } | null;
+  /**
+   * Write a bounded, normalized PNG rendition of every frame (`rendition-NNNN.png` in imageDir): the only pixels of an
+   * uploaded image the worker ever decodes (visual indexing). Absent or null: none.
+   */
+  rendition?: { maxLongEdge: number; maxBytes: number } | null;
+}
+
+/** What a sandboxed OCR run returns: the command result. The host reads and validates `job.output` itself. */
+export type SandboxedOcrResult = SandboxResult;
+
+export interface SandboxedOcrProvider {
+  /** Stable id for telemetry and ledger metadata, chosen by the plugin. */
+  id: string;
+  /** The provider's guest returns frame renditions (SandboxedOcrJob.rendition). Without it image uploads get no visual index. */
+  renditions?: boolean;
+  /** Largest source the provider accepts; larger files are refused before any VM work. */
+  maxSourceBytes: number;
+  /** Throw when the deployment is not ready (unpinned image, missing models or credentials). Never fall back. */
+  assertConfigured(): void;
+  /**
+   * Run the job. When the CLI refused the job or its input (a usage, model or input refusal, an internal error, or the CLI
+   * killed by its own resource limits), throw an error carrying `ocrRefused: true`: the page fails without a retry. Any
+   * other throw (VM creation, capacity, a deadline, a dropped transfer) is treated as infrastructure and retried later.
+   */
+  run(job: SandboxedOcrJob, signal?: AbortSignal): Promise<SandboxedOcrResult>;
+  /** Upper bound on one run's wall time for this many frames: the remote command budget. */
+  timeoutMs(frames: number): number;
+}
+
 export interface ExtractorPlugin {
   apiVersion: typeof EXTRACTOR_PLUGIN_API_VERSION;
   name: string;
   sandboxedPdf?: SandboxedPdfExtractorProvider;
   imageOrientation?: ImageOrientationProvider;
+  sandboxedOcr?: SandboxedOcrProvider;
 }
 
 /** Host values a plugin uses at runtime. Plugins import only types from the worker. */
@@ -178,7 +250,17 @@ export function registerExtractorPlugin(plugin: ExtractorPlugin): void {
   const orientation = plugin.imageOrientation;
   if (orientation) {
     if (imageOrientationProvider()) throw new Error("Only one image orientation provider may be registered");
+    if (!PROVIDER_ID.test(orientation.id ?? "")) throw new Error("Image orientation provider needs a lowercase id");
     if (typeof orientation.orient !== "function" || !(orientation.maxCostCents >= 0)) throw new Error("Image orientation provider needs orient() and maxCostCents");
+  }
+  const ocr = plugin.sandboxedOcr;
+  if (ocr) {
+    if (sandboxedOcrProvider()) throw new Error("Only one sandboxed OCR provider may be registered");
+    if (!PROVIDER_ID.test(ocr.id ?? "")) throw new Error("Sandboxed OCR provider needs a lowercase id");
+    if (!Number.isSafeInteger(ocr.maxSourceBytes) || ocr.maxSourceBytes < 1) throw new Error("Sandboxed OCR provider needs maxSourceBytes");
+    for (const name of ["assertConfigured", "run", "timeoutMs"] as const) {
+      if (typeof ocr[name] !== "function") throw new Error(`Sandboxed OCR provider lacks ${name}()`);
+    }
   }
   plugins.push(plugin);
   if (pdf?.shardProfile) registerShardProfile(pdf.shardProfile.key, pdf.shardProfile.prior);
@@ -195,8 +277,67 @@ export function requireSandboxedPdfProvider(): SandboxedPdfExtractorProvider {
   return provider;
 }
 
+const reportedOcrPages = new WeakMap<SandboxedPdfJob, number[]>();
+const reportedLayoutFacts = new WeakMap<SandboxedPdfJob, Map<number, PageLayoutFacts>>();
+
+/**
+ * Validate a provider run's `ocrPages` against the page count and keep them for the job. A malformed list refuses the
+ * run: provider output is untrusted, and billing evidence must not be guessed from it.
+ */
+export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: SandboxedPdfResult, pages: number): SandboxedPdfResult {
+  reportedOcrPages.delete(job);
+  reportedLayoutFacts.delete(job);
+  if (result.layoutFacts !== undefined) {
+    // Routing evidence, not billing evidence: a malformed payload is dropped (routing then has no layout facts), never repaired.
+    const layout = parsePageLayoutFacts(result.layoutFacts, Number.isSafeInteger(pages) && pages > 0 ? pages : MAX_REPORTED_PAGES);
+    if (layout.size > 0) reportedLayoutFacts.set(job, layout);
+    else console.warn("[vm-pdf] layout facts unusable; routing continues without them");
+    result = { ...result, layoutFacts: undefined };
+  }
+  const raw: unknown = result.ocrPages;
+  if (raw === undefined) return result;
+  const bound = Number.isSafeInteger(pages) && pages > 0 ? pages : MAX_REPORTED_PAGES;
+  if (!Array.isArray(raw) || raw.length > bound ||
+      raw.some((page) => !Number.isSafeInteger(page) || page < 1 || page > bound) || new Set(raw).size !== raw.length) {
+    throw new SandboxRunError(`Sandboxed PDF provider returned invalid ocrPages (expected unique pages 1..${bound})`, result.usage);
+  }
+  const ocrPages = [...(raw as number[])].sort((a, b) => a - b);
+  reportedOcrPages.set(job, ocrPages);
+  return { ...result, ocrPages };
+}
+
+/** The validated layout facts a finished job returned, or undefined when it returned none usable. */
+export function sandboxedPdfLayoutFacts(job: SandboxedPdfJob): Map<number, PageLayoutFacts> | undefined {
+  return reportedLayoutFacts.get(job);
+}
+
+/** The validated pages a finished job reported it OCR'd, or undefined when the provider did not say. */
+export function sandboxedPdfOcrPages(job: SandboxedPdfJob): number[] | undefined {
+  return reportedOcrPages.get(job);
+}
+
 export function imageOrientationProvider(): ImageOrientationProvider | null {
   return plugins.find((plugin) => plugin.imageOrientation)?.imageOrientation ?? null;
+}
+
+export function sandboxedOcrProvider(): SandboxedOcrProvider | null {
+  return plugins.find((plugin) => plugin.sandboxedOcr)?.sandboxedOcr ?? null;
+}
+
+/** The provider, or a refusal: VM OCR never falls back to the worker host or to another reader. */
+export function requireSandboxedOcrProvider(): SandboxedOcrProvider {
+  const provider = sandboxedOcrProvider();
+  if (!provider) throw new Error("DOCSLURP_OCR_MODE=vm needs a sandboxed OCR provider plugin (DOCSLURP_EXTRACTOR_PLUGINS); refusing local fallback");
+  return provider;
+}
+
+/** The generic ids of the capabilities registered plugins provide (`vm-pdf`, `image-orientation`, `vm-ocr`). */
+export function loadedPluginCapabilities(): string[] {
+  return [
+    ...(sandboxedPdfProvider() ? [VM_PDF_EXTRACTOR_ID] : []),
+    ...(imageOrientationProvider() ? ["image-orientation"] : []),
+    ...(sandboxedOcrProvider() ? ["vm-ocr"] : []),
+  ];
 }
 
 export function registeredExtractorPlugins(): readonly string[] {
@@ -241,15 +382,55 @@ export async function loadExtractorPlugins(
   }
   loadedFrom = key;
   assertExtractorPluginConfiguration(env);
-  if (plugins.length) console.log(`[extractor-plugins] loaded ${plugins.map((plugin) => plugin.name).join(",")}`);
+  // Generic capability ids only: plugin names and details are the plugin's own to log.
+  const capabilities = loadedPluginCapabilities();
+  if (capabilities.length) console.log(`[extractor-plugins] loaded api=${EXTRACTOR_PLUGIN_API_VERSION} providers=${capabilities.join(",")}`);
   return registeredExtractorPlugins();
 }
 
-/** A deployment that selects the VM extractor without a provider is misconfigured: refuse to start. */
-export function assertExtractorPluginConfiguration(env: NodeJS.ProcessEnv = process.env): void {
-  const wantsVm = env.DOCSLURP_PDF_EXTRACTOR?.trim() === VM_PDF_EXTRACTOR_ID || env.DOCSLURP_VM_PDF_INSTALLED?.trim() === "1";
-  if (wantsVm && !sandboxedPdfProvider()) {
-    throw new Error(`DOCSLURP_PDF_EXTRACTOR=${VM_PDF_EXTRACTOR_ID} or DOCSLURP_VM_PDF_INSTALLED=1 needs a sandboxed PDF provider in DOCSLURP_EXTRACTOR_PLUGINS`);
+/**
+ * Refuse to start on a misconfigured deployment. PDFs are Doppler's, in a VM or (customer-owned only) on this host:
+ *  - an unknown DOCSLURP_PDF_EXTRACTOR, DOCSLURP_PDF_MODE or DOCSLURP_VM_PDF_INSTALLED;
+ *  - a VM selection (or the service profile) without a sandboxed PDF provider;
+ *  - a provider loaded without the VM selection (PDFs would otherwise not run in it);
+ *  - DOCSLURP_PDF_MODE=local beside a VM selection or a loaded provider, or outside DOCSLURP_SERVICE_PROFILE=self-hosted, or
+ *    without Doppler's pdftomarkdown installed.
+ * With neither a VM nor local mode the worker starts (other formats still run) and says loudly that PDFs are refused.
+ */
+export function assertExtractorPluginConfiguration(env: NodeJS.ProcessEnv = process.env, deps: { dopplerInstalled?: () => boolean } = {}): void {
+  const sandboxed = sandboxedPdfConfigured(env);
+  const local = localPdfModeRequested(env);
+  if (sandboxed && !sandboxedPdfProvider()) {
+    throw new Error(`DOCSLURP_PDF_MODE=vm, DOCSLURP_PDF_EXTRACTOR=${VM_PDF_EXTRACTOR_ID}, DOCSLURP_VM_PDF_INSTALLED=1 or DOCSLURP_SERVICE_PROFILE=service needs a sandboxed PDF provider in DOCSLURP_EXTRACTOR_PLUGINS; refusing to start rather than parse PDFs on the worker host`);
+  }
+  // A loaded VM PDF provider means this deployment reads PDFs in VMs; the selection must be explicit.
+  if (!sandboxed && sandboxedPdfProvider()) {
+    throw new Error(`a sandboxed PDF provider is loaded but ${VM_PDF_EXTRACTOR_ID} is not selected; set DOCSLURP_PDF_MODE=vm (or DOCSLURP_PDF_EXTRACTOR=${VM_PDF_EXTRACTOR_ID}) rather than let PDFs fall back to the worker host; refusing to start`);
+  }
+  if (local) {
+    if (sandboxed) throw new Error(`DOCSLURP_PDF_MODE=local parses PDFs on the worker host, and this deployment runs PDFs only in ${VM_PDF_EXTRACTOR_ID}; unset it`);
+    if (env.DOCSLURP_SERVICE_PROFILE?.trim().toLowerCase() !== "self-hosted") {
+      throw new Error("DOCSLURP_PDF_MODE=local parses customer PDFs on the worker host and is only for customer-owned execution: it needs DOCSLURP_SERVICE_PROFILE=self-hosted; refusing to start");
+    }
+    if (!(deps.dopplerInstalled ?? (() => dopplerConverterInstalled(env)))()) {
+      throw new Error(`DOCSLURP_PDF_MODE=local needs Doppler's pdftomarkdown and pdfpagecount at ${dopplerBinDir(env)}, and prlimit on PATH (worker images ship them; DOCSLURP_DOPPLER_BIN_DIR points elsewhere); refusing to start`);
+    }
+    console.warn("[pdf] mode=local: Doppler (doppler-md) parses customer PDFs on the worker host, in the parser sandbox, not a VM (customer-owned execution)");
+  }
+  const mode = resolvePdfMode(env);
+  if (mode === "off") console.error(`[pdf] mode=off: ${PDF_EXTRACTION_UNCONFIGURED}; PDFs will be refused`);
+  else if (mode === "vm") console.log(`[pdf] mode=vm extractor=${VM_PDF_EXTRACTOR_ID}`);
+}
+
+/** Local mode's PDF tools: the converter, the structural page counter, and prlimit (the counter's external memory limit). */
+function dopplerConverterInstalled(env: NodeJS.ProcessEnv): boolean {
+  try {
+    accessSync(dopplerConverterPath(env), fsConstants.X_OK);
+    accessSync(path.join(dopplerBinDir(env), "pdfpagecount"), fsConstants.X_OK);
+    if (!(env.PATH ?? "").split(path.delimiter).some((dir) => { try { accessSync(path.join(dir, "prlimit"), fsConstants.X_OK); return true; } catch { return false; } })) return false;
+    return true;
+  } catch {
+    return false;
   }
 }
 

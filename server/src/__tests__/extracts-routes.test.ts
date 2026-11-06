@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createProjectIntakeFakes, fakeProject } from "./helpers/project-intake-fakes.js";
 
 /**
@@ -309,5 +309,35 @@ describe("reading an extract", () => {
     const goneDownload = await app.request("/extracts/ext_1/download");
     expect(goneDownload.status).toBe(410);
     expect(await goneDownload.json()).toMatchObject({ error: { code: "extract_expired", message: expect.stringContaining("expired") } });
+  });
+});
+
+describe("a sandboxed PDF deployment (vm-pdf) refuses host PDF parsers in extract pipelines", () => {
+  afterEach(() => vi.unstubAllEnvs());
+  it.each([
+    ["order.pdf", { order: { pdf: ["native-pdf"] } }],
+    ["pages", { pages: ["ocr"] }],
+    ["enrich", { enrich: ["poppler-text"] }],
+    ["voting.secondary", { voting: { enabled: true, secondary: "poppler-text" } }],
+  ])("refuses %s on bulk, URL and direct-session extracts, creating nothing", async (_label, documentExtraction) => {
+    vi.stubEnv("DOCSLURP_VM_PDF_INSTALLED", "1");
+    const { app, runs } = setup({ scopes: ["ingest"] });
+    const pipeline = { documentExtraction };
+    const responses = [
+      await app.request("/extracts/bulk", bulk([text("a.txt")], { pipeline: JSON.stringify(pipeline) })),
+      await app.request("/extracts/url", json({ urls: ["https://example.com/a.pdf"], pipeline })),
+      await app.request("/extracts/direct/sessions", json({ files: [{ filename: "a.pdf", mimeType: "application/pdf", sizeBytes: 10 }], pipeline })),
+    ];
+    for (const response of responses) expect([400, 422]).toContain(response.status);
+    expect(runs).toEqual([]);
+    expect(mocks.created).toEqual([]);
+  });
+});
+
+describe("the same extract pipeline on a host-parsing deployment", () => {
+  it("is accepted, so the refusal above is the vm-pdf rule", async () => {
+    const { app } = setup({ scopes: ["ingest"] });
+    const pipeline = JSON.stringify({ documentExtraction: { order: { pdf: ["native-pdf"] }, pages: ["ocr"], enrich: ["poppler-text"], voting: { enabled: true, secondary: "poppler-text" } } });
+    expect((await app.request("/extracts/bulk", bulk([text("a.txt")], { pipeline }))).status).toBeLessThan(300);
   });
 });

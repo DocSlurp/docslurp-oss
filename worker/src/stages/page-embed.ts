@@ -1,5 +1,5 @@
 import type postgres from "postgres";
-import sharp from "sharp";
+import sharp from "../tools/isolated-image.js";
 import { l2Normalize, packSignBits, pageCredits, qualityAllowsPageReading, quantizeInt8 } from "@docslurp/shared";
 
 import { ensurePageRows, markPagesEmbedded } from "../deferred/page-ledger.js";
@@ -14,6 +14,8 @@ import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import type { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
+import { sniffedPdf } from "../lib/sniffed-pdf.js";
+import { PAGE_RENDITION, pageRenditionKey, parseRawRendition, type RawRendition } from "../lib/page-rendition.js";
 
 type Sql = postgres.Sql<Record<string, unknown>>;
 
@@ -35,7 +37,9 @@ export interface PageEmbedDeps {
 export interface EmbedPageImagesResult {
   embeddedPages: number[];
   /** Set when the call stopped early; pages after the stop were not embedded. */
-  stoppedBy?: "cost-cap" | "quality-fast";
+  stoppedBy?: "cost-cap" | "quality-fast" | "no-vm-rendition";
+  /** Pages of an uploaded image without the OCR boundary's rendition: not embedded (never decoded from the customer's bytes). */
+  skippedWithoutRendition?: number[];
   inputTokens: number;
   costCents: number;
 }
@@ -48,6 +52,19 @@ export async function toPageJpeg(bytes: Uint8Array): Promise<Uint8Array> {
       .rotate()
       .resize({ width: PAGE_IMAGE_MAX_EDGE, height: PAGE_IMAGE_MAX_EDGE, fit: "inside", withoutEnlargement: true })
       .flatten({ background: "#ffffff" })
+      .jpeg({ quality: PAGE_IMAGE_JPEG_QUALITY })
+      .toBuffer(),
+  );
+}
+
+/**
+ * A rendition's pixels as the embedder's JPEG. sharp reads them as raw RGB (no decoder, no colour profile, no EXIF), capped
+ * at PAGE_RENDITION's pixel bound.
+ */
+export async function renditionToPageJpeg(raw: RawRendition): Promise<Uint8Array> {
+  return new Uint8Array(
+    await sharp(raw.pixels, { raw: { width: raw.width, height: raw.height, channels: 3 }, limitInputPixels: PAGE_RENDITION.maxLongEdge * PAGE_RENDITION.maxLongEdge, failOn: "error" })
+      .resize({ width: PAGE_IMAGE_MAX_EDGE, height: PAGE_IMAGE_MAX_EDGE, fit: "inside", withoutEnlargement: true })
       .jpeg({ quality: PAGE_IMAGE_JPEG_QUALITY })
       .toBuffer(),
   );
@@ -91,10 +108,34 @@ export async function embedPageImages(
     return result;
   }
   if (!run.projectId) throw new Error("page-embed requires a project-scoped run");
+  // Page images are decoded in this process (sharp/libvips) to make the JPEG the embedder reads. Only images we produced may
+  // be: a PDF page's render, or for an uploaded image the bounded rendition its OCR boundary wrote (lib/page-rendition.ts).
+  // The customer's own image bytes are never decoded here; a page without a rendition is skipped and reported.
+  const imageUpload = !sniffedPdf(document);
   const projectId = run.projectId;
   await ensurePageRows(deps.sql, document.id, document.pageCount);
 
   const renderWindow = async (windowPages: number[]): Promise<RenderedWindow> => {
+    if (imageUpload) {
+      const out: RenderedWindow = { pages: [], jpegs: [] };
+      for (const pageNumber of windowPages) {
+        const rendition = await deps.storage.getBytes(pageRenditionKey(document, pageNumber)).catch(() => null);
+        if (!rendition) {
+          (result.skippedWithoutRendition ??= []).push(pageNumber);
+          continue;
+        }
+        // Re-validated at read time: stored bytes are trusted no more than the boundary's.
+        const raw = parseRawRendition(rendition);
+        if (!raw) {
+          console.warn(`[page-embed] refused a stored rendition run=${run.id} document=${document.id} page=${pageNumber}: not a raw RGB rendition within its caps`);
+          (result.skippedWithoutRendition ??= []).push(pageNumber);
+          continue;
+        }
+        out.jpegs.push(await renditionToPageJpeg(raw));
+        out.pages.push(pageNumber);
+      }
+      return out;
+    }
     const rasters = await deps.rasters.renderSelectedPages({
       document,
       runId: run.id,
@@ -106,6 +147,7 @@ export async function embedPageImages(
     try {
       const out: RenderedWindow = { pages: [], jpegs: [] };
       for (const raster of [...rasters].sort((a, b) => a.pageNumber - b.pageNumber)) {
+        if (raster.customerOriginal) throw new Error(`page-embed refused to decode the customer's original bytes document=${document.id}`);
         out.jpegs.push(await toPageJpeg(await deps.storage.getBytes(raster.artifactKey)));
         out.pages.push(raster.pageNumber);
       }
@@ -115,7 +157,7 @@ export async function embedPageImages(
     }
   };
 
-  // Customer credits: a page embedded as an image is read by a model, so it bills as a Rich page (PRICE_CARD).
+  // Customer credits: a page embedded as an image is read by a model, so it bills as a Rich page (pricing provider).
   const estimate = (windowPages: number) => pageCredits("rich", windowPages);
   if (args.canAfford && !args.canAfford(estimate(windows[0]!.length))) {
     result.stoppedBy = "cost-cap";
@@ -183,6 +225,13 @@ export async function embedPageImages(
     result.inputTokens += embedded.inputTokens;
     result.costCents += embedded.costCents;
     await args.onWindow?.({ embedded: currentWindow.pages, windowIndex: index, windows: windows.length });
+  }
+  if (result.skippedWithoutRendition?.length) {
+    console.error(
+      `[page-embed] skipped ${result.skippedWithoutRendition.length} page(s) without an OCR-boundary rendition run=${run.id} document=${document.id} ` +
+        "(the uploaded image is never decoded in the worker; those pages are indexed by text only)",
+    );
+    if (result.embeddedPages.length === 0) result.stoppedBy = "no-vm-rendition";
   }
   return result;
 }
@@ -268,6 +317,9 @@ export class PageEmbedStage implements Stage {
           return {
             artifactUri: this.storage.uri(key),
             stats: {
+              // The ingest report lists this under skipped stages (reason image-without-vm-rendition).
+              ...(outcome.stoppedBy === "no-vm-rendition" ? { skipped: true, reason: "image-without-vm-rendition" } : {}),
+              skippedWithoutRendition: outcome.skippedWithoutRendition?.length ?? 0,
               embeddingModel: embedder.model,
               dims: embedder.dims,
               embeddedPages: outcome.embeddedPages.length,

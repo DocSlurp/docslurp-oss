@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   listProjects: vi.fn(),
   generateOpenRouterDocumentText: vi.fn(),
   recordUsageEvent: vi.fn(),
+  recordUnitCharge: vi.fn(),
   assertCanSpend: vi.fn(),
   isProjectChatEnabled: vi.fn(),
 }));
@@ -20,7 +21,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("./search.js", () => ({ hybridSearch: mocks.hybridSearch, ProjectNotFoundError: class extends Error { constructor() { super("Project not found"); } } }));
 vi.mock("./projects.js", () => ({ getProject: mocks.getProject, listProjects: mocks.listProjects }));
 vi.mock("./billing/spend-guard.js", () => ({ assertCanSpend: mocks.assertCanSpend }));
-vi.mock("../lib/ai-usage.js", () => ({ recordUsageEvent: mocks.recordUsageEvent }));
+vi.mock("../lib/ai-usage.js", () => ({ recordUsageEvent: mocks.recordUsageEvent, recordUnitCharge: mocks.recordUnitCharge }));
 vi.mock("../lib/privacy.js", () => ({
   hostedApiKeyForProjects: async ({ apiKey }: { apiKey: string | null }) => ({ apiKey, privacyMode: "standard" }),
   openRouterCall: () => ({}),
@@ -40,7 +41,8 @@ vi.mock("./project-chat.js", async (importOriginal) => ({
 }));
 
 const { aggregateProjectRagSearch } = await import("./aggregate-rag.js");
-const { aggregateProjectRagSearchRequestSchema } = await import("@docslurp/shared");
+const { createChatTurnContext, runInChatTurnContext } = await import("../lib/chat-turn-context.js");
+const { aggregateProjectRagSearchRequestSchema, chatAnswerCredits, chatModelTier } = await import("@docslurp/shared");
 
 const hit = {
   chunkId: "c1", documentId: "d1", score: 0.9, text: "Evidence",
@@ -63,6 +65,7 @@ beforeEach(() => {
     return { text: "Answer [1].", usage: { inputTokens: 10, outputTokens: 5, metadata: {} } };
   });
   mocks.recordUsageEvent.mockImplementation(async () => { mocks.calls.push("usage"); });
+  mocks.recordUnitCharge.mockImplementation(async () => { mocks.calls.push("charge"); });
 });
 
 describe("aggregateProjectRagSearch spend", () => {
@@ -81,13 +84,46 @@ describe("aggregateProjectRagSearch spend", () => {
   it("checks spend before the answer model and records its usage with the project scope", async () => {
     const response = await aggregateProjectRagSearch({ userId: "u1", orgId: "org-1", request: request({ generateAnswer: true }) });
     expect(response.answer).toBe("Answer [1].");
-    expect(mocks.calls).toEqual(["assertCanSpend", "model", "usage"]);
+    expect(mocks.calls).toEqual(["assertCanSpend", "model", "usage", "charge"]);
     expect(mocks.assertCanSpend).toHaveBeenCalledWith("org-1", "ws-1", { kind: "interactive", hold: true });
     expect(mocks.recordUsageEvent).toHaveBeenCalledWith(expect.objectContaining({
       userId: "u1",
       scope: { orgId: "org-1", projectIds: ["ws-1"] },
       usage: expect.objectContaining({ metric: "aggregate-rag-answer", inputTokens: 10, outputTokens: 5 }),
     }));
+  });
+
+  it("bills the answer as a chat answer to the one org searched, under the item id the loss alert groups its cost by", async () => {
+    await aggregateProjectRagSearch({ userId: "u1", orgId: "org-1", request: request({ generateAnswer: true }) });
+    const usage = mocks.recordUsageEvent.mock.calls[0]![0] as { usage: { metadata: Record<string, unknown> } };
+    const charge = mocks.recordUnitCharge.mock.calls[0]![0] as { userId: string; scope: unknown; charge: { id: string; metric: string; amount: number; credits: number; metadata: Record<string, unknown> } };
+    expect(charge.userId).toBe("u1");
+    expect(charge.scope).toEqual({ orgId: "org-1", projectIds: ["ws-1"] });
+    // Priced exactly as a chat answer by the same model (15 tokens: one answer at the model's tier).
+    expect(charge.charge).toMatchObject({ metric: "chat-answer", amount: 1, credits: chatAnswerCredits({ tier: chatModelTier("test/model"), totalTokens: 15 }) });
+    const item = usage.usage.metadata.chatTurnId;
+    expect(typeof item).toBe("string");
+    expect(charge.charge.metadata.chatTurnId).toBe(item);
+    expect(charge.charge.id).toBe(`${item}:charge`);
+    // Each answer is its own item and charge.
+    await aggregateProjectRagSearch({ userId: "u1", orgId: "org-1", request: request({ generateAnswer: true }) });
+    expect((mocks.recordUnitCharge.mock.calls[1]![0] as { charge: { id: string } }).charge.id).not.toBe(charge.charge.id);
+  });
+
+  it("keeps the chat turn's id on an answer generated inside a turn, and charges no separate answer", async () => {
+    const turn = createChatTurnContext({ id: "turn-42", refundOnFailure: true });
+    await runInChatTurnContext(turn, () => aggregateProjectRagSearch({ userId: "u1", orgId: "org-1", request: request({ generateAnswer: true }) }));
+    const usage = mocks.recordUsageEvent.mock.calls[0]![0] as { usage: { metadata: Record<string, unknown> } };
+    expect(usage.usage.metadata.chatTurnId).toBe("turn-42");
+    expect(mocks.recordUnitCharge).not.toHaveBeenCalled();
+  });
+
+  it("charges nothing when no model answered (no evidence to answer from)", async () => {
+    mocks.hybridSearch.mockResolvedValue({ sessionId: "s1", availability: null, results: [] });
+    const response = await aggregateProjectRagSearch({ userId: "u1", orgId: "org-1", request: request({ generateAnswer: true }) });
+    expect(response.answer).toBeTruthy();
+    expect(mocks.generateOpenRouterDocumentText).not.toHaveBeenCalled();
+    expect(mocks.recordUnitCharge).not.toHaveBeenCalled();
   });
 
   it("calls no model when the spend guard refuses", async () => {

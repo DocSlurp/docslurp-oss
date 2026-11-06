@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setVmIsolatedPageRangeStagesForTest } from "../pipeline/page-ranges.js";
-import { defaultPipelineFeatures } from "@docslurp/shared";
+import { defaultPipelineFeatures, pricingVersion } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import type { Document, StageState, ProjectRun, ProjectRunEvent } from "../models.js";
@@ -220,7 +220,7 @@ describe("Stage Execution", () => {
     const output = await execution.startRun({ runId: "run-1", totalStages: 3 });
 
     expect(store.runStatus).toBe("processing");
-    expect(output).toEqual({ documentIds: ["doc-1"], artifacts: { "doc-1:parse": "s3://db/parse", "run:vision-routing-version": "v3" }, documentPages: [2], documentMimeTypes: ["application/pdf"] });
+    expect(output).toEqual({ documentIds: ["doc-1"], artifacts: { "doc-1:parse": "s3://db/parse", "run:vision-routing-version": "v3", "run:page-billing-rules": pricingVersion() }, documentPages: [2], documentMimeTypes: ["application/pdf"] });
     expect(store.events.map((event) => event.eventType)).toEqual(["run.started"]);
   });
 

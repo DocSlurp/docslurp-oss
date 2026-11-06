@@ -2,7 +2,7 @@ import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 
-import { maxOrgsPerUser } from "../services/org-membership-limit.js";
+import { maxOrgsPerUser, warnOrgLimitAboveOneWithUniqueIndex } from "../services/org-membership-limit.js";
 
 /**
  * The one-organization-per-user policy (DOCSLURP_MAX_ORGS_PER_USER=1, index org_memberships_one_org_per_user): joining or
@@ -56,6 +56,16 @@ describe("one organization per user", () => {
     expect(maxOrgsPerUser({ DOCSLURP_MAX_ORGS_PER_USER: "lots" })).toBe(1);
   });
 
+  it("warns at startup when a limit above one meets the one-organization index", async () => {
+    const lines: string[] = [];
+    const indexExists = async () => (await sql<{ present: boolean }[]>`select to_regclass('public.org_memberships_one_org_per_user') is not null as present`)[0]!.present;
+    expect(await warnOrgLimitAboveOneWithUniqueIndex(indexExists, { DOCSLURP_MAX_ORGS_PER_USER: "3" }, (line) => lines.push(line))).toBe(true);
+    expect(lines.join("\n")).toMatch(/DOCSLURP_MAX_ORGS_PER_USER=3 has no effect/);
+    expect(await warnOrgLimitAboveOneWithUniqueIndex(indexExists, {}, (line) => lines.push(line))).toBe(false);
+    expect(await warnOrgLimitAboveOneWithUniqueIndex(async () => false, { DOCSLURP_MAX_ORGS_PER_USER: "3" }, (line) => lines.push(line))).toBe(false);
+    expect(lines).toHaveLength(1);
+  });
+
   it("refuses a second membership row outright", async () => {
     const owner = await user("owner");
     const other = await user("other");
@@ -71,9 +81,40 @@ describe("one organization per user", () => {
     const orgId = await team(owner);
     const personal = await orgs.resolveDefaultOrganization(invitee);
     expect(personal.isPersonal).toBe(true);
+    const [defaultProject] = await sql<{ id: string }[]>`select id from projects where org_id = ${personal.id} and is_default`;
+    expect(defaultProject).toBeDefined();
     await orgs.acceptOrganizationInvite(await invite(orgId, owner, invitee), invitee);
     expect(await membershipsOf(invitee)).toEqual([{ org_id: orgId, role: "member" }]);
     expect(await sql`select id from organizations where id = ${personal.id}`).toEqual([]);
+    // Its default project goes with it: projects.org_id has no foreign key, so nothing else would remove it.
+    expect(await sql`select id from projects where org_id = ${personal.id}`).toEqual([]);
+  });
+
+  it.each([
+    ["a chat session in its default project", async (orgId: string, userId: string) => {
+      const [ws] = await sql<{ id: string }[]>`select id from projects where org_id = ${orgId} and is_default`;
+      await sql`insert into chat_sessions (id, project_id, user_id) values (${`chat-${userId}`}, ${ws!.id}, ${userId})`;
+    }],
+    ["a pending upload session", async (orgId: string, userId: string) => {
+      await sql`insert into upload_sessions (id, user_id, org_id, status) values (${`up-${userId}`}, ${userId}, ${orgId}, 'pending')`;
+    }],
+    ["auto top-up enabled", async (orgId: string) => { await sql`update organizations set auto_recharge_enabled = true where id = ${orgId}`; }],
+    ["an unrevoked MCP grant", async (orgId: string, userId: string) => {
+      await sql`insert into mcp_oauth_clients (id, name, redirect_uris) values (${`c-${userId}`}, 'c', '[]'::jsonb) on conflict do nothing`;
+      // The grant's key is revoked (a revoked key is not data); the live grant is.
+      await sql`insert into api_keys (id, user_id, org_id, key_hash, name, revoked_at) values (${`gk-${userId}`}, ${userId}, ${orgId}, ${`gh-${userId}`}, 'n', now())`;
+      await sql`insert into mcp_oauth_grants (id, client_id, user_id, org_id, resource, scopes, api_key_id) values (${`g-${userId}`}, ${`c-${userId}`}, ${userId}, ${orgId}, 'r', '[]'::jsonb, ${`gk-${userId}`})`;
+    }],
+  ])("keeps a personal organization with %s and refuses the invite", async (_label, seed) => {
+    const owner = await user("owner");
+    const invitee = await user("invitee");
+    const orgId = await team(owner);
+    const personal = await orgs.resolveDefaultOrganization(invitee);
+    await seed(personal.id, invitee);
+    const token = await invite(orgId, owner, invitee);
+    await expect(orgs.acceptOrganizationInvite(token, invitee)).rejects.toMatchObject({ status: 409, code: "user_already_in_org" });
+    expect(await membershipsOf(invitee)).toEqual([{ org_id: personal.id, role: "owner" }]);
+    expect(await sql`select id from projects where org_id = ${personal.id} and is_default`).toHaveLength(1);
   });
 
   it("answers 409 user_already_in_org when the current organization has data, and changes nothing", async () => {
@@ -116,6 +157,23 @@ describe("one organization per user", () => {
     const [{ token }] = await sql<{ token: string }[]>`select token from project_invites where project_id = ${project!.id}`;
     await expect(orgs.acceptProjectInvite(token!, ownerB)).rejects.toMatchObject({ status: 409, code: "user_already_in_org" });
     expect(await sql`select 1 from project_members where project_id = ${project!.id} and user_id = ${ownerB}`).toEqual([]);
+  });
+
+  it("answers 409 when a project invite's join passes the check but loses the race to the one-organization index", async () => {
+    // A concurrent join that commits between the check and the insert leaves exactly this state: the check passed, the
+    // index refuses. A limit of 2 lets the check pass while the index (still present) refuses the second membership.
+    const ownerA = await user("owner-a");
+    const ownerB = await user("owner-b");
+    const orgA = await team(ownerA);
+    const orgB = await team(ownerB);
+    const [project] = await sql<{ id: string }[]>`select id from projects where org_id = ${orgA} and is_default`;
+    await orgs.inviteProjectMember(project!.id, { userId: ownerA, email: `${ownerB}@example.test`, role: "viewer", expiresInDays: 7 });
+    const [{ token }] = await sql<{ token: string }[]>`select token from project_invites where project_id = ${project!.id}`;
+    vi.stubEnv("DOCSLURP_MAX_ORGS_PER_USER", "2");
+    await expect(orgs.acceptProjectInvite(token!, ownerB)).rejects.toMatchObject({ status: 409, code: "user_already_in_org" });
+    expect(await membershipsOf(ownerB)).toEqual([{ org_id: orgB, role: "owner" }]);
+    expect(await sql`select 1 from project_members where project_id = ${project!.id} and user_id = ${ownerB}`).toEqual([]);
+    expect(await sql`select status from project_invites where project_id = ${project!.id}`).toEqual([{ status: "pending" }]);
   });
 
   it("gives a member who leaves exactly one organization again: their personal one", async () => {

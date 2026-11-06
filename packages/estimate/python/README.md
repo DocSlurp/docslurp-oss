@@ -2,18 +2,18 @@
 
 [Package docs](https://docslurp.io/docs/packages/estimate) · [GitHub](https://github.com/DocSlurp/docslurp-oss/tree/main/packages/estimate) · PyPI · not published yet
 
-Offline DocSlurp credit estimates for Python. Probes files on your machine (PDF pages and page mix, media duration,
-Office page counts) and prices an upload with the published price card, as `POST /v1/uploads/estimate` would.
-Nothing is uploaded. It runs the same WebAssembly module as `@docslurp/estimate` on npm, through wasmtime.
+The offline DocSlurp file profiler for Python. It measures files on your machine (file type, page counts, aggregate PDF
+page facts, media duration) and returns small file profiles; send them to `POST /v1/uploads/estimate` for a credit
+estimate. Nothing is uploaded, and nothing here prices anything. It runs the same WebAssembly module as
+`@docslurp/estimate` on npm, through wasmtime.
 
 ```python
-from docslurp_estimate import Estimator, fetch_estimate_card
+from docslurp_estimate import Estimator, request_quote
 
-estimator = Estimator()                                  # bundled price card
-# estimator = Estimator(card=fetch_estimate_card())      # current card from docslurp.io
-quote = estimator.quote_paths(["contract.pdf", "call.mp3"])
-print(quote["estimate"]["credits"], quote["card"]["version"])
+estimator = Estimator()
+result = estimator.estimate_paths(["contract.pdf", "call.mp3"])
+print([file["profile"] for file in result["files"]])                 # neutral facts, no credits
+quote = request_quote(result["request"]["files"], api_key=API_KEY)   # the server's estimate
 ```
 
-Pass a project's `profile` (returned by `POST /v1/uploads/estimate`) to quote with its settings; without one, a
-new hosted project with default settings is assumed.
+Offline, show the profiles without credits. See the npm package README for the profile fields.

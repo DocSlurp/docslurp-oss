@@ -12,7 +12,11 @@
     {
       "id": "handwriting-with-native-context",
       "path": "kreuzberg-handwriting-notes.pdf",
-      "tags": ["handwriting", "scanned", "mixed-raster-text"],
+      "tags": [
+        "handwriting",
+        "scanned",
+        "mixed-raster-text"
+      ],
       "expected": {
         "suggestedPlaybook": "review-grade",
         "visionPolicy": "aggressive",
@@ -24,12 +28,18 @@
             "ocrAuthorized": true
           }
         ]
-      }
+      },
+      "notes": "Owner rule 2026-11-05: a page with native text that places a large, scan-like, non-repeated image with no native text over it is read (pdf-layout-facts image evidence)."
     },
     {
       "id": "image-only-multipage-scan",
       "path": "image-heavy-ocr.pdf",
-      "tags": ["handwriting", "scanned", "image-only", "multipage"],
+      "tags": [
+        "handwriting",
+        "scanned",
+        "image-only",
+        "multipage"
+      ],
       "expected": {
         "suggestedPlaybook": "review-grade",
         "visionPolicy": "aggressive",
@@ -52,7 +62,11 @@
     {
       "id": "structured-form-with-annotations",
       "path": "form-rotated-notes.pdf",
-      "tags": ["forms", "annotations", "rotated-text"],
+      "tags": [
+        "forms",
+        "annotations",
+        "rotated-text"
+      ],
       "expected": {
         "suggestedPlaybook": "layout-aware",
         "pages": [
@@ -68,7 +82,11 @@
     {
       "id": "contiguous-multipage-table",
       "path": "tables-multipage-financials.pdf",
-      "tags": ["tables", "multipage", "structured-data"],
+      "tags": [
+        "tables",
+        "multipage",
+        "structured-data"
+      ],
       "expected": {
         "suggestedPlaybook": "layout-aware",
         "pages": [
@@ -96,7 +114,11 @@
     {
       "id": "formula-heavy-academic-document",
       "path": "academic-latex-ligatures.pdf",
-      "tags": ["formulas", "latex", "born-digital"],
+      "tags": [
+        "formulas",
+        "latex",
+        "born-digital"
+      ],
       "expected": {
         "suggestedPlaybook": "agentic",
         "pages": [
@@ -118,7 +140,11 @@
     {
       "id": "born-digital-metadata-prose",
       "path": "kreuzberg-metadata-document.pdf",
-      "tags": ["born-digital", "metadata", "negative-control"],
+      "tags": [
+        "born-digital",
+        "metadata",
+        "negative-control"
+      ],
       "expected": {
         "suggestedPlaybook": "fast",
         "visionPolicy": "skip",
@@ -128,6 +154,235 @@
             "route": "straightforward-text",
             "extractorHint": "cheap-text",
             "ocrAuthorized": false
+          }
+        ]
+      },
+      "notes": "Owner rule 2026-11-05: table-heavy only with a 5+ row table or 40%+ table coverage; this page's 4-row table (14% of the page) is prose."
+    },
+    {
+      "id": "generated-scan-beside-caption",
+      "path": "routing-scan-beside-caption.pdf",
+      "tags": [
+        "generated",
+        "image-evidence"
+      ],
+      "expected": {
+        "suggestedPlaybook": "review-grade",
+        "visionPolicy": "aggressive",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "handwriting-or-degraded",
+            "extractorHint": "vision-rescue",
+            "ocrAuthorized": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "generated-letterhead-logo",
+      "path": "routing-letterhead-logo.pdf",
+      "tags": [
+        "generated",
+        "image-evidence"
+      ],
+      "expected": {
+        "suggestedPlaybook": "fast",
+        "visionPolicy": "skip",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "straightforward-text",
+            "extractorHint": "cheap-text",
+            "ocrAuthorized": false
+          },
+          {
+            "pageNumber": 2,
+            "route": "straightforward-text",
+            "extractorHint": "cheap-text",
+            "ocrAuthorized": false
+          },
+          {
+            "pageNumber": 3,
+            "route": "straightforward-text",
+            "extractorHint": "cheap-text",
+            "ocrAuthorized": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "generated-photo-overlaid-caption",
+      "path": "routing-photo-overlaid-caption.pdf",
+      "tags": [
+        "generated",
+        "image-evidence"
+      ],
+      "expected": {
+        "suggestedPlaybook": "fast",
+        "visionPolicy": "skip",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "straightforward-text",
+            "extractorHint": "cheap-text",
+            "ocrAuthorized": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "generated-scan-with-text-layer",
+      "path": "routing-scan-with-text-layer.pdf",
+      "tags": [
+        "generated",
+        "image-evidence"
+      ],
+      "expected": {
+        "suggestedPlaybook": "fast",
+        "visionPolicy": "skip",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "straightforward-text",
+            "extractorHint": "cheap-text",
+            "ocrAuthorized": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "generated-table-4-rows",
+      "path": "routing-table-4-rows.pdf",
+      "tags": [
+        "generated",
+        "table-threshold"
+      ],
+      "expected": {
+        "suggestedPlaybook": "fast",
+        "visionPolicy": "skip",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "straightforward-text",
+            "extractorHint": "cheap-text",
+            "ocrAuthorized": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "generated-table-6-rows",
+      "path": "routing-table-6-rows.pdf",
+      "tags": [
+        "generated",
+        "table-threshold"
+      ],
+      "expected": {
+        "suggestedPlaybook": "layout-aware",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "table-heavy",
+            "extractorHint": "layout-aware",
+            "ocrAuthorized": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "generated-table-large-coverage",
+      "path": "routing-table-large-coverage.pdf",
+      "tags": [
+        "generated",
+        "table-threshold"
+      ],
+      "expected": {
+        "suggestedPlaybook": "layout-aware",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "table-heavy",
+            "extractorHint": "layout-aware",
+            "ocrAuthorized": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "generated-table-clean-financial",
+      "path": "routing-table-clean-financial.pdf",
+      "tags": [
+        "generated",
+        "born-digital-table"
+      ],
+      "notes": "Owner policy 2026-11-05: a born-digital table Doppler extracts soundly is served from Doppler's table (Fast), every row kept; no model read.",
+      "expected": {
+        "suggestedPlaybook": "layout-aware",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "table-heavy",
+            "extractorHint": "layout-aware",
+            "ocrAuthorized": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "generated-table-two-line-header",
+      "path": "routing-table-two-line-header.pdf",
+      "tags": [
+        "generated",
+        "born-digital-table"
+      ],
+      "notes": "Doppler splits the grouped two-line header; repairMarkdownTables merges it into one header row, so the table is sound and stays Fast.",
+      "expected": {
+        "suggestedPlaybook": "layout-aware",
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "table-heavy",
+            "extractorHint": "layout-aware",
+            "ocrAuthorized": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "generated-table-bullet-list",
+      "path": "routing-table-bullet-list.pdf",
+      "tags": [
+        "generated",
+        "born-digital-table"
+      ],
+      "notes": "A bulleted agenda Doppler lays out as a table is restored to a list: not table-heavy, not escalated.",
+      "expected": {
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "straightforward-text",
+            "extractorHint": "cheap-text",
+            "ocrAuthorized": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "generated-table-scanned",
+      "path": "routing-table-scanned.pdf",
+      "tags": [
+        "generated",
+        "scanned-table"
+      ],
+      "notes": "A table only as a page scan keeps the OCR/vision path.",
+      "expected": {
+        "pages": [
+          {
+            "pageNumber": 1,
+            "route": "handwriting-or-degraded",
+            "extractorHint": "vision-rescue",
+            "ocrAuthorized": true
           }
         ]
       }

@@ -1,9 +1,7 @@
-import { execFile, execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 
 import { afterAll, describe, expect, it } from "vitest";
 
@@ -20,6 +18,7 @@ import {
   type PageImageEvidence,
   type TextLayerVerifier,
 } from "../lib/page-image-evidence.js";
+import { collectPageLayoutFacts } from "../lib/page-layout-evidence.js";
 import { DocumentArtifactLedger } from "../pipeline/artifact-ledger.js";
 import { VISION_ROUTING_VERSION_SLOT } from "../lib/vision-routing-v2.js";
 import { splitFormFeedPages } from "../pipeline/page-facts.js";
@@ -47,8 +46,6 @@ const hasPoppler = (() => {
   }
 })();
 
-const kreuzbergScript = fileURLToPath(new URL("../../scripts/kreuzberg_extract.mjs", import.meta.url));
-
 const textPage = (seed: number): TestPdfPage => ({ kind: "text", heading: `Section ${seed} harbor ledger review`, lines: proseLines(36, seed) });
 const scanPage = (lines?: string[]): TestPdfPage => ({ kind: "image", images: [{ image: scannedImage() }], ...(lines ? { lines } : {}) });
 const blankPage: TestPdfPage = { kind: "blank" };
@@ -67,24 +64,25 @@ describe.skipIf(!hasPoppler)("raster page triage on generated PDFs", () => {
     await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })));
   });
 
-  /** Kreuzberg extraction → raster evidence → classification → vision and render selection. */
-  async function triage(pages: TestPdfPage[], maxPagesPerDocument = 20, verifyTextLayer?: TextLayerVerifier): Promise<Triage> {
+  /** Text-layer extraction (poppler-text, the default host PDF extractor) → raster evidence → classification → vision and render selection. */
+  async function triage(pages: TestPdfPage[], maxPagesPerDocument = 20, verifyTextLayer?: TextLayerVerifier, layout = false): Promise<Triage> {
     const dir = await mkdtemp(path.join(tmpdir(), "raster-triage-"));
     dirs.push(dir);
     const input = path.join(dir, "doc.pdf");
-    const output = path.join(dir, "doc.md");
     await writeFile(input, buildTestPdf(pages));
-    await promisify(execFile)(process.execPath, [kreuzbergScript, "--input", input, "--output", output], { timeout: 60_000 });
-    const markdown = await readFile(output, "utf8");
+    const runner = new CommandRunner();
+    const markdown = (await runner.run(await runner.extractText(input, pages.length, true))).stdout;
 
     const pageTexts = pageAlignedTexts(markdown, pages.length);
-    expect(pageTexts, "Kreuzberg Markdown should be page-aligned").not.toBeNull();
+    expect(pageTexts, "extracted text should be page-aligned").not.toBeNull();
     // The PDF's own text layer, as page facts record it (one pdftotext run, form-feed split).
-    const runner = new CommandRunner();
     const layerPlan = await runner.pageText(input, pages.length);
     const textLayerPages = splitFormFeedPages((await runner.run(layerPlan)).stdout, pages.length);
     const evidence = await collectPageImageEvidence({ runner, sourcePath: input, pageTexts: pageTexts!, textLayerPages, ...(verifyTextLayer ? { verifyTextLayer } : {}) });
     const evidenceMap = new Map((evidence ?? []).map((page) => [page.pageNumber, page]));
+    // Local mode: the open layout walker in the parser sandbox, over the same extraction.
+    const pageLayout = layout ? await collectPageLayoutFacts({ runner, sourcePath: input, pageCount: pages.length, markdown: pageTexts!.join("\f") }) : null;
+    if (layout) expect(pageLayout, "layout facts should be collected").not.toBeNull();
     const surface = buildAdaptiveRoutingDecisionSurface({
       documentId: "doc-1",
       filename: "doc.pdf",
@@ -96,6 +94,7 @@ describe.skipIf(!hasPoppler)("raster page triage on generated PDFs", () => {
           ? { source: "page-image-evidence", artifactUri: "s3://bucket/evidence.json" }
           : null,
       pageImageEvidence: evidenceMap,
+      ...(pageLayout ? { pageLayout } : {}),
       routingV2: true,
     });
 
@@ -169,6 +168,29 @@ describe.skipIf(!hasPoppler)("raster page triage on generated PDFs", () => {
     ]);
     expect(result.visionPages).toEqual([2]);
   }, 90_000);
+
+  describe("with layout facts (owner rule 2026-11-05: a scan beside native text is read)", () => {
+    const placed = (scale: number, lines: string[], image = scannedImage()): TestPdfPage => ({
+      kind: "image",
+      images: [{ image, rect: { x: (PAGE_WIDTH * (1 - scale)) / 2, y: 40, width: PAGE_WIDTH * scale, height: PAGE_HEIGHT * scale * 0.7 } }],
+      lines,
+    });
+    const caption = proseLines(6, 4);
+
+    it("a captioned scan covering a third of the page goes to vision; without layout facts it does not", async () => {
+      const pages = [textPage(1), placed(0.7, caption), textPage(3)];
+      expect((await triage(pages, 20, undefined, true)).visionPages).toEqual([2]);
+      expect((await triage(pages)).visionPages).toEqual([]);
+    }, 120_000);
+
+    it("a small scan, a repeated letterhead, and an OCR'd scan with its text layer do not go to vision", async () => {
+      const letterhead = { image: scannedImage({ width: 600, height: 400, lines: 8 }), rect: { x: 0, y: PAGE_HEIGHT * 0.6, width: PAGE_WIDTH, height: PAGE_HEIGHT * 0.4 }, shareKey: "letterhead" };
+      const sheet = (seed: number): TestPdfPage => ({ kind: "image", images: [letterhead], lines: proseLines(8, seed) });
+      expect((await triage([sheet(1), sheet(2), sheet(3), sheet(4)], 20, undefined, true)).visionPages).toEqual([]);
+      expect((await triage([textPage(1), placed(0.3, caption), textPage(3)], 20, undefined, true)).visionPages).toEqual([]);
+      expect((await triage([textPage(1), scanPage(proseLines(36, 9)), textPage(3)], 20, undefined, true)).visionPages).toEqual([]);
+    }, 120_000);
+  });
 
   it("blank pages never trigger paid vision, alone or in a document", async () => {
     const blankOnly = await triage([blankPage, blankPage]);

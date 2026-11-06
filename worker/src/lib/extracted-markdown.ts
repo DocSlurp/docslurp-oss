@@ -1,10 +1,60 @@
 import { assessTextLayer, pageWordCount } from "@docslurp/shared";
 import { stripLeadingFrontmatter } from "./markdown-structure.js";
 
-const MARKDOWN_TABLE_BLOCK =
-  /(^|\n)(?<table>(?:\|.*\|\n)+)(?=\n|$)/g;
+/**
+ * Pipe-table blocks: maximal runs of lines that start and end with `|`, each ended by a newline and followed by a blank
+ * line or the end of the text. Line-based and linear: the regex this replaces (`(^|\n)((?:\|.*\|\n)+)(?=\n|$)`)
+ * backtracked quadratically over a long pipe block that was not followed by a blank line (council I audit). Returns the
+ * runs as line index ranges [first, last].
+ */
+function markdownTableBlocks(lines: readonly string[]): Array<[number, number]> {
+  // A line holding a form feed spans a page break: never a table row, so the break is never trimmed out of a cell and
+  // pages never merge (council K #7).
+  const isPipeLine = (line: string) => line.length >= 2 && line.charCodeAt(0) === 124 && line.charCodeAt(line.length - 1) === 124 && !/[\r\f\u2028\u2029]/.test(line);
+  const blocks: Array<[number, number]> = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!isPipeLine(lines[i]!)) continue;
+    let j = i;
+    while (j + 1 < lines.length && isPipeLine(lines[j + 1]!)) j += 1;
+    if (j + 1 < lines.length && lines[j + 1] === "") blocks.push([i, j]);
+    i = j;
+  }
+  return blocks;
+}
 
-const DATA_URI = /data:[^,\s)"']+;base64,[a-z0-9+/=]+/gi;
+/** `,`, `)`, quotes or whitespace end a data: URI's type. */
+const isDataUriStop = (code: number) => code === 44 || code === 41 || code === 34 || code === 39 || code === 32 || (code >= 9 && code <= 13) || (code > 127 && /\s/.test(String.fromCharCode(code)));
+const isBase64Char = (code: number) => (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 43 || code === 47 || code === 61;
+
+/**
+ * Replace each `data:<type>;base64,<payload>` URI (case-insensitive; the type has no `,`, whitespace, `)` or quote and
+ * ends with `;base64`) via `replace`. A linear scan: the regex this replaces backtracked quadratically on `data:data:…`
+ * runs (council I audit), so a run's end is found once and shared by every `data:` inside it.
+ */
+function replaceDataUris(text: string, replace: (match: string) => string): string {
+  const lower = text.replace(/[A-Z]+/g, (letters) => letters.toLowerCase());
+  const out: string[] = [];
+  let from = 0, search = 0, runEnd = -1;
+  for (let at = lower.indexOf("data:", search); at !== -1; at = lower.indexOf("data:", search)) {
+    const typeStart = at + 5;
+    if (runEnd < typeStart) {
+      runEnd = typeStart;
+      while (runEnd < text.length && !isDataUriStop(text.charCodeAt(runEnd))) runEnd += 1;
+    }
+    if (text.charCodeAt(runEnd) === 44 && runEnd - typeStart > 7 && lower.startsWith(";base64", runEnd - 7)) {
+      let end = runEnd + 1;
+      while (end < text.length && isBase64Char(text.charCodeAt(end))) end += 1;
+      if (end > runEnd + 1) {
+        out.push(text.slice(from, at), replace(text.slice(at, end)));
+        from = search = end;
+        continue;
+      }
+    }
+    search = at + 1;
+  }
+  out.push(text.slice(from));
+  return out.join("");
+}
 
 export type ExtractionPlausibilitySignals = {
   plausibilityScore: number;
@@ -36,7 +86,7 @@ export function sanitizeExtractedMarkdown(
   let strippedDataUriCount = 0;
   let strippedDataUriBytes = 0;
   const body = stripLeadingFrontmatter(markdown);
-  const sanitized = body.markdown.replace(DATA_URI, (match) => {
+  const sanitized = replaceDataUris(body.markdown, (match) => {
     strippedDataUriCount += 1;
     strippedDataUriBytes += Buffer.byteLength(match);
     return "artifact://externalized-data-uri";
@@ -108,7 +158,7 @@ export function scoreExtractionPlausibility(
 }
 
 export function countMarkdownTables(markdown: string): number {
-  return [...markdown.matchAll(MARKDOWN_TABLE_BLOCK)].length;
+  return markdownTableBlocks(markdown.split("\n")).length;
 }
 
 export function countHtmlTables(markdown: string): number {
@@ -132,42 +182,54 @@ function escapeHtml(text: string): string {
     .replaceAll('"', "&quot;");
 }
 
-function markdownTableToHtml(tableMarkdown: string): string | null {
-  const lines = tableMarkdown
-    .trim()
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
+/** A cell with none of these needs neither inline-Markdown stripping nor HTML escaping. */
+const CELL_NEEDS_WORK = /[`*<>&"]/;
 
-  if (lines.length < 2) {
-    return null;
+/** String#trim's whitespace, by code: ASCII fast, the rest through \s. */
+const isSpace = (code: number) => code === 32 || (code >= 9 && code <= 13) || (code > 127 && /\s/.test(String.fromCharCode(code)));
+
+function cellHtml(cell: string): string {
+  const trimmed = cell.trim();
+  return CELL_NEEDS_WORK.test(trimmed) ? escapeHtml(stripInlineMarkdown(trimmed)) : trimmed;
+}
+
+const SEPARATOR_ROW = /^\|?(?:\s*:?-{3,}:?\s*\|)+\s*$/;
+
+/** HTML for the pipe-table block lines[first..last] (each line starts and ends with `|`), or null when it is not a table. */
+function markdownTableToHtml(lines: readonly string[], first: number, last: number): string | null {
+  let header: string | null = null;
+  let body = "";
+  let rows = 0;
+  let index = 0;
+  for (let at = first; at <= last; at++) {
+    const line = lines[at]!.trim();
+    if (!line) continue;
+    const position = index++;
+    if (position === 1 && line.includes("---") && SEPARATOR_ROW.test(line)) continue;
+    // Cells between pipes, trimmed by index (one string per cell, no split or trim copies).
+    const start = line.charCodeAt(0) === 124 ? 1 : 0;
+    const end = line.length > 1 && line.charCodeAt(line.length - 1) === 124 ? line.length - 1 : line.length;
+    let html = "";
+    let filled = false;
+    const tag = header === null ? "th" : "td";
+    for (let from = start; from <= end;) {
+      let to = line.indexOf("|", from);
+      if (to === -1 || to > end) to = end;
+      let a = from, b = to;
+      while (a < b && isSpace(line.charCodeAt(a))) a++;
+      while (b > a && isSpace(line.charCodeAt(b - 1))) b--;
+      const cell = a === b ? "" : cellHtml(line.slice(a, b));
+      if (cell) filled = true;
+      html += `<${tag}>${cell}</${tag}>`;
+      from = to + 1;
+    }
+    if (!filled) continue;
+    rows += 1;
+    if (header === null) header = `<tr>${html}</tr>`;
+    else body += `<tr>${html}</tr>`;
   }
-
-  const rows = lines
-    .filter((line, index) => {
-      if (index !== 1) {
-        return true;
-      }
-      return !/^\|?(?:\s*:?-{3,}:?\s*\|)+\s*$/.test(line);
-    })
-    .map((line) =>
-      line
-        .replace(/^\||\|$/g, "")
-        .split("|")
-        .map((cell) => escapeHtml(stripInlineMarkdown(cell.trim()))),
-    )
-    .filter((row) => row.length > 0 && row.some((cell) => cell.length > 0));
-
-  if (rows.length < 2) {
-    return null;
-  }
-
-  const [header, ...body] = rows;
-  const headerHtml = `<tr>${header.map((cell) => `<th>${cell}</th>`).join("")}</tr>`;
-  const bodyHtml = body
-    .map((row) => `<tr>${row.map((cell) => `<td>${cell}</td>`).join("")}</tr>`)
-    .join("");
-  return `<table>\n<thead>\n${headerHtml}\n</thead>\n<tbody>\n${bodyHtml}\n</tbody>\n</table>`;
+  if (index < 2 || rows < 2) return null;
+  return `<table>\n<thead>\n${header}\n</thead>\n<tbody>\n${body}\n</tbody>\n</table>`;
 }
 
 /**
@@ -183,13 +245,20 @@ export function normalizeExtractedMarkdown(args: {
     return args.markdown;
   }
 
-  return args.markdown.replace(
-    MARKDOWN_TABLE_BLOCK,
-    (fullMatch, prefix, table) => {
-      const html = markdownTableToHtml(table);
-      return html ? `${prefix}${html}\n` : fullMatch;
-    },
-  );
+  // One forward pass (blocks are in order and do not overlap): never a splice per table, which is quadratic on a file of
+  // many small tables (council K #1: 110 s on 4 MB).
+  const lines = args.markdown.split("\n");
+  const out: string[] = [];
+  let next = 0;
+  for (const [first, last] of markdownTableBlocks(lines)) {
+    const html = markdownTableToHtml(lines, first, last);
+    if (!html) continue;
+    for (; next < first; next++) out.push(lines[next]!);
+    out.push(html);
+    next = last + 1;
+  }
+  for (; next < lines.length; next++) out.push(lines[next]!);
+  return out.join("\n");
 }
 
 export function scoreMarkdownCandidate(args: {
@@ -214,8 +283,9 @@ export function scoreMarkdownCandidate(args: {
   const formattingSignals =
     (sanitized.match(/^#{1,6}\s+/gm) ?? []).length * 2 +
     (sanitized.match(/\*\*[^*\n][^*\n]*\*\*/g) ?? []).length +
-    (sanitized.match(/\[[^\]]+\]\([^)]+\)/g) ?? []).length +
-    (sanitized.match(/^\s*[-*+]\s+/gm) ?? []).length;
+    // Linear: link classes exclude their own opener; a list marker's indent never crosses lines (council K #3 audit).
+    (sanitized.match(/\[[^\][]+\]\((?:[^()]|\([^()]*\))+\)/g) ?? []).length +
+    (sanitized.match(/^[^\S\n]*[-*+]\s+/gm) ?? []).length;
   const formattingScore = Math.min(0.2, formattingSignals * 0.02);
   const selectionScore =
     plausibilityScore +

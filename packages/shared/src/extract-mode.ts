@@ -1,6 +1,7 @@
 import { z } from "zod";
 
-import { BILLABLE_UNIT_METRICS, PRICE_CARD } from "./billing.js";
+import { BILLABLE_UNIT_METRICS } from "./billing.js";
+import { pricing } from "./pricing-provider.js";
 import { documentExportContentSchema } from "./document-export.js";
 
 /**
@@ -9,8 +10,8 @@ import { documentExportContentSchema } from "./document-export.js";
  * prefix, and are deleted with their Postgres rows (chunks, pages) and
  * LanceDB vector rows (in the project's tables, compacted out at deletion)
  * when the retention window ends. The first EXTRACT_FREE_RETENTION_HOURS are
- * free; a longer window is charged as storage for the whole window at
- * EXTRACT_RETENTION_STORAGE_MULTIPLIER times the storage price.
+ * free; a longer window is charged for the whole window at the pricing
+ * provider's extended-retention price.
  * See docs/extract.md.
  */
 
@@ -18,12 +19,6 @@ import { documentExportContentSchema } from "./document-export.js";
 export const EXTRACT_FREE_RETENTION_HOURS = 48;
 /** Default longest retention a request may ask for. Deployments override it with DOCSLURP_EXTRACT_MAX_RETENTION_DAYS. */
 export const EXTRACT_MAX_RETENTION_DAYS = 30;
-/**
- * Extended retention is charged as storage at this multiple of the storage
- * price (PRICE_CARD.storageGbMonth), prorated over the window. The one knob for
- * the extended-retention margin.
- */
-export const EXTRACT_RETENTION_STORAGE_MULTIPLIER = 2;
 /** Storage months are 30 days for retention pricing. */
 export const EXTRACT_RETENTION_DAYS_PER_MONTH = 30;
 /** Billable unit metric of the extended-retention charge (one event per extract). */
@@ -101,14 +96,14 @@ export function isPaidExtractRetention(retentionHours: number, freeHours: number
 }
 
 /**
- * Credits for keeping `bytes` (objects + indexes) for `retentionHours`:
- * prorated storage at EXTRACT_RETENTION_STORAGE_MULTIPLIER x the storage
- * price. Zero inside the free window.
+ * Credits for keeping `bytes` (objects + indexes) for `retentionHours`: the
+ * pricing provider's extended-retention price, prorated over the window. Zero
+ * inside the free window.
  */
 export function extractRetentionCredits(args: { bytes: number; retentionHours: number; freeHours?: number }): number {
   const bytes = Number.isFinite(args.bytes) && args.bytes > 0 ? args.bytes : 0;
   const hours = Number.isFinite(args.retentionHours) && args.retentionHours > 0 ? args.retentionHours : 0;
   if (!isPaidExtractRetention(hours, args.freeHours)) return 0;
   const months = hours / 24 / EXTRACT_RETENTION_DAYS_PER_MONTH;
-  return (bytes / BYTES_PER_GB) * PRICE_CARD.storageGbMonth * EXTRACT_RETENTION_STORAGE_MULTIPLIER * months;
+  return pricing().extractRetentionCredits(bytes, months);
 }

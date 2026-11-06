@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
-import type { SandboxSession } from "./types.js";
+import { findSandboxInfrastructureError, type SandboxInfrastructureError, type SandboxSession } from "./types.js";
 
 /**
  * One sandbox session per scope (one Temporal activity). The session opens
@@ -14,7 +14,9 @@ export class SandboxSessionScope {
 
   get(): Promise<SandboxSession> {
     this.opening ??= this.open();
-    return this.opening;
+    // A session that could not be created is the sandbox's failure, noted for every document that asks, not only the
+    // first (real-Modal F1, recheck R #2): the rejection is cached, and each caller's watch must see it.
+    return this.opening.catch((error: unknown) => { noteSandboxInfrastructureError(error); throw error; });
   }
 
   /**
@@ -29,6 +31,13 @@ export class SandboxSessionScope {
 
   latchTeardown(error: Error): void {
     this.latched ??= error;
+  }
+
+  /** Let the opened session release what the stage no longer needs (SandboxSession.settle); never opens one. */
+  async settle(): Promise<void> {
+    if (!this.opening) return;
+    const session = await this.opening.catch(() => null);
+    await session?.settle?.();
   }
 
   async close(): Promise<void> {
@@ -46,9 +55,48 @@ export class SandboxSessionScope {
 
 export const sandboxScopeStorage = new AsyncLocalStorage<SandboxSessionScope>();
 
+/** The sandbox infrastructure failure seen while one document's stage ran (watchSandboxInfrastructure). */
+const infrastructureWatch = new AsyncLocalStorage<{ error: Error | null }>();
+
+/**
+ * Run `fn` (one document's stage) watching for sandbox infrastructure failures (SandboxInfrastructureError). The runner
+ * notes every one it sees, so the caller learns of it even when the stage caught it and fell back to another extractor
+ * or skipped a page: such a document must neither fail nor complete on a degraded result (real-Modal check F1).
+ */
+export async function watchSandboxInfrastructure<T>(fn: () => Promise<T>): Promise<{ result?: T; error?: unknown; infrastructure: Error | null }> {
+  const holder: { error: Error | null } = { error: null };
+  try {
+    const result = await infrastructureWatch.run(holder, fn);
+    return { result, infrastructure: holder.error };
+  } catch (error) {
+    return { error, infrastructure: holder.error };
+  }
+}
+
+/** Record `error` for the watching document when it is (or wraps) a SandboxInfrastructureError. */
+export function noteSandboxInfrastructureError(error: unknown): void {
+  const infrastructure = findSandboxInfrastructureError(error);
+  if (!infrastructure) return;
+  const holder = infrastructureWatch.getStore();
+  if (!holder) return;
+  // The first failure wins, except that one which strikes a document replaces one which strikes no one (council W #2):
+  // an earlier Modal API error must not hide a later failure the document caused.
+  const current = holder.error as SandboxInfrastructureError | null;
+  if (!current || (!current.strikes && infrastructure.strikes)) holder.error = infrastructure;
+}
+
 /** The current activity's latched teardown failure, if any (see SandboxSessionScope.teardownError). */
 export function latchedTeardownError(): Error | null {
   return sandboxScopeStorage.getStore()?.teardownError ?? null;
+}
+
+/**
+ * Before a stage's final checkpoint: idle pooled VMs are terminated and their remaining time recorded in the stage's
+ * ledger, so the checkpoint persists it (VM pool follow-up). Best effort: a failure is logged, never the stage's.
+ */
+export async function settleSandboxSession(): Promise<void> {
+  await sandboxScopeStorage.getStore()?.settle().catch((error: unknown) =>
+    console.warn(`[parser-sandbox] settle failed: ${error instanceof Error ? error.message : String(error)}`));
 }
 
 export function runWithSandboxScope<T>(scope: SandboxSessionScope, fn: () => Promise<T>): Promise<T> {

@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { PAGE_RASTER_ROUTING, decidePageRaster, pageWordCount, type PageRasterFacts } from "./page-raster-routing.js";
+import {
+  MIXED_SCAN_IMAGE_SIGNAL,
+  PAGE_RASTER_ROUTING,
+  decidePageRaster,
+  mixedScanImage,
+  pageWordCount,
+  scanLikeImage,
+  type PageLayoutImage,
+  type PageRasterFacts,
+} from "./page-raster-routing.js";
 
 const none = { count: 0, coverage: 0, largestCoverage: 0 };
 const page = (nativeWords: number | null, images: PageRasterFacts["images"], rest: Partial<PageRasterFacts> = {}) =>
@@ -69,5 +78,42 @@ describe("decidePageRaster", () => {
     const unverified = page(400, null, { textLayer: { verdict: "suspect", matchesOcr: null } });
     expect(unverified.read).toBe(false);
     expect(unverified.signals).toContain("ocr-not-authorized:text-layer-unverified");
+  });
+});
+
+describe("mixed text and scan pages (owner rule 2026-11-05)", () => {
+  const scan = (over: Partial<PageLayoutImage> = {}): PageLayoutImage => ({
+    bbox: [72, 200, 540, 600], coverage: 0.4, widthPx: 1700, heightPx: 1450, bitsPerComponent: 8, colorSpace: "gray",
+    encoding: "image", ppi: [260, 260], bytesPerPixel: 0.03, repeated: false, wordsInside: 0, ...over,
+  });
+  const words = PAGE_RASTER_ROUTING.sparsePageWords + 40;
+  const decide = (layoutImages: PageLayoutImage[] | null) => page(words, { count: 1, coverage: 0.4, largestCoverage: 0.4 }, { layoutImages });
+
+  it("reads a large scan placed beside native text, and returns its region", () => {
+    expect(decide([scan()])).toMatchObject({ read: true, kind: "raster", signals: [MIXED_SCAN_IMAGE_SIGNAL], region: [72, 200, 540, 600] });
+    expect(decide([scan({ encoding: "ccitt", bitsPerComponent: 1, bytesPerPixel: null })])).toMatchObject({ read: true });
+  });
+
+  it("does not read a logo or letterhead, a photo, a small image, or an image with native text over it", () => {
+    expect(decide([scan({ repeated: true })])).toMatchObject({ read: false, kind: "native-text" });
+    expect(decide([scan({ bytesPerPixel: 2.9, colorSpace: "rgb" })]).read).toBe(false);
+    expect(decide([scan({ bytesPerPixel: 0.6, colorSpace: "gray" })]).read).toBe(false);
+    expect(decide([scan({ coverage: 0.19 })]).read).toBe(false);
+    expect(decide([scan({ widthPx: 180 })]).read).toBe(false);
+    expect(decide([scan({ ppi: [40, 40] })]).read).toBe(false);
+    expect(decide([scan({ wordsInside: 3 })]).read).toBe(false);
+    expect(decide([scan({ wordsInside: 2 })]).read).toBe(true);
+  });
+
+  it("unknown layout, placement or word boxes never authorize a read", () => {
+    expect(decide(null).read).toBe(false);
+    expect(decide([scan({ bbox: null, coverage: null })]).read).toBe(false);
+    expect(decide([scan({ wordsInside: null })]).read).toBe(false);
+    expect(decide([scan({ ppi: [null, null] })]).read).toBe(false);
+  });
+
+  it("picks the largest qualifying image", () => {
+    expect(mixedScanImage([scan({ coverage: 0.25, bbox: [0, 0, 1, 1] }), scan()])?.bbox).toEqual([72, 200, 540, 600]);
+    expect(scanLikeImage(scan({ bytesPerPixel: 0.4, colorSpace: "gray" }))).toBe(false);
   });
 });

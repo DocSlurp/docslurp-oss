@@ -167,9 +167,17 @@ export function stripHtmlMarkup(text: string): string {
  */
 export function textPageCount(text: string, options: { markup?: boolean } = {}): number {
   if (text.length > TEXT_MEASURE_SAMPLE_CHARS) {
-    const sampled = textPageCount(text.slice(0, TEXT_MEASURE_SAMPLE_CHARS), options);
+    const sampled = measuredTextPages(text.slice(0, TEXT_MEASURE_SAMPLE_CHARS), options);
     return Math.max(1, Math.ceil(sampled * (text.length / TEXT_MEASURE_SAMPLE_CHARS)));
   }
+  return measuredTextPages(text, options);
+}
+
+/**
+ * The same text rule as textPageCount over the whole text, never sampled: the worker's measured count of a text file, which
+ * billing reads (worker/src/lib/text-page-count.ts). The caller bounds the text's size.
+ */
+export function measuredTextPages(text: string, options: { markup?: boolean } = {}): number {
   const visible = options.markup ? stripHtmlMarkup(text) : text;
   const lines = options.markup ? visible.split(/\r?\n/).filter((line) => line.trim() !== "").length : visible.split(/\r?\n/).length;
   const trimmed = visible.trim();
@@ -205,9 +213,9 @@ export type UploadMediaEstimate = z.infer<typeof uploadMediaEstimateSchema>;
 export type UploadMediaFile = { name: string; size: number; type?: string | null; durationSeconds?: number };
 
 /**
- * What the audio and video among `files` will cost. Prices follow PRICE_CARD: an audio minute is one Rich page, a
- * video minute whose frames are read is three, rounded up per file. A video read from its audio track alone bills as
- * audio, which is the cheaper option offered as `lighter`. Null when no file is media.
+ * What the audio and video among `files` will cost, at the pricing provider's media prices (`mediaRichPages`), rounded
+ * up per file. A video read from its audio track alone bills as audio, which is the cheaper option offered as `lighter`
+ * when the provider prices frames higher. Null when no file is media.
  */
 export function estimateUploadMedia(files: readonly UploadMediaFile[], options: { videoFrames: boolean }): UploadMediaEstimate | null {
   let audioFiles = 0;

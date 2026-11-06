@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { fileProfileSchema, quoteSettingsSchema } from "@docslurp/shared";
 
 /**
  * Estimate tools: one per work-creating operation, each forwarding the same body
@@ -57,9 +58,9 @@ export const estimateToolDefinitions: Array<{ name: EstimateToolName; title: str
     type: "object", properties: { project, mode: { type: "string", enum: ["full", "map", "visual"] } }, required: ["mode"] } },
   { name: "graphRebuildEstimate", title: "Estimate graph rebuild cost", description: "Cost of rebuilding the project knowledge graph. Read-only.", inputSchema: {
     type: "object", properties: { project } } },
-  { name: "uploadEstimate", title: "Estimate upload cost", description: "Cost of ingesting files before any bytes are sent. Pass page counts when known; otherwise pages are estimated from size. Audio and video are priced by duration: pass durationSeconds (or the MIME type) and read `media` for their credits and the cheaper audio-track-only option.", inputSchema: {
+  { name: "uploadEstimate", title: "Estimate upload cost", description: "Estimated cost of ingesting files before any bytes are sent. Pass page counts when known; otherwise pages are estimated from size. Pass `profile` when the file was profiled locally with @docslurp/estimate (its facts narrow the estimate; never billed). Audio and video are priced by duration: pass durationSeconds (or the MIME type) and read `media` for their credits and the cheaper audio-track-only option. `quote` is the full estimate (ingest, monthly hosting and usage, neutral lines, ranges, pricing version); pass `settings` to quote other knobs than the project's (quality, indexing, features, hostingMonths, searchesPerMonth, chatAnswersPerMonth).", inputSchema: {
     type: "object", properties: { project, files: { type: "array", minItems: 1, maxItems: 500, items: {
-      type: "object", properties: { name: { type: "string", minLength: 1 }, size: { type: "integer", minimum: 0 }, pages: { type: "integer", minimum: 0 }, type: { type: "string" }, durationSeconds: { type: "number", exclusiveMinimum: 0 } }, required: ["name", "size"] } } }, required: ["files"] } },
+      type: "object", properties: { name: { type: "string", minLength: 1 }, size: { type: "integer", minimum: 0 }, pages: { type: "integer", minimum: 0 }, type: { type: "string" }, durationSeconds: { type: "number", exclusiveMinimum: 0 }, profile: { ...freeObject, description: "A file profile from @docslurp/estimate, unchanged." } }, required: ["name", "size"] } }, settings: { ...freeObject, description: "Quote knobs overriding the project's: quality (fast, auto, good), indexing (full, on-demand, visual), documentSummary, structuredFields, knowledgeGraph, propositions, videoFrames, speedBoost, hostingMonths (1-60), searchesPerMonth, chatAnswersPerMonth, chatTier." } }, required: ["files"] } },
 ];
 
 export const jobsGetToolDefinition = {
@@ -77,7 +78,7 @@ const inputSchemas: Record<EstimateToolName, z.ZodType<Record<string, unknown>>>
   "fullIndexEstimate": z.object({ ...common, documentId: z.string().min(1).optional(), documentIds: z.array(z.string().min(1)).max(500).optional() }),
   "indexingModeEstimate": z.object({ ...common, mode: z.enum(["full", "map", "visual"]) }),
   "graphRebuildEstimate": z.object({ ...common }),
-  "uploadEstimate": z.object({ ...common, files: z.array(z.object({ name: z.string().min(1), size: z.number().int().min(0), pages: z.number().int().min(0).optional(), type: z.string().max(255).optional(), durationSeconds: z.number().positive().max(24 * 3600).optional() })).min(1).max(500) }),
+  "uploadEstimate": z.object({ ...common, files: z.array(z.object({ name: z.string().min(1), size: z.number().int().min(0), pages: z.number().int().min(0).optional(), type: z.string().max(255).optional(), durationSeconds: z.number().positive().max(24 * 3600).optional(), profile: fileProfileSchema.optional() })).min(1).max(500), settings: quoteSettingsSchema.partial().optional() }),
 };
 
 export function isEstimateToolName(name: string): name is EstimateToolName {
@@ -109,7 +110,7 @@ export function planEstimateTool(
         : { ok: true, plan: { path: `${ws}/full-index/estimate`, body: data.documentIds ? { documentIds: data.documentIds } : {} } };
     case "indexingModeEstimate": return { ok: true, plan: { path: `${ws}/indexing-mode/estimate`, body: { mode: data.mode } } };
     case "graphRebuildEstimate": return { ok: true, plan: { path: `${ws}/graph/jobs/estimate`, body: {} } };
-    case "uploadEstimate": return { ok: true, plan: { path: "/v1/uploads/estimate", body: { files: data.files, project } } };
+    case "uploadEstimate": return { ok: true, plan: { path: "/v1/uploads/estimate", body: { files: data.files, project, ...(data.settings ? { settings: data.settings } : {}) } } };
   }
 }
 

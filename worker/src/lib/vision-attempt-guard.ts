@@ -20,7 +20,7 @@ import { configuredVisionModel, maxCatalogWorstCaseVisionRequestCents, worstCase
  * embeddings and media frame description. Admission refuses when:
  *
  * - **Page bound**: the run already admitted `VISION_PAGE_ATTEMPTS` (default 2) requests for this
- *   page and purpose (whole-page read, document-map OCR, self-critique), or
+ *   page and purpose (whole-page read, document-map OCR, self-critique, OCR escalation or hosted OCR), or
  *   `VISION_REGION_ATTEMPTS_PER_PAGE` (default 12) routed region requests for this page. Refuses
  *   that page only.
  * - **Rejection breaker**: at least `VISION_BREAKER_MIN_FAILURES` (default 20) of the run's requests
@@ -63,12 +63,22 @@ import { configuredVisionModel, maxCatalogWorstCaseVisionRequestCents, worstCase
  * leave the page bound, the breaker and the org count. Throttles are bounded per call by
  * `VISION_THROTTLE_ALLOWANCE` (default 5); past it the wait goes to Temporal with its Retry-After.
  */
-export type VisionAttemptPurpose = "page" | "region" | "map-ocr" | "critique";
+export type VisionAttemptPurpose = "page" | "region" | "map-ocr" | "critique" | "ocr";
 
 export interface VisionAttemptTarget {
   documentId: string;
   pageNumber: number;
   purpose: VisionAttemptPurpose;
+  /**
+   * Distinct pages of this document the run may read for this purpose (the OCR escalation budget). Counted from the
+   * durable attempt ledger, so activity retries and worker restarts never reset it. Absent: no per-document bound.
+   */
+  documentPageLimit?: number;
+  /**
+   * Requests of this document for this purpose the run may admit in total, every page and every retry of a page included
+   * (the OCR escalation attempt budget). Counted from the durable ledger like `documentPageLimit`. Absent: no bound.
+   */
+  documentAttemptLimit?: number;
 }
 
 export interface VisionGuardConfig {
@@ -104,7 +114,11 @@ export type VisionGuardStopReason =
   /** A billed overrun of this org could not be reconciled yet: refused until it is persisted. */
   | "overrun-unreconciled"
   /** A store-backed run without the shared Postgres ledger: refused, never counted per process. */
-  | "no-attempt-ledger";
+  | "no-attempt-ledger"
+  /** The document already used its `documentPageLimit` distinct pages for this purpose in the run. */
+  | "document-page-limit"
+  /** The document already used its `documentAttemptLimit` requests for this purpose in the run. */
+  | "document-attempt-limit";
 
 export interface VisionGuardStop {
   reason: VisionGuardStopReason;
@@ -139,6 +153,10 @@ export interface VisionAttemptSnapshot {
   routeOverruns: number;
   /** The route's weight correction, already capped (1 when none). */
   routeCorrection: number;
+  /** Other pages of the target's document admitted for the target's purpose in the run (0 when not counted). */
+  documentPages?: number;
+  /** Requests admitted for the target's document and purpose in the run, every page and retry (0 when not counted). */
+  documentAttempts?: number;
 }
 
 export interface VisionAdmitRequest {
@@ -367,6 +385,14 @@ export function decideVisionAdmission(
     snapshot.runFailures / Math.max(1, snapshot.runAttempts) >= config.breakerFailureRate) {
     return stop("rejection-breaker", true);
   }
+  // A new page of a document whose per-document budget is spent; pages it already read keep their page bound.
+  if (target.documentPageLimit !== undefined && snapshot.pageAttempts === 0 && (snapshot.documentPages ?? 0) >= target.documentPageLimit) {
+    return stop("document-page-limit", false);
+  }
+  // Every request of the document for this purpose, retries included, counts against its total.
+  if (target.documentAttemptLimit !== undefined && (snapshot.documentAttempts ?? 0) >= target.documentAttemptLimit) {
+    return stop("document-attempt-limit", false);
+  }
   // This page only: other pages of the run keep their own budget.
   if (snapshot.pageAttempts >= pageLimit) return stop("page-attempt-limit", false);
   if (snapshot.orgCents + weightCents > config.orgLimitCents) {
@@ -411,6 +437,8 @@ export class MemoryVisionAttemptBackend implements VisionAttemptBackend {
       orgSettledCents: org.filter((row) => row.settled).reduce((sum, row) => sum + row.weight, 0),
       routeOverruns: request.route && request.orgId ? this.routeOverruns(request.route, request.orgId, since) : 0,
       routeCorrection,
+      documentPages: request.target.documentPageLimit === undefined ? 0 : this.documentPages(request.runId, request.target),
+      documentAttempts: request.target.documentAttemptLimit === undefined ? 0 : this.documentAttempts(request.runId, request.target),
     }, request.target, request.config, weightCents);
     if (stop) return { admitted: false, stop };
     const ticketId = randomUUID();
@@ -463,6 +491,19 @@ export class MemoryVisionAttemptBackend implements VisionAttemptBackend {
       this.orgs.set(ticket.orgId, rows);
     }
     return { recorded: true, orgId: ticket.orgId, toppedUpCents: Math.max(0, extra), ratio, previousMaxRatio };
+  }
+
+  private documentPages(runId: string, target: VisionAttemptTarget): number {
+    const prefix = `${runId}\u0000${target.documentId}\u0000`;
+    const own = pageKey(runId, target);
+    return [...this.pages.entries()].filter(([key, row]) => key !== own && key.startsWith(prefix)
+      && key.endsWith(`\u0000${target.purpose}`) && row.attempts > 0).length;
+  }
+
+  private documentAttempts(runId: string, target: VisionAttemptTarget): number {
+    const prefix = `${runId}\u0000${target.documentId}\u0000`;
+    return [...this.pages.entries()].filter(([key]) => key.startsWith(prefix) && key.endsWith(`\u0000${target.purpose}`))
+      .reduce((sum, [, row]) => sum + row.attempts, 0);
   }
 
   private routeOverruns(route: VisionRouteKey, orgId: string, since: number): number {

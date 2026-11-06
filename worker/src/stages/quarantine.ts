@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 
 import type { Config } from "../config.js";
 import type { Stage } from "../pipeline/pipeline.js";
-import { buildQuarantineStats, scanDocumentForQuarantine, assertAcceptedQuarantine, verifyIntakeFileFacts } from "../lib/quarantine.js";
+import { buildQuarantineStats, scanDocumentForQuarantine, assertAcceptedQuarantine, inspectQuarantine, verifyIntakeFileFacts } from "../lib/quarantine.js";
 import { runDocumentStage, runDocuments, } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import {
@@ -61,8 +61,11 @@ export class QuarantineStage implements Stage {
             // The scanned (and later parsed) bytes must be the bytes the server hashed.
             verifyStagedSource(document, sha256Bytes(bytes));
             // The API only glanced at this file; this is the first full look, before any parser.
-            const verified = verifyIntakeFileFacts(document, bytes);
+            // One inspection of the bytes (in the parser VM in production) serves the intake check and the scan.
+            const inspection = await inspectQuarantine({ bytes, filename: document.filename, tempFile, runner: this.runner, policy: this.config, ...(signal ? { signal } : {}) });
+            const verified = verifyIntakeFileFacts(document, inspection);
             const artifact = await scanDocumentForQuarantine({
+              inspection,
               documentId: document.id,
               filename: document.filename,
               declaredMimeType: verified?.scanDeclaredMimeType ?? document.mimeType,

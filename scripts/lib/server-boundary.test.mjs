@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { checkAppServerImports, checkEstimatorBoundary, checkServerBoundary } from "./server-boundary.mjs";
+import { checkAppEstimatorImports, checkAppServerImports, checkEstimatorBoundary, checkServerBoundary } from "./server-boundary.mjs";
 
 function fixture(files) {
   const root = mkdtempSync(join(tmpdir(), "boundary-"));
@@ -69,10 +69,28 @@ test("keeps the offline estimator's file probes out of the API, worker, shared c
   const root = fixture({
     "server/src/a.ts": 'import { createEstimator } from "@docslurp/estimate";',
     "worker/src/b.ts": 'const probe = await import("@docslurp/estimate/node");',
-    "packages/shared/src/c.ts": 'import card from "../../estimate/card.json";',
+    "packages/shared/src/c.ts": 'import rules from "../../estimate/profiler-rules.json";',
     "packages/shared/src/d.ts": 'import { quoteUpload } from "./upload-quote.js";',
     "packages/sdk/src/e.ts": 'export { createEstimator } from "@docslurp/estimate";',
     "packages/cli/src/f.ts": 'import { createEstimator } from "@docslurp/estimate";',
   });
   try { assert.equal(checkEstimatorBoundary(root).length, 4); } finally { rmSync(root, { recursive: true }); }
+});
+
+test("the app loads the offline estimator only in its Web Worker; types are free (council E #9)", () => {
+  const root = fixture({
+    "app/src/lib/local-upload-estimate.ts": 'import type { EstimateEvent } from "@docslurp/estimate";\nimport type { EstimateWorkerClient } from "@docslurp/estimate/client";\nconst [w, c] = await Promise.all([import("@docslurp/estimate/worker?worker"), import("@docslurp/estimate/client")]);',
+    "app/src/lib/types.ts": 'export type { QuoteFile } from "@docslurp/estimate";',
+    "app/src/lib/main-thread.ts": 'import { createEstimator } from "@docslurp/estimate";',
+    "app/src/lib/node-probe.ts": 'const probe = await import("@docslurp/estimate/node");',
+    "app/src/pages/estimate.astro": '---\nimport { estimateFiles } from "@docslurp/estimate";\n---',
+    "app/src/lib/estimate.test.ts": 'import { createEstimator } from "@docslurp/estimate";',
+  });
+  try {
+    const violations = checkAppEstimatorImports(root);
+    assert.equal(violations.length, 3);
+    assert.match(violations.join("\n"), /main-thread\.ts/);
+    assert.match(violations.join("\n"), /node-probe\.ts/);
+    assert.match(violations.join("\n"), /estimate\.astro/);
+  } finally { rmSync(root, { recursive: true }); }
 });

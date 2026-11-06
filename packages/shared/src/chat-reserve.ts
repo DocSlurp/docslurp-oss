@@ -1,5 +1,5 @@
 /**
- * Chat credit reserve and interactive overdraft (docs/pricing-and-credits.md,
+ * Chat credit reserve and interactive overdraft (docs/billing/credits.md,
  * "Chat reserve and overdraft"; migration 0053).
  *
  * Ingestion and automation (jobs) never spend an org's last few credits: run

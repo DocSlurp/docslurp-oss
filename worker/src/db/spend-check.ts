@@ -121,6 +121,8 @@ export interface SpendCheckResult {
   paused: boolean;
   reason?: string;
   available?: number;
+  /** The run should pause but the pause write failed (pauseRunForSpend never throws). */
+  pauseFailed?: boolean;
 }
 
 const BLOCK_MESSAGES: Record<string, string> = {
@@ -184,9 +186,23 @@ export async function enforceRunSpend(
 }
 
 /**
+ * The charge check could not decide: the balance read or the pause write failed, or the run has no organization to check. It
+ * fails closed and is retryable: the stage leaves the document unfinished (an infrastructure error, document-failure.ts) and
+ * Temporal retries the activity, which checks again before anything is charged.
+ */
+export class SpendCheckUnavailableError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "SpendCheckUnavailableError";
+  }
+}
+
+/**
  * The same check with a charge the run is about to owe: the run pauses when `credits` more would take the org's available balance
  * below what a running job needs. For a charge admission could not see (a document measured at far more pages than intake
- * counted). Never throws.
+ * counted, a TIFF's counted frames). Fails closed: a failed balance read or pause write throws SpendCheckUnavailableError (retryable)
+ * instead of letting the charge through. `blocked` without `paused` means the balance does not cover it and the run was already
+ * paused or stopped by something else.
  */
 export async function enforceRunSpendForCharge(
   client: Client,
@@ -194,7 +210,9 @@ export async function enforceRunSpendForCharge(
   credits: number,
   trigger: "stage-boundary" | "page-interval" | "checkpoint-interval" = "stage-boundary",
 ): Promise<SpendCheckResult> {
-  if (!spendCheckConfig().enabled || !run.orgId || !(credits > 0)) return { blocked: false, paused: false };
+  if (!spendCheckConfig().enabled || !(credits > 0)) return { blocked: false, paused: false };
+  if (!run.orgId) throw new SpendCheckUnavailableError(`run ${run.id} has no organization to check a ${credits.toFixed(2)}-credit charge against`);
+  let result: SpendCheckResult;
   try {
     const [row] = await client<{
       funded: boolean | null;
@@ -209,11 +227,51 @@ export async function enforceRunSpendForCharge(
     const available = Number(row?.available ?? 0) - credits;
     const reason = spendBlockCode(row ? { ...row, available, org_id: run.orgId } : row);
     if (!reason) return { blocked: false, paused: false };
-    return await pauseRunForSpend(client, run, reason, trigger, available);
+    result = await pauseRunForSpend(client, run, reason, trigger, available);
   } catch (error) {
-    console.error(`[spend-check] run=${run.id} charge check failed: ${error instanceof Error ? error.message : String(error)}`);
-    return { blocked: false, paused: false };
+    console.error(`[spend-check] run=${run.id} charge check failed, refusing the charge: ${error instanceof Error ? error.message : String(error)}`);
+    pushSpendCheckFailure(run, "check-failed");
+    throw new SpendCheckUnavailableError(`spend check for a ${credits.toFixed(2)}-credit charge failed`, { cause: error });
   }
+  if (result.pauseFailed) {
+    pushSpendCheckFailure(run, "pause-failed");
+    throw new SpendCheckUnavailableError(`spend check blocked a ${credits.toFixed(2)}-credit charge but could not pause run ${run.id}`);
+  }
+  return result;
+}
+
+/**
+ * The largest n in 1..max whose charge (`creditsFor(n)`) the org's balance still covers, by the same rule as
+ * enforceRunSpendForCharge, or 0 when not even one does. Read-only: nothing is paused. For bounding work before it is done (the
+ * frames an image's OCR read may cover). Fails closed: a failed read throws SpendCheckUnavailableError (retryable).
+ */
+export async function largestFundedCharge(
+  client: Client,
+  run: { id: string; orgId: string | null; projectId?: string | null },
+  max: number,
+  creditsFor: (n: number) => number,
+): Promise<number> {
+  if (!spendCheckConfig().enabled) return max;
+  if (!run.orgId) throw new SpendCheckUnavailableError(`run ${run.id} has no organization to size a charge against`);
+  let row: { funded: boolean | null; available: string | number; project_budget_paused: boolean; org_budget_paused: boolean; project_in_org: boolean } | undefined;
+  try {
+    [row] = await client<NonNullable<typeof row>[]>`
+      select funded, available, project_budget_paused, org_budget_paused, project_in_org
+      from org_spend_status(${run.orgId}, ${run.projectId ?? null}::text, 0)
+    `;
+  } catch (error) {
+    pushSpendCheckFailure(run, "check-failed");
+    throw new SpendCheckUnavailableError("balance read for sizing a charge failed", { cause: error });
+  }
+  for (let n = max; n >= 1; n -= 1) {
+    const available = Number(row?.available ?? 0) - creditsFor(n);
+    if (!spendBlockCode(row ? { ...row, available, org_id: run.orgId } : row)) return n;
+  }
+  return 0;
+}
+
+function pushSpendCheckFailure(run: { id: string; orgId: string | null }, reason: string): void {
+  console.error(`[spend-check] charge-refused run=${run.id} org=${run.orgId ?? "none"} reason=${reason} retryable=true`);
 }
 
 /**
@@ -262,7 +320,7 @@ export async function pauseRunForSpend(
     return { blocked: true, paused: true, reason, available };
   } catch (error) {
     console.error(`[spend-check] run=${run.id} pause failed: ${error instanceof Error ? error.message : String(error)}`);
-    return { blocked: true, paused: false, reason, available };
+    return { blocked: true, paused: false, reason, available, pauseFailed: true };
   }
 }
 

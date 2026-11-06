@@ -4,73 +4,46 @@ What protects a self-hosted install: the parser sandbox, malware scanning, secre
 
 ## Parser sandbox
 
-Document parsers run untrusted input. The worker starts each parser through a sandbox provider: `bubblewrap` (the default on Linux), `landlock`, `modal` or `none`. [Parser sandbox providers](sandbox-providers.md) compares them and covers setup. What each isolates:
+Production (`NODE_ENV=production`) requires the Modal provider with an explicit VM runtime. Local namespaces, containers and the unisolated development override do not qualify. Missing credentials, an unpinned image or a failed guest startup contract stop the worker; there is no local fallback. These requirements describe this source revision, not the state of an existing deployment.
 
-| Provider | Filesystem | Network | Processes |
-| --- | --- | --- | --- |
-| `bubblewrap` | Read-only runtime paths, private scratch | Blocked | Separate PID, IPC and UTS namespaces |
-| `landlock` | Landlock rules: read-only runtime paths and inputs, writes only to scratch and declared outputs | TCP connect and bind denied. Runs only on kernels with Landlock ABI v9 (landrun v0.1.17); on older kernels the probe fails and the worker does not start | Own PID namespace per command (needs unprivileged user namespaces); no IPC or UTS namespace |
-| `modal` | Separate remote sandbox, files staged in and out per command | Blocked | Separate remote sandbox |
-| `none` | Not isolated | Not isolated | Own PID namespace per command where the host allows it |
+The trusted API and worker coordinate storage, database operations and model calls. The parser VM receives only staged inputs and outputs. It has no database, storage, model-provider, authentication or encryption keys, no identity token or mounted volumes, and no network access. Registry pull credentials remain in the provider control plane. Each activity owns a separate VM session, terminated when the activity ends; commands have deadlines and bounded logs and file transfers.
 
-With every provider the parser gets an allowlisted environment, so the worker's secrets are not in its environment. With `none` it can still read any file the worker can.
+Configure the worker (the API runs no parser and needs no VM credentials):
 
-### What the sandbox does not give you
-
-None of the local providers is a VM boundary. Bubblewrap, landlock, seccomp and the worker container are defense in depth: the parser shares the host kernel with the worker, and in the Compose stack the worker holds the database URL, storage credentials, auth and encryption keys and any AI keys ([trust boundaries](architecture.md#trust-boundaries)). A kernel or sandbox escape from a parser therefore reaches those secrets. Some parsing also runs inside the worker process with no sandbox at all (see [Commands that skip the sandbox](#commands-that-skip-the-sandbox)).
-
-DocSlurp's own rule is that untrusted files need a VM or microVM boundary, with a parser host that holds no secrets. No shipped configuration meets that for every parser yet: `modal` moves command-line parsers off the worker host, but in-process parsers still run in the worker, and the planned `platform-task` provider ([Choosing isolation per platform](platform-isolation.md)) is the intended fix. Until then, run the stack on a dedicated host or VM that holds nothing else, and treat a parser compromise as a compromise of the whole install.
-
-### Bubblewrap
-
-The default provider runs `worker/scripts/parser-sandbox.sh`, which wraps the parser in bubblewrap (`bwrap`). What it does:
-
-- **Unshares** the network, PID, IPC and UTS namespaces (`--unshare-net`, `--unshare-pid`, `--unshare-ipc`, `--unshare-uts`). The parser has no network.
-- **Drops all capabilities** (`--cap-drop ALL`), starts a new session, and dies with its parent.
-- **Mounts a fresh `/proc`** and `/dev`, and an empty `/tmp`.
-- **Binds read-only** only the runtime paths it needs: `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, and a few entries under `/etc` (`ld.so.cache`, `alternatives`, `libreoffice`, `fonts`, `ssl`, `localtime`, `passwd`, `group`, ImageMagick config) plus `/var/cache/fontconfig`, where they exist. The worker adds the input files and any unpacked vendor bundles through `DOCSLURP_PARSER_SANDBOX_READABLE_PATHS`, also read-only. The application checkout, other jobs and worker credentials are not mounted.
-- **Binds writable** only the per-run scratch directory and the paths the worker lists in `DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS`. The script refuses any writable path that is not under `/tmp/docslurp-*` or `<host temp root>/docslurp-*`, and any path with `..` in it. It exits with code 70 (`refusing broad writable mount` or `refusing traversal in writable mount`) rather than mounting more.
-- **Rewrites** `HOME`, `TMPDIR`, `TMP`, `TEMP` and the `XDG_*` directories to a private per-run directory, which is deleted when the command exits.
-- **Installs a seccomp filter** the worker generates (`worker/src/sandbox/seccomp.ts`): io_uring always fails with ENOSYS, foreign-ABI system calls kill the process, and every command except the audited UNIX-socket clients (clamdscan, LibreOffice, Python, node, kreuzberg) also cannot create a UNIX socket. The launcher accepts the filter file only directly inside the sandbox root, not a symlink, and owned by the worker user. See [Parser sandbox providers](sandbox-providers.md#process-teardown).
-- **Passes a small environment**. Only these variables reach a parser, when set: `LANG`, `LC_ALL`, `LC_CTYPE`, `PATH`, `SSL_CERT_DIR`, `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `OPENSSL_CONF`, `PYTHON_VENV`, `TMP`, `TMPDIR`, `TEMP` and `TZ` (`defaultParserEnvAllowlist` in `worker/src/tools/process-env.ts`). Add more names, comma-separated, with `DOCSLURP_PARSER_ENV_ALLOWLIST`. Database, storage, auth and AI keys are not on the list.
-
-If `bwrap` is missing, the launcher exits with code 70 and `refusing to run parser without isolation`. It never falls back to running the parser unsandboxed.
-
-### Choosing and enforcing a provider
-
-The sandbox provider is chosen with `DOCSLURP_PARSER_SANDBOX` (`bubblewrap`, `landlock`, `modal` or `none`). Unset, it is `bubblewrap` on Linux and `none` on macOS outside production. The worker probes the provider at startup and refuses to start if isolation is unavailable. In every environment it requires process teardown (a per-command PID namespace, or a remote provider). With `NODE_ENV=production` it also requires filesystem isolation and at least `tcp-only` network isolation. Provider `none` runs parsers directly on the host and is accepted in production only with `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true`, which logs `[parser-sandbox] status=unisolated` on every start. Startup logs one line, `[parser-sandbox] provider=<id> filesystem=<bool> network=<level> processes=<bool> location=<local|remote>`. Each Temporal activity gets its own sandbox session, closed when the activity ends (`worker/src/sandbox/`).
-
-### Why Compose sets `systempaths=unconfined`
-
-This applies to the default `bubblewrap` provider. The worker services in `compose.selfhost.yml` set `systempaths=unconfined` so bubblewrap can mount a fresh `/proc`. Docker masks some `/proc` paths by default, and that blocks the mount. The worker keeps `cap_drop: [ALL]`, `no-new-privileges:true`, a pids limit of 256 and the seccomp profile `worker/security/seccomp-doc-extract.json`. The parser still runs inside the bubblewrap namespaces.
-
-### The error you see without it
-
-At startup, `scripts/start-worker.sh` runs `scripts/check-worker-prerequisites.mjs` with `--sandbox`. It probes the selected provider, then runs the installed `ffprobe`, `ffmpeg`, `pdftoppm` and `pandoc` inside it (local providers only). If that fails, the worker prints a line like this and exits without starting:
-
-```text
-[worker-prerequisites] parser isolation unavailable: <reason from the provider>
+```dotenv
+DOCSLURP_PARSER_SANDBOX=modal
+MODAL_TOKEN_ID=...
+MODAL_TOKEN_SECRET=...
+DOCSLURP_MODAL_IMAGE=ghcr.io/docslurp/worker-full@sha256:<verified-digest>
+DOCSLURP_PDF_ENGINE=off
+PAGE_ROUTER_MODE=off
 ```
 
-Common causes for bubblewrap are a host that forbids unprivileged user namespaces or mounts (sysctl or AppArmor), or removing `systempaths=unconfined` from the Compose file. See [Requirements](requirements.md#host-requirements) and the per-provider rows in [Operations](operations.md#troubleshooting). The output ends with `status=failed`.
+Build the parser runtime from the same source revision as the worker. It must contain `worker/scripts/parser-vm-contract.mjs`, image, PDF structure and quarantine entrypoints, and their compiled guest modules. Worker startup runs this contract in a VM. An older image fails startup. For a private registry, import the pinned image during deployment and provide the returned immutable IDs as `DOCSLURP_MODAL_IMAGE_ID`, together with the registry digest. Alternatively set `DOCSLURP_MODAL_REGISTRY_SECRET` to a provider-side registry pull secret; it is never attached to the guest environment. Verify image signatures as described below.
 
-### Commands that skip the sandbox
+Command-line parsers, native image codecs, PDF.js structure extraction and ZIP/MIME quarantine inspection execute in the VM. The API never parses a PDF: intake estimates its page count from the size, and the worker replaces it with Doppler `pdfpagecount`, run in its boundary, before anything bills. The in-process native PDF binding, its page probe and local image decision sidecars are refused in production. Build the trusted worker without the native binding (`DOCSLURP_NATIVE_PDF=0`); shadow mode is also parsing and is refused.
 
-Three kinds of code do not go through a sandbox provider:
+Guest results remain untrusted. Host validation bounds outline depth, counts, page references and field types; image dimensions and encoded bytes; and archive fields. Generic transfers cap files at 128 MiB, aggregate output at 512 MiB, directory entries at 8,192 and path depth at 64. Oversized outputs fail rather than widening these limits.
 
-- **In-process parsers**: the Node parsers Kreuzberg and LiteParse and, when an image installs it, the private native PDF engine (a native binding loaded by `worker/src/native-pdf/loader.ts`). They parse customer bytes inside the worker process, so no provider sandboxes them and they share the worker's environment and secrets. Only the worker container surrounds them, and a container is not a security boundary.
-- **The vector writer** (`vector_backend_write.py` and `orama_write.mjs`). It has to reach object storage, and the sandbox has no network. It is not sandboxed by any provider. It receives the vector backend URIs (`LANCEDB_URI`, `STORAGE_URI`, `CHROMA_PATH`, `CHROMA_URL`, `MILVUS_URI`, `ORAMA_PATH`) and AWS credentials including `AWS_SESSION_TOKEN`, and nothing else beyond the default allowlist. Only these two trusted scripts get that list; an input filename cannot ask for it (`isVectorBackendCommand` in `worker/src/tools/runner.ts`).
-- **The embedding pool**. It is a long-lived Python process started by the worker (`getEmbedPool` in the same file) rather than a per-call command. It has its own environment allowlist (`defaultPythonPoolEnvAllowlist`, extended with `DOCSLURP_PYTHON_POOL_ENV_ALLOWLIST`). It handles text to embed, not file parsing.
+### Development providers
+
+Outside production, Linux defaults to bubblewrap and other platforms to `none`. These modes are for trusted development fixtures. Bubblewrap, landlock and seccomp can provide defense in depth inside a VM, but cannot replace the VM boundary for customer files. The unisolated override never permits production parsing.
+
+### Trusted host processes
+
+Vector writers receive backend credentials through a dedicated allowlist. They handle vectors and application projections, not source-file parsing. The local embedding pool handles text, not document or image codecs. Parser jobs never receive those credentials. [Parser sandbox providers](sandbox-providers.md) documents session teardown and development-provider details.
 
 ## Malware scanning
 
-The worker scans files with ClamAV. At startup, `scripts/start-worker.sh` prepares ClamAV, updates signatures with `freshclam` and checks that `clamd` is ready when the daemon is required or managed. `DOCSLURP_CLAMAV_ENABLED=false` turns that startup step off (default `true`).
+Production scans run `clamscan` inside the parser VM, using only named `main`, `daily` and `bytecode` signature assets staged from the trusted updater. Freshness comes from the guest scanner using those same definitions, rather than from an unrelated host database. The worker does not use a host daemon socket. Explicitly requiring a daemon makes this configuration refuse scanning.
+
+At startup, `scripts/start-worker.sh` prepares ClamAV, updates signatures with `freshclam` and checks that `clamd` is ready when the daemon is required or managed. `DOCSLURP_CLAMAV_ENABLED=false` turns that startup step off (default `true`).
 
 The scan policy comes from `resolveMalwareScanPolicy` in `worker/src/tools/runner.ts`:
 
 | Variable | Default in production | Default otherwise | Meaning |
 | --- | --- | --- | --- |
-| `DOCSLURP_CLAMAV_REQUIRE_DAEMON` | `true` | `false` | Require `clamdscan`. If it is unavailable, the scan returns an error ("clamdscan is required but unavailable"). |
+| `DOCSLURP_CLAMAV_REQUIRE_DAEMON` | `false` | `false` | Require `clamdscan`. If it is unavailable, the scan returns an error ("clamdscan is required but unavailable"). |
 | `DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB` | `false` | `true` | When `false`, a stale or missing signature database blocks scanning. When `true`, it only produces a warning. |
 | `DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS` | `24` | `24` | Age after which signatures count as stale. |
 | `DOCSLURP_CLAMAV_DB_DIR` | `/var/lib/clamav` | `/var/lib/clamav` | Signature directory. |

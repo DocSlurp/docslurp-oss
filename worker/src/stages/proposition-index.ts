@@ -199,7 +199,7 @@ export class PropositionIndexStage implements Stage {
                 metadata: { ...generationCost.metadata, documentId: document.id },
               },
             );
-            // Price card (provisional): propositions per started 10 pages, once per document per run.
+            // Pricing provider: the propositions feature charge, once per document per run.
             // Priced on the pages the document bills, but never on more pages than its text holds (a layout-measured count of blank pages).
             chargeDocumentFeature(state, document, "propositions", undefined, { textPages: textPagesOfText(paragraphs.join("\n")) });
 

@@ -7,6 +7,7 @@
  * and tests run without the private package installed.
  */
 import { loadNativePdfModule } from "../../native-pdf/loader.js";
+import { vmOnlyParsing } from "../../lib/vm-only-parsing.js";
 
 export type Box = [number, number, number, number];
 
@@ -52,6 +53,9 @@ let override: ProbeBindingLoad | null = null;
 
 /** The raw binding, loaded once per process with the adapter's discovery; absence is a normal, reported state. */
 export function loadProbeBinding(env: NodeJS.ProcessEnv = process.env): ProbeBindingLoad {
+  if (vmOnlyParsing(env)) {
+    return { ok: false, reason: "in-process PDF probes lack a VM boundary in production" };
+  }
   if (override) return override;
   const loaded = loadNativePdfModule(env);
   if (!loaded.ok) return loaded;

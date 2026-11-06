@@ -15,11 +15,13 @@ export default defineConfig({
     // Usage pricing in tests uses the hardcoded tables; the live OpenRouter catalog is never fetched.
     env: { LIVE_MODEL_PRICES: "off" },
     exclude: ["node_modules", "dist"],
+    setupFiles: ["./src/test-setup.ts"],
   },
   resolve: {
     alias: {
       "@docslurp/worker/testing": resolve(__dirname, "../worker/src/testing.ts"),
       "@docslurp/shared/cancellation": shared("cancellation"),
+      "@docslurp/shared/pricing-loader": shared("pricing-loader"),
       "@docslurp/shared/error-reporting": shared("error-reporting"),
       "@docslurp/shared/error-response": shared("error-response"),
       "@docslurp/shared/file-token-path": shared("file-token-path"),

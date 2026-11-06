@@ -467,6 +467,11 @@ export interface GuardedCompletionArgs {
   /** Profile-preferred route for the retry after a refusal or content filter (see `alternateRouteBody`). */
   preferredRetryRoute?: RetryRoute;
   /**
+   * Reads the provider-reported charge from a response's `usage` on this route; unset: `readProviderCharge`
+   * (OpenRouter's `usage.cost`). DeepInfra reports `usage.estimated_cost` instead (lib/vision-pricing.ts).
+   */
+  providerCharge?: (usage: unknown) => ReturnType<typeof readProviderCharge>;
+  /**
    * The vision attempt guard's admission for every HTTP request this call sends (first try, inline
    * retries, the streaming fallback, the alternate-route retry); null only outside a run (benchmarks).
    */
@@ -589,11 +594,16 @@ async function attachGenerationReceipt(args: GuardedCompletionArgs, attempt: Vis
   }
 }
 
+/** The route's provider-reported charge in `usage` (`GuardedCompletionArgs.providerCharge`). */
+function chargeOf(args: GuardedCompletionArgs, usage: unknown): ReturnType<typeof readProviderCharge> {
+  return (args.providerCharge ?? readProviderCharge)(usage);
+}
+
 /** Report a request's provider usage to the gate, which compares it with the weight it was admitted at. */
 async function observeUsage(args: GuardedCompletionArgs, attempt: VisionAttempt | null): Promise<void> {
   const usage = attempt?.usage;
   if (!usage || !args.gate?.observed) return;
-  const charge = readProviderCharge(usage);
+  const charge = chargeOf(args, usage);
   const inputTokens = typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : 0;
   const outputTokens = typeof usage.completion_tokens === "number" ? usage.completion_tokens : 0;
   if (inputTokens + outputTokens === 0 && charge.costCents === undefined) return;
@@ -605,7 +615,7 @@ async function observeUsage(args: GuardedCompletionArgs, attempt: VisionAttempt 
 }
 
 function summarize(args: GuardedCompletionArgs, attempt: VisionAttempt, index: number, outcome: RetryableOutcome | null): AttemptSummary & { charge: ReturnType<typeof readProviderCharge> } {
-  const charge = readProviderCharge(attempt.usage);
+  const charge = chargeOf(args, attempt.usage);
   const hasUsage = Boolean(attempt.usage);
   const inputTokens = attempt.usage?.prompt_tokens ?? args.inputTokenEstimate;
   const outputTokens = attempt.usage?.completion_tokens ?? estimateTokens(attempt.text);
@@ -681,7 +691,7 @@ export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Pro
         const inputTokens = (totals?.inputTokens ?? 0) + (estimate?.inputTokens ?? 0);
         const outputTokens = (totals?.outputTokens ?? 0) + (estimate?.outputTokens ?? 0);
         // Only provider-reported charges are summed; the caller prices every other token on the served route.
-        const partialCharge = estimate ? readProviderCharge(partial?.usage ?? null).costCents : undefined;
+        const partialCharge = estimate ? chargeOf(args, partial?.usage ?? null).costCents : undefined;
         const charged = totals?.costCents !== undefined || partialCharge !== undefined;
         const chargedTokens = {
           inputTokens: (totals?.chargedTokens?.inputTokens ?? 0) + (partialCharge !== undefined ? estimate!.inputTokens : 0),

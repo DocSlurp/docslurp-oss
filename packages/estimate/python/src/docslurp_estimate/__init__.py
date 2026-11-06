@@ -1,20 +1,27 @@
-"""Offline DocSlurp credit estimates: probe files locally and quote an upload with the published price card.
+"""The offline DocSlurp file profiler: measure files locally and send the profiles to the server for a quote.
 
-Runs the estimator's WebAssembly module (the same one `@docslurp/estimate` ships on npm) through wasmtime and calls
-its JSON ABI (`ds_alloc`, `ds_free`, `ds_card`, `ds_read_plan`, `ds_probe`, `ds_quote`).
+Runs the profiler's WebAssembly module (the same one `@docslurp/estimate` ships on npm) through wasmtime and calls its
+JSON ABI (`ds_alloc`, `ds_free`, `ds_info`, `ds_read_plan`, `ds_probe`). A profile holds neutral, aggregate facts only
+(type, page counts, PDF page facts, media duration); nothing here prices anything. :func:`request_quote` asks a
+DocSlurp server (`POST /v1/uploads/estimate`) for an estimate.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 import urllib.request
 from importlib import resources
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional, Union
 
 import wasmtime
 
-__all__ = ["Estimator", "EstimatorError", "apply_probe", "fetch_estimate_card"]
+__all__ = ["Estimator", "EstimatorError", "request_quote"]
+
+ProgressCallback = Callable[[dict], None]
+Cancel = Union[threading.Event, Callable[[], bool]]
 
 _MASK64 = (1 << 64) - 1
 # The module's imported memory, in 64 KiB pages: 16 MiB initial, 256 MiB maximum (.cargo/config.toml).
@@ -23,7 +30,7 @@ _MEMORY_MAXIMUM_PAGES = 4096
 
 
 class EstimatorError(Exception):
-    """An estimator error with a stable ``code``: invalid_request, invalid_card, unsupported_rules or crashed."""
+    """An estimator error with a stable ``code``: invalid_request or crashed; quote_failed from :func:`request_quote`."""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -35,13 +42,9 @@ def _default_module_bytes() -> bytes:
 
 
 class Estimator:
-    """Probe files and quote uploads offline.
+    """Profile files offline. ``wasm`` overrides the module bytes or path."""
 
-    ``card`` is a price card from ``GET /v1/billing/estimate-card`` (see :func:`fetch_estimate_card`); by default
-    the card bundled into the module. ``wasm`` overrides the module bytes or path.
-    """
-
-    def __init__(self, card: Optional[Mapping[str, Any] | str] = None, wasm: Optional[bytes | str | os.PathLike] = None) -> None:
+    def __init__(self, wasm: Optional[bytes | str | os.PathLike] = None) -> None:
         self._engine = wasmtime.Engine()
         if wasm is None:
             module_bytes = _default_module_bytes()
@@ -51,7 +54,6 @@ class Estimator:
             with open(wasm, "rb") as handle:
                 module_bytes = handle.read()
         self._module = wasmtime.Module(self._engine, module_bytes)
-        self._card_json = None if card is None else (card if isinstance(card, str) else json.dumps(card)).encode()
         # One bounded memory for the estimator's lifetime: after a trap it is zeroed and the module instantiated into
         # it again, so hostile files cost at most this memory, never a fresh allocation per crash.
         self._new_store()
@@ -63,10 +65,13 @@ class Estimator:
         self._resets = 0
         self._instantiate()
 
+    _crashes = 0
+    _total_resets = 0
+
     def _instantiate(self) -> None:
         instance = wasmtime.Instance(self._store, self._module, [self._memory])
         exports = instance.exports(self._store)
-        self._fn = {name: exports[name] for name in ("ds_alloc", "ds_free", "ds_card", "ds_read_plan", "ds_probe", "ds_quote")}
+        self._fn = {name: exports[name] for name in ("ds_alloc", "ds_free", "ds_info", "ds_read_plan", "ds_probe")}
 
     def _reset(self) -> None:
         # A store keeps a little bookkeeping per instance; start a new one now and then so it stays bounded.
@@ -98,6 +103,8 @@ class Estimator:
         except wasmtime.Trap as error:
             # A trap (a panic, an input larger than the memory, or a file that hit the memory cap) leaves the heap
             # inconsistent: zero the memory and instantiate the module into it again, exactly as on first load.
+            self._crashes += 1
+            self._total_resets += 1
             self._reset()
             raise EstimatorError("crashed", f"the estimator stopped on this input ({error})") from None
         pointer, length = packed >> 32, packed & 0xFFFFFFFF
@@ -115,20 +122,20 @@ class Estimator:
             meta["type"] = type
         return json.dumps(meta).encode()
 
-    def card(self) -> dict:
-        """The price card quotes use: the supplied card, else the bundled one."""
-        return json.loads(self._card_json) if self._card_json else self._call("ds_card")
+    def info(self) -> dict:
+        """``{"profileSchema": n, "profiler": version}``: the profile shape and profiler version this module emits."""
+        return self._call("ds_info")
 
     def read_plan(self, name: str, size: int, type: Optional[str] = None) -> dict:
-        """Bytes :meth:`probe` needs: ``{"head": n, "tail": n}`` (head == size means the whole file)."""
+        """Bytes :meth:`profile` needs: ``{"head": n, "tail": n}`` (head == size means the whole file)."""
         return self._call("ds_read_plan", self._meta(name, size, type))
 
-    def probe(self, name: str, size: int, head: bytes, tail: Optional[bytes] = None, type: Optional[str] = None) -> dict:
-        """Probe a file from its first bytes and, for large media, its last bytes."""
+    def profile(self, name: str, size: int, head: bytes, tail: Optional[bytes] = None, type: Optional[str] = None) -> dict:
+        """Profile a file from its first bytes and, for large media, its last bytes."""
         return self._call("ds_probe", self._meta(name, size, type), head, tail)
 
-    def probe_path(self, path: str | os.PathLike, type: Optional[str] = None) -> dict:
-        """Probe the file at ``path``, reading only the bytes the probe needs."""
+    def profile_path(self, path: str | os.PathLike, type: Optional[str] = None) -> dict:
+        """Profile the file at ``path``, reading only the bytes the profile needs."""
         name = os.path.basename(os.fspath(path))
         size = os.path.getsize(path)
         plan = self.read_plan(name, size, type)
@@ -138,50 +145,155 @@ class Estimator:
             if plan["tail"]:
                 handle.seek(size - plan["tail"])
                 tail = handle.read(plan["tail"])
-        return self.probe(name, size, head, tail, type)
+        return self.profile(name, size, head, tail, type)
 
-    def quote(self, files: Iterable[Mapping[str, Any]], profile: Optional[Mapping[str, Any]] = None, speed_boost: Optional[bool] = None) -> dict:
-        """Quote files (``{"name", "size", "type"?, "pages"?, "durationSeconds"?, "mix"?, "mixConfidence"?}``)."""
-        request: dict[str, Any] = {"files": list(files)}
-        if profile is not None:
-            request["profile"] = profile
-        if speed_boost is not None:
-            request["speedBoost"] = speed_boost
-        return self._call("ds_quote", json.dumps(request).encode(), self._card_json)
+    def health(self) -> dict:
+        """Traps (``crashed``) and the fresh instances made after them."""
+        return {"crashes": self._crashes, "resets": self._total_resets}
 
-    def quote_paths(self, paths: Iterable[str | os.PathLike], profile: Optional[Mapping[str, Any]] = None, speed_boost: Optional[bool] = None) -> dict:
-        """Probe each path and quote them together. Files the probe cannot read are priced from name and size."""
-        files = []
-        probes = []
+    def estimate_paths(
+        self,
+        paths: Iterable[str | os.PathLike],
+        on_progress: Optional[ProgressCallback] = None,
+        cancel: Optional[Cancel] = None,
+    ) -> dict:
+        """Profile ``paths`` with progress, cancellation and per-file fallbacks, like JS ``estimateFiles``.
+
+        ``on_progress`` receives the same events (``file-start``, ``read-progress``, ``probe-start``, ``probe-done``,
+        ``file-done``, ``done``; one batch, so one ``batch-done``). ``cancel`` is a ``threading.Event`` or a callable;
+        once set, no further file starts and the result is ``partial``. A file that cannot be read or profiled is sent
+        with its name and size only. ``result["request"]["files"]`` is the body for :func:`request_quote`.
+        """
+        emit = on_progress or (lambda event: None)
+        cancelled = (cancel.is_set if isinstance(cancel, threading.Event) else cancel) or (lambda: False)
+        started = time.perf_counter()
+        paths = [os.fspath(path) for path in paths]
+        sources = []
         for path in paths:
-            file = {"name": os.path.basename(os.fspath(path)), "size": os.path.getsize(path)}
+            name = os.path.basename(path)
             try:
-                probed = self.probe_path(path)
-            except EstimatorError:
-                probed = None
-            probes.append(probed)
-            files.append(apply_probe(file, probed))
-        return {**self.quote(files, profile, speed_boost), "probes": probes}
+                sources.append({"name": name, "size": os.path.getsize(path), "path": path})
+            except OSError as error:
+                sources.append({"name": name, "size": 0, "path": path, "error": {"code": "read_failed", "message": str(error)}})
+        plans: list[Optional[dict]] = []
+        for source in sources:
+            plan = None if "error" in source else self.read_plan(source["name"], source["size"])
+            plans.append(plan)
+        planned = sum(plan["head"] + plan["tail"] for plan in plans if plan)
+        file_bytes = sum(source["size"] for source in sources)
+        counts = {"completed": 0, "probed": 0, "failed": 0, "skipped": 0}
+        state = {"read": 0}
+        health_before = self.health()
+        results: list[Optional[dict]] = [None] * len(sources)
+
+        def send(kind: str, **fields: Any) -> None:
+            emit({
+                "type": kind,
+                "elapsedMs": round((time.perf_counter() - started) * 1000, 1),
+                "files": {"total": len(sources), **counts},
+                "bytes": {"read": state["read"], "planned": planned, "files": file_bytes},
+                **fields,
+            })
+
+        def size_only(source: dict) -> dict:
+            return {"name": source["name"], "size": source["size"]}
+
+        def finish(index: int, status: str, **fields: Any) -> dict:
+            source = sources[index]
+            result = {"index": index, "name": source["name"], "size": source["size"], "status": status, "profile": None,
+                      "requestFile": size_only(source), "measured": False, "probeMs": None, **fields}
+            results[index] = result
+            counts["completed"] += 1
+            counts[status if status in ("probed", "failed") else "skipped"] += 1
+            return result
+
+        for index, source in enumerate(sources):
+            if cancelled():
+                break
+            ref = {"index": index, "name": source["name"]}
+            plan = plans[index]
+            send("file-start", file={**ref, "size": source["size"]}, plan=plan, filePlannedBytes=(plan["head"] + plan["tail"]) if plan else 0)
+            if plan is None:
+                send("file-done", file=ref, result=finish(index, "failed", reason=source["error"]))
+                continue
+            try:
+                with open(source["path"], "rb") as handle:
+                    head = handle.read(plan["head"])
+                    tail = None
+                    if plan["tail"]:
+                        handle.seek(source["size"] - plan["tail"])
+                        tail = handle.read(plan["tail"])
+            except OSError as error:
+                send("file-done", file=ref, result=finish(index, "failed", reason={"code": "read_failed", "message": str(error)}))
+                continue
+            read = len(head) + (len(tail) if tail else 0)
+            state["read"] += read
+            send("read-progress", file=ref, fileBytesRead=read, filePlannedBytes=plan["head"] + plan["tail"])
+            # One opaque call: report the stage and its time, never a percentage.
+            send("probe-start", file=ref, stage="probe")
+            probe_started = time.perf_counter()
+            try:
+                profile = self.profile(source["name"], source["size"], head, tail)
+                failure = None
+            except EstimatorError as error:
+                profile, failure = None, {"code": error.code, "message": f"{error}; sent with name and size only."}
+            probe_ms = round((time.perf_counter() - probe_started) * 1000, 2)
+            send("probe-done", file=ref, stage="probe", probeMs=probe_ms, ok=failure is None)
+            if failure:
+                result = finish(index, "failed", reason=failure, probeMs=probe_ms)
+            else:
+                result = finish(index, "probed", profile=profile, requestFile={**size_only(source), "profile": profile}, measured=True, probeMs=probe_ms)
+            send("file-done", file=ref, result=result)
+
+        was_cancelled = any(result is None for result in results)
+        for index, source in enumerate(sources):
+            if results[index] is None:
+                finish(index, "skipped", reason={"code": "cancelled", "message": "Not profiled before the run was cancelled; sent with name and size only."})
+        send("batch-done", batch={"index": 0, "start": 0, "end": len(sources)})
+        elapsed = time.perf_counter() - started
+        times = sorted(result["probeMs"] for result in results if result["probeMs"] is not None)
+        pick = lambda p: times[min(len(times) - 1, max(0, -(-p * len(times) // 100) - 1))] if times else 0
+        pdfs = [result["profile"]["pdf"] for result in results if result["profile"] and "pdf" in result["profile"]]
+        health = self.health()
+        unprofiled = sum(1 for result in results if not result["measured"])
+        stats = {
+            "elapsedMs": round(elapsed * 1000, 1),
+            "files": {"total": len(sources), "probed": counts["probed"], "failed": counts["failed"], "skipped": counts["skipped"], "unprofiled": unprofiled},
+            "bytes": {"read": state["read"], "planned": planned, "files": file_bytes},
+            "probeMs": {"total": round(sum(times), 2), "p50": pick(50), "p95": pick(95), "max": times[-1] if times else 0},
+            "throughput": {"filesPerSecond": round((counts["probed"] + counts["failed"]) / max(elapsed, 1e-3), 2), "megabytesPerSecond": round(state["read"] / 1e6 / max(elapsed, 1e-3), 2)},
+            "pages": {"found": sum((result["profile"] or {}).get("pages", 0) for result in results)},
+            "pdf": {"files": len(pdfs), "sampledPages": sum(pdf["sampledPages"] for pdf in pdfs), "rasterPages": sum(pdf["rasterPages"] for pdf in pdfs)},
+            "estimator": {"crashes": health["crashes"] - health_before["crashes"], "resets": health["resets"] - health_before["resets"]},
+        }
+        result = {"files": results, "request": {"files": [entry["requestFile"] for entry in results]}, "stats": stats,
+                  "partial": unprofiled > 0, "cancelled": was_cancelled, "unprofiledFiles": unprofiled}
+        send("done", partial=result["partial"], cancelled=was_cancelled)
+        return result
 
 
-def apply_probe(file: Mapping[str, Any], probe: Optional[Mapping[str, Any]]) -> dict:
-    """Copy a probe's measurements into a quote file, keeping fields the file already has."""
-    merged = dict(file)
-    if not probe:
-        return merged
-    if "type" not in merged and probe.get("mimeType"):
-        merged["type"] = probe["mimeType"]
-    for key in ("pages", "durationSeconds"):
-        if key not in merged and key in probe:
-            merged[key] = probe[key]
-    if "mix" not in merged and "mix" in probe:
-        merged["mix"] = probe["mix"]
-        if "mixConfidence" in probe:
-            merged["mixConfidence"] = probe["mixConfidence"]
-    return merged
+def request_quote(
+    files: Iterable[Mapping[str, Any]],
+    api_key: Optional[str] = None,
+    workspace: Optional[str] = None,
+    speed_boost: Optional[bool] = None,
+    origin: str = "https://docslurp.io",
+    timeout: float = 30.0,
+) -> dict:
+    """Ask a DocSlurp server to quote profiled files (``POST /v1/uploads/estimate``; an ``ingest`` key).
 
-
-def fetch_estimate_card(origin: str = "https://docslurp.io", timeout: float = 10.0) -> dict:
-    """The current price card from a DocSlurp server (public, no key)."""
-    with urllib.request.urlopen(f"{origin.rstrip('/')}/v1/billing/estimate-card", timeout=timeout) as response:
-        return json.loads(response.read().decode())
+    ``files`` are ``{"name", "size", "type"?, "profile"?}``, e.g. ``estimate_paths(...)["request"]["files"]``. The
+    answer is an estimate; profiles never change what an upload is charged. Offline, show the profiles without credits.
+    """
+    body: dict[str, Any] = {"files": list(files)}
+    if workspace:
+        body["workspace"] = workspace
+    if speed_boost is not None:
+        body["speedBoost"] = speed_boost
+    request = urllib.request.Request(f"{origin.rstrip('/')}/v1/uploads/estimate", data=json.dumps(body).encode(), method="POST",
+                                     headers={"content-type": "application/json", **({"authorization": f"Bearer {api_key}"} if api_key else {})})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode())
+    except OSError as error:
+        raise EstimatorError("quote_failed", f"the server did not quote these files ({error})") from None

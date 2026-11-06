@@ -1,10 +1,10 @@
-import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { killArgv, launchArgv } from "../providers/modal/control.js";
+import { HARDEN_LINKS_ARGV, KILL_PARSER_USER_ARGV, killArgv, launchArgv, lockImageArgv, resetArgv } from "../providers/modal/control.js";
 
 /** Run an argv locally, the way Modal runs it remotely, and collect its exit status and output. */
 function run(argv: string[]): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
@@ -74,4 +74,273 @@ describe("modal remote control scripts (run locally with /bin/sh)", () => {
     await run(launchArgv(control, "/bin/sh", ["-c", "exit 0"]));
     expect((await run(killArgv(control))).exitCode).toBe(0);
   });
+});
+
+describe("parser commands drop root in the VM (validation N10, council K #4/#5)", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(path.join(tmpdir(), "docslurp-modal-uid-")); });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  /**
+   * Fake tools at absolute paths (as the VM's /usr/bin/id, setpriv, chown): `id` reports `uid`, chown and setpriv record
+   * their arguments, setpriv then runs the command. Returns the tools for launchArgv.
+   */
+  function fakeTools(uid: string | null, withSetpriv = true) {
+    const bin = path.join(dir, "abs");
+    const log = path.join(dir, "calls");
+    mkdirSync(bin);
+    const write = (name: string, body: string) => { writeFileSync(path.join(bin, name), body); chmodSync(path.join(bin, name), 0o755); };
+    write("id", uid === null ? "#!/bin/sh\nexit 1\n" : `#!/bin/sh\necho ${uid}\n`);
+    write("chown", `#!/bin/sh\necho "chown $*" >> "${log}"\n`);
+    if (withSetpriv) write("setpriv", `#!/bin/sh\necho "setpriv $*" >> "${log}"\nwhile [ "$1" != "--" ]; do shift; done; shift; exec "$@"\n`);
+    return { id: path.join(bin, "id"), setpriv: path.join(bin, "setpriv") };
+  }
+  /** A PATH whose `id` claims a non-root user and whose setpriv/chown do nothing: the launch must never use them. */
+  function hostilePath(): string {
+    const bin = path.join(dir, "hostile");
+    mkdirSync(bin);
+    for (const [name, body] of [["id", "#!/bin/sh\necho 1000\n"], ["setpriv", "#!/bin/sh\nexit 0\n"], ["chown", "#!/bin/sh\nexit 0\n"]]) {
+      writeFileSync(path.join(bin, name!), body!); chmodSync(path.join(bin, name!), 0o755);
+    }
+    return bin;
+  }
+  const runWithPath = (argv: string[], PATH: string) => new Promise<{ exitCode: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn(argv[0]!, argv.slice(1), { stdio: ["ignore", "pipe", "pipe"], env: { PATH } });
+    let stdout = "", stderr = "";
+    child.stdout.on("data", (c) => (stdout += c)); child.stderr.on("data", (c) => (stderr += c));
+    child.once("error", reject); child.once("close", (exitCode) => resolve({ exitCode, stdout, stderr }));
+  });
+
+  it.each([["an empty PATH", () => ""], ["a hostile PATH", () => ""]])("as root under %s, runs through the absolute setpriv and changes no ownership", async (label) => {
+    const tools = fakeTools("0");
+    const out = path.join(dir, "out with space"); mkdirSync(out);
+    const PATH = label === "a hostile PATH" ? hostilePath() : "";
+    const result = await runWithPath(launchArgv(path.join(dir, "1"), "/bin/echo", ["a b"], [out, path.join(dir, "missing")], tools), PATH);
+    expect(result).toMatchObject({ exitCode: 0, stdout: "a b\n" });
+    // Root changes no ownership in the job tree (staging creates it as uid 10001, council O #4): only setpriv runs.
+    expect(readFileSync(path.join(dir, "calls"), "utf8").split("\n").filter(Boolean)).toEqual([
+      "setpriv --reuid=10001 --regid=10001 --clear-groups --no-new-privs -- /bin/echo a b",
+    ]);
+  });
+
+  it("as root without setpriv at its absolute path, refuses even when PATH offers one", async () => {
+    const tools = fakeTools("0", false);
+    const marker = path.join(dir, "ran");
+    const result = await runWithPath(launchArgv(path.join(dir, "1"), "/bin/sh", ["-c", `: > "${marker}"`], [], tools), hostilePath());
+    expect(result.exitCode).toBe(126);
+    expect(result.stderr).toMatch(/setpriv unavailable/);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("refuses when the uid cannot be read, instead of running as whoever it is", async () => {
+    const tools = fakeTools(null);
+    const marker = path.join(dir, "ran");
+    const result = await runWithPath(launchArgv(path.join(dir, "1"), "/bin/sh", ["-c", `: > "${marker}"`], [], tools), "");
+    expect(result.exitCode).toBe(126);
+    expect(result.stderr).toMatch(/cannot read the uid/);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("a hostile PATH cannot make root look unprivileged: the real /usr/bin/id decides", async () => {
+    const result = await runWithPath(launchArgv(path.join(dir, "1"), "/usr/bin/id", ["-u"], [dir]), hostilePath());
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe(String(process.getuid!()));
+  });
+});
+
+function spawnSyncShell(script: string): void { spawnSync("/bin/sh", ["-c", script], { stdio: "ignore" }); }
+
+// The leftover kill against a process that keeps forking and exiting its parent (recheck Q #2), in a real (unprivileged)
+// container as root: the /proc scan it replaced exited 0 with this process alive. Needs docker and the image below.
+const dockerKillTest = process.env.DOCSLURP_DOCKER_TESTS === "1";
+describe.skipIf(!dockerKillTest)("leftover kill in a container (recheck Q #2)", () => {
+  it("kills a fork-hopping parser-user process and verifies it is gone", async () => {
+    const hopper = [
+      "import os, sys",
+      "os.setgroups([]); os.setresgid(10001, 10001, 10001); os.setresuid(10001, 10001, 10001)",
+      "if os.fork(): os._exit(0)",
+      "os.setsid(); n = 0",
+      "while True:",
+      "    n += 1",
+      "    if n % 50 == 0: open('/w/hb', 'w').write(str(n))",
+      "    if os.fork(): os._exit(0)",
+    ].join("\n");
+    const script = [
+      "mkdir -p /w && chmod 1777 /w",
+      'python3 -c "$HOPPER"; python3 -c "$HOPPER"; sleep 0.5',
+      'a=$(cat /w/hb); sleep 0.3; b=$(cat /w/hb); [ "$a" != "$b" ] || { echo not-started; exit 1; }',
+      '"$@"; echo "kill=$?"; sleep 0.3',
+      'a=$(cat /w/hb); sleep 0.5; b=$(cat /w/hb); [ "$a" = "$b" ] && echo dead || echo alive',
+    ].join("\n");
+    const run = spawnSync("docker", ["run", "--rm", "--network", "none", "-e", `HOPPER=${hopper}`, "python:3.11-slim-bookworm", "sh", "-c", script, "sh", ...KILL_PARSER_USER_ARGV], { encoding: "utf8", timeout: 120_000 });
+    expect(run.stdout).toContain("kill=0");
+    expect(run.stdout.trim().split("\n").at(-1)).toBe("dead");
+  }, 150_000);
+});
+
+// Council W #1, W #3, U #8: the real image lock and post-command reset, as root in a container. Document A (uid 10001)
+// tries to rewrite the venv and leaves files in every scratch root; after the reset, document B sees none of it.
+describe.skipIf(!dockerKillTest)("parser VM image lock and reset (council W #1)", () => {
+  const asUser = (code: string) => `python3 -c "import os; os.setgroups([]); os.setresgid(10001,10001,10001); os.setresuid(10001,10001,10001); ${code}"`;
+  const docker = (script: string, extra: string[] = []) => spawnSync("docker", ["run", "--rm", "--network", "none", ...extra, "-e", `LOCK=${lockImageArgv([])[3]}`, "-e", `RESET=${resetArgv([])[3]}`,
+    "python:3.11-slim-bookworm", "sh", "-c", script], { encoding: "utf8", timeout: 120_000 });
+  const setup = [
+    "mkdir -p /app/.venv/bin /home/docslurp /tmp/docslurp-parser-sandbox",
+    "echo original > /app/.venv/bin/python3 && chmod 755 /app/.venv/bin/python3",
+    "chown -R 10001:10001 /app/.venv /home/docslurp /tmp/docslurp-parser-sandbox",
+  ];
+
+  it("document A can neither poison the venv nor leave files that document B sees", () => {
+    const run = docker([
+      ...setup,
+      'python3 -I -c "$LOCK" /tmp/docslurp-parser-sandbox; echo "lock=$?"',
+      `${asUser("open('/app/.venv/bin/python3','w').write('evil')")} 2>/dev/null; echo "venv-write=$?"`,
+      `${asUser("[open(p,'w').write('a') for p in ['/tmp/a','/var/tmp/a','/dev/shm/a','/home/docslurp/.a','/tmp/docslurp-parser-sandbox/a']]; os.makedirs('/tmp/d/e'); open('/tmp/d/e/f','w').write('a')")}; echo "a-writes=$?"`,
+      // A's job tree as staging leaves it after a successful command: its uploaded input and its downloaded output (W #3).
+      `${asUser("os.makedirs('/tmp/docslurp-job-a/out'); open('/tmp/docslurp-job-a/in.pdf','w').write('%PDF'); open('/tmp/docslurp-job-a/out/page.md','w').write('a')")}`,
+      'python3 -I -c "$RESET" /tmp/docslurp-parser-sandbox; echo "reset=$?"',
+      `${asUser("import glob; print('b-sees=' + ','.join(p for p in ['/tmp/a','/var/tmp/a','/dev/shm/a','/home/docslurp/.a','/tmp/docslurp-parser-sandbox/a','/tmp/d','/tmp/docslurp-job-a'] if os.path.lexists(p)))")}`,
+      "echo \"venv=$(cat /app/.venv/bin/python3) owner=$(stat -c %u /app/.venv/bin/python3)\"",
+    ].join("\n"));
+    expect(run.stdout).toContain("lock=0");
+    expect(run.stdout).toContain("venv-write=1");
+    expect(run.stdout).toContain("a-writes=0");
+    expect(run.stdout).toContain("reset=0");
+    expect(run.stdout).toMatch(/^b-sees=$/m);
+    expect(run.stdout).toContain("venv=original owner=0");
+  }, 150_000);
+
+  it("walks every mount: a path the parser user owns, whatever its mode, refuses the VM; SysV IPC it left is removed (council X #3)", () => {
+    const run = docker([
+      ...setup,
+      'python3 -I -c "$LOCK" /tmp/docslurp-parser-sandbox 2>&1; echo "clean-lock=$?"',
+      "mkdir -p /srv/owned && chmod 0555 /srv/owned && chown 10001:10001 /srv/owned",
+      'python3 -I -c "$LOCK" /tmp/docslurp-parser-sandbox 2>&1; echo "owned-lock=$?"',
+      "rmdir /srv/owned",
+      `${asUser("import subprocess; subprocess.run(['ipcmk', '-M', '4096'], check=True, stdout=subprocess.DEVNULL); subprocess.run(['ipcmk', '-Q'], check=True, stdout=subprocess.DEVNULL); subprocess.run(['ipcmk', '-S', '1'], check=True, stdout=subprocess.DEVNULL)")}; echo "ipc-made=$?"`,
+      'echo "ipc-before=$(awk \'NR>1 && $8==10001\' /proc/sysvipc/shm | wc -l)/$(awk \'NR>1 && $8==10001\' /proc/sysvipc/msg | wc -l)/$(awk \'NR>1 && $5==10001\' /proc/sysvipc/sem | wc -l)"',
+      'python3 -I -c "$RESET" /tmp/docslurp-parser-sandbox; echo "reset=$?"',
+      'echo "ipc-after=$(awk \'NR>1 && $8==10001\' /proc/sysvipc/shm | wc -l)/$(awk \'NR>1 && $8==10001\' /proc/sysvipc/msg | wc -l)/$(awk \'NR>1 && $5==10001\' /proc/sysvipc/sem | wc -l)"',
+    ].join("\n"));
+    expect(run.stdout).toContain("clean-lock=0");
+    expect(run.stdout).toMatch(/outside scratch and job roots: \/srv\/owned/);
+    expect(run.stdout).toContain("owned-lock=6");
+    expect(run.stdout).toContain("ipc-made=0");
+    expect(run.stdout).toContain("ipc-before=1/1/1");
+    expect(run.stdout).toContain("reset=0");
+    expect(run.stdout).toContain("ipc-after=0/0/0");
+  }, 150_000);
+
+  it("the reset keeps only the current document's uploaded inputs under a job root, and a full reset removes them (council X #7)", () => {
+    const keepReset = resetArgv(["/tmp/docslurp-parser-sandbox", "/tmp"], ["/tmp/docslurp-job-a/in.pdf", "/var/tmp/sneaky"]).slice(4).map((arg) => `'${arg}'`).join(" ");
+    const run = docker([
+      ...setup,
+      `${asUser("os.makedirs('/tmp/docslurp-job-a/out'); open('/tmp/docslurp-job-a/in.pdf','w').write('%PDF'); open('/tmp/docslurp-job-a/out/page.md','w').write('a'); open('/tmp/docslurp-job-a/extra','w').write('a'); open('/var/tmp/sneaky','w').write('a'); open('/tmp/other','w').write('a')")}`,
+      `python3 -I -c "$RESET" ${keepReset}; echo "keep-reset=$?"`,
+      'for p in /tmp/docslurp-job-a/in.pdf /tmp/docslurp-job-a/out /tmp/docslurp-job-a/extra /var/tmp/sneaky /tmp/other; do [ -e "$p" ] && echo "present $p" || echo "absent $p"; done',
+      'python3 -I -c "$RESET" /tmp/docslurp-parser-sandbox /tmp; echo "full-reset=$?"',
+      '[ -e /tmp/docslurp-job-a ] && echo "job-a present" || echo "job-a absent"',
+    ].join("\n"));
+    expect(run.stdout).toContain("keep-reset=0");
+    expect(run.stdout).toContain("present /tmp/docslurp-job-a/in.pdf");
+    for (const gone of ["/tmp/docslurp-job-a/out", "/tmp/docslurp-job-a/extra", "/var/tmp/sneaky", "/tmp/other"]) expect(run.stdout).toContain(`absent ${gone}`);
+    expect(run.stdout).toContain("full-reset=0");
+    expect(run.stdout).toContain("job-a absent");
+  }, 150_000);
+
+  it("after hardening the parser user cannot create a POSIX message queue (council XQ)", () => {
+    // Only the IPC-namespaced line of the real hardening script runs here: the others are host-wide sysctls.
+    const lines = HARDEN_LINKS_ARGV[2]!.split("\n");
+    const fn = lines.slice(lines.indexOf("set_check() {"), lines.indexOf("}") + 1);
+    const mq = lines.find((line) => line.includes("fs/mqueue/queues_max"))!;
+    expect(mq).toBe("set_check /proc/sys/fs/mqueue/queues_max 0");
+    const harden = [...fn, mq].join("\n");
+    const mqOpen = "import ctypes, os; rt = ctypes.CDLL('librt.so.1', use_errno=True); rt.mq_open.restype = ctypes.c_int; os.setgroups([]); os.setresgid(10001,10001,10001); os.setresuid(10001,10001,10001); fd = rt.mq_open(('/docslurp-xq-%d' % os.getpid()).encode(), os.O_CREAT | os.O_RDWR, 0o600, None); print('mq_open=%d errno=%d' % (fd, ctypes.get_errno()))";
+    const run = spawnSync("docker", ["run", "--rm", "--network", "none", "--ipc", "private", "--security-opt", "systempaths=unconfined", "-e", `HARDEN=${harden}`, "-e", `MQ=${mqOpen}`,
+      "python:3.11-slim-bookworm", "sh", "-c", 'python3 -c "$MQ"; sh -c "$HARDEN"; echo "harden=$? max=$(cat /proc/sys/fs/mqueue/queues_max)"; python3 -c "$MQ"'], { encoding: "utf8", timeout: 120_000 });
+    const opens = [...run.stdout.matchAll(/mq_open=(-?\d+) errno=(\d+)/g)].map((m) => Number(m[1]));
+    expect(opens[0]).toBeGreaterThanOrEqual(0); // before: the parser user could create one
+    expect(run.stdout).toContain("harden=0 max=0");
+    expect(opens[1]).toBe(-1); // after: refused (ENOSPC)
+  }, 150_000);
+
+  it("locks Modal's root 1777 /run tmpfs so the walk passes; without the lock step it is refused (council X #8)", () => {
+    const run = docker([
+      ...setup,
+      "chmod 1777 /run && mkdir -p /run/lock && chmod 1777 /run/lock && touch /run/open.sock && chmod 0666 /run/open.sock",
+      // The walk alone (the lock list emptied): Modal's /run is refused, fail-closed.
+      `python3 -I -c "$(printf '%s' "$LOCK" | sed 's/^for top in \\[.*\\]:$/for top in []:/')" /tmp/docslurp-parser-sandbox 2>&1; echo "walk-only=$?"`,
+      'python3 -I -c "$LOCK" /tmp/docslurp-parser-sandbox 2>&1; echo "lock=$?"',
+      'echo "run=$(stat -c %a /run) lock=$(stat -c %a /run/lock) sock=$(stat -c %a /run/open.sock)"',
+    ].join("\n"), ["--tmpfs", "/run:mode=1777"]);
+    expect(run.stdout).toMatch(/outside scratch and job roots: [^\n]*\/run/);
+    expect(run.stdout).toContain("walk-only=6");
+    expect(run.stdout).toContain("lock=0");
+    expect(run.stdout).toContain("run=1755 lock=1755 sock=644");
+  }, 150_000);
+
+  it("refuses an image path the parser user can still write, and reports a full job root or /dev/shm", () => {
+    const run = docker([
+      ...setup,
+      "mkdir -p /srv/open && chmod 0777 /srv/open",
+      'python3 -I -c "$LOCK" /tmp/docslurp-parser-sandbox 2>&1; echo "lock=$?"',
+      "mkdir -p /full && chmod 1777 /full",
+      'python3 -I -c "$RESET" /full; echo "reset-full=$?"',
+      'python3 -I -c "$RESET" /tmp/docslurp-parser-sandbox; echo "reset-ok=$?"',
+    ].join("\n"), ["--tmpfs", "/full:size=1m,mode=1777"]);
+    // Every mount is walked (council X #3): the extra tmpfs is flagged as well as /srv/open.
+    expect(run.stdout).toMatch(/writable by uid 10001 outside scratch and job roots: [^\n]*\/srv\/open/);
+    expect(run.stdout).toMatch(/outside scratch and job roots: [^\n]*\/full/);
+    expect(run.stdout).toContain("lock=6");
+    expect(run.stdout).toContain("[parser-reset] unhealthy root=/full");
+    expect(run.stdout).toContain("reset-full=5");
+    expect(run.stdout).toContain("reset-ok=0");
+  }, 150_000);
+});
+
+// Council V #4: the per-command cgroup path, end to end in a container with its own cgroup namespace (cgroup v2, writable
+// as in a parser VM). The real launch script puts the command in /sys/fs/cgroup/docslurp-cmd-<n> as root before dropping to
+// uid 10001; the real leftover kill must then report method=cgroup and beat both a process that SIGSTOPs everything it may
+// and one that keeps forking. Without the cgroup path these assertions fail (method=kill-1, no cgroup).
+describe.skipIf(!dockerKillTest)("leftover kill uses the command cgroup (council V #4)", () => {
+  const stopper = "import os, signal, time\nwhile True:\n    try: os.kill(-1, signal.SIGSTOP)\n    except OSError: pass\n    time.sleep(0.001)";
+  const hopper = "import os\nn = 0\nwhile True:\n    n += 1\n    if n % 50 == 0: open('/w/hb', 'w').write(str(n))\n    if os.fork(): os._exit(0)";
+  const runInContainer = (attack: string) => {
+    const argv = launchArgv("/tmp/.docslurp-modal-control/7", "python3", ["-c", attack]);
+    const script = [
+      "mount -o remount,rw /sys/fs/cgroup 2>/dev/null || true",
+      "mkdir -p /w /tmp/.docslurp-modal-control && chmod 1777 /w",
+      'count() { for d in /proc/[0-9]*; do awk \'/^Uid:/{print $2}\' "$d/status" 2>/dev/null; done | grep -c "^10001$"; }',
+      '"$@" &',
+      "sleep 0.7",
+      'echo "cgroup=$(ls -d /sys/fs/cgroup/docslurp-cmd-7 2>/dev/null)"',
+      'echo "before=$(count)"',
+      'a=$(cat /w/hb 2>/dev/null); sleep 0.3; b=$(cat /w/hb 2>/dev/null); [ -n "$b" ] && [ "$a" != "$b" ] && echo hopper=running',
+      'timeout 60 python3 -I -c "$KILL" 10001; echo "kill=$?"',
+      "sleep 0.5",
+      'echo "after=$(count)"',
+      'a=$(cat /w/hb 2>/dev/null); sleep 0.5; b=$(cat /w/hb 2>/dev/null); [ "$a" = "$b" ] && echo hopper=still',
+    ].join("\n");
+    return spawnSync("docker", ["run", "--rm", "--network", "none", "--cgroupns", "private", "--cap-add", "SYS_ADMIN", "-e", `KILL=${KILL_PARSER_USER_ARGV[3]}`,
+      "python:3.11-slim-bookworm", "sh", "-c", script, "sh", ...argv], { encoding: "utf8", timeout: 120_000 });
+  };
+
+  it("kills a process that SIGSTOPs everything it may, through cgroup.kill", () => {
+    const run = runInContainer(stopper);
+    expect(run.stdout).toContain("cgroup=/sys/fs/cgroup/docslurp-cmd-7");
+    expect(run.stdout).toMatch(/before=[1-9]/);
+    expect(run.stdout).toContain("[leftover-kill] method=cgroup cgroups=1");
+    expect(run.stdout).toContain("kill=0");
+    expect(run.stdout).toContain("after=0");
+  }, 150_000);
+
+  it("kills a fork-hopper, through cgroup.kill", () => {
+    const run = runInContainer(hopper);
+    expect(run.stdout).toContain("cgroup=/sys/fs/cgroup/docslurp-cmd-7");
+    expect(run.stdout).toContain("hopper=running");
+    expect(run.stdout).toContain("[leftover-kill] method=cgroup cgroups=1");
+    expect(run.stdout).toContain("kill=0");
+    expect(run.stdout).toContain("hopper=still");
+    expect(run.stdout).toContain("after=0");
+  }, 150_000);
 });

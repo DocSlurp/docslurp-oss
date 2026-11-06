@@ -11,7 +11,7 @@ import { type ArtifactStore } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import { PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import { readFile } from "node:fs/promises";
-import { detectHtmlEmbeds } from "../routing/html-embeds.js";
+import { detectHtmlEmbedsFile } from "../routing/html-embeds.js";
 
 export class ExtractHtmlStage implements Stage {
   readonly name = "extract-html";
@@ -55,7 +55,7 @@ export class ExtractHtmlStage implements Stage {
             if (document.mimeType === "text/html") {
               // H9: embedded / script-rendered content is not extracted; record it instead of dropping it silently.
               const source = await this.sources.get(document);
-              const report = detectHtmlEmbeds(await readFile(source.path, "utf8"));
+              const report = await detectHtmlEmbedsFile(source.path, this.runner, signal);
               const embedsKey = `${runArtifactRoot(state.run, document.userId)}/html/${document.id}.embeds.json`;
               if (report.needsAttention) {
                 await this.storage.putJson(embedsKey, { documentId: document.id, ...report });
@@ -115,7 +115,7 @@ export class ExtractHtmlStage implements Stage {
             let htmlUploaded = false;
 
             try {
-              const plan = await this.runner.extractHtml(tempFile);
+              const plan = await this.runner.extractHtml(tempFile, pageCount);
               console.log(
                 `[extract-debug] document=${document.id} planAvailable=${plan.available} tool=${plan.binary}`,
               );

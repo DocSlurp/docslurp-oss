@@ -38,15 +38,16 @@ describe("worker startup with DOCSLURP_EXTRACTOR_ID_ALIASES", () => {
   it("refuses an alias to an unknown id and over a built-in id", () => {
     registerTestProvider();
     expect(() => configureWorkerExtractorIdAliases({ DOCSLURP_EXTRACTOR_ID_ALIASES: `${LEGACY}:no-such-extractor` })).toThrow(/does not serve/);
-    expect(() => configureWorkerExtractorIdAliases({ DOCSLURP_EXTRACTOR_ID_ALIASES: "kreuzberg:vm-pdf" })).toThrow(/may not override/);
-    expect(canonicalExtractorId("kreuzberg")).toBe("kreuzberg");
+    expect(() => configureWorkerExtractorIdAliases({ DOCSLURP_EXTRACTOR_ID_ALIASES: "poppler-text:vm-pdf" })).toThrow(/may not override/);
+    expect(() => configureWorkerExtractorIdAliases({ DOCSLURP_EXTRACTOR_ID_ALIASES: "kreuzberg:pandoc" })).toThrow(/retired/);
+    expect(canonicalExtractorId("poppler-text")).toBe("poppler-text");
   });
 
   it("with a provider, resolves and prepares the legacy id as vm-pdf; unknown ids still fail", async () => {
     registerTestProvider();
     expect(() => documentExtractorRegistry.resolve("pdf", [LEGACY])).toThrow(/unknown extractor/);
     configureWorkerExtractorIdAliases(ALIAS);
-    expect(documentExtractorRegistry.resolve("pdf", [LEGACY, "vm-pdf", "kreuzberg"])).toEqual(["vm-pdf", "kreuzberg"]);
+    expect(documentExtractorRegistry.resolve("pdf", [LEGACY, "vm-pdf", "poppler-text"])).toEqual(["vm-pdf", "poppler-text"]);
     expect(() => documentExtractorRegistry.resolve("pdf", ["mystery"])).toThrow(/unknown extractor mystery/);
     const runner = { sandboxedPdfMarkdown: async (input: string, output: string) => ({ binary: "test-vm", args: [], available: true, sandboxedPdf: { input, output } }) };
     const prepared = await documentExtractorRegistry.prepare(LEGACY, runner as never, "/unused/source.pdf");

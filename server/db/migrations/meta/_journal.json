@@ -901,8 +901,36 @@
     {
       "idx": 128,
       "version": "7",
+      "when": 1793750400015,
+      "tag": "0128_vision_attempts_ocr_purpose",
+      "breakpoints": true
+    },
+    {
+      "idx": 129,
+      "version": "7",
+      "when": 1793750400016,
+      "tag": "0129_ocr_escalation_reads",
+      "breakpoints": true
+    },
+    {
+      "idx": 130,
+      "version": "7",
+      "when": 1793750400017,
+      "tag": "0130_page_count_provenance",
+      "breakpoints": true
+    },
+    {
+      "idx": 131,
+      "version": "7",
+      "when": 1793750400018,
+      "tag": "0131_pricing_provider_state",
+      "breakpoints": true
+    },
+    {
+      "idx": 132,
+      "version": "7",
       "when": 1793834400000,
-      "tag": "0128_projects",
+      "tag": "0132_projects",
       "breakpoints": true
     }
   ]

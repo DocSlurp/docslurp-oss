@@ -1,3 +1,4 @@
+import { quoteStoredDocuments } from "../services/stored-quote.js";
 import { projectRecommendationVisitsRoutes } from "./project-recommendation-visits.js";
 import { ChatToolBlockedError } from "../services/chat-tool-error.js";
 import { applyProjectSettingsProposalSchema } from "@docslurp/shared";
@@ -1704,8 +1705,12 @@ export const projectsRoutes = new Hono()
       if (!resolved.policy.allowFullIndexRequest) {
         return apiErrorResponse(c, 403, "forbidden", "This key or capability may not request a full index.", { category: "full_index_not_allowed" });
       }
-      const estimate = await estimateFullIndex({ speedBoost: c.req.valid("json").speedBoost === true, projectId: project.id, orgId: project.orgId, documentIds: c.req.valid("json").documentIds });
-      return c.json({ estimate, billing: billingState() });
+      const documentIds = c.req.valid("json").documentIds;
+      const estimate = await estimateFullIndex({ speedBoost: c.req.valid("json").speedBoost === true, projectId: project.id, orgId: project.orgId, documentIds });
+      const quote = estimate
+        ? await quoteStoredDocuments({ scope: { orgId: project.orgId, projectId: project.id, ...(documentIds ? { documentIds } : {}) }, pipeline: project.pipeline, estimate, settings: { indexing: "full" } })
+        : null;
+      return c.json({ estimate, quote, billing: billingState() });
     },
   )
   .post(
@@ -1726,7 +1731,11 @@ export const projectsRoutes = new Hono()
       const estimate = body.action === "reprocess"
         ? await estimateDocumentReprocess({ speedBoost: body.speedBoost === true, documentIds: body.documentIds, userId, projectId: project.id })
         : null;
-      return c.json({ estimate, billing: billingState() });
+      // Scoped to this project's documents: estimateDocumentReprocess already dropped any the caller cannot edit.
+      const quote = estimate
+        ? await quoteStoredDocuments({ scope: { orgId: project.orgId, projectId: project.id, documentIds: body.documentIds }, pipeline: project.pipeline, estimate, settings: { speedBoost: body.speedBoost === true } })
+        : null;
+      return c.json({ estimate, quote, billing: billingState() });
     },
   )
   .delete(

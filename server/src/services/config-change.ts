@@ -34,7 +34,6 @@ import { admissionBlock, requireRunCreditLease, isSpendBlockedError, spendBlockJ
 import { creditLeasesEnabled } from "./billing/credit-leases.js";
 import { getProjectAccess, canEditProject } from "./organizations.js";
 import {
-  INLINE_ESTIMATE_BUDGET_MS,
   jobStatusForMutation,
   recordJobMeta,
   type JobMeta,
@@ -66,12 +65,23 @@ export type ReindexTarget = {
   source_key: string;
   extraction_mode: string;
   page_count: number;
+  /** The worker's measured count (migration 0126), its method, intake's count source and the file facts: copied to the new version. */
+  billing_pages: number | null;
+  billing_pages_method: string | null;
+  page_count_source: string | null;
+  file_facts: unknown;
   canonical_id: string | null;
   version_number: number | null;
   source_sha256: string | null;
   source_path: string | null;
   index_config_hash: string | null;
 };
+
+/** Pages a document bills: the worker's measured count of an Office, slide, sheet or EPUB file, else its page count. */
+export function billedPages(doc: { page_count: number | null; billing_pages?: number | null }): number {
+  const measured = Number(doc.billing_pages);
+  return Math.max(0, measured > 0 ? measured : Number(doc.page_count) || 0);
+}
 
 export type ReindexMode = "required" | "recommended";
 
@@ -93,7 +103,6 @@ export type ProjectChangePlan = {
   targets: ReindexTarget[];
   /** Estimate of the re-index work; null when the change creates none. */
   estimate: CostEstimate | null;
-  estimateWithinBudget: boolean;
   /** The project row's `updated_at` when planned; apply re-plans if another change landed since. */
   rowVersion: string | null;
 };
@@ -116,7 +125,8 @@ async function loadTargets(
   const busyKinds = options.ignoreReindexRuns ? ["full-index"] : ["reindex", "full-index"];
   return await db<ReindexTarget[]>`
     select d.id, d.org_id, d.user_id, d.project_id, d.run_id, d.filename, d.mime_type, d.source_key,
-      d.extraction_mode, d.page_count, d.canonical_id, d.version_number, d.source_sha256, d.source_path, d.index_config_hash
+      d.extraction_mode, d.page_count, d.billing_pages, d.billing_pages_method, d.page_count_source, d.file_facts,
+      d.canonical_id, d.version_number, d.source_sha256, d.source_path, d.index_config_hash
     from documents d
     where d.project_id = ${projectId}
       and ${LIVE_DOCUMENT}
@@ -220,8 +230,6 @@ export async function planProjectChange(args: {
   input: UpdateProjectInput;
   indexingMode?: PipelineFeatures["indexingMode"];
   env?: EstimateEnv;
-  /** Inline-estimate budget in ms (default 150). */
-  budgetMs?: number;
   /** Merge a narrow trusted proposal against the same project snapshot this plan versions. */
   pipelineOverrides?: PipelineFeatureOverrides;
 }): Promise<ProjectChangePlan | null> {
@@ -239,8 +247,6 @@ export async function planProjectChange(args: {
   const beforeConfig = indexConfigOf(project.pipeline);
   const afterConfig = indexConfigOf(nextPipeline);
   const hashChanged = indexConfigHash(beforeConfig) !== indexConfigHash(afterConfig);
-  // The whole estimate (target loading included) counts against the inline budget.
-  const started = performance.now();
   let targets: ReindexTarget[] = [];
   if (reindex) {
     // Only an index-config change makes documents' stored hash meaningful; other changes (PII policy,
@@ -268,7 +274,8 @@ export async function planProjectChange(args: {
       const stages = owed ? compiledStages(nextPipeline, owed) : everything;
       const group = groups.get(stages.join(",")) ?? { stages, documents: 0, pages: 0 };
       group.documents += 1;
-      group.pages += Math.max(0, doc.page_count ?? 0);
+      // Priced on the pages the document bills, not the page basis its text splits into (one page for a measured DOCX).
+      group.pages += billedPages(doc);
       groups.set(stages.join(","), group);
     }
     const parts: CostEstimate[] = [];
@@ -279,11 +286,10 @@ export async function planProjectChange(args: {
     }
     estimate = parts.length === 1 ? parts[0]! : sumEstimates(parts);
   }
-  const estimateWithinBudget = performance.now() - started <= (args.budgetMs ?? INLINE_ESTIMATE_BUDGET_MS);
   return {
     project, input, nextPipeline, impact, reindex,
     willReindex: willReindex && targets.length > 0 && impact.stages.length > 0,
-    hashChanged, recordsIndexChange, beforeConfig, afterConfig, targets, estimate, estimateWithinBudget, rowVersion,
+    hashChanged, recordsIndexChange, beforeConfig, afterConfig, targets, estimate, rowVersion,
   };
 }
 
@@ -367,10 +373,13 @@ export async function createReindexRuns(args: {
       const versionNumber = await nextVersionNumber(tx as unknown as typeof sql, project.id, canonicalId);
       await tx`
         insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status,
-          extraction_mode, page_count, canonical_id, version_number, previous_version_id, reused_from_document_id,
+          extraction_mode, page_count, billing_pages, billing_pages_method, page_count_source, file_facts,
+          canonical_id, version_number, previous_version_id, reused_from_document_id,
           source_sha256, source_path, indexing_mode, reindex_of)
         values (${randomUUID()}, ${doc.org_id}, ${doc.user_id}, ${doc.project_id}, ${runId}, ${doc.filename},
           ${doc.mime_type}, ${doc.source_key}, 'queued', ${doc.extraction_mode}, ${doc.page_count},
+          ${doc.billing_pages ?? null}, ${doc.billing_pages_method ?? null}, ${doc.page_count_source ?? "assumed"},
+          ${doc.file_facts ? tx.json(doc.file_facts as never) : null},
           ${canonicalId}, ${versionNumber}, ${doc.id},
           ${batch.partial ? doc.id : null}, ${doc.source_sha256 ?? null}, ${doc.source_path ?? ""},
           ${effectiveIndexingMode("full")}, ${doc.id})
@@ -610,8 +619,9 @@ async function applyPlannedChange(args: {
 
   const jobMeta: Omit<JobMeta, "id"> = {
     kind: "reindex",
-    estimate: plan.estimateWithinBudget ? plan.estimate : null,
-    ...(plan.estimateWithinBudget ? {} : { estimateUrl: `/v1/projects/${project.id}/estimate` }),
+    // The same estimate the estimate route returns (null when the change creates no work).
+    estimate: plan.estimate,
+    estimateUrl: `/v1/projects/${project.id}/estimate`,
   };
 
   // Everything that reads on other connections happens before the transaction opens.
@@ -711,8 +721,15 @@ async function applyPlannedChange(args: {
 export type ProjectEstimateResponse = {
   impact: ConfigChangeImpact;
   estimate: CostEstimate | null;
+  /** The project's documents under the new configuration, in the `POST /v1/estimate` shape (ingest = this change's work). */
+  quote: import("@docslurp/shared").EstimateQuote | null;
   billing: "enforced" | "disabled";
 };
+
+/** The estimate of a change that reprocesses nothing. */
+function noWork(billing: "enforced" | "disabled"): CostEstimate {
+  return { pages: 0, documents: 0, billing, credits: billing === "enforced" ? { low: 0, high: 0 } : null, seconds: { low: 0, high: 0 }, basis: "No documents are reprocessed by this change." };
+}
 
 export function billingState(env: EstimateEnv = process.env): "enforced" | "disabled" {
   return isBillingEnforced(env) ? "enforced" : "disabled";
@@ -726,7 +743,12 @@ export async function estimateProjectChange(args: {
 }): Promise<ProjectEstimateResponse | null> {
   const plan = await planProjectChange(args);
   if (!plan) return null;
-  return { impact: plan.impact, estimate: plan.estimate, billing: billingState(args.env) };
+  // The same quote shape as POST /v1/estimate: the project's measured documents under the new configuration.
+  const { quoteStoredDocuments } = await import("./stored-quote.js");
+  const quote = plan.project.orgId
+    ? await quoteStoredDocuments({ scope: { orgId: plan.project.orgId, projectId: plan.project.id }, pipeline: plan.nextPipeline, estimate: plan.estimate ?? noWork(billingState(args.env)), env: args.env })
+    : null;
+  return { impact: plan.impact, estimate: plan.estimate, quote, billing: billingState(args.env) };
 }
 
 /** Whether the caller may change the project at all (used before planning writes). */
@@ -735,7 +757,7 @@ export async function canChangeProject(projectId: string, userId: string): Promi
   return Boolean(access && canEditProject(access, userId));
 }
 
-export { INLINE_ESTIMATE_BUDGET_MS, recordJobMeta };
+export { recordJobMeta };
 
 /** Frozen approval work identity; ignores index hashes which this transaction intentionally stamps. */
 export function reindexTargetSignature(targets: readonly ReindexTarget[]): string {

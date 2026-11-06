@@ -26,6 +26,8 @@ export const PUBLIC_ERROR_MESSAGES = {
   graphRebuildFailed: "The knowledge graph rebuild failed. Start it again; if it keeps failing, contact support.",
   silentVideo: "This video has no audio track, and video frame reading is disabled for this project or server.",
   imageNeedsVision: "This image can only be read with OCR or vision, and neither is available for this project. Check the project's vision and privacy settings.",
+  imageTooManyFrames: "This image has more than 64 frames (pages), the most one image file can hold. Split it into files of 64 frames or fewer, or upload it as a PDF.",
+  imageFramesUnfunded: "This image has more frames (pages) than your organization's balance covers. Processing is paused; buy credits and reprocess the file.",
   paused: "Processing is paused. Your project administrator can help you resume it.",
   projectMissing: "We couldn’t find that project. It may have been moved or removed.",
   personalOrganization: "Personal organizations can’t be changed this way.",
@@ -98,6 +100,8 @@ export function publicDiagnostics(value: unknown): unknown {
 export const DOCUMENT_FAILURE_MARKERS = {
   silentVideo: "Video has no audio track and video frame reading is disabled",
   imageNeedsVision: "Image needs OCR or vision to read and neither is available",
+  imageTooManyFrames: "Image has more frames than OCR reads in one file",
+  imageFramesUnfunded: "Image frames counted beyond the balance",
 } as const;
 
 /** Public copy for a stored Document, stage or Run error. Never echoes the raw text. */

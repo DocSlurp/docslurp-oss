@@ -23,8 +23,8 @@ beforeAll(async () => {
     insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
     insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
       values ('scan', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'embed', '${JSON.stringify(defaultPipelineFeatures)}', 1, 5);
-    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
-      values ('scan-pdf', 'o1', 'u1', 'w', 'scan', 'scan.pdf', 'application/pdf', 'raw/s', 'completed', 5);
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source)
+      values ('scan-pdf', 'o1', 'u1', 'w', 'scan', 'scan.pdf', 'application/pdf', 'raw/s', 'completed', 5, 'counted');
   `);
   const served = await serveOnRandomPort(db);
   server = served.server;
@@ -41,11 +41,11 @@ afterAll(async () => {
 
 const sql = () => (store as unknown as { sql: Parameters<typeof recordPageBaseFee>[0] }).sql;
 
-describe("scanned PDF pages OCR'd by Kreuzberg", () => {
+describe("scanned PDF pages OCR'd by the PDF engine", () => {
   it("bills 3 OCR'd pages Rich and the other 2 Fast, once, across a retry", async () => {
     const attempt = async () => {
       const state = WorkflowState.create(await store.loadRun("scan"), []);
-      for (const pageNumber of [2, 3, 5]) state.usageLedger.chargeRichPage({ documentId: "scan-pdf", pageNumber, readBy: "pdf-ocr", model: "kreuzberg" });
+      for (const pageNumber of [2, 3, 5]) state.usageLedger.chargeRichPage({ documentId: "scan-pdf", pageNumber, readBy: "pdf-ocr", model: "native-pdf" });
       const batch = state.usageLedger.checkpoint();
       await persistRunUsageEvents({ client: sql(), state, usageEvents: batch.events });
       batch.commit();

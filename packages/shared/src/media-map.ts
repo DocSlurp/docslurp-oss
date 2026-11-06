@@ -165,6 +165,37 @@ export const mediaMapMarkdownSchema = z.strictObject({
 });
 
 /** An entry in `document/media-map`: the validated facts plus the host's classification, route and artifact link. */
+const quarterTurn = z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]);
+const unitInterval = z.number().finite().min(0).max(1);
+
+/**
+ * What an image orientation provider decided for one image. Provider output is untrusted: every field is bounded, and
+ * the host additionally requires `model` to equal the provider's id.
+ */
+export const orientationResultSchema = z.strictObject({
+  model: slug,
+  modelSha256: z.string().regex(/^[0-9a-f]{64}$/),
+  status: z.enum(["upright", "uncertain", "corrected"]),
+  inputClockwiseDegrees: quarterTurn,
+  correctionClockwiseDegrees: quarterTurn,
+  confidence: unitInterval,
+  margin: unitInterval,
+  width: int(1, 65_535),
+  height: int(1, 65_535),
+  sourceWidth: int(1, 65_535),
+  sourceHeight: int(1, 65_535),
+  exifOrientation: int(0, 8),
+  exifApplied: z.boolean(),
+  mimeType: z.literal("image/png"),
+});
+export type OrientationResultRecord = z.infer<typeof orientationResultSchema>;
+
+/** An image's orientation in the media map: the provider's validated result, or why the stage skipped it. */
+export const mediaMapOrientationSchema = z.union([
+  orientationResultSchema.extend({ artifactId: z.string().min(1).max(512).optional() }),
+  z.strictObject({ status: z.enum(["skipped-route", "skipped-limit", "skipped-linked-mask"]) }),
+]);
+
 export const mediaMapImageSchema = z.strictObject({
   pageNumber: int(1, 100_000),
   occurrence: int(0, 511),
@@ -184,7 +215,7 @@ export const mediaMapImageSchema = z.strictObject({
   route: imageRouteSchema,
   markdown: mediaMapMarkdownSchema,
   /** Present only when the orientation stage ran for this asset. */
-  orientation: z.unknown().optional(),
+  orientation: mediaMapOrientationSchema.optional(),
 });
 export type MediaMapImage = z.infer<typeof mediaMapImageSchema>;
 

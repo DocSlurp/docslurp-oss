@@ -12,7 +12,7 @@ import {
 import type { Document } from "../models.js";
 import type { WorkflowState } from "./pipeline.js";
 
-type FeatureDocument = Pick<Document, "id" | "pageCount"> & Partial<Pick<Document, "billingPages" | "billingPagesMethod">>;
+type FeatureDocument = Pick<Document, "id" | "pageCount"> & Partial<Pick<Document, "billingPages" | "billingPagesMethod" | "pageCountSource">>;
 
 const CJK_RE = /[぀-ヿ㐀-䶿一-鿿가-힯豈-﫿ｦ-ﾟ]/gu;
 
@@ -40,19 +40,33 @@ export function textPagesOfText(text: string): number {
  * Pages an optional feature is priced on: the document's billed pages (the worker's measured count for an Office, slide, sheet or EPUB
  * file, else the page basis), or for a media file its Rich-equivalent pages (minutes x factor, recorded by the media stage).
  *
- * `textPages` is how much text the document holds, when the stage knows it. A count from a layout conversion (LibreOffice's pages of a
- * Word file) is capped by it: a document of thousands of blank pages is thousands of pages of base fee, but a feature reads only text,
- * so it never bills more pages than the text holds.
+ * `textPages` is how much text the document holds, when the stage knows it. A count the worker measured (a sheet's rows, the text
+ * rule over the extractor's Markdown, or an older layout or chapter count) is capped by it: a document of thousands of blank pages is thousands
+ * of pages of base fee, but a feature reads only text, so it never bills more pages than the text holds. Slides are the exception:
+ * a slide is a page whatever it holds. A count guessed from the file's size (`size-estimate`) never prices a feature: it bills the
+ * text the stage read, or nothing when that is unknown. Only measured counts price a feature (documentFeaturePages): an assumed
+ * page count never does.
  */
 export function featurePages(state: WorkflowState, document: FeatureDocument, options: { textPages?: number } = {}): number {
   const media = Number(state.artifactLedger.read(`media-charge:${document.id}`));
   if (Number.isFinite(media) && media > 0) return media;
-  const billed = Math.max(1, Number(document.billingPages) || Number(document.pageCount) || 0);
+  return documentFeaturePages(document, options);
+}
+
+/** featurePages for a paged (non-media) document, for callers outside a run (the graph rebuild job). */
+export function documentFeaturePages(document: Omit<FeatureDocument, "id">, options: { textPages?: number } = {}): number {
+  // Measured counts only, as the page fee (db/page-base-fee.ts): the worker's billing_pages (0 for a file that measured empty),
+  // else a page count recorded `counted`. An assumed count (an intake estimate) prices no feature.
+  const measuredPages = document.billingPages !== null && document.billingPages !== undefined && Number.isFinite(Number(document.billingPages))
+    ? Math.max(0, Math.floor(Number(document.billingPages)))
+    : document.pageCountSource === "counted" ? Math.max(1, Math.floor(Number(document.pageCount)) || 1) : 0;
+  if (measuredPages === 0) return 0;
+  const method = document.billingPagesMethod ?? null;
   const textPages = options.textPages;
-  if (document.billingPagesMethod === "pdf-conversion" && textPages !== undefined && Number.isFinite(textPages)) {
-    return Math.max(1, Math.min(billed, Math.floor(textPages)));
-  }
-  return billed;
+  const knownText = textPages !== undefined && Number.isFinite(textPages);
+  if (method === "size-estimate") return knownText ? Math.max(1, Math.floor(textPages)) : 0;
+  if (method !== null && method !== "slides" && knownText) return Math.max(1, Math.min(measuredPages, Math.floor(textPages)));
+  return measuredPages;
 }
 
 /**
@@ -84,7 +98,7 @@ function raiseFeatureCharge(state: WorkflowState, document: FeatureDocument, fea
 }
 
 /**
- * Charge one optional per-document feature (PRICE_CARD: summary, structured
+ * Charge one optional per-document feature (pricing provider: summary, structured
  * fields, knowledge graph, propositions) once per document per run. Called by
  * the feature's stage after it actually did the work, so a partial reprocess
  * that skips the stage pays nothing for it. The id makes a retried checkpoint

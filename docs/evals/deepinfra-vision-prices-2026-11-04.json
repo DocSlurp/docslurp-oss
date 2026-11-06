@@ -1,0 +1,19 @@
+{
+  "source": "https://api.deepinfra.com/models/list",
+  "retrieved": "2026-11-04",
+  "note": "Raw pricing fields of the DeepInfra listing for vision routes the catalog prices from DeepInfra (cents per token).",
+  "models": [
+    {
+      "model_name": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+      "type": "text-generation",
+      "max_tokens": 262144,
+      "pricing": {
+        "type": "tokens",
+        "cents_per_input_token": 0.000015,
+        "cents_per_output_token": 0.00006,
+        "rate_per_service_tier_priority": 1.5,
+        "rate_per_service_tier_flex": 0.8
+      }
+    }
+  ]
+}

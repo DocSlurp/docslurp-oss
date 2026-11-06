@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../db.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../db.js")>(), sql: vi.fn() }));
 
-import { assertSessionReplayable, createSessionIdempotently, type DirectSessionIdempotencyDeps } from "../services/direct-session-idempotency.js";
+import { assertSessionReplayable, assertSessionProjectStillContributable, createSessionIdempotently, type DirectSessionIdempotencyDeps } from "../services/direct-session-idempotency.js";
 import { hashIdempotencyPayload, IdempotencyConflictError, parseIdempotencyKey, scopedIdempotencyKey } from "../services/idempotency.js";
 
 /** An in-memory idempotency cache and an uncontended lock, with the cache keyed exactly as the real one (key + route). */
@@ -217,5 +217,29 @@ describe("assertSessionReplayable", () => {
 
   it.each(["failed", "aborted"])("says a %s session cannot be resumed instead of returning it without upload URLs", (status) => {
     expect(() => assertSessionReplayable({ ...session, status }, caller)).toThrowError(expect.objectContaining({ statusCode: 409, code: "upload_session_closed" }));
+  });
+});
+
+describe("assertSessionProjectStillContributable", () => {
+  it("refuses the replay with 403 once the user may no longer upload into the session's project", async () => {
+    const mayContribute = vi.fn(async () => false);
+    await expect(assertSessionProjectStillContributable({ project_id: "w" }, "u", mayContribute)).rejects.toMatchObject({ statusCode: 403 });
+    expect(mayContribute).toHaveBeenCalledWith("w", "u");
+    await expect(assertSessionProjectStillContributable({ project_id: "w" }, "u", async () => true)).resolves.toBeUndefined();
+  });
+
+  it("a replay whose describe refuses returns no session and creates none", async () => {
+    const { deps } = memoryDeps();
+    const create = vi.fn(async () => ({ sessionId: "s1" }));
+    let revoked = false;
+    const describe = vi.fn(async (sessionId: string) => {
+      await assertSessionProjectStillContributable({ project_id: "w" }, "u", async () => !revoked);
+      return { sessionId, files: [{ uploadUrl: "https://signed" }] };
+    });
+    const args = { key: "k", scope: { orgId: "o", userId: "u" }, request: {}, create, describe };
+    await createSessionIdempotently(args, deps);
+    revoked = true;
+    await expect(createSessionIdempotently(args, deps)).rejects.toMatchObject({ statusCode: 403 });
+    expect(create).toHaveBeenCalledTimes(1);
   });
 });

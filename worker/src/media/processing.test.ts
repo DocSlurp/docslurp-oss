@@ -103,7 +103,7 @@ describe("durable media request execution", () => {
     const hour = { bytes: new Uint8Array([1]), durationSeconds: 3600, format: "mp3" as const };
     await transcribeChunk({ ...f, provider: diar, input: hour, metric: "media-diarization" });
     const reserved = vi.mocked(f.journal.admit).mock.calls[0][0].reserveCents;
-    // Customers pay per audio minute (PRICE_CARD), charged with the transcription; diarization holds a token reserve.
+    // Customers pay per audio minute (pricing provider), charged with the transcription; diarization holds a token reserve.
     expect(reserved).toBeCloseTo(0.001, 9);
     vi.spyOn(asr, "transcribe").mockResolvedValue({ text: "", segments: [], costUsd: .012, costSource: "estimate" });
     await transcribeChunk({ ...f, provider: asr, input: { ...hour, bytes: new Uint8Array([2]) }, offset: 3600 });

@@ -72,8 +72,8 @@ describe("sandbox command construction", () => {
     const sourcePath = path.join(tempProject, "sample.pdf");
     const spec = command({
       plan: {
-        binary: "node",
-        args: ["kreuzberg_extract.mjs", "--input", sourcePath, "--output", `${sourcePath}.kreuzberg.md`],
+        binary: "python3",
+        args: ["office_markdown.py", "--kind", "pptx", "--input", sourcePath, "--output", `${sourcePath}.pptx.md`],
         available: true,
       },
     });
@@ -101,6 +101,21 @@ describe("sandbox command construction", () => {
       rmSync(project, { recursive: true, force: true });
       rmSync(outside, { recursive: true, force: true });
     }
+  });
+
+  it("stages signature files for directory-based health checks without writable input access", () => {
+    const project = mkdtempSync(path.join(tmpdir(), "docslurp-signatures-test-"));
+    try {
+      const signature = path.join(project, "daily.cvd");
+      writeFileSync(signature, "synthetic signature header");
+      const spec = command({ plan: { binary: "clamscan", args: ["--database", project, "--version"], available: true, stagedInputs: [signature], readOnlyInputs: true } });
+      expect(spec.inputPaths).toEqual([signature]);
+      expect(spec.writablePaths).toEqual([]);
+    } finally { rmSync(project, { recursive: true, force: true }); }
+  });
+
+  it("refuses auxiliary inputs outside private staging", () => {
+    expect(() => command({ plan: { ...samplePlan, stagedInputs: ["/etc/passwd"] } })).toThrow(/Auxiliary parser inputs/);
   });
 
   it("does not infer a writable checkout from scripts in a temporary worktree", () => {

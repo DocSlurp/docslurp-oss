@@ -515,3 +515,56 @@ describe("API-key run reads", () => {
   });
 
 });
+
+describe("runsRoutes operator redaction", () => {
+  const workerStats = { pagesPerMinute: 12, cpuUserMs: 900, rssBytes: 4096, workerClass: "large", region: "iad", nested: { peakRssMb: 3, regionBoxes: [1] } };
+  function sessionApp(isAdmin: boolean) {
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("sessionUser", { id: "user-1", email: "user@example.com", name: "Test User", isAdmin } as never);
+      await next();
+    });
+    return app.route("/runs", runsRoutes);
+  }
+  const leaks = (text: string) => /cpuUserMs|rssBytes|workerClass|"region"|peakRssMb/.test(text);
+  beforeEach(() => {
+    listRunsMock.mockReset();
+    listRunsPageMock.mockReset();
+    listenForRunEventsMock.mockReset();
+    getRunMock.mockReset();
+    listRunsMock.mockResolvedValue([{ id: "run-1", orgId: "org-1", stats: workerStats }]);
+    listRunsPageMock.mockResolvedValue({ runs: [{ id: "run-1", orgId: "org-1", stats: workerStats }], hasMore: false, nextCursor: null });
+  });
+
+  it.each(["/runs", "/runs?activity=true"])("strips worker diagnostics from %s for a non-operator, keeps the customer's numbers", async (path) => {
+    const body = await (await sessionApp(false).request(path)).text();
+    expect(leaks(body)).toBe(false);
+    expect(body).toContain('"pagesPerMinute":12');
+    expect(body).toContain('"regionBoxes":[1]');
+    expect(leaks(await (await sessionApp(true).request(path)).text())).toBe(true);
+  });
+
+  it("strips worker diagnostics from the activity stream's runs and events for a non-operator", async () => {
+    const close = vi.fn().mockResolvedValue(undefined);
+    listenForRunEventsMock.mockResolvedValue({ close });
+    getRunMock.mockResolvedValue({ id: "run-1", orgId: "org-1", stats: workerStats });
+    const response = await sessionApp(false).request("/runs/activity/stream");
+    const reader = response.body!.getReader();
+    const read = async () => new TextDecoder().decode((await reader.read()).value);
+    const inventory = await read();
+    expect(inventory).toContain('"id":"run-1"');
+    expect(leaks(inventory)).toBe(false);
+    await read(); // heartbeat
+    const notify = listenForRunEventsMock.mock.calls[0][0];
+    const delta = notify({ id: "ev-1", runId: "run-1", type: "run.heartbeat", stats: workerStats, payload: { rssBytes: 1, workerId: "w-1" }, progress: { machineId: "m" } });
+    const run = await read();
+    const event = await read();
+    await delta;
+    expect(run).toContain("event: activity-run");
+    expect(event).toContain("ev-1");
+    expect(leaks(run + event)).toBe(false);
+    expect(event).not.toMatch(/workerId|machineId/);
+    await reader.cancel();
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce(), { timeout: 5000 });
+  });
+});

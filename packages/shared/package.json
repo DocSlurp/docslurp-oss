@@ -85,6 +85,10 @@
     "./project-chat-ui": {
       "types": "./dist/project-chat-ui.d.ts",
       "import": "./dist/project-chat-ui.js"
+    },
+    "./pricing-loader": {
+      "types": "./dist/pricing-loader.d.ts",
+      "import": "./dist/pricing-loader.js"
     }
   },
   "files": [

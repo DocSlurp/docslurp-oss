@@ -1136,8 +1136,8 @@ async function answerScopeDecline(input: {
 }
 
 /**
- * Bill one chat answer at its model tier (PRICE_CARD.chatAnswerTiers), counted
- * once more per started 100k total tokens. Only the turn's own answer is
+ * Bill one chat answer at its model tier, as many answer units as the pricing
+ * provider counts for its total tokens. Only the turn's own answer is
  * billed (a nested grounded answer inside the agent's tools is part of it), and
  * it is written inside the chat turn, so an answer that never reaches the
  * client is refunded with the turn (chat-turn-billing.ts). Model tokens and

@@ -52,15 +52,21 @@ function readShape(shape: NumericShape): Partial<Record<NumberLocale, number>> {
   return readNumber(shape.body);
 }
 
+/** Longest cell read as a number, percentage, currency or date; longer cells are text and reach no regex (council K #3 audit). */
+const TYPED_CELL_MAX_CHARS = 64;
+
 function numericShape(value: string): NumericShape | null {
+  if (value.length > TYPED_CELL_MAX_CHARS * 4) return null;
   let text = value.trim();
+  if (text.length > TYPED_CELL_MAX_CHARS) return null;
   let negative = false;
   const parenthesized = text.match(/^\((.*)\)$/s);
   if (parenthesized) { negative = true; text = parenthesized[1]!.trim(); }
   const sign = text.match(/^([+\-−])\s*(.*)$/s);
   if (sign) { negative = negative || sign[1] !== "+"; text = sign[2]!; }
 
-  const percent = text.match(/^(\d[\d.,'   ]*?)\s*%$/);
+  // A percentage is short; the lazy body and \s* overlap, so longer cells never reach the regex (council K #3 audit).
+  const percent = text.length <= TYPED_CELL_MAX_CHARS ? text.match(/^(\d[\d.,'   ]*?)\s*%$/) : null;
   if (percent) return { kind: "percentage", negative, body: percent[1]! };
 
   const currency =
@@ -95,7 +101,9 @@ type DateReading = { fixed: string } | { numeric: [number, number, number]; orde
 
 /** A date's readings: fixed when its text is unambiguous, else one reading per day/month order it fits. */
 function readDate(value: string): DateReading | null {
+  if (value.length > TYPED_CELL_MAX_CHARS * 4) return null;
   const text = value.trim();
+  if (text.length > TYPED_CELL_MAX_CHARS) return null;
   let m = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/);
   if (!m) m = text.match(/^(\d{4})[/.](\d{1,2})[/.](\d{1,2})$/);
   if (m) {

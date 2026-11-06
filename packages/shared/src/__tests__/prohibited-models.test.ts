@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { HOSTED_EQUIVALENT_REFERENCES } from "../billing.js";
 import { CHAT_MODEL_PRICES_USD_PER_MTOK } from "../chat-model-prices.js";
 import {
   DEFAULT_OPENROUTER_VISION_MODEL,
@@ -43,7 +42,6 @@ function selectableModelIds(): Map<string, string> {
     if (profile.config.modelUri) add(modelIdOfUri(profile.config.modelUri), `visionProfileCatalog.${key}`);
   }
   for (const [key, profile] of Object.entries(embeddingProfileCatalog)) add(modelIdOfUri(profile.config.modelUri), `embeddingProfileCatalog.${key}`);
-  for (const reference of Object.values(HOSTED_EQUIVALENT_REFERENCES)) add(reference.model, "HOSTED_EQUIVALENT_REFERENCES");
   for (const entry of defaultAiUsagePricingCatalog) add(entry.model, "defaultAiUsagePricingCatalog");
   const routing = buildRoutingTargetCatalog({ prices: registry, visionCatalog: visionModelCatalog, env: everyEnv });
   for (const target of routing.targets) if (target.ref.modelUri) add(modelIdOfUri(target.ref.modelUri), `page router ${target.id}`);

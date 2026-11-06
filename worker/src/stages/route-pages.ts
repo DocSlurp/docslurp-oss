@@ -32,7 +32,6 @@ import { isCostCapExceeded, runDocumentStage, runDocuments, runSpentCents } from
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { buildPageInputs, createProbeRunner, parseProbeOutput, type ProbeRunner } from "../routing/page-input.js";
-import { sandboxedTesseract } from "../routing/probe/ocr-layer.js";
 import { readRoutingFlags, type TableGateMode } from "../routing/flags.js";
 import { PAGE_ROUTE_TABLE_GATE_METRIC, runTableGateShadow } from "../routing/gates/shadow.js";
 import { createInsetGate, type InsetGate } from "../routing/inset-gate.js";
@@ -71,6 +70,7 @@ import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 
 import { assertCompleteActivePlan, assertSupportedActiveMargin } from "../routing/active-plan.js";
+import { sniffedPdf } from "../lib/sniffed-pdf.js";
 
 export const PAGE_ROUTE_DECISION_METRIC = "page-route-decision";
 export const PAGE_ROUTE_CHUNK_ESTIMATE_METRIC = "page-route-chunk-estimate";
@@ -175,7 +175,7 @@ export class RoutePagesStage implements Stage {
         `${document.id}:${PAGE_ROUTE_PLAN_SLOT}`,
         "page route plan ready",
         async () => {
-          if (document.mimeType !== "application/pdf") {
+          if (!sniffedPdf(document)) {
             return { stats: { skipped: true, reason: "unsupported-format", mode } };
           }
           try {
@@ -229,9 +229,11 @@ export class RoutePagesStage implements Stage {
         thumbPx: settings.tilePx,
         routing,
         documentFormat: "pdf",
-        // TL1: OCR-layer pages are verified against a band re-OCR (about 1 s CPU, OCR-layer pages only).
-        verifyOcrLayer: true,
-        recognise: this.runner ? sandboxedTesseract(this.runner) : undefined,
+        // TL1: OCR-layer agreement is off until its threshold is re-tuned for the PP-OCR recogniser
+        // (routing/probe/ocr-layer.ts). With no recogniser the probe would only render pages on the host for nothing,
+        // so OCR-layer pages stay unverified and nothing is rendered for it.
+        verifyOcrLayer: false,
+        recognise: undefined,
         probe: this.deps.probe ?? createProbeRunner(),
         signal,
       });

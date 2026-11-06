@@ -24,7 +24,9 @@ import {
   effectiveVisionBaseUrl,
   findVisionServedRoute,
   isBilledVisionRoute,
+  isDeepInfraVisionBaseUrl,
   isOpenRouterBaseUrl,
+  readDeepInfraVisionCharge,
   UnpricedVisionRouteError,
   VISION_MAX_PROMPT_BYTES,
   visionImageTokenBound,
@@ -68,6 +70,7 @@ import {
   inferModelTarget,
   type PrivacyMode,
   OPENROUTER_BASE_URL,
+  DEEPINFRA_VISION_BASE_URL,
   resolveVisionRoute,
   type VisionConfig,
   type VisionExecutionConfig,
@@ -463,12 +466,16 @@ function readBoolean(value: string | undefined, fallback: boolean): boolean {
 }
 
 /**
- * The key a vision request carries: the OpenRouter key only to the official OpenRouter endpoint, the OpenAI key
- * only to the configured OpenAI base URL, and no key anywhere else (loopback servers, local runtimes).
+ * The key a vision request carries: the OpenRouter key only to the official OpenRouter endpoint, the DeepInfra key
+ * only to DeepInfra's official OpenAI-compatible endpoint, the OpenAI key only to the configured OpenAI base URL,
+ * and no key anywhere else (loopback servers, local runtimes).
  */
-function resolveVisionApiKey(billing: VisionRouteBilling, baseUrl: string | null, cfg: Config): string {
+export function resolveVisionApiKey(billing: VisionRouteBilling, baseUrl: string | null, cfg: Pick<Config, "openRouterApiKey" | "openAiApiKey" | "deepInfraApiKey">): string {
   if (billing === "openrouter") {
     return baseUrl?.replace(/\/+$/, "") === OPENROUTER_BASE_URL ? cfg.openRouterApiKey : "";
+  }
+  if (billing === "deepinfra") {
+    return baseUrl?.replace(/\/+$/, "") === DEEPINFRA_VISION_BASE_URL ? cfg.deepInfraApiKey ?? "" : "";
   }
   if (billing === "openai") return cfg.openAiApiKey;
   return "";
@@ -697,6 +704,8 @@ export async function runVisionRequest(args: {
         inputTokenEstimate: estimateTokens(args.prompt) + VISION_IMAGE_TOKEN_ESTIMATE,
         // Profiles that measured a refusal-free route send refused or filtered pages there on the single retry.
         preferredRetryRoute: contentFilterRetryProvider(args.model),
+        // DeepInfra reports its charge as `usage.estimated_cost`; every other route reads `usage.cost`.
+        ...(isDeepInfraVisionBaseUrl(args.baseUrl) ? { providerCharge: (usage: unknown) => readDeepInfraVisionCharge(args.model, usage) } : {}),
         gate: args.gate,
       });
       const text = postProcessVisionText(args.model, result.text);

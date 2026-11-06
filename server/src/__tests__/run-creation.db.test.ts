@@ -1,3 +1,4 @@
+import { pageCredits } from "@docslurp/shared";
 import postgres from "postgres";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultPipelineFeatures } from "@docslurp/shared";
@@ -81,7 +82,7 @@ const docxFacts = {
 };
 
 describe("the cost forecast and the page count's source", () => {
-  it("records an Office file's one page as assumed and prices its size, not one page; a PDF's own count stays counted", async () => {
+  it("records an Office file's and a PDF's intake count as assumed and prices their size, never the API's page count", async () => {
     const forecastOf = async (filename: string, mimeType: string, facts: object, pageCount: number, fileSize: number) => {
       await sql`delete from documents`;
       await sql`delete from project_runs`;
@@ -93,17 +94,18 @@ describe("the cost forecast and the page count's source", () => {
     // A 1.2 MB DOCX: intake counts 1 page, which is assumed, not counted.
     const docx = await forecastOf("contract.docx", docxFacts.mimeType, docxFacts, 1, 1_200_000);
     expect(docx.row).toEqual({ page_count: 1, page_count_source: "assumed" });
-    // The same size as a PDF that really has 1 page is counted, and priced as one page.
-    const onePage = await forecastOf("memo.pdf", "application/pdf", pdfFacts, 1, 1_200_000);
-    expect(onePage.row).toEqual({ page_count: 1, page_count_source: "counted" });
     // The assumed count is not passed to the forecast, so the DOCX is priced over its size (about 100 pages at the format's
     // 12 KB a page, up to 1,171 at its densest) instead of as one page.
-    expect(onePage.forecast.maxCents).toBeLessThan(2);
-    expect(docx.forecast.maxCents).toBeGreaterThan(onePage.forecast.maxCents * 50);
-    // A 40-page PDF is counted: forecast on 40.
+    expect(docx.forecast.maxCents).toBeGreaterThan(pageCredits("fast", 100));
+    // The API never parses a PDF (no pdfinfo in its process): its count is a size estimate, recorded as assumed, and the
+    // worker measures the real count in the VM before anything bills. The forecast prices the size, so a PDF the estimate
+    // calls 1 page and one it calls 40 are quoted the same, and well above one page.
+    const onePage = await forecastOf("memo.pdf", "application/pdf", pdfFacts, 1, 1_200_000);
+    expect(onePage.row).toEqual({ page_count: 1, page_count_source: "assumed" });
     const pdf = await forecastOf("contract.pdf", "application/pdf", pdfFacts, 40, 1_200_000);
-    expect(pdf.row).toEqual({ page_count: 40, page_count_source: "counted" });
-    expect(pdf.forecast.maxCents).toBeLessThan(docx.forecast.maxCents);
+    expect(pdf.row).toEqual({ page_count: 40, page_count_source: "assumed" });
+    expect(pdf.forecast.maxCents).toBe(onePage.forecast.maxCents);
+    expect(onePage.forecast.maxCents).toBeGreaterThan(pageCredits("fast", 10));
   });
 });
 
@@ -299,6 +301,22 @@ describe("Run creation versions Documents by lineage", () => {
       source_key: "u/raw/a.pdf", extraction_mode: "hybrid",
       metadata: { author: "Ada", sourceSizeMeasured: true },
     });
+  });
+
+  it("carries the worker's measured billing pages, their method, the count's source and the file facts to the new version", async () => {
+    prepare.mockResolvedValueOnce({ pageCount: 1, sourceSha256: "docx", fileFacts: docxFacts });
+    const original = await runCreation.create({
+      ...input, sources: { kind: "files", files: [{ filename: "contract.docx", mimeType: docxFacts.mimeType, sourceKey: "u/raw/contract.docx", fileSize: 90_000 }] },
+    });
+    // The worker measured it at 300 pages; its page basis stays the one page its text splits into.
+    await sql`update documents set billing_pages = 300, billing_pages_method = 'pdf-conversion' where id = ${original.documents[0]!.id}`;
+    const copy = await runCreation.create({ ...input, sources: { kind: "versionsOf", documentIds: [original.documents[0]!.id], reuse: true } });
+    const [row] = await sql<Record<string, unknown>[]>`select page_count, billing_pages, billing_pages_method, page_count_source, file_facts
+      from documents where version_number = 2`;
+    expect(row).toEqual({ page_count: 1, billing_pages: 300, billing_pages_method: "pdf-conversion", page_count_source: "assumed", file_facts: docxFacts });
+    // The run's forecast prices the measured pages, not one page or the file's size.
+    expect(copy.run.costForecast).toBeTruthy();
+    expect(copy.run.pagesTotal).toBe(1); // progress counts the page basis the worker splits
   });
 
   it("marks reused sources only for reusing (partial) runs", async () => {

@@ -4,6 +4,7 @@ import { defaultVisionRequestWeightCents, type VisionRequestGate } from './visio
 import { imageOrientationProvider, type ImageOrientationProvider, type OrientationResult } from '../extractors/plugins.js';
 import { SandboxRunError } from '../sandbox/types.js';
 import type { UsageEvent } from '../models.js';
+import { orientationResultSchema } from '@docslurp/shared';
 
 export type { OrientationResult };
 
@@ -30,13 +31,24 @@ export async function normalizeImageOrientation(input: string, recordUsage: (eve
   try {
     const { result, usage } = await provider.orient(input, output, signal);
     if (usage) recordUsage(usage);
-    const metadata: OrientationResult = result;
+    const metadata: OrientationResult = validateOrientationResult(result, provider.id);
     return { path:output, metadata, release:() => rm(output,{force:true}) };
   } catch (error) {
     if (error instanceof SandboxRunError && error.usage) recordUsage(error.usage);
     await rm(output,{force:true});
     throw error;
   }
+}
+
+/**
+ * Provider output is untrusted: a strict, bounded record whose `model` (recorded as the derived artifact's producer id)
+ * is the provider's own id. Anything else refuses the image rather than recording what the provider claimed.
+ */
+export function validateOrientationResult(result: unknown, providerId: string): OrientationResult {
+  const parsed = orientationResultSchema.safeParse(result);
+  if (!parsed.success) throw new Error(`Image orientation provider returned an invalid result: ${parsed.error.issues.slice(0, 3).map((issue) => `${issue.path.join('.') || 'result'} ${issue.message}`).join('; ')}`);
+  if (parsed.data.model !== providerId) throw new Error('Image orientation provider result names a different model than its provider id');
+  return parsed.data;
 }
 
 /** Reserve admission before paid preprocessing; the actual VLM request is admitted separately.

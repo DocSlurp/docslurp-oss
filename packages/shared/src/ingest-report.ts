@@ -83,6 +83,10 @@ export const ingestReportFailureReasonSchema = z.enum([
   "provider_failed",
   "policy_blocked",
   "cancelled",
+  /** The PDF's page tree was walked, but the PDF reader refuses it and sees no pages (a page count claimed beyond the file). */
+  "pdf-structure-rejected",
+  /** The run stopped after its infrastructure retries ran out (sandbox, network, database): nothing was found wrong with the file. */
+  "infrastructure-retries-exhausted",
   "unknown",
 ]);
 export type IngestReportFailureReason = z.infer<typeof ingestReportFailureReasonSchema>;
@@ -95,7 +99,7 @@ export const ingestReportFailureSchema = z.object({
   reason: ingestReportFailureReasonSchema,
   /** Reviewed, user-facing explanation of the reason. */
   message: z.string(),
-  /** Short sanitized excerpt of the recorded error (no paths, URLs, secrets or stack frames); null when none was recorded. */
+  /** A reviewed phrase about the failure (publicFailureDetail), never the recorded error's text; null when none applies. */
   detail: z.string().nullable(),
   /** False when running the same file again fails the same way until something else is fixed. */
   retryable: z.boolean(),
@@ -110,7 +114,88 @@ export const ingestReportFailuresSchema = z.object({
 });
 export type IngestReportFailures = z.infer<typeof ingestReportFailuresSchema>;
 
-export const INGEST_REPORT_FAILURE_DETAIL_MAX = 160;
+/** Why an extractor tried for a file did not serve it: public codes only, never error text. */
+export const ingestReportExtractorFallbackReasonSchema = z.enum(["unavailable", "failed", "timeout", "low-quality"]);
+export type IngestReportExtractorFallbackReason = z.infer<typeof ingestReportExtractorFallbackReasonSchema>;
+
+const extractorId = z.string().regex(/^[a-z0-9][a-z0-9-]{0,39}$/);
+
+/**
+ * A file that completed with a fallback extractor: the one wanted (first tried) failed, timed out or returned output rejected
+ * as low quality, and another served it. The file looks like a success, so the report says what it is missing.
+ */
+export const ingestReportExtractionWarningSchema = z.object({
+  documentId: z.string(),
+  filename: z.string(),
+  wantedExtractor: extractorId,
+  servedExtractor: extractorId,
+  reasons: z.array(z.object({ extractor: extractorId, reason: ingestReportExtractorFallbackReasonSchema })).max(16),
+  /** Reviewed, user-facing explanation. */
+  message: z.string(),
+});
+export type IngestReportExtractionWarning = z.infer<typeof ingestReportExtractionWarningSchema>;
+
+export const ingestReportExtractionWarningsSchema = z.object({
+  total: count,
+  /** Up to 20 files, newest first. */
+  examples: z.array(ingestReportExtractionWarningSchema),
+});
+
+/**
+ * Files with pages whose extracted text counts as more than DENSE_PAGE_EQUIVALENTS pages (page-equivalents.ts): text that is
+ * tiny, invisible, outside the visible page or layered, or simply very dense. It is indexed and billed by its volume; it is
+ * reported because hidden text is also a prompt-injection and search-stuffing vector.
+ */
+export const ingestReportDenseTextSchema = z.object({
+  total: count,
+  /** Up to 20 files, with up to 50 of their dense pages. */
+  examples: z.array(z.object({
+    documentId: z.string(),
+    filename: z.string(),
+    densePages: z.array(count),
+    densePageCount: count,
+    /** The file's measured page equivalents. */
+    pageEquivalents: count,
+  })),
+});
+export type IngestReportDenseText = z.infer<typeof ingestReportDenseTextSchema>;
+
+/**
+ * Files whose PDF reader extracted fewer pages than the page tree holds (its page tree is inconsistent, for example a page
+ * count that under-claims its pages): only the extracted pages are searchable and billed. Public reason code only.
+ */
+export const ingestReportPartialExtractionSchema = z.object({
+  total: count,
+  /** Up to 20 files. */
+  examples: z.array(z.object({
+    documentId: z.string(),
+    filename: z.string(),
+    reason: z.literal("pdf-partially-extracted"),
+    pagesExtracted: count,
+    pagesInFile: count,
+    /** Reviewed, user-facing explanation (partialExtractionMessage). */
+    message: z.string(),
+  })),
+});
+export type IngestReportPartialExtraction = z.infer<typeof ingestReportPartialExtractionSchema>;
+
+/** The warning for a partially extracted PDF: N of M pages, why, and what was billed. Never tool text. */
+export function partialExtractionMessage(extracted: number, inFile: number): string {
+  return `Only ${extracted} of this PDF's ${inFile} pages could be extracted because its page structure is inconsistent. Only the extracted pages are searchable and billed; re-save or re-export the PDF to recover the rest.`;
+}
+
+const FALLBACK_COPY: Record<IngestReportExtractorFallbackReason, string> = {
+  unavailable: "was not available on the processing server",
+  failed: "failed on this file",
+  timeout: "timed out on this file",
+  "low-quality": "returned too little usable text",
+};
+
+/** The reviewed message for a fallback: what was wanted, why it did not serve, and what served instead. */
+export function extractionWarningMessage(wanted: string, served: string, reason: IngestReportExtractorFallbackReason): string {
+  return `The ${wanted} extractor ${FALLBACK_COPY[reason]}, so ${served} read this file instead. Its text may lack headings, tables or layout the preferred extractor keeps; reprocess it once the cause is fixed.`;
+}
+
 
 const FAILURE_COPY: Record<IngestReportFailureReason, { message: string; retryable: boolean }> = {
   ocr_unavailable: {
@@ -124,18 +209,43 @@ const FAILURE_COPY: Record<IngestReportFailureReason, { message: string; retryab
   provider_failed: { message: "An AI provider call failed or was rate-limited while processing this file.", retryable: true },
   policy_blocked: { message: "Project or server policy (privacy mode, spend cap or PII rules) stopped processing this file.", retryable: false },
   cancelled: { message: "Processing of this file was cancelled.", retryable: true },
+  "pdf-structure-rejected": {
+    message: "This PDF's internal page structure is inconsistent, so its pages could not be read. Nothing was charged for it. Re-save or re-export the PDF and upload it again.",
+    retryable: false,
+  },
+  "infrastructure-retries-exhausted": {
+    message: "Processing stopped after repeated failures on our side, not because of this file. Upload it again to retry.",
+    retryable: true,
+  },
   unknown: { message: "Processing failed and the cause was not recorded.", retryable: true },
 };
 
 /** Most specific, least recoverable causes first: an OCR crash arrives wrapped in "no extractor produced output". */
+/** The worker's fixed refusal text for a PDF its reader rejects after the page tree was walked (lib/pdf-page-count.ts). */
+const PDF_STRUCTURE_REJECTED_TEXT = "PDF structure rejected";
+/**
+ * The marker the worker writes on a document whose run stopped after its infrastructure retries ran out (store.failRun):
+ * the document's public reason is then "infrastructure-retries-exhausted", whatever raw run error follows it.
+ */
+export const INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT = "Infrastructure retries exhausted";
+
 const FAILURE_PATTERNS: Array<[IngestReportFailureReason, RegExp]> = [
-  ["ocr_unavailable", /tessdata|traineddata|tesseract|leptonica|\bocr\b.*(?:unavailable|not (?:installed|found|available)|failed to (?:init|load))/i],
+  // First: its text also says "PDF", "page" and "structure", which later patterns would claim.
+  ["pdf-structure-rejected", new RegExp(PDF_STRUCTURE_REJECTED_TEXT)],
+  // Before every cause pattern: the raw run error that follows the marker would match one of them.
+  ["infrastructure-retries-exhausted", new RegExp(`^${INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT}`)],
+  // Current OCR (sandboxed VM provider) failures, plus the markers of the retired local OCR engine: stage errors stored
+  // before the cutover keep that text, and reports over those runs must still say OCR was unavailable.
+  ["ocr_unavailable", /model-refused|DOCSLURP_OCR_MODE|OCR provider plugin|tessdata|traineddata|tesseract|leptonica|\bocr\b.*(?:unavailable|refused|is off|not (?:installed|found|available)|failed to (?:init|load))/i],
   ["unsupported_format", /unsupported (?:file|format|media|mime|content)|(?:unknown|unrecognized|unrecognised) (?:file )?(?:format|type)|no (?:parser|handler) (?:for|available for)/i],
-  ["unreadable_file", /password|encrypted|corrupt|truncated|malformed|damaged|invalid (?:pdf|zip|xref|header|image)|cross-reference|xref|not a valid|bad (?:zip|header)|unexpected end of file|premature end/i],
+  ["unreadable_file", /password[- ]protected|requires? a password|(?:incorrect|wrong|missing) password|\bencrypted\b|corrupt|truncated|malformed|damaged|invalid (?:pdf|zip|xref|header|image)|cross-reference|xref|not a valid|bad (?:zip|header)|unexpected end of file|premature end/i],
   ["timeout", /timed? ?out|timeout|deadline exceeded|ETIMEDOUT/i],
   ["policy_blocked", /privacy mode|local-only|strict-privacy|cost cap|spend cap|maxCostCents|budget|\bpii\b|policy/i],
   ["provider_failed", /rate.?limit|\b429\b|\bprovider\b|openrouter|upstream|overloaded|quota|\b50[0234]\b/i],
   ["extractor_failed", /no extractor produced output|extractor/i],
+  // A converter that is missing or did not start (an executable absent from the image, a plan marked unavailable): the
+  // extractor could not run at all.
+  ["extractor_failed", /\b(?:unavailable|not installed|not found on PATH|command not found|missing (?:binary|converter|executable))\b|spawn \S+ ENOENT|\bENOENT\b.*\bspawn\b|exited with (?:code )?127\b/i],
 ];
 
 /** Maps a stored worker error (and the document status) to a reason and reviewed copy. Never echoes the raw text. */
@@ -151,25 +261,25 @@ export function classifyIngestFailure(error: string | null | undefined, document
 }
 
 /**
- * A short excerpt of a stored error that is safe to show: first line only, no
- * stack frames, filesystem paths, URLs (including connection strings), e-mail
- * addresses or credential-looking values. Null when nothing remains.
+ * Reviewed detail phrases a failure may show, matched against the stored error; the stored text itself never reaches users
+ * (it goes to telemetry). First match wins.
  */
-export function sanitizeFailureDetail(error: string | null | undefined): string | null {
+const PUBLIC_FAILURE_DETAILS: ReadonlyArray<[RegExp, string]> = [
+  [/password[- ]protected|requires? a password|(?:incorrect|wrong|missing) password|\bencrypted\b/i, "The file is password-protected or encrypted."],
+  [/truncated|unexpected end of file|premature end/i, "The file appears to be truncated."],
+  [/corrupt|damaged|malformed|cross-reference|\bxref\b|bad (?:zip|header)|not a valid/i, "The file's internal structure is damaged."],
+  [/too large|exceed(?:s|ing|ed)? (?:the )?(?:\d|max|limit|size)|byte limit/i, "The file exceeds a processing size limit."],
+  [/timed? ?out|timeout|deadline exceeded/i, "Processing took longer than its time limit."],
+  [/unsupported (?:file|format|media|mime|content)|no (?:parser|handler)/i, "This file format is not supported."],
+];
+
+/**
+ * A reviewed phrase describing a stored failure, or null. Never an excerpt: stored errors can carry credentials, paths,
+ * hostnames and provider text in any form (JSON, query strings, headers), so only the allowlisted phrases above are shown.
+ */
+export function publicFailureDetail(error: string | null | undefined): string | null {
   if (!error) return null;
-  const line = error.split(/\r?\n/).find((entry) => entry.trim() && !/^\s*at\s/.test(entry)) ?? "";
-  const cleaned = line
-    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "<url>")
-    .replace(/(?<![\w.:/-])(?:[A-Za-z]:\\|~\/|\.{0,2}\/)[^\s'"`<>|,;)\]]*/g, "<path>")
-    .replace(/\bBearer\s+\S+/gi, "Bearer <redacted>")
-    .replace(/\b(?:authorization|api[_-]?key|token|secret|password|passwd|credential)s?\s*[=:]\s*(?!<)\S+(?:\s+<redacted>)?/gi, (match) => `${match.split(/[=:]/)[0]}=<redacted>`)
-    .replace(/\b(?:sk|pk|rk|ghp|gho|xox[a-z])[-_][A-Za-z0-9_-]{8,}/g, "<redacted>")
-    .replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, "<email>")
-    .replace(/[A-Za-z0-9+/_=-]{32,}/g, "<redacted>")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!cleaned) return null;
-  return cleaned.length > INGEST_REPORT_FAILURE_DETAIL_MAX ? `${cleaned.slice(0, INGEST_REPORT_FAILURE_DETAIL_MAX - 1)}…` : cleaned;
+  return PUBLIC_FAILURE_DETAILS.find(([pattern]) => pattern.test(error))?.[1] ?? null;
 }
 
 export const ingestReportConfigItemSchema =z.object({
@@ -299,6 +409,12 @@ export const ingestReportSchema = z.object({
   }),
   /** Files that failed, why, and at which stage. Defaults to none for reports stored before this field existed. */
   failures: ingestReportFailuresSchema.default({ total: 0, byReason: [], examples: [] }),
+  /** Files that completed with a fallback extractor. Defaults to none for reports stored before this field existed. */
+  extractionWarnings: ingestReportExtractionWarningsSchema.default({ total: 0, examples: [] }),
+  /** Files with pages holding many pages of text (possible hidden or stuffed text). Defaults to none for older reports. */
+  denseText: ingestReportDenseTextSchema.default({ total: 0, examples: [] }),
+  /** PDFs extracted short of their page tree (`pdf-partially-extracted`). Defaults to none for older reports. */
+  partialExtraction: ingestReportPartialExtractionSchema.default({ total: 0, examples: [] }),
   focus: ingestReportPageSchema.array().nullable(),
   languages: z.array(z.object({ code: z.string(), documents: count })),
   stages: z.object({

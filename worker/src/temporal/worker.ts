@@ -31,7 +31,11 @@ import { createSandboxActivityInterceptor } from "../sandbox/activity-intercepto
 import { configureSourceQuarantine, postgresSourceQuarantine } from "../sandbox/source-quarantine.js";
 import { onTeardownBreakerOpen, quarantineForceExitMs, scheduleQuarantineForceExit, workerShutdownForceMs } from "../sandbox/teardown-breaker.js";
 import { initializeParserSandbox, setDefaultParserSandbox } from "../sandbox/startup.js";
+import { loadPricingThenParserSandbox } from "./startup-order.js";
 import { loadExtractorPlugins } from "../extractors/plugins.js";
+import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
+import { ocrLanguageSettingFromEnv } from "../ocr/languages.js";
+import { assertOcrConfiguration } from "../ocr/mode.js";
 import { configureWorkerExtractorIdAliases } from "../extractors/registry.js";
 import { ArtifactStore } from "../tools/storage.js";
 import { createStages } from "../stages/index.js";
@@ -121,9 +125,18 @@ async function main(): Promise<void> {
   }
   // Live OpenRouter list prices for receipt-less usage; hardcoded tables until (or unless) they load.
   startLiveModelPriceRefresh();
-  // Fail before connecting if the parser sandbox is unavailable or violates the production policy.
-  const sandbox = await initializeParserSandbox(process.env, process.platform).catch((error) => {
-    throw new FatalWorkerError("startup", `parser sandbox unavailable: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  // The pricing provider (DOCSLURP_PRICING_PLUGIN) loads first: every charge the worker records is priced by it, including
+  // the parser sandbox probe's VM time, so it must be installed before the probe (validation N2). The service profile
+  // refuses to start without one rather than price with the open default. Its durable state (pricing_provider_state,
+  // 0131) is read-only through the worker's pool; only the operator raises it. Then fail before connecting if the parser sandbox is unavailable
+  // or violates the production policy.
+  const sandbox = await loadPricingThenParserSandbox({
+    loadPricing: () => loadPricingProvider(process.env, { durableState: pricingDurableStateFromSql(store.stageSql), sql: store.stageSql }).catch((error) => {
+      throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
+    }),
+    initializeParserSandbox: () => initializeParserSandbox(process.env, process.platform).catch((error) => {
+      throw new FatalWorkerError("startup", `parser sandbox unavailable: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    }),
   });
   // Extractor plugins named by DOCSLURP_EXTRACTOR_PLUGINS load before taking work; a missing or broken one, or a
   // configuration that selects the VM PDF extractor without a provider, refuses to start.
@@ -134,6 +147,14 @@ async function main(): Promise<void> {
   // configs that name a renamed extractor keep running. An alias to an id it cannot serve refuses to start.
   try {
     configureWorkerExtractorIdAliases(process.env);
+  } catch (error) {
+    throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
+  }
+  // OCR runs only where DOCSLURP_OCR_MODE puts it: `vm` without an OCR provider, or `local` outside a self-hosted
+  // profile, refuses to start. The operator's OCR language default must be valid codes (or auto).
+  try {
+    assertOcrConfiguration(process.env);
+    console.log(`[ocr] default language=${ocrLanguageSettingFromEnv(process.env)} (applies where documentExtraction.ocr.language is auto)`);
   } catch (error) {
     throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
   }
@@ -155,7 +176,7 @@ async function main(): Promise<void> {
   const openSession = (activityId: string) => sandbox.provider.openSession(sandbox.config, { activityId });
   const runner = new CommandRunner({ openSession, shardCalibration: createShardCalibration(store) });
   const storage = new ArtifactStore(cfg);
-  const stages = createStages({ runner, storage, config: cfg, mediaJournal: store.mediaJournal, capacityStore: store.capacityLeaseStore([]), sql: store.stageSql });
+  const stages = createStages({ runner, storage, config: cfg, mediaJournal: store.mediaJournal, capacityStore: store.capacityLeaseStore([]), sql: store.stageSql, store });
 
   // Create activity implementations with injected dependencies
   const activities = createActivities({ store, storage, stages, config: cfg, runner });

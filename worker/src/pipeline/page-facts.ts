@@ -29,6 +29,10 @@ export interface VisionPageOutcome {
     | "no-attempt-ledger"
     | "route-overrun"
     | "overrun-unreconciled"
+    /** A per-document page budget (OCR escalation); vision page reads never set one. */
+    | "document-page-limit"
+    /** A per-document attempt budget (OCR escalation); vision page reads never set one. */
+    | "document-attempt-limit"
     | "blank-render"
     /** Nominated only by drawn-content bytes and its render could not be confirmed to hold ink. */
     | "unverified-render";
@@ -47,6 +51,8 @@ export function visionStatusForOutcome(outcome: VisionPageOutcome): PageVisionSt
     case "no-attempt-ledger":
     case "route-overrun":
     case "overrun-unreconciled":
+    case "document-page-limit":
+    case "document-attempt-limit":
       return "guarded";
     case "blank-render":
     case "unverified-render":
@@ -99,15 +105,20 @@ export function wordCount(text: string): number {
 }
 
 /**
- * Splits pdftotext output on form feeds, keeping empty pages in place (unlike
- * splitTextIntoPages, which drops them). Returns null when the page count does
- * not line up, so no page gets another page's numbers.
+ * Splits form-feed-paged text into its pages, keeping empty pages in place (unlike splitTextIntoPages, which drops them).
+ * Both conventions are read, the known page count deciding: pdftotext ends every page, the last included, with a form
+ * feed; Doppler's converter, vm-pdf and native-pdf separate N pages with N-1 form feeds, so a trailing form feed is a
+ * blank last page (real-Modal finding F1: read as a terminator, that page was never OCR'd). Returns null when neither
+ * lines up, so no page gets another page's numbers.
  */
 export function splitFormFeedPages(text: string, pageCount: number): string[] | null {
-  // pdftotext ends every page, including the last, with a form feed.
   const body = text.replace(/[^\S\f]+$/, "");
-  const parts = (body.endsWith("\f") ? body.slice(0, -1) : body).split("\f");
-  return parts.length === pageCount ? parts : null;
+  if (body.endsWith("\f")) {
+    const terminated = body.slice(0, -1).split("\f");
+    if (terminated.length === pageCount) return terminated;
+  }
+  const separated = body.split("\f");
+  return separated.length === pageCount ? separated : null;
 }
 
 /**

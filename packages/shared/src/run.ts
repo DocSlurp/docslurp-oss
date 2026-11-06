@@ -332,6 +332,12 @@ export const documentSchema = z.object({
   statusReason: z.string().nullable().optional(),
   extractionMode: z.string(),
   pageCount: z.number(),
+  /**
+   * `measured`: the worker (or intake, for text and single images) counted `pageCount`. `estimated`: intake's guess from the
+   * file's size for a format only the worker can count (PDF, Office, EPUB, multi-frame images); the worker replaces it with
+   * its measured count before anything bills, and billing never reads the estimate.
+   */
+  pageCountSource: z.enum(["estimated", "measured"]).optional(),
   sourceSha256: z.string().nullable().optional(),
   dedupedFromDocumentId: z.string().nullable().optional(),
   dedupScope: z.enum(["project", "org"]).nullable().optional(),

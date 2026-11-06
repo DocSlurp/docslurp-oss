@@ -1,4 +1,5 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { countPdfPages } from "../lib/pdf-page-count.js";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -9,7 +10,6 @@ import {
   type ExtractionPlausibilitySignals,
 } from "../lib/extracted-markdown.js";
 import { evaluateParserPolicy } from "../lib/parser-policy.js";
-import { LiteParseDocumentExtractionAdapter } from "../lib/document-extraction-adapter.js";
 import { defaultDocumentExtractorOrder } from "../extractors/registry.js";
 import { resolveNativePdfEngine } from "../native-pdf/engine.js";
 import { buildNativeParserPayload } from "../native-pdf/parser-payload.js";
@@ -109,8 +109,6 @@ function selectBenchmarkHybridExtractors(): Array<
 > {
   const mapped = defaultDocumentExtractorOrder.pdf.flatMap((label) => {
     switch (label) {
-      case "kreuzberg":
-        return ["kreuzberg"] as const;
       case "docling":
         return ["docling"] as const;
       case "native-pdf":
@@ -122,7 +120,7 @@ function selectBenchmarkHybridExtractors(): Array<
     }
   });
 
-  return [...new Set([...mapped, "liteparse" as const])];
+  return [...new Set(mapped)];
 }
 
 async function runSingleExtractor(args: {
@@ -136,28 +134,6 @@ async function runSingleExtractor(args: {
   let pageCount: number | undefined;
 
   switch (args.extractor) {
-    case "liteparse": {
-      const outPath = path.join(args.tempDir, "liteparse.json");
-      const adapter = new LiteParseDocumentExtractionAdapter(args.runner, {
-        ocrEnabled: false,
-      });
-      const result = await adapter.extract({
-        inputPath: args.inputPath,
-        outputPath: outPath,
-      });
-      markdown = result.markdown;
-      pageCount = result.pages.length;
-      break;
-    }
-    case "kreuzberg": {
-      const outPath = path.join(args.tempDir, "kreuzberg.md");
-      const plan = await args.runner.kreuzbergMarkdown(args.inputPath, outPath);
-      if (!plan.available) throw new Error("kreuzberg unavailable");
-      await args.runner.run(plan);
-      markdown = await readFile(outPath, "utf8");
-      break;
-    }
-
     case "native-pdf-text":
     case "native-pdf-markdown": {
       markdown = await runNativePdfArm(args.inputPath, args.extractor === "native-pdf-text" ? "text" : "markdown");
@@ -165,7 +141,7 @@ async function runSingleExtractor(args: {
     }
 
     case "pdftotext": {
-      const plan = await args.runner.extractText(args.inputPath);
+      const plan = await args.runner.extractText(args.inputPath, await countPdfPages(args.runner, args.inputPath));
       if (!plan.available) throw new Error("pdftotext unavailable");
       const result = await args.runner.run(plan);
       markdown = result.stdout;

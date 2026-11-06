@@ -1,3 +1,4 @@
+import { OCR_BOUNDARY_FAILED } from "./executors/run.js";
 import {
   inferModelTarget,
   type Assignment,
@@ -387,13 +388,17 @@ export async function runRoutedVision(args: RoutedVisionArgs): Promise<RoutedVis
           refusalFallback: true,
         });
       }
-      if (placement === "prose") candidates.push({ assignment, index: output.assignmentIndex, fromTargetId: output.targetId, part });
+      // An OCR read's handoff for a poor or empty page is the hosted escalation reader inside the OCR executor (with its
+      // own opt-in and budget), never the route's cascade.
+      if (placement === "prose" && output.runtime !== "ppocr") candidates.push({ assignment, index: output.assignmentIndex, fromTargetId: output.targetId, part });
     }
     await escalate(candidates);
     // A failed page-scope extraction with no other prose falls back to the project model.
     for (const failure of run.failures) {
       const assignment = plan.assignments[failure.assignmentIndex]!;
       if (assignment.scope.kind !== "page" || assignment.role === "accept-text" || assignment.role === "image-label" || assignment.role === "skip") continue;
+      // The page's OCR failed in its boundary: it fails, and no hosted model reads it in OCR's place.
+      if (failure.reason === OCR_BOUNDARY_FAILED) continue;
       const served = (parts.get(failure.pageNumber) ?? []).some((p) => p.placement === "prose");
       if (!served && !execution.fallbackPages.includes(failure.pageNumber) && !fallbackFromFailures.includes(failure.pageNumber)) {
         fallbackFromFailures.push(failure.pageNumber);

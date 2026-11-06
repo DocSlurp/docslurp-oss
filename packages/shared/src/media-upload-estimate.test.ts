@@ -1,6 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
-import { PRICE_CARD, pageCredits } from "./billing.js";
+import { mediaRichPages, pageCredits } from "./billing.js";
+import { DISTINCT_TEST_PRICING, installTestPricing } from "./pricing-testing.js";
+import { resetPricingProviderForTests } from "./pricing-provider.js";
 import { estimateUploadMedia, stripHtmlMarkup, textPageCount, uploadMediaKind } from "./media-upload-estimate.js";
 
 describe("uploadMediaKind", () => {
@@ -16,16 +18,19 @@ describe("uploadMediaKind", () => {
 });
 
 describe("estimateUploadMedia", () => {
+  afterEach(() => resetPricingProviderForTests());
+
   it("is null when nothing is audio or video", () => {
     expect(estimateUploadMedia([{ name: "a.pdf", size: 1_000 }], { videoFrames: true })).toBeNull();
   });
 
-  it("prices video by the minute, three times audio when frames are read", () => {
+  it("prices video by the minute, at the provider's frame-reading rate when frames are read", () => {
+    installTestPricing(DISTINCT_TEST_PRICING);
     const estimate = estimateUploadMedia([{ name: "demo.mp4", size: 50_000_000, durationSeconds: 600 }], { videoFrames: true })!;
     expect(estimate.videoMinutes).toBe(10);
     expect(estimate.durationsAssumed).toBe(false);
-    expect(estimate.credits.high).toBeCloseTo(pageCredits("rich", 10 * PRICE_CARD.videoMinuteRichPages));
-    expect(estimate.credits.low).toBeCloseTo(pageCredits("rich", 10 * PRICE_CARD.audioMinuteRichPages));
+    expect(estimate.credits.high).toBeCloseTo(pageCredits("rich", mediaRichPages("video", 600)));
+    expect(estimate.credits.low).toBeCloseTo(pageCredits("rich", mediaRichPages("audio", 600)));
     expect(estimate.lighter).toEqual({
       kind: "video-audio-track-only",
       credits: estimate.credits.low,

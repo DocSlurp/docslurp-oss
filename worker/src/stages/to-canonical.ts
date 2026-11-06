@@ -5,10 +5,8 @@ import { healthyDocuments } from "../pipeline/document-health.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
-import { recordMeasuredPageCount } from "../lib/office-page-count.js";
-import { sourceStorageKey } from "../tools/storage.js";
-import { resolveOcrLanguages } from "../extractors/kreuzberg-ocr.js";
-import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
+import { planOcrLanguages } from "../ocr/languages.js";
+import { resolveOcrMode } from "../ocr/mode.js";
 
 type CanonicalStrategy =
   | "already-pdf"
@@ -24,8 +22,7 @@ type CanonicalStrategy =
   | "xlsx-to-csv"
   | "rtf-to-html"
   | "doc-to-text"
-  | "tesseract-ocr"
-  | "tiff-split-ocr"
+  | "image-ocr"
   | "passthrough-unsupported"
   | "passthrough-unknown";
 
@@ -55,7 +52,7 @@ function pickStrategy(normalizedFormat: string): CanonicalStrategy {
     case "latex":
       return "latex-to-markdown";
     case "image":
-      return "tesseract-ocr";
+      return "image-ocr";
     default:
       return "passthrough-unknown";
   }
@@ -93,12 +90,6 @@ export class ToCanonicalStage implements Stage {
             if (ext === ".rtf") strategy = "rtf-to-html";
             else if (ext === ".doc") strategy = "doc-to-text";
           }
-          if (strategy === "tesseract-ocr" && (ext === ".tiff" || ext === ".tif")) {
-            strategy = "tiff-split-ocr";
-          }
-
-          // The project's OCR language, not English (`auto` is English plus the installed major-script packs).
-          const ocrLanguages = resolveOcrLanguages(state.run.pipeline.documentExtraction?.ocr?.language) ?? undefined;
           const artifact: Record<string, unknown> = {
             documentId: document.id,
             normalizedFormat,
@@ -196,32 +187,17 @@ export class ToCanonicalStage implements Stage {
               available: plan.available,
             };
             artifact.outputKey = output;
-          } else if (strategy === "tiff-split-ocr") {
-            const splitPlan = await this.runner.tiffSplit(document.sourceKey, "page-%04d.tiff");
-            const ocrPlan = await this.runner.tesseractOcr("page-0001.tiff", "ocr-output", ocrLanguages);
-            artifact.splitPlan = { binary: splitPlan.binary, args: splitPlan.args, available: splitPlan.available };
-            artifact.ocrPlan = { binary: ocrPlan.binary, args: ocrPlan.args, available: ocrPlan.available };
-          } else if (strategy === "tesseract-ocr") {
-            const plan = await this.runner.tesseractOcr(document.sourceKey, "ocr-output", ocrLanguages);
-            artifact.plan = {
-              binary: plan.binary,
-              args: plan.args,
-              available: plan.available,
+          } else if (strategy === "image-ocr") {
+            // Read by the OCR engine in extract-markdown (every frame of a multi-frame TIFF), in the configured boundary.
+            // This stage records the plan only; it decodes nothing.
+            artifact.ocr = {
+              mode: resolveOcrMode(),
+              recognisers: planOcrLanguages(state.run.pipeline.documentExtraction?.ocr?.language).recognisers,
             };
           }
 
-          // Office, EPUB and spreadsheet files arrive counted as one page. Measure what the document really holds and record it as
-          // documents.billing_pages before the completion charge reads it (page-base-fee.ts). The page basis (page_count) stays what
-          // the text splits into: these formats' text has no page breaks.
-          const pages = await recordMeasuredPageCount(state, {
-            runner: this.runner,
-            signal,
-            downloadSource: (target) => this.storage.downloadSourceToTempFile(
-              sourceStorageKey(target.sourceKey),
-              trustedTempDownloadPattern("docslurp-pages-", target),
-            ),
-          }, document, normalizedFormat);
-          artifact.pageCount = { intake: pages.intakePages, measured: pages.pages, method: pages.method };
+          // Office, EPUB and spreadsheet pages are counted in extract-markdown from the extractor's own output
+          // (lib/office-page-count.ts); this stage reads nothing of the source.
 
           await this.storage.putJson(key, artifact);
 
@@ -230,10 +206,6 @@ export class ToCanonicalStage implements Stage {
             stats: {
               strategy,
               normalizedFormat,
-              pageCount: pages.pages ?? pages.intakePages,
-              // The pages the text splits into (citations, page rows); `pageCount` above is what the document bills.
-              pageBasis: document.pageCount,
-              pageCountMethod: pages.method,
             },
           };
         },

@@ -9,8 +9,9 @@ import {
   PROJECT_INPUT_MAX_LENGTH,
   projectTemplateKeySchema,
   indexingModeSchema,
-  estimateCardRevision,
   quoteFileSchema,
+  quoteSettingsSchema,
+  pricingVersion,
 } from "@docslurp/shared";
 
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
@@ -34,7 +35,7 @@ import {
   directUploadSessionBelongsToOrganization,
   signDirectUploadParts,
 } from "../services/direct-upload-session.js";
-import { assertSessionReplayable, createSessionIdempotently } from "../services/direct-session-idempotency.js";
+import { assertSessionReplayable, assertSessionProjectStillContributable, createSessionIdempotently } from "../services/direct-session-idempotency.js";
 import { parseIdempotencyKey } from "../services/idempotency.js";
 import { isRunCreationBlockedError } from "../services/runs.js";
 import { UnreadableSourceError } from "../services/source-metadata.js";
@@ -54,7 +55,7 @@ import {
   type ProjectIntakePorts,
 } from "../services/project-intake.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
-import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
+import { apiErrorResponse, apiStatusError, nativeBodyLimit } from "../lib/api-error.js";
 import { findDefaultProject, getProject } from "../services/projects.js";
 import { IndexingModeError } from "../services/project-indexing-mode.js";
 import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
@@ -70,6 +71,12 @@ export const canonicalIdSchema = z.string().trim().min(1).max(MAX_CANONICAL_ID_L
 
 /** The public `project` field: a project UUID, slug, former slug or name; created when no project matches. */
 export const projectInputSchema = z.string().max(PROJECT_INPUT_MAX_LENGTH);
+
+/** GET /direct/sessions/:id (unless status only), part signing, file completion and confirm: the routes that mint URLs or ingest. */
+export function sessionRouteNeedsContribute(method: string, path: string, statusOnly: boolean): boolean {
+  if (method === "GET") return /\/direct\/sessions\/[^/]+\/?$/.test(path) && !statusOnly;
+  return method === "POST" && /\/direct\/sessions\/[^/]+\/(?:files\/[^/]+\/parts\/sign|files\/complete|confirm)\/?$/.test(path);
+}
 
 /** A restricted API key's project allowlist (null for sessions and unrestricted keys). */
 export function actorAllowedProjectIds(actor: RequestActor): readonly string[] | null {
@@ -260,6 +267,18 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
         // The `project` value itself is resolved inside the key's org and allowlist by intake.
       }
     }
+    // Every route that mints signed upload URLs for an existing session, or ingests it, re-checks that this user may still
+    // contribute to its project (a revoked or demoted share gets 403 and no URLs). Status-only reads and abort do not.
+    if (sessionMatch && sessionRouteNeedsContribute(c.req.method, c.req.path, c.req.query("statusOnly") === "true")) {
+      const loaded = await loadDirectUploadSession(sessionMatch[1], actor.userId);
+      if (loaded) {
+        try {
+          await assertSessionProjectStillContributable(loaded.session, actor.userId);
+        } catch (error) {
+          return projectIntakeErrorResponse(c, error) ?? apiStatusError(c, 403, "Forbidden");
+        }
+      }
+    }
     await next();
   })
   .post(
@@ -301,6 +320,8 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
             const loaded = await loadDirectUploadSession(sessionId, userId);
             if (!loaded) return null;
             assertSessionReplayable(loaded.session, { orgId, apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null, allowedProjectIds: actorAllowedProjectIds(actor) });
+            // ... and the user may still contribute to that project (a share revoked since gets no URLs).
+            await assertSessionProjectStillContributable(loaded.session, userId);
             return await describeDirectUploadSession(loaded);
           },
         });
@@ -538,16 +559,27 @@ export async function directUploadTarget(
   return found ? { projectId: found.id, projectName: null } : create(lookup.ref.name);
 }
 
+/** Largest estimate request body: 1,000 files with a capped profile (FILE_PROFILE_MAX_BYTES) each, plus names. */
+const UPLOAD_ESTIMATE_MAX_BODY_BYTES = 6 * 1024 * 1024;
+
 const uploadEstimateSchema = z.object({
   speedBoost: z.boolean().optional(),
+  /** Files by name, size and type, each optionally with a client file profile (`@docslurp/estimate`); untrusted, estimate only. */
   files: z.array(quoteFileSchema).min(1).max(1000),
+  /** Knobs to quote with instead of the project's own (the same as `POST /v1/estimate`). */
+  settings: quoteSettingsSchema.partial().optional(),
   project: projectInputSchema.optional(),
   orgId: z.string().optional(),
 });
 
-/** `POST /v1/uploads/estimate`: what ingesting these files would cost and take, before anything is stored. */
+/**
+ * `POST /v1/uploads/estimate`: what ingesting these files would cost and take, before anything is stored. Files may carry a
+ * file profile from the offline profiler; profiles are validated, clamped and used only to estimate. The upload itself is
+ * billed by what the worker measures, never by a profile.
+ */
 export const uploadEstimateRoutes = new Hono().post(
   "/estimate",
+  nativeBodyLimit(UPLOAD_ESTIMATE_MAX_BODY_BYTES),
   zValidator("json", uploadEstimateSchema),
   async (c) => {
     const userId = c.get("sessionUser").id;
@@ -568,14 +600,17 @@ export const uploadEstimateRoutes = new Hono().post(
     if (!project || (actor.type === "apiKey" && !apiKeyCanUseProject(actor.apiKey, project))) {
       return apiErrorResponse(c, 404, "project_not_found", "Project not found");
     }
-    const { estimate, media, profile } = await estimateUpload({ files: body.files, project, speedBoost: body.speedBoost === true });
-    // `orgId` is the organization whose credits the upload would spend, for reading its balance. `profile` and
-    // `cardRevision` let offline estimators quote later batches for this project and notice a newer card.
+    const { estimate, media, profile, quote } = await estimateUpload({ files: body.files, project, speedBoost: body.speedBoost === true, settings: body.settings });
+    // `orgId` is the organization whose credits the upload would spend, for reading its balance. `profile` is the
+    // project's settings the estimate priced with; `kind` labels the answer an estimate, never a charge.
     return c.json({
+      kind: "estimate" as const,
       estimate,
       media,
       profile,
-      cardRevision: estimateCardRevision(),
+      pricingVersion: pricingVersion(),
+      // The full estimate (ingest, monthly hosting and usage, lines) for the project's settings and any overrides.
+      quote,
       billing: billingState(),
       orgId: project.orgId,
       billingExempt: isBillingExemptOrg(project.orgId),

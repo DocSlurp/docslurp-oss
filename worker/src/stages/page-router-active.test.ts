@@ -170,7 +170,7 @@ describe("vision-extract with the page router", () => {
       asg(3, b.id, "chart-data"),
       asg(4, a.id, "extract-text"),
       asg(4, b.id, "table"),
-      asg(5, "ocr:tesseract", "ocr"),
+      asg(5, "ocr:ppocr", "ocr"),
     ]);
     const { stage, state } = make(plan);
     vi.spyOn(stage as unknown as { visionAllowed(): Promise<boolean> }, "visionAllowed").mockResolvedValue(true);

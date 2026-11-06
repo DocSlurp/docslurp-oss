@@ -69,6 +69,25 @@ describe("providerCostLossItems", () => {
     expect(items.find((item) => item.key === "tC")?.refunded).toBe(true);
   });
 
+  it("flags a run whose sandbox and escalation provider costs together exceed its unit charge", async () => {
+    const o1 = { org: "o1", project: "w1", user: "u1" };
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60_000);
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, updated_at) values
+      ('r-heavy', 'o1', 'u1', 'w1', 'bulk-upload', 'completed', 'completed', '{}', ${tenMinutesAgo}),
+      ('r-light', 'o1', 'u1', 'w1', 'bulk-upload', 'completed', 'completed', '{}', ${tenMinutesAgo})`;
+    // Arbitrary test amounts: a sandbox_compute event, an escalation read and one unit charge per run.
+    for (const [runId, sandboxCents] of [["r-heavy", 0.2], ["r-light", 0.1]] as const) {
+      await event({ ...o1, runId, model: "ocr-vm", metric: "sandbox_compute", providerCost: sandboxCents, metadata: { costSource: "estimate" } });
+      await event({ ...o1, runId, model: "vendor/escalation", metric: "ocr-escalation", providerCost: 0.07, metadata: { costSource: "provider" } });
+      await event({ ...o1, runId, model: "price-card", metric: "ingest-page-rich", credits: 0.25 });
+    }
+    const { items } = await attribution.providerCostLossItems(window());
+    // 0.2 + 0.07 = 0.27 against 0.25 credits is a loss; 0.1 + 0.07 is not.
+    expect(items.map((item) => item.key)).toEqual(["r-heavy"]);
+    expect(items[0]!.lossCents).toBeCloseTo(0.02, 6);
+    expect(items[0]!.topModel).toBe("ocr-vm");
+  });
+
   it("judges a run at its terminal status change, even long after its last event", async () => {
     await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, updated_at)
       values ('r-late', 'o1', 'u1', 'w1', 'bulk-upload', 'failed', 'failed', '{}', ${new Date(Date.now() - 5 * 60_000)})`;

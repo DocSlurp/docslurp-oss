@@ -21,22 +21,32 @@ import {
 } from "../lib/ai-usage.js";
 
 /**
- * Usage metrics that mean a vision or OCR model read one page (hosted vision,
- * local OCR of any kind, page mapping OCR, image labelling). Each such page bills as a
- * Rich page (PRICE_CARD), once per run, plus one more per extra 1,000 output tokens.
- * A Fast-mode page that falls back to vision is billed Rich the same way. Tesseract is an OCR model:
- * `image-ocr` (an uploaded image), `tesseract-page-ocr` (a page the router or the local graph OCR'd) and
- * `pdf-ocr` (Kreuzberg's OCR of a scanned PDF page) bill the same as a vision read.
+ * Usage metrics that mean a vision or OCR model read one page's content (hosted vision, local OCR of any kind, page
+ * mapping OCR). Each such page bills as Rich pages, once per run, as many as the pricing provider counts for its output
+ * tokens (`richPagesForOutputTokens`). A Fast-mode page that falls back to vision is billed Rich the same way. OCR is a model read:
+ * `page-ocr` (a page or image frame the OCR engine read, in its VM or the self-hosted sandbox; ocr/ledger.ts),
+ * `ocr-escalation` (a hosted second read of a page OCR read poorly), `hosted-ocr` (DOCSLURP_OCR_MODE=hosted) and
+ * `pdf-ocr` (an extractor that OCRs pages itself without reporting which) bill the same as a vision read.
+ *
+ * A local caption of a photo on the page (`image-label`, the image labeler) is not in the set: it describes a picture,
+ * it does not read the page's text, so it is recorded at its compute cost and the page stays Fast.
  */
 export const RICH_PAGE_READ_METRICS: ReadonlySet<string> = new Set([
   "page-analysis",
   "document-map-ocr",
   "ocr-native-pdf",
-  "image-label",
-  "image-ocr",
-  "tesseract-page-ocr",
+  "page-ocr",
+  "ocr-escalation",
+  "hosted-ocr",
   "pdf-ocr",
 ]);
+
+/**
+ * Page reads that bill one Rich page at most: their output tokens never add Rich units, and a
+ * read that returned no text (`metadata.outcome = "empty-output"`) charges nothing. `ocr-escalation` is the hosted second
+ * read of a page the recogniser read poorly (owner decision, 2026-11-05); its provider cost is recorded either way.
+ */
+export const FLAT_RICH_PAGE_READ_METRICS: ReadonlySet<string> = new Set(["ocr-escalation"]);
 
 /** Events taken for one checkpoint write; `commit()` once it has persisted. */
 export interface PipelineUsageBatch {
@@ -149,10 +159,11 @@ export class PipelineUsageEventLedger {
   /**
    * A vision/OCR read of a page: buffer its billable Rich page charges. The page's first read charges one Rich page (the id
    * makes a retried checkpoint a no-op); every reader's output tokens count toward the page's running total, and the page owes one
-   * more Rich unit per started `richExtraPageOutputTokens` past `richIncludedOutputTokens` (richPagesForOutputTokens). Each unit
+   * more Rich unit when the pricing provider counts more for the output (richPagesForOutputTokens). Each unit
    * after the first is its own event with a deterministic id (`rich:<run>:<document>:<page>:unit:<n>`), so a read that comes
    * after a cheaper one (a vision call after OCR, a retry with a larger output budget) raises the charge to what the
-   * total owes, and a retried checkpoint, or a retry that reads again, can never charge a unit twice.
+   * total owes, and a retried checkpoint, or a retry that reads again, can never charge a unit twice. A flat read
+   * (FLAT_RICH_PAGE_READ_METRICS) counts no output tokens and charges nothing when it returned no text.
    */
   private chargeRichPageRead(
     event: { metric: string; model?: string; outputTokens?: number | null; metadata?: Record<string, unknown> | null },
@@ -163,8 +174,10 @@ export class PipelineUsageEventLedger {
     const documentId = event.metadata?.documentId;
     const pageNumber = event.metadata?.pageNumber;
     if (typeof documentId !== "string" || typeof pageNumber !== "number" || !Number.isInteger(pageNumber)) return;
+    const flat = FLAT_RICH_PAGE_READ_METRICS.has(event.metric);
+    if (flat && event.metadata?.outcome === "empty-output") return;
     const key = `${documentId}:${pageNumber}`;
-    const outputTokens = Math.max(0, Number(event.outputTokens ?? 0) || 0);
+    const outputTokens = flat ? 0 : Math.max(0, Number(event.outputTokens ?? 0) || 0);
     const before = this.richCharged.get(key);
     const readers = before?.readers ?? new Map<string, number>();
     const reader = `${event.metric}:${event.model ?? ""}`;

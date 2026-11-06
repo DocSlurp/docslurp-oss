@@ -15,9 +15,9 @@ function packWithBaseline(): PolicyPack {
         { id: "wordy", parentId: "global", predicates: [{ feature: "native.wordCount", op: "gte", value: 100 }] },
       ],
       stats: [
-        // the native text layer is great in "wordy", cheapest-capable; kreuzberg is bad there
+        // the native text layer is great in "wordy", cheapest-capable; the Markdown arm is bad there
         { cellId: "wordy", targetId: "native:pdf-text", pass: passes(95, 5), cost: { meanUsd: 0, p90Usd: 0 }, latency: { p50Ms: 30, p95Ms: 60 }, n: 100 },
-        { cellId: "wordy", targetId: "native:kreuzberg", pass: passes(2, 20), cost: { meanUsd: 0, p90Usd: 0 }, latency: { p50Ms: 60, p95Ms: 120 }, n: 22 },
+        { cellId: "wordy", targetId: "native:pdf-markdown", pass: passes(2, 20), cost: { meanUsd: 0, p90Usd: 0 }, latency: { p50Ms: 60, p95Ms: 120 }, n: 22 },
         { cellId: "global", targetId: "native:pdf-text", pass: passes(5, 5), cost: { meanUsd: 0, p90Usd: 0 }, latency: { p50Ms: 30, p95Ms: 60 }, n: 10 },
       ],
     },

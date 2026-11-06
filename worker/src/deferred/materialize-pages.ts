@@ -1,3 +1,4 @@
+import { withPreparedHtmlTables } from "../pipeline/html-table-vm.js";
 import { randomBytes } from "node:crypto";
 import { rm } from "node:fs/promises";
 import path from "node:path";
@@ -21,7 +22,7 @@ import { resolveEmbeddingModel } from "../embeddings/resolver.js";
 import { runLocalArtifactCommand } from "../extractors/local-artifact-adapters.js";
 import { createPiiTextScanner } from "../lib/pii-redaction.js";
 import type { Document, EmbeddingProfile } from "../models.js";
-import { chunkTextWithMeta } from "../pipeline/chunking.js";
+import { chunkTextWithMeta, htmlTableSources } from "../pipeline/chunking.js";
 import {
   contiguousPageRanges,
   normalizePageNumbers,
@@ -474,6 +475,7 @@ export async function materializePageRange(
   const mapRows = await deps.sql<{ nodes: unknown }[]>`select nodes from document_maps where document_id = ${documentId}`;
   const headingFor = headingPathsFromMap(mapRows[0]?.nodes);
   const chunks: Array<{ id: string; page: number; index: number; text: string; headingPath: string[] }> = [];
+  await withPreparedHtmlTables([...prepared.values()].flatMap(entry => htmlTableSources(entry.text)), deps.runner, () => {
   for (const entry of [...prepared.values()].sort((a, b) => a.page - b.page)) {
     const mapHeading = headingFor(entry.page);
     let i = 0;
@@ -495,6 +497,7 @@ export async function materializePageRange(
       keptReads.set(entry.page, entry.text);
     }
   }
+  });
 
   // 4. Embed (batched). Nothing is published yet: pages, chunks and vectors are written in step 5, only for pages
   // this run still holds.

@@ -92,6 +92,9 @@ export const WORKER_TABLES = Object.freeze({
   geo_accepted_sources: { privileges: DML, evidence: "structured-extract accepted-source checkpoint" },
   geo_projection_generations: { optional: true, privileges: DML, evidence: "optional PostGIS accepted-source publisher" },
   geo_projection_features: { optional: true, privileges: DML, evidence: "optional PostGIS accepted-source publisher" },
+  // Escalation reads are written once per call (insert ... on conflict do nothing) and read back on retry; never updated or
+  // deleted by the worker: rows go with their run (ON DELETE CASCADE, as the table owner).
+  ocr_escalation_reads: { privileges: ["select", "insert"], evidence: "worker/src/db/store.ts ocrEscalationReads / recordOcrEscalationRead (worker/src/ocr/hosted-reader.ts)" },
   ready_geo_projection_generations: { optional: true, privileges: ["select"], evidence: "optional PostGIS readiness" },
   vector_index_tables: { privileges: DML, evidence: "worker/src/stages LanceDB tables; superseded-purge.ts" },
   vector_indexes: { privileges: DML, evidence: "worker/src/db/store.ts vector index rows" },
@@ -100,7 +103,9 @@ export const WORKER_TABLES = Object.freeze({
   vision_run_attempts: { privileges: ["select", "insert", "update"], evidence: "worker/src/db/vision-attempt-store.ts (vision attempt guard run counts)" },
   vision_route_overruns: { privileges: ["select", "insert", "delete"], evidence: "worker/src/db/vision-attempt-store.ts (per-org route overrun count, route weight correction, retention)" },
   webhook_outbox: { privileges: ["select", "insert"], evidence: "worker/src/db/store.ts enqueueWebhook (insert ... returning id)" },
-  webhooks: { privileges: [], columns: { select: ["org_id", "active", "events"] }, evidence: "worker/src/db/store.ts enqueueWebhookEvent subscription check by organization (no url, creator or signing secret)" },
+  // user_id stays for this release only: N-1 workers still check subscriptions by webhooks.user_id during the rollout
+  // (docs/rollout-0121-0127.md), and losing it would fail their terminal-checkpoint outbox insert. A later release drops it.
+  webhooks: { privileges: [], columns: { select: ["user_id", "org_id", "active", "events"] }, evidence: "worker/src/db/store.ts enqueueWebhookEvent subscription check by organization (no url or signing secret); user_id for N-1 workers during the 0125 rollout" },
   worker_capabilities: { privileges: DML, evidence: "worker/src/db/worker-capabilities.ts" },
   worker_maintenance_leases: { privileges: DML, evidence: "worker/src/db/worker-slot-store.ts" },
   worker_slot_tokens: { privileges: DML, evidence: "worker/src/db/worker-slot-store.ts; acquire/renew/release_worker_slot()" },
@@ -110,6 +115,8 @@ export const WORKER_TABLES = Object.freeze({
   project_runs: { privileges: DML, evidence: "worker/src/db/store.ts and page-task-store.ts" },
   project_secrets: { privileges: [], columns: { select: ["id", "project_id", "name", "type", "expires_at"] }, evidence: "worker/src/db/store.ts expiring-secret reminders (no encrypted_value)" },
   projects: { privileges: ["select", "update"], evidence: "worker/src/db/store.ts budget alerts; deferred/materialize-activity.ts" },
+  // Read only: raised by the table owner through pricing_state_raise() (0131), never by a runtime role.
+  pricing_provider_state: { privileges: ["select"], evidence: "packages/shared/src/pricing-loader.ts durableState (pricing provider, migration 0131)" },
 });
 
 /** Relations the worker must not touch, and why. */
@@ -149,6 +156,7 @@ export const WORKER_DENIED_TABLES = Object.freeze({
   org_invites: "membership invitations",
   org_memberships: "membership and roles",
   org_memberships_removed_backup: "memberships removed by 0127 (one organization per user); admin recovery only",
+  organizations_removed_backup: "empty personal organizations and their empty projects deleted by 0127; admin recovery only",
   parser_eval_fixtures: "evaluation fixtures (admin)",
   passkey: "Better Auth passkey credentials",
   query_suggestions: "search (API only)",
@@ -187,6 +195,18 @@ export const WORKER_DENIED_TABLES = Object.freeze({
 });
 
 /** `"name"` with embedded quotes doubled. */
+/**
+ * SECURITY DEFINER functions a runtime role may reach: the realtime revision triggers and the API's compaction call
+ * (0120). Keep equal to @docslurp/shared's RUNTIME_SECURITY_DEFINER_ALLOWLIST (db-roles.test.ts checks); reconcile
+ * revokes EXECUTE on every other owner definer function, and the runtime identity rule refuses one a runtime role reaches.
+ */
+export const RUNTIME_SECURITY_DEFINER_ALLOWLIST = Object.freeze([
+  "public.realtime_changed()",
+  "public.realtime_search_session_changed()",
+  "public.realtime_materialization_changed()",
+  "public.realtime_compact_revisions(text)",
+]);
+
 export function quoteIdent(name) {
   return `"${String(name).replaceAll('"', '""')}"`;
 }
@@ -266,6 +286,18 @@ export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, 
     if (has(roles.app)) statements.push(`grant select on public.realtime_revisions to ${quoteIdent(roles.app)}`,
       `grant execute on function public.realtime_compact_revisions(text) to ${quoteIdent(roles.app)}`);
   }
+  if (relations.includes("pricing_provider_state")) {
+    // Monotone pricing-provider state (0131): runtime roles only read it. pricing_state_raise is the table owner's (the
+    // operator's activation credential); no runtime role executes it (council J). The app's schema-wide DML and default
+    // privileges are taken back here.
+    statements.push("revoke all on public.pricing_provider_state from public",
+      "revoke all on function public.pricing_state_raise(text, bigint) from public");
+    for (const role of [roles.app, roles.worker].filter(has)) {
+      statements.push(`revoke all on public.pricing_provider_state from ${quoteIdent(role)}`,
+        `grant select on public.pricing_provider_state to ${quoteIdent(role)}`,
+        `revoke all on function public.pricing_state_raise(text, bigint) from ${quoteIdent(role)}`);
+    }
+  }
   if (nativeSchema) {
     // Native chat execution is an application service, never the ingestion role.
     statements.push("revoke all on schema docslurp_mastra from public",
@@ -324,6 +356,13 @@ export async function reconcileRoleGrants(client, { roles = DEFAULT_DB_ROLES, lo
   const { rows: columnRows } = await client.query(
     "select c.relname, array_agg(a.attname::text) as columns from pg_attribute a join pg_class c on c.oid = a.attrelid join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relkind in ('r','p') and a.attnum > 0 and not a.attisdropped group by c.relname",
   );
+  // Owner SECURITY DEFINER functions outside the runtime allowlist (recheck Q #5): nobody but the owner executes them.
+  const { rows: definerRows } = await client.query(`
+    select p.oid::regprocedure::text as signature from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+    where p.prosecdef and n.nspname not in ('pg_catalog', 'information_schema') and n.nspname not like 'pg_toast%'
+      and not exists (select 1 from pg_depend d where d.objid = p.oid and d.deptype = 'e')
+      and not (p.oid = any (array(select to_regprocedure(a) from unnest($1::text[]) a where to_regprocedure(a) is not null)))`,
+    [RUNTIME_SECURITY_DEFINER_ALLOWLIST]);
   const { rows: [{ migrations }] } = await client.query("select to_regclass('drizzle.__drizzle_migrations') is not null as migrations");
   const { rows: [{ native }] } = await client.query("select to_regnamespace('docslurp_mastra') is not null as native");
   const statements = roleGrantStatements({
@@ -336,6 +375,10 @@ export async function reconcileRoleGrants(client, { roles = DEFAULT_DB_ROLES, lo
     columns: Object.fromEntries(columnRows.map((row) => [row.relname, row.columns])),
     sequences: Object.fromEntries(sequenceRows.map((row) => [row.sequence, row.table])),
   });
+  for (const { signature } of definerRows) {
+    statements.push(`revoke all on function ${signature} from public`);
+    for (const role of present) statements.push(`revoke all on function ${signature} from ${quoteIdent(role)}`);
+  }
   await client.query("begin");
   try {
     for (const statement of statements) await client.query(statement);

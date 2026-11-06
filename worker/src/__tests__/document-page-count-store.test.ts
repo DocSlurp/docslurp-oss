@@ -60,8 +60,8 @@ describe("Store.setDocumentBillingPages", () => {
     expect(rows).toEqual([{ id: "copy", billing_pages: null }, { id: "other-run", billing_pages: null }]);
   }, 60_000);
 
-  it("refuses a non-positive billing count at the database", async () => {
-    await expect(store.setDocumentBillingPages("run1", "long-docx", 0, "pdf-conversion")).rejects.toThrow();
+  it("refuses a negative billing count at the database; 0 is a measured empty file (migration 0130)", async () => {
+    await expect(store.setDocumentBillingPages("run1", "long-docx", -1, "pdf-conversion")).rejects.toThrow();
   }, 60_000);
 });
 

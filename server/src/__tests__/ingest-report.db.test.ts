@@ -101,7 +101,9 @@ describe("ingest report on a migrated database", () => {
       byReason: [{ reason: "ocr_unavailable", documents: 1 }],
       examples: [{ documentId: "shot", filename: "screenshot.png", stage: "extract-markdown", reason: "ocr_unavailable", retryable: false }],
     });
-    expect(result.failures.examples[0]?.detail).toContain("Error opening data file <path>");
+    // The stored error never reaches the report: no excerpt, only a reviewed phrase when one applies.
+    expect(result.failures.examples[0]?.detail).toBeNull();
+    expect(JSON.stringify(result)).not.toMatch(/Error opening data file/);
     expect(JSON.stringify(result)).not.toMatch(/\/srv\/app|node_modules/);
     expect(result.recommendations.map((rec) => rec.id)).toEqual(["retry-failed-files"]);
     expect(report.summarizeIngestReport(result)).toMatch(/1 file failed\. screenshot\.png at extract-markdown: Text recognition \(OCR\)/);

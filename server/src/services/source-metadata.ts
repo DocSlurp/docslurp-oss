@@ -1,21 +1,18 @@
 import { instrumentS3Client } from "@docslurp/shared/observability";
 import { createHash } from "node:crypto";
-import { spawn } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
 
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 
 import { env as apiEnv } from "../config.js";
-import { sanitizeUploadFilename } from "../lib/filenames.js";
 import {
   decodeTextBytes,
+  estimatedPdfPages,
   fileFactsFor,
   s3ClientConfig,
   TEXT_PAGE_MIME_PREFIXES,
   textPageCount,
   type FileEncoding,
+  type IntakePageEvidence,
   type FileFacts,
 } from "@docslurp/shared";
 
@@ -24,6 +21,8 @@ export type SourceMetadata = {
   sourceSha256: string;
   /** What the bytes are, sniffed once here; the document is stored (and routed and billed) under `fileFacts.mimeType`. */
   fileFacts: FileFacts;
+  /** How `pageCount` was obtained; intakePageCountSource turns it into documents.page_count_source. */
+  pageEvidence: IntakePageEvidence;
 };
 
 /** The uploaded file cannot be read as the format it claims (corrupt, truncated or password-protected). A client error, not a server fault. */
@@ -45,33 +44,10 @@ export class AllSourcesUnreadableError extends UnreadableSourceError {
   }
 }
 
-/**
- * pdfinfo exit codes for a file it could not open (1) or decrypt (3). A null code means the process was
- * killed (our 30 s timeout or a crash on a malformed file), which is also this file's fault. Only a failure
- * to start pdfinfo at all (spawn error) is ours.
- */
-const PDFINFO_UNREADABLE_EXIT_CODES = new Set<number | null>([1, 3, null]);
-
-class PdfInfoExitError extends Error {
-  constructor(readonly exitCode: number | null, detail: string) {
-    super(`pdfinfo exited with ${exitCode ?? "unknown"}: ${detail}`.trim());
-  }
-}
-
 const pageCountS3Client = instrumentS3Client(new S3Client(s3ClientConfig(apiEnv.storage)), apiEnv.storage.endpoint);
 
 function sha256Hex(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
-}
-
-export function parsePdfInfoPageCount(output: string): number | null {
-  const match = output.match(/^Pages:\s+(\d+)/im);
-  if (!match) {
-    return null;
-  }
-
-  const value = Number.parseInt(match[1], 10);
-  return Number.isFinite(value) && value > 0 ? value : null;
 }
 
 export function estimateNonPdfPageCount(
@@ -79,66 +55,43 @@ export function estimateNonPdfPageCount(
   bytes: Uint8Array,
   encoding?: FileEncoding | null,
 ): number {
-  if (bytes.length === 0) {
-    return 1;
-  }
+  return nonPdfPageCount(contentType, bytes, encoding).pageCount;
+}
+
+/** Single-frame raster formats whose magic bytes make the file one page (a TIFF's frames are counted by the OCR boundary). */
+const SINGLE_FRAME_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"]);
+
+/**
+ * Intake's page count of a non-PDF file and the evidence behind it. Only the text rule over the whole text, or an image format
+ * the magic bytes confirm, is counted evidence; a declared type alone never is.
+ */
+export function nonPdfPageCount(
+  contentType: string,
+  bytes: Uint8Array,
+  encoding?: FileEncoding | null,
+  sniffedMimeType?: string | null,
+): { pageCount: number; pageEvidence: IntakePageEvidence } {
+  if (bytes.length === 0) return { pageCount: 1, pageEvidence: "none" };
 
   // The quote rules (isUploadTextFile, quoteFilePages) and the offline estimator count text pages the same way.
   if (!TEXT_PAGE_MIME_PREFIXES.some((prefix) => contentType.startsWith(prefix))) {
-    return 1;
+    const image = sniffedMimeType != null && sniffedMimeType === contentType && SINGLE_FRAME_IMAGE_TYPES.has(sniffedMimeType);
+    return { pageCount: 1, pageEvidence: image ? "image-header" : "none" };
   }
 
   // Decoded by the file's own encoding (a UTF-16 CSV is not UTF-8), with HTML markup removed. Only the first
   // TEXT_MEASURE_SAMPLE_BYTES are decoded and the count is scaled by the file's size, so a large or hostile file costs
-  // the API a bounded amount of work.
+  // the API a bounded amount of work; that scaled count is an estimate.
   const markup = contentType.startsWith("text/html");
-  if (bytes.length <= TEXT_MEASURE_SAMPLE_BYTES) return textPageCount(decodeTextBytes(bytes, encoding), { markup });
+  if (bytes.length <= TEXT_MEASURE_SAMPLE_BYTES) {
+    return { pageCount: textPageCount(decodeTextBytes(bytes, encoding), { markup }), pageEvidence: "text-rule" };
+  }
   const sampled = textPageCount(decodeTextBytes(bytes.subarray(0, TEXT_MEASURE_SAMPLE_BYTES), encoding), { markup });
-  return Math.max(1, Math.ceil(sampled * (bytes.length / TEXT_MEASURE_SAMPLE_BYTES)));
+  return { pageCount: Math.max(1, Math.ceil(sampled * (bytes.length / TEXT_MEASURE_SAMPLE_BYTES))), pageEvidence: "text-sample" };
 }
 
 /** Bytes of a text file the API decodes to count its pages. */
 const TEXT_MEASURE_SAMPLE_BYTES = 2_000_000;
-
-const PDFINFO_ENV = { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C", LC_ALL: "C" } as const;
-
-async function runPdfInfo(filePath: string): Promise<string> {
-  return await new Promise<string>((resolve, reject) => {
-    // pdfinfo parses uploader-supplied bytes. It inherits a minimal environment
-    // (no app secrets) and runs in the temp directory holding the single input
-    // file, so a malformed file cannot read our configuration from
-    // /proc/self/environ. The process is still inside the API container: the
-    // container drops all capabilities and is non-root (docker-compose.prod.yml),
-    // and page-count extraction is slated to move into the sandboxed worker.
-    // See security finding SEC-2026-10-03.
-    const child = spawn("pdfinfo", [filePath], {
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 30_000,
-      killSignal: "SIGKILL",
-      env: PDFINFO_ENV,
-      cwd: path.dirname(filePath),
-    });
-
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve(stdout);
-        return;
-      }
-
-      reject(new PdfInfoExitError(code, stderr || stdout));
-    });
-  });
-}
 
 async function downloadSourceBytes(sourceKey: string): Promise<Uint8Array> {
   const response = await pageCountS3Client.send(
@@ -148,7 +101,11 @@ async function downloadSourceBytes(sourceKey: string): Promise<Uint8Array> {
     }),
   );
 
+  const maxBytes = 500 * 1024 * 1024;
+  if (response.ContentLength !== undefined && (!Number.isSafeInteger(response.ContentLength) || response.ContentLength < 0 || response.ContentLength > maxBytes)) throw new Error("source object exceeds metadata byte limit");
+  if (process.env.NODE_ENV === "production" && response.ContentLength === undefined) throw new Error("source object size unavailable; refusing unbounded metadata download");
   const bytes = await response.Body?.transformToByteArray();
+  if (bytes && bytes.byteLength > maxBytes) throw new Error("source object exceeds metadata byte limit");
   return bytes ?? new Uint8Array();
 }
 
@@ -156,7 +113,7 @@ export async function resolveSourceMetadata(file: {
   mimeType: string;
   sourceKey: string;
   filename: string;
-}): Promise<SourceMetadata> {
+}, scope?: { userId: string; orgId: string; projectId: string; runId: string; apiKeyId?: string | null }): Promise<SourceMetadata> {
   const bytes = await downloadSourceBytes(file.sourceKey);
   const sourceSha256 = sha256Hex(bytes);
   // Header depth: magic bytes in the first few KB plus the declared type. ZIP and OLE containers are not opened and text is
@@ -173,34 +130,11 @@ export async function resolveSourceMetadata(file: {
   }
   const mimeType = fileFacts.mimeType;
   if (mimeType === "application/pdf") {
-    const directory = await mkdtemp(path.join(tmpdir(), "docslurp-pagecount-"));
-    const tempFile = path.join(
-      directory,
-      sanitizeUploadFilename(file.filename, "document.pdf"),
-    );
-
-    try {
-      await writeFile(tempFile, bytes);
-      let output: string;
-      try {
-        output = await runPdfInfo(tempFile);
-      } catch (error) {
-        if (error instanceof PdfInfoExitError && PDFINFO_UNREADABLE_EXIT_CODES.has(error.exitCode)) {
-          throw new UnreadableSourceError(file.filename, (error.message.replace(/^pdfinfo exited with (?:\d+|unknown):\s*/, "").split("\n")[0] || "invalid PDF").slice(0, 200));
-        }
-        throw error;
-      }
-      const pageCount = parsePdfInfoPageCount(output);
-      if (pageCount === null) throw new UnreadableSourceError(file.filename, "page count unavailable; refusing to ingest an incomplete document");
-      return { pageCount, sourceSha256, fileFacts };
-    } finally {
-      await rm(directory, { force: true, recursive: true });
-    }
+    // The API never parses customer PDF bytes (no pdfinfo or other native parser in this process): the page count is an
+    // estimate from the size, stored as `assumed` (shown as `estimated`). The worker measures the real count in its boundary
+    // before any stage uses it or anything bills; an unreadable PDF fails there.
+    return { pageCount: estimatedPdfPages(bytes.length), pageEvidence: "size-estimate", sourceSha256, fileFacts };
   }
 
-  return {
-    pageCount: estimateNonPdfPageCount(mimeType, bytes, fileFacts.encoding),
-    sourceSha256,
-    fileFacts,
-  };
+  return { ...nonPdfPageCount(mimeType, bytes, fileFacts.encoding, fileFacts.sniffedMimeType), sourceSha256, fileFacts };
 }

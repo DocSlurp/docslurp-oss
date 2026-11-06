@@ -6,7 +6,7 @@ import { startGraphRebuildSchema, updateProjectGraphSchema, type GraphJob } from
 import { actorHasAnyApiKeyScope, getRequestActor, apiKeyCanUseProject } from "../lib/request-actor.js";
 import { requestIp } from "../lib/request-context.js";
 import { appendAuditLog } from "../services/audit-log.js";
-import { INLINE_ESTIMATE_BUDGET_MS, jobStatusForMutation } from "../services/jobs.js";
+import { jobStatusForMutation } from "../services/jobs.js";
 import { billingState } from "../services/config-change.js";
 import {
   cancelGraphJob,
@@ -107,8 +107,7 @@ export const projectGraphRoutes = new Hono()
     if (denied) return denied;
     const userId = c.get("sessionUser").id;
     try {
-      let estimateMs = 0;
-      const job = await startGraphRebuild(projectRef, userId, c.req.valid("json"), { onEstimateTimed: (ms) => { estimateMs = ms; } });
+      const job = await startGraphRebuild(projectRef, userId, c.req.valid("json"));
       await audit(c, projectRef, userId, "project.graph.rebuild_started", job.id, {
         mode: job.mode,
         documents: job.documentsTotal,
@@ -116,11 +115,8 @@ export const projectGraphRoutes = new Hono()
         maxCostCents: job.maxCostCents,
       });
       const read = await jobStatusForMutation({ id: job.id, kind: "graph-rebuild" }, [], userId);
-      // Inline estimates only when they computed within the budget.
-      const status = estimateMs > INLINE_ESTIMATE_BUDGET_MS
-        ? { ...read, estimate: null, estimateUrl: `/v1/projects/${projectRef}/graph/jobs/estimate` }
-        : read;
-      return c.json({ ...job, job: status }, 202);
+      // The same estimate the estimate route returns, and that route.
+      return c.json({ ...job, job: { ...read, estimateUrl: `/v1/projects/${projectRef}/graph/jobs/estimate` } }, 202);
     } catch (error) {
       return graphError(c, error);
     }

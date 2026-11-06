@@ -2,7 +2,12 @@ import {
   compilePipelinePlan,
   effectiveIndexingMode,
   estimateProfileFor,
+  quoteEstimate,
+  quoteSettingsForPipeline,
   quoteUpload,
+  type EstimateQuote,
+  type EstimateRequest,
+  type QuoteSettings,
   type EstimateProfile,
   type QuoteFile,
   type UploadMediaEstimate,
@@ -102,13 +107,18 @@ export async function estimateUpload(args: {
   speedBoost?: boolean;
   files: QuoteFile[];
   project: { pipeline: PipelineFeatures; orgId: string };
+  settings?: Partial<QuoteSettings>;
   env?: EstimateEnv;
-}): Promise<{ estimate: CostEstimate; media: UploadMediaEstimate | null; profile: EstimateProfile }> {
-  const profile = estimateProfileFor(args.project.pipeline, {
-    workerSlots: await orgWorkerSlots(args.project.orgId),
-    env: args.env ?? process.env,
-  });
-  return { ...quoteUpload({ files: args.files, profile, speedBoost: args.speedBoost === true }), profile };
+}): Promise<{ estimate: CostEstimate; media: UploadMediaEstimate | null; profile: EstimateProfile; quote: EstimateQuote }> {
+  const workerSlots = await orgWorkerSlots(args.project.orgId);
+  const env = args.env ?? process.env;
+  const profile = estimateProfileFor(args.project.pipeline, { workerSlots, env });
+  // The same quote function as the public estimate, from the project's settings; the explicit speed boost wins.
+  const quote = quoteEstimate(
+    { files: args.files.map((file) => ({ ...file, ...(file.type === null ? { type: undefined } : {}) })) as EstimateRequest["files"], settings: { ...args.settings, speedBoost: args.speedBoost === true } },
+    { base: quoteSettingsForPipeline(args.project.pipeline), workerSlots, env },
+  );
+  return { ...quoteUpload({ files: args.files, profile, speedBoost: args.speedBoost === true }), profile, quote };
 }
 
 /** The one project the (editable) documents belong to, or null when they span several or none are found. */

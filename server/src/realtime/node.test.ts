@@ -53,16 +53,21 @@ async function rejected(url: string, headers: Record<string, string>) {
 }
 describe("real Node realtime Upgrade", () => {
   it("shares ten run subscriptions and activity on one connection; snapshots converge without HTTP reads", async () => {
-    const f = await fixture(); const { ws, frames } = await connect(f.url);
+    // Sharing and coalescing, not the watchdog: a 60 s window keeps the authorization watchdog from closing the socket
+    // while eleven sequential subscriptions are admitted on a loaded runner.
+    const f = await fixture({ authorizationRecheckMs: 60_000 }); const { ws, frames } = await connect(f.url);
     for (let n = 0; n < 10; n++) subscribe(ws, `run-${n}`, { kind: "run", runId: RUN });
     subscribe(ws);
-    await vi.waitFor(() => expect(frames.filter(frame => frame.type === "snapshot").length).toBeGreaterThanOrEqual(11));
+    await vi.waitFor(() => {
+      expect(ws.readyState, "socket still open").toBe(WebSocket.OPEN);
+      expect(frames.filter(frame => frame.type === "snapshot").length).toBeGreaterThanOrEqual(11);
+    }, { timeout: 15_000, interval: 50 });
     expect(f.backend.listen).toHaveBeenCalledTimes(1);
     expect(f.backend.project).toHaveBeenCalledTimes(2);
     for (let n = 0; n < 100; n++) f.update({ runs: [] });
-    await vi.waitFor(() => expect(frames.filter(frame => frame.type === "snapshot" && frame.data.runs.length === 0)).toHaveLength(11));
+    await vi.waitFor(() => expect(frames.filter(frame => frame.type === "snapshot" && frame.data.runs.length === 0)).toHaveLength(11), { timeout: 15_000, interval: 50 });
     expect(f.backend.project).toHaveBeenCalledTimes(4);
-  });
+  }, 30_000);
   it.each<Record<string, string>>([
     {}, { origin: "null" }, { origin: "https://evil.example.test" },
     { origin: ORIGIN, authorization: "Bearer dslp_test" }, { origin: ORIGIN, "x-api-key": "test" },
@@ -83,13 +88,25 @@ describe("real Node realtime Upgrade", () => {
     expect(f.backend.project).not.toHaveBeenCalled();
   });
   it("closes revoked sessions and removes revoked resources while idle", async () => {
-    const f = await fixture(); const { ws, frames } = await connect(f.url); subscribe(ws);
+    // Revocation, not the watchdog: the idle sweep runs every second and re-verifies decisions older than two seconds
+    // (node.ts verifyTimer), whatever the recheck window. With a 60 s window the watchdog (1011 authorization_timeout)
+    // cannot fire within this test however slow the runner is, so the only close is the revocation's. Watchdog
+    // fail-closed behaviour has its own cases ("expires stalled resource verification ..." and the session-check
+    // timeout case below), which use short windows on purpose.
+    const f = await fixture({ authorizationRecheckMs: 60_000 }); const { ws, frames } = await connect(f.url); subscribe(ws);
+    const closed = new Promise<{ code: number; reason: string }>(resolve => ws.once("close", (code, reason) => resolve({ code, reason: reason.toString() })));
     await vi.waitFor(() => expect(frames.some(frame => frame.type === "snapshot")).toBe(true));
+    const beforeDeny = frames.length;
     f.deny();
-    await vi.waitFor(() => expect(frames.some(frame => frame.code === "access_revoked")).toBe(true));
+    await vi.waitFor(() => {
+      expect(ws.readyState, "socket still open while revoking").toBe(WebSocket.OPEN);
+      expect(frames.some(frame => frame.code === "access_revoked")).toBe(true);
+    }, { timeout: 15_000, interval: 50 });
+    // Nothing reaches the client for a resource after its access was revoked.
+    expect(frames.slice(beforeDeny).filter(frame => frame.type === "snapshot" || frame.type === "upsert")).toEqual([]);
     f.revoke();
-    await vi.waitFor(() => expect(ws.readyState).toBe(WebSocket.CLOSED));
-  });
+    expect(await closed).toEqual({ code: 1008, reason: "access_revoked" });
+  }, 30_000);
   it.each(["{", JSON.stringify({ v: 2, type: "heartbeat" }), "x".repeat(9_000)])("rejects malformed, incompatible and oversized frames", async raw => {
     const f = await fixture(); const { ws } = await connect(f.url); ws.send(raw);
     await vi.waitFor(() => expect(ws.readyState).toBe(WebSocket.CLOSED));
@@ -213,17 +230,23 @@ describe("real Node realtime Upgrade", () => {
 });
 
 it("uses one bounded resource batch per sweep and still revokes an individual topic", async () => {
-  const f=await fixture();
+  // Sweep batching and revocation, not the watchdog: a 60 s window keeps the watchdog (1011 authorization_timeout) from
+  // closing the socket before the sweep on a loaded runner. The stalled-sweep case below covers the watchdog.
+  const f=await fixture({authorizationRecheckMs:60_000});
   let permitted=true;
   f.backend.authorizeMany=vi.fn(async(_user,resources)=>resources.map(()=>permitted?ORG:null));
   const {ws,frames}=await connect(f.url);
   for(let n=0;n<10;n++)subscribe(ws,`run-${n}`,{kind:"run",runId:RUN});
   await vi.waitFor(()=>expect(frames.filter(frame=>frame.type==="snapshot")).toHaveLength(10));
-  await vi.waitFor(()=>expect(f.backend.authorizeMany).toHaveBeenCalled());
+  // The first idle sweep re-verifies decisions once they are two seconds old.
+  await vi.waitFor(()=>expect(f.backend.authorizeMany).toHaveBeenCalled(),{timeout:15_000,interval:50});
   expect(vi.mocked(f.backend.authorizeMany).mock.calls.some(([,resources])=>resources.length===10)).toBe(true);
   permitted=false;
-  await vi.waitFor(()=>expect(frames.filter(frame=>frame.type==="error"&&frame.code==="access_revoked")).toHaveLength(10));
-});
+  await vi.waitFor(()=>{
+    expect(ws.readyState,"socket still open while revoking").toBe(WebSocket.OPEN);
+    expect(frames.filter(frame=>frame.type==="error"&&frame.code==="access_revoked")).toHaveLength(10);
+  },{timeout:15_000,interval:50});
+}, 30_000);
 it("fails closed when a batched resource sweep stalls despite healthy session checks", async () => {
   const f=await fixture();const {ws,frames}=await connect(f.url);
   subscribe(ws);await vi.waitFor(()=>expect(frames.some(frame=>frame.type==="snapshot")).toBe(true));

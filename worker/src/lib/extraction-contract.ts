@@ -21,11 +21,37 @@ function isTocHeading(text: string): boolean {
   return TOC_HEADINGS.has(foldKey(text.replace(/^#+\s*/, "")));
 }
 
+const isSpace = (char: string | undefined) => char !== undefined && /\s/.test(char);
+
+/**
+ * A table-of-contents entry: text, then a dot leader (`...`, `…`, `···`) or a gap of 3+ whitespace, then a 1-4 digit page
+ * number at the end. A linear scan in place of /\S.*(?:\.{3,}|…|·{3,}|\s{3,})\s*\d{1,4}\s*$/u, which backtracked
+ * cubically on long lines (council K #3 audit: 18 s on 4 KB). Lines over 1 KB are never entries.
+ */
+export function isLeaderTocLine(line: string): boolean {
+  if (line.length > 1024 || /[\r\u2028\u2029]/.test(line.trimEnd())) return false;
+  const text = line.trimEnd();
+  let digits = text.length;
+  while (digits > 0 && text[digits - 1]! >= "0" && text[digits - 1]! <= "9") digits--;
+  const count = text.length - digits;
+  if (count < 1 || count > 4) return false;
+  let gapStart = digits;
+  while (gapStart > 0 && isSpace(text[gapStart - 1])) gapStart--;
+  const before = (end: number) => text.slice(0, end).trim().length > 0;
+  // A wide gap: the leader is any 3 of the whitespace run, with text before it.
+  if (digits - gapStart >= 3 && before(gapStart)) return true;
+  const head = text.slice(0, gapStart);
+  for (const leader of ["...", "…", "···"]) {
+    if (head.endsWith(leader) && before(gapStart - leader.length)) return true;
+  }
+  return false;
+}
+
 /** Five or more consecutive entries that end in a page number after a dot leader or a wide gap. */
 function hasLeaderTocRun(text: string): boolean {
   let run = 0;
   for (const line of text.split("\n")) {
-    if (/\S.*(?:\.{3,}|…|·{3,}|\s{3,})\s*\d{1,4}\s*$/u.test(line)) {
+    if (isLeaderTocLine(line)) {
       if (++run >= 5) return true;
     } else if (line.trim()) {
       run = 0;
@@ -122,7 +148,9 @@ export function buildExtractionContract(args: {
     }
 
     // Extract links
-    const linkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
+    // Classes exclude their own opener: linear on unclosed `[` or `(` runs (council K #3 audit).
+    // One level of balanced parentheses in the target (Wikipedia-style `Foo_(bar)`) still parses (council M #6).
+    const linkRegex = /\[([^\][]+)\]\(((?:[^()]|\([^()]*\))+)\)/g;
     let linkMatch: RegExpExecArray | null = linkRegex.exec(pageText);
     while (linkMatch) {
       links.push({

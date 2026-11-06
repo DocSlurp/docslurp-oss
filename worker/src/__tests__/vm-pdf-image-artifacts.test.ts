@@ -139,10 +139,10 @@ it("uses the local default for image targets without a provider, and refuses mix
   const { resolveEmbeddedImageRequest }=await import("../extractors/embedded-images.js");
   const { defaultDocumentExtractionConfig }=await import("@docslurp/shared");
   const config={...defaultDocumentExtractionConfig,enrich:["document/media-map"]};
-  expect(resolveEmbeddedImageRequest(config,"pdf",["kreuzberg"])).toBeNull();
+  expect(resolveEmbeddedImageRequest(config,"pdf",["poppler-text"])).toBeNull();
   registerTestProvider();
-  expect(()=>resolveEmbeddedImageRequest(config,"pdf",["vm-pdf","kreuzberg"])).toThrow("vm-pdf-only");
-  expect(()=>resolveEmbeddedImageRequest({...config,voting:{enabled:true,secondary:"kreuzberg"}},"pdf",["vm-pdf"])).toThrow("vm-pdf-only");
+  expect(()=>resolveEmbeddedImageRequest(config,"pdf",["vm-pdf","poppler-text"])).toThrow("vm-pdf-only");
+  expect(()=>resolveEmbeddedImageRequest({...config,voting:{enabled:true,secondary:"poppler-text"}},"pdf",["vm-pdf"])).toThrow("vm-pdf-only");
   expect(()=>resolveEmbeddedImageRequest({...config,enrich:["document/media-map","page/text"]},"pdf",["vm-pdf"])).toThrow("non-image");
   expect(resolveEmbeddedImageRequest({...config},"pdf",["vm-pdf"])).toEqual({minWidth:1,minHeight:1});
   resetExtractorPluginsForTest();

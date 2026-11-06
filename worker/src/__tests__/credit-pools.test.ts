@@ -1,4 +1,9 @@
-import { FUNDED_WORKER_SLOTS, STARTER_CREDITS, STARTER_WORKER_SLOTS } from "@docslurp/shared";
+import { starterCredits, workerSlotsFor } from "@docslurp/shared";
+
+// Plan facts the migrations seed; the active pricing provider reports the same values.
+const STARTER_CREDITS = starterCredits();
+const STARTER_WORKER_SLOTS = workerSlotsFor(false);
+const FUNDED_WORKER_SLOTS = workerSlotsFor(true);
 import type { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 

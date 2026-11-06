@@ -163,3 +163,33 @@ describe("blocked boosted run recovery", () => {
     expect(leases).toHaveLength(0);
   });
 });
+
+describe("re-index versions of measured documents", () => {
+  const facts = { declaredMimeType: "application/msword", sniffedMimeType: "application/msword", mimeType: "application/msword", format: "office-other", container: "ole", encoding: null, mismatch: "none" };
+  async function measured(billingPages: number | null) {
+    await seed({ credits: 100_000, autoConfirm: true });
+    // A DOCX the worker measured at 300 pages: its page basis (page_count) is the one page its text splits into.
+    await sql`update documents set page_count = 1, billing_pages = ${billingPages}, billing_pages_method = ${billingPages ? "pdf-conversion" : null},
+      page_count_source = 'assumed', file_facts = ${sql.json(facts)}`;
+  }
+
+  it("prices the re-index on the pages the documents bill and carries the measured count, its source and file facts to each new version", async () => {
+    await measured(300);
+    const { plan, applied } = await patch(embeddingChange());
+    expect(applied?.job).toBeTruthy();
+    expect(plan.estimate?.pages).toBe(600); // two 300-page documents, not two pages
+    expect(plan.impact.pages).toBe(2); // the indexing count stays the page basis
+    const copies = await sql`select previous_version_id, page_count, billing_pages, billing_pages_method, page_count_source, file_facts
+      from documents where run_id in (select id from project_runs where kind = 'reindex') order by previous_version_id`;
+    expect(copies).toEqual([
+      { previous_version_id: "d0", page_count: 1, billing_pages: 300, billing_pages_method: "pdf-conversion", page_count_source: "assumed", file_facts: facts },
+      { previous_version_id: "d1", page_count: 1, billing_pages: 300, billing_pages_method: "pdf-conversion", page_count_source: "assumed", file_facts: facts },
+    ]);
+  });
+
+  it("prices an unmeasured document on its page count", async () => {
+    await measured(null);
+    const { plan } = await patch(embeddingChange());
+    expect(plan.estimate?.pages).toBe(2);
+  });
+});

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { defaultPipelineFeatures, embeddingProfileCatalog } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
-import { resolveEmbeddingModel } from "../embeddings/resolver.js";
+import { backendRuntime, resolveEmbeddingModel, resolveVectorBackends } from "../embeddings/resolver.js";
 import { parseLanceDbUri, parseStorageUri } from "@docslurp/shared";
 
 const baseConfig: Config = {
@@ -141,5 +141,23 @@ describe("resolveEmbeddingModel", () => {
     expect(result.model).toBe("nomic-embed-text");
     expect(result.runtime).toBe("remote");
     expect(result.baseUrl).toBe("http://127.0.0.1:11434/v1");
+  });
+});
+
+describe("vector backends: Chroma was removed (owner decision 2026-11-05)", () => {
+  it("offers lancedb, orama and milvus only; chroma is no backend", () => {
+    expect(resolveVectorBackends(baseConfig, { ...defaultPipelineFeatures, vectorBackends: ["lancedb", "milvus", "orama"] })).toEqual(["lancedb", "milvus", "orama"]);
+    expect(backendRuntime("chroma")).toBe("custom");
+    expect(backendRuntime("milvus")).toBe("service");
+  });
+
+  it("refuses an explicit chroma from VECTOR_BACKENDS or a pipeline, never falling back to another backend", () => {
+    expect(() => resolveVectorBackends({ ...baseConfig, vectorBackends: ["chroma"] }, { ...defaultPipelineFeatures, vectorBackends: [] }))
+      .toThrow(/VECTOR_BACKENDS: unsupported vector backend: chroma .*Chroma support was removed/);
+    // A pipeline that slipped past the schema (an old in-memory run) is refused too, even beside a supported backend.
+    expect(() => resolveVectorBackends(baseConfig, { ...defaultPipelineFeatures, vectorBackends: ["lancedb", "chroma"] as never }))
+      .toThrow(/pipeline.vectorBackends: unsupported vector backend: chroma/);
+    expect(() => resolveVectorBackends({ ...baseConfig, vectorBackends: ["pinecone"] }, { ...defaultPipelineFeatures, vectorBackends: [] }))
+      .toThrow(/unsupported vector backend: pinecone/);
   });
 });

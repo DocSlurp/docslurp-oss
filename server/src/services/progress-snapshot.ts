@@ -368,6 +368,11 @@ export function redactOperatorEvent<E extends { progress?: unknown; stats?: unkn
   return redacted;
 }
 
+/** A run (GET /runs, the activity stream) for a caller that is not a platform operator: its stats without worker diagnostics. */
+export function redactOperatorRun<R extends { stats?: unknown }>(run: R): R {
+  return "stats" in run ? { ...run, stats: redactOperatorKeys(run.stats) } : run;
+}
+
 /**
  * Platform-operator-only diagnostics: worker CPU and RAM per run, stage and event, and which worker classes and regions
  * served it. Customers (including org owners and admins) see cost, speed and page counts, not the machines behind them, so

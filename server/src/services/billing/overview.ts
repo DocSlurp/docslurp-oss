@@ -50,7 +50,7 @@ export async function getOrgStorage(
         where w.org_id = ${orgId} and r.extract_id is not null
           and d.status = 'completed' and d.superseded_at is null)`
     : db`(select 0 as bytes, 0 as pages)`;
-  const [row] = await db<{ source_bytes: string | number; pages: string | number }[]>`
+  const [row] = await db<{ source_bytes: string | number; pages: string | number; extra_pages: string | number }[]>`
     with extract_docs as ${extracts}
     select
       greatest(0, coalesce((select sum(s.source_bytes) from project_corpus_stats s
@@ -62,10 +62,15 @@ export async function getOrgStorage(
         join projects w on w.id = s.project_id where w.org_id = ${orgId}), 0)
        - (select pages from extract_docs)
        + coalesce((select sum(d.page_count) from documents d
-        where d.org_id = ${orgId} and d.archived_at is not null and d.purged_at is null), 0))::text as pages
+        where d.org_id = ${orgId} and d.archived_at is not null and d.purged_at is null), 0))::text as pages,
+      -- Pages a live document measured above its structural count (billing_pages: Office text, stuffed or giant pages):
+      -- its chunks, vectors and artifacts scale with what it holds, so the storage estimate does too.
+      coalesce((select sum(greatest(d.billing_pages - d.page_count, 0)) from documents d
+        join projects w on w.id = d.project_id
+        where w.org_id = ${orgId} and d.status = 'completed' and d.superseded_at is null and d.billing_pages > d.page_count), 0)::text as extra_pages
   `;
   const sourceBytes = Number(row?.source_bytes ?? 0);
-  const pages = Number(row?.pages ?? 0);
+  const pages = Number(row?.pages ?? 0) + Number(row?.extra_pages ?? 0);
   return {
     sourceBytes,
     pages,

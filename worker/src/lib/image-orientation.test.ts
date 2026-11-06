@@ -7,6 +7,7 @@ import {registerExtractorPlugin,resetExtractorPluginsForTest,type OrientationRes
 import {SandboxRunError} from '../sandbox/types.js';
 
 const orient=vi.fn<(input:string,output:string,signal?:AbortSignal)=>Promise<{result:OrientationResult;usage?:any}>>();
+const valid=(over:Partial<OrientationResult>={}):OrientationResult=>({model:'test-orientation',modelSha256:'a'.repeat(64),status:'corrected',inputClockwiseDegrees:90,correctionClockwiseDegrees:270,confidence:0.9,margin:0.5,width:20,height:10,sourceWidth:10,sourceHeight:20,exifOrientation:1,exifApplied:false,mimeType:'image/png',...over});
 const register=()=>registerExtractorPlugin({apiVersion:1,name:'test-orientation',imageOrientation:{id:'test-orientation',maxCostCents:1,orient}});
 beforeEach(()=>{resetExtractorPluginsForTest();register();});
 afterEach(()=>{vi.unstubAllEnvs();vi.resetAllMocks();resetExtractorPluginsForTest();});
@@ -28,7 +29,7 @@ it('is off without a provider and refuses to run instead of decoding on the host
 it('uses a distinct derivative, accounts for provider cost and cleans it without changing original',async()=>{
  const dir=await mkdtemp(path.join(tmpdir(),'orientation-helper-'));const input=path.join(dir,'source');await writeFile(input,'original');
  const usage={provider:'modal',model:'vm',metric:'sandbox_compute',amount:1,unit:'cent',costCents:1};
- orient.mockImplementation(async(_input,output)=>{await writeFile(output,'derivative');return {result:{status:'corrected'} as OrientationResult,usage};});
+ orient.mockImplementation(async(_input,output)=>{await writeFile(output,'derivative');return {result:valid(),usage};});
  try {const record=vi.fn();const result=await normalizeImageOrientation(input,record);expect(record).toHaveBeenCalledExactlyOnceWith(usage);expect(result.metadata.status).toBe('corrected');expect(result.path).not.toBe(input);await result.release();await expect(access(result.path)).rejects.toThrow();await expect(access(input)).resolves.toBeUndefined();}finally{await rm(dir,{recursive:true,force:true});}
 });
 it('records failed provider spend and never falls back to an unconfined decoder',async()=>{
@@ -55,4 +56,25 @@ it('bounds attempts including failures and refuses malformed persisted counters'
  expect(reserveOrientationAttempt(state)).toBe(false);
  expect(state.run.stats.imageOrientationAttempts).toBe(64);
  for(const value of [-1,NaN,'0',Infinity]){state.run.stats.imageOrientationAttempts=value;expect(()=>reserveOrientationAttempt(state)).toThrow();}
+});
+
+it('refuses provider results that are malformed, unbounded or name a different model, still recording spend',async()=>{
+ const usage={provider:'modal',model:'vm',metric:'sandbox_compute',amount:1,unit:'cent',costCents:1};
+ const bad:unknown[]=[
+  {status:'corrected'},
+  valid({model:'other-provider'}),
+  valid({modelSha256:'not-hex'}),
+  valid({status:'rotated' as never}),
+  valid({inputClockwiseDegrees:45 as never}),
+  valid({confidence:2}),
+  valid({width:1e9}),
+  valid({mimeType:'image/jpeg' as never}),
+  {...valid(),extra:'field'},
+ ];
+ for(const result of bad){
+  orient.mockImplementationOnce(async()=>({result:result as OrientationResult,usage}));
+  const record=vi.fn();
+  await expect(normalizeImageOrientation('/unused/source',record)).rejects.toThrow(/invalid result|different model/);
+  expect(record).toHaveBeenCalledExactlyOnceWith(usage);
+ }
 });

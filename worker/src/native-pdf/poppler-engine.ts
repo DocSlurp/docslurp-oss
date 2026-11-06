@@ -1,4 +1,5 @@
-import type { CommandPlan, CommandResult } from "../tools/runner.js";
+import { countPdfPages } from "../lib/pdf-page-count.js";
+import type { CommandPlan, CommandResult, CommandRunner } from "../tools/runner.js";
 import {
   NativePdfError,
   unsupported,
@@ -10,7 +11,8 @@ import {
 
 /** The subset of CommandRunner the poppler engine needs (sandboxed pdftotext). */
 export interface PopplerRunner {
-  extractText(source: string, preservePageBreaks?: boolean): Promise<CommandPlan>;
+  extractText(source: string, pages: number, preservePageBreaks?: boolean): Promise<CommandPlan>;
+  pdfPageCount: CommandRunner["pdfPageCount"];
   run(plan: CommandPlan, signal?: AbortSignal): Promise<CommandResult>;
 }
 
@@ -44,7 +46,8 @@ export class PopplerNativePdfEngine implements NativePdfEngine {
 
   async openPath(path: string, opts?: { password?: string; signal?: AbortSignal }): Promise<NativePdfDocument> {
     if (opts?.password) throw unsupported("password", this.id);
-    const plan = await this.runner.extractText(path, true);
+    // pdftotext stops at the page tree's walked count (Doppler pdfpagecount), never the file's own /Count.
+    const plan = await this.runner.extractText(path, await countPdfPages(this.runner, path, opts?.signal), true);
     if (!plan.available) throw new NativePdfError("NATIVE_PDF_UNAVAILABLE", "pdftotext is not installed");
     let pages: string[] | null = null;
     const load = async () => {

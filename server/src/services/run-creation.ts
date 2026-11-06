@@ -128,9 +128,9 @@ function sourceMetadata(value: unknown): Record<string, never> {
 }
 
 /**
- * `pages` for a forecast file: only a count (the worker's measured billing pages, or intake's count of a PDF, text file or image). An
- * assumed count, the one page intake gives an Office, slide, sheet or EPUB file, would price a 5 MB deck as a page, so the forecast
- * prices that file from its size instead (countedPagesForForecast).
+ * `pages` for a forecast file: only a count (the worker's measured billing pages or page count, or intake's count from the bytes of a
+ * whole text file or a single-frame image). An assumed count (a PDF's size estimate, the one page intake gives an Office file, a
+ * sampled text count) is left out, and the forecast prices that file over its size as a labelled range (countedPagesForForecast).
  */
 function forecastPages(doc: { page_count: number; billing_pages?: number | null; page_count_source?: string | null }): { pages?: number } {
   const pages = countedPagesForForecast({ pageCount: doc.page_count, billingPages: doc.billing_pages, pageCountSource: doc.page_count_source });
@@ -177,7 +177,7 @@ export async function enforceLiveBudgetCaps(
 
   // Credits are checked atomically when the run row is inserted
   // (admitRunSpend). An admitted run is paused, not failed, once the org
-  // balance goes negative mid-run (docs/pricing-and-credits.md, gotcha 7).
+  // balance goes negative mid-run (docs/billing/credits.md, run admission).
 
   // Budgets first: summing a month of attributed usage is the most expensive
   // statement on the ingest path (67% of app-database time at 576 slots in the
@@ -719,7 +719,7 @@ export function createRunCreation(deps: RunCreationDeps) {
       const documentId = randomUUID();
       let metadata: Awaited<ReturnType<typeof resolveSourceMetadata>>;
       try {
-        metadata = await resolveSourceMetadata({ ...file, filename });
+        metadata = await resolveSourceMetadata({ ...file, filename }, { userId: input.userId, orgId, projectId: input.projectId, runId, apiKeyId: input.apiKeyId });
       } catch (error) {
         if (error instanceof UnreadableSourceError) {
           unreadable.push({ sourceKey: file.sourceKey, filename, error });
@@ -780,8 +780,9 @@ export function createRunCreation(deps: RunCreationDeps) {
             'queued',
             'hybrid',
             ${metadata.pageCount},
-            -- A PDF's own count, the text rule over a text file and an image's one page are counted; a format only the worker can count is assumed.
-            ${intakePageCountSource({ name: filename, type: metadata.fileFacts.mimeType })},
+            -- Counted only on evidence from the bytes (the text rule over the whole text, a sniffed single-frame image); a PDF's
+            -- size estimate, a sampled text count and a format only the worker counts are assumed.
+            ${intakePageCountSource(metadata.pageEvidence)},
             ${metadata.sourceSha256},
             ${sql.json(JSON.parse(JSON.stringify(metadata.fileFacts)))},
             -- Point at the vector owner, not an intermediate copy, so purge keeps
@@ -850,7 +851,7 @@ export function createRunCreation(deps: RunCreationDeps) {
         const [inserted] = await client<DocumentRow[]>`
           insert into documents (
             id, org_id, user_id, project_id, run_id, filename, mime_type, source_key,
-            status, extraction_mode, page_count, page_count_source, file_size, source_sha256, file_facts,
+            status, extraction_mode, page_count, page_count_source, billing_pages, billing_pages_method, file_size, source_sha256, file_facts,
             canonical_id, version_number, previous_version_id, reused_from_document_id, metadata, indexing_mode
           )
           values (
@@ -866,7 +867,11 @@ export function createRunCreation(deps: RunCreationDeps) {
             ${source.extraction_mode},
             -- A new version starts from the source's page_count; the worker re-counts Office and EPUB pages after conversion.
             ${source.page_count ?? 0},
-            ${source.page_count_source ?? "counted"},
+            ${source.page_count_source ?? "assumed"},
+            -- The source's measured count bills the new version until the worker measures it again; a run that reuses the
+            -- conversion stage never does, and without it a 300-page DOCX would bill as one page.
+            ${source.billing_pages ?? null},
+            ${source.billing_pages_method ?? null},
             ${Number(source.file_size ?? 0) || 0},
             ${source.source_sha256 ?? null},
             ${source.file_facts ? sql.json(source.file_facts as never) : null},
