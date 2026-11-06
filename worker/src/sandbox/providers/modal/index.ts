@@ -42,6 +42,16 @@ export interface ModalConfig {
  * activity's Modal sandbox (and writing its remote directories) until the session closes or
  * `sessionTimeoutSeconds` ends it. See docs/self-host/sandbox-providers.md, "Process teardown".
  */
+/**
+ * The parser VM's main process: idle until terminated. Never the image's own entrypoint, which is the worker's start script
+ * (`start-worker.sh`, with a first-boot network install) and would run beside the customer job (real-Modal validation N1).
+ */
+export const PARSER_VM_IDLE_COMMAND = ["sleep", "infinity"] as const;
+/** Lifetime of the startup probe's VM: a backstop if its terminate request is lost. */
+export const PROBE_SESSION_TIMEOUT_SECONDS = 120;
+/** Deadline for the terminate request. Modal stops the VM once it accepts the request; exit is not awaited. */
+const TERMINATE_REQUEST_MS = 10_000;
+
 const ISOLATION: SandboxIsolation = { filesystem: true, network: "full", processes: true, location: "remote" };
 
 const configSchema: SandboxConfigSchema = {
@@ -333,13 +343,17 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
     async probe(config) {
       let session: SandboxSession | undefined;
       try {
-        session = await provider.openSession(config, { activityId: "startup-probe" });
+        session = await provider.openSession({ ...config, sessionTimeoutSeconds: Math.min(config.sessionTimeoutSeconds, PROBE_SESSION_TIMEOUT_SECONDS) }, { activityId: "startup-probe" });
         const result = await session.run!({ binary: "node", args: ["/app/worker/scripts/parser-vm-contract.mjs"], env: { PATH: "/usr/local/bin:/usr/bin:/bin" }, readablePaths: [], inputPaths: [], writablePaths: [], limits: { timeoutMs: 30_000 } });
         if (result.exitCode !== 0 || JSON.parse(result.stdout).protocol !== "parser-vm@2") throw new Error("parser VM image contract unavailable");
         return { ok: true, isolation: ISOLATION, detail: `VM image contract verified for '${config.app}'` };
       } catch (error) {
         return { ok: false, isolation: ISOLATION, detail: safeMessage(config, error) };
-      } finally { await session?.close(); }
+      } finally {
+        // A slow terminate never decides the probe: close() has asked Modal to stop the VM (and retried with a fresh client),
+        // and the probe VM's short lifetime ends it otherwise.
+        await session?.close().catch((error: unknown) => console.warn(`[parser-sandbox] provider=modal probe VM terminate: ${safeMessage(config, error)}`));
+      }
     },
     async openSession(config, context) {
       const { sdk, client } = await loadClient(config);
@@ -356,19 +370,27 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         return terminating;
       }
       async function doTerminate(): Promise<void> {
+        let failure: unknown;
         try {
-          if (sandbox) await withDeadline(sandbox.terminate({ wait: true }), 5_000);
+          // Ask Modal to stop the VM; waiting for its exit is not needed (and an image process that ignores signals could
+          // hold a wait for tens of seconds).
+          if (sandbox) await withDeadline(sandbox.terminate(), TERMINATE_REQUEST_MS);
         } catch (error) {
-          throw new Error(`modal sandbox terminate failed: ${safeMessage(config, error)}`);
+          failure = error;
         } finally {
           clientClosed = true;
           client.close();
         }
+        if (failure !== undefined && sandbox) {
+          // Retry once on a fresh client so a stuck connection cannot leave the VM running.
+          if (await terminateLate(sandbox)) return;
+          throw new Error(`modal sandbox terminate failed: ${safeMessage(config, failure)}`);
+        }
       }
-      async function terminateLate(created: import("modal").Sandbox): Promise<void> {
+      async function terminateLate(created: import("modal").Sandbox): Promise<boolean> {
         const cleanupClient = clientClosed ? new sdk.ModalClient({ tokenId: config.tokenId, tokenSecret: config.tokenSecret }) : client;
-        try { await withDeadline(new sdk.Sandbox(cleanupClient, created.sandboxId).terminate({ wait: true }), 5_000); }
-        catch { console.warn("[parser-sandbox] late VM cleanup failed; provider lifetime limit remains enforced"); }
+        try { await withDeadline(new sdk.Sandbox(cleanupClient, created.sandboxId).terminate(), TERMINATE_REQUEST_MS); return true; }
+        catch { console.warn("[parser-sandbox] late VM cleanup failed; provider lifetime limit remains enforced"); return false; }
         finally { if (cleanupClient !== client) cleanupClient.close(); }
       }
 
@@ -379,6 +401,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           const image = config.imageId ? await withDeadline(client.images.fromId(config.imageId), 30_000) : client.images.fromRegistry(config.image, registrySecret);
           const opened = await withDeadline(client.sandboxes.create(app, image, {
             runtime: "vm",
+            command: [...PARSER_VM_IDLE_COMMAND],
             includeOidcIdentityToken: false,
             env: {}, secrets: [], volumes: {}, cloudBucketMounts: {},
             cpu: config.cpu, cpuLimit: config.cpu,

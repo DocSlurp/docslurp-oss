@@ -294,11 +294,14 @@ function fakeSdk(
     createGate?: Promise<void>;
     exec?: (command: string[], control: string) => Promise<FakeProcess>;
     onKill?: (control: string) => void;
+    /** The first client's terminate request never answers (a stuck connection). */
+    terminateHangs?: boolean;
   } = {},
 ) {
   const remote = new MemoryRemoteFs();
   const state = {
     terminate: 0,
+    lateTerminate: 0,
     clientClose: 0,
     mkdirs: [] as string[],
     stats: [] as string[],
@@ -317,7 +320,7 @@ function fakeSdk(
   });
   const sandbox = {
     sandboxId: "sb-test",
-    terminate: async () => void state.terminate++,
+    terminate: async () => { state.terminate++; if (opts.terminateHangs) await new Promise(() => {}); },
     filesystem: {
       makeDirectory: async (p: string) => {
         state.mkdirs.push(p);
@@ -349,7 +352,7 @@ function fakeSdk(
   };
   const sdk = {
     SandboxFilesystemNotFoundError: NotFound,
-    Sandbox: class { constructor(_client: unknown, _id: string) {} async terminate() { state.terminate++; } },
+    Sandbox: class { constructor(_client: unknown, _id: string) {} async terminate() { state.terminate++; state.lateTerminate++; } },
     ModalClient: class {
       apps = { fromName: async () => ({}) };
       images = { fromRegistry: (tag: string, secret?: unknown) => void state.images.push([tag, secret]) };
@@ -405,6 +408,39 @@ describe("modal provider session lifecycle", () => {
       expect(state.clientClose).toBe(1);
       release(); await vi.advanceTimersByTimeAsync(1);
       expect(state.terminate).toBe(1); expect(state.clientClose).toBe(2);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("starts every parser VM with the idle command, never the image's entrypoint (validation N1)", async () => {
+    const { state, session } = await open();
+    await (await session()).close();
+    expect(state.createOptions[0]).toMatchObject({ command: ["sleep", "infinity"] });
+  });
+
+  it("a terminate request that never answers is retried on a fresh client and does not hang close (validation N1)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { state, session } = await open({ terminateHangs: true });
+      const opened = await session();
+      const closing = opened.close().then(() => "closed", (error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(await closing).toBe("closed");
+      expect(state.lateTerminate).toBe(1);
+      expect(state.clientClose).toBe(2);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("the startup probe's VM gets a short lifetime and a stuck teardown does not fail the probe (validation N1)", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const { sdk, state } = fakeSdk({ terminateHangs: true, exec: async () => finished(JSON.stringify({ protocol: "parser-vm@2" })) });
+      const provider = createModalProvider(async () => sdk);
+      const probing = provider.probe(config);
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(await probing).toMatchObject({ ok: true });
+      expect(state.createOptions[0]).toMatchObject({ command: ["sleep", "infinity"], timeoutMs: Math.min(config.sessionTimeoutSeconds, 120) * 1000 });
+      expect(state.lateTerminate).toBe(1);
     } finally { vi.useRealTimers(); }
   });
 
