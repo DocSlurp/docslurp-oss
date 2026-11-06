@@ -1089,6 +1089,11 @@ const INTAKE_SELECTION_FIELDS = ["project", "projectId", "projectIds", "projectN
 
 function rejectUncopyableIntakeSelection(input: object, plainProjection = false): void {
   rejectUncopyableFields(input, INTAKE_SELECTION_FIELDS);
+  // Spreading any accessor can mutate previously checked selectors before they
+  // are copied. Protocol containers must hold data; nested metadata is opaque.
+  for (const key of Reflect.ownKeys(input)) {
+    if (!("value" in Object.getOwnPropertyDescriptor(input, key)!)) throw new TypeError("Request fields must be data properties.");
+  }
   for (const key of INTAKE_SELECTION_FIELDS) {
     const value = Object.getOwnPropertyDescriptor(input, key)?.value;
     if (value === undefined) continue;
@@ -2349,6 +2354,9 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       rejectLegacyProjectOptions(input);
       // This endpoint explicitly projects plain protocol values below.
       rejectUncopyableIntakeSelection(input, true);
+      for (const key of INTAKE_SELECTION_FIELDS) {
+        if (key !== "projectIds" && key in input) throw new TypeError("Pass capability project selection in projectIds only.");
+      }
       rejectUncopyableFields(input, ["policy", "ttlSeconds", "boundClientKeyId", "allowedOrigins"]);
       if (input.ttlSeconds !== undefined && (typeof input.ttlSeconds !== "number" || !Number.isFinite(input.ttlSeconds))) throw new TypeError("Capability ttlSeconds must be a finite number.");
       if (input.boundClientKeyId !== undefined && typeof input.boundClientKeyId !== "string") throw new TypeError("Capability boundClientKeyId must be a string.");

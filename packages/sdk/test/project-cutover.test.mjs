@@ -255,3 +255,22 @@ test("capability arrays use validated data slots rather than custom iterators", 
   await client.createCapability({ projectIds });
   assert.deepEqual(captured.projectIds, ["restricted"]);
 });
+
+
+test("capabilities refuse canonical selectors outside their projectIds allowlist", async () => {
+  let requests = 0;
+  const client = createDocSlurpClient({ fetch: async () => { requests++; throw new Error("network must not run"); } });
+  for (const [key,value] of Object.entries({ project: "intended", projectId: "intended", orgId: "intended-org", projectName: "intended", project_id: "intended", project_ids: ["intended"], newProject: true, templateKey: "intended" })) {
+    await assert.rejects(async () => client.createCapability({ [key]: value }), /projectIds only/);
+  }
+  assert.equal(requests, 0);
+});
+
+test("unrelated request accessors cannot mutate validated scope during copying", async () => {
+  let requests = 0, reads = 0;
+  const client = createDocSlurpClient({ project: "client-default", fetch: async () => { requests++; throw new Error("network must not run"); } });
+  const input = { project: "intended", orgId: "intended-org", get q() { reads++; delete this.project; delete this.orgId; return "question"; } };
+  await assert.rejects(async () => client.search(input), /must be data properties/);
+  assert.equal(reads, 0);
+  assert.equal(requests, 0);
+});
