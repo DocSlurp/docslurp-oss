@@ -186,6 +186,61 @@ describe("estimate twins equal the mutation's job.estimate", () => {
   });
 });
 
+describe("estimate twins answer the unified quote from measured documents", () => {
+  beforeEach(seed);
+
+  type Quote = { kind: string; pricingVersion: string; pages: { low: number; high: number }; ingest: { credits: { low: number; high: number } | null }; hosting: { bytes: { low: number } }; settings: { indexing: string } };
+
+  it("each work estimate carries a quote whose ingest is the work's own estimate", async () => {
+    const app = appFor("u1");
+    for (const [path, body] of [
+      ["/v1/runs/run/reprocess/estimate", {}],
+      ["/v1/workspaces/w/documents/bulk/estimate", { action: "reprocess", documentIds: ["d1", "d2"] }],
+      ["/v1/workspaces/w/full-index/estimate", {}],
+    ] as const) {
+      const out = await (await post(app, path, body)).json() as { estimate: { credits: { low: number; high: number } }; quote: Quote };
+      expect(out.quote, path).toMatchObject({ kind: "estimate", pricingVersion: expect.any(String), pages: { low: 9, high: 9 } });
+      expect(out.quote.ingest.credits).toEqual({ low: Math.round(out.estimate.credits.low * 100) / 100, high: Math.round(out.estimate.credits.high * 100) / 100 });
+    }
+    const one = await (await post(app, "/v1/documents/d1/full-index/estimate")).json() as { quote: Quote };
+    expect(one.quote).toMatchObject({ pages: { low: 4, high: 4 }, settings: { indexing: "full" } });
+  });
+
+  it("a config change that reprocesses nothing quotes no ingest, only hosting under the new settings", async () => {
+    const out = await (await post(appFor("u1"), "/v1/workspaces/w/estimate", { name: "Renamed" })).json() as { estimate: unknown; quote: Quote };
+    expect(out.estimate).toBeNull();
+    expect(out.quote.ingest.credits).toEqual({ low: 0, high: 0 });
+    expect(out.quote.pages).toEqual({ low: 9, high: 9 });
+  });
+
+  it("the stored scope never reaches another organization's or workspace's documents", async () => {
+    const { storedQuoteFiles } = await import("../services/stored-quote.js");
+    await sql`insert into workspaces(id, org_id, user_id, name, slug, pipeline, is_default) values ('w2', 'o2', 'u2', 'Theirs', 'theirs', ${sql.json(JSON.parse(JSON.stringify(defaultPipelineFeatures)))}, true)`;
+    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total, artifacts)
+      values ('run2', 'o2', 'u2', 'w2', 'upload', 'completed', 'index', ${sql.json(JSON.parse(JSON.stringify(defaultPipelineFeatures)))}, 1, 50, '{}')`;
+    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id)
+      values ('x1', 'o2', 'u2', 'w2', 'run2', 'x.pdf', 'application/pdf', 'kx', 'completed', 50, 'cx')`;
+    // Another org's document ids, workspace or run under this org's scope: nothing.
+    expect(await storedQuoteFiles({ orgId: "o1", documentIds: ["x1"] })).toEqual([]);
+    expect(await storedQuoteFiles({ orgId: "o1", workspaceId: "w2" })).toEqual([]);
+    expect(await storedQuoteFiles({ orgId: "o1", runId: "run2" })).toEqual([]);
+    expect(await storedQuoteFiles({ orgId: "o1", documentIds: [] })).toEqual([]);
+    // Mixed ids keep only this org's own.
+    const own = await storedQuoteFiles({ orgId: "o1", documentIds: ["d1", "x1"] });
+    expect(own.map((file) => file.pages)).toEqual([4]);
+    // The bulk twin cannot quote another org's document through this workspace either.
+    const out = await (await post(appFor("u1"), "/v1/workspaces/w/documents/bulk/estimate", { action: "reprocess", documentIds: ["x1"] })).json() as { quote: Quote | null };
+    expect(out.quote?.pages.high ?? 0).toBe(0);
+  });
+
+  it("pages a model read are the measured mix", async () => {
+    const { storedQuoteFiles } = await import("../services/stored-quote.js");
+    await sql`insert into document_page_facts (document_id, page_number, vision_status) values ('d1', 1, 'extracted'), ('d1', 2, 'not-selected'), ('d2', 1, 'extracted')`;
+    const [file] = await storedQuoteFiles({ orgId: "o1", workspaceId: "w" });
+    expect(file).toMatchObject({ pages: 9, measured: { pages: 9, readPages: 2 }, type: "application/pdf" });
+  });
+});
+
 describe("estimate twins enforce the mutation's authorization", () => {
   beforeEach(seed);
 

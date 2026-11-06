@@ -1,3 +1,4 @@
+import { quoteStoredDocuments } from "../services/stored-quote.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { Hono, type Context } from "hono";
 import { zValidator } from "@hono/zod-validator";
@@ -309,9 +310,15 @@ export const runsRoutes = new Hono()
   .post("/:runId/reprocess/estimate", zValidator("json", reprocessRunSchema, validationHook), async (c) => {
     const denied = await denyRunContentUpdate(c, c.req.param("runId"));
     if (denied) return denied;
-    const estimate = await estimateRunReprocess({ runId: c.req.param("runId"), userId: c.get("sessionUser").id, options: c.req.valid("json") });
+    const userId = c.get("sessionUser").id;
+    const estimate = await estimateRunReprocess({ runId: c.req.param("runId"), userId, options: c.req.valid("json") });
     if (!estimate) return apiStatusError(c, 404, "Run not found");
-    return c.json({ estimate, billing: billingState() });
+    // The same quote shape as POST /v1/estimate, from the run's measured documents (estimateRunReprocess checked access).
+    const run = await getRun(c.req.param("runId"), userId, { cost: false });
+    const quote = run?.orgId
+      ? await quoteStoredDocuments({ scope: { orgId: run.orgId, workspaceId: run.workspaceId, runId: run.id }, pipeline: run.pipeline, estimate })
+      : null;
+    return c.json({ estimate, quote, billing: billingState() });
   })
   .post("/:runId/reprocess", zValidator("json", reprocessRunSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;

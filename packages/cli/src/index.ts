@@ -60,7 +60,7 @@ export function resolveQualityPipeline(flags: Record<string, string | boolean>):
 
 function usage(): void {
   console.log(`Usage:
-  docslurp estimate <files...> [--quality <fast|auto|good>] [--indexing <full|on-demand>] [--months <n>] [--json]
+  docslurp estimate <files...> [--quality <fast|auto|good>] [--indexing <full|on-demand|visual>] [--months <n>] [--json]
   docslurp upload <files...> [--workspace <id|slug|name> | --new-workspace] [--template <key>] [--quality <fast|auto|good>] [--canonical-id <id>] [--path <folder>] [--idempotency-key <key>] [--estimate] [--watch] [--api-url <url>]
   docslurp ingest-url <urls...> [--workspace <id|slug|name> | --new-workspace] [--template <key>] [--quality <fast|auto|good>] [--watch] [--api-url <url>]
   docslurp extract <files...|urls...> [--retention-days <n>] [--no-email] [--download <markdown|all>] [upload options]

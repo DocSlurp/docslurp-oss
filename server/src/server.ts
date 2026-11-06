@@ -10,7 +10,7 @@ import { existsSync } from "node:fs";
 import { initializeObservability } from "@docslurp/shared/observability";
 import { startRevisionMaintenance } from "./realtime/revision-maintenance.js";
 import { envFlags, formatEnvFlags } from "@docslurp/shared/env-flags";
-import { startLiveModelPriceRefresh } from "@docslurp/shared";
+import { QuoteSettingsError, startLiveModelPriceRefresh } from "@docslurp/shared";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { dirname, resolve } from "node:path";
@@ -128,6 +128,7 @@ export function createApiApp(): Hono {
   app.onError(nativeErrorHandler((error, c) => {
     // The request span records it (message, stack) once the response is sent.
     setCurrentRequestError(error);
+    if (error instanceof QuoteSettingsError) return c.json({ error: error.message, code: "invalid_request" }, 400);
     return error instanceof UnreadableSourceError
       ? c.json({ error: error.message, code: error.code }, error.statusCode)
       : spendAwareErrorHandler(error, c);

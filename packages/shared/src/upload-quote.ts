@@ -86,6 +86,8 @@ export type QuoteFile = UploadMediaFile & {
   pageEquivalents?: number;
   /** The high end of the page equivalents (profilePageEquivalentRange): wider when text was estimated or pages unsampled. */
   pageEquivalentsHigh?: number;
+  /** For a document already processed: its pages and how many a model read, as the worker recorded them (trusted). */
+  measured?: { pages: number; readPages: number };
   profile?: FileProfile;
 };
 

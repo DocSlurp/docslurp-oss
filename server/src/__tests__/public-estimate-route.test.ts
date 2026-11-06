@@ -44,6 +44,8 @@ describe("POST /v1/estimate (public)", () => {
     expect((await post({ files: [{ ...good, profile: { ...good.profile, credits: 0 } }] })).status).toBe(400);
     expect((await post({ files: [good], settings: { margin: 1 } })).status).toBe(400);
     expect((await post({ files: [good], workspace: "ws-1" })).status).toBe(400);
+    // Visual indexing reads every page: it cannot be quoted with fast quality, as a workspace cannot be configured so.
+    expect((await post({ files: [good], settings: { quality: "fast", indexing: "visual" } })).status).toBe(400);
     expect((await post({ files: Array.from({ length: 201 }, () => good) })).status).toBe(413);
     const huge = await app().request("/v1/estimate", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ files: [good], pad: "x".repeat(1_100_000) }) });
     expect(huge.status).toBe(413);
@@ -67,6 +69,17 @@ describe("POST /v1/estimate (public)", () => {
     expect(clamped.pages.high).toBeLessThanOrEqual(2 + 20 + 2 + 2);
   });
 
+  it("quotes visual indexing as a read of every page", async () => {
+    vi.stubEnv("STRIPE_SECRET_KEY", "sk_test_x");
+    const good = { name: "a.pdf", size: 40_000, profile: profile(40_000, 12) };
+    const full = await (await post({ files: [good], settings: { quality: "auto", indexing: "full" } })).json() as { ingest: { credits: { low: number } }; settings: { indexing: string; quality: string } };
+    const visual = await (await post({ files: [good], settings: { quality: "auto", indexing: "visual" } })).json() as typeof full;
+    const every = await (await post({ files: [good], settings: { quality: "good", indexing: "full" } })).json() as typeof full;
+    expect(visual.settings).toMatchObject({ indexing: "visual", quality: "auto" });
+    expect(visual.ingest.credits.low).toBe(every.ingest.credits.low);
+    expect(visual.ingest.credits.low).toBeGreaterThanOrEqual(full.ingest.credits.low);
+  });
+
   it("rate limits per client IP", async () => {
     vi.stubEnv("ESTIMATE_RATE_LIMIT_PER_MINUTE", "2");
     const body = { files: [{ name: "a.pdf", size: 1_000 }] };
@@ -74,5 +87,23 @@ describe("POST /v1/estimate (public)", () => {
     const statuses = [];
     for (let i = 0; i < 3; i += 1) statuses.push((await post(body, headers)).status);
     expect(statuses.at(-1)).toBe(429);
+  });
+
+  it("issues an opaque quote session and rate limits per session across addresses", async () => {
+    vi.stubEnv("ESTIMATE_RATE_LIMIT_PER_MINUTE", "1000");
+    vi.stubEnv("ESTIMATE_SESSION_RATE_LIMIT_PER_MINUTE", "2");
+    const body = { files: [{ name: "a.pdf", size: 1_000 }] };
+    const first = await post(body, { "x-forwarded-for": "198.51.100.40" });
+    const cookie = first.headers.get("set-cookie") ?? "";
+    expect(cookie).toMatch(/^ds_estimate_session=[A-Za-z0-9_-]{22};/);
+    expect(cookie).toMatch(/HttpOnly/i);
+    const session = cookie.split(";")[0]!;
+    const statuses = [first.status];
+    for (const ip of ["198.51.100.41", "198.51.100.42"]) statuses.push((await post(body, { "x-forwarded-for": ip, cookie: session })).status);
+    expect(statuses).toEqual([200, 200, 429]);
+    // A forged cookie is replaced, never trusted as a session.
+    const forged = await post(body, { "x-forwarded-for": "198.51.100.43", cookie: "ds_estimate_session=../../x" });
+    expect(forged.status).toBe(200);
+    expect(forged.headers.get("set-cookie")).toMatch(/^ds_estimate_session=[A-Za-z0-9_-]{22};/);
   });
 });

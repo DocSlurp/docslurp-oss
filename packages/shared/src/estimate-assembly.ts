@@ -59,7 +59,9 @@ export function assembleEstimateQuote(args: ProviderEstimateArgs & {
   validForMs: number;
   now?: Date;
 }): EstimateQuote {
-  const { files, settings, ingest } = args;
+  const { files, settings } = args;
+  // Stage-priced work on stored documents replaces the upload quote.
+  const ingest = args.work ?? args.ingest;
   const billed = args.profile.billing === "enforced";
   const paged = files.filter((file) => !uploadMediaKind(file));
   // Page equivalents: a stuffed page holds (and is billed as) more than one page; hosting scales with what it holds.

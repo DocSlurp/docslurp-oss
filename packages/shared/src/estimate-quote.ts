@@ -4,6 +4,8 @@ import { isBillingEnforced, pipelineProfileIdSchema } from "./billing.js";
 import { fileProfileSchema } from "./file-profile.js";
 import { CHAT_ANSWER_TIERS, pricing } from "./pricing-provider.js";
 import type { PipelineFeatures } from "./pipeline.js";
+import type { CostEstimate } from "./jobs.js";
+import type { UploadMediaEstimate } from "./media-upload-estimate.js";
 import { applyFileProfile, estimateProfileFor, type EstimateProfile, type QuoteFile } from "./upload-quote.js";
 
 /*
@@ -26,9 +28,10 @@ export const quoteSettingsSchema = z.strictObject({
   quality: pipelineProfileIdSchema,
   /**
    * `full` indexes every page for search and chat on upload (`pipeline.indexingMode: "full"`); `on-demand` maps the
-   * documents and indexes pages when a query first needs them (`"map"`).
+   * documents and indexes pages when a query first needs them (`"map"`); `visual` embeds every page image on upload
+   * (`"visual"`), a model read of every page, so it cannot be combined with `fast` quality.
    */
-  indexing: z.enum(["full", "on-demand"]),
+  indexing: z.enum(["full", "on-demand", "visual"]),
   /** Optional per-document features. */
   documentSummary: z.boolean(),
   structuredFields: z.boolean(),
@@ -121,6 +124,12 @@ export type ProviderEstimateArgs = {
   settings: QuoteSettings;
   /** The workspace profile these settings describe (quality, features, worker slots, billing). */
   profile: EstimateProfile;
+  /**
+   * Work on documents already stored (reprocess, full index, a config change), priced stage by stage by the provider's
+   * own delegates (`estimatePipelineWork`): it replaces the upload quote as the ingest figure. `files` are then the
+   * stored documents, from the worker's measured counts, for pages and hosting.
+   */
+  work?: { estimate: CostEstimate; media: UploadMediaEstimate | null };
 };
 
 /** The knobs a workspace pipeline is set to: the base an authenticated caller's settings override. */
@@ -128,7 +137,7 @@ export function quoteSettingsForPipeline(pipeline: PipelineFeatures): Partial<Qu
   const features = estimateProfileFor(pipeline, { env: {} }).documentFeatures;
   return {
     quality: pipeline.quality,
-    indexing: pipeline.indexingMode === "full" || pipeline.indexingMode === undefined ? "full" : "on-demand",
+    indexing: pipeline.indexingMode === "visual" ? "visual" : pipeline.indexingMode === "map" ? "on-demand" : "full",
     ...features,
     videoFrames: pipeline.mediaVideo?.enabled !== false,
     speedBoost: pipeline.speedBoost === true,
@@ -137,11 +146,12 @@ export function quoteSettingsForPipeline(pipeline: PipelineFeatures): Partial<Qu
 
 /** The upload pipeline a set of settings describes, as an EstimateProfile. */
 export function estimateProfileForSettings(settings: QuoteSettings, options: { workerSlots?: number; billing: "enforced" | "disabled" }): EstimateProfile {
-  const stages = 5 + (settings.indexing === "full" ? 2 : 1)
+  const stages = 5 + (settings.indexing === "on-demand" ? 1 : 2)
     + [settings.documentSummary, settings.structuredFields, settings.knowledgeGraph, settings.propositions].filter(Boolean).length;
   return {
     pricingVersion: pricing().version,
-    quality: settings.quality,
+    // Visual indexing embeds every page image: a model read of every page, priced as the quality that reads every page.
+    quality: settings.indexing === "visual" ? "good" : settings.quality,
     documentFeatures: {
       documentSummary: settings.documentSummary,
       structuredFields: settings.structuredFields,
@@ -156,6 +166,34 @@ export function estimateProfileForSettings(settings: QuoteSettings, options: { w
 }
 
 /**
+ * Quote work on documents the server already holds: `files` from their measured counts (`billing_pages`, size, type,
+ * pages a model read), never a client profile; `work` the stage-precise estimate of the work itself, or null to quote
+ * ingesting them afresh. The same quote shape as `POST /v1/estimate`.
+ */
+export function quoteStoredWork(args: {
+  files: readonly QuoteFile[];
+  work: { estimate: CostEstimate; media: UploadMediaEstimate | null } | null;
+  base?: Partial<QuoteSettings>;
+  settings?: Partial<QuoteSettings>;
+  workerSlots?: number;
+  env?: Record<string, string | undefined>;
+}): EstimateQuote {
+  const settings = quoteSettingsSchema.parse({ ...DEFAULT_QUOTE_SETTINGS, ...args.base, ...args.settings });
+  if (settings.indexing === "visual" && settings.quality === "fast") throw new QuoteSettingsError("Visual indexing reads every page and cannot be combined with fast quality");
+  const billing = isBillingEnforced(args.env ?? process.env) ? "enforced" : "disabled";
+  const files = args.files.map(({ profile: _ignored, ...file }) => file);
+  const profile = estimateProfileForSettings(settings, { billing, ...(args.workerSlots ? { workerSlots: args.workerSlots } : {}) });
+  const quote = pricing().quote({ files, settings, profile, ...(args.work ? { work: args.work } : {}) });
+  if (quote.kind !== "estimate" || quote.billing !== billing) throw new Error("pricing provider returned an invalid estimate");
+  return quote;
+}
+
+/** Settings a workspace could not be configured with (a quote refuses them as the workspace API does). */
+export class QuoteSettingsError extends Error {
+  override name = "QuoteSettingsError";
+}
+
+/**
  * Price an estimate request with the active pricing provider. `base` is the workspace's settings for an authenticated
  * caller, else the defaults; `request.settings` overrides them knob by knob. Profiles are validated by the schema,
  * clamped against each file's size and merged (`applyFileProfile`) before the provider sees them.
@@ -165,6 +203,7 @@ export function quoteEstimate(
   options: { base?: Partial<QuoteSettings>; workerSlots?: number; env?: Record<string, string | undefined> } = {},
 ): EstimateQuote {
   const settings = quoteSettingsSchema.parse({ ...DEFAULT_QUOTE_SETTINGS, ...options.base, ...request.settings });
+  if (settings.indexing === "visual" && settings.quality === "fast") throw new QuoteSettingsError("Visual indexing reads every page and cannot be combined with fast quality");
   const billing = isBillingEnforced(options.env ?? process.env) ? "enforced" : "disabled";
   const files = request.files.map((file) => applyFileProfile(file));
   const profile = estimateProfileForSettings(settings, { billing, ...(options.workerSlots ? { workerSlots: options.workerSlots } : {}) });

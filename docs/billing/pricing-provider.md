@@ -92,7 +92,7 @@ Request (strict: unknown fields are refused):
 ```
 
 Knobs (`quoteSettingsSchema`; omitted ones take a new workspace's defaults): `quality` (`fast`, `auto`, `good`),
-`indexing` (`full`, `on-demand`), `documentSummary`, `structuredFields`, `knowledgeGraph`, `propositions`,
+`indexing` (`full`, `on-demand`, `visual`: page images embedded on upload, a read of every page, refused with `fast`), `documentSummary`, `structuredFields`, `knowledgeGraph`, `propositions`,
 `videoFrames`, `speedBoost`, `hostingMonths` (1–60), `searchesPerMonth`, `chatAnswersPerMonth`, `chatTier`.
 
 Response (`EstimateQuote`): `kind: "estimate"`, `pricingVersion`, `validUntil`, `billing`, the resolved `settings`,
@@ -102,6 +102,13 @@ credits per month, months, total), `usage.creditsPerMonth` (searches and chat), 
 minute). Every credit figure is a range where the profile is uncertain, and null where the deployment does not bill.
 
 Limits: anonymous; a 1 MiB body; at most 200 files; per client IP `ESTIMATE_RATE_LIMIT_PER_MINUTE` quotes a minute
-(default 120) on top of the API's IP limits; no database read, nothing stored. Signed-in callers and API keys quote
+(default 120) and per quote session `ESTIMATE_SESSION_RATE_LIMIT_PER_MINUTE` (default 60; an opaque random
+`ds_estimate_session` cookie, issued on the first quote, holding no identity) on top of the API's IP limits; no database
+read, nothing stored.
+
+Page equivalents follow the provider's `pageEquivalentAllowance`: a page bills 1 up to the allowance and its full volume
+above it (`billedPageEquivalents`). Billing (`documents.billing_pages`) and quotes apply the same rule; the open default
+is 1, so every page bills its full volume. Pages the profiler had to estimate (`textEstimatedPages`), and unsampled pages
+of a file whose sampled pages were dense, widen only a quote's high end. Signed-in callers and API keys quote
 against a workspace's settings with `POST /v1/uploads/estimate` (`settings` overrides, answer in `quote`), which uses
 the same quote function.

@@ -126,7 +126,7 @@ function openQuoteUpload(args: ProviderQuoteArgs): { estimate: CostEstimate; med
 export const openStoredBytes: StoredBytesModel = (file, pages, settings) => {
   const text = profiledTextChars(file, pages, 2_000);
   const images = profiledPageArea(file) * 1_200;
-  const index = (chars: number) => (settings.indexing === "full" ? Math.ceil(chars / 2_000) * 6 * 1024 : 0);
+  const index = (chars: number) => (settings.indexing !== "on-demand" ? Math.ceil(chars / 2_000) * 6 * 1024 : 0);
   const bytesFor = (pageCount: number, chars: number) => file.size + pageCount * images + chars * 2 + index(chars);
   return { low: bytesFor(pages.low, text.low), high: bytesFor(pages.high, text.high) };
 };

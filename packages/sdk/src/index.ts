@@ -195,8 +195,11 @@ export type UploadEstimateInput = {
 /** The knobs of a quote, in customer terms; omitted ones take a new workspace's defaults. */
 export type QuoteSettings = {
   quality: "fast" | "auto" | "good";
-  /** `full` indexes every page on upload; `on-demand` indexes pages when a query first needs them. */
-  indexing: "full" | "on-demand";
+  /**
+   * `full` indexes every page on upload; `on-demand` indexes pages when a query first needs them; `visual` embeds every
+   * page image on upload (a read of every page; not with `fast` quality).
+   */
+  indexing: "full" | "on-demand" | "visual";
   documentSummary: boolean; structuredFields: boolean; knowledgeGraph: boolean; propositions: boolean;
   videoFrames: boolean; speedBoost: boolean;
   /** Months the files stay hosted (1 to 60). */
