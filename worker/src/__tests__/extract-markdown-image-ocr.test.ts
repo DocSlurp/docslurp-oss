@@ -60,6 +60,8 @@ async function harness(args: {
   result?: (job: SandboxedOcrJob) => unknown;
   /** Doppler's converter is installed (its separator-style output wins); default: not installed. */
   doppler?: boolean;
+  /** Storage writes fail with this error while it returns one for the key (a transient reset on a write). */
+  putFails?: (key: string) => Error | null;
 }) {
   const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-image-ocr-test-"));
   const attempted: string[] = [];
@@ -68,7 +70,11 @@ async function harness(args: {
   const manifests = new Map<string, any>();
   const storage = {
     uri: (key: string) => `s3://test/${key}`,
-    putBytes: async (key: string, data: Uint8Array) => { objects.set(key, Buffer.from(data)); },
+    putBytes: async (key: string, data: Uint8Array) => {
+      const failure = args.putFails?.(key);
+      if (failure) throw failure;
+      objects.set(key, Buffer.from(data));
+    },
     putJson: async (key: string, value: unknown) => { manifests.set(key, value); },
     streamText: async (key: string, text: string) => { objects.set(key, Buffer.from(text)); },
     createMultipartUploadStream: (key: string) => {
@@ -624,6 +630,31 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
       const text = h.text().find((value) => value.startsWith("Cover page native text"))!;
       expect(text.split("\f")).toHaveLength(30);
       expect(text.split("\f")[29]).toBe("Scan 30");
+    } finally { await h.cleanup(); }
+  });
+
+  it("a storage reset on the OCR'd Markdown write is retried, never a failed document, and the retry bills each page once (F7)", async () => {
+    vi.stubEnv("DOCSLURP_OCR_MODE", "vm");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let failures = 1;
+    const h = await harness({
+      format: "pdf", pageCount: 3,
+      extract: async () => ({ text: "Native page\f\f\f" }),
+      frames: (job) => job.pages!.map((frame) => ({ frame, text: `Scan ${frame}` })),
+      putFails: (key) => (key.endsWith(".ocr.md") && failures-- > 0 ? Object.assign(new Error("write ECONNRESET"), { code: "ECONNRESET" }) : null),
+    });
+    try {
+      const error = await h.stage.run(h.state).then(() => null, (caught: unknown) => caught as Error & { code?: string });
+      expect(error).toMatchObject({ code: "ECONNRESET" });
+      expect(error?.name).not.toBe("DocumentStageError");
+      expect(h.checkpoint()?.status).not.toBe("failed");
+      const firstIds = h.richIds();
+      expect(firstIds).toEqual(["rich:run-1:doc-1:2", "rich:run-1:doc-1:3"]);
+      // The activity's retry: the same document again, the same pages read, the same charge ids (the ledger keeps one each).
+      await h.stage.run(h.state);
+      expect(h.checkpoint()?.status).toBe("completed");
+      expect(new Set(h.richIds())).toEqual(new Set(firstIds));
+      expect(h.text().some((text) => text === "Native page\fScan 2\fScan 3")).toBe(true);
     } finally { await h.cleanup(); }
   });
 

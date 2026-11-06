@@ -1191,10 +1191,12 @@ export class ExtractMarkdownStage implements Stage {
                 // OCR could not run (VM creation, capacity, a deadline): the activity retries; the document is not at fault.
                 const ocrInfrastructure = findOcrInfrastructureError(error);
                 if (ocrInfrastructure) throw ocrInfrastructure;
-                // A run-policy stop (cost cap, an unfunded run paused by a measured-page or OCR batch check) or a charge check
-                // that could not decide ends the stage as it is: wrapped as a partial-artifact failure it would lose its identity
-                // and be retried with another extractor, then fail the document.
-                if (error instanceof RunPolicyError || error instanceof SpendCheckUnavailableError) throw error;
+                // A run-policy stop (cost cap, an unfunded run paused by a measured-page or OCR batch check), a charge check that
+                // could not decide, and any infrastructure failure (a storage reset on the Markdown write, a database timeout) end
+                // the stage as they are: wrapped as a partial-artifact failure they would lose their identity, be retried with
+                // another extractor, then fail the document after its paid reads (real-Modal finding F7). The activity retries
+                // instead; persisted OCR escalation reads are reused and page charges keep their ids, so nothing bills twice.
+                if (error instanceof RunPolicyError || error instanceof SpendCheckUnavailableError || (!signal?.aborted && !isDocumentLevelFailure(error, signal))) throw error;
                 if (!partialArtifactUri && !signal?.aborted && isDocumentLevelFailure(error, signal)) {
                   // Every extractor failed: keep what was planned and tried, and say so in telemetry.
                   const attempts = attemptLedger.snapshot();
