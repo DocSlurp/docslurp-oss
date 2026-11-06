@@ -61,8 +61,9 @@ Runtime processes never raise a value. Runtime database roles can only read the 
 `pricing_state_raise`, insert, update, delete or truncate it, so a compromised API, worker or executor cannot move a
 value however often it tries. The operator's activation tool raises values with the table owner's credential through
 `pricingStateAdminFromSql(sql).raise(key, candidate)`, which calls `pricing_state_raise(key, candidate)` (SECURITY
-INVOKER): it stores the larger of the stored value and `candidate`, never lowers a value, keeps the largest of concurrent
-raises, and refuses a candidate below 1. A missing key is seeded at any candidate (after a database reset the operator
+INVOKER). It is a strict compare-and-set: it seeds a missing key or sets an existing one to a `candidate` strictly above
+the stored value and returns it, and fails for a candidate at or below the stored value, so of concurrent raises to one
+value exactly one succeeds. It refuses a candidate below 1. A missing key is seeded at any candidate (after a database reset the operator
 restores the current value); an existing key rises by at most 1000 per raise, a guard against typos.
 
 Fail closed:

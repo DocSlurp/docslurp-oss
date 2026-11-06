@@ -344,14 +344,24 @@ describe("pricing_provider_state (migration 0131)", () => {
     }
   });
 
-  it("the owner raises monotonically, never lowering a value, at most 1000 per raise of an existing key", async () => {
+  it("the owner raises strictly: above the stored value, at most 1000 per raise of an existing key (council K #6)", async () => {
     const admin = await owner();
     expect(await admin.read("card.sequence.owner")).toBeNull();
     expect(await admin.raise("card.sequence.owner", 5n)).toBe(5n);
-    expect(await admin.raise("card.sequence.owner", 3n)).toBe(5n);
+    await expect(admin.raise("card.sequence.owner", 3n)).rejects.toThrow(/not above the stored value 5/);
+    await expect(admin.raise("card.sequence.owner", 5n)).rejects.toThrow(/not above the stored value 5/);
     expect(await admin.raise("card.sequence.owner", 9n)).toBe(9n);
     await expect(admin.raise("card.sequence.owner", 1010n)).rejects.toThrow(/more than 1000/);
     expect(await admin.raise("card.sequence.owner", 1009n)).toBe(1009n);
+    expect(await admin.read("card.sequence.owner")).toBe(1009n);
+  });
+
+  it("a second raise to the same value is refused, for a seeded key and a raised one (council K #6; the real race: pricing-state-raise.db.test.ts)", async () => {
+    const admin = await owner();
+    expect(await admin.raise("card.race", 7n)).toBe(7n);
+    await expect(admin.raise("card.race", 7n)).rejects.toThrow(/not above the stored value 7/);
+    expect(await admin.raise("card.race", 8n)).toBe(8n);
+    await expect(admin.raise("card.race", 8n)).rejects.toThrow(/not above the stored value 8/);
   });
 
   it("refuses candidates below 1 and negative values; seeds a missing key at any value, as after a reset (council I #3)", async () => {
@@ -363,16 +373,20 @@ describe("pricing_provider_state (migration 0131)", () => {
     expect(await admin.read("card.low")).toBeNull();
     await expect(db.query("insert into pricing_provider_state (key, value) values ('neg', -1)")).rejects.toThrow(/check constraint/);
     expect(await admin.raise("card.reset.seed", 4_321n)).toBe(4_321n);
+    await expect(admin.raise("card.reset.seed", 4_321n)).rejects.toThrow(/not above/);
     await expect(admin.raise("card.reset.seed", 5_322n)).rejects.toThrow(/more than 1000/);
     expect(await admin.raise("card.reset.seed", 5_321n)).toBe(5_321n);
   });
 
-  it("keeps the largest of concurrent owner raises and never returns less than a raise's own candidate", async () => {
+  it("concurrent owner raises never lower the value: each success returns its own candidate, the rest are refused", async () => {
     const admin = await owner();
     const candidates = Array.from({ length: 40 }, (_, index) => BigInt(((index * 7919) % 1000) + 1));
-    const results = await Promise.all(candidates.map((candidate) => admin.raise("concurrent.key", candidate)));
-    results.forEach((value, index) => expect(value >= candidates[index]!).toBe(true));
-    expect(await admin.read("concurrent.key")).toBe(candidates.reduce((max, value) => (value > max ? value : max)));
+    const results = await Promise.allSettled(candidates.map((candidate) => admin.raise("concurrent.key", candidate)));
+    const won = results.flatMap((result, index) => (result.status === "fulfilled" ? [[result.value, candidates[index]!] as const] : []));
+    expect(won.length).toBeGreaterThan(0);
+    for (const [value, candidate] of won) expect(value).toBe(candidate);
+    for (const result of results) if (result.status === "rejected") expect(String(result.reason)).toMatch(/not above the stored value/);
+    expect(await admin.read("concurrent.key")).toBe(won.reduce((max, [value]) => (value > max ? value : max), 0n));
   });
 
   it("denies runtime roles every direct write: no INSERT, UPDATE, DELETE or TRUNCATE", async () => {
