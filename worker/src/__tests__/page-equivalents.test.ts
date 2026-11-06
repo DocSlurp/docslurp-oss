@@ -173,10 +173,10 @@ describe("stuffed PDFs bill the text extraction actually produced", () => {
     expect(await recordPageEquivalents(sql(), { runId: full.runId, documentId: full.documentId, rows })).toBe(2 + 3 + 8);
     const installed = installTestPricing({ pageEquivalentAllowance: 3 });
     try {
-      const hosted = await documentRun(3);
+      const allowed = await documentRun(3);
       expect(installed.pageEquivalentAllowance).toBe(3);
-      expect(await recordPageEquivalents(sql(), { runId: hosted.runId, documentId: hosted.documentId, rows: rows.slice(0, 2) })).toBeNull();
-      expect((await store.loadDocument(hosted.documentId))!.billingPages).toBeNull();
+      expect(await recordPageEquivalents(sql(), { runId: allowed.runId, documentId: allowed.documentId, rows: rows.slice(0, 2) })).toBeNull();
+      expect((await store.loadDocument(allowed.documentId))!.billingPages).toBeNull();
     } finally {
       installTestPricing(DISTINCT_TEST_PRICING);
     }
