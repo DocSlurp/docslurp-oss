@@ -32,10 +32,10 @@ jobs:
         include:
           - suite: typecheck and build
           - suite: worker 1/2
-            run: pnpm --filter @docslurp/worker test --shard=1/2
+            run: DOCSLURP_REQUIRE_DOPPLER_TOOLS=1 pnpm --filter @docslurp/worker test --shard=1/2
             worker-tools: true
           - suite: worker 2/2
-            run: pnpm --filter @docslurp/worker test --shard=2/2
+            run: DOCSLURP_REQUIRE_DOPPLER_TOOLS=1 pnpm --filter @docslurp/worker test --shard=2/2
             worker-tools: true
           - suite: server
             run: pnpm --filter @docslurp/server test
@@ -68,6 +68,25 @@ jobs:
           node --test scripts/install-worker-test-tools.test.mjs
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           bash scripts/install-worker-test-tools.sh
+      # Doppler from the pinned source (worker/doppler.json), the images' recipe: the PDF page count (pdfpagecount) and
+      # the fork's utilities under /usr/lib/doppler. Built once per pin and cached; real-tool tests must run, not skip.
+      - name: Restore the Doppler build
+        if: matrix.worker-tools
+        id: doppler-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/docslurp/doppler-stage
+          key: doppler-${{ runner.os }}-24.04-${{ hashFiles('worker/doppler.json', 'scripts/install-doppler.sh') }}
+      - name: Install Doppler (pdfpagecount) and check prlimit
+        if: matrix.worker-tools
+        timeout-minutes: 25
+        run: DOCSLURP_DOPPLER_STAGE="$HOME/.cache/docslurp/doppler-stage" bash scripts/install-doppler.sh
+      - name: Save the Doppler build
+        if: matrix.worker-tools && steps.doppler-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/docslurp/doppler-stage
+          key: ${{ steps.doppler-cache.outputs.cache-primary-key }}
       - name: Set up worker Python test dependencies
         if: matrix.worker-tools
         run: |

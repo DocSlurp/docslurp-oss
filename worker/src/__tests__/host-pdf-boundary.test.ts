@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PDF_EXTRACTION_UNCONFIGURED, resolvePdfMode, sandboxedPdfConfigured } from "@docslurp/shared";
 
@@ -103,6 +106,13 @@ describe("customer-owned local mode (DOCSLURP_PDF_MODE=local)", () => {
     expect(() => assertExtractorPluginConfiguration(self, doppler)).not.toThrow();
     expect(() => assertExtractorPluginConfiguration({ DOCSLURP_PDF_MODE: "local" }, doppler)).toThrow(/customer-owned execution: it needs DOCSLURP_SERVICE_PROFILE=self-hosted/);
     expect(() => assertExtractorPluginConfiguration(self, { dopplerInstalled: () => false })).toThrow(/needs Doppler's pdftomarkdown/);
+    // The real check (no stub): a bin dir with the converter but without pdfpagecount, or without prlimit on PATH, refuses.
+    const bin = mkdtempSync(path.join(process.env.TMPDIR || tmpdir(), "doppler-bin-"));
+    writeFileSync(path.join(bin, "pdftomarkdown"), "#!/bin/sh\n", { mode: 0o755 });
+    expect(() => assertExtractorPluginConfiguration({ ...self, DOCSLURP_DOPPLER_BIN_DIR: bin })).toThrow(/pdfpagecount/);
+    writeFileSync(path.join(bin, "pdfpagecount"), "#!/bin/sh\n", { mode: 0o755 });
+    expect(() => assertExtractorPluginConfiguration({ ...self, DOCSLURP_DOPPLER_BIN_DIR: bin, PATH: bin })).toThrow(/prlimit/);
+    rmSync(bin, { recursive: true, force: true });
     // The service profile is a VM deployment: local mode beside it is refused (with a provider so the VM check passes).
     registerExtractorPlugin({ apiVersion: 1, name: "test-plugin", sandboxedPdf: provider() });
     for (const env of [{ DOCSLURP_SERVICE_PROFILE: "service" }, { DOCSLURP_PDF_EXTRACTOR: VM_PDF_EXTRACTOR_ID }, { DOCSLURP_PDF_MODE: "vm" }]) {

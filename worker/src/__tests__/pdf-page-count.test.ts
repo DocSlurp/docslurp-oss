@@ -117,6 +117,22 @@ describe("countPdfPages: one Doppler pdfpagecount run, every exit code mapped", 
     await expect(countPdfPages(stub({ error: teardown }), "/x.pdf")).rejects.toBe(teardown);
   });
 
+  it("fails closed when Doppler's pdfpagecount is not installed: no count, no other tool, a retried platform error", async () => {
+    const bin = await mkdtemp(path.join(process.env.TMPDIR || tmpdir(), "no-doppler-"));
+    vi.stubEnv("DOCSLURP_DOPPLER_BIN_DIR", bin);
+    try {
+      const runner = new CommandRunner();
+      expect((await runner.pdfPageCount("/tmp/in.pdf", PDF_PAGE_COUNT_LIMITS)).available).toBe(false);
+      const run = vi.spyOn(runner, "run");
+      const error = await countPdfPages(runner, "/tmp/in.pdf").catch((caught: unknown) => caught);
+      expect(error).toMatchObject({ name: "PdfPageCountUnavailableError", outcome: "unavailable" });
+      expect(isDocumentLevelFailure(error)).toBe(false);
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("runs the tool under prlimit with explicit page, depth and memory budgets, a CPU cap and a wall clock", async () => {
     const plan = await new CommandRunner().pdfPageCount("/tmp/in.pdf", PDF_PAGE_COUNT_LIMITS);
     const tool = `${dopplerBinDir()}/pdfpagecount`;
