@@ -1137,7 +1137,7 @@ function detectFormulaHeavyContent(text: string, lines: string[], routingV2: boo
   const equationLines = lines.filter((line) => /[=<>]/.test(line) && /[+\-*/^_]/.test(line)).length;
   const mathFunctionTerms = countMatches(text, /\b(?:sin|cos|tan|cot|sec|csc|log|ln|lim|max|min|argmax|argmin|sqrt)\b/gi);
   const symbolDensity = countMatches(text, /[=+\-*/^_<>]/g);
-  const functionAssignmentLines = lines.filter((line) => /\b[a-z]\w*\([^()]*\)\s*=/.test(line) || /\b(?:f|g|h|y)\s*=\s*[^.]{4,}/i.test(line)).length;
+  const functionAssignmentLines = lines.filter((line) => /\b[a-z]\w*\([^)]{0,256}\)\s*=/.test(line) || /\b(?:f|g|h|y)\s*=\s*[^.]{4,}/i.test(line)).length;
 
   // v2: text layers of typeset math carry it as Unicode: mathematical alphanumerics (𝑑, 𝐱) and
   // operators (∑, ≤, √). Their linear order loses fractions, scripts and roots.
