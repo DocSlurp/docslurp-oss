@@ -304,6 +304,8 @@ function fakeSdk(
     resetUnhealthyInVm?: number;
     /** The VM-start image lock finds paths the parser user can write (exit 6). */
     lockFails?: boolean;
+    /** The post-command reset exec throws: Modal's exec deadline (a wipe of millions of files) or a transport error. */
+    resetThrows?: "deadline" | "transport";
     /** The job-tree probe before another document's staging finds the tree unusable (council X #1). */
     treeBroken?: boolean | (() => boolean);
     /** The job-tree upload copy (cp as the parser user) exits non-zero, e.g. ENOSPC in the job tree. */
@@ -431,6 +433,8 @@ function fakeSdk(
       if (argv[0] === "python3" && argv[3]?.startsWith("# docslurp-reset")) {
         state.resets.push({ vm, roots: argv.slice(4) });
         state.events.push("reset");
+        if (opts.resetThrows === "deadline") throw new Error("Deadline exceeded while waiting for the exec");
+        if (opts.resetThrows === "transport") throw new Error("stream reset by peer");
         return finished("", opts.resetUnhealthyInVm === vm ? 5 : 0);
       }
       // The root leftover kill (KILL_PARSER_USER_ARGV): kill(-1) as the parser user, verified.
@@ -702,6 +706,19 @@ describe("modal provider session lifecycle", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it("a wipe that runs past its deadline strikes the command that just ran and terminates the VM; a transport error does not (council X #2)", async () => {
+    const slow = await open({ resetThrows: "deadline", exec: async () => finished() });
+    const overran = await (await slow.session()).run!(command).catch((error: unknown) => error);
+    expect(overran).toBeInstanceOf(SandboxInfrastructureError);
+    expect((overran as SandboxInfrastructureError).afterCommand).toBe(true);
+    expect(String((overran as Error).message)).toMatch(/scratch wipe ran past its deadline/);
+    expect(slow.state.terminate).toBe(1);
+    const lost = await open({ resetThrows: "transport", exec: async () => finished() });
+    const transport = await (await lost.session()).run!(command).catch((error: unknown) => error);
+    expect((transport as SandboxInfrastructureError).afterCommand).toBe(false);
+    expect(lost.state.terminate).toBe(1);
   });
 
   it("document B's own oversize input or job-tree ENOSPC strikes B, never the previous document A (council X #1)", async () => {

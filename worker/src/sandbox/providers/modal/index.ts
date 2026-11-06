@@ -233,6 +233,13 @@ function safeMessage(config: Partial<ModalConfig>, error: unknown): string {
 }
 
 /** The SDK reports an exec deadline as a typed timeout error or a plain "Deadline exceeded ..." error. */
+/** How long the post-command wipe and health check may take (RESET_SCRIPT). */
+const RESET_DEADLINE_MS = 60_000;
+
+function isControlDeadline(error: unknown): boolean {
+  return error instanceof Error && error.message === "parser VM control deadline exceeded";
+}
+
 function isExecTimeout(sdk: ModalSdk, error: unknown): boolean {
   for (const type of [sdk.TimeoutError, sdk.SandboxTimeoutError]) {
     if (typeof type === "function" && error instanceof type) return true;
@@ -874,11 +881,12 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           let transport: unknown;
           try {
             const proc = await sandbox!.exec(KILL_PARSER_USER_ARGV, { timeoutMs: KILL_SETTLE_MS * 3 });
-            code = await proc.wait();
+            code = await withDeadline(proc.wait(), KILL_SETTLE_MS * 3 + 5_000);
           } catch (error) {
             console.error(`[parser-sandbox] provider=modal leftover kill failed: ${safeMessage(config, error)}`);
-            // A kill that ran out of time was held up inside the VM (a stopped or flooding leftover): that is the job's.
-            if (!isExecTimeout(sdk, error)) transport = error;
+            // A kill that ran out of time, Modal's exec timeout or our own deadline, was held up inside the VM (a stopped
+            // or flooding leftover): that is the job's (council X #2), never a transport error.
+            if (!isExecTimeout(sdk, error) && !isControlDeadline(error)) transport = error;
           }
           if (code !== 0) {
             await terminate().catch(() => {});
@@ -898,19 +906,24 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         async function resetVm(): Promise<void> {
           let code: number | null = null;
           let transport: unknown;
+          let overran = false;
           try {
-            const proc = await sandbox!.exec(resetArgv(parserJobRoots()), { timeoutMs: 60_000 });
-            code = await proc.wait();
+            const proc = await sandbox!.exec(resetArgv(parserJobRoots()), { timeoutMs: RESET_DEADLINE_MS });
+            code = await withDeadline(proc.wait(), RESET_DEADLINE_MS + 5_000);
           } catch (error) {
             console.error(`[parser-sandbox] provider=modal reset failed: ${safeMessage(config, error)}`);
-            transport = error;
+            // A wipe that outlives its deadline (a command that left millions of files) is that command's doing (council
+            // X #2): it must not pass for a transport error and dodge the strike.
+            if (isExecTimeout(sdk, error) || isControlDeadline(error)) overran = true;
+            else transport = error;
           }
           // Whatever happened, nothing staged earlier may be assumed present any more.
           staging?.forgetUploads();
           if (code === 0) return;
           await terminate().catch(() => {});
           if (transport !== undefined) throw new SandboxInfrastructureError("parser VM reset could not run; VM terminated", undefined, { cause: transport });
-          throw new SandboxInfrastructureError(`parser VM ${code === 5 ? "disk or job root unusable" : "scratch could not be wiped"} after this document's command; VM terminated`, undefined, { afterCommand: true });
+          // Only a command that ran can have left what broke the reset; a reset after staging alone strikes no one.
+          throw new SandboxInfrastructureError(`parser VM ${overran ? "scratch wipe ran past its deadline" : code === 5 ? "disk or job root unusable" : "scratch could not be wiped"} after this document's command; VM terminated`, undefined, { afterCommand: commandRan });
         }
 
         /** The job roots as the next document's staging finds them; a broken one blames `previous` (council X #1). */
