@@ -59,6 +59,7 @@ export class ClassifyRouteStage implements Stage {
           const evidence = await this.loadEvidence(state, document);
           const imageEvidence = await this.loadPageImageEvidence(state, document.id);
           const routingV2 = resolveRunRoutingV2(state);
+          const pageLayout = routingV2 ? await this.loadPageLayoutFacts(state, document.id) : null;
           const surface = buildAdaptiveRoutingDecisionSurface({
             documentId: document.id,
             filename: document.filename,
@@ -77,6 +78,7 @@ export class ClassifyRouteStage implements Stage {
                   : null,
             pageImageEvidence: imageEvidence?.pages,
             drawnBytesPerPage: imageEvidence?.drawnBytesPerPage ?? null,
+            ...(pageLayout ? { pageLayout } : {}),
             routingV2,
           });
 
@@ -204,6 +206,23 @@ export class ClassifyRouteStage implements Stage {
     }
 
     return null;
+  }
+
+  /** Layout facts extract-markdown persisted (pdf-layout-facts@1); null when absent or unreadable, never invented. */
+  private async loadPageLayoutFacts(
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    documentId: string,
+  ): Promise<Map<number, PageLayoutFacts> | null> {
+    const artifactUri = state.artifactLedger.readDocument(documentId, "page-layout-facts");
+    if (!artifactUri) return null;
+    try {
+      const key = keyFromStorageUri(artifactUri, this.storage.bucket);
+      if (!key) return null;
+      const pages = parsePageLayoutFacts(await this.storage.getJson(key));
+      return pages.size > 0 ? pages : null;
+    } catch {
+      return null;
+    }
   }
 
   private async loadPageImageEvidence(

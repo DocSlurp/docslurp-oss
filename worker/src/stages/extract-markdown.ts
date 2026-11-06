@@ -111,6 +111,7 @@ import { ocrDocument } from "../ocr/read-document.js";
 import { recordMeasuredPageCount, type PageCountResult } from "../lib/office-page-count.js";
 import { processedPdfPages, reconcileProcessedPdfPages } from "../lib/pdf-page-count.js";
 import { recordExtractedPageEquivalents } from "../lib/page-equivalents.js";
+import { collectPageLayoutFacts } from "../lib/page-layout-evidence.js";
 import { PAGE_RENDITION, pageRenditionKey } from "../lib/page-rendition.js";
 import { extractorFailureReason, extractorFallbackFor, recordExtractorFallback } from "../lib/extractor-fallback.js";
 
@@ -948,6 +949,13 @@ export class ExtractMarkdownStage implements Stage {
                   if (pageImageEvidenceUri) {
                     state.artifactLedger.recordDocument(document.id, "page-image-evidence", pageImageEvidenceUri);
                   }
+                  // Layout facts (image placement, tables) for evidence routing; the sandboxed route gets them from the PDF VM.
+                  const pageLayoutFactsUri = hostPdfProbes === "ran" && resolveRunRoutingV2(state)
+                    ? await this.recordPageLayoutFacts(document, tempFile, winningText, state, signal)
+                    : null;
+                  if (pageLayoutFactsUri) {
+                    state.artifactLedger.recordDocument(document.id, "page-layout-facts", pageLayoutFactsUri);
+                  }
                   if (graph) {
                     state.artifactLedger.recordDocument(document.id, "artifact-graph", graph.manifestUri);
                     // Exact child URIs are authorized and withheld by the existing artifact/PII guards.
@@ -1577,6 +1585,33 @@ export class ExtractMarkdownStage implements Stage {
       );
       return null;
     }
+  }
+
+  /**
+   * Structural page layout (pdf-layout-facts@1: image placement and stream facts, words inside images, tables and ruled
+   * grids) collected in the parser sandbox by the open layout walker, persisted for classify-route. Optional: any failure
+   * leaves routing without layout facts, which never authorizes a read. `DOCSLURP_PDF_LAYOUT_FACTS=off` skips it.
+   */
+  private async recordPageLayoutFacts(
+    document: import("../models.js").Document,
+    sourcePath: string,
+    winningText: string,
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    signal?: AbortSignal,
+  ): Promise<string | null> {
+    if (process.env.DOCSLURP_PDF_LAYOUT_FACTS === "off") return null;
+    const pageTexts = pageAlignedTexts(winningText, Math.max(1, document.pageCount));
+    if (!pageTexts) return null;
+    const startedAt = Date.now();
+    const pages = await collectPageLayoutFacts({
+      runner: this.runner, sourcePath, pageCount: document.pageCount, markdown: pageTexts.join("\f"), signal,
+    });
+    if (signal?.aborted) throw signal.reason ?? new Error("aborted");
+    if (!pages) return null;
+    const key = `${runArtifactRoot(state.run, document.userId)}/page-layout-facts/${document.id}.json`;
+    await this.storage.putJson(key, { version: "pdf-layout-facts@1", documentId: document.id, pages: [...pages.entries()].map(([pageNumber, page]) => ({ pageNumber, known: true, ...page })) });
+    console.log(`[extract-debug] document=${document.id} pageLayoutFacts pages=${pages.size} ms=${Date.now() - startedAt}`);
+    return this.storage.uri(key);
   }
 
   /**

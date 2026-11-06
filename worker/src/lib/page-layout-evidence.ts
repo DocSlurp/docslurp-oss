@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { parsePageLayoutFacts, type PageLayoutFacts } from "../stages/classify-route.js";
+import { rethrowIfTeardown } from "../sandbox/teardown-breaker.js";
 import type { CommandRunner } from "../tools/runner.js";
 
 /** Pages the layout walker is run over at most per document (its own bound is 5,000). */
@@ -40,6 +41,8 @@ export async function collectPageLayoutFacts(args: {
     const pages = parsePageLayoutFacts(JSON.parse((await args.runner.run(factsPlan, args.signal)).stdout));
     return pages.size > 0 ? pages : null;
   } catch (error) {
+    rethrowIfTeardown(error);
+    if (args.signal?.aborted) throw error;
     console.warn(`[layout] facts unavailable: ${error instanceof Error ? error.message.slice(0, 200) : String(error)}`);
     return null;
   } finally {
