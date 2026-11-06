@@ -560,8 +560,18 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         }
       }
 
+      /**
+       * The leftover kill as a barrier (council P #3): claimed in the same synchronous step that sees no other command in
+       * flight, and admission waits for it, so no command stages or starts while the parser user's processes are killed.
+       */
+      let cleaning: Promise<void> | undefined;
+      function cleanLeftovers(): Promise<void> {
+        cleaning ??= killParserUserProcesses().finally(() => { cleaning = undefined; });
+        return cleaning;
+      }
+
       async function execute(command: SandboxCommand, started: number, signal?: AbortSignal): Promise<SandboxResult> {
-        while (discarding) await discarding;
+        while (discarding || cleaning) await (discarding ?? cleaning);
         inFlight++;
         try {
           try { return await withDeadline(executeCommand(command, started, signal), command.limits.timeoutMs + 60_000); }
@@ -574,7 +584,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           }
         } finally {
           inFlight--;
-          if (inFlight === 0 && sandbox && !closed) await killParserUserProcesses();
+          if (inFlight === 0 && sandbox && !closed) await cleanLeftovers();
           if (inFlight === 0 && pendingDiscards.length > 0 && !closed) {
             discarding ??= runDiscards();
             await discarding;
@@ -605,7 +615,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           }
           if (outcome.kind === "exited" && !signal?.aborted) {
             // Leftover processes die before anything is read back or staged (council M #3), when this is the only command.
-            if (inFlight === 1) await killParserUserProcesses();
+            if (inFlight === 1) await cleanLeftovers();
             // Only what this command created or changed comes back.
             if (closed) throw new Error("parser VM session closed before download");
             await staging!.download(snapshot);

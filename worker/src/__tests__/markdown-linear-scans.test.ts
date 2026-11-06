@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { countMarkdownTables, normalizeExtractedMarkdown, sanitizeExtractedMarkdown, scoreMarkdownCandidate } from "../lib/extracted-markdown.js";
 import { HEADING_MAX_LINE_CHARS, parseAtxHeading, plainHeadingText, stripLeadingFrontmatter } from "../lib/markdown-structure.js";
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
-import { chunkText } from "../pipeline/chunking.js";
+import { chunkText, chunkTextWithMeta } from "../pipeline/chunking.js";
 import { stripTrailingPageBreak } from "../lib/page-equivalents.js";
 import { splitProcessedPdfPages } from "../lib/pdf-page-count.js";
 
@@ -139,12 +139,36 @@ describe("links with one level of parentheses in the target still parse (council
   });
 });
 
-describe("CRLF headings (council M #7)", () => {
-  it("a heading line ending in \\r is a heading for the canonical builder and the chunker, its text without the \\r", () => {
+describe("CRLF headings (council M #7, P)", () => {
+  const text = "# Title\r\n\r\nBody text of the first section.\r\n\r\n## Results\r\n\r\nMore text.\r\n";
+
+  it("parseAtxHeading reads a heading line ending in \\r as the heading, without the \\r", () => {
     expect(parseAtxHeading("## Results\r")).toEqual({ level: 2, text: "Results" });
-    const text = "# Title\r\n\r\nBody text of the first section.\r\n\r\n## Results\r\n\r\nMore text.\r\n";
+  });
+
+  it("the chunker gives CRLF sections their heading paths (a behaviour change since 1e4c8079)", () => {
+    const chunks = [...chunkTextWithMeta(text, 1800)];
+    const results = chunks.find((chunk) => chunk.text.includes("More text."));
+    expect(results?.headingPath).toEqual(["Title", "Results"]);
+    expect(chunks.every((chunk) => chunk.headingPath.every((heading) => !heading.includes("\r")))).toBe(true);
+  });
+
+  it("the canonical builder reads the same headings", () => {
     const doc = buildCanonicalDocumentFromMarkdown({ documentId: "d", text, pageCount: 1 } as never);
     expect(JSON.stringify(doc)).toContain("Results");
     expect(JSON.stringify(doc)).not.toContain("Results\\r");
+  });
+});
+
+describe("the function-assignment signal's 4 KB skip covers both alternatives (council P #4)", () => {
+  it("matches each alternative on a short line, neither on an oversized one", async () => {
+    const { isFunctionAssignmentLine } = await import("../stages/classify-route.js");
+    const call = "f(x) = x + 1";
+    const assign = "y = alpha beta gamma";
+    expect(isFunctionAssignmentLine(call)).toBe(true);
+    expect(isFunctionAssignmentLine(assign)).toBe(true);
+    const pad = " ".repeat(4100);
+    expect(isFunctionAssignmentLine(`${call}${pad}`)).toBe(false);
+    expect(isFunctionAssignmentLine(`${assign}${pad}`)).toBe(false);
   });
 });

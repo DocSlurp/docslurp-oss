@@ -1131,14 +1131,21 @@ function detectSpecializedContent(text: string, lines: string[], routingV2: bool
     }));
 }
 
+/**
+ * A formula line such as `f(x) = ...` or `y = ...`. Lines over 4 KB are never formulas, for both alternatives (council M #5,
+ * P #4): the bounded argument scan costs ~256 steps a character.
+ */
+export function isFunctionAssignmentLine(line: string): boolean {
+  return line.length <= 4096 && (/\b[a-z]\w*\([^)]{0,256}\)\s*=/.test(line) || /\b(?:f|g|h|y)\s*=\s*[^.]{4,}/i.test(line));
+}
+
 function detectFormulaHeavyContent(text: string, lines: string[], routingV2: boolean): SpecializedSignalCandidate | null {
   const signals: string[] = [];
   const latexCommands = countMatches(text, /\\(?:frac|sum|int|alpha|beta|gamma|theta|lambda|mu|sigma|pi|sqrt|times|cdot|begin\{(?:equation|align)\}|end\{(?:equation|align)\})/g);
   const equationLines = lines.filter((line) => /[=<>]/.test(line) && /[+\-*/^_]/.test(line)).length;
   const mathFunctionTerms = countMatches(text, /\b(?:sin|cos|tan|cot|sec|csc|log|ln|lim|max|min|argmax|argmin|sqrt)\b/gi);
   const symbolDensity = countMatches(text, /[=+\-*/^_<>]/g);
-  // Lines over 4 KB are never formulas: the bounded scan costs ~256 steps a character, so long lines skip it (council M #5).
-  const functionAssignmentLines = lines.filter((line) => line.length <= 4096 && /\b[a-z]\w*\([^)]{0,256}\)\s*=/.test(line) || /\b(?:f|g|h|y)\s*=\s*[^.]{4,}/i.test(line)).length;
+  const functionAssignmentLines = lines.filter(isFunctionAssignmentLine).length;
 
   // v2: text layers of typeset math carry it as Unicode: mathematical alphanumerics (𝑑, 𝐱) and
   // operators (∑, ≤, √). Their linear order loses fractions, scripts and roots.

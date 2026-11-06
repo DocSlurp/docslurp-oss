@@ -299,6 +299,8 @@ function fakeSdk(
     terminateHangs?: boolean;
     /** The VM's link hardening fails (a sysctl that cannot be written or reads back 0). */
     hardeningFails?: boolean;
+    /** The leftover kill waits on this (a slow kill). */
+    killGate?: Promise<void>;
   } = {},
 ) {
   const remote = new MemoryRemoteFs();
@@ -309,6 +311,7 @@ function fakeSdk(
     readsAsUser: 0,
     leftoverKills: 0,
     rootWrites: [] as string[],
+    events: [] as string[],
     clientClose: 0,
     mkdirs: [] as string[],
     stats: [] as string[],
@@ -356,7 +359,13 @@ function fakeSdk(
       if (asUser?.[0] === "/bin/mkdir") { state.mkdirs.push(asUser[3]!); await remote.mkdir(asUser[3]!); return finished("", 0); }
       if (asUser?.[0] === "/bin/rm") { await remote.remove(asUser[3]!); return finished("", 0); }
       if (asUser?.[0] === "/bin/sh" && asUser[2]?.includes("cp --")) { await remote.writeFile(asUser[5]!, await remote.readFile(asUser[4]!)); return finished("", 0); }
-      if (asUser?.[0] === "/bin/sh" && asUser[2]?.startsWith("kill -9 -1")) { state.leftoverKills++; return finished("", 0); }
+      if (asUser?.[0] === "/bin/sh" && asUser[2]?.startsWith("kill -9 -1")) {
+        state.leftoverKills++;
+        state.events.push("kill-start");
+        await opts.killGate;
+        state.events.push("kill-end");
+        return finished("", 0);
+      }
       if (argv[0] === "/bin/chmod") return finished("", 0);
       if (argv[0] === "/bin/cat" || argv[0] === "python3") throw new Error("root must never read or list job output");
       if (isKill(argv)) {
@@ -366,6 +375,7 @@ function fakeSdk(
       }
       const command = argv.slice(7 + Number(argv[6]));
       state.commands.push(command);
+      state.events.push(`exec:${command.join(" ")}`);
       state.commandTimeouts.push(params?.timeoutMs);
       return (opts.exec ?? (async () => finished()))(command, controlOf(argv));
     },
@@ -458,6 +468,28 @@ describe("modal provider session lifecycle", () => {
       await opened.close();
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it("a command arriving during the leftover kill waits for it, then runs unharmed (council P #3)", async () => {
+    let release!: () => void;
+    const killGate = new Promise<void>((resolve) => { release = resolve; });
+    const { state, session } = await open({ killGate, exec: async () => finished() });
+    const opened = await session();
+    const first = opened.run!({ ...command, binary: "/bin/first" });
+    // Let the first command finish and its cleanup kill begin (it is held at the gate).
+    for (let i = 0; i < 50 && !state.events.includes("kill-start"); i++) await new Promise((resolve) => setTimeout(resolve, 1));
+    expect(state.events).toContain("kill-start");
+    const second = opened.run!({ ...command, binary: "/bin/second" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(state.events.some((event) => event.startsWith("exec:/bin/second"))).toBe(false); // not admitted during the kill
+    release();
+    await first;
+    await second;
+    const killEnd = state.events.indexOf("kill-end");
+    const secondExec = state.events.findIndex((event) => event.startsWith("exec:/bin/second"));
+    expect(killEnd).toBeGreaterThanOrEqual(0);
+    expect(secondExec).toBeGreaterThan(killEnd); // the old daemon was killed first; the new command ran after
+    await opened.close();
   });
 
   it("never kills the parser user's processes while another command is still running (council M #3)", async () => {
