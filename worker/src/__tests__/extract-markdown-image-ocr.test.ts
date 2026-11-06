@@ -4,7 +4,7 @@ import path from "node:path";
 import { Writable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { defaultPipelineFeatures, modalSandboxCostCents, PUBLIC_ERROR_MESSAGES, publicDocumentError } from "@docslurp/shared";
+import { defaultPipelineFeatures, pricing, PUBLIC_ERROR_MESSAGES, publicDocumentError } from "@docslurp/shared";
 
 import { enforceRunSpendForCharge, SpendCheckUnavailableError, setSpendCheckConfig } from "../db/spend-check.js";
 import { pushUsageEvent } from "../lib/perf-context.js";
@@ -314,7 +314,7 @@ describe("image documents are read by the OCR extractor", () => {
 
   /** The OCR VM's own provider-cost event, as the VM provider reports it through the runner (2 cores, at the sandbox rate). */
   const VM_SECONDS = 33.7;
-  const vmCostCents = modalSandboxCostCents({ cores: 2, memoryGib: 2, seconds: VM_SECONDS });
+  const vmCostCents = pricing().internalCost.sandboxCostCents({ provider: "modal", cores: 2, memoryGib: 2, seconds: VM_SECONDS });
   function withVmUsage(h: Awaited<ReturnType<typeof harness>>) {
     const served = h.runner.run.getMockImplementation()!;
     h.runner.run.mockImplementation(async (...args: Parameters<typeof served>) => {
@@ -346,7 +346,6 @@ describe("image documents are read by the OCR extractor", () => {
       noCustomerCharge(h);
       expect(vmEvents(h)).toHaveLength(1);
       expect(vmEvents(h)[0]!.costCents).toBeCloseTo(vmCostCents, 12);
-      expect(vmCostCents).toBeCloseTo(33.7 * (2 * 0.00003942 + 2 * 0.00000667) * 100, 12);
     } finally { await h.cleanup(); }
   });
 

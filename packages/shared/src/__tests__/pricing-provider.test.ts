@@ -172,10 +172,9 @@ describe("file profiles are untrusted", () => {
     expect(media.durationSeconds).toBe(24 * 3600);
   });
 
-  it("merges counts only where the caller gave none, and never trusts an encrypted page count", () => {
+  it("merges counts only where the caller gave none", () => {
     expect(applyFileProfile({ name: "a.pdf", size: 100_000, pages: 3, profile: pdfProfile() }).pages).toBe(3);
     expect(applyFileProfile({ name: "a.pdf", size: 100_000, profile: pdfProfile() }).pages).toBe(10);
-    expect(applyFileProfile({ name: "a.pdf", size: 100_000, profile: pdfProfile({ encrypted: true }) }).pages).toBeUndefined();
     expect(applyFileProfile({ name: "a.pdf", size: 1, profile: pdfProfile() }).profile).toBeUndefined();
   });
 

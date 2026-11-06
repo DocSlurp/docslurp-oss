@@ -19,8 +19,8 @@ import type {
 } from "@docslurp/shared";
 import {
   BILLABLE_UNIT_METRICS,
-  PRICE_CARD,
   searchCredits,
+  searchUnits,
   deferredProfilesEnabled,
   citationLocatorSchema,
   indexConfigHash,
@@ -1657,7 +1657,7 @@ export async function hybridSearch(rawQuery: string, userId: string, options: Se
     result.timings = timings;
     console.info(`[search-timing] ${Object.entries(timings).map(([key, ms]) => `${key.replace(/Ms$/, "")}=${ms}`).join(" ")} results=${result.results.length}`);
     // Price card: one search per root query (sub-searches of decomposition and
-    // multi-hop are part of it); LLM query strategies count as llmSearchMultiplier.
+    // multi-hop are part of it); LLM query strategies count as the provider's searchUnits.
     // Searches a chat turn runs are part of the chat answer's price.
     if (!options.rootSessionId && !currentChatTurn()) await chargeSearch(result, userId, activity.id);
     report?.({ ...activity, status: "success", runtimeMs: Date.now() - started, resultCount: result.results.length,
@@ -1672,10 +1672,10 @@ export async function hybridSearch(rawQuery: string, userId: string, options: Se
 }
 
 /**
- * Bill one completed root search (PRICE_CARD.searchPer1k). A search that ran an
+ * Bill one completed root search (pricing provider). A search that ran an
  * LLM query strategy (HyDE, rewrite, stepback, compression, self-query,
- * decomposition: any call with output tokens) counts as llmSearchMultiplier
- * searches. Query embeddings and strategy tokens are our cost, recorded
+ * decomposition: any call with output tokens) counts as the pricing
+ * provider's searchUnits. Query embeddings and strategy tokens are our cost, recorded
  * non-billable by the Search Session journal.
  */
 async function chargeSearch(result: SearchResponse, userId: string, searchId: string): Promise<void> {
@@ -1692,7 +1692,7 @@ async function chargeSearch(result: SearchResponse, userId: string, searchId: st
         amount: 1,
         unit: "search",
         credits: searchCredits(1, { llmStrategies }),
-        metadata: { llmStrategies, searchUnits: llmStrategies ? PRICE_CARD.llmSearchMultiplier : 1 },
+        metadata: { llmStrategies, searchUnits: searchUnits({ llmStrategies }) },
       },
     });
   } catch (error) {

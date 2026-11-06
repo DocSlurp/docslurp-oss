@@ -69,25 +69,22 @@ describe("providerCostLossItems", () => {
     expect(items.find((item) => item.key === "tC")?.refunded).toBe(true);
   });
 
-  it("flags an OCR run at the 4000 px opt-in with escalation: VM cost at the sandbox rate plus the escalation read exceed the Rich page", async () => {
-    const { modalSandboxCostCents } = await import("@docslurp/shared");
+  it("flags a run whose sandbox and escalation provider costs together exceed its unit charge", async () => {
     const o1 = { org: "o1", workspace: "w1", user: "u1" };
     const tenMinutesAgo = new Date(Date.now() - 10 * 60_000);
     await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, updated_at) values
-      ('r-ocr-4000', 'o1', 'u1', 'w1', 'bulk-upload', 'completed', 'completed', '{}', ${tenMinutesAgo}),
-      ('r-ocr-2000', 'o1', 'u1', 'w1', 'bulk-upload', 'completed', 'completed', '{}', ${tenMinutesAgo})`;
-    // One dense image each: the OCR VM's sandbox_compute event (cost at the sandbox rate, 2 cores), the escalation read's
-    // provider cost (DeepInfra Qwen3-VL-30B, 1,500 in / 800 out tokens: 0.0705 cents) and the one Rich page charged (0.25).
-    const escalationCents = (1_500 * 0.15 + 800 * 0.6) / 1e6 * 100;
-    for (const [runId, seconds, memoryGib] of [["r-ocr-4000", 18.6, 3], ["r-ocr-2000", 14.1, 2]] as const) {
-      await event({ ...o1, runId, model: "ocr-vm", metric: "sandbox_compute", providerCost: modalSandboxCostCents({ cores: 2, memoryGib, seconds }), metadata: { costSource: "estimate" } });
-      await event({ ...o1, runId, model: "Qwen/Qwen3-VL-30B-A3B-Instruct", metric: "ocr-escalation", providerCost: escalationCents, metadata: { costSource: "provider" } });
+      ('r-heavy', 'o1', 'u1', 'w1', 'bulk-upload', 'completed', 'completed', '{}', ${tenMinutesAgo}),
+      ('r-light', 'o1', 'u1', 'w1', 'bulk-upload', 'completed', 'completed', '{}', ${tenMinutesAgo})`;
+    // Arbitrary test amounts: a sandbox_compute event, an escalation read and one unit charge per run.
+    for (const [runId, sandboxCents] of [["r-heavy", 0.2], ["r-light", 0.1]] as const) {
+      await event({ ...o1, runId, model: "ocr-vm", metric: "sandbox_compute", providerCost: sandboxCents, metadata: { costSource: "estimate" } });
+      await event({ ...o1, runId, model: "vendor/escalation", metric: "ocr-escalation", providerCost: 0.07, metadata: { costSource: "provider" } });
       await event({ ...o1, runId, model: "price-card", metric: "ingest-page-rich", credits: 0.25 });
     }
     const { items } = await attribution.providerCostLossItems(window());
-    // 0.1839 + 0.0705 = 0.2544 cents against 0.25 credits: a loss. At the 2000 px default (0.1300 + 0.0705) it is profitable.
-    expect(items.map((item) => item.key)).toEqual(["r-ocr-4000"]);
-    expect(items[0]!.lossCents).toBeCloseTo(0.0044, 3);
+    // 0.2 + 0.07 = 0.27 against 0.25 credits is a loss; 0.1 + 0.07 is not.
+    expect(items.map((item) => item.key)).toEqual(["r-heavy"]);
+    expect(items[0]!.lossCents).toBeCloseTo(0.02, 6);
     expect(items[0]!.topModel).toBe("ocr-vm");
   });
 

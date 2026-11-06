@@ -1,3 +1,4 @@
+import { pricing } from "@docslurp/shared";
 import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
@@ -233,11 +234,11 @@ describe("extract sweep", () => {
     const events = await sql<{ id: string; metric: string; cost_cents: number; run_id: string; org_id: string; workspace_id: string; metadata: Record<string, unknown> }[]>`
       select id, metric, cost_cents::float8 as cost_cents, run_id, org_id, workspace_id, metadata from usage_events where metric = 'storage-extract-retention'`;
     const bytes = 2 * MB + 10 * (96 + 28) * 1024;
-    const expected = (bytes / 1024 ** 3) * 25 * 2;
+    const expected = pricing().extractRetentionCredits(bytes, 1);
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ id: `extract-retention:${id}:settle`, run_id: runId, org_id: "o", workspace_id: "w" });
     expect(events[0]!.cost_cents).toBeCloseTo(expected, 6);
-    expect(events[0]!.metadata).toMatchObject({ product: "extract", extractId: id, phase: "settle", multiplier: 2, billable: true });
+    expect(events[0]!.metadata).toMatchObject({ product: "extract", extractId: id, phase: "settle", retentionCreditsPerGbMonth: pricing().extractRetentionCredits(1024 ** 3, 1), billable: true });
     const [row] = await sql<{ retention_credits: number }[]>`select retention_credits::float8 as retention_credits from extracts where id = ${id}`;
     expect(row!.retention_credits).toBeCloseTo(expected, 6);
 
@@ -353,7 +354,7 @@ describe("extract sweep", () => {
       values (${paid}, 'o', 'w', 'u', ${`extracts/o/${paid}`}, 720, true, now() + interval '30 days')`;
     const runId = await seedRun({ id: paid, storagePrefix: `extracts/o/${paid}` });
     const perPage = (96 + 28) * 1024;
-    const credits = (bytes: number) => (bytes / 1024 ** 3) * 25 * 2;
+    const credits = (bytes: number) => pricing().extractRetentionCredits(bytes, 1);
     expect(await extracts.chargeExtractRetention(paid, "admission")).toBeCloseTo(credits(2 * MB + 10 * perPage), 6);
     // More pages turned up while processing: settle charges only the difference, once.
     await sql`update documents set page_count = 20 where run_id = ${runId}`;

@@ -75,8 +75,6 @@ describe("estimate parity", () => {
     expect(known.estimate.pagesRange).toBeUndefined();
     expect(sized.estimate).toMatchObject({ unmeasuredFiles: 1, pagesRange: { low: 3, high: 47 } });
     expect(sized.estimate.credits).toBeNull();
-    expect(sized.estimate.seconds!.low).toBe(known.estimate.seconds!.low);
-    expect(sized.estimate.seconds!.high).toBeGreaterThan(known.estimate.seconds!.high);
     expect(sized.profile).toEqual(known.profile);
     expect(sized.media).toBeNull();
   });

@@ -9,8 +9,8 @@ import {
   WORKSPACE_INPUT_MAX_LENGTH,
   workspaceTemplateKeySchema,
   indexingModeSchema,
-  estimateCardRevision,
   quoteFileSchema,
+  pricingVersion,
 } from "@docslurp/shared";
 
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
@@ -54,7 +54,7 @@ import {
   type WorkspaceIntakePorts,
 } from "../services/workspace-intake.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
-import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
+import { apiErrorResponse, apiStatusError, nativeBodyLimit } from "../lib/api-error.js";
 import { findDefaultWorkspace, getWorkspace } from "../services/workspaces.js";
 import { IndexingModeError } from "../services/workspace-indexing-mode.js";
 import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
@@ -558,16 +558,25 @@ export async function directUploadTarget(
   return found ? { workspaceId: found.id, workspaceName: null } : create(lookup.ref.name);
 }
 
+/** Largest estimate request body: 1,000 files with a capped profile (FILE_PROFILE_MAX_BYTES) each, plus names. */
+const UPLOAD_ESTIMATE_MAX_BODY_BYTES = 6 * 1024 * 1024;
+
 const uploadEstimateSchema = z.object({
   speedBoost: z.boolean().optional(),
+  /** Files by name, size and type, each optionally with a client file profile (`@docslurp/estimate`); untrusted, estimate only. */
   files: z.array(quoteFileSchema).min(1).max(1000),
   workspace: workspaceInputSchema.optional(),
   orgId: z.string().optional(),
 });
 
-/** `POST /v1/uploads/estimate`: what ingesting these files would cost and take, before anything is stored. */
+/**
+ * `POST /v1/uploads/estimate`: what ingesting these files would cost and take, before anything is stored. Files may carry a
+ * file profile from the offline profiler; profiles are validated, clamped and used only to estimate. The upload itself is
+ * billed by what the worker measures, never by a profile.
+ */
 export const uploadEstimateRoutes = new Hono().post(
   "/estimate",
+  nativeBodyLimit(UPLOAD_ESTIMATE_MAX_BODY_BYTES),
   zValidator("json", uploadEstimateSchema),
   async (c) => {
     const userId = c.get("sessionUser").id;
@@ -589,13 +598,14 @@ export const uploadEstimateRoutes = new Hono().post(
       return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
     }
     const { estimate, media, profile } = await estimateUpload({ files: body.files, workspace, speedBoost: body.speedBoost === true });
-    // `orgId` is the organization whose credits the upload would spend, for reading its balance. `profile` and
-    // `cardRevision` let offline estimators quote later batches for this workspace and notice a newer card.
+    // `orgId` is the organization whose credits the upload would spend, for reading its balance. `profile` is the
+    // workspace's settings the estimate priced with; `kind` labels the answer an estimate, never a charge.
     return c.json({
+      kind: "estimate" as const,
       estimate,
       media,
       profile,
-      cardRevision: estimateCardRevision(),
+      pricingVersion: pricingVersion(),
       billing: billingState(),
       orgId: workspace.orgId,
       billingExempt: isBillingExemptOrg(workspace.orgId),

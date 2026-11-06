@@ -258,7 +258,7 @@ function estimateScenario(args: {
   const mode = QUALITY_MODES[args.quality];
   const playbook = parserPlaybookCatalog[parserPlaybookForQuality(args.quality)];
   const historyForQuality = args.history.byQuality[args.quality];
-  // Customer price in credits (= cents) from PRICE_CARD, by the same quote an upload gets: counted pages price exactly, uncounted
+  // Customer price in credits (= cents) from the pricing provider, by the same quote an upload gets: counted pages price exactly, uncounted
   // ones over the range their size allows, with the high end every page read by a vision model.
   const profile = { ...estimateProfileFor({ ...args.pipeline, quality: args.quality }, { env: process.env }), billing: "enforced" as const };
   const quoted = quoteUpload({ files: args.files, profile, speedBoost: args.pipeline.speedBoost }).estimate.credits ?? { low: 0, high: 0 };

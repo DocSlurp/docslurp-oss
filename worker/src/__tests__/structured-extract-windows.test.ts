@@ -159,10 +159,9 @@ describe("structured extraction of long documents", () => {
     vi.mocked(generateOpenRouterText).mockResolvedValue(answer({ total: { value: 1, confidence: 0.9, evidence: [] }, signer: { value: null, confidence: 0.1, evidence: [] } }) as never);
     await new StructuredExtractStage(storage, config).run(state);
     expect(vi.mocked(generateOpenRouterText)).toHaveBeenCalledTimes(8);
-    // 800,000 characters is 229 pages of text: 23 started 10-page blocks (23 credits), where the page count billed 1.
-    expect(featureCredits("structuredFields", 1)).toBe(1);
+    // 800,000 characters is 229 pages of text, charged on those pages rather than the 1-page count.
     expect(structuredCredits(enqueue)).toBe(featureCredits("structuredFields", 229));
-    expect(structuredCredits(enqueue)).toBe(23);
+    expect(structuredCredits(enqueue)).toBeGreaterThan(featureCredits("structuredFields", 1));
   });
 
   it("bills the windows that finished when a later one fails, and a retry that re-reads them bills only what is new", async () => {

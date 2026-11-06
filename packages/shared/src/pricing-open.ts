@@ -28,7 +28,12 @@ export const OPEN_PLANNING = {
   maxPageFanoutPerRun: 128,
   overheadSeconds: 15,
 } as const;
+/**
+ * Plan facts the database already enforces (core migrations seed the starter grant and the org worker ceilings), so
+ * the open default reports the same values rather than contradict the schema.
+ */
 const OPEN_WORKER_SLOTS = { starter: 50, funded: 250 } as const;
+const OPEN_STARTER_CREDITS = 250;
 
 function nonNegative(value: number | null | undefined): number {
   return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0;
@@ -113,7 +118,7 @@ export const OPEN_PRICING: PricingProvider = {
   apiVersion: 1,
   id: "open",
   version: "open-1",
-  plans: { creditPacksCents: [], starterCredits: 0, workerSlots: { ...OPEN_WORKER_SLOTS }, privateDedicatedMonthlyUsd: null },
+  plans: { creditPacksCents: [], starterCredits: OPEN_STARTER_CREDITS, workerSlots: { ...OPEN_WORKER_SLOTS }, privateDedicatedMonthlyUsd: null },
   pageCredits: (_mode, pages) => nonNegative(pages) * OPEN_CREDITS_PER_PAGE,
   richPagesForOutputTokens: () => 1,
   mediaRichPages: (_kind, seconds) => minutes(seconds),
@@ -142,6 +147,7 @@ export const OPEN_PRICING: PricingProvider = {
     creditsPerPage: OPEN_CREDITS_PER_PAGE,
     mediaMinutePages: 1,
     note: "Open pricing default: a flat per-page charge; storage, search and chat are not charged.",
+    summary: `Pay per use: ${OPEN_CREDITS_PER_PAGE * 1000} credits per 1,000 pages or media minutes.`,
   }),
   estimateIngest: openEstimateIngest,
   quoteUpload: openQuoteUpload,
@@ -150,6 +156,7 @@ export const OPEN_PRICING: PricingProvider = {
     listCredits: () => null,
     sandboxCostCents: () => 0,
     sandboxRatesObservedAt: () => null,
+    workerSlotUsdPerHour: () => null,
   },
 };
 

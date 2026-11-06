@@ -163,6 +163,8 @@ export interface PricingProvider {
     sandboxCostCents(args: { provider: string; cores: number; memoryGib: number; seconds: number }): number;
     /** When the sandbox rates were observed (ISO date), or null. */
     sandboxRatesObservedAt(provider: string): string | null;
+    /** Infrastructure cost of one worker slot per hour in USD, for routing cost bounds; null when unknown. */
+    workerSlotUsdPerHour(): number | null;
   };
 }
 
@@ -192,7 +194,8 @@ export function assertPricingProvider(value: unknown): asserts value is PricingP
   }
   const cost = provider.internalCost;
   if (!cost || typeof cost.computeRates !== "function" || typeof cost.listCredits !== "function"
-    || typeof cost.sandboxCostCents !== "function" || typeof cost.sandboxRatesObservedAt !== "function") {
+    || typeof cost.sandboxCostCents !== "function" || typeof cost.sandboxRatesObservedAt !== "function"
+    || typeof cost.workerSlotUsdPerHour !== "function") {
     throw new Error(`pricing provider ${provider.id} has an incomplete internalCost`);
   }
 }

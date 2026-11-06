@@ -1,4 +1,4 @@
-import { PRICE_CARD, dailyStorageCredits, daysInUtcMonth, unitChargeMetadata } from "@docslurp/shared";
+import { storageCreditsPerMonth, dailyStorageCredits, daysInUtcMonth, unitChargeMetadata } from "@docslurp/shared";
 import { sql, type SqlClient } from "../../db.js";
 import { recordCostEvent } from "../../lib/ai-usage.js";
 import { STORAGE_USAGE_METRIC, STORAGE_USAGE_PROVIDER } from "../usage-attribution.js";
@@ -32,7 +32,7 @@ export function utcDay(now: Date): string {
 
 /**
  * Charge one day of storage per org per UTC day (design gotcha 10) at
- * PRICE_CARD.storageGbMonth / days in the month, on every stored byte
+ * the pricing provider's monthly storage price / days in the month, on every stored byte
  * (objects + indexes; no included GB). The
  * storage_meter_days primary key makes each (org, day) charge idempotent
  * across sweeps and instances; the Usage Event id is derived from the same
@@ -107,7 +107,7 @@ async function meterOrgDay(org: { id: string; created_by_user_id: string }, day:
         metadata: unitChargeMetadata({
           day,
           daysInMonth,
-          storageGbMonth: PRICE_CARD.storageGbMonth,
+          storageCreditsPerGbMonth: storageCreditsPerMonth(BYTES_PER_GB),
           objectBytes: storage.objectBytes,
           indexBytes: storage.indexBytes,
           sourceBytes: storage.sourceBytes,

@@ -568,8 +568,8 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
 
   if (flags.estimate === true && intake === UPLOAD_MODE) {
     const target = resolveIntakeTarget(flags);
-    const sized = await Promise.all(files.map(async (filePath) => ({ name: basename(filePath), size: (await openAsBlob(filePath)).size })));
-    await runEstimate("/v1/uploads/estimate", { files: sized, ...(target.workspace ? { workspace: target.workspace } : {}) }, flags);
+    const estimateFiles = await profiledEstimateFiles(files);
+    await runEstimate("/v1/uploads/estimate", { files: estimateFiles, ...(target.workspace ? { workspace: target.workspace } : {}) }, flags);
     return;
   }
 
@@ -637,6 +637,31 @@ function formatEstimate(estimate: CostEstimate): string {
   if (estimate.seconds) lines.push(`Time:      ${Math.round(estimate.seconds.low)}–${Math.round(estimate.seconds.high)} s`);
   lines.push(`Basis:     ${estimate.basis}`);
   return lines.join("\n");
+}
+
+/**
+ * Files for `POST /v1/uploads/estimate`. When the offline profiler (`@docslurp/estimate`) is installed beside the CLI, each
+ * file is profiled locally (type, pages, PDF page facts, media duration; nothing is uploaded) and its profile sent with it;
+ * otherwise files go by name and size, and the server estimates their pages from size.
+ */
+async function profiledEstimateFiles(paths: string[]): Promise<Array<{ name: string; size: number; profile?: unknown }>> {
+  const sized = await Promise.all(paths.map(async (filePath) => ({ name: basename(filePath), size: (await openAsBlob(filePath)).size })));
+  type Profiler = { createEstimator(): Promise<unknown>; estimatePaths(estimator: unknown, paths: string[]): Promise<{ request: { files: Array<{ name: string; size: number; profile?: unknown }> } }> };
+  let profiler: Profiler;
+  try {
+    // A variable specifier: the profiler is optional and never a build-time dependency.
+    const specifier = "@docslurp/estimate";
+    const [core, node] = await Promise.all([import(specifier), import(`${specifier}/node`)]);
+    profiler = { createEstimator: core.createEstimator, estimatePaths: node.estimatePaths };
+  } catch {
+    return sized;
+  }
+  try {
+    const result = await profiler.estimatePaths(await profiler.createEstimator(), paths);
+    return result.request.files.map((file, index) => ({ ...file, name: sized[index]!.name, size: sized[index]!.size }));
+  } catch {
+    return sized;
+  }
 }
 
 /** POSTs to a `…/estimate` route, prints the estimate (or raw JSON with --json) and leaves the operation undone. */

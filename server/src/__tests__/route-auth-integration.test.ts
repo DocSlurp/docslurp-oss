@@ -56,8 +56,6 @@ const ROUTE_AUTHENTICATED = [
   "POST /v1/waitlist",
   // Public price list (routes/billing.ts): prices are readable without signing in.
   "GET /v1/billing/prices",
-  // Public estimator card (routes/billing.ts): the same public prices plus planning constants for offline quotes.
-  "GET /v1/billing/estimate-card",
 ].sort();
 
 type Operation = { method: string; path: string };

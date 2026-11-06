@@ -19,3 +19,9 @@ if (process.env.DOCSLURP_PDF_MODE === undefined) process.env.DOCSLURP_PDF_MODE =
 
 // Unit suites do not launch paid VM preprocessing; orientation suites explicitly enable/mock it.
 process.env.DOCSLURP_IMAGE_ORIENTATION = "false";
+
+// Billing suites price through an installed provider with arbitrary, distinct test prices (a Rich page costs more than a
+// Fast one, a long output adds Rich pages, video frames add media pages), never a deployment's real prices. Suites that
+// need other numbers install their own (`installTestPricing`).
+import { DISTINCT_TEST_PRICING, installTestPricing } from "@docslurp/shared";
+installTestPricing(DISTINCT_TEST_PRICING);
