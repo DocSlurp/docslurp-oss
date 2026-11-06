@@ -361,4 +361,3 @@ function findEndOfCentralDirectory(bytes: Buffer): number {
   }
   return -1;
 }
-

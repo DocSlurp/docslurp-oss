@@ -59,4 +59,3 @@ export async function readPdfStructure(bytes: Uint8Array): Promise<PdfStructure>
     await task?.destroy();
   }
 }
-

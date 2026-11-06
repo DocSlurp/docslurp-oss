@@ -71,4 +71,3 @@ export function readTableCells(source: string): HtmlTableCell[] | null {
   try { visit(tables[0]!, "root", 0); } catch { return null; }
   return records.length ? records : null;
 }
-
