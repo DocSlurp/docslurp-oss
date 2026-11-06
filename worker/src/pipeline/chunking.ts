@@ -82,6 +82,9 @@ interface Section {
   tableIndex?: number;
 }
 
+/** Bounded lexical section scan; DOM parsing is performed separately in the VM. */
+export function htmlTableSources(text: string): string[] { return parseSections(text.trim()).filter(s => s.tableIndex !== undefined).map(s => s.body.trim()); }
+
 function parseSections(text: string): Section[] {
   const lines = text.split("\n");
   const sections: Section[] = [];

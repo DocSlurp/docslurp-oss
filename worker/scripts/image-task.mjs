@@ -23,7 +23,10 @@ const request = revive(JSON.parse(await readFile(requestFile, "utf8")));
 if (!["metadata", "toBuffer"].includes(request.terminal) || !Array.isArray(request.operations) || request.operations.length > 32) throw new Error("invalid image task");
 // Strings would let a compromised caller select paths or invoke special image loaders.
 if (!(request.input instanceof Uint8Array) && !request.input?.create) throw new Error("image input must be bytes or a generated canvas");
-let image = sharp(request.input, { ...request.options, limitInputPixels: 40_000_000 });
+const options = { ...request.options, limitInputPixels: 40_000_000 };
+let image = request.input instanceof Uint8Array
+  ? sharp(request.input, options)
+  : sharp({ ...options, create: request.input.create });
 for (const op of request.operations) {
   if (!methods.has(op.method) || !Array.isArray(op.args)) throw new Error("invalid image operation");
   image = Reflect.apply(Reflect.get(image, op.method), image, op.args);

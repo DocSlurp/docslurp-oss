@@ -61,6 +61,8 @@ export interface CommandPlan {
   binary: string;
   args: string[];
   available: boolean;
+  /** Auxiliary regular files under a private DocSlurp temp workspace, staged read-only. */
+  stagedInputs?: string[];
   /** Page count for the wall-clock budget; defaults to the document in the perf context. */
   pages?: number;
   /** Explicit wall-clock budget, overriding the page-based one. */
@@ -1020,7 +1022,11 @@ export class CommandRunner {
 
   private async clamVmDatabaseHealth(policy: MalwareScanPolicy, signal: AbortSignal | undefined, databaseArgs: string[]): Promise<ClamDatabaseHealth> {
     try {
-      const plan = await this.plan("clamscan", ...databaseArgs, "--version");
+      const signatureFiles = databaseArgs.filter((_, index) => index % 2 === 1);
+      if (!signatureFiles.length) throw new Error("No staged signature files");
+      // ClamAV print_version accepts a directory and reads its daily.cvd/cld header.
+      const plan = await this.plan("clamscan", "--database", path.dirname(signatureFiles[0]!), "--version");
+      plan.stagedInputs = signatureFiles;
       plan.readOnlyInputs = true;
       const result = await this.run(plan, signal);
       return parseClamVmDatabaseHealth(result.stdout, policy.maxSignatureAgeHours);

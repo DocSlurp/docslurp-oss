@@ -1,3 +1,5 @@
+import { withPreparedHtmlTables } from "../pipeline/html-table-vm.js";
+import { htmlTableSources } from "../pipeline/chunking.js";
 import { createHash } from "node:crypto";
 
 import { RunPolicyError } from "../lib/document-failure.js";
@@ -247,12 +249,15 @@ export class EmbedStage implements Stage {
           let existingUri: string | undefined;
           let prepFailed = true;
           try {
-            chunkDrafts = extracted.canonicalDocument
+            chunkDrafts = await withPreparedHtmlTables([
+              ...(extracted.canonicalDocument?.blocks.flatMap(block => [block.text.trim(), ...htmlTableSources(block.text)]) ?? []),
+              ...htmlTableSources(extracted.text),
+            ], this.runner, () => extracted.canonicalDocument
               ? buildCanonicalChunksFromDocument(extracted.canonicalDocument, document.filename, {
                   chunkOverlap: state.run.pipeline.chunkOverlap,
                   sourceKind: document.mimeType.startsWith("image/") ? "image" : null
                 })
-              : fallbackChunkDrafts(extracted.text, document.filename, state.run.pipeline.chunkOverlap);
+              : fallbackChunkDrafts(extracted.text, document.filename, state.run.pipeline.chunkOverlap), signal);
             contentHash = hashContent(
               JSON.stringify({
                 documentTitle: document.filename,
