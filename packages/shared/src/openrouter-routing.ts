@@ -1,4 +1,5 @@
 import { lowestOpenRouterReasoning } from "./openrouter-usage.js";
+import { isProhibitedRoutingModelId } from "./routing-targets.js";
 import { nitroBaseModel } from "./workspace-chat-models.js";
 export { nitroBaseModel } from "./workspace-chat-models.js";
 /**
@@ -151,23 +152,37 @@ export async function currentOpenRouterProviderPolicy(): Promise<OpenRouterProvi
 }
 
 /**
- * The open-weight text model a request falls back to when China-based providers
- * are turned off and its model has no other host (OpenRouter answers 404 "No
- * allowed providers"). OPENROUTER_RESTRICTED_FALLBACK_MODEL overrides it; "" or
- * "none" turns the fallback off. Checked 2026-11-06: openai/gpt-oss-120b
- * (Apache-2.0) has 21 non-China endpoints and is cheaper than the default.
+ * The open-weight text model a restricted request falls back to when its model
+ * has no host outside China (OpenRouter answers 404 "No allowed providers").
+ * OPENROUTER_RESTRICTED_FALLBACK_MODEL overrides it; "" or "none" turns the
+ * fallback off. A variant (`:nitro`, `:free`) or prohibited model is ignored.
+ * Checked 2026-11-06: openai/gpt-oss-120b (Apache-2.0) has 21 of 26 endpoints
+ * outside China and a lower list price than the default pipeline model.
  */
 export const DEFAULT_RESTRICTED_FALLBACK_MODEL = "openai/gpt-oss-120b";
 
+let warnedInvalidFallback = false;
 export function restrictedFallbackModel(env: NodeJS.ProcessEnv = process.env): string | undefined {
   const configured = env.OPENROUTER_RESTRICTED_FALLBACK_MODEL?.trim();
   if (configured === undefined) return DEFAULT_RESTRICTED_FALLBACK_MODEL;
-  return configured && configured.toLowerCase() !== "none" ? configured : undefined;
+  if (!configured || configured.toLowerCase() === "none") return undefined;
+  if (configured.includes(":") || isProhibitedRoutingModelId(configured)) {
+    if (!warnedInvalidFallback) console.warn(`[openrouter] region_fallback disabled: OPENROUTER_RESTRICTED_FALLBACK_MODEL=${configured} is a variant or prohibited model`);
+    warnedInvalidFallback = true;
+    return undefined;
+  }
+  return configured;
 }
 
-/** Models a restricted request found unservable, until this time; such requests go straight to the fallback. */
+/**
+ * Models that answered a restricted, unconstrained request with "No allowed
+ * providers", until this time. The answer depends only on the model and the
+ * shared non-China allowlist, so it holds for every restricted tenant; requests
+ * carrying their own provider constraints never record or read it.
+ */
 const regionBlockedModels = new Map<string, number>();
-const REGION_BLOCK_TTL_MS = 60 * 60_000;
+const REGION_BLOCK_TTL_MS = 30 * 60_000;
+const REGION_BLOCK_MAX_ENTRIES = 256;
 
 function regionBlocked(model: string, now = Date.now()): boolean {
   const until = regionBlockedModels.get(model);
@@ -177,43 +192,89 @@ function regionBlocked(model: string, now = Date.now()): boolean {
   return false;
 }
 
+function rememberRegionBlock(model: string, now = Date.now()): void {
+  regionBlockedModels.delete(model);
+  if (regionBlockedModels.size >= REGION_BLOCK_MAX_ENTRIES) regionBlockedModels.delete(regionBlockedModels.keys().next().value!);
+  regionBlockedModels.set(model, now + REGION_BLOCK_TTL_MS);
+}
+
 /** For tests: forget remembered region blocks. */
 export function resetRegionBlockedModels(): void {
   regionBlockedModels.clear();
 }
 
-const NON_TEXT_PART_TYPES = new Set(["image_url", "input_image", "image", "file", "input_file", "input_audio", "audio", "video_url"]);
+const TEXT_PART_TYPES = new Set(["text", "input_text", "output_text", "refusal", "reasoning", "summary_text", "function_call", "function_call_output", "tool_use", "tool_result", "message"]);
+const MEDIA_KEYS = new Set(["image_url", "input_image", "image", "image_file", "file", "file_id", "file_data", "input_file", "input_audio", "audio", "audio_url", "video_url", "input_video", "document"]);
 
-/** True when no message part is an image, file, audio or video: the fallback model reads text only. */
+/**
+ * True only when every part of the request is text (an allowlist: unknown part
+ * types, media keys, non-text modalities and anything too deeply nested count
+ * as media). The fallback model reads text only.
+ */
 export function isTextOnlyRequest(body: Record<string, unknown>): boolean {
+  if (Array.isArray(body.modalities) && body.modalities.some((modality) => modality !== "text")) return false;
   const visit = (value: unknown, depth: number): boolean => {
-    if (depth > 8 || value === null || typeof value !== "object") return true;
+    if (value === null || typeof value !== "object") return true;
+    if (depth > 12) return false;
     if (Array.isArray(value)) return value.every((item) => visit(item, depth + 1));
     const record = value as Record<string, unknown>;
-    if (typeof record.type === "string" && NON_TEXT_PART_TYPES.has(record.type)) return false;
-    return Object.values(record).every((item) => visit(item, depth + 1));
+    if (typeof record.type === "string" && !TEXT_PART_TYPES.has(record.type)) return false;
+    for (const [key, item] of Object.entries(record)) {
+      if (MEDIA_KEYS.has(key)) return false;
+      if (!visit(item, depth + 1)) return false;
+    }
+    return true;
   };
-  return visit(body.messages, 0) && visit(body.input, 0);
+  return visit(body.messages, 0) && visit(body.input, 0) && visit(body.prompt, 0);
 }
 
-/** OpenRouter's 404 for a model the request's provider restriction leaves without a host. */
+/**
+ * Whether a request may be re-sent to the fallback: text only, a plain model
+ * id, and no routing the caller chose (a provider pin, price or data policy,
+ * or a `models` list), which names a route that must not change.
+ */
+function regionFallbackEligible(body: Record<string, unknown>): boolean {
+  if (typeof body.model !== "string" || body.model.endsWith(":free") || Array.isArray(body.models)) return false;
+  const provider = body.provider;
+  if (provider !== undefined && (typeof provider !== "object" || provider === null || Object.keys(provider).length > 0)) return false;
+  return isTextOnlyRequest(body);
+}
+
+/** OpenRouter's 404 for a model the non-China restriction leaves without any host. */
 async function isNoAllowedProviderResponse(response: Response): Promise<boolean> {
   if (response.status !== 404) return false;
   const text = await response.clone().text().catch(() => "");
-  return /no allowed providers|no endpoints found/i.test(text);
+  return /no allowed providers are available/i.test(text);
 }
 
-/** The request re-targeted at the fallback model, with that model's reasoning floor where the caller disabled reasoning. */
+/**
+ * The request re-targeted at the fallback model. Unless the caller asked for
+ * real reasoning (low or more), it gets the fallback's verified floor, keeping
+ * `exclude`; a fallback with no verified floor gets its provider default.
+ */
 function withFallbackModel(body: Record<string, unknown>, fallback: string): Record<string, unknown> {
   const next: Record<string, unknown> = { ...body, model: fallback };
+  const reasoning = body.reasoning && typeof body.reasoning === "object" ? body.reasoning as Record<string, unknown> : undefined;
+  const effort = reasoning?.effort ?? body.reasoning_effort;
+  const explicit = reasoning?.enabled !== false && typeof effort === "string" && !["none", "minimal"].includes(effort);
+  if (explicit) return next;
+  delete next.reasoning_effort;
   const floor = lowestOpenRouterReasoning(fallback);
-  const reasoning = body.reasoning as Record<string, unknown> | undefined;
-  const disabled = reasoning?.enabled === false || reasoning?.effort === "none" || body.reasoning_effort === "none";
-  if (floor && disabled) {
-    delete next.reasoning_effort;
-    next.reasoning = floor;
-  }
+  const exclude = reasoning?.exclude === true ? { exclude: true } : {};
+  if (floor) next.reasoning = { ...floor, ...exclude };
+  else if (reasoning) next.reasoning = Object.keys(exclude).length ? exclude : undefined;
+  if (next.reasoning === undefined) delete next.reasoning;
   return next;
+}
+
+export interface OpenRouterRoutingOptions {
+  /**
+   * Re-send a restricted text request whose model has no host outside China to
+   * the open fallback model (restrictedFallbackModel). Only for calls on a
+   * pipeline or deployment default; never for a model a user chose (chat) or a
+   * purpose-built classifier, whose replies another model cannot stand in for.
+   */
+  restrictedFallback?: boolean;
 }
 
 /**
@@ -221,7 +282,7 @@ function withFallbackModel(body: Record<string, unknown>, fallback: string): Rec
  * organization. A restricted request whose body is not a JSON object cannot carry the restriction, so it is
  * refused rather than sent.
  */
-export function createOpenRouterRoutingFetch(baseFetch: typeof fetch = fetch): typeof fetch {
+export function createOpenRouterRoutingFetch(baseFetch: typeof fetch = fetch, options: OpenRouterRoutingOptions = {}): typeof fetch {
   return async (input, init) => {
     const policy = await currentOpenRouterProviderPolicy();
     const restricted = policy !== undefined && !policy.allowChinaProviders;
@@ -256,31 +317,35 @@ export function createOpenRouterRoutingFetch(baseFetch: typeof fetch = fetch): t
       const model = speedBoostModel(body.model, policy?.speedBoost);
       if (model !== body.model) body = { ...body, model };
     }
-    // A restricted text request whose model has no non-China host goes to the open fallback model,
-    // still under the same restriction. Image, file and audio requests are never re-targeted.
-    const regionFallback = restricted && generation && isTextOnlyRequest(body) ? restrictedFallbackModel() : undefined;
-    const requested = typeof body.model === "string" ? body.model : undefined;
+    // An opted-in restricted text request whose model has no host outside China goes to the open
+    // fallback model, still under the same restriction (see OpenRouterRoutingOptions.restrictedFallback).
+    const regionFallback = options.restrictedFallback && restricted && generation && regionFallbackEligible(original)
+      ? restrictedFallbackModel() : undefined;
+    const requested = typeof original.model === "string" ? nitroBaseModel(original.model) ?? original.model : undefined;
     const canFallBack = regionFallback !== undefined && requested !== undefined && requested !== regionFallback;
-    if (canFallBack && regionBlocked(requested)) {
-      console.warn(`[openrouter] region_fallback model=${requested} fallback=${regionFallback} reason=remembered`);
-      return baseFetch(input, { ...init, body: JSON.stringify(withOpenRouterProviderPreferences(withFallbackModel(body, regionFallback), { ...policy!, speedBoost: false })) });
-    }
+    const sendFallback = (reason: string) => {
+      console.warn(`[openrouter] region_fallback model=${requested} fallback=${regionFallback} reason=${reason}`);
+      const retargeted = withFallbackModel({ ...original, model: requested }, regionFallback!);
+      return baseFetch(input, { ...init, body: JSON.stringify(withOpenRouterProviderPreferences(retargeted, { ...policy!, speedBoost: false })) });
+    };
+    if (canFallBack && regionBlocked(requested)) return sendFallback("remembered");
     const routed = withOpenRouterProviderPreferences(body, policy);
-    const response = routed === original ? await baseFetch(input, init) : await baseFetch(input, { ...init, body: JSON.stringify(routed) });
-    if (canFallBack && await isNoAllowedProviderResponse(response)) {
-      regionBlockedModels.set(requested, Date.now() + REGION_BLOCK_TTL_MS);
-      console.warn(`[openrouter] region_fallback model=${requested} fallback=${regionFallback} status=404`);
-      await response.body?.cancel().catch(() => undefined);
-      return baseFetch(input, { ...init, body: JSON.stringify(withOpenRouterProviderPreferences(withFallbackModel(body, regionFallback), { ...policy!, speedBoost: false })) });
-    }
+    let response = routed === original ? await baseFetch(input, init) : await baseFetch(input, { ...init, body: JSON.stringify(routed) });
     const base = typeof routed.model === "string" ? nitroBaseModel(routed.model) : undefined;
-    if (response.status !== 404 || !base) return response;
-    // Nitro routing (throughput sort, price ceiling, quantization filter) can leave
-    // no endpoint, which OpenRouter answers with 404. Retry once on the base
-    // model's normal route instead of failing the call.
-    console.warn(`[openrouter] nitro_fallback model=${routed.model} base=${base} status=404`);
-    await response.body?.cancel().catch(() => undefined);
-    const fallback = withOpenRouterProviderPreferences({ ...original, model: base }, policy && { ...policy, speedBoost: false });
-    return baseFetch(input, { ...init, body: JSON.stringify(fallback) });
+    if (response.status === 404 && base) {
+      // Nitro routing (throughput sort, price ceiling, quantization filter) can leave
+      // no endpoint, which OpenRouter answers with 404. Retry once on the base
+      // model's normal route instead of failing the call.
+      console.warn(`[openrouter] nitro_fallback model=${routed.model} base=${base} status=404`);
+      await response.body?.cancel().catch(() => undefined);
+      const fallback = withOpenRouterProviderPreferences({ ...original, model: base }, policy && { ...policy, speedBoost: false });
+      response = await baseFetch(input, { ...init, body: JSON.stringify(fallback) });
+    }
+    if (canFallBack && await isNoAllowedProviderResponse(response)) {
+      rememberRegionBlock(requested);
+      await response.body?.cancel().catch(() => undefined);
+      return sendFallback("no-allowed-provider");
+    }
+    return response;
   };
 }

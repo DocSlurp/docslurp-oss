@@ -77,7 +77,7 @@ export class PipelineUsageEventLedger {
    * that persists the charge removes that request from the org's uncharged count.
    */
   record(input: WorkerAiUsageInput, options: { visionAttemptTicket?: string | null } = {}): UsageEvent | null {
-    const event = buildWorkerAiUsageEvent(input);
+    const event = buildWorkerAiUsageEvent(servedModelInput(input));
     this.chargeRichPageRead(event, false, options.visionAttemptTicket ?? null);
     if (!hasWorkerAiUsage(event)) {
       return null;
@@ -263,4 +263,15 @@ function hasUsageToPersist(event: UsageEvent): boolean {
     || (event.outputTokens ?? 0) > 0
     || event.amount > 0
     || event.costCents > 0;
+}
+
+/**
+ * A text call a restricted fallback re-targeted (generateOpenRouterText marks it
+ * `regionFallback` with the model that ran as `routedModel`) is recorded as the
+ * model that ran; the stage's model stays in metadata as `requestedModel`.
+ */
+function servedModelInput(input: WorkerAiUsageInput): WorkerAiUsageInput {
+  const metadata = input.metadata as Record<string, unknown> | undefined;
+  if (metadata?.regionFallback !== true || typeof metadata.routedModel !== "string" || metadata.routedModel === input.model) return input;
+  return { ...input, model: metadata.routedModel, metadata: { ...metadata, requestedModel: metadata.requestedModel ?? input.model } };
 }

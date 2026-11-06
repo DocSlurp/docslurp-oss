@@ -184,6 +184,18 @@ export function createOpenRouterReasoningFetch(baseFetch: typeof fetch, effort?:
   };
 }
 
+/**
+ * The model to price and record a text call as: the model actually sent when a
+ * restricted fallback re-targeted it, else the requested one. A speed-boost
+ * (`:nitro`) variant of the requested model is not a different model here, so
+ * its pricing is unchanged. Read `sentModel()` from a capture inside the routing fetch.
+ */
+export function servedTextModel(requested: string, sent: string | undefined): { model: string; regionFallback: boolean } {
+  if (!sent) return { model: requested, regionFallback: false };
+  const base = (model: string) => nitroBaseModel(model) ?? model;
+  return base(sent) === base(requested) ? { model: requested, regionFallback: false } : { model: sent, regionFallback: true };
+}
+
 /** Observe the original response before SDK validation discards router cost fields. */
 export function createOpenRouterUsageCapture(baseFetch: typeof fetch = fetch) {
   let captured: unknown;

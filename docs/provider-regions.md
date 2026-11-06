@@ -62,13 +62,23 @@ The vision route retains the same three hosts with either setting. Turning the s
 some text models unavailable:
 
 - **`qwen/qwen3.5-flash-02-23` (the default pipeline text model) is served only by Alibaba.** With China-based
-  providers off, OpenRouter answers its requests with 404 "No allowed providers". Text-only requests then fall
-  back automatically to an open-weight model with non-China hosts, `openai/gpt-oss-120b` (Apache-2.0; 21 of 26
-  endpoints outside China on 2026-11-06), still under the same host restriction and at its lowest reasoning
-  (`minimal`). A model found unservable is remembered for an hour, so later requests go straight to the
-  fallback; each fallback logs `[openrouter] region_fallback`. Requests with images, files or audio are never
-  re-targeted. Set `OPENROUTER_RESTRICTED_FALLBACK_MODEL` to another model, or to `none` to turn the fallback
-  off and fail instead. To pick the model yourself, set `pipeline.textGeneration.model` for such workspaces.
+  providers off, OpenRouter answers its requests with 404 "No allowed providers". Pipeline text calls (summaries,
+  graph extraction, document maps and other worker text stages) and the API's search helpers then fall back to an
+  open-weight model with non-China hosts, `openai/gpt-oss-120b` (Apache-2.0; 21 of 26 endpoints outside China on
+  2026-11-06), still under the same host restriction and at its lowest reasoning (`minimal`).
+  - Only text requests that set no routing of their own fall back. A request that pins providers, a price or
+    data policy, or lists `models`, `:free` variants, and requests with images, files or audio are never
+    re-targeted.
+  - Chat with a model the user chose, and purpose-built classifiers such as output moderation, never fall back:
+    another model cannot stand in for them.
+  - A speed-boost request first retries its base model, as before.
+  - A model found unservable is remembered for 30 minutes, so later restricted requests go straight to the
+    fallback. Requests that allow China-based hosts are never affected.
+  - Each fallback logs `[openrouter] region_fallback`. The usage record names the model that ran and keeps the
+    stage's model as `requestedModel`, with `regionFallback: true`.
+  - Set `OPENROUTER_RESTRICTED_FALLBACK_MODEL` to another model, or to `none` to turn the fallback off and fail
+    instead; a `:variant` or prohibited model is ignored. To choose the model yourself, set
+    `pipeline.textGeneration.model` for such workspaces.
 - Providers whose region is unknown (for example Relace, Typesafe, Liquid, NEAR AI, Makora) are never used
   while the setting is off.
 
@@ -105,8 +115,7 @@ changed row, and update the date. A provider missing from the table is `unknown`
 Vision and OpenRouter text usage records carry `servedProvider` (the host OpenRouter reported),
 `servedProviderSlug` and `servedProviderRegion` in their metadata, so spend can be broken down by host region.
 Billing still uses the served host's reported charge (`usage.cost`); list prices only bound requests. A
-request re-targeted at the restricted fallback is priced as the fallback model, and worker text usage records it as
-`routedModel`.
+request re-targeted at the restricted fallback is priced and recorded as the fallback model.
 
 ## Public disclosures
 

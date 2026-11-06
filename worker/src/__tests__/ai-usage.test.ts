@@ -256,3 +256,17 @@ describe("Speed boost worker accounting", () => {
     expect(ledger.pendingBillableCents).toBe(0);
   });
 });
+
+describe("restricted-provider fallback usage", () => {
+  it("records a re-targeted text call as the model that ran, keeping the requested model", () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const ledger = new PipelineUsageEventLedger();
+    const event = ledger.record({ provider: "openrouter", model: "qwen/qwen3.5-flash-02-23", metric: "graphrag-extract", inputTokens: 10, outputTokens: 5, costCents: 0.01,
+      metadata: { routedModel: "openai/gpt-oss-120b", regionFallback: true, requestedModel: "qwen/qwen3.5-flash-02-23" } });
+    expect(event).toMatchObject({ model: "openai/gpt-oss-120b", metadata: { requestedModel: "qwen/qwen3.5-flash-02-23", regionFallback: true } });
+    // Without the fallback flag the stage's model is kept, whatever routedModel says.
+    expect(ledger.record({ provider: "openrouter", model: "z-ai/glm-5.3-flash", metric: "graphrag-extract", inputTokens: 10, outputTokens: 5, costCents: 0.01,
+      metadata: { routedModel: "z-ai/glm-5.3-flash:nitro" } })).toMatchObject({ model: "z-ai/glm-5.3-flash" });
+  });
+});
+

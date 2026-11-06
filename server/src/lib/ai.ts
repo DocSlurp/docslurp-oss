@@ -1,4 +1,4 @@
-import { assertProviderAllowed, authorizePrivateModelCall, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, createOpenRouterUsageCapture, createOpenRouterChargeTotal, isPrivateModelUri, readProviderCharge, PRIVATE_MODEL_PROVIDER, resolveOpenRouterUsage, resolveSupportedModelIdWithWarning, type PrivacyMode, type PrivateCallAuditScope, type ProviderTextUsage } from "@docslurp/shared";
+import { assertProviderAllowed, authorizePrivateModelCall, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, createOpenRouterUsageCapture, createOpenRouterChargeTotal, isPrivateModelUri, readProviderCharge, PRIVATE_MODEL_PROVIDER, resolveOpenRouterUsage, servedTextModel, resolveSupportedModelIdWithWarning, type PrivacyMode, type PrivateCallAuditScope, type ProviderTextUsage } from "@docslurp/shared";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
@@ -207,7 +207,7 @@ export async function generateOpenRouterText(args: {
     async () => {
       const accounting = createOpenRouterUsageCapture();
       const provider = createOpenAI({
-        fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(withProviderPreferences(createOpenRouterRoutingFetch(accounting.fetch), args.providerPreferences))),
+        fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(withProviderPreferences(createOpenRouterRoutingFetch(accounting.fetch, { restrictedFallback: true }), args.providerPreferences))),
         apiKey: args.apiKey,
         baseURL: OPENROUTER_BASE_URL,
       });
@@ -227,8 +227,8 @@ export async function generateOpenRouterText(args: {
 
       return {
         text: result.text,
-        // A restricted request may have been re-targeted at the fallback model: price what was sent.
-        usage: await resolveOpenRouterUsage({ apiKey: args.apiKey, model: accounting.sentModel() ?? args.model ?? SEARCH_OPENROUTER_MODEL, generationId: result.response.id, usage: { ...result.usage, raw: accounting.usage() ?? result.usage.raw } }),
+        // A restricted request may have been re-targeted at the open fallback model: price what ran.
+        usage: await resolveOpenRouterUsage({ apiKey: args.apiKey, model: servedTextModel(args.model ?? SEARCH_OPENROUTER_MODEL, accounting.sentModel()).model, generationId: result.response.id, usage: { ...result.usage, raw: accounting.usage() ?? result.usage.raw } }),
       };
     },
   );
@@ -306,7 +306,7 @@ export async function generateOpenRouterDocumentText(args: {
     return {
       text,
       finishReason,
-      usage: await resolveOpenRouterUsage({ apiKey: args.apiKey, model: accounting.sentModel() ?? model, generationId: response.id, usage: { ...usage, raw: accounting.usage() ?? usage.raw } }),
+      usage: await resolveOpenRouterUsage({ apiKey: args.apiKey, model, generationId: response.id, usage: { ...usage, raw: accounting.usage() ?? usage.raw } }),
       sources,
     };
   }
