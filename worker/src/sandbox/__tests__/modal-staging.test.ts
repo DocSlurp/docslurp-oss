@@ -345,9 +345,10 @@ function fakeSdk(
         opts.onKill?.(controlOf(argv));
         return finished("", 0);
       }
-      state.commands.push(argv.slice(6));
+      const command = argv.slice(7 + Number(argv[6]));
+      state.commands.push(command);
       state.commandTimeouts.push(params?.timeoutMs);
-      return (opts.exec ?? (async () => finished()))(argv.slice(6), controlOf(argv));
+      return (opts.exec ?? (async () => finished()))(command, controlOf(argv));
     },
   };
   const sdk = {
@@ -434,7 +435,7 @@ describe("modal provider session lifecycle", () => {
     vi.useFakeTimers();
     try {
       vi.spyOn(console, "warn").mockImplementation(() => {});
-      const { sdk, state } = fakeSdk({ terminateHangs: true, exec: async () => finished(JSON.stringify({ protocol: "parser-vm@2" })) });
+      const { sdk, state } = fakeSdk({ terminateHangs: true, exec: async () => finished(JSON.stringify({ protocol: "parser-vm@2", uid: 10001 })) });
       const provider = createModalProvider(async () => sdk);
       const probing = provider.probe(config);
       await vi.advanceTimersByTimeAsync(10_001);

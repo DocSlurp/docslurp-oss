@@ -345,7 +345,10 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
       try {
         session = await provider.openSession({ ...config, sessionTimeoutSeconds: Math.min(config.sessionTimeoutSeconds, PROBE_SESSION_TIMEOUT_SECONDS) }, { activityId: "startup-probe" });
         const result = await session.run!({ binary: "node", args: ["/app/worker/scripts/parser-vm-contract.mjs"], env: { PATH: "/usr/local/bin:/usr/bin:/bin" }, readablePaths: [], inputPaths: [], writablePaths: [], limits: { timeoutMs: 30_000 } });
-        if (result.exitCode !== 0 || JSON.parse(result.stdout).protocol !== "parser-vm@2") throw new Error("parser VM image contract unavailable");
+        const contract = result.exitCode === 0 ? JSON.parse(result.stdout) as { protocol?: unknown; uid?: unknown } : null;
+        if (contract?.protocol !== "parser-vm@2") throw new Error("parser VM image contract unavailable");
+        // Parser commands drop root in the VM (control.ts); a contract run as root means they would parse as root (N10).
+        if (typeof contract.uid !== "number" || contract.uid === 0) throw new Error("parser VM commands do not drop root privileges");
         return { ok: true, isolation: ISOLATION, detail: `VM image contract verified for '${config.app}'` };
       } catch (error) {
         return { ok: false, isolation: ISOLATION, detail: safeMessage(config, error) };
@@ -457,7 +460,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
       async function runRemote(command: SandboxCommand, control: string, signal?: AbortSignal): Promise<RemoteOutcome> {
         const env: Record<string, string> = {};
         for (const [key, value] of Object.entries(command.env)) if (value !== undefined) env[key] = value;
-        const argv = launchArgv(control, command.binary, command.args);
+        const argv = launchArgv(control, command.binary, command.args, command.writablePaths);
         let settled: Promise<{ stdout: string; stderr: string; exitCode: number | null }> = Promise.reject(
           new Error("exec did not start"),
         );
