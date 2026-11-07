@@ -162,10 +162,9 @@ export function classifyAttempt(attempt: VisionAttempt): { kind: RetryableOutcom
     || attempt.error?.metadata?.error_type === "refusal"
     || /content[ -]?filter|blocked|refus/i.test(message);
   if (refusal) return { kind: "refusal", detail: message || attempt.finishReason || "content filtered" };
-  if (attempt.finishReason === "error" || (attempt.error && !attempt.hadChoices)) {
+  if (attempt.finishReason === "error" || attempt.error) {
     return { kind: "provider-error", detail: message || "provider returned an error body" };
   }
-  if (attempt.error && !attempt.text) return { kind: "provider-error", detail: message || "provider error" };
   if (attempt.finishReason === "length") return { kind: "length", detail: "finish_reason=length" };
   return null;
 }

@@ -301,3 +301,18 @@ it("retains charged HTTP failures inside transport retries", async () => {
     expect.objectContaining({ generationId: "gen-http-failure", costCents: 0.2 }),
   ]));
 });
+
+it("rejects partial text with a choice-level provider error and fails over", async () => {
+  const { bodies } = stubFetch([
+    new Response(JSON.stringify({ id: "failed-text", model: "m", provider: "ProvA",
+      choices: [{ message: { content: "Partial text" }, finish_reason: "stop", error: { code: 503, message: "upstream failed" } }],
+      usage: { prompt_tokens: 100, completion_tokens: 2, cost: 0.002 } })),
+    okStream("Complete text", "ProvB"),
+  ]);
+  const result = await run();
+  expect(bodies).toHaveLength(2);
+  expect(result.costCents).toBeCloseTo(0.3);
+  expect(result.costMetadata?.visionAttempts).toEqual(expect.arrayContaining([
+    expect.objectContaining({ generationId: "failed-text", outcome: "provider-error" }),
+  ]));
+});
