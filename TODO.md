@@ -1,8 +1,22 @@
 # TODO
 
+- Doppler security advisory tracking (council A L-B, 2026-11-05): the worker images and the VM guest run the pinned Doppler fork (`worker/doppler.json`), which does not receive Debian's poppler-utils patches (host probes stay Debian's). Before each release, and at least monthly, compare Poppler upstream security fixes and the Debian `src:poppler` tracker with the fork's base, cherry-pick or rebase in DocSlurp/doppler, and move the pin. Automate as a scheduled CI check that fails when upstream Poppler has a security tag newer than the fork's base.
+
+- Remaining host reads of customer bytes after the VM-only parser merge (#288 + #295, 2026-11-06): (1) worker format-detect decodes text-format files (`lib/text-page-count.ts`, pure TypeScript `decodeTextBytes`, no parser) to count their pages; (2) the API's intake sniffs a header (`fileFactsFor` depth `header`, magic bytes only) and decodes up to 2 MB of a text file to estimate its pages (`source-metadata.ts`); (3) `pdf-asset-cache` reads the 24-byte header of PNGs our own renderer produced. Move (1) and (2) into the parser VM (one `text-pages` entrypoint) and read raster dimensions from the VM's result instead of (3).
+- Reuse base VM OCR on retry (real-Modal validation N8, 2026-11-06): when the activity retries after a failure that follows the VM OCR (for example a storage reset on the Markdown write, F7), the base OCR runs again. The customer is charged once (page charges keep their ids), but provider cost doubles. Escalation reads are already reused (`ocr_escalation_reads`, 0129). Persist the base OCR page text per document, source hash and settings (object storage, not a table row per page), reuse it on retry, and drop it when the document completes.
+- VM-only parser migration acceptance: verify a packaged `parser-vm@2` image with an approved synthetic live VM test, record independent council resolution, and complete owner-approved rollout before treating existing deployments as isolated. Production startup now requires the VM provider; local namespace providers are for trusted development fixtures.
+
 - Vision self-critique prompt never reaches the model (council info, 2026-10-29, #235): the critique call in `worker/src/stages/extract-markdown.ts` (`runSelfCritique`) passes a prompt that `resolveVisionPromptTemplate` (`worker/src/tools/vision-runtime.ts`) does not recognize as a template key, so the request falls back to the `<OCR>` template and the model transcribes the page instead of critiquing the candidate. Pre-existing quality issue; give critique its own template (or pass its text through) and test that the sent prompt is the critique prompt.
 
 - Budget-cap admission race (council finding, 2026-10-28, #222): `enforceLiveBudgetCaps` (server/src/services/run-creation.ts) sums the month's spend outside the advisory-locked `admitRunSpend` transaction, so concurrent run creates and searches that materialize pages can all pass one under-cap snapshot and overshoot a monthly budget by roughly concurrency × per-run or `maxCreditsPerQuery` spend. Credits still gate the balance. Move the live sum inside the admission transaction after `pg_advisory_xact_lock`. Billing boundary: draft PR + council.
+
+## ClamAV definitions in parser VMs (2026-11-06)
+
+- [ ] Each parser VM spends 11–12 s staging the ClamAV definitions, and staging is serialized per worker (council W #7), so VM
+  starts queue behind it (real-Modal W run). Evaluate a parser image with the definitions baked in (rebuilt and re-pinned on
+  each signature update) or a Modal Volume holding them, either with the same freshness check the VM runs today (signature
+  date within `maxSignatureAgeHours`, failing closed). Measure VM start time and memory against today's per-VM staging
+  before choosing.
 
 ## Error recovery audit (2026-10-28)
 

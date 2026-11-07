@@ -1,11 +1,15 @@
 import { reserveOrientationAttempt } from "../lib/image-orientation.js";
-import { dopplerImageGraph, resolveDopplerImages } from "../extractors/doppler-image-graph.js";
+import { EMBEDDED_IMAGE_TARGETS, embeddedImageGraph, resolveEmbeddedImageRequest } from "../extractors/embedded-images.js";
+import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
+import {
+  SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, requireSandboxedPdfProvider, sandboxedPdfLayoutFacts, sandboxedPdfOcrPages,
+} from "../extractors/plugins.js";
 import { buildSummaryEvidence } from "./summary-evidence.js";
 import type { CapacityLeaseStore } from "../media/capacity/types.js";
 import { extractMedia } from "../media/extract.js";
 import type { MediaJournal } from "../media/types.js";
 import { constants as fsConstants, createReadStream, createWriteStream } from "node:fs";
-import { copyFile, mkdtemp, open, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdtemp, open, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
@@ -16,15 +20,20 @@ import {
   defaultDocumentExtractionConfig,
   isProviderCallAllowed,
   resolveVisionRoute,
-  splitTextIntoPages,
+  splitTextIntoPagesStrict,
   parserPlaybookCatalog,
   parserPlaybookForQuality,
   qualityAllowsPageReading,
   documentExtractionForQuality,
   deriveDocumentTitle,
   htmlDocumentTitle,
+  imageAnchorsToAltText,
+  resolvePdfExtractorSetting,
+  hostPdfExtractorsUnderSandbox,
+  sandboxedPdfConfigured,
   type ExtractionContract,
   type ExtractionArtifactRef,
+  repairMarkdownTables,
 } from "@docslurp/shared";
 import { readJsonFile } from "../tools/storage.js";
 import { documentArtifactRoot, runArtifactRoot } from "../lib/artifact-root.js";
@@ -70,11 +79,6 @@ import {
   type PageImageEvidence,
   type PageImageEvidenceArtifact,
 } from "../lib/page-image-evidence.js";
-import {
-  LiteParseDocumentExtractionAdapter,
-  type DocumentExtractionResult,
-} from "../lib/document-extraction-adapter.js";
-import { buildCanonicalDocumentFromStructuredExtraction } from "../lib/structured-canonical.js";
 export { scoreExtractionPlausibility } from "../lib/extracted-markdown.js";
 import type { CommandPlan } from "../tools/runner.js";
 import { resolveNativePdfEngine } from "../native-pdf/engine.js";
@@ -84,10 +88,11 @@ import { nativePdfEmphasisEnabled, resolveNativePdfMode } from "../native-pdf/mo
 import { runNativePdfShadow } from "../native-pdf/shadow.js";
 import { nativePdfEngineState } from "../native-pdf/loader.js";
 import { logNativePdfFallback } from "../native-pdf/types.js";
-import { isDocumentLevelFailure } from "../lib/document-failure.js";
+import { isDocumentLevelFailure, RunPolicyError } from "../lib/document-failure.js";
 import { rethrowIfTeardown } from "../sandbox/teardown-breaker.js";
+import { SpendCheckUnavailableError } from "../db/spend-check.js";
 import { reportExtractionDecision, summarizeNativePdfShadow, type NativePdfStageStats } from "../native-pdf/telemetry.js";
-import { documentExtractorRegistry, serializeExtractorOptions, type CandidateExecutors, type ExtractedCandidate, type PreparedExtractor } from "../extractors/registry.js";
+import { documentExtractorRegistry, serializeExtractorOptions, unsupportedSourceReason, type CandidateExecutors, type ExtractedCandidate, type PreparedExtractor } from "../extractors/registry.js";
 import { ExtractorAttemptLedger } from "../extractors/attempt-ledger.js";
 import { runLocalPdfArtifactGraph } from "../extractors/local-graph-runner.js";
 import type { CommandRunner } from "../tools/runner.js";
@@ -100,6 +105,16 @@ import type { VisionServedRoute } from "../lib/vision-pricing.js";
 import { visionGuardFor } from "../lib/vision-attempt-guard.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
+import { createHostedOcrReader } from "../ocr/hosted-reader.js";
+import { affordableImageFrames, authorizeImageFrames, authorizeImageRead, authorizeOcrRead, refuseUnfundedImageFrames } from "../ocr/image-frames.js";
+import { OCR_FAILED_PAGES_KEY, OcrInfrastructureError, OcrRefusedError, ocrFailedPages, recordOcrFailedPages, resolveOcrMode } from "../ocr/mode.js";
+import { ocrDocument } from "../ocr/read-document.js";
+import { recordMeasuredPageCount, type PageCountResult } from "../lib/office-page-count.js";
+import { processedPdfPages, reconcileProcessedPdfPages } from "../lib/pdf-page-count.js";
+import { recordExtractedPageEquivalents } from "../lib/page-equivalents.js";
+import { collectPageLayoutFacts } from "../lib/page-layout-evidence.js";
+import { PAGE_RENDITION, pageRenditionKey } from "../lib/page-rendition.js";
+import { extractorFailureReason, extractorFallbackFor, recordExtractorFallback } from "../lib/extractor-fallback.js";
 
 interface PageHeatmapEntry {
   pageNumber: number;
@@ -135,13 +150,15 @@ type SelfCritiqueResult = {
   costCents: number;
 };
 
-function buildPerPageHeatmap(
+export function buildPerPageHeatmap(
   text: string,
   pageCount: number,
   strategy: string,
 ): PageHeatmapEntry[] {
-  const pageTexts = splitTextIntoPages(text, pageCount);
-  if (pageTexts.length === 0) {
+  // Only page breaks the text itself carries: equal-length slices would score invented pages, and the critique
+  // that reads this heatmap would re-read and rewrite them.
+  const pageTexts = splitTextIntoPagesStrict(text, pageCount);
+  if (pageTexts === null || pageTexts.length === 0) {
     return [];
   }
 
@@ -159,11 +176,106 @@ function buildPerPageHeatmap(
   });
 }
 
+/** Refuse provider Markdown that is not a regular file or exceeds SANDBOXED_PDF_MAX_MARKDOWN_BYTES, before it is read. */
+export async function assertSandboxedPdfMarkdownBounded(outputPath: string): Promise<void> {
+  const info = await lstat(outputPath);
+  if (!info.isFile()) throw new Error("Sandboxed PDF provider output is not a regular file");
+  if (info.size > SANDBOXED_PDF_MAX_MARKDOWN_BYTES) {
+    throw new Error(`Sandboxed PDF provider output exceeds ${SANDBOXED_PDF_MAX_MARKDOWN_BYTES} bytes`);
+  }
+}
+
+/** Scanned PDF pages one OCR job reads; a long scan runs as several jobs. */
+export const OCR_PDF_BATCH_PAGES = 32;
+/**
+ * OCR read stats for a document: every page OCR read (the winner's, reported or inferred, plus the scan-fill engine's),
+ * where the reads came from, how many pages scan-fill read, and how many pages' OCR failed.
+ */
+export function ocrReadStats(
+  winnerPages: readonly number[],
+  winnerSource: "extractor-reported" | "inferred",
+  scanFilledPages: readonly number[],
+  failedPages: number,
+): { ocrReadPages: number; ocrReadSource: string; scanFilledPages: number; ocrFailedPages: number } {
+  const scanFilled = new Set(scanFilledPages);
+  const winnerOnly = winnerPages.filter((page) => !scanFilled.has(page));
+  const sources = [
+    ...(winnerSource === "extractor-reported" || winnerOnly.length ? [winnerSource] : []),
+    ...(scanFilled.size ? ["scan-fill"] : []),
+  ];
+  return {
+    ocrReadPages: new Set([...winnerPages, ...scanFilledPages]).size,
+    ocrReadSource: sources.length ? sources.join("+") : "none",
+    scanFilledPages: scanFilled.size,
+    ocrFailedPages: failedPages,
+  };
+}
+
+/** The OcrInfrastructureError in an error's cause chain, if any. */
+function findOcrInfrastructureError(error: unknown): OcrInfrastructureError | null {
+  let current: unknown = error;
+  for (let depth = 0; current && depth < 8; depth++) {
+    if (current instanceof OcrInfrastructureError) return current;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
+/** Scan-fill stops after this many OCR batches in a row failed deterministically; the remaining pages fail unread. */
+export const OCR_MAX_CONSECUTIVE_FAILED_BATCHES = 3;
+/** Bound on the OCR ledger's own `pdftotext` probe (the text layer is light work; a slow one is a hostile file). */
+export const OCR_LEDGER_PROBE_TIMEOUT_MS = 20_000;
+
+/** Text a page holds for a "has words" test: image references and `<!-- page N -->` markers are not words read. */
+export function ocrLedgerPageText(text: string | null | undefined): string {
+  if (typeof text !== "string") return "";
+  return imageAnchorsToAltText(text).replace(/<!--\s*page\s+\d+\s*-->/gi, "");
+}
+
+/**
+ * Whether the winning candidate ran OCR, so empty-native pages holding words could only be OCR reads. Only these
+ * candidates OCR without reporting pages: Dolphin (a page-reading model). Text-layer extractors (native-pdf,
+ * poppler-text, pandoc, pptx, xlsx, json) never OCR, and none of them links an OCR engine. The OCR engine reports and
+ * charges its own pages.
+ */
+export function candidateRanUnreportedOcr(candidate: Pick<ExtractedCandidate, "label">): boolean {
+  return candidate.label === "dolphin";
+}
+
 export function assertSupportedDocumentTarget(target: string): void {
   if (target !== "document/markdown") {
     throw new Error(`unsupported document extraction target ${target}; supported target: document/markdown`);
   }
 }
+
+/** What candidate executors know about the document: graph-local and the OCR extractor read it. */
+interface CandidateContext {
+  sourceHash: string;
+  pageCount: number;
+  documentId: string;
+  ocrLanguage?: string;
+  /** The run, for the OCR extractor's ledger and escalation reads. */
+  state?: import("../pipeline/pipeline.js").WorkflowState;
+  mimeType?: string | null;
+}
+
+/** Run ledger slot holding a content hash's measured page count, so a deduplicated copy bills the same pages. */
+const MEASURED_PAGES_KEY = "measured-pages";
+
+function measuredPagesOf(value: string | undefined): PageCountResult | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as Partial<PageCountResult>;
+    return Number.isSafeInteger(parsed.pages) && parsed.pages! >= 0 && (parsed.method === "slides" || parsed.method === "sheet-rows" || parsed.method === "text-rule" || parsed.method === "empty")
+      ? { pages: parsed.pages!, method: parsed.method }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** PDF extractors whose Markdown is Doppler's (local doppler-md, the sandboxed vm-pdf): their tables get repairMarkdownTables. */
+const DOPPLER_PDF_EXTRACTORS = new Set(["doppler-md", VM_PDF_EXTRACTOR_ID]);
 
 export class ExtractMarkdownStage implements Stage {
   readonly name = "extract-markdown";
@@ -199,7 +311,7 @@ export class ExtractMarkdownStage implements Stage {
             | keyof typeof parserPlaybookCatalog
             | undefined) ??
           parserPlaybookForQuality(state.run.pipeline.quality);
-        // Fast runs only text-layer extractors with OCR off, whatever the request or workspace asked for.
+        // Fast runs only text-layer extractors with OCR off, whatever the request or project asked for.
         const { config: extractionConfig, removed: fastRemoved } = documentExtractionForQuality(
           { ...defaultDocumentExtractionConfig, ...(state.run.pipeline.documentExtraction ?? {}) },
           state.run.pipeline.quality,
@@ -211,15 +323,18 @@ export class ExtractMarkdownStage implements Stage {
           );
         }
         assertSupportedDocumentTarget(extractionConfig.target);
+        // Only the OCR engine reads the OCR language (ocr/read-document.ts); document extractors never OCR.
+        const extractorOptions = extractionConfig.options;
         const hasTablePages =
           state.artifactLedger.readDocument(document.id, "hasTablePages") === "true";
-        const format = state.artifactLedger.readDocument(document.id, "normalizedFormat") ?? (this.isPdfDocument(document) ? "pdf" : "unknown");
+        // The sniffed format (format-detect) alone says whether the bytes are a PDF; a file name or declared type never does.
+        const format = state.artifactLedger.readDocument(document.id, "normalizedFormat") ?? "unknown";
         if (format === "audio" || format === "video") {
           await extractMedia({ state, document, runner: this.runner, storage: this.storage, journal: this.mediaJournal, capacityStore: this.capacityStore, signal });
           return;
         }
         const isPdf = format === "pdf";
-        const requestedImages = resolveDopplerImages(extractionConfig, format, this.tryResolveExtractorOrder(format, extractionConfig.order));
+        const requestedImages = resolveEmbeddedImageRequest(extractionConfig, format, this.tryResolveExtractorOrder(format, extractionConfig.order));
 
         console.log(
           `[extract-debug] stage=${this.name} document=${document.id} ` +
@@ -232,8 +347,14 @@ export class ExtractMarkdownStage implements Stage {
         let nativeExtraction: NativePdfStageStats["extraction"] = { status: "not-planned", code: null, reason: null };
         let lastUsableResult: DocumentStageResult | null = null;
 
+        // A PDF routed to the sandboxed provider is never parsed on this host for evidence: page facts, page-image
+        // evidence and the OCR ledger's text-layer probe are skipped (stage stats say so).
+        const sandboxReason = isPdf ? this.pdfSandboxReason(format, extractionConfig.order) : null;
+        const sandboxedPdfRoute = sandboxReason !== null;
+        // Under a sandboxed deployment no project setting may name a host PDF parser (pages, enrich, voting too).
+        const hostPdf = isPdf ? hostPdfExtractorsUnderSandbox(extractionConfig) : [];
         // Page facts for the ingest report run beside extraction (poppler, no pixels) and never fail it.
-        const pageFacts = this.recordSourcePageFacts(state, document, format, signal);
+        const pageFacts = this.recordSourcePageFacts(state, document, format, signal, sandboxedPdfRoute, sandboxReason);
         try {
           await runDocumentStage(
             state,
@@ -242,6 +363,10 @@ export class ExtractMarkdownStage implements Stage {
             artifactSlot,
             "markdown extraction ready",
             async (retryStrategy) => {
+              // Fails this document, never the run, and before anything reads the source.
+              if (hostPdf.length > 0) {
+                throw new Error(`extractor ${hostPdf.map((entry) => `${entry.id} (${entry.path.join(".")})`).join(", ")} refused for pdf: this deployment runs PDFs only in ${VM_PDF_EXTRACTOR_ID}`);
+              }
               const extractionStartedAt = Date.now();
               const pageCount = Math.max(1, document.pageCount);
 
@@ -281,8 +406,13 @@ export class ExtractMarkdownStage implements Stage {
 
               try {
                 const contentHash = cachedSource.sha256;
-                const existingUri = checkDedup(state, contentHash, artifactSlot);
+                const existingUri = checkDedup(state, contentHash, artifactSlot, document.id);
                 if (existingUri) {
+                  const inheritedFailures = state.artifactLedger.read(`${OCR_FAILED_PAGES_KEY}:${contentHash}`);
+                  if (inheritedFailures) state.artifactLedger.recordDocument(document.id, OCR_FAILED_PAGES_KEY, inheritedFailures);
+                  // A copy of a measured Office, EPUB or spreadsheet file bills its original's count, never intake's one page.
+                  const inheritedPages = measuredPagesOf(state.artifactLedger.read(`${MEASURED_PAGES_KEY}:${contentHash}`));
+                  if (inheritedPages) await recordMeasuredPageCount(state, document, format, inheritedPages);
                   console.log(
                     `[extract-debug] document=${document.id} deduplicated=true existingUri=${existingUri}`,
                   );
@@ -307,13 +437,23 @@ export class ExtractMarkdownStage implements Stage {
                 // does not know is kept unread too instead of reaching an OCR-capable extractor.
                 const keepImageUnread = (format === "image" || (document.mimeType ?? "").startsWith("image/")) &&
                   !qualityAllowsPageReading(state.run.pipeline.quality);
+                // An Office file no reader here can open fails now, loudly and for good, never through a weaker reader.
+                const unsupported = keepImageUnread ? null : await unsupportedSourceReason(tempFile, {
+                  format, mimeType: document.fileFacts?.sniffedMimeType ?? document.mimeType, filename: document.filename,
+                });
+                if (unsupported) {
+                  console.error(`[extract-markdown] unsupported-format document=${document.id} format=${format} reason=${JSON.stringify(unsupported)}`);
+                  throw new Error(unsupported);
+                }
                 let plannedExtractors = keepImageUnread ? null : await this.planExtractors({
+                  mimeType: document.fileFacts?.sniffedMimeType ?? null,
+                  pageCount: document.pageCount,
                   tempFile,
                   multiStrategyVoting: extractionConfig.voting.enabled,
                   secondaryId: extractionConfig.voting.secondary,
                   order: extractionConfig.order,
                   format,
-                  options: extractionConfig.options,
+                  options: extractorOptions,
                   attemptLedger,
                 });
                 // Why an image continues without extracted text (reported in the manifest and stats).
@@ -328,14 +468,10 @@ export class ExtractMarkdownStage implements Stage {
                 } else if (!plannedExtractors) {
                   if (lastUsableResult) return lastUsableResult;
                   const cause = `no untried extractor remains for ${format}: ${JSON.stringify(attemptLedger.snapshot())}`;
-                  if (format !== "image") throw new Error(cause);
-                  // OCR is unavailable here (e.g. an image built without Tesseract data): vision reads the pixels.
-                  textlessFallback = `OCR unavailable; ${cause}`;
-                  plannedExtractors = {
-                    primary: this.textlessImageExtractor(state, document, textlessFallback),
-                    secondary: null,
-                    tableAware: false,
-                  };
+                  // An image with OCR off (or every OCR attempt spent) fails: hosted vision is never a stand-in for OCR
+                  // (only DOCSLURP_OCR_MODE=hosted makes it the reader).
+                  if (format === "image") console.error(`[ocr] image-unread document=${document.id} mode=${resolveOcrMode()} cause=${cause}`);
+                  throw new Error(cause);
                 }
                 const tableAware = plannedExtractors.tableAware;
                 console.log(
@@ -351,17 +487,19 @@ export class ExtractMarkdownStage implements Stage {
                 attemptLedger.reserve(plannedExtractors.primary.label);
                 if (plannedExtractors.secondary) attemptLedger.reserve(plannedExtractors.secondary.label);
                 const isolated = await this.isolateConcurrentCandidates({
+                  mimeType: document.fileFacts?.sniffedMimeType ?? null,
+                  pageCount: document.pageCount,
                   primary: plannedExtractors.primary,
                   secondary: plannedExtractors.secondary,
                   sourcePath: tempFile,
                   format,
-                  options: extractionConfig.options,
+                  options: extractorOptions,
                   dirs: candidateDirs,
                 });
                 if (requestedImages) {
                   for (const prepared of [isolated.primary.extractor, isolated.secondary?.extractor]) {
-                    if (prepared && !prepared.plan.dopplerVm) throw new Error("Embedded image extraction refuses a non-VM candidate");
-                    if (prepared?.plan.dopplerVm) Object.assign(prepared.plan.dopplerVm, { embeddedImages: true, imageMinWidth: requestedImages.minWidth, imageMinHeight: requestedImages.minHeight });
+                    if (prepared && !prepared.plan.sandboxedPdf) throw new Error("Embedded image extraction refuses a non-VM candidate");
+                    if (prepared?.plan.sandboxedPdf) prepared.plan.sandboxedPdf.embeddedImages = { minWidth: requestedImages.minWidth, minHeight: requestedImages.minHeight };
                   }
                 }
                 const [resultA, resultB] = await this.collectCandidateResults({
@@ -371,15 +509,32 @@ export class ExtractMarkdownStage implements Stage {
                   secondaryKey: candidateBKey,
                   primarySource: isolated.primary.source,
                   secondarySource: isolated.secondary?.source ?? tempFile,
-                  graphContext: { sourceHash: contentHash, pageCount, documentId: document.id },
+                  graphContext: { sourceHash: contentHash, pageCount, documentId: document.id, ocrLanguage: state.run.pipeline.documentExtraction?.ocr?.language, state, mimeType: document.mimeType },
                   signal,
                 });
                 // A candidate whose command could not be torn down ends the stage: never let the
                 // other candidate (possibly the in-process engine) take over as a fallback.
                 for (const result of [resultA, resultB]) {
                   if (result?.status === "rejected") rethrowIfTeardown(result.reason);
+                  // A charge check that could not decide is retried, and a run-policy stop (cost cap, unfunded run) ends the stage:
+                  // neither is a reason to try another extractor or fail the document.
+                  if (result?.status === "rejected" && (result.reason instanceof SpendCheckUnavailableError || result.reason instanceof RunPolicyError)) throw result.reason;
+                }
+                // Neither may a candidate whose OCR boundary could not run: the activity retries instead of another
+                // extractor (or a failed document) standing in for an OCR read that was never tried.
+                for (const result of [resultA, resultB]) {
+                  if (result?.status === "rejected" && findOcrInfrastructureError(result.reason)) throw findOcrInfrastructureError(result.reason);
                 }
 
+                // Every candidate that failed is a fallback the ingest report shows when another extractor serves the file.
+                for (const [planned, result] of [
+                  [plannedExtractors.primary, resultA],
+                  [plannedExtractors.secondary, resultB],
+                ] as const) {
+                  if (planned && result?.status === "rejected") {
+                    recordExtractorFallback(state.artifactLedger, document.id, planned.label, extractorFailureReason(result.reason));
+                  }
+                }
                 for (const [planned, result] of [
                   [plannedExtractors.primary, resultA],
                   [plannedExtractors.secondary, resultB],
@@ -424,22 +579,8 @@ export class ExtractMarkdownStage implements Stage {
                       : "unavailable"
                     : "skipped";
                   const failure = `${plannedExtractors.primary.label}=${errA}, ${secondaryLabel}=${errB}`;
-                  // A crashing OCR is the same as an absent one for an image, but only once every configured
-                  // extractor has had its turn (the stage's retry strategies run them one per attempt).
-                  const untried = this.tryResolveExtractorOrder(format, extractionConfig.order)
-                    .some((id) => attemptLedger.canAttempt(id));
-                  if (format !== "image" || untried) {
-                    throw new Error(`no extractor produced output: ${failure}`);
-                  }
-                  textlessFallback = `OCR failed; ${failure}`;
-                  const textless = this.textlessImageExtractor(state, document, textlessFallback);
-                  plannedExtractors = { primary: textless, secondary: null, tableAware: false };
-                  candidateA = await textless.execute(
-                    this.candidateExecutors(),
-                    candidateAKey,
-                    tempFile,
-                    signal,
-                  );
+                  // A failed OCR read fails the image: no other reader stands in for it.
+                  throw new Error(`no extractor produced output: ${failure}`);
                 }
 
                 try {
@@ -490,6 +631,35 @@ export class ExtractMarkdownStage implements Stage {
                   );
 
                   let winningText = policyDecision.selectedMarkdown;
+                  // The page tree's count (format-detect) against the pages extraction processed: bill and authorize the larger.
+                  const pdfPageCheck = isPdf ? await reconcileProcessedPdfPages(state, document, processedPdfPages(winningText, winningCandidate.label)) : null;
+                  // What each extracted page holds, by the text rule: a page carrying many pages of text (tiny, invisible or
+                  // off-page text included, which is indexed like any other) bills as that many (lib/page-equivalents.ts).
+                  // A VM-extracted PDF's page areas come from its layout facts (the page boxes the walker measured in the VM);
+                  // a host-rendered page records its area when rendered. Either way it is recorded and authorized here.
+                  const pageEquivalents = await recordExtractedPageEquivalents(state, document, format, winningText, [],
+                    { extractor: winningCandidate.label, ...(winningCandidate.layoutFacts ? { pageSizesPt: winningCandidate.layoutFacts } : {}) });
+                  // Office, EPUB and spreadsheet files arrive counted as one page. Count what the extractor read, from its own
+                  // output (no other parser runs and the source is not read again), and record it as documents.billing_pages
+                  // before features and the completion charge read it (page-base-fee.ts). The page basis (page_count) stays what
+                  // the text splits into: these formats' text has no page breaks.
+                  const measuredPages = await recordMeasuredPageCount(state, document, format, {
+                    extractor: winningCandidate.label,
+                    markdown: policyDecision.selectedMarkdown,
+                  });
+                  if (measuredPages.pages !== null && measuredPages.method !== null) {
+                    state.artifactLedger.record(`${MEASURED_PAGES_KEY}:${contentHash}`, JSON.stringify({ pages: measuredPages.pages, method: measuredPages.method }));
+                  }
+                  // Scanned pages (no words in the winner's text) are read by the OCR engine in its boundary; the
+                  // text-layer extractors never OCR. The engine charges each page it reads.
+                  const scanFill = isPdf && qualityAllowsPageReading(state.run.pipeline.quality)
+                    ? await this.ocrScannedPdfPages(state, document, { sourcePath: tempFile, text: winningText, textKey: winningCandidate.textKey, ocrLanguage: extractionConfig.ocr.language, contentHash }, signal)
+                    : null;
+                  if (scanFill) {
+                    winningText = scanFill.text;
+                    strategy = `${strategy}+ocr`;
+                    partialArtifactUri = scanFill.textUri;
+                  }
                   let plausibilityScore = scoreExtractionPlausibility(
                     winningText,
                     document.pageCount,
@@ -506,7 +676,7 @@ export class ExtractMarkdownStage implements Stage {
                     sourceTempFile: tempFile,
                     strategy,
                     winningText,
-                    winningTextUri: winningCandidate.textUri,
+                    winningTextUri: scanFill?.textUri ?? winningCandidate.textUri,
                     heatmapPages,
                     signal,
                   });
@@ -528,25 +698,10 @@ export class ExtractMarkdownStage implements Stage {
                         `reviewed=${critique.reviewedPages.length} correctedUri=${critique.correctedTextUri ?? "none"}`,
                     );
                   }
-                  const normalizedStructuredPages =
-                    winningCandidate.structuredResult &&
-                    (critique?.acceptedPages.length ?? 0) === 0
-                      ? winningCandidate.structuredResult.pages.map((page) => ({
-                          ...page,
-                          markdown: normalizeExtractedMarkdown({
-                            markdown: page.markdown,
-                            preserveTables: state.run.pipeline.preserveTables,
-                          }),
-                        }))
-                      : null;
-                  const normalizedWinningText = normalizedStructuredPages
-                    ? normalizedStructuredPages
-                        .map((page) => page.markdown)
-                        .join("\f")
-                    : normalizeExtractedMarkdown({
-                        markdown: winningText,
-                        preserveTables: state.run.pipeline.preserveTables,
-                      });
+                  const normalizedWinningText = normalizeExtractedMarkdown({
+                    markdown: winningText,
+                    preserveTables: state.run.pipeline.preserveTables,
+                  });
                   if (normalizedWinningText !== winningText) {
                     winningText = normalizedWinningText;
                     strategy = `${strategy}+normalized`;
@@ -564,7 +719,7 @@ export class ExtractMarkdownStage implements Stage {
                     );
                   }
                   const nativePdfMode = resolveNativePdfMode();
-                  const nativeEngineState = isPdf && winningCandidate.label !== "doppler" ? await nativePdfEngineState() : null;
+                  const nativeEngineState = isPdf && winningCandidate.label !== VM_PDF_EXTRACTOR_ID ? await nativePdfEngineState() : null;
                   const nativePdfStats: NativePdfStageStats | null = nativeEngineState
                     ? {
                         mode: nativePdfMode,
@@ -590,7 +745,7 @@ export class ExtractMarkdownStage implements Stage {
                         parserPayload: { status: "none", reason: null },
                       }
                     : null;
-                  if (isPdf && winningCandidate.label !== "native-pdf" && winningCandidate.label !== "doppler" && nativePdfMode === "shadow") {
+                  if (isPdf && winningCandidate.label !== "native-pdf" && winningCandidate.label !== VM_PDF_EXTRACTOR_ID && nativePdfMode === "shadow") {
                     // Shadow mode records agreement and timing only; the primary output is untouched.
                     const nativeEngine = await resolveNativePdfEngine(this.runner).catch(() => null);
                     if (!nativeEngine) {
@@ -614,37 +769,24 @@ export class ExtractMarkdownStage implements Stage {
                   }
                   const sourceArtifactUri =
                     critique?.correctedTextUri ?? winningCandidate.textUri;
-                  const canUseStructuredCanonical =
-                    normalizedStructuredPages !== null;
-                  const canonicalDocument = canUseStructuredCanonical
-                    ? buildCanonicalDocumentFromStructuredExtraction({
-                        documentId: document.id,
-                        extractor: winningCandidate.label,
-                        pages: normalizedStructuredPages!,
-                        sourceArtifactUri,
-                        parserArtifactUri:
-                          winningCandidate.structuredArtifactUri ?? null,
-                      })
-                    : buildCanonicalDocumentFromMarkdown({
-                        documentId: document.id,
-                        text: winningText,
-                        pageCount: document.pageCount,
-                        sourceArtifactUri,
-                        extractor: winningCandidate.label,
-                      });
-                  // Doppler already reconstructs Markdown; do not silently parse it again on the host.
-                  const parserArtifacts = winningCandidate.structuredResult || winningCandidate.label === "doppler"
+                  const canonicalDocument = buildCanonicalDocumentFromMarkdown({
+                    documentId: document.id,
+                    text: winningText,
+                    pageCount: document.pageCount,
+                    sourceArtifactUri,
+                    extractor: winningCandidate.label,
+                  });
+                  // The VM extractor already reconstructs Markdown; do not silently parse it again on the host.
+                  const parserArtifacts = winningCandidate.label === VM_PDF_EXTRACTOR_ID
                     ? []
                     : await this.buildParserArtifacts(
                         document,
+                        format,
                         tempFile,
                         state,
                         { hasTablePages, nativePayloadOutcome: nativePdfStats?.parserPayload },
                         signal,
                       );
-                  if (nativePdfStats && winningCandidate.structuredResult) {
-                    nativePdfStats.parserPayload = { status: "none", reason: `structured result from ${winningCandidate.label}` };
-                  }
                   const parserEnrichedCanonicalDocument =
                     parserArtifacts.length > 0
                       ? enrichCanonicalDocumentWithBestParser(
@@ -674,9 +816,9 @@ export class ExtractMarkdownStage implements Stage {
                           })),
                         )
                       : [];
-                  const imageCandidate = availableCandidates.find(candidate => candidate.plan.dopplerVm?.embeddedImages);
+                  const imageCandidate = availableCandidates.find(candidate => candidate.plan.sandboxedPdf?.embeddedImages);
                   if (requestedImages && !imageCandidate) {
-                    throw new Error("Doppler images unavailable; refusing local image enrichment fallback");
+                    throw new Error("VM images unavailable; refusing local image enrichment fallback");
                   }
                   const graph = extractionConfig.enrich.length > 0
                     ? await this.enrichDocumentArtifacts({
@@ -689,7 +831,7 @@ export class ExtractMarkdownStage implements Stage {
                         reserveOrientation: () => reserveOrientationAttempt(state),
                         recordUsage: event => state.usageLedger.enqueue({ ...event,
                           metadata: { ...event.metadata, documentId: document.id, stage: "embedded-image-orientation" } }),
-                        dopplerImageBundle: imageCandidate ? `${imageCandidate.tempTextPath}.images` : undefined,
+                        vmImages: imageCandidate ? { output: imageCandidate.tempTextPath, markdownPath: imageCandidate.tempTextPath } : undefined,
                         pageNumbers: allPages,
                         runId: state.run.id,
                         signal,
@@ -709,20 +851,10 @@ export class ExtractMarkdownStage implements Stage {
                     textArtifactUri: winningCandidate.textUri,
                     candidates: [
                       candidateA
-                        ? {
-                            label: candidateA.label,
-                            artifactUri: candidateA.textUri,
-                            structuredArtifactUri:
-                              candidateA.structuredArtifactUri ?? null,
-                          }
+                        ? { label: candidateA.label, artifactUri: candidateA.textUri }
                         : null,
                       candidateB
-                        ? {
-                            label: candidateB.label,
-                            artifactUri: candidateB.textUri,
-                            structuredArtifactUri:
-                              candidateB.structuredArtifactUri ?? null,
-                          }
+                        ? { label: candidateB.label, artifactUri: candidateB.textUri }
                         : null,
                     ].filter(Boolean),
                     policyObservations: policyDecision.observations,
@@ -732,6 +864,7 @@ export class ExtractMarkdownStage implements Stage {
                     artifactGraphSteps: graph?.steps ?? [],
                     artifactGraphOutputCount: graph?.outputCount ?? 0,
                     artifactGraphLatencyMs: graph?.latencyMs ?? 0,
+                    artifactGraphStats: graph?.stats ?? null,
                     preserve: {
                       tables: state.run.pipeline.preserveTables,
                       code: state.run.pipeline.preserveCode,
@@ -784,7 +917,7 @@ export class ExtractMarkdownStage implements Stage {
                   await this.storage.putJson(contractKey, contract);
 
                   const artifactUri =
-                    critique?.correctedTextUri ?? winningCandidate.textUri;
+                    critique?.correctedTextUri ?? scanFill?.textUri ?? winningCandidate.textUri;
                   if (state.run.pipeline.summarize) {
                     const evidenceKey = `${runArtifactRoot(state.run, document.userId)}/summary-evidence/${document.id}.json`;
                     await this.storage.putJson(evidenceKey, buildSummaryEvidence({
@@ -800,9 +933,19 @@ export class ExtractMarkdownStage implements Stage {
                     parserScores.length > 0
                       ? this.storage.uri(parserEvalKey)
                       : null;
-                  const pageImageEvidenceUri = await this.recordDocumentImageEvidence(
-                    document, tempFile, winningText, state, { isPdf, format }, signal);
-                  registerHash(state, contentHash, artifactUri);
+                  const hostPdfProbes = isPdf && (sandboxedPdfRoute || winningCandidate.label === VM_PDF_EXTRACTOR_ID)
+                    ? "skipped-sandboxed-route" as const : isPdf ? "ran" as const : "not-pdf" as const;
+                  const pageImageEvidenceUri = hostPdfProbes === "skipped-sandboxed-route"
+                    ? this.skipHostPdfEvidence(document, "page-image-evidence", sandboxReason ?? "sandboxed-pdf-winner")
+                    : await this.recordDocumentImageEvidence(document, tempFile, winningText, state, { isPdf, format }, signal);
+                  // Every page OCR produced text for was read by a model: record the read per page, which is the only
+                  // thing that bills a page Rich (db/page-base-fee.ts). Vision reading it too is the same page, charged
+                  // once (the ledger keys a charge by run, document and page) and topped up for its output tokens.
+                  const ocrReadPages = await this.recordOcrPageReads(state, document, {
+                    format, isPdf, winningText, candidate: winningCandidate, sourcePath: tempFile,
+                    sandboxedRoute: hostPdfProbes === "skipped-sandboxed-route",
+                  }, signal);
+                  registerHash(state, contentHash, artifactUri, document.id);
 
                   for (const parserArtifact of parserArtifacts) {
                     state.artifactLedger.recordDocument(
@@ -815,6 +958,15 @@ export class ExtractMarkdownStage implements Stage {
                   if (pageImageEvidenceUri) {
                     state.artifactLedger.recordDocument(document.id, "page-image-evidence", pageImageEvidenceUri);
                   }
+                  // Layout facts (image placement, tables) for evidence routing: collected in the parser sandbox for host-probed
+                  // PDFs, or returned by the PDF VM from the same job that wrote the winning Markdown. Never host-probed otherwise.
+                  const pageLayoutFactsUri = !isPdf || !resolveRunRoutingV2(state) ? null
+                    : hostPdfProbes === "ran" ? await this.recordPageLayoutFacts(document, tempFile, winningText, state, signal)
+                    : winningCandidate.layoutFacts ? await this.storePageLayoutFacts(document, state, winningCandidate.layoutFacts, "vm-pdf")
+                    : null;
+                  if (pageLayoutFactsUri) {
+                    state.artifactLedger.recordDocument(document.id, "page-layout-facts", pageLayoutFactsUri);
+                  }
                   if (graph) {
                     state.artifactLedger.recordDocument(document.id, "artifact-graph", graph.manifestUri);
                     // Exact child URIs are authorized and withheld by the existing artifact/PII guards.
@@ -825,13 +977,6 @@ export class ExtractMarkdownStage implements Stage {
                   state.artifactLedger.recordDocument(document.id, "heatmap", this.storage.uri(heatmapKey));
                   state.artifactLedger.recordDocument(document.id, "canonical-document", canonicalUri);
                   state.artifactLedger.recordDocument(document.id, "extraction-contract", contractUri);
-                  if (winningCandidate.structuredArtifactUri) {
-                    state.artifactLedger.recordDocument(
-                      document.id,
-                      "liteparse-structured",
-                      winningCandidate.structuredArtifactUri,
-                    );
-                  }
                   if (critique) {
                     state.artifactLedger.recordDocument(document.id, "markdown-critique", critique.critiqueArtifactUri);
                   }
@@ -954,7 +1099,12 @@ export class ExtractMarkdownStage implements Stage {
                     });
                   }
 
-                  await completeDocumentPages(state, document, this.name, remaining, pageCount);
+                  // A multi-frame image's page basis grows once OCR counts its frames: progress and stats cover every frame.
+                  const countedPages = Math.max(pageCount, document.pageCount);
+                  const processedPages = countedPages > pageCount
+                    ? [...remaining, ...Array.from({ length: countedPages - pageCount }, (_, index) => pageCount + index + 1)]
+                    : remaining;
+                  await completeDocumentPages(state, document, this.name, processedPages, countedPages);
 
                   console.log(
                     `[extract-debug] document=${document.id} completed ` +
@@ -970,6 +1120,8 @@ export class ExtractMarkdownStage implements Stage {
                       needsVision,
                       textlessFallback,
                       plausibilityScore,
+                      // Fast kept the image unread on purpose: its empty text is not a low-quality extraction to retry.
+                      ...(winningCandidate.label === "image-textless" ? { keptUnread: true } : {}),
                       manifestUri,
                       artifactGraphUri: graph?.manifestUri ?? null,
                       artifactGraphTargets: graph?.requestedTargets ?? [],
@@ -977,6 +1129,7 @@ export class ExtractMarkdownStage implements Stage {
                       artifactGraphSteps: graph?.steps ?? [],
                       artifactGraphOutputCount: graph?.outputCount ?? 0,
                       artifactGraphLatencyMs: graph?.latencyMs ?? 0,
+                      artifactGraphStats: graph?.stats ?? null,
                       canonicalUri,
                       parserArtifactUri:
                         parserAwareCanonicalDocument.source.parserArtifactUri,
@@ -987,16 +1140,27 @@ export class ExtractMarkdownStage implements Stage {
                       preserveTables: state.run.pipeline.preserveTables,
                       preserveCode: state.run.pipeline.preserveCode,
                       skippedPages: completedPages.size,
-                      processedPages: remaining.length,
+                      processedPages: processedPages.length,
+                      pageCount: countedPages,
+                      // Office, EPUB and spreadsheet files: the pages they bill (counted from the extractor's output) and how.
+                      billingPages: measuredPages.pages,
+                      billingPagesMethod: measuredPages.method,
+                      ...(pdfPageCheck ? { pdfPagesMeasured: pdfPageCheck.measured, pdfPagesProcessed: pdfPageCheck.processed, pdfPagesMismatch: pdfPageCheck.mismatch } : {}),
+                      ...(pageEquivalents ? { pageEquivalents: pageEquivalents.equivalents, pageEquivalentsBilled: pageEquivalents.billed, densePages: pageEquivalents.densePages.slice(0, 50), densePageCount: pageEquivalents.densePages.length } : {}),
                       // Which extractor served the document, what else was planned or tried, and how the
                       // native PDF engine took part: queryable from stage stats without fetching the manifest.
                       extractor: winningCandidate.label,
                       secondaryExtractor: plannedExtractors.secondary?.label ?? null,
                       extractorOrder: this.tryResolveExtractorOrder(format, extractionConfig.order),
                       extractorAttempts: attemptLedger.snapshot(),
+                      // Extractors tried before the served one that failed, timed out or were rejected (ingest report warning).
+                      extractorFallback: extractorFallbackFor(state.artifactLedger, document.id, winningCandidate.label, this.tryResolveExtractorOrder(format, extractionConfig.order), attemptLedger.snapshot().unavailable),
                       retryStrategy: retryStrategy ?? "default",
                       extractionMs: Date.now() - extractionStartedAt,
                       nativePdf: nativePdfStats,
+                      // Host poppler probes (page facts, page-image evidence, OCR-ledger text layer) for this PDF.
+                      hostPdfProbes,
+                      ...ocrReadStats(ocrReadPages, winningCandidate.ocrPages ? "extractor-reported" : "inferred", scanFill?.pages ?? [], ocrFailedPages(state.artifactLedger, document.id).size),
                     },
                   };
                   const attemptsSnapshot = attemptLedger.snapshot();
@@ -1027,6 +1191,15 @@ export class ExtractMarkdownStage implements Stage {
                     `partialStats=${JSON.stringify(partialStats)}`,
                 );
                 // Rethrow interruptions untouched so they keep their AbortError/cancellation identity.
+                // OCR could not run (VM creation, capacity, a deadline): the activity retries; the document is not at fault.
+                const ocrInfrastructure = findOcrInfrastructureError(error);
+                if (ocrInfrastructure) throw ocrInfrastructure;
+                // A run-policy stop (cost cap, an unfunded run paused by a measured-page or OCR batch check), a charge check that
+                // could not decide, and any infrastructure failure (a storage reset on the Markdown write, a database timeout) end
+                // the stage as they are: wrapped as a partial-artifact failure they would lose their identity, be retried with
+                // another extractor, then fail the document after its paid reads (real-Modal finding F7). The activity retries
+                // instead; persisted OCR escalation reads are reused and page charges keep their ids, so nothing bills twice.
+                if (error instanceof RunPolicyError || error instanceof SpendCheckUnavailableError || (!signal?.aborted && !isDocumentLevelFailure(error, signal))) throw error;
                 if (!partialArtifactUri && !signal?.aborted && isDocumentLevelFailure(error, signal)) {
                   // Every extractor failed: keep what was planned and tried, and say so in telemetry.
                   const attempts = attemptLedger.snapshot();
@@ -1102,7 +1275,7 @@ export class ExtractMarkdownStage implements Stage {
       const metadataTitles = format === "html" ? [htmlDocumentTitle(await readFileHead(sourcePath, 256 * 1024))] : [];
       const derived = deriveDocumentTitle({
         metadataTitles,
-        pages: splitTextIntoPages(markdown, document.pageCount).slice(0, 2),
+        pages: (splitTextIntoPagesStrict(markdown, document.pageCount) ?? [markdown]).slice(0, 2),
         filename: document.filename,
       });
       if (!derived) return;
@@ -1138,6 +1311,194 @@ export class ExtractMarkdownStage implements Stage {
     if (!listing) return null;
     const stdout = await listing.stdout.catch(() => null);
     return stdout === null ? null : splitFormFeedPages(stdout, listing.lastPage);
+  }
+
+  /**
+   * OCR the PDF pages whose extracted text has no words, in the configured OCR boundary (in `vm` mode the VM renders the
+   * pages from the stored PDF; the host renders nothing for OCR), and splice the text into those page slots. Returns null
+   * when no page needs it or OCR does not read PDFs here (`off`, or `hosted`, which never renders on the host); those
+   * pages stay unread and are logged. A failed read throws: the document fails rather than going to another reader.
+   */
+  private async ocrScannedPdfPages(
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    document: import("../models.js").Document,
+    args: { sourcePath: string; text: string; textKey: string; ocrLanguage?: string; contentHash: string },
+    signal?: AbortSignal,
+  ): Promise<{ text: string; textUri: string; pages: number[] } | null> {
+    const pageCount = Math.max(1, Math.trunc(document.pageCount) || 1);
+    // A fully scanned PDF often comes back as no text at all (some extractors add page breaks only around text): every page
+    // is empty then.
+    const split = splitFormFeedPages(args.text, pageCount)
+      ?? (pageCount === 1 ? [args.text] : !/[\p{L}\p{N}]/u.test(ocrLedgerPageText(args.text)) ? Array<string>(pageCount).fill("") : null);
+    if (!split) {
+      console.error(`[ocr] scanned-pages-unread document=${document.id} reason=no-page-breaks: the extracted text has no reliable page breaks`);
+      pushPerfMetric({ metric: "ocr-pages-refused", value: 1, unit: "count", tags: ["ocr", "no-page-breaks"], metadata: { documentId: document.id } });
+      return null;
+    }
+    const hasWords = (text: string | undefined) => /[\p{L}\p{N}]/u.test(ocrLedgerPageText(text ?? ""));
+    const empty = split.map((text, index) => (hasWords(text) ? 0 : index + 1)).filter((page) => page > 0);
+    if (empty.length === 0) return null;
+    const mode = resolveOcrMode();
+    if (mode === "off" || mode === "hosted") {
+      console.error(`[ocr] scanned-pages-unread document=${document.id} pages=${empty.length} mode=${mode}: ${mode === "hosted" ? "hosted OCR never renders PDF pages on the host" : "OCR is off"}`);
+      pushPerfMetric({ metric: "ocr-pages-refused", value: empty.length, unit: "count", tags: ["ocr", mode], metadata: { documentId: document.id } });
+      return null;
+    }
+    const pages = [...split];
+    const read: number[] = [];
+    const hostedReader = createHostedOcrReader({ state, cfg: this.cfg, runner: this.runner });
+    const failed: number[] = [];
+    let consecutiveFailedBatches = 0;
+    for (let start = 0; start < empty.length; start += OCR_PDF_BATCH_PAGES) {
+      const batch = empty.slice(start, start + OCR_PDF_BATCH_PAGES);
+      // Each batch's Rich pages are authorized before its VM starts, as an image's read is: the cost cap, then the balance
+      // for this batch plus what earlier batches read (still buffered). A refusal pauses the run here (RunPolicyError, outside
+      // the refusal handling below); pages already read stay ledgered and are charged once.
+      await authorizeOcrRead(state, document.id, batch.length, "pdf-batch");
+      let result: Awaited<ReturnType<typeof ocrDocument>>;
+      try {
+        result = await ocrDocument({
+          runner: this.runner, state, documentId: document.id, source: args.sourcePath, kind: "pdf", pages: batch,
+          ...(args.ocrLanguage ? { languageSetting: args.ocrLanguage } : {}),
+          hostedReader, stage: this.name, ...(signal ? { signal } : {}),
+        });
+      } catch (error) {
+        rethrowIfTeardown(error);
+        if (signal?.aborted) throw error;
+        // The boundary could not run (VM creation, capacity, a deadline): the activity fails retryably and Temporal backs
+        // off, rather than failing pages that were never tried. Pages already read are charged once per page per run.
+        if (error instanceof OcrInfrastructureError) {
+          console.error(`[ocr] scanned-pages-infrastructure document=${document.id} pages=${batch.join(",")} reason=${error.message.slice(0, 300)}`);
+          throw error;
+        }
+        // A deterministic refusal (validation, model pin, hostile input, OCR refused by configuration): those pages fail,
+        // loudly, without another read of the same bytes; the document's text pages stand. Nothing else reads them.
+        failed.push(...batch);
+        consecutiveFailedBatches += 1;
+        console.error(`[ocr] scanned-pages-failed document=${document.id} pages=${batch.join(",")} reason=${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
+        pushPerfMetric({ metric: "ocr-pages-failed", value: batch.length, unit: "count", tags: ["ocr"], metadata: { documentId: document.id } });
+        if (consecutiveFailedBatches >= OCR_MAX_CONSECUTIVE_FAILED_BATCHES) {
+          // The same refusal is coming back batch after batch (a refused document, a broken pin): stop spending VMs on it.
+          const rest = empty.slice(start + OCR_PDF_BATCH_PAGES);
+          failed.push(...rest);
+          console.error(`[ocr] scanned-pages-stopped document=${document.id} after=${consecutiveFailedBatches} failed batches; ${rest.length} remaining pages failed unread`);
+          if (rest.length) pushPerfMetric({ metric: "ocr-pages-failed", value: rest.length, unit: "count", tags: ["ocr", "stopped"], metadata: { documentId: document.id } });
+          break;
+        }
+        continue;
+      }
+      consecutiveFailedBatches = 0;
+      // Pages the boundary did not reach (past its frame cap) fail; none is left neither read nor failed.
+      if (result.unreadPages.length) {
+        failed.push(...result.unreadPages);
+        console.error(`[ocr] scanned-pages-unreached document=${document.id} pages=${result.unreadPages.join(",")}`);
+      }
+      for (const page of result.pages) {
+        if (page.pageNumber >= 1 && page.pageNumber <= pageCount && hasWords(page.text)) {
+          pages[page.pageNumber - 1] = page.text;
+          read.push(page.pageNumber);
+        }
+      }
+    }
+    if (failed.length > 0) {
+      // Vision must not read these pages in OCR's place (vision-extract excludes them).
+      const list = recordOcrFailedPages(state, document.id, failed);
+      // A later document with the same bytes reuses this Markdown (checkDedup): it inherits the failed pages too.
+      state.artifactLedger.record(`${OCR_FAILED_PAGES_KEY}:${args.contentHash}`, list);
+    }
+    // Every page is a scan and none could be read: the document has no text, so it fails rather than publishing nothing.
+    if (failed.length > 0 && failed.length === pageCount) throw new Error(`OCR failed for every page (${pageCount}) of a scanned document`);
+    if (read.length === 0) return null;
+    const text = pages.join("\f");
+    const key = `${args.textKey}.ocr.md`;
+    await this.storage.putBytes(key, Buffer.from(text, "utf8"), "text/markdown; charset=utf-8");
+    console.log(`[ocr] document=${document.id} scanned pages read=${read.length}/${empty.length}`);
+    return { text, textUri: this.storage.uri(key), pages: read };
+  }
+
+  /**
+   * Records the Rich read of every page OCR produced text for, exactly once per page per run (the ledger keys a charge by run,
+   * document and page; a retry re-records the same pages under the same ids). An unknown fact never raises a charge.
+   *
+   * - A winner the OCR engine produced (the `ocr` extractor: an image, every frame of a multi-frame TIFF): the engine already
+   *   charged each page it read with words (ocr/ledger.ts); nothing more is recorded here.
+   * - A PDF whose winning candidate reports the pages it OCR'd (graph-local's OCR adapter, the sandboxed PDF provider):
+   *   exactly those pages, within the page count. Nothing is inferred on top.
+   * - The sandboxed route with no report: nothing. The host never probes the PDF for that route.
+   * - Otherwise, only when the winner ran OCR (candidateRanUnreportedOcr) and its text has reliable form-feed page breaks: a page
+   *   whose native text layer (poppler's `pdftotext`, from page facts or run here) has no words while the extracted page does.
+   * Words exclude image references and page markers. Fast never reads a page with a model, so it records nothing. Never throws:
+   * a failed probe is logged loudly (`[ocr-ledger] probe-failed`) and bills nothing.
+   */
+  private async recordOcrPageReads(
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    document: import("../models.js").Document,
+    args: { format: string; isPdf: boolean; winningText: string; candidate: ExtractedCandidate; sourcePath: string; sandboxedRoute?: boolean },
+    signal?: AbortSignal,
+  ): Promise<number[]> {
+    if (!qualityAllowsPageReading(state.run.pipeline.quality)) return [];
+    if (args.candidate.ocrCharged) return [...(args.candidate.ocrPages ?? [])].sort((a, b) => a - b);
+    const hasWords = (text: string | null | undefined) => /[\p{L}\p{N}]/u.test(ocrLedgerPageText(text));
+    const pages = new Set<number>();
+    let reported = false;
+    if (args.format === "image") {
+      // Images are read only by the OCR engine, which charges its own pages; any other winner read nothing.
+    } else if (args.isPdf) {
+      const pageCount = Math.max(1, Math.trunc(document.pageCount) || 1);
+      const sandboxed = args.sandboxedRoute === true || args.candidate.label === VM_PDF_EXTRACTOR_ID;
+      if (args.candidate.ocrPages) {
+        reported = true;
+        for (const page of args.candidate.ocrPages) if (Number.isSafeInteger(page) && page >= 1 && page <= pageCount) pages.add(page);
+      } else if (sandboxed) {
+        console.log(`[ocr-ledger] document=${document.id} extractor=${args.candidate.label} reported no OCR pages; none recorded`);
+      } else if (candidateRanUnreportedOcr(args.candidate)) {
+        const extracted = splitFormFeedPages(args.winningText, pageCount);
+        if (!extracted) {
+          console.log(`[ocr-ledger] document=${document.id} extractor=${args.candidate.label} text has no reliable page breaks; no OCR reads recorded`);
+        } else if (extracted.some((page) => hasWords(page))) {
+          try {
+            const native = await this.nativeTextLayerPages(state, document, args.sourcePath, pageCount, signal);
+            if (native) {
+              for (let page = 1; page <= pageCount; page += 1) {
+                if (!hasWords(native[page - 1]) && hasWords(extracted[page - 1])) pages.add(page);
+              }
+            } else {
+              this.ocrLedgerProbeFailed(document, args.candidate.label, "native text layer unavailable");
+            }
+          } catch (error) {
+            rethrowIfTeardown(error);
+            if (signal?.aborted) throw error;
+            this.ocrLedgerProbeFailed(document, args.candidate.label, error instanceof Error ? error.message : String(error));
+          }
+        }
+      }
+    }
+    for (const pageNumber of [...pages].sort((a, b) => a - b)) {
+      state.usageLedger.chargeRichPage({ documentId: document.id, pageNumber, readBy: reported ? "page-ocr" : "pdf-ocr", model: args.candidate.label });
+    }
+    return [...pages].sort((a, b) => a - b);
+  }
+
+  /** A text-layer probe failed for an OCR-capable winner: its scanned-page reads go unbilled, so say so loudly. */
+  private ocrLedgerProbeFailed(document: import("../models.js").Document, extractor: string, reason: string): void {
+    console.warn(`[ocr-ledger] probe-failed document=${document.id} extractor=${extractor} reason=${reason.slice(0, 300)}; scanned-page OCR reads are not recorded`);
+    pushPerfMetric({ metric: "ocr-ledger-probe-failed", value: 1, unit: "count", tags: ["ocr-ledger", extractor], metadata: { documentId: document.id } });
+  }
+
+  /** The PDF's own text layer per page (page facts' pdftotext run, else one run here), or null when neither is available. */
+  private async nativeTextLayerPages(
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    document: import("../models.js").Document,
+    sourcePath: string,
+    pageCount: number,
+    signal?: AbortSignal,
+  ): Promise<string[] | null> {
+    const fromFacts = await this.textLayerPages(state, document);
+    if (fromFacts && fromFacts.length >= pageCount) return fromFacts;
+    const plan = await this.runner.pageText(sourcePath, pageCount);
+    if (!plan.available) return null;
+    const result = await this.runner.run({ ...plan, pages: pageCount, timeoutMs: OCR_LEDGER_PROBE_TIMEOUT_MS }, signal);
+    return splitFormFeedPages(result.stdout, pageCount);
   }
 
   /**
@@ -1224,8 +1585,15 @@ export class ExtractMarkdownStage implements Stage {
         pageTexts,
         signal,
         sharedImagesList: this.imageListings.get(this.imageListingKey(state, document)),
-        // Routing v2 counts native words from the text layer, so an OCR'd scan stays sparse.
-        textLayerPages: resolveRunRoutingV2(state) ? await this.textLayerPages(state, document) : null,
+        // Evidence routing counts native words from the PDF's own text layer, so an OCR'd scan stays sparse, and
+        // judges the layer's quality (a suspect layer is cross-checked against an OCR of its page).
+        ...(resolveRunRoutingV2(state)
+          ? {
+              textLayerPages: await this.textLayerPages(state, document),
+              // No OCR cross-check of suspect text layers: it was tuned against the previous recogniser and stays off until re-tuned
+              // for the PP-OCR recogniser (docs/page-text-layer-quality.md). Suspect layers stay unverified.
+            }
+          : {}),
       });
       if (!pages) return null;
       return await this.storePageImageEvidence(document, state, pages, "pdfimages",
@@ -1240,14 +1608,78 @@ export class ExtractMarkdownStage implements Stage {
     }
   }
 
+  /**
+   * Structural page layout (pdf-layout-facts@1: image placement and stream facts, words inside images, tables and ruled
+   * grids) collected in the parser sandbox by the open layout walker, persisted for classify-route. Optional: any failure
+   * leaves routing without layout facts, which never authorizes a read. `DOCSLURP_PDF_LAYOUT_FACTS=off` skips it.
+   */
+  private async recordPageLayoutFacts(
+    document: import("../models.js").Document,
+    sourcePath: string,
+    winningText: string,
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    signal?: AbortSignal,
+  ): Promise<string | null> {
+    if (process.env.DOCSLURP_PDF_LAYOUT_FACTS === "off") return null;
+    const pageTexts = pageAlignedTexts(winningText, Math.max(1, document.pageCount));
+    if (!pageTexts) return null;
+    const startedAt = Date.now();
+    const pages = await collectPageLayoutFacts({
+      runner: this.runner, sourcePath, pageCount: document.pageCount, markdown: pageTexts.join("\f"), signal,
+    });
+    if (signal?.aborted) throw signal.reason ?? new Error("aborted");
+    if (!pages) return null;
+    return await this.storePageLayoutFacts(document, state, pages, "parser-sandbox", Date.now() - startedAt);
+  }
+
+  private async storePageLayoutFacts(
+    document: import("../models.js").Document,
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    pages: Map<number, import("../lib/page-layout-facts.js").PageLayoutFacts>,
+    source: "parser-sandbox" | "vm-pdf",
+    ms: number | null = null,
+  ): Promise<string> {
+    const key = `${runArtifactRoot(state.run, document.userId)}/page-layout-facts/${document.id}.json`;
+    await this.storage.putJson(key, {
+      version: "pdf-layout-facts@1", documentId: document.id, source,
+      pages: [...pages.entries()].map(([pageNumber, page]) => ({ pageNumber, known: true, ...page })),
+    });
+    console.log(`[extract-debug] document=${document.id} pageLayoutFacts source=${source} pages=${pages.size}${ms === null ? "" : ` ms=${ms}`}`);
+    return this.storage.uri(key);
+  }
+
+  /**
+   * Why this PDF is kept off the host, or null when it is not: `sandboxed-pdf-deployment` when the deployment is sandboxed
+   * (registry.resolve then refuses any other extractor, so the PDF goes to vm-pdf or fails), `sandboxed-pdf-route` when the
+   * project's order names vm-pdf on a deployment that would otherwise parse on the host. Host-side evidence probes are
+   * skipped in both cases, even if a later fallback wins.
+   */
+  private pdfSandboxReason(format: string, configured: Partial<Record<string, string[]>>): "sandboxed-pdf-deployment" | "sandboxed-pdf-route" | null {
+    if (format !== "pdf") return null;
+    if (resolvePdfExtractorSetting() === VM_PDF_EXTRACTOR_ID || sandboxedPdfConfigured()) return "sandboxed-pdf-deployment";
+    return this.tryResolveExtractorOrder(format, configured).includes(VM_PDF_EXTRACTOR_ID) ? "sandboxed-pdf-route" : null;
+  }
+
+  /** Host PDF evidence the sandboxed route does without; logged with the reason so the gap is visible. */
+  private skipHostPdfEvidence(document: import("../models.js").Document, what: "page-facts" | "page-image-evidence", reason: string | null): null {
+    console.log(`[extract-debug] document=${document.id} ${what}=skipped reason=${reason ?? "sandboxed-pdf-route"}`);
+    return null;
+  }
+
   /** Text-layer bytes and image counts per page (PDF), or one image page (image files). */
   private async recordSourcePageFacts(
     state: import("../pipeline/pipeline.js").WorkflowState,
     document: import("../models.js").Document,
     format: string,
     signal?: AbortSignal,
+    sandboxedPdfRoute = false,
+    sandboxReason: string | null = null,
   ): Promise<void> {
     if (!pageFactsEnabled() || !state.store?.upsertPageFacts) return;
+    if (format === "pdf" && sandboxedPdfRoute) {
+      this.skipHostPdfEvidence(document, "page-facts", sandboxReason);
+      return;
+    }
     // A resumed run skips a completed extraction; its facts were recorded then.
     if (state.documentStage(document.id, this.name)?.status === "completed") return;
     try {
@@ -1283,29 +1715,89 @@ export class ExtractMarkdownStage implements Stage {
     textKey: string,
     sourceTempFile: string,
     signal?: AbortSignal,
-    graphContext?: { sourceHash: string; pageCount: number; documentId: string },
+    graphContext?: CandidateContext,
   ): Promise<ExtractedCandidate> {
     return extractor.execute(this.candidateExecutors(graphContext), textKey, sourceTempFile, signal);
   }
 
   private candidateExecutors(
-    graphContext?: { sourceHash: string; pageCount: number; documentId: string },
+    graphContext?: CandidateContext,
   ): CandidateExecutors {
     return {
       stream: (plan, label, key, abort) => this.extractStreamCandidate(plan, label, key, abort),
-      file: (plan, label, key, outputPath, abort) => this.extractFileCandidate(plan, label, key, outputPath, abort),
-      liteparse: (candidate, key, source, abort) => this.extractLiteParseCandidate(candidate, key, source, abort),
+      file: (plan, label, key, outputPath, abort) => this.extractFileCandidate(plan, label, key, outputPath, abort, graphContext?.documentId),
       graph: (candidate, key, source, abort) => this.extractGraphCandidate(candidate, key, source, graphContext, abort),
       markdownFile: (candidate, key, outputPath) => this.uploadMarkdownFileCandidate(candidate, key, outputPath),
+      ocr: (candidate, key, source, abort) => this.extractOcrCandidate(candidate, key, source, graphContext, abort),
     };
   }
 
   /**
-   * An image has no text layer, so when OCR cannot read it (no Tesseract data on this worker, or
-   * Kreuzberg's bundled OCR crashing) vision is the only reader left. Returns a stand-in extractor whose empty
-   * Markdown lets page triage and the vision stage read the pixels. When the workspace cannot use vision
-   * (turned off, or privacy mode forbids the route) the image is unreadable: fail naming that cause. The raw
-   * diagnostic stays in the stored error and logs; `publicDocumentError` never shows it to users.
+   * An image's text from the OCR engine (every frame of a multi-frame TIFF, pages joined by form feeds), read in the
+   * configured boundary and charged per page there. Escalation reads go through the guarded vision path. Any refusal or
+   * failure throws: the stage fails the image rather than handing it to another reader.
+   */
+  private async extractOcrCandidate(
+    extractor: PreparedExtractor,
+    textKey: string,
+    sourcePath: string,
+    context: CandidateContext | undefined,
+    signal?: AbortSignal,
+  ): Promise<ExtractedCandidate> {
+    if (!context?.state) throw new Error("ocr extraction requires the run state");
+    const state = context.state;
+    // The read starts a VM: authorized before it (cost cap, balance for its Rich page), not only after the frames are counted.
+    await authorizeImageRead(state, context.documentId);
+    const result = await ocrDocument({
+      runner: this.runner,
+      state,
+      documentId: context.documentId,
+      source: sourcePath,
+      kind: "image",
+      mimeType: context.mimeType ?? null,
+      ...(context.ocrLanguage ? { languageSetting: context.ocrLanguage } : {}),
+      hostedReader: createHostedOcrReader({ state, cfg: this.cfg, runner: this.runner }),
+      stage: this.name,
+      // Each frame read is a page of the document (intake counted the image as one): recorded, and its extra Rich frames checked
+      // against the balance, before anything is charged.
+      beforeCharging: (frames) => authorizeImageFrames(state, context.documentId, this.name, frames),
+      // The VM reads no more frames than the run can pay for.
+      frameBudget: (max) => affordableImageFrames(state, context.documentId, max),
+      refuseUnfundedFrames: (budget) => refuseUnfundedImageFrames(state, context.documentId, this.name, budget),
+      // Its bounded rendition of each frame is the only pixels of this upload the worker ever decodes (page-image embedding).
+      rendition: PAGE_RENDITION,
+      ...(signal ? { signal } : {}),
+    });
+    const owner = state.documents.find((candidate) => candidate.id === context.documentId);
+    let renditions = 0;
+    for (const page of result.pages) {
+      if (!owner || !page.rendition) continue;
+      await this.storage.putBytes(pageRenditionKey(owner, page.pageNumber), page.rendition.bytes, "application/octet-stream");
+      renditions += 1;
+    }
+    if (owner && renditions < result.pages.length) {
+      console.warn(`[ocr] document=${context.documentId} renditions=${renditions}/${result.pages.length}: pages without one get no page-image vectors`);
+    }
+    const markdown = result.pages.map((page) => page.text).join("\f");
+    // An uploaded image's frames also count their decoded area (a giant scan is several standard pages to read).
+    if (owner) await recordExtractedPageEquivalents(state, owner, "image", markdown, result.pages);
+    const scratchDir = await mkdtemp(path.join(tmpdir(), "docslurp-extract-ocr-"));
+    const outputPath = path.join(scratchDir, "ocr.md");
+    try {
+      await writeFile(outputPath, markdown, "utf8");
+      const candidate = await this.uploadMarkdownFileCandidate(extractor, textKey, outputPath);
+      return { ...candidate, ocrPages: result.chargedPages, ocrCharged: true };
+    } catch (error) {
+      await rm(scratchDir, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  /**
+   * Fast keeps an image unread (no OCR on Fast): a stand-in extractor whose empty Markdown keeps the image as its page
+   * image. It is never a stand-in for OCR that failed or is off; those fail the document. When the project cannot use
+   * vision either, the image is unreadable: fail naming that cause. The raw diagnostic stays in the stored error and
+   * logs; `publicDocumentError` never shows it to users.
    */
   private textlessImageExtractor(
     state: import("../pipeline/pipeline.js").WorkflowState,
@@ -1370,7 +1862,7 @@ export class ExtractMarkdownStage implements Stage {
     extractor: PreparedExtractor,
     textKey: string,
     sourcePath: string,
-    context?: { sourceHash: string; pageCount: number; documentId: string },
+    context?: CandidateContext,
     signal?: AbortSignal,
   ): Promise<ExtractedCandidate> {
     if (!context) throw new Error("graph-local requires source hash and page count");
@@ -1383,6 +1875,7 @@ export class ExtractMarkdownStage implements Stage {
         pageCount: context.pageCount,
         targetKinds: ["document/markdown"],
         scratchDir,
+        ocrLanguage: context.ocrLanguage,
         signal,
       });
       const markdown = graph.targets.find((artifact) => artifact.kind === "document/markdown");
@@ -1396,6 +1889,7 @@ export class ExtractMarkdownStage implements Stage {
         textKey,
         textUri: this.storage.uri(textKey),
         tempTextPath: markdown.uri,
+        ...(graph.ocrPages?.length ? { ocrPages: [...graph.ocrPages] } : {}),
       };
     } catch (error) {
       await rm(scratchDir, { recursive: true, force: true });
@@ -1438,54 +1932,23 @@ export class ExtractMarkdownStage implements Stage {
     }
   }
 
-  private async extractLiteParseCandidate(
-    extractor: PreparedExtractor,
-    textKey: string,
-    sourceTempFile: string,
-    signal?: AbortSignal,
-  ): Promise<ExtractedCandidate> {
-    const adapter = new LiteParseDocumentExtractionAdapter(this.runner, {
-      ocrEnabled: false,
-    });
-    const structuredResult = await adapter.extract({
-      inputPath: sourceTempFile,
-      outputPath: extractor.outputPath!,
-      signal,
-    });
-    const sanitized = sanitizeExtractedMarkdown(structuredResult.markdown);
-    const tempTextPath = `${extractor.outputPath!}.md`;
-    await writeFile(tempTextPath, sanitized.markdown, "utf8");
-    await this.storage.streamText(
-      textKey,
-      sanitized.markdown,
-      "text/markdown; charset=utf-8",
-    );
-    const structuredKey = `${textKey}.structured.json`;
-    const sanitizedResult = {
-      ...structuredResult,
-      markdown: sanitized.markdown,
-    };
-    await this.storage.putJson(structuredKey, sanitizedResult);
-
-    return {
-      label: extractor.label,
-      plan: extractor.plan,
-      textKey,
-      textUri: this.storage.uri(textKey),
-      tempTextPath,
-      structuredResult: sanitizedResult,
-      structuredArtifactUri: this.storage.uri(structuredKey),
-    };
-  }
-
   private async extractFileCandidate(
     plan: CommandPlan,
     label: string,
     textKey: string,
     outputPath: string,
     signal?: AbortSignal,
+    documentId?: string,
   ): Promise<ExtractedCandidate> {
     await this.runner.run(plan, signal);
+    // Provider output is untrusted: a regular file of bounded size, checked before anything reads it.
+    if (plan.sandboxedPdf) await assertSandboxedPdfMarkdownBounded(outputPath);
+    // VM image output: put each routed-in image's reference at its reading-order position before the Markdown is stored.
+    if (plan.sandboxedPdf?.embeddedImages) {
+      if (!documentId) throw new Error("VM image references need the document id");
+      const images = await requireSandboxedPdfProvider().embeddedImages!.read(outputPath, signal);
+      await anchorImageMarkdownFile({ markdownPath: outputPath, images, sourceDocumentId: documentId });
+    }
 
     const upload = this.storage.createMultipartUploadStream(
       textKey,
@@ -1493,6 +1956,8 @@ export class ExtractMarkdownStage implements Stage {
     );
     await pipeline(createReadStream(outputPath), upload.writable);
     await upload.done;
+    const ocrPages = plan.sandboxedPdf ? sandboxedPdfOcrPages(plan.sandboxedPdf) : undefined;
+    const layoutFacts = plan.sandboxedPdf ? sandboxedPdfLayoutFacts(plan.sandboxedPdf) : undefined;
 
     return {
       label,
@@ -1500,6 +1965,8 @@ export class ExtractMarkdownStage implements Stage {
       textKey,
       textUri: this.storage.uri(textKey),
       tempTextPath: outputPath,
+      ...(ocrPages ? { ocrPages: [...ocrPages] } : {}),
+      ...(layoutFacts ? { layoutFacts } : {}),
     };
   }
 
@@ -1508,7 +1975,12 @@ export class ExtractMarkdownStage implements Stage {
   ): Promise<string> {
     const original = await readFile(candidate.tempTextPath, "utf8");
     const sanitized = sanitizeExtractedMarkdown(original);
-    if (sanitized.strippedDataUriCount === 0 && sanitized.strippedFrontmatterLines === 0) {
+    // Doppler's tables: a two-line header it split becomes one header row, a list it laid out in columns a list again.
+    const tables = DOPPLER_PDF_EXTRACTORS.has(candidate.label) ? repairMarkdownTables(sanitized.markdown) : null;
+    if (tables && (tables.repairs.mergedHeaders > 0 || tables.repairs.listsRestored > 0)) {
+      sanitized.markdown = tables.markdown;
+      console.log(`[extract-tables] extractor=${candidate.label} mergedHeaders=${tables.repairs.mergedHeaders} listsRestored=${tables.repairs.listsRestored}`);
+    } else if (sanitized.strippedDataUriCount === 0 && sanitized.strippedFrontmatterLines === 0) {
       return original;
     }
 
@@ -1549,6 +2021,9 @@ export class ExtractMarkdownStage implements Stage {
    * directories for the caller to remove.
    */
   private async isolateConcurrentCandidates(args: {
+    mimeType?: string | null;
+    /** The billed page count: every page-range utility a candidate runs stops at it. */
+    pageCount: number;
     primary: PreparedExtractor;
     secondary: PreparedExtractor | null;
     sourcePath: string;
@@ -1575,7 +2050,7 @@ export class ExtractMarkdownStage implements Stage {
         this.runner,
         source,
         serializeExtractorOptions(args.options, extractor.label),
-        { format: args.format },
+        { format: args.format, mimeType: args.mimeType ?? null, pageCount: args.pageCount },
       );
       return { extractor: prepared, source };
     };
@@ -1597,7 +2072,7 @@ export class ExtractMarkdownStage implements Stage {
     secondaryKey: string | null;
     primarySource: string;
     secondarySource: string;
-    graphContext: { sourceHash: string; pageCount: number; documentId: string };
+    graphContext: CandidateContext;
     signal?: AbortSignal;
   }): Promise<
     [
@@ -1666,8 +2141,18 @@ export class ExtractMarkdownStage implements Stage {
       process.env.DOCSLURP_CRITIQUE_MAX_COST_PER_PAGE_CENTS ??
         String(maxCostCents),
     );
+    // Critique rewrites single pages and joins them with form feeds, which later stages trust as page breaks. Text
+    // without reliable page breaks (the form feeds do not describe exactly `pageCount` pages) has no pages to
+    // rewrite: skip the critique rather than invent boundaries.
+    const pageTexts = splitTextIntoPagesStrict(args.winningText, Math.max(1, args.document.pageCount));
+    if (pageTexts === null || pageTexts.length === 0) {
+      console.warn(`[extract-markdown] self-critique skipped document=${args.document.id}: text has no reliable page breaks pageCount=${args.document.pageCount}`);
+      return null;
+    }
+    // Pages whose OCR failed in its boundary stay failed: critique never re-reads them with a hosted model.
+    const ocrFailed = ocrFailedPages(args.state.artifactLedger, args.document.id);
     const critiquePages = budgetCritiquePages(
-      selectCritiquePages(args.heatmapPages),
+      selectCritiquePages(args.heatmapPages).filter((page) => !ocrFailed.has(page)),
       maxCostCents,
       maxCostPerPageCents,
     );
@@ -1679,15 +2164,11 @@ export class ExtractMarkdownStage implements Stage {
       return null;
     }
     // Self-critique is optional; skip it when the vision route is hosted and
-    // the workspace privacy mode forbids hosted calls.
+    // the project privacy mode forbids hosted calls.
     if (!(await allowHostedCall(args.state, visionCall(resolveVisionRoute(args.state.run.pipeline.vision)), [args.document.id]))) {
       return null;
     }
 
-    const pageTexts = splitTextIntoPages(
-      args.winningText,
-      Math.max(1, args.document.pageCount),
-    );
     const scratchDir = await mkdtemp(path.join(tmpdir(), "docslurp-critique-"));
     const critiqueArtifactKey = `${runArtifactRoot(args.state.run, args.document.userId)}/critique/${args.document.id}.json`;
     const correctedTextKey = `${runArtifactRoot(args.state.run, args.document.userId)}/markdown/${args.document.id}.critique.md`;
@@ -1952,6 +2433,8 @@ export class ExtractMarkdownStage implements Stage {
 
   private async buildParserArtifacts(
     document: import("../models.js").Document,
+    /** The sniffed format (format-detect's normalizedFormat). */
+    format: string,
     sourceTempFile: string,
     state: import("../pipeline/pipeline.js").WorkflowState,
     options: {
@@ -1963,9 +2446,10 @@ export class ExtractMarkdownStage implements Stage {
   ): Promise<
     Array<{ parser: "native-pdf" | "unstructured"; uri: string; payload: unknown }>
   > {
-    const isPdf = this.isPdfDocument(document);
-    if (!isPdf) {
-      if (options.nativePayloadOutcome) options.nativePayloadOutcome.reason = "filename and MIME type are not PDF";
+    // PDF parsers (the in-process native engine, region extraction, the Unstructured sidecar) read only bytes sniffed as a
+    // PDF: a polyglot named x.pdf, or declared application/pdf, that sniffed as HTML must never reach a PDF parser.
+    if (format !== "pdf") {
+      if (options.nativePayloadOutcome) options.nativePayloadOutcome.reason = `sniffed format is ${format}, not pdf`;
       return [];
     }
 
@@ -2006,7 +2490,8 @@ export class ExtractMarkdownStage implements Stage {
           this.runner.unstructuredPartition(
             sourceTempFile,
             `${sourceTempFile}.unstructured.json`,
-            "hi_res",
+            // Text layer only: unstructured's OCR strategies would OCR inside this process.
+            "fast",
         ),
         timeoutMs: this.cfg.parserArtifactTimeoutMs,
       });
@@ -2165,7 +2650,7 @@ export class ExtractMarkdownStage implements Stage {
       const plan = await this.runner.unstructuredPartition(
         args.sourceTempFile,
         args.outputPath,
-        "hi_res",
+        "fast",
       );
       if (!plan.available) {
         return null;
@@ -2293,7 +2778,7 @@ export class ExtractMarkdownStage implements Stage {
     const unstructuredPlan = await this.runner.unstructuredPartition(
       slicePath,
       outputPath,
-      "hi_res",
+      "fast",
     );
     if (!unstructuredPlan.available) {
       throw new Error("unstructured parser is unavailable");
@@ -2429,7 +2914,7 @@ export class ExtractMarkdownStage implements Stage {
     const plan = await this.runner.unstructuredPartition(
       args.sourceTempFile,
       args.outputPath,
-      "hi_res",
+      "fast",
     );
     if (!plan.available) {
       return null;
@@ -2448,21 +2933,25 @@ export class ExtractMarkdownStage implements Stage {
     runId: string;
     signal?: AbortSignal;
     graphRunner?: typeof runLocalPdfArtifactGraph;
-    dopplerImageBundle?: string;
+    /** Images the VM extractor returned beside its Markdown output; read through the provider, never re-parsed here. */
+    vmImages?: { output: string; markdownPath?: string };
     canContinue?: () => boolean;
     reserveOrientation?: () => boolean;
     recordUsage?: (event: import("../models.js").UsageEvent) => void;
-  }): Promise<{ manifestUri: string; targetIds: string[]; requestedTargets: string[]; steps: string[]; outputCount: number; latencyMs: number; artifactUris?: string[] }> {
+  }): Promise<{ manifestUri: string; targetIds: string[]; requestedTargets: string[]; steps: string[]; outputCount: number; latencyMs: number; artifactUris: string[]; stats?: Readonly<Record<string, unknown>> }> {
     const startedAt = Date.now();
     const scratchDir = await mkdtemp(path.join(tmpdir(), "docslurp-artifact-graph-"));
     try {
       if (args.format !== "pdf") {
         throw new Error(`artifact enrichment is unavailable for ${args.format}`);
       }
-      const result = args.dopplerImageBundle
-        ? await dopplerImageGraph({ bundlePath: args.dopplerImageBundle, sourcePath: args.sourcePath,
+      const vmImages = args.vmImages ? requireSandboxedPdfProvider().embeddedImages : undefined;
+      if (args.vmImages && !vmImages) throw new Error("The sandboxed PDF provider does not return embedded images");
+      const result = args.vmImages && vmImages
+        ? await embeddedImageGraph({ images: await vmImages.read(args.vmImages.output, args.signal),
+            producer: { id: vmImages.producerId, optionsDigest: vmImages.optionsDigest }, sourcePath: args.sourcePath,
             sourceDocumentId: args.document.id, sourceHash: args.sourceHash, pageCount: args.pageNumbers.length,
-            targets: args.targets, scratchDir, signal: args.signal,
+            targets: args.targets, scratchDir, signal: args.signal, markdownPath: args.vmImages.markdownPath,
             recordUsage: args.recordUsage, canContinue: args.canContinue, reserveOrientation: args.reserveOrientation })
         : await (args.graphRunner ?? runLocalPdfArtifactGraph)({
         sourcePath: args.sourcePath,
@@ -2504,7 +2993,10 @@ export class ExtractMarkdownStage implements Stage {
         steps: [...result.steps],
         outputCount: persisted.length - 1,
         latencyMs: Date.now() - startedAt,
-        ...(args.dopplerImageBundle ? { artifactUris: persisted.slice(1).map(ref => ref.uri) } : {}),
+        // Image children and the media map are recorded as document artifact slots, so the artifact and PII guards
+        // (and exports) see them, whichever producer made them.
+        artifactUris: persisted.slice(1).filter(ref => EMBEDDED_IMAGE_TARGETS.has(ref.kind) || ref.kind === "page/embedded-image-mask").map(ref => ref.uri),
+        ...(result.stats ? { stats: result.stats } : {}),
       };
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
@@ -2531,13 +3023,6 @@ export class ExtractMarkdownStage implements Stage {
     return order.length ? order.join(",") : `none-for-${format}`;
   }
 
-  private isPdfDocument(document: import("../models.js").Document): boolean {
-    return (
-      path.extname(document.filename).toLowerCase() === ".pdf" ||
-      document.mimeType.toLowerCase().includes("pdf")
-    );
-  }
-
   private resolveDocumentExtractorOrder(
     format: string,
     order: Partial<Record<string, string[]>>,
@@ -2547,6 +3032,10 @@ export class ExtractMarkdownStage implements Stage {
 
   private async planExtractors(args: {
     tempFile: string;
+    /** The billed page count: every page-range utility a candidate runs stops at it. */
+    pageCount: number;
+    /** The bytes' sniffed MIME type (quarantine's file facts), handed to extractors that take one. */
+    mimeType?: string | null;
     multiStrategyVoting: boolean;
     secondaryId: string;
     order: Partial<Record<string, string[]>>;
@@ -2568,7 +3057,7 @@ export class ExtractMarkdownStage implements Stage {
           this.runner,
           args.tempFile,
           serializeExtractorOptions(args.options, id),
-          { format: args.format },
+          { format: args.format, mimeType: args.mimeType ?? null, pageCount: args.pageCount },
         ),
       ),
     );
@@ -2592,7 +3081,7 @@ export class ExtractMarkdownStage implements Stage {
           this.runner,
           args.tempFile,
           serializeExtractorOptions(args.options, args.secondaryId),
-          { format: args.format },
+          { format: args.format, mimeType: args.mimeType ?? null, pageCount: args.pageCount },
         );
         if (!explicit.plan.available) args.attemptLedger.markUnavailable(explicit.label);
         secondary = explicit.plan.available ? explicit : null;
@@ -2661,8 +3150,10 @@ export function mergeCritiquedPages(
   pageCount: number,
   corrections: Array<{ pageNumber: number; text: string }>,
 ): string {
-  const pages = splitTextIntoPages(originalText, pageCount);
-  if (pages.length === 0) {
+  // Strict: a text whose page breaks do not match the page count has no pages to replace, and joining slices with
+  // form feeds would write boundaries the text never had.
+  const pages = splitTextIntoPagesStrict(originalText, pageCount);
+  if (pages === null || pages.length === 0) {
     return originalText;
   }
 

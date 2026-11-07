@@ -16,8 +16,8 @@ describe("org_spend_status", () => {
       insert into "user" (id, name, email) values ('u1', 'U', 'u1@example.com');
       insert into organizations (id, name, slug, created_by_user_id, credit_balance_cents)
         values ('org-1', 'One', 'one', 'u1', 3), ('org-2', 'Two', 'two', 'u1', 10);
-      insert into workspaces (id, org_id, user_id, name) values ('ws-1', 'org-1', 'u1', 'W'), ('ws-2', 'org-2', 'u1', 'X');
-      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, input_cost_cents) values
+      insert into projects (id, org_id, user_id, name) values ('ws-1', 'org-1', 'u1', 'W'), ('ws-2', 'org-2', 'u1', 'X');
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, input_cost_cents) values
         ('fresh', 'org-1', 'u1', 'ws-1', 'bulk-upload', 'processing', 'embed', '{}', 0),
         ('half-spent', 'org-1', 'u1', 'ws-1', 'bulk-upload', 'queued', 'queued', '{}', 0.25),
         ('spent', 'org-1', 'u1', 'ws-1', 'bulk-upload', 'processing', 'embed', '{}', 5),
@@ -30,18 +30,18 @@ describe("org_spend_status", () => {
     await db?.close();
   });
 
-  async function status(org: string | null, workspace: string | null, reserve = 0) {
+  async function status(org: string | null, project: string | null, reserve = 0) {
     const { rows } = await db.query<Record<string, unknown>>(
       "select * from org_spend_status($1, $2, $3)",
-      [org, workspace, reserve],
+      [org, project, reserve],
     );
     return rows[0];
   }
 
-  it("reports available credits net of pending debits, resolving the org from the workspace", async () => {
+  it("reports available credits net of pending debits, resolving the org from the project", async () => {
     expect(await status(null, "ws-1")).toMatchObject({
       org_id: "org-1", funded: false, reserved: "0",
-      workspace_budget_paused: false, org_budget_paused: false, workspace_in_org: true,
+      project_budget_paused: false, org_budget_paused: false, project_in_org: true,
     });
     expect(Number((await status(null, "ws-1"))!.available)).toBe(2);
   });
@@ -51,11 +51,11 @@ describe("org_spend_status", () => {
     expect(Number((await status("org-1", "ws-1", 0.5))!.reserved)).toBeCloseTo(0.75);
   });
 
-  it("flags a workspace outside the org and budget pauses", async () => {
-    expect((await status("org-1", "ws-2"))!.workspace_in_org).toBe(false);
-    await db.exec("update workspaces set budget_paused = true where id = 'ws-1'");
+  it("flags a project outside the org and budget pauses", async () => {
+    expect((await status("org-1", "ws-2"))!.project_in_org).toBe(false);
+    await db.exec("update projects set budget_paused = true where id = 'ws-1'");
     await db.exec("update organizations set budget_paused = true where id = 'org-1'");
-    expect(await status("org-1", "ws-1")).toMatchObject({ workspace_budget_paused: true, org_budget_paused: true });
+    expect(await status("org-1", "ws-1")).toMatchObject({ project_budget_paused: true, org_budget_paused: true });
     expect(await status("missing", null)).toBeUndefined();
   });
 });

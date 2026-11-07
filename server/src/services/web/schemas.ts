@@ -3,8 +3,8 @@ import { z } from "zod";
 const httpUrl = z.url().max(2_048).refine((url) => /^https?:\/\//i.test(url), "Use HTTP or HTTPS URLs");
 const domain = z.string().trim().min(3).max(253).regex(/^[a-z0-9.-]+\.[a-z]{2,}$/i, "Use a bare domain such as example.com");
 const pathPattern = z.string().min(1).max(200);
-const workspace = z.string().min(1).max(256).optional()
-  .describe("Workspace whose privacy and billing settings apply. Omit for the organization default workspace.");
+const project = z.string().min(1).max(256).optional()
+  .describe("Project whose privacy and billing settings apply. Omit for the organization default project.");
 const depth = z.enum(["fast", "deep"]).default("fast")
   .describe("fast: cheapest mode. deep: higher-quality results or a fresh browser render; costs more.");
 
@@ -17,7 +17,7 @@ export const webSearchInput = z.object({
   excludeDomains: z.array(domain).max(20).optional(),
   recency: z.enum(["day", "week", "month", "year"]).optional().describe("Only pages published within this period."),
   maxCharacters: z.number().int().min(500).max(50_000).default(8_000).describe("Per-page Markdown cap when includeContent is set."),
-  workspace,
+  project,
 }).strict();
 
 export const webFetchInput = z.object({
@@ -25,7 +25,7 @@ export const webFetchInput = z.object({
     .describe("Public HTTP(S) pages to read as Markdown."),
   depth,
   maxCharacters: z.number().int().min(500).max(100_000).default(20_000).describe("Per-page Markdown cap."),
-  workspace,
+  project,
 }).strict();
 
 export const webMapInput = z.object({
@@ -33,7 +33,7 @@ export const webMapInput = z.object({
   limit: z.number().int().min(1).max(500).default(100),
   search: z.string().trim().min(1).max(200).optional().describe("Rank discovered URLs by relevance to this text."),
   includeSubdomains: z.boolean().default(false),
-  workspace,
+  project,
 }).strict();
 
 export const webCrawlInput = z.object({
@@ -44,12 +44,12 @@ export const webCrawlInput = z.object({
   excludePaths: z.array(pathPattern).max(20).optional().describe("Skip paths matching these regular expressions."),
   maxCharacters: z.number().int().min(500).max(100_000).default(20_000).describe("Per-page Markdown cap."),
   timeoutSeconds: z.number().int().min(15).max(170).default(120).describe("Stop waiting after this long and return the pages read so far."),
-  workspace,
+  project,
 }).strict();
 
-export const ingestWebsiteInput = webCrawlInput.omit({ maxCharacters: true, workspace: true }).extend({
-  workspace: z.string().min(1).max(256).optional().describe("Workspace ID, slug or name to ingest into. A name that matches no workspace creates it. Omit for the default workspace."),
-  newWorkspace: z.boolean().optional().describe("Without workspace: ingest into a fresh self-titled workspace."),
+export const ingestWebsiteInput = webCrawlInput.omit({ maxCharacters: true, project: true }).extend({
+  project: z.string().min(1).max(256).optional().describe("Project ID, slug or name to ingest into. A name that matches no project creates it. Omit for the default project."),
+  newProject: z.boolean().optional().describe("Without project: ingest into a fresh self-titled project."),
   tags: z.array(z.string().trim().min(1).max(64)).max(20).optional(),
 }).strict();
 

@@ -20,10 +20,10 @@ beforeAll(async () => {
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
-    insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+    insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
       values ('run-1', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{}', 1);
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
       values ('d1', 'o1', 'u1', 'w', 'run-1', 'a.pdf', 'application/pdf', 'k1', 'processing', 6);
   `);
   const served = await serveOnRandomPort(db);
@@ -43,7 +43,7 @@ beforeEach(async () => {
 
 const DIMS = 768;
 const document = { id: "d1", userId: "u1", runId: "run-1", filename: "a.pdf", mimeType: "application/pdf", pageCount: 6 } as Document;
-const run = { id: "run-1", orgId: "o1", workspaceId: "w" };
+const run = { id: "run-1", orgId: "o1", projectId: "w" };
 
 function fixture() {
   const objects = new Map<string, Buffer>();
@@ -97,8 +97,8 @@ describe("embedPageImages", () => {
     expect(result.embeddedPages).toEqual([1, 2, 3, 4, 5, 6]);
     expect(f.renderCalls).toEqual([[1, 2, 3, 4], [5, 6]]);
 
-    const rows = await db.query<{ page_number: number; dims: number; bl: number; il: number; scale: number; workspace_id: string; org_id: string }>(
-      `select page_number, dims, length(bits) as bl, length(int8) as il, scale, workspace_id, org_id from document_page_vectors order by page_number`,
+    const rows = await db.query<{ page_number: number; dims: number; bl: number; il: number; scale: number; project_id: string; org_id: string }>(
+      `select page_number, dims, length(bits) as bl, length(int8) as il, scale, project_id, org_id from document_page_vectors order by page_number`,
     );
     expect(rows.rows).toHaveLength(6);
     for (const row of rows.rows) {
@@ -106,7 +106,7 @@ describe("embedPageImages", () => {
       expect(row.bl).toBe(DIMS / 8);
       expect(row.il).toBe(DIMS);
       expect(row.scale).toBeGreaterThan(0);
-      expect([row.workspace_id, row.org_id]).toEqual(["w", "o1"]);
+      expect([row.project_id, row.org_id]).toEqual(["w", "o1"]);
     }
     const states = await db.query<{ embedded_at: unknown; embedding_model: string }>(`select embedded_at, embedding_model from document_page_states`);
     expect(states.rows).toHaveLength(6);

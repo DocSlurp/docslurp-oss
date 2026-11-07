@@ -37,14 +37,15 @@ beforeAll(async () => {
   await sql`update "user" set deleted_at = now() where id = 'u-gone'`;
   await sql`insert into account (id, "accountId", "providerId", "userId") values
     ('a1', 'gh-1', 'github', 'u-active'), ('a2', 'u-active', 'credential', 'u-active'), ('a3', 'g-2', 'google', 'u-idle')`;
-  await sql`insert into workspaces (id, user_id, name) values ('w1', 'u-active', 'Contracts')`;
-  await sql`insert into documents (id, user_id, workspace_id, filename, mime_type, source_key, status, page_count) values
+  await sql`insert into projects (id, user_id, name) values ('w1', 'u-active', 'Contracts')`;
+  await sql`insert into documents (id, user_id, project_id, filename, mime_type, source_key, status, page_count) values
     ('d1', 'u-active', 'w1', 'a.pdf', 'application/pdf', 'k1', 'completed', 12),
     ('d2', 'u-active', 'w1', 'b.pdf', 'application/pdf', 'k2', 'completed', 3)`;
   await sql`insert into search_sessions (id, user_id, query) values ('s1', 'u-active', 'termination clause')`;
-  await sql`insert into api_keys (id, user_id, key_hash, name, key_type) values
-    ('k1', 'u-active', 'hash-1', 'server', 'server'), ('k2', 'u-active', 'hash-2', 'widget', 'client')`;
-  await sql`insert into api_keys (id, user_id, key_hash, name, key_type, revoked_at) values ('k3', 'u-idle', 'hash-3', 'old', 'server', now())`;
+  await sql`insert into organizations (id, name, slug, created_by_user_id) values ('keys-org', 'Keys', 'keys-org', 'u-active')`;
+  await sql`insert into api_keys (id, user_id, org_id, key_hash, name, key_type) values
+    ('k1', 'u-active', 'keys-org', 'hash-1', 'server', 'server'), ('k2', 'u-active', 'keys-org', 'hash-2', 'widget', 'client')`;
+  await sql`insert into api_keys (id, user_id, org_id, key_hash, name, key_type, revoked_at) values ('k3', 'u-idle', 'keys-org', 'hash-3', 'old', 'server', now())`;
 }, 120_000);
 
 afterAll(async () => { await pool?.end(); await sql?.end(); await server?.stop(); await database?.close(); });
@@ -73,7 +74,7 @@ describe("admin user directory against migrated Postgres", () => {
     expect(body.total).toBe(2);
     const [active, idle] = body.users;
     expect(active).toMatchObject({
-      id: "u-active", email_verified: true, providers: ["credential", "github"], workspaces: 1, documents: 2, pages: 15,
+      id: "u-active", email_verified: true, providers: ["credential", "github"], projects: 1, documents: 2, pages: 15,
       searches: 1, api_keys: 1, browser_keys: 1, spend_cents: 0,
       attribution: { referrer_host: "news.example", referrer_url: "https://news.example/thread", utm_source: "newsletter", landing_path: "/pricing" },
     });

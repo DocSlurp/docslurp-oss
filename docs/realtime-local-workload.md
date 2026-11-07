@@ -6,7 +6,7 @@ Run `pnpm -C server exec vitest run src/realtime/load.db.test.ts`.
 ## Workload and boundaries
 
 Use the fully migrated local PostgreSQL-compatible test database (PGlite through
-postgres.js, one connection), one organization, owner, workspace, ten processing
+postgres.js, one connection), one organization, owner, project, ten processing
 runs, ten observers per run. Measure actual production `realtimeBackend` run
 projection and `RealtimeBroker`, using explicit one-second logical ticks to
 remove scheduler variance. No real-time sleep or performance claim about Fly.
@@ -93,7 +93,7 @@ included the batch authorization changes recorded with this report.
 
 Idle attribution is exactly 32 revision reads and 32 authorization batches.
 The old sweep separately resolved each of 17 resources every second; run
-authorization also read its workspace identity. The replacement uses one fresh
+authorization also read its project identity. The replacement uses one fresh
 statement for the bounded subscription set. There is no grant cache to invalidate.
 Delivery reauthorization and activity constituent authorization remain fresh.
 Generation checks and the independent resource-verification timeout remain.

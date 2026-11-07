@@ -2,6 +2,7 @@
 
 import { safeHttpFailure, retryAfterSeconds } from "./http-failure.js";
 
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { writeFile } from "node:fs/promises";
 import { basename } from "node:path";
@@ -23,33 +24,34 @@ function resolveApiUrl(flags: Record<string, string | boolean>): string {
 }
 
 /**
- * --workspace, then DOCSLURP_WORKSPACE, then "default" (the organization's
- * default workspace). A workspace is an ID, slug or name; names match by slug.
+ * --project, then DOCSLURP_PROJECT, then "default" (the organization's
+ * default project). A project is an ID, slug or name; names match by slug.
  */
-function resolveWorkspace(flags: Record<string, string | boolean>): string {
-  const explicit = typeof flags.workspace === "string" ? flags.workspace.trim() : "";
-  return explicit || process.env.DOCSLURP_WORKSPACE?.trim() || "default";
+function resolveProject(flags: Record<string, string | boolean>): string {
+  if (process.env.DOCSLURP_WORKSPACE?.trim() || process.env.DOCSLURP_WORKSPACE_ID?.trim()) throw new Error("Legacy workspace environment selection is no longer supported; set DOCSLURP_PROJECT.");
+  const explicit = typeof flags.project === "string" ? flags.project.trim() : "";
+  return explicit || process.env.DOCSLURP_PROJECT?.trim() || "default";
 }
 
-type IntakeTarget = { newWorkspace: boolean; templateKey?: string; workspace?: string };
+type IntakeTarget = { newProject: boolean; templateKey?: string; project?: string };
 
 /**
- * Where an upload or URL ingest lands. --workspace wins: the server finds the
- * workspace by ID, slug or name, or creates it from the name (with --template
- * applied). Otherwise --new-workspace or --template creates a self-titled
- * workspace, and anything else goes to DOCSLURP_WORKSPACE or "default".
+ * Where an upload or URL ingest lands. --project wins: the server finds the
+ * project by ID, slug or name, or creates it from the name (with --template
+ * applied). Otherwise --new-project or --template creates a self-titled
+ * project, and anything else goes to DOCSLURP_PROJECT or "default".
  */
 function resolveIntakeTarget(flags: Record<string, string | boolean>): IntakeTarget {
   const templateKey = typeof flags.template === "string" && flags.template.trim() ? flags.template.trim() : undefined;
-  const explicit = typeof flags.workspace === "string" ? flags.workspace.trim() : "";
-  if (explicit) return { newWorkspace: false, workspace: explicit, templateKey };
-  if (flags.newWorkspace === true || templateKey) return { newWorkspace: true, templateKey };
-  return { newWorkspace: false, workspace: resolveWorkspace(flags) };
+  const explicit = typeof flags.project === "string" ? flags.project.trim() : "";
+  if (explicit) return { newProject: false, project: explicit, templateKey };
+  if (flags.newProject === true || templateKey) return { newProject: true, templateKey };
+  return { newProject: false, project: resolveProject(flags) };
 }
 
 const QUALITY_MODES = ["fast", "auto", "good"] as const;
 
-/** `--quality fast|auto|good` as a pipeline override, or {} when the workspace setting applies. */
+/** `--quality fast|auto|good` as a pipeline override, or {} when the project setting applies. */
 export function resolveQualityPipeline(flags: Record<string, string | boolean>): { pipeline?: { quality: (typeof QUALITY_MODES)[number] } } {
   if (flags.quality === undefined) return {};
   const quality = typeof flags.quality === "string" ? flags.quality.trim().toLowerCase() : "";
@@ -59,30 +61,31 @@ export function resolveQualityPipeline(flags: Record<string, string | boolean>):
 
 function usage(): void {
   console.log(`Usage:
-  docslurp upload <files...> [--workspace <id|slug|name> | --new-workspace] [--template <key>] [--quality <fast|auto|good>] [--canonical-id <id>] [--path <folder>] [--estimate] [--watch] [--api-url <url>]
-  docslurp ingest-url <urls...> [--workspace <id|slug|name> | --new-workspace] [--template <key>] [--quality <fast|auto|good>] [--watch] [--api-url <url>]
+  docslurp estimate <files...> [--quality <fast|auto|good>] [--indexing <full|on-demand|visual>] [--months <n>] [--json]
+  docslurp upload <files...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--canonical-id <id>] [--path <folder>] [--idempotency-key <key>] [--estimate] [--watch] [--api-url <url>]
+  docslurp ingest-url <urls...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--watch] [--api-url <url>]
   docslurp extract <files...|urls...> [--retention-days <n>] [--no-email] [--download <markdown|all>] [upload options]
   docslurp extract-status <extractId> [--json]
   docslurp extract-download <extractId>
-  docslurp full-index [--workspace <id|slug|name>] [--document <id>] [--estimate] [--watch]
+  docslurp full-index [--project <id|slug|name>] [--document <id>] [--estimate] [--watch]
   docslurp reprocess <runId> [--stage-from <stage>] [--estimate] [--watch]
   docslurp jobs get <jobId> [--json]
   docslurp jobs watch <jobId> [--timeout <seconds>]
   docslurp status <runId> [--api-url <url>] [--watch] [--timeout <seconds>]
-  docslurp runs [--api-url <url>]
-  docslurp search <query> [--workspace <id|slug|name>] [--min-score <0..1>] [--json | --context]
-  docslurp search --queries-file <queries.json> [--workspace <id|slug|name>] [--concurrency <1..4>] [--json | --context]
-  docslurp chat <question> [--workspace <id|slug|name>] [--session <id>] [--json]
+  docslurp runs [--limit <1-100>] [--cursor <nextCursor>] [--api-url <url>]
+  docslurp search <query> [--project <id|slug|name>] [--min-score <0..1>] [--json | --context]
+  docslurp search --queries-file <queries.json> [--project <id|slug|name>] [--concurrency <1..4>] [--json | --context]
+  docslurp chat <question> [--project <id|slug|name>] [--session <id>] [--json]
   docslurp mcp-server [--api-url <url>] [--api-key <key>]   (alias: docslurp mcp)
   docslurp login [--device] [--scopes "search read chat ingest"] [--no-browser] [--profile <name>] [--api-url <url>]
   docslurp logout [--profile <name>] [--force]
   docslurp whoami [--json]
   docslurp auth status [--json]
   docslurp auth token
-  docslurp exec [--profile <name>] [--workspace <ws>] -- <command> [args...]
+  docslurp exec [--profile <name>] [--project <ws>] -- <command> [args...]
   docslurp --license
   docslurp migrate-algolia-synonyms <export.json> [--out <glossary.json>]
-  docslurp import-search-compat <export.json> --workspace <id|slug|name> [--source <algolia|elastic|legacy-parser>] [--api-url <url>] [--api-key <key>] [--out <normalized.json>]
+  docslurp import-search-compat <export.json> --project <id|slug|name> [--source <algolia|elastic|legacy-parser>] [--api-url <url>] [--api-key <key>] [--out <normalized.json>]
 
 API commands authenticate with, in order: --api-key <key>, DOCSLURP_API_KEY,
 DOCSLURP_TOKEN (a short-lived OAuth access token), then the stored login from
@@ -91,16 +94,16 @@ add chat or ingest with --scopes. Use --device on headless or SSH machines.
 docslurp auth token prints a fresh access token (valid at most 15 minutes);
 docslurp exec passes one to a child process as DOCSLURP_TOKEN without writing it to disk.
 --profile (or DOCSLURP_PROFILE) keeps separate logins; each profile has one per API URL.
-DOCSLURP_URL overrides the hosted service. Without --workspace or DOCSLURP_WORKSPACE,
-commands use the "default" workspace: your organization's default workspace.
---workspace takes a workspace ID, slug or name: "Legal Contracts" and legal-contracts are
-the same workspace. Uploads and URL ingests into a name that matches no workspace create
-it with that name (and --template, if given); other commands answer workspace not found.
---new-workspace (or --template alone) uploads into a fresh self-titled workspace.
---quality sets processing quality for the upload (default: the workspace's, auto unless changed):
-fast reads the text layer only and keeps scanned pages as images, not read ($0.05 per 1,000 pages);
-auto reads each page the cheapest faithful way ($0.05 to $2.50 per 1,000 pages, depending on the mix);
-good reads every page with a vision model ($2.50 per 1,000 pages).
+DOCSLURP_URL overrides the hosted service. Without --project or DOCSLURP_PROJECT,
+commands use the "default" project: your organization's default project.
+--project takes a project ID, slug or name: "Legal Contracts" and legal-contracts are
+the same project. Uploads and URL ingests into a name that matches no project create
+it with that name (and --template, if given); other commands answer project not found.
+--new-project (or --template alone) uploads into a fresh self-titled project.
+--quality sets processing quality for the upload (default: the project's, auto unless changed):
+fast reads the text layer only and keeps scanned pages as images, not read (lowest price);
+auto reads each page the cheapest faithful way (its price depends on the mix of pages);
+good reads every page with a vision model (highest price). Prices: https://docslurp.io/pricing
 --estimate prints the work estimate (pages, documents, credits, time) for the operation and exits without doing it.
 Mutations that queue background work print their job; follow it with docslurp jobs watch <jobId>.
 --watch waits up to five minutes by default; --timeout sets its limit.
@@ -147,15 +150,15 @@ async function migrateAlgoliaSynonymsCommand(inputPath: string, outPath: string)
 async function importSearchCompatCommand(inputPath: string, flags: Record<string, string | boolean>): Promise<void> {
   const raw = await readFile(inputPath, "utf8");
   const payload = JSON.parse(raw) as Record<string, unknown>;
-  const workspace = resolveWorkspace(flags);
-  if (!workspace) {
-    throw new Error("--workspace is required");
+  const project = resolveProject(flags);
+  if (!project) {
+    throw new Error("--project is required");
   }
 
   const source = String(flags.source ?? detectCompatSource(payload));
   const normalized = normalizeCompatImportPayload({
     source,
-    workspace,
+    project,
     payload
   });
 
@@ -187,7 +190,7 @@ async function importSearchCompatCommand(inputPath: string, flags: Record<string
   }
 
   const result = await response.json() as { imported: Record<string, number> };
-  console.log(`Imported ${source} compatibility payload into workspace ${workspace}.`);
+  console.log(`Imported ${source} compatibility payload into project ${project}.`);
   console.log(JSON.stringify(result.imported, null, 2));
 }
 
@@ -203,7 +206,7 @@ function detectCompatSource(payload: Record<string, unknown>): "algolia" | "elas
 
 function normalizeCompatImportPayload(args: {
   source: string;
-  workspace: string;
+  project: string;
   payload: Record<string, unknown>;
 }) {
   if (args.source === "elastic") {
@@ -218,7 +221,7 @@ function normalizeCompatImportPayload(args: {
 
     return {
       source: "elastic",
-      workspace: args.workspace,
+      project: args.project,
       settings: {
         searchableAttributes,
         attributesForFaceting: Object.keys(properties)
@@ -242,7 +245,7 @@ function normalizeCompatImportPayload(args: {
   if (args.source === "legacy-parser") {
     return {
       source: "legacy-parser",
-      workspace: args.workspace,
+      project: args.project,
       settings: args.payload.settings ?? {},
       synonyms: args.payload.synonyms ?? {},
       rules: args.payload.rules ?? [],
@@ -253,7 +256,7 @@ function normalizeCompatImportPayload(args: {
 
   return {
     source: "algolia",
-    workspace: args.workspace,
+    project: args.project,
     indexName: typeof args.payload.indexName === "string" ? args.payload.indexName : undefined,
     settings: args.payload.settings ?? {},
     synonyms: args.payload.synonyms ?? [],
@@ -271,6 +274,7 @@ function parseCliArgs(argv: string[]) {
   let i = 1;
   while (i < argv.length) {
     const arg = argv[i];
+    if (/^--(?:workspace(?:-id|-name)?|new-workspace)(?:=|$)/.test(arg ?? "")) throw new Error("Legacy workspace flags are no longer supported; use --project or --new-project.");
     if (arg === "--watch" || arg === "--json" || arg === "--context" || arg === "--estimate" || arg === "--device" || arg === "--force") {
       flags[arg.slice(2)] = true;
       i++;
@@ -280,12 +284,12 @@ function parseCliArgs(argv: string[]) {
     } else if (arg === "--no-email") {
       flags.noEmail = true;
       i++;
-    } else if (arg === "--new-workspace") {
-      flags.newWorkspace = true;
+    } else if (arg === "--new-project") {
+      flags.newProject = true;
       i++;
-    } else if (arg === "--workspace-name" || arg === "--workspace-id") {
-      throw new Error(`${arg} was removed: pass a workspace ID, slug or name with --workspace (a name that matches no workspace is created on upload).`);
-    } else if (arg === "--workspace" || arg === "--api-url" || arg === "--run" || arg === "--api-key" || arg === "--source" || arg === "--out" || arg === "--queries-file" || arg === "--concurrency" || arg === "--min-score" || arg === "--session" || arg === "--canonical-id" || arg === "--path" || arg === "--template" || arg === "--document" || arg === "--stage-from" || arg === "--retention-days" || arg === "--download" || arg === "--quality") {
+    } else if (arg === "--project-name" || arg === "--project-id") {
+      throw new Error(`${arg} was removed: pass a project ID, slug or name with --project (a name that matches no project is created on upload).`);
+    } else if (arg === "--project" || arg === "--api-url" || arg === "--run" || arg === "--api-key" || arg === "--source" || arg === "--out" || arg === "--queries-file" || arg === "--concurrency" || arg === "--min-score" || arg === "--session" || arg === "--canonical-id" || arg === "--path" || arg === "--template" || arg === "--document" || arg === "--stage-from" || arg === "--retention-days" || arg === "--download" || arg === "--quality" || arg === "--idempotency-key") {
       const key = arg.replace(/^--/, "").replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
       flags[key] = argv[i + 1] ?? "";
       i += 2;
@@ -335,75 +339,219 @@ function requestAuth(flags: Record<string, string | boolean>, apiUrl: string): P
 /** Same threshold as the SDK's DIRECT_UPLOAD_THRESHOLD_BYTES. */
 const DIRECT_UPLOAD_THRESHOLD_BYTES = 20 * 1024 * 1024;
 
-const MIME_BY_EXTENSION: Record<string, string> = {
-  pdf: "application/pdf", md: "text/markdown", txt: "text/plain", html: "text/html", htm: "text/html", csv: "text/csv",
-  json: "application/json", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", epub: "application/epub+zip",
-};
-
-function mimeTypeForPath(filePath: string): string {
-  return MIME_BY_EXTENSION[filePath.split(".").pop()?.toLowerCase() ?? ""] ?? "application/octet-stream";
+/**
+ * The type the file declares. The CLI keeps no format table of its own: the server resolves a missing or generic type from the file's
+ * extension and sniffs the bytes, so there is one list of formats (packages/shared/src/file-formats.ts).
+ */
+function declaredMimeType(blob: Blob): string {
+  return blob.type || "application/octet-stream";
 }
 
 type DirectUploadDescriptor = {
   id: string; filename: string; mimeType: string; sizeBytes: number; mode: "single" | "multipart";
+  /** Position in the create request and the client id sent with it: how a file is matched, never by (sanitized) filename. */
+  index?: number | null; clientId?: string | null; status?: string;
   putUrl?: string; partSize?: number; pendingParts?: Array<{ partNumber: number; sizeBytes: number; url: string }>;
+  completedParts?: Array<{ partNumber: number; etag: string }>;
 };
+type UploadRejection = { index?: number; clientId?: string; filename: string; statusCode: number; code: string; message: string };
+type DirectSession = { sessionId: string; status?: string; files: DirectUploadDescriptor[]; rejected?: UploadRejection[]; result?: unknown };
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** A timeout or a dropped connection: the request may or may not have reached the server. */
+function isLostResponse(error: unknown): boolean {
+  return error instanceof TypeError || (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError"));
+}
+
+const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+
+/** The server's coded 409 for a request whose Idempotency-Key is still being processed. */
+async function isInFlightConflict(response: Response): Promise<boolean> {
+  try {
+    const body = await response.clone().json() as { code?: unknown; error?: { code?: unknown } | unknown };
+    const code = (body.error && typeof body.error === "object" ? (body.error as { code?: unknown }).code : undefined) ?? body.code;
+    return code === "idempotency_in_flight";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Sends a request that is safe to repeat (it carries an Idempotency-Key, or is a read): a lost response or a transient status is retried
+ * with backoff, so a timeout never makes a second session or a second charge.
+ */
+async function apiFetchRepeatable(pathname: string, flags: Record<string, string | boolean>, init: RequestInit, timeoutMs?: number): Promise<Response> {
+  // A coded 409 means the first request with this Idempotency-Key is still being processed: its session is the one wanted, so wait
+  // and send the same key again until the request timeout rather than failing and orphaning it.
+  const waitLimitMs = Number.isFinite(Number(flags.timeout ?? 30)) && Number(flags.timeout ?? 30) > 0 ? Number(flags.timeout ?? 30) * 1000 : 30_000;
+  const giveUpAt = Date.now() + waitLimitMs;
+  let inFlight = 0;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const response = await apiFetch(pathname, flags, init, timeoutMs);
+      if (response.status === 409 && await isInFlightConflict(response)) {
+        const wait = Math.min(2_000, 250 * 2 ** inFlight++);
+        if (Date.now() + wait < giveUpAt) {
+          await response.body?.cancel();
+          await sleepMs(wait);
+          attempt--;
+          continue;
+        }
+      }
+      if (attempt >= 3 || !RETRYABLE_STATUSES.has(response.status)) return response;
+      const wait = Math.min(10, retryAfterSeconds(response.headers.get("retry-after")) ?? 0.25 * 2 ** attempt);
+      await response.body?.cancel();
+      await sleepMs(wait * 1000);
+    } catch (error) {
+      if (attempt >= 3 || !isLostResponse(error)) throw error;
+      await sleepMs(250 * 2 ** attempt);
+    }
+  }
+}
+
+/** Milliseconds a request carrying `bytes` may take: the request timeout plus time to send the body at a floor rate of 100 KB/s. */
+function bodyTimeoutMs(flags: Record<string, string | boolean>, bytes: number): number {
+  const base = Number(flags.timeout ?? 30) * 1000;
+  return (Number.isFinite(base) && base > 0 ? base : 30_000) + (bytes / 100_000) * 1000;
+}
 
 async function putToStorage(url: string, body: Blob, contentType?: string): Promise<string | null> {
-  // Presigned URL: never send the API key to storage.
-  const response = await fetch(url, { method: "PUT", body, headers: contentType ? { "Content-Type": contentType } : undefined });
-  if (!response.ok) throw await responseFailure(response);
-  return response.headers.get("etag");
+  // Presigned URL: never send the API key to storage. A part is retried with backoff before the caller resumes from the server's view.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const response = await fetch(url, {
+        method: "PUT", body, headers: contentType ? { "Content-Type": contentType } : undefined,
+        signal: AbortSignal.timeout(Math.ceil(Math.max(60_000, 30_000 + (body.size / 100_000) * 1000))),
+      });
+      if (response.ok) return response.headers.get("etag");
+      if (attempt >= 2 || !RETRYABLE_STATUSES.has(response.status)) throw await responseFailure(response);
+      await response.body?.cancel();
+    } catch (error) {
+      if (attempt >= 2 || !isLostResponse(error)) throw error;
+    }
+    await sleepMs(250 * 2 ** attempt);
+  }
+}
+
+/** Sends one file (or its remaining parts). Returns the completion body for `files/complete`. */
+async function sendFile(descriptor: DirectUploadDescriptor, blob: Blob): Promise<Record<string, unknown>> {
+  if (descriptor.mode === "single") {
+    const etag = await putToStorage(descriptor.putUrl ?? "", blob, descriptor.mimeType);
+    return { fileId: descriptor.id, ...(etag ? { etag } : {}) };
+  }
+  const parts: Array<{ partNumber: number; etag: string }> = [...(descriptor.completedParts ?? [])];
+  for (const part of descriptor.pendingParts ?? []) {
+    const start = (part.partNumber - 1) * (descriptor.partSize ?? part.sizeBytes);
+    const etag = await putToStorage(part.url, blob.slice(start, start + part.sizeBytes));
+    if (!etag) throw new Error(`Storage returned no ETag for ${descriptor.filename} part ${part.partNumber}`);
+    parts.push({ partNumber: part.partNumber, etag });
+    console.error(`Uploaded ${descriptor.filename} part ${part.partNumber}/${(descriptor.pendingParts ?? []).length}`);
+  }
+  return { fileId: descriptor.id, parts: parts.sort((a, b) => a.partNumber - b.partNumber) };
+}
+
+/** The local file a descriptor belongs to: by request index, then client id; by name and size only for an older server. */
+function localFileFor(descriptor: DirectUploadDescriptor, files: Array<{ blob: Blob; name: string }>, claimed: Set<number>): { file: { blob: Blob; name: string }; index: number } | undefined {
+  const byIndex = typeof descriptor.index === "number" ? descriptor.index
+    : descriptor.clientId != null && /^\d+$/.test(descriptor.clientId) ? Number(descriptor.clientId) : -1;
+  const index = byIndex >= 0 ? byIndex : files.findIndex((file, at) => !claimed.has(at) && file.name === descriptor.filename && file.blob.size === descriptor.sizeBytes);
+  const file = files[index];
+  if (!file || claimed.has(index)) return undefined;
+  claimed.add(index);
+  return { file, index };
+}
+
+/** After a lost confirm response, the session says whether intake already finished: poll it rather than confirming again. */
+async function pollConfirmedSession(sessionPath: string, flags: Record<string, string | boolean>): Promise<Response | null> {
+  const stopAt = Date.now() + Math.max(60_000, Number(flags.timeout ?? 30) * 1000);
+  while (Date.now() < stopAt) {
+    try {
+      const response = await apiFetch(`${sessionPath}?statusOnly=true`, flags);
+      if (response.ok) {
+        const session = await response.json() as { status?: string; result?: unknown };
+        if (session.result) return new Response(JSON.stringify(session.result), { status: 201, headers: { "content-type": "application/json" } });
+        if (session.status && ["failed", "aborted", "expired"].includes(session.status)) return null;
+      }
+    } catch (error) {
+      if (!isLostResponse(error)) throw error;
+    }
+    await sleepMs(1000);
+  }
+  return null;
 }
 
 /** Create a direct upload session, PUT each file (or its parts), complete, then confirm. Returns the confirm response. */
 async function uploadDirect(files: Array<{ blob: Blob; name: string }>, fields: FormData, flags: Record<string, string | boolean>, intake: IntakeMode = UPLOAD_MODE): Promise<Response> {
   const field = (name: string) => (typeof fields.get(name) === "string" ? String(fields.get(name)) : undefined);
-  const json = (body: unknown): RequestInit => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const json = (body: unknown, headers: Record<string, string> = {}): RequestInit => ({ method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) });
+  // One key per upload: a create that timed out is sent again with it and returns the same session, never a second one.
+  const idempotencyKey = typeof flags.idempotencyKey === "string" && flags.idempotencyKey ? flags.idempotencyKey : randomUUID();
   // Extract sessions are created under /v1/extracts and continue on the shared upload session routes.
-  const created = await apiFetch(`${intake.base}/direct/sessions`, flags, json({
+  const created = await apiFetchRepeatable(`${intake.base}/direct/sessions`, flags, json({
     ...intake.fields,
-    ...(field("workspace") ? { workspace: field("workspace") } : {}),
-    ...(field("newWorkspace") === "true" ? { newWorkspace: true } : {}),
+    ...(field("project") ? { project: field("project") } : {}),
+    ...(field("newProject") === "true" ? { newProject: true } : {}),
     ...(field("templateKey") ? { templateKey: field("templateKey") } : {}),
     ...(field("pipeline") ? { pipeline: JSON.parse(field("pipeline")!) } : {}),
-    files: files.map(({ blob, name }) => ({
-      filename: name, mimeType: blob.type || mimeTypeForPath(name), sizeBytes: blob.size,
+    files: files.map(({ blob, name }, index) => ({
+      clientId: String(index),
+      filename: name, mimeType: declaredMimeType(blob), sizeBytes: blob.size,
       ...(field("canonicalId") ? { canonicalId: field("canonicalId") } : {}),
       ...(typeof flags.path === "string" && flags.path ? { path: flags.path } : {}),
     })),
-  }));
+  }, { "Idempotency-Key": idempotencyKey }));
   if (!created.ok) return created;
-  const session = await created.json() as { sessionId: string; files: DirectUploadDescriptor[] };
+  const session = await created.json() as DirectSession;
   const sessionPath = `/v1/uploads/direct/sessions/${encodeURIComponent(session.sessionId)}`;
+  // Files the server left out while taking the rest, under the names the user typed.
+  const rejected = (session.rejected ?? []).map((rejection) => ({
+    ...rejection,
+    filename: typeof rejection.index === "number" ? files[rejection.index]?.name ?? rejection.filename : rejection.filename,
+  }));
   try {
-    const remaining = [...files];
-    for (const descriptor of session.files) {
-      const at = remaining.findIndex((file) => file.name === descriptor.filename && file.blob.size === descriptor.sizeBytes);
-      const source = at < 0 ? undefined : remaining.splice(at, 1)[0];
-      if (!source) throw new Error(`Upload session returned an unknown file: ${descriptor.filename}`);
-      let complete: Record<string, unknown>;
-      if (descriptor.mode === "single") {
-        const etag = await putToStorage(descriptor.putUrl ?? "", source.blob, descriptor.mimeType);
-        complete = { fileId: descriptor.id, ...(etag ? { etag } : {}) };
-      } else {
-        const parts: Array<{ partNumber: number; etag: string }> = [];
-        for (const part of descriptor.pendingParts ?? []) {
-          const start = (part.partNumber - 1) * (descriptor.partSize ?? part.sizeBytes);
-          const etag = await putToStorage(part.url, source.blob.slice(start, start + part.sizeBytes));
-          if (!etag) throw new Error(`Storage returned no ETag for ${descriptor.filename} part ${part.partNumber}`);
-          parts.push({ partNumber: part.partNumber, etag });
-          console.error(`Uploaded ${descriptor.filename} part ${part.partNumber}/${(descriptor.pendingParts ?? []).length}`);
+    const claimed = new Set<number>();
+    for (const first of session.files) {
+      const match = localFileFor(first, files, claimed);
+      if (!match) throw new Error(`Upload session returned a file this upload did not send: ${first.filename}`);
+      let descriptor = first;
+      let complete: Record<string, unknown> | null = null;
+      for (let round = 0; complete === null; round++) {
+        try {
+          complete = await sendFile(descriptor, match.file.blob);
+        } catch (error) {
+          if (round >= 2 || !(isLostResponse(error) || (error instanceof CliApiError && (error.status === 403 || RETRYABLE_STATUSES.has(error.status))))) throw error;
+          // Resume from what storage holds: the session lists the parts still missing, with fresh signed URLs.
+          await sleepMs(250 * 2 ** round);
+          const refreshed = await apiFetchRepeatable(sessionPath, flags, {});
+          if (!refreshed.ok) throw error;
+          const next = ((await refreshed.json()) as DirectSession).files.find((file) => file.id === descriptor.id);
+          if (!next) throw error;
+          if (next.status === "completed") { complete = { fileId: descriptor.id }; break; }
+          descriptor = next;
         }
-        complete = { fileId: descriptor.id, parts };
       }
-      const done = await apiFetch(`${sessionPath}/files/complete`, flags, json(complete));
+      const done = await apiFetchRepeatable(`${sessionPath}/files/complete`, flags, json(complete));
       if (!done.ok) throw await responseFailure(done);
     }
-    return await apiFetch(`${sessionPath}/confirm`, flags, { method: "POST" });
+    let confirmed: Response | null;
+    try {
+      confirmed = await apiFetch(`${sessionPath}/confirm`, flags, { method: "POST" });
+    } catch (error) {
+      if (!isLostResponse(error)) throw error;
+      confirmed = await pollConfirmedSession(sessionPath, flags);
+      if (!confirmed) throw error;
+    }
+    if (!confirmed.ok || rejected.length === 0) return confirmed;
+    const result = await confirmed.json() as Record<string, unknown>;
+    const warning = `${rejected.length} of ${files.length} files were not uploaded: ${rejected.map((file) => `${file.filename} (${file.message})`).join("; ")}`;
+    return new Response(JSON.stringify({
+      ...result,
+      rejected: [...rejected, ...((result.rejected as UploadRejection[] | undefined) ?? [])],
+      warnings: [...((result.warnings as string[] | undefined) ?? []), warning],
+    }), { status: confirmed.status, headers: { "content-type": "application/json" } });
   } catch (error) {
     await apiFetch(`${sessionPath}/abort`, flags, { method: "POST" }).catch(() => undefined);
     throw error;
@@ -423,8 +571,8 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
 
   if (flags.estimate === true && intake === UPLOAD_MODE) {
     const target = resolveIntakeTarget(flags);
-    const sized = await Promise.all(files.map(async (filePath) => ({ name: basename(filePath), size: (await openAsBlob(filePath)).size })));
-    await runEstimate("/v1/uploads/estimate", { files: sized, ...(target.workspace ? { workspace: target.workspace } : {}) }, flags);
+    const estimateFiles = await profiledEstimateFiles(files);
+    await runEstimate("/v1/uploads/estimate", { files: estimateFiles, ...(target.project ? { project: target.project } : {}) }, flags);
     return;
   }
 
@@ -432,8 +580,8 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
   for (const [name, value] of Object.entries(intake.fields)) formData.append(name, String(value));
 
   const target = resolveIntakeTarget(flags);
-  if (target.workspace) formData.append("workspace", target.workspace);
-  if (target.newWorkspace) formData.append("newWorkspace", "true");
+  if (target.project) formData.append("project", target.project);
+  if (target.newProject) formData.append("newProject", "true");
   if (target.templateKey) formData.append("templateKey", target.templateKey);
   const qualityPipeline = resolveQualityPipeline(flags).pipeline;
   if (qualityPipeline) formData.append("pipeline", JSON.stringify(qualityPipeline));
@@ -444,7 +592,7 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
   }
 
   if (typeof flags.path === "string" && flags.path) {
-    // Same folder path and filename re-uploaded in a workspace is a new version of one document.
+    // Same folder path and filename re-uploaded in a project is a new version of one document.
     formData.append("paths", JSON.stringify(files.map(() => flags.path)));
   }
 
@@ -458,12 +606,15 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
   // /v1/uploads/bulk buffers multipart bodies and is capped (25 MB by default);
   // larger uploads go straight to storage through a direct upload session.
   const totalBytes = blobs.reduce((sum, file) => sum + file.blob.size, 0);
+  // The bulk body is timed by its size, not the 30 s a small request gets, and carries an Idempotency-Key so a timed-out
+  // attempt can be sent again without uploading (and billing) the files twice.
   const response = totalBytes > DIRECT_UPLOAD_THRESHOLD_BYTES
     ? await uploadDirect(blobs, formData, flags, intake)
-    : await apiFetch(`${intake.base}/bulk`, flags, {
+    : await apiFetchRepeatable(`${intake.base}/bulk`, flags, {
       method: "POST",
+      headers: { "Idempotency-Key": typeof flags.idempotencyKey === "string" && flags.idempotencyKey ? flags.idempotencyKey : randomUUID() },
       body: formData
-    });
+    }, bodyTimeoutMs(flags, totalBytes));
 
   if (!response.ok) {
     printFailure(await responseFailure(response));
@@ -491,6 +642,71 @@ function formatEstimate(estimate: CostEstimate): string {
   return lines.join("\n");
 }
 
+/**
+ * Files for `POST /v1/uploads/estimate`. When the offline profiler (`@docslurp/estimate`) is installed beside the CLI, each
+ * file is profiled locally (type, pages, PDF page facts, media duration; nothing is uploaded) and its profile sent with it;
+ * otherwise files go by name and size, and the server estimates their pages from size.
+ */
+async function profiledEstimateFiles(paths: string[]): Promise<Array<{ name: string; size: number; profile?: unknown }>> {
+  const sized = await Promise.all(paths.map(async (filePath) => ({ name: basename(filePath), size: (await openAsBlob(filePath)).size })));
+  type Profiler = { createEstimator(): Promise<unknown>; estimatePaths(estimator: unknown, paths: string[]): Promise<{ request: { files: Array<{ name: string; size: number; profile?: unknown }> } }> };
+  let profiler: Profiler;
+  try {
+    // A variable specifier: the profiler is optional and never a build-time dependency.
+    const specifier = "@docslurp/estimate";
+    const [core, node] = await Promise.all([import(specifier), import(`${specifier}/node`)]);
+    profiler = { createEstimator: core.createEstimator, estimatePaths: node.estimatePaths };
+  } catch {
+    return sized;
+  }
+  try {
+    const result = await profiler.estimatePaths(await profiler.createEstimator(), paths);
+    return result.request.files.map((file, index) => ({ ...file, name: sized[index]!.name, size: sized[index]!.size }));
+  } catch {
+    return sized;
+  }
+}
+
+/**
+ * `docslurp estimate <files...>`: profile the files locally (when `@docslurp/estimate` is installed) and print the
+ * server's quote: ingest credits, monthly hosting and usage. Works without an API key (`POST /v1/estimate`).
+ */
+async function estimateCommand(files: string[], flags: Record<string, string | boolean>): Promise<void> {
+  if (files.length === 0) {
+    console.error("Error: at least one file path required");
+    process.exitCode = 1;
+    return;
+  }
+  const settings: Record<string, unknown> = {};
+  if (typeof flags.quality === "string") settings.quality = resolveQualityPipeline(flags).pipeline?.quality;
+  if (typeof flags.indexing === "string") settings.indexing = flags.indexing;
+  if (typeof flags.months === "string") settings.hostingMonths = Number.parseInt(flags.months, 10);
+  const body = { files: await profiledEstimateFiles(files), ...(Object.keys(settings).length ? { settings } : {}) };
+  const base = (typeof flags["api-url"] === "string" ? flags["api-url"] : process.env.DOCSLURP_API_URL ?? "https://docslurp.io").replace(/\/$/, "");
+  const response = await fetch(`${base}/v1/estimate`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  if (!response.ok) {
+    console.error(`Error: estimate failed (${response.status}): ${await response.text()}`);
+    process.exitCode = 1;
+    return;
+  }
+  const quote = await response.json() as {
+    pages: { low: number; high: number }; pricingVersion: string; validUntil: string; files: { total: number; profiled: number };
+    ingest: { credits: { low: number; high: number } | null }; hosting: { bytes: { low: number; high: number }; creditsPerMonth: { low: number; high: number } | null };
+    rates: { pagesPerDollar: { low: number; high: number } | null };
+  };
+  if (flags.json === true) {
+    console.log(JSON.stringify(quote, null, 2));
+    return;
+  }
+  const range = (r: { low: number; high: number }, digits = 2) => (r.low === r.high ? r.low.toFixed(digits) : `${r.low.toFixed(digits)}–${r.high.toFixed(digits)}`);
+  console.log(`Files:     ${quote.files.total} (${quote.files.profiled} profiled locally)`);
+  console.log(`Pages:     ${range(quote.pages, 0)}`);
+  console.log(quote.ingest.credits ? `Ingest:    ${range(quote.ingest.credits)} credits (estimate)` : "Ingest:    no credits (billing disabled on this deployment)");
+  console.log(`Hosting:   ${range({ low: quote.hosting.bytes.low / 1e6, high: quote.hosting.bytes.high / 1e6 }, 1)} MB${quote.hosting.creditsPerMonth ? `, ${range(quote.hosting.creditsPerMonth)} credits per month` : ""}`);
+  if (quote.rates.pagesPerDollar) console.log(`Pages/$1:  ${range(quote.rates.pagesPerDollar, 0)}`);
+  console.log(`Pricing:   ${quote.pricingVersion}, valid until ${quote.validUntil}`);
+}
+
 /** POSTs to a `…/estimate` route, prints the estimate (or raw JSON with --json) and leaves the operation undone. */
 async function runEstimate(pathname: string, body: unknown, flags: Record<string, string | boolean>): Promise<void> {
   const response = await apiFetch(pathname, flags, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -516,7 +732,7 @@ function printJob(job: JobStatus): void {
 
 async function fullIndexCommand(flags: Record<string, string | boolean>): Promise<void> {
   const document = typeof flags.document === "string" && flags.document ? flags.document : undefined;
-  const base = document ? `/v1/documents/${encodeURIComponent(document)}/full-index` : `/v1/workspaces/${encodeURIComponent(resolveWorkspace(flags))}/full-index`;
+  const base = document ? `/v1/documents/${encodeURIComponent(document)}/full-index` : `/v1/projects/${encodeURIComponent(resolveProject(flags))}/full-index`;
   if (flags.estimate === true) return runEstimate(`${base}/estimate`, {}, flags);
   await startWork(base, {}, flags);
 }
@@ -633,13 +849,13 @@ async function jobsCommand(action: string | undefined, jobId: string | undefined
 }
 
 type IntakeResult = {
-  job?: JobStatus; run: { id: string }; workspace: { id: string; name: string; slug?: string }; documents: unknown[]; warnings?: string[];
+  job?: JobStatus; run: { id: string }; project: { id: string; name: string; slug?: string }; documents: unknown[]; warnings?: string[];
   extract?: { id: string; expiresAt: string; paidRetention: boolean; notifyEmail: boolean };
 };
 
 async function printIntakeResult(response: Response, flags: Record<string, string | boolean>): Promise<void> {
   const result = await response.json() as IntakeResult;
-  console.log(`Workspace: ${result.workspace.name} (${result.workspace.slug ?? result.workspace.id})`);
+  console.log(`Project: ${result.project.name} (${result.project.slug ?? result.project.id})`);
   console.log(`Run ID:    ${result.run.id}`);
   console.log(`Documents: ${result.documents.length}`);
   if (result.extract) {
@@ -744,6 +960,24 @@ function formatElapsed(ms: number): string {
   return minutes > 0 ? `${minutes}m${String(secs).padStart(2, "0")}s` : `${secs}s`;
 }
 
+/** An AbortSignal.timeout abort (TimeoutError), as fetch rejects with it directly or as its cause. */
+function isTimeoutAbort(error: unknown): boolean {
+  const named = (value: unknown) => value instanceof Error && (value.name === "TimeoutError" || value.name === "AbortError");
+  return named(error) || (error instanceof Error && named((error as Error & { cause?: unknown }).cause));
+}
+
+/** What a spend-paused run is waiting for, so "paused" is not read as stuck. */
+function spendPausedNote(run: { controlState?: string | null; pauseReason?: string | null }): string {
+  if (run.controlState !== "paused" || !run.pauseReason) return "";
+  const why: Record<string, string> = {
+    credit_exhausted: "out of credits; resumes after a top-up",
+    project_budget_paused: "project budget reached; resumes when it is raised",
+    org_budget_paused: "organization budget reached; resumes when it is raised",
+    plan_not_entitled: "not covered by the current plan",
+  };
+  return ` (${why[run.pauseReason] ?? run.pauseReason})`;
+}
+
 async function statusCommand(runId: string, flags: Record<string, string | boolean>): Promise<void> {
   const watch = flags.watch === true;
   const timeoutSeconds = Number(flags.timeout ?? 300);
@@ -755,8 +989,18 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
 
   const printStatus = async (): Promise<boolean> => {
     const remainingMs = expiresAt - Date.now();
-    if (watch && remainingMs <= 0) throw new Error(`Run ${runId} did not complete within ${timeoutSeconds}s; it may still be queued or processing.`);
-    const response = await apiFetch(`/v1/runs/${encodeURIComponent(runId)}/progress`, flags, {}, watch ? Math.min(30_000, remainingMs) : Math.min(30_000, timeoutSeconds * 1000));
+    const deadlineError = () => new Error(`Run ${runId} did not complete within ${timeoutSeconds}s; it may still be queued or processing.`);
+    if (watch && remainingMs <= 0) throw deadlineError();
+    const requestTimeoutMs = watch ? Math.min(30_000, remainingMs) : Math.min(30_000, timeoutSeconds * 1000);
+    let response: Response;
+    try {
+      response = await apiFetch(`/v1/runs/${encodeURIComponent(runId)}/progress`, flags, {}, requestTimeoutMs);
+    } catch (error) {
+      // The request's timeout was the watch's remaining time: it aborted because the watch deadline arrived, so report
+      // that, not the transport's generic "aborted due to timeout". A request that timed out early keeps its own error.
+      if (watch && isTimeoutAbort(error) && expiresAt - Date.now() <= 0) throw deadlineError();
+      throw error;
+    }
 
     if (!response.ok) {
       throw await responseFailure(response);
@@ -768,6 +1012,7 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
         status: string;
         stage: string;
         controlState?: string | null;
+        pauseReason?: string | null;
         error?: string | null;
         totalDocuments: number;
         processedDocuments: number;
@@ -783,7 +1028,7 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
 
     const lines = [
       `Run:       ${run.id}`,
-      `Status:    ${run.controlState ?? run.status}`,
+      `Status:    ${run.controlState ?? run.status}${spendPausedNote(run)}`,
       `Stage:     ${run.stage}`,
       `Documents: [${renderBar(run.processedDocuments, run.totalDocuments)}] ${run.processedDocuments}/${run.totalDocuments} (${docPct}%)`,
       `Pages:     [${renderBar(run.pagesProcessed, run.pagesTotal)}] ${run.pagesProcessed}/${run.pagesTotal} (${pagePct}%)`,
@@ -798,7 +1043,9 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
     process.stdout.write(output);
     lineCount = lines.length;
 
-    const stopped = ["paused", "cancelled", "dead-letter"].includes(run.controlState ?? "");
+    // A spend pause (credits, a budget, a plan) lifts by itself once the org can spend: keep watching it.
+    const spendPaused = run.controlState === "paused" && Boolean(run.pauseReason);
+    const stopped = !spendPaused && ["paused", "cancelled", "dead-letter"].includes(run.controlState ?? "");
     const done = run.status === "completed" || run.status === "failed" || stopped;
     if (done) {
       const succeeded = run.status === "completed" && !stopped;
@@ -823,7 +1070,12 @@ async function statusCommand(runId: string, flags: Record<string, string | boole
 }
 
 async function runsCommand(flags: Record<string, string | boolean>): Promise<void> {
-  const response = await apiFetch("/v1/runs", flags);
+  const params = new URLSearchParams();
+  for (const name of ["limit", "cursor"]) {
+    const value = flags[name];
+    if (typeof value === "string" && value) params.set(name, value);
+  }
+  const response = await apiFetch(`/v1/runs${params.size ? `?${params}` : ""}`, flags);
   if (!response.ok) {
     console.error(`Failed to list runs (${response.status})`);
     process.exitCode = 1;
@@ -838,6 +1090,8 @@ async function runsCommand(flags: Record<string, string | boolean>): Promise<voi
       totalDocuments: number;
       createdAt: string;
     }>;
+    hasMore?: boolean;
+    nextCursor?: string | null;
   };
 
   if (data.runs.length === 0) {
@@ -851,6 +1105,8 @@ async function runsCommand(flags: Record<string, string | boolean>): Promise<voi
       `${run.id}  ${run.status.padEnd(10)}  ${(run.stage ?? "-").padEnd(15)}  ${String(run.totalDocuments).padStart(4)}  ${run.createdAt}`
     );
   }
+  // A page is not the whole history: say so, and how to read the rest.
+  if (data.hasMore && data.nextCursor) console.log(`\nMore runs exist. Next page: docslurp runs --cursor ${data.nextCursor}`);
 }
 
 type CliSearchResponse = {
@@ -883,9 +1139,9 @@ function printSearch(data: CliSearchResponse, flags: Record<string, string | boo
 }
 
 async function searchCommand(query: string, flags: Record<string, string | boolean>): Promise<void> {
-  const workspace = resolveWorkspace(flags);
+  const project = resolveProject(flags);
   if (flags.json && flags.context) throw new Error("Choose --json or --context.");
-  if (flags.run) throw new Error("Search uses --workspace <id|slug|name>; --run is no longer supported.");
+  if (flags.run) throw new Error("Search uses --project <id|slug|name>; --run is no longer supported.");
   if (flags.queriesFile) {
     if (query) throw new Error("Use a query or --queries-file, not both.");
     const inputs: unknown = JSON.parse(await readFile(String(flags.queriesFile), "utf8"));
@@ -893,8 +1149,8 @@ async function searchCommand(query: string, flags: Record<string, string | boole
     const queries = inputs.map((input) => {
       const value = typeof input === "string" ? { q: input } : input;
       if (!value || typeof value !== "object" || typeof value.q !== "string" || !value.q.trim()) throw new Error("Each query must be a nonempty string or an object with q.");
-      const target = value.workspace ?? workspace;
-      return typeof target === "string" && target.trim() ? { ...value, workspace: target } : value;
+      const target = value.project ?? project;
+      return typeof target === "string" && target.trim() ? { ...value, project: target } : value;
     });
     const concurrency = Number(flags.concurrency ?? 4);
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4) throw new Error("--concurrency must be an integer from 1 to 4.");
@@ -914,7 +1170,7 @@ async function searchCommand(query: string, flags: Record<string, string | boole
   const rawMinScore = flags.minScore === undefined ? undefined : String(flags.minScore).trim();
   const minScore = rawMinScore === undefined ? undefined : rawMinScore === "" ? Number.NaN : Number(rawMinScore);
   if (minScore !== undefined && !(minScore >= 0 && minScore <= 1)) throw new Error("--min-score must be a number from 0 to 1.");
-  const params = new URLSearchParams({ q: query, ...(workspace ? { workspace } : {}), ...(minScore === undefined ? {} : { minScore: String(minScore) }) });
+  const params = new URLSearchParams({ q: query, ...(project ? { project } : {}), ...(minScore === undefined ? {} : { minScore: String(minScore) }) });
   const response = await apiFetch(`/v1/search?${params.toString()}`, flags);
   if (!response.ok) throw await responseFailure(response);
   const data = await response.json() as CliSearchResponse;
@@ -922,12 +1178,12 @@ async function searchCommand(query: string, flags: Record<string, string | boole
 }
 
 async function chatCommand(question: string, flags: Record<string, string | boolean>): Promise<void> {
-  const workspace = resolveWorkspace(flags);
+  const project = resolveProject(flags);
   if (!question.trim()) throw new Error("Chat question required.");
   if (flags.context || flags.queriesFile || flags.concurrency) throw new Error("Chat accepts one question; batch/context options are for search.");
   const response = await apiFetch("/v1/chat", flags, {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ q: question, ...(workspace ? { workspace } : {}), ...(flags.session ? { sessionId: String(flags.session) } : {}) }),
+    body: JSON.stringify({ q: question, ...(project ? { project } : {}), ...(flags.session ? { sessionId: String(flags.session) } : {}) }),
   });
   if (!response.ok) throw await responseFailure(response);
   const data = await response.json() as { answer: string; sessionId: string; citations: CliSearchResponse["results"]; usage?: unknown; availability?: { message?: string | null } };
@@ -1083,11 +1339,11 @@ async function mcpServerCommand(flags: Record<string, string | boolean>): Promis
           break;
         }
         case "prompts/list":
-          respond({ prompts: [{ name: "workspace-grounded-answer", title: "Workspace grounded answer", description: "Answer using workspace evidence and citations" }] });
+          respond({ prompts: [{ name: "project-grounded-answer", title: "Project grounded answer", description: "Answer using project evidence and citations" }] });
           break;
         case "prompts/get": {
-          if (envelope.params?.name !== "workspace-grounded-answer") { invalid("Unknown prompt name"); break; }
-          const result = await get("/v1/mcp/prompts/workspace-grounded-answer");
+          if (envelope.params?.name !== "project-grounded-answer") { invalid("Unknown prompt name"); break; }
+          const result = await get("/v1/mcp/prompts/project-grounded-answer");
           respond({ messages: [{ role: "user", content: { type: "text", text: result.prompt } }] });
           break;
         }
@@ -1122,6 +1378,9 @@ async function main(): Promise<void> {
   switch (command) {
     case "upload":
       await uploadCommand(positional, flags);
+      break;
+    case "estimate":
+      await estimateCommand(positional, flags);
       break;
     case "ingest-url":
       await ingestUrlCommand(positional, flags);
@@ -1194,8 +1453,8 @@ async function main(): Promise<void> {
     }
     case "exec": {
       if (separator < 0) throw new Error("Usage: docslurp exec [--profile <name>] -- <command> [args...]");
-      const workspace = typeof flags.workspace === "string" && flags.workspace.trim() ? flags.workspace.trim() : process.env.DOCSLURP_WORKSPACE?.trim() || null;
-      await execCommand(flags, resolveApiUrl(flags), workspace, args.slice(separator + 1));
+      const project = typeof flags.project === "string" && flags.project.trim() ? flags.project.trim() : process.env.DOCSLURP_PROJECT?.trim() || null;
+      await execCommand(flags, resolveApiUrl(flags), project, args.slice(separator + 1));
       break;
     }
     case "migrate-algolia-synonyms": {

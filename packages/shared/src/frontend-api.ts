@@ -1,9 +1,9 @@
-import type { OrganizationRecord, WorkspaceRecord } from "./workspace.js";
+import type { OrganizationRecord, ProjectRecord } from "./project.js";
 
 /** Wire shapes for the endpoints the dashboard reads over HTTP (server/src/routes/frontend.ts). */
 
 /** GET /dashboard/bootstrap. Read-only dashboard state; account provisioning runs during authentication. */
-export type DashboardBootstrapResponse = { isAdmin: boolean; organizations: OrganizationRecord[]; workspaces: WorkspaceRecord[] };
+export type DashboardBootstrapResponse = { isAdmin: boolean; organizations: OrganizationRecord[]; projects: ProjectRecord[] };
 
 /** A seeded local account offered as a quick-login button (development only). */
 export type DevSeedAccountDescriptor = { id: "admin" | "member"; label: string; email: string };
@@ -21,12 +21,12 @@ export type AuthConfigResponse = {
 
 /** GET /v1/invites/:token?kind= */
 export type InvitePreview = {
-  kind: "organization" | "workspace";
+  kind: "organization" | "project";
   status: "pending" | "accepted" | "revoked" | "expired";
   email: string;
   role: string;
   organizationName: string;
-  workspaceName: string | null;
+  projectName: string | null;
   inviterName: string | null;
   expiresAt: string;
 };

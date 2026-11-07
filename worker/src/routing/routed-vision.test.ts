@@ -61,7 +61,7 @@ describe("active plan execution", () => {
     }));
     const result = await runRoutedVision({
       plan, execution: groupAssignmentsByTarget(plan, catalog), catalog,
-      selection: { modelUri: "llm://openrouter/workspace/default" } as never,
+      selection: { modelUri: "llm://openrouter/project/default" } as never,
       extract, allow: async () => true, canContinue: () => true,
     });
     expect(extract.mock.calls.map(([vision, pages]) => [vision.modelUri, pages])).toEqual([
@@ -123,7 +123,7 @@ describe("active plan execution", () => {
     expect(result.escalations.map((e) => [e.pageNumber, e.trigger])).toEqual([[2, "decision-model-verifier"], [3, "empty-output"]]);
   });
 
-  it("falls back to the workspace model for extraction roles no vision target serves, and skips blocked groups", async () => {
+  it("falls back to the project model for extraction roles no vision target serves, and skips blocked groups", async () => {
     const plan = await basePlan([
       assignment(2, "ocr:private/lightonocr-3", "ocr"),
       assignment(3, strong.id, "chart-data"),
@@ -134,10 +134,10 @@ describe("active plan execution", () => {
     // The labeler is a real executor now, not an idle enrichment role.
     expect(execution.requests.map((r) => r.index)).toEqual([2]);
     const extract = vi.fn(async (_vision, pages: number[]): Promise<RoutedExtractResult> => ({
-      outputs: pages.map((p) => output(p, "workspace", "x")), costCentsByPage: new Map(),
+      outputs: pages.map((p) => output(p, "project", "x")), costCentsByPage: new Map(),
     }));
     const result = await runRoutedVision({
-      plan, execution, catalog, selection: { modelUri: "workspace" } as never,
+      plan, execution, catalog, selection: { modelUri: "project" } as never,
       extract, allow: async (vision) => vision.modelUri !== strong.ref.modelUri, canContinue: () => true,
     });
     expect(result.skipped).toEqual([{ targetId: strong.id, pages: [3], reason: "privacy-mode" }]);

@@ -4,20 +4,20 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 let sql: postgres.Sql;
 let stop: () => Promise<void>;
-let summaries: typeof import("../services/workspace-board-telemetry.js").listWorkspaceBoardSummaries;
+let summaries: typeof import("../services/project-board-telemetry.js").listProjectBoardSummaries;
 
 beforeAll(async () => {
   const database = await startMigratedPostgres();
   stop = database.stop;
   sql = postgres(database.url, { max: 1, prepare: false, onnotice: () => {} });
   vi.doMock("../db.js", () => ({ sql }));
-  ({ listWorkspaceBoardSummaries: summaries } = await import("../services/workspace-board-telemetry.js"));
+  ({ listProjectBoardSummaries: summaries } = await import("../services/project-board-telemetry.js"));
   await sql`insert into "user" (id, name, email) values ('u', 'Test', 'bytes@example.test')`;
   await sql`insert into organizations (id, name, slug, created_by_user_id) values ('o', 'Test', 'bytes', 'u')`;
-  await sql`insert into workspaces (id, org_id, user_id, name) values ('w', 'o', 'u', 'Bytes'), ('other', 'o', 'u', 'Other')`;
-  await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline)
+  await sql`insert into projects (id, org_id, user_id, name) values ('w', 'o', 'u', 'Bytes'), ('other', 'o', 'u', 'Other')`;
+  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
     values ('r', 'o', 'u', 'w', 'bulk-upload', 'completed', 'embed', '{}'::jsonb)`;
-  await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status)
+  await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status)
     values ('a', 'o', 'u', 'w', 'r', 'a.pdf', 'application/pdf', 'a', 'completed'),
       ('b', 'o', 'u', 'w', 'r', 'b.pdf', 'application/pdf', 'b', 'completed'),
       ('foreign', 'o', 'u', 'other', 'r', 'c.pdf', 'application/pdf', 'c', 'completed')`;
@@ -38,9 +38,9 @@ async function exact() {
   }
   const [legacy] = await sql`select
     (select coalesce(sum(octet_length(c.text)), 0) from document_chunks c join documents d on d.id = c.document_id
-      where d.workspace_id = 'w' and d.status = 'completed' and d.superseded_at is null) +
+      where d.project_id = 'w' and d.status = 'completed' and d.superseded_at is null) +
     (select coalesce(sum(octet_length(p.text)), 0) from document_pages p join documents d on d.id = p.document_id
-      where d.workspace_id = 'w' and d.status = 'completed' and d.superseded_at is null) as bytes`;
+      where d.project_id = 'w' and d.status = 'completed' and d.superseded_at is null) as bytes`;
   expect((await summaries(['w'])).get('w')?.indexedBytes).toBe(Number(legacy.bytes));
 }
 

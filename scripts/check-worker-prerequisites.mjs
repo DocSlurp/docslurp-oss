@@ -12,18 +12,14 @@ const args = process.argv.slice(2);
 const profile = args.find((arg) => arg.startsWith('--profile='))?.split('=')[1] ?? 'full';
 const profiles = {
   routing: ['node'],
-  lean: ['node', 'python3', 'pandoc', 'pdfinfo', 'pdftotext', 'pdftohtml', 'pdftoppm', 'pdfimages', 'tesseract', 'cwebp', 'clamscan', 'clamdscan'],
-  test: ['node', 'pandoc', 'pdfinfo', 'pdftotext', 'pdftohtml', 'pdftoppm', 'pdfimages', 'tesseract'],
-  full: ['node', 'pandoc', 'pdfinfo', 'pdftotext', 'pdftohtml', 'pdftoppm', 'pdfimages', 'tesseract', 'cwebp', 'soffice', 'qpdf', 'gs', 'ocrmypdf', ...(process.platform === 'linux' ? ['catdoc'] : []), 'unrtf', 'tiffcp', 'xlsx2csv', 'clamscan', 'clamdscan'],
+  lean: ['node', 'python3', 'pandoc', 'pdfinfo', 'pdftotext', 'pdftohtml', 'pdftoppm', 'pdfimages', 'cwebp', 'clamscan', 'clamdscan'],
+  test: ['node', 'pandoc', 'pdfinfo', 'pdftotext', 'pdftohtml', 'pdftoppm', 'pdfimages'],
+  full: ['node', 'pandoc', 'pdfinfo', 'pdftotext', 'pdftohtml', 'pdftoppm', 'pdfimages', 'cwebp', 'soffice', 'qpdf', 'gs', ...(process.platform === 'linux' ? ['catdoc'] : []), 'unrtf', 'tiffcp', 'xlsx2csv', 'clamscan', 'clamdscan'],
 };
 if (!Object.hasOwn(profiles, profile) || args.some((arg) => arg !== `--profile=${profile}` && arg !== '--sandbox')) {
   console.error('Usage: node scripts/check-worker-prerequisites.mjs --profile=lean|full|test|routing [--sandbox]');
   process.exit(2);
 }
-// 360x70 1-bit PNG reading "OCR probe 731" (Liberation Sans 40 px), for the OCR smoke test.
-const OCR_PROBE_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAWgAAABGCAMAAADW6v4VAAAABlBMVEX///8AAABVwtN+AAAChUlEQVR42u2Y23LDIAxE0f//dGc67cSxdiURAzbt7pNjcVkdsIzTmiRJkiRJkiRJkiRJkiRJkiRJkiRJ0i4ys7st/A/9QdD2qyQO+yR9L7m6kgtwRp1O8R9bK4ctymiUr6vZvNmiTidtlMxYMYxAjzU7GDR1OuuJhL6OP2ph3HKwtYGDvOyRDTPSOvThV7cUxpt/sLch+Xlz53oyv0aTelUJA2+D7Q4CDby9gx7vHPpAtCwOpzGQ6unx9PnB2gl6ksYJ5waH/r6izudyPt5E4dIiuFzRq9QVIkOLEby9cjq0BXpQHwY66ktBezKvu2d0qI1bgCJpGl8MmgwfVYePQIOV+4F4bOPGOC9EA4OEfKIN/STQ8exdoF0Lv0f9Nadb5FPmvBlo3B4TNc4LV65jzyIgFrS9QVsymsNlZKi4jXWBhozJ/SeDdkonYRBRB4jUXOOe7JjNzUCzduBXUGkx6PYJaG56Z9ClfIeArs7Lz3bb1uge0G7si6CLR+UwcYEugC7Nm2R+L+iew1N1Z42u0b25kehk0B99gpP/Om56GUapdST+ANDohBTiiTOGvSuga/WMTUvnyNyPUnLSicJVr7iWBxU+blNEkri7BbTxOzjMvY76Mkx6Hkcvgk5eKdNBOzzmDbnfpVTwiOR5wE/Rsacl+PtArz7evVAeUzMWfj9OeW/YrcHFqazfeeoGW9C0kA93uQ509oVHwx2gm++OHiQwQ0O+ArcB6AbTSLKfiLocBo1h/+976TLRlUTGClyIEzjJMtD8v5ZTOKMKh7DjF13Qm66ksZmSL5JSIotBz9TW5neSQC+SQC+SQC+SQC+SQC+SQC+SQEuSJEmSJEmSJEmSJG2uL03xCLqgM+RYAAAAAElFTkSuQmCC';
-// Tesseract languages the lean and full images must ship (Debian tesseract-ocr-<lang> packages).
-const FULL_TESSERACT_LANGS = ['eng', 'deu', 'fra', 'spa', 'ara', 'chi_sim', 'chi_tra', 'ell', 'heb', 'hin', 'ita', 'jpn', 'kor', 'nld', 'pol', 'por', 'rus', 'tha', 'tur', 'ukr', 'vie'];
 const failures = [];
 const paths = (process.env.PATH ?? '').split(path.delimiter);
 const venv = path.resolve(process.env.PYTHON_VENV || process.env.DOCSLURP_WORKER_VENV || path.join(root, '.venv'));
@@ -57,22 +53,33 @@ for (const name of profiles[profile]) {
   if (!await binaryPath(name)) failures.push(`missing executable: ${name}`);
 }
 const require = createRequire(path.join(root, 'worker/package.json'));
-for (const name of profile === 'routing' ? ['@llamaindex/liteparse'] : ['@kreuzberg/node', '@llamaindex/liteparse', 'mammoth', '@lancedb/lancedb']) {
+for (const name of profile === 'routing' ? [] : ['mammoth', '@lancedb/lancedb']) {
   try {
-    const module = await import(require.resolve(name));
-    // Kreuzberg loads native bindings lazily; import alone misses ABI failures.
-    if (name === '@kreuzberg/node') {
-      const result = await module.extractBytes(Buffer.from('Parser startup check.'), 'text/plain');
-      if (!result.content?.includes('Parser startup check.')) throw new Error('native extraction returned no text');
-    }
+    await import(require.resolve(name));
   } catch (error) { failures.push(`cannot load Node package ${name}: ${error.message}`); }
+}
+// Worker images ship Doppler, the default PDF extractor, under DOCSLURP_DOPPLER_BIN_DIR (/usr/lib/doppler/bin, off PATH) and set
+// DOCSLURP_DOPPLER_REQUIRED=1: the converter must be there and its pdftotext must be the fork, while pdftotext on PATH stays
+// Debian's poppler-utils (no host tool is replaced by the fork).
+if ((process.env.DOCSLURP_DOPPLER_REQUIRED ?? '').trim() === '1') {
+  const dopplerBin = (process.env.DOCSLURP_DOPPLER_BIN_DIR ?? '').trim() || '/usr/lib/doppler/bin';
+  for (const name of ['pdftomarkdown', 'doppler-md', 'pdftotext', 'pdfpagecount']) {
+    if (!existsSync(path.join(dopplerBin, name))) failures.push(`missing Doppler executable: ${path.join(dopplerBin, name)}`);
+  }
+  const forkHelp = spawnSync(path.join(dopplerBin, 'pdftotext'), ['-h'], { encoding: 'utf8', timeout: 30000 });
+  if (!`${forkHelp.stdout ?? ''}${forkHelp.stderr ?? ''}`.includes('-wordmeta')) failures.push(`${dopplerBin}/pdftotext is not the Doppler fork`);
+  if (await binaryPath('pdftomarkdown')) failures.push('pdftomarkdown is on PATH: Doppler must stay off PATH (DOCSLURP_DOPPLER_BIN_DIR)');
+  // The structural page count runs under prlimit (an external address-space and CPU limit around pdfpagecount).
+  if (!(await binaryPath('prlimit'))) failures.push('missing prlimit (util-linux): the PDF page count runs under it');
+  if (spawnSync(path.join(dopplerBin, 'pdfpagecount'), ['-v'], { timeout: 30000 }).status !== 0) failures.push(`${dopplerBin}/pdfpagecount does not run`);
 }
 if (profile === 'full' || profile === 'test' || profile === 'lean') {
   // Every image bakes the base parsers into its venv (runtime pip installs are off).
   const python = existsSync(path.join(venv, 'bin/python3')) ? path.join(venv, 'bin/python3') : await binaryPath('python3');
   if (!python) failures.push('missing Python interpreter');
   else {
-    const result = spawnSync(python, ['-c', 'import PIL, ebooklib, pptx, openpyxl, trafilatura'], { encoding: 'utf8', timeout: 30000 });
+    // pptx, openpyxl and defusedxml serve the Office extractors (scripts/office_markdown.py).
+    const result = spawnSync(python, ['-c', 'import PIL, ebooklib, pptx, openpyxl, defusedxml, trafilatura'], { encoding: 'utf8', timeout: 30000 });
     if (result.status !== 0) failures.push(`Python parser imports failed (${python}): ${result.error?.message || result.stderr.trim()}`);
   }
   // Poppler needs poppler-data's predefined CMaps (UniGB-UCS2-H, UniCNS-UCS2-H, ...) to map CJK CID fonts
@@ -90,26 +97,32 @@ if (profile === 'full' || profile === 'test' || profile === 'lean') {
       failures.push(`poppler CJK CMap probe failed: ${error.message}`);
     } finally { if (dir) rmSync(dir, { recursive: true, force: true }); }
   }
-  const tesseract = await binaryPath('tesseract');
-  if (tesseract) {
-    const result = spawnSync(tesseract, ['--list-langs'], { encoding: 'utf8', timeout: 10000 });
-    if (result.status !== 0 || !/^eng\r?$/m.test(result.stdout)) failures.push('Tesseract English language data (eng) unavailable');
-    // Both images OCR scripts whose PDF text layers are often unusable (Thai, Arabic, CJK, ...).
-    if ((profile === 'full' || profile === 'lean') && result.status === 0) {
-      const have = new Set(result.stdout.split(/\r?\n/).map((line) => line.trim()));
-      // Alpine packages no Greek (ell) language data; see scripts/setup-cli-docker.sh.
-      const alpine = existsSync('/etc/alpine-release');
-      const missing = FULL_TESSERACT_LANGS.filter((lang) => !have.has(lang) && !(alpine && lang === 'ell'));
-      if (missing.length) failures.push(`Tesseract language data unavailable: ${missing.join(', ')}`);
+}
+// OCR runtime (docs/extraction/ocr.md): docslurp_ocr.py in its own venv with sha256-pinned models. Images
+// that bake it (Dockerfile.full) and local installs (scripts/install-ocr-runtime.sh) must pass its
+// self-test; DOCSLURP_OCR_MODE=local without it fails here instead of at the first scanned page.
+if (profile !== 'routing') {
+  const ocrPython = process.env.DOCSLURP_OCR_PYTHON || '/opt/docslurp/ocr-venv/bin/python3';
+  const ocrModels = process.env.DOCSLURP_OCR_MODEL_DIR || '/opt/docslurp/ocr-models';
+  const ocrMode = (process.env.DOCSLURP_OCR_MODE ?? '').trim().toLowerCase();
+  if (existsSync(ocrPython) && existsSync(ocrModels)) {
+    const cli = path.join(root, 'worker/scripts/docslurp_ocr.py');
+    const manifest = path.join(root, 'worker/ocr-models.json');
+    const missing = [cli, manifest].filter((file) => !existsSync(file));
+    if (missing.length) failures.push(`OCR runtime incomplete: missing ${missing.join(', ')}`);
+    else {
+      const result = spawnSync(ocrPython, ['-I', cli, '--self-test', '--models', ocrModels, '--manifest', manifest], { encoding: 'utf8', timeout: 120000 });
+      if (result.status !== 0) {
+        const detail = result.error?.message || (result.stderr || result.stdout).trim().split('\n').slice(-3).join(' ') || `exit ${result.status}`;
+        failures.push(`OCR self-test failed (${ocrPython}, models ${ocrModels}): ${detail}`);
+      }
     }
-    // Language data alone does not prove OCR works: OCR a tiny bundled image through Kreuzberg, the path images take.
-    if ((profile === 'full' || profile === 'lean') && result.status === 0) {
-      try {
-        const kreuzberg = await import(require.resolve('@kreuzberg/node'));
-        const ocr = await kreuzberg.extractBytes(Buffer.from(OCR_PROBE_PNG, 'base64'), 'image/png');
-        if (!/OCR probe 731/.test(ocr.content ?? '')) failures.push(`Kreuzberg OCR probe returned ${JSON.stringify((ocr.content ?? '').slice(0, 80))}`);
-      } catch (error) { failures.push(`Kreuzberg OCR probe failed: ${error.message}`); }
-    }
+  } else if (ocrMode === 'local') {
+    failures.push(`DOCSLURP_OCR_MODE=local needs the OCR venv (DOCSLURP_OCR_PYTHON=${ocrPython}) and models (DOCSLURP_OCR_MODEL_DIR=${ocrModels}); run scripts/install-ocr-runtime.sh`);
+  }
+  // Local OCR parses customer bytes on the worker host: only customer-owned self-hosting may choose it.
+  if (ocrMode === 'local' && (process.env.DOCSLURP_SERVICE_PROFILE ?? '').trim().toLowerCase() !== 'self-hosted') {
+    failures.push('DOCSLURP_OCR_MODE=local requires DOCSLURP_SERVICE_PROFILE=self-hosted');
   }
 }
 if (args.includes('--sandbox')) {

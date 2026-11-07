@@ -15,11 +15,13 @@ export default defineConfig({
     // Usage pricing in tests uses the hardcoded tables; the live OpenRouter catalog is never fetched.
     env: { LIVE_MODEL_PRICES: "off" },
     exclude: ["node_modules", "dist"],
+    setupFiles: ["./src/test-setup.ts"],
   },
   resolve: {
     alias: {
       "@docslurp/worker/testing": resolve(__dirname, "../worker/src/testing.ts"),
       "@docslurp/shared/cancellation": shared("cancellation"),
+      "@docslurp/shared/pricing-loader": shared("pricing-loader"),
       "@docslurp/shared/error-reporting": shared("error-reporting"),
       "@docslurp/shared/error-response": shared("error-response"),
       "@docslurp/shared/file-token-path": shared("file-token-path"),
@@ -33,9 +35,9 @@ export default defineConfig({
       "@docslurp/shared/temporal-security": shared("temporal-security"),
       "@docslurp/shared/auth-security": shared("auth-security"),
       "@docslurp/shared/client-ip": shared("client-ip"),
-      "@docslurp/shared/workspace-chat-models": shared("workspace-chat-models"),
+      "@docslurp/shared/project-chat-models": shared("project-chat-models"),
       "@docslurp/shared/chat-voice": shared("chat-voice"),
-      "@docslurp/shared/workspace-chat-ui": shared("workspace-chat-ui"),
+      "@docslurp/shared/project-chat-ui": shared("project-chat-ui"),
       "@docslurp/shared": shared("index"),
       "@docslurp/sdk/embed": resolve(__dirname, "../packages/sdk/src/embed/index.tsx"),
       "@docslurp/sdk/search-adapters": resolve(__dirname, "../packages/sdk/src/search-adapters.ts"),

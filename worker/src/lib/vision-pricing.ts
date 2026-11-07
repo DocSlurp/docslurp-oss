@@ -1,4 +1,5 @@
 import {
+  DEEPINFRA_VISION_BASE_URL,
   DEFAULT_OPENROUTER_VISION_MODEL,
   isLoopbackModelBaseUrl,
   isProhibitedPremiumModelId,
@@ -15,6 +16,7 @@ import {
 } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
+import { disputed } from "../media/accounting.js";
 import { visionMaxOutputTokens } from "../tools/vision-runtime.js";
 
 /** Where `resolveChatCompletionsUrl` (tools/vision-runtime.ts) sends a route that has no base URL. */
@@ -26,11 +28,12 @@ export const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
  *
  * - `local`: in-process (`local-cli`); `loopback`: a server on a loopback host; `private`: an operator-registry
  *   route, priced by the registry. None of these is billed per token by a provider.
- * - `openai`: the configured OpenAI base URL; `openrouter`: an `openrouter.ai` URL. Both bill per token.
+ * - `openai`: the configured OpenAI base URL; `openrouter`: an `openrouter.ai` URL; `deepinfra`: exactly DeepInfra's
+ *   official OpenAI-compatible endpoint (`DEEPINFRA_VISION_BASE_URL`, https only). All three bill per token.
  * - `unknown-hosted`: any other remote destination. It is billed by someone we cannot price or cap, so it is
  *   refused before anything is sent, and recorded as billed if a request ever reached it.
  */
-export type VisionRouteBilling = "local" | "loopback" | "private" | "openai" | "openrouter" | "unknown-hosted";
+export type VisionRouteBilling = "local" | "loopback" | "private" | "openai" | "openrouter" | "deepinfra" | "unknown-hosted";
 
 export function visionRouteBilling(
   route: { runtime: string; baseUrl: string | null; provider?: string },
@@ -41,6 +44,7 @@ export function visionRouteBilling(
   const destination = effectiveVisionBaseUrl(route.baseUrl, cfg);
   if (isLoopbackModelBaseUrl(destination)) return "loopback";
   if (isOpenRouterBaseUrl(destination)) return "openrouter";
+  if (isDeepInfraVisionBaseUrl(destination)) return "deepinfra";
   if (sameBaseUrl(destination, configuredOpenAiBaseUrl(cfg))) return "openai";
   return "unknown-hosted";
 }
@@ -61,12 +65,12 @@ export function effectiveVisionBaseUrl(baseUrl: string | null, cfg: Pick<Config,
 /**
  * The route a vision call was actually served on: the primary or the fallback, at its effective destination
  * (`baseUrl` null only for the in-process runtime). Every result, billed failure and rejection carries it, and its
- * usage is priced and labelled from it, never from the workspace's configured primary route.
+ * usage is priced and labelled from it, never from the project's configured primary route.
  */
 export interface VisionServedRoute {
   runtime: string;
   baseUrl: string | null;
-  /** Usage-ledger provider label (`openai`, `openrouter`, `private`, `vision-runtime`). */
+  /** Usage-ledger provider label (`openai`, `openrouter`, `deepinfra`, `private`, `vision-runtime`). */
   provider: string;
   /** Usage-ledger model id (the registry's usage model for private routes). */
   model: string;
@@ -77,6 +81,7 @@ export interface VisionServedRoute {
 export function visionLedgerProvider(billing: VisionRouteBilling): string {
   if (billing === "openai") return "openai";
   if (billing === "openrouter") return "openrouter";
+  if (billing === "deepinfra") return "deepinfra";
   if (billing === "private") return PRIVATE_MODEL_PROVIDER;
   return "vision-runtime";
 }
@@ -143,6 +148,53 @@ export function isOpenRouterBaseUrl(baseUrl: string | null): boolean {
   }
 }
 
+/**
+ * True only for DeepInfra's official OpenAI-compatible endpoint (`DEEPINFRA_VISION_BASE_URL`): https, host
+ * `api.deepinfra.com`, the `/v1/openai` path, no credentials, port or query. A look-alike host or any other path is not.
+ */
+export function isDeepInfraVisionBaseUrl(baseUrl: string | null): boolean {
+  if (!baseUrl) return false;
+  try {
+    const url = new URL(baseUrl);
+    if (url.username || url.password || url.hash) return false;
+    return sameBaseUrl(baseUrl, DEEPINFRA_VISION_BASE_URL);
+  } catch {
+    return false;
+  }
+}
+
+/** A provider-reported charge read from a response's `usage` (the shape `readProviderCharge` returns). */
+export type VisionProviderCharge = { costCents?: number; metadata?: Record<string, unknown> };
+
+/**
+ * DeepInfra's charge for one response on `model`: its OpenAI-compatible endpoint reports `usage.estimated_cost`
+ * (USD for that request at its own price), not OpenRouter's `usage.cost`, which is ignored on this route. Following
+ * the media path's rule (media/accounting.ts), the figure is the charge when it is within the dispute tolerance of the
+ * same tokens at the catalog list price; a disputed figure, a missing one or a model without a list price yields no
+ * charge, so the tokens are priced at list on the served route (`priceVisionServedUsage`) and the guard still
+ * compares that list price with the admitted weight.
+ */
+export function readDeepInfraVisionCharge(model: string, usage: unknown): VisionProviderCharge {
+  if (!usage || typeof usage !== "object") return {};
+  const raw = usage as Record<string, unknown>;
+  const reported = raw.estimated_cost;
+  if (typeof reported !== "number" || !Number.isFinite(reported) || reported < 0) return {};
+  const tokens = {
+    inputTokens: typeof raw.prompt_tokens === "number" && raw.prompt_tokens >= 0 ? raw.prompt_tokens : 0,
+    outputTokens: typeof raw.completion_tokens === "number" && raw.completion_tokens >= 0 ? raw.completion_tokens : 0,
+  };
+  const listCents = visionListPriceCents(model, tokens);
+  if (listCents === null) return {};
+  if (disputed(reported * 100, listCents)) {
+    console.warn(
+      `[vision-weight] disputed provider charge model=${model} provider=deepinfra reported_usd=${reported} ` +
+        `list_cents=${listCents.toFixed(4)} input_tokens=${tokens.inputTokens} output_tokens=${tokens.outputTokens}; recording list price`,
+    );
+    return {};
+  }
+  return { costCents: reported * 100, metadata: { costSource: "provider", providerCostUsd: reported, reportedField: "estimated_cost", providerUsage: raw } };
+}
+
 /** True when two base URLs name the same endpoint (case-insensitive origin, trailing slashes ignored). */
 export function sameBaseUrl(a: string, b: string): boolean {
   try {
@@ -156,7 +208,7 @@ export function sameBaseUrl(a: string, b: string): boolean {
 }
 
 export function isBilledVisionRoute(billing: VisionRouteBilling): boolean {
-  return billing === "openai" || billing === "openrouter" || billing === "unknown-hosted";
+  return billing === "openai" || billing === "openrouter" || billing === "deepinfra" || billing === "unknown-hosted";
 }
 
 /**
@@ -278,10 +330,11 @@ export interface VisionRequestPricing {
  * its size on this model, `visionInputTokenBound`) and the model's enforced output cap. Hosted vision is
  * limited to the priced catalog:
  *
- * - a billed route (OpenAI, OpenRouter) needs a catalog model with a token price and an image-token bound,
+ * - a billed route (OpenAI, OpenRouter, DeepInfra) needs a catalog model with a token price and an image-token bound,
  *   under the output-price limit and not a Pro/Ultra tier; anything else is refused (fail closed, nothing
  *   sent), on OpenRouter as on OpenAI. An unknown hosted destination is always refused;
- * - on OpenRouter the weight adds the per-image fee cap, and `maxPrice` carries the caps;
+ * - on OpenRouter the weight adds the per-image fee cap, and `maxPrice` carries the caps; OpenAI and DeepInfra
+ *   bill images only as prompt tokens and take no `max_price`, so their weight is the token price alone;
  * - a local runtime weighs `LOCAL_VISION_REQUEST_WEIGHT_CENTS`;
  * - a loopback or private route (not billed per token by a provider) weighs its catalog price when it has
  *   one, else the catalog-dominating prices, never less than the configured default model.
@@ -299,7 +352,7 @@ export function visionRequestPricing(route: {
   const outputTokens = visionMaxOutputTokens(route.model);
   const priced = visionModelTokenPricing(route.model);
   if (isBilledVisionRoute(route.billing)) {
-    if (route.billing === "unknown-hosted") throw new UnpricedVisionRouteError(route.model, "goes to a destination that is not OpenAI or OpenRouter");
+    if (route.billing === "unknown-hosted") throw new UnpricedVisionRouteError(route.model, "goes to a destination that is not OpenAI, OpenRouter or DeepInfra");
     if (isProhibitedPremiumModelId(route.model)) throw new UnpricedVisionRouteError(route.model, "is a Pro/Ultra tier");
     const refusal = visionModelRefusal(route.model);
     if (refusal) throw new UnpricedVisionRouteError(route.model, `is not admitted: ${refusal}`);

@@ -9,7 +9,8 @@
  *   timeout retries it, and because ordinary failures are counted from stage
  *   checkpoints rather than `info.attempt`, that attempt costs nothing either.
  *   Transient network and database errors (ECONNRESET, 57P01, connection
- *   terminated) are interruptions too: they must not consume ordinary attempts.
+ *   terminated) are interruptions too: they must not consume ordinary attempts, and so are parser sandbox
+ *   failures (SandboxInfrastructureError, real-Modal F5).
  * - cancelled: Temporal asked this activity to stop (run cancel). Rethrown as is.
  * - throttled: provider 429/5xx that outlasted in-process retries.
  * - hung: a command or stage exceeded its wall-clock or progress budget.
@@ -26,9 +27,10 @@ import { ApplicationFailure, CancelledFailure } from "@temporalio/common";
 
 import { findHungWorkError } from "../lib/hung-work.js";
 import { findProviderRetryableError } from "../lib/provider-retry.js";
-import { isTransientNetworkError } from "../lib/transient-errors.js";
+import { isTransientDatabaseError, isTransientNetworkError } from "../lib/transient-errors.js";
 import { isWorkerShuttingDown } from "../lib/worker-lifecycle.js";
 import { findCommandTeardownError, findWorkerQuarantinedError } from "../sandbox/teardown-breaker.js";
+import { findSandboxInfrastructureError } from "../sandbox/types.js";
 
 export type ActivityErrorClass = "interruption" | "cancelled" | "throttled" | "hung" | "teardown" | "ordinary";
 
@@ -67,6 +69,14 @@ export function classifyActivityError(
   // A dropped socket or restarted database is the infrastructure failing, not the document:
   // retry without spending an ordinary attempt (Temporal's maximumAttempts still bounds it).
   if (isTransientNetworkError(error, { includeTimeouts: false })) return "interruption";
+  // So is a database statement timeout or a charge check that could not decide: re-authorized from durable state on retry
+  // (real-Modal finding F6: a 57014 during re-authorization had failed the document as an ordinary error).
+  if (isTransientDatabaseError(error)) return "interruption";
+  // The parser sandbox failed (a VM that could not be created or hardened, a leftover kill that did not verify, a control
+  // deadline, a transport error): the stage retries on a fresh VM without a failure checkpoint, so no document is failed
+  // first (real-Modal F5). Exhausted retries fail the run, which fails its unfinished documents (store.failRun). A
+  // document's own staging violation (SandboxOutputError) is not infrastructure and stays a document failure.
+  if (findSandboxInfrastructureError(error)) return "interruption";
   return "ordinary";
 }
 

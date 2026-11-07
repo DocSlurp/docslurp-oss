@@ -2,12 +2,12 @@
  * Extract mode: an upload whose source files and stored artifacts (page
  * images, Markdown, stage outputs, exports) live under
  * `extracts/<org>/<extract>/`. Its Postgres rows (documents, chunks, pages)
- * and its LanceDB rows (in the workspace's vector tables) are deleted with it
+ * and its LanceDB rows (in the project's vector tables) are deleted with it
  * when the retention window ends; the worker compacts those tables at once.
  *
  * - `createExtract` records the durable expiry row before any byte is stored,
  *   after checking the retention cap and, for a paid window, spend.
- * - Intake (workspace-intake.ts) stores sources under the extract prefix and
+ * - Intake (project-intake.ts) stores sources under the extract prefix and
  *   run creation stamps the run with `extract_id` and `storage_prefix`, so the
  *   worker writes every artifact there.
  * - `sweepExtracts` (maintenance sweep) settles finished extracts (stored
@@ -18,8 +18,8 @@
  *   idempotent, so a crashed or partial pass is resumed by the next one.
  *
  * Every read is tenant-scoped: an extract is visible only to a user who can
- * read its workspace, and to an API key bound to its organization and
- * allowed that workspace. See docs/extract.md.
+ * read its project, and to an API key bound to its organization and
+ * allowed that project. See docs/extract.md.
  */
 import { randomUUID } from "node:crypto";
 
@@ -28,8 +28,7 @@ import {
   EXTRACT_MAX_RETENTION_DAYS,
   EXTRACT_PRODUCT,
   EXTRACT_RETENTION_METRIC,
-  EXTRACT_RETENTION_STORAGE_MULTIPLIER,
-  PRICE_CARD,
+  pricing,
   UNIT_CHARGE_PROVIDER,
   documentExportFolderNames,
   extractRetentionCredits,
@@ -44,7 +43,7 @@ import {
 
 import { sql } from "../db.js";
 import { recordCostEvent } from "../lib/ai-usage.js";
-import { apiKeyCanUseWorkspace, type RequestActor } from "../lib/request-actor.js";
+import { apiKeyCanUseProject, type RequestActor } from "../lib/request-actor.js";
 import { deleteObjectsUnderPrefix, deleteUploadedObject, signDownloadGet } from "../lib/storage.js";
 import { signalPipelineCancel, startDocumentExportWorkflow } from "../lib/temporal.js";
 import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
@@ -54,8 +53,8 @@ import { assertCanSpend, loadSpendStatus, spendGuardsSkipped, SpendBlockedError 
 import { isStorageBillingEnabled } from "./billing/storage-meter.js";
 import { formatExportBytes } from "./document-exports.js";
 import { isNotificationEnabled, sendExtractReadyEmail } from "./notifications.js";
-import { listAccessibleWorkspaceIds } from "./organizations.js";
-import type { IntakeExtract } from "./workspace-intake.js";
+import { listAccessibleProjectIds } from "./organizations.js";
+import type { IntakeExtract } from "./project-intake.js";
 
 // ---------------------------------------------------------------------------
 // Policy
@@ -129,7 +128,7 @@ const ESTIMATED_SOURCE_BYTES_PER_PAGE = 75 * 1024;
 interface ExtractRow {
   id: string;
   org_id: string;
-  workspace_id: string;
+  project_id: string;
   user_id: string;
   api_key_id: string | null;
   run_id: string | null;
@@ -159,14 +158,14 @@ interface ExtractRow {
 }
 
 const selectExtract = sql`
-  select e.id, e.org_id, e.workspace_id, e.user_id, e.api_key_id, e.run_id, e.storage_prefix, e.state,
+  select e.id, e.org_id, e.project_id, e.user_id, e.api_key_id, e.run_id, e.storage_prefix, e.state,
     e.retention_hours, e.paid_retention, e.expires_at::text, e.notify_email, e.download_content,
     e.completed_at::text, e.run_status, e.pages, e.stored_bytes, e.retention_credits, e.charged_at::text,
     e.export_id, e.export_skipped, e.created_at::text, e.deleted_at::text,
     r.status as live_run_status, x.status as export_status, x.expires_at::text as export_expires_at,
     (e.state <> 'active' or e.expires_at <= now()) as expired
   from extracts e
-  left join workspace_runs r on r.id = e.run_id and r.extract_id = e.id
+  left join project_runs r on r.id = e.run_id and r.extract_id = e.id
   left join document_exports x on x.id = e.export_id and x.org_id = e.org_id
 `;
 
@@ -201,7 +200,7 @@ export function describeExtract(row: ExtractRow): ExtractRecord {
   return {
     id: row.id,
     status,
-    workspaceId: row.workspace_id,
+    projectId: row.project_id,
     runId: row.run_id,
     retentionHours: row.retention_hours,
     paidRetention: row.paid_retention,
@@ -226,7 +225,7 @@ export function describeExtract(row: ExtractRow): ExtractRecord {
 export async function createExtract(args: {
   userId: string;
   orgId: string;
-  workspaceId: string;
+  projectId: string;
   apiKeyId?: string | null;
   options: ExtractOptions;
   /** Source bytes known up front (bulk files, declared direct-upload sizes), for the spend pre-check. */
@@ -235,20 +234,20 @@ export async function createExtract(args: {
 }): Promise<IntakeExtract> {
   const policy = args.policy ?? extractRetentionPolicy();
   const { retentionHours, paid } = resolveExtractRetention(args.options, policy);
-  if (paid) await assertCanAffordRetention({ orgId: args.orgId, workspaceId: args.workspaceId, retentionHours, freeHours: policy.freeHours, sourceBytes: args.estimatedSourceBytes ?? 0 });
+  if (paid) await assertCanAffordRetention({ orgId: args.orgId, projectId: args.projectId, retentionHours, freeHours: policy.freeHours, sourceBytes: args.estimatedSourceBytes ?? 0 });
   const id = `ext_${randomUUID().replace(/-/g, "")}`;
   const storagePrefix = extractStoragePrefix({ orgId: args.orgId, extractId: id });
   await sql`
     insert into extracts (
-      id, org_id, workspace_id, user_id, api_key_id, storage_prefix, retention_hours, paid_retention,
+      id, org_id, project_id, user_id, api_key_id, storage_prefix, retention_hours, paid_retention,
       expires_at, notify_email, download_content
     ) values (
-      ${id}, ${args.orgId}, ${args.workspaceId}, ${args.userId}, ${args.apiKeyId ?? null}, ${storagePrefix},
+      ${id}, ${args.orgId}, ${args.projectId}, ${args.userId}, ${args.apiKeyId ?? null}, ${storagePrefix},
       ${retentionHours}, ${paid}, now() + make_interval(hours => ${retentionHours}),
       ${args.options.notifyEmail ?? true}, ${args.options.download ?? "markdown"}
     )
   `;
-  console.log(`[extract] created extract=${id} org=${args.orgId} workspace=${args.workspaceId} retention_hours=${retentionHours} paid=${paid}`);
+  console.log(`[extract] created extract=${id} org=${args.orgId} project=${args.projectId} retention_hours=${retentionHours} paid=${paid}`);
   return { id, storagePrefix };
 }
 
@@ -256,15 +255,15 @@ export async function createExtract(args: {
  * A paid window needs an organization that may spend now (assertCanSpend) and,
  * when billing is enforced, available credits for the estimated retention charge.
  */
-async function assertCanAffordRetention(args: { orgId: string; workspaceId: string; retentionHours: number; freeHours: number; sourceBytes: number }): Promise<void> {
-  await assertCanSpend(args.orgId, args.workspaceId);
+async function assertCanAffordRetention(args: { orgId: string; projectId: string; retentionHours: number; freeHours: number; sourceBytes: number }): Promise<void> {
+  await assertCanSpend(args.orgId, args.projectId);
   if (spendGuardsSkipped() || isBillingExemptOrg(args.orgId) || !isStorageBillingEnabled()) return;
   const estimate = extractRetentionCredits({
     bytes: estimatedExtractStoredBytes({ sourceBytes: args.sourceBytes, pages: Math.ceil(args.sourceBytes / ESTIMATED_SOURCE_BYTES_PER_PAGE) }),
     retentionHours: args.retentionHours,
     freeHours: args.freeHours,
   });
-  const status = await loadSpendStatus(args.orgId, args.workspaceId);
+  const status = await loadSpendStatus(args.orgId, args.projectId);
   if (!status || status.available < estimate) {
     throw new SpendBlockedError(
       `Extended retention needs about ${estimate.toFixed(2)} credits; add credits or use the free ${args.freeHours}-hour window.`,
@@ -280,7 +279,7 @@ export async function attachExtractRun(extractId: string, runId: string): Promis
   await sql`
     update extracts set run_id = ${runId}, updated_at = now()
     where id = ${extractId} and (run_id is null or run_id = ${runId})
-      and exists (select 1 from workspace_runs r where r.id = ${runId} and r.extract_id = ${extractId})
+      and exists (select 1 from project_runs r where r.id = ${runId} and r.extract_id = ${extractId})
   `;
 }
 
@@ -292,7 +291,7 @@ export async function describeExtractById(id: string): Promise<ExtractRecord | n
 
 /** Whether any run of this extract exists (run creation links it in the run's own transaction). */
 export async function extractHasRun(extractId: string): Promise<boolean> {
-  const [row] = await sql<{ present: boolean }[]>`select exists (select 1 from workspace_runs where extract_id = ${extractId}) as present`;
+  const [row] = await sql<{ present: boolean }[]>`select exists (select 1 from project_runs where extract_id = ${extractId}) as present`;
   return row?.present === true;
 }
 
@@ -302,7 +301,7 @@ export async function extractHasRun(extractId: string): Promise<boolean> {
  */
 export async function abandonExtract(extractId: string): Promise<void> {
   await sql`update extracts set expires_at = least(expires_at, now()), updated_at = now()
-    where id = ${extractId} and not exists (select 1 from workspace_runs r where r.extract_id = ${extractId})`;
+    where id = ${extractId} and not exists (select 1 from project_runs r where r.extract_id = ${extractId})`;
 }
 
 /** The extract a direct upload session was created for, while it may still take files. */
@@ -314,16 +313,16 @@ export async function loadIntakeExtract(extractId: string, userId: string): Prom
   return row ? { id: row.id, storagePrefix: row.storage_prefix } : null;
 }
 
-/** May this actor see an extract in `workspaceId` of `orgId`? */
-async function actorMaySee(actor: RequestActor, row: Pick<ExtractRow, "workspace_id" | "org_id">): Promise<boolean> {
-  if (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, { id: row.workspace_id, orgId: row.org_id })) return false;
-  const workspaceIds = await listAccessibleWorkspaceIds(actor.userId);
-  return workspaceIds.includes(row.workspace_id);
+/** May this actor see an extract in `projectId` of `orgId`? */
+async function actorMaySee(actor: RequestActor, row: Pick<ExtractRow, "project_id" | "org_id">): Promise<boolean> {
+  if (actor.type === "apiKey" && !apiKeyCanUseProject(actor.apiKey, { id: row.project_id, orgId: row.org_id })) return false;
+  const projectIds = await listAccessibleProjectIds(actor.userId);
+  return projectIds.includes(row.project_id);
 }
 
 /**
- * One extract the actor may see: a reader of its workspace, through an API key
- * bound to its organization and allowed that workspace. Null (404) otherwise,
+ * One extract the actor may see: a reader of its project, through an API key
+ * bound to its organization and allowed that project. Null (404) otherwise,
  * so another tenant cannot learn whether an ID exists.
  */
 export async function getExtractForActor(id: string, actor: RequestActor): Promise<ExtractRow | null> {
@@ -335,16 +334,16 @@ export async function getExtractForActor(id: string, actor: RequestActor): Promi
 }
 
 export async function listExtractsForActor(actor: RequestActor, limit = 20): Promise<ExtractRecord[]> {
-  const workspaceIds = await listAccessibleWorkspaceIds(actor.userId);
-  if (workspaceIds.length === 0) return [];
+  const projectIds = await listAccessibleProjectIds(actor.userId);
+  if (projectIds.length === 0) return [];
   const orgScope = actor.type === "apiKey" ? sql`and e.org_id = ${actor.apiKey.orgId ?? ""}` : sql``;
   const rows = await sql<ExtractRow[]>`
     ${selectExtract}
-    where e.workspace_id = any(${sql.array(workspaceIds)}) ${orgScope}
+    where e.project_id = any(${sql.array(projectIds)}) ${orgScope}
     order by e.created_at desc limit ${Math.max(1, Math.min(limit, 100))}
   `;
   return rows
-    .filter((row) => actor.type !== "apiKey" || apiKeyCanUseWorkspace(actor.apiKey, { id: row.workspace_id, orgId: row.org_id }))
+    .filter((row) => actor.type !== "apiKey" || apiKeyCanUseProject(actor.apiKey, { id: row.project_id, orgId: row.org_id }))
     .map(describeExtract);
 }
 
@@ -363,7 +362,7 @@ export async function signExtractDownload(row: ExtractRow): Promise<string> {
   const [target] = await sql<{ object_key: string; filename: string }[]>`
     select x.object_key, x.filename from document_exports x
     join extracts e on e.id = ${row.id} and e.export_id = x.id
-    where x.id = ${row.export_id} and x.org_id = ${row.org_id} and x.workspace_id = ${row.workspace_id}
+    where x.id = ${row.export_id} and x.org_id = ${row.org_id} and x.project_id = ${row.project_id}
       and x.run_id = ${row.run_id} and x.status = 'ready' and x.expires_at > now()
       and e.state = 'active' and e.expires_at > now()
   `;
@@ -383,12 +382,12 @@ export async function signExtractDownload(row: ExtractRow): Promise<string> {
 export async function expireExtractNow(row: ExtractRow): Promise<void> {
   await sql`update extracts set expires_at = least(expires_at, now()), updated_at = now() where id = ${row.id} and org_id = ${row.org_id}`;
   await sql`update document_exports set expires_at = least(expires_at, now()), max_expires_at = least(coalesce(max_expires_at, now()), now())
-    where org_id = ${row.org_id} and run_id is not null and run_id in (select id from workspace_runs where extract_id = ${row.id})`;
+    where org_id = ${row.org_id} and run_id is not null and run_id in (select id from project_runs where extract_id = ${row.id})`;
 }
 
 /**
  * The download is the requester's alone, as with exports (whose download is
- * requester-only too). Other readers of the workspace see the extract's
+ * requester-only too). Other readers of the project see the extract's
  * status but cannot mint its link.
  */
 export async function actorMayDownload(actor: RequestActor, row: Pick<ExtractRow, "user_id">): Promise<boolean> {
@@ -443,8 +442,8 @@ async function settleFinishedExtracts(result: ExtractSweepResult): Promise<void>
         coalesce(sum(d.page_count), 0)::int as pages,
         coalesce(sum(d.file_size), 0)::bigint as source_bytes
       from extracts e
-      join workspace_runs r on r.id = e.run_id and r.extract_id = e.id
-      left join documents d on d.run_id = r.id and d.workspace_id = e.workspace_id and d.purged_at is null
+      join project_runs r on r.id = e.run_id and r.extract_id = e.id
+      left join documents d on d.run_id = r.id and d.project_id = e.project_id and d.purged_at is null
       where e.state = 'active' and e.completed_at is null and e.expires_at > now()
         and r.status in ('completed', 'failed')
       group by e.id, r.status
@@ -480,14 +479,14 @@ export async function chargeExtractRetention(
   const policy = extractRetentionPolicy();
   return await sql.begin(async (tx) => {
     const client = tx as unknown as typeof sql;
-    const [row] = await client<Array<Pick<ExtractRow, "id" | "org_id" | "workspace_id" | "user_id" | "api_key_id" | "run_id" | "retention_hours" | "paid_retention" | "retention_credits" | "charged_at">>>`
-      select id, org_id, workspace_id, user_id, api_key_id, run_id, retention_hours, paid_retention, retention_credits, charged_at::text
+    const [row] = await client<Array<Pick<ExtractRow, "id" | "org_id" | "project_id" | "user_id" | "api_key_id" | "run_id" | "retention_hours" | "paid_retention" | "retention_credits" | "charged_at">>>`
+      select id, org_id, project_id, user_id, api_key_id, run_id, retention_hours, paid_retention, retention_credits, charged_at::text
       from extracts where id = ${extractId} for update
     `;
     if (!row || !row.paid_retention || row.charged_at) return 0;
     const [measured] = await client<{ pages: number; source_bytes: string }[]>`
       select coalesce(sum(d.page_count), 0)::int as pages, coalesce(sum(d.file_size), 0)::bigint::text as source_bytes
-      from documents d join workspace_runs r on r.id = d.run_id
+      from documents d join project_runs r on r.id = d.run_id
       where r.extract_id = ${row.id} and d.org_id = ${row.org_id} and d.purged_at is null
     `;
     const pages = measured?.pages ?? 0;
@@ -499,7 +498,7 @@ export async function chargeExtractRetention(
       const eventId = phase === "admission" ? `extract-retention:${row.id}` : `extract-retention:${row.id}:${phase}`;
       const recorded = await recordCostEvent({
         userId: row.user_id,
-        scope: { orgId: row.org_id, workspaceId: row.workspace_id, runId: row.run_id ?? undefined, apiKeyId: row.api_key_id },
+        scope: { orgId: row.org_id, projectId: row.project_id, runId: row.run_id ?? undefined, apiKeyId: row.api_key_id },
         client,
         event: {
           id: eventId,
@@ -515,8 +514,7 @@ export async function chargeExtractRetention(
             phase,
             retentionHours: row.retention_hours,
             freeHours: policy.freeHours,
-            storageGbMonth: PRICE_CARD.storageGbMonth,
-            multiplier: EXTRACT_RETENTION_STORAGE_MULTIPLIER,
+            retentionCreditsPerGbMonth: pricing().extractRetentionCredits(1024 ** 3, 1),
             storedBytes: bytes,
             pages,
             // Artifact and index bytes are estimated from page counts, as in the daily meter.
@@ -560,11 +558,11 @@ async function chargeExtendedRetention(result: ExtractSweepResult): Promise<void
  * emailed by the export sweep: the extract email covers it.
  */
 async function queueExtractDownloads(result: ExtractSweepResult): Promise<void> {
-  const due = await sql<Array<Pick<ExtractRow, "id" | "org_id" | "workspace_id" | "user_id" | "run_id" | "storage_prefix" | "download_content" | "expires_at"> & { documents: number; filename: string | null; workspace_name: string | null }>>`
-    select e.id, e.org_id, e.workspace_id, e.user_id, e.run_id, e.storage_prefix, e.download_content, e.expires_at::text,
-      (select count(*)::int from documents d where d.run_id = e.run_id and d.workspace_id = e.workspace_id and d.status = 'completed' and d.purged_at is null) as documents,
-      (select min(d.filename) from documents d where d.run_id = e.run_id and d.workspace_id = e.workspace_id and d.status = 'completed') as filename,
-      (select w.name from workspaces w where w.id = e.workspace_id) as workspace_name
+  const due = await sql<Array<Pick<ExtractRow, "id" | "org_id" | "project_id" | "user_id" | "run_id" | "storage_prefix" | "download_content" | "expires_at"> & { documents: number; filename: string | null; project_name: string | null }>>`
+    select e.id, e.org_id, e.project_id, e.user_id, e.run_id, e.storage_prefix, e.download_content, e.expires_at::text,
+      (select count(*)::int from documents d where d.run_id = e.run_id and d.project_id = e.project_id and d.status = 'completed' and d.purged_at is null) as documents,
+      (select min(d.filename) from documents d where d.run_id = e.run_id and d.project_id = e.project_id and d.status = 'completed') as filename,
+      (select w.name from projects w where w.id = e.project_id) as project_name
     from extracts e
     where e.state = 'active' and e.expires_at > now() and e.completed_at is not null
       and e.export_id is null and not e.export_skipped
@@ -587,10 +585,10 @@ async function queueExtractDownloads(result: ExtractSweepResult): Promise<void> 
         if (!claim) return false;
         await client`
           insert into document_exports (
-            id, org_id, workspace_id, user_id, document_id, run_id, content, filename, object_key,
+            id, org_id, project_id, user_id, document_id, run_id, content, filename, object_key,
             document_count, estimated_bytes, notify_email, expires_at, max_expires_at
           ) values (
-            ${exportId}, ${row.org_id}, ${row.workspace_id}, ${row.user_id}, null, ${row.run_id}, ${row.download_content},
+            ${exportId}, ${row.org_id}, ${row.project_id}, ${row.user_id}, null, ${row.run_id}, ${row.download_content},
             ${`${base}.zip`}, ${`${row.storage_prefix}/exports/${exportId}/`},
             ${row.documents}, 0, false, ${row.expires_at}::timestamptz, ${row.expires_at}::timestamptz
           )
@@ -612,9 +610,9 @@ async function queueExtractDownloads(result: ExtractSweepResult): Promise<void> 
   }
 }
 
-/** Completion email: once the download is ready (or could not be built), to the requester, if they still can read the workspace. */
+/** Completion email: once the download is ready (or could not be built), to the requester, if they still can read the project. */
 async function sendDueExtractEmails(result: ExtractSweepResult): Promise<void> {
-  const due = await sql<Array<ExtractRow & { email: string; email_attempts: number; workspace_name: string | null }>>`
+  const due = await sql<Array<ExtractRow & { email: string; email_attempts: number; project_name: string | null }>>`
     update extracts e
     set emailed_at = now(), email_attempts = e.email_attempts + 1, updated_at = now()
     from "user" u
@@ -625,14 +623,14 @@ async function sendDueExtractEmails(result: ExtractSweepResult): Promise<void> {
       and (e.export_skipped or exists (
         select 1 from document_exports x where x.id = e.export_id and x.status in ('ready', 'failed')
       ))
-    returning e.id, e.org_id, e.workspace_id, e.user_id, e.run_id, e.storage_prefix, e.retention_hours, e.expires_at::text,
+    returning e.id, e.org_id, e.project_id, e.user_id, e.run_id, e.storage_prefix, e.retention_hours, e.expires_at::text,
       e.export_id, e.export_skipped, e.pages, u.email, e.email_attempts,
       (select x.status from document_exports x where x.id = e.export_id) as export_status,
-      (select w.name from workspaces w where w.id = e.workspace_id) as workspace_name
+      (select w.name from projects w where w.id = e.project_id) as project_name
   `;
   for (const row of due) {
-    const access = await listAccessibleWorkspaceIds(row.user_id);
-    if (!access.includes(row.workspace_id)) continue;
+    const access = await listAccessibleProjectIds(row.user_id);
+    if (!access.includes(row.project_id)) continue;
     const ready = row.export_status === "ready";
     // The user's run notification settings apply: completed for a ready download, failed otherwise.
     if (!await isNotificationEnabled(row.user_id, ready ? "run.completed" : "run.failed").catch(() => true)) continue;
@@ -641,7 +639,7 @@ async function sendDueExtractEmails(result: ExtractSweepResult): Promise<void> {
         userId: row.user_id,
         recipientEmail: row.email,
         orgId: row.org_id,
-        workspaceId: row.workspace_id,
+        projectId: row.project_id,
         extractId: row.id,
         ready,
         pages: row.pages ?? 0,
@@ -663,7 +661,7 @@ async function sendDueExtractEmails(result: ExtractSweepResult): Promise<void> {
 /**
  * The emailed link: the app's signed-in download page for the extract's
  * export. It names the export, it is not a credential: the app requires
- * sign-in, the export route checks the requester and workspace access, and
+ * sign-in, the export route checks the requester and project access, and
  * only then redirects to a two-minute signed URL for that one object.
  */
 export function extractAppUrl(exportId: string | null): string {
@@ -674,7 +672,7 @@ export function extractAppUrl(exportId: string | null): string {
 interface DeletionClaim {
   id: string;
   org_id: string;
-  workspace_id: string;
+  project_id: string;
   storage_prefix: string;
   expires_at: string;
   paid_retention: boolean;
@@ -706,7 +704,7 @@ async function deleteExpiredExtracts(result: ExtractSweepResult): Promise<void> 
       order by deletion_failures, expires_at limit ${DELETE_BATCH}
       for update skip locked
     )
-    returning e.id, e.org_id, e.workspace_id, e.storage_prefix, e.expires_at::text, e.paid_retention, e.charged_at::text,
+    returning e.id, e.org_id, e.project_id, e.storage_prefix, e.expires_at::text, e.paid_retention, e.charged_at::text,
       e.rows_deleted_at::text, e.deletion_failures, e.stored_bytes
   `;
   // UPDATE ... RETURNING has no order: work the claimed rows least-failed, longest-expired first.
@@ -740,27 +738,27 @@ async function deleteExpiredExtracts(result: ExtractSweepResult): Promise<void> 
  * anything whose source sits under its prefix, and every copy made from them
  * (versions, re-indexes, reused or deduplicated copies), scoped to the org.
  */
-async function extractDocumentIds(row: Pick<DeletionClaim, "id" | "org_id" | "workspace_id" | "storage_prefix">): Promise<string[]> {
+async function extractDocumentIds(row: Pick<DeletionClaim, "id" | "org_id" | "project_id" | "storage_prefix">): Promise<string[]> {
   const prefix = `${row.storage_prefix}/`;
-  // The extract's runs' documents (documents_run_id_idx), plus documents in its workspace whose source is under
-  // the prefix (a run deletion detaches them; documents_workspace_id_idx bounds the scan to one workspace).
+  // The extract's runs' documents (documents_run_id_idx), plus documents in its project whose source is under
+  // the prefix (a run deletion detaches them; documents_project_id_idx bounds the scan to one project).
   const base = await sql<{ id: string }[]>`
     select d.id from documents d
-    where d.run_id in (select r.id from workspace_runs r where r.extract_id = ${row.id}) and d.org_id = ${row.org_id}
+    where d.run_id in (select r.id from project_runs r where r.extract_id = ${row.id}) and d.org_id = ${row.org_id}
     union
     select d.id from documents d
-    where d.workspace_id = ${row.workspace_id} and d.run_id is null and left(d.source_key, ${prefix.length}) = ${prefix}
+    where d.project_id = ${row.project_id} and d.run_id is null and left(d.source_key, ${prefix.length}) = ${prefix}
   `;
   const found = new Set(base.map((item) => item.id));
-  // Copies made from them, breadth-first: they stay in the workspace (extract documents are never dedup
-  // sources across workspaces), and the chain columns are indexed (migration 0088).
+  // Copies made from them, breadth-first: they stay in the project (extract documents are never dedup
+  // sources across projects), and the chain columns are indexed (migration 0088).
   let frontier = [...found];
   for (let depth = 0; frontier.length > 0 && depth < 20; depth += 1) {
     const ids = sql.array(frontier);
     const next = await sql<{ id: string }[]>`
-      select id from documents where workspace_id = ${row.workspace_id} and previous_version_id = any(${ids})
-      union select id from documents where workspace_id = ${row.workspace_id} and reindex_of = any(${ids})
-      union select id from documents where workspace_id = ${row.workspace_id} and reused_from_document_id = any(${ids})
+      select id from documents where project_id = ${row.project_id} and previous_version_id = any(${ids})
+      union select id from documents where project_id = ${row.project_id} and reindex_of = any(${ids})
+      union select id from documents where project_id = ${row.project_id} and reused_from_document_id = any(${ids})
       union select id from documents where deduped_from_document_id = any(${ids}) and org_id = ${row.org_id}
     `;
     frontier = next.map((item) => item.id).filter((id) => !found.has(id));
@@ -786,7 +784,7 @@ async function extractDocumentIds(row: Pick<DeletionClaim, "id" | "org_id" | "wo
  */
 export async function deleteExtract(row: DeletionClaim): Promise<{ objects: number; bytes: number; done: boolean; lagSeconds: number }> {
   const runs = await sql<{ id: string; status: string }[]>`
-    select id, status from workspace_runs where extract_id = ${row.id} and org_id = ${row.org_id}
+    select id, status from project_runs where extract_id = ${row.id} and org_id = ${row.org_id}
   `;
   const active = runs.filter((candidate) => ACTIVE_RUN_STATUSES.includes(candidate.status));
   if (active.length > 0) {
@@ -796,7 +794,7 @@ export async function deleteExtract(row: DeletionClaim): Promise<{ objects: numb
         if (!/not found/i.test(message)) console.warn(`[extract-retention] could not cancel workflow run=${run.id}: ${message}`);
       });
       await sql`
-        update workspace_runs
+        update project_runs
         set status = 'failed', control_state = 'cancelled', control_requested_at = now(),
             error = 'The extract expired.', lease_expires_at = now(), updated_at = now()
         where id = ${run.id} and status = any(${sql.array(ACTIVE_RUN_STATUSES)})
@@ -853,7 +851,7 @@ export async function deleteExtract(row: DeletionClaim): Promise<{ objects: numb
     set state = 'deleted', deleted_at = now(), relist_after = now() + make_interval(hours => ${RELIST_AFTER_HOURS}),
       lease_expires_at = null, last_error = null, updated_at = now()
     where id = ${row.id}
-      and not exists (select 1 from workspace_runs r where r.extract_id = ${row.id})
+      and not exists (select 1 from project_runs r where r.extract_id = ${row.id})
     returning extract(epoch from now() - expires_at)::int as lag_seconds, deleted_objects::text as total_objects, deleted_bytes::text as total_bytes
   `;
   if (!finished) {
@@ -869,7 +867,7 @@ async function deleteExtractRows(row: DeletionClaim, runIds: string[]): Promise<
   const documentIds = await extractDocumentIds(row);
   if (documentIds.length > 0 || runIds.length > 0) {
     // Withdraw any zip holding the extract's documents (its own download, and
-    // workspace exports that included them, queued ones too) before they go.
+    // project exports that included them, queued ones too) before they go.
     const exported = await sql<{ id: string; object_key: string }[]>`
       select x.id, x.object_key from document_exports x
       where x.org_id = ${row.org_id} and (
@@ -878,11 +876,11 @@ async function deleteExtractRows(row: DeletionClaim, runIds: string[]): Promise<
         or x.document_id = any(${sql.array(documentIds)})
       )
     `;
-    // A workspace export still being built has no document_ids yet and may be zipping these
+    // A project export still being built has no document_ids yet and may be zipping these
     // documents right now: stop it (only a running export can become ready). The user can export again.
     await sql`update document_exports set status = 'failed', completed_at = now(),
         error = 'Some documents were deleted while this export was being built. Export again.'
-      where org_id = ${row.org_id} and workspace_id = ${row.workspace_id} and run_id is null
+      where org_id = ${row.org_id} and project_id = ${row.project_id} and run_id is null
         and status in ('queued', 'running') and document_ids = '{}'::text[]`;
     for (const item of exported) {
       if (!item.object_key.endsWith("/") && !item.object_key.startsWith(`${row.storage_prefix}/`)) await deleteUploadedObject(item.object_key);
@@ -892,13 +890,13 @@ async function deleteExtractRows(row: DeletionClaim, runIds: string[]): Promise<
     // documents go. The chat turns stay; they are the user's own conversation.
     for (let index = 0; index < documentIds.length; index += DOCUMENT_DELETE_BATCH) {
       await sql`delete from chat_answer_evidence_spans
-        where workspace_id = ${row.workspace_id} and citation ->> 'documentId' = any(${sql.array(documentIds.slice(index, index + DOCUMENT_DELETE_BATCH))})`;
+        where project_id = ${row.project_id} and citation ->> 'documentId' = any(${sql.array(documentIds.slice(index, index + DOCUMENT_DELETE_BATCH))})`;
     }
     for (let index = 0; index < documentIds.length; index += DOCUMENT_DELETE_BATCH) {
       await sql`delete from documents where id = any(${sql.array(documentIds.slice(index, index + DOCUMENT_DELETE_BATCH))}) and org_id = ${row.org_id}`;
     }
-    if (runIds.length > 0) await sql`delete from workspace_runs where id = any(${sql.array(runIds)}) and extract_id = ${row.id}`;
-    await notifySearchEligibilityChanged(sql, [row.workspace_id]).catch(() => undefined);
+    if (runIds.length > 0) await sql`delete from project_runs where id = any(${sql.array(runIds)}) and extract_id = ${row.id}`;
+    await notifySearchEligibilityChanged(sql, [row.project_id]).catch(() => undefined);
   }
   await sql`update extracts set rows_deleted_at = coalesce(rows_deleted_at, now()) where id = ${row.id}`;
 }

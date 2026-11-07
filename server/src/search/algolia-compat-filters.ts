@@ -98,7 +98,7 @@ const MAX_PARAM_DEPTH = 2;
 /** Postgres/filesystem filenames are at most 255 characters. */
 const MAX_FILENAME_LENGTH = 255;
 
-/** Bounds keep filter parsing cheap for browser keys before any workspace lookup. */
+/** Bounds keep filter parsing cheap for browser keys before any project lookup. */
 const MAX_FILTERS_BYTES = 8 * 1024;
 const MAX_CLAUSE_LENGTH = 1024;
 const MAX_CLAUSES = 100;

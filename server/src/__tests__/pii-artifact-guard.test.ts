@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { parseArtifactUri } from "@docslurp/shared";
 
 const sqlMock = vi.fn();
-const listAccessibleWorkspaceIdsMock = vi.fn();
+const listAccessibleProjectIdsMock = vi.fn();
 
 vi.mock("../db.js", () => ({
   sql: Object.assign(sqlMock, {
@@ -26,9 +26,9 @@ vi.mock("../lib/file-urls.js", () => ({
 }));
 
 vi.mock("../services/organizations.js", () => ({
-  getWorkspaceAccess: vi.fn(),
-  listAccessibleWorkspaceIds: listAccessibleWorkspaceIdsMock,
-  listEditableWorkspaceIds: vi.fn(async () => []),
+  getProjectAccess: vi.fn(),
+  listAccessibleProjectIds: listAccessibleProjectIdsMock,
+  listEditableProjectIds: vi.fn(async () => []),
 }));
 
 vi.mock("../services/run-creation.js", () => ({
@@ -62,8 +62,8 @@ function render(call: unknown[]): { text: string; values: unknown[] } {
 
 beforeEach(() => {
   sqlMock.mockReset();
-  listAccessibleWorkspaceIdsMock.mockReset();
-  listAccessibleWorkspaceIdsMock.mockResolvedValue(["ws-1"]);
+  listAccessibleProjectIdsMock.mockReset();
+  listAccessibleProjectIdsMock.mockResolvedValue(["ws-1"]);
 });
 
 describe("withheldArtifactUrisFromMetadata", () => {
@@ -75,7 +75,7 @@ describe("withheldArtifactUrisFromMetadata", () => {
 });
 
 describe("artifact access under the PII policy", () => {
-  it("refuses any URI a document in the caller's workspaces withholds", async () => {
+  it("refuses any URI a document in the caller's projects withholds", async () => {
     sqlMock.mockImplementation((...call: unknown[]) => {
       // Fragments are returned as tokens; the outer query resolves to a row.
       const { text } = render(call);

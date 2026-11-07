@@ -1,4 +1,5 @@
 import { instrumentFetch } from "@docslurp/shared/observability";
+import { estimateTextTokens } from "../token-estimate.js";
 import {
   authorizePrivateModelCall,
   isPrivateModelUri,
@@ -85,7 +86,7 @@ async function embedWithGemini(
   args: { model: string; query: string; journal: UsageRecorder; privacyMode: PrivacyMode; signal?: AbortSignal },
   deps: PageQueryEmbedderDeps,
 ): Promise<Float32Array | null> {
-  // Hosted: only `standard` workspaces may send query text to Google.
+  // Hosted: only `standard` projects may send query text to Google.
   if (!privacyModeAllowsHosted(args.privacyMode)) return null;
   const apiKey = deps.geminiApiKey ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY;
   if (!apiKey) return null;
@@ -109,7 +110,7 @@ async function embedWithGemini(
     model: modelId,
     metric: "page-query-embedding",
     // Actual provider usage; only a response without any usage falls back to an estimate, labelled as such.
-    inputTokens: reported ?? Math.ceil(args.query.length / 4),
+    inputTokens: reported ?? estimateTextTokens(args.query),
     metadata: { embedding: true, usageSource: reported === undefined ? "estimated" : "provider" },
   });
   return l2Normalize(values);

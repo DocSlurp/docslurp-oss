@@ -19,7 +19,7 @@ let exportsService: typeof import("../services/document-exports.js");
 let documents: typeof import("../services/documents.js");
 
 const MB = 1024 * 1024;
-const DOC_COLUMNS = "id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, file_size, stored_page_text_bytes";
+const DOC_COLUMNS = "id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, file_size, stored_page_text_bytes";
 
 beforeAll(async () => {
   const database = await startMigratedPostgres();
@@ -29,8 +29,8 @@ beforeAll(async () => {
   await sql`insert into "user" (id, name, email) values ('u', 'User', 'export@example.test'), ('stranger', 'S', 's@example.test')`;
   await sql`insert into organizations (id, name, slug, created_by_user_id) values ('o', 'Org', 'exports', 'u')`;
   await sql`insert into org_memberships (org_id, user_id, role) values ('o', 'u', 'owner')`;
-  await sql`insert into workspaces (id, org_id, user_id, name) values ('w', 'o', 'u', 'Finance / Q3'), ('empty', 'o', 'u', 'Empty')`;
-  await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts)
+  await sql`insert into projects (id, org_id, user_id, name) values ('w', 'o', 'u', 'Finance / Q3'), ('empty', 'o', 'u', 'Empty')`;
+  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts)
     values ('r', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', '{}', '{"small:page-1":"s3://b/p1.png","small:page-2":"s3://b/p2.png"}')`;
   await sql.unsafe(`insert into documents (${DOC_COLUMNS}) values
     ('small', 'o', 'u', 'w', 'r', 'Plan.pdf', 'application/pdf', 'k1', 'completed', ${2 * MB}, ${100 * 1024}),
@@ -46,7 +46,7 @@ beforeEach(async () => {
   await sql`delete from document_exports`;
 });
 
-const doc = (id: string, filename: string, status = "completed") => ({ id, filename, workspaceId: "w", orgId: "o", status });
+const doc = (id: string, filename: string, status = "completed") => ({ id, filename, projectId: "w", orgId: "o", status });
 const finance = { id: "w", name: "Finance / Q3", orgId: "o" };
 /** The hourly orphan scan runs when the sweep's clock has moved an hour on. */
 let clock = Date.now();
@@ -58,7 +58,7 @@ const markReady = (id: string, extra: { sizeBytes?: number; documentIds?: string
   where id = ${id}`;
 
 describe("document exports", () => {
-  it("queues a small export under exports/<org>/<workspace>/<export>/ on the small queue", async () => {
+  it("queues a small export under exports/<org>/<project>/<export>/ on the small queue", async () => {
     const exported = await exportsService.requestDocumentExport({ userId: "u", content: "markdown", document: doc("small", "Plan.pdf") });
 
     expect(exported).toMatchObject({ status: "queued", filename: "Plan.zip", documentCount: 1, notifyEmail: false, downloadUrl: null });
@@ -79,18 +79,18 @@ describe("document exports", () => {
 
     await expect(exportsService.requestDocumentExport({ userId: "u", content: "all", document: doc("huge", "Video.mp4") }))
       .rejects.toMatchObject({ status: 413, code: "payload_too_large" });
-    await expect(exportsService.requestDocumentExport({ userId: "u", content: "all", workspace: finance }))
+    await expect(exportsService.requestDocumentExport({ userId: "u", content: "all", project: finance }))
       .rejects.toMatchObject({ status: 413 });
-    await expect(exportsService.requestDocumentExport({ userId: "u", content: "markdown", workspace: { id: "empty", name: "Empty", orgId: "o" } }))
+    await expect(exportsService.requestDocumentExport({ userId: "u", content: "markdown", project: { id: "empty", name: "Empty", orgId: "o" } }))
       .rejects.toMatchObject({ status: 404 });
     await expect(exportsService.requestDocumentExport({ userId: "u", content: "markdown", document: doc("pending", "Draft.pdf", "processing") }))
       .rejects.toMatchObject({ status: 409, message: expect.stringContaining("still processing") });
   });
 
   it("reuses the same export asked for twice, and limits exports in flight and per day", async () => {
-    const first = await exportsService.requestDocumentExport({ userId: "u", content: "markdown", workspace: finance });
+    const first = await exportsService.requestDocumentExport({ userId: "u", content: "markdown", project: finance });
     expect(first.filename).toBe("Finance - Q3.zip");
-    const again = await Promise.all([1, 2, 3].map(() => exportsService.requestDocumentExport({ userId: "u", content: "markdown", workspace: finance })));
+    const again = await Promise.all([1, 2, 3].map(() => exportsService.requestDocumentExport({ userId: "u", content: "markdown", project: finance })));
     expect(new Set(again.map((entry) => entry.id))).toEqual(new Set([first.id]));
     expect(mocks.startWorkflow).toHaveBeenCalledTimes(1);
 
@@ -100,7 +100,7 @@ describe("document exports", () => {
       .rejects.toMatchObject({ status: 429, message: expect.stringContaining("in progress") });
 
     await sql`update document_exports set status = 'ready'`;
-    await sql`insert into document_exports (id, org_id, workspace_id, user_id, content, filename, object_key, status, expires_at)
+    await sql`insert into document_exports (id, org_id, project_id, user_id, content, filename, object_key, status, expires_at)
       select 'old-' || n, 'o', 'w', 'u', 'markdown', 'x.zip', 'exports/o/w/old/', 'ready', now() + interval '1 day' from generate_series(1, 17) as n`;
     await expect(exportsService.requestDocumentExport({ userId: "u", content: "markdown", document: doc("big", "Scan.pdf") }))
       .rejects.toMatchObject({ status: 429, message: expect.stringContaining("today's export limit") });
@@ -182,9 +182,9 @@ describe("document exports", () => {
     mocks.email.mockReset();
   });
 
-  it("withdraws a workspace export when a document in it is deleted", async () => {
+  it("withdraws a project export when a document in it is deleted", async () => {
     await sql.unsafe(`insert into documents (${DOC_COLUMNS}) values ('gone', 'o', 'u', 'w', 'r', 'Gone.pdf', 'application/pdf', 'k-gone', 'completed', 10, 10)`);
-    const exported = await exportsService.requestDocumentExport({ userId: "u", content: "markdown", workspace: finance });
+    const exported = await exportsService.requestDocumentExport({ userId: "u", content: "markdown", project: finance });
     await markReady(exported.id, { documentIds: ["small", "gone"] });
     await sql`delete from documents where id = 'gone'`;
 
@@ -210,7 +210,7 @@ describe("document exports", () => {
     expect(await sql`select id from document_exports where id = ${exported.id}`).toEqual([]);
   });
 
-  it("does not email someone removed from the workspace since asking", async () => {
+  it("does not email someone removed from the project since asking", async () => {
     await sql`insert into "user" (id, name, email) values ('removed', 'Removed', 'removed@example.test')`;
     await sql`insert into org_memberships (org_id, user_id, role) values ('o', 'removed', 'owner')`;
     const exported = await exportsService.requestDocumentExport({ userId: "removed", content: "all", document: doc("big", "Scan.pdf") });

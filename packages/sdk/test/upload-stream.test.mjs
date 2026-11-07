@@ -20,33 +20,33 @@ async function withServer(run) {
     form.raw = bytes.toString();
     requests.push(form);
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ workspace: { id: "workspace" }, run: { id: "run" }, documents: [] }));
+    response.end(JSON.stringify({ project: { id: "project" }, run: { id: "run" }, documents: [] }));
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   try { await run(`http://127.0.0.1:${server.address().port}`, requests); }
   finally { await new Promise((resolve) => server.close(resolve)); }
 }
 
-test("direct Node streams preserve ranges, infer filenames, and set workspace options over defaults", async () => {
+test("direct Node streams preserve ranges, infer filenames, and set project options over defaults", async () => {
   const dir = await mkdtemp(join(tmpdir(), "docslurp-sdk-stream-"));
   try {
     const path = join(dir, "handbook.pdf");
     await writeFile(path, "prefixDOCUMENTsuffix");
     await withServer(async (apiUrl, requests) => {
-      const client = createDocSlurpClient({ apiUrl, apiKey: "key", workspace: "client-default" });
+      const client = createDocSlurpClient({ apiUrl, apiKey: "key", project: "client-default" });
       const source = createReadStream(path, { start: 6, end: 13, highWaterMark: 2 });
-      assert.equal((await client.upload(source, { directUpload: false, workspace: "override", tags: ["streamed"] })).run.id, "run");
+      assert.equal((await client.upload(source, { directUpload: false, project: "override", tags: ["streamed"] })).run.id, "run");
       assert.equal(requests[0].get("files").name, "handbook.pdf");
       assert.equal(await requests[0].get("files").text(), "DOCUMENT");
-      assert.equal(requests[0].get("workspace"), "override");
+      assert.equal(requests[0].get("project"), "override");
       assert.deepEqual(JSON.parse(requests[0].get("tags")), ["streamed"]);
       assert.equal(source.destroyed, true);
-      await client.upload(createReadStream(path, { encoding: "hex", start: 6, end: 7 }), { directUpload: false, filename: 'named"\r\n.pdf', workspace: "" });
+      await client.upload(createReadStream(path, { encoding: "hex", start: 6, end: 7 }), { directUpload: false, filename: 'named"\r\n.pdf', project: "" });
       assert.equal(await requests[1].get("files").text(), Buffer.from("DO").toString("hex"));
       assert.equal(requests[1].get("files").name, 'named"\r\n.pdf');
       assert.match(requests[1].raw, /filename="named%22%0D%0A.pdf"/);
-      // An empty per-call ID falls back to the client's workspace.
-      assert.equal(requests[1].get("workspace"), "client-default");
+      // An empty per-call ID falls back to the client's project.
+      assert.equal(requests[1].get("project"), "client-default");
       const handle = await open(path);
       try {
         await client.upload(createReadStream(join(dir, "not-present.txt"), { fd: handle.fd, autoClose: false, start: 6, end: 7 }), { directUpload: false });

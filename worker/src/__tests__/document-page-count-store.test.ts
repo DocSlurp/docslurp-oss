@@ -1,0 +1,117 @@
+import type { PGlite } from "@electric-sql/pglite";
+import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+import { Store } from "../db/store.js";
+import { createMigratedDatabase } from "../test/migrated-db.js";
+import { serveOnRandomPort } from "../test/migrated-postgres.js";
+
+/** documents.billing_pages: the worker records the pages it measured for an Office file beside intake's page basis, scoped to its own run. */
+let db: PGlite;
+let server: PGLiteSocketServer;
+let store: Store;
+
+beforeAll(async () => {
+  db = await createMigratedDatabase();
+  await db.exec(`
+    insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
+    insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'One', 'one', 'u1');
+    insert into projects(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W');
+    insert into project_runs(id, org_id, user_id, project_id, kind, status, stage) values ('run1', 'o1', 'u1', 'w1', 'bulk', 'processing', 'queued');
+    insert into project_runs(id, org_id, user_id, project_id, kind, status, stage) values ('run2', 'o1', 'u1', 'w1', 'bulk', 'processing', 'queued');
+    insert into documents(id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, file_facts)
+      values ('long-docx', 'o1', 'u1', 'w1', 'run1', 'contract.docx',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'k1', 'processing', 1,
+        '{"mimeType":"application/vnd.openxmlformats-officedocument.wordprocessingml.document","format":"office-word","mismatch":"same-family","declaredMimeType":"application/msword","sniffedMimeType":"application/vnd.openxmlformats-officedocument.wordprocessingml.document","container":"zip","encoding":null}');
+    insert into documents(id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
+      values ('other-run', 'o1', 'u1', 'w1', 'run2', 'b.docx', 'application/msword', 'k2', 'processing', 1);
+    insert into documents(id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, deduped_from_document_id)
+      values ('copy', 'o1', 'u1', 'w1', 'run1', 'copy.docx', 'application/msword', 'k3', 'processing', 1, 'long-docx');
+  `);
+  const served = await serveOnRandomPort(db);
+  server = served.server;
+  store = new Store(`postgres://postgres@127.0.0.1:${served.port}/postgres`, 60_000, {
+    poolMax: 1,
+    workerSlots: { ttlMs: 60_000, globalCap: 0, defaultOrgSlots: 2 },
+  });
+}, 120_000);
+
+afterAll(async () => {
+  await store?.close();
+  await server?.stop();
+  await db?.close();
+});
+
+describe("Store.setDocumentBillingPages", () => {
+  it("records a long DOCX's measured pages as billing pages and leaves the page basis alone", async () => {
+    expect(await store.setDocumentBillingPages("run1", "long-docx", 300, "pdf-conversion")).toBe(true);
+    const [row] = (await db.query<{ page_count: number; billing_pages: number; billing_pages_method: string }>(
+      `select page_count, billing_pages, billing_pages_method from documents where id = 'long-docx'`)).rows;
+    expect(row).toEqual({ page_count: 1, billing_pages: 300, billing_pages_method: "pdf-conversion" });
+    const document = await store.loadDocument("long-docx");
+    expect(document).toMatchObject({ pageCount: 1, billingPages: 300, fileFacts: { format: "office-word", mismatch: "same-family", declaredMimeType: "application/msword" } });
+  }, 60_000);
+
+  it("never writes another run's document or a deduplicated copy", async () => {
+    expect(await store.setDocumentBillingPages("run1", "other-run", 999, "pdf-conversion")).toBe(false);
+    expect(await store.setDocumentBillingPages("run1", "copy", 999, "pdf-conversion")).toBe(false);
+    expect(await store.setDocumentBillingPages("run1", "missing", 999, "pdf-conversion")).toBe(false);
+    const rows = (await db.query<{ id: string; billing_pages: number | null }>(`select id, billing_pages from documents where id in ('other-run','copy') order by id`)).rows;
+    expect(rows).toEqual([{ id: "copy", billing_pages: null }, { id: "other-run", billing_pages: null }]);
+  }, 60_000);
+
+  it("refuses a negative billing count at the database; 0 is a measured empty file (migration 0130)", async () => {
+    await expect(store.setDocumentBillingPages("run1", "long-docx", -1, "pdf-conversion")).rejects.toThrow();
+  }, 60_000);
+});
+
+describe("Store.setDocumentFileFacts", () => {
+  const full = {
+    declaredMimeType: "application/msword",
+    sniffedMimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    format: "office-excel",
+    container: "zip",
+    encoding: null,
+    mismatch: "corrected",
+    inspection: "full",
+  } as never;
+
+  it("replaces a document's provisional facts and MIME type with the worker's full inspection", async () => {
+    expect(await store.setDocumentFileFacts("run1", "long-docx", full)).toBe(true);
+    const document = await store.loadDocument("long-docx");
+    expect(document).toMatchObject({ mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileFacts: { inspection: "full", mismatch: "corrected" } });
+  }, 60_000);
+
+  it("never writes another run's document or a deduplicated copy", async () => {
+    expect(await store.setDocumentFileFacts("run1", "other-run", full)).toBe(false);
+    expect(await store.setDocumentFileFacts("run1", "copy", full)).toBe(false);
+    expect(await store.setDocumentFileFacts("run1", "missing", full)).toBe(false);
+    const rows = (await db.query<{ id: string; mime_type: string }>(`select id, mime_type from documents where id in ('other-run','copy') order by id`)).rows;
+    expect(rows).toEqual([{ id: "copy", mime_type: "application/msword" }, { id: "other-run", mime_type: "application/msword" }]);
+  }, 60_000);
+});
+
+describe("Store.triggerWebhooks", () => {
+  it("queues a failed run's event with the public error, never the raw worker diagnostic", async () => {
+    await db.exec(`
+      insert into webhooks(id, user_id, org_id, url, secret, events) values ('hook', 'u1', 'o1', 'https://hooks.example/x', 's', '{"run.failed"}');
+      update project_runs set status = 'failed', stage = 'embed',
+        error = 'connect ECONNREFUSED 10.0.3.7:5432 at Pool.connect (/app/worker/src/db/store.ts:123) password=hunter2'
+        where id = 'run1';
+    `);
+    await store.triggerWebhooks("run1", "run.failed");
+    const [row] = (await db.query<{ payload: Record<string, unknown> }>(`select payload from webhook_outbox where payload->>'runId' = 'run1'`)).rows;
+    expect(row!.payload).toMatchObject({ event: "run.failed", runId: "run1", projectId: "w1", status: "failed" });
+    expect(JSON.stringify(row!.payload)).not.toMatch(/ECONNREFUSED|10\.0\.3\.7|hunter2|store\.ts/);
+    expect(typeof row!.payload.error).toBe("string");
+  }, 60_000);
+
+  it("sends a null error for a run that did not fail", async () => {
+    await db.exec(`update project_runs set status = 'completed', error = null where id = 'run2'`);
+    await db.exec(`delete from webhook_outbox`);
+    await store.triggerWebhooks("run2", "run.failed");
+    const [row] = (await db.query<{ payload: Record<string, unknown> }>(`select payload from webhook_outbox`)).rows;
+    expect(row!.payload.error).toBeNull();
+  }, 60_000);
+});

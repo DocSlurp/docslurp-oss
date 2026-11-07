@@ -3,22 +3,22 @@ const dbMock = vi.hoisted(() => ({ capacity: null as { count: number; own: boole
 vi.mock("../db.js", () => { const sql = Object.assign(vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => { dbMock.calls.push([strings, ...values]); if (strings.join("").includes("insert into document_page_renders")) return [{generation:"2026-10-23 12:00:00+00"}]; return strings.join("").includes("count(*)") && dbMock.capacity ? [dbMock.capacity] : []; }), { begin: vi.fn(async (fn: (sql: unknown) => unknown) => fn(sql)) }); return { sql }; });
 vi.mock("../lib/temporal.js", () => ({ startPageRenderWorkflow: vi.fn() }));
 vi.mock("../services/documents.js", () => ({ getDocumentViewerPayload: vi.fn() }));
-vi.mock("../services/organizations.js", () => ({ getWorkspaceAccess: vi.fn(), canEditWorkspace: vi.fn() }));
+vi.mock("../services/organizations.js", () => ({ getProjectAccess: vi.fn(), canEditProject: vi.fn() }));
 vi.mock("../services/billing/spend-guard.js", () => ({ assertCanSpend: vi.fn() }));
 import { getDocumentViewerPayload } from "../services/documents.js";
-import { getWorkspaceAccess, canEditWorkspace } from "../services/organizations.js";
+import { getProjectAccess, canEditProject } from "../services/organizations.js";
 import { startPageRenderWorkflow } from "../lib/temporal.js";
 import { requestDocumentPageRender } from "../services/document-page-render.js";
-const viewer = { document: { id: "doc", runId: "run", orgId: "org", workspaceId: "workspace", mimeType: "application/pdf", status: "completed", pageCount: 3 }, artifacts: [], source: { url: "/source" } };
-beforeEach(() => { vi.clearAllMocks(); dbMock.capacity = null; dbMock.calls.length = 0; vi.mocked(getDocumentViewerPayload).mockResolvedValue(structuredClone(viewer) as never); vi.mocked(getWorkspaceAccess).mockResolvedValue({} as never); vi.mocked(canEditWorkspace).mockReturnValue(true); });
+const viewer = { document: { id: "doc", runId: "run", orgId: "org", projectId: "project", mimeType: "application/pdf", status: "completed", pageCount: 3 }, artifacts: [], source: { url: "/source" } };
+beforeEach(() => { vi.clearAllMocks(); dbMock.capacity = null; dbMock.calls.length = 0; vi.mocked(getDocumentViewerPayload).mockResolvedValue(structuredClone(viewer) as never); vi.mocked(getProjectAccess).mockResolvedValue({} as never); vi.mocked(canEditProject).mockReturnValue(true); });
 describe("exact page image requests", () => {
   it("never queues reads, missing pages, withheld sources or read-only users", async () => {
     expect(await requestDocumentPageRender("doc", 3, "user", false, () => {})).toMatchObject({ status: "pending" });
     expect(await requestDocumentPageRender("doc", 4, "user", true, () => {})).toEqual({ status: "missing" });
     expect(await requestDocumentPageRender("doc", 0, "user", true, () => {})).toEqual({ status: "missing" });
-    vi.mocked(canEditWorkspace).mockReturnValue(false);
+    vi.mocked(canEditProject).mockReturnValue(false);
     expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toEqual({ status: "missing" });
-    vi.mocked(canEditWorkspace).mockReturnValue(true);
+    vi.mocked(canEditProject).mockReturnValue(true);
     vi.mocked(getDocumentViewerPayload).mockResolvedValue({ ...viewer, source: { url: "" } } as never);
     expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toEqual({ status: "unavailable" });
     expect(startPageRenderWorkflow).not.toHaveBeenCalled();
@@ -46,7 +46,7 @@ describe("exact page image requests", () => {
   });
   it("requires editor access even when a POST could return cached pixels", async () => {
     vi.mocked(getDocumentViewerPayload).mockResolvedValue({ ...viewer, artifacts: [{ slot: "doc:raster-v3-reader-120dpi-page-3", url: "/signed", uri: "s3://page" }] } as never);
-    vi.mocked(canEditWorkspace).mockReturnValue(false);
+    vi.mocked(canEditProject).mockReturnValue(false);
     expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toEqual({ status: "missing" });
     expect(await requestDocumentPageRender("doc", 3, "user", false, () => {})).toMatchObject({ status: "ready" });
   });

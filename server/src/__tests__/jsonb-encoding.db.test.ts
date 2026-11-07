@@ -30,17 +30,17 @@ beforeAll(async () => {
   await sql`insert into "user" (id, name, email) values ('u', 'U', 'u@example.test')`;
   await sql`insert into organizations (id, name, slug, created_by_user_id, credit_balance_cents) values ('o', 'O', 'o', 'u', 1000)`;
   await sql`insert into org_memberships (org_id, user_id, role) values ('o', 'u', 'owner')`;
-  await sql`insert into workspaces (id, org_id, user_id, name) values ('w', 'o', 'u', 'W')`;
+  await sql`insert into projects (id, org_id, user_id, name) values ('w', 'o', 'u', 'W')`;
 }, 120_000);
 
 afterAll(async () => { await sql?.end(); await stop?.(); });
-beforeEach(() => { prepare.mockReset().mockResolvedValue({ pageCount: 1, sourceSha256: "abc" }); });
+beforeEach(() => { prepare.mockReset().mockResolvedValue({ pageCount: 1, sourceSha256: "abc", fileFacts: { mimeType: "application/pdf", format: "pdf", mismatch: "none" } }); });
 
 describe("jsonb values are stored as objects, not JSON strings", () => {
   it("stores documents.metadata as an object", async () => {
     const { runCreation } = await import("../services/run-creation.js");
     await runCreation.create({
-      userId: "u", workspaceId: "w", kind: "bulk-upload", pipeline: defaultPipelineFeatures,
+      userId: "u", projectId: "w", kind: "bulk-upload", pipeline: defaultPipelineFeatures,
       sources: { kind: "files", files: [{ filename: "a.pdf", mimeType: "application/pdf", sourceKey: "u/raw/a.pdf", metadata: { connectorFileId: "f1", connectorEtag: "e1" } }] },
     });
     const rows = await sql`select jsonb_typeof(metadata) as t, metadata->>'connectorFileId' as id from documents`;

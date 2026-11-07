@@ -5,8 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { apiErrorEnvelopeSchema, PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 import { apiErrorResponse, apiStatusError, nativeApiErrors, nativeBodyLimit, nativeErrorHandler, usesNativeErrorEnvelope } from "../lib/api-error.js";
 import { apiPublicErrorMiddleware, publicErrorMiddleware } from "../lib/public-errors.js";
-import { ApiKeyWorkspaceNotAllowedError } from "../lib/request-actor.js";
-import { WorkspaceAccessError } from "../services/default-workspace.js";
+import { ApiKeyProjectNotAllowedError } from "../lib/request-actor.js";
+import { ProjectAccessError } from "../services/default-project.js";
 import { SpendBlockedError, spendAwareErrorHandler, spendBlockedResponse } from "../services/billing/spend-guard.js";
 import { validationHook } from "../lib/validation.js";
 import { zValidator } from "@hono/zod-validator";
@@ -21,25 +21,25 @@ function guarded(router: Hono) {
 }
 
 describe("thrown errors inside a native router", () => {
-  it("answers ApiKeyWorkspaceNotAllowedError with the workspace_not_found envelope", async () => {
+  it("answers ApiKeyProjectNotAllowedError with the project_not_found envelope", async () => {
     const router = new Hono()
       .use("*", nativeApiErrors)
-      .get("/blocked", () => { throw new ApiKeyWorkspaceNotAllowedError(); });
+      .get("/blocked", () => { throw new ApiKeyProjectNotAllowedError(); });
     const response = await guarded(router).request("/blocked");
     expect(response.status).toBe(404);
     const body = await response.json();
-    expect(body).toEqual({ error: { code: "workspace_not_found", message: PUBLIC_ERROR_MESSAGES.workspaceMissing, requestId: "req-uniform" } });
+    expect(body).toEqual({ error: { code: "project_not_found", message: PUBLIC_ERROR_MESSAGES.projectMissing, requestId: "req-uniform" } });
     expect(apiErrorEnvelopeSchema.safeParse(body).success).toBe(true);
   });
 
-  it("maps workspace access errors to the closed vocabulary", async () => {
+  it("maps project access errors to the closed vocabulary", async () => {
     const router = new Hono()
       .use("*", nativeApiErrors)
-      .get("/org", () => { throw new WorkspaceAccessError(404, "organization_not_found", "Organization not found"); })
-      .get("/forbidden", () => { throw new WorkspaceAccessError(403, "workspace_forbidden", "Default workspace is not accessible"); });
+      .get("/org", () => { throw new ProjectAccessError(404, "organization_not_found", "Organization not found"); })
+      .get("/forbidden", () => { throw new ProjectAccessError(403, "project_forbidden", "Default project is not accessible"); });
     const app = guarded(router);
     expect((await (await app.request("/org")).json()).error.code).toBe("organization_not_found");
-    expect((await (await app.request("/forbidden")).json()).error.code).toBe("workspace_forbidden");
+    expect((await (await app.request("/forbidden")).json()).error.code).toBe("project_forbidden");
   });
 
   it("keeps the headers of the error response (Retry-After, WWW-Authenticate)", async () => {
@@ -73,7 +73,7 @@ describe("app-level error handler", () => {
     hono.use("*", async (c, next) => { c.set("requestId", "req-app"); await next(); });
     hono.use("*", apiPublicErrorMiddleware);
     hono.get("/v1/spend", () => { throw new SpendBlockedError("Out of credits", "credit_exhausted"); });
-    hono.get("/v1/workspace", () => { throw new WorkspaceAccessError(404, "workspace_not_found", "Workspace not found"); });
+    hono.get("/v1/project", () => { throw new ProjectAccessError(404, "project_not_found", "Project not found"); });
     hono.get("/v1/boom", () => { throw new Error("postgres password=secret"); });
     hono.get("/v1/chat/completions", () => { throw new SpendBlockedError("Out of credits", "credit_exhausted"); });
     return hono;
@@ -95,9 +95,9 @@ describe("app-level error handler", () => {
     const spend = await hono.request("/v1/spend");
     expect(spend.status).toBe(402);
     expect(await spend.json()).toMatchObject({ error: { code: "credit_exhausted", requestId: "req-app" } });
-    const workspace = await hono.request("/v1/workspace");
-    expect(workspace.status).toBe(404);
-    expect(await workspace.json()).toMatchObject({ error: { code: "workspace_not_found" } });
+    const project = await hono.request("/v1/project");
+    expect(project.status).toBe(404);
+    expect(await project.json()).toMatchObject({ error: { code: "project_not_found" } });
     const boom = await hono.request("/v1/boom");
     expect(boom.status).toBe(500);
     const body = await boom.json();
@@ -266,15 +266,15 @@ describe("native request-size and validation errors", () => {
     const hono = new Hono();
     hono.get("/a", (c) => apiStatusError(c, 409, "x", { code: "invite_expired" }));
     hono.get("/b", (c) => apiStatusError(c, 402, "x", { code: "credit_exhausted" }));
-    hono.get("/c", (c) => apiErrorResponse(c, 404, "workspace_not_found", "x"));
+    hono.get("/c", (c) => apiErrorResponse(c, 404, "project_not_found", "x"));
     expect((await (await hono.request("/a")).json()).error.code).toBe("conflict");
     expect((await (await hono.request("/b")).json()).error.code).toBe("credit_exhausted");
-    expect((await (await hono.request("/c")).json()).error.code).toBe("workspace_not_found");
+    expect((await (await hono.request("/c")).json()).error.code).toBe("project_not_found");
   });
 });
 
 describe("usesNativeErrorEnvelope", () => {
-  it.each(["/v1/search", "/v1/workspaces/ws/chat", "/v1/uploads/bulk", "/v1/session-tools/tools/x", "/dashboard/bootstrap", "/meta/config"])("treats %s as the native API", (path) => {
+  it.each(["/v1/search", "/v1/projects/ws/chat", "/v1/uploads/bulk", "/v1/session-tools/tools/x", "/dashboard/bootstrap", "/meta/config"])("treats %s as the native API", (path) => {
     expect(usesNativeErrorEnvelope(path)).toBe(true);
   });
   it.each(["/v1/mcp", "/v1/mcp/tools/x", "/v1/chat/completions", "/v1/models", "/compat/algolia/1/indexes/x/query", "/oauth/mcp/token", "/webhooks/stripe", "/.well-known/oauth-authorization-server", "/health", "/docs"])(

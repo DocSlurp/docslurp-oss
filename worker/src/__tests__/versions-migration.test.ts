@@ -56,10 +56,10 @@ describe("migration 0065 versions, retention and config jobs", () => {
     await db.exec(`
       insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
       insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
-      insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+      insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
         values ('run-1', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{}', 1);
-      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
         values ('d1', 'o1', 'u1', 'w', 'run-1', 'a.pdf', 'application/pdf', 'k1', 'processing', 3);
     `);
   }, 120_000);
@@ -77,18 +77,18 @@ describe("migration 0065 versions, retention and config jobs", () => {
       `select source_path, archived_at, index_config_hash from documents where id = 'd1'`);
     expect(d.rows[0]).toEqual({ source_path: "", archived_at: null, index_config_hash: null });
     const w = await db.query<{ a: boolean; r: unknown; p: unknown }>(
-      `select auto_confirm_reindex a, retain_document_versions r, index_configs p from workspaces where id = 'w'`);
+      `select auto_confirm_reindex a, retain_document_versions r, index_configs p from projects where id = 'w'`);
     expect(w.rows[0]).toEqual({ a: false, r: null, p: null });
     const o = await db.query<{ r: unknown }>(`select retain_document_versions r from organizations where id = 'o1'`);
     expect(o.rows[0]!.r).toBeNull();
-    const r = await db.query<{ b: unknown; j: unknown }>(`select blocked_reason b, job_id j from workspace_runs where id = 'run-1'`);
+    const r = await db.query<{ b: unknown; j: unknown }>(`select blocked_reason b, job_id j from project_runs where id = 'run-1'`);
     expect(r.rows[0]).toEqual({ b: null, j: null });
     const re = await db.query<{ r: unknown }>(`select reindex_of r from documents where id = 'd1'`);
     expect(re.rows[0]!.r).toBeNull();
   });
 
   it("enforces check constraints", async () => {
-    for (const t of ["organizations", "workspaces"]) {
+    for (const t of ["organizations", "projects"]) {
       const id = t === "organizations" ? "o1" : "w";
       await expect(db.exec(`update ${t} set retain_document_versions = 0 where id = '${id}'`)).rejects.toThrow();
       await expect(db.exec(`update ${t} set retain_document_versions = 101 where id = '${id}'`)).rejects.toThrow();
@@ -96,11 +96,11 @@ describe("migration 0065 versions, retention and config jobs", () => {
       await db.exec(`update ${t} set retain_document_versions = 100 where id = '${id}'`);
       await db.exec(`update ${t} set retain_document_versions = null where id = '${id}'`);
     }
-    await expect(db.exec(`update workspace_runs set blocked_reason = 'nope' where id = 'run-1'`)).rejects.toThrow();
+    await expect(db.exec(`update project_runs set blocked_reason = 'nope' where id = 'run-1'`)).rejects.toThrow();
     for (const reason of ["credits", "budget", "policy"]) {
-      await db.exec(`update workspace_runs set status = 'blocked', blocked_reason = '${reason}' where id = 'run-1'`);
+      await db.exec(`update project_runs set status = 'blocked', blocked_reason = '${reason}' where id = 'run-1'`);
     }
-    await db.exec(`update workspace_runs set status = 'processing', blocked_reason = null where id = 'run-1'`);
+    await db.exec(`update project_runs set status = 'processing', blocked_reason = null where id = 'run-1'`);
   });
 
   it("SQL docslurp_version_key equals the reference TS algorithm for the sample inputs", async () => {
@@ -123,7 +123,7 @@ describe("migration 0065 versions, retention and config jobs", () => {
     const doc = (id: string, name: string, status: string, day: string, prev: string | null) =>
       `('${id}','o1','u1','w','run-1','${name}','application/pdf','k-${id}','${status}',1,'2026-02-${day}',${prev ? `'${prev}'` : "null"})`;
     await db.exec(`
-      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, created_at, previous_version_id) values
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, created_at, previous_version_id) values
         ${doc("u1a", "Same.pdf", "completed", "01", null)},
         ${doc("u2a", "same.PDF", "completed", "02", null)},
         ${doc("c1", "Chain.pdf", "completed", "01", null)},
@@ -138,7 +138,8 @@ describe("migration 0065 versions, retention and config jobs", () => {
     const stmts = m.split("--> statement-breakpoint").map((s) => s.trim())
       .filter((s) => /^(--[^\n]*\n)*\s*(WITH RECURSIVE[\s\S]*?\)\s*)?UPDATE documents/i.test(s) && !/ALTER|CREATE/i.test(s.slice(0, 40)));
     expect(stmts).toHaveLength(2);
-    for (const s of stmts) await db.exec(s);
+    // Rebind only the historical backfill column to this fully migrated fixture.
+    for (const s of stmts) await db.exec(s.replaceAll("workspace_id", "project_id"));
     const rows = await db.query<{ id: string; canonical_id: string; superseded_at: unknown; by: string | null }>(
       `select id, canonical_id, superseded_at, superseded_by_document_id by from documents
        where id in ('u1a','u2a','c1','c2','f1','f2') order by id`);

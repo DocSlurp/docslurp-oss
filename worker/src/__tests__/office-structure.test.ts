@@ -16,7 +16,7 @@ const deck = { slideCount: 3, slides: [
 const deckMarkdown = "## Quarterly Roadmap\n\nPlatform team review\n\n## Cost per thousand pages\n\nSpend dropped eighteen percent\n\nSource: finance dashboard\n\n## Risks";
 
 describe("slide locators", () => {
-  const doc = enrichCanonicalDocumentWithPptx(buildCanonicalDocumentFromMarkdown({ documentId: "p", text: deckMarkdown, pageCount: 1, extractor: "kreuzberg" }), deck);
+  const doc = enrichCanonicalDocumentWithPptx(buildCanonicalDocumentFromMarkdown({ documentId: "p", text: deckMarkdown, pageCount: 1, extractor: "pptx" }), deck);
   const chunks = buildCanonicalChunksFromDocument(doc, "deck.pptx", { maxChars: 4000 });
   it("assigns each block to its slide with the matching shape box", () => {
     const spend = doc.blocks.find(b => b.text.startsWith("Spend"))!;
@@ -61,7 +61,7 @@ describe("sheet locators", () => {
     { name: "Budget", csv: "Item,Cost\nParser,1200\nASR,300\n", firstRow: 1, firstCol: 1, lastRow: 3, lastCol: 2, headerRow: 1, dataRows: [2, 3] },
   ] };
   const md = "## Timeline\n\n| Milestone | Owner | Due |\n| --- | --- | --- |\n| Design review | Ana | 2026-10-20 |\n| Security review | Bo | 2026-10-27 |\n| Launch | Cy | 2026-10-30 |\n\n## Budget\n\n| Item | Cost |\n| --- | --- |\n| Parser | 1200 |\n| ASR | 300 |";
-  const doc = enrichCanonicalDocumentWithXlsx(buildCanonicalDocumentFromMarkdown({ documentId: "x", text: md, pageCount: 1, extractor: "kreuzberg" }), book);
+  const doc = enrichCanonicalDocumentWithXlsx(buildCanonicalDocumentFromMarkdown({ documentId: "x", text: md, pageCount: 1, extractor: "xlsx" }), book);
   const chunks = buildCanonicalChunksFromDocument(doc, "book.xlsx", { maxChars: 4000 });
   const sheet = (predicate: (c: (typeof chunks)[number]) => boolean) => chunks.find(predicate)?.locator;
   it("gives the whole table, each row and each cell an absolute A1 range with the header row", () => {

@@ -1,18 +1,18 @@
 # Document versions and retention
 
-Uploading a file whose workspace, folder path and filename match an earlier upload creates a new version of the same document. Search, chat and suggestions only ever see the newest version. Older versions stay readable until retention removes them.
+Uploading a file whose project, folder path and filename match an earlier upload creates a new version of the same document. Search, chat and suggestions only ever see the newest version. Older versions stay readable until retention removes them.
 
 ## Version identity
 
 A document's version key is, in order:
 
 1. `canonicalId`, when you supply one on upload.
-2. Otherwise `path:` plus a hash of the workspace id, the normalized folder path and the filename.
+2. Otherwise `path:` plus a hash of the project id, the normalized folder path and the filename.
 
 Normalization applies Unicode NFC, case folding, `\` to `/`, collapsed repeated slashes, and trimmed slashes and whitespace. A `..` segment, or a path longer than 1024 characters, is rejected.
 
-- The same filename in two folders of one workspace gives two independent chains, both live.
-- The same filename in two workspaces gives two chains.
+- The same filename in two folders of one project gives two independent chains, both live.
+- The same filename in two projects gives two chains.
 - Identical bytes still create a new version. Content-hash deduplication shares stored artifacts between the copies, but the upload is not skipped.
 - Re-uploading while the previous version is still processing is safe: the newer upload becomes current when it finishes, and a late older one is superseded on arrival.
 
@@ -23,7 +23,7 @@ await client.upload({ files: [file], path: "contracts/2026" });
 ```
 
 ```bash
-docslurp upload nda.pdf --workspace legal --path contracts/2026
+docslurp upload nda.pdf --project legal --path contracts/2026
 ```
 
 HTTP, MCP and drag-and-drop folder uploads carry the same `path`.
@@ -34,19 +34,19 @@ Retention is the number of versions kept per document, counting the current one.
 
 | Setting | Effective value |
 | --- | --- |
-| Workspace override | Used when set. |
-| Organization setting | Used when the workspace has no override. |
+| Project override | Used when set. |
+| Organization setting | Used when the project has no override. |
 | Default | 2 (current plus one earlier version), for every organization. |
 
 Valid overrides are 1 to 100; `null` clears an override.
 
 ```ts
 await client.setRetention({ orgId }, 5);                       // organization default
-await client.setRetention({ workspace: "legal" }, 10);          // workspace override
-await client.setRetention({ workspace: "legal" }, null);        // inherit again
+await client.setRetention({ project: "legal" }, 10);          // project override
+await client.setRetention({ project: "legal" }, null);        // inherit again
 ```
 
-Both calls `PATCH` `retainDocumentVersions` on `/v1/organizations/:id` or `/v1/workspaces/:id`. Lowering the value takes effect at the next purge, which archives or purges the extra versions.
+Both calls `PATCH` `retainDocumentVersions` on `/v1/organizations/:id` or `/v1/projects/:id`. Lowering the value takes effect at the next purge, which archives or purges the extra versions.
 
 ## Archived versions
 
@@ -64,7 +64,7 @@ Retention works the same for every organization, on hosted and self-hosted deplo
 
 ## Upgrading existing data
 
-A one-time migration gives every live document without a version key a chain and keeps only the newest completed version per chain current. Older rows had no folder, so same-named files count as one chain only when `previous_version_id` links them. Where old links crossed workspaces, the migration does not follow them, so it leaves more legacy duplicates live than the new upload rules would. Re-uploading a file supersedes its legacy duplicate going forward.
+A one-time migration gives every live document without a version key a chain and keeps only the newest completed version per chain current. Older rows had no folder, so same-named files count as one chain only when `previous_version_id` links them. Where old links crossed projects, the migration does not follow them, so it leaves more legacy duplicates live than the new upload rules would. Re-uploading a file supersedes its legacy duplicate going forward.
 
 ## Version picker
 

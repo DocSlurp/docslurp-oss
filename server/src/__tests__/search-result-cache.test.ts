@@ -41,9 +41,9 @@ describe("result cache keys", () => {
 describe("lanceDbVectorSearch result cache", () => {
   let dir: string;
   const rec = (id: string, documentId: string, vector: number[]) => ({ id, documentId, text: id, vector });
-  const location = (workspaceId: string) => VectorNamespaceManager.getEmbeddingLocation(dir, "org-a", workspaceId, "m", 2);
-  const search = (workspaceId = "ws-a", documentIds?: string[]) => collectSearchTimings(() =>
-    lanceDbVectorSearch({ orgId: "org-a", workspaceId, embeddingModel: "m", queryVector: [1, 0], documentIds, limit: 5 }));
+  const location = (projectId: string) => VectorNamespaceManager.getEmbeddingLocation(dir, "org-a", projectId, "m", 2);
+  const search = (projectId = "ws-a", documentIds?: string[]) => collectSearchTimings(() =>
+    lanceDbVectorSearch({ orgId: "org-a", projectId, embeddingModel: "m", queryVector: [1, 0], documentIds, limit: 5 }));
 
   beforeEach(async () => {
     dir = await mkdtemp(path.join(tmpdir(), "docslurp-result-cache-"));
@@ -51,9 +51,9 @@ describe("lanceDbVectorSearch result cache", () => {
     process.env.SEARCH_RESULT_CACHE_MAX_ENTRIES = "50";
     resetLanceDbConnectionForTests();
     resetResultCacheForTests();
-    for (const [workspaceId, rows] of [["ws-a", [rec("a1", "d1", [1, 0]), rec("a2", "d2", [0.9, 0.1])]], ["ws-b", [rec("b1", "d9", [1, 0])]]] as const) {
-      const db = await lancedb.connect(location(workspaceId).uri);
-      (await db.createTable(location(workspaceId).table, [...rows])).close();
+    for (const [projectId, rows] of [["ws-a", [rec("a1", "d1", [1, 0]), rec("a2", "d2", [0.9, 0.1])]], ["ws-b", [rec("b1", "d9", [1, 0])]]] as const) {
+      const db = await lancedb.connect(location(projectId).uri);
+      (await db.createTable(location(projectId).table, [...rows])).close();
       db.close();
     }
   });
@@ -65,7 +65,7 @@ describe("lanceDbVectorSearch result cache", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it("serves the second identical query from cache, per workspace", async () => {
+  it("serves the second identical query from cache, per project", async () => {
     const first = await search();
     expect(first.timings.resultCacheMiss).toBe(1);
     const second = await search();
@@ -78,7 +78,7 @@ describe("lanceDbVectorSearch result cache", () => {
 
   it("never reads or writes the cache in strict-privacy mode", async () => {
     const strict = () => collectSearchTimings(() =>
-      lanceDbVectorSearch({ orgId: "org-a", workspaceId: "ws-a", embeddingModel: "m", queryVector: [1, 0], limit: 5, privacyMode: "strict-privacy" }));
+      lanceDbVectorSearch({ orgId: "org-a", projectId: "ws-a", embeddingModel: "m", queryVector: [1, 0], limit: 5, privacyMode: "strict-privacy" }));
     const first = await strict();
     const second = await strict();
     expect(first.timings.resultCacheBypass).toBe(1);

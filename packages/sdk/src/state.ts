@@ -1,4 +1,4 @@
-import type { JsonObject, WorkspaceRun } from "./index.js";
+import type { JsonObject, ProjectRun } from "./index.js";
 
 export type RunLifecycleStatus = "queued" | "processing" | "paused" | "completed" | "failed";
 export type RunProgressTone = "queued" | "processing" | "completed" | "failed";
@@ -36,13 +36,13 @@ export type RunProgress = {
 };
 /** An authoritative full snapshot, also returned by the polling fallback. */
 export type RunProgressSnapshot = {
-  run: WorkspaceRun & { workspaceId: string; orgId: string; stage: string; totalDocuments: number; processedDocuments: number; pagesTotal: number; pagesProcessed: number; costCents: number; computeEstimated: boolean; /** Billed spend the run cost cap is enforced against (costCents without the compute estimate). */ billedCostCents?: number }; stages: RunStageState[]; recentEvents: RunEvent[];
+  run: ProjectRun & { projectId: string; orgId: string; stage: string; totalDocuments: number; processedDocuments: number; pagesTotal: number; pagesProcessed: number; costCents: number; computeEstimated: boolean; /** Billed spend the run cost cap is enforced against (costCents without the compute estimate). */ billedCostCents?: number }; stages: RunStageState[]; recentEvents: RunEvent[];
   temporal: RunTemporalState | null; progress?: RunProgress; stats: JsonObject; artifacts: Record<string, string>;
 };
-export type WorkspaceRunProgressSnapshot = RunProgressSnapshot;
+export type ProjectRunProgressSnapshot = RunProgressSnapshot;
 export type DistributionStats = { sampleCount: number; p50: number | null; p95: number | null; max: number | null };
-export type WorkspaceState = {
-  workspaceId: string; orgId: string; observedAt: string;
+export type ProjectState = {
+  projectId: string; orgId: string; observedAt: string;
   recentWindow: { from: string; to: string; hours: number };
   /**
    * total/completed are the current corpus (completed documents not superseded by a
@@ -66,7 +66,7 @@ export type OrganizationAccess = {
   orgId: string; userId: string; role: OrganizationRole;
   capabilities: { read: boolean; update: boolean; manageMembers: boolean; manageOwners: boolean; manageApiKeys: boolean; leave: boolean };
 };
-export type OrganizationDetails = { organization: OrganizationRecord; access: OrganizationAccess; counts: { members: number; workspaces: number } };
+export type OrganizationDetails = { organization: OrganizationRecord; access: OrganizationAccess; counts: { members: number; projects: number } };
 export type OrganizationMembership = { orgId: string; userId: string; role: OrganizationRole; createdAt: string };
 export type OrganizationMember = OrganizationMembership & { email: string; name: string };
 export type OrganizationInviteStatus = "pending" | "accepted" | "revoked" | "expired";
@@ -88,7 +88,7 @@ export type OrganizationApiKey = {
   allowedDomains: string[]; scopes: string[];
   /** Optional requests-per-minute cap; null means the plan's per-category limits apply. */
   rateLimitRpm: number | null; rateLimitPpd: number;
-  /** Workspaces the key may use; empty means every workspace in its organization. */
-  workspaceIds?: string[];
+  /** Projects the key may use; empty means every project in its organization. */
+  projectIds?: string[];
   lastUsedAt: string | null; createdAt: string; revokedAt: string | null; requestsLastMinute?: number; pagesToday?: number;
 };

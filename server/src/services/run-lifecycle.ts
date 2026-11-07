@@ -1,3 +1,4 @@
+import { WorkflowExecutionAlreadyStartedError } from "@temporalio/client";
 import type { TransactionSql } from "postgres";
 import {
   compilePipelinePlan,
@@ -7,7 +8,7 @@ import {
   resolvePoisonRunFailureThreshold,
   sanitizeStoredPipeline,
   type PipelineFeatures,
-  type WorkspaceRun,
+  type ProjectRun,
 } from "@docslurp/shared";
 
 import { sql as defaultSql, type SqlClient } from "../db.js";
@@ -24,12 +25,12 @@ import {
  *
  * Starting (and deferring when Temporal is unavailable), restarting, retrying,
  * operator control, and failing a Run all go through this module so routes,
- * Workspace Intake, reconciliation, and the stale-run sweep share one set of
+ * Project Intake, reconciliation, and the stale-run sweep share one set of
  * rules. Failure bookkeeping (failure_count, failure history, dead-letter)
  * matches the worker's terminal failure through `planRunFailure`.
  */
 
-type RunStatus = WorkspaceRun["status"];
+type RunStatus = ProjectRun["status"];
 
 export type RunLifecycleRun = { id: string; pipeline: PipelineFeatures };
 
@@ -107,10 +108,10 @@ function clampPriority(priority: number): number {
 }
 
 export function planRunControlUpdate(
-  run: Pick<WorkspaceRun, "status" | "priority" | "controlState">,
+  run: Pick<ProjectRun, "status" | "priority" | "controlState">,
   input: { action: RunControlAction; priority?: number },
 ): {
-  status?: WorkspaceRun["status"];
+  status?: ProjectRun["status"];
   priority?: number;
   controlState?: string | null;
   controlRequestedAt: "now" | null;
@@ -185,7 +186,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
   async function markWorkflowStarted(runId: string, generation: string | null, sql: SqlClient | TransactionSql = deps.sql): Promise<void> {
     try {
       await sql`
-        update workspace_runs
+        update project_runs
         set workflow_started_at = now(), workflow_start_next_at = null
         where id = ${runId} and execution_generation is not distinct from ${generation}
       `;
@@ -198,7 +199,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
   async function markWorkflowStartPending(runId: string, generation: string | null, sql: SqlClient | TransactionSql = deps.sql): Promise<void> {
     try {
       await sql`
-        update workspace_runs
+        update project_runs
         set
           workflow_started_at = null,
           workflow_start_attempts = workflow_start_attempts + 1,
@@ -246,7 +247,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     // current intent under lock and cannot dispatch an older generation.
     return await sql.begin(async (tx) => {
       const [ready] = await tx<{ id: string; execution_generation: string | null }[]>`
-        select id, execution_generation from workspace_runs where id = ${run.id} and creation_ready_at is not null for update
+        select id, execution_generation from project_runs where id = ${run.id} and creation_ready_at is not null for update
       `;
       if (!ready) return { status: "deferred", reason: "Run creation has not been published for processing." };
       let outcome: RunStartOutcome;
@@ -255,7 +256,8 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
         outcome = { status: "started" };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (!options?.restartExisting && message.toLowerCase().includes("already started")) {
+        // The typed Temporal error decides, not its wording.
+        if (!options?.restartExisting && error instanceof WorkflowExecutionAlreadyStartedError) {
           outcome = { status: "already-started" };
         } else if (isTemporalConnectionUnavailable(error)) {
           console.warn(`[temporal] deferred workflow start for run=${run.id}: ${message}`);
@@ -275,7 +277,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
   async function resumeFailed(runId: string, transaction?: TransactionSql): Promise<boolean> {
     const transition = async (tx: TransactionSql) => {
       const [locked] = await tx<{ status: string }[]>`
-        select status from workspace_runs where id = ${runId} for update
+        select status from project_runs where id = ${runId} for update
       `;
       if (locked?.status !== "failed") return [];
       await tx`
@@ -285,7 +287,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
             and superseded_at is null and status <> 'cancelled')
       `;
       await tx`
-        delete from workspace_run_stage_states
+        delete from project_run_stage_states
         where run_id = ${runId} and status <> 'completed'
       `;
       await tx`
@@ -303,7 +305,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
           and d.superseded_at is null
       `;
       return await tx<{ id: string }[]>`
-        update workspace_runs
+        update project_runs
         set status = 'queued', control_state = null, control_requested_at = null,
             execution_generation = gen_random_uuid()::text,
             workflow_started_at = null, workflow_start_attempts = 0, workflow_start_next_at = null,
@@ -332,7 +334,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
       const [locked] = await tx<{ status: string; failed: number }[]>`
         select status,
                (select count(*)::int from documents d where d.run_id = ${run.id} and d.status = 'failed' and d.superseded_at is null) as failed
-        from workspace_runs where id = ${run.id} for update
+        from project_runs where id = ${run.id} for update
       `;
       if (locked?.status !== "completed" || !(locked.failed > 0)) return [];
       const failedStages = await tx<{ stage_name: string }[]>`
@@ -354,7 +356,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
       const rerunStages = stageOrder.slice(earliest);
       if (rerunStages.length > 0) {
         await tx`
-          delete from workspace_run_stage_states
+          delete from project_run_stage_states
           where run_id = ${run.id} and stage_name = any(${sql.array([...rerunStages])})
         `;
       }
@@ -372,7 +374,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
         where d.run_id = ${run.id} and d.status = 'failed' and d.superseded_at is null
       `;
       return await tx<{ id: string }[]>`
-        update workspace_runs
+        update project_runs
         set status = 'queued', control_state = null, control_requested_at = null,
             execution_generation = gen_random_uuid()::text,
             workflow_started_at = null, workflow_start_attempts = 0, workflow_start_next_at = null,
@@ -394,7 +396,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     if (run.status === "failed") return await resumeFailed(run.id, transaction) ? "resumed" : "not-retryable";
     if (run.status === "completed") return await resumeCompletedWithFailures(run, transaction) ? "resumed" : "not-retryable";
     if (run.status === "queued") {
-      const [current] = await transaction<{ status: string }[]>`select status from workspace_runs where id = ${run.id} for update`;
+      const [current] = await transaction<{ status: string }[]>`select status from project_runs where id = ${run.id} for update`;
       return current?.status === "queued" ? "restarted" : "not-retryable";
     }
     return "not-retryable";
@@ -437,7 +439,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
       { status: string; control_state: string | null; stats: Record<string, unknown> | null; failure_count: number }[]
     >`
       select status, control_state, stats, coalesce(failure_count, 0)::int as failure_count
-      from workspace_runs
+      from project_runs
       where id = ${runId}
       limit 1
     `;
@@ -461,7 +463,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     // Compare-and-set on status and failure_count so concurrent failures
     // (worker, sweep, reconciliation) cannot double count or clobber.
     const [row] = await sql<FailedRunRow[]>`
-      update workspace_runs
+      update project_runs
       set
         status = 'failed',
         stage = ${input.stage},
@@ -504,7 +506,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     // The row is the event; NOTIFY only hints listeners to read it (run-event-hub.ts).
     await sql`
       with inserted as (
-        insert into workspace_run_events (
+        insert into project_run_events (
           id, user_id, run_id, document_id, stage_name, event_type, status,
           message, progress, stats, payload, created_at
         )
@@ -527,14 +529,14 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
    * recover). Returns the Run id when a row changed, or null.
    */
   async function control(
-    run: Pick<WorkspaceRun, "id" | "status" | "priority" | "controlState" | "error">,
+    run: Pick<ProjectRun, "id" | "status" | "priority" | "controlState" | "error">,
     input: { action: RunControlAction; priority?: number },
     transaction?: TransactionSql,
   ): Promise<string | null> {
     const query = transaction ?? sql;
     if (transaction && (input.action === "resume" || input.action === "recover")) {
-      const [current] = await query<{ status: WorkspaceRun["status"]; control_state: string | null; priority: number; error: string | null }[]>`
-        select status, control_state, priority, error from workspace_runs where id = ${run.id} for update
+      const [current] = await query<{ status: ProjectRun["status"]; control_state: string | null; priority: number; error: string | null }[]>`
+        select status, control_state, priority, error from project_runs where id = ${run.id} for update
       `;
       if (!current || (input.action === "recover" ? current.control_state !== "dead-letter" :
         !["paused", "pause_requested"].includes(current.control_state ?? "") || ["blocked", "completed", "failed"].includes(current.status))) return null;
@@ -544,7 +546,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
 
     if (input.action === "reprioritize") {
       const [row] = await query<{ id: string }[]>`
-        update workspace_runs
+        update project_runs
         set priority = ${planned.priority ?? run.priority},
             updated_at = now()
         where id = ${run.id}
@@ -555,7 +557,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
 
     if (input.action === "recover") {
       const [row] = await query<{ id: string }[]>`
-        update workspace_runs
+        update project_runs
         set
           status = 'queued',
           execution_generation = gen_random_uuid()::text,
@@ -583,7 +585,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     if (input.action === "resume") {
       if (!transaction) await signals.resume(run.id).catch(() => {});
       const [row] = await query<{ id: string }[]>`
-        update workspace_runs
+        update project_runs
         set control_state = ${planned.controlState ?? null},
             control_requested_at = null,
             status = ${planned.status ?? run.status},
@@ -600,7 +602,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     if (input.action === "pause") {
       await signals.pause(run.id).catch(() => {});
       const [row] = await query<{ id: string }[]>`
-        update workspace_runs
+        update project_runs
         set control_state = ${planned.controlState ?? null},
             control_requested_at = now(),
             status = ${planned.status ?? run.status},
@@ -617,7 +619,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     // runs fail immediately.
     if (!planned.immediate) await signals.cancel(run.id);
     const [row] = await query<{ id: string }[]>`
-      update workspace_runs
+      update project_runs
       set control_state = ${planned.controlState ?? null},
           control_requested_at = now(),
           status = ${planned.status ?? run.status},

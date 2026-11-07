@@ -2,12 +2,12 @@ import { nativeOperations } from "../agent-runtime/runtime.js";
 import { sql } from "../db.js";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import { getRequestActor, loadActorScopedWorkspace, resolveActorWorkspaceId } from "../lib/request-actor.js";
+import { getRequestActor, loadActorScopedProject, resolveActorProjectId } from "../lib/request-actor.js";
 import { authorizedChatOperationSnapshot, authorizeChatOperation } from "../services/chat-operation-access.js";
 import { cancelChatOperation, launchChatOperation, readChatOperation } from "../services/chat-operations.js";
-import { workspaceChatDisabledBody } from "../services/workspace-chat.js";
+import { projectChatDisabledBody } from "../services/project-chat.js";
 
-const launchSchema = z.object({ q: z.string().trim().min(1).max(64_000), workspace: z.string().max(128).optional(), sessionId: z.string().max(128).optional(), model: z.string().max(128).optional() }).strict();
+const launchSchema = z.object({ q: z.string().trim().min(1).max(64_000), project: z.string().max(128).optional(), sessionId: z.string().max(128).optional(), model: z.string().max(128).optional() }).strict();
 /** Session-only, opt-in route. Legacy API-key chat retains its existing contract. */
 export const chatOperationRoutes = new Hono()
   .onError((_error,c) => c.json({error:"operation_unavailable"},409))
@@ -61,11 +61,11 @@ export async function durableChatLaunchHandler(c: Context) {
   const body = launchSchema.parse(JSON.parse(raw));
   const actor = getRequestActor(c);
   if (actor.type !== "session") return c.json({ error: "forbidden" }, 403);
-  const id = await resolveActorWorkspaceId(actor, body.workspace);
-  const workspace = await loadActorScopedWorkspace(id, actor);
-  if (!workspace?.orgId || await workspaceChatDisabledBody(id, actor.userId)) return c.json({ error: "forbidden" }, 403);
+  const id = await resolveActorProjectId(actor, body.project);
+  const project = await loadActorScopedProject(id, actor);
+  if (!project?.orgId || await projectChatDisabledBody(id, actor.userId)) return c.json({ error: "forbidden" }, 403);
   const native=await nativeOperations(async()=>actor);
-  const task = await launchChatOperation({ userId: actor.userId, workspaceId: id, orgId: workspace.orgId, key: c.req.header("Idempotency-Key") ?? "", input: { ...body, authSessionId: actor.sessionId }, runtime:"mastra" });
+  const task = await launchChatOperation({ userId: actor.userId, projectId: id, orgId: project.orgId, key: c.req.header("Idempotency-Key") ?? "", input: { ...body, authSessionId: actor.sessionId }, runtime:"mastra" });
   const accepted=await native.launch(task.id);
   return c.json({operationId:accepted.operationId,rootId:accepted.rootId,status:accepted.status},202);
 }

@@ -12,61 +12,61 @@ function recorder(respond = () => json({ estimate, billing: "disabled" })) {
     calls.push({ url: String(url).replace("https://x.test", ""), method: init.method ?? "GET", body: init.body ? JSON.parse(init.body) : undefined });
     return respond(calls.at(-1));
   };
-  return { calls, client: createDocSlurpClient({ apiUrl: "https://x.test", apiKey: "k", workspace: "ws1", fetch }) };
+  return { calls, client: createDocSlurpClient({ apiUrl: "https://x.test", apiKey: "k", project: "ws1", fetch }) };
 }
 
 test("estimate methods hit their *-estimate routes with the mutation body", async () => {
   const { calls, client } = recorder();
-  await client.updateWorkspaceEstimate(undefined, { pipeline: { chunking: "x" }, apply: "reindex" });
-  await client.updateWorkspaceEstimate("other", { retainDocumentVersions: 3 });
+  await client.updateProjectEstimate(undefined, { pipeline: { chunking: "x" }, apply: "reindex" });
+  await client.updateProjectEstimate("other", { retainDocumentVersions: 3 });
   await client.updateSearchSettingsEstimate("ws1", { reranker: "on" });
   await client.reprocessEstimate("run/1", { stages: ["embed"] });
   await client.fullIndexEstimate({ documentId: "d1" });
   await client.fullIndexEstimate({ documentIds: ["d1", "d2"] });
-  await client.rebuildGraphEstimate({ workspace: "g" });
+  await client.rebuildGraphEstimate({ project: "g" });
   await client.uploadEstimate({ files: [{ name: "a.pdf", size: 10, pages: 4 }] });
   await client.setIndexingModeEstimate("map");
-  await client.uploadEstimate({ files: [{ name: "b.pdf", size: 5 }], workspace: "Legal Contracts" });
+  await client.uploadEstimate({ files: [{ name: "b.pdf", size: 5 }], project: "Legal Contracts" });
   assert.deepEqual(calls.map((c) => [c.method, c.url]), [
-    ["POST", "/v1/workspaces/ws1/estimate"],
-    ["POST", "/v1/workspaces/other/estimate"],
-    ["POST", "/v1/workspaces/ws1/search-settings/estimate"],
+    ["POST", "/v1/projects/ws1/estimate"],
+    ["POST", "/v1/projects/other/estimate"],
+    ["POST", "/v1/projects/ws1/search-settings/estimate"],
     ["POST", "/v1/runs/run%2F1/reprocess/estimate"],
     ["POST", "/v1/documents/d1/full-index/estimate"],
-    ["POST", "/v1/workspaces/ws1/full-index/estimate"],
-    ["POST", "/v1/workspaces/g/graph/jobs/estimate"],
+    ["POST", "/v1/projects/ws1/full-index/estimate"],
+    ["POST", "/v1/projects/g/graph/jobs/estimate"],
     ["POST", "/v1/uploads/estimate"],
-    ["POST", "/v1/workspaces/ws1/indexing-mode/estimate"],
+    ["POST", "/v1/projects/ws1/indexing-mode/estimate"],
     ["POST", "/v1/uploads/estimate"],
   ]);
   assert.deepEqual(calls[0].body, { pipeline: { chunking: "x" }, apply: "reindex" });
   assert.deepEqual(calls[5].body, { documentIds: ["d1", "d2"] });
-  // The workspace selects the route and never leaks into the graph estimate body.
+  // The project selects the route and never leaks into the graph estimate body.
   assert.deepEqual(calls[6].body, {});
-  // Upload estimates default to the client workspace; a per-call workspace (ID, slug or name) wins.
-  assert.deepEqual(calls[7].body, { files: [{ name: "a.pdf", size: 10, pages: 4 }], workspace: "ws1" });
+  // Upload estimates default to the client project; a per-call project (ID, slug or name) wins.
+  assert.deepEqual(calls[7].body, { files: [{ name: "a.pdf", size: 10, pages: 4 }], project: "ws1" });
   assert.deepEqual(calls[8].body, { mode: "map" });
-  assert.deepEqual(calls[9].body, { files: [{ name: "b.pdf", size: 5 }], workspace: "Legal Contracts" });
+  assert.deepEqual(calls[9].body, { files: [{ name: "b.pdf", size: 5 }], project: "Legal Contracts" });
 });
 
 test("mutations expose the queued job", async () => {
-  const { calls, client } = recorder(() => json({ workspace: { id: "ws1" }, job }));
-  const result = await client.updateWorkspace(undefined, { autoConfirmReindex: true, apply: "reindex" });
+  const { calls, client } = recorder(() => json({ project: { id: "ws1" }, job }));
+  const result = await client.updateProject(undefined, { autoConfirmReindex: true, apply: "reindex" });
   assert.equal(result.job?.id, "j1");
   await client.updateSearchSettings("ws1", { x: 1 });
-  assert.deepEqual(calls.map((c) => [c.method, c.url]), [["PATCH", "/v1/workspaces/ws1"], ["PATCH", "/v1/workspaces/ws1/search-settings"]]);
+  assert.deepEqual(calls.map((c) => [c.method, c.url]), [["PATCH", "/v1/projects/ws1"], ["PATCH", "/v1/projects/ws1/search-settings"]]);
   assert.deepEqual(calls[0].body, { autoConfirmReindex: true, apply: "reindex" });
 });
 
-test("setRetention targets org or workspace and validates the range", async () => {
+test("setRetention targets org or project and validates the range", async () => {
   const { calls, client } = recorder(() => json({}));
   await client.setRetention({ orgId: "o 1" }, 5);
-  await client.setRetention({ workspace: "w" }, null);
+  await client.setRetention({ project: "w" }, null);
   await client.setRetention({}, 2);
   assert.deepEqual(calls.map((c) => [c.method, c.url, c.body]), [
     ["PATCH", "/v1/organizations/o%201", { retainDocumentVersions: 5 }],
-    ["PATCH", "/v1/workspaces/w", { retainDocumentVersions: null }],
-    ["PATCH", "/v1/workspaces/ws1", { retainDocumentVersions: 2 }],
+    ["PATCH", "/v1/projects/w", { retainDocumentVersions: null }],
+    ["PATCH", "/v1/projects/ws1", { retainDocumentVersions: 2 }],
   ]);
   assert.throws(() => client.setRetention({}, 0), RangeError);
   assert.throws(() => client.setRetention({}, 101), RangeError);
@@ -175,7 +175,7 @@ test("content updates hit their routes and reprocessRun returns one shape for st
     ["POST", "/v1/runs/run%2F1/reprocess", {}],
     ["PUT", "/v1/documents/d%2F1/tags", { tags: ["docs"] }],
     ["POST", "/v1/documents/bulk", { action: "delete", documentIds: ["d1", "d2"] }],
-    ["POST", "/v1/workspaces/ws1/ingest-report/reprocess", { recommendationId: "vision-all-pages" }],
-    ["POST", "/v1/workspaces/other/ingest-report/apply", { recommendationId: "preserve-tables", runId: "r1" }],
+    ["POST", "/v1/projects/ws1/ingest-report/reprocess", { recommendationId: "vision-all-pages" }],
+    ["POST", "/v1/projects/other/ingest-report/apply", { recommendationId: "preserve-tables", runId: "r1" }],
   ]);
 });

@@ -10,7 +10,7 @@ export type NotificationEvent =
   | "run.failed"
   | "plausibility.warning"
   | "cost.alert"
-  | "workspace.invite";
+  | "project.invite";
 
 type NotificationPrefsRow = {
   user_id: string;
@@ -18,7 +18,7 @@ type NotificationPrefsRow = {
   run_failed: boolean;
   quality_warning: boolean;
   cost_alert: boolean;
-  workspace_invite: boolean;
+  project_invite: boolean;
   updated_at: string;
 };
 
@@ -34,7 +34,7 @@ export interface NotificationPreferences {
   runFailed: boolean;
   plausibilityWarning: boolean;
   costAlert: boolean;
-  workspaceInvite: boolean;
+  projectInvite: boolean;
   updatedAt: string;
 }
 
@@ -48,7 +48,7 @@ type NotificationDeliveryRow = {
   id: string;
   user_id: string;
   org_id: string | null;
-  workspace_id: string | null;
+  project_id: string | null;
   event_type: string;
   provider: string;
   recipient: string;
@@ -63,7 +63,7 @@ export interface NotificationInboxEntry {
   id: string;
   userId: string;
   orgId: string | null;
-  workspaceId: string | null;
+  projectId: string | null;
   eventType: string;
   provider: string;
   recipient: string;
@@ -90,8 +90,8 @@ function prefsColumn(event: NotificationEvent): keyof Omit<NotificationPrefsRow,
       return "quality_warning";
     case "cost.alert":
       return "cost_alert";
-    case "workspace.invite":
-      return "workspace_invite";
+    case "project.invite":
+      return "project_invite";
   }
 }
 
@@ -102,7 +102,7 @@ function mapPrefs(row: NotificationPrefsRow): NotificationPreferences {
     runFailed: row.run_failed,
     plausibilityWarning: row.quality_warning,
     costAlert: row.cost_alert,
-    workspaceInvite: row.workspace_invite,
+    projectInvite: row.project_invite,
     updatedAt: row.updated_at
   };
 }
@@ -112,7 +112,7 @@ function mapDelivery(row: NotificationDeliveryRow): NotificationInboxEntry {
     id: row.id,
     userId: row.user_id,
     orgId: row.org_id,
-    workspaceId: row.workspace_id,
+    projectId: row.project_id,
     eventType: row.event_type,
     provider: row.provider,
     recipient: row.recipient,
@@ -192,7 +192,7 @@ export async function getNotificationPreferences(userId: string): Promise<Notifi
       run_failed,
       quality_warning,
       cost_alert,
-      workspace_invite,
+      project_invite,
       updated_at::text
   `;
 
@@ -211,7 +211,7 @@ export async function updateNotificationPreferences(
       run_failed,
       quality_warning,
       cost_alert,
-      workspace_invite,
+      project_invite,
       updated_at
     )
     values (
@@ -220,7 +220,7 @@ export async function updateNotificationPreferences(
       ${updates.runFailed ?? current.runFailed},
       ${updates.plausibilityWarning ?? current.plausibilityWarning},
       ${updates.costAlert ?? current.costAlert},
-      ${updates.workspaceInvite ?? current.workspaceInvite},
+      ${updates.projectInvite ?? current.projectInvite},
       now()
     )
     on conflict (user_id) do update
@@ -229,7 +229,7 @@ export async function updateNotificationPreferences(
       run_failed = excluded.run_failed,
       quality_warning = excluded.quality_warning,
       cost_alert = excluded.cost_alert,
-      workspace_invite = excluded.workspace_invite,
+      project_invite = excluded.project_invite,
       updated_at = now()
     returning
       user_id,
@@ -237,7 +237,7 @@ export async function updateNotificationPreferences(
       run_failed,
       quality_warning,
       cost_alert,
-      workspace_invite,
+      project_invite,
       updated_at::text
   `;
 
@@ -246,14 +246,14 @@ export async function updateNotificationPreferences(
 
 export async function listNotificationInbox(args: {
   userId: string;
-  workspaceId?: string;
+  projectId?: string;
   event?: NotificationEvent;
   limit?: number;
 }): Promise<NotificationInboxPage> {
   const conditions: SqlFragment[] = [sql`user_id = ${args.userId}`];
 
-  if (args.workspaceId) {
-    conditions.push(sql`workspace_id = ${args.workspaceId}`);
+  if (args.projectId) {
+    conditions.push(sql`project_id = ${args.projectId}`);
   }
 
   if (args.event) {
@@ -268,7 +268,7 @@ export async function listNotificationInbox(args: {
        id,
        user_id,
        org_id,
-       workspace_id,
+       project_id,
        event_type,
        provider,
        recipient,
@@ -309,7 +309,7 @@ export async function markNotificationRead(args: {
       id,
       user_id,
       org_id,
-      workspace_id,
+      project_id,
       event_type,
       provider,
       recipient,
@@ -325,14 +325,14 @@ export async function markNotificationRead(args: {
 
 export async function markAllNotificationsRead(args: {
   userId: string;
-  workspaceId?: string;
+  projectId?: string;
 }): Promise<number> {
-  if (args.workspaceId) {
+  if (args.projectId) {
     const result = await sql`
       update notification_deliveries
       set read_at = now()
       where user_id = ${args.userId}
-        and workspace_id = ${args.workspaceId}
+        and project_id = ${args.projectId}
         and read_at is null
     `;
 
@@ -360,8 +360,8 @@ export async function isNotificationEnabled(userId: string, event: NotificationE
       return prefs.plausibilityWarning;
     case "cost.alert":
       return prefs.costAlert;
-    case "workspace.invite":
-      return prefs.workspaceInvite;
+    case "project.invite":
+      return prefs.projectInvite;
   }
 }
 
@@ -395,7 +395,7 @@ export async function sendNotificationEmail(args: {
     id: deliveryId,
     userId: args.userId,
     orgId: null,
-    workspaceId: null,
+    projectId: null,
     event: args.event,
     provider: delivery.provider,
     recipient: user.email,
@@ -420,7 +420,7 @@ export async function sendNotificationEmail(args: {
 
 export async function sendRunStatusEmail(args: {
   userId: string;
-  workspaceName: string;
+  projectName: string;
   runId: string;
   status: "completed" | "failed";
   stage?: string | null;
@@ -428,11 +428,11 @@ export async function sendRunStatusEmail(args: {
 }): Promise<EmailDeliveryResult | null> {
   const subject =
     args.status === "completed"
-      ? `Run completed: ${args.workspaceName}`
-      : `Run failed: ${args.workspaceName}`;
+      ? `Run completed: ${args.projectName}`
+      : `Run failed: ${args.projectName}`;
 
   const lines = [
-    `Workspace: ${args.workspaceName}`,
+    `Project: ${args.projectName}`,
     `Run ID: ${args.runId}`,
     `Status: ${args.status}`
   ];
@@ -455,26 +455,26 @@ export async function sendRunStatusEmail(args: {
     text: bodyText,
     metadata: {
       runId: args.runId,
-      workspaceName: args.workspaceName,
+      projectName: args.projectName,
       stage: args.stage ?? null
     }
   });
 }
 
-export async function sendWorkspaceInviteEmail(args: {
+export async function sendProjectInviteEmail(args: {
   actorUserId: string;
   recipientEmail: string;
   orgId?: string | null;
-  workspaceId?: string | null;
-  workspaceName: string;
+  projectId?: string | null;
+  projectName: string;
   inviterName: string;
   inviteToken: string;
 }): Promise<EmailDeliveryResult | null> {
-  const inviteUrl = inviteAcceptUrl(args.inviteToken, "workspace");
+  const inviteUrl = inviteAcceptUrl(args.inviteToken, "project");
   const deliveryId = randomUUID();
-  const subject = `Workspace invite: ${args.workspaceName}`;
-  const html = `<p>${escapeHtml(args.inviterName)} invited you to <strong>${escapeHtml(args.workspaceName)}</strong>.</p><p><a href="${escapeAttribute(inviteUrl)}">Accept invite</a></p>`;
-  const text = `${args.inviterName} invited you to ${args.workspaceName}.\nAccept: ${inviteUrl}`;
+  const subject = `Project invite: ${args.projectName}`;
+  const html = `<p>${escapeHtml(args.inviterName)} invited you to <strong>${escapeHtml(args.projectName)}</strong>.</p><p><a href="${escapeAttribute(inviteUrl)}">Accept invite</a></p>`;
+  const text = `${args.inviterName} invited you to ${args.projectName}.\nAccept: ${inviteUrl}`;
 
   const delivery = await deliverEmail({
     deliveryId,
@@ -488,15 +488,15 @@ export async function sendWorkspaceInviteEmail(args: {
     id: deliveryId,
     userId: args.actorUserId,
     orgId: args.orgId ?? null,
-    workspaceId: args.workspaceId ?? null,
-    event: "workspace.invite",
+    projectId: args.projectId ?? null,
+    event: "project.invite",
     provider: delivery.provider,
     recipient: args.recipientEmail,
     subject,
     delivered: delivery.delivered,
     metadata: {
       orgId: args.orgId ?? null,
-      workspaceId: args.workspaceId ?? null,
+      projectId: args.projectId ?? null,
       inviteToken: args.inviteToken,
       response: delivery.responseText ?? null
     }
@@ -517,7 +517,7 @@ export async function sendExportReadyEmail(args: {
   userId: string;
   recipientEmail: string;
   orgId: string;
-  workspaceId: string;
+  projectId: string;
   filename: string;
   ready: boolean;
   sizeLabel: string | null;
@@ -526,7 +526,7 @@ export async function sendExportReadyEmail(args: {
 }): Promise<void> {
   const deliveryId = randomUUID();
   const until = args.expiresAt.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
-  // A fixed subject: the filename comes from user-named documents and workspaces, so it stays in the escaped body.
+  // A fixed subject: the filename comes from user-named documents and projects, so it stays in the escaped body.
   const subject = args.ready ? "Your DocSlurp export is ready" : "Your DocSlurp export didn't finish";
   const size = args.sizeLabel ? ` (${args.sizeLabel})` : "";
   const html = args.ready
@@ -541,13 +541,13 @@ export async function sendExportReadyEmail(args: {
     id: deliveryId,
     userId: args.userId,
     orgId: args.orgId,
-    workspaceId: args.workspaceId,
+    projectId: args.projectId,
     event: args.ready ? "export.ready" : "export.failed",
     provider: delivery.provider,
     recipient: args.recipientEmail,
     subject,
     delivered: delivery.delivered,
-    metadata: { orgId: args.orgId, workspaceId: args.workspaceId, response: delivery.responseText ?? null }
+    metadata: { orgId: args.orgId, projectId: args.projectId, response: delivery.responseText ?? null }
   }).catch(() => undefined);
   if (!delivery.delivered) throw new Error(`email provider ${delivery.provider} refused the export email`);
 }
@@ -561,7 +561,7 @@ export async function sendExtractReadyEmail(args: {
   userId: string;
   recipientEmail: string;
   orgId: string;
-  workspaceId: string;
+  projectId: string;
   extractId: string;
   ready: boolean;
   pages: number;
@@ -584,19 +584,19 @@ export async function sendExtractReadyEmail(args: {
     id: deliveryId,
     userId: args.userId,
     orgId: args.orgId,
-    workspaceId: args.workspaceId,
+    projectId: args.projectId,
     event: args.ready ? "extract.ready" : "extract.failed",
     provider: delivery.provider,
     recipient: args.recipientEmail,
     subject,
     delivered: delivery.delivered,
-    metadata: { orgId: args.orgId, workspaceId: args.workspaceId, extractId: args.extractId, response: delivery.responseText ?? null }
+    metadata: { orgId: args.orgId, projectId: args.projectId, extractId: args.extractId, response: delivery.responseText ?? null }
   }).catch(() => undefined);
   if (!delivery.delivered) throw new Error(`email provider ${delivery.provider} refused the extract email`);
 }
 
 /** The signed-in accept page (dashboard). */
-export function inviteAcceptUrl(token: string, kind: "organization" | "workspace"): string {
+export function inviteAcceptUrl(token: string, kind: "organization" | "project"): string {
   const base = (process.env.APP_URL ?? "http://localhost:4321").replace(/\/$/, "");
   return `${base}/app/invites/${encodeURIComponent(token)}?kind=${kind}`;
 }
@@ -622,8 +622,8 @@ export async function sendOrganizationInviteEmail(args: {
     id: deliveryId,
     userId: args.actorUserId,
     orgId: args.orgId,
-    workspaceId: null,
-    event: "workspace.invite",
+    projectId: null,
+    event: "project.invite",
     provider: delivery.provider,
     recipient: args.recipientEmail,
     subject,
@@ -638,7 +638,7 @@ async function logDelivery(args: {
   id: string;
   userId: string;
   orgId?: string | null;
-  workspaceId?: string | null;
+  projectId?: string | null;
   /** Transactional emails the user asked for (exports) are not preference-gated events. */
   event: NotificationEvent | "export.ready" | "export.failed" | "extract.ready" | "extract.failed";
   provider: string;
@@ -652,7 +652,7 @@ async function logDelivery(args: {
       id,
       user_id,
       org_id,
-      workspace_id,
+      project_id,
       event_type,
       provider,
       recipient,
@@ -665,7 +665,7 @@ async function logDelivery(args: {
       ${args.id},
       ${args.userId},
       ${args.orgId ?? null},
-      ${args.workspaceId ?? null},
+      ${args.projectId ?? null},
       ${args.event},
       ${args.provider},
       ${args.recipient},

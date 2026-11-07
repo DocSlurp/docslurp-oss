@@ -19,7 +19,7 @@
 import { readFile } from "node:fs/promises";
 
 import { findDecisionModel, type DecisionModel } from "@docslurp/shared";
-import sharp from "sharp";
+import sharp from "../tools/isolated-image.js";
 
 import type { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import type { CascadeVerifier, VerifierRequest, VerifierVerdict } from "./cascade.js";

@@ -15,7 +15,7 @@ import {
  * A command whose teardown could not be verified (CommandTeardownError) may have left processes
  * running on this machine: parsers holding customer bytes and CPU, outside any slot. Raster
  * commands keep their semaphore slot poisoned, but every other parser (pandoc, LibreOffice,
- * tesseract, local-artifact adapters) runs in an activity slot that Temporal frees as soon as the
+ * OCR, local-artifact adapters) runs in an activity slot that Temporal frees as soon as the
  * activity fails. So once `WORKER_UNVERIFIED_TEARDOWN_LIMIT` (default 1) such commands happened in
  * this process, the worker is quarantined:
  *
@@ -26,7 +26,7 @@ import {
  *
  * Recovery: restart the machine or container, not just the process. A fresh VM or container has
  * no stray processes; on Fly the restart policy boots a new VM after the non-zero exit. Investigate
- * the `[worker-command] status=teardown-unverified` log lines (org, workspace, run, document,
+ * the `[worker-command] status=teardown-unverified` log lines (org, project, run, document,
  * stage) first. The activity in which the teardown failed always ends as a non-retryable teardown
  * failure, even if a stage swallowed or replaced the error (activity-interceptor.ts latches it),
  * the document's staged source hash is denylisted fleet-wide when the command caused it, and every

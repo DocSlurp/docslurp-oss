@@ -11,15 +11,15 @@ vi.mock("../services/api-keys.js", async (importOriginal) => ({ ...(await import
 vi.mock("../middleware/rate-limit.js", () => ({ enforceAuthenticatedApiRateLimit }));
 vi.mock("../lib/auth.js", () => ({ auth: { api: { getSession: vi.fn(async () => null) } }, appDbPool: {} }));
 
-const { ApiKeyIpNotAllowedError, ClientKeyOriginNotAllowedError, ClientKeyWorkspacesRequiredError } = await import("../services/api-keys.js");
+const { ApiKeyIpNotAllowedError, ClientKeyOriginNotAllowedError, ClientKeyProjectsRequiredError } = await import("../services/api-keys.js");
 const { apiKeyAuth } = await import("../middleware/api-key-auth.js");
 const { mcpAuth } = await import("../middleware/mcp-auth.js");
-const { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace } = await import("../lib/api-key-workspace-scope.js");
+const { apiKeyAllowsProject, apiKeyCanUseProject } = await import("../lib/api-key-project-scope.js");
 const { resetCapabilityKeyForTests, sealCapabilityToken } = await import("../lib/capability-tokens.js");
 const { chatSessionForRequest, ChatSessionForbiddenError, chatSessionTokenRefusal, sealChatSessionToken } = await import("../lib/chat-session-tokens.js");
 
 function clientActor(keyId = "pub-1"): Extract<RequestActor, { type: "apiKey" }> {
-  return { type: "apiKey", userId: "owner", apiKey: { keyId, userId: "owner", orgId: "org-1", keyType: "client", allowedDomains: ["docs.example.com"], scopes: ["search", "chat"], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [], workspaceIds: ["ws-1"] } };
+  return { type: "apiKey", userId: "owner", apiKey: { keyId, userId: "owner", orgId: "org-1", keyType: "client", allowedDomains: ["docs.example.com"], scopes: ["search", "chat"], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [], projectIds: ["ws-1"] } };
 }
 
 beforeEach(() => {
@@ -28,15 +28,15 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllEnvs());
 
-describe("browser keys need a workspace allowlist", () => {
+describe("browser keys need a project allowlist", () => {
   it("refuses a legacy browser key with no allowlist, saying how to fix it", async () => {
-    validateApiKey.mockRejectedValueOnce(new ClientKeyWorkspacesRequiredError());
+    validateApiKey.mockRejectedValueOnce(new ClientKeyProjectsRequiredError());
     const app = new Hono().use("*", apiKeyAuth).get("/compat/x", (c) => c.json({ ok: true }));
     const response = await app.request("/compat/x", { headers: { Authorization: "Bearer dslp_pub_legacy" } });
     expect(response.status).toBe(403);
     const body = await response.json() as { code: string; error: string };
-    expect(body.code).toBe("client_key_workspaces_required");
-    expect(body.error).toMatch(/workspaceIds/);
+    expect(body.code).toBe("client_key_projects_required");
+    expect(body.error).toMatch(/projectIds/);
   });
 
   it("answers a browser key on a website it doesn't allow with its own code and fix, not invalid-key", async () => {
@@ -63,7 +63,7 @@ describe("browser keys need a workspace allowlist", () => {
     expect(await mcpRefused.json()).toMatchObject({ code: "api_key_ip_not_allowed" });
   });
 
-  it.each([ClientKeyWorkspacesRequiredError, ClientKeyOriginNotAllowedError])("refuses a legacy or wrong-site browser key on MCP like any browser key (%o)", async (ErrorType) => {
+  it.each([ClientKeyProjectsRequiredError, ClientKeyOriginNotAllowedError])("refuses a legacy or wrong-site browser key on MCP like any browser key (%o)", async (ErrorType) => {
     validateApiKey.mockRejectedValueOnce(new ErrorType());
     const app = new Hono().use("*", mcpAuth).post("/v1/mcp", (c) => c.json({ ok: true }));
     const response = await app.request("/v1/mcp", { method: "POST", headers: { Authorization: "Bearer dslp_pub_legacy" } });
@@ -71,26 +71,26 @@ describe("browser keys need a workspace allowlist", () => {
     expect(await response.json()).toEqual({ error: "A server API key is required" });
   });
 
-  it("never treats an empty allowlist as every workspace for a browser key, and refuses other workspaces", () => {
-    expect(apiKeyAllowsWorkspace({ keyType: "client", workspaceIds: [] }, "ws-1")).toBe(false);
-    expect(apiKeyAllowsWorkspace({ keyType: "client", workspaceIds: ["ws-1"] }, "ws-2")).toBe(false);
-    expect(apiKeyAllowsWorkspace({ keyType: "client", workspaceIds: ["ws-1"] }, "ws-1")).toBe(true);
-    expect(apiKeyCanUseWorkspace({ keyType: "client", orgId: "org-1", workspaceIds: ["ws-1"] }, { id: "ws-1", orgId: "org-2" })).toBe(false);
+  it("never treats an empty allowlist as every project for a browser key, and refuses other projects", () => {
+    expect(apiKeyAllowsProject({ keyType: "client", projectIds: [] }, "ws-1")).toBe(false);
+    expect(apiKeyAllowsProject({ keyType: "client", projectIds: ["ws-1"] }, "ws-2")).toBe(false);
+    expect(apiKeyAllowsProject({ keyType: "client", projectIds: ["ws-1"] }, "ws-1")).toBe(true);
+    expect(apiKeyCanUseProject({ keyType: "client", orgId: "org-1", projectIds: ["ws-1"] }, { id: "ws-1", orgId: "org-2" })).toBe(false);
     // Server keys keep the documented "empty means the owner's org" behaviour.
-    expect(apiKeyAllowsWorkspace({ keyType: "server", workspaceIds: [] }, "ws-9")).toBe(true);
+    expect(apiKeyAllowsProject({ keyType: "server", projectIds: [] }, "ws-9")).toBe(true);
   });
 });
 
 describe("browser-key chat sessions are bound to a sealed grant", () => {
   const actor = clientActor();
-  const scope = { workspaceId: "ws-1", sessionId: "11111111-1111-4111-8111-111111111111" };
-  const grant = (overrides: Partial<{ keyId: string; workspaceId: string; sessionId: string; nowMs: number }> = {}) =>
+  const scope = { projectId: "ws-1", sessionId: "11111111-1111-4111-8111-111111111111" };
+  const grant = (overrides: Partial<{ keyId: string; projectId: string; sessionId: string; nowMs: number }> = {}) =>
     sealChatSessionToken({ keyId: "pub-1", ...scope, ...overrides });
 
   it("continues a session only with the grant issued for it", () => {
     expect(chatSessionForRequest(actor, { ...scope, sessionToken: grant() })).toBe(scope.sessionId);
     // A new conversation needs no grant.
-    expect(chatSessionForRequest(actor, { workspaceId: "ws-1" })).toBeUndefined();
+    expect(chatSessionForRequest(actor, { projectId: "ws-1" })).toBeUndefined();
   });
 
   it("starts a fresh session (never the old one) for a session id with no grant, as pre-grant widgets send", () => {
@@ -103,9 +103,9 @@ describe("browser-key chat sessions are bound to a sealed grant", () => {
     expect(() => chatSessionForRequest(actor, { ...scope, sessionToken: mine })).toThrow(ChatSessionForbiddenError);
   });
 
-  it("refuses a grant for another key or workspace", () => {
+  it("refuses a grant for another key or project", () => {
     expect(chatSessionTokenRefusal(grant({ keyId: "pub-2" }), { keyId: "pub-1", ...scope })).toBe("scope");
-    expect(chatSessionTokenRefusal(grant({ workspaceId: "ws-2" }), { keyId: "pub-1", ...scope })).toBe("scope");
+    expect(chatSessionTokenRefusal(grant({ projectId: "ws-2" }), { keyId: "pub-1", ...scope })).toBe("scope");
   });
 
   it("refuses tampered and foreign-family grants; treats expired ones as no grant", () => {
@@ -114,7 +114,7 @@ describe("browser-key chat sessions are bound to a sealed grant", () => {
     expect(chatSessionTokenRefusal(flipped, { keyId: "pub-1", ...scope })).toBe("invalid");
     expect(chatSessionTokenRefusal("not a token", { keyId: "pub-1", ...scope })).toBe("invalid");
     // A search capability (same root secret, other family) never opens as a chat grant.
-    const capability = sealCapabilityToken({ v: 1, orgId: "org-1", workspaceIds: ["ws-1"], policy: {}, issuedByKeyId: "pub-1", exp: Math.floor(Date.now() / 1000) + 600, jti: "j" } as never);
+    const capability = sealCapabilityToken({ v: 1, orgId: "org-1", projectIds: ["ws-1"], policy: {}, issuedByKeyId: "pub-1", exp: Math.floor(Date.now() / 1000) + 600, jti: "j" } as never);
     expect(chatSessionTokenRefusal(capability, { keyId: "pub-1", ...scope })).toBe("invalid");
     const old = grant({ nowMs: Date.now() - 25 * 60 * 60 * 1000 });
     expect(chatSessionTokenRefusal(old, { keyId: "pub-1", ...scope })).toBe("expired");

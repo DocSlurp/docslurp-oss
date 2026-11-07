@@ -52,11 +52,11 @@ async function seed(pg: Sql) {
   await pg`insert into "user" (id, name, email) values ('lock-u1', 'U', 'lock-u1@example.com') on conflict do nothing`;
   await pg`insert into organizations (id, name, slug, created_by_user_id, credit_balance_cents)
     values (${`${prefix}-org`}, 'Lock', ${`${prefix}-org`}, 'lock-u1', 1000000)`;
-  await pg`insert into workspaces (id, org_id, user_id, name) values (${`${prefix}-ws`}, ${`${prefix}-org`}, 'lock-u1', 'W')`;
-  await pg`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts)
+  await pg`insert into projects (id, org_id, user_id, name) values (${`${prefix}-ws`}, ${`${prefix}-org`}, 'lock-u1', 'W')`;
+  await pg`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts)
     values (${runId}, ${`${prefix}-org`}, 'lock-u1', ${`${prefix}-ws`}, 'bulk-upload', 'processing', 'extract-markdown', '{}', '{}')`;
   for (const id of docIds) {
-    await pg`insert into documents (id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+    await pg`insert into documents (id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
       values (${id}, 'lock-u1', ${`${prefix}-ws`}, ${runId}, ${`${id}.pdf`}, 'application/pdf', ${`k/${id}`}, 'processing', 10)`;
   }
 }
@@ -64,9 +64,9 @@ async function seed(pg: Sql) {
 async function wipe(pg: Sql) {
   await pg`delete from credit_debits_pending where org_id = ${`${prefix}-org`}`;
   await pg`delete from usage_events where run_id = ${runId}`;
-  await pg`delete from workspace_runs where id = ${runId}`;
+  await pg`delete from project_runs where id = ${runId}`;
   await pg`delete from documents where id like ${`${prefix}-%`}`;
-  await pg`delete from workspaces where id = ${`${prefix}-ws`}`;
+  await pg`delete from projects where id = ${`${prefix}-ws`}`;
   await pg`delete from organizations where id = ${`${prefix}-org`}`;
 }
 
@@ -105,11 +105,11 @@ describe.skipIf(!realUrl)("run checkpoint lock order under real concurrency", ()
         values (${runId}, ${docIds[0]!}, 'extract-markdown', 1, 'completed', now())`;
       // Shard A: finishShard's prelude, then the spend-counter checkpoint update.
       await checkpoint`begin`;
-      await checkpoint`update workspace_runs set shard_demand = greatest(0, shard_demand - 1) where id = ${runId}`;
+      await checkpoint`update project_runs set shard_demand = greatest(0, shard_demand - 1) where id = ${runId}`;
       const counter = spendCounterSql(checkpoint as unknown as Sql, runId, checkpoint`0`, 0);
       const runUpdate = checkpoint`
-        update workspace_runs set ${counter.assignments}, stage = 'extract-markdown', updated_at = now()
-        from ${counter.from} where workspace_runs.id = spend_prev.id
+        update project_runs set ${counter.assignments}, stage = 'extract-markdown', updated_at = now()
+        from ${counter.from} where project_runs.id = spend_prev.id
         returning ${counter.checkDue} as spend_check_due`;
       const runUpdateDone = runUpdate.then(() => "done" as const, (error: { code?: string }) => error.code ?? "error");
       // With FOR UPDATE the checkpoint queues behind B's open transaction (a
@@ -179,7 +179,7 @@ describe.skipIf(!realUrl)("run checkpoint lock order under real concurrency", ()
     expect(Number(usage!.internal_cents)).toBe(0);
     expect(Number(usage!.cents)).toBeCloseTo(expectedCents, 6);
     const [run] = await pg<{ spent_cents: string; artifacts: Record<string, string> }[]>`
-      select spent_cents, artifacts from workspace_runs where id = ${runId}`;
+      select spent_cents, artifacts from project_runs where id = ${runId}`;
     expect(Number(run!.spent_cents)).toBeCloseTo(expectedCents, 6);
     expect(Object.keys(run!.artifacts)).toHaveLength(docIds.length * rounds);
   }, 120_000);
@@ -191,7 +191,7 @@ describe.skipIf(!realUrl)("run checkpoint lock order under real concurrency", ()
     state.usageLedger.enqueue(localCompute(3));
     state.usageLedger.enqueue(unitCharge(5, { documentId: docIds[0]!, pageNumber: 1 }));
     await Promise.all([store.updateProgress(state), store.updateProgress(state), store.finishShard(state)]);
-    const [run] = await pg<{ spent_cents: string }[]>`select spent_cents from workspace_runs where id = ${runId}`;
+    const [run] = await pg<{ spent_cents: string }[]>`select spent_cents from project_runs where id = ${runId}`;
     expect(Number(run!.spent_cents)).toBe(5);
     const [usage] = await pg<{ events: number; cents: string }[]>`
       select count(*)::int as events, coalesce(sum(cost_cents), 0) as cents from usage_events where run_id = ${runId}`;

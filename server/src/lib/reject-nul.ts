@@ -10,7 +10,7 @@ const JSON_NUL_ESCAPE = /(?<!\\)(?:\\\\)*\\u0000/i;
 /**
  * Postgres text values cannot contain NUL, so one in any string a client sends
  * ends as a 22021 error and an HTTP 500 wherever it is stored or used as a
- * query parameter (search filters, document ids, workspace names, ...). JSON
+ * query parameter (search filters, document ids, project names, ...). JSON
  * allows it, so answer with a clear 400 at the edge instead of fixing each
  * field. File uploads and non-JSON bodies are not inspected.
  */

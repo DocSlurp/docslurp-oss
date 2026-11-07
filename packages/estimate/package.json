@@ -1,0 +1,54 @@
+{
+  "name": "@docslurp/estimate",
+  "version": "0.5.0",
+  "private": true,
+  "description": "Offline DocSlurp file profiler: measure files locally (type, pages, PDF page facts, media duration) and send the profiles to the server for a quote.",
+  "type": "module",
+  "license": "MIT",
+  "homepage": "https://docslurp.io/docs/packages/estimate",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DocSlurp/docslurp-oss.git",
+    "directory": "packages/estimate"
+  },
+  "bugs": {
+    "url": "https://github.com/DocSlurp/docslurp-oss/issues"
+  },
+  "exports": {
+    ".": {
+      "types": "./js/index.d.ts",
+      "import": "./js/index.mjs"
+    },
+    "./node": {
+      "types": "./js/node.d.ts",
+      "import": "./js/node.mjs"
+    },
+    "./worker": {
+      "types": "./js/worker.d.ts",
+      "import": "./js/worker.mjs"
+    },
+    "./client": {
+      "types": "./js/client.d.ts",
+      "import": "./js/client.mjs"
+    },
+    "./docslurp_estimate.wasm": "./dist/docslurp_estimate.wasm"
+  },
+  "files": [
+    "js",
+    "dist",
+    "README.md",
+    "LICENSE",
+    "profiler-rules.json"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "test:wasm": "node scripts/build-wasm.mjs && node ../../scripts/node-test.mjs test/*.test.mjs",
+    "test:python": "node scripts/build-wasm.mjs && node scripts/build-python.mjs && cd python && uv run --isolated --with wasmtime --with-editable . python -I -m unittest discover -s tests -v"
+  },
+  "devDependencies": {
+    "@docslurp/shared": "workspace:*"
+  }
+}

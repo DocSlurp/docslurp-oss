@@ -89,7 +89,7 @@ describe("hosted vision catalog", () => {
       expect(applyDefaultVisionOverride(base, { DOCSLURP_VISION_MODEL_URI: defaultUri })).toBe(base);
     });
 
-    it("lets an explicit workspace model, profile or privacy mode win", () => {
+    it("lets an explicit project model, profile or privacy mode win", () => {
       const env = { DOCSLURP_VISION_MODEL_URI: luna };
       const explicitModel = pipeline(visionConfigSchema.parse({ modelUri: "llm://openrouter/z-ai/glm-5.3-flash" }));
       const explicitProfile = pipeline(visionConfigSchema.parse({ profile: "cheapest-hosted" }));

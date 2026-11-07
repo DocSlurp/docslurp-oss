@@ -32,7 +32,7 @@ beforeAll(async () => {
   await sql`insert into session(id,"userId",token,"expiresAt") values('session-1','owner','test-token',now()+interval '1 hour')`;
   await sql`insert into organizations(id,name,slug,created_by_user_id) values('org','Org','realtime-operation-org','owner')`;
   await sql`insert into org_memberships(org_id,user_id,role) values('org','owner','owner') on conflict do nothing`;
-  await sql`insert into workspaces(id,org_id,user_id,name) values(${WS},'org','owner','Operations')`;
+  await sql`insert into projects(id,org_id,user_id,name) values(${WS},'org','owner','Operations')`;
 }, 60_000);
 afterAll(async () => { vi.unstubAllEnvs(); await sql?.end(); await stop?.(); });
 
@@ -52,7 +52,7 @@ async function observe(url: string, id: string, after = 0) {
   return {socket,frames};
 }
 it("detaches without cancelling and recovers accepted output on another host", async () => {
-  const root = await operations.launchChatOperation({userId:"owner",orgId:"org",workspaceId:WS,key:"ws-recovery-test",input:{q:"test"}});
+  const root = await operations.launchChatOperation({userId:"owner",orgId:"org",projectId:WS,key:"ws-recovery-test",input:{q:"test"}});
   const attempt = await operations.claimChatOperation(); expect(attempt?.id).toBe(root.id);
   await operations.appendChatOperation(root.id,attempt!.attempt_id!,"text",{text:"first "});
   const first = await host(); const firstView = await observe(first.url,root.id);
@@ -65,7 +65,7 @@ it("detaches without cancelling and recovers accepted output on another host", a
       await vi.waitFor(() => expect(secondView.frames.some(frame => frame.data?.operation?.snapshot?.text === "first second")).toBe(true));
       const state = await operations.readChatOperation("owner",root.id,0);
       expect(state?.operation.cancel_requested).toBe(false);
-      const child = await operations.launchChatOperation({userId:"owner",orgId:"org",workspaceId:WS,key:"ws-child-test",parentId:root.id,input:{q:"child"}});
+      const child = await operations.launchChatOperation({userId:"owner",orgId:"org",projectId:WS,key:"ws-child-test",parentId:root.id,input:{q:"child"}});
       // Child discovery advances the transport revision even if root sequence does not change.
       await vi.waitFor(() => expect(secondView.frames.some(frame => frame.data?.tasks?.some((task: any) => task.id === child.id))).toBe(true), {timeout:3_000});
       const payloads = secondView.frames.filter(frame => frame.type === "snapshot" || frame.type === "upsert");
@@ -82,11 +82,11 @@ it("denies cached-but-expired sessions and explicit API credentials", async () =
   expect(await api.authenticateRealtimeSession(new Headers({authorization:"Bearer test"}))).toBeNull();
 });
 
-it("pushes workspace, suggestion and viewer changes through the production adapter and SQL backend", async () => {
+it("pushes project, suggestion and viewer changes through the production adapter and SQL backend", async () => {
   sessionId="dashboard-session";
   await sql`insert into session(id,"userId",token,"expiresAt") values(${sessionId},'owner','dashboard-token',now()+interval '1 hour')`;
   const documentId = "00000000-0000-4000-8000-000000000003";
-  await sql`insert into documents(id,user_id,org_id,workspace_id,filename,mime_type,source_key,status)
+  await sql`insert into documents(id,user_id,org_id,project_id,filename,mime_type,source_key,status)
     values(${documentId},'owner','org',${WS},'live.txt','text/plain','private-source','processing')`;
   const server = await host();
   const socket = new WebSocket(server.url, {headers:{origin:ORIGIN,cookie:"session=owner"}});
@@ -94,15 +94,15 @@ it("pushes workspace, suggestion and viewer changes through the production adapt
   socket.on("message", data => frames.push(JSON.parse(data.toString())));
   try {
     await new Promise<void>((resolve,reject) => {socket.once("open",resolve);socket.once("error",reject);});
-    socket.send(JSON.stringify({v:1,type:"subscribe",subscriptionId:"workspace",generation:1,resource:{kind:"workspace",workspaceId:WS}}));
+    socket.send(JSON.stringify({v:1,type:"subscribe",subscriptionId:"project",generation:1,resource:{kind:"project",projectId:WS}}));
     await vi.waitFor(() => expect(frames.some(frame => frame.type === "snapshot" && frame.data?.id === WS)).toBe(true),{timeout:4_000});
-    for (const resource of [{kind:"suggestions",workspaceId:WS},{kind:"viewer",documentId}]) {
+    for (const resource of [{kind:"suggestions",projectId:WS},{kind:"viewer",documentId}]) {
       socket.send(JSON.stringify({v:1,type:"subscribe",subscriptionId:resource.kind,generation:1,resource}));
     }
     await vi.waitFor(() => expect(frames.some(frame => frame.resource?.kind === "viewer" && frame.data?.document?.status === "processing")).toBe(true),{timeout:3_000});
-    await sql`update workspaces set name='Committed live change' where id=${WS}`;
+    await sql`update projects set name='Committed live change' where id=${WS}`;
     await sql`update documents set status='completed',page_count=3 where id=${documentId}`;
-    await sql`insert into query_suggestions(id,user_id,workspace_id,phrase,weight) values('ws-suggestion','owner',${WS},'Live SQL question',999)`;
+    await sql`insert into query_suggestions(id,user_id,project_id,phrase,weight) values('ws-suggestion','owner',${WS},'Live SQL question',999)`;
     await vi.waitFor(() => expect(frames.some(frame => frame.data?.name === "Committed live change")).toBe(true),{timeout:3_000});
     await vi.waitFor(() => expect(frames.some(frame => frame.resource?.kind === "suggestions" && frame.data?.suggestions?.includes("Live SQL question"))).toBe(true),{timeout:3_000});
     await vi.waitFor(() => expect(frames.some(frame => frame.resource?.kind === "viewer" && frame.data?.document?.status === "completed" && frame.data?.pageStats?.pageCount === 3)).toBe(true),{timeout:3_000});

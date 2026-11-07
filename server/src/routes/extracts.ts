@@ -6,15 +6,15 @@ import {
   extractOptionsSchema,
   indexingModeSchema,
   pipelineFeatureOverridesSchema,
-  WORKSPACE_INPUT_MAX_LENGTH,
-  workspaceTemplateKeySchema,
+  PROJECT_INPUT_MAX_LENGTH,
+  projectTemplateKeySchema,
   type ExtractOptions,
-  type WorkspaceRecord,
+  type ProjectRecord,
 } from "@docslurp/shared";
 
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { reportPublicError } from "../lib/public-errors.js";
-import { actorHasAnyApiKeyScope, apiKeyCanUseWorkspace, getRequestActor, type RequestActor } from "../lib/request-actor.js";
+import { actorHasAnyApiKeyScope, apiKeyCanUseProject, getRequestActor, type RequestActor } from "../lib/request-actor.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { createDirectUploadSession } from "../services/direct-upload-session.js";
@@ -33,23 +33,23 @@ import {
   signExtractDownload,
 } from "../services/extracts.js";
 import {
-  createBulkWorkspaceIntake,
-  createRemoteUrlWorkspaceIntake,
+  createBulkProjectIntake,
+  createRemoteUrlProjectIntake,
   parseFormDocumentTags,
-  parseFormWorkspaceIntakePipeline,
-  parseWorkspaceIntakePipeline,
-  parseWorkspaceIntakeTemplateKey,
-} from "../services/workspace-intake-actions.js";
+  parseFormProjectIntakePipeline,
+  parseProjectIntakePipeline,
+  parseProjectIntakeTemplateKey,
+} from "../services/project-intake-actions.js";
 import {
-  inferWorkspaceTitleFromFilenames,
-  inferWorkspaceTitleFromUrls,
-  WorkspaceIntakeError,
-  workspaceIntakePorts,
-  type WorkspaceIntakePorts,
-} from "../services/workspace-intake.js";
-import { getWorkspace } from "../services/workspaces.js";
+  inferProjectTitleFromFilenames,
+  inferProjectTitleFromUrls,
+  ProjectIntakeError,
+  projectIntakePorts,
+  type ProjectIntakePorts,
+} from "../services/project-intake.js";
+import { getProject } from "../services/projects.js";
 import {
-  actorAllowedWorkspaceIds,
+  actorAllowedProjectIds,
   canonicalIdSchema,
   directUploadFileSchema,
   directUploadTarget,
@@ -58,8 +58,8 @@ import {
   parseSourcePaths,
   runCreationErrorResponse,
   uploadValidationHook,
-  workspaceInputSchema,
-  workspaceIntakeErrorResponse,
+  projectInputSchema,
+  projectIntakeErrorResponse,
 } from "./uploads.js";
 
 /**
@@ -72,9 +72,9 @@ import {
 const ingestUrlSchema = z.object({
   tags: documentTagsSchema.optional(),
   orgId: z.string().optional(),
-  workspace: workspaceInputSchema.optional(),
-  newWorkspace: z.boolean().optional(),
-  templateKey: workspaceTemplateKeySchema.optional(),
+  project: projectInputSchema.optional(),
+  newProject: z.boolean().optional(),
+  templateKey: projectTemplateKeySchema.optional(),
   indexingMode: indexingModeSchema.optional(),
   urls: z.array(z.union([
     z.string().url(),
@@ -87,9 +87,9 @@ const createDirectSessionSchema = z.object({
   indexingMode: indexingModeSchema.optional(),
   tags: documentTagsSchema.optional(),
   orgId: z.string().optional(),
-  workspace: workspaceInputSchema.optional(),
-  newWorkspace: z.boolean().optional(),
-  templateKey: workspaceTemplateKeySchema.optional(),
+  project: projectInputSchema.optional(),
+  newProject: z.boolean().optional(),
+  templateKey: projectTemplateKeySchema.optional(),
   pipeline: pipelineFeatureOverridesSchema.optional(),
   files: z.array(directUploadFileSchema).min(1),
 }).extend(extractOptionsSchema.shape);
@@ -107,7 +107,7 @@ function parseFormExtractOptions(body: Record<string, unknown>): ExtractOptions 
   if (typeof body.download === "string" && body.download.trim()) raw.download = body.download.trim();
   const parsed = extractOptionsSchema.safeParse(raw);
   if (!parsed.success) {
-    throw new WorkspaceIntakeError("Invalid extract options", 422, parsed.error.issues.map((issue) => ({
+    throw new ProjectIntakeError("Invalid extract options", 422, parsed.error.issues.map((issue) => ({
       path: issue.path.join("."), message: issue.message, code: issue.code,
     })));
   }
@@ -119,57 +119,57 @@ function extractOptionsOf(input: ExtractOptions): ExtractOptions {
 }
 
 /**
- * The workspace an extract lands in, resolved before the extract (and its
+ * The project an extract lands in, resolved before the extract (and its
  * storage prefix, which names the organization) exists: an existing one, or
- * one created now when the request asks for a new workspace. Same rules as
- * upload: a workspace-restricted key never creates one.
+ * one created now when the request asks for a new project. Same rules as
+ * upload: a project-restricted key never creates one.
  */
-async function extractWorkspace(
+async function extractProject(
   actor: RequestActor,
-  input: { workspace?: string | null; newWorkspace?: boolean; templateKey?: string; pipeline?: unknown; indexingMode?: string },
+  input: { project?: string | null; newProject?: boolean; templateKey?: string; pipeline?: unknown; indexingMode?: string },
   orgId: string | null,
   title: string,
-  ports: WorkspaceIntakePorts,
-): Promise<{ workspace: WorkspaceRecord; created: boolean }> {
-  const target = await directUploadTarget(actor, { workspace: input.workspace ?? undefined, newWorkspace: input.newWorkspace, templateKey: input.templateKey }, orgId);
-  if (target.workspaceId) {
-    const workspace = await getWorkspace(target.workspaceId, actor.userId);
-    if (!workspace || (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace))) {
-      throw new WorkspaceIntakeError("Workspace not found", 404);
+  ports: ProjectIntakePorts,
+): Promise<{ project: ProjectRecord; created: boolean }> {
+  const target = await directUploadTarget(actor, { project: input.project ?? undefined, newProject: input.newProject, templateKey: input.templateKey }, orgId);
+  if (target.projectId) {
+    const project = await getProject(target.projectId, actor.userId);
+    if (!project || (actor.type === "apiKey" && !apiKeyCanUseProject(actor.apiKey, project))) {
+      throw new ProjectIntakeError("Project not found", 404);
     }
-    return { workspace, created: false };
+    return { project, created: false };
   }
-  const templateKey = parseWorkspaceIntakeTemplateKey(input.templateKey);
-  const overrides = parseWorkspaceIntakePipeline(input.pipeline);
+  const templateKey = parseProjectIntakeTemplateKey(input.templateKey);
+  const overrides = parseProjectIntakePipeline(input.pipeline);
   const indexingMode = indexingModeSchema.safeParse(input.indexingMode).data;
-  const workspace = await ports.records.createWorkspace({
+  const project = await ports.records.createProject({
     userId: actor.userId,
     orgId: orgId ?? undefined,
-    name: target.workspaceName ?? title,
+    name: target.projectName ?? title,
     templateKey,
     pipeline: indexingMode ? { ...overrides, indexingMode } : overrides,
-    autoNamed: !target.workspaceName,
+    autoNamed: !target.projectName,
   });
-  return { workspace, created: true };
+  return { project, created: true };
 }
 
-/** Removes a workspace made for an extract whose request then failed. */
-async function discardCreated(target: { workspace: WorkspaceRecord; created: boolean } | null, ports: WorkspaceIntakePorts): Promise<void> {
+/** Removes a project made for an extract whose request then failed. */
+async function discardCreated(target: { project: ProjectRecord; created: boolean } | null, ports: ProjectIntakePorts): Promise<void> {
   if (!target?.created) return;
-  await ports.records.discardWorkspace(target.workspace.id).catch((error: unknown) => {
-    console.error(`[extract] could not remove workspace=${target.workspace.id} after the request failed:`, error instanceof Error ? error.message : String(error));
+  await ports.records.discardProject(target.project.id).catch((error: unknown) => {
+    console.error(`[extract] could not remove project=${target.project.id} after the request failed:`, error instanceof Error ? error.message : String(error));
   });
 }
 
 /**
- * A request failed: expire its extract and remove a workspace made for it,
+ * A request failed: expire its extract and remove a project made for it,
  * unless a run exists (run creation commits the link in its own transaction):
  * then the extract is live and keeps its schedule.
  */
 async function releaseFailedExtract(
   extractId: string | null,
-  target: { workspace: WorkspaceRecord; created: boolean } | null,
-  ports: WorkspaceIntakePorts,
+  target: { project: ProjectRecord; created: boolean } | null,
+  ports: ProjectIntakePorts,
 ): Promise<void> {
   if (extractId && await extractHasRun(extractId).catch(() => true)) return;
   if (extractId) await abandonExtract(extractId).catch(() => undefined);
@@ -184,14 +184,14 @@ function extractErrorResponse(c: Context, error: unknown): Response | null {
 function intakeFailure(c: Context, error: unknown): Response {
   return (
     extractErrorResponse(c, error) ??
-    workspaceIntakeErrorResponse(c, error) ??
+    projectIntakeErrorResponse(c, error) ??
     runCreationErrorResponse(c, error) ??
     apiStatusError(c, 500, reportPublicError(error))
   );
 }
 
 /** `ports` lets tests drive the real routes against fake storage, records, and workflow start. */
-export const createExtractsRoutes = (ports: WorkspaceIntakePorts = workspaceIntakePorts) => acceptApiKeys(new Hono()
+export const createExtractsRoutes = (ports: ProjectIntakePorts = projectIntakePorts) => acceptApiKeys(new Hono()
   .use("*", async (c, next) => {
     const actor = getRequestActor(c);
     if (actor.type !== "apiKey") return next();
@@ -226,35 +226,35 @@ export const createExtractsRoutes = (ports: WorkspaceIntakePorts = workspaceInta
     const body = await c.req.parseBody({ all: true });
     const orgId = c.get("apiKey")?.orgId ?? (typeof body.orgId === "string" && body.orgId.trim() ? body.orgId.trim() : null);
     const files = normalizeFiles(body.files ?? body.file);
-    let target: { workspace: WorkspaceRecord; created: boolean } | null = null;
+    let target: { project: ProjectRecord; created: boolean } | null = null;
     let extractId: string | null = null;
     try {
-      if (files.length === 0) throw new WorkspaceIntakeError("Attach at least one file using the files field.", 400);
+      if (files.length === 0) throw new ProjectIntakeError("Attach at least one file using the files field.", 400);
       const options = parseFormExtractOptions(body);
       const canonicalIds = parseCanonicalIds(files, body);
       const paths = parseSourcePaths(files, body);
-      const pipeline = parseFormWorkspaceIntakePipeline(body.pipeline);
-      target = await extractWorkspace(actor, {
-        workspace: typeof body.workspace === "string" && body.workspace.trim() ? body.workspace.slice(0, WORKSPACE_INPUT_MAX_LENGTH) : null,
-        newWorkspace: body.newWorkspace === "true",
+      const pipeline = parseFormProjectIntakePipeline(body.pipeline);
+      target = await extractProject(actor, {
+        project: typeof body.project === "string" && body.project.trim() ? body.project.slice(0, PROJECT_INPUT_MAX_LENGTH) : null,
+        newProject: body.newProject === "true",
         templateKey: typeof body.templateKey === "string" ? body.templateKey : undefined,
         pipeline,
         indexingMode: typeof body.indexingMode === "string" ? body.indexingMode : undefined,
-      }, orgId, inferWorkspaceTitleFromFilenames(files.map((file) => file.name)), ports);
+      }, orgId, inferProjectTitleFromFilenames(files.map((file) => file.name)), ports);
       const extract = await createExtract({
         userId: actor.userId,
-        orgId: target.workspace.orgId,
-        workspaceId: target.workspace.id,
+        orgId: target.project.orgId,
+        projectId: target.project.id,
         apiKeyId: c.get("apiKey")?.keyId ?? null,
         options,
         estimatedSourceBytes: files.reduce((sum, file) => sum + file.size, 0),
       });
       extractId = extract.id;
-      const result = await createBulkWorkspaceIntake({
+      const result = await createBulkProjectIntake({
         userId: actor.userId,
-        orgId: target.workspace.orgId,
-        workspace: target.workspace.id,
-        allowedWorkspaceIds: actorAllowedWorkspaceIds(actor),
+        orgId: target.project.orgId,
+        project: target.project.id,
+        allowedProjectIds: actorAllowedProjectIds(actor),
         indexingMode: indexingModeSchema.safeParse(body.indexingMode).data,
         pipeline: target.created ? undefined : pipeline,
         files,
@@ -284,23 +284,23 @@ export const createExtractsRoutes = (ports: WorkspaceIntakePorts = workspaceInta
     const body = c.req.valid("json");
     const idempotencyKey = c.req.header("Idempotency-Key")?.trim();
     const urls = body.urls.map((entry) => typeof entry === "string" ? entry : entry.url);
-    let target: { workspace: WorkspaceRecord; created: boolean } | null = null;
+    let target: { project: ProjectRecord; created: boolean } | null = null;
     let extractId: string | null = null;
     try {
-      target = await extractWorkspace(actor, body, c.get("apiKey")?.orgId ?? body.orgId ?? null, inferWorkspaceTitleFromUrls(urls), ports);
+      target = await extractProject(actor, body, c.get("apiKey")?.orgId ?? body.orgId ?? null, inferProjectTitleFromUrls(urls), ports);
       const extract = await createExtract({
         userId: actor.userId,
-        orgId: target.workspace.orgId,
-        workspaceId: target.workspace.id,
+        orgId: target.project.orgId,
+        projectId: target.project.id,
         apiKeyId: c.get("apiKey")?.keyId ?? null,
         options: extractOptionsOf(body),
       });
       extractId = extract.id;
-      const result = await createRemoteUrlWorkspaceIntake({
+      const result = await createRemoteUrlProjectIntake({
         userId: actor.userId,
-        orgId: target.workspace.orgId,
-        workspace: target.workspace.id,
-        allowedWorkspaceIds: actorAllowedWorkspaceIds(actor),
+        orgId: target.project.orgId,
+        project: target.project.id,
+        allowedProjectIds: actorAllowedProjectIds(actor),
         indexingMode: body.indexingMode,
         pipeline: target.created ? undefined : body.pipeline,
         tags: body.tags,
@@ -325,15 +325,15 @@ export const createExtractsRoutes = (ports: WorkspaceIntakePorts = workspaceInta
   .post("/direct/sessions", zValidator("json", createDirectSessionSchema, uploadValidationHook), async (c) => {
     const actor = getRequestActor(c);
     const input = c.req.valid("json");
-    let target: { workspace: WorkspaceRecord; created: boolean } | null = null;
+    let target: { project: ProjectRecord; created: boolean } | null = null;
     let extractId: string | null = null;
     try {
-      target = await extractWorkspace(actor, input, c.get("apiKey")?.orgId ?? input.orgId ?? null, inferWorkspaceTitleFromFilenames(input.files.map((file) => file.filename)), ports);
-      const pipeline = parseWorkspaceIntakePipeline({ ...input.pipeline, ...(input.indexingMode ? { indexingMode: input.indexingMode } : {}) });
+      target = await extractProject(actor, input, c.get("apiKey")?.orgId ?? input.orgId ?? null, inferProjectTitleFromFilenames(input.files.map((file) => file.filename)), ports);
+      const pipeline = parseProjectIntakePipeline({ ...input.pipeline, ...(input.indexingMode ? { indexingMode: input.indexingMode } : {}) });
       const extract = await createExtract({
         userId: actor.userId,
-        orgId: target.workspace.orgId,
-        workspaceId: target.workspace.id,
+        orgId: target.project.orgId,
+        projectId: target.project.id,
         apiKeyId: c.get("apiKey")?.keyId ?? null,
         options: extractOptionsOf(input),
         estimatedSourceBytes: input.files.reduce((sum, file) => sum + (file.sizeBytes ?? 0), 0),
@@ -341,11 +341,11 @@ export const createExtractsRoutes = (ports: WorkspaceIntakePorts = workspaceInta
       extractId = extract.id;
       const session = await createDirectUploadSession({
         userId: actor.userId,
-        orgId: target.workspace.orgId,
+        orgId: target.project.orgId,
         apiKeyId: c.get("apiKey")?.keyId ?? null,
-        allowedWorkspaceIds: actorAllowedWorkspaceIds(actor),
-        workspaceId: target.workspace.id,
-        workspaceName: null,
+        allowedProjectIds: actorAllowedProjectIds(actor),
+        projectId: target.project.id,
+        projectName: null,
         templateKey: null,
         pipeline: target.created ? {} : pipeline,
         files: input.files,
@@ -390,7 +390,7 @@ export const createExtractsRoutes = (ports: WorkspaceIntakePorts = workspaceInta
     const actor = getRequestActor(c);
     const row = await getExtractForActor(c.req.param("extractId"), actor);
     if (!row) return apiErrorResponse(c, 404, "extract_not_found", "Extract not found");
-    // Readers of the workspace may see an extract; only its requester may delete it early.
+    // Readers of the project may see an extract; only its requester may delete it early.
     if (row.user_id !== actor.userId) return apiErrorResponse(c, 403, "forbidden", "Only the requester can delete this extract");
     await expireExtractNow(row);
     return c.json({ extract: describeExtract({ ...row, expired: true }) }, 202);

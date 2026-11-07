@@ -7,7 +7,7 @@
  * - `cn`: headquartered in China, or a Chinese-owned company listed under an international entity (named in
  *   `basis`). Its requests are under Chinese jurisdiction whatever its datacenters.
  * - `other`: OpenRouter lists a headquarters outside China and the company is not Chinese-owned.
- * - `unknown`: OpenRouter lists no headquarters. Never guessed: an organization or workspace that turned
+ * - `unknown`: OpenRouter lists no headquarters. Never guessed: an organization or project that turned
  *   China-based providers off cannot reach these either.
  *
  * Direct (non-OpenRouter) providers use the same slugs (`openai`, `anthropic`, `deepinfra`, `perplexity`,

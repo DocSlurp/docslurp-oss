@@ -5,14 +5,14 @@ import { splitTextIntoPages as splitDocumentPages } from "@docslurp/shared";
 import { sql } from "../db.js";
 import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { getArtifactJson, getArtifactText } from "../lib/artifacts.js";
-import { listAccessibleWorkspaceIds } from "./organizations.js";
+import { listAccessibleProjectIds } from "./organizations.js";
 import { getDocumentViewerPayload, setDocumentTags } from "./documents.js";
 
 type ReviewDocumentRow = {
   id: string;
   org_id: string;
   user_id: string;
-  workspace_id: string;
+  project_id: string;
   run_id: string | null;
   filename: string;
   mime_type: string;
@@ -51,7 +51,7 @@ type CorrectionRow = {
 
 type CorrectionProfileHistoryRow = {
   document_id: string;
-  workspace_id: string;
+  project_id: string;
   filename: string;
   mime_type: string;
   extraction_mode: string;
@@ -112,7 +112,7 @@ export interface CorrectionWorkbenchPayload {
 
 export interface CorrectionProfileSummary {
   profileKey: string;
-  workspaceId: string;
+  projectId: string;
   documentType: {
     key: string;
     label: string;
@@ -305,8 +305,8 @@ export function classifyCorrectionDocumentType(input: {
   return { key: "other", label: "Other documents" };
 }
 
-function buildCorrectionProfileKey(workspaceId: string, documentTypeKey: string): string {
-  return `${workspaceId}:${documentTypeKey}`;
+function buildCorrectionProfileKey(projectId: string, documentTypeKey: string): string {
+  return `${projectId}:${documentTypeKey}`;
 }
 
 function getStageFailureLabel(stageName: string): string {
@@ -431,8 +431,8 @@ export function calculateReviewSeverity(input: {
 }
 
 async function getAccessibleDocument(docId: string, userId: string): Promise<ReviewDocumentRow | null> {
-  const workspaceIds = await listAccessibleWorkspaceIds(userId);
-  if (workspaceIds.length === 0) {
+  const projectIds = await listAccessibleProjectIds(userId);
+  if (projectIds.length === 0) {
     return null;
   }
 
@@ -441,7 +441,7 @@ async function getAccessibleDocument(docId: string, userId: string): Promise<Rev
       id,
       org_id,
       user_id,
-      workspace_id,
+      project_id,
       run_id,
       filename,
       mime_type,
@@ -455,7 +455,7 @@ async function getAccessibleDocument(docId: string, userId: string): Promise<Rev
       updated_at::text
     from documents
     where id = ${docId}
-      and workspace_id = any(${sql.array(workspaceIds)})
+      and project_id = any(${sql.array(projectIds)})
     limit 1
   `;
 
@@ -521,11 +521,11 @@ async function getReviewSignalSnapshot(docId: string): Promise<ReviewSignalRow |
   return row ?? null;
 }
 
-async function listWorkspaceCorrectionHistory(workspaceId: string): Promise<CorrectionProfileHistoryRow[]> {
+async function listProjectCorrectionHistory(projectId: string): Promise<CorrectionProfileHistoryRow[]> {
   return await sql<CorrectionProfileHistoryRow[]>`
     select
       d.id as document_id,
-      d.workspace_id,
+      d.project_id,
       d.filename,
       d.mime_type,
       d.extraction_mode,
@@ -565,14 +565,14 @@ async function listWorkspaceCorrectionHistory(workspaceId: string): Promise<Corr
       ) as failed_stage_names
     from document_corrections dc
     join documents d on d.id = dc.document_id
-    where d.workspace_id = ${workspaceId}
+    where d.project_id = ${projectId}
     order by dc.updated_at desc
     limit 80
   `;
 }
 
 type CorrectionProfileSummaryInput = {
-  document: Pick<ReviewDocumentRow, "id" | "workspace_id" | "filename" | "mime_type" | "extraction_mode">;
+  document: Pick<ReviewDocumentRow, "id" | "project_id" | "filename" | "mime_type" | "extraction_mode">;
   correction: CorrectionRow | null;
   reviewSignal: ReviewSignalRow | null;
   history: CorrectionProfileHistoryRow[];
@@ -584,7 +584,7 @@ export function buildCorrectionProfileSummary(args: CorrectionProfileSummaryInpu
     mimeType: args.document.mime_type,
     extractionMode: args.document.extraction_mode
   });
-  const profileKey = buildCorrectionProfileKey(args.document.workspace_id, documentType.key);
+  const profileKey = buildCorrectionProfileKey(args.document.project_id, documentType.key);
   const scopedHistory = args.history.filter((entry) => {
     return (
       classifyCorrectionDocumentType({
@@ -695,7 +695,7 @@ export function buildCorrectionProfileSummary(args: CorrectionProfileSummaryInpu
 
   return {
     profileKey,
-    workspaceId: args.document.workspace_id,
+    projectId: args.document.project_id,
     documentType,
     summary: {
       correctedDocuments: scopedHistory.length,
@@ -739,7 +739,7 @@ export async function getCorrectionWorkbench(docId: string, userId: string): Pro
     getDocumentViewerPayload(docId, userId),
     getCorrectionRow(docId),
     getReviewSignalSnapshot(docId),
-    listWorkspaceCorrectionHistory(document.workspace_id)
+    listProjectCorrectionHistory(document.project_id)
   ]);
 
   const markdownUri = viewer?.artifacts.find((artifact) => artifact.slot === `${docId}:markdown`)?.uri;
@@ -799,7 +799,7 @@ export async function saveDocumentCorrection(args: {
 
   await sql.begin(async tx => {
     const transaction = tx as unknown as typeof sql;
-    await transaction`select id from workspaces where id=${document.workspace_id} and org_id=${document.org_id} for share`;
+    await transaction`select id from projects where id=${document.project_id} and org_id=${document.org_id} for share`;
   const [savedCorrection] = await transaction`
     insert into document_corrections (
       id,
@@ -836,10 +836,10 @@ export async function saveDocumentCorrection(args: {
     // Explicit structured edits are new authority, even NULL -> NULL clears.
     // Notes-only inserts carry no source mutation and must not fence geometry.
     if (args.structuredData !== undefined) await transaction`update documents set projection_revision=projection_revision+1
-      where id=${args.docId} and workspace_id=${document.workspace_id} and org_id=${document.org_id}`;
+      where id=${args.docId} and project_id=${document.project_id} and org_id=${document.org_id}`;
     const corrected = args.structuredData !== undefined ? args.structuredData : savedCorrection.corrected_structured_data as Record<string, unknown> | null;
     if (args.structuredData !== undefined || corrected !== null) await publishGeoCorrection(transaction, {
-      documentId: args.docId, workspaceId: document.workspace_id, orgId: document.org_id,
+      documentId: args.docId, projectId: document.project_id, orgId: document.org_id,
     }, corrected);
   });
 
@@ -868,7 +868,7 @@ export async function reindexDocumentCorrection(args: {
     mimeType: document.mime_type,
     extractionMode: document.extraction_mode
   });
-  const profileKey = buildCorrectionProfileKey(document.workspace_id, documentType.key);
+  const profileKey = buildCorrectionProfileKey(document.project_id, documentType.key);
   const failureModes = buildReviewFailureModes(
     {
       plausibilityScore: reviewSignal?.plausibility_score ?? null,
@@ -918,7 +918,7 @@ export async function reindexDocumentCorrection(args: {
           reindexedAt: new Date().toISOString(),
           extractionProfile: {
             key: profileKey,
-            workspaceId: document.workspace_id,
+            projectId: document.project_id,
             documentType: documentType.key,
             signalKeys,
             failureModes
@@ -1009,7 +1009,7 @@ export async function reindexDocumentCorrection(args: {
     `;
     // The document's LanceDB rows now carry stale text: native search drops
     // the cached eligibility (lanceStale) on commit and serves it from Postgres.
-    await notifySearchEligibilityChanged(transaction, [document.workspace_id]);
+    await notifySearchEligibilityChanged(transaction, [document.project_id]);
   });
 
   return {

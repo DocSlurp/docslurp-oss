@@ -36,11 +36,16 @@ export async function prepareAudioChunk(runner: CommandRunner, source: string, o
   } finally { await unlink(output).catch(() => {}); }
 }
 
-/** Whole-document audio for diarization: speaker labels are only consistent within one request, so keep it to one small upload. */
-export async function prepareDiarizationAudio(runner: CommandRunner, source: string, signal?: AbortSignal) {
+/**
+ * Whole-document audio for diarization: speaker labels are only consistent within one request, so keep it to one small upload.
+ * Encoded only up to `durationSeconds`, the duration the file is billed for (inspectMedia): a container that declares less than
+ * it holds gets no more audio processed than it pays for, like the transcription windows and video frames.
+ */
+export async function prepareDiarizationAudio(runner: CommandRunner, source: string, durationSeconds: number, signal?: AbortSignal) {
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) throw new Error("Diarization needs the billed media duration");
   const output = path.join(path.dirname(source), "diarization.mp3");
   const plan = await runner.plan("ffmpeg", "-nostdin", "-v", "error", "-y", "-protocol_whitelist", "file,pipe", "-format_whitelist", "wav,mp3,flac,ogg,mov,matroska,webm,aac,avi",
-    "-threads", "2", "-i", source, "-map", "0:a:0", "-vn", "-sn", "-dn", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "32k", "-threads", "1",
+    "-threads", "2", "-i", source, "-t", String(durationSeconds), "-map", "0:a:0", "-vn", "-sn", "-dn", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "32k", "-threads", "1",
     "-fs", String(DIARIZATION_MAX_BYTES + 1), output);
   plan.timeoutMs = 600000;
   try {

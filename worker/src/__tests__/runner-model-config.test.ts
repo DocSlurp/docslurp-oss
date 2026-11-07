@@ -10,8 +10,8 @@ it("passes configured local model defaults to helper scripts and honors explicit
   vi.spyOn(runner, "isAvailable").mockResolvedValue(true);
   const ocr = await runner.florence2("page.png", "out.json", "<OCR>");
   const clip = await runner.transformersJsClip("page.png", "out.json", "text,photo");
-  const explicit = await runner.florence2("page.png", "out.json", "<OCR>", "vendor/workspace-ocr");
+  const explicit = await runner.florence2("page.png", "out.json", "<OCR>", "vendor/project-ocr");
   expect(ocr.args.slice(-2)).toEqual(["--model", "vendor/local-ocr"]);
   expect(clip.args.slice(-2)).toEqual(["--model", "vendor/local-classifier"]);
-  expect(explicit.args.slice(-2)).toEqual(["--model", "vendor/workspace-ocr"]);
+  expect(explicit.args.slice(-2)).toEqual(["--model", "vendor/project-ocr"]);
 });

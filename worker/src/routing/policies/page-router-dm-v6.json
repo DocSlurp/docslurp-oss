@@ -4,7 +4,7 @@
   "policyVersion": "page-router-dm-v6",
   "trainingDataSha256": "210794fb441b63220db4c0ba721890764ad20a883fc9a02a22c4f527296b0c0a",
   "fitDate": "2026-10-12",
-  "splitPolicy": "fit=development+calibration splits of eval-suite (W11 tolerant-markdown@v1 labels/outcomes) and eval-suite (generator gold); the test split is held out and used only to report calibration brier/auroc; split by sourceFamily; decision questions are plain_ocr_sufficient/needs_math_extraction/needs_table_structure only (no whole-page trust question); per-target pass mappings are fit on the primary model's calibrated answers; the native accept-text-layer mapping is fit only on pages the production trust cascade accepts (status, OCR-layer agreement >= 0.4, provisional math gate 0.01, inset crop gate); no case ids, filenames or content in this pack; v3 adds Claude Haiku 5.5 and Claude Sonnet 5.5 targets and refits DeepSeek V4.1 Flash (effort none) and GLM-5.3 Flash (effort minimal) from fresh runs of the lowest accepted reasoning effort; page-router-dm-v5 = page-router-dm-v3 unchanged plus native-pdf targets: native:pdf-markdown and native:pdf-text pass mappings fit on the primary model's calibrated answers over development+calibration text-layer pages (probe textLayerStatus ok) of the preservation suite (suite inputs and born-digital source pages) and eval-suite, scored with tolerant-markdown@v1 at the W11 thresholds (text .90, math .70, tables .70, overall .85); the test split was never extracted; ocr:pdf-ocr-fill and ocr:pdf-ocr alias the ocr:tesseract mapping until the engine OCR is measured; latency from the native-pdf engine bench; page-router-dm-v5 merges v3 (E2 transcription targets) with v4 (native-pdf targets) in one fit on the v3 base and adds Platt calibrations for liquid/d1 (text state, same three questions, fit on development+calibration); target pass mappings stay fit on the primary calibrated answers (Platt calibration makes the mapping inputs comparable across the chain models); page-router-dm-v6 keeps the v5 mappings (fit on cloudflare/clef-flash answers) as the default and adds per-serving-model target mappings fit the same way on each model's own calibrated development+calibration answers: openai/gpt-6-luna-decisions (19 targets), typesafe/jev-1.13 (19 targets), liquid/d1 (19 targets)",
+  "splitPolicy": "fit=development+calibration splits of eval-suite (W11 tolerant-markdown@v1 labels/outcomes) and eval-suite (generator gold); the test split is held out and used only to report calibration brier/auroc; split by sourceFamily; decision questions are plain_ocr_sufficient/needs_math_extraction/needs_table_structure only (no whole-page trust question); per-target pass mappings are fit on the primary model's calibrated answers; the native accept-text-layer mapping is fit only on pages the production trust cascade accepts (status, OCR-layer agreement >= 0.4, provisional math gate 0.01, inset crop gate); no case ids, filenames or content in this pack; v3 adds Claude Haiku 5.5 and Claude Sonnet 5.5 targets and refits DeepSeek V4.1 Flash (effort none) and GLM-5.3 Flash (effort minimal) from fresh runs of the lowest accepted reasoning effort; page-router-dm-v5 = page-router-dm-v3 unchanged plus native-pdf targets: native:pdf-markdown and native:pdf-text pass mappings fit on the primary model's calibrated answers over development+calibration text-layer pages (probe textLayerStatus ok) of the preservation suite (suite inputs and born-digital source pages) and eval-suite, scored with tolerant-markdown@v1 at the W11 thresholds (text .90, math .70, tables .70, overall .85); the test split was never extracted; ocr:pdf-ocr-fill and ocr:pdf-ocr alias the ocr:ppocr mapping until the engine OCR is measured; latency from the native-pdf engine bench; page-router-dm-v5 merges v3 (E2 transcription targets) with v4 (native-pdf targets) in one fit on the v3 base and adds Platt calibrations for liquid/d1 (text state, same three questions, fit on development+calibration); target pass mappings stay fit on the primary calibrated answers (Platt calibration makes the mapping inputs comparable across the chain models); page-router-dm-v6 keeps the v5 mappings (fit on cloudflare/clef-flash answers) as the default and adds per-serving-model target mappings fit the same way on each model's own calibrated development+calibration answers: openai/gpt-6-luna-decisions (19 targets), typesafe/jev-1.13 (19 targets), liquid/d1 (19 targets) OCR targets (ocr:*) carry no fitted mapping or stats: their earlier fit measured a retired recogniser, so they stay unmeasured until PP-OCR is fit; the router has no estimate for them and promotion cannot use one.",
   "passThreshold": 0.85
  },
  "decisionModels": [
@@ -206,48 +206,6 @@
     "p95Ms": 90.4
    },
    "n": 93
-  },
-  {
-   "targetId": "ocr:tesseract",
-   "pass": {
-    "text": {
-     "intercept": -0.4228,
-     "weights": {
-      "plain_ocr_sufficient": 0.7345,
-      "needs_math_extraction": -1.2874,
-      "needs_table_structure": -0.6643
-     },
-     "baseRate": 0.3556
-    },
-    "math": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "tables": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "overall": {
-     "intercept": -0.7533,
-     "weights": {
-      "plain_ocr_sufficient": 0.5673,
-      "needs_math_extraction": -1.4011,
-      "needs_table_structure": -0.8307
-     },
-     "baseRate": 0.2321
-    }
-   },
-   "cost": {
-    "meanUsd": 0.0,
-    "p90Usd": 0.0
-   },
-   "latency": {
-    "p50Ms": 2032.8,
-    "p95Ms": 6330.4
-   },
-   "n": 56
   },
   {
    "targetId": "vlm:openrouter/anthropic/claude-haiku-5.5",
@@ -936,90 +894,6 @@
    "n": 106
   },
   {
-   "targetId": "ocr:pdf-ocr-fill",
-   "pass": {
-    "text": {
-     "intercept": -0.4228,
-     "weights": {
-      "plain_ocr_sufficient": 0.7345,
-      "needs_math_extraction": -1.2874,
-      "needs_table_structure": -0.6643
-     },
-     "baseRate": 0.3556
-    },
-    "math": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "tables": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "overall": {
-     "intercept": -0.7533,
-     "weights": {
-      "plain_ocr_sufficient": 0.5673,
-      "needs_math_extraction": -1.4011,
-      "needs_table_structure": -0.8307
-     },
-     "baseRate": 0.2321
-    }
-   },
-   "cost": {
-    "meanUsd": 0.0,
-    "p90Usd": 0.0
-   },
-   "latency": {
-    "p50Ms": 2032.8,
-    "p95Ms": 6330.4
-   },
-   "n": 56
-  },
-  {
-   "targetId": "ocr:pdf-ocr",
-   "pass": {
-    "text": {
-     "intercept": -0.4228,
-     "weights": {
-      "plain_ocr_sufficient": 0.7345,
-      "needs_math_extraction": -1.2874,
-      "needs_table_structure": -0.6643
-     },
-     "baseRate": 0.3556
-    },
-    "math": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "tables": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "overall": {
-     "intercept": -0.7533,
-     "weights": {
-      "plain_ocr_sufficient": 0.5673,
-      "needs_math_extraction": -1.4011,
-      "needs_table_structure": -0.8307
-     },
-     "baseRate": 0.2321
-    }
-   },
-   "cost": {
-    "meanUsd": 0.0,
-    "p90Usd": 0.0
-   },
-   "latency": {
-    "p50Ms": 2032.8,
-    "p95Ms": 6330.4
-   },
-   "n": 56
-  },
-  {
    "targetId": "native:accept-text-layer",
    "decisionModel": "openai/gpt-6-luna-decisions",
    "pass": {
@@ -1061,49 +935,6 @@
     "p95Ms": 90.4
    },
    "n": 93
-  },
-  {
-   "targetId": "ocr:tesseract",
-   "decisionModel": "openai/gpt-6-luna-decisions",
-   "pass": {
-    "text": {
-     "intercept": -0.2109,
-     "weights": {
-      "plain_ocr_sufficient": 0.4026,
-      "needs_math_extraction": -1.3457,
-      "needs_table_structure": -0.5799
-     },
-     "baseRate": 0.3556
-    },
-    "math": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "tables": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "overall": {
-     "intercept": -0.7081,
-     "weights": {
-      "plain_ocr_sufficient": 0.4923,
-      "needs_math_extraction": -1.4143,
-      "needs_table_structure": -0.7259
-     },
-     "baseRate": 0.2321
-    }
-   },
-   "cost": {
-    "meanUsd": 0.0,
-    "p90Usd": 0.0
-   },
-   "latency": {
-    "p50Ms": 2032.8,
-    "p95Ms": 6330.4
-   },
-   "n": 56
   },
   {
    "targetId": "vlm:openrouter/anthropic/claude-haiku-5.5",
@@ -1807,92 +1638,6 @@
    "n": 106
   },
   {
-   "targetId": "ocr:pdf-ocr-fill",
-   "decisionModel": "openai/gpt-6-luna-decisions",
-   "pass": {
-    "text": {
-     "intercept": -0.2109,
-     "weights": {
-      "plain_ocr_sufficient": 0.4026,
-      "needs_math_extraction": -1.3457,
-      "needs_table_structure": -0.5799
-     },
-     "baseRate": 0.3556
-    },
-    "math": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "tables": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "overall": {
-     "intercept": -0.7081,
-     "weights": {
-      "plain_ocr_sufficient": 0.4923,
-      "needs_math_extraction": -1.4143,
-      "needs_table_structure": -0.7259
-     },
-     "baseRate": 0.2321
-    }
-   },
-   "cost": {
-    "meanUsd": 0.0,
-    "p90Usd": 0.0
-   },
-   "latency": {
-    "p50Ms": 2032.8,
-    "p95Ms": 6330.4
-   },
-   "n": 56
-  },
-  {
-   "targetId": "ocr:pdf-ocr",
-   "decisionModel": "openai/gpt-6-luna-decisions",
-   "pass": {
-    "text": {
-     "intercept": -0.2109,
-     "weights": {
-      "plain_ocr_sufficient": 0.4026,
-      "needs_math_extraction": -1.3457,
-      "needs_table_structure": -0.5799
-     },
-     "baseRate": 0.3556
-    },
-    "math": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "tables": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "overall": {
-     "intercept": -0.7081,
-     "weights": {
-      "plain_ocr_sufficient": 0.4923,
-      "needs_math_extraction": -1.4143,
-      "needs_table_structure": -0.7259
-     },
-     "baseRate": 0.2321
-    }
-   },
-   "cost": {
-    "meanUsd": 0.0,
-    "p90Usd": 0.0
-   },
-   "latency": {
-    "p50Ms": 2032.8,
-    "p95Ms": 6330.4
-   },
-   "n": 56
-  },
-  {
    "targetId": "native:accept-text-layer",
    "decisionModel": "typesafe/jev-1.13",
    "pass": {
@@ -1934,49 +1679,6 @@
     "p95Ms": 90.4
    },
    "n": 93
-  },
-  {
-   "targetId": "ocr:tesseract",
-   "decisionModel": "typesafe/jev-1.13",
-   "pass": {
-    "text": {
-     "intercept": -0.7117,
-     "weights": {
-      "plain_ocr_sufficient": 0.8092,
-      "needs_math_extraction": -0.8696,
-      "needs_table_structure": 0.0935
-     },
-     "baseRate": 0.3556
-    },
-    "math": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "tables": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "overall": {
-     "intercept": -1.4586,
-     "weights": {
-      "plain_ocr_sufficient": 0.7346,
-      "needs_math_extraction": -0.4967,
-      "needs_table_structure": -0.0128
-     },
-     "baseRate": 0.2321
-    }
-   },
-   "cost": {
-    "meanUsd": 0.0,
-    "p90Usd": 0.0
-   },
-   "latency": {
-    "p50Ms": 2032.8,
-    "p95Ms": 6330.4
-   },
-   "n": 56
   },
   {
    "targetId": "vlm:openrouter/anthropic/claude-haiku-5.5",
@@ -2680,92 +2382,6 @@
    "n": 106
   },
   {
-   "targetId": "ocr:pdf-ocr-fill",
-   "decisionModel": "typesafe/jev-1.13",
-   "pass": {
-    "text": {
-     "intercept": -0.7117,
-     "weights": {
-      "plain_ocr_sufficient": 0.8092,
-      "needs_math_extraction": -0.8696,
-      "needs_table_structure": 0.0935
-     },
-     "baseRate": 0.3556
-    },
-    "math": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "tables": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "overall": {
-     "intercept": -1.4586,
-     "weights": {
-      "plain_ocr_sufficient": 0.7346,
-      "needs_math_extraction": -0.4967,
-      "needs_table_structure": -0.0128
-     },
-     "baseRate": 0.2321
-    }
-   },
-   "cost": {
-    "meanUsd": 0.0,
-    "p90Usd": 0.0
-   },
-   "latency": {
-    "p50Ms": 2032.8,
-    "p95Ms": 6330.4
-   },
-   "n": 56
-  },
-  {
-   "targetId": "ocr:pdf-ocr",
-   "decisionModel": "typesafe/jev-1.13",
-   "pass": {
-    "text": {
-     "intercept": -0.7117,
-     "weights": {
-      "plain_ocr_sufficient": 0.8092,
-      "needs_math_extraction": -0.8696,
-      "needs_table_structure": 0.0935
-     },
-     "baseRate": 0.3556
-    },
-    "math": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "tables": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "overall": {
-     "intercept": -1.4586,
-     "weights": {
-      "plain_ocr_sufficient": 0.7346,
-      "needs_math_extraction": -0.4967,
-      "needs_table_structure": -0.0128
-     },
-     "baseRate": 0.2321
-    }
-   },
-   "cost": {
-    "meanUsd": 0.0,
-    "p90Usd": 0.0
-   },
-   "latency": {
-    "p50Ms": 2032.8,
-    "p95Ms": 6330.4
-   },
-   "n": 56
-  },
-  {
    "targetId": "native:accept-text-layer",
    "decisionModel": "liquid/d1",
    "pass": {
@@ -2807,49 +2423,6 @@
     "p95Ms": 90.4
    },
    "n": 93
-  },
-  {
-   "targetId": "ocr:tesseract",
-   "decisionModel": "liquid/d1",
-   "pass": {
-    "text": {
-     "intercept": -0.0748,
-     "weights": {
-      "plain_ocr_sufficient": -0.0764,
-      "needs_math_extraction": -1.1371,
-      "needs_table_structure": -0.097
-     },
-     "baseRate": 0.3556
-    },
-    "math": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "tables": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "overall": {
-     "intercept": -0.9317,
-     "weights": {
-      "plain_ocr_sufficient": 0.0118,
-      "needs_math_extraction": -0.7471,
-      "needs_table_structure": -0.0619
-     },
-     "baseRate": 0.2321
-    }
-   },
-   "cost": {
-    "meanUsd": 0.0,
-    "p90Usd": 0.0
-   },
-   "latency": {
-    "p50Ms": 2032.8,
-    "p95Ms": 6330.4
-   },
-   "n": 56
   },
   {
    "targetId": "vlm:openrouter/anthropic/claude-haiku-5.5",
@@ -3551,92 +3124,6 @@
     "p95Ms": 47.9
    },
    "n": 106
-  },
-  {
-   "targetId": "ocr:pdf-ocr-fill",
-   "decisionModel": "liquid/d1",
-   "pass": {
-    "text": {
-     "intercept": -0.0748,
-     "weights": {
-      "plain_ocr_sufficient": -0.0764,
-      "needs_math_extraction": -1.1371,
-      "needs_table_structure": -0.097
-     },
-     "baseRate": 0.3556
-    },
-    "math": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "tables": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "overall": {
-     "intercept": -0.9317,
-     "weights": {
-      "plain_ocr_sufficient": 0.0118,
-      "needs_math_extraction": -0.7471,
-      "needs_table_structure": -0.0619
-     },
-     "baseRate": 0.2321
-    }
-   },
-   "cost": {
-    "meanUsd": 0.0,
-    "p90Usd": 0.0
-   },
-   "latency": {
-    "p50Ms": 2032.8,
-    "p95Ms": 6330.4
-   },
-   "n": 56
-  },
-  {
-   "targetId": "ocr:pdf-ocr",
-   "decisionModel": "liquid/d1",
-   "pass": {
-    "text": {
-     "intercept": -0.0748,
-     "weights": {
-      "plain_ocr_sufficient": -0.0764,
-      "needs_math_extraction": -1.1371,
-      "needs_table_structure": -0.097
-     },
-     "baseRate": 0.3556
-    },
-    "math": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "tables": {
-     "intercept": -4.5951,
-     "weights": {},
-     "baseRate": 0.01
-    },
-    "overall": {
-     "intercept": -0.9317,
-     "weights": {
-      "plain_ocr_sufficient": 0.0118,
-      "needs_math_extraction": -0.7471,
-      "needs_table_structure": -0.0619
-     },
-     "baseRate": 0.2321
-    }
-   },
-   "cost": {
-    "meanUsd": 0.0,
-    "p90Usd": 0.0
-   },
-   "latency": {
-    "p50Ms": 2032.8,
-    "p95Ms": 6330.4
-   },
-   "n": 56
   }
  ]
 }

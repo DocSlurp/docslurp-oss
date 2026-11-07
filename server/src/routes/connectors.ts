@@ -14,7 +14,7 @@ import {
   sanitizeStoredPipeline,
   updateConnectorSchema,
   type PipelineFeatures,
-  type WorkspaceConnector,
+  type ProjectConnector,
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
@@ -22,13 +22,13 @@ import { env } from "../config.js";
 import { openSecret, sealSecret } from "../lib/encryption.js";
 import { validationErrorResponse, type ValidationErrorSource } from "../lib/validation.js";
 import { getConnectorAdapter } from "../services/connectors/index.js";
-import { canManageWorkspace, getWorkspaceAccess } from "../services/organizations.js";
+import { canManageProject, getProjectAccess } from "../services/organizations.js";
 import {
-  intakeIntoWorkspace,
+  intakeIntoProject,
   screenIntakeFile,
   type IntakeFileVerdict,
-  type WorkspaceIntakeItem,
-} from "../services/workspace-intake.js";
+  type ProjectIntakeItem,
+} from "../services/project-intake.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 
 function encryptCredentials(credentials: Record<string, unknown>): string {
@@ -50,7 +50,7 @@ const connectorValidationHook = (result: { success: boolean; error?: ValidationE
 
 type ConnectorRow = {
   id: string;
-  workspace_id: string;
+  project_id: string;
   type: string;
   name: string;
   credentials_encrypted: string;
@@ -82,13 +82,13 @@ async function validatedSettings(type: string, config: Record<string, unknown>, 
   return { config: parsedConfig, credentials: parsedCredentials };
 }
 
-function rowToConnector(row: ConnectorRow): WorkspaceConnector {
+function rowToConnector(row: ConnectorRow): ProjectConnector {
   return {
     id: row.id,
-    workspaceId: row.workspace_id,
-    type: row.type as WorkspaceConnector["type"],
+    projectId: row.project_id,
+    type: row.type as ProjectConnector["type"],
     name: row.name,
-    status: row.status as WorkspaceConnector["status"],
+    status: row.status as ProjectConnector["status"],
     config: connectorSchemas[row.type as keyof typeof connectorSchemas]?.config.safeParse(row.config).data ?? {},
     lastSyncAt: row.last_sync_at,
     createdAt: row.created_at,
@@ -96,15 +96,15 @@ function rowToConnector(row: ConnectorRow): WorkspaceConnector {
   };
 }
 
-async function requireConnectorAccess(workspaceId: string, userId: string): Promise<
+async function requireConnectorAccess(projectId: string, userId: string): Promise<
   | { ok: true }
-  | { ok: false; status: 403 | 404; code: "forbidden" | "workspace_not_found"; message: string }
+  | { ok: false; status: 403 | 404; code: "forbidden" | "project_not_found"; message: string }
 > {
-  const access = await getWorkspaceAccess(workspaceId, userId);
+  const access = await getProjectAccess(projectId, userId);
   if (!access) {
-    return { ok: false, status: 404, code: "workspace_not_found", message: "Workspace not found" };
+    return { ok: false, status: 404, code: "project_not_found", message: "Project not found" };
   }
-  if (!canManageWorkspace(access, userId)) {
+  if (!canManageProject(access, userId)) {
     return { ok: false, status: 403, code: "forbidden", message: "Forbidden" };
   }
   return { ok: true };
@@ -126,12 +126,12 @@ export async function runConnectorSync(row: ConnectorRow, syncLogId: string): Pr
     const credentials = decryptCredentials(row.credentials_encrypted);
     const config = row.config ?? {};
     const files = await adapter.listFiles(config, credentials);
-    const workspaceRows = await sql<Array<{ org_id: string; user_id: string; pipeline: PipelineFeatures | null }>>`
-      select org_id, user_id, pipeline from workspaces where id = ${row.workspace_id} limit 1
+    const projectRows = await sql<Array<{ org_id: string; user_id: string; pipeline: PipelineFeatures | null }>>`
+      select org_id, user_id, pipeline from projects where id = ${row.project_id} limit 1
     `;
-    const wsInfo = workspaceRows[0];
+    const wsInfo = projectRows[0];
     if (!wsInfo) {
-      throw new Error("Workspace not found");
+      throw new Error("Project not found");
     }
     // Connectors skip files the intake policy rejects instead of failing the sync.
     const skip = (verdict: Extract<IntakeFileVerdict, { ok: false }>) => {
@@ -139,7 +139,7 @@ export async function runConnectorSync(row: ConnectorRow, syncLogId: string): Pr
       skippedReasons.add(verdict.reason === "parser-surface" ? verdict.message : verdict.reason);
     };
 
-    async function* connectorItems(): AsyncGenerator<WorkspaceIntakeItem> {
+    async function* connectorItems(): AsyncGenerator<ProjectIntakeItem> {
       for (const file of files) {
         const declared = screenIntakeFile(
           { filename: file.name, mimeType: file.mimeType, sizeBytes: file.size },
@@ -153,7 +153,7 @@ export async function runConnectorSync(row: ConnectorRow, syncLogId: string): Pr
         // Check if we already have this file (by connector file id or path)
         const existing = await sql`
           select id, metadata->>'connectorEtag' as etag from documents
-          where workspace_id = ${row.workspace_id}
+          where project_id = ${row.project_id}
             and (metadata->>'connectorFileId' = ${file.id} or metadata->>'connectorPath' = ${file.path})
           limit 1
         `;
@@ -194,13 +194,13 @@ export async function runConnectorSync(row: ConnectorRow, syncLogId: string): Pr
       }
     }
 
-    await intakeIntoWorkspace({
+    await intakeIntoProject({
       userId: wsInfo.user_id,
       orgId: wsInfo.org_id,
-      workspace: row.workspace_id,
-      // The stored workspace pipeline is passed as the request override; drop extractor settings it may still
+      project: row.project_id,
+      // The stored project pipeline is passed as the request override; drop extractor settings it may still
       // carry that the strict schemas now reject, so a stale row cannot fail every sync.
-      pipeline: sanitizeStoredPipeline(wsInfo.pipeline ?? defaultPipelineFeatures, `workspace ${row.workspace_id}`),
+      pipeline: sanitizeStoredPipeline(wsInfo.pipeline ?? defaultPipelineFeatures, `project ${row.project_id}`),
       kind: "connector-sync",
       items: connectorItems(),
       mayBeEmpty: true,
@@ -224,7 +224,7 @@ export async function runConnectorSync(row: ConnectorRow, syncLogId: string): Pr
       where id = ${syncLogId}
     `;
     await sql`
-      update workspace_connectors set last_sync_at = now(), status = 'active', updated_at = now()
+      update project_connectors set last_sync_at = now(), status = 'active', updated_at = now()
       where id = ${row.id}
     `;
   } catch (error) {
@@ -236,37 +236,37 @@ export async function runConnectorSync(row: ConnectorRow, syncLogId: string): Pr
       where id = ${syncLogId}
     `;
     await sql`
-      update workspace_connectors set status = 'error', updated_at = now() where id = ${row.id}
+      update project_connectors set status = 'error', updated_at = now() where id = ${row.id}
     `;
     throw error;
   }
 }
 
 export const connectorsRoutes = new Hono()
-  // List connectors for a workspace
-  .get("/:workspaceId/connectors", async (c) => {
+  // List connectors for a project
+  .get("/:projectId/connectors", async (c) => {
     const userId = c.get("sessionUser").id;
-    const workspaceId = c.req.param("workspaceId");
-    const access = await requireConnectorAccess(workspaceId, userId);
+    const projectId = c.req.param("projectId");
+    const access = await requireConnectorAccess(projectId, userId);
     if (!access.ok) {
       return apiErrorResponse(c, access.status, access.code, access.message);
     }
 
     const rows = await sql<ConnectorRow[]>`
-      select id, workspace_id, type, name, credentials_encrypted, config, status, last_sync_at, created_at, updated_at
-      from workspace_connectors
-      where workspace_id = ${workspaceId}
+      select id, project_id, type, name, credentials_encrypted, config, status, last_sync_at, created_at, updated_at
+      from project_connectors
+      where project_id = ${projectId}
       order by created_at asc
     `;
 
     return c.json({ connectors: rows.map(rowToConnector) });
   })
 
-  // Get health status for all connectors in a workspace
-  .get("/:workspaceId/connectors/health", async (c) => {
+  // Get health status for all connectors in a project
+  .get("/:projectId/connectors/health", async (c) => {
     const userId = c.get("sessionUser").id;
-    const workspaceId = c.req.param("workspaceId");
-    const access = await requireConnectorAccess(workspaceId, userId);
+    const projectId = c.req.param("projectId");
+    const access = await requireConnectorAccess(projectId, userId);
     if (!access.ok) {
       return apiErrorResponse(c, access.status, access.code, access.message);
     }
@@ -281,9 +281,9 @@ export const connectorsRoutes = new Hono()
         extract(epoch from (now() - wc.last_sync_at))::int as lag_seconds,
         count(case when csl.status = 'failed' and csl.started_at > now() - interval '7 days' then 1 end)::int as consecutive_failures,
         count(case when csl.status = 'running' then 1 end)::int as active_syncs
-      from workspace_connectors wc
+      from project_connectors wc
       left join connector_sync_log csl on csl.connector_id = wc.id
-      where wc.workspace_id = ${workspaceId}
+      where wc.project_id = ${projectId}
       group by wc.id, wc.name, wc.type, wc.status, wc.last_sync_at
       order by wc.created_at asc
     `;
@@ -292,18 +292,18 @@ export const connectorsRoutes = new Hono()
   })
 
   // Get a single connector
-  .get("/:workspaceId/connectors/:connectorId", async (c) => {
+  .get("/:projectId/connectors/:connectorId", async (c) => {
     const userId = c.get("sessionUser").id;
-    const { workspaceId, connectorId } = c.req.param();
-    const access = await requireConnectorAccess(workspaceId, userId);
+    const { projectId, connectorId } = c.req.param();
+    const access = await requireConnectorAccess(projectId, userId);
     if (!access.ok) {
       return apiErrorResponse(c, access.status, access.code, access.message);
     }
 
     const rows = await sql<ConnectorRow[]>`
-      select id, workspace_id, type, name, credentials_encrypted, config, status, last_sync_at, created_at, updated_at
-      from workspace_connectors
-      where id = ${connectorId} and workspace_id = ${workspaceId}
+      select id, project_id, type, name, credentials_encrypted, config, status, last_sync_at, created_at, updated_at
+      from project_connectors
+      where id = ${connectorId} and project_id = ${projectId}
     `;
 
     if (rows.length === 0) return apiStatusError(c, 404, "Connector not found");
@@ -311,11 +311,11 @@ export const connectorsRoutes = new Hono()
   })
 
   // Create a connector
-  .post("/:workspaceId/connectors", zValidator("json", createConnectorSchema, connectorValidationHook), async (c) => {
+  .post("/:projectId/connectors", zValidator("json", createConnectorSchema, connectorValidationHook), async (c) => {
     const userId = c.get("sessionUser").id;
-    const workspaceId = c.req.param("workspaceId");
+    const projectId = c.req.param("projectId");
     const body = c.req.valid("json");
-    const access = await requireConnectorAccess(workspaceId, userId);
+    const access = await requireConnectorAccess(projectId, userId);
     if (!access.ok) {
       return apiErrorResponse(c, access.status, access.code, access.message);
     }
@@ -326,25 +326,25 @@ export const connectorsRoutes = new Hono()
     const credentialsEncrypted = encryptCredentials(settings.credentials);
 
     const rows = await sql<ConnectorRow[]>`
-      insert into workspace_connectors (id, workspace_id, type, name, credentials_encrypted, config, status)
-      values (${randomUUID()}, ${workspaceId}, ${body.type}, ${body.name}, ${credentialsEncrypted}, ${sql.json(toSqlJson(settings.config))}, 'active')
-      returning id, workspace_id, type, name, credentials_encrypted, config, status, last_sync_at, created_at, updated_at
+      insert into project_connectors (id, project_id, type, name, credentials_encrypted, config, status)
+      values (${randomUUID()}, ${projectId}, ${body.type}, ${body.name}, ${credentialsEncrypted}, ${sql.json(toSqlJson(settings.config))}, 'active')
+      returning id, project_id, type, name, credentials_encrypted, config, status, last_sync_at, created_at, updated_at
     `;
 
     return c.json({ connector: rowToConnector(rows[0]!) }, 201);
   })
 
   // Update a connector
-  .patch("/:workspaceId/connectors/:connectorId", zValidator("json", updateConnectorSchema, connectorValidationHook), async (c) => {
+  .patch("/:projectId/connectors/:connectorId", zValidator("json", updateConnectorSchema, connectorValidationHook), async (c) => {
     const userId = c.get("sessionUser").id;
-    const { workspaceId, connectorId } = c.req.param();
+    const { projectId, connectorId } = c.req.param();
     const body = c.req.valid("json");
-    const access = await requireConnectorAccess(workspaceId, userId);
+    const access = await requireConnectorAccess(projectId, userId);
     if (!access.ok) {
       return apiErrorResponse(c, access.status, access.code, access.message);
     }
 
-    const existing = await sql<ConnectorRow[]>`select * from workspace_connectors where id = ${connectorId} and workspace_id = ${workspaceId}`;
+    const existing = await sql<ConnectorRow[]>`select * from project_connectors where id = ${connectorId} and project_id = ${projectId}`;
     if (!existing[0]) return apiStatusError(c, 404, "Connector not found");
     let settings;
     try {
@@ -353,23 +353,23 @@ export const connectorsRoutes = new Hono()
     } catch { return apiStatusError(c, 422, "Invalid connector settings: use valid credentials and a public HTTPS endpoint", { code: "invalid_request" }); }
     const now = new Date().toISOString();
     if (body.name !== undefined) {
-      await sql`update workspace_connectors set name = ${body.name}, updated_at = ${now} where id = ${connectorId} and workspace_id = ${workspaceId}`;
+      await sql`update project_connectors set name = ${body.name}, updated_at = ${now} where id = ${connectorId} and project_id = ${projectId}`;
     }
     if (body.credentials !== undefined) {
       const enc = encryptCredentials(settings.credentials);
-      await sql`update workspace_connectors set credentials_encrypted = ${enc}, updated_at = ${now} where id = ${connectorId} and workspace_id = ${workspaceId}`;
+      await sql`update project_connectors set credentials_encrypted = ${enc}, updated_at = ${now} where id = ${connectorId} and project_id = ${projectId}`;
     }
     if (body.config !== undefined) {
-      await sql`update workspace_connectors set config = ${sql.json(toSqlJson(settings.config))}, updated_at = ${now} where id = ${connectorId} and workspace_id = ${workspaceId}`;
+      await sql`update project_connectors set config = ${sql.json(toSqlJson(settings.config))}, updated_at = ${now} where id = ${connectorId} and project_id = ${projectId}`;
     }
     if (body.status !== undefined) {
-      await sql`update workspace_connectors set status = ${body.status}, updated_at = ${now} where id = ${connectorId} and workspace_id = ${workspaceId}`;
+      await sql`update project_connectors set status = ${body.status}, updated_at = ${now} where id = ${connectorId} and project_id = ${projectId}`;
     }
 
     const rows = await sql<ConnectorRow[]>`
-      select id, workspace_id, type, name, credentials_encrypted, config, status, last_sync_at, created_at, updated_at
-      from workspace_connectors
-      where id = ${connectorId} and workspace_id = ${workspaceId}
+      select id, project_id, type, name, credentials_encrypted, config, status, last_sync_at, created_at, updated_at
+      from project_connectors
+      where id = ${connectorId} and project_id = ${projectId}
     `;
 
     if (rows.length === 0) return apiStatusError(c, 404, "Connector not found");
@@ -377,31 +377,31 @@ export const connectorsRoutes = new Hono()
   })
 
   // Delete a connector
-  .delete("/:workspaceId/connectors/:connectorId", async (c) => {
+  .delete("/:projectId/connectors/:connectorId", async (c) => {
     const userId = c.get("sessionUser").id;
-    const { workspaceId, connectorId } = c.req.param();
-    const access = await requireConnectorAccess(workspaceId, userId);
+    const { projectId, connectorId } = c.req.param();
+    const access = await requireConnectorAccess(projectId, userId);
     if (!access.ok) {
       return apiErrorResponse(c, access.status, access.code, access.message);
     }
 
-    await sql`delete from workspace_connectors where id = ${connectorId} and workspace_id = ${workspaceId}`;
+    await sql`delete from project_connectors where id = ${connectorId} and project_id = ${projectId}`;
     return c.json({ deleted: true });
   })
 
   // Trigger a sync for a connector
-  .post("/:workspaceId/connectors/:connectorId/sync", async (c) => {
+  .post("/:projectId/connectors/:connectorId/sync", async (c) => {
     const userId = c.get("sessionUser").id;
-    const { workspaceId, connectorId } = c.req.param();
-    const access = await requireConnectorAccess(workspaceId, userId);
+    const { projectId, connectorId } = c.req.param();
+    const access = await requireConnectorAccess(projectId, userId);
     if (!access.ok) {
       return apiErrorResponse(c, access.status, access.code, access.message);
     }
 
     const rows = await sql<ConnectorRow[]>`
-      select id, workspace_id, type, name, credentials_encrypted, config, status, last_sync_at, created_at, updated_at
-      from workspace_connectors
-      where id = ${connectorId} and workspace_id = ${workspaceId}
+      select id, project_id, type, name, credentials_encrypted, config, status, last_sync_at, created_at, updated_at
+      from project_connectors
+      where id = ${connectorId} and project_id = ${projectId}
     `;
 
     if (rows.length === 0) return apiStatusError(c, 404, "Connector not found");
@@ -432,10 +432,10 @@ export const connectorsRoutes = new Hono()
   })
 
   // Get sync history for a connector
-  .get("/:workspaceId/connectors/:connectorId/history", async (c) => {
+  .get("/:projectId/connectors/:connectorId/history", async (c) => {
     const userId = c.get("sessionUser").id;
-    const { workspaceId, connectorId } = c.req.param();
-    const access = await requireConnectorAccess(workspaceId, userId);
+    const { projectId, connectorId } = c.req.param();
+    const access = await requireConnectorAccess(projectId, userId);
     if (!access.ok) {
       return apiErrorResponse(c, access.status, access.code, access.message);
     }
@@ -447,9 +447,9 @@ export const connectorsRoutes = new Hono()
       select csl.id, csl.connector_id, csl.started_at, csl.finished_at, csl.status,
              csl.files_added, csl.files_updated, csl.files_deleted, csl.error_message, csl.cost_cents
       from connector_sync_log csl
-      join workspace_connectors wc on wc.id = csl.connector_id
+      join project_connectors wc on wc.id = csl.connector_id
       where csl.connector_id = ${connectorId}
-        and wc.workspace_id = ${workspaceId}
+        and wc.project_id = ${projectId}
       order by csl.started_at desc
       limit ${limit} offset ${offset}
     `;

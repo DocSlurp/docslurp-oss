@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { organizationRoleSchema } from "./pipeline.js";
-import { organizationMembershipSchema, organizationSchema } from "./workspace.js";
+import { organizationMembershipSchema, organizationSchema } from "./project.js";
 
 export const organizationAccessSchema = z.object({
   orgId: z.string(), userId: z.string(), role: organizationRoleSchema,
@@ -9,7 +9,7 @@ export const organizationAccessSchema = z.object({
 export type OrganizationAccess = z.infer<typeof organizationAccessSchema>;
 export const organizationDetailsSchema = z.object({
   organization: organizationSchema, access: organizationAccessSchema,
-  counts: z.object({ members: z.number().int().nonnegative(), workspaces: z.number().int().nonnegative() }),
+  counts: z.object({ members: z.number().int().nonnegative(), projects: z.number().int().nonnegative() }),
 });
 export type OrganizationDetails = z.infer<typeof organizationDetailsSchema>;
 export const organizationMemberSchema = organizationMembershipSchema.extend({ email: z.string(), name: z.string() });

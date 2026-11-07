@@ -23,11 +23,11 @@ for (const arm of config.arms) {
  const rows = [];
  for (const test of dataset.cases.filter(test => !arm.caseIds || arm.caseIds.includes(test.id))) {
   const reference = test.retrieval ? test : dataset.cases.find(c => c.id === test.provenance.parents[0]);
-  const target = config.targets.find(t => t.workspaceId === reference.retrieval.workspaceId);
+  const target = config.targets.find(t => t.projectId === reference.retrieval.projectId);
   if (!target) throw new Error("No authorized target for case");
   const cookie = Object.entries(JSON.parse(fs.readFileSync(target.cookiePath))).map(([k,v]) => `${k}=${v}`).join("; ");
   const params = new URLSearchParams(reference.retrieval.flags);
-  for (const [k,v] of Object.entries({ parentRetrieval: true, limit: 10, ...arm.overrides, q: test.question, workspaceId: target.workspaceId })) params.set(k,String(v));
+  for (const [k,v] of Object.entries({ parentRetrieval: true, limit: 10, ...arm.overrides, q: test.question, projectId: target.projectId })) params.set(k,String(v));
   const url = new URL("/v1/search", config.base); url.search = params.toString();
   if (estimatedCostCents >= config.maxEstimatedCostCents) throw new Error("Cost bound reached");
   const started = Date.now();

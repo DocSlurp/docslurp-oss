@@ -59,7 +59,7 @@ type UserRow = {
   providers: string[]; passkeys: number;
   org_id: string | null; org_name: string | null; credit_balance_cents: number | null; org_count: number;
   last_active_at: string | null; active_sessions: number;
-  workspaces: number; documents: number; pages: number; last_upload_at: string | null; upload_sessions: number;
+  projects: number; documents: number; pages: number; last_upload_at: string | null; upload_sessions: number;
   searches: number; last_search_at: string | null; chat_sessions: number;
   api_keys: number; browser_keys: number; api_key_last_used_at: string | null;
   surfaces: { surface: string; client: string | null; first_seen_at: string; last_seen_at: string; requests: number }[];
@@ -128,7 +128,7 @@ adminUsersRoutes.get("/", async (c) => {
       po.id as org_id, po.name as org_name, po.credit_balance_cents::double precision as credit_balance_cents,
       (select count(*)::int from org_memberships m where m.user_id = u.id) as org_count,
       sess.last_active_at, sess.active_sessions,
-      (select count(*)::int from workspaces w where w.user_id = u.id) as workspaces,
+      (select count(*)::int from projects w where w.user_id = u.id) as projects,
       docs.documents, docs.pages, docs.last_upload_at,
       (select count(*)::int from upload_sessions us where us.user_id = u.id) as upload_sessions,
       srch.searches, srch.last_search_at,

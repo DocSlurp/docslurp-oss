@@ -1,18 +1,18 @@
 /**
  * One-off move of an org's vectors from the org-level LanceDB layouts
- * (lancedb-legacy-layout.ts) into per-workspace databases, without
+ * (lancedb-legacy-layout.ts) into per-project databases, without
  * re-embedding (CLI: lancedb-relocate-cli.ts):
  *
  *   1. stream every legacy table of the org, newest layout first, and route
- *      each row by its documentId to the workspace(s) that read it: the
- *      document's own workspace, the workspace of each same-workspace dedup
+ *      each row by its documentId to the project(s) that read it: the
+ *      document's own project, the project of each same-project dedup
  *      copy (copies read their source's rows), and, rebound to the copy's own
- *      chunk ids by chunk index, each copy in another workspace (those now own
+ *      chunk ids by chunk index, each copy in another project (those now own
  *      their rows);
  *   2. keep only rows whose chunk still exists in `document_chunks` (a stale
  *      row from before a reprocess or correction would otherwise come back as
  *      a ghost citation), with the chunk index taken from Postgres;
- *   3. append them to `<root>/<org>/<workspace>/vectors-<model>-<dims>`, never
+ *   3. append them to `<root>/<org>/<project>/vectors-<model>-<dims>`, never
  *      replacing a row already there: the first copy of an id wins, whether
  *      the worker wrote it since the upgrade or a newer legacy layout held it.
  *      Reruns therefore converge and never clobber newer vectors;
@@ -38,7 +38,7 @@ import { dropLanceDbTable } from "../db/superseded-purge.js";
 import type { VectorBackendRecord } from "./embedding-runtime.js";
 import { connectLanceDb } from "./lancedb-connection.js";
 import { legacyEmbeddingLocations, legacyOrgTable } from "./lancedb-legacy-layout.js";
-import { workspaceVectorLocation } from "./lancedb-location.js";
+import { projectVectorLocation } from "./lancedb-location.js";
 import { lanceDbMaintenanceSettings, runLanceDbMaintenance } from "./lancedb-maintenance.js";
 import { isRetryableLanceCommitError, withUniformHydrationColumns } from "./lancedb-writer.js";
 
@@ -54,7 +54,7 @@ export interface LanceRelocateOptions {
   maxPendingRows?: number;
   skipMaintenance?: boolean;
   /**
-   * Also maintain workspace databases this run wrote nothing to (rows already
+   * Also maintain project databases this run wrote nothing to (rows already
    * relocated): builds a vector index on tables that crossed a lowered
    * vectorIndexMinRows without new writes to trigger maintenance.
    */
@@ -70,38 +70,38 @@ export interface LanceRelocateResult {
   orgId: string;
   /** Legacy tables that existed, with the rows counted and read. */
   sources: Array<VectorLocation & { rows: number; read: number }>;
-  /** Rows appended per workspace database. */
-  written: Array<VectorLocation & { workspaceId: string; rows: number }>;
+  /** Rows appended per project database. */
+  written: Array<VectorLocation & { projectId: string; rows: number }>;
   /** Rows already present in the destination (written since the upgrade, a newer layout, or a rerun). */
   skippedExisting: number;
   /** Rows of documents that no longer exist (left for the legacy drop). */
   orphanRows: number;
   /** Rows whose chunk no longer exists (replaced by a reprocess or correction). */
   staleRows: number;
-  /** Rows of a cross-workspace copy's source without a matching chunk on the copy. */
+  /** Rows of a cross-project copy's source without a matching chunk on the copy. */
   unmatchedCopyRows: number;
   droppedLegacy: VectorLocation[];
-  /** Workspace databases maintained (vector index, FTS, optimize) and registered for the sweep. */
+  /** Project databases maintained (vector index, FTS, optimize) and registered for the sweep. */
   maintained: VectorLocation[];
   errors: string[];
 }
 
 type IndexedDocument = {
   id: string;
-  workspace_id: string;
+  project_id: string;
   run_id: string;
   source_key: string | null;
   filename: string | null;
   deduped_from_document_id: string | null;
-  owner_workspace_id: string | null;
+  owner_project_id: string | null;
   embedding_model: string;
   dimension: number;
 };
 
-type Copy = { id: string; workspaceId: string; runId: string; sourceKey: string | null; filename: string | null };
+type Copy = { id: string; projectId: string; runId: string; sourceKey: string | null; filename: string | null };
 
-/** Where one source document's rows go: as-is into workspaces, rebound into copies elsewhere. */
-type Route = { workspaces: Set<string>; copies: Copy[] };
+/** Where one source document's rows go: as-is into projects, rebound into copies elsewhere. */
+type Route = { projects: Set<string>; copies: Copy[] };
 
 type Space = { model: string; dimensions: number; routes: Map<string, Route> };
 
@@ -176,8 +176,8 @@ export async function relocateOrgVectors(options: LanceRelocateOptions): Promise
 
   try {
     const documents = await sql<IndexedDocument[]>`
-      select distinct d.id, d.workspace_id, d.run_id, d.source_key, d.filename, d.deduped_from_document_id,
-        owner.workspace_id as owner_workspace_id, v.embedding_model, v.dimension
+      select distinct d.id, d.project_id, d.run_id, d.source_key, d.filename, d.deduped_from_document_id,
+        owner.project_id as owner_project_id, v.embedding_model, v.dimension
       from documents d
       join vector_indexes v on v.document_id = d.id and v.backend = 'lancedb'
       left join documents owner on owner.id = d.deduped_from_document_id
@@ -190,17 +190,17 @@ export async function relocateOrgVectors(options: LanceRelocateOptions): Promise
       if (!space) spaces.set(key, space = { model: document.embedding_model, dimensions: document.dimension, routes: new Map() });
       const route = (id: string) => {
         let entry = space!.routes.get(id);
-        if (!entry) space!.routes.set(id, entry = { workspaces: new Set(), copies: [] });
+        if (!entry) space!.routes.set(id, entry = { projects: new Set(), copies: [] });
         return entry;
       };
-      // The document's own rows, and a same-workspace copy's view of its source's rows.
-      route(document.id).workspaces.add(document.workspace_id);
+      // The document's own rows, and a same-project copy's view of its source's rows.
+      route(document.id).projects.add(document.project_id);
       const source = document.deduped_from_document_id;
-      if (source && (document.owner_workspace_id ?? document.workspace_id) === document.workspace_id) {
-        route(source).workspaces.add(document.workspace_id);
+      if (source && (document.owner_project_id ?? document.project_id) === document.project_id) {
+        route(source).projects.add(document.project_id);
       } else if (source) {
         route(source).copies.push({
-          id: document.id, workspaceId: document.workspace_id, runId: document.run_id,
+          id: document.id, projectId: document.project_id, runId: document.run_id,
           sourceKey: document.source_key, filename: document.filename,
         });
       }
@@ -217,14 +217,14 @@ export async function relocateOrgVectors(options: LanceRelocateOptions): Promise
       return entry;
     };
 
-    type Destination = { location: VectorLocation; workspaceId: string; seen: Set<string>; pending: VectorBackendRecord[]; rows: number };
+    type Destination = { location: VectorLocation; projectId: string; seen: Set<string>; pending: VectorBackendRecord[]; rows: number };
     const destinations = new Map<string, Destination>();
     let pendingRows = 0;
-    const destination = async (workspaceId: string, space: Space): Promise<Destination> => {
-      const location = workspaceVectorLocation({ orgId, workspaceId }, { model: space.model, dimensions: space.dimensions }, root);
+    const destination = async (projectId: string, space: Space): Promise<Destination> => {
+      const location = projectVectorLocation({ orgId, projectId }, { model: space.model, dimensions: space.dimensions }, root);
       const key = `${location.uri}\u0000${location.table}`;
       let entry = destinations.get(key);
-      if (!entry) destinations.set(key, entry = { location, workspaceId, seen: await existingIds(location), pending: [], rows: 0 });
+      if (!entry) destinations.set(key, entry = { location, projectId, seen: await existingIds(location), pending: [], rows: 0 });
       return entry;
     };
     const flush = async (entry: Destination) => {
@@ -296,8 +296,8 @@ export async function relocateOrgVectors(options: LanceRelocateOptions): Promise
         result.staleRows += 1;
         return;
       }
-      for (const workspaceId of route.workspaces) {
-        await enqueue(await destination(workspaceId, space), record(row, row.documentId, row.id, chunkIndex));
+      for (const projectId of route.projects) {
+        await enqueue(await destination(projectId, space), record(row, row.documentId, row.id, chunkIndex));
       }
       for (const copy of route.copies) {
         const id = (await chunks(copy.id)).byIndex.get(chunkIndex);
@@ -305,7 +305,7 @@ export async function relocateOrgVectors(options: LanceRelocateOptions): Promise
           result.unmatchedCopyRows += 1;
           continue;
         }
-        await enqueue(await destination(copy.workspaceId, space), record(row, copy.id, id, chunkIndex, copy));
+        await enqueue(await destination(copy.projectId, space), record(row, copy.id, id, chunkIndex, copy));
       }
     };
 
@@ -355,7 +355,7 @@ export async function relocateOrgVectors(options: LanceRelocateOptions): Promise
     });
     for (const entry of destinations.values()) await flush(entry);
     result.written = [...destinations.values()].filter((entry) => entry.rows > 0)
-      .map((entry) => ({ ...entry.location, workspaceId: entry.workspaceId, rows: entry.rows }));
+      .map((entry) => ({ ...entry.location, projectId: entry.projectId, rows: entry.rows }));
 
     if (!dryRun && !options.skipMaintenance) {
       const maintenance = lanceDbMaintenanceSettings(resolveLanceDbConfig().params);
@@ -388,7 +388,7 @@ export async function relocateOrgVectors(options: LanceRelocateOptions): Promise
     result.errors.push(error instanceof Error ? error.message : String(error));
   }
   log(`[relocate] org=${orgId} sources=${result.sources.length} written=${result.written.reduce((sum, entry) => sum + entry.rows, 0)}`
-    + ` workspaces=${new Set(result.written.map((entry) => entry.workspaceId)).size} skipped_existing=${result.skippedExisting}`
+    + ` projects=${new Set(result.written.map((entry) => entry.projectId)).size} skipped_existing=${result.skippedExisting}`
     + ` orphan_rows=${result.orphanRows} stale_rows=${result.staleRows} unmatched_copy_rows=${result.unmatchedCopyRows}`
     + ` dropped=${result.droppedLegacy.length} errors=${result.errors.length}${dryRun ? " (dry run)" : ""}`);
   return result;

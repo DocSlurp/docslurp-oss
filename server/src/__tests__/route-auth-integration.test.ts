@@ -40,7 +40,7 @@ vi.mock("../services/api-keys.js", async () => {
   return { ...actual, validateApiKey: mocks.validateApiKey };
 });
 
-const ALL_SCOPES = ["ingest", "search", "artifacts", "organizations:read", "organizations:manage", "workspaces:manage"];
+const ALL_SCOPES = ["ingest", "search", "artifacts", "organizations:read", "organizations:manage", "projects:manage"];
 const KEY = "dslp_priv_route_auth_test";
 // Routes that authenticate callers themselves; adding one is a reviewed change.
 const ROUTE_AUTHENTICATED = [
@@ -56,6 +56,8 @@ const ROUTE_AUTHENTICATED = [
   "POST /v1/waitlist",
   // Public price list (routes/billing.ts): prices are readable without signing in.
   "GET /v1/billing/prices",
+  // Public quote (routes/estimate.ts): profiles and settings only, no account data, rate limited per IP.
+  "POST /v1/estimate",
 ].sort();
 
 type Operation = { method: string; path: string };
@@ -66,7 +68,7 @@ let routes: Array<{ method: string; path: string; mode: string }>;
 
 function concretePath(path: string): string {
   return path
-    .replace(/\{workspaceId\}|:workspaceId\b/g, "00000000-0000-4000-8000-000000000001")
+    .replace(/\{projectId\}|:projectId\b/g, "00000000-0000-4000-8000-000000000001")
     .replace(/\{[^}]+\}/g, "test-id")
     .replace(/:[A-Za-z_]+/g, "test-id");
 }
@@ -113,7 +115,7 @@ describe("API key route declarations (real middleware stack)", () => {
     expect((await requestWithKey({ method: "GET", path: "/dashboard/bootstrap" })).status).toBe(401);
   });
 
-  it("documents the workspace graph routes as API-key routes", () => {
+  it("documents the project graph routes as API-key routes", () => {
     const graph = documented.filter((operation) => operation.path.includes("/graph"));
     expect(graph.length).toBeGreaterThanOrEqual(6);
   });
@@ -167,7 +169,7 @@ describe("browser keys on admin and server-only routes (real middleware stack)",
   const browserKey = {
     keyId: "key-browser", userId: "user-route-auth", orgId: "org-route-auth", keyType: "client",
     allowedDomains: ["docs.example.com"], scopes: ["search", "chat"], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [],
-    workspaceIds: ["00000000-0000-4000-8000-000000000001"], maxOutputTokens: 1000,
+    projectIds: ["00000000-0000-4000-8000-000000000001"], maxOutputTokens: 1000,
   };
   it.each([
     ["GET", "/v1/api-keys"],
@@ -177,10 +179,10 @@ describe("browser keys on admin and server-only routes (real middleware stack)",
     ["POST", "/v1/admin/billing/credits"],
     ["GET", "/v1/organizations"],
     ["DELETE", "/v1/organizations/test-id"],
-    ["PATCH", "/v1/workspaces/00000000-0000-4000-8000-000000000001"],
-    ["POST", "/v1/workspaces/00000000-0000-4000-8000-000000000001/settings-proposals/apply"],
+    ["PATCH", "/v1/projects/00000000-0000-4000-8000-000000000001"],
+    ["POST", "/v1/projects/00000000-0000-4000-8000-000000000001/settings-proposals/apply"],
     ["POST", "/v1/uploads/url"],
-    ["GET", "/v1/workspaces/00000000-0000-4000-8000-000000000001/state"],
+    ["GET", "/v1/projects/00000000-0000-4000-8000-000000000001/state"],
   ])("refuses a browser key on %s %s", async (method, path) => {
     mocks.validateApiKey.mockResolvedValueOnce(browserKey);
     const response = await app.request(path, {

@@ -3,9 +3,9 @@ import { InvalidRetrievalQueryError } from "../lib/retrieval-query-flags.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const hybridSearch = vi.fn();
-const chatWorkspace = vi.fn();
-const workspaceChatDisabledBody = vi.fn(async (_workspaceId: string, _userId: string): Promise<{ error: string; code: "chat_disabled" } | null> => null);
-const aggregateWorkspaceRagSearch = vi.fn();
+const chatProject = vi.fn();
+const projectChatDisabledBody = vi.fn(async (_projectId: string, _userId: string): Promise<{ error: string; code: "chat_disabled" } | null> => null);
+const aggregateProjectRagSearch = vi.fn();
 const sqlMock = vi.fn();
 const enforceActorCategoryRateLimit = vi.fn(async (..._args: unknown[]): Promise<Response | null> => null);
 
@@ -20,30 +20,33 @@ vi.mock("../db.js", () => ({
 
 vi.mock("../services/search.js", () => ({
   hybridSearch,
-  MissingWorkspaceScopeError: class extends Error {},
+  MissingProjectScopeError: class extends Error {},
+  CrossProjectScopeError: class extends Error {},
+  ProjectNotFoundError: class ProjectNotFoundError extends Error { constructor() { super("Project not found"); } },
 }));
 
-vi.mock("../services/workspace-chat.js", () => ({
-  chatWorkspace,
-  workspaceChatDisabledBody,
+vi.mock("../services/project-chat.js", () => ({
+  chatProject,
+  projectChatDisabledBody,
 }));
 
 vi.mock("../services/aggregate-rag.js", () => ({
-  aggregateWorkspaceRagSearch,
+  aggregateProjectRagSearch,
 }));
 
-const getWorkspace = vi.fn();
-const ensureDefaultWorkspace = vi.fn(async () => ({ id: "ws-default" }));
-vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => null), findWorkspaceForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })),
-  ensureDefaultWorkspace,
-  getWorkspace,
+const getProject = vi.fn();
+const ensureDefaultProject = vi.fn(async () => ({ id: "ws-default" }));
+vi.mock("../services/projects.js", () => ({ resolveProjectRef: vi.fn(async () => null), findProjectForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })),
+  ensureDefaultProject,
+  getProject,
 }));
 
-// The response cache re-checks access and reads privacy per request; workspaces named "*strict*" are strict-privacy.
+// The response cache re-checks access and reads privacy per request; projects named "*strict*" are strict-privacy.
 vi.mock("../services/organizations.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("../services/organizations.js")>(),
-  getWorkspaceAccessWithPipeline: vi.fn(async (workspaceId: string) => ({
-    workspaceId, orgId: "org-1", pipeline: workspaceId.includes("strict") ? { privacyMode: "strict-privacy" } : {},
+  resolveDefaultOrganization: vi.fn(async () => ({ id: "org-1" })),
+  getProjectAccessWithPipeline: vi.fn(async (projectId: string) => ({
+    projectId, orgId: "org-1", pipeline: projectId.includes("strict") ? { privacyMode: "strict-privacy" } : {},
   })),
 }));
 
@@ -53,7 +56,7 @@ vi.mock("@docslurp/shared/observability", async (importOriginal) => ({
   activeTraceparent: () => traceparent.value,
 }));
 
-const { searchRoutes, workspaceChatRoutes, clearSearchResponseCacheForTests } = await import("../routes/search.js");
+const { searchRoutes, projectChatRoutes, clearSearchResponseCacheForTests } = await import("../routes/search.js");
 const { publicErrorMiddleware } = await import("../lib/public-errors.js");
 const { apiErrorEnvelopeSchema, PUBLIC_ERROR_MESSAGES } = await import("@docslurp/shared");
 
@@ -69,7 +72,7 @@ function buildApp(actor?: import("../lib/request-actor.js").RequestActor) {
     await next();
   });
   app.route("/search", searchRoutes);
-  app.route("/chat", workspaceChatRoutes);
+  app.route("/chat", projectChatRoutes);
   return app;
 }
 
@@ -79,12 +82,12 @@ describe("searchRoutes", () => {
   beforeEach(() => {
     app = buildApp();
     hybridSearch.mockReset();
-    chatWorkspace.mockReset();
-    aggregateWorkspaceRagSearch.mockReset();
+    chatProject.mockReset();
+    aggregateProjectRagSearch.mockReset();
     sqlMock.mockReset();
   });
 
-  it("passes workspace through as a search filter on GET /search", async () => {
+  it("passes project through as a search filter on GET /search", async () => {
     hybridSearch.mockResolvedValueOnce({
       results: [],
       sessionId: "session-1",
@@ -92,7 +95,7 @@ describe("searchRoutes", () => {
         status: "partial",
         isPartial: true,
         scope: {
-          workspaceId: "ws-1",
+          projectId: "ws-1",
           runId: null
         },
         coverage: {
@@ -116,7 +119,7 @@ describe("searchRoutes", () => {
       }
     });
 
-    const response = await app.request("/search?q=test&workspace=ws-1");
+    const response = await app.request("/search?q=test&project=ws-1");
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
@@ -132,7 +135,7 @@ describe("searchRoutes", () => {
       "user-1",
       expect.objectContaining({
         filters: expect.objectContaining({
-          workspaceId: "ws-1",
+          projectId: "ws-1",
         }),
       })
     );
@@ -141,25 +144,25 @@ describe("searchRoutes", () => {
   it("rejects an invalid minScore on GET /search with 400, like POST", async () => {
     hybridSearch.mockClear();
     for (const bad of ["abc", "7", "-1"]) {
-      const response = await app.request(`/search?q=test&workspace=ws-1&minScore=${bad}`);
+      const response = await app.request(`/search?q=test&project=ws-1&minScore=${bad}`);
       expect(response.status, bad).toBe(400);
       await expect(response.json()).resolves.toMatchObject({ error: { code: "invalid_request", message: expect.stringContaining("minScore") } });
     }
     expect(hybridSearch).not.toHaveBeenCalled();
   });
 
-  it("searches the default workspace when GET /search omits workspace", async () => {
+  it("searches the default project when GET /search omits project", async () => {
     hybridSearch.mockResolvedValueOnce({ results: [], sessionId: "session-default" });
     const response = await app.request("/search?q=test");
 
     expect(response.status).toBe(200);
-    expect(ensureDefaultWorkspace).toHaveBeenCalledWith({ userId: "user-1", orgId: undefined });
+    expect(ensureDefaultProject).toHaveBeenCalledWith({ userId: "user-1", orgId: undefined });
     expect(hybridSearch).toHaveBeenCalledWith("test", "user-1", expect.objectContaining({
-      filters: expect.objectContaining({ workspaceId: "ws-default" }),
+      filters: expect.objectContaining({ projectId: "ws-default" }),
     }));
   });
 
-  it("passes workspace through as a search filter on POST /search", async () => {
+  it("passes project through as a search filter on POST /search", async () => {
     hybridSearch.mockResolvedValueOnce({
       results: [],
       sessionId: "session-2",
@@ -167,7 +170,7 @@ describe("searchRoutes", () => {
         status: "complete",
         isPartial: false,
         scope: {
-          workspaceId: "ws-2",
+          projectId: "ws-2",
           runId: null
         },
         coverage: {
@@ -196,7 +199,7 @@ describe("searchRoutes", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         q: "test",
-        workspace: "ws-2",
+        project: "ws-2",
       }),
     });
 
@@ -214,7 +217,7 @@ describe("searchRoutes", () => {
       "user-1",
       expect.objectContaining({
         filters: expect.objectContaining({
-          workspaceId: "ws-2",
+          projectId: "ws-2",
         }),
       })
     );
@@ -224,13 +227,13 @@ describe("searchRoutes", () => {
     process.env.SEARCH_RESPONSE_CACHE_TTL_MS = "30000";
     clearSearchResponseCacheForTests();
     try {
-      hybridSearch.mockImplementation(async (_q: string, _user: string, options: { filters: { workspaceId: string } }) => ({
+      hybridSearch.mockImplementation(async (_q: string, _user: string, options: { filters: { projectId: string } }) => ({
         results: [{ id: "c1" }], sessionId: "s",
-        availability: { status: "complete", isPartial: false, scope: { workspaceId: options.filters.workspaceId, runId: null } },
+        availability: { status: "complete", isPartial: false, scope: { projectId: options.filters.projectId, runId: null } },
         usageEvents: [{ inputTokens: 6, outputTokens: 0, costCents: 0.01, metadata: { costSource: "provider" } }],
       }));
-      const search = async (q: string, workspaceId = "ws-2"): Promise<any> =>
-        (await app.request("/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q, workspace: workspaceId }) })).json();
+      const search = async (q: string, projectId = "ws-2"): Promise<any> =>
+        (await app.request("/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q, project: projectId }) })).json();
       const first = await search("rate limits");
       const second = await search("rate limits");
       expect(hybridSearch).toHaveBeenCalledTimes(1);
@@ -263,7 +266,7 @@ describe("searchRoutes", () => {
     try {
       hybridSearch.mockResolvedValue({ results: [], sessionId: "geo", availability: { status: "complete" } });
       for (let i = 0; i < 2; i++) {
-        const response = await app.request("/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "road", workspace: "ws-2", geo }) });
+        const response = await app.request("/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "road", project: "ws-2", geo }) });
         expect(response.status).toBe(200);
       }
       expect(hybridSearch).toHaveBeenCalledTimes(2);
@@ -273,16 +276,16 @@ describe("searchRoutes", () => {
 
   it.each([400,409,503] as const)("preserves spatial error status %s on non-streaming chat",async status=>{
     const {GeoSearchError}=await import("../search/geo-scope.js");
-    chatWorkspace.mockRejectedValueOnce(new GeoSearchError("Spatial request refused",status));
+    chatProject.mockRejectedValueOnce(new GeoSearchError("Spatial request refused",status));
     const guarded=new Hono();
     guarded.use("*",async(c,next)=>{c.set("requestId","geo-error-test");await next();});
     guarded.use("*",publicErrorMiddleware); guarded.route("/",app);
-    const response=await guarded.request("/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({q:"road",workspace:"ws-2",filters:{geo:{field:"site",op:"radius",center:[0,0],radiusMeters:100}}})});
+    const response=await guarded.request("/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({q:"road",project:"ws-2",filters:{geo:{field:"site",op:"radius",center:[0,0],radiusMeters:100}}})});
     expect(response.status).toBe(status);
     expect(apiErrorEnvelopeSchema.safeParse(await response.json()).success).toBe(true);
   });
 
-  it("searches the default workspace when POST /search omits workspace", async () => {
+  it("searches the default project when POST /search omits project", async () => {
     hybridSearch.mockResolvedValueOnce({ results: [], sessionId: "session-default" });
     const response = await app.request("/search", {
       method: "POST",
@@ -294,20 +297,20 @@ describe("searchRoutes", () => {
 
     expect(response.status).toBe(200);
     expect(hybridSearch).toHaveBeenCalledWith("test", "user-1", expect.objectContaining({
-      filters: expect.objectContaining({ workspaceId: "ws-default" }),
+      filters: expect.objectContaining({ projectId: "ws-default" }),
     }));
   });
 
-  it("runs aggregate RAG search without requiring a single workspace scope", async () => {
-    aggregateWorkspaceRagSearch.mockResolvedValueOnce({
+  it("runs aggregate RAG search without requiring a single project scope", async () => {
+    aggregateProjectRagSearch.mockResolvedValueOnce({
       query: "who is this for?",
       answer: "The docs are for implementation teams [1].",
       citations: [],
       evidenceSpans: [],
-      workspaces: [
+      projects: [
         {
-          workspaceId: "ws-1",
-          workspaceName: "Product Manuals",
+          projectId: "ws-1",
+          projectName: "Product Manuals",
           sessionId: "search-1",
           availability: null,
           results: [],
@@ -328,7 +331,7 @@ describe("searchRoutes", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         q: "who is this for?",
-        maxWorkspaces: 4,
+        maxProjects: 4,
       }),
     });
 
@@ -336,17 +339,19 @@ describe("searchRoutes", () => {
     await expect(response.json()).resolves.toMatchObject({
       query: "who is this for?",
       answer: "The docs are for implementation teams [1].",
-      workspaces: [
+      projects: [
         {
-          workspaceId: "ws-1",
+          projectId: "ws-1",
         },
       ],
     });
-    expect(aggregateWorkspaceRagSearch).toHaveBeenCalledWith({
+    expect(aggregateProjectRagSearch).toHaveBeenCalledWith({
       userId: "user-1",
+      // A session that names no organization searches its default one, never several.
+      orgId: "org-1",
       request: expect.objectContaining({
         q: "who is this for?",
-        maxWorkspaces: 4,
+        maxProjects: 4,
       }),
       apiKey: null,
     });
@@ -354,182 +359,207 @@ describe("searchRoutes", () => {
   });
 
   describe("aggregate answers need the chat scope", () => {
-    const keyActor = (scopes: string[], keyType: "server" | "client" = "server") => ({ type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "key", userId: "user-1", orgId: "org", keyType, allowedDomains: [], scopes, rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], workspaceIds: [] } });
+    const keyActor = (scopes: string[], keyType: "server" | "client" = "server") => ({ type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "key", userId: "user-1", orgId: "org", keyType, allowedDomains: [], scopes, rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], projectIds: [] } });
     const aggregate = (actor: ReturnType<typeof keyActor>, body: Record<string, unknown>) => buildApp(actor).request("/search/aggregate", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "who is this for?", ...body }),
     });
-    const empty = { query: "q", answer: null, citations: [], evidenceSpans: [], workspaces: [], warnings: [], partial: false, usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } };
+    const empty = { query: "q", answer: null, citations: [], evidenceSpans: [], projects: [], warnings: [], partial: false, usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } };
 
     it("refuses generateAnswer from a search-only key before any lookup, search or model call", async () => {
       const response = await aggregate(keyActor(["search"]), { generateAnswer: true });
       expect(response.status).toBe(403);
       await expect(response.json()).resolves.toMatchObject({ error: { code: "forbidden" } });
-      expect(aggregateWorkspaceRagSearch).not.toHaveBeenCalled();
+      expect(aggregateProjectRagSearch).not.toHaveBeenCalled();
       expect(hybridSearch).not.toHaveBeenCalled();
     });
 
     it("refuses a chat-only key (search is still required)", async () => {
       expect((await aggregate(keyActor(["chat"]), { generateAnswer: true })).status).toBe(403);
-      expect(aggregateWorkspaceRagSearch).not.toHaveBeenCalled();
+      expect(aggregateProjectRagSearch).not.toHaveBeenCalled();
     });
 
     it("refuses generateAnswer from a browser key, even with chat", async () => {
-      const response = await aggregate(keyActor(["search", "chat"], "client"), { generateAnswer: true, workspaces: ["ws-1"] });
+      const response = await aggregate(keyActor(["search", "chat"], "client"), { generateAnswer: true, projects: ["ws-1"] });
       expect(response.status).toBe(403);
-      expect(aggregateWorkspaceRagSearch).not.toHaveBeenCalled();
+      expect(aggregateProjectRagSearch).not.toHaveBeenCalled();
       expect(hybridSearch).not.toHaveBeenCalled();
     });
 
-    it("answers 400 when an answer would span organizations", async () => {
-      aggregateWorkspaceRagSearch.mockRejectedValueOnce(Object.assign(new Error("generateAnswer needs workspaces from one organization"), { name: "AggregateAnswerScopeError" }));
-      const response = await aggregate(keyActor(["search", "chat"]), { generateAnswer: true });
-      expect(response.status).toBe(400);
-      await expect(response.json()).resolves.toMatchObject({ error: { code: "invalid_request", message: expect.stringContaining("one organization") } });
+    it("answers 404 for the typed project-not-found error and not for look-alike messages", async () => {
+      const { ProjectNotFoundError } = await import("../services/search.js");
+      aggregateProjectRagSearch.mockRejectedValueOnce(new ProjectNotFoundError());
+      expect((await aggregate(keyActor(["search"]), {})).status).toBe(404);
+      // Control flow follows the error's type, not its wording.
+      aggregateProjectRagSearch.mockRejectedValueOnce(new Error("Project not found: cache entry evicted"));
+      expect((await aggregate(keyActor(["search"]), {})).status).toBe(500);
     });
 
     it("runs a default request from a search-only key with every model-calling step off", async () => {
-      aggregateWorkspaceRagSearch.mockResolvedValueOnce(empty);
+      aggregateProjectRagSearch.mockResolvedValueOnce(empty);
       expect((await aggregate(keyActor(["search"]), {})).status).toBe(200);
-      expect(aggregateWorkspaceRagSearch).toHaveBeenCalledWith(expect.objectContaining({
+      expect(aggregateProjectRagSearch).toHaveBeenCalledWith(expect.objectContaining({
         request: expect.objectContaining({ generateAnswer: false, queryRewrite: false, selfQuery: false, hyde: false, compression: false, queryDecompose: false, stepback: false }),
       }));
     });
 
     it("counts an answer as chat-ai and refuses when that allowance is spent", async () => {
-      aggregateWorkspaceRagSearch.mockResolvedValue(empty);
+      aggregateProjectRagSearch.mockResolvedValue(empty);
       enforceActorCategoryRateLimit.mockClear();
       expect((await aggregate(keyActor(["search"]), {})).status).toBe(200);
       expect(enforceActorCategoryRateLimit).not.toHaveBeenCalled();
       expect((await aggregate(keyActor(["search", "chat"]), { generateAnswer: true })).status).toBe(200);
       expect(enforceActorCategoryRateLimit).toHaveBeenCalledWith(expect.anything(), "chat-ai");
-      aggregateWorkspaceRagSearch.mockClear();
+      aggregateProjectRagSearch.mockClear();
       enforceActorCategoryRateLimit.mockResolvedValueOnce(new Response(null, { status: 429 }));
       expect((await aggregate(keyActor(["search", "chat"]), { generateAnswer: true })).status).toBe(429);
-      expect(aggregateWorkspaceRagSearch).not.toHaveBeenCalled();
-      aggregateWorkspaceRagSearch.mockReset();
+      expect(aggregateProjectRagSearch).not.toHaveBeenCalled();
+      aggregateProjectRagSearch.mockReset();
     });
 
     it("answers for a key with search and chat", async () => {
-      aggregateWorkspaceRagSearch.mockResolvedValueOnce({ ...empty, answer: "Answer [1]." });
+      aggregateProjectRagSearch.mockResolvedValueOnce({ ...empty, answer: "Answer [1]." });
       expect((await aggregate(keyActor(["search", "chat"]), { generateAnswer: true })).status).toBe(200);
-      expect(aggregateWorkspaceRagSearch).toHaveBeenCalledWith(expect.objectContaining({ request: expect.objectContaining({ generateAnswer: true }) }));
+      expect(aggregateProjectRagSearch).toHaveBeenCalledWith(expect.objectContaining({ request: expect.objectContaining({ generateAnswer: true }) }));
     });
   });
 
-  it("forwards a verified API actor and preserves scope and workspace denials", async () => {
-    const actor = { type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "key", userId: "user-1", orgId: "org", keyType: "server" as const, allowedDomains: [], scopes: ["search", "chat"], rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], workspaceIds: ["ws-chat"] } };
-    getWorkspace.mockResolvedValue({ id: "ws-chat", orgId: "org" });
-    chatWorkspace.mockResolvedValue({ answer: "Supported" });
-    const request = () => buildApp(actor).request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat" }) });
+  it("forwards a verified API actor and preserves scope and project denials", async () => {
+    const actor = { type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "key", userId: "user-1", orgId: "org", keyType: "server" as const, allowedDomains: [], scopes: ["search", "chat"], rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], projectIds: ["ws-chat"] } };
+    getProject.mockResolvedValue({ id: "ws-chat", orgId: "org" });
+    chatProject.mockResolvedValue({ answer: "Supported" });
+    const request = () => buildApp(actor).request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", project: "ws-chat" }) });
     expect((await request()).status).toBe(200);
-    expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ actor, allowAgentTools: true }));
-    chatWorkspace.mockClear();
+    expect(chatProject).toHaveBeenCalledWith(expect.objectContaining({ actor, allowAgentTools: true }));
+    chatProject.mockClear();
     actor.apiKey.scopes = ["ingest"];
     expect((await request()).status).toBe(403);
     // Passages are not answers: a search-only key cannot generate one.
     actor.apiKey.scopes = ["search"];
     expect((await request()).status).toBe(403);
-    expect(chatWorkspace).not.toHaveBeenCalled();
+    expect(chatProject).not.toHaveBeenCalled();
     actor.apiKey.scopes = ["search", "chat"];
-    actor.apiKey.workspaceIds = ["other"];
+    actor.apiKey.projectIds = ["other"];
     expect((await request()).status).toBe(404);
-    expect(chatWorkspace).not.toHaveBeenCalled();
+    expect(chatProject).not.toHaveBeenCalled();
   });
 
   describe("browser-key chat session grants (route level)", () => {
     const session = "11111111-1111-4111-8111-111111111111";
-    const visitor = () => ({ type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "pub-1", userId: "user-1", orgId: "org", keyType: "client" as const, allowedDomains: ["docs.example.com"], scopes: ["search", "chat"], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [], workspaceIds: ["ws-chat"] } });
-    beforeEach(() => { process.env.BETTER_AUTH_SECRET ||= "search-routes-session-grant-test-secret"; getWorkspace.mockResolvedValue({ id: "ws-chat", orgId: "org" }); });
+    const visitor = () => ({ type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "pub-1", userId: "user-1", orgId: "org", keyType: "client" as const, allowedDomains: ["docs.example.com"], scopes: ["search", "chat"], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [], projectIds: ["ws-chat"] } });
+    beforeEach(() => { process.env.BETTER_AUTH_SECRET ||= "search-routes-session-grant-test-secret"; getProject.mockResolvedValue({ id: "ws-chat", orgId: "org" }); });
 
     it("round-trips the grant on POST; a session id without one starts a fresh session", async () => {
       const { sealChatSessionToken } = await import("../lib/chat-session-tokens.js");
       const app = buildApp(visitor());
-      const post = (body: Record<string, unknown>) => app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat", ...body }) });
+      const post = (body: Record<string, unknown>) => app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", project: "ws-chat", ...body }) });
       // A widget deployed before grants sends only sessionId: it gets an answer in a new session.
-      chatWorkspace.mockResolvedValueOnce({ answer: "Supported", sessionId: "new-session", sessionToken: "fresh" });
+      chatProject.mockResolvedValueOnce({ answer: "Supported", sessionId: "new-session", sessionToken: "fresh" });
       const legacy = await post({ sessionId: session });
       expect(legacy.status).toBe(200);
       expect(await legacy.json()).toMatchObject({ sessionId: "new-session", sessionToken: "fresh" });
-      expect(chatWorkspace).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: undefined }));
-      chatWorkspace.mockClear();
-      const token = sealChatSessionToken({ keyId: "pub-1", workspaceId: "ws-chat", sessionId: session });
-      chatWorkspace.mockResolvedValueOnce({ answer: "Supported", sessionId: session, sessionToken: "next" });
+      expect(chatProject).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: undefined }));
+      chatProject.mockClear();
+      const token = sealChatSessionToken({ keyId: "pub-1", projectId: "ws-chat", sessionId: session });
+      chatProject.mockResolvedValueOnce({ answer: "Supported", sessionId: session, sessionToken: "next" });
       const ok = await post({ sessionId: session, sessionToken: token });
       expect(ok.status).toBe(200);
       expect(await ok.json()).toMatchObject({ sessionToken: "next" });
-      expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ sessionId: session, sessionToken: token }));
+      expect(chatProject).toHaveBeenCalledWith(expect.objectContaining({ sessionId: session, sessionToken: token }));
       // Another key's grant for the same session id is refused.
-      const foreign = sealChatSessionToken({ keyId: "pub-2", workspaceId: "ws-chat", sessionId: session });
+      const foreign = sealChatSessionToken({ keyId: "pub-2", projectId: "ws-chat", sessionId: session });
       expect((await post({ sessionId: session, sessionToken: foreign })).status).toBe(403);
     });
 
     it("takes the grant only from a header on the stream, refusing a bad one before the stream opens", async () => {
       const { sealChatSessionToken } = await import("../lib/chat-session-tokens.js");
       const app = buildApp(visitor());
-      const token = sealChatSessionToken({ keyId: "pub-1", workspaceId: "ws-chat", sessionId: session });
-      const foreign = sealChatSessionToken({ keyId: "pub-2", workspaceId: "ws-chat", sessionId: session });
-      const refused = await app.request(`/chat/stream?q=test&workspace=ws-chat&sessionId=${session}`, { headers: { "X-DocSlurp-Chat-Session-Token": foreign } });
+      const token = sealChatSessionToken({ keyId: "pub-1", projectId: "ws-chat", sessionId: session });
+      const foreign = sealChatSessionToken({ keyId: "pub-2", projectId: "ws-chat", sessionId: session });
+      const refused = await app.request(`/chat/stream?q=test&project=ws-chat&sessionId=${session}`, { headers: { "X-DocSlurp-Chat-Session-Token": foreign } });
       expect(refused.status).toBe(403);
       expect(await refused.json()).toMatchObject({ error: { code: "chat_session_forbidden" } });
-      expect(chatWorkspace).not.toHaveBeenCalled();
+      expect(chatProject).not.toHaveBeenCalled();
       // A funded organization for the stream's spend pre-check.
-      sqlMock.mockResolvedValue([{ org_id: "org", funded: true, auto_top_up_on: false, available: 1_000_000, reserved: 0, workspace_budget_paused: false, org_budget_paused: false, workspace_in_org: true, has_credit_grants: true }]);
-      chatWorkspace.mockResolvedValueOnce({ id: "a", answer: "Supported", sessionId: session, sessionToken: "next", searchSessionId: null });
-      const stream = await app.request(`/chat/stream?q=test&workspace=ws-chat&sessionId=${session}`, { headers: { "X-DocSlurp-Chat-Session-Token": token } });
+      sqlMock.mockResolvedValue([{ org_id: "org", funded: true, auto_top_up_on: false, available: 1_000_000, reserved: 0, project_budget_paused: false, org_budget_paused: false, project_in_org: true, has_credit_grants: true }]);
+      chatProject.mockResolvedValueOnce({ id: "a", answer: "Supported", sessionId: session, sessionToken: "next", searchSessionId: null });
+      const stream = await app.request(`/chat/stream?q=test&project=ws-chat&sessionId=${session}`, { headers: { "X-DocSlurp-Chat-Session-Token": token } });
       expect(stream.status).toBe(200);
       const text = await stream.text();
       expect(text).toContain("event: done");
       expect(text).toContain('"sessionToken":"next"');
-      expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ sessionId: session, sessionToken: token }));
+      expect(chatProject).toHaveBeenCalledWith(expect.objectContaining({ sessionId: session, sessionToken: token }));
       // The query form is gone: a grant in the URL is ignored, so the session starts fresh.
-      chatWorkspace.mockClear();
-      chatWorkspace.mockResolvedValueOnce({ id: "b", answer: "Supported", sessionId: "new", sessionToken: "fresh", searchSessionId: null });
-      const query = await app.request(`/chat/stream?q=test&workspace=ws-chat&sessionId=${session}&sessionToken=${token}`);
+      chatProject.mockClear();
+      chatProject.mockResolvedValueOnce({ id: "b", answer: "Supported", sessionId: "new", sessionToken: "fresh", searchSessionId: null });
+      const query = await app.request(`/chat/stream?q=test&project=ws-chat&sessionId=${session}&sessionToken=${token}`);
       await query.text();
-      expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ sessionId: undefined }));
+      expect(chatProject).toHaveBeenCalledWith(expect.objectContaining({ sessionId: undefined }));
+    });
+
+    it("streams from a POST whose question is in the body, with the same grant and key checks", async () => {
+      const { sealChatSessionToken } = await import("../lib/chat-session-tokens.js");
+      const app = buildApp(visitor());
+      const token = sealChatSessionToken({ keyId: "pub-1", projectId: "ws-chat", sessionId: session });
+      const foreign = sealChatSessionToken({ keyId: "pub-2", projectId: "ws-chat", sessionId: session });
+      const post = (body: unknown, headers: Record<string, string> = {}) => app.request("/chat/stream", { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) });
+      expect((await post({ q: "test", project: "ws-chat", sessionId: session }, { "X-DocSlurp-Chat-Session-Token": foreign })).status).toBe(403);
+      expect((await post("not an object")).status).toBe(400);
+      expect((await post({ project: "ws-chat" })).status).toBe(400);
+      expect(chatProject).not.toHaveBeenCalled();
+      sqlMock.mockResolvedValue([{ org_id: "org", funded: true, auto_top_up_on: false, available: 1_000_000, reserved: 0, project_budget_paused: false, org_budget_paused: false, project_in_org: true, has_credit_grants: true }]);
+      chatProject.mockResolvedValueOnce({ id: "a", answer: "Supported", sessionId: session, sessionToken: "next", searchSessionId: null });
+      const stream = await post({ q: "What is the late fee?", project: "ws-chat", sessionId: session }, { "X-DocSlurp-Chat-Session-Token": token });
+      expect(stream.status).toBe(200);
+      expect(await stream.text()).toContain("event: done");
+      expect(chatProject).toHaveBeenCalledWith(expect.objectContaining({ query: "What is the late fee?", sessionId: session, sessionToken: token }));
+      // A browser key limited to ws-chat cannot stream another project through the body either.
+      chatProject.mockClear();
+      const other = await post({ q: "test", project: "ws-other" });
+      expect(other.status).toBeGreaterThanOrEqual(400);
+      expect(chatProject).not.toHaveBeenCalled();
     });
 
     it("refuses a cookie-session GET stream started cross-site (top-level navigation)", async () => {
       const app = buildApp({ type: "session", userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "" } });
-      const crossSite = await app.request("/chat/stream?q=test&workspace=ws-chat", { headers: { "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate" } });
+      const crossSite = await app.request("/chat/stream?q=test&project=ws-chat", { headers: { "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate" } });
       expect(crossSite.status).toBe(403);
-      const foreignOrigin = await app.request("/chat/stream?q=test&workspace=ws-chat", { headers: { Origin: "https://evil.example" } });
+      const foreignOrigin = await app.request("/chat/stream?q=test&project=ws-chat", { headers: { Origin: "https://evil.example" } });
       expect(foreignOrigin.status).toBe(403);
       // No Origin and no Fetch Metadata (an <img>, curl with a stolen cookie, Safari before 16.4): refused too.
-      const bare = await app.request("/chat/stream?q=test&workspace=ws-chat");
+      const bare = await app.request("/chat/stream?q=test&project=ws-chat");
       expect(bare.status).toBe(403);
-      expect(chatWorkspace).not.toHaveBeenCalled();
+      expect(chatProject).not.toHaveBeenCalled();
     });
   });
 
   it("GET chat stream preserves empty and geo filters",async()=>{
-    const actor={type:"apiKey" as const,userId:"user-1",apiKey:{keyId:"key",userId:"user-1",orgId:"org",keyType:"server" as const,allowedDomains:[],scopes:["chat"],rateLimitRpm:60,rateLimitPpd:1000,rateLimits:[],workspaceIds:["ws-chat"]}};
-    getWorkspace.mockResolvedValue({id:"ws-chat",orgId:"org"});
-    sqlMock.mockResolvedValue([{org_id:"org",funded:true,auto_top_up_on:false,available:1000000,reserved:0,workspace_budget_paused:false,org_budget_paused:false,workspace_in_org:true,has_credit_grants:true}]);
-    chatWorkspace.mockResolvedValue({id:"a",answer:"Empty",citations:[],sessionId:"s",searchSessionId:null});
+    const actor={type:"apiKey" as const,userId:"user-1",apiKey:{keyId:"key",userId:"user-1",orgId:"org",keyType:"server" as const,allowedDomains:[],scopes:["chat"],rateLimitRpm:60,rateLimitPpd:1000,rateLimits:[],projectIds:["ws-chat"]}};
+    getProject.mockResolvedValue({id:"ws-chat",orgId:"org"});
+    sqlMock.mockResolvedValue([{org_id:"org",funded:true,auto_top_up_on:false,available:1000000,reserved:0,project_budget_paused:false,org_budget_paused:false,project_in_org:true,has_credit_grants:true}]);
+    chatProject.mockResolvedValue({id:"a",answer:"Empty",citations:[],sessionId:"s",searchSessionId:null});
     const filters={documentIds:[],geo:{field:"site",op:"radius",center:[0,0],radiusMeters:100}};
-    const response=await buildApp(actor).request(`/chat/stream?q=road&workspace=ws-chat&filters=${encodeURIComponent(JSON.stringify(filters))}`);
+    const response=await buildApp(actor).request(`/chat/stream?q=road&project=ws-chat&filters=${encodeURIComponent(JSON.stringify(filters))}`);
     expect(response.status).toBe(200); expect(await response.text()).toContain("event: done");
-    expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({filters}));
+    expect(chatProject).toHaveBeenCalledWith(expect.objectContaining({filters}));
   });
   it.each(["{",JSON.stringify({geo:{field:"site",op:"radius",center:[999,0],radiusMeters:100}}),"x".repeat(16385)])("rejects invalid streaming filters before chat",async filters=>{
     const response=await buildApp().request(`/chat/stream?q=road&filters=${encodeURIComponent(filters)}`,{headers:{"Sec-Fetch-Site":"same-origin"}});
-    expect(response.status).toBe(400);expect(chatWorkspace).not.toHaveBeenCalled();
+    expect(response.status).toBe(400);expect(chatProject).not.toHaveBeenCalled();
   });
 
-  it("applies the same key scope and workspace denials to GET /chat/stream as to POST /chat", async () => {
-    const actor = { type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "key", userId: "user-1", orgId: "org", keyType: "server" as const, allowedDomains: [], scopes: ["search", "chat"], rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], workspaceIds: ["ws-chat"] } };
-    getWorkspace.mockResolvedValue({ id: "ws-chat", orgId: "org" });
-    chatWorkspace.mockResolvedValue({ answer: "Supported", citations: [] });
-    const request = () => buildApp(actor).request("/chat/stream?q=Question&workspace=ws-chat");
+  it("applies the same key scope and project denials to GET /chat/stream as to POST /chat", async () => {
+    const actor = { type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "key", userId: "user-1", orgId: "org", keyType: "server" as const, allowedDomains: [], scopes: ["search", "chat"], rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], projectIds: ["ws-chat"] } };
+    getProject.mockResolvedValue({ id: "ws-chat", orgId: "org" });
+    chatProject.mockResolvedValue({ answer: "Supported", citations: [] });
+    const request = () => buildApp(actor).request("/chat/stream?q=Question&project=ws-chat");
     // The allowed path is covered by the stream tests below; here only the denials, before any answer runs.
     // A search-only key reads passages; it cannot spend on an answer.
     actor.apiKey.scopes = ["search"];
     expect((await request()).status).toBe(403);
     actor.apiKey.scopes = ["search", "chat"];
-    actor.apiKey.workspaceIds = ["other"];
+    actor.apiKey.projectIds = ["other"];
     expect((await request()).status).toBe(404);
-    expect(chatWorkspace).not.toHaveBeenCalled();
+    expect(chatProject).not.toHaveBeenCalled();
   });
 
   it("keeps public chat on grounded retrieval when DOCSLURP_PUBLIC_CHAT_AGENT_ENABLED is off", async () => {
@@ -537,34 +567,34 @@ describe("searchRoutes", () => {
     const previous = env.publicChatAgentEnabled;
     env.publicChatAgentEnabled = false;
     try {
-      chatWorkspace.mockResolvedValueOnce({ answer: "Supported" });
-      const response = await buildApp().request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat" }) });
+      chatProject.mockResolvedValueOnce({ answer: "Supported" });
+      const response = await buildApp().request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", project: "ws-chat" }) });
       expect(response.status).toBe(200);
-      expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ allowAgentTools: false }));
-      expect(chatWorkspace.mock.calls.at(-1)?.[0]).not.toHaveProperty("allowConfiguration");
+      expect(chatProject).toHaveBeenCalledWith(expect.objectContaining({ allowAgentTools: false }));
+      expect(chatProject.mock.calls.at(-1)?.[0]).not.toHaveProperty("allowConfiguration");
     } finally {
       env.publicChatAgentEnabled = previous;
     }
   });
 
   it("accepts agent.tools and retrieval.parentRetrieval on chat and forwards them", async () => {
-    chatWorkspace.mockResolvedValueOnce({ answer: "Supported" });
-    const body = { q: "Question", workspace: "ws-chat", agent: { tools: false }, retrieval: { parentRetrieval: false } };
+    chatProject.mockResolvedValueOnce({ answer: "Supported" });
+    const body = { q: "Question", project: "ws-chat", agent: { tools: false }, retrieval: { parentRetrieval: false } };
     const response = await app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     expect(response.status).toBe(200);
-    expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ agent: { tools: false }, retrieval: { parentRetrieval: false } }));
+    expect(chatProject).toHaveBeenCalledWith(expect.objectContaining({ agent: { tools: false }, retrieval: { parentRetrieval: false } }));
     const invalid = await app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, agent: { tools: "off" } }) });
     expect(invalid.status).toBe(400);
   });
 
   it("rejects public attempts to set the internal agent permission", async () => {
-    const response = await app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat", allowAgentTools: true }) });
+    const response = await app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", project: "ws-chat", allowAgentTools: true }) });
     expect(response.status).toBe(400);
-    expect(chatWorkspace).not.toHaveBeenCalled();
+    expect(chatProject).not.toHaveBeenCalled();
   });
 
-  it("requires workspace for chat POST and forwards it to workspace chat", async () => {
-    chatWorkspace.mockResolvedValueOnce({
+  it("requires project for chat POST and forwards it to project chat", async () => {
+    chatProject.mockResolvedValueOnce({
       id: "resp-1",
       sessionId: "chat-1",
       searchSessionId: "search-1",
@@ -597,13 +627,13 @@ describe("searchRoutes", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         q: "test",
-        workspace: "ws-chat",
+        project: "ws-chat",
       }),
     });
 
     expect(response.status).toBe(200);
-    expect(chatWorkspace).toHaveBeenCalledWith({
-      workspaceId: "ws-chat",
+    expect(chatProject).toHaveBeenCalledWith({
+      projectId: "ws-chat",
       userId: "user-1",
       query: "test",
       sessionId: undefined,
@@ -617,61 +647,61 @@ describe("searchRoutes", () => {
   it("returns the active traceparent on chat responses so clients can join traces", async () => {
     traceparent.value = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
     try {
-      chatWorkspace.mockResolvedValueOnce({ answer: "Supported" });
-      const response = await app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat" }) });
+      chatProject.mockResolvedValueOnce({ answer: "Supported" });
+      const response = await app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", project: "ws-chat" }) });
       expect(response.headers.get("traceparent")).toBe(traceparent.value);
     } finally {
       traceparent.value = null;
     }
-    chatWorkspace.mockResolvedValueOnce({ answer: "Supported" });
-    const untraced = await app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat" }) });
+    chatProject.mockResolvedValueOnce({ answer: "Supported" });
+    const untraced = await app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", project: "ws-chat" }) });
     expect(untraced.headers.get("traceparent")).toBeNull();
   });
 
   it("forwards per-request agent limits and rejects out-of-range ones", async () => {
-    chatWorkspace.mockResolvedValueOnce({ answer: "Supported" });
+    chatProject.mockResolvedValueOnce({ answer: "Supported" });
     const post = (body: unknown) => app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    expect((await post({ q: "Question", workspace: "ws-chat", agent: { maxSteps: 3, maxToolCalls: 2, searchConcurrency: 1 } })).status).toBe(200);
-    expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ agent: { maxSteps: 3, maxToolCalls: 2, searchConcurrency: 1 } }));
-    chatWorkspace.mockClear();
+    expect((await post({ q: "Question", project: "ws-chat", agent: { maxSteps: 3, maxToolCalls: 2, searchConcurrency: 1 } })).status).toBe(200);
+    expect(chatProject).toHaveBeenCalledWith(expect.objectContaining({ agent: { maxSteps: 3, maxToolCalls: 2, searchConcurrency: 1 } }));
+    chatProject.mockClear();
     for (const agent of [{ maxSteps: 13 }, { maxToolCalls: 0 }, { searchConcurrency: 9 }, { unknown: 1 }]) {
-      const response = await post({ q: "Question", workspace: "ws-chat", agent });
+      const response = await post({ q: "Question", project: "ws-chat", agent });
       expect(response.status).toBe(400);
       expect(await response.json()).toMatchObject({ error: { code: "invalid_request" } });
     }
-    expect(chatWorkspace).not.toHaveBeenCalled();
+    expect(chatProject).not.toHaveBeenCalled();
   });
 
   it("answers 400 model_not_allowed for a refused model on chat POST and before the chat stream opens", async () => {
     const { ChatModelNotAllowedError } = await import("../lib/chat-model-policy.js");
-    chatWorkspace.mockRejectedValueOnce(new ChatModelNotAllowedError());
-    const post = await app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", workspace: "ws-chat", model: "unknown/model" }) });
+    chatProject.mockRejectedValueOnce(new ChatModelNotAllowedError());
+    const post = await app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", project: "ws-chat", model: "unknown/model" }) });
     expect(post.status).toBe(400);
     expect(await post.json()).toMatchObject({ error: { code: "model_not_allowed" } });
-    chatWorkspace.mockClear();
-    const stream = await app.request("/chat/stream?q=test&workspace=ws-chat&model=inception/mercury-3", { headers: { "Sec-Fetch-Site": "same-origin" } });
+    chatProject.mockClear();
+    const stream = await app.request("/chat/stream?q=test&project=ws-chat&model=inception/mercury-3", { headers: { "Sec-Fetch-Site": "same-origin" } });
     expect(stream.status).toBe(400);
     expect(await stream.json()).toMatchObject({ error: { code: "model_not_allowed" } });
-    expect(chatWorkspace).not.toHaveBeenCalled();
+    expect(chatProject).not.toHaveBeenCalled();
   });
 
-  it("rejects chat POST and chat stream with 403 when the workspace turned chat off", async () => {
-    workspaceChatDisabledBody.mockResolvedValue({ error: "Chat is turned off for this workspace.", code: "chat_disabled" });
+  it("rejects chat POST and chat stream with 403 when the project turned chat off", async () => {
+    projectChatDisabledBody.mockResolvedValue({ error: "Chat is turned off for this project.", code: "chat_disabled" });
     try {
       const post = await app.request("/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ q: "test", workspace: "ws-chat" }),
+        body: JSON.stringify({ q: "test", project: "ws-chat" }),
       });
       expect(post.status).toBe(403);
-      expect(await post.json()).toMatchObject({ error: { code: "chat_disabled", message: "Chat is turned off for this workspace." } });
+      expect(await post.json()).toMatchObject({ error: { code: "chat_disabled", message: "Chat is turned off for this project." } });
 
-      const stream = await app.request("/chat/stream?q=test&workspace=ws-chat", { headers: { "Sec-Fetch-Site": "same-origin" } });
+      const stream = await app.request("/chat/stream?q=test&project=ws-chat", { headers: { "Sec-Fetch-Site": "same-origin" } });
       expect(stream.status).toBe(403);
       expect(await stream.json()).toMatchObject({ error: { code: "chat_disabled" } });
-      expect(chatWorkspace).not.toHaveBeenCalled();
+      expect(chatProject).not.toHaveBeenCalled();
     } finally {
-      workspaceChatDisabledBody.mockResolvedValue(null);
+      projectChatDisabledBody.mockResolvedValue(null);
     }
   });
 
@@ -703,7 +733,7 @@ describe("searchRoutes", () => {
     });
 
     it("answers a missing q, an unparseable body and a missing feedback chunk with invalid_request", async () => {
-      expect(await (await app.request("/search?workspace=ws-1")).json()).toMatchObject({ error: { code: "invalid_request" } });
+      expect(await (await app.request("/search?project=ws-1")).json()).toMatchObject({ error: { code: "invalid_request" } });
       const unparseable = await app.request("/search/aggregate", { method: "POST", body: "{nope" });
       expect(unparseable.status).toBe(400);
       expect(await unparseable.json()).toMatchObject({ error: { code: "invalid_request" } });
@@ -714,24 +744,24 @@ describe("searchRoutes", () => {
 
     it("answers invalid retrieval syntax with 400 in single and batch search", async () => {
       hybridSearch.mockRejectedValueOnce(new InvalidRetrievalQueryError("Tag syntax needs search wording"));
-      const single = await post("/search", { q: "tag:finance", workspace: "ws-1", selfQuery: true });
+      const single = await post("/search", { q: "tag:finance", project: "ws-1", selfQuery: true });
       expect(single.status).toBe(400);
       expect(await single.json()).toMatchObject({ error: { code: "invalid_request" } });
 
       hybridSearch.mockRejectedValueOnce(new InvalidRetrievalQueryError("Tag syntax needs search wording"));
-      const batch = await post("/search", { queries: [{ q: "tag:finance", workspace: "ws-1", selfQuery: true }] });
+      const batch = await post("/search", { queries: [{ q: "tag:finance", project: "ws-1", selfQuery: true }] });
       expect(batch.status).toBe(200);
       expect(await batch.json()).toMatchObject({ results: [{ ok: false, error: { status: 400, code: "INVALID_RETRIEVAL_QUERY" } }] });
     });
 
     it("keeps the envelope for thrown spend blocks and unexpected failures", async () => {
       hybridSearch.mockRejectedValueOnce(Object.assign(new Error("credits"), { statusCode: 402, code: "credit_exhausted" }));
-      const blocked = await post("/search", { q: "test", workspace: "ws-1" });
+      const blocked = await post("/search", { q: "test", project: "ws-1" });
       expect(blocked.status).toBe(402);
       expect(await blocked.json()).toMatchObject({ error: { code: "credit_exhausted" } });
 
       hybridSearch.mockRejectedValueOnce(new Error("postgres password=secret"));
-      const failed = await post("/search", { q: "test", workspace: "ws-1" });
+      const failed = await post("/search", { q: "test", project: "ws-1" });
       expect(failed.status).toBe(500);
       const json = await failed.json();
       expect(json).toMatchObject({ error: { code: "internal" } });
@@ -743,8 +773,8 @@ describe("searchRoutes", () => {
       guarded.use("*", async (c, next) => { c.set("requestId", "req-env-1"); await next(); });
       guarded.use("*", publicErrorMiddleware);
       guarded.route("/", app);
-      workspaceChatDisabledBody.mockResolvedValueOnce({ error: "internal wording", code: "chat_disabled" });
-      const response = await guarded.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "test", workspace: "ws-chat" }) });
+      projectChatDisabledBody.mockResolvedValueOnce({ error: "internal wording", code: "chat_disabled" });
+      const response = await guarded.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "test", project: "ws-chat" }) });
       expect(response.status).toBe(403);
       const json = await response.json();
       expect(apiErrorEnvelopeSchema.parse(json)).toEqual({ error: { code: "chat_disabled", message: PUBLIC_ERROR_MESSAGES.chatDisabled, requestId: "req-env-1" } });

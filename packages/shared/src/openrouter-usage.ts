@@ -1,4 +1,4 @@
-import { nitroBaseModel } from "./workspace-chat-models.js";
+import { nitroBaseModel } from "./project-chat-models.js";
 import { withServedProviderRegion } from "./provider-regions.js";
 import { chatModelPricePerToken } from "./chat-model-prices.js";
 import { liveModelPrice, refreshStaleLiveModelPrices } from "./live-model-prices.js";

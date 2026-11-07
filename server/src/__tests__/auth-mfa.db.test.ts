@@ -4,6 +4,7 @@ import type { Pool } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createMigratedDatabase, serveOnRandomPort } from "@docslurp/worker/testing";
+import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
 
 /**
  * Passkeys and two-factor auth against the real Better Auth configuration
@@ -25,6 +26,7 @@ const sentEmails: Array<{ to: string; code: string }> = [];
 
 beforeAll(async () => {
   const database = await createMigratedDatabase();
+  await database.exec(LIFT_ONE_ORG_PER_USER_POLICY);
   const serving = await serveOnRandomPort(database, { maxConnections: 8 });
   const url = `postgres://postgres@127.0.0.1:${serving.port}/postgres`;
   stop = async () => { await serving.server.stop(); await database.close(); };
@@ -352,7 +354,7 @@ describe("sign-in challenge", () => {
     const { createEmailVerificationToken } = await import("better-auth/api");
     const token = await createEmailVerificationToken(SECRET, user.email);
     const browser = new Browser();
-    const response = await browser.request(`/verify-email?token=${token}&callbackURL=${encodeURIComponent("/app/workspaces")}`);
+    const response = await browser.request(`/verify-email?token=${token}&callbackURL=${encodeURIComponent("/app/projects")}`);
     expect(response.status).toBe(404);
     expect(await browser.session()).toBeNull();
   });
@@ -837,11 +839,11 @@ describe("org MFA policy", () => {
     const { Hono } = await import("hono");
     const { sessionAuth } = await import("../middleware/session-auth.js");
     const app = new Hono().use("*", sessionAuth)
-      .get("/v1/workspaces", (c) => c.json({ ok: true }))
+      .get("/v1/projects", (c) => c.json({ ok: true }))
       .get("/v1/account/security", (c) => c.json({ ok: true }));
-    const workspaces = await app.request("http://localhost:4321/v1/workspaces", { headers: browser.headers() });
-    expect(workspaces.status).toBe(403);
-    expect((await workspaces.json()).error.code).toBe("mfa_required");
+    const projects = await app.request("http://localhost:4321/v1/projects", { headers: browser.headers() });
+    expect(projects.status).toBe(403);
+    expect((await projects.json()).error.code).toBe("mfa_required");
     expect((await app.request("http://localhost:4321/v1/account/security", { headers: browser.headers() })).status).toBe(200);
   });
 

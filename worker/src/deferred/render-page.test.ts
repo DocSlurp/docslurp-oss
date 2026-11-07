@@ -8,9 +8,9 @@ function setup(options: { withheld?: boolean; deleted?: boolean; failCommit?: bo
   const artifacts: Record<string, string> = {};
   const sql = Object.assign(vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
     const query = strings.join("?");
-    if (query.includes("select d.org_id")) return [{ org_id: "org", workspace_id: "workspace", withheld: options.withheld ?? false, low:options.existing, high:options.existing }];
+    if (query.includes("select d.org_id")) return [{ org_id: "org", project_id: "project", withheld: options.withheld ?? false, low:options.existing, high:options.existing }];
     if (query.includes("select d.id")) return options.deleted ? [] : [{ id: "doc" }];
-    if (query.includes("update workspace_runs")) Object.assign(artifacts, values[0]);
+    if (query.includes("update project_runs")) Object.assign(artifacts, values[0]);
     return [];
   }), { json: (value: unknown) => value, begin: vi.fn(async (fn: (sql: unknown) => Promise<void>) => { if (options.failCommit) throw new Error("transaction failed"); await fn(sql); }) });
   return { artifacts, deps: { store: { stageSql: sql, loadDocument: vi.fn(async () => document) }, runner: {}, storage: {} } as never };
@@ -30,7 +30,7 @@ describe("lazy PDF worker rendering", () => {
     expect(artifacts).toEqual({ "doc:page-1": "s3://page-1", "doc:page-3": "s3://page-3", "doc:raster-v3-reader-120dpi-page-1": "s3://page-1", "doc:raster-v3-reader-120dpi-page-3": "s3://page-3" });
     expect(mocks.persist).toHaveBeenCalledTimes(2);
     const first = mocks.receipts[0];
-    expect(first.scope).toEqual({ orgId: "org", workspaceId: "workspace" });
+    expect(first.scope).toEqual({ orgId: "org", projectId: "project" });
     await renderDocumentPage(setup().deps, { documentId: "doc", runId: "run", pageNumber: 1 });
     expect(mocks.receipts[2].usageEvents[0].id).toBe(first.usageEvents[0].id);
     expect(mocks.clear).toHaveBeenCalledTimes(3);

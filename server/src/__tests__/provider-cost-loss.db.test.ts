@@ -14,28 +14,28 @@ beforeAll(async () => {
   vi.doMock("../db.js", () => ({ sql }));
   await sql`insert into "user" (id, name, email) values ('u1', 'One', 'one@example.test'), ('u2', 'Two', 'two@example.test')`;
   await sql`insert into organizations (id, name, slug, created_by_user_id) values ('o1', 'One', 'loss-one', 'u1'), ('o2', 'Two', 'loss-two', 'u2')`;
-  await sql`insert into workspaces (id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'One'), ('w2', 'o2', 'u2', 'Two')`;
+  await sql`insert into projects (id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'One'), ('w2', 'o2', 'u2', 'Two')`;
   attribution = await import("../services/usage-attribution.js");
 }, 120_000);
 afterAll(async () => { await sql?.end(); await stop?.(); });
 beforeEach(async () => {
   await sql`delete from usage_events`;
-  await sql`delete from workspace_runs`;
+  await sql`delete from project_runs`;
 });
 
 let seq = 0;
-async function event(args: { org: string; workspace: string; user: string; credits?: number; providerCost?: unknown; metadata?: Record<string, unknown>; runId?: string; model?: string; metric?: string; at?: Date }) {
+async function event(args: { org: string; project: string; user: string; credits?: number; providerCost?: unknown; metadata?: Record<string, unknown>; runId?: string; model?: string; metric?: string; at?: Date }) {
   seq += 1;
   const metadata = { ...(args.providerCost !== undefined ? { providerCostCents: args.providerCost } : {}), ...args.metadata };
-  await sql`insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, cost_cents, metadata, created_at, org_id, workspace_id)
+  await sql`insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, cost_cents, metadata, created_at, org_id, project_id)
     values (${`ue-${seq}`}, ${args.user}, ${args.runId ?? null}, 'openrouter', ${args.model ?? "vendor/model"}, ${args.metric ?? "test"}, 1, 'token', ${args.credits ?? 0},
-      ${sql.json(metadata as never)}, ${args.at ?? new Date(Date.now() - 10 * 60_000)}, ${args.org}, ${args.workspace})`;
+      ${sql.json(metadata as never)}, ${args.at ?? new Date(Date.now() - 10 * 60_000)}, ${args.org}, ${args.project})`;
 }
 const window = () => ({ since: new Date(Date.now() - 60 * 60_000), until: new Date(Date.now() - 60_000) });
 
 describe("providerCostLossItems", () => {
   it("reports chat turns, finished runs and sessions whose provider cost exceeds their credits", async () => {
-    const o1 = { org: "o1", workspace: "w1", user: "u1" };
+    const o1 = { org: "o1", project: "w1", user: "u1" };
     // Turn A loses 2 cents; turn B is profitable.
     await event({ ...o1, providerCost: 3, metadata: { chatTurnId: "tA", costSource: "provider" }, model: "vendor/expensive" });
     await event({ ...o1, credits: 1, metadata: { chatTurnId: "tA" } });
@@ -45,7 +45,7 @@ describe("providerCostLossItems", () => {
     await event({ ...o1, providerCost: 2, metadata: { chatTurnId: "tC", costSource: "provider", chatTurnRefund: { reason: "error", credits: 1 } } });
     // A finished run priced from estimates, and a run still processing.
     const tenMinutesAgo = new Date(Date.now() - 10 * 60_000);
-    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, updated_at) values
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, updated_at) values
       ('r-done', 'o1', 'u1', 'w1', 'bulk-upload', 'completed', 'completed', '{}', ${tenMinutesAgo}),
       ('r-busy', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'embed', '{}', ${tenMinutesAgo})`;
     await event({ ...o1, runId: "r-done", providerCost: 10, metadata: { costSource: "estimate" } });
@@ -69,21 +69,40 @@ describe("providerCostLossItems", () => {
     expect(items.find((item) => item.key === "tC")?.refunded).toBe(true);
   });
 
+  it("flags a run whose sandbox and escalation provider costs together exceed its unit charge", async () => {
+    const o1 = { org: "o1", project: "w1", user: "u1" };
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60_000);
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, updated_at) values
+      ('r-heavy', 'o1', 'u1', 'w1', 'bulk-upload', 'completed', 'completed', '{}', ${tenMinutesAgo}),
+      ('r-light', 'o1', 'u1', 'w1', 'bulk-upload', 'completed', 'completed', '{}', ${tenMinutesAgo})`;
+    // Arbitrary test amounts: a sandbox_compute event, an escalation read and one unit charge per run.
+    for (const [runId, sandboxCents] of [["r-heavy", 0.2], ["r-light", 0.1]] as const) {
+      await event({ ...o1, runId, model: "ocr-vm", metric: "sandbox_compute", providerCost: sandboxCents, metadata: { costSource: "estimate" } });
+      await event({ ...o1, runId, model: "vendor/escalation", metric: "ocr-escalation", providerCost: 0.07, metadata: { costSource: "provider" } });
+      await event({ ...o1, runId, model: "price-card", metric: "ingest-page-rich", credits: 0.25 });
+    }
+    const { items } = await attribution.providerCostLossItems(window());
+    // 0.2 + 0.07 = 0.27 against 0.25 credits is a loss; 0.1 + 0.07 is not.
+    expect(items.map((item) => item.key)).toEqual(["r-heavy"]);
+    expect(items[0]!.lossCents).toBeCloseTo(0.02, 6);
+    expect(items[0]!.topModel).toBe("ocr-vm");
+  });
+
   it("judges a run at its terminal status change, even long after its last event", async () => {
-    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, updated_at)
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, updated_at)
       values ('r-late', 'o1', 'u1', 'w1', 'bulk-upload', 'failed', 'failed', '{}', ${new Date(Date.now() - 5 * 60_000)})`;
-    await event({ org: "o1", workspace: "w1", user: "u1", runId: "r-late", providerCost: 3, at: new Date(Date.now() - 3 * 60 * 60_000) });
+    await event({ org: "o1", project: "w1", user: "u1", runId: "r-late", providerCost: 3, at: new Date(Date.now() - 3 * 60 * 60_000) });
     const { items } = await attribution.providerCostLossItems(window());
     expect(items.map((item) => item.key)).toEqual(["r-late"]);
   });
 
   it("keeps organizations apart and honours the window", async () => {
     // The same turn id in two orgs never merges.
-    await event({ org: "o1", workspace: "w1", user: "u1", providerCost: 2, metadata: { chatTurnId: "shared" } });
-    await event({ org: "o2", workspace: "w2", user: "u2", credits: 10, metadata: { chatTurnId: "shared" } });
+    await event({ org: "o1", project: "w1", user: "u1", providerCost: 2, metadata: { chatTurnId: "shared" } });
+    await event({ org: "o2", project: "w2", user: "u2", credits: 10, metadata: { chatTurnId: "shared" } });
     // Older than the window, and too recent to have settled.
-    await event({ org: "o1", workspace: "w1", user: "u1", providerCost: 5, metadata: { chatTurnId: "old" }, at: new Date(Date.now() - 2 * 60 * 60_000) });
-    await event({ org: "o1", workspace: "w1", user: "u1", providerCost: 5, metadata: { chatTurnId: "fresh" }, at: new Date() });
+    await event({ org: "o1", project: "w1", user: "u1", providerCost: 5, metadata: { chatTurnId: "old" }, at: new Date(Date.now() - 2 * 60 * 60_000) });
+    await event({ org: "o1", project: "w1", user: "u1", providerCost: 5, metadata: { chatTurnId: "fresh" }, at: new Date() });
     const { items } = await attribution.providerCostLossItems(window());
     expect(items.map((item) => [item.orgId, item.key, item.lossCents])).toEqual([["o1", "shared", 2]]);
   });

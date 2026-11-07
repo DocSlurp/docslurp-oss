@@ -26,7 +26,7 @@ export async function sweepInterruptedConnectorSyncs(): Promise<number> {
   const connectorIds = [...new Set(interrupted.map((row) => row.connector_id))];
   if (connectorIds.length > 0) {
     await sql`
-      update workspace_connectors
+      update project_connectors
       set status = 'error', updated_at = now()
       where id in ${sql(connectorIds)} and status <> 'paused'
     `;

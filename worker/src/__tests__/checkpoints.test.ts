@@ -14,13 +14,13 @@ import { HungWorkError } from "../lib/hung-work.js";
 import { hasFailedDocumentStage } from "../pipeline/document-health.js";
 import { WorkflowState, type CheckpointStore } from "../pipeline/pipeline.js";
 import { defaultPipelineFeatures } from "@docslurp/shared";
-import type { Document, StageState, WorkspaceRun } from "../models.js";
+import type { Document, StageState, ProjectRun } from "../models.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeRun(overrides: Partial<WorkspaceRun> = {}): WorkspaceRun {
+function makeRun(overrides: Partial<ProjectRun> = {}): ProjectRun {
   return {
     id: "run-1",
     orgId: "org-1",
@@ -44,7 +44,7 @@ function makeRun(overrides: Partial<WorkspaceRun> = {}): WorkspaceRun {
   };
 }
 
-function makeState(runOverrides: Partial<WorkspaceRun> = {}): WorkflowState {
+function makeState(runOverrides: Partial<ProjectRun> = {}): WorkflowState {
   return WorkflowState.create(makeRun(runOverrides), []);
 }
 

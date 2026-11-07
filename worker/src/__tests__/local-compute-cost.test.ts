@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { CREDIT_RATE_CARD } from "@docslurp/shared";
+import { DISTINCT_TEST_PRICING, installTestPricing, OPEN_PRICING } from "@docslurp/shared";
 
 import {
-  flySharedComputeRates,
   buildLocalComputePerformanceEvents,
   buildLocalComputeUsageEvent,
   buildAllocatedResourceObservation,
@@ -21,12 +20,18 @@ const rates: LocalComputeRates = {
 };
 
 describe("Local Compute Cost Module", () => {
-  it("prices the deployed Fly worker without double-counting included RAM across the October rate change", () => {
-    const before = flySharedComputeRates(new Date("2026-09-30T00:00:00Z"));
-    const after = flySharedComputeRates(new Date("2026-10-01T00:00:00Z"));
-    const hourly = (r: typeof before) => (2 * r.cpuCentsPerSecond + 3 * r.memoryCentsPerGbSecond) * 3600 / 100;
-    expect(hourly(before)).toBeCloseTo(0.0054 + 2.5 * 5 / 720, 10);
-    expect(hourly(after)).toBeCloseTo(0.0061 + 2.5 * 6 / 720, 10);
+  it("takes a named rate card's rates from the pricing provider, and per-rate env overrides over them", () => {
+    installTestPricing({ internalCost: { ...OPEN_PRICING.internalCost, computeRates: (card) => (card === "test-card" ? { cpuCentsPerSecond: 0.5, memoryCentsPerGbSecond: 0.25 } : null) } });
+    try {
+      const named = resolveWorkerDeploymentProfile({ DOCSLURP_COMPUTE_RATE_CARD: "test-card" }, 1);
+      expect([named.rates.cpuCentsPerSecond, named.rates.memoryCentsPerGbSecond]).toEqual([0.5, 0.25]);
+      const overridden = resolveWorkerDeploymentProfile({ DOCSLURP_COMPUTE_RATE_CARD: "test-card", DOCSLURP_CPU_CENTS_PER_SECOND: "0.75" }, 1);
+      expect(overridden.rates.cpuCentsPerSecond).toBe(0.75);
+      // An unknown card keeps the provider-neutral defaults.
+      expect(resolveWorkerDeploymentProfile({ DOCSLURP_COMPUTE_RATE_CARD: "other" }, 1).rates.cpuCentsPerSecond).toBe(0.001);
+    } finally {
+      installTestPricing(DISTINCT_TEST_PRICING);
+    }
   });
   it("prices CPU, memory, GPU, storage, and network resources", () => {
     const result = calculateLocalComputeCost({
@@ -85,9 +90,9 @@ describe("Local Compute Cost Module", () => {
       observation,
       env: { DOCSLURP_BILL_COMPUTE: "true", STRIPE_SECRET_KEY: "sk_test" },
     });
-    const list = CREDIT_RATE_CARD.cpuVcpuHour + 2 * CREDIT_RATE_CARD.memoryGbHour + 0.1 * CREDIT_RATE_CARD.gpuStandardHour;
     expect(event.metadata?.billable).toBe(false);
-    expect(event.metadata?.internalListCredits).toBeCloseTo(list, 9);
+    // A provider without an internal list reference records none.
+    expect(event.metadata?.internalListCredits).toBeUndefined();
     expect(event.metadata?.infraCostCents).toBe(3600 * 2 + 7200 * 3 + 360 * 5);
     expect(buildLocalComputeUsageEvent({ metric: "parser-process", profile: { ...profile, rates }, observation, costRollup: "included" }).costCents).toBe(0);
   });

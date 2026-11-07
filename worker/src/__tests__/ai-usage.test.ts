@@ -1,3 +1,4 @@
+import { pageCredits, speedBoostMultiplier } from "@docslurp/shared";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -78,13 +79,16 @@ describe("worker AI usage Module", () => {
       provider: "openrouter", model: "google/gemini-3.1-flash-lite", metric: "page-analysis",
       inputTokens: 1_149, outputTokens, costCents: 0.12, metadata: { documentId: "doc-1", pageNumber },
     });
-    read(1, 884);
-    read(1, 900); // a retry of the same page in the same run: not charged again
-    read(2, 2_035); // dense page: 3 Rich pages
+    read(1, 700);
+    read(1, 750); // a retry of the same page in the same run: not charged again
+    read(2, 2_035); // dense page: 3 Rich pages under the test provider's output rule
     const charges = ledger.snapshot().filter((event) => event.metric === "ingest-page-rich");
+    // Page 2 is three Rich units, each its own event so a retried read can never charge one twice.
     expect(charges.map((event) => [event.id, event.amount, event.costCents])).toEqual([
       ["rich:run-1:doc-1:1", 1, 0.25],
-      ["rich:run-1:doc-1:2", 3, 0.75],
+      ["rich:run-1:doc-1:2", 1, 0.25],
+      ["rich:run-1:doc-1:2:unit:2", 1, 0.25],
+      ["rich:run-1:doc-1:2:unit:3", 1, 0.25],
     ]);
     expect(charges[0]!.metadata).toMatchObject({ billable: true, unitCharge: true, readBy: "page-analysis" });
     expect(ledger.pendingBillableCents).toBeCloseTo(1);
@@ -92,6 +96,70 @@ describe("worker AI usage Module", () => {
     // A local OCR read with no tokens or cost still bills the page.
     ledger.record({ provider: "vision-runtime", model: "local", metric: "ocr-native-pdf", amount: 1, unit: "image", costCents: 0, inputTokens: 0, outputTokens: 0, metadata: { documentId: "doc-1", pageNumber: 3 } });
     expect(ledger.richPagesOf("doc-1").has(3)).toBe(true);
+  });
+
+  it("keeps the output-token surcharge when a vision read follows an OCR read of the same page", () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const ledger = new PipelineUsageEventLedger();
+    ledger.runId = "run-1";
+    const vision = (outputTokens: number) => ledger.record({
+      provider: "openrouter", model: "google/gemini-3.1-flash-lite", metric: "page-analysis",
+      inputTokens: 1_149, outputTokens, costCents: 0.12, metadata: { documentId: "img", pageNumber: 1 },
+    });
+    // An uploaded image: OCR reads it (no output tokens) and charges the page as one Rich page; vision then reads it for
+    // 2,000 output tokens, which the page's first charge did not cover (3 Rich pages in all under the test provider).
+    ledger.chargeRichPage({ documentId: "img", pageNumber: 1, readBy: "page-ocr" });
+    expect(ledger.pendingBillableCents).toBeCloseTo(0.25);
+    vision(2_000);
+    const charges = () => ledger.snapshot().filter((event) => event.metric === "ingest-page-rich");
+    expect(charges().map((event) => event.id)).toEqual(["rich:run-1:img:1", "rich:run-1:img:1:unit:2", "rich:run-1:img:1:unit:3"]);
+    expect(ledger.pendingBillableCents).toBeCloseTo(0.75);
+    expect(ledger.richPagesCharged("img", 1)).toBe(3);
+    // The same vision read recorded again (a retry in the same run) adds nothing; a bigger one adds only the difference.
+    vision(1_900);
+    expect(charges()).toHaveLength(3);
+    vision(2_500);
+    expect(charges().map((event) => event.id).at(-1)).toBe("rich:run-1:img:1:unit:4");
+    expect(ledger.pendingBillableCents).toBeCloseTo(1);
+    // A retry in a new ledger (a restarted activity) reading the same page emits the same ids, which insert nothing twice.
+    const retry = new PipelineUsageEventLedger();
+    retry.runId = "run-1";
+    retry.chargeRichPage({ documentId: "img", pageNumber: 1, readBy: "page-ocr" });
+    retry.record({ provider: "openrouter", model: "google/gemini-3.1-flash-lite", metric: "page-analysis", inputTokens: 1, outputTokens: 2_500, costCents: 0, metadata: { documentId: "img", pageNumber: 1 } });
+    expect(retry.snapshot().filter((event) => event.metric === "ingest-page-rich").map((event) => event.id)).toEqual(charges().map((event) => event.id));
+  });
+
+  it("bills every OCR reader as a Rich read of its page", () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const ledger = new PipelineUsageEventLedger();
+    ledger.runId = "run-1";
+    for (const metric of ["page-ocr", "ocr-escalation", "hosted-ocr", "pdf-ocr", "ocr-native-pdf"]) {
+      ledger.record({ provider: "local", model: "ppocr-v6-small", metric, amount: 1, unit: "image", costCents: 0, metadata: { documentId: metric, pageNumber: 1 } });
+      expect(ledger.hasRichCharge(metric, 1)).toBe(true);
+    }
+  });
+
+  it("bills an OCR escalation read one Rich page at most, and nothing when it returned no text", () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const ledger = new PipelineUsageEventLedger();
+    ledger.runId = "run-1";
+    const escalation = (pageNumber: number, outputTokens: number, outcome: string) => ledger.record({
+      provider: "deepinfra", model: "Qwen/Qwen3-VL-30B-A3B-Instruct", metric: "ocr-escalation", amount: 1, unit: "page",
+      costCents: 0.3, inputTokens: 1_500, outputTokens, metadata: { documentId: "doc", pageNumber, outcome },
+    });
+    const charges = (pageNumber: number) => ledger.snapshot().filter((event) => event.metric === "ingest-page-rich" && event.metadata?.pageNumber === pageNumber);
+    // 9,000 output tokens would owe 9 Rich units on a vision read; an escalation read owes one.
+    escalation(1, 9_000, "completed");
+    expect(charges(1).map((event) => event.id)).toEqual(["rich:run-1:doc:1"]);
+    // Empty output: provider cost recorded (the event is kept), no Rich charge.
+    expect(escalation(2, 40, "empty-output")).not.toBeNull();
+    expect(charges(2)).toEqual([]);
+    expect(ledger.hasRichCharge("doc", 2)).toBe(false);
+    // A page the recogniser already charged stays one Rich page after its escalation.
+    ledger.chargeRichPage({ documentId: "doc", pageNumber: 3, readBy: "page-ocr" });
+    escalation(3, 4_000, "completed");
+    expect(charges(3)).toHaveLength(1);
+    expect(ledger.pendingBillableCents).toBeCloseTo(0.5);
   });
 
   it("does not record empty AI usage", () => {
@@ -245,8 +313,9 @@ describe("Speed boost worker accounting", () => {
     ledger.record(input);
     const charges = ledger.snapshot().filter(event => event.metric === "ingest-page-rich");
     expect(charges).toHaveLength(1);
-    expect(charges[0]).toMatchObject({ costCents: 1, metadata: { speedBoost: true } });
-    expect(ledger.pendingBillableCents).toBe(1);
+    const boosted = pageCredits("rich", 1) * speedBoostMultiplier(true);
+    expect(charges[0]).toMatchObject({ costCents: boosted, metadata: { speedBoost: true } });
+    expect(ledger.pendingBillableCents).toBe(boosted);
     expect(ledger.snapshot().filter(event => event.metric === "page-analysis").every(event => event.metadata?.providerCostCents === 0.37)).toBe(true);
     expect(Reflect.set(ledger, "speedBoost", false)).toBe(false);
     const first = ledger.checkpoint();

@@ -1,4 +1,6 @@
 import "../src/env.js";
+import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
+
 import { sql } from "../src/db.js";
 import { runNativeChatWorker } from "../src/agent-runtime/runtime.js";
 const shutdown = new AbortController();
@@ -11,6 +13,16 @@ const stop = () => {
 };
 process.once("SIGINT", stop);
 process.once("SIGTERM", stop);
+// Chat answers are priced and charged here: load the deployment's pricing provider (with its durable state) before
+// claiming any operation. DOCSLURP_PRICING_REQUIRED=1 (fly.chat-executor.toml) without a provider refuses to start, so
+// the executor never prices an answer with the open default (or at 0).
+try {
+  await loadPricingProvider(process.env, { durableState: pricingDurableStateFromSql(sql), sql });
+} catch (error) {
+  console.error("[native-chat] startup_refused pricing:", error instanceof Error ? error.message : String(error));
+  await sql.end({ timeout: 1 }).catch(() => undefined);
+  process.exit(1);
+}
 try {
   await runNativeChatWorker(shutdown.signal);
   await sql.end({ timeout: 1 });

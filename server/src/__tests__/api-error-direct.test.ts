@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ApiErrorCode } from "@docslurp/shared";
 import { apiKeyScopeMiddleware } from "../lib/api-key-authorization.js";
-import { assertApiKeyWorkspaceAccess, setRequestActor } from "../lib/request-actor.js";
+import { assertApiKeyProjectAccess, setRequestActor } from "../lib/request-actor.js";
 import type { ValidatedKey } from "../services/api-keys.js";
 import { mcpAdapterRoutes } from "../services/mcp-tools.js";
 
@@ -14,7 +14,7 @@ import { mcpAdapterRoutes } from "../services/mcp-tools.js";
  */
 const keyWith = (scopes: string[]) => ({
   keyId: "key-direct", userId: "user-direct", orgId: "org-direct", keyType: "server", allowedDomains: [],
-  scopes, rateLimitRpm: 600, rateLimitPpd: 100_000, rateLimits: [], workspaceIds: [],
+  scopes, rateLimitRpm: 600, rateLimitPpd: 100_000, rateLimits: [], projectIds: [],
 }) as unknown as ValidatedKey;
 
 function withKey(scopes: string[]) {
@@ -40,8 +40,8 @@ describe("native handlers emit the envelope directly", () => {
     expect((await allowed.request("/guarded")).status).toBe(200);
   });
 
-  it("assertApiKeyWorkspaceAccess answers a missing scope as forbidden", async () => {
-    const app = withKey(["ingest"]).get("/ws/:id", async (c) => (await assertApiKeyWorkspaceAccess(c, c.req.param("id"), "search")) ?? c.json({ ok: true }));
+  it("assertApiKeyProjectAccess answers a missing scope as forbidden", async () => {
+    const app = withKey(["ingest"]).get("/ws/:id", async (c) => (await assertApiKeyProjectAccess(c, c.req.param("id"), "search")) ?? c.json({ ok: true }));
     await expectEnvelope(await app.request("/ws/any"), 403, "forbidden");
   });
 
@@ -53,8 +53,8 @@ describe("native handlers emit the envelope directly", () => {
     await expectEnvelope(await post("/v1/session-tools", "search", ["ingest"], {}), 403, "forbidden");
     expect(await (await post("/v1/mcp", "search", ["ingest"], {})).json()).toEqual({ error: expect.any(String) });
 
-    const invalid = await expectEnvelope(await post("/v1/session-tools", "listWorkspaces", ["search"], { limit: "many" }), 400, "invalid_request");
+    const invalid = await expectEnvelope(await post("/v1/session-tools", "listProjects", ["search"], { limit: "many" }), 400, "invalid_request");
     expect(invalid.details?.issues).toEqual([expect.objectContaining({ path: "limit" })]);
-    expect(await (await post("/v1/mcp", "listWorkspaces", ["search"], { limit: "many" })).json()).toEqual({ error: expect.any(String) });
+    expect(await (await post("/v1/mcp", "listProjects", ["search"], { limit: "many" })).json()).toEqual({ error: expect.any(String) });
   });
 });

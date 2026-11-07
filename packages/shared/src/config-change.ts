@@ -37,7 +37,7 @@ const KIND_RANK: Record<ConfigChangeKind, number> = {
   "reindex-required": 4,
 };
 
-/** What determines whether stored vectors are interchangeable; recorded per workspace in `index_configs`, keyed by `indexConfigHash`. */
+/** What determines whether stored vectors are interchangeable; recorded per project in `index_configs`, keyed by `indexConfigHash`. */
 export type IndexConfig = {
   embeddingModel: string;
   dims: number | null;

@@ -22,7 +22,7 @@ beforeAll(async () => {
   vi.doMock("../db.js", () => ({ sql }));
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1')`;
-  await sql`insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W'), ('w2', 'o1', 'u1', 'Other')`;
+  await sql`insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W'), ('w2', 'o1', 'u1', 'Other')`;
   eligibility = await import("../search/eligibility.js");
   ({ loadSearchAvailability } = await import("../search/session-setup.js"));
 }, 120_000);
@@ -37,21 +37,21 @@ beforeEach(async () => {
   await sql`delete from document_run_stage_states`;
   await sql`delete from document_chunks`;
   await sql`delete from documents`;
-  await sql`delete from workspace_runs`;
+  await sql`delete from project_runs`;
 });
 
 /** The pre-0063 query: counts document_pages and document_chunks rows per search. */
-async function legacyAvailability(args: { workspaceId: string; runId?: string }) {
+async function legacyAvailability(args: { projectId: string; runId?: string }) {
   const { fullyIndexedDocument, earlyLexicalDocument, servableInProgressVersion } = eligibility;
   const [row] = await sql`
     with scoped_runs as (
       select id, status, lease_expires_at
-      from workspace_runs
-      where workspace_id = ${args.workspaceId}
+      from project_runs
+      where project_id = ${args.projectId}
         and (${args.runId ?? null}::text is null or id = ${args.runId ?? null})
     ),
     scoped_docs as (
-      select d.id, d.run_id, d.page_count, d.status, d.workspace_id, d.canonical_id, d.created_at, d.superseded_at,
+      select d.id, d.run_id, d.page_count, d.status, d.project_id, d.canonical_id, d.created_at, d.superseded_at,
         ${fullyIndexedDocument("d")} as fully_indexed,
         ${earlyLexicalDocument("d")} as keyword_only
       from documents d
@@ -141,10 +141,10 @@ async function legacyAvailability(args: { workspaceId: string; runId?: string })
 
 let clock = 0;
 
-async function run(id: string, args: { status?: string; workspaceId?: string; leaseMinutes?: number } = {}) {
+async function run(id: string, args: { status?: string; projectId?: string; leaseMinutes?: number } = {}) {
   await sql`
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, lease_expires_at)
-    values (${id}, 'o1', 'u1', ${args.workspaceId ?? "w"}, 'bulk-upload', ${args.status ?? "processing"}, 'embed', '{}'::jsonb,
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, lease_expires_at)
+    values (${id}, 'o1', 'u1', ${args.projectId ?? "w"}, 'bulk-upload', ${args.status ?? "processing"}, 'embed', '{}'::jsonb,
       now() + make_interval(mins => ${args.leaseMinutes ?? 5}))
   `;
 }
@@ -155,13 +155,13 @@ async function doc(id: string, args: {
   pages?: number;
   canonicalId?: string;
   lexical?: boolean;
-  workspaceId?: string;
+  projectId?: string;
 }) {
   clock += 1;
   await sql`
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status,
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status,
       page_count, canonical_id, lexical_searchable_at, created_at)
-    values (${id}, 'o1', 'u1', ${args.workspaceId ?? "w"}, ${args.runId}, ${`${id}.pdf`}, 'application/pdf', ${`raw/${id}`},
+    values (${id}, 'o1', 'u1', ${args.projectId ?? "w"}, ${args.runId}, ${`${id}.pdf`}, 'application/pdf', ${`raw/${id}`},
       ${args.status}, ${args.pages ?? 4}, ${args.canonicalId ?? null}, ${args.lexical ? new Date() : null},
       to_timestamp(${1_800_000_000 + clock}))
   `;
@@ -204,15 +204,15 @@ async function expectCountersExact() {
   }
 }
 
-async function expectSameAsLegacy(scopes: Array<{ workspaceId: string; runId?: string }>) {
+async function expectSameAsLegacy(scopes: Array<{ projectId: string; runId?: string }>) {
   await expectCountersExact();
   for (const scope of scopes) {
     expect(await loadSearchAvailability(scope)).toEqual(await legacyAvailability(scope));
   }
 }
 
-/** Every document state the availability block distinguishes, across three runs and two workspaces. */
-async function mixedWorkspace() {
+/** Every document state the availability block distinguishes, across three runs and two projects. */
+async function mixedProject() {
   await run("r-done", { status: "completed" });
   await doc("complete", { runId: "r-done", status: "completed", pages: 10 });
   await chunks("complete", "r-done", 25);
@@ -258,29 +258,29 @@ async function mixedWorkspace() {
   await chunks("orphan", "r-failed", 2);
   await run("r-queued", { status: "queued" });
 
-  await run("r-other", { workspaceId: "w2" });
-  await doc("elsewhere", { runId: "r-other", status: "completed", workspaceId: "w2", pages: 7 });
+  await run("r-other", { projectId: "w2" });
+  await doc("elsewhere", { runId: "r-other", status: "completed", projectId: "w2", pages: 7 });
   await chunks("elsewhere", "r-other", 9);
 }
 
 const scopes = [
-  { workspaceId: "w" },
-  { workspaceId: "w", runId: "r-done" },
-  { workspaceId: "w", runId: "r-live" },
-  { workspaceId: "w", runId: "r-stalled" },
-  { workspaceId: "w", runId: "r-failed" },
-  { workspaceId: "w", runId: "r-queued" },
-  { workspaceId: "w", runId: "r-other" },
-  { workspaceId: "w2" },
-  { workspaceId: "empty" },
+  { projectId: "w" },
+  { projectId: "w", runId: "r-done" },
+  { projectId: "w", runId: "r-live" },
+  { projectId: "w", runId: "r-stalled" },
+  { projectId: "w", runId: "r-failed" },
+  { projectId: "w", runId: "r-queued" },
+  { projectId: "w", runId: "r-other" },
+  { projectId: "w2" },
+  { projectId: "empty" },
 ];
 
 describe("search availability from document counters", () => {
   it("matches the row-counting query for every document state", async () => {
-    await mixedWorkspace();
+    await mixedProject();
     await expectSameAsLegacy(scopes);
 
-    expect(await loadSearchAvailability({ workspaceId: "w" })).toMatchObject({
+    expect(await loadSearchAvailability({ projectId: "w" })).toMatchObject({
       // Superseded and PII-blocked documents are not counted.
       total_documents: 11,
       indexed_documents: 3,
@@ -302,7 +302,7 @@ describe("search availability from document counters", () => {
   });
 
   it("stays exact through re-chunking, run purges, upserts, copies and document deletes", async () => {
-    await mixedWorkspace();
+    await mixedProject();
 
     // Retry writes more chunks in a second batch, then drops the stale tail
     // (deleteStaleDocumentChunks).
@@ -345,14 +345,14 @@ describe("search availability from document counters", () => {
     // Deleting documents cascades to their chunks and pages without error.
     await sql`delete from documents where id in ('keyword-only', 'v2', 'reused')`;
     await expectSameAsLegacy(scopes);
-    await sql`delete from workspace_runs where id = 'r-stalled'`;
+    await sql`delete from project_runs where id = 'r-stalled'`;
     await expectSameAsLegacy(scopes);
   });
   it("follows chunk rows an upsert moves to another document", async () => {
     // A deduplicated embed artifact carries the first document's chunk ids, and
     // insertChunks upserts with `document_id = excluded.document_id`: the copy's
     // document takes over the rows (worker/src/stages/embed.ts).
-    await mixedWorkspace();
+    await mixedProject();
     await doc("dedup-copy", { runId: "r-live", status: "completed", pages: 10 });
     await sql`
       insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, heading_path, token_estimate, metadata)
@@ -366,7 +366,7 @@ describe("search availability from document counters", () => {
   });
 
   it("backfills counters for rows written before the triggers existed", async () => {
-    await mixedWorkspace();
+    await mixedProject();
     await sql`update documents set chunk_count = 0, stored_page_count = 0`;
     await sql`update documents set chunk_count = 99 where id = 'complete'`;
     const { readFileSync } = await import("node:fs");

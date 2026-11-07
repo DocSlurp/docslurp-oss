@@ -52,7 +52,7 @@ describe("docslurp_version_key SQL matches documentVersionKey", () => {
   for (const [path, name] of cases) {
     it(`agrees for ${JSON.stringify([path, name])}`, async () => {
       const { rows } = await db.query<{ key: string }>("select docslurp_version_key($1, $2, $3) as key", [WS, path, name]);
-      expect(rows[0]?.key).toBe(documentVersionKey({ workspaceId: WS, path, filename: name }));
+      expect(rows[0]?.key).toBe(documentVersionKey({ projectId: WS, path, filename: name }));
     });
   }
 });

@@ -11,7 +11,7 @@ const snapshot = (completed, status = "processing") => ({
 async function http(handler, task) {
   const server = createServer(handler);
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
-  const client = createDocSlurpClient({ apiUrl: `http://127.0.0.1:${server.address().port}`, apiKey: "fixture", workspace: "work/id" });
+  const client = createDocSlurpClient({ apiUrl: `http://127.0.0.1:${server.address().port}`, apiKey: "fixture", project: "work/id" });
   try { await task(client); } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
 }
 function json(response, body, status = 200) { response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(body)); }
@@ -184,22 +184,22 @@ test("overall timeout retains the last run; bounds are validated", async () => {
   });
 });
 
-test("workspace state uses configured workspace and validates bounded window", async () => {
-  await http((request, response) => { assert.equal(request.url, "/v1/workspaces/work%2Fid/state?recentWindowHours=48"); json(response, { pages: { total: 10, indexed: 7, notIndexed: 3 }, storage: { sourceMb: 2.5 } }); }, async client => {
-    const value = await client.getWorkspaceState(undefined, { recentWindowHours: 48 }); assert.equal(value.pages.notIndexed, 3); assert.equal(value.storage.sourceMb, 2.5);
-    for (const hours of [0, 721, 1.5, NaN]) assert.throws(() => client.getWorkspaceState(undefined, { recentWindowHours: hours }), RangeError);
+test("project state uses configured project and validates bounded window", async () => {
+  await http((request, response) => { assert.equal(request.url, "/v1/projects/work%2Fid/state?recentWindowHours=48"); json(response, { pages: { total: 10, indexed: 7, notIndexed: 3 }, storage: { sourceMb: 2.5 } }); }, async client => {
+    const value = await client.getProjectState(undefined, { recentWindowHours: 48 }); assert.equal(value.pages.notIndexed, 3); assert.equal(value.storage.sourceMb, 2.5);
+    for (const hours of [0, 721, 1.5, NaN]) assert.throws(() => client.getProjectState(undefined, { recentWindowHours: hours }), RangeError);
   });
 });
 
-test("ingest report uses the configured workspace and passes run and document scope", async () => {
+test("ingest report uses the configured project and passes run and document scope", async () => {
   const urls = [];
-  await http((request, response) => { urls.push(request.url); json(response, { workspaceId: "work/id", files: { total: 2 }, recommendations: [] }); }, async client => {
+  await http((request, response) => { urls.push(request.url); json(response, { projectId: "work/id", files: { total: 2 }, recommendations: [] }); }, async client => {
     const value = await client.getIngestReport(undefined, { runId: "run 1", documentIds: ["a", "b"] });
     assert.equal(value.files.total, 2);
     await client.getIngestReport("other");
     assert.throws(() => client.getIngestReport(undefined, { documentIds: Array.from({ length: 101 }, (_, i) => `d${i}`) }), RangeError);
   });
-  assert.deepEqual(urls, ["/v1/workspaces/work%2Fid/ingest-report?runId=run+1&documentIds=a%2Cb", "/v1/workspaces/other/ingest-report"]);
+  assert.deepEqual(urls, ["/v1/projects/work%2Fid/ingest-report?runId=run+1&documentIds=a%2Cb", "/v1/projects/other/ingest-report"]);
 });
 
 test("organization wrappers preserve encoded tenant paths, bodies and response semantics", async () => {

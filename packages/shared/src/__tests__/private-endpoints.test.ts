@@ -147,11 +147,11 @@ describe("authorizePrivateModelCall", () => {
       modelUri: "llm://private/gpu1/Qwen/Qwen3-Embedding-0.6B",
       capability: "embedding",
       operation: "worker.embedding",
-      auditScope: { workspaceId: "ws-1", runId: "run-1" },
+      auditScope: { projectId: "ws-1", runId: "run-1" },
       baseFetch,
     });
     expect(written).toEqual([{
-      workspaceId: "ws-1", runId: "run-1", documentId: null,
+      projectId: "ws-1", runId: "run-1", documentId: null,
       modelId: "private/gpu1/Qwen/Qwen3-Embedding-0.6B", endpoint: "private:gpu1:worker.embedding", privacyMode: "strict-privacy",
     }]);
     expect(call.model).toBe("Qwen/Qwen3-Embedding-0.6B");
@@ -171,7 +171,7 @@ describe("authorizePrivateModelCall", () => {
     await expect(authorizePrivateModelCall({ privacyMode: "strict-privacy", modelUri: "llm://private/gpu1/Qwen/Qwen3.6-35B-A3B-FP8", capability: "text", operation: "t" }))
       .rejects.toBeInstanceOf(PrivacyModeViolationError);
     configurePrivateCallAudit(undefined);
-    await expect(authorizePrivateModelCall({ privacyMode: "strict-privacy", modelUri: "llm://private/gpu1/Qwen/Qwen3.6-35B-A3B-FP8", capability: "text", operation: "t", auditScope: { workspaceId: "ws" } }))
+    await expect(authorizePrivateModelCall({ privacyMode: "strict-privacy", modelUri: "llm://private/gpu1/Qwen/Qwen3.6-35B-A3B-FP8", capability: "text", operation: "t", auditScope: { projectId: "ws" } }))
       .rejects.toBeInstanceOf(PrivacyModeViolationError);
   });
 
@@ -179,9 +179,9 @@ describe("authorizePrivateModelCall", () => {
     setPrivateModelEndpointRegistryForTests(JSON.parse(registry()));
     const write = vi.fn(async () => {});
     configurePrivateCallAudit({ write });
-    await expect(authorizePrivateModelCall({ privacyMode: "strict-privacy", modelUri: "llm://private/nope/Qwen/Qwen3.6-35B-A3B-FP8", capability: "text", operation: "t", auditScope: { workspaceId: "ws" } }))
+    await expect(authorizePrivateModelCall({ privacyMode: "strict-privacy", modelUri: "llm://private/nope/Qwen/Qwen3.6-35B-A3B-FP8", capability: "text", operation: "t", auditScope: { projectId: "ws" } }))
       .rejects.toBeInstanceOf(PrivacyModeViolationError);
-    await expect(authorizePrivateModelCall({ privacyMode: "strict-privacy", modelUri: "llm://private/gpu1/Qwen/Qwen3.6-35B-A3B-FP8", capability: "text", operation: "t", auditScope: { workspaceId: "ws" } }))
+    await expect(authorizePrivateModelCall({ privacyMode: "strict-privacy", modelUri: "llm://private/gpu1/Qwen/Qwen3.6-35B-A3B-FP8", capability: "text", operation: "t", auditScope: { projectId: "ws" } }))
       .rejects.toThrow();
     expect(write).not.toHaveBeenCalled();
   });

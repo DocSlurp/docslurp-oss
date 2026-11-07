@@ -11,13 +11,13 @@ import { handleMcpHttp, type McpDispatch, type McpManifest } from "./mcp-http.js
 
 const manifest: McpManifest = { capabilities: [{
   id: "suggestQueries",
-  title: "Workspace suggestions",
-  description: "Suggest queries for a workspace without AI generation.",
+  title: "Project suggestions",
+  description: "Suggest queries for a project without AI generation.",
   category: "tool",
   inputSchema: {
     type: "object",
-    properties: { workspaceId: { type: "string" } },
-    required: ["workspaceId"],
+    properties: { projectId: { type: "string" } },
+    required: ["projectId"],
     additionalProperties: false,
   },
 }] };
@@ -83,13 +83,13 @@ describe("Pi agent with the DocSlurp MCP HTTP endpoint", () => {
         return fauxAssistantMessage("Try searching for support hours.");
       });
       faux.setResponses([
-        fauxAssistantMessage(fauxToolCall("suggestQueries", { workspaceId: "example" }, { id: "suggest-1" })),
+        fauxAssistantMessage(fauxToolCall("suggestQueries", { projectId: "example" }, { id: "suggest-1" })),
         followUp,
       ]);
       const agent = new Agent({ initialState: { model: faux.getModel(), tools }, streamFn: faux.streamSimple });
       const events: string[] = [];
       agent.subscribe(event => { events.push(event.type); });
-      await agent.prompt("Suggest a query for workspace example.");
+      await agent.prompt("Suggest a query for project example.");
 
       expect(agent.state.errorMessage).toBeUndefined();
       expect(faux.state.callCount).toBe(2);
@@ -98,7 +98,7 @@ describe("Pi agent with the DocSlurp MCP HTTP endpoint", () => {
       const [path, init] = dispatch.mock.calls[0]!;
       expect(path).toBe("/tools/suggestQueries");
       expect(init?.method).toBe("POST");
-      expect(JSON.parse(init?.body as string)).toEqual({ workspaceId: "example" });
+      expect(JSON.parse(init?.body as string)).toEqual({ projectId: "example" });
       expect(agent.state.messages.at(-1)).toMatchObject({
         role: "assistant", content: [{ type: "text", text: "Try searching for support hours." }],
       });
@@ -109,9 +109,9 @@ describe("Pi agent with the DocSlurp MCP HTTP endpoint", () => {
   });
 
   it.each<{ name: string; args: JsonObject; response: () => Response; error: string; dispatched: boolean }>([
-    { name: "adapter errors", args: { workspaceId: "missing" }, response: () => Response.json({ error: "Workspace not found" }, { status: 404 }), error: "Workspace not found", dispatched: true },
-    { name: "unexpected backend failures", args: { workspaceId: "example" }, response: () => { throw new Error("private backend details"); }, error: "DocSlurp request failed", dispatched: true },
-    { name: "invalid discovered-schema arguments", args: {}, response: () => Response.json({}), error: "workspaceId", dispatched: false },
+    { name: "adapter errors", args: { projectId: "missing" }, response: () => Response.json({ error: "Project not found" }, { status: 404 }), error: "Project not found", dispatched: true },
+    { name: "unexpected backend failures", args: { projectId: "example" }, response: () => { throw new Error("private backend details"); }, error: "DocSlurp request failed", dispatched: true },
+    { name: "invalid discovered-schema arguments", args: {}, response: () => Response.json({}), error: "projectId", dispatched: false },
   ])("reports $name to Pi as tool failures", async ({ args, response, error, dispatched }) => {
     const dispatch = vi.fn<McpDispatch>(async () => response());
     await withEndpoint(dispatch, async client => {

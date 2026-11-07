@@ -41,14 +41,14 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await sql`delete from workspace_runs`;
+  await sql`delete from project_runs`;
   await sql`delete from credit_leases`;
   await sql`delete from interactive_spend_holds`;
   await sql`delete from credit_grants`;
-  await sql`delete from workspaces`;
+  await sql`delete from projects`;
   await sql`delete from organizations`;
   await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 0)`;
-  await sql`insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W')`;
+  await sql`insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W')`;
   await grantOnce("o1");
 });
 
@@ -61,7 +61,7 @@ const balance = (credits: number, account: "starter" | "funded" = "starter") =>
 
 async function admit(id: string) {
   return await guard.admitRunSpend("o1", "w", (tx) => tx`
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline)
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
     values (${id}, 'o1', 'u1', 'w', 'bulk-upload', 'queued', 'queued', '{}')
     returning id
   `, { leaseRunId: id });
@@ -85,8 +85,8 @@ describe("chat credit reserve", () => {
     expect(await outstanding()).toBeCloseTo(30, 6);
     // Renewals of every run (worker path) cannot reach into the reserve either.
     for (const runId of admitted) {
-      await sql`update workspace_runs set status = 'processing' where id = ${runId}`;
-      await leases.grantRunCreditLease(sql as never, { runId, orgId: "o1", workspaceId: "w" });
+      await sql`update project_runs set status = 'processing' where id = ${runId}`;
+      await leases.grantRunCreditLease(sql as never, { runId, orgId: "o1", projectId: "w" });
     }
     expect(await outstanding()).toBeLessThanOrEqual(30 + 1e-9);
     // Jobs are out of credits; chat still works on the reserve.
@@ -157,7 +157,7 @@ describe("interactive overdraft", () => {
     const results = await Promise.allSettled(Array.from({ length: 5 }, () => chat()));
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(2);
     // The runs finish or pause: their leases are released and the floor moves back.
-    await sql`update workspace_runs set status = 'completed'`;
+    await sql`update project_runs set status = 'completed'`;
     await sql`delete from interactive_spend_holds`;
     for (let i = 0; i < 8; i += 1) await chat();
     await expect(chat()).rejects.toMatchObject({ code: "credit_exhausted" });
@@ -177,9 +177,9 @@ describe("interactive overdraft", () => {
 
   it("keeps monthly budget caps as hard stops", async () => {
     await balance(5_000);
-    await sql`update workspaces set budget_paused = true where id = 'w'`;
-    await expect(chat()).rejects.toMatchObject({ code: "workspace_budget_paused" });
-    await sql`update workspaces set budget_paused = false where id = 'w'`;
+    await sql`update projects set budget_paused = true where id = 'w'`;
+    await expect(chat()).rejects.toMatchObject({ code: "project_budget_paused" });
+    await sql`update projects set budget_paused = false where id = 'w'`;
     await sql`update organizations set budget_paused = true where id = 'o1'`;
     await expect(chat()).rejects.toMatchObject({ code: "org_budget_paused" });
   });
@@ -197,7 +197,7 @@ describe("interactive overdraft", () => {
 
   it("does not let one org's holds or grants affect another org", async () => {
     await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('o2', 'Other', 'other', 'u1', -50)`;
-    await sql`insert into workspaces(id, org_id, user_id, name) values ('w2', 'o2', 'u1', 'W2')`;
+    await sql`insert into projects(id, org_id, user_id, name) values ('w2', 'o2', 'u1', 'W2')`;
     await balance(-50);
     for (let i = 0; i < 10; i += 1) await chat();
     await expect(chat()).rejects.toMatchObject({ code: "credit_exhausted" });
@@ -220,22 +220,22 @@ describe("interactive overdraft", () => {
 describe("Speed boost admission", () => {
   it("reserves each mixed run's own immutable opt-in and rejects malformed or changed flags", async () => {
     await balance(200);
-    await sql`insert into workspace_runs(id,org_id,user_id,workspace_id,kind,status,stage,pipeline)
+    await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline)
       values ('base-run','o1','u1','w','bulk-upload','queued','queued','{}'),
         ('boost-run','o1','u1','w','bulk-upload','queued','queued','{"speedBoost":true}')`;
     const status = await guard.loadSpendStatus("o1", "w", { runReserveCredits: 1 });
     expect(status?.reserved).toBe(5);
-    await sql`update workspace_runs set spent_cents=1 where id='boost-run'`;
+    await sql`update project_runs set spent_cents=1 where id='boost-run'`;
     expect((await guard.loadSpendStatus("o1", "w", { runReserveCredits: 1 }))?.reserved).toBe(4);
-    await expect(sql`update workspace_runs set pipeline='{"speedBoost":false}' where id='boost-run'`).rejects.toThrow("immutable");
-    await expect(sql`insert into workspace_runs(id,org_id,user_id,workspace_id,kind,status,stage,pipeline)
+    await expect(sql`update project_runs set pipeline='{"speedBoost":false}' where id='boost-run'`).rejects.toThrow("immutable");
+    await expect(sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline)
       values ('malformed-run','o1','u1','w','bulk-upload','queued','queued','{"speedBoost":"true"}')`).rejects.toThrow("boolean");
     expect((await guard.loadSpendStatus("wrong-org", "w", { runReserveCredits: 1 }))).toBeNull();
-    await leases.grantRunCreditLease(sql as never, { runId: "base-run", orgId: "o1", workspaceId: "w" });
-    await leases.grantRunCreditLease(sql as never, { runId: "boost-run", orgId: "o1", workspaceId: "w" });
+    await leases.grantRunCreditLease(sql as never, { runId: "base-run", orgId: "o1", projectId: "w" });
+    await leases.grantRunCreditLease(sql as never, { runId: "boost-run", orgId: "o1", projectId: "w" });
     const grants = await sql<{holder_id:string; granted:number}[]>`select holder_id,granted from credit_leases order by holder_id`;
     expect(grants).toEqual([{holder_id:"base-run",granted:10},{holder_id:"boost-run",granted:40}]);
-    await expect(leases.grantRunCreditLease(sql as never, { runId: "boost-run", orgId: "wrong-org", workspaceId: "w" })).rejects.toThrow("not in org");
+    await expect(leases.grantRunCreditLease(sql as never, { runId: "boost-run", orgId: "wrong-org", projectId: "w" })).rejects.toThrow("not in org");
   });
 
   it("requires the boosted run reservation before insertion while omitted mode remains unchanged", async () => {

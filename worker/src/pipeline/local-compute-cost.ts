@@ -1,4 +1,4 @@
-import { CREDIT_RATE_CARD, priceResources } from "@docslurp/shared";
+import { pricing } from "@docslurp/shared";
 
 import { resolveActivityConcurrency } from "../concurrency.js";
 import type { JsonMap, PerformanceEvent, UsageEvent } from "../models.js";
@@ -81,19 +81,6 @@ const DEFAULT_RATES: LocalComputeRates = {
   networkEgressCentsPerGb: 2,
 };
 
-/** Published Fly shared-machine list rates; configurable overrides still win. */
-export function flySharedComputeRates(at = new Date()): Pick<LocalComputeRates, "cpuCentsPerSecond" | "memoryCentsPerGbSecond"> {
-  const updated = at.getTime() >= Date.parse("2026-10-01T00:00:00Z");
-  const memoryDollarsPerGbMonth = updated ? 6 : 5;
-  const twoCpuBaseDollarsPerHour = updated ? 0.0061 : 0.0054;
-  // The base preset already includes 0.5 GB. Remove that allowance from
-  // the CPU component before pricing the full configured memory capacity.
-  return {
-    cpuCentsPerSecond: ((twoCpuBaseDollarsPerHour - 0.5 * memoryDollarsPerGbMonth / 720) / 2) * 100 / 3600,
-    memoryCentsPerGbSecond: memoryDollarsPerGbMonth * 100 / SECONDS_PER_MONTH,
-  };
-}
-
 /** Machine capacity divided by concurrent activity slots, when both are configured. */
 export function perSlotShare(machineTotal: string | undefined, slots: string | number | undefined): number | null {
   const total = Number.parseFloat(machineTotal ?? "");
@@ -117,9 +104,8 @@ export function resolveWorkerDeploymentProfile(
   const image = readText(env.DOCSLURP_WORKER_IMAGE)
     ?? (lane === "heavy" ? "worker-full" : lane === "lean" ? "worker-lean" : "development");
 
-  const defaults = env.DOCSLURP_COMPUTE_RATE_CARD === "fly-shared"
-    ? { ...DEFAULT_RATES, ...flySharedComputeRates(), gpuCentsPerSecond: 0, storageCentsPerGbMonth: 15 }
-    : DEFAULT_RATES;
+  // A named rate card (DOCSLURP_COMPUTE_RATE_CARD) is the pricing provider's; per-rate env overrides still win.
+  const defaults = { ...DEFAULT_RATES, ...(pricing().internalCost.computeRates(env.DOCSLURP_COMPUTE_RATE_CARD) ?? {}) };
 
   return {
     id: `${lane}:${workerClass}:${region}`,
@@ -206,8 +192,9 @@ export function setMeteringEnforced(value: boolean): void {
 /**
  * Local compute as a Usage Event: raw infrastructure cost for our own cost
  * reports only (`billable: false`, persisted at 0 credits). Customers pay
- * PRICE_CARD units (pages, minutes), never CPU, memory or GPU time. The
- * internal list-rate reference is kept in `metadata.internalListCredits`.
+ * unit charges (pages, minutes), never CPU, memory or GPU time. The pricing
+ * provider's internal list reference, when it has one, is kept in
+ * `metadata.internalListCredits`.
  */
 export function buildLocalComputeUsageEvent(args: {
   metric: string;
@@ -219,10 +206,10 @@ export function buildLocalComputeUsageEvent(args: {
 }): UsageEvent {
   const profile = args.profile ?? resolveWorkerDeploymentProfile();
   const cost = calculateLocalComputeCost(args.observation, profile.rates);
-  const listCharge = priceResources({
+  const provider = pricing();
+  const listCredits = provider.internalCost.listCredits({
     cpuSeconds: args.observation.cpuSeconds,
     memoryGbSeconds: args.observation.memoryGbSeconds,
-    gpuStandardSeconds: args.observation.gpuSeconds,
   });
   const chargedCents = cost.totalCents;
 
@@ -252,8 +239,8 @@ export function buildLocalComputeUsageEvent(args: {
       rateCard: process.env.DOCSLURP_COMPUTE_RATE_CARD ?? "configured-or-generic",
       rateObservedAt: new Date().toISOString(),
       infraCostCents: cost.totalCents,
-      internalListCredits: listCharge.totalCredits,
-      rateCardVersion: CREDIT_RATE_CARD.version,
+      ...(listCredits === null ? {} : { internalListCredits: listCredits }),
+      pricingVersion: provider.version,
       ...args.metadata,
     },
   };

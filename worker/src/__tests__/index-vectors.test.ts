@@ -7,7 +7,7 @@ import {
   buildVectorRecords,
   vectorBackendCollectionName
 } from "../stages/index-vectors.js";
-import { workspaceVectorLocation } from "../stages/lancedb-location.js";
+import { projectVectorLocation } from "../stages/lancedb-location.js";
 
 describe("buildVectorIndexSearchMetadata", () => {
   it("marks vector manifests as fully indexed search surfaces", () => {
@@ -20,16 +20,16 @@ describe("buildVectorIndexSearchMetadata", () => {
 });
 
 describe("vectorBackendCollectionName", () => {
-  it("uses a plain chunks table inside the workspace's database", () => {
+  it("uses a plain chunks table inside the project's database", () => {
     expect(vectorBackendCollectionName({
-      backend: "lancedb", orgId: "org-a", workspaceId: "ws-1", runId: "run",
+      backend: "lancedb", orgId: "org-a", projectId: "ws-1", runId: "run",
     })).toBe("chunks");
   });
 
-  it("fails closed when LanceDB indexing has no org or workspace id", () => {
-    for (const scope of [{ orgId: null, workspaceId: "ws-1" }, { orgId: "org-a", workspaceId: null }, { orgId: "org-a" }]) {
+  it("fails closed when LanceDB indexing has no org or project id", () => {
+    for (const scope of [{ orgId: null, projectId: "ws-1" }, { orgId: "org-a", projectId: null }, { orgId: "org-a" }]) {
       expect(() => vectorBackendCollectionName({ backend: "lancedb", runId: "run-123", ...scope }))
-        .toThrow("LanceDB vector indexing requires the run's orgId and workspaceId");
+        .toThrow("LanceDB vector indexing requires the run's orgId and projectId");
     }
   });
 
@@ -44,12 +44,12 @@ describe("vectorBackendCollectionName", () => {
   });
 });
 
-describe("workspaceVectorLocation", () => {
-  it("resolves the run's workspace database and fails closed without its ids", () => {
-    expect(workspaceVectorLocation({ orgId: "org-a", workspaceId: "ws-1" }, { model: "m/x", dimensions: 4 }, "/data"))
+describe("projectVectorLocation", () => {
+  it("resolves the run's project database and fails closed without its ids", () => {
+    expect(projectVectorLocation({ orgId: "org-a", projectId: "ws-1" }, { model: "m/x", dimensions: 4 }, "/data"))
       .toEqual({ uri: "/data/org-a/ws-1/vectors-m%2Fx-4", table: "chunks" });
-    expect(() => workspaceVectorLocation({ orgId: "org-a" }, { model: "m", dimensions: 4 }, "/data")).toThrow();
-    expect(() => workspaceVectorLocation({ workspaceId: "ws-1", orgId: " " }, { model: "m", dimensions: 4 }, "/data")).toThrow();
+    expect(() => projectVectorLocation({ orgId: "org-a" }, { model: "m", dimensions: 4 }, "/data")).toThrow();
+    expect(() => projectVectorLocation({ projectId: "ws-1", orgId: " " }, { model: "m", dimensions: 4 }, "/data")).toThrow();
   });
 });
 

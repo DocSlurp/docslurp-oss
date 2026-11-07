@@ -34,6 +34,8 @@
     "db:generate": "drizzle-kit generate --config=drizzle.config.ts",
     "db:introspect": "drizzle-kit introspect --config=drizzle.config.ts",
     "db:migrate": "node server/db/migrate.mjs",
+    "db:folded-index": "node server/db/folded-search-index.mjs",
+    "db:predeploy-check": "node server/db/predeploy-check.mjs",
     "db:seed": "pnpm --filter @docslurp/server db:seed",
     "db:up": "docker compose up -d postgres redis minio createbucket temporal temporal-ui",
     "fixtures:fetch": "node scripts/fetch-fixtures.mjs",

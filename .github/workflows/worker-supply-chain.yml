@@ -14,6 +14,10 @@ on:
       - 'scripts/normalize-sbom-sarif*'
       - 'worker/package.json'
       - 'worker/vendor-bundles.json'
+      - 'worker/ocr-models.json'
+      - 'worker/scripts/docslurp_ocr.py'
+      - 'scripts/fetch-ocr-models*'
+      - 'scripts/install-ocr-runtime.sh'
       - 'scripts/build-worker-venv.sh'
       - 'scripts/prune-worker-node-modules.mjs'
       - 'scripts/vendor-bundles/**'
@@ -34,6 +38,10 @@ on:
       - 'scripts/normalize-sbom-sarif*'
       - 'worker/package.json'
       - 'worker/vendor-bundles.json'
+      - 'worker/ocr-models.json'
+      - 'worker/scripts/docslurp_ocr.py'
+      - 'scripts/fetch-ocr-models*'
+      - 'scripts/install-ocr-runtime.sh'
       - 'scripts/build-worker-venv.sh'
       - 'scripts/prune-worker-node-modules.mjs'
       - 'scripts/vendor-bundles/**'
@@ -76,10 +84,11 @@ jobs:
           UV_TORCH_BACKEND=cpu uv pip compile worker/requirements-base.txt --generate-hashes --python-version 3.11 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements-base.lock.txt
           UV_TORCH_BACKEND=cpu uv pip compile worker/requirements.txt --generate-hashes --python-version 3.11 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements.lock.txt
           UV_TORCH_BACKEND=cpu uv pip compile worker/requirements-fallback.txt --generate-hashes --python-version 3.11 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements-fallback.lock.txt
+          uv pip compile worker/requirements-ocr.txt --generate-hashes --python-version 3.13 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements-ocr.lock.txt
           uv pip compile scripts/uv-installer.txt --generate-hashes --universal --python-version 3.11 --output-file scripts/uv-installer.lock.txt
 
       - name: Ensure worker lockfiles are committed
-        run: git diff --exit-code -- worker/requirements-base.lock.txt worker/requirements.lock.txt worker/requirements-fallback.lock.txt scripts/uv-installer.lock.txt
+        run: git diff --exit-code -- worker/requirements-base.lock.txt worker/requirements.lock.txt worker/requirements-fallback.lock.txt worker/requirements-ocr.lock.txt scripts/uv-installer.lock.txt
 
       - name: Ensure every Python lock pins hashes
         run: node scripts/check-python-lock-hashes.mjs

@@ -12,12 +12,12 @@ test("chat and reprocessing serialize choices without inventing defaults", async
   assert.deepEqual(bodies.slice(1).map(b => b.speedBoost), [true, false, true]);
 });
 test("chat stream carries explicit choice", async () => {
-  let url;
-  const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch: async input => {
-    url = new URL(input); return new Response('event: done\ndata: {}\n\n', { headers: { "content-type": "text/event-stream" } });
+  let body;
+  const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "key", fetch: async (_input, init) => {
+    body = JSON.parse(init.body); return new Response('event: done\ndata: {}\n\n', { headers: { "content-type": "text/event-stream" } });
   } });
   for await (const _event of client.chatStream({ q: "question", speedBoost: true })) {}
-  assert.equal(url.searchParams.get("speedBoost"), "true");
+  assert.equal(body.speedBoost, true);
 });
 test("URL and multipart uploads retain true and false independently of quality", async () => {
   const calls = [];

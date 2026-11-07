@@ -21,9 +21,9 @@ describe("parseFilters", () => {
     expect(result.runId).toBe("run-456");
   });
 
-  it("parses workspaceId", () => {
-    const result = parseFilters({ workspaceId: "ws-123" });
-    expect(result.workspaceId).toBe("ws-123");
+  it("parses projectId", () => {
+    const result = parseFilters({ projectId: "ws-123" });
+    expect(result.projectId).toBe("ws-123");
   });
 
   it("parses language", () => {

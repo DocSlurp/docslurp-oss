@@ -15,16 +15,16 @@ beforeAll(async () => {
   ({ loadSearchAvailability: availability } = await import("../search/session-setup.js"));
   await sql`insert into "user" (id, name, email) values ('u', 'Test', 'pending@example.test')`;
   await sql`insert into organizations (id, name, slug, created_by_user_id) values ('o', 'Test', 'pending', 'u')`;
-  await sql`insert into workspaces (id, org_id, user_id, name) values ('w', 'o', 'u', 'Test')`;
+  await sql`insert into projects (id, org_id, user_id, name) values ('w', 'o', 'u', 'Test')`;
 }, 120_000);
 afterAll(async () => { await sql?.end(); await stop?.(); });
 
 describe("canonical replacement of failed-run pending history", () => {
   it("retires an unflagged queued old document and restores exact search availability when its replacement completes", async () => {
-    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline)
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
       values ('old', 'o', 'u', 'w', 'upload', 'failed', 'embed', '{}'::jsonb),
         ('new', 'o', 'u', 'w', 'upload', 'processing', 'index', '{}'::jsonb)`;
-    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, canonical_id, page_count, created_at)
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, canonical_id, page_count, created_at)
       values ('old-doc', 'o', 'u', 'w', 'old', 'a.txt', 'text/plain', 'old-key', 'queued', '/a.txt', 4, '2026-01-01'),
         ('new-doc', 'o', 'u', 'w', 'new', 'a.txt', 'text/plain', 'new-key', 'queued', '/a.txt', 4, '2026-01-02')`;
     await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text)
@@ -32,18 +32,18 @@ describe("canonical replacement of failed-run pending history", () => {
     await sql`update documents set status = 'completed' where id = 'new-doc'`;
     expect(await sql`select status, superseded_by_document_id as replacement from documents where id = 'old-doc'`)
       .toEqual([{ status: 'cancelled', replacement: 'new-doc' }]);
-    expect(await availability({ workspaceId: 'w' })).toMatchObject({
+    expect(await availability({ projectId: 'w' })).toMatchObject({
       total_documents: 1, total_pages: 4, searchable_documents: 1, searchable_pages: 4,
     });
-    expect(await sql`select count(*)::int as n from documents where workspace_id = 'w'`).toEqual([{ n: 2 }]);
+    expect(await sql`select count(*)::int as n from documents where project_id = 'w'`).toEqual([{ n: 2 }]);
   });
 
   it("preserves an active cancelling run until it ends, then retires its replaced queued history", async () => {
-    await sql`insert into workspaces (id, org_id, user_id, name) values ('active-w', 'o', 'u', 'Active')`;
-    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, control_state)
+    await sql`insert into projects (id, org_id, user_id, name) values ('active-w', 'o', 'u', 'Active')`;
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, control_state)
       values ('active-old', 'o', 'u', 'active-w', 'upload', 'processing', 'embed', '{}'::jsonb, 'cancel_requested'),
         ('active-new', 'o', 'u', 'active-w', 'upload', 'processing', 'index', '{}'::jsonb, null)`;
-    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, canonical_id, created_at)
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, canonical_id, created_at)
       values ('active-old-doc', 'o', 'u', 'active-w', 'active-old', 'a.txt', 'text/plain', 'old-key', 'queued', '/a.txt', '2026-01-01'),
         ('active-new-doc', 'o', 'u', 'active-w', 'active-new', 'a.txt', 'text/plain', 'new-key', 'completed', '/a.txt', '2026-01-02')`;
     expect(await sql`select status, superseded_at from documents where id = 'active-old-doc'`).toEqual([{ status: 'queued', superseded_at: null }]);
@@ -53,14 +53,14 @@ describe("canonical replacement of failed-run pending history", () => {
       .toEqual([{ status: 'cancelled', replacement: 'active-new-doc' }]);
   });
 
-  it("never guesses replacements across organizations, workspaces, canonical source identities or older versions", async () => {
+  it("never guesses replacements across organizations, projects, canonical source identities or older versions", async () => {
     await sql`insert into organizations (id, name, slug, created_by_user_id) values ('o2', 'Other', 'pending-other', 'u')`;
-    await sql`insert into workspaces (id, org_id, user_id, name) values ('scope-w', 'o', 'u', 'Scope'), ('scope-other', 'o2', 'u', 'Other')`;
-    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline)
+    await sql`insert into projects (id, org_id, user_id, name) values ('scope-w', 'o', 'u', 'Scope'), ('scope-other', 'o2', 'u', 'Other')`;
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
       values ('scope-old', 'o', 'u', 'scope-w', 'upload', 'failed', 'embed', '{}'::jsonb),
         ('scope-new', 'o', 'u', 'scope-w', 'upload', 'processing', 'index', '{}'::jsonb),
         ('scope-foreign', 'o2', 'u', 'scope-other', 'upload', 'processing', 'index', '{}'::jsonb)`;
-    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, canonical_id, created_at)
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, canonical_id, created_at)
       values ('scope-target', 'o', 'u', 'scope-w', 'scope-old', 'a.txt', 'text/plain', 'target', 'queued', '/dir-a/a.txt', '2026-01-03'),
         ('scope-foreign-doc', 'o2', 'u', 'scope-other', 'scope-foreign', 'a.txt', 'text/plain', 'foreign', 'completed', '/dir-a/a.txt', '2026-01-04'),
         ('scope-other-source', 'o', 'u', 'scope-w', 'scope-new', 'a.txt', 'text/plain', 'other-source', 'completed', '/dir-b/a.txt', '2026-01-04'),

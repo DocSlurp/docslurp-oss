@@ -1,12 +1,12 @@
 import {expect,it} from "vitest";
-import {searchInputSchema,searchOptions,workspaceChatInputSchema} from "../lib/search-input.js";
+import {searchInputSchema,searchOptions,projectChatInputSchema} from "../lib/search-input.js";
 import {toolInputJsonSchema} from "../services/mcp-tool-schemas.js";
 import {geoPredicateSchema} from "@docslurp/shared";
 const geo = {field:"site",op:"radius" as const,center:[0,0] as [number,number],radiusMeters:1000};
 it("search, chat and MCP expose the same typed spatial input",()=>{
  const input=searchInputSchema.parse({q:"road",geo});
- expect(searchOptions({...input,workspaceId:"w"}).filters.geo).toEqual(geo);
- expect(workspaceChatInputSchema.parse({q:"road",filters:{geo}}).filters?.geo).toEqual(geo);
+ expect(searchOptions({...input,projectId:"w"}).filters.geo).toEqual(geo);
+ expect(projectChatInputSchema.parse({q:"road",filters:{geo}}).filters?.geo).toEqual(geo);
  const advertised=toolInputJsonSchema(searchInputSchema);
  expect(JSON.stringify(advertised)).toContain('radiusMeters');
  expect(JSON.stringify(advertised)).toContain('bbox');

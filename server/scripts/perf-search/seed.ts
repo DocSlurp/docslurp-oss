@@ -67,10 +67,10 @@ await sql`insert into "user" (id, name, email) values ('perfu', 'Perf', 'perf@ex
 await sql`insert into organizations (id, name, slug, created_by_user_id) values (${ORG}, 'Perf', 'perf', 'perfu') on conflict do nothing`;
 await sql`insert into org_memberships (org_id, user_id, role) values (${ORG}, 'perfu', 'owner') on conflict do nothing`;
 const pipelineJson = { embedding: { modelUri: MODEL_URI, target: "local", dimensions: 384 } };
-await sql`insert into workspaces (id, org_id, user_id, name, pipeline) values ('perfw', ${ORG}, 'perfu', 'Perf', ${sql.json(pipelineJson as never)}) on conflict (id) do update set pipeline = excluded.pipeline`;
-await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline) values ('perfrun', ${ORG}, 'perfu', 'perfw', 'bulk-upload', 'completed', 'completed', '{}') on conflict do nothing`;
+await sql`insert into projects (id, org_id, user_id, name, pipeline) values ('perfw', ${ORG}, 'perfu', 'Perf', ${sql.json(pipelineJson as never)}) on conflict (id) do update set pipeline = excluded.pipeline`;
+await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values ('perfrun', ${ORG}, 'perfu', 'perfw', 'bulk-upload', 'completed', 'completed', '{}') on conflict do nothing`;
 for (const d of docs) {
-  await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status) values (${d.id}, ${ORG}, 'perfu', 'perfw', 'perfrun', ${d.filename}, 'text/markdown', ${"k" + d.id}, 'completed') on conflict (id) do nothing`;
+  await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status) values (${d.id}, ${ORG}, 'perfu', 'perfw', 'perfrun', ${d.filename}, 'text/markdown', ${"k" + d.id}, 'completed') on conflict (id) do nothing`;
   await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension) values (${"vi" + d.id}, ${d.id}, 'lancedb', 'b', 'p', ${route.model}, ${DIM}) on conflict do nothing`;
 }
 const rows: any[] = [];

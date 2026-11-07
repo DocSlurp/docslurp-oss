@@ -17,9 +17,9 @@ beforeAll(async () => {
   vi.doMock("../db.js", () => ({ sql }));
   vi.doMock("../services/organizations.js", async () => ({
     ...await vi.importActual<object>("../services/organizations.js"),
-    listAccessibleWorkspaceIds: async () => ["admission-w1", "admission-w2"],
-    getWorkspaceAccess: async () => ({}),
-    canContributeToWorkspace: () => true,
+    listAccessibleProjectIds: async () => ["admission-w1", "admission-w2"],
+    getProjectAccess: async () => ({}),
+    canContributeToProject: () => true,
   }));
   vi.doMock("../services/worker-fleet.js", () => ({ fleetSupportsNow: () => true, taskQueueForOrgKey: () => ({ taskQueue: "test" }) }));
   vi.doMock("../services/billing/credit-leases.js", async () => {
@@ -44,20 +44,20 @@ beforeEach(async () => {
   failure = "none";
   vi.stubEnv("WORKER_CREDIT_LEASES", "on");
   vi.stubEnv("WORKER_CREDIT_LEASE_FRACTION", "1");
-  await sql`delete from workspace_runs where workspace_id in ('admission-w1', 'admission-w2')`;
-  await sql`delete from workspaces where id in ('admission-w1', 'admission-w2')`;
+  await sql`delete from project_runs where project_id in ('admission-w1', 'admission-w2')`;
+  await sql`delete from projects where id in ('admission-w1', 'admission-w2')`;
   await sql`delete from credit_leases where org_id = 'admission-org'`;
   await sql`delete from organizations where id = 'admission-org'`;
   await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents)
     values ('admission-org', 'Admission', 'admission', 'admission-user', 1000)`;
-  await sql`insert into workspaces(id, org_id, user_id, name) values
+  await sql`insert into projects(id, org_id, user_id, name) values
     ('admission-w1', 'admission-org', 'admission-user', 'One'), ('admission-w2', 'admission-org', 'admission-user', 'Two')`;
 });
 
-function admit(runId: string, speedBoost = true, workspaceId = "admission-w1") {
-  return guard.admitRunSpend("admission-org", workspaceId, tx => tx`
-    insert into workspace_runs(id, org_id, user_id, workspace_id, kind, status, stage, pipeline)
-    values (${runId}, 'admission-org', 'admission-user', ${workspaceId}, 'upload', 'queued', 'queued', ${tx.json({ speedBoost })})
+function admit(runId: string, speedBoost = true, projectId = "admission-w1") {
+  return guard.admitRunSpend("admission-org", projectId, tx => tx`
+    insert into project_runs(id, org_id, user_id, project_id, kind, status, stage, pipeline)
+    values (${runId}, 'admission-org', 'admission-user', ${projectId}, 'upload', 'queued', 'queued', ${tx.json({ speedBoost })})
     returning id
   `, { leaseRunId: runId, speedBoost });
 }
@@ -68,7 +68,7 @@ describe("mandatory run admission leases", () => {
     await expect(guard.admitRunSpend("admission-org", "admission-w1", callback, { speedBoost: true, leaseRunId }))
       .rejects.toThrow("requires a lease run ID");
     expect(callback).not.toHaveBeenCalled();
-    expect(await sql`select id from workspace_runs where org_id = 'admission-org'`).toHaveLength(0);
+    expect(await sql`select id from project_runs where org_id = 'admission-org'`).toHaveLength(0);
   });
 
   it.each([false, true])("commits a usable lease for speedBoost=%s", async speedBoost => {
@@ -80,17 +80,17 @@ describe("mandatory run admission leases", () => {
   it.each(["throw-after-write", "null", "refused", "zero", "nan", "negative"] as const)("rolls back run and lease on %s", async mode => {
     failure = mode;
     await expect(admit("refused")).rejects.toThrow(mode === "throw-after-write" ? "injected lease write failure" : "usable credit lease");
-    expect(await sql`select id from workspace_runs where org_id = 'admission-org'`).toHaveLength(0);
+    expect(await sql`select id from project_runs where org_id = 'admission-org'`).toHaveLength(0);
     expect(await sql`select id from credit_leases where org_id = 'admission-org'`).toHaveLength(0);
   });
 
-  it.skipIf(!databaseUrl)("serializes boosted admissions across workspaces on the same limited balance", async () => {
+  it.skipIf(!databaseUrl)("serializes boosted admissions across projects on the same limited balance", async () => {
     await sql`update organizations set credit_balance_cents = 105 where id = 'admission-org'`;
     const results = await Promise.allSettled([admit("race-a", true, "admission-w1"), admit("race-b", true, "admission-w2")]);
     expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
     const rejected = results.find(result => result.status === "rejected");
     expect(rejected).toMatchObject({ status: "rejected", reason: { code: "credit_exhausted" } });
-    expect(await sql`select id from workspace_runs where org_id = 'admission-org' and status = 'queued'`).toHaveLength(1);
+    expect(await sql`select id from project_runs where org_id = 'admission-org' and status = 'queued'`).toHaveLength(1);
     const [lease] = await sql`select granted from credit_leases where org_id = 'admission-org' and status = 'active'`;
     expect(Number(lease!.granted)).toBe(5);
     const [outstanding] = await sql`select org_outstanding_credit_leases('admission-org') as credits`;
@@ -111,7 +111,7 @@ describe("transactional readmission", () => {
     expect(await sql`select id from credit_leases where holder_id='own'`).toHaveLength(1);
   });
 
-  it("does not borrow an expired lease or another workspace's lease", async () => {
+  it("does not borrow an expired lease or another project's lease", async () => {
     await sql`update organizations set credit_balance_cents=105 where id='admission-org'`;
     await admit("own");
     await sql`update credit_leases set expires_at=now()-interval '1 minute' where holder_id='own'`;
@@ -131,7 +131,7 @@ describe("transactional readmission", () => {
     const lifecycle = createRunLifecycle({ sql, startWorkflow: publish, failureThreshold: 3,
       signals: { resume: publish, cancel: publish, pause: publish } });
     await admit("noop");
-    await sql`update workspace_runs set status='completed', control_state=null where id='noop'`;
+    await sql`update project_runs set status='completed', control_state=null where id='noop'`;
     await sql`delete from credit_leases where holder_id='noop'`;
     await sql`update organizations set credit_balance_cents=0 where id='admission-org'`;
     const unchanged = Symbol("unchanged");
@@ -144,7 +144,7 @@ describe("transactional readmission", () => {
     })).rejects.toBe(unchanged);
     expect(publish).not.toHaveBeenCalled();
     expect(await sql`select id from credit_leases where holder_id='noop'`).toHaveLength(0);
-    expect((await sql`select status from workspace_runs where id='noop'`)[0]?.status).toBe("completed");
+    expect((await sql`select status from project_runs where id='noop'`)[0]?.status).toBe("completed");
   });
 
   it.skipIf(!databaseUrl)("serializes mixed admissions without releasing another run's credits", async () => {
@@ -164,15 +164,15 @@ describe("transactional readmission", () => {
     await admit("refused-existing");
     failure = "refused";
     await expect(readmit("refused-existing", async tx => {
-      await tx`update workspace_runs set status='processing' where id='refused-existing'`;
+      await tx`update project_runs set status='processing' where id='refused-existing'`;
       return "changed";
     })).rejects.toMatchObject({code:"credit_exhausted"});
-    expect((await sql`select status from workspace_runs where id='refused-existing'`)[0]?.status).toBe("queued");
+    expect((await sql`select status from project_runs where id='refused-existing'`)[0]?.status).toBe("queued");
   });
 
   it.each(["retry", "recover", "resume"])("runs.ts %s is a no-op at zero credit without mocking admission", async action => {
     await admit("service-noop");
-    await sql`update workspace_runs set status=${action === 'resume' ? 'processing' : 'completed'},control_state=null where id='service-noop'`;
+    await sql`update project_runs set status=${action === 'resume' ? 'processing' : 'completed'},control_state=null where id='service-noop'`;
     await sql`delete from credit_leases where holder_id='service-noop'`;
     await sql`update organizations set credit_balance_cents=0 where id='admission-org'`;
     const { retryRun, controlRun } = await import("../services/runs.js");
@@ -189,9 +189,9 @@ describe("transactional readmission", () => {
     await sql`delete from credit_leases where holder_id='rollback'`;
     await sql`update organizations set credit_balance_cents=0 where id='admission-org'`;
     await expect(readmit("rollback", async tx => {
-      await tx`update workspace_runs set status='processing' where id='rollback'`;
+      await tx`update project_runs set status='processing' where id='rollback'`;
       return "changed";
     })).rejects.toMatchObject({code:"credit_exhausted"});
-    expect((await sql`select status from workspace_runs where id='rollback'`)[0]?.status).toBe("queued");
+    expect((await sql`select status from project_runs where id='rollback'`)[0]?.status).toBe("queued");
   });
 });

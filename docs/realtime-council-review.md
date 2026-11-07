@@ -5,8 +5,8 @@ Status: implementation and reviews in progress; not merge approval.
 ## Security Paranoid — GPT-6-astra, integrated core 5b2dc6d5
 
 - High: activity delivery checked organization membership but could expose a
-  captured private-workspace run after workspace membership removal. Repair:
-  authorize the bounded set of constituent workspace IDs again before delivery;
+  captured private-project run after project membership removal. Repair:
+  authorize the bounded set of constituent project IDs again before delivery;
   missing collection authorization support fails closed.
 - Medium: unrelated successful session checks could extend a stalled resource
   verification sweep forever. Repair: track the last completed resource sweep
@@ -55,7 +55,7 @@ capacity acceptance from the idle fix. Flags remain off; no merge/deployment.
 
 ## Final adversarial review repairs (2026-11-03)
 
-Review of frozen `f10b6e86` identified a high-severity gap: shared materialization acceptance checked task lease/cancellation but not the originating session or current workspace authority after waiting for the root lock. Both execution adapters now carry the trusted session identity and abort signal. Acceptance uses the same transaction to revalidate the session and existing workspace-access policy immediately before allocation, and checks abort before dispatch. Existing accepted shared work retains its documented independent lifecycle.
+Review of frozen `f10b6e86` identified a high-severity gap: shared materialization acceptance checked task lease/cancellation but not the originating session or current project authority after waiting for the root lock. Both execution adapters now carry the trusted session identity and abort signal. Acceptance uses the same transaction to revalidate the session and existing project-access policy immediately before allocation, and checks abort before dispatch. Existing accepted shared work retains its documented independent lifecycle.
 
 Validation: eight dependency tests pass on isolated PostgreSQL 17 with five connections. Deterministic contention tests hold the root lock, confirm acceptance is waiting, revoke the session or org membership (or abort), then release the lock; each produces zero allocated runs and dependency records. Server TypeScript passes. The disposable database was removed. Independent security recheck remains required.
 
@@ -170,7 +170,7 @@ The application role now receives usage/DML/sequence access to the migrated
 `docslurp_mastra` schema without CREATE; ingestion-worker and PUBLIC grants there
 are revoked. A negative test grants the worker access deliberately, reconciles,
 and verifies it is denied again. The full server run also exposed a stale
-suggestion-route fixture: it lacked the shared projection's workspace-access
+suggestion-route fixture: it lacked the shared projection's project-access
 result. The fixture now models authorized access and adds a denial-before-read
 case; production authorization behavior was not changed.
 

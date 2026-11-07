@@ -130,7 +130,7 @@ function expectRestricted(provider: Record<string, any>) {
   expect(provider.ignore).toEqual(expect.arrayContaining([...CHINA_PROVIDER_SLUGS]));
 }
 
-describe("China-provider restriction (org or workspace opt-out)", () => {
+describe("China-provider restriction (org or project opt-out)", () => {
   it("keeps China-based and unknown-region providers out of every attempt, retries included", async () => {
     const { bodies } = await run(GLM, [
       filtered("Wafer"),

@@ -9,17 +9,17 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
  * included) and a turn the client abandoned are charged, a server-side error
  * or timeout is refunded, and error bodies carry the turn's usage.
  */
-const { chatWorkspace } = vi.hoisted(() => ({ chatWorkspace: vi.fn() }));
-vi.mock("../services/workspace-chat.js", async (original) => ({
-  ...await original<typeof import("../services/workspace-chat.js")>(),
-  chatWorkspace,
-  workspaceChatDisabledBody: async () => null,
+const { chatProject } = vi.hoisted(() => ({ chatProject: vi.fn() }));
+vi.mock("../services/project-chat.js", async (original) => ({
+  ...await original<typeof import("../services/project-chat.js")>(),
+  chatProject,
+  projectChatDisabledBody: async () => null,
 }));
 vi.mock("../lib/request-actor.js", async (original) => ({
   ...await original<typeof import("../lib/request-actor.js")>(),
-  assertApiKeyWorkspaceAccess: async () => null,
+  assertApiKeyProjectAccess: async () => null,
   getRequestActor: () => ({ type: "session", userId: "u1" }),
-  resolveActorWorkspaceId: async () => "w1",
+  resolveActorProjectId: async () => "w1",
 }));
 
 let stop: () => Promise<void>;
@@ -49,24 +49,24 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  chatWorkspace.mockReset();
+  chatProject.mockReset();
   await sql`delete from credit_debits_pending`;
   await sql`delete from credit_ledger`;
   await sql`delete from credit_grants`;
   await sql`delete from usage_events`;
-  await sql`delete from workspaces`;
+  await sql`delete from projects`;
   await sql`delete from organizations`;
   await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 1000)`;
-  await sql`insert into workspaces(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W')`;
+  await sql`insert into projects(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W')`;
 });
 
 /** A chat turn that billed its answer (and flushed it), then answered or failed. */
 function turnThat(outcome: (turnId: string) => unknown) {
-  chatWorkspace.mockImplementation(async () => {
+  chatProject.mockImplementation(async () => {
     const turnId = billing.currentChatTurnHandle()!.id;
     await usage.recordUnitCharge({
       userId: "u1",
-      scope: { orgId: "o1", workspaceId: "w1", sessionId: "s1" },
+      scope: { orgId: "o1", projectId: "w1", sessionId: "s1" },
       charge: { id: `chat-answer:${turnId}`, metric: "chat-answer", amount: 1, unit: "answer", credits: 12, metadata: { providerCostCents: 10 } },
     });
     await credits.flushPendingCreditDebits();
@@ -80,7 +80,7 @@ function post(init: RequestInit = {}) {
   app.use("*", publicErrors.publicErrorMiddleware);
   app.use("*", async (c, next) => { c.set("sessionUser", { id: "u1", email: "", name: "" }); await next(); });
   app.onError((_error, c) => c.json({ error: "internal" }, 500));
-  app.route("/v1/chat", routes.workspaceChatRoutes);
+  app.route("/v1/chat", routes.projectChatRoutes);
   return app.request("/v1/chat", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "What changed?" }), ...init,
   });

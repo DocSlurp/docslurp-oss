@@ -5,7 +5,7 @@ import { benchmarkExtractor } from "../benchmarks/extraction-benchmark.js";
 import { buildExtractionContract } from "../lib/extraction-contract.js";
 import { loadNativePdfEngine } from "../native-pdf/loader.js";
 
-// Pipe tables come from the private native-pdf engine; Kreuzberg renders this fixture's tables as aligned text.
+// Pipe tables come from the private native-pdf engine; Poppler text renders this fixture's tables as aligned text.
 const nativePdfAvailable = (await loadNativePdfEngine()).ok;
 
 describe("Extraction Edge Cases", () => {
@@ -58,11 +58,11 @@ describe("Extraction Edge Cases", () => {
       const result = await benchmarkExtractor({
         fixtureId: "formulas-math",
         fixturePath,
-        method: "kreuzberg",
+        method: "poppler-text",
         runner,
       });
 
-      expect(result.contract.metadata.extractor).toBe("kreuzberg");
+      expect(result.contract.metadata.extractor).toBe("poppler-text");
       // the extractor keeps the raw text for these formulas, which include "integral", "derivative"
       expect(result.contract.markdown.toLowerCase()).toContain("integral");
       expect(result.contract.markdown.toLowerCase()).toContain("derivative");
@@ -86,11 +86,11 @@ describe("Extraction Edge Cases", () => {
       const result = await benchmarkExtractor({
         fixtureId: "multicolumn-report",
         fixturePath,
-        method: "kreuzberg",
+        method: "poppler-text",
         runner,
       });
 
-      expect(result.contract.metadata.extractor).toBe("kreuzberg");
+      expect(result.contract.metadata.extractor).toBe("poppler-text");
       // Multi-column logic might get mangled but should be mostly present
       expect(result.contract.rawText.toLowerCase()).toContain("figure 2");
       expect(result.contract.rawText.toLowerCase()).toContain("latency");
@@ -114,11 +114,11 @@ describe("Extraction Edge Cases", () => {
       const result = await benchmarkExtractor({
         fixtureId: "metadata-doc",
         fixturePath,
-        method: "kreuzberg",
+        method: "poppler-text",
         runner,
       });
 
-      expect(result.contract.metadata.extractor).toBe("kreuzberg");
+      expect(result.contract.metadata.extractor).toBe("poppler-text");
       expect(result.contract.rawText.toLowerCase()).toContain("title");
       expect(result.contract.rawText.toLowerCase()).toContain("author");
 
@@ -269,7 +269,8 @@ Scan the QR code below:
     });
 
     expect(contract.hasToC).toBe(true);
-    expect(contract.hasQRCodes).toBe(true);
+    // A page that mentions a QR code is not evidence of one.
+    expect(contract.hasQRCodes).toBe(false);
     expect(contract.headers[0].text).toBe("Table of Contents");
   });
 });

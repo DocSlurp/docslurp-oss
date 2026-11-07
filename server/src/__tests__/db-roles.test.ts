@@ -1,5 +1,5 @@
 import { applyRemainingMigrations, createMigratedDatabase } from "@docslurp/worker/testing";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
   DEFAULT_DB_ROLES,
@@ -51,7 +51,14 @@ async function denied(role: string, statement: string): Promise<boolean> {
 beforeAll(async () => {
   db = await createMigratedDatabase({ stopBefore: "0120_realtime_nonblocking_revisions" });
   for (const role of [app, worker, backup]) await db.exec(`create role ${role} nologin`);
-  await reconcileRoleGrants(db, { log: silent });
+  await reconcileRoleGrants({ query: async (statement: string, params?: unknown[]) => {
+    const result = await db.query<Record<string, unknown>>(statement.replaceAll("project", "workspace"), params);
+    return { ...result, rows: result.rows.map((row: Record<string, unknown>) => Object.fromEntries(Object.entries(row).map(([key, value]) => {
+        // The old schema reports column arrays as well as relation names.
+        if (key === "columns" && Array.isArray(value)) return [key, value.map(column => typeof column === "string" ? column.replaceAll("workspace", "project") : column)];
+        return [key, ["relname", "table", "sequence"].includes(key) && typeof value === "string" ? value.replaceAll("workspace", "project") : value];
+      }))) };
+  } }, { log: silent });
   // No reconciliation after migration: live roles must work at commit.
   await applyRemainingMigrations(db, "0120_realtime_nonblocking_revisions");
 }, 120_000);
@@ -74,7 +81,7 @@ describe("worker table classification", () => {
   it("keeps auth, credential and billing tables out of the worker's reach", () => {
     for (const table of [
       "account", "session", "verification", "api_keys", "oauth_accounts", "credit_grants",
-      "mcp_oauth_tokens", "mcp_oauth_clients", "sso_identity_links", "stripe_webhook_events", "workspace_connectors",
+      "mcp_oauth_tokens", "mcp_oauth_clients", "sso_identity_links", "stripe_webhook_events", "project_connectors",
     ]) {
       expect(WORKER_DENIED_TABLES[table], table).toBeTruthy();
     }
@@ -121,14 +128,14 @@ describe("worker role", () => {
   it("publishes ingestion revisions through validated triggers immediately after migration", async () => {
     await db.exec(`insert into "user"(id,name,email) values('role-realtime','Test','role-realtime@example.test');
       insert into organizations(id,name,slug,created_by_user_id) values('role-realtime','Test','role-realtime','role-realtime');
-      insert into workspaces(id,org_id,user_id,name) values('role-realtime','role-realtime','role-realtime','Test');
-      insert into workspace_runs(id,org_id,user_id,workspace_id,kind,status,stage)
+      insert into projects(id,org_id,user_id,name) values('role-realtime','role-realtime','role-realtime','Test');
+      insert into project_runs(id,org_id,user_id,project_id,kind,status,stage)
         values('role-realtime-run','role-realtime','role-realtime','role-realtime','upload','processing','extract');
-      insert into documents(id,org_id,user_id,workspace_id,run_id,filename,mime_type,source_key,status)
+      insert into documents(id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status)
         values('role-realtime-doc','role-realtime','role-realtime','role-realtime','role-realtime-run','test.txt','text/plain','fixture','queued');`);
     const read = async () => (await db.query<{revision:string}>("select revision::text from realtime_revisions where org_id='role-realtime'")).rows[0]!.revision;
     const before = BigInt(await read());
-    await as(worker, () => db.exec("update workspace_runs set stage='index' where id='role-realtime-run'"));
+    await as(worker, () => db.exec("update project_runs set stage='index' where id='role-realtime-run'"));
     await as(worker, () => db.exec("update documents set status='processing' where id='role-realtime-doc'"));
     // Exercises the separate deferred-materialization trigger as the worker.
     await as(worker, () => db.exec(`insert into document_page_states(document_id,page_number,state)
@@ -162,14 +169,17 @@ describe("worker role", () => {
     }
   });
 
-  it("reads only the granted columns of user, webhooks and workspace_secrets", async () => {
+  it("reads only the granted columns of user, webhooks and project_secrets", async () => {
     expect(await denied(worker, `select id, email from "user"`)).toBe(false);
     expect(await denied(worker, `select name from "user"`)).toBe(true);
     expect(await denied(worker, `update "user" set email = email`)).toBe(true);
-    expect(await denied(worker, "select user_id, active, events from webhooks")).toBe(false);
+    expect(await denied(worker, "select org_id, active, events from webhooks")).toBe(false);
+    // Kept for N-1 workers during the 0125 rollout (roles.mjs); a later release drops it.
+    expect(await denied(worker, "select user_id from webhooks")).toBe(false);
+    expect(await denied(worker, "select url from webhooks")).toBe(true);
     expect(await denied(worker, "select secret from webhooks")).toBe(true);
-    expect(await denied(worker, "select id, workspace_id, name, type, expires_at from workspace_secrets")).toBe(false);
-    expect(await denied(worker, "select encrypted_value from workspace_secrets")).toBe(true);
+    expect(await denied(worker, "select id, project_id, name, type, expires_at from project_secrets")).toBe(false);
+    expect(await denied(worker, "select encrypted_value from project_secrets")).toBe(true);
   });
 
   it("has exactly the declared privileges on allowed tables", async () => {
@@ -263,6 +273,344 @@ describe("migration ownership preflight", () => {
       await expect(as("migration_candidate", () => assertMigrationOwner(db))).rejects.toThrow(/MIGRATION_DATABASE_URL/);
     } finally {
       await db.exec("drop table spatial_ref_sys; revoke create on schema public from migration_candidate; drop role migration_candidate");
+    }
+  });
+});
+
+describe("ocr_escalation_reads (migration 0129)", () => {
+  // The exact statements worker/src/db/store.ts runs (recordOcrEscalationRead, ocrEscalationReads).
+  const insert = (attempt: number) => `insert into ocr_escalation_reads (run_id, document_id, page_number, attempt, status, text, model, usage_events)
+    values ('esc-roles-run', 'doc-1', 3, ${attempt}, 'completed', 'Hosted transcription', 'qwen', '[{"id":"ocr-escalation:esc-roles-run:doc-1:3:${attempt}"}]'::jsonb)
+    on conflict (run_id, document_id, page_number, attempt) do nothing`;
+  const read = "select attempt, status, text, model, usage_events from ocr_escalation_reads where run_id = 'esc-roles-run' and document_id = 'doc-1' and page_number = 3 order by attempt";
+
+  beforeAll(async () => {
+    await db.exec(`
+      insert into "user" (id, name, email) values ('esc-roles-u', 'U', 'esc-roles@example.com') on conflict do nothing;
+      insert into organizations (id, name, slug, created_by_user_id) values ('esc-roles-org', 'O', 'esc-roles-org', 'esc-roles-u') on conflict do nothing;
+      insert into projects (id, org_id, user_id, name) values ('esc-roles-ws', 'esc-roles-org', 'esc-roles-u', 'W') on conflict do nothing;
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
+        values ('esc-roles-run', 'esc-roles-org', 'esc-roles-u', 'esc-roles-ws', 'bulk-upload', 'processing', 'extract-markdown', '{}') on conflict do nothing;`);
+  });
+
+  it("lets the worker write a read, read it back and replay the write on retry, as the store does", async () => {
+    await as(worker, async () => {
+      await db.exec(insert(1));
+      await db.exec(insert(1)); // a retried activity re-sends the same attempt: no error, no second row
+      const { rows } = await db.query<{ attempt: number; text: string }>(read);
+      expect(rows).toEqual([expect.objectContaining({ attempt: 1, text: "Hosted transcription" })]);
+    });
+  });
+
+  it("denies the worker every operation it does not need", async () => {
+    expect(WORKER_TABLES.ocr_escalation_reads?.privileges).toEqual(["select", "insert"]);
+    expect(await denied(worker, "update ocr_escalation_reads set text = 'x'")).toBe(true);
+    expect(await denied(worker, "delete from ocr_escalation_reads")).toBe(true);
+    expect(await denied(worker, "truncate ocr_escalation_reads")).toBe(true);
+  });
+
+  it("denies the backup role every write (it reads through pg_read_all_data in ops); the app role deletes it with its run", async () => {
+    for (const statement of [insert(2), "update ocr_escalation_reads set text = 'x'", "delete from ocr_escalation_reads"]) {
+      expect(await denied(backup, statement), statement).toBe(true);
+    }
+    await as(app, async () => {
+      await db.exec("delete from project_runs where id = 'esc-roles-run'");
+      const { rows } = await db.query(read);
+      expect(rows).toEqual([]);
+    });
+  });
+});
+
+describe("pricing_provider_state (migration 0131)", () => {
+  // The read-only seam the pricing plugin receives, and the operator's admin seam (packages/shared/src/pricing-loader.ts).
+  const sqlAs = (role: string | null) => ({ unsafe: async (query: string, params?: unknown[]) =>
+    (role ? await as(role, () => db.query<Record<string, unknown>>(query, params as unknown[])) : await db.query<Record<string, unknown>>(query, params as unknown[])).rows });
+  const stateAs = async (role: string) => (await import("@docslurp/shared/pricing-loader")).pricingDurableStateFromSql(sqlAs(role));
+  /** The admin seam over a runtime role's connection: what a compromised runtime role could try. */
+  const adminAs = async (role: string) => (await import("@docslurp/shared/pricing-loader")).pricingStateAdminFromSql(sqlAs(role));
+  /** The admin seam as the table owner (this test database's migration connection): the operator's activation path. */
+  const owner = async () => (await import("@docslurp/shared/pricing-loader")).pricingStateAdminFromSql(sqlAs(null));
+
+  it("runtime seam is read-only: the API and worker read a value the owner raised and get no raise at all", async () => {
+    await (await owner()).raise("card.sequence.read", 5n);
+    for (const role of [app, worker]) {
+      const state = await stateAs(role);
+      expect(await state.read("card.sequence.read")).toBe(5n);
+      expect(await state.read(`never.${role}`)).toBeNull();
+      expect((state as unknown as { raise?: unknown }).raise).toBeUndefined();
+    }
+  });
+
+  it("no runtime role can execute pricing_state_raise, however often it tries (council J)", async () => {
+    for (const role of [app, worker, backup]) {
+      for (const value of [1000n, 2000n, 3000n]) {
+        expect(await denied(role, `select pricing_state_raise('wedge.${role}', ${value})`), `${role} ${value}`).toBe(true);
+      }
+      if (role !== backup) await expect((await adminAs(role)).raise(`wedge.${role}`, 1n)).rejects.toThrow(/permission denied/);
+      expect(await (await owner()).read(`wedge.${role}`)).toBeNull();
+    }
+  });
+
+  it("the owner raises strictly: above the stored value, at most 1000 per raise of an existing key (council K #6)", async () => {
+    const admin = await owner();
+    expect(await admin.read("card.sequence.owner")).toBeNull();
+    expect(await admin.raise("card.sequence.owner", 5n)).toBe(5n);
+    await expect(admin.raise("card.sequence.owner", 3n)).rejects.toThrow(/not above the stored value 5/);
+    await expect(admin.raise("card.sequence.owner", 5n)).rejects.toThrow(/not above the stored value 5/);
+    expect(await admin.raise("card.sequence.owner", 9n)).toBe(9n);
+    await expect(admin.raise("card.sequence.owner", 1010n)).rejects.toThrow(/more than 1000/);
+    expect(await admin.raise("card.sequence.owner", 1009n)).toBe(1009n);
+    expect(await admin.read("card.sequence.owner")).toBe(1009n);
+  });
+
+  it("a second raise to the same value is refused, for a seeded key and a raised one (council K #6; the real race: pricing-state-raise.db.test.ts)", async () => {
+    const admin = await owner();
+    expect(await admin.raise("card.race", 7n)).toBe(7n);
+    await expect(admin.raise("card.race", 7n)).rejects.toThrow(/not above the stored value 7/);
+    expect(await admin.raise("card.race", 8n)).toBe(8n);
+    await expect(admin.raise("card.race", 8n)).rejects.toThrow(/not above the stored value 8/);
+  });
+
+  it("refuses candidates below 1 and negative values; seeds a missing key at any value, as after a reset (council I #3)", async () => {
+    const admin = await owner();
+    for (const candidate of [0n, -1n, -(2n ** 62n)]) {
+      await expect(admin.raise("card.low", candidate)).rejects.toThrow(/at least 1/);
+      await expect(admin.raise("card.sequence.owner", candidate)).rejects.toThrow(/at least 1/);
+    }
+    expect(await admin.read("card.low")).toBeNull();
+    await expect(db.query("insert into pricing_provider_state (key, value) values ('neg', -1)")).rejects.toThrow(/check constraint/);
+    expect(await admin.raise("card.reset.seed", 4_321n)).toBe(4_321n);
+    await expect(admin.raise("card.reset.seed", 4_321n)).rejects.toThrow(/not above/);
+    await expect(admin.raise("card.reset.seed", 5_322n)).rejects.toThrow(/more than 1000/);
+    expect(await admin.raise("card.reset.seed", 5_321n)).toBe(5_321n);
+  });
+
+  it("concurrent owner raises never lower the value: each success returns its own candidate, the rest are refused", async () => {
+    const admin = await owner();
+    const candidates = Array.from({ length: 40 }, (_, index) => BigInt(((index * 7919) % 1000) + 1));
+    const results = await Promise.allSettled(candidates.map((candidate) => admin.raise("concurrent.key", candidate)));
+    const won = results.flatMap((result, index) => (result.status === "fulfilled" ? [[result.value, candidates[index]!] as const] : []));
+    expect(won.length).toBeGreaterThan(0);
+    for (const [value, candidate] of won) expect(value).toBe(candidate);
+    for (const result of results) if (result.status === "rejected") expect(String(result.reason)).toMatch(/not above the stored value/);
+    expect(await admin.read("concurrent.key")).toBe(won.reduce((max, [value]) => (value > max ? value : max), 0n));
+  });
+
+  it("denies runtime roles every direct write: no INSERT, UPDATE, DELETE or TRUNCATE", async () => {
+    expect(WORKER_TABLES.pricing_provider_state?.privileges).toEqual(["select"]);
+    for (const role of [app, worker, backup]) {
+      for (const statement of [
+        "insert into pricing_provider_state (key, value) values ('forged', 1)",
+        "update pricing_provider_state set value = 0",
+        "delete from pricing_provider_state",
+        "truncate pricing_provider_state",
+      ]) expect(await denied(role, statement), `${role}: ${statement}`).toBe(true);
+    }
+  });
+
+  it("keeps those grants after reconciliation, despite the app's schema-wide DML and default privileges", async () => {
+    await reconcileRoleGrants(db, { log: silent });
+    for (const role of [app, worker]) {
+      expect(await denied(role, "update pricing_provider_state set value = 0")).toBe(true);
+      expect(await denied(role, "select pricing_state_raise('after.reconcile', 2)")).toBe(true);
+      expect(await (await stateAs(role)).read("card.sequence.owner")).toBe(1009n);
+    }
+  });
+
+  it("refuses keys outside the neutral key shape and values outside int8", async () => {
+    const admin = await owner();
+    await expect(admin.raise("Bad Key", 1n)).rejects.toThrow(/invalid key/);
+    await expect(admin.raise("ok.key", 2n ** 63n)).rejects.toThrow(/64-bit/);
+    await expect(db.query("select pricing_state_raise('Bad Key', 1)")).rejects.toThrow(/check constraint/);
+  });
+});
+
+describe("runtime database identity gate (council N #1)", () => {
+  const check = async (role: string | null, expected: string) => {
+    const { checkRuntimeIdentity } = await import("../../db/runtime-role-check.mjs");
+    const client = { query: (query: string, params?: unknown[]) => db.query<Record<string, unknown>>(query, params) };
+    return role ? as(role, () => checkRuntimeIdentity(client, expected)) : checkRuntimeIdentity(client, expected);
+  };
+
+  it("passes the API and executor role and the worker role as themselves", async () => {
+    expect(await check(app, app)).toEqual([]);
+    expect(await check(worker, worker)).toEqual([]);
+  });
+
+  it("refuses the owner or a superuser, whatever role it claims", async () => {
+    const problems = (await check(null, app)).join("\n");
+    expect(problems).toMatch(/superuser/);
+    expect(problems).toMatch(/owns \d+ object/);
+  });
+
+  it("refuses a role that is not the expected least-privilege role", async () => {
+    expect((await check(worker, app)).join("\n")).toMatch(/not a member of docslurp_app/);
+    expect((await check(backup, worker)).join("\n")).toMatch(/not a member of docslurp_worker/);
+    expect((await check(app, "docslurp")).join("\n")).toMatch(/unknown expected role/);
+  });
+
+  it("refuses a runtime role that can raise or write the pricing high-water mark", async () => {
+    await db.exec(`grant execute on function public.pricing_state_raise(text, bigint) to ${app}`);
+    await db.exec(`grant insert on public.pricing_provider_state to ${worker}`);
+    try {
+      expect((await check(app, app)).join("\n")).toMatch(/may execute pricing_state_raise/);
+      expect((await check(worker, worker)).join("\n")).toMatch(/can insert pricing_provider_state/);
+    } finally {
+      await db.exec(`revoke execute on function public.pricing_state_raise(text, bigint) from ${app}`);
+      await db.exec(`revoke insert on public.pricing_provider_state from ${worker}`);
+    }
+    expect(await check(app, app)).toEqual([]);
+  });
+
+  it("refuses a runtime role that owns a table", async () => {
+    await db.exec(`create table public.runtime_owned_probe (id int)`);
+    await db.exec(`alter table public.runtime_owned_probe owner to ${worker}`);
+    try {
+      expect((await check(worker, worker)).join("\n")).toMatch(/owns \d+ object/);
+    } finally {
+      await db.exec(`drop table public.runtime_owned_probe`);
+    }
+  });
+});
+
+describe("grant options (recheck S #6)", () => {
+  it("a runtime role holding WITH GRANT OPTION is refused at startup and at the gate", async () => {
+    const { checkRuntimeIdentity } = await import("../../db/runtime-role-check.mjs");
+    await db.exec(`grant select on public.documents to ${app} with grant option`);
+    try {
+      const problems = await as(app, () => checkRuntimeIdentity({ query: (query: string, params?: unknown[]) => db.query<Record<string, unknown>>(query, params) }, app));
+      expect(problems.join("\n")).toMatch(/holds grant options \(WITH GRANT OPTION\) on relation/);
+    } finally {
+      await db.exec(`revoke grant option for select on public.documents from ${app}`);
+    }
+  });
+});
+
+describe("owner SECURITY DEFINER functions (recheck Q #5c)", () => {
+  it("reconcile revokes EXECUTE on every one outside the allowlist, and the allowlist matches the shared rule's", async () => {
+    const { RUNTIME_SECURITY_DEFINER_ALLOWLIST } = await import("../../db/roles.mjs");
+    const shared = await import("@docslurp/shared/pricing-loader");
+    expect([...RUNTIME_SECURITY_DEFINER_ALLOWLIST]).toEqual([...shared.RUNTIME_SECURITY_DEFINER_ALLOWLIST]);
+    await db.exec("create function public.definer_probe() returns int language sql security definer as 'select 1'");
+    await db.exec(`grant execute on function public.definer_probe() to ${app}`);
+    try {
+      await reconcileRoleGrants(db, { log: silent });
+      const { rows: [row] } = await db.query<{ probe: boolean; pub: boolean; compact: boolean }>(`select
+        has_function_privilege('${app}', 'public.definer_probe()', 'EXECUTE') as probe,
+        exists (select 1 from pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a where p.oid = 'public.definer_probe()'::regprocedure and a.grantee = 0) as pub,
+        has_function_privilege('${app}', 'public.realtime_compact_revisions(text)', 'EXECUTE') as compact`);
+      expect(row).toEqual({ probe: false, pub: false, compact: true });
+    } finally {
+      await db.exec("drop function public.definer_probe()");
+    }
+  });
+});
+
+describe("runtime database identity gate before the role rollout", () => {
+  it("refuses with a rollout pointer when the least-privilege role does not exist", async () => {
+    const { runtimeIdentityProblems } = await import("../../db/runtime-role-check.mjs");
+    expect(runtimeIdentityProblems({ role: "docslurp", allowed_held: "", owned_objects: 40 }, app, { expectedExists: false }).join("\n"))
+      .toMatch(/owner role docslurp[\s\S]*role docslurp_app does not exist: roll out the least-privilege roles/);
+  });
+});
+
+describe("runtime processes refuse to start as a pricing-state writer (council M #1)", () => {
+  const sqlAs = (role: string | null) => ({ unsafe: async (query: string, params?: unknown[]) =>
+    (role ? await as(role, () => db.query<Record<string, unknown>>(query, params as unknown[])) : await db.query<Record<string, unknown>>(query, params as unknown[])).rows });
+
+  it("passes the least-privilege runtime roles", async () => {
+    const { assertRuntimeCannotMovePricingState } = await import("@docslurp/shared/pricing-loader");
+    await expect(assertRuntimeCannotMovePricingState(sqlAs(app))).resolves.toBeUndefined();
+    await expect(assertRuntimeCannotMovePricingState(sqlAs(worker))).resolves.toBeUndefined();
+  });
+
+  it("refuses the owner or superuser, and a runtime role granted EXECUTE on the raise", async () => {
+    const { assertRuntimeCannotMovePricingState } = await import("@docslurp/shared/pricing-loader");
+    await expect(assertRuntimeCannotMovePricingState(sqlAs(null))).rejects.toThrow(/superuser.*owns pricing_provider_state|superuser, owns pricing_provider_state/);
+    await db.exec(`grant execute on function public.pricing_state_raise(text, bigint) to ${app}`);
+    try {
+      await expect(assertRuntimeCannotMovePricingState(sqlAs(app))).rejects.toThrow(/may execute pricing_state_raise; .*refusing to start|may execute pricing_state_raise/);
+    } finally {
+      await db.exec(`revoke execute on function public.pricing_state_raise(text, bigint) from ${app}`);
+    }
+  });
+
+  it("is on by default wherever pricing is required, and loadPricingProvider refuses before loading any plugin", async () => {
+    const { loadPricingProvider, refusePricingStateWriter, resetPricingLoaderForTests } = await import("@docslurp/shared/pricing-loader");
+    expect(refusePricingStateWriter({ DOCSLURP_SERVICE_PROFILE: "service" })).toBe(true);
+    expect(refusePricingStateWriter({ DOCSLURP_PRICING_REQUIRED: "1" })).toBe(true);
+    expect(refusePricingStateWriter({})).toBe(false);
+    // Where pricing is required the check cannot be turned off (council O #3).
+    expect(refusePricingStateWriter({ DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_REFUSE_PRICING_STATE_WRITER: "0" })).toBe(true);
+    expect(refusePricingStateWriter({ DOCSLURP_PRICING_REQUIRED: "1", DOCSLURP_REFUSE_PRICING_STATE_WRITER: "false" })).toBe(true);
+    expect(refusePricingStateWriter({ DOCSLURP_REFUSE_PRICING_STATE_WRITER: "1" })).toBe(true);
+    const importModule = vi.fn();
+    resetPricingLoaderForTests();
+    await expect(loadPricingProvider({ DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_PRICING_PLUGIN: "/p.mjs" }, { sql: sqlAs(null), importModule })).rejects.toThrow(/refusing to start/);
+    expect(importModule).not.toHaveBeenCalled();
+    resetPricingLoaderForTests();
+  });
+});
+
+describe("one pricing-state writer rule for startup and the deploy gate (council P #1)", () => {
+  const sqlAs = (role: string) => ({ unsafe: async (query: string, params?: unknown[]) => (await as(role, () => db.query<Record<string, unknown>>(query, params as unknown[]))).rows });
+  const gate = async (role: string, expected: string) => {
+    const { checkRuntimeIdentity } = await import("../../db/runtime-role-check.mjs");
+    return as(role, () => checkRuntimeIdentity({ query: (query: string, params?: unknown[]) => db.query<Record<string, unknown>>(query, params) }, expected));
+  };
+  const refusedBoth = async (role: string, expected: string, pattern: RegExp) => {
+    const { assertRuntimeCannotMovePricingState } = await import("@docslurp/shared/pricing-loader");
+    await expect(assertRuntimeCannotMovePricingState(sqlAs(role))).rejects.toThrow(pattern);
+    expect((await gate(role, expected)).join("\n")).toMatch(pattern);
+  };
+
+  it.each(["insert", "update", "delete", "truncate"])("refuses a runtime role granted %s on pricing_provider_state, at startup and at deploy", async (privilege) => {
+    await db.exec(`grant ${privilege} on public.pricing_provider_state to ${app}`);
+    try { await refusedBoth(app, app, new RegExp(`can ${privilege} pricing_provider_state`)); }
+    finally { await db.exec(`revoke ${privilege} on public.pricing_provider_state from ${app}`); }
+  });
+
+  it.each([["update", "value"], ["insert", "key"]])("refuses a runtime role granted column-level %s (%s) on pricing_provider_state (recheck R #1)", async (privilege, column) => {
+    await db.exec(`grant ${privilege} (${column}) on public.pricing_provider_state to ${worker}`);
+    try { await refusedBoth(worker, worker, new RegExp(`can ${privilege} pricing_provider_state`)); }
+    finally { await db.exec(`revoke ${privilege} (${column}) on public.pricing_provider_state from ${worker}`); }
+  });
+
+  it("refuses an inherited grant (through another role) and pg_write_all_data membership", async () => {
+    await db.exec("create role pricing_state_writer_probe nologin");
+    await db.exec("grant update on public.pricing_provider_state to pricing_state_writer_probe");
+    await db.exec(`grant pricing_state_writer_probe to ${worker}`);
+    try { await refusedBoth(worker, worker, /can update pricing_provider_state/); }
+    finally { await db.exec(`revoke pricing_state_writer_probe from ${worker}`); await db.exec("drop owned by pricing_state_writer_probe"); await db.exec("drop role pricing_state_writer_probe"); }
+    await db.exec(`grant pg_write_all_data to ${app}`);
+    try { await refusedBoth(app, app, /pg_write_all_data/); }
+    finally { await db.exec(`revoke pg_write_all_data from ${app}`); }
+  });
+
+  it("the lowering attack is refused before it can run: SELECT plus UPDATE", async () => {
+    await db.exec(`grant select, update on public.pricing_provider_state to ${worker}`);
+    try { await refusedBoth(worker, worker, /can update pricing_provider_state/); }
+    finally { await db.exec(`revoke update on public.pricing_provider_state from ${worker}`); }
+    const { assertRuntimeCannotMovePricingState } = await import("@docslurp/shared/pricing-loader");
+    await expect(assertRuntimeCannotMovePricingState(sqlAs(worker))).resolves.toBeUndefined();
+  });
+});
+
+describe("no override where pricing is required (council O #3)", () => {
+  it("DOCSLURP_REFUSE_PRICING_STATE_WRITER=0 is ignored under the service profile: the owner still refuses to start, with an error naming the ignored flag", async () => {
+    const { loadPricingProvider, resetPricingLoaderForTests } = await import("@docslurp/shared/pricing-loader");
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((message: unknown) => { errors.push(String(message)); });
+    const importModule = vi.fn();
+    resetPricingLoaderForTests();
+    try {
+      const sql = { unsafe: async (query: string, params?: unknown[]) => (await db.query<Record<string, unknown>>(query, params as unknown[])).rows };
+      await expect(loadPricingProvider({ DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_PRICING_PLUGIN: "/p.mjs", DOCSLURP_REFUSE_PRICING_STATE_WRITER: "0" }, { sql, importModule })).rejects.toThrow(/refusing to start/);
+      expect(importModule).not.toHaveBeenCalled();
+      expect(errors.join("\n")).toMatch(/DOCSLURP_REFUSE_PRICING_STATE_WRITER=0 is ignored where pricing is required/);
+    } finally {
+      spy.mockRestore();
+      resetPricingLoaderForTests();
     }
   });
 });

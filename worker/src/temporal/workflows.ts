@@ -573,6 +573,7 @@ export async function documentPipeline(
     // Record failure in DB (best-effort — don't let this throw mask the real error)
     const message =
       rootCause(error) ?? (error instanceof Error ? error.message : String(error));
+    const failureType = applicationFailureType(error);
     await CancellationScope.nonCancellable(() => (scaling?.quick ?? quickActivities)
       .failPipelineRun({
         ...(input.executionGeneration ? { executionGeneration: input.executionGeneration } : {}),
@@ -580,11 +581,22 @@ export async function documentPipeline(
         stage: progress.stage,
         message,
         ...(progress.stageGroup?.length ? { stageGroup: progress.stageGroup } : {}),
+        ...(failureType ? { failureType } : {}),
       })
       .catch(() => {}));
 
     throw error;
   }
+}
+
+/** The type of the first ApplicationFailure in `error`'s cause chain (deterministic: reads the failure only). */
+function applicationFailureType(error: unknown): string | undefined {
+  let current: unknown = error;
+  for (let depth = 0; current && depth < 8; depth += 1) {
+    if (current instanceof ApplicationFailure && current.type) return current.type;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return undefined;
 }
 
 /**

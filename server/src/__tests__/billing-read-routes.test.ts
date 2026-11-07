@@ -58,3 +58,11 @@ describe("billing reads for an org the caller does not belong to", () => {
     expect(await response.json()).toEqual({ creditBalanceCents: 1_250, orgId: "org-own" });
   });
 });
+
+describe("estimate card", () => {
+  it("is gone: prices are quoted by the server, never shipped to clients", async () => {
+    const response = await buildApp().request("/v1/billing/estimate-card");
+    expect(response.status).toBe(404);
+    expect(listOrganizations).not.toHaveBeenCalled();
+  });
+});

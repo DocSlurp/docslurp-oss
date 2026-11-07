@@ -34,7 +34,7 @@ export async function adoptBackfillDocuments(
           where st.document_id = t.id and st.run_id = t.run_id and st.status = 'failed'
         )) as adoptable
     from documents t
-    join workspace_runs r on r.id = t.run_id and r.kind = 'full-index'
+    join project_runs r on r.id = t.run_id and r.kind = 'full-index'
     left join documents s on s.id = t.reused_from_document_id
     where t.run_id = ${runId}
       and t.indexing_mode <> 'full'

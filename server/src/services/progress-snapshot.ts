@@ -3,12 +3,13 @@ import {
   inferExecutionStageOrder,
   getPipelineStageLabel,
   type RunStage,
-  type WorkspaceRun,
-  type WorkspaceRunLifecycleStatus,
-  type WorkspaceRunProgressModule,
-  type WorkspaceRunProgressTone,
-  type WorkspaceRunStageState,
-  type WorkspaceRunTemporal,
+  type ProjectRun,
+  type ProjectRunLifecycleStatus,
+  type ProjectRunProgressModule,
+  type ProjectRunProgressSnapshot,
+  type ProjectRunProgressTone,
+  type ProjectRunStageState,
+  type ProjectRunTemporal,
 } from "@docslurp/shared";
 
 type StageAggregate = {
@@ -26,9 +27,9 @@ type StageAggregate = {
 export type ProgressSnapshotPageProgress = Record<string, Record<string, number>>;
 
 export type ProgressSnapshotInput = {
-  run: WorkspaceRun;
-  stages: WorkspaceRunStageState[];
-  temporal: WorkspaceRunTemporal | null;
+  run: ProjectRun;
+  stages: ProjectRunStageState[];
+  temporal: ProjectRunTemporal | null;
   pageProgress: ProgressSnapshotPageProgress;
   cpuUserMs: number;
   cpuSystemMs: number;
@@ -51,9 +52,9 @@ export type ProgressSnapshotInput = {
 };
 
 function lifecycleStatus(
-  run: WorkspaceRun,
-  temporal: WorkspaceRunTemporal | null,
-): WorkspaceRunLifecycleStatus {
+  run: ProjectRun,
+  temporal: ProjectRunTemporal | null,
+): ProjectRunLifecycleStatus {
   const temporalStatus = temporal?.workflowStatus ?? null;
   if (temporalStatus === "PAUSED") {
     return "paused";
@@ -79,7 +80,7 @@ function lifecycleStatus(
   return run.status === "blocked" ? "queued" : run.status;
 }
 
-function aggregateStageStates(stages: WorkspaceRunStageState[]): Map<RunStage, StageAggregate> {
+function aggregateStageStates(stages: ProjectRunStageState[]): Map<RunStage, StageAggregate> {
   const map = new Map<RunStage, StageAggregate>();
 
   for (const stage of stages) {
@@ -119,11 +120,11 @@ function aggregateStageStates(stages: WorkspaceRunStageState[]): Map<RunStage, S
 
 function stageTone(args: {
   stage: RunStage;
-  status: WorkspaceRunLifecycleStatus;
+  status: ProjectRunLifecycleStatus;
   currentStage: RunStage;
   expectedStages: RunStage[];
   aggregates: Map<RunStage, StageAggregate>;
-}): WorkspaceRunProgressTone {
+}): ProjectRunProgressTone {
   if (args.status === "completed") {
     return "completed";
   }
@@ -162,7 +163,7 @@ function stageTone(args: {
 }
 
 function sumStageMetric(
-  stages: WorkspaceRunStageState[],
+  stages: ProjectRunStageState[],
   stage: RunStage,
   key: string,
 ): number {
@@ -176,7 +177,7 @@ function sumStageMetric(
   }, 0);
 }
 
-export function buildProgressModule(args: ProgressSnapshotInput): WorkspaceRunProgressModule {
+export function buildProgressModule(args: ProgressSnapshotInput): ProjectRunProgressModule {
   const compiledPlan = compilePipelinePlan(args.run.pipeline);
   const aggregates = aggregateStageStates(args.stages);
   const status = lifecycleStatus(args.run, args.temporal);
@@ -197,7 +198,7 @@ export function buildProgressModule(args: ProgressSnapshotInput): WorkspaceRunPr
     }
   }
 
-  const tones = new Map<RunStage, WorkspaceRunProgressTone>();
+  const tones = new Map<RunStage, ProjectRunProgressTone>();
   for (const stage of expectedStages) {
     tones.set(
       stage,
@@ -276,7 +277,7 @@ export function buildProgressModule(args: ProgressSnapshotInput): WorkspaceRunPr
     .map((phase) => {
       const phaseStages = phase.stages;
       const completedPhaseStages = phaseStages.filter((stage) => tones.get(stage) === "completed").length;
-      const phaseStatus: WorkspaceRunProgressTone = phaseStages.some((stage) => tones.get(stage) === "failed")
+      const phaseStatus: ProjectRunProgressTone = phaseStages.some((stage) => tones.get(stage) === "failed")
         ? "failed"
         : completedPhaseStages === phaseStages.length
           ? "completed"
@@ -336,5 +337,62 @@ export function buildProgressModule(args: ProgressSnapshotInput): WorkspaceRunPr
       rssDeltaBytes: args.rssDeltaBytes,
       peakRssBytes: args.peakRssBytes,
     },
+  };
+}
+
+/**
+ * Keys that describe the worker machine rather than the customer's run: CPU and RAM (`cpuUserMs`, `rssBytes`, `peakRssMb`),
+ * the machine, the worker and its settings (`workerClass`, `workerId`), and the region it ran in (`region`, `regions`).
+ * Layout `regionBoxes` and the like are the customer's data and stay.
+ */
+const OPERATOR_KEY = /^(?:cpu|rss|peakRss|machine|worker|flyRegion|regions?$)/i;
+/** Nesting below which the walk stops and drops the subtree, so a hostile or runaway structure cannot hide a key. */
+const OPERATOR_KEY_MAX_DEPTH = 12;
+
+/** `value` without operator keys at any depth. Returns a copy; a subtree nested deeper than the limit is dropped (fail closed). */
+export function redactOperatorKeys<T>(value: T, depth = 0): T {
+  if (value === null || typeof value !== "object") return value;
+  if (depth >= OPERATOR_KEY_MAX_DEPTH) return null as T;
+  if (Array.isArray(value)) return value.map((item) => redactOperatorKeys(item, depth + 1)) as T;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !OPERATOR_KEY.test(key))
+      .map(([key, item]) => [key, redactOperatorKeys(item, depth + 1)]),
+  ) as T;
+}
+
+/** A run event for a caller that is not a platform operator: heartbeat metrics, stats and progress without worker diagnostics. */
+export function redactOperatorEvent<E extends { progress?: unknown; stats?: unknown; payload?: unknown }>(event: E): E {
+  const redacted: E = { ...event };
+  for (const field of ["progress", "stats", "payload"] as const) if (field in event) redacted[field] = redactOperatorKeys(event[field]) as E[typeof field];
+  return redacted;
+}
+
+/** A run (GET /runs, the activity stream) for a caller that is not a platform operator: its stats without worker diagnostics. */
+export function redactOperatorRun<R extends { stats?: unknown }>(run: R): R {
+  return "stats" in run ? { ...run, stats: redactOperatorKeys(run.stats) } : run;
+}
+
+/**
+ * Platform-operator-only diagnostics: worker CPU and RAM per run, stage and event, and which worker classes and regions
+ * served it. Customers (including org owners and admins) see cost, speed and page counts, not the machines behind them, so
+ * this is removed on the server for every caller that is not a platform operator rather than hidden in a client: from the
+ * snapshot's stats, rollups and totals, and by key from the heartbeat events, stage stats and run stats it carries.
+ * Returns a copy; the input is not mutated.
+ */
+export function redactOperatorRunFields(snapshot: ProjectRunProgressSnapshot): ProjectRunProgressSnapshot {
+  const progress = snapshot.progress && {
+    ...snapshot.progress,
+    stageRollups: snapshot.progress.stageRollups.map((rollup) => ({ ...rollup, cpuMs: 0, peakRssBytes: 0 })),
+    usageTotals: { ...snapshot.progress.usageTotals, workerClasses: [], regions: [] },
+    resourceTotals: { ...snapshot.progress.resourceTotals, cpuUserMs: 0, cpuSystemMs: 0, cpuTotalMs: 0, rssDeltaBytes: 0, peakRssBytes: 0 },
+  };
+  return {
+    ...snapshot,
+    run: { ...snapshot.run, stats: redactOperatorKeys(snapshot.run.stats) },
+    stages: snapshot.stages.map((stage) => ({ ...stage, stats: redactOperatorKeys(stage.stats) })),
+    recentEvents: snapshot.recentEvents.map(redactOperatorEvent),
+    stats: redactOperatorKeys(snapshot.stats),
+    progress,
   };
 }

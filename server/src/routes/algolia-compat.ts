@@ -5,23 +5,26 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import type { WorkspaceSearchSettings } from "@docslurp/shared";
+import type { ProjectSearchSettings } from "@docslurp/shared";
 
 import { sql } from "../db.js";
 import {
   apiKeyHasAnyScope,
   assertServerApiKey,
-  loadApiKeyScopedWorkspace
+  loadApiKeyScopedProject
 } from "../lib/api-key-authorization.js";
 import { apiKeyAuth } from "../middleware/api-key-auth.js";
 import { hybridSearch } from "../services/search.js";
+import { cacheableApiKeyId, readCachedResponse, responseCacheTicket, searchResponseCacheTtlMs, storeResponse } from "../search/response-cache.js";
+import { highlightMatches } from "../search/highlight.js";
+import { currentRequestApiKeyId } from "../lib/request-context.js";
 import type { ValidatedKey } from "../services/api-keys.js";
 import type { SearchFilters } from "../search/filters.js";
 import { AlgoliaFilterError, parseAlgoliaCompatFilters } from "../search/algolia-compat-filters.js";
 import {
-  getWorkspaceSearchSettings,
-  mutateWorkspaceSearchSettingsForUser,
-  userCanEditWorkspaceSettings
+  getProjectSearchSettings,
+  mutateProjectSearchSettingsForUser,
+  userCanEditProjectSettings
 } from "../services/search-controls.js";
 
 const queryBodySchema = z.object({
@@ -37,6 +40,23 @@ const queryBodySchema = z.object({
   highlightPreTag: z.string().optional(),
   highlightPostTag: z.string().optional(),
 }).passthrough();
+
+/** Ranked passages retrieved per compat query, so counts describe a real window (the SDK search adapters use the same 100). */
+const COMPAT_COUNT_WINDOW = 100;
+const COMPAT_MAX_FETCH = 1000;
+
+/** The window covers the requested page plus one passage, and at least COMPAT_COUNT_WINDOW passages. */
+function compatFetchLimit(pageStart: number, hitsPerPage: number): number {
+  return Math.max(1, Math.min(COMPAT_MAX_FETCH, Math.max(COMPAT_COUNT_WINDOW, pageStart + hitsPerPage + 1)));
+}
+
+/**
+ * nbHits is the number of passages found in the retrieved window. A window that came back full may have more
+ * beyond it, so the count is only a floor and `exhaustive` is false; a short window is the whole result set.
+ */
+function compatHitCount(found: number, fetchLimit: number): { nbHits: number; exhaustive: boolean } {
+  return { nbHits: found, exhaustive: found < fetchLimit };
+}
 
 const batchQuerySchema = z.object({
   requests: z.array(queryBodySchema.extend({ indexName: z.string().min(1) })).max(10),
@@ -63,8 +83,8 @@ const compatRetrievalOptions = {
 
 type CompatImportBody = {
   source?: "algolia" | "elastic" | "legacy-parser";
-  /** Workspace ID, slug or name to import into; falls back to indexName. */
-  workspace?: string;
+  /** Project ID, slug or name to import into; falls back to indexName. */
+  project?: string;
   indexName?: string;
   synonyms?: unknown;
   rules?: unknown;
@@ -119,6 +139,8 @@ function selectAlgoliaHitFields(hit: Record<string, unknown>, attributesToRetrie
 
 function buildAlgoliaHit(args: {
   result: Awaited<ReturnType<typeof hybridSearch>>["results"][number];
+  /** The query the hit answers, so matched words can be highlighted. */
+  query?: string;
   highlightPreTag?: string;
   highlightPostTag?: string;
   attributesToRetrieve?: string[];
@@ -141,18 +163,58 @@ function buildAlgoliaHit(args: {
       regionCoordinateSpace: args.result.citation.regionCoordinateSpace ?? null,
       locator: args.result.citation.locator ?? null,
     },
+    // Real highlights (the query's words wrapped in the requested tags), not an always-"none" placeholder.
     _highlightResult: args.highlightPreTag && args.highlightPostTag
       ? {
-          text: {
-            value: args.result.text,
-            matchLevel: "none",
-            matchedWords: [],
-          },
+          text: highlightMatches(args.result.text, args.query ?? "", args.highlightPreTag, args.highlightPostTag),
+          filename: highlightMatches(args.result.citation.filename, args.query ?? "", args.highlightPreTag, args.highlightPostTag),
         }
       : undefined,
   };
 
   return selectAlgoliaHitFields(hit, args.attributesToRetrieve);
+}
+
+/**
+ * Rows to fetch for a page. Fetching `pageStart + hitsPerPage + 1` made every page a different request, so
+ * paging a result list re-ran (and re-billed) the whole search for each page. The size is rounded up to a
+ * stable bucket, so pages 1-5 of ten share one search and one cache entry.
+ */
+export function stableFetchLimit(needed: number): number {
+  let limit = 50;
+  while (limit < needed && limit < 1000) limit *= 2;
+  return Math.min(1000, limit);
+}
+
+type CompatSearchResponse = Awaited<ReturnType<typeof hybridSearch>>;
+
+/**
+ * One compat search, served from the tenant-scoped response cache when an identical request (same key, user,
+ * project, query, filters and fetch size) ran moments ago. Authorization (scope, project) happened before
+ * this call; the cache re-checks project access and never stores strict-privacy projects.
+ */
+async function compatSearch(args: { query: string; apiKey: ValidatedKey; projectId: string; filters: SearchFilters; limit: number }): Promise<Pick<CompatSearchResponse, "results" | "sessionId">> {
+  const ttl = searchResponseCacheTtlMs();
+  const apiKeyId = cacheableApiKeyId(args.apiKey.keyId, currentRequestApiKeyId());
+  const ticket = ttl > 0 && apiKeyId !== undefined
+    ? await responseCacheTicket({
+        userId: args.apiKey.userId, apiKeyId, projectIds: [args.projectId],
+        request: { surface: "algolia-compat", query: args.query, limit: args.limit, filters: args.filters, retrieval: compatRetrievalOptions },
+      })
+    : null;
+  const cached = ticket ? readCachedResponse(ticket, ttl) as Pick<CompatSearchResponse, "results" | "sessionId"> | undefined : undefined;
+  if (cached) return cached;
+  const response = await hybridSearch(args.query, args.apiKey.userId, {
+    runId: undefined,
+    limit: args.limit,
+    filters: args.filters,
+    variant: "algolia-compat",
+    ...compatRetrievalOptions,
+    mmrLambda: undefined,
+  } as never);
+  const data = { results: response.results, sessionId: response.sessionId };
+  if (ticket && response.availability?.status === "complete") await storeResponse(ticket, data, args.projectId);
+  return data;
 }
 
 function toAlgoliaSynonymEntries(synonyms: Record<string, string[]>) {
@@ -205,7 +267,7 @@ function normalizeRulesPayload(payload: unknown): Array<Record<string, unknown>>
     .map((value) => ({ ...(value as Record<string, unknown>) }));
 }
 
-function mergeCompatSettings(settings: WorkspaceSearchSettings, patch: Record<string, unknown>) {
+function mergeCompatSettings(settings: ProjectSearchSettings, patch: Record<string, unknown>) {
   return {
     ...defaultCompatSettings,
     ...settings.compatSettings,
@@ -213,8 +275,8 @@ function mergeCompatSettings(settings: WorkspaceSearchSettings, patch: Record<st
   };
 }
 
-async function loadScopedWorkspace(indexName: string, apiKey: ValidatedKey) {
-  return await loadApiKeyScopedWorkspace(indexName, apiKey);
+async function loadScopedProject(indexName: string, apiKey: ValidatedKey) {
+  return await loadApiKeyScopedProject(indexName, apiKey);
 }
 
 function requireSearchKey(apiKey: ValidatedKey): Response | null {
@@ -223,8 +285,8 @@ function requireSearchKey(apiKey: ValidatedKey): Response | null {
 
 /**
  * Compatibility settings/synonyms/rules mutations are the "admin" surface: they
- * change a workspace's search configuration, so they require the dedicated
- * `workspaces:manage` scope (never granted by default) on top of a server key.
+ * change a project's search configuration, so they require the dedicated
+ * `projects:manage` scope (never granted by default) on top of a server key.
  * Security finding SEC-2026-10-01.
  */
 function requireServerManageKey(apiKey: ValidatedKey): Response | null {
@@ -233,31 +295,31 @@ function requireServerManageKey(apiKey: ValidatedKey): Response | null {
   } catch (error) {
     return Response.json({ message: reportPublicError(error) }, { status: 403 });
   }
-  if (!apiKeyHasAnyScope(apiKey, ["workspaces:manage"])) {
-    return Response.json({ message: "workspaces:manage scope required" }, { status: 403 });
+  if (!apiKeyHasAnyScope(apiKey, ["projects:manage"])) {
+    return Response.json({ message: "projects:manage scope required" }, { status: 403 });
   }
   return null;
 }
 
 /**
- * The key owner must be allowed to edit the target workspace. The scope check
- * above is org-level; this is the per-workspace boundary that stops a viewer
+ * The key owner must be allowed to edit the target project. The scope check
+ * above is org-level; this is the per-project boundary that stops a viewer
  * from rewriting settings through a key they were permitted to mint.
  * Security finding SEC-2026-10-01.
  */
-async function requireWorkspaceEditAccess(workspaceId: string, apiKey: ValidatedKey): Promise<Response | null> {
-  if (await userCanEditWorkspaceSettings(workspaceId, apiKey.userId)) return null;
-  return Response.json({ message: "workspace edit access required" }, { status: 403 });
+async function requireProjectEditAccess(projectId: string, apiKey: ValidatedKey): Promise<Response | null> {
+  if (await userCanEditProjectSettings(projectId, apiKey.userId)) return null;
+  return Response.json({ message: "project edit access required" }, { status: 403 });
 }
 
 async function persistImport(args: {
-  workspaceId: string;
+  projectId: string;
   userId: string;
   indexName: string;
   body: CompatImportBody;
 }) {
   const source = args.body.source ?? "algolia";
-  const saved = await mutateWorkspaceSearchSettingsForUser({ workspaceId: args.workspaceId, userId: args.userId, mutate: current => {
+  const saved = await mutateProjectSearchSettingsForUser({ projectId: args.projectId, userId: args.userId, mutate: current => {
     const compatSettings = mergeCompatSettings(current, args.body.settings ?? {});
     const synonyms = normalizeSynonymPayload(args.body.synonyms);
     const rules = normalizeRulesPayload(args.body.rules);
@@ -265,7 +327,7 @@ async function persistImport(args: {
       ...(current.compatMetadata ?? {}),
       source,
       importedAt: new Date().toISOString(),
-      sourceIndexName: args.body.indexName ?? args.body.workspace ?? args.indexName,
+      sourceIndexName: args.body.indexName ?? args.body.project ?? args.indexName,
       schema: args.body.schema ?? {},
       metadata: args.body.metadata ?? {}
     };
@@ -290,7 +352,7 @@ async function persistImport(args: {
 
   return {
     source,
-    workspaceId: args.workspaceId,
+    projectId: args.projectId,
     imported: {
       synonyms: Object.keys(synonyms).length,
       rules: rules.length,
@@ -340,7 +402,7 @@ function countSchemaFields(schema: Record<string, unknown> | undefined) {
 }
 
 async function recordAnalyticsEvent(args: {
-  workspaceId: string;
+  projectId: string;
   userId: string;
   eventType: "click" | "conversion" | "view";
   sessionId?: string;
@@ -355,8 +417,8 @@ async function recordAnalyticsEvent(args: {
       ${randomUUID()},
       ${args.userId},
       ${`compat.algolia.${args.eventType}`},
-      'workspace',
-      ${args.workspaceId},
+      'project',
+      ${args.projectId},
       ${sql.json({
         sessionId: args.sessionId ?? null,
         objectId: args.objectId ?? null,
@@ -404,31 +466,24 @@ export const algoliaCompatRoutes = new Hono()
     const filters = compatFilters(body);
     if (filters instanceof Response) return filters;
 
-    const workspace = await loadScopedWorkspace(indexName, apiKey);
-    if (!workspace) {
-      return c.json({ message: "index (workspace) not found" }, 404);
+    const project = await loadScopedProject(indexName, apiKey);
+    if (!project) {
+      return c.json({ message: "index (project) not found" }, 404);
     }
 
-    const settings = await getWorkspaceSearchSettings(workspace.id, apiKey.userId);
+    const settings = await getProjectSearchSettings(project.id, apiKey.userId);
     const hitsPerPage = Math.max(1, Math.min(1000, body.hitsPerPage ?? Number(settings.compatSettings.hitsPerPage ?? 10)));
     const page = Math.max(0, body.page ?? 0);
     const pageStart = page * hitsPerPage;
-    const fetchLimit = Math.max(1, Math.min(1000, pageStart + hitsPerPage + 1));
-    filters.workspaceId = workspace.id;
+    const fetchLimit = stableFetchLimit(compatFetchLimit(pageStart, hitsPerPage));
+    filters.projectId = project.id;
 
-    const { results, sessionId } = await hybridSearch(query, apiKey.userId, {
-      runId: undefined,
-      limit: fetchLimit,
-      filters,
-      variant: "algolia-compat",
-      ...compatRetrievalOptions,
-      mmrLambda: undefined,
-    } as never);
+    const { results, sessionId } = await compatSearch({ query, apiKey, projectId: project.id, filters, limit: fetchLimit });
 
-    const hasMore = results.length > pageStart + hitsPerPage;
     const pageResults = results.slice(pageStart, pageStart + hitsPerPage);
     const mappedHits = pageResults.map((result) => buildAlgoliaHit({
       result,
+      query,
       highlightPreTag: body.highlightPreTag,
       highlightPostTag: body.highlightPostTag,
       attributesToRetrieve: body.attributesToRetrieve
@@ -436,9 +491,9 @@ export const algoliaCompatRoutes = new Hono()
     const facetHits = results
       .slice(0, Math.min(results.length, pageStart + hitsPerPage))
       .map((result) => buildAlgoliaHit({ result }));
-    const nbHits = hasMore
-      ? pageStart + mappedHits.length + 1
-      : Math.min(results.length, pageStart + mappedHits.length);
+    // The hits found in the ranked window we asked for. Full means more may exist beyond it: nbHits is then a
+    // floor, and exhaustiveNbHits says so, instead of inventing "one more hit" for the next page.
+    const { nbHits, exhaustive } = compatHitCount(results.length, fetchLimit);
 
     const response = {
       hits: mappedHits,
@@ -451,7 +506,7 @@ export const algoliaCompatRoutes = new Hono()
       queryID: sessionId,
       params: "",
       facets: buildFacetResponse(body.facets ?? [], facetHits),
-      exhaustiveNbHits: !hasMore && fetchLimit < 1000
+      exhaustiveNbHits: exhaustive
     };
 
     return c.json(response);
@@ -473,30 +528,23 @@ export const algoliaCompatRoutes = new Hono()
     const results = [];
     for (const [index, request] of requests.entries()) {
       const startedAt = performance.now();
-      const workspace = await loadScopedWorkspace(request.indexName, apiKey);
-      if (!workspace || !request.query) {
+      const project = await loadScopedProject(request.indexName, apiKey);
+      if (!project || !request.query) {
         results.push({ hits: [], nbHits: 0, page: 0, hitsPerPage: request.hitsPerPage ?? 10, nbPages: 0, processingTimeMS: 0, query: request.query ?? "", params: "" });
         continue;
       }
       const hitsPerPage = Math.max(1, Math.min(1000, request.hitsPerPage ?? 10));
       const page = Math.max(0, request.page ?? 0);
       const pageStart = page * hitsPerPage;
-      const fetchLimit = Math.max(1, Math.min(1000, pageStart + hitsPerPage + 1));
-      const filters = { ...requestFilters[index]!, workspaceId: workspace.id };
-      const response = await hybridSearch(request.query, apiKey.userId, {
-        limit: fetchLimit,
-        filters,
-        variant: "algolia-compat",
-        ...compatRetrievalOptions,
-      });
-      const hasMore = response.results.length > pageStart + hitsPerPage;
+      const fetchLimit = stableFetchLimit(compatFetchLimit(pageStart, hitsPerPage));
+      const filters = { ...requestFilters[index]!, projectId: project.id };
+      const response = await compatSearch({ query: request.query, apiKey, projectId: project.id, filters, limit: fetchLimit });
       const pageResults = response.results.slice(pageStart, pageStart + hitsPerPage);
-      const nbHits = hasMore
-        ? pageStart + pageResults.length + 1
-        : Math.min(response.results.length, pageStart + pageResults.length);
+      const { nbHits, exhaustive } = compatHitCount(response.results.length, fetchLimit);
       results.push({
         hits: pageResults.map((result) => buildAlgoliaHit({
           result,
+          query: request.query,
           highlightPreTag: request.highlightPreTag,
           highlightPostTag: request.highlightPostTag,
           attributesToRetrieve: request.attributesToRetrieve
@@ -515,7 +563,7 @@ export const algoliaCompatRoutes = new Hono()
             .slice(0, Math.min(response.results.length, pageStart + hitsPerPage))
             .map((result) => buildAlgoliaHit({ result }))
         ),
-        exhaustiveNbHits: !hasMore && fetchLimit < 1000
+        exhaustiveNbHits: exhaustive
       });
     }
 
@@ -528,16 +576,16 @@ export const algoliaCompatRoutes = new Hono()
     const body = c.req.valid("json");
     const filters = compatFilters(body);
     if (filters instanceof Response) return filters;
-    const workspace = await loadScopedWorkspace(c.req.param("indexName"), apiKey);
-    if (!workspace) {
-      return c.json({ message: "index (workspace) not found" }, 404);
+    const project = await loadScopedProject(c.req.param("indexName"), apiKey);
+    if (!project) {
+      return c.json({ message: "index (project) not found" }, 404);
     }
 
     const facetName = c.req.param("facetName");
     const maxFacetHits = Math.max(1, Math.min(100, body.maxFacetHits ?? 10));
     const typedQuery = body.query?.trim();
     const query = typedQuery || body.facetQuery?.trim() || "*";
-    filters.workspaceId = workspace.id;
+    filters.projectId = project.id;
 
     const { results } = await hybridSearch(query, apiKey.userId, {
       limit: Math.min(1000, maxFacetHits * 10),
@@ -559,92 +607,92 @@ export const algoliaCompatRoutes = new Hono()
     const apiKey = c.get("apiKey");
     const forbidden = requireSearchKey(apiKey);
     if (forbidden) return forbidden;
-    const workspace = await loadScopedWorkspace(c.req.param("indexName"), apiKey);
-    if (!workspace) {
-      return c.json({ message: "index (workspace) not found" }, 404);
+    const project = await loadScopedProject(c.req.param("indexName"), apiKey);
+    if (!project) {
+      return c.json({ message: "index (project) not found" }, 404);
     }
-    const settings = await getWorkspaceSearchSettings(workspace.id, apiKey.userId);
+    const settings = await getProjectSearchSettings(project.id, apiKey.userId);
     return c.json(mergeCompatSettings(settings, {}));
   })
   .put("/1/indexes/:indexName/settings", async (c) => {
     const apiKey = c.get("apiKey");
     const forbidden = requireServerManageKey(apiKey);
     if (forbidden) return forbidden;
-    const workspace = await loadScopedWorkspace(c.req.param("indexName"), apiKey);
-    if (!workspace) {
-      return c.json({ message: "index (workspace) not found" }, 404);
+    const project = await loadScopedProject(c.req.param("indexName"), apiKey);
+    if (!project) {
+      return c.json({ message: "index (project) not found" }, 404);
     }
-    const denied = await requireWorkspaceEditAccess(workspace.id, apiKey);
+    const denied = await requireProjectEditAccess(project.id, apiKey);
     if (denied) return denied;
     const patch = await c.req.json<Record<string, unknown>>();
-    const settings = await mutateWorkspaceSearchSettingsForUser({ workspaceId: workspace.id, userId: apiKey.userId,
+    const settings = await mutateProjectSearchSettingsForUser({ projectId: project.id, userId: apiKey.userId,
       mutate: current => ({ ...current, compatSettings: mergeCompatSettings(current, patch) }) });
-    if (!settings) return c.json({ message: "Workspace editing permission is required" }, 403);
+    if (!settings) return c.json({ message: "Project editing permission is required" }, 403);
     return c.json({ ok: true, settings: mergeCompatSettings(settings, {}) });
   })
   .get("/1/indexes/:indexName/synonyms", async (c) => {
     const apiKey = c.get("apiKey");
     const forbidden = requireSearchKey(apiKey);
     if (forbidden) return forbidden;
-    const workspace = await loadScopedWorkspace(c.req.param("indexName"), apiKey);
-    if (!workspace) {
-      return c.json({ message: "index (workspace) not found" }, 404);
+    const project = await loadScopedProject(c.req.param("indexName"), apiKey);
+    if (!project) {
+      return c.json({ message: "index (project) not found" }, 404);
     }
-    const settings = await getWorkspaceSearchSettings(workspace.id, apiKey.userId);
+    const settings = await getProjectSearchSettings(project.id, apiKey.userId);
     return c.json({ hits: toAlgoliaSynonymEntries(settings.synonyms) });
   })
   .post("/1/indexes/:indexName/synonyms/batch", async (c) => {
     const apiKey = c.get("apiKey");
     const forbidden = requireServerManageKey(apiKey);
     if (forbidden) return forbidden;
-    const workspace = await loadScopedWorkspace(c.req.param("indexName"), apiKey);
-    if (!workspace) {
-      return c.json({ message: "index (workspace) not found" }, 404);
+    const project = await loadScopedProject(c.req.param("indexName"), apiKey);
+    if (!project) {
+      return c.json({ message: "index (project) not found" }, 404);
     }
-    const denied = await requireWorkspaceEditAccess(workspace.id, apiKey);
+    const denied = await requireProjectEditAccess(project.id, apiKey);
     if (denied) return denied;
     const body = await c.req.json<{ synonyms?: unknown }>();
     const synonyms = normalizeSynonymPayload(body.synonyms);
-    const saved = await mutateWorkspaceSearchSettingsForUser({ workspaceId: workspace.id, userId: apiKey.userId,
+    const saved = await mutateProjectSearchSettingsForUser({ projectId: project.id, userId: apiKey.userId,
       mutate: current => ({ ...current, synonyms }) });
-    if (!saved) return c.json({ message: "Workspace editing permission is required" }, 403);
+    if (!saved) return c.json({ message: "Project editing permission is required" }, 403);
     return c.json({ updatedAt: new Date().toISOString(), count: Object.keys(synonyms).length });
   })
   .get("/1/indexes/:indexName/rules", async (c) => {
     const apiKey = c.get("apiKey");
     const forbidden = requireSearchKey(apiKey);
     if (forbidden) return forbidden;
-    const workspace = await loadScopedWorkspace(c.req.param("indexName"), apiKey);
-    if (!workspace) {
-      return c.json({ message: "index (workspace) not found" }, 404);
+    const project = await loadScopedProject(c.req.param("indexName"), apiKey);
+    if (!project) {
+      return c.json({ message: "index (project) not found" }, 404);
     }
-    const settings = await getWorkspaceSearchSettings(workspace.id, apiKey.userId);
+    const settings = await getProjectSearchSettings(project.id, apiKey.userId);
     return c.json({ hits: settings.rules });
   })
   .post("/1/indexes/:indexName/rules/batch", async (c) => {
     const apiKey = c.get("apiKey");
     const forbidden = requireServerManageKey(apiKey);
     if (forbidden) return forbidden;
-    const workspace = await loadScopedWorkspace(c.req.param("indexName"), apiKey);
-    if (!workspace) {
-      return c.json({ message: "index (workspace) not found" }, 404);
+    const project = await loadScopedProject(c.req.param("indexName"), apiKey);
+    if (!project) {
+      return c.json({ message: "index (project) not found" }, 404);
     }
-    const denied = await requireWorkspaceEditAccess(workspace.id, apiKey);
+    const denied = await requireProjectEditAccess(project.id, apiKey);
     if (denied) return denied;
     const body = await c.req.json<{ rules?: unknown }>();
     const rules = normalizeRulesPayload(body.rules);
-    const saved = await mutateWorkspaceSearchSettingsForUser({ workspaceId: workspace.id, userId: apiKey.userId,
+    const saved = await mutateProjectSearchSettingsForUser({ projectId: project.id, userId: apiKey.userId,
       mutate: current => ({ ...current, rules, pinnedResults: rules.flatMap((rule) => ruleToPins(rule)) }) });
-    if (!saved) return c.json({ message: "Workspace editing permission is required" }, 403);
+    if (!saved) return c.json({ message: "Project editing permission is required" }, 403);
     return c.json({ updatedAt: new Date().toISOString(), count: rules.length });
   })
   .get("/1/indexes/:indexName/analytics/summary", async (c) => {
     const apiKey = c.get("apiKey");
     const forbidden = requireSearchKey(apiKey);
     if (forbidden) return forbidden;
-    const workspace = await loadScopedWorkspace(c.req.param("indexName"), apiKey);
-    if (!workspace) {
-      return c.json({ message: "index (workspace) not found" }, 404);
+    const project = await loadScopedProject(c.req.param("indexName"), apiKey);
+    if (!project) {
+      return c.json({ message: "index (project) not found" }, 404);
     }
 
     const [summary] = await sql<{
@@ -657,25 +705,25 @@ export const algoliaCompatRoutes = new Hono()
         coalesce((
           select count(*)::int
           from search_sessions s
-          where s.metadata->>'workspaceId' = ${workspace.id}
+          where s.metadata->>'projectId' = ${project.id}
         ), 0) as queries,
         coalesce((
           select count(*)::int
           from search_zero_results z
-          where z.workspace_id = ${workspace.id}
+          where z.project_id = ${project.id}
         ), 0) as zero_results,
         coalesce((
           select count(*)::int
           from audit_log a
-          where a.resource_type = 'workspace'
-            and a.resource_id = ${workspace.id}
+          where a.resource_type = 'project'
+            and a.resource_id = ${project.id}
             and a.action = 'compat.algolia.click'
         ), 0) as clicks,
         coalesce((
           select count(*)::int
           from audit_log a
-          where a.resource_type = 'workspace'
-            and a.resource_id = ${workspace.id}
+          where a.resource_type = 'project'
+            and a.resource_id = ${project.id}
             and a.action = 'compat.algolia.conversion'
         ), 0) as conversions
     `;
@@ -691,13 +739,13 @@ export const algoliaCompatRoutes = new Hono()
     const apiKey = c.get("apiKey");
     const forbidden = requireSearchKey(apiKey);
     if (forbidden) return forbidden;
-    const workspace = await loadScopedWorkspace(c.req.param("indexName"), apiKey);
-    if (!workspace) {
-      return c.json({ message: "index (workspace) not found" }, 404);
+    const project = await loadScopedProject(c.req.param("indexName"), apiKey);
+    if (!project) {
+      return c.json({ message: "index (project) not found" }, 404);
     }
     const body = await c.req.json<{ queryID?: string; objectIDs?: string[]; positions?: number[] }>();
     await Promise.all((body.objectIDs ?? []).map((objectId, index) => recordAnalyticsEvent({
-      workspaceId: workspace.id,
+      projectId: project.id,
       userId: apiKey.userId,
       eventType: "click",
       queryId: body.queryID,
@@ -712,13 +760,13 @@ export const algoliaCompatRoutes = new Hono()
     const apiKey = c.get("apiKey");
     const forbidden = requireSearchKey(apiKey);
     if (forbidden) return forbidden;
-    const workspace = await loadScopedWorkspace(c.req.param("indexName"), apiKey);
-    if (!workspace) {
-      return c.json({ message: "index (workspace) not found" }, 404);
+    const project = await loadScopedProject(c.req.param("indexName"), apiKey);
+    if (!project) {
+      return c.json({ message: "index (project) not found" }, 404);
     }
     const body = await c.req.json<{ queryID?: string; objectIDs?: string[]; eventName?: string }>();
     await Promise.all((body.objectIDs ?? []).map((objectId) => recordAnalyticsEvent({
-      workspaceId: workspace.id,
+      projectId: project.id,
       userId: apiKey.userId,
       eventType: "conversion",
       queryId: body.queryID,
@@ -734,23 +782,23 @@ export const algoliaCompatRoutes = new Hono()
     const forbidden = requireServerManageKey(apiKey);
     if (forbidden) return forbidden;
     const body = await c.req.json<CompatImportBody>();
-    const indexName = body.workspace ?? body.indexName ?? "";
+    const indexName = body.project ?? body.indexName ?? "";
     if (!indexName) {
-      return c.json({ message: "workspace or indexName is required" }, 400);
+      return c.json({ message: "project or indexName is required" }, 400);
     }
-    const workspace = await loadScopedWorkspace(indexName, apiKey);
-    if (!workspace) {
-      return c.json({ message: "index (workspace) not found" }, 404);
+    const project = await loadScopedProject(indexName, apiKey);
+    if (!project) {
+      return c.json({ message: "index (project) not found" }, 404);
     }
-    const denied = await requireWorkspaceEditAccess(workspace.id, apiKey);
+    const denied = await requireProjectEditAccess(project.id, apiKey);
     if (denied) return denied;
     const result = await persistImport({
-      workspaceId: workspace.id,
+      projectId: project.id,
       userId: apiKey.userId,
       indexName,
       body
     });
-    if (!result) return c.json({ message: "Workspace editing permission is required" }, 403);
+    if (!result) return c.json({ message: "Project editing permission is required" }, 403);
     return c.json(result, 201);
   });
 

@@ -31,7 +31,7 @@ beforeAll(async () => {
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 1000)`;
   await sql`insert into org_memberships(org_id, user_id, role) values ('o1', 'u1', 'owner')`;
-  await sql`insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W')`;
+  await sql`insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W')`;
   ({ reprocessRun, isReprocessRejectedError } = await import("../services/runs.js"));
 }, 120_000);
 
@@ -42,7 +42,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await sql`delete from documents`;
-  await sql`delete from workspace_runs`;
+  await sql`delete from project_runs`;
 });
 
 const extraction = {
@@ -52,14 +52,14 @@ const extraction = {
 
 async function seedSource(args: { artifacts?: Record<string, string>; docStatus?: string; artifactsPurged?: boolean } = {}) {
   await sql`
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts,
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts,
       total_documents, pages_total, artifacts_purged_at)
     values ('run-src', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'completed',
       ${sql.json(defaultPipelineFeatures as unknown as postgres.JSONValue)}, ${sql.json(args.artifacts ?? extraction)},
       1, 2, ${args.artifactsPurged ? new Date() : null})
   `;
   await sql`
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status,
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status,
       page_count, source_sha256)
     values ('src', 'o1', 'u1', 'w', 'run-src', 'a.pdf', 'application/pdf', 'raw/a.pdf', ${args.docStatus ?? "completed"},
       2, 'sha-a')
@@ -72,19 +72,19 @@ async function rejection(promise: Promise<unknown>) {
   return error as { statusCode: number; code: string; details: Record<string, unknown> };
 }
 
-const runCount = async () => Number((await sql<{ n: number }[]>`select count(*)::int as n from workspace_runs`)[0]?.n);
+const runCount = async () => Number((await sql<{ n: number }[]>`select count(*)::int as n from project_runs`)[0]?.n);
 
 describe("reprocess keeps the deferred indexing mode", () => {
   it("gives reprocessed and bulk-reprocessed versions the run pipeline's mode", async () => {
     process.env.DOCSLURP_DEFERRED_PROFILES = "1";
     try {
       await sql`
-        insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts, total_documents, pages_total)
+        insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts, total_documents, pages_total)
         values ('run-map', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'completed',
           ${sql.json({ ...defaultPipelineFeatures, indexingMode: "map" } as unknown as postgres.JSONValue)}, '{}'::jsonb, 1, 2)
       `;
       await sql`
-        insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode)
+        insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode)
         values ('src-map', 'o1', 'u1', 'w', 'run-map', 'm.pdf', 'application/pdf', 'raw/m.pdf', 'completed', 2, 'map')
       `;
       const created = await reprocessRun("run-map", "u1");
@@ -107,12 +107,12 @@ describe("reprocess after a mode-switch backfill adopted the source", () => {
     try {
       // The source was uploaded in map mode; a backfill later adopted it into visual mode (its run is unchanged).
       await sql`
-        insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts, total_documents, pages_total)
+        insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts, total_documents, pages_total)
         values ('run-old', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'completed',
           ${sql.json({ ...defaultPipelineFeatures, indexingMode: "map" } as unknown as postgres.JSONValue)}, '{}'::jsonb, 1, 2)
       `;
       await sql`
-        insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode)
+        insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode)
         values ('src-adopted', 'o1', 'u1', 'w', 'run-old', 'v.pdf', 'application/pdf', 'raw/v.pdf', 'completed', 2, 'visual')
       `;
       const created = await reprocessRun("run-old", "u1");

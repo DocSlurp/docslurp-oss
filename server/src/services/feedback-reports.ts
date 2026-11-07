@@ -40,7 +40,7 @@ export type FeedbackAlertStatus = "not_applicable" | "pending" | "sent" | "suppr
 
 export interface FeedbackReportInput {
   orgId: string;
-  workspaceId: string | null;
+  projectId: string | null;
   userId: string;
   userEmail: string;
   category: FeedbackCategory;
@@ -77,7 +77,7 @@ export interface FeedbackAlert {
   category: FeedbackCategory;
   orgId: string;
   orgName: string | null;
-  workspaceId: string | null;
+  projectId: string | null;
   userEmail: string;
   message: string;
   route: string | null;
@@ -223,11 +223,11 @@ export async function submitFeedbackReport(input: FeedbackReportInput, deps: Fee
     const reference = newFeedbackReference();
     const [row] = await tx<{ created_at: Date | string }[]>`
       insert into feedback_reports (
-        id, reference, org_id, workspace_id, user_id, category, severity, message, message_hash,
+        id, reference, org_id, project_id, user_id, category, severity, message, message_hash,
         route, screen, trace_id, request_id, error_code, occurred_at, client_timezone,
         user_agent, app_version, alert_status, alert_suppressed_reason, summary_paged
       ) values (
-        ${id}, ${reference}, ${input.orgId}, ${input.workspaceId}, ${input.userId}, ${input.category},
+        ${id}, ${reference}, ${input.orgId}, ${input.projectId}, ${input.userId}, ${input.category},
         ${input.severity}, ${input.message}, ${messageHash}, ${input.route}, ${input.screen},
         ${input.traceId}, ${input.requestId}, ${input.errorCode}, ${input.occurredAt},
         ${input.clientTimezone}, ${input.userAgent}, ${input.appVersion}, ${alertStatus}, ${suppressedReason}, ${summary !== null}
@@ -258,7 +258,7 @@ export async function submitFeedbackReport(input: FeedbackReportInput, deps: Fee
     try {
       status = await sendAlert({
         reference: report.reference, category: input.category, orgId: input.orgId, orgName: outcome.orgName,
-        workspaceId: input.workspaceId, userEmail: input.userEmail, message: input.message, route: input.route,
+        projectId: input.projectId, userEmail: input.userEmail, message: input.message, route: input.route,
         screen: input.screen, traceId: input.traceId, requestId: input.requestId, errorCode: input.errorCode,
       });
     } catch {
@@ -279,7 +279,7 @@ export async function submitFeedbackReport(input: FeedbackReportInput, deps: Fee
       "docslurp.feedback.reference": report.reference, "docslurp.feedback.severity": report.severity,
       "docslurp.feedback.category": report.category, "docslurp.feedback.alert": report.alertStatus,
       "docslurp.orgId": input.orgId, "enduser.id": input.userId,
-      ...(input.workspaceId ? { "docslurp.workspaceId": input.workspaceId } : {}),
+      ...(input.projectId ? { "docslurp.projectId": input.projectId } : {}),
       ...(input.traceId ? { "docslurp.feedback.trace_id": input.traceId } : {}),
       ...(input.requestId ? { "docslurp.feedback.request_id": input.requestId } : {}),
       ...(input.errorCode ? { "docslurp.feedback.error_code": input.errorCode } : {}),

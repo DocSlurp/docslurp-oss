@@ -1,7 +1,7 @@
 import { lowestOpenRouterReasoning } from "./openrouter-usage.js";
 import { isProhibitedRoutingModelId } from "./routing-targets.js";
-import { nitroBaseModel } from "./workspace-chat-models.js";
-export { nitroBaseModel } from "./workspace-chat-models.js";
+import { nitroBaseModel } from "./project-chat-models.js";
+export { nitroBaseModel } from "./project-chat-models.js";
 /**
  * OpenRouter host routing: which upstream providers may serve a request, and
  * in what order. Applied to request bodies by `createOpenRouterRoutingFetch`
@@ -13,7 +13,7 @@ export { nitroBaseModel } from "./workspace-chat-models.js";
  *   Hosts must serve at least FP8 weights: the cheapest listings are often
  *   FP4/NVFP4 or undisclosed quantizations.
  * - China-based providers are allowed by default. An organization, or a
- *   workspace inside an allowing organization, can turn them off
+ *   project inside an allowing organization, can turn them off
  *   (`allowChinaProviders`). A restricted request then carries an allowlist,
  *   `provider.only`, of providers with a known headquarters outside China
  *   (provider-regions.ts), plus every China-based provider on `ignore`; any
@@ -31,7 +31,7 @@ const PRICE_ROUTED_MODEL_PREFIXES = ["z-ai/glm-", "deepseek/deepseek-"] as const
 const PRICE_ROUTED_QUANTIZATIONS = ["fp8", "fp16", "bf16", "fp32"] as const;
 
 export interface OpenRouterProviderPolicy {
-  /** False when the organization or workspace turned off China-based providers. */
+  /** False when the organization or project turned off China-based providers. */
   allowChinaProviders: boolean;
   /** Explicit per-request or immutable run opt-in; unsupported models remain unchanged. */
   speedBoost?: boolean;

@@ -9,7 +9,7 @@ vi.mock("../db.js", () => ({
   sql: sqlMock,
 }));
 
-const { defaultAiUsagePricingCatalog, PRICE_CARD_VERSION } = await import("@docslurp/shared");
+const { defaultAiUsagePricingCatalog, pricingVersion } = await import("@docslurp/shared");
 const { createUsageLedger, recordUnitCharge, recordUsageEvent } = await import(
   "../lib/ai-usage.js"
 );
@@ -54,7 +54,7 @@ describe("Usage Event ledger", () => {
 
     const event = await recordUsageEvent({
       userId: "user-1",
-      scope: { orgId: "org-1", workspaceId: "ws-1", runId: "run-1" },
+      scope: { orgId: "org-1", projectId: "ws-1", runId: "run-1" },
       usage: {
         provider: "openai",
         model: "text-embedding-3-small",
@@ -79,7 +79,7 @@ describe("Usage Event ledger", () => {
     expect(insert).toContain("run-1");
     expect(insertedMetadata(insert)).toMatchObject({
       orgId: "org-1",
-      workspaceId: "ws-1",
+      projectId: "ws-1",
       costSource: "estimate",
       providerCostCents: (42 / 1000) * 0.002,
       billable: false,
@@ -92,13 +92,13 @@ describe("Usage Event ledger", () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     const event = await recordUnitCharge({
       userId: "user-1",
-      scope: { orgId: "org-1", workspaceId: "ws-1" },
+      scope: { orgId: "org-1", projectId: "ws-1" },
       charge: { id: "search:1", metric: "search-query", amount: 1, unit: "search", credits: 0.01 },
     });
     expect(event).toMatchObject({ provider: "docslurp", metric: "search-query", costCents: 0.01 });
     const [insert] = usageInserts();
     expect(insert).toContain(0.01);
-    expect(insertedMetadata(insert)).toMatchObject({ billable: true, unitCharge: true, priceCard: PRICE_CARD_VERSION });
+    expect(insertedMetadata(insert)).toMatchObject({ billable: true, unitCharge: true, priceCard: pricingVersion() });
   });
 
   it("attributes usage to the API key authenticating the request", async () => {
@@ -123,12 +123,12 @@ describe("Usage Event ledger", () => {
     expect(insertedMetadata(withoutKey)).not.toHaveProperty("apiKeyId");
   });
 
-  it("records provider cost without a customer charge and stamps cross-workspace scope", async () => {
+  it("records provider cost without a customer charge and stamps cross-project scope", async () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
 
     await recordUsageEvent({
       userId: "user-1",
-      scope: { orgId: "org-1", workspaceIds: ["ws-1", "ws-2", "ws-1"] },
+      scope: { orgId: "org-1", projectIds: ["ws-1", "ws-2", "ws-1"] },
       usage: {
         provider: "openrouter",
         model: "model-1",
@@ -146,7 +146,7 @@ describe("Usage Event ledger", () => {
     expect(insertedMetadata(insert)).toEqual({
       feature: "chat",
       orgId: "org-1",
-      workspaceIds: ["ws-1", "ws-2"],
+      projectIds: ["ws-1", "ws-2"],
       providerCostCents: 7,
       billable: false,
       costRole: "provider",
@@ -171,7 +171,7 @@ describe("Usage Event ledger", () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     const event = await recordUsageEvent({
       userId: "user-1",
-      scope: { orgId: "org-1", workspaceId: "ws-1" },
+      scope: { orgId: "org-1", projectId: "ws-1" },
       usage: {
         provider: "openrouter", model: "microsoft/mai-transcribe-2", metric: "chat.transcription",
         amount: 12.5, unit: "second", costCents: 0.03472222,
@@ -180,7 +180,7 @@ describe("Usage Event ledger", () => {
     });
     expect(event).toMatchObject({ inputTokens: 0, outputTokens: 0, amount: 12.5, unit: "second", costCents: 0 });
     expect(usageInserts()).toHaveLength(1);
-    expect(insertedMetadata(usageInserts()[0])).toMatchObject({ orgId: "org-1", workspaceId: "ws-1", tokenUsageReported: false, providerCostCents: 0.03472222, billable: false });
+    expect(insertedMetadata(usageInserts()[0])).toMatchObject({ orgId: "org-1", projectId: "ws-1", tokenUsageReported: false, providerCostCents: 0.03472222, billable: false });
   });
 
   it("buffers on record, adopts child events without logging, persists on flush", async () => {
@@ -266,7 +266,7 @@ describe("Usage Event ledger", () => {
     for (const entry of priced) {
       await recordUsageEvent({
         userId: "user-1",
-        scope: { orgId: "org-1", workspaceId: "ws-1" },
+        scope: { orgId: "org-1", projectId: "ws-1" },
         usage: { provider: entry.provider ?? "openrouter", model: entry.model, metric: "invariant", inputTokens: 1_000, outputTokens: 200 },
       });
     }

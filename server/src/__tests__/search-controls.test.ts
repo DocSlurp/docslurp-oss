@@ -1,4 +1,4 @@
-import { defaultWorkspaceSearchSettings } from "@docslurp/shared";
+import { defaultProjectSearchSettings } from "@docslurp/shared";
 import { describe, expect, it } from "vitest";
 
 import { applySearchControls } from "../services/search-controls.js";
@@ -15,7 +15,7 @@ describe("applySearchControls", () => {
       query: "",
       results,
       settings: {
-        workspaceId: "ws-1",
+        projectId: "ws-1",
         userId: "u1",
         typoTolerance: true,
         dedupeByFilename: true,
@@ -64,7 +64,7 @@ describe("applySearchControls", () => {
       query: "",
       results: results.slice(0, 2),
       settings: {
-        workspaceId: "ws-1",
+        projectId: "ws-1",
         userId: "u1",
         typoTolerance: true,
         dedupeByFilename: true,
@@ -113,7 +113,7 @@ describe("applySearchControls", () => {
       query: "invoice",
       results,
       settings: {
-        workspaceId: "ws-1",
+        projectId: "ws-1",
         userId: "u1",
         typoTolerance: true,
         dedupeByFilename: false,
@@ -159,7 +159,7 @@ describe("applySearchControls", () => {
 
 it("does not fabricate pinned documents outside filtered candidates", () => {
   const results = applySearchControls({ query: "budget", results: [],
-    settings: { ...defaultWorkspaceSearchSettings, workspaceId: "w", userId: "u", pinnedResults: [{ queryPattern: "budget", documentId: "outside" }] },
+    settings: { ...defaultProjectSearchSettings, projectId: "w", userId: "u", pinnedResults: [{ queryPattern: "budget", documentId: "outside" }] },
   });
   expect(results).toEqual([]);
 });

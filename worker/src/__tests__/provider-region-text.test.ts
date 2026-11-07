@@ -72,7 +72,7 @@ it("refuses direct Nitro before network access when the run did not opt in", asy
 });
 
 
-it("pipeline text calls start at the model's lowest reasoning setting unless the workspace sets an effort", async () => {
+it("pipeline text calls start at the model's lowest reasoning setting unless the project sets an effort", async () => {
   const [qwen] = await textBodies(DEFAULT_PIPELINE_TEXT_MODEL, { allowChinaProviders: true });
   expect(qwen!.reasoning).toEqual({ enabled: false });
   const [glm] = await textBodies("z-ai/glm-5.3-flash", { allowChinaProviders: true });

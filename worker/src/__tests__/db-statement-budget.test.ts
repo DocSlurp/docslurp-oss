@@ -38,7 +38,7 @@ beforeAll(async () => {
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 1000000);
-    insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
+    insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
   `);
   const served = await serveOnRandomPort(db);
   server = served.server;
@@ -155,10 +155,10 @@ const stages: Stage[] = [
 
 async function seedRun(runId: string): Promise<void> {
   await db.exec(`
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total, execution_generation)
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total, execution_generation)
       values ('${runId}', 'o1', 'u1', 'w', 'bulk-upload', 'queued', 'queued', '${JSON.stringify(defaultPipelineFeatures)}', 1, ${PAGES}, '${runId}-generation');
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
-      values ('${runId}-doc', 'o1', 'u1', 'w', '${runId}', 'a.pdf', 'application/pdf', 'raw/a.pdf', 'queued', ${PAGES});
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source)
+      values ('${runId}-doc', 'o1', 'u1', 'w', '${runId}', 'a.pdf', 'application/pdf', 'raw/a.pdf', 'queued', ${PAGES}, 'counted');
   `);
 }
 
@@ -284,7 +284,7 @@ describe("database statement budget per page", () => {
       expect(before.balance - after.balance).toBeCloseTo(before.pending, 9);
 
       const { rows } = await db.query<{ event_type: string }>(
-        "select event_type from workspace_run_events where run_id = 'run-1' order by created_at, id");
+        "select event_type from project_run_events where run_id = 'run-1' order by created_at, id");
       expect(rows.at(-1)?.event_type).toBe("run.completed");
       expect(rows.length).toBeGreaterThan(20);
     } finally {
@@ -313,7 +313,7 @@ describe("database statement budget per page", () => {
       // Same work, same statements (reads moved into the completion checkpoint, not added).
       expect(grouped.wire.statements).toBeLessThanOrEqual(single.wire.statements);
       const { rows } = await db.query<{ event_type: string }>(
-        "select event_type from workspace_run_events where run_id = 'run-grp' order by created_at, id");
+        "select event_type from project_run_events where run_id = 'run-grp' order by created_at, id");
       expect(rows.at(-1)?.event_type).toBe("run.completed");
     } finally {
       await store.close();
@@ -326,14 +326,14 @@ describe("database statement budget per page", () => {
       const counter = instrument(store);
       const hydrate = (store as unknown as { hydrateHistoricalStagePerformance(state: unknown): Promise<void> })
         .hydrateHistoricalStagePerformance.bind(store);
-      const states = Array.from({ length: 8 }, (_, i) => ({ run: { id: `cold-${i}`, workspaceId: "w", userId: "u1", stats: {} } }));
+      const states = Array.from({ length: 8 }, (_, i) => ({ run: { id: `cold-${i}`, projectId: "w", userId: "u1", stats: {} } }));
       await Promise.all(states.map((state) => hydrate(state)));
       const percentileQueries = [...counter.byKind.entries()]
         .filter(([kind]) => kind.includes("perf.stage_name"))
         .reduce((total, [, count]) => total + count, 0);
       expect(percentileQueries).toBe(1);
       // A warm cache issues none.
-      await hydrate({ run: { id: "warm-1", workspaceId: "w", userId: "u1", stats: {} } });
+      await hydrate({ run: { id: "warm-1", projectId: "w", userId: "u1", stats: {} } });
       expect([...counter.byKind.entries()].filter(([kind]) => kind.includes("perf.stage_name")).reduce((t, [, c]) => t + c, 0)).toBe(1);
     } finally {
       await store.close();

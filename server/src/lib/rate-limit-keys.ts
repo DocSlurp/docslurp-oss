@@ -58,9 +58,9 @@ export function classifyRateLimitCategory(method: string, path: string): RateLim
     normalizedPath === "/v1/chat/stream"
     || normalizedPath === "/v1/chat"
     || normalizedPath === "/v1/chat/completions"
-    || /^\/v1\/workspaces\/[^/]+\/chat(?:\/|$)/.test(normalizedPath)
+    || /^\/v1\/projects\/[^/]+\/chat(?:\/|$)/.test(normalizedPath)
     // Improve calls a model: it shares the AI chat budget.
-    || /^\/v1\/workspaces\/[^/]+\/chat-instructions\/improve$/.test(normalizedPath)
+    || /^\/v1\/projects\/[^/]+\/chat-instructions\/improve$/.test(normalizedPath)
   ) {
     return "chat-ai";
   }
@@ -71,7 +71,7 @@ export function classifyRateLimitCategory(method: string, path: string): RateLim
     // Every search-compat adapter (Algolia, Meilisearch, Typesense, Pagefind) is a search.
     || normalizedPath === "/compat" || normalizedPath.startsWith("/compat/")
     || normalizedPath.startsWith("/v1/mcp")
-    || /^\/v1\/workspaces\/[^/]+\/search(?:\/|$)/.test(normalizedPath)
+    || /^\/v1\/projects\/[^/]+\/search(?:\/|$)/.test(normalizedPath)
   ) {
     return "search";
   }

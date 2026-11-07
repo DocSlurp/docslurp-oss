@@ -17,7 +17,7 @@ Native Node adapters require Node >=22; the HTTP-only SDK supports Node >=20. Pr
 
 DocSlurp generates and accounts for embeddings before LanceDB writes. Persisted `embedding_functions` metadata is therefore unsupported in its numeric adapters. Worker JS and Python writers, server native search, and SDK native offline reads/writes refuse its presence before provider restoration. The SDK propagates this refusal instead of falling back to another embedding path. No arbitrary provider from stored metadata is initialized. Server search reports an unavailable native table and may use its existing tenant-scoped database fallback; it never removes authorization or document constraints.
 
-The upgrade also fixes a pre-existing empty-allowlist issue: an explicit empty document list returns no vector results before opening storage or accessing result caches. Only omission means all eligible documents inside the already authorized workspace.
+The upgrade also fixes a pre-existing empty-allowlist issue: an explicit empty document list returns no vector results before opening storage or accessing result caches. Only omission means all eligible documents inside the already authorized project.
 
 ## Verification
 

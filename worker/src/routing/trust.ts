@@ -13,14 +13,18 @@
  * Steps 1-3 are pure and live here; step 4 needs a model call and is wired in the decision-model router.
  */
 
-import type { PageInput } from "@docslurp/shared";
+import { TEXT_LAYER_AGREEMENT_MIN, type PageInput } from "@docslurp/shared";
 
 export const TRUST_RULE = {
-  /** Minimum agreement of an OCR layer with a fresh OCR of a band of the page (TL1 tuned on dev+calibration: 0.4). */
-  ocrLayerAgreementMin: 0.4,
   /**
-   * Pages with at least this share of math-font glyphs are not accept-text-only.
-   * PROVISIONAL: chosen after seeing the TL1 development/calibration data (0.01 separated its math pages);
+   * Minimum agreement (the lesser of precision and recall, in reading order) of an OCR layer with a fresh OCR of a
+   * band of the page: the one threshold the worker's text-layer cross-check shares (`TEXT_LAYER_AGREEMENT_MIN`).
+   */
+  ocrLayerAgreementMin: TEXT_LAYER_AGREEMENT_MIN,
+  /**
+   * Pages with at least this share of math glyphs (mathematical alphanumerics, operators and symbols; Greek letters
+   * are prose and unit symbols) are not accept-text-only. The one math threshold: triage and planner derive theirs
+   * from it. PROVISIONAL: chosen after seeing the TL1 development/calibration data (0.01 separated its math pages);
    * it has not been validated on independently collected pages and should be re-fit when more data exists.
    */
   mathGlyphRatio: 0.01,

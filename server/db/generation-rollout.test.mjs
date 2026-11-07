@@ -24,3 +24,16 @@ test('fresh installs and subsequent migrations need no rollout override', async 
   await assertGenerationRollout(client({ existing: false, migrated: false }), {});
   await assertGenerationRollout(client({ existing: true, migrated: true }), {});
 });
+
+test('historical run tables remain subject to the downtime gate', async () => {
+  const calls = [];
+  const db = client({ existing: true, migrated: false, legacy: true, current: false });
+  const query = db.query;
+  db.query = async sql => { calls.push(sql); return query(sql); };
+  await assert.rejects(assertGenerationRollout(client({ existing: true, migrated: false, legacy: true }), {}), /attestation missing/);
+  await assertGenerationRollout(db, attestation);
+  assert.ok(calls.at(-1).includes('from workspace_runs'));
+});
+test('dual physical schemas are not a fresh installation', async () => {
+  await assert.rejects(assertGenerationRollout(client({ existing: true, migrated: true, legacy: true, current: true }), attestation), /ambiguous/);
+});

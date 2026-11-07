@@ -13,7 +13,7 @@ let stop: () => Promise<void>;
 let sql: postgres.Sql<Record<string, unknown>>;
 let keys: typeof import("../services/api-keys.js");
 let orgId: string;
-const WORKSPACE = "11111111-1111-4111-8111-111111111111";
+const PROJECT = "11111111-1111-4111-8111-111111111111";
 
 beforeAll(async () => {
   const pg = await startMigratedPostgres();
@@ -25,10 +25,10 @@ beforeAll(async () => {
   vi.doMock("../db.js", () => ({ sql }));
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
   keys = await import("../services/api-keys.js");
-  // A server key creates the personal organization; the docs workspace lives in it.
+  // A server key creates the personal organization; the docs project lives in it.
   const seed = await keys.createApiKey("u1", "seed");
   orgId = seed.key.orgId!;
-  await sql`insert into workspaces (id, org_id, user_id, name) values (${WORKSPACE}, ${orgId}, 'u1', 'Docs')`;
+  await sql`insert into projects (id, org_id, user_id, name) values (${PROJECT}, ${orgId}, 'u1', 'Docs')`;
 }, 120_000);
 
 afterAll(async () => {
@@ -37,11 +37,11 @@ afterAll(async () => {
 });
 
 const browser = (extra: Record<string, unknown> = {}) =>
-  keys.createApiKey("u1", "widget", { keyType: "client", allowedDomains: ["docs.example.com"], workspaceIds: [WORKSPACE], scopes: ["search", "chat"], ...extra });
+  keys.createApiKey("u1", "widget", { keyType: "client", allowedDomains: ["docs.example.com"], projectIds: [PROJECT], scopes: ["search", "chat"], ...extra });
 
 describe("browser keys", () => {
   it("can't be created with a server scope, and default to a 1,000-token output cap", async () => {
-    for (const scopes of [["ingest"], ["search", "artifacts"], ["workspaces:manage"]]) {
+    for (const scopes of [["ingest"], ["search", "artifacts"], ["projects:manage"]]) {
       await expect(browser({ scopes })).rejects.toMatchObject({ status: 400, code: "invalid_key_scope" });
     }
     const { rawKey, key } = await browser();

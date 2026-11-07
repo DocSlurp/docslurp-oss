@@ -495,7 +495,7 @@ export class DocumentMapStage implements Stage {
       pages.forEach((t, i) => coarse.set(first + i, t));
     }
     let coarseRows = [...coarse.entries()].filter(([, t]) => t.trim().length > 0);
-    // The coarse layer is searchable, so it obeys the workspace PII policy exactly like materialized pages.
+    // The coarse layer is searchable, so it obeys the project PII policy exactly like materialized pages.
     const policy = resolvePolicy(state.run.pipeline);
     const blockedPages: number[] = [];
     if (policy.enabled && policy.patterns.length > 0) {

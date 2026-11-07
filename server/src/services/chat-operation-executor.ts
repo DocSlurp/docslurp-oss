@@ -2,8 +2,8 @@ import { withChatRunOwner } from "./chat-run-dependencies.js";
 import { env } from "../config.js";
 import { sql } from "../db.js";
 import { withDeferredContext } from "../search/deferred/deferred-context.js";
-import { loadActorScopedWorkspace, type SessionRequestActor } from "../lib/request-actor.js";
-import { chatWorkspace, workspaceChatDisabledBody } from "./workspace-chat.js";
+import { loadActorScopedProject, type SessionRequestActor } from "../lib/request-actor.js";
+import { chatProject, projectChatDisabledBody } from "./project-chat.js";
 import { appendChatOperation, claimChatOperation, cleanupChatOperations, heartbeatChatOperation, type Operation } from "./chat-operations.js";
 
 /** No request signal is accepted here. The durable claim owns cancellation. */
@@ -29,8 +29,8 @@ export async function executeChatOperation(task: Operation) {
         ))`;
 
     const actor: SessionRequestActor = { type: "session", userId: task.user_id, sessionId: String(task.input.authSessionId), user: { id: task.user_id, email: "", name: "" } };
-    const workspace = session && await loadActorScopedWorkspace(task.workspace_id, actor);
-    if (!workspace || workspace.orgId !== task.org_id || !await heartbeatChatOperation(task.id, attempt)) throw new Error("operation_cancelled_or_access_revoked");
+    const project = session && await loadActorScopedProject(task.project_id, actor);
+    if (!project || project.orgId !== task.org_id || !await heartbeatChatOperation(task.id, attempt)) throw new Error("operation_cancelled_or_access_revoked");
     return actor;
   };
   let checking = false;
@@ -41,9 +41,9 @@ export async function executeChatOperation(task: Operation) {
   }, 2000);
   try {
     const actor = await check();
-    const disabled = await workspaceChatDisabledBody(task.workspace_id, task.user_id);
+    const disabled = await projectChatDisabledBody(task.project_id, task.user_id);
     if (disabled) throw new Error("chat_disabled");
-    const result = await withChatRunOwner({...task,signal:abort.signal}, () => withDeferredContext({ signal: abort.signal }, () => chatWorkspace({ workspaceId: task.workspace_id, userId: task.user_id, query: String(task.input.q),
+    const result = await withChatRunOwner({...task,signal:abort.signal}, () => withDeferredContext({ signal: abort.signal }, () => chatProject({ projectId: task.project_id, userId: task.user_id, query: String(task.input.q),
       sessionId: task.input.sessionId as string | undefined, model: task.input.model as string | undefined,
       actor, allowAgentTools: env.publicChatAgentEnabled, allowConfiguration: false, signal: abort.signal,
       onTextDelta: text => append("text", { text }),

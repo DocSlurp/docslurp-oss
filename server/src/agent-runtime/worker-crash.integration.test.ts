@@ -67,14 +67,14 @@ it.runIf(!!url&&!!redis).each(["redis", "redis-timeout", "pool", "cas"] as const
     } else if(mode.startsWith("redis")) {
       await pool.query(`insert into "user"(id,name,email) values($1,'IO fixture',$2)`,[id,`${id}@example.test`]);
       await pool.query(`insert into organizations(id,name,slug,created_by_user_id) values($1,'IO fixture',$1,$1)`,[id]);
-      await pool.query(`insert into workspaces(id,org_id,user_id,name) values($1,$1,$1,'IO fixture')`,[id]);
-      await pool.query(`insert into chat_operations(id,root_id,user_id,workspace_id,org_id,idempotency_key,request_hash,input,runtime)
+      await pool.query(`insert into projects(id,org_id,user_id,name) values($1,$1,$1,'IO fixture')`,[id]);
+      await pool.query(`insert into chat_operations(id,root_id,user_id,project_id,org_id,idempotency_key,request_hash,input,runtime)
         values($1,$1,$1,$1,$1,$1,'fixture','{}','mastra')`,[id]);
       // Real Redis stops answering all clients, including connected native I/O.
       await admin.sendCommand(["CLIENT","PAUSE","10000",mode==="redis-timeout"?"WRITE":"ALL"]);
     }
     if(mode!=="pool") {
-      await storage.createTask({id,toolCallId:id,toolName:"docslurpWorkspaceChat",agentId:"docslurp-workspace-chat",
+      await storage.createTask({id,toolCallId:id,toolName:"docslurpProjectChat",agentId:"docslurp-project-chat",
         runId:id,resourceId:JSON.stringify([id,id]),args:{operationId:id},status:mode==="cas"?"running":"pending",
         ownerId:mode==="cas"?"dead-owner":undefined,leaseExpiresAt:mode==="cas"?new Date(Date.now()-10000):undefined,
         createdAt:new Date(),maxRetries:0,retryCount:0,timeoutMs:600000});
@@ -121,7 +121,7 @@ it.runIf(!!url&&!!redis).each(["redis", "redis-timeout", "pool", "cas"] as const
     await admin.sendCommand(["CLIENT","UNPAUSE"]).catch(()=>{});await admin.quit();
     await storage.deleteTask(id);
     await pool.query(`delete from chat_operations where id=$1`,[id]);
-    await pool.query(`delete from workspaces where id=$1`,[id]);
+    await pool.query(`delete from projects where id=$1`,[id]);
     await pool.query(`delete from organizations where id=$1`,[id]);
     await pool.query(`delete from "user" where id=$1`,[id]);
     await producer.close();await pool.end();
@@ -136,7 +136,7 @@ it.runIf(!!url&&!!redis)("keyset recovery reaches multiple pages under status ch
   const storage=await producer.mastra.backgroundTaskManager!.getStorage();
   const prefix=`churn-${randomUUID()}-`;
   const ids=Array.from({length:130},(_,n)=>`${prefix}${String(n).padStart(3,"0")}`);
-  const make=async(id:string)=>storage.createTask({id,toolCallId:id,toolName:"fixture",agentId:"docslurp-workspace-chat",
+  const make=async(id:string)=>storage.createTask({id,toolCallId:id,toolName:"fixture",agentId:"docslurp-project-chat",
     runId:id,args:{},status:"running",ownerId:"dead",leaseExpiresAt:new Date(Date.now()-10000),
     createdAt:new Date(),maxRetries:0,retryCount:0,timeoutMs:600000});
   for(const id of ids)await make(id);

@@ -17,7 +17,6 @@ import {
   estimateTokens,
 } from "./embedding-runtime.js";
 import {
-  detectLanguage,
   resolveEmbeddingModel,
 } from "../embeddings/resolver.js";
 import { indexableDocuments } from "../pipeline/pii-gate.js";
@@ -130,12 +129,7 @@ export class DocumentSummaryStage implements Stage {
                 : "Sampled document overview (page references unavailable). "
               : "";
             const summaryText = notice + generatedSummary.trim();
-            const detectedLang = detectLanguage(summaryText);
-            const profile = resolveEmbeddingModel(
-              this.config,
-              state.run.pipeline,
-              detectedLang,
-            );
+            const profile = resolveEmbeddingModel(this.config, state.run.pipeline);
             const embedded = await embedTextChunks({
               chunks: [summaryText],
               profile,

@@ -12,9 +12,9 @@ it("retains community summaries and qualifies broader evidence in tagged context
 });
 
 it.each<SearchFilters>([{ documentId: "selected" }, { mimeTypes: ["text/plain"] }, { pageRange: { from: 2 } }, { runId: "r" }])("qualifies broad context for scope %j and preserves qualification once", (filters) => {
-  const summary = "Workspace summary.";
+  const summary = "Project summary.";
   const qualified = qualifyCommunitySummary(summary, filters);
-  expect(qualified).toContain("Broader workspace context");
+  expect(qualified).toContain("Broader project context");
   expect(qualified).toContain(JSON.stringify(filters));
   expect(qualifyCommunitySummary(qualified, filters)).toBe(qualified);
 });

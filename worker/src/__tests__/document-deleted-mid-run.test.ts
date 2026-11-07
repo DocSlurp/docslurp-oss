@@ -34,13 +34,13 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await db.exec(`
-    delete from usage_events; delete from workspace_runs; delete from documents;
+    delete from usage_events; delete from project_runs; delete from documents;
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x') on conflict do nothing;
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1') on conflict do nothing;
-    insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W') on conflict do nothing;
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+    insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W') on conflict do nothing;
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
       values ('r1', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{}', 2, 4);
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
       values ('keep', 'o1', 'u1', 'w', 'r1', 'a.pdf', 'application/pdf', 'k1', 'processing', 2),
              ('gone', 'o1', 'u1', 'w', 'r1', 'b.pdf', 'application/pdf', 'k2', 'processing', 2);
   `);
@@ -102,7 +102,7 @@ describe("document deleted while its run is processing (full pipeline)", () => {
     const input = { stageName: "extract", runId: "r1", totalStages: 1, artifacts: {} };
 
     const first = await outcome(execution.runStage(input, runtime(1)));
-    const afterFirst = (await db.query<{ status: string; failure_count: number }>(`select status, coalesce(failure_count, 0)::int as failure_count from workspace_runs where id = 'r1'`)).rows[0]!;
+    const afterFirst = (await db.query<{ status: string; failure_count: number }>(`select status, coalesce(failure_count, 0)::int as failure_count from project_runs where id = 'r1'`)).rows[0]!;
     const usageAfterFirst = (await db.query<{ n: number }>(`select count(*)::int as n from usage_events where run_id = 'r1'`)).rows[0]!.n;
     expect(first).toBe("ok");
     expect(afterFirst).toEqual({ status: "processing", failure_count: 0 });
@@ -129,7 +129,7 @@ describe("missing-document classifier", () => {
     // A real missing run (not document) violation from the database.
     const state = await loadRunState(store, "r1");
     const doc = state.documents[0]!;
-    await db.exec(`delete from workspace_runs where id = 'r1'`).catch(() => {});
+    await db.exec(`delete from project_runs where id = 'r1'`).catch(() => {});
     const err = await db.query(`insert into document_run_stage_states (run_id, document_id, stage_name, status) values ('nope', '${doc.id}', 's', 'processing')`).then(() => null, (e: unknown) => e);
     expect(err).not.toBeNull();
     expect(isMissingDocumentError(err)).toBe(false);

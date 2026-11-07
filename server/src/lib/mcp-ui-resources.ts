@@ -114,7 +114,7 @@ export function uploadUiResource(options: UploadUiOptions = {}) {
   const _meta = uiMeta(connectDomains);
   return {
     html, uri,
-    listing: { uri, name: "upload-widget", title: "DocSlurp uploader", description: "Drop local files to upload them to a workspace.", mimeType: MCP_APP_MIME_TYPE, _meta },
+    listing: { uri, name: "upload-widget", title: "DocSlurp uploader", description: "Drop local files to upload them to a project.", mimeType: MCP_APP_MIME_TYPE, _meta },
     content: { uri, mimeType: MCP_APP_MIME_TYPE, text: html, _meta },
   };
 }

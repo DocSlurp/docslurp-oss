@@ -6,7 +6,7 @@ function candidates(seconds: number, moving=false): VideoCandidate[] {
   return Array.from({length:seconds*2},(_,i)=>({seconds:i/2,delta:moving?.2:0,area:moving?.5:0,tile:moving?.4:0,histogram:moving?.3:0}));
 }
 describe("bounded video policies",()=>{
-  it("gives every organization the same $10 per-document ceiling, which a workspace can only lower", () => {
+  it("gives every organization the same $10 per-document ceiling, which a project can only lower", () => {
     expect(videoPolicy(30).maxCostCents).toBe(1000);
     expect(videoPolicy(30, { maxCostCents: 2000 }).maxCostCents).toBe(1000);
     expect(videoPolicy(30, { maxCostCents: 10 }).maxCostCents).toBe(10);
@@ -32,7 +32,7 @@ describe("bounded video policies",()=>{
     const short=candidates(30);short[7]={seconds:3.5,delta:0,area:.003,tile:.8,histogram:0};
     expect(selectVideoFrames(short,videoPolicy(30)).some(f=>f.seconds===3.5)).toBe(true);
   });
-  it("clamps workspace settings to the policy and bounds total candidate work",()=>{
+  it("clamps project settings to the policy and bounds total candidate work",()=>{
     const p=videoPolicy(600,{maxFrames:1200,imagesPerCall:32,scanFps:10});expect(p.frames).toBe(120);expect(p.images).toBe(24);
     expect(videoPolicy(7200,{scanFps:10}).scanFps).toBe(2);
     expect(()=>videoPolicy(7201)).toThrow();expect(()=>videoPolicy(30,{scanFps:NaN})).toThrow();

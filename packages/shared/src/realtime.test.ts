@@ -33,7 +33,7 @@ it("strictly bounds suggestions and rejects viewer artifact fields", () => {
   expect(realtimeSuggestionsSnapshotSchema.safeParse({...suggestions,suggestions:["x".repeat(1025)]}).success).toBe(false);
   expect(realtimeSuggestionsSnapshotSchema.safeParse({...suggestions,secret:"unexpected"}).success).toBe(false);
   const viewer = {
-    document: { id: "doc", workspaceId: "workspace", runId: null, status: "processing", title: null,
+    document: { id: "doc", projectId: "project", runId: null, status: "processing", title: null,
       statusReason: null, pageCount: 0, versionNumber: 1, previousVersionId: null, supersededAt: null,
       supersededByDocumentId: null, updatedAt: "2026-11-03T00:00:00Z" },
     tags: [], stages: [], pageStats: { pageCount: 0, chunkCount: 0, pageTextCount: 0 }, run: null,

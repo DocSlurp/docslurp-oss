@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { mediaConfig } from "./config.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { runSpentCents } from "../pipeline/checkpoints.js";
-import type { WorkspaceRun } from "../models.js";
+import type { ProjectRun } from "../models.js";
 import type { MediaJournal, MediaProvider, MediaReceipt } from "./types.js";
 import type { ArtifactStore } from "../tools/storage.js";
 vi.mock("@docslurp/shared/observability", async (importOriginal) => ({ ...await importOriginal<typeof import("@docslurp/shared/observability")>(), withObservation: (_: unknown, run: () => unknown) => run(), emitTelemetryLog: vi.fn(), recordMediaTelemetry: vi.fn() }));
@@ -20,13 +20,13 @@ function fixture() {
   };
   const provider: MediaProvider = { id: "test", model: "speech", priceUsdPerMinute: .01,
     transcribe: vi.fn(async () => ({ text: "spoken", segments: [], costUsd: .0001, costSource: "provider" as const })) };
-  const state = new WorkflowState({ id: "r", userId: "u", orgId: "o", workspaceId: "w", stats: {}, artifacts: {},
-    spentCents: 0, pipeline: { maxCostCents: 1 } } as WorkspaceRun, []);
+  const state = new WorkflowState({ id: "r", userId: "u", orgId: "o", projectId: "w", stats: {}, artifacts: {},
+    spentCents: 0, pipeline: { maxCostCents: 1 } } as ProjectRun, []);
   state.store = { updateProgress: vi.fn(async () => {}) } as unknown as NonNullable<WorkflowState["store"]>;
   let saved: unknown;
   const storage = { putJson: vi.fn(async (_: string, value: unknown) => { saved = value; }),
     getJson: vi.fn(async () => saved) } as unknown as ArtifactStore;
-  return { state, provider, journal, storage, scope: { orgId: "o", workspaceId: "w", runId: "r", documentId: "d" },
+  return { state, provider, journal, storage, scope: { orgId: "o", projectId: "w", runId: "r", documentId: "d" },
     input: { bytes: new Uint8Array([1,2]), durationSeconds: 2 }, offset: 0, config: mediaConfig({}) };
 }
 describe("durable media request execution", () => {
@@ -69,7 +69,7 @@ describe("durable media request execution", () => {
   });
 
   it("keeps the pre-overlap receipt key for plain wav chunks so in-flight runs are not re-billed after deploy", () => {
-    const scope = { orgId: "o", workspaceId: "w", runId: "r", documentId: "d" };
+    const scope = { orgId: "o", projectId: "w", runId: "r", documentId: "d" };
     const provider = { id: "deepinfra", model: "m" }; const bytes = new Uint8Array([1, 2, 3]);
     const legacy = createHash("sha256").update(JSON.stringify([scope, "deepinfra", "m", 296, 308, "wav16k-v1"])).update(bytes).digest("hex");
     expect(mediaRequestKey(scope, provider, 296, { bytes, durationSeconds: 308 })).toBe(legacy);
@@ -103,7 +103,7 @@ describe("durable media request execution", () => {
     const hour = { bytes: new Uint8Array([1]), durationSeconds: 3600, format: "mp3" as const };
     await transcribeChunk({ ...f, provider: diar, input: hour, metric: "media-diarization" });
     const reserved = vi.mocked(f.journal.admit).mock.calls[0][0].reserveCents;
-    // Customers pay per audio minute (PRICE_CARD), charged with the transcription; diarization holds a token reserve.
+    // Customers pay per audio minute (pricing provider), charged with the transcription; diarization holds a token reserve.
     expect(reserved).toBeCloseTo(0.001, 9);
     vi.spyOn(asr, "transcribe").mockResolvedValue({ text: "", segments: [], costUsd: .012, costSource: "estimate" });
     await transcribeChunk({ ...f, provider: asr, input: { ...hour, bytes: new Uint8Array([2]) }, offset: 3600 });

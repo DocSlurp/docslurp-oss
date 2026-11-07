@@ -14,6 +14,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      "@docslurp/shared/pricing-loader": path.resolve(__dirname, "../packages/shared/src/pricing-loader.ts"),
       "@docslurp/shared/error-reporting": path.resolve(__dirname, "../packages/shared/src/error-reporting.ts"),
       "@docslurp/shared/env-flags": path.resolve(__dirname, "../packages/shared/src/env-flags.ts"),
       "@docslurp/shared/observability": path.resolve(__dirname, "../packages/shared/src/observability.ts"),

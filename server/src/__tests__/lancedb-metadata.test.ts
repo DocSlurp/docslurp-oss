@@ -60,7 +60,7 @@ it("refuses populated provider metadata through actual scoped server search", as
       expect((await table.schema()).metadata.get("embedding_functions")).toBe(metadata);
       table.close(); reopened.close();
       process.env.LANCEDB_URI=dir;
-      expect(await lanceDbVectorSearch({orgId:"org",workspaceId:`ws-${index}`,embeddingModel:"model",queryVector:[1,0],limit:3,documentIds:["doc"]})).toEqual([]);
+      expect(await lanceDbVectorSearch({orgId:"org",projectId:`ws-${index}`,embeddingModel:"model",queryVector:[1,0],limit:3,documentIds:["doc"]})).toEqual([]);
       resetLanceDbConnectionForTests();
     }
     expect(constructors).not.toHaveBeenCalled();

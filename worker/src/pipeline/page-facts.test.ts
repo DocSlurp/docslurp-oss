@@ -29,7 +29,18 @@ describe("page facts", () => {
     expect(splitFormFeedPages("one\f\fthree\f", 3)).toEqual(["one", "", "three"]);
     expect(splitFormFeedPages("one\ftwo", 2)).toEqual(["one", "two"]);
     // Misaligned output records nothing rather than shifting pages.
-    expect(splitFormFeedPages("one\ftwo\f", 3)).toBeNull();
+    expect(splitFormFeedPages("one\ftwo", 3)).toBeNull();
+    expect(splitFormFeedPages("one\ftwo\f\f\f", 3)).toBeNull();
+  });
+
+  it("reads both form-feed conventions, the page count deciding (real-Modal finding F1)", () => {
+    // pdftotext terminates every page: 2 pages, the second blank.
+    expect(splitFormFeedPages("one\f\f", 2)).toEqual(["one", ""]);
+    // Doppler, vm-pdf and native-pdf separate pages: 3 pages, the third blank (it was dropped before).
+    expect(splitFormFeedPages("one\ftwo\f", 3)).toEqual(["one", "two", ""]);
+    // A 30-page image-only scan from a separating extractor: 29 form feeds, 30 empty pages.
+    expect(splitFormFeedPages("\f".repeat(29), 30)).toEqual(Array(30).fill(""));
+    expect(splitFormFeedPages("\f".repeat(29), 29)).toEqual(Array(29).fill(""));
   });
 
   it("parses pdfimages -list, ignoring masks", () => {

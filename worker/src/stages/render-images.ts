@@ -14,7 +14,8 @@ import { runArtifactRoot } from "../lib/artifact-root.js";
 import type { Config } from "../config.js";
 import { loadActiveRoutePlan } from "../routing/active-plan.js";
 import { pagesNeedingPixels } from "../routing/runtime.js";
-import { prioritizePagesWithoutNativeText } from "./classify-route.js";
+import { prioritizePagesWithoutNativeText, selectLegacyVisionPages } from "./classify-route.js";
+import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
 import { visionAllowedForDocument } from "../lib/vision-page-budget.js";
 import { pageInRanges, type DocumentPageRanges } from "../pipeline/page-ranges.js";
 import {
@@ -163,7 +164,7 @@ export class RenderImagesStage implements Stage {
       return { pageNumbers: keptAsImage, request, routed: null, keptAsImage, unreadPages };
     }
     // Native text-only runs leave previews on demand. Classification can
-    // suggest images, but must not override the workspace feature choices.
+    // suggest images, but must not override the project feature choices.
     const wantsRasters = state.run.pipeline.preserveImages || state.run.pipeline.visionFallback;
     // Only PDFs and images have a raster form. HTML, text and other
     // split documents keep on-demand previews instead of failing here
@@ -178,10 +179,13 @@ export class RenderImagesStage implements Stage {
             request,
             // With vision on but disallowed for this document (playbook), pre-render nothing; vision renders
             // any further page it needs on demand, and previews render on demand.
-            state.run.pipeline.visionFallback &&
-              !visionAllowedForDocument(state.run.pipeline, state.artifactLedger.readDocument(document.id, "parser-playbook"))
-              ? { maxPages: 0 }
-              : {},
+            {
+              routingV2: resolveRunRoutingV2(state),
+              ...(state.run.pipeline.visionFallback &&
+                !visionAllowedForDocument(state.run.pipeline, state.artifactLedger.readDocument(document.id, "parser-playbook"), { evidenceRouting: resolveRunRoutingV2(state) })
+                ? { maxPages: 0 }
+                : {}),
+            },
           )
         : [];
     const pageNumbers = isImage ? selected.filter((pageNumber) => pageNumber === 1) : selected;
@@ -243,14 +247,25 @@ export class RenderImagesStage implements Stage {
   }
 }
 
+/**
+ * Pages to pre-render from a classification. Evidence routing (`routingV2`) renders exactly the pages vision will
+ * read (`selectLegacyVisionPages`), so a page is never rendered for a rule that vision does not share and a blank
+ * page is never rendered. Earlier runs keep the wider rule (low-confidence text routes also pre-render).
+ */
 export function selectRasterPagesFromClassification(
   input: unknown,
-  options: { maxPages?: number } = {},
+  options: { maxPages?: number; routingV2?: boolean } = {},
 ): number[] {
   const parsed = adaptiveRoutingDecisionSurfaceSchema.safeParse(input);
   const artifact = parsed.success ? parsed.data : null;
   if (artifact?.status !== "ready" || !Array.isArray(artifact.pages)) return [];
   const maxPages = options.maxPages === undefined ? Number.POSITIVE_INFINITY : Math.max(0, Math.floor(options.maxPages));
+  if (options.routingV2 === true) {
+    return [...new Set(selectLegacyVisionPages(artifact.pages, { routingV2: true }))]
+      .filter((pageNumber) => Number.isInteger(pageNumber) && pageNumber > 0)
+      .slice(0, maxPages)
+      .sort((left, right) => left - right);
+  }
   return [...new Set(prioritizePagesWithoutNativeText(artifact.pages)
     .filter((page) =>
       page.extractorHint === "vision-rescue"

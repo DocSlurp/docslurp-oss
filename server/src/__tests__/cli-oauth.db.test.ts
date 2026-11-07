@@ -7,6 +7,7 @@ import type { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { startMigratedPostgres } from "@docslurp/worker/testing";
+import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
 
 /**
  * The first-party CLI OAuth flows (docslurp login) against the real OAuth
@@ -14,7 +15,7 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
  * with PKCE and loopback redirect, the device authorization grant (RFC 8628),
  * REST-audience tokens on /v1 with mapped scopes, and every negative case the
  * identity boundary requires. Only the browser session and the default
- * workspace lookup are stand-ins.
+ * project lookup are stand-ins.
  * CLI_OAUTH_TEST_DATABASE_URL enables real concurrent transactions and owner
  * PATCH checks; point it only at a disposable, migrated Postgres database.
  */
@@ -43,9 +44,9 @@ vi.mock("../services/web/service.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("../services/web/service.js")>(),
   webCapabilityAvailable: () => true,
 }));
-vi.mock("../services/workspaces.js", async (importOriginal) => ({
-  ...await importOriginal<typeof import("../services/workspaces.js")>(),
-  findDefaultWorkspace: async ({ orgId }: { orgId: string }) => ({ id: `ws-${orgId}`, name: `Default ${orgId}`, slug: "default", orgId }),
+vi.mock("../services/projects.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../services/projects.js")>(),
+  findDefaultProject: async ({ orgId }: { orgId: string }) => ({ id: `ws-${orgId}`, name: `Default ${orgId}`, slug: "default", orgId }),
 }));
 
 let stopDb: () => Promise<void>;
@@ -69,6 +70,8 @@ beforeAll(async () => {
   sqlConnection.current = (await import("postgres")).default(pg.url, { max: 1 });
   const { Pool } = await import("pg");
   pool.current = new Pool({ connectionString: pg.url, max: process.env.CLI_OAUTH_TEST_DATABASE_URL ? 24 : 1 });
+  // Only in the throwaway database: never change an external one.
+  if (!process.env.CLI_OAUTH_TEST_DATABASE_URL) await q(LIFT_ONE_ORG_PER_USER_POLICY);
   for (const user of ["owner", "other"]) {
     await q(`insert into "user"(id, name, email) values ($1, $1, $1 || '@example.test') on conflict do nothing`, [user]);
     await q(`insert into "session"(id, "expiresAt", token, "userId") values ('sess-' || $1, now() + interval '1 day', 'tok-' || $1, $1) on conflict do nothing`, [user]);
@@ -84,12 +87,12 @@ beforeAll(async () => {
   const { apiKeysRoutes } = await import("../routes/api-keys.js");
   const { whoamiRoutes } = await import("../routes/whoami.js");
   const { uploadsRoutes } = await import("../routes/uploads.js");
-  const { workspacesRoutes } = await import("../routes/workspaces.js");
+  const { projectsRoutes } = await import("../routes/projects.js");
   const app = new Hono();
   app.use("/v1/*", sessionAuth);
   app.route("/", mcpOAuthMetadataRoutes).route("/oauth/mcp", mcpOAuthRoutes)
     .route("/v1/api-keys", apiKeysRoutes).route("/v1/whoami", whoamiRoutes).route("/v1/uploads", uploadsRoutes)
-    .route("/v1/workspaces", workspacesRoutes).route("/v1/mcp", mcpRoutes);
+    .route("/v1/projects", projectsRoutes).route("/v1/mcp", mcpRoutes);
   server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 });
   if (!server.listening) await new Promise<void>((resolve) => server.once("listening", resolve));
   origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -178,7 +181,7 @@ describe("authorization code flow for the CLI", () => {
     const body = await me.json() as Record<string, any>;
     expect(body.user).toMatchObject({ id: "owner", email: "owner@example.test" });
     expect(body.organization).toMatchObject({ id: "org-owner" });
-    expect(body.defaultWorkspace).toMatchObject({ id: "ws-org-owner" });
+    expect(body.defaultProject).toMatchObject({ id: "ws-org-owner" });
     expect(body.credential).toMatchObject({ type: "oauth", client: "DocSlurp CLI", scopes: ["search", "read"], apiKeyScopes: ["search", "artifacts"] });
     expect(Date.parse(body.credential.expiresAt)).toBeGreaterThan(Date.now());
     expect(JSON.stringify(body)).not.toContain(issued.body.access_token);
@@ -252,7 +255,10 @@ describe("authorization code flow for the CLI", () => {
     // `other` cannot approve a grant into an organization it does not belong to.
     const { callback } = await authorize({ user: "other", org: "org-owner" });
     expect(callback).toBeNull();
-    // Leaving the organization invalidates the token at once.
+    // Leaving the organization invalidates the token at once. One organization per user (migration 0127): `other` moves
+    // from its own organization into the owner's, rather than holding two memberships.
+    await q("delete from org_memberships where org_id = 'org-other' and user_id = 'other'");
+    expect((await whoami(other.access_token)).status).toBe(401);
     await q("insert into org_memberships(org_id, user_id, role) values ('org-owner', 'other', 'member')");
     const joined = await login({ user: "other", org: "org-owner" });
     expect((await whoami(joined.access_token)).status).toBe(200);
@@ -294,7 +300,7 @@ describe("delegated tokens are never platform admins", () => {
       const keyRow = (await q("select id from mcp_oauth_grants where user_id = 'owner' limit 1")).rows[0];
       expect(keyRow).toBeTruthy();
       // Control: a plain server key of the same user is an admin.
-      const plain = { type: "apiKey" as const, userId: "owner", apiKey: { keyId: "k", userId: "owner", orgId: "org-owner", keyType: "server" as const, allowedDomains: [], scopes: ["search"], rateLimitRpm: null, rateLimitPpd: 1, rateLimits: [], workspaceIds: [] } };
+      const plain = { type: "apiKey" as const, userId: "owner", apiKey: { keyId: "k", userId: "owner", orgId: "org-owner", keyType: "server" as const, allowedDomains: [], scopes: ["search"], rateLimitRpm: null, rateLimitPpd: 1, rateLimits: [], projectIds: [] } };
       expect(await requestActor.isPlatformAdminActor(plain)).toBe(true);
 
       const registered = await (await fetch(`${origin}/oauth/mcp/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ client_name: "Admin MCP", redirect_uris: ["http://127.0.0.1/callback"] }) })).json() as { client_id: string };
@@ -367,7 +373,7 @@ describe("scope mapping on the REST API", () => {
   it("maps OAuth scopes to API-key scopes and never to settings or organization scopes", () => {
     expect(oauth.oauthScopesToApiKeyScopes(["search", "chat", "read", "ingest"]).sort()).toEqual(["artifacts", "chat", "ingest", "search"]);
     expect(oauth.oauthScopesToApiKeyScopes(["read"])).toEqual(["artifacts"]);
-    expect(oauth.oauthScopesToApiKeyScopes(["workspaces:manage", "organizations:manage", "admin"])).toEqual([]);
+    expect(oauth.oauthScopesToApiKeyScopes(["projects:manage", "organizations:manage", "admin"])).toEqual([]);
     expect(oauth.oauthScopesToApiKeyScopes(["web"])).toEqual(["web"]);
   });
 
@@ -383,17 +389,17 @@ describe("scope mapping on the REST API", () => {
     expect((tools.tools ?? []).map((tool) => tool.id)).not.toContain("upload");
   });
 
-  it("an ingest token cannot change workspace settings", async () => {
+  it("an ingest token cannot change project settings", async () => {
     const issued = await login({ scope: "search read ingest chat" });
     const headers = { authorization: `Bearer ${issued.access_token}`, "content-type": "application/json" };
-    const patch = await fetch(`${api}/workspaces/ws-org-owner`, { method: "PATCH", headers, body: JSON.stringify({ name: "renamed" }) });
+    const patch = await fetch(`${api}/projects/ws-org-owner`, { method: "PATCH", headers, body: JSON.stringify({ name: "renamed" }) });
     expect(patch.status).toBe(403);
-    // Search and chat settings take only a server key with workspaces:manage, which an OAuth token never holds.
-    const settings = await fetch(`${api}/workspaces/ws-org-owner/search-settings`, { method: "PATCH", headers, body: JSON.stringify({ chat: { answerStyle: "concise" } }) });
+    // Search and chat settings take only a server key with projects:manage, which an OAuth token never holds.
+    const settings = await fetch(`${api}/projects/ws-org-owner/search-settings`, { method: "PATCH", headers, body: JSON.stringify({ chat: { answerStyle: "concise" } }) });
     expect(settings.status).toBe(403);
-    const settingsEstimate = await fetch(`${api}/workspaces/ws-org-owner/search-settings/estimate`, { method: "POST", headers, body: JSON.stringify({ chat: { answerStyle: "concise" } }) });
+    const settingsEstimate = await fetch(`${api}/projects/ws-org-owner/search-settings/estimate`, { method: "POST", headers, body: JSON.stringify({ chat: { answerStyle: "concise" } }) });
     expect(settingsEstimate.status).toBe(403);
-    const apply = await fetch(`${api}/workspaces/ws-org-owner/ingest-report/apply`, { method: "POST", headers, body: JSON.stringify({ recommendationId: "x" }) });
+    const apply = await fetch(`${api}/projects/ws-org-owner/ingest-report/apply`, { method: "POST", headers, body: JSON.stringify({ recommendationId: "x" }) });
     expect([400, 403]).toContain(apply.status);
     expect(apply.status).not.toBe(200);
   });
@@ -403,16 +409,16 @@ describe("scope mapping on the REST API", () => {
     const actor = await requestActor.resolveApiKeyActor(`Bearer ${issued.access_token}`);
     expect(actor?.type).toBe("apiKey");
     expect(actor && "sessionId" in actor).toBe(false);
-    expect(actor?.apiKey.scopes).not.toContain("workspaces:manage");
+    expect(actor?.apiKey.scopes).not.toContain("projects:manage");
     expect(await requestActor.isPlatformAdminActor(actor!)).toBe(false);
     const tools = await (await fetch(`${mcp}/tools`, { headers: { authorization: `Bearer ${issued.access_token}` } })).json() as { tools?: Array<{ id: string }> };
     const names = (tools.tools ?? []).map((tool) => tool.id);
     expect(names).toContain("search");
-    expect(names).not.toContain("proposeWorkspaceSettings");
-    const call = await fetch(`${mcp}/tools/proposeWorkspaceSettings`, { method: "POST", headers: { authorization: `Bearer ${issued.access_token}`, "content-type": "application/json" }, body: "{}" });
+    expect(names).not.toContain("proposeProjectSettings");
+    const call = await fetch(`${mcp}/tools/proposeProjectSettings`, { method: "POST", headers: { authorization: `Bearer ${issued.access_token}`, "content-type": "application/json" }, body: "{}" });
     expect(call.status).not.toBe(200);
     // Session-only settings routes ignore the bearer token entirely.
-    const proposals = await fetch(`${api}/workspaces/ws-org-owner/settings-proposals/apply`, { method: "POST", headers: { authorization: `Bearer ${issued.access_token}`, "content-type": "application/json" }, body: "{}" });
+    const proposals = await fetch(`${api}/projects/ws-org-owner/settings-proposals/apply`, { method: "POST", headers: { authorization: `Bearer ${issued.access_token}`, "content-type": "application/json" }, body: "{}" });
     expect(proposals.status).not.toBe(200);
   });
 });

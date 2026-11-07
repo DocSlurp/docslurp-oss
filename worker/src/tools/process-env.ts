@@ -17,8 +17,6 @@ export const defaultParserEnvAllowlist = [
 export const vectorBackendEnvAllowlist = [
   "LANCEDB_URI",
   "STORAGE_URI",
-  "CHROMA_PATH",
-  "CHROMA_URL",
   "MILVUS_URI",
   "ORAMA_PATH",
   "AWS_ACCESS_KEY_ID",

@@ -1,4 +1,5 @@
 import { SUMMARY_EVIDENCE_MAX_BYTES, SUMMARY_INPUT_MAX_BYTES, type SummaryEvidence } from "./summary-evidence.js";
+import { imageAnchorsToAltText } from "@docslurp/shared";
 import type { Document } from "../models.js";
 import { keyFromStorageUri, type ArtifactStore } from "../tools/storage.js";
 
@@ -26,7 +27,7 @@ export async function readSummarySource(
         throw new Error("Summary evidence does not match the current document");
       }
       if (evidence.sourceUri === artifactUri) {
-        return { text: evidence.text, sourceBytes: evidence.sourceBytes, readBytes: bytes.length,
+        return { text: imageAnchorsToAltText(evidence.text), sourceBytes: evidence.sourceBytes, readBytes: bytes.length,
           sampled: evidence.sampled, coverage: { totalPages: evidence.totalPages,
             pages: evidence.pages, pageReferences: evidence.pageReferences } };
       }
@@ -58,7 +59,8 @@ export async function readSummarySource(
   }
   if (size <= SUMMARY_SOURCE_MAX_BYTES) {
     const bytes = await storage.getByteRange(key, 0, size - 1, signal);
-    return { text: bytes.toString("utf8"), sourceBytes: size, readBytes: readBytes + bytes.length, sampled: false };
+    // Summaries read text: image references become their alt text, never their artifact ids.
+    return { text: imageAnchorsToAltText(bytes.toString("utf8")), sourceBytes: size, readBytes: readBytes + bytes.length, sampled: false };
   }
 
   const rangeBytes = SUMMARY_SOURCE_MAX_BYTES / RANGE_COUNT;
@@ -72,7 +74,7 @@ export async function readSummarySource(
     const text = bytes.toString("utf8").replace(/^\uFFFD+|\uFFFD+$/g, "");
     excerpts.push(`[Source bytes ${start}-${start + rangeBytes - 1} of ${size}]\n${text}`);
   }
-  return { text: excerpts.join("\n\n"), sourceBytes: size, readBytes, sampled: true };
+  return { text: imageAnchorsToAltText(excerpts.join("\n\n")), sourceBytes: size, readBytes, sampled: true };
 }
 
 function parseEvidence(value: unknown): SummaryEvidence {

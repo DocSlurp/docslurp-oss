@@ -7,14 +7,14 @@ severity, alerts the team live.
 ## Where reports go
 
 - **Database:** every report lands in `feedback_reports` (migration 0092) with
-  its organization, workspace (when the reporter can reach it), user, category,
+  its organization, project (when the reporter can reach it), user, category,
   severity, message, route, screen name, trace ID, request ID, public error
   code, client timestamp and timezone, user agent and server build
   (`DOCSLURP_GIT_SHA`, else `FLY_IMAGE_REF`). Each report gets a reference
   such as `FB-7KQ2-M9XD` that the user sees and can quote.
 - **Telemetry:** each stored report emits a `[feedback] stored ...` log line and
   an OTLP log event `docslurp.feedback.report`. The event carries the reference,
-  severity, category, alert outcome, org, user, workspace, trace ID and request
+  severity, category, alert outcome, org, user, project, trace ID and request
   ID. It never carries the message text. In SigNoz, filter logs on
   `event.name = docslurp.feedback.report`, and open the reported trace by its
   `docslurp.feedback.trace_id`.
@@ -85,8 +85,8 @@ support queue.
 
 ## Tenant scope
 
-A report names a workspace or org only when the reporter can reach it: a
-workspace through the normal workspace access check, an org through
+A report names a project or org only when the reporter can reach it: a
+project through the normal project access check, an org through
 membership. Otherwise the report is filed under the reporter's personal org.
 The response is the same either way, so the fields reveal nothing about
 other tenants. `GET /v1/feedback` lists only the caller's own 20 most recent

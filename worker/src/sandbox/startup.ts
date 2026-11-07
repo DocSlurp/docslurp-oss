@@ -1,3 +1,4 @@
+import { assertServiceProfileRuntime } from "../lib/vm-only-parsing.js";
 import { assertSandboxPolicy } from "./policy.js";
 import { loadSandboxProvider, resolveSandboxProviderId } from "./registry.js";
 import { type ParserSandboxProvider, type SandboxIsolation } from "./types.js";
@@ -6,6 +7,8 @@ export interface InitializedParserSandbox {
   provider: ParserSandboxProvider;
   config: Record<string, unknown>;
   isolation: SandboxIsolation;
+  /** The VM image's tools (SandboxProbeResult.tools), when the provider reports them. */
+  tools?: readonly string[];
 }
 
 /**
@@ -16,6 +19,7 @@ export async function initializeParserSandbox(
   env: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
 ): Promise<InitializedParserSandbox> {
+  assertServiceProfileRuntime(env);
   const id = resolveSandboxProviderId(env, platform);
   const provider = await loadSandboxProvider(id);
   const config = provider.readConfig(env) as Record<string, unknown>;
@@ -29,7 +33,7 @@ export async function initializeParserSandbox(
     `[parser-sandbox] provider=${provider.id} filesystem=${isolation.filesystem} ` +
       `network=${isolation.network} processes=${isolation.processes} location=${isolation.location}`,
   );
-  return { provider, config, isolation };
+  return { provider, config, isolation, ...(probe.tools ? { tools: probe.tools } : {}) };
 }
 
 let registeredSandbox: InitializedParserSandbox | undefined;

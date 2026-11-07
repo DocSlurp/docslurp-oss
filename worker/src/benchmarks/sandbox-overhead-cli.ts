@@ -60,10 +60,10 @@ async function measureProvider(id: SandboxProviderId, file: string, repeat: numb
   const isolation = isolationSummary(probe.isolation);
   if (!probe.ok) return { provider: id, status: "skipped", isolation, detail: probe.detail };
 
-  // The directory name prefix is what launchers accept as a private writable workspace.
+  // The directory name prefix is what launchers accept as a private writable project.
   const outputDir = mkdtempSync(path.join(tmpdir(), "docslurp-sandbox-bench-"));
   try {
-    // Parsers read their input from a DocSlurp workspace, which is what remote providers stage.
+    // Parsers read their input from a DocSlurp project, which is what remote providers stage.
     const input = path.join(outputDir, path.basename(file));
     copyFileSync(file, input);
     const commands = buildCommands(input, outputDir);

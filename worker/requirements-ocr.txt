@@ -1,0 +1,11 @@
+# OCR runtime for worker/scripts/docslurp_ocr.py: PaddleOCR PP-OCRv6 models run
+# through RapidOCR on onnxruntime (CPU). Models are not packages: they are pinned
+# by sha256 in worker/ocr-models.json and loaded only by explicit path.
+# The [rtl] extra pulls python-bidi, required by the Arabic recogniser.
+rapidocr[rtl]==3.10.0
+onnxruntime==1.31.1
+numpy
+# Pillow 13 fixes native image decoder and encoder security advisories.
+Pillow>=13.0.0,<14
+# Headless build only: the GUI opencv-python wheel bundles Qt/X11 libraries.
+opencv-python-headless

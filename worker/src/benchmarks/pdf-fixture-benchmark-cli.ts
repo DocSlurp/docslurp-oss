@@ -103,7 +103,6 @@ function parseExtractor(value: string | undefined): ParseBenchDocSlurpExtractor 
   switch (value ?? "hybrid") {
     case "hybrid":
     case "docling":
-    case "kreuzberg":
     case "native-pdf-text":
     case "native-pdf-markdown":
     case "pdftotext":

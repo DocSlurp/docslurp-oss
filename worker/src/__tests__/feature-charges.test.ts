@@ -1,16 +1,17 @@
 import { describe, expect, it } from "vitest";
+import { featureCredits, mediaRichPages } from "@docslurp/shared";
 
-import { chargeDocumentFeature, featurePages } from "../pipeline/feature-charges.js";
+import { chargeDocumentFeature, chargeFeatureForTextRead, featurePages, textPagesOfText, textReadPages } from "../pipeline/feature-charges.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { chargeMediaMinutes } from "../media/extract.js";
-import type { WorkspaceRun } from "../models.js";
+import type { ProjectRun } from "../models.js";
 
-const run = { id: "run-1", userId: "u1", orgId: "o1", workspaceId: "w1", stats: {}, artifacts: {}, pipeline: {}, stage: "queued" } as unknown as WorkspaceRun;
+const run = { id: "run-1", userId: "u1", orgId: "o1", projectId: "w1", stats: {}, artifacts: {}, pipeline: {}, stage: "queued" } as unknown as ProjectRun;
 
 describe("optional per-document feature charges", () => {
   it("charges each feature once per document per run, priced on its pages", () => {
     const state = WorkflowState.create(run, []);
-    const document = { id: "doc-1", pageCount: 23 };
+    const document = { id: "doc-1", pageCount: 23, pageCountSource: "counted" as const };
     chargeDocumentFeature(state, document, "documentSummary");
     chargeDocumentFeature(state, document, "knowledgeGraph");
     chargeDocumentFeature(state, document, "knowledgeGraph"); // a retried stage: no second charge
@@ -18,20 +19,62 @@ describe("optional per-document feature charges", () => {
     chargeDocumentFeature(state, document, "propositions");
     const events = state.usageLedger.snapshot();
     expect(events.map((event) => [event.id, event.metric, event.costCents])).toEqual([
-      ["feature:documentSummary:run-1:doc-1", "feature-document-summary", 0.5],
-      ["feature:knowledgeGraph:run-1:doc-1", "feature-knowledge-graph", 4.5],
-      ["feature:structuredFields:run-1:doc-1", "feature-structured-fields", 3],
-      ["feature:propositions:run-1:doc-1", "feature-propositions", 3],
+      ["feature:documentSummary:run-1:doc-1", "feature-document-summary", featureCredits("documentSummary", 23)],
+      ["feature:knowledgeGraph:run-1:doc-1", "feature-knowledge-graph", featureCredits("knowledgeGraph", 23)],
+      ["feature:structuredFields:run-1:doc-1", "feature-structured-fields", featureCredits("structuredFields", 23)],
+      ["feature:propositions:run-1:doc-1", "feature-propositions", featureCredits("propositions", 23)],
     ]);
     expect(events.every((event) => event.metadata?.unitCharge === true && event.metadata?.billable === true)).toBe(true);
-    expect(state.usageLedger.pendingBillableCents).toBeCloseTo(11);
+    expect(state.usageLedger.pendingBillableCents).toBeCloseTo((["documentSummary", "knowledgeGraph", "structuredFields", "propositions"] as const).reduce((sum, feature) => sum + featureCredits(feature, 23), 0));
   });
 
   it("prices a media file on its Rich-equivalent pages (minutes x factor)", () => {
     const state = WorkflowState.create(run, []);
     chargeMediaMinutes(state, "talk", "video", 30 * 60);
-    expect(featurePages(state, { id: "talk", pageCount: 1 })).toBe(90);
+    expect(featurePages(state, { id: "talk", pageCount: 1 })).toBe(mediaRichPages("video", 30 * 60));
     chargeDocumentFeature(state, { id: "talk", pageCount: 1 }, "structuredFields");
-    expect(state.usageLedger.snapshot().find((event) => event.metric === "feature-structured-fields")?.costCents).toBe(9);
+    expect(state.usageLedger.snapshot().find((event) => event.metric === "feature-structured-fields")?.costCents).toBe(featureCredits("structuredFields", mediaRichPages("video", 30 * 60)));
   });
 });
+
+describe("features priced on text read", () => {
+  it("bills a document's billing pages, not its page basis, and caps a layout-measured count by the text it holds", () => {
+    const state = WorkflowState.create(run, []);
+    // A 300-page DOCX: the page basis is 1 (its text has no page breaks), the layout engine measured 300.
+    expect(featurePages(state, { id: "d", pageCount: 1, billingPages: 300, billingPagesMethod: "pdf-conversion" })).toBe(300);
+    // 5,000 pages of which almost all are blank: features read text, so they price the text (2 pages), base fee still bills 5,000.
+    expect(featurePages(state, { id: "d", pageCount: 1, billingPages: 5_000, billingPagesMethod: "pdf-conversion" }, { textPages: textPagesOfText("one short note\n".repeat(100)) })).toBe(1);
+    expect(featurePages(state, { id: "d", pageCount: 1, billingPages: 5_000, billingPagesMethod: "pdf-conversion" }, { textPages: 40 })).toBe(40);
+    // Every other measured count is capped by the text too: a sheet whose rows measure 4,688 pages but hold 2 pages of text.
+    expect(featurePages(state, { id: "d", pageCount: 1, billingPages: 4_688, billingPagesMethod: "sheet-rows" }, { textPages: 2 })).toBe(2);
+    expect(featurePages(state, { id: "d", pageCount: 1, billingPages: 50, billingPagesMethod: "text-pages" }, { textPages: 9 })).toBe(9);
+    expect(featurePages(state, { id: "d", pageCount: 1, billingPages: 50, billingPagesMethod: "text-rule" }, { textPages: 80 })).toBe(50);
+    // A slide is a page whatever it holds.
+    expect(featurePages(state, { id: "d", pageCount: 1, billingPages: 40, billingPagesMethod: "slides" }, { textPages: 3 })).toBe(40);
+    // A size estimate never prices a feature: the text read when known, else nothing (never intake's assumed page).
+    expect(featurePages(state, { id: "d", pageCount: 1, billingPages: 768, billingPagesMethod: "size-estimate" }, { textPages: 12 })).toBe(12);
+    expect(featurePages(state, { id: "d", pageCount: 1, billingPages: 768, billingPagesMethod: "size-estimate" })).toBe(0);
+  });
+
+  it("raises a charge to the text read and never lowers it; a repeat adds nothing, a larger read adds the difference under a new id", () => {
+    const state = WorkflowState.create(run, []);
+    const document = { id: "doc-1", pageCount: 1 };
+    // 800,000 characters: 229 pages of text. The charge follows the text read, not the 1-page count.
+    chargeFeatureForTextRead(state, document, "structuredFields", { chars: 300_000, floorPages: false });
+    chargeFeatureForTextRead(state, document, "structuredFields", { chars: 300_000, floorPages: false });
+    chargeFeatureForTextRead(state, document, "structuredFields", { chars: 800_000 });
+    chargeFeatureForTextRead(state, document, "structuredFields", { chars: 100_000 }); // a smaller read lowers nothing
+    const events = state.usageLedger.snapshot();
+    expect(events.map((event) => event.id)).toEqual(["feature:structuredFields:run-1:doc-1", expect.stringContaining("feature:structuredFields:run-1:doc-1:topup:")]);
+    expect(events.reduce((sum, event) => sum + event.costCents, 0)).toBeCloseTo(featureCredits("structuredFields", 229), 9);
+    expect(textReadPages(800_000)).toBe(229);
+  });
+
+  it("weighs East Asian text three characters to one, as the text page rule does", () => {
+    expect(textReadPages(3_500)).toBe(1);
+    expect(textReadPages(3_500, 3_500)).toBe(3);
+    expect(textPagesOfText("漢".repeat(3_500))).toBe(3);
+    expect(textPagesOfText("   ")).toBe(0);
+  });
+});
+

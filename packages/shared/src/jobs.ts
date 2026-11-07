@@ -10,7 +10,12 @@ export const jobStateSchema = z.enum(["queued", "blocked", "processing", "comple
  * pages and time still apply.
  */
 export const costEstimateSchema = z.object({
+  /** Pages priced: counted pages, or the middle of the range for files whose pages were not counted. */
   pages: z.number().nonnegative(),
+  /** Present when some files' pages were not counted: the fewest and most pages their sizes allow. `pages` is not a ceiling then. */
+  pagesRange: z.object({ low: z.number().nonnegative(), high: z.number().nonnegative() }).optional(),
+  /** How many files' page counts are unknown (priced over a range). */
+  unmeasuredFiles: z.number().int().nonnegative().optional(),
   documents: z.number().nonnegative(),
   billing: z.enum(["enforced", "disabled"]),
   credits: z.object({ low: z.number().nonnegative(), high: z.number().nonnegative() }).nullable(),
@@ -29,7 +34,7 @@ export const jobStatusSchema = z.object({
   reason: z.enum(["credits", "budget", "policy"]).optional(),
   queue: z.object({ position: z.number().int().nullable(), ahead: z.number().int().nullable() }),
   runIds: z.array(z.string()),
-  /** Null when not computable within 150 ms; then `estimateUrl` is set. */
+  /** The same estimate `estimateUrl` returns; null when the work has none. */
   estimate: costEstimateSchema.nullable(),
   estimateUrl: z.string().optional(),
   statusUrl: z.string(),

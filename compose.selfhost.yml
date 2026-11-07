@@ -17,7 +17,7 @@ x-server-environment: &server-environment
   BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Missing auth secret}
   OAUTH_TOKEN_ENCRYPTION_KEY: ${OAUTH_TOKEN_ENCRYPTION_KEY:?Missing OAuth encryption key}
   CREDENTIALS_ENCRYPTION_KEY: ${CREDENTIALS_ENCRYPTION_KEY:?Missing credential encryption key}
-  SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:?Missing workspace secret encryption key}
+  SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:?Missing project secret encryption key}
   METRICS_SECRET: ${METRICS_SECRET:?Missing metrics secret}
   # Bucket name must match the createbucket service below.
   STORAGE_URI: s3://docslurp-files?endpoint=http://minio:9000&region=us-east-1
@@ -118,7 +118,8 @@ services:
     env_file:
       - path: ${SELFHOST_ENV_FILE:-.env.selfhost}
         required: false
-    environment: *server-environment
+    environment:
+      <<: *server-environment
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -145,7 +146,20 @@ services:
     env_file:
       - path: ${SELFHOST_ENV_FILE:-.env.selfhost}
         required: false
-    environment: *server-environment
+    environment:
+      <<: *server-environment
+      BETTER_AUTH_SECRET: ""
+      OAUTH_TOKEN_ENCRYPTION_KEY: ""
+      CREDENTIALS_ENCRYPTION_KEY: ""
+      SECRETS_ENCRYPTION_KEY: ""
+      MODAL_TOKEN_ID: ${MODAL_TOKEN_ID:?Configure parser VM credentials}
+      MODAL_TOKEN_SECRET: ${MODAL_TOKEN_SECRET:?Configure parser VM credentials}
+      DOCSLURP_PARSER_SANDBOX: modal
+      DOCSLURP_MODAL_IMAGE: ${DOCSLURP_MODAL_IMAGE:?Configure a pinned parser VM image}
+      DOCSLURP_PDF_ENGINE: "off"
+      PAGE_ROUTER_MODE: "off"
+      DOCSLURP_CLAMAV_REQUIRE_DAEMON: "false"
+      DOCSLURP_CLAMAV_MANAGE_DAEMON: "false"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -158,9 +172,6 @@ services:
     security_opt:
       - no-new-privileges:true
       - seccomp:./worker/security/seccomp-doc-extract.json
-      # bubblewrap (parser isolation) must mount a fresh /proc; Docker's masked /proc paths forbid that.
-      # Capabilities stay dropped and the parser still runs inside the bubblewrap namespaces.
-      - systempaths=unconfined
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=2048m
       - /var/tmp:rw,noexec,nosuid,nodev,size=512m
@@ -187,9 +198,6 @@ services:
     security_opt:
       - no-new-privileges:true
       - seccomp:./worker/security/seccomp-doc-extract.json
-      # bubblewrap (parser isolation) must mount a fresh /proc; Docker's masked /proc paths forbid that.
-      # Capabilities stay dropped and the parser still runs inside the bubblewrap namespaces.
-      - systempaths=unconfined
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=4096m
       - /var/tmp:rw,noexec,nosuid,nodev,size=1024m

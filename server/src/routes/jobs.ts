@@ -11,7 +11,7 @@ const JOB_STREAM_MAX_MS = 10 * 60_000;
 
 async function readJob(c: Context): Promise<JobStatusWithProgress | Response> {
   const actor = getRequestActor(c);
-  if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "workspaces:manage"])) {
+  if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "projects:manage"])) {
     return apiErrorResponse(c, 403, "forbidden", "Forbidden");
   }
   const job = await getJobStatus(c.req.param("jobId") ?? "", c.get("sessionUser").id, {
@@ -21,7 +21,7 @@ async function readJob(c: Context): Promise<JobStatusWithProgress | Response> {
 }
 
 /**
- * Shared job resource over `workspace_runs` and `graph_jobs`. `GET /:jobId` is the polling endpoint; `/events`
+ * Shared job resource over `project_runs` and `graph_jobs`. `GET /:jobId` is the polling endpoint; `/events`
  * streams `status` (full job, on change), `progress` (counts, on change) and a final `done`. Streams end after
  * 10 minutes: reconnect or poll.
  */

@@ -5,7 +5,6 @@ import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
 
 import {
-  EXAMPLE_CORPORA,
   MAX_TOPUP_CENTS,
   MIN_TOPUP_CENTS,
   autoTopUpSettingsSchema,
@@ -109,12 +108,12 @@ function parseLimit(value: string | undefined, fallback: number): number {
 
 export const billingRoutes = new Hono()
   // ---------------------------------------------------------------- catalog
-  // Public price list (no auth, see authenticatedByRoute below): the per-unit
-  // price card, credit packs, top-up limits, starter credits, worker ceilings,
-  // chat model tiers and the reference corpora for the pricing page.
+  // Public price list (no auth, see authenticatedByRoute below): the pricing
+  // provider's published prices, credit packs, top-up limits, starter credits
+  // and worker ceilings.
   .get("/prices", (c) => {
     c.header("Cache-Control", "public, max-age=300");
-    return c.json({ ...billingPrices(), examples: EXAMPLE_CORPORA });
+    return c.json(billingPrices());
   })
 
   // ---------------------------------------------------------------- reads

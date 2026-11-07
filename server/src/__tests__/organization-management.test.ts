@@ -10,7 +10,7 @@ vi.mock("../db.js", () => {
   }, { json: (value: unknown) => value, begin: async (fn: (tx: unknown) => Promise<unknown>) => { queries.transactions++; return fn(query); } });
   return { sql: query };
 });
-vi.mock("../services/notifications.js", () => ({ sendWorkspaceInviteEmail: vi.fn(), sendOrganizationInviteEmail: vi.fn(async () => null) }));
+vi.mock("../services/notifications.js", () => ({ sendProjectInviteEmail: vi.fn(), sendOrganizationInviteEmail: vi.fn(async () => null) }));
 
 const { assertMembershipMutation, inviteOrganizationMember, updateOrganizationMemberRole, removeOrganizationMember, organizationCapabilities, createOrganization, OrganizationError } = await import("../services/organizations.js");
 const member = (role: string, userId = "actor") => ({ org_id: "org", user_id: userId, role, created_at: "2026-10-06" });
@@ -70,20 +70,22 @@ describe("transactional membership service", () => {
     await expect(removeOrganizationMember({ orgId: "org", userId: "actor", memberUserId: "target" })).rejects.toMatchObject({ status: 409, code: "last_owner" });
     expect(queries.statements.some(s => s.includes("delete"))).toBe(false);
   });
-  it("removes membership, revokes keys and MCP grants, hands over workspaces and audits in one transaction (G-06)", async () => {
+  it("removes membership, revokes keys and MCP grants, hands over projects and audits in one transaction (G-06)", async () => {
     locked("owner", "member");
-    queries.responses.push([], [], [], [], [], []);
+    // The removed member still has another organization (the limit lifted), so no personal one is provisioned here.
+    queries.responses.push([], [], [], [], [], [{ exists: 1 }], []);
     await expect(removeOrganizationMember({ orgId: "org", userId: "actor", memberUserId: "target" })).resolves.toBe(true);
     expect(queries.transactions).toBe(1);
-    expect(queries.statements.slice(-6).map(s => s.trim().split(/\s+/).slice(0, 3).join(" "))).toEqual([
-      "delete from org_memberships", "update api_keys set", "update mcp_oauth_grants set", "update workspaces set", "delete from workspace_members", "insert into audit_log",
+    expect(queries.statements.slice(-7).map(s => s.trim().split(/\s+/).slice(0, 3).join(" "))).toEqual([
+      "delete from org_memberships", "update api_keys set", "update mcp_oauth_grants set", "update projects set", "delete from project_members", "select 1 from", "insert into audit_log",
     ]);
-    expect(queries.statements.find(s => s.startsWith("update workspaces"))).toContain("role = 'owner'");
+    expect(queries.statements.find(s => s.startsWith("update projects"))).toContain("role = 'owner'");
   });
-  it("creates owner membership, default workspace and audit before leaving the creation transaction", async () => {
-    queries.responses.push([{ id: "actor" }], [], [], [], [], [{ id: "org", name: "New", slug: null, is_personal: false, personal_owner_user_id: null, created_by_user_id: "actor", credit_balance_cents: 0, member_role: "owner", created_at: "2026-10-06", updated_at: "2026-10-06" }]);
+  it("creates owner membership, default project and audit before leaving the creation transaction", async () => {
+    queries.responses.push([{ id: "actor" }], [], [], [], [], [], [{ id: "org", name: "New", slug: null, is_personal: false, personal_owner_user_id: null, created_by_user_id: "actor", credit_balance_cents: 0, member_role: "owner", created_at: "2026-10-06", updated_at: "2026-10-06" }]);
     await expect(createOrganization({ userId: "actor", name: "New" })).resolves.toMatchObject({ memberRole: "owner" });
     expect(queries.transactions).toBe(1);
-    expect(queries.statements.slice(1, 5).map(s => s.trim().split(/\s+/).slice(0, 3).join(" "))).toEqual(["insert into organizations", "insert into org_memberships", "insert into workspaces", "insert into audit_log"]);
+    // The membership-limit check (org-membership-limit.ts) runs first, inside the same transaction.
+    expect(queries.statements.slice(1, 6).map(s => s.trim().split(/\s+/).slice(0, 3).join(" "))).toEqual(["select om.org_id, o.is_personal,", "insert into organizations", "insert into org_memberships", "insert into projects", "insert into audit_log"]);
   });
 });

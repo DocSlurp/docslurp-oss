@@ -72,7 +72,7 @@ export function startNativeRecovery(source: Pool, redisUrl: string, namespace: s
         horizon = clock!.now;
       }
       const { rows } = await pool.query<{ id: string }>(`select id from docslurp_mastra.mastra_background_tasks
-        where agent_id='docslurp-workspace-chat' and status in ('pending','running') and id>$1 and "createdAtZ"<=$2 order by id limit 64`, [cursor, horizon]);
+        where agent_id='docslurp-project-chat' and status in ('pending','running') and id>$1 and "createdAtZ"<=$2 order by id limit 64`, [cursor, horizon]);
       if (!rows.length) { cursor = ""; horizon = undefined; }
       await manager.init(pubsub);
       const tasks = await manager.getStorage();

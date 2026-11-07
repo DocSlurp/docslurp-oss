@@ -5,14 +5,17 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, rmSy
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { afterAll, beforeAll, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, expect, it } from "vitest";
 import { applyOwnedMigrations } from "../../db/owned-migrations.mjs";
 
 const url = process.env.MIGRATION_OWNER_TEST_DATABASE_URL;
 const folder = resolve("db/migrations");
 const owner = `migration_owner_${process.pid}`;
 const outsider = `migration_outsider_${process.pid}`;
+/** Databases this file created and has not dropped yet; only these are ever dropped. */
 const databases: string[] = [];
+const ownedPrefix = `migration_owner_db_${process.pid}_`;
+let created = 0;
 let admin: Client, scratch: string;
 const attested = { GENERATION_ROLLOUT_DRAINED: "all-executions-and-activities-stopped" };
 async function connect(database: string, runtime = false) {
@@ -36,14 +39,31 @@ beforeAll(async () => {
   writeFileSync(resolve(scratch, "meta/_journal.json"), JSON.stringify(journal));
   for (const entry of journal.entries) copyFileSync(resolve(folder, `${entry.tag}.sql`), resolve(scratch, `${entry.tag}.sql`));
 });
+/*
+ * Drop each test's databases when it ends, not all of them in afterAll. Every DROP DATABASE waits for an immediate
+ * checkpoint, and that checkpoint flushes every dirty buffer the earlier tests' migrations left. Dropping all eight at
+ * the end made the first drop pay for all of them (measured locally: 10,417 buffers and 7,959 fsynced files, 3.7 s of
+ * a 4.0 s teardown), which went past the 10 s hook timeout on CI's slower disks. Dropped right away, a database's own
+ * dirty buffers are discarded, so each checkpoint has almost nothing to flush: 8 drops, 0.27 s total, 48 ms at most,
+ * and no hook needs a longer timeout. Each test's clients have already
+ * ended here (pg_stat_activity showed no sessions on these databases), so FORCE terminates nothing that is still in use.
+ */
+async function dropOwnedDatabases() {
+  while (databases.length) {
+    const name = databases.shift()!;
+    if (!name.startsWith(ownedPrefix)) throw new Error(`refusing to drop ${name}: not created by this test file`);
+    await admin.query(`drop database if exists ${name} with (force)`);
+  }
+}
+afterEach(async () => { if (admin) await dropOwnedDatabases(); });
 afterAll(async () => {
   if (!admin) return;
-  for (const name of databases) await admin.query(`drop database if exists ${name} with (force)`);
+  await dropOwnedDatabases();
   await admin.query(`drop role ${owner}; drop role ${outsider}`);
   await admin.end(); if (scratch) rmSync(scratch, { recursive: true });
 });
 async function database(old = true, postgis = false) {
-  const name = `migration_owner_db_${process.pid}_${databases.length}`;
+  const name = `${ownedPrefix}${created++}`;
   databases.push(name); await admin.query(`create database ${name} owner ${owner} template template0`);
   const c = await connect(name);
   if (postgis) await c.query("create extension postgis");
@@ -78,7 +98,7 @@ it.skipIf(!url)("keeps a closed pre-generation database on one superuser session
     await runtime.query(`select * from chat_operations limit 1;
       insert into "user"(id,name,email) values('owner-test','Test','owner-test@example.test');
       insert into organizations(id,name,slug,created_by_user_id) values('owner-test','Test','owner-test','owner-test');
-      insert into workspaces(id,org_id,user_id,name) values('owner-test','owner-test','owner-test','Test');
+      insert into projects(id,org_id,user_id,name) values('owner-test','owner-test','owner-test','Test');
       select * from realtime_revisions;`);
     // A normal subsequent owner migration must remain supported and idempotent.
     await applyOwnedMigrations(runtime, { migrationsFolder: folder, env: {} });
@@ -155,7 +175,7 @@ it.skipIf(!url)("refuses missing publisher membership and rolls back pending sch
   const c = await connect(name);
   try {
     await expect(applyOwnedMigrations(c, { migrationsFolder: folder, env: attested })).rejects.toThrow();
-    expect((await c.query("select exists(select 1 from information_schema.columns where table_name='workspace_runs' and column_name='execution_generation') as applied")).rows[0].applied).toBe(false);
+    expect((await c.query("select exists(select 1 from information_schema.columns where table_name='project_runs' and column_name='execution_generation') as applied")).rows[0].applied).toBe(false);
     expect((await c.query("select current_user=session_user as restored")).rows[0].restored).toBe(true);
   } finally { await c.end(); await admin.query(`grant docslurp_realtime_publisher to ${owner}`); }
 }, 60_000);

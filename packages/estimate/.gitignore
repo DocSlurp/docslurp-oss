@@ -1,0 +1,6 @@
+target/
+pkg/
+dist/
+python/src/docslurp_estimate/docslurp_estimate.wasm
+python/dist/
+__pycache__/

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { WorkspaceRunProgressSnapshot } from "@docslurp/shared";
+import type { ProjectRunProgressSnapshot } from "@docslurp/shared";
 import { streamRunProgressSnapshots } from "../services/run-progress-stream.js";
 
 function harness(status = "processing") {
@@ -7,7 +7,7 @@ function harness(status = "processing") {
   let abort!: () => void;
   const frames: { event: string; data: string }[] = [];
   const close = vi.fn(async () => {});
-  const snapshot = vi.fn(async () => ({ run: { status, controlState: null }, progress: { pageRollup: { completed: 3, total: 10 } } } as unknown as WorkspaceRunProgressSnapshot));
+  const snapshot = vi.fn(async () => ({ run: { status, controlState: null }, progress: { pageRollup: { completed: 3, total: 10 } } } as unknown as ProjectRunProgressSnapshot));
   const result = streamRunProgressSnapshots({
     snapshot,
     subscribe: async callback => { invalidate = callback; return { close }; },
@@ -57,10 +57,10 @@ describe("typed run progress lifecycle", () => {
   it("keeps paused runs observable until resumed or cancelled", async () => {
     vi.useFakeTimers();
     const h = harness();
-    h.snapshot.mockResolvedValue({ run: { status: "processing", controlState: "paused" } } as WorkspaceRunProgressSnapshot);
+    h.snapshot.mockResolvedValue({ run: { status: "processing", controlState: "paused" } } as ProjectRunProgressSnapshot);
     await vi.advanceTimersByTimeAsync(4_000);
     expect(h.close).not.toHaveBeenCalled();
-    h.snapshot.mockResolvedValue({ run: { status: "processing", controlState: "cancelled" } } as WorkspaceRunProgressSnapshot);
+    h.snapshot.mockResolvedValue({ run: { status: "processing", controlState: "cancelled" } } as ProjectRunProgressSnapshot);
     h.invalidate();
     await vi.advanceTimersByTimeAsync(1_000);
     await h.result;

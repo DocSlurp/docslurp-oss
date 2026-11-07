@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import type { PrivacyMode } from "@docslurp/shared";
 import { privacyModeBypassesCaches } from "../lib/cache-privacy.js";
 import { privacyModeOf } from "../lib/privacy.js";
-import { getWorkspaceAccessWithPipeline } from "../services/organizations.js";
-import { ensureInvalidationListener, onSearchWorkspaceInvalidated } from "./eligible-documents.js";
+import { getProjectAccessWithPipeline } from "../services/organizations.js";
+import { ensureInvalidationListener, onSearchProjectInvalidated } from "./eligible-documents.js";
 
 /**
  * Identical searches repeat constantly (type-ahead, popular questions), so a
@@ -12,24 +12,24 @@ import { ensureInvalidationListener, onSearchWorkspaceInvalidated } from "./elig
  *
  * Tenant boundary (every rule fails closed: when in doubt, no cache):
  * - The route authenticates the caller and checks the API key's scopes and
- *   workspace allowlist before it asks for a ticket, so a revoked or narrowed
+ *   project allowlist before it asks for a ticket, so a revoked or narrowed
  *   key is refused before any cached answer is read.
- * - `responseCacheTicket` re-checks workspace access for the user (and the
- *   request's key allowlist) and reads each workspace's privacy mode with one
- *   query per workspace, memoized only within one request or batch. A workspace
+ * - `responseCacheTicket` re-checks project access for the user (and the
+ *   request's key allowlist) and reads each project's privacy mode with one
+ *   query per project, memoized only within one request or batch. A project
  *   that is strict-privacy, missing or unreachable, or a lookup that fails or
  *   exceeds the lookup timeout, yields no ticket: nothing is read or written.
  * - `storeResponse` repeats that lookup unmemoized just before writing, and
- *   skips the write if the workspace was invalidated while the search ran, so a
- *   workspace made strict-privacy mid-search never gets an entry.
+ *   skips the write if the project was invalidated while the search ran, so a
+ *   project made strict-privacy mid-search never gets an entry.
  * - The key is a SHA-256 of the resolved organizations, the user, the API key
- *   id, the resolved workspace ids and the exact request (filters, retrieval
+ *   id, the resolved project ids and the exact request (filters, retrieval
  *   options, the query as sent), so answers never cross callers, keys,
- *   tenants, workspaces or options.
+ *   tenants, projects or options.
  * - Entries are partitioned by organization with per-organization entry and
  *   byte caps; global pressure evicts from the largest organization, so one
  *   tenant cannot push out another's entries. Oversized answers are not kept.
- * - Settings, pipeline and document changes drop a workspace's entries through
+ * - Settings, pipeline and document changes drop a project's entries through
  *   the search invalidation hints (eligible-documents.ts); answers are otherwise
  *   at most one TTL old.
  */
@@ -45,12 +45,12 @@ export interface ResponseCacheTicket {
   readonly key: string;
   readonly orgKey: string;
   readonly userId: string;
-  readonly workspaceIds: readonly string[];
-  /** Invalidation generation of each workspace when the ticket was issued. */
+  readonly projectIds: readonly string[];
+  /** Invalidation generation of each project when the ticket was issued. */
   readonly generations: readonly number[];
 }
 
-type Entry = { at: number; data: unknown; bytes: number; workspaceIds: readonly string[] };
+type Entry = { at: number; data: unknown; bytes: number; projectIds: readonly string[] };
 
 /** Access and privacy lookups slower than this skip the cache (SEARCH_RESPONSE_CACHE_LOOKUP_TIMEOUT_MS, default 250). */
 function keyResolutionTimeoutMs(): number {
@@ -72,8 +72,8 @@ let totalEntries = 0;
 let totalBytes = 0;
 const generations = new Map<string, number>();
 
-onSearchWorkspaceInvalidated({
-  invalidate: invalidateSearchResponseCacheWorkspace,
+onSearchProjectInvalidated({
+  invalidate: invalidateSearchResponseCacheProject,
   active: () => totalEntries > 0,
 });
 
@@ -100,20 +100,20 @@ export function searchResponseCacheStatsForTests(): { entries: number; bytes: nu
   return { entries: totalEntries, bytes: totalBytes, byOrg: Object.fromEntries([...partitions].map(([org, entries]) => [org, entries.size])) };
 }
 
-/** Drops every cached answer that read the workspace, and fails in-flight writes for it. */
-export function invalidateSearchResponseCacheWorkspace(workspaceId: string): void {
-  generations.set(workspaceId, (generations.get(workspaceId) ?? 0) + 1);
+/** Drops every cached answer that read the project, and fails in-flight writes for it. */
+export function invalidateSearchResponseCacheProject(projectId: string): void {
+  generations.set(projectId, (generations.get(projectId) ?? 0) + 1);
   for (const [orgKey, entries] of partitions) {
     for (const [key, entry] of entries) {
-      if (entry.workspaceIds.includes(workspaceId)) removeEntry(orgKey, key);
+      if (entry.projectIds.includes(projectId)) removeEntry(orgKey, key);
     }
   }
 }
 
-async function lookupScope(workspaceId: string, userId: string): Promise<ScopeEntry | null> {
+async function lookupScope(projectId: string, userId: string): Promise<ScopeEntry | null> {
   try {
-    const access = await getWorkspaceAccessWithPipeline(workspaceId, userId);
-    if (!access || access.workspaceId !== workspaceId || !access.orgId) return null;
+    const access = await getProjectAccessWithPipeline(projectId, userId);
+    if (!access || access.projectId !== projectId || !access.orgId) return null;
     return { orgId: access.orgId, privacyMode: privacyModeOf(access.pipeline) };
   } catch {
     return null;
@@ -130,24 +130,24 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
 }
 
 /** Organizations of a cacheable scope, or null (strict-privacy, unresolved, no access). */
-async function cacheableScope(workspaceIds: readonly string[], userId: string, memo?: CacheScopeMemo): Promise<string[] | null> {
-  const scopes = await Promise.all(workspaceIds.map((workspaceId) => {
-    const memoKey = JSON.stringify([userId, workspaceId]);
+async function cacheableScope(projectIds: readonly string[], userId: string, memo?: CacheScopeMemo): Promise<string[] | null> {
+  const scopes = await Promise.all(projectIds.map((projectId) => {
+    const memoKey = JSON.stringify([userId, projectId]);
     let lookup = memo?.get(memoKey);
     if (!lookup) {
-      lookup = lookupScope(workspaceId, userId);
+      lookup = lookupScope(projectId, userId);
       memo?.set(memoKey, lookup);
     }
     return lookup;
   }));
   const resolved = scopes.filter((scope): scope is ScopeEntry => scope !== null);
-  if (resolved.length !== workspaceIds.length) return null;
+  if (resolved.length !== projectIds.length) return null;
   if (resolved.some((scope) => privacyModeBypassesCaches(scope.privacyMode))) return null;
   return [...new Set(resolved.map((scope) => scope.orgId))].sort();
 }
 
-function normalizeWorkspaceIds(workspaceIds: readonly string[]): string[] | null {
-  const ids = [...new Set(workspaceIds.map((id) => id.trim()))].sort();
+function normalizeProjectIds(projectIds: readonly string[]): string[] | null {
+  const ids = [...new Set(projectIds.map((id) => id.trim()))].sort();
   return ids.length === 0 || ids.some((id) => !id) ? null : ids;
 }
 
@@ -170,19 +170,19 @@ export function cacheableApiKeyId(actorApiKeyId: string | null | undefined, cont
 export async function responseCacheTicket(args: {
   userId: string;
   apiKeyId: string | null;
-  workspaceIds: readonly string[];
+  projectIds: readonly string[];
   request: Record<string, unknown>;
   memo?: CacheScopeMemo;
 }): Promise<ResponseCacheTicket | null> {
-  const workspaceIds = normalizeWorkspaceIds(args.workspaceIds);
-  if (!args.userId.trim() || !workspaceIds) return null;
-  const startGenerations = workspaceIds.map((id) => generations.get(id) ?? 0);
-  const orgIds = await withTimeout(cacheableScope(workspaceIds, args.userId, args.memo), keyResolutionTimeoutMs());
+  const projectIds = normalizeProjectIds(args.projectIds);
+  if (!args.userId.trim() || !projectIds) return null;
+  const startGenerations = projectIds.map((id) => generations.get(id) ?? 0);
+  const orgIds = await withTimeout(cacheableScope(projectIds, args.userId, args.memo), keyResolutionTimeoutMs());
   if (!orgIds || orgIds.length === 0) return null;
   const key = createHash("sha256")
-    .update(JSON.stringify([orgIds, args.userId, args.apiKeyId, workspaceIds, args.request]))
+    .update(JSON.stringify([orgIds, args.userId, args.apiKeyId, projectIds, args.request]))
     .digest("hex");
-  return { key, orgKey: orgIds.join(","), userId: args.userId, workspaceIds, generations: startGenerations };
+  return { key, orgKey: orgIds.join(","), userId: args.userId, projectIds, generations: startGenerations };
 }
 
 export function readCachedResponse(ticket: ResponseCacheTicket, ttlMs: number): unknown {
@@ -200,16 +200,16 @@ export function readCachedResponse(ticket: ResponseCacheTicket, ttlMs: number): 
 }
 
 /**
- * Stores a complete answer under its ticket. `scopeWorkspaceId` is the
- * workspace the answer reports it searched; a single-workspace ticket requires
+ * Stores a complete answer under its ticket. `scopeProjectId` is the
+ * project the answer reports it searched; a single-project ticket requires
  * it to match exactly. Before writing, access and privacy are read again
- * (unmemoized) and the workspaces must not have been invalidated since the
+ * (unmemoized) and the projects must not have been invalidated since the
  * ticket was issued. Returns whether the answer was stored.
  */
-export async function storeResponse(ticket: ResponseCacheTicket, data: unknown, scopeWorkspaceId: string | null | undefined): Promise<boolean> {
-  const scopeMatches = ticket.workspaceIds.length === 1
-    ? scopeWorkspaceId === ticket.workspaceIds[0]
-    : scopeWorkspaceId === undefined || scopeWorkspaceId === null || ticket.workspaceIds.includes(scopeWorkspaceId);
+export async function storeResponse(ticket: ResponseCacheTicket, data: unknown, scopeProjectId: string | null | undefined): Promise<boolean> {
+  const scopeMatches = ticket.projectIds.length === 1
+    ? scopeProjectId === ticket.projectIds[0]
+    : scopeProjectId === undefined || scopeProjectId === null || ticket.projectIds.includes(scopeProjectId);
   if (!scopeMatches) return false;
   let bytes: number;
   try {
@@ -218,9 +218,9 @@ export async function storeResponse(ticket: ResponseCacheTicket, data: unknown, 
     return false;
   }
   if (bytes > limits.maxEntryBytes || bytes > limits.perOrgMaxBytes || bytes > limits.maxBytes) return false;
-  const changed = () => ticket.workspaceIds.some((id, index) => (generations.get(id) ?? 0) !== ticket.generations[index]);
+  const changed = () => ticket.projectIds.some((id, index) => (generations.get(id) ?? 0) !== ticket.generations[index]);
   if (changed()) return false;
-  const orgIds = await withTimeout(cacheableScope(ticket.workspaceIds, ticket.userId), keyResolutionTimeoutMs());
+  const orgIds = await withTimeout(cacheableScope(ticket.projectIds, ticket.userId), keyResolutionTimeoutMs());
   if (!orgIds || orgIds.join(",") !== ticket.orgKey || changed()) return false;
 
   removeEntry(ticket.orgKey, ticket.key);
@@ -229,7 +229,7 @@ export async function storeResponse(ticket: ResponseCacheTicket, data: unknown, 
     entries = new Map();
     partitions.set(ticket.orgKey, entries);
   }
-  entries.set(ticket.key, { at: Date.now(), data, bytes, workspaceIds: ticket.workspaceIds });
+  entries.set(ticket.key, { at: Date.now(), data, bytes, projectIds: ticket.projectIds });
   partitionBytes.set(ticket.orgKey, (partitionBytes.get(ticket.orgKey) ?? 0) + bytes);
   totalEntries += 1;
   totalBytes += bytes;

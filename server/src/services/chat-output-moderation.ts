@@ -1,4 +1,4 @@
-import { createOpenRouterRoutingFetch, liveModelPrice, readProviderCharge, type PrivacyMode, type WorkspaceChatResponse } from "@docslurp/shared";
+import { createOpenRouterRoutingFetch, liveModelPrice, readProviderCharge, type PrivacyMode, type ProjectChatResponse } from "@docslurp/shared";
 
 import { recordUsageEvent } from "../lib/ai-usage.js";
 import { assertCanSpend } from "./billing/spend-guard.js";
@@ -12,9 +12,9 @@ import type { RequestActor } from "../lib/request-actor.js";
  *
  * The interface is provider-neutral; the default is a no-op. The one adapter,
  * Llama Guard 4 12B on OpenRouter pinned to DeepInfra (US), classifies the
- * question and answer pair. Only `standard` privacy-mode workspaces are sent
+ * question and answer pair. Only `standard` privacy-mode projects are sent
  * to it; any other mode refuses the public answer without a provider call, because the answer
- * text would leave the workspace's allowed providers; the answer is withheld.
+ * text would leave the project's allowed providers; the answer is withheld.
  *
  * When it applies, the chat turn buffers streamed text and emits only the
  * moderated answer. A moderation failure fails closed for these public actors:
@@ -48,7 +48,7 @@ export const LLAMA_GUARD_PRICE = { input: 0.18, output: 0.18 } as const;
 
 /** Llama Guard 4 over OpenRouter's chat completions API. `fetch` is injectable for tests. */
 export function llamaGuardOutputModerator(args: { apiKey: string; fetch?: typeof fetch; baseUrl?: string; timeoutMs?: number }): OutputModerator {
-  // Hosts follow the org/workspace China-provider policy, like every OpenRouter call (DeepInfra is US-based).
+  // Hosts follow the org/project China-provider policy, like every OpenRouter call (DeepInfra is US-based).
   const doFetch = createOpenRouterRoutingFetch(args.fetch ?? fetch);
   return {
     name: "llama-guard-4",
@@ -136,34 +136,34 @@ export const MODERATION_UNAVAILABLE_ANSWER = "I couldn't check this answer, so I
  * with a short refusal and loses its citations. A moderation failure withholds
  * the answer the same way (fail closed) and is logged loudly.
  */
-export async function moderateChatAnswer(response: WorkspaceChatResponse, args: {
+export async function moderateChatAnswer(response: ProjectChatResponse, args: {
   actor: RequestActor | null | undefined;
   question: string;
   userId: string;
-  workspaceId: string;
+  projectId: string;
   orgId?: string | null;
   privacyMode: PrivacyMode;
   moderator?: OutputModerator | null;
   signal?: AbortSignal;
-}): Promise<WorkspaceChatResponse> {
+}): Promise<ProjectChatResponse> {
   const moderator = args.moderator === undefined ? configuredOutputModerator() : args.moderator;
   if (!moderator || moderator === noopOutputModerator || !moderationAppliesTo(args.actor) || !response.answer.trim()) return response;
   if (args.privacyMode !== "standard") {
-    console.warn(`[chat-moderation] skipped workspace=${args.workspaceId}: privacy mode ${args.privacyMode} does not allow the moderation provider`);
+    console.warn(`[chat-moderation] skipped project=${args.projectId}: privacy mode ${args.privacyMode} does not allow the moderation provider`);
     return { ...response, answer: MODERATION_UNAVAILABLE_ANSWER, citations: [], evidenceSpans: [] };
   }
   let verdict: ModerationVerdict;
   try {
-    await assertCanSpend(args.orgId ?? null, args.workspaceId, { kind: "interactive", hold: false });
+    await assertCanSpend(args.orgId ?? null, args.projectId, { kind: "interactive", hold: false });
     verdict = await moderator.moderate({ question: args.question, answer: response.answer }, args.signal);
   } catch (error) {
-    console.error(`[chat-moderation] failed workspace=${args.workspaceId}; answer withheld:`, error instanceof Error ? error.message : String(error));
+    console.error(`[chat-moderation] failed project=${args.projectId}; answer withheld:`, error instanceof Error ? error.message : String(error));
     return { ...response, answer: MODERATION_UNAVAILABLE_ANSWER, citations: [], evidenceSpans: [] };
   }
   if (verdict.usage) {
     await recordUsageEvent({
       userId: args.userId,
-      scope: { orgId: args.orgId ?? null, workspaceId: args.workspaceId, sessionId: response.sessionId },
+      scope: { orgId: args.orgId ?? null, projectId: args.projectId, sessionId: response.sessionId },
       usage: { provider: "openrouter", model: verdict.usage.model, metric: "chat-output-moderation",
         inputTokens: verdict.usage.inputTokens, outputTokens: verdict.usage.outputTokens, costCents: verdict.usage.costCents,
         metadata: { ...verdict.usage.metadata, moderator: moderator.name, flagged: verdict.flagged } },
@@ -171,6 +171,6 @@ export async function moderateChatAnswer(response: WorkspaceChatResponse, args: 
   }
   if (verdict.unavailable) return { ...response, answer: MODERATION_UNAVAILABLE_ANSWER, citations: [], evidenceSpans: [] };
   if (!verdict.flagged) return response;
-  console.warn(`[chat-moderation] flagged workspace=${args.workspaceId} categories=${verdict.categories.join(",") || "unknown"}`);
+  console.warn(`[chat-moderation] flagged project=${args.projectId} categories=${verdict.categories.join(",") || "unknown"}`);
   return { ...response, answer: MODERATED_ANSWER, citations: [], evidenceSpans: [] };
 }
