@@ -1,3 +1,4 @@
+import { runVisionRequest } from "../tools/vision-runtime.js";
 import { runDocuments } from "../pipeline/checkpoints.js";
 import type { Document } from "../models.js";
 import { describe, expect, it, vi } from "vitest";
@@ -107,4 +108,20 @@ describe("resource admission at execution", () => {
   it("never treats allocation pressure as a bad document", () => {
     expect(isDocumentLevelFailure(new Error("command admission", { cause: new ResourceCapacityError() }))).toBe(false);
   });
+});
+
+it("returns local vision's gate admission when the real runner refuses dispatch", async () => {
+  const runner = new CommandRunner();
+  vi.spyOn(runner, "florence2").mockResolvedValue({ binary: "unused", args: [], available: true });
+  const failed = vi.fn();
+  const unbilled = vi.fn(async () => true);
+  const admit = vi.fn(async () => {});
+  await expect(withResourceCapacityGuard(pressure, () => runVisionRequest({
+    imagePath: "/hostile/scan.png", outputPath: "/unused/output.json", mimeType: "image/png",
+    runner, runtime: "local-cli", model: "microsoft/Florence-2-base-ft", prompt: "<OCR>",
+    baseUrl: null, apiKey: "", gate: { admit, failed, unbilled },
+  }))).rejects.toBeInstanceOf(ResourceCapacityError);
+  expect(admit).toHaveBeenCalledOnce();
+  expect(unbilled).toHaveBeenCalledExactlyOnceWith("cancelled");
+  expect(failed).not.toHaveBeenCalled();
 });

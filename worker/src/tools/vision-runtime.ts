@@ -1,3 +1,4 @@
+import { ResourceCapacityError } from "../lib/resource-capacity.js";
 import { currentProviderPolicy } from "../lib/provider-rate-limit.js";
 import { nitroBaseModel, speedBoostModel, withOpenRouterProviderPreferences, resolveSupportedModelIdWithWarning, withServedProviderRegion } from "@docslurp/shared";
 import { withObservation } from "@docslurp/shared/observability";
@@ -612,7 +613,8 @@ export async function runVisionRequest(args: {
         try {
           await args.runner.run(plan, args.signal);
         } catch (error) {
-          args.gate?.failed();
+          if (error instanceof ResourceCapacityError) await args.gate?.unbilled("cancelled");
+          else args.gate?.failed();
           throw error;
         }
         const payload = await readJsonFile<{
