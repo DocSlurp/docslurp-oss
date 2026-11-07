@@ -77,18 +77,18 @@ export async function extractMedia(args: { state: WorkflowState; document: Docum
   await runDocumentStage(state, document, "extract-markdown", `${document.id}:markdown`, "transcribed media", async () => {
     const config = mediaConfig();
     if (!config.enabled) throw new RunPolicyError("Remote media processing is disabled; enable MEDIA_REMOTE_ENABLED");
-    if (!args.journal || !state.store || !state.run.orgId || !state.run.workspaceId) throw new Error("Media requires durable, tenant-scoped execution");
-    const scope = { orgId: state.run.orgId, workspaceId: state.run.workspaceId, runId: state.run.id, documentId: document.id };
+    if (!args.journal || !state.store || !state.run.orgId || !state.run.projectId) throw new Error("Media requires durable, tenant-scoped execution");
+    const scope = { orgId: state.run.orgId, projectId: state.run.projectId, runId: state.run.id, documentId: document.id };
     const provider = config.provider === "capacity"
       ? leasedMediaProvider(config.model, scope, args.capacityStore ?? (() => { throw new Error("Capacity store missing"); })(), state.run.pipeline.maxCostCents ?? null)
       : await configuredMediaProvider(config.provider, config.model);
     if (!(await allowHostedCall(state, { provider: provider.id, model: provider.model, operation: "media.transcribe", target: "hosted" }, [document.id]))) {
-      throw new RunPolicyError("Workspace privacy mode disallows the configured media provider");
+      throw new RunPolicyError("Project privacy mode disallows the configured media provider");
     }
     const source = await stageSourceFile(storage, document, "source.media", { maxBytes: config.maxSourceBytes });
     try {
       const { duration, hasAudio, hasVideo } = await inspectMedia(runner, source, config, signal);
-      // Missing workspace configuration opts in; explicit false wins even for silent video.
+      // Missing project configuration opts in; explicit false wins even for silent video.
       // Platform, privacy, budget and durable quota checks still apply.
       const visualEnabled = process.env.MEDIA_VIDEO_ENABLED === "true" && hasVideo
         && state.run.pipeline.mediaVideo?.enabled !== false;
@@ -102,7 +102,7 @@ export async function extractMedia(args: { state: WorkflowState; document: Docum
       // before any lease or paid call instead of letting host cost bypass the cap.
       if (hasVideo && provider instanceof LeasedMediaProvider) throw new Error("Video document budgets require a managed media provider");
       const vision = hasVideo && visualEnabled ? await configuredVisionProvider() : undefined;
-      if (vision && !(await allowHostedCall(state, { provider: vision.id, model: vision.model, operation: "media.vision", target: "hosted" }, [document.id]))) throw new RunPolicyError("Workspace privacy mode disallows video vision");
+      if (vision && !(await allowHostedCall(state, { provider: vision.id, model: vision.model, operation: "media.vision", target: "hosted" }, [document.id]))) throw new RunPolicyError("Project privacy mode disallows video vision");
       const visualSegments: VisualSegment[] = [];
       let scanStats: { candidateCount: number; selectedCount: number; largestGapSeconds: number } | undefined;
       let costUsd = 0;

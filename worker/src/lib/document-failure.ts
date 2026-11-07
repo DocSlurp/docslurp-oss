@@ -13,7 +13,7 @@ import { findProviderRetryableError } from "./provider-retry.js";
 
 /**
  * A Run-wide stop that is not the Document's fault: a spend cap reached, or a
- * workspace policy (privacy mode, disabled provider) that forbids the work for
+ * project policy (privacy mode, disabled provider) that forbids the work for
  * every Document. It fails the stage instead of skipping one Document.
  */
 export class RunPolicyError extends Error {

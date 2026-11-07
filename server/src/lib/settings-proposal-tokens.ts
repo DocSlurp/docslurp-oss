@@ -1,13 +1,13 @@
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
 import { getRequiredEncryptionKey } from "./encryption.js";
 
-const AAD = Buffer.from("docslurp:workspace-settings-proposal:v1");
+const AAD = Buffer.from("docslurp:project-settings-proposal:v1");
 function key(): Buffer {
   const root = process.env.FILE_TOKEN_SECRET?.trim() ? getRequiredEncryptionKey("FILE_TOKEN_SECRET")
     : process.env.SECRETS_ENCRYPTION_KEY?.trim() ? getRequiredEncryptionKey("SECRETS_ENCRYPTION_KEY")
       : process.env.BETTER_AUTH_SECRET?.trim() ? Buffer.from(process.env.BETTER_AUTH_SECRET.trim()) : null;
-  if (!root) throw new Error("Workspace proposals need a configured signing secret");
-  return Buffer.from(hkdfSync("sha256", root, "docslurp-workspace-settings", "proposal-approval-v1", 32));
+  if (!root) throw new Error("Project proposals need a configured signing secret");
+  return Buffer.from(hkdfSync("sha256", root, "docslurp-project-settings", "proposal-approval-v1", 32));
 }
 export function sealSettingsProposal(claims: Record<string, unknown>): string {
   const iv = randomBytes(12), cipher = createCipheriv("aes-256-gcm", key(), iv);

@@ -15,6 +15,7 @@ try {
       create table usage_events (cost_cents integer not null default 0);
       create table organizations (credit_balance_cents integer not null default 0);
       create table credit_ledger (delta numeric(12,2));
+      -- This isolated schema exercises immutable migration0013, before the rename.
       create table workspace_runs (input_cost_cents integer, output_cost_cents integer, pages_total integer, created_at timestamptz);
       create materialized view admin_stats as select count(*) from workspace_runs;
       insert into organizations values (2000);

@@ -19,10 +19,10 @@ export const API_ERROR_CODES = [
   "web_scope_required",
   "mfa_required",
   "not_found",
-  "workspace_not_found",
-  "workspace_forbidden",
-  "workspace_ambiguous",
-  "workspace_scope_forbidden",
+  "project_not_found",
+  "project_forbidden",
+  "project_ambiguous",
+  "project_scope_forbidden",
   "no_stages_to_run",
   "source_not_reusable",
   "missing_stage_artifacts",
@@ -53,13 +53,13 @@ export const API_ERROR_CODES = [
   "unreadable_source",
   "payment_required",
   "credit_exhausted",
-  "workspace_budget_paused",
+  "project_budget_paused",
   "org_budget_paused",
   "minimum_credit_required",
   "plan_not_entitled",
   "chat_disabled",
   "chat_session_forbidden",
-  "client_key_workspaces_required",
+  "client_key_projects_required",
   "client_key_origin_not_allowed",
   "api_key_ip_not_allowed",
   "model_not_allowed",
@@ -118,11 +118,11 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   unauthorized: PUBLIC_ERROR_MESSAGES.unauthorized,
   forbidden: PUBLIC_ERROR_MESSAGES.forbidden,
   not_found: PUBLIC_ERROR_MESSAGES.missing,
-  workspace_not_found: PUBLIC_ERROR_MESSAGES.workspaceMissing,
-  workspace_forbidden: PUBLIC_ERROR_MESSAGES.forbidden,
-  workspace_ambiguous: "More than one of your organizations has a workspace with this name. Pass orgId, or the workspace ID, to choose one.",
-  workspace_scope_forbidden: "This API key is limited to specific workspaces, so it can't create a new one. Name a workspace the key can use.",
-  no_stages_to_run: "None of the requested stages runs in this pipeline. Choose stages the workspace has turned on.",
+  project_not_found: PUBLIC_ERROR_MESSAGES.projectMissing,
+  project_forbidden: PUBLIC_ERROR_MESSAGES.forbidden,
+  project_ambiguous: "More than one of your organizations has a project with this name. Pass orgId, or the project ID, to choose one.",
+  project_scope_forbidden: "This API key is limited to specific projects, so it can't create a new one. Name a project the key can use.",
+  no_stages_to_run: "None of the requested stages runs in this pipeline. Choose stages the project has turned on.",
   source_not_reusable: "This run's earlier output can't be reused for a partial reprocess. Reprocess every stage instead.",
   missing_stage_artifacts: "This run is missing the earlier stage output needed to reprocess from there. Reprocess from an earlier stage or upload again.",
   organization_not_found: PUBLIC_ERROR_MESSAGES.organizationMissing,
@@ -154,22 +154,22 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   unreadable_source: PUBLIC_ERROR_MESSAGES.unreadableSource,
   payment_required: PUBLIC_ERROR_MESSAGES.creditExhausted,
   credit_exhausted: PUBLIC_ERROR_MESSAGES.creditExhausted,
-  workspace_budget_paused: PUBLIC_ERROR_MESSAGES.budgetPaused,
+  project_budget_paused: PUBLIC_ERROR_MESSAGES.budgetPaused,
   org_budget_paused: PUBLIC_ERROR_MESSAGES.budgetPaused,
   minimum_credit_required: PUBLIC_ERROR_MESSAGES.creditExhausted,
   plan_not_entitled: PUBLIC_ERROR_MESSAGES.planRequired,
   chat_disabled: PUBLIC_ERROR_MESSAGES.chatDisabled,
   chat_session_forbidden: "This conversation can't be continued with this request. Send the sessionToken returned with the previous answer, or start a new conversation.",
-  client_key_workspaces_required: "This browser API key isn't limited to specific workspaces. Edit the key and choose the workspaces it may use (workspaceIds), then try again.",
+  client_key_projects_required: "This browser API key isn't limited to specific projects. Edit the key and choose the projects it may use (projectIds), then try again.",
   api_key_ip_not_allowed: "This API key can't be used from this IP address. Add the address or its range to the key's IP allowlist, or call from an allowed server.",
   client_key_origin_not_allowed: "This browser API key isn't allowed on this website. Add the site to the key's allowed websites (for example docs.example.com, or *.example.com for its subdomains), or call DocSlurp from your server with a server key.",
   model_not_allowed: PUBLIC_ERROR_MESSAGES.modelNotAllowed,
   chat_deadline_exceeded: PUBLIC_ERROR_MESSAGES.chatDeadline,
   chat_tool_failed: PUBLIC_ERROR_MESSAGES.chatToolFailed,
   invalid_search_scope: PUBLIC_ERROR_MESSAGES.searchScope,
-  web_disabled: "Web tools are turned off for this server or workspace.",
+  web_disabled: "Web tools are turned off for this server or project.",
   url_blocked: "This URL can't be fetched. Use a public HTTP or HTTPS address.",
-  privacy_mode_blocked: "This workspace's privacy mode doesn't allow web tools.",
+  privacy_mode_blocked: "This project's privacy mode doesn't allow web tools.",
   extract_not_found: "Extract not found.",
   extract_expired: "This extract has expired and its files and outputs were deleted. Run the extract again to get new results.",
   retention_exceeds_cap: "retentionDays is longer than this deployment keeps extracts. Ask for fewer days; details.maxRetentionDays is the limit.",
@@ -232,8 +232,8 @@ export function publicApiErrorLinks(value: unknown): ApiErrorLinks | undefined {
  */
 export function publicApiErrorMessage(code: ApiErrorCode, details?: ApiErrorDetails): string {
   const base = API_ERROR_PUBLIC_MESSAGES[code];
-  if (code === "workspace_not_found" && typeof details?.workspaceSlug === "string") {
-    return `No workspace matching "${details.workspaceSlug}" was found. Pass a workspace ID, slug or name from this organization, or omit workspace to use the default workspace.`;
+  if (code === "project_not_found" && typeof details?.projectSlug === "string") {
+    return `No project matching "${details.projectSlug}" was found. Pass a project ID, slug or name from this organization, or omit project to use the default project.`;
   }
   const links = publicApiErrorLinks(details?.links);
   if (!links) return base;
@@ -252,7 +252,7 @@ export function publicApiErrorMessage(code: ApiErrorCode, details?: ApiErrorDeta
       if (!links.buyCredits && !links.billing) return base;
       return `Your organization is out of credits. Buy credits at ${links.buyCredits ?? links.billing}`
         + (links.autoTopUp ? `, or turn on auto top-up at ${links.autoTopUp}.` : ".");
-    case "workspace_budget_paused":
+    case "project_budget_paused":
     case "org_budget_paused":
       return links.billing ? `${base} Review spend and budgets at ${links.billing}.` : base;
     default:
@@ -305,9 +305,9 @@ export function publicApiErrorDetails(details: unknown): ApiErrorDetails | undef
   for (const key of SAFE_DETAIL_LABELS) {
     if (typeof source[key] === "string" && /^[\w:.-]{1,80}$/.test(source[key])) safe[key] = source[key];
   }
-  // The slug a `workspace` value was looked up by (lowercase letters, digits and hyphens only).
-  if (typeof source.workspaceSlug === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(source.workspaceSlug) && source.workspaceSlug.length <= 63) {
-    safe.workspaceSlug = source.workspaceSlug;
+  // The slug a `project` value was looked up by (lowercase letters, digits and hyphens only).
+  if (typeof source.projectSlug === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(source.projectSlug) && source.projectSlug.length <= 63) {
+    safe.projectSlug = source.projectSlug;
   }
   const links = publicApiErrorLinks(source.links);
   if (links) safe.links = links;

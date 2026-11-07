@@ -18,7 +18,7 @@ export interface LocalArtifactAdapterOptions {
   imageScaleTo?: number;
   /**
    * OCR language: `auto` (the default; DOCSLURP_OCR_LANGUAGE overrides it) tries the recognisers in order, or codes such
-   * as `eng+deu` from the workspace (ocr/languages.ts).
+   * as `eng+deu` from the project (ocr/languages.ts).
    */
   ocrLanguage?: string;
   /** Called with a page's number when `ppocr-page-ocr` produced text for it: a model read that bills as a Rich page. */

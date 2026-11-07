@@ -15,7 +15,7 @@ it.each([
   const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
   const graph = await extractDocumentGraph({
     filename: "synthetic.html", chunks: [{ id: "chunk", text: "Example System handles documents." }],
-    context: { config: defaultGraphConfig, scope: "Synthetic workspace", model: "test-model", apiKey: "mock", useLlm: true, privacyMode: "standard", onUsage },
+    context: { config: defaultGraphConfig, scope: "Synthetic project", model: "test-model", apiKey: "mock", useLlm: true, privacyMode: "standard", onUsage },
   });
   // A cut-off answer is retried at 3,200 and 6,400 tokens; each attempt is recorded.
   const attempts = finishReason === "length" ? 3 : 1;
@@ -60,7 +60,7 @@ it("preserves asymmetric subject/object order and distinct reciprocal relationsh
   const graph = await extractDocumentGraph({ filename: "teams.txt", chunks: [
     { id: "one", text: "Zulu Team delegates to Alpha Team." },
     { id: "two", text: "Alpha Team delegates to Zulu Team." },
-  ], context: { config: defaultGraphConfig, scope: "Workspace documents", model: "test-model", apiKey: "mock", useLlm: true, privacyMode: "standard", onUsage: () => {} } });
+  ], context: { config: defaultGraphConfig, scope: "Project documents", model: "test-model", apiKey: "mock", useLlm: true, privacyMode: "standard", onUsage: () => {} } });
   expect(graph.edges.filter((edge) => edge.normalizedPredicate === "delegates_to").map((edge) => [edge.sourceKey.split("\0")[0], edge.targetKey.split("\0")[0]])).toEqual([
     ["zulu team", "alpha team"], ["alpha team", "zulu team"],
   ]);

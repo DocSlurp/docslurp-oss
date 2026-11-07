@@ -46,9 +46,9 @@ beforeAll(async () => {
   await sql`insert into org_memberships(org_id, user_id, role) values
     ('team', 'admin', 'owner'), ('team', 'mate', 'member'), ('other', 'bob', 'owner'),
     ('team', 'dual', 'admin'), ('other', 'dual', 'admin')`;
-  await sql`insert into workspaces(id, org_id, user_id, name, is_default) values
+  await sql`insert into projects(id, org_id, user_id, name, is_default) values
     ('ws-a', 'team', 'admin', 'A', true), ('ws-b', 'team', 'admin', 'B', false), ('ws-other', 'other', 'bob', 'O', true)`;
-  await sql`insert into workspace_runs(id, org_id, user_id, workspace_id, kind, status, stage, job_id) values
+  await sql`insert into project_runs(id, org_id, user_id, project_id, kind, status, stage, job_id) values
     ('run-a', 'team', 'mate', 'ws-a', 'upload', 'completed', 'completed', 'j-a'),
     ('run-b', 'team', 'admin', 'ws-b', 'upload', 'completed', 'completed', 'j-b'),
     ('run-o', 'other', 'dual', 'ws-other', 'upload', 'completed', 'completed', 'j-o')`;
@@ -66,7 +66,7 @@ beforeEach(async () => {
 const hook = (id: string, userId: string, orgId: string, url: string) =>
   sql`insert into webhooks (id, user_id, org_id, url, secret, events)
     values (${id}, ${userId}, ${orgId}, ${url}, 'whsec_plain', ${sql.array(["run.completed", "document.replaced"])})`;
-const event = (runId: string, workspaceId: string) => ({ runId, workspaceId });
+const event = (runId: string, projectId: string) => ({ runId, projectId });
 
 describe("org-keyed webhooks", () => {
   it("fires for a run a teammate started, signed with the standard signature", async () => {
@@ -83,12 +83,12 @@ describe("org-keyed webhooks", () => {
     expect(await webhooks.drainWebhookOutbox()).toBe(0);
   });
 
-  it("fires for every workspace of the organization: there is no workspace scope", async () => {
+  it("fires for every project of the organization: there is no project scope", async () => {
     await hook("team-hook", "admin", "team", "https://hooks.example/team");
     await outbox("ob-a", "mate", "run.completed", event("run-a", "ws-a"));
     await outbox("ob-b", "admin", "run.completed", event("run-b", "ws-b"));
     await webhooks.drainWebhookOutbox();
-    expect(requests.map((request) => JSON.parse(request.body).workspaceId).sort()).toEqual(["ws-a", "ws-b"]);
+    expect(requests.map((request) => JSON.parse(request.body).projectId).sort()).toEqual(["ws-a", "ws-b"]);
   });
 
   it("never delivers another organization's events, in either direction", async () => {
@@ -103,19 +103,19 @@ describe("org-keyed webhooks", () => {
     expect(byUrl).toEqual({ "https://hooks.example/team": "run-a", "https://hooks.example/other": "run-o" });
   });
 
-  it("routes by the run: a payload naming another organization's workspace is refused, whoever the row names", async () => {
+  it("routes by the run: a payload naming another organization's project is refused, whoever the row names", async () => {
     await hook("team-hook", "admin", "team", "https://hooks.example/team");
     await hook("other-hook", "bob", "other", "https://hooks.example/other");
     // run-o is the other org's; the payload claims team's ws-a and a team user.
     await outbox("ob-mixed", "admin", "run.completed", event("run-o", "ws-a"));
     await webhooks.drainWebhookOutbox();
     expect(requests).toEqual([]);
-    expect(await dispatched("ob-mixed")).toMatchObject({ last_error: "Skipped: the event's workspace does not match its run" });
+    expect(await dispatched("ob-mixed")).toMatchObject({ last_error: "Skipped: the event's project does not match its run" });
   });
 
   it("refuses events with no run, or an unknown run, instead of guessing an organization", async () => {
     await hook("team-hook", "admin", "team", "https://hooks.example/team");
-    await outbox("ob-none", "admin", "run.completed", { workspaceId: "ws-a" });
+    await outbox("ob-none", "admin", "run.completed", { projectId: "ws-a" });
     await outbox("ob-unknown", "admin", "run.completed", event("run-missing", "ws-a"));
     await webhooks.drainWebhookOutbox();
     expect(requests).toEqual([]);
@@ -123,18 +123,18 @@ describe("org-keyed webhooks", () => {
     expect(await dispatched("ob-unknown")).toMatchObject({ last_error: expect.stringContaining("no longer exists") });
   });
 
-  it("skips events from a workspace that turned webhook notifications off or did not select them", async () => {
+  it("skips events from a project that turned webhook notifications off or did not select them", async () => {
     await hook("team-hook", "admin", "team", "https://hooks.example/team");
-    await sql`update workspaces set pipeline = ${sql.json({ webhooks: { enabled: false, events: [] } } as never)} where id = 'ws-a'`;
+    await sql`update projects set pipeline = ${sql.json({ webhooks: { enabled: false, events: [] } } as never)} where id = 'ws-a'`;
     await outbox("ob-off", "admin", "document.replaced", event("run-a", "ws-a"));
     await webhooks.drainWebhookOutbox();
     expect(requests).toEqual([]);
-    expect(await dispatched("ob-off")).toMatchObject({ last_error: "Skipped: webhook notifications are off for this workspace" });
-    await sql`update workspaces set pipeline = ${sql.json({ webhooks: { enabled: true, events: ["run.failed"] } } as never)} where id = 'ws-a'`;
+    expect(await dispatched("ob-off")).toMatchObject({ last_error: "Skipped: webhook notifications are off for this project" });
+    await sql`update projects set pipeline = ${sql.json({ webhooks: { enabled: true, events: ["run.failed"] } } as never)} where id = 'ws-a'`;
     await outbox("ob-narrow", "admin", "document.replaced", event("run-a", "ws-a"));
     await webhooks.drainWebhookOutbox();
     expect(requests).toEqual([]);
-    await sql`update workspaces set pipeline = '{}'::jsonb where id = 'ws-a'`;
+    await sql`update projects set pipeline = '{}'::jsonb where id = 'ws-a'`;
   });
 
   it("stops delivering once the webhook's creator is demoted to member or leaves the organization", async () => {
@@ -223,7 +223,7 @@ describe("creating a webhook", () => {
     expect(await sql`select count(*)::int as count from webhooks`).toEqual([{ count: 0 }]);
     const created = await webhooks.createWebhook({ ...base, userId: "admin", orgId: "team" });
     expect(created).toMatchObject({ orgId: "team", userId: "admin" });
-    expect(created).not.toHaveProperty("workspaceId");
+    expect(created).not.toHaveProperty("projectId");
   });
 
   it("refuses an organization that has been deleted", async () => {

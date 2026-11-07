@@ -73,8 +73,8 @@ describe("0125 webhooks", () => {
     expect(await rows("select id from webhook_deliveries order by id")).toEqual([{ id: "d-solo" }]);
   });
 
-  it("has no workspace scope and refuses a webhook without an organization", async () => {
-    expect(await rows("select column_name from information_schema.columns where table_name = 'webhooks' and column_name = 'workspace_id'")).toEqual([]);
+  it("has no project scope and refuses a webhook without an organization", async () => {
+    expect(await rows("select column_name from information_schema.columns where table_name = 'webhooks' and column_name = 'project_id'")).toEqual([]);
     await expect(db.query("insert into webhooks (id, user_id, url, secret) values ('w9', 'solo', 'https://example.test/x', 's')"))
       .rejects.toThrow(/null value in column "org_id"/);
   });

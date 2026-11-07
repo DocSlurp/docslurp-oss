@@ -7,8 +7,8 @@ import { fileProfileSchema, quoteSettingsSchema } from "@docslurp/shared";
  * work or spend credits, so an agent can price a change before asking for approval.
  */
 
-const WORKSPACE_REF = 'Optional workspace ID, slug or name (names match by slug). Omit for the organization default workspace.';
-const workspace = { type: "string", minLength: 1, maxLength: 256, description: WORKSPACE_REF };
+const PROJECT_REF = 'Optional project ID, slug or name (names match by slug). Omit for the organization default project.';
+const project = { type: "string", minLength: 1, maxLength: 256, description: PROJECT_REF };
 const freeObject = { type: "object", additionalProperties: true };
 
 export const ESTIMATE_TOOL_NAMES = [
@@ -28,12 +28,12 @@ export type EstimateToolName = (typeof ESTIMATE_TOOL_NAMES)[number];
  */
 type EstimateAccess = { sessionOnly: true } | { scopes: readonly string[]; server?: boolean };
 export const ESTIMATE_TOOL_ACCESS: Record<EstimateToolName, EstimateAccess> = {
-  "updateEstimate": { scopes: ["workspaces:manage"], server: true },
-  "searchSettingsEstimate": { scopes: ["workspaces:manage"], server: true },
+  "updateEstimate": { scopes: ["projects:manage"], server: true },
+  "searchSettingsEstimate": { scopes: ["projects:manage"], server: true },
   "reprocessEstimate": { scopes: ["ingest"], server: true },
   "fullIndexEstimate": { scopes: ["ingest"] },
-  "indexingModeEstimate": { scopes: ["workspaces:manage"], server: true },
-  "graphRebuildEstimate": { scopes: ["workspaces:manage"], server: true },
+  "indexingModeEstimate": { scopes: ["projects:manage"], server: true },
+  "graphRebuildEstimate": { scopes: ["projects:manage"], server: true },
   "uploadEstimate": { scopes: ["ingest"] },
 };
 
@@ -46,21 +46,21 @@ export function apiKeyMayUseEstimateTool(name: EstimateToolName, key: { scopes: 
 }
 
 export const estimateToolDefinitions: Array<{ name: EstimateToolName; title: string; description: string; inputSchema: Record<string, unknown> }> = [
-  { name: "updateEstimate", title: "Estimate workspace settings cost", description: "Impact kind and cost of PATCHing workspace settings (pipeline, embedding, chat...), including the re-index it would queue. Read-only; nothing is applied.", inputSchema: {
-    type: "object", properties: { workspace, changes: { ...freeObject, description: "The PATCH body you intend to send, for example { pipeline: {...}, apply: \"reindex\" }." } }, required: ["changes"] } },
-  { name: "searchSettingsEstimate", title: "Estimate search settings cost", description: "Impact and cost of changing a workspace's search settings. Read-only.", inputSchema: {
-    type: "object", properties: { workspace, changes: { ...freeObject, description: "The search-settings PATCH body." } }, required: ["changes"] } },
+  { name: "updateEstimate", title: "Estimate project settings cost", description: "Impact kind and cost of PATCHing project settings (pipeline, embedding, chat...), including the re-index it would queue. Read-only; nothing is applied.", inputSchema: {
+    type: "object", properties: { project, changes: { ...freeObject, description: "The PATCH body you intend to send, for example { pipeline: {...}, apply: \"reindex\" }." } }, required: ["changes"] } },
+  { name: "searchSettingsEstimate", title: "Estimate search settings cost", description: "Impact and cost of changing a project's search settings. Read-only.", inputSchema: {
+    type: "object", properties: { project, changes: { ...freeObject, description: "The search-settings PATCH body." } }, required: ["changes"] } },
   { name: "reprocessEstimate", title: "Estimate reprocessing cost", description: "Cost of re-running a run, optionally from a stage. Read-only.", inputSchema: {
     type: "object", properties: { runId: { type: "string", minLength: 1 }, stages: { type: "array", items: { type: "string" } }, stageFrom: { type: "string" } }, required: ["runId"] } },
-  { name: "fullIndexEstimate", title: "Estimate full indexing cost", description: "Cost of fully indexing a deferred workspace, listed documents, or one document (documentId). Read-only.", inputSchema: {
-    type: "object", properties: { workspace, documentId: { type: "string", minLength: 1 }, documentIds: { type: "array", items: { type: "string", minLength: 1 }, maxItems: 500 } } } },
-  { name: "indexingModeEstimate", title: "Estimate indexing mode cost", description: "Cost of switching a workspace to full, map or visual indexing. Read-only.", inputSchema: {
-    type: "object", properties: { workspace, mode: { type: "string", enum: ["full", "map", "visual"] } }, required: ["mode"] } },
-  { name: "graphRebuildEstimate", title: "Estimate graph rebuild cost", description: "Cost of rebuilding the workspace knowledge graph. Read-only.", inputSchema: {
-    type: "object", properties: { workspace } } },
-  { name: "uploadEstimate", title: "Estimate upload cost", description: "Estimated cost of ingesting files before any bytes are sent. Pass page counts when known; otherwise pages are estimated from size. Pass `profile` when the file was profiled locally with @docslurp/estimate (its facts narrow the estimate; never billed). Audio and video are priced by duration: pass durationSeconds (or the MIME type) and read `media` for their credits and the cheaper audio-track-only option. `quote` is the full estimate (ingest, monthly hosting and usage, neutral lines, ranges, pricing version); pass `settings` to quote other knobs than the workspace's (quality, indexing, features, hostingMonths, searchesPerMonth, chatAnswersPerMonth).", inputSchema: {
-    type: "object", properties: { workspace, files: { type: "array", minItems: 1, maxItems: 500, items: {
-      type: "object", properties: { name: { type: "string", minLength: 1 }, size: { type: "integer", minimum: 0 }, pages: { type: "integer", minimum: 0 }, type: { type: "string" }, durationSeconds: { type: "number", exclusiveMinimum: 0 }, profile: { ...freeObject, description: "A file profile from @docslurp/estimate, unchanged." } }, required: ["name", "size"] } }, settings: { ...freeObject, description: "Quote knobs overriding the workspace's: quality (fast, auto, good), indexing (full, on-demand, visual), documentSummary, structuredFields, knowledgeGraph, propositions, videoFrames, speedBoost, hostingMonths (1-60), searchesPerMonth, chatAnswersPerMonth, chatTier." } }, required: ["files"] } },
+  { name: "fullIndexEstimate", title: "Estimate full indexing cost", description: "Cost of fully indexing a deferred project, listed documents, or one document (documentId). Read-only.", inputSchema: {
+    type: "object", properties: { project, documentId: { type: "string", minLength: 1 }, documentIds: { type: "array", items: { type: "string", minLength: 1 }, maxItems: 500 } } } },
+  { name: "indexingModeEstimate", title: "Estimate indexing mode cost", description: "Cost of switching a project to full, map or visual indexing. Read-only.", inputSchema: {
+    type: "object", properties: { project, mode: { type: "string", enum: ["full", "map", "visual"] } }, required: ["mode"] } },
+  { name: "graphRebuildEstimate", title: "Estimate graph rebuild cost", description: "Cost of rebuilding the project knowledge graph. Read-only.", inputSchema: {
+    type: "object", properties: { project } } },
+  { name: "uploadEstimate", title: "Estimate upload cost", description: "Estimated cost of ingesting files before any bytes are sent. Pass page counts when known; otherwise pages are estimated from size. Pass `profile` when the file was profiled locally with @docslurp/estimate (its facts narrow the estimate; never billed). Audio and video are priced by duration: pass durationSeconds (or the MIME type) and read `media` for their credits and the cheaper audio-track-only option. `quote` is the full estimate (ingest, monthly hosting and usage, neutral lines, ranges, pricing version); pass `settings` to quote other knobs than the project's (quality, indexing, features, hostingMonths, searchesPerMonth, chatAnswersPerMonth).", inputSchema: {
+    type: "object", properties: { project, files: { type: "array", minItems: 1, maxItems: 500, items: {
+      type: "object", properties: { name: { type: "string", minLength: 1 }, size: { type: "integer", minimum: 0 }, pages: { type: "integer", minimum: 0 }, type: { type: "string" }, durationSeconds: { type: "number", exclusiveMinimum: 0 }, profile: { ...freeObject, description: "A file profile from @docslurp/estimate, unchanged." } }, required: ["name", "size"] } }, settings: { ...freeObject, description: "Quote knobs overriding the project's: quality (fast, auto, good), indexing (full, on-demand, visual), documentSummary, structuredFields, knowledgeGraph, propositions, videoFrames, speedBoost, hostingMonths (1-60), searchesPerMonth, chatAnswersPerMonth, chatTier." } }, required: ["files"] } },
 ];
 
 export const jobsGetToolDefinition = {
@@ -70,7 +70,7 @@ export const jobsGetToolDefinition = {
 };
 export const jobsGetInputSchema = z.object({ jobId: z.string().min(1).max(256) });
 
-const common = { workspace: z.string().min(1).max(256).optional() };
+const common = { project: z.string().min(1).max(256).optional() };
 const inputSchemas: Record<EstimateToolName, z.ZodType<Record<string, unknown>>> = {
   "updateEstimate": z.object({ ...common, changes: z.record(z.string(), z.unknown()) }),
   "searchSettingsEstimate": z.object({ ...common, changes: z.record(z.string(), z.unknown()) }),
@@ -85,18 +85,18 @@ export function isEstimateToolName(name: string): name is EstimateToolName {
   return (ESTIMATE_TOOL_NAMES as readonly string[]).includes(name);
 }
 
-export type EstimatePlan = { path: string; body: Record<string, unknown>; workspaceRef?: string };
+export type EstimatePlan = { path: string; body: Record<string, unknown>; projectRef?: string };
 
-/** Validates tool input and maps it to the estimate route and its mutation-identical body. `workspace` is the already-resolved workspace id. */
+/** Validates tool input and maps it to the estimate route and its mutation-identical body. `project` is the already-resolved project id. */
 export function planEstimateTool(
   name: EstimateToolName,
   input: unknown,
-  workspace: string,
+  project: string,
 ): { ok: true; plan: EstimatePlan } | { ok: false; issues: z.core.$ZodIssue[] } {
   const parsed = inputSchemas[name].safeParse(input);
   if (!parsed.success) return { ok: false, issues: parsed.error.issues };
   const data = parsed.data;
-  const ws = `/v1/workspaces/${encodeURIComponent(workspace)}`;
+  const ws = `/v1/projects/${encodeURIComponent(project)}`;
   switch (name) {
     case "updateEstimate": return { ok: true, plan: { path: `${ws}/estimate`, body: data.changes as Record<string, unknown> } };
     case "searchSettingsEstimate": return { ok: true, plan: { path: `${ws}/search-settings/estimate`, body: data.changes as Record<string, unknown> } };
@@ -110,12 +110,12 @@ export function planEstimateTool(
         : { ok: true, plan: { path: `${ws}/full-index/estimate`, body: data.documentIds ? { documentIds: data.documentIds } : {} } };
     case "indexingModeEstimate": return { ok: true, plan: { path: `${ws}/indexing-mode/estimate`, body: { mode: data.mode } } };
     case "graphRebuildEstimate": return { ok: true, plan: { path: `${ws}/graph/jobs/estimate`, body: {} } };
-    case "uploadEstimate": return { ok: true, plan: { path: "/v1/uploads/estimate", body: { files: data.files, workspace, ...(data.settings ? { settings: data.settings } : {}) } } };
+    case "uploadEstimate": return { ok: true, plan: { path: "/v1/uploads/estimate", body: { files: data.files, project, ...(data.settings ? { settings: data.settings } : {}) } } };
   }
 }
 
-/** Whether the tool takes a workspace (so the caller resolves the default/slug first). */
-export function estimateToolUsesWorkspace(name: EstimateToolName, input: unknown): boolean {
+/** Whether the tool takes a project (so the caller resolves the default/slug first). */
+export function estimateToolUsesProject(name: EstimateToolName, input: unknown): boolean {
   if (name === "reprocessEstimate") return false;
   if (name === "fullIndexEstimate" && input && typeof input === "object" && typeof (input as { documentId?: unknown }).documentId === "string") return false;
   return true;

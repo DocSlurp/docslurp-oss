@@ -13,30 +13,30 @@ test('indexes rendered main content with code and headings, excluding navigation
   assert.doesNotMatch(guide.html, /Hand off|boilerplate|>3</);
   assert.match(guide.html, /kept/);
 });
-test('uses canonical page identity, isolated workspace and public ingestion/progress contracts', async () => {
+test('uses canonical page identity, isolated project and public ingestion/progress contracts', async () => {
   const corpus = [{ path: '/docs/sdk', canonicalId: 'https://docslurp.io/docs/sdk', filename: docFilename('/docs/sdk'), html: '<h1>SDK</h1>' }];
   const calls = [];
   const fetchMock = async (url, init) => {
     calls.push({ url, init });
     assert.equal(init.headers.Authorization, 'Bearer private-index-key');
     if (url.endsWith('/v1/uploads/bulk')) {
-      // The name goes to the server, which finds the workspace or creates it on the first build.
-      assert.equal(init.body.get('workspace'), 'DocSlurp documentation');
-      assert.equal(init.body.get('newWorkspace'), null);
+      // The name goes to the server, which finds the project or creates it on the first build.
+      assert.equal(init.body.get('project'), 'DocSlurp documentation');
+      assert.equal(init.body.get('newProject'), null);
       assert.deepEqual(JSON.parse(init.body.get('canonicalIds')), ['https://docslurp.io/docs/sdk']);
       assert.equal(init.body.getAll('files')[0].name, docFilename('/docs/sdk'));
       assert.deepEqual(JSON.parse(init.body.get('pipeline')), { visionFallback: false, preserveImages: false, summarize: true });
-      return Response.json({ run: { id: 'run-id' }, workspace: { id: 'docs-id' } });
+      return Response.json({ run: { id: 'run-id' }, project: { id: 'docs-id' } });
     }
     assert.equal(url, 'https://docslurp.io/v1/runs/run-id/progress');
     return Response.json({ run: { id: 'run-id', status: 'completed' } });
   };
-  assert.deepEqual(await indexDocs(corpus, { apiUrl: 'https://docslurp.io' }, 'private-index-key', fetchMock), { workspaceId: 'docs-id', runId: 'run-id' });
+  assert.deepEqual(await indexDocs(corpus, { apiUrl: 'https://docslurp.io' }, 'private-index-key', fetchMock), { projectId: 'docs-id', runId: 'run-id' });
   assert.equal(calls.length, 2);
 });
 test('stops on the run states the API actually reports instead of waiting out the deadline', async () => {
   const progress = run => async url => url.endsWith('/v1/uploads/bulk')
-    ? Response.json({ run: { id: 'run-id' }, workspace: { id: 'docs-id' } })
+    ? Response.json({ run: { id: 'run-id' }, project: { id: 'docs-id' } })
     : Response.json({ run });
   for (const [run, message] of [
     [{ id: 'run-id', status: 'failed' }, /^Error: Docs ingestion failed$/],
@@ -47,10 +47,10 @@ test('stops on the run states the API actually reports instead of waiting out th
     await assert.rejects(indexDocs([], { apiUrl: 'https://docslurp.io' }, 'k', progress(run)), message);
   }
 });
-test('targets a configured workspace ID, slug or name and reports upstream errors without credentials', async () => {
+test('targets a configured project ID, slug or name and reports upstream errors without credentials', async () => {
   const sent = [];
-  await assert.rejects(indexDocs([], { apiUrl: 'https://docslurp.io', workspace: 'product-manuals' }, 'secret', async (url, init) => {
-    sent.push(init.body.get('workspace'));
+  await assert.rejects(indexDocs([], { apiUrl: 'https://docslurp.io', project: 'product-manuals' }, 'secret', async (url, init) => {
+    sent.push(init.body.get('project'));
     return new Response('secret', { status: 401 });
   }), /^Error: DocSlurp \/v1\/uploads\/bulk: HTTP 401$/);
   assert.deepEqual(sent, ['product-manuals']);

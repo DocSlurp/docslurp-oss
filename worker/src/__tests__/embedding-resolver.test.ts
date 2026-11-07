@@ -90,7 +90,7 @@ describe("resolveEmbeddingModel", () => {
     };
     const first = resolveEmbeddingModel(baseConfig, local);
     // The old per-document switch moved a non-ASCII document to the multilingual
-    // MiniLM (384 dims) while the workspace recorded vectors of the configured model.
+    // MiniLM (384 dims) while the project recorded vectors of the configured model.
     expect(first.profile).toBe("good-fast-local");
     expect(first.modelUri).toBe(local.embedding.modelUri);
     expect(first.dimensions).toBe(local.embedding.dimensions ?? first.dimensions);
@@ -104,7 +104,7 @@ describe("resolveEmbeddingModel", () => {
     expect(result.dimensions).toBe(1024);
   });
 
-  it("respects workspace-selected remote models while keeping workspace dimensions", () => {
+  it("respects project-selected remote models while keeping project dimensions", () => {
     const pipeline = {
       ...defaultPipelineFeatures,
       embedding: {
@@ -124,7 +124,7 @@ describe("resolveEmbeddingModel", () => {
     expect(result.dimensions).toBe(1536);
   });
 
-  it("derives custom local routes without exposing adapter knobs in workspace config", () => {
+  it("derives custom local routes without exposing adapter knobs in project config", () => {
     const pipeline = {
       ...defaultPipelineFeatures,
       embedding: {

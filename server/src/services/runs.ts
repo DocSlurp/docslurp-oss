@@ -11,26 +11,26 @@ import {
   effectiveIndexingMode,
   findMissingReuseInputs,
   withoutStageSelection,
-  workspaceRunEventSchema,
-  workspaceRunProgressSnapshotSchema,
-  workspaceRunStageStateSchema,
+  projectRunEventSchema,
+  projectRunProgressSnapshotSchema,
+  projectRunStageStateSchema,
   type DocumentRecord,
   type PipelineFeatures,
-  type WorkspaceRun,
-  type WorkspaceRunEvent,
-  type WorkspaceRunProgressSnapshot,
-  type WorkspaceRunStageState,
+  type ProjectRun,
+  type ProjectRunEvent,
+  type ProjectRunProgressSnapshot,
+  type ProjectRunStageState,
 } from "@docslurp/shared";
 
 import { runCreation } from "./run-creation.js";
 import {
   jsonRecord,
   mapDocument,
-  mapWorkspaceRun,
+  mapProjectRun,
   serializeOptionalTimestamp,
   serializeTimestamp,
   type DocumentRow,
-  type WorkspaceRunRow,
+  type ProjectRunRow,
 } from "./run-records.js";
 import { sql } from "../db.js";
 import { RUN_EVENTS_CHANNEL, RunEventHub, type RunEventHubRow } from "./run-event-hub.js";
@@ -43,9 +43,9 @@ import {
   getRunProcessingPreview,
 } from "./run-processing-preview.js";
 import {
-  canContributeToWorkspace,
-  getWorkspaceAccess,
-  listAccessibleWorkspaceIds,
+  canContributeToProject,
+  getProjectAccess,
+  listAccessibleProjectIds,
 } from "./organizations.js";
 import {
   admitRunSpend,
@@ -68,8 +68,8 @@ export { buildRunProcessingPreview, getRunProcessingPreview };
 type StageStateRow = {
   run_id: string;
   document_id: string | null;
-  stage_name: WorkspaceRunStageState["stage"];
-  status: WorkspaceRunStageState["status"];
+  stage_name: ProjectRunStageState["stage"];
+  status: ProjectRunStageState["status"];
   attempts: number;
   artifact_uri: string | null;
   stats: Record<string, unknown> | null;
@@ -79,14 +79,14 @@ type StageStateRow = {
   updated_at: string | Date;
 };
 
-type WorkspaceRunEventRow = {
+type ProjectRunEventRow = {
   id: string;
   user_id: string;
   run_id: string;
   document_id: string | null;
-  stage_name: WorkspaceRunEvent["stage"];
-  event_type: WorkspaceRunEvent["type"];
-  status: WorkspaceRunEvent["status"];
+  stage_name: ProjectRunEvent["stage"];
+  event_type: ProjectRunEvent["type"];
+  status: ProjectRunEvent["status"];
   message: string | null;
   progress: Record<string, unknown> | null;
   stats: Record<string, unknown> | null;
@@ -126,7 +126,7 @@ function timestampMs(value: string | Date | null | undefined): number | null {
 }
 
 export function shouldFailStaleProcessingRun(args: {
-  runStatus: WorkspaceRun["status"];
+  runStatus: ProjectRun["status"];
   temporalStatus: string | null;
   lastHeartbeatAt: string | Date | null;
   leaseExpiresAt: string | Date | null;
@@ -159,7 +159,7 @@ export function shouldFailStaleProcessingRun(args: {
 async function loadRunHeartbeat(runId: string): Promise<RunHeartbeatRow | null> {
   const [row] = await sql<RunHeartbeatRow[]>`
     select last_heartbeat_at, lease_expires_at, updated_at
-    from workspace_runs
+    from project_runs
     where id = ${runId}
     limit 1
   `;
@@ -168,12 +168,12 @@ async function loadRunHeartbeat(runId: string): Promise<RunHeartbeatRow | null> 
 }
 
 async function markRunFailedFromReconciliation(args: {
-  run: WorkspaceRun;
-  stage: WorkspaceRun["stage"];
+  run: ProjectRun;
+  stage: ProjectRun["stage"];
   message: string;
   stats: Record<string, unknown>;
   payload: Record<string, unknown>;
-}): Promise<WorkspaceRun> {
+}): Promise<ProjectRun> {
   const row = await runLifecycle.fail(args.run.id, {
     stage: args.stage,
     message: args.message,
@@ -186,16 +186,16 @@ async function markRunFailedFromReconciliation(args: {
     return args.run;
   }
 
-  return mapWorkspaceRun({
-    ...(row as unknown as WorkspaceRunRow),
-    workspace_name: args.run.workspaceName,
+  return mapProjectRun({
+    ...(row as unknown as ProjectRunRow),
+    project_name: args.run.projectName,
   }, args.run);
 }
 
 async function reconcileTemporalRunState(
-  run: WorkspaceRun,
+  run: ProjectRun,
   temporal: Awaited<ReturnType<typeof getPipelineTemporalSnapshot>>,
-): Promise<WorkspaceRun> {
+): Promise<ProjectRun> {
   const workflowStatus = temporal?.workflowStatus ?? null;
   if (
     run.status === "completed" ||
@@ -286,7 +286,7 @@ async function reconcileTemporalRunState(
 }
 
 /** Fill runs' cost from the usage ledger in one statement. */
-export async function withRunCosts(runs: WorkspaceRun[]): Promise<WorkspaceRun[]> {
+export async function withRunCosts(runs: ProjectRun[]): Promise<ProjectRun[]> {
   if (runs.length === 0) return runs;
   const costs = await runUsageCostSummaries(runs.map((run) => run.id));
   return runs.map((run) => {
@@ -295,8 +295,8 @@ export async function withRunCosts(runs: WorkspaceRun[]): Promise<WorkspaceRun[]
   });
 }
 
-function mapStageState(row: StageStateRow): WorkspaceRunStageState {
-  return workspaceRunStageStateSchema.parse({
+function mapStageState(row: StageStateRow): ProjectRunStageState {
+  return projectRunStageStateSchema.parse({
     runId: row.run_id,
     documentId: row.document_id,
     stage: row.stage_name,
@@ -311,8 +311,8 @@ function mapStageState(row: StageStateRow): WorkspaceRunStageState {
   });
 }
 
-function mapWorkspaceRunEvent(row: WorkspaceRunEventRow): WorkspaceRunEvent {
-  return workspaceRunEventSchema.parse({
+function mapProjectRunEvent(row: ProjectRunEventRow): ProjectRunEvent {
+  return projectRunEventSchema.parse({
     id: row.id,
     userId: row.user_id,
     runId: row.run_id,
@@ -328,27 +328,27 @@ function mapWorkspaceRunEvent(row: WorkspaceRunEventRow): WorkspaceRunEvent {
   });
 }
 
-export async function listRuns(userId: string, activityOnly = false): Promise<WorkspaceRun[]> {
-  const workspaceIds = await listAccessibleWorkspaceIds(userId);
-  if (workspaceIds.length === 0) {
+export async function listRuns(userId: string, activityOnly = false): Promise<ProjectRun[]> {
+  const projectIds = await listAccessibleProjectIds(userId);
+  if (projectIds.length === 0) {
     return [];
   }
 
   if (activityOnly) {
     // Include every active upload, even when it is older than the history window.
-    const rows = await sql<WorkspaceRunRow[]>`
-      select runs.*, workspaces.name as workspace_name
-      from workspace_runs runs
-      join workspaces on workspaces.id = runs.workspace_id
-      where runs.workspace_id = any(${sql.array(workspaceIds)})
+    const rows = await sql<ProjectRunRow[]>`
+      select runs.*, projects.name as project_name
+      from project_runs runs
+      join projects on projects.id = runs.project_id
+      where runs.project_id = any(${sql.array(projectIds)})
         and (runs.status in ('queued', 'processing') or runs.updated_at > now() - interval '5 minutes')
       order by runs.updated_at desc
     `;
-    const result: WorkspaceRun[] = [];
+    const result: ProjectRun[] = [];
     // Reconcile cold leases without asking Temporal about every healthy upload.
     for (let index = 0; index < rows.length; index += 8) {
       result.push(...await Promise.all(rows.slice(index, index + 8).map(async row => {
-        const run = mapWorkspaceRun(row);
+        const run = mapProjectRun(row);
         if (run.controlState === "paused" || !shouldFailStaleProcessingRun({
           runStatus: run.status, temporalStatus: null,
           lastHeartbeatAt: row.last_heartbeat_at ?? null,
@@ -363,26 +363,26 @@ export async function listRuns(userId: string, activityOnly = false): Promise<Wo
   return (await listRunsPage(userId, {})).runs;
 }
 
-export type RunsPage = { runs: WorkspaceRun[]; hasMore: boolean; nextCursor: string | null };
+export type RunsPage = { runs: ProjectRun[]; hasMore: boolean; nextCursor: string | null };
 
 /**
- * One page of run history, highest priority and newest first, over the workspaces the caller can reach (and, for
+ * One page of run history, highest priority and newest first, over the projects the caller can reach (and, for
  * an API key, only its organization). Pages are keyset-ordered on (priority, created_at, id), so runs created
  * while paging never shift a page; `nextCursor` is null on the last page.
  */
 export async function listRunsPage(userId: string, args: { orgId?: string | null; limit?: number; cursor?: string }): Promise<RunsPage> {
   const limit = args.limit ?? 50;
-  const workspaceIds = await listAccessibleWorkspaceIds(userId);
-  if (workspaceIds.length === 0) return { runs: [], hasMore: false, nextCursor: null };
+  const projectIds = await listAccessibleProjectIds(userId);
+  if (projectIds.length === 0) return { runs: [], hasMore: false, nextCursor: null };
   const after = args.cursor ? decodeListCursor<{ priority: number; createdAt: string; id: string }>("runs", args.cursor, { priority: "int", createdAt: "timestamp", id: "string" }) : null;
-  const rows = await sql<(WorkspaceRunRow & { cursor_created_at: string })[]>`
+  const rows = await sql<(ProjectRunRow & { cursor_created_at: string })[]>`
     select
       runs.*,
       runs.created_at::text as cursor_created_at,
-      workspaces.name as workspace_name
-    from workspace_runs runs
-    join workspaces on workspaces.id = runs.workspace_id
-    where runs.workspace_id = any(${sql.array(workspaceIds)})
+      projects.name as project_name
+    from project_runs runs
+    join projects on projects.id = runs.project_id
+    where runs.project_id = any(${sql.array(projectIds)})
       ${args.orgId ? sql`and runs.org_id = ${args.orgId}` : sql``}
       ${after ? sql`and (runs.priority, runs.created_at, runs.id) < (${after.priority}::int, ${after.createdAt}::timestamptz, ${after.id})` : sql``}
     order by runs.priority desc, runs.created_at desc, runs.id desc
@@ -392,7 +392,7 @@ export async function listRunsPage(userId: string, args: { orgId?: string | null
   const page = rows.slice(0, limit);
   const last = page.at(-1);
   return {
-    runs: await withRunCosts(page.map((row) => mapWorkspaceRun(row))),
+    runs: await withRunCosts(page.map((row) => mapProjectRun(row))),
     hasMore,
     nextCursor: hasMore && last ? encodeListCursor("runs", { priority: Number(last.priority), createdAt: last.cursor_created_at, id: last.id }) : null,
   };
@@ -403,38 +403,38 @@ export async function getRun(
   userId: string,
   /** `cost: false` skips the usage aggregate (costCents 0) for callers that never return the run. */
   options: { cost?: boolean } = {},
-): Promise<WorkspaceRun | null> {
-  const workspaceIds = await listAccessibleWorkspaceIds(userId);
-  if (workspaceIds.length === 0) {
+): Promise<ProjectRun | null> {
+  const projectIds = await listAccessibleProjectIds(userId);
+  if (projectIds.length === 0) {
     return null;
   }
 
-  const [row] = await sql<WorkspaceRunRow[]>`
+  const [row] = await sql<ProjectRunRow[]>`
     select
       runs.*,
-      workspaces.name as workspace_name
-    from workspace_runs runs
-    join workspaces on workspaces.id = runs.workspace_id
-    where runs.id = ${runId} and runs.workspace_id = any(${sql.array(workspaceIds)})
+      projects.name as project_name
+    from project_runs runs
+    join projects on projects.id = runs.project_id
+    where runs.id = ${runId} and runs.project_id = any(${sql.array(projectIds)})
     limit 1
   `;
 
   if (!row) return null;
-  const run = mapWorkspaceRun(row);
+  const run = mapProjectRun(row);
   // Progress snapshots compute the cost themselves (buildRunProgressSnapshot).
   return options.cost === false ? run : (await withRunCosts([run]))[0]!;
 }
 
 export async function listDocuments(userId: string): Promise<DocumentRecord[]> {
-  const workspaceIds = await listAccessibleWorkspaceIds(userId);
-  if (workspaceIds.length === 0) {
+  const projectIds = await listAccessibleProjectIds(userId);
+  if (projectIds.length === 0) {
     return [];
   }
 
   const rows = await sql<DocumentRow[]>`
     select *
     from documents
-    where workspace_id = any(${sql.array(workspaceIds)})
+    where project_id = any(${sql.array(projectIds)})
     order by created_at desc
     limit 100
   `;
@@ -446,8 +446,8 @@ export async function getDocumentVersions(
   docId: string,
   userId: string,
 ): Promise<DocumentRecord[]> {
-  const workspaceIds = await listAccessibleWorkspaceIds(userId);
-  if (workspaceIds.length === 0) {
+  const projectIds = await listAccessibleProjectIds(userId);
+  if (projectIds.length === 0) {
     return [];
   }
 
@@ -458,7 +458,7 @@ export async function getDocumentVersions(
     const lookupId: string = currentId;
     const rows: DocumentRow[] = await sql<DocumentRow[]>`
       select * from documents
-      where id = ${lookupId} and workspace_id = any(${sql.array(workspaceIds)})
+      where id = ${lookupId} and project_id = any(${sql.array(projectIds)})
       limit 1
     `;
 
@@ -485,12 +485,12 @@ type ReuseSourceRow = {
  * derived data, and carry the artifacts the executed stages read.
  */
 async function assertReusableSource(
-  original: Pick<WorkspaceRun, "id" | "artifacts">,
+  original: Pick<ProjectRun, "id" | "artifacts">,
   plan: ReturnType<typeof compilePipelinePlan>,
   documentIds?: string[],
 ): Promise<void> {
   const [runRow] = await sql<{ artifacts_purged_at: Date | string | null }[]>`
-    select artifacts_purged_at from workspace_runs where id = ${original.id}
+    select artifacts_purged_at from project_runs where id = ${original.id}
   `;
   const sources = await sql<ReuseSourceRow[]>`
     select id, status, purged_at from documents where run_id = ${original.id}
@@ -502,7 +502,7 @@ async function assertReusableSource(
 
 /** Pure reuse validation over already-loaded rows (shared by the single-run and batched paths). */
 function checkReusableSource(
-  original: Pick<WorkspaceRun, "id" | "artifacts">,
+  original: Pick<ProjectRun, "id" | "artifacts">,
   artifactsPurgedAt: Date | string | null,
   sources: ReuseSourceRow[],
   plan: ReturnType<typeof compilePipelinePlan>,
@@ -559,14 +559,14 @@ export async function reprocessRun(
   runId: string,
   userId: string,
   options?: { stages?: string[]; stageFrom?: string; speedBoost?: boolean },
-): Promise<{ run: WorkspaceRun; deferredReason: string | null } | null> {
+): Promise<{ run: ProjectRun; deferredReason: string | null } | null> {
   const original = await getRun(runId, userId);
   if (!original) return null;
-  const access = await getWorkspaceAccess(original.workspaceId, userId);
-  if (!access || !canContributeToWorkspace(access, userId)) {
+  const access = await getProjectAccess(original.projectId, userId);
+  if (!access || !canContributeToProject(access, userId)) {
     throw new Error("Forbidden");
   }
-  const [extractRun] = await sql<{ extract_id: string | null }[]>`select extract_id from workspace_runs where id = ${runId}`;
+  const [extractRun] = await sql<{ extract_id: string | null }[]>`select extract_id from project_runs where id = ${runId}`;
   if (extractRun?.extract_id) throw extractNotReprocessable();
 
   const docs = await sql<DocumentRow[]>`
@@ -600,7 +600,7 @@ export async function reprocessRun(
 
   const created = await runCreation.create({
     userId,
-    workspaceId: original.workspaceId,
+    projectId: original.projectId,
     kind: original.kind,
     priority: original.priority ?? 0,
     speedBoost: options?.speedBoost === true,
@@ -610,12 +610,12 @@ export async function reprocessRun(
   return { run: created.run, deferredReason: created.deferredReason };
 }
 
-type RunEventHubRowSql = Omit<WorkspaceRunEventRow, "stats" | "payload"> & { cursor: string };
+type RunEventHubRowSql = Omit<ProjectRunEventRow, "stats" | "payload"> & { cursor: string };
 
 function mapHubRow(row: RunEventHubRowSql): RunEventHubRow {
   // Live deltas stay compact, as the NOTIFY payloads were: full stats and
   // payload remain available from the event and progress APIs.
-  return { event: mapWorkspaceRunEvent({ ...row, stats: {}, payload: {} }), cursor: row.cursor };
+  return { event: mapProjectRunEvent({ ...row, stats: {}, payload: {} }), cursor: row.cursor };
 }
 
 let runEventHub: RunEventHub | null = null;
@@ -637,7 +637,7 @@ function getRunEventHub(): RunEventHub {
           events.created_at::text, to_char(events.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor
         from jsonb_to_recordset(${sql.json(cursors.map(({ runId, after }) => ({ run_id: runId, after })))}::jsonb)
           as wanted(run_id text, after timestamptz)
-        join workspace_run_events events
+        join project_run_events events
           on events.run_id = wanted.run_id and events.created_at >= wanted.after
         order by events.created_at asc, events.id asc
         limit ${limit}
@@ -650,10 +650,10 @@ function getRunEventHub(): RunEventHub {
           events.id, events.user_id, events.run_id, events.document_id, events.stage_name,
           events.event_type, events.status, events.message, events.progress,
           events.created_at::text, to_char(events.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as cursor
-        from workspace_run_events events
+        from project_run_events events
         where events.run_id = ${runId}
           and events.created_at >= (
-            select max(created_at) from workspace_run_events where run_id = ${runId}
+            select max(created_at) from project_run_events where run_id = ${runId}
           ) - (${lookbackMs} * interval '1 millisecond')
       `;
       return rows.map(mapHubRow);
@@ -664,11 +664,11 @@ function getRunEventHub(): RunEventHub {
 
 /**
  * Live run events for SSE routes: one run's (`runId`) or all runs'. Events
- * are read by cursor from workspace_run_events; NOTIFY only wakes the reader
+ * are read by cursor from project_run_events; NOTIFY only wakes the reader
  * (see run-event-hub.ts). Callers still check access per event.
  */
 export async function listenForRunEvents(
-  onEvent: (event: WorkspaceRunEvent) => void | Promise<void>,
+  onEvent: (event: ProjectRunEvent) => void | Promise<void>,
   filter: { runId?: string } = {},
 ): Promise<{ close: () => Promise<void> }> {
   return await getRunEventHub().subscribe(onEvent, filter);
@@ -677,13 +677,13 @@ export async function listenForRunEvents(
 export async function retryRun(
   runId: string,
   userId: string,
-): Promise<{ run: WorkspaceRun; outcome: RunRetryOutcome } | null> {
+): Promise<{ run: ProjectRun; outcome: RunRetryOutcome } | null> {
   const run = await getRun(runId, userId);
   if (!run) {
     return null;
   }
-  const access = await getWorkspaceAccess(run.workspaceId, userId);
-  if (!access || !canContributeToWorkspace(access, userId)) {
+  const access = await getProjectAccess(run.projectId, userId);
+  if (!access || !canContributeToProject(access, userId)) {
     throw new Error("Forbidden");
   }
 
@@ -693,7 +693,7 @@ export async function retryRun(
   {
     const notRetryable = Symbol("retry-no-longer-eligible");
     try {
-      const prepared = await admitRunSpend(run.orgId, run.workspaceId, async tx => {
+      const prepared = await admitRunSpend(run.orgId, run.projectId, async tx => {
         const status = await runLifecycle.prepareRetry(run, tx);
         // Abort admission before its post-callback lease acquisition. A stale or
         // clean completed run must not retain credits for work it cannot retry.
@@ -716,13 +716,13 @@ export async function controlRun(
   runId: string,
   userId: string,
   input: { action: RunControlAction; priority?: number },
-): Promise<WorkspaceRun | null> {
+): Promise<ProjectRun | null> {
   const run = await getRun(runId, userId);
   if (!run) {
     return null;
   }
-  const access = await getWorkspaceAccess(run.workspaceId, userId);
-  if (!access || !canContributeToWorkspace(access, userId)) {
+  const access = await getProjectAccess(run.projectId, userId);
+  if (!access || !canContributeToProject(access, userId)) {
     throw new Error("Forbidden");
   }
 
@@ -742,13 +742,13 @@ export async function controlRun(
     const outcome = await resumeSpendPausedRunOutcome(run.id);
     if (outcome.status === "resumed" || outcome.status === "deferred") return getRun(run.id, userId);
     if (outcome.status === "blocked") {
-      const code = (["workspace_budget_paused", "org_budget_paused", "plan_not_entitled"] as const)
+      const code = (["project_budget_paused", "org_budget_paused", "plan_not_entitled"] as const)
         .find((candidate) => candidate === outcome.reason) ?? "credit_exhausted";
       throw new SpendBlockedError(
         code === "credit_exhausted"
           ? "Out of credits: other runs in this organization hold the remaining credits. " +
             "Buy credits or turn on auto top-up at /app/billing to continue."
-          : "AI processing is paused for this workspace or organization. Raise the budget to resume.",
+          : "AI processing is paused for this project or organization. Raise the budget to resume.",
         code,
       );
     }
@@ -756,7 +756,7 @@ export async function controlRun(
   if (input.action === "recover" || input.action === "resume") {
     const unchanged = Symbol("control-no-longer-eligible");
     try {
-      await admitRunSpend(run.orgId, run.workspaceId, async tx => {
+      await admitRunSpend(run.orgId, run.projectId, async tx => {
         const changed = await runLifecycle.control(run, input, tx);
         if (!changed) throw unchanged;
         return changed;
@@ -775,7 +775,7 @@ export async function controlRun(
 export async function listRunStageStates(
   runId: string,
   userId: string,
-): Promise<WorkspaceRunStageState[]> {
+): Promise<ProjectRunStageState[]> {
   const run = await getRun(runId, userId);
   if (!run) {
     return [];
@@ -787,7 +787,7 @@ export async function listRunStageStates(
 async function listRunStageStatesForRunId(
   runId: string,
   limit?: number,
-): Promise<WorkspaceRunStageState[]> {
+): Promise<ProjectRunStageState[]> {
   const rows = await sql<StageStateRow[]>`
     select
       rss.run_id,
@@ -801,8 +801,8 @@ async function listRunStageStatesForRunId(
       rss.started_at::text,
       rss.completed_at::text,
       rss.updated_at::text
-    from workspace_run_stage_states rss
-    join workspace_runs runs on runs.id = rss.run_id
+    from project_run_stage_states rss
+    join project_runs runs on runs.id = rss.run_id
     where rss.run_id = ${runId}
     union all
     select
@@ -818,7 +818,7 @@ async function listRunStageStatesForRunId(
       drss.completed_at::text,
       drss.updated_at::text
     from document_run_stage_states drss
-    join workspace_runs runs on runs.id = drss.run_id
+    join project_runs runs on runs.id = drss.run_id
     where drss.run_id = ${runId}
     order by updated_at asc
     ${limit ? sql`limit ${limit}` : sql``}
@@ -832,7 +832,7 @@ export async function listRunEvents(args: {
   userId: string;
   after?: string;
   limit?: number;
-}): Promise<WorkspaceRunEvent[]> {
+}): Promise<ProjectRunEvent[]> {
   const run = await getRun(args.runId, args.userId);
   if (!run) {
     return [];
@@ -850,9 +850,9 @@ export async function listRunEventsForRunId(args: {
   after?: string;
   limit?: number;
   newest?: boolean;
-}): Promise<WorkspaceRunEvent[]> {
+}): Promise<ProjectRunEvent[]> {
   const limit = Math.max(1, Math.min(args.limit ?? 50, 200));
-  const rows = await sql<WorkspaceRunEventRow[]>`
+  const rows = await sql<ProjectRunEventRow[]>`
     select
       events.id,
       events.user_id,
@@ -866,8 +866,8 @@ export async function listRunEventsForRunId(args: {
       events.stats,
       events.payload,
       events.created_at::text
-    from workspace_run_events events
-    join workspace_runs runs on runs.id = events.run_id
+    from project_run_events events
+    join project_runs runs on runs.id = events.run_id
     where events.run_id = ${args.runId}
       and (${args.after ?? null}::timestamptz is null or events.created_at > ${args.after ?? null}::timestamptz)
     order by ${args.newest ? sql`events.created_at desc, events.id desc` : sql`events.created_at asc, events.id asc`}
@@ -879,7 +879,7 @@ export async function listRunEventsForRunId(args: {
   if (args.newest) rows.reverse();
   return rows.flatMap((row) => {
     try {
-      return [mapWorkspaceRunEvent(row)];
+      return [mapProjectRunEvent(row)];
     } catch (error) {
       console.warn(`[runs] skipped unreadable run event ${row.id} (${row.event_type}):`, error instanceof Error ? error.message.slice(0, 200) : String(error));
       return [];
@@ -913,7 +913,7 @@ export function summarizeStageResources(rows: StageResourceRow[]) {
 }
 
 export async function buildRunProgressSnapshot(
-  run: WorkspaceRun,
+  run: ProjectRun,
   options?: {
     recentEventLimit?: number;
     /** Observe persisted state without querying/reconciling the executor. */
@@ -924,7 +924,7 @@ export async function buildRunProgressSnapshot(
      */
     operator?: boolean;
   },
-): Promise<WorkspaceRunProgressSnapshot> {
+): Promise<ProjectRunProgressSnapshot> {
   const recentEventLimit = options?.recentEventLimit ?? 100;
 
   const temporal = options?.readOnly ? null : await getPipelineTemporalSnapshot(run.id);
@@ -995,7 +995,7 @@ export async function buildRunProgressSnapshot(
     ...cost,
   });
 
-  const snapshot = workspaceRunProgressSnapshotSchema.parse({
+  const snapshot = projectRunProgressSnapshotSchema.parse({
     // One cost on every surface: the run record carries progress.usageTotals.costCents.
     run: { ...reconciledRun, costCents: cost.costCents, computeEstimated: cost.computeEstimated, billedCostCents: cost.billedCostCents },
     stages,
@@ -1016,7 +1016,7 @@ export async function getRunProgress(
     /** Platform operator: keep the worker diagnostics (see buildRunProgressSnapshot). */
     operator?: boolean;
   },
-): Promise<WorkspaceRunProgressSnapshot | null> {
+): Promise<ProjectRunProgressSnapshot | null> {
   const run = await getRun(runId, userId, { cost: false });
   if (!run) {
     return null;
@@ -1037,7 +1037,7 @@ export async function assertBackfillReusableMany(
   const plan = compilePipelinePlan(pipeline);
   if (plan.stageOrder.length === 0) {
     throw new ReprocessRejectedError(
-      "None of the requested stages is enabled in this workspace's pipeline.",
+      "None of the requested stages is enabled in this project's pipeline.",
       400,
       "no_stages_to_run",
       { requested: pipeline.stageSubset ?? null },
@@ -1046,7 +1046,7 @@ export async function assertBackfillReusableMany(
   if (plan.reusedStages.length === 0) return;
   const runIds = groups.map((group) => group.runId);
   const runs = await sql<{ id: string; artifacts: Record<string, unknown> | null; artifacts_purged_at: Date | string | null }[]>`
-    select id, artifacts, artifacts_purged_at from workspace_runs where id = any(${runIds})
+    select id, artifacts, artifacts_purged_at from project_runs where id = any(${runIds})
   `;
   const documentIds = groups.flatMap((group) => group.documentIds);
   const docs = await sql<(ReuseSourceRow & { run_id: string })[]>`
@@ -1062,6 +1062,6 @@ export async function assertBackfillReusableMany(
     }
     const wanted = new Set(group.documentIds);
     const sources = docs.filter((doc) => doc.run_id === group.runId && wanted.has(doc.id));
-    checkReusableSource({ id: run.id, artifacts: (run.artifacts ?? {}) as WorkspaceRun["artifacts"] }, run.artifacts_purged_at, sources, plan);
+    checkReusableSource({ id: run.id, artifacts: (run.artifacts ?? {}) as ProjectRun["artifacts"] }, run.artifacts_purged_at, sources, plan);
   }
 }

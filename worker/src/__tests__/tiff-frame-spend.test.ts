@@ -29,11 +29,11 @@ beforeAll(async () => {
     insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com');
     insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents)
       values ('o-low', 'Low', 'low', 'u1', 8, 105), ('o-ten', 'Ten', 'ten', 'u1', 8, 110);
-    insert into workspaces(id, org_id, user_id, name) values ('w-low', 'o-low', 'u1', 'L'), ('w-ten', 'o-ten', 'u1', 'T');
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+    insert into projects(id, org_id, user_id, name) values ('w-low', 'o-low', 'u1', 'L'), ('w-ten', 'o-ten', 'u1', 'T');
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
       values ('run-low', 'o-low', 'u1', 'w-low', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 1, 1),
              ('run-ten', 'o-ten', 'u1', 'w-ten', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 2, 2);
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source) values
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source) values
       ('tiff-40', 'o-low', 'u1', 'w-low', 'run-low', 'deposition.tiff', 'image/tiff', 'raw/t40', 'processing', 1, 'assumed'),
       ('tiff-a', 'o-ten', 'u1', 'w-ten', 'run-ten', 'a.tiff', 'image/tiff', 'raw/ta', 'processing', 1, 'assumed'),
       ('tiff-b', 'o-ten', 'u1', 'w-ten', 'run-ten', 'b.tiff', 'image/tiff', 'raw/tb', 'processing', 1, 'assumed');
@@ -61,21 +61,21 @@ async function stateFor(runId: string, documentId: string): Promise<WorkflowStat
 }
 
 const control = async (runId: string) =>
-  (await db.query<{ control_state: string | null; pause_reason: string | null }>(`select control_state, pause_reason from workspace_runs where id = '${runId}'`)).rows[0];
+  (await db.query<{ control_state: string | null; pause_reason: string | null }>(`select control_state, pause_reason from project_runs where id = '${runId}'`)).rows[0];
 const pageCount = async (documentId: string) =>
   (await db.query<{ page_count: number; page_count_source: string }>(`select page_count, page_count_source from documents where id = '${documentId}'`)).rows[0];
 
 describe("charge spend check fails closed", () => {
   it("refuses with a retryable error when the balance read fails, and when the pause it decided on cannot be written", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const run = { id: "run-x", orgId: "o-low", workspaceId: "w-low", userId: "u1" };
+    const run = { id: "run-x", orgId: "o-low", projectId: "w-low", userId: "u1" };
     const readFails = (async () => { throw new Error("connection reset"); }) as any;
     await expect(enforceRunSpendForCharge(readFails, run, 5)).rejects.toBeInstanceOf(SpendCheckUnavailableError);
     // The balance says no; the pause update then fails.
     let queries = 0;
     const pauseFails = (async () => {
       queries += 1;
-      if (queries === 1) return [{ funded: true, available: 0, workspace_budget_paused: false, org_budget_paused: false, workspace_in_org: true }];
+      if (queries === 1) return [{ funded: true, available: 0, project_budget_paused: false, org_budget_paused: false, project_in_org: true }];
       throw new Error("deadlock detected");
     }) as any;
     await expect(enforceRunSpendForCharge(pauseFails, run, 5)).rejects.toBeInstanceOf(SpendCheckUnavailableError);
@@ -118,7 +118,7 @@ describe("OCR VM provider cost on a refused image", () => {
 
 describe("TIFF frame-count spend check", () => {
   it("sizes an image's OCR read to the frames the balance covers before the VM starts, without pausing the run", async () => {
-    await db.exec(`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source)
+    await db.exec(`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source)
       values ('tiff-size', 'o-low', 'u1', 'w-low', 'run-low', 'size.tiff', 'image/tiff', 'raw/ts', 'processing', 1, 'assumed')`);
     const state = await stateFor("run-low", "tiff-size");
     const frames = await affordableImageFrames(state, "tiff-size", 64);

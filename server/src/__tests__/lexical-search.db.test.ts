@@ -23,7 +23,7 @@ beforeAll(async () => {
 
   await sql.unsafe("set session_replication_role = replica");
   await sql`
-    insert into documents (id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, org_id)
+    insert into documents (id, user_id, project_id, run_id, filename, mime_type, source_key, status, org_id)
     select 'doc-' || g, 'u1', case when g <= 8 then 'ws-a' else 'ws-b' end, 'run-1', 'f' || g || '.pdf', 'application/pdf', 'k', 'completed', 'org1'
     from generate_series(1, 10) g
   `;
@@ -42,7 +42,7 @@ afterAll(async () => {
   await stop?.();
 });
 
-const where = () => sql`exists (select 1 from documents scope_document where scope_document.id = c.document_id and scope_document.workspace_id = 'ws-a') and d.status = 'completed' and d.superseded_at is null`;
+const where = () => sql`exists (select 1 from documents scope_document where scope_document.id = c.document_id and scope_document.project_id = 'ws-a') and d.status = 'completed' and d.superseded_at is null`;
 
 async function unboundedRanking(tsquery: string, limit: number): Promise<string[]> {
   const rows = await sql<{ id: string }[]>`

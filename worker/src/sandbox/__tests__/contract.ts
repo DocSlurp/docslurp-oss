@@ -75,7 +75,7 @@ export function defineSandboxContract(
       return opened;
     }
 
-    function workspace(label: string): string {
+    function project(label: string): string {
       const dir = mkdtempSync(path.join(root, `${label}-`));
       return dir;
     }
@@ -95,7 +95,7 @@ export function defineSandboxContract(
 
     it("fails to read a file that was not declared readable", async (ctx) => {
       const opened = requireFilesystem(ctx);
-      const dir = workspace("secret");
+      const dir = project("secret");
       const secret = path.join(dir, "secret.txt");
       writeFileSync(secret, "top-secret");
       const result = await execInSession(opened, command(["-c", `cat "${secret}"`]));
@@ -105,7 +105,7 @@ export function defineSandboxContract(
 
     it("reads a declared input file", async (ctx) => {
       const opened = ready(ctx);
-      const dir = workspace("input");
+      const dir = project("input");
       const input = path.join(dir, "input.txt");
       writeFileSync(input, "input-contents");
       const result = await execInSession(
@@ -118,8 +118,8 @@ export function defineSandboxContract(
 
     it("fails to write outside the declared writable paths", async (ctx) => {
       const opened = requireFilesystem(ctx);
-      const allowed = workspace("allowed");
-      const outside = workspace("outside");
+      const allowed = project("allowed");
+      const outside = project("outside");
       const target = path.join(outside, "out.txt");
       const result = await execInSession(
         opened,
@@ -132,7 +132,7 @@ export function defineSandboxContract(
     it("makes writes to a declared writable path visible locally", async (ctx) => {
       const opened = ready(ctx);
       if (opened.isolation.location !== "local") ctx.skip("write-back is checked on local providers only");
-      const dir = workspace("writable");
+      const dir = project("writable");
       const target = path.join(dir, "out.txt");
       const result = await execInSession(
         opened,
@@ -230,7 +230,7 @@ export function defineSandboxContract(
       // A local command writes the host directory directly, so a partial file it wrote before
       // the kill stays there by design; only remote providers copy outputs back.
       if (opened.isolation.location === "local") ctx.skip("outputs are staged back on remote providers only");
-      const dir = workspace("aborted");
+      const dir = project("aborted");
       const partial = path.join(dir, "partial.txt");
       const controller = new AbortController();
       const aborted = execInSession(

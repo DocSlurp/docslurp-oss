@@ -54,6 +54,6 @@ The default stack needs no GPU. The lean and full workers run on CPU, and local 
 A GPU is optional in two places:
 
 - The `vision-runtime` extractor for handwriting, degraded scans and charts is listed with 1 GB of VRAM or more and an optional GPU ([Extraction feature matrix](../extraction-feature-matrix.md)).
-- Private model endpoints let you point `local-only` and `strict-privacy` workspaces at an OpenAI-compatible server you run, such as vLLM on a rented GPU. The GPU lives on that server, not in this Compose stack. See [Model configuration](../model-configuration.md#private-model-endpoints).
+- Private model endpoints let you point `local-only` and `strict-privacy` projects at an OpenAI-compatible server you run, such as vLLM on a rented GPU. The GPU lives on that server, not in this Compose stack. See [Model configuration](../model-configuration.md#private-model-endpoints).
 
 The Compose file has no GPU device reservations.

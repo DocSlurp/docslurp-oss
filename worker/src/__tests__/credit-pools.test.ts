@@ -176,7 +176,7 @@ describe("credit balance functions", () => {
       const { rows } = await db.query<{ credits: string; metadata: Record<string, unknown> }>(
         `select (delta * 100)::text as credits, metadata from credit_ledger where org_id = 'agg-pending'`);
       expect(rows).toHaveLength(1);
-      expect(rows[0]!.metadata).toMatchObject({ aggregated: true, debitCount: 240, runCount: 3, runsTruncated: false, workspaceIds: ["ws-1"] });
+      expect(rows[0]!.metadata).toMatchObject({ aggregated: true, debitCount: 240, runCount: 3, runsTruncated: false, projectIds: ["ws-1"] });
       const runs = rows[0]!.metadata.runs as Record<string, number>;
       expect(Object.keys(runs).sort()).toEqual(["run-0", "run-1", "run-2"]);
       expect(Object.values(runs).reduce((sum, value) => sum + Number(value), 0)).toBeCloseTo(total, 6);
@@ -194,7 +194,7 @@ describe("credit balance functions", () => {
       expect((await org("agg-idem")).balance).toBe(350);
       const { rows } = await db.query<{ metadata: Record<string, unknown> }>(
         `select metadata from credit_ledger where org_id = 'agg-idem' order by created_at limit 1`);
-      expect(rows[0]!.metadata).toMatchObject({ runId: "run-a", workspaceId: "ws-1", debitCount: 1 });
+      expect(rows[0]!.metadata).toMatchObject({ runId: "run-a", projectId: "ws-1", debitCount: 1 });
     });
 
     it("ignores zero and negative amounts", async () => {

@@ -21,8 +21,8 @@ beforeAll(async () => {
   db = await createMigratedDatabase();
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
-    insert into workspaces(id, org_id, user_id, name) values ('w', null, 'u1', 'W');
-    insert into workspace_runs (id, user_id, workspace_id, kind, status, stage, pipeline) values
+    insert into projects(id, org_id, user_id, name) values ('w', null, 'u1', 'W');
+    insert into project_runs (id, user_id, project_id, kind, status, stage, pipeline) values
       ('run-a', 'u1', 'w', 'bulk-upload', 'processing', 'embed', '{}'),
       ('run-b', 'u1', 'w', 'bulk-upload', 'processing', 'embed', '{}');
   `);
@@ -44,13 +44,13 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await sql`delete from workspace_run_events`;
+  await sql`delete from project_run_events`;
   statements.length = 0;
 });
 
 const notifies = () => statements.filter((query) => query.includes("pg_notify"));
 const events = async () => (await sql<{ run_id: string; event_type: string; message: string }[]>`
-  select run_id, event_type, message from workspace_run_events order by created_at, id`)
+  select run_id, event_type, message from project_run_events order by created_at, id`)
   .map((row) => `${row.run_id}:${row.event_type}:${row.message}`);
 
 const progress = (runId: string, message: string) => ({ userId: "u1", runId, eventType: "run.progress", message });

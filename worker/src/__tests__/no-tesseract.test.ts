@@ -38,7 +38,7 @@ describe("No OCR engine is installed or linked in the worker", () => {
   const scanner = async () => (await import(pathToFileURL(path.join(repo, "scripts", "scan-ocr-engines.mjs")).href)) as Scan;
 
   it("finds no Tesseract, Leptonica or PaddleOCR linkage in any installed ELF or wasm object", async () => {
-    // Every native object the installed workspace can load: the pnpm store the worker resolves from, and the worker's
+    // Every native object the installed project can load: the pnpm store the worker resolves from, and the worker's
     // and repository's own node_modules. A hit names the file and evidence; remove that dependency (it would run OCR on
     // customer pixels in the worker host) instead of allow-listing it here. Unverified (stripped) objects are listed.
     const store = path.join(repo, "node_modules", ".pnpm");

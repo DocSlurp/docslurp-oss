@@ -123,7 +123,7 @@ Request (strict: unknown fields are refused):
 }
 ```
 
-Knobs (`quoteSettingsSchema`; omitted ones take a new workspace's defaults): `quality` (`fast`, `auto`, `good`),
+Knobs (`quoteSettingsSchema`; omitted ones take a new project's defaults): `quality` (`fast`, `auto`, `good`),
 `indexing` (`full`, `on-demand`, `visual`: page images embedded on upload, a read of every page, refused with `fast`), `documentSummary`, `structuredFields`, `knowledgeGraph`, `propositions`,
 `videoFrames`, `speedBoost`, `hostingMonths` (1–60), `searchesPerMonth`, `chatAnswersPerMonth`, `chatTier`.
 
@@ -145,5 +145,5 @@ a twice-Letter page with little text bills 2. Office, EPUB, HTML and text files 
 allowance. Billing (`recordPageEquivalents`' `allowance`, over the stored whole measurements) and quotes (the profile's
 `pageEquivalentsByAllowance`, exact for an allowance of 1 to 3) apply the same rule. Pages the profiler had to estimate (`textEstimatedPages`), and unsampled pages
 of a file whose sampled pages were dense, widen only a quote's high end. Signed-in callers and API keys quote
-against a workspace's settings with `POST /v1/uploads/estimate` (`settings` overrides, answer in `quote`), which uses
+against a project's settings with `POST /v1/uploads/estimate` (`settings` overrides, answer in `quote`), which uses
 the same quote function.

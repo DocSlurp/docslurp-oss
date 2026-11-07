@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  listWorkspaces: vi.fn(),
+  listProjects: vi.fn(),
   getInvitePreview: vi.fn(),
   notifySignup: vi.fn(),
   insert: vi.fn(),
@@ -15,7 +15,7 @@ const mocks = vi.hoisted(() => ({
   devSeed: vi.fn(),
 }));
 
-vi.mock("../services/workspaces.js", () => ({ listWorkspaces: mocks.listWorkspaces }));
+vi.mock("../services/projects.js", () => ({ listProjects: mocks.listProjects }));
 vi.mock("../services/organizations.js", () => ({ getInvitePreview: mocks.getInvitePreview, listOrganizations: mocks.listOrganizations }));
 vi.mock("../lib/signup-notifications.js", () => ({ notifySignup: mocks.notifySignup }));
 vi.mock("../db.js", () => ({ sql: (...args: unknown[]) => mocks.insert(...args) }));
@@ -50,21 +50,21 @@ const session = (userId: string, isAdmin = false): TestActor => ({ type: "sessio
 beforeEach(() => { vi.resetAllMocks(); });
 
 describe("GET /dashboard/bootstrap", () => {
-  it("reads the caller's organizations and workspaces without provisioning or promotion", async () => {
+  it("reads the caller's organizations and projects without provisioning or promotion", async () => {
     mocks.listOrganizations.mockResolvedValue([{ id: "o1" }]);
-    mocks.listWorkspaces.mockResolvedValue([{ id: "w1", orgId: "o1" }]);
+    mocks.listProjects.mockResolvedValue([{ id: "w1", orgId: "o1" }]);
     const res = await appAs(session("u1", true)).request("/dashboard/bootstrap");
-    expect(await res.json()).toEqual({ isOperator: true, isAdmin: true, organizations: [{ id: "o1" }], workspaces: [{ id: "w1", orgId: "o1" }] });
+    expect(await res.json()).toEqual({ isOperator: true, isAdmin: true, organizations: [{ id: "o1" }], projects: [{ id: "w1", orgId: "o1" }] });
     expect(mocks.ensure).not.toHaveBeenCalled();
     expect(mocks.admit).not.toHaveBeenCalled();
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
-    expect(mocks.listWorkspaces).toHaveBeenCalledExactlyOnceWith("u1", { refineNames: false });
+    expect(mocks.listProjects).toHaveBeenCalledExactlyOnceWith("u1", { refineNames: false });
     expect(mocks.listOrganizations).toHaveBeenCalledExactlyOnceWith("u1");
   });
   it("is session-only: an API key is refused and nothing is listed", async () => {
     const res = await appAs({ type: "apiKey", userId: "u1" }).request("/dashboard/bootstrap");
     expect(res.status).toBe(403);
-    expect(mocks.listWorkspaces).not.toHaveBeenCalled();
+    expect(mocks.listProjects).not.toHaveBeenCalled();
   });
 });
 
@@ -75,11 +75,11 @@ describe("GET /v1/invites/:token", () => {
     expect(res.status).toBe(200);
     expect(mocks.getInvitePreview).toHaveBeenCalledWith("tok", "organization");
   });
-  it("defaults to a workspace invite and returns 404 for an unknown token", async () => {
+  it("defaults to a project invite and returns 404 for an unknown token", async () => {
     mocks.getInvitePreview.mockResolvedValue(null);
     const res = await appAs(session("u1")).request("/v1/invites/nope");
     expect(res.status).toBe(404);
-    expect(mocks.getInvitePreview).toHaveBeenCalledWith("nope", "workspace");
+    expect(mocks.getInvitePreview).toHaveBeenCalledWith("nope", "project");
   });
   it("refuses API keys", async () => {
     expect((await appAs({ type: "apiKey", userId: "u1" }).request("/v1/invites/tok")).status).toBe(403);

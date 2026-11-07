@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { chatModelTier } from "./billing.js";
-import { isWorkspaceChatModelId, nitroBaseModel } from "./workspace-chat-models.js";
+import { isProjectChatModelId, nitroBaseModel } from "./project-chat-models.js";
 import { withOpenRouterProviderPreferences } from "./openrouter-routing.js";
 import { lowestOpenRouterReasoning, resolveOpenRouterUsage } from "./openrouter-usage.js";
 
@@ -8,7 +8,7 @@ describe("reviewed Nitro variants", () => {
   for (const base of ["z-ai/glm-5.3-flash", "deepseek/deepseek-v4.1-flash", "openai/gpt-6-luna"]) {
     it(`keeps ${base} attribution and enforces endpoint ceilings`, () => {
       const model = `${base}:nitro`;
-      expect(isWorkspaceChatModelId(model)).toBe(true);
+      expect(isProjectChatModelId(model)).toBe(true);
       expect(nitroBaseModel(model)).toBe(base);
       expect(chatModelTier(model)).toBe(chatModelTier(base));
       expect(lowestOpenRouterReasoning(model)).toEqual(lowestOpenRouterReasoning(base));
@@ -18,7 +18,7 @@ describe("reviewed Nitro variants", () => {
   }
   it("rejects arbitrary and prohibited variants", () => {
     for (const model of ["openai/gpt-6-pro:nitro", "openai/gpt-6-ultra:nitro", "unknown/model:nitro", "z-ai/glm-5.3-flash:nitro:nitro"]) {
-      expect(isWorkspaceChatModelId(model)).toBe(false);
+      expect(isProjectChatModelId(model)).toBe(false);
       expect(nitroBaseModel(model)).toBeUndefined();
       expect(() => withOpenRouterProviderPreferences({ model })).toThrow("Unsupported");
     }

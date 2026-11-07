@@ -116,7 +116,7 @@ export function toActivityFailure(error: unknown, attempt?: number, ordinaryAtte
  * retry without spending an ordinary attempt; hung work is final; ordinary
  * failures become non-retryable once the stage checkpoint has recorded
  * STAGE_ORDINARY_ATTEMPTS of them. `ordinaryFailures` comes from
- * workspace_run_stage_states, so attempts lost to deploys, scale-in, the 6 h
+ * project_run_stage_states, so attempts lost to deploys, scale-in, the 6 h
  * recycle or a heartbeat timeout after SIGKILL do not count. It falls back to
  * the Temporal attempt only when the store did not report a count.
  */
@@ -246,10 +246,10 @@ export function createActivities(deps: ActivityDependencies) {
         progress("starting-stage", tasks.length);
         if (tasks.length) {
           state.stage = "vision-extract";
-          await store.startRunStage(state, state.stage, { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
+          await store.startRunStage(state, state.stage, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
           for (let offset = 0; offset < tasks.length; offset += 100) {
             progress("persisting", offset);
-            await store.pageTasks.enqueue(tasks.slice(offset, offset + 100), { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
+            await store.pageTasks.enqueue(tasks.slice(offset, offset + 100), { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
           }
         }
         return tasks;
@@ -268,8 +268,8 @@ export function createActivities(deps: ActivityDependencies) {
         progress("starting-stage", tasks.length);
         if (!tasks.length) return { total: 0 };
         state.stage = "vision-extract";
-        await store.startRunStage(state, state.stage, { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
-        const total = await store.pageTasks.enqueueWithPayload(tasks, (offset) => progress("persisting", offset), { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
+        await store.startRunStage(state, state.stage, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
+        const total = await store.pageTasks.enqueueWithPayload(tasks, (offset) => progress("persisting", offset), { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
         return { total };
       });
     },
@@ -524,7 +524,7 @@ export function createActivities(deps: ActivityDependencies) {
       console.log(`[page-task] run=${task.runId} document=${task.documentId} page=${task.pageNumber} worker=${workerId} started`);
       try {
         const result = await runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.allowChinaProviders, speedBoost: state.run.pipeline.speedBoost },
-          () => runWithPrivacyAuditScope({ workspaceId: state.run.workspaceId ?? null, runId: task.runId, documentId: task.documentId },
+          () => runWithPrivacyAuditScope({ projectId: state.run.projectId ?? null, runId: task.runId, documentId: task.documentId },
             () => stage.runPageTask(state, task, controller.signal)));
         recordPageCompute();
         await store.pageTasks.finish(task, ownedLease, state, result);

@@ -30,7 +30,7 @@ import {
   PdfSourceCache,
 } from "../pipeline/pdf-asset-cache.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
-import { workspaceVectorLocation } from "../stages/lancedb-location.js";
+import { projectVectorLocation } from "../stages/lancedb-location.js";
 import type { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { resolvePolicy } from "../stages/pii-detect.js";
 import { embedTextChunks, estimateTokens, type RemoteEmbeddingUsage, type VectorBackendRecord } from "../stages/embedding-runtime.js";
@@ -348,7 +348,7 @@ export async function materializePageRange(
   const storedReads = new Map((await deps.sql<{ page_number: number; read_text: string }[]>`
     select s.page_number, s.read_text from document_page_states s
     join documents d on d.id = s.document_id
-    join workspace_runs r on r.id = d.run_id
+    join project_runs r on r.id = d.run_id
     where s.document_id = ${documentId} and s.page_number = any(${pages}::int[])
       and s.read_billed_run is not null and s.read_text is not null and s.state <> 'blocked-pii'
       and r.artifacts_purged_at is null
@@ -449,7 +449,7 @@ export async function materializePageRange(
     }
   });
 
-  // 2. PII check with the workspace policy.
+  // 2. PII check with the project policy.
   const policy = resolvePolicy(pipeline);
   const scan = policy.enabled && policy.patterns.length > 0
     ? createPiiTextScanner(policy.patterns, policy.allowlistPatterns)
@@ -574,7 +574,7 @@ export async function materializePageRange(
   const rangePages = [...new Set([...pages])].sort((a, b) => a - b);
   const claimedBy = input.runId;
   const billsHere = input.reason !== "full-index";
-  const location = workspaceVectorLocation(run, { model: profile.model, dimensions: dims }, deps.config.lancedb.root);
+  const location = projectVectorLocation(run, { model: profile.model, dimensions: dims }, deps.config.lancedb.root);
   let written: string[] = [];
   /** Customer credits of this call's committed billing decisions (billLockedMaterializedPages `credits`). */
   let chargedCredits = 0;
@@ -738,7 +738,7 @@ export async function materializePageRange(
     throw error;
   }
   for (const batch of batches) batch.commit();
-  const unpublished = [...staleIds.filter(() => Boolean(run.orgId && run.workspaceId)), ...discard];
+  const unpublished = [...staleIds.filter(() => Boolean(run.orgId && run.projectId)), ...discard];
   if (unpublished.length > 0) {
     await ops.deleteVectors(location.uri, location.table, unpublished).catch(async (error: unknown) => {
       console.warn(`[materialize] stale vector cleanup failed for ${documentId}: ${error instanceof Error ? error.message : String(error)}`);
@@ -768,20 +768,20 @@ const ORPHAN_VECTOR_GRACE_MINUTES = 15;
 
 /**
  * Hands vector ids whose delete failed (or whose commit outcome is unknown) to storage_cleanup_queue
- * (`vector_rows`). The sweep deletes, in the workspace's own LanceDB database, only the ids no document_chunks
+ * (`vector_rows`). The sweep deletes, in the project's own LanceDB database, only the ids no document_chunks
  * row names (superseded-purge.ts drainStorageCleanupQueue), so a live publication's vectors are never removed.
  * Best effort: a failure is logged; such vectors stay unsearchable (no chunk row hydrates them).
  */
 export async function queueOrphanVectors(
   sql: Sql,
-  scope: { orgId?: string | null; workspaceId?: string | null },
+  scope: { orgId?: string | null; projectId?: string | null },
   documentId: string,
   space: { model: string; dimensions: number },
   ids: string[],
 ): Promise<void> {
-  if (ids.length === 0 || !scope.orgId || !scope.workspaceId) return;
+  if (ids.length === 0 || !scope.orgId || !scope.projectId) return;
   const target = `${documentId}#${randomBytes(8).toString("hex")}`;
-  const payload = { workspaceId: scope.workspaceId, documentId, embeddingModel: space.model, dimension: space.dimensions, ids };
+  const payload = { projectId: scope.projectId, documentId, embeddingModel: space.model, dimension: space.dimensions, ids };
   try {
     await sql`
       insert into storage_cleanup_queue (kind, org_id, target, payload, reason, not_before)

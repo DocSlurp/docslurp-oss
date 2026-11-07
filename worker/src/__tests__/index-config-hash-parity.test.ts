@@ -6,7 +6,7 @@ import { mergePipelineFeatures } from "../models.js";
 
 /**
  * The index stage stamps `documents.index_config_hash` from the run's pipeline as the worker loads it
- * (`mergePipelineFeatures`); the API compares it with the hash of the workspace pipeline it normalizes
+ * (`mergePipelineFeatures`); the API compares it with the hash of the project pipeline it normalizes
  * (`normalizePipelineFeatures`). Both routes must give the same hash for the same stored config.
  */
 const stored: Array<[string, unknown]> = [

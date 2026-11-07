@@ -23,7 +23,7 @@ async function invoke(args, respond, { killAfterMs = 15_000 } = {}) {
     const url = `http://127.0.0.1:${server.address().port}`;
     const child = spawn(process.execPath, ["dist/index.js", ...args, "--api-url", `${url}/`], {
       cwd: new URL("..", import.meta.url),
-      env: { ...process.env, NO_PROXY: "127.0.0.1", no_proxy: "127.0.0.1", DOCSLURP_API_KEY: "test-key", DOCSLURP_URL: "https://ignored-env.test", DOCSLURP_WORKSPACE: "" },
+      env: { ...process.env, NO_PROXY: "127.0.0.1", no_proxy: "127.0.0.1", DOCSLURP_API_KEY: "test-key", DOCSLURP_URL: "https://ignored-env.test", DOCSLURP_PROJECT: "" },
     });
     let stdout = "", stderr = "";
     child.stdout.on("data", (data) => { stdout += data; });
@@ -38,7 +38,7 @@ async function invoke(args, respond, { killAfterMs = 15_000 } = {}) {
 }
 
 const sanitize = (name) => name.replace(/[<>:"|?*]/g, "-").replace(/\s+/g, " ").trim().replace(/^-+/, "");
-const intakeResult = { workspace: { id: "w", name: "Default", slug: "default" }, run: { id: "run" }, documents: [{ id: "d" }] };
+const intakeResult = { project: { id: "w", name: "Default", slug: "default" }, run: { id: "run" }, documents: [{ id: "d" }] };
 
 test("direct uploads match session files by index: names the server sanitizes still carry their own bytes", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cli-upload-"));

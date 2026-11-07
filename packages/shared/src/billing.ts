@@ -168,7 +168,7 @@ export function chatAnswerUnits(totalTokens?: number | null): number {
   return pricing().chatAnswerUnits(totalTokens);
 }
 
-/** Tier of a chat model id (`provider/model`, bare `model`, or a `workspace:` alias resolved by the caller). */
+/** Tier of a chat model id (`provider/model`, bare `model`, or a `project:` alias resolved by the caller). */
 export function chatModelTier(model: string | null | undefined): ChatAnswerTier {
   return pricing().chatModelTier(model);
 }
@@ -558,7 +558,7 @@ export type IngestJobCost = z.infer<typeof ingestJobCostSchema>;
 /**
  * House organizations whose spend is never blocked for lack of credits (our
  * own docs site search and indexing keys). Usage is still metered, debited and
- * reported; only the credit gate is skipped. Workspace and org budget caps
+ * reported; only the credit gate is skipped. Project and org budget caps
  * still apply. Comma-separated org ids in BILLING_EXEMPT_ORG_IDS.
  */
 export function billingExemptOrgIds(env: Record<string, string | undefined> = process.env): ReadonlySet<string> {

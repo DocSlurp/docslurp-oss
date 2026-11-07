@@ -29,7 +29,7 @@ export type ExtractionResultFormat = z.infer<
 
 /**
  * OCR engine. PP-OCR (worker/src/ocr) is the only one; any engine name stored before it is read as PP-OCR, so older
- * workspace and run configs still parse.
+ * project and run configs still parse.
  */
 export const extractionOcrBackendSchema = z.preprocess(
   (value) => (typeof value === "string" ? "ppocr" : value),
@@ -125,14 +125,14 @@ export const ocrLanguageSchema = z.string().trim()
   .max(64);
 
 /**
- * Workspace OCR language: `auto` detects each page's script and runs the matching installed packs; anything else
+ * Project OCR language: `auto` detects each page's script and runs the matching installed packs; anything else
  * is language codes. English was the only language before, which turned Arabic, Chinese and Hindi scans into junk.
  */
 export const ocrLanguageSettingSchema = z.union([z.literal("auto"), ocrLanguageSchema]);
 
 /**
- * Dolphin options a workspace may set. The repository and model paths, and the Python binary, come only from the
- * worker environment (DOLPHIN_REPO_PATH, DOLPHIN_MODEL_PATH, DOLPHIN_PYTHON_BIN): a path from a workspace would
+ * Dolphin options a project may set. The repository and model paths, and the Python binary, come only from the
+ * worker environment (DOLPHIN_REPO_PATH, DOLPHIN_MODEL_PATH, DOLPHIN_PYTHON_BIN): a path from a project would
  * let it choose which script the worker runs.
  */
 export const dolphinExtractorOptionsSchema = z.object({
@@ -197,11 +197,11 @@ function dropInvalid(schema: z.ZodTypeAny, value: Record<string, unknown>, prefi
 }
 
 /**
- * Reads the `documentExtraction` of a stored pipeline (a workspace row, a run row) that predates the strict extractor
+ * Reads the `documentExtraction` of a stored pipeline (a project row, a run row) that predates the strict extractor
  * option schemas: drops options for extractor ids without a schema, keys a schema does not allow, invalid option
  * values and an invalid `ocr.language`, and lists every dropped path. Nothing dropped is kept, so a stored
  * `dolphin.repoPath` never reaches a script. Requests stay strict (`documentExtractionConfigSchema` rejects all of
- * these); only reads of stored settings use this, so one stale row cannot fail an org's workspace list or a run load.
+ * these); only reads of stored settings use this, so one stale row cannot fail an org's project list or a run load.
  */
 export function sanitizeStoredDocumentExtraction(value: unknown): { value: unknown; dropped: string[] } {
   if (!isPlainObject(value)) return { value, dropped: [] };
@@ -254,7 +254,7 @@ export function sanitizeStoredDocumentExtraction(value: unknown): { value: unkno
 }
 
 /**
- * A workspace policy. The document router can emit the same ordered IDs per document. Configured legacy extractor ids
+ * A project policy. The document router can emit the same ordered IDs per document. Configured legacy extractor ids
  * (DOCSLURP_EXTRACTOR_ID_ALIASES, extractor-aliases.ts) are rewritten to their canonical id before validation.
  */
 export const documentExtractionConfigSchema = z.preprocess(normalizeDocumentExtractionAliases, z.object({
@@ -278,7 +278,7 @@ export const documentExtractionConfigSchema = z.preprocess(normalizeDocumentExtr
     autoRotate: z.boolean().default(true),
   }).default({ language: "auto", autoRotate: true }),
 }).superRefine((config, ctx) => {
-  // A sandboxed PDF deployment never lets a workspace route PDFs to a host parser (fail closed, 400 at the API).
+  // A sandboxed PDF deployment never lets a project route PDFs to a host parser (fail closed, 400 at the API).
   for (const { path, id } of hostPdfExtractorsUnderSandbox(config)) {
     ctx.addIssue({ code: "custom", path, message: `extractor ${id} parses PDFs on the worker host; this deployment runs PDFs only in the sandboxed extractor (vm-pdf)` });
   }

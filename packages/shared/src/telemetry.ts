@@ -47,7 +47,7 @@ let warnedMissingOtlp = false;
 export const mapsObservationAiUsage = () => !getRuntime()?.nativeAiTelemetry;
 function bestEffort(run: () => void): void { try { run(); } catch { /* Telemetry never changes application outcomes. */ } }
 const timeoutMillis = 5000;
-const correlationKeys = new Set(["requestId", "runId", "documentId", "workspaceId", "orgId", "stageName", "scope"]);
+const correlationKeys = new Set(["requestId", "runId", "documentId", "projectId", "orgId", "stageName", "scope"]);
 
 function numberSetting(value: string | undefined, fallback: number, min: number, max: number): number {
   const result = value?.trim() ? Number(value) : fallback;
@@ -485,7 +485,7 @@ export function startDependencySpan(name: string, attributes: Attributes) {
   const started = performance.now();
   const scope = context.active().getValue(dependencyScopeKey) as Record<string, unknown> | undefined;
   const correlation = Object.fromEntries(Object.entries(scope ?? {}).filter(([key, value]) =>
-    ["requestId", "runId", "documentId", "workspaceId", "orgId", "sessionId", "stageName"].includes(key) && typeof value === "string")
+    ["requestId", "runId", "documentId", "projectId", "orgId", "sessionId", "stageName"].includes(key) && typeof value === "string")
     .map(([key, value]) => [`docslurp.${key}`, value as string]));
   attributes = { ...correlation, ...attributes };
   const runtime = getRuntime();

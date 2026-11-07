@@ -202,7 +202,7 @@ describe("runRoutedVision with executors", () => {
     expect(byTarget[strong.id]!.actual.passed).toBe(true);
   });
 
-  it("uses native extractors and OCR as page prose, and falls back to the workspace model when an executor fails", async () => {
+  it("uses native extractors and OCR as page prose, and falls back to the project model when an executor fails", async () => {
     const { deps } = fakeDeps({ ocr: vi.fn(async () => { throw new Error("boom"); }) });
     const { result, extract } = await run([
       asg(1, nativeText.id, "extract-text"),
@@ -215,7 +215,7 @@ describe("runRoutedVision with executors", () => {
     expect(result.actuals.find((a) => a.servesTargetId === ppocr.id)?.costUsd).toBe(0.005);
   });
 
-  it("never falls back to the workspace model for a page whose OCR failed in its boundary", async () => {
+  it("never falls back to the project model for a page whose OCR failed in its boundary", async () => {
     const { deps } = fakeDeps({ ocr: vi.fn(async () => { throw new OcrBoundaryFailure("OCR of page 2 failed in the vm boundary"); }) });
     const { result, extract } = await run([asg(1, nativeText.id, "extract-text"), asg(2, ppocr.id, "ocr")], { deps });
     expect(extract).not.toHaveBeenCalled();
@@ -223,7 +223,7 @@ describe("runRoutedVision with executors", () => {
     expect(result.outputs.map((o) => o.pageNumber)).toEqual([1]);
   });
 
-  it("without executor deps, executor-only extraction pages fall back to the workspace model", async () => {
+  it("without executor deps, executor-only extraction pages fall back to the project model", async () => {
     const { result, extract } = await run([asg(2, ppocr.id, "ocr"), asg(2, florence.id, "image-label", { kind: "image", imageIndex: 0 })]);
     expect(vi.mocked(extract).mock.calls[0]![1]).toEqual([2]);
     expect(result.outputs).toHaveLength(1);

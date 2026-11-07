@@ -143,7 +143,7 @@ describe("configured text models reach worker stages and usage records", () => {
   ] as const)("%s respects a task override", async (StageClass, operation, metric) => {
     const state = {
       run: { id: "run", pipeline: normalizePipelineFeatures({ summarize: true, propositionIndex: true,
-        textGeneration: { model: "vendor/workspace", models: { [operation]: "vendor/task" } } }) },
+        textGeneration: { model: "vendor/project", models: { [operation]: "vendor/task" } } }) },
       documents: [{ id: "document", userId: "user", filename: "document" }],
       docConcurrency: 1, artifactLedger: { readDocument: () => undefined, read: () => undefined, record: () => undefined },
       usageLedger: { enqueue: () => null, record }, pendingPerformance: [],

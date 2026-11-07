@@ -5,7 +5,7 @@ import type postgres from "postgres";
  * organization (request, session or API key), and nothing derives a tenant from the user id.
  *
  * While the limit is 1 it is enforced twice: here, for every path that adds a membership (accepting an organization or
- * workspace invite, creating an organization), and by the unique index org_memberships_one_org_per_user (migration 0127).
+ * project invite, creating an organization), and by the unique index org_memberships_one_org_per_user (migration 0127).
  * To allow several organizations per user: drop that index in a migration and raise DOCSLURP_MAX_ORGS_PER_USER
  * (docs/api-sdk.md#one-organization-per-user).
  */

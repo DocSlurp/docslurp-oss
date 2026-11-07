@@ -7,7 +7,7 @@ import {
   DEFAULT_INDEXING_MODE,
   estimatePageEmbedCredits,
   isBillingEnforced,
-  workspaceTemplates,
+  projectTemplates,
   deferredProfilesEnabled,
   narrowMaterializationPolicy,
   normalizePipelineFeatures,
@@ -59,9 +59,9 @@ describe("defaults and helpers", () => {
   it("indexes fully by default for every organization", () => {
     expect(DEFAULT_INDEXING_MODE).toBe("full");
   });
-  it("no workspace template opts into page-image embedding", () => {
-    expect(workspaceTemplates.length).toBeGreaterThan(0);
-    for (const template of workspaceTemplates) {
+  it("no project template opts into page-image embedding", () => {
+    expect(projectTemplates.length).toBeGreaterThan(0);
+    for (const template of projectTemplates) {
       expect(template.pipeline.indexingMode, template.key).not.toBe("visual");
       expect(template.pipeline.visualPages.coarseFallback, template.key).toBe(false);
     }

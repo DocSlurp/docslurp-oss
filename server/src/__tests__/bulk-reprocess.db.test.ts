@@ -5,7 +5,7 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 /**
  * bulkReprocessDocuments against a migrated database: it must start the Runs it
- * publishes and keep going when one (workspace, pipeline) group cannot be created.
+ * publishes and keep going when one (project, pipeline) group cannot be created.
  */
 let sql: postgres.Sql;
 let stop: () => Promise<void>;
@@ -41,7 +41,7 @@ beforeAll(async () => {
   await sql`insert into "user" (id, name, email) values ('u', 'U', 'u@example.test')`;
   await sql`insert into organizations (id, name, slug, created_by_user_id, credit_balance_cents) values ('o', 'O', 'o', 'u', 1000)`;
   await sql`insert into org_memberships (org_id, user_id, role) values ('o', 'u', 'owner')`;
-  await sql`insert into workspaces (id, org_id, user_id, name) values ('w', 'o', 'u', 'W')`;
+  await sql`insert into projects (id, org_id, user_id, name) values ('w', 'o', 'u', 'W')`;
 }, 120_000);
 
 afterAll(async () => { await sql?.end(); await stop?.(); });
@@ -50,16 +50,16 @@ beforeEach(async () => {
   failAll = false;
   startWorkflow.mockClear();
   await sql`delete from documents`;
-  await sql`delete from workspace_runs`;
+  await sql`delete from project_runs`;
 });
 
 async function seedDocument(id: string, pipeline: object) {
   const runId = `run-${id}`;
   await sql`
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
     values (${runId}, 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', ${sql.json(pipeline as postgres.JSONValue)}, 1, 2)`;
   await sql`
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
     values (${id}, 'o', 'u', 'w', ${runId}, ${`${id}.pdf`}, 'application/pdf', ${`u/raw/${id}.pdf`}, 'completed', 2)`;
 }
 
@@ -71,7 +71,7 @@ describe("bulkReprocessDocuments", () => {
     expect(result.runs).toHaveLength(1);
     expect(startWorkflow).toHaveBeenCalledTimes(1);
     expect(startWorkflow.mock.calls[0]![0]).toBe(result.runs[0]!.id);
-    const [row] = await sql`select workflow_started_at is not null as started from workspace_runs where id = ${result.runs[0]!.id}`;
+    const [row] = await sql`select workflow_started_at is not null as started from project_runs where id = ${result.runs[0]!.id}`;
     expect(row).toEqual({ started: true });
   });
 
@@ -81,7 +81,7 @@ describe("bulkReprocessDocuments", () => {
     const result = await bulkReprocessDocuments(["a"], "u");
     expect(result.runs).toHaveLength(1);
     expect(result.warnings).toHaveLength(1);
-    const [row] = await sql`select status from workspace_runs where id = ${result.runs[0]!.id}`;
+    const [row] = await sql`select status from project_runs where id = ${result.runs[0]!.id}`;
     expect(row).toEqual({ status: "queued" });
   });
 
@@ -93,7 +93,7 @@ describe("bulkReprocessDocuments", () => {
     expect(result.runs).toHaveLength(1);
     expect(startWorkflow).toHaveBeenCalledTimes(1);
     expect(result.failed).toEqual([
-      { workspaceId: "w", documentIds: expect.arrayContaining(["bad1", "bad2"]), message: "Insufficient credits", code: "credit_exhausted" },
+      { projectId: "w", documentIds: expect.arrayContaining(["bad1", "bad2"]), message: "Insufficient credits", code: "credit_exhausted" },
     ]);
     expect(result.failed[0]!.documentIds).toHaveLength(2);
     expect(result.warnings).toEqual(["2 documents in w were not reprocessed: Insufficient credits"]);
@@ -120,7 +120,7 @@ describe("stored pipelines the strict schemas now reject (round 5 M1)", () => {
   // Fails validation for good: no sanitizing can make it start.
   const invalid = { ...defaultPipelineFeatures, quality: "turbo" };
   const counts = async () => (await sql<{ runs: number; docs: number }[]>`
-    select (select count(*)::int from workspace_runs) as runs, (select count(*)::int from documents) as docs`)[0];
+    select (select count(*)::int from project_runs) as runs, (select count(*)::int from documents) as docs`)[0];
   const quiet = () => vi.spyOn(console, "error").mockImplementation(() => {});
 
   it("bulk reprocess and its estimate succeed on a stale row, with the rejected path dropped", async () => {
@@ -132,7 +132,7 @@ describe("stored pipelines the strict schemas now reject (round 5 M1)", () => {
       const result = await bulkReprocessDocuments(["s"], "u");
       expect(result.failed).toEqual([]);
       expect(result.runs).toHaveLength(1);
-      const [row] = await sql<{ pipeline: unknown }[]>`select pipeline from workspace_runs where id = ${result.runs[0]!.id}`;
+      const [row] = await sql<{ pipeline: unknown }[]>`select pipeline from project_runs where id = ${result.runs[0]!.id}`;
       expect(JSON.stringify(row!.pipeline)).not.toContain("/tmp/attacker");
       expect(JSON.stringify(row!.pipeline)).not.toContain("useCache");
       expect(startWorkflow).toHaveBeenCalledTimes(1);
@@ -153,7 +153,7 @@ describe("stored pipelines the strict schemas now reject (round 5 M1)", () => {
   describe("queued-run recovery", () => {
     const queued = async (id: string, pipeline: object) => {
       await sql`
-        insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, creation_ready_at)
+        insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, creation_ready_at)
         values (${id}, 'o', 'u', 'w', 'bulk-upload', 'queued', 'queued', ${sql.json(pipeline as postgres.JSONValue)}, 0, now())`;
     };
     const sweeper = async () => {
@@ -183,7 +183,7 @@ describe("stored pipelines the strict schemas now reject (round 5 M1)", () => {
         const recovery = await sweeper();
         expect(await recovery.sweepOnce({ ignoreBackoff: true })).toMatchObject({ claimed: 1, started: 0, failed: 1 });
         const [row] = await sql<{ status: string; error: string; stats: { startFailure?: { category?: string } } }[]>`
-          select status, error, stats from workspace_runs where id = 'q-bad'`;
+          select status, error, stats from project_runs where id = 'q-bad'`;
         expect(row!.status).toBe("failed");
         expect(row!.stats.startFailure?.category).toBe("invalid_pipeline");
         // The public error does not echo the raw validation message.

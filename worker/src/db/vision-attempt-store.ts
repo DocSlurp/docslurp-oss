@@ -102,10 +102,10 @@ export class PostgresVisionAttemptBackend implements VisionAttemptBackend {
     const { runId, target, config, weightCents } = request;
     return await this.sql.begin(async (tx) => {
       await lock(tx, `vision-run:${runId}`);
-      // The run row decides the org (falling back to its workspace's): a caller's org never widens or moves the scope.
+      // The run row decides the org (falling back to its project's): a caller's org never widens or moves the scope.
       const [run] = await tx<{ org_id: string | null }[]>`
         select coalesce(r.org_id, w.org_id) as org_id
-        from workspace_runs r left join workspaces w on w.id = r.workspace_id
+        from project_runs r left join projects w on w.id = r.project_id
         where r.id = ${runId}`;
       const orgId = run?.org_id ?? null;
       if (orgId) await lock(tx, `vision-org:${orgId}`);
@@ -211,7 +211,7 @@ export class PostgresVisionAttemptBackend implements VisionAttemptBackend {
     const { ticketId, route, billedCents } = request;
     return await this.sql.begin(async (tx) => {
       // The ticket, not the run row, owns the overrun: it names the org the request was admitted under and survives
-      // the run's and the workspace's deletion.
+      // the run's and the project's deletion.
       const [ticket] = await tx<{ org_id: string; weight_cents: number; bound_cents: number }[]>`
         select org_id, weight_cents::float8 as weight_cents, bound_cents::float8 as bound_cents
         from vision_admission_tickets where id = ${ticketId}`;

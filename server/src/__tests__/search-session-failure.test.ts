@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { defaultWorkspaceSearchSettings, normalizePipelineFeatures, validateDeepInfraEmbedding } from "@docslurp/shared";
+import { defaultProjectSearchSettings, normalizePipelineFeatures, validateDeepInfraEmbedding } from "@docslurp/shared";
 
 const mocks = vi.hoisted(() => ({ sql: Object.assign(vi.fn(), { begin: vi.fn(), array: vi.fn((v: unknown) => v) }), embed: vi.fn(), report: vi.fn() }));
 vi.mock("../db.js", () => ({ sql: mocks.sql }));
@@ -9,9 +9,9 @@ const { runSearchSession } = await import("../search/session-runner.js");
 const { createSearchSessionJournal } = await import("../search/session.js");
 
 function fixture() {
-  const session = createSearchSessionJournal({ rootSessionId: "failed-search", scope: { workspaceId: "workspace", orgId: "organization" } });
+  const session = createSearchSessionJournal({ rootSessionId: "failed-search", scope: { projectId: "project", orgId: "organization" } });
   const adapters = { buildAvailability: vi.fn(), completedPageSearch: vi.fn(), progressivePageSearch: vi.fn(), vectorSearch: vi.fn(), textSearch: vi.fn(), graphNeighborSearch: vi.fn(), communitySummarySearch: vi.fn(), runSearch: vi.fn(), wholeCorpusFallback: vi.fn() };
-  const setup = { session, normalizedScope: { workspaceId: "workspace", orgId: "organization" }, workspaceSettings: defaultWorkspaceSearchSettings, openRouterApiKey: undefined, availabilityRow: undefined, resolvedOptions: {}, indexConfigs: {}, workspacePipeline: normalizePipelineFeatures({ embedding: { profile: "cheapest-hosted", target: "hosted", modelUri: "llm://deepinfra/BAAI/bge-m3" } }), privacyMode: "standard" as const };
+  const setup = { session, normalizedScope: { projectId: "project", orgId: "organization" }, projectSettings: defaultProjectSearchSettings, openRouterApiKey: undefined, availabilityRow: undefined, resolvedOptions: {}, indexConfigs: {}, projectPipeline: normalizePipelineFeatures({ embedding: { profile: "cheapest-hosted", target: "hosted", modelUri: "llm://deepinfra/BAAI/bge-m3" } }), privacyMode: "standard" as const };
   return { query: "Generic evidence question", userId: "user", options: {}, setup, adapters };
 }
 const usageWrites = () => mocks.sql.mock.calls.filter(([parts]) => Array.isArray(parts) && parts.join(" ").includes("insert into usage_events"));
@@ -36,7 +36,7 @@ describe("failed paid search accounting", () => {
     expect(usageWrites()).toHaveLength(1);
     const write = usageWrites()[0]!;
     expect(write).toContain("user"); expect(write).toContain("deepinfra"); expect(write).toContain("BAAI/bge-m3"); expect(write).toContain(7);
-    expect(write.some(value => typeof value === "string" && value.includes('"workspaceId":"workspace"') && value.includes('"orgId":"organization"') && value.includes('"sessionId":"failed-search"'))).toBe(true);
+    expect(write.some(value => typeof value === "string" && value.includes('"projectId":"project"') && value.includes('"orgId":"organization"') && value.includes('"sessionId":"failed-search"'))).toBe(true);
     expect(args.adapters.vectorSearch).not.toHaveBeenCalled();
     await args.setup.session.flushUsage(args.userId);
     expect(usageWrites()).toHaveLength(1);

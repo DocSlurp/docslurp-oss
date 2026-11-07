@@ -3,7 +3,7 @@ import type { Sql } from "postgres";
 import { isBillingExemptOrg } from "@docslurp/shared";
 import { jobCreditReserve } from "../../db/chat-reserve.js";
 import { WorkflowState } from "../../pipeline/pipeline.js";
-import type { WorkspaceRun } from "../../models.js";
+import type { ProjectRun } from "../../models.js";
 import { debitRunUsageCredits, persistRunUsageEvents } from "../../db/usage-event-store.js";
 import { consumeRunCreditLease, creditLeasesActive } from "../../db/credit-lease.js";
 import type { CapacityLease, CapacityLeaseStore } from "./types.js";
@@ -13,7 +13,7 @@ function decode(row: Record<string, any>): CapacityLease {
     costUsd: row.cost_usd === null ? null : Number(row.cost_usd), createdAt: new Date(row.created_at).getTime(), deadline: new Date(row.deadline).getTime() };
 }
 export class PostgresCapacityLeaseStore implements CapacityLeaseStore {
-  constructor(private readonly sql: Sql<Record<string, unknown>>, private readonly loadRun: (id: string) => Promise<WorkspaceRun | null>,
+  constructor(private readonly sql: Sql<Record<string, unknown>>, private readonly loadRun: (id: string) => Promise<ProjectRun | null>,
     private readonly providerIds: string[]) {}
   async reserve(args: Parameters<CapacityLeaseStore["reserve"]>[0]): Promise<CapacityLease> {
     if (args.ttlMs < 60000 || args.ttlMs > 2 * 3600000 || args.quote.observedAt < Date.now() - 60000) throw new Error("Invalid capacity deadline or stale quote");
@@ -31,9 +31,9 @@ export class PostgresCapacityLeaseStore implements CapacityLeaseStore {
       await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${args.scope.orgId}))`;
       // Credit leases other runs hold (migration 0052) are spoken for, and the
       // chat reserve (0053) is not for jobs.
-      const [status] = await tx<{ funded: boolean | null; available: number; leased: number; workspace_in_org: boolean; org_budget_paused: boolean; workspace_budget_paused: boolean }[]>`
+      const [status] = await tx<{ funded: boolean | null; available: number; leased: number; project_in_org: boolean; org_budget_paused: boolean; project_budget_paused: boolean }[]>`
         select s.*, org_outstanding_credit_leases(${args.scope.orgId}, 'run', ${args.scope.runId}) as leased
-        from org_spend_status(${args.scope.orgId}, ${args.scope.workspaceId}, 0) s`;
+        from org_spend_status(${args.scope.orgId}, ${args.scope.projectId}, 0) s`;
       const [pending] = await tx<{ org_reserved: number; run_reserved: number }[]>`select
         coalesce(sum(cents) filter (where org = ${args.scope.orgId}), 0) as org_reserved,
         coalesce(sum(cents) filter (where run = ${args.scope.runId}), 0) as run_reserved from (
@@ -43,10 +43,10 @@ export class PostgresCapacityLeaseStore implements CapacityLeaseStore {
           select org_id, run_id, case when usage_settled then greatest(reserve_cents-coalesce(charged_cost_cents,cost_cents,0),0) else greatest(reserve_cents,coalesce(charged_cost_cents,cost_cents,0)) end
             from remote_media_jobs where usage_settled = false or cost_state = 'disputed'
         ) reservations`;
-      if (!status?.workspace_in_org || status.org_budget_paused || status.workspace_budget_paused ||
+      if (!status?.project_in_org || status.org_budget_paused || status.project_budget_paused ||
         (Number(status.available) - Number(status.leased) - jobCreditReserve(status.funded) < reserved * 100 + Number(pending.org_reserved) && !isBillingExemptOrg(args.scope.orgId))) throw new Error("Capacity spend admission denied");
-      const [run] = await tx<{ spent: number }[]>`select spent_cents as spent from workspace_runs
-        where id = ${args.scope.runId} and org_id = ${args.scope.orgId} and workspace_id = ${args.scope.workspaceId}
+      const [run] = await tx<{ spent: number }[]>`select spent_cents as spent from project_runs
+        where id = ${args.scope.runId} and org_id = ${args.scope.orgId} and project_id = ${args.scope.projectId}
         and coalesce(control_state, '') not in ('paused','pause_requested','cancelled','cancel_requested','dead-letter')`;
       if (!run || (args.maxRunCostCents != null && Number(run.spent) + Number(pending.run_reserved) + reserved * 100 > args.maxRunCostCents)) throw new Error("Capacity run admission denied");
       const [document] = await tx`select id from documents where id = ${args.scope.documentId} and run_id = ${args.scope.runId}`;

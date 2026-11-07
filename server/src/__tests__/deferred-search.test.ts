@@ -3,31 +3,31 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { MaterializationPolicy } from "@docslurp/shared";
 
 const sqlMock = Object.assign(vi.fn(async () => []), { array: (values: unknown[]) => values });
-const chatWorkspace = vi.fn();
+const chatProject = vi.fn();
 vi.mock("../db.js", () => ({ sql: sqlMock }));
 vi.mock("../lib/temporal.js", () => ({ startMaterializeWorkflow: vi.fn() }));
-vi.mock("../services/search.js", () => ({ hybridSearch: vi.fn(), MissingWorkspaceScopeError: class extends Error {} }));
-vi.mock("../services/workspace-chat.js", () => ({
-  chatWorkspace,
-  workspaceChatDisabledBody: vi.fn(async () => null),
+vi.mock("../services/search.js", () => ({ hybridSearch: vi.fn(), MissingProjectScopeError: class extends Error {} }));
+vi.mock("../services/project-chat.js", () => ({
+  chatProject,
+  projectChatDisabledBody: vi.fn(async () => null),
 }));
-vi.mock("../services/aggregate-rag.js", () => ({ aggregateWorkspaceRagSearch: vi.fn() }));
+vi.mock("../services/aggregate-rag.js", () => ({ aggregateProjectRagSearch: vi.fn() }));
 vi.mock("../services/run-creation.js", () => ({ enforceLiveBudgetCaps: vi.fn(async () => undefined) }));
 vi.mock("../services/billing/spend-guard.js", () => ({
   assertCanSpend: vi.fn(async () => undefined),
   canSpend: vi.fn(async () => true),
 }));
-vi.mock("../services/workspaces.js", () => ({
-  resolveWorkspaceRef: vi.fn(async () => null), findWorkspaceForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })),
-  ensureDefaultWorkspace: vi.fn(async () => ({ id: "ws-1" })),
-  getWorkspace: vi.fn(),
+vi.mock("../services/projects.js", () => ({
+  resolveProjectRef: vi.fn(async () => null), findProjectForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })),
+  ensureDefaultProject: vi.fn(async () => ({ id: "ws-1" })),
+  getProject: vi.fn(),
 }));
 
 const { materializeForQuery, estimatedPageMaterializeCredits } = await import("../search/deferred/materialize-client.js");
 const { runDeferredPageSearch } = await import("../search/deferred/deferred-search.js");
 const { buildSearchSessionMetadata } = await import("../search/session.js");
 const { getDeferredContext } = await import("../search/deferred/deferred-context.js");
-const { searchRoutes, workspaceChatRoutes } = await import("../routes/search.js");
+const { searchRoutes, projectChatRoutes } = await import("../routes/search.js");
 type Deps = import("../search/deferred/materialize-client.js").MaterializeDeps;
 type PageState = import("../search/deferred/materialize-client.js").PageState;
 
@@ -76,11 +76,11 @@ function fakeDeps(initial: Record<string, string>, options: { indexAfterPolls?: 
   return { deps, started, ledger };
 }
 
-const base = { orgId: "org-1", userId: "user-1", workspaceId: "ws-1", sessionId: "s-1", policy };
+const base = { orgId: "org-1", userId: "user-1", projectId: "ws-1", sessionId: "s-1", policy };
 
 beforeEach(() => {
   sqlMock.mockClear();
-  chatWorkspace.mockReset();
+  chatProject.mockReset();
 });
 
 describe("materializeForQuery", () => {
@@ -249,7 +249,7 @@ describe("runDeferredPageSearch", () => {
     regionCoordinateSpace: null, sourceTrace: null, source: "document", retrievalStage: "full-index",
   }) as never;
   const searchArgs = (j: ReturnType<typeof journal>, extra: object = {}) => ({
-    query: "warranty", textQuery: "warranty", queryVector: null, userId: "u", orgId: "o", workspaceId: "ws-1",
+    query: "warranty", textQuery: "warranty", queryVector: null, userId: "u", orgId: "o", projectId: "ws-1",
     options: { limit: 20 }, policy, privacyMode: "standard" as const, journal: j,
     search: { textSearch: vi.fn(async () => [chunk("c1", "d1", 21), chunk("c2", "d1", 50)]), vectorSearch: vi.fn(async () => []) },
     ...extra,
@@ -427,10 +427,10 @@ describe("request policy for context-less routes", () => {
     const { resolveMaterializationPolicy } = await import("../services/materialization-policy.js");
     const pipeline = { materialization: undefined } as never;
     const policy = await resolveSearchMaterializationPolicy(
-      { workspacePipeline: pipeline, workspaceId: "ws-1" },
+      { projectPipeline: pipeline, projectId: "ws-1" },
       {
         keyId: () => "key-1",
-        lookupKey: vi.fn(async () => ({ orgId: "org-1", keyType: "client" as const, scopes: ["search"], workspaceIds: [], materializationPolicy: { maxPagesPerQuery: 5 } })),
+        lookupKey: vi.fn(async () => ({ orgId: "org-1", keyType: "client" as const, scopes: ["search"], projectIds: [], materializationPolicy: { maxPagesPerQuery: 5 } })),
         resolve: resolveMaterializationPolicy,
       },
     );
@@ -447,11 +447,11 @@ describe("request policy for context-less routes", () => {
     resetRequestPolicyCacheForTests();
     // Session-issued capability: no issuer key lookup is needed.
     const token = sealCapabilityToken({
-      v: 1, orgId: "org-1", workspaceIds: ["ws-1"], policy: { maxPagesPerQuery: 3 }, issuedByKeyId: "session:s1",
+      v: 1, orgId: "org-1", projectIds: ["ws-1"], policy: { maxPagesPerQuery: 3 }, issuedByKeyId: "session:s1",
       exp: Math.floor(Date.now() / 1000) + 600, jti: "j", allowedOrigins: ["https://a.com"],
     } as never);
     const call = (header: string | null, origin: string | null) => resolveSearchMaterializationPolicy(
-      { workspacePipeline: {} as never, workspaceId: "ws-1" },
+      { projectPipeline: {} as never, projectId: "ws-1" },
       { keyId: () => null, capability: () => ({ header, origin }), lookupKey: vi.fn(), resolve: resolveMaterializationPolicy },
     );
     expect((await call(token, "https://a.com")).maxPagesPerQuery).toBe(3);
@@ -463,16 +463,16 @@ describe("request policy for context-less routes", () => {
     const { resolveSearchMaterializationPolicy, resetRequestPolicyCacheForTests } = await import("../search/deferred/request-policy.js");
     const { resolveMaterializationPolicy } = await import("../services/materialization-policy.js");
     resetRequestPolicyCacheForTests();
-    const lookupKey = vi.fn(async () => ({ keyType: "client" as const, scopes: ["search"], workspaceIds: [], materializationPolicy: {} }));
+    const lookupKey = vi.fn(async () => ({ keyType: "client" as const, scopes: ["search"], projectIds: [], materializationPolicy: {} }));
     const callDeps = { keyId: () => "key-cache", lookupKey, resolve: resolveMaterializationPolicy };
-    for (let i = 0; i < 3; i++) await resolveSearchMaterializationPolicy({ workspacePipeline: {} as never, workspaceId: "ws-1" }, callDeps as never);
+    for (let i = 0; i < 3; i++) await resolveSearchMaterializationPolicy({ projectPipeline: {} as never, projectId: "ws-1" }, callDeps as never);
     expect(lookupKey).toHaveBeenCalledTimes(1);
   });
 
   it("fails closed when the request's key cannot be resolved", async () => {
     const { resolveSearchMaterializationPolicy, FAIL_CLOSED_POLICY } = await import("../search/deferred/request-policy.js");
     const policy = await resolveSearchMaterializationPolicy(
-      { workspacePipeline: {} as never, workspaceId: "ws-1" },
+      { projectPipeline: {} as never, projectId: "ws-1" },
       { keyId: () => "revoked", lookupKey: vi.fn(async () => null), resolve: vi.fn() },
     );
     expect(policy).toBe(FAIL_CLOSED_POLICY);
@@ -483,7 +483,7 @@ describe("request policy for context-less routes", () => {
     const { resolveSearchMaterializationPolicy } = await import("../search/deferred/request-policy.js");
     const { resolveMaterializationPolicy } = await import("../services/materialization-policy.js");
     const policy = await resolveSearchMaterializationPolicy(
-      { workspacePipeline: {} as never, workspaceId: "ws-1" },
+      { projectPipeline: {} as never, projectId: "ws-1" },
       { keyId: () => null, lookupKey: vi.fn(), resolve: resolveMaterializationPolicy },
     );
     expect(policy.maxPagesPerQuery).toBe(40);
@@ -494,11 +494,11 @@ describe("session metadata", () => {
   it("persists deferred stats from diagnostics", () => {
     const stats = { temperature: "warm", pendingPages: 2 };
     const metadata = buildSearchSessionMetadata({
-      originalQuery: "q", effectiveQuery: "q", filters: {}, options: {}, workspaceId: "ws-1", selfQueryReasons: [],
+      originalQuery: "q", effectiveQuery: "q", filters: {}, options: {}, projectId: "ws-1", selfQueryReasons: [],
       diagnostics: { deferred: stats },
     } as never);
     expect(metadata.deferred).toEqual(stats);
-    expect(buildSearchSessionMetadata({ originalQuery: "q", filters: {}, options: {}, workspaceId: "ws-1" } as never).deferred).toBeNull();
+    expect(buildSearchSessionMetadata({ originalQuery: "q", filters: {}, options: {}, projectId: "ws-1" } as never).deferred).toBeNull();
   });
 });
 
@@ -516,7 +516,7 @@ describe("out-of-credit search over HTTP", () => {
     app.use("*", async (c, next) => { c.set("sessionUser", { id: "u", email: "", name: "" }); await next(); });
     app.route("/search", searchRoutes);
     const response = await app.request("/search", {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ q: "warranty", workspace: "ws-1" }),
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ q: "warranty", project: "ws-1" }),
     });
     expect(response.status).toBe(200);
     const body = await response.json();
@@ -533,19 +533,19 @@ describe("GET /v1/chat/stream deferred events", () => {
       await next();
     });
     app.route("/search", searchRoutes);
-    app.route("/chat", workspaceChatRoutes);
+    app.route("/chat", projectChatRoutes);
     return app;
   }
 
   it("emits page-materializing and page-ready before message", async () => {
-    chatWorkspace.mockImplementation(async () => {
+    chatProject.mockImplementation(async () => {
       const sink = getDeferredContext()?.onEvent;
       sink?.({ type: "page-materializing", documentId: "d1", pages: [4, 5] });
       await new Promise((resolve) => setTimeout(resolve, 5));
       sink?.({ type: "page-ready", documentId: "d1", pages: [4, 5] });
       return { id: "m1", sessionId: "chat-1", searchSessionId: "s-1", answer: "ok" };
     });
-    const response = await buildApp().request("/chat/stream?q=hello&workspace=ws-1", { headers: { "Sec-Fetch-Site": "same-origin" } });
+    const response = await buildApp().request("/chat/stream?q=hello&project=ws-1", { headers: { "Sec-Fetch-Site": "same-origin" } });
     expect(response.status).toBe(200);
     const text = await response.text();
     const events = [...text.matchAll(/^event: (.+)$/gm)].map((m) => m[1]);

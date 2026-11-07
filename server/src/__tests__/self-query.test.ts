@@ -9,10 +9,10 @@ describe("deriveSelfQueryFilters", () => {
     const plan = await deriveSelfQueryFilters({
       ...base,
       query: 'In the "Q4 board deck", what changed on slide 12?',
-      baseFilters: { workspaceId: "ws-1" },
+      baseFilters: { projectId: "ws-1" },
     });
 
-    expect(plan.filters.workspaceId).toBe("ws-1");
+    expect(plan.filters.projectId).toBe("ws-1");
     expect(plan.filters.pageRange).toEqual({ from: 12, to: 12 });
     expect(plan.filters.filenameContains).toBeUndefined();
     expect(plan.filters.mimeTypes).toBeUndefined();
@@ -26,8 +26,8 @@ describe("deriveSelfQueryFilters", () => {
     "explain the csv parser in the spreadsheet module",
     "Wie funktioniert das auf Deutsch, in german please",
   ])("derives no type, filename or language filter from the words of %j", async (query) => {
-    const plan = await deriveSelfQueryFilters({ ...base, query, baseFilters: { workspaceId: "ws-1" } });
-    expect(plan.filters).toEqual({ workspaceId: "ws-1" });
+    const plan = await deriveSelfQueryFilters({ ...base, query, baseFilters: { projectId: "ws-1" } });
+    expect(plan.filters).toEqual({ projectId: "ws-1" });
   });
 
   it("never replaces or widens what the caller restricted", async () => {
@@ -35,12 +35,12 @@ describe("deriveSelfQueryFilters", () => {
       ...base,
       query: 'what did the CEO say in the "board deck" about the spreadsheet on page 4',
       baseFilters: {
-        workspaceId: "ws-1", filenameContains: "contract", mimeTypes: ["application/pdf"], documentIds: ["doc-1"],
+        projectId: "ws-1", filenameContains: "contract", mimeTypes: ["application/pdf"], documentIds: ["doc-1"],
         runId: "run-1", pageRange: { from: 1, to: 3 },
       },
     });
     expect(plan.filters).toMatchObject({
-      workspaceId: "ws-1", filenameContains: "contract", mimeTypes: ["application/pdf"], documentIds: ["doc-1"], runId: "run-1",
+      projectId: "ws-1", filenameContains: "contract", mimeTypes: ["application/pdf"], documentIds: ["doc-1"], runId: "run-1",
     });
     // The derived page 4 lies outside the caller's 1-3: the caller's range stands.
     expect(plan.filters.pageRange).toEqual({ from: 1, to: 3 });
@@ -58,9 +58,9 @@ describe("narrowFilters", () => {
   });
 
   it("keeps every caller scope key untouched", () => {
-    const caller = { workspaceId: "ws-1", documentIds: ["a"], filenameEquals: "exact.pdf", tags: ["finance"] };
+    const caller = { projectId: "ws-1", documentIds: ["a"], filenameEquals: "exact.pdf", tags: ["finance"] };
     const out = narrowFilters(caller, { filenameContains: "x", tags: ["other"], mimeTypes: ["image/png"] });
-    expect(out).toMatchObject({ workspaceId: "ws-1", documentIds: ["a"], filenameEquals: "exact.pdf", tags: ["finance"] });
+    expect(out).toMatchObject({ projectId: "ws-1", documentIds: ["a"], filenameEquals: "exact.pdf", tags: ["finance"] });
     expect(out.filenameContains).toBeUndefined();
   });
 

@@ -1,5 +1,5 @@
 import type { DocumentArtifactLedger } from "../pipeline/artifact-ledger.js";
-import type { WorkspaceRun } from "../models.js";
+import type { ProjectRun } from "../models.js";
 
 /**
  * Per-run routing version for the legacy (non-router) vision path:
@@ -43,7 +43,7 @@ function warnUnknownPin(runId: string, stored: string): void {
   console.warn(`[vision-routing] run=${runId} has routing version ${JSON.stringify(stored.slice(0, 40))}${note}; routing as v1`);
 }
 
-type RunRoutingState = { run: Pick<WorkspaceRun, "id" | "workspaceId">; artifactLedger: DocumentArtifactLedger };
+type RunRoutingState = { run: Pick<ProjectRun, "id" | "projectId">; artifactLedger: DocumentArtifactLedger };
 
 /**
  * Pins the run to evidence routing (v3) unless it already has a version, and records it in the run's artifacts

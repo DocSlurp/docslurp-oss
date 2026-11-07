@@ -25,13 +25,13 @@ export interface GraphChunk {
 
 export interface GraphExtractionContext {
   config: GraphConfig;
-  /** Trusted scope: the workspace's domain brief, or its own definition. */
+  /** Trusted scope: the project's domain brief, or its own definition. */
   scope: string;
   model: string;
   /** LLM extraction runs only with a key; otherwise heuristics only. */
   apiKey?: string;
   useLlm: boolean;
-  /** Workspace privacy mode; the hosted LLM client refuses calls outside `standard`. */
+  /** Project privacy mode; the hosted LLM client refuses calls outside `standard`. */
   privacyMode: PrivacyMode;
   textGeneration?: TextGenerationConfig;
   deploymentProfile?: TextGenerationProfile;
@@ -40,7 +40,7 @@ export interface GraphExtractionContext {
   onUsage?: (usage: TextGenerationUsage, details: { window: number; finishReason: string }) => void;
 }
 
-/** Workspace natural key of a node: `kg_nodes (normalized_name, entity_type)`. */
+/** Project natural key of a node: `kg_nodes (normalized_name, entity_type)`. */
 export type GraphNodeKey = string;
 
 export interface GraphNodeDraft {
@@ -70,7 +70,7 @@ export interface GraphChunkEntityDraft {
   pageNumbers: number[];
 }
 
-/** One document's contribution to the workspace graph. */
+/** One document's contribution to the project graph. */
 export interface DocumentGraph {
   nodes: GraphNodeDraft[];
   edges: GraphEdgeDraft[];
@@ -363,7 +363,7 @@ async function extractWindowWithLlm(args: {
   const typeUnion = args.entityTypes.map((type) => JSON.stringify(type)).join("|");
   const trustedContext = [
     { label: "Filename", value: args.filename },
-    { label: "Workspace domain and scope", value: args.context.scope },
+    { label: "Project domain and scope", value: args.context.scope },
   ];
   if (args.part) {
     trustedContext.push({
@@ -380,7 +380,7 @@ async function extractWindowWithLlm(args: {
   const task = buildTrustedDocumentTaskPrompt({
     instruction: [
       "Extract a compact knowledge graph from the document.",
-      "Favor the subjects and relationships that matter for the workspace domain and scope; skip boilerplate, navigation, and incidental mentions.",
+      "Favor the subjects and relationships that matter for the project domain and scope; skip boilerplate, navigation, and incidental mentions.",
     ].join(" "),
     outputContract: [
       "Return strict JSON with keys `entities` and `relationships`.",
@@ -693,7 +693,7 @@ function normalizeEntityType(value: unknown): string {
   return /^[a-z][a-z0-9_]{1,39}$/.test(normalized) ? normalized : "concept";
 }
 
-/** Maps a type outside the workspace vocabulary onto the `concept` catch-all. */
+/** Maps a type outside the project vocabulary onto the `concept` catch-all. */
 function constrainEntityType(value: unknown, allowedTypes: ReadonlySet<string>): string {
   const normalized = normalizeEntityType(value);
   return allowedTypes.has(normalized) ? normalized : "concept";

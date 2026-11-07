@@ -9,7 +9,7 @@ import { setSpendCheckConfig } from "../db/spend-check.js";
 import { Store } from "../db/store.js";
 import { authorizeImageFrames } from "../ocr/image-frames.js";
 import { VisionRunGuard, type VisionGuardConfig, type VisionRequestGate } from "../lib/vision-attempt-guard.js";
-import type { WorkspaceRun } from "../models.js";
+import type { ProjectRun } from "../models.js";
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { pngHeader } from "../test/fake-ocr.js";
@@ -51,9 +51,9 @@ describe.skipIf(!url)("OCR escalation budget on real Postgres", () => {
     admin = postgres(url!, { max: 2, onnotice: () => undefined });
     await admin`insert into "user" (id, name, email) values ('ocrb-u1', 'U', 'ocrb-u1@example.com') on conflict do nothing`;
     await admin`insert into organizations (id, name, slug, created_by_user_id) values ('ocrb-org', 'O', 'ocrb-org', 'ocrb-u1') on conflict do nothing`;
-    await admin`insert into workspaces (id, org_id, user_id, name) values ('ocrb-ws', 'ocrb-org', 'ocrb-u1', 'W') on conflict do nothing`;
+    await admin`insert into projects (id, org_id, user_id, name) values ('ocrb-ws', 'ocrb-org', 'ocrb-u1', 'W') on conflict do nothing`;
     for (const id of [runId, "ocrbudget-run-2"]) {
-      await admin`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts)
+      await admin`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts)
         values (${id}, 'ocrb-org', 'ocrb-u1', 'ocrb-ws', 'bulk-upload', 'processing', 'extract-markdown', '{}', '{}') on conflict do nothing`;
     }
     scratch = await mkdtemp(path.join(process.env.TMPDIR || tmpdir(), "docslurp-ocr-budget-"));
@@ -101,10 +101,10 @@ describe.skipIf(!url)("OCR escalation budget on real Postgres", () => {
   }, 60_000);
 
   it("fails closed for two TIFFs authorizing at the same time while the spend check's database errors", async () => {
-    await admin`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts)
+    await admin`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts)
       values ('ocrb-tiff-run', 'ocrb-org', 'ocrb-u1', 'ocrb-ws', 'bulk-upload', 'processing', 'extract-markdown', '{}', '{}') on conflict do nothing`;
     for (const id of ["ocrb-tiff-a", "ocrb-tiff-b"]) {
-      await admin`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source)
+      await admin`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source)
         values (${id}, 'ocrb-org', 'ocrb-u1', 'ocrb-ws', 'ocrb-tiff-run', ${`${id}.tiff`}, 'image/tiff', ${`raw/${id}`}, 'processing', 1, 'assumed')`;
     }
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
@@ -124,7 +124,7 @@ describe.skipIf(!url)("OCR escalation budget on real Postgres", () => {
       for (const outcome of outcomes) expect((outcome as PromiseRejectedResult).reason).toMatchObject({ name: "SpendCheckUnavailableError" });
       // Nothing charged, the run neither paused nor let through.
       for (const { state } of activities) expect(state.usageLedger.snapshot()).toEqual([]);
-      const [run] = await admin<{ control_state: string | null }[]>`select control_state from workspace_runs where id = 'ocrb-tiff-run'`;
+      const [run] = await admin<{ control_state: string | null }[]>`select control_state from project_runs where id = 'ocrb-tiff-run'`;
       expect(run?.control_state).toBeNull();
       const [charges] = await admin<{ n: number }[]>`select count(*)::int as n from usage_events where run_id = 'ocrb-tiff-run'`;
       expect(charges?.n).toBe(0);
@@ -148,9 +148,9 @@ describe.skipIf(!url)("OCR escalation budget on real Postgres", () => {
     });
     const activity = () => {
       const state = WorkflowState.create({
-        id: run, orgId: "ocrb-org", workspaceId: "ocrb-ws", userId: "ocrb-u1", artifacts: {}, stats: {}, stage: "extract-markdown", spentCents: 0,
+        id: run, orgId: "ocrb-org", projectId: "ocrb-ws", userId: "ocrb-u1", artifacts: {}, stats: {}, stage: "extract-markdown", spentCents: 0,
         pipeline: { vision: { target: "remote", modelUri: "llm://openrouter/google/gemini-3.1-flash-lite", maxPagesPerDocument: 1_000 }, privacyMode: "standard", visionFallback: true },
-      } as unknown as WorkspaceRun, []);
+      } as unknown as ProjectRun, []);
       state.visionAttempts = store().visionAttempts;
       state.usageLedger.runId = run;
       return { state, reader: createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: { DOCSLURP_OCR_ESCALATION: "on" }, execute }) };

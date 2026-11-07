@@ -64,7 +64,7 @@ self-test whenever the runtime is present, and fails when `local` is set without
 - A refused or invalid OCR read (a CLI refusal, a model-pin mismatch, hostile input, a result that fails validation):
   the page fails, without another read of the same bytes, and is recorded as such (`ocr-failed-pages`). Vision page
   selection and the page router skip it; in the router the assignment fails as `ocr-boundary-failed` and never reaches
-  the workspace-model fallback or a cascade. It is not read by a hosted model instead, and an escalation read is never a
+  the project-model fallback or a cascade. It is not read by a hosted model instead, and an escalation read is never a
   substitute for a read that did not happen. Scan fill stops after three refused batches in a row and fails the
   remaining scanned pages unread.
 - An OCR read that could not run (VM creation, capacity, a deadline, a provider that is not ready) is not the page's
@@ -93,7 +93,7 @@ cost is recorded at the VM's real rate, so the provider-cost loss alert flags ru
 
 ## Languages
 
-`DOCSLURP_OCR_LANGUAGE` is the worker's default for workspaces left on `auto`. It takes `auto` or three-letter codes
+`DOCSLURP_OCR_LANGUAGE` is the worker's default for projects left on `auto`. It takes `auto` or three-letter codes
 such as `eng` or `eng+deu`; anything else stops the worker at startup. Codes map to recogniser families. Under `auto`
 the CLI tries `multi` first and then other families while a page's confidence stays low, up to
 `DOCSLURP_OCR_MAX_ATTEMPTS` (default 3, 1 to 7). A named language tries only its own families. Scripts no recogniser
@@ -108,7 +108,7 @@ the Arabic or Devanagari (Hindi) recogniser, and pages in a script no recogniser
 - `DOCSLURP_OCR_ESCALATION=on` turns it on; it is off unless set. The model must be a hosted, priced route
   (DeepInfra, OpenRouter or OpenAI); a local or private one is refused.
 - It has its own per-document page budget (`DOCSLURP_OCR_ESCALATION_MAX_PAGES`, default 25), its own ledger entries,
-  the run's cost cap, the workspace privacy mode and the run's vision attempt guard. The budget counts the document's
+  the run's cost cap, the project privacy mode and the run's vision attempt guard. The budget counts the document's
   pages in the guard's durable attempt ledger (`vision_run_attempts`, purpose `ocr`), so an activity retry or a worker
   restart does not reset it.
 - It reads the PNG the OCR boundary wrote. The host produces no image for it.
@@ -179,7 +179,7 @@ stripped object without evidence is not proof of absence, so it is never reporte
 package (the owning Debian package's dependencies, the crate or npm package's build features) and record that. Against
 the retired addons the scanner reports both: the stripped Kreuzberg build through `.dynsym` and an embedded
 `tesseract 5.5` banner, LiteParse through 5,244 `.symtab` symbols. `worker/src/__tests__/no-tesseract.test.ts` runs it
-over the installed workspace and fails on any hit, and proves detection on a stripped system binary with a patched-in
+over the installed project and fails on any hit, and proves detection on a stripped system binary with a patched-in
 banner. Run it over a built image too:
 
 ```sh
@@ -211,7 +211,7 @@ not install unstructured at all; it comes with the `unstructured` vendor bundle.
 | `DOCSLURP_OCR_ESCALATION_MAX_PAGES` | `25` | Hosted reads per document. |
 | `DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS` | pages + a fifth (`30`) | Hosted requests per document, every page and retry included, counted in the durable vision attempt ledger. |
 | `DOCSLURP_OCR_MAX_ATTEMPTS` | `3` | Recogniser attempts per page under `auto` (1 to 7). |
-| `DOCSLURP_OCR_LANGUAGE` | `auto` | Default language for workspaces left on `auto`. |
+| `DOCSLURP_OCR_LANGUAGE` | `auto` | Default language for projects left on `auto`. |
 | `DOCSLURP_OCR_MAX_LONG_EDGE` | `2000` | Long-edge cap in pixels (640 to 4000). Above 2000 is an explicit opt-in (see [Sizing](#sizing)). |
 | `DOCSLURP_OCR_MAX_CONCURRENT` | `1` | Concurrent OCR jobs per worker process. |
 

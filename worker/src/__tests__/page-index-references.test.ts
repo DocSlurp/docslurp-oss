@@ -8,7 +8,7 @@ import { WorkflowState } from "../pipeline/pipeline.js";
 import { PageIndexStage } from "../stages/page-index.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import type { CommandRunner } from "../tools/runner.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 
 /**
  * Page-level text (document_pages, which feeds page search and chat context) never carries a Fast page-image
@@ -33,9 +33,9 @@ describe("page-index: Fast page-image references", () => {
       deleteKeys: async () => undefined,
     } as unknown as ArtifactStore;
     const state = WorkflowState.create({
-      id: "run", orgId: "org", userId: "user", workspaceId: "ws", spentCents: 0, stats: {}, artifacts: {},
+      id: "run", orgId: "org", userId: "user", projectId: "ws", spentCents: 0, stats: {}, artifacts: {},
       pipeline: normalizePipelineFeatures({ quality: "fast", pageIndex: true }),
-    } as unknown as WorkspaceRun, [document]);
+    } as unknown as ProjectRun, [document]);
     state.artifactLedger.recordDocument("doc", "canonical-document", "s3://bucket/canonical/doc.json");
     state.artifactLedger.recordDocument("doc", "extraction-contract", "s3://bucket/contract/doc.json");
     await applyPageImageReferences({

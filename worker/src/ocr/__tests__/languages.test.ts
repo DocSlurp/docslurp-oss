@@ -50,10 +50,10 @@ describe("planOcrLanguages", () => {
     }
   });
 
-  it("falls back to DOCSLURP_OCR_LANGUAGE when the workspace says auto or nothing", () => {
+  it("falls back to DOCSLURP_OCR_LANGUAGE when the project says auto or nothing", () => {
     expect(planOcrLanguages("auto", env({ DOCSLURP_OCR_LANGUAGE: "kor" }))).toMatchObject({ recognisers: ["korean"], setting: "kor" });
     expect(planOcrLanguages(undefined, env({ DOCSLURP_OCR_LANGUAGE: "rus" })).recognisers).toEqual(["eslav"]);
-    // A workspace's named language wins over the worker default.
+    // A project's named language wins over the worker default.
     expect(planOcrLanguages("ara", env({ DOCSLURP_OCR_LANGUAGE: "kor" })).recognisers).toEqual(["arabic"]);
     expect(effectiveOcrLanguageSetting(" auto ", env({ DOCSLURP_OCR_LANGUAGE: "eng+deu" }))).toBe("eng+deu");
   });

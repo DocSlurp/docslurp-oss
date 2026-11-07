@@ -15,8 +15,8 @@ import { consumeFeatureRateLimit } from "../middleware/rate-limit.js";
  * (`@docslurp/estimate`) and settings, and gets the pricing provider's estimate: ingest credits, monthly hosting and
  * usage, neutral lines and ranges. Files never reach the server, only their profiles.
  *
- * - No tenant data: the route reads no database row and stores nothing; it prices with new-workspace defaults.
- *   Authenticated callers quote against a workspace with `POST /v1/uploads/estimate` (same quote function).
+ * - No tenant data: the route reads no database row and stores nothing; it prices with new-project defaults.
+ *   Authenticated callers quote against a project with `POST /v1/uploads/estimate` (same quote function).
  * - Bounded: a 1 MiB body, at most ESTIMATE_MAX_FILES_ANONYMOUS files, strict schemas (unknown fields refused), profiles
  *   clamped against each file's size.
  * - Rate limited per client IP (ESTIMATE_RATE_LIMIT_PER_MINUTE, default 120 quotes a minute) and per quote session
@@ -83,8 +83,8 @@ export const estimateRoutes = new Hono().post(
       return apiErrorResponse(c, 429, "rate_limited", "Too many estimates; try again shortly");
     }
     const body = c.req.valid("json");
-    if (body.workspace) {
-      return apiErrorResponse(c, 400, "invalid_request", "Quote a workspace with POST /v1/uploads/estimate (signed in or with an API key)");
+    if (body.project) {
+      return apiErrorResponse(c, 400, "invalid_request", "Quote a project with POST /v1/uploads/estimate (signed in or with an API key)");
     }
     if (body.files.length > ESTIMATE_MAX_FILES_ANONYMOUS) {
       return apiErrorResponse(c, 413, "payload_too_large", `Send at most ${ESTIMATE_MAX_FILES_ANONYMOUS} files per estimate`);

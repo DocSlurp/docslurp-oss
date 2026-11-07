@@ -8,7 +8,7 @@ import type { Config } from "../config.js";
 import { Store } from "../db/store.js";
 import { persistRunUsageEvents } from "../db/usage-event-store.js";
 import type { VisionRequestGate } from "../lib/vision-attempt-guard.js";
-import type { WorkspaceRun } from "../models.js";
+import type { ProjectRun } from "../models.js";
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { pngHeader } from "../test/fake-ocr.js";
@@ -41,9 +41,9 @@ beforeAll(async () => {
   admin = sql(shared);
   await admin`insert into "user" (id, name, email) values ('esc-u', 'U', 'esc-u@example.com')`;
   await admin`insert into organizations (id, name, slug, created_by_user_id) values ('esc-org', 'O', 'esc-org', 'esc-u')`;
-  await admin`insert into workspaces (id, org_id, user_id, name) values ('esc-ws', 'esc-org', 'esc-u', 'W')`;
+  await admin`insert into projects (id, org_id, user_id, name) values ('esc-ws', 'esc-org', 'esc-u', 'W')`;
   for (const id of ["esc-run-1", "esc-run-2", "esc-run-3", "esc-run-role", "esc-run-race"]) {
-    await admin`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts)
+    await admin`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts)
       values (${id}, 'esc-org', 'esc-u', 'esc-ws', 'bulk-upload', 'processing', 'extract-markdown', '{}', '{}')`;
   }
   scratch = await mkdtemp(path.join(process.env.TMPDIR || tmpdir(), "docslurp-esc-retry-"));
@@ -68,9 +68,9 @@ const success = (): VisionExecutionResult => ({
 function activity(runId: string, execute: typeof executeVisionRuntime, env: NodeJS.ProcessEnv = {}) {
   const created = shared;
   const state = WorkflowState.create({
-    id: runId, orgId: "esc-org", workspaceId: "esc-ws", userId: "esc-u", artifacts: {}, stats: {}, stage: "extract-markdown", spentCents: 0,
+    id: runId, orgId: "esc-org", projectId: "esc-ws", userId: "esc-u", artifacts: {}, stats: {}, stage: "extract-markdown", spentCents: 0,
     pipeline: { vision: { target: "remote", modelUri: "llm://openrouter/google/gemini-3.1-flash-lite", maxPagesPerDocument: 1_000 }, privacyMode: "standard", visionFallback: true },
-  } as unknown as WorkspaceRun, []);
+  } as unknown as ProjectRun, []);
   state.store = created;
   state.visionAttempts = created.visionAttempts;
   state.usageLedger.runId = runId;

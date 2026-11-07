@@ -10,9 +10,9 @@ import { zValidator } from "@hono/zod-validator";
 import { getArtifactJson } from "../lib/artifacts.js";
 import {
   apiKeyHasAnyScope,
-  assertApiKeyWorkspaceScope
+  assertApiKeyProjectScope
 } from "../lib/api-key-authorization.js";
-import { getRequestActor, resolveActorWorkspaceFilter } from "../lib/request-actor.js";
+import { getRequestActor, resolveActorProjectFilter } from "../lib/request-actor.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { appendAuditLog } from "../services/audit-log.js";
 import {
@@ -46,14 +46,14 @@ import { deferredProfilesEnabled } from "@docslurp/shared";
 import { getRun } from "../services/runs.js";
 import { runLifecycle } from "../services/run-lifecycle.js";
 import { resolveMaterializationPolicy } from "../services/materialization-policy.js";
-import { getWorkspace } from "../services/workspaces.js";
-import { canEditWorkspace, getWorkspaceAccess } from "../services/organizations.js";
-import { estimateFullIndex, IndexingModeError, requestFullIndex } from "../services/workspace-indexing-mode.js";
+import { getProject } from "../services/projects.js";
+import { canEditProject, getProjectAccess } from "../services/organizations.js";
+import { estimateFullIndex, IndexingModeError, requestFullIndex } from "../services/project-indexing-mode.js";
 import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from "../services/jobs.js";
 import { billingState } from "../services/config-change.js";
-import { estimateDocumentReprocess, singleWorkspaceOf } from "../services/work-estimates.js";
+import { estimateDocumentReprocess, singleProjectOf } from "../services/work-estimates.js";
 import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "../lib/content-update-access.js";
-import { apiKeyCanUseWorkspace } from "../lib/api-key-workspace-scope.js";
+import { apiKeyCanUseProject } from "../lib/api-key-project-scope.js";
 
 const bulkSchema = z.object({
   speedBoost: z.boolean().optional(),
@@ -82,7 +82,7 @@ async function requireApiKeyDocumentScope(c: Context, docId: string, userId: str
     return { response: apiStatusError(c, 404, "Document not found") };
   }
   try {
-    assertApiKeyWorkspaceScope(apiKey, viewer.document);
+    assertApiKeyProjectScope(apiKey, viewer.document);
   } catch {
     return { response: apiStatusError(c, 404, "Document not found") };
   }
@@ -97,14 +97,14 @@ function isContentUpdateRequest(method: string, path: string): boolean {
 }
 
 /**
- * For an API key, every listed document must exist in a workspace the key can
+ * For an API key, every listed document must exist in a project the key can
  * use; anything else answers 404 like a missing document, before any change.
  */
 async function denyOutOfScopeDocuments(c: Context, documentIds: string[], userId: string): Promise<Response | null> {
   const apiKey = c.get("apiKey");
   if (!apiKey) return null;
   const owners = await listDocumentOwners([...new Set(documentIds)], userId);
-  const usable = new Set(owners.filter((owner) => apiKeyCanUseWorkspace(apiKey, owner)).map((owner) => owner.id));
+  const usable = new Set(owners.filter((owner) => apiKeyCanUseProject(apiKey, owner)).map((owner) => owner.id));
   return documentIds.every((id) => usable.has(id)) ? null : apiStatusError(c, 404, "Document not found");
 }
 
@@ -126,7 +126,7 @@ export const documentsRoutes = new Hono()
       await next();
       return;
     }
-    // Full index spends credits, so it needs ingest (like the workspace endpoint) instead of artifacts.
+    // Full index spends credits, so it needs ingest (like the project endpoint) instead of artifacts.
     if (!apiKeyHasAnyScope(apiKey, fullIndexRequest ? ["ingest"] : ["artifacts"])) {
       return apiStatusError(c, 403, "Forbidden");
     }
@@ -143,7 +143,7 @@ export const documentsRoutes = new Hono()
     if (!/^[1-9][0-9]{0,5}$/.test(raw)) return apiStatusError(c, 404, "Document page not found");
     try {
       const result = await requestDocumentPageRender(c.req.param("documentId"), Number(raw), c.get("sessionUser").id, c.req.method === "POST",
-        document => assertApiKeyWorkspaceScope(c.get("apiKey"), document), quality);
+        document => assertApiKeyProjectScope(c.get("apiKey"), document), quality);
       if (result.status === "busy") { c.header("Retry-After", "5"); return apiStatusError(c, 429, "Page image queue is busy"); }
       if (result.status === "missing") return apiStatusError(c, 404, "Document page not found");
       if (result.status === "unavailable") return apiStatusError(c, 409, "Page image unavailable");
@@ -159,7 +159,7 @@ export const documentsRoutes = new Hono()
   .get("/", async (c) => {
     const userId = c.get("sessionUser").id;
     const apiKey = c.get("apiKey");
-    const workspaceId = await resolveActorWorkspaceFilter(getRequestActor(c), c.req.query("workspace"), c.req.query("orgId"));
+    const projectId = await resolveActorProjectFilter(getRequestActor(c), c.req.query("project"), c.req.query("orgId"));
     const tagQuery = c.req.query("tags");
     const tags = tagQuery
       ? tagQuery.split(",").map((value) => value.trim()).filter(Boolean)
@@ -169,7 +169,7 @@ export const documentsRoutes = new Hono()
       userId,
       orgId: apiKey?.orgId ?? undefined,
       runId: c.req.query("runId") ?? undefined,
-      workspaceId,
+      projectId,
       tags,
       limit: parseListLimit(c.req.query("limit"), 250, 250),
       cursor: c.req.query("cursor") || undefined,
@@ -180,33 +180,33 @@ export const documentsRoutes = new Hono()
     if (!deferredProfilesEnabled()) return apiErrorResponse(c, 404, "not_found", "Not found");
     const userId = c.get("sessionUser").id;
     const viewer = await getDocumentViewerPayload(c.req.param("documentId"), userId);
-    const workspace = viewer ? await getWorkspace(viewer.document.workspaceId, userId) : null;
+    const project = viewer ? await getProject(viewer.document.projectId, userId) : null;
     const apiKey = c.get("apiKey");
-    if (!viewer || !workspace) return apiErrorResponse(c, 404, "not_found", "Document not found");
+    if (!viewer || !project) return apiErrorResponse(c, 404, "not_found", "Document not found");
     if (apiKey) {
       try {
-        assertApiKeyWorkspaceScope(apiKey, viewer.document);
+        assertApiKeyProjectScope(apiKey, viewer.document);
       } catch {
         return apiErrorResponse(c, 404, "not_found", "Document not found");
       }
     }
     const resolved = await resolveMaterializationPolicy({
-      workspacePipeline: workspace.pipeline,
+      projectPipeline: project.pipeline,
       apiKey,
       capabilityHeader: c.req.header("X-DocSlurp-Capability"),
       origin: c.req.header("Origin"),
-      workspaceId: workspace.id,
+      projectId: project.id,
     });
     if ("error" in resolved) return apiErrorResponse(c, 403, "forbidden", "Invalid capability", { category: resolved.error });
     try {
       const inline = await inlineEstimate(
-        () => estimateFullIndex({ speedBoost: c.req.valid("json").speedBoost === true, workspaceId: workspace.id, orgId: workspace.orgId, documentIds: [viewer.document.id] }),
+        () => estimateFullIndex({ speedBoost: c.req.valid("json").speedBoost === true, projectId: project.id, orgId: project.orgId, documentIds: [viewer.document.id] }),
         `/v1/documents/${viewer.document.id}/full-index/estimate`,
       );
       const result = await requestFullIndex({
         speedBoost: c.req.valid("json").speedBoost === true,
-        orgId: workspace.orgId,
-        workspaceId: workspace.id,
+        orgId: project.orgId,
+        projectId: project.id,
         documentIds: [viewer.document.id],
         actor: getRequestActor(c),
         policy: resolved.policy,
@@ -226,39 +226,39 @@ export const documentsRoutes = new Hono()
     if (!deferredProfilesEnabled()) return apiErrorResponse(c, 404, "not_found", "Not found");
     const userId = c.get("sessionUser").id;
     const viewer = await getDocumentViewerPayload(c.req.param("documentId"), userId);
-    const workspace = viewer ? await getWorkspace(viewer.document.workspaceId, userId) : null;
+    const project = viewer ? await getProject(viewer.document.projectId, userId) : null;
     const apiKey = c.get("apiKey");
-    if (!viewer || !workspace) return apiErrorResponse(c, 404, "not_found", "Document not found");
+    if (!viewer || !project) return apiErrorResponse(c, 404, "not_found", "Document not found");
     if (apiKey) {
       try {
-        assertApiKeyWorkspaceScope(apiKey, viewer.document);
+        assertApiKeyProjectScope(apiKey, viewer.document);
       } catch {
         return apiErrorResponse(c, 404, "not_found", "Document not found");
       }
     }
     const resolved = await resolveMaterializationPolicy({
-      workspacePipeline: workspace.pipeline,
+      projectPipeline: project.pipeline,
       apiKey,
       capabilityHeader: c.req.header("X-DocSlurp-Capability"),
       origin: c.req.header("Origin"),
-      workspaceId: workspace.id,
+      projectId: project.id,
     });
     if ("error" in resolved) return apiErrorResponse(c, 403, "forbidden", "Invalid capability", { category: resolved.error });
     if (!resolved.policy.allowFullIndexRequest) {
       return apiErrorResponse(c, 403, "forbidden", "This key or capability may not request a full index.", { category: "full_index_not_allowed" });
     }
-    const access = await getWorkspaceAccess(workspace.id, userId);
-    if (!access || !canEditWorkspace(access, userId)) return apiErrorResponse(c, 404, "not_found", "Document not found");
-    const estimate = await estimateFullIndex({ speedBoost: c.req.valid("json").speedBoost === true, workspaceId: workspace.id, orgId: workspace.orgId, documentIds: [viewer.document.id] });
+    const access = await getProjectAccess(project.id, userId);
+    if (!access || !canEditProject(access, userId)) return apiErrorResponse(c, 404, "not_found", "Document not found");
+    const estimate = await estimateFullIndex({ speedBoost: c.req.valid("json").speedBoost === true, projectId: project.id, orgId: project.orgId, documentIds: [viewer.document.id] });
     const quote = estimate
-      ? await quoteStoredDocuments({ scope: { orgId: workspace.orgId, workspaceId: workspace.id, documentIds: [viewer.document.id] }, pipeline: workspace.pipeline, estimate, settings: { indexing: "full" } })
+      ? await quoteStoredDocuments({ scope: { orgId: project.orgId, projectId: project.id, documentIds: [viewer.document.id] }, pipeline: project.pipeline, estimate, settings: { indexing: "full" } })
       : null;
     return c.json({ estimate, quote, billing: billingState() });
   })
   .get("/index", async (c) => {
     const userId = c.get("sessionUser").id;
     const apiKey = c.get("apiKey");
-    const workspaceId = await resolveActorWorkspaceFilter(getRequestActor(c), c.req.query("workspace"), c.req.query("orgId"));
+    const projectId = await resolveActorProjectFilter(getRequestActor(c), c.req.query("project"), c.req.query("orgId"));
     const tagQuery = c.req.query("tags");
     const tags = tagQuery
       ? tagQuery.split(",").map((value) => value.trim()).filter(Boolean)
@@ -267,7 +267,7 @@ export const documentsRoutes = new Hono()
     const result = await listDocumentIndexEntries({
       userId,
       orgId: apiKey?.orgId ?? c.req.query("orgId") ?? undefined,
-      workspaceId,
+      projectId,
       q: c.req.query("q") ?? undefined,
       tags,
       limit: Number.isFinite(rawLimit) ? rawLimit : undefined,
@@ -307,7 +307,7 @@ export const documentsRoutes = new Hono()
       ipAddress: requestIp(c),
       metadata: {
         filename: deleted.filename,
-        workspaceId: deleted.workspaceId,
+        projectId: deleted.projectId,
         runId: deleted.runId,
         sourceKey: deleted.sourceKey,
         userAgent: requestUserAgent(c)
@@ -535,11 +535,11 @@ export const documentsRoutes = new Hono()
       return c.json({ artifacts });
     }
 
-    // Same selection as the workspace-scoped twin when the documents live in one workspace.
-    const bulkWorkspaceId = await singleWorkspaceOf(body.documentIds, userId);
+    // Same selection as the project-scoped twin when the documents live in one project.
+    const bulkProjectId = await singleProjectOf(body.documentIds, userId);
     const bulkInline = await inlineEstimate(
-      () => estimateDocumentReprocess({ documentIds: body.documentIds, userId, speedBoost: body.speedBoost === true, ...(bulkWorkspaceId ? { workspaceId: bulkWorkspaceId } : {}) }),
-      `/v1/workspaces/${bulkWorkspaceId ?? "{workspaceId}"}/documents/bulk/estimate`,
+      () => estimateDocumentReprocess({ documentIds: body.documentIds, userId, speedBoost: body.speedBoost === true, ...(bulkProjectId ? { projectId: bulkProjectId } : {}) }),
+      `/v1/projects/${bulkProjectId ?? "{projectId}"}/documents/bulk/estimate`,
     );
     let bulk: Awaited<ReturnType<typeof bulkReprocessDocuments>>;
     try {

@@ -5,7 +5,7 @@ beforeAll(async () => {
   db = await createMigratedDatabase();
   await db.exec(`insert into "user" (id,name,email) values ('realtime-user','Test','realtime@example.test');
     insert into organizations(id,name,slug,created_by_user_id) values ('realtime-org','Test','realtime','realtime-user');
-    insert into workspaces(id,org_id,user_id,name) values ('realtime-workspace','realtime-org','realtime-user','Test');`);
+    insert into projects(id,org_id,user_id,name) values ('realtime-project','realtime-org','realtime-user','Test');`);
 }, 60_000);
 afterAll(async () => { await db?.close(); });
 async function revision() {
@@ -14,7 +14,7 @@ async function revision() {
 describe("commit-visible realtime coverage", () => {
   it("compacts committed counter rows without changing the aggregate revision", async () => {
     const before=await revision();
-    for(let i=0;i<300;i++) await db.exec("update workspaces set name=name where id='realtime-workspace'");
+    for(let i=0;i<300;i++) await db.exec("update projects set name=name where id='realtime-project'");
     expect(await revision()).toBe(before+300);
     const {rows:[row]}=await db.query<{count:number}>("select count(*)::int as count from realtime_revision_counters where org_id='realtime-org'");
     expect(row!.count).toBeLessThanOrEqual(2);
@@ -22,7 +22,7 @@ describe("commit-visible realtime coverage", () => {
   it("rolls revisions back with a failed mutation", async () => {
     const before = await revision();
     await expect(db.transaction(async tx => {
-      await tx.exec(`update workspaces set name='rolled back' where id='realtime-workspace'`);
+      await tx.exec(`update projects set name='rolled back' where id='realtime-project'`);
       throw new Error("rollback");
     })).rejects.toThrow("rollback");
     expect(await revision()).toBe(before);
@@ -30,20 +30,20 @@ describe("commit-visible realtime coverage", () => {
   it("coalesces repeated writes and publishes settings and deletion", async () => {
     const before = await revision();
     await db.transaction(async tx => {
-      for (let i = 0; i < 100; i++) await tx.exec(`update workspaces set name='changed' where id='realtime-workspace'`);
+      for (let i = 0; i < 100; i++) await tx.exec(`update projects set name='changed' where id='realtime-project'`);
     });
     expect(await revision()).toBe(before + 1);
-    await db.exec(`insert into documents(id,user_id,org_id,workspace_id,filename,mime_type,source_key,status)
-      values('realtime-doc','realtime-user','realtime-org','realtime-workspace','test.txt','text/plain','test','queued')`);
+    await db.exec(`insert into documents(id,user_id,org_id,project_id,filename,mime_type,source_key,status)
+      values('realtime-doc','realtime-user','realtime-org','realtime-project','test.txt','text/plain','test','queued')`);
     const created = await revision();
     await db.exec(`delete from documents where id='realtime-doc'`);
     expect(await revision()).toBe(created + 1);
   });
   it("publishes run/stage changes, membership revocation and credit changes", async () => {
-    await db.exec(`insert into workspace_runs(id,user_id,org_id,workspace_id,kind,status,stage)
-      values ('realtime-run','realtime-user','realtime-org','realtime-workspace','upload','processing','extract')`);
+    await db.exec(`insert into project_runs(id,user_id,org_id,project_id,kind,status,stage)
+      values ('realtime-run','realtime-user','realtime-org','realtime-project','upload','processing','extract')`);
     let before = await revision();
-    await db.exec(`insert into workspace_run_stage_states(run_id,stage_name,status) values('realtime-run','extract','completed')`);
+    await db.exec(`insert into project_run_stage_states(run_id,stage_name,status) values('realtime-run','extract','completed')`);
     expect(await revision()).toBe(before + 1);
     before = await revision();
     await db.exec(`update organizations set credit_balance_cents=100 where id='realtime-org'`);
@@ -55,13 +55,13 @@ describe("commit-visible realtime coverage", () => {
   });
   it("publishes curated/recent suggestions and page metadata only after commit", async () => {
     let before = await revision();
-    await db.exec(`insert into query_suggestions(id,user_id,workspace_id,phrase) values('realtime-suggestion','realtime-user','realtime-workspace','Question')`);
+    await db.exec(`insert into query_suggestions(id,user_id,project_id,phrase) values('realtime-suggestion','realtime-user','realtime-project','Question')`);
     expect(await revision()).toBe(before+1);
     before = await revision();
-    await db.exec(`insert into search_sessions(id,user_id,query,metadata) values('realtime-search','realtime-user','Query','{"workspaceId":"realtime-workspace"}')`);
+    await db.exec(`insert into search_sessions(id,user_id,query,metadata) values('realtime-search','realtime-user','Query','{"projectId":"realtime-project"}')`);
     expect(await revision()).toBe(before+1);
-    await db.exec(`insert into documents(id,user_id,org_id,workspace_id,run_id,filename,mime_type,source_key,status)
-      values('realtime-page-doc','realtime-user','realtime-org','realtime-workspace','realtime-run','test.txt','text/plain','test','processing')`);
+    await db.exec(`insert into documents(id,user_id,org_id,project_id,run_id,filename,mime_type,source_key,status)
+      values('realtime-page-doc','realtime-user','realtime-org','realtime-project','realtime-run','test.txt','text/plain','test','processing')`);
     before = await revision();
     await db.exec(`insert into document_pages(id,document_id,run_id,user_id,page_number,text)
       values('realtime-page','realtime-page-doc','realtime-run','realtime-user',1,'text')`);

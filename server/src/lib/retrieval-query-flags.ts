@@ -2,8 +2,8 @@ import { searchCandidateDepthSchema, searchResultOrderSchema } from "@docslurp/s
 
 /**
  * Retrieval flags from a query string, shared by GET /v1/search and the
- * workspace search stream. Flags are tri-state: an omitted flag stays
- * undefined so the workspace's retrieval defaults decide; only "true" and
+ * project search stream. Flags are tri-state: an omitted flag stays
+ * undefined so the project's retrieval defaults decide; only "true" and
  * "false" (or "1"/"0") set it explicitly.
  */
 export interface RetrievalQueryFlags {

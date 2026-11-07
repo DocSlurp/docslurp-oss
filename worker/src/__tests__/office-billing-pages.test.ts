@@ -30,19 +30,19 @@ beforeAll(async () => {
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com');
     insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 100000), ('o2', 'Poor', 'poor', 'u1', 8, 20), ('o3', 'Ten', 'ten', 'u1', 8, 110);
-    insert into workspaces(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W'), ('w2', 'o2', 'u1', 'P'), ('w3', 'o3', 'u1', 'T');
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+    insert into projects(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W'), ('w2', 'o2', 'u1', 'P'), ('w3', 'o3', 'u1', 'T');
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
       values ('run1', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'embed', '${pipeline}', 1, 1),
              ('run2', 'o2', 'u1', 'w2', 'bulk-upload', 'processing', 'to-canonical', '${withFeatures}', 1, 1),
              ('run3', 'o3', 'u1', 'w3', 'bulk-upload', 'processing', 'to-canonical', '${pipeline}', 10, 10);
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
       select 'big' || n, 'o3', 'u1', 'w3', 'run3', 'big' || n || '.docx', '${DOCX}', 'raw/b' || n, 'processing', 1 from generate_series(1, 10) n;
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count) values
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count) values
       ('docx1', 'o1', 'u1', 'w1', 'run1', 'contract.docx', '${DOCX}', 'raw/c1', 'completed', 1),
       ('docx2', 'o2', 'u1', 'w2', 'run2', 'huge.docx', '${DOCX}', 'raw/c2', 'processing', 1);
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
       values ('run4', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'embed', '${withFeatures}', 2, 2);
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source) values
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source) values
       ('blank', 'o1', 'u1', 'w1', 'run4', 'blank.docx', '${DOCX}', 'raw/blank', 'completed', 1, 'assumed'),
       ('sheetless', 'o1', 'u1', 'w1', 'run4', 'notes.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'raw/sheetless', 'completed', 1, 'assumed');
   `);
@@ -110,7 +110,7 @@ describe("a measured DOCX: page rows and billing", () => {
     // The count is recorded, the run is paused and the document is stopped (a run-policy stop), not carried on.
     await expect(recordMeasuredPageCount({ run, store }, document, "office-word", counted(20_000))).rejects.toMatchObject({ name: "RunPolicyError" });
     expect((await store.loadDocument("docx2"))!.billingPages).toBe(20_000);
-    const { rows } = await db.query<{ control_state: string | null; pause_reason: string | null }>(`select control_state, pause_reason from workspace_runs where id = 'run2'`);
+    const { rows } = await db.query<{ control_state: string | null; pause_reason: string | null }>(`select control_state, pause_reason from project_runs where id = 'run2'`);
     expect(rows[0]).toEqual({ control_state: "paused", pause_reason: "credit_exhausted" });
     // A run already paused (or stopped) by something else: the check reports blocked without pausing, and still stops it.
     await expect(recordMeasuredPageCount({ run, store }, document, "office-word", counted(20_000))).rejects.toMatchObject({ name: "RunPolicyError" });
@@ -124,7 +124,7 @@ describe("a measured DOCX: page rows and billing", () => {
     const each = extraCreditsForMeasuredPages(run.pipeline, 1, 400, "text-rule");
     expect(each).toBeLessThan(5);
     expect(each * 10).toBeGreaterThan(10);
-    const state = async () => (await db.query<{ control_state: string | null }>(`select control_state from workspace_runs where id = 'run3'`)).rows[0]!.control_state;
+    const state = async () => (await db.query<{ control_state: string | null }>(`select control_state from project_runs where id = 'run3'`)).rows[0]!.control_state;
     let pausedAt = 0;
     for (let n = 1; n <= 10 && !pausedAt; n += 1) {
       const stopped = await recordMeasuredPageCount({ run, store }, (await store.loadDocument(`big${n}`))!, "office-word", counted(400))
@@ -145,18 +145,18 @@ describe("a measured DOCX: page rows and billing", () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
     expect(extraCreditsForMeasuredPages(defaultPipelineFeatures, 1, 1)).toBe(0);
     expect(extraCreditsForMeasuredPages(defaultPipelineFeatures, 5, 3)).toBe(0);
-    await db.exec(`update workspace_runs set control_state = null, pause_reason = null where id = 'run1'`);
+    await db.exec(`update project_runs set control_state = null, pause_reason = null where id = 'run1'`);
     const run = await store.loadRun("run1");
     const document = (await store.loadDocument("docx1"))!;
     await recordMeasuredPageCount({ run, store }, document, "office-word", counted(40));
-    const { rows } = await db.query<{ control_state: string | null }>(`select control_state from workspace_runs where id = 'run1'`);
+    const { rows } = await db.query<{ control_state: string | null }>(`select control_state from project_runs where id = 'run1'`);
     expect(rows[0]!.control_state).toBeNull();
   }, 60_000);
 
   it("fails closed when the measured-page spend check's database errors: retryable, never treated as funded", async () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
     vi.spyOn(console, "error").mockImplementation(() => undefined);
-    await db.exec(`update workspace_runs set control_state = null, pause_reason = null where id = 'run1'`);
+    await db.exec(`update project_runs set control_state = null, pause_reason = null where id = 'run1'`);
     const run = await store.loadRun("run1");
     const document = (await store.loadDocument("docx1"))!;
     await db.exec(`alter function org_spend_status(text, text, numeric) rename to org_spend_status_unavailable`);

@@ -7,7 +7,7 @@ import {
 
 type Client = Sql<Record<string, unknown>>;
 export interface GeoAttempt {
-  documentId: string; workspaceId: string; orgId: string; runId: string;
+  documentId: string; projectId: string; orgId: string; runId: string;
   revision: string; schemaDigest: string;
 }
 export interface GeoFinalSource extends GeoAttempt {
@@ -29,16 +29,16 @@ export async function beginGeoAttempt(sql: Client, identity: Omit<GeoAttempt, "r
   validateGeoAnnotations(schema);
   const schemaDigest = geoDigest(schema);
   return await sql.begin(async tx => {
-    const [workspace] = await tx`select pipeline from workspaces where id=${identity.workspaceId}
+    const [project] = await tx`select pipeline from projects where id=${identity.projectId}
       and org_id=${identity.orgId} and archived_at is null for share`;
-    const pipeline = workspace?.pipeline as { outputSchema?: unknown } | undefined;
+    const pipeline = project?.pipeline as { outputSchema?: unknown } | undefined;
     if (!pipeline?.outputSchema || geoDigest(pipeline.outputSchema) !== schemaDigest) {
-      throw new Error("Geo extraction schema is not the current workspace schema");
+      throw new Error("Geo extraction schema is not the current project schema");
     }
     const [capability] = await tx`select to_regprocedure('publish_accepted_geo_source(text)') is not null as ready`;
     if (!capability?.ready) throw new Error("Geo spatial migrations are not installed");
     const [document] = await tx`update documents set projection_revision=projection_revision+1
-      where id=${identity.documentId} and workspace_id=${identity.workspaceId} and org_id=${identity.orgId}
+      where id=${identity.documentId} and project_id=${identity.projectId} and org_id=${identity.orgId}
         and status not in ('pii_blocked','failed') and deduped_from_document_id is null
         and archived_at is null and superseded_at is null and purged_at is null
         and not geo_has_correction

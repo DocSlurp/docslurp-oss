@@ -34,7 +34,7 @@ export interface RoutedVisionArgs {
   plan: RoutePlan;
   execution: RoutedExecution;
   catalog: readonly RoutingTarget[];
-  /** Workspace vision config: the model for fallback pages and the base of every group's config. */
+  /** Project vision config: the model for fallback pages and the base of every group's config. */
   selection: VisionConfig;
   extract: (vision: VisionConfig, pages: number[], options?: RoutedExtractOptions) => Promise<RoutedExtractResult>;
   /** Privacy gate for a group's vision config (false skips the group). */
@@ -43,7 +43,7 @@ export interface RoutedVisionArgs {
   canContinue: () => boolean;
   /**
    * Real execution for non-VLM targets (text layer, native extractors, OCR, labeler) and for
-   * region/image-scoped calls. Without it those assignments fall back to the workspace model.
+   * region/image-scoped calls. Without it those assignments fall back to the project model.
    */
   executorDeps?: ExecutorDeps;
   /** Optional decision-model verifier consulted only when every free check passed. */
@@ -172,7 +172,7 @@ function buildPageOutput(pageNumber: number, parts: Part[], pageHeightPt: number
 
 /**
  * Executes a plan: page-scope VLM assignments batched per target (each group runs its own model
- * instead of the workspace vision model), every other assignment through the executor registry
+ * instead of the project vision model), every other assignment through the executor registry
  * (text layer, native extractors, OCR, local labeler, region/image crops), merges each page's
  * outputs into one canonical-ready body, then escalates pages whose output trips a free check
  * (or the optional verifier) at most once through the assignment's planned cascade target. Pure
@@ -310,7 +310,7 @@ export async function runRoutedVision(args: RoutedVisionArgs): Promise<RoutedVis
     }
   };
 
-  // ---- Page-scope VLM groups (workspace vision path) ----
+  // ---- Page-scope VLM groups (project vision path) ----
   for (const group of execution.groups) {
     if (!args.canContinue()) {
       skipped.push({ targetId: group.targetId, pages: group.pages, reason: "cost-cap" });
@@ -335,7 +335,7 @@ export async function runRoutedVision(args: RoutedVisionArgs): Promise<RoutedVis
   let executorRequests = execution.requests;
   const runnable = args.executorDeps ? executorRequests : [];
   if (!args.executorDeps) {
-    // No executors wired: extraction pages the registry would have served use the workspace model.
+    // No executors wired: extraction pages the registry would have served use the project model.
     for (const request of executorRequests) {
       const a = request.assignment;
       if (a.role === "accept-text" || a.role === "image-label" || a.scope.kind !== "page") continue;
@@ -393,7 +393,7 @@ export async function runRoutedVision(args: RoutedVisionArgs): Promise<RoutedVis
       if (placement === "prose" && output.runtime !== "ppocr") candidates.push({ assignment, index: output.assignmentIndex, fromTargetId: output.targetId, part });
     }
     await escalate(candidates);
-    // A failed page-scope extraction with no other prose falls back to the workspace model.
+    // A failed page-scope extraction with no other prose falls back to the project model.
     for (const failure of run.failures) {
       const assignment = plan.assignments[failure.assignmentIndex]!;
       if (assignment.scope.kind !== "page" || assignment.role === "accept-text" || assignment.role === "image-label" || assignment.role === "skip") continue;
@@ -407,7 +407,7 @@ export async function runRoutedVision(args: RoutedVisionArgs): Promise<RoutedVis
     }
   }
 
-  // ---- Workspace-model fallback ----
+  // ---- Project-model fallback ----
   const fallbackPages = [...new Set([...execution.fallbackPages, ...fallbackFromFailures])]
     .filter((page) => !(parts.get(page) ?? []).some((p) => p.placement === "prose"))
     .sort((a, b) => a - b);
@@ -416,7 +416,7 @@ export async function runRoutedVision(args: RoutedVisionArgs): Promise<RoutedVis
       const result = await args.extract(selection, fallbackPages);
       recordVision(result, (page) => execution.fallbackServes[page] ?? "skip", "extract-text");
     } else {
-      skipped.push({ targetId: "workspace-vision-model", pages: fallbackPages, reason: "cost-cap" });
+      skipped.push({ targetId: "project-vision-model", pages: fallbackPages, reason: "cost-cap" });
     }
   }
 

@@ -31,7 +31,7 @@ export class OcrRefusedError extends Error {
 
 /**
  * An OCR read the boundary failed or refused in `vm`/`local` mode. Callers that have other readers (the page router's
- * workspace-model fallback and cascades) must let it propagate: no other reader serves a page whose OCR failed.
+ * project-model fallback and cascades) must let it propagate: no other reader serves a page whose OCR failed.
  */
 export class OcrBoundaryFailure extends Error {
   constructor(message: string, options?: { cause?: unknown }) {

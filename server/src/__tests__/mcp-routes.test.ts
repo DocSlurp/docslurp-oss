@@ -9,10 +9,10 @@ vi.mock("../services/mcp-oauth.js", async (original) => ({
   ...await original<typeof import("../services/mcp-oauth.js")>(), validateMcpToken,
 }));
 const hybridSearch = vi.fn();
-const chatWorkspace = vi.fn();
-const workspaceChatDisabledBody = vi.fn(async (_workspaceId: string, _userId: string): Promise<{ error: string; code: "chat_disabled" } | null> => null);
-const getWorkspace = vi.fn();
-const listWorkspaces = vi.fn();
+const chatProject = vi.fn();
+const projectChatDisabledBody = vi.fn(async (_projectId: string, _userId: string): Promise<{ error: string; code: "chat_disabled" } | null> => null);
+const getProject = vi.fn();
+const listProjects = vi.fn();
 const uploadRequest = vi.fn();
 const loadDirectUploadSession = vi.fn();
 const describeDirectUploadSession = vi.fn();
@@ -22,12 +22,12 @@ const loadMediaEvidence = vi.fn();
 vi.mock("../services/media-evidence.js", () => ({ loadMediaEvidence }));
 
 const forwardInProcess = vi.fn();
-const listEditableWorkspaceIds = vi.fn(async (_userId: string): Promise<string[]> => []);
-vi.mock("../services/organizations.js", async (importOriginal) => ({ ...(await importOriginal<typeof import("../services/organizations.js")>()), listEditableWorkspaceIds }));
+const listEditableProjectIds = vi.fn(async (_userId: string): Promise<string[]> => []);
+vi.mock("../services/organizations.js", async (importOriginal) => ({ ...(await importOriginal<typeof import("../services/organizations.js")>()), listEditableProjectIds }));
 
 // forwardInProcess is mocked, so the route modules it statically mounts only need to exist.
-vi.mock("../routes/workspaces.js", async () => ({ workspacesRoutes: new (await import("hono")).Hono() }));
-vi.mock("../routes/workspace-graph.js", async () => ({ workspaceGraphRoutes: new (await import("hono")).Hono() }));
+vi.mock("../routes/projects.js", async () => ({ projectsRoutes: new (await import("hono")).Hono() }));
+vi.mock("../routes/project-graph.js", async () => ({ projectGraphRoutes: new (await import("hono")).Hono() }));
 vi.mock("../routes/documents.js", async () => ({ documentsRoutes: new (await import("hono")).Hono() }));
 vi.mock("../routes/runs.js", async () => ({ runsRoutes: new (await import("hono")).Hono() }));
 vi.mock("../routes/jobs.js", async () => ({ jobsRoutes: new (await import("hono")).Hono() }));
@@ -38,10 +38,10 @@ vi.mock("../services/api-keys.js", () => ({
 
 vi.mock("../services/search.js", () => ({
   hybridSearch,
-  MissingWorkspaceScopeError: class extends Error {},
+  MissingProjectScopeError: class extends Error {},
 }));
-vi.mock("../services/workspace-chat.js", () => ({ chatWorkspace, workspaceChatDisabledBody }));
-vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => null), findWorkspaceForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })), ensureDefaultWorkspace: vi.fn(async () => ({ id: "default-ws" })), getWorkspace, listWorkspaces }));
+vi.mock("../services/project-chat.js", () => ({ chatProject, projectChatDisabledBody }));
+vi.mock("../services/projects.js", () => ({ resolveProjectRef: vi.fn(async () => null), findProjectForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })), ensureDefaultProject: vi.fn(async () => ({ id: "default-ws" })), getProject, listProjects }));
 
 vi.mock("../routes/uploads.js", async () => {
   const { Hono } = await import("hono");
@@ -53,19 +53,19 @@ vi.mock("../routes/uploads.js", async () => {
           const file = entry as File;
           return { name: file.name, type: file.type, bytes: Buffer.from(await file.arrayBuffer()).toString("hex") };
         }));
-        return { workspace: form.get("workspace") ?? undefined, files };
+        return { project: form.get("project") ?? undefined, files };
       })()
       : await c.req.json();
     const outcome = uploadRequest({ path: c.req.path, actor: c.get("requestActor"), body, idempotencyKey: c.req.header("Idempotency-Key") });
     if (outcome instanceof Response) return outcome;
-    return c.json({ workspace: { id: "ws-1" }, run: { id: "run-1" } }, 201);
+    return c.json({ project: { id: "ws-1" }, run: { id: "run-1" } }, 201);
   }) };
 });
 
 vi.mock("../db.js", () => ({
   sql: vi.fn(),
 }));
-const loadIngestReport = vi.fn(async (args: { workspace: { id: string } }) => ({ workspaceId: args.workspace.id, files: { total: 0 } }));
+const loadIngestReport = vi.fn(async (args: { project: { id: string } }) => ({ projectId: args.project.id, files: { total: 0 } }));
 vi.mock("../services/ingest-report.js", () => ({
   loadIngestReport,
   summarizeIngestReport: vi.fn(() => "**Ingest report**: no files yet."),
@@ -89,7 +89,7 @@ const validatedKey: ValidatedKey = {
   scopes: ["search", "chat"],
   rateLimitRpm: 60,
   rateLimitPpd: 10_000,
-  rateLimits: [], workspaceIds: [],
+  rateLimits: [], projectIds: [],
 };
 
 function buildApp() {
@@ -106,24 +106,24 @@ describe("mcpRoutes", () => {
     validateMcpToken.mockReset();
     validateApiKey.mockReset();
     validateApiKey.mockResolvedValue(validatedKey);
-    listWorkspaces.mockReset();
-    listEditableWorkspaceIds.mockReset();
-    listEditableWorkspaceIds.mockResolvedValue(["default-ws", "ws-2"]);
+    listProjects.mockReset();
+    listEditableProjectIds.mockReset();
+    listEditableProjectIds.mockResolvedValue(["default-ws", "ws-2"]);
     loadMediaEvidence.mockReset();
     uploadRequest.mockReset();
     loadDirectUploadSession.mockReset();
     hybridSearch.mockReset();
     hybridSearch.mockResolvedValue({ results: [{ text: "Support hours", citation: { filename: "guide.txt", pageNumber: 1 } }], sessionId: "retrieval-1", availability: { status: "ready" }, usageEvents: [{ inputTokens: 7, outputTokens: 0, costCents: 0.001, metadata: { costSource: "provider" } }] });
-    chatWorkspace.mockReset();
-    getWorkspace.mockReset();
-    getWorkspace.mockImplementation(async (id: string) => id === "foreign" ? { id, orgId: "org-2" } : { id, orgId: "org-1" });
+    chatProject.mockReset();
+    getProject.mockReset();
+    getProject.mockImplementation(async (id: string) => id === "foreign" ? { id, orgId: "org-2" } : { id, orgId: "org-1" });
   });
 
-  it("reads media evidence only inside the credential-authorized workspace", async () => {
+  it("reads media evidence only inside the credential-authorized project", async () => {
     loadMediaEvidence.mockResolvedValue({ results: [], summary: { coverage: "sampled-visual-only" } });
-    const request = (workspace: string) => app.request("/mcp/tools/getMediaEvidence", {
+    const request = (project: string) => app.request("/mcp/tools/getMediaEvidence", {
       method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" },
-      body: JSON.stringify({ workspace, documentId: "video", offset: 16000 }),
+      body: JSON.stringify({ project, documentId: "video", offset: 16000 }),
     });
     expect((await request("foreign")).status).toBe(404);
     expect(loadMediaEvidence).not.toHaveBeenCalled();
@@ -131,21 +131,21 @@ describe("mcpRoutes", () => {
     expect(loadMediaEvidence).toHaveBeenCalledWith("ws-1", "video", 16000);
   });
 
-  it("lists only credential-authorized workspaces before pagination without refining names", async () => {
-    validateApiKey.mockResolvedValue({ ...validatedKey, workspaceIds: ["allowed"] });
-    listWorkspaces.mockResolvedValue([
+  it("lists only credential-authorized projects before pagination without refining names", async () => {
+    validateApiKey.mockResolvedValue({ ...validatedKey, projectIds: ["allowed"] });
+    listProjects.mockResolvedValue([
       { id: "foreign", orgId: "org-2", name: "Secret" },
       { id: "excluded", orgId: "org-1", name: "Excluded" },
       { id: "allowed", orgId: "org-1", slug: "manuals", name: "Manuals", isDefault: true, systemPrompt: "private instructions" },
     ]);
-    const response = await app.request("/mcp/tools/listWorkspaces", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: '{"limit":1}' });
-    expect(await response.json()).toEqual({ workspaces: [{ id: "allowed", slug: "manuals", name: "Manuals", isDefault: true }], total: 1, nextOffset: null });
-    expect(listWorkspaces).toHaveBeenCalledWith("user-1", { refineNames: false });
+    const response = await app.request("/mcp/tools/listProjects", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: '{"limit":1}' });
+    expect(await response.json()).toEqual({ projects: [{ id: "allowed", slug: "manuals", name: "Manuals", isDefault: true }], total: 1, nextOffset: null });
+    expect(listProjects).toHaveBeenCalledWith("user-1", { refineNames: false });
   });
 
   it("resolves the uploader target read-only and hides the tool while the MCP Apps flag is off", async () => {
     validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
-    listWorkspaces.mockResolvedValue([
+    listProjects.mockResolvedValue([
       { id: "default-ws", orgId: "org-1", slug: "main", name: "Main", isDefault: true, systemPrompt: "private" },
       { id: "ws-2", orgId: "org-1", slug: "legal", name: "Legal", isDefault: false },
     ]);
@@ -156,21 +156,21 @@ describe("mcpRoutes", () => {
     try {
       const defaulted = await (await call({})).json();
       expect(defaulted).toEqual({
-        workspace: { id: "default-ws", slug: "main", name: "Main", isDefault: true },
-        workspaces: [{ id: "default-ws", slug: "main", name: "Main", isDefault: true }, { id: "ws-2", slug: "legal", name: "Legal", isDefault: false }],
+        project: { id: "default-ws", slug: "main", name: "Main", isDefault: true },
+        projects: [{ id: "default-ws", slug: "main", name: "Main", isDefault: true }, { id: "ws-2", slug: "legal", name: "Legal", isDefault: false }],
         limits: { maxFiles: 10, maxFileBytes: 5368709120 },
         uploader: { resourceUri: UPLOAD_UI_URI },
         hint: expect.any(String),
       });
-      expect((await (await call({ workspace: "ws-2" })).json()).workspace.id).toBe("ws-2");
+      expect((await (await call({ project: "ws-2" })).json()).project.id).toBe("ws-2");
       expect((await call({ extra: 1 })).status).toBe(400);
       expect(uploadRequest).not.toHaveBeenCalled();
     } finally { env.mcpAppsUiEnabled = false; }
   });
 
-  it("offers the uploader only workspaces the user may upload to, matching the upload route's viewer rule", async () => {
+  it("offers the uploader only projects the user may upload to, matching the upload route's viewer rule", async () => {
     validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
-    listWorkspaces.mockResolvedValue([
+    listProjects.mockResolvedValue([
       { id: "default-ws", orgId: "org-1", slug: "main", name: "Main", isDefault: true },
       { id: "ws-2", orgId: "org-1", slug: "legal", name: "Legal", isDefault: false },
       { id: "shared-view", orgId: "org-1", slug: "shared", name: "Shared (viewer)", isDefault: false },
@@ -180,15 +180,15 @@ describe("mcpRoutes", () => {
     env.mcpAppsUiEnabled = true;
     try {
       const listed = await (await call({})).json();
-      expect(listed.workspaces.map((item: { id: string }) => item.id)).toEqual(["default-ws", "ws-2"]);
+      expect(listed.projects.map((item: { id: string }) => item.id)).toEqual(["default-ws", "ws-2"]);
       // A read-only share is not a valid target even when asked for by id.
-      expect((await call({ workspace: "shared-view" })).status).toBe(403);
-      // Default-workspace viewers may upload (listEditableWorkspaceIds includes the default for org members).
-      listEditableWorkspaceIds.mockResolvedValue(["default-ws"]);
+      expect((await call({ project: "shared-view" })).status).toBe(403);
+      // Default-project viewers may upload (listEditableProjectIds includes the default for org members).
+      listEditableProjectIds.mockResolvedValue(["default-ws"]);
       const viewer = await (await call({})).json();
-      expect(viewer.workspace.id).toBe("default-ws");
-      expect(viewer.workspaces.map((item: { id: string }) => item.id)).toEqual(["default-ws"]);
-      expect(listEditableWorkspaceIds).toHaveBeenCalledWith("user-1");
+      expect(viewer.project.id).toBe("default-ws");
+      expect(viewer.projects.map((item: { id: string }) => item.id)).toEqual(["default-ws"]);
+      expect(listEditableProjectIds).toHaveBeenCalledWith("user-1");
     } finally { env.mcpAppsUiEnabled = false; }
   });
 
@@ -211,16 +211,16 @@ describe("mcpRoutes", () => {
     } finally { env.mcpAppsUiEnabled = false; }
   });
 
-  it("answers 404 when the uploader target workspace does not exist", async () => {
+  it("answers 404 when the uploader target project does not exist", async () => {
     validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
-    listWorkspaces.mockResolvedValue([]);
-    getWorkspace.mockResolvedValue(null);
+    listProjects.mockResolvedValue([]);
+    getProject.mockResolvedValue(null);
     const { env } = await import("../config.js");
     env.mcpAppsUiEnabled = true;
     try {
-      const response = await app.request("/mcp/tools/openUploader", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: JSON.stringify({ workspace: "ghost" }) });
+      const response = await app.request("/mcp/tools/openUploader", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: JSON.stringify({ project: "ghost" }) });
       expect(response.status).toBe(404);
-      expect(listEditableWorkspaceIds).not.toHaveBeenCalled();
+      expect(listEditableProjectIds).not.toHaveBeenCalled();
     } finally { env.mcpAppsUiEnabled = false; }
   });
 
@@ -230,12 +230,12 @@ describe("mcpRoutes", () => {
     const response = await app.request("/mcp/tools/upload", { method: "POST", headers, body: JSON.stringify({ urls: ["https://example.com/manual.pdf"], idempotencyKey: "retry-1" }) });
     expect(response.status).toBe(201);
     expect(uploadRequest).toHaveBeenLastCalledWith(expect.objectContaining({ path: "/url", actor: expect.objectContaining({ userId: "user-1", apiKey: expect.objectContaining({ orgId: "org-1" }) }), body: { urls: ["https://example.com/manual.pdf"] }, idempotencyKey: "retry-1" }));
-    // An omitted workspace is left to the uploads route, which files it into the default workspace.
-    const text = await app.request("/mcp/tools/upload", { method: "POST", headers, body: JSON.stringify({ workspace: "ws-1", files: Array.from({ length: 10 }, (_, i) => ({ filename: `notes-${i}.pdf`, sizeBytes: 40 * 1024 * 1024, mimeType: "application/pdf" })) }) });
+    // An omitted project is left to the uploads route, which files it into the default project.
+    const text = await app.request("/mcp/tools/upload", { method: "POST", headers, body: JSON.stringify({ project: "ws-1", files: Array.from({ length: 10 }, (_, i) => ({ filename: `notes-${i}.pdf`, sizeBytes: 40 * 1024 * 1024, mimeType: "application/pdf" })) }) });
     expect(text.status).toBe(201);
     const call = uploadRequest.mock.lastCall![0];
     expect(call.path).toBe("/direct/sessions");
-    expect(call.body.workspace).toBe("ws-1");
+    expect(call.body.project).toBe("ws-1");
     expect(call.body.files).toHaveLength(10);
     expect(call.body.files.every((file: { singlePart?: boolean }) => file.singlePart === undefined)).toBe(true);
   });
@@ -260,18 +260,18 @@ describe("mcpRoutes", () => {
     expect(uploadRequest.mock.lastCall![0].body.files[0].singlePart).toBe(true);
   });
 
-  it("preserves an explicitly named new workspace for signed-upload completion", async () => {
+  it("preserves an explicitly named new project for signed-upload completion", async () => {
     validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
-    const response = await app.request("/mcp/tools/upload", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: JSON.stringify({ workspace: "Legal contracts", files: [{ filename: "contract.pdf", sizeBytes: 42, mimeType: "application/pdf" }] }) });
+    const response = await app.request("/mcp/tools/upload", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: JSON.stringify({ project: "Legal contracts", files: [{ filename: "contract.pdf", sizeBytes: 42, mimeType: "application/pdf" }] }) });
     expect(response.status).toBe(201);
-    expect(uploadRequest.mock.lastCall![0].body).toEqual({ workspace: "Legal contracts", files: [{ filename: "contract.pdf", sizeBytes: 42, mimeType: "application/pdf" }] });
+    expect(uploadRequest.mock.lastCall![0].body).toEqual({ project: "Legal contracts", files: [{ filename: "contract.pdf", sizeBytes: 42, mimeType: "application/pdf" }] });
   });
 
   it("completes every signed file before confirming ingestion, checking ownership and session state", async () => {
-    validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"], workspaceIds: ["ws-1"] });
+    validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"], projectIds: ["ws-1"] });
     const sessionId = "00000000-0000-4000-8000-000000000001";
     const fileId = "00000000-0000-4000-8000-000000000002";
-    const loaded = { session: { status: "pending", org_id: "org-1", workspace_id: "ws-1" }, files: [{ id: fileId, upload_mode: "single" }] };
+    const loaded = { session: { status: "pending", org_id: "org-1", project_id: "ws-1" }, files: [{ id: fileId, upload_mode: "single" }] };
     loadDirectUploadSession.mockResolvedValue(loaded);
     const request = () => app.request("/mcp/tools/completeUpload", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: JSON.stringify({ sessionId, fileIds: [fileId] }) });
     expect((await request()).status).toBe(201);
@@ -284,7 +284,7 @@ describe("mcpRoutes", () => {
     uploadRequest.mockClear();
     loadDirectUploadSession.mockResolvedValue({ ...loaded, session: { ...loaded.session, org_id: "foreign" } });
     expect((await request()).status).toBe(404);
-    loadDirectUploadSession.mockResolvedValue({ ...loaded, session: { ...loaded.session, workspace_id: "foreign" } });
+    loadDirectUploadSession.mockResolvedValue({ ...loaded, session: { ...loaded.session, project_id: "foreign" } });
     expect((await request()).status).toBe(404);
     loadDirectUploadSession.mockResolvedValue({ ...loaded, session: { ...loaded.session, status: "confirmed" } });
     expect((await request()).status).toBe(409);
@@ -295,9 +295,9 @@ describe("mcpRoutes", () => {
 
   it("follows automatic upload sessions without exposing foreign sessions", async () => {
     const sessionId = "11111111-1111-4111-8111-111111111111";
-    const loaded = { session: { id: sessionId, user_id: "user-1", org_id: "org-1", workspace_id: "ws-1", status: "confirmed" }, files: [] };
+    const loaded = { session: { id: sessionId, user_id: "user-1", org_id: "org-1", project_id: "ws-1", status: "confirmed" }, files: [] };
     loadDirectUploadSession.mockResolvedValue(loaded);
-    describeDirectUploadSession.mockResolvedValue({ sessionId, status: "confirmed", result: { workspace: { id: "ws-1" }, run: { id: "run-1" } }, files: [] });
+    describeDirectUploadSession.mockResolvedValue({ sessionId, status: "confirmed", result: { project: { id: "ws-1" }, run: { id: "run-1" } }, files: [] });
     const request = () => app.request("/mcp/tools/getUploadStatus", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: JSON.stringify({ sessionId }) });
     const response = await request();
     expect(response.status).toBe(200);
@@ -305,18 +305,18 @@ describe("mcpRoutes", () => {
     expect(loadDirectUploadSession).toHaveBeenCalledWith(sessionId, "user-1");
     loadDirectUploadSession.mockResolvedValue({ ...loaded, session: { ...loaded.session, org_id: "foreign" } });
     expect((await request()).status).toBe(404);
-    loadDirectUploadSession.mockResolvedValue({ ...loaded, session: { ...loaded.session, workspace_id: "foreign" } });
+    loadDirectUploadSession.mockResolvedValue({ ...loaded, session: { ...loaded.session, project_id: "foreign" } });
     expect((await request()).status).toBe(404);
   });
 
   it("sends inline text and base64 files through bulk intake for clients that cannot reach storage", async () => {
     validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
     const response = await app.request("/mcp/tools/upload", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: JSON.stringify({
-      workspace: "ws-1", idempotencyKey: "inline-1",
+      project: "ws-1", idempotencyKey: "inline-1",
       inlineFiles: [{ filename: "notes.md", text: "# Hi" }, { filename: "scan.pdf", mimeType: "application/pdf", contentBase64: Buffer.from("%PDF-1.7").toString("base64").replace(/=+$/, "") }],
     }) });
     expect(response.status).toBe(201);
-    expect(uploadRequest).toHaveBeenLastCalledWith(expect.objectContaining({ path: "/bulk", idempotencyKey: "inline-1", body: { workspace: "ws-1", files: [
+    expect(uploadRequest).toHaveBeenLastCalledWith(expect.objectContaining({ path: "/bulk", idempotencyKey: "inline-1", body: { project: "ws-1", files: [
       { name: "notes.md", type: "application/octet-stream", bytes: Buffer.from("# Hi").toString("hex") },
       { name: "scan.pdf", type: "application/pdf", bytes: Buffer.from("%PDF-1.7").toString("hex") },
     ] } }));
@@ -334,20 +334,20 @@ describe("mcpRoutes", () => {
     expect(uploadRequest).not.toHaveBeenCalled();
   });
 
-  it("refuses upload without ingest scope or outside the credential workspace allowlist", async () => {
+  it("refuses upload without ingest scope or outside the credential project allowlist", async () => {
     const request = (body: unknown) => app.request("/mcp/tools/upload", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const input = { urls: ["https://example.com/manual.pdf"] };
     expect((await request(input)).status).toBe(403);
     expect(uploadRequest).not.toHaveBeenCalled();
-    // The uploads route resolves the workspace inside the key's allowlist (a
+    // The uploads route resolves the project inside the key's allowlist (a
     // restricted key can neither reach nor create others); MCP forwards the
     // value with the restricted actor and passes the route's refusal through.
-    validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"], workspaceIds: ["ws-1"] });
-    uploadRequest.mockReturnValueOnce(Response.json({ error: { code: "workspace_not_found" } }, { status: 404 }));
-    expect((await request({ ...input, workspace: "00000000-0000-4000-8000-00000000f0f0" })).status).toBe(404);
+    validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"], projectIds: ["ws-1"] });
+    uploadRequest.mockReturnValueOnce(Response.json({ error: { code: "project_not_found" } }, { status: 404 }));
+    expect((await request({ ...input, project: "00000000-0000-4000-8000-00000000f0f0" })).status).toBe(404);
     uploadRequest.mockReturnValueOnce(Response.json({ error: { code: "forbidden" } }, { status: 403 }));
-    expect((await request({ ...input, workspace: "New" })).status).toBe(403);
-    expect(uploadRequest.mock.calls.map(([call]) => [call.body.workspace, call.actor.apiKey.workspaceIds])).toEqual([
+    expect((await request({ ...input, project: "New" })).status).toBe(403);
+    expect(uploadRequest.mock.calls.map(([call]) => [call.body.project, call.actor.apiKey.projectIds])).toEqual([
       ["00000000-0000-4000-8000-00000000f0f0", ["ws-1"]],
       ["New", ["ws-1"]],
     ]);
@@ -360,18 +360,18 @@ describe("mcpRoutes", () => {
     expect(uploadRequest).not.toHaveBeenCalled();
   });
 
-  it("discovers documented workspace tools and advertises only the implemented MCP transport", async () => {
+  it("discovers documented project tools and advertises only the implemented MCP transport", async () => {
     const response = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
     expect(response.status).toBe(200);
-    expect((await response.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "getUploadStatus", "search", "chat", "getMediaEvidence", "suggestQueries", "getJob"]);
+    expect((await response.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listProjects", "getUploadStatus", "search", "chat", "getMediaEvidence", "suggestQueries", "getJob"]);
     const manifest = await app.request("/mcp/manifest", { headers: { Authorization: "Bearer dslp_test" } });
     expect((await manifest.json()).server.transports).toEqual(["streamable-http", "stdio"]);
   });
 
   it.each([
     { keyType: "server" as const, scopes: ["search"] },
-    { keyType: "server" as const, scopes: ["search", "ingest", "chat", "workspaces:manage"] },
-    { keyType: "client" as const, scopes: ["search", "workspaces:manage"] },
+    { keyType: "server" as const, scopes: ["search", "ingest", "chat", "projects:manage"] },
+    { keyType: "client" as const, scopes: ["search", "projects:manage"] },
   ])("never lists or runs settings tools for an API key, whatever its scopes: %j", async ({ keyType, scopes }) => {
     validateApiKey.mockResolvedValue({ ...validatedKey, keyType, scopes });
     const response = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
@@ -379,9 +379,9 @@ describe("mcpRoutes", () => {
     else {
       expect(response.status).toBe(200);
       const ids = (await response.json()).tools.map((tool: { id: string }) => tool.id);
-      for (const name of ["getWorkspaceSettings", "proposeWorkspaceSettings", "applyWorkspaceSettings", "applySettingsProposal"]) expect(ids).not.toContain(name);
+      for (const name of ["getProjectSettings", "proposeProjectSettings", "applyProjectSettings", "applySettingsProposal"]) expect(ids).not.toContain(name);
     }
-    for (const name of ["getWorkspaceSettings", "proposeWorkspaceSettings"]) {
+    for (const name of ["getProjectSettings", "proposeProjectSettings"]) {
       const call = await app.request(`/mcp/tools/${name}`, {
         method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: "{}",
       });
@@ -390,14 +390,14 @@ describe("mcpRoutes", () => {
   });
 
   it("withholds both settings tools from an OAuth token on list, manifest and direct call", async () => {
-    validateMcpToken.mockResolvedValue({ ...validatedKey, scopes: ["search", "ingest", "workspaces:manage"] });
+    validateMcpToken.mockResolvedValue({ ...validatedKey, scopes: ["search", "ingest", "projects:manage"] });
     const headers = { Authorization: "Bearer dsmcp_test", "Content-Type": "application/json" };
     const listed = await app.request("/mcp/tools", { headers });
     expect(listed.status).toBe(200);
     const ids = (await listed.json()).tools.map((tool: { id: string }) => tool.id);
     const manifest = await app.request("/mcp/manifest", { headers });
     const capabilities = (await manifest.json()).capabilities.map((tool: { id: string }) => tool.id);
-    for (const name of ["getWorkspaceSettings", "proposeWorkspaceSettings"]) {
+    for (const name of ["getProjectSettings", "proposeProjectSettings"]) {
       expect(ids).not.toContain(name);
       expect(capabilities).not.toContain(name);
       expect((await app.request(`/mcp/tools/${name}`, { method: "POST", headers, body: "{}" })).status).toBe(404);
@@ -412,14 +412,14 @@ describe("mcpRoutes", () => {
   });
 
   it.each([
-    ["search", { workspace: "", q: "query" }],
-    ["search", { workspace: "00000000-0000-4000-8000-000000000001", q: " " }],
-    ["suggestQueries", { workspace: "00000000-0000-4000-8000-000000000001", limit: -1 }],
+    ["search", { project: "", q: "query" }],
+    ["search", { project: "00000000-0000-4000-8000-000000000001", q: " " }],
+    ["suggestQueries", { project: "00000000-0000-4000-8000-000000000001", limit: -1 }],
     ["getUploadStatus", { documentIds: Array.from({ length: 101 }, (_, index) => `d${index}`) }],
-    ["getUploadStatus", { workspace: "ws-1", sql: "drop table documents" }],
-    ["chat", { workspace: "ws-1", q: " " }],
+    ["getUploadStatus", { project: "ws-1", sql: "drop table documents" }],
+    ["chat", { project: "ws-1", q: " " }],
     ["search", { queries: [] }],
-    ["search", { queries: [{ workspace: "ws-1", q: "query" }], concurrency: 9 }],
+    ["search", { queries: [{ project: "ws-1", q: "query" }], concurrency: 9 }],
   ])("rejects invalid %s arguments before running the tool", async (tool, body) => {
     const response = await app.request(`/mcp/tools/${tool}`, {
       method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: JSON.stringify(body),
@@ -438,7 +438,7 @@ describe("mcpRoutes", () => {
       const res = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
       return (await res.json()).tools.map((tool: { id: string }) => tool.id).filter((id: string) => id.endsWith("Estimate"));
     };
-    expect(await listed({ scopes: ["search", "ingest", "workspaces:manage"], keyType: "server" })).toEqual([
+    expect(await listed({ scopes: ["search", "ingest", "projects:manage"], keyType: "server" })).toEqual([
       "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "updateEstimate", "searchSettingsEstimate", "indexingModeEstimate", "graphRebuildEstimate",
     ]);
     expect(await listed({ scopes: ["ingest"] })).toEqual(["uploadEstimate", "fullIndexEstimate", "reprocessEstimate"]);
@@ -450,40 +450,40 @@ describe("mcpRoutes", () => {
       method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
     beforeEach(() => {
-      validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["search", "ingest", "workspaces:manage"] });
+      validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["search", "ingest", "projects:manage"] });
       forwardInProcess.mockReset();
       forwardInProcess.mockImplementation(async () => Response.json({ estimate: { pages: 3 }, billing: "disabled" }));
     });
 
-    it("resolves the workspace and forwards the mutation body to the estimate route", async () => {
-      const response = await post("indexingModeEstimate", { workspace: "ws-1", mode: "map" });
+    it("resolves the project and forwards the mutation body to the estimate route", async () => {
+      const response = await post("indexingModeEstimate", { project: "ws-1", mode: "map" });
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({ tool: "indexingModeEstimate", estimate: { pages: 3 } });
-      expect(forwardInProcess).toHaveBeenCalledWith(expect.anything(), "POST", "/v1/workspaces/ws-1/indexing-mode/estimate", { mode: "map" }, expect.anything());
+      expect(forwardInProcess).toHaveBeenCalledWith(expect.anything(), "POST", "/v1/projects/ws-1/indexing-mode/estimate", { mode: "map" }, expect.anything());
     });
 
-    it("does not forward for a foreign workspace or invalid input", async () => {
-      expect((await post("graphRebuildEstimate", { workspace: "foreign" })).status).toBe(404);
-      expect((await post("indexingModeEstimate", { workspace: "ws-1", mode: "bogus" })).status).toBe(400);
+    it("does not forward for a foreign project or invalid input", async () => {
+      expect((await post("graphRebuildEstimate", { project: "foreign" })).status).toBe(404);
+      expect((await post("indexingModeEstimate", { project: "ws-1", mode: "bogus" })).status).toBe(400);
       expect(forwardInProcess).not.toHaveBeenCalled();
     });
 
     it("requires the mutation's scope and key type, and never offers session-only estimates to keys", async () => {
-      expect((await post("uploadEstimate", { workspace: "ws-1", files: [{ name: "a.pdf", size: 1 }] })).status).toBe(200);
+      expect((await post("uploadEstimate", { project: "ws-1", files: [{ name: "a.pdf", size: 1 }] })).status).toBe(200);
       validateApiKey.mockResolvedValueOnce({ ...validatedKey, scopes: ["search"] });
-      expect((await post("uploadEstimate", { workspace: "ws-1", files: [{ name: "a.pdf", size: 1 }] })).status).toBe(403);
+      expect((await post("uploadEstimate", { project: "ws-1", files: [{ name: "a.pdf", size: 1 }] })).status).toBe(403);
       validateApiKey.mockResolvedValueOnce({ ...validatedKey, scopes: ["search", "ingest"] });
-      expect((await post("updateEstimate", { workspace: "ws-1", changes: {} })).status).toBe(403);
+      expect((await post("updateEstimate", { project: "ws-1", changes: {} })).status).toBe(403);
       validateApiKey.mockResolvedValueOnce({ ...validatedKey, scopes: ["search"] });
       expect((await post("reprocessEstimate", { runId: "r1" })).status).toBe(403);
-      // The search-settings estimate needs the mutation's workspaces:manage server key.
+      // The search-settings estimate needs the mutation's projects:manage server key.
       validateApiKey.mockResolvedValueOnce({ ...validatedKey, scopes: ["search", "ingest", "chat"] });
-      expect((await post("searchSettingsEstimate", { workspace: "ws-1", changes: {} })).status).toBe(403);
-      validateApiKey.mockResolvedValueOnce({ ...validatedKey, keyType: "client", scopes: ["search", "workspaces:manage"] });
-      expect((await post("searchSettingsEstimate", { workspace: "ws-1", changes: {} })).status).toBe(403);
+      expect((await post("searchSettingsEstimate", { project: "ws-1", changes: {} })).status).toBe(403);
+      validateApiKey.mockResolvedValueOnce({ ...validatedKey, keyType: "client", scopes: ["search", "projects:manage"] });
+      expect((await post("searchSettingsEstimate", { project: "ws-1", changes: {} })).status).toBe(403);
       expect(forwardInProcess).toHaveBeenCalledTimes(1);
-      expect((await post("searchSettingsEstimate", { workspace: "ws-1", changes: {} })).status).toBe(200);
-      expect(forwardInProcess).toHaveBeenLastCalledWith(expect.anything(), "POST", "/v1/workspaces/ws-1/search-settings/estimate", {}, expect.anything());
+      expect((await post("searchSettingsEstimate", { project: "ws-1", changes: {} })).status).toBe(200);
+      expect(forwardInProcess).toHaveBeenLastCalledWith(expect.anything(), "POST", "/v1/projects/ws-1/search-settings/estimate", {}, expect.anything());
     });
 
     it("getJob forwards to /v1/jobs/:id and surfaces route_unavailable", async () => {
@@ -517,7 +517,7 @@ describe("mcpRoutes", () => {
     for (const name of ["upload", "extract", "completeUpload", "chat"]) {
       expect(tools.find(tool => tool.name === name)?.annotations).toMatchObject({ readOnlyHint: false, idempotentHint: false });
     }
-    for (const name of ["listWorkspaces", "search", "getUploadStatus", "getMediaEvidence", "suggestQueries"]) {
+    for (const name of ["listProjects", "search", "getUploadStatus", "getMediaEvidence", "suggestQueries"]) {
       expect(tools.find(tool => tool.name === name)?.annotations).toMatchObject({ readOnlyHint: true, idempotentHint: true, destructiveHint: false });
     }
     const upload = tools.find(tool => tool.name === "upload")!;
@@ -537,7 +537,7 @@ describe("mcpRoutes", () => {
       fetch: async (url, init) => app.request(new Request(url, init)),
     }));
     expect((await client.listTools()).tools.map(tool => tool.name)).toContain("search");
-    const called = await client.callTool({ name: "search", arguments: { q: "audience?", workspace: "ws-1" } });
+    const called = await client.callTool({ name: "search", arguments: { q: "audience?", project: "ws-1" } });
     expect(called.isError).toBe(false);
     expect(hybridSearch).toHaveBeenCalledWith("audience?", "user-1", expect.anything());
     await client.close();
@@ -558,52 +558,52 @@ describe("mcpRoutes", () => {
   });
 
   it("returns portable cited search data and a direct grounded chat answer", async () => {
-    chatWorkspace.mockResolvedValueOnce({ answer: "Weekdays [1]", citations: [{ filename: "guide.txt", pageNumber: 1 }], sessionId: "chat-1", usage: { inputTokens: 10, outputTokens: 3 } });
+    chatProject.mockResolvedValueOnce({ answer: "Weekdays [1]", citations: [{ filename: "guide.txt", pageNumber: 1 }], sessionId: "chat-1", usage: { inputTokens: 10, outputTokens: 3 } });
     const call = (name: string, args: unknown) => app.request(`/mcp/tools/${name}`, {
       method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: JSON.stringify(args),
     });
-    expect(await (await call("search", { workspace: "ws-1", q: "Support hours?" })).json()).toMatchObject({ results: [{ text: "Support hours" }], sessionId: "retrieval-1", availability: { status: "ready" } });
-    const chat = await call("chat", { workspace: "ws-1", q: "Support hours?", sessionId: "chat-existing" });
+    expect(await (await call("search", { project: "ws-1", q: "Support hours?" })).json()).toMatchObject({ results: [{ text: "Support hours" }], sessionId: "retrieval-1", availability: { status: "ready" } });
+    const chat = await call("chat", { project: "ws-1", q: "Support hours?", sessionId: "chat-existing" });
     expect(await chat.json()).toMatchObject({ answer: "Weekdays [1]", citations: [{ filename: "guide.txt" }], usage: { outputTokens: 3 } });
-    expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1", userId: "user-1", query: "Support hours?", sessionId: "chat-existing" }));
+    expect(chatProject).toHaveBeenCalledWith(expect.objectContaining({ projectId: "ws-1", userId: "user-1", query: "Support hours?", sessionId: "chat-existing" }));
     expect(hybridSearch).toHaveBeenCalledWith("Support hours?", "user-1", expect.objectContaining({ useHyDE: undefined, useRerank: undefined, queryRewrite: undefined }));
   });
 
-  it("keeps parallel retrieval results ordered and denies foreign workspaces before retrieval", async () => {
+  it("keeps parallel retrieval results ordered and denies foreign projects before retrieval", async () => {
     const response = await app.request("/mcp/tools/search", {
-      method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: JSON.stringify({ queries: [{ q: "first", workspace: "ws-1" }, { q: "private", workspace: "foreign" }] }),
+      method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: JSON.stringify({ queries: [{ q: "first", project: "ws-1" }, { q: "private", project: "foreign" }] }),
     });
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ results: [{ ok: true, data: { sessionId: "retrieval-1" } }, { ok: false, error: { code: "WORKSPACE_NOT_FOUND", status: 404 } }] });
+    expect(await response.json()).toMatchObject({ results: [{ ok: true, data: { sessionId: "retrieval-1" } }, { ok: false, error: { code: "PROJECT_NOT_FOUND", status: 404 } }] });
     expect(hybridSearch).toHaveBeenCalledTimes(1);
     expect(hybridSearch).toHaveBeenCalledWith("first", "user-1", expect.anything());
-    expect(chatWorkspace).not.toHaveBeenCalled();
+    expect(chatProject).not.toHaveBeenCalled();
   });
 
   it("does not discover or execute search/chat tools without search scope", async () => {
     validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["ingest"] });
     const listed = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
-    expect((await listed.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "upload", "getUploadStatus", "extract", "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "getJob", "completeUpload"]);
+    expect((await listed.json()).tools.map((tool: { id: string }) => tool.id)).toEqual(["listProjects", "upload", "getUploadStatus", "extract", "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "getJob", "completeUpload"]);
     for (const name of ["search", "chat"]) {
       expect((await app.request(`/mcp/tools/${name}`, { method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: "{}" })).status).toBe(403);
     }
-    expect(chatWorkspace).not.toHaveBeenCalled();
+    expect(chatProject).not.toHaveBeenCalled();
     expect(hybridSearch).not.toHaveBeenCalled();
   });
 
   it("discovers and calls search and chat through the official HTTP client", async () => {
-    chatWorkspace.mockResolvedValue({ answer: "Weekdays [1]", citations: [], sessionId: "chat-1", usage: { inputTokens: 10, outputTokens: 3 } });
+    chatProject.mockResolvedValue({ answer: "Weekdays [1]", citations: [], sessionId: "chat-1", usage: { inputTokens: 10, outputTokens: 3 } });
     const client = new Client({ name: "rag-chat-test", version: "1" });
     await client.connect(new StreamableHTTPClientTransport(new URL("http://localhost:4321/mcp"), { requestInit: { headers: { Authorization: "Bearer dslp_test" } }, fetch: async (url, init) => app.request(new Request(url, init)) }));
     const tools = (await client.listTools()).tools;
     expect(tools.find(tool => tool.name === "chat")?.annotations?.idempotentHint).toBe(false);
-    const search = await client.callTool({ name: "search", arguments: { q: "Support?", workspace: "ws-1" } });
+    const search = await client.callTool({ name: "search", arguments: { q: "Support?", project: "ws-1" } });
     expect(search.structuredContent).toMatchObject({ usage: { totalTokens: 7, costCents: 0.001, costSource: "provider" } });
-    const batch = await client.callTool({ name: "search", arguments: { queries: [{ q: "Support?", workspace: "ws-1" }] } });
+    const batch = await client.callTool({ name: "search", arguments: { queries: [{ q: "Support?", project: "ws-1" }] } });
     expect(batch.structuredContent).toMatchObject({ results: [{ ok: true, data: { results: [{ text: "Support hours" }] } }] });
-    const chat = await client.callTool({ name: "chat", arguments: { q: "Support?", workspace: "ws-1" } });
+    const chat = await client.callTool({ name: "chat", arguments: { q: "Support?", project: "ws-1" } });
     expect(chat.structuredContent).toMatchObject({ answer: "Weekdays [1]", usage: { outputTokens: 3 } });
-    expect(chatWorkspace).toHaveBeenCalledWith(expect.objectContaining({ actor: expect.objectContaining({ type: "apiKey", apiKey: validatedKey }), allowAgentTools: false, allowConfiguration: false }));
+    expect(chatProject).toHaveBeenCalledWith(expect.objectContaining({ actor: expect.objectContaining({ type: "apiKey", apiKey: validatedKey }), allowAgentTools: false, allowConfiguration: false }));
     await client.close();
   });
 
@@ -617,25 +617,25 @@ describe("session MCP tools", () => {
     const { sessionToolRoutes } = await import("../routes/session-tools.js");
     const { setRequestActor } = await import("../lib/request-actor.js");
     app = new Hono().use("*", async (c, next) => { setRequestActor(c, actor); await next(); }).route("/tools", sessionToolRoutes);
-    getWorkspace.mockImplementation(async (id: string) => id === "foreign" ? null : { id, orgId: "org-1" });
+    getProject.mockImplementation(async (id: string) => id === "foreign" ? null : { id, orgId: "org-1" });
     hybridSearch.mockClear();
   });
   const headers = { Origin: "http://localhost:4321", "Content-Type": "application/json" };
 
-  it("uses the authenticated session identity and preserves workspace access checks", async () => {
-    const response = await app.request("/tools/tools/search", { method: "POST", headers, body: JSON.stringify({ workspace: "ws-1", q: "hello" }) });
+  it("uses the authenticated session identity and preserves project access checks", async () => {
+    const response = await app.request("/tools/tools/search", { method: "POST", headers, body: JSON.stringify({ project: "ws-1", q: "hello" }) });
     expect(response.status).toBe(200);
     expect(hybridSearch).toHaveBeenCalledWith("hello", "user-1", expect.anything());
-    expect((await app.request("/tools/tools/suggestQueries", { method: "POST", headers, body: JSON.stringify({ workspace: "foreign" }) })).status).toBe(404);
+    expect((await app.request("/tools/tools/suggestQueries", { method: "POST", headers, body: JSON.stringify({ project: "foreign" }) })).status).toBe(404);
   });
 
-  it("returns a read-only ingest report for an accessible workspace and hides foreign ones", async () => {
+  it("returns a read-only ingest report for an accessible project and hides foreign ones", async () => {
     loadIngestReport.mockClear();
-    const response = await app.request("/tools/tools/getUploadStatus", { method: "POST", headers, body: JSON.stringify({ workspace: "ws-1", runId: "run-1" }) });
+    const response = await app.request("/tools/tools/getUploadStatus", { method: "POST", headers, body: JSON.stringify({ project: "ws-1", runId: "run-1" }) });
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ tool: "getUploadStatus", summary: expect.stringContaining("Ingest report"), report: { workspaceId: "ws-1" } });
-    expect(loadIngestReport).toHaveBeenCalledWith(expect.objectContaining({ canEdit: false, runId: "run-1", workspace: expect.objectContaining({ id: "ws-1" }) }));
-    expect((await app.request("/tools/tools/getUploadStatus", { method: "POST", headers, body: JSON.stringify({ workspace: "foreign" }) })).status).toBe(404);
+    await expect(response.json()).resolves.toMatchObject({ tool: "getUploadStatus", summary: expect.stringContaining("Ingest report"), report: { projectId: "ws-1" } });
+    expect(loadIngestReport).toHaveBeenCalledWith(expect.objectContaining({ canEdit: false, runId: "run-1", project: expect.objectContaining({ id: "ws-1" }) }));
+    expect((await app.request("/tools/tools/getUploadStatus", { method: "POST", headers, body: JSON.stringify({ project: "foreign" }) })).status).toBe(404);
     expect(loadIngestReport).toHaveBeenCalledTimes(1);
   });
 
@@ -677,7 +677,7 @@ describe("session MCP tools", () => {
     expect(tool.inputSchema.properties.files).toBeDefined();
     expect(tool.inputSchema.properties.inlineFiles.items.properties.contentBase64).toBeDefined();
     expect(tool.inputSchema.properties.userId).toBeUndefined();
-    expect(tools.map((tool: { id: string }) => tool.id)).toEqual(["listWorkspaces", "upload", "getUploadStatus", "search", "chat", "extract", "getMediaEvidence", "suggestQueries", "getWorkspaceSettings", "proposeWorkspaceSettings", "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "updateEstimate", "searchSettingsEstimate", "indexingModeEstimate", "graphRebuildEstimate", "getJob", "completeUpload"]);
+    expect(tools.map((tool: { id: string }) => tool.id)).toEqual(["listProjects", "upload", "getUploadStatus", "search", "chat", "extract", "getMediaEvidence", "suggestQueries", "getProjectSettings", "proposeProjectSettings", "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "updateEstimate", "searchSettingsEstimate", "indexingModeEstimate", "graphRebuildEstimate", "getJob", "completeUpload"]);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
   });
 });

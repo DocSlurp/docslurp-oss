@@ -25,7 +25,7 @@ beforeAll(async () => {
   await reconcileRoleGrants(owner, { log: () => {} });
   await owner.query(`insert into "user"(id,name,email) values('publication','Test','publication@example.test');
     insert into organizations(id,name,slug,created_by_user_id) values('publication','Test','publication','publication');
-    insert into workspaces(id,org_id,user_id,name) values
+    insert into projects(id,org_id,user_id,name) values
       ('publication-holder','publication','publication','Test'),('publication-writer','publication','publication','Test')`);
 });
 afterAll(async () => { await stop?.(); await Promise.all(clients.map(c => c.end())); });
@@ -46,7 +46,15 @@ it.skipIf(!url)("keeps already-connected restricted sessions working at migratio
       await migration.query(readFileSync(new URL(`${entry.tag}.sql`, dir), "utf8"));
       await migration.query("commit");
     }
-    await reconcileRoleGrants(migration, { log: () => {} });
+    // Bootstrap the historical grant policy before the project rename.
+    await reconcileRoleGrants({ query: async (statement: string, params?: unknown[]) => {
+      const result = await migration.query(statement.replaceAll("project", "workspace"), params);
+      return { ...result, rows: result.rows.map((row: Record<string, unknown>) => Object.fromEntries(Object.entries(row).map(([key, value]) => {
+        // The old schema reports column arrays as well as relation names.
+        if (key === "columns" && Array.isArray(value)) return [key, value.map(column => typeof column === "string" ? column.replaceAll("workspace", "project") : column)];
+        return [key, ["relname", "table", "sequence"].includes(key) && typeof value === "string" ? value.replaceAll("workspace", "project") : value];
+      }))) };
+    } }, { log: () => {} });
     await migration.query(`insert into "user"(id,name,email) values('upgrade','Test','upgrade@example.test');
       insert into organizations(id,name,slug,created_by_user_id) values('upgrade','Test','upgrade','upgrade');
       insert into workspaces(id,org_id,user_id,name) values('upgrade','upgrade','upgrade','Test')`);
@@ -87,7 +95,7 @@ it.skipIf(!url)("denies direct and arbitrary-tenant mutation under the actual in
     "select * from public.realtime_compact_revisions('')",
     "set role docslurp_realtime_publisher",
   ]) await expect(worker.query(statement)).rejects.toMatchObject({ code: "42501" });
-  await worker.query("update workspaces set name='published' where id='publication-writer'");
+  await worker.query("update projects set name='published' where id='publication-writer'");
 });
 
 it.skipIf(!url)("drains a long-transaction burst without further writes and bounds reader work", async () => {
@@ -95,8 +103,8 @@ it.skipIf(!url)("drains a long-transaction burst without further writes and boun
   const read = async () => (await owner.query("select revision from realtime_revisions where org_id='publication'")).rows[0].revision;
   const before = BigInt(await read());
   await holder.query("begin");
-  await holder.query("update workspaces set name='holding' where id='publication-holder'");
-  for (let i = 0; i < 300; i++) await writer.query("update workspaces set name='burst' where id='publication-writer'");
+  await holder.query("update projects set name='holding' where id='publication-holder'");
+  for (let i = 0; i < 300; i++) await writer.query("update projects set name='burst' where id='publication-writer'");
   const rows = async () => Number((await owner.query("select count(*) from realtime_revision_counters where org_id='publication'")).rows[0].count);
   expect(await rows()).toBeGreaterThanOrEqual(300);
   const planRows = async () => {

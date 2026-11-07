@@ -497,7 +497,7 @@ export interface GuardedCompletion {
 }
 
 /**
- * The body as sent: on OpenRouter the current organization/workspace provider policy is applied to every
+ * The body as sent: on OpenRouter the current organization/project provider policy is applied to every
  * attempt (first try, inline retries, alternate route, streaming fallback), whatever routing built the body.
  * Throws ProviderRegionRefusedError, before anything is sent, when no allowed provider is left.
  */

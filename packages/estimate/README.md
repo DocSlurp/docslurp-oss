@@ -131,7 +131,7 @@ const { files, request, stats, partial, cancelled } = await estimateFiles(estima
   ```
 - **Node** `estimatePaths(estimator, paths, options)` and **Python** `Estimator.estimate_paths(paths,
   on_progress=..., cancel=threading.Event())` report the same events and stats.
-- **Quotes.** `requestQuote({ files, apiKey, workspace?, speedBoost?, origin? })` posts to
+- **Quotes.** `requestQuote({ files, apiKey, project?, speedBoost?, origin? })` posts to
   `POST /v1/uploads/estimate` (an API key with the `ingest` scope). The answer is labelled an estimate: a profile
   never changes what an upload is charged, which the worker measures as it processes the files.
 - **Errors.** `EstimatorError.code` is `invalid_request`, `crashed`, `worker_failed` or `quote_failed`. After

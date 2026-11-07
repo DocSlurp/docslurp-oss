@@ -19,11 +19,11 @@ beforeAll(async () => {
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
-    insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline)
+    insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
       values ('run-1', 'o1', 'u1', 'w', 'url-ingest', 'completed', 'completed', '{}'),
              ('run-2', 'o1', 'u1', 'w', 'url-ingest', 'processing', 'index', '{}');
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, canonical_id, created_at, page_count)
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, canonical_id, created_at, page_count)
       values ('v1', 'o1', 'u1', 'w', 'run-1', 'p.html', 'text/html', 'k1', 'completed', 'https://x.test/p', '2026-01-01', 3),
              ('v2', 'o1', 'u1', 'w', 'run-2', 'p.html', 'text/html', 'k2', 'embed', 'https://x.test/p', '2026-01-02', 4);
     insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension)
@@ -45,7 +45,7 @@ afterAll(async () => {
 describe("canonical cutover", () => {
   it("registers vectors, completes, supersedes and announces in one step", async () => {
     const state = {
-      run: { id: "run-2", userId: "u1", workspaceId: "w", stats: {} },
+      run: { id: "run-2", userId: "u1", projectId: "w", stats: {} },
       documents: [{ id: "v2", pageCount: 4 }],
       vectorIndexes: [
         { documentId: "v2", backend: "lancedb", bucket: "b", path: "p2", embeddingModel: "m", dimension: 4 },
@@ -61,16 +61,16 @@ describe("canonical cutover", () => {
 
     const live = await db.query<{ id: string }>(`
       select d.id from documents d
-      where d.workspace_id = 'w' and d.status = 'completed' and d.superseded_at is null
+      where d.project_id = 'w' and d.status = 'completed' and d.superseded_at is null
         and exists (select 1 from vector_indexes vi where vi.document_id = d.id)
     `);
     expect(live.rows).toEqual([{ id: "v2" }]);
-    expect((await db.query(`select page_count::int as pages from workspace_corpus_stats where workspace_id = 'w'`)).rows)
+    expect((await db.query(`select page_count::int as pages from project_corpus_stats where project_id = 'w'`)).rows)
       .toEqual([{ pages: 4 }]);
     // Only this document's vectors were flushed; the rest stay buffered for updateProgress.
     expect(state.vectorIndexes.map((vector) => vector.documentId)).toEqual(["other"]);
     const events = await db.query<{ event_type: string; document_id: string; payload: { replacedDocumentIds: string[] } }>(
-      `select event_type, document_id, payload from workspace_run_events where event_type = 'document.replaced'`,
+      `select event_type, document_id, payload from project_run_events where event_type = 'document.replaced'`,
     );
     expect(events.rows.map((row) => [row.document_id, row.payload.replacedDocumentIds])).toEqual([["v2", ["v1"]]]);
   });

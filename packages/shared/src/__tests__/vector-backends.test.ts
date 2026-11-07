@@ -21,7 +21,7 @@ describe("vector backend validation", () => {
     const parsed = vectorBackendSchema.safeParse("chroma");
     expect(parsed.success).toBe(false);
     expect(parsed.error?.issues[0]?.message).toBe("unsupported vector backend: chroma (supported: lancedb, orama, milvus; Chroma support was removed)");
-    // A stored workspace pipeline (normalizePipelineFeatures) and a full pipeline (the API's schema) naming it both fail.
+    // A stored project pipeline (normalizePipelineFeatures) and a full pipeline (the API's schema) naming it both fail.
     expect(() => normalizePipelineFeatures({ vectorBackends: ["chroma"] } as never)).toThrow(/unsupported vector backend: chroma/);
     expect(() => pipelineFeaturesSchema.parse({ ...defaultPipelineFeatures, vectorBackends: ["lancedb", "chroma"] })).toThrow(/unsupported vector backend: chroma/);
   });

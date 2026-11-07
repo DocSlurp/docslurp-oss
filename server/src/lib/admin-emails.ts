@@ -7,7 +7,7 @@ export function configuredAdminEmails(csv = process.env.ADMIN_EMAILS ?? ""): str
 
 /*
  * ADMIN_EMAILS names platform operators (DocSlurp staff), a role separate from
- * every organization and workspace role. It is read, never written back: being
+ * every organization and project role. It is read, never written back: being
  * an operator does not change, and must never imply, a role inside a customer
  * organization. Operator tools authorize through isConfiguredAdminUser; a
  * customer organization decides who administers it. (Sign-in used to promote an

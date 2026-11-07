@@ -47,7 +47,7 @@ def main() -> None:
     args = parse_args()
     config = load_config(args.config_json)
     # The worker passes this extractor's options (dolphinExtractorOptionsSchema): only mode and maxBatchSize.
-    # Repository, model and Python paths come from the worker environment only; a workspace never chooses them.
+    # Repository, model and Python paths come from the worker environment only; a project never chooses them.
     unknown = sorted(set(config) - {"mode", "maxBatchSize"})
     if unknown:
         raise SystemExit(f"dolphin options not allowed: {', '.join(unknown)}")

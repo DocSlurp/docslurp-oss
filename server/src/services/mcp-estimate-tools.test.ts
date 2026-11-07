@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ESTIMATE_TOOL_NAMES, estimateToolDefinitions, estimateToolUsesWorkspace, planEstimateTool } from "./mcp-estimate-tools.js";
+import { ESTIMATE_TOOL_NAMES, estimateToolDefinitions, estimateToolUsesProject, planEstimateTool } from "./mcp-estimate-tools.js";
 import { mcpManifest } from "./mcp-tools.js";
 
 describe("MCP estimate tools", () => {
@@ -14,22 +14,22 @@ describe("MCP estimate tools", () => {
       if (!result.ok) throw new Error("invalid");
       return [result.plan.path, result.plan.body];
     };
-    expect(plan("updateEstimate", { changes: { apply: "reindex", pipeline: {} } })).toEqual(["/v1/workspaces/w1/estimate", { apply: "reindex", pipeline: {} }]);
-    expect(plan("searchSettingsEstimate", { changes: { a: 1 } })).toEqual(["/v1/workspaces/w1/search-settings/estimate", { a: 1 }]);
+    expect(plan("updateEstimate", { changes: { apply: "reindex", pipeline: {} } })).toEqual(["/v1/projects/w1/estimate", { apply: "reindex", pipeline: {} }]);
+    expect(plan("searchSettingsEstimate", { changes: { a: 1 } })).toEqual(["/v1/projects/w1/search-settings/estimate", { a: 1 }]);
     expect(plan("reprocessEstimate", { runId: "r/1", stageFrom: "embed" })).toEqual(["/v1/runs/r%2F1/reprocess/estimate", { stageFrom: "embed" }]);
     expect(plan("fullIndexEstimate", { documentId: "d1" })).toEqual(["/v1/documents/d1/full-index/estimate", {}]);
-    expect(plan("fullIndexEstimate", { documentIds: ["a"] })).toEqual(["/v1/workspaces/w1/full-index/estimate", { documentIds: ["a"] }]);
-    expect(plan("indexingModeEstimate", { mode: "map" })).toEqual(["/v1/workspaces/w1/indexing-mode/estimate", { mode: "map" }]);
-    expect(plan("graphRebuildEstimate", {})).toEqual(["/v1/workspaces/w1/graph/jobs/estimate", {}]);
-    expect(plan("uploadEstimate", { files: [{ name: "a.pdf", size: 9, pages: 2 }] })).toEqual(["/v1/uploads/estimate", { files: [{ name: "a.pdf", size: 9, pages: 2 }], workspace: "w1" }]);
+    expect(plan("fullIndexEstimate", { documentIds: ["a"] })).toEqual(["/v1/projects/w1/full-index/estimate", { documentIds: ["a"] }]);
+    expect(plan("indexingModeEstimate", { mode: "map" })).toEqual(["/v1/projects/w1/indexing-mode/estimate", { mode: "map" }]);
+    expect(plan("graphRebuildEstimate", {})).toEqual(["/v1/projects/w1/graph/jobs/estimate", {}]);
+    expect(plan("uploadEstimate", { files: [{ name: "a.pdf", size: 9, pages: 2 }] })).toEqual(["/v1/uploads/estimate", { files: [{ name: "a.pdf", size: 9, pages: 2 }], project: "w1" }]);
   });
 
-  it("rejects invalid input and skips workspace resolution for run and document targets", () => {
+  it("rejects invalid input and skips project resolution for run and document targets", () => {
     expect(planEstimateTool("indexingModeEstimate", { mode: "bogus" }, "w1").ok).toBe(false);
     expect(planEstimateTool("uploadEstimate", { files: [] }, "w1").ok).toBe(false);
-    expect(estimateToolUsesWorkspace("reprocessEstimate", { runId: "r" })).toBe(false);
-    expect(estimateToolUsesWorkspace("fullIndexEstimate", { documentId: "d" })).toBe(false);
-    expect(estimateToolUsesWorkspace("fullIndexEstimate", {})).toBe(true);
+    expect(estimateToolUsesProject("reprocessEstimate", { runId: "r" })).toBe(false);
+    expect(estimateToolUsesProject("fullIndexEstimate", { documentId: "d" })).toBe(false);
+    expect(estimateToolUsesProject("fullIndexEstimate", {})).toBe(true);
   });
 
   it("registers estimate tools and getJob in the manifest, gated by scope", () => {
@@ -44,13 +44,13 @@ describe("MCP estimate tools", () => {
     expect(ids(["ingest"])).toContain("uploadEstimate");
     expect(ids(["ingest"])).toContain("fullIndexEstimate");
     expect(ids(["ingest"])).not.toContain("updateEstimate");
-    expect(ids(["workspaces:manage"])).toEqual(expect.arrayContaining(["updateEstimate", "indexingModeEstimate", "graphRebuildEstimate"]));
-    expect(ids(["workspaces:manage"], "client")).not.toContain("updateEstimate");
+    expect(ids(["projects:manage"])).toEqual(expect.arrayContaining(["updateEstimate", "indexingModeEstimate", "graphRebuildEstimate"]));
+    expect(ids(["projects:manage"], "client")).not.toContain("updateEstimate");
     expect(ids(["ingest"])).toContain("reprocessEstimate");
     expect(ids(["ingest"], "client")).not.toContain("reprocessEstimate");
-    // The search-settings estimate needs the mutation's gate: a server key with workspaces:manage.
-    expect(ids(["workspaces:manage"])).toContain("searchSettingsEstimate");
+    // The search-settings estimate needs the mutation's gate: a server key with projects:manage.
+    expect(ids(["projects:manage"])).toContain("searchSettingsEstimate");
     expect(ids(["search", "ingest"])).not.toContain("searchSettingsEstimate");
-    expect(ids(["workspaces:manage"], "client")).not.toContain("searchSettingsEstimate");
+    expect(ids(["projects:manage"], "client")).not.toContain("searchSettingsEstimate");
   });
 });

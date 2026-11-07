@@ -230,7 +230,14 @@ export async function collectReport(client, { journal, acceptedPiiPatterns, extr
   oneOrgMigrationSql ??= readFileSync(ONE_ORG_MIGRATION, "utf8");
   extractorIds ??= knownExtractorIds(await loadBuiltInExtractorIds());
   const sections = [];
-  const q = async (text, params = []) => (await client.query(text, params)).rows;
+  // The report is used both before and after the breaking terminology cutover.
+  // Choose from known schema names; never guess when both generations exist.
+  const { rows: [schema] } = await client.query("select to_regclass('public.projects') is not null as projects, to_regclass('public.workspaces') is not null as workspaces");
+  if (schema.projects && schema.workspaces) throw new Error("Ambiguous project schema; refusing the predeploy report");
+  const q = async (text, params = []) => (await client.query(
+    schema.projects ? text.replaceAll("workspace_runs", "project_runs").replace(/\b(from|join|update|into|table)\s+(public\.)?workspaces\b/gi, "$1 $2projects").replaceAll("workspace_id", "project_id") : text,
+    params,
+  )).rows;
 
   // 1. Migrations and long transactions.
   // A failed statement would abort the read-only transaction, so the table is looked up, not tried.
@@ -355,13 +362,13 @@ export async function collectReport(client, { journal, acceptedPiiPatterns, extr
   const badPatterns = await q(
     `select source, pattern, count(*)::int as pipelines
      from (
-       select 'workspaces' as source, jsonb_array_elements_text(pipeline -> 'piiPolicy' -> 'patterns') as pattern
+       select 'projects' as source, jsonb_array_elements_text(pipeline -> 'piiPolicy' -> 'patterns') as pattern
          from workspaces where jsonb_typeof(pipeline -> 'piiPolicy' -> 'patterns') = 'array'
        union all
        select 'upload_sessions', jsonb_array_elements_text(pipeline -> 'piiPolicy' -> 'patterns')
          from upload_sessions where jsonb_typeof(pipeline -> 'piiPolicy' -> 'patterns') = 'array'
        union all
-       select 'workspace_runs (in flight)', jsonb_array_elements_text(pipeline -> 'piiPolicy' -> 'patterns')
+       select 'project_runs (in flight)', jsonb_array_elements_text(pipeline -> 'piiPolicy' -> 'patterns')
          from workspace_runs where status = any($2::text[]) and jsonb_typeof(pipeline -> 'piiPolicy' -> 'patterns') = 'array'
      ) found
      where pattern <> all($1::text[])
@@ -383,13 +390,13 @@ export async function collectReport(client, { journal, acceptedPiiPatterns, extr
   // never rerouted to another backend.
   const badBackends = await q(
     `select source, backend, count(*)::int as pipelines from (
-       select 'workspaces' as source, jsonb_array_elements_text(pipeline -> 'vectorBackends') as backend
+       select 'projects' as source, jsonb_array_elements_text(pipeline -> 'vectorBackends') as backend
          from workspaces where jsonb_typeof(pipeline -> 'vectorBackends') = 'array'
        union all
        select 'upload_sessions', jsonb_array_elements_text(pipeline -> 'vectorBackends')
          from upload_sessions where jsonb_typeof(pipeline -> 'vectorBackends') = 'array'
        union all
-       select 'workspace_runs (in flight)', jsonb_array_elements_text(pipeline -> 'vectorBackends')
+       select 'project_runs (in flight)', jsonb_array_elements_text(pipeline -> 'vectorBackends')
          from workspace_runs where status = any($2::text[]) and jsonb_typeof(pipeline -> 'vectorBackends') = 'array'
      ) found
      where lower(btrim(backend)) <> all($1::text[])
@@ -432,11 +439,11 @@ export async function collectReport(client, { journal, acceptedPiiPatterns, extr
   // 5b. Stored extraction configs naming an extractor id this build does not know.
   const unknownExtractors = await q(
     `with configs as (
-       select 'workspaces' as source, pipeline -> 'documentExtraction' as x from workspaces where jsonb_typeof(pipeline -> 'documentExtraction') = 'object'
+       select 'projects' as source, pipeline -> 'documentExtraction' as x from workspaces where jsonb_typeof(pipeline -> 'documentExtraction') = 'object'
        union all
        select 'upload_sessions', pipeline -> 'documentExtraction' from upload_sessions where jsonb_typeof(pipeline -> 'documentExtraction') = 'object'
        union all
-       select 'workspace_runs (in flight)', pipeline -> 'documentExtraction' from workspace_runs
+       select 'project_runs (in flight)', pipeline -> 'documentExtraction' from workspace_runs
          where status = any($2::text[]) and jsonb_typeof(pipeline -> 'documentExtraction') = 'object'
      ),
      lists as (

@@ -7,7 +7,7 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 /**
  * Search serves every live document from the index config it was built with: one vector search per config in
- * `workspaces.index_configs`, each restricted to that config's documents, the query embedded once per distinct
+ * `projects.index_configs`, each restricted to that config's documents, the query embedded once per distinct
  * model, the lists fused with RRF. With a single config nothing extra runs.
  */
 let stop: () => Promise<void>;
@@ -51,16 +51,16 @@ afterAll(async () => {
 async function seed(docHashes: Array<string | null>, configs: Record<string, unknown> | null, pipeline: PipelineFeatures = C) {
   await sql`delete from vector_indexes`;
   await sql`delete from documents`;
-  await sql`delete from workspace_runs`;
-  await sql`delete from workspaces`;
+  await sql`delete from project_runs`;
+  await sql`delete from projects`;
   await sql`delete from organizations`;
   await sql`insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1')`;
-  await sql`insert into workspaces(id, org_id, user_id, name, pipeline, index_configs)
+  await sql`insert into projects(id, org_id, user_id, name, pipeline, index_configs)
     values ('w', 'o1', 'u1', 'W', ${sql.json(JSON.parse(JSON.stringify(pipeline)))}, ${configs ? sql.json(JSON.parse(JSON.stringify(configs))) : null})`;
-  await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
     values ('r', 'o1', 'u1', 'w', 'upload', 'completed', 'index', '{}', ${docHashes.length})`;
   for (const [i, h] of docHashes.entries()) {
-    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, index_config_hash)
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, index_config_hash)
       values (${`d${i}`}, 'o1', 'u1', 'w', 'r', ${`f${i}`}, 'application/pdf', ${`k${i}`}, 'completed', 1, ${h})`;
     await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension)
       values (${`v${i}`}, ${`d${i}`}, 'lancedb', 'b', 'p', 'm', 384)`;
@@ -79,7 +79,7 @@ describe("servedVectorSearch", () => {
     const embed = vi.fn(async () => [1]);
     queries = 0;
     const result = await serving.servedVectorSearch({
-      workspaceId: "w", pipeline: C, indexConfigs: { [hash(C)]: cfg(C) }, queryVector: [0], query: "q", deps: { search, embed },
+      projectId: "w", pipeline: C, indexConfigs: { [hash(C)]: cfg(C) }, queryVector: [0], query: "q", deps: { search, embed },
     });
     expect(queries).toBe(0);
     expect(result).toEqual([chunk("a")]);
@@ -91,7 +91,7 @@ describe("servedVectorSearch", () => {
   it("loads the config map with the pipeline in a single query", async () => {
     await seed([hash(C)], { [hash(C)]: cfg(C) });
     queries = 0;
-    const loaded = await setup.loadWorkspaceIndexing("w");
+    const loaded = await setup.loadProjectIndexing("w");
     expect(queries).toBe(1);
     expect(Object.keys(loaded.indexConfigs)).toEqual([hash(C)]);
     expect(loaded.pipeline.embedding.modelUri).toBe("llm://transformers.js/Xenova/bge-m3");
@@ -105,7 +105,7 @@ describe("servedVectorSearch", () => {
     });
     const embed = vi.fn(async (_text: string, embedding: { modelUri?: string }) => (embedding.modelUri?.includes("gte") ? [2] : [1]));
     const result = await serving.servedVectorSearch({
-      workspaceId: "w", pipeline: C, indexConfigs: { [hash(A)]: cfg(A), [hash(B)]: cfg(B), [hash(C)]: cfg(C) },
+      projectId: "w", pipeline: C, indexConfigs: { [hash(A)]: cfg(A), [hash(B)]: cfg(B), [hash(C)]: cfg(C) },
       queryVector: [0], query: "the effective query", deps: { search: search as never, embed },
     });
 
@@ -127,7 +127,7 @@ describe("servedVectorSearch", () => {
     const search = vi.fn(async () => [chunk("x")]);
     const embed = vi.fn(async () => [5]);
     await serving.servedVectorSearch({
-      workspaceId: "w", pipeline: D, indexConfigs: { [hash(C)]: cfg(C), [hash(D)]: cfg(D) }, queryVector: [0], query: "q", deps: { search, embed },
+      projectId: "w", pipeline: D, indexConfigs: { [hash(C)]: cfg(C), [hash(D)]: cfg(D) }, queryVector: [0], query: "q", deps: { search, embed },
     });
     expect(embed).not.toHaveBeenCalled();
     expect(search).toHaveBeenCalledTimes(2);
@@ -140,7 +140,7 @@ describe("servedVectorSearch", () => {
     const search = vi.fn(async (_vector: number[], _serve: Serve) => [chunk("x")]);
     const embed = vi.fn(async (_text: string, _embedding: { modelUri?: string }) => [7]);
     await serving.servedVectorSearch({
-      workspaceId: "w", pipeline: Cls, indexConfigs: { [hash(C)]: cfg(C), [hash(Cls)]: cfg(Cls) }, queryVector: [0], query: "q", deps: { search: search as never, embed },
+      projectId: "w", pipeline: Cls, indexConfigs: { [hash(C)]: cfg(C), [hash(Cls)]: cfg(Cls) }, queryVector: [0], query: "q", deps: { search: search as never, embed },
     });
     // The mean-pooled documents are searched with a mean-pooled query, never the current CLS vector.
     expect(embed).toHaveBeenCalledTimes(1);
@@ -159,7 +159,7 @@ describe("servedVectorSearch", () => {
     const search = vi.fn(async () => [chunk("x")]);
     const diagnostic = vi.fn();
     await serving.servedVectorSearch({
-      workspaceId: "w", pipeline: C, indexConfigs: { [hash(A)]: cfg(A), [hash(B)]: cfg(B), [hash(C)]: cfg(C), [hash(F)]: cfg(F) },
+      projectId: "w", pipeline: C, indexConfigs: { [hash(A)]: cfg(A), [hash(B)]: cfg(B), [hash(C)]: cfg(C), [hash(F)]: cfg(F) },
       queryVector: [0], query: "q", deps: { search, embed: vi.fn(async () => [1]), diagnostic },
     });
     expect(search).toHaveBeenCalledTimes(3);
@@ -170,10 +170,10 @@ describe("servedVectorSearch", () => {
     await seed([hash(C), hash(C)], { [hash(A)]: cfg(A), [hash(C)]: cfg(C) });
     const search = vi.fn(async () => [chunk("a")]);
     await serving.servedVectorSearch({
-      workspaceId: "w", pipeline: C, indexConfigs: { [hash(A)]: cfg(A), [hash(C)]: cfg(C) }, queryVector: [0], query: "q", deps: { search, embed: vi.fn() },
+      projectId: "w", pipeline: C, indexConfigs: { [hash(A)]: cfg(A), [hash(C)]: cfg(C) }, queryVector: [0], query: "q", deps: { search, embed: vi.fn() },
     });
     await vi.waitFor(async () => {
-      const [ws] = await sql<{ index_configs: Record<string, unknown> }[]>`select index_configs from workspaces where id = 'w'`;
+      const [ws] = await sql<{ index_configs: Record<string, unknown> }[]>`select index_configs from projects where id = 'w'`;
       expect(Object.keys(ws!.index_configs)).toEqual([hash(C)]);
     });
   });
@@ -183,10 +183,10 @@ describe("servedVectorSearch", () => {
     await seed([hash(C), hash(C)], { [hash(C)]: cfg(C), [hash(B)]: cfg(B) }, B);
     const search = vi.fn(async () => [chunk("a")]);
     await serving.servedVectorSearch({
-      workspaceId: "w", pipeline: C, indexConfigs: { [hash(C)]: cfg(C), [hash(B)]: cfg(B) }, queryVector: [0], query: "q", deps: { search, embed: vi.fn() },
+      projectId: "w", pipeline: C, indexConfigs: { [hash(C)]: cfg(C), [hash(B)]: cfg(B) }, queryVector: [0], query: "q", deps: { search, embed: vi.fn() },
     });
     await new Promise((resolve) => setTimeout(resolve, 50));
-    const [ws] = await sql<{ index_configs: Record<string, unknown> }[]>`select index_configs from workspaces where id = 'w'`;
+    const [ws] = await sql<{ index_configs: Record<string, unknown> }[]>`select index_configs from projects where id = 'w'`;
     expect(Object.keys(ws!.index_configs).sort()).toEqual([hash(B), hash(C)].sort());
   });
 
@@ -194,10 +194,10 @@ describe("servedVectorSearch", () => {
     await seed([hash(B), hash(B)], { [hash(C)]: cfg(C) }, B);
     const search = vi.fn(async () => [chunk("b")]);
     await serving.servedVectorSearch({
-      workspaceId: "w", pipeline: B, indexConfigs: { [hash(C)]: cfg(C) }, queryVector: [0], query: "q", deps: { search, embed: vi.fn() },
+      projectId: "w", pipeline: B, indexConfigs: { [hash(C)]: cfg(C) }, queryVector: [0], query: "q", deps: { search, embed: vi.fn() },
     });
     await vi.waitFor(async () => {
-      const [ws] = await sql<{ index_configs: Record<string, unknown> }[]>`select index_configs from workspaces where id = 'w'`;
+      const [ws] = await sql<{ index_configs: Record<string, unknown> }[]>`select index_configs from projects where id = 'w'`;
       expect(ws!.index_configs).toEqual({ [hash(B)]: cfg(B) });
     });
   });
@@ -209,9 +209,9 @@ describe("servedVectorSearch", () => {
       apply(target, thisArg, args) {
         const text = (args[0] as TemplateStringsArray).join("?");
         const result = Reflect.apply(target as never, thisArg, args) as Promise<unknown>;
-        if (text.includes("select pipeline from workspaces")) {
+        if (text.includes("select pipeline from projects")) {
           return result.then(async (rows) => {
-            await sql`update workspaces set pipeline = ${sql.json(JSON.parse(JSON.stringify(B)))} where id = 'w'`;
+            await sql`update projects set pipeline = ${sql.json(JSON.parse(JSON.stringify(B)))} where id = 'w'`;
             return rows;
           });
         }
@@ -219,18 +219,18 @@ describe("servedVectorSearch", () => {
       },
     });
     expect(await serving.pruneIndexConfigs("w", racing as never)).toBeNull();
-    const [ws] = await sql<{ index_configs: Record<string, unknown> }[]>`select index_configs from workspaces where id = 'w'`;
+    const [ws] = await sql<{ index_configs: Record<string, unknown> }[]>`select index_configs from projects where id = 'w'`;
     expect(Object.keys(ws!.index_configs).sort()).toEqual([hash(B), hash(C)].sort());
   });
 
   it("sweeper prune empties entries once re-indexed documents replace the old ones", async () => {
     await seed([hash(B)], { [hash(A)]: cfg(A), [hash(B)]: cfg(B), [hash(C)]: cfg(C) });
     expect(await serving.pruneDrainedIndexConfigs(sql as never)).toBe(0);
-    let [ws] = await sql<{ index_configs: Record<string, unknown> }[]>`select index_configs from workspaces where id = 'w'`;
+    let [ws] = await sql<{ index_configs: Record<string, unknown> }[]>`select index_configs from projects where id = 'w'`;
     expect(Object.keys(ws!.index_configs).sort()).toEqual([hash(B), hash(C)].sort());
     await sql`update documents set index_config_hash = ${hash(C)}`;
     expect(await serving.pruneDrainedIndexConfigs(sql as never)).toBe(1);
-    [ws] = await sql<{ index_configs: Record<string, unknown> }[]>`select index_configs from workspaces where id = 'w'`;
+    [ws] = await sql<{ index_configs: Record<string, unknown> }[]>`select index_configs from projects where id = 'w'`;
     expect(Object.keys(ws!.index_configs)).toEqual([hash(C)]);
   });
 });

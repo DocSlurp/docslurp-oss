@@ -1,6 +1,6 @@
 /**
  * Verified OpenRouter list prices (USD per 1M tokens) for models that can drive
- * workspace chat: the chat catalog plus the operator eval candidates. It mirrors
+ * project chat: the chat catalog plus the operator eval candidates. It mirrors
  * the matching entries of scripts/lib/model-prices.json, which a test keeps in
  * sync; runtime packages cannot read that script file.
  *

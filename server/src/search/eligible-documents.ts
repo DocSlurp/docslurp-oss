@@ -8,14 +8,14 @@ import { loadSearchAvailability, type SearchAvailabilityRow } from "./session-se
 import { envInt, TtlLruCache } from "./ttl-lru.js";
 
 /**
- * Native search (SEARCH_LANCEDB_NATIVE): the per-workspace set of documents
+ * Native search (SEARCH_LANCEDB_NATIVE): the per-project set of documents
  * search may serve, loaded with one query and cached for a short TTL, so a
  * search on a warm cache runs no eligibility or availability SQL. The set is
  * the LanceDB prefilter (documentId IN …) for vector and full-text queries.
  *
  * Freshness: entries live SEARCH_ELIGIBLE_CACHE_TTL_MS (default 15000) and are
  * dropped early when the worker's `run_events` NOTIFY hint names a run of the
- * workspace, i.e. when a document or run of the workspace changes state. A
+ * project, i.e. when a document or run of the project changes state. A
  * document that completes indexing is therefore searchable within one hint
  * (or at worst one TTL), and one that is deleted or superseded stops being
  * served by the same bound; hits are still filtered to this set, never wider.
@@ -44,7 +44,7 @@ export interface EligibleDocument {
 }
 
 export interface EligibleDocumentSet {
-  workspaceId: string;
+  projectId: string;
   embeddingModel: string;
   dimension: number;
   documents: EligibleDocument[];
@@ -75,13 +75,13 @@ function falsy(value: string | undefined): boolean {
  * Native search is the default: lexical (BM25), vector and hydration come
  * from LanceDB, with Postgres fallbacks for tables without an FTS index, rows
  * without hydration columns and legacy tables. SEARCH_LANCEDB_NATIVE=0 is the
- * global kill switch; while it is off, SEARCH_LANCEDB_NATIVE_WORKSPACES=<id,…>
- * still turns native search on for the listed workspaces.
+ * global kill switch; while it is off, SEARCH_LANCEDB_NATIVE_PROJECTS=<id,…>
+ * still turns native search on for the listed projects.
  */
-export function searchLanceDbNativeEnabled(workspaceId: string | undefined, env: NodeJS.ProcessEnv = process.env): boolean {
+export function searchLanceDbNativeEnabled(projectId: string | undefined, env: NodeJS.ProcessEnv = process.env): boolean {
   if (!falsy(env.SEARCH_LANCEDB_NATIVE)) return true;
-  if (!workspaceId) return false;
-  return (env.SEARCH_LANCEDB_NATIVE_WORKSPACES ?? "").split(",").map((id) => id.trim()).filter(Boolean).includes(workspaceId);
+  if (!projectId) return false;
+  return (env.SEARCH_LANCEDB_NATIVE_PROJECTS ?? "").split(",").map((id) => id.trim()).filter(Boolean).includes(projectId);
 }
 
 export function eligibleCacheTtlMs(env: NodeJS.ProcessEnv = process.env): number {
@@ -91,10 +91,10 @@ export function eligibleCacheTtlMs(env: NodeJS.ProcessEnv = process.env): number
 const MAX_ENTRIES = 500;
 let eligibleCache: TtlLruCache<Promise<EligibleDocumentSet>> | null = null;
 let availabilityCache: TtlLruCache<Promise<SearchAvailabilityRow | undefined>> | null = null;
-/** Workspace of each run seen in a cached set, so a run_events hint can drop the right entries. */
-const runWorkspaces = new Map<string, string>();
-/** Cache keys per workspace, for invalidation. */
-const keysByWorkspace = new Map<string, Set<string>>();
+/** Project of each run seen in a cached set, so a run_events hint can drop the right entries. */
+const runProjects = new Map<string, string>();
+/** Cache keys per project, for invalidation. */
+const keysByProject = new Map<string, Set<string>>();
 
 function caches() {
   eligibleCache ??= new TtlLruCache(MAX_ENTRIES, eligibleCacheTtlMs());
@@ -102,64 +102,64 @@ function caches() {
   return { eligibleCache, availabilityCache };
 }
 
-function remember(workspaceId: string, key: string): void {
-  const keys = keysByWorkspace.get(workspaceId) ?? new Set<string>();
+function remember(projectId: string, key: string): void {
+  const keys = keysByProject.get(projectId) ?? new Set<string>();
   keys.add(key);
-  keysByWorkspace.set(workspaceId, keys);
+  keysByProject.set(projectId, keys);
 }
 
 /**
- * Other per-workspace search caches (the search response cache) that drop
+ * Other per-project search caches (the search response cache) that drop
  * entries on the same hints. `active` says whether it holds anything, so an
  * unknown run is still looked up while only those caches are populated.
  */
-export interface SearchWorkspaceInvalidationListener {
-  invalidate(workspaceId: string): void;
+export interface SearchProjectInvalidationListener {
+  invalidate(projectId: string): void;
   active(): boolean;
 }
-const invalidationListeners = new Set<SearchWorkspaceInvalidationListener>();
+const invalidationListeners = new Set<SearchProjectInvalidationListener>();
 
-/** Registers a cache to clear on workspace invalidation hints, and starts listening for them. */
-export function onSearchWorkspaceInvalidated(listener: SearchWorkspaceInvalidationListener): void {
+/** Registers a cache to clear on project invalidation hints, and starts listening for them. */
+export function onSearchProjectInvalidated(listener: SearchProjectInvalidationListener): void {
   invalidationListeners.add(listener);
 }
 
-/** Drop every cached eligibility and availability entry of the workspace (and of registered caches). */
-export function invalidateSearchWorkspace(workspaceId: string): void {
+/** Drop every cached eligibility and availability entry of the project (and of registered caches). */
+export function invalidateSearchProject(projectId: string): void {
   for (const listener of invalidationListeners) {
-    try { listener.invalidate(workspaceId); } catch { /* one cache must not block the others */ }
+    try { listener.invalidate(projectId); } catch { /* one cache must not block the others */ }
   }
-  const keys = keysByWorkspace.get(workspaceId);
+  const keys = keysByProject.get(projectId);
   if (!keys) return;
-  keysByWorkspace.delete(workspaceId);
+  keysByProject.delete(projectId);
   for (const key of keys) {
     eligibleCache?.delete(key);
     availabilityCache?.delete(key);
   }
 }
 
-/** A run_events hint: invalidate the workspaces of the hinted runs (unknown runs are looked up off the search path). */
+/** A run_events hint: invalidate the projects of the hinted runs (unknown runs are looked up off the search path). */
 export async function invalidateSearchRuns(runIds: string[]): Promise<void> {
   const unknown: string[] = [];
   for (const runId of runIds) {
-    const workspaceId = runWorkspaces.get(runId);
-    if (workspaceId) invalidateSearchWorkspace(workspaceId);
+    const projectId = runProjects.get(runId);
+    if (projectId) invalidateSearchProject(projectId);
     else unknown.push(runId);
   }
   const listenersActive = [...invalidationListeners].some((listener) => listener.active());
-  if (unknown.length === 0 || (keysByWorkspace.size === 0 && !listenersActive)) return;
-  const rows = await sql<{ id: string; workspace_id: string }[]>`
-    select id, workspace_id from workspace_runs where id = any(${sql.array(unknown)})
+  if (unknown.length === 0 || (keysByProject.size === 0 && !listenersActive)) return;
+  const rows = await sql<{ id: string; project_id: string }[]>`
+    select id, project_id from project_runs where id = any(${sql.array(unknown)})
   `;
   for (const row of rows) {
-    if (runWorkspaces.size < 100_000) runWorkspaces.set(row.id, row.workspace_id);
-    invalidateSearchWorkspace(row.workspace_id);
+    if (runProjects.size < 100_000) runProjects.set(row.id, row.project_id);
+    invalidateSearchProject(row.project_id);
   }
 }
 
 let listening: Promise<unknown> | null = null;
 
-function stringIds(payload: string, field: "runIds" | "workspaceIds"): string[] {
+function stringIds(payload: string, field: "runIds" | "projectIds"): string[] {
   try {
     const parsed = JSON.parse(payload) as Record<string, unknown>;
     const ids = parsed[field];
@@ -169,9 +169,9 @@ function stringIds(payload: string, field: "runIds" | "workspaceIds"): string[] 
   }
 }
 
-/** A search_eligibility hint (search/eligibility-hint.ts): drop the named workspaces. */
+/** A search_eligibility hint (search/eligibility-hint.ts): drop the named projects. */
 export function handleSearchEligibilityHint(payload: string): void {
-  for (const workspaceId of stringIds(payload, "workspaceIds")) invalidateSearchWorkspace(workspaceId);
+  for (const projectId of stringIds(payload, "projectIds")) invalidateSearchProject(projectId);
 }
 
 /**
@@ -195,7 +195,7 @@ export function ensureInvalidationListener(): void {
   });
 }
 
-async function queryEligibleDocuments(workspaceId: string, embeddingModel: string, dimension: number): Promise<EligibleDocumentSet> {
+async function queryEligibleDocuments(projectId: string, embeddingModel: string, dimension: number): Promise<EligibleDocumentSet> {
   const lexical: SqlFragment = lexicalSearchableDocument("d");
   // The vector part is the per-search `current_docs` CTE of vectorSearch,
   // including the walk from dedup copies to the document that owns the rows.
@@ -216,7 +216,7 @@ async function queryEligibleDocuments(workspaceId: string, embeddingModel: strin
           where dc.document_id = d.id and dc.reindex_completed_at > v.created_at
         ) as lance_stale
       from documents d
-      where d.workspace_id = ${workspaceId}
+      where d.project_id = ${projectId}
         and ((d.status = 'completed' and d.superseded_at is null) or ${lexical})
     ),
     chain as (
@@ -226,9 +226,9 @@ async function queryEligibleDocuments(workspaceId: string, embeddingModel: strin
       union all
       select chain.id, d.id, d.deduped_from_document_id, chain.depth + 1
       from chain join documents d on d.id = chain.next
-      -- Rows live in this workspace's database: a source in another workspace
+      -- Rows live in this project's database: a source in another project
       -- is not the owner (the copy was indexed as its own rows).
-      where chain.depth < 8 and d.workspace_id = ${workspaceId}
+      where chain.depth < 8 and d.project_id = ${projectId}
     ),
     owners as (
       select distinct on (chain.id) chain.id, chain.node as owner_id, owner.index_config_hash
@@ -254,7 +254,7 @@ async function queryEligibleDocuments(workspaceId: string, embeddingModel: strin
     lanceStale: row.lance_stale,
   }));
   return {
-    workspaceId,
+    projectId,
     embeddingModel,
     dimension,
     documents,
@@ -263,35 +263,35 @@ async function queryEligibleDocuments(workspaceId: string, embeddingModel: strin
   };
 }
 
-/** The cached eligible set for one workspace and embedding space; one query on a miss, none on a hit. */
-export function loadEligibleDocuments(args: { workspaceId: string; embeddingModel: string; dimension: number }): Promise<EligibleDocumentSet> {
+/** The cached eligible set for one project and embedding space; one query on a miss, none on a hit. */
+export function loadEligibleDocuments(args: { projectId: string; embeddingModel: string; dimension: number }): Promise<EligibleDocumentSet> {
   ensureInvalidationListener();
   const { eligibleCache } = caches();
-  const key = JSON.stringify(["eligible", args.workspaceId, args.embeddingModel, args.dimension]);
+  const key = JSON.stringify(["eligible", args.projectId, args.embeddingModel, args.dimension]);
   const cached = eligibleCache.get(key);
   if (cached) return cached;
-  const loading = queryEligibleDocuments(args.workspaceId, args.embeddingModel, args.dimension).then((set) => {
-    for (const document of set.documents) if (runWorkspaces.size < 100_000) runWorkspaces.set(document.runId, set.workspaceId);
+  const loading = queryEligibleDocuments(args.projectId, args.embeddingModel, args.dimension).then((set) => {
+    for (const document of set.documents) if (runProjects.size < 100_000) runProjects.set(document.runId, set.projectId);
     return set;
   });
   // A failed load is not cached.
   loading.catch(() => eligibleCache.delete(key));
   eligibleCache.set(key, loading);
-  remember(args.workspaceId, key);
+  remember(args.projectId, key);
   return loading;
 }
 
 /** Cached search availability (session-setup loadSearchAvailability) for native search. */
-export function loadCachedSearchAvailability(args: { workspaceId: string; runId?: string }): Promise<SearchAvailabilityRow | undefined> {
+export function loadCachedSearchAvailability(args: { projectId: string; runId?: string }): Promise<SearchAvailabilityRow | undefined> {
   ensureInvalidationListener();
   const { availabilityCache } = caches();
-  const key = JSON.stringify(["availability", args.workspaceId, args.runId ?? null]);
+  const key = JSON.stringify(["availability", args.projectId, args.runId ?? null]);
   const cached = availabilityCache.get(key);
   if (cached) return cached;
   const loading = loadSearchAvailability(args);
   loading.catch(() => availabilityCache.delete(key));
   availabilityCache.set(key, loading);
-  remember(args.workspaceId, key);
+  remember(args.projectId, key);
   return loading;
 }
 
@@ -300,7 +300,7 @@ export function nativeScopeSupported(filters: SearchFilters | undefined): boolea
   // Explicit capabilities: a newly introduced filter must never silently widen
   // native retrieval before this adapter implements its semantics.
   const supported = new Set([
-    "documentId", "documentIds", "runId", "workspaceId", "filenameContains", "filenameEquals", "mimeTypes", "tags",
+    "documentId", "documentIds", "runId", "projectId", "filenameContains", "filenameEquals", "mimeTypes", "tags",
   ]);
   return Object.entries(filters ?? {}).every(([key, value]) =>
     value === undefined || supported.has(key));
@@ -360,7 +360,7 @@ export function scopeEligibleDocuments(
   filters: SearchFilters | undefined,
   runId: string | undefined,
 ): EligibleDocument[] {
-  if (filters?.workspaceId && filters.workspaceId !== set.workspaceId) return [];
+  if (filters?.projectId && filters.projectId !== set.projectId) return [];
   const ids = new Set(filters?.documentIds ?? []);
   // Same literal-substring semantics as the Postgres path (wildcards escaped).
   const filename = filters?.filenameContains ? ilikeContainsMatcher(escapeLikePattern(filters.filenameContains)) : null;
@@ -387,6 +387,6 @@ export function matchesServingHash(document: EligibleDocument, hash: HashFilter 
 export function resetEligibleDocumentCachesForTests(): void {
   eligibleCache = null;
   availabilityCache = null;
-  runWorkspaces.clear();
-  keysByWorkspace.clear();
+  runProjects.clear();
+  keysByProject.clear();
 }

@@ -1,6 +1,6 @@
 import { stateManagementPaths, stateManagementSchemas } from "./state-management-openapi.js";
 import { configChangePaths } from "./config-change-openapi.js";
-import { workspaceGraphPaths, workspaceGraphSchemas } from "./workspace-graph-openapi.js";
+import { projectGraphPaths, projectGraphSchemas } from "./project-graph-openapi.js";
 import { simpleServicePaths, simpleServiceSchemas } from "./simple-service-openapi.js";
 import { webhookEventCatalog } from "./webhook-events.js";
 import { searchCompatibilityPaths, searchCompatibilitySchemas } from "./search-compat-openapi.js";
@@ -22,15 +22,15 @@ export function buildOpenApiDocument(baseUrl: string) {
     ],
     components: {
       securitySchemes: {
-        bearerAuth: { type: "http", scheme: "bearer", description: "DocSlurp API key. Server keys start with dslp_priv_ and must stay secret; browser/embed client keys start with dslp_pub_, are domain-restricted and search-only unless granted chat (answers) or, with a workspace allowlist, web, ingest or artifacts. Keys issued before typed prefixes (dslp_...) remain valid." },
+        bearerAuth: { type: "http", scheme: "bearer", description: "DocSlurp API key. Server keys start with dslp_priv_ and must stay secret; browser/embed client keys start with dslp_pub_, are domain-restricted and search-only unless granted chat (answers) or, with a project allowlist, web, ingest or artifacts. Keys issued before typed prefixes (dslp_...) remain valid." },
         sessionAuth: { type: "apiKey", in: "cookie", name: "better-auth.session_token", description: "Authenticated dashboard session" },
       },
-      schemas: { ApiError: apiErrorSchema, ...simpleServiceSchemas, ...stateManagementSchemas, ...workspaceGraphSchemas, ...searchCompatibilitySchemas },
+      schemas: { ApiError: apiErrorSchema, ...simpleServiceSchemas, ...stateManagementSchemas, ...projectGraphSchemas, ...searchCompatibilitySchemas },
     },
     tags: [
       { name: "health" },
       { name: "runs" },
-      { name: "workspaces" },
+      { name: "projects" },
       { name: "organizations" },
       { name: "documents" },
       { name: "ingest" },
@@ -88,26 +88,26 @@ export function buildOpenApiDocument(baseUrl: string) {
           ],
           responses: {
             "200": {
-              description: "Recent workspace runs"
+              description: "Recent project runs"
             }
           }
         }
       },
-      "/v1/workspaces": {
+      "/v1/projects": {
         get: {
-          tags: ["workspaces"],
-          summary: "List workspaces",
+          tags: ["projects"],
+          summary: "List projects",
           security: keyOrSessionSecurity,
           parameters: [
             { in: "query", name: "userId", schema: { type: "string" } }
           ],
           responses: {
-            "200": { description: "Workspace list" }
+            "200": { description: "Project list" }
           }
         },
         post: {
-          tags: ["workspaces"],
-          summary: "Create workspace",
+          tags: ["projects"],
+          summary: "Create project",
           requestBody: {
             required: true,
             content: {
@@ -125,7 +125,7 @@ export function buildOpenApiDocument(baseUrl: string) {
             }
           },
           responses: {
-            "201": { description: "Workspace created" }
+            "201": { description: "Project created" }
           }
         }
       },
@@ -231,7 +231,7 @@ export function buildOpenApiDocument(baseUrl: string) {
       ...apiKeySurfacePaths,
       ...simpleServicePaths,
       ...stateManagementPaths,
-      ...workspaceGraphPaths,
+      ...projectGraphPaths,
       ...configChangePaths,
     }
   };

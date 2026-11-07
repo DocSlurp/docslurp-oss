@@ -109,7 +109,7 @@ describe("document extraction configs under an alias", () => {
     expect(documentExtractionConfigSchema.safeParse(both).success).toBe(false);
     // A stored row with both keeps the target's options and drops the alias key loudly.
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    const stored = sanitizeStoredPipeline({ documentExtraction: both }, "workspace w1") as { documentExtraction: { options: Record<string, unknown> } };
+    const stored = sanitizeStoredPipeline({ documentExtraction: both }, "project w1") as { documentExtraction: { options: Record<string, unknown> } };
     expect(stored.documentExtraction.options).toEqual({ "vm-pdf": { images: { enabled: false } } });
     expect(error.mock.calls[0]![0]).toContain(`documentExtraction.options.${LEGACY}`);
   });
@@ -121,7 +121,7 @@ describe("document extraction configs under an alias", () => {
     expect(overrides.documentExtraction).toMatchObject({ order: { pdf: ["vm-pdf", "poppler-text"] }, voting: { secondary: "vm-pdf" } });
   });
 
-  it("stored workspace and run pipelines keep the renamed extractor's options instead of dropping them", () => {
+  it("stored project and run pipelines keep the renamed extractor's options instead of dropping them", () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     install();
     const stored = { documentExtraction: legacyConfig(), instructions: `keep "${LEGACY}" in free text` };
@@ -162,7 +162,7 @@ describe("retired extractor ids", () => {
 
   it("are reported by stored-pipeline reads", () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    const stored = sanitizeStoredPipeline({ documentExtraction: { order: { pdf: ["kreuzberg"] }, options: { liteparse: {} } } }, "workspace w2") as { documentExtraction: Record<string, unknown> };
+    const stored = sanitizeStoredPipeline({ documentExtraction: { order: { pdf: ["kreuzberg"] }, options: { liteparse: {} } } }, "project w2") as { documentExtraction: Record<string, unknown> };
     expect(stored.documentExtraction.order).toEqual({});
     expect(stored.documentExtraction.options).toEqual({});
     expect(error.mock.calls[0]![0]).toContain("documentExtraction.order.pdf:kreuzberg");

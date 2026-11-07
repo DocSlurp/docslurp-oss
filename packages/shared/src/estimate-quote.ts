@@ -21,7 +21,7 @@ export const ESTIMATE_MAX_FILES = 1_000;
 
 /**
  * The knobs a quote can turn, in customer terms. Every one is a real pipeline or usage choice that changes cost. Omitted
- * knobs take the workspace's value (authenticated, with a workspace) or a new workspace's default.
+ * knobs take the project's value (authenticated, with a project) or a new project's default.
  */
 export const quoteSettingsSchema = z.strictObject({
   /** Processing quality: fast reads text layers only, auto reads scans and complex pages, good reads every page. */
@@ -79,8 +79,8 @@ export const estimateFileSchema = z.strictObject({
 export const estimateRequestSchema = z.strictObject({
   files: z.array(estimateFileSchema).min(1).max(ESTIMATE_MAX_FILES),
   settings: quoteSettingsSchema.partial().optional(),
-  /** Authenticated callers only: the workspace whose settings (and balance) the estimate uses. */
-  workspace: z.string().min(1).max(256).optional(),
+  /** Authenticated callers only: the project whose settings (and balance) the estimate uses. */
+  project: z.string().min(1).max(256).optional(),
 });
 export type EstimateRequest = z.infer<typeof estimateRequestSchema>;
 
@@ -122,7 +122,7 @@ export type EstimateQuote = {
 export type ProviderEstimateArgs = {
   files: readonly QuoteFile[];
   settings: QuoteSettings;
-  /** The workspace profile these settings describe (quality, features, worker slots, billing). */
+  /** The project profile these settings describe (quality, features, worker slots, billing). */
   profile: EstimateProfile;
   /**
    * Work on documents already stored (reprocess, full index, a config change), priced stage by stage by the provider's
@@ -132,7 +132,7 @@ export type ProviderEstimateArgs = {
   work?: { estimate: CostEstimate; media: UploadMediaEstimate | null };
 };
 
-/** The knobs a workspace pipeline is set to: the base an authenticated caller's settings override. */
+/** The knobs a project pipeline is set to: the base an authenticated caller's settings override. */
 export function quoteSettingsForPipeline(pipeline: PipelineFeatures): Partial<QuoteSettings> {
   const features = estimateProfileFor(pipeline, { env: {} }).documentFeatures;
   return {
@@ -188,13 +188,13 @@ export function quoteStoredWork(args: {
   return quote;
 }
 
-/** Settings a workspace could not be configured with (a quote refuses them as the workspace API does). */
+/** Settings a project could not be configured with (a quote refuses them as the project API does). */
 export class QuoteSettingsError extends Error {
   override name = "QuoteSettingsError";
 }
 
 /**
- * Price an estimate request with the active pricing provider. `base` is the workspace's settings for an authenticated
+ * Price an estimate request with the active pricing provider. `base` is the project's settings for an authenticated
  * caller, else the defaults; `request.settings` overrides them knob by knob. Profiles are validated by the schema,
  * clamped against each file's size and merged (`applyFileProfile`) before the provider sees them.
  */

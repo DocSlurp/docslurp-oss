@@ -42,14 +42,14 @@ import { jobsRoutes } from "./routes/jobs.js";
 import { uploadEstimateRoutes, uploadsRoutes } from "./routes/uploads.js";
 import { estimateRoutes } from "./routes/estimate.js";
 import { webhooksRoutes } from "./routes/webhooks.js";
-import { workspacesRoutes } from "./routes/workspaces.js";
+import { projectsRoutes } from "./routes/projects.js";
 import { chatInstructionsRoutes } from "./routes/chat-instructions.js";
 import { assertOutputModerationConfig } from "./services/chat-output-moderation.js";
 import { warnOrgLimitAboveOneWithUniqueIndex } from "./services/org-membership-limit.js";
 import { apiKeysRoutes } from "./routes/api-keys.js";
-import { searchRoutes, searchesRoutes, workspaceChatRoutes } from "./routes/search.js";
+import { searchRoutes, searchesRoutes, projectChatRoutes } from "./routes/search.js";
 import { webRoutes } from "./routes/web.js";
-import { workspaceGraphRoutes } from "./routes/workspace-graph.js";
+import { projectGraphRoutes } from "./routes/project-graph.js";
 import { artifactsRoutes } from "./routes/artifacts.js";
 import { inviteRoutes, metaRoutes, dashboardRoutes, waitlistRoutes } from "./routes/frontend.js";
 import { filesRoutes } from "./routes/files.js";
@@ -85,10 +85,11 @@ import { startWebhookOutboxListener, stopWebhookOutboxListener } from "./service
 import { startOrgSpendChangedListener, stopOrgSpendChangedListener } from "./services/spend-paused-runs.js";
 import { replaceProcessTask } from "./lib/process-singleton.js";
 import { startDbWatchdog } from "./services/db-watchdog.js";
-import { workspaceRefPath } from "./middleware/workspace-ref-path.js";
+import { projectRefPath } from "./middleware/project-ref-path.js";
 import { spendAwareErrorHandler } from "./services/billing/spend-guard.js";
 import { UnreadableSourceError } from "./services/source-metadata.js";
 import { warmDefaultLocalEmbedding } from "./lib/ai.js";
+import { rejectLegacyProjectSelection } from "./lib/reject-legacy-project-selection.js";
 import { rejectNulBytes } from "./lib/reject-nul.js";
 import { registerProviderPolicy } from "./lib/provider-policy.js";
 
@@ -178,10 +179,11 @@ export function createApiApp(): Hono {
   // The Algolia adapter reads JSON itself; bound it like the other compat adapters.
   app.use("/compat/algolia/*", nativeBodyLimit(256 * 1024));
   app.use("*", rejectNulBytes);
-  // `/v1/workspaces/:slug|default/...` → resolved workspace UUID routes.
-  const workspaceRefs = workspaceRefPath([workspacesRoutes, chatInstructionsRoutes, connectorsRoutes, secretsRoutes, workspaceGraphRoutes]);
-  app.use("/v1/workspaces/:workspaceRef", workspaceRefs);
-  app.use("/v1/workspaces/:workspaceRef/*", workspaceRefs);
+  app.use("/v1/*", rejectLegacyProjectSelection);
+  // `/v1/projects/:slug|default/...` → resolved project UUID routes.
+  const projectRefs = projectRefPath([projectsRoutes, chatInstructionsRoutes, connectorsRoutes, secretsRoutes, projectGraphRoutes]);
+  app.use("/v1/projects/:projectRef", projectRefs);
+  app.use("/v1/projects/:projectRef/*", projectRefs);
 
   app.route("/", healthRoutes);
   app.route("/", docsRoutes);
@@ -196,8 +198,8 @@ export function createApiApp(): Hono {
   app.get("/v1/realtime", c => c.json({ error: "WebSocket Upgrade required" }, process.env.REALTIME_ENABLED === "true" ? 426 : 404));
   app.route("/v1/runs", runsRoutes);
   app.route("/v1/jobs", jobsRoutes);
-  app.route("/v1/workspaces", workspacesRoutes);
-  app.route("/v1/workspaces", chatInstructionsRoutes);
+  app.route("/v1/projects", projectsRoutes);
+  app.route("/v1/projects", chatInstructionsRoutes);
   app.route("/v1/documents", documentsRoutes);
   app.route("/v1/exports", exportsRoutes);
   app.route("/v1/extractors", extractorRoutes);
@@ -217,7 +219,7 @@ export function createApiApp(): Hono {
   app.route("/v1/search", searchRoutes);
   app.route("/v1/web", webRoutes);
   app.route("/v1/searches", searchesRoutes);
-  app.route("/v1/chat", workspaceChatRoutes);
+  app.route("/v1/chat", projectChatRoutes);
   app.route("/v1", chatCompletionsRoutes);
   app.route("/v1", suggestRoutes);
   app.route("/v1/mcp", mcpRoutes);
@@ -225,12 +227,12 @@ export function createApiApp(): Hono {
   app.route("/compat/algolia", algoliaCompatRoutes);
   app.route("/compat", searchCompatRoutes);
   app.route("/v1/auth", samlCallbackRoutes);
-  app.route("/v1/workspaces", connectorsRoutes);
+  app.route("/v1/projects", connectorsRoutes);
   app.route("/v1/billing", billingRoutes);
   app.route("/v1/admin/billing", adminBillingRoutes);
   app.route("/v1/admin/users", adminUsersRoutes);
-  app.route("/v1/workspaces", secretsRoutes);
-  app.route("/v1/workspaces", workspaceGraphRoutes);
+  app.route("/v1/projects", secretsRoutes);
+  app.route("/v1/projects", projectGraphRoutes);
   app.route("/v1/user-settings", userSettingsRoutes);
   app.route("/v1/account", accountRoutes);
   app.route("/v1/whoami", whoamiRoutes);

@@ -149,9 +149,9 @@ describe("webhooksRoutes", () => {
       expect(createWebhook).toHaveBeenLastCalledWith(expect.objectContaining({ userId: "demo-user", orgId: "personal-org" }));
     });
 
-    it("rejects a workspace scope: webhooks belong to an organization", async () => {
+    it("rejects a project scope: webhooks belong to an organization", async () => {
       vi.mocked(createWebhook).mockReset();
-      expect((await create({ orgId: "team", workspaceId: "ws-1" })).status).toBe(400);
+      expect((await create({ orgId: "team", projectId: "ws-1" })).status).toBe(400);
       expect(createWebhook).not.toHaveBeenCalled();
     });
 

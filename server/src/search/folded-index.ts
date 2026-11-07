@@ -4,7 +4,7 @@ import { sql } from "../db.js";
  * The folded keyword leg (to_tsvector('simple', docslurp_fold_text(text)), migration 0121) is served by a GIN
  * expression index that `node scripts/folded-search-index.mjs` builds CONCURRENTLY, outside the migrator
  * (docs/rollout-0121-0127.md). Keyword search works before it exists and while it is being built: the leg then
- * evaluates the expression for the workspace's chunks, which is slow on a large workspace, so it gets a short
+ * evaluates the expression for the project's chunks, which is slow on a large project, so it gets a short
  * statement timeout of its own and contributes nothing when it is cut off.
  */
 export const FOLDED_INDEX_NAME = "document_chunks_ts_folded_expr_idx";

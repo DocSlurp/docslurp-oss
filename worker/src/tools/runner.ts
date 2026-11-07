@@ -72,7 +72,7 @@ export interface CommandPlan {
   binary: string;
   args: string[];
   available: boolean;
-  /** Auxiliary regular files under a private DocSlurp temp workspace, staged read-only. */
+  /** Auxiliary regular files under a private DocSlurp temp project, staged read-only. */
   stagedInputs?: string[];
   /**
    * A host directory of read-only reference files the command reads (ClamAV definitions), named by its content's hash. A
@@ -2182,7 +2182,7 @@ function commandAttribution(): Record<string, string | undefined> {
   const context = currentPerfContext();
   return {
     org_id: context?.orgId ?? undefined,
-    workspace_id: context?.workspaceId,
+    project_id: context?.projectId,
     run_id: context?.runId,
     document_id: context?.documentId,
     stage: context?.stageName,

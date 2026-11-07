@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 import { defaultPipelineFeatures, normalizePipelineFeatures, pageCredits } from "@docslurp/shared";
 
 const reads = vi.hoisted(() => [] as unknown[]);
@@ -219,12 +219,12 @@ describe("no host parser runs to count Office, RTF, EPUB or PPTX pages", () => {
     return { storage, downloads };
   }
 
-  function run(): WorkspaceRun {
+  function run(): ProjectRun {
     return {
       id: "run-1", orgId: "org-1", userId: "u", kind: "bulk-upload", status: "processing", stage: "to-canonical", totalDocuments: 1,
       processedDocuments: 0, pagesTotal: 1, pagesProcessed: 0, spentCents: 0, pipeline: { ...defaultPipelineFeatures }, error: null,
       stats: {}, artifacts: {}, claimId: null, createdAt: new Date(), updatedAt: new Date(),
-    } as WorkspaceRun;
+    } as ProjectRun;
   }
 
   for (const entry of cases) {

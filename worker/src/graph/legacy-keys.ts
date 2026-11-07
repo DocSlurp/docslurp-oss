@@ -1,22 +1,22 @@
 /**
- * Heals workspace graphs written before entities were keyed by Unicode names (fingerprint g4, graph.ts).
+ * Heals project graphs written before entities were keyed by Unicode names (fingerprint g4, graph.ts).
  *
  * Earlier keys kept ASCII letters only, so "Müller" was stored as "mller" (and never met the "müller" a newer
  * document produces: one entity, two nodes that no query joins) and a name with no ASCII letters, every Chinese,
  * Japanese, Korean, Arabic or Cyrillic name, was stored under the empty key, one node per entity type that
- * merged every such name in the workspace into a single "entity".
+ * merged every such name in the project into a single "entity".
  *
  * A rebuild would re-extract those documents with a model and spend credits, so nothing is enqueued. This pass
  * costs nothing: it re-keys each old node from the names the node itself holds, merges it into the node that
  * already has the new key (mentions, edges and edge evidence move across), and removes the empty-key nodes,
  * whose mentions mix unrelated names and cannot be split. The documents keep their stale fingerprint, so a
- * rebuild the user asks for still re-extracts them properly. It is idempotent and runs once per workspace per
+ * rebuild the user asks for still re-extracts them properly. It is idempotent and runs once per project per
  * worker process, before the first graph write (`replaceDocumentGraph`).
  */
 import type { Sql } from "postgres";
 
 import { graphEdgeEndpoints, normalizeName } from "./extract.js";
-import { lockWorkspaceGraph, refreshGraphElements } from "./graph-store.js";
+import { lockProjectGraph, refreshGraphElements } from "./graph-store.js";
 
 type Client = Sql<Record<string, unknown>>;
 
@@ -47,7 +47,7 @@ export function currentKeyOf(node: Pick<NodeRow, "canonical_name" | "normalized_
   return key === node.normalized_name ? null : key;
 }
 
-async function mergeNode(tx: Client, workspaceId: string, from: string, into: string): Promise<string[]> {
+async function mergeNode(tx: Client, projectId: string, from: string, into: string): Promise<string[]> {
   await tx`
     update chunk_entities set node_id = ${into}
     where node_id = ${from}
@@ -55,7 +55,7 @@ async function mergeNode(tx: Client, workspaceId: string, from: string, into: st
   `;
   const edges = await tx<{ id: string; source_node_id: string; target_node_id: string; normalized_predicate: string }[]>`
     select id, source_node_id, target_node_id, normalized_predicate from kg_edges
-    where workspace_id = ${workspaceId} and (source_node_id = ${from} or target_node_id = ${from})
+    where project_id = ${projectId} and (source_node_id = ${from} or target_node_id = ${from})
   `;
   const touched = new Set<string>([into]);
   for (const edge of edges) {
@@ -67,13 +67,13 @@ async function mergeNode(tx: Client, workspaceId: string, from: string, into: st
     const [left, right] = graphEdgeEndpoints(source, target, edge.normalized_predicate);
     const [existing] = await tx<{ id: string }[]>`
       select id from kg_edges
-      where workspace_id = ${workspaceId} and source_node_id = ${left} and target_node_id = ${right}
+      where project_id = ${projectId} and source_node_id = ${left} and target_node_id = ${right}
         and normalized_predicate = ${edge.normalized_predicate} and id <> ${edge.id}
     `;
     if (existing) {
       await tx`
-        insert into kg_edge_evidence (edge_id, document_id, workspace_id, weight, confidence)
-        select ${existing.id}, document_id, workspace_id, weight, confidence from kg_edge_evidence where edge_id = ${edge.id}
+        insert into kg_edge_evidence (edge_id, document_id, project_id, weight, confidence)
+        select ${existing.id}, document_id, project_id, weight, confidence from kg_edge_evidence where edge_id = ${edge.id}
         on conflict (edge_id, document_id) do nothing
       `;
     } else {
@@ -99,14 +99,14 @@ async function mergeNode(tx: Client, workspaceId: string, from: string, into: st
   return [...touched].filter((id) => id !== from);
 }
 
-/** Re-keys the old nodes of one workspace; see the module note. */
-export async function healLegacyGraphKeys(sql: Client, workspaceId: string): Promise<LegacyKeyHealResult> {
+/** Re-keys the old nodes of one project; see the module note. */
+export async function healLegacyGraphKeys(sql: Client, projectId: string): Promise<LegacyKeyHealResult> {
   return await sql.begin(async (transaction) => {
     const tx = transaction as unknown as Client;
-    await lockWorkspaceGraph(tx, workspaceId);
+    await lockProjectGraph(tx, projectId);
     const nodes = await tx<NodeRow[]>`
       select id, canonical_name, normalized_name, entity_type, aliases from kg_nodes
-      where workspace_id = ${workspaceId} order by id
+      where project_id = ${projectId} order by id
     `;
     const byKey = new Map(nodes.map((node) => [`${node.normalized_name}\u0000${node.entity_type}`, node.id]));
     const result: LegacyKeyHealResult = { renamed: 0, merged: 0, removed: 0 };
@@ -129,7 +129,7 @@ export async function healLegacyGraphKeys(sql: Client, workspaceId: string): Pro
       }
       const target = byKey.get(`${key}\u0000${node.entity_type}`);
       if (target && target !== node.id) {
-        for (const id of await mergeNode(tx, workspaceId, node.id, target)) refresh.add(id);
+        for (const id of await mergeNode(tx, projectId, node.id, target)) refresh.add(id);
         byKey.delete(oldKey);
         result.merged += 1;
       } else {
@@ -141,7 +141,7 @@ export async function healLegacyGraphKeys(sql: Client, workspaceId: string): Pro
     }
     // Counts and edge weights follow the moved evidence; nodes nothing supports any more are dropped.
     if (refresh.size > 0) {
-      const live = await tx<{ id: string }[]>`select id from kg_nodes where workspace_id = ${workspaceId} and id = any(${tx.array([...refresh])})`;
+      const live = await tx<{ id: string }[]>`select id from kg_nodes where project_id = ${projectId} and id = any(${tx.array([...refresh])})`;
       if (live.length > 0) await refreshGraphElements(tx, { nodeIds: live.map((row) => row.id) });
     }
     return result;
@@ -150,21 +150,21 @@ export async function healLegacyGraphKeys(sql: Client, workspaceId: string): Pro
 
 const healed = new Map<string, Promise<LegacyKeyHealResult | null>>();
 
-/** `healLegacyGraphKeys` once per workspace per process, and only when the workspace holds a pre-g4 document. */
-export function healLegacyGraphKeysOnce(sql: Client, workspaceId: string): Promise<LegacyKeyHealResult | null> {
-  let pending = healed.get(workspaceId);
+/** `healLegacyGraphKeys` once per project per process, and only when the project holds a pre-g4 document. */
+export function healLegacyGraphKeysOnce(sql: Client, projectId: string): Promise<LegacyKeyHealResult | null> {
+  let pending = healed.get(projectId);
   if (!pending) {
     pending = (async () => {
       const [legacy] = await sql<{ legacy: boolean }[]>`
-        select exists (select 1 from kg_document_state where workspace_id = ${workspaceId} and config_hash not like 'g4-%') as legacy
+        select exists (select 1 from kg_document_state where project_id = ${projectId} and config_hash not like 'g4-%') as legacy
       `;
-      return legacy?.legacy ? await healLegacyGraphKeys(sql, workspaceId) : null;
+      return legacy?.legacy ? await healLegacyGraphKeys(sql, projectId) : null;
     })().catch((error: unknown) => {
-      healed.delete(workspaceId);
-      console.warn(`[graph] legacy key heal failed workspace=${workspaceId}: ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`);
+      healed.delete(projectId);
+      console.warn(`[graph] legacy key heal failed project=${projectId}: ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`);
       return null;
     });
-    healed.set(workspaceId, pending);
+    healed.set(projectId, pending);
   }
   return pending;
 }

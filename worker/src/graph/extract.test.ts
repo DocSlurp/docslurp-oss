@@ -24,7 +24,7 @@ describe("buildExtractionWindows", () => {
 });
 
 describe("parseGraphExtraction", () => {
-  it("keeps the workspace vocabulary and maps unknown types to concept", () => {
+  it("keeps the project vocabulary and maps unknown types to concept", () => {
     const graph = parseGraphExtraction(
       JSON.stringify({
         entities: [

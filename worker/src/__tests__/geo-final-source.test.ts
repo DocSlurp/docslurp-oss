@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { acceptedGeoSource, beginGeoAttempt, geoDigest } from "../db/geo-final-source.js";
 import { structuredResultEnvelopeSchema } from "@docslurp/shared";
 const schema = { type: "object", properties: { "a/b": { type: "object", format: "geojson" } } };
-const attempt = { documentId: "d", workspaceId: "w", orgId: "o", runId: "r", revision: "1", schemaDigest: geoDigest(schema) };
+const attempt = { documentId: "d", projectId: "w", orgId: "o", runId: "r", revision: "1", schemaDigest: geoDigest(schema) };
 const result = () => structuredResultEnvelopeSchema.parse({ documentId: "d", schema: { name: "s", version: "1" },
   createdAt: new Date().toISOString(), overallPolicy: "auto-accept", fields: {
     "a/b": { value: { type: "Point", coordinates: [0,0] }, confidence: 1, policy: "auto-accept", errors: [], evidence: [] }

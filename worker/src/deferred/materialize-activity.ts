@@ -38,23 +38,23 @@ export interface MaterializeActivityDeps {
  * A materialize run must apply the pipeline the document was ingested with (PII policy, privacy mode,
  * embedding model). The app copies it into the run row; if that row carries none (an empty pipeline would
  * silently become the defaults and write vectors to the wrong table or leak OCR to hosted providers),
- * load the source document's ingest run pipeline, then the workspace's, and refuse to run on defaults.
+ * load the source document's ingest run pipeline, then the project's, and refuse to run on defaults.
  */
-async function withSourcePipeline<R extends { id: string; kind?: string; pipeline: unknown; workspaceId?: string | null }>(
+async function withSourcePipeline<R extends { id: string; kind?: string; pipeline: unknown; projectId?: string | null }>(
   sql: Sql<Record<string, unknown>>,
   run: R,
   documentId: string,
 ): Promise<R> {
   if (run.kind !== "materialize") return run;
   const [own] = await sql<{ empty: boolean }[]>`
-    select (pipeline = '{}'::jsonb) as empty from workspace_runs where id = ${run.id}
+    select (pipeline = '{}'::jsonb) as empty from project_runs where id = ${run.id}
   `;
   if (own && !own.empty) return run;
   const [source] = await sql<{ pipeline: Record<string, unknown> | null }[]>`
     select coalesce(nullif(r.pipeline, '{}'::jsonb), nullif(w.pipeline, '{}'::jsonb)) as pipeline
     from documents d
-    left join workspace_runs r on r.id = d.run_id
-    left join workspaces w on w.id = d.workspace_id
+    left join project_runs r on r.id = d.run_id
+    left join projects w on w.id = d.project_id
     where d.id = ${documentId}
   `;
   if (!source?.pipeline) {
@@ -92,7 +92,7 @@ async function materializeRange(deps: MaterializeActivityDeps, input: Materializ
   const renewLease = (): Promise<unknown> => {
     // Ranges of one run renew concurrently: greatest() keeps one from shortening another's (or the app's) lease.
     const renewal: Promise<unknown> = sql`
-      update workspace_runs
+      update project_runs
       set last_heartbeat_at = now(),
           lease_expires_at = greatest(coalesce(lease_expires_at, now()), now() + (${MATERIALIZE_LEASE_SECONDS} * interval '1 second'))
       where id = ${input.runId} and status = 'processing'
@@ -120,7 +120,7 @@ async function materializeRange(deps: MaterializeActivityDeps, input: Materializ
     const beat = heartbeat ? setInterval(heartbeat, deps.heartbeatIntervalMs ?? 20_000) : null;
     heartbeat?.();
     try {
-      // Provider calls carry the run's org for fair share and its China-provider policy (org AND workspace).
+      // Provider calls carry the run's org for fair share and its China-provider policy (org AND project).
       const own = await runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.allowChinaProviders, speedBoost: state.run.pipeline.speedBoost }, () => materializePageRange(
         { ...deps.materializer, sql, store, usage: state.usageLedger },
         { ...input, reason, pages, document, pipeline: run.pipeline, run: state.run },
@@ -215,7 +215,7 @@ export async function completeMaterializeRun(
   const realFailures = result.failed.filter((f) => f.reason !== DOCUMENT_DELETED_REASON);
   const status = result.indexed.length === 0 && realFailures.length > 0 ? "failed" : "completed";
   await sql`
-    update workspace_runs
+    update project_runs
     set status = ${status}, stage = ${status},
         pages_total = ${result.indexed.length + result.blocked.length + result.failed.length},
         pages_processed = ${result.indexed.length},

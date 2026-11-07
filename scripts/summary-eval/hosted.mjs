@@ -1,5 +1,5 @@
 // Opt-in paid comparison. Run with OPENROUTER_API_KEY and --budget-usd <= approved budget.
-// Outputs stay in ignored .cache; never bills a customer workspace.
+// Outputs stay in ignored .cache; never bills a customer project.
 import { readFileSync, appendFileSync, existsSync } from 'node:fs';
 import { generateOpenRouterText } from '../../worker/src/lib/ai.ts';
 import { PipelineUsageEventLedger } from '../../worker/src/pipeline/usage-ledger.ts';

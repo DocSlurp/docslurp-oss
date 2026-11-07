@@ -151,7 +151,7 @@ function admitVisionTargets(targets: RoutingTarget[]): RoutingTarget[] {
  * Builds the live catalogs from the environment. Non-standard privacy modes drop
  * hosted targets and hosted decision models (the call sites also fail closed).
  * DISABLE_NON_FREE_SOFTWARE drops non-free-licensed targets and decision models at admission (a stored plan that
- * names one resolves to no target and falls back to the workspace vision model). VLM targets the vision runtime
+ * names one resolves to no target and falls back to the project vision model). VLM targets the vision runtime
  * refuses (`vlmTargetProblem`: hosted models outside the priced vision catalog) are dropped the same way.
  */
 export function buildRuntimeCatalog(
@@ -220,7 +220,7 @@ export interface RoutedGroup {
 }
 
 export interface RoutedExecution {
-  /** Page-scope extraction on a VLM target, batched per target (workspace vision path, cached, fan-out capable). */
+  /** Page-scope extraction on a VLM target, batched per target (project vision path, cached, fan-out capable). */
   groups: RoutedGroup[];
   /**
    * Assignments the executor registry runs (native text, OCR, local labeler, region/image-scoped
@@ -230,7 +230,7 @@ export interface RoutedExecution {
   requests: ExecutionRequest[];
   /**
    * Extraction assignments no executor can run (unknown target, unconfigured engine). Their pages
-   * fall back to the workspace vision model so a page that needs pixels is never silently dropped.
+   * fall back to the project vision model so a page that needs pixels is never silently dropped.
    */
   fallbackPages: number[];
   /** Planned target id to attribute each fallback page's actual cost to (first unexecutable assignment). */
@@ -260,7 +260,7 @@ export function groupAssignmentsByTarget(plan: RoutePlan, catalog: readonly Rout
       if (target && executorFor(target)) requests.push({ assignment, index, target });
       return;
     }
-    // Whole-page VLM extraction keeps the batched workspace vision path.
+    // Whole-page VLM extraction keeps the batched project vision path.
     if (isVlm(target) && assignment.scope.kind === "page" && assignment.role !== "image-label") {
       const group = groups.get(target.id) ?? {
         targetId: target.id,

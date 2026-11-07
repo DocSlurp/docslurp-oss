@@ -27,7 +27,7 @@ export async function rerankHosted(args: {
   model?: string;
   apiKey?: string;
   privacyMode: PrivacyMode;
-  scope?: { orgId: string; workspaceId: string };
+  scope?: { orgId: string; projectId: string };
   session: SearchSessionJournal;
 }): Promise<RankedChunk[]> {
   const startedAt = performance.now();
@@ -56,7 +56,7 @@ export async function rerankHosted(args: {
     checkPrivacy();
     reason = "missing_key_or_scope";
     const { apiKey, scope } = args;
-    if (!apiKey || !scope?.orgId || !scope.workspaceId) throw Error();
+    if (!apiKey || !scope?.orgId || !scope.projectId) throw Error();
     reason = "invalid_input";
     if (!args.query.trim() || args.chunks.length > 200 || new Set(args.chunks.map(c => c.id)).size !== args.chunks.length
       || args.chunks.some(c => !c.id || !c.text.trim() || Buffer.byteLength(args.query) + Buffer.byteLength(c.text) > 30_000)) throw Error();
@@ -72,7 +72,7 @@ export async function rerankHosted(args: {
         const batch = args.chunks.slice(offset, offset + 25);
         let batchReason = "spend_blocked";
         try {
-          await assertCanSpend(scope.orgId, scope.workspaceId, { kind: "interactive" });
+          await assertCanSpend(scope.orgId, scope.projectId, { kind: "interactive" });
           // A sibling may have failed while this admission was waiting in SQL.
           if (stopped) return;
           batchReason = "timeout";

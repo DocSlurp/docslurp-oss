@@ -3,7 +3,7 @@ import type { TransactionSql } from "postgres";
 export interface ExecutionOwner {
   runId: string;
   orgId: string;
-  workspaceId: string;
+  projectId: string;
   executionGeneration?: string;
 }
 
@@ -20,8 +20,8 @@ export class StaleExecutionError extends Error {
  */
 export async function assertExecutionOwnership(tx: TransactionSql, owner: ExecutionOwner): Promise<void> {
   const [row] = await tx<{ id: string }[]>`
-    select id from workspace_runs
-    where id = ${owner.runId} and org_id = ${owner.orgId} and workspace_id = ${owner.workspaceId}
+    select id from project_runs
+    where id = ${owner.runId} and org_id = ${owner.orgId} and project_id = ${owner.projectId}
       and execution_generation is not distinct from ${owner.executionGeneration ?? null}
     for update
   `;
@@ -33,7 +33,7 @@ export async function assertExecutionOwnership(tx: TransactionSql, owner: Execut
 export async function assertPlanningOwnership(tx: TransactionSql, owner: ExecutionOwner): Promise<void> {
   await assertExecutionOwnership(tx, owner);
   const [row] = await tx`
-    select id from workspace_runs where id = ${owner.runId}
+    select id from project_runs where id = ${owner.runId}
       and status in ('queued', 'processing')
       and coalesce(control_state, '') not in ('cancelled', 'cancel_requested', 'paused', 'pause_requested', 'dead-letter')`;
   if (!row) throw new StaleExecutionError();

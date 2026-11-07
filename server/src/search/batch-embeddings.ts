@@ -6,8 +6,8 @@ import type { SearchOptions } from "../services/search.js";
 import { embeddingCache } from "./embedding-cache.js";
 import { searchLanceDbNativeEnabled } from "./eligible-documents.js";
 import { METERED_EMBEDDING_PROVIDERS, queryEmbeddingApiKey, queryEmbeddingCacheKey } from "./session-planner.js";
-import { loadSearchWorkspaceContext } from "./session-setup.js";
-import { resolveWorkspaceRetrievalControls } from "./workspace-retrieval-session.js";
+import { loadSearchProjectContext } from "./session-setup.js";
+import { resolveProjectRetrievalControls } from "./project-retrieval-session.js";
 
 /** Options that make a search embed something other than its query text. */
 function embedsQueryText(options: SearchOptions): boolean {
@@ -17,38 +17,38 @@ function embedsQueryText(options: SearchOptions): boolean {
 
 /**
  * Batch search: embed the queries of one batch with one provider request per
- * workspace and seed the query-embedding cache, so each search of the batch
+ * project and seed the query-embedding cache, so each search of the batch
  * finds its vector there instead of making its own call. Only queries whose
- * search would embed the raw query text are prefetched (after workspace
- * retrieval defaults, so a workspace that turns HyDE on is not charged for
+ * search would embed the raw query text are prefetched (after project
+ * retrieval defaults, so a project that turns HyDE on is not charged for
  * vectors it would not use), only when the cache may hold them (not
  * strict-privacy), and only for routes with a batch path. The batch call's
- * actual usage is recorded once, scoped to the org and workspace. Any failure
- * leaves the searches to embed one by one, as before. Only workspaces on
+ * actual usage is recorded once, scoped to the org and project. Any failure
+ * leaves the searches to embed one by one, as before. Only projects on
  * native search (the default; SEARCH_LANCEDB_NATIVE=0 turns it off outside
- * SEARCH_LANCEDB_NATIVE_WORKSPACES).
+ * SEARCH_LANCEDB_NATIVE_PROJECTS).
  */
 export async function prefetchBatchQueryEmbeddings(
-  items: Array<{ query: string; workspaceId: string; options: SearchOptions }>,
+  items: Array<{ query: string; projectId: string; options: SearchOptions }>,
   userId: string,
   signal?: AbortSignal,
 ): Promise<{ prefetched: number; calls: number }> {
-  const byWorkspace = new Map<string, typeof items>();
-  for (const item of items.filter(item => !item.options.filters?.geo)) byWorkspace.set(item.workspaceId, [...(byWorkspace.get(item.workspaceId) ?? []), item]);
+  const byProject = new Map<string, typeof items>();
+  for (const item of items.filter(item => !item.options.filters?.geo)) byProject.set(item.projectId, [...(byProject.get(item.projectId) ?? []), item]);
   let prefetched = 0;
   let calls = 0;
-  await Promise.all([...byWorkspace].map(async ([workspaceId, group]) => {
-    // With native search off for the workspace, each search embeds its own query.
-    if (group.length < 2 || !searchLanceDbNativeEnabled(workspaceId)) return;
+  await Promise.all([...byProject].map(async ([projectId, group]) => {
+    // With native search off for the project, each search embeds its own query.
+    if (group.length < 2 || !searchLanceDbNativeEnabled(projectId)) return;
     try {
-      const context = await loadSearchWorkspaceContext(workspaceId, userId);
+      const context = await loadSearchProjectContext(projectId, userId);
       const { pipeline } = context.indexing;
       const privacyMode = pipeline.privacyMode;
       const orgId = context.scope.orgId;
       const cache = embeddingCache();
       const texts = new Map<string, string>();
       for (const item of group) {
-        const resolved = resolveWorkspaceRetrievalControls({ options: item.options, workspaceId, settings: context.settings, pipeline }).options;
+        const resolved = resolveProjectRetrievalControls({ options: item.options, projectId, settings: context.settings, pipeline }).options;
         if (!embedsQueryText(resolved)) continue;
         const key = queryEmbeddingCacheKey(item.query, pipeline.embedding, privacyMode, orgId);
         if (!key || cache.get(key) || texts.has(key)) continue;
@@ -64,13 +64,13 @@ export async function prefetchBatchQueryEmbeddings(
         values, runtime: route.runtime, provider: route.provider, model: route.model, dimensions: route.dimensions,
         requestedDimensions: route.requestedDimensions, normalize: route.provider === "deepinfra" ? pipeline.embedding.normalize : true,
         apiKey, baseURL: route.baseUrl ?? process.env.OPENAI_BASE_URL, privacyMode, modelUri: route.modelUri,
-        auditScope: { workspaceId }, signal,
+        auditScope: { projectId }, signal,
       });
       if (!result || result.embeddings.length !== values.length) return;
       calls += 1;
       await recordUsageEvent({
         userId,
-        scope: { orgId, workspaceId },
+        scope: { orgId, projectId },
         usage: {
           provider: route.provider, model: route.model, metric: "embed-query", inputTokens: result.usage.inputTokens, logOutputTokens: false,
           // The provider's reported charge when it sent one (OpenRouter); otherwise priced from tokens.
@@ -83,7 +83,7 @@ export async function prefetchBatchQueryEmbeddings(
       prefetched += values.length;
     } catch (error) {
       // Non-fatal: the searches embed one by one and surface provider errors themselves.
-      console.warn(`[search] batch query embedding skipped workspace=${workspaceId}: ${error instanceof Error ? error.message : String(error)}`);
+      console.warn(`[search] batch query embedding skipped project=${projectId}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }));
   return { prefetched, calls };

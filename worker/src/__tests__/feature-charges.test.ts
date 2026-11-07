@@ -4,9 +4,9 @@ import { featureCredits, mediaRichPages } from "@docslurp/shared";
 import { chargeDocumentFeature, chargeFeatureForTextRead, featurePages, textPagesOfText, textReadPages } from "../pipeline/feature-charges.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { chargeMediaMinutes } from "../media/extract.js";
-import type { WorkspaceRun } from "../models.js";
+import type { ProjectRun } from "../models.js";
 
-const run = { id: "run-1", userId: "u1", orgId: "o1", workspaceId: "w1", stats: {}, artifacts: {}, pipeline: {}, stage: "queued" } as unknown as WorkspaceRun;
+const run = { id: "run-1", userId: "u1", orgId: "o1", projectId: "w1", stats: {}, artifacts: {}, pipeline: {}, stage: "queued" } as unknown as ProjectRun;
 
 describe("optional per-document feature charges", () => {
   it("charges each feature once per document per run, priced on its pages", () => {

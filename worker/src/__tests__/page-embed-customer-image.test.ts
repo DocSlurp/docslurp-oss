@@ -46,7 +46,7 @@ function deps(objects: Map<string, Buffer>, rasters = vi.fn()) {
   };
 }
 
-const run = { id: "run-1", orgId: "o", workspaceId: "w", pipeline: { ...defaultPipelineFeatures, quality: "auto" as const } };
+const run = { id: "run-1", orgId: "o", projectId: "w", pipeline: { ...defaultPipelineFeatures, quality: "auto" as const } };
 
 describe("page-embed on an uploaded image", () => {
   it("embeds the OCR boundary's rendition and never decodes the customer's own bytes", async () => {

@@ -62,7 +62,7 @@ vi.mock("../lib/ai.js", async (importOriginal) => {
 
 import { fromEnv } from "../config.js";
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { MemoryProviderRateStore, ProviderRateLimiter, readProviderRateLimitConfig, setProviderRateLimiterForTests } from "../lib/provider-rate-limit.js";
 import { EmbedStage } from "../stages/embed.js";
@@ -126,9 +126,9 @@ async function runBench(pages: number) {
   };
   const pipeline = normalizePipelineFeatures({ embedding: { profile: "cheapest-hosted" } as never });
   const run = {
-    id: "run", userId: "u1", orgId: "o1", workspaceId: "w1", stage: "embed", status: "processing", pipeline,
+    id: "run", userId: "u1", orgId: "o1", projectId: "w1", stage: "embed", status: "processing", pipeline,
     stats: {}, artifacts: { [`${documentId}:canonical-document`]: storage.uri(canonicalKey) }, spentCents: 0,
-  } as unknown as WorkspaceRun;
+  } as unknown as ProjectRun;
   const state = WorkflowState.create(run, [document]);
   state.store = benchStore() as unknown as WorkflowState["store"];
   const config = { ...fromEnv(), openRouterApiKey: "bench-key", openAiApiKey: "bench-key" };

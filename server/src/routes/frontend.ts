@@ -8,7 +8,7 @@ import { authenticatedByRoute } from "../lib/route-auth.js";
 import { getRequestActor } from "../lib/request-actor.js";
 import { notifySignup } from "../lib/signup-notifications.js";
 import { getInvitePreview, listOrganizations } from "../services/organizations.js";
-import { listWorkspaces } from "../services/workspaces.js";
+import { listProjects } from "../services/projects.js";
 import { apiStatusError } from "../lib/api-error.js";
 
 /**
@@ -19,7 +19,7 @@ import { apiStatusError } from "../lib/api-error.js";
  */
 
 /**
- * GET /dashboard/bootstrap: the signed-in user's platform-operator flag, organizations and accessible workspaces.
+ * GET /dashboard/bootstrap: the signed-in user's platform-operator flag, organizations and accessible projects.
  * `isOperator` is the only switch for operator-only views (worker CPU/RAM, regions, chat traces); an organization
  * owner or admin is not an operator. `isAdmin` is the same value, kept for existing readers.
  */
@@ -28,15 +28,15 @@ export const dashboardRoutes = new Hono().get("/", async (c) => {
   if (actor.type !== "session") return apiStatusError(c, 403, "Forbidden");
   c.header("Cache-Control", "private, no-store");
   const isOperator = actor.user.isAdmin === true;
-  const [organizations, workspaces] = await Promise.all([listOrganizations(actor.userId), listWorkspaces(actor.userId, { refineNames: false })]);
-  return c.json({ isOperator, isAdmin: isOperator, organizations, workspaces });
+  const [organizations, projects] = await Promise.all([listOrganizations(actor.userId), listProjects(actor.userId, { refineNames: false })]);
+  return c.json({ isOperator, isAdmin: isOperator, organizations, projects });
 });
 
-/** GET /v1/invites/:token?kind=organization|workspace: what the accept page offers. The token is the credential. */
+/** GET /v1/invites/:token?kind=organization|project: what the accept page offers. The token is the credential. */
 export const inviteRoutes = new Hono().get("/:token", async (c) => {
   const actor = getRequestActor(c);
   if (actor.type !== "session") return apiStatusError(c, 403, "Forbidden");
-  const kind = c.req.query("kind") === "organization" ? "organization" : "workspace";
+  const kind = c.req.query("kind") === "organization" ? "organization" : "project";
   const preview = await getInvitePreview(c.req.param("token"), kind);
   return preview ? c.json(preview) : apiStatusError(c, 404, "Invite not found");
 });

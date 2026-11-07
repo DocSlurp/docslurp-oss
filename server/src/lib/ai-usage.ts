@@ -25,10 +25,10 @@ import { currentRequestApiKeyId } from "./request-context.js";
  * Callers say "this AI call happened, in this scope". The ledger owns pricing,
  * the `[ai-usage]` console line, scope stamping, and persistence into
  * `usage_events`. Scope keys are stamped into metadata under exactly the keys
- * `services/usage-attribution.ts` reads (`orgId`, `workspaceId`,
- * `workspaceIds`, `sessionId`, `apiKeyId`); `runId` goes to the `run_id` column.
- * The resolved org, single workspace and API key are also stamped into the
- * `org_id`, `workspace_id` and `api_key_id` columns (migration 0042), which
+ * `services/usage-attribution.ts` reads (`orgId`, `projectId`,
+ * `projectIds`, `sessionId`, `apiKeyId`); `runId` goes to the `run_id` column.
+ * The resolved org, single project and API key are also stamped into the
+ * `org_id`, `project_id` and `api_key_id` columns (migration 0042), which
  * attribution reads first.
  */
 
@@ -52,8 +52,8 @@ export interface UsageInput {
 
 export interface UsageScope {
   orgId?: string | null;
-  workspaceId?: string | null;
-  workspaceIds?: readonly string[] | null;
+  projectId?: string | null;
+  projectIds?: readonly string[] | null;
   sessionId?: string | null;
   runId?: string | null;
   /** Defaults to the API key authenticating the current request, for per-key spend limits. */
@@ -112,7 +112,7 @@ export async function recordCostEvent(args: {
   const client = args.client ?? sql;
   const scope = scopeColumns(args.scope, metadata);
   const rows = await client`
-    insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, cost_cents, input_tokens, output_tokens, metadata, org_id, workspace_id, api_key_id)
+    insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, cost_cents, input_tokens, output_tokens, metadata, org_id, project_id, api_key_id)
     values (
       ${event.id},
       ${args.userId},
@@ -127,7 +127,7 @@ export async function recordCostEvent(args: {
       0,
       ${JSON.stringify(metadata)}::text::jsonb,
       ${resolvedOrgId(client, args.scope, scope)},
-      ${resolvedWorkspaceId(client, args.scope, scope)},
+      ${resolvedProjectId(client, args.scope, scope)},
       ${scope.apiKeyId}
     )
     on conflict (id) do nothing
@@ -276,9 +276,9 @@ export function stampUsageScope(
 ): Record<string, unknown> {
   const stamped = { ...usageTraceContext(), ...metadata };
   if (scope.orgId) stamped.orgId = scope.orgId;
-  if (scope.workspaceId) stamped.workspaceId = scope.workspaceId;
-  if (scope.workspaceIds && scope.workspaceIds.length > 0) {
-    stamped.workspaceIds = [...new Set(scope.workspaceIds)];
+  if (scope.projectId) stamped.projectId = scope.projectId;
+  if (scope.projectIds && scope.projectIds.length > 0) {
+    stamped.projectIds = [...new Set(scope.projectIds)];
   }
   if (scope.sessionId) stamped.sessionId = scope.sessionId;
   if (scope.runId) stamped.runId = scope.runId;
@@ -340,7 +340,7 @@ async function writeUsageEvent(
   const id = event.id ?? randomUUID();
   await client`
     with recorded as (
-      insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, cost_cents, input_tokens, output_tokens, metadata, org_id, workspace_id, api_key_id)
+      insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, cost_cents, input_tokens, output_tokens, metadata, org_id, project_id, api_key_id)
       values (
         ${id},
         ${userId},
@@ -355,15 +355,15 @@ async function writeUsageEvent(
         ${event.outputTokens},
         ${JSON.stringify(metadata)}::text::jsonb,
         ${resolvedOrgId(client, scope, columns)},
-        ${resolvedWorkspaceId(client, scope, columns)},
+        ${resolvedProjectId(client, scope, columns)},
         ${columns.apiKeyId}
       )
       on conflict (id) do nothing
-      returning cost_cents, org_id, workspace_id
+      returning cost_cents, org_id, project_id
     )
     select enqueue_org_credit_debit(
       recorded.org_id, recorded.cost_cents, ${userId}, 'usage',
-      ${scope.runId ?? null}, recorded.workspace_id,
+      ${scope.runId ?? null}, recorded.project_id,
       ${JSON.stringify({ sessionId: scope.sessionId ?? null, metric: event.metric, ...(turn ? { chatTurnId: turn.id, usageEventId: id } : {}) })}::text::jsonb
     )
     from recorded
@@ -434,42 +434,42 @@ export async function voidChatTurnUsage(
 }
 
 interface ScopeColumns {
-  /** The single attributed workspace the writer knows about, if any. */
-  workspaceId: string | null;
-  /** First workspace of a cross-workspace split, used only to resolve the org. */
-  splitWorkspaceId: string | null;
+  /** The single attributed project the writer knows about, if any. */
+  projectId: string | null;
+  /** First project of a cross-project split, used only to resolve the org. */
+  splitProjectId: string | null;
   split: boolean;
   apiKeyId: string | null;
 }
 
 function scopeColumns(scope: UsageScope, metadata: Record<string, unknown>): ScopeColumns {
-  const ids = [...new Set(scope.workspaceIds ?? [])];
-  const workspaceId = scope.workspaceId ?? (ids.length === 1 ? ids[0]! : null);
+  const ids = [...new Set(scope.projectIds ?? [])];
+  const projectId = scope.projectId ?? (ids.length === 1 ? ids[0]! : null);
   return {
-    workspaceId,
-    splitWorkspaceId: ids[0] ?? null,
-    split: !workspaceId && ids.length > 1,
+    projectId,
+    splitProjectId: ids[0] ?? null,
+    split: !projectId && ids.length > 1,
     apiKeyId: typeof metadata.apiKeyId === "string" ? metadata.apiKeyId : null,
   };
 }
 
 /**
  * The tenant columns stamped on the event (migration 0042), resolved at write
- * time so the spend survives run and workspace deletion. Workspace: the
- * scope's, else the run's, else the Search Session's (not for cross-workspace
- * splits). Org: the scope's, else that workspace's, the run's, or the first
- * split workspace's org. Appended after the original values so the earlier
+ * time so the spend survives run and project deletion. Project: the
+ * scope's, else the run's, else the Search Session's (not for cross-project
+ * splits). Org: the scope's, else that project's, the run's, or the first
+ * split project's org. Appended after the original values so the earlier
  * parameters keep their positions.
  */
-function resolvedWorkspaceId(client: UsageClient, scope: UsageScope, columns: ScopeColumns) {
+function resolvedProjectId(client: UsageClient, scope: UsageScope, columns: ScopeColumns) {
   const sessionId = columns.split ? null : scope.sessionId ?? null;
   return client`coalesce(
-    ${columns.workspaceId}::text,
-    (select wr.workspace_id from workspace_runs wr where wr.id = ${scope.runId ?? null}::text),
+    ${columns.projectId}::text,
+    (select wr.project_id from project_runs wr where wr.id = ${scope.runId ?? null}::text),
     (
       select case when jsonb_typeof(ss.metadata) = 'string'
-        then (ss.metadata #>> '{}')::jsonb ->> 'workspaceId'
-        else ss.metadata ->> 'workspaceId'
+        then (ss.metadata #>> '{}')::jsonb ->> 'projectId'
+        else ss.metadata ->> 'projectId'
       end
       from search_sessions ss
       where ss.id = ${sessionId}::text
@@ -480,9 +480,9 @@ function resolvedWorkspaceId(client: UsageClient, scope: UsageScope, columns: Sc
 function resolvedOrgId(client: UsageClient, scope: UsageScope, columns: ScopeColumns) {
   return client`coalesce(
     ${scope.orgId ?? null}::text,
-    (select w.org_id from workspaces w where w.id = ${resolvedWorkspaceId(client, scope, columns)}),
-    (select wr.org_id from workspace_runs wr where wr.id = ${scope.runId ?? null}::text),
-    (select w.org_id from workspaces w where w.id = ${columns.splitWorkspaceId}::text)
+    (select w.org_id from projects w where w.id = ${resolvedProjectId(client, scope, columns)}),
+    (select wr.org_id from project_runs wr where wr.id = ${scope.runId ?? null}::text),
+    (select w.org_id from projects w where w.id = ${columns.splitProjectId}::text)
   )`;
 }
 

@@ -132,7 +132,7 @@ describe("DeepInfra vision route resolution", () => {
     expect(resolveVisionRoute(config)).toMatchObject({ provider: "deepinfra", runtime: "openai-compatible", model: MODEL, baseUrl: DEEPINFRA_VISION_BASE_URL });
   });
 
-  it("refuses a workspace baseUrl on a deepinfra URI, and ignores it if one reaches the resolver", () => {
+  it("refuses a project baseUrl on a deepinfra URI, and ignores it if one reaches the resolver", () => {
     const evil = `${URI}?baseUrl=${encodeURIComponent("https://evil.test/v1")}`;
     expect(visionModelUriProblem(evil)).toMatch(/baseUrl overrides are only supported for local model providers/);
     expect(visionConfigSchema.safeParse({ modelUri: evil }).success).toBe(false);

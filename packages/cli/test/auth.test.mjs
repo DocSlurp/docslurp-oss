@@ -76,7 +76,7 @@ function fakeServer(options = {}) {
     const bearer = request.headers.authorization?.replace(/^Bearer /, "");
     if (url.pathname === "/v1/whoami") {
       if (bearer !== state.access && !String(bearer).startsWith("env-") && !String(bearer).startsWith("key-")) return send(401, { error: "unauthorized" });
-      return send(200, { user: { id: "owner", email: "owner@example.test", name: "Owner" }, organization: { id: "org", name: "Acme" }, defaultWorkspace: { id: "ws", name: "Default", slug: "default" }, credential: { type: "oauth", scopes: ["search", "read"], apiKeyScopes: ["search", "artifacts"], expiresAt: new Date(Date.now() + 900_000).toISOString() } });
+      return send(200, { user: { id: "owner", email: "owner@example.test", name: "Owner" }, organization: { id: "org", name: "Acme" }, defaultProject: { id: "ws", name: "Default", slug: "default" }, credential: { type: "oauth", scopes: ["search", "read"], apiKeyScopes: ["search", "artifacts"], expiresAt: new Date(Date.now() + 900_000).toISOString() } });
     }
     if (url.pathname === "/v1/search") return send(200, { results: [] });
     if (url.pathname === "/v1/mcp/tools") return send(bearer === state.access ? 200 : 401, { tools: [] });
@@ -161,7 +161,7 @@ test("login: loopback authorization code with PKCE, least-privilege scopes, priv
     assert.ok(authorize.get("state").length >= 43);
     assert.match(result.stdout, /Signed in to .* as owner@example\.test/);
     assert.match(result.stdout, /Organization: Acme/);
-    assert.match(result.stdout, /Default workspace: Default/);
+    assert.match(result.stdout, /Default project: Default/);
     assert.ok(!`${result.stdout}${result.stderr}`.includes(fake.state.access), "token printed");
     const file = join(box.config, "docslurp", "credentials.json");
     assert.equal((await stat(file)).mode & 0o777, 0o600);
@@ -373,8 +373,8 @@ test("exec passes a fresh token in the child environment only, never argv, and k
   const fake = fakeServer(); const url = await fake.start(); const box = await sandbox();
   try {
     await writeStored(box.config, url, {});
-    const script = "console.log(JSON.stringify({ argv: process.argv, token: process.env.DOCSLURP_TOKEN, url: process.env.DOCSLURP_URL, ws: process.env.DOCSLURP_WORKSPACE, key: process.env.DOCSLURP_API_KEY ?? null })); process.exit(3)";
-    const result = await cli(["exec", "--workspace", "contracts", "--", process.execPath, "-e", script, "--", "--help"], { url, config: box.config });
+    const script = "console.log(JSON.stringify({ argv: process.argv, token: process.env.DOCSLURP_TOKEN, url: process.env.DOCSLURP_URL, ws: process.env.DOCSLURP_PROJECT, key: process.env.DOCSLURP_API_KEY ?? null })); process.exit(3)";
+    const result = await cli(["exec", "--project", "contracts", "--", process.execPath, "-e", script, "--", "--help"], { url, config: box.config });
     assert.equal(result.code, 3, result.stderr);
     const child = JSON.parse(result.stdout);
     assert.equal(child.token, "dscli_access_1");

@@ -44,7 +44,7 @@ export async function runStorageMeter(options: { now?: Date } = {}): Promise<{ m
   }
   const day = utcDay(options.now ?? new Date());
   // Usage is attributed to the creator, or to an owner once the creator's
-  // account is deleted. Deleted orgs have no workspaces left to meter.
+  // account is deleted. Deleted orgs have no projects left to meter.
   const orgs = await sql<{ id: string; created_by_user_id: string }[]>`
     select o.id, coalesce(o.created_by_user_id, (
       select om.user_id from org_memberships om
@@ -55,8 +55,8 @@ export async function runStorageMeter(options: { now?: Date } = {}): Promise<{ m
     where o.deleted_at is null
       and not exists (select 1 from storage_meter_days d where d.org_id = o.id and d.day = ${day}::date)
       and exists (
-        select 1 from workspaces w
-        join workspace_corpus_stats s on s.workspace_id = w.id
+        select 1 from projects w
+        join project_corpus_stats s on s.project_id = w.id
         where w.org_id = o.id and (s.source_bytes > 0 or s.page_count > 0)
       )
     limit ${ORGS_PER_SWEEP}

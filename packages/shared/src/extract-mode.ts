@@ -8,7 +8,7 @@ import { documentExportContentSchema } from "./document-export.js";
  * Extract mode: an upload whose source files and stored artifacts (page
  * images, Markdown, stage outputs, exports) live under their own storage
  * prefix, and are deleted with their Postgres rows (chunks, pages) and
- * LanceDB vector rows (in the workspace's tables, compacted out at deletion)
+ * LanceDB vector rows (in the project's tables, compacted out at deletion)
  * when the retention window ends. The first EXTRACT_FREE_RETENTION_HOURS are
  * free; a longer window is charged for the whole window at the pricing
  * provider's extended-retention price.
@@ -48,7 +48,7 @@ export type ExtractStatus = z.infer<typeof extractStatusSchema>;
 export const extractRecordSchema = z.object({
   id: z.string(),
   status: extractStatusSchema,
-  workspaceId: z.string(),
+  projectId: z.string(),
   runId: z.string().nullable(),
   /** Hours the files and outputs are kept, counted from createdAt. */
   retentionHours: z.number().int(),

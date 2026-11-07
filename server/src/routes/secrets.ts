@@ -5,11 +5,11 @@ import { zValidator } from "@hono/zod-validator";
 
 import { appendAuditLog } from "../services/audit-log.js";
 import {
-  authorizeWorkspaceSecretAccess,
-  createWorkspaceSecret,
-  deleteWorkspaceSecret,
-  listWorkspaceSecrets,
-  rotateWorkspaceSecret
+  authorizeProjectSecretAccess,
+  createProjectSecret,
+  deleteProjectSecret,
+  listProjectSecrets,
+  rotateProjectSecret
 } from "../services/secrets.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
@@ -27,32 +27,32 @@ const rotateSecretSchema = z.object({
 });
 
 export const secretsRoutes = new Hono()
-  .get("/:workspaceId/secrets", async (c) => {
+  .get("/:projectId/secrets", async (c) => {
     const userId = c.get("sessionUser").id;
-    const workspaceId = c.req.param("workspaceId");
+    const projectId = c.req.param("projectId");
 
-    const authorization = await authorizeWorkspaceSecretAccess({ workspaceId, userId });
+    const authorization = await authorizeProjectSecretAccess({ projectId, userId });
     if (!authorization.ok) {
       return apiErrorResponse(c, authorization.status, authorization.code, authorization.message);
     }
 
-    const secrets = await listWorkspaceSecrets({ access: authorization.grant });
+    const secrets = await listProjectSecrets({ access: authorization.grant });
     return c.json({ secrets });
   })
-  .post("/:workspaceId/secrets", zValidator("json", createSecretSchema, validationHook), async (c) => {
+  .post("/:projectId/secrets", zValidator("json", createSecretSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
-    const workspaceId = c.req.param("workspaceId");
+    const projectId = c.req.param("projectId");
     const body = c.req.valid("json");
 
-    const authorization = await authorizeWorkspaceSecretAccess({ workspaceId, userId });
+    const authorization = await authorizeProjectSecretAccess({ projectId, userId });
     if (!authorization.ok) {
       return apiErrorResponse(c, authorization.status, authorization.code, authorization.message);
     }
 
     try {
-      const secret = await createWorkspaceSecret({
+      const secret = await createProjectSecret({
         access: authorization.grant,
-        workspaceId,
+        projectId,
         name: body.name,
         type: body.type,
         value: body.value,
@@ -62,9 +62,9 @@ export const secretsRoutes = new Hono()
       await appendAuditLog({
         orgId: authorization.grant.orgId,
         userId,
-        workspaceId,
-        action: "workspace.secret.created",
-        resourceType: "workspace-secret",
+        projectId,
+        action: "project.secret.created",
+        resourceType: "project-secret",
         resourceId: secret.id,
         ipAddress: requestIp(c),
         metadata: {
@@ -79,20 +79,20 @@ export const secretsRoutes = new Hono()
       return apiStatusError(c, 400, reportPublicError(error));
     }
   })
-  .post("/:workspaceId/secrets/:secretId/rotate", zValidator("json", rotateSecretSchema, validationHook), async (c) => {
+  .post("/:projectId/secrets/:secretId/rotate", zValidator("json", rotateSecretSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
-    const workspaceId = c.req.param("workspaceId");
+    const projectId = c.req.param("projectId");
     const secretId = c.req.param("secretId");
     const body = c.req.valid("json");
 
-    const authorization = await authorizeWorkspaceSecretAccess({ workspaceId, userId });
+    const authorization = await authorizeProjectSecretAccess({ projectId, userId });
     if (!authorization.ok) {
       return apiErrorResponse(c, authorization.status, authorization.code, authorization.message);
     }
 
-    const secret = await rotateWorkspaceSecret({
+    const secret = await rotateProjectSecret({
       access: authorization.grant,
-      workspaceId,
+      projectId,
       secretId,
       newValue: body.value
     });
@@ -104,9 +104,9 @@ export const secretsRoutes = new Hono()
     await appendAuditLog({
       orgId: authorization.grant.orgId,
       userId,
-      workspaceId,
-      action: "workspace.secret.rotated",
-      resourceType: "workspace-secret",
+      projectId,
+      action: "project.secret.rotated",
+      resourceType: "project-secret",
       resourceId: secret.id,
       ipAddress: requestIp(c),
       metadata: {
@@ -118,19 +118,19 @@ export const secretsRoutes = new Hono()
 
     return c.json({ secret });
   })
-  .delete("/:workspaceId/secrets/:secretId", async (c) => {
+  .delete("/:projectId/secrets/:secretId", async (c) => {
     const userId = c.get("sessionUser").id;
-    const workspaceId = c.req.param("workspaceId");
+    const projectId = c.req.param("projectId");
     const secretId = c.req.param("secretId");
 
-    const authorization = await authorizeWorkspaceSecretAccess({ workspaceId, userId });
+    const authorization = await authorizeProjectSecretAccess({ projectId, userId });
     if (!authorization.ok) {
       return apiErrorResponse(c, authorization.status, authorization.code, authorization.message);
     }
 
-    const deleted = await deleteWorkspaceSecret({
+    const deleted = await deleteProjectSecret({
       access: authorization.grant,
-      workspaceId,
+      projectId,
       secretId
     });
 
@@ -141,9 +141,9 @@ export const secretsRoutes = new Hono()
     await appendAuditLog({
       orgId: authorization.grant.orgId,
       userId,
-      workspaceId,
-      action: "workspace.secret.deleted",
-      resourceType: "workspace-secret",
+      projectId,
+      action: "project.secret.deleted",
+      resourceType: "project-secret",
       resourceId: secretId,
       ipAddress: requestIp(c),
       metadata: { userAgent: requestUserAgent(c) }

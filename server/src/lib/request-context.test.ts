@@ -107,7 +107,7 @@ describe("request observation names", () => {
     app.use("*", requestContextMiddleware);
     const probes = ["/health", "/ready", "/metrics", "/fly-scaler-metrics"];
     for (const route of probes) app.get(route, c => c.text("ok"));
-    app.get("/v1/workspaces/:id/metrics", c => c.text("ok"));
+    app.get("/v1/projects/:id/metrics", c => c.text("ok"));
     for (const path of probes) expect((await app.request(path)).status).toBe(200);
     expect(observe).not.toHaveBeenCalled();
     // Successful probes are not logged; failing ones still are.
@@ -118,8 +118,8 @@ describe("request observation names", () => {
     expect((await failingProbe.request("/ready")).status).toBe(503);
     expect(posthogLog.mock.calls.at(-1)?.[0]).toMatchObject({ severityText: "error", attributes: { "http.route": "/ready" } });
     // Only the exact probe routes are skipped.
-    await app.request("/v1/workspaces/w/metrics");
-    expect(observe.mock.calls.at(-1)?.[0]).toMatchObject({ name: "api.GET./v1/workspaces/:id/metrics" });
+    await app.request("/v1/projects/w/metrics");
+    expect(observe.mock.calls.at(-1)?.[0]).toMatchObject({ name: "api.GET./v1/projects/:id/metrics" });
   });
 
   it("keeps static and wildcard endpoint names stable", async () => {
@@ -146,9 +146,9 @@ describe("request observation names", () => {
     const app = new Hono();
     app.use("*", requestContextMiddleware);
     app.use("/v1/*", async (c) => c.text("unauthorized", 401));
-    app.post("/v1/workspaces/:workspaceId/connectors/:connectorId/sync", (c) => c.text("ok"));
-    expect((await app.request("/v1/workspaces/workspace-a/connectors/connector-b/sync", { method: "POST" })).status).toBe(401);
-    expect(observe.mock.calls[0][0].name).toBe("api.POST./v1/workspaces/:workspaceId/connectors/:connectorId/sync");
+    app.post("/v1/projects/:projectId/connectors/:connectorId/sync", (c) => c.text("ok"));
+    expect((await app.request("/v1/projects/project-a/connectors/connector-b/sync", { method: "POST" })).status).toBe(401);
+    expect(observe.mock.calls[0][0].name).toBe("api.POST./v1/projects/:projectId/connectors/:connectorId/sync");
   });
   it("reports final response and telemetry duration separately from handler timing", async () => {
     vi.useFakeTimers();
@@ -193,18 +193,18 @@ describe("request span attributes", () => {
     const { requestSpanAttributes } = await import("./request-context.js");
     expect(requestSpanAttributes({
       requestId: "req-1",
-      route: "/v1/workspaces/:workspaceId/runs/:runId",
-      pathname: "/v1/workspaces/ws%201/runs/run-2",
+      route: "/v1/projects/:projectId/runs/:runId",
+      pathname: "/v1/projects/ws%201/runs/run-2",
       identity: { userId: "user-1", orgId: "org-1", apiKeyId: "key-1" },
       userAgent: "docslurp-sdk/1.0",
     })).toEqual({
       "docslurp.requestId": "req-1",
-      "url.path": "/v1/workspaces/ws%201/runs/run-2",
+      "url.path": "/v1/projects/ws%201/runs/run-2",
       "enduser.id": "user-1",
       "docslurp.orgId": "org-1",
       "docslurp.apiKeyId": "key-1",
       "user_agent.original": "docslurp-sdk/1.0",
-      "docslurp.workspaceId": "ws 1",
+      "docslurp.projectId": "ws 1",
       "docslurp.runId": "run-2",
     });
   });
@@ -216,18 +216,18 @@ describe("secret route params", () => {
     const route = "/v1/organizations/invites/:token/accept";
     const pathname = redactSecretRouteParams("/v1/organizations/invites/tok_SECRET123/accept", route);
     expect(pathname).toBe("/v1/organizations/invites/:token/accept");
-    expect(redactSecretRouteParams("/v1/workspaces/ws-1", "/v1/workspaces/:workspaceId")).toBe("/v1/workspaces/ws-1");
+    expect(redactSecretRouteParams("/v1/projects/ws-1", "/v1/projects/:projectId")).toBe("/v1/projects/ws-1");
     const attributes = requestSpanAttributes({ requestId: "r", route, pathname, identity: undefined });
     expect(JSON.stringify(attributes)).not.toContain("SECRET123");
     expect(attributes["docslurp.token"]).toBeUndefined();
   });
 });
 
-describe("workspace attribution", () => {
-  it("names the resolved workspace for slug and default references, and cleans param names", async () => {
+describe("project attribution", () => {
+  it("names the resolved project for slug and default references, and cleans param names", async () => {
     const { requestSpanAttributes } = await import("./request-context.js");
-    const viaSlug = requestSpanAttributes({ requestId: "r", route: "/v1/workspaces/:workspaceId/state", pathname: "/v1/workspaces/default/state", identity: { userId: "u", workspaceId: "ws-uuid" } });
-    expect(viaSlug).toMatchObject({ "docslurp.workspaceId": "ws-uuid", "docslurp.workspaceRef": "default" });
+    const viaSlug = requestSpanAttributes({ requestId: "r", route: "/v1/projects/:projectId/state", pathname: "/v1/projects/default/state", identity: { userId: "u", projectId: "ws-uuid" } });
+    expect(viaSlug).toMatchObject({ "docslurp.projectId": "ws-uuid", "docslurp.projectRef": "default" });
     const setting = requestSpanAttributes({ requestId: "r", route: "/v1/billing/:setting{auto-top-up|auto-recharge}", pathname: "/v1/billing/auto-top-up", identity: undefined });
     expect(setting["docslurp.setting"]).toBe("auto-top-up");
   });

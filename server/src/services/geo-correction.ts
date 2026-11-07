@@ -4,10 +4,10 @@ import type { sql } from "../db.js";
 
 /** Called only inside the authorized correction transaction, after its source row is saved. */
 export async function publishGeoCorrection(client: typeof sql,
-  scope: {documentId: string; workspaceId: string; orgId: string}, values: Record<string, unknown> | null): Promise<void> {
-  const [workspace] = await client`select pipeline from workspaces where id=${scope.workspaceId} and org_id=${scope.orgId}
+  scope: {documentId: string; projectId: string; orgId: string}, values: Record<string, unknown> | null): Promise<void> {
+  const [project] = await client`select pipeline from projects where id=${scope.projectId} and org_id=${scope.orgId}
     and archived_at is null for share`;
-  const schema = (workspace?.pipeline as {outputSchema?: Record<string, unknown>} | undefined)?.outputSchema;
+  const schema = (project?.pipeline as {outputSchema?: Record<string, unknown>} | undefined)?.outputSchema;
   if (!schema) return;
   const properties = schema.properties;
   if (!properties || typeof properties !== "object" || Array.isArray(properties)) return;
@@ -27,10 +27,10 @@ export async function publishGeoCorrection(client: typeof sql,
   });
   if (features.length > 1000 || Buffer.byteLength(JSON.stringify(features)) > 1024 * 1024) throw new Error("Geo correction exceeds document budget");
   const [document] = await client`select projection_revision::text as revision from documents
-    where id=${scope.documentId} and workspace_id=${scope.workspaceId} and org_id=${scope.orgId} for update`;
+    where id=${scope.documentId} and project_id=${scope.projectId} and org_id=${scope.orgId} for update`;
   if (!document) throw new Error("Geo correction document is unavailable");
   const hash = (value: unknown) => createHash("sha256").update(canonicalGeoProjectionJson(value)).digest("hex");
-  await client`select commit_geo_corrected_source(${scope.documentId},${scope.workspaceId},${scope.orgId},
+  await client`select commit_geo_corrected_source(${scope.documentId},${scope.projectId},${scope.orgId},
     ${String(document.revision)}::bigint,${values === null ? null : client.json(JSON.parse(JSON.stringify(values)))}::jsonb,
     ${hash(schema)},${hash(features)},${client.json(features)}::jsonb)`;
 }

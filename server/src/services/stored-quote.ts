@@ -18,8 +18,8 @@ import { orgWorkerSlots, type EstimateEnv } from "./config-change.js";
  * the quote adds the hosting and usage figures and the neutral lines.
  */
 
-/** Documents to quote. Always org-scoped; `workspaceId`, `runId` and `documentIds` narrow it further. */
-export type StoredQuoteScope = { orgId: string; workspaceId?: string; runId?: string; documentIds?: readonly string[] };
+/** Documents to quote. Always org-scoped; `projectId`, `runId` and `documentIds` narrow it further. */
+export type StoredQuoteScope = { orgId: string; projectId?: string; runId?: string; documentIds?: readonly string[] };
 
 /**
  * Where a stored document's page count stands for a quote: `measured` (the worker's `billing_pages`, else a `counted`
@@ -48,7 +48,7 @@ export async function storedQuoteFiles(scope: StoredQuoteScope): Promise<QuoteFi
         greatest(coalesce(d.billing_pages, d.page_count), 0) as pages
       from documents d
       where d.org_id = ${scope.orgId}
-        ${scope.workspaceId ? sql`and d.workspace_id = ${scope.workspaceId}` : sql``}
+        ${scope.projectId ? sql`and d.project_id = ${scope.projectId}` : sql``}
         ${scope.runId ? sql`and d.run_id = ${scope.runId}` : sql``}
         ${scope.documentIds ? sql`and d.id = any(${sql.array([...scope.documentIds])})` : sql``}
         and d.superseded_at is null and d.purged_at is null and d.deduped_from_document_id is null

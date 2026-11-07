@@ -77,7 +77,7 @@ function intersectDateRange(
 
 /**
  * Apply derived filters to the caller's. Derived filters (explicit `tag:` syntax, page numbers, a model's reading
- * of the query) may only narrow: every scope the caller set (documents, run, workspace, geo, filename, tags) is
+ * of the query) may only narrow: every scope the caller set (documents, run, project, geo, filename, tags) is
  * kept exactly, and for the filters that have values on both sides the result is the intersection, never a union.
  * A derived value that would leave nothing (disjoint types or pages) is dropped, so a misreading can
  * neither widen the search nor empty it.

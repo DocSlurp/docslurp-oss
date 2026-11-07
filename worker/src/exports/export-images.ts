@@ -43,7 +43,7 @@ export interface ExportImagePlan {
   images: ExportImage[];
 }
 
-const PII_REASON = "withheld by the workspace's privacy (PII) policy";
+const PII_REASON = "withheld by the project's privacy (PII) policy";
 
 function pad(value: number, width: number): string {
   return String(value).padStart(width, "0");

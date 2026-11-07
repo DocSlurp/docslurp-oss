@@ -91,7 +91,7 @@ export async function enqueueOrgCreditDebit(
     userId?: string | null;
     reason?: string;
     runId?: string | null;
-    workspaceId?: string | null;
+    projectId?: string | null;
     metadata?: Record<string, unknown>;
   },
 ): Promise<void> {
@@ -103,7 +103,7 @@ export async function enqueueOrgCreditDebit(
       ${args.userId ?? null},
       ${args.reason ?? "usage"},
       ${args.runId ?? null},
-      ${args.workspaceId ?? null},
+      ${args.projectId ?? null},
       ${JSON.stringify(args.metadata ?? {})}::text::jsonb
     )
   `;

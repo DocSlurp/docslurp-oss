@@ -12,12 +12,12 @@ import {
 import type { Config } from "../config.js";
 import type { WorkerAiUsageInput } from "../lib/ai-usage.js";
 import type { CommandRunner } from "../tools/runner.js";
-import { refreshWorkspaceCommunities } from "./communities.js";
+import { refreshProjectCommunities } from "./communities.js";
 import { extractDocumentGraph } from "./extract.js";
 import { replaceDocumentGraph } from "./graph-store.js";
 import { persistScopedUsageEvents } from "../db/usage-event-store.js";
-import { allowHostedCallForWorkspace, openRouterTextCall, runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
-import { runWithProviderRateScope, workspaceProviderScope } from "../lib/provider-rate-limit.js";
+import { allowHostedCallForProject, openRouterTextCall, runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
+import { runWithProviderRateScope, projectProviderScope } from "../lib/provider-rate-limit.js";
 import { textFallbackCost, textModelApiKey, textUsageLabels } from "../lib/text-model-route.js";
 import { DOCUMENT_FEATURE_METRICS, UNIT_CHARGE_PROVIDER, featureCredits, featurePagesRead, unitChargeMetadata } from "@docslurp/shared";
 import { documentFeaturePages, textReadPages } from "../pipeline/feature-charges.js";
@@ -37,7 +37,7 @@ export interface GraphJobRunnerOptions {
 type GraphJobRow = {
   id: string;
   org_id: string;
-  workspace_id: string;
+  project_id: string;
   user_id: string;
   mode: "stale" | "full";
   phase: "queued" | "extracting" | "communities" | "done";
@@ -63,11 +63,11 @@ const DEFAULT_LEASE_MS = 15 * 60_000;
 /** Number of documents a rebuild job of `mode` would extract right now. */
 export async function countGraphJobDocuments(
   sql: Client,
-  args: { workspaceId: string; mode: "stale" | "full"; configHash: string },
+  args: { projectId: string; mode: "stale" | "full"; configHash: string },
 ): Promise<number> {
   const [row] = await sql<{ count: number }[]>`
     select count(*)::int as count from documents d
-    where d.workspace_id = ${args.workspaceId}
+    where d.project_id = ${args.projectId}
       and d.status = 'completed' and d.superseded_at is null
       and (${args.mode} = 'full' or not exists (
         select 1 from kg_document_state s where s.document_id = d.id and s.config_hash = ${args.configHash}
@@ -77,9 +77,9 @@ export async function countGraphJobDocuments(
 }
 
 /**
- * Claims one queued (or lease-expired) workspace graph rebuild and runs it to
+ * Claims one queued (or lease-expired) project graph rebuild and runs it to
  * the end: re-extract the target documents from their stored chunks, merging
- * each into the workspace graph as it goes, then re-cluster communities.
+ * each into the project graph as it goes, then re-cluster communities.
  * Progress, tokens and cost are written after every batch so the API can
  * stream them. Returns the number of jobs run (0 or 1).
  */
@@ -100,18 +100,18 @@ export async function runGraphJobs(sql: Client, options: GraphJobRunnerOptions):
       limit 1
       for update skip locked
     )
-    returning id, org_id, workspace_id, user_id, mode, phase, config, config_hash, model, max_cost_cents, cost_cents, cursor
+    returning id, org_id, project_id, user_id, mode, phase, config, config_hash, model, max_cost_cents, cost_cents, cursor
   `;
   if (!job) return 0;
 
   try {
-    // Private endpoint calls in this job are attributed to its workspace (strict-privacy audit).
-    const providers = await workspaceProviderScope(sql, job.workspace_id);
-    await runWithPrivacyAuditScope({ workspaceId: job.workspace_id },
+    // Private endpoint calls in this job are attributed to its project (strict-privacy audit).
+    const providers = await projectProviderScope(sql, job.project_id);
+    await runWithPrivacyAuditScope({ projectId: job.project_id },
       () => runWithProviderRateScope(providers, () => runClaimedJob(sql, job, options, leaseMs)));
   } catch (error) {
     const message = error instanceof Error ? error.message.split("\n")[0] ?? "" : String(error);
-    console.error(`[graph-job] failed job=${job.id} workspace=${job.workspace_id} error=${message}`);
+    console.error(`[graph-job] failed job=${job.id} project=${job.project_id} error=${message}`);
     await sql`
       update graph_jobs
       set status = 'failed', error = ${message.slice(0, 2000)}, finished_at = now(), updated_at = now(),
@@ -123,13 +123,13 @@ export async function runGraphJobs(sql: Client, options: GraphJobRunnerOptions):
 }
 
 async function runClaimedJob(sql: Client, job: GraphJobRow, options: GraphJobRunnerOptions, leaseMs: number) {
-  const [workspace] = await sql<{ name: string; pipeline: unknown }[]>`
-    select name, pipeline from workspaces where id = ${job.workspace_id}
+  const [project] = await sql<{ name: string; pipeline: unknown }[]>`
+    select name, pipeline from projects where id = ${job.project_id}
   `;
-  if (!workspace) throw new Error("Workspace no longer exists");
-  const pipeline = normalizeStoredPipelineFeatures(workspace.pipeline as PipelineFeatures, `workspace ${job.workspace_id}`);
+  if (!project) throw new Error("Project no longer exists");
+  const pipeline = normalizeStoredPipelineFeatures(project.pipeline as PipelineFeatures, `project ${job.project_id}`);
   const graphConfig: GraphConfig = graphConfigSchema.parse(job.config);
-  const scope = graphConfig.domain ?? `Workspace "${workspace.name}"`;
+  const scope = graphConfig.domain ?? `Project "${project.name}"`;
   const concurrency = Math.max(1, options.concurrency ?? 4);
   const maxCostCents = job.max_cost_cents === null ? null : Number(job.max_cost_cents);
   let spentCents = Number(job.cost_cents);
@@ -137,20 +137,20 @@ async function runClaimedJob(sql: Client, job: GraphJobRow, options: GraphJobRun
   const config = options.config;
   // Without a key both graph extraction and community summaries use heuristics;
   // a privacyMode block withholds the key so no chunk text reaches a hosted LLM.
-  const graphApiKey = pipeline.graphRag && textModelApiKey(config.openRouterApiKey, job.model) && await allowHostedCallForWorkspace(sql, {
+  const graphApiKey = pipeline.graphRag && textModelApiKey(config.openRouterApiKey, job.model) && await allowHostedCallForProject(sql, {
     privacyMode: pipeline.privacyMode,
-    workspaceId: job.workspace_id,
+    projectId: job.project_id,
     call: openRouterTextCall("graph-extraction", job.model),
   }) ? textModelApiKey(config.openRouterApiKey, job.model) : undefined;
 
-  console.log(`[graph-job] started job=${job.id} workspace=${job.workspace_id} mode=${job.mode} depth=${graphConfig.depth}`);
+  console.log(`[graph-job] started job=${job.id} project=${job.project_id} mode=${job.mode} depth=${graphConfig.depth}`);
 
   if (job.phase === "extracting" || job.phase === "queued") {
     for (;;) {
       const documents = await sql<{ id: string; filename: string; page_count: number | null; page_count_source: string | null; billing_pages: number | null; billing_pages_method: string | null }[]>`
         -- The pages the document bills (the worker's measured count of an Office file, and how it was found), and its page basis.
         select d.id, d.filename, d.page_count, d.page_count_source, d.billing_pages, d.billing_pages_method from documents d
-        where d.workspace_id = ${job.workspace_id}
+        where d.project_id = ${job.project_id}
           and d.status = 'completed' and d.superseded_at is null
           and (${cursor}::text is null or d.id > ${cursor})
           and (${job.mode} = 'full' or not exists (
@@ -208,7 +208,7 @@ async function runClaimedJob(sql: Client, job: GraphJobRow, options: GraphJobRun
             },
           });
           await replaceDocumentGraph(sql, {
-            workspaceId: job.workspace_id,
+            projectId: job.project_id,
             userId: job.user_id,
             runId: null,
             documentId: document.id,
@@ -286,15 +286,15 @@ async function runClaimedJob(sql: Client, job: GraphJobRow, options: GraphJobRun
   if (pipeline.graphRag || pipeline.graphCommunitySummaries) {
     const communityModel = resolvePipelineTextModel(pipeline, "community-summary", config.textGenerationModel);
     const usage: WorkerAiUsageInput[] = [];
-    const communityApiKey = textModelApiKey(config.openRouterApiKey, communityModel) && await allowHostedCallForWorkspace(sql, {
+    const communityApiKey = textModelApiKey(config.openRouterApiKey, communityModel) && await allowHostedCallForProject(sql, {
       privacyMode: pipeline.privacyMode,
-      workspaceId: job.workspace_id,
+      projectId: job.project_id,
       call: openRouterTextCall("community-summary", communityModel),
     }) ? textModelApiKey(config.openRouterApiKey, communityModel) : undefined;
     try {
-      await refreshWorkspaceCommunities({
+      await refreshProjectCommunities({
         sql,
-        workspaceId: job.workspace_id,
+        projectId: job.project_id,
         userId: job.user_id,
         runId: null,
         context: {
@@ -337,7 +337,7 @@ async function runClaimedJob(sql: Client, job: GraphJobRow, options: GraphJobRun
     `;
   }
   await finishJob(sql, job.id, options.workerId, "completed", null);
-  console.log(`[graph-job] completed job=${job.id} workspace=${job.workspace_id}`);
+  console.log(`[graph-job] completed job=${job.id} project=${job.project_id}`);
 }
 
 async function finishJob(
@@ -356,7 +356,7 @@ async function finishJob(
 }
 
 /**
- * Rebuild spend is run-less: it is stamped with the job's workspace and org
+ * Rebuild spend is run-less: it is stamped with the job's project and org
  * (usage_events tenant columns) and `graphJobId` ties it to the job.
  */
 async function persistJobUsage(sql: Client, job: GraphJobRow, events: Array<WorkerAiUsageInput & { id?: string }>) {
@@ -364,7 +364,7 @@ async function persistJobUsage(sql: Client, job: GraphJobRow, events: Array<Work
   await persistScopedUsageEvents({
     client: sql,
     userId: job.user_id,
-    scope: { orgId: job.org_id, workspaceId: job.workspace_id },
+    scope: { orgId: job.org_id, projectId: job.project_id },
     usageEvents: events.map((event) => ({
       ...(event.id ? { id: event.id } : {}),
       provider: event.provider,

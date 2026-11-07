@@ -19,7 +19,7 @@ import { GraphEnrichStage } from "../stages/graph-enrich.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { Store } from "../db/store.js";
 import { refreshKnowledgeGraphNodes } from "../db/superseded-purge.js";
-import { refreshWorkspaceCommunities } from "../graph/communities.js";
+import { refreshProjectCommunities } from "../graph/communities.js";
 import { graphNodeKey, type DocumentGraph } from "../graph/extract.js";
 import { countGraphJobDocuments, runGraphJobs } from "../graph/rebuild-job.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
@@ -42,7 +42,7 @@ beforeAll(async () => {
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1')`;
   await sql`
-    insert into workspaces(id, org_id, user_id, name, pipeline)
+    insert into projects(id, org_id, user_id, name, pipeline)
     values ('w', 'o1', 'u1', 'Supply chain', ${sql.json({ entityIndex: true })})
   `;
 }, 60_000);
@@ -55,22 +55,22 @@ afterAll(async () => {
 
 beforeEach(async () => {
   vi.mocked(generateOpenRouterText).mockReset();
-  await sql`update workspaces set pipeline = ${sql.json({ entityIndex: true })} where id = 'w'`;
+  await sql`update projects set pipeline = ${sql.json({ entityIndex: true })} where id = 'w'`;
   await sql`delete from graph_jobs`;
   await sql`delete from kg_communities`;
   await sql`delete from kg_nodes`;
   await sql`delete from documents`;
-  await sql`delete from workspace_runs`;
+  await sql`delete from project_runs`;
 });
 
 async function seedDocument(id: string, text: string) {
   const run = `run-${id}`;
   await sql`
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, total_documents, pipeline)
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pipeline)
     values (${run}, 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'completed', 1, '{}'::jsonb)
   `;
   await sql`
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status)
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status)
     values (${id}, 'o1', 'u1', 'w', ${run}, ${`${id}.md`}, 'text/markdown', ${`raw/${id}`}, 'completed')
   `;
   await sql`
@@ -124,7 +124,7 @@ function documentGraph(documentId: string, supplier: string, customers: string[]
 }
 
 const write = (documentId: string, graph: DocumentGraph, configHash = "g1-test") =>
-  store.replaceDocumentGraph({ workspaceId: "w", userId: "u1", runId: `run-${documentId}`, documentId, configHash, graph });
+  store.replaceDocumentGraph({ projectId: "w", userId: "u1", runId: `run-${documentId}`, documentId, configHash, graph });
 
 const nodes = () =>
   sql<{ name: string; mentions: number; documents: number }[]>`
@@ -132,18 +132,18 @@ const nodes = () =>
     from kg_nodes order by normalized_name
   `;
 
-describe("workspace knowledge graph persistence", () => {
+describe("project knowledge graph persistence", () => {
   it.each([false, true])("links reused embeddings to current document chunks (source purged=%s)", async (purgeSource) => {
     const text = "Copper Works supplies Silver Labs.";
     await seedDocument("source", text);
     await seedDocument("copy", text);
     const artifactUri = "s3://test/old-run/embeddings/source.json";
-    await sql`update workspace_runs set artifacts = ${sql.json({ "source:embeddings": artifactUri })} where id = 'run-source'`;
+    await sql`update project_runs set artifacts = ${sql.json({ "source:embeddings": artifactUri })} where id = 'run-source'`;
     await sql`update documents set reused_from_document_id = 'source' where id = 'copy'`;
     await sql`delete from document_chunks where document_id = 'copy'`;
-    await sql`update workspace_runs set status = 'queued' where id = 'run-copy'`;
-    const [ownership] = await sql`select org_id, workspace_id, execution_generation from workspace_runs where id = 'run-copy'`;
-    expect(await store.seedReusedStageOutputs("run-copy", ["embed"], { runId: "run-copy", orgId: ownership!.org_id, workspaceId: ownership!.workspace_id, executionGeneration: ownership!.execution_generation ?? undefined }))
+    await sql`update project_runs set status = 'queued' where id = 'run-copy'`;
+    const [ownership] = await sql`select org_id, project_id, execution_generation from project_runs where id = 'run-copy'`;
+    expect(await store.seedReusedStageOutputs("run-copy", ["embed"], { runId: "run-copy", orgId: ownership!.org_id, projectId: ownership!.project_id, executionGeneration: ownership!.execution_generation ?? undefined }))
       .toEqual({ seededDocuments: 1, unavailable: [] });
     if (purgeSource) await sql`delete from document_chunks where document_id = 'source'`;
 
@@ -195,7 +195,7 @@ describe("workspace knowledge graph persistence", () => {
     expect(await sql`select count(*)::int as count from kg_edge_evidence`).toEqual([{ count: 4 }]);
   });
 
-  it("merges documents from separate runs into one workspace graph", async () => {
+  it("merges documents from separate runs into one project graph", async () => {
     await seedDocument("d1", "Acme supplies Globex");
     await seedDocument("d2", "Acme supplies Globex");
     await write("d1", documentGraph("d1", "Acme", ["Globex"], ["Acme Corp"]));
@@ -273,8 +273,8 @@ describe("workspace knowledge graph persistence", () => {
     await seedDocument("d2", "Acme supplies Globex");
     await write("d1", documentGraph("d1", "Acme", ["Globex"]));
     await write("d2", documentGraph("d2", "Acme", ["Globex"]));
-    await sql`update workspaces set artifact_retention_days = 1, run_retention_days = 2 where id = 'w'`;
-    await sql`update workspace_runs set created_at = now() - interval '3 days' where id = 'run-d1'`;
+    await sql`update projects set artifact_retention_days = 1, run_retention_days = 2 where id = 'w'`;
+    await sql`update project_runs set created_at = now() - interval '3 days' where id = 'run-d1'`;
 
     await retention().purgeExpiredArtifacts({ bucket: "bucket", deleteKeys: async () => {} } as unknown as ArtifactStore, 10);
     expect(await nodes()).toEqual([
@@ -284,7 +284,7 @@ describe("workspace knowledge graph persistence", () => {
     expect(await sql`select weight from kg_edges`).toEqual([{ weight: 1 }]);
 
     await retention().deleteExpiredRuns(10);
-    expect(await sql`select id from workspace_runs order by id`).toEqual([{ id: "run-d2" }]);
+    expect(await sql`select id from project_runs order by id`).toEqual([{ id: "run-d2" }]);
     expect(await nodes()).toEqual([
       { name: "acme", mentions: 1, documents: 1 },
       { name: "globex", mentions: 1, documents: 1 },
@@ -298,8 +298,8 @@ describe("workspace knowledge graph persistence", () => {
     await seedDocument("d2", "Acme supplies Globex and Initech");
     await write("d1", documentGraph("d1", "Acme", ["Globex", "Initech"]));
     await write("d2", documentGraph("d2", "Acme", ["Globex"]));
-    await sql`update workspaces set artifact_retention_days = null, run_retention_days = 2 where id = 'w'`;
-    await sql`update workspace_runs set created_at = now() - interval '3 days' where id = 'run-d1'`;
+    await sql`update projects set artifact_retention_days = null, run_retention_days = 2 where id = 'w'`;
+    await sql`update project_runs set created_at = now() - interval '3 days' where id = 'run-d1'`;
 
     await retention().deleteExpiredRuns(10);
     // Initech was only supported by the expired run, so it and its edge go.
@@ -311,21 +311,21 @@ describe("workspace knowledge graph persistence", () => {
     expect(await sql`select document_id from kg_document_state`).toEqual([{ document_id: "d2" }]);
   });
 
-  it("clusters the whole workspace and reuses unchanged community summaries", async () => {
+  it("clusters the whole project and reuses unchanged community summaries", async () => {
     await seedDocument("d1", "Acme supplies Globex and Hooli");
     await seedDocument("d2", "Umbrella supplies Initech and Wonka");
     await write("d1", documentGraph("d1", "Acme", ["Globex", "Hooli"]));
     await write("d2", documentGraph("d2", "Umbrella", ["Initech", "Wonka"]));
     const context = { scope: "Supply chain", model: "test-model", privacyMode: "standard" as const };
 
-    const first = await refreshWorkspaceCommunities({ sql, workspaceId: "w", userId: "u1", runId: null, context });
+    const first = await refreshProjectCommunities({ sql, projectId: "w", userId: "u1", runId: null, context });
     expect(first).toMatchObject({ communities: 2, summarized: 2, reused: 0 });
     const level0 = await sql<{ members: number }[]>`
       select member_count as members from kg_communities where level = 0 order by label
     `;
     expect(level0).toEqual([{ members: 3 }, { members: 3 }]);
 
-    const second = await refreshWorkspaceCommunities({ sql, workspaceId: "w", userId: "u1", runId: null, context });
+    const second = await refreshProjectCommunities({ sql, projectId: "w", userId: "u1", runId: null, context });
     expect(second).toMatchObject({ communities: 2, summarized: 0, reused: 2 });
   });
 
@@ -340,18 +340,18 @@ describe("workspace knowledge graph persistence", () => {
     `;
 
     vi.mocked(generateOpenRouterText).mockRejectedValue(new Error("404 No endpoints found"));
-    const failed = await refreshWorkspaceCommunities({ sql, workspaceId: "w", userId: "u1", runId: null, context });
+    const failed = await refreshProjectCommunities({ sql, projectId: "w", userId: "u1", runId: null, context });
     expect(failed).toMatchObject({ summarized: 2, reused: 0 });
     expect(await summarySources()).toEqual([{ source: "heuristic" }, { source: "heuristic" }]);
 
     vi.mocked(generateOpenRouterText).mockResolvedValue({
       text: "Suppliers and their customers.", finishReason: "stop", usage: { inputTokens: 10, outputTokens: 5 },
     });
-    const recovered = await refreshWorkspaceCommunities({ sql, workspaceId: "w", userId: "u1", runId: null, context });
+    const recovered = await refreshProjectCommunities({ sql, projectId: "w", userId: "u1", runId: null, context });
     expect(recovered).toMatchObject({ summarized: 2, reused: 0, inputTokens: 20, outputTokens: 10 });
     expect(await summarySources()).toEqual([{ source: "llm" }, { source: "llm" }]);
 
-    const again = await refreshWorkspaceCommunities({ sql, workspaceId: "w", userId: "u1", runId: null, context });
+    const again = await refreshProjectCommunities({ sql, projectId: "w", userId: "u1", runId: null, context });
     expect(again).toMatchObject({ summarized: 0, reused: 2 });
     expect(generateOpenRouterText).toHaveBeenCalledTimes(4);
   });
@@ -362,7 +362,7 @@ describe("workspace knowledge graph persistence", () => {
     vi.mocked(generateOpenRouterText)
       .mockResolvedValueOnce({ text: "Acme supplies", finishReason: "length", usage: { inputTokens: 10, outputTokens: 220 } })
       .mockResolvedValue({ text: "Acme supplies Globex and Hooli.", finishReason: "stop", usage: { inputTokens: 10, outputTokens: 12 } });
-    const result = await refreshWorkspaceCommunities({ sql, workspaceId: "w", userId: "u1", runId: null,
+    const result = await refreshProjectCommunities({ sql, projectId: "w", userId: "u1", runId: null,
       context: { scope: "Supply chain", model: "test-model", privacyMode: "standard", apiKey: "mock-only" } });
     expect(result).toMatchObject({ communities: 1, summarized: 1, inputTokens: 20, outputTokens: 232 });
     expect(vi.mocked(generateOpenRouterText).mock.calls.map(([call]) => call.maxOutputTokens)).toEqual([220, 440]);
@@ -379,20 +379,20 @@ describe("workspace knowledge graph persistence", () => {
     // The fallback graph is stored and searchable, but never counts as current.
     expect(await nodes()).toContainEqual({ name: "hooli", mentions: 1, documents: 1 });
     expect(await store.documentsWithGraph("w", configHash, ["d1", "d2"])).toEqual(new Set(["d1"]));
-    expect(await countGraphJobDocuments(sql, { workspaceId: "w", mode: "stale", configHash })).toBe(1);
+    expect(await countGraphJobDocuments(sql, { projectId: "w", mode: "stale", configHash })).toBe(1);
 
     await write("d2", documentGraph("d2", "Acme", ["Hooli"]), configHash);
     expect(await store.documentsWithGraph("w", configHash, ["d1", "d2"])).toEqual(new Set(["d1", "d2"]));
   });
 });
 
-describe("workspace graph rebuild jobs", () => {
+describe("project graph rebuild jobs", () => {
   const config = { costPer1kInputTokens: 0.01, costPer1kOutputTokens: 0.03 } as Config;
   const configHash = graphConfigFingerprint(defaultGraphConfig, "test-model");
 
   async function queueJob(id: string, mode: "stale" | "full") {
     await sql`
-      insert into graph_jobs (id, org_id, workspace_id, user_id, mode, config, config_hash, model)
+      insert into graph_jobs (id, org_id, project_id, user_id, mode, config, config_hash, model)
       values (${id}, 'o1', 'w', 'u1', ${mode}, ${sql.json(defaultGraphConfig)}, ${configHash}, 'test-model')
     `;
   }
@@ -401,7 +401,7 @@ describe("workspace graph rebuild jobs", () => {
     await seedDocument("d1", "Acme Corporation signed with Globex Industries in March 2024.");
     await seedDocument("d2", "Initech Company audited Umbrella Agency in 2023.");
     await write("d1", documentGraph("d1", "Acme", ["Globex"]), configHash);
-    expect(await countGraphJobDocuments(sql, { workspaceId: "w", mode: "stale", configHash })).toBe(1);
+    expect(await countGraphJobDocuments(sql, { projectId: "w", mode: "stale", configHash })).toBe(1);
 
     await queueJob("job-1", "stale");
     // PGlite serves one connection, so tests extract one document at a time.
@@ -410,7 +410,7 @@ describe("workspace graph rebuild jobs", () => {
       select status, phase, documents_processed, documents_failed, cursor, lease_owner from graph_jobs where id = 'job-1'
     `;
     expect(job).toEqual({ status: "completed", phase: "done", documents_processed: 1, documents_failed: 0, cursor: "d2", lease_owner: null });
-    expect(await countGraphJobDocuments(sql, { workspaceId: "w", mode: "stale", configHash })).toBe(0);
+    expect(await countGraphJobDocuments(sql, { projectId: "w", mode: "stale", configHash })).toBe(0);
     expect(await sql`select source from kg_document_state where document_id = 'd2'`).toEqual([{ source: "heuristic" }]);
 
     // A full rebuild revisits everything; nothing is left to claim afterwards.
@@ -422,7 +422,7 @@ describe("workspace graph rebuild jobs", () => {
 
   it("persists graph tokens at provider cost (billing 0 credits) when a generated response cannot be parsed", async () => {
     await seedDocument("d1", "Example System handles documents.");
-    await sql`update workspaces set pipeline = ${sql.json({ graphRag: true })} where id = 'w'`;
+    await sql`update projects set pipeline = ${sql.json({ graphRag: true })} where id = 'w'`;
     vi.mocked(generateOpenRouterText).mockResolvedValue({
       text: '{"entities":[{"name":"Example"}', finishReason: "length",
       usage: { inputTokens: 100, outputTokens: 1600, costCents: 0.25 },
@@ -446,7 +446,7 @@ describe("workspace graph rebuild jobs", () => {
 
   it("persists graph usage even when storing the resulting graph fails", async () => {
     await seedDocument("d1", "Example System handles documents.");
-    await sql`update workspaces set pipeline = ${sql.json({ graphRag: true })} where id = 'w'`;
+    await sql`update projects set pipeline = ${sql.json({ graphRag: true })} where id = 'w'`;
     vi.mocked(generateOpenRouterText).mockResolvedValue({
       text: '{"entities":[],"relationships":[]}', finishReason: "stop",
       usage: { inputTokens: 100, outputTokens: 20, costCents: 0.1 },
@@ -475,8 +475,8 @@ describe("workspace graph rebuild jobs", () => {
     ]);
   });
 
-  it("allows one active rebuild per workspace", async () => {
+  it("allows one active rebuild per project", async () => {
     await queueJob("job-4", "stale");
-    await expect(queueJob("job-5", "full")).rejects.toThrow(/graph_jobs_one_active_per_workspace/);
+    await expect(queueJob("job-5", "full")).rejects.toThrow(/graph_jobs_one_active_per_project/);
   });
 });

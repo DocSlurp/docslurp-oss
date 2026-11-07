@@ -311,7 +311,7 @@ export class ExtractMarkdownStage implements Stage {
             | keyof typeof parserPlaybookCatalog
             | undefined) ??
           parserPlaybookForQuality(state.run.pipeline.quality);
-        // Fast runs only text-layer extractors with OCR off, whatever the request or workspace asked for.
+        // Fast runs only text-layer extractors with OCR off, whatever the request or project asked for.
         const { config: extractionConfig, removed: fastRemoved } = documentExtractionForQuality(
           { ...defaultDocumentExtractionConfig, ...(state.run.pipeline.documentExtraction ?? {}) },
           state.run.pipeline.quality,
@@ -351,7 +351,7 @@ export class ExtractMarkdownStage implements Stage {
         // evidence and the OCR ledger's text-layer probe are skipped (stage stats say so).
         const sandboxReason = isPdf ? this.pdfSandboxReason(format, extractionConfig.order) : null;
         const sandboxedPdfRoute = sandboxReason !== null;
-        // Under a sandboxed deployment no workspace setting may name a host PDF parser (pages, enrich, voting too).
+        // Under a sandboxed deployment no project setting may name a host PDF parser (pages, enrich, voting too).
         const hostPdf = isPdf ? hostPdfExtractorsUnderSandbox(extractionConfig) : [];
         // Page facts for the ingest report run beside extraction (poppler, no pixels) and never fail it.
         const pageFacts = this.recordSourcePageFacts(state, document, format, signal, sandboxedPdfRoute, sandboxReason);
@@ -1651,7 +1651,7 @@ export class ExtractMarkdownStage implements Stage {
   /**
    * Why this PDF is kept off the host, or null when it is not: `sandboxed-pdf-deployment` when the deployment is sandboxed
    * (registry.resolve then refuses any other extractor, so the PDF goes to vm-pdf or fails), `sandboxed-pdf-route` when the
-   * workspace's order names vm-pdf on a deployment that would otherwise parse on the host. Host-side evidence probes are
+   * project's order names vm-pdf on a deployment that would otherwise parse on the host. Host-side evidence probes are
    * skipped in both cases, even if a later fallback wins.
    */
   private pdfSandboxReason(format: string, configured: Partial<Record<string, string[]>>): "sandboxed-pdf-deployment" | "sandboxed-pdf-route" | null {
@@ -1795,7 +1795,7 @@ export class ExtractMarkdownStage implements Stage {
 
   /**
    * Fast keeps an image unread (no OCR on Fast): a stand-in extractor whose empty Markdown keeps the image as its page
-   * image. It is never a stand-in for OCR that failed or is off; those fail the document. When the workspace cannot use
+   * image. It is never a stand-in for OCR that failed or is off; those fail the document. When the project cannot use
    * vision either, the image is unreadable: fail naming that cause. The raw diagnostic stays in the stored error and
    * logs; `publicDocumentError` never shows it to users.
    */
@@ -2164,7 +2164,7 @@ export class ExtractMarkdownStage implements Stage {
       return null;
     }
     // Self-critique is optional; skip it when the vision route is hosted and
-    // the workspace privacy mode forbids hosted calls.
+    // the project privacy mode forbids hosted calls.
     if (!(await allowHostedCall(args.state, visionCall(resolveVisionRoute(args.state.run.pipeline.vision)), [args.document.id]))) {
       return null;
     }

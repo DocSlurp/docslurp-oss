@@ -1,7 +1,7 @@
 /**
- * A user's "Processing defaults" (Settings > General) seed the workspaces that
- * Workspace Intake creates for them. They never change existing workspaces:
- * once a workspace exists its own pipeline and search settings win.
+ * A user's "Processing defaults" (Settings > General) seed the projects that
+ * Project Intake creates for them. They never change existing projects:
+ * once a project exists its own pipeline and search settings win.
  *
  * Applied keys and their meaning:
  * - enableGraphRag      -> pipeline.graphRag (knowledge graph built at ingest)
@@ -15,7 +15,7 @@
  */
 import {
   type PipelineFeatures,
-  type WorkspaceSearchSettings,
+  type ProjectSearchSettings,
 } from "@docslurp/shared";
 
 import type { UserGeneralSettings } from "./user-settings.js";
@@ -37,10 +37,10 @@ export function seedPipelineFromProcessingDefaults(
   return next;
 }
 
-/** The search-settings patch a new workspace gets, or null when nothing differs from the defaults. */
+/** The search-settings patch a new project gets, or null when nothing differs from the defaults. */
 export function seedSearchSettingsFromProcessingDefaults(
   defaults: ProcessingDefaults,
-): { chat: Partial<WorkspaceSearchSettings["chat"]> } | null {
+): { chat: Partial<ProjectSearchSettings["chat"]> } | null {
   const answerStyle = defaults?.defaultAnswerStyle;
   if (!answerStyle || answerStyle === "balanced") return null;
   return { chat: { answerStyle } };

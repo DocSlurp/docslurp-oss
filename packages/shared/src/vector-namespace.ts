@@ -1,15 +1,15 @@
 /**
- * VectorNamespaceManager: one LanceDB database per workspace.
+ * VectorNamespaceManager: one LanceDB database per project.
  *
- * Each workspace's embeddings live under their own LanceDB URI:
+ * Each project's embeddings live under their own LanceDB URI:
  *
- *   <LANCEDB_URI>/<orgId>/<workspaceId>/vectors-<model>-<dimensions>/chunks.lance
+ *   <LANCEDB_URI>/<orgId>/<projectId>/vectors-<model>-<dimensions>/chunks.lance
  *
- * A search opens exactly one workspace's database, so a query cannot return
- * another workspace's (or org's) rows regardless of filter correctness, and
- * deleting a workspace drops its tables whole. Different embedding models
+ * A search opens exactly one project's database, so a query cannot return
+ * another project's (or org's) rows regardless of filter correctness, and
+ * deleting a project drops its tables whole. Different embedding models
  * (even with equal dimensions) occupy different vector spaces, so each gets
- * its own database inside the workspace.
+ * its own database inside the project.
  */
 
 const SAFE_SEGMENT = /^[a-zA-Z0-9_-]+$/;
@@ -22,13 +22,13 @@ export interface VectorLocation {
 }
 
 export class VectorNamespaceManager {
-  /** `<root>/<orgId>/<workspaceId>`: the directory holding every vector space of one workspace. */
-  static getWorkspaceRoot(root: string, orgId: string, workspaceId: string): string {
-    return `${root.replace(/\/+$/, "")}/${safeSegment(orgId, "orgId")}/${safeSegment(workspaceId, "workspaceId")}`;
+  /** `<root>/<orgId>/<projectId>`: the directory holding every vector space of one project. */
+  static getProjectRoot(root: string, orgId: string, projectId: string): string {
+    return `${root.replace(/\/+$/, "")}/${safeSegment(orgId, "orgId")}/${safeSegment(projectId, "projectId")}`;
   }
 
-  /** The LanceDB database (and table) for one workspace and embedding space. */
-  static getEmbeddingLocation(root: string, orgId: string, workspaceId: string, model: string, dimensions: number): VectorLocation {
+  /** The LanceDB database (and table) for one project and embedding space. */
+  static getEmbeddingLocation(root: string, orgId: string, projectId: string, model: string, dimensions: number): VectorLocation {
     if (!model.trim() || !Number.isSafeInteger(dimensions) || dimensions < 1) {
       throw new Error("Embedding namespace requires a model and positive dimensions");
     }
@@ -37,7 +37,7 @@ export class VectorNamespaceManager {
     // The dimension suffix has no "-", so the last "-<digits>" is unambiguous.
     const modelSegment = encodeURIComponent(model).replace(/\./g, "%2E");
     return {
-      uri: `${VectorNamespaceManager.getWorkspaceRoot(root, orgId, workspaceId)}/vectors-${modelSegment}-${dimensions}`,
+      uri: `${VectorNamespaceManager.getProjectRoot(root, orgId, projectId)}/vectors-${modelSegment}-${dimensions}`,
       table: LANCEDB_CHUNKS_TABLE,
     };
   }

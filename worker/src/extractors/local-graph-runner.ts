@@ -18,7 +18,7 @@ export interface LocalPdfGraphInput {
   maxOutputs?: number;
   maxSourceBytes?: number;
   maxArtifactBytes?: number;
-  /** OCR language setting (`auto` or language codes); the workspace's documentExtraction.ocr.language. */
+  /** OCR language setting (`auto` or language codes); the project's documentExtraction.ocr.language. */
   ocrLanguage?: string;
 }
 

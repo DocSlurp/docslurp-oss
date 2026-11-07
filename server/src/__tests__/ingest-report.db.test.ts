@@ -7,13 +7,13 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
 /**
  * Ingest report against a database built from server/db/migrations (0054 adds
  * document_page_facts): seeded text-only, scanned, mixed and audio files in
- * one workspace, a second organization's workspace that must never leak in,
+ * one project, a second organization's project that must never leak in,
  * and the editor-only apply and reprocess actions.
  */
 let stop: () => Promise<void>;
 let sql: postgres.Sql<Record<string, unknown>>;
 let report: typeof import("../services/ingest-report.js");
-let workspaces: typeof import("../services/workspaces.js");
+let projects: typeof import("../services/projects.js");
 
 beforeAll(async () => {
   const pg = await startMigratedPostgres();
@@ -31,14 +31,14 @@ beforeAll(async () => {
   await sql`insert into "user"(id, name, email) values ('owner', 'Owner', 'o@x'), ('viewer', 'Viewer', 'v@x'), ('stranger', 'S', 's@x')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('o1', 'One', 'one', 'owner', 100000), ('o2', 'Two', 'two', 'stranger', 100000)`;
   await sql`insert into org_memberships(org_id, user_id, role) values ('o1', 'owner', 'owner'), ('o1', 'viewer', 'member'), ('o2', 'stranger', 'owner')`;
-  await sql`insert into workspaces(id, org_id, user_id, name, pipeline) values
+  await sql`insert into projects(id, org_id, user_id, name, pipeline) values
     ('w1', 'o1', 'owner', 'Contracts', ${json(defaultPipelineFeatures)}),
     ('w2', 'o2', 'stranger', 'Other org', ${json(defaultPipelineFeatures)})`;
-  await sql`insert into workspace_members(workspace_id, user_id, role) values ('w1', 'viewer', 'viewer')`;
-  await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total, pages_processed, created_at, updated_at)
+  await sql`insert into project_members(project_id, user_id, role) values ('w1', 'viewer', 'viewer')`;
+  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total, pages_processed, created_at, updated_at)
     values ('r1', 'o1', 'owner', 'w1', 'bulk-upload', 'completed', 'completed', ${json(defaultPipelineFeatures)}, 4, 11, 11, now() - interval '2 minutes', now()),
            ('r2', 'o2', 'stranger', 'w2', 'bulk-upload', 'completed', 'completed', ${json(defaultPipelineFeatures)}, 1, 50, 50, now() - interval '1 minute', now())`;
-  await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, file_size) values
+  await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, file_size) values
     ('text', 'o1', 'owner', 'w1', 'r1', 'handbook.pdf', 'application/pdf', 'k/text', 'completed', 3, 300000),
     ('scan', 'o1', 'owner', 'w1', 'r1', 'scan.pdf', 'application/pdf', 'k/scan', 'completed', 2, 2000000),
     ('mixed', 'o1', 'owner', 'w1', 'r1', 'mixed.pdf', 'application/pdf', 'k/mixed', 'completed', 4, 900000),
@@ -66,7 +66,7 @@ beforeAll(async () => {
     ('p1', 'stranger', 'r2', 'foreign', 'document', 'embed', 'detected-language', 1, 'ratio', ${json({ detectedLanguage: "fr" })})`;
 
   report = await import("../services/ingest-report.js");
-  workspaces = await import("../services/workspaces.js");
+  projects = await import("../services/projects.js");
 }, 180_000);
 
 afterAll(async () => {
@@ -74,8 +74,8 @@ afterAll(async () => {
   await stop?.();
 });
 
-async function workspace(id: string, userId: string) {
-  const record = await workspaces.getWorkspace(id, userId);
+async function project(id: string, userId: string) {
+  const record = await projects.getProject(id, userId);
   if (!record) throw new Error(`no access to ${id} for ${userId}`);
   return record;
 }
@@ -84,10 +84,10 @@ describe("ingest report on a migrated database", () => {
   it("shows why a file failed from the stored stage error, without paths or a vision misdiagnosis", async () => {
     const json = (value: unknown) => sql.json(value as postgres.JSONValue);
     const ocr = "no extractor produced output: kreuzberg=Error: Error opening data file /srv/app/node_modules/kreuzberg/tessdata/eng.traineddata";
-    await sql`insert into workspaces(id, org_id, user_id, name, pipeline) values ('w3', 'o1', 'owner', 'Failures', ${json(defaultPipelineFeatures)})`;
-    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total, pages_processed)
+    await sql`insert into projects(id, org_id, user_id, name, pipeline) values ('w3', 'o1', 'owner', 'Failures', ${json(defaultPipelineFeatures)})`;
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total, pages_processed)
       values ('r3', 'o1', 'owner', 'w3', 'bulk-upload', 'failed', 'extract-markdown', ${json(defaultPipelineFeatures)}, 1, 1, 0)`;
-    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, file_size)
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, file_size)
       values ('shot', 'o1', 'owner', 'w3', 'r3', 'screenshot.png', 'image/png', 'k/shot', 'failed', 1, 40000)`;
     await sql`insert into document_page_facts (document_id, page_number, run_id, text_bytes, word_count, image_count, facts_source, vision_status)
       values ('shot', 1, 'r3', 0, 0, 1, 'image', 'not-selected')`;
@@ -95,7 +95,7 @@ describe("ingest report on a migrated database", () => {
       ('r3', 'shot', 'extract-markdown', 'failed', ${ocr}, ${json({})}),
       ('r3', 'shot', 'vision-extract', 'completed', null, ${json({ skipped: true, reason: "page-triage-skip", pages: 1, selectedPages: [] })})`;
 
-    const result = await report.loadIngestReport({ workspace: await workspace("w3", "owner"), canEdit: true });
+    const result = await report.loadIngestReport({ project: await project("w3", "owner"), canEdit: true });
     expect(result.failures).toMatchObject({
       total: 1,
       byReason: [{ reason: "ocr_unavailable", documents: 1 }],
@@ -109,8 +109,8 @@ describe("ingest report on a migrated database", () => {
     expect(report.summarizeIngestReport(result)).toMatch(/1 file failed\. screenshot\.png at extract-markdown: Text recognition \(OCR\)/);
   });
 
-  it("reports the workspace's own files page by page", async () => {
-    const result = await report.loadIngestReport({ workspace: await workspace("w1", "owner"), canEdit: true });
+  it("reports the project's own files page by page", async () => {
+    const result = await report.loadIngestReport({ project: await project("w1", "owner"), canEdit: true });
     expect(result.files.total).toBe(4);
     expect(result.files.byType).toEqual([
       { type: "pdf", files: 3, pages: 9, bytes: 3_200_000 },
@@ -130,8 +130,8 @@ describe("ingest report on a migrated database", () => {
   });
 
   it("never mixes in another organization's files, stages, languages or pages", async () => {
-    const own = await workspace("w1", "owner");
-    const all = await report.loadIngestReport({ workspace: own, canEdit: true });
+    const own = await project("w1", "owner");
+    const all = await report.loadIngestReport({ project: own, canEdit: true });
     const text = JSON.stringify(all);
     expect(text).not.toContain("secret.pdf");
     expect(text).not.toContain("foreign");
@@ -140,81 +140,81 @@ describe("ingest report on a migrated database", () => {
     expect(all.stages.failed).toEqual([]);
     expect(all.extraction.visionOverCapPages).toBe(0);
 
-    // Another workspace's run or document ids match nothing in this workspace.
-    const viaRun = await report.loadIngestReport({ workspace: own, canEdit: true, runId: "r2" });
+    // Another project's run or document ids match nothing in this project.
+    const viaRun = await report.loadIngestReport({ project: own, canEdit: true, runId: "r2" });
     expect(viaRun.files.total).toBe(0);
     expect(viaRun.scope.matchedDocuments).toBe(0);
-    const viaIds = await report.loadIngestReport({ workspace: own, canEdit: true, documentIds: ["foreign", "scan"] });
+    const viaIds = await report.loadIngestReport({ project: own, canEdit: true, documentIds: ["foreign", "scan"] });
     expect(viaIds.files.total).toBe(1);
     expect(JSON.stringify(viaIds)).not.toContain("secret.pdf");
 
-    // The other org's members cannot load this workspace at all.
-    await expect(workspaces.getWorkspace("w1", "stranger")).resolves.toBeNull();
+    // The other org's members cannot load this project at all.
+    await expect(projects.getProject("w1", "stranger")).resolves.toBeNull();
   });
 
   it("scopes to one run", async () => {
-    const result = await report.loadIngestReport({ workspace: await workspace("w1", "owner"), canEdit: true, runId: "r1" });
+    const result = await report.loadIngestReport({ project: await project("w1", "owner"), canEdit: true, runId: "r1" });
     expect(result.scope).toMatchObject({ runId: "r1", matchedDocuments: 4, documents: 4 });
   });
 
   it("lets viewers read but not apply or reprocess", async () => {
-    const asViewer = await workspace("w1", "viewer");
-    const read = await report.loadIngestReport({ workspace: asViewer, canEdit: false });
+    const asViewer = await project("w1", "viewer");
+    const read = await report.loadIngestReport({ project: asViewer, canEdit: false });
     expect(read.files.total).toBe(4);
-    await expect(report.applyIngestRecommendation({ workspace: asViewer, userId: "viewer", recommendationId: "vision-all-pages" }))
+    await expect(report.applyIngestRecommendation({ project: asViewer, userId: "viewer", recommendationId: "vision-all-pages" }))
       .rejects.toMatchObject({ status: 403 });
-    await expect(report.reprocessIngestRecommendation({ workspace: asViewer, userId: "viewer", recommendationId: "vision-all-pages" }))
+    await expect(report.reprocessIngestRecommendation({ project: asViewer, userId: "viewer", recommendationId: "vision-all-pages" }))
       .rejects.toMatchObject({ status: 403 });
-    const [{ pipeline }] = await sql<{ pipeline: { quality?: string } }[]>`select pipeline from workspaces where id = 'w1'`;
+    const [{ pipeline }] = await sql<{ pipeline: { quality?: string } }[]>`select pipeline from projects where id = 'w1'`;
     expect(pipeline.quality ?? "auto").toBe("auto");
   });
 
   it("applies a recommendation for an editor by merging onto the stored pipeline", async () => {
-    await sql`update workspaces set pipeline = ${sql.json(mergePipelineFeatures(defaultPipelineFeatures, { summarize: true }) as unknown as postgres.JSONValue)} where id = 'w1'`;
-    const asOwner = await workspace("w1", "owner");
-    await expect(report.applyIngestRecommendation({ workspace: asOwner, userId: "owner", recommendationId: "made-up" }))
+    await sql`update projects set pipeline = ${sql.json(mergePipelineFeatures(defaultPipelineFeatures, { summarize: true }) as unknown as postgres.JSONValue)} where id = 'w1'`;
+    const asOwner = await project("w1", "owner");
+    await expect(report.applyIngestRecommendation({ project: asOwner, userId: "owner", recommendationId: "made-up" }))
       .rejects.toMatchObject({ status: 409 });
-    const applied = await report.applyIngestRecommendation({ workspace: asOwner, userId: "owner", recommendationId: "vision-all-pages" });
+    const applied = await report.applyIngestRecommendation({ project: asOwner, userId: "owner", recommendationId: "vision-all-pages" });
     expect(applied.pipeline.quality).toBe("good");
     expect(applied.pipeline.vision).not.toHaveProperty("maxPagesPerDocument");
     expect(applied.pipeline.vision).not.toHaveProperty("forceAllPages");
     expect(applied.pipeline.summarize).toBe(true);
     // The rule no longer fires the same way once vision covers every page; the scans still need reprocessing.
-    const after = await report.loadIngestReport({ workspace: await workspace("w1", "owner"), canEdit: true });
+    const after = await report.loadIngestReport({ project: await project("w1", "owner"), canEdit: true });
     expect(after.config.find((item) => item.key === "quality")?.value).toBe("Good");
   });
 
-  it("reprocesses the affected files with the workspace's current settings", async () => {
-    const asOwner = await workspace("w1", "owner");
+  it("reprocesses the affected files with the project's current settings", async () => {
+    const asOwner = await project("w1", "owner");
     // Vision already reads every page now, so the recommendation is a reprocess only.
-    const after = await report.loadIngestReport({ workspace: asOwner, canEdit: true });
+    const after = await report.loadIngestReport({ project: asOwner, canEdit: true });
     expect(after.recommendations.find((rec) => rec.id === "reprocess-with-vision")?.patch).toBeNull();
-    const result = await report.reprocessIngestRecommendation({ workspace: asOwner, userId: "owner", recommendationId: "reprocess-with-vision" });
+    const result = await report.reprocessIngestRecommendation({ project: asOwner, userId: "owner", recommendationId: "reprocess-with-vision" });
     expect(result.documentIds.sort()).toEqual(["mixed", "scan"]);
     expect(result.runs).toHaveLength(1);
-    const [run] = await sql<{ pipeline: { quality: string }; workspace_id: string }[]>`
-      select pipeline, workspace_id from workspace_runs where id = ${result.runs[0]!.id}`;
-    expect(run).toMatchObject({ workspace_id: "w1", pipeline: { quality: "good" } });
+    const [run] = await sql<{ pipeline: { quality: string }; project_id: string }[]>`
+      select pipeline, project_id from project_runs where id = ${result.runs[0]!.id}`;
+    expect(run).toMatchObject({ project_id: "w1", pipeline: { quality: "good" } });
     const versions = await sql<{ filename: string; file_size: number; page_count: number }[]>`
       select filename, file_size::int as file_size, page_count from documents where run_id = ${result.runs[0]!.id} order by filename`;
     expect(versions).toEqual([{ filename: "mixed.pdf", file_size: 900000, page_count: 4 }, { filename: "scan.pdf", file_size: 2000000, page_count: 2 }]);
-    const [{ pages_total }] = await sql<{ pages_total: number }[]>`select pages_total from workspace_runs where id = ${result.runs[0]!.id}`;
+    const [{ pages_total }] = await sql<{ pages_total: number }[]>`select pages_total from project_runs where id = ${result.runs[0]!.id}`;
     expect(pages_total).toBe(6);
   });
 
   it("recomputes the report the action came from (document scope)", async () => {
-    const asOwner = await workspace("w1", "owner");
-    await expect(report.reprocessIngestRecommendation({ workspace: asOwner, userId: "owner", recommendationId: "reprocess-with-vision", documentIds: ["text"] }))
+    const asOwner = await project("w1", "owner");
+    await expect(report.reprocessIngestRecommendation({ project: asOwner, userId: "owner", recommendationId: "reprocess-with-vision", documentIds: ["text"] }))
       .rejects.toMatchObject({ status: 409 });
   });
 
   it("counts chunks that span pages for every page they cover", async () => {
-    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, file_size)
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, file_size)
       values ('span', 'o1', 'owner', 'w1', 'r1', 'span.pdf', 'application/pdf', 'k/span', 'completed', 3, 1000)`;
     await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, page_number, metadata) values
       ('span-0', 'span', 'r1', 'owner', 0, ${"a".repeat(900)}, 1, '{}'::jsonb),
       ('span-1', 'span', 'r1', 'owner', 1, ${"b".repeat(1000)}, null, ${sql.json({ pageNumbers: [2, 3] })})`;
-    const result = await report.loadIngestReport({ workspace: await workspace("w1", "owner"), canEdit: true, documentIds: ["span"] });
+    const result = await report.loadIngestReport({ project: await project("w1", "owner"), canEdit: true, documentIds: ["span"] });
     expect(result.searchability).toMatchObject({ searchablePages: 3, unsearchablePages: 0 });
     expect(result.text.indexedPerPage.samples).toBe(3);
   });

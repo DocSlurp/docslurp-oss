@@ -112,16 +112,16 @@ export class PageTaskStore {
       // The usage_events trigger adds `cost` to spent_cents (0056).
       const cost = await persistRunUsageEvents({client, state, usageEvents});
       if (leases) {
-        const [run] = await client<{ spent_cents: number | string }[]>`update workspace_runs set updated_at=now() where id=${task.runId}
+        const [run] = await client<{ spent_cents: number | string }[]>`update project_runs set updated_at=now() where id=${task.runId}
           returning spent_cents`;
         spentCents = Number(run?.spent_cents ?? spentCents) || 0;
       } else {
         // Mid-run balance check cadence (spend-check.ts): every N pages or credits.
         const counter = spendCounterSql(client, task.runId, client`1`, cost);
-        const [run] = await client<{ spend_check_due: boolean; spent_cents: number | string }[]>`update workspace_runs
+        const [run] = await client<{ spend_check_due: boolean; spent_cents: number | string }[]>`update project_runs
           set ${counter.assignments}, updated_at=now()
-          from ${counter.from} where workspace_runs.id = spend_prev.id
-          returning ${counter.checkDue} as spend_check_due, workspace_runs.spent_cents`;
+          from ${counter.from} where project_runs.id = spend_prev.id
+          returning ${counter.checkDue} as spend_check_due, project_runs.spent_cents`;
         spendCheckDue = run?.spend_check_due === true;
         spentCents = Number(run?.spent_cents ?? spentCents) || 0;
       }
@@ -143,12 +143,12 @@ export class PageTaskStore {
     state.run.spentCents = spentCents;
     if (leaseConsumed) {
       await this.creditLeases!.afterConsume({
-        id: task.runId, orgId: state.run.orgId, workspaceId: state.run.workspaceId ?? null, userId: state.run.userId,
+        id: task.runId, orgId: state.run.orgId, projectId: state.run.projectId ?? null, userId: state.run.userId,
       }, leaseObservation, "page-interval");
     }
     if (spendCheckDue) {
       await enforceRunSpend(this.sql, {
-        id: task.runId, orgId: state.run.orgId, workspaceId: state.run.workspaceId ?? null, userId: state.run.userId,
+        id: task.runId, orgId: state.run.orgId, projectId: state.run.projectId ?? null, userId: state.run.userId,
       }, "page-interval");
     }
   }

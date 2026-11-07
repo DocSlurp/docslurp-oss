@@ -50,7 +50,7 @@ const owner = { type: "session", userId: "u", sessionId: "s", user: { id: "u", e
 const stranger = { type: "session", userId: "stranger", sessionId: "s2", user: { id: "stranger", email: "s@example.test", name: "S" } } as const;
 const key = (overrides: Record<string, unknown> = {}) => ({
   type: "apiKey", userId: "u",
-  apiKey: { keyId: "k", userId: "u", orgId: "o", keyType: "server", scopes: ["ingest", "artifacts"], workspaceIds: [], allowedDomains: [], rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], ...overrides },
+  apiKey: { keyId: "k", userId: "u", orgId: "o", keyType: "server", scopes: ["ingest", "artifacts"], projectIds: [], allowedDomains: [], rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], ...overrides },
 }) as never;
 
 beforeAll(async () => {
@@ -61,7 +61,7 @@ beforeAll(async () => {
   await sql`insert into "user" (id, name, email) values ('u', 'User', 'u@example.test'), ('stranger', 'S', 's@example.test')`;
   await sql`insert into organizations (id, name, slug, created_by_user_id) values ('o', 'Org', 'extract-org', 'u'), ('o2', 'Other', 'other-org', 'stranger')`;
   await sql`insert into org_memberships (org_id, user_id, role) values ('o', 'u', 'owner'), ('o2', 'stranger', 'owner')`;
-  await sql`insert into workspaces (id, org_id, user_id, name) values ('w', 'o', 'u', 'Inbox'), ('w-other', 'o2', 'stranger', 'Theirs')`;
+  await sql`insert into projects (id, org_id, user_id, name) values ('w', 'o', 'u', 'Inbox'), ('w-other', 'o2', 'stranger', 'Theirs')`;
   extracts = await import("../services/extracts.js");
 }, 120_000);
 afterAll(async () => { await sql?.end(); await stop?.(); });
@@ -75,22 +75,22 @@ beforeEach(async () => {
   delete process.env.DOCSLURP_EXTRACT_MAX_RETENTION_DAYS;
   await sql`delete from document_exports`;
   await sql`delete from documents`;
-  await sql`delete from workspace_runs`;
+  await sql`delete from project_runs`;
   await sql`delete from extracts`;
   await sql`delete from storage_cleanup_queue`;
   await sql`delete from document_cleanup_queue`;
 });
 
 async function newExtract(options: { retentionDays?: number } = {}) {
-  return await extracts.createExtract({ userId: "u", orgId: "o", workspaceId: "w", options });
+  return await extracts.createExtract({ userId: "u", orgId: "o", projectId: "w", options });
 }
 
 /** What intake and the worker leave behind: an extract run with documents and objects under the prefix. */
 async function seedRun(extract: { id: string; storagePrefix: string }, status = "completed") {
   const runId = `run-${extract.id.slice(4, 12)}`;
-  await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, extract_id, storage_prefix)
+  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, extract_id, storage_prefix)
     values (${runId}, 'o', 'u', 'w', 'bulk-upload', ${status}, ${status}, '{}', ${extract.id}, ${extract.storagePrefix})`;
-  await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, file_size, page_count, canonical_id)
+  await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, file_size, page_count, canonical_id)
     values (${`${runId}-d1`}, 'o', 'u', 'w', ${runId}, 'Report.pdf', 'application/pdf', ${`${extract.storagePrefix}/raw/r.pdf`}, ${status === "completed" ? "completed" : "processing"}, ${2 * MB}, 10, ${`docslurp:extract:${extract.id}:d1`})`;
   await extracts.attachExtractRun(extract.id, runId);
   for (const [name, size] of [["raw/r.pdf", 2 * MB], ["images/d1/page-1.png", 1000], ["parser/d1.json", 500], ["markdown/d1.md", 200]] as const) {
@@ -125,14 +125,14 @@ describe("extract retention policy", () => {
 });
 
 describe("extract reads are tenant-scoped", () => {
-  it("shows an extract to a reader of its workspace and to a key of its org, and to nobody else", async () => {
+  it("shows an extract to a reader of its project and to a key of its org, and to nobody else", async () => {
     const extract = await newExtract();
     expect(await extracts.getExtractForActor(extract.id, owner)).toMatchObject({ id: extract.id });
     expect(await extracts.getExtractForActor(extract.id, key())).toMatchObject({ id: extract.id });
-    // Another tenant, a key of another org, a key restricted to other workspaces, and a guessed ID all see nothing.
+    // Another tenant, a key of another org, a key restricted to other projects, and a guessed ID all see nothing.
     expect(await extracts.getExtractForActor(extract.id, stranger)).toBeNull();
     expect(await extracts.getExtractForActor(extract.id, key({ orgId: "o2" }))).toBeNull();
-    expect(await extracts.getExtractForActor(extract.id, key({ workspaceIds: ["w-elsewhere"] }))).toBeNull();
+    expect(await extracts.getExtractForActor(extract.id, key({ projectIds: ["w-elsewhere"] }))).toBeNull();
     expect(await extracts.getExtractForActor("ext_00000000000000000000000000000000", owner)).toBeNull();
     expect(await extracts.getExtractForActor("../ext", owner)).toBeNull();
     expect((await extracts.listExtractsForActor(stranger)).map((item) => item.id)).toEqual([]);
@@ -192,7 +192,7 @@ describe("extract sweep", () => {
   });
 
   it("skips the email when the request opted out or the user turned run emails off", async () => {
-    const quiet = await extracts.createExtract({ userId: "u", orgId: "o", workspaceId: "w", options: { notifyEmail: false } });
+    const quiet = await extracts.createExtract({ userId: "u", orgId: "o", projectId: "w", options: { notifyEmail: false } });
     await seedRun(quiet);
     const muted = await newExtract();
     await seedRun(muted);
@@ -225,18 +225,18 @@ describe("extract sweep", () => {
     process.env.DOCSLURP_BILL_STORAGE = "true";
     // Inserted directly: the spend pre-check is covered above.
     const id = "ext_" + "a".repeat(32);
-    await sql`insert into extracts (id, org_id, workspace_id, user_id, storage_prefix, retention_hours, paid_retention, expires_at)
+    await sql`insert into extracts (id, org_id, project_id, user_id, storage_prefix, retention_hours, paid_retention, expires_at)
       values (${id}, 'o', 'w', 'u', ${`extracts/o/${id}`}, 720, true, now() + interval '30 days')`;
     const runId = await seedRun({ id, storagePrefix: `extracts/o/${id}` });
     await extracts.sweepExtracts();
     await extracts.sweepExtracts();
 
-    const events = await sql<{ id: string; metric: string; cost_cents: number; run_id: string; org_id: string; workspace_id: string; metadata: Record<string, unknown> }[]>`
-      select id, metric, cost_cents::float8 as cost_cents, run_id, org_id, workspace_id, metadata from usage_events where metric = 'storage-extract-retention'`;
+    const events = await sql<{ id: string; metric: string; cost_cents: number; run_id: string; org_id: string; project_id: string; metadata: Record<string, unknown> }[]>`
+      select id, metric, cost_cents::float8 as cost_cents, run_id, org_id, project_id, metadata from usage_events where metric = 'storage-extract-retention'`;
     const bytes = 2 * MB + 10 * (96 + 28) * 1024;
     const expected = pricing().extractRetentionCredits(bytes, 1);
     expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ id: `extract-retention:${id}:settle`, run_id: runId, org_id: "o", workspace_id: "w" });
+    expect(events[0]).toMatchObject({ id: `extract-retention:${id}:settle`, run_id: runId, org_id: "o", project_id: "w" });
     expect(events[0]!.cost_cents).toBeCloseTo(expected, 6);
     expect(events[0]!.metadata).toMatchObject({ product: "extract", extractId: id, phase: "settle", retentionCreditsPerGbMonth: pricing().extractRetentionCredits(1024 ** 3, 1), billable: true });
     const [row] = await sql<{ retention_credits: number }[]>`select retention_credits::float8 as retention_credits from extracts where id = ${id}`;
@@ -253,8 +253,8 @@ describe("extract sweep", () => {
   it("deletes an expired extract: in-flight run cancelled first, rows deleted after the grace, prefix emptied, idempotently", async () => {
     const extract = await newExtract();
     const runId = await seedRun(extract, "processing");
-    // A workspace export that included the extract's document is withdrawn too, and one still being built is stopped.
-    await sql`insert into document_exports (id, org_id, workspace_id, user_id, content, filename, object_key, status, document_ids, expires_at)
+    // A project export that included the extract's document is withdrawn too, and one still being built is stopped.
+    await sql`insert into document_exports (id, org_id, project_id, user_id, content, filename, object_key, status, document_ids, expires_at)
       values ('exp_ws', 'o', 'w', 'u', 'markdown', 'Inbox.zip', 'exports/o/w/exp_ws/a1.zip', 'ready', ${sql.array([`${runId}-d1`])}, now() + interval '7 days'),
              ('exp_building', 'o', 'w', 'u', 'markdown', 'Inbox.zip', 'exports/o/w/exp_building/', 'running', '{}', now() + interval '7 days')`;
     // Another tenant's objects next door are never touched.
@@ -273,7 +273,7 @@ describe("extract sweep", () => {
     await sql`update extracts set purge_after = now() - interval '1 second' where id = ${extract.id}`;
     const result = await extracts.sweepExtracts();
     expect((await sql`select id from documents where run_id = ${runId}`).length).toBe(0);
-    expect((await sql`select id from workspace_runs where id = ${runId}`).length).toBe(0);
+    expect((await sql`select id from project_runs where id = ${runId}`).length).toBe(0);
     expect((await sql`select id, status from document_exports order by id`)).toEqual([{ id: "exp_building", status: "failed" }]);
     expect(mocks.deleted).toEqual(["exports/o/w/exp_ws/a1.zip"]);
     expect((await sql`select document_id from document_cleanup_queue`).map((row) => row.document_id)).toEqual([`${runId}-d1`]);
@@ -310,12 +310,12 @@ describe("extract sweep", () => {
     const audio = await newExtract();
     const runId = await seedRun(audio);
     // An audio extract's media receipts and admissions point at its run and document (migrations 0048/0050).
-    await sql`insert into remote_media_jobs (id, request_key, org_id, workspace_id, run_id, document_id, provider, model, status, reserve_cents)
+    await sql`insert into remote_media_jobs (id, request_key, org_id, project_id, run_id, document_id, provider, model, status, reserve_cents)
       values ('rmj-1', 'rk-1', 'o', 'w', ${runId}, ${`${runId}-d1`}, 'provider', 'model', 'completed', 1)`;
     await sql`insert into media_video_admissions (document_id, org_id, run_id, duration_seconds, reserved_frames) values (${`${runId}-d1`}, 'o', ${runId}, 60, 10)`;
     // A copy outside the extract run (a re-index from before the guard), chained by reindex_of.
-    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline) values ('kept-run', 'o', 'u', 'w', 'reindex', 'completed', 'completed', '{}')`;
-    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, reindex_of)
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values ('kept-run', 'o', 'u', 'w', 'reindex', 'completed', 'completed', '{}')`;
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, reindex_of)
       values ('copy-1', 'o', 'u', 'w', 'kept-run', 'Report.pdf', 'application/pdf', 'u/kept-run/raw/r.pdf', 'completed', 10, ${`${runId}-d1`}, ${`${runId}-d1`})`;
     const second = await newExtract();
     await seedRun(second);
@@ -350,7 +350,7 @@ describe("extract sweep", () => {
   it("charges a paid window at admission, tops it up at settle, and charges an unsettled one at expiry", async () => {
     process.env.DOCSLURP_BILL_STORAGE = "true";
     const paid = "ext_" + "b".repeat(32);
-    await sql`insert into extracts (id, org_id, workspace_id, user_id, storage_prefix, retention_hours, paid_retention, expires_at)
+    await sql`insert into extracts (id, org_id, project_id, user_id, storage_prefix, retention_hours, paid_retention, expires_at)
       values (${paid}, 'o', 'w', 'u', ${`extracts/o/${paid}`}, 720, true, now() + interval '30 days')`;
     const runId = await seedRun({ id: paid, storagePrefix: `extracts/o/${paid}` });
     const perPage = (96 + 28) * 1024;
@@ -366,19 +366,19 @@ describe("extract sweep", () => {
 
     // A paid extract whose run never finished pays at expiry, before its rows go.
     const paused = "ext_" + "c".repeat(32);
-    await sql`insert into extracts (id, org_id, workspace_id, user_id, storage_prefix, retention_hours, paid_retention, expires_at)
+    await sql`insert into extracts (id, org_id, project_id, user_id, storage_prefix, retention_hours, paid_retention, expires_at)
       values (${paused}, 'o', 'w', 'u', ${`extracts/o/${paused}`}, 720, true, now() - interval '1 minute')`;
     const pausedRun = await seedRun({ id: paused, storagePrefix: `extracts/o/${paused}` }, "completed");
-    await sql`update workspace_runs set status = 'failed', stage = 'failed' where id = ${pausedRun}`;
+    await sql`update project_runs set status = 'failed', stage = 'failed' where id = ${pausedRun}`;
     await extracts.sweepExtracts();
     expect((await sql`select id from usage_events where id = ${`extract-retention:${paused}:expiry`}`).length).toBe(1);
   });
 
-  it("leaves live extract documents off the daily storage meter, by the workspace's org", async () => {
+  it("leaves live extract documents off the daily storage meter, by the project's org", async () => {
     const extract = await newExtract();
     await seedRun(extract);
-    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline) values ('kept', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', '{}')`;
-    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, file_size, page_count)
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values ('kept', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', '{}')`;
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, file_size, page_count)
       values ('kept-1', 'o', 'u', 'w', 'kept', 'Kept.pdf', 'application/pdf', 'u/kept/raw/k.pdf', 'completed', ${3 * MB}, 4)`;
     const { getOrgStorage } = await import("../services/billing/overview.js");
     expect(await getOrgStorage("o", sql as never)).toMatchObject({ sourceBytes: 5 * MB, pages: 14 });
@@ -389,10 +389,10 @@ describe("extract sweep", () => {
 
   it("counts a stuffed document's measured page equivalents in the storage estimate", async () => {
     // A 1-page PDF whose extraction measured 50 page equivalents (billing_pages): its chunks and vectors scale with that.
-    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline) values ('stuffed', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', '{}')`;
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values ('stuffed', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', '{}')`;
     const { getOrgStorage } = await import("../services/billing/overview.js");
     const before = await getOrgStorage("o", sql as never, { excludeExtracts: true });
-    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, file_size, page_count, page_count_source, billing_pages, billing_pages_method)
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, file_size, page_count, page_count_source, billing_pages, billing_pages_method)
       values ('stuffed-1', 'o', 'u', 'w', 'stuffed', 'Stuffed.pdf', 'application/pdf', 'u/stuffed/raw/s.pdf', 'completed', 1000, 1, 'counted', 50, 'page-equivalents')`;
     const after = await getOrgStorage("o", sql as never, { excludeExtracts: true });
     expect(after.pages - before.pages).toBe(50);
@@ -401,9 +401,9 @@ describe("extract sweep", () => {
   it("removes chat evidence spans quoting an extract's documents, and keeps the chat turn", async () => {
     const extract = await newExtract();
     const runId = await seedRun(extract);
-    await sql`insert into chat_sessions (id, workspace_id, user_id) values ('chat-1', 'w', 'u')`;
+    await sql`insert into chat_sessions (id, project_id, user_id) values ('chat-1', 'w', 'u')`;
     await sql`insert into chat_turns (id, session_id, role, content) values ('turn-1', 'chat-1', 'user', 'what does the report say?')`;
-    await sql`insert into chat_answer_evidence_spans (id, answer_id, session_id, user_id, workspace_id, citation_index, answer_start, answer_end, answer_text, source_text, source_start, source_end, citation)
+    await sql`insert into chat_answer_evidence_spans (id, answer_id, session_id, user_id, project_id, citation_index, answer_start, answer_end, answer_text, source_text, source_start, source_end, citation)
       values ('span-x', 'a1', 'chat-1', 'u', 'w', 1, 0, 5, 'It is', 'CONFIDENTIAL extract text', 0, 25, ${sql.json({ documentId: `${runId}-d1` })}),
              ('span-kept', 'a1', 'chat-1', 'u', 'w', 2, 0, 5, 'It is', 'kept document text', 0, 18, ${sql.json({ documentId: "kept-doc" })})`;
     await sql`update extracts set expires_at = now() - interval '1 minute' where id = ${extract.id}`;
@@ -421,13 +421,13 @@ describe("extract sweep", () => {
       const { createRunCreation } = await import("../services/run-creation.js");
       const creation = createRunCreation({ sql: sql as never, start: async () => ({ status: "started" }) as never });
       await expect(creation.create({
-        userId: "u", workspaceId: "w", kind: "direct-upload", pipeline: {} as never, extract,
+        userId: "u", projectId: "w", kind: "direct-upload", pipeline: {} as never, extract,
         sources: { kind: "files", files: [{ filename: "r.pdf", mimeType: "application/pdf", sourceKey: `${extract.storagePrefix}/raw/r.pdf` }] },
       })).rejects.toMatchObject({ status: 410, code: "extract_expired" });
     } finally {
       vi.unstubAllEnvs();
     }
-    expect((await sql`select id from workspace_runs where extract_id = ${extract.id}`).length).toBe(0);
+    expect((await sql`select id from project_runs where extract_id = ${extract.id}`).length).toBe(0);
   });
 
   it("refuses to reprocess an extract run or its documents with 409, single and bulk", async () => {
@@ -437,7 +437,7 @@ describe("extract sweep", () => {
     await expect(reprocessRun(runId, "u")).rejects.toMatchObject({ statusCode: 409, code: "extract_not_reprocessable" });
     const { bulkReprocessDocuments } = await import("../services/documents.js");
     await expect(bulkReprocessDocuments([`${runId}-d1`], "u")).rejects.toMatchObject({ statusCode: 409, code: "extract_not_reprocessable" });
-    expect((await sql`select id from workspace_runs`).map((row) => row.id)).toEqual([runId]);
+    expect((await sql`select id from project_runs`).map((row) => row.id)).toEqual([runId]);
   });
 
   it("resumes a deletion that failed part-way", async () => {

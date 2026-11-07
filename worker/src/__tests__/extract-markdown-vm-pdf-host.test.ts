@@ -8,7 +8,7 @@ import { defaultPipelineFeatures, normalizeStoredPipelineFeatures } from "@docsl
 
 import { acceptSandboxedPdfResult, type SandboxedPdfJob } from "../extractors/plugins.js";
 import { VISION_ROUTING_VERSION_SLOT } from "../lib/vision-routing-v2.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
 import type { CommandPlan, CommandRunner } from "../tools/runner.js";
@@ -18,14 +18,14 @@ import type { CommandPlan, CommandRunner } from "../tools/runner.js";
  * extraction, page-image evidence, the OCR ledger) runs against a runner spy that records every method call and every
  * command it is asked to run. Only the provider's job may run; no host `pdf*` tool may even be planned.
  */
-function run(documentExtraction: Record<string, unknown> = {}): WorkspaceRun {
+function run(documentExtraction: Record<string, unknown> = {}): ProjectRun {
   return {
     id: "run-1", orgId: "org-1", userId: "user-1", kind: "bulk-upload", status: "processing", stage: "extract-markdown",
     totalDocuments: 1, processedDocuments: 0, pagesTotal: 3, pagesProcessed: 0, spentCents: 0,
     pipeline: { ...defaultPipelineFeatures, markdownExtraction: true, visionFallback: true,
       documentExtraction: { ...defaultPipelineFeatures.documentExtraction, ...documentExtraction } },
     error: null, stats: {}, artifacts: {}, claimId: null, createdAt: new Date(), updatedAt: new Date(),
-  } as WorkspaceRun;
+  } as ProjectRun;
 }
 
 async function harness(providerResult: { ocrPages?: unknown; layoutFacts?: unknown; markdown: string }, documentExtraction: Record<string, unknown> = {}) {
@@ -114,7 +114,7 @@ describe("the sandboxed PDF route on the worker host", () => {
     ["DOCSLURP_PDF_EXTRACTOR", "vm-pdf", { order: { pdf: ["native-pdf"] } }],
     ["DOCSLURP_VM_PDF_INSTALLED", "1", { order: { pdf: ["poppler-text", "native-pdf"] } }],
     ["DOCSLURP_PDF_EXTRACTOR", "vm-pdf", { enrich: ["poppler-text"] }],
-  ])("under %s=%s refuses a run whose workspace override names a host parser (%j), without touching the host", async (name, value, override) => {
+  ])("under %s=%s refuses a run whose project override names a host parser (%j), without touching the host", async (name, value, override) => {
     vi.stubEnv(name, value);
     vi.stubEnv("WORKER_PAGE_FACTS", "true");
     const h = await harness({ markdown: "text\f\f\f" }, override);

@@ -42,7 +42,7 @@ export interface ProductionExecutorDepsInput {
   storage: Pick<ArtifactStore, "bucket" | "getJson" | "downloadToTempFile">;
   rasters: Pick<PdfRasterCache, "renderSelectedPages" | "sourcePath"> & Partial<Pick<PdfRasterCache, "renderClip">>;
   runner: Pick<CommandRunner, "plan" | "florence2" | "run" | "sandboxedOcrRead" | "localOcrRead">;
-  /** The workspace OCR language setting (`auto` or language codes); unset reads the environment default. */
+  /** The project OCR language setting (`auto` or language codes); unset reads the environment default. */
   ocrLanguage?: string;
   /** Ledger lookup for the document's canonical-document artifact uri. */
   canonicalUri: () => string | null;
@@ -258,7 +258,7 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
       const started = Date.now();
       // The router's raster (already rendered for routing) is read in the OCR boundary; OCR itself renders and decodes
       // nothing on the host. In vm/local mode a failed or refused read throws OcrBoundaryFailure, which the executor
-      // loop records as a failed page: neither the workspace-model fallback nor a cascade reads the page in OCR's place.
+      // loop records as a failed page: neither the project-model fallback nor a cascade reads the page in OCR's place.
       // With OCR off or hosted (operator choices with no recogniser) the read is empty.
       const mode = resolveOcrMode();
       const hostedReader = input.hostedReader ?? null;
@@ -285,7 +285,7 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
         input.recordOcrRead(read);
         const page = read.pages[0];
         // A degraded or empty read goes to the hosted escalation reader, which applies the escalation opt-in and its
-        // budget; never to the route's cascade or the workspace model. Without escalation the recogniser's read stands.
+        // budget; never to the route's cascade or the project model. Without escalation the recogniser's read stands.
         if (page?.escalation && hostedReader) await escalateOcrPages(read, hostedReader, input.document.id, signal);
         const text = page?.text.trim() ?? "";
         const model = page?.recogniser.startsWith("escalated:") ? page.recogniser.slice("escalated:".length) : OCR_MODEL;

@@ -6,7 +6,7 @@ import { defaultPipelineFeatures, fileFactsFor } from "@docslurp/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { sniffedPdf } from "../lib/sniffed-pdf.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 import { resolveNativePdfEngine } from "../native-pdf/engine.js";
 import { assertNativePdfEngineAtStartup, loadNativePdfEngine, setNativePdfEngineForTesting } from "../native-pdf/loader.js";
 import type { NativePdfEngine } from "../native-pdf/types.js";
@@ -61,7 +61,7 @@ describe("a polyglot x.pdf sniffed as HTML never reaches a PDF parser", () => {
       id: "doc-1", userId: "u", runId: "run-1", filename: "x.pdf", mimeType: facts().mimeType, fileFacts: facts(),
       sourceKey: "u/run/raw/x.pdf", status: "queued", extractionMode: "hybrid", pageCount: 1, createdAt: new Date(), updatedAt: new Date(),
     } as Document;
-    const run = { id: "run-1", orgId: "o", userId: "u", pipeline: { ...defaultPipelineFeatures, pdfRegionExtraction: true }, stats: {}, artifacts: {} } as unknown as WorkspaceRun;
+    const run = { id: "run-1", orgId: "o", userId: "u", pipeline: { ...defaultPipelineFeatures, pdfRegionExtraction: true }, stats: {}, artifacts: {} } as unknown as ProjectRun;
     const state = WorkflowState.create(run, [document]);
     const runner = { run: vi.fn(async () => { throw new Error("a parser ran"); }) };
     const stage = new ExtractMarkdownStage(runner as never, {} as never, { parserArtifactTimeoutMs: 1_000 } as never);

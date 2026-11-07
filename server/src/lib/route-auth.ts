@@ -6,7 +6,7 @@ import { matchedRoutes } from "hono/route";
  *
  * - "session" (the default for every route): a Better Auth cookie session.
  * - "apiKey": an API key bearer token, or a session. The route still checks
- *   the key's scopes, type and workspace itself.
+ *   the key's scopes, type and project itself.
  * - "route": the route authenticates the caller itself (OpenAI-compatible
  *   chat, SSO init/callback). `sessionAuth` resolves nothing.
  *

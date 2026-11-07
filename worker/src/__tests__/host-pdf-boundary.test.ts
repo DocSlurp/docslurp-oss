@@ -18,7 +18,7 @@ import type { CommandRunner } from "../tools/runner.js";
 /**
  * PDFs are Doppler's: in a VM (vm-pdf) wherever a provider is configured, which production ships statically; on the worker
  * host (doppler-md) only in customer-owned local mode (DOCSLURP_PDF_MODE=local with DOCSLURP_SERVICE_PROFILE=self-hosted);
- * with neither, refused: no host parser runs, not even one a workspace names.
+ * with neither, refused: no host parser runs, not even one a project names.
  */
 
 /** A runner that records every method called on it; `run` (executing a command) always fails the test. */
@@ -55,7 +55,7 @@ beforeEach(() => {
 afterEach(() => { setNativePdfEngineForTesting(null); resetExtractorPluginsForTest(); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
 describe("neither a VM nor local mode: PDF extraction fails closed", () => {
-  it("resolves to off and refuses every PDF order, including host extractors a workspace names", () => {
+  it("resolves to off and refuses every PDF order, including host extractors a project names", () => {
     expect(resolvePdfMode()).toBe("off");
     const registry = new ExtractorRegistry();
     expect(() => registry.resolve("pdf")).toThrow(PDF_EXTRACTION_UNCONFIGURED);

@@ -155,7 +155,7 @@ describe("a document's pageCountSource", () => {
   it("is measured only for a counted page count; an assumed, missing or unknown source is an estimate", async () => {
     const { mapDocument } = await import("../services/run-records.js");
     const row = (page_count_source: string | null | undefined) => mapDocument({
-      id: "d", user_id: "u", org_id: "o", workspace_id: "w", run_id: "r", filename: "a.pdf", mime_type: "application/pdf", source_key: "k",
+      id: "d", user_id: "u", org_id: "o", project_id: "w", run_id: "r", filename: "a.pdf", mime_type: "application/pdf", source_key: "k",
       status: "queued", extraction_mode: "fast", page_count: 40, page_count_source, version_number: 1, previous_version_id: null,
       created_at: new Date(0), updated_at: new Date(0),
     } as never).pageCountSource;

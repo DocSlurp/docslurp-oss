@@ -45,14 +45,14 @@ export interface SearchSessionExecutionInput {
   userId: string;
   session: SearchSessionJournal;
   options: SearchOptions;
-  workspaceId: string;
+  projectId: string;
   availability: SearchAvailability;
   chunks: SearchChunk[];
   effectiveQuery: string;
   filters: SearchOptions["filters"];
   selfQueryReasons: string[];
   variant?: string;
-  workspaceSettings?: Parameters<typeof applySearchControls>[0]["settings"];
+  projectSettings?: Parameters<typeof applySearchControls>[0]["settings"];
   retrievalChain?: unknown;
   wholeCorpusFallback?: (filters?: SearchOptions["filters"]) => Promise<SearchResult[]>;
   /** Floor already applied to `chunks`; omitted: resolved from the options with nothing dropped yet. */
@@ -68,7 +68,7 @@ export interface SearchPostRetrievalInput {
     "useRerank" | "useMmr" | "mmrLambda" | "useContextualCompression" | "candidateDepth" | "resultOrder" | "rerankProvider" | "rerankModel"
   >;
   rerankApiKey?: string;
-  rerankScope?: { orgId: string; workspaceId: string };
+  rerankScope?: { orgId: string; projectId: string };
   openRouterApiKey?: string | null;
   privacyMode: PrivacyMode;
   session: SearchSessionJournal;
@@ -80,7 +80,7 @@ export interface SearchSessionRetrievalInput
   retrieveCandidateLists(): Promise<SearchChunk[][]>;
   buildAvailability(chunks: SearchChunk[]): SearchAvailability;
   rerankApiKey?: string;
-  rerankScope?: { orgId: string; workspaceId: string };
+  rerankScope?: { orgId: string; projectId: string };
   openRouterApiKey?: string | null;
   privacyMode: PrivacyMode;
 }
@@ -338,14 +338,14 @@ export async function executeSearchSessionRetrieval(
     userId: input.userId,
     session: input.session,
     options: input.options,
-    workspaceId: input.workspaceId,
+    projectId: input.projectId,
     availability: input.buildAvailability(chunks),
     chunks,
     effectiveQuery: input.effectiveQuery,
     filters: input.filters,
     selfQueryReasons: input.selfQueryReasons,
     variant: input.variant,
-    workspaceSettings: input.workspaceSettings,
+    projectSettings: input.projectSettings,
     retrievalChain: input.retrievalChain,
     wholeCorpusFallback: input.wholeCorpusFallback,
     relevanceFloor: { minScore: floor.minScore, dropped: floor.dropped },
@@ -364,7 +364,7 @@ async function writeZeroResultDiagnostics(
 ): Promise<void> {
   const span = startTelemetrySpan("docslurp.search", "api.search-zero-result", {
     "docslurp.sessionId": args.sessionId,
-    "docslurp.workspaceId": args.workspaceId,
+    "docslurp.projectId": args.projectId,
   });
   try {
     await span.run(() => recordZeroResultDiagnostics(args));
@@ -379,11 +379,11 @@ export async function finalizeSearchSessionExecution(
   input: SearchSessionExecutionInput,
 ): Promise<SearchResponse> {
   let results = input.chunks.map((chunk) => searchChunkToResult(chunk));
-  if (input.workspaceSettings) {
+  if (input.projectSettings) {
     results = applySearchControls({
       query: input.retrievalQuery ?? input.query,
       results,
-      settings: input.workspaceSettings,
+      settings: input.projectSettings,
     });
   }
 
@@ -445,7 +445,7 @@ export async function finalizeSearchSessionExecution(
         effectiveQuery: input.effectiveQuery,
         filters: input.filters,
         options: input.options,
-        workspaceId: input.workspaceId,
+        projectId: input.projectId,
         selfQueryReasons: input.selfQueryReasons,
         availability: input.availability,
         retrievalChain: input.retrievalChain,
@@ -466,7 +466,7 @@ export async function finalizeSearchSessionExecution(
     const diagnostics = {
       sessionId: input.session.sessionId,
       userId: input.userId,
-      workspaceId: input.workspaceId,
+      projectId: input.projectId,
       query: input.query,
       filtersJson: toSearchMetadataRecord(input.filters),
     };
@@ -493,7 +493,7 @@ export async function finalizeSearchSessionExecution(
 
 async function attachParentText(results: SearchResult[], input: SearchSessionExecutionInput): Promise<void> {
   const query: typeof boundedSearchQuery = input.filters?.geo ? boundedSearchQuery : async build => await build(sql);
-  const scope = retrievalScope({ workspaceId: input.workspaceId, filters: input.filters, runId: input.options.runId });
+  const scope = retrievalScope({ projectId: input.projectId, filters: input.filters, runId: input.options.runId });
   results = results.filter(result => result.citation.source === "document");
   const keyMap = new Map<string, { documentId: string; pageNumber: number }>();
   for (const result of results) {

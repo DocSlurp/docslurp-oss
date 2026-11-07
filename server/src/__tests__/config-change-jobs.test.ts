@@ -46,19 +46,19 @@ afterAll(async () => {
 const pipeline = (patch: Partial<PipelineFeatures> = {}): PipelineFeatures => ({ ...defaultPipelineFeatures, ...patch });
 
 async function seed(args: { credits: number; autoConfirm?: boolean; documents?: number; vectorized?: boolean }) {
-  await sql`delete from workspace_runs`;
+  await sql`delete from project_runs`;
   await sql`delete from documents`;
-  await sql`delete from workspaces`;
+  await sql`delete from projects`;
   await sql`delete from organizations`;
   await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', ${args.credits})`;
   await sql`insert into org_memberships(org_id, user_id, role) values ('o1', 'u1', 'owner')`;
-  await sql`insert into workspaces(id, org_id, user_id, name, pipeline, auto_confirm_reindex)
+  await sql`insert into projects(id, org_id, user_id, name, pipeline, auto_confirm_reindex)
     values ('w', 'o1', 'u1', 'W', ${sql.json(JSON.parse(JSON.stringify(pipeline())))}, ${args.autoConfirm ?? false})`;
-  await sql`insert into workspace_search_settings(workspace_id, user_id) values ('w', 'u1') on conflict do nothing`.catch(() => undefined);
-  await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, artifacts)
+  await sql`insert into project_search_settings(project_id, user_id) values ('w', 'u1') on conflict do nothing`.catch(() => undefined);
+  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, artifacts)
     values ('src', 'o1', 'u1', 'w', 'upload', 'completed', 'index', ${sql.json(JSON.parse(JSON.stringify(pipeline())))}, ${args.documents ?? 2}, ${sql.json(Object.fromEntries(Array.from({ length: args.documents ?? 2 }, (_, i) => [`d${i}:markdown`, `s3://b/d${i}.md`])))})`;
   for (let i = 0; i < (args.documents ?? 2); i += 1) {
-    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id)
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id)
       values (${`d${i}`}, 'o1', 'u1', 'w', 'src', ${`f${i}.pdf`}, 'application/pdf', ${`k${i}`}, 'completed', 5, ${`c${i}`})`;
     if (args.vectorized) {
       await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension)
@@ -70,12 +70,12 @@ async function seed(args: { credits: number; autoConfirm?: boolean; documents?: 
 const embeddingChange = () => ({ pipeline: pipeline({ embedding: { ...defaultPipelineFeatures.embedding, target: "local" as const, modelUri: "llm://transformers.js/Xenova/gte-small" as never } }) });
 
 async function patch(input: Record<string, unknown>) {
-  const plan = await change.planWorkspaceChange({ workspaceId: "w", userId: "u1", input: input as never });
+  const plan = await change.planProjectChange({ projectId: "w", userId: "u1", input: input as never });
   expect(plan).not.toBeNull();
-  return { plan: plan!, applied: await change.applyWorkspaceChange({ plan: plan!, userId: "u1" }) };
+  return { plan: plan!, applied: await change.applyProjectChange({ plan: plan!, userId: "u1" }) };
 }
 
-describe("PATCH /v1/workspaces/:id is non-breaking", () => {
+describe("PATCH /v1/projects/:id is non-breaking", () => {
   beforeEach(() => seed({ credits: 10_000 }));
 
   const validBodies: Array<[string, Record<string, unknown>]> = [
@@ -86,7 +86,7 @@ describe("PATCH /v1/workspaces/:id is non-breaking", () => {
     ["retention days", { artifactRetentionDays: 30, runRetentionDays: 60 }],
     ["clear retention", { artifactRetentionDays: null, runRetentionDays: 0 }],
     ["pipeline summarize", { pipeline: pipeline({ summarize: true }) }],
-    ["workspace summaries", { summaries: true }],
+    ["project summaries", { summaries: true }],
     ["pipeline same", { pipeline: pipeline() }],
     ["pipeline webhooks", { pipeline: pipeline({ webhooks: { enabled: false } as never }) }],
     ["apply new-uploads", { apply: "new-uploads", pipeline: pipeline({ summarize: true }) }],
@@ -97,18 +97,18 @@ describe("PATCH /v1/workspaces/:id is non-breaking", () => {
   it.each(validBodies)("accepts %s", async (_name, body) => {
     const { applied } = await patch(body);
     expect(applied).not.toBeNull();
-    expect(applied!.workspace.id).toBe("w");
+    expect(applied!.project.id).toBe("w");
   });
 });
 
 describe("config-change jobs", () => {
-  it("plans document-summary backfill through the workspace summaries option", async () => {
+  it("plans document-summary backfill through the project summaries option", async () => {
     await seed({ credits: 10_000 });
-    const planned = await change.planWorkspaceChange({ workspaceId: "w", userId: "u1", input: { summaries: true } });
+    const planned = await change.planProjectChange({ projectId: "w", userId: "u1", input: { summaries: true } });
     expect(planned?.impact.kind).toBe("reindex-recommended");
     expect(planned?.impact.stages).toContain("document-summary");
     const { applied } = await patch({ summaries: true, apply: "new-uploads" });
-    expect(applied?.workspace.summaries).toBe(true);
+    expect(applied?.project.summaries).toBe(true);
     expect(applied?.job).toBeNull();
     await seed({ credits: 10_000 });
     expect((await patch({ summaries: true, apply: "reindex" })).applied?.job).not.toBeNull();
@@ -121,12 +121,12 @@ describe("config-change jobs", () => {
     expect(plan.impact.kind).toBe("reindex-required");
     expect(applied!.job).toMatchObject({ kind: "reindex", status: "queued", statusUrl: expect.stringMatching(/^\/v1\/jobs\//) });
     expect(applied!.queuedRunIds).toEqual(applied!.job!.runIds);
-    const [ws] = await sql<{ index_configs: Record<string, unknown> | null }[]>`select index_configs from workspaces where id = 'w'`;
+    const [ws] = await sql<{ index_configs: Record<string, unknown> | null }[]>`select index_configs from projects where id = 'w'`;
     expect(ws!.index_configs).toEqual({
       [indexConfigHash(before)]: before,
       [indexConfigHash(indexConfigOf(embeddingChange().pipeline))]: indexConfigOf(embeddingChange().pipeline),
     });
-    const [run] = await sql<{ job_id: string; ready: boolean }[]>`select job_id, creation_ready_at is not null as ready from workspace_runs where id = ${applied!.job!.id}`;
+    const [run] = await sql<{ job_id: string; ready: boolean }[]>`select job_id, creation_ready_at is not null as ready from project_runs where id = ${applied!.job!.id}`;
     expect(run!.job_id).toBe(applied!.job!.id);
     // Published for processing: run start and run-start recovery only pick up runs with creation_ready_at.
     expect(run!.ready).toBe(true);
@@ -140,11 +140,11 @@ describe("config-change jobs", () => {
     await seed({ credits: 10_000 });
     const extractId = "ext_" + "e".repeat(32);
     const prefix = `extracts/o1/${extractId}`;
-    await sql`insert into extracts (id, org_id, workspace_id, user_id, storage_prefix, retention_hours, expires_at)
+    await sql`insert into extracts (id, org_id, project_id, user_id, storage_prefix, retention_hours, expires_at)
       values (${extractId}, 'o1', 'w', 'u1', ${prefix}, 48, now() + interval '2 days')`;
-    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, extract_id, storage_prefix)
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, extract_id, storage_prefix)
       values ('ext-run', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'index', ${sql.json(JSON.parse(JSON.stringify(pipeline())))}, 1, ${extractId}, ${prefix})`;
-    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id)
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id)
       values ('dx', 'o1', 'u1', 'w', 'ext-run', 'secret.pdf', 'application/pdf', ${`${prefix}/raw/secret.pdf`}, 'completed', 5, ${`docslurp:extract:${extractId}:dx`})`;
 
     const { applied } = await patch(embeddingChange());
@@ -153,14 +153,14 @@ describe("config-change jobs", () => {
     expect(copies.some((copy) => copy.source_key.startsWith("extracts/"))).toBe(false);
 
     // The database refuses an extract source outside its own extract run, whatever path tries it.
-    await expect(sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, reindex_of)
+    await expect(sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, reindex_of)
       values ('dx-copy', 'o1', 'u1', 'w', ${applied!.job!.id}, 'secret.pdf', 'application/pdf', ${`${prefix}/raw/secret.pdf`}, 'queued', 5, 'dx', 'dx')`).rejects.toThrow(/extract source outside its own extract run/);
-    await expect(sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+    await expect(sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
       values ('dx-other', 'o1', 'u1', 'w', 'src', 'x.pdf', 'application/pdf', ${`extracts/o1/ext_${"f".repeat(32)}/raw/x.pdf`}, 'queued', 1)`).rejects.toThrow(/extract source/);
-    await expect(sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+    await expect(sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
       values ('dx-wrong', 'o1', 'u1', 'w', 'ext-run', 'x.pdf', 'application/pdf', 'u1/raw/x.pdf', 'queued', 1)`).rejects.toThrow(/outside the extract prefix/);
     // Nor may a kept document take an extract's version key.
-    await expect(sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id)
+    await expect(sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id)
       values ('dx-key', 'o1', 'u1', 'w', 'src', 'x.pdf', 'application/pdf', 'u1/raw/k.pdf', 'queued', 1, ${`docslurp:extract:${extractId}:dx`})`).rejects.toThrow(/extract version key/);
     await sql`delete from extracts`;
   });
@@ -171,7 +171,7 @@ describe("config-change jobs", () => {
       const { applied } = await patch(body);
       expect(applied!.job).toBeNull();
     }
-    const [runs] = await sql<{ n: number }[]>`select count(*)::int as n from workspace_runs where kind = 'reindex'`;
+    const [runs] = await sql<{ n: number }[]>`select count(*)::int as n from project_runs where kind = 'reindex'`;
     expect(runs!.n).toBe(0);
   });
 
@@ -193,13 +193,13 @@ describe("config-change jobs", () => {
     const { applied } = await patch(embeddingChange());
     expect(applied!.job).toMatchObject({ status: "blocked", reason: "credits" });
     expect(applied!.queuedRunIds).toEqual([]);
-    const [ws] = await sql<{ pipeline: PipelineFeatures }[]>`select pipeline from workspaces where id = 'w'`;
+    const [ws] = await sql<{ pipeline: PipelineFeatures }[]>`select pipeline from projects where id = 'w'`;
     expect(ws!.pipeline.embedding.modelUri).toBe("llm://transformers.js/Xenova/gte-small");
 
     expect((await blocked.resumeBlockedRuns({ sql: sql as never })).resumed).toBe(0);
     await sql`update organizations set credit_balance_cents = 10000 where id = 'o1'`;
     expect((await blocked.resumeBlockedRuns({ sql: sql as never })).resumed).toBe(applied!.job!.runIds.length);
-    const [run] = await sql<{ status: string; blocked_reason: string | null; ready: boolean }[]>`select status, blocked_reason, creation_ready_at is not null as ready from workspace_runs where id = ${applied!.job!.id}`;
+    const [run] = await sql<{ status: string; blocked_reason: string | null; ready: boolean }[]>`select status, blocked_reason, creation_ready_at is not null as ready from project_runs where id = ${applied!.job!.id}`;
     expect(run).toEqual({ status: "queued", blocked_reason: null, ready: true });
   });
 
@@ -217,14 +217,14 @@ describe("config-change jobs", () => {
 
     // d0 is re-indexed on B mid-flight; the B run is still processing.
     const [kid] = await sql<{ id: string }[]>`select id from documents where previous_version_id = 'd0'`;
-    await sql`update workspace_runs set status = 'processing' where id = ${first.applied!.job!.id}`;
+    await sql`update project_runs set status = 'processing' where id = ${first.applied!.job!.id}`;
     await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension) values ('vk', ${kid!.id}, 'lancedb', 'b', 'p', 'm2', 384)`;
     await sql`update documents set status = 'completed', index_config_hash = ${hashes.B} where id = ${kid!.id}`;
 
     const second = await patch({ pipeline: C });
     expect(second.applied!.cancelledRunIds).toEqual([first.applied!.job!.id]);
     expect(cancelSignal).toHaveBeenCalledWith(first.applied!.job!.id);
-    const [oldRun] = await sql<{ status: string; control_state: string }[]>`select status, control_state from workspace_runs where id = ${first.applied!.job!.id}`;
+    const [oldRun] = await sql<{ status: string; control_state: string }[]>`select status, control_state from project_runs where id = ${first.applied!.job!.id}`;
     expect(oldRun).toEqual({ status: "processing", control_state: "cancel_requested" });
     // A requested cancel is not terminal: the job reads processing (and streams no `done`) until the run ends.
     const lingering = await jobs.getJobStatus(first.applied!.job!.id, "u1", { apiKey: null });
@@ -236,14 +236,14 @@ describe("config-change jobs", () => {
     // Every live document (the B-indexed d0 replacement and the still-A d1, d2) is queued for C.
     const live = await sql<{ id: string; h: string | null }[]>`select id, index_config_hash h from documents where superseded_at is null and status = 'completed' order by id`;
     expect(live.map((r) => r.h).sort()).toEqual([hashes.A, hashes.A, hashes.B].sort());
-    const queued = await sql<{ previous_version_id: string }[]>`select previous_version_id from documents where run_id in (select id from workspace_runs where job_id = ${second.applied!.job!.id})`;
+    const queued = await sql<{ previous_version_id: string }[]>`select previous_version_id from documents where run_id in (select id from project_runs where job_id = ${second.applied!.job!.id})`;
     expect(queued.map((r) => r.previous_version_id).sort()).toEqual(["d1", "d2", kid!.id].sort());
-    const [ws] = await sql<{ index_configs: Record<string, unknown> }[]>`select index_configs from workspaces where id = 'w'`;
+    const [ws] = await sql<{ index_configs: Record<string, unknown> }[]>`select index_configs from projects where id = 'w'`;
     expect(Object.keys(ws!.index_configs).sort()).toEqual(Object.values(hashes).sort());
 
     // The C job finishes: each replacement completes on C and supersedes its source.
     for (const row of queued) {
-      const [replacement] = await sql<{ id: string }[]>`select id from documents where previous_version_id = ${row.previous_version_id} and run_id in (select id from workspace_runs where job_id = ${second.applied!.job!.id})`;
+      const [replacement] = await sql<{ id: string }[]>`select id from documents where previous_version_id = ${row.previous_version_id} and run_id in (select id from project_runs where job_id = ${second.applied!.job!.id})`;
       await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension) values (${`vc-${replacement!.id}`}, ${replacement!.id}, 'lancedb', 'b', 'p', 'm3', 1024)`;
       await sql`update documents set status = 'completed', index_config_hash = ${hashes.C} where id = ${replacement!.id}`;
     }
@@ -251,7 +251,7 @@ describe("config-change jobs", () => {
     expect(done.map((r) => r.h)).toEqual([hashes.C, hashes.C, hashes.C]);
     const serving = await import("../search/index-serving.js");
     await serving.pruneDrainedIndexConfigs(sql as never);
-    const [pruned] = await sql<{ index_configs: Record<string, unknown> }[]>`select index_configs from workspaces where id = 'w'`;
+    const [pruned] = await sql<{ index_configs: Record<string, unknown> }[]>`select index_configs from projects where id = 'w'`;
     expect(Object.keys(pruned!.index_configs)).toEqual([hashes.C]);
   });
 
@@ -261,18 +261,18 @@ describe("config-change jobs", () => {
     expect(first.applied!.job).toMatchObject({ status: "blocked" });
     const second = await patch({ pipeline: pipeline({ embedding: { ...defaultPipelineFeatures.embedding, target: "local" as const, modelUri: "llm://transformers.js/Xenova/all-MiniLM-L6-v2" as never } }) });
     expect(second.applied!.job).toMatchObject({ status: "blocked" });
-    const [cancelled] = await sql<{ status: string; control_state: string }[]>`select status, control_state from workspace_runs where id = ${first.applied!.job!.id}`;
+    const [cancelled] = await sql<{ status: string; control_state: string }[]>`select status, control_state from project_runs where id = ${first.applied!.job!.id}`;
     expect(cancelled).toEqual({ status: "failed", control_state: "cancelled" });
 
     await sql`update organizations set credit_balance_cents = 10000 where id = 'o1'`;
-    await sql`update workspace_runs set control_state = 'paused' where id = ${second.applied!.job!.id}`;
+    await sql`update project_runs set control_state = 'paused' where id = ${second.applied!.job!.id}`;
     expect((await blocked.resumeBlockedRuns({ sql: sql as never })).resumed).toBe(0);
-    await sql`update workspace_runs set control_state = null where id = ${second.applied!.job!.id}`;
-    await sql`update workspaces set archived_at = now() where id = 'w'`;
+    await sql`update project_runs set control_state = null where id = ${second.applied!.job!.id}`;
+    await sql`update projects set archived_at = now() where id = 'w'`;
     expect((await blocked.resumeBlockedRuns({ sql: sql as never })).resumed).toBe(0);
-    await sql`update workspaces set archived_at = null where id = 'w'`;
+    await sql`update projects set archived_at = null where id = 'w'`;
     expect((await blocked.resumeBlockedRuns({ sql: sql as never })).resumed).toBe(1);
-    const [stale] = await sql<{ status: string }[]>`select status from workspace_runs where id = ${first.applied!.job!.id}`;
+    const [stale] = await sql<{ status: string }[]>`select status from project_runs where id = ${first.applied!.job!.id}`;
     expect(stale!.status).toBe("failed");
   });
 
@@ -288,19 +288,19 @@ describe("config-change jobs", () => {
   it("finds a job's runs by job_id", async () => {
     await seed({ credits: 10_000 });
     const { applied } = await patch(embeddingChange());
-    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, job_id)
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, job_id)
       values ('second-run', 'o1', 'u1', 'w', 'reindex', 'queued', 'queued', '{}', 1, ${applied!.job!.id})`;
     const status = await jobs.getJobStatus(applied!.job!.id, "u1");
     expect(status!.runIds.sort()).toEqual([applied!.job!.id, "second-run"].sort());
     // The lookup uses the job_id index (a seq scan on a tiny table is disabled for the plan check).
     await sql`set enable_seqscan = off`;
-    const plan = await sql<Record<string, string>[]>`explain select r.id from workspace_runs r where r.id = ${applied!.job!.id} or r.job_id = ${applied!.job!.id}`;
+    const plan = await sql<Record<string, string>[]>`explain select r.id from project_runs r where r.id = ${applied!.job!.id} or r.job_id = ${applied!.job!.id}`;
     await sql`set enable_seqscan = on`;
-    expect(plan.map((row) => Object.values(row)[0]).join("\n")).toContain("workspace_runs_job_id_idx");
+    expect(plan.map((row) => Object.values(row)[0]).join("\n")).toContain("project_runs_job_id_idx");
   });
 
   const stagesOf = async (jobId: string) =>
-    (await sql<{ s: string[] | null }[]>`select pipeline -> 'stageSubset' as s from workspace_runs where job_id = ${jobId} order by created_at`)
+    (await sql<{ s: string[] | null }[]>`select pipeline -> 'stageSubset' as s from project_runs where job_id = ${jobId} order by created_at`)
       .flatMap((row) => row.s ?? []);
   const MINILM = "llm://transformers.js/Xenova/all-MiniLM-L6-v2" as never;
   const embeddingTo = (pl: PipelineFeatures) => ({ pipeline: { ...pl, embedding: { ...pl.embedding, target: "local" as const, modelUri: MINILM } } });
@@ -327,9 +327,9 @@ describe("config-change jobs", () => {
     expect(first.applied!.job).not.toBeNull();
 
     const body = embeddingTo(pii);
-    const twin = await change.estimateWorkspaceChange({ workspaceId: "w", userId: "u1", input: body as never });
+    const twin = await change.estimateProjectChange({ projectId: "w", userId: "u1", input: body as never });
     const embedOnly = await change.estimateWork({
-      features: twin ? (await change.planWorkspaceChange({ workspaceId: "w", userId: "u1", input: body as never }))!.nextPipeline : pii,
+      features: twin ? (await change.planProjectChange({ projectId: "w", userId: "u1", input: body as never }))!.nextPipeline : pii,
       stages: twin!.impact.stages, documents: 2, pages: 10, orgId: "o1",
     });
     // The in-flight PII work is owed again; the compiled embed subset already includes it, so it is priced once.
@@ -356,44 +356,44 @@ describe("config-change jobs", () => {
   it("re-runs everything for a document whose cancelled run had no stage subset", async () => {
     await seed({ credits: 10_000, documents: 2, vectorized: true });
     const first = await patch(embeddingChange());
-    await sql`update workspace_runs set pipeline = pipeline - 'stageSubset' where id = ${first.applied!.job!.id}`;
+    await sql`update project_runs set pipeline = pipeline - 'stageSubset' where id = ${first.applied!.job!.id}`;
     const second = await patch(embeddingTo(embeddingChange().pipeline));
-    const runs = await sql<{ s: unknown }[]>`select pipeline -> 'stageSubset' as s from workspace_runs where job_id = ${second.applied!.job!.id}`;
+    const runs = await sql<{ s: unknown }[]>`select pipeline -> 'stageSubset' as s from project_runs where job_id = ${second.applied!.job!.id}`;
     expect(runs.every((run) => run.s === null)).toBe(true);
   });
 
   it("leaves in-flight full-index runs alone: they build the previous config, which stays served", async () => {
     await seed({ credits: 10_000, documents: 2, vectorized: true });
     // A full index (map -> full) is in flight for a deferred document; it indexes with the config current when it started.
-    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
       values ('fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'embed', '{}', 1)`;
     const { applied } = await patch(embeddingChange());
     expect(applied!.cancelledRunIds).toEqual([]);
-    const [run] = await sql<{ status: string; control_state: string | null }[]>`select status, control_state from workspace_runs where id = 'fi'`;
+    const [run] = await sql<{ status: string; control_state: string | null }[]>`select status, control_state from project_runs where id = 'fi'`;
     expect(run).toEqual({ status: "processing", control_state: null });
     // Its result is stamped with the previous config, which the map still records, so it stays searchable.
-    const [ws] = await sql<{ index_configs: Record<string, unknown> }[]>`select index_configs from workspaces where id = 'w'`;
+    const [ws] = await sql<{ index_configs: Record<string, unknown> }[]>`select index_configs from projects where id = 'w'`;
     expect(Object.keys(ws!.index_configs)).toContain(indexConfigHash(indexConfigOf(pipeline())));
   });
 });
 
 describe("concurrent PATCHes do not lose updates", () => {
-  const plan = async (input: Record<string, unknown>) => (await change.planWorkspaceChange({ workspaceId: "w", userId: "u1", input: input as never }))!;
-  const modelOf = async () => ((await sql`select pipeline from workspaces where id = 'w'`)[0]!.pipeline as PipelineFeatures).embedding.modelUri;
+  const plan = async (input: Record<string, unknown>) => (await change.planProjectChange({ projectId: "w", userId: "u1", input: input as never }))!;
+  const modelOf = async () => ((await sql`select pipeline from projects where id = 'w'`)[0]!.pipeline as PipelineFeatures).embedding.modelUri;
 
   it("an embedding change planned before a budget change keeps the budget (and the job matches the final index)", async () => {
     await seed({ credits: 10_000, documents: 2, vectorized: true });
     const embedding = await plan(embeddingChange());
     const budget = await plan({ monthlyBudgetCents: 4321 });
-    await change.applyWorkspaceChange({ plan: budget, userId: "u1" });
-    const applied = await change.applyWorkspaceChange({ plan: embedding, userId: "u1" });
-    const [row] = await sql`select monthly_budget_cents, pipeline, index_configs from workspaces where id = 'w'`;
+    await change.applyProjectChange({ plan: budget, userId: "u1" });
+    const applied = await change.applyProjectChange({ plan: embedding, userId: "u1" });
+    const [row] = await sql`select monthly_budget_cents, pipeline, index_configs from projects where id = 'w'`;
     expect(row!.monthly_budget_cents).toBe(4321);
     expect(await modelOf()).toBe("llm://transformers.js/Xenova/gte-small");
     const finalHash = indexConfigHash(indexConfigOf(row!.pipeline as PipelineFeatures));
     expect(Object.keys(row!.index_configs as object)).toContain(finalHash);
     expect(applied!.job).toMatchObject({ kind: "reindex" });
-    const [run] = await sql`select pipeline from workspace_runs where id = ${applied!.job!.id}`;
+    const [run] = await sql`select pipeline from project_runs where id = ${applied!.job!.id}`;
     expect((run!.pipeline as PipelineFeatures).embedding.modelUri).toBe("llm://transformers.js/Xenova/gte-small");
   });
 });
@@ -401,7 +401,7 @@ describe("concurrent PATCHes do not lose updates", () => {
 describe("re-index version numbers", () => {
   it("does not reuse the number of an upload that is still in flight", async () => {
     await seed({ credits: 10_000, documents: 1, vectorized: true });
-    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id, version_number, previous_version_id)
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id, version_number, previous_version_id)
       values ('up2', 'o1', 'u1', 'w', 'src', 'f0.pdf', 'application/pdf', 'k0', 'processing', 5, 'c0', 2, 'd0')`;
     await patch(embeddingChange());
     const children = await sql<{ version_number: number }[]>`select version_number from documents where reindex_of = 'd0'`;
@@ -412,9 +412,9 @@ describe("re-index version numbers", () => {
 describe("re-plan exhaustion", () => {
   it("throws a retryable 409 config_conflict and changes nothing", async () => {
     await seed({ credits: 10_000, documents: 1, vectorized: true });
-    const stale = { ...(await change.planWorkspaceChange({ workspaceId: "w", userId: "u1", input: { monthlyBudgetCents: 777 } as never }))!, rowVersion: "not-the-row-version" };
-    await expect(change.applyWorkspaceChange({ plan: stale, userId: "u1", maxAttempts: 1 })).rejects.toMatchObject({ status: 409, code: "config_conflict" });
-    expect((await sql`select monthly_budget_cents from workspaces where id = 'w'`)[0]!.monthly_budget_cents).toBeNull();
+    const stale = { ...(await change.planProjectChange({ projectId: "w", userId: "u1", input: { monthlyBudgetCents: 777 } as never }))!, rowVersion: "not-the-row-version" };
+    await expect(change.applyProjectChange({ plan: stale, userId: "u1", maxAttempts: 1 })).rejects.toMatchObject({ status: 409, code: "config_conflict" });
+    expect((await sql`select monthly_budget_cents from projects where id = 'w'`)[0]!.monthly_budget_cents).toBeNull();
   });
 });
 
@@ -433,7 +433,7 @@ describe("estimator prices the compiled plan the run will execute", () => {
 
   it.each(fields)("%s: priced and displayed stages equal the compiled stageOrder", async (_name, patchFields) => {
     await seed({ credits: 10_000, documents: 2, vectorized: true });
-    const plan = await change.planWorkspaceChange({ workspaceId: "w", userId: "u1", input: { pipeline: pipeline(patchFields), apply: "reindex" } as never });
+    const plan = await change.planProjectChange({ projectId: "w", userId: "u1", input: { pipeline: pipeline(patchFields), apply: "reindex" } as never });
     if (!plan || !plan.reindex || plan.impact.stages.length === 0) return; // field has no re-index effect in this config
     const compiled = compilePipelinePlan({ ...withoutStageSelection(plan.nextPipeline), stageSubset: [...plan.impact.stages] } as PipelineFeatures).stageOrder;
     expect(plan.impact.stages).toEqual(compiled);
@@ -443,17 +443,17 @@ describe("estimator prices the compiled plan the run will execute", () => {
 
   it("at least the embedding change is a priced re-index (guards the table above)", async () => {
     await seed({ credits: 10_000, documents: 2, vectorized: true });
-    const plan = await change.planWorkspaceChange({ workspaceId: "w", userId: "u1", input: embeddingChange() as never });
+    const plan = await change.planProjectChange({ projectId: "w", userId: "u1", input: embeddingChange() as never });
     expect(plan!.impact.stages.length).toBeGreaterThan(0);
     expect(plan!.estimate).not.toBeNull();
   });
 });
 
 describe("estimates equal the mutation's job estimate", () => {
-  it("workspace estimate route payload matches job.estimate", async () => {
+  it("project estimate route payload matches job.estimate", async () => {
     await seed({ credits: 10_000 });
     const body = embeddingChange();
-    const estimated = await change.estimateWorkspaceChange({ workspaceId: "w", userId: "u1", input: body as never });
+    const estimated = await change.estimateProjectChange({ projectId: "w", userId: "u1", input: body as never });
     expect(estimated!.impact.kind).toBe("reindex-required");
     expect(estimated!.estimate).toMatchObject({ documents: 2, pages: 10 });
     const { applied } = await patch(body);
@@ -462,7 +462,7 @@ describe("estimates equal the mutation's job estimate", () => {
 
   it("reports billing disabled with null credits when the deployment does not bill", async () => {
     await seed({ credits: 10_000 });
-    const estimated = await change.estimateWorkspaceChange({ workspaceId: "w", userId: "u1", input: embeddingChange() as never, env: {} });
+    const estimated = await change.estimateProjectChange({ projectId: "w", userId: "u1", input: embeddingChange() as never, env: {} });
     expect(estimated!.estimate).toMatchObject({ billing: "disabled", credits: null });
     expect(change.billingState({})).toBe("disabled");
     expect(change.billingState({ STRIPE_SECRET_KEY: "sk_test" })).toBe("enforced");
@@ -485,7 +485,7 @@ describe("job resource", () => {
     });
     expect((await app.request("/v1/jobs/nope")).status).toBe(404);
 
-    await sql`update workspace_runs set status = 'completed' where id = ${applied!.job!.id}`;
+    await sql`update project_runs set status = 'completed' where id = ${applied!.job!.id}`;
     const events = await (await app.request(`/v1/jobs/${applied!.job!.id}/events`)).text();
     expect(events).toContain("event: status");
     expect(events).toContain("event: progress");
@@ -511,14 +511,14 @@ describe("inline estimates", () => {
     expect(slow).toEqual({ estimate, estimateUrl: "/est" });
   });
 
-  it("a workspace change's job carries its estimate and the estimate route", async () => {
+  it("a project change's job carries its estimate and the estimate route", async () => {
     await seed({ credits: 10_000 });
-    const plan = await change.planWorkspaceChange({ workspaceId: "w", userId: "u1", input: embeddingChange() as never });
-    const applied = await change.applyWorkspaceChange({ plan: plan!, userId: "u1" });
-    expect(applied!.job).toMatchObject({ estimate: plan!.estimate, estimateUrl: "/v1/workspaces/w/estimate" });
+    const plan = await change.planProjectChange({ projectId: "w", userId: "u1", input: embeddingChange() as never });
+    const applied = await change.applyProjectChange({ plan: plan!, userId: "u1" });
+    expect(applied!.job).toMatchObject({ estimate: plan!.estimate, estimateUrl: "/v1/projects/w/estimate" });
     expect(plan!.estimate).not.toBeNull();
     // The estimate route still answers in full.
-    const full = await change.estimateWorkspaceChange({ workspaceId: "w", userId: "u1", input: { monthlyBudgetCents: 1 } as never });
+    const full = await change.estimateProjectChange({ projectId: "w", userId: "u1", input: { monthlyBudgetCents: 1 } as never });
     expect(full!.estimate).toBeNull();
   });
 });

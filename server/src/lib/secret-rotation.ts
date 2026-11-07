@@ -3,8 +3,8 @@ import { openSecret, sealSecret, validateEncryptionConfiguration } from "./encry
 
 /** Fixed inventory of AES-GCM stores; SQL identifiers never come from CLI input. */
 export const secretStores = [
-  { table: "workspace_secrets", column: "encrypted_value", key: "SECRETS_ENCRYPTION_KEY", plaintext: false },
-  { table: "workspace_connectors", column: "credentials_encrypted", key: "CREDENTIALS_ENCRYPTION_KEY", plaintext: false },
+  { table: "project_secrets", column: "encrypted_value", key: "SECRETS_ENCRYPTION_KEY", plaintext: false },
+  { table: "project_connectors", column: "credentials_encrypted", key: "CREDENTIALS_ENCRYPTION_KEY", plaintext: false },
   { table: "mcp_service_connections", column: "credentials_encrypted", key: "CREDENTIALS_ENCRYPTION_KEY", plaintext: false },
   { table: "webhooks", column: "secret", key: "SECRETS_ENCRYPTION_KEY", plaintext: true },
 ] as const;

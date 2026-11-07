@@ -22,7 +22,7 @@ function keyActor(keyType: "server" | "client", keyId = `${keyType}-key`): Reque
   return {
     type: "apiKey", userId: "user-1",
     apiKey: { keyId, userId: "user-1", orgId: "org-1", keyType, allowedDomains: keyType === "client" ? ["example.com"] : [], scopes: ["search", "chat"],
-      rateLimitRpm: null, rateLimitPpd: 10_000, rateLimits: [], workspaceIds: [] },
+      rateLimitRpm: null, rateLimitPpd: 10_000, rateLimits: [], projectIds: [] },
   };
 }
 

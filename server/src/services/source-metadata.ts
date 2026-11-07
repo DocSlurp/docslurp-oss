@@ -113,7 +113,7 @@ export async function resolveSourceMetadata(file: {
   mimeType: string;
   sourceKey: string;
   filename: string;
-}, scope?: { userId: string; orgId: string; workspaceId: string; runId: string; apiKeyId?: string | null }): Promise<SourceMetadata> {
+}, scope?: { userId: string; orgId: string; projectId: string; runId: string; apiKeyId?: string | null }): Promise<SourceMetadata> {
   const bytes = await downloadSourceBytes(file.sourceKey);
   const sourceSha256 = sha256Hex(bytes);
   // Header depth: magic bytes in the first few KB plus the declared type. ZIP and OLE containers are not opened and text is

@@ -59,7 +59,7 @@ const defaultDeps: RequestPolicyDeps = {
  * that cannot be resolved fails closed rather than widening.
  */
 export async function resolveSearchMaterializationPolicy(
-  args: { context?: DeferredRequestContext; workspacePipeline: PipelineFeatures; workspaceId: string },
+  args: { context?: DeferredRequestContext; projectPipeline: PipelineFeatures; projectId: string },
   deps: RequestPolicyDeps = defaultDeps,
 ): Promise<MaterializationPolicy> {
   if (args.context?.policy) return args.context.policy;
@@ -74,7 +74,7 @@ export async function resolveSearchMaterializationPolicy(
   }
   const capability = args.context ? null : deps.capability?.() ?? null;
   const resolved = await deps.resolve({
-    workspacePipeline: args.workspacePipeline, apiKey, workspaceId: args.workspaceId,
+    projectPipeline: args.projectPipeline, apiKey, projectId: args.projectId,
     ...(capability?.header ? { capabilityHeader: capability.header, origin: capability.origin } : {}),
   });
   return "error" in resolved ? FAIL_CLOSED_POLICY : resolved.policy;

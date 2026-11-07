@@ -6,7 +6,7 @@ import { classifyIngestFailure, defaultPipelineFeatures } from "@docslurp/shared
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { unsupportedSourceReason } from "../extractors/registry.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
 
@@ -53,7 +53,7 @@ function stageFor(sourcePath: string, c: (typeof cases)[number]) {
     totalDocuments: 1, processedDocuments: 0, pagesTotal: 1, pagesProcessed: 0, spentCents: 0,
     pipeline: { ...defaultPipelineFeatures, markdownExtraction: true },
     error: null, stats: {}, artifacts: {}, claimId: null, createdAt: new Date(), updatedAt: new Date(),
-  } as WorkspaceRun;
+  } as ProjectRun;
   const document = {
     id: "doc-1", userId: "user-1", runId: "run-1", filename: c.filename, mimeType: c.mimeType,
     sourceKey: `raw/${c.filename}`, status: "processing", extractionMode: "hybrid", pageCount: 1, createdAt: new Date(), updatedAt: new Date(),

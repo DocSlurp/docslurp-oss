@@ -3,7 +3,7 @@ import type { RequestActor, SessionRequestActor } from "./request-actor.js";
 /**
  * The first-party DocSlurp app: a Better Auth cookie session resolved by
  * `sessionAuth` (which also enforces the CSRF origin check on mutations).
- * Settings tools and modes (proposeWorkspaceSettings, suggestions mode,
+ * Settings tools and modes (proposeProjectSettings, suggestions mode,
  * thread settings changed from chat messages, Apply) are only for this actor.
  * API keys of any type (server, client/publishable), MCP OAuth tokens and
  * capability tokens are never first-party, whatever the request claims, so a

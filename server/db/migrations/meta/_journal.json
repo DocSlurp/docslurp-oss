@@ -925,6 +925,13 @@
       "when": 1793750400018,
       "tag": "0131_pricing_provider_state",
       "breakpoints": true
+    },
+    {
+      "idx": 132,
+      "version": "7",
+      "when": 1793834400000,
+      "tag": "0132_projects",
+      "breakpoints": true
     }
   ]
 }

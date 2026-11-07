@@ -12,7 +12,7 @@ import { compilePipelinePlan, type PipelineFeatures } from "./pipeline.js";
 
 /*
  * Upload quotes without a database: what `POST /v1/uploads/estimate` returns. This module holds the generic parts (page
- * counts and ranges from a file's name, type and size, the workspace's EstimateProfile, file-profile merging); the price
+ * counts and ranges from a file's name, type and size, the project's EstimateProfile, file-profile merging); the price
  * itself is the pricing provider's (pricing-provider.ts).
  */
 
@@ -32,7 +32,7 @@ export const quoteFileSchema = z.object({
   profile: fileProfileSchema.optional(),
 });
 
-/** What pricing an upload reads from a workspace: its compiled pipeline and org capacity, nothing else. */
+/** What pricing an upload reads from a project: its compiled pipeline and org capacity, nothing else. */
 export const estimateProfileSchema = z.strictObject({
   /** Pricing version (the pricing provider's) the profile was built under. */
   pricingVersion: z.string().max(64),
@@ -54,7 +54,7 @@ export const estimateProfileSchema = z.strictObject({
 });
 export type EstimateProfile = z.infer<typeof estimateProfileSchema>;
 
-/** Reduce a workspace pipeline to its EstimateProfile, exactly as the upload estimate prices it. */
+/** Reduce a project pipeline to its EstimateProfile, exactly as the upload estimate prices it. */
 export function estimateProfileFor(
   pipeline: PipelineFeatures,
   options: { workerSlots?: number; env: Record<string, string | undefined> },
@@ -116,7 +116,7 @@ export function applyFileProfile(file: QuoteFile): QuoteFile {
 }
 
 /**
- * Quote an upload of `files` into a workspace with `profile`: the active pricing provider's estimate. File profiles are
+ * Quote an upload of `files` into a project with `profile`: the active pricing provider's estimate. File profiles are
  * validated, clamped and merged first (applyFileProfile). An estimate only: billing is measured by the worker.
  */
 export function quoteUpload(args: {

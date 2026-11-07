@@ -153,12 +153,12 @@ export function estimateEvents(estimator, files, options = {}) {
  * profile? }`, e.g. `result.request.files`). Needs an API key with the `ingest` scope (or a session). The response is
  * the server's estimate; profiles never change what an upload is charged. Offline, show the profiles without credits.
  */
-export async function requestQuote({ files, workspace, speedBoost, apiKey, origin = "https://docslurp.io", fetch: fetchImpl = globalThis.fetch, init = {} }) {
+export async function requestQuote({ files, project, speedBoost, apiKey, origin = "https://docslurp.io", fetch: fetchImpl = globalThis.fetch, init = {} }) {
   const response = await fetchImpl(new URL("/v1/uploads/estimate", origin), {
     ...init,
     method: "POST",
     headers: { "content-type": "application/json", ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}), ...(init.headers ?? {}) },
-    body: JSON.stringify({ files, ...(workspace ? { workspace } : {}), ...(speedBoost !== undefined ? { speedBoost } : {}) }),
+    body: JSON.stringify({ files, ...(project ? { project } : {}), ...(speedBoost !== undefined ? { speedBoost } : {}) }),
   });
   if (!response.ok) throw new EstimatorError("quote_failed", `the server did not quote these files (${response.status})`);
   return response.json();

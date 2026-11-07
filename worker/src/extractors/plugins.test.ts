@@ -45,7 +45,7 @@ describe("extractor plugin registration", () => {
   it.each([
     ["DOCSLURP_PDF_EXTRACTOR", VM_PDF_EXTRACTOR_ID],
     ["DOCSLURP_VM_PDF_INSTALLED", "1"],
-  ])("under %s=%s refuses a workspace order naming poppler-text or native-pdf for PDFs", (name, value) => {
+  ])("under %s=%s refuses a project order naming poppler-text or native-pdf for PDFs", (name, value) => {
     vi.stubEnv(name, value);
     const registry = new ExtractorRegistry();
     expect(registry.resolve("pdf")).toEqual([VM_PDF_EXTRACTOR_ID]);

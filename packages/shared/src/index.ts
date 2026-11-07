@@ -58,8 +58,8 @@ export * from "./live-model-prices.js";
 export * from "./graph.js";
 export * from "./run.js";
 export * from "./run-failure.js";
-export * from "./workspace.js";
-export * from "./workspace-slug.js";
+export * from "./project.js";
+export * from "./project-slug.js";
 export * from "./connection-uri.js";
 export * from "./chunks.js";
 export * from "./search.js";
@@ -85,7 +85,7 @@ export * from "./openrouter-routing.js";
 export * from "./provider-regions.js";
 export * from "./chat-model-prices.js";
 
-export * from "./workspace-state.js";
+export * from "./project-state.js";
 export * from "./ingest-report.js";
 export * from "./organization-management.js";
 export * from "./worker-autoscale.js";
@@ -103,7 +103,7 @@ export * from "./page-render.js";
 export * from "./document-export.js";
 export * from "./extract-mode.js";
 
-export * from "./workspace-settings-proposal.js";
+export * from "./project-settings-proposal.js";
 
 export * from "./geo.js";
 export * from "./geo-projection-contract.js";

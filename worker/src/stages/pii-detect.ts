@@ -86,7 +86,7 @@ export class PiiScanIncompleteError extends Error {
 export function resolvePolicy(pipeline: WorkflowState["run"]["pipeline"]): PiiPolicy {
   const raw = pipeline.piiPolicy;
   // A pattern this worker does not know (a newer API configured it) must stop the scan, not be dropped:
-  // dropping it would index documents the workspace asked to have checked for it.
+  // dropping it would index documents the project asked to have checked for it.
   const unknown = raw.enabled ? (raw.patterns ?? []).filter((p) => !piiPatternTypeSchema.options.includes(p as PiiPatternType)) : [];
   if (unknown.length > 0) {
     throw new PiiScanIncompleteError(`PII policy names patterns this worker cannot detect: ${unknown.join(", ")}`);

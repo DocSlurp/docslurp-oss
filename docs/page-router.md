@@ -1,7 +1,7 @@
 # Page router and native-pdf engine (internal design)
 
 Status (2026-10-12, branch `feat/page-router`): everything here is **off by default**. The router runs only when the
-worker env ceiling `PAGE_ROUTER_MODE` and the workspace `pipeline.pageRouter.mode` both opt in; `shadow` records
+worker env ceiling `PAGE_ROUTER_MODE` and the project `pipeline.pageRouter.mode` both opt in; `shadow` records
 decisions without changing extraction. The native PDF engine runs only when `DOCSLURP_PDF_ENGINE` is set and the
 binding is installed. Evidence lives in evals/page-router/RESULTS.md (generated from
 `ledger.jsonl`), evals/page-router/HYPOTHESES.md,
@@ -89,17 +89,17 @@ fail closed by kind: private VLMs and local labelers are `non-free` until classi
 | `non-free` | Custom addenda, non-commercial, research-only, LFM/Gemma-style terms, no declared licence | rejected (`non-free-disabled`) |
 | `proprietary-hosted` | Closed model reached only through a vendor API (Gemini, Claude, GPT, Jev, Clef, pplx-decider) | kept |
 
-The flag covers `non-free` only. Proprietary hosted APIs are governed by the workspace privacy modes
+The flag covers `non-free` only. Proprietary hosted APIs are governed by the project privacy modes
 (`standard`, `local-only`, `strict-privacy`; see `docs/model-configuration.md`), not by this flag. Open-weight models we call
 only through a hosted API are classed by their verified weights licence (Ling-3.0-flash-VL, DeepSeek V4.1 Flash, GLM-5.3 Flash: MIT, `free`).
 
 With the flag on, the flag is read once (`routing/flags.ts`) and applied in: catalog admission
 (`buildRoutingTargetCatalog` / `buildDecisionModelCatalog`, reason `non-free-disabled`, via `buildRuntimeCatalog`),
 the decision-model chain (a requested non-free model is unresolved and traced as skipped; the decision client also refuses to call one),
-the executor registry (`executorFor` returns null, so a stored plan that names one falls back to the workspace vision model),
+the executor registry (`executorFor` returns null, so a stored plan that names one falls back to the project vision model),
 and the Extract flat-tier route policy (`isRouteEligibleForFlatTier`, `isMeasuredOcrRouteEligible`, `flatOcrDefaultRoutes`
 take `{ disableNonFree }`; dots.ocr leaves the math-page defaults). The app lists no router models; `/extractors` lists
-document extractors, all `free`. Workspace-configured embedding and vision models are not enforced by the flag; use
+document extractors, all `free`. Project-configured embedding and vision models are not enforced by the flag; use
 `licenseClassOfModel()` to check them.
 
 | Model | Class | Licence | Source |
@@ -162,8 +162,8 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 
 | Flag | Default | Values | Effect |
 |---|---|---|---|
-| `PAGE_ROUTER_MODE` | `off` (production: `shadow`) | off, shadow, active | Worker ceiling over the workspace `pageRouter.mode`; the lower of the two wins. The app reads it as the platform default: a new run whose workspace left `pageRouter.mode` unset gets `shadow` (never `active`) when it is shadow or active, so the route-pages stage is planned with no workspace setup. Set it on both `fly.app.toml` and `fly.worker.toml`. |
-| workspace `pipeline.pageRouter` | mode unset, router `baseline` | see `pageRouterConfigSchema` | Opt-in, objective, router kind, decision-model chain, tile size, budget per document, margin floor, verifier value. |
+| `PAGE_ROUTER_MODE` | `off` (production: `shadow`) | off, shadow, active | Worker ceiling over the project `pageRouter.mode`; the lower of the two wins. The app reads it as the platform default: a new run whose project left `pageRouter.mode` unset gets `shadow` (never `active`) when it is shadow or active, so the route-pages stage is planned with no project setup. Set it on both `fly.app.toml` and `fly.worker.toml`. |
+| project `pipeline.pageRouter` | mode unset, router `baseline` | see `pageRouterConfigSchema` | Opt-in, objective, router kind, decision-model chain, tile size, budget per document, margin floor, verifier value. |
 | `DISABLE_NON_FREE_SOFTWARE` | `false` | true, false, 1, 0 | Opt-out of non-free-licensed models and engines; see "Licence classes" below. A typo reads as false with one warning. |
 | `PAGE_ROUTER_TABLE_GATE` | `off` | off, shadow | Ruled-grid-or-crop table rule in shadow (telemetry only). |
 | `VISION_PAGE_ATTEMPTS` | `2` | integer 1..4 (clamped) | Vision provider requests per page and purpose per run, retries and fallbacks included (vision run guard, below). |
@@ -238,7 +238,7 @@ timeouts and aborts before sending consume nothing, and an admission whose call 
 `fetch` is handed back) and the local runtime call, through the
 `VisionRequestGate` that `executeVisionRuntime` requires (only operator benchmarks pass `null`). That
 covers legacy pages, page-router regions and their refusal fallbacks, cascade legs and
-workspace-model fallbacks, document-map OCR, extract-markdown self-critique and deferred page
+project-model fallbacks, document-map OCR, extract-markdown self-critique and deferred page
 materialization, and every request inside each of them. Other model calls are outside it (see the
 end of this section).
 
@@ -257,7 +257,7 @@ other 5xx, timeouts and network errors after sending, accepted streams that brea
 
 The counts live in a shared ledger (migration 0101, `worker/src/db/vision-attempt-store.ts`):
 admission takes the run's then the org's advisory lock, so every worker of a run and every run of an
-org admit against the same rows. The org comes from the run row (its workspace's org when the run has
+org admit against the same rows. The org comes from the run row (its project's org when the run has
 none; the worker loads the run with that same org, so usage rows and the credit debit use it too); a
 run with neither is refused (`unscoped-run`), never run unbounded. A store-backed run whose store
 has no ledger refuses every request (`no-attempt-ledger`, logged as an error) instead of counting per
@@ -288,7 +288,7 @@ it; without a receipt it is recorded from estimates, labelled `usage_source=esti
 An overrun logs `[vision-weight] overrun model=… provider=… upstream=… billed=… bound=…` and is
 reconciled against the request's admission ticket (`vision_admission_tickets`): a durable row,
 written at admission with the org the request was admitted under, its admitted weight and its catalog
-bound, that outlives the run, its workspace and the request's org-count row. In one transaction under
+bound, that outlives the run, its project and the request's org-count row. In one transaction under
 the org's advisory lock it adds billed minus admitted weight to that org's count as a settled row of
 its own (`overrun:<ticket>`; no Rich charge checkpoint removes it) and inserts a
 `vision_route_overruns` row keyed by the ticket. Reconciliation is idempotent per ticket: a retried
@@ -346,10 +346,10 @@ charge (`rich:<run>:<document>:<page>`, deterministic per run and page) carries 
 and the checkpoint deletes the ticket's `vision_org_attempts` row only if its insert of that charge
 happened (`on conflict do nothing returning id`). A page charged earlier, by another activity or
 another path, removes nothing more. Until that checkpoint the request stays counted (and in flight,
-so it never makes a refusal sticky): a cancel, a workspace or run deletion, a lost page-task lease
+so it never makes a refusal sticky): a cancel, a project or run deletion, a lost page-task lease
 or a crash between the read and its checkpoint leaves it counted. Rejections, failures, retries,
 critique and second reads stay counted. The count is keyed by org only, with no foreign key to runs
-or workspaces, so deleting either cannot reset it; it holds across runs, reprocessing and
+or projects, so deleting either cannot reset it; it holds across runs, reprocessing and
 extraction, and another org is never affected.
 
 Hosted vision is limited to the priced catalog. A vision route is `openai` or `openrouter` (a
@@ -364,13 +364,13 @@ a route is billed follows its effective destination (a route with no base URL go
 routes are unbilled, and an unknown hosted destination is refused. The OpenAI key goes only to the
 configured OpenAI base URL and the OpenRouter key only to the official OpenRouter endpoint; loopback
 servers get no key. Usage is priced and labelled on the route that served or billed each request (a
-fallback's model and provider, the configured OpenAI base URL), never the workspace's configured
+fallback's model and provider, the configured OpenAI base URL), never the project's configured
 primary.
 
 The page router plans only with targets the vision runtime accepts: `buildRuntimeCatalog` drops every
 VLM target that fails the same check (`vlmTargetProblem`, logged once per target as
 `[page-router] target=... filtered from the routing catalog`), so the planner picks the next-best
-admitted target, and a stored plan naming a dropped target falls back to the workspace vision model.
+admitted target, and a stored plan naming a dropped target falls back to the project vision model.
 Today that drops `anthropic/claude-haiku-5.5`, `anthropic/claude-sonnet-5.5` and
 `google/gemini-3.5-flash-lite` (not in the priced catalog) and the private seeds
 (`vlm:private/<id>`, whose URIs carry no registry alias).
@@ -385,7 +385,7 @@ downscaling), Gemini 3's largest per-image count (2,240), Gemini 2.x's 258-token
 256 px, and, for open-weights models, the most tokens their published Hugging Face image processor
 gives one image at any size, after minimum-size upscaling, resizing, tiling and patch merging, plus
 framing tokens (DeepSeek V4.1 Flash 1,024; GLM 5.3 Flash 8,002; MiMo V2.6 Flash and Nemotron 3.5
-Super VL have no bound and are refused, above; see `visionModelImageTokenBound` in `packages/shared/src/embedding.ts`). Workspace schema labels in the
+Super VL have no bound and are refused, above; see `visionModelImageTokenBound` in `packages/shared/src/embedding.ts`). Project schema labels in the
 `schema-form-fields` prompt are capped (100 labels, 80 characters each, 4 KB in total) and a prompt
 over 16 KB is refused before admission. On OpenRouter the request carries `provider.max_price`:
 `prompt` and `completion` (USD per million tokens) equal to the prices the weight assumes, `image`
@@ -397,7 +397,7 @@ provider that meets your routing requirements") for that, and such a 503 (or a b
 matching endpoints or `max_price`) is a counted failure, not a throttle (`isRoutingExclusion`,
 `worker/src/lib/provider-retry.ts`; an assumption, not verified with a paid call). The in-process
 local runtime weighs 2 cents. So the most an org can cost us per day in uncharged requests is the
-$40 bound, whichever models its workspaces route to: at an unreadable size, 651 requests on the
+$40 bound, whichever models its projects route to: at an unreadable size, 651 requests on the
 default `deepseek/deepseek-v4.1-flash-1017` (6.14 cents), 1,083 on `gpt-4.1-mini` (3.69 cents),
 1,553 on `google/gemini-3.1-flash-lite` (2.58 cents); a 1700x2200 page weighs 2.15 cents on the
 default model (1,864 a day). Any mix in one org shares the same bound.
@@ -430,7 +430,7 @@ hold ink: size and pixel dimensions are read from the render file vision would r
 render carries no dimensions), and a render that cannot be confirmed is not sent
 (`unverified-render`, page fact `not-selected`).
 
-Outside the guard: the decision-model verifier (off unless a workspace values quality at or above
+Outside the guard: the decision-model verifier (off unless a project values quality at or above
 0.50 USD per unit; stops at the run cost cap), page-image embeddings and media frame description,
 which are not page transcription calls and keep their own bounds.
 
@@ -449,7 +449,7 @@ provider regression. The manifest's `failedPages` lists each such page with its 
 - Probe and trust rules are free (CPU). On easy born-digital pages TL1 accepted 26/26 pages on test with 0 false
   trusts; router cost there is about $0.002 per 1,000 pages (list estimate).
 - Decision-model triage bills input only (fractions of a cent per 1,000 pages at 384 px single-page states).
-- The TL3 verifier pays off only when a quality unit is worth >= $0.50 per page to the workspace; below that, free
+- The TL3 verifier pays off only when a quality unit is worth >= $0.50 per page to the project; below that, free
   checks capture most of the escalation gain (test replay: free checks $4.77 vs always-escalate $31.26 per 1,000
   pages).
 - Hosted targets dominate cost; the router's job is to keep pages on accept-text and cheap targets unless evidence
@@ -474,8 +474,8 @@ provider regression. The manifest's `failedPages` lists each such page with its 
    integrity judge).
 5. Run `node scripts/evaluation-integrity-judge.mjs` for every corpus used in a promotion claim (supports synthetic,
    `licensed-real` and declared non-deterministic assets).
-6. Turn on in this order: `shadow` on a few workspaces, compare `page-route-decision`, `page-route-timing` and
-   `page-route-chunk-estimate` rows against actuals, then `active` per workspace.
+6. Turn on in this order: `shadow` on a few projects, compare `page-route-decision`, `page-route-timing` and
+   `page-route-chunk-estimate` rows against actuals, then `active` per project.
 
 ## Production rollout: shadow now, promotion later
 
@@ -485,9 +485,9 @@ Production (`fly.app.toml`, `fly.worker.toml`) runs both features in shadow: `PA
 (`native-pdf-shadow` in `performance_log`, the route plan artifact) and never changes extraction output. Native OCR models
 and CJK fonts stay off; page OCR runs in the VM provider (`DOCSLURP_OCR_MODE=vm`).
 
-Workspaces need no setup: the app stamps `pageRouter.mode=shadow` on a new run when the workspace left it unset
-(`withPlatformPageRouterMode`), so the stage plan every service compiles includes `route-pages`. A workspace that sets
-`off` stays off; `active` stays a per-workspace opt-in under the ceiling. Runs created before the flag change have no
+Projects need no setup: the app stamps `pageRouter.mode=shadow` on a new run when the project left it unset
+(`withPlatformPageRouterMode`), so the stage plan every service compiles includes `route-pages`. A project that sets
+`off` stays off; `active` stays a per-project opt-in under the ceiling. Runs created before the flag change have no
 route-pages stage; reprocess to include it.
 
 **Image build.** The pinned binding (`vendor-artifacts/native-pdf/manifest.json`, sha256) is a private release asset.
@@ -519,12 +519,12 @@ Promote the two features independently and only with evidence; each step is a co
    evaluation integrity judge passing, and quality at parity on a held-out slice. Rollback: set it back to `shadow`.
 2. **Probe**: done. The Python/PyMuPDF probe was removed with PyMuPDF (2026-10-15); `internal research notes`
    holds the last parity run (text-layer status and needs-attention agree on every page of the development slice).
-3. **Page router, workspace `pageRouter.mode=active` under `PAGE_ROUTER_MODE=active`**: raise the worker ceiling to `active`
-   in `fly.worker.toml` (the app stamp stays `shadow`, so no workspace changes behaviour until it sets `active`). Gates:
+3. **Page router, project `pageRouter.mode=active` under `PAGE_ROUTER_MODE=active`**: raise the worker ceiling to `active`
+   in `fly.worker.toml` (the app stamp stays `shadow`, so no project changes behaviour until it sets `active`). Gates:
    shadow plans on production pages show estimated cost and quality at or better than the legacy path, decision-model health
    canaries green for 3 distinct UTC days (`DOCSLURP_DECISION_HEALTH_HISTORY` set on a persistent path), the integrity judge
-   passing, and an active-mode canary workspace with a measured cost-per-1,000-pages and quality delta before wider rollout.
-   Make `active` the default for unset workspaces only as a separate, reviewed change.
+   passing, and an active-mode canary project with a measured cost-per-1,000-pages and quality delta before wider rollout.
+   Make `active` the default for unset projects only as a separate, reviewed change.
 4. Rollback for any step is the previous value of the flag; shadow output is telemetry only and safe to leave on.
 
 ### Default free routing (2026-10-22)

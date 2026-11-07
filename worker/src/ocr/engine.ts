@@ -78,7 +78,7 @@ export interface OcrReadInput {
   pages?: number[];
   /** A lower frame cap than the default (the frames the run can pay for); the boundary stops there and reports truncation. */
   maxFrames?: number;
-  /** Workspace OCR language setting (`auto` or codes). */
+  /** Project OCR language setting (`auto` or codes). */
   languageSetting?: string;
   /** Keep PNGs of pages that qualify for escalation. */
   escalation: boolean;

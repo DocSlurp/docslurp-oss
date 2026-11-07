@@ -30,7 +30,7 @@ export async function authorizeMeasuredPages(
   const pages = await store.measuredPagesAboveIntake(state.run.id);
   if (!(pages > 0)) return { checkedPages: 0 };
   const credits = pageCredits("fast", pages) * speedBoostMultiplier(state.run.pipeline.speedBoost === true);
-  const outcome = await store.enforceSpendForCharge({ id: state.run.id, orgId: state.run.orgId ?? null, workspaceId: state.run.workspaceId, userId: state.run.userId }, credits);
+  const outcome = await store.enforceSpendForCharge({ id: state.run.id, orgId: state.run.orgId ?? null, projectId: state.run.projectId, userId: state.run.userId }, credits);
   if (outcome.paused || outcome.blocked) {
     console.warn(`[page-auth] run=${state.run.id} document=${document.id} stopped: ${pages} measured pages above intake owe ${credits.toFixed(2)} credits more than the balance holds (paused=${outcome.paused})`);
     throw new RunPolicyError(`Credits do not cover the measured pages of document ${document.id}; run ${outcome.paused ? "paused" : "stopped"}`);

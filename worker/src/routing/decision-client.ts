@@ -246,7 +246,7 @@ function baseDecisionModelId(id: string): string {
 }
 
 export interface DecisionClientOptions {
-  /** Workspace privacy mode; hosted calls fail closed outside `standard`. */
+  /** Project privacy mode; hosted calls fail closed outside `standard`. */
   privacyMode: PrivacyMode | string | null | undefined;
   env?: NodeJS.ProcessEnv;
   fetchImpl?: typeof fetch;
@@ -347,7 +347,7 @@ export function createDecisionClient(options: DecisionClientOptions): DecisionCl
         const spec = endpointSpec(model);
         if (!spec) throw new DecisionUnavailableError(`unsupported decision endpoint ${model.endpoint}`);
         provider = spec.provider;
-        // Decision-model calls send workspace content to a hosted AI provider.
+        // Decision-model calls send project content to a hosted AI provider.
         assertProviderAllowed(options.privacyMode, {
           provider: spec.provider,
           model: model.id,

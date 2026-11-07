@@ -33,7 +33,7 @@ import { PiiDetectStage } from "./pii-detect.js";
 import { PageEmbedStage } from "./page-embed.js";
 import { configurePageAreaSink, createPageAreaSink } from "../pipeline/page-area-sink.js";
 
-/** Placeholder until the deferred-indexing stage lands; only reachable when a workspace opts into that mode. */
+/** Placeholder until the deferred-indexing stage lands; only reachable when a project opts into that mode. */
 
 export function createStages(args: {
   runner: CommandRunner;

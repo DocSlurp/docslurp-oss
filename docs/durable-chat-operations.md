@@ -8,7 +8,7 @@ No provider calls run in an HTTP request or WebSocket callback.
 
 Session-authenticated HTTP endpoints under `/v1/chat/operations`:
 
-- `POST /` accepts `{q, workspace?, sessionId?, model?}` with an
+- `POST /` accepts `{q, project?, sessionId?, model?}` with an
   `Idempotency-Key` of 8–128 ASCII letters, digits, underscores or hyphens.
   Returns 202 `{operationId,rootId,status}`. Retry the same input/key after a
   lost acknowledgement; the SQL owner lock and unique key return the original
@@ -27,7 +27,7 @@ Session-authenticated HTTP endpoints under `/v1/chat/operations`:
 `createChatOperationProvider(resolveActor)` structurally implements PR278's
 `RealtimeOperationProvider`. Pass a callback that revalidates the **current
 socket's session**, including revocation, not a user lookup or cached actor.
-Close/abort only detaches observation. Every delivery checks workspace and
+Close/abort only detaches observation. Every delivery checks project and
 owner again. Descendants are individually authorized. The integrated provider uses one shared tree-signature sweep per second, including
 missed notifications and offline descendant changes, then coalesces identical
 user/operation/cursor reads. The socket host bounds connections/subscriptions and
@@ -41,10 +41,10 @@ PostgresStore and indexed Redis PubSub/cache. Apply migrations through
 only after review/authorization. Missing shared transport fails closed. Flags
 remain disabled. See [native reassessment](realtime-mastra-assessment.md).
 
-The SQL operation row is now an application binding: tenant/root/workspace,
+The SQL operation row is now an application binding: tenant/root/project,
 idempotency, deadline, cancellation intent and quota counters. Native storage owns
 task/attempt state, leases, timeouts, results and zero-retry worker recovery.
-The executor reconstructs the existing workspace-chat policy and usage ledger
+The executor reconstructs the existing project-chat policy and usage ledger
 from trusted scope. Its lifetime is unrelated to HTTP responses and sockets.
 Session, MFA, membership and cancellation are checked during execution; accepted
 output is fenced under the root cancellation lock and native lease before native
@@ -60,7 +60,7 @@ count. No arbitrary subagent/retry launcher exists in the current tool surface.
 Replay pages have at most 256 indexed events. Public sequences are native indices
 plus one, including non-text events. Native cache append precedes delivery.
 Snapshots include accumulated text, tool outcomes and final citations, plus
-authoritative workspace_id/root_id and independent treeSettled. Expired/future
+authoritative project_id/root_id and independent treeSettled. Expired/future
 cursors resync from the retained final result; missing active history is explicit
 failure. Recovery does not launch work. Native task/cache and application binding
 retention is seven days; the worker removes expired application bindings in
@@ -92,7 +92,7 @@ could leave a derived rejected promise unhandled. The follow-up establishes the
 existing deferred execution context, enforces cancellation/deadline in the locked
 append transaction, and returns the already-observed persistence promise.
 
-Regression evidence: 88 tests across chat-operations.db and workspace-chat pass
+Regression evidence: 88 tests across chat-operations.db and project-chat pass
 with `NODE_OPTIONS=--unhandled-rejections=strict`. They include cancellation during
 real non-agent retrieval/generation boundaries (mocked providers), committed
 cancel/deadline versus late result, and rejected evidence persistence. This is an
@@ -121,7 +121,7 @@ cancellation even when the map locator degrades a provider error. The audit also
 added checks before materialization run/workflow creation, so cancellation during
 spend admission or run creation does not launch a new paid workflow. Already
 accepted workflows retain their independent ownership. The three affected routing,
-deferred-search and workspace-chat suites pass 139 tests under strict rejection
+deferred-search and project-chat suites pass 139 tests under strict rejection
 handling, including the new spend/create/dispatch races.
 
 ## Worker shutdown policy (native runtime)

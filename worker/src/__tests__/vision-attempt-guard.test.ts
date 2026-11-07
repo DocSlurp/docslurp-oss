@@ -54,7 +54,7 @@ import { guardedVisionCall } from "../lib/guarded-vision-call.js";
 import { loadRunState } from "../pipeline/stage-execution.js";
 import { PdfRasterCache, type PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import { CommandRunner } from "../tools/runner.js";
-import type { WorkspaceRun } from "../models.js";
+import type { ProjectRun } from "../models.js";
 import type { Config } from "../config.js";
 import type { Document } from "../models.js";
 
@@ -65,9 +65,9 @@ const CFG = { openAiBaseUrl: "https://api.openai.com/v1", costPer1kInputTokens: 
 /** A run state with its own attempt ledger (never the process-wide one other tests share). */
 function runState(pipeline: Record<string, unknown> = {}, backend = new MemoryVisionAttemptBackend(), orgId: string | null = "org-1"): WorkflowState {
   const state = WorkflowState.create({
-    id: "run-1", orgId, workspaceId: "ws-1", userId: "user-1", artifacts: {}, stats: {}, stage: "vision-extract",
+    id: "run-1", orgId, projectId: "ws-1", userId: "user-1", artifacts: {}, stats: {}, stage: "vision-extract",
     pipeline: { vision: VISION, privacyMode: "standard", visionFallback: true, ...pipeline },
-  } as unknown as WorkspaceRun, []);
+  } as unknown as ProjectRun, []);
   state.visionAttempts = backend;
   return state;
 }
@@ -107,7 +107,7 @@ describe("vision guard config", () => {
       const weight = visionRequestPricing({ model: model.id, runtime: model.runtime, billing, inputTokens: visionInputTokenBound(null, "", model.id) }).weightCents;
       if (billing === "openrouter") expect(weight).toBeCloseTo(worstCaseVisionRequestCents(model.id)!, 10);
       else expect(weight).toBeLessThanOrEqual(worstCaseVisionRequestCents(model.id)!);
-      // Requests the default bound admits x their worst case never pass $40, whichever model the workspace picks.
+      // Requests the default bound admits x their worst case never pass $40, whichever model the project picks.
       expect(Math.floor(4_000 / weight) * weight).toBeLessThanOrEqual(4_000);
       expect(weight).toBeLessThanOrEqual(costliest);
     }
@@ -224,7 +224,7 @@ describe("VisionRunGuard", () => {
   it("a store-backed run without the shared ledger refuses every request loudly, never counting per process", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const run = { id: "run-no-ledger", orgId: "org-1", workspaceId: "ws-1", userId: "user-1", artifacts: {}, stats: {}, pipeline: {} } as unknown as WorkspaceRun;
+    const run = { id: "run-no-ledger", orgId: "org-1", projectId: "ws-1", userId: "user-1", artifacts: {}, stats: {}, pipeline: {} } as unknown as ProjectRun;
     const state = await loadRunState({
       loadRun: async () => run, loadDocumentsForRun: async () => [], hydrateState: async (loaded: WorkflowState) => loaded,
     } as never, run.id, { hydrate: false });

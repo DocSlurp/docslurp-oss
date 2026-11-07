@@ -174,7 +174,7 @@ async function runFixtureBenchmark(args: {
         outputPath,
         vision: args.candidate,
         cfg: args.cfg,
-        // Operator benchmark over evaluation fixtures, not workspace content.
+        // Operator benchmark over evaluation fixtures, not project content.
         privacyMode: "standard",
         runner: args.runner,
         // Operator tool outside any run or org: no attempt guard.

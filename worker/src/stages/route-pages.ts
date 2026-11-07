@@ -463,7 +463,7 @@ export class RoutePagesStage implements Stage {
       return { router: baseline(), routerNote: `decision-model-unavailable:${args.requestedModels.join("|")}` };
     }
     // Decision calls cost money and send page images or text to a hosted provider: the run's own
-    // cost cap and the workspace privacy mode both gate them (strict-privacy audits the block).
+    // cost cap and the project privacy mode both gate them (strict-privacy audits the block).
     const canSpend = (this.deps.canSpend ?? ((s: WorkflowState) => !isCostCapExceeded(s)))(state);
     if (!canSpend) return { router: baseline(), routerNote: "decision-model-skipped:cost-cap" };
     let models = args.decisionModels;

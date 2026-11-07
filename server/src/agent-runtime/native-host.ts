@@ -63,7 +63,7 @@ export async function createNativeChatHost(options: {
     });
     const transportClient = trackRedis(createClient({ url: options.redisUrl, disableOfflineQueue: true,
       commandOptions: { abortSignal: io.signal, timeout: 2000 }, socket: { connectTimeout: 1000 } }));
-    // redis-streams declares node-redis 5 types; workspace uses compatible 6.
+    // redis-streams declares node-redis 5 types; project uses compatible 6.
     // The injected client's public duplicate/destroy/command API is tested below.
     const transport = new RedisStreamsPubSub({ client: transportClient as unknown as RedisStreamsPubSubConfig["client"],
       keyPrefix: `${namespace}:events`, maxStreamLength: 4096, streamIdleTtlMs: 7 * 86400000 });

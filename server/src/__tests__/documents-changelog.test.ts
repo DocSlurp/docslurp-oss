@@ -7,7 +7,7 @@ function buildDocument(id: string, versionNumber: number) {
     id,
     userId: "user-1",
     orgId: "org-1",
-    workspaceId: "ws-1",
+    projectId: "ws-1",
     runId: "run-1",
     filename: "master-service-agreement.md",
     mimeType: "text/markdown",

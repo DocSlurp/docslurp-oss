@@ -51,7 +51,7 @@ export const RATE_LIMIT_DOCS_PATH = "/docs/http#rate-limits-and-headers";
 export const CREDITS_DOCS_PATH = "/docs/http#credits-and-budgets";
 
 const CREDIT_CODES = new Set<ApiErrorCode>(["credit_exhausted", "minimum_credit_required", "payment_required"]);
-const BUDGET_CODES = new Set<ApiErrorCode>(["workspace_budget_paused", "org_budget_paused"]);
+const BUDGET_CODES = new Set<ApiErrorCode>(["project_budget_paused", "org_budget_paused"]);
 const KEY_LIMIT_CODES = new Set<ApiErrorCode>(["spend_limit_exceeded", "daily_page_limit"]);
 
 /**

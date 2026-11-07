@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { WorkspaceRunProgressSnapshot } from "@docslurp/shared";
+import type { ProjectRunProgressSnapshot } from "@docslurp/shared";
 import { redactOperatorEvent, redactOperatorKeys, redactOperatorRunFields } from "./progress-snapshot.js";
 
-function snapshot(): WorkspaceRunProgressSnapshot {
+function snapshot(): ProjectRunProgressSnapshot {
   return {
     run: { id: "run-1" },
     stages: [],
@@ -15,7 +15,7 @@ function snapshot(): WorkspaceRunProgressSnapshot {
       usageTotals: { costCents: 3, workerClasses: ["perf-8x"], regions: ["iad"] },
       resourceTotals: { elapsedMs: 100, cpuUserMs: 5, cpuSystemMs: 6, cpuTotalMs: 11, rssDeltaBytes: 1, peakRssBytes: 9 },
     },
-  } as unknown as WorkspaceRunProgressSnapshot;
+  } as unknown as ProjectRunProgressSnapshot;
 }
 
 describe("redactOperatorRunFields", () => {
@@ -45,7 +45,7 @@ describe("operator diagnostics nested in events and stage stats", () => {
     recentEvents: [heartbeat],
     stages: [{ stageName: "extract", status: "completed", stats: { pages: 12, cpuSeconds: 3.2, rssBytes: 5, workerClass: "perf-8x", regionBoxes: 4, nested: { peakRssMb: 9, region: "iad", kept: 1 } } }],
     run: { id: "run-1", stats: { documents: 2, workerId: "machine-91", cpuTotalMs: 12 } },
-  } as unknown as WorkspaceRunProgressSnapshot);
+  } as unknown as ProjectRunProgressSnapshot);
 
   it("removes resource and machine keys from heartbeat events, stage stats and run stats at any depth", () => {
     const out = redactOperatorRunFields(withEvents());

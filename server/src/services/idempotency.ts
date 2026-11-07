@@ -15,9 +15,10 @@ type IdempotencyRow = {
  * key is a hash over the organization, the user and the key, and a key from one tenant can never match another tenant's entry.
  */
 export function scopedIdempotencyKey(scope: IdempotencyScope, key: string): string {
-  // An API key and a target workspace narrow the scope further: two keys of one user (with different workspace allowlists)
+  // An API key and a target project narrow the scope further: two keys of one user (with different project allowlists)
   // never share a cache entry, and neither do two targets. Omitted, the scope is the organization and user alone.
-  const narrowed = scope.apiKeyId || scope.workspace ? `\u0000key:${scope.apiKeyId ?? ""}\u0000workspace:${scope.workspace ?? ""}` : "";
+  // Keep the opaque hash namespace stable across the terminology cutover.
+  const narrowed = scope.apiKeyId || scope.project ? `\u0000key:${scope.apiKeyId ?? ""}\u0000workspace:${scope.project ?? ""}` : "";
   return createHash("sha256").update(`${scope.orgId ?? ""}\u0000${scope.userId}${narrowed}\u0000${key}`).digest("hex");
 }
 
@@ -26,8 +27,8 @@ export type IdempotencyScope = {
   userId: string;
   /** The API key making the request, when it is not a browser session. */
   apiKeyId?: string | null;
-  /** The resolved target workspace (its ID, or the name of the one the request creates). */
-  workspace?: string | null;
+  /** The resolved target project (its ID, or the name of the one the request creates). */
+  project?: string | null;
 };
 
 /** The key was used before with a different request. Safe to show the caller; any other failure is not. */

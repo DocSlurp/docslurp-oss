@@ -37,11 +37,11 @@ beforeAll(async () => {
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com');
     insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 10000000), ('o2', 'Low', 'low', 'u1', 8, 101);
-    insert into workspaces(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W'), ('w2', 'o2', 'u1', 'L');
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+    insert into projects(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W'), ('w2', 'o2', 'u1', 'L');
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
       values ('run1', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 1, ${apiEstimate}),
              ('run2', 'o2', 'u1', 'w2', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 1, ${apiEstimate});
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, source_sha256, file_facts) values
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, source_sha256, file_facts) values
       ('big', 'o1', 'u1', 'w1', 'run1', 'log.txt', 'text/plain', 'raw/big', 'processing', ${apiEstimate}, 'assumed', '${sha}', '${JSON.stringify(textFacts)}'),
       ('poor', 'o2', 'u1', 'w2', 'run2', 'log.txt', 'text/plain', 'raw/poor', 'processing', ${apiEstimate}, 'assumed', '${sha}', '${JSON.stringify(textFacts)}'),
       ('small', 'o1', 'u1', 'w1', 'run1', 'a.txt', 'text/plain', 'raw/small', 'processing', 2, 'counted', null, '${JSON.stringify(textFacts)}');
@@ -106,7 +106,7 @@ describe("text pages are measured in full by the worker, and only that count bil
     const { state, document } = await stateFor("run2", "poor");
     expect(await recordMeasuredTextPageCount({ state, document, format: "plain-text", readSource: async () => bytes })).toMatchObject({ pages: fullCount });
     await expect(authorizeMeasuredPages(state, document)).rejects.toMatchObject({ name: "RunPolicyError" });
-    const { rows } = await db.query<{ control_state: string | null }>(`select control_state from workspace_runs where id = 'run2'`);
+    const { rows } = await db.query<{ control_state: string | null }>(`select control_state from project_runs where id = 'run2'`);
     expect(rows[0]!.control_state).toBe("paused");
   }, 60_000);
 
@@ -121,11 +121,11 @@ describe("text pages are measured in full by the worker, and only that count bil
   }, 60_000);
 
   it("Store.pauseRunForSpend pauses a processing run once; a second pause reports blocked, not paused", async () => {
-    await db.exec(`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+    await db.exec(`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
       values ('run3', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'extract', '${pipeline}', 1)`);
-    const run = { id: "run3", orgId: "o1", workspaceId: "w1", userId: "u1" };
+    const run = { id: "run3", orgId: "o1", projectId: "w1", userId: "u1" };
     expect(await store.pauseRunForSpend(run, "credit_exhausted")).toEqual({ paused: true, blocked: true });
-    const { rows } = await db.query<{ control_state: string; pause_reason: string }>(`select control_state, pause_reason from workspace_runs where id = 'run3'`);
+    const { rows } = await db.query<{ control_state: string; pause_reason: string }>(`select control_state, pause_reason from project_runs where id = 'run3'`);
     expect(rows[0]).toEqual({ control_state: "paused", pause_reason: "credit_exhausted" });
     expect(await store.pauseRunForSpend(run, "credit_exhausted")).toEqual({ paused: false, blocked: true });
   }, 60_000);

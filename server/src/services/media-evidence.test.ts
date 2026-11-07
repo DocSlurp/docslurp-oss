@@ -16,7 +16,7 @@ describe("media evidence", () => {
     expect(result?.nextOffset).toBe(10 + result!.results[0].text.length);
     const [strings, ...params] = mocks.sql.mock.calls[0];
     const sql = strings.join('?');
-    expect(sql).toContain("d.workspace_id =");
+    expect(sql).toContain("d.project_id =");
     expect(sql).toContain("d.status = 'completed'");
     expect(sql).toContain("d.superseded_at is null");
     expect(params).toEqual([11, "video", "selected"]);

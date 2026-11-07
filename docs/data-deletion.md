@@ -1,6 +1,6 @@
 # Data deletion and tenant offboarding
 
-How DocSlurp deletes documents, runs, workspaces, organizations and accounts,
+How DocSlurp deletes documents, runs, projects, organizations and accounts,
 what it keeps, and how long each step takes.
 
 ## The contract
@@ -16,37 +16,37 @@ before FK cascades destroy the rows that describe it:
 | Trigger | Queue | What it records |
 | --- | --- | --- |
 | `documents_enqueue_cleanup` | `document_cleanup_queue` (one row per document) | LanceDB targets (from `vector_indexes` and `vector_index_outbox`), stage artifact URIs, the raw source key, knowledge-graph node ids. It also drops the document's pending vector writes. |
-| `workspace_runs_enqueue_storage_cleanup` | `storage_cleanup_queue` (`storage_prefix`) | The run's storage prefix `<userId>/<runId>/` for each uploader, plus run-level artifact URIs. |
+| `project_runs_enqueue_storage_cleanup` | `storage_cleanup_queue` (`storage_prefix`) | The run's storage prefix `<userId>/<runId>/` for each uploader, plus run-level artifact URIs. |
 
 Because the triggers run inside Postgres, every delete path is covered: single
-and bulk document delete, workspace delete, run retention, discarded intake,
+and bulk document delete, project delete, run retention, discarded intake,
 org and account deletion, and a manual `delete` in psql.
 
 Extracts (see [extract.md](extract.md)) write everything under
 `extracts/<org>/<extract>/` instead of `<userId>/<runId>/`. Their `extracts`
-row is a durable expiry record with no foreign keys, so it survives workspace,
+row is a durable expiry record with no foreign keys, so it survives project,
 run and account deletion. The API's maintenance sweep deletes an expired
 extract's documents and runs, which fires the triggers above, and then empties
-its prefix. Deleting a workspace expires its extracts at once.
+its prefix. Deleting a project expires its extracts at once.
 
-Every workspace has its own LanceDB database per embedding space
-(`<LANCEDB_URI>/<orgId>/<workspaceId>/vectors-<model>-<dimensions>`). Workspace
-deletion (`deleteWorkspaceData`, which organization deletion also runs for each
-workspace) queues `vector_table` entries for them first, so they are dropped
+Every project has its own LanceDB database per embedding space
+(`<LANCEDB_URI>/<orgId>/<projectId>/vectors-<model>-<dimensions>`). Project
+deletion (`deleteProjectData`, which organization deletion also runs for each
+project) queues `vector_table` entries for them first, so they are dropped
 whole instead of being deleted one document at a time, then a `vector_prefix`
-entry that removes everything left under `<LANCEDB_URI>/<orgId>/<workspaceId>/`
+entry that removes everything left under `<LANCEDB_URI>/<orgId>/<projectId>/`
 (tables of models no document indexes any more, the directories). A local root
 is removed directly; an object-storage root must live in the artifact bucket,
 otherwise only the known tables are dropped and the sweep logs a warning. While documents are
 still in flight the drop waits out the same 15-minute grace as their cleanup.
 
-Org-level tables from before per-workspace databases are deleted by the
-relocation CLI's `--drop-legacy` step (see [operations](self-host/operations.md#moving-to-per-workspace-lancedb-databases-migration-0082));
+Org-level tables from before per-project databases are deleted by the
+relocation CLI's `--drop-legacy` step (see [operations](self-host/operations.md#moving-to-per-project-lancedb-databases-migration-0082));
 cleanup rows queued for them before migration 0082 drop them by their legacy
 names.
 
 A dedup copy shares its source's LanceDB rows only inside the source's
-workspace. A copy in another workspace has its own rows, so deleting the source
+project. A copy in another project has its own rows, so deleting the source
 removes the source's rows even while that copy lives; the shared storage
 artifacts stay until the last copy is gone.
 
@@ -79,7 +79,7 @@ sweep deletes them.
 | Path | Entry point | Behaviour |
 | --- | --- | --- |
 | Document(s) | `DELETE /v1/documents/:id`, bulk delete (`services/documents.ts`) | Rows are deleted at once, and the trigger enqueues cleanup. |
-| Workspace | `DELETE /v1/workspaces/:id` (`services/workspaces.ts` → `services/data-deletion.ts`) | In-flight runs are cancelled in Temporal and marked `cancelled`. Documents are then deleted in batches of 500, and finally the workspace row is deleted, which cascades to runs and per-workspace rows. If Temporal is unreachable, the delete still proceeds and the grace period covers late writes. |
+| Project | `DELETE /v1/projects/:id` (`services/projects.ts` → `services/data-deletion.ts`) | In-flight runs are cancelled in Temporal and marked `cancelled`. Documents are then deleted in batches of 500, and finally the project row is deleted, which cascades to runs and per-project rows. If Temporal is unreachable, the delete still proceeds and the grace period covers late writes. |
 | Run retention | worker `deleteExpiredRuns` | When a run is older than `run_retention_days`, its documents and the run row are deleted together, whether or not artifact retention already ran. A deleted run takes its artifacts with it. Newer versions that pointed at a deleted predecessor get `previous_version_id = null`. |
 | Artifact retention | worker `purgeExpiredArtifacts` | Deletes artifacts and derived rows but keeps the document rows. Before `vector_indexes` is dropped, the document's LanceDB targets are queued (`delete_source = false`). |
 | Discarded intake | `discardUnstartedRun` (`services/run-creation.ts`) | When a queued run's intake failed, its documents and run are deleted and the triggers enqueue its raw uploads. |
@@ -104,7 +104,7 @@ order:
    deletes SSO domains, links and requests, and writes an `organization.deleted` audit row.
 3. It cancels in-flight runs through Temporal.
 4. It deletes undelivered `webhook_outbox` rows about the org's runs.
-5. It deletes every workspace (`deleteWorkspaceData`): each queues
+5. It deletes every project (`deleteProjectData`): each queues
    `vector_table` drops for its LanceDB databases, and the triggers enqueue
    storage cleanup.
 6. It deletes org-scoped non-billing rows: AI operations, graph jobs, budget
@@ -126,7 +126,7 @@ email address. Use `GET /v1/account/deletion` to preview the outcome:
   until the user makes another member an owner or deletes the org.
 - **Deleted.** The user's personal org, and any org where they are the only
   member, are fully purged as described above.
-- **Left.** The user leaves every other org. Documents and workspaces they
+- **Left.** The user leaves every other org. Documents and projects they
   added there stay with the org, because the org is the data controller for
   team content, and the org's owners and admins keep managing them.
 
@@ -168,7 +168,7 @@ anonymized tombstones.
 Migration `0036_tenant_offboarding.sql` enforces this in the schema. Deleting
 an org's creator no longer deletes the org (`created_by_user_id` is now `ON
 DELETE SET NULL`). A hard `delete from "user"` is refused (`RESTRICT`) while
-the user still owns workspaces, runs or documents, or has usage events or
+the user still owns projects, runs or documents, or has usage events or
 ledger entries, so it can no longer cascade into shared data.
 
 ## SLA

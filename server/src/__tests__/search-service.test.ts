@@ -73,9 +73,9 @@ vi.mock("../search/synonym.js", () => ({
 
 vi.mock("../services/search-controls.js", () => ({
   applySearchControls: ({ results }: { results: unknown }) => results,
-  getWorkspaceSearchSettings: vi.fn(
-    async (workspaceId: string, userId: string) => ({
-      workspaceId,
+  getProjectSearchSettings: vi.fn(
+    async (projectId: string, userId: string) => ({
+      projectId,
       userId,
       typoTolerance: true,
       dedupeByFilename: true,
@@ -111,7 +111,7 @@ vi.mock("../services/search-controls.js", () => ({
   recordZeroResultDiagnostics: vi.fn(async () => undefined),
 }));
 
-const { hybridSearch, MissingWorkspaceScopeError, deriveSearchAvailability, partialAvailabilityMessage } =
+const { hybridSearch, MissingProjectScopeError, deriveSearchAvailability, partialAvailabilityMessage } =
   await import("../services/search.js");
 
 describe("hybridSearch", () => {
@@ -141,7 +141,7 @@ describe("hybridSearch", () => {
     sqlMock.unsafe.mockReset();
 
     await expect(hybridSearch("test", "user-1")).rejects.toBeInstanceOf(
-      MissingWorkspaceScopeError,
+      MissingProjectScopeError,
     );
     expect(sqlMock).not.toHaveBeenCalled();
     expect(sqlMock.unsafe).not.toHaveBeenCalled();
@@ -152,8 +152,8 @@ describe("hybridSearch", () => {
     sqlMock.unsafe.mockReset();
     sqlMock.mockImplementation(async (strings) => {
       const text = Array.isArray(strings) ? strings.join(" ") : String(strings);
-      if (text.includes("select runs.workspace_id")) {
-        return [{ workspace_id: "ws-1" }];
+      if (text.includes("select runs.project_id")) {
+        return [{ project_id: "ws-1" }];
       }
       if (text.includes("select pipeline")) {
         return [];
@@ -191,7 +191,7 @@ describe("hybridSearch", () => {
         isPartial: true,
         keywordOnly: false,
         scope: {
-          workspaceId: "ws-1",
+          projectId: "ws-1",
           runId: "run-1",
         },
         coverage: {
@@ -225,13 +225,13 @@ describe("hybridSearch", () => {
     expect(finished.runtimeMs).toBeGreaterThanOrEqual(0);
   });
 
-  it("rejects document scopes that cross workspace boundaries", async () => {
+  it("rejects document scopes that cross project boundaries", async () => {
     sqlMock.mockReset();
     sqlMock.unsafe.mockReset();
     sqlMock.mockImplementation(async (strings) => {
       const text = Array.isArray(strings) ? strings.join(" ") : String(strings);
-      if (text.includes("select distinct d.workspace_id")) {
-        return [{ workspace_id: "ws-1" }, { workspace_id: "ws-2" }];
+      if (text.includes("select distinct d.project_id")) {
+        return [{ project_id: "ws-1" }, { project_id: "ws-2" }];
       }
       return [];
     });
@@ -240,7 +240,7 @@ describe("hybridSearch", () => {
       hybridSearch("test", "user-1", {
         filters: { documentIds: ["doc-1", "doc-2"] },
       }),
-    ).rejects.toThrow("Search scope must stay within a single workspace");
+    ).rejects.toThrow("Search scope must stay within a single project");
     expect(sqlMock.unsafe).not.toHaveBeenCalled();
   });
 
@@ -260,7 +260,7 @@ describe("hybridSearch", () => {
           processing_runs: 1,
         },
         {
-          workspaceId: "ws-1",
+          projectId: "ws-1",
           runId: "run-1",
         },
       ),
@@ -269,7 +269,7 @@ describe("hybridSearch", () => {
       isPartial: true,
       keywordOnly: false,
       scope: {
-        workspaceId: "ws-1",
+        projectId: "ws-1",
         runId: "run-1",
       },
       coverage: {
@@ -315,7 +315,7 @@ describe("hybridSearch", () => {
           stalled_runs: 0,
         },
         {
-          workspaceId: "ws-1",
+          projectId: "ws-1",
           runId: "run-1",
         },
       ),
@@ -324,7 +324,7 @@ describe("hybridSearch", () => {
       isPartial: false,
       keywordOnly: false,
       scope: {
-        workspaceId: "ws-1",
+        projectId: "ws-1",
         runId: "run-1",
       },
       coverage: {
@@ -351,7 +351,7 @@ describe("hybridSearch", () => {
     });
   });
 
-  it("treats chunk-indexed workspaces as searchable even when page indexing is disabled", () => {
+  it("treats chunk-indexed projects as searchable even when page indexing is disabled", () => {
     expect(
       deriveSearchAvailability(
         {
@@ -367,7 +367,7 @@ describe("hybridSearch", () => {
           processing_runs: 0,
         },
         {
-          workspaceId: "ws-1",
+          projectId: "ws-1",
         },
       ),
     ).toEqual({
@@ -375,7 +375,7 @@ describe("hybridSearch", () => {
       isPartial: false,
       keywordOnly: false,
       scope: {
-        workspaceId: "ws-1",
+        projectId: "ws-1",
         runId: null,
       },
       coverage: {
@@ -411,8 +411,8 @@ describe("hybridSearch", () => {
         const text = Array.isArray(strings)
           ? strings.join(" ")
           : String(strings);
-        if (text.includes("select runs.workspace_id")) {
-          return [{ workspace_id: "ws-1" }];
+        if (text.includes("select runs.project_id")) {
+          return [{ project_id: "ws-1" }];
         }
 
         if (text.includes("with scoped_runs as")) {
@@ -505,14 +505,14 @@ describe("hybridSearch", () => {
 
     sqlMock.mockImplementation(async (strings, ...values) => {
       const text = Array.isArray(strings) ? strings.join(" ") : String(strings);
-      if (text.includes("from workspaces w")) {
+      if (text.includes("from projects w")) {
         return [
           {
-            workspace_id: "ws-1",
+            project_id: "ws-1",
             org_id: "org-1",
-            workspace_owner_user_id: "user-1",
+            project_owner_user_id: "user-1",
             org_role: "owner",
-            workspace_role: null,
+            project_role: null,
           },
         ];
       }
@@ -577,7 +577,7 @@ describe("hybridSearch", () => {
     });
 
     const response = await hybridSearch("List of math classes?", "user-1", {
-      filters: { workspaceId: "ws-1" },
+      filters: { projectId: "ws-1" },
       useRerank: false,
       useMmr: false,
       parentRetrieval: false,
@@ -589,22 +589,22 @@ describe("hybridSearch", () => {
     expect(response.availability.status).toBe("complete");
   });
 
-  it("restricts vector candidates to the requested documents inside an authorized workspace", async () => {
+  it("restricts vector candidates to the requested documents inside an authorized project", async () => {
     sqlMock.mockReset();
     sqlMock.mockImplementation(async (strings) => {
       const text = Array.isArray(strings) ? strings.join(" ") : String(strings);
-      if (text.includes("from workspaces w")) return [{ workspace_id: "ws-1", org_id: "org-1", workspace_owner_user_id: "user-1", org_role: "owner", workspace_role: null }];
+      if (text.includes("from projects w")) return [{ project_id: "ws-1", org_id: "org-1", project_owner_user_id: "user-1", org_role: "owner", project_role: null }];
       if (text.includes("join vector_indexes")) return [{ id: "doc-1", owner_id: "doc-1" }];
       return [];
     });
     lanceDbVectorSearch.mockResolvedValue([]);
     await hybridSearch("contract", "user-1", {
-      filters: { workspaceId: "ws-1", documentIds: ["doc-1"] },
+      filters: { projectId: "ws-1", documentIds: ["doc-1"] },
       queryVector: [0.1, 0.2], useRerank: false, useMmr: false,
       parentRetrieval: false, suppressSessionLog: true,
     });
     expect(lanceDbVectorSearch).toHaveBeenCalledWith(expect.objectContaining({
-      orgId: "org-1", workspaceId: "ws-1", documentIds: ["doc-1"],
+      orgId: "org-1", projectId: "ws-1", documentIds: ["doc-1"],
     }));
   });
 
@@ -612,7 +612,7 @@ describe("hybridSearch", () => {
     sqlMock.mockReset();
     sqlMock.mockImplementation(async (strings) => {
       const text = Array.isArray(strings) ? strings.join(" ") : String(strings);
-      if (text.includes("from workspaces w")) return [{ workspace_id: "ws-1", org_id: "org-1", workspace_owner_user_id: "user-1", org_role: "owner", workspace_role: null }];
+      if (text.includes("from projects w")) return [{ project_id: "ws-1", org_id: "org-1", project_owner_user_id: "user-1", org_role: "owner", project_role: null }];
       if (text.includes("join vector_indexes")) return [{ id: "copy", owner_id: "owner" }];
       if (text.includes("jsonb_to_recordset")) {
         return [{ id: "copy-chunk-3", document_id: "copy", run_id: "run-2", chunk_index: 3, text: "Copy chunk body", heading_path: [],
@@ -622,7 +622,7 @@ describe("hybridSearch", () => {
     });
     lanceDbVectorSearch.mockResolvedValue([{ id: "owner-chunk-3", documentId: "owner", chunkIndex: 3, score: 0.9 }]);
     const response = await hybridSearch("contract", "user-1", {
-      filters: { workspaceId: "ws-1" }, queryVector: [0.1, 0.2], useRerank: false, useMmr: false,
+      filters: { projectId: "ws-1" }, queryVector: [0.1, 0.2], useRerank: false, useMmr: false,
       parentRetrieval: false, suppressSessionLog: true,
     });
     expect(lanceDbVectorSearch).toHaveBeenCalledWith(expect.objectContaining({ documentIds: ["copy", "owner"] }));
@@ -638,7 +638,7 @@ describe("hybridSearch", () => {
       sqlMock.mockImplementation(async (strings) => {
         const text = Array.isArray(strings) ? strings.join(" ") : String(strings);
         if (text.includes("select pipeline")) return [{ pipeline: { embedding: { profile: "good-fast-local" } } }];
-        if (text.includes("from workspaces w")) return [{ workspace_id: "ws-1", org_id: "org-1", workspace_owner_user_id: "user-1", org_role: "owner", workspace_role: null }];
+        if (text.includes("from projects w")) return [{ project_id: "ws-1", org_id: "org-1", project_owner_user_id: "user-1", org_role: "owner", project_role: null }];
         if (text.includes("join vector_indexes")) return [{ id: "doc-1", owner_id: "doc-1" }];
         if (text.includes("with scoped_runs as")) {
           return [{ total_documents: 1, indexed_documents: 1, page_indexed_documents: 0, searchable_documents: 1, in_progress_documents: 0,
@@ -652,11 +652,11 @@ describe("hybridSearch", () => {
       });
     }
     const search = (query: string, options: Record<string, unknown> = {}) => hybridSearch(query, "user-1", {
-      filters: { workspaceId: "ws-1" }, queryVector: [0.1, 0.2], useRerank: false, useMmr: false,
+      filters: { projectId: "ws-1" }, queryVector: [0.1, 0.2], useRerank: false, useMmr: false,
       parentRetrieval: false, suppressSessionLog: true, ...options,
     });
 
-    it("reports no match instead of weak hits for a query nothing in the workspace answers", async () => {
+    it("reports no match instead of weak hits for a query nothing in the project answers", async () => {
       mockIndex();
       lanceDbVectorSearch.mockResolvedValue([hitFor("strong", 0.31), hitFor("weak", 0.12)]);
       const response = await search("zxqvbn nonsense gibberish");
@@ -697,24 +697,24 @@ describe("hybridSearch", () => {
     });
   });
 
-  it("checks workspace access again before LanceDB vector search", async () => {
+  it("checks project access again before LanceDB vector search", async () => {
     sqlMock.mockReset();
     sqlMock.unsafe.mockReset();
     let accessChecks = 0;
 
     sqlMock.mockImplementation(async (strings) => {
       const text = Array.isArray(strings) ? strings.join(" ") : String(strings);
-      // The search charge's org resolution (lib/ai-usage.ts) also reads workspaces; it is not an access check.
-      if (text.includes("from workspaces w") && !text.trimStart().startsWith("coalesce(")) {
+      // The search charge's org resolution (lib/ai-usage.ts) also reads projects; it is not an access check.
+      if (text.includes("from projects w") && !text.trimStart().startsWith("coalesce(")) {
         accessChecks += 1;
         return accessChecks === 1
           ? [
               {
-                workspace_id: "ws-1",
+                project_id: "ws-1",
                 org_id: "org-1",
-                workspace_owner_user_id: "user-1",
+                project_owner_user_id: "user-1",
                 org_role: "owner",
-                workspace_role: null,
+                project_role: null,
               },
             ]
           : [];
@@ -741,7 +741,7 @@ describe("hybridSearch", () => {
     });
 
     await hybridSearch("contract", "user-1", {
-      filters: { workspaceId: "ws-1" },
+      filters: { projectId: "ws-1" },
       queryVector: [0.1, 0.2],
       useRerank: false,
       useMmr: false,
@@ -761,14 +761,14 @@ describe("hybridSearch", () => {
 
     sqlMock.mockImplementation(async (strings) => {
       const text = Array.isArray(strings) ? strings.join(" ") : String(strings);
-      if (text.includes("from workspaces w")) {
+      if (text.includes("from projects w")) {
         return [
           {
-            workspace_id: "ws-1",
+            project_id: "ws-1",
             org_id: "org-1",
-            workspace_owner_user_id: "user-1",
+            project_owner_user_id: "user-1",
             org_role: "owner",
-            workspace_role: null,
+            project_role: null,
           },
         ];
       }
@@ -812,7 +812,7 @@ describe("hybridSearch", () => {
     });
 
     await hybridSearch(rawQuery, "user-1", {
-      filters: { workspaceId: "ws-1" },
+      filters: { projectId: "ws-1" },
       useRerank: false,
       useMmr: false,
       parentRetrieval: false,
@@ -857,14 +857,14 @@ describe("hybridSearch", () => {
     sqlMock.mockImplementation(async (strings, ...values) => {
       const text = Array.isArray(strings) ? strings.join(" ") : String(strings);
 
-      if (text.includes("from workspaces w")) {
+      if (text.includes("from projects w")) {
         return [
           {
-            workspace_id: "ws-1",
+            project_id: "ws-1",
             org_id: "org-1",
-            workspace_owner_user_id: "user-1",
+            project_owner_user_id: "user-1",
             org_role: "owner",
-            workspace_role: null,
+            project_role: null,
           },
         ];
       }
@@ -955,7 +955,7 @@ describe("hybridSearch", () => {
       "What is the market cap of the company whose CEO wrote patent X?",
       "user-1",
       {
-        filters: { workspaceId: "ws-1" },
+        filters: { projectId: "ws-1" },
         iterativeMultiHop: true,
         queryVector: [0.1, 0.2],
         useRerank: false,
@@ -1018,14 +1018,14 @@ describe("hybridSearch", () => {
 
     sqlMock.mockImplementation(async (strings) => {
       const text = Array.isArray(strings) ? strings.join(" ") : String(strings);
-      if (text.includes("from workspaces w")) {
+      if (text.includes("from projects w")) {
         return [
           {
-            workspace_id: "ws-1",
+            project_id: "ws-1",
             org_id: "org-1",
-            workspace_owner_user_id: "user-1",
+            project_owner_user_id: "user-1",
             org_role: "owner",
-            workspace_role: null,
+            project_role: null,
           },
         ];
       }
@@ -1072,7 +1072,7 @@ describe("hybridSearch", () => {
     });
 
     const response = await hybridSearch("acquisition terms", "user-1", {
-      filters: { workspaceId: "ws-1" },
+      filters: { projectId: "ws-1" },
       useRerank: false,
       useMmr: false,
       useContextualCompression: true,
@@ -1107,7 +1107,7 @@ describe("hybridSearch", () => {
         queued_runs: 0,
         processing_runs: 0,
       },
-      { workspaceId: "ws-1" },
+      { projectId: "ws-1" },
     );
     expect(availability.status).toBe("partial");
     expect(availability.isPartial).toBe(true);

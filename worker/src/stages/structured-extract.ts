@@ -238,7 +238,7 @@ export class StructuredExtractStage implements Stage {
           artifactSlot,
           "structured extraction complete",
           async () => {
-            if (geoSchemaFields(outputSchema).length && (!state.store?.beginGeoAttempt || !state.run.workspaceId || !state.run.orgId)) {
+            if (geoSchemaFields(outputSchema).length && (!state.store?.beginGeoAttempt || !state.run.projectId || !state.run.orgId)) {
               throw new Error("Geo extraction requires a scoped persistent store");
             }
             const geoAttempt = geoSchemaFields(outputSchema).length
@@ -678,7 +678,7 @@ Do not include explanations. Use short evidence snippets that appear verbatim in
 
 /**
  * JSON schema for the `{ fields: { <name>: { value, confidence, evidence } } }`
- * envelope the extraction prompt asks for, built from the workspace schema's
+ * envelope the extraction prompt asks for, built from the project schema's
  * own property names and value schemas at runtime.
  */
 export function buildStructuredFieldsEnvelopeSchema(outputSchema: Record<string, unknown>): Record<string, unknown> {

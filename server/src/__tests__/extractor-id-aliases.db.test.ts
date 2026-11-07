@@ -57,7 +57,7 @@ describe("stored legacy-id pipelines under the alias", () => {
     await sql`insert into "user" (id, name, email) values ('u', 'U', 'u@example.test')`;
     await sql`insert into organizations (id, name, slug, created_by_user_id, credit_balance_cents) values ('o', 'O', 'o', 'u', 1000)`;
     await sql`insert into org_memberships (org_id, user_id, role) values ('o', 'u', 'owner')`;
-    await sql`insert into workspaces (id, org_id, user_id, name, pipeline) values ('w', 'o', 'u', 'W', ${sql.json(legacy as unknown as postgres.JSONValue)})`;
+    await sql`insert into projects (id, org_id, user_id, name, pipeline) values ('w', 'o', 'u', 'W', ${sql.json(legacy as unknown as postgres.JSONValue)})`;
   }, 120_000);
 
   afterAll(async () => { await sql?.end(); await stop?.(); });
@@ -65,7 +65,7 @@ describe("stored legacy-id pipelines under the alias", () => {
   beforeEach(async () => {
     configureApiExtractorIdAliases(ENV);
     await sql`delete from documents`;
-    await sql`delete from workspace_runs`;
+    await sql`delete from project_runs`;
   });
 
   const canonical = (pipeline: unknown) => {
@@ -79,14 +79,14 @@ describe("stored legacy-id pipelines under the alias", () => {
   it("reprocessing a document from a pre-deploy run writes the new run with the canonical id and keeps its options", async () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     await sql`
-      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
       values ('run-old', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', ${sql.json(legacy as unknown as postgres.JSONValue)}, 1, 2)`;
     await sql`
-      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
       values ('d', 'o', 'u', 'w', 'run-old', 'd.pdf', 'application/pdf', 'u/raw/d.pdf', 'completed', 2)`;
     const result = await bulkReprocessDocuments(["d"], "u");
     expect(result.failed).toEqual([]);
-    const [row] = await sql<{ pipeline: unknown }[]>`select pipeline from workspace_runs where id = ${result.runs[0]!.id}`;
+    const [row] = await sql<{ pipeline: unknown }[]>`select pipeline from project_runs where id = ${result.runs[0]!.id}`;
     canonical(row!.pipeline);
     canonical(startWorkflow.mock.calls[0]![1]);
     // Nothing was dropped: the options moved to the canonical key instead.
@@ -95,7 +95,7 @@ describe("stored legacy-id pipelines under the alias", () => {
 
   it("a run queued before the deploy starts with the canonical id", async () => {
     await sql`
-      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, creation_ready_at)
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, creation_ready_at)
       values ('q-old', 'o', 'u', 'w', 'bulk-upload', 'queued', 'queued', ${sql.json(legacy as unknown as postgres.JSONValue)}, 0, now())`;
     const { createRunLifecycle } = await import("../services/run-lifecycle.js");
     const { createRunStartRecovery } = await import("../services/run-start-recovery.js");
@@ -113,14 +113,14 @@ describe("stored legacy-id pipelines under the alias", () => {
       const host = { ...defaultPipelineFeatures, documentExtraction: { ...defaultPipelineFeatures.documentExtraction,
         order: { pdf: ["poppler-text", "native-pdf"] }, pages: ["ocr"], enrich: ["poppler-text"], voting: { enabled: true, secondary: "native-pdf" } } };
       await sql`
-        insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+        insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
         values ('run-host', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', ${sql.json(host as unknown as postgres.JSONValue)}, 1, 2)`;
       await sql`
-        insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+        insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
         values ('dh', 'o', 'u', 'w', 'run-host', 'dh.pdf', 'application/pdf', 'u/raw/dh.pdf', 'completed', 2)`;
       const result = await bulkReprocessDocuments(["dh"], "u");
       expect(result.failed).toEqual([]);
-      const [row] = await sql<{ pipeline: { documentExtraction: Record<string, unknown> } }[]>`select pipeline from workspace_runs where id = ${result.runs[0]!.id}`;
+      const [row] = await sql<{ pipeline: { documentExtraction: Record<string, unknown> } }[]>`select pipeline from project_runs where id = ${result.runs[0]!.id}`;
       for (const pipeline of [row!.pipeline, startWorkflow.mock.calls[0]![1] as typeof row.pipeline]) {
         expect(JSON.stringify(pipeline.documentExtraction)).not.toMatch(/poppler-text|native-pdf/);
         expect({ pages: pipeline.documentExtraction.pages, enrich: pipeline.documentExtraction.enrich, voting: pipeline.documentExtraction.voting }).toEqual({ pages: [], enrich: [], voting: { enabled: true, secondary: "next-in-order" } });

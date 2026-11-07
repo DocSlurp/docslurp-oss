@@ -7,7 +7,7 @@ import {
   resolvePageImageEmbedder,
   type PageImageEmbedder,
 } from "../deferred/page-image-embedders.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 import { completeDocumentPages, runDocumentStage, runDocuments, runSpentCents, skipCompletedPages } from "../pipeline/checkpoints.js";
 import type { PdfRasterCache } from "../pipeline/pdf-asset-cache.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
@@ -85,7 +85,7 @@ export async function embedPageImages(
   args: {
     document: Document;
     pages: number[];
-    run: Pick<WorkspaceRun, "id" | "orgId" | "workspaceId"> & { pipeline?: Pick<WorkspaceRun["pipeline"], "quality"> };
+    run: Pick<ProjectRun, "id" | "orgId" | "projectId"> & { pipeline?: Pick<ProjectRun["pipeline"], "quality"> };
     signal?: AbortSignal;
     windowSize?: number;
     onWindow?: (info: { embedded: number[]; windowIndex: number; windows: number }) => Promise<void> | void;
@@ -107,12 +107,12 @@ export async function embedPageImages(
     result.stoppedBy = "quality-fast";
     return result;
   }
-  if (!run.workspaceId) throw new Error("page-embed requires a workspace-scoped run");
+  if (!run.projectId) throw new Error("page-embed requires a project-scoped run");
   // Page images are decoded in this process (sharp/libvips) to make the JPEG the embedder reads. Only images we produced may
   // be: a PDF page's render, or for an uploaded image the bounded rendition its OCR boundary wrote (lib/page-rendition.ts).
   // The customer's own image bytes are never decoded here; a page without a rendition is skipped and reported.
   const imageUpload = !sniffedPdf(document);
-  const workspaceId = run.workspaceId;
+  const projectId = run.projectId;
   await ensurePageRows(deps.sql, document.id, document.pageCount);
 
   const renderWindow = async (windowPages: number[]): Promise<RenderedWindow> => {
@@ -211,7 +211,7 @@ export async function embedPageImages(
         bits: Buffer.from(bits),
         int8: Buffer.from(q.values.buffer, q.values.byteOffset, q.values.byteLength),
         scale: q.scale,
-        workspace_id: workspaceId,
+        project_id: projectId,
         org_id: run.orgId ?? null,
       };
     });

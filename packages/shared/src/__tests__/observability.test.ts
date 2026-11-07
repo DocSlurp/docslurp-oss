@@ -68,7 +68,7 @@ describe("server observability", () => {
   it("sets late-bound user and session IDs on the already-open observation", async () => {
     enable();
     await withObservation({ name: "request" }, async () => {
-      addTraceMetadata({ userId: "user-1", sessionId: "session-1", workspaceId: "w" });
+      addTraceMetadata({ userId: "user-1", sessionId: "session-1", projectId: "w" });
       return withObservation({ name: "child" }, async () => 1);
     });
     expect(state.attributes).toEqual([
@@ -93,7 +93,7 @@ describe("server observability", () => {
         withObservation(
           { name: requestId, metadata: { requestId } },
           async () => {
-            addTraceMetadata({ workspaceId: requestId });
+            addTraceMetadata({ projectId: requestId });
             await Promise.resolve();
             return withObservation(
               { name: `${requestId}-child` },
@@ -109,7 +109,7 @@ describe("server observability", () => {
       );
       expect(updates[0].data.metadata).toEqual({
         requestId,
-        workspaceId: requestId,
+        projectId: requestId,
       });
     }
     expect(state.processorOptions[0].additionalHeaders).toEqual({ "x-langfuse-ingestion-version": "4" });

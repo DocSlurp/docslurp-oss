@@ -9,7 +9,7 @@ const { sweepSpendPausedRuns } = await import("../services/spend-paused-runs.js"
 const text = (strings: unknown) => (Array.isArray(strings) ? strings.join("?") : String(strings));
 const status = (available: number) => ({
   org_id: "org-1", funded: false, available, reserved: 0,
-  workspace_budget_paused: false, org_budget_paused: false, workspace_in_org: true,
+  project_budget_paused: false, org_budget_paused: false, project_in_org: true,
 });
 
 describe("spend-paused run sweep", () => {
@@ -26,19 +26,19 @@ describe("spend-paused run sweep", () => {
     const updates: string[] = [];
     sqlMock.mockImplementation((strings: unknown, ...values: unknown[]) => {
       const query = text(strings);
-      if (query.includes("from workspace_runs\n    where pause_reason is not null")) {
+      if (query.includes("from project_runs\n    where pause_reason is not null")) {
         return Promise.resolve([
-          { id: "run-ok", org_id: "org-ok", workspace_id: "ws-ok", user_id: "u1", pause_reason: "credit_exhausted" },
-          { id: "run-blocked", org_id: "org-blocked", workspace_id: "ws-b", user_id: "u1", pause_reason: "credit_exhausted" },
+          { id: "run-ok", org_id: "org-ok", project_id: "ws-ok", user_id: "u1", pause_reason: "credit_exhausted" },
+          { id: "run-blocked", org_id: "org-blocked", project_id: "ws-b", user_id: "u1", pause_reason: "credit_exhausted" },
         ]);
       }
-      if (query.includes("select id, org_id, workspace_id, user_id, pause_reason from workspace_runs")) {
+      if (query.includes("select id, org_id, project_id, user_id, pause_reason from project_runs")) {
         const id = values[0] as string;
-        return Promise.resolve([{ id, org_id: id === "run-ok" ? "org-ok" : "org-blocked", workspace_id: "ws", user_id: "u1", pause_reason: "credit_exhausted" }]);
+        return Promise.resolve([{ id, org_id: id === "run-ok" ? "org-ok" : "org-blocked", project_id: "ws", user_id: "u1", pause_reason: "credit_exhausted" }]);
       }
       if (query.includes("from grant_credit_lease(")) return Promise.resolve([lease]);
       if (query.includes("org_spend_status")) return Promise.resolve([status(available[values[0] as string] ?? 0)]);
-      if (query.includes("update workspace_runs")) {
+      if (query.includes("update project_runs")) {
         updates.push(values.find((value) => typeof value === "string" && value.startsWith("run-")) as string);
         return Promise.resolve([{ id: "run-ok", user_id: "u1", pause_reason: "credit_exhausted" }]);
       }

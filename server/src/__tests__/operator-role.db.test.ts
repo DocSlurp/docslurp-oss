@@ -29,7 +29,7 @@ beforeAll(async () => {
   await sql`insert into organizations(id, name, slug, created_by_user_id) values ('customer', 'Customer', 'customer', 'owner')`;
   await sql`insert into org_memberships(org_id, user_id, role) values
     ('customer', 'owner', 'owner'), ('customer', 'ops', 'member'), ('customer', 'ops-unverified', 'member')`;
-  await sql`insert into workspaces(id, org_id, user_id, name, is_default) values
+  await sql`insert into projects(id, org_id, user_id, name, is_default) values
     ('customer-default', 'customer', 'owner', 'Default', true), ('customer-private', 'customer', 'owner', 'Private', false)`;
   orgs = await import("../services/organizations.js");
   adminEmails = await import("../lib/admin-emails.js");
@@ -45,13 +45,13 @@ describe("operator is separate from customer roles", () => {
     vi.unstubAllEnvs();
   });
 
-  it("leaves an operator's membership in a customer org untouched and gives no access to its private workspaces", async () => {
+  it("leaves an operator's membership in a customer org untouched and gives no access to its private projects", async () => {
     vi.stubEnv("ADMIN_EMAILS", "ops@example.com");
     expect(await adminEmails.isConfiguredAdminUserSql(sql as never, "ops")).toBe(true);
     const [membership] = await sql<{ role: string }[]>`select role from org_memberships where org_id = 'customer' and user_id = 'ops'`;
     expect(membership!.role).toBe("member");
-    expect(await orgs.getWorkspaceAccess("customer-private", "ops")).toBeNull();
-    expect(await orgs.getWorkspaceAccess("customer-default", "ops")).toMatchObject({ orgRole: "member" });
+    expect(await orgs.getProjectAccess("customer-private", "ops")).toBeNull();
+    expect(await orgs.getProjectAccess("customer-default", "ops")).toMatchObject({ orgRole: "member" });
     vi.unstubAllEnvs();
   });
 });

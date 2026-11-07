@@ -21,9 +21,9 @@ docslurp login --scopes "search read ingest"
 docslurp upload ./handbook.pdf --watch
 ```
 
-Use your own file. The CLI prints the workspace name and slug, the run ID and the document count, then watches processing. In an interactive terminal, the document and page progress bars update in place. When output is redirected, you get successive text snapshots instead.
+Use your own file. The CLI prints the project name and slug, the run ID and the document count, then watches processing. In an interactive terminal, the document and page progress bars update in place. When output is redirected, you get successive text snapshots instead.
 
-You don't need to set up a workspace. The upload went to your organization's default workspace, which search and chat also use:
+You don't need to set up a project. The upload went to your organization's default project, which search and chat also use:
 
 ```bash
 docslurp search 'What is the parental leave policy?'
@@ -44,25 +44,25 @@ docslurp status 'paste-the-returned-run-id' --watch --timeout 600
 
 A watch timeout does not cancel processing, so don't upload the file again just because a watch timed out.
 
-## Build a workspace over time
+## Build a project over time
 
-Every command picks its workspace from `--workspace`, then `DOCSLURP_WORKSPACE`, then `default` (your organization's default workspace). Uploads keep adding to that one workspace. `--workspace` takes a workspace ID, slug or name: `'Legal contracts'`, `legal-contracts` and `LEGAL CONTRACTS` are the same workspace.
+Every command picks its project from `--project`, then `DOCSLURP_PROJECT`, then `default` (your organization's default project). Uploads keep adding to that one project. `--project` takes a project ID, slug or name: `'Legal contracts'`, `legal-contracts` and `LEGAL CONTRACTS` are the same project.
 
-To keep documents separate, upload with `--workspace '<name>'`: the first upload creates a workspace with that name (slug `legal-contracts` for `'Legal contracts'`) and later commands find it by the same name or slug. `--new-workspace` (or `--template <key>` alone) creates a workspace that titles itself from its content and gets a slug such as `amber-falcon-ridge`, which you can rename through the API. Former slugs and UUIDs also work; see [Workspaces](https://docslurp.io/docs/http#workspaces).
+To keep documents separate, upload with `--project '<name>'`: the first upload creates a project with that name (slug `legal-contracts` for `'Legal contracts'`) and later commands find it by the same name or slug. `--new-project` (or `--template <key>` alone) creates a project that titles itself from its content and gets a slug such as `amber-falcon-ridge`, which you can rename through the API. Former slugs and UUIDs also work; see [Projects](https://docslurp.io/docs/http#projects).
 
 ```bash
 docslurp upload ./benefits.pdf ./onboarding.docx --watch --timeout 600
 docslurp search 'benefits eligibility'
 
-docslurp upload ./contracts/*.pdf --new-workspace --watch
-docslurp upload ./contracts/*.pdf --workspace 'Legal contracts' --template legal-contracts
-docslurp ingest-url https://example.com/handbook.pdf --workspace legal-contracts --watch
-export DOCSLURP_WORKSPACE='legal-contracts'      # The name or the slug the upload printed; or pass --workspace per command.
+docslurp upload ./contracts/*.pdf --new-project --watch
+docslurp upload ./contracts/*.pdf --project 'Legal contracts' --template legal-contracts
+docslurp ingest-url https://example.com/handbook.pdf --project legal-contracts --watch
+export DOCSLURP_PROJECT='legal-contracts'      # The name or the slug the upload printed; or pass --project per command.
 docslurp search 'termination notice'
-docslurp search 'benefits eligibility' --workspace default
+docslurp search 'benefits eligibility' --project default
 ```
 
-- Uploads and `ingest-url` create the `--workspace` you name when none matches (applying `--template`, if given); other commands answer workspace not found. `--new-workspace` applies only without `--workspace`. Template keys: `legal-contracts`, `medical-records`, `financial-reports`, `engineering-docs`, `meeting-notes`.
+- Uploads and `ingest-url` create the `--project` you name when none matches (applying `--template`, if given); other commands answer project not found. `--new-project` applies only without `--project`. Template keys: `legal-contracts`, `medical-records`, `financial-reports`, `engineering-docs`, `meeting-notes`.
 - Shell globs such as `./manuals/*.pdf` work because your shell expands them. The CLI takes file paths; it doesn't import directories recursively or read uploads from stdin.
 - Files are sent as file-backed blobs, so the CLI doesn't load every file into memory.
 
@@ -74,7 +74,7 @@ Give a single-file upload a `--canonical-id`, such as a URL or site path. Upload
 docslurp upload ./products.pdf --canonical-id '/products' --watch
 ```
 
-Every upload is versioned by workspace, folder path and filename. Re-uploading `report.pdf` supersedes the earlier version, and `--path` keeps same-named files in different folders apart:
+Every upload is versioned by project, folder path and filename. Re-uploading `report.pdf` supersedes the earlier version, and `--path` keeps same-named files in different folders apart:
 
 ```bash
 docslurp upload ./report.pdf --path contracts/2025
@@ -100,7 +100,7 @@ jq '.results[] | {text, score, citation}' evidence.json
 
 `--json` prints the API response to stdout, including `availability` and the search `sessionId`. Check `availability` before treating missing results as absent: other uploads may still be indexing. A retrieval score is not a confidence percentage.
 
-For a CI job that needs a fully indexed workspace and at least one hit, use the [runnable CI script](https://docslurp.io/docs/examples/search-ci.sh). It checks both that the request succeeded and that results are ready, with strict shell error handling and cleanup. The script needs `jq`; the CLI doesn't.
+For a CI job that needs a fully indexed project and at least one hit, use the [runnable CI script](https://docslurp.io/docs/examples/search-ci.sh). It checks both that the request succeeded and that results are ready, with strict shell error handling and cleanup. The script needs `jq`; the CLI doesn't.
 
 ### Ask several questions at once
 
@@ -117,7 +117,7 @@ Create `queries.json`:
 docslurp search --queries-file queries.json --concurrency 2 --json > batch.json
 ```
 
-- The file holds **1 to 20** query strings or search input objects. Objects can set their own `workspace`.
+- The file holds **1 to 20** query strings or search input objects. Objects can set their own `project`.
 - `--concurrency` is **1 to 4**, default **4**.
 - Results stay in input order. Check each result's `ok` before reading its `data`.
 - If some queries fail, the successful results are still printed, but the command exits with status 1. Under `set -e`, handle that exit before reading the file.
@@ -148,29 +148,29 @@ Run `docslurp` with no arguments, or `docslurp --help`, for built-in usage.
 
 | Command | What it does | Options |
 | --- | --- | --- |
-| `upload <files...>` | Upload files and print the workspace and run IDs | `--workspace <id\|slug\|name>` (created if no workspace matches), or `--new-workspace`; `--template`; `--quality <fast\|auto\|good>`; `--canonical-id` (one file only), `--path <folder>` (same path and filename is a new version), `--estimate` (print pages, credits and time, then exit), `--watch` |
-| `ingest-url <urls...>` | Fetch and ingest URLs, then print the workspace and run IDs | Same workspace options as `upload`, `--quality`, `--watch` |
+| `upload <files...>` | Upload files and print the project and run IDs | `--project <id\|slug\|name>` (created if no project matches), or `--new-project`; `--template`; `--quality <fast\|auto\|good>`; `--canonical-id` (one file only), `--path <folder>` (same path and filename is a new version), `--estimate` (print pages, credits and time, then exit), `--watch` |
+| `ingest-url <urls...>` | Fetch and ingest URLs, then print the project and run IDs | Same project options as `upload`, `--quality`, `--watch` |
 | `extract <files...\|urls...>` | Upload files or ingest URLs (not both) whose files and outputs are deleted when the retention window ends; prints the extract ID and deletion time | Same options as `upload`; `--retention-days <n>` (longer than the free 48 hours is charged as storage), `--no-email`, `--download <markdown\|all>` |
 | `extract-status <extract-id>` | Print an extract's status, pages, download state and deletion time | `--json` |
 | `extract-download <extract-id>` | Print a two-minute signed URL for the extract's results zip (a server key with `artifacts`, or a login with `read`) | None |
-| `full-index` | Index every remaining page of a workspace (or one document) | `--workspace`, `--document`, `--estimate`, `--watch`, `--json` |
+| `full-index` | Index every remaining page of a project (or one document) | `--project`, `--document`, `--estimate`, `--watch`, `--json` |
 | `reprocess <run-id>` | Re-run a run, optionally from a stage | `--stage-from`, `--estimate`, `--watch`, `--json` |
 | `jobs get <job-id>` / `jobs watch <job-id>` | Print a background job, or follow it (SSE, polling fallback) until it ends | `--json` (get), `--timeout` (watch; never applies while the job is blocked) |
 | `status <run-id>` | Print progress for a run | `--watch` |
 | `runs` | List the runs you can access | None |
-| `search <query>` | Retrieve cited passages from a workspace | `--workspace`, `--min-score <0..1>` (relevance floor; `0` turns it off), `--json` or `--context` |
-| `search --queries-file <file>` | Run up to 20 questions in one request | `--workspace`, `--concurrency`, `--json` or `--context` |
-| `chat <question>` | Write a cited answer | `--workspace`, `--session`, `--json` |
+| `search <query>` | Retrieve cited passages from a project | `--project`, `--min-score <0..1>` (relevance floor; `0` turns it off), `--json` or `--context` |
+| `search --queries-file <file>` | Run up to 20 questions in one request | `--project`, `--concurrency`, `--json` or `--context` |
+| `chat <question>` | Write a cited answer | `--project`, `--session`, `--json` |
 | `mcp-server` (alias `mcp`) | Serve DocSlurp agent tools over stdio | `--api-url`, `--api-key` |
 | `login`, `logout`, `whoami`, `auth status`, `auth token`, `exec` | Sign in and manage the stored login; see [Sign in](#sign-in) | `--profile`, `--api-url`; `--json` (whoami, auth status) |
 | `migrate-algolia-synonyms <export.json>` | Convert Algolia synonym records to a glossary, locally | `--out <glossary.json>` |
-| `import-search-compat <export.json>` | Normalize and import Algolia, Elastic or legacy search configuration | `--workspace`, `--source`, `--out` |
+| `import-search-compat <export.json>` | Normalize and import Algolia, Elastic or legacy search configuration | `--project`, `--source`, `--out` |
 | `--license` | Print the license and notice | None |
 
 - `--json` works on search, chat, extract-status, jobs get, whoami, auth status, full-index, reprocess and any `--estimate`. Upload, ingest-url, status and runs print text. For machine-readable upload IDs, use the [Node SDK](https://docslurp.io/docs/sdk-reference) or the [HTTP API](https://docslurp.io/docs/http).
 - `--context` and `--json` can't be combined.
-- Search is scoped to a workspace (the default one unless you set another). `--run` is not supported.
-- `--quality` sets processing quality for that upload: `fast` reads only the text layer (scanned pages stay images and aren't searchable), `auto` reads each page the cheapest faithful way, and `good` reads every page with a vision model. Without it, the workspace's setting applies (`auto` unless changed).
+- Search is scoped to a project (the default one unless you set another). `--run` is not supported.
+- `--quality` sets processing quality for that upload: `fast` reads only the text layer (scanned pages stay images and aren't searchable), `auto` reads each page the cheapest faithful way, and `good` reads every page with a vision model. Without it, the project's setting applies (`auto` unless changed).
 
 ### Connection and timeout settings
 
@@ -180,7 +180,7 @@ Run `docslurp` with no arguments, or `docslurp --help`, for built-in usage.
 | None | `DOCSLURP_TOKEN` | A short-lived OAuth access token (`docslurp auth token`) |
 | `--profile <name>` | `DOCSLURP_PROFILE` | `default`; one stored login per profile and API URL |
 | `--api-url <origin>` | `DOCSLURP_URL` | `https://docslurp.io` (don't add `/v1`) |
-| `--workspace <id\|slug\|name>` | `DOCSLURP_WORKSPACE` | `default`, your organization's default workspace. On `upload`/`ingest-url` a name that matches no workspace creates it; `--new-workspace` or `--template` without `--workspace` creates a self-titled one. |
+| `--project <id\|slug\|name>` | `DOCSLURP_PROJECT` | `default`, your organization's default project. On `upload`/`ingest-url` a name that matches no project creates it; `--new-project` or `--template` without `--project` creates a self-titled one. |
 | `--timeout <seconds>` | None | 30 seconds per API request; 300 seconds per watch |
 
 Flags override environment variables. With `upload --watch --timeout 600`, the upload request gets up to 600 seconds **and then** the watch gets up to 600 seconds. Watches poll every two seconds, and each progress read is capped at 30 seconds. `--timeout` applies to every API command, including upload, status, runs, search, chat and `jobs watch` (300 seconds by default), but not to `import-search-compat` or the long-lived MCP server. The CLI doesn't retry failed requests.
@@ -204,7 +204,7 @@ See [agent setup](https://docslurp.io/docs/mcp) and [Algolia compatibility](http
 
 ```bash
 DOCSLURP_API_KEY= DOCSLURP_TOKEN= docslurp import-search-compat export.json \
-  --workspace 'your-workspace-slug' --source algolia \
+  --project 'your-project-slug' --source algolia \
   --profile normalize-only --out normalized.json
 ```
 
@@ -216,18 +216,18 @@ DOCSLURP_API_KEY= DOCSLURP_TOKEN= docslurp import-search-compat export.json \
 docslurp login                         # browser sign-in; asks for search and read
 docslurp login --scopes "search read chat ingest"
 docslurp login --device                # headless or SSH: enter a code on any device
-docslurp whoami                        # user, organization, default workspace, scopes, expiry
+docslurp whoami                        # user, organization, default project, scopes, expiry
 docslurp auth status                   # also shows which credential is in use and where it is stored
 docslurp logout                        # revokes the login on the server, then deletes it locally
 ```
 
 - **Browser login** uses OAuth 2.1 authorization code with PKCE and a one-time listener on `127.0.0.1` on a random port. If the browser does not open, the CLI prints the URL; `--no-browser` only prints it.
 - **Device login** (`--device`, RFC 8628) prints a short code such as `WDJB-MJHT` and a page on your DocSlurp origin. Open the page on any signed-in device and type the code; there is no link with the code filled in. The approval page shows when and from which IP the request was made. It grants `search` and `read` only: any other scope you asked for (`chat`, `ingest`, `web`) stays off unless you tick it there. Never enter a code someone else sent you.
-- **Scopes** are least privilege by default: `search` and `read`. Add `chat` to ask questions (uses credits) and `ingest` to upload, ingest URLs or reprocess. A CLI login can never change workspace settings, manage an organization or mint API keys; use the dashboard or a server key with those scopes.
+- **Scopes** are least privilege by default: `search` and `read`. Add `chat` to ask questions (uses credits) and `ingest` to upload, ingest URLs or reprocess. A CLI login can never change project settings, manage an organization or mint API keys; use the dashboard or a server key with those scopes.
 
 | Login scope | Lets the CLI |
 | --- | --- |
-| `search` | Search and list workspaces |
+| `search` | Search and list projects |
 | `read` | Read document text, pages, files, runs and exports |
 | `chat` | Ask grounded questions (`docslurp chat`) |
 | `ingest` | Upload, ingest URLs, reprocess, retag or delete documents |
@@ -255,10 +255,10 @@ export DOCSLURP_TOKEN="$(docslurp auth token)"
 # Or let the CLI hand one to a child process through its environment only:
 # never written to disk, never on the command line.
 docslurp exec -- npm run ingest-docs
-docslurp exec --workspace contracts -- python agent.py
+docslurp exec --project contracts -- python agent.py
 ```
 
-`exec` sets `DOCSLURP_TOKEN`, `DOCSLURP_URL` and, when you choose one, `DOCSLURP_WORKSPACE`, and exits with the child's status. The SDK reads `DOCSLURP_TOKEN` when no API key is set. Env tokens are short-lived (at most 15 minutes, not refreshed) and carry only the scopes of your login, so use them for one job; for long-running CI, use a scoped server key. `auth token` and `exec` refuse to forward an API key. When `DOCSLURP_TOKEN` is already set, `auth token` prints it back unchanged (with a note on stderr); unset it to get a token from your stored login. On Windows, `exec` finds commands through `PATHEXT` (so `npm`, `npx` and `pnpm` work) and never runs one from the current directory.
+`exec` sets `DOCSLURP_TOKEN`, `DOCSLURP_URL` and, when you choose one, `DOCSLURP_PROJECT`, and exits with the child's status. The SDK reads `DOCSLURP_TOKEN` when no API key is set. Env tokens are short-lived (at most 15 minutes, not refreshed) and carry only the scopes of your login, so use them for one job; for long-running CI, use a scoped server key. `auth token` and `exec` refuse to forward an API key. When `DOCSLURP_TOKEN` is already set, `auth token` prints it back unchanged (with a note on stderr); unset it to get a token from your stored login. On Windows, `exec` finds commands through `PATHEXT` (so `npm`, `npx` and `pnpm` work) and never runs one from the current directory.
 
 ## When something goes wrong
 
@@ -267,10 +267,10 @@ docslurp exec --workspace contracts -- python agent.py
 | Not signed in, or HTTP 401 | Run `docslurp login` (or `docslurp auth status` to see which credential is in use), or set `DOCSLURP_API_KEY` to a valid server key for this deployment. |
 | Login expired or revoked | Run `docslurp login` again. Logins refresh themselves for 30 days of use. |
 | `permissions ... are too open` | Run the `chmod` the message names, or `docslurp logout --force` and log in again. |
-| HTTP 403 | Check your workspace access and the scopes: `ingest` for uploads, `search` for search, `chat` for chat. For a login, add scopes with `docslurp login --scopes "search read chat ingest"`. |
+| HTTP 403 | Check your project access and the scopes: `ingest` for uploads, `search` for search, `chat` for chat. For a login, add scopes with `docslurp login --scopes "search read chat ingest"`. |
 | Watch timed out | Run `docslurp status RUN_ID --watch`. The run may still be processing. |
-| Run failed, paused, cancelled or dead-lettered | Check its status and the workspace in the dashboard before uploading again. |
-| Search returns nothing or too little | Check `availability` in `search --json`, and confirm the workspace (`--workspace` or `DOCSLURP_WORKSPACE`, else `default`). |
+| Run failed, paused, cancelled or dead-lettered | Check its status and the project in the dashboard before uploading again. |
+| Search returns nothing or too little | Check `availability` in `search --json`, and confirm the project (`--project` or `DOCSLURP_PROJECT`, else `default`). |
 | `Unexpected token` when parsing stdout | Add `--json` to search or chat. Progress output is text, not JSON. |
 | Some batch queries failed | Check each result's `ok`. Successful results are still in the JSON output. |
 

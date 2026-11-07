@@ -4,7 +4,7 @@ import { sql } from "../db.js";
 export const CHAT_OPERATION_LIMITS = { outputBytes: 262_144, treeOutputBytes: 524_288, tasks: 64, activeRoots: 8, replay: 256, recoveryBytes: 393_216, retentionDays: 7 } as const;
 export type OperationStatus = "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "interrupted";
 export interface Operation {
-  id: string; root_id: string; parent_id: string | null; user_id: string; workspace_id: string; org_id: string;
+  id: string; root_id: string; parent_id: string | null; user_id: string; project_id: string; org_id: string;
   runtime?: "legacy" | "mastra";
   status: OperationStatus; attempt_id: string | null; sequence: number; snapshot: Record<string, unknown>;
   cancel_requested: boolean; tree_cancel_requested: boolean; request_hash: string; input: Record<string, unknown>;
@@ -12,15 +12,15 @@ export interface Operation {
 export class OperationConflict extends Error {}
 export const terminalOperation = (status: OperationStatus) => ["completed", "failed", "cancelled", "interrupted"].includes(status);
 
-/** The caller must resolve workspace permission before launch. Root locking serializes child launch/cancel. */
-export async function launchChatOperation(args: { userId: string; workspaceId: string; orgId: string; key: string; input: Record<string, unknown>; parentId?: string; runtime?: "legacy" | "mastra" }) {
+/** The caller must resolve project permission before launch. Root locking serializes child launch/cancel. */
+export async function launchChatOperation(args: { userId: string; projectId: string; orgId: string; key: string; input: Record<string, unknown>; parentId?: string; runtime?: "legacy" | "mastra" }) {
   if (!/^[a-zA-Z0-9_-]{8,128}$/.test(args.key) || Buffer.byteLength(JSON.stringify(args.input)) > 128_000) throw new OperationConflict("Invalid launch size or idempotency key");
   const { authSessionId: _authSessionId, ...semanticInput } = args.input;
   const hash = createHash("sha256").update(JSON.stringify(semanticInput)).digest("hex");
   return sql.begin(async tx => {
     // Tenant owner lock also bounds concurrent root launches and duplicate keys.
     await tx`select id from "user" where id = ${args.userId} for update`;
-    const [existing] = await tx<Operation[]>`select * from chat_operations where user_id=${args.userId} and workspace_id=${args.workspaceId} and idempotency_key=${args.key}`;
+    const [existing] = await tx<Operation[]>`select * from chat_operations where user_id=${args.userId} and project_id=${args.projectId} and idempotency_key=${args.key}`;
     if (existing) {
       if (existing.runtime !== (args.runtime ?? "legacy") || existing.request_hash !== hash || existing.parent_id !== (args.parentId ?? null)) throw new OperationConflict("Idempotency key reused with different input");
       return existing;
@@ -28,7 +28,7 @@ export async function launchChatOperation(args: { userId: string; workspaceId: s
     const id = randomUUID();
     let rootId: string = id;
     if (args.parentId) {
-      const [parent] = await tx<Operation[]>`select * from chat_operations where id=${args.parentId} and user_id=${args.userId} and workspace_id=${args.workspaceId} and org_id=${args.orgId}`;
+      const [parent] = await tx<Operation[]>`select * from chat_operations where id=${args.parentId} and user_id=${args.userId} and project_id=${args.projectId} and org_id=${args.orgId}`;
       if (!parent) throw new OperationConflict("Parent unavailable");
       const [root] = await tx<Operation[]>`select * from chat_operations where id=${parent.root_id} for update`;
       const [currentParent] = await tx<Operation[]>`select * from chat_operations where id=${parent.id}`;
@@ -54,8 +54,8 @@ export async function launchChatOperation(args: { userId: string; workspaceId: s
         ))`;
       if (count >= CHAT_OPERATION_LIMITS.activeRoots) throw new OperationConflict("Active operation limit");
     }
-    const [row] = await tx<Operation[]>`insert into chat_operations (id, root_id, parent_id, user_id, workspace_id, org_id, idempotency_key, request_hash, input, runtime, status)
-      values (${id}, ${rootId}, ${args.parentId ?? null}, ${args.userId}, ${args.workspaceId}, ${args.orgId}, ${args.key}, ${hash}, ${tx.json(args.input as never)}, ${args.runtime ?? "legacy"}, ${args.runtime === "mastra" ? "waiting" : "queued"}) returning *`;
+    const [row] = await tx<Operation[]>`insert into chat_operations (id, root_id, parent_id, user_id, project_id, org_id, idempotency_key, request_hash, input, runtime, status)
+      values (${id}, ${rootId}, ${args.parentId ?? null}, ${args.userId}, ${args.projectId}, ${args.orgId}, ${args.key}, ${hash}, ${tx.json(args.input as never)}, ${args.runtime ?? "legacy"}, ${args.runtime === "mastra" ? "waiting" : "queued"}) returning *`;
     if (args.parentId) await tx`update chat_operations set deadline=(select deadline from chat_operations where id=${rootId}), expires_at=(select expires_at from chat_operations where id=${rootId}) where id=${id}`;
     return row!;
   });

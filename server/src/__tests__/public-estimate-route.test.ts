@@ -43,8 +43,8 @@ describe("POST /v1/estimate (public)", () => {
     const good = { name: "a.pdf", size: 40_000, profile: profile(40_000, 12) };
     expect((await post({ files: [{ ...good, profile: { ...good.profile, credits: 0 } }] })).status).toBe(400);
     expect((await post({ files: [good], settings: { margin: 1 } })).status).toBe(400);
-    expect((await post({ files: [good], workspace: "ws-1" })).status).toBe(400);
-    // Visual indexing reads every page: it cannot be quoted with fast quality, as a workspace cannot be configured so.
+    expect((await post({ files: [good], project: "ws-1" })).status).toBe(400);
+    // Visual indexing reads every page: it cannot be quoted with fast quality, as a project cannot be configured so.
     expect((await post({ files: [good], settings: { quality: "fast", indexing: "visual" } })).status).toBe(400);
     expect((await post({ files: Array.from({ length: 201 }, () => good) })).status).toBe(413);
     const huge = await app().request("/v1/estimate", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ files: [good], pad: "x".repeat(1_100_000) }) });
@@ -55,7 +55,7 @@ describe("POST /v1/estimate (public)", () => {
     const good = { name: "a.pdf", size: 40_000, profile: profile(40_000, 12) };
     const responses = [
       await post({ files: [{ ...good, profile: { ...good.profile, credits: 0 } }] }),
-      await post({ files: [good], workspace: "ws-1" }),
+      await post({ files: [good], project: "ws-1" }),
       await post({ files: Array.from({ length: 201 }, () => good) }),
       await app().request("/v1/estimate", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ files: [good], pad: "x".repeat(1_100_000) }) }),
     ];

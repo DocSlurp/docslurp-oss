@@ -43,7 +43,7 @@ beforeAll(async () => {
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com');
     insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 100000000), ('o3', 'Empty', 'empty', 'u1', 8, 0);
-    insert into workspaces(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W'), ('w3', 'o3', 'u1', 'E');
+    insert into projects(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W'), ('w3', 'o3', 'u1', 'E');
   `);
   const served = await serveOnRandomPort(db);
   server = served.server;
@@ -56,14 +56,14 @@ afterAll(async () => { await store?.close(); await server?.stop(); await db?.clo
 
 let seq = 0;
 /** A run with one counted document of `pages` pages; returns its state. */
-async function documentRun(pages: number, mime = "application/pdf", facts: object = pdfFacts, org: { org: string; workspace: string } = { org: "o1", workspace: "w1" }) {
+async function documentRun(pages: number, mime = "application/pdf", facts: object = pdfFacts, org: { org: string; project: string } = { org: "o1", project: "w1" }) {
   seq += 1;
   const runId = `run-${seq}`, documentId = `doc-${seq}`;
   await db.exec(`
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
-      values ('${runId}', '${org.org}', 'u1', '${org.workspace}', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 1, ${pages});
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts)
-      values ('${documentId}', '${org.org}', 'u1', '${org.workspace}', '${runId}', 'f', '${mime}', 'raw/${documentId}', 'processing', ${pages}, 'counted', '${JSON.stringify(facts)}');`);
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+      values ('${runId}', '${org.org}', 'u1', '${org.project}', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 1, ${pages});
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts)
+      values ('${documentId}', '${org.org}', 'u1', '${org.project}', '${runId}', 'f', '${mime}', 'raw/${documentId}', 'processing', ${pages}, 'counted', '${JSON.stringify(facts)}');`);
   const document = (await store.loadDocument(documentId))!;
   const state = WorkflowState.create(await store.loadRun(runId), [document]);
   state.store = store;
@@ -445,13 +445,13 @@ describe("rendered-area equivalents are authorized like every measured page (cou
     return { calls, artifacts, cache: new PdfRasterCache(runner as never, storage as never, sources) };
   }
   const usageEvents = async (runId: string) => (await db.query<{ n: number }>(`select count(*)::int as n from usage_events where run_id = '${runId}'`)).rows[0]!.n;
-  const runControl = async (runId: string) => (await db.query<{ control_state: string | null }>(`select control_state from workspace_runs where id = '${runId}'`)).rows[0]!.control_state;
+  const runControl = async (runId: string) => (await db.query<{ control_state: string | null }>(`select control_state from project_runs where id = '${runId}'`)).rows[0]!.control_state;
   const balance = async (org: string) => Number((await db.query<{ c: string }>(`select credit_balance_cents::text as c from organizations where id = '${org}'`)).rows[0]!.c);
 
   it("an area-only increase on an unfunded run pauses it before anything renders, caches or charges", async () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
     configurePageAreaSink(createPageAreaSink(sql(), store));
-    const { document, runId, documentId } = await documentRun(2, "application/pdf", pdfFacts, { org: "o3", workspace: "w3" });
+    const { document, runId, documentId } = await documentRun(2, "application/pdf", pdfFacts, { org: "o3", project: "w3" });
     const before = await balance("o3");
     const { calls, artifacts, cache } = rasterHarness();
     await expect(cache.renderSelectedPages({ document, runId, pageNumbers: [1, 2] })).rejects.toMatchObject({ name: "RunPolicyError" });
@@ -524,7 +524,7 @@ describe("rendered-area equivalents are authorized like every measured page (cou
   it("the native engine's renders are authorized the same way: an unfunded run caches nothing", async () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
     configurePageAreaSink(createPageAreaSink(sql(), store));
-    const { document, runId } = await documentRun(2, "application/pdf", pdfFacts, { org: "o3", workspace: "w3" });
+    const { document, runId } = await documentRun(2, "application/pdf", pdfFacts, { org: "o3", project: "w3" });
     const png = (width: number, height: number) => {
       const buf = Buffer.alloc(33);
       buf.write("\x89PNG\r\n\x1a\n", 0, "latin1");
@@ -588,10 +588,10 @@ describe("VM-extracted page areas bill from the layout facts' page boxes (real-M
 
   it("the area increase is authorized: an unfunded run pauses", async () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
-    const { state, document, runId } = await documentRun(1, "application/pdf", pdfFacts, { org: "o3", workspace: "w3" });
+    const { state, document, runId } = await documentRun(1, "application/pdf", pdfFacts, { org: "o3", project: "w3" });
     await expect(recordExtractedPageEquivalents(state, document, "pdf", "caption", [], { pageSizesPt: facts([{ pageNumber: 1, widthPt: 14_400, heightPt: 14_400 }]) }))
       .rejects.toMatchObject({ name: "RunPolicyError" });
-    expect((await db.query<{ control_state: string }>(`select control_state from workspace_runs where id = '${runId}'`)).rows[0]!.control_state).toBe("paused");
+    expect((await db.query<{ control_state: string }>(`select control_state from project_runs where id = '${runId}'`)).rows[0]!.control_state).toBe("paused");
   });
 
   it("a blank trailing page keeps its slot and bills its area: Doppler's \"caption\\f\" with a 4-Letter page 2 bills 5 (council H)", async () => {
@@ -631,10 +631,10 @@ describe("VM-extracted page areas bill from the layout facts' page boxes (real-M
 
   it("a blank trailing page's area is authorized: an unfunded run pauses", async () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
-    const { state, document, runId } = await documentRun(2, "application/pdf", pdfFacts, { org: "o3", workspace: "w3" });
+    const { state, document, runId } = await documentRun(2, "application/pdf", pdfFacts, { org: "o3", project: "w3" });
     await expect(recordExtractedPageEquivalents(state, document, "pdf", "caption\f", [],
       { extractor: "vm-pdf", pageSizesPt: facts([{ pageNumber: 2, widthPt: 14_400, heightPt: 14_400 }]) })).rejects.toMatchObject({ name: "RunPolicyError" });
-    expect((await db.query<{ control_state: string }>(`select control_state from workspace_runs where id = '${runId}'`)).rows[0]!.control_state).toBe("paused");
+    expect((await db.query<{ control_state: string }>(`select control_state from project_runs where id = '${runId}'`)).rows[0]!.control_state).toBe("paused");
   });
 
   it("parses the walker's page box, bounded; an unknown or hostile size bills no area", () => {

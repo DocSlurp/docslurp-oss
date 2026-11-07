@@ -19,8 +19,8 @@ Subscribe example:
 
 Unsubscribe carries the same subscription ID and generation, without resource.
 Heartbeat is `{"v":1,"type":"heartbeat"}`. Unknown fields and versions fail.
-Resources are activity/orgId, run/runId, workspace/workspaceId,
-documents/workspaceId/page, billing/orgId, economics/orgId/page, and operation/operationId/after.
+Resources are activity/orgId, run/runId, project/projectId,
+documents/projectId/page, billing/orgId, economics/orgId/page, and operation/operationId/after.
 Documents use bounded pages; `after` is the last applied operation sequence.
 
 Server resource frames carry v, type, subscriptionId, generation, resource,
@@ -68,11 +68,11 @@ never truncate terminal/delete semantics. Metrics contain counts/timing only.
 
 | Projection | Required committed changes | Current WS coverage |
 | --- | --- | --- |
-| Activity/jobs | Run creation, lifecycle, parent/child membership | workspace_runs trigger |
+| Activity/jobs | Run creation, lifecycle, parent/child membership | project_runs trigger |
 | Run | Progress, completion, cancellation, retries | Run, event, run/document/page stage and performance triggers |
 | Documents/viewer | Creation, update, deletion, processing/page metadata | Document, page, chunk, stage, tag and summary triggers |
 | Suggestions | Curated/recent queries and corpus readiness | Query suggestion, search session, document and chunk triggers |
-| Workspace | Settings, membership, deletion | Workspace, search settings, org/workspace membership triggers |
+| Project | Settings, membership, deletion | Project, search settings, org/project membership triggers |
 | Billing/economics | Attributed spend, credits, permissions | Usage, organizations, credit ledger/pending debit/lease/hold triggers |
 | Operations | Output, descendants, attempts, terminal results | Shared tree signature sweep, authorized durable snapshots/replay |
 
@@ -99,19 +99,19 @@ The following final projection contracts supersede the earlier generic examples:
 
 | Resource | `snapshot.data` | Bound |
 | --- | --- | --- |
-| activity/orgId | `{ runs: WorkspaceRun[], truncated: boolean }` | 200 runs, active first then latest update |
-| run/runId | WorkspaceRunProgressSnapshot, including recentEvents | Latest 100 lifecycle events; no durable event-history claim |
-| workspace/workspaceId | WorkspaceRecord (`workspaceSchema`) | One workspace |
-| documents/workspaceId/page | DocumentIndexResponse | 50 documents/page; page 0–1000 |
+| activity/orgId | `{ runs: ProjectRun[], truncated: boolean }` | 200 runs, active first then latest update |
+| run/runId | ProjectRunProgressSnapshot, including recentEvents | Latest 100 lifecycle events; no durable event-history claim |
+| project/projectId | ProjectRecord (`projectSchema`) | One project |
+| documents/projectId/page | DocumentIndexResponse | 50 documents/page; page 0–1000 |
 | billing/orgId | BillingOverview (`billingOverviewSchema`) | Owner/admin only |
-| economics/orgId/page | `{ workspaces: [{workspaceId,name,documentCount,pageCount,sourceBytes,activeRuns,pagesProcessed,runtimeMs,usage}], page,hasMore }` | 50 workspaces/page; owner/admin only; usage from attribution service |
+| economics/orgId/page | `{ projects: [{projectId,name,documentCount,pageCount,sourceBytes,activeRuns,pagesProcessed,runtimeMs,usage}], page,hasMore }` | 50 projects/page; owner/admin only; usage from attribution service |
 
-WorkspaceRun gains optional `jobId` (effective parent ID, run ID when no parent).
+ProjectRun gains optional `jobId` (effective parent ID, run ID when no parent).
 Keep each child's own run ID/status/progress under that parent. Activity is a
 bounded inventory, not all historical runs. The run snapshot's recentEvents
 is an authoritative bounded replacement window, not an append-only journal.
 Do not append that window repeatedly. Older history remains an explicit HTTP read.
-A resource error evicts that subscription's data (including removed runs/workspaces).
+A resource error evicts that subscription's data (including removed runs/projects).
 Collection snapshots replace missing members. Dashboard snapshots may skip revisions;
 only append-only operation output uses durable replay sequence semantics.
 
@@ -134,7 +134,7 @@ and full recovery read per subscription. Signatures include descendants and the
 organization authorization revision. Changed trees load bounded recovery state;
 identical user/operation/cursor reads share a result during that sweep (up to 128
 cached recovery pages), while each observer still revalidates its own session.
-Task summaries use one bounded query and authorize each distinct workspace.
+Task summaries use one bounded query and authorize each distinct project.
 Wire revisions for operation frames are independent of durable output sequences:
 child-only changes must remain visible when the parent's sequence stays fixed.
 Use `data.events[].sequence` and `data.watermark` for durable replay, never the wire
@@ -142,12 +142,12 @@ revision. A `resync-required` operation frame contains `{state,code}` where stat
 the authoritative recovery snapshot: apply its watermark, then tail newer output.
 Do not blindly repeat an expired cursor. An operation `error` evicts the subscription.
 
-Run snapshots omit executor queries/reconciliation and workspace reads do not
+Run snapshots omit executor queries/reconciliation and project reads do not
 self-title as a side effect. Run snapshots cap stage rows at 1,000 and per-document
 page-progress entries at 2,000; over-limit snapshots close with an explicit resync
 reason rather than silently omit state. Economics runtimeMs is the sum of completed
 runs' created-to-updated wall time (includes queue/retry time), not CPU time or pure
-parser throughput. Economics usage is all-time attributed workspace spend.
+parser throughput. Economics usage is all-time attributed project spend.
 
 `/metrics` exports fixed-label realtime connection/subscription gauges, queued bytes,
 projection reads/time, revision queries, notifications, shared-read coalescing,
@@ -167,8 +167,8 @@ remain coordinator/app integration work. Both flags remain off by default.
 
 ## Suggestions and open-viewer processing (integration contract)
 
-- Subscribe `{kind:"suggestions",workspaceId}`. Data uses the existing
-  `/v1/suggest?workspace=…&limit=8` shape: `suggestions`, `contextualSuggestions`,
+- Subscribe `{kind:"suggestions",projectId}`. Data uses the existing
+  `/v1/suggest?project=…&limit=8` shape: `suggestions`, `contextualSuggestions`,
   optional `contextualPending`, and `semantic:{status,indexedChunkCount,
   completedDocuments,totalDocuments}`. Arrays are capped at eight strings of
   1,024 characters. Shared validator: `realtimeSuggestionsSnapshotSchema`.
@@ -187,7 +187,7 @@ remain coordinator/app integration work. Both flags remain off by default.
   explicit authorized HTTP reads; do not fetch the full viewer on every snapshot.
   Removed/revoked documents produce a scoped error and clear the open viewer.
 
-Both resources authorize workspace membership before reads and delivery, share
+Both resources authorize project membership before reads and delivery, share
 broker coalescing, and reconcile commit-visible revisions. Publication covers
 query_suggestions, search-session queries, document/page/chunk changes, document
 stages, tags, run state and attributed usage. Keep the old component timers only
@@ -196,10 +196,10 @@ while the feature flag is off or the shared transport owns REST fallback.
 ## External work discovery (migrations 0117–0119; native lifecycle)
 
 Operation recovery now includes `dependencies` alongside executable chat `tasks`.
-Each dependency has stable `id`, `parent_id`, `root_id`, `run_id`, workspace/org
+Each dependency has stable `id`, `parent_id`, `root_id`, `run_id`, project/org
 scope, `status`, run execution-generation `attempt_id`, maximum `page_attempts`,
 `stage`, `control_state`, `ready_pages`, `failed_pages`, document/page `result_ref`,
-and `revision`. References grant no access: every dependency workspace is
+and `revision`. References grant no access: every dependency project is
 reauthorized before the recovery response. Fetch artifacts through the existing
 authorized document endpoints. The global operation reconciler includes new
 links and deadline transitions; committed page ledger changes advance the org
@@ -242,14 +242,14 @@ this adapter checkpoint is not final issue319 acceptance.
 
 POST /v1/chat/operations binds idempotency and trusted tenant scope, then enqueues
 exactly one native BackgroundTaskManager task under that binding. The separately
-supervised executor registers a static workspace-chat tool. Neither the socket nor
+supervised executor registers a static project-chat tool. Neither the socket nor
 the HTTP response owns its abort signal. New operations do not use the legacy SQL
 claim loop. Native PostgresStore owns task state/results and native indexed
 PubSub/cache owns replay; DocSlurp adds authorization, output quotas and explicit
 resync responses.
 
-The public operation envelope retains id, root_id, workspace_id, org_id, status,
-attempt_id, sequence and snapshot. Every task summary carries its own workspace_id
+The public operation envelope retains id, root_id, project_id, org_id, status,
+attempt_id, sequence and snapshot. Every task summary carries its own project_id
 and root_id; dependencies retain independent shared-run attempt/status/result
 references. treeSettled is false while any native child or shared materialization
 is active, even if the answer is completed. Public sequence is native event index
@@ -274,7 +274,7 @@ REST-only rate-limit Redis credentials are not sufficient. No infrastructure,
 provider migration or flag activation is performed by these changes. The chosen
 Redis persistence, memory/eviction policy and production proxy must be validated
 before activation. See realtime-mastra-assessment.md for installed API evidence
-and the distinction between existing workspace chat logic and native ownership.
+and the distinction between existing project chat logic and native ownership.
 
 ### Revision publication and ingestion lock independence
 

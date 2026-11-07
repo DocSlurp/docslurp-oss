@@ -173,11 +173,11 @@ export async function generateOpenRouterText(args: {
   prompt: string;
   model?: string;
   maxOutputTokens: number;
-  /** Privacy mode of the workspace whose content or query is sent; only `standard` may reach OpenRouter. */
+  /** Privacy mode of the project whose content or query is sent; only `standard` may reach OpenRouter. */
   privacyMode: PrivacyMode;
   signal?: AbortSignal;
   observability?: AiObservabilityContext;
-  /** Workspace attribution for strict-privacy audit rows on private endpoint calls. */
+  /** Project attribution for strict-privacy audit rows on private endpoint calls. */
   auditScope?: PrivateCallAuditScope;
   /**
    * OpenRouter `provider` preferences for this call (for example an `only`
@@ -263,12 +263,12 @@ export async function generateOpenRouterDocumentText(args: {
   }>;
   model?: string;
   maxOutputTokens: number;
-  /** Strictest privacy mode across the workspaces whose documents are included. */
+  /** Strictest privacy mode across the projects whose documents are included. */
   privacyMode: PrivacyMode;
   signal?: AbortSignal;
   onTextDelta?: TextDeltaHandler;
   observability?: AiObservabilityContext;
-  /** Workspace attribution for strict-privacy audit rows on private endpoint calls. */
+  /** Project attribution for strict-privacy audit rows on private endpoint calls. */
   auditScope?: PrivateCallAuditScope;
 }): Promise<{
   text: string;
@@ -282,7 +282,7 @@ export async function generateOpenRouterDocumentText(args: {
       operation: "api.chat.documents",
       modelUri: args.model,
       system: args.system,
-      prompt: `${args.prompt}\n\nWorkspace evidence:\n\n${inlineDocuments}`,
+      prompt: `${args.prompt}\n\nProject evidence:\n\n${inlineDocuments}`,
       maxOutputTokens: args.maxOutputTokens,
       privacyMode: args.privacyMode,
       auditScope: args.auditScope,
@@ -357,7 +357,7 @@ export async function generateOpenRouterDocumentText(args: {
           }),
           model: provider(model),
           system: args.system,
-          prompt: `${args.prompt}\n\nWorkspace evidence:\n\n${inlineDocuments}`,
+          prompt: `${args.prompt}\n\nProject evidence:\n\n${inlineDocuments}`,
           maxOutputTokens: args.maxOutputTokens,
           abortSignal: args.signal,
           providerOptions,
@@ -484,12 +484,12 @@ export async function embedConfiguredText(args: {
   model?: string;
   dimensions?: number;
   maxRetries?: number;
-  /** Workspace-configured dimensions to request from servers that support them. */
+  /** Project-configured dimensions to request from servers that support them. */
   requestedDimensions?: number;
   normalize?: boolean;
   apiKey?: string;
   baseURL?: string;
-  /** Workspace privacy mode; hosted embedding providers are refused outside `standard`. */
+  /** Project privacy mode; hosted embedding providers are refused outside `standard`. */
   privacyMode: PrivacyMode;
   signal?: AbortSignal;
   observability?: AiObservabilityContext;
@@ -497,7 +497,7 @@ export async function embedConfiguredText(args: {
   onUsage?: (usage: EmbeddingUsage) => Promise<void> | void;
   /** `llm://private/...` route; required when `provider` is `private`. */
   modelUri?: string;
-  /** Workspace attribution for strict-privacy audit rows on private endpoint calls. */
+  /** Project attribution for strict-privacy audit rows on private endpoint calls. */
   auditScope?: PrivateCallAuditScope;
 }): Promise<{ embedding: number[]; usage: EmbeddingUsage }> {
   if (args.provider === PRIVATE_MODEL_PROVIDER) {
@@ -702,7 +702,7 @@ async function embedLocalText(args: {
   model?: string;
   dimensions?: number;
   normalize?: boolean;
-  /** The workspace route; its `?pooling=` must match how the documents were embedded. */
+  /** The project route; its `?pooling=` must match how the documents were embedded. */
   modelUri?: string;
 }): Promise<{ embedding: number[]; usage: EmbeddingUsage }> {
   return withObservation(
@@ -720,7 +720,7 @@ async function embedLocalText(args: {
       const pipeline = await getLocalEmbeddingPipeline(
         args.model ?? SEARCH_EMBEDDING_MODEL,
       );
-      // Same pooling as the workspace's documents were embedded with (`?pooling=` on the route).
+      // Same pooling as the project's documents were embedded with (`?pooling=` on the route).
       const output = await pipeline(args.value, {
         pooling: localEmbeddingPooling(args.modelUri ?? ""),
         normalize: args.normalize ?? true,

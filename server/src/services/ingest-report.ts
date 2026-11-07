@@ -30,19 +30,19 @@ import {
   type IngestReportRecommendation,
   type PipelineFeatureOverrides,
   type PipelineFeatures,
-  type WorkspaceRecord,
+  type ProjectRecord,
   partialExtractionMessage,
 } from "@docslurp/shared";
 import { z } from "zod";
 import type { BulkReprocessResult } from "./documents.js";
 import { sql, type SqlClient } from "../db.js";
-import { workspaceRunsUsageCost } from "./usage-attribution.js";
+import { projectRunsUsageCost } from "./usage-attribution.js";
 
 /**
- * Ingest report: per-file and per-page observations for a workspace (or one
+ * Ingest report: per-file and per-page observations for a project (or one
  * run / a set of documents), the pipeline settings that shaped them and
  * deterministic recommendations. No model call. Every query is scoped to the
- * caller-authorized workspace id; callers must check access first.
+ * caller-authorized project id; callers must check access first.
  */
 
 /** Pages per file read page by page; longer files contribute their first pages. */
@@ -111,7 +111,7 @@ export interface IngestReportRunRow {
 }
 
 export interface IngestReportInput {
-  workspace: Pick<WorkspaceRecord, "id" | "name" | "pipeline">;
+  project: Pick<ProjectRecord, "id" | "name" | "pipeline">;
   scope: { runId: string | null; documentIds: string[] | null; matchedDocuments: number };
   documents: IngestReportDocumentRow[];
   /** Document ids whose pages were loaded (within the page cap). */
@@ -210,13 +210,13 @@ function formatCents(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
-/** Model URI the workspace's vision stage calls (explicit, else the profile's). */
+/** Model URI the project's vision stage calls (explicit, else the profile's). */
 export function visionModelUri(pipeline: PipelineFeatures): string {
   // Includes the DOCSLURP_VISION_MODEL_URI override, matching the model the worker calls.
   return applyDefaultVisionOverride(pipeline).vision.modelUri ?? visionProfileCatalog[pipeline.vision.profile]?.config.modelUri ?? "";
 }
 
-/** Whether the workspace's quality lets vision read pages at all (fast never does; there is no per-file page count). */
+/** Whether the project's quality lets vision read pages at all (fast never does; there is no per-file page count). */
 export function qualityAllowsVision(pipeline: PipelineFeatures): boolean {
   return qualityAllowsPageReading(pipeline.quality);
 }
@@ -281,7 +281,7 @@ function publicPage(page: PageView): IngestReportPage {
 const KIND_ORDER: FileKind[] = ["pdf", "image", "office", "html", "text", "epub", "audio", "video", "other"];
 
 export function buildIngestReport(input: IngestReportInput): IngestReport {
-  const pipeline = input.workspace.pipeline;
+  const pipeline = input.project.pipeline;
   const docs = input.documents;
   const docById = new Map(docs.map((doc) => [doc.id, doc]));
   const pageViews = input.pages.flatMap((row) => {
@@ -435,8 +435,8 @@ export function buildIngestReport(input: IngestReportInput): IngestReport {
   };
 
   return {
-    workspaceId: input.workspace.id,
-    workspaceName: input.workspace.name,
+    projectId: input.project.id,
+    projectName: input.project.name,
     generatedAt: (input.now ?? new Date()).toISOString(),
     scope: {
       runId: input.scope.runId,
@@ -694,7 +694,7 @@ export function buildConfigItems(pipeline: PipelineFeatures, observed: Observed)
   }
   items.push({
     key: "embed", label: "Embeddings", value: pipeline.embed && pipeline.indexVectors ? `On (${pipeline.embedding.profile})` : "Off",
-    note: pipeline.embed && pipeline.indexVectors ? "Chunks are searchable by meaning as well as keywords." : "Only keyword search can find this workspace's text.",
+    note: pipeline.embed && pipeline.indexVectors ? "Chunks are searchable by meaning as well as keywords." : "Only keyword search can find this project's text.",
   });
   items.push({
     key: "chunking", label: "Chunking", value: `${pipeline.chunkOverlap ? "Overlap on" : "No overlap"}, ${pipeline.contextualChunkPreambles ? "context preambles on" : "no preambles"}`,
@@ -703,11 +703,11 @@ export function buildConfigItems(pipeline: PipelineFeatures, observed: Observed)
   if (kinds.has("video") || kinds.has("audio")) {
     items.push({
       key: "mediaVideo.enabled", label: "Video frames", value: onOff(pipeline.mediaVideo?.enabled !== false),
-      note: "Workspace policy only, not evidence that frames were processed. Video also requires platform support, privacy permission and available budget/quota; audio transcription is a platform setting.",
+      note: "Project policy only, not evidence that frames were processed. Video also requires platform support, privacy permission and available budget/quota; audio transcription is a platform setting.",
     });
   }
   if (pipeline.outputSchema && Object.keys(pipeline.outputSchema).length > 0) {
-    items.push({ key: "outputSchema", label: "Structured extraction", value: "On", note: "Fields are extracted against the workspace schema after text extraction." });
+    items.push({ key: "outputSchema", label: "Structured extraction", value: "On", note: "Fields are extracted against the project schema after text extraction." });
   }
   if (pipeline.maxCostCents !== null) {
     items.push({ key: "maxCostCents", label: "Cost cap per run", value: formatCents(pipeline.maxCostCents), note: "Vision stops for the rest of a run once its spend reaches the cap." });
@@ -720,7 +720,7 @@ export function buildConfigItems(pipeline: PipelineFeatures, observed: Observed)
 
 function visionCentsPerPage(pipeline: PipelineFeatures, observed: Observed): { cents: number; basis: string } {
   if (observed.visionCents !== null && observed.visionCents > 0 && observed.visionPages >= 3) {
-    return { cents: observed.visionCents / observed.visionPages, basis: `observed vision spend in this workspace (${plural(observed.visionPages, "page")})` };
+    return { cents: observed.visionCents / observed.visionPages, basis: `observed vision spend in this project (${plural(observed.visionPages, "page")})` };
   }
   const model = visionModelUri(pipeline);
   const catalog = visionModelCatalogByUri[model]?.estimatedCostPerPageCents ?? 0.5;
@@ -744,7 +744,7 @@ function reprocessEstimate(observed: Observed, documentIds: string[], visionPage
 /**
  * How each recommendation the report can emit reaches the user. Every id must be
  * listed (the compiler enforces it): "pipeline-patch" recommendations carry a
- * `patch` the chat assistant can prepare with `proposeWorkspaceSettings`
+ * `patch` the chat assistant can prepare with `proposeProjectSettings`
  * ({changes: {pipeline: patch}}); the rest are deliberately not proposable.
  */
 export const INGEST_RECOMMENDATION_CATALOG = {
@@ -823,7 +823,7 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
       cost: {
         centsPer100Pages: round(vision.cents * 100, 2),
         reprocessCents: round(estimate.cents, 2),
-        basis: `Vision about ${formatCents(vision.cents)} per page (${vision.basis}), charged on every page. Reprocessing re-runs the ${plural(estimate.pages, "page")} of the affected files${estimate.baseKnown ? " at this workspace's observed cost per page" : ""} plus vision.`,
+        basis: `Vision about ${formatCents(vision.cents)} per page (${vision.basis}), charged on every page. Reprocessing re-runs the ${plural(estimate.pages, "page")} of the affected files${estimate.baseKnown ? " at this project's observed cost per page" : ""} plus vision.`,
       },
       patch: settingInPlace ? null : patch,
       reprocessDocumentIds: affectedDocIds,
@@ -839,7 +839,7 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
       id: "fast-kept-as-image", severity: "medium",
       title: settingInPlace ? "Reprocess pages kept as images" : "Make pages kept as images searchable",
       reason: `${plural(keptAsImage.length, "page")} in ${plural(ids.length, "file")} had no text layer and ${agree(keptAsImage.length, "was", "were")} kept as ${agree(keptAsImage.length, "a page image", "page images")} in Fast mode, so ${agree(keptAsImage.length, "its", "their")} text was not read and cannot be searched.${
-        settingInPlace ? " The workspace no longer uses Fast, so these files were processed before that change." : ""}`,
+        settingInPlace ? " The project no longer uses Fast, so these files were processed before that change." : ""}`,
       effect: settingInPlace
         ? `Reprocess the ${plural(ids.length, "affected file")} so ${agree(keptAsImage.length, "this page is", "these pages are")} read.`
         : `Switch processing quality to Auto (reads only the pages that need it, ${qualityModePriceRange("auto")} per 1,000 pages) or Good (a vision model reads every page, ${qualityModePriceRange("good")} per 1,000 pages). Applies to new uploads; reprocess the ${plural(ids.length, "affected file")} to read existing pages.`,
@@ -905,7 +905,7 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
       reason: `${plural(costCapped.length, "page")} skipped vision because the run reached its ${formatCents(pipeline.maxCostCents)} cost cap${
         observed.singleRun && observed.billedCostCents !== null ? ` (${formatCents(observed.billedCostCents)} billed: AI calls, embeddings, page fees and billed compute; compute estimates do not count)` : ""
       }.`,
-      effect: "Raise or remove maxCostCents in workspace settings, then reprocess, to read these pages.",
+      effect: "Raise or remove maxCostCents in project settings, then reprocess, to read these pages.",
       affectedPages: costCapped.length, affectedDocuments: new Set(costCapped.map((page) => page.documentId)).size,
       cost: { centsPer100Pages: round(vision.cents * 100, 2), reprocessCents: null, basis: `Vision about ${formatCents(vision.cents)} per page (${vision.basis}).` },
       patch: null, reprocessDocumentIds: [],
@@ -944,7 +944,7 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
     recs.push({
       id: "turn-on-video", severity: "medium",
       title: "Read video frames",
-      reason: `${plural(videos.length, "video file")} ${agree(videos.length, "has", "have")} video frame reading disabled in this workspace; on-screen text and slides may not be indexed.`,
+      reason: `${plural(videos.length, "video file")} ${agree(videos.length, "has", "have")} video frame reading disabled in this project; on-screen text and slides may not be indexed.`,
       effect: "Selected frames are read with a vision model alongside the transcript. Applies to new uploads and needs platform video support.",
       affectedPages: 0, affectedDocuments: videos.length,
       cost: { centsPer100Pages: null, reprocessCents: null, basis: "Depends on video length and frame selection; mediaVideo.maxCostCents bounds it per file." },
@@ -976,7 +976,7 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
       reason: `${plural(notIndexed.length, "page")} in ${plural(ids.length, "file")} ${agree(notIndexed.length, "has", "have")} a text layer but no chunks, so search cannot return ${agree(notIndexed.length, "it", "them")}.`,
       effect: "Reprocessing re-extracts and re-chunks these files.",
       affectedPages: notIndexed.length, affectedDocuments: ids.length,
-      cost: { centsPer100Pages: null, reprocessCents: round(estimate.cents, 2), basis: estimate.baseKnown ? "This workspace's observed cost per page." : `Planning estimate ${EMBED_CENTS_PER_PAGE}¢ per page.` },
+      cost: { centsPer100Pages: null, reprocessCents: round(estimate.cents, 2), basis: estimate.baseKnown ? "This project's observed cost per page." : `Planning estimate ${EMBED_CENTS_PER_PAGE}¢ per page.` },
       patch: null, reprocessDocumentIds: ids,
     });
   }
@@ -993,12 +993,12 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
       title: "Retry failed files",
       reason: `${plural(failedDocs.length, "file")} failed during processing and ${agree(failedDocs.length, "is", "are")} not searchable.${knownCauses.length ? ` Cause: ${knownCauses.join(" ")}` : ""}`,
       effect: retryable === causes.length
-        ? "Reprocessing runs them again with the current workspace settings."
+        ? "Reprocessing runs them again with the current project settings."
         : retryable === 0
-          ? `Reprocessing will fail the same way until the cause is fixed; changing workspace settings does not help. Check the failure details first.`
-          : `Reprocessing runs the ${plural(retryable, "retryable file")} again with the current workspace settings; the others will fail the same way until their cause is fixed.`,
+          ? `Reprocessing will fail the same way until the cause is fixed; changing project settings does not help. Check the failure details first.`
+          : `Reprocessing runs the ${plural(retryable, "retryable file")} again with the current project settings; the others will fail the same way until their cause is fixed.`,
       affectedPages: failedDocs.reduce((sum, doc) => sum + Math.max(0, doc.pageCount), 0), affectedDocuments: failedDocs.length,
-      cost: { centsPer100Pages: null, reprocessCents: round(estimate.cents, 2), basis: estimate.baseKnown ? "This workspace's observed cost per page." : `Planning estimate ${EMBED_CENTS_PER_PAGE}¢ per page.` },
+      cost: { centsPer100Pages: null, reprocessCents: round(estimate.cents, 2), basis: estimate.baseKnown ? "This project's observed cost per page." : `Planning estimate ${EMBED_CENTS_PER_PAGE}¢ per page.` },
       patch: null, reprocessDocumentIds: ids,
     });
   }
@@ -1010,7 +1010,7 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
       id: "multilingual-embeddings", severity: "info",
       title: "Use a multilingual embedding profile",
       reason: `${plural(files, "file")} ${agree(files, "is", "are")} in ${nonEnglish.map(([code]) => code).join(", ")}, and the ${pipeline.embedding.profile} profile is tuned for English.`,
-      effect: "Switch the embedding profile to multilingual-local in workspace settings. Changing profiles re-embeds everything, so reprocess the whole workspace afterwards.",
+      effect: "Switch the embedding profile to multilingual-local in project settings. Changing profiles re-embeds everything, so reprocess the whole project afterwards.",
       affectedPages: 0, affectedDocuments: files,
       cost: { centsPer100Pages: 0, reprocessCents: null, basis: "Local profile: worker compute only." },
       patch: null, reprocessDocumentIds: [],
@@ -1042,7 +1042,7 @@ export function escapeMarkdown(text: string): string {
 /** Short Markdown for the chat transcript; the card carries the detail. */
 export function summarizeIngestReport(report: IngestReport): string {
   const lines: string[] = [];
-  const scope = report.scope.runId ? "this run" : report.scope.documentIds ? "the selected files" : escapeMarkdown(report.workspaceName);
+  const scope = report.scope.runId ? "this run" : report.scope.documentIds ? "the selected files" : escapeMarkdown(report.projectName);
   if (report.files.total === 0) {
     return `**Ingest report** for ${scope}: no files yet. Drop files here to start.`;
   }
@@ -1118,25 +1118,25 @@ function numOrNull(value: unknown): number | null {
 }
 
 /**
- * Loads and builds the report. `workspace` must already be authorized for the
+ * Loads and builds the report. `project` must already be authorized for the
  * caller; every query filters on its id, so a foreign runId or document id
  * simply matches nothing.
  */
 export async function loadIngestReport(args: {
-  workspace: Pick<WorkspaceRecord, "id" | "name" | "pipeline">;
+  project: Pick<ProjectRecord, "id" | "name" | "pipeline">;
   canEdit: boolean;
   runId?: string | null;
   documentIds?: string[] | null;
   focusPages?: number[];
 }, client: SqlClient = sql): Promise<IngestReport> {
-  const workspaceId = args.workspace.id;
+  const projectId = args.project.id;
   const runId = args.runId ?? null;
   const documentIds = args.documentIds?.length ? args.documentIds : null;
   const scoped = runId !== null || documentIds !== null;
 
   const [{ matched } = { matched: 0 }] = await client<{ matched: number }[]>`
     select count(*)::int as matched from documents d
-    where d.workspace_id = ${workspaceId} and d.purged_at is null
+    where d.project_id = ${projectId} and d.purged_at is null
       and (${scoped} or d.superseded_at is null)
       and (${runId}::text is null or d.run_id = ${runId})
       and (${documentIds === null} or d.id = any(${client.array(documentIds ?? [])}::text[]))
@@ -1145,7 +1145,7 @@ export async function loadIngestReport(args: {
     select d.id, d.filename, d.mime_type, d.status, d.page_count, d.file_size, d.run_id, d.created_at,
       (d.superseded_at is not null) as superseded
     from documents d
-    where d.workspace_id = ${workspaceId} and d.purged_at is null
+    where d.project_id = ${projectId} and d.purged_at is null
       and (${scoped} or d.superseded_at is null)
       and (${runId}::text is null or d.run_id = ${runId})
       and (${documentIds === null} or d.id = any(${client.array(documentIds ?? [])}::text[]))
@@ -1155,7 +1155,7 @@ export async function loadIngestReport(args: {
   const ids = docRows.map((row) => row.id);
   if (ids.length === 0) {
     return buildIngestReport({
-      workspace: args.workspace, scope: { runId, documentIds, matchedDocuments: matched },
+      project: args.project, scope: { runId, documentIds, matchedDocuments: matched },
       documents: [], pageDetailDocumentIds: [], pages: [], stages: [], runs: [], costCents: null,
       canEdit: args.canEdit, focusPages: args.focusPages,
     });
@@ -1177,7 +1177,7 @@ export async function loadIngestReport(args: {
         count(*) filter (where c.page_number is null and jsonb_typeof(c.metadata -> 'pageNumbers') is distinct from 'array')::int as unattributed
       from document_chunks c
       join documents d on d.id = c.document_id and d.run_id = c.run_id
-      where d.workspace_id = ${workspaceId} and d.id = any(${client.array(ids)}::text[])
+      where d.project_id = ${projectId} and d.id = any(${client.array(ids)}::text[])
       group by c.document_id
     `,
     detailIds.length === 0 ? Promise.resolve([]) : client<{
@@ -1187,7 +1187,7 @@ export async function loadIngestReport(args: {
       with d as (
         select id, run_id, least(greatest(page_count, 0), ${MAX_PAGES_PER_DOCUMENT}) as pages
         from documents
-        where workspace_id = ${workspaceId} and id = any(${client.array(detailIds)}::text[])
+        where project_id = ${projectId} and id = any(${client.array(detailIds)}::text[])
       ),
       -- A chunk counts for its page, or for every page it spans (metadata.pageNumbers), its bytes split evenly.
       cp as (
@@ -1238,14 +1238,14 @@ export async function loadIngestReport(args: {
         case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'pdfPagesMismatch') = 'string' then left(s.stats ->> 'pdfPagesMismatch', 40) end as pdf_pages_mismatch
       from document_run_stage_states s
       join documents d on d.id = s.document_id and d.run_id = s.run_id
-      where d.workspace_id = ${workspaceId} and d.id = any(${client.array(ids)}::text[])
+      where d.project_id = ${projectId} and d.id = any(${client.array(ids)}::text[])
       order by s.started_at nulls last, s.updated_at
     `,
     client<{ document_id: string; language: string | null }[]>`
       select distinct on (p.document_id) p.document_id, left(p.metadata ->> 'detectedLanguage', 16) as language
       from performance_log p
       join documents d on d.id = p.document_id
-      where d.workspace_id = ${workspaceId} and p.document_id = any(${client.array(ids)}::text[]) and p.metric = 'detected-language'
+      where d.project_id = ${projectId} and p.document_id = any(${client.array(ids)}::text[]) and p.metric = 'detected-language'
       order by p.document_id, p.created_at desc
     `,
   ]);
@@ -1255,16 +1255,16 @@ export async function loadIngestReport(args: {
     runIds.length === 0 ? Promise.resolve([]) : client<{ id: string; status: string; pages_processed: number; duration_ms: string | number }[]>`
       select r.id, r.status, greatest(r.pages_processed, 0) as pages_processed,
         greatest(extract(epoch from (r.updated_at - r.created_at)) * 1000, 0) as duration_ms
-      from workspace_runs r
-      where r.workspace_id = ${workspaceId} and r.id = any(${client.array(runIds)}::text[])
+      from project_runs r
+      where r.project_id = ${projectId} and r.id = any(${client.array(runIds)}::text[])
     `,
-    workspaceRunsUsageCost(workspaceId, runIds, client).catch(() => null),
+    projectRunsUsageCost(projectId, runIds, client).catch(() => null),
   ]);
 
   const chunksByDoc = new Map(chunkRows.map((row) => [row.document_id, row]));
   const languageByDoc = new Map(languageRows.map((row) => [row.document_id, row.language]));
   return buildIngestReport({
-    workspace: args.workspace,
+    project: args.project,
     scope: { runId, documentIds, matchedDocuments: matched },
     documents: docRows.map((row) => ({
       id: row.id, filename: row.filename, mimeType: row.mime_type, status: row.status,
@@ -1325,53 +1325,53 @@ export function patchHolds(pipeline: unknown, patch: unknown): boolean {
 }
 
 type RecommendationAction = {
-  workspace: WorkspaceRecord; userId: string; recommendationId: string;
+  project: ProjectRecord; userId: string; recommendationId: string;
   /** The scope of the report the action came from; the server recomputes that same report. */
   runId?: string | null; documentIds?: string[] | null;
 };
 
 async function editableRecommendation(args: RecommendationAction): Promise<IngestReportRecommendation> {
-  const { getWorkspaceAccess, canEditWorkspace } = await import("./organizations.js");
-  const access = await getWorkspaceAccess(args.workspace.id, args.userId);
-  if (!access) throw new IngestReportActionError("Workspace not found", 404);
-  if (!canEditWorkspace(access, args.userId)) {
-    throw new IngestReportActionError("Only workspace editors can change ingest settings or reprocess files.", 403);
+  const { getProjectAccess, canEditProject } = await import("./organizations.js");
+  const access = await getProjectAccess(args.project.id, args.userId);
+  if (!access) throw new IngestReportActionError("Project not found", 404);
+  if (!canEditProject(access, args.userId)) {
+    throw new IngestReportActionError("Only project editors can change ingest settings or reprocess files.", 403);
   }
   // Recompute: the change comes from the server's own rules, never from the client.
   const report = await loadIngestReport({
-    workspace: args.workspace, canEdit: true, runId: args.runId ?? null, documentIds: args.documentIds ?? null,
+    project: args.project, canEdit: true, runId: args.runId ?? null, documentIds: args.documentIds ?? null,
   });
   const recommendation = report.recommendations.find((rec) => rec.id === args.recommendationId);
   if (!recommendation) throw new IngestReportActionError("This recommendation no longer applies; refresh the report.", 409);
   return recommendation;
 }
 
-/** Applies a recommendation's pipeline change through the regular workspace update path. */
-export async function applyIngestRecommendation(args: RecommendationAction): Promise<{ workspace: WorkspaceRecord; recommendation: IngestReportRecommendation; pipeline: PipelineFeatures }> {
+/** Applies a recommendation's pipeline change through the regular project update path. */
+export async function applyIngestRecommendation(args: RecommendationAction): Promise<{ project: ProjectRecord; recommendation: IngestReportRecommendation; pipeline: PipelineFeatures }> {
   const recommendation = await editableRecommendation(args);
   if (!recommendation.patch) throw new IngestReportActionError("This recommendation has no setting to turn on.", 409);
-  const { getWorkspace, updateWorkspace } = await import("./workspaces.js");
+  const { getProject, updateProject } = await import("./projects.js");
   // Merge onto the pipeline as stored now, so a settings edit made meanwhile is kept.
-  const current = await getWorkspace(args.workspace.id, args.userId);
-  if (!current) throw new IngestReportActionError("Workspace not found", 404);
+  const current = await getProject(args.project.id, args.userId);
+  if (!current) throw new IngestReportActionError("Project not found", 404);
   const next = applyRecommendationPatch(current.pipeline, recommendation.patch);
-  const updated = await updateWorkspace(args.workspace.id, args.userId, { pipeline: next });
-  if (!updated) throw new IngestReportActionError("Only workspace editors can change ingest settings.", 403);
+  const updated = await updateProject(args.project.id, args.userId, { pipeline: next });
+  if (!updated) throw new IngestReportActionError("Only project editors can change ingest settings.", 403);
   if (!patchHolds(updated.pipeline, recommendation.patch)) {
-    throw new IngestReportActionError("The workspace template locks this setting, so it was not changed.", 409);
+    throw new IngestReportActionError("The project template locks this setting, so it was not changed.", 409);
   }
-  return { workspace: updated, recommendation, pipeline: updated.pipeline };
+  return { project: updated, recommendation, pipeline: updated.pipeline };
 }
 
 export const INGEST_REPORT_REPROCESS_LIMIT = 100;
 
-/** Reprocesses a recommendation's affected files (at most 100) with the workspace's current settings. */
+/** Reprocesses a recommendation's affected files (at most 100) with the project's current settings. */
 export async function reprocessIngestRecommendation(args: RecommendationAction & { speedBoost?: boolean }): Promise<{ runs: Array<{ id: string }>; documentIds: string[]; skippedDocuments: number; estimatedCents: number | null; failed: BulkReprocessResult["failed"]; warnings: string[] }> {
   const recommendation = await editableRecommendation(args);
   const ids = recommendation.reprocessDocumentIds.slice(0, INGEST_REPORT_REPROCESS_LIMIT);
   if (ids.length === 0) throw new IngestReportActionError("No files to reprocess for this recommendation.", 409);
   const { bulkReprocessDocuments } = await import("./documents.js");
-  const { runs, failed, warnings } = await bulkReprocessDocuments(ids, args.userId, { useWorkspacePipeline: true, speedBoost: args.speedBoost === true });
+  const { runs, failed, warnings } = await bulkReprocessDocuments(ids, args.userId, { useProjectPipeline: true, speedBoost: args.speedBoost === true });
   return {
     runs: runs.map((run) => ({ id: run.id })),
     documentIds: ids,

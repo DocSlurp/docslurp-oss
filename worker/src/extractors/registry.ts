@@ -262,7 +262,7 @@ export class ExtractorRegistry {
     const base = defaultDocumentExtractorOrder[format] ?? defaultDocumentExtractorOrder.default;
     // PDFs: a VM deployment (DOCSLURP_PDF_MODE=vm, DOCSLURP_PDF_EXTRACTOR=vm-pdf, DOCSLURP_VM_PDF_INSTALLED=1 or
     // DOCSLURP_SERVICE_PROFILE=service) runs them only in vm-pdf; with neither a VM nor local mode they are refused here,
-    // whatever a workspace names, so no host parser runs.
+    // whatever a project names, so no host parser runs.
     const pdfMode = format === "pdf" ? resolvePdfMode() : null;
     if (pdfMode === "off") throw new Error(PDF_EXTRACTION_UNCONFIGURED);
     const sandboxedPdf = pdfMode === "vm";
@@ -278,7 +278,7 @@ export class ExtractorRegistry {
     const ids = kept && !emptiedByRetired ? kept : defaults.filter((id) =>
       this.entries.get(id)?.descriptor.capabilities.formats.includes(format),
     );
-    // Fail closed: a workspace order naming a host parser under a sandboxed deployment is refused, never run.
+    // Fail closed: a project order naming a host parser under a sandboxed deployment is refused, never run.
     const hostIds = sandboxedPdf ? ids.filter((id) => id !== VM_PDF_EXTRACTOR_ID) : [];
     if (hostIds.length > 0) {
       throw new Error(`extractor ${hostIds.join(", ")} refused for pdf: this deployment runs PDFs only in ${VM_PDF_EXTRACTOR_ID}`);

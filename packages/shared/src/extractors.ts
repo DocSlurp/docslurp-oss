@@ -127,7 +127,7 @@ export interface ExtractorOutput {
   diagnostics: { latencyMs: number; warnings: string[]; toolVersion?: string };
 }
 
-/** Router output for one document. It has the same method IDs as workspace policy. */
+/** Router output for one document. It has the same method IDs as project policy. */
 export interface ResolvedExtractionPlan {
   target: string;
   enrich: string[];
@@ -256,7 +256,7 @@ export function publicDocumentExtractorDescriptors(options: { nativePdfInstalled
 export const SANDBOXED_PDF_EXTRACTOR_ID = "vm-pdf";
 
 /**
- * Under a sandboxed PDF deployment (sandboxedPdfConfigured), every extractor a workspace's documentExtraction names for
+ * Under a sandboxed PDF deployment (sandboxedPdfConfigured), every extractor a project's documentExtraction names for
  * PDFs must be the sandboxed one: anything else would parse customer PDFs on the worker host. Returns each offending
  * place (`order.pdf.0`, `pages.1`, `enrich.0`, `voting.secondary`) with its id; empty when the deployment is not sandboxed
  * or the config names none. `pages` and `enrich` are not per format, so they are held to the same rule. Ids are compared

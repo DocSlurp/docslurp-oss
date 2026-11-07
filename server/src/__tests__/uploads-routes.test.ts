@@ -5,7 +5,7 @@ import { defaultPipelineFeatures } from "@docslurp/shared";
 import { createUploadsRoutes } from "../routes/uploads.js";
 import { RunCreationBlockedError } from "../services/runs.js";
 import { withTestSession } from "./helpers/session-app.js";
-import { createWorkspaceIntakeFakes, fakeWorkspace } from "./helpers/workspace-intake-fakes.js";
+import { createProjectIntakeFakes, fakeProject } from "./helpers/project-intake-fakes.js";
 
 // URL safety checks resolve hosts; keep them independent of live DNS.
 
@@ -20,8 +20,8 @@ vi.mock("node:dns/promises", () => ({
   lookup: vi.fn(async () => [{ address: "93.184.216.34", family: 4 }]),
 }));
 
-function setup(workspaces = [fakeWorkspace({ id: "ws-1", orgId: "org-1" })]) {
-  const fakes = createWorkspaceIntakeFakes({ workspaces });
+function setup(projects = [fakeProject({ id: "ws-1", orgId: "org-1" })]) {
+  const fakes = createProjectIntakeFakes({ projects });
   const app = withTestSession(new Hono(), { id: "user-1", email: "user-1@example.com", name: "User One" });
   app.route("/uploads", createUploadsRoutes(fakes.ports));
   return { app, fakes };
@@ -42,14 +42,14 @@ const text = (name: string) => new File(["hello"], name, { type: "text/plain" })
 
 afterEach(() => vi.unstubAllGlobals());
 
-describe("uploadsRoutes over Workspace Intake", () => {
-  it("files untargeted uploads into the organization's default workspace", async () => {
+describe("uploadsRoutes over Project Intake", () => {
+  it("files untargeted uploads into the organization's default project", async () => {
     const { app, fakes } = setup();
     const response = await app.request("/uploads/bulk", bulk([text("pricing.txt")], { orgId: "org-99" }));
 
     expect(response.status).toBe(201);
-    expect(fakes.createdWorkspaces).toEqual([]);
-    expect(fakes.runs[0].workspaceId).toBe("ws-default-org-99");
+    expect(fakes.createdProjects).toEqual([]);
+    expect(fakes.runs[0].projectId).toBe("ws-default-org-99");
   });
 
   it("accepts the good files of a bulk upload and lists the rejected ones in the 201 body", async () => {
@@ -79,25 +79,25 @@ describe("uploadsRoutes over Workspace Intake", () => {
     expect(none.status).toBe(415);
   });
 
-  it("creates a self-titled workspace and returns the run handoff", async () => {
+  it("creates a self-titled project and returns the run handoff", async () => {
     const { app, fakes } = setup();
     const response = await app.request(
       "/uploads/bulk",
-      bulk([new File(["%PDF"], "master_service_agreement_v2.pdf", { type: "application/pdf" }), text("pricing.txt")], { orgId: "org-99", newWorkspace: "true" }),
+      bulk([new File(["%PDF"], "master_service_agreement_v2.pdf", { type: "application/pdf" }), text("pricing.txt")], { orgId: "org-99", newProject: "true" }),
     );
 
     expect(response.status).toBe(201);
-    expect(fakes.createdWorkspaces).toEqual([expect.objectContaining({ name: "Master service agreement v2 + 1 more", orgId: "org-99" })]);
+    expect(fakes.createdProjects).toEqual([expect.objectContaining({ name: "Master service agreement v2 + 1 more", orgId: "org-99" })]);
     await expect(response.json()).resolves.toMatchObject({ run: { id: "run-1" }, documents: [{}, {}], warnings: [] });
     expect(fakes.audit[0].metadata).toMatchObject({ mode: "bulk-upload", userAgent: "vitest" });
   });
 
-  it("appends to the targeted workspace with its pipeline when no override is sent", async () => {
+  it("appends to the targeted project with its pipeline when no override is sent", async () => {
     const pipeline = { ...defaultPipelineFeatures, embed: false, indexVectors: false };
-    const { app, fakes } = setup([fakeWorkspace({ id: "ws-1", pipeline })]);
-    const response = await app.request("/uploads/bulk", bulk([text("notes.txt")], { workspace: "ws-1" }));
+    const { app, fakes } = setup([fakeProject({ id: "ws-1", pipeline })]);
+    const response = await app.request("/uploads/bulk", bulk([text("notes.txt")], { project: "ws-1" }));
     expect(response.status).toBe(201);
-    expect(fakes.runs[0]).toMatchObject({ workspaceId: "ws-1", pipeline });
+    expect(fakes.runs[0]).toMatchObject({ projectId: "ws-1", pipeline });
   });
 
   it("maps policy rejections to 415 and 413 before storage", async () => {
@@ -107,28 +107,28 @@ describe("uploadsRoutes over Workspace Intake", () => {
     expect(fakes.objects.size).toBe(0);
   });
 
-  it("creates a workspace named by an unmatched workspace value, then appends to it by name", async () => {
+  it("creates a project named by an unmatched project value, then appends to it by name", async () => {
     const { app, fakes } = setup([]);
-    const response = await app.request("/uploads/bulk", bulk([text("notes.txt")], { workspace: "Field Notes" }));
+    const response = await app.request("/uploads/bulk", bulk([text("notes.txt")], { project: "Field Notes" }));
     expect(response.status).toBe(201);
-    expect(fakes.createdWorkspaces).toEqual([expect.objectContaining({ name: "Field Notes", autoNamed: false })]);
-    const again = await app.request("/uploads/bulk", bulk([text("more.txt")], { workspace: "field notes" }));
+    expect(fakes.createdProjects).toEqual([expect.objectContaining({ name: "Field Notes", autoNamed: false })]);
+    const again = await app.request("/uploads/bulk", bulk([text("more.txt")], { project: "field notes" }));
     expect(again.status).toBe(201);
-    expect(fakes.createdWorkspaces).toHaveLength(1);
-    expect(fakes.runs.map((run) => run.workspaceId)).toEqual([fakes.runs[0].workspaceId, fakes.runs[0].workspaceId]);
+    expect(fakes.createdProjects).toHaveLength(1);
+    expect(fakes.runs.map((run) => run.projectId)).toEqual([fakes.runs[0].projectId, fakes.runs[0].projectId]);
   });
 
-  it("returns 404 for an unknown target workspace UUID", async () => {
+  it("returns 404 for an unknown target project UUID", async () => {
     const { app, fakes } = setup([]);
-    const response = await app.request("/uploads/bulk", bulk([text("notes.txt")], { workspace: "33333333-3333-4333-8333-333333333333" }));
+    const response = await app.request("/uploads/bulk", bulk([text("notes.txt")], { project: "33333333-3333-4333-8333-333333333333" }));
     expect(response.status).toBe(404);
-    await expect(response.json()).resolves.toMatchObject({ error: { code: "workspace_not_found" } });
-    expect(fakes.createdWorkspaces).toEqual([]);
+    await expect(response.json()).resolves.toMatchObject({ error: { code: "project_not_found" } });
+    expect(fakes.createdProjects).toEqual([]);
   });
 
-  it("answers 400 for a workspace value with no letters or digits", async () => {
+  it("answers 400 for a project value with no letters or digits", async () => {
     const { app, fakes } = setup();
-    const response = await app.request("/uploads/bulk", bulk([text("notes.txt")], { workspace: "!!!" }));
+    const response = await app.request("/uploads/bulk", bulk([text("notes.txt")], { project: "!!!" }));
     expect(response.status).toBe(400);
     expect(fakes.runs).toEqual([]);
   });
@@ -147,7 +147,7 @@ describe("uploadsRoutes over Workspace Intake", () => {
     const { app } = setup();
     const response = await app.request(
       "/uploads/url",
-      json({ workspace: "ws-1", urls: ["https://example.com/contracts.txt"], pipeline: { embed: false, indexVectors: true } }),
+      json({ project: "ws-1", urls: ["https://example.com/contracts.txt"], pipeline: { embed: false, indexVectors: true } }),
     );
     expect(response.status).toBe(422);
     await expect(response.json()).resolves.toMatchObject({
@@ -161,7 +161,7 @@ describe("uploadsRoutes over Workspace Intake", () => {
       headers: { "content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "content-length": "9" },
     })));
     const { app } = setup();
-    const response = await app.request("/uploads/url", json({ workspace: "ws-1", urls: ["https://example.com/report.docx"] }));
+    const response = await app.request("/uploads/url", json({ project: "ws-1", urls: ["https://example.com/report.docx"] }));
     expect(response.status).toBe(415);
     await expect(response.json()).resolves.toMatchObject({ error: { code: "remote_format_disabled", message: expect.stringContaining("REMOTE_INGEST_COMPLEX_FORMATS_ENABLED=true") } });
   });
@@ -169,7 +169,7 @@ describe("uploadsRoutes over Workspace Intake", () => {
   it("reports what URL ingest fetched", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("hello", { status: 200, headers: { "content-type": "text/plain", "content-length": "5" } })));
     const { app } = setup();
-    const response = await app.request("/uploads/url", json({ workspace: "ws-1", urls: ["https://example.com/contracts.txt?token=secret"] }));
+    const response = await app.request("/uploads/url", json({ project: "ws-1", urls: ["https://example.com/contracts.txt?token=secret"] }));
     expect(response.status).toBe(201);
     await expect(response.json()).resolves.toMatchObject({ ingested: [{ filename: "contracts.txt", mimeType: "text/plain" }] });
   });
@@ -177,7 +177,7 @@ describe("uploadsRoutes over Workspace Intake", () => {
   it("defaults URL canonical IDs to the URL and accepts per-URL overrides", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("hello", { status: 200, headers: { "content-type": "text/plain" } })));
     const { app, fakes } = setup();
-    const response = await app.request("/uploads/url", json({ workspace: "ws-1", urls: [
+    const response = await app.request("/uploads/url", json({ project: "ws-1", urls: [
       "https://example.com/products/#pricing",
       { url: "https://example.com/products.mdx", canonicalId: "/products" },
     ] }));
@@ -188,10 +188,10 @@ describe("uploadsRoutes over Workspace Intake", () => {
 
   it("carries multipart canonical IDs onto stored files", async () => {
     const { app, fakes } = setup();
-    let response = await app.request("/uploads/bulk", bulk([text("products.md")], { workspace: "ws-1", canonicalId: "/products" }));
+    let response = await app.request("/uploads/bulk", bulk([text("products.md")], { project: "ws-1", canonicalId: "/products" }));
     expect(response.status).toBe(201);
     response = await app.request("/uploads/bulk", bulk([text("a.md"), text("b.md")], {
-      workspace: "ws-1", canonicalIds: JSON.stringify({ "b.md": "/b" }),
+      project: "ws-1", canonicalIds: JSON.stringify({ "b.md": "/b" }),
     }));
     expect(response.status).toBe(201);
     expect(fakes.runs.map((run) => run.files.map((file) => file.canonicalId ?? null))).toEqual([["/products"], [null, "/b"]]);
@@ -200,18 +200,18 @@ describe("uploadsRoutes over Workspace Intake", () => {
   it("carries folder paths onto stored files and rejects '..' with 400", async () => {
     const { app, fakes } = setup();
     let response = await app.request("/uploads/bulk", bulk([text("a.md"), text("b.md")], {
-      workspace: "ws-1", paths: JSON.stringify(["docs/a", ""]),
+      project: "ws-1", paths: JSON.stringify(["docs/a", ""]),
     }));
     expect(response.status).toBe(201);
     expect(fakes.runs[0].files.map((file) => file.path ?? "")).toEqual(["docs/a", ""]);
-    response = await app.request("/uploads/bulk", bulk([text("a.md")], { workspace: "ws-1", path: "x/../y" }));
+    response = await app.request("/uploads/bulk", bulk([text("a.md")], { project: "ws-1", path: "x/../y" }));
     expect(response.status).toBe(400);
     expect(fakes.runs).toHaveLength(1);
   });
 
   it("rejects canonical IDs that do not line up with the uploaded files", async () => {
     const { app, fakes } = setup();
-    const response = await app.request("/uploads/bulk", bulk([text("a.md"), text("b.md")], { workspace: "ws-1", canonicalId: "/a" }));
+    const response = await app.request("/uploads/bulk", bulk([text("a.md"), text("b.md")], { project: "ws-1", canonicalId: "/a" }));
     expect(response.status).toBe(400);
     expect(fakes.runs).toEqual([]);
   });
@@ -240,7 +240,7 @@ describe("upload tags", () => {
   it("normalizes tags before applying them to every accepted file", async () => {
     const { app, fakes } = setup();
     const response = await app.request("/uploads/bulk", bulk([text("a.txt"), text("b.txt")], {
-      workspace: "ws-1", tags: JSON.stringify([" finance ", "finance", "FY26"]),
+      project: "ws-1", tags: JSON.stringify([" finance ", "finance", "FY26"]),
     }));
     expect(response.status).toBe(201);
     expect(fakes.runs[0].files.map((file) => file.tags)).toEqual([["finance", "FY26"], ["finance", "FY26"]]);
@@ -257,28 +257,28 @@ describe("upload tags", () => {
   it("carries URL upload tags into intake", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("hello", { headers: { "content-type": "text/plain" } })));
     const { app, fakes } = setup();
-    const response = await app.request("/uploads/url", json({ workspace: "ws-1", urls: ["https://example.com/notes.txt"], tags: ["research"] }));
+    const response = await app.request("/uploads/url", json({ project: "ws-1", urls: ["https://example.com/notes.txt"], tags: ["research"] }));
     expect(response.status).toBe(201);
     expect(fakes.runs[0].files[0].tags).toEqual(["research"]);
   });
 });
 
 describe("explicit Speed boost admission", () => {
-  it.each([undefined, "false", "true"])("bulk upload treats %s as a request choice, never a workspace default", async flag => {
-    const { app, fakes } = setup([fakeWorkspace({ id: "ws-1", orgId: "org-1", pipeline: { ...defaultPipelineFeatures, speedBoost: true } })]);
-    const response = await app.request("/uploads/bulk", bulk([text("boost.txt")], { workspace: "ws-1", ...(flag === undefined ? {} : { speedBoost: flag }), pipeline: JSON.stringify({ speedBoost: true }) }));
+  it.each([undefined, "false", "true"])("bulk upload treats %s as a request choice, never a project default", async flag => {
+    const { app, fakes } = setup([fakeProject({ id: "ws-1", orgId: "org-1", pipeline: { ...defaultPipelineFeatures, speedBoost: true } })]);
+    const response = await app.request("/uploads/bulk", bulk([text("boost.txt")], { project: "ws-1", ...(flag === undefined ? {} : { speedBoost: flag }), pipeline: JSON.stringify({ speedBoost: true }) }));
     expect(response.status).toBe(201);
     expect(fakes.runs[0].pipeline.speedBoost).toBe(flag === "true");
   });
   it.each(["yes", "1", "TRUE", ""])("rejects ambiguous multipart speedBoost=%s before admission", async flag => {
     const { app, fakes } = setup();
-    const response = await app.request("/uploads/bulk", bulk([text("boost.txt")], { workspace: "ws-1", speedBoost: flag }));
+    const response = await app.request("/uploads/bulk", bulk([text("boost.txt")], { project: "ws-1", speedBoost: flag }));
     expect(response.status).toBe(400);
     expect(fakes.runs).toHaveLength(0);
   });
   it("rejects string JSON speedBoost before URL fetching", async () => {
     const { app, fakes } = setup();
-    const response = await app.request("/uploads/url", json({ workspace: "ws-1", urls: ["https://example.com/a.txt"], speedBoost: "true" }));
+    const response = await app.request("/uploads/url", json({ project: "ws-1", urls: ["https://example.com/a.txt"], speedBoost: "true" }));
     expect(response.status).toBe(422);
     expect(fakes.runs).toHaveLength(0);
   });
@@ -298,9 +298,9 @@ describe("a sandboxed PDF deployment (vm-pdf) refuses host PDF parsers in upload
     const { app, fakes } = setup();
     const pipeline = { documentExtraction };
     const responses = [
-      await app.request("/uploads/bulk", bulk([text("a.txt")], { workspace: "ws-1", pipeline: JSON.stringify(pipeline) })),
-      await app.request("/uploads/url", json({ workspace: "ws-1", urls: ["https://example.com/a.pdf"], pipeline })),
-      await app.request("/uploads/direct/sessions", json({ workspace: "ws-1", files: [{ filename: "a.pdf", mimeType: "application/pdf", sizeBytes: 10 }], pipeline })),
+      await app.request("/uploads/bulk", bulk([text("a.txt")], { project: "ws-1", pipeline: JSON.stringify(pipeline) })),
+      await app.request("/uploads/url", json({ project: "ws-1", urls: ["https://example.com/a.pdf"], pipeline })),
+      await app.request("/uploads/direct/sessions", json({ project: "ws-1", files: [{ filename: "a.pdf", mimeType: "application/pdf", sizeBytes: 10 }], pipeline })),
     ];
     for (const response of responses) {
       expect([400, 422]).toContain(response.status);
@@ -312,7 +312,7 @@ describe("a sandboxed PDF deployment (vm-pdf) refuses host PDF parsers in upload
 
   it("accepts the same pipeline when the deployment parses PDFs on the host", async () => {
     const { app } = setup();
-    const response = await app.request("/uploads/bulk", bulk([text("a.txt")], { workspace: "ws-1", pipeline: JSON.stringify({ documentExtraction: { order: { pdf: ["poppler-text"] } } }) }));
+    const response = await app.request("/uploads/bulk", bulk([text("a.txt")], { project: "ws-1", pipeline: JSON.stringify({ documentExtraction: { order: { pdf: ["poppler-text"] } } }) }));
     expect(response.status).toBeLessThan(300);
   });
 });

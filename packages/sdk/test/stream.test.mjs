@@ -71,23 +71,23 @@ test("abort and timeout cancel idle readers, even when a custom fetch ignores si
   }
 });
 
-test("activity stream yields typed events filtered by type and workspace", async () => {
+test("activity stream yields typed events filtered by type and project", async () => {
   const frames = [
     'event: activity\ndata: {"runs":[]}\n\n',
-    'event: activity-run\ndata: {"id":"run-a","workspaceId":"ws-a"}\n\n',
+    'event: activity-run\ndata: {"id":"run-a","projectId":"ws-a"}\n\n',
     'id: e1\nevent: activity-event\ndata: {"type":"document.completed","runId":"run-a","documentId":"doc-new"}\n\n',
     'id: e2\nevent: activity-event\ndata: {"type":"document.replaced","runId":"run-a","documentId":"doc-new","progress":{"canonicalId":"/products","replacedDocumentIds":["doc-old"]}}\n\n',
-    'event: activity-run\ndata: {"id":"run-b","workspaceId":"ws-b"}\n\n',
+    'event: activity-run\ndata: {"id":"run-b","projectId":"ws-b"}\n\n',
     'id: e3\nevent: activity-event\ndata: {"type":"document.replaced","runId":"run-b","documentId":"doc-b","progress":{}}\n\n',
   ];
   let requested;
   const sdk = client(async (url) => { requested = String(url); return streamResponse(frames); });
   const events = [];
-  for await (const event of sdk.streamActivity({ types: ["document.replaced"], workspaceId: "ws-a" })) events.push(event);
+  for await (const event of sdk.streamActivity({ types: ["document.replaced"], projectId: "ws-a" })) events.push(event);
   assert.match(requested, /\/v1\/runs\/activity\/stream$/);
   assert.equal(events.length, 1);
   assert.deepEqual(
-    { type: events[0].type, id: events[0].id, workspaceId: events[0].workspaceId, documentId: events[0].documentId, progress: events[0].progress },
-    { type: "document.replaced", id: "e2", workspaceId: "ws-a", documentId: "doc-new", progress: { canonicalId: "/products", replacedDocumentIds: ["doc-old"] } },
+    { type: events[0].type, id: events[0].id, projectId: events[0].projectId, documentId: events[0].documentId, progress: events[0].progress },
+    { type: "document.replaced", id: "e2", projectId: "ws-a", documentId: "doc-new", progress: { canonicalId: "/products", replacedDocumentIds: ["doc-old"] } },
   );
 });

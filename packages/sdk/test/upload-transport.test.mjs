@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { createDocSlurpClient, DocSlurpApiError } from "../dist/index.js";
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
-const uploadResult = { workspace: { id: "workspace" }, run: { id: "run" }, documents: [] };
+const uploadResult = { project: { id: "project" }, run: { id: "run" }, documents: [] };
 
 /** What the server does to a filename (server/src/lib/filenames.ts), so descriptors carry the sanitized name. */
 const sanitize = (name) => name.replace(/[<>:"|?*]/g, "-").replace(/\s+/g, " ").trim().replace(/^-+/, "");

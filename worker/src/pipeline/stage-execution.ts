@@ -236,7 +236,7 @@ export function createStageExecution(deps: {
     let state = await loadRunState(store, input.runId, loadOptions);
     const plan = compilePipelinePlan(state.run.pipeline);
     if (plan.reusedStages.length > 0) {
-      await seedReusedStages(input.runId, plan, { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
+      await seedReusedStages(input.runId, plan, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
       state = await loadRunState(store, input.runId, loadOptions);
       stageStates = undefined;
     }
@@ -491,9 +491,9 @@ export function createStageExecution(deps: {
 
       // Run the stage with the orchestrator's cancellation signal
       await withObservation({ name: `worker.stage.${stageName}`,
-        metadata: { runId, workspaceId: state.run.workspaceId, orgId: state.run.orgId,
+        metadata: { runId, projectId: state.run.projectId, orgId: state.run.orgId,
           temporalAttempt: runtime.attempt, stage: stageName },
-      }, () => runWithPrivacyAuditScope({ workspaceId: state.run.workspaceId ?? null, runId },
+      }, () => runWithPrivacyAuditScope({ projectId: state.run.projectId ?? null, runId },
         // Run-level provider calls (graph extraction, community summaries) carry the run's org and China-provider
         // policy, as per-document stages do; without it they fail closed to non-China providers only.
         () => runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.allowChinaProviders, speedBoost: state.run.pipeline.speedBoost },
@@ -712,7 +712,7 @@ export function createStageExecution(deps: {
       const noun = failed.length === 1 ? "document" : "documents";
       const message = `All ${failed.length} ${noun} failed${detail}`;
       console.error(`[temporal] run=${input.runId} status=failed message=${message}`);
-      await store.failRun(input.runId, first?.[0] ?? state.stage, message, { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
+      await store.failRun(input.runId, first?.[0] ?? state.stage, message, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
       await notifyTerminal(input.runId, "run.failed");
       return;
     }
@@ -720,7 +720,7 @@ export function createStageExecution(deps: {
     console.log(
       `[temporal] run=${input.runId} status=completed failedDocuments=${failed.length}`,
     );
-    await store.completeRun(state, { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
+    await store.completeRun(state, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
 
     await notifyTerminal(input.runId, "run.completed");
   }
@@ -740,7 +740,7 @@ export function createStageExecution(deps: {
     );
 
     const state = await loadRunState(store, input.runId);
-    await store.failRun(input.runId, stage, input.message, { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration },
+    await store.failRun(input.runId, stage, input.message, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration },
       // The stage's infrastructure retries ran out: its unfinished documents say so publicly (real-Modal P3).
       { infrastructureRetriesExhausted: input.failureType === WORKER_INTERRUPTED });
 

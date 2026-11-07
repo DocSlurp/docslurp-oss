@@ -34,17 +34,17 @@ describe("stored PII policies with patterns that no longer exist", () => {
 
   it("drops the unknown pattern with a loud log and keeps the policy and the known patterns instead of failing the whole read", () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    const features = normalizeStoredPipelineFeatures(stored(["ssn", "retired-detector", "credit-card", "another-gone"]), "workspace w1");
+    const features = normalizeStoredPipelineFeatures(stored(["ssn", "retired-detector", "credit-card", "another-gone"]), "project w1");
     expect(features.piiPolicy).toMatchObject({ enabled: true, patterns: ["ssn", "credit-card"], action: "block_indexing", allowlistPatterns: ["internal-.*"] });
     expect(error).toHaveBeenCalledOnce();
-    expect(String(error.mock.calls[0]![0])).toMatch(/workspace w1.*retired-detector.*another-gone/);
+    expect(String(error.mock.calls[0]![0])).toMatch(/project w1.*retired-detector.*another-gone/);
     error.mockRestore();
   });
 
   it("does not drop anything from a policy whose patterns all exist, and does not log", () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const input = stored(["ssn", "private-key"]);
-    expect(sanitizeStoredPipeline(input, "workspace w1")).toBe(input);
+    expect(sanitizeStoredPipeline(input, "project w1")).toBe(input);
     expect(error).not.toHaveBeenCalled();
     error.mockRestore();
   });
@@ -54,7 +54,7 @@ describe("stored PII policies with patterns that no longer exist", () => {
   });
 
   it("does not hide a pattern list that is not a list: that still fails the read", () => {
-    expect(() => normalizeStoredPipelineFeatures(stored("ssn" as never), "workspace w1")).toThrow();
+    expect(() => normalizeStoredPipelineFeatures(stored("ssn" as never), "project w1")).toThrow();
   });
 
   it("drops an unknown pattern and a stale extractor setting in the same read", () => {

@@ -116,7 +116,7 @@ describe("worker private endpoint embeddings", () => {
     expect(profile).toMatchObject({ provider: "private", runtime: "remote", baseUrl: BASE_URL, dimensions: 16 });
     const usage: RemoteEmbeddingUsage[] = [];
 
-    const result = await runWithPrivacyAuditScope({ workspaceId: "ws-1", runId: "run-1" }, () => embedTextChunks({
+    const result = await runWithPrivacyAuditScope({ projectId: "ws-1", runId: "run-1" }, () => embedTextChunks({
       privacyMode: "strict-privacy",
       chunks: ["alpha", "beta", "gamma"],
       profile,
@@ -136,7 +136,7 @@ describe("worker private endpoint embeddings", () => {
     expect(result.costCents).toBeCloseTo(21 * 0.5 / 1_000_000 * 100);
     expect(audit).toHaveLength(2);
     expect(audit[0]).toEqual({
-      workspaceId: "ws-1", runId: "run-1", documentId: null,
+      projectId: "ws-1", runId: "run-1", documentId: null,
       modelId: "private/gpu1/Qwen/Qwen3-Embedding-0.6B", endpoint: "private:gpu1:worker.embedding", privacyMode: "strict-privacy",
     });
   });
@@ -158,7 +158,7 @@ describe("worker private endpoint text", () => {
     expect(isProviderCallAllowed("strict-privacy", openRouterTextCall("document-summary", model))).toBe(true);
     expect(isProviderCallAllowed("strict-privacy", openRouterTextCall("document-summary", "llm://private/gpu2/Qwen/Qwen3.6-35B-A3B-FP8"))).toBe(false);
 
-    const result = await runWithPrivacyAuditScope({ workspaceId: "ws-1", runId: "run-1" }, () => generateOpenRouterText({
+    const result = await runWithPrivacyAuditScope({ projectId: "ws-1", runId: "run-1" }, () => generateOpenRouterText({
       operation: "structured-extraction",
       apiKey: "private-endpoint",
       model,
@@ -198,7 +198,7 @@ describe("worker private endpoint vision", () => {
     const dir = await mkdtemp(join(tmpdir(), "private-vision-"));
     const imagePath = join(dir, "page.png");
     await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
-    const result = await runWithPrivacyAuditScope({ workspaceId: "ws-1", runId: "run-1", documentId: "doc-1" }, () => executeVisionRuntime({
+    const result = await runWithPrivacyAuditScope({ projectId: "ws-1", runId: "run-1", documentId: "doc-1" }, () => executeVisionRuntime({
       imagePath,
       outputPath: `${imagePath}.json`, gate: null,
       vision: visionConfigSchema.parse({ modelUri: "llm://private/gpu1/lightonai/LightOnOCR-3-0.8B", prompt: "markdown" }),
@@ -215,6 +215,6 @@ describe("worker private endpoint vision", () => {
     // The registry's price is an explicit charge for the whole call: kept as it is on the (unbilled) private route.
     expect(result.chargedTokens).toBeUndefined();
     expect(priceVisionResult(result, fromEnv())).toBeCloseTo(result.costCents!, 12);
-    expect(audit).toEqual([expect.objectContaining({ workspaceId: "ws-1", documentId: "doc-1", endpoint: "private:gpu1:worker.vision" })]);
+    expect(audit).toEqual([expect.objectContaining({ projectId: "ws-1", documentId: "doc-1", endpoint: "private:gpu1:worker.vision" })]);
   });
 });

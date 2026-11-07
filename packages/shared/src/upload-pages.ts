@@ -52,7 +52,7 @@ export const UNMEASURED_WORKER_COUNTED_BYTES_PER_PAGE: Readonly<Record<WorkerCou
 export const FAST_ONLY_FORMATS: readonly WorkerCountedFormat[] = ["office-word", "office-other", "office-excel", "office-pptx"];
 
 /**
- * Whether a file's pages bill Fast whatever the workspace's quality (FAST_ONLY_FORMATS). A page mix the client sent does not change
+ * Whether a file's pages bill Fast whatever the project's quality (FAST_ONLY_FORMATS). A page mix the client sent does not change
  * that: no model reads these files, so a measured scanned share would quote Rich pages the worker never bills.
  */
 export function isFastOnlyFile(file: { name: string; type?: string | null }): boolean {

@@ -88,7 +88,7 @@ amount when those are included.
 
 ### Where the fat was
 
-1. **The pnpm content store shipped in the image**, plus the workspace root's
+1. **The pnpm content store shipped in the image**, plus the project root's
    dependencies. `pnpm install --filter @docslurp/worker... --prod` in the
    runtime stage left `/root/.local/share/pnpm/store` (1.86 GB on the production
    machine) and installed `better-auth` with its prisma/effect/typescript tree

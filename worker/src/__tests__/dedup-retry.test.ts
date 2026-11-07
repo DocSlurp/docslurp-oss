@@ -1,7 +1,7 @@
 import { defaultPipelineFeatures } from "@docslurp/shared";
 import { describe, expect, it, vi } from "vitest";
 
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 import { checkDedup, registerHash, runDocumentStage } from "../pipeline/checkpoints.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { extractorFailureReason, extractorFallbackFor, recordExtractorFallback } from "../lib/extractor-fallback.js";
@@ -16,7 +16,7 @@ function document(id: string): Document {
     extractionMode: "hybrid", pageCount: 1, createdAt: new Date(), updatedAt: new Date() } as Document;
 }
 const run = { id: "run-1", orgId: "o", userId: "u", kind: "bulk-upload", status: "processing", stage: "extract-markdown", pipeline: { ...defaultPipelineFeatures },
-  stats: {}, artifacts: {}, totalDocuments: 2, processedDocuments: 0, pagesTotal: 2, pagesProcessed: 0, spentCents: 0 } as unknown as WorkspaceRun;
+  stats: {}, artifacts: {}, totalDocuments: 2, processedDocuments: 0, pagesTotal: 2, pagesProcessed: 0, spentCents: 0 } as unknown as ProjectRun;
 
 /** extract-markdown's dedup use, with `extractors` tried in order: plausibility 0 for empty text. */
 function extractStage(state: WorkflowState, doc: Document, outputs: Record<string, string>, seen: string[]) {

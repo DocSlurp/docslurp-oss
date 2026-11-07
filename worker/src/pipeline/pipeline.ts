@@ -1,7 +1,7 @@
 import type { GeoAttempt, GeoFinalSource } from "../db/geo-final-source.js";
 import type { DerivedDocumentTitle, PrivacyAuditEntry } from "@docslurp/shared";
-import type { StageState, WorkspaceRunEvent } from "../models.js";
-import type { Document, ParserEvaluation, PerformanceEvent, UsageEvent, WorkspaceRun } from "../models.js";
+import type { StageState, ProjectRunEvent } from "../models.js";
+import type { Document, ParserEvaluation, PerformanceEvent, UsageEvent, ProjectRun } from "../models.js";
 import { cloneArtifacts, cloneJsonMap } from "../models.js";
 import { DocumentArtifactLedger } from "./artifact-ledger.js";
 import { PipelineUsageEventLedger } from "./usage-ledger.js";
@@ -58,7 +58,7 @@ export interface CheckpointStore {
     artifactUri?: string,
     stats?: Record<string, unknown>
   ): Promise<void>;
-  appendEvent(event: WorkspaceRunEvent): Promise<void>;
+  appendEvent(event: ProjectRunEvent): Promise<void>;
   /**
    * Credit leases: true when the run's usage not yet checkpointed would use up
    * the lease this process last saw, so the caller should checkpoint now.
@@ -83,14 +83,14 @@ export interface CheckpointStore {
   /** The run's TIFFs whose frames raised their page count, with the pages already charged Rich (frame-count spend check). */
   countedImageFrames?(runId: string): Promise<Array<{ documentId: string; pageCount: number; chargedPages: number }>>;
   /** Pauses the run when credits it newly owes (a measured page count above intake's) no longer fit the org's balance. */
-  enforceSpendForCharge?(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean; blocked?: boolean }>;
+  enforceSpendForCharge?(run: { id: string; orgId: string | null; projectId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean; blocked?: boolean }>;
   /** Records pages measured above one page (text or area equivalents) and raises billing_pages; returns it (db/page-equivalents.ts). */
   recordPageEquivalents?(runId: string, documentId: string, rows: import("../db/page-equivalents.js").PageEquivalentRow[], allowance?: number): Promise<number | null>;
   recordWholeDocumentPages?(runId: string, documentId: string, pages: number): Promise<number | null>;
   /** Fast pages of the run measured above admission's priced counts (documents.intake_page_count); durable, recomputed per call. */
   measuredPagesAboveIntake?(runId: string): Promise<number>;
   /** Pauses the run for funds (pause_reason `reason`) without a balance check; `blocked` without `paused`: already paused or stopped. */
-  pauseRunForSpend?(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, reason: string): Promise<{ paused: boolean; blocked: boolean }>;
+  pauseRunForSpend?(run: { id: string; orgId: string | null; projectId?: string | null; userId: string }, reason: string): Promise<{ paused: boolean; blocked: boolean }>;
   /** This run's persisted OCR escalation reads of a page, oldest first (migration 0129). */
   ocrEscalationReads?(runId: string, documentId: string, pageNumber: number): Promise<OcrEscalationReadRow[]>;
   /**
@@ -99,7 +99,7 @@ export interface CheckpointStore {
    */
   recordOcrEscalationRead?(row: Omit<OcrEscalationReadRow, "attempt"> & { runId: string; documentId: string; pageNumber: number }): Promise<number>;
   /** The largest n in 1..max whose `creditsFor(n)` the org's balance covers; read-only (nothing is paused). */
-  largestFundedCharge?(run: { id: string; orgId: string | null; workspaceId?: string | null }, max: number, creditsFor: (n: number) => number): Promise<number>;
+  largestFundedCharge?(run: { id: string; orgId: string | null; projectId?: string | null }, max: number, creditsFor: (n: number) => number): Promise<number>;
   /** The run's measured documents (billing_pages set) that still bill at completion, for the cumulative page-count spend check. */
   measuredRunDocuments?(runId: string): Promise<Array<{ pageCount: number; billingPages: number; method: string | null }>>;
   /**
@@ -134,7 +134,7 @@ export interface VectorIndex {
 }
 
 export class WorkflowState {
-  run: WorkspaceRun;
+  run: ProjectRun;
   documents: Document[];
   stage: string;
   artifacts: Record<string, string>;
@@ -176,7 +176,7 @@ export class WorkflowState {
    */
   shard: { artifacts: Record<string, string> } | null = null;
 
-  constructor(run: WorkspaceRun, documents: Document[]) {
+  constructor(run: ProjectRun, documents: Document[]) {
     this.usageLedger = new PipelineUsageEventLedger(run.pipeline.speedBoost === true);
     this.run = {
       ...run,
@@ -199,7 +199,7 @@ export class WorkflowState {
     this.usageLedger.runId = run.id;
   }
 
-  static create(run: WorkspaceRun, documents: Document[]): WorkflowState {
+  static create(run: ProjectRun, documents: Document[]): WorkflowState {
     return new WorkflowState(run, documents);
   }
 

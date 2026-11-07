@@ -1,7 +1,7 @@
 /*
  * Hosted page reads for OCR: the escalation read of a page the recogniser read poorly (`ocr-escalation`), and the read of
  * a stored image in DOCSLURP_OCR_MODE=hosted (`hosted-ocr`). Both go through the worker's guarded vision call path:
- * the workspace privacy mode, the run cost cap, the run's vision attempt guard (per-page, breaker, org and route
+ * the project privacy mode, the run cost cap, the run's vision attempt guard (per-page, breaker, org and route
  * bounds, and a per-document page budget counted in its durable ledger), and the usage ledger with the provider's actual tokens and cost.
  *
  * The bytes sent are never produced on the worker host: an escalation image is the PNG the OCR boundary wrote (checked

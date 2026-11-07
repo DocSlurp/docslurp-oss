@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultPipelineFeatures } from "@docslurp/shared";
 
 import type { SandboxedOcrJob } from "../extractors/plugins.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
 import { fakeOcrRunner, type FakeFrame } from "../test/fake-ocr.js";
@@ -19,13 +19,13 @@ import type { CommandRunner } from "../tools/runner.js";
  * sandboxed PDF provider) are billed from that report; Dolphin is inferred from an empty native layer. Text-layer
  * extractors never OCR, and Fast never reads a page.
  */
-function run(pipeline: Record<string, unknown> = {}): WorkspaceRun {
+function run(pipeline: Record<string, unknown> = {}): ProjectRun {
   return {
     id: "run-1", orgId: "org-1", userId: "user-1", kind: "bulk-upload", status: "processing", stage: "extract-markdown",
     totalDocuments: 1, processedDocuments: 0, pagesTotal: 3, pagesProcessed: 0, spentCents: 0,
     pipeline: { ...defaultPipelineFeatures, markdownExtraction: true, ...pipeline },
     error: null, stats: {}, artifacts: {}, claimId: null, createdAt: new Date(), updatedAt: new Date(),
-  } as WorkspaceRun;
+  } as ProjectRun;
 }
 
 async function harness(args: {

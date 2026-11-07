@@ -6,15 +6,15 @@ import { documentsRoutes } from "../routes/documents.js";
 import { jobsRoutes } from "../routes/jobs.js";
 import { runsRoutes } from "../routes/runs.js";
 import { uploadEstimateRoutes } from "../routes/uploads.js";
-import { workspaceGraphRoutes } from "../routes/workspace-graph.js";
-import { workspacesRoutes } from "../routes/workspaces.js";
+import { projectGraphRoutes } from "../routes/project-graph.js";
+import { projectsRoutes } from "../routes/projects.js";
 import { spendAwareErrorHandler } from "./billing/spend-guard.js";
 
 export * from "./mcp-estimate-catalog.js";
 
 const ROUTE_MOUNTS: Array<{ prefix: string; routes: Hono }> = [
-  { prefix: "/v1/workspaces", routes: workspacesRoutes },
-  { prefix: "/v1/workspaces", routes: workspaceGraphRoutes },
+  { prefix: "/v1/projects", routes: projectsRoutes },
+  { prefix: "/v1/projects", routes: projectGraphRoutes },
   { prefix: "/v1/documents", routes: documentsRoutes },
   { prefix: "/v1/runs", routes: runsRoutes },
   { prefix: "/v1/uploads", routes: uploadEstimateRoutes },
@@ -35,7 +35,7 @@ function buildForwardApp(): Hono {
   return app;
 }
 
-/** Issues the request in-process against the owning route modules (built once), like workspace.search does. */
+/** Issues the request in-process against the owning route modules (built once), like project.search does. */
 export async function forwardInProcess(actor: RequestActor, method: "GET" | "POST", path: string, body?: unknown, signal?: AbortSignal): Promise<Response> {
   forwardApp ??= buildForwardApp();
   const request = new Request(`http://mcp.internal${path}`, {

@@ -57,7 +57,7 @@ export function ocrLanguageSettingFromEnv(env: NodeJS.ProcessEnv = process.env):
   return parsed.data;
 }
 
-/** The workspace's setting when it names languages; otherwise (`auto` or unset) the worker's `DOCSLURP_OCR_LANGUAGE`. */
+/** The project's setting when it names languages; otherwise (`auto` or unset) the worker's `DOCSLURP_OCR_LANGUAGE`. */
 export function effectiveOcrLanguageSetting(setting: string | undefined, env: NodeJS.ProcessEnv = process.env): string {
   const value = setting?.trim();
   if (value && value !== OCR_AUTO) return value;
@@ -82,7 +82,7 @@ export function ocrMaxAttempts(env: NodeJS.ProcessEnv = process.env): number {
   return 3;
 }
 
-/** The recogniser plan for a workspace setting (`auto`, `eng`, `eng+kor`). Throws on a malformed setting. */
+/** The recogniser plan for a project setting (`auto`, `eng`, `eng+kor`). Throws on a malformed setting. */
 export function planOcrLanguages(setting: string | undefined, env: NodeJS.ProcessEnv = process.env): OcrLanguagePlan {
   const resolved = effectiveOcrLanguageSetting(setting, env);
   if (resolved === OCR_AUTO) {

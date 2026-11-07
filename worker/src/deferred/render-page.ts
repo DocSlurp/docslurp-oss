@@ -20,12 +20,12 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
   const sql = store.stageSql;
   const document = await store.loadDocument(input.documentId);
   if (document.runId !== input.runId || document.status !== "completed" || document.mimeType !== "application/pdf" || !Number.isInteger(input.pageNumber) || input.pageNumber < 1 || input.pageNumber > document.pageCount) throw new Error("Document page is not renderable");
-  const [row] = await sql<{ org_id: string; workspace_id: string; withheld: boolean; low: string | null; high: string | null }[]>`
-    select d.org_id, d.workspace_id,
+  const [row] = await sql<{ org_id: string; project_id: string; withheld: boolean; low: string | null; high: string | null }[]>`
+    select d.org_id, d.project_id,
       coalesce(jsonb_array_length(d.metadata->'pii'->'withheldArtifactUris'), 0) > 0 as withheld,
       r.artifacts->>${pageRenderSlot(input.documentId, input.pageNumber, quality, 120)} as low,
       r.artifacts->>${pageRenderSlot(input.documentId, input.pageNumber, quality, 250)} as high
-    from documents d join workspace_runs r on r.id=d.run_id
+    from documents d join project_runs r on r.id=d.run_id
     where d.id=${document.id} and r.id=${input.runId}
   `;
   if (!row || row.withheld) throw new Error("Document page is unavailable");
@@ -37,7 +37,7 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
     return;
   }
   if (isBillingEnforced()) {
-    const [budget] = await sql<{ funded: boolean; available: number; workspace_budget_paused: boolean; org_budget_paused: boolean; workspace_in_org: boolean }[]>`select * from org_spend_status(${row.org_id}, ${row.workspace_id}::text, 0)`;
+    const [budget] = await sql<{ funded: boolean; available: number; project_budget_paused: boolean; org_budget_paused: boolean; project_in_org: boolean }[]>`select * from org_spend_status(${row.org_id}, ${row.project_id}::text, 0)`;
     if (spendBlockCode(budget ? { ...budget, org_id: row.org_id } : undefined)) throw new Error("Page rendering spend is blocked");
   }
   const started = Date.now();
@@ -64,9 +64,9 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
       and coalesce(jsonb_array_length(d.metadata->'pii'->'withheldArtifactUris'),0)=0 for update of d`;
     if (!live.length) throw new Error("Document page is unavailable");
     signal?.throwIfAborted();
-    await client`update workspace_runs set artifacts=coalesce(artifacts,'{}'::jsonb) || ${client.json({ [slot]: page.artifactUri, ...(quality === "reader" ? { [`${document.id}:page-${input.pageNumber}`]: page.artifactUri } : {}) })}::jsonb where id=${input.runId}`;
+    await client`update project_runs set artifacts=coalesce(artifacts,'{}'::jsonb) || ${client.json({ [slot]: page.artifactUri, ...(quality === "reader" ? { [`${document.id}:page-${input.pageNumber}`]: page.artifactUri } : {}) })}::jsonb where id=${input.runId}`;
     await client`delete from document_page_renders where document_id=${document.id} and run_id=${input.runId} and page_number=${input.pageNumber} and quality=${quality} and dpi=${dpi}`;
-    await persistScopedUsageEvents({ client, userId: document.userId, scope: { orgId: row.org_id, workspaceId: row.workspace_id }, usageEvents: batch.events });
+    await persistScopedUsageEvents({ client, userId: document.userId, scope: { orgId: row.org_id, projectId: row.project_id }, usageEvents: batch.events });
   });
   batch.commit();
 }

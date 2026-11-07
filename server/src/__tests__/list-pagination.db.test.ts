@@ -28,22 +28,22 @@ beforeAll(async () => {
   await sql`insert into "user" (id, name, email) values ('alice', 'A', 'alice@example.test'), ('bob', 'B', 'bob@example.test')`;
   await sql`insert into organizations (id, name, slug, created_by_user_id) values ('org-a', 'A', 'org-a', 'alice'), ('org-b', 'B', 'org-b', 'bob'), ('org-c', 'C', 'org-c', 'alice')`;
   await sql`insert into org_memberships (org_id, user_id, role) values ('org-a', 'alice', 'owner'), ('org-b', 'bob', 'owner'), ('org-c', 'alice', 'owner')`;
-  await sql`insert into workspaces (id, org_id, user_id, name) values ('wa', 'org-a', 'alice', 'A'), ('wb', 'org-b', 'bob', 'B'), ('wc', 'org-c', 'alice', 'C')`;
-  // 23 documents in wa, several sharing a created_at (ties must not drop or repeat rows); one in each other workspace.
+  await sql`insert into projects (id, org_id, user_id, name) values ('wa', 'org-a', 'alice', 'A'), ('wb', 'org-b', 'bob', 'B'), ('wc', 'org-c', 'alice', 'C')`;
+  // 23 documents in wa, several sharing a created_at (ties must not drop or repeat rows); one in each other project.
   for (let index = 0; index < 23; index += 1) {
     const at = `2026-01-01 00:00:${String(Math.floor(index / 3)).padStart(2, "0")}.123456+00`;
-    await sql`insert into documents (id, org_id, user_id, workspace_id, filename, mime_type, source_key, status, created_at)
+    await sql`insert into documents (id, org_id, user_id, project_id, filename, mime_type, source_key, status, created_at)
       values (${`a-${String(index).padStart(2, "0")}`}, 'org-a', 'alice', 'wa', ${`a${index}.pdf`}, 'application/pdf', ${`ka-${index}`}, 'completed', ${at}::timestamptz)`;
   }
-  await sql`insert into documents (id, org_id, user_id, workspace_id, filename, mime_type, source_key, status) values
+  await sql`insert into documents (id, org_id, user_id, project_id, filename, mime_type, source_key, status) values
     ('b-0', 'org-b', 'bob', 'wb', 'b.pdf', 'application/pdf', 'kb', 'completed'),
     ('c-0', 'org-c', 'alice', 'wc', 'c.pdf', 'application/pdf', 'kc', 'completed')`;
   for (let index = 0; index < 12; index += 1) {
-    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, job_id, priority, created_at)
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, job_id, priority, created_at)
       values (${`run-a-${String(index).padStart(2, "0")}`}, 'org-a', 'alice', 'wa', 'upload', 'completed', 'completed', 'j', ${index % 2},
         ${`2026-01-01 00:00:${String(Math.floor(index / 2)).padStart(2, "0")}+00`}::timestamptz)`;
   }
-  await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, job_id) values
+  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, job_id) values
     ('run-b-0', 'org-b', 'bob', 'wb', 'upload', 'completed', 'completed', 'j'),
     ('run-c-0', 'org-c', 'alice', 'wc', 'upload', 'completed', 'completed', 'j')`;
   documents = await import("../services/documents.js");
@@ -66,19 +66,19 @@ async function allDocumentIds(args: Parameters<typeof documents.listDocumentsWit
 
 describe("documents", () => {
   it("returns every document exactly once across pages, newest first, even when timestamps tie", async () => {
-    const ids = await allDocumentIds({ userId: "alice", workspaceId: "wa" }, 5);
+    const ids = await allDocumentIds({ userId: "alice", projectId: "wa" }, 5);
     expect(ids).toHaveLength(23);
     expect(new Set(ids).size).toBe(23);
-    const unpaged = (await documents.listDocumentsWithFilters({ userId: "alice", workspaceId: "wa", limit: 250 })).documents.map((doc) => doc.id);
+    const unpaged = (await documents.listDocumentsWithFilters({ userId: "alice", projectId: "wa", limit: 250 })).documents.map((doc) => doc.id);
     expect(ids).toEqual(unpaged);
   });
 
   it("is not shifted by documents added while paging", async () => {
-    const first = await documents.listDocumentsWithFilters({ userId: "alice", workspaceId: "wa", limit: 5 });
-    await sql`insert into documents (id, org_id, user_id, workspace_id, filename, mime_type, source_key, status, created_at)
+    const first = await documents.listDocumentsWithFilters({ userId: "alice", projectId: "wa", limit: 5 });
+    await sql`insert into documents (id, org_id, user_id, project_id, filename, mime_type, source_key, status, created_at)
       values ('a-late', 'org-a', 'alice', 'wa', 'late.pdf', 'application/pdf', 'kl', 'completed', now())`;
     try {
-      const second = await documents.listDocumentsWithFilters({ userId: "alice", workspaceId: "wa", limit: 5, cursor: first.nextCursor! });
+      const second = await documents.listDocumentsWithFilters({ userId: "alice", projectId: "wa", limit: 5, cursor: first.nextCursor! });
       expect(second.documents.map((doc) => doc.id)).not.toContain("a-late");
       expect(second.documents.map((doc) => doc.id).filter((id) => first.documents.some((doc) => doc.id === id))).toEqual([]);
     } finally {

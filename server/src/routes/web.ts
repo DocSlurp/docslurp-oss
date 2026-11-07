@@ -3,14 +3,14 @@ import { Hono, type Context } from "hono";
 
 import { apiStatusError, nativeApiErrors } from "../lib/api-error.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
-import { actorHasAnyApiKeyScope, getRequestActor, loadActorScopedWorkspace, lookupActorWorkspace, resolveActorWorkspaceId, setRequestActor, type RequestActor } from "../lib/request-actor.js";
+import { actorHasAnyApiKeyScope, getRequestActor, loadActorScopedProject, lookupActorProject, resolveActorProjectId, setRequestActor, type RequestActor } from "../lib/request-actor.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiKeyCanUseWebTools } from "../lib/web-tool-access.js";
 import { assertCanSpend, spendAwareErrorHandler } from "../services/billing/spend-guard.js";
-import { WorkspaceIntakeError } from "../services/workspace-intake.js";
+import { ProjectIntakeError } from "../services/project-intake.js";
 import { validationHook } from "../lib/validation.js";
-import { createWebsiteWorkspaceIntake } from "../services/workspace-intake-actions.js";
-import { runCreationErrorResponse, workspaceIntakeErrorResponse } from "./uploads.js";
+import { createWebsiteProjectIntake } from "../services/project-intake-actions.js";
+import { runCreationErrorResponse, projectIntakeErrorResponse } from "./uploads.js";
 import { ingestWebsiteInput, webCrawlInput, webFetchInput, webMapInput, webSearchInput, type WebCrawlRequest } from "../services/web/schemas.js";
 import { runWebCapability, type WebSurface } from "../services/web/service.js";
 import { WebToolError, type WebCapability, type WebInput } from "../services/web/types.js";
@@ -24,10 +24,10 @@ export function webErrorResponse(c: Context, error: unknown): Response | null {
   });
 }
 
-/** The workspace whose privacy mode and billing apply to a web call (default when omitted). */
-export async function webCallWorkspace(actor: RequestActor, workspace: string | undefined, orgId?: string | null) {
-  const resolved = await loadActorScopedWorkspace(await resolveActorWorkspaceId(actor, workspace, orgId), actor);
-  if (!resolved) throw new WebToolError(404, "invalid_request", "Workspace not found");
+/** The project whose privacy mode and billing apply to a web call (default when omitted). */
+export async function webCallProject(actor: RequestActor, project: string | undefined, orgId?: string | null) {
+  const resolved = await loadActorScopedProject(await resolveActorProjectId(actor, project, orgId), actor);
+  if (!resolved) throw new WebToolError(404, "invalid_request", "Project not found");
   return resolved;
 }
 
@@ -35,18 +35,18 @@ export function crawlInput(body: WebCrawlRequest): WebInput<"crawl"> {
   return { url: body.url, limit: body.limit, maxDepth: body.maxDepth, includePaths: body.includePaths, excludePaths: body.excludePaths, maxCharacters: body.maxCharacters };
 }
 
-/** Strip routing-only fields (workspace, timeout) so the cache key and providers see the capability input alone. */
+/** Strip routing-only fields (project, timeout) so the cache key and providers see the capability input alone. */
 function capabilityInput<C extends WebCapability>(capability: C, body: Record<string, unknown>): WebInput<C> {
-  const { workspace: _workspace, timeoutSeconds: _timeout, ...input } = body;
+  const { project: _project, timeoutSeconds: _timeout, ...input } = body;
   return (capability === "crawl" ? crawlInput(body as WebCrawlRequest) : input) as WebInput<C>;
 }
 
 async function handle<C extends WebCapability>(c: Context, capability: C, body: Record<string, unknown>, surface: WebSurface): Promise<Response> {
   const actor = getRequestActor(c);
   try {
-    const workspace = await webCallWorkspace(actor, body.workspace as string | undefined);
+    const project = await webCallProject(actor, body.project as string | undefined);
     const result = await runWebCapability(capability, capabilityInput(capability, body), {
-      userId: actor.userId, orgId: workspace.orgId, workspaceId: workspace.id, surface, signal: c.req.raw.signal,
+      userId: actor.userId, orgId: project.orgId, projectId: project.id, surface, signal: c.req.raw.signal,
     }, capability === "crawl" ? { deadlineMs: (body.timeoutSeconds as number) * 1000 } : {});
     return c.json(result);
   } catch (error) {
@@ -58,7 +58,7 @@ async function handle<C extends WebCapability>(c: Context, capability: C, body: 
 
 /**
  * Web Capabilities over REST: search the public web, read pages as Markdown,
- * map a site's URLs, crawl a site, and ingest a crawled site into a workspace.
+ * map a site's URLs, crawl a site, and ingest a crawled site into a project.
  * API keys need `search` (ingest needs `ingest`); public client keys also need
  * the opt-in `web` scope. Each call is charged credits.
  */
@@ -82,38 +82,38 @@ function createWebRoutes(surface: WebSurface) {
   .post("/ingest", zValidator("json", ingestWebsiteInput, validationHook), async (c) => {
     const actor = getRequestActor(c);
     const body = c.req.valid("json");
-    const restricted = actor.type === "apiKey" && Boolean(actor.apiKey.workspaceIds?.length);
-    // A workspace-restricted key never creates a workspace (intake also refuses names outside its allowlist).
-    if (restricted && !body.workspace?.trim() && body.newWorkspace) {
-      return apiStatusError(c, 403, "Workspace-scoped API keys cannot create new workspaces", { code: "workspace_scope_forbidden" });
+    const restricted = actor.type === "apiKey" && Boolean(actor.apiKey.projectIds?.length);
+    // A project-restricted key never creates a project (intake also refuses names outside its allowlist).
+    if (restricted && !body.project?.trim() && body.newProject) {
+      return apiStatusError(c, 403, "Project-scoped API keys cannot create new projects", { code: "project_scope_forbidden" });
     }
     try {
       // Preflight before any paid crawl: the target must exist and be usable, or be a
       // new name the actor may create; spend must allow the ingest run that follows.
-      const lookup = await lookupActorWorkspace(actor, body.workspace?.trim() || null);
+      const lookup = await lookupActorProject(actor, body.project?.trim() || null);
       let scopeRef: string | undefined;
       if (lookup.ref.kind !== "default") {
-        const found = "workspace" in lookup ? lookup.workspace : null;
+        const found = "project" in lookup ? lookup.project : null;
         if (found) scopeRef = found.id;
-        else if (lookup.ref.kind === "id") throw new WorkspaceIntakeError("Workspace not found", 404);
-        else if (restricted) throw new WorkspaceIntakeError("This API key is limited to specific workspaces and cannot create new ones.", 403);
-        // A new workspace name: the crawl is billed in the default workspace's scope.
+        else if (lookup.ref.kind === "id") throw new ProjectIntakeError("Project not found", 404);
+        else if (restricted) throw new ProjectIntakeError("This API key is limited to specific projects and cannot create new ones.", 403);
+        // A new project name: the crawl is billed in the default project's scope.
       }
-      const scope = await webCallWorkspace(actor, scopeRef);
+      const scope = await webCallProject(actor, scopeRef);
       await assertCanSpend(scope.orgId, scope.id, { kind: "job" });
-      const result = await createWebsiteWorkspaceIntake({
+      const result = await createWebsiteProjectIntake({
         userId: actor.userId,
         orgId: scope.orgId,
-        // Intake's default branch is the org default; a restricted key's default is its own (preflighted) workspace.
-        workspace: body.workspace?.trim() || (restricted ? scope.id : null),
-        newWorkspace: body.newWorkspace,
-        allowedWorkspaceIds: restricted && actor.type === "apiKey" ? actor.apiKey.workspaceIds! : null,
+        // Intake's default branch is the org default; a restricted key's default is its own (preflighted) project.
+        project: body.project?.trim() || (restricted ? scope.id : null),
+        newProject: body.newProject,
+        allowedProjectIds: restricted && actor.type === "apiKey" ? actor.apiKey.projectIds! : null,
         tags: body.tags,
         startUrl: body.url,
         crawlOptions: { limit: body.limit, maxDepth: body.maxDepth, includePaths: body.includePaths ?? null, excludePaths: body.excludePaths ?? null },
         crawl: async () => {
-          const crawled = await runWebCapability("crawl", crawlInput({ ...body, maxCharacters: 100_000, workspace: undefined }), {
-            userId: actor.userId, orgId: scope.orgId, workspaceId: scope.id, surface: surface === "api" ? "ingest" : surface, signal: c.req.raw.signal,
+          const crawled = await runWebCapability("crawl", crawlInput({ ...body, maxCharacters: 100_000, project: undefined }), {
+            userId: actor.userId, orgId: scope.orgId, projectId: scope.id, surface: surface === "api" ? "ingest" : surface, signal: c.req.raw.signal,
           }, { deadlineMs: body.timeoutSeconds * 1000 });
           return { pages: crawled.pages, credits: crawled.usage.credits };
         },
@@ -126,7 +126,7 @@ function createWebRoutes(surface: WebSurface) {
     } catch (error) {
       const response = webErrorResponse(c, error);
       if (response) return response;
-      const intake = workspaceIntakeErrorResponse(c, error) ?? runCreationErrorResponse(c, error);
+      const intake = projectIntakeErrorResponse(c, error) ?? runCreationErrorResponse(c, error);
       if (intake) return intake;
       throw error;
     }

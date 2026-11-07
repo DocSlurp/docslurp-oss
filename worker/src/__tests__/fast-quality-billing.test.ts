@@ -41,11 +41,11 @@ beforeAll(async () => {
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com');
     insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 100000);
-    insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+    insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
       values ('fast', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'embed', '${pipeline("fast")}', 6, 316),
              ('auto', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'embed', '${pipeline("auto")}', 2, 4);
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source) values
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source) values
       ${fastDocs},
       ('a-pdf', 'o1', 'u1', 'w', 'auto', 'scan.pdf', 'application/pdf', 'raw/a1', 'completed', 3, 'counted'),
       ('a-png', 'o1', 'u1', 'w', 'auto', 'photo.png', 'image/png', 'raw/a2', 'completed', 1, 'counted');
@@ -141,9 +141,9 @@ describe("Fast page billing from the usage ledger (recordPageBaseFee)", () => {
 
   it("bills an unread image file and an unread scan Fast: unknown or unread is never Rich", { timeout: 60_000 }, async () => {
     await db.exec(`
-      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
         values ('auto-unread', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'embed', '${pipeline("auto")}', 2, 4);
-      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source) values
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source) values
         ('u-pdf', 'o1', 'u1', 'w', 'auto-unread', 'scan.pdf', 'application/pdf', 'raw/u1', 'completed', 3, 'counted'),
         ('u-png', 'o1', 'u1', 'w', 'auto-unread', 'photo.png', 'image/png', 'raw/u2', 'completed', 1, 'counted');
       insert into document_page_facts (document_id, page_number, run_id, text_bytes, image_count) values
@@ -155,9 +155,9 @@ describe("Fast page billing from the usage ledger (recordPageBaseFee)", () => {
 
   it("bills a blank uploaded image's OCR read Rich, and a blank scanned PDF page Fast, from read to completion", { timeout: 60_000 }, async () => {
     await db.exec(`
-      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
         values ('auto-blank', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'embed', '${pipeline("auto")}', 2, 3);
-      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source) values
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source) values
         ('b-pdf', 'o1', 'u1', 'w', 'auto-blank', 'scan.pdf', 'application/pdf', 'raw/b1', 'completed', 2, 'counted'),
         ('b-png', 'o1', 'u1', 'w', 'auto-blank', 'blank.png', 'image/png', 'raw/b2', 'completed', 1, 'counted');
     `);
@@ -190,9 +190,9 @@ describe("Fast page billing from the usage ledger (recordPageBaseFee)", () => {
 
   it("keeps the earlier release's completion rule for a run it started (no pin): unread images and scans bill Rich", { timeout: 60_000 }, async () => {
     await db.exec(`
-      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
         values ('auto-legacy', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'embed', '${pipeline("auto")}', 3, 5);
-      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source) values
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source) values
         ('l-pdf', 'o1', 'u1', 'w', 'auto-legacy', 'scan.pdf', 'application/pdf', 'raw/l1', 'completed', 3, 'counted'),
         ('l-png', 'o1', 'u1', 'w', 'auto-legacy', 'photo.png', 'image/png', 'raw/l2', 'completed', 1, 'counted'),
         ('l-read', 'o1', 'u1', 'w', 'auto-legacy', 'read.png', 'image/png', 'raw/l3', 'completed', 1, 'counted');

@@ -16,7 +16,7 @@ import { apiStatusError } from "../lib/api-error.js";
  * 1. authenticating the caller (cookie session or API key; see sessionAuth),
  * 2. opening the sealed token (lib/file-tokens.ts): genuine, unexpired,
  * 3. matching the token's user and credential to the caller's,
- * 4. re-checking document access now (membership, key workspace allowlist,
+ * 4. re-checking document access now (membership, key project allowlist,
  *    key org, PII withholding), so revocations apply to URLs already issued.
  * Every failure answers the same 404 and reveals nothing about why.
  *

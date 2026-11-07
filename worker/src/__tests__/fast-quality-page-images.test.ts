@@ -18,7 +18,7 @@ import { WorkflowState } from "../pipeline/pipeline.js";
 import { extractTextForEmbedding } from "../stages/embedding-runtime.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import type { CommandRunner } from "../tools/runner.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 
 const document = { id: "doc", userId: "user", filename: "scan.pdf", mimeType: "application/pdf", pageCount: 2, sourceKey: "source.pdf" } as Document;
 
@@ -46,9 +46,9 @@ function fastState(): { state: WorkflowState; storage: ArtifactStore; objects: M
   });
   const { storage, objects } = memoryStorage({ "canonical/doc.json": canonical, "contract/doc.json": contract });
   const state = WorkflowState.create({
-    id: "run", orgId: "org", userId: "user", workspaceId: "ws", spentCents: 0, stats: {}, artifacts: {},
+    id: "run", orgId: "org", userId: "user", projectId: "ws", spentCents: 0, stats: {}, artifacts: {},
     pipeline: normalizePipelineFeatures({ quality: "fast" }),
-  } as unknown as WorkspaceRun, [document]);
+  } as unknown as ProjectRun, [document]);
   state.artifactLedger.recordDocument("doc", "canonical-document", "s3://bucket/canonical/doc.json");
   state.artifactLedger.recordDocument("doc", "extraction-contract", "s3://bucket/contract/doc.json");
   return { state, storage, objects, canonical };
@@ -163,9 +163,9 @@ describe("quality fast: kept-as-image renders are bounded", () => {
     const facts: Array<{ pageNumber: number; visionStatus?: string }> = [];
     const grants = new Map<string, number>();
     const state = WorkflowState.create({
-      id: runId, orgId: "org", userId: "user", workspaceId: "ws", spentCents: 0, stats: {}, artifacts: {},
+      id: runId, orgId: "org", userId: "user", projectId: "ws", spentCents: 0, stats: {}, artifacts: {},
       pipeline: normalizePipelineFeatures({ quality: "fast" }),
-    } as unknown as WorkspaceRun, [blankPdf]);
+    } as unknown as ProjectRun, [blankPdf]);
     // Every other store call is a no-op; page facts are captured.
     const known: Record<string, unknown> = {
       getCompletedPages: async () => new Set<number>(),
@@ -276,9 +276,9 @@ describe("quality fast: references follow the stored image format", () => {
     });
     const { storage, objects } = memoryStorage({ "canonical/img.json": canonical, "contract/img.json": contract });
     const state = WorkflowState.create({
-      id: "run", orgId: "org", userId: "user", workspaceId: "ws", spentCents: 0, stats: {}, artifacts: {},
+      id: "run", orgId: "org", userId: "user", projectId: "ws", spentCents: 0, stats: {}, artifacts: {},
       pipeline: normalizePipelineFeatures({ quality: "fast" }),
-    } as unknown as WorkspaceRun, [imageDoc]);
+    } as unknown as ProjectRun, [imageDoc]);
     state.artifactLedger.recordDocument("img", "canonical-document", "s3://bucket/canonical/img.json");
     state.artifactLedger.recordDocument("img", "extraction-contract", "s3://bucket/contract/img.json");
     const artifactUri = `s3://bucket/run/images/img/v2-150dpi/page-1.${extension}`;
@@ -296,7 +296,7 @@ describe("quality fast: references follow the stored image format", () => {
       blocks: built.blocks.map((block) => (block.pageNumber === 2 ? { ...block, metadata: { ...block.metadata, extractor: "page-image" } } : block)),
     };
     const row = {
-      id: "doc", workspace_id: "ws", run_id: "run", filename: "scan.pdf", mime_type: "application/pdf", source_key: "raw/doc",
+      id: "doc", project_id: "ws", run_id: "run", filename: "scan.pdf", mime_type: "application/pdf", source_key: "raw/doc",
       status: "completed", extraction_mode: "fast", page_count: 3, version_number: 1, metadata: {}, created_at: "2026-10-29", updated_at: "2026-10-29",
       tags: [], artifacts: {
         "doc:markdown": "s3://bucket/run/markdown/doc.md",
@@ -330,7 +330,7 @@ describe("quality fast: references follow the stored image format", () => {
   it("opens the canonical document only when a page image could ship, and caps its size (L3)", async () => {
     const opened: string[] = [];
     const row = {
-      id: "doc", workspace_id: "ws", run_id: "run", filename: "a.pdf", mime_type: "application/pdf", source_key: "raw/doc",
+      id: "doc", project_id: "ws", run_id: "run", filename: "a.pdf", mime_type: "application/pdf", source_key: "raw/doc",
       status: "completed", extraction_mode: "fast", page_count: 2, version_number: 1, metadata: {}, created_at: "2026-10-29", updated_at: "2026-10-29",
       tags: [], artifacts: { "doc:markdown": "s3://bucket/run/markdown/doc.md", "doc:canonical-document": "s3://bucket/run/canonical/doc.json" },
     } satisfies ExportDocumentRow;

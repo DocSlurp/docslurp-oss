@@ -211,10 +211,10 @@ export interface MeasuredRunDocument { pageCount: number; billingPages: number; 
  */
 export async function recordMeasuredPageCount(
   state: {
-    run: { id: string; orgId?: string | null; userId?: string; workspaceId?: string; pipeline?: PipelineFeatures };
+    run: { id: string; orgId?: string | null; userId?: string; projectId?: string; pipeline?: PipelineFeatures };
     store?: {
       setDocumentBillingPages?(runId: string, documentId: string, billingPages: number, method: string): Promise<boolean>;
-      enforceSpendForCharge?(run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean; blocked?: boolean }>;
+      enforceSpendForCharge?(run: { id: string; orgId: string | null; projectId?: string | null; userId: string }, credits: number): Promise<{ paused: boolean; blocked?: boolean }>;
       measuredRunDocuments?(runId: string): Promise<MeasuredRunDocument[]>;
     } | null;
   },
@@ -252,7 +252,7 @@ export async function recordMeasuredPageCount(
       const runFast = measuredDocuments.reduce((sum, row) => sum + extraCreditsForMeasuredPages(pipeline, row.pageCount, row.billingPages, row.method, { features: false }), 0);
       // The run's rows include this document once it is recorded; never count less than this document alone.
       const extra = own - ownFast + Math.max(ownFast, runFast);
-      const outcome = await state.store.enforceSpendForCharge({ id: state.run.id, orgId: state.run.orgId ?? null, workspaceId: state.run.workspaceId, userId: state.run.userId }, extra);
+      const outcome = await state.store.enforceSpendForCharge({ id: state.run.id, orgId: state.run.orgId ?? null, projectId: state.run.projectId, userId: state.run.userId }, extra);
       if (outcome.paused || outcome.blocked) {
         console.warn(`[page-count] run=${state.run.id} document=${document.id} stopped (paused=${outcome.paused}): measured ${measured.pages} pages (intake ${intakePages}) owes ${extra.toFixed(2)} more credits than the balance holds`);
         throw new RunPolicyError(`Credits do not cover the measured pages of document ${document.id}; run ${outcome.paused ? "paused" : "stopped"}`);

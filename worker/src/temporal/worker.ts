@@ -509,7 +509,7 @@ async function main(): Promise<void> {
     : null;
   purgeTimer?.unref();
 
-  // Workspace graph rebuilds (graph_jobs): one job at a time per worker,
+  // Project graph rebuilds (graph_jobs): one job at a time per worker,
   // leased so a crashed worker's job resumes elsewhere.
   let graphJobRunning = false;
   const runGraphJobs = () => {

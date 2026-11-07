@@ -46,7 +46,7 @@ export async function authorizeOcrRead(state: WorkflowState, documentId: string,
   const store = state.store;
   if (!store?.enforceSpendForCharge || !state.run.userId) return;
   const credits = pageCredits("rich", Math.max(1, pages)) * speedBoostMultiplier(state.run.pipeline.speedBoost === true) + state.usageLedger.pendingBillableCents;
-  const outcome = await store.enforceSpendForCharge({ id: state.run.id, orgId: state.run.orgId ?? null, workspaceId: state.run.workspaceId, userId: state.run.userId }, credits);
+  const outcome = await store.enforceSpendForCharge({ id: state.run.id, orgId: state.run.orgId ?? null, projectId: state.run.projectId, userId: state.run.userId }, credits);
   if (outcome.paused || outcome.blocked) {
     console.warn(`[ocr] ${label} run=${state.run.id} document=${documentId} pages=${pages} reason=unfunded credits=${credits.toFixed(2)}`);
     throw new RunPolicyError(`Credits do not cover the OCR read of ${subject}; run paused`);
@@ -72,7 +72,7 @@ export async function affordableImageFrames(state: WorkflowState, documentId: st
     .reduce((sum, row) => sum + extraCreditsForMeasuredPages(pipeline, Math.max(1, row.chargedPages), row.pageCount, null, { mode: "rich", features: false }), 0);
   const pending = state.usageLedger.pendingBillableCents;
   const frames = await store.largestFundedCharge(
-    { id: state.run.id, orgId: state.run.orgId ?? null, workspaceId: state.run.workspaceId },
+    { id: state.run.id, orgId: state.run.orgId ?? null, projectId: state.run.projectId },
     max,
     (n) => extraCreditsForMeasuredPages(pipeline, intake, n, null, { mode: "rich" }) + others + pending,
   );
@@ -112,7 +112,7 @@ export async function authorizeImageFrames(state: WorkflowState, documentId: str
   const runRich = rows.reduce((sum, row) => sum + extraCreditsForMeasuredPages(pipeline, Math.max(1, row.chargedPages), row.pageCount, null, { mode: "rich", features: false }), 0);
   const extra = own - ownRich + Math.max(ownRich, runRich);
   // Fails closed: a check that cannot decide throws SpendCheckUnavailableError (retryable) out of the stage, before any charge.
-  const outcome = await store.enforceSpendForCharge({ id: state.run.id, orgId: state.run.orgId ?? null, workspaceId: state.run.workspaceId, userId: state.run.userId }, extra);
+  const outcome = await store.enforceSpendForCharge({ id: state.run.id, orgId: state.run.orgId ?? null, projectId: state.run.projectId, userId: state.run.userId }, extra);
   if (!outcome.paused && !outcome.blocked) return;
   throw unfundedFramesError(state, documentId, frames, outcome.paused, `owes=${extra.toFixed(2)} intake=${intake}`);
 }
@@ -140,7 +140,7 @@ function unfundedFramesError(state: WorkflowState, documentId: string, frames: n
  */
 export async function refuseUnfundedImageFrames(state: WorkflowState, documentId: string, stageName: string, budget: number): Promise<never> {
   await authorizeImageFrames(state, documentId, stageName, budget + 1);
-  const run = { id: state.run.id, orgId: state.run.orgId ?? null, workspaceId: state.run.workspaceId, userId: state.run.userId };
+  const run = { id: state.run.id, orgId: state.run.orgId ?? null, projectId: state.run.projectId, userId: state.run.userId };
   if (!state.store?.pauseRunForSpend || !run.userId) {
     throw new SpendCheckUnavailableError(`image ${documentId} exceeds its funded frames (${budget}) but run ${state.run.id} cannot be paused`);
   }

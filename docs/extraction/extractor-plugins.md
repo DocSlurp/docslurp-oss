@@ -19,7 +19,7 @@ Plugins are loaded by configuration, never imported by core. Core builds, typech
 | `DOCSLURP_VM_PDF_INSTALLED=1` | API (and worker) | List `vm-pdf` in `GET /v1/extractors` and admit PDFs up to its source limit. Must be empty, `0` or `1`. |
 | `DOCSLURP_EXTRACTOR_ID_ALIASES` | API and worker | Legacy extractor ids, `<old>:<new>[,<old>:<new>]`; see [Renaming an extractor](#renaming-an-extractor). |
 
-Workspaces select the extractor with `documentExtraction.order.pdf: ["vm-pdf"]` and pass its options under
+Projects select the extractor with `documentExtraction.order.pdf: ["vm-pdf"]` and pass its options under
 `documentExtraction.options["vm-pdf"]` (`images.enabled`, `images.minWidth`, `images.minHeight`,
 `pdf.extractImages`).
 
@@ -58,7 +58,7 @@ provider behind the `vm-pdf` id), set `DOCSLURP_EXTRACTOR_ID_ALIASES=<old>:<new>
 
 - Parsing rewrites the old id to the new one wherever a `documentExtraction` config names an extractor: `order`,
   `components`, `pages`, `enrich`, `voting.secondary` and the `options` key. It applies to requests and to stored
-  workspace, run and upload-session configs alike, so nothing written after the deploy carries the old id. Free text
+  project, run and upload-session configs alike, so nothing written after the deploy carries the old id. Free text
   elsewhere in a pipeline is never touched.
 - Startup refuses an alias whose target the process does not serve (`vm-pdf` without a provider on the worker, or
   without `DOCSLURP_VM_PDF_INSTALLED=1` on the API), an alias that names a built-in id, a chain, or a malformed
@@ -147,7 +147,7 @@ Untrusted files are processed behind a VM or microVM boundary (`AGENTS.md`). A p
 ## Host-side PDF parsing that remains
 
 The sandboxed route moves Markdown extraction into the provider's VM. It does not yet move every read of the PDF.
-When a PDF goes to `vm-pdf` (the deployment sets `DOCSLURP_PDF_EXTRACTOR=vm-pdf`, or the workspace order names it),
+When a PDF goes to `vm-pdf` (the deployment sets `DOCSLURP_PDF_EXTRACTOR=vm-pdf`, or the project order names it),
 the extract stage skips these host probes, and its stage stats record `hostPdfProbes: "skipped-sandboxed-route"`:
 
 - page facts (`pdftotext`, `pdfimages -list`) for the ingest report;
@@ -160,7 +160,7 @@ Other stages still read the PDF on the worker host. Today that includes:
 - page rasterization for vision extraction, page embeddings and deferred page materialization (`pdftoppm`,
   `pdftotext`);
 - the document map reads the outline and structure in process, with pdf.js;
-- a fallback extractor, when a workspace's order lists one after `vm-pdf` and the provider fails, runs on the host
+- a fallback extractor, when a project's order lists one after `vm-pdf` and the provider fails, runs on the host
   like any built-in extractor.
 
 The poppler commands run under the worker's parser sandbox (see `docs/worker-image.md`), which is defense in depth

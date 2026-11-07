@@ -29,17 +29,17 @@ beforeAll(async () => {
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1')`;
   await sql`insert into org_memberships(org_id, user_id, role) values ('o1', 'u1', 'owner')`;
-  await sql`insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W')`;
+  await sql`insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W')`;
   await sql`
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, processed_documents, pages_total, pages_processed, stats)
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, processed_documents, pages_total, pages_processed, stats)
     values ('r1', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'extract-markdown', ${sql.json(defaultPipelineFeatures as unknown as postgres.JSONValue)}, 1, 0, 10, 4,
       ${sql.json({ documents: 1, workerId: "machine-91" } as postgres.JSONValue)})
   `;
-  await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+  await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
     values ('d1', 'o1', 'u1', 'w', 'r1', 'a.pdf', 'application/pdf', 'raw/a', 'processing', 10)`;
   await sql`insert into document_run_stage_states (run_id, document_id, stage_name, status, attempts, stats)
     values ('r1', 'd1', 'extract-markdown', 'processing', 1, ${sql.json({ pages: 4, cpuSeconds: 3.2, rssBytes: 55555, workerClass: "perf-8x" } as postgres.JSONValue)})`;
-  await sql`insert into workspace_run_events (id, user_id, run_id, event_type, progress, stats, payload) values
+  await sql`insert into project_run_events (id, user_id, run_id, event_type, progress, stats, payload) values
     ('hb1', 'u1', 'r1', 'run.progress', ${sql.json({ completedDocumentStages: 1 } as postgres.JSONValue)}, ${sql.json({ pages: 4 } as postgres.JSONValue)},
      ${sql.json({ kind: "heartbeat", metrics: { inputTokens: 5, costCents: 2, rssBytes: 123456789, peakRssBytes: 234567890, cpuUserMs: 910, cpuSystemMs: 80 } } as postgres.JSONValue)})`;
 }, 120_000);

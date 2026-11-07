@@ -1,15 +1,15 @@
 import type { ChatScope } from "./chat-instructions.js";
-import { describeChatScope, neutralizeWorkspaceText, SCOPE_PLACEHOLDER } from "./chat-instructions.js";
+import { describeChatScope, neutralizeProjectText, SCOPE_PLACEHOLDER } from "./chat-instructions.js";
 import { sql } from "../db.js";
 import type { ScopeDeclineDecision } from "../search/scope-relevance.js";
 
 /**
- * The workspace's scope for the default chat instructions and the scope
- * decline. Only owner-controlled text describes it (the workspace name); no
- * query is needed. Callers have already authorized the workspace.
+ * The project's scope for the default chat instructions and the scope
+ * decline. Only owner-controlled text describes it (the project name); no
+ * query is needed. Callers have already authorized the project.
  */
-export function chatScopeFor(workspace: { name?: string | null } | null | undefined): ChatScope {
-  return { workspaceName: workspace?.name ?? null };
+export function chatScopeFor(project: { name?: string | null } | null | undefined): ChatScope {
+  return { projectName: project?.name ?? null };
 }
 
 /**
@@ -19,7 +19,7 @@ export function chatScopeFor(workspace: { name?: string | null } | null | undefi
  * user only, never placed in a prompt.
  */
 export function suggestionTopic(value: string | null | undefined): string {
-  const cleaned = neutralizeWorkspaceText(value ?? "", 400)
+  const cleaned = neutralizeProjectText(value ?? "", 400)
     .replace(/\.[a-z0-9]{2,5}$/i, "")
     .replace(/\bhttps?:\/\/\S+|\bwww\.\S+/gi, " ")
     .replace(/[^\p{L}\p{N}\s.,:;'’()&/-]+/gu, " ")
@@ -31,10 +31,10 @@ export function suggestionTopic(value: string | null | undefined): string {
 }
 
 /**
- * Two or three questions the workspace can answer, from current document
+ * Two or three questions the project can answer, from current document
  * titles and section headings (sanitised, quoted, bounded). No model call.
  */
-export async function loadScopeSuggestions(workspaceId: string): Promise<string[]> {
+export async function loadScopeSuggestions(projectId: string): Promise<string[]> {
   let titles: string[] = [];
   let headings: string[] = [];
   try {
@@ -42,7 +42,7 @@ export async function loadScopeSuggestions(workspaceId: string): Promise<string[
       sql<{ title: string | null }[]>`
         select coalesce(nullif(btrim(d.metadata ->> 'title'), ''), d.filename) as title
         from documents d
-        where d.workspace_id = ${workspaceId} and d.status = 'completed' and d.superseded_at is null
+        where d.project_id = ${projectId} and d.status = 'completed' and d.superseded_at is null
           and d.archived_at is null and d.purged_at is null
         order by d.created_at
         limit 4
@@ -51,7 +51,7 @@ export async function loadScopeSuggestions(workspaceId: string): Promise<string[
         select distinct on (lower(c.heading_path[1])) c.heading_path[1] as heading
         from document_chunks c
         join documents d on d.id = c.document_id
-        where d.workspace_id = ${workspaceId} and d.status = 'completed' and d.superseded_at is null
+        where d.project_id = ${projectId} and d.status = 'completed' and d.superseded_at is null
           and d.archived_at is null and d.purged_at is null
           and array_length(c.heading_path, 1) > 0
         order by lower(c.heading_path[1]), c.chunk_index
@@ -67,16 +67,16 @@ export async function loadScopeSuggestions(workspaceId: string): Promise<string[
     ...titles.slice(0, 2).map(title => `What does “${title}” cover?`),
     ...headings.slice(0, 2).map(heading => `What do the documents say about “${heading}”?`),
   ];
-  if (suggestions.length === 0) suggestions.push("What topics do the documents in this workspace cover?");
+  if (suggestions.length === 0) suggestions.push("What topics do the documents in this project cover?");
   return [...new Set(suggestions)].slice(0, 3);
 }
 
-/** The polite templated decline: what the workspace covers and what to ask instead. */
+/** The polite templated decline: what the project covers and what to ask instead. */
 export function buildScopeDeclineAnswer(scope: ChatScope, suggestions: readonly string[]): { answer: string; scope: string } {
   const covers = describeChatScope(scope);
   const scopeText = covers === SCOPE_PLACEHOLDER ? "the documents uploaded to it" : covers;
   const lines = [
-    `That question doesn't look related to this workspace, which covers ${scopeText}, so I can't answer it from these documents.`,
+    `That question doesn't look related to this project, which covers ${scopeText}, so I can't answer it from these documents.`,
   ];
   if (suggestions.length) {
     lines.push("", "You could ask, for example:", ...suggestions.map(suggestion => `- ${suggestion}`));
@@ -86,7 +86,7 @@ export function buildScopeDeclineAnswer(scope: ChatScope, suggestions: readonly 
 
 /** Every decline is logged with its relevance for tuning; the question text is never logged. */
 export function logScopeDecline(args: {
-  workspaceId: string;
+  projectId: string;
   path: "retrieval";
   decision: ScopeDeclineDecision;
   requestId?: string | null;
@@ -95,6 +95,6 @@ export function logScopeDecline(args: {
 }): void {
   const signal = args.decision.signal;
   console.log(
-    `[chat-scope-decline] workspace=${args.workspaceId} path=${args.path} request_id=${args.requestId ?? "none"} chat_session_id=${args.sessionId ?? "none"} search_session_id=${args.searchSessionId ?? "none"} relevance=${(args.decision.relevance ?? 0).toFixed(3)} threshold=${args.decision.threshold.toFixed(3)} top_cosine=${signal ? signal.topCosine.toFixed(3) : "none"} pipeline=${signal?.pipeline ?? "none"}`,
+    `[chat-scope-decline] project=${args.projectId} path=${args.path} request_id=${args.requestId ?? "none"} chat_session_id=${args.sessionId ?? "none"} search_session_id=${args.searchSessionId ?? "none"} relevance=${(args.decision.relevance ?? 0).toFixed(3)} threshold=${args.decision.threshold.toFixed(3)} top_cosine=${signal ? signal.topCosine.toFixed(3) : "none"} pipeline=${signal?.pipeline ?? "none"}`,
   );
 }

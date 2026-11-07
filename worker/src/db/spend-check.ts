@@ -20,7 +20,7 @@ import { RUN_EVENTS_CHANNEL } from "./run-event-store.js";
  *    unchecked spend, whichever comes first. The counters live on the run
  *    row (spend_unchecked_pages/credits), so the cadence holds across every
  *    worker that processes the run's pages.
- * When available credits fall below 0, or the workspace/org is paused by its
+ * When available credits fall below 0, or the project/org is paused by its
  * monthly budget, the run is paused, not failed: control_state = 'paused',
  * pause_reason = the block code, a run event with the reason, and the
  * existing Temporal `pause` signal (no workflow code change, so replay is
@@ -78,8 +78,8 @@ export function setSpendCheckConfig(config: SpendCheckConfig | null): void {
 const NEVER = 1e15;
 
 /**
- * Fragments for `update workspace_runs set ... from <from> where
- * workspace_runs.id = spend_prev.id returning <checkDue>`, adding `pages` (a
+ * Fragments for `update project_runs set ... from <from> where
+ * project_runs.id = spend_prev.id returning <checkDue>`, adding `pages` (a
  * SQL expression; it may read `spend_prev.pages_processed`, the row before the
  * update) and `credits` to the run's unchecked counters and resetting both
  * once either crosses its threshold. `checkDue` is true exactly when this
@@ -109,7 +109,7 @@ export function spendCounterSql(client: Client, runId: string, pages: ReturnType
     `,
     from: client`(
       select id, spend_unchecked_pages, spend_unchecked_credits, pages_processed
-      from workspace_runs where id = ${runId} for no key update
+      from project_runs where id = ${runId} for no key update
     ) spend_prev`,
     checkDue: due(),
   };
@@ -127,9 +127,9 @@ export interface SpendCheckResult {
 
 const BLOCK_MESSAGES: Record<string, string> = {
   credit_exhausted: "Paused: the organization is out of credits for processing. Add credits or enable auto-recharge and the run resumes automatically.",
-  workspace_budget_paused: "Paused: this workspace reached its monthly budget cap. Raise the budget and the run resumes automatically.",
+  project_budget_paused: "Paused: this project reached its monthly budget cap. Raise the budget and the run resumes automatically.",
   org_budget_paused: "Paused: the organization reached its monthly budget cap. Raise the budget and the run resumes automatically.",
-  plan_not_entitled: "Paused: this workspace has no billing organization.",
+  plan_not_entitled: "Paused: this project has no billing organization.",
 };
 
 /**
@@ -141,12 +141,12 @@ export function spendBlockCode(row: {
   org_id?: string | null;
   funded?: boolean | null;
   available: number | string;
-  workspace_budget_paused: boolean;
+  project_budget_paused: boolean;
   org_budget_paused: boolean;
-  workspace_in_org: boolean;
+  project_in_org: boolean;
 } | undefined): string | null {
-  if (!row || !row.workspace_in_org) return "plan_not_entitled";
-  if (row.workspace_budget_paused) return "workspace_budget_paused";
+  if (!row || !row.project_in_org) return "plan_not_entitled";
+  if (row.project_budget_paused) return "project_budget_paused";
   if (row.org_budget_paused) return "org_budget_paused";
   // House orgs (BILLING_EXEMPT_ORG_IDS) are metered but never credit-gated.
   const reserve = row.funded === undefined ? 0 : jobCreditReserve(row.funded);
@@ -161,7 +161,7 @@ export function spendBlockCode(row: {
  */
 export async function enforceRunSpend(
   client: Client,
-  run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string },
+  run: { id: string; orgId: string | null; projectId?: string | null; userId: string },
   trigger: "stage-boundary" | "page-interval" | "checkpoint-interval",
 ): Promise<SpendCheckResult> {
   if (!spendCheckConfig().enabled || !run.orgId) return { blocked: false, paused: false };
@@ -169,12 +169,12 @@ export async function enforceRunSpend(
     const [row] = await client<{
       funded: boolean | null;
       available: string | number;
-      workspace_budget_paused: boolean;
+      project_budget_paused: boolean;
       org_budget_paused: boolean;
-      workspace_in_org: boolean;
+      project_in_org: boolean;
     }[]>`
-      select funded, available, workspace_budget_paused, org_budget_paused, workspace_in_org
-      from org_spend_status(${run.orgId}, ${run.workspaceId ?? null}::text, 0)
+      select funded, available, project_budget_paused, org_budget_paused, project_in_org
+      from org_spend_status(${run.orgId}, ${run.projectId ?? null}::text, 0)
     `;
     const reason = spendBlockCode(row ? { ...row, org_id: run.orgId } : row);
     if (!reason) return { blocked: false, paused: false };
@@ -206,7 +206,7 @@ export class SpendCheckUnavailableError extends Error {
  */
 export async function enforceRunSpendForCharge(
   client: Client,
-  run: { id: string; orgId: string | null; workspaceId?: string | null; userId: string },
+  run: { id: string; orgId: string | null; projectId?: string | null; userId: string },
   credits: number,
   trigger: "stage-boundary" | "page-interval" | "checkpoint-interval" = "stage-boundary",
 ): Promise<SpendCheckResult> {
@@ -217,12 +217,12 @@ export async function enforceRunSpendForCharge(
     const [row] = await client<{
       funded: boolean | null;
       available: string | number;
-      workspace_budget_paused: boolean;
+      project_budget_paused: boolean;
       org_budget_paused: boolean;
-      workspace_in_org: boolean;
+      project_in_org: boolean;
     }[]>`
-      select funded, available, workspace_budget_paused, org_budget_paused, workspace_in_org
-      from org_spend_status(${run.orgId}, ${run.workspaceId ?? null}::text, 0)
+      select funded, available, project_budget_paused, org_budget_paused, project_in_org
+      from org_spend_status(${run.orgId}, ${run.projectId ?? null}::text, 0)
     `;
     const available = Number(row?.available ?? 0) - credits;
     const reason = spendBlockCode(row ? { ...row, available, org_id: run.orgId } : row);
@@ -247,17 +247,17 @@ export async function enforceRunSpendForCharge(
  */
 export async function largestFundedCharge(
   client: Client,
-  run: { id: string; orgId: string | null; workspaceId?: string | null },
+  run: { id: string; orgId: string | null; projectId?: string | null },
   max: number,
   creditsFor: (n: number) => number,
 ): Promise<number> {
   if (!spendCheckConfig().enabled) return max;
   if (!run.orgId) throw new SpendCheckUnavailableError(`run ${run.id} has no organization to size a charge against`);
-  let row: { funded: boolean | null; available: string | number; workspace_budget_paused: boolean; org_budget_paused: boolean; workspace_in_org: boolean } | undefined;
+  let row: { funded: boolean | null; available: string | number; project_budget_paused: boolean; org_budget_paused: boolean; project_in_org: boolean } | undefined;
   try {
     [row] = await client<NonNullable<typeof row>[]>`
-      select funded, available, workspace_budget_paused, org_budget_paused, workspace_in_org
-      from org_spend_status(${run.orgId}, ${run.workspaceId ?? null}::text, 0)
+      select funded, available, project_budget_paused, org_budget_paused, project_in_org
+      from org_spend_status(${run.orgId}, ${run.projectId ?? null}::text, 0)
     `;
   } catch (error) {
     pushSpendCheckFailure(run, "check-failed");
@@ -289,7 +289,7 @@ export async function pauseRunForSpend(
   try {
     const message = BLOCK_MESSAGES[reason] ?? `Paused: ${reason}`;
     const updated = await client`
-      update workspace_runs
+      update project_runs
       set control_state = 'paused',
           control_requested_at = now(),
           pause_reason = ${reason},
@@ -305,7 +305,7 @@ export async function pauseRunForSpend(
     );
     await client`
       with inserted as (
-        insert into workspace_run_events (id, user_id, run_id, event_type, status, message, progress, stats, payload)
+        insert into project_run_events (id, user_id, run_id, event_type, status, message, progress, stats, payload)
         values (
           gen_random_uuid()::text, ${run.userId}, ${run.id}, 'run.progress', 'processing', ${message},
           '{}'::jsonb, '{}'::jsonb,

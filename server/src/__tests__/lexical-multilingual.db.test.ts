@@ -36,12 +36,12 @@ beforeAll(async () => {
   await sql.unsafe("set session_replication_role = replica");
   const languages = Object.keys(CORPUS);
   await sql`
-    insert into documents (id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, org_id)
+    insert into documents (id, user_id, project_id, run_id, filename, mime_type, source_key, status, org_id)
     select 'doc-' || l, 'u1', 'ws-a', 'run-1', l || '.txt', 'text/plain', 'k', 'completed', 'org1'
     from unnest(${languages}::text[]) as l
   `;
   await sql`
-    insert into documents (id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, org_id)
+    insert into documents (id, user_id, project_id, run_id, filename, mime_type, source_key, status, org_id)
     values ('doc-foreign', 'u2', 'ws-b', 'run-2', 'foreign.txt', 'text/plain', 'k', 'completed', 'org2')
   `;
   await sql`insert into document_chunks ${sql(languages.map((language, index) => ({
@@ -62,7 +62,7 @@ afterAll(async () => {
 });
 
 const find = async (query: string) =>
-  (await search.textSearch(query, "u1", { filters: { workspaceId: "ws-a" }, limit: 5 })).map((chunk) => chunk.id);
+  (await search.textSearch(query, "u1", { filters: { projectId: "ws-a" }, limit: 5 })).map((chunk) => chunk.id);
 
 describe.each([
   ["before the folded index is built", false],
@@ -102,16 +102,16 @@ describe.each([
     expect(ids[0]).toBe(expected);
   });
 
-  it("returns nothing for text that is not in the workspace", async () => {
+  it("returns nothing for text that is not in the project", async () => {
     expect(await find("zxqvbn zxqvbn")).toEqual([]);
     expect(await find("火星の天気")).not.toContain("c-ja");
   });
 
-  it("never returns another workspace's chunk for the same words", async () => {
+  it("never returns another project's chunk for the same words", async () => {
     const ids = await find("Müller Gebühren");
     expect(ids).toContain("c-de");
     expect(ids).not.toContain("c-foreign");
-    const other = (await search.textSearch("Müller Gebühren", "u2", { filters: { workspaceId: "ws-b" }, limit: 5 })).map((chunk) => chunk.id);
+    const other = (await search.textSearch("Müller Gebühren", "u2", { filters: { projectId: "ws-b" }, limit: 5 })).map((chunk) => chunk.id);
     expect(other).toEqual(["c-foreign"]);
   });
 

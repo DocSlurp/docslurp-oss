@@ -9,7 +9,7 @@ import { WorkflowState } from "../pipeline/pipeline.js";
 import { VISION_ROUTING_VERSION_SLOT } from "../lib/vision-routing-v2.js";
 import type { PageImageEvidenceArtifact } from "../lib/page-image-evidence.js";
 import type { Config } from "../config.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 
 // OCR-shaped text: dense enough that v1 (extracted word count) never calls the page sparse.
 const OCR_PROSE = Array.from({ length: 12 }, (_, index) =>
@@ -37,10 +37,10 @@ function setup(version: "v1" | "v3", options: { visionFallback?: boolean; pageCo
   };
   const stage = new ExtractMarkdownStage(runner as never, storage as never, {} as Config);
   const state = WorkflowState.create({
-    id: "run-1", orgId: "org-1", workspaceId: "ws-1", userId: "user-1", stats: {}, stage: "extract-markdown",
+    id: "run-1", orgId: "org-1", projectId: "ws-1", userId: "user-1", stats: {}, stage: "extract-markdown",
     artifacts: { [VISION_ROUTING_VERSION_SLOT]: version },
     pipeline: { visionFallback: options.visionFallback ?? true },
-  } as unknown as WorkspaceRun, []);
+  } as unknown as ProjectRun, []);
   const document = {
     id: "doc-1", userId: "user-1", filename: "scan.pdf", mimeType: "application/pdf", pageCount: options.pageCount ?? 1,
   } as Document;

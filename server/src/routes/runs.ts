@@ -10,8 +10,8 @@ import {
   runProcessingPreviewRequestSchema
 } from "@docslurp/shared";
 
-import { actorHasAnyApiKeyScope, getRequestActor, isPlatformAdminActor, loadActorScopedWorkspace, requireActorWorkspace, type RequestActor } from "../lib/request-actor.js";
-import { WorkspaceAccessError } from "../services/default-workspace.js";
+import { actorHasAnyApiKeyScope, getRequestActor, isPlatformAdminActor, loadActorScopedProject, requireActorProject, type RequestActor } from "../lib/request-actor.js";
+import { ProjectAccessError } from "../services/default-project.js";
 import { validationErrorResponse, type ValidationErrorSource, validationHook } from "../lib/validation.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { appendAuditLog } from "../services/audit-log.js";
@@ -41,15 +41,15 @@ import { billingState } from "../services/config-change.js";
 import { estimateRunReprocess } from "../services/work-estimates.js";
 import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "../lib/content-update-access.js";
 import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
-import { IndexingModeError } from "../services/workspace-indexing-mode.js";
+import { IndexingModeError } from "../services/project-indexing-mode.js";
 
-/** A server key with `ingest` may reprocess runs in the workspaces it can use; null when the actor may proceed. */
+/** A server key with `ingest` may reprocess runs in the projects it can use; null when the actor may proceed. */
 async function denyRunContentUpdate(c: Context, runId: string): Promise<Response | null> {
   const actor = getRequestActor(c);
   if (actor.type !== "apiKey") return null;
   if (!apiKeyCanUpdateContent(actor.apiKey)) return apiStatusError(c, 403, CONTENT_UPDATE_SCOPE_MESSAGE);
   const run = await getRun(runId, actor.userId, { cost: false });
-  if (!run || !await loadActorScopedWorkspace(run.workspaceId, actor)) return apiStatusError(c, 404, "Run not found");
+  if (!run || !await loadActorScopedProject(run.projectId, actor)) return apiStatusError(c, 404, "Run not found");
   return null;
 }
 
@@ -58,7 +58,7 @@ async function denyRunContentUpdate(c: Context, runId: string): Promise<Response
  * search-only by design, so it must not read them even though it carries the
  * `search` scope (which the runs router also accepts). Security finding
  * SEC-2026-10-ROUND3-01: a public `dslp_pub_` key could list org runs and
- * workspace internals.
+ * project internals.
  */
 function apiKeyMayReadRuns(actor: RequestActor): boolean {
   return actor.type !== "apiKey"
@@ -73,13 +73,13 @@ const controlRunSchema = z.object({
   priority: z.number().int().min(-100).max(100).optional()
 });
 
-/** Maps workspace resolution and access failures to 403/404; rethrows anything else. */
-function workspaceErrorResponse(c: Context, error: unknown): Response {
-  if (error instanceof WorkspaceAccessError) {
+/** Maps project resolution and access failures to 403/404; rethrows anything else. */
+function projectErrorResponse(c: Context, error: unknown): Response {
+  if (error instanceof ProjectAccessError) {
     return apiStatusError(c, error.status, error.message, { code: error.code, details: error.details });
   }
-  if (error instanceof Error && error.message === "Workspace not found") {
-    return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+  if (error instanceof Error && error.message === "Project not found") {
+    return apiErrorResponse(c, 404, "project_not_found", "Project not found");
   }
   if (error instanceof Error && error.message === "Forbidden") {
     return apiStatusError(c, 403, "Forbidden");
@@ -140,7 +140,7 @@ export const runsRoutes = new Hono()
       stream.onAbort(() => { aborted = true; resolveAbort(); });
       const subscription = await listenForRunEvents(async event => {
         if (aborted) return;
-        // Recheck workspace membership for each event; never trust event user ids.
+        // Recheck project membership for each event; never trust event user ids.
         const run = await getRun(event.runId, userId);
         if (!run || (orgId && run.orgId !== orgId)) return;
         if (aborted) return;
@@ -176,7 +176,7 @@ export const runsRoutes = new Hono()
         return apiStatusError(c, 403, "Forbidden");
       }
       const run = await getRun(c.req.param("runId"), userId, { cost: false });
-      if (!run || !await loadActorScopedWorkspace(run.workspaceId, actor)) {
+      if (!run || !await loadActorScopedProject(run.projectId, actor)) {
         return apiStatusError(c, 404, "Run not found");
       }
     }
@@ -195,7 +195,7 @@ export const runsRoutes = new Hono()
       return apiStatusError(c, 403, "Forbidden");
     }
     const run = await getRun(runId, actor.userId, { cost: false });
-    if (!run || !await loadActorScopedWorkspace(run.workspaceId, actor)) {
+    if (!run || !await loadActorScopedProject(run.projectId, actor)) {
       return apiStatusError(c, 404, "Run not found");
     }
     c.header("X-Accel-Buffering", "no");
@@ -207,7 +207,7 @@ export const runsRoutes = new Hono()
         snapshot: async () => {
           if (actor.type === "apiKey" && !await isApiKeyLive(actor.apiKey, ["ingest", "search", "artifacts"])) return null;
           const snapshot = await getRunProgress(runId, actor.userId, { recentEventLimit: 0, operator });
-          if (!snapshot || !await loadActorScopedWorkspace(snapshot.run.workspaceId, actor)) return null;
+          if (!snapshot || !await loadActorScopedProject(snapshot.run.projectId, actor)) return null;
           return snapshot;
         },
       });
@@ -224,7 +224,7 @@ export const runsRoutes = new Hono()
         return apiStatusError(c, 403, "Forbidden");
       }
       const run = await getRun(c.req.param("runId"), userId, { cost: false });
-      if (!run || !await loadActorScopedWorkspace(run.workspaceId, actor)) {
+      if (!run || !await loadActorScopedProject(run.projectId, actor)) {
         return apiStatusError(c, 404, "Run not found");
       }
     }
@@ -248,7 +248,7 @@ export const runsRoutes = new Hono()
     if (!apiKeyMayReadRuns(actor)) {
       return apiStatusError(c, 403, "Forbidden");
     }
-    if (!run || (actor.type === "apiKey" && !await loadActorScopedWorkspace(run.workspaceId, actor))) {
+    if (!run || (actor.type === "apiKey" && !await loadActorScopedProject(run.projectId, actor))) {
       return apiStatusError(c, 404, "Run not found");
     }
 
@@ -263,7 +263,7 @@ export const runsRoutes = new Hono()
       stream.onAbort(() => { aborted = true; resolveAbort(); });
       async function authorizedSnapshot() {
         const snapshot = await getRunProgress(runId, userId, { operator });
-        if (!snapshot || (actor.type === "apiKey" && !await loadActorScopedWorkspace(snapshot.run.workspaceId, actor))) return null;
+        if (!snapshot || (actor.type === "apiKey" && !await loadActorScopedProject(snapshot.run.projectId, actor))) return null;
         return snapshot;
       }
       const subscription = await listenForRunEvents(async (event) => {
@@ -300,11 +300,11 @@ export const runsRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
     try {
-      const workspace = await requireActorWorkspace(getRequestActor(c), body.workspace);
-      const preview = await getRunProcessingPreview({ ...body, workspaceId: workspace.id }, userId);
+      const project = await requireActorProject(getRequestActor(c), body.project);
+      const preview = await getRunProcessingPreview({ ...body, projectId: project.id }, userId);
       return c.json(preview);
     } catch (error) {
-      return workspaceErrorResponse(c, error);
+      return projectErrorResponse(c, error);
     }
   })
   .post("/:runId/reprocess/estimate", zValidator("json", reprocessRunSchema, validationHook), async (c) => {
@@ -316,7 +316,7 @@ export const runsRoutes = new Hono()
     // The same quote shape as POST /v1/estimate, from the run's measured documents (estimateRunReprocess checked access).
     const run = await getRun(c.req.param("runId"), userId, { cost: false });
     const quote = run?.orgId
-      ? await quoteStoredDocuments({ scope: { orgId: run.orgId, workspaceId: run.workspaceId, runId: run.id }, pipeline: run.pipeline, estimate })
+      ? await quoteStoredDocuments({ scope: { orgId: run.orgId, projectId: run.projectId, runId: run.id }, pipeline: run.pipeline, estimate })
       : null;
     return c.json({ estimate, quote, billing: billingState() });
   })
@@ -357,7 +357,7 @@ export const runsRoutes = new Hono()
     await appendAuditLog({
       orgId: run.orgId,
       userId,
-      workspaceId: run.workspaceId,
+      projectId: run.projectId,
       runId: run.id,
       apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null,
       action: "run.reprocessed",
@@ -392,7 +392,7 @@ export const runsRoutes = new Hono()
     await appendAuditLog({
       orgId: run.orgId,
       userId,
-      workspaceId: run.workspaceId,
+      projectId: run.projectId,
       runId: run.id,
       action: "run.retried",
       resourceType: "run",
@@ -426,7 +426,7 @@ export const runsRoutes = new Hono()
     await appendAuditLog({
       orgId: run.orgId,
       userId,
-      workspaceId: run.workspaceId,
+      projectId: run.projectId,
       runId: run.id,
       action: `run.control.${body.action}`,
       resourceType: "run",

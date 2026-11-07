@@ -7,7 +7,7 @@ export interface VideoPolicy {
   selectedFps: number; clipSeconds: number; visualTokens: number; maxCostCents: number;
 }
 // One policy for every organization: up to 2 hours at the frame density the video minute price assumes
-// (<= 12 frames/minute). A workspace or upload can only ask for less (`mediaVideo`), never more; credits, budgets and the
+// (<= 12 frames/minute). A project or upload can only ask for less (`mediaVideo`), never more; credits, budgets and the
 // per-document cost cap below bound spend.
 const preset = { duration: 7200, frames: 1440, images: 24, scanFps: 2, selectedFps: 2, interval: 5, minimum: 24, clipSeconds: 120, visualTokens: 16384, maxCostCents: 1000 };
 export function videoPolicy(duration: number, settings: VideoSettings = {}): VideoPolicy {

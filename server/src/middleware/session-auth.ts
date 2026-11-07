@@ -79,7 +79,7 @@ export const sessionAuth: MiddlewareHandler = async (c, next) => {
       ip: requestIp(c),
       });
     } catch (error) {
-      // A browser key on a website it doesn't allow, or a legacy one without workspaces: say how to fix it, never widen it.
+      // A browser key on a website it doesn't allow, or a legacy one without projects: say how to fix it, never widen it.
       if (!(error instanceof ApiKeyPolicyError)) throw error;
       return middlewareErrorResponse(c, 403, error.code, error.message);
     }

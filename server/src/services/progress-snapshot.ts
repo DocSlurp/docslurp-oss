@@ -3,13 +3,13 @@ import {
   inferExecutionStageOrder,
   getPipelineStageLabel,
   type RunStage,
-  type WorkspaceRun,
-  type WorkspaceRunLifecycleStatus,
-  type WorkspaceRunProgressModule,
-  type WorkspaceRunProgressSnapshot,
-  type WorkspaceRunProgressTone,
-  type WorkspaceRunStageState,
-  type WorkspaceRunTemporal,
+  type ProjectRun,
+  type ProjectRunLifecycleStatus,
+  type ProjectRunProgressModule,
+  type ProjectRunProgressSnapshot,
+  type ProjectRunProgressTone,
+  type ProjectRunStageState,
+  type ProjectRunTemporal,
 } from "@docslurp/shared";
 
 type StageAggregate = {
@@ -27,9 +27,9 @@ type StageAggregate = {
 export type ProgressSnapshotPageProgress = Record<string, Record<string, number>>;
 
 export type ProgressSnapshotInput = {
-  run: WorkspaceRun;
-  stages: WorkspaceRunStageState[];
-  temporal: WorkspaceRunTemporal | null;
+  run: ProjectRun;
+  stages: ProjectRunStageState[];
+  temporal: ProjectRunTemporal | null;
   pageProgress: ProgressSnapshotPageProgress;
   cpuUserMs: number;
   cpuSystemMs: number;
@@ -52,9 +52,9 @@ export type ProgressSnapshotInput = {
 };
 
 function lifecycleStatus(
-  run: WorkspaceRun,
-  temporal: WorkspaceRunTemporal | null,
-): WorkspaceRunLifecycleStatus {
+  run: ProjectRun,
+  temporal: ProjectRunTemporal | null,
+): ProjectRunLifecycleStatus {
   const temporalStatus = temporal?.workflowStatus ?? null;
   if (temporalStatus === "PAUSED") {
     return "paused";
@@ -80,7 +80,7 @@ function lifecycleStatus(
   return run.status === "blocked" ? "queued" : run.status;
 }
 
-function aggregateStageStates(stages: WorkspaceRunStageState[]): Map<RunStage, StageAggregate> {
+function aggregateStageStates(stages: ProjectRunStageState[]): Map<RunStage, StageAggregate> {
   const map = new Map<RunStage, StageAggregate>();
 
   for (const stage of stages) {
@@ -120,11 +120,11 @@ function aggregateStageStates(stages: WorkspaceRunStageState[]): Map<RunStage, S
 
 function stageTone(args: {
   stage: RunStage;
-  status: WorkspaceRunLifecycleStatus;
+  status: ProjectRunLifecycleStatus;
   currentStage: RunStage;
   expectedStages: RunStage[];
   aggregates: Map<RunStage, StageAggregate>;
-}): WorkspaceRunProgressTone {
+}): ProjectRunProgressTone {
   if (args.status === "completed") {
     return "completed";
   }
@@ -163,7 +163,7 @@ function stageTone(args: {
 }
 
 function sumStageMetric(
-  stages: WorkspaceRunStageState[],
+  stages: ProjectRunStageState[],
   stage: RunStage,
   key: string,
 ): number {
@@ -177,7 +177,7 @@ function sumStageMetric(
   }, 0);
 }
 
-export function buildProgressModule(args: ProgressSnapshotInput): WorkspaceRunProgressModule {
+export function buildProgressModule(args: ProgressSnapshotInput): ProjectRunProgressModule {
   const compiledPlan = compilePipelinePlan(args.run.pipeline);
   const aggregates = aggregateStageStates(args.stages);
   const status = lifecycleStatus(args.run, args.temporal);
@@ -198,7 +198,7 @@ export function buildProgressModule(args: ProgressSnapshotInput): WorkspaceRunPr
     }
   }
 
-  const tones = new Map<RunStage, WorkspaceRunProgressTone>();
+  const tones = new Map<RunStage, ProjectRunProgressTone>();
   for (const stage of expectedStages) {
     tones.set(
       stage,
@@ -277,7 +277,7 @@ export function buildProgressModule(args: ProgressSnapshotInput): WorkspaceRunPr
     .map((phase) => {
       const phaseStages = phase.stages;
       const completedPhaseStages = phaseStages.filter((stage) => tones.get(stage) === "completed").length;
-      const phaseStatus: WorkspaceRunProgressTone = phaseStages.some((stage) => tones.get(stage) === "failed")
+      const phaseStatus: ProjectRunProgressTone = phaseStages.some((stage) => tones.get(stage) === "failed")
         ? "failed"
         : completedPhaseStages === phaseStages.length
           ? "completed"
@@ -380,7 +380,7 @@ export function redactOperatorRun<R extends { stats?: unknown }>(run: R): R {
  * snapshot's stats, rollups and totals, and by key from the heartbeat events, stage stats and run stats it carries.
  * Returns a copy; the input is not mutated.
  */
-export function redactOperatorRunFields(snapshot: WorkspaceRunProgressSnapshot): WorkspaceRunProgressSnapshot {
+export function redactOperatorRunFields(snapshot: ProjectRunProgressSnapshot): ProjectRunProgressSnapshot {
   const progress = snapshot.progress && {
     ...snapshot.progress,
     stageRollups: snapshot.progress.stageRollups.map((rollup) => ({ ...rollup, cpuMs: 0, peakRssBytes: 0 })),

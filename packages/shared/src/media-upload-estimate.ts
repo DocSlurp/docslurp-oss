@@ -193,7 +193,7 @@ export const uploadMediaEstimateSchema = z.object({
   videoMinutes: z.number().nonnegative(),
   /** True when a file's duration was not supplied and was guessed from its size. */
   durationsAssumed: z.boolean(),
-  /** Whether the workspace reads sampled video frames (`mediaVideo.enabled`), which triples a video minute's price. */
+  /** Whether the project reads sampled video frames (`mediaVideo.enabled`), which triples a video minute's price. */
   videoFrames: z.boolean(),
   /** Credits for the media files: `low` reads video from its audio track only, `high` also reads frames. */
   credits: z.object({ low: z.number().nonnegative(), high: z.number().nonnegative() }),

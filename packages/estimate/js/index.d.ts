@@ -210,7 +210,7 @@ export function createEstimator(options?: { module?: WebAssembly.Module | Buffer
 /** `POST /v1/uploads/estimate`: the server's quote for profiled files (an estimate; never what an upload is charged). */
 export function requestQuote(args: {
   files: EstimateRequestFile[];
-  workspace?: string;
+  project?: string;
   speedBoost?: boolean;
   apiKey?: string;
   origin?: string | URL;

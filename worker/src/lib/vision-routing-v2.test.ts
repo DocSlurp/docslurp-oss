@@ -8,8 +8,8 @@ import {
   routingVersion,
 } from "./vision-routing-v2.js";
 
-const run = (workspaceId: string | undefined = "ws-a", stored?: string) => ({
-  run: { id: "run-1", workspaceId },
+const run = (projectId: string | undefined = "ws-a", stored?: string) => ({
+  run: { id: "run-1", projectId },
   artifactLedger: DocumentArtifactLedger.create(stored === undefined ? {} : { [VISION_ROUTING_VERSION_SLOT]: stored }),
 });
 

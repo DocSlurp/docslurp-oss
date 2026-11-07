@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { imageAnchorsToAltText, normalizePipelineFeatures } from "@docslurp/shared";
 
 import { fromEnv } from "../config.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { PageIndexStage } from "../stages/page-index.js";
 import { PropositionIndexStage } from "../stages/proposition-index.js";
@@ -33,9 +33,9 @@ function harness() {
     deleteKeys: async () => undefined,
   } as unknown as ArtifactStore;
   const state = WorkflowState.create({
-    id: "run", orgId: "org", userId: "user", workspaceId: "ws", spentCents: 0, stats: {}, artifacts: {},
+    id: "run", orgId: "org", userId: "user", projectId: "ws", spentCents: 0, stats: {}, artifacts: {},
     pipeline: normalizePipelineFeatures({ pageIndex: true, propositionIndex: true }),
-  } as unknown as WorkspaceRun, [document]);
+  } as unknown as ProjectRun, [document]);
   state.artifactLedger.recordDocument("doc", "markdown", "s3://bucket/extract/doc.md");
   const inserted: Array<{ pageNumber: number; text: string }> = [];
   const known: Record<string, unknown> = {

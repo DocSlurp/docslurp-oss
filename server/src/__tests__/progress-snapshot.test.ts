@@ -1,21 +1,21 @@
 import { describe, expect, it } from "vitest";
 import {
   defaultPipelineFeatures,
-  type WorkspaceRun,
-  type WorkspaceRunStageState,
-  type WorkspaceRunTemporal,
+  type ProjectRun,
+  type ProjectRunStageState,
+  type ProjectRunTemporal,
 } from "@docslurp/shared";
 
 import { buildProgressModule } from "../services/progress-snapshot.js";
 
-function run(overrides: Partial<WorkspaceRun> = {}): WorkspaceRun {
+function run(overrides: Partial<ProjectRun> = {}): ProjectRun {
   const now = new Date("2026-05-08T12:00:00.000Z").toISOString();
   return {
     id: "run-1",
     userId: "user-1",
     orgId: "org-1",
-    workspaceId: "workspace-1",
-    workspaceName: "Contracts",
+    projectId: "project-1",
+    projectName: "Contracts",
     failedDocuments: 0,
     kind: "bulk-upload",
     status: "processing",
@@ -41,8 +41,8 @@ function run(overrides: Partial<WorkspaceRun> = {}): WorkspaceRun {
 }
 
 function stageState(
-  overrides: Partial<WorkspaceRunStageState>,
-): WorkspaceRunStageState {
+  overrides: Partial<ProjectRunStageState>,
+): ProjectRunStageState {
   return {
     runId: "run-1",
     documentId: null,
@@ -59,7 +59,7 @@ function stageState(
   };
 }
 
-function temporal(overrides: Partial<WorkspaceRunTemporal> = {}): WorkspaceRunTemporal {
+function temporal(overrides: Partial<ProjectRunTemporal> = {}): ProjectRunTemporal {
   return {
     workflowId: "run-run-1",
     workflowRunId: "temporal-run-1",

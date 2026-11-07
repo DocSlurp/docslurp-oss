@@ -48,7 +48,7 @@ describe("estimateUploadMedia", () => {
     expect(estimate.lighter).toBeNull();
   });
 
-  it("offers nothing cheaper when the workspace already skips video frames", () => {
+  it("offers nothing cheaper when the project already skips video frames", () => {
     const estimate = estimateUploadMedia([{ name: "demo.mp4", size: 1, durationSeconds: 300 }], { videoFrames: false })!;
     expect(estimate.credits.low).toBe(estimate.credits.high);
     expect(estimate.lighter).toBeNull();

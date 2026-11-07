@@ -21,7 +21,7 @@ import {
 import { sql } from "../db.js";
 import { estimateWork, orgWorkerSlots, sumEstimates, type EstimateEnv } from "./config-change.js";
 import { getRun } from "./runs.js";
-import { listEditableWorkspaceIds } from "./organizations.js";
+import { listEditableProjectIds } from "./organizations.js";
 
 /** Estimates for work-creating routes other than config changes. Each is shared by the mutation and its `/estimate` twin. */
 
@@ -53,32 +53,32 @@ export async function estimateRunReprocess(args: {
 
 /**
  * Bulk document reprocess: every selected document re-runs its run's pipeline. Documents are grouped by
- * workspace and pipeline exactly like the mutation, and the group estimates are summed. `workspaceId`
- * restricts the selection (the workspace-scoped estimate route).
+ * project and pipeline exactly like the mutation, and the group estimates are summed. `projectId`
+ * restricts the selection (the project-scoped estimate route).
  */
 export async function estimateDocumentReprocess(args: {
   speedBoost?: boolean;
   documentIds: string[];
   userId: string;
-  workspaceId?: string;
+  projectId?: string;
   env?: EstimateEnv;
 }): Promise<CostEstimate | null> {
-  const workspaceIds = await listEditableWorkspaceIds(args.userId);
-  if (workspaceIds.length === 0 || args.documentIds.length === 0) return null;
-  const rows = await sql<{ workspace_id: string; org_id: string; page_count: number; indexing_mode: string | null; pipeline: PipelineFeatures | null }[]>`
-    select d.workspace_id, d.org_id, d.page_count, d.indexing_mode,
-      (select wr.pipeline from workspace_runs wr where wr.id = d.run_id) as pipeline
+  const projectIds = await listEditableProjectIds(args.userId);
+  if (projectIds.length === 0 || args.documentIds.length === 0) return null;
+  const rows = await sql<{ project_id: string; org_id: string; page_count: number; indexing_mode: string | null; pipeline: PipelineFeatures | null }[]>`
+    select d.project_id, d.org_id, d.page_count, d.indexing_mode,
+      (select wr.pipeline from project_runs wr where wr.id = d.run_id) as pipeline
     from documents d
-    where d.workspace_id = any(${sql.array(workspaceIds)}) and d.id = any(${sql.array(args.documentIds)})
-      ${args.workspaceId ? sql`and d.workspace_id = ${args.workspaceId}` : sql``}
+    where d.project_id = any(${sql.array(projectIds)}) and d.id = any(${sql.array(args.documentIds)})
+      ${args.projectId ? sql`and d.project_id = ${args.projectId}` : sql``}
   `;
   const groups = new Map<string, { orgId: string; features: PipelineFeatures; documents: number; pages: number }>();
   for (const row of rows) {
     // Same lenient read as the mutation: drop stored extractor settings the strict schemas now reject.
-    const base = sanitizeStoredPipeline((row.pipeline ?? {}) as PipelineFeatures, `a run in workspace ${row.workspace_id}`);
+    const base = sanitizeStoredPipeline((row.pipeline ?? {}) as PipelineFeatures, `a run in project ${row.project_id}`);
     base.speedBoost = args.speedBoost === true;
     const features = row.indexing_mode ? { ...base, indexingMode: effectiveIndexingMode(row.indexing_mode as PipelineFeatures["indexingMode"]) } : base;
-    const key = `${row.workspace_id}:${JSON.stringify(features)}`;
+    const key = `${row.project_id}:${JSON.stringify(features)}`;
     const group = groups.get(key) ?? { orgId: row.org_id, features, documents: 0, pages: 0 };
     group.documents += 1;
     group.pages += Math.max(0, row.page_count ?? 0);
@@ -99,37 +99,37 @@ export async function estimateDocumentReprocess(args: {
 }
 
 /**
- * `POST /v1/uploads/estimate`: ingesting new files with the target workspace's pipeline. Audio and video are priced
- * by duration (`media`, also included in `estimate.credits`); everything else by page. The workspace reduces to an
+ * `POST /v1/uploads/estimate`: ingesting new files with the target project's pipeline. Audio and video are priced
+ * by duration (`media`, also included in `estimate.credits`); everything else by page. The project reduces to an
  * EstimateProfile, which the response returns so offline estimators (`@docslurp/estimate`) price later batches the same way.
  */
 export async function estimateUpload(args: {
   speedBoost?: boolean;
   files: QuoteFile[];
-  workspace: { pipeline: PipelineFeatures; orgId: string };
+  project: { pipeline: PipelineFeatures; orgId: string };
   settings?: Partial<QuoteSettings>;
   env?: EstimateEnv;
 }): Promise<{ estimate: CostEstimate; media: UploadMediaEstimate | null; profile: EstimateProfile; quote: EstimateQuote }> {
-  const workerSlots = await orgWorkerSlots(args.workspace.orgId);
+  const workerSlots = await orgWorkerSlots(args.project.orgId);
   const env = args.env ?? process.env;
-  const profile = estimateProfileFor(args.workspace.pipeline, { workerSlots, env });
-  // The same quote function as the public estimate, from the workspace's settings; the explicit speed boost wins.
+  const profile = estimateProfileFor(args.project.pipeline, { workerSlots, env });
+  // The same quote function as the public estimate, from the project's settings; the explicit speed boost wins.
   const quote = quoteEstimate(
     { files: args.files.map((file) => ({ ...file, ...(file.type === null ? { type: undefined } : {}) })) as EstimateRequest["files"], settings: { ...args.settings, speedBoost: args.speedBoost === true } },
-    { base: quoteSettingsForPipeline(args.workspace.pipeline), workerSlots, env },
+    { base: quoteSettingsForPipeline(args.project.pipeline), workerSlots, env },
   );
   return { ...quoteUpload({ files: args.files, profile, speedBoost: args.speedBoost === true }), profile, quote };
 }
 
-/** The one workspace the (editable) documents belong to, or null when they span several or none are found. */
-export async function singleWorkspaceOf(documentIds: string[], userId: string): Promise<string | null> {
-  const workspaceIds = await listEditableWorkspaceIds(userId);
-  if (workspaceIds.length === 0 || documentIds.length === 0) return null;
-  const rows = await sql<{ workspace_id: string }[]>`
-    select distinct workspace_id from documents
-    where workspace_id = any(${sql.array(workspaceIds)}) and id = any(${sql.array(documentIds)})
+/** The one project the (editable) documents belong to, or null when they span several or none are found. */
+export async function singleProjectOf(documentIds: string[], userId: string): Promise<string | null> {
+  const projectIds = await listEditableProjectIds(userId);
+  if (projectIds.length === 0 || documentIds.length === 0) return null;
+  const rows = await sql<{ project_id: string }[]>`
+    select distinct project_id from documents
+    where project_id = any(${sql.array(projectIds)}) and id = any(${sql.array(documentIds)})
   `;
-  return rows.length === 1 ? rows[0]!.workspace_id : null;
+  return rows.length === 1 ? rows[0]!.project_id : null;
 }
 
 export { sumEstimates };

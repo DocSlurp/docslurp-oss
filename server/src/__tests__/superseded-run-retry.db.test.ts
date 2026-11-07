@@ -14,16 +14,16 @@ beforeAll(async () => {
   sql = postgres(db.url, { max: 1, prepare: false, onnotice: () => {} });
   await sql`insert into "user" (id, name, email) values ('u', 'Test', 'retired@example.test')`;
   await sql`insert into organizations (id, name, slug, created_by_user_id) values ('o', 'Test', 'retired', 'u')`;
-  await sql`insert into workspaces (id, org_id, user_id, name) values ('w', 'o', 'u', 'Test')`;
+  await sql`insert into projects (id, org_id, user_id, name) values ('w', 'o', 'u', 'Test')`;
 }, 120_000);
 afterAll(async () => { await sql?.end(); await stop?.(); });
 
 async function run(id: string, status: string) {
-  await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, creation_ready_at)
+  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, creation_ready_at)
     values (${id}, 'o', 'u', 'w', 'upload', ${status}, 'embed', '{}'::jsonb, now())`;
 }
 async function doc(id: string, runId: string, status: string, retired = false) {
-  await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, superseded_at)
+  await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, superseded_at)
     values (${id}, 'o', 'u', 'w', ${runId}, 'a.txt', 'text/plain', ${id}, ${status}, ${retired ? new Date() : null})`;
 }
 function lifecycle() {
@@ -69,14 +69,15 @@ describe("retired documents stay outside run retries", () => {
   it("repairs only superseded pending documents in terminal runs, retaining history and active work", async () => {
     await run('repair-terminal', 'failed');
     await run('repair-active', 'processing');
-    await sql`update workspace_runs set control_state = 'cancel_requested' where id = 'repair-active'`;
+    await sql`update project_runs set control_state = 'cancel_requested' where id = 'repair-active'`;
     await doc('repair-a-old-queued', 'repair-terminal', 'queued', true);
     await doc('repair-b-old-processing', 'repair-terminal', 'processing', true);
     await doc('repair-c-current', 'repair-terminal', 'queued');
     await doc('repair-d-old-completed', 'repair-terminal', 'completed', true);
     await doc('repair-e-active', 'repair-active', 'queued', true);
     const repair = readFileSync(new URL('../../db/migrations/0073_retire_superseded_pending_documents.sql', import.meta.url), 'utf8');
-    await sql.unsafe(repair);
+    // Replay the immutable historical repair against the post-cutover schema.
+    await sql.unsafe(repair.replaceAll("workspace_runs", "project_runs"));
     expect(await statuses('repair-terminal')).toEqual([
       { id: 'repair-a-old-queued', status: 'cancelled' }, { id: 'repair-b-old-processing', status: 'cancelled' },
       { id: 'repair-c-current', status: 'queued' }, { id: 'repair-d-old-completed', status: 'completed' },

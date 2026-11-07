@@ -1,71 +1,71 @@
 import { resolveGeoDocumentScope } from "./geo-scope.js";
 import {
-  defaultWorkspaceSearchSettings,
+  defaultProjectSearchSettings,
   normalizePipelineFeatures,
   normalizeStoredPipelineFeatures,
   privacyModeAllowsHosted,
   type PrivacyMode,
   type PipelineFeatures,
-  type WorkspaceSearchSettings,
+  type ProjectSearchSettings,
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
 import { resolveOpenRouterApiKey, SEARCH_OPENROUTER_MODEL } from "../lib/ai.js";
-import { hostedApiKeyForWorkspace, openRouterCall } from "../lib/privacy.js";
+import { hostedApiKeyForProject, openRouterCall } from "../lib/privacy.js";
 import { canSpend } from "../services/billing/spend-guard.js";
-import { getWorkspaceAccess } from "../services/organizations.js";
-import { currentRequestApiKeyWorkspaceIds } from "../lib/request-context.js";
-import { getWorkspaceSearchSettings, parseWorkspaceSearchSettingsRow, type SettingsRow } from "../services/search-controls.js";
+import { getProjectAccess } from "../services/organizations.js";
+import { currentRequestApiKeyProjectIds } from "../lib/request-context.js";
+import { getProjectSearchSettings, parseProjectSearchSettingsRow, type SettingsRow } from "../services/search-controls.js";
 import { loadCachedSearchAvailability, searchLanceDbNativeEnabled } from "./eligible-documents.js";
 import type { SearchOptions } from "../services/search.js";
 import { createSearchSessionJournal, searchSessionWriteBehindEnabled, type SearchSessionJournal } from "./session.js";
-import { resolveWorkspaceRetrievalControls } from "./workspace-retrieval-session.js";
+import { resolveProjectRetrievalControls } from "./project-retrieval-session.js";
 import { parseIndexConfigs, type IndexConfigMap } from "./index-serving.js";
 import { earlyLexicalDocument, fullyIndexedDocument, servableInProgressVersion } from "./eligibility.js";
 
 /**
- * The workspace does not exist or the caller may not see it (the two are indistinguishable by design).
- * The message stays "Workspace not found" for routes that still match it; new code tests `instanceof`.
+ * The project does not exist or the caller may not see it (the two are indistinguishable by design).
+ * The message stays "Project not found" for routes that still match it; new code tests `instanceof`.
  */
-export class WorkspaceNotFoundError extends Error {
+export class ProjectNotFoundError extends Error {
   readonly status = 404 as const;
-  constructor(message = "Workspace not found") {
+  constructor(message = "Project not found") {
     super(message);
-    this.name = "WorkspaceNotFoundError";
+    this.name = "ProjectNotFoundError";
   }
 }
 
-/** A retrieval scope spanning more than one workspace (HTTP 400). */
-export class CrossWorkspaceScopeError extends Error {
+/** A retrieval scope spanning more than one project (HTTP 400). */
+export class CrossProjectScopeError extends Error {
   constructor() {
-    super("Search scope must stay within a single workspace");
-    this.name = "CrossWorkspaceScopeError";
+    super("Search scope must stay within a single project");
+    this.name = "CrossProjectScopeError";
   }
 }
 
-export class MissingWorkspaceScopeError extends Error {
+export class MissingProjectScopeError extends Error {
   constructor() {
     super(
-      "Retrieval requires a workspaceId filter or a narrower run/document scope.",
+      "Retrieval requires a projectId filter or a narrower run/document scope.",
     );
-    this.name = "MissingWorkspaceScopeError";
+    this.name = "MissingProjectScopeError";
   }
 }
 
 export interface SearchSetup {
   session: SearchSessionJournal;
-  normalizedScope: SearchWorkspaceScope;
-  workspaceSettings: WorkspaceSearchSettings;
-  /** Undefined when privacyMode forbids hosted LLM strategies for this workspace. */
+  normalizedScope: SearchProjectScope;
+  projectSettings: ProjectSearchSettings;
+  /** Undefined when privacyMode forbids hosted LLM strategies for this project. */
   openRouterApiKey: string | undefined;
   rerankApiKey?: string;
   availabilityRow: SearchAvailabilityRow | undefined;
   resolvedOptions: SearchOptions;
-  workspacePipeline: PipelineFeatures;
+  projectPipeline: PipelineFeatures;
   /** Index configs live documents are built with (hash -> config); one entry or none means a single index. */
   indexConfigs: IndexConfigMap;
   privacyMode: PrivacyMode;
-  /** SEARCH_LANCEDB_NATIVE for this workspace: lexical, vector and hydration come from LanceDB. */
+  /** SEARCH_LANCEDB_NATIVE for this project: lexical, vector and hydration come from LanceDB. */
   lanceNative?: boolean;
 }
 
@@ -89,7 +89,7 @@ export type SearchAvailabilityRow = {
   stalled_runs?: number;
 };
 
-type WorkspacePipelineRow = {
+type ProjectPipelineRow = {
   pipeline: PipelineFeatures | null;
   index_configs?: unknown;
 };
@@ -98,29 +98,29 @@ export async function resolveSearchSetup(
   userId: string,
   options: SearchOptions,
 ): Promise<SearchSetup> {
-  const requestedWorkspaceId = options.filters?.workspaceId?.trim();
-  const lanceNative = searchLanceDbNativeEnabled(requestedWorkspaceId);
-  let normalizedScope: SearchWorkspaceScope;
-  let workspaceSettings: WorkspaceSearchSettings;
-  let workspaceIndexing: { pipeline: PipelineFeatures; indexConfigs: IndexConfigMap };
-  if (lanceNative && requestedWorkspaceId) {
+  const requestedProjectId = options.filters?.projectId?.trim();
+  const lanceNative = searchLanceDbNativeEnabled(requestedProjectId);
+  let normalizedScope: SearchProjectScope;
+  let projectSettings: ProjectSearchSettings;
+  let projectIndexing: { pipeline: PipelineFeatures; indexConfigs: IndexConfigMap };
+  if (lanceNative && requestedProjectId) {
     // Access, settings and pipeline in one round trip (never cached: they decide authorization and privacy).
-    ({ scope: normalizedScope, settings: workspaceSettings, indexing: workspaceIndexing } =
-      await loadSearchWorkspaceContext(requestedWorkspaceId, userId));
+    ({ scope: normalizedScope, settings: projectSettings, indexing: projectIndexing } =
+      await loadSearchProjectContext(requestedProjectId, userId));
   } else {
     normalizedScope = await normalizeSearchScope({ userId, options });
     // Independent lookups run together: each is a database round trip.
-    [workspaceSettings, workspaceIndexing] = await Promise.all([
-      getWorkspaceSearchSettings(normalizedScope.workspaceId, userId).catch(() => ({
-        ...defaultWorkspaceSearchSettings,
-        workspaceId: normalizedScope.workspaceId,
+    [projectSettings, projectIndexing] = await Promise.all([
+      getProjectSearchSettings(normalizedScope.projectId, userId).catch(() => ({
+        ...defaultProjectSearchSettings,
+        projectId: normalizedScope.projectId,
         userId,
       })),
-      loadWorkspaceIndexing(normalizedScope.workspaceId),
+      loadProjectIndexing(normalizedScope.projectId),
     ]);
   }
   if (options.filters?.geo) {
-    options = {...options, filters: await resolveGeoDocumentScope(normalizedScope, options.filters, workspaceIndexing.pipeline.outputSchema, options.runId),
+    options = {...options, filters: await resolveGeoDocumentScope(normalizedScope, options.filters, projectIndexing.pipeline.outputSchema, options.runId),
       summarySeed:false, enableCommunityExpansion:false};
   }
   const session = createSearchSessionJournal({
@@ -128,17 +128,17 @@ export async function resolveSearchSetup(
     scope: normalizedScope,
     writeBehind: searchSessionWriteBehindEnabled(lanceNative),
   });
-  const workspacePipeline = workspaceIndexing.pipeline;
-  const retrievalControls = resolveWorkspaceRetrievalControls({
+  const projectPipeline = projectIndexing.pipeline;
+  const retrievalControls = resolveProjectRetrievalControls({
     options,
-    workspaceId: normalizedScope.workspaceId,
-    settings: workspaceSettings,
-    pipeline: workspacePipeline,
+    projectId: normalizedScope.projectId,
+    settings: projectSettings,
+    pipeline: projectPipeline,
   });
   session.recordDiagnostic("retrievalControls", retrievalControls.diagnostics);
   const resolvedOptions = retrievalControls.options;
   const availabilityPromise = (lanceNative ? loadCachedSearchAvailability : loadSearchAvailability)({
-    workspaceId: normalizedScope.workspaceId,
+    projectId: normalizedScope.projectId,
     runId:
       resolvedOptions.runId?.trim() ||
       resolvedOptions.filters?.runId?.trim() ||
@@ -147,7 +147,7 @@ export async function resolveSearchSetup(
   // Settles with the spend check below; never left unhandled if that throws first.
   availabilityPromise.catch(() => undefined);
 
-  const privacyMode = workspacePipeline.privacyMode;
+  const privacyMode = projectPipeline.privacyMode;
   const wantsHostedStrategies = Boolean(
     resolvedOptions.useHyDE || resolvedOptions.queryRewrite || resolvedOptions.stepback ||
     resolvedOptions.selfQuery || resolvedOptions.useContextualCompression || resolvedOptions.iterativeMultiHop,
@@ -155,10 +155,10 @@ export async function resolveSearchSetup(
   // HyDE, rewrite, stepback, self-query, compression and multi-hop are optional
   // and skip without a key, so a privacy block withholds the key.
   const openRouterApiKey = wantsHostedStrategies
-    ? await hostedApiKeyForWorkspace({
+    ? await hostedApiKeyForProject({
         apiKey: resolveOpenRouterApiKey(),
         privacyMode,
-        workspaceId: normalizedScope.workspaceId,
+        projectId: normalizedScope.projectId,
         call: openRouterCall("api.search.strategies", SEARCH_OPENROUTER_MODEL),
       })
     : privacyModeAllowsHosted(privacyMode) ? resolveOpenRouterApiKey() : undefined;
@@ -166,9 +166,9 @@ export async function resolveSearchSetup(
     session.recordDiagnostic("privacyMode", { privacyMode, hostedStrategies: "blocked" });
   }
   const rerankApiKey = resolvedOptions.useRerank && resolvedOptions.rerankProvider === "deepinfra"
-    ? await hostedApiKeyForWorkspace({
+    ? await hostedApiKeyForProject({
         apiKey: process.env.DEEPINFRA_API_KEY,
-        privacyMode, workspaceId: normalizedScope.workspaceId,
+        privacyMode, projectId: normalizedScope.projectId,
         call: { provider: "deepinfra", model: "Qwen/Qwen3-Reranker-0.6B", operation: "api.search.rerank", target: "hosted" },
       })
     : undefined;
@@ -176,89 +176,89 @@ export async function resolveSearchSetup(
   // retrieval still runs, without model calls.
   const [availabilityRow, spendAllowed] = await Promise.all([
     availabilityPromise,
-    (openRouterApiKey || rerankApiKey) ? canSpend(normalizedScope.orgId, normalizedScope.workspaceId, { kind: "interactive", hold: false }) : true,
+    (openRouterApiKey || rerankApiKey) ? canSpend(normalizedScope.orgId, normalizedScope.projectId, { kind: "interactive", hold: false }) : true,
   ]);
   if (!spendAllowed) session.recordDiagnostic("aiStrategies", { disabled: "spend_blocked" });
 
   return {
     session,
     normalizedScope,
-    workspaceSettings,
+    projectSettings,
     openRouterApiKey: spendAllowed ? openRouterApiKey : undefined,
     rerankApiKey: spendAllowed ? rerankApiKey : undefined,
     availabilityRow,
     resolvedOptions,
-    workspacePipeline,
-    indexConfigs: workspaceIndexing.indexConfigs,
+    projectPipeline,
+    indexConfigs: projectIndexing.indexConfigs,
     privacyMode,
     lanceNative,
   };
 }
 
-type SearchWorkspaceContextRow = Partial<SettingsRow> & {
-  workspace_id: string;
+type SearchProjectContextRow = Partial<SettingsRow> & {
+  project_id: string;
   org_id: string;
   pipeline: PipelineFeatures | null;
   index_configs: unknown;
-  settings_workspace_id: string | null;
+  settings_project_id: string | null;
 };
 
 /**
- * getWorkspaceAccess + getWorkspaceSearchSettings + loadWorkspaceIndexing as
+ * getProjectAccess + getProjectSearchSettings + loadProjectIndexing as
  * one query, with the same access rule (G-06) and API-key allowlist.
  */
-export async function loadSearchWorkspaceContext(workspaceId: string, userId: string): Promise<{
-  scope: SearchWorkspaceScope;
-  settings: WorkspaceSearchSettings;
+export async function loadSearchProjectContext(projectId: string, userId: string): Promise<{
+  scope: SearchProjectScope;
+  settings: ProjectSearchSettings;
   indexing: { pipeline: PipelineFeatures; indexConfigs: IndexConfigMap };
 }> {
-  const [row] = await sql<SearchWorkspaceContextRow[]>`
-    select w.id as workspace_id, w.org_id, w.pipeline, w.index_configs,
-      s.workspace_id as settings_workspace_id, s.user_id, s.typo_tolerance, s.dedupe_by_filename, s.ranking_rules,
+  const [row] = await sql<SearchProjectContextRow[]>`
+    select w.id as project_id, w.org_id, w.pipeline, w.index_configs,
+      s.project_id as settings_project_id, s.user_id, s.typo_tolerance, s.dedupe_by_filename, s.ranking_rules,
       s.boosts, s.pinned_results, s.synonyms, s.compat_settings, s.rules, s.compat_metadata
-    from workspaces w
-    left join workspace_search_settings s on s.workspace_id = w.id
-    where w.id = ${workspaceId}
-      and docslurp_workspace_access(w.id, ${userId})
+    from projects w
+    left join project_search_settings s on s.project_id = w.id
+    where w.id = ${projectId}
+      and docslurp_project_access(w.id, ${userId})
     limit 1
   `;
-  const allowlist = currentRequestApiKeyWorkspaceIds();
-  if (!row || (allowlist && !allowlist.includes(row.workspace_id))) throw new WorkspaceNotFoundError();
-  let settings: WorkspaceSearchSettings;
+  const allowlist = currentRequestApiKeyProjectIds();
+  if (!row || (allowlist && !allowlist.includes(row.project_id))) throw new ProjectNotFoundError();
+  let settings: ProjectSearchSettings;
   try {
-    settings = parseWorkspaceSearchSettingsRow(row.settings_workspace_id ? row as SettingsRow : undefined, row.workspace_id, userId);
+    settings = parseProjectSearchSettingsRow(row.settings_project_id ? row as SettingsRow : undefined, row.project_id, userId);
   } catch {
-    settings = { ...defaultWorkspaceSearchSettings, workspaceId: row.workspace_id, userId };
+    settings = { ...defaultProjectSearchSettings, projectId: row.project_id, userId };
   }
   let indexing: { pipeline: PipelineFeatures; indexConfigs: IndexConfigMap };
   try {
-    indexing = { pipeline: normalizeStoredPipelineFeatures(row.pipeline ?? null, `workspace ${row.workspace_id}`), indexConfigs: parseIndexConfigs(row.index_configs) };
+    indexing = { pipeline: normalizeStoredPipelineFeatures(row.pipeline ?? null, `project ${row.project_id}`), indexConfigs: parseIndexConfigs(row.index_configs) };
   } catch {
-    // Fail closed, as loadWorkspaceIndexing does.
+    // Fail closed, as loadProjectIndexing does.
     indexing = { pipeline: { ...normalizePipelineFeatures(null), privacyMode: "local-only" }, indexConfigs: {} };
   }
-  return { scope: { workspaceId: row.workspace_id, orgId: row.org_id }, settings, indexing };
+  return { scope: { projectId: row.project_id, orgId: row.org_id }, settings, indexing };
 }
 
-export interface SearchWorkspaceScope {
-  workspaceId: string;
+export interface SearchProjectScope {
+  projectId: string;
   orgId: string;
 }
 
-async function resolveSearchWorkspaceScope(args: {
+async function resolveSearchProjectScope(args: {
   userId: string;
   runId?: string;
   filters?: SearchOptions["filters"];
-}): Promise<SearchWorkspaceScope> {
-  const requestedWorkspaceId = args.filters?.workspaceId?.trim();
-  const allowlist = currentRequestApiKeyWorkspaceIds();
+}): Promise<SearchProjectScope> {
+  const requestedProjectId = args.filters?.projectId?.trim();
+  const allowlist = currentRequestApiKeyProjectIds();
   const keyAllowlist = allowlist ? sql.array([...allowlist]) : null;
-  if (requestedWorkspaceId) {
-    const access = await getWorkspaceAccess(requestedWorkspaceId, args.userId);
+  if (requestedProjectId) {
+    const access = await getProjectAccess(requestedProjectId, args.userId);
     if (!access) {
-      throw new WorkspaceNotFoundError();
+      throw new ProjectNotFoundError();
     }
-    return { workspaceId: access.workspaceId, orgId: access.orgId };
+    return { projectId: access.projectId, orgId: access.orgId };
   }
 
   const documentIds = args.filters?.documentIds?.length
@@ -268,52 +268,52 @@ async function resolveSearchWorkspaceScope(args: {
       : [];
 
   if (documentIds.length > 0) {
-    const rows = await sql<{ workspace_id: string; org_id: string }[]>`
-      select distinct d.workspace_id, w.org_id
+    const rows = await sql<{ project_id: string; org_id: string }[]>`
+      select distinct d.project_id, w.org_id
       from documents d
-      join workspaces w on w.id = d.workspace_id
+      join projects w on w.id = d.project_id
       where d.id = any(${sql.array(documentIds)})
-        and docslurp_workspace_access(w.id, ${args.userId})
+        and docslurp_project_access(w.id, ${args.userId})
         and (${keyAllowlist}::text[] is null or w.id = any(${keyAllowlist}::text[]))
     `;
 
     if (rows.length === 0) {
-      throw new WorkspaceNotFoundError();
+      throw new ProjectNotFoundError();
     }
 
     if (rows.length > 1) {
-      throw new CrossWorkspaceScopeError();
+      throw new CrossProjectScopeError();
     }
 
-    return { workspaceId: rows[0]!.workspace_id, orgId: rows[0]!.org_id };
+    return { projectId: rows[0]!.project_id, orgId: rows[0]!.org_id };
   }
 
   if (args.runId) {
-    const [row] = await sql<{ workspace_id: string; org_id: string }[]>`
-      select runs.workspace_id, w.org_id
-      from workspace_runs runs
-      join workspaces w on w.id = runs.workspace_id
+    const [row] = await sql<{ project_id: string; org_id: string }[]>`
+      select runs.project_id, w.org_id
+      from project_runs runs
+      join projects w on w.id = runs.project_id
       where runs.id = ${args.runId}
-        and docslurp_workspace_access(w.id, ${args.userId})
+        and docslurp_project_access(w.id, ${args.userId})
         and (${keyAllowlist}::text[] is null or w.id = any(${keyAllowlist}::text[]))
       limit 1
     `;
 
     if (!row) {
-      throw new WorkspaceNotFoundError();
+      throw new ProjectNotFoundError();
     }
 
-    return { workspaceId: row.workspace_id, orgId: row.org_id };
+    return { projectId: row.project_id, orgId: row.org_id };
   }
 
-  throw new MissingWorkspaceScopeError();
+  throw new MissingProjectScopeError();
 }
 
 async function normalizeSearchScope(args: {
   userId: string;
   options: SearchOptions;
-}): Promise<SearchWorkspaceScope> {
-  return await resolveSearchWorkspaceScope({
+}): Promise<SearchProjectScope> {
+  return await resolveSearchProjectScope({
     userId: args.userId,
     runId:
       args.options.runId?.trim() ||
@@ -324,7 +324,7 @@ async function normalizeSearchScope(args: {
 }
 
 export async function loadSearchAvailability(args: {
-  workspaceId: string;
+  projectId: string;
   runId?: string;
 }): Promise<SearchAvailabilityRow | undefined> {
   // Coverage counts what search actually serves (search/eligibility.ts), not
@@ -339,12 +339,12 @@ export async function loadSearchAvailability(args: {
   const [row] = await sql<SearchAvailabilityRow[]>`
     with scoped_runs as (
       select id, status, lease_expires_at
-      from workspace_runs
-      where workspace_id = ${args.workspaceId}
+      from project_runs
+      where project_id = ${args.projectId}
         and (${args.runId ?? null}::text is null or id = ${args.runId ?? null})
     ),
     scoped_docs as (
-      select d.id, d.run_id, d.page_count, d.status, d.workspace_id, d.canonical_id, d.created_at, d.superseded_at,
+      select d.id, d.run_id, d.page_count, d.status, d.project_id, d.canonical_id, d.created_at, d.superseded_at,
         d.stored_page_count, d.chunk_count,
         ${fullyIndexedDocument("d")} as fully_indexed,
         ${earlyLexicalDocument("d")} as keyword_only
@@ -431,27 +431,27 @@ export async function loadSearchAvailability(args: {
   return row;
 }
 
-/** The workspace pipeline and its recorded index configs in one round trip. */
-export async function loadWorkspaceIndexing(
-  workspaceId: string,
+/** The project pipeline and its recorded index configs in one round trip. */
+export async function loadProjectIndexing(
+  projectId: string,
 ): Promise<{ pipeline: PipelineFeatures; indexConfigs: IndexConfigMap }> {
   try {
-    const [row] = await sql<WorkspacePipelineRow[]>`
+    const [row] = await sql<ProjectPipelineRow[]>`
       select pipeline, index_configs
-      from workspaces
-      where id = ${workspaceId}
+      from projects
+      where id = ${projectId}
       limit 1
     `;
-    return { pipeline: normalizeStoredPipelineFeatures(row?.pipeline ?? null, `workspace ${workspaceId}`), indexConfigs: parseIndexConfigs(row?.index_configs) };
+    return { pipeline: normalizeStoredPipelineFeatures(row?.pipeline ?? null, `project ${projectId}`), indexConfigs: parseIndexConfigs(row?.index_configs) };
   } catch {
     // Fail closed: an unreadable or invalid pipeline must not fall back to the
-    // standard (hosted-allowed) default and leak a private workspace's queries.
+    // standard (hosted-allowed) default and leak a private project's queries.
     return { pipeline: { ...normalizePipelineFeatures(null), privacyMode: "local-only" }, indexConfigs: {} };
   }
 }
 
-export async function loadWorkspacePipeline(
-  workspaceId: string,
+export async function loadProjectPipeline(
+  projectId: string,
 ): Promise<PipelineFeatures> {
-  return (await loadWorkspaceIndexing(workspaceId)).pipeline;
+  return (await loadProjectIndexing(projectId)).pipeline;
 }

@@ -3,7 +3,7 @@ import { friendlyErrorMessage, PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 import { reportPublicError } from "../lib/public-errors.js";
 import { randomUUID, createHmac } from "node:crypto";
 
-import { workspaceAllowsWebhookEvent } from "@docslurp/shared";
+import { projectAllowsWebhookEvent } from "@docslurp/shared";
 
 import { apiPool, sql } from "../db.js";
 import { assertSafeExternalUrl, safeExternalFetch } from "../lib/network-security.js";
@@ -509,30 +509,30 @@ export async function drainWebhookOutbox(limit = 25): Promise<number> {
       `;
     };
     // Webhooks belong to an organization, not to the user who started the run (the outbox row's user_id is attribution
-    // only and never routes). The event's run decides the organization; its payload must name that run's own workspace,
+    // only and never routes). The event's run decides the organization; its payload must name that run's own project,
     // and an event that names no run has no tenant and is never delivered.
     const runId = typeof event.payload?.runId === "string" ? event.payload.runId : null;
     if (!runId) {
       await skip("Skipped: event has no run, so no organization to deliver it to");
       continue;
     }
-    const [run] = await sql<{ org_id: string | null; workspace_id: string; workspace_org_id: string | null; pipeline: Record<string, unknown> | null }[]>`
-      select r.org_id, r.workspace_id, ws.org_id as workspace_org_id, ws.pipeline
-      from workspace_runs r
-      join workspaces ws on ws.id = r.workspace_id
+    const [run] = await sql<{ org_id: string | null; project_id: string; project_org_id: string | null; pipeline: Record<string, unknown> | null }[]>`
+      select r.org_id, r.project_id, ws.org_id as project_org_id, ws.pipeline
+      from project_runs r
+      join projects ws on ws.id = r.project_id
       where r.id = ${runId}
     `;
     if (!run || !run.org_id) {
       await skip("Skipped: the event's run no longer exists or has no organization");
       continue;
     }
-    if (event.payload?.workspaceId !== run.workspace_id || run.workspace_org_id !== run.org_id) {
-      await skip("Skipped: the event's workspace does not match its run");
+    if (event.payload?.projectId !== run.project_id || run.project_org_id !== run.org_id) {
+      await skip("Skipped: the event's project does not match its run");
       continue;
     }
-    // Workspaces can switch off (or narrow) the webhook events they emit.
-    if (!workspaceAllowsWebhookEvent(run.pipeline as Parameters<typeof workspaceAllowsWebhookEvent>[0], event.event_type)) {
-      await skip("Skipped: webhook notifications are off for this workspace");
+    // Projects can switch off (or narrow) the webhook events they emit.
+    if (!projectAllowsWebhookEvent(run.pipeline as Parameters<typeof projectAllowsWebhookEvent>[0], event.event_type)) {
+      await skip("Skipped: webhook notifications are off for this project");
       continue;
     }
     const webhooks = await sql<(WebhookRow & { can_deliver: boolean })[]>`

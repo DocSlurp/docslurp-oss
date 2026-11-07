@@ -9,7 +9,7 @@ import { maxOrgsPerUser, warnOrgLimitAboveOneWithUniqueIndex } from "../services
  * creating a second organization answers 409 user_already_in_org unless the user's current organization is an empty personal
  * one, which is then replaced; leaving gives the user their personal organization back; a user moved out loses access at once.
  */
-vi.mock("../services/notifications.js", () => ({ sendWorkspaceInviteEmail: vi.fn(async () => null), sendOrganizationInviteEmail: vi.fn(async () => null) }));
+vi.mock("../services/notifications.js", () => ({ sendProjectInviteEmail: vi.fn(async () => null), sendOrganizationInviteEmail: vi.fn(async () => null) }));
 
 let sql: postgres.Sql;
 let stop: () => Promise<void>;
@@ -81,19 +81,19 @@ describe("one organization per user", () => {
     const orgId = await team(owner);
     const personal = await orgs.resolveDefaultOrganization(invitee);
     expect(personal.isPersonal).toBe(true);
-    const [defaultWorkspace] = await sql<{ id: string }[]>`select id from workspaces where org_id = ${personal.id} and is_default`;
-    expect(defaultWorkspace).toBeDefined();
+    const [defaultProject] = await sql<{ id: string }[]>`select id from projects where org_id = ${personal.id} and is_default`;
+    expect(defaultProject).toBeDefined();
     await orgs.acceptOrganizationInvite(await invite(orgId, owner, invitee), invitee);
     expect(await membershipsOf(invitee)).toEqual([{ org_id: orgId, role: "member" }]);
     expect(await sql`select id from organizations where id = ${personal.id}`).toEqual([]);
-    // Its default workspace goes with it: workspaces.org_id has no foreign key, so nothing else would remove it.
-    expect(await sql`select id from workspaces where org_id = ${personal.id}`).toEqual([]);
+    // Its default project goes with it: projects.org_id has no foreign key, so nothing else would remove it.
+    expect(await sql`select id from projects where org_id = ${personal.id}`).toEqual([]);
   });
 
   it.each([
-    ["a chat session in its default workspace", async (orgId: string, userId: string) => {
-      const [ws] = await sql<{ id: string }[]>`select id from workspaces where org_id = ${orgId} and is_default`;
-      await sql`insert into chat_sessions (id, workspace_id, user_id) values (${`chat-${userId}`}, ${ws!.id}, ${userId})`;
+    ["a chat session in its default project", async (orgId: string, userId: string) => {
+      const [ws] = await sql<{ id: string }[]>`select id from projects where org_id = ${orgId} and is_default`;
+      await sql`insert into chat_sessions (id, project_id, user_id) values (${`chat-${userId}`}, ${ws!.id}, ${userId})`;
     }],
     ["a pending upload session", async (orgId: string, userId: string) => {
       await sql`insert into upload_sessions (id, user_id, org_id, status) values (${`up-${userId}`}, ${userId}, ${orgId}, 'pending')`;
@@ -114,7 +114,7 @@ describe("one organization per user", () => {
     const token = await invite(orgId, owner, invitee);
     await expect(orgs.acceptOrganizationInvite(token, invitee)).rejects.toMatchObject({ status: 409, code: "user_already_in_org" });
     expect(await membershipsOf(invitee)).toEqual([{ org_id: personal.id, role: "owner" }]);
-    expect(await sql`select id from workspaces where org_id = ${personal.id} and is_default`).toHaveLength(1);
+    expect(await sql`select id from projects where org_id = ${personal.id} and is_default`).toHaveLength(1);
   });
 
   it("answers 409 user_already_in_org when the current organization has data, and changes nothing", async () => {
@@ -147,33 +147,33 @@ describe("one organization per user", () => {
     expect(await membershipsOf(someone)).toEqual([{ org_id: first.id, role: "owner" }]);
   });
 
-  it("answers 409 for a workspace invite that would add a second organization", async () => {
+  it("answers 409 for a project invite that would add a second organization", async () => {
     const ownerA = await user("owner-a");
     const ownerB = await user("owner-b");
     const orgA = await team(ownerA);
     await team(ownerB);
-    const [workspace] = await sql<{ id: string }[]>`select id from workspaces where org_id = ${orgA} and is_default`;
-    await orgs.inviteWorkspaceMember(workspace!.id, { userId: ownerA, email: `${ownerB}@example.test`, role: "viewer", expiresInDays: 7 });
-    const [{ token }] = await sql<{ token: string }[]>`select token from workspace_invites where workspace_id = ${workspace!.id}`;
-    await expect(orgs.acceptWorkspaceInvite(token!, ownerB)).rejects.toMatchObject({ status: 409, code: "user_already_in_org" });
-    expect(await sql`select 1 from workspace_members where workspace_id = ${workspace!.id} and user_id = ${ownerB}`).toEqual([]);
+    const [project] = await sql<{ id: string }[]>`select id from projects where org_id = ${orgA} and is_default`;
+    await orgs.inviteProjectMember(project!.id, { userId: ownerA, email: `${ownerB}@example.test`, role: "viewer", expiresInDays: 7 });
+    const [{ token }] = await sql<{ token: string }[]>`select token from project_invites where project_id = ${project!.id}`;
+    await expect(orgs.acceptProjectInvite(token!, ownerB)).rejects.toMatchObject({ status: 409, code: "user_already_in_org" });
+    expect(await sql`select 1 from project_members where project_id = ${project!.id} and user_id = ${ownerB}`).toEqual([]);
   });
 
-  it("answers 409 when a workspace invite's join passes the check but loses the race to the one-organization index", async () => {
+  it("answers 409 when a project invite's join passes the check but loses the race to the one-organization index", async () => {
     // A concurrent join that commits between the check and the insert leaves exactly this state: the check passed, the
     // index refuses. A limit of 2 lets the check pass while the index (still present) refuses the second membership.
     const ownerA = await user("owner-a");
     const ownerB = await user("owner-b");
     const orgA = await team(ownerA);
     const orgB = await team(ownerB);
-    const [workspace] = await sql<{ id: string }[]>`select id from workspaces where org_id = ${orgA} and is_default`;
-    await orgs.inviteWorkspaceMember(workspace!.id, { userId: ownerA, email: `${ownerB}@example.test`, role: "viewer", expiresInDays: 7 });
-    const [{ token }] = await sql<{ token: string }[]>`select token from workspace_invites where workspace_id = ${workspace!.id}`;
+    const [project] = await sql<{ id: string }[]>`select id from projects where org_id = ${orgA} and is_default`;
+    await orgs.inviteProjectMember(project!.id, { userId: ownerA, email: `${ownerB}@example.test`, role: "viewer", expiresInDays: 7 });
+    const [{ token }] = await sql<{ token: string }[]>`select token from project_invites where project_id = ${project!.id}`;
     vi.stubEnv("DOCSLURP_MAX_ORGS_PER_USER", "2");
-    await expect(orgs.acceptWorkspaceInvite(token!, ownerB)).rejects.toMatchObject({ status: 409, code: "user_already_in_org" });
+    await expect(orgs.acceptProjectInvite(token!, ownerB)).rejects.toMatchObject({ status: 409, code: "user_already_in_org" });
     expect(await membershipsOf(ownerB)).toEqual([{ org_id: orgB, role: "owner" }]);
-    expect(await sql`select 1 from workspace_members where workspace_id = ${workspace!.id} and user_id = ${ownerB}`).toEqual([]);
-    expect(await sql`select status from workspace_invites where workspace_id = ${workspace!.id}`).toEqual([{ status: "pending" }]);
+    expect(await sql`select 1 from project_members where project_id = ${project!.id} and user_id = ${ownerB}`).toEqual([]);
+    expect(await sql`select status from project_invites where project_id = ${project!.id}`).toEqual([{ status: "pending" }]);
   });
 
   it("gives a member who leaves exactly one organization again: their personal one", async () => {
@@ -195,12 +195,12 @@ describe("one organization per user", () => {
     const removed = await user("removed");
     const orgId = await team(owner);
     await orgs.acceptOrganizationInvite(await invite(orgId, owner, removed), removed);
-    const [workspace] = await sql<{ id: string }[]>`select id from workspaces where org_id = ${orgId} and is_default`;
+    const [project] = await sql<{ id: string }[]>`select id from projects where org_id = ${orgId} and is_default`;
     await sql`update org_memberships set role = 'admin' where org_id = ${orgId} and user_id = ${removed}`;
     await sql`insert into api_keys (id, user_id, org_id, key_hash, name) values (${`k-${removed}`}, ${removed}, ${orgId}, ${`h-${removed}`}, 'n')`;
-    expect(await orgs.getWorkspaceAccess(workspace!.id, removed)).not.toBeNull();
+    expect(await orgs.getProjectAccess(project!.id, removed)).not.toBeNull();
     await orgs.removeOrganizationMember({ orgId, userId: owner, memberUserId: removed });
-    expect(await orgs.getWorkspaceAccess(workspace!.id, removed)).toBeNull();
+    expect(await orgs.getProjectAccess(project!.id, removed)).toBeNull();
     expect(await orgs.getOrganization(orgId, removed)).toBeNull();
     expect(await sql`select revoked_at is not null as revoked from api_keys where id = ${`k-${removed}`}`).toEqual([{ revoked: true }]);
     // The org's data stays the org's: the removed user's new organization is a fresh personal one with none of it.

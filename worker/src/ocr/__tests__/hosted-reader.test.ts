@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Config } from "../../config.js";
 import { priceVisionResult } from "../../lib/guarded-vision-call.js";
 import { MemoryVisionAttemptBackend, type VisionRequestGate } from "../../lib/vision-attempt-guard.js";
-import type { WorkspaceRun } from "../../models.js";
+import type { ProjectRun } from "../../models.js";
 import { WorkflowState } from "../../pipeline/pipeline.js";
 import { pngHeader } from "../../test/fake-ocr.js";
 import type { CommandRunner } from "../../tools/runner.js";
@@ -22,10 +22,10 @@ const ROUTE = { runtime: "openai-compatible", baseUrl: "https://api.deepinfra.co
 
 function runState(pipeline: Record<string, unknown> = {}, run: Record<string, unknown> = {}): WorkflowState {
   const state = WorkflowState.create({
-    id: "run-1", orgId: "org-1", workspaceId: "ws-1", userId: "user-1", artifacts: {}, stats: {}, stage: "extract-markdown", spentCents: 0,
+    id: "run-1", orgId: "org-1", projectId: "ws-1", userId: "user-1", artifacts: {}, stats: {}, stage: "extract-markdown", spentCents: 0,
     pipeline: { vision: { target: "remote", modelUri: "llm://openrouter/google/gemini-3.1-flash-lite", maxPagesPerDocument: 1_000 }, privacyMode: "standard", visionFallback: true, ...pipeline },
     ...run,
-  } as unknown as WorkspaceRun, []);
+  } as unknown as ProjectRun, []);
   state.visionAttempts = new MemoryVisionAttemptBackend();
   state.usageLedger.runId = "run-1";
   return state;

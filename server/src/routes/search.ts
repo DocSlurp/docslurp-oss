@@ -5,30 +5,30 @@ import { reportPublicError } from "../lib/public-errors.js";
 import { chatSessionForRequest, CHAT_SESSION_TOKEN_HEADER } from "../lib/chat-session-tokens.js";
 import { apiErrorResponse, nativeApiErrors, withApiErrorDetails } from "../lib/api-error.js";
 import { Hono, type Context } from "hono";
-import { batchSearchInputSchema, searchFormError, searchInputSchema, searchOptions, workspaceChatInputSchema, type SearchInput } from "../lib/search-input.js";
+import { batchSearchInputSchema, searchFormError, searchInputSchema, searchOptions, projectChatInputSchema, type SearchInput } from "../lib/search-input.js";
 import { streamSSE } from "hono/streaming";
 import { assertCanSpend } from "../services/billing/spend-guard.js";
 import { enforceActorCategoryRateLimit } from "../middleware/rate-limit.js";
 import { acquireChatSlot } from "../middleware/chat-concurrency.js";
 
-import { aggregateWorkspaceRagSearchRequestSchema, deferredProfilesEnabled, type ApiErrorCode } from "@docslurp/shared";
+import { aggregateProjectRagSearchRequestSchema, deferredProfilesEnabled, type ApiErrorCode } from "@docslurp/shared";
 
 import {
   actorHasAnyApiKeyScope,
-  assertApiKeyWorkspaceAccess,
+  assertApiKeyProjectAccess,
   getRequestActor,
-  resolveActorWorkspaceId,
+  resolveActorProjectId,
 } from "../lib/request-actor.js";
 import { withDeferredContext, type DeferredRequestContext, type MaterializeEvent } from "../search/deferred/deferred-context.js";
 import { defaultMaterializeDeps, pageKey } from "../search/deferred/materialize-client.js";
-import { loadWorkspacePipeline } from "../search/session-setup.js";
+import { loadProjectPipeline } from "../search/session-setup.js";
 import { resolveMaterializationPolicy } from "../services/materialization-policy.js";
-import { aggregateWorkspaceRagSearch } from "../services/aggregate-rag.js";
+import { aggregateProjectRagSearch } from "../services/aggregate-rag.js";
 import { resolveDefaultOrganization } from "../services/organizations.js";
-import { WorkspaceAccessError } from "../services/default-workspace.js";
-import { CrossWorkspaceScopeError, hybridSearch, MissingWorkspaceScopeError, WorkspaceNotFoundError } from "../services/search.js";
+import { ProjectAccessError } from "../services/default-project.js";
+import { CrossProjectScopeError, hybridSearch, MissingProjectScopeError, ProjectNotFoundError } from "../services/search.js";
 import { prefetchBatchQueryEmbeddings } from "../search/batch-embeddings.js";
-import { chatWorkspace, workspaceChatDisabledBody } from "../services/workspace-chat.js";
+import { chatProject, projectChatDisabledBody } from "../services/project-chat.js";
 import { beginChatTurn, chatTurnFailureReason, type ChatTurn, type ChatTurnUsage } from "../services/billing/chat-turn-billing.js";
 import { parseFilters } from "../search/filters.js";
 import { InvalidRetrievalQueryError, parseRetrievalQueryFlags } from "../lib/retrieval-query-flags.js";
@@ -53,7 +53,7 @@ function modelNotAllowed(c: Context): Response {
  * Runs each validated query, preserving input order and per-item errors.
  * The batch is one admission group (at most SEARCH_MAX_SLOTS_PER_TURN
  * concurrent searches, search/search-limiter.ts), and its query embeddings
- * are fetched with one provider request per workspace before the searches
+ * are fetched with one provider request per project before the searches
  * start (search/batch-embeddings.ts).
  */
 async function runSearchBatch(c: Context, parsed: { queries: SearchInput[]; concurrency: number }, userId: string): Promise<BatchResult[]> {
@@ -65,12 +65,12 @@ async function runSearchBatch(c: Context, parsed: { queries: SearchInput[]; conc
   // Scope and API-key checks first, so embeddings are only prefetched for queries that will run.
   const inputs = await Promise.all(queries.map(async (query, index) => {
     try {
-      const input = { ...query, workspaceId: await resolveActorWorkspaceId(getRequestActor(c), query.workspace, query.orgId) };
-      const forbidden = await assertApiKeyWorkspaceAccess(c, input.workspaceId, "search");
+      const input = { ...query, projectId: await resolveActorProjectId(getRequestActor(c), query.project, query.orgId) };
+      const forbidden = await assertApiKeyProjectAccess(c, input.projectId, "search");
       if (forbidden) {
         results[index] = { ok: false, error: {
-          code: forbidden.status === 403 ? "FORBIDDEN" : "WORKSPACE_NOT_FOUND",
-          message: forbidden.status === 403 ? "Forbidden" : "Workspace not found", status: forbidden.status } };
+          code: forbidden.status === 403 ? "FORBIDDEN" : "PROJECT_NOT_FOUND",
+          message: forbidden.status === 403 ? "Forbidden" : "Project not found", status: forbidden.status } };
         return null;
       }
       return input;
@@ -80,9 +80,9 @@ async function runSearchBatch(c: Context, parsed: { queries: SearchInput[]; conc
     }
   }));
   if (!signal.aborted) {
-    await prefetchBatchQueryEmbeddings(inputs.flatMap((input) => input ? [{ query: input.q.replaceAll("\u0000", ""), workspaceId: input.workspaceId, options: searchOptions(input) }] : []), userId, signal);
+    await prefetchBatchQueryEmbeddings(inputs.flatMap((input) => input ? [{ query: input.q.replaceAll("\u0000", ""), projectId: input.projectId, options: searchOptions(input) }] : []), userId, signal);
   }
-  // One access and privacy lookup per workspace for the whole batch, never reused by another request.
+  // One access and privacy lookup per project for the whole batch, never reused by another request.
   const memo = createCacheScopeMemo();
   let next = 0;
   async function worker() {
@@ -91,7 +91,7 @@ async function runSearchBatch(c: Context, parsed: { queries: SearchInput[]; conc
       const input = inputs[index];
       if (!input) continue;
       try {
-        const deferred = await deferredRequestContext(c, input.workspaceId);
+        const deferred = await deferredRequestContext(c, input.projectId);
         if ("response" in deferred) {
           const status = deferred.response.status;
           results[index] = { ok: false, error: { code: status === 401 ? "UNAUTHORIZED" : "FORBIDDEN", message: "Search capability rejected", status } };
@@ -115,20 +115,20 @@ function clampSearchLimit(value: number | undefined): number | undefined {
   return Math.max(1, Math.min(100, Math.floor(value)));
 }
 
-/** API-key scope and workspace checks, answered in the native error envelope. Answers need `chat`; passages need `search`. */
-async function denyWorkspaceAccess(c: Context, workspaceId: string, scope: "search" | "chat" = "search"): Promise<Response | null> {
-  const denied = await assertApiKeyWorkspaceAccess(c, workspaceId, scope);
+/** API-key scope and project checks, answered in the native error envelope. Answers need `chat`; passages need `search`. */
+async function denyProjectAccess(c: Context, projectId: string, scope: "search" | "chat" = "search"): Promise<Response | null> {
+  const denied = await assertApiKeyProjectAccess(c, projectId, scope);
   if (!denied) return null;
   return denied.status === 403
     ? apiErrorResponse(c, 403, "forbidden", "Forbidden")
-    : apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+    : apiErrorResponse(c, 404, "project_not_found", "Project not found");
 }
 
 const CAPABILITY_ERRORS = {
   capability_invalid: { status: 401, message: "Search capability is invalid" },
   capability_expired: { status: 401, message: "Search capability has expired" },
   capability_origin: { status: 403, message: "Search capability is not valid for this origin" },
-  capability_scope: { status: 403, message: "Search capability does not cover this workspace" },
+  capability_scope: { status: 403, message: "Search capability does not cover this project" },
 } as const;
 
 /**
@@ -139,7 +139,7 @@ const CAPABILITY_ERRORS = {
  */
 async function deferredRequestContext(
   c: Context,
-  workspaceId: string,
+  projectId: string,
   onEvent?: (event: MaterializeEvent) => void,
 ): Promise<{ context: DeferredRequestContext } | { response: Response }> {
   const actor = getRequestActor(c);
@@ -147,11 +147,11 @@ async function deferredRequestContext(
   const capability = c.req.header("X-DocSlurp-Capability")?.trim();
   if (deferredProfilesEnabled() && capability) {
     const resolved = await resolveMaterializationPolicy({
-      workspacePipeline: await loadWorkspacePipeline(workspaceId),
+      projectPipeline: await loadProjectPipeline(projectId),
       apiKey: context.apiKey ?? null,
       capabilityHeader: capability,
       origin: c.req.header("Origin") ?? null,
-      workspaceId,
+      projectId,
     });
     if ("error" in resolved) {
       const { status, message } = CAPABILITY_ERRORS[resolved.error];
@@ -180,35 +180,35 @@ function sameOriginBrowserRequest(c: Context): boolean {
 }
 
 /** `grounded` is the nested MCP tool target: retrieval-only, never another agent or a settings change. */
-async function handleWorkspaceChat(c: Context, mode: "public" | "grounded") {
+async function handleProjectChat(c: Context, mode: "public" | "grounded") {
   if (mode === "public" && process.env.DOCSLURP_DURABLE_CHAT === "1" && getRequestActor(c).type === "session") {
     return durableChatLaunchHandler(c);
   }
   // Lets clients join a turn to its trace (the trace id is the second field).
   const traceparent = activeTraceparent();
   if (traceparent) c.header("traceparent", traceparent);
-  const parsed = workspaceChatInputSchema.safeParse(await c.req.json().catch(() => null));
+  const parsed = projectChatInputSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid chat input", { issues: parsed.error.issues });
   const body = parsed.data;
   const userId = c.get("sessionUser")?.id;
   if (!userId) return apiErrorResponse(c, 401, "unauthorized", "Missing session");
-  const workspaceId = await resolveActorWorkspaceId(getRequestActor(c), body.workspace, body.orgId);
-  const forbidden = await denyWorkspaceAccess(c, workspaceId, "chat");
+  const projectId = await resolveActorProjectId(getRequestActor(c), body.project, body.orgId);
+  const forbidden = await denyProjectAccess(c, projectId, "chat");
   if (forbidden) return forbidden;
-  const chatDisabled = await workspaceChatDisabledBody(workspaceId, userId);
+  const chatDisabled = await projectChatDisabledBody(projectId, userId);
   if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
   // Before the turn starts: a browser key continues a session only with its grant
   // (no grant: a fresh session; a bad grant: 403).
-  const sessionId = chatSessionForRequest(getRequestActor(c), { workspaceId, sessionId: body.sessionId, sessionToken: body.sessionToken });
-  const deferred = await deferredRequestContext(c, workspaceId);
+  const sessionId = chatSessionForRequest(getRequestActor(c), { projectId, sessionId: body.sessionId, sessionToken: body.sessionToken });
+  const deferred = await deferredRequestContext(c, projectId);
   if ("response" in deferred) return deferred.response;
   // This route knows whether the answer reached the client, so it owns the
   // chat turn's bill. A nested grounded call joins the agent's turn instead.
   const turn = beginChatTurn({ speedBoost: parsed.data.speedBoost });
   const signal = c.req.raw.signal;
-  let response: Awaited<ReturnType<typeof chatWorkspace>>;
+  let response: Awaited<ReturnType<typeof chatProject>>;
   try {
-    response = await turn.run(() => withDeferredContext(deferred.context, () => chatWorkspace({ workspaceId, userId,
+    response = await turn.run(() => withDeferredContext(deferred.context, () => chatProject({ projectId, userId,
       query: body.q, sessionId, sessionToken: body.sessionToken, model: body.model, speedBoost: body.speedBoost,
       actor: getRequestActor(c), signal,
       ...(mode === "grounded"
@@ -242,17 +242,17 @@ async function failChatTurn(turn: ChatTurn, reason: string): Promise<ChatTurnUsa
   }
 }
 
-const workspaceChatHandler = (c: Context) => handleWorkspaceChat(c, "public");
+const projectChatHandler = (c: Context) => handleProjectChat(c, "public");
 
-export const workspaceChatRoutes = new Hono()
+export const projectChatRoutes = new Hono()
   .route("/operations", chatOperationRoutes)
   .use("*", nativeApiErrors)
-  .post("/", workspaceChatHandler)
-  .get("/stream", workspaceChatStreamHandler)
+  .post("/", projectChatHandler)
+  .get("/stream", projectChatStreamHandler)
   // The question travels in the body, not the URL, where proxies, logs and history keep it.
-  .post("/stream", workspaceChatStreamHandler);
+  .post("/stream", projectChatStreamHandler);
 /** Internal tool target only. Never mount this router as a public agent entrypoint. */
-export const groundedWorkspaceChatRoutes = new Hono().use("*", nativeApiErrors).post("/", (c: Context) => handleWorkspaceChat(c, "grounded"));
+export const groundedProjectChatRoutes = new Hono().use("*", nativeApiErrors).post("/", (c: Context) => handleProjectChat(c, "grounded"));
 
 /**
  * `POST /v1/chat/stream` (and `GET /v1/chat/stream`, kept for browsers that
@@ -260,7 +260,7 @@ export const groundedWorkspaceChatRoutes = new Hono().use("*", nativeApiErrors).
  * The POST carries the same JSON body as `POST /v1/chat`, so the question is
  * never in a URL. The same scoping, chat settings and spend checks apply.
  */
-async function workspaceChatStreamHandler(c: Context) {
+async function projectChatStreamHandler(c: Context) {
   if (process.env.DOCSLURP_DURABLE_CHAT === "1" && getRequestActor(c).type === "session") {
     return c.json({ error: "Use POST /v1/chat/operations with Idempotency-Key, then resume the operation" }, 409);
   }
@@ -285,26 +285,26 @@ async function workspaceChatStreamHandler(c: Context) {
       } catch { return apiErrorResponse(c,400,"invalid_request","Invalid chat filters"); }
     }
     input = { filters, q: c.req.query("q"),
-      workspace: c.req.query("workspace") || undefined, orgId: c.req.query("orgId") || undefined,
+      project: c.req.query("project") || undefined, orgId: c.req.query("orgId") || undefined,
       sessionId: c.req.query("sessionId"),
       sessionToken: c.req.header(CHAT_SESSION_TOKEN_HEADER)?.trim() || undefined,
       model: c.req.query("model"), speedBoost: c.req.query("speedBoost") === undefined ? false : c.req.query("speedBoost") === "true" ? true : c.req.query("speedBoost") === "false" ? false : c.req.query("speedBoost") };
   }
-  const parsed = workspaceChatInputSchema.safeParse(input);
+  const parsed = projectChatInputSchema.safeParse(input);
   if (!parsed.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid chat input", { issues: parsed.error.issues });
   const { q: query, sessionToken, model } = parsed.data;
 
   const userId = c.get("sessionUser").id;
-  const workspaceId = await resolveActorWorkspaceId(getRequestActor(c), parsed.data.workspace, parsed.data.orgId);
-  const forbidden = await denyWorkspaceAccess(c, workspaceId, "chat");
+  const projectId = await resolveActorProjectId(getRequestActor(c), parsed.data.project, parsed.data.orgId);
+  const forbidden = await denyProjectAccess(c, projectId, "chat");
   if (forbidden) return forbidden;
-  const chatDisabled = await workspaceChatDisabledBody(workspaceId, userId);
+  const chatDisabled = await projectChatDisabledBody(projectId, userId);
   if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
-  if (await chatModelRefused(getRequestActor(c), model, workspaceId)) return modelNotAllowed(c);
-  const sessionId = chatSessionForRequest(getRequestActor(c), { workspaceId, sessionId: parsed.data.sessionId, sessionToken });
+  if (await chatModelRefused(getRequestActor(c), model, projectId)) return modelNotAllowed(c);
+  const sessionId = chatSessionForRequest(getRequestActor(c), { projectId, sessionId: parsed.data.sessionId, sessionToken });
   // Refuse before the stream opens, so a blocked spend is a 402.
-  // Pre-check only: chatWorkspace takes the interactive hold.
-  await assertCanSpend(null, workspaceId, { kind: "interactive", hold: false });
+  // Pre-check only: chatProject takes the interactive hold.
+  await assertCanSpend(null, projectId, { kind: "interactive", hold: false });
   c.header("Cache-Control", "no-cache");
   c.header("X-Accel-Buffering", "no");
 
@@ -312,7 +312,7 @@ async function workspaceChatStreamHandler(c: Context) {
   // Events are chained so they reach the client in order, ahead of `message`.
   let pendingEvents: Promise<unknown> = Promise.resolve();
   let sink: (event: MaterializeEvent) => void = () => undefined;
-  const deferred = await deferredRequestContext(c, workspaceId, (event) => sink(event));
+  const deferred = await deferredRequestContext(c, projectId, (event) => sink(event));
   if ("response" in deferred) return deferred.response;
 
   const turn = beginChatTurn({ speedBoost: parsed.data.speedBoost });
@@ -329,14 +329,14 @@ async function workspaceChatStreamHandler(c: Context) {
       event: "status",
       data: JSON.stringify({
         stage: "retrieval",
-        message: "Retrieving workspace context"
+        message: "Retrieving project context"
       })
     });
 
-    let response: Awaited<ReturnType<typeof chatWorkspace>>;
+    let response: Awaited<ReturnType<typeof chatProject>>;
     try {
-      response = await withDeferredContext(deferred.context, () => chatWorkspace({
-        workspaceId,
+      response = await withDeferredContext(deferred.context, () => chatProject({
+        projectId,
         userId,
         query,
         actor: getRequestActor(c), allowAgentTools: env.publicChatAgentEnabled, signal: AbortSignal.any([c.req.raw.signal, abort.signal]),
@@ -375,17 +375,17 @@ function expectedSearchFailure(error: unknown): SearchFailure | null {
   if (error instanceof InvalidRetrievalQueryError) {
     return { code: "INVALID_RETRIEVAL_QUERY", apiCode: "invalid_request", message: error.message, status: 400 };
   }
-  if (error instanceof WorkspaceAccessError) {
-    if (error.status === 400) return { code: "INVALID_WORKSPACE", apiCode: "invalid_request", message: error.message, status: 400 };
+  if (error instanceof ProjectAccessError) {
+    if (error.status === 400) return { code: "INVALID_PROJECT", apiCode: "invalid_request", message: error.message, status: 400 };
     return error.status === 403
       ? { code: "FORBIDDEN", apiCode: "forbidden", message: error.message, status: 403 }
-      : { code: "WORKSPACE_NOT_FOUND", apiCode: "workspace_not_found", message: error.message, status: 404 };
+      : { code: "PROJECT_NOT_FOUND", apiCode: "project_not_found", message: error.message, status: 404 };
   }
-  if (error instanceof MissingWorkspaceScopeError || error instanceof CrossWorkspaceScopeError) {
+  if (error instanceof MissingProjectScopeError || error instanceof CrossProjectScopeError) {
     return { code: "INVALID_SEARCH_SCOPE", apiCode: "invalid_search_scope", message: error.message, status: 400 };
   }
-  if (error instanceof WorkspaceNotFoundError) {
-    return { code: "WORKSPACE_NOT_FOUND", apiCode: "workspace_not_found", message: error.message, status: 404 };
+  if (error instanceof ProjectNotFoundError) {
+    return { code: "PROJECT_NOT_FOUND", apiCode: "project_not_found", message: error.message, status: 404 };
   }
   return null;
 }
@@ -404,17 +404,17 @@ function requestApiKeyId(c: Context): string | null | undefined {
 
 /**
  * Runs one search, reusing a recent identical answer when the response cache
- * (search/response-cache.ts) allows it. Callers authorize the workspace and the
+ * (search/response-cache.ts) allows it. Callers authorize the project and the
  * API key's scopes first; the cache never serves a request that has not passed them.
  * `memo` shares access and privacy lookups across the searches of one request or batch.
  */
-async function retrieve(body: SearchInput & { workspaceId: string }, userId: string, actorApiKeyId: string | null | undefined, deferred: DeferredRequestContext | undefined, memo: CacheScopeMemo): Promise<SearchData> {
+async function retrieve(body: SearchInput & { projectId: string }, userId: string, actorApiKeyId: string | null | undefined, deferred: DeferredRequestContext | undefined, memo: CacheScopeMemo): Promise<SearchData> {
   // A capability changes the policy a cached answer was produced under: never share across it.
   const ttl = deferred?.policy || body.geo ? 0 : searchResponseCacheTtlMs();
   const apiKeyId = cacheableApiKeyId(actorApiKeyId, currentRequestApiKeyId());
   // Keyed on the exact request, query as sent: the search runs on that same text.
   const ticket = ttl > 0 && apiKeyId !== undefined
-    ? await responseCacheTicket({ userId, apiKeyId, workspaceIds: [body.workspaceId], request: { ...body }, memo })
+    ? await responseCacheTicket({ userId, apiKeyId, projectIds: [body.projectId], request: { ...body }, memo })
     : null;
   const cached = ticket ? readCachedResponse(ticket, ttl) as SearchData | undefined : undefined;
   if (cached) {
@@ -428,7 +428,7 @@ async function retrieve(body: SearchInput & { workspaceId: string }, userId: str
   const data = publicSearchResponse(await (deferred ? withDeferredContext(deferred, search) : search()));
   // A response with pages still materializing must not be replayed as final.
   if (ticket && data.availability?.status === "complete" && !(data.deferred && data.deferred.pendingPages > 0)) {
-    await storeResponse(ticket, data, data.availability?.scope?.workspaceId);
+    await storeResponse(ticket, data, data.availability?.scope?.projectId);
   }
   return data;
 }
@@ -445,18 +445,18 @@ export const searchRoutes = new Hono()
     if (!userId) {
       return apiErrorResponse(c, 401, "unauthorized", "Missing session");
     }
-    const workspaceId = await resolveActorWorkspaceId(
+    const projectId = await resolveActorProjectId(
       getRequestActor(c),
-      c.req.query("workspace"),
+      c.req.query("project"),
       c.req.query("orgId"),
     );
-    const forbidden = await denyWorkspaceAccess(c, workspaceId);
+    const forbidden = await denyProjectAccess(c, projectId);
     if (forbidden) return forbidden;
     const runId = c.req.query("runId");
     const limit = c.req.query("limit");
     const variant = c.req.query("variant");
 
-    // Retrieval flags are tri-state: omitted flags fall back to the workspace's
+    // Retrieval flags are tri-state: omitted flags fall back to the project's
     // Retrieval Controls (provider-backed enhancements default off there).
     let flags: ReturnType<typeof parseRetrievalQueryFlags>;
     try {
@@ -469,7 +469,7 @@ export const searchRoutes = new Hono()
     const filters = parseFilters({
       documentId: c.req.query("documentId") ?? "",
       runId: runId ?? "",
-      workspaceId,
+      projectId,
       filenameContains: c.req.query("filenameContains") ?? "",
       mimeTypes: c.req.query("mimeTypes") ?? "",
       tags: c.req.query("tags") ?? "",
@@ -489,7 +489,7 @@ export const searchRoutes = new Hono()
       } catch { return apiErrorResponse(c,400,"invalid_request","Invalid spatial predicate"); }
     }
 
-    const deferred = await deferredRequestContext(c, workspaceId);
+    const deferred = await deferredRequestContext(c, projectId);
     if ("response" in deferred) return deferred.response;
     try {
       const response = await withDeferredContext(deferred.context, () => hybridSearch(query, userId, {
@@ -524,13 +524,13 @@ export const searchRoutes = new Hono()
     }
     const userId = c.get("sessionUser")?.id;
     if (!userId) return apiErrorResponse(c, 401, "unauthorized", "Missing session");
-    const workspaceId = await resolveActorWorkspaceId(getRequestActor(c), parsed.data.workspace, parsed.data.orgId);
-    const forbidden = await denyWorkspaceAccess(c, workspaceId);
+    const projectId = await resolveActorProjectId(getRequestActor(c), parsed.data.project, parsed.data.orgId);
+    const forbidden = await denyProjectAccess(c, projectId);
     if (forbidden) return forbidden;
-    const deferred = await deferredRequestContext(c, workspaceId);
+    const deferred = await deferredRequestContext(c, projectId);
     if ("response" in deferred) return deferred.response;
     try {
-      return c.json(await retrieve({ ...parsed.data, workspaceId }, userId, requestApiKeyId(c), deferred.context, createCacheScopeMemo()));
+      return c.json(await retrieve({ ...parsed.data, projectId }, userId, requestApiKeyId(c), deferred.context, createCacheScopeMemo()));
     } catch (error) {
       const failure = expectedSearchFailure(error);
       if (failure) return apiErrorResponse(c, failure.status, failure.apiCode, failure.message);
@@ -538,7 +538,7 @@ export const searchRoutes = new Hono()
     }
   })
   .post("/aggregate", async (c) => {
-    const parsed = aggregateWorkspaceRagSearchRequestSchema.safeParse(
+    const parsed = aggregateProjectRagSearchRequestSchema.safeParse(
       await c.req.json().catch(() => null),
     );
     if (!parsed.success) {
@@ -551,9 +551,9 @@ export const searchRoutes = new Hono()
     }
     // A generated answer is a model call billed like chat, so it needs the
     // chat scope as well (the same scope /v1/chat checks). Refuse before any
-    // workspace lookup or retrieval runs.
+    // project lookup or retrieval runs.
     // Browser keys never get aggregate answers: the answer path has no output
-    // moderation and fans out across workspaces, which a public key must not reach.
+    // moderation and fans out across projects, which a public key must not reach.
     if (parsed.data.generateAnswer && actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["chat"]))) {
       return apiErrorResponse(c, 403, "forbidden", "Forbidden");
     }
@@ -572,26 +572,26 @@ export const searchRoutes = new Hono()
     }
 
     try {
-      // Each listed workspace may be a UUID, slug, former slug, name or
+      // Each listed project may be a UUID, slug, former slug, name or
       // `default`; one that matches nothing answers 404 naming its slug.
       // One organization per search: the key's, else the one the session names, else its personal one.
       const orgId = actor.type === "apiKey" ? actor.apiKey.orgId : parsed.data.orgId ?? (await resolveDefaultOrganization(actor.userId)).id;
       if (actor.type === "apiKey" && parsed.data.orgId && parsed.data.orgId !== orgId) {
-        return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+        return apiErrorResponse(c, 404, "project_not_found", "Project not found");
       }
-      const workspaces = await Promise.all(
-        parsed.data.workspaces.map((workspace) => resolveActorWorkspaceId(actor, workspace, orgId)),
+      const projects = await Promise.all(
+        parsed.data.projects.map((project) => resolveActorProjectId(actor, project, orgId)),
       );
-      const response = await aggregateWorkspaceRagSearch({
+      const response = await aggregateProjectRagSearch({
         userId: actor.userId,
         orgId,
-        request: { ...parsed.data, workspaces },
+        request: { ...parsed.data, projects },
         apiKey: actor.type === "apiKey" ? actor.apiKey : null,
       });
       return c.json(response);
     } catch (error) {
-      if (error instanceof WorkspaceNotFoundError) {
-        return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+      if (error instanceof ProjectNotFoundError) {
+        return apiErrorResponse(c, 404, "project_not_found", "Project not found");
       }
       throw error;
     } finally {
@@ -632,8 +632,8 @@ export const searchRoutes = new Hono()
               ${apiKey?.orgId ?? null}::text is null
               or exists (
                 select 1
-                from workspaces w
-                where w.id = s.metadata ->> 'workspaceId'
+                from projects w
+                where w.id = s.metadata ->> 'projectId'
                   and w.org_id = ${apiKey?.orgId ?? null}
               )
             )
@@ -655,15 +655,15 @@ export const searchesRoutes = new Hono().get("/:sessionId/materialization", asyn
   if (!userId) return apiErrorResponse(c, 401, "unauthorized", "Missing session");
   const { sessionId } = c.req.param();
   await awaitSearchSessionWrites(sessionId);
-  const [row] = await sql<{ workspace_id: string | null; candidates: unknown; deferred: unknown }[]>`
-    select metadata ->> 'workspaceId' as workspace_id,
+  const [row] = await sql<{ project_id: string | null; candidates: unknown; deferred: unknown }[]>`
+    select metadata ->> 'projectId' as project_id,
            metadata -> 'diagnostics' -> 'deferredCandidates' as candidates,
            metadata -> 'deferred' as deferred
     from search_sessions
     where id = ${sessionId} and user_id = ${userId}
   `;
-  if (!row?.workspace_id) return apiErrorResponse(c, 404, "not_found", "Search session not found");
-  const forbidden = await assertApiKeyWorkspaceAccess(c, row.workspace_id, "search");
+  if (!row?.project_id) return apiErrorResponse(c, 404, "not_found", "Search session not found");
+  const forbidden = await assertApiKeyProjectAccess(c, row.project_id, "search");
   if (forbidden) return forbidden;
   const candidates = (Array.isArray(row.candidates) ? row.candidates : [])
     .filter((p): p is { documentId: string; page: number } =>
@@ -686,4 +686,4 @@ export const searchesRoutes = new Hono().get("/:sessionId/materialization", asyn
 
 acceptApiKeys(searchRoutes);
 acceptApiKeys(searchesRoutes);
-acceptApiKeys(workspaceChatRoutes, ["POST /", "GET /stream", "POST /stream"]);
+acceptApiKeys(projectChatRoutes, ["POST /", "GET /stream", "POST /stream"]);

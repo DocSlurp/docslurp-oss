@@ -36,14 +36,14 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await db.exec(`
-    delete from usage_events; delete from document_run_stage_states; delete from documents; delete from workspace_runs;
+    delete from usage_events; delete from document_run_stage_states; delete from documents; delete from project_runs;
     insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com') on conflict do nothing;
     insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 1000000) on conflict do nothing;
-    insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W') on conflict do nothing;
+    insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W') on conflict do nothing;
     delete from run_terminal_receipts;
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total, execution_generation)
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total, execution_generation)
       values ('r1', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{}', 2, 4, 'g1');
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
       values ('x', 'o1', 'u1', 'w', 'r1', 'x.pdf', 'application/pdf', 'k1', 'processing', 2),
              ('y', 'o1', 'u1', 'w', 'r1', 'y.pdf', 'application/pdf', 'k2', 'processing', 2);
   `);
@@ -92,7 +92,7 @@ async function visionEvents(): Promise<number> {
   return (await db.query<{ n: number }>(`select count(*)::int as n from usage_events where run_id = 'r1' and metric = 'vision'`)).rows[0]!.n;
 }
 async function run(): Promise<{ status: string; failure_count: number }> {
-  return (await db.query<{ status: string; failure_count: number }>(`select status, coalesce(failure_count, 0)::int as failure_count from workspace_runs where id = 'r1'`)).rows[0]!;
+  return (await db.query<{ status: string; failure_count: number }>(`select status, coalesce(failure_count, 0)::int as failure_count from project_runs where id = 'r1'`)).rows[0]!;
 }
 
 describe("sandbox infrastructure failures retry the stage without failing the document (real-Modal F5)", () => {

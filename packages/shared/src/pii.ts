@@ -180,7 +180,7 @@ export type PiiScanOptions = {
   /** Page the scanned text came from, recorded on each match. */
   pageNumber?: number | null;
   /**
-   * Workspace allowlist (`piiPolicy.allowlistPatterns`). A detected value is
+   * Project allowlist (`piiPolicy.allowlistPatterns`). A detected value is
    * suppressed when it fully matches any entry. Entries are case-insensitive
    * regular expressions; an entry that is not a valid expression is compared
    * as a case-insensitive literal. Entries are only ever tested against the

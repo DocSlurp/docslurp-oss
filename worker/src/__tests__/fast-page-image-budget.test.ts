@@ -33,10 +33,10 @@ beforeAll(async () => {
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com');
     insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 100000);
-    insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+    insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
       values ('run', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'render-images', '{}', ${DOCUMENTS}, ${DOCUMENTS * 40});
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count) values ${documents};
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count) values ${documents};
   `);
   // Several connections, like several worker processes; PGlite serializes them, transactions included.
   const served = await serveOnRandomPort(db, { maxConnections: 8 });
@@ -81,7 +81,7 @@ describe("Fast page-image render budget (Postgres, shared by workers)", () => {
     const restarted = worker();
     // The restarted worker sees the stored grant, and a document new to it finds the budget already spent.
     expect(await restarted.reserveFastPageImageRenders({ runId: "run", documentId: granted.document_id, wanted: 10, perRun: 45 })).toBe(granted.granted);
-    await db.exec(`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+    await db.exec(`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
       values ('late', 'o1', 'u1', 'w', 'run', 'late.pdf', 'application/pdf', 'raw/late', 'processing', 5)`);
     expect(await restarted.reserveFastPageImageRenders({ runId: "run", documentId: "late", wanted: 5, perRun: 45 })).toBe(0);
   });
@@ -91,11 +91,11 @@ describe("Fast page-image render budget (Postgres, shared by workers)", () => {
       await db.exec(`
         insert into "user"(id, name, email) values ('u2', 'B', 'b@example.com');
         insert into organizations(id, name, slug, created_by_user_id) values ('o2', 'Other', 'other', 'u2');
-        insert into workspaces(id, org_id, user_id, name) values ('w2', 'o2', 'u2', 'W2'), ('w1b', 'o1', 'u1', 'W1b');
-        insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+        insert into projects(id, org_id, user_id, name) values ('w2', 'o2', 'u2', 'W2'), ('w1b', 'o1', 'u1', 'W1b');
+        insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
           values ('other-run', 'o2', 'u2', 'w2', 'bulk-upload', 'processing', 'render-images', '{}', 1),
                  ('fresh', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'render-images', '{}', 1);
-        insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+        insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
           values ('foreign', 'o2', 'u2', 'w2', 'other-run', 'f.pdf', 'application/pdf', 'raw/f', 'processing', 40),
                  ('moved', 'o1', 'u1', 'w1b', 'fresh', 'm.pdf', 'application/pdf', 'raw/m', 'processing', 40);
       `);
@@ -118,7 +118,7 @@ describe("Fast page-image render budget (Postgres, shared by workers)", () => {
       expect((await db.query(`select 1 from run_fast_page_image_grants where document_id = 'foreign'`)).rows).toHaveLength(0);
     });
 
-    it("refuses another run's document in the same org, and a document whose workspace differs from the run's", async () => {
+    it("refuses another run's document in the same org, and a document whose project differs from the run's", async () => {
       const store = worker();
       await expect(store.reserveFastPageImageRenders({ runId: "fresh", documentId: "d1", wanted: 3, perRun: 1000 }))
         .rejects.toThrow(/does not belong to run/);

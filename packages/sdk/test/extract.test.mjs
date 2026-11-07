@@ -5,7 +5,7 @@ import { createDocSlurpClient, DocSlurpApiError } from "../dist/index.js";
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const extract = { id: "ext_1", status: "processing", expiresAt: "2026-10-29T00:00:00.000Z" };
-const result = { workspace: { id: "workspace" }, run: { id: "run" }, documents: [], extract };
+const result = { project: { id: "project" }, run: { id: "run" }, documents: [], extract };
 
 function fakeApi() {
   const calls = [];
@@ -33,7 +33,7 @@ test("extract uses the upload transports against /v1/extracts and sends the rete
 
   const fromUrls = await client.extract({ urls: ["https://example.com/a.pdf"] }, { retentionDays: 7, notifyEmail: false });
   assert.equal(fromUrls.extract.id, "ext_1");
-  assert.deepEqual(JSON.parse(api.calls[0].body), { urls: ["https://example.com/a.pdf"], newWorkspace: false, workspace: "default", retentionDays: 7, notifyEmail: false });
+  assert.deepEqual(JSON.parse(api.calls[0].body), { urls: ["https://example.com/a.pdf"], newProject: false, project: "default", retentionDays: 7, notifyEmail: false });
   assert.equal(api.calls[0].url, "https://api.invalid/v1/extracts/url");
 
   await client.extract(new Blob(["hello"], { type: "text/plain" }), { download: "all" });

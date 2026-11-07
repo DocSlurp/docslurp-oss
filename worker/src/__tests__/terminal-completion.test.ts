@@ -3,12 +3,12 @@ import { defaultPipelineFeatures, getPipelineStageOrder, pipelineStageOrder } fr
 import { Store } from "../db/store.js";
 import { createActivities } from "../temporal/activities.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 vi.mock("../db/page-base-fee.js", () => ({ recordPageBaseFee: vi.fn() }));
 
 async function complete(statuses: string[]) {
-  const run: WorkspaceRun = {
-    id: "run-1", orgId: "org-1", userId: "user-1", workspaceId: "workspace-1", kind: "bulk-upload", status: "processing", stage: "page-index",
+  const run: ProjectRun = {
+    id: "run-1", orgId: "org-1", userId: "user-1", projectId: "project-1", kind: "bulk-upload", status: "processing", stage: "page-index",
     totalDocuments: statuses.length, processedDocuments: 0, pagesTotal: statuses.length, pagesProcessed: 0, spentCents: 0,
     pipeline: { ...defaultPipelineFeatures, embed: false, indexVectors: false, pageIndex: true, visionFallback: false, contextualChunkPreambles: false },
     error: null, stats: {}, artifacts: {}, claimId: null, createdAt: new Date(), updatedAt: new Date(),

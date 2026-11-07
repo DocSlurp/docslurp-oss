@@ -3,29 +3,29 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { findWorkspaceRoot } from "./env.js";
+import { findProjectRoot } from "./env.js";
 
-describe("findWorkspaceRoot", () => {
-  it("returns the outermost workspace when this repo is a core/ submodule", () => {
+describe("findProjectRoot", () => {
+  it("returns the outermost project when this repo is a core/ submodule", () => {
     const outer = mkdtempSync(join(tmpdir(), "ws-"));
     const core = join(outer, "core");
     const start = join(core, "server", "src");
     mkdirSync(start, { recursive: true });
     writeFileSync(join(outer, "pnpm-workspace.yaml"), "packages: []\n");
     writeFileSync(join(core, "pnpm-workspace.yaml"), "packages: []\n");
-    expect(findWorkspaceRoot(start)).toBe(outer);
+    expect(findProjectRoot(start)).toBe(outer);
   });
 
-  it("returns the only workspace in the standalone layout", () => {
+  it("returns the only project in the standalone layout", () => {
     const root = mkdtempSync(join(tmpdir(), "ws-"));
     const start = join(root, "server", "src");
     mkdirSync(start, { recursive: true });
     writeFileSync(join(root, "pnpm-workspace.yaml"), "packages: []\n");
-    expect(findWorkspaceRoot(start)).toBe(root);
+    expect(findProjectRoot(start)).toBe(root);
   });
 
-  it("falls back to the start directory with no workspace", () => {
+  it("falls back to the start directory with no project", () => {
     const start = mkdtempSync(join(tmpdir(), "ws-"));
-    expect(findWorkspaceRoot(start)).toBe(start);
+    expect(findProjectRoot(start)).toBe(start);
   });
 });

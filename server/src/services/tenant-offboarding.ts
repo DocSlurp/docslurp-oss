@@ -2,13 +2,13 @@ import { randomUUID } from "node:crypto";
 
 import { sql as defaultSql, type SqlClient } from "../db.js";
 import { signalPipelineCancel } from "../lib/temporal.js";
-import { cancelWorkspaceRuns, deleteWorkspaceData, type DataDeletionDeps } from "./data-deletion.js";
+import { cancelProjectRuns, deleteProjectData, type DataDeletionDeps } from "./data-deletion.js";
 
 /**
  * Tenant offboarding: organization deletion and account deletion.
  * The flow, the retained records and the SLA are in docs/data-deletion.md.
  *
- * Tenant data (workspaces, runs, documents, chunks, graphs, chats, settings,
+ * Tenant data (projects, runs, documents, chunks, graphs, chats, settings,
  * keys, grants, SSO) is deleted; LanceDB rows and object-storage artifacts go
  * through the cleanup queues that the delete triggers fill. Billing and audit
  * records are kept for accounting: a deleted org or account keeps an
@@ -42,7 +42,7 @@ export const DELETED_USER_NAME = "Deleted user";
 
 export interface OrganizationDeletionResult {
   orgId: string;
-  workspaces: number;
+  projects: number;
   documents: number;
   runsCancelled: number;
 }
@@ -117,7 +117,7 @@ export async function purgeOrganization(
       where id = ${orgId}
     `;
     await client`delete from org_memberships where org_id = ${orgId}`;
-    await client`delete from workspace_invites where org_id = ${orgId}`;
+    await client`delete from project_invites where org_id = ${orgId}`;
     await client`
       update api_keys set revoked_at = coalesce(revoked_at, now()) where org_id = ${orgId}
     `;
@@ -136,26 +136,26 @@ export async function purgeOrganization(
     `;
   });
 
-  const workspaceIds = (await sql<{ id: string }[]>`
-    select id from workspaces where org_id = ${orgId}
+  const projectIds = (await sql<{ id: string }[]>`
+    select id from projects where org_id = ${orgId}
   `).map((row) => row.id);
 
-  const cancelled = await cancelWorkspaceRuns(workspaceIds, "Organization deleted", deps);
+  const cancelled = await cancelProjectRuns(projectIds, "Organization deleted", deps);
 
   // Webhook deliveries about this org's runs that have not gone out yet.
-  if (workspaceIds.length > 0) {
+  if (projectIds.length > 0) {
     await sql`
       delete from webhook_outbox
       where dispatched_at is null
         and payload ->> 'runId' in (
-          select id from workspace_runs where workspace_id = any(${sql.array(workspaceIds)})
+          select id from project_runs where project_id = any(${sql.array(projectIds)})
         )
     `;
   }
 
-  // Each workspace's LanceDB databases are queued for a whole drop by
-  // deleteWorkspaceData; the per-document sweep skips tables queued there.
-  // Org-level tables from before per-workspace databases (not yet removed by
+  // Each project's LanceDB databases are queued for a whole drop by
+  // deleteProjectData; the per-document sweep skips tables queued there.
+  // Org-level tables from before per-project databases (not yet removed by
   // the relocation CLI's --drop-legacy) hold this org's chunk text too.
   await sql`
     insert into storage_cleanup_queue (kind, org_id, target, payload, reason)
@@ -173,8 +173,8 @@ export async function purgeOrganization(
     on conflict (kind, target) do nothing
   `;
   let documents = 0;
-  for (const workspaceId of workspaceIds) {
-    documents += (await deleteWorkspaceData(workspaceId, deps)).documents;
+  for (const projectId of projectIds) {
+    documents += (await deleteProjectData(projectId, deps)).documents;
   }
 
   // Org-scoped rows that are not billing or audit history.
@@ -208,9 +208,9 @@ export async function purgeOrganization(
   `;
 
   console.log(
-    `[offboarding] org deleted orgId=${orgId} reason=${reason} workspaces=${workspaceIds.length} documents=${documents} runsCancelled=${cancelled.cancelled}`,
+    `[offboarding] org deleted orgId=${orgId} reason=${reason} projects=${projectIds.length} documents=${documents} runsCancelled=${cancelled.cancelled}`,
   );
-  return { orgId, workspaces: workspaceIds.length, documents, runsCancelled: cancelled.cancelled };
+  return { orgId, projects: projectIds.length, documents, runsCancelled: cancelled.cancelled };
 }
 
 /** Finishes org deletions interrupted after the tombstone was written. */
@@ -308,8 +308,8 @@ export async function deleteAccount(
     const client = tx as unknown as SqlClient;
     const userId = input.userId;
     await client`delete from org_memberships where user_id = ${userId}`;
-    await client`delete from workspace_members where user_id = ${userId}`;
-    await client`delete from workspace_invites where invited_by_user_id = ${userId} and status = 'pending'`;
+    await client`delete from project_members where user_id = ${userId}`;
+    await client`delete from project_invites where invited_by_user_id = ${userId} and status = 'pending'`;
     // Credentials and integrations.
     await client`update mcp_oauth_grants set revoked_at = coalesce(revoked_at, now()) where user_id = ${userId}`;
     await client`delete from mcp_oauth_requests where user_id = ${userId}`;
@@ -326,7 +326,7 @@ export async function deleteAccount(
     await client`delete from oauth_accounts where user_id = ${userId}`;
     await client`delete from sso_identity_links where user_id = ${userId}`;
     // Personal settings and activity.
-    await client`delete from workspace_recommendation_visits where user_id = ${userId}`;
+    await client`delete from project_recommendation_visits where user_id = ${userId}`;
     await client`delete from user_settings where user_id = ${userId}`;
     await client`delete from notification_prefs where user_id = ${userId}`;
     await client`delete from notification_deliveries where user_id = ${userId}`;

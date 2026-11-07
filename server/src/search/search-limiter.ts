@@ -30,7 +30,7 @@ import { resolveDatabasePoolMax } from "../lib/api-pool.js";
  * - SEARCH_QUEUE_TIMEOUT_MS: longest wait for a slot (default 30000); then 503
  *   with Retry-After.
  * - SEARCH_FAIR_ADMISSION: serve waiting searches round-robin per tenant (org,
- *   else workspace), so one tenant's fan-out cannot starve others. Defaults to
+ *   else project), so one tenant's fan-out cannot starve others. Defaults to
  *   the process-wide SEARCH_LANCEDB_NATIVE flag (on unless it is 0); off, the
  *   queue is one FIFO.
  * - SEARCH_MAX_SLOTS_PER_TURN: slots one chat agent turn or API batch holds at
@@ -75,7 +75,7 @@ export function resolveSearchLimiterOptions(env: NodeJS.ProcessEnv = process.env
   };
 }
 
-/** Who a search is admitted for: `tenant` (org, else workspace) shares fairly; `group` (turn, batch) is capped. */
+/** Who a search is admitted for: `tenant` (org, else project) shares fairly; `group` (turn, batch) is capped. */
 export interface SearchAdmission {
   tenant?: string | null;
   group?: string | null;

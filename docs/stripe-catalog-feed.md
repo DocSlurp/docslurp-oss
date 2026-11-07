@@ -4,7 +4,7 @@ Generate a discovery-only CSV of the prepaid credit packs ($25, $50 and $100; `C
 
 ## Environment files and precedence
 
-Run commands from the workspace root. The loader finds the outermost ancestor containing `pnpm-workspace.yaml`: the standalone core root, or the private app root when core is checked out inside it.
+Run commands from the project root. The loader finds the outermost ancestor containing `pnpm-workspace.yaml`: the standalone core root, or the private app root when core is checked out inside it.
 
 - The default (`--env local`) loads the root `.env` only.
 - `--env production` overlays the root `.env.production` on `.env`. It fails if `.env.production` is missing.

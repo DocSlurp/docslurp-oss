@@ -16,8 +16,8 @@ beforeAll(async()=>{
   await sql`insert into "user"(id,name,email) values('load-owner','Test','load@example.test')`;
   await sql`insert into organizations(id,name,slug,created_by_user_id) values('load-org','Test','load','load-owner')`;
   await sql`insert into org_memberships(org_id,user_id,role) values('load-org','load-owner','owner') on conflict do nothing`;
-  await sql`insert into workspaces(id,org_id,user_id,name) values('load-w','load-org','load-owner','Test')`;
-  for(let n=0;n<10;n++) await sql`insert into workspace_runs(id,org_id,user_id,workspace_id,kind,status,stage)
+  await sql`insert into projects(id,org_id,user_id,name) values('load-w','load-org','load-owner','Test')`;
+  for(let n=0;n<10;n++) await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage)
     values(${`load-${n}`},'load-org','load-owner','load-w','upload','processing','vision-extract')`;
 },120000);
 afterAll(async()=>{await sql?.end();await stop?.();});
@@ -27,7 +27,7 @@ it("measures the frozen matched local workload without provider calls",async()=>
   for(const scenario of ["idle","burst","ten-run","reconnect"]){
     const arms=[];
     for(const arm of ["sse-policy","broker"]){
-      await sql`update workspace_runs set total_documents=0,updated_at='2026-01-01T00:00:00Z' where workspace_id='load-w'`;
+      await sql`update project_runs set total_documents=0,updated_at='2026-01-01T00:00:00Z' where project_id='load-w'`;
       const resources: DashboardResource[]=Array.from({length:scenario==="idle"||scenario==="burst"?1:10},(_,n)=>({kind:"run",runId:`load-${n}`}));
       const latest=new Map<string,unknown>();
       let deliveries=0,bytes=0,projections=0,revisionReads=0;
@@ -50,7 +50,7 @@ it("measures the frozen matched local workload without provider calls",async()=>
         collecting=false;
         const burst=scenario==="burst"&&second===5;
         const changed=burst||(scenario==="ten-run"&&(second===5||second===15))||(scenario==="reconnect"&&second===6);
-        if(changed) for(let n=0;n<(burst?100:1);n++) await sql`update workspace_runs set total_documents=total_documents+1,updated_at=now() where workspace_id='load-w'`;
+        if(changed) for(let n=0;n<(burst?100:1);n++) await sql`update project_runs set total_documents=total_documents+1,updated_at=now() where project_id='load-w'`;
         collecting=true;
         if(scenario==="reconnect"&&second===5){detach.forEach(fn=>fn());detach=[];}
         if(scenario==="reconnect"&&second>=5&&second<8) continue;

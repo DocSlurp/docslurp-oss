@@ -3,9 +3,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { RICH_PAGE_READ_METRICS } from "../pipeline/usage-ledger.js";
-import type { WorkspaceRun } from "../models.js";
+import type { ProjectRun } from "../models.js";
 
-const run = { id: "run-1", userId: "u1", orgId: "o1", workspaceId: "w1", stats: {}, artifacts: {}, pipeline: {}, stage: "queued" } as unknown as WorkspaceRun;
+const run = { id: "run-1", userId: "u1", orgId: "o1", projectId: "w1", stats: {}, artifacts: {}, pipeline: {}, stage: "queued" } as unknown as ProjectRun;
 
 /** What vision-extract's recordLocalUsage writes for a local model's call on a page. */
 function localRead(state: WorkflowState, metric: string, pageNumber: number) {

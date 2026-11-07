@@ -22,7 +22,7 @@ let context: typeof import("../lib/chat-turn-context.js");
 
 const FREE = "o-free";
 const PAID = "o-paid";
-const workspaceOf = (orgId: string) => `w-${orgId}`;
+const projectOf = (orgId: string) => `w-${orgId}`;
 
 beforeAll(async () => {
   const pg = await startMigratedPostgres();
@@ -47,7 +47,7 @@ beforeEach(async () => {
   await sql`delete from credit_ledger`;
   await sql`delete from credit_grants`;
   await sql`delete from usage_events`;
-  await sql`delete from workspaces`;
+  await sql`delete from projects`;
   await sql`delete from organizations`;
   // A starter org and a funded org (one prepaid balance each).
   await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents)
@@ -55,7 +55,7 @@ beforeEach(async () => {
   await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents, funded_at)
     values (${PAID}, 'Paid', 'paid', 'u1', 5000, now())`;
   for (const orgId of [FREE, PAID]) {
-    await sql`insert into workspaces(id, org_id, user_id, name) values (${workspaceOf(orgId)}, ${orgId}, 'u1', 'W')`;
+    await sql`insert into projects(id, org_id, user_id, name) values (${projectOf(orgId)}, ${orgId}, 'u1', 'W')`;
   }
 });
 
@@ -66,7 +66,7 @@ beforeEach(async () => {
 function step(orgId: string, client?: typeof sql) {
   return usage.recordUnitCharge({
     userId: "u1",
-    scope: { orgId, workspaceId: workspaceOf(orgId), sessionId: "chat-session" },
+    scope: { orgId, projectId: projectOf(orgId), sessionId: "chat-session" },
     charge: { id: randomUUID(), metric: "chat-answer", amount: 1, unit: "answer", credits: 12, metadata: { providerCostCents: 10 } },
     ...(client ? { client } : {}),
   });
@@ -360,7 +360,7 @@ describe("nested chat turns", () => {
 it("charges a boosted answer exactly once in its tenant and refunds its four-times credits", async () => {
   const turn = billing.beginChatTurn({ speedBoost: true });
   await turn.run(async () => {
-    const args = { userId: "u1", scope: { orgId: FREE, workspaceId: workspaceOf(FREE) },
+    const args = { userId: "u1", scope: { orgId: FREE, projectId: projectOf(FREE) },
       charge: { id: "boosted-answer-id", metric: "chat-answer" as const, amount: 1, unit: "answer", credits: 12 } };
     await usage.recordUnitCharge(args);
     await usage.recordUnitCharge(args);

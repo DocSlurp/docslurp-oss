@@ -45,7 +45,7 @@ export interface SandboxCommand {
    * supplies the runtime.
    */
   readablePaths: string[];
-  /** The command's file inputs inside DocSlurp temp workspaces. Remote providers upload exactly these. */
+  /** The command's file inputs inside DocSlurp temp projects. Remote providers upload exactly these. */
   inputPaths: string[];
   /** Directories the command may write. Remote providers create them and copy them back. */
   writablePaths: string[];

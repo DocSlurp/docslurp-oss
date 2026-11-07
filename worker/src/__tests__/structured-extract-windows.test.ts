@@ -8,7 +8,7 @@ import { generateOpenRouterText } from "../lib/ai.js";
 import { featureCredits } from "@docslurp/shared";
 import type { UsageEvent } from "../models.js";
 import type { ArtifactStore } from "../tools/storage.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 
 vi.mock("../lib/ai.js", () => ({ generateOpenRouterText: vi.fn() }));
 
@@ -34,9 +34,9 @@ function memoryStorage(initial: Record<string, string>) {
 
 function stateFor(document: Document, schema: Record<string, unknown>) {
   const state = WorkflowState.create({
-    id: "run", orgId: "org", userId: "user", workspaceId: "ws", spentCents: 0, stats: {}, artifacts: {},
+    id: "run", orgId: "org", userId: "user", projectId: "ws", spentCents: 0, stats: {}, artifacts: {},
     pipeline: normalizePipelineFeatures({ outputSchema: schema }),
-  } as unknown as WorkspaceRun, [document]);
+  } as unknown as ProjectRun, [document]);
   state.artifactLedger.recordDocument(document.id, "markdown", "s3://bucket/markdown/doc.md");
   return state;
 }

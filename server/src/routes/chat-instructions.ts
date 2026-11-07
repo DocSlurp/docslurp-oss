@@ -8,18 +8,18 @@ import { apiErrorResponse } from "../lib/api-error.js";
 import { getRequestActor, isFirstPartyAppActor } from "../lib/request-actor.js";
 import { consumeFeatureRateLimit } from "../middleware/rate-limit.js";
 import { isSpendBlockedError, spendBlockedResponse } from "../services/billing/spend-guard.js";
-import { composeAgentWorkspaceInstructions, composeSystemMessage, composeSystemMessageSections, defaultChatInstructionsTemplate } from "../services/chat-instructions.js";
+import { composeAgentProjectInstructions, composeSystemMessage, composeSystemMessageSections, defaultChatInstructionsTemplate } from "../services/chat-instructions.js";
 import { findCoreRuleConflicts, ImproveUnavailableError, improveChatInstructions, resolveImproveModel } from "../services/chat-instructions-improve.js";
 import { chatScopeFor } from "../services/chat-scope.js";
 import { describeSearchSettingsForAgent } from "../services/chat-search-options.js";
-import { describeCurrentSearchSettings } from "../services/workspace-chat.js";
-import { canEditWorkspace, getWorkspaceAccess } from "../services/organizations.js";
-import { getWorkspaceSearchSettings } from "../services/search-controls.js";
-import { getWorkspace } from "../services/workspaces.js";
+import { describeCurrentSearchSettings } from "../services/project-chat.js";
+import { canEditProject, getProjectAccess } from "../services/organizations.js";
+import { getProjectSearchSettings } from "../services/search-controls.js";
+import { getProject } from "../services/projects.js";
 import { resolveScopeDeclineThreshold } from "../search/scope-relevance.js";
 
 /**
- * Workspace chat instructions: the composed system-message preview and the
+ * Project chat instructions: the composed system-message preview and the
  * "Improve" suggestion. Both are DocSlurp-app features: undeclared routes are
  * session-only in sessionAuth, and each handler also requires the first-party
  * app actor (isFirstPartyAppActor), so API keys of any type, browser keys,
@@ -53,23 +53,23 @@ function refuseNonAppActor(c: Parameters<typeof getRequestActor>[0]): Response |
 
 export const chatInstructionsRoutes = new Hono()
   .post(
-    "/:workspaceId/chat-instructions/preview",
+    "/:projectId/chat-instructions/preview",
     zValidator("json", previewSchema),
     async (c) => {
       const refused = refuseNonAppActor(c);
       if (refused) return refused;
       const userId = c.get("sessionUser").id;
-      const workspaceId = String(c.req.param("workspaceId"));
-      const access = await getWorkspaceAccess(workspaceId, userId);
-      const workspace = access ? await getWorkspace(workspaceId, userId) : null;
-      if (!access || !workspace) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
-      const settings = await getWorkspaceSearchSettings(workspaceId, userId);
+      const projectId = String(c.req.param("projectId"));
+      const access = await getProjectAccess(projectId, userId);
+      const project = access ? await getProject(projectId, userId) : null;
+      if (!access || !project) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
+      const settings = await getProjectSearchSettings(projectId, userId);
       const body = c.req.valid("json");
       const instructions = body.instructions === undefined ? settings.chat.searchInstructions : body.instructions;
-      const scope = chatScopeFor(workspace);
+      const scope = chatScopeFor(project);
       const chat = { ...settings.chat, answerStyle: body.answerStyle ?? settings.chat.answerStyle, citations: body.citations ?? settings.chat.citations };
       const base = {
-        ingestInstructions: workspace.systemPrompt,
+        ingestInstructions: project.systemPrompt,
         searchInstructions: instructions,
         answerStyle: chat.answerStyle,
         citations: chat.citations,
@@ -77,18 +77,18 @@ export const chatInstructionsRoutes = new Hono()
       };
       // Exactly what each chat path composes: direct answers (one retrieval, one
       // model call) and the search agent (the default in the app and /v1/chat).
-      const direct = { ...base, contextNote: describeCurrentSearchSettings({ ...settings, chat }), contextLabel: "workspace excerpts", autoExecutePlans: true };
-      const agent = composeAgentWorkspaceInstructions({ ...base, contextNote: describeSearchSettingsForAgent({ ...settings, chat }) });
+      const direct = { ...base, contextNote: describeCurrentSearchSettings({ ...settings, chat }), contextLabel: "project excerpts", autoExecutePlans: true };
+      const agent = composeAgentProjectInstructions({ ...base, contextNote: describeSearchSettingsForAgent({ ...settings, chat }) });
       return c.json({
         sections: composeSystemMessageSections(direct),
         systemMessage: composeSystemMessage(direct),
         paths: {
           direct: { label: "Direct answers", sections: composeSystemMessageSections(direct) },
-          agent: { label: "Search agent (default in the app)", sections: agent.sections, note: "The agent adds its own tool, grounding and citation rules between the core rules and the workspace part." },
+          agent: { label: "Search agent (default in the app)", sections: agent.sections, note: "The agent adds its own tool, grounding and citation rules between the core rules and the project part." },
         },
         defaultTemplate: defaultChatInstructionsTemplate(scope, chat),
         conflicts: findCoreRuleConflicts(instructions),
-        ingestConflicts: findCoreRuleConflicts(workspace.systemPrompt),
+        ingestConflicts: findCoreRuleConflicts(project.systemPrompt),
         maxChars: CHAT_INSTRUCTIONS_MAX_CHARS,
         scopeDecline: {
           threshold: resolveScopeDeclineThreshold(settings.chat.scopeDeclineThreshold),
@@ -98,21 +98,21 @@ export const chatInstructionsRoutes = new Hono()
     },
   )
   .post(
-    "/:workspaceId/chat-instructions/improve",
+    "/:projectId/chat-instructions/improve",
     zValidator("json", draftSchema),
     async (c) => {
       const refused = refuseNonAppActor(c);
       if (refused) return refused;
       const userId = c.get("sessionUser").id;
-      const workspaceId = String(c.req.param("workspaceId"));
-      const access = await getWorkspaceAccess(workspaceId, userId);
-      const workspace = access ? await getWorkspace(workspaceId, userId) : null;
+      const projectId = String(c.req.param("projectId"));
+      const access = await getProjectAccess(projectId, userId);
+      const project = access ? await getProject(projectId, userId) : null;
       // Improve suggests settings, so it needs edit access, like saving them.
-      if (!access || !workspace || !canEditWorkspace(access, userId)) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+      if (!access || !project || !canEditProject(access, userId)) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
 
-      // The workspace limit is checked first, so a workspace refusal never uses up the user's allowance.
+      // The project limit is checked first, so a project refusal never uses up the user's allowance.
       for (const [subject, limit] of [
-        [`workspace:${workspaceId}`, envInt("CHAT_INSTRUCTIONS_IMPROVE_WORKSPACE_LIMIT_PER_HOUR", 30)],
+        [`project:${projectId}`, envInt("CHAT_INSTRUCTIONS_IMPROVE_PROJECT_LIMIT_PER_HOUR", 30)],
         [`user:${userId}`, envInt("CHAT_INSTRUCTIONS_IMPROVE_USER_LIMIT_PER_HOUR", 10)],
       ] as const) {
         const retryAfter = await consumeFeatureRateLimit({ feature: "chat-instructions-improve", subject, limit, windowMs: IMPROVE_WINDOW_MS, requireShared: true });
@@ -122,15 +122,15 @@ export const chatInstructionsRoutes = new Hono()
         }
       }
 
-      const settings = await getWorkspaceSearchSettings(workspaceId, userId);
+      const settings = await getProjectSearchSettings(projectId, userId);
       const body = c.req.valid("json");
-      const scope = chatScopeFor(workspace);
+      const scope = chatScopeFor(project);
       const draft = (body.instructions === undefined ? settings.chat.searchInstructions : body.instructions)?.trim()
         || defaultChatInstructionsTemplate(scope, settings.chat);
       try {
         resolveImproveModel();
         const result = await improveChatInstructions({
-          userId, orgId: workspace.orgId, workspaceId, pipeline: workspace.pipeline,
+          userId, orgId: project.orgId, projectId, pipeline: project.pipeline,
           draft, scope, chat: settings.chat, signal: c.req.raw.signal,
         });
         return c.json({ ...result, draft, saved: false });

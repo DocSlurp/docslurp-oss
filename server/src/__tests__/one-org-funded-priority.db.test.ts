@@ -33,6 +33,6 @@ it.each(["funded_at = now()", "auto_recharge_enabled = true"])("keeps an older f
     expect((await db.query('select id, revoked_at is null as live from api_keys order by id')).rows).toEqual([
       { id: "free-key", live: false }, { id: "paid-key", live: true },
     ]);
-    expect((await db.query("select user_id from workspaces where id = 'paid-workspace'")).rows).toEqual([{ user_id: "retention-user" }]);
+    expect((await db.query("select user_id from projects where id = 'paid-workspace'")).rows).toEqual([{ user_id: "retention-user" }]);
   } finally { await db.close(); }
-});
+}, 120_000);

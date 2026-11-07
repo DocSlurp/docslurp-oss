@@ -22,9 +22,9 @@ const status = (overrides: Partial<Parameters<typeof spendBlockReason>[0] & obje
   funded: false,
   available: 10,
   reserved: 0,
-  workspaceBudgetPaused: false,
+  projectBudgetPaused: false,
   orgBudgetPaused: false,
-  workspaceInOrg: true,
+  projectInOrg: true,
   ...overrides,
 });
 
@@ -69,9 +69,9 @@ describe("spend admission rule", () => {
   });
 
   it("keeps budget caps and entitlement as hard stops for interactive spend", () => {
-    expect(spendBlockReason(status({ workspaceBudgetPaused: true, hasCreditGrants: true }), "interactive", config)?.code).toBe("workspace_budget_paused");
+    expect(spendBlockReason(status({ projectBudgetPaused: true, hasCreditGrants: true }), "interactive", config)?.code).toBe("project_budget_paused");
     expect(spendBlockReason(status({ orgBudgetPaused: true, hasCreditGrants: true }), "interactive", config)?.code).toBe("org_budget_paused");
-    expect(spendBlockReason(status({ workspaceInOrg: false, hasCreditGrants: true }), "interactive", config)?.code).toBe("plan_not_entitled");
+    expect(spendBlockReason(status({ projectInOrg: false, hasCreditGrants: true }), "interactive", config)?.code).toBe("plan_not_entitled");
   });
 
   it("never credit-gates house orgs, but still honours their budget caps", () => {
@@ -86,10 +86,10 @@ describe("spend admission rule", () => {
     }
   });
 
-  it("blocks budget-paused workspaces and orgs, and workspaces outside a billing org", () => {
-    expect(spendBlockReason(status({ workspaceBudgetPaused: true }))?.code).toBe("workspace_budget_paused");
+  it("blocks budget-paused projects and orgs, and projects outside a billing org", () => {
+    expect(spendBlockReason(status({ projectBudgetPaused: true }))?.code).toBe("project_budget_paused");
     expect(spendBlockReason(status({ orgBudgetPaused: true }))?.code).toBe("org_budget_paused");
-    expect(spendBlockReason(status({ workspaceInOrg: false }))?.code).toBe("plan_not_entitled");
+    expect(spendBlockReason(status({ projectInOrg: false }))?.code).toBe("plan_not_entitled");
     expect(spendBlockReason(null)?.code).toBe("plan_not_entitled");
   });
 });
@@ -101,10 +101,10 @@ describe("assertCanSpend", () => {
 
   const row = (overrides: Record<string, unknown> = {}) => ({
     org_id: "org-1", funded: false, available: "500", reserved: "0",
-    workspace_budget_paused: false, org_budget_paused: false, workspace_in_org: true, has_credit_grants: true, ...overrides,
+    project_budget_paused: false, org_budget_paused: false, project_in_org: true, has_credit_grants: true, ...overrides,
   });
 
-  it("reads org_spend_status for the workspace and throws a 402 when blocked", async () => {
+  it("reads org_spend_status for the project and throws a 402 when blocked", async () => {
     sqlMock.mockResolvedValueOnce([row()]);
     await expect(assertCanSpend(null, "ws-1")).resolves.toBeUndefined();
     const [strings, ...values] = sqlMock.mock.calls[0]!;

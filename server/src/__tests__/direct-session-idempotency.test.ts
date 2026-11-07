@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../db.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../db.js")>(), sql: vi.fn() }));
 
-import { assertSessionReplayable, assertSessionWorkspaceStillContributable, createSessionIdempotently, type DirectSessionIdempotencyDeps } from "../services/direct-session-idempotency.js";
+import { assertSessionReplayable, assertSessionProjectStillContributable, createSessionIdempotently, type DirectSessionIdempotencyDeps } from "../services/direct-session-idempotency.js";
 import { hashIdempotencyPayload, IdempotencyConflictError, parseIdempotencyKey, scopedIdempotencyKey } from "../services/idempotency.js";
 
 /** An in-memory idempotency cache and an uncontended lock, with the cache keyed exactly as the real one (key + route). */
@@ -110,6 +110,11 @@ describe("createSessionIdempotently", () => {
 });
 
 describe("idempotency keys", () => {
+  it("preserves the pre-cutover scoped-key digest", () => {
+    // Recorded from the estimator candidate's scope encoding before the rename.
+    expect(scopedIdempotencyKey({ orgId: "org-a", userId: "u", apiKeyId: "credential", project: "target" }, "k"))
+      .toBe("b035af9e5df3f8fb99078889e23c715b4e882cb629ac6a73a2b8e96346cb527e");
+  });
   it("scopes the stored key to organization and user", () => {
     const a = scopedIdempotencyKey({ orgId: "org-a", userId: "u" }, "k");
     expect(a).not.toBe(scopedIdempotencyKey({ orgId: "org-b", userId: "u" }, "k"));
@@ -132,31 +137,31 @@ describe("upload-session idempotency across credentials", () => {
   const request = { files: [{ filename: "a.pdf", mimeType: "application/pdf", sizeBytes: 1 }] };
   const base = { orgId: "org-1", userId: "user-1" };
 
-  it("never replays one API key's session to another key of the same user (different workspace allowlists)", async () => {
+  it("never replays one API key's session to another key of the same user (different project allowlists)", async () => {
     const { deps } = memoryDeps();
     const { create, describe } = sessions();
-    const keyA = await createSessionIdempotently({ key: "retry", scope: { ...base, apiKeyId: "key-a", workspace: "ws-1" }, request, create, describe }, deps);
-    const keyB = await createSessionIdempotently({ key: "retry", scope: { ...base, apiKeyId: "key-b", workspace: "ws-2" }, request, create, describe }, deps);
+    const keyA = await createSessionIdempotently({ key: "retry", scope: { ...base, apiKeyId: "key-a", project: "ws-1" }, request, create, describe }, deps);
+    const keyB = await createSessionIdempotently({ key: "retry", scope: { ...base, apiKeyId: "key-b", project: "ws-2" }, request, create, describe }, deps);
     expect(create).toHaveBeenCalledTimes(2);
     expect(keyB.replayed).toBe(false);
     expect(keyB.body.sessionId).not.toBe(keyA.body.sessionId);
     expect(describe).not.toHaveBeenCalled();
   });
 
-  it("separates the same key and body aimed at two workspaces, and the same key from a browser session and an API key", async () => {
+  it("separates the same key and body aimed at two projects, and the same key from a browser session and an API key", async () => {
     const { deps } = memoryDeps();
     const { create, describe } = sessions();
-    await createSessionIdempotently({ key: "k", scope: { ...base, apiKeyId: "key-a", workspace: "ws-1" }, request, create, describe }, deps);
-    await createSessionIdempotently({ key: "k", scope: { ...base, apiKeyId: "key-a", workspace: "ws-2" }, request, create, describe }, deps);
-    await createSessionIdempotently({ key: "k", scope: { ...base, apiKeyId: null, workspace: "ws-1" }, request, create, describe }, deps);
+    await createSessionIdempotently({ key: "k", scope: { ...base, apiKeyId: "key-a", project: "ws-1" }, request, create, describe }, deps);
+    await createSessionIdempotently({ key: "k", scope: { ...base, apiKeyId: "key-a", project: "ws-2" }, request, create, describe }, deps);
+    await createSessionIdempotently({ key: "k", scope: { ...base, apiKeyId: null, project: "ws-1" }, request, create, describe }, deps);
     expect(create).toHaveBeenCalledTimes(3);
     expect(describe).not.toHaveBeenCalled();
   });
 
-  it("still replays for the same key and workspace", async () => {
+  it("still replays for the same key and project", async () => {
     const { deps } = memoryDeps();
     const { create, describe } = sessions();
-    const args = { key: "k", scope: { ...base, apiKeyId: "key-a", workspace: "ws-1" }, request, create, describe };
+    const args = { key: "k", scope: { ...base, apiKeyId: "key-a", project: "ws-1" }, request, create, describe };
     await createSessionIdempotently(args, deps);
     expect((await createSessionIdempotently(args, deps)).replayed).toBe(true);
   });
@@ -164,7 +169,7 @@ describe("upload-session idempotency across credentials", () => {
   it("lets the replay's authorization refuse: a describe that throws leaves the session unreturned and creates nothing", async () => {
     const { deps } = memoryDeps();
     const { create } = sessions();
-    const scope = { ...base, apiKeyId: "key-a", workspace: "ws-1" };
+    const scope = { ...base, apiKeyId: "key-a", project: "ws-1" };
     await createSessionIdempotently({ key: "k", scope, request, create, describe: async (id) => ({ sessionId: id, files: [] }) }, deps);
     const denied = Object.assign(new Error("not yours"), { statusCode: 409 });
     await expect(createSessionIdempotently({ key: "k", scope, request, create, describe: async () => { throw denied; } }, deps)).rejects.toBe(denied);
@@ -189,25 +194,25 @@ describe("upload-session idempotency across credentials", () => {
 });
 
 describe("assertSessionReplayable", () => {
-  const session = { org_id: "org-1", api_key_id: "key-a", workspace_id: "ws-1", status: "uploading" };
-  const caller = { orgId: "org-1", apiKeyId: "key-a", allowedWorkspaceIds: ["ws-1"] };
+  const session = { org_id: "org-1", api_key_id: "key-a", project_id: "ws-1", status: "uploading" };
+  const caller = { orgId: "org-1", apiKeyId: "key-a", allowedProjectIds: ["ws-1"] };
 
   it("hands back an open session to the key that made it", () => {
     expect(() => assertSessionReplayable(session, caller)).not.toThrow();
-    expect(() => assertSessionReplayable({ ...session, status: "pending" }, { ...caller, allowedWorkspaceIds: null })).not.toThrow();
+    expect(() => assertSessionReplayable({ ...session, status: "pending" }, { ...caller, allowedProjectIds: null })).not.toThrow();
   });
 
   it.each([
     ["another key", { ...caller, apiKeyId: "key-b" }],
     ["a browser session for a key's session", { ...caller, apiKeyId: null }],
     ["another organization", { ...caller, orgId: "org-2" }],
-    ["a key whose allowlist excludes the workspace", { ...caller, allowedWorkspaceIds: ["ws-2"] }],
+    ["a key whose allowlist excludes the project", { ...caller, allowedProjectIds: ["ws-2"] }],
   ])("refuses %s with a 409 and never returns the session", (_label, other) => {
     expect(() => assertSessionReplayable(session, other)).toThrowError(expect.objectContaining({ statusCode: 409, code: "idempotency_key_reused" }));
   });
 
-  it("refuses a session that is unassigned to a workspace for an allowlisted key", () => {
-    expect(() => assertSessionReplayable({ ...session, workspace_id: null }, caller)).toThrowError(expect.objectContaining({ statusCode: 409 }));
+  it("refuses a session that is unassigned to a project for an allowlisted key", () => {
+    expect(() => assertSessionReplayable({ ...session, project_id: null }, caller)).toThrowError(expect.objectContaining({ statusCode: 409 }));
   });
 
   it.each(["failed", "aborted"])("says a %s session cannot be resumed instead of returning it without upload URLs", (status) => {
@@ -215,12 +220,12 @@ describe("assertSessionReplayable", () => {
   });
 });
 
-describe("assertSessionWorkspaceStillContributable", () => {
-  it("refuses the replay with 403 once the user may no longer upload into the session's workspace", async () => {
+describe("assertSessionProjectStillContributable", () => {
+  it("refuses the replay with 403 once the user may no longer upload into the session's project", async () => {
     const mayContribute = vi.fn(async () => false);
-    await expect(assertSessionWorkspaceStillContributable({ workspace_id: "w" }, "u", mayContribute)).rejects.toMatchObject({ statusCode: 403 });
+    await expect(assertSessionProjectStillContributable({ project_id: "w" }, "u", mayContribute)).rejects.toMatchObject({ statusCode: 403 });
     expect(mayContribute).toHaveBeenCalledWith("w", "u");
-    await expect(assertSessionWorkspaceStillContributable({ workspace_id: "w" }, "u", async () => true)).resolves.toBeUndefined();
+    await expect(assertSessionProjectStillContributable({ project_id: "w" }, "u", async () => true)).resolves.toBeUndefined();
   });
 
   it("a replay whose describe refuses returns no session and creates none", async () => {
@@ -228,7 +233,7 @@ describe("assertSessionWorkspaceStillContributable", () => {
     const create = vi.fn(async () => ({ sessionId: "s1" }));
     let revoked = false;
     const describe = vi.fn(async (sessionId: string) => {
-      await assertSessionWorkspaceStillContributable({ workspace_id: "w" }, "u", async () => !revoked);
+      await assertSessionProjectStillContributable({ project_id: "w" }, "u", async () => !revoked);
       return { sessionId, files: [{ uploadUrl: "https://signed" }] };
     });
     const args = { key: "k", scope: { orgId: "o", userId: "u" }, request: {}, create, describe };

@@ -55,7 +55,7 @@ test("app code may import only the server mount and the auth entry", () => {
     "app/src/lib/auth.ts": "import { auth } from '@docslurp/server/lib/better-auth';",
     "app/src/middleware.ts": "const m = await import('@docslurp/server/server');",
     "app/src/lib/a.test.ts": "import '@docslurp/server/services/ingest-report';",
-    "app/src/lib/b.ts": "import { x } from '@docslurp/server/services/workspaces';",
+    "app/src/lib/b.ts": "import { x } from '@docslurp/server/services/projects';",
     "app/src/pages/c.astro": "---\nimport { y } from \"@docslurp/server/lib/mcp-origin\";\n---",
   });
   try {

@@ -11,7 +11,7 @@ import { pushUsageEvent } from "../lib/perf-context.js";
 
 import { documentExtractorRegistry } from "../extractors/registry.js";
 import type { SandboxedOcrJob } from "../extractors/plugins.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { ExtractMarkdownStage, OCR_MAX_CONSECUTIVE_FAILED_BATCHES, OCR_PDF_BATCH_PAGES } from "../stages/extract-markdown.js";
 import { fakeOcrRunner, ocrResultFor, type FakeFrame } from "../test/fake-ocr.js";
@@ -22,13 +22,13 @@ import type { CommandRunner } from "../tools/runner.js";
  * filled by it. A refused or failed OCR read fails the document: hosted vision is never a stand-in, and Fast never OCRs.
  */
 
-function createRun(pipeline: Record<string, unknown> = {}, pagesTotal = 1): WorkspaceRun {
+function createRun(pipeline: Record<string, unknown> = {}, pagesTotal = 1): ProjectRun {
   return {
     id: "run-1", orgId: "org-1", userId: "user-1", kind: "bulk-upload", status: "processing", stage: "extract-markdown",
     totalDocuments: 1, processedDocuments: 0, pagesTotal, pagesProcessed: 0, spentCents: 0,
     pipeline: { ...defaultPipelineFeatures, markdownExtraction: true, ...pipeline },
     error: null, stats: {}, artifacts: {}, claimId: null, createdAt: new Date(), updatedAt: new Date(),
-  } as WorkspaceRun;
+  } as ProjectRun;
 }
 
 function createDocument(filename: string, mimeType: string, pageCount: number): Document {
@@ -428,7 +428,7 @@ describe("image documents are read by the OCR extractor", () => {
     // The real charge check over a client whose queries fail, but only after the pre-read check has passed.
     let reads = 0;
     const failing = (async () => { throw Object.assign(new Error("connection terminated unexpectedly"), { name: "PostgresError", code: "08006" }); }) as any;
-    const healthy = (async () => [{ funded: true, available: 1_000, workspace_budget_paused: false, org_budget_paused: false, workspace_in_org: true }]) as any;
+    const healthy = (async () => [{ funded: true, available: 1_000, project_budget_paused: false, org_budget_paused: false, project_in_org: true }]) as any;
     (store as any).enforceSpendForCharge = async (run: any, credits: number) => {
       reads += 1;
       const result = await enforceRunSpendForCharge(reads === 1 ? healthy : failing, run, credits);

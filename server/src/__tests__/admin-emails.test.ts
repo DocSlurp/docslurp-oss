@@ -24,7 +24,7 @@ describe("ADMIN_EMAILS operators", () => {
     const pool = { query: vi.fn(async () => ({ rows: [{ is_admin: false }] })) };
     expect(await isConfiguredAdminUser(pool as unknown as Pool, "user-2")).toBe(false);
   });
-  it("no longer exports anything that writes organization or workspace roles", async () => {
+  it("no longer exports anything that writes organization or project roles", async () => {
     const module = await import("../lib/admin-emails.js");
     expect(Object.keys(module).filter((name) => /admit|promote/i.test(name))).toEqual([]);
   });

@@ -50,7 +50,7 @@ Every content connector must cover initial ingestion, update/delete propagation,
 
 ## Language SDKs
 
-Each client needs upload/URL ingestion, run waiting, cited search/chat, typed errors, retries that respect rate limits, cancellation and streaming with a nonstreaming fallback. Preserve server-side credentials, organization/workspace scope, usage metadata and executable examples. Validate a real indexed corpus before calling a package supported.
+Each client needs upload/URL ingestion, run waiting, cited search/chat, typed errors, retries that respect rate limits, cancellation and streaming with a nonstreaming fallback. Preserve server-side credentials, organization/project scope, usage metadata and executable examples. Validate a real indexed corpus before calling a package supported.
 
 <a id="python-sdk"></a>
 

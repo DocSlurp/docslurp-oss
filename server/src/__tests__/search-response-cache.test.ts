@@ -6,31 +6,31 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * writes re-check privacy and invalidation; memory is bounded per organization.
  */
 
-type Access = { workspaceId: string; orgId: string; pipeline: unknown } | Error | "slow";
+type Access = { projectId: string; orgId: string; pipeline: unknown } | Error | "slow";
 const access = vi.hoisted(() => new Map<string, unknown>());
 const lookups = vi.hoisted(() => ({ count: 0 }));
 vi.mock("../services/organizations.js", () => ({
-  getWorkspaceAccessWithPipeline: vi.fn(async (workspaceId: string) => {
+  getProjectAccessWithPipeline: vi.fn(async (projectId: string) => {
     lookups.count += 1;
-    const entry = access.get(workspaceId) as Access | undefined;
+    const entry = access.get(projectId) as Access | undefined;
     if (entry instanceof Error) throw entry;
     if (entry === "slow") {
       await new Promise((resolve) => setTimeout(resolve, 400));
-      return { workspaceId, orgId: "org-1", pipeline: {} };
+      return { projectId, orgId: "org-1", pipeline: {} };
     }
     return entry ?? null;
   }),
 }));
-vi.mock("../search/eligible-documents.js", () => ({ ensureInvalidationListener: vi.fn(), onSearchWorkspaceInvalidated: vi.fn() }));
+vi.mock("../search/eligible-documents.js", () => ({ ensureInvalidationListener: vi.fn(), onSearchProjectInvalidated: vi.fn() }));
 vi.mock("../db.js", () => ({ sql: vi.fn(async () => { throw new Error("no database in this test"); }) }));
 
 const cache = await import("../search/response-cache.js");
 
-const request = { q: "pump", workspace: "ws-a" };
-const ticket = (workspaceIds: string[], overrides: Partial<Parameters<typeof cache.responseCacheTicket>[0]> = {}) =>
-  cache.responseCacheTicket({ userId: "user-1", apiKeyId: "key-1", workspaceIds, request, ...overrides });
+const request = { q: "pump", project: "ws-a" };
+const ticket = (projectIds: string[], overrides: Partial<Parameters<typeof cache.responseCacheTicket>[0]> = {}) =>
+  cache.responseCacheTicket({ userId: "user-1", apiKeyId: "key-1", projectIds, request, ...overrides });
 const set = (id: string, orgId: string, privacyMode?: string) =>
-  access.set(id, { workspaceId: id, orgId, pipeline: privacyMode ? { privacyMode } : {} });
+  access.set(id, { projectId: id, orgId, pipeline: privacyMode ? { privacyMode } : {} });
 
 beforeEach(() => {
   cache.clearSearchResponseCacheForTests();
@@ -45,7 +45,7 @@ beforeEach(() => {
 describe("responseCacheTicket", () => {
   it("issues a hashed key for standard and local-only scopes", async () => {
     const value = await ticket(["ws-b", "ws-a"]);
-    expect(value).toMatchObject({ orgKey: "org-1", userId: "user-1", workspaceIds: ["ws-a", "ws-b"] });
+    expect(value).toMatchObject({ orgKey: "org-1", userId: "user-1", projectIds: ["ws-a", "ws-b"] });
     expect(value!.key).toMatch(/^[0-9a-f]{64}$/);
   });
 
@@ -66,7 +66,7 @@ describe("responseCacheTicket", () => {
     }
   });
 
-  it("refuses a strict-privacy workspace alone or anywhere in a mixed scope", async () => {
+  it("refuses a strict-privacy project alone or anywhere in a mixed scope", async () => {
     expect(await ticket(["ws-strict"])).toBeNull();
     expect(await ticket(["ws-a", "ws-strict"])).toBeNull();
     expect(await ticket(["ws-strict", "ws-b", "ws-a"])).toBeNull();
@@ -77,9 +77,9 @@ describe("responseCacheTicket", () => {
     expect(await ticket(["ws-a"])).toBeNull();
     access.set("ws-a", new Error("db down"));
     expect(await ticket(["ws-a"])).toBeNull();
-    access.set("ws-a", { workspaceId: "ws-other", orgId: "org-2", pipeline: {} });
+    access.set("ws-a", { projectId: "ws-other", orgId: "org-2", pipeline: {} });
     expect(await ticket(["ws-a"])).toBeNull();
-    access.set("ws-a", { workspaceId: "ws-a", orgId: "org-1", pipeline: { privacyMode: "not-a-mode" } });
+    access.set("ws-a", { projectId: "ws-a", orgId: "org-1", pipeline: { privacyMode: "not-a-mode" } });
     expect(await ticket(["ws-a"])).toBeNull();
   });
 
@@ -134,7 +134,7 @@ describe("storeResponse", () => {
     expect(cache.readCachedResponse(t, 60_000)).toEqual(data());
   });
 
-  it("requires an explicit scope match for a single-workspace ticket", async () => {
+  it("requires an explicit scope match for a single-project ticket", async () => {
     const t = (await ticket(["ws-a"]))!;
     expect(await cache.storeResponse(t, data(), undefined)).toBe(false);
     expect(await cache.storeResponse(t, data(), null)).toBe(false);
@@ -142,7 +142,7 @@ describe("storeResponse", () => {
     expect(cache.readCachedResponse(t, 60_000)).toBeUndefined();
   });
 
-  it("does not store when the workspace became strict-privacy during the search", async () => {
+  it("does not store when the project became strict-privacy during the search", async () => {
     const t = (await ticket(["ws-a"]))!;
     set("ws-a", "org-1", "strict-privacy");
     expect(await cache.storeResponse(t, data(), "ws-a")).toBe(false);
@@ -150,18 +150,18 @@ describe("storeResponse", () => {
     expect(cache.readCachedResponse(t, 60_000)).toBeUndefined();
   });
 
-  it("does not store when the workspace was invalidated during the search, even if it reads standard again", async () => {
+  it("does not store when the project was invalidated during the search, even if it reads standard again", async () => {
     const t = (await ticket(["ws-a"]))!;
-    cache.invalidateSearchResponseCacheWorkspace("ws-a");
+    cache.invalidateSearchResponseCacheProject("ws-a");
     expect(await cache.storeResponse(t, data(), "ws-a")).toBe(false);
   });
 
-  it("drops a workspace's entries on invalidation", async () => {
+  it("drops a project's entries on invalidation", async () => {
     const a = (await ticket(["ws-a"]))!;
     const b = (await ticket(["ws-b"]))!;
     await cache.storeResponse(a, data("a"), "ws-a");
     await cache.storeResponse(b, data("b"), "ws-b");
-    cache.invalidateSearchResponseCacheWorkspace("ws-a");
+    cache.invalidateSearchResponseCacheProject("ws-a");
     expect(cache.readCachedResponse(a, 60_000)).toBeUndefined();
     expect(cache.readCachedResponse(b, 60_000)).toEqual(data("b"));
   });

@@ -30,7 +30,7 @@ vi.mock("../services/api-keys.js", async () => {
 
 const key = (extra: Record<string, unknown> = {}) => ({
   keyId: "key-uniform", userId: "user-uniform", orgId: "org-uniform", keyType: "server", allowedDomains: [],
-  scopes: ["ingest", "search", "workspaces:manage"], rateLimitRpm: 600, rateLimitPpd: 100_000, rateLimits: [], workspaceIds: [], ...extra,
+  scopes: ["ingest", "search", "projects:manage"], rateLimitRpm: 600, rateLimitPpd: 100_000, rateLimits: [], projectIds: [], ...extra,
 });
 const ip = { "fly-client-ip": "192.0.2.77" };
 const bearer = { Authorization: "Bearer dslp_priv_uniform", ...ip };
@@ -130,7 +130,7 @@ describe("one error shape for the native API (real middleware stack)", () => {
   });
 
   it("answers missing and invalid credentials with unauthorized", async () => {
-    expect((await envelope(await app.request("/v1/workspaces/board", { headers: ip }))).code).toBe("unauthorized");
+    expect((await envelope(await app.request("/v1/projects/board", { headers: ip }))).code).toBe("unauthorized");
     expect((await envelope(await app.request("/dashboard/bootstrap", { headers: ip }))).code).toBe("unauthorized");
     mocks.validateApiKey.mockResolvedValue(null);
     expect((await envelope(await app.request("/v1/documents", { headers: bearer }))).code).toBe("unauthorized");
@@ -140,8 +140,8 @@ describe("one error shape for the native API (real middleware stack)", () => {
     vi.stubEnv("API_RATE_LIMIT_ENABLED", "true");
     vi.stubEnv("API_RATE_LIMIT_IP_READ_MAX", "1");
     await app.request("/health", { headers: ip });
-    await app.request("/v1/workspaces/board", { headers: ip });
-    const limited = await app.request("/v1/workspaces/board", { headers: ip });
+    await app.request("/v1/projects/board", { headers: ip });
+    const limited = await app.request("/v1/projects/board", { headers: ip });
     expect(limited.status).toBe(429);
     expect(limited.headers.get("Retry-After")).toMatch(/^\d+$/);
     expect(limited.headers.get("RateLimit-Policy")).toContain("ip-read");
@@ -156,7 +156,7 @@ describe("one error shape for the native API (real middleware stack)", () => {
     // spend_limit_exceeded envelope itself is covered in rate-limit.test.ts.
     vi.stubEnv("API_RATE_LIMIT_ENABLED", "true");
     mocks.validateApiKey.mockResolvedValue(key({ rateLimits: [{ metric: "spend", limit: 0, windowSeconds: 3600 }] }));
-    const refused = await app.request("/v1/search?q=x&workspaceId=00000000-0000-4000-8000-000000000001", { headers: bearer });
+    const refused = await app.request("/v1/search?q=x&projectId=00000000-0000-4000-8000-000000000001", { headers: bearer });
     expect(refused.status).toBe(503);
     expect(refused.headers.get("Retry-After")).toMatch(/^\d+$/);
     const error = await envelope(refused);
@@ -179,7 +179,7 @@ describe("one error shape for the native API (real middleware stack)", () => {
   });
 
   it("answers an unexpected failure with internal and never its text", async () => {
-    const response = await app.request("/v1/workspaces", { headers: bearer });
+    const response = await app.request("/v1/projects", { headers: bearer });
     expect(response.status).toBe(500);
     const error = await envelope(response);
     expect(error.code).toBe("internal");

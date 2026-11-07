@@ -3,7 +3,7 @@ import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
 
 import { apiErrorResponse, nativeBodyLimit } from "../lib/api-error.js";
-import { getRequestActor, loadActorScopedWorkspace } from "../lib/request-actor.js";
+import { getRequestActor, loadActorScopedProject } from "../lib/request-actor.js";
 import { requestUserAgent, setCurrentRequestOrgId } from "../lib/request-context.js";
 import { validationHook } from "../lib/validation.js";
 import { resolveDefaultOrganization, getOrganization } from "../services/organizations.js";
@@ -50,7 +50,7 @@ export const feedbackReportSchema = z.object({
   /** Path only; query strings and fragments are dropped (they can carry tokens). */
   route: optionalLine(300).transform((value) => (value ? feedbackRouteTemplate(value) : null)),
   screen: optionalLine(120),
-  workspaceId: optionalLine(256),
+  projectId: optionalLine(256),
   orgId: optionalLine(128),
   /** W3C trace id (32 lowercase hex, not all zeros). */
   traceId: optionalPattern(/^(?!0{32})[0-9a-f]{32}$/),
@@ -85,18 +85,18 @@ export function createFeedbackRoutes(deps: FeedbackDeps = {}) {
       if (actor.type !== "session" || !actor.userId) return apiErrorResponse(c, 401, "unauthorized", "Sign in to send feedback");
       const body = c.req.valid("json");
 
-      // Tenant scope: a named workspace counts only when this user can reach it;
+      // Tenant scope: a named project counts only when this user can reach it;
       // a named org only when they are a member. Otherwise the personal org.
       // The response is identical either way, so the fields are no access oracle.
-      const workspace = body.workspaceId ? await loadActorScopedWorkspace(body.workspaceId, actor).catch(() => null) : null;
-      const org = workspace
-        ? { id: workspace.orgId }
+      const project = body.projectId ? await loadActorScopedProject(body.projectId, actor).catch(() => null) : null;
+      const org = project
+        ? { id: project.orgId }
         : (body.orgId ? await getOrganization(body.orgId, actor.userId) : null) ?? await resolveDefaultOrganization(actor.userId);
       setCurrentRequestOrgId(org.id);
 
       const result = await submitFeedbackReport({
         orgId: org.id,
-        workspaceId: workspace?.id ?? null,
+        projectId: project?.id ?? null,
         userId: actor.userId,
         userEmail: actor.user.email,
         category: body.category,

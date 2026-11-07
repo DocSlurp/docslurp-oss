@@ -31,7 +31,7 @@ import { configuredVisionModel, maxCatalogWorstCaseVisionRequestCents, worstCase
  *   moment it is admitted (pessimistic) and leaves the count only in the checkpoint transaction that
  *   persists the customer Rich page charge it created (`rich:<run>:<document>:<page>`, first insert
  *   wins; db/usage-event-store.ts). The count is kept per org with no foreign key to runs or
- *   workspaces, so deleting either cannot reset it. Sticky only when settled uncharged requests alone
+ *   projects, so deleting either cannot reset it. Sticky only when settled uncharged requests alone
  *   leave no room; requests still in flight or awaiting their checkpoint never make a refusal sticky.
  *
  * - **Route overrun**: this org's requests on the request's route (ledger provider and model) billed more
@@ -377,7 +377,7 @@ export function decideVisionAdmission(
     orgLimitCents: config.orgLimitCents, requestCents: roundCents(weightCents),
     routeOverruns: snapshot.routeOverruns, routeCorrection: snapshot.routeCorrection,
   });
-  // A run with no org (and no workspace org) cannot be bounded per org: refuse, never skip the bound.
+  // A run with no org (and no project org) cannot be bounded per org: refuse, never skip the bound.
   if (!snapshot.scoped) return stop("unscoped-run", true);
   // This org's requests keep billing above the route's bound: refused for this org until its overruns age out.
   if (snapshot.routeOverruns >= config.routeOverrunLimit) return stop("route-overrun", false);

@@ -212,7 +212,7 @@ export class PipelineUsageEventLedger {
   /**
    * Billable cost (credits) of the events buffered since the last committed
    * checkpoint, kept as a running sum so cost-cap checks stay O(1). Together
-   * with `workspace_runs.spent_cents` (the committed part) it is the run's
+   * with `project_runs.spent_cents` (the committed part) it is the run's
    * spend figure (checkpoints.ts runSpentCents).
    */
   get pendingBillableCents(): number {

@@ -72,9 +72,9 @@ describe("a run created with the legacy id before the deploy", () => {
     await db.exec(`
       insert into "user"(id, name, email) values ('u1', 'A', 'a@example.invalid');
       insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
-      insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
+      insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
     `);
-    await db.query(`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+    await db.query(`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
       values ('run-1', 'o1', 'u1', 'w', 'upload', 'processing', 'extract-markdown', $1::jsonb, 1)`, [JSON.stringify(legacyPipeline)]);
     const served = await serveOnRandomPort(db);
     server = served.server;

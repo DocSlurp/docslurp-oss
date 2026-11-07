@@ -18,7 +18,10 @@ const journal = JSON.parse(readFileSync(new URL("../../db/migrations/meta/_journ
 type Removal = { org_id: string; user_id: string; reason: string };
 type Promotion = { org_id: string; user_id: string; previous_role: string };
 let db: Awaited<ReturnType<typeof createMigratedDatabase>>;
-const rows = async <T>(text: string) => (await db.query<T>(text)).rows;
+const rows = async <T>(text: string) => {
+  const { rows: [schema] } = await db.query<{ renamed: boolean }>("select to_regclass('public.projects') is not null as renamed");
+  return (await db.query<T>(schema.renamed ? text.replaceAll("workspace", "project") : text)).rows;
+};
 let plannedRemovals: Removal[];
 let plannedPromotions: Promotion[];
 let report: { title: string; level: string; lines: string[] };
@@ -191,7 +194,7 @@ describe("0127 one organization per user", () => {
       { id: "k-t3", revoked: true },
     ]);
     expect(await rows("select * from workspace_members where user_id = 'two-teams'")).toEqual([]);
-    expect(await rows("select workspace_id, user_id from workspace_members order by workspace_id")).toEqual([{ workspace_id: "ws-t3", user_id: "t3-member" }]);
+    expect(await rows("select workspace_id, user_id from workspace_members order by workspace_id")).toEqual([{ project_id: "ws-t3", user_id: "t3-member" }]);
     expect(await rows("select id, user_id from workspaces order by id")).toEqual([
       { id: "ws-t1", user_id: "owner-t1" },
       { id: "ws-t2", user_id: "two-teams" },
@@ -209,7 +212,7 @@ describe("0127 one organization per user", () => {
   });
 
   it("reports a personal organization with no data as empty, and one with data or of a team as not", async () => {
-    await db.exec(`insert into workspaces (id, org_id, user_id, name) values ('ws-solo', 'p-solo', 'solo', 'S');
+    await db.exec(`insert into projects (id, org_id, user_id, name) values ('ws-solo', 'p-solo', 'solo', 'S');
       insert into api_keys (id, user_id, org_id, key_hash, name, revoked_at) values ('k-solo-old', 'solo', 'p-solo', 'h9', 'n', now())`);
     // p-solo: only a revoked key. p-tomb: nothing. p-data: a run-less workspace and only a revoked key now, but not empty
     // after a live key is added. t1: a team.

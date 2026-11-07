@@ -7,7 +7,7 @@ export interface NativeOperationBinding {
   rootId: string;
   userId: string;
   orgId: string;
-  workspaceId: string;
+  projectId: string;
   deadline: Date;
   outputBytes?: number;
 }
@@ -18,7 +18,7 @@ export interface NativeOperationPolicy {
   serializeAcceptance<T>(binding: NativeOperationBinding, work: () => Promise<T>): Promise<T>;
   recordCancellation(binding: NativeOperationBinding, scope: "task" | "tree"): Promise<void>;
 }
-const agentId="docslurp-workspace-chat";
+const agentId="docslurp-project-chat";
 const resourceId=(binding:NativeOperationBinding)=>JSON.stringify([binding.orgId,binding.userId]);
 
 /** Native task lifecycle plus application identity/permission policy. This class
@@ -52,7 +52,7 @@ export class NativeOperations {
       const remaining=binding.deadline.getTime()-Date.now();
       if(remaining<=0)throw new Error("operation_deadline");
       const {task}=await this.manager.enqueue({agentId,runId:binding.rootId,
-        toolName:"docslurpWorkspaceChat",toolCallId:binding.id,resourceId:resourceId(binding),threadId:binding.id,
+        toolName:"docslurpProjectChat",toolCallId:binding.id,resourceId:resourceId(binding),threadId:binding.id,
         args:{operationId:binding.id},timeoutMs:Math.min(600000,remaining),maxRetries:0});
       return {operationId:binding.id,rootId:binding.rootId,taskId:task.id,status:publicTask(task).status};
     });
@@ -74,7 +74,7 @@ export class NativeOperations {
     // Recheck after native storage/cache awaits, before returning any payload.
     await this.policy.authorize(operationId);
     for (const child of tasks) await this.policy.authorize(child.toolCallId);
-    return {...recovery,operation:{...publicTask(task),user_id:binding.userId,org_id:binding.orgId,workspace_id:binding.workspaceId,snapshot:recovery.snapshot,sequence:recovery.watermark},tasks:tasks.map(child=>({...publicTask(child),workspace_id:scopes.get(child.id)!.workspaceId,org_id:scopes.get(child.id)!.orgId,user_id:binding.userId})),
+    return {...recovery,operation:{...publicTask(task),user_id:binding.userId,org_id:binding.orgId,project_id:binding.projectId,snapshot:recovery.snapshot,sequence:recovery.watermark},tasks:tasks.map(child=>({...publicTask(child),project_id:scopes.get(child.id)!.projectId,org_id:scopes.get(child.id)!.orgId,user_id:binding.userId})),
       treeSettled:tasks.every(child=>["completed","failed","cancelled","timed_out"].includes(child.status))};
   }
   async cancel(operationId:string,scope:"task"|"tree") {

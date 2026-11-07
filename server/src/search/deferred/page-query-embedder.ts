@@ -86,7 +86,7 @@ async function embedWithGemini(
   args: { model: string; query: string; journal: UsageRecorder; privacyMode: PrivacyMode; signal?: AbortSignal },
   deps: PageQueryEmbedderDeps,
 ): Promise<Float32Array | null> {
-  // Hosted: only `standard` workspaces may send query text to Google.
+  // Hosted: only `standard` projects may send query text to Google.
   if (!privacyModeAllowsHosted(args.privacyMode)) return null;
   const apiKey = deps.geminiApiKey ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY;
   if (!apiKey) return null;

@@ -16,16 +16,16 @@ beforeAll(async () => {
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'One', 'one', 'u1');
-    insert into workspaces(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W');
-    insert into workspace_runs(id, org_id, user_id, workspace_id, kind, status, stage) values ('run1', 'o1', 'u1', 'w1', 'bulk', 'processing', 'queued');
-    insert into workspace_runs(id, org_id, user_id, workspace_id, kind, status, stage) values ('run2', 'o1', 'u1', 'w1', 'bulk', 'processing', 'queued');
-    insert into documents(id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, file_facts)
+    insert into projects(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W');
+    insert into project_runs(id, org_id, user_id, project_id, kind, status, stage) values ('run1', 'o1', 'u1', 'w1', 'bulk', 'processing', 'queued');
+    insert into project_runs(id, org_id, user_id, project_id, kind, status, stage) values ('run2', 'o1', 'u1', 'w1', 'bulk', 'processing', 'queued');
+    insert into documents(id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, file_facts)
       values ('long-docx', 'o1', 'u1', 'w1', 'run1', 'contract.docx',
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'k1', 'processing', 1,
         '{"mimeType":"application/vnd.openxmlformats-officedocument.wordprocessingml.document","format":"office-word","mismatch":"same-family","declaredMimeType":"application/msword","sniffedMimeType":"application/vnd.openxmlformats-officedocument.wordprocessingml.document","container":"zip","encoding":null}');
-    insert into documents(id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
+    insert into documents(id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
       values ('other-run', 'o1', 'u1', 'w1', 'run2', 'b.docx', 'application/msword', 'k2', 'processing', 1);
-    insert into documents(id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, deduped_from_document_id)
+    insert into documents(id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, deduped_from_document_id)
       values ('copy', 'o1', 'u1', 'w1', 'run1', 'copy.docx', 'application/msword', 'k3', 'processing', 1, 'long-docx');
   `);
   const served = await serveOnRandomPort(db);
@@ -96,19 +96,19 @@ describe("Store.triggerWebhooks", () => {
   it("queues a failed run's event with the public error, never the raw worker diagnostic", async () => {
     await db.exec(`
       insert into webhooks(id, user_id, org_id, url, secret, events) values ('hook', 'u1', 'o1', 'https://hooks.example/x', 's', '{"run.failed"}');
-      update workspace_runs set status = 'failed', stage = 'embed',
+      update project_runs set status = 'failed', stage = 'embed',
         error = 'connect ECONNREFUSED 10.0.3.7:5432 at Pool.connect (/app/worker/src/db/store.ts:123) password=hunter2'
         where id = 'run1';
     `);
     await store.triggerWebhooks("run1", "run.failed");
     const [row] = (await db.query<{ payload: Record<string, unknown> }>(`select payload from webhook_outbox where payload->>'runId' = 'run1'`)).rows;
-    expect(row!.payload).toMatchObject({ event: "run.failed", runId: "run1", workspaceId: "w1", status: "failed" });
+    expect(row!.payload).toMatchObject({ event: "run.failed", runId: "run1", projectId: "w1", status: "failed" });
     expect(JSON.stringify(row!.payload)).not.toMatch(/ECONNREFUSED|10\.0\.3\.7|hunter2|store\.ts/);
     expect(typeof row!.payload.error).toBe("string");
   }, 60_000);
 
   it("sends a null error for a run that did not fail", async () => {
-    await db.exec(`update workspace_runs set status = 'completed', error = null where id = 'run2'`);
+    await db.exec(`update project_runs set status = 'completed', error = null where id = 'run2'`);
     await db.exec(`delete from webhook_outbox`);
     await store.triggerWebhooks("run2", "run.failed");
     const [row] = (await db.query<{ payload: Record<string, unknown> }>(`select payload from webhook_outbox`)).rows;

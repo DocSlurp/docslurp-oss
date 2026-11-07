@@ -14,7 +14,7 @@ describe("buildStorageIntegrityReport", () => {
           key: "docs/source.pdf",
           runId: "run-1",
           documentId: "doc-1",
-          workspaceId: "ws-1",
+          projectId: "ws-1",
           orgId: "org-1",
           userId: "user-1",
           source: "source.pdf"
@@ -25,7 +25,7 @@ describe("buildStorageIntegrityReport", () => {
           runId: "run-1",
           userId: "user-1",
           orgId: "org-1",
-          workspaceId: "ws-1",
+          projectId: "ws-1",
           status: "completed",
           pipeline: {
             embed: true,
@@ -83,7 +83,7 @@ describe("groupReferencesByRunPrefix", () => {
 describe("runStorageIntegritySweep existence checks", () => {
   it("lists each run prefix once and HEADs only what the listing lacks", async () => {
     const { Store } = await import("../db/store.js");
-    const references = ["u1/run-a/a.json", "u1/run-a/b.json", "u1/run-a/gone.json", "u1/run-b/c.json", "loose.json"].map((key) => ({ kind: "stage-artifact", key, runId: null, documentId: null, workspaceId: null, orgId: null, userId: null, source: key }));
+    const references = ["u1/run-a/a.json", "u1/run-a/b.json", "u1/run-a/gone.json", "u1/run-b/c.json", "loose.json"].map((key) => ({ kind: "stage-artifact", key, runId: null, documentId: null, projectId: null, orgId: null, userId: null, source: key }));
     const store = Object.create(Store.prototype) as InstanceType<typeof Store>;
     Object.assign(store, {
       loadStorageIntegrityReferences: async () => references,

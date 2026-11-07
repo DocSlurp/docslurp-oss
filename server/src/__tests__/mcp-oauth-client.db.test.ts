@@ -194,7 +194,7 @@ describe("MCP OAuth with the official MCP client SDK", () => {
 
     const client = await connect(provider);
     const { tools } = await client.listTools();
-    expect(tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(["search", "chat", "listWorkspaces", "upload"]));
+    expect(tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(["search", "chat", "listProjects", "upload"]));
     expect(tools.find((tool) => tool.name === "search")?.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false });
     const search = await client.callTool({ name: "search", arguments: { q: "renewal" } });
     expect(search.isError).toBe(false);

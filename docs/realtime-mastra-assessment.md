@@ -21,7 +21,7 @@ persistent-storage acceptance.
 |---|---|---|
 | Agent loop, saved workflow state, recovery/fencing | DurableAgent / EventedAgent; `recover`, `recoverActiveRuns`, execution-fence | Static server-side model/tool/policy reconstruction; usage for every real attempt |
 | Background tools, leases, retries, suspension/results | BackgroundTaskManager; static executor registry, get/list/cancel/resume | Tenant filter, root admission/budget and shared Temporal ownership |
-| Conversations | Memory resource/thread scopes | Server-derived org/workspace/user binding; no client authority |
+| Conversations | Memory resource/thread scopes | Server-derived org/project/user binding; no client authority |
 | Ongoing input and external job notices | Signals / thread streams | Authorization and paid-follow-up policy; observing must not send a wake signal |
 | Modes and approvals | AgentController Session when needed | Existing product does not currently require new modes; do not add an alternate controller |
 | Tool validation and guardrails | Native Tools and processors | Existing read-only allowlist, privacy, spend, cancellation checks |
@@ -118,15 +118,15 @@ Durable-agent automatic recovery remains off because it can repeat paid calls.
 Native BackgroundTaskManager owns new first-party operations: durable enqueue,
 cross-process dispatch, leases, lifecycle, cancellation, timeout, zero-retry stale
 recovery and final result storage. Native indexed PubSub/cache owns replay.
-The existing workspace chat/retrieval implementation is invoked as a statically
+The existing project chat/retrieval implementation is invoked as a statically
 registered native background tool; its pre-existing AI SDK agent loop and usage
 ledger are not serialized as request closures or replaced by a second model call.
 Native DurableAgent/Memory capability tests remain useful, but this path does not
-claim to have migrated the existing workspace conversation history into Memory.
+claim to have migrated the existing project conversation history into Memory.
 No new AgentController, Signals-driven paid follow-up, subagent launcher or custom
 agent loop was added merely to exercise those APIs.
 
-The application SQL binding retains identity, tenant/workspace/root scope,
+The application SQL binding retains identity, tenant/project/root scope,
 idempotency, deadline, cancellation intent and accepted-output quota counters.
 It does not own native task leases, execution dispatch, output journal or result
 storage. Existing shared Temporal materialization references remain application

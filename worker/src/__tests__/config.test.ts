@@ -58,7 +58,7 @@ describe("fromEnv", () => {
     expect(config).not.toHaveProperty("embeddingBatchSize");
   });
 
-  it("allows an inference lane override without changing the workspace model", () => {
+  it("allows an inference lane override without changing the project model", () => {
     process.env.DEFAULT_INFERENCE_LANE = "backfill";
 
     const config = fromEnv();

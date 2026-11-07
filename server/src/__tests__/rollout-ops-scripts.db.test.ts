@@ -129,7 +129,7 @@ describe("predeploy-check", () => {
       const extractors = byTitle("Stored extraction configs");
       expect(extractors.level).toBe("warn");
       expect(extractors.title).toContain(": 1");
-      expect(extractors.lines.join("\n")).toContain(`workspaces: "retired-extractor" (1 mention(s))`);
+      expect(extractors.lines.join("\n")).toContain(`projects: "retired-extractor" (1 mention(s))`);
       expect(byTitle("documents:").title).toMatch(/^documents: ~\d+ rows, /);
       expect(byTitle("Completed stage states").level).toBe("warn");
       expect(byTitle("Runs in flight").title).toContain("Runs in flight: 2 (");
@@ -171,13 +171,13 @@ describe("predeploy-check", () => {
     expect((await report()).level).toBe("ok");
     await client.query(`insert into "user"(id, name, email) values ('vb-u', 'U', 'vb@example.com') on conflict do nothing;
       insert into organizations(id, name, slug, created_by_user_id) values ('vb-o', 'O', 'vb-o', 'vb-u') on conflict do nothing;
-      insert into workspaces(id, org_id, user_id, name, pipeline) values ('vb-w', 'vb-o', 'vb-u', 'W', '{"vectorBackends": ["lancedb", "chroma"]}'::jsonb)`);
+      insert into projects(id, org_id, user_id, name, pipeline) values ('vb-w', 'vb-o', 'vb-u', 'W', '{"vectorBackends": ["lancedb", "chroma"]}'::jsonb)`);
     try {
       const blocked = await report();
       expect(blocked.level).toBe("blocker");
-      expect(blocked.lines.join("\n")).toContain('workspaces: "chroma" in 1 pipeline(s)');
+      expect(blocked.lines.join("\n")).toContain('projects: "chroma" in 1 pipeline(s)');
     } finally {
-      await client.query("delete from workspaces where id = 'vb-w'; delete from organizations where id = 'vb-o'; delete from \"user\" where id = 'vb-u'");
+      await client.query("delete from projects where id = 'vb-w'; delete from organizations where id = 'vb-o'; delete from \"user\" where id = 'vb-u'");
     }
   });
 
