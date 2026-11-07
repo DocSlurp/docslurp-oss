@@ -1,3 +1,5 @@
+import { ResourceCapacityError } from "../lib/resource-capacity.js";
+export { ResourceCapacityError } from "../lib/resource-capacity.js";
 import { readFileSync } from "node:fs";
 import os from "node:os";
 
@@ -133,11 +135,24 @@ export function detectAvailableMemoryBytes(reader: MemoryLimitReader, rssBytes: 
   const available = meminfo?.match(/^MemAvailable:\s+(\d+)\s+kB$/m);
   if (available) candidates.push(Number(available[1]) * 1024);
   else if (reader.osFreeMemoryBytes !== undefined) candidates.push(reader.osFreeMemoryBytes);
-  for (const path of ["/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory/memory.usage_in_bytes"]) {
-    const raw = reader.read(path)?.trim();
-    if (raw && /^\d+$/.test(raw)) {
-      const used = Number(raw);
-      if (Number.isSafeInteger(used)) candidates.push(Math.max(0, limit - used));
+  for (const [limitPath, usagePath, statPath, inactiveKey] of [
+    ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory.stat", "inactive_file"],
+    ["/sys/fs/cgroup/memory/memory.limit_in_bytes", "/sys/fs/cgroup/memory/memory.usage_in_bytes", "/sys/fs/cgroup/memory/memory.stat", "total_inactive_file"],
+  ] as const) {
+    const finiteLimit = parseMemoryBytes(reader.read(limitPath), "bytes");
+    const raw = reader.read(usagePath)?.trim();
+    const used = raw && /^\d+$/.test(raw) ? Number(raw) : NaN;
+    if (Number.isSafeInteger(used)) {
+      const inactive = reader.read(statPath)?.match(new RegExp(`^${inactiveKey}\\s+(\\d+)$`, "m"));
+      const cache = inactive ? Number(inactive[1]) : 0;
+      // Inactive file cache is reclaimable, unlike anonymous parser memory. The system
+      // MemAvailable bound and 20% admission reserve still apply.
+      const reclaimable = Number.isSafeInteger(cache) ? Math.min(used, cache) : 0;
+      candidates.push(Math.max(0, limit - used + reclaimable));
+    }
+    else if (finiteLimit !== null) {
+      // A bounded cgroup with unreadable usage cannot safely borrow host free memory.
+      candidates.push(0);
     }
   }
   return Math.max(0, Math.min(...candidates));
@@ -190,8 +205,12 @@ export function resolveAdaptiveStageTuning(args: {
     config,
     embeddingRoute.runtime,
   );
+  const usableMemoryBytes = Math.max(0, memoryHeadroomBytes - totalMemoryBytes * 0.2);
+  if (state.documents.length > 0 && usableMemoryBytes < stageMemoryMb * 1024 * 1024) {
+    throw new ResourceCapacityError();
+  }
   const memoryLimited = clamp(
-    Math.floor(Math.max(0, memoryHeadroomBytes - totalMemoryBytes * 0.2) / 1024 / 1024 / stageMemoryMb),
+    Math.floor(usableMemoryBytes / 1024 / 1024 / stageMemoryMb),
     1,
     maxDocConcurrency,
   );

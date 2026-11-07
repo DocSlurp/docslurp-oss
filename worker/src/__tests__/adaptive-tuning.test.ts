@@ -11,6 +11,7 @@ import {
   applyAdaptiveStageTuning,
   detectMemoryLimitBytes,
   detectAvailableMemoryBytes,
+  ResourceCapacityError,
   resolveAdaptiveStageTuning,
   type ResourceSnapshot,
 } from "../pipeline/adaptive-tuning.js";
@@ -218,15 +219,26 @@ describe("whole allocation memory headroom", () => {
       "/sys/fs/cgroup/memory/memory.usage_in_bytes": String(2200 * mb),
     } }), 200 * mb)).toBe(0);
   });
+  it.each([undefined, "invalid"])("refuses bounded cgroup headroom with unreadable usage %s", (usage) => {
+    const reader = memoryReader({ files: { "/sys/fs/cgroup/memory.max": String(4096 * mb) } });
+    expect(detectAvailableMemoryBytes({ ...reader, read: (path) => path.endsWith("memory.current") ? usage : reader.read(path),
+      osFreeMemoryBytes: 8192 * mb }, 100 * mb)).toBe(0);
+  });
+  it("allows reclaimable inactive file cache without ignoring anonymous usage", () => {
+    expect(detectAvailableMemoryBytes(memoryReader({ osMb: 4096, files: {
+      "/sys/fs/cgroup/memory.max": String(4096 * mb),
+      "/sys/fs/cgroup/memory.current": String(3900 * mb),
+      "/sys/fs/cgroup/memory.stat": `inactive_file ${3000 * mb}\nanon ${900 * mb}\n`,
+      "/proc/meminfo": "MemAvailable: 3145728 kB\n",
+    } }), 200 * mb)).toBe(3072 * mb);
+  });
   it("uses OS free memory if Linux telemetry is absent", () => {
     expect(detectAvailableMemoryBytes({ ...memoryReader({}), osFreeMemoryBytes: 500 * mb }, 200 * mb)).toBe(500 * mb);
   });
   it("uses allocation pressure instead of the small coordinator RSS for tuning", () => {
     const state = makeState([makeDocument("doc-1", 1), makeDocument("doc-2", 1)]);
-    const tuning = resolveAdaptiveStageTuning({ config: baseConfig(), state, stageName: "vision-extract",
-      resources: { cpuCount: 8, rssBytes: 200 * mb, totalMemoryBytes: 8192 * mb, availableMemoryBytes: 256 * mb } });
-    expect(tuning.docConcurrency).toBe(1);
-    expect(tuning.resource.memoryHeadroomMb).toBe(256);
+    expect(() => resolveAdaptiveStageTuning({ config: baseConfig(), state, stageName: "vision-extract",
+      resources: { cpuCount: 8, rssBytes: 200 * mb, totalMemoryBytes: 8192 * mb, availableMemoryBytes: 256 * mb } })).toThrow(ResourceCapacityError);
   });
 });
 
@@ -238,11 +250,11 @@ describe("adaptive stage tuning", () => {
       config: baseConfig({ workerDocConcurrency: 4 }),
       state,
       stageName: "extract-markdown",
-      resources: resources({ rssMb: 3500, totalMemoryMb: 4096 }),
+      resources: resources({ rssMb: 2200, totalMemoryMb: 4096 }),
     });
 
     expect(tuning.docConcurrency).toBe(1);
-    expect(tuning.resource.memoryHeadroomMb).toBe(596);
+    expect(tuning.resource.memoryHeadroomMb).toBe(1896);
     expect(tuning.reasons.join(" ")).toContain("memory headroom");
   });
 
@@ -400,11 +412,11 @@ describe("adaptive stage tuning", () => {
       config: baseConfig(),
       state,
       stageName: "embed",
-      resources: resources({ rssMb: 3900, totalMemoryMb: 4096 }),
+      resources: resources({ rssMb: 2200, totalMemoryMb: 4096 }),
     });
     applyAdaptiveStageTuning(state, tuning);
 
-    expect(adaptiveEmbeddingBatchSizeForStage(state, "embed", 24)).toBe(8);
+    expect(adaptiveEmbeddingBatchSizeForStage(state, "embed", 24)).toBe(16);
     expect(adaptiveEmbeddingBatchSizeForStage(state, "extract-markdown", 24)).toBe(24);
   });
 

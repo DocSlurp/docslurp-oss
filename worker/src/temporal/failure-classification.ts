@@ -25,6 +25,7 @@
 
 import { ApplicationFailure, CancelledFailure } from "@temporalio/common";
 
+import { ResourceCapacityError } from "../lib/resource-capacity.js";
 import { findHungWorkError } from "../lib/hung-work.js";
 import { findProviderRetryableError } from "../lib/provider-retry.js";
 import { isTransientDatabaseError, isTransientNetworkError } from "../lib/transient-errors.js";
@@ -77,6 +78,12 @@ export function classifyActivityError(
   // first (real-Modal F5). Exhausted retries fail the run, which fails its unfinished documents (store.failRun). A
   // document's own staging violation (SandboxOutputError) is not infrastructure and stays a document failure.
   if (findSandboxInfrastructureError(error)) return "interruption";
+  // No document started: allocation pressure is infrastructure, not a bad document.
+  let cause: unknown = error;
+  for (let depth = 0; cause instanceof Error && depth < 6; depth++, cause = cause.cause) {
+    if (cause instanceof ResourceCapacityError) return "interruption";
+  }
+
   return "ordinary";
 }
 
