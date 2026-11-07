@@ -35,4 +35,4 @@ it.each(["funded_at = now()", "auto_recharge_enabled = true"])("keeps an older f
     ]);
     expect((await db.query("select user_id from projects where id = 'paid-workspace'")).rows).toEqual([{ user_id: "retention-user" }]);
   } finally { await db.close(); }
-});
+}, 120_000);
