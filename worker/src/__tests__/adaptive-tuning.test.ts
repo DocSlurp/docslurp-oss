@@ -243,8 +243,17 @@ describe("whole allocation memory headroom", () => {
     expect(() => resolveAdaptiveStageTuning({ config: baseConfig(), state, stageName: "vision-extract",
       resources: { cpuCount: 8, rssBytes: 200 * mb, totalMemoryBytes: 8192 * mb, availableMemoryBytes: 0 } })).not.toThrow();
   });
+  it.each(["fast", "cached"])("allows %s vision bookkeeping without parser capacity", (mode) => {
+    const state = makeState([makeDocument("doc-1", 2)]);
+    state.run.pipeline.visionFallback = true;
+    if (mode === "fast") state.run.pipeline.quality = "fast";
+    else { state.distributedVisionPages.set("doc-1:1", {}); state.distributedVisionPages.set("doc-1:2", {}); }
+    expect(() => resolveAdaptiveStageTuning({ config: baseConfig(), state, stageName: "vision-extract",
+      resources: { cpuCount: 8, rssBytes: 200 * mb, totalMemoryBytes: 8192 * mb, availableMemoryBytes: 0 } })).not.toThrow();
+  });
   it("uses allocation pressure instead of the small coordinator RSS for tuning", () => {
     const state = makeState([makeDocument("doc-1", 1), makeDocument("doc-2", 1)]);
+    state.run.pipeline.visionFallback = true;
     expect(() => resolveAdaptiveStageTuning({ config: baseConfig(), state, stageName: "vision-extract",
       resources: { cpuCount: 8, rssBytes: 200 * mb, totalMemoryBytes: 8192 * mb, availableMemoryBytes: 256 * mb } })).toThrow(ResourceCapacityError);
   });
