@@ -226,11 +226,13 @@ COPY worker/LICENSE ./worker/LICENSE
 COPY worker/scripts ./worker/scripts
 # Allowlist + lock for Python provisioning (worker/src/tools/python-deps.ts) and the
 # vendor bundle trust root (worker/src/tools/vendor-bundles.ts).
-COPY worker/requirements*.txt worker/vendor-bundles.json ./worker/
+COPY worker/requirements*.txt worker/vendor-bundles.json worker/ocr-models.json ./worker/
 COPY worker/security ./worker/security
 COPY scripts/check-worker-prerequisites.mjs ./scripts/check-worker-prerequisites.mjs
 COPY scripts/start-worker.sh ./scripts/start-worker.sh
 COPY --from=builder /app/worker/dist ./worker/dist
+# The host validates VM OCR receipts against these pins; it needs the manifest, not model weights.
+RUN node --input-type=module -e 'import { pinnedOcrModels } from "./worker/dist/ocr/models.js"; if (!pinnedOcrModels().size) throw new Error("OCR model pins missing");'
 RUN rm -rf ./worker/scripts/__pycache__ \
     && chmod +x ./worker/scripts/parser-sandbox.sh ./scripts/start-worker.sh \
     && PYTHON_VENV=/app/.venv node scripts/check-worker-prerequisites.mjs --profile=lean
