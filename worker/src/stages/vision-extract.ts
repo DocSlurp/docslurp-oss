@@ -1197,6 +1197,7 @@ export class VisionExtractStage implements Stage {
               pagesDetail: completed,
             });
             throw new DocumentStageError(toError(error).message, {
+              cause: error,
               artifactUri: storageKey ? this.storage.uri(storageKey) : undefined,
               stats: { partial: completed.length > 0, processedPages: completed.length, error: toError(error).message },
             });
@@ -1323,6 +1324,7 @@ export class VisionExtractStage implements Stage {
       });
     }
     throw new DocumentStageError(`vision extraction failed: ${message}`, {
+      cause: fatal.error,
       artifactUri: storageKey ? this.storage.uri(storageKey) : undefined,
       stats: {
         partial: outputs.length > 0,

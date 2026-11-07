@@ -1,3 +1,4 @@
+import { findResourceCapacityError } from "../lib/resource-capacity.js";
 import { reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { EMBEDDED_IMAGE_TARGETS, embeddedImageGraph, resolveEmbeddedImageRequest } from "../extractors/embedded-images.js";
 import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
@@ -515,7 +516,11 @@ export class ExtractMarkdownStage implements Stage {
                 // A candidate whose command could not be torn down ends the stage: never let the
                 // other candidate (possibly the in-process engine) take over as a fallback.
                 for (const result of [resultA, resultB]) {
-                  if (result?.status === "rejected") rethrowIfTeardown(result.reason);
+                  if (result?.status === "rejected") {
+                    rethrowIfTeardown(result.reason);
+                    const capacity = findResourceCapacityError(result.reason);
+                    if (capacity) throw capacity;
+                  }
                   // A charge check that could not decide is retried, and a run-policy stop (cost cap, unfunded run) ends the stage:
                   // neither is a reason to try another extractor or fail the document.
                   if (result?.status === "rejected" && (result.reason instanceof SpendCheckUnavailableError || result.reason instanceof RunPolicyError)) throw result.reason;

@@ -291,6 +291,12 @@ export async function fetchWithProviderRetry(url: string, init: RequestInit, opt
         if (options.signal?.aborted) throw abortReason(options.signal);
         assertResourceCapacity();
         await options.gate?.admit();
+        try {
+          assertResourceCapacity();
+        } catch (error) {
+          await options.gate?.unbilled("cancelled");
+          throw error;
+        }
         // Cancelled while the admission was pending (a database round trip): hand it back unsent.
         if (options.signal?.aborted) {
           await options.gate?.unbilled("cancelled");

@@ -23,6 +23,20 @@ describe("resource admission at execution", () => {
     expect(admit).not.toHaveBeenCalled();
   });
 
+  it("returns an unsent billing admission when pressure develops during the gate", async () => {
+    let congested = false;
+    const send = vi.fn();
+    const unbilled = vi.fn(async () => true);
+    await expect(withResourceCapacityGuard(() => { if (congested) pressure(); }, () =>
+      fetchWithProviderRetry("https://provider.invalid", {}, {
+        provider: "test", label: "delayed gate", maxRetries: 0, fetchImpl: send,
+        gate: { async admit() { congested = true; }, failed() {}, unbilled },
+      }),
+    )).rejects.toBeInstanceOf(ResourceCapacityError);
+    expect(send).not.toHaveBeenCalled();
+    expect(unbilled).toHaveBeenCalledExactlyOnceWith("cancelled");
+  });
+
   it("refuses command execution before staging or reading an oversized/malicious source", async () => {
     const runner = new CommandRunner();
     await expect(withResourceCapacityGuard(pressure, () => runner.run({
@@ -35,6 +49,22 @@ describe("resource admission at execution", () => {
     await expect(withResourceCapacityGuard(pressure, () => runner.launch({
       binary: "not-a-real-parser", args: ["/hostile/customer.pdf"], available: true,
     }))).rejects.toBeInstanceOf(ResourceCapacityError);
+  });
+
+  it("rechecks pressure after asynchronous sandbox acquisition and releases without dispatch", async () => {
+    let congested = false;
+    const run = vi.fn();
+    const close = vi.fn(async () => {});
+    const runner = new CommandRunner({ openSession: async () => {
+      await Promise.resolve();
+      congested = true;
+      return { providerId: "test-vm", isolation: { location: "remote" }, run, close } as never;
+    } });
+    await expect(withResourceCapacityGuard(() => { if (congested) pressure(); }, () => runner.launch({
+      binary: "not-a-real-parser", args: [], available: true,
+    }))).rejects.toBeInstanceOf(ResourceCapacityError);
+    expect(run).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
   });
 
   it("isolates simultaneous activity guards and leaves outer contexts unchanged", async () => {

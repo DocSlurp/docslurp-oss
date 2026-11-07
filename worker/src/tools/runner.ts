@@ -1568,6 +1568,7 @@ export class CommandRunner {
     });
     const { session, release } = await this.acquireSession();
     try {
+      assertResourceCapacity();
       if (session.spawn) {
         assertProcessTeardown(session);
         assertUnixSocketFilter(session, command);

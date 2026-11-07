@@ -21,3 +21,14 @@ export function withResourceCapacityGuard<T>(check: () => void, work: () => T): 
 export function assertResourceCapacity(): void {
   admission.getStore()?.();
 }
+
+/** Preserve admission identity through parser/provider wrappers. */
+export function findResourceCapacityError(error: unknown): ResourceCapacityError | null {
+  const seen = new Set<unknown>();
+  while (error instanceof Error && !seen.has(error)) {
+    if (error instanceof ResourceCapacityError) return error;
+    seen.add(error);
+    error = error.cause;
+  }
+  return null;
+}

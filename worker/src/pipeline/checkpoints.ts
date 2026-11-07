@@ -40,8 +40,8 @@ export class DocumentStageError extends Error {
   readonly artifactUri?: string;
   readonly stats?: Record<string, unknown>;
 
-  constructor(message: string, options?: { artifactUri?: string; stats?: Record<string, unknown> }) {
-    super(message);
+  constructor(message: string, options?: { artifactUri?: string; stats?: Record<string, unknown>; cause?: unknown }) {
+    super(message, { cause: options?.cause });
     this.name = "DocumentStageError";
     this.artifactUri = options?.artifactUri;
     this.stats = options?.stats;
