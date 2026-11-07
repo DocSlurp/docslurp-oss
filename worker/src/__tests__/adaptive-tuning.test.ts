@@ -10,6 +10,7 @@ import {
   adaptiveUnstructuredSettingsForStage,
   applyAdaptiveStageTuning,
   detectMemoryLimitBytes,
+  detectAvailableMemoryBytes,
   resolveAdaptiveStageTuning,
   type ResourceSnapshot,
 } from "../pipeline/adaptive-tuning.js";
@@ -191,6 +192,41 @@ describe("memory limit detection", () => {
         osMb: 8192,
       })),
     ).toBe(8192 * 1024 * 1024);
+  });
+});
+
+describe("whole allocation memory headroom", () => {
+  const mb = 1024 * 1024;
+  it("honors the tighter cgroup even with a larger Fly declaration", () => {
+    expect(detectMemoryLimitBytes(memoryReader({ flyMachineMemoryMb: "8192", files: {
+      "/sys/fs/cgroup/memory.max": String(2048 * mb),
+    } }))).toBe(2048 * mb);
+  });
+  it("accounts for child processes charged to cgroup v2", () => {
+    expect(detectAvailableMemoryBytes(memoryReader({ files: {
+      "/sys/fs/cgroup/memory.max": String(4096 * mb),
+      "/sys/fs/cgroup/memory.current": String(3500 * mb),
+    } }), 200 * mb)).toBe(596 * mb);
+  });
+  it("backs off when other VM processes consume system memory", () => {
+    expect(detectAvailableMemoryBytes(memoryReader({ files: {
+      "/proc/meminfo": "MemAvailable: 262144 kB\n",
+    } }), 200 * mb)).toBe(256 * mb);
+  });
+  it("handles v1 pressure above the allocation without negative headroom", () => {
+    expect(detectAvailableMemoryBytes(memoryReader({ osMb: 2048, files: {
+      "/sys/fs/cgroup/memory/memory.usage_in_bytes": String(2200 * mb),
+    } }), 200 * mb)).toBe(0);
+  });
+  it("uses OS free memory if Linux telemetry is absent", () => {
+    expect(detectAvailableMemoryBytes({ ...memoryReader({}), osFreeMemoryBytes: 500 * mb }, 200 * mb)).toBe(500 * mb);
+  });
+  it("uses allocation pressure instead of the small coordinator RSS for tuning", () => {
+    const state = makeState([makeDocument("doc-1", 1), makeDocument("doc-2", 1)]);
+    const tuning = resolveAdaptiveStageTuning({ config: baseConfig(), state, stageName: "vision-extract",
+      resources: { cpuCount: 8, rssBytes: 200 * mb, totalMemoryBytes: 8192 * mb, availableMemoryBytes: 256 * mb } });
+    expect(tuning.docConcurrency).toBe(1);
+    expect(tuning.resource.memoryHeadroomMb).toBe(256);
   });
 });
 
