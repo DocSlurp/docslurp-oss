@@ -3,12 +3,11 @@ export { ResourceCapacityError } from "../lib/resource-capacity.js";
 import { readFileSync } from "node:fs";
 import os from "node:os";
 
-import { qualityAllowsPageReading, resolveEmbeddingRoute } from "@docslurp/shared";
+import { resolveEmbeddingRoute } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import type { JsonMap, PerformanceEvent, StageState } from "../models.js";
 import type { WorkflowState } from "./pipeline.js";
-import { hasFailedDocumentStage } from "./document-health.js";
 
 export interface ResourceSnapshot {
   cpuCount: number;
@@ -164,6 +163,8 @@ export function resolveAdaptiveStageTuning(args: {
   state: WorkflowState;
   stageName: string;
   resources?: ResourceSnapshot;
+  /** Actual command/request admission; stage sizing alone never blocks cache finalization. */
+  admitWork?: boolean;
 }): AdaptiveStageTuning {
   const { config, state, stageName } = args;
   const resources = args.resources ?? captureResourceSnapshot();
@@ -207,25 +208,7 @@ export function resolveAdaptiveStageTuning(args: {
     embeddingRoute.runtime,
   );
   const usableMemoryBytes = Math.max(0, memoryHeadroomBytes - totalMemoryBytes * 0.2);
-  const pendingWork = state.documents.some((document) => {
-    if (state.documentStages.get(document.id)?.get(stageName)?.status === "completed"
-      || hasFailedDocumentStage(state, document.id, stageName)) return false;
-    if (stageName === "vision-extract") {
-      if (!state.run.pipeline.visionFallback || !qualityAllowsPageReading(state.run.pipeline.quality)) return false;
-      // Distributed activities have already paid for and completed these pages; this
-      // activity only assembles their manifest. Unknown page counts still need admission.
-      if (Number.isSafeInteger(document.pageCount) && document.pageCount > 0
-        && state.distributedVisionPages.size >= document.pageCount) {
-        let allCached = true;
-        for (let page = 1; page <= document.pageCount; page++) {
-          if (!state.distributedVisionPages.has(`${document.id}:${page}`)) { allCached = false; break; }
-        }
-        if (allCached) return false;
-      }
-    }
-    return true;
-  });
-  if (pendingWork && usableMemoryBytes < stageMemoryMb * 1024 * 1024) {
+  if (args.admitWork && usableMemoryBytes < stageMemoryMb * 1024 * 1024) {
     throw new ResourceCapacityError();
   }
   const memoryLimited = clamp(

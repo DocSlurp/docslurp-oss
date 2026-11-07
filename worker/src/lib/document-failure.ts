@@ -51,6 +51,7 @@ const INFRASTRUCTURE_ERROR_NAMES = new Set([
   "SandboxInfrastructureError",
   // A charge's spend check could not decide (db/spend-check.ts): refused, retried, never a verdict on the Document.
   "SpendCheckUnavailableError",
+  "ResourceCapacityError",
   // The PDF page counter is missing or broke its contract (lib/pdf-page-count.ts): the platform's fault, retried.
   "PdfPageCountUnavailableError",
 ]);

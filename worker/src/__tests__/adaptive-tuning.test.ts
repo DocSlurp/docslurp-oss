@@ -255,7 +255,7 @@ describe("whole allocation memory headroom", () => {
     const state = makeState([makeDocument("doc-1", 1), makeDocument("doc-2", 1)]);
     state.run.pipeline.visionFallback = true;
     expect(() => resolveAdaptiveStageTuning({ config: baseConfig(), state, stageName: "vision-extract",
-      resources: { cpuCount: 8, rssBytes: 200 * mb, totalMemoryBytes: 8192 * mb, availableMemoryBytes: 256 * mb } })).toThrow(ResourceCapacityError);
+      admitWork: true, resources: { cpuCount: 8, rssBytes: 200 * mb, totalMemoryBytes: 8192 * mb, availableMemoryBytes: 256 * mb } })).toThrow(ResourceCapacityError);
   });
 });
 

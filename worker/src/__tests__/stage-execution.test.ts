@@ -1,3 +1,5 @@
+import { ResourceCapacityError, assertResourceCapacity } from "../lib/resource-capacity.js";
+import { classifyActivityError } from "../temporal/failure-classification.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setVmIsolatedPageRangeStagesForTest } from "../pipeline/page-ranges.js";
 import { defaultPipelineFeatures, pricingVersion } from "@docslurp/shared";
@@ -424,5 +426,30 @@ describe("Stage Execution", () => {
     expect(store.stageStatus.get("parse")).toBe("completed");
     expect(heartbeats.length).toBeGreaterThan(3);
     expect(heartbeats.at(-1)).toMatchObject({ lastProgress: "command:pdftotext" });
+  });
+});
+
+
+describe("stage capacity guard integration", () => {
+  it.each([false, true])("checks only actual work admission (work=%s)", async (work) => {
+    vi.stubEnv("FLY_MACHINE_MEMORY_MB", "1");
+    const store = new FakeStore();
+    const { runtime: rt } = runtime();
+    const execution = createStageExecution({ store,
+      config: { ...config, workerAdaptiveTuning: true },
+      stages: [stage("parse", async () => { if (work) assertResourceCapacity(); })],
+    });
+    try {
+      const run = execution.runStage(input("parse"), { ...rt,
+        classifyError: (error) => classifyActivityError(error, { shuttingDown: () => false }),
+      });
+      if (work) {
+        await expect(run).rejects.toBeInstanceOf(ResourceCapacityError);
+        expect(store.ordinaryFailures.get("parse") ?? 0).toBe(0);
+      } else {
+        await run;
+        expect(store.stageStatus.get("parse")).toBe("completed");
+      }
+    } finally { vi.unstubAllEnvs(); }
   });
 });
