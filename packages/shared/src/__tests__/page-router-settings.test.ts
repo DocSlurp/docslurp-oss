@@ -9,7 +9,7 @@ import {
   withPlatformPageRouterMode,
 } from "../pipeline.js";
 
-describe("page router workspace settings", () => {
+describe("page router project settings", () => {
   it("defaults to no mode and no route-pages stage", () => {
     const features = pipelineFeaturesSchema.parse({});
     expect(features.pageRouter.mode).toBeUndefined();
@@ -39,7 +39,7 @@ describe("page router workspace settings", () => {
     expect(pipelineFeaturesSchema.safeParse({ pageRouter: { decisionModel: [] } }).success).toBe(false);
   });
 
-  it("adds route-pages between classify-route and render-images when the workspace opts in", () => {
+  it("adds route-pages between classify-route and render-images when the project opts in", () => {
     const order = compilePipelinePlan({
       ...defaultPipelineFeatures,
       pageRouter: { ...defaultPipelineFeatures.pageRouter, mode: "shadow" },
@@ -53,7 +53,7 @@ describe("page router workspace settings", () => {
     expect(off).not.toContain("route-pages");
   });
 
-  it("caps the workspace mode by the worker env ceiling", () => {
+  it("caps the project mode by the worker env ceiling", () => {
     expect(resolvePageRouterMode("active", "off")).toBe("off");
     expect(resolvePageRouterMode("active", undefined)).toBe("off");
     expect(resolvePageRouterMode("active", "shadow")).toBe("shadow");
@@ -64,7 +64,7 @@ describe("page router workspace settings", () => {
 });
 
 describe("platform page-router default", () => {
-  it("plans a shadow route-pages stage for workspaces with no mode when the platform runs the router", () => {
+  it("plans a shadow route-pages stage for projects with no mode when the platform runs the router", () => {
     for (const platform of ["shadow", "active"] as const) {
       const stamped = withPlatformPageRouterMode(defaultPipelineFeatures, platform);
       expect(stamped.pageRouter.mode).toBe("shadow");
@@ -72,7 +72,7 @@ describe("platform page-router default", () => {
     }
   });
 
-  it("leaves workspaces alone when the platform is off or the workspace chose a mode", () => {
+  it("leaves projects alone when the platform is off or the project chose a mode", () => {
     expect(withPlatformPageRouterMode(defaultPipelineFeatures, "off")).toBe(defaultPipelineFeatures);
     expect(withPlatformPageRouterMode(defaultPipelineFeatures, undefined)).toBe(defaultPipelineFeatures);
     const off = { ...defaultPipelineFeatures, pageRouter: { ...defaultPipelineFeatures.pageRouter, mode: "off" as const } };

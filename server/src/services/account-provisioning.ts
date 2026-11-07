@@ -13,12 +13,9 @@ export async function ensureUserAndOrganization(appDbPool: Pick<Pool, "query" | 
   // A deleted account (docs/data-deletion.md) is never re-bootstrapped, even
   // while a cached session cookie is still valid.
   const ready = await appDbPool.query<{ ready: boolean }>(`
-    select (exists(select 1 from org_memberships where user_id = $1)
-      and not exists (
-        select 1 from organizations o
-        where o.personal_owner_user_id = $1
-          and not exists (select 1 from org_memberships om where om.org_id = o.id and om.user_id = $1)
-      ))
+    -- A user with any organization is provisioned: a personal organization they are no longer a member of (they joined
+    -- another while DOCSLURP_MAX_ORGS_PER_USER is 1) is not re-joined here.
+    select exists(select 1 from org_memberships where user_id = $1)
       or exists(select 1 from "user" where id = $1 and deleted_at is not null) as ready
   `, [user.id]);
   if (ready.rows[0]?.ready === true) return;
@@ -64,12 +61,15 @@ export async function ensureUserAndOrganization(appDbPool: Pick<Pool, "query" | 
       );
     }
 
+    // Sign-up gives a user their personal organization; a user who already belongs to one (one organization per user while
+    // DOCSLURP_MAX_ORGS_PER_USER is 1) is not given a second membership.
     await client.query(
       `
         insert into org_memberships (org_id, user_id, role)
         select id, $1, 'owner'
         from organizations
         where personal_owner_user_id = $1
+          and not exists (select 1 from org_memberships om where om.user_id = $1)
         on conflict (org_id, user_id) do nothing
       `,
       [user.id]

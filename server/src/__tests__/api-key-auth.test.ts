@@ -14,13 +14,13 @@ const { apiKeyAuth } = await import("../middleware/api-key-auth.js");
 const validatedKey: ValidatedKey = {
   keyId: "key-1",
   userId: "user-1",
-  orgId: null,
+  orgId: "org-1",
   keyType: "server",
   allowedDomains: [],
   scopes: ["documents:read"],
   rateLimitRpm: 60,
   rateLimitPpd: 10_000,
-  rateLimits: [], workspaceIds: [],
+  rateLimits: [], projectIds: [],
 };
 
 function buildApp() {

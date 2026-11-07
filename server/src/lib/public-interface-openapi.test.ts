@@ -22,10 +22,10 @@ describe("canonical public API documentation", () => {
     const document: any = buildOpenApiDocument("https://api.example.test");
     const schema = document.components.schemas.ApiError;
     expect(schema.properties.error.required).toEqual(["code", "message", "requestId"]);
-    expect(schema.properties.error.properties.code.enum).toContain("workspace_not_found");
+    expect(schema.properties.error.properties.code.enum).toContain("project_not_found");
 
     const refersToEnvelope = (response: any) => response?.content?.["application/json"]?.schema?.$ref === "#/components/schemas/ApiError";
-    for (const [path, method] of [["/v1/search", "post"], ["/v1/chat", "post"], ["/v1/uploads/bulk", "post"], ["/v1/runs/{runId}/progress", "get"], ["/v1/workspaces/{workspaceId}", "patch"]]) {
+    for (const [path, method] of [["/v1/search", "post"], ["/v1/chat", "post"], ["/v1/uploads/bulk", "post"], ["/v1/runs/{runId}/progress", "get"], ["/v1/projects/{projectId}", "patch"]]) {
       const responses = document.paths[path]?.[method]?.responses;
       expect(responses, `${method} ${path}`).toBeDefined();
       for (const status of ["400", "401", "403", "404", "429"].filter((status) => responses[status])) {

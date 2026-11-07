@@ -48,18 +48,18 @@ afterAll(async () => {
 beforeEach(async () => {
   signals.pause.mockClear();
   signals.resume.mockClear();
-  await sql`delete from workspace_run_events`;
-  await sql`delete from workspace_runs`;
+  await sql`delete from project_run_events`;
+  await sql`delete from project_runs`;
   await sql`delete from credit_leases`;
-  await sql`delete from workspaces`;
+  await sql`delete from projects`;
   await sql`delete from organizations`;
   await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 0.6)`;
-  await sql`insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W')`;
+  await sql`insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W')`;
 });
 
 async function admit(id: string) {
   return await guard.admitRunSpend("o1", "w", (tx) => tx`
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline)
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
     values (${id}, 'o1', 'u1', 'w', 'bulk-upload', 'queued', 'queued', '{}')
     returning id
   `, { leaseRunId: id });
@@ -82,7 +82,7 @@ describe("credit leases (app)", () => {
   });
 
   it("resumes a spend-paused run only when it gets a lease, and sweeps one org on notification", async () => {
-    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, control_state, pause_reason)
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, control_state, pause_reason)
       values ('p1', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'vision-extract', '{}', 'paused', 'credit_exhausted'),
              ('p2', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'vision-extract', '{}', 'paused', 'credit_exhausted')`;
     await sql`update organizations set credit_balance_cents = 0.5 where id = 'o1'`;
@@ -90,7 +90,7 @@ describe("credit leases (app)", () => {
     // The first run takes the 0.5 credits; the second finds nothing free and stays paused.
     expect(result.resumed).toBe(1);
     const rows = await sql<{ id: string; control_state: string | null; pause_reason: string | null }[]>`
-      select id, control_state, pause_reason from workspace_runs order by id`;
+      select id, control_state, pause_reason from project_runs order by id`;
     expect(rows).toEqual([
       { id: "p1", control_state: null, pause_reason: null },
       { id: "p2", control_state: "paused", pause_reason: "credit_exhausted" },
@@ -100,23 +100,23 @@ describe("credit leases (app)", () => {
     // A manual resume of the still-blocked run is refused, not passed to the operator resume.
     expect(await paused.resumeSpendPausedRunOutcome("p2", { sql: sql as never, signals }))
       .toEqual({ status: "blocked", reason: "credit_exhausted" });
-    expect((await sql<{ control_state: string }[]>`select control_state from workspace_runs where id = 'p2'`)[0]!.control_state).toBe("paused");
+    expect((await sql<{ control_state: string }[]>`select control_state from project_runs where id = 'p2'`)[0]!.control_state).toBe("paused");
     // Another org's sweep never touches this org's runs.
     expect(await paused.sweepSpendPausedRuns({ sql: sql as never, signals, orgId: "other" })).toEqual({ resumed: 0, stillBlocked: 0 });
   });
 
   it("keeps the durable pause and lease unchanged after failed resume delivery, then retries once", async () => {
-    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, control_state, pause_reason)
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, control_state, pause_reason)
       values ('delivery', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'vision-extract', '{}', 'paused', 'credit_exhausted')`;
     signals.resume.mockRejectedValueOnce(new Error("Temporal unavailable"));
     expect(await paused.resumeSpendPausedRunOutcome("delivery", { sql: sql as never, signals })).toEqual({ status: "deferred" });
-    expect((await sql`select control_state, pause_reason from workspace_runs where id = 'delivery'`)[0]).toMatchObject({ control_state: "paused", pause_reason: "credit_exhausted" });
+    expect((await sql`select control_state, pause_reason from project_runs where id = 'delivery'`)[0]).toMatchObject({ control_state: "paused", pause_reason: "credit_exhausted" });
     expect(await outstanding()).toBe(0);
-    expect(await sql`select id from workspace_run_events where run_id = 'delivery'`).toHaveLength(0);
+    expect(await sql`select id from project_run_events where run_id = 'delivery'`).toHaveLength(0);
     expect(await paused.resumeSpendPausedRunOutcome("delivery", { sql: sql as never, signals })).toEqual({ status: "resumed" });
     expect(await paused.resumeSpendPausedRunOutcome("delivery", { sql: sql as never, signals })).toEqual({ status: "not-spend-paused" });
     expect(signals.resume).toHaveBeenCalledTimes(2);
-    expect(await sql`select id from workspace_run_events where run_id = 'delivery'`).toHaveLength(1);
+    expect(await sql`select id from project_run_events where run_id = 'delivery'`).toHaveLength(1);
   });
 
   it("parses org_spend_changed payloads defensively", () => {

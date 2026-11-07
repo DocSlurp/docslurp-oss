@@ -51,8 +51,10 @@ export function graphConfigFingerprint(config: GraphConfig, model: string): stri
     hash = Math.imul(hash, 0x01000193) >>> 0;
   }
   // g3 uses current document chunk identities; earlier reused graphs may
-  // reference source chunks (and g1 may reverse edges). Mark stale, never enqueue.
-  return `g3-${hash.toString(16).padStart(8, "0")}`;
+  // reference source chunks (and g1 may reverse edges). g4 keys entities by
+  // Unicode names (NFC, any script; C, C++ and C# distinct), so graphs built
+  // with the ASCII-only keys are stale. Mark stale, never enqueue.
+  return `g4-${hash.toString(16).padStart(8, "0")}`;
 }
 
 /** Observed per-window figures from earlier builds, used in place of defaults. */
@@ -88,7 +90,7 @@ export const graphBuildEstimateSchema = z.object({
   seconds: z.number().nonnegative(),
   secondsLow: z.number().nonnegative(),
   secondsHigh: z.number().nonnegative(),
-  /** `observed` once a finished build in this workspace (or org) calibrates it. */
+  /** `observed` once a finished build in this project (or org) calibrates it. */
   basis: z.enum(["observed", "default"]),
 });
 export type GraphBuildEstimate = z.infer<typeof graphBuildEstimateSchema>;
@@ -178,7 +180,7 @@ export function estimateGraphBuild(input: GraphBuildEstimateInput): GraphBuildEs
 }
 
 /** Partial graph settings update; fields left out keep their current value. */
-export const updateWorkspaceGraphSchema = z
+export const updateProjectGraphSchema = z
   .object({
     enabled: z.boolean().optional(),
     domain: z.string().trim().max(2000).nullable().optional(),
@@ -186,7 +188,7 @@ export const updateWorkspaceGraphSchema = z
     depth: z.enum(graphDepths).optional(),
   })
   .strict();
-export type UpdateWorkspaceGraphInput = z.infer<typeof updateWorkspaceGraphSchema>;
+export type UpdateProjectGraphInput = z.infer<typeof updateProjectGraphSchema>;
 
 export const graphRebuildModeSchema = z.enum(["stale", "full"]);
 export type GraphRebuildMode = z.infer<typeof graphRebuildModeSchema>;
@@ -206,7 +208,7 @@ export type GraphJobStatus = z.infer<typeof graphJobStatusSchema>;
 
 export const graphJobSchema = z.object({
   id: z.string(),
-  workspaceId: z.string(),
+  projectId: z.string(),
   mode: graphRebuildModeSchema,
   status: graphJobStatusSchema,
   phase: z.enum(["queued", "extracting", "communities", "done"]),
@@ -237,8 +239,8 @@ export function isGraphJobActive(job: Pick<GraphJob, "status">): boolean {
   return job.status === "queued" || job.status === "running";
 }
 
-export const workspaceGraphStatusSchema = z.object({
-  workspaceId: z.string(),
+export const projectGraphStatusSchema = z.object({
+  projectId: z.string(),
   enabled: z.boolean(),
   config: graphConfigSchema,
   configHash: z.string(),
@@ -274,11 +276,11 @@ export const workspaceGraphStatusSchema = z.object({
   activeJob: graphJobSchema.nullable(),
   lastJob: graphJobSchema.nullable(),
 });
-export type WorkspaceGraphStatus = z.infer<typeof workspaceGraphStatusSchema>;
+export type ProjectGraphStatus = z.infer<typeof projectGraphStatusSchema>;
 
-/** Scope used when a workspace leaves `graph.domain` empty: its own definition. */
-export function graphFallbackScope(workspace: { name: string; templateDescription?: string | null }): string {
-  return [`Workspace "${workspace.name}"`, workspace.templateDescription?.trim()]
+/** Scope used when a project leaves `graph.domain` empty: its own definition. */
+export function graphFallbackScope(project: { name: string; templateDescription?: string | null }): string {
+  return [`Project "${project.name}"`, project.templateDescription?.trim()]
     .filter(Boolean)
     .join(": ");
 }

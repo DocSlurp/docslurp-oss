@@ -1,3 +1,5 @@
+import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
+
 export interface WebhookEventDefinition {
   type: string;
   description: string;
@@ -11,7 +13,7 @@ export const webhookEventCatalog: WebhookEventDefinition[] = [
     examplePayload: {
       event: "document.replaced",
       runId: "run_123",
-      workspaceId: "ws_123",
+      projectId: "ws_123",
       documentId: "doc_new",
       canonicalId: "/products",
       previousVersionId: "doc_old",
@@ -21,29 +23,34 @@ export const webhookEventCatalog: WebhookEventDefinition[] = [
   },
   {
     type: "run.completed",
-    description: "Emitted when a workspace run finishes. failedDocuments counts Documents that failed and were skipped; retry the Run to reprocess them.",
+    description: "Emitted when a project run finishes. failedDocuments counts Documents that failed and were skipped; retry the Run to reprocess them.",
+    // The worker outbox's payload (worker/src/db/store.ts triggerWebhooks), field for field.
     examplePayload: {
       event: "run.completed",
       runId: "run_123",
-      workspaceId: "ws_123",
+      projectId: "ws_123",
       status: "completed",
+      stage: "completed",
       processedDocuments: 14,
-      failedDocuments: 0,
       pagesProcessed: 942,
-      costCents: 187,
+      failedDocuments: 0,
+      error: null,
       deliveredAt: "2026-03-07T15:00:00.000Z"
     }
   },
   {
     type: "run.failed",
-    description: "Emitted when a run fails and can no longer make progress.",
+    description: "Emitted when a run fails and can no longer make progress. error is public copy; the raw worker error stays in the run record and telemetry.",
     examplePayload: {
       event: "run.failed",
       runId: "run_123",
-      workspaceId: "ws_123",
+      projectId: "ws_123",
       status: "failed",
       stage: "extract-markdown",
-      error: "pdftotext exited non-zero",
+      processedDocuments: 3,
+      pagesProcessed: 120,
+      failedDocuments: 1,
+      error: PUBLIC_ERROR_MESSAGES.processing,
       deliveredAt: "2026-03-07T15:00:00.000Z"
     }
   },

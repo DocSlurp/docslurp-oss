@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_PIPELINE_TEXT_MODEL, normalizePipelineFeatures, pipelineTextOperationSchema, resolvePipelineTextModel, resolvePipelineTextGenerationOptions } from "../pipeline.js";
 
 describe("pipeline text model configuration", () => {
-  it("inherits the deployment profile and applies explicit workspace task controls", () => {
+  it("inherits the deployment profile and applies explicit project task controls", () => {
     const inherited = resolvePipelineTextGenerationOptions({ operation: "community-summary", deploymentProfile: "grounded-low", maxOutputTokens: 220 });
     expect(inherited).toMatchObject({ profile: "grounded-low", reasoningEffort: "low", maxOutputTokens: 256 });
     const config = normalizePipelineFeatures({ textGeneration: { profile: "grounded-low", reasoningEffort: "high", reasoningEfforts: { "community-summary": "low" }, maxOutputTokens: { "community-summary": 600 } } }).textGeneration;
@@ -22,11 +22,11 @@ describe("pipeline text model configuration", () => {
     expect(resolvePipelineTextGenerationOptions({ operation: "graph-extraction", config, maxOutputTokens: 2048 }).reasoningEffort).toBe("low");
   });
 
-  it("applies task, workspace, deployment, and built-in precedence for every operation", () => {
+  it("applies task, project, deployment, and built-in precedence for every operation", () => {
     for (const operation of pipelineTextOperationSchema.options) {
-      const pipeline = normalizePipelineFeatures({ textGeneration: { model: "vendor/workspace", models: { [operation]: "vendor/task" } } });
+      const pipeline = normalizePipelineFeatures({ textGeneration: { model: "vendor/project", models: { [operation]: "vendor/task" } } });
       expect(resolvePipelineTextModel(pipeline, operation, "vendor/deployment")).toBe("vendor/task");
-      expect(resolvePipelineTextModel(normalizePipelineFeatures({ textGeneration: { model: "vendor/workspace" } }), operation, "vendor/deployment")).toBe("vendor/workspace");
+      expect(resolvePipelineTextModel(normalizePipelineFeatures({ textGeneration: { model: "vendor/project" } }), operation, "vendor/deployment")).toBe("vendor/project");
       expect(resolvePipelineTextModel(normalizePipelineFeatures(), operation, "vendor/deployment")).toBe("vendor/deployment");
       expect(resolvePipelineTextModel(normalizePipelineFeatures(), operation)).toBe(DEFAULT_PIPELINE_TEXT_MODEL);
     }

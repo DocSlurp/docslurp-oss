@@ -6,19 +6,19 @@ import {
   stageExecutionStatusSchema,
 } from "./pipeline.js";
 
-export const workspaceRunSchema = z.object({
+export const projectRunSchema = z.object({
   id: z.string(),
   /** Effective parent job identity; each child retains its own run ID. */
   jobId: z.string().optional(),
   userId: z.string(),
   orgId: z.string(),
-  workspaceId: z.string(),
-  workspaceName: z.string(),
+  projectId: z.string(),
+  projectName: z.string(),
   kind: z.string(),
   status: runStatusSchema,
   priority: z.number().int().default(0),
   controlState: z.string().nullable().default(null),
-  /** Why the worker paused the run for spend (credit_exhausted, workspace_budget_paused, org_budget_paused, plan_not_entitled); it resumes by itself once the org may spend. */
+  /** Why the worker paused the run for spend (credit_exhausted, project_budget_paused, org_budget_paused, plan_not_entitled); it resumes by itself once the org may spend. */
   pauseReason: z.string().nullable().optional(),
   controlRequestedAt: z.string().nullable().default(null),
   stage: runStageSchema,
@@ -59,9 +59,9 @@ export const workspaceRunSchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
 });
-export type WorkspaceRun = z.infer<typeof workspaceRunSchema>;
+export type ProjectRun = z.infer<typeof projectRunSchema>;
 
-export const workspaceRunStageStateSchema = z.object({
+export const projectRunStageStateSchema = z.object({
   runId: z.string(),
   documentId: z.string().nullable().default(null),
   stage: runStageSchema,
@@ -74,11 +74,11 @@ export const workspaceRunStageStateSchema = z.object({
   completedAt: z.string().nullable().default(null),
   updatedAt: z.string(),
 });
-export type WorkspaceRunStageState = z.infer<
-  typeof workspaceRunStageStateSchema
+export type ProjectRunStageState = z.infer<
+  typeof projectRunStageStateSchema
 >;
 
-export const workspaceRunEventTypeSchema = z.enum([
+export const projectRunEventTypeSchema = z.enum([
   "run.started",
   "run.progress",
   "run.failed",
@@ -96,15 +96,15 @@ export const workspaceRunEventTypeSchema = z.enum([
   /** A document's extracted text scored below the plausibility threshold (worker store). */
   "document.plausibility_warning",
 ]);
-export type WorkspaceRunEventType = z.infer<typeof workspaceRunEventTypeSchema>;
+export type ProjectRunEventType = z.infer<typeof projectRunEventTypeSchema>;
 
-export const workspaceRunEventSchema = z.object({
+export const projectRunEventSchema = z.object({
   id: z.string(),
   userId: z.string(),
   runId: z.string(),
   documentId: z.string().nullable().default(null),
   stage: runStageSchema.nullable().default(null),
-  type: workspaceRunEventTypeSchema,
+  type: projectRunEventTypeSchema,
   status: stageExecutionStatusSchema.nullable().default(null),
   message: z.string().nullable().default(null),
   progress: z.record(z.string(), z.unknown()).default({}),
@@ -112,7 +112,7 @@ export const workspaceRunEventSchema = z.object({
   payload: z.record(z.string(), z.unknown()).default({}),
   createdAt: z.string(),
 });
-export type WorkspaceRunEvent = z.infer<typeof workspaceRunEventSchema>;
+export type ProjectRunEvent = z.infer<typeof projectRunEventSchema>;
 
 export const temporalWorkflowStatusSchema = z.enum([
   "UNSPECIFIED",
@@ -130,7 +130,7 @@ export type TemporalWorkflowStatus = z.infer<
   typeof temporalWorkflowStatusSchema
 >;
 
-export const workspaceRunTemporalSchema = z.object({
+export const projectRunTemporalSchema = z.object({
   workflowId: z.string(),
   workflowRunId: z.string().nullable().default(null),
   workflowStatus: temporalWorkflowStatusSchema.nullable().default(null),
@@ -162,45 +162,45 @@ export const workspaceRunTemporalSchema = z.object({
     }),
   queriedAt: z.string(),
 });
-export type WorkspaceRunTemporal = z.infer<typeof workspaceRunTemporalSchema>;
+export type ProjectRunTemporal = z.infer<typeof projectRunTemporalSchema>;
 
-export const workspaceRunLifecycleStatusSchema = z.enum([
+export const projectRunLifecycleStatusSchema = z.enum([
   "queued",
   "processing",
   "paused",
   "completed",
   "failed",
 ]);
-export type WorkspaceRunLifecycleStatus = z.infer<
-  typeof workspaceRunLifecycleStatusSchema
+export type ProjectRunLifecycleStatus = z.infer<
+  typeof projectRunLifecycleStatusSchema
 >;
 
-export const workspaceRunProgressToneSchema = z.enum([
+export const projectRunProgressToneSchema = z.enum([
   "queued",
   "processing",
   "completed",
   "failed",
 ]);
-export type WorkspaceRunProgressTone = z.infer<
-  typeof workspaceRunProgressToneSchema
+export type ProjectRunProgressTone = z.infer<
+  typeof projectRunProgressToneSchema
 >;
 
-export const workspaceRunProgressPhaseSchema = z.object({
+export const projectRunProgressPhaseSchema = z.object({
   key: z.string(),
   label: z.string(),
   stages: z.array(runStageSchema).default([]),
-  status: workspaceRunProgressToneSchema,
+  status: projectRunProgressToneSchema,
   completedStages: z.number().int().nonnegative(),
   totalStages: z.number().int().nonnegative(),
 });
-export type WorkspaceRunProgressPhase = z.infer<
-  typeof workspaceRunProgressPhaseSchema
+export type ProjectRunProgressPhase = z.infer<
+  typeof projectRunProgressPhaseSchema
 >;
 
-export const workspaceRunProgressStageRollupSchema = z.object({
+export const projectRunProgressStageRollupSchema = z.object({
   stage: runStageSchema,
   label: z.string(),
-  status: workspaceRunProgressToneSchema,
+  status: projectRunProgressToneSchema,
   completedPages: z.number().int().nonnegative(),
   totalPages: z.number().int().nonnegative(),
   pageRatio: z.number().nonnegative(),
@@ -221,12 +221,12 @@ export const workspaceRunProgressStageRollupSchema = z.object({
   /** Highest worker process RSS observed while this stage ran (not a sum of deltas). */
   peakRssBytes: z.number().nonnegative().optional(),
 });
-export type WorkspaceRunProgressStageRollup = z.infer<
-  typeof workspaceRunProgressStageRollupSchema
+export type ProjectRunProgressStageRollup = z.infer<
+  typeof projectRunProgressStageRollupSchema
 >;
 
-export const workspaceRunProgressModuleSchema = z.object({
-  lifecycleStatus: workspaceRunLifecycleStatusSchema,
+export const projectRunProgressModuleSchema = z.object({
+  lifecycleStatus: projectRunLifecycleStatusSchema,
   currentStage: runStageSchema,
   currentStageLabel: z.string(),
   currentStageIndex: z.number().int().nonnegative().nullable().default(null),
@@ -235,8 +235,8 @@ export const workspaceRunProgressModuleSchema = z.object({
   completedStages: z.number().int().nonnegative(),
   totalStages: z.number().int().nonnegative(),
   percentComplete: z.number().int().min(0).max(100),
-  phases: z.array(workspaceRunProgressPhaseSchema),
-  stageRollups: z.array(workspaceRunProgressStageRollupSchema),
+  phases: z.array(projectRunProgressPhaseSchema),
+  stageRollups: z.array(projectRunProgressStageRollupSchema),
   pageRollup: z.object({
     completed: z.number().int().nonnegative(),
     total: z.number().int().nonnegative(),
@@ -280,21 +280,21 @@ export const workspaceRunProgressModuleSchema = z.object({
     peakRssBytes: z.number().nonnegative().default(0),
   }),
 });
-export type WorkspaceRunProgressModule = z.infer<
-  typeof workspaceRunProgressModuleSchema
+export type ProjectRunProgressModule = z.infer<
+  typeof projectRunProgressModuleSchema
 >;
 
-export const workspaceRunProgressSnapshotSchema = z.object({
-  run: workspaceRunSchema,
-  stages: z.array(workspaceRunStageStateSchema),
-  recentEvents: z.array(workspaceRunEventSchema),
-  temporal: workspaceRunTemporalSchema.nullable().default(null),
-  progress: workspaceRunProgressModuleSchema.optional(),
+export const projectRunProgressSnapshotSchema = z.object({
+  run: projectRunSchema,
+  stages: z.array(projectRunStageStateSchema),
+  recentEvents: z.array(projectRunEventSchema),
+  temporal: projectRunTemporalSchema.nullable().default(null),
+  progress: projectRunProgressModuleSchema.optional(),
   stats: z.record(z.string(), z.unknown()).default({}),
   artifacts: z.record(z.string(), z.string()).default({}),
 });
-export type WorkspaceRunProgressSnapshot = z.infer<
-  typeof workspaceRunProgressSnapshotSchema
+export type ProjectRunProgressSnapshot = z.infer<
+  typeof projectRunProgressSnapshotSchema
 >;
 
 /**
@@ -315,7 +315,7 @@ export const documentSchema = z.object({
   id: z.string(),
   userId: z.string(),
   orgId: z.string(),
-  workspaceId: z.string(),
+  projectId: z.string(),
   runId: z.string().nullable(),
   filename: z.string(),
   /**
@@ -332,9 +332,15 @@ export const documentSchema = z.object({
   statusReason: z.string().nullable().optional(),
   extractionMode: z.string(),
   pageCount: z.number(),
+  /**
+   * `measured`: the worker (or intake, for text and single images) counted `pageCount`. `estimated`: intake's guess from the
+   * file's size for a format only the worker can count (PDF, Office, EPUB, multi-frame images); the worker replaces it with
+   * its measured count before anything bills, and billing never reads the estimate.
+   */
+  pageCountSource: z.enum(["estimated", "measured"]).optional(),
   sourceSha256: z.string().nullable().optional(),
   dedupedFromDocumentId: z.string().nullable().optional(),
-  dedupScope: z.enum(["workspace", "org"]).nullable().optional(),
+  dedupScope: z.enum(["project", "org"]).nullable().optional(),
   tags: z.array(z.string()).default([]),
   versionNumber: z.number().optional(),
   previousVersionId: z.string().nullable().optional(),
@@ -349,7 +355,7 @@ export const documentSchema = z.object({
 export type DocumentRecord = z.infer<typeof documentSchema>;
 
 export const documentIndexEntrySchema = documentSchema.extend({
-  workspaceName: z.string(),
+  projectName: z.string(),
   orgName: z.string().nullable().default(null),
   summary: z.string().nullable().default(null),
 });
@@ -392,6 +398,31 @@ export function normalizePageNumbers(
   }
 
   return [...normalized].sort((left, right) => left - right);
+}
+
+/**
+ * Splits extracted text into pages only when the text itself says where the
+ * pages are. Returns null when the form feeds do not describe exactly
+ * `pageCount` pages (or there is no page count to check them against), so no
+ * text is ever labelled with another page's number. Unlike
+ * `splitTextIntoPages` it never falls back to `---` rules or equal-length
+ * slices, and it keeps empty pages in place.
+ *
+ * A document that is known to be one page (`pageCount === 1`) is that page.
+ */
+export function splitTextIntoPagesStrict(
+  text: string,
+  pageCount: number | null | undefined,
+): string[] | null {
+  const normalizedPageCount = normalizePageNumber(pageCount);
+  if (normalizedPageCount === null) return null;
+  const unified = text.replace(/\r\n/g, "\n");
+  if (!unified.trim()) return [];
+  if (normalizedPageCount === 1) return [unified.replace(/\f/g, "\n").trim()];
+
+  const parts = unified.split("\f").map((page) => page.trim());
+  while (parts.length > normalizedPageCount && parts[parts.length - 1] === "") parts.pop();
+  return parts.length === normalizedPageCount ? parts : null;
 }
 
 export function splitTextIntoPages(

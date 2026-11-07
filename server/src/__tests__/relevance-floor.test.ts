@@ -17,6 +17,7 @@ const {
   phraseRelevance,
   resolveMinScore,
   termCoverage,
+  contentTerms,
   vectorRelevance,
 } = await import("../search/relevance.js");
 const { executeSearchSessionRetrieval, searchResultsToChunks } = await import("../search/session-execution.js");
@@ -37,7 +38,7 @@ function chunk(id: string, overrides: Partial<SearchChunk> = {}): SearchChunk {
 
 const availability = (status: SearchAvailability["status"]): SearchAvailability => ({
   status, isPartial: status === "partial" || status === "pending", keywordOnly: false,
-  scope: { workspaceId: "ws-1", runId: null },
+  scope: { projectId: "ws-1", runId: null },
   coverage: { totalDocuments: 1, indexedDocuments: 1, pageIndexedDocuments: 0, searchableDocuments: 1, pageOnlyDocuments: 0,
     keywordOnlyDocuments: 0, failedDocuments: 0, inProgressDocuments: 0, totalPages: 1, searchablePages: 1, indexedChunkCount: 1, queuedRuns: 0, processingRuns: 0 },
   resultBreakdown: { indexedResultCount: 0, pageResultCount: 0 }, message: null,
@@ -55,7 +56,7 @@ async function run(args: {
   wholeCorpusFallback?: () => Promise<never[]>; limit?: number; candidateDepth?: number; resultOrder?: "relevance" | "prompt";
 }) {
   return executeSearchSessionRetrieval({
-    query: "q", userId: "user-1", session: session(), workspaceId: "ws-1", limit: args.limit ?? 10,
+    query: "q", userId: "user-1", session: session(), projectId: "ws-1", limit: args.limit ?? 10,
     options: { minScore: args.minScore, useRerank: false, useMmr: false, candidateDepth: args.candidateDepth, resultOrder: args.resultOrder },
     retrieveCandidateLists: async () => args.lists,
     buildAvailability: () => availability(args.status ?? "complete"),
@@ -121,6 +122,32 @@ describe("relevance signals", () => {
     expect(termCoverage("zxqvbn nonsense gibberish", "A nonsense clause about taxes.")).toBeCloseTo(1 / 3, 10);
     expect(termCoverage("the of and", "anything")).toBe(0);
     expect(termCoverage("税金", "この税金は")).toBe(1);
+  });
+
+  it("matches a root with its inflections but not a different word that starts with it", () => {
+    expect(termCoverage("tax", "Taxes are due")).toBe(1);
+    expect(termCoverage("taxes", "income taxation rules")).toBe(1);
+    expect(termCoverage("tax", "The taxi arrives at nine")).toBe(0);
+    expect(termCoverage("policies", "Our policy covers it")).toBe(1);
+    expect(termCoverage("run", "running costs")).toBe(1);
+  });
+
+  it("counts negations and ordinary nouns as content, not filler", () => {
+    expect(contentTerms("refunds not allowed")).toContain("not");
+    expect(contentTerms("no refunds")).toContain("no");
+    expect(contentTerms("class action settlement")).toEqual(["class", "action", "settlement"]);
+    expect(contentTerms("course catalog")).toContain("course");
+    expect(termCoverage("refunds not allowed", "refunds allowed")).toBeCloseTo(2 / 3, 10);
+  });
+
+  it("measures coverage across accents, scripts and unsegmented text", () => {
+    expect(termCoverage("Muller Gebuhren", "Die Müller Gebühren steigen")).toBe(1);
+    expect(termCoverage("Gebühren", "gebuhren")).toBe(1);
+    expect(termCoverage("налоговая декларация", "Налоговая декларация подана")).toBe(1);
+    expect(termCoverage("налог", "налоговая декларация")).toBe(0);
+    expect(termCoverage("東京 首都", "東京は日本の首都です")).toBe(1);
+    expect(termCoverage("日本の首都", "東京は日本の首都です")).toBeGreaterThanOrEqual(0.5);
+    expect(termCoverage("日本の首都", "今日の天気は晴れ")).toBeLessThan(0.5);
   });
 
   it("counts lexical evidence only for a majority of the query terms", () => {
@@ -285,7 +312,7 @@ describe("relevance floor across recursive search modes", () => {
     const { finalizeSearchSessionExecution } = await import("../search/session-execution.js");
     const wholeCorpusFallback = vi.fn(async () => [] as never[]);
     const response = await finalizeSearchSessionExecution({
-      query: "q", userId: "user-1", session: session(), options: {}, workspaceId: "ws-1",
+      query: "q", userId: "user-1", session: session(), options: {}, projectId: "ws-1",
       availability: availability("complete"), chunks: plan!.chunks, effectiveQuery: "q", filters: undefined,
       selfQueryReasons: [], wholeCorpusFallback,
       relevanceFloor: { minScore: DEFAULT_MIN_SCORE, dropped: plan!.relevanceFloorDropped },
@@ -323,7 +350,7 @@ describe("fallback failures retain spatial and query bounds",()=>{
   const error=kind==="timeout"?new SearchStatementTimeoutError(100):kind==="abort"?new SearchAbortedError():new GeoSearchError("Stale geometry",409);
   const persist=vi.fn();
   const journal={sessionId:"s",persist,usageEvents:()=>[],diagnostics:()=>({}),recordDiagnostic:vi.fn(),adoptUsage:vi.fn()};
-  await expect(finalizeSearchSessionExecution({query:"q",userId:"u",session:journal,options:{},workspaceId:"w",
+  await expect(finalizeSearchSessionExecution({query:"q",userId:"u",session:journal,options:{},projectId:"w",
    availability:availability("complete"),chunks:[],effectiveQuery:"q",selfQueryReasons:[],
    wholeCorpusFallback:async()=>{throw error;}} as never)).rejects.toBe(error);
   expect(persist).not.toHaveBeenCalled();

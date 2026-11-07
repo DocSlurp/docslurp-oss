@@ -6,13 +6,13 @@ import { setChatReserveConfig } from "../db/chat-reserve.js";
 import { startMigratedPostgres } from "../test/migrated-postgres.js";
 import { PostgresMediaJournal } from "./journal.js";
 import { PostgresCapacityLeaseStore } from "./capacity/store.js";
-import type { WorkspaceRun } from "../models.js";
+import type { ProjectRun } from "../models.js";
 
 describe("remote media admission and accounting on migrated Postgres", () => {
   let db: Awaited<ReturnType<typeof startMigratedPostgres>>;
   let sql: postgres.Sql<Record<string, unknown>>;
   let journal: PostgresMediaJournal;
-  const scope = { orgId: "media-org", workspaceId: "media-ws", runId: "media-run", documentId: "media-doc" };
+  const scope = { orgId: "media-org", projectId: "media-ws", runId: "media-run", documentId: "media-doc" };
   const args = { scope, key: "request-a", provider: "test", model: "speech", reserveCents: .5,
     maxRunCostCents: 100, maxConcurrent: 1, dailyBudgetCents: 5 };
   beforeAll(async () => {
@@ -22,10 +22,10 @@ describe("remote media admission and accounting on migrated Postgres", () => {
     await sql`insert into "user"(id,name,email) values ('media-u','Media','media-test@example.com')`;
     await sql`insert into organizations(id,name,slug,created_by_user_id,credit_balance_cents)
       values ('media-org','Media','media-test','media-u',100)`;
-    await sql`insert into workspaces(id,org_id,user_id,name) values ('media-ws','media-org','media-u','Media')`;
-    await sql`insert into workspace_runs(id,org_id,user_id,workspace_id,kind,status,stage,pipeline)
+    await sql`insert into projects(id,org_id,user_id,name) values ('media-ws','media-org','media-u','Media')`;
+    await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline)
       values ('media-run','media-org','media-u','media-ws','bulk-upload','processing','extract-markdown','{}')`;
-    await sql`insert into documents(id,user_id,workspace_id,run_id,filename,mime_type,source_key,status)
+    await sql`insert into documents(id,user_id,project_id,run_id,filename,mime_type,source_key,status)
       values ('media-doc','media-u','media-ws','media-run','sample.wav','audio/wav','source','uploaded')`;
   }, 120000);
   beforeEach(async () => { await sql`delete from media_reconciliation_actions`; await sql`delete from remote_media_jobs`; await sql`delete from media_video_admissions`; await sql`delete from remote_capacity_leases`; await sql`delete from remote_capacity_watchdog`; });
@@ -65,8 +65,8 @@ describe("remote media admission and accounting on migrated Postgres", () => {
     await expect(journal.admit({ ...args, reserveCents: 30, dailyBudgetCents: 100, maxRunCostCents: 1000 })).rejects.toThrow("spend admission");
   });
   it("requires watchdog readiness and atomically records capacity cost once", async () => {
-    const run = { id: "media-run", userId: "media-u", orgId: "media-org", workspaceId: "media-ws", stats: {}, artifacts: {},
-      spentCents: 0, pipeline: {} } as WorkspaceRun;
+    const run = { id: "media-run", userId: "media-u", orgId: "media-org", projectId: "media-ws", stats: {}, artifacts: {},
+      spentCents: 0, pipeline: {} } as ProjectRun;
     const leases = new PostgresCapacityLeaseStore(sql, async () => run, ["test"]);
     const request = { scope, provider: "test", beforeIds: ["unrelated"], quote: { hourlyUsd: .3, fixedReserveUsd: .01, observedAt: Date.now() },
       ttlMs: 60000, budgetUsd: 1, maxConcurrent: 1, maxRunCostCents: 100 };
@@ -77,14 +77,14 @@ describe("remote media admission and accounting on migrated Postgres", () => {
     expect(cost).toBeCloseTo(.005);
     await leases.deleted(lease, lease.createdAt + 120000);
     expect(await leases.outstanding()).toHaveLength(0);
-    const rows = await sql`select org_id,workspace_id,run_id,cost_cents,(metadata->>'providerCostCents')::numeric as provider_cost from usage_events where id = ${lease.id}`;
-    expect(rows).toHaveLength(1); expect(rows[0]).toMatchObject({ org_id: scope.orgId, workspace_id: scope.workspaceId, run_id: scope.runId });
+    const rows = await sql`select org_id,project_id,run_id,cost_cents,(metadata->>'providerCostCents')::numeric as provider_cost from usage_events where id = ${lease.id}`;
+    expect(rows).toHaveLength(1); expect(rows[0]).toMatchObject({ org_id: scope.orgId, project_id: scope.projectId, run_id: scope.runId });
     // Capacity cost is ours: recorded once, billed 0 credits (customers pay per media minute).
     expect(Number(rows[0].cost_cents)).toBe(0);
     expect(Number(rows[0].provider_cost)).toBeCloseTo(.5);
   });
   it("admits video without a daily organization quota and does not count a retry twice", async () => {
-    await sql`insert into documents(id,user_id,workspace_id,run_id,filename,mime_type,source_key,status)
+    await sql`insert into documents(id,user_id,project_id,run_id,filename,mime_type,source_key,status)
       values ('media-doc-2','media-u','media-ws','media-run','second.mp4','video/mp4','second','uploaded') on conflict do nothing`;
     // 800 s of video was the whole former starter day (600 s); both admissions now succeed for any organization.
     await Promise.all([journal.admitVideo(scope,400,40),journal.admitVideo({...scope,documentId:"media-doc-2"},400,40)]);

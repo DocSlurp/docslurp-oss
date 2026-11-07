@@ -10,13 +10,13 @@ import DocSlurpSearch from "@docslurp/contrib-astro";
 ---
 <!-- PUBLIC_DOCSLURP_CLIENT_KEY holds a browser key, safe to ship in page HTML. -->
 <DocSlurpSearch clientKey={import.meta.env.PUBLIC_DOCSLURP_CLIENT_KEY} />
-<!-- To search a named workspace: <DocSlurpSearch clientKey={...} workspace="product-manuals" /> -->
+<!-- To search a named project: <DocSlurpSearch clientKey={...} project="product-manuals" /> -->
 ```
 
 | Prop | Default | Notes |
 | --- | --- | --- |
 | `clientKey` | Required | A browser key: search-only and restricted to your allowed websites. Server keys are refused in the browser. |
-| `workspace` | `default` | A workspace ID, slug (such as `product-manuals`) or name, or `default`, the key organization's default workspace. See [Workspaces](https://docslurp.io/docs/http#workspaces). |
+| `project` | `default` | A project ID, slug (such as `product-manuals`) or name, or `default`, the key organization's default project. See [Projects](https://docslurp.io/docs/http#projects). |
 | `apiUrl` | `https://docslurp.io` | The service origin. |
 | `placeholder` | `Search documents…` | Search box placeholder. |
 
@@ -42,18 +42,18 @@ integrations: [docslurpDocsIndex({
   site: 'https://docs.example.com',           // Origin used for canonical page URLs.
   apiUrl: 'https://docslurp.io',
   apiKey: process.env.DOCSLURP_API_KEY,       // Server key with the ingest scope.
-  workspace: 'Product documentation',          // ID, slug or name; created on the first build if none matches.
+  project: 'Product documentation',          // ID, slug or name; created on the first build if none matches.
 })]
 ```
 
-Without `apiKey`, the build still writes `.docslurp/docs-index.json` and skips the upload. With a key, any indexing failure fails the build. A successful upload writes `docslurp-docs-search.json` (`{ "workspace": "<workspace ID>" }`) to the client output, so your search component can find it. Use `renderEnv` to pass environment variables that only the page renderer needs. `apiUrl` and `site` default to `https://docslurp.io` and `workspace` to `DocSlurp documentation`, so set `site` and `workspace` for your own docs.
+Without `apiKey`, the build still writes `.docslurp/docs-index.json` and skips the upload. With a key, any indexing failure fails the build. A successful upload writes `docslurp-docs-search.json` (`{ "project": "<project ID>" }`) to the client output, so your search component can find it. Use `renderEnv` to pass environment variables that only the page renderer needs. `apiUrl` and `site` default to `https://docslurp.io` and `project` to `DocSlurp documentation`, so set `site` and `project` for your own docs.
 
 Pages are indexed as text: the upload asks for `{ visionFallback: false, preserveImages: false, summarize: true }`, so rendered HTML skips page images and vision and gets per-page summaries. Pass `pipeline` with other pipeline overrides to change that.
 
 To index a site after it deploys (for example when the build has no API key), crawl the live pages instead:
 
 ```bash
-DOCSLURP_API_KEY=... DOCSLURP_DOCS_WORKSPACE_ID=<workspace ID, slug or name> \
+DOCSLURP_API_KEY=... DOCSLURP_DOCS_PROJECT_ID=<project ID, slug or name> \
   node node_modules/@docslurp/contrib-astro/index-docs.mjs --site https://docs.example.com --routes routes.json --output .docslurp/docs-index.json
 ```
 

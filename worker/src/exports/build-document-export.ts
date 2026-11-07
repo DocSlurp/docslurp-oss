@@ -14,6 +14,10 @@ import type { Sql } from "postgres";
 
 import { keyFromStorageUri, type ArtifactStore } from "../tools/storage.js";
 import { discard, ZIP_MAX_ENTRIES, zipStream, type ZipStreamBody, type ZipStreamEntry } from "./zip-stream.js";
+import {
+  EXPORT_IMAGE_METADATA_MAX_BYTES, exportImageIndex, planExportImages, rewriteImageMarkdown, rewriteImageMarkdownStream,
+  type ExportImagePlan,
+} from "./export-images.js";
 
 /**
  * Builds one queued document export: streams each document's files from
@@ -24,6 +28,10 @@ import { discard, ZIP_MAX_ENTRIES, zipStream, type ZipStreamBody, type ZipStream
  * `<name>.md`, `pages/page-0001.md`, `structured.json` and `metadata.json`;
  * "all" adds `original/`, `images/` and `outputs/`. `README.md` comes last and
  * lists anything left out.
+ *
+ * Embedded images go to `images/page-0001/image-001.webp` with `images/index.json`
+ * (export-images.ts). They are written before the Markdown, and image references in
+ * the Markdown become relative links only to files the zip actually holds.
  */
 
 /** Pipeline outputs worth handing to a person, by artifact slot name. Indexes and vectors stay out. */
@@ -49,7 +57,7 @@ export const DOCUMENT_EXPORT_MAX_ATTEMPTS = 4;
 interface ExportRow {
   id: string;
   org_id: string;
-  workspace_id: string;
+  project_id: string;
   document_id: string | null;
   /** Extract downloads: only this run's documents. */
   run_id?: string | null;
@@ -61,7 +69,7 @@ interface ExportRow {
 
 export interface ExportDocumentRow {
   id: string;
-  workspace_id: string;
+  project_id: string;
   run_id: string | null;
   filename: string;
   mime_type: string;
@@ -172,7 +180,7 @@ async function referencedPageImages(source: ExportSource, canonicalKey: string |
 export async function* documentExportEntries(
   args: {
     root: string;
-    scope: "document" | "workspace";
+    scope: "document" | "project";
     content: DocumentExportContent;
     documents: ExportDocumentRow[];
     truncated: boolean;
@@ -181,7 +189,11 @@ export async function* documentExportEntries(
   },
   source: ExportSource,
   skipped: Array<{ path: string; reason: string }>,
+  /** Paths the zip accepted so far (zipStream onAdd). Without it, every yielded entry counts as added. */
+  added?: ReadonlySet<string>,
 ): AsyncGenerator<ZipStreamEntry> {
+  const skippedPaths = () => new Set(skipped.map((entry) => entry.path));
+  const isAdded = (path: string) => added ? added.has(path) : !skippedPaths().has(path);
   const folders = args.scope === "document"
     ? [args.root]
     : documentExportFolderNames(args.documents.map((row) => row.filename)).map((name) => `${args.root}/${name}`);
@@ -205,10 +217,27 @@ export async function* documentExportEntries(
     if (completed && args.content === "all") {
       for (const [slot, uri] of Object.entries(row.artifacts ?? {})) {
         const target = slot.startsWith(prefix) && withheld.has(uri) ? artifactExportPath(slot.slice(prefix.length), uri) : null;
-        if (target) skipped.push({ path: `${folder}/${target.path}`, reason: "withheld by the workspace's privacy (PII) policy" });
+        if (target) skipped.push({ path: `${folder}/${target.path}`, reason: "withheld by the project's privacy (PII) policy" });
       }
     }
     const pages = completed ? await source.pages(row.id) : [];
+    const imagePlan = completed ? await documentImagePlan(source, artifacts, withheld, artifactKey("artifact-graph"), args.content === "all") : null;
+    if (imagePlan?.problem) skipped.push({ path: `${folder}/images/`, reason: `embedded images left out: ${imagePlan.problem}` });
+    const links = new Map<string, string>();
+    if (imagePlan?.plan) {
+      // Images first: by the time the Markdown is written, `isAdded` says which files the zip holds.
+      for (const image of imagePlan.plan.images) {
+        if (!image.owner) continue;
+        if (image.key === null) {
+          skipped.push({ path: `${folder}/${image.path}`, reason: image.unavailable ?? "not available" });
+          continue;
+        }
+        yield { path: `${folder}/${image.path}`, compress: false, modifiedAt, body: streamed(image.key) };
+      }
+      for (const image of imagePlan.plan.images) {
+        if (image.key !== null && isAdded(`${folder}/${image.path}`)) links.set(`p${image.pageNumber}o${image.occurrence}|${image.artifactId}`, image.path);
+      }
+    }
     if (!completed) {
       skipped.push({ path: `${folder}/`, reason: row.status === "failed" ? "processing failed, so only metadata.json is included" : "still processing, so only metadata.json is included; export again when it finishes" });
     }
@@ -221,16 +250,17 @@ export async function* documentExportEntries(
       // Streamed as stored; the indexed page text stands in when there is no Markdown artifact.
       body: async () => {
         const markdown = markdownKey ? await source.open(markdownKey).catch(() => null) : null;
-        if (markdown && markdown.size !== 0) return markdown;
+        // Image references become links to files in this zip, or their alt text when the file is not here.
+        if (markdown && markdown.size !== 0) return { stream: rewriteImageMarkdownStream(markdown.stream, links, ""), size: null };
         if (markdown) await discard(markdown.stream);
         const joined = pages.map((page) => page.text).filter((text) => text.trim()).join("\n\n");
-        return joined || null;
+        return rewriteImageMarkdown(joined, links, "") || null;
       },
     };
 
     if (pages.length > 1 && !args.omitPageFiles) {
       for (const page of pages) {
-        yield { path: `${folder}/pages/${pageLabel(page.page_number)}.md`, compress: true, modifiedAt, body: async () => page.text };
+        yield { path: `${folder}/pages/${pageLabel(page.page_number)}.md`, compress: true, modifiedAt, body: async () => rewriteImageMarkdown(page.text, links, "../") };
       }
     }
 
@@ -270,7 +300,7 @@ export async function* documentExportEntries(
     if (args.content === "all") {
       const originalPath = `${folder}/original/${safeExportName(row.filename, "original", { keepExtension: true })}`;
       if (withheld.has(`s3://${source.bucket}/${row.source_key}`)) {
-        skipped.push({ path: originalPath, reason: "withheld by the workspace's privacy (PII) policy" });
+        skipped.push({ path: originalPath, reason: "withheld by the project's privacy (PII) policy" });
       } else {
         yield {
           path: originalPath,
@@ -283,6 +313,12 @@ export async function* documentExportEntries(
         const target = artifactExportPath(entry.name, entry.key);
         if (target) yield { path: `${folder}/${target.path}`, compress: target.compress, modifiedAt, body: streamed(entry.key) };
       }
+    }
+
+    if (imagePlan?.plan) {
+      const plan: ExportImagePlan = imagePlan.plan;
+      yield { path: `${folder}/images/index.json`, compress: true, modifiedAt,
+        body: async () => exportImageIndex({ documentId: row.id, plan, added: isAdded, folder }) };
     }
 
     yield {
@@ -298,7 +334,7 @@ export async function* documentExportEntries(
         version: row.version_number ?? 1,
         extractionMode: row.extraction_mode,
         tags: row.tags,
-        workspaceId: row.workspace_id,
+        projectId: row.project_id,
         runId: row.run_id,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
@@ -312,6 +348,36 @@ export async function* documentExportEntries(
     required: true,
     body: async () => exportReadme(args, folders.map((folder) => folder.slice(args.root.length + 1) || "."), skipped),
   };
+}
+
+/** The document's embedded images, read only through its own (not withheld) artifact slots. */
+async function documentImagePlan(
+  source: ExportSource,
+  artifacts: Array<{ name: string; uri: string; key: string }>,
+  withheld: ReadonlySet<string>,
+  manifestKey: string | null,
+  includeAll: boolean,
+): Promise<{ plan: ExportImagePlan | null; problem?: string } | null> {
+  if (!manifestKey) return null;
+  const readJson = async (key: string): Promise<unknown> => {
+    const opened = await source.open(key);
+    if (opened.size !== null && opened.size > EXPORT_IMAGE_METADATA_MAX_BYTES) {
+      (opened.stream as { destroy?: () => void }).destroy?.();
+      throw new Error("too large");
+    }
+    const text = await readTextCapped(opened.stream, EXPORT_IMAGE_METADATA_MAX_BYTES);
+    if (text === null) throw new Error("too large");
+    return JSON.parse(text);
+  };
+  let manifest: unknown;
+  try {
+    manifest = await readJson(manifestKey);
+  } catch (error) {
+    console.warn(`[document-export] artifact graph unreadable key=${manifestKey}: ${error instanceof Error ? error.message : String(error)}`);
+    return { plan: null, problem: "artifact graph unreadable" };
+  }
+  const allowed = new Map(artifacts.map((entry) => [entry.uri, entry.key]));
+  return await planExportImages({ manifest: manifest as never, allowed, withheld, readJson, includeAll });
 }
 
 function withheldUris(metadata: unknown): Set<string> {
@@ -337,11 +403,11 @@ function exportReadme(
     args.omitPageFiles
       ? "- page-by-page Markdown is left out: this export has more pages than one zip can hold as separate files. Export fewer documents to get it."
       : "- `pages/page-0001.md`: the same text page by page (documents with more than one page)",
-    "- `structured.json`: fields extracted against the workspace schema, when it has one",
+    "- `structured.json`: fields extracted against the project schema, when it has one",
     "- `metadata.json`: filename, type, status, page count, version and tags",
   ];
   if (args.content !== "all") {
-    lines.push("- `images/`: page images for pages kept as images in Fast mode, which the Markdown links to");
+    lines.push("- `images/`: page images for pages kept as images in Fast mode, and the embedded images the Markdown references");
   }
   if (args.content === "all") {
     lines.push(
@@ -350,6 +416,15 @@ function exportReadme(
       "- `outputs/`: other readable pipeline outputs, such as HTML and the canonical document",
     );
   }
+  lines.push(
+    "",
+    "## Images",
+    "",
+    "- `images/page-0001.png`: a rendered page image",
+    "- `images/page-0001/image-001.webp`: an image embedded in page 1, numbered by its occurrence on the page; masks sit beside the image they mask (`image-001.smask.webp`). An image repeated on several pages is stored once, at its first occurrence.",
+    "- `images/index.json`: every embedded image occurrence with its page, occurrence, size, class and export path (`null` when the file is not included, with the reason)",
+    "- In `<name>.md`, image links are relative to the document folder (`images/page-0001/image-001.webp`); in `pages/page-0001.md` they start with `../`. An image that is not in this export keeps only its alt text, and is listed below.",
+  );
   if (count > 1) {
     lines.push("", "## Documents", "", "| Folder | File | Pages | Status |", "| --- | --- | ---: | --- |");
     args.documents.forEach((row, index) => {
@@ -371,7 +446,7 @@ function cell(value: string): string {
 }
 
 const documentColumns = (sql: Sql) => sql`
-  d.id, d.workspace_id, d.run_id, d.filename, d.mime_type, d.source_key, d.status, d.extraction_mode,
+  d.id, d.project_id, d.run_id, d.filename, d.mime_type, d.source_key, d.status, d.extraction_mode,
   d.page_count, d.version_number, d.metadata, d.created_at::text, d.updated_at::text,
   coalesce((select array_agg(dt.tag order by dt.tag) from document_tags dt where dt.document_id = d.id), '{}') as tags,
   null::jsonb as artifacts
@@ -387,7 +462,7 @@ export async function loadExportArtifacts(sql: Sql, documents: ExportDocumentRow
   if (runIds.length === 0) return;
   const slots = await sql<Array<{ run_id: string; document_id: string; slot: string; uri: string }>>`
     select r.id as run_id, split_part(artifact.key, ':', 1) as document_id, artifact.key as slot, artifact.value as uri
-    from workspace_runs r
+    from project_runs r
     cross join lateral jsonb_each_text(coalesce(r.artifacts, '{}'::jsonb)) as artifact
     where r.id = any(${sql.array(runIds)})
       and split_part(artifact.key, ':', 1) = any(${sql.array(documents.map((row) => row.id))})
@@ -405,17 +480,17 @@ export async function loadExportArtifacts(sql: Sql, documents: ExportDocumentRow
 }
 
 /**
- * The export's documents: the one document, or the workspace's live versions.
+ * The export's documents: the one document, or the project's live versions.
  * `superseded_at` is set only once a newer version completes, so a pending or
  * failed re-upload never hides the version that is still searchable.
  */
-export async function loadExportDocuments(sql: Sql, row: Pick<ExportRow, "workspace_id" | "document_id" | "run_id">): Promise<{ documents: ExportDocumentRow[]; truncated: boolean }> {
+export async function loadExportDocuments(sql: Sql, row: Pick<ExportRow, "project_id" | "document_id" | "run_id">): Promise<{ documents: ExportDocumentRow[]; truncated: boolean }> {
   if (row.run_id) {
-    // An extract's download: its run's completed documents, still in the export's workspace.
+    // An extract's download: its run's completed documents, still in the export's project.
     const documents = await sql<ExportDocumentRow[]>`
       select ${documentColumns(sql)}
       from documents d
-      where d.run_id = ${row.run_id} and d.workspace_id = ${row.workspace_id}
+      where d.run_id = ${row.run_id} and d.project_id = ${row.project_id}
         and d.status = 'completed' and d.purged_at is null
       order by lower(d.filename), d.created_at, d.id
       limit ${DOCUMENT_EXPORT_MAX_DOCUMENTS + 1}
@@ -426,14 +501,14 @@ export async function loadExportDocuments(sql: Sql, row: Pick<ExportRow, "worksp
     const documents = await sql<ExportDocumentRow[]>`
       select ${documentColumns(sql)}
       from documents d
-      where d.id = ${row.document_id} and d.workspace_id = ${row.workspace_id} and d.purged_at is null
+      where d.id = ${row.document_id} and d.project_id = ${row.project_id} and d.purged_at is null
     `;
     return { documents, truncated: false };
   }
   const documents = await sql<ExportDocumentRow[]>`
     select ${documentColumns(sql)}
     from documents d
-    where d.workspace_id = ${row.workspace_id}
+    where d.project_id = ${row.project_id}
       and d.superseded_at is null and d.archived_at is null and d.purged_at is null
     order by lower(d.filename), d.created_at, d.id
     limit ${DOCUMENT_EXPORT_MAX_DOCUMENTS + 1}
@@ -467,24 +542,29 @@ export async function buildDocumentExport(
   const [row] = await sql<Array<ExportRow & { attempts: number; notify_email: boolean }>>`
     update document_exports set status = 'running', started_at = coalesce(started_at, now()), attempts = attempts + 1
     where id = ${exportId} and status in ('queued', 'running') and expires_at > now()
-    returning id, org_id, workspace_id, document_id, run_id, content, filename, object_key, expires_at, attempts, notify_email
+    returning id, org_id, project_id, document_id, run_id, content, filename, object_key, expires_at, attempts, notify_email
   `;
   if (!row) return { status: "skipped" };
   const prefix = row.object_key.endsWith("/") ? row.object_key : `${row.object_key.slice(0, row.object_key.lastIndexOf("/") + 1)}`;
   const key = `${prefix}a${options.attempt ?? row.attempts}.zip`;
   const started = Date.now();
-  console.log(`[document-export] start export=${row.id} attempt=${options.attempt ?? row.attempts} content=${row.content} scope=${row.document_id ? "document" : "workspace"} workspace=${row.workspace_id}`);
+  console.log(`[document-export] start export=${row.id} attempt=${options.attempt ?? row.attempts} content=${row.content} scope=${row.document_id ? "document" : "project"} project=${row.project_id}`);
 
   try {
     const { documents, truncated } = await loadExportDocuments(sql, row);
-    if (documents.length === 0) throw new Error("Nothing to export: the document or workspace has no documents left.");
+    if (documents.length === 0) throw new Error("Nothing to export: the document or project has no documents left.");
     await loadExportArtifacts(sql, documents);
     // Zip without ZIP64 holds 65,535 files: drop page-by-page files rather than the documents.
     const [pageCount] = await sql<Array<{ pages: number }>>`
       select count(*)::int as pages from document_pages where document_id = any(${sql.array(documents.map((document) => document.id))})
     `;
     // Markdown-only exports add the page images Fast kept (at most one per page), counted as page images here.
-    const imageEntries = documents.reduce((sum, document) => sum + Object.keys(document.artifacts ?? {}).filter((slot) => /:page-\d+$/.test(slot)).length, 0);
+    // Embedded images (one slot each, at most) and one images/index.json per document that has any.
+    const imageEntries = documents.reduce((sum, document) => {
+      const slots = Object.keys(document.artifacts ?? {});
+      const embedded = slots.filter((slot) => /:embedded-image-artifact:\d+$/.test(slot)).length;
+      return sum + slots.filter((slot) => /:page-\d+$/.test(slot)).length + embedded + (embedded > 0 ? 1 : 0);
+    }, 0);
     const omitPageFiles = documents.length * 12 + imageEntries + (pageCount?.pages ?? 0) > ZIP_MAX_ENTRIES;
     const root = row.filename.replace(/\.zip$/i, "");
     const skipped: Array<{ path: string; reason: string }> = [];
@@ -498,12 +578,13 @@ export async function buildDocumentExport(
         select page_number, text from document_pages where document_id = ${documentId} order by page_number
       `,
     };
-    const entries = documentExportEntries({ root, scope: row.document_id ? "document" : "workspace", content: row.content, documents, truncated, omitPageFiles }, source, skipped);
+    const added = new Set<string>();
+    const entries = documentExportEntries({ root, scope: row.document_id ? "document" : "project", content: row.content, documents, truncated, omitPageFiles }, source, skipped, added);
     const chunks = async function* (): AsyncGenerator<Uint8Array> {
       for await (const chunk of zipStream(entries, {
         maxBytes: options.maxBytes ?? DOCUMENT_EXPORT_MAX_BYTES,
         onSkip: (path, reason) => skipped.push({ path, reason }),
-        onAdd: () => { files += 1; },
+        onAdd: (path) => { files += 1; added.add(path); },
         onProgress: options.heartbeat,
       })) {
         sizeBytes += chunk.byteLength;

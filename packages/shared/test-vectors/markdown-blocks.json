@@ -1,0 +1,13 @@
+[
+  { "name": "empty page", "page": "", "blocks": [] },
+  { "name": "only blank lines", "page": "\n\n  \n", "blocks": [] },
+  { "name": "paragraphs separated by blank runs", "page": "one\ntwo\n\n\nthree\n", "blocks": [[0, 1], [4, 4]] },
+  { "name": "leading blank lines and trailing newline", "page": "\n\n# Title\n\nbody text\n\n", "blocks": [[2, 2], [4, 4]] },
+  { "name": "backtick fence keeps its blank lines", "page": "intro\n\n```py\nx = 1\n\ny = 2\n```\n\nafter", "blocks": [[0, 0], [2, 6], [8, 8]] },
+  { "name": "tilde fence closes only on a long enough tilde line", "page": "~~~~\na\n~~~\n\nb\n~~~~\nz", "blocks": [[0, 5], [6, 6]] },
+  { "name": "unterminated fence runs to the end", "page": "a\n\n```\nb\n\nc", "blocks": [[0, 0], [2, 5]] },
+  { "name": "html table keeps blank lines inside", "page": "before\n\n<table>\n<tr><td>a</td></tr>\n\n<tr><td>b</td></tr>\n</table>\n\nafter", "blocks": [[0, 0], [2, 6], [8, 8]] },
+  { "name": "one-line html table", "page": "<table><tr><td>x</td></tr></table>\nnext line", "blocks": [[0, 0], [1, 1]] },
+  { "name": "pipe table is an ordinary block", "page": "| a | b |\n| - | - |\n| 1 | 2 |\n\ntext", "blocks": [[0, 2], [4, 4]] },
+  { "name": "image reference is its own block", "page": "text\n\n![](docslurp-artifact:d1:abc.webp#p1o0)\n\nmore", "blocks": [[0, 0], [2, 2], [4, 4]] }
+]

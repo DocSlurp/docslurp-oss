@@ -34,11 +34,11 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await db.exec(`
-    delete from workspace_runs; delete from workspaces; delete from organizations;
+    delete from project_runs; delete from projects; delete from organizations;
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x') on conflict do nothing;
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1'), ('o2', 'Other', 'other', 'u1');
-    insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W'), ('w2', 'o2', 'u1', 'W2');
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+    insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W'), ('w2', 'o2', 'u1', 'W2');
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
       values ('r1', 'o1', 'u1', 'w', 'upload', 'processing', 'graph-enrich', '{}', 0, 0);
   `);
   vi.spyOn(console, "log").mockImplementation(() => {});
@@ -56,25 +56,25 @@ async function observedScope() {
 }
 
 describe("run-level stage provider scope", () => {
-  it("carries the run's org and allows China-based providers only when the org and workspace both do", async () => {
-    await db.exec(`update organizations set allow_china_providers = true; update workspaces set allow_china_providers = true;`);
+  it("carries the run's org and allows China-based providers only when the org and project both do", async () => {
+    await db.exec(`update organizations set allow_china_providers = true; update projects set allow_china_providers = true;`);
     expect(await observedScope()).toEqual({ policy: { allowChinaProviders: true, speedBoost: false }, org: "o1" });
   });
 
-  it("stays restricted when the workspace turned China-based providers off", async () => {
-    await db.exec(`update organizations set allow_china_providers = true; update workspaces set allow_china_providers = false where id = 'w';
-      update workspaces set allow_china_providers = true where id = 'w2';`);
+  it("stays restricted when the project turned China-based providers off", async () => {
+    await db.exec(`update organizations set allow_china_providers = true; update projects set allow_china_providers = false where id = 'w';
+      update projects set allow_china_providers = true where id = 'w2';`);
     expect((await observedScope()).policy.allowChinaProviders).toBe(false);
   });
 
   it("stays restricted when the run's org turned them off, whatever another org allows", async () => {
-    await db.exec(`update organizations set allow_china_providers = (id = 'o2'); update workspaces set allow_china_providers = true;`);
+    await db.exec(`update organizations set allow_china_providers = (id = 'o2'); update projects set allow_china_providers = true;`);
     expect(await observedScope()).toEqual({ policy: { allowChinaProviders: false, speedBoost: false }, org: "o1" });
   });
 
   it("keeps concurrent runs' scopes apart", async () => {
-    await db.exec(`update organizations set allow_china_providers = true; update workspaces set allow_china_providers = (id = 'w');
-      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+    await db.exec(`update organizations set allow_china_providers = true; update projects set allow_china_providers = (id = 'w');
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
         values ('r2', 'o2', 'u1', 'w2', 'upload', 'processing', 'graph-enrich', '{}', 0, 0);`);
     const seen = new Map<string, { allow: boolean; org: string | null }>();
     let release!: () => void;
@@ -95,7 +95,7 @@ describe("run-level stage provider scope", () => {
   });
 
   it("leaves no scope behind after the stage", async () => {
-    await db.exec(`update organizations set allow_china_providers = true; update workspaces set allow_china_providers = true;`);
+    await db.exec(`update organizations set allow_china_providers = true; update projects set allow_china_providers = true;`);
     await observedScope();
     expect(currentProviderPolicy().allowChinaProviders).toBe(false);
     expect(currentProviderRateOrg()).toBeNull();

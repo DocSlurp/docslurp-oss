@@ -5,7 +5,7 @@ import { sql, type SqlClient } from "../db.js";
 /**
  * Time and cancellation bounds for search SQL.
  *
- * On 2026-10-20 lexical (FTS) branches on a 285K-chunk workspace ran 1-4
+ * On 2026-10-20 lexical (FTS) branches on a 285K-chunk project ran 1-4
  * minutes each on a 2 GB database, with no statement_timeout, and kept running
  * after the HTTP request was gone. Each one held a pool connection, and
  * postgres.js pipelines new queries onto busy connections when none is free

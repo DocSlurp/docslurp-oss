@@ -1,4 +1,5 @@
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { countPdfPages } from "../lib/pdf-page-count.js";
 import path from "node:path";
 import { tmpdir } from "node:os";
 
@@ -144,7 +145,7 @@ async function runFixtureBenchmark(args: {
   const tempDir = await mkdtemp(path.join(tmpdir(), "docslurp-vision-bench-"));
 
   try {
-    const renderPlan = await args.runner.renderPageImages(sourcePath, path.join(tempDir, "page"));
+    const renderPlan = await args.runner.renderPageImages(sourcePath, path.join(tempDir, "page"), await countPdfPages(args.runner, sourcePath));
     if (!renderPlan.available) {
       throw new Error("pdftoppm unavailable");
     }
@@ -173,7 +174,7 @@ async function runFixtureBenchmark(args: {
         outputPath,
         vision: args.candidate,
         cfg: args.cfg,
-        // Operator benchmark over evaluation fixtures, not workspace content.
+        // Operator benchmark over evaluation fixtures, not project content.
         privacyMode: "standard",
         runner: args.runner,
         // Operator tool outside any run or org: no attempt guard.

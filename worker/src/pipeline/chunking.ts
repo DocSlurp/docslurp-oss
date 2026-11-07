@@ -1,5 +1,6 @@
 import { tableChunks, TableBoundary } from "./table-chunking.js";
-import { leadingFrontmatterLineCount, plainHeadingText } from "../lib/markdown-structure.js";
+import { leadingFrontmatterLineCount, parseAtxHeading, plainHeadingText } from "../lib/markdown-structure.js";
+import { atomizeSized, fitsLimits, headWords, normalizeNfc, tailWords, type SizeLimits } from "../lib/unicode-text.js";
 
 export interface ChunkMeta {
   text: string;
@@ -8,8 +9,14 @@ export interface ChunkMeta {
   overlapIndex?: number;
 }
 
-export function* chunkText(text: string, maxChars: number): Generator<string> {
-  for (const meta of chunkTextWithMeta(text, maxChars)) {
+export interface ChunkOptions {
+  overlapFraction?: number;
+  /** Model-token limit per chunk (see `estimateTokens`); characters alone bound the chunk when omitted. */
+  maxTokens?: number;
+}
+
+export function* chunkText(text: string, maxChars: number, options?: Pick<ChunkOptions, "maxTokens">): Generator<string> {
+  for (const meta of chunkTextWithMeta(text, maxChars, options)) {
     yield meta.text;
   }
 }
@@ -17,10 +24,14 @@ export function* chunkText(text: string, maxChars: number): Generator<string> {
 export function* chunkTextWithMeta(
   text: string,
   maxChars: number,
-  options?: { overlapFraction?: number }
+  options?: ChunkOptions
 ): Generator<ChunkMeta> {
   if (!Number.isSafeInteger(maxChars) || maxChars <= 0) throw new RangeError("maxChars must be a positive safe integer");
-  const clean = text.trim();
+  if (options?.maxTokens !== undefined && (!Number.isSafeInteger(options.maxTokens) || options.maxTokens <= 0)) {
+    throw new RangeError("maxTokens must be a positive safe integer");
+  }
+  const limits: SizeLimits = { maxChars, maxTokens: options?.maxTokens };
+  const clean = normalizeNfc(text).trim();
   if (!clean) {
     return;
   }
@@ -31,7 +42,7 @@ export function* chunkTextWithMeta(
   if (overlapFraction <= 0) {
     let chunkIndex = 0;
     for (const section of sections) {
-      for (const chunk of emitSection(section, maxChars)) {
+      for (const chunk of emitSection(section, limits)) {
         const trimmed = chunk.trim();
         if (trimmed) {
           yield { text: trimmed, headingPath: section.headingPath, chunkIndex };
@@ -45,7 +56,7 @@ export function* chunkTextWithMeta(
   // Collect all base chunks, then insert overlap chunks between adjacent pairs
   const baseChunks: { text: string; headingPath: string[]; table: boolean }[] = [];
   for (const section of sections) {
-    for (const chunk of emitSection(section, maxChars)) {
+    for (const chunk of emitSection(section, limits)) {
       const trimmed = chunk.trim();
       if (trimmed) {
         baseChunks.push({ text: trimmed, headingPath: section.headingPath, table: section.tableIndex !== undefined });
@@ -62,12 +73,11 @@ export function* chunkTextWithMeta(
     if (i + 1 < baseChunks.length) {
       const next = baseChunks[i + 1]!;
       if (current.table || next.table) continue;
-      const tailLen = Math.floor(current.text.length * overlapFraction);
-      const headLen = Math.floor(next.text.length * overlapFraction);
-      const tail = current.text.slice(-tailLen);
-      const head = next.text.slice(0, headLen);
+      // Overlap is cut on word boundaries so it never starts mid-word or mid-grapheme.
+      const tail = tailWords(current.text, Math.floor(current.text.length * overlapFraction));
+      const head = headWords(next.text, Math.floor(next.text.length * overlapFraction));
       const overlapText = (tail + " " + head).trim();
-      if (overlapText && overlapText.length <= maxChars) {
+      if (overlapText && fitsLimits(overlapText, limits)) {
         yield { text: overlapText, headingPath: current.headingPath, chunkIndex, overlapIndex: 1 };
         chunkIndex++;
       }
@@ -81,6 +91,9 @@ interface Section {
   body: string;
   tableIndex?: number;
 }
+
+/** Bounded lexical section scan; DOM parsing is performed separately in the VM. */
+export function htmlTableSources(text: string): string[] { return parseSections(text.trim()).filter(s => s.tableIndex !== undefined).map(s => s.body.trim()); }
 
 function parseSections(text: string): Section[] {
   const lines = text.split("\n");
@@ -129,10 +142,10 @@ function parseSections(text: string): Section[] {
       if (fence === null) fence = marker;
       else if (marker[0] === fence[0] && marker.length >= fence.length) fence = null;
     }
-    const headingMatch = fence === null && !fenceMatch ? line.match(/^(#{1,6})\s+(.+)$/) : null;
-    if (headingMatch && plainHeadingText(headingMatch[2]!)) {
-      const level = headingMatch[1]!.length;
-      const headingText = plainHeadingText(headingMatch[2]!);
+    const headingMatch = fence === null && !fenceMatch ? parseAtxHeading(line) : null;
+    if (headingMatch && plainHeadingText(headingMatch.text)) {
+      const level = headingMatch.level;
+      const headingText = plainHeadingText(headingMatch.text);
 
       // Determine if this heading starts a new section
       const isTopLevel = level <= 2;
@@ -170,48 +183,33 @@ function parseSections(text: string): Section[] {
   return sections;
 }
 
-function* emitSection(section: Section, maxChars: number): Generator<string> {
+function* emitSection(section: Section, limits: SizeLimits): Generator<string> {
   const body = section.body;
-  if (section.tableIndex !== undefined) { yield* tableChunks(body, maxChars, section.tableIndex); return; }
+  if (section.tableIndex !== undefined) { yield* tableChunks(body, limits.maxChars, section.tableIndex); return; }
   if (!body) {
     return;
   }
 
-  if (body.length <= maxChars) {
+  if (fitsLimits(body, limits)) {
     yield body;
     return;
   }
 
-  // Split on sentence boundaries
-  const sentences = splitSentences(body);
+  // Pack sentences (prose) and whole fenced blocks (code) into chunks. A fence
+  // is split, at line boundaries, only when it cannot fit a chunk by itself.
   let current = "";
-
-  for (const sentence of sentences) {
-    if (sentence.length > maxChars) {
-      // Flush current buffer
-      if (current.trim()) {
-        yield current.trim();
+  let currentTokens = 0;
+  for (const block of splitFences(body)) {
+    // `atomizeSized` returns a fitting block as one piece, with the token count it needed to decide.
+    for (const piece of atomizeSized(block.text, limits, { code: block.code })) {
+      if (current && !fitsLimits(current + piece.text, limits, currentTokens + piece.tokens)) {
+        if (current.trim()) yield current.trim();
         current = "";
+        currentTokens = 0;
       }
-      // Hard split oversized sentence
-      let remainder = sentence;
-      while (remainder.length > maxChars) {
-        yield remainder.slice(0, maxChars).trim();
-        remainder = remainder.slice(maxChars);
-      }
-      if (remainder.trim()) {
-        current = remainder;
-      }
-      continue;
+      current += piece.text;
+      currentTokens += piece.tokens;
     }
-
-    if (current && current.length + sentence.length > maxChars) {
-      yield current.trim();
-      current = sentence;
-      continue;
-    }
-
-    current += sentence;
   }
 
   if (current.trim()) {
@@ -219,22 +217,30 @@ function* emitSection(section: Section, maxChars: number): Generator<string> {
   }
 }
 
-function splitSentences(text: string): string[] {
-  // Split on sentence-ending punctuation followed by whitespace and a capital letter or newline
-  const parts: string[] = [];
-  const pattern = /([.!?])\s+(?=[A-Z\n])/g;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = pattern.exec(text)) !== null) {
-    const end = match.index + match[1]!.length;
-    parts.push(text.slice(lastIndex, end));
-    lastIndex = end;
+/** Splits a section body into prose and fenced-code blocks, keeping every character. */
+function splitFences(body: string): Array<{ text: string; code: boolean }> {
+  const blocks: Array<{ text: string; code: boolean }> = [];
+  let fence: string | null = null;
+  let buffer = "";
+  const flush = (code: boolean) => {
+    if (buffer) blocks.push({ text: buffer, code });
+    buffer = "";
+  };
+  for (const line of body.split(/(?<=\n)/)) {
+    const marker = line.match(/^\s{0,3}(`{3,}|~{3,})/)?.[1];
+    if (marker && fence === null) {
+      flush(false);
+      fence = marker;
+      buffer = line;
+    } else if (marker && fence !== null && marker[0] === fence[0] && marker.length >= fence.length) {
+      buffer += line;
+      flush(true);
+      fence = null;
+    } else {
+      buffer += line;
+    }
   }
-
-  if (lastIndex < text.length) {
-    parts.push(text.slice(lastIndex));
-  }
-
-  return parts;
+  // An unterminated fence runs to the end of the section; it is still code.
+  flush(fence !== null);
+  return blocks;
 }

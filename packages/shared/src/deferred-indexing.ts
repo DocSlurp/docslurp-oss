@@ -3,7 +3,7 @@ import { z } from "zod";
 import { pageCredits } from "./billing.js";
 import { formatPrivateModelUri, getPrivateModelEndpointRegistry, lookupPrivateModelRoute } from "./private-endpoints.js";
 
-/** How a workspace indexes documents: eagerly (`full`) or deferred until a query needs pages. */
+/** How a project indexes documents: eagerly (`full`) or deferred until a query needs pages. */
 export const indexingModeSchema = z.enum(["full", "map", "visual"]);
 export type IndexingMode = z.infer<typeof indexingModeSchema>;
 
@@ -78,7 +78,7 @@ export function narrowMaterializationPolicy(
 }
 
 /**
- * What a new workspace indexes with unless the caller picks a mode: everything up front, for every organization.
+ * What a new project indexes with unless the caller picks a mode: everything up front, for every organization.
  * `map` (On demand · page map) and `visual` (On demand · page images) are explicit, cheaper choices; no balance,
  * plan or template selects them for you.
  */
@@ -114,7 +114,7 @@ export function pageEmbedRoutesPrivate(route: "auto" | "jina-private" | "gemini"
 
 /**
  * Estimated credits to embed `pages` page images. A page a model reads as an image is a Rich page
- * (PRICE_CARD), whichever route (hosted Gemini or a private endpoint) embeds it.
+ * (pricing provider), whichever route (hosted Gemini or a private endpoint) embeds it.
  */
 export function estimatePageEmbedCredits(pages: number, _route: "auto" | "jina-private" | "gemini" = "auto"): number {
   return pageCredits("rich", Math.max(0, pages));
@@ -173,7 +173,7 @@ export const DEFAULT_MATERIALIZE_TASK_QUEUE = "docslurp-materialize";
 export interface CapabilityClaims {
   v: 1;
   orgId: string;
-  workspaceIds: string[];
+  projectIds: string[];
   policy: Partial<MaterializationPolicy>;
   issuedByKeyId: string;
   boundClientKeyId?: string;

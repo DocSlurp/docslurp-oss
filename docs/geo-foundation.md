@@ -43,7 +43,7 @@ The `geo` keyword is an application annotation, not a standard JSON Schema keywo
 ## Explicit column-type opt-in and cost
 
 Spatial fields are opt-in: a DocSlurp structured field must have `type: "geo"`.
-In workspace JSON Schema, select this type with `type: "object", format: "geojson"`.
+In project JSON Schema, select this type with `type: "object", format: "geojson"`.
 `geojson` is a documented application format, not a standard JSON Schema format.
 A `geo` mapping without that format is rejected. Ordinary objects, GeoJSON-looking
 values, numeric columns and detector suggestions do not select the geo type.

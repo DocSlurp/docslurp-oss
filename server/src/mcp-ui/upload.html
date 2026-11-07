@@ -168,11 +168,11 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
     A hand-written MCP Apps view speaking raw JSON-RPC over postMessage
     (spec 2026-01-26, github.com/modelcontextprotocol/ext-apps). It never touches
     the DocSlurp API directly. Flow: ui/initialize -> tool-result (openUploader:
-    workspace, workspaces, limits) -> pick files -> uploadEstimate -> upload ->
+    project, projects, limits) -> pick files -> uploadEstimate -> upload ->
     XHR PUT each file to its presigned URL -> completeUpload -> poll
     getUploadStatus -> ui/update-model-context and ui/message.
 
-    Every string that came from outside (file names, workspace names, tool and
+    Every string that came from outside (file names, project names, tool and
     error text) reaches the DOM through textContent / text nodes only.
   */
 
@@ -214,11 +214,11 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
     hostCaps: null,     // null until ui/initialize answers
     nohostMsg: null,
     limits: { maxFiles: DEFAULT_LIMITS.maxFiles, maxFileBytes: DEFAULT_LIMITS.maxFileBytes, accept: null },
-    workspaces: [],
-    workspaceId: null,
-    workspaceName: null,
+    projects: [],
+    projectId: null,
+    projectName: null,
     bootError: null,
-    bootFatal: false,   // openUploader failed: uploading is disabled (never fall back to the default workspace)
+    bootFatal: false,   // openUploader failed: uploading is disabled (never fall back to the default project)
     files: [],          // { key, file, name, size, mime, problem, sent, state, descId }
     notice: null,
     estimate: null,
@@ -227,7 +227,7 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
     session: null,
     pendingComplete: null, // { files, plan, sessionId } kept so completeUpload can be re-checked
     sentFiles: [],
-    run: null,          // { id, workspaceId, workspaceName, startedAt, expectedDocs, fileCount, rejected: [] }
+    run: null,          // { id, projectId, projectName, startedAt, expectedDocs, fileCount, rejected: [] }
     status: null,
     statusStale: false,
     statusError: null,
@@ -326,7 +326,7 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
   }
   function sum(list, key) { return list.reduce(function (a, f) { return a + f[key]; }, 0); }
   function validFiles() { return S.files.filter(function (f) { return !f.problem; }); }
-  function destName() { return S.workspaceName || 'Default workspace'; }
+  function destName() { return S.projectName || 'Default project'; }
 
   // ---------------------------------------------------------------- JSON-RPC over postMessage
 
@@ -484,7 +484,7 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
   function onToolResult(result) {
     var out = unwrapToolResult(result);
     if (out.error) {
-      // openUploader failed (unknown workspace, no access): never fall back to the default workspace.
+      // openUploader failed (unknown project, no access): never fall back to the default project.
       S.bootError = out.error;
       S.bootFatal = true;
       if (S.phase === 'idle' || S.phase === 'connecting' || S.phase === 'confirm') render();
@@ -503,22 +503,22 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
         S.limits.accept = accept.length ? accept : null;
       }
     }
-    if (Array.isArray(d.workspaces)) {
-      S.workspaces = d.workspaces.filter(function (w) { return isObject(w) && typeof w.id === 'string' && typeof w.name === 'string'; })
+    if (Array.isArray(d.projects)) {
+      S.projects = d.projects.filter(function (w) { return isObject(w) && typeof w.id === 'string' && typeof w.name === 'string'; })
         .slice(0, 50).map(function (w) { return { id: str(w.id, 128), name: str(w.name, 200), isDefault: w.isDefault === true }; });
     }
-    var chosen = isObject(d.workspace) && typeof d.workspace.id === 'string' ? d.workspace : null;
+    var chosen = isObject(d.project) && typeof d.project.id === 'string' ? d.project : null;
     if (chosen && (S.phase === 'idle' || S.phase === 'connecting' || S.phase === 'confirm' || S.phase === 'nohost')) {
-      S.workspaceId = str(chosen.id, 128);
-      S.workspaceName = str(chosen.name, 200) || null;
-      // The picker lists at most 50; make sure the chosen workspace is always selectable.
-      if (!S.workspaces.some(function (w) { return w.id === S.workspaceId; })) {
-        S.workspaces.unshift({ id: S.workspaceId, name: S.workspaceName || S.workspaceId, isDefault: chosen.isDefault === true });
+      S.projectId = str(chosen.id, 128);
+      S.projectName = str(chosen.name, 200) || null;
+      // The picker lists at most 50; make sure the chosen project is always selectable.
+      if (!S.projects.some(function (w) { return w.id === S.projectId; })) {
+        S.projects.unshift({ id: S.projectId, name: S.projectName || S.projectId, isDefault: chosen.isDefault === true });
       }
       if (S.phase === 'confirm') requestEstimate();
-    } else if (!S.workspaceId) {
-      var def = S.workspaces.filter(function (w) { return w.isDefault; })[0];
-      if (def) { S.workspaceId = def.id; S.workspaceName = def.name; }
+    } else if (!S.projectId) {
+      var def = S.projects.filter(function (w) { return w.isDefault; })[0];
+      if (def) { S.projectId = def.id; S.projectName = def.name; }
     }
     render();
   }
@@ -630,7 +630,7 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
     if (!files.length) { S.estimating = false; return; }
     S.estimating = true;
     var args = { files: files.map(function (f) { return { name: f.name, size: f.size }; }) };
-    if (S.workspaceId) args.workspace = S.workspaceId;
+    if (S.projectId) args.project = S.projectId;
     callTool('uploadEstimate', args).then(function (data) {
       if (seq !== S.estimateSeq) return;
       var e = isObject(data.estimate) ? data.estimate : null;
@@ -666,7 +666,7 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
     S.error = null; S.status = null; S.asked = null; S.pendingComplete = null; S.session = null;
     render();
     var args = { files: files.map(function (f) { return { filename: f.name, mimeType: f.mime, sizeBytes: f.size, singlePart: true }; }) };
-    if (S.workspaceId) args.workspace = S.workspaceId;
+    if (S.projectId) args.project = S.projectId;
 
     callTool('upload', args).then(function (data) {
       if (run !== uploadRunId) {
@@ -771,7 +771,7 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
           done(); f.state = 'sent'; f.sent = f.size; renderSoon(); resolve();
         } else if (xhr.status === 403) {
           fail('put', 'The upload link expired or was refused',
-            'Storage refused ' + clean(f.name) + '. Upload links expire after 15 minutes. Other files may already be stored or ingesting. Check the workspace before retrying.',
+            'Storage refused ' + clean(f.name) + '. Upload links expire after 15 minutes. Other files may already be stored or ingesting. Check the project before retrying.',
             'PUT returned HTTP 403 (signed link expired, or the bucket policy refused it).');
         } else {
           fail('put', 'Upload stopped', 'Storage rejected ' + clean(f.name) + ' (HTTP ' + xhr.status + '). Other files may already be stored or ingesting.',
@@ -781,7 +781,7 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
       xhr.onerror = function () {
         if (run !== uploadRunId) return;
         fail('blocked', 'The app blocked the direct upload',
-          'No storage response was received. Files may already be stored or ingesting; check the workspace before retrying.',
+          'No storage response was received. Files may already be stored or ingesting; check the project before retrying.',
           'PUT to the storage origin failed before any response (network, CORS or CSP). The storage address may not be on this app’s allowed list, or the bucket does not allow uploads from here.');
       };
       xhr.ontimeout = xhr.onerror;
@@ -825,13 +825,13 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
     }, function (err) {
       if (run !== uploadRunId) return;
       setError('complete', pc.cancelled ? 'Upload state unknown' : 'Upload sent, but not confirmed',
-        'The server could not confirm the session state. Files may already be stored or ingesting. Check again before uploading anything twice, or ask the assistant to check the workspace.',
+        'The server could not confirm the session state. Files may already be stored or ingesting. Check again before uploading anything twice, or ask the assistant to check the project.',
         (err && err.message) || 'getUploadStatus failed');
     });
   }
 
   function onCompleted(files, data) {
-    var ws = isObject(data.workspace) ? data.workspace : {};
+    var ws = isObject(data.project) ? data.project : {};
     var runInfo = isObject(data.run) ? data.run : {};
     var runId = str(runInfo.id, 128);
     var documents = Array.isArray(data.documents) ? data.documents : [];
@@ -839,12 +839,12 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
       return { filename: str(r.filename, 512), code: str(r.code, 40), message: str(r.message, 300) || 'Not accepted' };
     });
     if (!runId) {
-      return setError('complete', 'Upload finished without a run', 'The files were stored but no ingestion run was reported. Ask the assistant to check the workspace.', 'completeUpload returned no run id');
+      return setError('complete', 'Upload finished without a run', 'The files were stored but no ingestion run was reported. Ask the assistant to check the project.', 'completeUpload returned no run id');
     }
     S.run = {
       id: runId,
-      workspaceId: str(ws.id, 128) || S.workspaceId,
-      workspaceName: str(ws.name, 200) || destName(),
+      projectId: str(ws.id, 128) || S.projectId,
+      projectName: str(ws.name, 200) || destName(),
       startedAt: Date.now(),
       expectedDocs: documents.length || Math.max(1, files.length - rejected.length),
       fileCount: files.length,
@@ -873,7 +873,7 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
     var pc = S.pendingComplete;
     if (!pc) return;
     var run = ++uploadRunId;
-    if (!pc.sessionId) return setError('complete', 'Upload state unknown', 'Ask the assistant to check the workspace before retrying.', 'No session response received');
+    if (!pc.sessionId) return setError('complete', 'Upload state unknown', 'Ask the assistant to check the project before retrying.', 'No session response received');
     if (pc.cancelled) return checkSession(pc, run);
     finishUpload(pc.files, pc.plan, pc.sessionId, run, false);
   }
@@ -913,7 +913,7 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
     if (!poll.running || !S.run) return;
     if (document.hidden) return; // resumes from visibilitychange
     var runId = S.run.id;
-    callTool('getUploadStatus', { workspace: S.run.workspaceId || undefined, runId: runId }).then(function (data) {
+    callTool('getUploadStatus', { project: S.run.projectId || undefined, runId: runId }).then(function (data) {
       if (!poll.running || !S.run || S.run.id !== runId) return;
       poll.count += 1; poll.failures = 0; S.statusError = null; S.rateLimited = false;
       applyStatus(data);
@@ -1037,12 +1037,12 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
     var files = st && st.items ? st.items.map(function (it) { return { filename: clean(it.filename), status: it.status }; })
       : S.sentFiles.map(function (f) { return { filename: clean(f.name), status: st ? 'unknown' : 'queued' }; });
     var searchable = st ? st.searchable : 0, total = st ? st.total : null;
-    var text = 'DocSlurp uploader: ' + plural(S.run.fileCount, 'file') + ' sent to workspace ' + quoted(S.run.workspaceName) + ' (run ' + clean(S.run.id, 64) + '). ' +
+    var text = 'DocSlurp uploader: ' + plural(S.run.fileCount, 'file') + ' sent to project ' + quoted(S.run.projectName) + ' (run ' + clean(S.run.id, 64) + '). ' +
       (st ? searchable + ' of ' + total + ' pages searchable' + (st.terminal ? ', processing finished.' : ', still processing.') : 'Processing started.');
     request('ui/update-model-context', {
       content: [{ type: 'text', text: text }],
       structuredContent: {
-        workspace: { id: clean(S.run.workspaceId, 128), name: clean(S.run.workspaceName) },
+        project: { id: clean(S.run.projectId, 128), name: clean(S.run.projectName) },
         runId: clean(S.run.id, 64), files: files, pagesSearchable: searchable, pagesTotal: total
       }
     }, MESSAGE_TIMEOUT_MS).catch(function () { /* context is best effort */ });
@@ -1053,7 +1053,7 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
     var st = S.status;
     var names = (st && st.items ? st.items.filter(function (it) { return it.status === 'completed'; }).map(function (it) { return it.filename; })
       : S.sentFiles.map(function (f) { return f.name; })).slice(0, 5).map(quoted);
-    var text = 'I just uploaded ' + (names.length ? names.join(', ') : 'files') + ' to the DocSlurp workspace ' + quoted(S.run.workspaceName) +
+    var text = 'I just uploaded ' + (names.length ? names.join(', ') : 'files') + ' to the DocSlurp project ' + quoted(S.run.projectName) +
       '. Search them and tell me what they contain, with page citations.';
     S.asked = 'sending'; render();
     request('ui/message', { role: 'user', content: [{ type: 'text', text: text }] }, MESSAGE_TIMEOUT_MS).then(function (result) {
@@ -1072,18 +1072,18 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
   function dot(kind) { return h('span', { class: 'dot ' + kind }); }
 
   function destEl(editable) {
-    if (editable && S.workspaces.length > 1 && !S.bootFatal) {
+    if (editable && S.projects.length > 1 && !S.bootFatal) {
       return h('select', {
-        class: 'dest-select', 'data-k': 'dest', 'aria-label': 'Destination workspace',
+        class: 'dest-select', 'data-k': 'dest', 'aria-label': 'Destination project',
         onchange: function (ev) {
-          var chosen = S.workspaces.filter(function (w) { return w.id === ev.target.value; })[0];
+          var chosen = S.projects.filter(function (w) { return w.id === ev.target.value; })[0];
           if (!chosen) return;
-          S.workspaceId = chosen.id; S.workspaceName = chosen.name;
+          S.projectId = chosen.id; S.projectName = chosen.name;
           if (S.phase === 'confirm') requestEstimate();
           render();
         }
-      }, S.workspaces.map(function (w) {
-        return h('option', { value: w.id, selected: w.id === S.workspaceId }, w.name + (w.isDefault ? ' (default)' : ''));
+      }, S.projects.map(function (w) {
+        return h('option', { value: w.id, selected: w.id === S.projectId }, w.name + (w.isDefault ? ' (default)' : ''));
       }));
     }
     return h('span', { class: 'dest' }, S.bootFatal ? 'unavailable' : destName());
@@ -1122,7 +1122,7 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
     return [
       head(['Upload to ', destEl(true)]),
       S.bootError ? h('div', { class: 'alert', role: 'alert' }, h('b', null, 'Uploading is unavailable'),
-        h('span', null, S.bootError + ' Ask the assistant to open the uploader again with a workspace you can use.')) : null,
+        h('span', null, S.bootError + ' Ask the assistant to open the uploader again with a project you can use.')) : null,
       h('div', { class: 'drop' + (S.dragging ? ' over' : '') + (off ? ' off' : ''), 'data-k': 'drop' },
         h('strong', null, 'Drop files here'),
         h('button', { class: 'p', 'data-k': 'choose', disabled: off, onclick: openPicker }, 'Choose files')),
@@ -1259,7 +1259,7 @@ details p { margin: 4px 0 0; overflow-wrap: anywhere; }
     else { title = 'Indexed in '; kind = 'ready'; }
 
     var parts = [
-      head([dot(kind), title, h('span', { class: 'dest' }, run.workspaceName)], finished && elapsed ? fmtDuration(elapsed) + ' elapsed' : plural(run.fileCount, 'file'))
+      head([dot(kind), title, h('span', { class: 'dest' }, run.projectName)], finished && elapsed ? fmtDuration(elapsed) + ' elapsed' : plural(run.fileCount, 'file'))
     ];
 
     if (!st) {

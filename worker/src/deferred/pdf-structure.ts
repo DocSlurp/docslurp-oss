@@ -1,66 +1,42 @@
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { CommandRunner } from "../tools/runner.js";
+import { resolveScriptsDir } from "../tools/scripts-dir.js";
 import type { MapDraft, MapNode } from "./siphon-agent.js";
+import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 
 export interface OutlineNode { title: string; level: number; physicalPage: number | null; children: OutlineNode[] }
 
 export interface PdfStructure { pageCount: number; outline: OutlineNode[]; pageLabels: string[] | null }
 
-const MAX_OUTLINE_NODES = 5000;
-const MAX_OUTLINE_DEPTH = 8;
-
-type PdfJs = typeof import("pdfjs-dist/legacy/build/pdf.mjs");
-let pdfjs: Promise<PdfJs> | null = null;
-function loadPdfJs(): Promise<PdfJs> {
-  pdfjs ??= import("pdfjs-dist/legacy/build/pdf.mjs");
-  return pdfjs;
-}
-
-interface RawOutlineItem { title?: string; dest?: unknown; items?: RawOutlineItem[] }
-
-/** Free structure: page count, outline (bookmarks) with resolved physical pages, and `/PageLabels`. Never renders or OCRs. */
+/** PDF.js runs in the parser VM; only typed structure JSON returns to the worker. */
 export async function readPdfStructure(bytes: Uint8Array): Promise<PdfStructure> {
-  const lib = await loadPdfJs();
-  let task: ReturnType<PdfJs["getDocument"]> | null = null;
+  if (!vmOnlyParsing()) {
+    return (await import("./pdf-structure-guest.js")).readPdfStructure(bytes);
+  }
+  if (bytes.byteLength > 500 * 1024 * 1024) throw new Error("PDF structure input exceeds 500 MiB");
+  const dir = await mkdtemp(path.join(tmpdir(), "docslurp-pdf-structure-"));
   try {
-    task = lib.getDocument({
-      data: new Uint8Array(bytes), // pdf.js takes ownership of the buffer
-      useSystemFonts: false, disableFontFace: true, verbosity: 0, stopAtErrors: false,
-    });
-    const doc = await task.promise;
-    const pageCount = doc.numPages;
-    const raw = (await doc.getOutline().catch(() => null)) as RawOutlineItem[] | null;
-    let budget = MAX_OUTLINE_NODES;
-    const resolvePage = async (dest: unknown): Promise<number | null> => {
-      try {
-        const explicit = typeof dest === "string" ? await doc.getDestination(dest) : (dest as unknown[] | null);
-        if (!Array.isArray(explicit) || explicit.length === 0) return null;
-        const target = explicit[0];
-        if (typeof target === "number") return target >= 0 && target < pageCount ? target + 1 : null;
-        if (target && typeof target === "object") {
-          const index = await doc.getPageIndex(target as never);
-          return index >= 0 && index < pageCount ? index + 1 : null;
-        }
-        return null;
-      } catch {
-        return null;
-      }
-    };
-    const convert = async (items: RawOutlineItem[], level: number): Promise<OutlineNode[]> => {
-      const out: OutlineNode[] = [];
-      for (const item of items) {
-        if (budget <= 0) break;
-        budget--;
-        const title = (item.title ?? "").replace(/\s+/g, " ").trim();
-        const children = level < MAX_OUTLINE_DEPTH && item.items?.length ? await convert(item.items, level + 1) : [];
-        if (!title) { out.push(...children); continue; }
-        out.push({ title, level, physicalPage: await resolvePage(item.dest), children });
-      }
-      return out;
-    };
-    const outline = raw ? await convert(raw, 1) : [];
-    const labels = (await doc.getPageLabels().catch(() => null)) as string[] | null;
-    return { pageCount, outline, pageLabels: labels && labels.length === pageCount ? labels : null };
+    const input = path.join(dir, "input.pdf");
+    const output = path.join(dir, "structure.json");
+    await writeFile(input, bytes, { mode: 0o600 });
+    await new CommandRunner().run({ binary: "node", args: [path.join(resolveScriptsDir(), "pdf-structure.mjs"), input, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 });
+    if ((await stat(output)).size > 4 * 1024 * 1024) throw new Error("PDF structure output exceeds 4 MiB");
+    const result = JSON.parse(await readFile(output, "utf8")) as PdfStructure;
+    if (!Number.isSafeInteger(result.pageCount) || result.pageCount < 1 || result.pageCount > 1_000_000 || !Array.isArray(result.outline)) throw new Error("invalid PDF structure result");
+    if (result.pageLabels !== null && (!Array.isArray(result.pageLabels) || result.pageLabels.length !== result.pageCount || result.pageLabels.some((label) => typeof label !== "string" || label.length > 1024))) throw new Error("invalid PDF page labels");
+    const pending = result.outline.map((node) => ({ node, depth: 1 }));
+    let count = 0;
+    while (pending.length) {
+      const { node, depth } = pending.pop()!;
+      if (++count > 5000 || depth > 8 || !node || typeof node.title !== "string" || node.title.length > 4096 || !Number.isSafeInteger(node.level) || node.level < 1 || node.level > 8 || !Array.isArray(node.children) || !(node.physicalPage === null || Number.isSafeInteger(node.physicalPage) && node.physicalPage >= 1 && node.physicalPage <= result.pageCount)) throw new Error("invalid PDF outline");
+      if (pending.length + node.children.length > 5000) throw new Error("PDF outline exceeds node limit");
+      for (const child of node.children) pending.push({ node: child, depth: depth + 1 });
+    }
+    return result;
   } finally {
-    await task?.destroy();
+    await rm(dir, { recursive: true, force: true });
   }
 }
 

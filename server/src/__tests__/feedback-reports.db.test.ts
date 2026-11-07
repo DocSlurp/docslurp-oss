@@ -27,7 +27,7 @@ vi.mock("../lib/better-auth.js", () => ({
 vi.mock("../lib/admin-emails.js", () => ({ isConfiguredAdminUser: async () => false }));
 vi.mock("../services/api-keys.js", async (original) => ({
   ...await original<typeof import("../services/api-keys.js")>(),
-  validateApiKey: async () => ({ keyId: "k", userId: "ua", orgId: "oa", scopes: ["ingest", "search"], workspaceIds: null, type: "server" }),
+  validateApiKey: async () => ({ keyId: "k", userId: "ua", orgId: "oa", scopes: ["ingest", "search"], projectIds: null, type: "server" }),
 }));
 
 let sql: postgres.Sql;
@@ -46,7 +46,7 @@ beforeAll(async () => {
   await sql`insert into organizations (id, name, slug, created_by_user_id, is_personal, personal_owner_user_id)
     values ('oa', 'Org A', 'org-a', 'ua', true, 'ua'), ('ob', 'Org *B* <!channel>', 'org-b', 'ub', true, 'ub')`;
   await sql`insert into org_memberships (org_id, user_id, role) values ('oa', 'ua', 'owner'), ('ob', 'ub', 'owner')`;
-  await sql`insert into workspaces (id, org_id, user_id, name) values ('00000000-0000-4000-8000-0000000000aa', 'oa', 'ua', 'A docs'), ('00000000-0000-4000-8000-0000000000bb', 'ob', 'ub', 'B secrets')`;
+  await sql`insert into projects (id, org_id, user_id, name) values ('00000000-0000-4000-8000-0000000000aa', 'oa', 'ua', 'A docs'), ('00000000-0000-4000-8000-0000000000bb', 'ob', 'ub', 'B secrets')`;
   const { sessionAuth } = await import("../middleware/session-auth.js");
   const { createFeedbackRoutes } = await import("../routes/feedback.js");
   app = new Hono();
@@ -85,7 +85,7 @@ describe("POST /v1/feedback", () => {
 
   it("stores the report with the reporter's tenant scope and metadata", async () => {
     const response = await post({
-      ...base, workspaceId: WA, route: "/app/workspaces/wa?token=secret#x", screen: "Workspace chat",
+      ...base, projectId: WA, route: "/app/projects/wa?token=secret#x", screen: "Project chat",
       traceId: "4bf92f3577b34da6a3ce929d0e0e4736", requestId: "req-123", errorCode: "internal",
       occurredAt: new Date().toISOString(), timezone: "Europe/Berlin",
     }, "sess-a", { "user-agent": "TestAgent/1.0" });
@@ -95,19 +95,19 @@ describe("POST /v1/feedback", () => {
     expect(body.alert).toBe("none");
     const [row] = await sql`select * from feedback_reports`;
     expect(row).toMatchObject({
-      org_id: "oa", workspace_id: WA, user_id: "ua", category: "bug", severity: "normal",
-      route: "/app/workspaces/wa", screen: "Workspace chat", trace_id: "4bf92f3577b34da6a3ce929d0e0e4736",
+      org_id: "oa", project_id: WA, user_id: "ua", category: "bug", severity: "normal",
+      route: "/app/projects/wa", screen: "Project chat", trace_id: "4bf92f3577b34da6a3ce929d0e0e4736",
       request_id: "req-123", error_code: "internal", client_timezone: "Europe/Berlin",
       user_agent: "TestAgent/1.0", alert_status: "not_applicable", reference: body.report.reference,
     });
     expect(sendAlert).not.toHaveBeenCalled();
   });
 
-  it("never attributes a report to another tenant's workspace or org", async () => {
-    expect((await post({ ...base, workspaceId: WB })).status).toBe(201);
+  it("never attributes a report to another tenant's project or org", async () => {
+    expect((await post({ ...base, projectId: WB })).status).toBe(201);
     expect((await post({ ...base, message: "second", orgId: "ob" })).status).toBe(201);
-    const rows = await sql`select org_id, workspace_id from feedback_reports order by created_at`;
-    expect(rows.map((row) => ({ ...row }))).toEqual([{ org_id: "oa", workspace_id: null }, { org_id: "oa", workspace_id: null }]);
+    const rows = await sql`select org_id, project_id from feedback_reports order by created_at`;
+    expect(rows.map((row) => ({ ...row }))).toEqual([{ org_id: "oa", project_id: null }, { org_id: "oa", project_id: null }]);
   });
 
   it("lists only the caller's own reports", async () => {
@@ -120,9 +120,9 @@ describe("POST /v1/feedback", () => {
 
   it("stores route templates, never invite tokens", async () => {
     await post({ ...base, route: "/app/invites/inv_abcdefghijklmnopqrstuvwxyz/accept?x=1" });
-    await post({ ...base, message: "two", route: "/app/workspaces/3bd4b650-4442-4e00-8c84-a6ce1f2156f8" });
+    await post({ ...base, message: "two", route: "/app/projects/3bd4b650-4442-4e00-8c84-a6ce1f2156f8" });
     const rows = await sql`select route from feedback_reports order by created_at`;
-    expect(rows.map((row) => row.route)).toEqual(["/app/invites/:token/accept", "/app/workspaces/:id"]);
+    expect(rows.map((row) => row.route)).toEqual(["/app/invites/:token/accept", "/app/projects/:id"]);
   });
 
   it("validates input and caps the message length", async () => {

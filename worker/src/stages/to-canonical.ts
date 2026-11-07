@@ -5,6 +5,8 @@ import { healthyDocuments } from "../pipeline/document-health.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
+import { planOcrLanguages } from "../ocr/languages.js";
+import { resolveOcrMode } from "../ocr/mode.js";
 
 type CanonicalStrategy =
   | "already-pdf"
@@ -20,8 +22,7 @@ type CanonicalStrategy =
   | "xlsx-to-csv"
   | "rtf-to-html"
   | "doc-to-text"
-  | "tesseract-ocr"
-  | "tiff-split-ocr"
+  | "image-ocr"
   | "passthrough-unsupported"
   | "passthrough-unknown";
 
@@ -51,7 +52,7 @@ function pickStrategy(normalizedFormat: string): CanonicalStrategy {
     case "latex":
       return "latex-to-markdown";
     case "image":
-      return "tesseract-ocr";
+      return "image-ocr";
     default:
       return "passthrough-unknown";
   }
@@ -89,10 +90,6 @@ export class ToCanonicalStage implements Stage {
             if (ext === ".rtf") strategy = "rtf-to-html";
             else if (ext === ".doc") strategy = "doc-to-text";
           }
-          if (strategy === "tesseract-ocr" && (ext === ".tiff" || ext === ".tif")) {
-            strategy = "tiff-split-ocr";
-          }
-
           const artifact: Record<string, unknown> = {
             documentId: document.id,
             normalizedFormat,
@@ -190,19 +187,17 @@ export class ToCanonicalStage implements Stage {
               available: plan.available,
             };
             artifact.outputKey = output;
-          } else if (strategy === "tiff-split-ocr") {
-            const splitPlan = await this.runner.tiffSplit(document.sourceKey, "page-%04d.tiff");
-            const ocrPlan = await this.runner.tesseractOcr("page-0001.tiff", "ocr-output");
-            artifact.splitPlan = { binary: splitPlan.binary, args: splitPlan.args, available: splitPlan.available };
-            artifact.ocrPlan = { binary: ocrPlan.binary, args: ocrPlan.args, available: ocrPlan.available };
-          } else if (strategy === "tesseract-ocr") {
-            const plan = await this.runner.tesseractOcr(document.sourceKey, "ocr-output");
-            artifact.plan = {
-              binary: plan.binary,
-              args: plan.args,
-              available: plan.available,
+          } else if (strategy === "image-ocr") {
+            // Read by the OCR engine in extract-markdown (every frame of a multi-frame TIFF), in the configured boundary.
+            // This stage records the plan only; it decodes nothing.
+            artifact.ocr = {
+              mode: resolveOcrMode(),
+              recognisers: planOcrLanguages(state.run.pipeline.documentExtraction?.ocr?.language).recognisers,
             };
           }
+
+          // Office, EPUB and spreadsheet pages are counted in extract-markdown from the extractor's own output
+          // (lib/office-page-count.ts); this stage reads nothing of the source.
 
           await this.storage.putJson(key, artifact);
 

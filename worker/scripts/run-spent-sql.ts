@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import type { Sql } from "postgres";
 
 /**
- * Install the usage_events -> workspace_runs.spent_cents trigger from
+ * Install the usage_events -> project_runs.spent_cents trigger from
  * migration 0056 into a scratch schema (verification scripts build minimal
  * tables instead of applying every migration, so the migration's lock and
  * usage_attribution backfill are skipped).

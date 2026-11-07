@@ -30,9 +30,9 @@ beforeEach(() => { vi.clearAllMocks(); mocks.actor = { type: "session", userId: 
 describe("organization public route contracts", () => {
   it("keeps records and detail snapshots on distinct routes", async () => {
     mocks.getOrganization.mockResolvedValue({ id: "org", name: "Team" });
-    mocks.details.mockResolvedValue({ organization: { id: "org" }, access: {}, counts: { members: 2, workspaces: 1 } });
+    mocks.details.mockResolvedValue({ organization: { id: "org" }, access: {}, counts: { members: 2, projects: 1 } });
     expect(await (await app.request("/v1/organizations/org")).json()).toEqual({ id: "org", name: "Team" });
-    expect(await (await app.request("/v1/organizations/org/details")).json()).toHaveProperty("counts.workspaces", 1);
+    expect(await (await app.request("/v1/organizations/org/details")).json()).toHaveProperty("counts.projects", 1);
   });
   it("returns typed membership conflict rather than generic 400/500", async () => {
     mocks.invite.mockRejectedValue(new OrganizationError(409, "membership_exists", "Already exists"));
@@ -94,7 +94,7 @@ describe("organization public route contracts", () => {
     expect(mocks.list).not.toHaveBeenCalled();
   });
   it("deletes an organization only for a signed-in session, with the actor and confirmation", async () => {
-    mocks.deleteOrganization.mockResolvedValue({ orgId: "org", workspaces: 1, documents: 2, runsCancelled: 0 });
+    mocks.deleteOrganization.mockResolvedValue({ orgId: "org", projects: 1, documents: 2, runsCancelled: 0 });
     const init = { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmation: "Team" }) };
     const response = await app.request("/v1/organizations/org", init);
     expect(response.status).toBe(200);

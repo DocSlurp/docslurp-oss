@@ -10,9 +10,9 @@ export function DocumentSearch() {
     defineDocSlurpSearch();
     const element = document.createElement('docslurp-search-box');
     element.setAttribute('client-key', clientKey);
-    // Optional overrides: a named workspace (slug or UUID; default "default") and the service origin.
-    const workspace = process.env.NEXT_PUBLIC_DOCSLURP_WORKSPACE;
-    if (workspace) element.setAttribute('workspace', workspace);
+    // Optional overrides: a named project (slug or UUID; default "default") and the service origin.
+    const project = process.env.NEXT_PUBLIC_DOCSLURP_PROJECT;
+    if (project) element.setAttribute('project', project);
     if (process.env.NEXT_PUBLIC_DOCSLURP_URL) element.setAttribute('api-url', process.env.NEXT_PUBLIC_DOCSLURP_URL);
     host.current?.append(element);
     return () => element.remove();

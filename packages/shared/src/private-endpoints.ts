@@ -6,11 +6,11 @@ import { z } from "zod";
  * A private endpoint is an OpenAI-compatible server (vLLM, SGLang, TGI, ...)
  * running open-weight models on single-tenant hardware the operator rents or
  * owns. Only operators declare them, through the `DOCSLURP_PRIVATE_MODEL_ENDPOINTS`
- * deployment variable; workspaces and API callers can only reference a
+ * deployment variable; projects and API callers can only reference a
  * registered alias with `llm://private/<alias>/<model-id>`. The base URL and
- * credentials never come from workspace settings or requests.
+ * credentials never come from project settings or requests.
  *
- * `local-only` and `strict-privacy` workspaces may call registered private
+ * `local-only` and `strict-privacy` projects may call registered private
  * endpoints. Every call resolves the alias, model and capability against this
  * registry and fails closed on any mismatch (see `resolveProviderTarget`).
  *

@@ -143,6 +143,12 @@ export async function seedNonProductionUsers({ includeFixtures = false } = {}): 
         updated_at = now()
     `;
 
+    // One organization per user (DOCSLURP_MAX_ORGS_PER_USER, migration 0127): the seed users live in the shared org, so
+    // any other membership they picked up (a personal org from sign-up) is dropped first.
+    await sql`
+      delete from org_memberships
+      where user_id in (${adminUserId}, ${memberUserId}) and org_id <> 'seed-shared-org'
+    `;
     await sql`
       insert into org_memberships (org_id, user_id, role)
       values
@@ -153,7 +159,7 @@ export async function seedNonProductionUsers({ includeFixtures = false } = {}): 
     `;
 
     await sql`
-      insert into workspaces (
+      insert into projects (
         id,
         org_id,
         user_id,
@@ -165,10 +171,10 @@ export async function seedNonProductionUsers({ includeFixtures = false } = {}): 
         pipeline
       )
       values (
-        'seed-shared-workspace',
+        'seed-shared-project',
         'seed-shared-org',
         ${adminUserId},
-        'Seed Shared Workspace',
+        'Seed Shared Project',
         'meeting-notes',
         10000,
         30,
@@ -185,22 +191,22 @@ export async function seedNonProductionUsers({ includeFixtures = false } = {}): 
     `;
 
     await sql`
-      insert into workspace_members (workspace_id, user_id, role, invited_by_user_id)
+      insert into project_members (project_id, user_id, role, invited_by_user_id)
       values
-        ('seed-shared-workspace', ${adminUserId}, 'admin', ${adminUserId}),
-        ('seed-shared-workspace', ${memberUserId}, 'editor', ${adminUserId})
-      on conflict (workspace_id, user_id) do update
+        ('seed-shared-project', ${adminUserId}, 'admin', ${adminUserId}),
+        ('seed-shared-project', ${memberUserId}, 'editor', ${adminUserId})
+      on conflict (project_id, user_id) do update
       set role = excluded.role,
           invited_by_user_id = excluded.invited_by_user_id
     `;
 
     if (includeFixtures) {
       await sql`
-        insert into workspace_runs (
+        insert into project_runs (
           id,
           org_id,
           user_id,
-          workspace_id,
+          project_id,
           kind,
           status,
           stage,
@@ -214,7 +220,7 @@ export async function seedNonProductionUsers({ includeFixtures = false } = {}): 
           'seed-queued-run',
           'seed-shared-org',
           ${adminUserId},
-          'seed-shared-workspace',
+          'seed-shared-project',
           'bulk-upload',
           'queued',
           'queued',
@@ -228,18 +234,18 @@ export async function seedNonProductionUsers({ includeFixtures = false } = {}): 
         set
           org_id = excluded.org_id,
           user_id = excluded.user_id,
-          workspace_id = excluded.workspace_id,
+          project_id = excluded.project_id,
           status = 'queued',
           stage = 'queued',
           updated_at = now()
       `;
     }
 
-    console.log("[seed] Seed users and shared workspace ready:");
+    console.log("[seed] Seed users and shared project ready:");
     console.log(`- admin:  ${adminIdentity.email}`);
     console.log(`- member: ${memberIdentity.email}`);
     console.log("- org:    seed-shared-org");
-    console.log("- ws:     seed-shared-workspace");
+    console.log("- ws:     seed-shared-project");
     if (includeFixtures) console.log("- run:    seed-queued-run");
   }
 

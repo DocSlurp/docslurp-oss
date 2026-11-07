@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./request-actor.js", () => ({ isPlatformAdminActor: vi.fn(async (actor?: { admin?: boolean }) => actor?.admin === true) }));
-const getWorkspaceAccess = vi.fn(async (workspaceId: string) => ({ workspaceId, orgId: workspaceId === "ws-eval" ? "org-eval" : "org-other" }));
-vi.mock("../services/organizations.js", () => ({ getWorkspaceAccess }));
+const getProjectAccess = vi.fn(async (projectId: string) => ({ projectId, orgId: projectId === "ws-eval" ? "org-eval" : "org-other" }));
+vi.mock("../services/organizations.js", () => ({ getProjectAccess }));
 
 const {
   ChatModelNotAllowedError, chatEvalAccess, chatModelRefused, chatTurnNeedsEvalAccess, configuredChatEvalModels, parseChatEvalModels,
@@ -118,27 +118,27 @@ describe("agent limits", () => {
 describe("DOCSLURP_CHAT_EVAL_ORG_IDS", () => {
   const session = { type: "session" as const, userId: "u", sessionId: "s", user: { id: "u", email: "", name: "" } };
   const key = (keyType: "server" | "client") => ({ type: "apiKey" as const, userId: "u",
-    apiKey: { keyId: "k", userId: "u", orgId: "org-eval", keyType, allowedDomains: [], scopes: ["search"], rateLimitRpm: 60, rateLimitPpd: 1, rateLimits: [], workspaceIds: [] } });
+    apiKey: { keyId: "k", userId: "u", orgId: "org-eval", keyType, allowedDomains: [], scopes: ["search"], rateLimitRpm: 60, rateLimitPpd: 1, rateLimits: [], projectIds: [] } });
 
-  it("grants eval access for workspaces owned by a listed org, to sessions and server keys only", async () => {
+  it("grants eval access for projects owned by a listed org, to sessions and server keys only", async () => {
     vi.stubEnv("DOCSLURP_CHAT_EVAL_ORG_IDS", " org-eval , org-two");
     expect(await chatEvalAccess(session, "ws-eval")).toBe(true);
     expect(await chatEvalAccess(key("server"), "ws-eval")).toBe(true);
     expect(await chatEvalAccess(key("client"), "ws-eval")).toBe(false);
-    // The workspace's owning org decides, not the key's or caller's org.
+    // The project's owning org decides, not the key's or caller's org.
     expect(await chatEvalAccess(key("server"), "ws-plain")).toBe(false);
     expect(await chatEvalAccess(session, undefined)).toBe(false);
     expect(await chatEvalAccess(undefined, "ws-eval")).toBe(false);
   });
 
   it("is off when unset, while platform admins keep access everywhere", async () => {
-    getWorkspaceAccess.mockClear();
+    getProjectAccess.mockClear();
     expect(await chatEvalAccess(session, "ws-eval")).toBe(false);
-    expect(getWorkspaceAccess).not.toHaveBeenCalled();
+    expect(getProjectAccess).not.toHaveBeenCalled();
     expect(await chatEvalAccess({ ...session, admin: true } as never, "ws-plain")).toBe(true);
   });
 
-  it("pre-checks stream models against the turn's workspace", async () => {
+  it("pre-checks stream models against the turn's project", async () => {
     vi.stubEnv("DOCSLURP_CHAT_EVAL_ORG_IDS", "org-eval");
     vi.stubEnv("DOCSLURP_CHAT_EVAL_MODELS", "inception/mercury-3");
     expect(await chatModelRefused(session, "inception/mercury-3", "ws-eval")).toBe(false);
@@ -159,12 +159,12 @@ describe("eval access lookups", () => {
     expect(chatTurnNeedsEvalAccess(undefined, { searchConcurrency: 8 })).toBe(true);
   });
 
-  it("skips the workspace lookup when the stream pre-check names a catalog model or none", async () => {
+  it("skips the project lookup when the stream pre-check names a catalog model or none", async () => {
     vi.stubEnv("DOCSLURP_CHAT_EVAL_ORG_IDS", "org-eval");
-    getWorkspaceAccess.mockClear();
+    getProjectAccess.mockClear();
     expect(await chatModelRefused(session, "anthropic/claude-haiku-5.5", "ws-eval")).toBe(false);
     expect(await chatModelRefused(session, undefined, "ws-eval")).toBe(false);
-    expect(getWorkspaceAccess).not.toHaveBeenCalled();
+    expect(getProjectAccess).not.toHaveBeenCalled();
   });
 });
 

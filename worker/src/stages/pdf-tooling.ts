@@ -73,8 +73,8 @@ export class PdfToolingStage implements Stage {
               },
               {
                 id: "ocr-rescue",
-                summary: "Escalate to OCR only for scans, faxed pages, or broken text layers.",
-                tools: ["ocrmypdf", "native-pdf-ocr", "unstructured-hi-res", "florence-2"]
+                summary: "Escalate to OCR (PP-OCR in the OCR boundary) only for scans, faxed pages, or broken text layers.",
+                tools: ["ppocr", "florence-2"]
               },
               {
                 id: "cheap-local-multimodal",
@@ -196,6 +196,8 @@ export class PdfToolingStage implements Stage {
   }
 
   private async buildToolchains(document: import("../models.js").Document, runId: string): Promise<ToolchainManifest[]> {
+    // Catalogued plans carry the billed page count as their range, as every run does (runner.pdfPageRangeArgs).
+    const toolPages = Math.max(1, Math.trunc(Number(document.pageCount)) || 1);
     const [
       pdfInfo,
       extractText,
@@ -203,23 +205,19 @@ export class PdfToolingStage implements Stage {
       extractImages,
       splitPages,
       renderImages,
-      ocrPdf,
       unstructuredFast,
-      unstructuredHiRes,
       nativePdf,
       unpdfExtract,
       transformersJsClip,
       florence2
     ] = await Promise.all([
       this.runner.pdfInfo(document.sourceKey),
-      this.runner.extractText(document.sourceKey),
-      this.runner.extractHtml(document.sourceKey),
-      this.runner.extractImages(document.sourceKey, "page"),
-      this.runner.splitPages(document.sourceKey, "page-%d.pdf"),
-      this.runner.renderPageImages(document.sourceKey, "page"),
-      this.runner.ocrPdf(document.sourceKey, "ocr-output.pdf"),
+      this.runner.extractText(document.sourceKey, toolPages),
+      this.runner.extractHtml(document.sourceKey, toolPages),
+      this.runner.extractImages(document.sourceKey, "page", toolPages),
+      this.runner.splitPages(document.sourceKey, "page-%d.pdf", toolPages),
+      this.runner.renderPageImages(document.sourceKey, "page", toolPages),
       this.runner.unstructuredPartition(document.sourceKey, "unstructured-fast.json", "fast"),
-      this.runner.unstructuredPartition(document.sourceKey, "unstructured-hi-res.json", "hi_res"),
       this.nativePdfPlan(),
       this.runner.unpdfExtract(document.sourceKey, "unpdf.json"),
       this.runner.transformersJsClip(
@@ -247,24 +245,13 @@ export class PdfToolingStage implements Stage {
         }
       },
       {
-        id: "ocrmypdf",
-        tier: "scan-rescue",
-        kind: "native-cli",
-        bestFor: ["repairing scanned PDFs", "adding searchable text layers"],
-        tradeoffs: ["slower than text-layer extraction", "depends on OCR runtime and language packs"],
-        commands: {
-          ocrmypdf: ocrPdf
-        }
-      },
-      {
         id: "unstructured",
         tier: "layout-ocr",
         kind: "python-wrapper",
         bestFor: ["element-level extraction", "tables", "OCR-aware partitioning"],
         tradeoffs: ["heavier dependency set", "slower than poppler on clean PDFs"],
         commands: {
-          "partition-fast": unstructuredFast,
-          "partition-hi-res": unstructuredHiRes
+          "partition-fast": unstructuredFast
         }
       },
       {
@@ -272,7 +259,7 @@ export class PdfToolingStage implements Stage {
         tier: "cheap-layout",
         kind: "in-process",
         bestFor: ["per-page Markdown with tables, links and image placements", "reading-order repair on multi-column pages", "in-process page rendering and OCR fill"],
-        tradeoffs: ["private optional engine (DOCSLURP_NATIVE_PDF=1 images); unavailable in the public tree, which falls back to Kreuzberg and Poppler", "documents past its page limit fall back to Kreuzberg"],
+        tradeoffs: ["private optional engine (DOCSLURP_NATIVE_PDF=1 images); unavailable in the public tree, which falls back to Poppler", "documents past its page limit fall back to Poppler"],
         commands: {
           markdown: nativePdf,
           text: nativePdf,

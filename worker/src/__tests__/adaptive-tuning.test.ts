@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { normalizePipelineFeatures } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 import {
   adaptiveEmbeddingBatchSizeForStage,
   adaptiveTuningPerformanceEvents,
@@ -99,11 +99,11 @@ function makeDocument(id: string, pageCount: number): Document {
 }
 
 function makeState(documents: Document[]): WorkflowState {
-  const run: WorkspaceRun = {
+  const run: ProjectRun = {
     id: "run-1",
     orgId: "org-1",
     userId: "user-1",
-    workspaceId: "workspace-1",
+    projectId: "project-1",
     kind: "ingest",
     status: "processing",
     stage: "queued",
@@ -254,7 +254,7 @@ describe("adaptive stage tuning", () => {
   it("uses historical stage speed before the current run has completed stages", () => {
     const state = makeState([makeDocument("doc-1", 10), makeDocument("doc-2", 10)]);
     state.run.stats.historicalStagePerformance = {
-      scope: "workspace",
+      scope: "project",
       lookbackDays: 14,
       stages: {
         embed: {
@@ -281,7 +281,7 @@ describe("adaptive stage tuning", () => {
   it("uses historical fast slice speed to seed larger unstructured page slices", () => {
     const state = makeState([makeDocument("doc-1", 12)]);
     state.run.stats.historicalStagePerformance = {
-      scope: "workspace",
+      scope: "project",
       lookbackDays: 14,
       stages: {
         "extract-markdown": {

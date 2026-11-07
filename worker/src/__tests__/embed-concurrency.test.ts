@@ -41,7 +41,7 @@ vi.mock("../lib/ai.js", async (importOriginal) => ({
 
 import { fromEnv } from "../config.js";
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { EmbedStage } from "../stages/embed.js";
 import type { CommandRunner } from "../tools/runner.js";
@@ -94,10 +94,10 @@ async function embedOnce(env: Record<string, string>, documents = ["doc"], pipel
       status: "processing", extractionMode: "hybrid", pageCount: PAGES, createdAt: new Date(), updatedAt: new Date() });
   }
   const run = {
-    id: "run", userId: "u1", orgId: "o1", workspaceId: "w1", stage: "embed", status: "processing",
+    id: "run", userId: "u1", orgId: "o1", projectId: "w1", stage: "embed", status: "processing",
     pipeline: { ...normalizePipelineFeatures({ embedding: { profile: "cheapest-hosted", modelUri: "llm://openai/text-embedding-3-small", target: "hosted" } as never }), ...pipelineOverrides },
     stats: {}, artifacts, spentCents: 0,
-  } as unknown as WorkspaceRun;
+  } as unknown as ProjectRun;
   const state = WorkflowState.create(run, docs);
   state.docConcurrency = 1;
   const materialized = new Map<string, { id: string; documentId: string; metadata: Record<string, unknown> }>();

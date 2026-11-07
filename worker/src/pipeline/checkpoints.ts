@@ -1,10 +1,12 @@
 import type { GeoFinalSource } from "../db/geo-final-source.js";
+import { recordExtractorFallback } from "../lib/extractor-fallback.js";
 import { reportException, initializeWorkerErrorReporting } from "@docslurp/shared/error-reporting";
 import { createHash } from "node:crypto";
 
 import type { Document } from "../models.js";
 import { runWithPerfContext } from "../lib/perf-context.js";
-import { latchedTeardownError } from "../sandbox/session-context.js";
+import { latchedTeardownError, watchSandboxInfrastructure } from "../sandbox/session-context.js";
+import { SANDBOX_INFRASTRUCTURE_RETRIES, SandboxRepeatedFailureError } from "../sandbox/types.js";
 import { findQuarantinedSourceError } from "../sandbox/source-quarantine.js";
 import { noteWorkProgress } from "../lib/work-progress.js";
 import { hasFailedDocumentStage } from "./document-health.js";
@@ -67,7 +69,7 @@ export class DocumentStageError extends Error {
 
 /**
  * The run's spend for the run cost cap: billed spend committed to
- * usage_events (`workspace_runs.spent_cents`, as of this state's last
+ * usage_events (`project_runs.spent_cents`, as of this state's last
  * checkpoint, including other shards' and page tasks' commits) plus the
  * billable events still buffered in the ledger. Every usage event counts:
  * AI tokens, embeddings, vision, media, per-page fees and billed worker
@@ -140,6 +142,8 @@ function recordRetryCount(
 }
 
 function plausibilityScoreFor(stats: Record<string, unknown>): number | undefined {
+  // A page kept unread on purpose (Fast keeps an image as its page image) has no text by design: nothing to escalate.
+  if (stats.keptUnread === true) return undefined;
   return typeof stats.plausibilityScore === "number"
     ? stats.plausibilityScore
     : undefined;
@@ -282,17 +286,53 @@ export async function runDocumentStage(
         `attempt=${attempt.attempt}/${attempt.totalAttempts} strategy=${attempt.strategy ?? "default"}`,
     );
     try {
-      const result = await runWithPerfContext({
+      // Strikes other documents' failures put on this one (council W #2: it broke the job tree they inherited) count too.
+      const recorded = Number((checkpoint?.stats as { sandboxInfrastructureStrikes?: unknown } | undefined)?.sandboxInfrastructureStrikes ?? 0);
+      if (recorded > SANDBOX_INFRASTRUCTURE_RETRIES) throw new SandboxRepeatedFailureError(recorded, "strikes recorded against this document");
+      const watched = await watchSandboxInfrastructure(() => runWithPerfContext({
         runId: state.run.id,
         documentId: document.id,
         orgId: state.run.orgId,
-        ...(state.run.workspaceId ? { workspaceId: state.run.workspaceId } : {}),
+        ...(state.run.projectId ? { projectId: state.run.projectId } : {}),
         pageCount: document.pageCount,
         scope: "document",
         stageName,
         pushPerformance: (event) => state.pendingPerformance.push(event),
         pushUsage: (event) => state.usageLedger.enqueue(event),
-      }, async () => await runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.allowChinaProviders, speedBoost: state.run.pipeline.speedBoost }, () => run(attempt.strategy)));
+      }, async () => await runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.allowChinaProviders, speedBoost: state.run.pipeline.speedBoost }, () => run(attempt.strategy))));
+      // The sandbox failed under this document (VM creation or hardening, a leftover kill, a control deadline): that is
+      // the outcome, even when the stage caught it and fell back or skipped a page. The document neither fails nor
+      // completes on it; the activity retries (real-Modal check F1).
+      if (watched.infrastructure) {
+        // Counted durably, and only when the failure followed this document's own command on its VM (council U #4): a
+        // document that breaks a fresh VM every time cannot keep the whole stage retrying (recheck S #2), while a provider
+        // outage (session open, VM creation, API errors) is a plain retry and never fails a document.
+        const failure = watched.infrastructure as { afterCommand?: unknown; blameDocumentId?: unknown };
+        const ownCommand = failure.afterCommand === true;
+        // A job tree the previous document of this run left unusable is that document's strike (council W #2); it fails
+        // at the limit the next time its stage runs.
+        const blamed = typeof failure.blameDocumentId === "string" && failure.blameDocumentId !== document.id ? failure.blameDocumentId : null;
+        if (!ownCommand && blamed) {
+          // On the blamed document's own row for the stage it last ran (council X #1), never this document's stage name.
+          const recorded = state.store?.noteBlamedSandboxStrike
+            ? await state.store.noteBlamedSandboxStrike(state, blamed).catch((error: unknown) => {
+              console.warn(`[checkpoint-debug] document=${blamed} blamed sandbox strike not recorded: ${error instanceof Error ? error.message : String(error)}`);
+              return null;
+            })
+            : null;
+          if (recorded === null) console.warn(`[checkpoint-debug] document=${blamed} run=${state.run.id} blamed sandbox strike not recorded: no stage row for that document in this run`);
+        }
+        const strikes = (ownCommand || failure.blameDocumentId === document.id) && state.store?.noteSandboxInfrastructureStrike
+          ? await state.store.noteSandboxInfrastructureStrike(state, document.id, stageName).catch((error: unknown) => {
+            console.warn(`[checkpoint-debug] document=${document.id} stage=${stageName} sandbox strike not recorded: ${error instanceof Error ? error.message : String(error)}`);
+            return 0;
+          })
+          : 0;
+        if (strikes > SANDBOX_INFRASTRUCTURE_RETRIES) throw new SandboxRepeatedFailureError(strikes, watched.infrastructure.message);
+        throw watched.infrastructure;
+      }
+      if ("error" in watched) throw watched.error;
+      const result = watched.result!;
       // A command teardown that failed in this activity ends it, even if the stage swallowed it.
       const latched = latchedTeardownError();
       if (latched) throw latched;
@@ -309,6 +349,10 @@ export async function runDocumentStage(
           plausibilityScore: plausibilityDecision.plausibilityScore,
         });
         recordRetryCount(state, document.id, attempt.attempt);
+        // The rejected attempt's output must not be served by dedup, to this document's retry or to a copy of it.
+        releaseDocumentHashes(state, document.id);
+        // Its extractor did not serve the document: the ingest report shows the fallback.
+        recordExtractorFallback(state.artifactLedger, document.id, stats.extractor, "low-quality");
         continue;
       }
 
@@ -355,7 +399,9 @@ export async function runDocumentStage(
       recordRetryCount(state, document.id, attempt.attempt);
 
       // A quarantined source fails the Document at once: another strategy would only try again.
-      if (!hasRemainingAttempts(attempt) || !isDocumentLevelFailure(error, signal) || findQuarantinedSourceError(error)) {
+      // So does a document over its sandbox strike limit: another strategy would break another VM.
+      if (!hasRemainingAttempts(attempt) || !isDocumentLevelFailure(error, signal) || findQuarantinedSourceError(error)
+        || error instanceof SandboxRepeatedFailureError) {
         break;
       }
     }
@@ -451,9 +497,12 @@ export function hashContent(content: string | Buffer): string {
 export function checkDedup(
   state: WorkflowState,
   contentHash: string,
-  artifactSlot: string
+  artifactSlot: string,
+  /** The document asking. An entry its own earlier attempt registered is never reused: a retry runs the next extractor. */
+  documentId?: string,
 ): string | undefined {
   const existing = state.contentHashes.get(contentHash);
+  if (existing && documentId !== undefined && state.contentHashOwners.get(contentHash) === documentId) return undefined;
   if (existing) {
     state.artifactLedger.record(artifactSlot, existing);
     return existing;
@@ -464,9 +513,24 @@ export function checkDedup(
 export function registerHash(
   state: WorkflowState,
   contentHash: string,
-  artifactUri: string
+  artifactUri: string,
+  documentId?: string,
 ): void {
   state.contentHashes.set(contentHash, artifactUri);
+  if (documentId !== undefined) state.contentHashOwners.set(contentHash, documentId);
+  else state.contentHashOwners.delete(contentHash);
+}
+
+/**
+ * Withdraw the content hashes a document's attempt registered: its output was rejected (low plausibility) and the stage
+ * retries, so no other document with the same bytes may reuse it either.
+ */
+export function releaseDocumentHashes(state: WorkflowState, documentId: string): void {
+  for (const [hash, owner] of state.contentHashOwners) {
+    if (owner !== documentId) continue;
+    state.contentHashes.delete(hash);
+    state.contentHashOwners.delete(hash);
+  }
 }
 
 export function skipCompletedPages(completedPages: Set<number>, pageNumbers: number[]): number[] {

@@ -15,10 +15,3 @@ minimumReleaseAge: 1440
 minimumReleaseAgeExclude:
   - mastra
   - '@mastra/*'
-  - '@kreuzberg/node'
-  - '@kreuzberg/node-darwin-arm64'
-  - '@kreuzberg/node-darwin-x64'
-  - '@kreuzberg/node-linux-arm64-gnu'
-  - '@kreuzberg/node-linux-x64-gnu'
-  - '@kreuzberg/node-linux-x64-musl'
-  - '@kreuzberg/node-win32-x64-msvc'

@@ -2,104 +2,30 @@ import type { Document } from "../models.js";
 import type { Stage } from "../pipeline/pipeline.js";
 import { runDocumentStage } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
-import type { ArtifactStore } from "../tools/storage.js";
+import { cleanupTempFile, sourceStorageKey, type ArtifactStore } from "../tools/storage.js";
+import type { CommandRunner } from "../tools/runner.js";
+import { recordMeasuredPdfPageCount } from "../lib/pdf-page-count.js";
+import { recordMeasuredTextPageCount } from "../lib/text-page-count.js";
+import { authorizeMeasuredPages } from "../lib/measured-page-authorization.js";
+import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
+import { detectFileFormat, resolvePdfMode, type NormalizedFormat } from "@docslurp/shared";
+import { sniffedPdf } from "../lib/sniffed-pdf.js";
 
-type NormalizedFormat =
-  | "pdf"
-  | "markdown"
-  | "plain-text"
-  | "html"
-  | "office-word"
-  | "office-excel"
-  | "office-pptx"
-  | "office-other"
-  | "structured-csv"
-  | "structured-json"
-  | "epub"
-  | "latex"
-  | "image"
-  | "audio"
-  | "video"
-  | "unknown";
-
-const mimeMap: Record<string, NormalizedFormat> = {
-  "audio/mpeg": "audio", "audio/mp3": "audio", "audio/wav": "audio", "audio/x-wav": "audio",
-  "audio/flac": "audio", "audio/ogg": "audio", "audio/mp4": "audio", "audio/webm": "audio",
-  "video/mp4": "video", "video/webm": "video", "video/quicktime": "video", "video/x-matroska": "video",
-  "application/pdf": "pdf",
-  "text/markdown": "markdown",
-  "text/plain": "plain-text",
-  "text/html": "html",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "office-word",
-  "application/rtf": "office-other",
-  "text/csv": "structured-csv",
-  "application/json": "structured-json",
-  "application/x-ndjson": "structured-json",
-  "application/epub+zip": "epub",
-  "application/vnd.openxmlformats-officedocument.presentationml.presentation": "office-pptx",
-  "application/vnd.ms-powerpoint": "office-pptx",
-  "application/x-latex": "latex",
-  "text/x-tex": "latex",
-  "image/png": "image",
-  "image/jpeg": "image",
-  "image/tiff": "image",
-  "image/webp": "image",
-};
-
-const extMap: Record<string, NormalizedFormat> = {
-  ".mp3": "audio", ".wav": "audio", ".flac": "audio", ".ogg": "audio", ".opus": "audio", ".m4a": "audio", ".aac": "audio",
-  ".mp4": "video", ".webm": "video", ".mov": "video", ".mkv": "video", ".avi": "video",
-  ".pdf": "pdf",
-  ".md": "markdown",
-  ".txt": "plain-text",
-  ".html": "html",
-  ".htm": "html",
-  ".mhtml": "html",
-  ".docx": "office-word",
-  ".doc": "office-word",
-  ".xlsx": "office-excel",
-  ".xls": "office-excel",
-  ".pptx": "office-pptx",
-  ".ppt": "office-pptx",
-  ".odt": "office-other",
-  ".rtf": "office-other",
-  ".csv": "structured-csv",
-  ".tsv": "structured-csv",
-  ".json": "structured-json",
-  ".jsonl": "structured-json",
-  ".epub": "epub",
-  ".tex": "latex",
-  ".png": "image",
-  ".jpg": "image",
-  ".jpeg": "image",
-  ".tiff": "image",
-  ".tif": "image",
-  ".webp": "image",
-};
-
-function detectFormat(document: Document): NormalizedFormat {
-  const mime = document.mimeType?.toLowerCase() ?? "";
-  if (mimeMap[mime]) {
-    return mimeMap[mime];
-  }
-
-  const filename = document.filename ?? "";
-  const dot = filename.lastIndexOf(".");
-  if (dot >= 0) {
-    const ext = filename.slice(dot).toLowerCase();
-    if (extMap[ext]) {
-      return extMap[ext];
-    }
-  }
-
-  return "unknown";
+/**
+ * The format intake persisted from the sniffed bytes (documents.file_facts) when there is one; otherwise the stored MIME type
+ * and extension, for documents ingested before intake sniffed.
+ */
+function detectFormat(document: Document): { format: NormalizedFormat; detectedBy: "intake-file-facts" | "mime-and-extension" } {
+  const persisted = document.fileFacts?.format;
+  if (persisted && persisted !== "unknown") return { format: persisted, detectedBy: "intake-file-facts" };
+  return { format: detectFileFormat({ filename: document.filename, mimeType: document.mimeType }), detectedBy: "mime-and-extension" };
 }
 
 export class FormatDetectStage implements Stage {
   readonly name = "format-detect";
 
-  constructor(private readonly storage: ArtifactStore) {}
+  constructor(private readonly storage: ArtifactStore, private readonly runner?: Pick<CommandRunner, "pdfPageCount" | "pdfPopplerAcceptance" | "run">) {}
 
   async run(state: import("../pipeline/pipeline.js").WorkflowState, signal?: AbortSignal): Promise<void> {
     for (const document of healthyDocuments(state)) {
@@ -117,23 +43,48 @@ export class FormatDetectStage implements Stage {
             throw signal.reason instanceof Error ? signal.reason : new Error("aborted");
           }
 
-          const normalizedFormat = detectFormat(document);
+          const { format: normalizedFormat, detectedBy } = detectFormat(document);
 
           await this.storage.putJson(key, {
             documentId: document.id,
             filename: document.filename,
             declaredMimeType: document.mimeType,
             normalizedFormat,
-            detectedBy: "mime-and-extension",
+            detectedBy,
+            fileFacts: document.fileFacts ?? null,
           });
 
           state.artifactLedger.recordDocument(document.id, "normalizedFormat", normalizedFormat);
+          // With no PDF mode (neither a VM provider nor customer-owned local mode) extraction refuses every PDF: refuse it here,
+          // before split-pages, render-images, routing evidence or any other stage runs host Poppler on its bytes.
+          if (sniffedPdf(document) && resolvePdfMode(process.env) === "off") {
+            console.error(`[format-detect] refused document=${document.id}: a PDF with no PDF mode configured (DOCSLURP_PDF_MODE); no host parser runs`);
+            throw new Error("PDF extraction unavailable: no PDF mode is configured (DOCSLURP_PDF_MODE), so this PDF is refused before any parser runs");
+          }
+          // A PDF's page count from intake is an estimate (the API never parses it): measure it in the PDF boundary now,
+          // before any stage uses it or anything bills.
+          let temp: string | null = null;
+          const pdfPages = this.runner ? await recordMeasuredPdfPageCount({
+            state, document, runner: this.runner, signal,
+            sourcePath: async () => (temp ??= await this.storage.downloadSourceToTempFile(sourceStorageKey(document.sourceKey), trustedTempDownloadPattern("docslurp-pdf-pages-", document))),
+          }).finally(async () => { if (temp) await cleanupTempFile(temp); }) : null;
+          // A text file intake could not count in full (sampled over 2 MB, or no evidence): the same text rule over the whole text.
+          const textPages = await recordMeasuredTextPageCount({
+            state, document, format: normalizedFormat,
+            readSource: (maxBytes) => this.storage.getBytes(sourceStorageKey(document.sourceKey), { maxBytes }),
+          });
+          // Every attempt, including a retry that finds the measurement already persisted: authorize the measured pages above
+          // what admission priced, from durable state (intake_page_count), before any later stage runs.
+          await authorizeMeasuredPages(state, document);
 
           return {
             artifactUri: this.storage.uri(key),
             stats: {
               normalizedFormat,
-              detectedBy: "mime-and-extension",
+              detectedBy,
+              mimeVerdict: document.fileFacts?.mismatch ?? null,
+              ...(pdfPages ? { pdfPages: pdfPages.pages, pdfPagesEstimate: pdfPages.estimate, pdfPagesMethod: pdfPages.method } : {}),
+              ...(textPages ? { textPages: textPages.pages, textPagesEstimate: textPages.estimate } : {}),
             },
           };
         },

@@ -88,10 +88,10 @@ beforeAll(async () => {
   await sql`insert into "user" (id, name, email) values ('u', 'User', 'native@example.test')`;
   await sql`insert into organizations (id, name, slug, created_by_user_id) values ('org1', 'Org', 'native', 'u')`;
   await sql`insert into org_memberships (org_id, user_id, role) values ('org1', 'u', 'owner')`;
-  await sql`insert into workspaces (id, org_id, user_id, name) values ('w', 'org1', 'u', 'Native')`;
-  await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline) values ('run1', 'org1', 'u', 'w', 'bulk-upload', 'completed', 'completed', '{}')`;
+  await sql`insert into projects (id, org_id, user_id, name) values ('w', 'org1', 'u', 'Native')`;
+  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values ('run1', 'org1', 'u', 'w', 'bulk-upload', 'completed', 'completed', '{}')`;
   for (let d = 1; d <= DOCS; d += 1) {
-    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status)
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status)
       values (${`doc${d}`}, 'org1', 'u', 'w', 'run1', ${`doc${d}.pdf`}, 'application/pdf', ${`k${d}`}, 'completed')`;
     await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension)
       values (${`vi${d}`}, ${`doc${d}`}, 'lancedb', 'b', 'p', ${route.model}, ${DIM})`;
@@ -111,7 +111,7 @@ beforeAll(async () => {
     }
   }
   // A dedup copy of doc2: chunks in Postgres only, vectors owned by doc2.
-  await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, deduped_from_document_id)
+  await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, deduped_from_document_id)
     values ('copy2', 'org1', 'u', 'w', 'run1', 'copy2.pdf', 'application/pdf', 'kc', 'completed', 'doc2')`;
   await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension)
     values ('vic', 'copy2', 'lancedb', 'b', 'p', ${route.model}, ${DIM})`;
@@ -152,7 +152,7 @@ function near(id: string): number[] {
 
 async function run(native: boolean, query: string, options: Record<string, unknown>) {
   vi.stubEnv("SEARCH_LANCEDB_NATIVE", native ? "1" : "0");
-  const response = await search.hybridSearch(query, "u", { ...baseOptions, ...options, filters: { workspaceId: "w", ...(options.filters as object ?? {}) } });
+  const response = await search.hybridSearch(query, "u", { ...baseOptions, ...options, filters: { projectId: "w", ...(options.filters as object ?? {}) } });
   await session.drainSearchSessionWrites();
   return response;
 }
@@ -160,12 +160,12 @@ async function run(native: boolean, query: string, options: Record<string, unkno
 const citations = (response: Awaited<ReturnType<typeof run>>) => response.results.map((result) => ({ text: result.text, citation: result.citation }));
 
 describe("SEARCH_LANCEDB_NATIVE", () => {
-  it("is on unless SEARCH_LANCEDB_NATIVE turns it off; listed workspaces stay on when it is off", () => {
+  it("is on unless SEARCH_LANCEDB_NATIVE turns it off; listed projects stay on when it is off", () => {
     expect(eligible.searchLanceDbNativeEnabled("w", {})).toBe(true);
     expect(eligible.searchLanceDbNativeEnabled(undefined, { SEARCH_LANCEDB_NATIVE: "" })).toBe(true);
     for (const off of ["0", "false", "off", "no"]) expect(eligible.searchLanceDbNativeEnabled("w", { SEARCH_LANCEDB_NATIVE: off })).toBe(false);
-    expect(eligible.searchLanceDbNativeEnabled("w", { SEARCH_LANCEDB_NATIVE: "0", SEARCH_LANCEDB_NATIVE_WORKSPACES: "x, w" })).toBe(true);
-    expect(eligible.searchLanceDbNativeEnabled(undefined, { SEARCH_LANCEDB_NATIVE: "0", SEARCH_LANCEDB_NATIVE_WORKSPACES: "w" })).toBe(false);
+    expect(eligible.searchLanceDbNativeEnabled("w", { SEARCH_LANCEDB_NATIVE: "0", SEARCH_LANCEDB_NATIVE_PROJECTS: "x, w" })).toBe(true);
+    expect(eligible.searchLanceDbNativeEnabled(undefined, { SEARCH_LANCEDB_NATIVE: "0", SEARCH_LANCEDB_NATIVE_PROJECTS: "w" })).toBe(false);
   });
 
   it("matches filenameContains like Postgres ILIKE, in linear time", async () => {
@@ -222,7 +222,7 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
     await run(true, "torque bearing", { queryVector, filters });
     vi.stubEnv("SEARCH_LANCEDB_NATIVE", "1");
     statements.length = 0;
-    const response = await search.hybridSearch("torque bearing", "u", { ...baseOptions, queryVector, filters: { workspaceId: "w", ...filters } });
+    const response = await search.hybridSearch("torque bearing", "u", { ...baseOptions, queryVector, filters: { projectId: "w", ...filters } });
     // Write-behind session and usage writes may already have started; they are not on the answer's path.
     const reads = statements.filter((statement) => !/^\s*(begin|commit|insert|delete|update|with recorded|savepoint|release)/i.test(statement));
     await session.drainSearchSessionWrites();
@@ -231,7 +231,7 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
     // Plus, per retrieval branch (vector, keyword; run in parallel), one primary-key check that the
     // LanceDB-hydrated hits' chunks still exist.
     expect(reads.length).toBeLessThanOrEqual(3);
-    expect(reads[0]).toMatch(/from workspaces w/);
+    expect(reads[0]).toMatch(/from projects w/);
     for (const read of reads.slice(1)) expect(read).toMatch(/select id from document_chunks where id in/);
     expect(statements.some((statement) => /insert into search_sessions/.test(statement))).toBe(true);
   });
@@ -268,7 +268,7 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
       const queryVector = near("doc4-9");
       const legacy = await run(false, "cavitation erosion", { queryVector });
       vi.stubEnv("SEARCH_LANCEDB_NATIVE", undefined);
-      const native = await search.hybridSearch("cavitation erosion", "u", { ...baseOptions, queryVector, filters: { workspaceId: "w" } });
+      const native = await search.hybridSearch("cavitation erosion", "u", { ...baseOptions, queryVector, filters: { projectId: "w" } });
       await session.drainSearchSessionWrites();
       expect(native.timings?.nativeLexicalUnindexed).toBe(1);
       expect(native.timings?.nativeHydrationPostgres).toBe(1);
@@ -288,7 +288,7 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
       values ('doc4-9-fixed', 'doc4', 'run1', 'u', 9, ${corrected}, ${original.headingPath}, ${original.page}, 12, ${sql.json(original.metadata as postgres.JSONValue)})`;
     await sql`insert into document_corrections (id, document_id, run_id, user_id, corrected_markdown, reindex_completed_at)
       values ('fix', 'doc4', 'run1', 'u', 'x', now() + interval '1 second')`;
-    eligible.handleSearchEligibilityHint(JSON.stringify({ workspaceIds: ["w"] }));
+    eligible.handleSearchEligibilityHint(JSON.stringify({ projectIds: ["w"] }));
     try {
       const queryVector = near("doc4-9");
       for (const query of ["cavitation erosion", "corrosion erosion"]) {
@@ -305,7 +305,7 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
       await sql`delete from document_chunks where id = 'doc4-9-fixed'`;
       await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, heading_path, page_number, token_estimate, metadata)
         values ('doc4-9', 'doc4', 'run1', 'u', 9, ${original.text}, ${original.headingPath}, ${original.page}, 12, ${sql.json(original.metadata as postgres.JSONValue)})`;
-      eligible.handleSearchEligibilityHint(JSON.stringify({ workspaceIds: ["w"] }));
+      eligible.handleSearchEligibilityHint(JSON.stringify({ projectIds: ["w"] }));
     }
   });
 
@@ -354,33 +354,33 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
   });
 
   it("stops serving a deleted document once the delete commits (no run_events hint)", async () => {
-    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status)
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status)
       values ('gone', 'org1', 'u', 'w', 'run1', 'gone.pdf', 'application/pdf', 'kg', 'completed')`;
     await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension)
       values ('vig', 'gone', 'lancedb', 'b', 'p', ${route.model}, ${DIM})`;
-    const set = await eligible.loadEligibleDocuments({ workspaceId: "w", embeddingModel: route.model, dimension: DIM });
+    const set = await eligible.loadEligibleDocuments({ projectId: "w", embeddingModel: route.model, dimension: DIM });
     expect(set.documents.map((document) => document.id)).toContain("gone");
     const documents = await import("../services/documents.js");
     statements.length = 0;
     statementParameters.length = 0;
     expect(await documents.deleteDocuments(["gone"], "u")).toBe(1);
     const hint = statements.findIndex((statement) => /pg_notify/.test(statement));
-    expect(statementParameters[hint]).toEqual(["search_eligibility", JSON.stringify({ workspaceIds: ["w"] })]);
-    // Every API process drops the workspace on the hint (delivered at commit).
-    eligible.handleSearchEligibilityHint(JSON.stringify({ workspaceIds: ["w"] }));
-    const fresh = await eligible.loadEligibleDocuments({ workspaceId: "w", embeddingModel: route.model, dimension: DIM });
+    expect(statementParameters[hint]).toEqual(["search_eligibility", JSON.stringify({ projectIds: ["w"] })]);
+    // Every API process drops the project on the hint (delivered at commit).
+    eligible.handleSearchEligibilityHint(JSON.stringify({ projectIds: ["w"] }));
+    const fresh = await eligible.loadEligibleDocuments({ projectId: "w", embeddingModel: route.model, dimension: DIM });
     expect(fresh).not.toBe(set);
     expect(fresh.documents.map((document) => document.id)).not.toContain("gone");
   });
 
-  it("drops cached eligibility when a run_events hint names the workspace's run", async () => {
-    const set = await eligible.loadEligibleDocuments({ workspaceId: "w", embeddingModel: route.model, dimension: DIM });
+  it("drops cached eligibility when a run_events hint names the project's run", async () => {
+    const set = await eligible.loadEligibleDocuments({ projectId: "w", embeddingModel: route.model, dimension: DIM });
     expect(set.documents.filter((document) => document.vectorReady)).toHaveLength(DOCS + 1);
     await sql`update documents set superseded_at = now() where id = 'doc6'`;
     try {
-      expect(await eligible.loadEligibleDocuments({ workspaceId: "w", embeddingModel: route.model, dimension: DIM })).toBe(set);
+      expect(await eligible.loadEligibleDocuments({ projectId: "w", embeddingModel: route.model, dimension: DIM })).toBe(set);
       await eligible.invalidateSearchRuns(["run1"]);
-      const fresh = await eligible.loadEligibleDocuments({ workspaceId: "w", embeddingModel: route.model, dimension: DIM });
+      const fresh = await eligible.loadEligibleDocuments({ projectId: "w", embeddingModel: route.model, dimension: DIM });
       expect(fresh.documents.map((document) => document.id)).not.toContain("doc6");
     } finally {
       await sql`update documents set superseded_at = null where id = 'doc6'`;

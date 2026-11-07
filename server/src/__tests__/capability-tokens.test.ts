@@ -1,12 +1,12 @@
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { openCapabilityToken, resetCapabilityKeyForTests, sealCapabilityToken } from "../lib/capability-tokens.js";
+import { openCapabilityToken, resetCapabilityKeyForTests, sealCapabilityToken, sealedTokenFamily, peekCapabilityToken } from "../lib/capability-tokens.js";
 import type { CapabilityClaims } from "@docslurp/shared";
 
 const now = 1_900_000_000_000;
 const claims: CapabilityClaims = {
-  v: 1, orgId: "org-1", workspaceIds: ["ws-a"], policy: { maxPagesPerQuery: 10 },
+  v: 1, orgId: "org-1", projectIds: ["ws-a"], policy: { maxPagesPerQuery: 10 },
   issuedByKeyId: "key-1", exp: Math.floor(now / 1000) + 600, jti: "jti-1",
 };
 
@@ -36,6 +36,15 @@ describe("search capability tokens", () => {
     expect(openCapabilityToken(sealCapabilityToken({ ...claims, exp: Math.floor(now / 1000) }), now)).toBeNull();
   });
 
+  it("requires canonical encoding when inspecting capability claims", () => {
+    for (let length = 0; length < 3; length++) {
+      const token = sealCapabilityToken({ ...claims, jti: "canonical" + "x".repeat(length) });
+      expect(peekCapabilityToken(token)).not.toBeNull();
+      expect(peekCapabilityToken(token + "x")).toBeNull();
+      expect(peekCapabilityToken(token + "=")).toBeNull();
+    }
+  });
+
   it("does not open under a different secret", () => {
     const token = sealCapabilityToken(claims);
     process.env.SECRETS_ENCRYPTION_KEY = "b".repeat(64);
@@ -45,24 +54,24 @@ describe("search capability tokens", () => {
 });
 
 const actorRef: { current: unknown } = { current: null };
-vi.mock("../services/workspaces.js", () => ({
-  getWorkspace: vi.fn(async (id: string) => ({ id, orgId: "org-1" })),
-  ensureDefaultWorkspace: vi.fn(async () => ({ id: "ws-default", orgId: "org-1" })),
+vi.mock("../services/projects.js", () => ({
+  getProject: vi.fn(async (id: string) => ({ id, orgId: "org-1" })),
+  ensureDefaultProject: vi.fn(async () => ({ id: "ws-default", orgId: "org-1" })),
 }));
 vi.mock("../lib/request-actor.js", async () => {
-  const scope = await import("../lib/api-key-workspace-scope.js");
+  const scope = await import("../lib/api-key-project-scope.js");
   return {
     getRequestActor: () => actorRef.current,
     actorHasAnyApiKeyScope: (actor: { type: string; apiKey?: { scopes: string[] } }, scopes: string[]) =>
       actor.type === "apiKey" && scopes.some((s) => actor.apiKey!.scopes.includes(s)),
-    apiKeyCanUseWorkspace: scope.apiKeyCanUseWorkspace,
+    apiKeyCanUseProject: scope.apiKeyCanUseProject,
   };
 });
 
 describe("POST /v1/capabilities", () => {
   const key = (keyType: "server" | "client") => ({
     type: "apiKey", userId: "u1",
-    apiKey: { keyId: "key-1", userId: "u1", orgId: "org-1", keyType, scopes: ["search"], workspaceIds: [], allowedDomains: [], rateLimitRpm: 1, rateLimitPpd: 1, rateLimits: [], materializationPolicy: { maxPagesPerQuery: 30 } },
+    apiKey: { keyId: "key-1", userId: "u1", orgId: "org-1", keyType, scopes: ["search"], projectIds: [], allowedDomains: [], rateLimitRpm: 1, rateLimitPpd: 1, rateLimits: [], materializationPolicy: { maxPagesPerQuery: 30 } },
   });
   const post = async (body: unknown) => {
     const { capabilitiesRoutes } = await import("../routes/capabilities.js");
@@ -78,13 +87,27 @@ describe("POST /v1/capabilities", () => {
 
   it("mints for a server key with the effective policy", async () => {
     actorRef.current = key("server");
-    const res = await post({ workspaceIds: ["ws-a"], policy: { maxPagesPerQuery: 500 }, ttlSeconds: 600 });
+    const res = await post({ projectIds: ["ws-a"], policy: { maxPagesPerQuery: 500 }, ttlSeconds: 600 });
     expect(res.status).toBe(200);
     const json = await res.json() as { token: string; policy: { maxPagesPerQuery: number } };
     expect(json.policy.maxPagesPerQuery).toBe(30);
     const opened = openCapabilityToken(json.token)!;
     expect(opened.issuedByKeyId).toBe("key-1");
-    expect(opened.workspaceIds).toEqual(["ws-a"]);
+    expect(opened.projectIds).toEqual(["ws-a"]);
+  });
+
+  it("rejects unsupported scope fields before default selection or token issuance", async () => {
+    actorRef.current = key("server");
+    const { ensureDefaultProject, getProject } = await import("../services/projects.js");
+    for (const scope of [{ project: "intended" }, { projectId: "intended" }, { orgId: "intended-org" }, { workspaceId: "legacy" }]) {
+      vi.mocked(ensureDefaultProject).mockClear();
+      vi.mocked(getProject).mockClear();
+      const response = await post(scope);
+      expect(response.status).toBe(400);
+      expect(await response.json()).not.toHaveProperty("token");
+      expect(ensureDefaultProject).not.toHaveBeenCalled();
+      expect(getProject).not.toHaveBeenCalled();
+    }
   });
 
   it("mints for a session as session:<userId>", async () => {
@@ -93,12 +116,12 @@ describe("POST /v1/capabilities", () => {
     expect(res.status).toBe(200);
     const opened = openCapabilityToken(((await res.json()) as { token: string }).token)!;
     expect(opened.issuedByKeyId).toBe("session:u9");
-    expect(opened.workspaceIds).toEqual(["ws-default"]);
+    expect(opened.projectIds).toEqual(["ws-default"]);
   });
 
   it("rejects capabilities too large to open with 400", async () => {
     actorRef.current = key("server");
-    const res = await post({ workspaceIds: ["ws-a"], allowedOrigins: Array.from({ length: 20 }, (_, i) => `https://${"x".repeat(280)}${i}.example`) });
+    const res = await post({ projectIds: ["ws-a"], allowedOrigins: Array.from({ length: 20 }, (_, i) => `https://${"x".repeat(280)}${i}.example`) });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: { details: { category: string } } }).error.details.category).toBe("capability_too_large");
   });
@@ -108,5 +131,19 @@ describe("POST /v1/capabilities", () => {
     expect((await post({ ttlSeconds: 60 })).status).toBe(403);
     actorRef.current = key("server");
     expect((await post({ ttlSeconds: 7200 })).status).toBe(400);
+  });
+});
+
+
+describe("sealed token canonical encoding", () => {
+  it("rejects dangling base64 characters even when decoded bytes match", () => {
+    const family = sealedTokenFamily("canonical-test:v1");
+    for (let length = 0; length < 3; length++) {
+      const claims = { text: "x".repeat(length) };
+      const token = family.seal(claims);
+      expect(family.open(token)).toEqual(claims);
+      expect(family.open(token + "x")).toBeNull();
+      expect(family.open(token + "=")).toBeNull();
+    }
   });
 });

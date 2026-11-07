@@ -96,11 +96,11 @@ describe("search strategy usage", () => {
     ]);
   });
 
-  it("strategy usage recorded on a Search Session persists with session, workspace and org scope", async () => {
+  it("strategy usage recorded on a Search Session persists with session, project and org scope", async () => {
     const log = vi.mocked(console.log);
     const journal = createSearchSessionJournal({
       rootSessionId: "session-1",
-      scope: { workspaceId: "ws-1", orgId: "org-1" },
+      scope: { projectId: "ws-1", orgId: "org-1" },
     });
     generateOpenRouterText
       .mockResolvedValueOnce(reply("hypothetical passage", 10, 5))
@@ -146,7 +146,7 @@ describe("search strategy usage", () => {
       query: "q",
       results: [],
       chunks: [],
-      metadata: { originalQuery: "q", options: {}, workspaceId: "ws-1" },
+      metadata: { originalQuery: "q", options: {}, projectId: "ws-1" },
     });
 
     expect(usageRows.map((row) => row[5])).toEqual(["hyde", "self-query", "stepback"]);
@@ -154,7 +154,7 @@ describe("search strategy usage", () => {
       expect(row[2]).toBeNull(); // run_id
       expect(JSON.parse(String(row[11]))).toMatchObject({
         sessionId: "session-1",
-        workspaceId: "ws-1",
+        projectId: "ws-1",
         orgId: "org-1",
       });
     }

@@ -5,13 +5,11 @@
       "description": "Unstructured partitioning (PDF hi_res, Office) with CPU-only inference deps, no audio/whisper stack (docs/worker-image.md).",
       "pythonModules": [
         "unstructured",
-        "unstructured_inference",
-        "unstructured_pytesseract"
+        "unstructured_inference"
       ],
       "distributions": [
         "unstructured",
-        "unstructured-inference",
-        "unstructured-pytesseract"
+        "unstructured-inference"
       ],
       "artifacts": [
         {

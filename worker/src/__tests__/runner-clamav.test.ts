@@ -3,10 +3,10 @@ import { describe, expect, it } from "vitest";
 import { assessClamDatabaseHealth, resolveMalwareScanPolicy } from "../tools/runner.js";
 
 describe("malware scan policy", () => {
-  it("requires clamd and fails closed on stale definitions in production by default", () => {
+  it("uses VM-local scanning and fails closed on stale definitions in production by default", () => {
     const policy = resolveMalwareScanPolicy({ NODE_ENV: "production" });
 
-    expect(policy.requireDaemon).toBe(true);
+    expect(policy.requireDaemon).toBe(false);
     expect(policy.failOpenOnStaleDefinitions).toBe(false);
     expect(policy.maxSignatureAgeHours).toBe(24);
   });

@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { createDocSlurpClient, DIRECT_UPLOAD_THRESHOLD_BYTES } from "../dist/index.js";
 
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
-const uploadResult = { workspace: { id: "workspace" }, run: { id: "run" }, documents: [] };
+const uploadResult = { project: { id: "project" }, run: { id: "run" }, documents: [] };
 
 function fakeApi({ mode = "single", partSize = 4 } = {}) {
   const calls = [];
@@ -45,8 +45,8 @@ test("uploads above the threshold go through a direct session, never multipart /
     "GET https://api.invalid/v1/uploads/direct/sessions/s1?statusOnly=true",
   ]);
   const session = JSON.parse(api.calls[0].body);
-  assert.deepEqual(session.files, [{ filename: "big.pdf", mimeType: "application/pdf", sizeBytes: big.size, canonicalId: "/manual" }]);
-  assert.equal(session.workspace, "default");
+  assert.deepEqual(session.files, [{ clientId: "0", filename: "big.pdf", mimeType: "application/pdf", sizeBytes: big.size, canonicalId: "/manual" }]);
+  assert.equal(session.project, "default");
   // Presigned storage URLs never receive the API key.
   assert.equal(api.calls[1].auth, null);
   assert.equal(api.calls[1].contentType, "application/pdf");

@@ -3,9 +3,9 @@ import { qualityModeSchema } from "./quality.js";
 import { defaultPipelineFeatures, pipelineFeaturesSchema } from "./pipeline.js";
 import { searchCitationSchema } from "./chunks.js";
 import {
-  workspaceChatDebugSchema,
-  workspaceChatModeSchema,
-} from "./workspace.js";
+  projectChatDebugSchema,
+  projectChatModeSchema,
+} from "./project.js";
 import { ingestReportSchema } from "./ingest-report.js";
 
 export const searchResultSchema = z.object({
@@ -31,7 +31,7 @@ export const searchResultSchema = z.object({
 });
 export type SearchResult = z.infer<typeof searchResultSchema>;
 
-export const workspaceChatEvidenceSpanSchema = z.object({
+export const projectChatEvidenceSpanSchema = z.object({
   citationIndex: z.number().int().nonnegative(),
   answerStart: z.number().int().nonnegative(),
   answerEnd: z.number().int().positive(),
@@ -41,11 +41,11 @@ export const workspaceChatEvidenceSpanSchema = z.object({
   sourceEnd: z.number().int().nonnegative(),
   citation: searchCitationSchema,
 });
-export type WorkspaceChatEvidenceSpan = z.infer<
-  typeof workspaceChatEvidenceSpanSchema
+export type ProjectChatEvidenceSpan = z.infer<
+  typeof projectChatEvidenceSpanSchema
 >;
 
-export const workspaceChatUsageSchema = z.object({
+export const projectChatUsageSchema = z.object({
   inputTokens: z.number().int().nonnegative().default(0),
   outputTokens: z.number().int().nonnegative().default(0),
   totalTokens: z.number().int().nonnegative().default(0),
@@ -55,14 +55,14 @@ export const workspaceChatUsageSchema = z.object({
   /** Agent turns: provider cost (USD cents) the tools reported for their own work, such as query embeddings, rewrites and nested answers. */
   toolCostCents: z.number().nonnegative().optional(),
 });
-export type WorkspaceChatUsage = z.infer<typeof workspaceChatUsageSchema>;
+export type ProjectChatUsage = z.infer<typeof projectChatUsageSchema>;
 
-export const workspaceChatRuntimeSchema = z.object({
+export const projectChatRuntimeSchema = z.object({
   startedAt: z.string(),
   completedAt: z.string(),
   totalMs: z.number().int().nonnegative(),
 });
-export type WorkspaceChatRuntime = z.infer<typeof workspaceChatRuntimeSchema>;
+export type ProjectChatRuntime = z.infer<typeof projectChatRuntimeSchema>;
 
 export const searchAvailabilityCoverageSchema = z.object({
   totalDocuments: z.number().int().nonnegative(),
@@ -91,7 +91,7 @@ export const searchAvailabilitySchema = z.object({
   /** True when some searchable documents have keyword results only (no vectors yet). */
   keywordOnly: z.boolean().default(false),
   scope: z.object({
-    workspaceId: z.string(),
+    projectId: z.string(),
     runId: z.string().nullable(),
   }),
   coverage: searchAvailabilityCoverageSchema,
@@ -103,12 +103,12 @@ export const searchAvailabilitySchema = z.object({
 });
 export type SearchAvailability = z.infer<typeof searchAvailabilitySchema>;
 
-export const workspaceChatResponseSchema = z.object({
+export const projectChatResponseSchema = z.object({
   id: z.string(),
   sessionId: z.string(),
   /**
    * Browser (client) keys only: the sealed grant to continue this session
-   * (bound to the key, workspace and session; expires after 24 hours). Send
+   * (bound to the key, project and session; expires after 24 hours). Send
    * it back as `sessionToken` with `sessionId`; a session id alone is refused.
    */
   sessionToken: z.string().optional(),
@@ -116,11 +116,11 @@ export const workspaceChatResponseSchema = z.object({
   answer: z.string(),
   finishReason: z.enum(["stop", "length", "content-filter"]).optional(),
   citations: z.array(searchResultSchema),
-  evidenceSpans: z.array(workspaceChatEvidenceSpanSchema).default([]),
+  evidenceSpans: z.array(projectChatEvidenceSpanSchema).default([]),
   availability: searchAvailabilitySchema.nullable().default(null),
-  usage: workspaceChatUsageSchema,
-  runtime: workspaceChatRuntimeSchema,
-  debug: workspaceChatDebugSchema,
+  usage: projectChatUsageSchema,
+  runtime: projectChatRuntimeSchema,
+  debug: projectChatDebugSchema,
   /** Present when the turn was answered with the ingest report ("/status"); no model was called. */
   ingestReport: ingestReportSchema.optional(),
   /**
@@ -134,21 +134,26 @@ export const workspaceChatResponseSchema = z.object({
     /** Best vector match, rescaled above the embedding pipeline's noise baseline, 0..1. */
     relevance: z.number().min(0).max(1),
     threshold: z.number().min(0).max(1),
-    /** The workspace's scope as shown in the decline. */
+    /** The project's scope as shown in the decline. */
     scope: z.string(),
     suggestions: z.array(z.string()).max(3),
   }).optional(),
 });
-export type WorkspaceChatResponse = z.infer<typeof workspaceChatResponseSchema>;
+export type ProjectChatResponse = z.infer<typeof projectChatResponseSchema>;
 
-export const aggregateWorkspaceRagSearchRequestSchema = z
+export const aggregateProjectRagSearchRequestSchema = z
   .object({
     q: z.string().min(1).optional(),
     goal: z.string().min(1).optional(),
-    /** Workspace IDs, slugs or names (see parseWorkspaceInput). Empty: every workspace the caller can search. */
-    workspaces: z.array(z.string().trim().min(1).max(256)).default([]),
-    limitPerWorkspace: z.number().int().positive().max(25).default(5),
-    maxWorkspaces: z.number().int().positive().max(50).default(12),
+    /**
+     * The organization to search. An API key always searches its own (another value is refused); a session defaults to
+     * its personal organization. A search never spans organizations.
+     */
+    orgId: z.string().trim().min(1).max(256).optional(),
+    /** Project IDs, slugs or names (see parseProjectInput) in that organization. Empty: every project there the caller can search. */
+    projects: z.array(z.string().trim().min(1).max(256)).default([]),
+    limitPerProject: z.number().int().positive().max(25).default(5),
+    maxProjects: z.number().int().positive().max(50).default(12),
     maxCitations: z.number().int().positive().max(50).default(12),
     /**
      * Calls a model on the caller's credits: off unless requested, and an API
@@ -160,7 +165,7 @@ export const aggregateWorkspaceRagSearchRequestSchema = z
     rerank: z.boolean().default(true),
     mmr: z.boolean().default(false),
     mmrLambda: z.number().min(0).max(1).optional(),
-    /** Relevance floor, 0..1; 0 disables it. Omitted: workspace default, else SEARCH_MIN_SCORE. */
+    /** Relevance floor, 0..1; 0 disables it. Omitted: project default, else SEARCH_MIN_SCORE. */
     minScore: z.number().min(0).max(1).optional(),
     compression: z.boolean().default(false),
     /** Provider-backed steps stay off unless requested, as on POST /v1/search. */
@@ -178,8 +183,8 @@ export const aggregateWorkspaceRagSearchRequestSchema = z
     path: ["q"],
     message: "Provide q or goal.",
   });
-export type AggregateWorkspaceRagSearchRequest = z.infer<
-  typeof aggregateWorkspaceRagSearchRequestSchema
+export type AggregateProjectRagSearchRequest = z.infer<
+  typeof aggregateProjectRagSearchRequestSchema
 >;
 
 // Run processing preview schemas
@@ -188,6 +193,8 @@ export const runProcessingPreviewFileSchema = z.object({
   filename: z.string().min(1),
   mimeType: z.string().min(1),
   sizeBytes: z.number().int().nonnegative(),
+  /** Counted pages, when known (a run's documents have them). Without it pages are estimated from the size, over a range. */
+  pages: z.number().int().positive().max(10_000_000).optional(),
 });
 export type RunProcessingPreviewFile = z.infer<
   typeof runProcessingPreviewFileSchema
@@ -203,8 +210,8 @@ export type RunProcessingPreviewUrl = z.infer<
 export const runProcessingPreviewRequestSchema = z
   .object({
     speedBoost: z.boolean().optional(),
-    /** Workspace ID, slug or name (see parseWorkspaceInput); omitted means the org's default workspace. */
-    workspace: z.string().trim().min(1).max(256).optional(),
+    /** Project ID, slug or name (see parseProjectInput); omitted means the org's default project. */
+    project: z.string().trim().min(1).max(256).optional(),
     pipeline: pipelineFeaturesSchema.default(defaultPipelineFeatures),
     files: z.array(runProcessingPreviewFileSchema).default([]),
     urls: z.array(runProcessingPreviewUrlSchema).default([]),

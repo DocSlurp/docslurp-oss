@@ -24,7 +24,7 @@ vi.mock("../routing/executors/deps.js", async (importOriginal) => {
         await fn({ path: path.join(rasterDir.path, `page-${pageNumber}.png`), mimeType: "image/png", pageNumber }),
       withCrop: async <T>(raster: { path: string; mimeType: string }, _box: unknown, fn: (crop: { path: string; mimeType: string }) => Promise<T>) =>
         await fn(raster),
-      ocr: async () => { throw new Error("tesseract unavailable"); },
+      ocr: async () => { throw new Error("ocr unavailable"); },
       label: async () => { throw new Error("labeler unavailable"); },
       vlm: async (args: { target: RoutingTarget; role: Assignment["role"]; raster: { path: string; mimeType: string }; pageNumber: number; signal?: AbortSignal }) =>
         await input.callVision(visionConfigForModel(input.selection, args.target.ref.modelUri!, args.role),
@@ -44,7 +44,7 @@ import { HeuristicRouter } from "../routing/routers/heuristic.js";
 import { groupAssignmentsByTarget } from "../routing/runtime.js";
 import { BIG_BUDGET, makePage, testCatalog } from "../routing/testing.js";
 import type { Config } from "../config.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 import { attachVisionServedRoute } from "../lib/vision-pricing.js";
 
 const MODEL = "google/gemini-3.1-flash-lite";
@@ -53,14 +53,14 @@ const CFG = { openAiBaseUrl: "https://api.openai.com/v1", costPer1kInputTokens: 
 
 const catalog = testCatalog();
 const regionVlm = catalog.find((t) => t.kind === "hosted-vlm" && t.roles.includes("chart-data")) as RoutingTarget;
-const tesseract = catalog.find((t) => t.id === "ocr:tesseract")!;
+const ppocr = catalog.find((t) => t.id === "ocr:ppocr")!;
 const estimate = { costUsd: 0.002, latencyMs: 1500, pPass: 0.9 };
 const asg = (pageNumber: number, target: RoutingTarget, role: Assignment["role"], scope: Assignment["scope"] = { kind: "page" }): Assignment =>
   ({ pageNumber, scope, targetId: target.id, role, reason: "test", estimate, cascade: [] });
 
 /**
  * Page 1: a region crop on a hosted VLM (executor). Pages 2-4: page-scope OCR that fails, so the
- * workspace model reads them as the fallback. Page 4 was already decided by a page task.
+ * project model reads them as the fallback. Page 4 was already decided by a page task.
  */
 async function routedPlan() {
   const base = await new HeuristicRouter({ documentId: "doc", runId: "run-1" }).plan([makePage({ pageNumber: 1 })], catalog, BIG_BUDGET, "cost-quality");
@@ -69,9 +69,9 @@ async function routedPlan() {
     mode: "active",
     assignments: [
       asg(1, regionVlm, "chart-data", { kind: "region", bbox: { x: 50, y: 400, width: 200, height: 100 } }),
-      asg(2, tesseract, "extract-text"),
-      asg(3, tesseract, "extract-text"),
-      asg(4, tesseract, "extract-text"),
+      asg(2, ppocr, "extract-text"),
+      asg(3, ppocr, "extract-text"),
+      asg(4, ppocr, "extract-text"),
     ],
   };
   return { plan, execution: groupAssignmentsByTarget(plan, catalog), catalog };
@@ -85,9 +85,9 @@ function rejection(costCents = 2) {
 
 function runState(pipeline: Record<string, unknown> = {}, orgId: string | null = "org-1"): WorkflowState {
   const state = WorkflowState.create({
-    id: "run-1", orgId, workspaceId: "ws-1", userId: "user-1", artifacts: {}, stats: {}, stage: "vision-extract",
+    id: "run-1", orgId, projectId: "ws-1", userId: "user-1", artifacts: {}, stats: {}, stage: "vision-extract",
     pipeline: { vision: VISION, privacyMode: "standard", visionFallback: true, ...pipeline },
-  } as unknown as WorkspaceRun, []);
+  } as unknown as ProjectRun, []);
   state.visionAttempts = new MemoryVisionAttemptBackend();
   return state;
 }

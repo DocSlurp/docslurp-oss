@@ -37,10 +37,12 @@ import { recordShardTiming } from "./shard-calibration.js";
 import type { PageRangeSlice } from "../temporal/shared.js";
 import { HungWorkError } from "../lib/hung-work.js";
 import { runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
+import { pinRunPageBillingRules } from "../db/page-base-fee.js";
 import { pinRunRoutingVersion } from "../lib/vision-routing-v2.js";
 import { ProgressTracker, resolveStageStallTimeoutMs, runWithProgressTracker } from "../lib/work-progress.js";
-import { latchedTeardownError } from "../sandbox/session-context.js";
+import { latchedTeardownError, settleSandboxSession } from "../sandbox/session-context.js";
 import { findCommandTeardownError } from "../sandbox/teardown-breaker.js";
+import { WORKER_INTERRUPTED } from "../temporal/failure-classification.js";
 import {
   buildRunProgressEvent,
   buildRunStartedEvent,
@@ -234,7 +236,7 @@ export function createStageExecution(deps: {
     let state = await loadRunState(store, input.runId, loadOptions);
     const plan = compilePipelinePlan(state.run.pipeline);
     if (plan.reusedStages.length > 0) {
-      await seedReusedStages(input.runId, plan, { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
+      await seedReusedStages(input.runId, plan, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
       state = await loadRunState(store, input.runId, loadOptions);
       stageStates = undefined;
     }
@@ -243,9 +245,13 @@ export function createStageExecution(deps: {
       : store.hydrateState(state));
     const { run, documents } = state;
 
-    // Legacy vision routing version: read from the environment once, here, and persisted with the
-    // run's artifacts by the progress write below, so every stage, shard and page task agrees.
+    // Legacy vision routing version: pinned once, here (evidence routing, v3, unless the run already carries a
+    // pin), and persisted with the run's artifacts by the progress write below, so every stage, shard and page
+    // task agrees. There is no environment switch.
     const visionRoutingVersion = pinRunRoutingVersion(state);
+    // Page billing rules, pinned the same way: a run without the pin (started by an earlier release) keeps that release's
+    // completion charge for image files and scanned pages (db/page-base-fee.ts).
+    const pageBillingRules = pinRunPageBillingRules(state);
 
     // Mark run as processing
     state.run.status = "processing";
@@ -268,7 +274,7 @@ export function createStageExecution(deps: {
       `[temporal] run=${run.id} status=init docs=${documents.length} ` +
         `minCents=${forecast.minCents} maxCents=${forecast.maxCents} ` +
         `completedRunStages=${completedRunStages.length} completedDocStages=${completedDocStages.length} ` +
-        `artifactKeys=${Object.keys(state.artifacts).length} visionRouting=${visionRoutingVersion}`,
+        `artifactKeys=${Object.keys(state.artifacts).length} visionRouting=${visionRoutingVersion} pageBilling=${pageBillingRules}`,
     );
     if (completedRunStages.length > 0) {
       console.log(
@@ -485,9 +491,9 @@ export function createStageExecution(deps: {
 
       // Run the stage with the orchestrator's cancellation signal
       await withObservation({ name: `worker.stage.${stageName}`,
-        metadata: { runId, workspaceId: state.run.workspaceId, orgId: state.run.orgId,
+        metadata: { runId, projectId: state.run.projectId, orgId: state.run.orgId,
           temporalAttempt: runtime.attempt, stage: stageName },
-      }, () => runWithPrivacyAuditScope({ workspaceId: state.run.workspaceId ?? null, runId },
+      }, () => runWithPrivacyAuditScope({ projectId: state.run.projectId ?? null, runId },
         // Run-level provider calls (graph extraction, community summaries) carry the run's org and China-provider
         // policy, as per-document stages do; without it they fail closed to non-China providers only.
         () => runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.allowChinaProviders, speedBoost: state.run.pipeline.speedBoost },
@@ -593,6 +599,8 @@ export function createStageExecution(deps: {
           reasons: tuning.reasons,
         },
       };
+      // Idle parser VMs end here, and their time after the last command lands in this stage's ledger (VM pool follow-up).
+      await settleSandboxSession();
       // Everything this attempt recorded, including events already flushed by
       // mid-stage checkpoints. The pending buffer alone (ledger.snapshot())
       // misses those: it reported only the trailing worker-stage compute event
@@ -662,6 +670,7 @@ export function createStageExecution(deps: {
           `[temporal] run=${runId} stage=${stageName} shard progress flush failed: ${String(flushError)}`));
         throw error;
       }
+      await settleSandboxSession();
       // Throttling waits out Retry-After; it is not a document failure.
       const ordinaryFailures = await store.failRunStage(state, stageName, message, {
         countFailure: classification !== "throttled",
@@ -703,7 +712,7 @@ export function createStageExecution(deps: {
       const noun = failed.length === 1 ? "document" : "documents";
       const message = `All ${failed.length} ${noun} failed${detail}`;
       console.error(`[temporal] run=${input.runId} status=failed message=${message}`);
-      await store.failRun(input.runId, first?.[0] ?? state.stage, message, { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
+      await store.failRun(input.runId, first?.[0] ?? state.stage, message, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
       await notifyTerminal(input.runId, "run.failed");
       return;
     }
@@ -711,7 +720,7 @@ export function createStageExecution(deps: {
     console.log(
       `[temporal] run=${input.runId} status=completed failedDocuments=${failed.length}`,
     );
-    await store.completeRun(state, { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
+    await store.completeRun(state, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration });
 
     await notifyTerminal(input.runId, "run.completed");
   }
@@ -731,7 +740,9 @@ export function createStageExecution(deps: {
     );
 
     const state = await loadRunState(store, input.runId);
-    await store.failRun(input.runId, stage, input.message, { runId: input.runId, orgId: state.run.orgId!, workspaceId: state.run.workspaceId!, executionGeneration: input.executionGeneration });
+    await store.failRun(input.runId, stage, input.message, { runId: input.runId, orgId: state.run.orgId!, projectId: state.run.projectId!, executionGeneration: input.executionGeneration },
+      // The stage's infrastructure retries ran out: its unfinished documents say so publicly (real-Modal P3).
+      { infrastructureRetriesExhausted: input.failureType === WORKER_INTERRUPTED });
 
     await notifyTerminal(input.runId, "run.failed");
   }

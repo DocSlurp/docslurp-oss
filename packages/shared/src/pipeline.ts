@@ -1,6 +1,7 @@
 import { validateGeoAnnotations } from "./geo.js";
 import { z } from "zod";
 import { migrateStoredModelSettings } from "./stored-model-settings.js";
+import { dropRetiredExtractorIds, normalizeDocumentExtractionAliases } from "./extractor-aliases.js";
 import { DEFAULT_QUALITY_MODE, migrateLegacyQualitySettings, qualityModeSchema } from "./quality.js";
 import {
   defaultDocumentExtractionConfig,
@@ -19,6 +20,7 @@ import {
   parseLlmModelUri,
 } from "./embedding.js";
 import { isProviderCallAllowed } from "./privacy.js";
+import { piiPatternTypeSchema } from "./pii.js";
 import { decisionFormatSchema, routingObjectiveSchema } from "./page-routing.js";
 import {
   indexingModeSchema,
@@ -35,8 +37,8 @@ export const organizationRoleSchema = z.enum([
 ]);
 export type OrganizationRole = z.infer<typeof organizationRoleSchema>;
 
-export const workspaceMemberRoleSchema = z.enum(["viewer", "editor", "admin"]);
-export type WorkspaceMemberRole = z.infer<typeof workspaceMemberRoleSchema>;
+export const projectMemberRoleSchema = z.enum(["viewer", "editor", "admin"]);
+export type ProjectMemberRole = z.infer<typeof projectMemberRoleSchema>;
 
 export const runStatusSchema = z.enum([
   "queued",
@@ -178,8 +180,8 @@ function validateOutputSchemaDefinition(
 }
 
 /**
- * Workspace privacy execution mode. Enforced by the guard in `./privacy.ts`:
- * - `standard`: hosted AI providers may receive workspace content.
+ * Project privacy execution mode. Enforced by the guard in `./privacy.ts`:
+ * - `standard`: hosted AI providers may receive project content.
  * - `local-only`: no hosted/remote LLM, vision, embedding, rerank or STT calls;
  *   optional hosted-only stages are skipped, required ones fail closed.
  * - `strict-privacy`: same call policy as `local-only`, plus every blocked hosted
@@ -194,7 +196,7 @@ export const privacyModeSchema = z.enum([
 ]);
 export type PrivacyMode = z.infer<typeof privacyModeSchema>;
 
-// Model IDs belong in defaults/catalogs; runtime stages resolve workspace settings.
+// Model IDs belong in defaults/catalogs; runtime stages resolve project settings.
 export const DEFAULT_PIPELINE_TEXT_MODEL = "qwen/qwen3.5-flash-02-23";
 export const pipelineTextOperationSchema = z.enum([
   "document-summary", "document-map", "proposition-extraction", "structured-extraction",
@@ -250,7 +252,7 @@ export function resolvePipelineTextGenerationOptions(args: {
   };
 }
 
-/** Task override → workspace default → deployment default → built-in default. */
+/** Task override → project default → deployment default → built-in default. */
 export function resolvePipelineTextModel(
   pipeline: { textGeneration?: TextGenerationConfig },
   operation: PipelineTextOperation,
@@ -277,7 +279,7 @@ export const defaultStructuredExtractionConfig: StructuredExtractionConfig = {
   maxOutputTokens: 4096,
 };
 
-/** Entity types graph extraction uses when a workspace does not name its own. */
+/** Entity types graph extraction uses when a project does not name its own. */
 export const defaultGraphEntityTypes = [
   "person",
   "organization",
@@ -295,7 +297,7 @@ export const graphEntityTypeSchema = z
   .pipe(z.string().regex(/^[a-z][a-z0-9_]{1,39}$/, "Entity types use letters, digits, and underscores"));
 
 /**
- * Per-workspace knowledge-graph tuning. Every lever is optional: the defaults
+ * Per-project knowledge-graph tuning. Every lever is optional: the defaults
  * extract a generic people/organization/concept graph that suits most corpora.
  *
  * - `domain`: plain-language description of the business, project, or scope so
@@ -317,16 +319,16 @@ export const defaultGraphConfig: GraphConfig = {
   depth: "standard",
 };
 
-export const workspaceWebhookSettingsSchema = z.object({
+export const projectWebhookSettingsSchema = z.object({
   enabled: z.boolean().default(true),
   events: z.array(z.string().trim().min(1).max(80)).max(32).default([]),
 });
-export type WorkspaceWebhookSettings = z.infer<typeof workspaceWebhookSettingsSchema>;
-export const defaultWorkspaceWebhookSettings: WorkspaceWebhookSettings = { enabled: true, events: [] };
+export type ProjectWebhookSettings = z.infer<typeof projectWebhookSettingsSchema>;
+export const defaultProjectWebhookSettings: ProjectWebhookSettings = { enabled: true, events: [] };
 
-/** True when this workspace lets `eventType` through to its users' webhooks. */
-export function workspaceAllowsWebhookEvent(
-  pipeline: { webhooks?: Partial<WorkspaceWebhookSettings> | null } | null | undefined,
+/** True when this project lets `eventType` through to its users' webhooks. */
+export function projectAllowsWebhookEvent(
+  pipeline: { webhooks?: Partial<ProjectWebhookSettings> | null } | null | undefined,
   eventType: string,
 ): boolean {
   const settings = pipeline?.webhooks;
@@ -354,8 +356,8 @@ export const pageRouterModeSchema = z.enum(["off", "shadow", "active"]);
 export type PageRouterMode = z.infer<typeof pageRouterModeSchema>;
 
 /**
- * Workspace page-router settings. `mode` is the opt-in: unset (or "off") leaves
- * the pipeline without a route-pages stage, so existing workspaces keep today's
+ * Project page-router settings. `mode` is the opt-in: unset (or "off") leaves
+ * the pipeline without a route-pages stage, so existing projects keep today's
  * behavior. The worker's PAGE_ROUTER_MODE env is a ceiling on top of this (see
  * resolvePageRouterMode). Routing decisions are made by decision models, never
  * by a generative LLM.
@@ -382,7 +384,7 @@ export const pageRouterConfigSchema = z.object({
   /** Minimum gross margin fraction the org must retain on the chunk. */
   marginFloor: z.number().min(0).max(1).default(0.5),
   /**
-   * USD the workspace gets from one unit (0..1) of page-content quality. The decision-model verifier
+   * USD the project gets from one unit (0..1) of page-content quality. The decision-model verifier
    * (TL3) only runs at or above 0.5: below that the free cascade checks capture the gain. Null/unset: no verifier.
    */
   valueUsdPerQualityUnit: z.number().min(0).max(1000).nullable().optional(),
@@ -399,24 +401,24 @@ export function pageRouterDecisionModels(config: Pick<PageRouterConfig, "decisio
 const PAGE_ROUTER_MODE_RANK: Record<PageRouterMode, number> = { off: 0, shadow: 1, active: 2 };
 
 /**
- * Effective page-router mode: the workspace setting capped by the worker env
+ * Effective page-router mode: the project setting capped by the worker env
  * ceiling. A missing value on either side means off, so nothing runs until both
- * the operator (env) and the workspace opt in.
+ * the operator (env) and the project opt in.
  */
 export function resolvePageRouterMode(
-  workspaceMode: PageRouterMode | null | undefined,
+  projectMode: PageRouterMode | null | undefined,
   envMode: PageRouterMode | null | undefined,
 ): PageRouterMode {
-  const w = workspaceMode ?? "off";
+  const w = projectMode ?? "off";
   const e = envMode ?? "off";
   return PAGE_ROUTER_MODE_RANK[w] <= PAGE_ROUTER_MODE_RANK[e] ? w : e;
 }
 
 /**
- * Platform default for a new run's `pageRouter.mode`, from the deployment's PAGE_ROUTER_MODE. A workspace that
- * sets a mode keeps it (the worker ceiling still applies). A workspace that leaves it unset gets `shadow` when the
+ * Platform default for a new run's `pageRouter.mode`, from the deployment's PAGE_ROUTER_MODE. A project that
+ * sets a mode keeps it (the worker ceiling still applies). A project that leaves it unset gets `shadow` when the
  * platform runs shadow or active, so the route-pages stage is planned (the plan is compiled without the worker env)
- * and telemetry is gathered with no workspace setup. `active` is never a default: it stays an explicit workspace opt-in.
+ * and telemetry is gathered with no project setup. `active` is never a default: it stays an explicit project opt-in.
  */
 export function withPlatformPageRouterMode<T extends { pageRouter?: Partial<PageRouterConfig> | null }>(
   features: T,
@@ -505,8 +507,9 @@ export const pipelineFeaturesSchema = z
     piiPolicy: z
       .object({
         enabled: z.boolean().default(false),
+        // Only detectors that exist: an unknown name is rejected here instead of being dropped by a scan.
         patterns: z
-          .array(z.string())
+          .array(piiPatternTypeSchema)
           .default([
             "ssn",
             "credit-card",
@@ -514,6 +517,9 @@ export const pipelineFeaturesSchema = z
             "anthropic-api-key",
             "github-token",
             "generic-api-key",
+            "aws-access-key",
+            "stripe-api-key",
+            "private-key",
           ]),
         action: z
           .enum(["flag_for_review", "redact_artifacts", "block_indexing"])
@@ -532,16 +538,16 @@ export const pipelineFeaturesSchema = z
     // per semantic region (header/body/footer/sidebar) for richer chunking and citations.
     pdfRegionExtraction: z.boolean().default(false),
     /**
-     * Webhook notifications for this workspace. Subscriptions belong to users;
-     * this decides whether the workspace's events reach them. `events` narrows
+     * Webhook notifications for this project. Subscriptions belong to users;
+     * this decides whether the project's events reach them. `events` narrows
      * delivery to a subset (empty means every subscribed event).
      */
-    webhooks: workspaceWebhookSettingsSchema.default(defaultWorkspaceWebhookSettings),
+    webhooks: projectWebhookSettingsSchema.default(defaultProjectWebhookSettings),
     /**
      * Web tools (web search, page fetch, site map, crawl, website ingest) for
-     * this workspace's REST, MCP and chat calls. On by default and written
-     * explicitly into every workspace's pipeline (migration 0080); set false to
-     * opt the workspace out. Queries go to a hosted web provider, so privacy
+     * this project's REST, MCP and chat calls. On by default and written
+     * explicitly into every project's pipeline (migration 0080); set false to
+     * opt the project out. Queries go to a hosted web provider, so privacy
      * modes that forbid hosted calls block web tools regardless.
      */
     webTools: z.boolean().default(true),
@@ -699,13 +705,16 @@ export const defaultPipelineFeatures: PipelineFeatures = {
       "anthropic-api-key",
       "github-token",
       "generic-api-key",
+      "aws-access-key",
+      "stripe-api-key",
+      "private-key",
     ],
     action: "flag_for_review",
     allowlistPatterns: [],
   },
   privacyMode: "standard",
   pdfRegionExtraction: false,
-  webhooks: defaultWorkspaceWebhookSettings,
+  webhooks: defaultProjectWebhookSettings,
   webTools: true,
   pageRouter: defaultPageRouterConfig,
   mediaVideo: { enabled: true },
@@ -921,7 +930,7 @@ export type PipelineFeatureOverrides = Omit<
   "vision" | "embedding" | "piiPolicy" | "documentExtraction" | "textGeneration" | "graph" | "structuredExtraction" | "webhooks"
 > & {
   structuredExtraction?: Partial<PipelineFeatures["structuredExtraction"]> | null;
-  webhooks?: Partial<WorkspaceWebhookSettings> | null;
+  webhooks?: Partial<ProjectWebhookSettings> | null;
   graph?: Partial<GraphConfig> | null;
   textGeneration?: Partial<TextGenerationConfig> | null;
   vision?: Partial<PipelineFeatures["vision"]> | null;
@@ -1016,7 +1025,7 @@ export function normalizePipelineFeatures(
       ...(source?.structuredExtraction ?? {}),
     },
     webhooks: {
-      ...defaultWorkspaceWebhookSettings,
+      ...defaultProjectWebhookSettings,
       ...(source?.webhooks ?? {}),
     },
     // Good means a vision model reads every page, so it turns vision on: `{ quality: "good", visionFallback: false }`
@@ -1025,8 +1034,15 @@ export function normalizePipelineFeatures(
   });
 }
 
+/** `value` with its `documentExtraction` extractor ids aliased to their canonical ids (extractor-aliases.ts). */
+function withCanonicalExtractorIds<T>(value: T): T {
+  if (!isPlainRecord(value) || !isPlainRecord(value.documentExtraction)) return value;
+  const extraction = normalizeDocumentExtractionAliases(value.documentExtraction);
+  return extraction === value.documentExtraction ? value : ({ ...value, documentExtraction: extraction } as T);
+}
+
 /**
- * `normalizePipelineFeatures` for a stored pipeline (a workspace or run row). Stored extractor settings that the
+ * `normalizePipelineFeatures` for a stored pipeline (a project or run row). Stored extractor settings that the
  * strict schemas now reject (an unknown extractor id or key, a Dolphin path, an invalid OCR language) are dropped
  * with a loud log naming `source` and the dropped paths (sanitizeStoredDocumentExtraction), instead of failing the
  * read. Requests stay strict, and nothing else is relaxed: an invalid `quality` or any other setting still throws.
@@ -1038,13 +1054,36 @@ export function normalizeStoredPipelineFeatures(
   return normalizePipelineFeatures(sanitizeStoredPipeline(stored, source));
 }
 
-/** Drops invalid stored extractor settings (see normalizeStoredPipelineFeatures), logging what it dropped. */
+/**
+ * Drops what a stored pipeline holds that the strict schemas now reject (see normalizeStoredPipelineFeatures), logging
+ * what it dropped: invalid extractor settings, and PII detector names that no longer exist (the policy, its action and the
+ * other detectors stay). New writes stay strict.
+ */
 export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
-  if (!isPlainRecord(stored) || !isPlainRecord(stored.documentExtraction)) return stored;
-  const { value, dropped } = sanitizeStoredDocumentExtraction(stored.documentExtraction);
-  if (dropped.length === 0) return stored;
-  console.error(`[pipeline] stored pipeline of ${source} has extractor settings the schema rejects; dropped ${dropped.join(", ")}`);
-  return { ...stored, documentExtraction: value } as T;
+  if (!isPlainRecord(stored)) return stored;
+  // Canonical ids drop retired extractors silently; a stored read reports what they named.
+  const retired = isPlainRecord(stored.documentExtraction) ? dropRetiredExtractorIds(stored.documentExtraction).dropped : [];
+  let next: Record<string, unknown> = withCanonicalExtractorIds(stored);
+  const dropped: string[] = retired.map((entry) => `documentExtraction.${entry}`);
+  if (isPlainRecord(next.documentExtraction)) {
+    const extraction = sanitizeStoredDocumentExtraction(next.documentExtraction);
+    if (extraction.dropped.length > 0) {
+      next = { ...next, documentExtraction: extraction.value };
+      dropped.push(...extraction.dropped);
+    }
+  }
+  if (isPlainRecord(stored.piiPolicy) && Array.isArray(stored.piiPolicy.patterns)) {
+    const patterns = stored.piiPolicy.patterns;
+    const known = patterns.filter((pattern) => piiPatternTypeSchema.safeParse(pattern).success);
+    if (known.length !== patterns.length) {
+      const unknown = patterns.filter((pattern) => !piiPatternTypeSchema.safeParse(pattern).success);
+      next = { ...next, piiPolicy: { ...stored.piiPolicy, patterns: known } };
+      dropped.push(...unknown.map((pattern) => `piiPolicy.patterns[${typeof pattern === "string" ? pattern.slice(0, 64) : typeof pattern}]`));
+    }
+  }
+  if (dropped.length === 0) return next as T;
+  console.error(`[pipeline] stored pipeline of ${source} has settings the schema rejects; dropped ${dropped.join(", ")}`);
+  return next as T;
 }
 
 /** Keys whose override value replaces the base value instead of merging into it. */
@@ -1069,7 +1108,7 @@ function mergeOverrideRecord(
 
 /**
  * Deep-merges partial per-request overrides onto a full pipeline (usually a
- * workspace's stored pipeline). Nested settings merge key by key; arrays,
+ * project's stored pipeline). Nested settings merge key by key; arrays,
  * `outputSchema` and `vectorBackends` replace. The result is normalized.
  */
 export function mergePipelineFeatures(
@@ -1092,10 +1131,10 @@ const pipelineFeatureKeys = new Set(Object.keys(defaultPipelineFeatures).concat(
 
 /**
  * Validates partial pipeline overrides (as sent with an upload) without
- * filling in defaults, so they can be merged onto the workspace pipeline.
+ * filling in defaults, so they can be merged onto the project pipeline.
  */
 export const pipelineFeatureOverridesSchema = z
-  .preprocess(migrateLegacyQualitySettings, z.record(z.string(), z.unknown()))
+  .preprocess((value) => withCanonicalExtractorIds(migrateLegacyQualitySettings(value as never)), z.record(z.string(), z.unknown()))
   .superRefine((value, ctx) => {
     const unknownKeys = Object.keys(value).filter((key) => !pipelineFeatureKeys.has(key));
     for (const key of unknownKeys) {
@@ -1232,7 +1271,6 @@ export const stageDataFlow: Record<PipelineRunStage, StageDataFlow> = {
     produces: [
       ...extractedText,
       "markdown-manifest",
-      "liteparse-structured",
       "artifact-graph",
       "heatmap",
       "markdown-critique",
@@ -1243,11 +1281,11 @@ export const stageDataFlow: Record<PipelineRunStage, StageDataFlow> = {
   },
   "extract-html": { produces: ["html", "html-manifest"] },
   "classify-route": {
-    consumes: ["canonical-document", "markdown-manifest", "extraction-contract", "liteparse-structured", "page-image-evidence"],
+    consumes: ["canonical-document", "markdown-manifest", "extraction-contract", "page-image-evidence"],
     produces: ["classification", "parser-playbook"],
   },
   "route-pages": {
-    consumes: ["classification", "canonical-document", "liteparse-structured", "parser-playbook"],
+    consumes: ["classification", "canonical-document", "parser-playbook"],
     produces: ["page-route-plan"],
   },
   "render-images": { consumes: ["classification", "page-route-plan"], produces: ["images", "page-images"] },
@@ -1483,7 +1521,7 @@ export function compilePipelinePlan(
 }
 
 /**
- * Read a stored pipeline snapshot (a run's, or an old workspace row) that may
+ * Read a stored pipeline snapshot (a run's, or an old project row) that may
  * predate the current schema: retired keys and nulls where values are now
  * required. Each validation pass drops exactly the fields the schema reports
  * so defaults fill them; a list of historical runs never fails on one row.

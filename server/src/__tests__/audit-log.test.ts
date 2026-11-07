@@ -7,7 +7,7 @@ describe("buildAuditLogListQuery", () => {
     const { query, params, limit } = buildAuditLogListQuery({
       actorUserId: "admin-user",
       orgId: "org-1",
-      workspaceId: "ws-1",
+      projectId: "ws-1",
       runId: "run-1",
       before: "2026-03-07T00:00:00.000Z",
       limit: 50

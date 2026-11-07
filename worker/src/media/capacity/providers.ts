@@ -33,7 +33,7 @@ function validate(template: HostTemplate) {
   if (!Number.isFinite(template.maxHourlyUsd) || template.maxHourlyUsd <= 0 || !Number.isFinite(template.fixedReserveUsd) || template.fixedReserveUsd < 0) throw new Error("Invalid capacity cost ceiling");
   if (/PRIVATE KEY|DEEPINFRA_API_KEY|VAST_API_KEY|DATABASE_URL|HF_TOKEN|tskey-/i.test(template.bootstrap)) throw new Error("Bootstrap must not contain infrastructure credentials or reusable tailnet keys");
 }
-/** API key stays on the controller. Bootstrap is operator-owned, never workspace input. */
+/** API key stays on the controller. Bootstrap is operator-owned, never project input. */
 export class DeepInfraCapacityProvider implements CapacityProvider {
   readonly id = "deepinfra";
   constructor(private readonly key: string, private readonly template: HostTemplate) { validate(template); if (!key || !template.gpuConfig) throw new Error("DeepInfra capacity configuration missing"); }

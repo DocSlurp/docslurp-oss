@@ -12,7 +12,7 @@ test('multi-premise answer requires cited pages and actual successful searches',
   }
 });
 test('search-many, nested chat, and claimed search prose do not count as actual search calls', () => {
-  const r = response(); r.debug.toolCalls = [{ name: 'workspace.search-many', status: 'success' }];
+  const r = response(); r.debug.toolCalls = [{ name: 'project.search-many', status: 'success' }];
   assert.equal(scoreCase(gold, r, docs).checks.actualSearches, false);
 });
 test('negative control rejects unsupported affirmative answer', () => {
@@ -46,7 +46,7 @@ test('valid multi-page metadata does not require a fabricated scalar page anchor
 });
 
 test('current search id counts; historical aliases and prose do not', () => {
-  const r = response(); r.debug.toolCalls = [{ name: 'workspace.search', status: 'success' }];
+  const r = response(); r.debug.toolCalls = [{ name: 'project.search', status: 'success' }];
   assert.equal(scoreCase({ minSearchCalls: 1 }, r, docs).checks.actualSearches, false);
   assert.equal(scoreCase({ minSearchCalls: 1 }, { answer: 'I searched the documents.' }, docs).pass, false);
 });
@@ -178,7 +178,7 @@ test('existing-document gold rejects upload requests while accepting an honest l
   for (const id of ['existing-document-no-upload-request-v1', 'no-fabricated-pdf-read-tool-v1']) {
     const g = gold.find(entry => entry.id === id);
     const answer = text => scoreCase(g, { answer: text, debug: { toolCalls: [] } }, {}).pass;
-    assert.equal(answer('I cannot inspect rendered pixels, so crispness stays unverified. I can search the extracted text of the workspace PDF instead.'), true, id);
+    assert.equal(answer('I cannot inspect rendered pixels, so crispness stays unverified. I can search the extracted text of the project PDF instead.'), true, id);
     assert.equal(answer('I cannot inspect pixels. Want to upload the PDF so I can check its text?'), false, id);
     assert.equal(answer('I cannot inspect pixels, but if you upload the original file I can read it.'), false, id);
     assert.equal(answer('That is not available. Please re-upload the document.'), false, id);

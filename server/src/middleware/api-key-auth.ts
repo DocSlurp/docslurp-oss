@@ -6,7 +6,7 @@ import { ApiKeyPolicyError, resolveApiKeyActor, setRequestActor } from "../lib/r
 
 declare module "hono" {
   interface ContextVariableMap {
-    /** A browser key refused for a fixable reason (workspace allowlist, website); protocol surfaces re-shape it. */
+    /** A browser key refused for a fixable reason (project allowlist, website); protocol surfaces re-shape it. */
     apiKeyPolicyRefusal: ApiKeyPolicyError;
   }
 }

@@ -18,14 +18,14 @@ const { acceptApiKeys, authenticatedByRoute } = await import("../lib/route-auth.
  */
 function app() {
   const ok = () => (c: any) => c.json({ ok: true });
-  const workspaces = new Hono()
+  const projects = new Hono()
     .get("/board", ok())
     .get("/", ok())
     .post("/", ok())
-    .get("/:workspaceId", ok())
-    .patch("/:workspaceId", ok())
-    .get("/:workspaceId/members", ok());
-  acceptApiKeys(workspaces, ["GET /", "GET /:workspaceId", "PATCH /:workspaceId"]);
+    .get("/:projectId", ok())
+    .patch("/:projectId", ok())
+    .get("/:projectId/members", ok());
+  acceptApiKeys(projects, ["GET /", "GET /:projectId", "PATCH /:projectId"]);
   // A router with its own onError: app.route() wraps its handlers.
   const organizations = new Hono()
     .onError((_error, c) => c.json({ error: "boom" }, 500))
@@ -38,7 +38,7 @@ function app() {
 
   const server = new Hono();
   server.use("/v1/*", sessionAuth);
-  server.route("/v1/workspaces", workspaces);
+  server.route("/v1/projects", projects);
   server.route("/v1/organizations", organizations);
   server.route("/v1/auth", publicRoutes);
   server.all("/v1/mcp", ok());
@@ -53,19 +53,19 @@ describe("native resource bearer authentication boundary", () => {
     mocks.session.mockResolvedValue(null);
   });
 
-  it.each([["GET", "/v1/workspaces"], ["GET", "/v1/workspaces/one"], ["PATCH", "/v1/workspaces/amber-falcon-ridge"], ["GET", "/v1/organizations/one"], ["POST", "/v1/organizations/one/members"]])("accepts bearer credentials for declared %s %s", async (method, path) => {
+  it.each([["GET", "/v1/projects"], ["GET", "/v1/projects/one"], ["PATCH", "/v1/projects/amber-falcon-ridge"], ["GET", "/v1/organizations/one"], ["POST", "/v1/organizations/one/members"]])("accepts bearer credentials for declared %s %s", async (method, path) => {
     expect((await app().request(path, { method, headers })).status).toBe(200);
     expect(mocks.apiKey).toHaveBeenCalledOnce();
   });
 
-  it.each([["GET", "/v1/workspaces/board"], ["POST", "/v1/workspaces"], ["GET", "/v1/workspaces/one/members"], ["POST", "/v1/organizations"], ["GET", "/v1/unknown"]])("keeps undeclared %s %s session-only", async (method, path) => {
+  it.each([["GET", "/v1/projects/board"], ["POST", "/v1/projects"], ["GET", "/v1/projects/one/members"], ["POST", "/v1/organizations"], ["GET", "/v1/unknown"]])("keeps undeclared %s %s session-only", async (method, path) => {
     expect((await app().request(path, { method, headers })).status).toBe(401);
     expect(mocks.apiKey).not.toHaveBeenCalled();
   });
 
   it("does not let a more specific session-only route inherit a declared parameter route", async () => {
     mocks.session.mockResolvedValue({ type: "session" });
-    expect((await app().request("/v1/workspaces/board", { headers })).status).toBe(200);
+    expect((await app().request("/v1/projects/board", { headers })).status).toBe(200);
     expect(mocks.apiKey).not.toHaveBeenCalled();
   });
 
@@ -145,7 +145,7 @@ describe("native resource bearer authentication boundary", () => {
       responseHeaders?.append("set-cookie", "better-auth.session_token=renewed; Max-Age=2592000; Path=/; HttpOnly");
       return { type: "session" };
     });
-    const response = await app().request("/v1/workspaces/board");
+    const response = await app().request("/v1/projects/board");
     expect(response.status).toBe(200);
     expect(response.headers.getSetCookie()).toEqual(["better-auth.session_token=renewed; Max-Age=2592000; Path=/; HttpOnly"]);
   });

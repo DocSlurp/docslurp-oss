@@ -6,7 +6,7 @@ import { createRequire } from "node:module";
 
 const args = process.argv.slice(2);
 const option = (name) => args[args.indexOf(name) + 1];
-for (const flag of ["--env-file", "--workspace", "--user", "--output"]) if (!args.includes(flag)) throw new Error(`Missing ${flag}`);
+for (const flag of ["--env-file", "--project", "--user", "--output"]) if (!args.includes(flag)) throw new Error(`Missing ${flag}`);
 const require = createRequire(new URL("../../worker/package.json", import.meta.url));
 const { parse } = require("dotenv");
 const source = parse(await readFile(option("--env-file")));
@@ -30,11 +30,11 @@ try {
     import("../../server/src/db.ts"), import("../../server/src/services/billing/spend-guard.ts"), import("../../server/src/lib/ai-usage.ts"), import("../../server/src/services/usage-attribution.ts"), import("../../server/src/lib/ai.ts"), import("../../worker/src/stages/embedding-runtime.ts"), import("../../worker/src/config.ts"),
   ]);
   sql = db;
-  const workspaceId = option("--workspace"), userId = option("--user");
-  const [workspace] = await sql`select id, org_id, user_id from workspaces where id = ${workspaceId} and user_id = ${userId}`;
-  if (!workspace?.org_id) throw new Error("Verified owned workspace with organization required");
+  const projectId = option("--project"), userId = option("--user");
+  const [project] = await sql`select id, org_id, user_id from projects where id = ${projectId} and user_id = ${userId}`;
+  if (!project?.org_id) throw new Error("Verified owned project with organization required");
   if (spendGuardsSkipped()) throw new Error("Spend guards must be active");
-  const scope = { orgId: workspace.org_id, workspaceId, sessionId };
+  const scope = { orgId: project.org_id, projectId, sessionId };
   report.scope = { ...scope, userId };
   const ledger = createUsageLedger({ userId, scope });
   const record = async (metric, inputTokens, kind) => {
@@ -49,7 +49,7 @@ try {
   const query = "How many batteries does the blue sensor use?";
   if (document.length + query.length > 512) throw new Error("Synthetic smoke input bound exceeded");
   for (const kind of ["document", "query"]) {
-    await assertCanSpend(scope.orgId, workspaceId, { kind: "interactive" });
+    await assertCanSpend(scope.orgId, projectId, { kind: "interactive" });
     const attempt = { kind, startedAt: new Date().toISOString(), status: "started", inputCharacters: (kind === "document" ? document : query).length };
     report.attempts.push(attempt); await save();
     try {
@@ -69,9 +69,9 @@ try {
     }
     await save();
   }
-  const rows = await sql`select id, provider, model, metric, input_tokens, output_tokens, cost_cents, org_id, workspace_id, metadata from ${attributedUsage(null)} au where au.metadata ->> 'sessionId' = ${sessionId}`;
+  const rows = await sql`select id, provider, model, metric, input_tokens, output_tokens, cost_cents, org_id, project_id, metadata from ${attributedUsage(null)} au where au.metadata ->> 'sessionId' = ${sessionId}`;
   report.persistedUsage = rows.map(({ metadata, ...row }) => ({ ...row, usageSource: metadata.usageSource, sessionId: metadata.sessionId }));
-  if (rows.length !== 2 || rows.some((row) => row.provider !== "deepinfra" || row.model !== "BAAI/bge-m3" || row.org_id !== scope.orgId || row.workspace_id !== workspaceId || !(row.input_tokens > 0))) throw new Error("Scoped persisted usage readback failed");
+  if (rows.length !== 2 || rows.some((row) => row.provider !== "deepinfra" || row.model !== "BAAI/bge-m3" || row.org_id !== scope.orgId || row.project_id !== projectId || !(row.input_tokens > 0))) throw new Error("Scoped persisted usage readback failed");
   report.customerLedgerUsd = rows.reduce((total, row) => total + Number(row.cost_cents) / 100, 0);
   report.completedAt = new Date().toISOString(); report.status = "success";
   await save(); console.log(JSON.stringify(report, null, 2));

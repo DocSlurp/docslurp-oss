@@ -8,7 +8,7 @@ Existing AI SDK spans retain their normal export filter.
 ## Reading a request
 
 Follow the same trace ID from the HTTP request or worker activity into observations
-and dependency calls. Dependency spans inherit request, run, document, workspace,
+and dependency calls. Dependency spans inherit request, run, document, project,
 organization, session and stage IDs when those are available in the observation
 scope. Late-bound IDs apply to subsequent children; parent trace links remain the
 primary correlation mechanism. Existing W3C context propagation connects services.
@@ -81,7 +81,7 @@ Caveats: the proxy is another hop. On loopback against MinIO it added about
 ceiling); against a remote provider this is small next to network latency, but
 confirm with `worker/scripts/lancedb-s3-trace-bench.ts` before trusting absolute
 timings, and keep it off for headline throughput runs unless every compared
-provider uses it. Spans are not linked to a workspace or run: requests arrive from a
+provider uses it. Spans are not linked to a project or run: requests arrive from a
 native thread outside the async context, so correlate by time window and key prefix.
 Upstream addressing is always path-style, and the proxy runs per process (API and
 each worker log their own lines).

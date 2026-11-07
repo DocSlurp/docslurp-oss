@@ -1,5 +1,5 @@
 /**
- * Move org-level LanceDB tables into per-workspace databases from a checkout; see
+ * Move org-level LanceDB tables into per-project databases from a checkout; see
  * src/stages/lancedb-relocate-cli.ts. In the worker image run
  * `node worker/dist/stages/lancedb-relocate-cli.js` instead.
  *

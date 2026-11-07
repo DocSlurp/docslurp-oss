@@ -1,0 +1,106 @@
+{
+  "schemaVersion": 1,
+  "engine": {
+    "name": "rapidocr",
+    "version": "3.10.0",
+    "wheelSha256": "2fc34e26cd0f48514804a94f8832283039c7334076bff60768b1fed9ad068050"
+  },
+  "models": [
+    {
+      "id": "pp-ocrv6-det-small",
+      "family": null,
+      "role": "det",
+      "ocrVersion": "PP-OCRv6",
+      "file": "PP-OCRv6_det_small.onnx",
+      "sha256": "090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f",
+      "bytes": 9929594,
+      "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv6/det/PP-OCRv6_det_small.onnx",
+      "license": "Apache-2.0",
+      "source": "PaddlePaddle PaddleOCR model card (huggingface.co/PaddlePaddle); ONNX export by RapidAI/RapidOCR v3.10.0 (Apache-2.0)"
+    },
+    {
+      "id": "pp-ocrv6-rec-small",
+      "family": "multi",
+      "role": "rec",
+      "ocrVersion": "PP-OCRv6",
+      "file": "PP-OCRv6_rec_small.onnx",
+      "sha256": "6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884",
+      "bytes": 21234383,
+      "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx",
+      "license": "Apache-2.0",
+      "source": "PaddlePaddle PaddleOCR model card (huggingface.co/PaddlePaddle); ONNX export by RapidAI/RapidOCR v3.10.0 (Apache-2.0)"
+    },
+    {
+      "id": "pp-ocrv5-rec-korean-mobile",
+      "family": "korean",
+      "role": "rec",
+      "ocrVersion": "PP-OCRv5",
+      "file": "korean_PP-OCRv5_rec_mobile.onnx",
+      "sha256": "cd6e2ea50f6943ca7271eb8c56a877a5a90720b7047fe9c41a2e541a25773c9b",
+      "bytes": 13488748,
+      "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv5/rec/korean_PP-OCRv5_rec_mobile.onnx",
+      "license": "Apache-2.0",
+      "source": "PaddlePaddle PaddleOCR model card (huggingface.co/PaddlePaddle); ONNX export by RapidAI/RapidOCR v3.10.0 (Apache-2.0)"
+    },
+    {
+      "id": "pp-ocrv5-rec-eslav-mobile",
+      "family": "eslav",
+      "role": "rec",
+      "ocrVersion": "PP-OCRv5",
+      "file": "eslav_PP-OCRv5_rec_mobile.onnx",
+      "sha256": "08705d6721849b1347d26187f15a5e362c431963a2a62bfff4feac578c489aab",
+      "bytes": 7911802,
+      "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv5/rec/eslav_PP-OCRv5_rec_mobile.onnx",
+      "license": "Apache-2.0",
+      "source": "PaddlePaddle PaddleOCR model card (huggingface.co/PaddlePaddle); ONNX export by RapidAI/RapidOCR v3.10.0 (Apache-2.0)"
+    },
+    {
+      "id": "pp-ocrv5-rec-arabic-mobile",
+      "family": "arabic",
+      "role": "rec",
+      "ocrVersion": "PP-OCRv5",
+      "file": "arabic_PP-OCRv5_rec_mobile.onnx",
+      "sha256": "c1192e632d0baa9146ae5b756a0e635e3dc63c1733737ebfd1629e87144e9295",
+      "bytes": 8023828,
+      "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv5/rec/arabic_PP-OCRv5_rec_mobile.onnx",
+      "license": "Apache-2.0",
+      "source": "PaddlePaddle PaddleOCR model card (huggingface.co/PaddlePaddle); ONNX export by RapidAI/RapidOCR v3.10.0 (Apache-2.0)"
+    },
+    {
+      "id": "pp-ocrv5-rec-devanagari-mobile",
+      "family": "devanagari",
+      "role": "rec",
+      "ocrVersion": "PP-OCRv5",
+      "file": "devanagari_PP-OCRv5_rec_mobile.onnx",
+      "sha256": "d6f0a906580e3fa6b324a318718f1f31f268b6ea8ef985f91c2012a37f52c91e",
+      "bytes": 7940361,
+      "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv5/rec/devanagari_PP-OCRv5_rec_mobile.onnx",
+      "license": "Apache-2.0",
+      "source": "PaddlePaddle PaddleOCR model card (huggingface.co/PaddlePaddle); ONNX export by RapidAI/RapidOCR v3.10.0 (Apache-2.0)"
+    },
+    {
+      "id": "pp-ocrv5-rec-greek-mobile",
+      "family": "greek",
+      "role": "rec",
+      "ocrVersion": "PP-OCRv5",
+      "file": "el_PP-OCRv5_rec_mobile.onnx",
+      "sha256": "b4368bccd557123c702b7549fee6cd1e94b581337d1c9b65310f109131542b7f",
+      "bytes": 7832350,
+      "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv5/rec/el_PP-OCRv5_rec_mobile.onnx",
+      "license": "Apache-2.0",
+      "source": "PaddlePaddle PaddleOCR model card (huggingface.co/PaddlePaddle); ONNX export by RapidAI/RapidOCR v3.10.0 (Apache-2.0)"
+    },
+    {
+      "id": "pp-ocrv5-rec-thai-mobile",
+      "family": "thai",
+      "role": "rec",
+      "ocrVersion": "PP-OCRv5",
+      "file": "th_PP-OCRv5_rec_mobile.onnx",
+      "sha256": "de541dd83161c241ff426f7ecfd602a0ba77d686cf3ab9a6c255ea82fd08006e",
+      "bytes": 7915294,
+      "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv5/rec/th_PP-OCRv5_rec_mobile.onnx",
+      "license": "Apache-2.0",
+      "source": "PaddlePaddle PaddleOCR model card (huggingface.co/PaddlePaddle); ONNX export by RapidAI/RapidOCR v3.10.0 (Apache-2.0)"
+    }
+  ]
+}

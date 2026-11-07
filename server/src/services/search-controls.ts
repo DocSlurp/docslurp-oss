@@ -1,20 +1,20 @@
 import { randomUUID } from "node:crypto";
 
 import {
-  defaultWorkspaceSearchSettings,
-  updateWorkspaceSearchSettingsSchema,
-  workspaceSearchSettingsSchema,
+  defaultProjectSearchSettings,
+  updateProjectSearchSettingsSchema,
+  projectSearchSettingsSchema,
   type SearchResult,
-  type UpdateWorkspaceSearchSettingsInput,
-  type WorkspaceSearchSettings
+  type UpdateProjectSearchSettingsInput,
+  type ProjectSearchSettings
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
 import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
-import { canEditWorkspace, getWorkspaceAccess } from "./organizations.js";
+import { canEditProject, getProjectAccess } from "./organizations.js";
 
 export type SettingsRow = {
-  workspace_id: string;
+  project_id: string;
   user_id: string;
   typo_tolerance: boolean;
   dedupe_by_filename: boolean;
@@ -27,32 +27,32 @@ export type SettingsRow = {
   compat_metadata: Record<string, unknown> | null;
 };
 
-export async function getWorkspaceSearchSettings(workspaceId: string, userId: string, client: typeof sql = sql): Promise<WorkspaceSearchSettings> {
+export async function getProjectSearchSettings(projectId: string, userId: string, client: typeof sql = sql): Promise<ProjectSearchSettings> {
   const [row] = await client<SettingsRow[]>`
-    select workspace_id, user_id, typo_tolerance, dedupe_by_filename, ranking_rules, boosts, pinned_results, synonyms, compat_settings, rules, compat_metadata
-    from workspace_search_settings
-    where workspace_id = ${workspaceId}
+    select project_id, user_id, typo_tolerance, dedupe_by_filename, ranking_rules, boosts, pinned_results, synonyms, compat_settings, rules, compat_metadata
+    from project_search_settings
+    where project_id = ${projectId}
     limit 1
   `;
 
-  return parseWorkspaceSearchSettingsRow(row, workspaceId, userId);
+  return parseProjectSearchSettingsRow(row, projectId, userId);
 }
 
-/** Settings from a workspace_search_settings row (defaults without one); shared with the one-query search setup. */
-export function parseWorkspaceSearchSettingsRow(row: SettingsRow | undefined, workspaceId: string, userId: string): WorkspaceSearchSettings {
+/** Settings from a project_search_settings row (defaults without one); shared with the one-query search setup. */
+export function parseProjectSearchSettingsRow(row: SettingsRow | undefined, projectId: string, userId: string): ProjectSearchSettings {
   if (!row) {
-    return workspaceSearchSettingsSchema.parse({
-      ...defaultWorkspaceSearchSettings,
-      workspaceId,
+    return projectSearchSettingsSchema.parse({
+      ...defaultProjectSearchSettings,
+      projectId,
       userId
     });
   }
 
   const compatMetadata = row.compat_metadata ?? {};
-  const workspaceUi = readWorkspaceUiSettings(compatMetadata);
+  const projectUi = readProjectUiSettings(compatMetadata);
 
-  return workspaceSearchSettingsSchema.parse({
-    workspaceId,
+  return projectSearchSettingsSchema.parse({
+    projectId,
     userId: row.user_id,
     typoTolerance: row.typo_tolerance,
     dedupeByFilename: row.dedupe_by_filename,
@@ -60,16 +60,16 @@ export function parseWorkspaceSearchSettingsRow(row: SettingsRow | undefined, wo
     boosts: row.boosts ?? {},
     pinnedResults: row.pinned_results ?? [],
     synonyms: row.synonyms ?? {},
-    retrievalDefaults: workspaceUi.retrievalDefaults,
-    chat: workspaceUi.chat,
+    retrievalDefaults: projectUi.retrievalDefaults,
+    chat: projectUi.chat,
     compatSettings: row.compat_settings ?? {},
     rules: row.rules ?? [],
     compatMetadata
   });
 }
 
-export async function upsertWorkspaceSearchSettings(settings: WorkspaceSearchSettings, client: typeof sql = sql): Promise<void> {
-  const parsed = workspaceSearchSettingsSchema.parse(settings);
+export async function upsertProjectSearchSettings(settings: ProjectSearchSettings, client: typeof sql = sql): Promise<void> {
+  const parsed = projectSearchSettingsSchema.parse(settings);
   const rankingRulesJson = JSON.parse(JSON.stringify(parsed.rankingRules)) as Record<string, unknown>;
   const boostsJson = JSON.parse(JSON.stringify(parsed.boosts)) as Record<string, unknown>;
   const pinnedResultsJson = JSON.parse(JSON.stringify(parsed.pinnedResults)) as Array<Record<string, unknown>>;
@@ -78,17 +78,17 @@ export async function upsertWorkspaceSearchSettings(settings: WorkspaceSearchSet
   const rulesJson = JSON.parse(JSON.stringify(parsed.rules)) as Array<Record<string, unknown>>;
   const compatMetadataJson = JSON.parse(JSON.stringify({
     ...parsed.compatMetadata,
-    workspaceUi: {
+    projectUi: {
       retrievalDefaults: parsed.retrievalDefaults,
       chat: parsed.chat
     }
   })) as Record<string, unknown>;
 
   await client`
-    insert into workspace_search_settings (
-      workspace_id, user_id, typo_tolerance, dedupe_by_filename, ranking_rules, boosts, pinned_results, synonyms, compat_settings, rules, compat_metadata
+    insert into project_search_settings (
+      project_id, user_id, typo_tolerance, dedupe_by_filename, ranking_rules, boosts, pinned_results, synonyms, compat_settings, rules, compat_metadata
     ) values (
-      ${parsed.workspaceId},
+      ${parsed.projectId},
       ${parsed.userId},
       ${parsed.typoTolerance},
       ${parsed.dedupeByFilename},
@@ -100,7 +100,7 @@ export async function upsertWorkspaceSearchSettings(settings: WorkspaceSearchSet
       ${client.json(rulesJson as Parameters<typeof sql.json>[0])},
       ${client.json(compatMetadataJson as Parameters<typeof sql.json>[0])}
     )
-    on conflict (workspace_id) do update set
+    on conflict (project_id) do update set
       user_id = excluded.user_id,
       typo_tolerance = excluded.typo_tolerance,
       dedupe_by_filename = excluded.dedupe_by_filename,
@@ -114,41 +114,41 @@ export async function upsertWorkspaceSearchSettings(settings: WorkspaceSearchSet
       updated_at = now()
   `;
   // Ranking, synonyms and retrieval defaults change answers: drop cached ones in every API process.
-  await notifySearchEligibilityChanged(client, [parsed.workspaceId]);
+  await notifySearchEligibilityChanged(client, [parsed.projectId]);
 }
 
-export async function getWorkspaceSearchSettingsForUser(
-  workspaceId: string,
+export async function getProjectSearchSettingsForUser(
+  projectId: string,
   userId: string
-): Promise<WorkspaceSearchSettings | null> {
-  const access = await getWorkspaceAccess(workspaceId, userId);
+): Promise<ProjectSearchSettings | null> {
+  const access = await getProjectAccess(projectId, userId);
   if (!access) {
     return null;
   }
 
-  return await getWorkspaceSearchSettings(workspaceId, userId);
+  return await getProjectSearchSettings(projectId, userId);
 }
 
 /** Applies a retrieval-defaults patch; a null clears an optional (pipeline-derived) setting. */
 function mergeRetrievalDefaults(
-  current: WorkspaceSearchSettings["retrievalDefaults"],
-  patch: UpdateWorkspaceSearchSettingsInput["retrievalDefaults"],
-): WorkspaceSearchSettings["retrievalDefaults"] {
+  current: ProjectSearchSettings["retrievalDefaults"],
+  patch: UpdateProjectSearchSettingsInput["retrievalDefaults"],
+): ProjectSearchSettings["retrievalDefaults"] {
   const next: Record<string, unknown> = { ...current };
   for (const [key, value] of Object.entries(patch ?? {})) {
     if (value === null) delete next[key];
     else if (value !== undefined) next[key] = value;
   }
-  return next as WorkspaceSearchSettings["retrievalDefaults"];
+  return next as ProjectSearchSettings["retrievalDefaults"];
 }
 
 /** The settings a search-settings PATCH would store; pure, shared by the mutation and its estimate. */
-export function mergeWorkspaceSearchSettings(
-  current: WorkspaceSearchSettings,
-  input: UpdateWorkspaceSearchSettingsInput,
-): WorkspaceSearchSettings {
-  const parsedInput = updateWorkspaceSearchSettingsSchema.parse(input);
-  return workspaceSearchSettingsSchema.parse({
+export function mergeProjectSearchSettings(
+  current: ProjectSearchSettings,
+  input: UpdateProjectSearchSettingsInput,
+): ProjectSearchSettings {
+  const parsedInput = updateProjectSearchSettingsSchema.parse(input);
+  return projectSearchSettingsSchema.parse({
     ...current,
     typoTolerance: parsedInput.typoTolerance ?? current.typoTolerance,
     dedupeByFilename: parsedInput.dedupeByFilename ?? current.dedupeByFilename,
@@ -164,49 +164,49 @@ export function mergeWorkspaceSearchSettings(
   });
 }
 
-export async function updateWorkspaceSearchSettingsForUser(args: {
-  workspaceId: string;
+export async function updateProjectSearchSettingsForUser(args: {
+  projectId: string;
   userId: string;
-  input: UpdateWorkspaceSearchSettingsInput;
-}): Promise<WorkspaceSearchSettings | null> {
-  return mutateWorkspaceSearchSettingsForUser({ ...args, mutate: current => mergeWorkspaceSearchSettings(current, args.input) });
+  input: UpdateProjectSearchSettingsInput;
+}): Promise<ProjectSearchSettings | null> {
+  return mutateProjectSearchSettingsForUser({ ...args, mutate: current => mergeProjectSearchSettings(current, args.input) });
 }
 
 /** Serialize every read/merge/write, including first inserts, with proposal Apply. */
-export async function mutateWorkspaceSearchSettingsForUser(args: {
-  workspaceId: string;
+export async function mutateProjectSearchSettingsForUser(args: {
+  projectId: string;
   userId: string;
-  mutate: (current: WorkspaceSearchSettings) => WorkspaceSearchSettings;
-}): Promise<WorkspaceSearchSettings | null> {
+  mutate: (current: ProjectSearchSettings) => ProjectSearchSettings;
+}): Promise<ProjectSearchSettings | null> {
   return await sql.begin(async tx => {
     const client = tx as unknown as typeof sql;
-    await client`select pg_advisory_xact_lock(hashtextextended(${`config-change:${args.workspaceId}`}, 0))`;
-    const access = await getWorkspaceAccess(args.workspaceId, args.userId, client);
-    if (!access || !canEditWorkspace(access, args.userId)) return null;
-    const current = await getWorkspaceSearchSettings(args.workspaceId, args.userId, client);
+    await client`select pg_advisory_xact_lock(hashtextextended(${`config-change:${args.projectId}`}, 0))`;
+    const access = await getProjectAccess(args.projectId, args.userId, client);
+    if (!access || !canEditProject(access, args.userId)) return null;
+    const current = await getProjectSearchSettings(args.projectId, args.userId, client);
     const next = args.mutate(current);
-    await upsertWorkspaceSearchSettings(next, client);
-    await client`update workspaces set updated_at=now() where id=${args.workspaceId}`;
+    await upsertProjectSearchSettings(next, client);
+    await client`update projects set updated_at=now() where id=${args.projectId}`;
     return next;
   });
 }
 
 /**
- * Whether this user may change a workspace's search configuration. The session
- * route already enforces this (updateWorkspaceSearchSettingsForUser); the
+ * Whether this user may change a project's search configuration. The session
+ * route already enforces this (updateProjectSearchSettingsForUser); the
  * compatibility routes (Algolia/Meilisearch/Typesense/Pagefind) must enforce the
- * same rule, or a read-only workspace member can rewrite settings through an API
+ * same rule, or a read-only project member can rewrite settings through an API
  * key they are allowed to create. Security finding SEC-2026-10-01.
  */
-export async function userCanEditWorkspaceSettings(workspaceId: string, userId: string): Promise<boolean> {
-  const access = await getWorkspaceAccess(workspaceId, userId);
-  return access !== null && canEditWorkspace(access, userId);
+export async function userCanEditProjectSettings(projectId: string, userId: string): Promise<boolean> {
+  const access = await getProjectAccess(projectId, userId);
+  return access !== null && canEditProject(access, userId);
 }
 
 export function applySearchControls(args: {
   query: string;
   results: SearchResult[];
-  settings: WorkspaceSearchSettings;
+  settings: ProjectSearchSettings;
 }): SearchResult[] {
   let out = [...args.results];
 
@@ -273,28 +273,28 @@ export function applySearchControls(args: {
   return out;
 }
 
-function readWorkspaceUiSettings(metadata: Record<string, unknown>) {
-  const defaults = defaultWorkspaceSearchSettings;
-  const workspaceUi = metadata.workspaceUi;
+function readProjectUiSettings(metadata: Record<string, unknown>) {
+  const defaults = defaultProjectSearchSettings;
+  const projectUi = metadata.projectUi;
 
-  if (!workspaceUi || typeof workspaceUi !== "object") {
+  if (!projectUi || typeof projectUi !== "object") {
     return {
       retrievalDefaults: defaults.retrievalDefaults,
       chat: defaults.chat
     };
   }
 
-  const uiRecord = workspaceUi as Record<string, unknown>;
+  const uiRecord = projectUi as Record<string, unknown>;
   return {
-    retrievalDefaults: workspaceSearchSettingsSchema.shape.retrievalDefaults.parse(uiRecord.retrievalDefaults ?? {}),
-    chat: workspaceSearchSettingsSchema.shape.chat.parse(uiRecord.chat ?? {})
+    retrievalDefaults: projectSearchSettingsSchema.shape.retrievalDefaults.parse(uiRecord.retrievalDefaults ?? {}),
+    chat: projectSearchSettingsSchema.shape.chat.parse(uiRecord.chat ?? {})
   };
 }
 
 export async function recordZeroResultDiagnostics(args: {
   sessionId: string;
   userId: string;
-  workspaceId: string;
+  projectId: string;
   query: string;
   filtersJson: Record<string, unknown>;
 }): Promise<void> {
@@ -305,7 +305,7 @@ export async function recordZeroResultDiagnostics(args: {
       select 1
       from document_chunks c
       join documents d on d.id = c.document_id
-      where d.workspace_id = ${args.workspaceId}
+      where d.project_id = ${args.projectId}
         and d.superseded_at is null
       limit 1
     ) indexed
@@ -316,7 +316,7 @@ export async function recordZeroResultDiagnostics(args: {
 
   if ((emptyIndexRows[0]?.count ?? 0) === 0) {
     reasons.push("empty-index");
-    suggestions.push({ kind: "ingest", message: "No indexed content. Upload and index documents for this workspace." });
+    suggestions.push({ kind: "ingest", message: "No indexed content. Upload and index documents for this project." });
   }
 
   // Heuristic: very short query
@@ -331,8 +331,8 @@ export async function recordZeroResultDiagnostics(args: {
     with cleared as (
       delete from search_zero_results where session_id = ${args.sessionId}
     )
-    insert into search_zero_results (id, session_id, user_id, workspace_id, reason, suggestions)
-    values (${randomUUID()}, ${args.sessionId}, ${args.userId}, ${args.workspaceId}, ${reasons.join("|") || "unknown"}, ${sql.json(suggestions)})
+    insert into search_zero_results (id, session_id, user_id, project_id, reason, suggestions)
+    values (${randomUUID()}, ${args.sessionId}, ${args.userId}, ${args.projectId}, ${reasons.join("|") || "unknown"}, ${sql.json(suggestions)})
   `;
 }
 

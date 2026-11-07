@@ -41,6 +41,7 @@ import type { UsageEvent } from "../models.js";
 import { fetchWithProviderRetry, type ProviderRetryOptions } from "../lib/provider-retry.js";
 import type { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { readRoutingFlags } from "./flags.js";
+import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 
 export const PAGE_ROUTE_DECISION_METRIC = "page-route-decision";
 /** Health-canary probes of a decision model (see health/canary.ts). */
@@ -245,7 +246,7 @@ function baseDecisionModelId(id: string): string {
 }
 
 export interface DecisionClientOptions {
-  /** Workspace privacy mode; hosted calls fail closed outside `standard`. */
+  /** Project privacy mode; hosted calls fail closed outside `standard`. */
   privacyMode: PrivacyMode | string | null | undefined;
   env?: NodeJS.ProcessEnv;
   fetchImpl?: typeof fetch;
@@ -328,6 +329,7 @@ export function createDecisionClient(options: DecisionClientOptions): DecisionCl
       let body: unknown;
       let provider: string;
       if (model.endpoint === "local-transformers") {
+        if (vmOnlyParsing(env)) throw new DecisionUnavailableError("local image decision sidecars lack a VM boundary in production; configure a remote model endpoint");
         provider = "local";
         // Local runtimes never leave the machine, so they stay allowed in every privacy mode.
         assertProviderAllowed(options.privacyMode, {
@@ -345,7 +347,7 @@ export function createDecisionClient(options: DecisionClientOptions): DecisionCl
         const spec = endpointSpec(model);
         if (!spec) throw new DecisionUnavailableError(`unsupported decision endpoint ${model.endpoint}`);
         provider = spec.provider;
-        // Decision-model calls send workspace content to a hosted AI provider.
+        // Decision-model calls send project content to a hosted AI provider.
         assertProviderAllowed(options.privacyMode, {
           provider: spec.provider,
           model: model.id,

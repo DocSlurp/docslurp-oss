@@ -1,5 +1,5 @@
 import { relations } from "drizzle-orm/relations";
-import { user, creditLedger, organizations, documents, vectorIndexes, workspaceRuns, usageEvents, workspaces, performanceLog, workspaceRunEvents, workspaceSecrets, session, account, workspaceInvites, documentCorrections, pageStageStates, workspaceConnectors, webhooks, documentChunks, documentPages, webhookDeliveries, notificationPrefs, notificationDeliveries, apiKeys, documentSummaries, searchSessions, searchSessionResults, auditLog, searchEvalFixtures, searchIndexStaleness, documentPropositions, idempotencyCache, searchExperiments, chatSessions, chatTurns, piiDetections, chatAnswerEvidenceSpans, parserEvalFixtures, parserEvalResults, uploadSessions, uploadSessionFiles, searchZeroResults, workspaceSearchSettings, querySuggestions, privacyAuditLog, connectorSyncLog, oauthAccounts, ssoAuthRequests, kgNodes, kgEdges, kgCommunities, orgMemberships, documentTags, apiKeyUsage, kgCommunityMembers, workspaceMembers, workspaceRunStageStates, documentRunStageStates, chunkEntities, creditGrants, storageMeterDays } from "./schema";
+import { user, creditLedger, organizations, documents, vectorIndexes, projectRuns, usageEvents, projects, performanceLog, projectRunEvents, projectSecrets, session, account, projectInvites, documentCorrections, pageStageStates, projectConnectors, webhooks, documentChunks, documentPages, webhookDeliveries, notificationPrefs, notificationDeliveries, apiKeys, documentSummaries, searchSessions, searchSessionResults, auditLog, searchEvalFixtures, searchIndexStaleness, documentPropositions, idempotencyCache, searchExperiments, chatSessions, chatTurns, piiDetections, chatAnswerEvidenceSpans, parserEvalFixtures, parserEvalResults, uploadSessions, uploadSessionFiles, searchZeroResults, projectSearchSettings, querySuggestions, privacyAuditLog, connectorSyncLog, oauthAccounts, ssoAuthRequests, kgNodes, kgEdges, kgCommunities, orgMemberships, documentTags, apiKeyUsage, kgCommunityMembers, projectMembers, projectRunStageStates, documentRunStageStates, chunkEntities, creditGrants, storageMeterDays } from "./schema";
 
 export const creditLedgerRelations = relations(creditLedger, ({one}) => ({
 	user: one(user, {
@@ -19,14 +19,14 @@ export const userRelations = relations(user, ({many}) => ({
 	usageEvents: many(usageEvents),
 	documents: many(documents),
 	performanceLogs: many(performanceLog),
-	workspaceRunEvents: many(workspaceRunEvents),
+	projectRunEvents: many(projectRunEvents),
 	sessions: many(session),
 	accounts: many(account),
-	workspaceInvites_acceptedByUserId: many(workspaceInvites, {
-		relationName: "workspaceInvites_acceptedByUserId_user_id"
+	projectInvites_acceptedByUserId: many(projectInvites, {
+		relationName: "projectInvites_acceptedByUserId_user_id"
 	}),
-	workspaceInvites_invitedByUserId: many(workspaceInvites, {
-		relationName: "workspaceInvites_invitedByUserId_user_id"
+	projectInvites_invitedByUserId: many(projectInvites, {
+		relationName: "projectInvites_invitedByUserId_user_id"
 	}),
 	documentCorrections: many(documentCorrections),
 	webhooks: many(webhooks),
@@ -45,14 +45,14 @@ export const userRelations = relations(user, ({many}) => ({
 	idempotencyCaches: many(idempotencyCache),
 	searchExperiments: many(searchExperiments),
 	chatSessions: many(chatSessions),
-	workspaces: many(workspaces),
+	projects: many(projects),
 	chatAnswerEvidenceSpans: many(chatAnswerEvidenceSpans),
 	parserEvalFixtures: many(parserEvalFixtures),
 	parserEvalResults: many(parserEvalResults),
 	uploadSessions: many(uploadSessions),
-	workspaceRuns: many(workspaceRuns),
+	projectRuns: many(projectRuns),
 	searchZeroResults: many(searchZeroResults),
-	workspaceSearchSettings: many(workspaceSearchSettings),
+	projectSearchSettings: many(projectSearchSettings),
 	querySuggestions: many(querySuggestions),
 	oauthAccounts: many(oauthAccounts),
 	kgNodes: many(kgNodes),
@@ -60,11 +60,11 @@ export const userRelations = relations(user, ({many}) => ({
 	kgCommunities: many(kgCommunities),
 	orgMemberships: many(orgMemberships),
 	documentTags: many(documentTags),
-	workspaceMembers_invitedByUserId: many(workspaceMembers, {
-		relationName: "workspaceMembers_invitedByUserId_user_id"
+	projectMembers_invitedByUserId: many(projectMembers, {
+		relationName: "projectMembers_invitedByUserId_user_id"
 	}),
-	workspaceMembers_userId: many(workspaceMembers, {
-		relationName: "workspaceMembers_userId_user_id"
+	projectMembers_userId: many(projectMembers, {
+		relationName: "projectMembers_userId_user_id"
 	}),
 	chunkEntities: many(chunkEntities),
 }));
@@ -80,7 +80,7 @@ export const organizationsRelations = relations(organizations, ({one, many}) => 
 		references: [user.id],
 		relationName: "organizations_personalOwnerUserId_user_id"
 	}),
-	workspaceInvites: many(workspaceInvites),
+	projectInvites: many(projectInvites),
 	notificationPrefs: many(notificationPrefs),
 	notificationDeliveries: many(notificationDeliveries),
 	apiKeys: many(apiKeys),
@@ -102,13 +102,13 @@ export const vectorIndexesRelations = relations(vectorIndexes, ({one}) => ({
 export const documentsRelations = relations(documents, ({one, many}) => ({
 	vectorIndexes: many(vectorIndexes),
 	usageEvents: many(usageEvents),
-	workspace: one(workspaces, {
-		fields: [documents.workspaceId],
-		references: [workspaces.id]
+	project: one(projects, {
+		fields: [documents.projectId],
+		references: [projects.id]
 	}),
-	workspaceRun: one(workspaceRuns, {
+	projectRun: one(projectRuns, {
 		fields: [documents.runId],
-		references: [workspaceRuns.id]
+		references: [projectRuns.id]
 	}),
 	user: one(user, {
 		fields: [documents.userId],
@@ -123,7 +123,7 @@ export const documentsRelations = relations(documents, ({one, many}) => ({
 		relationName: "documents_dedupedFromDocumentId_documents_id"
 	}),
 	performanceLogs: many(performanceLog),
-	workspaceRunEvents: many(workspaceRunEvents),
+	projectRunEvents: many(projectRunEvents),
 	documentCorrections: many(documentCorrections),
 	pageStageStates: many(pageStageStates),
 	documentChunks: many(documentChunks),
@@ -141,9 +141,9 @@ export const documentsRelations = relations(documents, ({one, many}) => ({
 }));
 
 export const usageEventsRelations = relations(usageEvents, ({one}) => ({
-	workspaceRun: one(workspaceRuns, {
+	projectRun: one(projectRuns, {
 		fields: [usageEvents.runId],
-		references: [workspaceRuns.id]
+		references: [projectRuns.id]
 	}),
 	document: one(documents, {
 		fields: [usageEvents.documentId],
@@ -155,11 +155,11 @@ export const usageEventsRelations = relations(usageEvents, ({one}) => ({
 	}),
 }));
 
-export const workspaceRunsRelations = relations(workspaceRuns, ({one, many}) => ({
+export const projectRunsRelations = relations(projectRuns, ({one, many}) => ({
 	usageEvents: many(usageEvents),
 	documents: many(documents),
 	performanceLogs: many(performanceLog),
-	workspaceRunEvents: many(workspaceRunEvents),
+	projectRunEvents: many(projectRunEvents),
 	documentCorrections: many(documentCorrections),
 	pageStageStates: many(pageStageStates),
 	documentChunks: many(documentChunks),
@@ -172,55 +172,55 @@ export const workspaceRunsRelations = relations(workspaceRuns, ({one, many}) => 
 	piiDetections: many(piiDetections),
 	parserEvalFixtures: many(parserEvalFixtures),
 	parserEvalResults: many(parserEvalResults),
-	workspace: one(workspaces, {
-		fields: [workspaceRuns.workspaceId],
-		references: [workspaces.id]
+	project: one(projects, {
+		fields: [projectRuns.projectId],
+		references: [projects.id]
 	}),
 	user: one(user, {
-		fields: [workspaceRuns.userId],
+		fields: [projectRuns.userId],
 		references: [user.id]
 	}),
 	privacyAuditLogs: many(privacyAuditLog),
 	kgNodes: many(kgNodes),
 	kgEdges: many(kgEdges),
 	kgCommunities: many(kgCommunities),
-	workspaceRunStageStates: many(workspaceRunStageStates),
+	projectRunStageStates: many(projectRunStageStates),
 	documentRunStageStates: many(documentRunStageStates),
 	chunkEntities: many(chunkEntities),
 }));
 
-export const workspacesRelations = relations(workspaces, ({one, many}) => ({
+export const projectsRelations = relations(projects, ({one, many}) => ({
 	documents: many(documents),
-	workspaceSecrets: many(workspaceSecrets),
-	workspaceInvites: many(workspaceInvites),
-	workspaceConnectors: many(workspaceConnectors),
+	projectSecrets: many(projectSecrets),
+	projectInvites: many(projectInvites),
+	projectConnectors: many(projectConnectors),
 	notificationPrefs: many(notificationPrefs),
 	notificationDeliveries: many(notificationDeliveries),
 	auditLogs: many(auditLog),
 	chatSessions: many(chatSessions),
 	user: one(user, {
-		fields: [workspaces.userId],
+		fields: [projects.userId],
 		references: [user.id]
 	}),
 	chatAnswerEvidenceSpans: many(chatAnswerEvidenceSpans),
 	uploadSessions: many(uploadSessions),
-	workspaceRuns: many(workspaceRuns),
+	projectRuns: many(projectRuns),
 	searchZeroResults: many(searchZeroResults),
-	workspaceSearchSettings: many(workspaceSearchSettings),
+	projectSearchSettings: many(projectSearchSettings),
 	querySuggestions: many(querySuggestions),
 	privacyAuditLogs: many(privacyAuditLog),
 	kgNodes: many(kgNodes),
 	kgEdges: many(kgEdges),
 	kgCommunities: many(kgCommunities),
 	kgCommunityMembers: many(kgCommunityMembers),
-	workspaceMembers: many(workspaceMembers),
+	projectMembers: many(projectMembers),
 	chunkEntities: many(chunkEntities),
 }));
 
 export const performanceLogRelations = relations(performanceLog, ({one}) => ({
-	workspaceRun: one(workspaceRuns, {
+	projectRun: one(projectRuns, {
 		fields: [performanceLog.runId],
-		references: [workspaceRuns.id]
+		references: [projectRuns.id]
 	}),
 	document: one(documents, {
 		fields: [performanceLog.documentId],
@@ -232,25 +232,25 @@ export const performanceLogRelations = relations(performanceLog, ({one}) => ({
 	}),
 }));
 
-export const workspaceRunEventsRelations = relations(workspaceRunEvents, ({one}) => ({
-	workspaceRun: one(workspaceRuns, {
-		fields: [workspaceRunEvents.runId],
-		references: [workspaceRuns.id]
+export const projectRunEventsRelations = relations(projectRunEvents, ({one}) => ({
+	projectRun: one(projectRuns, {
+		fields: [projectRunEvents.runId],
+		references: [projectRuns.id]
 	}),
 	document: one(documents, {
-		fields: [workspaceRunEvents.documentId],
+		fields: [projectRunEvents.documentId],
 		references: [documents.id]
 	}),
 	user: one(user, {
-		fields: [workspaceRunEvents.userId],
+		fields: [projectRunEvents.userId],
 		references: [user.id]
 	}),
 }));
 
-export const workspaceSecretsRelations = relations(workspaceSecrets, ({one}) => ({
-	workspace: one(workspaces, {
-		fields: [workspaceSecrets.workspaceId],
-		references: [workspaces.id]
+export const projectSecretsRelations = relations(projectSecrets, ({one}) => ({
+	project: one(projects, {
+		fields: [projectSecrets.projectId],
+		references: [projects.id]
 	}),
 }));
 
@@ -268,24 +268,24 @@ export const accountRelations = relations(account, ({one}) => ({
 	}),
 }));
 
-export const workspaceInvitesRelations = relations(workspaceInvites, ({one}) => ({
-	workspace: one(workspaces, {
-		fields: [workspaceInvites.workspaceId],
-		references: [workspaces.id]
+export const projectInvitesRelations = relations(projectInvites, ({one}) => ({
+	project: one(projects, {
+		fields: [projectInvites.projectId],
+		references: [projects.id]
 	}),
 	organization: one(organizations, {
-		fields: [workspaceInvites.orgId],
+		fields: [projectInvites.orgId],
 		references: [organizations.id]
 	}),
 	user_acceptedByUserId: one(user, {
-		fields: [workspaceInvites.acceptedByUserId],
+		fields: [projectInvites.acceptedByUserId],
 		references: [user.id],
-		relationName: "workspaceInvites_acceptedByUserId_user_id"
+		relationName: "projectInvites_acceptedByUserId_user_id"
 	}),
 	user_invitedByUserId: one(user, {
-		fields: [workspaceInvites.invitedByUserId],
+		fields: [projectInvites.invitedByUserId],
 		references: [user.id],
-		relationName: "workspaceInvites_invitedByUserId_user_id"
+		relationName: "projectInvites_invitedByUserId_user_id"
 	}),
 }));
 
@@ -294,9 +294,9 @@ export const documentCorrectionsRelations = relations(documentCorrections, ({one
 		fields: [documentCorrections.documentId],
 		references: [documents.id]
 	}),
-	workspaceRun: one(workspaceRuns, {
+	projectRun: one(projectRuns, {
 		fields: [documentCorrections.runId],
-		references: [workspaceRuns.id]
+		references: [projectRuns.id]
 	}),
 	user: one(user, {
 		fields: [documentCorrections.userId],
@@ -305,9 +305,9 @@ export const documentCorrectionsRelations = relations(documentCorrections, ({one
 }));
 
 export const pageStageStatesRelations = relations(pageStageStates, ({one}) => ({
-	workspaceRun: one(workspaceRuns, {
+	projectRun: one(projectRuns, {
 		fields: [pageStageStates.runId],
-		references: [workspaceRuns.id]
+		references: [projectRuns.id]
 	}),
 	document: one(documents, {
 		fields: [pageStageStates.documentId],
@@ -315,10 +315,10 @@ export const pageStageStatesRelations = relations(pageStageStates, ({one}) => ({
 	}),
 }));
 
-export const workspaceConnectorsRelations = relations(workspaceConnectors, ({one, many}) => ({
-	workspace: one(workspaces, {
-		fields: [workspaceConnectors.workspaceId],
-		references: [workspaces.id]
+export const projectConnectorsRelations = relations(projectConnectors, ({one, many}) => ({
+	project: one(projects, {
+		fields: [projectConnectors.projectId],
+		references: [projects.id]
 	}),
 	connectorSyncLogs: many(connectorSyncLog),
 }));
@@ -336,9 +336,9 @@ export const documentChunksRelations = relations(documentChunks, ({one, many}) =
 		fields: [documentChunks.documentId],
 		references: [documents.id]
 	}),
-	workspaceRun: one(workspaceRuns, {
+	projectRun: one(projectRuns, {
 		fields: [documentChunks.runId],
-		references: [workspaceRuns.id]
+		references: [projectRuns.id]
 	}),
 	documentPage: one(documentPages, {
 		fields: [documentChunks.parentPageId],
@@ -357,9 +357,9 @@ export const documentPagesRelations = relations(documentPages, ({one, many}) => 
 		fields: [documentPages.documentId],
 		references: [documents.id]
 	}),
-	workspaceRun: one(workspaceRuns, {
+	projectRun: one(projectRuns, {
 		fields: [documentPages.runId],
-		references: [workspaceRuns.id]
+		references: [projectRuns.id]
 	}),
 	user: one(user, {
 		fields: [documentPages.userId],
@@ -391,9 +391,9 @@ export const notificationPrefsRelations = relations(notificationPrefs, ({one}) =
 		fields: [notificationPrefs.orgId],
 		references: [organizations.id]
 	}),
-	workspace: one(workspaces, {
-		fields: [notificationPrefs.workspaceId],
-		references: [workspaces.id]
+	project: one(projects, {
+		fields: [notificationPrefs.projectId],
+		references: [projects.id]
 	}),
 	user: one(user, {
 		fields: [notificationPrefs.userId],
@@ -406,9 +406,9 @@ export const notificationDeliveriesRelations = relations(notificationDeliveries,
 		fields: [notificationDeliveries.orgId],
 		references: [organizations.id]
 	}),
-	workspace: one(workspaces, {
-		fields: [notificationDeliveries.workspaceId],
-		references: [workspaces.id]
+	project: one(projects, {
+		fields: [notificationDeliveries.projectId],
+		references: [projects.id]
 	}),
 	user: one(user, {
 		fields: [notificationDeliveries.userId],
@@ -434,9 +434,9 @@ export const documentSummariesRelations = relations(documentSummaries, ({one}) =
 		fields: [documentSummaries.documentId],
 		references: [documents.id]
 	}),
-	workspaceRun: one(workspaceRuns, {
+	projectRun: one(projectRuns, {
 		fields: [documentSummaries.runId],
-		references: [workspaceRuns.id]
+		references: [projectRuns.id]
 	}),
 	user: one(user, {
 		fields: [documentSummaries.userId],
@@ -466,13 +466,13 @@ export const auditLogRelations = relations(auditLog, ({one}) => ({
 		fields: [auditLog.orgId],
 		references: [organizations.id]
 	}),
-	workspace: one(workspaces, {
-		fields: [auditLog.workspaceId],
-		references: [workspaces.id]
+	project: one(projects, {
+		fields: [auditLog.projectId],
+		references: [projects.id]
 	}),
-	workspaceRun: one(workspaceRuns, {
+	projectRun: one(projectRuns, {
 		fields: [auditLog.runId],
-		references: [workspaceRuns.id]
+		references: [projectRuns.id]
 	}),
 	document: one(documents, {
 		fields: [auditLog.documentId],
@@ -489,9 +489,9 @@ export const auditLogRelations = relations(auditLog, ({one}) => ({
 }));
 
 export const searchEvalFixturesRelations = relations(searchEvalFixtures, ({one}) => ({
-	workspaceRun: one(workspaceRuns, {
+	projectRun: one(projectRuns, {
 		fields: [searchEvalFixtures.runId],
-		references: [workspaceRuns.id]
+		references: [projectRuns.id]
 	}),
 	user: one(user, {
 		fields: [searchEvalFixtures.userId],
@@ -500,9 +500,9 @@ export const searchEvalFixturesRelations = relations(searchEvalFixtures, ({one})
 }));
 
 export const searchIndexStalenessRelations = relations(searchIndexStaleness, ({one}) => ({
-	workspaceRun: one(workspaceRuns, {
+	projectRun: one(projectRuns, {
 		fields: [searchIndexStaleness.runId],
-		references: [workspaceRuns.id]
+		references: [projectRuns.id]
 	}),
 	document: one(documents, {
 		fields: [searchIndexStaleness.documentId],
@@ -519,9 +519,9 @@ export const documentPropositionsRelations = relations(documentPropositions, ({o
 		fields: [documentPropositions.documentId],
 		references: [documents.id]
 	}),
-	workspaceRun: one(workspaceRuns, {
+	projectRun: one(projectRuns, {
 		fields: [documentPropositions.runId],
-		references: [workspaceRuns.id]
+		references: [projectRuns.id]
 	}),
 	user: one(user, {
 		fields: [documentPropositions.userId],
@@ -544,9 +544,9 @@ export const searchExperimentsRelations = relations(searchExperiments, ({one}) =
 }));
 
 export const chatSessionsRelations = relations(chatSessions, ({one, many}) => ({
-	workspace: one(workspaces, {
-		fields: [chatSessions.workspaceId],
-		references: [workspaces.id]
+	project: one(projects, {
+		fields: [chatSessions.projectId],
+		references: [projects.id]
 	}),
 	user: one(user, {
 		fields: [chatSessions.userId],
@@ -568,9 +568,9 @@ export const piiDetectionsRelations = relations(piiDetections, ({one}) => ({
 		fields: [piiDetections.documentId],
 		references: [documents.id]
 	}),
-	workspaceRun: one(workspaceRuns, {
+	projectRun: one(projectRuns, {
 		fields: [piiDetections.runId],
-		references: [workspaceRuns.id]
+		references: [projectRuns.id]
 	}),
 }));
 
@@ -583,9 +583,9 @@ export const chatAnswerEvidenceSpansRelations = relations(chatAnswerEvidenceSpan
 		fields: [chatAnswerEvidenceSpans.searchSessionId],
 		references: [searchSessions.id]
 	}),
-	workspace: one(workspaces, {
-		fields: [chatAnswerEvidenceSpans.workspaceId],
-		references: [workspaces.id]
+	project: one(projects, {
+		fields: [chatAnswerEvidenceSpans.projectId],
+		references: [projects.id]
 	}),
 	user: one(user, {
 		fields: [chatAnswerEvidenceSpans.userId],
@@ -594,9 +594,9 @@ export const chatAnswerEvidenceSpansRelations = relations(chatAnswerEvidenceSpan
 }));
 
 export const parserEvalFixturesRelations = relations(parserEvalFixtures, ({one}) => ({
-	workspaceRun: one(workspaceRuns, {
+	projectRun: one(projectRuns, {
 		fields: [parserEvalFixtures.runId],
-		references: [workspaceRuns.id]
+		references: [projectRuns.id]
 	}),
 	document: one(documents, {
 		fields: [parserEvalFixtures.documentId],
@@ -609,9 +609,9 @@ export const parserEvalFixturesRelations = relations(parserEvalFixtures, ({one})
 }));
 
 export const parserEvalResultsRelations = relations(parserEvalResults, ({one}) => ({
-	workspaceRun: one(workspaceRuns, {
+	projectRun: one(projectRuns, {
 		fields: [parserEvalResults.runId],
-		references: [workspaceRuns.id]
+		references: [projectRuns.id]
 	}),
 	document: one(documents, {
 		fields: [parserEvalResults.documentId],
@@ -632,9 +632,9 @@ export const uploadSessionsRelations = relations(uploadSessions, ({one, many}) =
 		fields: [uploadSessions.orgId],
 		references: [organizations.id]
 	}),
-	workspace: one(workspaces, {
-		fields: [uploadSessions.workspaceId],
-		references: [workspaces.id]
+	project: one(projects, {
+		fields: [uploadSessions.projectId],
+		references: [projects.id]
 	}),
 	uploadSessionFiles: many(uploadSessionFiles),
 }));
@@ -655,19 +655,19 @@ export const searchZeroResultsRelations = relations(searchZeroResults, ({one}) =
 		fields: [searchZeroResults.userId],
 		references: [user.id]
 	}),
-	workspace: one(workspaces, {
-		fields: [searchZeroResults.workspaceId],
-		references: [workspaces.id]
+	project: one(projects, {
+		fields: [searchZeroResults.projectId],
+		references: [projects.id]
 	}),
 }));
 
-export const workspaceSearchSettingsRelations = relations(workspaceSearchSettings, ({one}) => ({
-	workspace: one(workspaces, {
-		fields: [workspaceSearchSettings.workspaceId],
-		references: [workspaces.id]
+export const projectSearchSettingsRelations = relations(projectSearchSettings, ({one}) => ({
+	project: one(projects, {
+		fields: [projectSearchSettings.projectId],
+		references: [projects.id]
 	}),
 	user: one(user, {
-		fields: [workspaceSearchSettings.userId],
+		fields: [projectSearchSettings.userId],
 		references: [user.id]
 	}),
 }));
@@ -677,9 +677,9 @@ export const querySuggestionsRelations = relations(querySuggestions, ({one}) => 
 		fields: [querySuggestions.userId],
 		references: [user.id]
 	}),
-	workspace: one(workspaces, {
-		fields: [querySuggestions.workspaceId],
-		references: [workspaces.id]
+	project: one(projects, {
+		fields: [querySuggestions.projectId],
+		references: [projects.id]
 	}),
 }));
 
@@ -688,20 +688,20 @@ export const privacyAuditLogRelations = relations(privacyAuditLog, ({one}) => ({
 		fields: [privacyAuditLog.documentId],
 		references: [documents.id]
 	}),
-	workspaceRun: one(workspaceRuns, {
+	projectRun: one(projectRuns, {
 		fields: [privacyAuditLog.runId],
-		references: [workspaceRuns.id]
+		references: [projectRuns.id]
 	}),
-	workspace: one(workspaces, {
-		fields: [privacyAuditLog.workspaceId],
-		references: [workspaces.id]
+	project: one(projects, {
+		fields: [privacyAuditLog.projectId],
+		references: [projects.id]
 	}),
 }));
 
 export const connectorSyncLogRelations = relations(connectorSyncLog, ({one}) => ({
-	workspaceConnector: one(workspaceConnectors, {
+	projectConnector: one(projectConnectors, {
 		fields: [connectorSyncLog.connectorId],
-		references: [workspaceConnectors.id]
+		references: [projectConnectors.id]
 	}),
 }));
 
@@ -734,13 +734,13 @@ export const storageMeterDaysRelations = relations(storageMeterDays, ({one}) => 
 }));
 
 export const kgNodesRelations = relations(kgNodes, ({one, many}) => ({
-	workspace: one(workspaces, {
-		fields: [kgNodes.workspaceId],
-		references: [workspaces.id]
+	project: one(projects, {
+		fields: [kgNodes.projectId],
+		references: [projects.id]
 	}),
-	workspaceRun: one(workspaceRuns, {
+	projectRun: one(projectRuns, {
 		fields: [kgNodes.runId],
-		references: [workspaceRuns.id]
+		references: [projectRuns.id]
 	}),
 	user: one(user, {
 		fields: [kgNodes.userId],
@@ -757,13 +757,13 @@ export const kgNodesRelations = relations(kgNodes, ({one, many}) => ({
 }));
 
 export const kgEdgesRelations = relations(kgEdges, ({one}) => ({
-	workspace: one(workspaces, {
-		fields: [kgEdges.workspaceId],
-		references: [workspaces.id]
+	project: one(projects, {
+		fields: [kgEdges.projectId],
+		references: [projects.id]
 	}),
-	workspaceRun: one(workspaceRuns, {
+	projectRun: one(projectRuns, {
 		fields: [kgEdges.runId],
-		references: [workspaceRuns.id]
+		references: [projectRuns.id]
 	}),
 	user: one(user, {
 		fields: [kgEdges.userId],
@@ -782,13 +782,13 @@ export const kgEdgesRelations = relations(kgEdges, ({one}) => ({
 }));
 
 export const kgCommunitiesRelations = relations(kgCommunities, ({one, many}) => ({
-	workspace: one(workspaces, {
-		fields: [kgCommunities.workspaceId],
-		references: [workspaces.id]
+	project: one(projects, {
+		fields: [kgCommunities.projectId],
+		references: [projects.id]
 	}),
-	workspaceRun: one(workspaceRuns, {
+	projectRun: one(projectRuns, {
 		fields: [kgCommunities.runId],
-		references: [workspaceRuns.id]
+		references: [projectRuns.id]
 	}),
 	user: one(user, {
 		fields: [kgCommunities.userId],
@@ -835,40 +835,40 @@ export const kgCommunityMembersRelations = relations(kgCommunityMembers, ({one})
 		fields: [kgCommunityMembers.nodeId],
 		references: [kgNodes.id]
 	}),
-	workspace: one(workspaces, {
-		fields: [kgCommunityMembers.workspaceId],
-		references: [workspaces.id]
+	project: one(projects, {
+		fields: [kgCommunityMembers.projectId],
+		references: [projects.id]
 	}),
 }));
 
-export const workspaceMembersRelations = relations(workspaceMembers, ({one}) => ({
-	workspace: one(workspaces, {
-		fields: [workspaceMembers.workspaceId],
-		references: [workspaces.id]
+export const projectMembersRelations = relations(projectMembers, ({one}) => ({
+	project: one(projects, {
+		fields: [projectMembers.projectId],
+		references: [projects.id]
 	}),
 	user_invitedByUserId: one(user, {
-		fields: [workspaceMembers.invitedByUserId],
+		fields: [projectMembers.invitedByUserId],
 		references: [user.id],
-		relationName: "workspaceMembers_invitedByUserId_user_id"
+		relationName: "projectMembers_invitedByUserId_user_id"
 	}),
 	user_userId: one(user, {
-		fields: [workspaceMembers.userId],
+		fields: [projectMembers.userId],
 		references: [user.id],
-		relationName: "workspaceMembers_userId_user_id"
+		relationName: "projectMembers_userId_user_id"
 	}),
 }));
 
-export const workspaceRunStageStatesRelations = relations(workspaceRunStageStates, ({one}) => ({
-	workspaceRun: one(workspaceRuns, {
-		fields: [workspaceRunStageStates.runId],
-		references: [workspaceRuns.id]
+export const projectRunStageStatesRelations = relations(projectRunStageStates, ({one}) => ({
+	projectRun: one(projectRuns, {
+		fields: [projectRunStageStates.runId],
+		references: [projectRuns.id]
 	}),
 }));
 
 export const documentRunStageStatesRelations = relations(documentRunStageStates, ({one}) => ({
-	workspaceRun: one(workspaceRuns, {
+	projectRun: one(projectRuns, {
 		fields: [documentRunStageStates.runId],
-		references: [workspaceRuns.id]
+		references: [projectRuns.id]
 	}),
 	document: one(documents, {
 		fields: [documentRunStageStates.documentId],
@@ -881,13 +881,13 @@ export const chunkEntitiesRelations = relations(chunkEntities, ({one}) => ({
 		fields: [chunkEntities.chunkId],
 		references: [documentChunks.id]
 	}),
-	workspace: one(workspaces, {
-		fields: [chunkEntities.workspaceId],
-		references: [workspaces.id]
+	project: one(projects, {
+		fields: [chunkEntities.projectId],
+		references: [projects.id]
 	}),
-	workspaceRun: one(workspaceRuns, {
+	projectRun: one(projectRuns, {
 		fields: [chunkEntities.runId],
-		references: [workspaceRuns.id]
+		references: [projectRuns.id]
 	}),
 	user: one(user, {
 		fields: [chunkEntities.userId],

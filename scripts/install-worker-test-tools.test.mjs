@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const script = resolve("scripts/install-worker-test-tools.sh");
-function run(scenario) {
+function run(scenario, extraEnv = {}) {
   const dir = mkdtempSync(join(process.env.TMPDIR ?? process.env.RUNNER_TEMP, "ci-mirror-test."));
   try {
     const bin = join(dir, "bin"); mkdirSync(bin);
@@ -31,19 +31,32 @@ elif [[ "$SCENARIO" != success && "$SCENARIO" != installfail ]]; then
 fi
 `);
     // Mock only host identity so the same test exercises fallback on non-Ubuntu developer hosts.
-    const command = 'source "$1"; assert_supported_runner() { :; }; main';
+    // The OCR runtime installer is stubbed: it records its arguments instead of building a venv.
+    mkdirSync(join(dir, "root", "scripts"), { recursive: true });
+    writeFileSync(join(dir, "root", "scripts", "install-ocr-runtime.sh"), 'printf "%s\\n" "ocr $*" >> "$TEST_DIR/ocr"\n');
+    const command = 'source "$1"; ROOT_DIR="$TEST_DIR/root"; assert_supported_runner() { :; }; main';
     const result = spawnSync("bash", ["-c", command, "--", script], {
-      env: { ...process.env, PATH: bin + ":" + process.env.PATH, RUNNER_TEMP: dir, TMPDIR: dir, TEST_DIR: dir, SCENARIO: scenario }, encoding: "utf8",
+      env: { ...process.env, PATH: bin + ":" + process.env.PATH, RUNNER_TEMP: dir, TMPDIR: dir, TEST_DIR: dir, SCENARIO: scenario, DOCSLURP_INSTALL_OCR: "", DOCSLURP_OCR_PREFIX: "", ...extraEnv }, encoding: "utf8",
     });
     const read = (name) => { try { return readFileSync(join(dir, name), "utf8"); } catch { return ""; } };
-    return { status: result.status, apt: read("apt"), attempts: Number(read("count")), timeouts: read("timeouts"), sources: read("sources"), leftovers: readdirSync(dir).filter(n => n.startsWith("worker-test-apt.")) };
+    return { status: result.status, apt: read("apt"), attempts: Number(read("count")), timeouts: read("timeouts"), sources: read("sources"), ocr: read("ocr"), leftovers: readdirSync(dir).filter(n => n.startsWith("worker-test-apt.")) };
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 test("successful primary installation needs no fallback", () => {
   const r = run("success"); assert.equal(r.status, 0);
   assert.equal(r.sources, ""); assert.equal(r.attempts, 1);
   assert.match(r.apt, /update --error-on=any/);
-  assert.match(r.apt, /install -y --no-install-recommends bubblewrap poppler-data poppler-utils pandoc tesseract-ocr tesseract-ocr-eng ffmpeg/);
+  assert.match(r.apt, /install -y --no-install-recommends bubblewrap poppler-data poppler-utils pandoc ffmpeg/);
+  assert.doesNotMatch(r.apt, /tesseract/);
+  assert.equal(r.ocr, "", "the OCR runtime is opt-in");
+});
+test("DOCSLURP_INSTALL_OCR=1 builds the OCR runtime after the packages", () => {
+  let r = run("success", { DOCSLURP_INSTALL_OCR: "1" }); assert.equal(r.status, 0);
+  assert.equal(r.ocr, "ocr \n");
+  r = run("success", { DOCSLURP_INSTALL_OCR: "1", DOCSLURP_OCR_PREFIX: "/opt/ocr" }); assert.equal(r.status, 0);
+  assert.equal(r.ocr, "ocr /opt/ocr\n");
+  r = run("bothfail", { DOCSLURP_INSTALL_OCR: "1" }); assert.notEqual(r.status, 0);
+  assert.equal(r.ocr, "");
 });
 for (const scenario of ["primaryfail", "installfail", "timeout"]) test(`${scenario} retries bounded official signed sources successfully`, () => {
   const r = run(scenario); assert.equal(r.status, 0);

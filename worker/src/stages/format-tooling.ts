@@ -1,4 +1,5 @@
 import type { Stage } from "../pipeline/pipeline.js";
+import { resolveOcrMode } from "../ocr/mode.js";
 import { runDocumentStage, runDocuments, } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { resolveNativePdfEngine } from "../native-pdf/engine.js";
@@ -53,10 +54,9 @@ export class FormatToolingStage implements Stage {
 
     if (format === "pdf") {
       checks.push(
-        { tool: "pdftotext", profile: "fast-text-layer", plan: () => this.runner.extractText(sourceKey) },
-        { tool: "pdftohtml", profile: "fast-text-layer", plan: () => this.runner.extractHtml(sourceKey) },
-        { tool: "native-pdf", profile: "layout-aware-markdown", plan: async () => ({ available: (await resolveNativePdfEngine(this.runner)) !== null }) },
-        { tool: "ocrmypdf", profile: "ocr-rescue", plan: () => this.runner.ocrPdf(sourceKey, "out.pdf") }
+        { tool: "pdftotext", profile: "fast-text-layer", plan: () => this.runner.extractText(sourceKey, 1) },
+        { tool: "pdftohtml", profile: "fast-text-layer", plan: () => this.runner.extractHtml(sourceKey, 1) },
+        { tool: "native-pdf", profile: "layout-aware-markdown", plan: async () => ({ available: (await resolveNativePdfEngine(this.runner)) !== null }) }
       );
     } else if (format === "office-word" || format === "office-other") {
       checks.push(
@@ -89,7 +89,7 @@ export class FormatToolingStage implements Stage {
       );
     } else if (format === "image") {
       checks.push(
-        { tool: "tesseract", profile: "ocr", plan: () => this.runner.tesseractOcr(sourceKey, "out") },
+        { tool: "ocr", profile: "ocr", plan: async () => ({ available: resolveOcrMode() !== "off" }) },
         { tool: "tiffcp", profile: "tiff-split", plan: () => this.runner.tiffSplit(sourceKey, "page-%04d.tiff") }
       );
     } else if (format === "structured-json" || format === "structured-csv" || format === "markdown" || format === "plain-text") {

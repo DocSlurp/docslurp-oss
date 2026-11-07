@@ -4,7 +4,7 @@
 //   node scripts/prune-worker-node-modules.mjs --dir /prod/worker [--arch x64|arm64] [--dry-run]
 //
 // 1. Drops top-level packages the worker does not declare (pnpm deploy also
-//    installs the workspace root's dependencies, e.g. better-auth + prisma).
+//    installs the project root's dependencies, e.g. better-auth + prisma).
 // 2. Cuts optional edges the worker never loads (LanceDB's embedding-registry
 //    copy of @huggingface/transformers 3 with its own onnxruntime-node/web).
 // 3. Garbage-collects every .pnpm package no longer reachable from (1).

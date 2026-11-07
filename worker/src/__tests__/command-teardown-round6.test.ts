@@ -197,10 +197,10 @@ describe("M1: a provider that cannot filter UNIX sockets refuses the commands th
   });
 
   it("socketless tools are denied UNIX sockets by default; audited socket clients are not", () => {
-    for (const binary of ["pdftoppm", "/usr/bin/pdfinfo", "qpdf", "tesseract", "pandoc", "unrtf", "catdoc", "tiffcp", "clamscan", "some-new-tool"]) {
+    for (const binary of ["pdftoppm", "/usr/bin/pdfinfo", "qpdf", "pdftotext", "pandoc", "unrtf", "catdoc", "tiffcp", "clamscan", "some-new-tool"]) {
       expect(deniesUnixSockets({ binary }), binary).toBe(true);
     }
-    for (const binary of ["clamdscan", "soffice", "/opt/venv/bin/python3", "python3.13", "node", "docling", "kreuzberg"]) {
+    for (const binary of ["clamdscan", "soffice", "/opt/venv/bin/python3", "python3.13", "node", "docling"]) {
       expect(deniesUnixSockets({ binary }), binary).toBe(false);
     }
     expect(deniesUnixSockets({ binary: "pdftoppm", denyUnixSockets: false })).toBe(false);
@@ -251,12 +251,13 @@ describe("M2: concurrent extractor candidates share no writable directory", () =
     const runner = new CommandRunner();
     const stage = new ExtractMarkdownStage(runner, {} as never, { serializePdfCandidateExtraction: false } as never);
     const { documentExtractorRegistry } = await import("../extractors/registry.js");
-    const prepare = (id: string) => documentExtractorRegistry.prepare(id, runner, source, undefined, { format: "pdf" });
+    const prepare = (id: string) => documentExtractorRegistry.prepare(id, runner, source, undefined, { format: "pdf", pageCount: 3 });
     const dirs: string[] = [];
     const isolated = await (stage as unknown as {
       isolateConcurrentCandidates(args: object): Promise<{ primary: { extractor: { plan: { args: string[]; binary: string } }; source: string }; secondary: { extractor: { plan: { args: string[]; binary: string } }; source: string } }>;
     }).isolateConcurrentCandidates({
-      primary: await prepare("kreuzberg"),
+      pageCount: 3,
+      primary: await prepare("pptx"),
       secondary: await prepare("poppler-text"),
       sourcePath: source,
       format: "pdf",
@@ -290,15 +291,16 @@ describe("M2: concurrent extractor candidates share no writable directory", () =
     writeFileSync(source, "%PDF-1.4");
     const runner = new CommandRunner();
     const { documentExtractorRegistry } = await import("../extractors/registry.js");
-    const candidate = await documentExtractorRegistry.prepare("poppler-text", runner, source, undefined, { format: "pdf" });
+    const candidate = await documentExtractorRegistry.prepare("poppler-text", runner, source, undefined, { format: "pdf", pageCount: 3 });
     for (const [serialize, secondary] of [[false, null], [true, candidate]] as const) {
       const stage = new ExtractMarkdownStage(runner, {} as never, { serializePdfCandidateExtraction: serialize } as never);
       const dirs: string[] = [];
       const isolated = await (stage as unknown as { isolateConcurrentCandidates(args: object): Promise<{ primary: { source: string } }> })
-        .isolateConcurrentCandidates({ primary: candidate, secondary, sourcePath: source, format: "pdf", options: {}, dirs });
+        .isolateConcurrentCandidates({ pageCount: 3, primary: candidate, secondary, sourcePath: source, format: "pdf", options: {}, dirs });
       roots.push(...dirs);
       expect(isolated.primary.source).not.toBe(source);
-      expect(path.dirname(isolated.primary.source)).toBe(dirs[0]);
+      // Both candidates' directories are created concurrently: `dirs` (the cleanup list) is in completion order.
+      expect(dirs).toContain(path.dirname(isolated.primary.source));
       expect(dirs).toHaveLength(secondary ? 2 : 1);
     }
   });
@@ -313,7 +315,7 @@ describe("M3: only a teardown the command caused lists its source, and only for 
       },
       async record(entry) {
         records.push({ documentId: entry.documentId, ttlHours: entry.ttlHours });
-        return { sourceSha256: "sha", orgId: "org-1", workspaceId: "ws-1" };
+        return { sourceSha256: "sha", orgId: "org-1", projectId: "ws-1" };
       },
       async noteRefusal() {},
       async recordOrgFailure() {

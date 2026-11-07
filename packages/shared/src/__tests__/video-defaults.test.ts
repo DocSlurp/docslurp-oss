@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { defaultPipelineFeatures, normalizePipelineFeatures, pipelineFeaturesSchema, mergePipelineFeatures, applyWorkspacePipelineOverrides, getWorkspaceTemplate } from "../index.js";
+import { defaultPipelineFeatures, normalizePipelineFeatures, pipelineFeaturesSchema, mergePipelineFeatures, applyProjectPipelineOverrides, getProjectTemplate } from "../index.js";
 
-describe("workspace video defaults", () => {
+describe("project video defaults", () => {
   it("enables missing schema/settings and canonical creation defaults", () => {
     expect(pipelineFeaturesSchema.parse({}).mediaVideo.enabled).toBe(true);
     expect(pipelineFeaturesSchema.parse({ mediaVideo: {} }).mediaVideo.enabled).toBe(true);
@@ -13,6 +13,6 @@ describe("workspace video defaults", () => {
     const normalized = normalizePipelineFeatures(source);
     expect(normalized).toMatchObject(source);
     expect(mergePipelineFeatures(normalized, { pageIndex: true })).toMatchObject({ ...source, pageIndex: true });
-    expect(applyWorkspacePipelineOverrides(normalized, { summarize: false }, getWorkspaceTemplate(null))).toMatchObject({ mediaVideo: { enabled: false, maxFrames: 17 }, maxCostCents: 12, summarize: false });
+    expect(applyProjectPipelineOverrides(normalized, { summarize: false }, getProjectTemplate(null))).toMatchObject({ mediaVideo: { enabled: false, maxFrames: 17 }, maxCostCents: 12, summarize: false });
   });
 });

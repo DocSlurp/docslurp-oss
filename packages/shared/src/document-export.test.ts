@@ -25,9 +25,9 @@ describe("document export names", () => {
     expect(rfc5987Encode("it's (a)*.zip")).toBe("it%27s%20%28a%29%2A.zip");
   });
 
-  it("takes a document, a workspace, or neither (the default workspace), never both", () => {
+  it("takes a document, a project, or neither (the default project), never both", () => {
     expect(documentExportRequestSchema.safeParse({}).success).toBe(true);
-    expect(documentExportRequestSchema.parse({ workspaceId: "default" }).content).toBe("markdown");
-    expect(documentExportRequestSchema.safeParse({ documentId: "a", workspaceId: "b" }).success).toBe(false);
+    expect(documentExportRequestSchema.parse({ projectId: "default" }).content).toBe("markdown");
+    expect(documentExportRequestSchema.safeParse({ documentId: "a", projectId: "b" }).success).toBe(false);
   });
 });

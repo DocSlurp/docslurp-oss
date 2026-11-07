@@ -51,7 +51,7 @@ describe("locatePageImageCandidates", () => {
     const noise = rng(99);
     const query = l2Normalize(Array.from(target, (v) => v + noise() * 0.02));
 
-    const hits = await locatePageImageCandidates({ workspaceId: "ws", documentIds: [], model: "m", queryVector: query, k: 5 });
+    const hits = await locatePageImageCandidates({ projectId: "ws", documentIds: [], model: "m", queryVector: query, k: 5 });
     expect(hits[0]).toMatchObject({ documentId: "doc-b", page: 17 });
     expect(hits[0]!.score).toBeGreaterThan(0.95);
     expect(hits).toHaveLength(5);
@@ -61,9 +61,9 @@ describe("locatePageImageCandidates", () => {
     const next = rng(3);
     for (let page = 1; page <= 10; page++) vectors.set(`doc-a#${page}`, randomVector(next));
     const query = vectors.get("doc-a#4")!;
-    await locatePageImageCandidates({ workspaceId: "ws", documentIds: [], model: "m", queryVector: query, k: 3 });
+    await locatePageImageCandidates({ projectId: "ws", documentIds: [], model: "m", queryVector: query, k: 3 });
     const callsAfterFirst = sqlMock.mock.calls.length;
-    const again = await locatePageImageCandidates({ workspaceId: "ws", documentIds: [], model: "m", queryVector: query, k: 3 });
+    const again = await locatePageImageCandidates({ projectId: "ws", documentIds: [], model: "m", queryVector: query, k: 3 });
     expect(sqlMock.mock.calls.length).toBe(callsAfterFirst);
     expect(again[0]).toMatchObject({ documentId: "doc-a", page: 4 });
   });
@@ -74,7 +74,7 @@ describe("locatePageImageCandidates", () => {
       const next = rng(5);
       for (let page = 1; page <= 10; page++) vectors.set(`doc-a#${page}`, randomVector(next));
       const query = vectors.get("doc-a#2")!;
-      const run = () => locatePageImageCandidates({ workspaceId: "ws", documentIds: [], model: "m", queryVector: query, k: 1 });
+      const run = () => locatePageImageCandidates({ projectId: "ws", documentIds: [], model: "m", queryVector: query, k: 1 });
       await run();
       await run();
       expect(loadCount).toBe(1);
@@ -91,7 +91,7 @@ describe("locatePageImageCandidates", () => {
     const next = rng(21);
     for (let page = 1; page <= 10; page++) vectors.set(`doc-a#${page}`, randomVector(next));
     const query = vectors.get("doc-a#3")!;
-    await Promise.all([1, 2, 3].map(() => locatePageImageCandidates({ workspaceId: "ws", documentIds: [], model: "m", queryVector: query, k: 1 })));
+    await Promise.all([1, 2, 3].map(() => locatePageImageCandidates({ projectId: "ws", documentIds: [], model: "m", queryVector: query, k: 1 })));
     expect(loadCount).toBe(1);
   });
 
@@ -103,7 +103,7 @@ describe("locatePageImageCandidates", () => {
       // 1500 pages x (96 + 768) bytes is over the 1 MB budget.
       for (let page = 1; page <= 1500; page++) vectors.set(`doc-a#${page}`, randomVector(next));
       const query = vectors.get("doc-a#3")!;
-      const run = () => locatePageImageCandidates({ workspaceId: "ws", documentIds: [], model: "m", queryVector: query, k: 1 });
+      const run = () => locatePageImageCandidates({ projectId: "ws", documentIds: [], model: "m", queryVector: query, k: 1 });
       expect((await run())[0]).toMatchObject({ page: 3 });
       await run();
       expect(loadCount).toBe(2);
@@ -117,13 +117,13 @@ describe("locatePageImageCandidates", () => {
     for (let page = 1; page <= 20; page++) vectors.set(`doc-a#${page}`, randomVector(next));
     for (let page = 1; page <= 20; page++) vectors.set(`doc-b#${page}`, randomVector(next));
     const query = vectors.get("doc-a#9")!;
-    const hits = await locatePageImageCandidates({ workspaceId: "ws", documentIds: ["doc-b"], model: "m", queryVector: query, k: 5 });
+    const hits = await locatePageImageCandidates({ projectId: "ws", documentIds: ["doc-b"], model: "m", queryVector: query, k: 5 });
     expect(hits.length).toBeGreaterThan(0);
     expect(hits.every((h) => h.documentId === "doc-b")).toBe(true);
   });
 
   it("returns nothing when the query dimension does not match the stored model", async () => {
     vectors.set("doc-a#1", randomVector(rng(1)));
-    expect(await locatePageImageCandidates({ workspaceId: "ws", documentIds: [], model: "m", queryVector: new Float32Array(10), k: 3 })).toEqual([]);
+    expect(await locatePageImageCandidates({ projectId: "ws", documentIds: [], model: "m", queryVector: new Float32Array(10), k: 3 })).toEqual([]);
   });
 });

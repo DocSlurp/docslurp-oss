@@ -26,7 +26,7 @@ const REQUEST_TIMEOUT_MS = 120_000;
 /** Directory listings and client UIs show these; icons and websiteUrl need protocol 2025-11-25. */
 const SERVER_INFO = {
   name: "docslurp", title: "DocSlurp", version: "0.1.0",
-  description: "Upload documents and media, search them with page citations, and get cited answers from your workspaces.",
+  description: "Upload documents and media, search them with page citations, and get cited answers from your projects.",
   websiteUrl: "https://docslurp.io/docs/mcp",
   icons: [{ src: "https://docslurp.io/brand/icon-512.png", mimeType: "image/png", sizes: ["512x512"] }],
 };
@@ -57,7 +57,7 @@ function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signa
   };
   const server = new Server(SERVER_INFO, {
     capabilities: { tools: {}, resources: {}, prompts: {} },
-    instructions: "In hosts that render MCP Apps, call openUploader when the user wants to upload local files you cannot read. Use listWorkspaces to discover authorized workspaces. Use upload for URLs or up to 10 files with direct storage targets. Upload the bytes to the returned single PUT or multipart part URLs; completion and ingestion are automatic. If you cannot reach those URLs, send small files as upload inlineFiles. For a public file, pass its URL so DocSlurp downloads it directly. Follow getUploadStatus with the returned sessionId, then workspace and run IDs. Workspace selection is optional: omitted workspace uses the organization default. Use search with q for one query or queries for a batch of cited passages to answer with your own model, or chat for a generated grounded answer that incurs AI usage. Respect workspace and cost constraints.",
+    instructions: "In hosts that render MCP Apps, call openUploader when the user wants to upload local files you cannot read. Use listProjects to discover authorized projects. Use upload for URLs or up to 10 files with direct storage targets. Upload the bytes to the returned single PUT or multipart part URLs; completion and ingestion are automatic. If you cannot reach those URLs, send small files as upload inlineFiles. For a public file, pass its URL so DocSlurp downloads it directly. Follow getUploadStatus with the returned sessionId, then project and run IDs. Project selection is optional: omitted project uses the organization default. Use search with q for one query or queries for a batch of cited passages to answer with your own model, or chat for a generated grounded answer that incurs AI usage. Respect project and cost constraints.",
   });
   // The uploader exists only when the manifest offers it and the widget bundle is built.
   const uploader = manifest.capabilities.some((item) => item.id === UPLOADER_TOOL_ID) ? uploadUiResource(ui) : null;
@@ -98,11 +98,11 @@ function createServer(manifest: McpManifest, adapterDispatch: McpDispatch, signa
     return { contents: [{ uri: request.params.uri, mimeType: "application/json", text: await response.text() }] };
   });
   server.setRequestHandler("prompts/list", () => ({ prompts: [{
-    name: "workspace-grounded-answer", title: "Workspace grounded answer", description: "Answer from workspace evidence with citations.",
+    name: "project-grounded-answer", title: "Project grounded answer", description: "Answer from project evidence with citations.",
   }] }));
   server.setRequestHandler("prompts/get", async (request) => {
-    if (request.params.name !== "workspace-grounded-answer") throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Unknown prompt");
-    const response = await dispatch("/prompts/workspace-grounded-answer", { signal });
+    if (request.params.name !== "project-grounded-answer") throw new ProtocolError(ProtocolErrorCode.InvalidParams, "Unknown prompt");
+    const response = await dispatch("/prompts/project-grounded-answer", { signal });
     const result = await response.json() as { prompt: string };
     return { messages: [{ role: "user" as const, content: { type: "text" as const, text: result.prompt } }] };
   });

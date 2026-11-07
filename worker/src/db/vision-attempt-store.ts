@@ -102,10 +102,10 @@ export class PostgresVisionAttemptBackend implements VisionAttemptBackend {
     const { runId, target, config, weightCents } = request;
     return await this.sql.begin(async (tx) => {
       await lock(tx, `vision-run:${runId}`);
-      // The run row decides the org (falling back to its workspace's): a caller's org never widens or moves the scope.
+      // The run row decides the org (falling back to its project's): a caller's org never widens or moves the scope.
       const [run] = await tx<{ org_id: string | null }[]>`
         select coalesce(r.org_id, w.org_id) as org_id
-        from workspace_runs r left join workspaces w on w.id = r.workspace_id
+        from project_runs r left join projects w on w.id = r.project_id
         where r.id = ${runId}`;
       const orgId = run?.org_id ?? null;
       if (orgId) await lock(tx, `vision-org:${orgId}`);
@@ -113,6 +113,15 @@ export class PostgresVisionAttemptBackend implements VisionAttemptBackend {
         select attempts from vision_run_attempts
         where run_id = ${runId} and document_id = ${target.documentId} and page_number = ${target.pageNumber}
           and purpose = ${target.purpose}`;
+      // The per-document page budget (OCR escalation): other pages of this document admitted for the purpose.
+      const [documentPages] = target.documentPageLimit === undefined ? [] : await tx<{ pages: number }[]>`
+        select count(*)::int as pages from vision_run_attempts
+        where run_id = ${runId} and document_id = ${target.documentId} and purpose = ${target.purpose}
+          and page_number <> ${target.pageNumber} and attempts > 0`;
+      // The per-document attempt budget (OCR escalation): every request of this document for the purpose, retries included.
+      const [documentAttempts] = target.documentAttemptLimit === undefined ? [] : await tx<{ attempts: number }[]>`
+        select coalesce(sum(attempts), 0)::int as attempts from vision_run_attempts
+        where run_id = ${runId} and document_id = ${target.documentId} and purpose = ${target.purpose}`;
       const [totals] = await tx<{ attempts: number; failures: number }[]>`
         select coalesce(sum(attempts), 0)::int as attempts, coalesce(sum(failures), 0)::int as failures
         from vision_run_attempts where run_id = ${runId}`;
@@ -150,6 +159,8 @@ export class PostgresVisionAttemptBackend implements VisionAttemptBackend {
         orgSettledCents: org.settled,
         routeOverruns,
         routeCorrection,
+        documentPages: documentPages?.pages ?? 0,
+        documentAttempts: documentAttempts?.attempts ?? 0,
       }, target, config, admittedCents);
       if (stop) return { admitted: false as const, stop };
       const ticketId = randomUUID();
@@ -200,7 +211,7 @@ export class PostgresVisionAttemptBackend implements VisionAttemptBackend {
     const { ticketId, route, billedCents } = request;
     return await this.sql.begin(async (tx) => {
       // The ticket, not the run row, owns the overrun: it names the org the request was admitted under and survives
-      // the run's and the workspace's deletion.
+      // the run's and the project's deletion.
       const [ticket] = await tx<{ org_id: string; weight_cents: number; bound_cents: number }[]>`
         select org_id, weight_cents::float8 as weight_cents, bound_cents::float8 as bound_cents
         from vision_admission_tickets where id = ${ticketId}`;

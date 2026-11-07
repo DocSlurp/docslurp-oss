@@ -13,17 +13,17 @@ import {
 } from "@docslurp/shared";
 
 import { CAPABILITY_MAX_TOKEN_CHARS, CAPABILITY_MAX_TTL_SECONDS, sealCapabilityToken } from "../lib/capability-tokens.js";
-import { actorHasAnyApiKeyScope, apiKeyCanUseWorkspace, getRequestActor } from "../lib/request-actor.js";
+import { actorHasAnyApiKeyScope, apiKeyCanUseProject, getRequestActor } from "../lib/request-actor.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
-import { ensureDefaultWorkspace, getWorkspace } from "../services/workspaces.js";
+import { ensureDefaultProject, getProject } from "../services/projects.js";
 
 const bodySchema = z.object({
-  workspaceIds: z.array(z.string().min(1).max(200)).min(1).max(20).optional(),
+  projectIds: z.array(z.string().min(1).max(200)).min(1).max(20).optional(),
   policy: materializationPolicyOverridesSchema.optional(),
   ttlSeconds: z.number().int().min(1).max(CAPABILITY_MAX_TTL_SECONDS).optional(),
   boundClientKeyId: z.string().min(1).max(200).optional(),
   allowedOrigins: z.array(z.string().min(1).max(300)).max(20).optional(),
-});
+}).strict();
 
 /**
  * POST /v1/capabilities mints a sealed search capability a browser can send as
@@ -49,33 +49,33 @@ export const capabilitiesRoutes = new Hono().post("/", zValidator("json", bodySc
   const body = c.req.valid("json");
 
   const orgId = actor.type === "apiKey" ? actor.apiKey.orgId : null;
-  let requested = body.workspaceIds;
+  let requested = body.projectIds;
   if (!requested) {
-    const allowlist = actor.type === "apiKey" ? actor.apiKey.workspaceIds : [];
+    const allowlist = actor.type === "apiKey" ? actor.apiKey.projectIds : [];
     requested = allowlist.length > 0
       ? allowlist
-      : [(await ensureDefaultWorkspace({ userId: actor.userId, orgId })).id];
+      : [(await ensureDefaultProject({ userId: actor.userId, orgId })).id];
   }
 
   let tokenOrgId: string | null = orgId;
-  for (const workspaceId of requested) {
-    const workspace = await getWorkspace(workspaceId, actor.userId);
-    const allowed = workspace && (actor.type !== "apiKey" || apiKeyCanUseWorkspace(actor.apiKey, workspace));
-    if (!workspace || !allowed) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
-    if (tokenOrgId && workspace.orgId !== tokenOrgId) {
+  for (const projectId of requested) {
+    const project = await getProject(projectId, actor.userId);
+    const allowed = project && (actor.type !== "apiKey" || apiKeyCanUseProject(actor.apiKey, project));
+    if (!project || !allowed) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
+    if (tokenOrgId && project.orgId !== tokenOrgId) {
       return apiErrorResponse(c, 400, "invalid_request", "A capability covers one organization", { category: "capability_scope" });
     }
-    tokenOrgId = workspace.orgId;
+    tokenOrgId = project.orgId;
   }
 
   const issuerPolicy = actor.type === "apiKey" ? actor.apiKey.materializationPolicy : undefined;
   const policy = narrowMaterializationPolicy(DEFAULT_SERVER_MATERIALIZATION_POLICY, issuerPolicy, body.policy);
-  if (!tokenOrgId) return apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+  if (!tokenOrgId) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
   const exp = Math.floor(Date.now() / 1000) + (body.ttlSeconds ?? CAPABILITY_MAX_TTL_SECONDS);
   const token = sealCapabilityToken({
     v: 1,
     orgId: tokenOrgId,
-    workspaceIds: requested,
+    projectIds: requested,
     // Only the requested narrowing; defaults and the issuer's caps are re-applied at use time.
     policy: body.policy ?? {},
     issuedByKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : `session:${actor.userId}`,
@@ -85,7 +85,7 @@ export const capabilitiesRoutes = new Hono().post("/", zValidator("json", bodySc
     jti: randomUUID(),
   });
   if (token.length > CAPABILITY_MAX_TOKEN_CHARS) {
-    return apiErrorResponse(c, 400, "invalid_request", "Capability is too large; list fewer workspaces or origins", { category: "capability_too_large" });
+    return apiErrorResponse(c, 400, "invalid_request", "Capability is too large; list fewer projects or origins", { category: "capability_too_large" });
   }
   return c.json({ token, expiresAt: new Date(exp * 1000).toISOString(), policy });
 });

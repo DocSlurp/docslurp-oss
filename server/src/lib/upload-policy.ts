@@ -1,108 +1,22 @@
-import path from "node:path";
-
+import { bareMimeType, isSupportedFileType, resolveSupportedMimeType, SUPPORTED_UPLOAD_MIME_TYPES } from "@docslurp/shared";
 import { bodyLimit } from "hono/body-limit";
 
 import { env } from "../config.js";
 import { apiErrorResponse } from "./api-error.js";
 
-const supportedMimeTypes = new Set([
-  "application/pdf",
-  "text/markdown",
-  "text/plain",
-  "text/html",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  "application/vnd.ms-excel",
-  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  "application/vnd.ms-powerpoint",
-  "application/rtf",
-  "text/csv",
-  "text/tab-separated-values",
-  "application/json",
-  "application/x-ndjson",
-  "application/epub+zip",
-  "application/x-latex",
-  "text/x-tex",
-  "image/png",
-  "image/jpeg",
-  "image/tiff",
-  "image/webp",
-  "audio/mpeg",
-  "audio/mp4",
-  "audio/wav",
-  "audio/webm",
-  "video/mp4",
-  "video/webm"
-]);
-
-const extensionFallbackMimeTypes: Record<string, string> = {
-  ".pdf": "application/pdf",
-  ".md": "text/markdown",
-  ".txt": "text/plain",
-  ".html": "text/html",
-  ".htm": "text/html",
-  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  ".doc": "application/msword",
-  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  ".xls": "application/vnd.ms-excel",
-  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  ".ppt": "application/vnd.ms-powerpoint",
-  ".rtf": "application/rtf",
-  ".csv": "text/csv",
-  ".tsv": "text/tab-separated-values",
-  ".json": "application/json",
-  ".jsonl": "application/x-ndjson",
-  ".epub": "application/epub+zip",
-  ".tex": "application/x-latex",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".tif": "image/tiff",
-  ".tiff": "image/tiff",
-  ".webp": "image/webp",
-  ".mp3": "audio/mpeg",
-  ".m4a": "audio/mp4",
-  ".wav": "audio/wav",
-  ".weba": "audio/webm",
-  ".webm": "video/webm",
-  ".mp4": "video/mp4"
-};
-
+/** Intake accepts exactly the formats in the shared table the worker, the quote and the estimator card read. */
 function normalizeMimeType(value: string | null | undefined): string | null {
-  if (!value) {
-    return null;
-  }
-
-  const normalized = value.split(";")[0]?.trim().toLowerCase() ?? null;
-  return normalized && normalized !== "application/octet-stream" ? normalized : null;
+  const bare = bareMimeType(value);
+  return bare && bare !== "application/octet-stream" ? bare : null;
 }
 
 export function isSupportedUploadMimeType(mimeType: string | null | undefined, filename?: string): boolean {
-  const normalizedMimeType = normalizeMimeType(mimeType);
-  if (normalizedMimeType && supportedMimeTypes.has(normalizedMimeType)) {
-    return true;
-  }
-
-  if (!filename) {
-    return false;
-  }
-
-  const fallbackMimeType = extensionFallbackMimeTypes[path.extname(filename).toLowerCase()];
-  return fallbackMimeType ? supportedMimeTypes.has(fallbackMimeType) : false;
+  return isSupportedFileType(normalizeMimeType(mimeType), filename);
 }
 
 export function resolveUploadMimeType(mimeType: string | null | undefined, filename: string): string {
-  const normalizedMimeType = normalizeMimeType(mimeType);
-  if (normalizedMimeType && supportedMimeTypes.has(normalizedMimeType)) {
-    return normalizedMimeType;
-  }
-
-  const fallbackMimeType = extensionFallbackMimeTypes[path.extname(filename).toLowerCase()];
-  if (fallbackMimeType) {
-    return fallbackMimeType;
-  }
-
+  const resolved = resolveSupportedMimeType(normalizeMimeType(mimeType), filename);
+  if (resolved) return resolved;
   throw new Error(`Unsupported file type for ${filename}`);
 }
 
@@ -154,5 +68,5 @@ export function multipartBodyLimit(maxBytes: number) {
 }
 
 export function listSupportedUploadMimeTypes(): string[] {
-  return [...supportedMimeTypes].sort();
+  return [...SUPPORTED_UPLOAD_MIME_TYPES];
 }

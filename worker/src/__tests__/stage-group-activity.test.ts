@@ -9,18 +9,18 @@ import { describe, expect, it } from "vitest";
 
 import type { Config } from "../config.js";
 import type { Store } from "../db/store.js";
-import type { Document, StageState, WorkspaceRun } from "../models.js";
+import type { Document, StageState, ProjectRun } from "../models.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import { createActivities } from "../temporal/activities.js";
 import type { StageOutput } from "../temporal/shared.js";
 import type { ArtifactStore } from "../tools/storage.js";
 
 const run = {
-  id: "run-1", orgId: "org-1", userId: "user-1", workspaceId: "ws-1", kind: "bulk-upload",
+  id: "run-1", orgId: "org-1", userId: "user-1", projectId: "ws-1", kind: "bulk-upload",
   status: "processing", stage: "embed", totalDocuments: 1, processedDocuments: 0, pagesTotal: 1,
   pagesProcessed: 0, spentCents: 0, pipeline: defaultPipelineFeatures,
   error: null, stats: {}, artifacts: {}, claimId: null, createdAt: new Date(), updatedAt: new Date(),
-} as WorkspaceRun;
+} as ProjectRun;
 const document = {
   id: "doc-1", userId: "user-1", runId: "run-1", filename: "a.pdf", mimeType: "application/pdf",
   sourceKey: "raw/a.pdf", status: "processing", extractionMode: "hybrid", pageCount: 1,

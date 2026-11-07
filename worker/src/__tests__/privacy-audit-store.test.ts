@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildBlockedPrivacyAuditEntry } from "@docslurp/shared";
 
 import { Store } from "../db/store.js";
-import { allowHostedCallForWorkspace, openRouterTextCall } from "../lib/privacy-guard.js";
+import { allowHostedCallForProject, openRouterTextCall } from "../lib/privacy-guard.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
@@ -23,7 +23,7 @@ beforeAll(async () => {
   sql = (store as unknown as { sql: postgres.Sql<Record<string, unknown>> }).sql;
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1')`;
-  await sql`insert into workspaces(id, org_id, user_id, name, pipeline) values ('w', 'o1', 'u1', 'Private', '{}'::jsonb)`;
+  await sql`insert into projects(id, org_id, user_id, name, pipeline) values ('w', 'o1', 'u1', 'Private', '{}'::jsonb)`;
 }, 60_000);
 
 afterAll(async () => {
@@ -38,20 +38,20 @@ describe("privacy_audit_log writes", () => {
       buildBlockedPrivacyAuditEntry({
         privacyMode: "strict-privacy",
         call: openRouterTextCall("document-summary", "vendor/model"),
-        workspaceId: "w",
+        projectId: "w",
       }),
     ]);
-    const rows = await sql<{ workspace_id: string; model_id: string; endpoint: string; privacy_mode: string }[]>`
-      select workspace_id, model_id, endpoint, privacy_mode from privacy_audit_log where endpoint = 'blocked:worker.text.document-summary'
+    const rows = await sql<{ project_id: string; model_id: string; endpoint: string; privacy_mode: string }[]>`
+      select project_id, model_id, endpoint, privacy_mode from privacy_audit_log where endpoint = 'blocked:worker.text.document-summary'
     `;
-    expect(rows).toEqual([{ workspace_id: "w", model_id: "openrouter/vendor/model", endpoint: "blocked:worker.text.document-summary", privacy_mode: "strict-privacy" }]);
+    expect(rows).toEqual([{ project_id: "w", model_id: "openrouter/vendor/model", endpoint: "blocked:worker.text.document-summary", privacy_mode: "strict-privacy" }]);
   });
 
   it("gates background jobs and audits only strict-privacy", async () => {
     const call = openRouterTextCall("graph-extraction", "vendor/model");
-    expect(await allowHostedCallForWorkspace(sql, { privacyMode: "standard", workspaceId: "w", call })).toBe(true);
-    expect(await allowHostedCallForWorkspace(sql, { privacyMode: "local-only", workspaceId: "w", call })).toBe(false);
-    expect(await allowHostedCallForWorkspace(sql, { privacyMode: "strict-privacy", workspaceId: "w", call })).toBe(false);
+    expect(await allowHostedCallForProject(sql, { privacyMode: "standard", projectId: "w", call })).toBe(true);
+    expect(await allowHostedCallForProject(sql, { privacyMode: "local-only", projectId: "w", call })).toBe(false);
+    expect(await allowHostedCallForProject(sql, { privacyMode: "strict-privacy", projectId: "w", call })).toBe(false);
     const rows = await sql<{ privacy_mode: string }[]>`
       select privacy_mode from privacy_audit_log where endpoint = 'blocked:worker.text.graph-extraction'
     `;

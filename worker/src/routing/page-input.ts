@@ -4,7 +4,7 @@
  * classify-route heuristic (when available) into each page's `heuristic`.
  */
 
-import sharp from "sharp";
+import sharp from "../tools/isolated-image.js";
 import {
   PAGE_FEATURES_SCHEMA_VERSION,
   PAGE_INPUT_SCHEMA_VERSION,
@@ -70,9 +70,9 @@ export type ProbeRunner = (args: {
   pages?: string;
   thumbDir?: string;
   thumbPx?: number;
-  /** Re-OCR a band of pages whose text lies over a page image and report how well the layer agrees (needs tesseract). */
+  /** Re-OCR a band of pages whose text lies over a page image and report how well the layer agrees (needs `recognise`). */
   verifyOcrLayer?: boolean;
-  /** Sandboxed OCR for the layer check (`sandboxedTesseract`); absent leaves OCR layers unverified. */
+  /** OCR for the layer check, run in the OCR boundary; absent (the worker's default) leaves OCR layers unverified. */
   recognise?: Recogniser;
   signal?: AbortSignal;
 }) => Promise<string>;

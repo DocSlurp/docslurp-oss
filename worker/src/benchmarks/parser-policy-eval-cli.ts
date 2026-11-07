@@ -39,7 +39,7 @@ async function main(): Promise<void> {
     path.join(fixtureRoot, "parser-policy-eval-v1.json");
   const outputPath = arg("--output") ??
     path.join(process.cwd(), ".benchmarks", "parser-policy-eval-v1.json");
-  const candidateExtractor = (arg("--candidate") ?? "liteparse") as ParseBenchDocSlurpExtractor;
+  const candidateExtractor = (arg("--candidate") ?? "native-pdf-markdown") as ParseBenchDocSlurpExtractor;
   const baselineExtractor = (arg("--baseline") ?? "hybrid") as ParseBenchDocSlurpExtractor;
   const limit = Number.parseInt(arg("--limit") ?? "0", 10);
   const profile = resolveEvalProfile();

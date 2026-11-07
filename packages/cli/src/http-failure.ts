@@ -6,16 +6,16 @@ const RECOVERY_MESSAGES: Record<string, string> = {
   credit_exhausted: "Your organization is out of credits. Add credits before trying again.",
   payment_required: "Your organization needs credits before this action can continue.",
   minimum_credit_required: "Add credits before trying this action again.",
-  workspace_budget_paused: "This workspace budget is paused. Review its budget before continuing.",
+  project_budget_paused: "This project budget is paused. Review its budget before continuing.",
   org_budget_paused: "Your organization budget is paused. Review its budget before continuing.",
   plan_not_entitled: "This feature is not available for this account. Review your account capabilities.",
   rate_limited: "Wait for the retry delay before trying again.",
   spend_limit_exceeded: "This API key has reached its spending limit. Review the key limits.",
   daily_page_limit: "This API key has reached its daily page limit. Review the key limits.",
-  chat_disabled: "Chat is disabled for this workspace. Enable chat in workspace settings.",
-  invalid_search_scope: "Choose a valid search scope in this workspace and try again.",
-  workspace_scope_forbidden: "Choose a workspace this API key can access.",
-  model_not_allowed: "Choose a model allowed by this workspace.",
+  chat_disabled: "Chat is disabled for this project. Enable chat in project settings.",
+  invalid_search_scope: "Choose a valid search scope in this project and try again.",
+  project_scope_forbidden: "Choose a project this API key can access.",
+  model_not_allowed: "Choose a model allowed by this project.",
   unavailable: "The service is temporarily unavailable. Try again later.",
 };
 
@@ -28,7 +28,7 @@ export function safeHttpFailure(status: number, body: unknown): { code?: string;
   const retryAfterSeconds = typeof details.retryAfterSeconds === "number" && Number.isFinite(details.retryAfterSeconds) && details.retryAfterSeconds >= 0 ? details.retryAfterSeconds : undefined;
   const fallback = status === 401 ? RECOVERY_MESSAGES.unauthorized
     : status === 402 ? RECOVERY_MESSAGES.payment_required
-    : status === 403 ? "You don’t have access to this action. Ask your workspace administrator for help."
+    : status === 403 ? "You don’t have access to this action. Ask your project administrator for help."
     : status === 429 ? RECOVERY_MESSAGES.rate_limited
     : status === 404 ? "This resource is unavailable. Check its identifier and your access."
     : status === 413 ? "This file is too large. Choose a smaller file."

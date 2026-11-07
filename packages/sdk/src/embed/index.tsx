@@ -34,13 +34,13 @@ type DocumentViewerPayload = {
 type BaseEmbedProps = {
   /** Default https://docslurp.io. */
   apiUrl?: string;
-  /** Workspace ID, slug or name, or "default" (the key organization's default workspace). Default "default". */
-  workspace?: string;
+  /** Project ID, slug or name, or "default" (the key organization's default project). Default "default". */
+  project?: string;
   clientKey?: string;
 };
 
 const DEFAULT_API_URL = "https://docslurp.io";
-const DEFAULT_WORKSPACE = "default";
+const DEFAULT_PROJECT = "default";
 
 type OfflineSearchEmbedOptions = Omit<
   OfflineSearchClientOptions,
@@ -63,7 +63,7 @@ function buildHeaders(clientKey?: string, apiUrl = DEFAULT_API_URL) {
 
 export function SearchEmbed({
   apiUrl = DEFAULT_API_URL,
-  workspace = DEFAULT_WORKSPACE,
+  project = DEFAULT_PROJECT,
   clientKey,
   placeholder = "Search documents...",
   limit = 8,
@@ -78,8 +78,8 @@ export function SearchEmbed({
   const [status, setStatus] = useState<string | null>(null);
   const [results, setResults] = useState<SearchResult[]>([]);
   const canSearch = useMemo(
-    () => q.trim().length > 0 && Boolean(offline || workspace),
-    [offline, q, workspace],
+    () => q.trim().length > 0 && Boolean(offline || project),
+    [offline, q, project],
   );
   const offlineClient = useMemo(() => {
     if (!offline) {
@@ -97,10 +97,10 @@ export function SearchEmbed({
         const nextResults = await offlineClient.search(q, { limit });
         setResults(nextResults);
         setStatus(`Found ${nextResults.length} results offline`);
-      } else if (workspace) {
+      } else if (project) {
         const params = new URLSearchParams({
           q,
-          workspace,
+          project,
           limit: String(limit),
         });
         const res = await fetch(
@@ -126,7 +126,7 @@ export function SearchEmbed({
       void run();
     }, 250);
     return () => clearTimeout(id);
-  }, [q, offlineClient, workspace, apiUrl, clientKey, limit]);
+  }, [q, offlineClient, project, apiUrl, clientKey, limit]);
 
   return (
     <div data-docslurp-surface="search" style={surfaceStyle}>
@@ -171,9 +171,9 @@ export function SearchEmbed({
 
 export function ChatEmbed({
   apiUrl = DEFAULT_API_URL,
-  workspace = DEFAULT_WORKSPACE,
+  project = DEFAULT_PROJECT,
   clientKey,
-  placeholder = "Ask about this workspace...",
+  placeholder = "Ask about this project...",
 }: BaseEmbedProps & {
   placeholder?: string;
 }) {
@@ -184,7 +184,7 @@ export function ChatEmbed({
 
   async function send() {
     const text = q.trim();
-    if (!text || !workspace) return;
+    if (!text || !project) return;
     setBusy(true);
     setError(null);
     setAnswer(null);
@@ -195,7 +195,7 @@ export function ChatEmbed({
           "Content-Type": "application/json",
           ...buildHeaders(clientKey, apiUrl),
         },
-        body: JSON.stringify({ q: text, workspace }),
+        body: JSON.stringify({ q: text, project }),
       });
       if (!res.ok) throw new Error("Request failed");
       const json = (await res.json()) as ChatResponse;
@@ -219,7 +219,7 @@ export function ChatEmbed({
       />
       <div style={{ display: "flex", justifyContent: "flex-end" }}>
         <button
-          disabled={busy || !q.trim() || !workspace}
+          disabled={busy || !q.trim() || !project}
           onClick={() => void send()}
           style={buttonStyle}
           type="button"
@@ -388,7 +388,7 @@ export function defineDocSlurpElements(options?: {
               }
             : undefined
         }
-        workspace={element.getAttribute("workspace") || undefined}
+        project={element.getAttribute("project") || undefined}
       />
     ),
   );
@@ -396,7 +396,7 @@ export function defineDocSlurpElements(options?: {
     <ChatEmbed
       clientKey={element.getAttribute("client-key") ?? undefined}
       apiUrl={element.getAttribute("api-url") || undefined}
-      workspace={element.getAttribute("workspace") || undefined}
+      project={element.getAttribute("project") || undefined}
     />
   ));
   defineReactElement(

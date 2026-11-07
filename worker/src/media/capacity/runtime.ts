@@ -10,7 +10,7 @@ export interface CapacitySettings {
   provider: string; template: HostTemplate; endpointTemplate: string;
   ttlMs: number; dailyBudgetUsd: number; maxConcurrent: number;
 }
-/** Operator-owned config only. Never accept a template or endpoint from an upload/workspace. */
+/** Operator-owned config only. Never accept a template or endpoint from an upload/project. */
 export function capacitySettings(env: NodeJS.ProcessEnv = process.env): CapacitySettings | null {
   if (env.MEDIA_CAPACITY_ENABLED !== "true") return null;
   if (env.MEDIA_CAPACITY_HOST_CLASS_APPROVED !== "true" || !env.MEDIA_CAPACITY_CONFIG_FILE) throw new Error("Capacity host class and operator configuration must be approved");

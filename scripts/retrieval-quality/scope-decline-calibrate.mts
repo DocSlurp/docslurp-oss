@@ -66,7 +66,7 @@ function readTraces(dir: string): { questions: Array<{ query: string; corpus: st
       if (!body?.results) continue;
       const url = new URL(record.request.url);
       const query = url.searchParams.get("q");
-      const corpus = url.searchParams.get("workspaceId") ?? "unknown";
+      const corpus = url.searchParams.get("projectId") ?? "unknown";
       if (query) questions.set(query, corpus);
       for (const result of body.results) if (result.text && !passages.has(result.text)) passages.set(result.text, { id: `p${passages.size}`, text: result.text, corpus });
     }

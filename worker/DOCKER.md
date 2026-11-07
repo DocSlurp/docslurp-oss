@@ -5,20 +5,29 @@ Sizes, contents, Fly limits and vendor bundles are documented in
 
 ## Dockerfile.lean (production)
 
-Production worker (`fly.worker.toml`), about 1.9 GB uncompressed: Node 24 with a pruned, worker-only
+Production worker (`fly.worker.toml`), about 1,980 MiB uncompressed (estimate: the
+2,085 MiB measured 2026-10-26 less the 107 MiB of OCR language packs it no longer ships): Node 24 with a pruned, worker-only
 `node_modules` (`pnpm deploy`), poppler-utils, pandoc, ffmpeg, ClamAV, bubblewrap,
 and a wheel-only Python venv with the base parsers (trafilatura,
 ebooklib, python-pptx, openpyxl, xlsx2csv). Docling and Unstructured
 are fetched on demand as sha256-pinned vendor bundles
 (`DOCSLURP_VENDOR_BUNDLE_BASE_URL`). Runtime pip installs are off.
+It has no OCR engine: lean workers OCR through an extractor plugin's VM provider
+(`DOCSLURP_OCR_MODE=vm`), hosted mode, or not at all ([OCR](../docs/extraction/ocr.md)).
 
 ## Dockerfile.full
 
-Self-host image for every document type, about 2.6 GB uncompressed. Everything in lean, plus:
+Self-host image for every document type, about 2.9 GB uncompressed (estimate, not yet measured: the earlier 2.6 GB less the OCR language packs, plus the OCR venv and models). Everything in lean, plus:
 
-- **Tesseract OCR** - with eng, fra, deu, spa language packs
+- **Local OCR runtime** - `worker/scripts/docslurp_ocr.py` in a wheel-only, hash-checked venv
+  (`/opt/docslurp/ocr-venv`: RapidOCR 3.10.0 on onnxruntime, 351 MiB measured in the build stage) and the eight
+  PP-OCRv6/v5 models pinned by sha256 in `worker/ocr-models.json` (`/opt/docslurp/ocr-models`,
+  84 MB per the manifest). Both are root-owned and read-only, and the build runs `docslurp_ocr.py --self-test`.
+  The image sets `DOCSLURP_OCR_PYTHON` and `DOCSLURP_OCR_MODEL_DIR` but not the OCR mode: local OCR
+  runs only when the operator sets `DOCSLURP_SERVICE_PROFILE=self-hosted DOCSLURP_OCR_MODE=local`
+  ([OCR](../docs/extraction/ocr.md)).
 - **LibreOffice headless** - office format conversion (pptx, xlsx, doc, rtf)
-- **ghostscript, imagemagick, qpdf, ocrmypdf, catdoc, unrtf**
+- **ghostscript, imagemagick, qpdf, catdoc, unrtf** (no ocrmypdf: it depends on a system OCR engine)
 - **Docling / Unstructured** - from vendor bundles, or (without a bundle source)
   the legacy first-boot install of `requirements.lock.txt` into `/app/.venv`
   (`DOCSLURP_WORKER_INSTALL_HEAVY_DEPS_ON_STARTUP`, default true here)
@@ -29,13 +38,15 @@ Builds vendor bundle archives (`--build-arg BUNDLE=docling|unstructured --target
 
 ## Dockerfile
 
-Legacy all-in-one image used by `docker-compose.prod.yml`.
+Legacy all-in-one image used by `docker-compose.prod.yml`. It installs its tools through
+`scripts/setup-cli-docker.sh` and has no OCR engine.
 
 ## Locked Python Supply Chain
 
-The worker now carries three Linux-targeted lockfiles generated with `uv pip compile`:
+The worker now carries four Linux-targeted lockfiles generated with `uv pip compile`:
 
 - `worker/requirements-base.lock.txt` - baked into every image's venv (wheel-only) for the base parser stack
+- `worker/requirements-ocr.lock.txt` - the OCR venv in `Dockerfile.full` and `scripts/install-ocr-runtime.sh` (wheel-only)
 - `worker/requirements.lock.txt` - used for the deferred full parser/tooling install
 - `worker/requirements-fallback.lock.txt` - used when the deferred install falls back to the reduced parser set
 
@@ -82,7 +93,7 @@ Production defaults now prefer `clamdscan`, refresh signatures on startup, and f
 
 ## Parser Trust Boundary
 
-The worker images now run as a dedicated non-root `docslurp` user. Untrusted extraction commands are launched through `worker/scripts/parser-sandbox.sh`, which gives each parser invocation its own ephemeral scratch workspace plus isolated `HOME`, `TMPDIR`, and XDG directories instead of sharing the main worker process context.
+The worker images now run as a dedicated non-root `docslurp` user. Untrusted extraction commands are launched through `worker/scripts/parser-sandbox.sh`, which gives each parser invocation its own ephemeral scratch project plus isolated `HOME`, `TMPDIR`, and XDG directories instead of sharing the main worker process context.
 
 Useful env overrides:
 

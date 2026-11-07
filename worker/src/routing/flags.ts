@@ -18,8 +18,9 @@ import { readDisableNonFreeSoftware } from "@docslurp/shared";
 /** Table candidate gate: `shadow` logs ruled-grid-or-crop decisions and estimates; extraction is unchanged. */
 export type TableGateMode = "off" | "shadow";
 /**
- * Page OCR from the native-pdf engine: `scripts` (default) only when tesseract's output is not words in its languages
- * and the engine reads another script; `prefer` engine first (guarded); `off` tesseract only. See executors/ocr-policy.ts.
+ * Page OCR from the native-pdf engine (DOCSLURP_OCR_MODE=local only): `scripts` (default) only when PP-OCR's output is
+ * not words and the engine reads another script; `prefer` engine first (guarded); `off` PP-OCR only. See
+ * executors/ocr-policy.ts.
  */
 export type NativeOcrPolicy = "off" | "scripts" | "prefer";
 

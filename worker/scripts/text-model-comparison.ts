@@ -81,7 +81,7 @@ for (const id of ids) {
 const resumeChain = resumeDirectory ? [...(previousProvenance.resumeChain ?? []), path.resolve(resumeDirectory)] : [];
 await writeFile(path.join(directory, "provenance.json"), JSON.stringify({ sessionId, dataset, datasetSha256, sourceCommit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(), dirty: execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim(), budgetUsd, routing: "automatic OpenRouter routing; same SDK as worker", experiment, resumeChain, priorCalls: priorResults.length, reserveUnknownCosts, pricingVerifiedAt: new Date().toISOString(), catalog: catalog.data.filter(m => ids.includes(m.id)), integrity }, null, 2));
 const db = new DatabaseSync(path.join(directory, "usage.sqlite"));
-db.exec("CREATE TABLE usage_events (id TEXT PRIMARY KEY, session_id TEXT, org_id TEXT, workspace_id TEXT, run_id TEXT, model TEXT, input_tokens INTEGER, output_tokens INTEGER, cost_cents REAL, event_json TEXT)");
+db.exec("CREATE TABLE usage_events (id TEXT PRIMARY KEY, session_id TEXT, org_id TEXT, project_id TEXT, run_id TEXT, model TEXT, input_tokens INTEGER, output_tokens INTEGER, cost_cents REAL, event_json TEXT)");
 const insert = db.prepare("INSERT INTO usage_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
 const ledger = new PipelineUsageEventLedger();
 function persist() {
@@ -173,10 +173,10 @@ async function worker() {
       if (!costKnown) { unknownCost = true; unknownReservedUsd += reservation; }
       else spent += cost / 100;
       const event = ledger.record({ provider: "openrouter", model, metric: `text-model-eval.${fixture.operation}`, inputTokens: answer.usage.inputTokens, outputTokens: answer.usage.outputTokens,
-        costCents: cost ?? 0, metadata: { ...answer.usage.metadata, sessionId, orgId: "synthetic-evaluation", workspaceId: sessionId, runId: sessionId, caseId: fixture.id, arm,
+        costCents: cost ?? 0, metadata: { ...answer.usage.metadata, sessionId, orgId: "synthetic-evaluation", projectId: sessionId, runId: sessionId, caseId: fixture.id, arm,
           receipt, repeat, settings, requestSettings, costMissing: cost === undefined } });
       if (!event) ledger.enqueue({ id: randomUUID(), provider: "openrouter", model, metric: `text-model-eval.${fixture.operation}`, amount: 1, unit: "attempt", costCents: 0,
-        metadata: { ...answer.usage.metadata, sessionId, orgId: "synthetic-evaluation", workspaceId: sessionId, runId: sessionId, caseId: fixture.id, arm, repeat,
+        metadata: { ...answer.usage.metadata, sessionId, orgId: "synthetic-evaluation", projectId: sessionId, runId: sessionId, caseId: fixture.id, arm, repeat,
           usageUnavailable: !costKnown, costUnavailable: !costKnown, reservedWorstCaseUsd: costKnown ? 0 : reservation } }, { logAiUsage: true });
       persist();
       result = { model, arm, repeat, settings, requestSettings, maxOutputTokens, finishReason: "finishReason" in answer ? answer.finishReason : undefined,
@@ -189,7 +189,7 @@ async function worker() {
       unknownReservedUsd += reservation;
       result = { model, arm, repeat, caseId: fixture.id, operation: fixture.operation, latencyMs: performance.now() - started, error: error instanceof Error ? error.message : String(error), reservedWorstCaseUsd: reservation };
       ledger.enqueue({ id: randomUUID(), provider: "openrouter", model, metric: `text-model-eval.failed`, amount: 1, unit: "attempt", costCents: 0,
-        metadata: { sessionId, orgId: "synthetic-evaluation", workspaceId: sessionId, runId: sessionId, arm, repeat, caseId: fixture.id, usageUnavailable: true, costUnavailable: true, reservedWorstCaseUsd: reservation } }, { logAiUsage: true });
+        metadata: { sessionId, orgId: "synthetic-evaluation", projectId: sessionId, runId: sessionId, arm, repeat, caseId: fixture.id, usageUnavailable: true, costUnavailable: true, reservedWorstCaseUsd: reservation } }, { logAiUsage: true });
       persist();
     } finally { reserved -= reservation; }
     results.push(result);

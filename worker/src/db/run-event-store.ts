@@ -2,10 +2,10 @@ import { randomUUID } from "node:crypto";
 
 import type { JSONValue, Sql } from "postgres";
 
-import type { WorkspaceRunEvent } from "../models.js";
+import type { ProjectRunEvent } from "../models.js";
 
 /**
- * Run events: the durable log is `workspace_run_events`; NOTIFY is only a
+ * Run events: the durable log is `project_run_events`; NOTIFY is only a
  * wake-up hint.
  *
  * Every NOTIFY-bearing commit takes PostgreSQL's database-wide notify-queue
@@ -41,7 +41,7 @@ export function encodeRunEventHints(runIds: Iterable<string>): string[] {
   return payloads;
 }
 
-type StampedRunEvent = WorkspaceRunEvent & { id: string; createdAtIso: string };
+type StampedRunEvent = ProjectRunEvent & { id: string; createdAtIso: string };
 
 let lastStampMicros = 0;
 
@@ -57,7 +57,7 @@ function nextEventTimestamp(): string {
   return `${iso.slice(0, -1)}${String(micros % 1_000).padStart(3, "0")}Z`;
 }
 
-function stamp(event: WorkspaceRunEvent): StampedRunEvent {
+function stamp(event: ProjectRunEvent): StampedRunEvent {
   if ("createdAtIso" in event) return event as StampedRunEvent;
   return {
     ...event,
@@ -91,9 +91,9 @@ function eventRow(event: StampedRunEvent) {
  * ~48 KB of JSON (one statement for a typical flush; a larger flush wraps its
  * statements in one transaction). Ids make retries idempotent.
  */
-export async function insertWorkspaceRunEvents(args: {
+export async function insertProjectRunEvents(args: {
   sql: Sql<Record<string, unknown>>;
-  events: WorkspaceRunEvent[];
+  events: ProjectRunEvent[];
   notify?: boolean;
 }): Promise<void> {
   if (args.events.length === 0) return;
@@ -139,7 +139,7 @@ async function insertChunk(
 ): Promise<void> {
   await sql`
     with inserted as (
-      insert into workspace_run_events (
+      insert into project_run_events (
         id, user_id, run_id, document_id, stage_name, event_type, status,
         message, progress, stats, payload, created_at
       )
@@ -160,11 +160,11 @@ async function insertChunk(
 }
 
 /** Writes one event now (and hints its run). For low-volume paths outside the worker hot path. */
-export async function appendWorkspaceRunEvent(args: {
+export async function appendProjectRunEvent(args: {
   sql: Sql<Record<string, unknown>>;
-  event: WorkspaceRunEvent;
+  event: ProjectRunEvent;
 }): Promise<void> {
-  await insertWorkspaceRunEvents({ sql: args.sql, events: [args.event] });
+  await insertProjectRunEvents({ sql: args.sql, events: [args.event] });
 }
 
 export interface RunEventPublisherOptions {
@@ -211,7 +211,7 @@ export class RunEventPublisher {
     return this.buffer.length;
   }
 
-  async append(event: WorkspaceRunEvent): Promise<void> {
+  async append(event: ProjectRunEvent): Promise<void> {
     this.buffer.push(stamp(event));
     this.trim();
     if (this.closed || this.options.flushMs === 0 || TERMINAL_RUN_EVENT_TYPES.has(event.eventType)) {
@@ -265,13 +265,13 @@ export class RunEventPublisher {
 
   private async write(batch: StampedRunEvent[]): Promise<void> {
     try {
-      await insertWorkspaceRunEvents({ sql: this.sql, events: batch });
+      await insertProjectRunEvents({ sql: this.sql, events: batch });
     } catch (error) {
       if (!isIntegrityError(error)) throw error;
       // A row whose run or document was deleted meanwhile must not poison the
       // batch: write rows one by one and drop only the ones that cannot land.
       for (const event of batch) {
-        await insertWorkspaceRunEvents({ sql: this.sql, events: [event], notify: false }).catch((rowError) => {
+        await insertProjectRunEvents({ sql: this.sql, events: [event], notify: false }).catch((rowError) => {
           if (!isIntegrityError(rowError)) throw rowError;
           console.warn(`[run-events] dropped event run=${event.runId} type=${event.eventType}: ${String(rowError)}`);
         });

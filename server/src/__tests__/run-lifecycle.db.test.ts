@@ -10,21 +10,21 @@ import type { SqlClient } from "../db.js";
 // Real-Postgres check of Run Lifecycle transitions. RUN_LIFECYCLE_DATABASE_URL
 // must point at a disposable local database built by applying
 // server/db/migrations (pnpm db:migrate); server/db/migrations is the only
-// schema source. Each test seeds its own user, organization and workspace with
+// schema source. Each test seeds its own user, organization and project with
 // unique ids and deletes them afterwards. Skipped without a local DB:
 //   RUN_LIFECYCLE_DATABASE_URL=$DATABASE_URL npx vitest run --project api run-lifecycle.db
 const databaseUrl = process.env.RUN_LIFECYCLE_DATABASE_URL ?? "";
 const isLocal =
   databaseUrl !== "" && ["localhost", "127.0.0.1"].includes(new URL(databaseUrl).hostname);
 
-type Tenant = { userId: string; orgId: string; workspaceId: string; id: (name: string) => string };
+type Tenant = { userId: string; orgId: string; projectId: string; id: (name: string) => string };
 
 async function withTenant(run: (sql: SqlClient, tenant: Tenant) => Promise<void>): Promise<void> {
   const suffix = randomUUID();
   const tenant: Tenant = {
     userId: `rl-user-${suffix}`,
     orgId: `rl-org-${suffix}`,
-    workspaceId: `rl-ws-${suffix}`,
+    projectId: `rl-ws-${suffix}`,
     id: (name) => `${name}-${suffix}`,
   };
   const sql = postgres(databaseUrl, { max: 1, prepare: false, onnotice: () => {} });
@@ -32,11 +32,11 @@ async function withTenant(run: (sql: SqlClient, tenant: Tenant) => Promise<void>
     await sql`insert into "user" (id, name, email) values (${tenant.userId}, 'Run lifecycle', ${`${tenant.userId}@example.test`})`;
     await sql`insert into organizations (id, name, created_by_user_id) values (${tenant.orgId}, 'Run lifecycle', ${tenant.userId})`;
     await sql`insert into org_memberships (org_id, user_id, role) values (${tenant.orgId}, ${tenant.userId}, 'owner')`;
-    await sql`insert into workspaces (id, org_id, user_id, name) values (${tenant.workspaceId}, ${tenant.orgId}, ${tenant.userId}, 'Run lifecycle')`;
+    await sql`insert into projects (id, org_id, user_id, name) values (${tenant.projectId}, ${tenant.orgId}, ${tenant.userId}, 'Run lifecycle')`;
     await run(sql as unknown as SqlClient, tenant);
   } finally {
-    // Runs, events, stage states and documents cascade from the workspace.
-    await sql`delete from workspaces where id = ${tenant.workspaceId}`;
+    // Runs, events, stage states and documents cascade from the project.
+    await sql`delete from projects where id = ${tenant.projectId}`;
     await sql`delete from organizations where id = ${tenant.orgId}`;
     await sql`delete from "user" where id = ${tenant.userId}`;
     await sql.end();
@@ -51,12 +51,12 @@ async function insertRun(
 ): Promise<string> {
   const id = tenant.id(name);
   await sql`
-    insert into workspace_runs (
-      id, org_id, user_id, workspace_id, kind, status, stage, stats, control_state, error, failure_count,
+    insert into project_runs (
+      id, org_id, user_id, project_id, kind, status, stage, stats, control_state, error, failure_count,
       dead_letter_reason, creation_ready_at
     )
     values (
-      ${id}, ${tenant.orgId}, ${tenant.userId}, ${tenant.workspaceId}, 'bulk-upload', ${values.status}, ${values.stage},
+      ${id}, ${tenant.orgId}, ${tenant.userId}, ${tenant.projectId}, 'bulk-upload', ${values.status}, ${values.stage},
       ${sql.json((values.stats ?? {}) as postgres.JSONValue)}, ${values.controlState ?? null}, ${values.error ?? null},
       ${values.failureCount ?? 0}, ${values.deadLetterReason ?? null}, now()
     )
@@ -67,8 +67,8 @@ async function insertRun(
 async function insertDocument(sql: SqlClient, tenant: Tenant, runId: string, name: string, status: string): Promise<string> {
   const id = tenant.id(name);
   await sql`
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status)
-    values (${id}, ${tenant.orgId}, ${tenant.userId}, ${tenant.workspaceId}, ${runId}, ${`${name}.pdf`}, 'application/pdf',
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status)
+    values (${id}, ${tenant.orgId}, ${tenant.userId}, ${tenant.projectId}, ${runId}, ${`${name}.pdf`}, 'application/pdf',
       ${`${tenant.userId}/raw/${id}.pdf`}, ${status})
   `;
   return id;
@@ -118,7 +118,7 @@ describe.skipIf(!isLocal)("Run Lifecycle (local Postgres)", () => {
         { id: open, status: "queued" },
       ]);
       const [event] = await sql<{ event_type: string; payload: Record<string, unknown> }[]>`
-        select event_type, payload from workspace_run_events where run_id = ${runId}
+        select event_type, payload from project_run_events where run_id = ${runId}
       `;
       expect(event).toMatchObject({
         event_type: "run.failed",
@@ -129,7 +129,7 @@ describe.skipIf(!isLocal)("Run Lifecycle (local Postgres)", () => {
       expect(await lifecycle(sql).fail(runId, { stage: "queued", message: "again", fromStatuses: ["queued"] })).toBeNull();
 
       // The second failure reaches the poison threshold.
-      await sql`update workspace_runs set status = 'processing' where id = ${runId}`;
+      await sql`update project_runs set status = 'processing' where id = ${runId}`;
       const dead = await lifecycle(sql).fail(runId, { stage: "parse", message: "boom", fromStatuses: ["processing"] });
       expect(dead).toMatchObject({ failure_count: 2, control_state: "dead-letter", dead_letter_reason: "boom" });
     });
@@ -142,7 +142,7 @@ describe.skipIf(!isLocal)("Run Lifecycle (local Postgres)", () => {
         stage: "queued", message: "stale", fromStatuses: ["queued"], skipControlStates: ["paused"],
       });
       expect(result).toBeNull();
-      const [row] = await sql<{ status: string }[]>`select status from workspace_runs where id = ${runId}`;
+      const [row] = await sql<{ status: string }[]>`select status from project_runs where id = ${runId}`;
       expect(row.status).toBe("queued");
     });
   });
@@ -155,24 +155,24 @@ describe.skipIf(!isLocal)("Run Lifecycle (local Postgres)", () => {
       const docA = await insertDocument(sql, tenant, runId, "doc-a", "completed");
       const docB = await insertDocument(sql, tenant, runId, "doc-b", "failed");
       await sql`
-        insert into workspace_run_stage_states (run_id, stage_name, status)
+        insert into project_run_stage_states (run_id, stage_name, status)
         values (${runId}, 'fetch', 'completed'), (${runId}, 'parse', 'failed')
       `;
 
-      const [original] = await sql`select execution_generation from workspace_runs where id = ${runId}`;
+      const [original] = await sql`select execution_generation from project_runs where id = ${runId}`;
       const startWorkflow = vi.fn(async () => {});
       const outcome = await lifecycle(sql, startWorkflow).retry({ id: runId, status: "failed", pipeline: defaultPipelineFeatures });
 
       expect(outcome).toEqual({ status: "resumed", start: { status: "started" } });
-      const [retried] = await sql`select execution_generation from workspace_runs where id = ${runId}`;
+      const [retried] = await sql`select execution_generation from project_runs where id = ${runId}`;
       expect(retried.execution_generation).toEqual(expect.any(String));
       expect(retried.execution_generation).not.toBe(original.execution_generation);
       expect(startWorkflow).toHaveBeenCalledExactlyOnceWith(runId, defaultPipelineFeatures, {
         restartExisting: true, executionGeneration: retried.execution_generation,
       });
-      const [row] = await sql`select status, stage, error, failure_count, control_state, dead_letter_reason from workspace_runs where id = ${runId}`;
+      const [row] = await sql`select status, stage, error, failure_count, control_state, dead_letter_reason from project_runs where id = ${runId}`;
       expect(row).toEqual({ status: "queued", stage: "queued", error: null, failure_count: 0, control_state: null, dead_letter_reason: null });
-      expect(await sql`select stage_name from workspace_run_stage_states where run_id = ${runId}`).toEqual([{ stage_name: "fetch" }]);
+      expect(await sql`select stage_name from project_run_stage_states where run_id = ${runId}`).toEqual([{ stage_name: "fetch" }]);
       expect(await sql`select id, status from documents where run_id = ${runId} order by id`).toEqual([
         { id: docA, status: "completed" },
         { id: docB, status: "queued" },

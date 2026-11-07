@@ -5,18 +5,18 @@ import { describe, expect, it } from "vitest";
 
 import { defaultPipelineFeatures, type DerivedDocumentTitle } from "@docslurp/shared";
 
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
 import type { CommandRunner } from "../tools/runner.js";
 
-function createRun(): WorkspaceRun {
+function createRun(): ProjectRun {
   return {
     id: "run-1", orgId: "org-1", userId: "user-1", kind: "bulk-upload", status: "processing", stage: "extract-markdown",
     totalDocuments: 1, processedDocuments: 0, pagesTotal: 1, pagesProcessed: 0, spentCents: 0,
     pipeline: { ...defaultPipelineFeatures, markdownExtraction: true, visionFallback: false },
     error: null, stats: {}, artifacts: {}, claimId: null, createdAt: new Date(), updatedAt: new Date(),
-  } as WorkspaceRun;
+  } as ProjectRun;
 }
 
 /** The stage's real control flow with in-memory storage, a fake extractor and a store that records titles. */
@@ -30,7 +30,8 @@ async function extractWithTitle(args: { filename: string; mimeType: string; form
       streamText: async () => undefined,
     };
     const runner = {
-      kreuzbergMarkdown: async () => ({ binary: "node", args: [], available: true }),
+      officeMarkdown: async () => ({ binary: "python3", args: [], available: true }),
+      dopplerMarkdown: async () => ({ binary: "pdftomarkdown", args: [], available: false }),
       extractText: async () => ({ binary: "pdftotext", args: [], available: true }),
       extractMarkdown: async () => ({ binary: "pandoc", args: [], available: true }),
     } as unknown as CommandRunner;

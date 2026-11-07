@@ -11,7 +11,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Write embedding records to a vector backend.")
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--backend", required=True, choices=["lancedb", "chroma", "milvus"])
+    parser.add_argument("--backend", required=True, choices=["lancedb", "milvus"])
     parser.add_argument("--collection", required=True)
     return parser.parse_args()
 
@@ -100,33 +100,6 @@ def write_lancedb(args: argparse.Namespace, payload: dict) -> dict:
     }
 
 
-def write_chroma(args: argparse.Namespace, payload: dict) -> dict:
-    try:
-        import chromadb  # type: ignore
-    except ImportError as exc:
-        raise SystemExit(f"missing dependency: pip install chromadb ({exc})")
-
-    url = os.getenv("CHROMA_URL")
-    if url:
-        parsed = urlparse(url)
-        client = chromadb.HttpClient(host=parsed.hostname or "localhost", port=parsed.port or 8000)
-        location = url
-    else:
-        path = os.getenv("CHROMA_PATH", "/tmp/docslurp-chroma")
-        client = chromadb.PersistentClient(path=path)
-        location = path
-
-    collection = client.get_or_create_collection(args.collection)
-    records = payload["records"]
-    collection.upsert(
-        ids=[record["id"] for record in records],
-        embeddings=[record["vector"] for record in records],
-        documents=[record["text"] for record in records],
-        metadatas=[record.get("metadata", {}) for record in records],
-    )
-    return {"backend": "chroma", "collection": args.collection, "records": len(records), "location": location}
-
-
 def write_milvus(args: argparse.Namespace, payload: dict) -> dict:
     try:
         from pymilvus import MilvusClient  # type: ignore
@@ -164,8 +137,6 @@ def main() -> int:
 
     if args.backend == "lancedb":
         result = write_lancedb(args, payload)
-    elif args.backend == "chroma":
-        result = write_chroma(args, payload)
     else:
         result = write_milvus(args, payload)
 

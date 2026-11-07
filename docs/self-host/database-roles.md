@@ -6,7 +6,7 @@ By default the server, the workers, migrations and backups all connect as one Po
 | --- | --- | --- |
 | `docslurp` (owner) | Migrations (`MIGRATION_DATABASE_URL`) and break-glass access | Owns every object |
 | `docslurp_app` | The API server (`DATABASE_URL`) | Select, insert, update and delete on every table; usage on sequences; execute on functions. No `CREATE`, not an owner |
-| `docslurp_worker` | Workers (`DATABASE_URL` on worker hosts) | DML only on the tables workers use; column-level reads of `user` (`id`, `email`), `webhooks` (`user_id`, `active`, `events`) and `workspace_secrets` (no ciphertext). No access to auth, API key, OAuth, SSO, connector or Stripe tables |
+| `docslurp_worker` | Workers (`DATABASE_URL` on worker hosts) | DML only on the tables workers use; column-level reads of `user` (`id`, `email`), `webhooks` (`org_id`, `active`, `events`) and `project_secrets` (no ciphertext). No access to auth, API key, OAuth, SSO, connector or Stripe tables |
 | `docslurp_backup` | `pg_dump` | `pg_read_all_data` |
 
 The worker's table list lives in `server/db/roles.mjs` (`WORKER_TABLES`, with the code that needs each one, and `WORKER_DENIED_TABLES`, with the reason for each). A test (`server/src/__tests__/db-roles.test.ts`) fails when a migration adds a table that is in neither list, so a new table is never silently granted or denied.
@@ -40,7 +40,7 @@ Rolling back is the reverse: point `DATABASE_URL` back at the owner. The roles a
 
 ## Runtime requirements
 
-Neither runtime role runs DDL. The server and workers use `LISTEN`/`NOTIFY`, advisory locks (`pg_advisory_lock`, `pg_advisory_xact_lock`) and `to_regclass`/`information_schema` checks, none of which need ownership. Most triggers and functions are `SECURITY INVOKER`, so the worker's list includes the tables its writes reach through triggers (for example `workspace_corpus_stats` and `credit_ledger`). Foreign-key cascades run as the table owner and need no grant.
+Neither runtime role runs DDL. The server and workers use `LISTEN`/`NOTIFY`, advisory locks (`pg_advisory_lock`, `pg_advisory_xact_lock`) and `to_regclass`/`information_schema` checks, none of which need ownership. Most triggers and functions are `SECURITY INVOKER`, so the worker's list includes the tables its writes reach through triggers (for example `project_corpus_stats` and `credit_ledger`). Foreign-key cascades run as the table owner and need no grant.
 
 The server's database watchdog counts its own pool's backends in `pg_stat_activity`. Postgres shows a role the state of its own sessions, so the server's pool and probe must use the same role.
 
@@ -51,7 +51,7 @@ The ingestion worker has no access to `chat_operations`, `chat_operation_events`
 document, usage and page-state writes invoke validated `SECURITY DEFINER` triggers
 owned by `docslurp_realtime_publisher`. That role has no login, inheritance,
 superuser, role creation, database creation, replication or RLS bypass. Its only
-data grants are counter DML and SELECT of `(id, org_id)` on workspaces, runs and
+data grants are counter DML and SELECT of `(id, org_id)` on projects, runs and
 documents. It has no schema CREATE privilege after migration. Trigger functions
 validate the exact public relation, trigger name, timing, level and arguments;
 all lookups are schema-qualified with a fixed `pg_catalog,pg_temp` search path.

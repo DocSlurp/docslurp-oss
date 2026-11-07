@@ -49,7 +49,7 @@ class OperationHub {
           coalesce(array_agg(t.id) filter(where t.id is not null),'{}') as native_tasks
         from chat_operations c left join realtime_revisions r on r.org_id=c.org_id
         left join docslurp_mastra.mastra_background_tasks t on c.runtime='mastra' and t.tool_call_id=c.id
-          and t.agent_id='docslurp-workspace-chat'
+          and t.agent_id='docslurp-project-chat'
         where c.root_id=any(${sql.array(roots)}) and c.expires_at>now()
         group by c.root_id,c.user_id`;
       // Native retained-list length detects missed PubSub wakes without reading

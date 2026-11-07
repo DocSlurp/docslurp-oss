@@ -13,11 +13,11 @@ import {
 } from "./private-endpoints.js";
 
 /**
- * Workspace privacy execution modes (`pipeline.privacyMode`).
+ * Project privacy execution modes (`pipeline.privacyMode`).
  *
  * - `standard`: hosted model providers (OpenRouter, OpenAI, Anthropic, ...) may
  *   receive document content and queries.
- * - `local-only`: no workspace content, page image, query or audio may be sent to
+ * - `local-only`: no project content, page image, query or audio may be sent to
  *   a hosted/remote AI provider. LLM, vision, embedding, rerank and
  *   speech-to-text calls must use local runtimes (transformers.js, ONNX,
  *   Florence local-cli, or loopback ollama/vLLM/LM Studio servers). Optional
@@ -114,8 +114,8 @@ export class PrivacyModeViolationError extends Error {
     readonly call: ProviderCallDescriptor,
   ) {
     super(
-      `Workspace privacy mode '${privacyMode}' blocks hosted AI call ${call.operation} ` +
-        `(${call.provider}/${call.model}); configure a local model route or switch the workspace to standard.`,
+      `Project privacy mode '${privacyMode}' blocks hosted AI call ${call.operation} ` +
+        `(${call.provider}/${call.model}); configure a local model route or switch the project to standard.`,
     );
     this.name = "PrivacyModeViolationError";
   }
@@ -138,7 +138,7 @@ export function assertProviderAllowed(
 
 /** Row shape for `privacy_audit_log`. `endpoint` is prefixed `blocked:` because the call never left. */
 export interface PrivacyAuditEntry {
-  workspaceId: string | null;
+  projectId: string | null;
   runId: string | null;
   documentId: string | null;
   modelId: string;
@@ -149,12 +149,12 @@ export interface PrivacyAuditEntry {
 export function buildBlockedPrivacyAuditEntry(args: {
   privacyMode: string;
   call: ProviderCallDescriptor;
-  workspaceId?: string | null;
+  projectId?: string | null;
   runId?: string | null;
   documentId?: string | null;
 }): PrivacyAuditEntry {
   return {
-    workspaceId: args.workspaceId ?? null,
+    projectId: args.projectId ?? null,
     runId: args.runId ?? null,
     documentId: args.documentId ?? null,
     modelId: `${args.call.provider}/${args.call.model}`.slice(0, 400),
@@ -174,7 +174,7 @@ export function formatPrivacyBlockLog(mode: string, call: ProviderCallDescriptor
 
 /** Who a private call is attributed to in `privacy_audit_log`. */
 export interface PrivateCallAuditScope {
-  workspaceId?: string | null;
+  projectId?: string | null;
   runId?: string | null;
   documentId?: string | null;
 }
@@ -201,7 +201,7 @@ export function buildAllowedPrivateAuditEntry(args: {
   scope: PrivateCallAuditScope;
 }): PrivacyAuditEntry {
   return {
-    workspaceId: args.scope.workspaceId ?? null,
+    projectId: args.scope.projectId ?? null,
     runId: args.scope.runId ?? null,
     documentId: args.scope.documentId ?? null,
     modelId: `private/${args.route.alias}/${args.route.model.id}`.slice(0, 400),
@@ -263,15 +263,15 @@ export async function authorizePrivateModelCall(args: {
     if (!privateCallAudit) {
       throw new PrivacyModeViolationError(mode, { ...descriptor, operation: `${args.operation} (no audit sink configured)` });
     }
-    if (!scope.workspaceId) {
-      throw new PrivacyModeViolationError(mode, { ...descriptor, operation: `${args.operation} (no workspace audit scope)` });
+    if (!scope.projectId) {
+      throw new PrivacyModeViolationError(mode, { ...descriptor, operation: `${args.operation} (no project audit scope)` });
     }
     // Proof first: if the row cannot be written the content is not sent.
     await privateCallAudit.write([buildAllowedPrivateAuditEntry({ privacyMode: mode, route, operation: args.operation, scope })]);
   }
   console.log(
     `[privacy] private-call operation=${args.operation} alias=${route.alias} model=${route.model.id} ` +
-      `capability=${args.capability} privacy_mode=${mode} workspace=${scope.workspaceId ?? "-"}`,
+      `capability=${args.capability} privacy_mode=${mode} project=${scope.projectId ?? "-"}`,
   );
   return {
     route,

@@ -1,0 +1,98 @@
+{
+ "walker": "pdf-layout-facts@1",
+ "pages": [
+  {
+   "pageNumber": 1,
+   "known": true,
+   "words": 66,
+   "widthPt": 612,
+   "heightPt": 792,
+   "images": [
+    {
+     "bbox": [
+      36,
+      22,
+      576,
+      202
+     ],
+     "coverage": 0.2005,
+     "widthPx": 900,
+     "heightPx": 300,
+     "bitsPerComponent": 8,
+     "encoding": "image",
+     "ppi": [
+      120,
+      120
+     ],
+     "bytesPerPixel": 0.01138,
+     "repeated": true,
+     "wordsInside": 0
+    }
+   ],
+   "grids": null,
+   "tableCoverage": null
+  },
+  {
+   "pageNumber": 2,
+   "known": true,
+   "words": 66,
+   "widthPt": 612,
+   "heightPt": 792,
+   "images": [
+    {
+     "bbox": [
+      36,
+      22,
+      576,
+      202
+     ],
+     "coverage": 0.2005,
+     "widthPx": 900,
+     "heightPx": 300,
+     "bitsPerComponent": 8,
+     "encoding": "image",
+     "ppi": [
+      120,
+      120
+     ],
+     "bytesPerPixel": 0.01138,
+     "repeated": true,
+     "wordsInside": 0
+    }
+   ],
+   "grids": null,
+   "tableCoverage": null
+  },
+  {
+   "pageNumber": 3,
+   "known": true,
+   "words": 66,
+   "widthPt": 612,
+   "heightPt": 792,
+   "images": [
+    {
+     "bbox": [
+      36,
+      22,
+      576,
+      202
+     ],
+     "coverage": 0.2005,
+     "widthPx": 900,
+     "heightPx": 300,
+     "bitsPerComponent": 8,
+     "encoding": "image",
+     "ppi": [
+      120,
+      120
+     ],
+     "bytesPerPixel": 0.01138,
+     "repeated": true,
+     "wordsInside": 0
+    }
+   ],
+   "grids": null,
+   "tableCoverage": null
+  }
+ ]
+}

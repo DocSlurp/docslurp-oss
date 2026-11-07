@@ -1,4 +1,4 @@
-import type { WorkspaceRunProgressSnapshot } from "@docslurp/shared";
+import type { ProjectRunProgressSnapshot } from "@docslurp/shared";
 
 type Stream = {
   readonly aborted: boolean;
@@ -10,7 +10,7 @@ type Stream = {
  * they do not enqueue an unbounded history of expensive snapshot reads. */
 export async function streamRunProgressSnapshots(args: {
   stream: Stream;
-  snapshot: () => Promise<WorkspaceRunProgressSnapshot | null>;
+  snapshot: () => Promise<ProjectRunProgressSnapshot | null>;
   subscribe: (invalidate: () => void) => Promise<{ close(): Promise<void> }>;
 }): Promise<void> {
   const { stream } = args;

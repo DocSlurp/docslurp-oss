@@ -20,10 +20,10 @@ beforeAll(async () => {
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
-    insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-    insert into workspace_runs (execution_generation, id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents)
+    insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
+    insert into project_runs (execution_generation, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
       values (null, 'run-1', 'o1', 'u1', 'w', 'upload', 'processing', 'pii-detect', '{}', 2);
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, created_at)
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, created_at)
       values ('d-block', 'o1', 'u1', 'w', 'run-1', 'hr.pdf', 'application/pdf', 'k1', 'processing', 2, '2026-01-01'),
              ('d-ok', 'o1', 'u1', 'w', 'run-1', 'ok.pdf', 'application/pdf', 'k2', 'processing', 1, '2026-01-02');
   `);
@@ -56,7 +56,7 @@ describe("PII-blocked documents in the run lifecycle", () => {
     });
 
     const sink = createPostgresPiiDetectionSink(url);
-    const match = { patternType: "ssn" as const, matchedPrefix: fingerprintPiiMatch("ssn", "123-45-6789"), pageNumber: 2, byteOffset: 4, length: 11 };
+    const match = { patternType: "ssn" as const, matchedPrefix: fingerprintPiiMatch("ssn", "123-45-6789"), pageNumber: 2, byteOffset: 4, charOffset: 4, length: 11 };
     // Recording twice (a retried stage) must not duplicate detections.
     await sink.recordDetections("d-block", "run-1", [match], false);
     await sink.recordDetections("d-block", "run-1", [match], false);
@@ -93,7 +93,7 @@ describe("PII-blocked documents in the run lifecycle", () => {
       reason: "PII policy blocked indexing: 1 match (ssn)",
       withheldArtifactUris: ["s3://b/k1"],
     });
-    const run = await db.query<{ status: string }>(`select status from workspace_runs where id = 'run-1'`);
+    const run = await db.query<{ status: string }>(`select status from project_runs where id = 'run-1'`);
     expect(run.rows[0]?.status).toBe("completed");
     const detections = await db.query<{ pattern_type: string; page_number: number; matched_prefix: string }>(
       `select pattern_type, page_number, matched_prefix from pii_detections where document_id = 'd-block'`,
@@ -115,14 +115,14 @@ describe("PII-blocked documents in the run lifecycle", () => {
 
     // Search only serves completed documents, so the blocked one is never retrievable.
     const searchable = await db.query<{ id: string }>(
-      `select id from documents where workspace_id = 'w' and status = 'completed' and superseded_at is null`,
+      `select id from documents where project_id = 'w' and status = 'completed' and superseded_at is null`,
     );
     expect(searchable.rows).toEqual([{ id: "d-ok" }]);
   });
 
   it("a clean rescan lifts an earlier block and clears the PII metadata", async () => {
     await db.exec(`
-      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, metadata)
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, metadata)
         values ('d-rescan', 'o1', 'u1', 'w', 'run-1', 'r.pdf', 'application/pdf', 'k3', 'pii_blocked', 1, '{"pii": {"blocked": true}, "keep": 1}');
     `);
     await withStore(async (store) => {
@@ -144,7 +144,7 @@ describe("PII-blocked documents in the run lifecycle", () => {
 
   it("a PII rescan withdraws early keyword search until embed rewrites the chunks", async () => {
     await db.exec(`
-      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, lexical_searchable_at)
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, lexical_searchable_at)
         values ('d-early', 'o1', 'u1', 'w', 'run-1', 'e.pdf', 'application/pdf', 'k4', 'graph-enrich', 1, now());
     `);
     const marker = async () => (await db.query<{ early: boolean }>(

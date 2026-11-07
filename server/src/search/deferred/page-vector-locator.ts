@@ -4,7 +4,7 @@ import { sql } from "../../db.js";
 
 /**
  * Visual Pages locator: first-stage Hamming top-200 over packed sign bits,
- * then int8 cosine rescore. A workspace+model matrix is loaded once and kept
+ * then int8 cosine rescore. A project+model matrix is loaded once and kept
  * in an in-process LRU bounded by bytes; it is revalidated against
  * `max(created_at)`/`count(*)` at most once per TTL (and dropped explicitly
  * when materialization lands new pages), so a warm query runs no SQL.
@@ -42,9 +42,9 @@ function ttlMs(): number {
   return Number.isFinite(value) && value >= 0 ? value : 5000;
 }
 
-export function clearPageVectorCache(workspaceId?: string): void {
+export function clearPageVectorCache(projectId?: string): void {
   for (const [key, matrix] of [...cache]) {
-    if (workspaceId === undefined || key.startsWith(`${workspaceId}\u0000`)) {
+    if (projectId === undefined || key.startsWith(`${projectId}\u0000`)) {
       cachedBytes -= matrix.bytes;
       cache.delete(key);
     }
@@ -67,11 +67,11 @@ function remember(key: string, matrix: Matrix): void {
 
 type VectorRow = { document_id: string; page_number: number; dims: number; bits: Uint8Array; int8: Uint8Array; scale: number };
 
-async function loadMatrix(workspaceId: string, model: string, stamp: string): Promise<Matrix | null> {
+async function loadMatrix(projectId: string, model: string, stamp: string): Promise<Matrix | null> {
   const rows = await sql<VectorRow[]>`
     select document_id, page_number, dims, bits, int8, scale
     from document_page_vectors
-    where workspace_id = ${workspaceId} and model = ${model}
+    where project_id = ${projectId} and model = ${model}
     order by document_id, page_number
   `;
   const dims = rows[0]?.dims;
@@ -107,8 +107,8 @@ async function loadMatrix(workspaceId: string, model: string, stamp: string): Pr
 
 const inflight = new Map<string, Promise<Matrix | null>>();
 
-async function matrixFor(workspaceId: string, model: string): Promise<Matrix | null> {
-  const key = `${workspaceId}\u0000${model}`;
+async function matrixFor(projectId: string, model: string): Promise<Matrix | null> {
+  const key = `${projectId}\u0000${model}`;
   const hit = cache.get(key);
   if (hit && Date.now() - hit.checkedAt < ttlMs()) {
     cache.delete(key);
@@ -118,11 +118,11 @@ async function matrixFor(workspaceId: string, model: string): Promise<Matrix | n
   const [stampRow] = await sql<{ stamp: string | null }[]>`
     select (max(created_at)::text || ':' || count(*)::text) as stamp
     from document_page_vectors
-    where workspace_id = ${workspaceId} and model = ${model}
+    where project_id = ${projectId} and model = ${model}
   `;
   const stamp = stampRow?.stamp ?? "";
   if (!stamp) {
-    clearPageVectorCache(workspaceId);
+    clearPageVectorCache(projectId);
     return null;
   }
   if (hit && hit.stamp === stamp) {
@@ -135,7 +135,7 @@ async function matrixFor(workspaceId: string, model: string): Promise<Matrix | n
   const flightKey = `${key}\u0000${stamp}`;
   let flight = inflight.get(flightKey);
   if (!flight) {
-    flight = loadMatrix(workspaceId, model, stamp)
+    flight = loadMatrix(projectId, model, stamp)
       .then((matrix) => {
         // A matrix bigger than the whole budget would evict everything: serve it uncached.
         if (matrix && matrix.bytes <= maxCacheBytes()) remember(key, matrix);
@@ -147,27 +147,27 @@ async function matrixFor(workspaceId: string, model: string): Promise<Matrix | n
   return flight;
 }
 
-/** Models that have stored page vectors in the workspace, most pages first. */
-export async function listPageVectorModels(workspaceId: string, documentIds?: string[]): Promise<string[]> {
+/** Models that have stored page vectors in the project, most pages first. */
+export async function listPageVectorModels(projectId: string, documentIds?: string[]): Promise<string[]> {
   const rows = documentIds && documentIds.length > 0
     ? await sql<{ model: string }[]>`
         select model from document_page_vectors
-        where workspace_id = ${workspaceId} and document_id = any(${sql.array(documentIds, 25)})
+        where project_id = ${projectId} and document_id = any(${sql.array(documentIds, 25)})
         group by model order by count(*) desc`
     : await sql<{ model: string }[]>`
-        select model from document_page_vectors where workspace_id = ${workspaceId}
+        select model from document_page_vectors where project_id = ${projectId}
         group by model order by count(*) desc`;
   return rows.map((row) => row.model);
 }
 
 export async function locatePageImageCandidates(args: {
-  workspaceId: string;
+  projectId: string;
   documentIds: string[];
   model: string;
   queryVector: Float32Array;
   k: number;
 }): Promise<Array<{ documentId: string; page: number; score: number }>> {
-  const matrix = await matrixFor(args.workspaceId, args.model);
+  const matrix = await matrixFor(args.projectId, args.model);
   if (!matrix || args.queryVector.length !== matrix.dims || args.k <= 0) return [];
   const query = packSignBits(args.queryVector);
 

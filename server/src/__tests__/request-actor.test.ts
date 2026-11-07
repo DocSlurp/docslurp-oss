@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { WorkspaceRecord } from "@docslurp/shared";
+import type { ProjectRecord } from "@docslurp/shared";
 import type { ValidatedKey } from "../services/api-keys.js";
 
 vi.mock("../lib/auth.js", () => ({
@@ -15,21 +15,21 @@ vi.mock("../services/api-keys.js", () => ({
   validateApiKey: vi.fn()
 }));
 
-vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => null), findWorkspaceForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })),
-  getWorkspace: vi.fn(),
-  ensureDefaultWorkspace: vi.fn(async () => ({ id: "ws-default" }))
+vi.mock("../services/projects.js", () => ({ resolveProjectRef: vi.fn(async () => null), findProjectForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })),
+  getProject: vi.fn(),
+  ensureDefaultProject: vi.fn(async () => ({ id: "ws-default" }))
 }));
 
 const { auth } = await import("../lib/auth.js");
 const { validateApiKey } = await import("../services/api-keys.js");
-const { getWorkspace } = await import("../services/workspaces.js");
+const { getProject } = await import("../services/projects.js");
 const {
   actorHasAnyApiKeyScope,
   assertActorServerApiKey,
-  ApiKeyWorkspaceNotAllowedError,
-  assertActorWorkspaceOrgScope,
-  loadActorScopedWorkspace,
-  resolveActorWorkspaceId,
+  ApiKeyProjectNotAllowedError,
+  assertActorProjectOrgScope,
+  loadActorScopedProject,
+  resolveActorProjectId,
   resolveApiKeyActor,
   resolveBetterAuthSessionActor
 } = await import("../lib/request-actor.js");
@@ -43,20 +43,20 @@ const validatedKey: ValidatedKey = {
   scopes: ["search"],
   rateLimitRpm: 60,
   rateLimitPpd: 10_000,
-  rateLimits: [], workspaceIds: [],
+  rateLimits: [], projectIds: [],
 };
 
-const workspace = {
+const project = {
   id: "ws-1",
   orgId: "org-1",
   userId: "user-1"
-} as WorkspaceRecord;
+} as ProjectRecord;
 
 describe("request actor helpers", () => {
   beforeEach(() => {
     vi.mocked(auth.api.getSession).mockReset();
     vi.mocked(validateApiKey).mockReset();
-    vi.mocked(getWorkspace).mockReset();
+    vi.mocked(getProject).mockReset();
   });
 
   it("resolves a Better Auth session actor from validated session headers", async () => {
@@ -115,53 +115,53 @@ describe("request actor helpers", () => {
     expect(actor).toEqual({ type: "apiKey", userId: "user-1", apiKey: validatedKey });
   });
 
-  it("applies API-key scope and workspace organization capabilities through the actor", async () => {
-    vi.mocked(getWorkspace).mockResolvedValue(workspace);
+  it("applies API-key scope and project organization capabilities through the actor", async () => {
+    vi.mocked(getProject).mockResolvedValue(project);
     const actor = { type: "apiKey" as const, userId: "user-1", apiKey: validatedKey };
 
     expect(actorHasAnyApiKeyScope(actor, ["search"])).toBe(true);
     expect(assertActorServerApiKey(actor)).toBeUndefined();
-    await expect(loadActorScopedWorkspace("ws-1", actor)).resolves.toBe(workspace);
+    await expect(loadActorScopedProject("ws-1", actor)).resolves.toBe(project);
   });
 
-  it("denies workspace access for a key without an organization", async () => {
-    vi.mocked(getWorkspace).mockResolvedValue(workspace);
-    await expect(loadActorScopedWorkspace("ws-1", { type: "apiKey", userId: "user-1", apiKey: { ...validatedKey, orgId: null } })).resolves.toBeNull();
+  it("denies project access for a key whose organization is blank", async () => {
+    vi.mocked(getProject).mockResolvedValue(project);
+    await expect(loadActorScopedProject("ws-1", { type: "apiKey", userId: "user-1", apiKey: { ...validatedKey, orgId: "" } })).resolves.toBeNull();
   });
 
-  it("denies API-key workspace loads outside the key organization", async () => {
-    vi.mocked(getWorkspace).mockResolvedValue({
-      ...workspace,
+  it("denies API-key project loads outside the key organization", async () => {
+    vi.mocked(getProject).mockResolvedValue({
+      ...project,
       orgId: "org-2"
     });
 
-    await expect(loadActorScopedWorkspace("ws-1", {
+    await expect(loadActorScopedProject("ws-1", {
       type: "apiKey",
       userId: "user-1",
       apiKey: validatedKey
     })).resolves.toBeNull();
   });
 
-  describe("workspace allowlist (G-03)", () => {
-    const bound = { type: "apiKey" as const, userId: "user-1", apiKey: { ...validatedKey, workspaceIds: ["ws-1"] } };
+  describe("project allowlist (G-03)", () => {
+    const bound = { type: "apiKey" as const, userId: "user-1", apiKey: { ...validatedKey, projectIds: ["ws-1"] } };
 
-    it("loads only allowlisted workspaces", async () => {
-      vi.mocked(getWorkspace).mockResolvedValue(workspace);
-      await expect(loadActorScopedWorkspace("ws-1", bound)).resolves.toBe(workspace);
-      vi.mocked(getWorkspace).mockResolvedValue({ ...workspace, id: "ws-2" });
-      await expect(loadActorScopedWorkspace("ws-2", bound)).resolves.toBeNull();
+    it("loads only allowlisted projects", async () => {
+      vi.mocked(getProject).mockResolvedValue(project);
+      await expect(loadActorScopedProject("ws-1", bound)).resolves.toBe(project);
+      vi.mocked(getProject).mockResolvedValue({ ...project, id: "ws-2" });
+      await expect(loadActorScopedProject("ws-2", bound)).resolves.toBeNull();
     });
 
-    it("rejects explicit workspaces outside the allowlist and defaults to an allowlisted one", async () => {
-      await expect(resolveActorWorkspaceId(bound, "00000000-0000-4000-8000-000000000002")).rejects.toBeInstanceOf(ApiKeyWorkspaceNotAllowedError);
-      await expect(resolveActorWorkspaceId(bound, null)).resolves.toBe("ws-1");
+    it("rejects explicit projects outside the allowlist and defaults to an allowlisted one", async () => {
+      await expect(resolveActorProjectId(bound, "00000000-0000-4000-8000-000000000002")).rejects.toBeInstanceOf(ApiKeyProjectNotAllowedError);
+      await expect(resolveActorProjectId(bound, null)).resolves.toBe("ws-1");
       const unrestricted = { type: "apiKey" as const, userId: "user-1", apiKey: validatedKey };
-      await expect(resolveActorWorkspaceId(unrestricted, null)).resolves.toBe("ws-default");
+      await expect(resolveActorProjectId(unrestricted, null)).resolves.toBe("ws-default");
     });
 
-    it("checks the document's workspace, not the document id", () => {
-      expect(() => assertActorWorkspaceOrgScope(bound, { id: "doc-1", workspaceId: "ws-1", orgId: "org-1" })).not.toThrow();
-      expect(() => assertActorWorkspaceOrgScope(bound, { id: "doc-1", workspaceId: "ws-2", orgId: "org-1" })).toThrow(/not allowed/);
+    it("checks the document's project, not the document id", () => {
+      expect(() => assertActorProjectOrgScope(bound, { id: "doc-1", projectId: "ws-1", orgId: "org-1" })).not.toThrow();
+      expect(() => assertActorProjectOrgScope(bound, { id: "doc-1", projectId: "ws-2", orgId: "org-1" })).toThrow(/not allowed/);
     });
   });
 });

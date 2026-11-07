@@ -41,8 +41,8 @@ create trigger workspace_runs_budget_guard before insert on workspace_runs
 for each row execute function enforce_workspace_run_budget();
 `;
 
-/** A workspace with a 100-cent budget and 150 cents of run-attributed spend this month. */
-async function seedOverBudgetWorkspace(db: PGlite): Promise<void> {
+/** A project with a 100-cent budget and 150 cents of run-attributed spend this month. */
+async function seedOverBudgetProject(db: PGlite): Promise<void> {
   await db.exec(`
     insert into "user" (id, name, email) values ('u1', 'U', 'u1@example.com');
     insert into organizations (id, name, slug, created_by_user_id) values ('o1', 'Org', 'org-1', 'u1');
@@ -55,31 +55,31 @@ async function seedOverBudgetWorkspace(db: PGlite): Promise<void> {
 }
 
 /** The reindex path's insert for a budget-blocked change (config-change.ts createReindexRuns). */
-const insertBlockedReindexRun = (db: PGlite) =>
-  db.exec(`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, blocked_reason, stage)
+const insertBlockedReindexRun = (db: PGlite, legacy = false) =>
+  db.exec(`insert into ${legacy ? "workspace_runs" : "project_runs"} (id, org_id, user_id, ${legacy ? "workspace_id" : "project_id"}, kind, status, blocked_reason, stage)
     values ('r2', 'o1', 'u1', 'w1', 'reindex', 'blocked', 'budget', 'queued')`);
 
 const triggerCount = async (db: PGlite) =>
   (await db.query<{ n: number }>(
-    `select count(*)::int as n from pg_trigger where tgname = 'workspace_runs_budget_guard'`,
+    `select count(*)::int as n from pg_trigger where tgname IN ('workspace_runs_budget_guard','project_runs_budget_guard')`,
   )).rows[0]!.n +
   (await db.query<{ n: number }>(
-    `select count(*)::int as n from pg_proc where proname = 'enforce_workspace_run_budget'`,
+    `select count(*)::int as n from pg_proc where proname IN ('enforce_workspace_run_budget','enforce_project_run_budget')`,
   )).rows[0]!.n;
 
 describe("migration 0096 drop_legacy_budget_trigger", () => {
   it("removes the legacy trigger that rejected budget-blocked reindex runs", async () => {
     const db = await createMigratedDatabase({ stopBefore: "drop_legacy_budget_trigger" });
     await db.exec(LEGACY_TRIGGER);
-    await seedOverBudgetWorkspace(db);
-    await expect(insertBlockedReindexRun(db)).rejects.toThrow(/workspace monthly budget exceeded/);
+    await seedOverBudgetProject(db);
+    await expect(insertBlockedReindexRun(db, true)).rejects.toThrow(/workspace monthly budget exceeded/);
 
     await applyRemainingMigrations(db, "drop_legacy_budget_trigger");
 
     expect(await triggerCount(db)).toBe(0);
     await insertBlockedReindexRun(db);
     const run = await db.query<{ status: string; blocked_reason: string }>(
-      `select status, blocked_reason from workspace_runs where id = 'r2'`,
+      `select status, blocked_reason from project_runs where id = 'r2'`,
     );
     expect(run.rows).toEqual([{ status: "blocked", blocked_reason: "budget" }]);
     await db.close();
@@ -88,7 +88,7 @@ describe("migration 0096 drop_legacy_budget_trigger", () => {
   it("leaves budget enforcement to the attribution view, which counts the spend the trigger missed", async () => {
     const db = await createMigratedDatabase({ stopBefore: "drop_legacy_budget_trigger" });
     await db.exec(LEGACY_TRIGGER);
-    // Org o1 is over its workspace's 100-cent budget through search and chat only (run_id null);
+    // Org o1 is over its project's 100-cent budget through search and chat only (run_id null);
     // org o2 is a separate tenant with the same budget and no spend.
     await db.exec(`
       insert into "user" (id, name, email) values ('u1', 'U', 'u1@example.com'), ('u2', 'V', 'u2@example.com');
@@ -98,18 +98,18 @@ describe("migration 0096 drop_legacy_budget_trigger", () => {
       insert into usage_events (id, user_id, run_id, org_id, workspace_id, provider, model, metric, unit, amount, cost_cents)
         values ('e1', 'u1', null, 'o1', 'w1', 'openai', 'm', 'chat', 'tokens', 1, 150);
     `);
-    // The trigger only summed run-joined spend, so it let this over-budget workspace start a run.
+    // The trigger only summed run-joined spend, so it let this over-budget project start a run.
     await db.exec(`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage)
       values ('r1', 'o1', 'u1', 'w1', 'upload', 'queued', 'queued')`);
 
     await applyRemainingMigrations(db, "drop_legacy_budget_trigger");
 
     // enforceLiveBudgetCaps and the worker's budget sweep sum this view for the month.
-    const spend = async (workspaceId: string) =>
+    const spend = async (projectId: string) =>
       (await db.query<{ cents: number }>(
         `select coalesce(sum(cost_cents), 0)::float8 as cents from usage_attribution
-         where workspace_id = $1 and created_at >= date_trunc('month', now())`,
-        [workspaceId],
+         where project_id = $1 and created_at >= date_trunc('month', now())`,
+        [projectId],
       )).rows[0]!.cents;
     expect(await spend("w1")).toBeGreaterThanOrEqual(100);
     expect(await spend("w2")).toBe(0);

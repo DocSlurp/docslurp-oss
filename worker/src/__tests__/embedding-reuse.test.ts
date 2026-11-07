@@ -53,7 +53,7 @@ import {
   type EmbeddingReuseStore,
   type ReusableEmbeddingArtifact,
 } from "../embeddings/embedding-reuse.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { EmbedStage } from "../stages/embed.js";
 import type { CommandRunner } from "../tools/runner.js";
@@ -63,7 +63,8 @@ const BUCKET = "test-bucket";
 
 function fakeVector(text: string, dimensions: number): number[] {
   const digest = createHash("sha256").update(text).digest();
-  return Array.from({ length: Math.min(dimensions, 8) }, (_, index) => digest[index]! / 255);
+  // A vector has the recorded dimension: the stage refuses any other length.
+  return Array.from({ length: dimensions }, (_, index) => digest[index % digest.length]! / 255);
 }
 
 class MemoryStorage {
@@ -176,9 +177,9 @@ async function runEmbed(args: EmbedArgs) {
   const pipeline = normalizePipelineFeatures({ contextualChunkPreambles: false, ...hosted, ...args.pipeline });
   if (args.privacyMode) pipeline.privacyMode = args.privacyMode;
   const run = {
-    id: args.runId, userId: "u1", orgId: args.orgId === undefined ? "o1" : args.orgId, workspaceId: "w1",
+    id: args.runId, userId: "u1", orgId: args.orgId === undefined ? "o1" : args.orgId, projectId: "w1",
     stage: "embed", status: "processing", pipeline, stats: {}, artifacts, spentCents: 0,
-  } as unknown as WorkspaceRun;
+  } as unknown as ProjectRun;
   const state = WorkflowState.create(run, [document]);
   for (const [hash, uri] of args.dedupHashes ?? []) state.contentHashes.set(hash, uri);
   if (args.reuse) state.store = { ...checkpointStore(args.reuse), ...args.storeExtras } as unknown as WorkflowState["store"];

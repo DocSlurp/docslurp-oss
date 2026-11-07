@@ -51,8 +51,9 @@ def validate_manifest(manifest):
 
 def evaluation_identity(root,scorers,measure_path,ocr_binary_hash,ocr_language_hash,render_version):
     versions={}
-    for command in ['pdftotext','pdfimages','qpdf','tesseract']:
-        r=subprocess.run([command,'--version'] if command in ['qpdf','tesseract'] else [command,'-v'],capture_output=True,timeout=10)
+    # OCR is the PP-OCR CLI, identified by ocr_binary_hash (the CLI) and ocr_language_hash (its pinned model manifest).
+    for command in ['pdftotext','pdfimages','qpdf']:
+        r=subprocess.run([command,'--version'] if command=='qpdf' else [command,'-v'],capture_output=True,timeout=10)
         versions[command]=(r.stdout+r.stderr).decode().splitlines()[0]
     return {'datasetHash':file_hash(root/'manifest.json'),'datasetCanonicalHash':identity_hash(json.loads((root/'manifest.json').read_text())),'measureHash':file_hash(measure_path),
             'contractHash':file_hash(Path(__file__)),

@@ -17,24 +17,24 @@ import type { EmbeddingArtifact } from "./embedding-runtime.js";
 import { indexableDocuments } from "../pipeline/pii-gate.js";
 import { allowHostedCall, openRouterTextCall } from "../lib/privacy-guard.js";
 import { textFallbackCost, textModelApiKey, textUsageLabels } from "../lib/text-model-route.js";
-import { chargeDocumentFeature } from "../pipeline/feature-charges.js";
+import { chargeFeatureForTextRead, textReadPages } from "../pipeline/feature-charges.js";
 import { runBounded } from "../lib/bounded-concurrency.js";
 
 /** Store surface graph enrichment writes through (the Postgres `Store`). */
 export interface KnowledgeGraphStore {
   /** Current relational chunks; reused embedding artifacts can contain old document IDs. */
-  loadDocumentGraphChunks(workspaceId: string, documentId: string): Promise<GraphChunk[]>;
+  loadDocumentGraphChunks(projectId: string, documentId: string): Promise<GraphChunk[]>;
   replaceDocumentGraph(input: ReplaceDocumentGraphInput): Promise<{ nodes: number; edges: number }>;
-  refreshWorkspaceCommunities(args: {
-    workspaceId: string;
+  refreshProjectCommunities(args: {
+    projectId: string;
     userId: string;
     runId: string | null;
     context: CommunitySummaryContext;
   }): Promise<CommunityRefreshResult>;
   /** Documents already extracted with this config; a re-run (e.g. retrying failed Documents) skips them. */
-  documentsWithGraph?(workspaceId: string, configHash: string, documentIds: readonly string[]): Promise<Set<string>>;
-  /** The workspace's own definition, used as scope when no domain is set. */
-  workspaceGraphScope(workspaceId: string): Promise<string>;
+  documentsWithGraph?(projectId: string, configHash: string, documentIds: readonly string[]): Promise<Set<string>>;
+  /** The project's own definition, used as scope when no domain is set. */
+  projectGraphScope(projectId: string): Promise<string>;
 }
 
 function graphStoreOf(state: WorkflowState): KnowledgeGraphStore | null {
@@ -45,10 +45,10 @@ function graphStoreOf(state: WorkflowState): KnowledgeGraphStore | null {
 }
 
 /**
- * Builds the workspace knowledge graph progressively: each document is
- * extracted and merged into the workspace graph as soon as it is read, so the
+ * Builds the project knowledge graph progressively: each document is
+ * extracted and merged into the project graph as soon as it is read, so the
  * graph grows while a large run is still going. Communities are re-clustered
- * across the whole workspace once the run's documents are in.
+ * across the whole project once the run's documents are in.
  */
 export class GraphEnrichStage implements Stage {
   readonly name = "graph-enrich";
@@ -62,7 +62,7 @@ export class GraphEnrichStage implements Stage {
   async run(state: WorkflowState, signal?: AbortSignal): Promise<void> {
     const pipeline = state.run.pipeline;
     if (!pipeline.graphRag && !pipeline.entityIndex && !pipeline.graphCommunitySummaries) return;
-    if (!state.run.workspaceId) return;
+    if (!state.run.projectId) return;
 
     const graphStore = graphStoreOf(state);
     const graphModel = resolvePipelineTextModel(pipeline, "graph-extraction", this.config.textGenerationModel);
@@ -84,7 +84,7 @@ export class GraphEnrichStage implements Stage {
       ? textModelApiKey(this.config.openRouterApiKey, communityModel)
       : undefined;
     const scope = graphConfig.domain
-      ?? (graphStore ? await graphStore.workspaceGraphScope(state.run.workspaceId) : "Workspace documents");
+      ?? (graphStore ? await graphStore.projectGraphScope(state.run.projectId) : "Project documents");
 
     const documents: Array<Record<string, unknown>> = [];
     let windows = 0;
@@ -92,14 +92,14 @@ export class GraphEnrichStage implements Stage {
     let fallbackDocuments = 0;
     let nodes = 0;
     let edges = 0;
-    const workspaceId = state.run.workspaceId;
+    const projectId = state.run.projectId;
 
     // A failed model extraction records a fallback hash, so it is not skipped here.
     const alreadyExtracted = graphStore?.documentsWithGraph
-      ? await graphStore.documentsWithGraph(workspaceId, configHash, documentIds)
+      ? await graphStore.documentsWithGraph(projectId, configHash, documentIds)
       : new Set<string>();
     const pending = indexableDocuments(state).filter((document) => !alreadyExtracted.has(document.id));
-    // Documents are independent model calls; graph writes serialize on the workspace lock.
+    // Documents are independent model calls; graph writes serialize on the project lock.
     await runBounded(pending.length, this.config.graphJobConcurrency ?? 4, async (index) => {
       const document = pending[index]!;
       const artifactUri = state.artifactLedger.readDocument(document.id, "embeddings");
@@ -107,9 +107,9 @@ export class GraphEnrichStage implements Stage {
       if (!key) return;
       // Reused embedding artifacts keep the source document's chunk IDs, while
       // reuse materializes new relational IDs. Graph mentions must point at the
-      // current document's rows, just as workspace graph rebuilds do.
+      // current document's rows, just as project graph rebuilds do.
       const chunks: GraphChunk[] = graphStore
-        ? await graphStore.loadDocumentGraphChunks(workspaceId, document.id)
+        ? await graphStore.loadDocumentGraphChunks(projectId, document.id)
         : ((await this.storage.getJson<EmbeddingArtifact>(key)).chunks ?? []).map((chunk) => ({
             id: chunk.id,
             text: chunk.text,
@@ -146,7 +146,7 @@ export class GraphEnrichStage implements Stage {
               outputTokens: usage.outputTokens,
               metadata: {
                 ...usage.metadata,
-                workspaceId,
+                projectId,
                 documentId: document.id,
                 depth: graphConfig.depth,
                 ...details,
@@ -157,17 +157,20 @@ export class GraphEnrichStage implements Stage {
       });
       windows += graph.windows;
       if (graph.llmFailed) fallbackDocuments += 1;
-      if (graph.source === "llm") {
-        llmDocuments += 1;
-        // Price card: knowledge graph per started 10 pages, once per document per run, only when the
-        // model extracted it (heuristic fallback graphs are free). Community summaries are included.
-        chargeDocumentFeature(state, document, "knowledgeGraph");
+      if (graph.source === "llm") llmDocuments += 1;
+      if (graph.charsAttempted > 0) {
+        // Pricing provider: the knowledge graph feature charge, once per document per run, when the model read the document.
+        // Community summaries are included. The price follows the text the model read: every window it answered, even when no
+        // answer parsed and the graph fell back to heuristics (the provider was paid to read them), the document's pages pro rata
+        // on that share, and at least the pages of text read (3,500 characters a page). A graph no model answered for is free.
+        chargeFeatureForTextRead(state, document, "knowledgeGraph", { chars: graph.charsAttempted, total: { chars: graph.charsTotal },
+          textPages: chunks.length ? textReadPages(chunks.reduce((sum, chunk) => sum + chunk.text.length, 0)) : undefined });
       }
 
       // Persist per document: search sees the graph grow during long runs.
       const written = graphStore
         ? await graphStore.replaceDocumentGraph({
-            workspaceId,
+            projectId,
             userId: state.run.userId,
             runId: state.run.id,
             documentId: document.id,
@@ -184,6 +187,10 @@ export class GraphEnrichStage implements Stage {
         relationships: graph.edges.length,
         chunks: chunks.length,
         windows: graph.windows,
+        charsRead: graph.charsRead,
+        charsAttempted: graph.charsAttempted,
+        charsTotal: graph.charsTotal,
+        truncated: graph.truncated,
         source: graph.source,
         llmFailed: graph.llmFailed,
         durationMs: graph.durationMs,
@@ -197,8 +204,8 @@ export class GraphEnrichStage implements Stage {
 
     const includeCommunities = pipeline.graphRag || pipeline.graphCommunitySummaries;
     const communities = includeCommunities && graphStore
-      ? await graphStore.refreshWorkspaceCommunities({
-          workspaceId: state.run.workspaceId,
+      ? await graphStore.refreshProjectCommunities({
+          projectId: state.run.projectId,
           userId: state.run.userId,
           runId: state.run.id,
           context: {
@@ -224,13 +231,13 @@ export class GraphEnrichStage implements Stage {
                 }).costCents,
                 inputTokens: usage.inputTokens,
                 outputTokens: usage.outputTokens,
-                metadata: { ...usage.metadata, workspaceId, ...details },
+                metadata: { ...usage.metadata, projectId, ...details },
               });
             },
           },
         })
       : null;
-    const artifactKey = `${runArtifactRoot(state.run, state.run.userId)}/graph/workspace-graph.json`;
+    const artifactKey = `${runArtifactRoot(state.run, state.run.userId)}/graph/project-graph.json`;
     await this.storage.putJson(artifactKey, {
       config: graphConfig,
       configHash,
@@ -241,7 +248,7 @@ export class GraphEnrichStage implements Stage {
     state.artifacts["knowledge-graph"] = this.storage.uri(artifactKey);
     state.run.artifacts["knowledge-graph"] = this.storage.uri(artifactKey);
 
-    const metadata = { workspaceId: state.run.workspaceId };
+    const metadata = { projectId: state.run.projectId };
     state.pendingPerformance.push(
       { scope: "run", stageName: this.name, metric: "graph-node-count", value: nodes, unit: "node", tags: ["graph", "entity"], metadata },
       { scope: "run", stageName: this.name, metric: "graph-edge-count", value: edges, unit: "edge", tags: ["graph", "relationship"], metadata },

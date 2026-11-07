@@ -45,7 +45,7 @@ function actorForApiKey(keyId: string, rateLimitRpm: number | null = null, extra
       scopes: ["search"],
       rateLimitRpm,
       rateLimitPpd: 10_000,
-      rateLimits: [], workspaceIds: [],
+      rateLimits: [], projectIds: [],
       ...extra,
     },
   };
@@ -579,9 +579,9 @@ describe("api rate limit middleware", () => {
     expect(classifyRateLimitCategory("POST", "/v1/search/chat")).toBe("search");
     expect(classifyRateLimitCategory("POST", "/v1/chat")).toBe("chat-ai");
     expect(classifyRateLimitCategory("POST", "/v1/chat/completions")).toBe("chat-ai");
-    expect(classifyRateLimitCategory("POST", "/v1/workspaces/ws-1/chat")).toBe("chat-ai");
+    expect(classifyRateLimitCategory("POST", "/v1/projects/ws-1/chat")).toBe("chat-ai");
     expect(classifyRateLimitCategory("GET", "/v1/documents/doc-1")).toBe("read");
-    expect(classifyRateLimitCategory("PATCH", "/v1/workspaces/ws-1")).toBe("write");
+    expect(classifyRateLimitCategory("PATCH", "/v1/projects/ws-1")).toBe("write");
     expect(classifyRateLimitCategory("POST", "/webhooks/stripe")).toBe("webhook");
   });
 });

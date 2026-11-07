@@ -107,10 +107,10 @@ describe("publicApiErrorDetails", () => {
 
 describe("safeErrorResponse for the native API", () => {
   it("rewrites a legacy handler body into the envelope, keeping a closed code, field paths and headers", async () => {
-    const legacy = Response.json({ error: "Tenant acme: document 42 missing", code: "workspace_not_found", issues: [{ path: ["q"], message: "secret" }] },
+    const legacy = Response.json({ error: "Tenant acme: document 42 missing", code: "project_not_found", issues: [{ path: ["q"], message: "secret" }] },
       { status: 404, headers: { "retry-after": "5", "x-docslurp-spend": "kept" } });
     const res = await safeErrorResponse(legacy, "req-n", undefined, true);
-    expect(await res.json()).toEqual({ error: { code: "workspace_not_found", message: API_ERROR_PUBLIC_MESSAGES.workspace_not_found, requestId: "req-n",
+    expect(await res.json()).toEqual({ error: { code: "project_not_found", message: API_ERROR_PUBLIC_MESSAGES.project_not_found, requestId: "req-n",
       details: { issues: [{ path: "q", message: PUBLIC_ERROR_MESSAGES.invalid, code: "invalid_value" }] } } });
     expect(res.headers.get("retry-after")).toBe("5");
     expect(res.headers.get("x-docslurp-spend")).toBe("kept");
@@ -124,8 +124,8 @@ describe("safeErrorResponse for the native API", () => {
     expect(await nested.json()).toMatchObject({ error: { code: "invalid_request", details: { issues: [{ path: "name" }] } } });
   });
   it("leaves the legacy shape alone when not native", async () => {
-    const res = await safeErrorResponse(Response.json({ error: "x", code: "workspace_not_found" }, { status: 404 }), "r");
-    expect(await res.json()).toMatchObject({ code: "workspace_not_found", requestId: "r" });
+    const res = await safeErrorResponse(Response.json({ error: "x", code: "project_not_found" }, { status: 404 }), "r");
+    expect(await res.json()).toMatchObject({ code: "project_not_found", requestId: "r" });
   });
 });
 
@@ -163,7 +163,7 @@ describe("domain error codes", () => {
   it("every code a route can surface has reviewed public copy", async () => {
     const { API_ERROR_CODES, API_ERROR_PUBLIC_MESSAGES } = await import("../api-error.js");
     for (const code of API_ERROR_CODES) expect(API_ERROR_PUBLIC_MESSAGES[code], code).toMatch(/\S/);
-    for (const code of ["workspace_scope_forbidden", "no_stages_to_run", "source_not_reusable", "missing_stage_artifacts", "workspace_forbidden"]) {
+    for (const code of ["project_scope_forbidden", "no_stages_to_run", "source_not_reusable", "missing_stage_artifacts", "project_forbidden"]) {
       expect(API_ERROR_CODES).toContain(code);
     }
   });

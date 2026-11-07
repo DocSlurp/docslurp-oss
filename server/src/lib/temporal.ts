@@ -33,7 +33,7 @@ import {
   type PipelineFeatures,
   type PipelineRunStage,
   type WorkerCapability,
-  type WorkspaceRunTemporal,
+  type ProjectRunTemporal,
 } from "@docslurp/shared";
 import { formatTemporalConnectionError } from "@docslurp/shared/temporal-connection";
 import { createTemporalSecurityConfig } from "@docslurp/shared/temporal-security";
@@ -190,7 +190,7 @@ export function resolvePageConcurrency(envValue: string | undefined, orgWorkerSl
 }
 
 interface RunSlotScope {
-  /** Org id, or workspace:<id> for runs without an org — matches worker_slot_leases.org_key. */
+  /** Org id, or project:<id> for runs without an org — matches worker_slot_leases.org_key. */
   orgKey: string;
   workerSlots: number | null;
 }
@@ -198,8 +198,8 @@ interface RunSlotScope {
 async function runSlotScope(runId: string): Promise<RunSlotScope | null> {
   try {
     const [row] = await sql<{ org_key: string; worker_slots: number | null }[]>`
-      select coalesce(r.org_id, 'workspace:' || r.workspace_id) as org_key, o.worker_slots
-      from workspace_runs r
+      select coalesce(r.org_id, 'project:' || r.project_id) as org_key, o.worker_slots
+      from project_runs r
       left join organizations o on o.id = r.org_id
       where r.id = ${runId}
       limit 1
@@ -530,7 +530,7 @@ export async function describePipelineWorkflow(
 
 export async function getPipelineTemporalSnapshot(
   runId: string
-): Promise<WorkspaceRunTemporal | null> {
+): Promise<ProjectRunTemporal | null> {
   const queriedAt = new Date().toISOString();
   const [description, progress] = await Promise.all([
     describePipelineWorkflow(runId),

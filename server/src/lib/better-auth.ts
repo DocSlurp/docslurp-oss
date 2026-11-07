@@ -8,7 +8,6 @@ import { notifySignup } from "./signup-notifications.js";
 import { ensureUserAndOrganization } from "../services/account-provisioning.js";
 import { cookieHeaderFromAuthContext, recordSignupAttribution } from "../services/signup-attribution.js";
 import { applyAccountKindRules } from "../services/account-kind.js";
-import { admitConfiguredAdminUser } from "./admin-emails.js";
 import { createAuthEmailOptions, sendAuthEmailCode } from "./auth-email.js";
 import { breachedPasswordPlugins, resolveBreachedPasswordPolicy } from "./auth-breached-password.js";
 import { databaseAuthBudgetStore, emailRecipientLimiter, emailRecipientLimitsEnabled } from "./auth-rate-limits.js";
@@ -220,7 +219,6 @@ export const auth = betterAuth({
           if (result.rows[0]) {
             await ensureUserAndOrganization(pool, { id: session.userId, name: result.rows[0].name ?? "" });
           }
-          await admitConfiguredAdminUser(pool, session.userId);
           // Staff is recognized once the address is verified; analytics only, never blocks sign-in.
           await applyAccountKindRules(pool, [session.userId])
             .catch(error => console.warn("[account-kind] not applied", error instanceof Error ? error.message : error));

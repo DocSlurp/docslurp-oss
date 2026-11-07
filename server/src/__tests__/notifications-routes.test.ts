@@ -8,9 +8,9 @@ vi.mock("../services/notifications.js", () => ({
   updateNotificationPreferences: vi.fn()
 }));
 
-vi.mock("../services/workspaces.js", () => ({
-  resolveWorkspaceRef: vi.fn(async () => null), findWorkspaceForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })),
-  getWorkspace: vi.fn(async (id: string) => ({ id, orgId: "org-1", userId: "user-1" })),
+vi.mock("../services/projects.js", () => ({
+  resolveProjectRef: vi.fn(async () => null), findProjectForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })),
+  getProject: vi.fn(async (id: string) => ({ id, orgId: "org-1", userId: "user-1" })),
 }));
 
 const { listNotificationInbox, markAllNotificationsRead, markNotificationRead } = await import("../services/notifications.js");
@@ -36,13 +36,13 @@ describe("notificationsRoutes", () => {
     vi.mocked(listNotificationInbox).mockResolvedValue({ deliveries: [], unreadCount: 0 });
 
     const response = await app.request(
-      "/inbox?workspace=ws-1&event=plausibility.warning&limit=10"
+      "/inbox?project=ws-1&event=plausibility.warning&limit=10"
     );
 
     expect(response.status).toBe(200);
     expect(listNotificationInbox).toHaveBeenCalledWith({
       userId: "user-1",
-      workspaceId: "ws-1",
+      projectId: "ws-1",
       event: "plausibility.warning",
       limit: 10
     });
@@ -53,7 +53,7 @@ describe("notificationsRoutes", () => {
       id: "delivery-1",
       userId: "user-1",
       orgId: null,
-      workspaceId: null,
+      projectId: null,
       eventType: "run.completed",
       provider: "console",
       recipient: "user@example.com",
@@ -82,13 +82,13 @@ describe("notificationsRoutes", () => {
       headers: {
         "content-type": "application/json"
       },
-      body: JSON.stringify({ workspace: "ws-1" })
+      body: JSON.stringify({ project: "ws-1" })
     });
 
     expect(response.status).toBe(200);
     expect(markAllNotificationsRead).toHaveBeenCalledWith({
       userId: "user-1",
-      workspaceId: "ws-1"
+      projectId: "ws-1"
     });
   });
 });

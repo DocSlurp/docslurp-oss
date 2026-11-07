@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_OPENROUTER_VISION_MODEL, defaultPageRouterConfig, type Assignment, type PageRouterMode, type RoutePlan } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import type { PdfRasterCache } from "../pipeline/pdf-asset-cache.js";
 import type { CommandRunner } from "../tools/runner.js";
@@ -50,7 +50,7 @@ function stateWith(plan: RoutePlan | null, mode: PageRouterMode | undefined, ext
       pageRouter: { ...defaultPageRouterConfig, marginFloor: 0, mode },
       ...extra,
     },
-  } as unknown as WorkspaceRun, [document]);
+  } as unknown as ProjectRun, [document]);
   state.docConcurrency = 1;
   if (plan) state.artifactLedger.recordDocument("doc", "page-route-plan", "s3://bucket/user/run/page-route/doc.json");
   return state;
@@ -140,7 +140,7 @@ describe("vision-extract with the page router", () => {
     expect(storage.putJson).toHaveBeenCalledWith("user/run/page-route/doc.validation.json", expect.objectContaining({ runId: "run" }));
   });
 
-  it("does not route in off/shadow, without a plan, or when the workspace forces all pages", async () => {
+  it("does not route in off/shadow, without a plan, or when the project forces all pages", async () => {
     const plan = await planWith([asg(2, hostedVlms[0]!.id, "extract-text")]);
     const shadowPlan = { ...plan, mode: "shadow" as const };
     const load = (s: VisionExtractStage, st: WorkflowState) =>
@@ -170,7 +170,7 @@ describe("vision-extract with the page router", () => {
       asg(3, b.id, "chart-data"),
       asg(4, a.id, "extract-text"),
       asg(4, b.id, "table"),
-      asg(5, "ocr:tesseract", "ocr"),
+      asg(5, "ocr:ppocr", "ocr"),
     ]);
     const { stage, state } = make(plan);
     vi.spyOn(stage as unknown as { visionAllowed(): Promise<boolean> }, "visionAllowed").mockResolvedValue(true);

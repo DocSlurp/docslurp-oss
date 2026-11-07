@@ -56,7 +56,7 @@ describe("retrieval adapters", () => {
       textQuery: "contract agreement",
       queryVector: [1, 2, 3],
       userId: "user-1",
-      workspaceId: "ws-1",
+      projectId: "ws-1",
       options: {
         enableGraphExpansion: true,
         enableCommunityExpansion: true,
@@ -97,7 +97,7 @@ describe("retrieval adapters", () => {
       textQuery: "contract",
       queryVector: null,
       userId: "user-1",
-      workspaceId: "ws-1",
+      projectId: "ws-1",
       options: {},
     });
 

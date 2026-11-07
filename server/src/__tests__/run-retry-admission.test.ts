@@ -1,11 +1,11 @@
 import { beforeEach, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
-  run: { id:"retry-r", orgId:"retry-o", workspaceId:"retry-w", status:"completed", pipeline:{speedBoost:true} },
+  run: { id:"retry-r", orgId:"retry-o", projectId:"retry-w", status:"completed", pipeline:{speedBoost:true} },
   prepare: vi.fn(), start: vi.fn(), lease: vi.fn(), admit: vi.fn(),
 }));
 vi.mock("../db.js",()=>({sql:Object.assign(vi.fn(async()=>[{}]),{array:(v:unknown)=>v})}));
-vi.mock("../services/organizations.js",()=>({listAccessibleWorkspaceIds:async()=>['retry-w'],getWorkspaceAccess:async()=>({}),canContributeToWorkspace:()=>true}));
-vi.mock("../services/run-records.js",async original=>({...await original<object>(),mapWorkspaceRun:()=>mocks.run}));
+vi.mock("../services/organizations.js",()=>({listAccessibleProjectIds:async()=>['retry-w'],getProjectAccess:async()=>({}),canContributeToProject:()=>true}));
+vi.mock("../services/run-records.js",async original=>({...await original<object>(),mapProjectRun:()=>mocks.run}));
 vi.mock("../services/usage-attribution.js",async original=>({...await original<object>(),runUsageCostSummaries:async()=>new Map()}));
 vi.mock("../services/run-lifecycle.js",async original=>({...await original<object>(),runLifecycle:{prepareRetry:mocks.prepare,start:mocks.start}}));
 vi.mock("../services/billing/spend-guard.js",async original=>({...await original<object>(),admitRunSpend:mocks.admit}));
@@ -13,7 +13,7 @@ const { retryRun } = await import("../services/runs.js");
 beforeEach(()=>{
   vi.clearAllMocks();
   mocks.run.pipeline.speedBoost = true;
-  mocks.admit.mockImplementation(async (_org,_workspace,callback)=>{const result=await callback({});await mocks.lease();return result;});
+  mocks.admit.mockImplementation(async (_org,_project,callback)=>{const result=await callback({});await mocks.lease();return result;});
 });
 it("rolls back the no-op retry before lease acquisition or workflow start",async()=>{
   mocks.prepare.mockResolvedValue('not-retryable');

@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { PII_DETECTORS } from "./pii-detectors.js";
+
 export const piiPatternTypeSchema = z.enum([
   "ssn",
   "credit-card",
@@ -14,6 +16,12 @@ export const piiPatternTypeSchema = z.enum([
   "iban",
   "passport",
   "drivers-license",
+  "aws-access-key",
+  "stripe-api-key",
+  "slack-token",
+  "google-api-key",
+  "jwt",
+  "private-key",
 ]);
 export type PiiPatternType = z.infer<typeof piiPatternTypeSchema>;
 
@@ -33,6 +41,9 @@ export const piiPolicySchema = z.object({
     "anthropic-api-key",
     "github-token",
     "generic-api-key",
+    "aws-access-key",
+    "stripe-api-key",
+    "private-key",
   ]),
   action: piiPolicyActionSchema.default("flag_for_review"),
   allowlistPatterns: z.array(z.string()).default([]),
@@ -45,30 +56,21 @@ export type PiiMatch = {
   patternType: PiiPatternType;
   matchedPrefix: string;  // keyed by legacy DB column; stores a non-reversible match fingerprint
   pageNumber: number | null;
+  /**
+   * UTF-8 byte offset of the match within the scanned text (the string the
+   * scanner was given, not the source file). This is the unit of
+   * `pii_detections.byte_offset`.
+   */
   byteOffset: number;
+  /** UTF-16 code-unit index of the match within the scanned string; what `redactPii` slices with. */
+  charOffset: number;
+  /** Length of the match in UTF-16 code units. */
   length: number;
 };
 
 export type PiiScanResult = {
   matches: PiiMatch[];
   redactedContent?: string;
-};
-
-// Regex patterns for each PII type
-const PATTERNS: Record<PiiPatternType, RegExp> = {
-  "ssn": /\b\d{3}[-\s]?\d{2}[-\s]?\d{4}\b/g,
-  "credit-card": /\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|3(?:0[0-5]|[68][0-9])[0-9]{11}|6(?:011|5[0-9]{2})[0-9]{12}|(?:2131|1800|35\d{3})\d{11})\b/g,
-  "phone": /\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g,
-  "email": /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g,
-  "openai-api-key": /\bsk-[A-Za-z0-9\-_]{20,}\b/g,
-  "anthropic-api-key": /\bsk-ant-[A-Za-z0-9\-_]{20,}\b/g,
-  "github-token": /\bghp_[A-Za-z0-9]{36}\b|\bgho_[A-Za-z0-9]{36}\b|\bghs_[A-Za-z0-9]{36}\b/g,
-  "generic-api-key": /\b(?:api[_-]?key|apikey|secret[_-]?key|access[_-]?token)\s*[=:]\s*['"]?([A-Za-z0-9\-_.]{16,})['"]?/gi,
-  "ip-address": /\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b/g,
-  "bank-account": /\b[0-9]{8,17}\b(?=.*\b(?:account|acct|routing|aba)\b)/gi,
-  "iban": /\b[A-Z]{2}[0-9]{2}[A-Z0-9]{4}[0-9]{7}(?:[A-Z0-9]?){0,16}\b/g,
-  "passport": /\b[A-Z]{1,2}[0-9]{6,9}\b/g,
-  "drivers-license": /\b[A-Z]{1,2}[0-9]{5,9}\b/g,
 };
 
 const SHA256_INITIAL_HASH = [
@@ -178,7 +180,7 @@ export type PiiScanOptions = {
   /** Page the scanned text came from, recorded on each match. */
   pageNumber?: number | null;
   /**
-   * Workspace allowlist (`piiPolicy.allowlistPatterns`). A detected value is
+   * Project allowlist (`piiPolicy.allowlistPatterns`). A detected value is
    * suppressed when it fully matches any entry. Entries are case-insensitive
    * regular expressions; an entry that is not a valid expression is compared
    * as a case-insensitive literal. Entries are only ever tested against the
@@ -212,38 +214,68 @@ export function compilePiiAllowlist(entries: readonly string[] = []): PiiAllowli
   return (value) => matchers.some((matches) => matches(value));
 }
 
+/** UTF-8 bytes of content[from, to), counting a lone surrogate as the 3-byte U+FFFD an encoder writes for it. */
+function utf8Length(content: string, from: number, to: number): number {
+  let bytes = 0;
+  for (let index = from; index < to; index += 1) {
+    const code = content.charCodeAt(index);
+    if (code < 0x80) bytes += 1;
+    else if (code < 0x800) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff && index + 1 < to) {
+      const next = content.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else bytes += 3;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+
+/** Separators dropped so an allowlist entry for "4111111111111111" also covers "4111 1111 1111 1111". */
+const compactValue = (value: string) => value.replace(/[\s-]/g, "");
+
 /**
  * Scan text content for PII patterns.
  * Returns matches with non-reversible fingerprints (never the full match or visible prefix).
- * Values matching the allowlist are dropped.
+ * Values matching the allowlist are dropped. A pattern this build has no detector for throws:
+ * an unknown name must never turn into "nothing to look for".
  */
 export function scanForPii(
   content: string,
   patterns: readonly PiiPatternType[],
   options: PiiScanOptions = {}
 ): PiiMatch[] {
-  const matches: PiiMatch[] = [];
   const pageNumber = options.pageNumber ?? null;
   const allowlisted = compilePiiAllowlist(options.allowlistPatterns ?? []);
+  const found: Array<{ patternType: PiiPatternType; start: number; end: number; value: string }> = [];
 
   for (const patternType of patterns) {
-    const regex = new RegExp(PATTERNS[patternType].source, PATTERNS[patternType].flags);
-    let match: RegExpExecArray | null;
-
-    while ((match = regex.exec(content)) !== null) {
-      const fullMatch = match[0];
-      if (allowlisted(fullMatch)) continue;
-      matches.push({
-        patternType,
-        matchedPrefix: fingerprintPiiMatch(patternType, fullMatch),
-        pageNumber,
-        byteOffset: match.index,
-        length: fullMatch.length,
-      });
+    const detect = PII_DETECTORS[patternType];
+    if (!detect) throw new Error(`PII scan has no detector for pattern "${patternType}"`);
+    for (const span of detect(content)) {
+      const value = content.slice(span.start, span.end);
+      if (allowlisted(value) || allowlisted(compactValue(value))) continue;
+      found.push({ patternType, start: span.start, end: span.end, value });
     }
   }
 
-  return matches.sort((a, b) => a.byteOffset - b.byteOffset || b.length - a.length);
+  found.sort((a, b) => a.start - b.start || b.end - a.end);
+  // Byte offsets are computed in one forward pass over the sorted starts.
+  let cursor = 0;
+  let bytes = 0;
+  return found.map((hit) => {
+    bytes += utf8Length(content, cursor, hit.start);
+    cursor = hit.start;
+    return {
+      patternType: hit.patternType,
+      matchedPrefix: fingerprintPiiMatch(hit.patternType, hit.value),
+      pageNumber,
+      byteOffset: bytes,
+      charOffset: hit.start,
+      length: hit.end - hit.start,
+    };
+  });
 }
 
 /**
@@ -254,11 +286,11 @@ export function scanForPii(
 export function redactPii(content: string, matches: readonly PiiMatch[]): string {
   if (matches.length === 0) return content;
 
-  const ordered = [...matches].sort((a, b) => a.byteOffset - b.byteOffset || b.length - a.length);
+  const ordered = [...matches].sort((a, b) => a.charOffset - b.charOffset || b.length - a.length);
   const spans: Array<{ start: number; end: number; patternType: PiiPatternType }> = [];
   for (const match of ordered) {
-    const start = match.byteOffset;
-    const end = match.byteOffset + match.length;
+    const start = match.charOffset;
+    const end = match.charOffset + match.length;
     const last = spans[spans.length - 1];
     if (last && start < last.end) {
       last.end = Math.max(last.end, end);

@@ -49,9 +49,9 @@ beforeAll(async () => {
   vi.doMock("../services/connectors/index.js", () => ({
     getConnectorAdapter: () => ({ listFiles, downloadFile: async () => Buffer.from("%PDF") }),
   }));
-  vi.doMock("../services/workspace-intake.js", async (importOriginal) => ({
-    ...(await importOriginal<typeof import("../services/workspace-intake.js")>()),
-    intakeIntoWorkspace: async (request: { items: AsyncIterable<unknown> }) => {
+  vi.doMock("../services/project-intake.js", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../services/project-intake.js")>()),
+    intakeIntoProject: async (request: { items: AsyncIterable<unknown> }) => {
       const items: unknown[] = [];
       for await (const item of request.items) items.push(item);
       intake(items);
@@ -61,8 +61,8 @@ beforeAll(async () => {
   ({ runConnectorSync } = await import("../routes/connectors.js"));
   await sql`insert into "user" (id, name, email) values ('u', 'U', 'u@example.test')`;
   await sql`insert into organizations (id, name, slug, created_by_user_id) values ('o', 'O', 'o', 'u')`;
-  await sql`insert into workspaces (id, org_id, user_id, name) values ('w', 'o', 'u', 'W')`;
-  await sql`insert into workspace_connectors (id, workspace_id, type, name, credentials_encrypted) values ('c', 'w', 's3', 'B', ${encrypted()})`;
+  await sql`insert into projects (id, org_id, user_id, name) values ('w', 'o', 'u', 'W')`;
+  await sql`insert into project_connectors (id, project_id, type, name, credentials_encrypted) values ('c', 'w', 's3', 'B', ${encrypted()})`;
 }, 120_000);
 
 afterAll(async () => { await sql?.end(); await stop?.(); });
@@ -76,14 +76,14 @@ beforeEach(async () => {
 async function sync() {
   await sql`insert into connector_sync_log (id, connector_id) values (${`log-${Math.random()}`}, 'c') `;
   const [log] = await sql<{ id: string }[]>`select id from connector_sync_log order by started_at desc limit 1`;
-  const [row] = await sql`select * from workspace_connectors where id = 'c'`;
+  const [row] = await sql`select * from project_connectors where id = 'c'`;
   await runConnectorSync(row as never, log!.id);
 }
 
 async function seedDocument(etag: string) {
   // Same shape the connector intake writes into documents.metadata.
   await sql`
-    insert into documents (id, org_id, user_id, workspace_id, filename, mime_type, source_key, status, metadata)
+    insert into documents (id, org_id, user_id, project_id, filename, mime_type, source_key, status, metadata)
     values ('d1', 'o', 'u', 'w', 'a.pdf', 'application/pdf', 'u/raw/a.pdf', 'completed',
       ${sql.json({ connectorId: "c", connectorFileId: "f1", connectorPath: "docs/a.pdf", connectorEtag: etag })})
   `;

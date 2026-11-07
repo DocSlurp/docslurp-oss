@@ -4,6 +4,8 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { csvCellText, textBodyPages } from "../lib/office-page-count.js";
+
 const python = process.env.OFFICE_TEST_PYTHON ?? "python3";
 const scripts = path.resolve(import.meta.dirname, "../../scripts");
 const hasOfficeLibs = spawnSync(python, ["-c", "import pptx, openpyxl"]).status === 0;
@@ -36,4 +38,39 @@ describe.skipIf(!hasOfficeLibs)("office sidecar scripts on tricky inputs", () =>
     expect(orders.csv.trim().split("\n")).toHaveLength(1); // header row only
     expect(book.sheets.find(s => s.name === "Wide")!.truncated).toBe(true); // A1:XFD1048576 does not run for the whole timeout
   });
+
+  it("writes a run of empty rows as one blank line, so a stray cell far down a sheet is a page, not thousands", () => {
+    const book = path.join(dir, "stray.xlsx");
+    // An 11-cell sheet with a note at A100000: the old sidecar wrote 99,999 rows of commas for the gap (1,667 pages by the 60-line rule).
+    execFileSync(python, ["-c", [
+      "import openpyxl, sys",
+      "wb = openpyxl.Workbook(); ws = wb.active",
+      "for row in range(1, 11): ws.cell(row=row, column=1, value=f'cell {row}')",
+      "ws['A100000'] = 'a note'",
+      "wb.save(sys.argv[1])",
+    ].join("\n"), book]);
+    run("xlsx_extract.py", book, `${book}.json`);
+    const sheet = (JSON.parse(readFileSync(`${book}.json`, "utf8")) as { sheets: { csv: string }[] }).sheets[0]!;
+    expect(sheet.csv.split(/\r?\n/).length).toBeLessThan(20);
+    expect(textBodyPages([sheet.csv])).toBe(1);
+  });
+
+  it("ends each row at its last filled cell, so a stray cell at XFD1 does not pad every row to 16,384 columns", () => {
+    const book = path.join(dir, "far.xlsx");
+    // The council's 12 KB file that measured 4,688 pages: 1,000 rows in column A and an "x" at XFD1.
+    execFileSync(python, ["-c", [
+      "import openpyxl, sys",
+      "wb = openpyxl.Workbook(); ws = wb.active",
+      "for row in range(1, 1001): ws.cell(row=row, column=1, value=f'row {row}')",
+      "ws['XFD1'] = 'x'",
+      "wb.save(sys.argv[1])",
+    ].join("\n"), book]);
+    run("xlsx_extract.py", book, `${book}.json`);
+    const sheet = (JSON.parse(readFileSync(`${book}.json`, "utf8")) as { sheets: { csv: string; lastCol: number }[] }).sheets[0]!;
+    const lines = sheet.csv.trim().split(/\r?\n/);
+    expect(lines[0]!.endsWith(",x")).toBe(true); // the far cell is kept where it is
+    expect(lines.slice(1).every((line) => !line.includes(","))).toBe(true);
+    expect(sheet.lastCol).toBe(16_384);
+    expect(textBodyPages([csvCellText(sheet.csv)])).toBe(17);
+  }, 30_000); // openpyxl writes and reads a 16,384-column sheet: about a second alone, longer beside the rest of the suite
 });

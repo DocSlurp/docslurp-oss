@@ -22,7 +22,7 @@ export function recordUsageReceipt(event: { id?: string; provider: string; model
   if (typeof event.inputTokens === "number") attributes["docslurp.usage.input_tokens"] = event.inputTokens;
   if (typeof event.outputTokens === "number") attributes["docslurp.usage.output_tokens"] = event.outputTokens;
   if (typeof providerCost === "number" && Number.isFinite(providerCost)) attributes["docslurp.usage.provider_cost_usd"] = providerCost / 100;
-  for (const key of ["requestId", "runId", "documentId", "workspaceId", "orgId", "sessionId", "providerRequestId", "generationId", "traceId", "spanId"]) {
+  for (const key of ["requestId", "runId", "documentId", "projectId", "orgId", "sessionId", "providerRequestId", "generationId", "traceId", "spanId"]) {
     if (typeof metadata[key] === "string") attributes[`docslurp.${key}`] = metadata[key];
   }
   startDependencySpan("usage.receipt", attributes).end();

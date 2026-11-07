@@ -26,8 +26,8 @@ import { fleetSupportsNow, taskQueueForOrgKey } from "../worker-fleet.js";
  *
  * An org may spend while
  *  - available credits (prepaid balance - pending debits) are above 0,
- *  - neither the workspace nor the org is paused by its monthly budget, and
- *  - the workspace belongs to the org (entitlement; see spendBlockReason).
+ *  - neither the project nor the org is paused by its monthly budget, and
+ *  - the project belongs to the org (entitlement; see spendBlockReason).
  * The rule is the `org_spend_status()` SQL function (migration 0044), which the
  * worker's mid-run balance check reads too.
  *
@@ -62,7 +62,7 @@ export type SpendKind = "job" | "interactive";
 
 export type SpendBlockedCode =
   | "credit_exhausted"
-  | "workspace_budget_paused"
+  | "project_budget_paused"
   | "org_budget_paused"
   | "minimum_credit_required"
   | "plan_not_entitled";
@@ -94,9 +94,9 @@ export interface SpendStatus {
   autoTopUpOn?: boolean;
   available: number;
   reserved: number;
-  workspaceBudgetPaused: boolean;
+  projectBudgetPaused: boolean;
   orgBudgetPaused: boolean;
-  workspaceInOrg: boolean;
+  projectInOrg: boolean;
   /** The org received credits at least once (may overdraw interactively). */
   hasCreditGrants?: boolean;
 }
@@ -120,7 +120,7 @@ export function spendGuardsSkipped(env: NodeJS.ProcessEnv = process.env): boolea
 
 export async function loadSpendStatus(
   orgId: string | null | undefined,
-  workspaceId: string | null | undefined,
+  projectId: string | null | undefined,
   options: { client?: Client; runReserveCredits?: number } = {},
 ): Promise<SpendStatus | null> {
   const client = (options.client ?? sql) as SqlClient;
@@ -130,16 +130,16 @@ export async function loadSpendStatus(
     auto_top_up_on: boolean | null;
     available: string | number;
     reserved: string | number;
-    workspace_budget_paused: boolean;
+    project_budget_paused: boolean;
     org_budget_paused: boolean;
-    workspace_in_org: boolean;
+    project_in_org: boolean;
     has_credit_grants: boolean | null;
   }[]>`
     select s.*, org_has_credit_grants(s.org_id) as has_credit_grants,
       (select o.auto_recharge_enabled from organizations o where o.id = s.org_id) as auto_top_up_on
     from org_spend_status(
       ${orgId ?? null}::text,
-      ${workspaceId ?? null}::text,
+      ${projectId ?? null}::text,
       ${options.runReserveCredits ?? 0}::numeric
     ) s
   `;
@@ -150,9 +150,9 @@ export async function loadSpendStatus(
     autoTopUpOn: row.auto_top_up_on === true,
     available: Number(row.available),
     reserved: Number(row.reserved),
-    workspaceBudgetPaused: row.workspace_budget_paused,
+    projectBudgetPaused: row.project_budget_paused,
     orgBudgetPaused: row.org_budget_paused,
-    workspaceInOrg: row.workspace_in_org,
+    projectInOrg: row.project_in_org,
     hasCreditGrants: row.has_credit_grants === true,
   };
 }
@@ -163,20 +163,20 @@ export function spendBlockReason(
   kind: SpendKind = "job",
   config: ChatCreditReserveConfig = resolveChatCreditReserveConfig(),
 ): { code: SpendBlockedCode; message: string } | null {
-  // Entitlement: a billing org that owns the workspace. Nothing else gates AI
+  // Entitlement: a billing org that owns the project. Nothing else gates AI
   // features: starter orgs spend their starter credits like anyone else.
-  if (!status || !status.workspaceInOrg) {
+  if (!status || !status.projectInOrg) {
     return {
       code: "plan_not_entitled",
-      message: "This workspace has no billing organization, so it cannot run AI processing.",
+      message: "This project has no billing organization, so it cannot run AI processing.",
     };
   }
-  if (status.workspaceBudgetPaused) {
+  if (status.projectBudgetPaused) {
     return {
-      code: "workspace_budget_paused",
+      code: "project_budget_paused",
       message:
-        "This workspace has reached its monthly budget cap and AI processing is paused. " +
-        "Increase the budget in workspace settings to resume.",
+        "This project has reached its monthly budget cap and AI processing is paused. " +
+        "Increase the budget in project settings to resume.",
     };
   }
   if (status.orgBudgetPaused) {
@@ -223,7 +223,7 @@ export function spendBlockReason(
  */
 async function admitInteractive(
   status: SpendStatus,
-  workspaceId: string | null | undefined,
+  projectId: string | null | undefined,
   options: { client?: Client; hold?: boolean },
   config: ChatCreditReserveConfig,
 ): Promise<{ code: SpendBlockedCode; message: string } | null> {
@@ -235,7 +235,7 @@ async function admitInteractive(
   const admit = async (tx: SqlClient) => {
     const [row] = await tx<{ admitted: boolean; available: string | number; held: string | number }[]>`
       select admitted, available, held from admit_interactive_spend(
-        ${status.orgId}::text, ${workspaceId ?? null}::text,
+        ${status.orgId}::text, ${projectId ?? null}::text,
         ${allowance}::numeric, ${hold}::numeric, ${config.holdTtlSeconds}::int
       )
     `;
@@ -259,7 +259,7 @@ async function admitInteractive(
 
 /**
  * Throw SpendBlockedError (HTTP 402) unless the org may spend. Pass
- * `workspaceId` whenever the spend belongs to one; `orgId` may be omitted then.
+ * `projectId` whenever the spend belongs to one; `orgId` may be omitted then.
  * `kind` defaults to the strict "job" rule; user-facing chat and search pass
  * "interactive". `hold: false` checks without taking an interactive hold,
  * for pre-checks (a 402 before a stream opens) and cheap optional calls whose
@@ -275,27 +275,27 @@ export interface SpendCheckOptions {
 
 export async function assertCanSpend(
   orgId: string | null | undefined,
-  workspaceId?: string | null,
+  projectId?: string | null,
   options: SpendCheckOptions = {},
 ): Promise<void> {
   if (spendGuardsSkipped()) return;
-  const reason = await spendDecision(orgId, workspaceId, options);
+  const reason = await spendDecision(orgId, projectId, options);
   if (reason) throw new SpendBlockedError(reason.message, reason.code, reason.autoTopUpOn === true, reason.details);
 }
 
 /** Non-throwing form, for paths that degrade instead of failing (search strategies). */
 export async function canSpend(
   orgId: string | null | undefined,
-  workspaceId?: string | null,
+  projectId?: string | null,
   options: Omit<SpendCheckOptions, "client"> = {},
 ): Promise<boolean> {
   if (spendGuardsSkipped()) return true;
-  return (await spendDecision(orgId, workspaceId, options)) === null;
+  return (await spendDecision(orgId, projectId, options)) === null;
 }
 
 async function spendDecision(
   orgId: string | null | undefined,
-  workspaceId: string | null | undefined,
+  projectId: string | null | undefined,
   options: SpendCheckOptions,
 ): Promise<{ code: SpendBlockedCode; message: string; autoTopUpOn?: boolean; details?: Record<string, unknown> } | null> {
   const kind = options.kind ?? "job";
@@ -305,9 +305,9 @@ async function spendDecision(
   const multiplier = speedBoostMultiplier(current?.speedBoost ?? options.speedBoost);
   const baseConfig = resolveChatCreditReserveConfig();
   const config = { ...baseConfig, holdCredits: baseConfig.holdCredits * multiplier };
-  const status = await loadSpendStatus(orgId, workspaceId, { client: options.client });
+  const status = await loadSpendStatus(orgId, projectId, { client: options.client });
   const reason = spendBlockReason(status, kind, config)
-    ?? (kind === "interactive" && status ? await admitInteractive(status, workspaceId, { client: options.client, hold: options.hold }, config) : null);
+    ?? (kind === "interactive" && status ? await admitInteractive(status, projectId, { client: options.client, hold: options.hold }, config) : null);
   return reason ? { ...reason, autoTopUpOn: status?.autoTopUpOn === true,
     details: { spendKind: kind,
       availableCredits: status?.available ?? 0, heldCredits: status?.reserved ?? 0,
@@ -317,7 +317,7 @@ async function spendDecision(
 /** A queued run with mandatory leases must own usable credit in this transaction. */
 export async function requireRunCreditLease(
   tx: TransactionSql,
-  run: { runId: string; orgId: string; workspaceId: string },
+  run: { runId: string; orgId: string; projectId: string },
 ): Promise<void> {
   const grant = await grantRunCreditLease(tx, run);
   if (!grant || grant.blockReason || !Number.isFinite(grant.remaining) || grant.remaining <= 0) {
@@ -334,7 +334,7 @@ export async function requireRunCreditLease(
  */
 export async function admitRunSpend<T>(
   orgId: string,
-  workspaceId: string,
+  projectId: string,
   admit: (client: TransactionSql) => Promise<T>,
   options: { leaseRunId?: string; speedBoost?: boolean; readmission?: boolean } = {},
 ): Promise<T> {
@@ -359,10 +359,10 @@ export async function admitRunSpend<T>(
     let ownReservation = 0;
     if (options.readmission) {
       const [existing] = await tx`
-        select pipeline from workspace_runs where id = ${options.leaseRunId ?? ""}
-          and org_id = ${orgId} and workspace_id = ${workspaceId} for update
+        select pipeline from project_runs where id = ${options.leaseRunId ?? ""}
+          and org_id = ${orgId} and project_id = ${projectId} for update
       `;
-      if (!existing) throw new SpendBlockedError("Run does not belong to this workspace", "plan_not_entitled");
+      if (!existing) throw new SpendBlockedError("Run does not belong to this project", "plan_not_entitled");
       if ((existing.pipeline?.speedBoost === true) !== (options.speedBoost === true)) {
         throw new SpendBlockedError("Run mode cannot change during readmission", "plan_not_entitled");
       }
@@ -372,20 +372,20 @@ export async function admitRunSpend<T>(
       const [reservation] = leases ? await tx`
         select coalesce(sum(greatest(granted-consumed,0)),0) as amount from credit_leases
         where holder_kind='run' and holder_id=${options.leaseRunId!}
-          and org_id=${orgId} and workspace_id=${workspaceId}
+          and org_id=${orgId} and project_id=${projectId}
           and status='active' and expires_at>now() and not credit_exempt
       ` : await tx`
         select case when pipeline->'speedBoost'='true'::jsonb
           then greatest(0, ${runAdmissionReserveCredits()} * 4 - spent_cents)
           else greatest(0, ${runAdmissionReserveCredits()} - (input_cost_cents+output_cost_cents)) end as amount
-        from workspace_runs where id=${options.leaseRunId!}
-          and org_id=${orgId} and workspace_id=${workspaceId} and status in ('queued','processing')
+        from project_runs where id=${options.leaseRunId!}
+          and org_id=${orgId} and project_id=${projectId} and status in ('queued','processing')
           and coalesce(control_state, '') not in ('paused', 'cancelled', 'cancel_requested', 'dead-letter')
       `;
       ownReservation = Number(reservation?.amount ?? 0);
     }
     if (guarded) {
-      const status = await loadSpendStatus(orgId, workspaceId, {
+      const status = await loadSpendStatus(orgId, projectId, {
         client: tx,
         // Leases replace the per-run reservation: `reserved` holds them all.
         runReserveCredits: leases ? 0 : runAdmissionReserveCredits(),
@@ -412,7 +412,7 @@ export async function admitRunSpend<T>(
     // Failure aborts this transaction, including the queued run and any partial
     // lease writes. A worker checkpoint cannot repair unreserved admission.
     if (leases && options.leaseRunId) {
-      await requireRunCreditLease(tx, { runId: options.leaseRunId, orgId, workspaceId });
+      await requireRunCreditLease(tx, { runId: options.leaseRunId, orgId, projectId });
     }
     return admitted!;
   })) as T;
@@ -420,7 +420,7 @@ export async function admitRunSpend<T>(
 
 /** Why a spend block should be shown to users: `credits`, `budget` or `policy`. */
 export function spendBlockJobReason(code: SpendBlockedCode): "credits" | "budget" | "policy" {
-  if (code === "workspace_budget_paused" || code === "org_budget_paused") return "budget";
+  if (code === "project_budget_paused" || code === "org_budget_paused") return "budget";
   if (code === "plan_not_entitled") return "policy";
   return "credits";
 }
@@ -433,14 +433,14 @@ export function spendBlockJobReason(code: SpendBlockedCode): "credits" | "budget
 export async function admissionBlock(
   tx: TransactionSql,
   orgId: string,
-  workspaceId: string,
+  projectId: string,
   options: { speedBoost?: boolean } = {},
 ): Promise<{ code: SpendBlockedCode; message: string } | null> {
   if (spendGuardsSkipped()) return null;
   await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${orgId}))`;
   const multiplier = speedBoostMultiplier(options.speedBoost);
   const leases = creditLeasesEnabled();
-  const status = await loadSpendStatus(orgId, workspaceId, {
+  const status = await loadSpendStatus(orgId, projectId, {
     client: tx, runReserveCredits: leases ? 0 : runAdmissionReserveCredits(),
   });
   return spendBlockReason(status && multiplier > 1 ? { ...status, reserved: status.reserved

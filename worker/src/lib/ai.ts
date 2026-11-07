@@ -119,7 +119,7 @@ export async function generateOpenRouterText(args: {
   maxOutputTokens: number;
   textGeneration?: TextGenerationConfig;
   deploymentProfile?: TextGenerationProfile;
-  /** Workspace privacy mode; OpenRouter is hosted, so only `standard` may call it. */
+  /** Project privacy mode; OpenRouter is hosted, so only `standard` may call it. */
   privacyMode: PrivacyMode;
   signal?: AbortSignal;
   /** Structured output schema; sent as `response_format: json_schema` to private endpoints only. */

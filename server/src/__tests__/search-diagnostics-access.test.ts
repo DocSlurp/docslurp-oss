@@ -5,13 +5,13 @@ import type { RequestActor } from "../lib/request-actor.js";
 
 const mocks = vi.hoisted(() => ({
   sql: vi.fn(),
-  loadActorScopedWorkspace: vi.fn(),
+  loadActorScopedProject: vi.fn(),
 }));
 
 vi.mock("../db.js", () => ({ sql: mocks.sql }));
 vi.mock("../lib/request-actor.js", async () => {
   const actual = await vi.importActual<typeof import("../lib/request-actor.js")>("../lib/request-actor.js");
-  return { ...actual, loadActorScopedWorkspace: mocks.loadActorScopedWorkspace };
+  return { ...actual, loadActorScopedProject: mocks.loadActorScopedProject };
 });
 
 const { suggestRoutes } = await import("../routes/suggest.js");
@@ -32,24 +32,24 @@ const session: RequestActor = { type: "session", userId: "user-1", sessionId: "s
 const apiKey = (scopes: string[]): RequestActor => ({
   type: "apiKey",
   userId: "user-1",
-  apiKey: { keyId: "k", userId: "user-1", orgId: "org-1", keyType: "server", allowedDomains: [], scopes, rateLimitRpm: 60, rateLimitPpd: 100, rateLimits: [], workspaceIds: [] },
+  apiKey: { keyId: "k", userId: "user-1", orgId: "org-1", keyType: "server", allowedDomains: [], scopes, rateLimitRpm: 60, rateLimitPpd: 100, rateLimits: [], projectIds: [] },
 });
 
 describe("GET /v1/search/diagnostics", () => {
   beforeEach(() => {
-    mocks.sql.mockReset().mockResolvedValue([{ reason: "no_matches", suggestions: ["x"], created_at: "2026-01-01", workspace_id: "ws-other" }]);
-    mocks.loadActorScopedWorkspace.mockReset();
+    mocks.sql.mockReset().mockResolvedValue([{ reason: "no_matches", suggestions: ["x"], created_at: "2026-01-01", project_id: "ws-other" }]);
+    mocks.loadActorScopedProject.mockReset();
   });
 
-  it("hides diagnostics for a session in a workspace the actor cannot read", async () => {
-    mocks.loadActorScopedWorkspace.mockResolvedValue(null);
+  it("hides diagnostics for a session in a project the actor cannot read", async () => {
+    mocks.loadActorScopedProject.mockResolvedValue(null);
     const response = await appFor(session).request("/v1/search/diagnostics?sessionId=foreign");
     expect(await response.json()).toEqual({ diagnostics: null });
-    expect(mocks.loadActorScopedWorkspace).toHaveBeenCalledWith("ws-other", session);
+    expect(mocks.loadActorScopedProject).toHaveBeenCalledWith("ws-other", session);
   });
 
-  it("returns diagnostics when the workspace is accessible", async () => {
-    mocks.loadActorScopedWorkspace.mockResolvedValue({ id: "ws-other", orgId: "org-1" });
+  it("returns diagnostics when the project is accessible", async () => {
+    mocks.loadActorScopedProject.mockResolvedValue({ id: "ws-other", orgId: "org-1" });
     const response = await appFor(session).request("/v1/search/diagnostics?sessionId=mine");
     expect(await response.json()).toEqual({ diagnostics: { reason: "no_matches", suggestions: ["x"], createdAt: "2026-01-01" } });
   });

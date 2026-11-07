@@ -5,7 +5,7 @@ import { normalizePipelineFeatures } from "@docslurp/shared";
 import { fromEnv } from "../config.js";
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
 import { buildExtractionContract } from "../lib/extraction-contract.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 import type { PdfRasterCache } from "../pipeline/pdf-asset-cache.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { buildSummaryEvidence } from "../stages/summary-evidence.js";
@@ -37,8 +37,8 @@ function setup() {
     sourceKey: "u1/run-1/source/doc-1", status: "processing", extractionMode: "hybrid", pageCount: 2,
     createdAt: new Date(), updatedAt: new Date(),
   };
-  const run = { id: "run-1", userId: "u1", orgId: "o1", workspaceId: "w1", stage: "vision-extract", status: "processing",
-    pipeline: normalizePipelineFeatures({ summarize: true, quality: "good" }), stats: {}, artifacts: {} } as unknown as WorkspaceRun;
+  const run = { id: "run-1", userId: "u1", orgId: "o1", projectId: "w1", stage: "vision-extract", status: "processing",
+    pipeline: normalizePipelineFeatures({ summarize: true, quality: "good" }), stats: {}, artifacts: {} } as unknown as ProjectRun;
   const state = WorkflowState.create(run, [document]);
   return { storage, document, state };
 }

@@ -76,7 +76,7 @@ function fakeServer(options = {}) {
     const bearer = request.headers.authorization?.replace(/^Bearer /, "");
     if (url.pathname === "/v1/whoami") {
       if (bearer !== state.access && !String(bearer).startsWith("env-") && !String(bearer).startsWith("key-")) return send(401, { error: "unauthorized" });
-      return send(200, { user: { id: "owner", email: "owner@example.test", name: "Owner" }, organization: { id: "org", name: "Acme" }, defaultWorkspace: { id: "ws", name: "Default", slug: "default" }, credential: { type: "oauth", scopes: ["search", "read"], apiKeyScopes: ["search", "artifacts"], expiresAt: new Date(Date.now() + 900_000).toISOString() } });
+      return send(200, { user: { id: "owner", email: "owner@example.test", name: "Owner" }, organization: { id: "org", name: "Acme" }, defaultProject: { id: "ws", name: "Default", slug: "default" }, credential: { type: "oauth", scopes: ["search", "read"], apiKeyScopes: ["search", "artifacts"], expiresAt: new Date(Date.now() + 900_000).toISOString() } });
     }
     if (url.pathname === "/v1/search") return send(200, { results: [] });
     if (url.pathname === "/v1/mcp/tools") return send(bearer === state.access ? 200 : 401, { tools: [] });
@@ -161,7 +161,7 @@ test("login: loopback authorization code with PKCE, least-privilege scopes, priv
     assert.ok(authorize.get("state").length >= 43);
     assert.match(result.stdout, /Signed in to .* as owner@example\.test/);
     assert.match(result.stdout, /Organization: Acme/);
-    assert.match(result.stdout, /Default workspace: Default/);
+    assert.match(result.stdout, /Default project: Default/);
     assert.ok(!`${result.stdout}${result.stderr}`.includes(fake.state.access), "token printed");
     const file = join(box.config, "docslurp", "credentials.json");
     assert.equal((await stat(file)).mode & 0o777, 0o600);
@@ -373,8 +373,8 @@ test("exec passes a fresh token in the child environment only, never argv, and k
   const fake = fakeServer(); const url = await fake.start(); const box = await sandbox();
   try {
     await writeStored(box.config, url, {});
-    const script = "console.log(JSON.stringify({ argv: process.argv, token: process.env.DOCSLURP_TOKEN, url: process.env.DOCSLURP_URL, ws: process.env.DOCSLURP_WORKSPACE, key: process.env.DOCSLURP_API_KEY ?? null })); process.exit(3)";
-    const result = await cli(["exec", "--workspace", "contracts", "--", process.execPath, "-e", script, "--", "--help"], { url, config: box.config });
+    const script = "console.log(JSON.stringify({ argv: process.argv, token: process.env.DOCSLURP_TOKEN, url: process.env.DOCSLURP_URL, ws: process.env.DOCSLURP_PROJECT, key: process.env.DOCSLURP_API_KEY ?? null })); process.exit(3)";
+    const result = await cli(["exec", "--project", "contracts", "--", process.execPath, "-e", script, "--", "--help"], { url, config: box.config });
     assert.equal(result.code, 3, result.stderr);
     const child = JSON.parse(result.stdout);
     assert.equal(child.token, "dscli_access_1");
@@ -580,4 +580,29 @@ test("Windows exec treats only PATHEXT extensions as extensions and skips relati
   assert.equal(resolveWindowsCommand("python3.11", env, exists), "C:\\py\\python3.11.exe");
   assert.equal(resolveWindowsCommand("tool", env, exists), "C:\\tools\\tool.cmd");
   assert.equal(resolveWindowsCommand("tool", { ...env, PATH: "bin;." }, exists), null);
+});
+
+test("refreshTokens reports the server's machine reason and never reads the description's prose", async () => {
+  const { refreshTokens } = await import("../dist/auth/oauth.js");
+  const answers = [
+    { error: "invalid_grant", error_description: "Anything at all", docslurp_reason: "refresh_token_just_rotated" },
+    { error: "invalid_grant", error_description: "This refresh token was just rotated. Use the newest refresh token." },
+  ];
+  const server = createServer((request, response) => {
+    request.resume();
+    response.writeHead(400, { "content-type": "application/json" });
+    response.end(JSON.stringify(answers.shift()));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const endpoint = `http://127.0.0.1:${server.address().port}/token`;
+    const authorizationServer = { issuer: `http://127.0.0.1:${server.address().port}`, token_endpoint: endpoint };
+    const flagged = await refreshTokens(authorizationServer, "token");
+    assert.deepEqual([flagged.ok, flagged.error, flagged.reason], [false, "invalid_grant", "refresh_token_just_rotated"]);
+    // The same prose without the reason is an ordinary failure: the CLI no longer matches on message text.
+    const prose = await refreshTokens(authorizationServer, "token");
+    assert.equal(prose.reason, undefined);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });

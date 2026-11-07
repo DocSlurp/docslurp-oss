@@ -19,29 +19,52 @@ and from the deploy error text. The CI image budget (below) is set well under it
 | | `Dockerfile.lean` (production, `fly.worker.toml`) | `Dockerfile.full` (self-host `--profile full`) |
 | --- | --- | --- |
 | Node | worker-only production `node_modules` from `pnpm deploy`, pruned | same |
-| System tools | poppler-utils + poppler-data (CJK CMaps), Tesseract (eng, deu, fra, spa, ara, chi_sim, chi_tra, ell, heb, hin, ita, jpn, kor, nld, pol, por, rus, tha, tur, ukr, vie), cwebp (lossless WebP page images), pandoc, ffmpeg, ClamAV, bubblewrap; fonts for non-embedded PDF fonts: URW base-35 and Liberation (metric-compatible Times/Helvetica/Courier and Arial/Times New Roman/Courier New), Noto core (Arabic, Hebrew, Thai, Devanagari, Greek, Cyrillic), Droid Sans Fallback (CJK) | adds LibreOffice, ocrmypdf, ghostscript, ImageMagick, qpdf, catdoc, unrtf; Noto CJK instead of Droid Sans Fallback |
+| System tools | Debian poppler-utils (`pdftotext`, `pdfinfo`, `pdfimages`, `pdftoppm`, `pdftohtml`, `pdfseparate`, `pdfunite`) + Doppler under `/usr/lib/doppler`, off `PATH` (see below) + poppler-data (CJK CMaps), cwebp (lossless WebP page images), pandoc, ffmpeg, ClamAV, bubblewrap; fonts for non-embedded PDF fonts: URW base-35 and Liberation (metric-compatible Times/Helvetica/Courier and Arial/Times New Roman/Courier New), Noto core (Arabic, Hebrew, Thai, Devanagari, Greek, Cyrillic), Droid Sans Fallback (CJK) | adds LibreOffice, ghostscript, ImageMagick, qpdf, catdoc, unrtf; Noto CJK instead of Droid Sans Fallback |
+| OCR | none: OCR runs in an extractor plugin's VM provider (`vm`), through a hosted model (`hosted`), or not at all | the local OCR runtime: `docslurp_ocr.py`, its venv `/opt/docslurp/ocr-venv` and the pinned models `/opt/docslurp/ocr-models` (root-owned, read-only); used only in `local` mode |
 | Python venv `/app/.venv` | base parsers: trafilatura, ebooklib, python-pptx, openpyxl, xlsx2csv, Pillow (wheel-only, read-only) | same, plus pip for the legacy first-boot install |
 | Unstructured | vendor bundles, fetched on first use | vendor bundles, or the legacy first-boot pip install when no bundle source is configured |
-| Kreuzberg, LiteParse, mammoth, LanceDB, transformers.js | in `node_modules` | same |
-| Native PDF engine | optional, `DOCSLURP_NATIVE_PDF=1`; PDFs otherwise use Kreuzberg and Poppler (PyMuPDF/pymupdf4llm and the MuPDF `mupdf-tools` apt package were removed 2026-10-15: AGPL) | same |
+| mammoth, LanceDB, transformers.js | in `node_modules` | same |
+| Native PDF engine | optional, `DOCSLURP_NATIVE_PDF=1`; PDFs are Doppler's (in a VM, or `doppler-md` in local mode) (PyMuPDF/pymupdf4llm and the MuPDF `mupdf-tools` apt package were removed 2026-10-15: AGPL) | same |
 | Runtime pip installs | off (`DOCSLURP_PYTHON_LAZY_INSTALL=false`) | on for the first-boot path only |
 
-### Images without Tesseract data
+### Doppler
 
-Both images ship Tesseract and its 21 languages. On the lean image they add 107 MiB (the apt delta for
-`tesseract-ocr` and the language packs, measured 2026-10-26; the image is 2,085 MiB uncompressed). The prerequisite
-check fails the build, and a `lean` or `full` worker's startup, if any language is missing. Production therefore OCRs
-images locally, in the parser sandbox, instead of sending them to vision. Image OCR uses English unless the
-extractor config sets `ocr.language`, so text in other scripts may come out poor; `DOCSLURP_OCR=off` restores
-vision-first routing. A self-built image or local setup without the language data falls back
-as follows. Kreuzberg's bundled Tesseract otherwise looks for that data at the path of the machine that built it. The extractor planner therefore checks for `<lang>.traineddata` in
-`TESSDATA_PREFIX` and Kreuzberg's system locations (`worker/src/extractors/ocr-capability.ts`) before offering
-Kreuzberg for an image, and `DOCSLURP_OCR=off` forces that answer. With no OCR, or when Kreuzberg's OCR still
-fails, an image continues with empty text so page triage and the vision stage read it (manifest and stage stats
-record `textlessFallback`). If the workspace has vision fallback off, or its privacy mode forbids the vision
-route, the document fails with the public message "This image can only be read with OCR or vision, and neither is
-available for this workspace." and the raw cause stays in the stored error and logs. PDFs are unaffected: Kreuzberg
-reads their text layer and does not OCR them by default; scanned pages reach vision through page triage.
+Doppler ([DocSlurp/doppler](https://github.com/DocSlurp/doppler), GPL-2.0-or-later, the DocSlurp Poppler fork) is the PDF
+extractor. Both images build it from the source pinned in `worker/doppler.json` and install it under `/usr/lib/doppler`
+(`bin/pdftomarkdown`, `bin/doppler-md`, `bin/pdfpagecount`, the fork's `pdftotext` and other utilities, `lib/libpoppler`),
+off `PATH`. `pdfpagecount` is the structural PDF page count (run under `prlimit`, which both images and local mode require);
+`pdftomarkdown` runs the fork's `pdftotext` from beside itself, and every other host PDF tool (`pdfinfo`, `pdfimages`,
+`pdftoppm`) stays Debian's `poppler-utils`. The images set `DOCSLURP_DOPPLER_BIN_DIR=/usr/lib/doppler/bin`.
+
+Where it runs is `DOCSLURP_PDF_MODE` ([Docker Compose](self-host/docker-compose.md#pdfs)): in a VM (`vm`, the sandboxed PDF
+provider; production) or, for customer-owned execution only, on the worker host under the parser sandbox (`local`, which needs
+`DOCSLURP_SERVICE_PROFILE=self-hosted`). With neither, PDFs are refused and no other host parser runs.
+
+### OCR
+
+Neither image installs or links an OCR engine, package, binary or language data; `scripts/scan-ocr-engines.mjs` checks
+every ELF and wasm object in a built image ([Tesseract](extraction/ocr.md#tesseract)). Where OCR runs is set by `DOCSLURP_OCR_MODE`;
+see [OCR](extraction/ocr.md) for the modes, the service and self-hosted profiles, and what fails closed.
+
+- **Lean** has no OCR engine. Production workers set `vm` (the production default) and load an OCR provider through
+  `DOCSLURP_EXTRACTOR_PLUGINS`; without one the worker refuses to start. Lean also serves `hosted` and `off`.
+- **Full** bakes the local OCR runtime for customer-owned self-hosting: `worker/scripts/docslurp_ocr.py`, a wheel-only,
+  hash-checked venv from `worker/requirements-ocr.lock.txt` at `/opt/docslurp/ocr-venv` (RapidOCR 3.10.0 on
+  onnxruntime; 351 MiB, measured in the build stage on 2026-11-04, linux/amd64), and the eight models pinned by sha256 in
+  `worker/ocr-models.json` at `/opt/docslurp/ocr-models` (84 MB). Both are root-owned and read-only. The build verifies
+  every model hash and runs `docslurp_ocr.py --self-test`; a missing or mismatched model fails the build. The image
+  sets `DOCSLURP_OCR_PYTHON` and `DOCSLURP_OCR_MODEL_DIR` only. It does not set `DOCSLURP_OCR_MODE` or
+  `DOCSLURP_SERVICE_PROFILE`: the operator chooses them.
+
+Images used to ship 21 OCR language packs (107 MiB on lean, measured 2026-10-26). Removing them makes lean about
+1,980 MiB uncompressed (estimate: the 2,085 MiB measured then, less the packs; not re-measured). The full image gains the OCR venv and models
+and loses the language packs and ocrmypdf, which depends on a system OCR engine.
+
+The prerequisite check (`scripts/check-worker-prerequisites.mjs`) runs `docslurp_ocr.py --self-test` whenever the OCR
+venv and model directory exist, and fails when `DOCSLURP_OCR_MODE=local` is set without them or without
+`DOCSLURP_SERVICE_PROFILE=self-hosted`. For a local install outside Docker, run `scripts/install-ocr-runtime.sh` (or
+`scripts/setup-cli-linux.sh --with-ocr`); it builds the same venv and models under `~/.cache/docslurp/ocr` and prints
+the variables to set.
 
 ### Measured sizes (local builds, 2026-10-14, linux/amd64)
 
@@ -65,7 +88,7 @@ amount when those are included.
 
 ### Where the fat was
 
-1. **The pnpm content store shipped in the image**, plus the workspace root's
+1. **The pnpm content store shipped in the image**, plus the project root's
    dependencies. `pnpm install --filter @docslurp/worker... --prod` in the
    runtime stage left `/root/.local/share/pnpm/store` (1.86 GB on the production
    machine) and installed `better-auth` with its prisma/effect/typescript tree
@@ -85,7 +108,7 @@ amount when those are included.
    `unstructured[all-docs]` and useless on CPU), torch (708 MB), Python
    LanceDB + pyarrow (340 MB, unused because the worker writes LanceDB from Node),
    two OpenCV builds (270 MB), pypandoc's bundled pandoc (155 MB, a duplicate of
-   apt pandoc), and chromadb/kubernetes. The bundles keep only what each extractor
+   apt pandoc), and (before it was removed) chromadb/kubernetes. The bundles keep only what each extractor
    imports, use CPU-only torch, and leave out the audio extras.
 4. **Duplicate models.** `docling-tools models download` fetches the layout model
    twice (safetensors and ONNX, 171 MB each), TableFormer "fast" and "accurate",
@@ -107,10 +130,9 @@ Not trimmed yet (candidates):
 
 Docling was retired on 2026-10-21 because its Pillow <13 constraint prevented
 security fixes. It is no longer installed, advertised, or selected by the worker.
-Use Kreuzberg, native-pdf, or Poppler for PDF extraction. Historical Docling size
+Use Doppler (vm-pdf or doppler-md) for PDF extraction. Historical Docling size
 and timing measurements below describe the retired bundle. Only Unstructured
 is supported by the current bundle manifest.
-
 
 A bundle is a relocatable, content-addressed `.tar.zst` containing:
 
@@ -268,4 +290,4 @@ installs `unstructured` from the real bucket into a scratch cache and deletes it
 image must stay at or under 2.5 GiB. It also checks that runtime pip is off, that
 `/app` and the venv are not writable by uid 10001, that the bundle cache is
 writable, and that no pnpm store, pnpm or venv pip ships. The other images keep
-the 6 GiB budget and the "no torch/chromadb baked" check.
+the 6 GiB budget and the "no torch, chromadb, lancedb or pymilvus baked" check (chromadb is no longer a dependency at all).

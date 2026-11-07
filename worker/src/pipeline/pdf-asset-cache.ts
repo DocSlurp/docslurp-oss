@@ -15,10 +15,14 @@ import { logNativePdfFallback, NativePdfError } from "../native-pdf/types.js";
 import { renderClipNative, renderPagesNative } from "../native-pdf/render.js";
 import type { Bbox, NativePdfEngine } from "../native-pdf/types.js";
 import { boundedRasterDpi, boundedRasterEdge } from "../lib/raster-bounds.js";
+import { pageAreaEquivalents, pageAreaEquivalentsPt } from "@docslurp/shared";
+import type { PageEquivalentRow } from "../db/page-equivalents.js";
+import { recordRenderedPageAreas } from "./page-area-sink.js";
 import { pushPerfMetric } from "../lib/perf-context.js";
 import { isCommandTeardownError } from "../sandbox/teardown.js";
 import { SourceIntegrityError, verifyStagedSource } from "../sandbox/source-integrity.js";
 import { registerReadOnlySource, unregisterReadOnlySource } from "../sandbox/paths.js";
+import { sniffedPdf } from "../lib/sniffed-pdf.js";
 
 export type RasterEngineName = "pdftoppm" | "native-pdf";
 
@@ -287,6 +291,11 @@ export interface RasterPageArtifact {
   engine?: RasterEngineName;
   /** Requested density; oversized pages are bounded before allocation. */
   dpi?: number;
+  /**
+   * The customer's own uploaded bytes passed through as the page image (an image document), not a render this service produced
+   * in its parser sandbox or VM. Never decode it in-process (sharp/libvips in the worker): only renders we produced may be.
+   */
+  customerOriginal?: boolean;
 }
 
 type RasterStorage = Pick<ArtifactStore, "objectSize" | "putBytes" | "uri">;
@@ -341,7 +350,7 @@ export class PdfRasterCache {
     maxEdgePx?: number;
     signal?: AbortSignal;
   }): Promise<{ bytes: Buffer; widthPx: number | null; heightPx: number | null; mimeType: string; engine: RasterEngineName; dpi: number } | null> {
-    if (args.document.mimeType !== "application/pdf") return null;
+    if (!sniffedPdf(args.document)) return null;
     const { name, engine } = await this.resolveEngine();
     if (name !== "native-pdf" || !engine) return null;
     const dpi = clampDpi(args.dpi);
@@ -394,7 +403,7 @@ export class PdfRasterCache {
     const pageNumbers = normalizePageNumbers(args.pageNumbers, args.document.pageCount);
     if (pageNumbers.length === 0) return [];
 
-    const isPdf = args.document.mimeType === "application/pdf";
+    const isPdf = sniffedPdf(args.document);
     if (!isPdf && pageNumbers.some((pageNumber) => pageNumber !== 1)) {
       throw new Error(`Native image documents only support page 1, received ${pageNumbers.join(",")}`);
     }
@@ -415,6 +424,8 @@ export class PdfRasterCache {
     }));
     const missing = pageNumbers.filter((pageNumber) => existing.get(pageNumber) === null);
     const generated = new Map<number, { sizeBytes: number; widthPx: number | null; heightPx: number | null }>();
+    // Each rendered page's area in standard pages (capped per page) bills: a giant page costs the pixels it renders to. It is
+    // recorded and authorized (recordRenderedPageAreas) before the page's bytes are cached, so a cache hit was authorized.
 
     if (missing.length > 0) {
       const source = await this.sources.get(args.document);
@@ -425,22 +436,30 @@ export class PdfRasterCache {
       }
       let nativeDone = false;
       if (isPdf && resolved.engine) {
+        let rendered: Awaited<ReturnType<typeof renderPagesNative>> | null = null;
         try {
-          const rendered = await renderPagesNative(resolved.engine, source.path, missing, {
+          rendered = await renderPagesNative(resolved.engine, source.path, missing, {
             dpi,
             concurrency: this.options.concurrency,
             signal: args.signal,
           });
-          if (missing.every((pageNumber) => rendered.has(pageNumber))) {
-            for (const [pageNumber, page] of rendered) {
-              await this.storage.putBytes(keys.get(pageNumber)!, page.bytes, "image/png");
-              generated.set(pageNumber, { sizeBytes: page.bytes.byteLength, widthPx: page.widthPx, heightPx: page.heightPx });
-            }
-            nativeDone = true;
-          }
         } catch (error) {
           if (args.signal?.aborted) throw error;
           logNativePdfFallback("raster-render", error, "pdftoppm");
+        }
+        if (rendered && missing.every((pageNumber) => rendered.has(pageNumber))) {
+          const areas: PageEquivalentRow[] = [];
+          for (const [pageNumber, page] of rendered) {
+            if (page.widthPx && page.heightPx) areas.push({ pageNumber, area: pageAreaEquivalents(page.widthPx, page.heightPx, dpi) });
+          }
+          // Measured and authorized before any page is cached, outside the engine fallback: a refusal (an unfunded run is
+          // paused) or a failed record stops here and leaves nothing a retry would skip.
+          await recordRenderedPageAreas(args.runId, args.document, areas);
+          for (const [pageNumber, page] of rendered) {
+            await this.storage.putBytes(keys.get(pageNumber)!, page.bytes, "image/png");
+            generated.set(pageNumber, { sizeBytes: page.bytes.byteLength, widthPx: page.widthPx, heightPx: page.heightPx });
+          }
+          nativeDone = true;
         }
       }
       if (isPdf && !nativeDone && resolved.engine) {
@@ -466,9 +485,14 @@ export class PdfRasterCache {
         await runLanes(contiguousPageRanges(pdftoppmPages), lanes, args.signal, async (range, signal) => {
           for (const [pageNumber, size] of await this.pdfPageSizes(source.path, range.first, range.last, signal)) sizes.set(pageNumber, size);
         });
+        if (pdftoppmPages.some((pageNumber) => !sizes.has(pageNumber))) throw new Error("PDF page dimensions unavailable; refusing unbounded rasterization");
+        // Each page's area from its size, measured and authorized before anything renders or is cached.
+        await recordRenderedPageAreas(args.runId, args.document, pdftoppmPages.map((pageNumber) => {
+          const size = sizes.get(pageNumber)!;
+          return { pageNumber, area: pageAreaEquivalentsPt(size.widthPt, size.heightPt) };
+        }));
         await runLanes(pdftoppmPages, lanes, args.signal, async (selectedPage, signal) => {
-          const size = sizes.get(selectedPage);
-          if (!size) throw new Error("PDF page dimensions unavailable; refusing unbounded rasterization");
+          const size = sizes.get(selectedPage)!;
           const renderDpi = boundedRasterDpi(size.widthPt, size.heightPt, dpi);
           // Each command writes only to its own directory and reads the source read-only: concurrent
           // lanes share no writable path (so no socket or file to meet on), and one lane cannot touch
@@ -517,6 +541,7 @@ export class PdfRasterCache {
         heightPx: generatedPage?.heightPx ?? null,
         sizeBytes: generatedPage?.sizeBytes ?? existing.get(pageNumber) ?? 0,
         cacheHit: existing.get(pageNumber) !== null,
+        ...(isPdf ? {} : { customerOriginal: true }),
         mimeType: outputMimeType,
         engine: isPdf ? engineName : undefined,
         dpi: isPdf ? dpi : undefined,

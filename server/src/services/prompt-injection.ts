@@ -1,49 +1,33 @@
+/**
+ * Prompt-injection signals for retrieved evidence: flag-only.
+ *
+ * A keyword or regex match never edits, hides or drops evidence. API docs say
+ * "pass your API key in the Authorization header" and invoices say "send to
+ * accounts payable"; deleting those lines silently removed real content while
+ * the same instruction in another language passed untouched. Evidence is kept
+ * verbatim and isolated structurally instead (`formatEvidenceBlocks` in
+ * lib/ai.ts: a nonce-delimited block per document that the document text
+ * cannot close, plus the system rule that evidence is data). A match is only
+ * logged, so operators can see attacks without readers losing text.
+ */
 const instructionLikePatterns: Array<{ label: string; pattern: RegExp }> = [
   { label: "override-instructions", pattern: /\b(ignore|forget|disregard|override)\b.{0,40}\b(instruction|system prompt|developer message|previous)\b/i },
-  { label: "role-escalation", pattern: /\b(system:|developer:|assistant:|tool:|function call|tool call)\b/i },
-  { label: "secret-seeking", pattern: /\b(api key|token|password|secret|credential|environment variable|env var)\b/i },
-  { label: "exfiltration", pattern: /\b(exfiltrate|send to|upload to|post to|webhook|curl|wget|fetch this url)\b/i },
-  { label: "tool-manipulation", pattern: /\b(run command|execute code|browse the web|open the link|call the tool|use the connector)\b/i }
+  { label: "role-escalation", pattern: /(^|\n)\s*(system|developer|assistant|tool)\s*:/i }
 ];
 
-export type PromptInjectionReview = {
-  text: string;
+export type PromptInjectionClassification = {
   flagged: boolean;
   indicators: string[];
-  suppressedLineCount: number;
 };
 
-export function reviewUntrustedEvidenceText(text: string): PromptInjectionReview {
-  const indicators = new Set<string>();
-  let suppressedLineCount = 0;
-
-  const sanitizedLines = text
-    .split(/\r?\n/)
-    .map((line) => {
-      const matched = instructionLikePatterns.filter(({ pattern }) => pattern.test(line));
-      if (matched.length === 0) {
-        return line;
-      }
-
-      suppressedLineCount += 1;
-      for (const entry of matched) {
-        indicators.add(entry.label);
-      }
-      return "[suppressed instruction-like content removed from untrusted evidence]";
-    });
-
-  return {
-    text: sanitizedLines.join("\n"),
-    flagged: indicators.size > 0,
-    indicators: [...indicators],
-    suppressedLineCount
-  };
+/** The labels of injection-shaped patterns in `text`. The text itself is never changed. */
+export function classifyUntrustedEvidenceText(text: string): PromptInjectionClassification {
+  const indicators = instructionLikePatterns.filter(({ pattern }) => pattern.test(text)).map(({ label }) => label);
+  return { flagged: indicators.length > 0, indicators };
 }
 
-export function buildPromptInjectionWarning(flaggedDocuments: number): string | null {
-  if (flaggedDocuments <= 0) {
-    return null;
-  }
-
-  return `Suppressed instruction-like text from ${flaggedDocuments} retrieved excerpt(s) before LLM generation.`;
+/** Log (never remove) injection-shaped evidence. Only labels and a source name are written, not the text. */
+export function logInjectionIndicators(source: string, classification: PromptInjectionClassification): void {
+  if (!classification.flagged) return;
+  console.warn(`[prompt-injection] flagged source=${source} indicators=${classification.indicators.join(",")} action=none`);
 }

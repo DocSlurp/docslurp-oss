@@ -20,10 +20,10 @@ const config: VisionGuardConfig = {
   pageAttempts: 2, regionAttempts: 4, breakerMinFailures: 1_000, breakerFailureRate: 1, orgLimitCents: 10, throttleAllowance: 5, routeOverrunLimit: 3, routeWeightCorrectionMax: 4,
 };
 
-async function insertRuns(rows: Array<[runId: string, orgId: string | null, workspaceId: string]>): Promise<void> {
+async function insertRuns(rows: Array<[runId: string, orgId: string | null, projectId: string]>): Promise<void> {
   const values = rows.map(([id, org, ws]) =>
     `('${id}', ${org ? `'${org}'` : "null"}, 'u1', '${ws}', 'upload', 'processing', 'vision-extract', '{}', '{}')`);
-  await db.exec(`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts) values ${values.join(", ")};`);
+  await db.exec(`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts) values ${values.join(", ")};`);
 }
 
 const count = async (query: string) => Number((await db.query<{ n: number }>(query)).rows[0]?.n ?? 0);
@@ -54,9 +54,9 @@ beforeAll(async () => {
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id)
-      values ('o1', 'One', 'one', 'u1'), ('o2', 'Two', 'two', 'u1'), ('o3', 'Three', 'three', 'u1'), ('o4', 'Four', 'four', 'u1');
-    insert into workspaces(id, org_id, user_id, name)
-      values ('w1', 'o1', 'u1', 'W'), ('w2', 'o2', 'u1', 'W2'), ('w3', 'o3', 'u1', 'W3'), ('w4', 'o4', 'u1', 'W4'), ('w-none', null, 'u1', 'Orphan');
+      values ('o1', 'One', 'one', 'u1'), ('o2', 'Two', 'two', 'u1'), ('o3', 'Three', 'three', 'u1'), ('o4', 'Four', 'four', 'u1'), ('o-budget', 'Budget', 'budget', 'u1');
+    insert into projects(id, org_id, user_id, name)
+      values ('w1', 'o1', 'u1', 'W'), ('w2', 'o2', 'u1', 'W2'), ('w3', 'o3', 'u1', 'W3'), ('w4', 'o4', 'u1', 'W4'), ('w-budget', 'o-budget', 'u1', 'WB'), ('w-none', null, 'u1', 'Orphan');
   `);
   const served = await serveOnRandomPort(db);
   server = served.server;
@@ -97,19 +97,36 @@ describe("PostgresVisionAttemptBackend", () => {
     expect(await orgCount("o1")).toBe(10);
   }, 60_000);
 
-  it("deleting the run or its workspace mid-call does not reset the org's count", async () => {
-    await db.exec(`insert into workspaces(id, org_id, user_id, name) values ('w3-doomed', 'o3', 'u1', 'Doomed');`);
+  it("holds a per-document page budget across guards (an activity retry or a worker restart) and per document", async () => {
+    await insertRuns([["run-doc-budget", "o-budget", "w-budget"]]);
+    const admitOne = async (guard: VisionRunGuard, documentId: string, pageNumber: number) => {
+      const gate = guard.call({ documentId, pageNumber, purpose: "ocr", documentPageLimit: 2 });
+      try { await gate.admit({ weightCents: 0.001 }); } finally { await gate.finish(); }
+    };
+    const first = guardOf("run-doc-budget", null, { orgLimitCents: 1_000 });
+    await admitOne(first, "doc-a", 1);
+    await admitOne(first, "doc-a", 2);
+    // A new guard (retried activity, restarted worker) reads the same durable rows.
+    const retry = guardOf("run-doc-budget", null, { orgLimitCents: 1_000 });
+    await expect(admitOne(retry, "doc-a", 3)).rejects.toMatchObject({ stop: { reason: "document-page-limit", sticky: false } });
+    // A page already read keeps its own page bound; another document has its own budget.
+    await admitOne(retry, "doc-a", 1);
+    await admitOne(retry, "doc-b", 1);
+  });
+
+  it("deleting the run or its project mid-call does not reset the org's count", async () => {
+    await db.exec(`insert into projects(id, org_id, user_id, name) values ('w3-doomed', 'o3', 'u1', 'Doomed');`);
     await insertRuns([["doomed-run", "o3", "w3"], ["doomed-ws-run", "o3", "w3-doomed"]]);
     // A call admits a request, then the run is deleted while the request is in flight.
     const runGate = guardOf("doomed-run").call({ documentId: "d1", pageNumber: 1, purpose: "page" });
     await runGate.admit({ weightCents: 1 });
-    await db.exec(`delete from workspace_runs where id = 'doomed-run';`);
+    await db.exec(`delete from project_runs where id = 'doomed-run';`);
     await runGate.finish();
-    // Same through workspace deletion (which cascades its runs).
+    // Same through project deletion (which cascades its runs).
     const wsGate = guardOf("doomed-ws-run").call({ documentId: "d1", pageNumber: 1, purpose: "page" });
     await wsGate.admit({ weightCents: 1 });
     await wsGate.admit({ weightCents: 1 });
-    await db.exec(`delete from workspaces where id = 'w3-doomed';`);
+    await db.exec(`delete from projects where id = 'w3-doomed';`);
     await wsGate.finish();
     expect(await count(`select count(*)::int as n from vision_run_attempts where run_id in ('doomed-run', 'doomed-ws-run')`)).toBe(0);
     expect(await orgCount("o3")).toBe(3);
@@ -121,7 +138,7 @@ describe("PostgresVisionAttemptBackend", () => {
     await expect(call(guardOf("after-delete", null, { orgLimitCents: 3 }), 1, 1)).rejects.toMatchObject({ stop: { reason: "org-attempt-limit", orgCents: 3 } });
   }, 60_000);
 
-  it("scopes a run without an org to its workspace's org, and refuses one with neither", async () => {
+  it("scopes a run without an org to its project's org, and refuses one with neither", async () => {
     await insertRuns([["null-org", null, "w4"], ["no-org-at-all", null, "w-none"]]);
     await call(guardOf("null-org"), 1, 1, { failed: true });
     expect(await orgCount("o4")).toBe(1);
@@ -131,7 +148,7 @@ describe("PostgresVisionAttemptBackend", () => {
 
   it("in-flight requests never make a refusal sticky; finished uncharged ones do", async () => {
     await db.exec(`insert into organizations(id, name, slug, created_by_user_id) values ('o5', 'Five', 'five', 'u1');
-      insert into workspaces(id, org_id, user_id, name) values ('w5', 'o5', 'u1', 'W5');`);
+      insert into projects(id, org_id, user_id, name) values ('w5', 'o5', 'u1', 'W5');`);
     await insertRuns([["inflight", "o5", "w5"]]);
     const guard = guardOf("inflight", null, { orgLimitCents: 2 });
     const first = guard.call({ documentId: "d1", pageNumber: 1, purpose: "page" });
@@ -151,10 +168,10 @@ describe("PostgresVisionAttemptBackend", () => {
 
   it("weighs each request by its route's worst case: mixed models in one org share one cents bound", async () => {
     await db.exec(`insert into organizations(id, name, slug, created_by_user_id) values ('o7', 'Seven', 'seven', 'u1');
-      insert into workspaces(id, org_id, user_id, name) values ('w7a', 'o7', 'u1', 'Cheap'), ('w7b', 'o7', 'u1', 'Pricey');`);
+      insert into projects(id, org_id, user_id, name) values ('w7a', 'o7', 'u1', 'Cheap'), ('w7b', 'o7', 'u1', 'Pricey');`);
     await insertRuns([["cheap-run", "o7", "w7a"], ["pricey-run", "o7", "w7b"]]);
     const limit = { orgLimitCents: 10 };
-    // The cheap workspace sends 1.5-cent requests, the pricey one 3.5-cent requests, on separate pages.
+    // The cheap project sends 1.5-cent requests, the pricey one 3.5-cent requests, on separate pages.
     const send = async (runId: string, page: number, weightCents: number) => {
       const gate = guardOf(runId, null, limit).call({ documentId: "d1", pageNumber: page, purpose: "page" });
       try {
@@ -176,7 +193,7 @@ describe("PostgresVisionAttemptBackend", () => {
 
   it("tops up the ticket's org by a billed overrun and refuses the route for that org only; other orgs pay the correction", async () => {
     await db.exec(`insert into organizations(id, name, slug, created_by_user_id) values ('o12', 'Twelve', 'twelve', 'u1'), ('o13', 'Thirteen', 'thirteen', 'u1');
-      insert into workspaces(id, org_id, user_id, name) values ('w12', 'o12', 'u1', 'W12'), ('w13', 'o13', 'u1', 'W13');`);
+      insert into projects(id, org_id, user_id, name) values ('w12', 'o12', 'u1', 'W12'), ('w13', 'o13', 'u1', 'W13');`);
     await insertRuns([["overrun-run", "o12", "w12"], ["other-org-run", "o13", "w13"]]);
     const route = { provider: "openrouter", model: "acme/overrun-vl" };
     const limits = { orgLimitCents: 100, routeOverrunLimit: 2 };
@@ -214,15 +231,15 @@ describe("PostgresVisionAttemptBackend", () => {
 
   it("reconciles an overrun against its durable ticket after the run is deleted, once per ticket", async () => {
     await db.exec(`insert into organizations(id, name, slug, created_by_user_id) values ('o14', 'Fourteen', 'fourteen', 'u1');
-      insert into workspaces(id, org_id, user_id, name) values ('w14', 'o14', 'u1', 'W14');`);
+      insert into projects(id, org_id, user_id, name) values ('w14', 'o14', 'u1', 'W14');`);
     await insertRuns([["doomed-overrun", "o14", "w14"]]);
     const route = { provider: "openrouter", model: "acme/deleted-vl" };
     const guard = guardOf("doomed-overrun", null, { orgLimitCents: 1_000 });
     const gate = guard.call({ documentId: "d1", pageNumber: 1, purpose: "page" });
     await gate.admit({ weightCents: 1, route });
     const [ticket] = (await db.query<{ id: string }>(`select id from vision_admission_tickets where org_id = 'o14'`)).rows;
-    // The run (and its workspace) are deleted while the request is in flight; the 100-cent response lands afterwards.
-    await db.exec(`delete from workspace_runs where id = 'doomed-overrun'; delete from workspaces where id = 'w14';`);
+    // The run (and its project) are deleted while the request is in flight; the 100-cent response lands afterwards.
+    await db.exec(`delete from project_runs where id = 'doomed-overrun'; delete from projects where id = 'w14';`);
     await gate.overrun({ route, billedCents: 100, boundCents: 1 });
     await gate.finish();
     // Admitted at 1 and billed 100: the org counts all of it (before this fix the run lookup found no org: 99 lost).
@@ -240,7 +257,7 @@ describe("PostgresVisionAttemptBackend", () => {
 
   it("un-counts only the first charge of a page per run; regions, critique and second reads stay uncharged", async () => {
     await db.exec(`insert into organizations(id, name, slug, created_by_user_id) values ('o6', 'Six', 'six', 'u1');
-      insert into workspaces(id, org_id, user_id, name) values ('w6', 'o6', 'u1', 'W6');`);
+      insert into projects(id, org_id, user_id, name) values ('w6', 'o6', 'u1', 'W6');`);
     await insertRuns([["charges", "o6", "w6"]]);
     await insertDocument("charges-doc", "o6", "w6", "charges");
     const first = await stateOf("charges");
@@ -266,7 +283,7 @@ describe("PostgresVisionAttemptBackend", () => {
   describe("a charged read leaves the org count only with its persisted charge", () => {
     beforeAll(async () => {
       await db.exec(`insert into organizations(id, name, slug, created_by_user_id) values ('o8', 'Eight', 'eight', 'u1');
-        insert into workspaces(id, org_id, user_id, name) values ('w8', 'o8', 'u1', 'W8'), ('w8-doomed', 'o8', 'u1', 'Doomed');`);
+        insert into projects(id, org_id, user_id, name) values ('w8', 'o8', 'u1', 'W8'), ('w8-doomed', 'o8', 'u1', 'Doomed');`);
     });
 
     it("stays counted after settlement and leaves in the checkpoint that inserts the Rich charge", async () => {
@@ -283,7 +300,7 @@ describe("PostgresVisionAttemptBackend", () => {
       expect(await count(`select count(*)::int as n from usage_events where id = 'rich:h1-ok:h1-ok-doc:1'`)).toBe(1);
     }, 60_000);
 
-    it("cancel, workspace deletion or a crash between the read and its checkpoint leave the org count unchanged", async () => {
+    it("cancel, project deletion or a crash between the read and its checkpoint leave the org count unchanged", async () => {
       await insertRuns([["h1-cancel", "o8", "w8"], ["h1-deleted", "o8", "w8-doomed"], ["h1-crash", "o8", "w8"]]);
       await insertDocument("h1-cancel-doc", "o8", "w8", "h1-cancel");
       await insertDocument("h1-deleted-doc", "o8", "w8-doomed", "h1-deleted");
@@ -296,9 +313,9 @@ describe("PostgresVisionAttemptBackend", () => {
       await readPage(deleted, "h1-deleted-doc", 1);
       await readPage(crashed, "h1-crash-doc", 1);
       // Cancel: the activity stops and its state is dropped without a checkpoint.
-      await db.exec(`update workspace_runs set status = 'cancelled' where id = 'h1-cancel';`);
-      // Workspace deletion cascades the run; its checkpoint then cannot persist the charge.
-      await db.exec(`delete from workspaces where id = 'w8-doomed';`);
+      await db.exec(`update project_runs set status = 'cancelled' where id = 'h1-cancel';`);
+      // Project deletion cascades the run; its checkpoint then cannot persist the charge.
+      await db.exec(`delete from projects where id = 'w8-doomed';`);
       await expect(store.updateProgress(deleted)).rejects.toThrow();
       // Crash: the worker dies with the charge only in memory (no checkpoint at all).
       expect(await orgCount("o8")).toBe(before + 3);
@@ -341,9 +358,9 @@ describe("PostgresVisionAttemptBackend", () => {
       expect(await count(`select count(*)::int as n from usage_events where id = 'rich:h1-dup:h1-dup-doc:1'`)).toBe(1);
     }, 60_000);
 
-    it("a run without an org bills, attributes and releases under its workspace's org", async () => {
+    it("a run without an org bills, attributes and releases under its project's org", async () => {
       await db.exec(`insert into organizations(id, name, slug, created_by_user_id) values ('o9', 'Nine', 'nine', 'u1');
-        insert into workspaces(id, org_id, user_id, name) values ('w9', 'o9', 'u1', 'W9');`);
+        insert into projects(id, org_id, user_id, name) values ('w9', 'o9', 'u1', 'W9');`);
       await insertRuns([["null-org-billed", null, "w9"]]);
       await insertDocument("null-org-doc", "o9", "w9", "null-org-billed");
       const state = await stateOf("null-org-billed");
@@ -362,7 +379,7 @@ describe("PostgresVisionAttemptBackend", () => {
     describe("a failing credit debit rolls back the charge and the ticket release together", () => {
       beforeAll(async () => {
         await db.exec(`insert into organizations(id, name, slug, created_by_user_id) values ('o10', 'Ten', 'ten', 'u1');
-          insert into workspaces(id, org_id, user_id, name) values ('w10', 'o10', 'u1', 'W10');
+          insert into projects(id, org_id, user_id, name) values ('w10', 'o10', 'u1', 'W10');
           create function test_fail_o10_debit() returns trigger language plpgsql as $$
           begin
             if new.org_id = 'o10' then raise exception 'injected debit failure'; end if;
@@ -407,9 +424,9 @@ describe("PostgresVisionAttemptBackend", () => {
       }, 60_000);
     });
 
-    it("bills a null-org run's materialized pages under its workspace's org", async () => {
+    it("bills a null-org run's materialized pages under its project's org", async () => {
       await db.exec(`insert into organizations(id, name, slug, created_by_user_id) values ('o11', 'Eleven', 'eleven', 'u1');
-        insert into workspaces(id, org_id, user_id, name) values ('w11', 'o11', 'u1', 'W11');`);
+        insert into projects(id, org_id, user_id, name) values ('w11', 'o11', 'u1', 'W11');`);
       await insertRuns([["null-org-fee", null, "w11"]]);
       await insertDocument("null-org-fee-doc", "o11", "w11", "null-org-fee");
       const sql = (store as unknown as { sql: import("postgres").Sql<Record<string, unknown>> }).sql;
@@ -420,9 +437,9 @@ describe("PostgresVisionAttemptBackend", () => {
   });
 });
 
-async function insertDocument(id: string, orgId: string, workspaceId: string, runId: string): Promise<void> {
-  await db.exec(`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count)
-    values ('${id}', '${orgId}', 'u1', '${workspaceId}', '${runId}', '${id}.pdf', 'application/pdf', 'raw/${id}', 'processing', 2);`);
+async function insertDocument(id: string, orgId: string, projectId: string, runId: string): Promise<void> {
+  await db.exec(`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
+    values ('${id}', '${orgId}', 'u1', '${projectId}', '${runId}', '${id}.pdf', 'application/pdf', 'raw/${id}', 'processing', 2);`);
 }
 
 /** An activity's state for `runId`, loaded through the store with the shared ledger. */

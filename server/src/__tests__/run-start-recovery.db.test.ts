@@ -1,3 +1,4 @@
+import { WorkflowExecutionAlreadyStartedError } from "@temporalio/client";
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
 import { describe, expect, it, vi } from "vitest";
@@ -9,7 +10,7 @@ import type { SqlClient } from "../db.js";
 // Real-Postgres check of run-start recovery (claiming, backoff, SKIP LOCKED).
 // RUN_LIFECYCLE_DATABASE_URL must point at a disposable local database built by
 // applying server/db/migrations (pnpm db:migrate); server/db/migrations is the
-// only schema source. Each test seeds its own user, organization and workspace
+// only schema source. Each test seeds its own user, organization and project
 // with unique ids and deletes them afterwards. Recovery sweeps every due Run in
 // the database, so do not point this at a database other processes are using.
 //   RUN_LIFECYCLE_DATABASE_URL=$DATABASE_URL npx vitest run --project api run-start-recovery.db
@@ -21,7 +22,7 @@ const temporalDown = new Error(
   "Temporal API client could not connect to Temporal at temporal.example.invalid:7233.\noriginalError=Error: Failed to connect before the deadline",
 );
 
-type Tenant = { userId: string; orgId: string; workspaceId: string; runId: (name: string) => string };
+type Tenant = { userId: string; orgId: string; projectId: string; runId: (name: string) => string };
 type Clients = { sql: SqlClient; other: SqlClient; tenant: Tenant };
 
 async function withTenant(run: (clients: Clients) => Promise<void>): Promise<void> {
@@ -29,7 +30,7 @@ async function withTenant(run: (clients: Clients) => Promise<void>): Promise<voi
   const tenant: Tenant = {
     userId: `rsr-user-${suffix}`,
     orgId: `rsr-org-${suffix}`,
-    workspaceId: `rsr-ws-${suffix}`,
+    projectId: `rsr-ws-${suffix}`,
     runId: (name) => `${name}-${suffix}`,
   };
   const connect = () => postgres(databaseUrl, { max: 2, prepare: false, onnotice: () => {} });
@@ -39,11 +40,11 @@ async function withTenant(run: (clients: Clients) => Promise<void>): Promise<voi
     await sql`insert into "user" (id, name, email) values (${tenant.userId}, 'Run start recovery', ${`${tenant.userId}@example.test`})`;
     await sql`insert into organizations (id, name, created_by_user_id) values (${tenant.orgId}, 'Run start recovery', ${tenant.userId})`;
     await sql`insert into org_memberships (org_id, user_id, role) values (${tenant.orgId}, ${tenant.userId}, 'owner')`;
-    await sql`insert into workspaces (id, org_id, user_id, name) values (${tenant.workspaceId}, ${tenant.orgId}, ${tenant.userId}, 'Run start recovery')`;
+    await sql`insert into projects (id, org_id, user_id, name) values (${tenant.projectId}, ${tenant.orgId}, ${tenant.userId}, 'Run start recovery')`;
     await run({ sql: sql as unknown as SqlClient, other: other as unknown as SqlClient, tenant });
   } finally {
-    // Runs and documents cascade from the workspace.
-    await sql`delete from workspaces where id = ${tenant.workspaceId}`;
+    // Runs and documents cascade from the project.
+    await sql`delete from projects where id = ${tenant.projectId}`;
     await sql`delete from organizations where id = ${tenant.orgId}`;
     await sql`delete from "user" where id = ${tenant.userId}`;
     await sql.end();
@@ -59,7 +60,7 @@ function fakeTemporal() {
     state.startCalls += 1;
     if (state.delayMs) await new Promise((resolve) => setTimeout(resolve, state.delayMs));
     if (state.down) throw temporalDown;
-    if (workflows.has(runId)) throw new Error("Workflow execution already started");
+    if (workflows.has(runId)) throw new WorkflowExecutionAlreadyStartedError("Workflow execution already started", runId, "pipeline");
     workflows.set(runId, Date.now());
   });
   return { workflows, state, startWorkflow };
@@ -79,9 +80,9 @@ function recovery(sql: SqlClient, temporal: ReturnType<typeof fakeTemporal>) {
 
 async function insertRun(sql: SqlClient, tenant: Tenant, name: string, values: { ageMs?: number; status?: string; controlState?: string; started?: boolean } = {}) {
   await sql`
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, control_state, created_at, workflow_started_at, creation_ready_at)
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, control_state, created_at, workflow_started_at, creation_ready_at)
     values (
-      ${tenant.runId(name)}, ${tenant.orgId}, ${tenant.userId}, ${tenant.workspaceId}, 'bulk-upload',
+      ${tenant.runId(name)}, ${tenant.orgId}, ${tenant.userId}, ${tenant.projectId}, 'bulk-upload',
       ${values.status ?? "queued"}, 'queued', ${values.controlState ?? null},
       now() - (${values.ageMs ?? 0} * interval '1 millisecond'),
       ${values.started ? sql`now()` : null},
@@ -95,7 +96,7 @@ async function runRow(sql: SqlClient, id: string) {
     workflow_started_at: Date | null;
     workflow_start_attempts: number;
     workflow_start_next_at: Date | null;
-  }[]>`select workflow_started_at, workflow_start_attempts, workflow_start_next_at from workspace_runs where id = ${id}`;
+  }[]>`select workflow_started_at, workflow_start_attempts, workflow_start_next_at from project_runs where id = ${id}`;
   return row;
 }
 
@@ -151,7 +152,7 @@ describe.skipIf(!isLocal)("run-start recovery (local Postgres)", () => {
 
       expect(await r.sweepOnce()).toMatchObject({ claimed: 0 });
       // First retry is due after the 2 s base backoff.
-      await sql`update workspace_runs set workflow_start_next_at = now() - interval '1 ms' where id = ${tenant.runId("run-backoff")}`;
+      await sql`update project_runs set workflow_start_next_at = now() - interval '1 ms' where id = ${tenant.runId("run-backoff")}`;
       expect(await r.sweepOnce()).toMatchObject({ claimed: 1, started: 1 });
     });
   });
@@ -164,7 +165,7 @@ describe.skipIf(!isLocal)("run-start recovery (local Postgres)", () => {
       await insertRun(sql, tenant, "run-orphan", { ageMs: 60_000 });
       // Creation still in flight: never eligible, regardless of its age.
       await insertRun(sql, tenant, "run-fresh", { ageMs: 60_000 });
-      await sql`update workspace_runs set creation_ready_at = null, creation_expires_at = now() + interval '5 minutes' where id = ${tenant.runId("run-fresh")}`;
+      await sql`update project_runs set creation_ready_at = null, creation_expires_at = now() + interval '5 minutes' where id = ${tenant.runId("run-fresh")}`;
       // Started, waiting for worker slots.
       await insertRun(sql, tenant, "run-waiting", { ageMs: 60_000, started: true });
       await insertRun(sql, tenant, "run-paused", { ageMs: 60_000, controlState: "paused" });
@@ -192,8 +193,8 @@ describe.skipIf(!isLocal)("run-start recovery (local Postgres)", () => {
       // SKIP LOCKED + the claim lease: every run was started exactly once.
       expect(temporal.state.startCalls).toBe(40);
       const [{ pending }] = await sql<{ pending: number }[]>`
-        select count(*)::int as pending from workspace_runs
-        where workspace_id = ${tenant.workspaceId} and workflow_started_at is null
+        select count(*)::int as pending from project_runs
+        where project_id = ${tenant.projectId} and workflow_started_at is null
       `;
       expect(pending).toBe(0);
     });

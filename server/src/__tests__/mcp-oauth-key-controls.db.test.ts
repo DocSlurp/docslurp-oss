@@ -1,6 +1,7 @@
 import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
+import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
 
 // OAuth resources and config.apiUrl derive from the public URL, read at import time; pin it
 // before any import so a developer's .env (dotenv never overrides set values) cannot change it.
@@ -16,6 +17,7 @@ const context = { ip: "203.0.113.7" };
 
 beforeAll(async () => {
   const database = await startMigratedPostgres();
+  await database.db.exec(LIFT_ONE_ORG_PER_USER_POLICY);
   stop = database.stop;
   sql = postgres(database.url, { max: 1, prepare: false, onnotice: () => {} });
   vi.doMock("../db.js", () => ({ sql }));

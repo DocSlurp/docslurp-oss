@@ -37,11 +37,11 @@ describe("server/db/migrations", () => {
       "select table_name from information_schema.tables where table_schema = 'public'",
     );
     const names = new Set(tables.rows.map((row) => row.table_name));
-    for (const table of ["workspaces", "workspace_slugs", "documents", "workspace_corpus_stats", "document_cleanup_queue", "webhook_outbox", "chat_message_feedback", "budget_alerts"]) {
+    for (const table of ["projects", "project_slugs", "documents", "project_corpus_stats", "document_cleanup_queue", "webhook_outbox", "chat_message_feedback", "budget_alerts"]) {
       expect(names, table).toContain(table);
     }
     const columns = await db.query<{ column_name: string }>(
-      "select column_name from information_schema.columns where table_name = 'workspaces' and column_name in ('is_default', 'slug')",
+      "select column_name from information_schema.columns where table_name = 'projects' and column_name in ('is_default', 'slug')",
     );
     expect(columns.rows.map((row) => row.column_name).sort()).toEqual(["is_default", "slug"]);
     await db.close();

@@ -5,10 +5,10 @@ describe("ExtractorAttemptLedger", () => {
   it("keeps unavailable probes distinct from executions", () => {
     const ledger = new ExtractorAttemptLedger();
     ledger.markUnavailable("docling");
-    ledger.reserve("kreuzberg");
-    expect(ledger.snapshot()).toEqual({ attempted: ["kreuzberg"], unavailable: ["docling"] });
+    ledger.reserve("native-pdf");
+    expect(ledger.snapshot()).toEqual({ attempted: ["native-pdf"], unavailable: ["docling"] });
     expect(ledger.canAttempt("docling")).toBe(false);
-    expect(ledger.canAttempt("kreuzberg")).toBe(false);
+    expect(ledger.canAttempt("native-pdf")).toBe(false);
     expect(ledger.canAttempt("poppler-text")).toBe(true);
   });
 

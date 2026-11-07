@@ -80,9 +80,9 @@ export const connectorConfigSchema = z.union([
 ]);
 
 // Main connector record schema
-export const workspaceConnectorSchema = z.object({
+export const projectConnectorSchema = z.object({
   id: z.string().uuid(),
-  workspaceId: z.string().uuid(),
+  projectId: z.string().uuid(),
   type: connectorTypeSchema,
   name: z.string().min(1).max(8192).max(120),
   status: connectorStatusSchema.default("active"),
@@ -91,7 +91,7 @@ export const workspaceConnectorSchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
 });
-export type WorkspaceConnector = z.infer<typeof workspaceConnectorSchema>;
+export type ProjectConnector = z.infer<typeof projectConnectorSchema>;
 
 export const createConnectorSchema = z.object({
   type: connectorTypeSchema,

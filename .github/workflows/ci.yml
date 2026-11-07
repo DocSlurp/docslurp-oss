@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # No paths filter: every job, the OCR CLI job included, runs on every PR into these bases.
+    branches: [main, feat/offline-credit-estimator]
   workflow_dispatch:
 
 concurrency:
@@ -22,7 +23,7 @@ jobs:
   test:
     name: ${{ matrix.suite }}
     timeout-minutes: 20
-    # Native Kreuzberg requires newer glibc; enable unprivileged namespaces only
+    # Ubuntu 24.04 runner; enable unprivileged namespaces only
     # on this disposable CI runner so the real parser sandbox remains exercised.
     runs-on: ubuntu-24.04
     strategy:
@@ -31,10 +32,10 @@ jobs:
         include:
           - suite: typecheck and build
           - suite: worker 1/2
-            run: pnpm --filter @docslurp/worker test --shard=1/2
+            run: DOCSLURP_REQUIRE_DOPPLER_TOOLS=1 pnpm --filter @docslurp/worker test --shard=1/2
             worker-tools: true
           - suite: worker 2/2
-            run: pnpm --filter @docslurp/worker test --shard=2/2
+            run: DOCSLURP_REQUIRE_DOPPLER_TOOLS=1 pnpm --filter @docslurp/worker test --shard=2/2
             worker-tools: true
           - suite: server
             run: pnpm --filter @docslurp/server test
@@ -67,6 +68,25 @@ jobs:
           node --test scripts/install-worker-test-tools.test.mjs
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           bash scripts/install-worker-test-tools.sh
+      # Doppler from the pinned source (worker/doppler.json), the images' recipe: the PDF page count (pdfpagecount) and
+      # the fork's utilities under /usr/lib/doppler. Built once per pin and cached; real-tool tests must run, not skip.
+      - name: Restore the Doppler build
+        if: matrix.worker-tools
+        id: doppler-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/docslurp/doppler-stage
+          key: doppler-${{ runner.os }}-24.04-${{ hashFiles('worker/doppler.json', 'scripts/install-doppler.sh') }}
+      - name: Install Doppler (pdfpagecount) and check prlimit
+        if: matrix.worker-tools
+        timeout-minutes: 25
+        run: DOCSLURP_DOPPLER_STAGE="$HOME/.cache/docslurp/doppler-stage" bash scripts/install-doppler.sh
+      - name: Save the Doppler build
+        if: matrix.worker-tools && steps.doppler-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/docslurp/doppler-stage
+          key: ${{ steps.doppler-cache.outputs.cache-primary-key }}
       - name: Set up worker Python test dependencies
         if: matrix.worker-tools
         run: |
@@ -84,6 +104,10 @@ jobs:
         run: pnpm worker:check --profile=test --sandbox
       - run: ${{ matrix.run }}
         if: matrix.run
+      # The page layout walker (image placement, table geometry) that local mode, the routing eval and the PDF VM share.
+      - name: PDF layout facts walker tests
+        if: matrix.suite == 'worker 1/2'
+        run: '"${PYTHON_VENV}/bin/python" -I worker/scripts/test_pdf_layout_facts.py'
       # Deterministic, local-only routing regression gate: no hosted AI calls, no spend.
       - name: Document routing regression eval
         if: matrix.suite == 'worker 1/2'
@@ -193,9 +217,114 @@ jobs:
       - name: Run gated database and Redis tests
         run: node scripts/run-database-tests.mjs
 
+  # The real OCR CLI (worker/scripts/docslurp_ocr.py) with its pinned models, alone and under the real parser sandbox.
+  # Models are fetched and sha256-verified at install (scripts/install-ocr-runtime.sh); the CLI loads them only by path
+  # and refuses sockets, and the sandbox has no network. scripts/run-ocr-cli-tests.mjs fails on any skipped test.
+  ocr-cli:
+    name: OCR CLI
+    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    env:
+      OCR_PREFIX: ${{ github.workspace }}/.ocr-runtime
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: 'pnpm'
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.13.0'
+          python-version: '3.11'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @docslurp/shared build
+      - name: Install bubblewrap, poppler and test fonts
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bubblewrap poppler-utils fonts-dejavu-core fonts-noto-cjk
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Install the OCR runtime (hash-checked wheels, sha256-verified models)
+        run: bash scripts/install-ocr-runtime.sh "$OCR_PREFIX"
+      - name: Run the OCR CLI tests (no skips allowed)
+        env:
+          HF_HUB_OFFLINE: '1'
+        run: |
+          DOCSLURP_OCR_TEST_PYTHON="$OCR_PREFIX/venv/bin/python3" \
+          DOCSLURP_OCR_TEST_MODELS="$OCR_PREFIX/models" \
+          node scripts/run-ocr-cli-tests.mjs
+
+  # The offline file profiler (packages/estimate): Rust unit and profile-fixture tests, then the wasm build
+  # (size budget), its JS tests (profiles accepted by @docslurp/shared's fileProfileSchema) and the Python package tests.
+  estimate:
+    name: offline estimator
+    timeout-minutes: 20
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - name: Install the pinned Rust toolchain (packages/estimate/rust-toolchain.toml)
+        working-directory: packages/estimate
+        run: rustup toolchain install
+      - name: Rust tests
+        working-directory: packages/estimate
+        run: cargo test --locked
+      - run: pnpm --filter @docslurp/shared build
+      - name: Build the wasm module and run its JS tests
+        run: pnpm --filter @docslurp/estimate test:wasm
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.13.0'
+          python-version: '3.11'
+      - name: Python package tests (wasmtime)
+        run: pnpm --filter @docslurp/estimate test:python
+
+  # The structural PDF page count (Doppler pdfpagecount, worker/doppler.json) and the page-range contract, against the real
+  # tools: Doppler is built from the pinned source with the worker image's own stage, and the tests run inside it. Billing
+  # and authorization read this count, so its hostile-tree tests must run, not skip.
+  doppler-pagecount:
+    name: Doppler page count
+    timeout-minutes: 40
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @docslurp/shared build
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build Doppler from the pinned source (worker image stage doppler-utils)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: worker/Dockerfile.lean
+          target: doppler-utils
+          load: true
+          tags: docslurp-doppler-utils:ci
+          cache-from: type=gha,scope=doppler-utils
+          cache-to: type=gha,scope=doppler-utils,mode=max
+      - name: Page count and page-range tests against the real tools (no skips)
+        run: |
+          docker run --rm --privileged -v "$PWD:$PWD" -w "$PWD/worker" -e TMPDIR=/tmp -e HOME=/tmp -e DOCSLURP_REQUIRE_DOPPLER_TOOLS=1 \
+            docslurp-doppler-utils:ci sh -c 'cp -a /out/usr/lib/doppler /usr/lib/ && npx vitest run src/__tests__/pdf-page-count.test.ts --reporter=verbose'
+
   ci-success:
     # A stable required check. Never mask failures.
-    needs: [test, database]
+    needs: [test, database, estimate, ocr-cli, doppler-pagecount]
     if: always()
     runs-on: ubuntu-slim
     timeout-minutes: 1

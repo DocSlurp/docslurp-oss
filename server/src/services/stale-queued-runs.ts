@@ -91,7 +91,7 @@ async function markStaleQueuedRunRecoveryAttempt(
   };
 
   await sql`
-    update workspace_runs
+    update project_runs
     set
       stats = ${sql.json(JSON.parse(JSON.stringify(nextStats)))}::jsonb,
       updated_at = now()
@@ -133,7 +133,7 @@ async function recoverStaleQueuedRun(row: StaleQueuedRunRow): Promise<void> {
 async function sweepOnce(): Promise<void> {
   const rows = await sql<StaleQueuedRunRow[]>`
     select id, user_id, pipeline, stage, total_documents, created_at, updated_at, stats
-    from workspace_runs
+    from project_runs
     where status = 'queued'
       and creation_ready_at is not null
       and kind <> 'materialize'

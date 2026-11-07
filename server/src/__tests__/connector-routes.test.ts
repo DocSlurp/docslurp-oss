@@ -20,8 +20,8 @@ vi.mock("../lib/encryption.js", () => ({
 }));
 
 vi.mock("../services/organizations.js", () => ({
-  getWorkspaceAccess: vi.fn(async () => ({ role: "owner" })),
-  canManageWorkspace: vi.fn(() => true),
+  getProjectAccess: vi.fn(async () => ({ role: "owner" })),
+  canManageProject: vi.fn(() => true),
 }));
 
 const { connectorsRoutes } = await import("../routes/connectors.js");
@@ -33,12 +33,12 @@ function buildApp() {
     (c as unknown as { set: (key: string, value: unknown) => void }).set("sessionUser", { id: "user-1" });
     await next();
   });
-  app.route("/v1/workspaces", connectorsRoutes);
+  app.route("/v1/projects", connectorsRoutes);
   return app;
 }
 
 function createConnector(type: string) {
-  return buildApp().request("/v1/workspaces/ws-1/connectors", {
+  return buildApp().request("/v1/projects/ws-1/connectors", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ type, name: "Source", credentials: { accessKeyId: "x", secretAccessKey: "x" }, config: { bucket: "docs" } }),
@@ -67,7 +67,7 @@ describe("connector creation", () => {
     sqlMock.mockResolvedValueOnce([
       {
         id: "conn-1",
-        workspace_id: "ws-1",
+        project_id: "ws-1",
         type: "s3",
         name: "Source",
         credentials_encrypted: "iv:tag:data",
@@ -86,7 +86,7 @@ describe("connector creation", () => {
   });
 
   it.each(['https://127.0.0.1/', 'https://169.254.169.254/', 'http://10.0.0.1/', 'https://[::1]/', 'https://127.0.0.1.sslip.io/'])("rejects unsafe endpoints before persistence: %s", async (endpoint) => {
-    const response = await buildApp().request('/v1/workspaces/ws-1/connectors', {
+    const response = await buildApp().request('/v1/projects/ws-1/connectors', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ type: 's3', name: 'Source', config: { bucket: 'docs', endpoint }, credentials: { accessKeyId: 'x', secretAccessKey: 'x' } }),
     });
@@ -95,7 +95,7 @@ describe("connector creation", () => {
   });
 
   it("rejects a private Confluence base URL before persistence", async () => {
-    const response = await buildApp().request('/v1/workspaces/ws-1/connectors', {
+    const response = await buildApp().request('/v1/projects/ws-1/connectors', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ type: 'confluence', name: 'Source', config: {}, credentials: { baseUrl: 'https://169.254.169.254/', email: 'admin@example.com', apiToken: 'test' } }),
     });
@@ -104,7 +104,7 @@ describe("connector creation", () => {
   });
 
   it("rejects oversized config before persistence", async () => {
-    const response = await buildApp().request('/v1/workspaces/ws-1/connectors', {
+    const response = await buildApp().request('/v1/projects/ws-1/connectors', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ type: 's3', name: 'Source', config: { bucket: 'docs', extra: 'x'.repeat(17000) }, credentials: { accessKeyId: 'x', secretAccessKey: 'x' } }),
     });
@@ -114,7 +114,7 @@ describe("connector creation", () => {
 
   it("validates a changed endpoint before any update", async () => {
     sqlMock.mockResolvedValueOnce([{ type: 's3', config: { bucket: 'docs' }, credentials_encrypted: `sealed:${Buffer.from(JSON.stringify({ accessKeyId: 'x', secretAccessKey: 'x' })).toString('base64')}` }]);
-    const response = await buildApp().request('/v1/workspaces/ws-1/connectors/conn-1', {
+    const response = await buildApp().request('/v1/projects/ws-1/connectors/conn-1', {
       method: 'PATCH', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name: 'Changed', config: { bucket: 'docs', endpoint: 'https://127.0.0.1/' } }),
     });
