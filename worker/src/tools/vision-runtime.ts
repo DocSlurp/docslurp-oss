@@ -730,6 +730,7 @@ export async function runVisionRequest(args: {
           // The swapped call was served and billed even though its output is refused.
           attachVisionBilledUsage(error, {
             inputTokens: result.inputTokens, outputTokens: result.outputTokens,
+            costMetadata: result.costMetadata,
             ...(result.costCents !== undefined ? { costCents: result.costCents, ...(result.chargedTokens ? { chargedTokens: result.chargedTokens } : {}) } : {}),
           });
           throw error;

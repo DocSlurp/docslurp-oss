@@ -136,8 +136,8 @@ describe("China-provider restriction (org or project opt-out)", () => {
       filtered("Wafer"),
       sse([{ id: "g", model: GLM, provider: "Friendli", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
     ], { allowChinaProviders: false });
-    expect(bodies[0]!.provider).toEqual({ order: ["wafer/nvfp4", "friendli", "inference-net/fp4"], allow_fallbacks: false, only: [...NON_CHINA_PROVIDER_SLUGS], ignore: [...CHINA_PROVIDER_SLUGS], max_price: visionMaxPrice(GLM) });
-    expect(bodies[1]!.provider).toMatchObject({ order: ["friendli", "inference-net/fp4"], ignore: ["Wafer", ...CHINA_PROVIDER_SLUGS] });
+    expect(bodies[0]!.provider).toEqual({ only: ["wafer/nvfp4", "friendli", "inference-net/fp4"], sort: "price", allow_fallbacks: true, ignore: [...CHINA_PROVIDER_SLUGS], max_price: visionMaxPrice(GLM) });
+    expect(bodies[1]!.provider).toMatchObject({ only: ["wafer/nvfp4", "friendli", "inference-net/fp4"], ignore: ["Wafer", ...CHINA_PROVIDER_SLUGS] });
     for (const body of bodies) expectRestricted(body.provider);
   });
 
@@ -177,7 +177,7 @@ describe("China-provider restriction (org or project opt-out)", () => {
     const { bodies } = await run(GLM, [
       sse([{ id: "g", model: GLM, provider: "Wafer", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
     ]);
-    expect(bodies[0]!.provider).toEqual({ order: ["wafer/nvfp4", "friendli", "inference-net/fp4"], allow_fallbacks: false, max_price: visionMaxPrice(GLM) });
+    expect(bodies[0]!.provider).toEqual({ only: ["wafer/nvfp4", "friendli", "inference-net/fp4"], sort: "price", allow_fallbacks: true, max_price: visionMaxPrice(GLM) });
   });
 
   it("labels usage with the served host and its region", async () => {

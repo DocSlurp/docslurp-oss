@@ -199,6 +199,17 @@ describe("provider cost accounting", () => {
     expect(tiny.costCents).toBeCloseTo((1_000 * 0.0000002 + 1_000 * 0.000001) * 100, 12);
     expect(tiny.metadata).not.toHaveProperty("pricingOverride");
   });
+  it("retries incomplete BYOK receipts without losing existing token counts", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { total_cost: 0, is_byok: true } })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { total_cost: 0, is_byok: true, upstream_inference_cost: 0.002 } })));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await resolveOpenRouterUsage({ apiKey: "test", model: "vendor/model", generationId: "delayed",
+      receiptRetryDelaysMs: [0, 1], usage: { inputTokens: 30, outputTokens: 7, raw: { prompt_tokens: 30, completion_tokens: 7 } } });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ inputTokens: 30, outputTokens: 7, costCents: 0.2,
+      metadata: { isByok: true, routerCreditCostUsd: 0, upstreamInferenceCostUsd: 0.002 } });
+  });
   it("retries the generation receipt once and records the provider charge", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response("", { status: 404 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ data: { total_cost: 0.0004, is_byok: false } }))));

@@ -53,7 +53,7 @@ async function resolveOpenRouterUsageInner(args: {
     for (const delayMs of args.receiptRetryDelaysMs ?? [0]) {
       if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
       const receipt = await fetchGenerationReceipt(args.apiKey, args.generationId, base).catch(() => null);
-      if (receipt === "incomplete") break;
+      if (receipt === "incomplete") continue;
       if (receipt) {
         return { ...receipt, metadata: { ...receipt.metadata, ...(delayMs > 0 ? { receiptRetried: true } : {}) } };
       }
@@ -78,7 +78,7 @@ async function resolveOpenRouterUsageInner(args: {
   const pricing = live ? { input: live.input, output: live.output } : verified;
   return { ...base,
     ...(pricing ? { costCents: (base.inputTokens * pricing.input + base.outputTokens * pricing.output) * 100 } : {}),
-    metadata: { costSource: "estimate", accountingStatus: "receipt-missing", generationId: args.generationId ?? null,
+    metadata: { costSource: pricing ? "estimate" : "unknown", reconciliationRequired: true, accountingStatus: "receipt-missing", generationId: args.generationId ?? null,
       pricingSource: live ? "openrouter-live" : verified ? "model-prices" : "configured-fallback",
       ...(live?.override ? { pricingOverride: live.override } : {}), ...(pricing ? { pricingUsdPerToken: pricing } : {}) },
   };
