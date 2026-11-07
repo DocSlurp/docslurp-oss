@@ -1,5 +1,5 @@
 import { currentProviderPolicy } from "./provider-rate-limit.js";
-import { speedBoostModel, assertProviderAllowed, authorizePrivateModelCall, isPrivateModelUri, type PrivacyMode, createOpenRouterUsageCapture, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, resolveOpenRouterUsage, resolvePipelineTextGenerationOptions, resolveSupportedModelIdWithWarning, type TextGenerationConfig, type TextGenerationProfile, type ProviderTextUsage, type PipelineTextOperation } from "@docslurp/shared";
+import { speedBoostModel, assertProviderAllowed, authorizePrivateModelCall, isPrivateModelUri, type PrivacyMode, createOpenRouterUsageCapture, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, resolveOpenRouterUsage, servedTextModel, regionFallbackUsageMetadata, resolvePipelineTextGenerationOptions, resolveSupportedModelIdWithWarning, type TextGenerationConfig, type TextGenerationProfile, type ProviderTextUsage, type PipelineTextOperation } from "@docslurp/shared";
 import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
@@ -151,7 +151,7 @@ export async function generateOpenRouterText(args: {
     async () => {
       const accounting = createOpenRouterUsageCapture();
       const provider = createOpenAI({
-        fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(accounting.fetch), settings.reasoningEffort ?? "none")),
+        fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(accounting.fetch, { restrictedFallback: true }), settings.reasoningEffort ?? "none")),
         apiKey: args.apiKey,
         baseURL: OPENROUTER_BASE_URL,
       });
@@ -166,8 +166,12 @@ export async function generateOpenRouterText(args: {
       });
 
       noteWorkProgress(`ai:${args.operation}`);
-      const usage = await resolveOpenRouterUsage({ apiKey: args.apiKey, model: args.model, providerName: accounting.providerName(), generationId: result.response.id, receiptRetryDelaysMs: [0, 1_500], usage: { ...result.usage, raw: accounting.usage() ?? result.usage.raw } });
-      const recordedUsage: TextGenerationUsage = { ...usage, metadata: { ...usage.metadata, routedModel: args.model, reasoningTokens: result.usage.outputTokenDetails?.reasoningTokens ?? usage.metadata?.reasoningTokens } };
+      // A restricted request may have been re-targeted at the open fallback model: price and record what ran.
+      const served = servedTextModel(args.model, accounting.sentModel());
+      const usage = await resolveOpenRouterUsage({ apiKey: args.apiKey, model: served.model, providerName: accounting.providerName(), generationId: result.response.id, receiptRetryDelaysMs: [0, 1_500], usage: { ...result.usage, raw: accounting.usage() ?? result.usage.raw } });
+      const recordedUsage: TextGenerationUsage = { ...usage, metadata: { ...usage.metadata, routedModel: served.model,
+        ...regionFallbackUsageMetadata(args.model, served),
+        reasoningTokens: result.usage.outputTokenDetails?.reasoningTokens ?? usage.metadata?.reasoningTokens } };
       return { text: result.text, finishReason: result.finishReason, usage: recordedUsage };
     },
   );

@@ -126,6 +126,9 @@ export const OPENROUTER_LOWEST_REASONING: Readonly<Record<string, OpenRouterReas
   // pipeline model spends a 1,600-token graph-extraction budget on reasoning and returns no answer.
   "qwen/qwen3.5-flash-02-23": { enabled: false },
   "qwen/qwen3.6-flash": { enabled: false },
+  // 2026-11-06 probes on non-China hosts: `{ enabled: false }` and effort `none` return HTTP 400 "Reasoning is
+  // mandatory"; `minimal` returns HTTP 200 with ~145 reasoning tokens (unset: ~750). The restricted fallback model.
+  "openai/gpt-oss-120b": { effort: "minimal" },
 };
 
 export function lowestOpenRouterReasoning(model: string | undefined): OpenRouterReasoning | undefined {
@@ -181,11 +184,40 @@ export function createOpenRouterReasoningFetch(baseFetch: typeof fetch, effort?:
   };
 }
 
+/**
+ * The model to price and record a text call as: the model actually sent when a
+ * restricted fallback re-targeted it, else the requested one. A speed-boost
+ * (`:nitro`) variant of the requested model is not a different model here, so
+ * its pricing is unchanged. Read `sentModel()` from a capture inside the routing fetch.
+ */
+export function servedTextModel(requested: string, sent: string | undefined): { model: string; regionFallback: boolean } {
+  if (!sent) return { model: requested, regionFallback: false };
+  const base = (model: string) => nitroBaseModel(model) ?? model;
+  return base(sent) === base(requested) ? { model: requested, regionFallback: false } : { model: sent, regionFallback: true };
+}
+
+/** Usage metadata marking a call the restricted fallback re-targeted: the model that ran and the one requested. */
+export function regionFallbackUsageMetadata(requested: string, served: { model: string; regionFallback: boolean }): Record<string, unknown> {
+  return served.regionFallback ? { routedModel: served.model, regionFallback: true, requestedModel: requested } : {};
+}
+
+/**
+ * A usage input for a call the restricted fallback re-targeted (metadata
+ * `regionFallback` with `routedModel`), relabelled as the model that ran; the
+ * caller's model stays in metadata as `requestedModel`. Other inputs pass through.
+ */
+export function withServedUsageModel<T extends { model: string; metadata?: Record<string, unknown> | null }>(input: T): T {
+  const metadata = input.metadata ?? undefined;
+  if (metadata?.regionFallback !== true || typeof metadata.routedModel !== "string" || metadata.routedModel === input.model) return input;
+  return { ...input, model: metadata.routedModel, metadata: { ...metadata, requestedModel: metadata.requestedModel ?? input.model } };
+}
+
 /** Observe the original response before SDK validation discards router cost fields. */
 export function createOpenRouterUsageCapture(baseFetch: typeof fetch = fetch) {
   let captured: unknown;
   let providerName: string | undefined;
   let responseModel: string | undefined;
+  let sentModel: string | undefined;
   const capture = (text: string) => {
     try {
       const value = JSON.parse(text) as { provider?: string; model?: string; usage?: unknown; response?: { provider?: string; model?: string; usage?: unknown } };
@@ -202,6 +234,11 @@ export function createOpenRouterUsageCapture(baseFetch: typeof fetch = fetch) {
     captured = undefined;
     providerName = undefined;
     responseModel = undefined;
+    sentModel = undefined;
+    // The model this request actually asked for, after routing (a restricted fallback re-targets it).
+    if (typeof init?.body === "string") {
+      try { const model = (JSON.parse(init.body) as { model?: unknown }).model; if (typeof model === "string") sentModel = model; } catch { /* not JSON */ }
+    }
     const response = await baseFetch(input, init);
     if (!response.ok || !response.body) return response;
     const streaming = response.headers.get("content-type")?.includes("text/event-stream");
@@ -225,7 +262,7 @@ export function createOpenRouterUsageCapture(baseFetch: typeof fetch = fetch) {
       flush() { observe(decoder.decode()); if (streaming && buffer.startsWith("data:")) capture(buffer.slice(5).trim()); else if (!streaming) capture(buffer); },
     })), { status: response.status, statusText: response.statusText, headers: response.headers });
   };
-  return { fetch: trackedFetch, usage: () => captured, providerName: () => providerName, responseModel: () => responseModel };
+  return { fetch: trackedFetch, usage: () => captured, providerName: () => providerName, responseModel: () => responseModel, sentModel: () => sentModel };
 }
 
 /**

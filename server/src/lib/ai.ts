@@ -1,4 +1,4 @@
-import { assertProviderAllowed, authorizePrivateModelCall, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, createOpenRouterUsageCapture, createOpenRouterChargeTotal, isPrivateModelUri, readProviderCharge, PRIVATE_MODEL_PROVIDER, resolveOpenRouterUsage, resolveSupportedModelIdWithWarning, type PrivacyMode, type PrivateCallAuditScope, type ProviderTextUsage } from "@docslurp/shared";
+import { assertProviderAllowed, authorizePrivateModelCall, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, createOpenRouterUsageCapture, createOpenRouterChargeTotal, isPrivateModelUri, readProviderCharge, PRIVATE_MODEL_PROVIDER, resolveOpenRouterUsage, servedTextModel, regionFallbackUsageMetadata, resolveSupportedModelIdWithWarning, type PrivacyMode, type PrivateCallAuditScope, type ProviderTextUsage } from "@docslurp/shared";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -208,11 +208,19 @@ export async function generateOpenRouterText(args: {
     async () => {
       const accounting = createOpenRouterUsageCapture();
       const provider = createOpenAI({
-        fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(withProviderPreferences(createOpenRouterRoutingFetch(accounting.fetch), args.providerPreferences))),
+        fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(withProviderPreferences(createOpenRouterRoutingFetch(accounting.fetch, { restrictedFallback: (args.model ?? SEARCH_OPENROUTER_MODEL) === SEARCH_OPENROUTER_MODEL }), args.providerPreferences))),
         apiKey: args.apiKey,
         baseURL: OPENROUTER_BASE_URL,
       });
       const model = args.model ?? SEARCH_OPENROUTER_MODEL;
+      // Only the default search model falls back when China-based providers are off: a model the
+      // caller chose (a workspace chat model) is never replaced. A re-targeted call is priced and
+      // marked as the model that ran (regionFallback), and usage recording relabels it.
+      const servedOpenRouterUsage = async () => {
+        const served = servedTextModel(model, accounting.sentModel());
+        const usage = await resolveOpenRouterUsage({ apiKey: args.apiKey, model: served.model, generationId: result.response.id, usage: { ...result.usage, raw: accounting.usage() ?? result.usage.raw } });
+        return served.regionFallback ? { ...usage, metadata: { ...usage.metadata, ...regionFallbackUsageMetadata(model, served) } } : usage;
+      };
       const result = await generateText({
         ...posthogAiTelemetry({
           functionId: args.operation ?? "api.text.openrouter",
@@ -228,7 +236,7 @@ export async function generateOpenRouterText(args: {
 
       return {
         text: result.text,
-        usage: await resolveOpenRouterUsage({ apiKey: args.apiKey, model: args.model ?? SEARCH_OPENROUTER_MODEL, generationId: result.response.id, usage: { ...result.usage, raw: accounting.usage() ?? result.usage.raw } }),
+        usage: await servedOpenRouterUsage(),
       };
     },
   );
