@@ -1,3 +1,4 @@
+import { runBounded } from "../lib/bounded-concurrency.js";
 import type { GeoFinalSource } from "../db/geo-final-source.js";
 import { recordExtractorFallback } from "../lib/extractor-fallback.js";
 import { reportException, initializeWorkerErrorReporting } from "@docslurp/shared/error-reporting";
@@ -23,29 +24,9 @@ export async function runDocuments<T>(
   concurrency: number,
   fn: (document: Document) => Promise<T>
 ): Promise<T[]> {
-  if (concurrency <= 1) {
-    const results: T[] = [];
-    for (const doc of documents) {
-      results.push(await fn(doc));
-    }
-    return results;
-  }
-
-  const results: T[] = new Array(documents.length);
-  let index = 0;
-
-  async function worker(): Promise<void> {
-    while (true) {
-      const i = index++;
-      if (i >= documents.length) return;
-      const doc = documents[i]!;
-      results[i] = await fn(doc);
-    }
-  }
-
-  const workers = Array.from({ length: Math.min(concurrency, documents.length) }, () => worker());
-  await Promise.all(workers);
-  return results;
+  // Stop admission on infrastructure/pressure failure and drain accepted work so
+  // its usage and checkpoints land before the stage retries.
+  return runBounded(documents.length, concurrency, (index) => fn(documents[index]!));
 }
 
 export interface DocumentStageResult {

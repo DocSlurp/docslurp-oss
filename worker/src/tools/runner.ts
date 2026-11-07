@@ -1528,7 +1528,9 @@ export class CommandRunner {
   }
 
   async launch(plan: CommandPlan, signal?: AbortSignal): Promise<LaunchedCommand> {
+    assertResourceCapacity();
     await admitCommand();
+    assertResourceCapacity();
     if (plan.sandboxedOcr) {
       const provider = requireSandboxedOcrProvider();
       const frames = plan.pages ?? plan.sandboxedOcr.maxFrames;

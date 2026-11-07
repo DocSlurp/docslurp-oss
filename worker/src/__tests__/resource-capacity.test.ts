@@ -1,3 +1,5 @@
+import { runDocuments } from "../pipeline/checkpoints.js";
+import type { Document } from "../models.js";
 import { describe, expect, it, vi } from "vitest";
 import { assertResourceCapacity, ResourceCapacityError, withResourceCapacityGuard } from "../lib/resource-capacity.js";
 import { fetchWithProviderRetry } from "../lib/provider-retry.js";
@@ -28,6 +30,13 @@ describe("resource admission at execution", () => {
     }))).rejects.toBeInstanceOf(ResourceCapacityError);
   });
 
+  it("guards direct launch paths used by streams, artifacts and malware scans", async () => {
+    const runner = new CommandRunner();
+    await expect(withResourceCapacityGuard(pressure, () => runner.launch({
+      binary: "not-a-real-parser", args: ["/hostile/customer.pdf"], available: true,
+    }))).rejects.toBeInstanceOf(ResourceCapacityError);
+  });
+
   it("isolates simultaneous activity guards and leaves outer contexts unchanged", async () => {
     const check = vi.fn();
     const rejected = withResourceCapacityGuard(pressure, async () => {
@@ -41,6 +50,28 @@ describe("resource admission at execution", () => {
     await Promise.all([rejected, accepted]);
     assertResourceCapacity();
     expect(check).toHaveBeenCalledTimes(1);
+  });
+
+  it("drains accepted document work and stops new admissions after pressure", async () => {
+    let finish!: () => void;
+    const slow = new Promise<void>((resolve) => { finish = resolve; });
+    const docs = ["one", "two", "three"].map((id) => ({ id }) as Document);
+    const started: string[] = [];
+    let persisted = false;
+    let settled = false;
+    const pending = runDocuments(docs, 2, async (document) => {
+      started.push(document.id);
+      if (document.id === "one") { await Promise.resolve(); throw new ResourceCapacityError(); }
+      await slow;
+      persisted = true;
+    });
+    void pending.catch(() => { settled = true; });
+    await Promise.resolve(); await Promise.resolve();
+    expect(settled).toBe(false);
+    finish();
+    await expect(pending).rejects.toBeInstanceOf(ResourceCapacityError);
+    expect(persisted).toBe(true);
+    expect(started).toEqual(["one", "two"]);
   });
 
   it("never treats allocation pressure as a bad document", () => {
