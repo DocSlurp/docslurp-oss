@@ -235,6 +235,14 @@ describe("whole allocation memory headroom", () => {
   it("uses OS free memory if Linux telemetry is absent", () => {
     expect(detectAvailableMemoryBytes({ ...memoryReader({}), osFreeMemoryBytes: 500 * mb }, 200 * mb)).toBe(500 * mb);
   });
+  it("permits completed-stage bookkeeping under pressure without readmitting work", () => {
+    const state = makeState([makeDocument("doc-1", 1)]);
+    state.setDocumentStage({ runId: "run-1", documentId: "doc-1", stageName: "vision-extract",
+      status: "completed", attempts: 1, artifactUri: "done", stats: {}, error: "",
+      startedAt: null, completedAt: null, updatedAt: new Date() });
+    expect(() => resolveAdaptiveStageTuning({ config: baseConfig(), state, stageName: "vision-extract",
+      resources: { cpuCount: 8, rssBytes: 200 * mb, totalMemoryBytes: 8192 * mb, availableMemoryBytes: 0 } })).not.toThrow();
+  });
   it("uses allocation pressure instead of the small coordinator RSS for tuning", () => {
     const state = makeState([makeDocument("doc-1", 1), makeDocument("doc-2", 1)]);
     expect(() => resolveAdaptiveStageTuning({ config: baseConfig(), state, stageName: "vision-extract",

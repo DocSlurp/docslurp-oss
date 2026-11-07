@@ -8,6 +8,7 @@ import { resolveEmbeddingRoute } from "@docslurp/shared";
 import type { Config } from "../config.js";
 import type { JsonMap, PerformanceEvent, StageState } from "../models.js";
 import type { WorkflowState } from "./pipeline.js";
+import { hasFailedDocumentStage } from "./document-health.js";
 
 export interface ResourceSnapshot {
   cpuCount: number;
@@ -206,7 +207,10 @@ export function resolveAdaptiveStageTuning(args: {
     embeddingRoute.runtime,
   );
   const usableMemoryBytes = Math.max(0, memoryHeadroomBytes - totalMemoryBytes * 0.2);
-  if (state.documents.length > 0 && usableMemoryBytes < stageMemoryMb * 1024 * 1024) {
+  const pendingWork = state.documents.some((document) =>
+    state.documentStages.get(document.id)?.get(stageName)?.status !== "completed"
+    && !hasFailedDocumentStage(state, document.id, stageName));
+  if (pendingWork && usableMemoryBytes < stageMemoryMb * 1024 * 1024) {
     throw new ResourceCapacityError();
   }
   const memoryLimited = clamp(
