@@ -726,7 +726,8 @@ export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Pro
           inputTokens, outputTokens,
           costMetadata: { reconciliationRequired: true, visionAttempts: [
             ...log.map(stripCharge),
-            ...(partial ? [stripCharge(summarize(args, partial, log.length + 1, "provider-error"))] : []),
+            ...(partial ? [stripCharge(summarize(args, partial, log.length + 1, "provider-error"))]
+              : accepted ? [stripCharge(acceptedWithoutOutput(args, log.length + 1))] : []),
           ] },
           ...(charged ? { costCents: (totals?.costCents ?? 0) + (partialCharge ?? 0), chargedTokens } : {}),
           usageSource: providerUsage ? "provider" : "estimated",

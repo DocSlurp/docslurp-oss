@@ -17,3 +17,12 @@ it("replaces aggregate estimates once after all attempt receipts arrive", async 
 it("leaves uncertain costs untouched when an attempt lacks a generation ID", async () => {
   expect(await reconcileVisionReceiptMetadata({ visionAttempts: [{ inputTokens: 1, outputTokens: 2 }] }, "m", "key")).toBeNull();
 });
+
+it("never marks a partly known history reconciled when a later accepted attempt is unknown", async () => {
+  const metadata = { providerCostCents: 9, visionAttempts: [
+    { generationId: "known", inputTokens: 10, outputTokens: 2, costCents: 0.1 },
+    { generationId: null, inputTokens: 1000, outputTokens: 0 },
+  ] };
+  expect(await reconcileVisionReceiptMetadata(metadata, "m", "key")).toBeNull();
+  expect(metadata.providerCostCents).toBe(9);
+});

@@ -41,16 +41,17 @@ export async function reconcileVisionReceiptMetadata(
 
 /** Explicit tenant scope and compare-and-swap prevent cross-tenant or concurrent overwrite. */
 export async function reconcileVisionReceipts(args: {
-  client: Sql; orgId: string; projectId: string; apiKey: string;
-}): Promise<number> {
+  client: Sql; orgId: string; projectId: string; apiKey: string; afterId?: string;
+}): Promise<{ updated: number; examined: number; nextCursor: string | null }> {
   if (!args.orgId || !args.projectId) throw new Error("Receipt reconciliation requires tenant scope");
   const rows = await args.client`
     select id, model, metadata from usage_events
     where org_id = ${args.orgId} and project_id = ${args.projectId}
       and provider = 'openrouter'
+      and id > ${args.afterId ?? ''}
       and (metadata ? 'visionAttempts' or metadata ? 'attempts')
       and metadata->>'accountingStatus' is distinct from 'reconciled'
-    order by created_at asc limit 100`;
+    order by id asc limit 100`;
   let updated = 0;
   for (const row of rows) {
     const metadata = await reconcileVisionReceiptMetadata(row.metadata, row.model, args.apiKey);
@@ -61,5 +62,5 @@ export async function reconcileVisionReceipts(args: {
         and metadata = ${args.client.json(row.metadata)} returning id`;
     updated += result.length;
   }
-  return updated;
+  return { updated, examined: rows.length, nextCursor: rows.length === 100 ? rows[rows.length - 1]!.id : null };
 }

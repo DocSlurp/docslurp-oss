@@ -18,3 +18,8 @@ cannot establish an actual charge; do not label that request free.
 This command handles OpenRouter vision attempt records, not direct-provider
 invoices or historical records whose attempt IDs were discarded. Use the matching
 account credential; BYOK upstream amounts are included only when confirmed.
+
+Each response includes `nextCursor`. Pass it as the third positional argument to
+advance past the examined batch, including unresolved rows. Continue until it is
+null. A later reconciliation sweep starts without a cursor to revisit delayed
+receipts. This explicit traversal prevents old missing-ID rows from starving later rows.
