@@ -96,6 +96,20 @@ describe("POST /v1/capabilities", () => {
     expect(opened.projectIds).toEqual(["ws-a"]);
   });
 
+  it("rejects unsupported scope fields before default selection or token issuance", async () => {
+    actorRef.current = key("server");
+    const { ensureDefaultProject, getProject } = await import("../services/projects.js");
+    for (const scope of [{ project: "intended" }, { projectId: "intended" }, { orgId: "intended-org" }, { workspaceId: "legacy" }]) {
+      vi.mocked(ensureDefaultProject).mockClear();
+      vi.mocked(getProject).mockClear();
+      const response = await post(scope);
+      expect(response.status).toBe(400);
+      expect(await response.json()).not.toHaveProperty("token");
+      expect(ensureDefaultProject).not.toHaveBeenCalled();
+      expect(getProject).not.toHaveBeenCalled();
+    }
+  });
+
   it("mints for a session as session:<userId>", async () => {
     actorRef.current = { type: "session", userId: "u9" };
     const res = await post({});

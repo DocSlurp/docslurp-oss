@@ -23,7 +23,7 @@ const bodySchema = z.object({
   ttlSeconds: z.number().int().min(1).max(CAPABILITY_MAX_TTL_SECONDS).optional(),
   boundClientKeyId: z.string().min(1).max(200).optional(),
   allowedOrigins: z.array(z.string().min(1).max(300)).max(20).optional(),
-});
+}).strict();
 
 /**
  * POST /v1/capabilities mints a sealed search capability a browser can send as
