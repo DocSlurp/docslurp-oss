@@ -208,6 +208,8 @@ export interface ProviderRetryOptions {
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   random?: () => number;
   limiter?: ProviderConcurrencyLimiter;
+  /** Observe each HTTP error before retries consume it; true means billing evidence exists. */
+  onHttpError?: (response: Response) => Promise<boolean>;
   onRetry?: (info: { attempt: number; status: number | null; delayMs: number }) => void;
   /** Fleet-wide TPM/RPM limiting for this provider+model; `onLease` receives the successful attempt's lease. */
   rateLimit?: { model: string; tokens: number; limiter?: ProviderRateLimiter; onLease?: (lease: ProviderRateLease) => void };
@@ -296,6 +298,7 @@ export async function fetchWithProviderRetry(url: string, init: RequestInit, opt
         return await doFetch(url, { ...init, signal: withRequestTimeout(options.signal) });
       }, options.signal);
       noteWorkProgress(`provider:${options.provider}`);
+      const billedError = !response.ok && options.onHttpError ? await options.onHttpError(response.clone()) : false;
       if (response.ok || !isRetryableStatus(response.status)) {
         if (lease) options.rateLimit?.onLease?.(lease);
         return response;
@@ -315,7 +318,7 @@ export async function fetchWithProviderRetry(url: string, init: RequestInit, opt
         return new Response(body, { status, headers: response.headers });
       }
       // A rate limit or overload is refused before acceptance: it leaves the guard's counts.
-      if (isUnbilledThrottleStatus(status) && options.gate) {
+      if (isUnbilledThrottleStatus(status) && !billedError && options.gate) {
         allowanceSpent = !(await options.gate.unbilled("throttle", { provider: options.provider, status }));
       } else options.gate?.failed();
       retryAfterMs = parseRetryAfterMs(response.headers);

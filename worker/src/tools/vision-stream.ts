@@ -261,6 +261,7 @@ export interface TokenCounts {
 
 /** Provider usage a failed (not rejected) vision call was still billed for. */
 export interface VisionBilledUsage {
+  costMetadata?: Record<string, unknown>;
   inputTokens: number;
   outputTokens: number;
   /**
@@ -512,7 +513,7 @@ async function withProviderPolicy(args: GuardedCompletionArgs, body: Record<stri
   return { ...body, provider: applyOpenRouterProviderPolicy(own, policy) };
 }
 
-async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unknown>, streaming: boolean): Promise<VisionAttempt> {
+async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unknown>, streaming: boolean, history: Array<ReturnType<typeof summarize>>): Promise<VisionAttempt> {
   body = await withProviderPolicy(args, body);
   const controller = new AbortController();
   const onCaller = () => controller.abort(args.signal?.reason);
@@ -527,6 +528,17 @@ async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unkn
       body: JSON.stringify(streaming ? { ...body, stream: true, stream_options: { include_usage: true } } : body),
     }, {
       provider: args.providerLabel,
+      onHttpError: async (response) => {
+        let failed: VisionAttempt;
+        try { failed = await consumeJson(response); } catch { return false; }
+        if (!failed.id && !failed.usage) return false;
+        await attachGenerationReceipt(args, failed);
+        await observeUsage(args, failed);
+        const summary = summarize(args, failed, history.length + 1, "provider-error");
+        history.push(summary);
+        logAttempt(summary, args.model);
+        return true;
+      },
       fetchImpl: args.fetchImpl,
       label: "vision request",
       signal: controller.signal,
@@ -672,7 +684,7 @@ export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Pro
     let attempt: VisionAttempt;
     try {
       try {
-        attempt = await runAttempt(args, body, streaming);
+        attempt = await runAttempt(args, body, streaming, log);
       } catch (error) {
         if (!(error instanceof StreamStartError)) throw error;
         // A 200 stream that broke before its first chunk was still accepted (and may be billed): count it.
@@ -684,7 +696,7 @@ export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Pro
         // Endpoint rejects or fails streaming before the first chunk: one non-streaming retry of the same attempt.
         console.warn(`[vision-stream] streaming unavailable (${error.message}); retrying without streaming`);
         streaming = false;
-        attempt = await runAttempt(args, body, false);
+        attempt = await runAttempt(args, body, false, log);
         if (error instanceof StreamUnsupportedError && noteStreamingUnsupported(streamingKey(args), error.status)) {
           console.warn(`[vision-stream] model=${args.model} streaming unsupported by this endpoint (${error.status}); non-streaming for ${STREAM_MEMO_TTL_MS / 60_000} min in this process`);
         }
@@ -712,6 +724,10 @@ export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Pro
         const providerUsage = (!totals || totals.usageSource === "provider") && (!estimate || Boolean(partial?.usage));
         attachVisionBilledUsage(error, {
           inputTokens, outputTokens,
+          costMetadata: { reconciliationRequired: true, visionAttempts: [
+            ...log.map(stripCharge),
+            ...(partial ? [stripCharge(summarize(args, partial, log.length + 1, "provider-error"))] : []),
+          ] },
           ...(charged ? { costCents: (totals?.costCents ?? 0) + (partialCharge ?? 0), chargedTokens } : {}),
           usageSource: providerUsage ? "provider" : "estimated",
         });

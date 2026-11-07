@@ -286,3 +286,18 @@ describe("token-only receipt recovery", () => {
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/generation?"))).toBe(true);
   });
 });
+
+it("retains charged HTTP failures inside transport retries", async () => {
+  vi.stubEnv("AI_PROVIDER_MAX_RETRIES", "1");
+  const { fn } = stubFetch([
+    new Response(JSON.stringify({ id: "gen-http-failure", provider: "ProvA", model: "m",
+      error: { code: 503 }, usage: { prompt_tokens: 100, completion_tokens: 2, cost: 0.002 } }), { status: 503 }),
+    okStream(),
+  ]);
+  const result = await run();
+  expect(fn).toHaveBeenCalledTimes(2);
+  expect(result.costCents).toBeCloseTo(0.3);
+  expect(result.costMetadata?.visionAttempts).toEqual(expect.arrayContaining([
+    expect.objectContaining({ generationId: "gen-http-failure", costCents: 0.2 }),
+  ]));
+});
