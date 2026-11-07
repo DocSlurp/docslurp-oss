@@ -206,7 +206,7 @@ async function oneOrgSection(q, { plan, promotions, ownerless: ownerlessSql, ack
       ? ["None. Every user belongs to at most one live organization."]
       : [
           `${count("deleted_organization")} in tombstoned organizations; ${count("empty_personal_organization")} in empty personal organizations (DELETED with the organization and its empty workspaces, backed up to organizations_removed_backup);`,
-          `${count("not_kept")} more removed by the keep rule (team before personal, then most recent run or document, then role, then oldest membership).`,
+          `${count("not_kept")} more removed by the keep rule (funded first, then team before personal, then most recent run or document, then role, then oldest membership).`,
           "Removed memberships are copied to org_memberships_removed_backup; the user loses access at once (keys and MCP grants revoked).",
           funded.length === 0
             ? "No user is removed from a funded organization."

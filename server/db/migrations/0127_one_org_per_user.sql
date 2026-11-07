@@ -9,7 +9,7 @@
 --      media job or admission, no connector, workspace share or workspace invite, no unrevoked API key or MCP grant, no
 --      webhook, no Stripe customer, and never funded (funded_at, or auto top-up enabled). A revoked key is not data, and the
 --      automatic signup grant does not count as funding. An organization that fails any of these is kept with its data.
---   3. Of what remains, one membership is kept per user. Ranking: a team organization before a personal one, then the
+--   3. Of what remains, one membership is kept per user. Ranking: a funded organization (funded_at or auto top-up) first, then a team before a personal one, then the
 --      organization with the most recent run or document, then the stronger role (owner, admin, member), then the
 --      longest-standing membership, then the organization id. The others are removed and handled as a member removal
 --      (organizations.ts mutateMembership): the user's API keys and MCP grants there are revoked and their direct
@@ -97,7 +97,8 @@ CREATE TEMP TABLE removed_memberships ON COMMIT DROP AS
 -- one-org-plan:begin
 WITH candidate AS (
   -- Organizations a removal can touch: tombstoned ones with members, and those of users with several memberships.
-  SELECT o.id, o.is_personal, o.personal_owner_user_id, o.deleted_at IS NOT NULL AS tombstoned
+  SELECT o.id, o.is_personal, o.personal_owner_user_id, o.deleted_at IS NOT NULL AS tombstoned,
+    (o.funded_at IS NOT NULL OR coalesce(o.auto_recharge_enabled, false)) AS funded
   FROM organizations o
   WHERE EXISTS (
     SELECT 1 FROM org_memberships om
@@ -106,7 +107,7 @@ WITH candidate AS (
   )
 ),
 org_state AS (
-  SELECT candidate.id, candidate.is_personal, candidate.personal_owner_user_id, candidate.tombstoned,
+  SELECT candidate.id, candidate.is_personal, candidate.personal_owner_user_id, candidate.tombstoned, candidate.funded,
     docslurp_personal_org_is_empty(candidate.id) AS personal_empty,
     greatest(
       (SELECT max(r.created_at) FROM workspace_runs r WHERE r.org_id = candidate.id),
@@ -134,7 +135,7 @@ ranked AS (
   SELECT om.org_id, om.user_id,
     row_number() OVER (
       PARTITION BY om.user_id
-      ORDER BY s.is_personal, s.last_activity DESC NULLS LAST,
+      ORDER BY s.funded DESC, s.is_personal, s.last_activity DESC NULLS LAST,
         CASE om.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, om.created_at, om.org_id
     ) AS position
   FROM org_memberships om

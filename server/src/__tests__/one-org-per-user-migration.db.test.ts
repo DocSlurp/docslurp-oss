@@ -54,8 +54,8 @@ beforeAll(async () => {
       ('t3', 'T3', 't3', 'sole-owner', false, null), ('t4', 'T4', 't4', 'owner-t4', false, null), ('t5', 'T5', 't5', 'sole-owner-5', false, null),
       ('dead', 'Dead', 'dead', 'tomb', false, null), ('dead2', 'Dead2', 'dead2', 'only-tomb', false, null);
     update organizations set deleted_at = now() where id in ('dead', 'dead2');
-    -- t3 is funded: removing its sole owner is what the pre-deploy report blocks on.
-    update organizations set funded_at = now() where id = 't3';
+    -- Both alternatives are funded: removing t3's sole owner still requires acknowledgement.
+    update organizations set funded_at = now() where id in ('t3', 't4');
     insert into org_memberships (org_id, user_id, role, created_at) values
       ('p-solo', 'solo', 'owner', now()),
       ('t1', 'owner-t1', 'owner', now() - interval '10 days'),

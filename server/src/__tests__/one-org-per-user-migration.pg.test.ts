@@ -83,8 +83,8 @@ describe.skipIf(!url)("0127 one organization per user, on PostgreSQL through mig
         ('pg127-funded', 'Funded Team', 'pg127-funded', 'pg127-fund', false, null),
         -- A team that already had no owner: its only member is promoted, a plain member, so it needs the acknowledgement.
         ('pg127-orphan', 'Orphan Team', 'pg127-orphan', 'pg127-lonely', false, null);
-      -- Auto top-up counts as funded, in the migration and in the report alike.
-      update organizations set auto_recharge_enabled = true where id = 'pg127-funded';
+      -- Both alternatives are funded; recency breaks the tie and the funded removal still needs acknowledgement.
+      update organizations set auto_recharge_enabled = true where id in ('pg127-funded', 'pg127-team');
       insert into org_memberships (org_id, user_id, role, created_at) values
         ('pg127-team', 'pg127-team-owner', 'owner', now() - interval '30 days'),
         ('pg127-p-chat', 'pg127-chat', 'owner', now()), ('pg127-team', 'pg127-chat', 'member', now()),
