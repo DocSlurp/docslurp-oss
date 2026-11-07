@@ -144,6 +144,7 @@ export interface VisionAttempt {
   model: string | null;
   provider: string | null;
   usage: ChatUsage | null;
+  receiptMetadata?: Record<string, unknown>;
   /** `choices[0].error` or a top-level `error` object. */
   error: ChoiceError | null;
   hadChoices: boolean;
@@ -289,6 +290,8 @@ export function findVisionBilledUsage(error: unknown): VisionBilledUsage | null 
 }
 
 export interface AttemptSummary {
+  generationId?: string | null;
+  costMetadata?: Record<string, unknown>;
   attempt: number;
   provider: string | null;
   model: string | null;
@@ -576,19 +579,27 @@ async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unkn
  * `usage_source=estimated`. Never throws.
  */
 async function attachGenerationReceipt(args: GuardedCompletionArgs, attempt: VisionAttempt): Promise<void> {
-  if (attempt.usage || !args.openRouter || !attempt.id) return;
+  if (!args.openRouter || !attempt.id || readProviderCharge(attempt.usage).costCents !== undefined) return;
   const apiKey = (args.headers.Authorization ?? args.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
   if (!apiKey) return;
   try {
     const receipt = await resolveOpenRouterUsage({
       apiKey, model: args.model, generationId: attempt.id,
-      usage: { inputTokens: args.inputTokenEstimate, outputTokens: estimateTokens(attempt.text) },
+      providerName: attempt.provider ?? undefined,
+      receiptRetryDelaysMs: [0, 250],
+      usage: { inputTokens: attempt.usage?.prompt_tokens ?? args.inputTokenEstimate,
+        outputTokens: attempt.usage?.completion_tokens ?? estimateTokens(attempt.text), raw: attempt.usage },
     });
+    attempt.receiptMetadata = receipt.metadata;
     if (receipt.metadata?.costSource !== "provider" || receipt.costCents === undefined) {
       console.warn(`[vision-stream] model=${args.model} generation=${attempt.id} no usage and no receipt; recording estimated usage`);
       return;
     }
-    attempt.usage = { prompt_tokens: receipt.inputTokens, completion_tokens: receipt.outputTokens, cost: receipt.costCents / 100, generation_receipt: true };
+    // Preserve separately billed BYOK components; combined spend is not a router charge.
+    attempt.usage = { ...attempt.usage,
+      ...(receipt.metadata.providerUsage as Record<string, unknown>),
+      prompt_tokens: receipt.inputTokens, completion_tokens: receipt.outputTokens, generation_receipt: true };
+    if (typeof receipt.metadata.providerName === "string") attempt.provider = receipt.metadata.providerName;
   } catch (error) {
     console.warn(`[vision-stream] model=${args.model} generation=${attempt.id} receipt lookup failed: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -621,6 +632,7 @@ function summarize(args: GuardedCompletionArgs, attempt: VisionAttempt, index: n
   const outputTokens = attempt.usage?.completion_tokens ?? estimateTokens(attempt.text);
   const costCents = charge.costCents;
   return {
+    generationId: attempt.id, costMetadata: { ...attempt.receiptMetadata, ...charge.metadata },
     attempt: index, provider: attempt.provider, model: attempt.model, streamed: attempt.streamed, outcome: outcome ?? "ok",
     finishReason: attempt.finishReason, inputTokens, outputTokens, costCents, usageSource: hasUsage ? "provider" : "estimated", charge,
   };
@@ -763,9 +775,10 @@ function totalsOf(log: Array<ReturnType<typeof summarize>>, args: GuardedComplet
     : undefined;
   const usageSource: "provider" | "estimated" = log.every((s) => s.usageSource === "provider") ? "provider" : "estimated";
   const costMetadata = anyCharge ? {
-    costSource: "provider",
+    costSource: charged.length === log.length ? "provider" : "mixed",
+    reconciliationRequired: charged.length !== log.length,
     providerCostUsd: log.reduce((n, s) => n + (s.charge.costCents ?? 0), 0) / 100,
-    ...(log.length > 1 ? { visionAttempts: log.map(stripCharge) } : log[0]!.charge.metadata),
-  } : log.length > 1 ? { visionAttempts: log.map(stripCharge) } : undefined;
+    visionAttempts: log.map(stripCharge),
+  } : { costSource: "estimate", reconciliationRequired: true, visionAttempts: log.map(stripCharge) };
   return { inputTokens, outputTokens, usageSource, costCents, ...(chargedTokens ? { chargedTokens } : {}), costMetadata };
 }

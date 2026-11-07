@@ -269,3 +269,20 @@ describe("guarded hosted vision request", () => {
     expect(OPENROUTER_BASE_URL).toContain("openrouter");
   });
 });
+
+
+describe("token-only receipt recovery", () => {
+  it("recovers BYOK cost without overwriting the separate router fee", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).includes("/generation?")) return new Response(JSON.stringify({ data: {
+        total_cost: 0, is_byok: true, upstream_inference_cost: 0.001,
+        native_tokens_prompt: 1000, native_tokens_completion: 50, provider_name: "ProvA",
+      } }));
+      return sse([delta("# Page\nHello"), finish("stop", { prompt_tokens: 1000, completion_tokens: 50 })]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await run();
+    expect(result.costCents).toBeCloseTo(0.1);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/generation?"))).toBe(true);
+  });
+});
