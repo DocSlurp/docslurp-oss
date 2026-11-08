@@ -437,7 +437,14 @@ async function consumeJson(response: Response): Promise<VisionAttempt> {
   attempt.usage = payload.usage && typeof payload.usage === "object" ? payload.usage : null;
   const choice = payload.choices?.[0];
   attempt.hadChoices = Boolean(choice);
-  attempt.text = chatText(choice?.message?.content).trim();
+  const text = chatText(choice?.message?.content);
+  // JSON-only providers must pass the same output guard as streamed responses.
+  // Scan before trimming so a runaway whitespace tail is not hidden.
+  const detector = createDegenerationDetector();
+  for (let offset = 0; offset < text.length && !attempt.degenerate; offset += CHECK_EVERY_CHARS) {
+    attempt.degenerate = detector.push(text.slice(offset, offset + CHECK_EVERY_CHARS));
+  }
+  attempt.text = text.trim();
   attempt.finishReason = choice?.finish_reason ?? null;
   attempt.error = (choice?.error && typeof choice.error === "object" ? choice.error : null)
     ?? (payload.error && typeof payload.error === "object" ? payload.error : null);
