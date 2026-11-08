@@ -237,7 +237,7 @@ export function resolveWorkflowScalingInput(
   slotGate?: boolean;
   pageChildBatchSize?: number;
   activityTaskQueue?: string;
-  documentSharding?: { minDocsPerShard: number; maxShards: number; minPagesPerShard: number };
+  documentSharding?: { minDocsPerShard: number; maxShards: number; minPagesPerShard: number; quarantine?: boolean };
   groupLightStages?: boolean;
   groupableStages?: string[];
   pageRangeSharding?: { stages: string[]; maxShards: number };
@@ -253,6 +253,8 @@ export function resolveWorkflowScalingInput(
   );
   const sharding = envFlag(env.WORKER_DOCUMENT_SHARDING, true) && maxShards >= 2
     ? {
+        ...(envFlag(env.WORKER_SHARD_QUARANTINE, false)
+          && capabilities?.has("workflow.quarantine-shards") ? { quarantine: true } : {}),
         minDocsPerShard: Math.max(1, Number.parseInt(env.WORKER_MIN_DOCS_PER_SHARD ?? "2", 10) || 2),
         maxShards,
         // A shard costs ~2-4 s of fixed overhead (cross-region DB round trips),
@@ -392,7 +394,7 @@ export async function startPipelineWorkflow(
   // (services/worker-fleet.ts); unknown resolves to the old behaviour. Skipped
   // when no workflow-input flag is on (nothing to gate).
   const configured = configuredGatedFlags();
-  const capabilities = configured.WORKER_INDEX_BEFORE_ENRICH || configured.WORKER_GROUP_ADJACENT_STAGES
+  const capabilities = configured.WORKER_INDEX_BEFORE_ENRICH || configured.WORKER_GROUP_ADJACENT_STAGES || configured.WORKER_SHARD_QUARANTINE
     ? await effectiveFleetCapabilities(route.taskQueue)
     : null;
   let restartExisting = options?.restartExisting;

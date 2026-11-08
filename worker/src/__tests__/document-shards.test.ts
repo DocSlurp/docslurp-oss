@@ -65,6 +65,48 @@ describe("document-sharded workflow stages", () => {
   const sharded = { runId: "run", pipeline: {} as never, slotGate: true,
     documentSharding: { minDocsPerShard: 1, maxShards: 3 }, activityTaskQueue: "acts" };
 
+  it.each(["none", "light", "adjacent"])("shards quarantine and reconciles before parsing with %s grouping", async (grouping) => {
+    const order: string[] = [];
+    mocks.activities.runPipelineStageShard.mockImplementation(async ({ stageName, documentIds }: { stageName: string; documentIds: string[] }) => {
+      expect(stageName).toBe("quarantine");
+      expect(documentIds).toHaveLength(2);
+      await Promise.resolve();
+      order.push("scan-shard");
+      return zero;
+    });
+    mocks.activities.runPipelineStage.mockImplementation(async ({ stageName }: { stageName: string }) => {
+      if (stageName === "quarantine") expect(order).toEqual(["scan-shard", "scan-shard", "scan-shard"]);
+      if (stageName === "format-detect") expect(order.at(-1)).toBe("quarantine");
+      order.push(stageName);
+      return { artifacts: {}, usage: zero };
+    });
+    mocks.activities.runPipelineStages = vi.fn(async ({ stageNames }: { stageNames: string[] }) => {
+      for (const stageName of stageNames) await mocks.activities.runPipelineStage({ stageName });
+      return { artifacts: {}, usage: zero };
+    });
+    await documentPipeline({ ...sharded, documentSharding: { ...sharded.documentSharding, quarantine: true },
+      stageOrder: ["quarantine", "format-detect"],
+      groupLightStages: grouping === "light",
+      ...(grouping === "adjacent" ? { groupableStages: ["quarantine", "format-detect"] } : {}) });
+    expect(mocks.activities.runPipelineStageShard).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([undefined, false])("does not add quarantine commands to old or disabled histories (%s)", async (quarantine) => {
+    await documentPipeline({ ...sharded, documentSharding: { ...sharded.documentSharding, quarantine }, stageOrder: ["quarantine"] });
+    expect(mocks.activities.runPipelineStageShard).not.toHaveBeenCalled();
+    expect(mocks.activities.runPipelineStage).toHaveBeenCalledTimes(1);
+  });
+
+  it("never starts downstream parsing when quarantine reconciliation refuses the input", async () => {
+    mocks.activities.runPipelineStageShard.mockRejectedValueOnce(new Error("scan failed"));
+    mocks.activities.runPipelineStage.mockRejectedValue(new Error("quarantine rejected malicious input"));
+    await expect(documentPipeline({ ...sharded, documentSharding: { ...sharded.documentSharding, quarantine: true },
+      stageOrder: ["quarantine", "format-detect"] })).rejects.toThrow("quarantine rejected");
+    expect(mocks.activities.runPipelineStage).toHaveBeenCalledTimes(1);
+    expect(mocks.activities.runPipelineStage.mock.calls[0]?.[0].stageName).toBe("quarantine");
+    expect(mocks.activities.completePipelineRun).not.toHaveBeenCalled();
+  });
+
   it("fans shardable stages out before the stage pass, and leaves other stages alone", async () => {
     const order: string[] = [];
     mocks.activities.runPipelineStageShard.mockImplementation(async (shard: { stageName: string; documentIds: string[]; artifacts: object }) => {

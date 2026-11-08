@@ -125,11 +125,11 @@ describe("WorkerCapabilityRegistry", () => {
     expect(await resolveWorkerCapabilities({
       creditLeasesActive: async () => false,
       lexicalColumnPresent: async () => true,
-    })).toEqual(["search.early-lexical", "workflow.group-adjacent-stages", "workflow.index-before-enrich", "workflow.page-range-shards"]);
+    })).toEqual(["search.early-lexical", "workflow.group-adjacent-stages", "workflow.index-before-enrich", "workflow.page-range-shards", "workflow.quarantine-shards"]);
     expect(await resolveWorkerCapabilities({
       creditLeasesActive: async () => { throw new Error("db down"); },
       lexicalColumnPresent: async () => false,
-    })).toEqual(["workflow.group-adjacent-stages", "workflow.index-before-enrich", "workflow.page-range-shards"]);
+    })).toEqual(["workflow.group-adjacent-stages", "workflow.index-before-enrich", "workflow.page-range-shards", "workflow.quarantine-shards"]);
   });
 });
 
