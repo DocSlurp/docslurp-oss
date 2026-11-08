@@ -1,13 +1,14 @@
 # Integrity candidate adjudication
 
 The integrity judge accepts an optional trusted operator-supplied JSON attestation.
-It never changes detection, deletes comments, or waives findings. Without a record,
-candidates retain `needs-review`. Any invalid or rejected record blocks promotion.
+The default scan remains strict. It never deletes comments or waives hard findings.
+Without a record, candidates retain `needs-review`. Any invalid or rejected record blocks promotion.
 
-API: `judgeIntegrity({ dataset, repo?, base?, reviewContext?, adjudication? })`.
+API: `judgeIntegrity({ dataset, repo?, base?, reviewContext?, adjudication?, labeledOverlapPolicy? })`.
 `adjudication` is a JSON file path, not a boolean or an object. Unknown API keys
 and unknown/duplicate CLI options are rejected. CLI equivalents are `--dataset`,
-`--repo`, `--base`, `--review-context`, `--adjudication`; `--output` saves the report.
+`--repo`, `--base`, `--review-context`, `--adjudication`,
+`--labeled-overlap-policy`; `--output` saves the report.
 
 First scan with a fresh operator-assigned review context. Give an independent
 reviewer the scan and source context. Supply their explicit decisions in an
@@ -26,7 +27,7 @@ The exact record keys are:
   (nonempty string), and `reviewedAt` (UTC ISO timestamp with milliseconds, not future).
 
 Candidate bindings include rule, file, origin, line, evidence hash and occurrence
-ID. The set hash binds the ordered complete set, including repeated occurrences.
+ID; lexical-overlap candidates also carry UTF-16 source offset and match length. The set hash binds the ordered complete set, including repeated occurrences.
 Missing, extra, duplicate, changed or rejected decisions fail closed. Dataset,
 source, repository revision, index, or candidate changes invalidate applicable
 bindings. Findings always block, even alongside a valid accepted record.
@@ -49,3 +50,44 @@ Never copy expected-answer plaintext into rationale or provenance. Reports retai
 only the record hash and acceptance status, not reviewer free text. Retain the
 external record securely for audit. No real held-out run or acceptance is part of
 this implementation's synthetic validation.
+
+
+## Explicit lexical-overlap review
+
+Technical source documents can contain API/type names that also occur in ordinary
+application code. The default `labeledOverlapPolicy: "block"` still treats these
+matches as findings. Opt-in `labeledOverlapPolicy: "review"` (CLI
+`--labeled-overlap-policy review`) requires a nonempty fresh `reviewContext` and
+turns **only standalone labeled-answer matches** into review candidates. It is not
+an API allowlist, syntax exemption, or automatic pass.
+
+Every match in the complete file is retained, including multiple matches on one
+line, strings, comments and unsupported source languages. A benign first API
+reference cannot hide a later answer literal. Whole-file candidates cover the
+same file's diff additions; index/revision/source hashes still bind the scan.
+The report includes the chosen policy. Fixture identifiers, source recognition
+hashes, copied artifacts, answer/label combinations, label clusters, missing
+provenance and incomplete repository coverage remain hard findings in either mode.
+
+An independent reviewer must inspect the exact full source and each occurrence,
+reject answer injection or unexplained dependence on held-out content, and provide
+one decision per candidate. A trusted false acceptance can clear an actual answer
+literal: the tool does not authenticate reviewer judgment or prove independence.
+Do not use this mode for unattended promotion or let the extraction author
+self-approve their own overlaps. An author-generated accept-all record is not a
+review. Keep rejected and original blocked artifacts alongside later assessments.
+
+Example invocation (external data and record paths):
+
+```sh
+node scripts/evaluation-integrity-judge.mjs \
+  --dataset "$DATASET_DIR" --repo "$REPO_DIR" --base origin/main \
+  --labeled-overlap-policy review --review-context "$REVIEW_CONTEXT" \
+  --output "$SCAN_PATH"
+```
+
+The first scan remains `needs-review` or `blocked`. After independent review, rerun
+with identical arguments plus `--adjudication "$REVIEW_RECORD"`. Any source,
+index, dataset, context or occurrence-set change requires a fresh review. A prior
+record cannot be used to bypass strict mode, whose hard labeled-answer findings
+remain blocking.

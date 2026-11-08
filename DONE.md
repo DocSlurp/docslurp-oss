@@ -1,3 +1,7 @@
+## Explicit integrity lexical-overlap review (2026-11-08)
+
+- Added opt-in, snapshot-bound independent review for standalone labeled-answer overlaps. Strict scans remain the default; every lexical occurrence requires a decision, and fixture/source recognition, copied artifacts, label combinations, provenance and coverage failures remain non-waivable. No automatic API exemptions, real-dataset acceptance, or default promotion is included.
+
 ## Page equivalents: stuffed pages bill what they hold (2026-11-05)
 
 - Billable pages are measured page equivalents: per page, the larger of 1, the text rule over the text extracted from it, and (for rendered and OCR'd pages) its area against a Letter page, capped per page (`packages/shared/src/page-equivalents.ts`). Pages above one are recorded in `document_page_facts` (migration 0130) and raise `documents.billing_pages`, which the page fee, feature charges, spend authorization and the storage estimate read. Tiny, invisible or off-page text is indexed like any other and so counted by volume; files with pages over three equivalents are listed in the ingest report (`denseText`). A document over 100,000 equivalents is refused. Prices stay out of core.
