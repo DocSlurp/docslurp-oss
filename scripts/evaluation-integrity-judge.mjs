@@ -78,7 +78,8 @@ function commentRanges(file, text) {
 const exactKeys = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).sort().join(',') === [...keys].sort().join(',');
 const candidateBinding = (candidate) => ({ rule: candidate.rule, file: candidate.file,
-  origin: candidate.origin, line: candidate.line, evidenceHash: candidate.evidenceHash });
+  origin: candidate.origin, line: candidate.line, evidenceHash: candidate.evidenceHash,
+  ...(candidate.offset === undefined ? {} : { offset: candidate.offset, length: candidate.length }) });
 const candidateId = (candidate) => hash(JSON.stringify(candidateBinding(candidate)));
 function applyAdjudication(result, path, reviewContext) {
   result.candidates = result.candidates.map((candidate, index) => ({ ...candidate, candidateId: hash(`${index}:${candidateId(candidate)}`) }));
@@ -122,12 +123,14 @@ function applyAdjudication(result, path, reviewContext) {
 }
 
 export function judgeIntegrity(options) {
-  if (!options || Object.keys(options).some((key) => !['dataset', 'repo', 'base', 'adjudication', 'reviewContext'].includes(key))) throw new Error('invalid-judge-options');
-  let { dataset, repo = process.cwd(), base = 'HEAD', adjudication, reviewContext } = options;
+  if (!options || Object.keys(options).some((key) => !['dataset', 'repo', 'base', 'adjudication', 'reviewContext', 'labeledOverlapPolicy'].includes(key))) throw new Error('invalid-judge-options');
+  let { dataset, repo = process.cwd(), base = 'HEAD', adjudication, reviewContext, labeledOverlapPolicy = 'block' } = options;
+  if (!['block', 'review'].includes(labeledOverlapPolicy)) throw new Error('invalid-labeled-overlap-policy');
+  if (labeledOverlapPolicy === 'review' && !nonempty(reviewContext)) throw new Error('labeled-overlap-review-requires-context');
   const findings = [];
   const candidates = [];
   const add = (rule, detail = {}) => findings.push({ rule, ...detail });
-  const result = { schema: 'docslurp-evaluation-integrity@v1', passed: false, datasetHash: null, productionHash: null, gitHead: null, base, repositories: [], scannedFiles: 0, scannedProductionFiles: 0, cases: 0, findings, candidates };
+  const result = { schema: 'docslurp-evaluation-integrity@v1', labeledOverlapPolicy, passed: false, datasetHash: null, productionHash: null, gitHead: null, base, repositories: [], scannedFiles: 0, scannedProductionFiles: 0, cases: 0, findings, candidates };
   try {
     repo = realpathSync(repo);
     dataset = realpathSync(dataset);
@@ -291,6 +294,20 @@ export function judgeIntegrity(options) {
         if (seen.has(key)) continue;
         let found = pattern(value).exec(text);
         if (!found) continue;
+        // Opt-in operator review does not prove an API reference harmless. Preserve
+        // EVERY lexical occurrence, including strings/comments and later matches
+        // in the same file, for explicit independent snapshot-bound decisions.
+        // Fixture/source recognition and label-combination rules are never waived.
+        if (rule === 'labeled-answer' && labeledOverlapPolicy === 'review') {
+          const expression = pattern(value);
+          for (const occurrence of text.matchAll(new RegExp(expression.source, expression.flags + 'g'))) {
+            candidates.push({ rule: 'labeled-answer-overlap', file, origin,
+              line: text.slice(0, occurrence.index).split('\n').length,
+              offset: occurrence.index, length: occurrence[0].length, evidenceHash: hash(value) });
+          }
+          seen.add(key); // Full working-tree coverage also covers its diff additions.
+          continue;
+        }
         // Shape-based specificity, never a unit or benchmark phrase allowlist.
         if (rule === 'labeled-answer' && /^\d+(?:\.\d+)?\s+\p{Ll}+$/u.test(value)) {
           if (origin === 'working-tree') {
@@ -371,12 +388,12 @@ export function judgeIntegrity(options) {
 export function main(argv = process.argv.slice(2)) {
   const options = {};
   for (let i = 0; i < argv.length; i += 2) {
-    if (!['--dataset', '--repo', '--base', '--output', '--adjudication', '--review-context'].includes(argv[i]) || Object.hasOwn(options, argv[i].slice(2)) || !argv[i + 1] || argv[i + 1].startsWith('--')) throw new Error('Expected --dataset <path> [--repo <path>] [--base <commit>] [--output <path>]');
+    if (!['--dataset', '--repo', '--base', '--output', '--adjudication', '--review-context', '--labeled-overlap-policy'].includes(argv[i]) || Object.hasOwn(options, argv[i].slice(2)) || !argv[i + 1] || argv[i + 1].startsWith('--')) throw new Error('Expected --dataset <path> [--repo <path>] [--base <commit>] [--output <path>]');
     options[argv[i].slice(2)] = argv[i + 1];
   }
   if (!options.dataset) throw new Error('--dataset is required');
-  const { 'review-context': reviewContext, output, ...judgeOptions } = options;
-  const report = judgeIntegrity({ ...judgeOptions, reviewContext });
+  const { 'review-context': reviewContext, 'labeled-overlap-policy': labeledOverlapPolicy, output, ...judgeOptions } = options;
+  const report = judgeIntegrity({ ...judgeOptions, reviewContext, labeledOverlapPolicy });
   const json = `${JSON.stringify(report, null, 2)}\n`;
   if (options.output) { mkdirSync(dirname(resolve(options.output)), { recursive: true }); writeFileSync(options.output, json); }
   else process.stdout.write(json);

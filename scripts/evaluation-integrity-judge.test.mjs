@@ -467,3 +467,102 @@ test('operator adjudication binds the entire scan and never waives findings', (t
   assert.throws(() => main(['--dataset', f.dataset, '--dataset', f.dataset]));
   assert.throws(() => main(['--dataset', f.dataset, '--unknown', 'value']));
 });
+
+function lexicalReviewFixture(t, source) {
+  const f = fixture(t);
+  const labels = JSON.stringify({ labels: [{ name: 'observed_method', expected: 'sortRecords' }] });
+  writeFileSync(join(f.dataset, 'labels.json'), labels);
+  f.manifest.cases[0].labels.sha256 = sha(labels); f.save();
+  writeFileSync(join(f.repo, 'worker.ts'), source);
+  const options = { repo: f.repo, dataset: f.dataset, labeledOverlapPolicy: 'review', reviewContext: 'synthetic-lexical-review' };
+  const initial = judgeIntegrity(options);
+  const record = { schema: 'docslurp-integrity-adjudication@v1', datasetHash: initial.datasetHash,
+    productionHash: initial.productionHash, candidateSetHash: initial.candidateSetHash, reviewContext: options.reviewContext,
+    reviewer: { identity: 'separate-synthetic-reviewer', independent: true, provenance: 'Independent test-only review session' },
+    decisions: initial.candidates.map(candidate => ({ candidate, decision: 'accept', reason: 'Synthetic runtime method reference reviewed in complete source', reviewedAt: '2026-01-01T00:00:00.000Z' })) };
+  const adjudication = join(f.dataset, 'lexical-review.json');
+  const run = (value = record, overrides = {}) => {
+    writeFileSync(adjudication, JSON.stringify(value));
+    return judgeIntegrity({ ...options, adjudication, ...overrides });
+  };
+  return { ...f, options, initial, record, run };
+}
+
+test('lexical review is explicit, never automatically clears executable API references', t => {
+  const f = lexicalReviewFixture(t, 'export const sorted = xs => xs.sortRecords();');
+  assert.equal(judgeIntegrity({ repo: f.repo, dataset: f.dataset }).status, 'blocked');
+  assert.equal(f.initial.labeledOverlapPolicy, 'review');
+  assert.equal(f.initial.status, 'needs-review');
+  assert.equal(f.initial.passed, false);
+  assert.equal(f.initial.candidates.length, 1);
+  assert.equal(f.initial.candidates[0].rule, 'labeled-answer-overlap');
+  assert.equal(f.run().passed, true, 'explicit trusted independent acceptance of exact snapshot');
+  assert.equal(f.run(f.record, { labeledOverlapPolicy: 'block' }).passed, false);
+  assert.throws(() => judgeIntegrity({ ...f.options, labeledOverlapPolicy: true }), /invalid-labeled/);
+  assert.throws(() => judgeIntegrity({ ...f.options, labeledOverlapPolicy: 'ignore' }), /invalid-labeled/);
+  assert.throws(() => judgeIntegrity({ ...f.options, reviewContext: '' }), /requires-context/);
+  assert.ok(!JSON.stringify(f.initial).includes('sortRecords'), 'reports retain hashes, not expected values');
+});
+
+test('lexical review exposes every occurrence, including later answer injection and unsupported syntax', t => {
+  const source = 'export const sorted = xs => xs.sortRecords(); const answer = "sortRecords"; // sortRecords';
+  const f = lexicalReviewFixture(t, source);
+  assert.equal(f.initial.candidates.length, 3);
+  assert.equal(new Set(f.initial.candidates.map(c => c.offset)).size, 3);
+  assert.equal(new Set(f.initial.candidates.map(c => c.candidateId)).size, 3);
+  assert.ok(f.initial.candidates.every(c => c.line === 1 && c.length === 11));
+  const incomplete = structuredClone(f.record); incomplete.decisions.pop();
+  assert.equal(f.run(incomplete).passed, false, 'cannot accept first match and skip injection');
+  const rejected = structuredClone(f.record); rejected.decisions[1].decision = 'reject';
+  assert.equal(f.run(rejected).passed, false, 'independent rejection blocks actual answer injection');
+  assert.ok(rules(f.run(rejected)).includes('adjudication-rejected'));
+  writeFileSync(join(f.repo, 'worker.py'), 'answer = "sortRecords"\n# sortRecords\n');
+  const expanded = judgeIntegrity(f.options);
+  assert.equal(expanded.status, 'needs-review');
+  assert.equal(expanded.candidates.length, 5, 'unsupported syntax is retained for review, never AST-exempted');
+  assert.equal(f.run().passed, false, 'old review cannot cover new injection');
+});
+
+test('lexical decisions bind source, dataset, reviewer, context, offsets and complete candidate set', t => {
+  const source = 'export const sorted = xs => xs.sortRecords();';
+  const f = lexicalReviewFixture(t, source);
+  for (const mutate of [
+    r => { r.datasetHash = '0'.repeat(64); }, r => { r.productionHash = '0'.repeat(64); },
+    r => { r.candidateSetHash = '0'.repeat(64); }, r => { r.reviewContext = 'other'; },
+    r => { r.reviewer.independent = false; }, r => { r.reviewer.identity = ''; },
+    r => { delete r.reviewer.provenance; }, r => { r.decisions = []; },
+    r => { r.decisions.push(r.decisions[0]); }, r => { r.decisions[0].candidate.offset++; },
+    r => { r.decisions[0].candidate.length--; }, r => { r.decisions[0].candidate.evidenceHash = '0'.repeat(64); },
+  ]) {
+    const changed = structuredClone(f.record); mutate(changed);
+    assert.equal(f.run(changed).passed, false);
+  }
+  writeFileSync(join(f.repo, 'worker.ts'), source.replace('xs =>', 'values =>'));
+  assert.equal(f.run().passed, false);
+  writeFileSync(join(f.repo, 'worker.ts'), source);
+  f.git('add', '.');
+  assert.equal(f.run().passed, false, 'changed index');
+  f.git('restore', '--staged', 'worker.ts');
+  f.manifest.cases[0].provenance.description = 'Updated test-only provenance'; f.save();
+  assert.equal(f.run().passed, false);
+});
+
+test('accepted lexical decisions cannot waive source copying, fixture recognition or label combinations', t => {
+  for (const source of [
+    'const known = "held-out-fixture-001"; const method = "sortRecords";',
+    'const output = { observed_method: "sortRecords", second_label: "fine" };',
+  ]) {
+    const f = lexicalReviewFixture(t, source);
+    if (source.includes('second_label')) {
+      const labels = JSON.stringify({ labels: [{ name: 'observed_method', expected: 'sortRecords' }, { name: 'second_label', expected: 'fine' }] });
+      writeFileSync(join(f.dataset, 'labels.json'), labels); f.manifest.cases[0].labels.sha256 = sha(labels); f.save();
+    }
+    writeFileSync(join(f.repo, 'source.bin'), f.source);
+    const report = judgeIntegrity(f.options);
+    const record = { ...f.record, datasetHash: report.datasetHash, productionHash: report.productionHash,
+      candidateSetHash: report.candidateSetHash, decisions: report.candidates.map(candidate => ({ ...f.record.decisions[0], candidate })) };
+    assert.equal(f.run(record).passed, false);
+    assert.ok(rules(f.run(record)).includes('copied-source-artifact'));
+    assert.ok(rules(f.run(record)).includes(source.includes('second_label') ? 'answer-label-combination' : 'fixture-identifier'));
+  }
+});
