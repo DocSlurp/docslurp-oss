@@ -109,6 +109,8 @@ export interface PageRangeShardPlan {
 
 /** Recorded in workflow input so replay never depends on later env changes. */
 export interface DocumentShardingInput {
+  /** Explicit new-run opt-in; absent histories keep quarantine on one activity. */
+  quarantine?: boolean;
   /** Fewest documents worth a shard of their own. */
   minDocsPerShard: number;
   /** Most shards per stage; bounds workflow history. */

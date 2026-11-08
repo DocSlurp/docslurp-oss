@@ -274,10 +274,13 @@ export async function documentPipeline(
     initialized = true;
     let artifacts = initResult.artifacts;
 
+    // Only recorded input enables new shard commands; existing histories are unchanged.
+    const shardable = (stageName: string): boolean => SHARDABLE_STAGES.includes(stageName)
+      || (stageName === "quarantine" && input.documentSharding?.quarantine === true);
     /** Document shards this run dispatches for a stage (fewer than two: none). */
     const shardPlan = (stageName: string): string[][] => {
       const sharding = input.documentSharding;
-      if (!sharding || !scaling || !SHARDABLE_STAGES.includes(stageName)) return [];
+      if (!sharding || !scaling || !shardable(stageName)) return [];
       // Only the documents this stage works on; the stage pass takes the rest as no-ops.
       const types = initResult.documentMimeTypes;
       const picked = initResult.documentIds.flatMap((id, index) => !types || stageWorksOn(stageName, types[index]) ? [index] : []);
@@ -297,6 +300,9 @@ export async function documentPipeline(
       (stageName === "vision-extract" && (input.pageConcurrency ?? 0) > 1) || shardPlan(stageName).length > 1
       || (pageRangeStages?.has(stageName) ?? false);
 
+    const legacyGroupable = (stageName: string): boolean => LIGHT_STAGES.includes(stageName)
+      && !(stageName === "quarantine" && input.documentSharding?.quarantine === true);
+
     // Execute each stage sequentially
     for (let i = 0; i < stageOrder.length; i++) {
       // Handle pause/cancel signals
@@ -310,9 +316,9 @@ export async function documentPipeline(
       const stageName = stageOrder[i]!;
 
       // Recorded in workflow input: runs started without it keep one activity per stage.
-      if (!groupable && input.groupLightStages && scaling && LIGHT_STAGES.includes(stageName)) {
+      if (!groupable && input.groupLightStages && scaling && legacyGroupable(stageName)) {
         let end = i;
-        while (end < stageOrder.length && LIGHT_STAGES.includes(stageOrder[end]!)) end++;
+        while (end < stageOrder.length && legacyGroupable(stageOrder[end]!)) end++;
         const group = stageOrder.slice(i, end);
         if (group.length > 1) {
           progress = {
@@ -464,7 +470,7 @@ export async function documentPipeline(
       }
 
       // Recorded in workflow input: runs started without it keep one activity per stage.
-      if (input.documentSharding && scaling && SHARDABLE_STAGES.includes(stageName)) {
+      if (input.documentSharding && scaling && shardable(stageName)) {
         const shards = shardPlan(stageName);
         if (shards.length > 1) {
           const shardActivities = shardActivityProxies(input.activityTaskQueue);

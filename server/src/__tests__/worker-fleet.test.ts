@@ -112,6 +112,11 @@ describe("gate wiring", () => {
     expect(fleet.configuredGatedFlags({ NODE_ENV: "production", WORKER_GROUP_ADJACENT_STAGES: "true", WORKER_GROUP_LIGHT_STAGES: "false" }).WORKER_GROUP_ADJACENT_STAGES).toBe(false);
   });
 
+  it("reports quarantine sharding as opt-in", () => {
+    expect(fleet.configuredGatedFlags({ NODE_ENV: "production" }).WORKER_SHARD_QUARANTINE).toBe(false);
+    expect(fleet.configuredGatedFlags({ WORKER_SHARD_QUARANTINE: "true" }).WORKER_SHARD_QUARANTINE).toBe(true);
+  });
+
   it("routes load-test orgs to the load-test queue", () => {
     const env = { TEMPORAL_LOADTEST_TASK_QUEUE: "docslurp-loadtest", TEMPORAL_LOADTEST_ORG_IDS: "lt" };
     expect(fleet.taskQueueForOrgKey("lt", "docslurp-pipeline", env).taskQueue).toBe("docslurp-loadtest");

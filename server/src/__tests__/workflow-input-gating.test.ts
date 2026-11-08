@@ -16,7 +16,7 @@ vi.mock("@temporalio/client", () => ({
 }));
 vi.mock("../db.js", () => ({ sql: vi.fn(async () => []) }));
 
-const ENV_KEYS = ["NODE_ENV", "WORKER_CAPABILITY_GATE", "WORKER_INDEX_BEFORE_ENRICH", "WORKER_GROUP_ADJACENT_STAGES"] as const;
+const ENV_KEYS = ["NODE_ENV", "WORKER_CAPABILITY_GATE", "WORKER_INDEX_BEFORE_ENRICH", "WORKER_GROUP_ADJACENT_STAGES", "WORKER_SHARD_QUARANTINE", "TEMPORAL_NAMESPACE"] as const;
 const saved: Record<string, string | undefined> = {};
 
 beforeEach(() => {
@@ -48,11 +48,21 @@ async function startWith(pollers: Array<{ identity: string; buildId: string }>) 
   }, process.env));
   const { startPipelineWorkflow } = await import("../lib/temporal.js");
   await startPipelineWorkflow("run-1", normalizePipelineFeatures({ summarize: true, propositionIndex: true }));
-  const [, options] = mocks.start.mock.calls.at(-1) as unknown as [string, { args: Array<{ stageOrder: string[]; groupableStages?: string[] }> }];
+  const [, options] = mocks.start.mock.calls.at(-1) as unknown as [string, { args: Array<{ stageOrder: string[]; groupableStages?: string[]; documentSharding?: { quarantine?: boolean } }> }];
   return options.args[0]!;
 }
 
 describe("startPipelineWorkflow with the capability gate", () => {
+  it.each([false, true])("gates quarantine when it is the only enabled flag (mixed fleet %s)", async (mixed) => {
+    Object.assign(process.env, { NODE_ENV: "production", TEMPORAL_NAMESPACE: "test-gating", WORKER_INDEX_BEFORE_ENRICH: "false",
+      WORKER_GROUP_ADJACENT_STAGES: "false", WORKER_SHARD_QUARANTINE: "true" });
+    const pollers = [{ identity: "new-worker", buildId: "new" }];
+    if (mixed) pollers.push({ identity: "old-worker", buildId: "old" });
+    const input = await startWith(pollers);
+    expect(input.documentSharding?.quarantine).toBe(mixed ? undefined : true);
+    expect(input.groupableStages).toBeUndefined();
+  });
+
   it("records the old input while an older worker still polls", async () => {
     const input = await startWith([{ identity: "new-worker", buildId: "new" }, { identity: "old-worker", buildId: "old" }]);
     expect(input.stageOrder.at(-1)).toBe("index");
@@ -75,7 +85,7 @@ describe("startPipelineWorkflow with the capability gate", () => {
     }, process.env));
     const { startPipelineWorkflow } = await import("../lib/temporal.js");
     await startPipelineWorkflow("run-2", normalizePipelineFeatures({ summarize: true, propositionIndex: true }));
-    const [, options] = mocks.start.mock.calls.at(-1) as unknown as [string, { args: Array<{ stageOrder: string[]; groupableStages?: string[] }> }];
+    const [, options] = mocks.start.mock.calls.at(-1) as unknown as [string, { args: Array<{ stageOrder: string[]; groupableStages?: string[]; documentSharding?: { quarantine?: boolean } }> }];
     expect(options.args[0]!.stageOrder.at(-1)).toBe("index");
     expect(options.args[0]!.groupableStages).toBeUndefined();
   });

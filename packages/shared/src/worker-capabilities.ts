@@ -32,6 +32,8 @@
 export const WORKER_CAPABILITY_PROTOCOL = 1;
 
 export const WORKER_CAPABILITIES = [
+  /** New workflow inputs may shard quarantine before any parsing stage. */
+  "workflow.quarantine-shards",
   /** Runs `index` right after `embed` and keeps indexed documents `completed` through enrichment. */
   "workflow.index-before-enrich",
   /** Groups arbitrary adjacent stages into one activity (stage-groups.ts), not only LIGHT_STAGES. */
@@ -59,6 +61,11 @@ export interface GatedFeature {
 
 /** Flags the app only honours once the whole fleet supports them. */
 export const GATED_FEATURES: readonly GatedFeature[] = [
+  {
+    flag: "WORKER_SHARD_QUARANTINE",
+    capability: "workflow.quarantine-shards",
+    description: "documentSharding.quarantine recorded only for a capable fleet",
+  },
   {
     flag: "WORKER_INDEX_BEFORE_ENRICH",
     capability: "workflow.index-before-enrich",

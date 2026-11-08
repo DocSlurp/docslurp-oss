@@ -33,6 +33,7 @@ export async function resolveWorkerCapabilities(probes: WorkerCapabilityProbes):
     "workflow.index-before-enrich",
     "workflow.group-adjacent-stages",
     "workflow.page-range-shards",
+    "workflow.quarantine-shards",
   ];
   const [leases, lexical] = await Promise.all([
     probes.creditLeasesActive().catch(() => false),
