@@ -72,6 +72,7 @@ function fakeLangfuse({ failOn = null } = {}) {
     if (route === "/score-configs") return { data: [...state.configs.values()], meta: { totalPages: 1 } };
     if (route.startsWith("/score-configs/")) return state.configs.get(route.split("/").at(-1)) ?? null;
     if (route === "/otel/v1/traces") { for (const span of body.resourceSpans[0].scopeSpans[0].spans) state.spans.set(span.spanId, span); return {}; }
+    if (route === "/v3/scores") return { data: [...state.scores.values()].filter(s => s.traceId === new URLSearchParams(path.split("?")[1]).get("traceId")).map(s => structuredClone(s)), meta: {} };
     if (route === "/scores") { state.scores.set(body.id, body); return { id: body.id }; }
     if (route === "/experiment-items") {
       const attrs = (s) => Object.fromEntries(s.attributes.map((a) => [a.key, Object.values(a.value)[0]]));
@@ -347,9 +348,9 @@ for (const [field, wrong] of Object.entries({ value: 0.1, id: "unrelated-score",
     assert.equal(repaired.readbackVerified, true);
     const corrupt = async (path, body, opts) => {
       const out = await api(path, body, opts);
-      if (path.startsWith("/experiment-items?")) {
+      if (path.startsWith("/v3/scores?")) {
         // Keep the matching name present, even when its association is wrong.
-        out.data[0].scores = [{ ...original, [field]: wrong }, ...out.data[0].scores.filter(s => s.name !== original.name)];
+        out.data = [{ ...original, [field]: wrong }, ...out.data.filter(s => s.name !== original.name)];
       }
       return out;
     };
@@ -361,8 +362,8 @@ test("score readback accepts bounded rounding and V3 boolean/subject identities,
   const { api, state, run } = await scoredRunFixture();
   const v3 = async (path, body, opts) => {
     const out = await api(path, body, opts);
-    if (path.startsWith("/experiment-items?")) for (const row of out.data) row.scores = row.scores.map(s => ({
-      id: s.id, name: s.name, configId: s.configId,
+    if (path.startsWith("/v3/scores?")) out.data = out.data.map(s => ({
+      id: s.id, name: s.name, configId: s.configId, metadata: s.metadata,
       value: s.name.endsWith(".pass") ? Boolean(s.value) : s.value + 1e-14,
       dataType: s.name.endsWith(".pass") ? "BOOLEAN" : "NUMERIC",
       subject: { kind: "observation", id: s.observationId, traceId: s.traceId },
@@ -375,4 +376,39 @@ test("score readback accepts bounded rounding and V3 boolean/subject identities,
   assert.equal(again.itemsWritten, 0);
   assert.equal(state.writes.length, writes);
   assert.equal([...state.scores.values()][0].id, scoreId(run.items[0], run.items[0].scores[0].name));
+});
+
+test("project score details verify despite incomplete experiment projections and ignored timestamps", async () => {
+  const { api, state, run } = await scoredRunFixture();
+  run.scoredAt = "2026-10-26T10:02:00Z";
+  const projected = async (path, body, opts) => {
+    const result = await api(path, body, opts);
+    if (path === "/scores") state.scores.get(body.id).timestamp = "2026-10-27T00:00:00Z";
+    if (path.startsWith("/experiment-items?")) for (const row of result.data) row.scores = row.scores.map(({ configId, metadata, ...score }) => score);
+    return result;
+  };
+  assert.equal((await syncRun(projected, run)).scoresWritten, 2);
+  assert.equal((await syncRun(projected, run)).scoresWritten, 0);
+  for (const score of state.scores.values()) assert.equal(score.metadata.scoredAt, run.scoredAt);
+});
+
+for (const field of ["experimentId", "caseId", "runManifestSha256", "scoredAt"]) {
+  test(`full score provenance ${field} is mandatory`, async () => {
+    const { api, run } = await scoredRunFixture();
+    const corrupt = async (path, body, opts) => {
+      const result = await api(path, body, opts);
+      if (path.startsWith("/v3/scores?")) for (const score of result.data) delete score.metadata[field];
+      return result;
+    };
+    await assert.rejects(syncRun(corrupt, run, { timeoutMs: -1 }), /readback incomplete/);
+  });
+}
+
+test("missing full scores and repeated pagination fail closed", async () => {
+  const { api, run } = await scoredRunFixture();
+  for (const response of [{ data: [], meta: {} }, { data: [], meta: { cursor: "repeat" } }]) {
+    const incomplete = (path, body, opts) => path.startsWith("/v3/scores?") ? structuredClone(response) : api(path, body, opts);
+    await assert.rejects(syncRun(incomplete, run, { timeoutMs: -1 }), /readback incomplete|pagination did not finish/);
+  }
+  assert.equal(run.scoredAt, null);
 });
