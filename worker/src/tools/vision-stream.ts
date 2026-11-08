@@ -444,6 +444,7 @@ async function consumeJson(response: Response): Promise<VisionAttempt> {
   for (let offset = 0; offset < text.length && !attempt.degenerate; offset += CHECK_EVERY_CHARS) {
     attempt.degenerate = detector.push(text.slice(offset, offset + CHECK_EVERY_CHARS));
   }
+  attempt.degenerate ??= detectDegeneration(text);
   attempt.text = text.trim();
   attempt.finishReason = choice?.finish_reason ?? null;
   attempt.error = (choice?.error && typeof choice.error === "object" ? choice.error : null)

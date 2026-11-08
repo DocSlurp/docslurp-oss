@@ -104,7 +104,7 @@ describe("degeneration detector", () => {
 });
 
 describe("guarded hosted vision request", () => {
-  it.each(["# Page\n" + "xy".repeat(2000), "# Page\n" + " ".repeat(1800)])(
+  it.each(["# Page\n" + "xy".repeat(2000), "# Page\n" + " ".repeat(1800), "Header" + "xy".repeat(750)])(
     "rejects degenerate JSON output and preserves both attempt charges", async (text) => {
       vi.spyOn(console, "log").mockImplementation(() => {});
       vi.spyOn(console, "warn").mockImplementation(() => {});
