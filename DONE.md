@@ -1,3 +1,7 @@
+## Bounded stage telemetry flush (2026-11-09)
+
+- Apply the existing five-second telemetry deadline to metric force-flush operations so a stalled exporter cannot indefinitely delay stage completion. Regression exercises the real SDK reader with a non-settling exporter.
+
 ## Explicit native child task launch and nested identity (2026-11-09)
 
 - Add session-only child project-chat launch through the existing native background-task owner, inheriting authorized project/organization and root deadline/retention. Return persisted nested parent IDs, including waiting intents before native acceptance. Preserve idempotency, cancellation fences, tree quotas and zero automatic retries. Local native integration covers parallel/nested work, independent-host recovery after parent completion, scope/session/input rejection, cancellation races and concurrent root output exhaustion. Activation and automatic agent delegation/retry acceptance remain open.

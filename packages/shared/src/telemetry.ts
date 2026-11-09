@@ -261,7 +261,7 @@ function registerRuntimeMetrics(provider: MeterProvider): void {
 export async function flushObservability(): Promise<void> {
   const runtime = getRuntime();
   if (!runtime || runtime.shutdown) return;
-  await Promise.allSettled([() => runtime.traces.forceFlush(), () => runtime.metrics?.forceFlush(), () => runtime.logs?.forceFlush({ timeoutMillis })].map(run => Promise.resolve().then(run)));
+  await Promise.allSettled([() => runtime.traces.forceFlush(), () => runtime.metrics?.forceFlush({ timeoutMillis }), () => runtime.logs?.forceFlush({ timeoutMillis })].map(run => Promise.resolve().then(run)));
 }
 
 export async function shutdownObservability(): Promise<void> {
