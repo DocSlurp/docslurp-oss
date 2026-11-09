@@ -1782,13 +1782,30 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   }
 
   async function waitUploadSession(path: string, options: UploadOptions): Promise<UploadResponse> {
-    const bound = deadline(options.timeoutMs ?? 30 * 60_000, options.signal);
+    const timeoutMs = positiveDuration(options.timeoutMs ?? 30 * 60_000, "timeoutMs");
+    const expiresAt = Date.now() + timeoutMs;
+    const bound = deadline(timeoutMs, options.signal);
+    let pollDelayMs = 250;
+    let transientFailures = 0;
     try {
       while (true) {
-        const session = await request<UploadSession>(`${path}?statusOnly=true`, {}, { ...options, signal: bound.signal }, true);
-        if (session.result) return session.result;
-        if (["failed", "aborted", "expired"].includes(session.status)) throw new Error(`Upload session ${session.status}`);
-        await sleep(250, bound.signal);
+        let retryDelayMs = pollDelayMs;
+        try {
+          // This loop owns status retries; retrying inside request would multiply polling traffic.
+          const session = await request<UploadSession>(`${path}?statusOnly=true`, {}, { ...options, signal: bound.signal });
+          transientFailures = 0;
+          if (session.result) return session.result;
+          if (["failed", "aborted", "expired"].includes(session.status)) throw new Error(`Upload session ${session.status}`);
+        } catch (error) {
+          if (!(error instanceof DocSlurpApiError)) throw error;
+          if (error.status !== 429 && (![502, 503, 504].includes(error.status) || ++transientFailures > 2)) throw error;
+          // Uploaded bytes may already have started a run. Keep observing the same session,
+          // respecting the server's full wait and the original cancellation/deadline bound.
+          retryDelayMs = Math.max(retryDelayMs, (error.retryAfterSeconds ?? 0) * 1000);
+        }
+        // A very long Retry-After must not overflow setTimeout and turn into rapid polling.
+        await sleep(Math.min(retryDelayMs, Math.max(0, expiresAt - Date.now())), bound.signal);
+        pollDelayMs = Math.min(5_000, pollDelayMs * 2);
       }
     } finally { bound.dispose(); }
   }
@@ -1796,6 +1813,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   async function uploadStreamDirect(source: UploadByteStream, metadata: UploadOptions, options: UploadOptions): Promise<UploadResponse> {
     const bound = deadline(options.timeoutMs ?? 30 * 60_000, options.signal);
     const stopped = new AbortController();
+    let transferCompleted = false;
     const signal = AbortSignal.any([bound.signal, stopped.signal]);
     const transferOptions = { ...options, signal };
     const iterator = source[Symbol.asyncIterator]();
@@ -1864,12 +1882,13 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       if (failure) throw failure;
       parts.sort((a, b) => a.partNumber - b.partNumber);
       await request(`${sessionPath}/files/complete`, jsonRequest("POST", { fileId: descriptor.id, sizeBytes, parts }), transferOptions);
+      transferCompleted = true;
       return await waitUploadSession(sessionPath, transferOptions);
     } catch (error) {
       stopped.abort(error);
       close();
       await Promise.all(active);
-      if (sessionPath) await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
+      if (sessionPath && !transferCompleted) await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
       throw error;
     } finally { close(); observable.off?.("error", onSourceError); signal.removeEventListener("abort", close); bound.dispose(); }
   }
@@ -2033,12 +2052,13 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         if (!match) throw new Error(`Direct upload session returned a file this upload did not send: ${descriptor.filename}`);
         await transferFile(sessionPath, descriptor, match.source.blob, options);
       }
-      const result = await waitUploadSession(sessionPath, options);
-      return leftOut.length ? { ...result, rejected: [...leftOut, ...(result.rejected ?? [])] } : result;
     } catch (error) {
       await request(`${sessionPath}/abort`, { method: "POST" }, { timeoutMs: 10_000 }).catch(() => {});
       throw error;
     }
+    // Once bytes have arrived, a status failure must not cancel accepted ingestion.
+    const result = await waitUploadSession(sessionPath, options);
+    return leftOut.length ? { ...result, rejected: [...leftOut, ...(result.rejected ?? [])] } : result;
   }
 
   return {
