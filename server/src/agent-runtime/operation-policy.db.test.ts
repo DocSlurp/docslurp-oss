@@ -41,3 +41,11 @@ it("records root cancellation before refusing any subsequent native acceptance",
   await expect(policy.serializeAcceptance(binding,accept)).rejects.toThrow("operation_cancelled_or_expired");
   expect(accept).toHaveBeenCalledTimes(1);
 });
+it("returns persisted parent identity for nested native task summaries", async () => {
+  const root=await ops.launchChatOperation({userId:actor.userId,orgId:"native-org",projectId:"00000000-0000-4000-8000-000000000319",key:"nested_policy_root",input:{q:"root"}});
+  const child=await ops.launchChatOperation({userId:actor.userId,orgId:"native-org",projectId:"00000000-0000-4000-8000-000000000319",key:"nested_policy_child",input:{q:"child"},parentId:root.id});
+  const grandchild=await ops.launchChatOperation({userId:actor.userId,orgId:"native-org",projectId:"00000000-0000-4000-8000-000000000319",key:"nested_policy_grandchild",input:{q:"grandchild"},parentId:child.id});
+  const policy=createPolicy(async()=>actor);
+  expect(await policy.authorize(root.id)).toMatchObject({rootId:root.id,parentId:null});
+  expect(await policy.authorize(grandchild.id)).toMatchObject({rootId:root.id,parentId:child.id});
+});

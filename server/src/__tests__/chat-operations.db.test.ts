@@ -24,6 +24,15 @@ beforeAll(async () => {
 beforeEach(async () => { runtime.allowed=true; runtime.chat.mockReset(); await sql`delete from chat_operations`; });
 afterAll(async () => { await sql?.end(); await stop?.(); });
 const launch = (key: string, parentId?: string) => ops.launchChatOperation({ userId: "u", projectId: "w", orgId: "o", key, input: { q: "hello" }, parentId });
+it.each(["deadline", "retention", "runtime"])("refuses a child under an unavailable %s root without inserting it", async reason => {
+  const root = await launch(`child_guard_${reason}`);
+  if (reason === "deadline") await sql`update chat_operations set deadline=clock_timestamp()-interval '1 second' where id=${root.id}`;
+  if (reason === "retention") await sql`update chat_operations set expires_at=clock_timestamp()-interval '1 second' where id=${root.id}`;
+  const before = await sql`select id from chat_operations`;
+  await expect(ops.launchChatOperation({userId:"u",projectId:"w",orgId:"o",key:`guarded_child_${reason}`,input:{q:"child"},parentId:root.id,
+    runtime:reason === "runtime" ? "mastra" : "legacy"})).rejects.toThrow();
+  expect(await sql`select id from chat_operations`).toEqual(before);
+});
 it("deduplicates a lost launch ACK, rejects changed input and claims exactly once", async () => {
   const [a,b] = await Promise.all([launch("lost_ack_1"),launch("lost_ack_1")]);
   expect(a.id).toBe(b.id);

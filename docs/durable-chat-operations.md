@@ -70,7 +70,43 @@ or shared Temporal dependencies after the answer completes. Trees have at most
 64 task/dependency references, a ten-minute deadline, 512 KiB accepted output
 budget and 256 KiB per task. Native host concurrency is bounded to eight; native
 task retries default to zero. Native attempt identity includes task ID and retry
-count. No arbitrary subagent/retry launcher exists in the current tool surface.
+count. The session-only `POST /v1/chat/operations/:id/tasks` endpoint explicitly
+launches a child project-chat background task through that same native manager.
+It requires a fresh `Idempotency-Key` and the root launch body (`q`, optional
+`model`/`sessionId`) without a `project` selector: project and organization are
+inherited from the authorized parent. Keys are scoped to owner and project: a
+repeated key in that namespace returns the same child; changed input or a different
+parent in that namespace conflicts. Nested children retain their real
+persisted `parent_id`, rather than being flattened under the root.
+
+The current session is revalidated before persisting launch intent, and native
+acceptance revalidates again under the root cancellation lock. Expired/cancelled
+roots, incompatible runtimes, unauthorized parents and tree limits refuse new
+launches. A completed parent answer does not prevent explicit child work during
+the remaining root deadline; new children inherit that deadline and retention.
+Native parent failure/interruption also does not itself cancel the root. A new
+explicit authorized child request is permitted until deadline/cancellation; it is
+new work, never an automatic retry or restart of that failed parent.
+Cancel-one leaves siblings running; cancel-tree fences new acceptance and covers
+accepted descendants. There is no implicit model/tool delegation or retry API;
+this endpoint adds explicit background jobs, not automatic subagent orchestration.
+
+Persisted intents awaiting native acceptance remain visible as waiting summaries
+with a null native task/attempt ID, keeping the tree unsettled. Replaying the
+initiation key can finish acceptance exactly once. No worker or observer silently
+turns an unaccepted intent into paid execution. An expired intent becomes an
+explicit interruption; accepted native output missing its history fails loudly.
+
+```sh
+curl -X POST "$DOCSLURP_URL/v1/chat/operations/$PARENT_OPERATION_ID/tasks" \
+  -H "Origin: $DOCSLURP_URL" \
+  -H 'Content-Type: application/json' -H 'Idempotency-Key: child-request-001' \
+  -b first-party-session.cookies --data '{"q":"Summarize the remaining evidence"}'
+```
+
+The cookie is a first-party session; API keys are intentionally refused. Normal
+first-party Origin/CSRF policy still applies. HTTP responses and observers do not
+own execution, and the existing per-task/root output budgets remain shared.
 
 Replay pages have at most 256 indexed events. Public sequences are native indices
 plus one, including non-text events. Native cache append precedes delivery.

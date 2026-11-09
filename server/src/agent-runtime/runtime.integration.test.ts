@@ -7,6 +7,7 @@ import { randomUUID, createHmac } from "node:crypto";
 import { Hono } from "hono";
 import postgres from "postgres";
 import { afterAll,beforeAll,expect,it,vi } from "vitest";
+import type { RequestActor } from "../lib/request-actor.js";
 const state=vi.hoisted(()=>({chat:vi.fn()}));
 const url=process.env.NATIVE_CHAT_TEST_DATABASE_URL;
 const redis=process.env.NATIVE_CHAT_TEST_REDIS_URL;
@@ -21,6 +22,12 @@ const shutdown=new AbortController();
 let worker:Promise<void>;
 let actor={type:"session" as const,userId:"native-api-owner",sessionId:"native-api-session",user:{id:"native-api-owner",name:"Native",email:"native-api@example.test"}};
 const project="00000000-0000-4000-8000-000000000320";
+const requestApp=()=>new Hono().use("*",async(c,next)=>{c.set("requestActor",actor);await next();}).route("/v1/chat/operations",routes);
+async function restoreSession() {
+  await sql`insert into session(id,token,"userId","expiresAt","createdAt","updatedAt")
+    values('native-api-session','native-api-test-token-child','native-api-owner',now()+interval '1 day',now(),now())
+    on conflict(id) do update set "expiresAt"=now()+interval '1 day'`;
+}
 beforeAll(async()=>{
   if(!enabled)return;
   if(new URL(url!).hostname!=="127.0.0.1"||new URL(redis!).hostname!=="127.0.0.1")throw new Error("isolated loopback services required");
@@ -150,6 +157,216 @@ it.runIf(enabled)("explicit native cancellation aborts only the accepted task an
   const result=await (await app.request(`/v1/chat/operations/${operationId}`)).json();
   expect(result.operation.status).toBe("cancelled");expect(result.operation.snapshot.text).toBe("kept partial");
   expect(result.treeSettled).toBe(true);
+},20000);
+
+it.runIf(enabled)("launches parallel and nested native children after the parent answer, recovering their true tree from another host", async () => {
+  await restoreSession();
+  let release!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  const started=new Set<string>();
+  state.chat.mockReset().mockImplementation(async args=>{
+    started.add(args.query);
+    await args.onTextDelta(`${args.query} partial`);
+    if(args.query!=="tree root") await gate;
+    args.signal.throwIfAborted();
+    return {answer:`${args.query} result`,citations:[]};
+  });
+  const app=requestApp();
+  const post=(path:string,key:string,q:string)=>app.request(path,{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":key},body:JSON.stringify({q,...(path==="/v1/chat/operations"?{project}:{})})});
+  const rootResponse=await post("/v1/chat/operations","native_child_root","tree root");
+  expect(rootResponse.status).toBe(202);
+  const root=(await rootResponse.json()).operationId;
+  let second:Awaited<ReturnType<typeof import("./native-host.js").createNativeChatHost>>|undefined;
+  const secondPool=new Pool({connectionString:url,max:3});
+  try {
+    await vi.waitFor(async()=>expect((await (await app.request(`/v1/chat/operations/${root}`)).json()).operation.status).toBe("completed"),{timeout:10000});
+    const responses=await Promise.all([post(`/v1/chat/operations/${root}/tasks`,"native_child_a","tree child a"),post(`/v1/chat/operations/${root}/tasks`,"native_child_b","tree child b")]);
+    expect(responses.map(r=>r.status)).toEqual([202,202]);
+    const [a,b]=await Promise.all(responses.map(async r=>(await r.json()).operationId));
+    const repeated=await post(`/v1/chat/operations/${root}/tasks`,"native_child_a","tree child a");
+    expect(repeated.status).toBe(202);expect((await repeated.json()).operationId).toBe(a);
+    const nested=await post(`/v1/chat/operations/${a}/tasks`,"native_grandchild","tree grandchild");
+    expect(nested.status).toBe(202);const grandchild=(await nested.json()).operationId;
+    await vi.waitFor(()=>expect(started.size).toBe(4),{timeout:10000});
+    const {createNativeChatHost}=await import("./native-host.js");
+    const {NativeOperations}=await import("./native-operations.js");
+    const {createNativeOperationPolicy}=await import("./operation-policy.js");
+    second=await createNativeChatHost({pool:secondPool,redisUrl:redis!,namespace:process.env.MASTRA_NAMESPACE,worker:false});
+    const recovered=new NativeOperations(second.mastra.backgroundTaskManager!,second.pubsub,createNativeOperationPolicy(async()=>actor));
+    const tree=await recovered.read(root,0);
+    expect(tree.operation.status).toBe("completed");expect(tree.treeSettled).toBe(false);
+    expect(tree.tasks).toHaveLength(4);
+    expect(tree.tasks.find(t=>t.id===root)?.parent_id).toBeNull();
+    expect(tree.tasks.find(t=>t.id===a)?.parent_id).toBe(root);
+    expect(tree.tasks.find(t=>t.id===b)?.parent_id).toBe(root);
+    expect(tree.tasks.find(t=>t.id===grandchild)?.parent_id).toBe(a);
+    expect((await recovered.read(grandchild,0)).operation.parent_id).toBe(a);
+    release();
+    await vi.waitFor(async()=>expect((await recovered.read(root,0)).treeSettled).toBe(true),{timeout:10000});
+    for(const id of [a,b,grandchild])expect((await recovered.read(id,0)).operation.status).toBe("completed");
+    for(const q of started)expect(state.chat.mock.calls.filter(([args])=>args.query===q)).toHaveLength(1);
+  } finally {release();await second?.close();await secondPool.end();}
+},40000);
+
+it.runIf(enabled)("rejects child scope selectors, foreign/API-key/revoked actors, oversized input and cancelled or expired roots", async () => {
+  await restoreSession();
+  state.chat.mockReset().mockImplementation(async()=>({answer:"guard root",citations:[]}));
+  const app=requestApp();
+  const rootResponse=await app.request("/v1/chat/operations",{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":"native_child_guards"},body:JSON.stringify({q:"guards",project})});
+  expect(rootResponse.status).toBe(202);const root=(await rootResponse.json()).operationId;
+  await vi.waitFor(async()=>expect((await (await app.request(`/v1/chat/operations/${root}`)).json()).operation.status).toBe("completed"),{timeout:10000});
+  const headers={"content-type":"application/json","Idempotency-Key":"native_rejected_child"};
+  expect((await app.request(`/v1/chat/operations/${root}/tasks`,{method:"POST",headers,body:JSON.stringify({q:"child",project})})).status).toBe(400);
+  expect((await app.request(`/v1/chat/operations/${root}/tasks`,{method:"POST",headers,body:JSON.stringify({q:"x".repeat(128001)})})).status).toBe(413);
+  const asActor=(value:RequestActor)=>new Hono().use("*",async(c,next)=>{c.set("requestActor",value);await next();}).route("/v1/chat/operations",routes);
+  const launchAs=(target:Hono)=>target.request(`/v1/chat/operations/${root}/tasks`,{method:"POST",headers,body:'{"q":"child"}'});
+  expect((await launchAs(asActor({type:"apiKey",userId:actor.userId,apiKey:{keyId:"native-child-test-key",userId:actor.userId,orgId:"native-api-org",keyType:"server",allowedDomains:[],scopes:["ingest"],rateLimitRpm:null,rateLimitPpd:100,rateLimits:[],projectIds:[project]}}))).status).toBe(403);
+  await sql`insert into "user"(id,name,email) values('native-child-foreign','Foreign','foreign-child@example.test') on conflict do nothing`;
+  await sql`insert into session(id,token,"userId","expiresAt","createdAt","updatedAt") values('native-child-foreign-session','native-child-foreign-test-token','native-child-foreign',now()+interval '1 day',now(),now()) on conflict do nothing`;
+  await sql`insert into organizations(id,name,slug,created_by_user_id) values('native-child-foreign-org','Foreign','native-child-foreign','native-child-foreign') on conflict do nothing`;
+  await sql`insert into org_memberships(org_id,user_id,role) values('native-child-foreign-org','native-child-foreign','owner') on conflict do nothing`;
+  const foreign={type:"session" as const,userId:"native-child-foreign",sessionId:"native-child-foreign-session",user:{id:"native-child-foreign",name:"Foreign",email:"foreign-child@example.test"}};
+  expect(await (await import("../realtime/session.js")).revalidateRealtimeSession(foreign,AbortSignal.timeout(5000))).toEqual(foreign);
+  expect((await launchAs(asActor(foreign))).status).toBe(409);
+  await sql`delete from org_memberships where org_id='native-api-org' and user_id=${actor.userId}`;
+  expect((await launchAs(app)).status).toBe(409);
+  await sql`insert into org_memberships(org_id,user_id,role) values('native-api-org',${actor.userId},'owner')`;
+  await sql`update "user" set "twoFactorEnabled"=true where id=${actor.userId}`;
+  expect((await launchAs(app)).status).toBe(409);
+  await sql`update "user" set "twoFactorEnabled"=false where id=${actor.userId}`;
+  await sql`update session set "expiresAt"=now()-interval '1 second' where id=${actor.sessionId}`;
+  expect((await launchAs(app)).status).toBe(409);
+  await restoreSession();
+  await sql`update chat_operations set deadline=clock_timestamp()-interval '1 second' where id=${root}`;
+  expect((await launchAs(app)).status).toBe(409);
+  await sql`update chat_operations set deadline=clock_timestamp()+interval '1 minute',tree_cancel_requested=true where id=${root}`;
+  expect((await launchAs(app)).status).toBe(409);
+  expect(state.chat.mock.calls.filter(([args])=>args.query==="child")).toHaveLength(0);
+  expect((await sql`select count(*)::int as count from chat_operations where parent_id=${root}`)[0].count).toBe(0);
+},25000);
+
+it.runIf(enabled)("cancels one child independently and fences a child-launch race with root cancellation", async () => {
+  await restoreSession();
+  const aborted=new Set<string>();
+  state.chat.mockReset().mockImplementation(async args=>{
+    if(args.query==="cancel tree root")return {answer:"root",citations:[]};
+    await args.onTextDelta("child running");
+    await new Promise<void>((_resolve,reject)=>{
+      const stop=()=>{aborted.add(args.query);reject(new Error("cancelled"));};
+      if(args.signal.aborted)stop();else args.signal.addEventListener("abort",stop,{once:true});
+    });
+    return {answer:"unreachable"};
+  });
+  const app=requestApp();
+  const post=(path:string,key:string,q:string)=>app.request(path,{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":key},body:JSON.stringify({q,...(path==="/v1/chat/operations"?{project}:{})})});
+  const rootResponse=await post("/v1/chat/operations","native_cancel_tree_root","cancel tree root");
+  expect(rootResponse.status).toBe(202);const root=(await rootResponse.json()).operationId;
+  const cancel=(id:string,scope:string)=>app.request(`/v1/chat/operations/${id}/cancel`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({scope})});
+  try {
+    const children=await Promise.all([post(`/v1/chat/operations/${root}/tasks`,"native_cancel_child_a","cancel child a"),post(`/v1/chat/operations/${root}/tasks`,"native_cancel_child_b","cancel child b")]);
+    expect(children.map(r=>r.status)).toEqual([202,202]);
+    const [a,b]=await Promise.all(children.map(async r=>(await r.json()).operationId));
+    await vi.waitFor(async()=>expect((await (await app.request(`/v1/chat/operations/${b}`)).json()).operation.snapshot.text).toBe("child running"),{timeout:10000});
+    expect((await cancel(a,"task")).status).toBe(200);
+    await vi.waitFor(()=>expect(aborted.has("cancel child a")).toBe(true),{timeout:5000});
+    expect(aborted.has("cancel child b")).toBe(false);
+    const [cancelled,racing]=await Promise.all([cancel(root,"tree"),post(`/v1/chat/operations/${b}/tasks`,"native_cancel_racing_child","cancel racing child")]);
+    expect(cancelled.status).toBe(200);expect([202,409]).toContain(racing.status);
+    await vi.waitFor(()=>expect(aborted.has("cancel child b")).toBe(true),{timeout:5000});
+    if(racing.status===202){
+      const id=(await racing.json()).operationId;
+      await vi.waitFor(async()=>expect(["cancelled","failed"]).toContain((await (await app.request(`/v1/chat/operations/${id}`)).json()).operation.status),{timeout:10000});
+    }
+    expect((await post(`/v1/chat/operations/${root}/tasks`,"native_cancel_after_commit","cancel late child")).status).toBe(409);
+  } finally {await cancel(root,"tree");}
+},30000);
+
+it.runIf(enabled)("applies the shared output quota across concurrent native children", async () => {
+  await restoreSession();
+  const text="x".repeat(190000);
+  state.chat.mockReset().mockImplementation(async args=>{
+    if(args.query==="quota root")return {answer:"root",citations:[]};
+    await args.onTextDelta(text);
+    return {answer:text,citations:[]};
+  });
+  const app=requestApp();
+  const post=(path:string,key:string,q:string)=>app.request(path,{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":key},body:JSON.stringify({q,...(path==="/v1/chat/operations"?{project}:{})})});
+  const rootResponse=await post("/v1/chat/operations","native_child_quota_root","quota root");
+  expect(rootResponse.status).toBe(202);const root=(await rootResponse.json()).operationId;
+  const responses=await Promise.all([0,1,2].map(i=>post(`/v1/chat/operations/${root}/tasks`,`native_child_quota_${i}`,`quota child ${i}`)));
+  expect(responses.map(r=>r.status)).toEqual([202,202,202]);
+  const ids=await Promise.all(responses.map(async r=>(await r.json()).operationId));
+  await vi.waitFor(async()=>{
+    const result=await (await app.request(`/v1/chat/operations/${root}`)).json();
+    expect(result.tasks).toHaveLength(4);expect(result.treeSettled).toBe(true);
+    expect(result.tasks.filter((task:{id:string})=>ids.includes(task.id)).map((task:{status:string})=>task.status).sort()).toEqual(["completed","completed","failed"]);
+  },{timeout:10000});
+  const [usage]=await sql`select sum(output_bytes)::int as bytes from chat_operations where root_id=${root}`;
+  expect(usage.bytes).toBeGreaterThan(380000);expect(usage.bytes).toBeLessThanOrEqual(524288);
+},20000);
+
+it.runIf(enabled)("keeps an unaccepted child visible without executing it until the launch key is replayed", async () => {
+  await restoreSession();
+  state.chat.mockReset().mockImplementation(async args=>({answer:args.query,citations:[]}));
+  const app=requestApp();
+  const rootResponse=await app.request("/v1/chat/operations",{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":"native_intent_root"},body:JSON.stringify({q:"intent root",project})});
+  expect(rootResponse.status).toBe(202);const root=(await rootResponse.json()).operationId;
+  await vi.waitFor(async()=>expect((await (await app.request(`/v1/chat/operations/${root}`)).json()).operation.status).toBe("completed"),{timeout:10000});
+  // Reproduce a launcher dying after intent commits and before native enqueue.
+  const {launchChatOperation}=await import("../services/chat-operations.js");
+  const intent=await launchChatOperation({userId:actor.userId,projectId:project,orgId:"native-api-org",key:"native_unaccepted_child",input:{q:"intent child",authSessionId:actor.sessionId},parentId:root,runtime:"mastra"});
+  const tree=await (await app.request(`/v1/chat/operations/${root}`)).json();
+  expect(tree.treeSettled).toBe(false);
+  expect(tree.tasks.find((task:{id:string})=>task.id===intent.id)).toMatchObject({parent_id:root,status:"waiting",nativeTaskId:null,attempt_id:null});
+  expect((await (await app.request(`/v1/chat/operations/${intent.id}`)).json()).operation.status).toBe("waiting");
+  expect((await app.request(`/v1/chat/operations/${intent.id}?after=invalid`)).status).toBe(409);
+  const host=await runtime.nativeChatRuntime();
+  expect((await host.mastra.backgroundTaskManager!.listTasks({toolCallId:intent.id})).total).toBe(0);
+  const expired=await launchChatOperation({userId:actor.userId,projectId:project,orgId:"native-api-org",key:"native_expired_intent",input:{q:"expired intent",authSessionId:actor.sessionId},parentId:root,runtime:"mastra"});
+  await sql`update chat_operations set deadline=clock_timestamp()-interval '1 second' where id=${expired.id}`;
+  expect((await (await app.request(`/v1/chat/operations/${expired.id}`)).json()).operation).toMatchObject({status:"interrupted",nativeTaskId:null});
+  expect((await host.mastra.backgroundTaskManager!.listTasks({toolCallId:expired.id})).total).toBe(0);
+  const retry=()=>app.request(`/v1/chat/operations/${root}/tasks`,{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":"native_unaccepted_child"},body:'{"q":"intent child"}'});
+  const replies=await Promise.all([retry(),retry()]);
+  expect(replies.map(r=>r.status)).toEqual([202,202]);
+  for(const reply of replies)expect((await reply.json()).operationId).toBe(intent.id);
+  await vi.waitFor(async()=>expect((await (await app.request(`/v1/chat/operations/${root}`)).json()).treeSettled).toBe(true),{timeout:10000});
+  expect(state.chat.mock.calls.filter(([args])=>args.query==="intent child")).toHaveLength(1);
+},20000);
+
+it.runIf(enabled)("bounds native launch intents at 64 references and settles unaccepted children on tree cancellation", async () => {
+  await restoreSession();
+  state.chat.mockReset().mockImplementation(async()=>({answer:"fanout root",citations:[]}));
+  const app=requestApp();
+  const rootResponse=await app.request("/v1/chat/operations",{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":"native_fanout_root"},body:JSON.stringify({q:"fanout root",project})});
+  expect(rootResponse.status).toBe(202);const root=(await rootResponse.json()).operationId;
+  await vi.waitFor(async()=>expect((await (await app.request(`/v1/chat/operations/${root}`)).json()).operation.status).toBe("completed"),{timeout:10000});
+  const {launchChatOperation}=await import("../services/chat-operations.js");
+  for(let i=0;i<63;i++)await launchChatOperation({userId:actor.userId,projectId:project,orgId:"native-api-org",key:`native_fanout_child_${i}`,input:{q:"unaccepted child",authSessionId:actor.sessionId},parentId:root,runtime:"mastra"});
+  const tree=await (await app.request(`/v1/chat/operations/${root}`)).json();
+  expect(tree.tasks).toHaveLength(64);expect(tree.treeSettled).toBe(false);
+  expect((await app.request(`/v1/chat/operations/${root}/tasks`,{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":"native_fanout_overflow"},body:'{"q":"overflow"}'})).status).toBe(409);
+  expect((await sql`select count(*)::int as count from chat_operations where root_id=${root}`)[0].count).toBe(64);
+  expect((await app.request(`/v1/chat/operations/${root}/cancel`,{method:"POST",headers:{"content-type":"application/json"},body:'{"scope":"tree"}'})).status).toBe(200);
+  expect((await (await app.request(`/v1/chat/operations/${root}`)).json()).treeSettled).toBe(true);
+  expect(state.chat.mock.calls.filter(([args])=>args.query==="unaccepted child")).toHaveLength(0);
+},25000);
+
+it.runIf(enabled)("permits explicit new child work after native parent failure without retrying the parent", async () => {
+  await restoreSession();
+  state.chat.mockReset().mockImplementation(async args=>{
+    if(args.query==="failed native parent")throw new Error("executor_interrupted");
+    return {answer:"explicit new child",citations:[]};
+  });
+  const app=requestApp();
+  const rootResponse=await app.request("/v1/chat/operations",{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":"native_failed_parent"},body:JSON.stringify({q:"failed native parent",project})});
+  expect(rootResponse.status).toBe(202);const root=(await rootResponse.json()).operationId;
+  await vi.waitFor(async()=>expect(["failed","interrupted"]).toContain((await (await app.request(`/v1/chat/operations/${root}`)).json()).operation.status),{timeout:10000});
+  const child=await app.request(`/v1/chat/operations/${root}/tasks`,{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":"native_after_failure_child"},body:'{"q":"new explicit child"}'});
+  expect(child.status).toBe(202);const id=(await child.json()).operationId;
+  await vi.waitFor(async()=>expect((await (await app.request(`/v1/chat/operations/${id}`)).json()).operation.status).toBe("completed"),{timeout:10000});
+  expect(state.chat.mock.calls.filter(([args])=>args.query==="failed native parent")).toHaveLength(1);
+  expect(state.chat.mock.calls.filter(([args])=>args.query==="new explicit child")).toHaveLength(1);
 },20000);
 
 it.runIf(enabled)("keeps shared materialization visible after the native parent answer completes and tree cancellation",async()=>{
