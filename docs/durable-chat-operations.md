@@ -36,10 +36,25 @@ Lifecycle snapshots include terminal errors even with no remaining text.
 
 New first-party operations use native Mastra BackgroundTaskManager, native
 PostgresStore and indexed Redis PubSub/cache. Apply migrations through
-0119, configure an existing durable shared Redis instance with MASTRA_REDIS_URL
-(or the existing API_RATE_LIMIT_REDIS_URL), and supervise the dedicated executor
-only after review/authorization. Missing shared transport fails closed. Flags
-remain disabled. See [native reassessment](realtime-mastra-assessment.md).
+0119, explicitly configure a durable shared Redis instance with `MASTRA_REDIS_URL`,
+and supervise the dedicated executor only after review/authorization. There is no
+rate-limiter Redis fallback. Startup requires permission to inspect `CONFIG GET`
+and `INFO`, a writable primary, positive finite `maxmemory`, `noeviction`, healthy
+initialized AOF, `appendfsync always`, and `no-appendfsync-on-rewrite no`. Missing,
+weak or uninspectable policy fails closed with a sanitized error.
+
+The host awaits Mastra 1.81.0's native BackgroundTaskManager initialization before
+readiness or recovery. Connection and initialization have a ten-second deadline,
+followed by bounded cleanup; caller-owned PostgreSQL pools require their own
+timeouts. A failed producer startup releases its cached promise so a later request
+can retry initialization. Accepted tasks retain their zero-retry policy.
+
+These checks establish configured persistence and seven-day output retention,
+including interrupted output. Operators must independently prove persistent
+volume survival, restart recovery, capacity, disk/fsync failure handling and any
+replication/failover guarantees. Policy is checked at startup; keep it stable
+afterward. AOF does not establish volume-loss or replicated acknowledgement
+guarantees. Flags remain disabled. See [native reassessment](realtime-mastra-assessment.md).
 
 The SQL operation row is now an application binding: tenant/root/project,
 idempotency, deadline, cancellation intent and quota counters. Native storage owns
