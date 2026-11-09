@@ -260,7 +260,10 @@ it("fails closed when a batched resource sweep stalls despite healthy session ch
 it("reauthorizes an idle operation independently of output and revokes its topic", async () => {
   let allowed = true;
   const revalidate = vi.fn(async () => { if (!allowed) throw new Error("operation_forbidden"); });
-  const f = await fixture({ operations: { subscribe: async input => {
+  // This tests a denied scope, not watchdog expiry. The default 100ms fixture
+  // window can expire before the sweep on a loaded runner, correctly closing
+  // the socket instead of emitting the scoped denial asserted below.
+  const f = await fixture({ authorizationRecheckMs: 60_000, operations: { subscribe: async input => {
     await input.observer.snapshot({ text: "retained" }, 1);
     return { close: async () => {}, revalidate };
   } } });
@@ -268,10 +271,13 @@ it("reauthorizes an idle operation independently of output and revokes its topic
   subscribe(ws, "answer", { kind: "operation", operationId: RUN, after: 0 });
   await vi.waitFor(() => expect(frames.some(frame => frame.type === "snapshot")).toBe(true));
   allowed = false;
-  await vi.waitFor(() => expect(frames.some(frame => frame.code === "access_revoked")).toBe(true));
+  await vi.waitFor(() => {
+    expect(ws.readyState, "permission denial keeps the observer socket open").toBe(WebSocket.OPEN);
+    expect(frames.some(frame => frame.code === "access_revoked")).toBe(true);
+  }, { timeout: 15_000, interval: 50 });
   expect(revalidate).toHaveBeenCalled();
   expect(frames.filter(frame => frame.type === "snapshot")).toHaveLength(1);
-});
+}, 20_000);
 
 it("expires stalled operation authorization while session checks remain healthy", async () => {
   let release!: () => void;

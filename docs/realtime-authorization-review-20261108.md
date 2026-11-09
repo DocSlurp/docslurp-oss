@@ -46,3 +46,18 @@ already-aborted callers and abort-listener cleanup. The first parameterized empt
 fixture incorrectly supplied no test argument; it was corrected before the six
 cases passed. These checks do not establish full
 feature activation, executor/Redis readiness or production capacity acceptance.
+
+## CI fixture correction
+
+The full server lane on the first PR head failed the idle permission-denial
+assertion; matrix fail-fast then cancelled typecheck and both worker lanes.
+A controlled 150ms event-loop stall reproduces that exact assertion failure:
+the fixture's 100ms watchdog closes the socket before its permission sweep.
+The permission-denial case now uses a 60-second test-only watchdog window and
+explicitly requires an open socket plus `access_revoked`. The same controlled
+stall passes with that fixture. The reproduction stall was removed afterward.
+Dedicated stalled-authorization and freshness tests still verify deadline expiry;
+no production deadline, security assertion or workflow fail-fast policy changed.
+After removing the reproduction stall, the full server suite with `CI=1` passed:
+379 files passed, 24 gated files skipped; 4,326 tests passed, 142 skipped. The run
+took 325 seconds and retained the existing gate policy.
