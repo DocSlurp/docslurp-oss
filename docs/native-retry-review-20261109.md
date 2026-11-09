@@ -49,9 +49,12 @@ in [durable chat operations](durable-chat-operations.md#explicit-child-retry-att
 - Nineteen focused identity/history/policy tests passed. They include same-owner
   stale invocation fencing, duplicate/concurrent retry keys, three-attempt bounds,
   and explicit prior-history unavailability without hiding the latest answer.
-- Server TypeScript check passed after the repair set. Eight worker crash/recovery
+- Server TypeScript check and emitted JavaScript build passed after the repair set. Eight worker crash/recovery
   tests passed, with a separate JSON report confirming eight passes and zero
-  failures. Full server suite validation is pending final reconciliation.
+  failures. The full server suite passed 383 files and 4,365 tests; 24 files and
+  153 tests were gated/skipped. The native runtime and crash suites above were
+  separately enabled against isolated PostgreSQL/Redis rather than counted as
+  exercised by the default gated run.
 
 The first retry/cancel race assertion expected only native `cancelled`, but
 observed native `failed` when the application cancellation guard refused execution
