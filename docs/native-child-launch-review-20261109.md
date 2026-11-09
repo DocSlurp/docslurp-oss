@@ -73,3 +73,24 @@ must complete native acceptance. Accepted work remains independent of HTTP and
 socket observers. Default retries remain zero. Local mocks prove lifecycle and
 scope behavior, not model quality, production capacity, Redis volume/failover
 survival, browser/proxy acceptance or a canary. Activation flags remain off.
+
+## CI scanner download correction
+
+Three CI attempts failed during scanner installation on GitHub HTTP 504s, before
+either scanner ran. Add bounded fallback to the fixed public release-asset API
+for the same files, retaining versions and SHA-256 pins. No authorization header
+or token is added. A primary checksum mismatch refuses immediately; both route
+failures and fallback checksum mismatch fail closed before extraction. The
+[official API](https://docs.github.com/en/rest/releases/assets#get-a-release-asset)
+supports binary content through its octet-stream representation and redirects.
+
+Five regression cases passed. Both actual API downloads matched the existing
+hashes; a full installation with simulated primary failure and those verified
+archives ran Gitleaks 8.30.1 and TruffleHog 3.99.2 successfully. The regression
+file participates in the existing package/script test glob.
+
+Three new independent critics reviewed only the installer delta:
+`scanner_fetch_architect`, `scanner_fetch_minimalist`, and adversarial
+`scanner_fetch_security`. Each passed the focused tests and approved without
+findings. Their coverage excluded actual network/full installation; the
+coordinator supplied that evidence. Neither scan nor checksum gate was weakened.
