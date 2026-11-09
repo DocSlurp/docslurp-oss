@@ -179,7 +179,7 @@ it.runIf(enabled)("executes an explicitly retried child as a new native attempt 
   let before:any;
   await vi.waitFor(async()=>{before=await (await app.request(`/v1/chat/operations/${id}`)).json();expect(before.operation.status).toBe("failed");},{timeout:15000});
   expect(before.operation.snapshot.text).toBe("first attempt partial");
-  const retry=(body:unknown={authorizeNewAttempt:true},key="retry_ack_fixture")=>app.request(`/v1/chat/operations/${id}/retry`,{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":key},body:JSON.stringify(body)});
+  const retry=(body:unknown={authorizeNewAttempt:true,observedAttemptId:before.operation.attempt_id},key="retry_ack_fixture")=>app.request(`/v1/chat/operations/${id}/retry`,{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":key},body:JSON.stringify(body)});
   expect((await retry({authorizeNewAttempt:false})).status).toBe(409);
   expect((await retry({authorizeNewAttempt:true,q:"replacement"})).status).toBe(409);
   expect((await retry({authorizeNewAttempt:true,extra:"x".repeat(300)})).status).toBe(413);
@@ -196,7 +196,7 @@ it.runIf(enabled)("executes an explicitly retried child as a new native attempt 
     expect(current.operation.attempt_id).not.toBe(before.operation.attempt_id);
     expect(current.watermark).toBeGreaterThan(before.watermark);
     expect(current.operation.snapshot.priorAttempts).toMatchObject([{snapshot:{text:"first attempt partial"}}]);
-    expect((await retry({authorizeNewAttempt:true},"overlap_fixture")).status).toBe(409);
+    expect((await retry({authorizeNewAttempt:true,observedAttemptId:current.operation.attempt_id},"overlap_fixture")).status).toBe(409);
     expect(childCalls).toBe(2);
     const offline=new AbortController();
     const {createChatOperationProvider}=await import("../services/chat-operation-access.js");
@@ -214,6 +214,31 @@ it.runIf(enabled)("executes an explicitly retried child as a new native attempt 
     expect((await retry()).status).toBe(409);expect(childCalls).toBe(2);
   }finally{release();actor=previousActor;await restoreSession();}
 },30000);
+it.runIf(enabled)("refuses delayed consent for an older failed attempt without another execution",async()=>{
+  await restoreSession();let childCalls=0;
+  state.chat.mockReset().mockImplementation(async(args)=>{
+    if(args.query==="consent parent")return {answer:"parent",citations:[]};
+    childCalls++;throw new Error("synthetic_consent_failure");
+  });
+  const app=requestApp();const headers={"content-type":"application/json","Idempotency-Key":"consent_parent_fixture"};
+  const root=(await (await app.request("/v1/chat/operations",{method:"POST",headers,body:JSON.stringify({q:"consent parent",project})})).json()).operationId;
+  const id=(await (await app.request(`/v1/chat/operations/${root}/tasks`,{method:"POST",headers:{...headers,"Idempotency-Key":"consent_child_fixture"},body:JSON.stringify({q:"consent child"})})).json()).operationId;
+  const read=async()=>{const response=await app.request(`/v1/chat/operations/${id}`);expect(response.status).toBe(200);return response.json();};
+  let first:any;await vi.waitFor(async()=>{first=await read();expect(first.operation.status).toBe("failed");},{timeout:15000});
+  const retry=(key:string,observedAttemptId?:string)=>app.request(`/v1/chat/operations/${id}/retry`,{method:"POST",headers:{...headers,"Idempotency-Key":key},body:JSON.stringify({authorizeNewAttempt:true,observedAttemptId})});
+  expect((await retry("consent_missing_source")).status).toBe(409);
+  expect((await retry("consent_client_b",first.operation.attempt_id)).status).toBe(202);
+  let second:any;await vi.waitFor(async()=>{second=await read();expect(second.operation.attemptOrdinal).toBe(1);expect(second.operation.status).toBe("failed");},{timeout:15000});
+  // A delayed unused key from client A must not authorize client B's successor.
+  expect((await retry("consent_delayed_a",first.operation.attempt_id)).status).toBe(409);
+  expect((await retry("consent_client_b",second.operation.attempt_id)).status).toBe(409);
+  expect((await retry("consent_client_b",first.operation.attempt_id)).status).toBe(202);
+  expect(childCalls).toBe(2);
+  const host=await runtime.nativeChatRuntime();expect((await host.mastra.backgroundTaskManager!.listTasks({toolCallId:id})).total).toBe(2);
+  expect((await retry("consent_fresh_source",second.operation.attempt_id)).status).toBe(202);
+  await vi.waitFor(async()=>{const last=await read();expect(last.operation.attemptOrdinal).toBe(2);expect(last.operation.status).toBe("failed");},{timeout:15000});
+  expect(childCalls).toBe(3);expect((await host.mastra.backgroundTaskManager!.listTasks({toolCallId:id})).total).toBe(3);
+},40000);
 it.runIf(enabled)("does not turn a refused oversized first delta into missing history on a later retry",async()=>{
   await restoreSession();let calls=0;
   state.chat.mockReset().mockImplementation(async(args)=>{
@@ -226,8 +251,8 @@ it.runIf(enabled)("does not turn a refused oversized first delta into missing hi
   const host=await runtime.nativeChatRuntime();
   await vi.waitFor(async()=>expect((await host.mastra.backgroundTaskManager!.listTasks({toolCallId:id})).tasks[0]?.status).toBe("failed"),{timeout:15000});
   const failed=await app.request(`/v1/chat/operations/${id}`);expect(failed.status).toBe(200);
-  expect((await failed.json()).operation.snapshot.text).toBe("");
-  expect((await app.request(`/v1/chat/operations/${id}/retry`,{method:"POST",headers:{...headers,"Idempotency-Key":"oversized_retry_fixture"},body:'{"authorizeNewAttempt":true}'})).status).toBe(202);
+  const failedState=await failed.json();expect(failedState.operation.snapshot.text).toBe("");
+  expect((await app.request(`/v1/chat/operations/${id}/retry`,{method:"POST",headers:{...headers,"Idempotency-Key":"oversized_retry_fixture"},body:JSON.stringify({authorizeNewAttempt:true,observedAttemptId:failedState.operation.attempt_id})})).status).toBe(202);
   let current:any;await vi.waitFor(async()=>{current=await (await app.request(`/v1/chat/operations/${id}`)).json();expect(current.operation.status).toBe("completed");},{timeout:15000});
   expect(current.operation.snapshot).toMatchObject({answer:"bounded retry",priorAttempts:[{historyUnavailable:false,snapshot:{text:""}}]});
   expect(calls).toBe(2);
@@ -244,8 +269,9 @@ it.runIf(enabled)("refuses retry admission after quota, deadline, cancellation o
   const id=(await (await app.request(`/v1/chat/operations/${root}/tasks`,{method:"POST",headers:{...headers,"Idempotency-Key":"retry_guard_child"},body:JSON.stringify({q:"retry guard child"})})).json()).operationId;
   const host=await runtime.nativeChatRuntime();
   await vi.waitFor(async()=>expect((await host.mastra.backgroundTaskManager!.listTasks({toolCallId:id})).tasks[0]?.status).toBe("failed"),{timeout:15000});
+  const observedAttemptId=`${(await host.mastra.backgroundTaskManager!.listTasks({toolCallId:id})).tasks[0]!.id}:0`;
   const [originalRoot]=await sql`select output_bytes,deadline from chat_operations where id=${root}`;
-  const request=(target:Hono=app)=>target.request(`/v1/chat/operations/${id}/retry`,{method:"POST",headers:{...headers,"Idempotency-Key":"retry_guard_attempt"},body:'{"authorizeNewAttempt":true}'});
+  const request=(target:Hono=app)=>target.request(`/v1/chat/operations/${id}/retry`,{method:"POST",headers:{...headers,"Idempotency-Key":"retry_guard_attempt"},body:JSON.stringify({authorizeNewAttempt:true,observedAttemptId})});
   const denied=async()=>{expect((await request()).status).toBe(409);expect(childCalls).toBe(1);};
   await sql`update chat_operations set output_bytes=262144 where id=${id}`;await denied();
   await sql`update chat_operations set output_bytes=0 where id=${id}`;
@@ -289,10 +315,11 @@ it.runIf(enabled)("serializes retry acceptance with root cancellation and never 
   const id=(await (await app.request(`/v1/chat/operations/${root}/tasks`,{method:"POST",headers:{...headers,"Idempotency-Key":"retry_race_child"},body:JSON.stringify({q:"retry race child"})})).json()).operationId;
   const host=await runtime.nativeChatRuntime();const manager=host.mastra.backgroundTaskManager!;
   await vi.waitFor(async()=>expect((await manager.listTasks({toolCallId:id})).tasks[0]?.status).toBe("failed"),{timeout:15000});
+  const observedAttemptId=`${(await manager.listTasks({toolCallId:id})).tasks[0]!.id}:0`;
   const enqueue=manager.enqueue.bind(manager);let entered=false;let release!:()=>void;
   const gate=new Promise<void>(resolve=>{release=resolve;});
   const spy=vi.spyOn(manager,"enqueue").mockImplementation(async(...args)=>{if(args[0].toolCallId===id){entered=true;await gate;}return enqueue(...args);});
-  const retry=(key="retry_race_attempt")=>app.request(`/v1/chat/operations/${id}/retry`,{method:"POST",headers:{...headers,"Idempotency-Key":key},body:'{"authorizeNewAttempt":true}'});
+  const retry=(key="retry_race_attempt")=>app.request(`/v1/chat/operations/${id}/retry`,{method:"POST",headers:{...headers,"Idempotency-Key":key},body:JSON.stringify({authorizeNewAttempt:true,observedAttemptId})});
   try {
     const accepting=retry();await vi.waitFor(()=>expect(entered).toBe(true),{timeout:10000});
     const cancelling=app.request(`/v1/chat/operations/${root}/cancel`,{method:"POST",headers:{"content-type":"application/json"},body:'{"scope":"tree"}'});
@@ -427,7 +454,7 @@ it.runIf(enabled)("rejects child scope selectors, foreign/API-key/revoked actors
   expect((await app.request(`/v1/chat/operations/${root}/tasks`,{method:"POST",headers,body:JSON.stringify({q:"child",project})})).status).toBe(400);
   expect((await app.request(`/v1/chat/operations/${root}/tasks`,{method:"POST",headers,body:JSON.stringify({q:"x".repeat(128001)})})).status).toBe(413);
   const asActor=(value:RequestActor)=>new Hono().use("*",async(c,next)=>{c.set("requestActor",value);await next();}).route("/v1/chat/operations",routes);
-  const retryAs=(target:Hono)=>target.request(`/v1/chat/operations/${root}/retry`,{method:"POST",headers,body:'{"authorizeNewAttempt":true}'});
+  const retryAs=(target:Hono)=>target.request(`/v1/chat/operations/${root}/retry`,{method:"POST",headers,body:'{"authorizeNewAttempt":true,"observedAttemptId":"root-not-retryable:0"}'});
   const launchAs=(target:Hono)=>target.request(`/v1/chat/operations/${root}/tasks`,{method:"POST",headers,body:'{"q":"child"}'});
   expect((await launchAs(asActor({type:"apiKey",userId:actor.userId,apiKey:{keyId:"native-child-test-key",userId:actor.userId,orgId:"native-api-org",keyType:"server",allowedDomains:[],scopes:["ingest"],rateLimitRpm:null,rateLimitPpd:100,rateLimits:[],projectIds:[project]}}))).status).toBe(403);
   await sql`insert into "user"(id,name,email) values('native-child-foreign','Foreign','foreign-child@example.test') on conflict do nothing`;

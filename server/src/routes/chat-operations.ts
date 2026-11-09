@@ -40,11 +40,11 @@ export const chatOperationRoutes = new Hono()
         if(bytes>256){await reader.cancel();return c.json({error:"input_too_large"},413);}raw+=decoder.decode(value,{stream:true});}
       raw+=decoder.decode();
     }finally{reader.releaseLock();}
-    z.object({authorizeNewAttempt:z.literal(true)}).strict().parse(JSON.parse(raw));
+    const body=z.object({authorizeNewAttempt:z.literal(true),observedAttemptId:z.string().min(1).max(128)}).strict().parse(JSON.parse(raw));
     const actor=getRequestActor(c);
     const project=await authorizeChatOperation(actor,id);
     if(await projectChatDisabledBody(project.id,actor.userId))return c.json({error:"forbidden"},403);
-    const accepted=await (await nativeOperations(async()=>actor)).retry(id,c.req.header("Idempotency-Key")??"");
+    const accepted=await (await nativeOperations(async()=>actor)).retry(id,c.req.header("Idempotency-Key")??"",body.observedAttemptId);
     return c.json({operationId:accepted.operationId,rootId:accepted.rootId,status:accepted.status},202);
   })
   .get("/:id", async c => {
