@@ -1,3 +1,7 @@
+## Independent realtime operation authorization (2026-11-08)
+
+- Reauthorize operation and descendant project scopes independently of output reconciliation. Idle scope checks read only bounded identities and permissions, coalesce duplicate operation topics per socket sweep, and preserve the sweep's original freshness boundary. A stalled scope check expires the host watchdog without cancelling accepted work. Real WebSocket/database regressions cover membership revocation with stalled reconciliation, duplicate topics, slow sweeps and stalled authorization. Feature activation and production capacity gates remain open.
+
 ## Capability-gated quarantine sharding (2026-11-08)
 
 - `WORKER_SHARD_QUARANTINE` opts new runs into bounded quarantine document shards only after fleet capability verification. Recorded input preserves existing Temporal histories; legacy and adjacent stage grouping retain scan-before-parse ordering. Existing VM scans, tenant slot limits and document checkpoints remain. Real-stage negative tests cover infected/oversized files, foreign shard IDs and interrupted scan recovery; performance improvement requires deployment measurement.

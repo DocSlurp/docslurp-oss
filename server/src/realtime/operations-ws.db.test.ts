@@ -110,3 +110,27 @@ it("pushes project, suggestion and viewer changes through the production adapter
     await vi.waitFor(() => expect(frames.some(frame => frame.resource?.kind === "viewer" && frame.type === "error")).toBe(true),{timeout:3_000});
   } finally {socket.terminate();await server.close();}
 },15_000);
+
+it("revokes an idle operation when membership changes even while hub reconciliation is stalled", async () => {
+  sessionId = "idle-revocation-session";
+  await sql`insert into session(id,"userId",token,"expiresAt") values(${sessionId},'owner','idle-revocation-token',now()+interval '1 hour')`;
+  const root = await operations.launchChatOperation({ userId: "owner", orgId: "org", projectId: WS,
+    key: "idle-revocation-test", input: { q: "retained state" } });
+  const { operationHub } = await import("./operation-hub.js");
+  // Initial capture still uses the real authorized SQL provider. Subsequent hub
+  // ticks make no progress, so only the host's independent scope sweep can revoke.
+  const stalledHub = vi.spyOn(operationHub, "tick").mockResolvedValue(undefined);
+  const server = await host();
+  const view = await observe(server.url, root.id);
+  try {
+    await vi.waitFor(() => expect(view.frames.some(frame => frame.type === "snapshot")).toBe(true));
+    await sql`delete from org_memberships where org_id='org' and user_id='owner'`;
+    await vi.waitFor(() => expect(view.frames.some(frame => frame.code === "access_revoked")).toBe(true), { timeout: 5_000 });
+    const payloads = view.frames.filter(frame => frame.type === "snapshot" || frame.type === "upsert");
+    expect(payloads).toHaveLength(1);
+    expect(view.socket.readyState).toBe(WebSocket.OPEN);
+  } finally {
+    view.socket.terminate(); await server.close(); stalledHub.mockRestore();
+    await sql`insert into org_memberships(org_id,user_id,role) values('org','owner','owner') on conflict do nothing`;
+  }
+}, 10_000);

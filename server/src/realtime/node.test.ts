@@ -256,3 +256,80 @@ it("fails closed when a batched resource sweep stalls despite healthy session ch
   expect(await closed).toBe("authorization_timeout");
   release?.();
 });
+
+it("reauthorizes an idle operation independently of output and revokes its topic", async () => {
+  let allowed = true;
+  const revalidate = vi.fn(async () => { if (!allowed) throw new Error("operation_forbidden"); });
+  const f = await fixture({ operations: { subscribe: async input => {
+    await input.observer.snapshot({ text: "retained" }, 1);
+    return { close: async () => {}, revalidate };
+  } } });
+  const { ws, frames } = await connect(f.url);
+  subscribe(ws, "answer", { kind: "operation", operationId: RUN, after: 0 });
+  await vi.waitFor(() => expect(frames.some(frame => frame.type === "snapshot")).toBe(true));
+  allowed = false;
+  await vi.waitFor(() => expect(frames.some(frame => frame.code === "access_revoked")).toBe(true));
+  expect(revalidate).toHaveBeenCalled();
+  expect(frames.filter(frame => frame.type === "snapshot")).toHaveLength(1);
+});
+
+it("expires stalled operation authorization while session checks remain healthy", async () => {
+  let release!: () => void;
+  const revalidate = vi.fn(() => new Promise<void>(resolve => { release = resolve; }));
+  const f = await fixture({ operations: { subscribe: async input => {
+    await input.observer.snapshot({ text: "retained" }, 1);
+    return { close: async () => {}, revalidate };
+  } } });
+  const { ws, frames } = await connect(f.url);
+  const closed = new Promise<string>(resolve => ws.once("close", (_code, reason) => resolve(reason.toString())));
+  subscribe(ws, "answer", { kind: "operation", operationId: RUN, after: 0 });
+  await vi.waitFor(() => expect(frames.some(frame => frame.type === "snapshot")).toBe(true));
+  expect(await closed).toBe("authorization_timeout");
+  expect(revalidate).toHaveBeenCalled();
+  release?.();
+});
+
+it("coalesces duplicate operation topics into one fresh check per sweep", async () => {
+  let allowed = true;
+  const revalidate = vi.fn(async () => { if (!allowed) throw new Error("operation_forbidden"); });
+  const f = await fixture({ authorizationRecheckMs: 60_000, operations: { subscribe: async input => {
+    await input.observer.snapshot({ text: "retained" }, 1);
+    return { close: async () => {}, revalidate };
+  } } });
+  const { ws, frames } = await connect(f.url);
+  for (let index = 0; index < 10; index++) subscribe(ws, `answer-${index}`, { kind: "operation", operationId: RUN, after: index });
+  await vi.waitFor(() => expect(frames.filter(frame => frame.type === "snapshot")).toHaveLength(10));
+  await vi.waitFor(() => expect(revalidate).toHaveBeenCalled(), { timeout: 5_000 });
+  expect(revalidate).toHaveBeenCalledTimes(1);
+  allowed = false;
+  await vi.waitFor(() => expect(frames.filter(frame => frame.code === "access_revoked")).toHaveLength(10), { timeout: 5_000 });
+  expect(revalidate).toHaveBeenCalledTimes(2);
+}, 15_000);
+
+it("does not renew an early authorization decision when a slow sweep finishes", async () => {
+  const base = Date.now();
+  const clock = vi.spyOn(Date, "now").mockReturnValue(base);
+  let release!: () => void;
+  const started = new Promise<void>(resolve => {
+    release = resolve;
+  });
+  let seen!: () => void;
+  const checking = new Promise<void>(resolve => { seen = resolve; });
+  const f = await fixture({ authorizationRecheckMs: 100_000, operations: { subscribe: async input => {
+    await input.observer.snapshot({}, 1);
+    return { close: async () => {}, revalidate: async () => { seen(); await started; } };
+  } } });
+  const { ws, frames } = await connect(f.url);
+  try {
+    subscribe(ws, "answer", { kind: "operation", operationId: RUN, after: 0 });
+    await vi.waitFor(() => expect(frames.some(frame => frame.type === "snapshot")).toBe(true));
+    clock.mockReturnValue(base + 2_000);
+    await checking;
+    clock.mockReturnValue(base + 4_000);
+    release();
+    await new Promise(resolve => setImmediate(resolve));
+    const closed = new Promise<string>(resolve => ws.once("close", (_code, reason) => resolve(reason.toString())));
+    clock.mockReturnValue(base + 102_001);
+    expect(await Promise.race([closed, new Promise(resolve => setTimeout(() => resolve("watchdog_did_not_expire"), 1_500))])).toBe("authorization_timeout");
+  } finally { release(); clock.mockRestore(); }
+}, 10_000);

@@ -113,7 +113,7 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
           const operations = options.operationsForSession?.(headers, session) ?? options.operations;
           const controller = new AbortController();
           controllers.add(controller);
-          const subscriptions = new Map<string, { generation: number; resource: RealtimeResource; close(): void | Promise<void> }>();
+          const subscriptions = new Map<string, { generation: number; resource: RealtimeResource; revalidate?: () => Promise<void>; close(): void | Promise<void> }>();
           const generations = new Map<string, number>();
           let messages = 0;
           let windowStart = Date.now();
@@ -194,7 +194,7 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
               const detach = () => abort.abort();
               controller.signal.addEventListener("abort", detach, { once: true });
               let dispose: (() => void | Promise<void>) | undefined;
-              const subscription = { generation: frame.generation, resource: frame.resource, close: async () => {
+              const subscription = { generation: frame.generation, resource: frame.resource, revalidate: undefined as (() => Promise<void>) | undefined, close: async () => {
                 controller.signal.removeEventListener("abort", detach); abort.abort(); await dispose?.();
               } };
               subscriptions.set(frame.subscriptionId, subscription);
@@ -209,6 +209,7 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
                     observer: { snapshot: (data, seq) => deliverFrame("snapshot", data, seq), append: (data, seq) => deliverFrame("upsert", data, seq),
                       resync: (data, seq, code) => deliverFrame(code === "operation_unavailable" ? "error" : "resync-required", { state: data, code }, seq) } });
                   dispose = () => observer.close();
+                  subscription.revalidate = () => observer.revalidate();
                 } else dispose = await broker.subscribe(session.userId, frame.resource, Object.assign(
                   (data: unknown, revision: number) => deliverFrame("snapshot", data, revision),
                   { failed: () => close(1013, "projection_unavailable"), revoked: async () => {
@@ -233,8 +234,24 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
             if (verifying || Date.now()-resourcesVerifiedAt < Math.min(2_000,
               (options.authorizationRecheckMs ?? LIMITS.authorizationRecheckMs)/2)) return;
             verifying = true;
+            const verificationStartedAt = Date.now();
             void live().then(async valid => {
               if (!valid) return;
+              const operations = [...subscriptions].filter(([, sub]) => sub.resource.kind === "operation");
+              // Never refresh the watchdog with a session-only decision. A
+              // stalled operation scope check must expire independently of the
+              // hub and of successful checks for other subscriptions.
+              if (operations.some(([, sub]) => !sub.revalidate)) return;
+              const operationChecks = new Map<string, Promise<void>>();
+              await Promise.all(operations.map(async ([id, sub]) => {
+                // Multiple cursors/consumers of the same operation confer no
+                // additional authority and need only one fresh scope read.
+                const operationId = (sub.resource as Extract<RealtimeResource, { kind: "operation" }>).operationId;
+                let check = operationChecks.get(operationId);
+                if (!check) { check = sub.revalidate!(); operationChecks.set(operationId, check); }
+                try { await check; }
+                catch { await revokeSubscription(id, sub.generation, sub.resource, 0); }
+              }));
               // Capture generations before awaiting: a late sweep cannot revoke
               // a replacement subscription. Delivery still checks access afresh.
               const pending = [...subscriptions].filter(
@@ -248,7 +265,8 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
                 const [id, sub] = pending[index]!;
                 if (!allowed[index]) await revokeSubscription(id, sub.generation, sub.resource, 0);
               }
-              resourcesVerifiedAt = Date.now();
+              // A slow later scope must not renew an earlier decision's lease.
+              resourcesVerifiedAt = verificationStartedAt;
             }).catch(() => close(1011, "authorization_failed")).finally(() => { verifying = false; });
           }, Math.min(1_000, (options.authorizationRecheckMs ?? LIMITS.authorizationRecheckMs) / 2));
           const heartbeat = setInterval(() => {

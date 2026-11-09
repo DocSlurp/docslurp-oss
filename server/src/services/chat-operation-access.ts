@@ -3,6 +3,7 @@ import { readChatRunDependencies } from "./chat-run-dependencies.js";
 import { sql } from "../db.js";
 import { loadActorScopedProject, type RequestActor } from "../lib/request-actor.js";
 import { operationHub } from "../realtime/operation-hub.js";
+import { revalidateOperationScopes } from "../realtime/operation-authorization.js";
 import { readChatOperation, type Operation } from "./chat-operations.js";
 
 export async function authorizeChatOperation(actor: RequestActor, id: string) {
@@ -60,7 +61,8 @@ export function createChatOperationProvider(resolveActor: (userId: string) => Pr
       let cursor = input.resource.after;
       let first = true;
       let detach: (() => void) | undefined;
-      const close = async () => { closed = true; detach?.(); input.signal.removeEventListener("abort", close); };
+      const verification = new AbortController();
+      const close = async () => { closed = true; verification.abort(); detach?.(); input.signal.removeEventListener("abort", close); };
       const authorize = async (id: string) => {
         const actor = await resolveActor(input.userId);
         if (!actor || actor.userId !== input.userId) throw new Error("operation_forbidden");
@@ -91,7 +93,15 @@ export function createChatOperationProvider(resolveActor: (userId: string) => Pr
           failed: async () => { await close(); await input.observer.resync({ error: "operation_unavailable" }, cursor, "operation_unavailable"); },
         });
       } catch (error) { await close(); throw error; }
-      return { close };
+      return { close, revalidate: async () => {
+        if (closed || input.signal.aborted) throw new Error("operation_forbidden");
+        const actor = await resolveActor(input.userId);
+        if (!actor || actor.type !== "session" || actor.userId !== input.userId) throw new Error("operation_forbidden");
+        // Read identities only: no Redis output, page-ledger projection, or
+        // operation-hub dependency. Idle revocation must work if those stall.
+        await revalidateOperationScopes(actor.userId, input.resource.operationId, verification.signal);
+        if (closed || input.signal.aborted) throw new Error("operation_forbidden");
+      } };
     },
   };
 }
