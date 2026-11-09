@@ -1,6 +1,7 @@
 ## Explicit native child task launch and nested identity (2026-11-09)
 
 - Add session-only child project-chat launch through the existing native background-task owner, inheriting authorized project/organization and root deadline/retention. Return persisted nested parent IDs, including waiting intents before native acceptance. Preserve idempotency, cancellation fences, tree quotas and zero automatic retries. Local native integration covers parallel/nested work, independent-host recovery after parent completion, scope/session/input rejection, cancellation races and concurrent root output exhaustion. Activation and automatic agent delegation/retry acceptance remain open.
+- Three independent council reviews and coordinator resolutions are recorded in `docs/native-child-launch-review-20261109.md`, with full server and isolated native/SQL/crash validation.
 
 ## Native chat startup and interrupted-output retention (2026-11-08)
 

@@ -231,6 +231,9 @@ it.runIf(enabled)("rejects child scope selectors, foreign/API-key/revoked actors
   await sql`delete from org_memberships where org_id='native-api-org' and user_id=${actor.userId}`;
   expect((await launchAs(app)).status).toBe(409);
   await sql`insert into org_memberships(org_id,user_id,role) values('native-api-org',${actor.userId},'owner')`;
+  await sql`update "user" set "twoFactorEnabled"=true where id=${actor.userId}`;
+  expect((await launchAs(app)).status).toBe(409);
+  await sql`update "user" set "twoFactorEnabled"=false where id=${actor.userId}`;
   await sql`update session set "expiresAt"=now()-interval '1 second' where id=${actor.sessionId}`;
   expect((await launchAs(app)).status).toBe(409);
   await restoreSession();
@@ -319,6 +322,10 @@ it.runIf(enabled)("keeps an unaccepted child visible without executing it until 
   expect((await app.request(`/v1/chat/operations/${intent.id}?after=invalid`)).status).toBe(409);
   const host=await runtime.nativeChatRuntime();
   expect((await host.mastra.backgroundTaskManager!.listTasks({toolCallId:intent.id})).total).toBe(0);
+  const expired=await launchChatOperation({userId:actor.userId,projectId:project,orgId:"native-api-org",key:"native_expired_intent",input:{q:"expired intent",authSessionId:actor.sessionId},parentId:root,runtime:"mastra"});
+  await sql`update chat_operations set deadline=clock_timestamp()-interval '1 second' where id=${expired.id}`;
+  expect((await (await app.request(`/v1/chat/operations/${expired.id}`)).json()).operation).toMatchObject({status:"interrupted",nativeTaskId:null});
+  expect((await host.mastra.backgroundTaskManager!.listTasks({toolCallId:expired.id})).total).toBe(0);
   const retry=()=>app.request(`/v1/chat/operations/${root}/tasks`,{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":"native_unaccepted_child"},body:'{"q":"intent child"}'});
   const replies=await Promise.all([retry(),retry()]);
   expect(replies.map(r=>r.status)).toEqual([202,202]);
