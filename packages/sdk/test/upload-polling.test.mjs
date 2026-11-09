@@ -193,3 +193,39 @@ test("an unknown-size stream whose bytes were completed survives a status 429 wi
   assert.equal(calls.filter(call => call.method === "PUT").length, 1);
   assert.equal(calls.some(call => call.url.endsWith("/abort")), false);
 });
+
+for (const status of [401, 403]) {
+  test(`revoked or wrong-scope status ${status} is not retried after transfer`, async () => {
+    const api = setup(() => json({ error: { code: status === 401 ? "unauthorized" : "project_scope_forbidden" } }, status));
+    await assert.rejects(api.upload(), error => error instanceof DocSlurpApiError && error.status === status);
+    assert.equal(api.polls(), 1);
+    assertTransferredOnce(api);
+  });
+}
+
+test("HTTP-date Retry-After delays observation of the same session", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const retryAt = new Date(Date.now() + 3000).toUTCString();
+  const api = setup(count => count === 1 ? json({}, 429, { "retry-after": retryAt }) : json({ status: "completed", result }));
+  const pending = api.upload();
+  await flush();
+  t.mock.timers.tick(2999); await flush();
+  assert.equal(api.polls(), 1);
+  t.mock.timers.tick(1);
+  assert.equal((await pending).run.id, "accepted-run");
+  assertTransferredOnce(api);
+});
+
+for (const retryAfter of ["invalid-delay", "-3", "Infinity"]) {
+  test(`malformed Retry-After ${retryAfter} retains bounded polling backoff`, async t => {
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    const api = setup(count => count === 1 ? json({}, 429, { "retry-after": retryAfter }) : json({ status: "completed", result }));
+    const pending = api.upload();
+    await flush();
+    t.mock.timers.tick(249); await flush();
+    assert.equal(api.polls(), 1);
+    t.mock.timers.tick(1);
+    assert.equal((await pending).run.id, "accepted-run");
+    assertTransferredOnce(api);
+  });
+}
