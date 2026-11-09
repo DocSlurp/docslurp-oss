@@ -1,4 +1,5 @@
 import type { BackgroundTaskManager, ToolExecutor } from "@mastra/core/background-tasks";
+import type postgres from "postgres";
 import type { PubSub } from "@mastra/core/events";
 import { sql } from "../db.js";
 import { env } from "../config.js";
@@ -8,6 +9,7 @@ import { chatProject, projectChatDisabledBody } from "../services/project-chat.j
 import { withDeferredContext } from "../search/deferred/deferred-context.js";
 import { withNativeChatRunOwner } from "../services/chat-run-dependencies.js";
 import { operationOutputTopic, publishOperationOutput } from "./operation-delivery.js";
+import { executionAttempt } from "./native-attempts.js";
 
 /** Native static executor: reconstructs application policy after cross-process
  * dispatch. Native task leases, timeouts, cancellation and stale-worker recovery
@@ -21,12 +23,12 @@ export function createProjectChatExecutor(manager:BackgroundTaskManager,pubsub:P
       where id=${args.operationId} and runtime='mastra'`;
     if(!binding)throw new Error("operation_unavailable");
     const matches=await manager.listTasks({agentId:"docslurp-project-chat",toolCallId:binding.id,
-      resourceId:JSON.stringify([binding.org_id,binding.user_id]),perPage:2});
-    const task=matches.tasks[0];
-    if(matches.total!==1||!task||task.status!=="running"||task.ownerId!==manager.ownerId)throw new Error("native_execution_fence");
+      resourceId:JSON.stringify([binding.org_id,binding.user_id]),perPage:4});
+    if(matches.total!==matches.tasks.length)throw new Error("native_execution_fence");
+    const task=executionAttempt(matches.tasks,args,manager.ownerId);
     const local=new AbortController();
     const signal=options?.abortSignal ? AbortSignal.any([options.abortSignal,local.signal]) : local.signal;
-    const actor:SessionRequestActor={type:"session",userId:binding.user_id,sessionId:String(binding.input.authSessionId),
+    const actor:SessionRequestActor={type:"session",userId:binding.user_id,sessionId:String(task.args.authSessionId??binding.input.authSessionId),
       user:{id:binding.user_id,email:"",name:""}};
     const check=async()=>{
       signal.throwIfAborted();
@@ -37,7 +39,8 @@ export function createProjectChatExecutor(manager:BackgroundTaskManager,pubsub:P
         select c.id from chat_operations c join chat_operations root on root.id=c.root_id
         join docslurp_mastra.mastra_background_tasks t on t.tool_call_id=c.id
         where c.id=${binding.id} and not c.cancel_requested and not root.tree_cancel_requested
-          and c.deadline>clock_timestamp() and t.id=${task.id} and t.status='running'
+          and c.deadline>clock_timestamp() and root.deadline>clock_timestamp()
+          and c.expires_at>clock_timestamp() and root.expires_at>clock_timestamp() and t.id=${task.id} and t.status='running'
           and t."ownerId"=${manager.ownerId} and t."leaseExpiresAtZ">clock_timestamp()`;
       if(!active)throw new Error("operation_cancelled_or_expired");
       signal.throwIfAborted();
@@ -48,22 +51,37 @@ export function createProjectChatExecutor(manager:BackgroundTaskManager,pubsub:P
     const tools:unknown[]=[];
     let evidence:unknown;
     let verifiedAt=Date.now();
+    let outputMarked=task.metadata?.outputExpected===true;
+    let outputAccepted=task.metadata?.outputAccepted===true;
+    let publicationAttempted=false;
+    const lockAndFence=async(tx:postgres.TransactionSql)=>{
+      await tx`select id from chat_operations where id=${binding.root_id} for update`;
+      const [active]=await tx`
+        select c.id from chat_operations c join chat_operations root on root.id=c.root_id
+        join docslurp_mastra.mastra_background_tasks t on t.tool_call_id=c.id
+        where c.id=${binding.id} and not c.cancel_requested and not root.tree_cancel_requested
+          and c.deadline>clock_timestamp() and root.deadline>clock_timestamp()
+          and c.expires_at>clock_timestamp() and root.expires_at>clock_timestamp() and t.id=${task.id} and t.status='running'
+          and t."ownerId"=${manager.ownerId} and t."leaseExpiresAtZ">clock_timestamp()
+        for share of t`;
+      if(!active)throw new Error("operation_cancelled_or_expired");
+      signal.throwIfAborted();
+    };
     const append=(kind:"text"|"tool"|"evidence"|"result",payload:unknown)=>{
       pending=pending.then(async()=>{
         await check();
-        // Serialize policy acceptance against root cancellation. Native storage
-        // remains the owner of the task lease and output cache.
+        if(!outputMarked) {
+          // Conservative persisted marker precedes output. A storage failure
+          // cannot later masquerade as an attempt that never accepted output.
+          const storage=await manager.getStorage();
+          if(!await storage.updateTask(task.id,{metadata:{...task.metadata,outputExpected:true}},
+            {expectedStatus:"running",expectedOwnerId:manager.ownerId}))throw new Error("native_execution_fence");
+          outputMarked=true;
+        }
+        // Reserve the quota durably before touching Redis. An ACK failure after
+        // the retained append must not roll back its quota and permit free replay.
         await sql.begin(async tx=>{
-          await tx`select id from chat_operations where id=${binding.root_id} for update`;
-          const [active]=await tx`
-            select c.id from chat_operations c join chat_operations root on root.id=c.root_id
-            join docslurp_mastra.mastra_background_tasks t on t.tool_call_id=c.id
-            where c.id=${binding.id} and not c.cancel_requested and not root.tree_cancel_requested
-              and c.deadline>clock_timestamp() and t.id=${task.id} and t.status='running'
-              and t."ownerId"=${manager.ownerId} and t."leaseExpiresAtZ">clock_timestamp()
-            for share of t`;
-          if(!active)throw new Error("operation_cancelled_or_expired");
-          signal.throwIfAborted();
+          await lockAndFence(tx);
           let budgetPayload=payload;
           if(kind==="result"&&payload&&typeof payload==="object"&&"answer" in payload&&payload.answer===text) {
             const {answer:_answer,...metadata}=payload;budgetPayload=metadata;
@@ -73,11 +91,23 @@ export function createProjectChatExecutor(manager:BackgroundTaskManager,pubsub:P
           const [accepted]=await tx`update chat_operations set output_bytes=output_bytes+${bytes}
             where id=${binding.id} and output_bytes+${bytes}<=262144 and ${Number(total!.bytes)+bytes}<=524288 returning id`;
           if(!accepted)throw new Error("operation_output_limit");
+        });
+        // Recheck under the cancellation lock after the reservation commits.
+        // Reservations are conservative and never refunded on uncertain output.
+        await sql.begin(async tx=>{
+          await lockAndFence(tx);
+          publicationAttempted=true;
           await publishOperationOutput(pubsub,task.id,{kind,payload});
           if(kind==="tool")tools.push(payload);
           if(kind==="evidence")evidence=payload;
           if(kind==="text"&&payload&&typeof payload==="object"&&"text" in payload)text+=String(payload.text);
         });
+        if(!outputAccepted) {
+          const storage=await manager.getStorage();
+          if(!await storage.updateTask(task.id,{metadata:{...task.metadata,outputExpected:true,outputAccepted:true}},
+            {expectedStatus:"running",expectedOwnerId:manager.ownerId}))throw new Error("native_execution_fence");
+          outputAccepted=true;
+        }
       });
       void pending.catch(error=>local.abort(error));
       return pending;
@@ -103,6 +133,18 @@ export function createProjectChatExecutor(manager:BackgroundTaskManager,pubsub:P
       await append("result",result);
       const events=await pubsub.getHistory(operationOutputTopic(task.id));
       return {result:{...result,tools,...(evidence===undefined?{}:{evidence})},watermark:(events.at(-1)?.index ?? -1)+1};
-    } finally {clearInterval(timer);await pending.catch(()=>{});}
+    } finally {
+      clearInterval(timer);await pending.catch(()=>{});
+      if(!publicationAttempted)try {
+        // A quota/fence refusal before calling PubSub is known not to have
+        // accepted output. Do not turn that refusal into a permanent history gap.
+        const storage=await manager.getStorage();const current=await storage.getTask(task.id);
+        if(current?.metadata?.outputExpected===true&&(current.ownerId===manager.ownerId||
+          !current.ownerId&&["failed","cancelled","timed_out"].includes(current.status))) {
+          await storage.updateTask(task.id,{metadata:{...current.metadata,outputExpected:false,outputAccepted:false}},
+            {expectedStatus:current.status,expectedOwnerId:current.ownerId??null});
+        }
+      }catch{console.error("[native-chat] output_marker_cleanup_failed");}
+    }
   }};
 }

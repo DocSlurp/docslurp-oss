@@ -35,11 +35,11 @@ it("authorizes session and project before exposing a persisted native binding",a
 });
 it("records root cancellation before refusing any subsequent native acceptance",async()=>{
   const policy=createPolicy(async()=>actor);const binding=await policy.authorize(operationId);
-  const accept=vi.fn(async()=>"accepted");
+  const accept=vi.fn(async(admit:()=>Promise<void>)=>{await admit();return "accepted";});
   expect(await policy.serializeAcceptance(binding,accept)).toBe("accepted");
   await policy.recordCancellation(binding,"tree");
   await expect(policy.serializeAcceptance(binding,accept)).rejects.toThrow("operation_cancelled_or_expired");
-  expect(accept).toHaveBeenCalledTimes(1);
+  expect(accept).toHaveBeenCalledTimes(2);
 });
 it("returns persisted parent identity for nested native task summaries", async () => {
   const root=await ops.launchChatOperation({userId:actor.userId,orgId:"native-org",projectId:"00000000-0000-4000-8000-000000000319",key:"nested_policy_root",input:{q:"root"}});

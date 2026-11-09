@@ -1,3 +1,7 @@
+## Explicit native child retry attempts (2026-11-09)
+
+- Add session-authorized, idempotent retries with stable logical identity, distinct native attempts and retained prior output. Keep automatic retries disabled, preserve deadlines and cumulative quotas, fence stale invocations, and reserve output quota before publication. Independent Council findings and repairs are recorded in `docs/native-retry-review-20261109.md`. Browser controls and runtime activation remain follow-up acceptance work.
+
 ## Bounded direct-upload observation
 
 - Back off direct-session status polling and honor transient throttling within the original deadline. Once bytes are transferred, an observation failure no longer aborts accepted ingestion. Transfer failures still clean up incomplete sessions.

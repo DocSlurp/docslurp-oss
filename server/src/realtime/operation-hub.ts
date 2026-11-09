@@ -1,4 +1,5 @@
 import { nativeChatRuntime } from "../agent-runtime/runtime.js";
+import { MAX_OPERATION_ATTEMPTS } from "../agent-runtime/native-attempts.js";
 import { operationOutputTopic } from "../agent-runtime/operation-delivery.js";
 import type { authorizedChatOperationSnapshot } from "../services/chat-operation-access.js";
 import { sql } from "../db.js";
@@ -57,8 +58,8 @@ class OperationHub {
       if(rows.some(row=>row.native_tasks.length)) {
         const host=await nativeChatRuntime();
         for(const row of rows) {
-          if(row.native_tasks.length>64)throw new Error("operation_tree_limit");
-          const lengths=await Promise.all(row.native_tasks.map(id=>host.cache.listLength(`pubsub:${operationOutputTopic(id)}`)));
+          if(row.native_tasks.length>64*MAX_OPERATION_ATTEMPTS)throw new Error("operation_tree_limit");
+          const lengths=await Promise.all([...row.native_tasks].sort().map(id=>host.cache.listLength(`pubsub:${operationOutputTopic(id)}`)));
           row.version+=":"+lengths.join(",");
         }
       }
