@@ -34,7 +34,7 @@ export const WORKER_CAPABILITY_PROTOCOL = 1;
 export const WORKER_CAPABILITIES = [
   /** New workflow inputs may shard quarantine before any parsing stage. */
   "workflow.quarantine-shards",
-    "workflow.quarantine-document-threshold",
+  "workflow.quarantine-document-threshold",
   /** Runs `index` right after `embed` and keeps indexed documents `completed` through enrichment. */
   "workflow.index-before-enrich",
   /** Groups arbitrary adjacent stages into one activity (stage-groups.ts), not only LIGHT_STAGES. */
