@@ -94,11 +94,15 @@ adds explicit background jobs, not automatic subagent orchestration.
 ### Explicit child retry attempts
 
 `POST /:id/retry` requires a first-party session, a fresh `Idempotency-Key` and
-exactly `{"authorizeNewAttempt":true}` (maximum body 256 bytes). This explicitly
+`{"authorizeNewAttempt":true,"observedAttemptId":"<attempt_id>"}` (maximum body
+256 bytes). This explicitly
 authorizes another execution and its potential charges, using the original input
 and project. It only accepts failed/interrupted children, never completed,
 cancelled or active tasks or root operations. Repeating a retry key returns the
-same accepted attempt, including after a lost enqueue/HTTP acknowledgement.
+same accepted attempt, including after a lost enqueue/HTTP acknowledgement,
+only when its observed source also matches. A new key must name the latest failed
+attempt under the acceptance lock. Delayed consent from an older attempt is
+refused without starting work, even when a different client already retried it.
 The logical operation ID stays fixed. There are at most three native attempts
 per logical task, with zero automatic retries on each. Fresh session/MFA/project
 checks, cancellation, the original deadline, active-root capacity and cumulative

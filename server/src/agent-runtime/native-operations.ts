@@ -69,16 +69,24 @@ export class NativeOperations {
     return handle;
   }
   /** One authenticated mutation authorizes one new invocation, never recovery. */
-  async retry(operationId:string,key:string) {
+  async retry(operationId:string,key:string,observedAttemptId:string) {
     if(!/^[a-zA-Z0-9_-]{8,128}$/.test(key))throw new Error("invalid_retry_key");
     const binding=await this.policy.authorize(operationId);
     if(!binding.parentId)throw new Error("child_required");
     return this.policy.serializeAcceptance(binding,async(admitNewAttempt)=>{
       const attempts=operationAttempts(await this.tasks(binding));
       const existing=attempts.find(task=>task.metadata?.retryKey===key);
-      if(existing)return {operationId:binding.id,rootId:binding.rootId,taskId:existing.id,status:publicTask(existing,binding).status};
+      if(existing) {
+        // Recover only the same consent, even after subsequent attempts settle.
+        if(observedAttemptId!==`${existing.metadata?.retryOf}:0`)throw new Error("operation_attempt_changed");
+        return {operationId:binding.id,rootId:binding.rootId,taskId:existing.id,status:publicTask(existing,binding).status};
+      }
       const previous=attempts.at(-1);
       if(!previous||!["failed","timed_out"].includes(previous.status))throw new Error("operation_not_retryable");
+      // The user authorized a successor to the attempt they actually saw.
+      // Check under the acceptance lock so a delayed, unused key cannot spend
+      // on a later failed attempt created by another tab or client.
+      if(observedAttemptId!==`${previous.id}:${previous.retryCount}`)throw new Error("operation_attempt_changed");
       if(attempts.length>=MAX_OPERATION_ATTEMPTS)throw new Error("operation_attempt_limit");
       await admitNewAttempt();
       if(previous.metadata?.outputExpected===undefined) {
