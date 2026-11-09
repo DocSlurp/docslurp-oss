@@ -229,3 +229,171 @@ for (const retryAfter of ["invalid-delay", "-3", "Infinity"]) {
     assertTransferredOnce(api);
   });
 }
+
+function streamedSession({ status = () => json({ status: "completed", result }), complete = () => json({ ok: true }), clientOptions = {} } = {}) {
+  const calls = [];
+  let polls = 0;
+  const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "test-key", ...clientOptions, fetch: async (url, init = {}) => {
+    const href = String(url);
+    calls.push({ url: href, method: init.method ?? "GET", auth: new Headers(init.headers).get("authorization"), credentials: init.credentials });
+    if (href.endsWith("/direct/sessions")) return json({ sessionId: "stream", files: [{ id: "file", mode: "multipart", partSize: 4 }] });
+    if (href.endsWith("/parts/sign")) return json({ parts: [{ partNumber: 1, url: "https://storage.invalid/part" }] });
+    if (href === "https://storage.invalid/part") return new Response(null, { headers: { etag: '"part"' } });
+    if (href.endsWith("/files/complete")) return complete(init);
+    if (href.endsWith("?statusOnly=true")) return status(++polls, init);
+    if (href.endsWith("/abort")) return json({ ok: true });
+    throw new Error(`Unexpected request ${href}`);
+  } });
+  return { client, calls, polls: () => polls, upload(options) {
+    async function* source() { yield new TextEncoder().encode("abc"); }
+    return client.upload(source(), options);
+  } };
+}
+
+function assertStreamTransferredOnce(api, { aborted = false } = {}) {
+  assert.equal(api.calls.filter(call => call.url.endsWith("/direct/sessions")).length, 1);
+  assert.equal(api.calls.filter(call => call.method === "PUT").length, 1);
+  assert.equal(api.calls.filter(call => call.url.endsWith("/files/complete")).length, 1);
+  assert.equal(api.calls.filter(call => call.url.endsWith("/abort")).length, Number(aborted));
+}
+
+test("multipart storage PUT omits bearer credentials and cookies even with an API key configured", async () => {
+  const api = streamedSession();
+  assert.equal((await api.upload()).run.id, "accepted-run");
+  const put = api.calls.find(call => call.method === "PUT");
+  assert.equal(put.auth, null);
+  assert.equal(put.credentials, "omit");
+  assert.equal(api.calls.find(call => call.url.endsWith("/parts/sign")).auth, "Bearer test-key");
+  assertStreamTransferredOnce(api);
+});
+
+test("refused forced token refresh never falls back to cookies or replays accepted bytes", async () => {
+  const reason = new Error("Refresh refused");
+  let refreshes = 0;
+  const api = streamedSession({
+    status: () => json({}, 401),
+    clientOptions: { apiKey: undefined, accessToken: async ({ forceRefresh }) => {
+      if (forceRefresh) { refreshes++; throw reason; }
+      return "access-token";
+    } },
+  });
+  await assert.rejects(api.upload(), error => error === reason);
+  assert.equal(refreshes, 1);
+  assert.equal(api.polls(), 1);
+  assert.equal(api.calls.filter(call => call.method !== "PUT").every(call => call.credentials === "omit"), true);
+  assertStreamTransferredOnce(api);
+});
+
+for (const status of [401, 403]) {
+  test(`stream status ${status} after acknowledged completion preserves accepted bytes`, async () => {
+    const api = streamedSession({ status: () => json({}, status) });
+    await assert.rejects(api.upload(), error => error instanceof DocSlurpApiError && error.status === status);
+    assert.equal(api.polls(), 1);
+    assertStreamTransferredOnce(api);
+  });
+}
+
+for (const status of ["failed", "aborted", "expired"]) {
+  test(`stream terminal status ${status} after acknowledged completion stays a failure without abort`, async () => {
+    const api = streamedSession({ status: () => json({ status }) });
+    await assert.rejects(api.upload(), new RegExp(`Upload session ${status}`));
+    assertStreamTransferredOnce(api);
+  });
+}
+
+test("stream observation timeout after acknowledged completion does not abort the session", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const api = streamedSession({ status: () => json({ status: "ingesting" }) });
+  const rejected = assert.rejects(api.upload({ timeoutMs: 1000 }), error => error instanceof DocSlurpTimeoutError);
+  await flush();
+  t.mock.timers.tick(1000);
+  await rejected;
+  assertStreamTransferredOnce(api);
+});
+
+test("stream observation cancellation after acknowledged completion does not abort the session", async () => {
+  const controller = new AbortController();
+  const reason = new Error("Stop watching accepted stream");
+  const api = streamedSession({ status: () => {
+    controller.abort(reason);
+    return json({ status: "ingesting" });
+  } });
+  await assert.rejects(api.upload({ signal: controller.signal }), error => error === reason);
+  assertStreamTransferredOnce(api);
+});
+
+for (const failure of ["lost-response", "refused", "cancel-before-ack"]) {
+  test(`stream completion ${failure} retains existing unacknowledged-transfer cleanup`, async () => {
+    const controller = new AbortController();
+    const reason = new Error("Cancelled before completion acknowledgement");
+    const api = streamedSession({ complete: () => {
+      if (failure === "lost-response") throw new TypeError("Completion response lost");
+      if (failure === "cancel-before-ack") { controller.abort(reason); throw reason; }
+      return json({}, 403);
+    } });
+    await assert.rejects(api.upload({ signal: controller.signal }), error => failure === "lost-response"
+      ? error instanceof TypeError : failure === "cancel-before-ack" ? error === reason
+        : error instanceof DocSlurpApiError && error.status === 403);
+    assert.equal(api.polls(), 0);
+    assertStreamTransferredOnce(api, { aborted: true });
+  });
+}
+
+test("same idempotency key and getUploadSession recover accepted ingestion without resending bytes", async () => {
+  let sessions = 0;
+  let puts = 0;
+  let processingStarts = 0;
+  let acceptedKey;
+  const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "test-key", fetch: async (url, init = {}) => {
+    const href = String(url);
+    if (href.endsWith("/direct/sessions")) {
+      const key = new Headers(init.headers).get("idempotency-key");
+      assert.equal(key, "recover-same-session");
+      if (!acceptedKey) { sessions++; acceptedKey = key; }
+      assert.equal(key, acceptedKey);
+      return json({ sessionId: "recover", files: [{ id: "file", clientId: "0", filename: "doc.txt", mode: "single", putUrl: "https://storage.invalid/doc" }] });
+    }
+    if (href === "https://storage.invalid/doc") { puts++; processingStarts++; return new Response(null); }
+    if (href.endsWith("?statusOnly=true")) return json({}, 403);
+    if (href.endsWith("/direct/sessions/recover")) return json({ sessionId: "recover", status: "confirmed", result });
+    throw new Error(`Unexpected request ${href}`);
+  } });
+  await assert.rejects(client.upload(new Blob(["hello"]), { idempotencyKey: "recover-same-session", filename: "doc.txt" }), error => error.status === 403);
+  const recovered = await client.createUploadSession({ files: [{ filename: "doc.txt", sizeBytes: 5 }] }, { idempotencyKey: "recover-same-session" });
+  const observed = await client.getUploadSession(recovered.sessionId);
+  assert.equal(observed.result.run.id, "accepted-run");
+  assert.equal(sessions, 1);
+  assert.equal(puts, 1);
+  assert.equal(processingStarts, 1);
+});
+
+for (const descriptorCase of ["unknown", "duplicate"]) {
+  test(`a malicious ${descriptorCase} session descriptor cannot upload an unclaimed source`, async () => {
+    const puts = [];
+    let aborts = 0;
+    const descriptor = { id: "file", clientId: "0", filename: "doc.txt", mode: "single", putUrl: "https://storage.invalid/intended" };
+    const client = createDocSlurpClient({ apiUrl: "https://api.invalid", apiKey: "test-key", fetch: async (url, init = {}) => {
+      const href = String(url);
+      if (href.endsWith("/direct/sessions")) return json({ sessionId: "malicious", files: descriptorCase === "unknown"
+        ? [{ ...descriptor, clientId: "99", putUrl: "https://storage.invalid/unsafe" }]
+        : [descriptor, { ...descriptor, id: "duplicate", putUrl: "https://storage.invalid/unsafe" }] });
+      if (init.method === "PUT") { puts.push(href); return new Response(null); }
+      if (href.endsWith("/abort")) { aborts++; return json({ ok: true }); }
+      throw new Error(`Unexpected request ${href}`);
+    } });
+    await assert.rejects(client.upload(new Blob(["hello"]), { filename: "doc.txt" }), /returned a file this upload did not send/);
+    assert.deepEqual(puts, descriptorCase === "unknown" ? [] : ["https://storage.invalid/intended"]);
+    assert.equal(aborts, 1);
+  });
+}
+
+test("finite Retry-After whose milliseconds overflow to Infinity still respects the poll deadline", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const api = setup(() => json({}, 429, { "retry-after": "1e308" }));
+  const rejected = assert.rejects(api.upload({ timeoutMs: 1000 }), error => error instanceof DocSlurpTimeoutError);
+  await flush();
+  t.mock.timers.tick(999); await flush();
+  assert.equal(api.polls(), 1);
+  t.mock.timers.tick(1); await rejected;
+  assertTransferredOnce(api);
+});
