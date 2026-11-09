@@ -2,6 +2,7 @@ import { revalidateRealtimeSession } from "../realtime/session.js";
 import { sql } from "../db.js";
 import { loadActorScopedProject, type RequestActor } from "../lib/request-actor.js";
 import type { NativeOperationBinding, NativeOperationPolicy } from "./native-operations.js";
+import { CHAT_OPERATION_LIMITS } from "../services/chat-operations.js";
 
 /** Application binding policy. The chat_operations row is identity/idempotency,
  * tenant scope, cancellation intent and budget metadata; Mastra owns execution.
@@ -18,7 +19,7 @@ export function createNativeOperationPolicy(resolveActor: () => Promise<RequestA
     if (!row) throw new Error("operation_forbidden");
     const project=await loadActorScopedProject(row.project_id,actor,{refineNames:false});
     if (!project || project.orgId!==row.org_id)throw new Error("operation_forbidden");
-    return {id:row.id,rootId:row.root_id,parentId:row.parent_id,userId:row.user_id,orgId:row.org_id,projectId:row.project_id,deadline:row.deadline,outputBytes:row.output_bytes,cancelRequested:row.cancel_requested,treeCancelled:row.tree_cancel_requested};
+    return {id:row.id,rootId:row.root_id,parentId:row.parent_id,userId:row.user_id,orgId:row.org_id,projectId:row.project_id,deadline:row.deadline,outputBytes:row.output_bytes,cancelRequested:row.cancel_requested,treeCancelled:row.tree_cancel_requested,authSessionId:actor.sessionId};
   };
   return {
     authorize,
@@ -32,16 +33,36 @@ export function createNativeOperationPolicy(resolveActor: () => Promise<RequestA
       const actor=await resolveActor();
       if(actor?.type!=="session"||actor.userId!==binding.userId)throw new Error("operation_forbidden");
       return sql.begin(async tx=>{
-        const [root]=await tx`select id,tree_cancel_requested from chat_operations where id=${binding.rootId} and user_id=${binding.userId} for update`;
+        // Same owner-before-root lock order as launchChatOperation.
+        await tx`select id from "user" where id=${binding.userId} for update`;
+        const [root]=await tx`select id,tree_cancel_requested,deadline>clock_timestamp() as live from chat_operations where id=${binding.rootId} and user_id=${binding.userId}
+          and expires_at>clock_timestamp() for update`;
         if(!await revalidateRealtimeSession(actor,AbortSignal.timeout(5000),tx))throw new Error("operation_forbidden");
         const [access]=await tx`select w.id from projects w
           where w.id=${binding.projectId} and w.org_id=${binding.orgId}
             and docslurp_project_access(w.id,${actor.userId})`;
         if(!access)throw new Error("operation_forbidden");
-        const [current]=await tx`select id from chat_operations where id=${binding.id} and user_id=${binding.userId}
-          and not cancel_requested and deadline>clock_timestamp() and expires_at>clock_timestamp()`;
-        if(!root||root.tree_cancel_requested||!current)throw new Error("operation_cancelled_or_expired");
-        return work();
+        const [current]=await tx`select id,cancel_requested,deadline>clock_timestamp() as live from chat_operations where id=${binding.id} and user_id=${binding.userId}
+          and expires_at>clock_timestamp()`;
+        if(!root||!current)throw new Error("operation_unavailable");
+        const admitNewAttempt=async()=>{
+          if(root.tree_cancel_requested||current.cancel_requested||!root.live||!current.live)throw new Error("operation_cancelled_or_expired");
+          const [budget]=await tx`select coalesce(sum(output_bytes),0)::int as bytes,
+            max(output_bytes) filter(where id=${binding.id}) as own from chat_operations where root_id=${binding.rootId}`;
+          if(Number(budget!.bytes)>=CHAT_OPERATION_LIMITS.treeOutputBytes||Number(budget!.own)>=CHAT_OPERATION_LIMITS.outputBytes)throw new Error("operation_output_limit");
+          const [{count}]=await tx<{count:number}[]>`select count(*)::int as count from chat_operations root
+            where root.user_id=${binding.userId} and root.parent_id is null and root.id<>${binding.rootId} and (
+              chat_root_has_active_dependencies(root.id) or exists(select 1 from chat_operations child
+                where child.root_id=root.id and (
+                  (child.runtime='legacy' and child.status in ('queued','running','waiting')) or
+                  (child.runtime='mastra' and (
+                    exists(select 1 from docslurp_mastra.mastra_background_tasks t where t.tool_call_id=child.id and t.status in ('pending','running','suspended')) or
+                    (child.deadline>clock_timestamp() and not child.cancel_requested and not exists(
+                      select 1 from docslurp_mastra.mastra_background_tasks t where t.tool_call_id=child.id))
+                  )))))`;
+          if(count>=CHAT_OPERATION_LIMITS.activeRoots)throw new Error("active_operation_limit");
+        };
+        return work(admitNewAttempt);
       }) as ReturnType<typeof work>;
     },
     async recordCancellation(binding,scope) {

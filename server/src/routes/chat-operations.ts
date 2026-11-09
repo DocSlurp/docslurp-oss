@@ -28,6 +28,25 @@ export const chatOperationRoutes = new Hono()
   })
   .post("/", c => durableChatLaunchHandler(c))
   .post("/:id/tasks", c => durableChatLaunchHandler(c, z.uuid().parse(c.req.param("id"))))
+  .post("/:id/retry", async c => {
+    const id=z.uuid().parse(c.req.param("id"));
+    // No replacement query/model/native identity is accepted on a retry.
+    if(Number(c.req.header("content-length")??0)>256)return c.json({error:"input_too_large"},413);
+    const reader=c.req.raw.body?.getReader();
+    let raw="";let bytes=0;
+    if(reader)try {
+      const decoder=new TextDecoder();
+      for(;;){const {done,value}=await reader.read();if(done)break;bytes+=value.byteLength;
+        if(bytes>256){await reader.cancel();return c.json({error:"input_too_large"},413);}raw+=decoder.decode(value,{stream:true});}
+      raw+=decoder.decode();
+    }finally{reader.releaseLock();}
+    z.object({authorizeNewAttempt:z.literal(true)}).strict().parse(JSON.parse(raw));
+    const actor=getRequestActor(c);
+    const project=await authorizeChatOperation(actor,id);
+    if(await projectChatDisabledBody(project.id,actor.userId))return c.json({error:"forbidden"},403);
+    const accepted=await (await nativeOperations(async()=>actor)).retry(id,c.req.header("Idempotency-Key")??"");
+    return c.json({operationId:accepted.operationId,rootId:accepted.rootId,status:accepted.status},202);
+  })
   .get("/:id", async c => {
     const actor = getRequestActor(c);
     await authorizeChatOperation(actor, c.req.param("id"));

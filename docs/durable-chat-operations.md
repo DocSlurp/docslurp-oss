@@ -88,8 +88,55 @@ Native parent failure/interruption also does not itself cancel the root. A new
 explicit authorized child request is permitted until deadline/cancellation; it is
 new work, never an automatic retry or restart of that failed parent.
 Cancel-one leaves siblings running; cancel-tree fences new acceptance and covers
-accepted descendants. There is no implicit model/tool delegation or retry API;
-this endpoint adds explicit background jobs, not automatic subagent orchestration.
+accepted descendants. There is no implicit model/tool delegation; child launch
+adds explicit background jobs, not automatic subagent orchestration.
+
+### Explicit child retry attempts
+
+`POST /:id/retry` requires a first-party session, a fresh `Idempotency-Key` and
+exactly `{"authorizeNewAttempt":true}` (maximum body 256 bytes). This explicitly
+authorizes another execution and its potential charges, using the original input
+and project. It only accepts failed/interrupted children, never completed,
+cancelled or active tasks or root operations. Repeating a retry key returns the
+same accepted attempt, including after a lost enqueue/HTTP acknowledgement.
+The logical operation ID stays fixed. There are at most three native attempts
+per logical task, with zero automatic retries on each. Fresh session/MFA/project
+checks, cancellation, the original deadline, active-root capacity and cumulative
+task/tree output quotas apply to admission and execution. A fresh authorized
+session may retry work whose original session expired; observers never replace
+execution authority or initiate a retry.
+
+Native Mastra 1.81.0 `restart()` accepts pending/running tasks and `resume()`
+accepts suspended tasks. Neither retries terminal failures. Its automatic
+background retry wrapper does not apply the retry-filter/backoff fields declared
+in its types, and its stale-running recovery can requeue without advancing the
+retry counter. Consequently explicit retries enqueue a new native task with
+lineage/idempotency metadata. Native task rows/topics retain attempts; no new
+execution queue or journal is introduced. Worker loss stays interrupted.
+
+Current output remains separate from `snapshot.priorAttempts`, which retains each
+earlier attempt's status, snapshot and watermark. If earlier history is no longer
+recoverable, that reference has `historyUnavailable:true`, a null watermark and
+an explicit error; a separately retained current answer remains recoverable.
+No earlier text is invented. Attempt zero keeps existing
+native-index-plus-one cursors. Later attempts use
+`attemptOrdinal * 1_000_000 + nativeIndex + 1`, with an empty attempt's watermark
+at that range's base. The 256-KiB cumulative logical output budget bounds frame
+count below one range. Moving from an older range explicitly resyncs. Clients
+must reject an older attempt even when its snapshot says resync, and must not
+concatenate earlier partial text/citations/tools into the latest answer.
+
+Each dispatch carries an immutable server-created invocation nonce and ordinal;
+an old invocation cannot select a newer attempt on the same worker. Quota
+reservations commit before cache publication and are never refunded on an
+uncertain append or transport acknowledgement. Publication rechecks the native
+lease and cancellation under the root lock. This can conservatively consume
+output quota without visible output; it prevents retained output escaping its
+quota when Redis succeeds and a later acknowledgement fails. Persisted native
+metadata distinguishes pending publication from known accepted output. Missing
+retained accepted output fails loudly; a still-pending first append may return
+an empty running snapshot. Actual provider usage remains recorded for every real
+invocation; replay and repeated keys add no invocation or usage write.
 
 Persisted intents awaiting native acceptance remain visible as waiting summaries
 with a null native task/attempt ID, keeping the tree unsettled. Replaying the

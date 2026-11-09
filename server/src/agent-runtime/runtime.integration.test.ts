@@ -8,6 +8,8 @@ import { Hono } from "hono";
 import postgres from "postgres";
 import { afterAll,beforeAll,expect,it,vi } from "vitest";
 import type { RequestActor } from "../lib/request-actor.js";
+import { StrictCachingPubSub } from "./strict-pubsub.js";
+import { operationOutputTopic } from "./operation-delivery.js";
 const state=vi.hoisted(()=>({chat:vi.fn()}));
 const url=process.env.NATIVE_CHAT_TEST_DATABASE_URL;
 const redis=process.env.NATIVE_CHAT_TEST_REDIS_URL;
@@ -158,6 +160,212 @@ it.runIf(enabled)("explicit native cancellation aborts only the accepted task an
   expect(result.operation.status).toBe("cancelled");expect(result.operation.snapshot.text).toBe("kept partial");
   expect(result.treeSettled).toBe(true);
 },20000);
+it.runIf(enabled)("executes an explicitly retried child as a new native attempt while retaining old output and recovering a lost retry ACK",async()=>{
+  await restoreSession();
+  let childCalls=0;let release!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  state.chat.mockReset().mockImplementation(async(args)=>{
+    if(args.query==="retry parent")return {answer:"parent available",citations:[]};
+    childCalls++;
+    if(childCalls===1){await args.onTextDelta("first attempt partial");throw new Error("synthetic_transient_failure");}
+    await args.onTextDelta("second attempt ");await gate;
+    await args.onTextDelta("answer");return {answer:"second attempt answer",citations:[{documentId:"retry-document",page:2}]};
+  });
+  const app=requestApp();
+  const launch=await app.request("/v1/chat/operations",{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":"retry_parent_fixture"},body:JSON.stringify({q:"retry parent",project})});
+  expect(launch.status).toBe(202);const rootId=(await launch.json()).operationId;
+  const child=await app.request(`/v1/chat/operations/${rootId}/tasks`,{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":"retry_child_fixture"},body:JSON.stringify({q:"retry child"})});
+  expect(child.status).toBe(202);const id=(await child.json()).operationId;
+  let before:any;
+  await vi.waitFor(async()=>{before=await (await app.request(`/v1/chat/operations/${id}`)).json();expect(before.operation.status).toBe("failed");},{timeout:15000});
+  expect(before.operation.snapshot.text).toBe("first attempt partial");
+  const retry=(body:unknown={authorizeNewAttempt:true},key="retry_ack_fixture")=>app.request(`/v1/chat/operations/${id}/retry`,{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":key},body:JSON.stringify(body)});
+  expect((await retry({authorizeNewAttempt:false})).status).toBe(409);
+  expect((await retry({authorizeNewAttempt:true,q:"replacement"})).status).toBe(409);
+  expect((await retry({authorizeNewAttempt:true,extra:"x".repeat(300)})).status).toBe(413);
+  expect(childCalls).toBe(1);
+  const previousActor=actor;
+  await sql`insert into session(id,token,"userId","expiresAt","createdAt","updatedAt") values('retry-fresh-session','retry-fresh-test-token',${actor.userId},now()+interval '1 day',now(),now())`;
+  actor={...actor,sessionId:"retry-fresh-session"};
+  await sql`update session set "expiresAt"=now()-interval '1 second' where id=${previousActor.sessionId}`;
+  try {
+    expect((await retry()).status).toBe(202); // Deliberately lose this response.
+    const repeated=await retry();expect(repeated.status).toBe(202);expect((await repeated.json()).operationId).toBe(id);
+    let current:any;
+    await vi.waitFor(async()=>{current=await (await app.request(`/v1/chat/operations/${id}?after=${before.watermark}`)).json();expect(current.operation.snapshot.text).toBe("second attempt ");},{timeout:15000});
+    expect(current.operation.attempt_id).not.toBe(before.operation.attempt_id);
+    expect(current.watermark).toBeGreaterThan(before.watermark);
+    expect(current.operation.snapshot.priorAttempts).toMatchObject([{snapshot:{text:"first attempt partial"}}]);
+    expect((await retry({authorizeNewAttempt:true},"overlap_fixture")).status).toBe(409);
+    expect(childCalls).toBe(2);
+    const offline=new AbortController();
+    const {createChatOperationProvider}=await import("../services/chat-operation-access.js");
+    const watch=await createChatOperationProvider(async()=>actor).subscribe({userId:actor.userId,resource:{kind:"operation",operationId:id,after:current.watermark},signal:offline.signal,
+      observer:{snapshot:async()=>{},append:async()=>{},resync:async()=>{}}});
+    offline.abort();await watch.close();release();
+    await vi.waitFor(async()=>{current=await (await app.request(`/v1/chat/operations/${id}`)).json();expect(current.operation.status).toBe("completed");},{timeout:15000});
+    expect(current.operation.snapshot).toMatchObject({answer:"second attempt answer",citations:[{documentId:"retry-document",page:2}],priorAttempts:[{snapshot:{text:"first attempt partial"}}]});
+    const [budget]=await sql`select output_bytes from chat_operations where id=${id}`;
+    await sql`update chat_operations set output_bytes=262144 where id=${id}`;
+    expect((await retry()).status).toBe(202);expect(childCalls).toBe(2);
+    await sql`update chat_operations set output_bytes=${Number(budget!.output_bytes)} where id=${id}`;
+    const host=await runtime.nativeChatRuntime();expect((await host.mastra.backgroundTaskManager!.listTasks({toolCallId:id})).total).toBe(2);
+    await sql`update session set "expiresAt"=now()-interval '1 second' where id=${actor.sessionId}`;
+    expect((await retry()).status).toBe(409);expect(childCalls).toBe(2);
+  }finally{release();actor=previousActor;await restoreSession();}
+},30000);
+it.runIf(enabled)("does not turn a refused oversized first delta into missing history on a later retry",async()=>{
+  await restoreSession();let calls=0;
+  state.chat.mockReset().mockImplementation(async(args)=>{
+    if(args.query==="oversized parent")return {answer:"parent",citations:[]};
+    calls++;await args.onTextDelta(calls===1?"x".repeat(262145):"bounded retry");return {answer:"bounded retry",citations:[]};
+  });
+  const app=requestApp();const headers={"content-type":"application/json","Idempotency-Key":"oversized_parent_fixture"};
+  const root=(await (await app.request("/v1/chat/operations",{method:"POST",headers,body:JSON.stringify({q:"oversized parent",project})})).json()).operationId;
+  const id=(await (await app.request(`/v1/chat/operations/${root}/tasks`,{method:"POST",headers:{...headers,"Idempotency-Key":"oversized_child_fixture"},body:JSON.stringify({q:"oversized child"})})).json()).operationId;
+  const host=await runtime.nativeChatRuntime();
+  await vi.waitFor(async()=>expect((await host.mastra.backgroundTaskManager!.listTasks({toolCallId:id})).tasks[0]?.status).toBe("failed"),{timeout:15000});
+  const failed=await app.request(`/v1/chat/operations/${id}`);expect(failed.status).toBe(200);
+  expect((await failed.json()).operation.snapshot.text).toBe("");
+  expect((await app.request(`/v1/chat/operations/${id}/retry`,{method:"POST",headers:{...headers,"Idempotency-Key":"oversized_retry_fixture"},body:'{"authorizeNewAttempt":true}'})).status).toBe(202);
+  let current:any;await vi.waitFor(async()=>{current=await (await app.request(`/v1/chat/operations/${id}`)).json();expect(current.operation.status).toBe("completed");},{timeout:15000});
+  expect(current.operation.snapshot).toMatchObject({answer:"bounded retry",priorAttempts:[{historyUnavailable:false,snapshot:{text:""}}]});
+  expect(calls).toBe(2);
+},30000);
+
+it.runIf(enabled)("refuses retry admission after quota, deadline, cancellation or authorization loss without another execution",async()=>{
+  await restoreSession();let childCalls=0;
+  state.chat.mockReset().mockImplementation(async(args)=>{
+    if(args.query==="retry guard parent")return {answer:"parent",citations:[]};
+    childCalls++;throw new Error("synthetic_guard_failure");
+  });
+  const app=requestApp();const headers={"content-type":"application/json","Idempotency-Key":"retry_guard_parent"};
+  const root=(await (await app.request("/v1/chat/operations",{method:"POST",headers,body:JSON.stringify({q:"retry guard parent",project})})).json()).operationId;
+  const id=(await (await app.request(`/v1/chat/operations/${root}/tasks`,{method:"POST",headers:{...headers,"Idempotency-Key":"retry_guard_child"},body:JSON.stringify({q:"retry guard child"})})).json()).operationId;
+  const host=await runtime.nativeChatRuntime();
+  await vi.waitFor(async()=>expect((await host.mastra.backgroundTaskManager!.listTasks({toolCallId:id})).tasks[0]?.status).toBe("failed"),{timeout:15000});
+  const [originalRoot]=await sql`select output_bytes,deadline from chat_operations where id=${root}`;
+  const request=(target:Hono=app)=>target.request(`/v1/chat/operations/${id}/retry`,{method:"POST",headers:{...headers,"Idempotency-Key":"retry_guard_attempt"},body:'{"authorizeNewAttempt":true}'});
+  const denied=async()=>{expect((await request()).status).toBe(409);expect(childCalls).toBe(1);};
+  await sql`update chat_operations set output_bytes=262144 where id=${id}`;await denied();
+  await sql`update chat_operations set output_bytes=0 where id=${id}`;
+  await sql`update chat_operations set output_bytes=524288 where id=${root}`;await denied();
+  await sql`update chat_operations set output_bytes=${Number(originalRoot!.output_bytes)},deadline=clock_timestamp()-interval '1 second' where id=${root}`;await denied();
+  await sql`update chat_operations set deadline=${originalRoot!.deadline},tree_cancel_requested=true where id=${root}`;await denied();
+  await sql`update chat_operations set tree_cancel_requested=false where id=${root}`;
+  await sql`update chat_operations set cancel_requested=true where id=${id}`;await denied();
+  await sql`update chat_operations set cancel_requested=false where id=${id}`;
+  await sql`update session set "expiresAt"=now()-interval '1 second' where id=${actor.sessionId}`;await denied();await restoreSession();
+  await sql`update "user" set "twoFactorEnabled"=true where id=${actor.userId}`;await denied();
+  await sql`update "user" set "twoFactorEnabled"=false where id=${actor.userId}`;
+  await sql`delete from org_memberships where org_id='native-api-org' and user_id=${actor.userId}`;await denied();
+  await sql`insert into org_memberships(org_id,user_id,role) values('native-api-org',${actor.userId},'owner')`;
+  const asActor=(value:RequestActor)=>new Hono().use("*",async(c,next)=>{c.set("requestActor",value);await next();}).route("/v1/chat/operations",routes);
+  expect((await request(asActor({type:"apiKey",userId:actor.userId,apiKey:{keyId:"retry-key",userId:actor.userId,orgId:"native-api-org",keyType:"server",allowedDomains:[],scopes:["ingest"],rateLimitRpm:null,rateLimitPpd:100,rateLimits:[],projectIds:[project]}}))).status).toBe(403);
+  await sql`insert into "user"(id,name,email) values('retry-other-owner','Other','retry-other@example.test') on conflict do nothing`;
+  await sql`insert into session(id,token,"userId","expiresAt","createdAt","updatedAt") values('retry-other-session','retry-other-test-token','retry-other-owner',now()+interval '1 day',now(),now()) on conflict do nothing`;
+  expect((await request(asActor({type:"session",userId:"retry-other-owner",sessionId:"retry-other-session",user:{id:"retry-other-owner",name:"Other",email:"retry-other@example.test"}}))).status).toBe(409);
+  const intents:string[]=[];
+  try {
+    const {launchChatOperation}=await import("../services/chat-operations.js");
+    for(let n=0;n<8;n++)intents.push((await launchChatOperation({userId:actor.userId,projectId:project,orgId:"native-api-org",key:`retry_capacity_${n}`,input:{q:"unaccepted capacity fixture"},runtime:"mastra"})).id);
+    await denied();
+  }finally{if(intents.length)await sql`update chat_operations set cancel_requested=true,tree_cancel_requested=true,deadline=clock_timestamp()-interval '1 second' where id=any(${intents})`;}
+  expect(childCalls).toBe(1);expect((await host.mastra.backgroundTaskManager!.listTasks({toolCallId:id})).total).toBe(1);
+},40000);
+
+it.runIf(enabled)("serializes retry acceptance with root cancellation and never accepts a later new attempt",async()=>{
+  await restoreSession();let calls=0;
+  state.chat.mockReset().mockImplementation(async(args)=>{
+    if(args.query==="retry race parent")return {answer:"parent",citations:[]};
+    calls++;if(calls===1)throw new Error("synthetic_retry_race_failure");
+    await new Promise<void>((_resolve,reject)=>{
+      if(args.signal.aborted)reject(args.signal.reason);
+      else args.signal.addEventListener("abort",()=>reject(args.signal.reason),{once:true});
+    });
+  });
+  const app=requestApp();const headers={"content-type":"application/json","Idempotency-Key":"retry_race_parent"};
+  const root=(await (await app.request("/v1/chat/operations",{method:"POST",headers,body:JSON.stringify({q:"retry race parent",project})})).json()).operationId;
+  const id=(await (await app.request(`/v1/chat/operations/${root}/tasks`,{method:"POST",headers:{...headers,"Idempotency-Key":"retry_race_child"},body:JSON.stringify({q:"retry race child"})})).json()).operationId;
+  const host=await runtime.nativeChatRuntime();const manager=host.mastra.backgroundTaskManager!;
+  await vi.waitFor(async()=>expect((await manager.listTasks({toolCallId:id})).tasks[0]?.status).toBe("failed"),{timeout:15000});
+  const enqueue=manager.enqueue.bind(manager);let entered=false;let release!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  const spy=vi.spyOn(manager,"enqueue").mockImplementation(async(...args)=>{if(args[0].toolCallId===id){entered=true;await gate;}return enqueue(...args);});
+  const retry=(key="retry_race_attempt")=>app.request(`/v1/chat/operations/${id}/retry`,{method:"POST",headers:{...headers,"Idempotency-Key":key},body:'{"authorizeNewAttempt":true}'});
+  try {
+    const accepting=retry();await vi.waitFor(()=>expect(entered).toBe(true),{timeout:10000});
+    const cancelling=app.request(`/v1/chat/operations/${root}/cancel`,{method:"POST",headers:{"content-type":"application/json"},body:'{"scope":"tree"}'});
+    release();expect((await accepting).status).toBe(202);expect((await cancelling).status).toBe(200);
+    await vi.waitFor(async()=>{
+      const value=await (await app.request(`/v1/chat/operations/${id}`)).json();
+      // The native executor may refuse on durable intent before native cancel
+      // reaches it. Preserve its outcome while exposing the recorded intent.
+      expect(["cancelled","failed"]).toContain(value.operation.status);
+      expect(value.operation).toMatchObject({cancel_requested:true,tree_cancel_requested:true,canRetry:false});
+    },{timeout:10000});
+    expect((await retry()).status).toBe(202); // Recover the accepted key, without reexecution.
+    expect((await retry("retry_after_cancel")).status).toBe(409);
+    expect((await manager.listTasks({toolCallId:id})).total).toBe(2);expect(calls).toBeLessThanOrEqual(2);
+  }finally{release();spy.mockRestore();}
+},30000);
+
+it.runIf(enabled)("reconciles a full logical tree with retained retry attempts without exceeding the watcher bound",async()=>{
+  await restoreSession();state.chat.mockReset().mockResolvedValue({answer:"bounded root",citations:[]});
+  const app=requestApp();
+  const root=(await (await app.request("/v1/chat/operations",{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":"retained_attempt_tree"},body:JSON.stringify({q:"root",project})})).json()).operationId;
+  await vi.waitFor(async()=>expect((await (await app.request(`/v1/chat/operations/${root}`)).json()).operation.status).toBe("completed"),{timeout:15000});
+  const {launchChatOperation}=await import("../services/chat-operations.js");
+  const host=await runtime.nativeChatRuntime();const storage=await host.mastra.backgroundTaskManager!.getStorage();
+  for(let n=0;n<63;n++) {
+    const child=await launchChatOperation({userId:actor.userId,projectId:project,orgId:"native-api-org",key:`retained_tree_child_${n}`,input:{q:"fixture"},parentId:root,runtime:"mastra"});
+    let prior:string|undefined;
+    for(let ordinal=0;ordinal<3;ordinal++) {
+      const id=randomUUID();
+      await storage.createTask({id,status:ordinal===2?"completed":"failed",agentId:"docslurp-project-chat",runId:root,toolCallId:child.id,threadId:child.id,
+        toolName:"docslurpProjectChat",resourceId:JSON.stringify(["native-api-org",actor.userId]),args:{operationId:child.id},
+        createdAt:new Date(),retryCount:0,maxRetries:0,timeoutMs:10000,metadata:{attemptOrdinal:ordinal,outputExpected:false,...(prior?{retryOf:prior,retryKey:`fixture_${ordinal}`}:{})},result:{result:{answer:""},watermark:0}});
+      prior=id;
+    }
+  }
+  const {operationHub}=await import("../realtime/operation-hub.js");
+  const refresh=vi.fn(async()=>false);const failed=vi.fn(async()=>{});
+  const release=operationHub.watch({rootId:root,userId:actor.userId,refresh,failed});
+  try {await operationHub.tick();expect(refresh).toHaveBeenCalledTimes(1);expect(failed).not.toHaveBeenCalled();}
+  finally{release();}
+  const recovered=await app.request(`/v1/chat/operations/${root}`);expect(recovered.status).toBe(200);
+  const value=await recovered.json();expect(value.tasks).toHaveLength(64);expect(value.treeSettled).toBe(true);
+  expect(state.chat).toHaveBeenCalledTimes(1);
+},30000);
+
+it.runIf(enabled)("keeps quota charged when retained output succeeds but its publish acknowledgement fails",async()=>{
+  await restoreSession();
+  const text="accepted despite lost acknowledgement";
+  let entered=false;let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
+  state.chat.mockReset().mockImplementation(async(args)=>{await args.onTextDelta(text);return {answer:text,citations:[]};});
+  const publish=StrictCachingPubSub.prototype.publish;
+  const spy=vi.spyOn(StrictCachingPubSub.prototype,"publish").mockImplementation(async function(this:StrictCachingPubSub,topic,event,options){
+    if(topic.startsWith(operationOutputTopic(""))&&JSON.stringify(event.data).includes(text)) {
+      entered=true;await gate;await publish.call(this,topic,event,options);throw new Error("synthetic_lost_output_ack");
+    }
+    return publish.call(this,topic,event,options);
+  });
+  try {
+    const app=requestApp();
+    const response=await app.request("/v1/chat/operations",{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":"output_ack_quota_fixture"},body:JSON.stringify({q:"output acknowledgement",project})});
+    expect(response.status).toBe(202);const id=(await response.json()).operationId;
+    await vi.waitFor(()=>expect(entered).toBe(true),{timeout:15000});
+    // A persisted intent marker is not proof that a still-running append finished.
+    const pending=await app.request(`/v1/chat/operations/${id}`);expect(pending.status).toBe(200);
+    expect((await pending.json()).operation.snapshot.text).toBe("");
+    release();let recovered:any;
+    await vi.waitFor(async()=>{recovered=await (await app.request(`/v1/chat/operations/${id}`)).json();expect(recovered.operation.status).toBe("failed");},{timeout:15000});
+    expect(recovered.operation.snapshot.text).toBe(text);
+    const [row]=await sql`select output_bytes from chat_operations where id=${id}`;
+    expect(Number(row!.output_bytes)).toBeGreaterThanOrEqual(Buffer.byteLength(JSON.stringify({text})));
+    expect(state.chat).toHaveBeenCalledTimes(1);
+  }finally{release();spy.mockRestore();}
+},30000);
 
 it.runIf(enabled)("launches parallel and nested native children after the parent answer, recovering their true tree from another host", async () => {
   await restoreSession();
@@ -219,6 +427,7 @@ it.runIf(enabled)("rejects child scope selectors, foreign/API-key/revoked actors
   expect((await app.request(`/v1/chat/operations/${root}/tasks`,{method:"POST",headers,body:JSON.stringify({q:"child",project})})).status).toBe(400);
   expect((await app.request(`/v1/chat/operations/${root}/tasks`,{method:"POST",headers,body:JSON.stringify({q:"x".repeat(128001)})})).status).toBe(413);
   const asActor=(value:RequestActor)=>new Hono().use("*",async(c,next)=>{c.set("requestActor",value);await next();}).route("/v1/chat/operations",routes);
+  const retryAs=(target:Hono)=>target.request(`/v1/chat/operations/${root}/retry`,{method:"POST",headers,body:'{"authorizeNewAttempt":true}'});
   const launchAs=(target:Hono)=>target.request(`/v1/chat/operations/${root}/tasks`,{method:"POST",headers,body:'{"q":"child"}'});
   expect((await launchAs(asActor({type:"apiKey",userId:actor.userId,apiKey:{keyId:"native-child-test-key",userId:actor.userId,orgId:"native-api-org",keyType:"server",allowedDomains:[],scopes:["ingest"],rateLimitRpm:null,rateLimitPpd:100,rateLimits:[],projectIds:[project]}}))).status).toBe(403);
   await sql`insert into "user"(id,name,email) values('native-child-foreign','Foreign','foreign-child@example.test') on conflict do nothing`;
@@ -228,19 +437,25 @@ it.runIf(enabled)("rejects child scope selectors, foreign/API-key/revoked actors
   const foreign={type:"session" as const,userId:"native-child-foreign",sessionId:"native-child-foreign-session",user:{id:"native-child-foreign",name:"Foreign",email:"foreign-child@example.test"}};
   expect(await (await import("../realtime/session.js")).revalidateRealtimeSession(foreign,AbortSignal.timeout(5000))).toEqual(foreign);
   expect((await launchAs(asActor(foreign))).status).toBe(409);
+  expect((await retryAs(asActor(foreign))).status).toBe(409);
   await sql`delete from org_memberships where org_id='native-api-org' and user_id=${actor.userId}`;
   expect((await launchAs(app)).status).toBe(409);
+  expect((await retryAs(app)).status).toBe(409);
   await sql`insert into org_memberships(org_id,user_id,role) values('native-api-org',${actor.userId},'owner')`;
   await sql`update "user" set "twoFactorEnabled"=true where id=${actor.userId}`;
   expect((await launchAs(app)).status).toBe(409);
+  expect((await retryAs(app)).status).toBe(409);
   await sql`update "user" set "twoFactorEnabled"=false where id=${actor.userId}`;
   await sql`update session set "expiresAt"=now()-interval '1 second' where id=${actor.sessionId}`;
   expect((await launchAs(app)).status).toBe(409);
+  expect((await retryAs(app)).status).toBe(409);
   await restoreSession();
   await sql`update chat_operations set deadline=clock_timestamp()-interval '1 second' where id=${root}`;
   expect((await launchAs(app)).status).toBe(409);
+  expect((await retryAs(app)).status).toBe(409);
   await sql`update chat_operations set deadline=clock_timestamp()+interval '1 minute',tree_cancel_requested=true where id=${root}`;
   expect((await launchAs(app)).status).toBe(409);
+  expect((await retryAs(app)).status).toBe(409);
   expect(state.chat.mock.calls.filter(([args])=>args.query==="child")).toHaveLength(0);
   expect((await sql`select count(*)::int as count from chat_operations where parent_id=${root}`)[0].count).toBe(0);
 },25000);
