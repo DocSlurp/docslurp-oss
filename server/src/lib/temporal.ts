@@ -237,7 +237,7 @@ export function resolveWorkflowScalingInput(
   slotGate?: boolean;
   pageChildBatchSize?: number;
   activityTaskQueue?: string;
-  documentSharding?: { minDocsPerShard: number; maxShards: number; minPagesPerShard: number; quarantine?: boolean };
+  documentSharding?: { minDocsPerShard: number; maxShards: number; minPagesPerShard: number; quarantine?: boolean; quarantineMinPagesPerShard?: number };
   groupLightStages?: boolean;
   groupableStages?: string[];
   pageRangeSharding?: { stages: string[]; maxShards: number };
@@ -254,7 +254,8 @@ export function resolveWorkflowScalingInput(
   const sharding = envFlag(env.WORKER_DOCUMENT_SHARDING, true) && maxShards >= 2
     ? {
         ...(envFlag(env.WORKER_SHARD_QUARANTINE, false)
-          && capabilities?.has("workflow.quarantine-shards") ? { quarantine: true } : {}),
+          && capabilities?.has("workflow.quarantine-shards") ? { quarantine: true, ...(capabilities.has("workflow.quarantine-document-threshold")
+            ? { quarantineMinPagesPerShard: 1 } : {}) } : {}),
         minDocsPerShard: Math.max(1, Number.parseInt(env.WORKER_MIN_DOCS_PER_SHARD ?? "2", 10) || 2),
         maxShards,
         // A shard costs ~2-4 s of fixed overhead (cross-region DB round trips),

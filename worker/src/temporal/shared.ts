@@ -111,6 +111,8 @@ export interface PageRangeShardPlan {
 export interface DocumentShardingInput {
   /** Explicit new-run opt-in; absent histories keep quarantine on one activity. */
   quarantine?: boolean;
+  /** Recorded override for scans before trustworthy page counts exist. */
+  quarantineMinPagesPerShard?: number;
   /** Fewest documents worth a shard of their own. */
   minDocsPerShard: number;
   /** Most shards per stage; bounds workflow history. */

@@ -287,7 +287,9 @@ export async function documentPipeline(
       return planDocumentShards(
         picked.map((index) => initResult.documentIds[index]!),
         initResult.documentPages ? picked.map((index) => initResult.documentPages![index]!) : undefined,
-        sharding,
+        stageName === "quarantine" && sharding.quarantineMinPagesPerShard !== undefined
+          ? { ...sharding, minPagesPerShard: sharding.quarantineMinPagesPerShard }
+          : sharding,
       );
     };
     // Recorded in workflow input: runs started without it keep LIGHT_STAGES grouping (or none).

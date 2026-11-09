@@ -42,6 +42,14 @@ describe("resolveWorkflowScalingInput", () => {
       .toBeUndefined();
   });
 
+  it("records scan threshold only for upgraded workers", () => {
+    const env = { WORKER_SHARD_QUARANTINE: "true", WORKER_MIN_PAGES_PER_SHARD: "32" };
+    const old = resolveWorkflowScalingInput(env, undefined, undefined, new Set(["workflow.quarantine-shards"]));
+    expect(old.documentSharding?.quarantineMinPagesPerShard).toBeUndefined();
+    const upgraded = resolveWorkflowScalingInput(env, undefined, undefined, new Set(["workflow.quarantine-shards", "workflow.quarantine-document-threshold"]));
+    expect(upgraded.documentSharding).toMatchObject({ quarantine: true, quarantineMinPagesPerShard: 1, minPagesPerShard: 32 });
+  });
+
   it("records quarantine sharding only with explicit opt-in and a capable fleet", () => {
     const env = { WORKER_SHARD_QUARANTINE: "true" };
     const capable = new Set(["workflow.quarantine-shards" as const]);
