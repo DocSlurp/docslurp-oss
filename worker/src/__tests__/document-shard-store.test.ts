@@ -3,7 +3,7 @@ import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import type postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { parseOrgDemand, queryWorkerScalerSnapshot } from "@docslurp/shared";
+import { calculateWorkerTargetMachines, parseOrgDemand, queryWorkerScalerSnapshot } from "@docslurp/shared";
 import { Store } from "../db/store.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
@@ -134,5 +134,60 @@ describe("scaler demand for runs between activities", () => {
     expect(await demand()).toBe(1);
     expect(await demand(0)).toBe(0);
     expect(await demand(30 * 60)).toBe(2);
+  });
+});
+
+describe("autoscaler demand follows runnable page work", () => {
+  it("bootstraps a vision-enabled run without counting future pages, then scales from its queued tasks", async () => {
+    await sql`insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents)
+      values ('runnable', 'Runnable', 'runnable', 'u1', 250, 1000)`;
+    await sql`insert into projects(id, org_id, user_id, name) values ('runnable-project', 'runnable', 'u1', 'Runnable')`;
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, pages_total, lease_expires_at)
+      values ('runnable-run', 'runnable', 'u1', 'runnable-project', 'bulk-upload', 'queued', 'quarantine',
+        '{"visionFallback":true,"maxCostCents":0}', 500, now() + interval '1 minute')`;
+    const params = { pageFanout: 128, defaultOrgSlots: 2, loadtestMaxMachines: 125 };
+    const read = async () => {
+      const snapshot = await queryWorkerScalerSnapshot(sql, params);
+      return parseOrgDemand(snapshot.org_demand).filter((org) => org.orgKey === "runnable");
+    };
+    const target = async (globalSlotCap = 1000, maxMachines = 125) => calculateWorkerTargetMachines({ orgs: await read(), workerActive: 1 }, {
+      slotsPerMachine: 2, globalSlotCap, headroom: 1, maxMachines, excludedOrgKeys: new Set(),
+    });
+    const demand = async () => (await read())[0]?.demand ?? 0;
+    // One slot starts the producer even before any page task exists.
+    expect(await demand()).toBe(1);
+    expect(await target()).toBe(1);
+    await sql`update project_runs set status='processing', stage='format-detect' where id='runnable-run'`;
+    expect(await demand()).toBe(1);
+    await sql`update project_runs set stage='vision-extract' where id='runnable-run'`;
+    expect(await demand()).toBe(1);
+    await sql`insert into documents(id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status)
+      values ('runnable-doc', 'runnable', 'u1', 'runnable-project', 'runnable-run', 'document.pdf', 'application/pdf', 'raw/document', 'processing')`;
+    await sql`insert into page_work_tasks(run_id, document_id, page_number)
+      select 'runnable-run', 'runnable-doc', generate_series(1, 130)`;
+    expect(await demand()).toBe(128); // workflow fan-out bounds real task backlog
+    expect(await target()).toBe(64);
+    expect(await target(10)).toBe(5); // global slot cap
+    expect(await target(1000, 3)).toBe(3); // fleet machine cap
+    await sql`update page_work_tasks set status='processing' where run_id='runnable-run' and page_number <= 4`;
+    await sql`update page_work_tasks set status='completed' where run_id='runnable-run' and page_number > 4`;
+    expect(await demand()).toBe(4); // processing work counts, completed work does not
+    // Organization caps still apply independently of the task backlog.
+    await sql`update organizations set worker_slots=2 where id='runnable'`;
+    expect(await demand()).toBe(2);
+    for (const control of ['paused', 'cancel_requested', 'cancelled']) {
+      await sql`update project_runs set control_state=${control} where id='runnable-run'`;
+      expect(await demand()).toBe(0);
+    }
+    await sql`update project_runs set control_state=null where id='runnable-run'`;
+    await sql`update page_work_tasks set status='completed' where run_id='runnable-run'`;
+    expect(await demand()).toBe(1); // keep the stage tail runnable
+    await sql`update project_runs set shard_demand=8 where id='runnable-run'`;
+    await sql`update organizations set worker_slots=250 where id='runnable'`;
+    expect(await demand()).toBe(8); // document-shard demand is unchanged
+    for (const status of ['completed', 'failed', 'cancelled']) {
+      await sql`update project_runs set status=${status} where id='runnable-run'`;
+      expect(await demand()).toBe(0);
+    }
   });
 });

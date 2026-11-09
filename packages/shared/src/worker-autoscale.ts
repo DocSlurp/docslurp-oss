@@ -202,13 +202,9 @@ export async function queryWorkerScalerSnapshot(sql: ScalerSql, params: WorkerSc
               coalesce(o.worker_slots, ${params.defaultOrgSlots}) as slots,
               case when r.status = 'processing' then r.shard_demand else 0 end as shard_demand,
               least(${params.pageFanout}, coalesce(o.worker_slots, ${params.defaultOrgSlots}), 128) as fanout_cap,
-              greatest(
-                (select count(*) from page_work_tasks p where p.run_id = r.id and p.status in ('queued','processing')),
-                case when coalesce((r.pipeline->>'visionFallback')::boolean,false)
-                  and coalesce((r.pipeline->>'maxCostCents')::numeric,0)=0
-                  and not exists(select 1 from project_run_stage_states s where s.run_id=r.id and s.stage_name='vision-extract' and s.status='completed')
-                then r.pages_total else 0 end
-              ) as page_demand
+              -- Only persisted page work is runnable. Future vision pages must not
+              -- start a fleet while this run is still in document-stage barriers.
+              (select count(*) from page_work_tasks p where p.run_id = r.id and p.status in ('queued','processing')) as page_demand
             from project_runs r
             left join organizations o on o.id = r.org_id
             where (r.status = 'queued' and coalesce(r.control_state,'') not in ('paused','cancelled'))
