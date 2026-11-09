@@ -65,6 +65,15 @@ describe("document-sharded workflow stages", () => {
   const sharded = { runId: "run", pipeline: {} as never, slotGate: true,
     documentSharding: { minDocsPerShard: 1, maxShards: 3 }, activityTaskQueue: "acts" };
 
+  it.each([undefined, 1])("uses only a recorded quarantine threshold (%s)", async (quarantineMinPagesPerShard) => {
+    await documentPipeline({ ...sharded, documentSharding: {
+      ...sharded.documentSharding, quarantine: true, minPagesPerShard: 32,
+      ...(quarantineMinPagesPerShard === undefined ? {} : { quarantineMinPagesPerShard }),
+    }, stageOrder: ["quarantine", "extract-markdown"] });
+    expect(mocks.activities.runPipelineStageShard).toHaveBeenCalledTimes(quarantineMinPagesPerShard === undefined ? 0 : 3);
+    for (const [input] of mocks.activities.runPipelineStageShard.mock.calls) expect(input.stageName).toBe("quarantine");
+  });
+
   it.each(["none", "light", "adjacent"])("shards quarantine and reconciles before parsing with %s grouping", async (grouping) => {
     const order: string[] = [];
     mocks.activities.runPipelineStageShard.mockImplementation(async ({ stageName, documentIds }: { stageName: string; documentIds: string[] }) => {
