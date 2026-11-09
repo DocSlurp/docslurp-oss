@@ -1,3 +1,7 @@
+## Native chat startup and interrupted-output retention (2026-11-08)
+
+- Require explicit inspectable, synchronously persistent, bounded noeviction Redis; await the native Mastra initialization barrier with bounded failure cleanup. Release failed producer initialization for a later attempt without retrying accepted model work. Keep application output and its counters for seven days. Three independent council reviews and resolutions are recorded in `docs/native-chat-startup-review-20261108.md`; activation gates remain open and flags stay off.
+
 ## Independent realtime operation authorization (2026-11-08)
 
 - Reauthorize operation and descendant project scopes independently of output reconciliation. Idle scope checks read only bounded identities and permissions, coalesce duplicate operation topics per socket sweep, and preserve the sweep's original freshness boundary. A stalled scope check expires the host watchdog without cancelling accepted work. Real WebSocket/database regressions cover membership revocation with stalled reconciliation, duplicate topics, slow sweeps and stalled authorization. Feature activation and production capacity gates remain open.

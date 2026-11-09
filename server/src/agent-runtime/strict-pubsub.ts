@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { CachingPubSub, isRunLocalTopic, cachedLogTtlMs, type PubSub, type Event } from "@mastra/core/events";
 import type { MastraServerCache } from "@mastra/core/cache";
+import { operationOutputTopic } from "./operation-delivery.js";
+import { OPERATION_RETENTION_MS } from "./durability-policy.js";
 
 /** Mastra 1.80 CachingPubSub logs cache-write failure then delivers live-only.
  * A resumable first-party stream must instead stop before advertising that
@@ -13,7 +15,8 @@ export class StrictCachingPubSub extends CachingPubSub {
   override async publish(topic: string, event: Omit<Event, "id" | "createdAt">, options?: { localOnly?: boolean }) {
     if (options?.localOnly || isRunLocalTopic(topic) || !this.cacheTopic(topic)) return this.transport.publish(topic, event, options);
     const fullEvent = { ...event, id: randomUUID(), createdAt: new Date() };
-    const index = await this.durableCache.listPushIndexed(`pubsub:${topic}`, `pubsub:${topic}:counter`, fullEvent, cachedLogTtlMs(topic));
+    const ttl = topic.startsWith(operationOutputTopic("")) ? OPERATION_RETENTION_MS : cachedLogTtlMs(topic);
+    const index = await this.durableCache.listPushIndexed(`pubsub:${topic}`, `pubsub:${topic}:counter`, fullEvent, ttl);
     await this.transport.publish(topic, { ...fullEvent, index }, options);
   }
 }

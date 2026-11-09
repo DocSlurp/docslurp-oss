@@ -7,6 +7,9 @@ import { exportSchemas } from "@mastra/pg";
 import { createMockModel } from "@mastra/core/test-utils/llm-mock";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 import { createNativeChatHost } from "./native-host.js";
+import { createClient } from "redis";
+import { operationOutputTopic } from "./operation-delivery.js";
+import { OPERATION_RETENTION_MS } from "./durability-policy.js";
 let stop:()=>Promise<void>;
 let pool:Pool;
 const hosts:Array<Awaited<ReturnType<typeof createNativeChatHost>>>=[];
@@ -29,6 +32,19 @@ it.runIf(!!process.env.NATIVE_CHAT_TEST_REDIS_URL)("replays from another native 
   };
   const a=await createNativeChatHost({pool,redisUrl:url.href,namespace,worker:true,createAgent:makeAgent});hosts.push(a);
   const b=await createNativeChatHost({pool,redisUrl:url.href,namespace,worker:false,createAgent:makeAgent});hosts.push(b);
+  const policyClient = createClient({url:url.href});
+  await policyClient.connect();
+  try {
+    const outputTopic = operationOutputTopic(`retained-${randomUUID()}`);
+    await a.pubsub.publish(outputTopic,{type:"chunk",runId:"retention-check",data:{text:"retained partial"}});
+    const key=`${namespace}:cache:pubsub:${outputTopic}`;
+    const ttl=await policyClient.pTTL(key);
+    expect(ttl).toBeGreaterThan(OPERATION_RETENTION_MS-10_000);
+    expect(ttl).toBeLessThanOrEqual(OPERATION_RETENTION_MS);
+    expect(await policyClient.pTTL(`${key}:counter`)).toBeGreaterThan(OPERATION_RETENTION_MS-10_000);
+    expect(await policyClient.pTTL(`${key}:counter:bytes`)).toBeGreaterThan(OPERATION_RETENTION_MS-10_000);
+    await a.pubsub.clearTopic(outputTopic);
+  } finally {await policyClient.quit();}
   const started=await a.agent!.stream("fixture",{runId:randomUUID(),maxSteps:1});
   expect(await started.output.text).toBe("native shared result");
   const recovered=await b.agent!.observe(started.runId,{idleTimeoutMs:5000});

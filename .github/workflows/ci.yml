@@ -212,6 +212,21 @@ jobs:
           cache: 'pnpm'
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @docslurp/shared build
+      - name: Require durable Redis for native runtime tests
+        env:
+          REDIS_CONTAINER: ${{ job.services.redis.id }}
+        run: |
+          docker exec "$REDIS_CONTAINER" redis-cli CONFIG SET appendonly yes
+          docker exec "$REDIS_CONTAINER" redis-cli CONFIG SET appendfsync always
+          docker exec "$REDIS_CONTAINER" redis-cli CONFIG SET no-appendfsync-on-rewrite no
+          docker exec "$REDIS_CONTAINER" redis-cli CONFIG SET maxmemory-policy noeviction
+          docker exec "$REDIS_CONTAINER" redis-cli CONFIG SET maxmemory 268435456
+          ready=0
+          for attempt in $(seq 1 30); do
+            if docker exec "$REDIS_CONTAINER" redis-cli INFO persistence | tr -d '\r' | grep -q '^aof_rewrite_in_progress:0$'; then ready=1; break; fi
+            sleep 1
+          done
+          test "$ready" = 1
       - name: Migrate the template database
         run: DATABASE_URL="${DATABASE_TEST_ADMIN_URL}/${DATABASE_TEST_TEMPLATE}" node server/db/migrate.mjs
       - name: Run gated database and Redis tests
