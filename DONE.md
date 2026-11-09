@@ -1,3 +1,7 @@
+## Explicit native child task launch and nested identity (2026-11-09)
+
+- Add session-only child project-chat launch through the existing native background-task owner, inheriting authorized project/organization and root deadline/retention. Return persisted nested parent IDs, including waiting intents before native acceptance. Preserve idempotency, cancellation fences, tree quotas and zero automatic retries. Local native integration covers parallel/nested work, independent-host recovery after parent completion, scope/session/input rejection, cancellation races and concurrent root output exhaustion. Activation and automatic agent delegation/retry acceptance remain open.
+
 ## Native chat startup and interrupted-output retention (2026-11-08)
 
 - Require explicit inspectable, synchronously persistent, bounded noeviction Redis; await the native Mastra initialization barrier with bounded failure cleanup. Release failed producer initialization for a later attempt without retrying accepted model work. Keep application output and its counters for seven days. Three independent council reviews and resolutions are recorded in `docs/native-chat-startup-review-20261108.md`; activation gates remain open and flags stay off.

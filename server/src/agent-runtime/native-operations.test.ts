@@ -11,7 +11,8 @@ it("uses native persistent identity for lost ACK recovery and rejects revoked ob
   const host=new Mastra({storage:new InMemoryStore(),pubsub,workers:false,backgroundTasks:{enabled:true,mode:"producer",recoverStaleTasksOnStart:false}});
   let allowed=true;let tail=Promise.resolve();
   const policy:NativeOperationPolicy={
-    authorize:async id=>{if(!allowed||id!=="op")throw new Error("forbidden");return {id,rootId:id,userId:"u",orgId:"o",projectId:"w",deadline:new Date(Date.now()+60000)};},
+    authorize:async id=>{if(!allowed||id!=="op")throw new Error("forbidden");return {id,rootId:id,parentId:null,userId:"u",orgId:"o",projectId:"w",deadline:new Date(Date.now()+60000),cancelRequested:false,treeCancelled:false};},
+    listTree:async()=>["op"],
     serializeAcceptance:async(_binding,work)=>{const preceding=tail;let release!:()=>void;tail=new Promise(resolve=>{release=resolve;});await preceding;try{return await work();}finally{release();}},
     recordCancellation:async()=>{},
   };

@@ -28,11 +28,11 @@ export async function launchChatOperation(args: { userId: string; projectId: str
     const id = randomUUID();
     let rootId: string = id;
     if (args.parentId) {
-      const [parent] = await tx<Operation[]>`select * from chat_operations where id=${args.parentId} and user_id=${args.userId} and project_id=${args.projectId} and org_id=${args.orgId}`;
+      const [parent] = await tx<Operation[]>`select * from chat_operations where id=${args.parentId} and user_id=${args.userId} and project_id=${args.projectId} and org_id=${args.orgId} and expires_at>clock_timestamp()`;
       if (!parent) throw new OperationConflict("Parent unavailable");
-      const [root] = await tx<Operation[]>`select * from chat_operations where id=${parent.root_id} for update`;
+      const [root] = await tx<(Operation & {launchable:boolean})[]>`select *, deadline>clock_timestamp() and expires_at>clock_timestamp() as launchable from chat_operations where id=${parent.root_id} for update`;
       const [currentParent] = await tx<Operation[]>`select * from chat_operations where id=${parent.id}`;
-      if (!root || root.tree_cancel_requested || currentParent!.cancel_requested || currentParent!.status === "interrupted") throw new OperationConflict("Tree cancelled or interrupted");
+      if (!root || !root.launchable || root.runtime !== (args.runtime ?? "legacy") || parent.runtime !== (args.runtime ?? "legacy") || root.tree_cancel_requested || currentParent!.cancel_requested || currentParent!.status === "interrupted") throw new OperationConflict("Tree cancelled, interrupted, expired or incompatible");
       const [{ count }] = await tx<{ count: number }[]>`select ((select count(*) from chat_operations where root_id=${root.id}) +
         (select count(*) from chat_run_dependencies d join chat_operations c on c.id=d.operation_id where c.root_id=${root.id}))::int as count`;
       if (count >= CHAT_OPERATION_LIMITS.tasks) throw new OperationConflict("Task tree limit");

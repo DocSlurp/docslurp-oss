@@ -6,6 +6,7 @@ import { getRequestActor, loadActorScopedProject, resolveActorProjectId } from "
 import { authorizedChatOperationSnapshot, authorizeChatOperation } from "../services/chat-operation-access.js";
 import { cancelChatOperation, launchChatOperation, readChatOperation } from "../services/chat-operations.js";
 import { projectChatDisabledBody } from "../services/project-chat.js";
+import { revalidateRealtimeSession } from "../realtime/session.js";
 
 const launchSchema = z.object({ q: z.string().trim().min(1).max(64_000), project: z.string().max(128).optional(), sessionId: z.string().max(128).optional(), model: z.string().max(128).optional() }).strict();
 /** Session-only, opt-in route. Legacy API-key chat retains its existing contract. */
@@ -25,7 +26,8 @@ export const chatOperationRoutes = new Hono()
     }
     return c.json({operations});
   })
-  .post("/", durableChatLaunchHandler)
+  .post("/", c => durableChatLaunchHandler(c))
+  .post("/:id/tasks", c => durableChatLaunchHandler(c, z.uuid().parse(c.req.param("id"))))
   .get("/:id", async c => {
     const actor = getRequestActor(c);
     await authorizeChatOperation(actor, c.req.param("id"));
@@ -41,7 +43,7 @@ export const chatOperationRoutes = new Hono()
     return c.json({ accepted: true });
   });
 
-export async function durableChatLaunchHandler(c: Context) {
+export async function durableChatLaunchHandler(c: Context, parentId?: string) {
   if (Number(c.req.header("content-length") ?? 0) > 128_000) return c.json({ error: "input_too_large" }, 413);
   const reader = c.req.raw.body?.getReader();
   const chunks: Uint8Array[] = [];
@@ -61,11 +63,16 @@ export async function durableChatLaunchHandler(c: Context) {
   const body = launchSchema.parse(JSON.parse(raw));
   const actor = getRequestActor(c);
   if (actor.type !== "session") return c.json({ error: "forbidden" }, 403);
-  const id = await resolveActorProjectId(actor, body.project);
-  const project = await loadActorScopedProject(id, actor);
+  if (!await revalidateRealtimeSession(actor, AbortSignal.timeout(5000))) throw new Error("operation_forbidden");
+  // A child inherits its authorized parent's project and organization. Request
+  // selectors never redirect accepted work into a different task tree scope.
+  if (parentId && body.project !== undefined) return c.json({ error: "project_inherited" }, 400);
+  const parentProject = parentId ? await authorizeChatOperation(actor, parentId) : undefined;
+  const id = parentProject?.id ?? await resolveActorProjectId(actor, body.project);
+  const project = parentProject ?? await loadActorScopedProject(id, actor);
   if (!project?.orgId || await projectChatDisabledBody(id, actor.userId)) return c.json({ error: "forbidden" }, 403);
   const native=await nativeOperations(async()=>actor);
-  const task = await launchChatOperation({ userId: actor.userId, projectId: id, orgId: project.orgId, key: c.req.header("Idempotency-Key") ?? "", input: { ...body, authSessionId: actor.sessionId }, runtime:"mastra" });
+  const task = await launchChatOperation({ userId: actor.userId, projectId: id, orgId: project.orgId, key: c.req.header("Idempotency-Key") ?? "", input: { ...body, authSessionId: actor.sessionId }, parentId, runtime:"mastra" });
   const accepted=await native.launch(task.id);
   return c.json({operationId:accepted.operationId,rootId:accepted.rootId,status:accepted.status},202);
 }
