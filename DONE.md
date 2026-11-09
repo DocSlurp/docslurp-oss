@@ -1,3 +1,7 @@
+## Bounded direct-upload observation
+
+- Back off direct-session status polling and honor transient throttling within the original deadline. Once bytes are transferred, an observation failure no longer aborts accepted ingestion. Transfer failures still clean up incomplete sessions.
+
 ## Bounded stage telemetry flush (2026-11-09)
 
 - Apply the existing five-second telemetry deadline to metric force-flush operations so a stalled exporter cannot indefinitely delay stage completion. Regression exercises the real SDK reader with a non-settling exporter.
