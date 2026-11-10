@@ -130,9 +130,9 @@ it.runIf(enabled)("runs once under native ownership, recovers a lost HTTP ACK an
     } finally {socket.terminate();await adapter.close();if(mounted)await mounted.drain();else await new Promise<void>(resolve=>server.close(()=>resolve()));}
 
     const original=actor;actor={...actor,userId:"foreign"};
-    expect((await app.request(`/v1/chat/operations/${operationId}`)).status).toBe(409);actor=original;
+    expect((await app.request(`/v1/chat/operations/${operationId}`)).status).toBe(403);actor=original;
     await sql`delete from session where id=${actor.sessionId}`;
-    expect((await app.request(`/v1/chat/operations/${operationId}`)).status).toBe(409);
+    expect((await app.request(`/v1/chat/operations/${operationId}`)).status).toBe(403);
   } finally {release();}
 },40000);
 
@@ -211,7 +211,7 @@ it.runIf(enabled)("executes an explicitly retried child as a new native attempt 
     await sql`update chat_operations set output_bytes=${Number(budget!.output_bytes)} where id=${id}`;
     const host=await runtime.nativeChatRuntime();expect((await host.mastra.backgroundTaskManager!.listTasks({toolCallId:id})).total).toBe(2);
     await sql`update session set "expiresAt"=now()-interval '1 second' where id=${actor.sessionId}`;
-    expect((await retry()).status).toBe(409);expect(childCalls).toBe(2);
+    expect((await retry()).status).toBe(403);expect(childCalls).toBe(2);
   }finally{release();actor=previousActor;await restoreSession();}
 },30000);
 it.runIf(enabled)("refuses delayed consent for an older failed attempt without another execution",async()=>{
@@ -272,7 +272,7 @@ it.runIf(enabled)("refuses retry admission after quota, deadline, cancellation o
   const observedAttemptId=`${(await host.mastra.backgroundTaskManager!.listTasks({toolCallId:id})).tasks[0]!.id}:0`;
   const [originalRoot]=await sql`select output_bytes,deadline from chat_operations where id=${root}`;
   const request=(target:Hono=app)=>target.request(`/v1/chat/operations/${id}/retry`,{method:"POST",headers:{...headers,"Idempotency-Key":"retry_guard_attempt"},body:JSON.stringify({authorizeNewAttempt:true,observedAttemptId})});
-  const denied=async()=>{expect((await request()).status).toBe(409);expect(childCalls).toBe(1);};
+  const denied=async(status=409)=>{const response=await request();expect(response.status).toBe(status);if(status===403)expect(await response.json()).toEqual({error:"forbidden"});expect(childCalls).toBe(1);};
   await sql`update chat_operations set output_bytes=262144 where id=${id}`;await denied();
   await sql`update chat_operations set output_bytes=0 where id=${id}`;
   await sql`update chat_operations set output_bytes=524288 where id=${root}`;await denied();
@@ -281,16 +281,16 @@ it.runIf(enabled)("refuses retry admission after quota, deadline, cancellation o
   await sql`update chat_operations set tree_cancel_requested=false where id=${root}`;
   await sql`update chat_operations set cancel_requested=true where id=${id}`;await denied();
   await sql`update chat_operations set cancel_requested=false where id=${id}`;
-  await sql`update session set "expiresAt"=now()-interval '1 second' where id=${actor.sessionId}`;await denied();await restoreSession();
-  await sql`update "user" set "twoFactorEnabled"=true where id=${actor.userId}`;await denied();
+  await sql`update session set "expiresAt"=now()-interval '1 second' where id=${actor.sessionId}`;await denied(403);await restoreSession();
+  await sql`update "user" set "twoFactorEnabled"=true where id=${actor.userId}`;await denied(403);
   await sql`update "user" set "twoFactorEnabled"=false where id=${actor.userId}`;
-  await sql`delete from org_memberships where org_id='native-api-org' and user_id=${actor.userId}`;await denied();
+  await sql`delete from org_memberships where org_id='native-api-org' and user_id=${actor.userId}`;await denied(403);
   await sql`insert into org_memberships(org_id,user_id,role) values('native-api-org',${actor.userId},'owner')`;
   const asActor=(value:RequestActor)=>new Hono().use("*",async(c,next)=>{c.set("requestActor",value);await next();}).route("/v1/chat/operations",routes);
   expect((await request(asActor({type:"apiKey",userId:actor.userId,apiKey:{keyId:"retry-key",userId:actor.userId,orgId:"native-api-org",keyType:"server",allowedDomains:[],scopes:["ingest"],rateLimitRpm:null,rateLimitPpd:100,rateLimits:[],projectIds:[project]}}))).status).toBe(403);
   await sql`insert into "user"(id,name,email) values('retry-other-owner','Other','retry-other@example.test') on conflict do nothing`;
   await sql`insert into session(id,token,"userId","expiresAt","createdAt","updatedAt") values('retry-other-session','retry-other-test-token','retry-other-owner',now()+interval '1 day',now(),now()) on conflict do nothing`;
-  expect((await request(asActor({type:"session",userId:"retry-other-owner",sessionId:"retry-other-session",user:{id:"retry-other-owner",name:"Other",email:"retry-other@example.test"}}))).status).toBe(409);
+  expect((await request(asActor({type:"session",userId:"retry-other-owner",sessionId:"retry-other-session",user:{id:"retry-other-owner",name:"Other",email:"retry-other@example.test"}}))).status).toBe(403);
   const intents:string[]=[];
   try {
     const {launchChatOperation}=await import("../services/chat-operations.js");
@@ -463,19 +463,19 @@ it.runIf(enabled)("rejects child scope selectors, foreign/API-key/revoked actors
   await sql`insert into org_memberships(org_id,user_id,role) values('native-child-foreign-org','native-child-foreign','owner') on conflict do nothing`;
   const foreign={type:"session" as const,userId:"native-child-foreign",sessionId:"native-child-foreign-session",user:{id:"native-child-foreign",name:"Foreign",email:"foreign-child@example.test"}};
   expect(await (await import("../realtime/session.js")).revalidateRealtimeSession(foreign,AbortSignal.timeout(5000))).toEqual(foreign);
-  expect((await launchAs(asActor(foreign))).status).toBe(409);
-  expect((await retryAs(asActor(foreign))).status).toBe(409);
+  expect((await launchAs(asActor(foreign))).status).toBe(403);
+  expect((await retryAs(asActor(foreign))).status).toBe(403);
   await sql`delete from org_memberships where org_id='native-api-org' and user_id=${actor.userId}`;
-  expect((await launchAs(app)).status).toBe(409);
-  expect((await retryAs(app)).status).toBe(409);
+  expect((await launchAs(app)).status).toBe(403);
+  expect((await retryAs(app)).status).toBe(403);
   await sql`insert into org_memberships(org_id,user_id,role) values('native-api-org',${actor.userId},'owner')`;
   await sql`update "user" set "twoFactorEnabled"=true where id=${actor.userId}`;
-  expect((await launchAs(app)).status).toBe(409);
-  expect((await retryAs(app)).status).toBe(409);
+  expect((await launchAs(app)).status).toBe(403);
+  expect((await retryAs(app)).status).toBe(403);
   await sql`update "user" set "twoFactorEnabled"=false where id=${actor.userId}`;
   await sql`update session set "expiresAt"=now()-interval '1 second' where id=${actor.sessionId}`;
-  expect((await launchAs(app)).status).toBe(409);
-  expect((await retryAs(app)).status).toBe(409);
+  expect((await launchAs(app)).status).toBe(403);
+  expect((await retryAs(app)).status).toBe(403);
   await restoreSession();
   await sql`update chat_operations set deadline=clock_timestamp()-interval '1 second' where id=${root}`;
   expect((await launchAs(app)).status).toBe(409);

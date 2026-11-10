@@ -1,3 +1,7 @@
+## Organization-scoped realtime canary admission (2026-11-10)
+
+- Add a bounded, fail-closed organization allowlist to authenticated socket/resource delivery and new native launch, child and retry admission. Preserve existing session/MFA/project policy, accepted task execution and authorized HTTP recovery/Stop. Fresh membership, malformed config, foreign scopes, revoked sessions and oversized admission regressions pass. Review: `docs/realtime-canary-review-20261110.md`.
+
 ## Exact page-image readiness observation (2026-11-09)
 
 - Add a bounded session-authorized page/run/quality readiness resource to the existing dashboard socket. Publish no content or URLs and preserve the existing render workflow, isolated execution, HTTP initiation and on-demand artifact fetch. Commit/rollback, tenant, withheld-artifact and protocol regressions pass. Review and client repair notes: `docs/page-image-observation.md`. Production activation remains separate.

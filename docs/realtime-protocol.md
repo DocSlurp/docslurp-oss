@@ -306,3 +306,23 @@ seconds, with at most one dedicated connection (closed after one idle second),
 a 500ms acquisition deadline, 1s statement timeout and 1.5s client query timeout.
 It never runs per observer, per read or per event. Maintenance exports query,
 folded-row and failure counters; include this additional load in capacity gates.
+
+### Organization canary
+
+Optionally set `REALTIME_CANARY_ORG_IDS` to 1–16 comma-separated organization
+UUIDs on the API. Existing global flags still apply. An omitted value preserves
+the global rollout contract; an empty, malformed or oversized value fails closed
+and is rejected when the first-party host attaches. No wildcard is supported.
+
+Upgrade and ongoing socket validation require fresh membership in a listed,
+undeleted organization. Dashboard subscriptions and operation trees must belong
+to listed organizations. New native launch, child launch and retry admission also
+require membership in their authorized project's listed organization. The cohort
+is an additional restriction, never a replacement for session, MFA, project,
+owner, deadline or billing checks. It does not enable API-key socket access.
+
+Accepted task execution retains its existing policy after cohort changes.
+Authorized HTTP discovery, recovery and Stop remain available while the durable
+feature is enabled, so shrinking the canary cannot strand an accepted task.
+Browser hosts should combine their build flags with an explicit server-rendered
+eligibility marker; the marker grants no server authority.

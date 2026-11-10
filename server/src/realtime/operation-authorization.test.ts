@@ -38,3 +38,12 @@ it("releases the abort listener after a successful fresh permission batch", asyn
   controller.abort();
   expect(cancel).not.toHaveBeenCalled();
 });
+
+it("refuses an authorized task tree containing an organization outside the cohort", async () => {
+  const org = "00000000-0000-4000-8000-000000000001";
+  vi.stubEnv("REALTIME_CANARY_ORG_IDS", org);
+  const query = Object.assign(Promise.resolve([{permitted:true,org_id:org},{permitted:true,org_id:"foreign"}]), {cancel:vi.fn()});
+  try {
+    await expect(revalidateOperationScopes("owner","operation",new AbortController().signal,vi.fn(()=>query) as unknown as postgres.Sql)).rejects.toThrow("operation_forbidden");
+  } finally { vi.unstubAllEnvs(); }
+});
