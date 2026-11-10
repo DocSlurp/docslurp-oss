@@ -1,3 +1,7 @@
+## Exact page-image readiness observation (2026-11-09)
+
+- Add a bounded session-authorized page/run/quality readiness resource to the existing dashboard socket. Publish no content or URLs and preserve the existing render workflow, isolated execution, HTTP initiation and on-demand artifact fetch. Commit/rollback, tenant, withheld-artifact and protocol regressions pass. Review and client repair notes: `docs/page-image-observation.md`. Production activation remains separate.
+
 ## Explicit native child retry attempts (2026-11-09)
 
 - Add session-authorized, idempotent retries with stable logical identity, distinct native attempts and retained prior output. Keep automatic retries disabled, preserve deadlines and cumulative quotas, fence stale invocations, and reserve output quota before publication. Independent Council findings and repairs are recorded in `docs/native-retry-review-20261109.md`. Browser controls and runtime activation remain follow-up acceptance work.

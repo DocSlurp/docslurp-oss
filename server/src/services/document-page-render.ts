@@ -17,6 +17,7 @@ export async function requestDocumentPageRender(documentId: string, pageNumber: 
     const access = await getProjectAccess(doc.projectId, userId);
     if (!access || !canEditProject(access, userId)) return { status: "missing" as const };
   }
+  const observation=doc.runId?{kind:"page-image" as const,documentId:doc.id,runId:doc.runId,pageNumber,quality}:undefined;
   const dpi = pageRenderDpi(quality);
   const capabilities = pageRenderCapabilities();
   const artifact = viewer.artifacts.find(item => item.slot === pageRenderSlot(documentId, pageNumber, quality, dpi));
@@ -24,12 +25,12 @@ export async function requestDocumentPageRender(documentId: string, pageNumber: 
     const legacy = viewer.artifacts.find(item => item.slot === `${documentId}:page-${pageNumber}` || item.slot === `${documentId}:raster-v2-reader-page-${pageNumber}`);
     // Reusing already-authorized pixels is cheaper than a needless downgrade.
     // Their actual DPI is unknown; do not label them as 120 DPI.
-    if (legacy) return { status: "ready" as const, capabilities, artifact: { ...legacy, slot: `${documentId}:page-${pageNumber}` } };
+    if (legacy) return { status: "ready" as const, capabilities, observation, artifact: { ...legacy, slot: `${documentId}:page-${pageNumber}` } };
   }
-  if (artifact) return { status: "ready" as const, dpi, capabilities, artifact: { ...artifact, slot: `${documentId}:page-${pageNumber}` } };
+  if (artifact) return { status: "ready" as const, dpi, capabilities, observation, artifact: { ...artifact, slot: `${documentId}:page-${pageNumber}` } };
   // Withheld sources may never be recreated as unredacted page images.
   if (doc.mimeType !== "application/pdf" || doc.status !== "completed" || !doc.runId || !viewer.source?.url) return { status: "unavailable" as const };
-  if (!start) return { status: "pending" as const, dpi, capabilities };
+  if (!start) return { status: "pending" as const, dpi, capabilities, observation };
   await assertCanSpend(doc.orgId, doc.projectId, { kind: "interactive" });
   const admitted = await sql.begin(async tx => {
     await tx`select pg_advisory_xact_lock(hashtext(${`page-render:${doc.orgId}`}))`;
@@ -45,5 +46,5 @@ export async function requestDocumentPageRender(documentId: string, pageNumber: 
   });
   if (!admitted) return { status: "busy" as const };
   await startPageRenderWorkflow({ documentId: doc.id, runId: doc.runId, pageNumber, quality, dpi });
-  return { status: "pending" as const, dpi, capabilities };
+  return { status: "pending" as const, dpi, capabilities, observation };
 }
