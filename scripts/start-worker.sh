@@ -26,6 +26,8 @@ CLAMAV_LOG_DIR="${DOCSLURP_CLAMAV_LOG_DIR:-/var/log/clamav}"
 CLAMAV_CLAMD_CONF="${DOCSLURP_CLAMAV_CLAMD_CONF:-/etc/clamav/clamd.conf}"
 CLAMAV_FRESHCLAM_CONF="${DOCSLURP_CLAMAV_FRESHCLAM_CONF:-/etc/clamav/freshclam.conf}"
 CLAMD_PID=""
+FRESHCLAM_PID=""
+WORKER_PID=""
 CLAMD_BIN="${DOCSLURP_CLAMD_BIN:-}"
 
 is_production_env() {
@@ -85,9 +87,13 @@ clamav_warn_or_exit() {
 }
 
 clamav_cleanup() {
-  if [[ -n "${CLAMD_PID}" ]]; then
-    kill "${CLAMD_PID}" >/dev/null 2>&1 || true
-  fi
+  local pid
+  for pid in "${FRESHCLAM_PID}" "${CLAMD_PID}"; do
+    if [[ -n "${pid}" ]]; then
+      kill "${pid}" >/dev/null 2>&1 || true
+      wait "${pid}" 2>/dev/null || true
+    fi
+  done
 }
 
 trap clamav_cleanup EXIT
@@ -262,17 +268,20 @@ prepare_clamav_runtime() {
 }
 
 latest_clamav_signature_epoch() {
-  local file mtime latest=0
-  shopt -s nullglob
-  for file in "${CLAMAV_DB_DIR}"/*.cld "${CLAMAV_DB_DIR}"/*.cvd "${CLAMAV_DB_DIR}"/*.inc; do
-    [[ -e "${file}" ]] || continue
-    mtime="$(stat -c '%Y' "${file}" 2>/dev/null || stat -f '%m' "${file}" 2>/dev/null || echo 0)"
-    if [[ "${mtime}" =~ ^[0-9]+$ ]] && (( mtime > latest )); then
-      latest="${mtime}"
-    fi
-  done
-  shopt -u nullglob
-
+  # Image copies change mtimes without updating definitions. Ask the trusted
+  # scanner for the same signature-header timestamp the parser VM checks.
+  # This reads operator-supplied definitions only, never customer files.
+  local version latest now
+  version="$(TZ=UTC run_clamav_command timeout 15s clamscan --database "${CLAMAV_DB_DIR}" --version 2>/dev/null)" || { echo 0; return; }
+  local format='^ClamAV [0-9.]+/[0-9]+/(Sun|Mon|Tue|Wed|Thu|Fri|Sat) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)  ?[0-9]{1,2} [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}$'
+  if [[ ${#version} -gt 512 || ! "${version}" =~ ${format} ]]; then
+    echo 0; return
+  fi
+  latest="$(date -u -d "${version#*/*/}" +%s 2>/dev/null)" || { echo 0; return; }
+  now="$(date +%s)"
+  if [[ ! "${latest}" =~ ^[0-9]+$ ]] || (( latest > now + 3600 )); then
+    echo 0; return
+  fi
   echo "${latest}"
 }
 
@@ -291,7 +300,7 @@ verify_clamav_signature_freshness() {
   fi
   age_hours=$(( age_seconds / 3600 ))
 
-  if (( age_hours > CLAMAV_MAX_DB_AGE_HOURS )); then
+  if (( age_seconds > CLAMAV_MAX_DB_AGE_HOURS * 3600 )); then
     clamav_warn_or_exit \
       "ClamAV signature database is stale (${age_hours}h old, max ${CLAMAV_MAX_DB_AGE_HOURS}h)" \
       "${CLAMAV_FAIL_OPEN_ON_STALE_DB}"
@@ -369,6 +378,48 @@ run_freshclam_update() {
   fi
 }
 
+start_clamav_updater() {
+  # FreshClam owns periodic checks and retries. Keep a long-lived worker from
+  # aging beyond the scan policy between restarts; an external updater may opt out.
+  if ! bool_env "${DOCSLURP_CLAMAV_MANAGE_UPDATER:-$(default_bool_for_env true false)}" false ||
+      ! bool_env "${CLAMAV_UPDATE_ON_STARTUP}" true; then
+    return
+  fi
+  if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1) )); then
+    echo "[worker-start] error: managed ClamAV updater requires Bash 5.1 or newer" >&2
+    return 1
+  fi
+  env -i PATH="${PATH}" HOME="${HOME:-${CLAMAV_RUN_DIR}}" LANG="${LANG:-C.UTF-8}" TZ="${TZ:-UTC}" \
+    freshclam --daemon --foreground --checks=12 --stdout \
+    --config-file="$(freshclam_config_file)" &
+  FRESHCLAM_PID="$!"
+}
+
+stop_worker() {
+  if [[ -n "${WORKER_PID}" ]]; then
+    kill -"${1:-TERM}" "${WORKER_PID}" 2>/dev/null || true
+    wait "${WORKER_PID}" 2>/dev/null || true
+    WORKER_PID=""
+  fi
+}
+
+run_worker_with_updater() {
+  # Preserve graceful worker shutdown while owning the updater's lifetime.
+  trap 'trap - TERM INT; stop_worker TERM; exit 143' TERM
+  trap 'trap - TERM INT; stop_worker INT; exit 130' INT
+  node "${ROOT_DIR}/worker/dist/temporal/worker.js" &
+  WORKER_PID="$!"
+  local exited="" status=0
+  wait -n -p exited "${WORKER_PID}" "${FRESHCLAM_PID}" || status="$?"
+  if [[ "${exited:-}" != "${WORKER_PID}" ]]; then
+    echo "[worker-start] error: ClamAV updater exited; stopping worker" >&2
+    stop_worker TERM
+    return 1
+  fi
+  WORKER_PID=""
+  return "${status}"
+}
+
 wait_for_clamd() {
   local retries="${1:-30}"
   local attempt
@@ -427,6 +478,7 @@ bootstrap_clamav() {
   run_freshclam_update
   verify_clamav_signature_freshness
   ensure_clamd_ready
+  start_clamav_updater
 }
 
 bootstrap_deferred_python() {
@@ -486,4 +538,8 @@ bootstrap_clamav
 
 configure_runtime_memory_budgets
 
-exec node "${ROOT_DIR}/worker/dist/temporal/worker.js"
+if [[ -n "${FRESHCLAM_PID}" ]]; then
+  run_worker_with_updater
+else
+  exec node "${ROOT_DIR}/worker/dist/temporal/worker.js"
+fi
