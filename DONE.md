@@ -1,3 +1,7 @@
+## Independent native admission pause (2026-11-10)
+
+- Add a strict optional admission switch for new native root, child and retry attempts while preserving authorized discovery, retained output and Stop. Recover a lost ACK during pause with real native ownership and migrated SQL authorization, without a duplicate task or paid model call. Council findings, resolutions and limits: `docs/native-admission-review-20261110.md`. Host activation remains separate.
+
 ## Organization-scoped realtime canary admission (2026-11-10)
 
 - Add a bounded, fail-closed organization allowlist to authenticated socket/resource delivery and new native launch, child and retry admission. Preserve existing session/MFA/project policy, accepted task execution and authorized HTTP recovery/Stop. Fresh membership, malformed config, foreign scopes, revoked sessions and oversized admission regressions pass. Review: `docs/realtime-canary-review-20261110.md`.
