@@ -34,3 +34,18 @@ without resource details; unavailable history remains 409. Route regressions
 verify both outcomes. CI also exposed an older observer fixture without an
 organization membership; its explicit owner membership now matches the access
 policy exercised by fresh task-tree validation.
+
+## Gated native integration contract correction
+
+CI on `8ad664ef` exposed stale HTTP 409 expectations in the opt-in native runtime
+integration suite after the forbidden-recovery contract changed to 403. Update
+foreign-user, revoked/expired session, MFA and lost-membership assertions for
+recovery, child launch and retry. Keep quota, cancellation, deadline and input
+conflict assertions at 409; additionally verify the generic forbidden envelope
+and unchanged execution count for rejected retry admission.
+
+The complete native runtime integration file passed locally against isolated
+PostgreSQL 17 and durable Redis 7.4: 20 tests passed, zero skipped. The first local
+run retained one additional stale expired-session retry assertion (19 passed, one
+failed); the corrected rerun passed all 20. Temporary local service containers
+were removed after each run. No production state or runtime policy changed.
