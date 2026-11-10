@@ -15,3 +15,11 @@ export function realtimeCanaryOrgAllowed(orgId: string | null | undefined): bool
   const ids = realtimeCanaryOrgIds();
   return ids === null || !!orgId && ids.includes(orgId.toLowerCase());
 }
+
+/** Pause new paid attempts without disabling authorized retained reads or Stop.
+ * Missing admission configuration preserves the existing global opt-in. */
+export function durableChatAdmissionEnabled(): boolean {
+  const value = process.env.DOCSLURP_DURABLE_CHAT_ADMISSION;
+  if (value !== undefined && value !== "0" && value !== "1") throw new Error("durable_chat_invalid_admission_policy");
+  return process.env.DOCSLURP_DURABLE_CHAT === "1" && value !== "0";
+}

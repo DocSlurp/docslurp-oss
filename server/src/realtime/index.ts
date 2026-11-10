@@ -1,4 +1,4 @@
-import { realtimeCanaryOrgIds } from "./rollout-scope.js";
+import { durableChatAdmissionEnabled, realtimeCanaryOrgIds } from "./rollout-scope.js";
 import { hasRealtimeCanaryMembership, revalidateRealtimeSession } from "./session.js";
 import type { Server } from "node:http";
 import { attachRealtimeServer } from "./node.js";
@@ -8,7 +8,7 @@ import { sql } from "../db.js";
 import { createChatOperationProvider } from "../services/chat-operation-access.js";
 import { env } from "../config.js";
 import type { RealtimeOperationProvider } from "../services/realtime-operation.js";
-export { realtimeCanaryOrgAllowed } from "./rollout-scope.js";
+export { durableChatAdmissionEnabled, realtimeCanaryOrgAllowed } from "./rollout-scope.js";
 export { attachRealtimeServer } from "./node.js";
 export type { RealtimeHostOptions, RealtimeSession } from "./node.js";
 export type { RealtimeOperationProvider, RealtimeOperationObserver, RealtimeOperationSubscription } from "../services/realtime-operation.js";
@@ -19,6 +19,7 @@ export { revisionMaintenanceMetrics } from "./revision-maintenance.js";
  * actual Node server; mounting Hono's fetch handler alone cannot handle Upgrade.
  */
 export function attachFirstPartyRealtime(server: Server, options: { operations?: RealtimeOperationProvider } = {}) {
+  durableChatAdmissionEnabled(); // Validate policy without changing accepted execution.
   realtimeCanaryOrgIds(); // Validate before attaching even when global flags are off.
   return attachRealtimeServer(server, {
     enabled: process.env.REALTIME_ENABLED === "true",

@@ -1,3 +1,4 @@
+import { durableChatAdmissionEnabled } from "../realtime/rollout-scope.js";
 import { nativeOperations } from "../agent-runtime/runtime.js";
 import { sql } from "../db.js";
 import { Hono, type Context } from "hono";
@@ -10,6 +11,7 @@ import { hasRealtimeCanaryMembership, revalidateRealtimeSession } from "../realt
 
 const launchSchema = z.object({ q: z.string().trim().min(1).max(64_000), project: z.string().max(128).optional(), sessionId: z.string().max(128).optional(), model: z.string().max(128).optional() }).strict();
 function operationErrorResponse(error: unknown, c: Context) {
+  if (error instanceof Error && error.message === "durable_chat_invalid_admission_policy") console.error("[native-chat] admission_refused invalid_policy");
   return error instanceof Error && error.message === "operation_forbidden"
     ? c.json({error:"forbidden"},403)
     : c.json({error:"operation_unavailable"},409);
@@ -34,6 +36,7 @@ export const chatOperationRoutes = new Hono()
   .post("/", c => durableChatLaunchHandler(c))
   .post("/:id/tasks", c => durableChatLaunchHandler(c, z.uuid().parse(c.req.param("id"))))
   .post("/:id/retry", async c => {
+    if (!durableChatAdmissionEnabled()) return c.json({error:"admission_paused"},403);
     const id=z.uuid().parse(c.req.param("id"));
     // No replacement query/model/native identity is accepted on a retry.
     if(Number(c.req.header("content-length")??0)>256)return c.json({error:"input_too_large"},413);
@@ -69,6 +72,7 @@ export const chatOperationRoutes = new Hono()
   });
 
 export async function durableChatLaunchHandler(c: Context, parentId?: string) {
+  if (!durableChatAdmissionEnabled()) return c.json({error:"admission_paused"},403);
   if (Number(c.req.header("content-length") ?? 0) > 128_000) return c.json({ error: "input_too_large" }, 413);
   const reader = c.req.raw.body?.getReader();
   const chunks: Uint8Array[] = [];
