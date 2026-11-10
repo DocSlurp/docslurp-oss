@@ -9,13 +9,18 @@ import { projectChatDisabledBody } from "../services/project-chat.js";
 import { hasRealtimeCanaryMembership, revalidateRealtimeSession } from "../realtime/session.js";
 
 const launchSchema = z.object({ q: z.string().trim().min(1).max(64_000), project: z.string().max(128).optional(), sessionId: z.string().max(128).optional(), model: z.string().max(128).optional() }).strict();
+function operationErrorResponse(error: unknown, c: Context) {
+  return error instanceof Error && error.message === "operation_forbidden"
+    ? c.json({error:"forbidden"},403)
+    : c.json({error:"operation_unavailable"},409);
+}
 /** Session-only, opt-in route. Legacy API-key chat retains its existing contract. */
 export const chatOperationRoutes = new Hono()
-  .onError((_error,c) => c.json({error:"operation_unavailable"},409))
+  .onError(operationErrorResponse)
   .use("*", async (c, next) => {
     if (process.env.DOCSLURP_DURABLE_CHAT !== "1") return c.json({ error: "not_enabled" }, 404);
     if (getRequestActor(c).type !== "session") return c.json({ error: "session_required" }, 403);
-    try { await next(); } catch { return c.json({ error: "operation_unavailable" }, 409); }
+    try { await next(); } catch (error) { return operationErrorResponse(error,c); }
   })
   .get("/", async c => {
     const actor = getRequestActor(c);

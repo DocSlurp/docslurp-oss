@@ -25,3 +25,12 @@ include foreign/revoked membership, deleted organizations, malformed/oversized
 configuration and launch input, revoked session and task-tree scope mismatch.
 No production activation, real-session load result or latency claim is made by
 this source review.
+
+A final independent adversarial host review (`canary_final_security`) found that
+the route normalized authorization refusals to the same HTTP 409 as unavailable
+history. This prevented a fallback client from clearing revoked output. The
+route now maps the internal `operation_forbidden` refusal to generic HTTP 403,
+without resource details; unavailable history remains 409. Route regressions
+verify both outcomes. CI also exposed an older observer fixture without an
+organization membership; its explicit owner membership now matches the access
+policy exercised by fresh task-tree validation.
