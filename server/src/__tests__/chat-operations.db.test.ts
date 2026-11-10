@@ -19,6 +19,7 @@ beforeAll(async () => {
   ops = await import("../services/chat-operations.js");
   await sql`insert into "user" (id,name,email) values ('u','Owner','owner@example.test'),('v','Other','other@example.test')`;
   await sql`insert into organizations (id,name,slug,created_by_user_id) values ('o','Org','durable','u')`;
+  await sql`insert into org_memberships(org_id,user_id,role) values('o','u','owner')`;
   await sql`insert into projects (id,org_id,user_id,name) values ('w','o','u','Project')`;
 }, 120_000);
 beforeEach(async () => { runtime.allowed=true; runtime.chat.mockReset(); await sql`delete from chat_operations`; });

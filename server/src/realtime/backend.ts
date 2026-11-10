@@ -1,3 +1,4 @@
+import { realtimeCanaryOrgAllowed } from "./rollout-scope.js";
 import { readPageImageReadiness } from "../services/page-image-readiness.js";
 import { realtimeSuggestionsSnapshotSchema } from "@docslurp/shared";
 import { readProjectSuggestions } from "../services/project-suggestions.js";
@@ -41,7 +42,7 @@ async function authorizeMany(userId: string, resources: DashboardResource[]): Pr
     left join org_memberships om on om.org_id=o.id and om.user_id=${userId}
     order by x.index`;
   if (rows.length !== resources.length) throw new Error("authorization_incomplete");
-  return rows.map(row => row.org_id);
+  return rows.map(row => row.org_id && realtimeCanaryOrgAllowed(row.org_id) ? row.org_id : null);
 }
 async function authorize(userId: string, resource: DashboardResource): Promise<string | null> {
   return (await authorizeMany(userId, [resource]))[0] ?? null;

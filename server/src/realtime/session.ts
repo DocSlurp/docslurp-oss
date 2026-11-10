@@ -1,3 +1,4 @@
+import { realtimeCanaryOrgIds } from "./rollout-scope.js";
 import type postgres from "postgres";
 import { sql } from "../db.js";
 import type { RealtimeSession } from "./node.js";
@@ -26,4 +27,24 @@ export async function revalidateRealtimeSession(session: RealtimeSession, signal
     signal.throwIfAborted();
     return rows.length===1 ? session : null;
   } finally { signal.removeEventListener("abort",cancel); }
+}
+
+/** Cohort admission is separate from execution policy: accepted tasks keep their
+ * existing session/project/deadline checks when rollout membership changes. */
+export async function hasRealtimeCanaryMembership(userId: string, orgId?: string, signal: AbortSignal = AbortSignal.timeout(5000), client: postgres.Sql | postgres.TransactionSql = sql): Promise<boolean> {
+  signal.throwIfAborted();
+  const ids = realtimeCanaryOrgIds();
+  if (ids === null) return true;
+  if (orgId && !ids.includes(orgId.toLowerCase())) return false;
+  const query = client`select 1 from org_memberships m join organizations o on o.id=m.org_id
+    where m.user_id=${userId} and o.deleted_at is null
+      and m.org_id=any(${client.array(orgId ? [orgId] : ids)}) limit 1`;
+  const cancel = () => { void Promise.resolve(query.cancel()).catch(() => {}); };
+  signal.addEventListener("abort", cancel, { once: true });
+  try {
+    signal.throwIfAborted();
+    const rows = await query;
+    signal.throwIfAborted();
+    return rows.length === 1;
+  } finally { signal.removeEventListener("abort", cancel); }
 }
