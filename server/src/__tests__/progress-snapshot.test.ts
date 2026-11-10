@@ -155,7 +155,7 @@ describe("buildProgressModule", () => {
     expect(renderImages?.latencyMs).toBe(42);
   });
 
-  it("treats terminal Temporal failure as failed progress", () => {
+  it("keeps persisted progress authoritative over a terminal Temporal observation", () => {
     const progress = buildProgressModule({
       run: run({ status: "processing", stage: "extract-markdown" }),
       temporal: temporal({
@@ -174,8 +174,8 @@ describe("buildProgressModule", () => {
       costCents: 0,
     });
 
-    expect(progress.lifecycleStatus).toBe("failed");
-    expect(progress.stageRollups.find((stage) => stage.stage === "extract-markdown")?.status).toBe("failed");
+    expect(progress.lifecycleStatus).toBe("processing");
+    expect(progress.stageRollups.find((stage) => stage.stage === "extract-markdown")?.status).toBe("processing");
   });
   it("keeps enrichment stages a run moved after index queued while embed and index run", () => {
     const pipeline = { ...defaultPipelineFeatures, summarize: true };
@@ -204,4 +204,26 @@ describe("buildProgressModule", () => {
     expect(tone(canonical, "document-summary")).toBe("completed");
     expect(canonical.expectedStages.slice(-3)).toEqual(["document-summary", "embed", "index"]);
   });
+  it.each(["RUNNING", "FAILED", "COMPLETED", "PAUSED"] as const)("cannot override persisted lifecycle or stage with a %s executor observation", workflowStatus => {
+    for (const status of ["queued", "processing", "completed", "failed", "blocked"] as const) {
+      const progress = buildProgressModule({
+        run: run({ status, stage: "embed" }), temporal: temporal({ workflowStatus, stage: "extract-markdown" }),
+        stages: [], pageProgress: {}, cpuUserMs: 0, cpuSystemMs: 0, rssDeltaBytes: 0,
+        peakRssBytes: 0, inputTokens: 0, outputTokens: 0, costCents: 0,
+      });
+      expect(progress.lifecycleStatus).toBe(status === "blocked" ? "queued" : status);
+      expect(progress.currentStage).toBe("embed");
+    }
+  });
+
+  it("shows an acknowledged persisted pause without hiding terminal completion", () => {
+    const progress = (status: "processing" | "completed") => buildProgressModule({
+      run: run({ status, controlState: "paused" }), temporal: temporal({ workflowStatus: "RUNNING" }),
+      stages: [], pageProgress: {}, cpuUserMs: 0, cpuSystemMs: 0, rssDeltaBytes: 0,
+      peakRssBytes: 0, inputTokens: 0, outputTokens: 0, costCents: 0,
+    });
+    expect(progress("processing").lifecycleStatus).toBe("paused");
+    expect(progress("completed").lifecycleStatus).toBe("completed");
+  });
+
 });

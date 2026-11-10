@@ -51,32 +51,10 @@ export type ProgressSnapshotInput = {
   regions?: string[];
 };
 
-function lifecycleStatus(
-  run: ProjectRun,
-  temporal: ProjectRunTemporal | null,
-): ProjectRunLifecycleStatus {
-  const temporalStatus = temporal?.workflowStatus ?? null;
-  if (temporalStatus === "PAUSED") {
-    return "paused";
-  }
-
-  if (temporalStatus === "RUNNING") {
-    return run.status === "queued" ? "queued" : "processing";
-  }
-
-  if (temporalStatus === "COMPLETED") {
-    return "completed";
-  }
-
-  if (
-    temporalStatus === "FAILED" ||
-    temporalStatus === "TIMED_OUT" ||
-    temporalStatus === "TERMINATED" ||
-    temporalStatus === "CANCELLED"
-  ) {
-    return "failed";
-  }
-
+function lifecycleStatus(run: ProjectRun): ProjectRunLifecycleStatus {
+  // A diagnostic executor snapshot may be stale or from a prior generation.
+  // Only persisted owner state can establish completion, failure or a pause.
+  if ((run.status === "queued" || run.status === "processing") && run.controlState === "paused") return "paused";
   return run.status === "blocked" ? "queued" : run.status;
 }
 
@@ -180,8 +158,8 @@ function sumStageMetric(
 export function buildProgressModule(args: ProgressSnapshotInput): ProjectRunProgressModule {
   const compiledPlan = compilePipelinePlan(args.run.pipeline);
   const aggregates = aggregateStageStates(args.stages);
-  const status = lifecycleStatus(args.run, args.temporal);
-  const currentStage = args.temporal?.stage ?? args.run.stage;
+  const status = lifecycleStatus(args.run);
+  const currentStage = args.run.stage;
   // Execution order (index may run before enrichment), so stages the run moved
   // later are not shown completed while earlier stages run.
   const expectedStages: RunStage[] = inferExecutionStageOrder(compiledPlan.stageOrder, {

@@ -20,20 +20,11 @@ beforeEach(() => {
     queriedAt: "2026-09-30T12:02:00.000Z",
   }));
 });
-it("preserves the project name when reconciling a failed workflow", async () => {
-  // Run Lifecycle fail reads the current row, then compare-and-sets it.
-  sql.mockResolvedValueOnce([{ status: "processing", control_state: null, stats: {}, failure_count: 0 }]);
-  sql.mockResolvedValueOnce([{
-    id: run.id, user_id: run.userId, org_id: run.orgId, project_id: run.projectId,
-    kind: run.kind, status: "failed", stage: "index", total_documents: 1, processed_documents: 0,
-    pages_total: 1, pages_processed: 0, spent_cents: 0,
-    control_requested_at: null, pipeline: run.pipeline, stats: {}, artifacts: {}, error: "Workflow failed",
-    created_at: run.createdAt, updated_at: run.updatedAt,
-  }]);
+it("preserves persisted status and project name when observing a failed workflow", async () => {
   const snapshot = await buildRunProgressSnapshot(run, { recentEventLimit: 0 });
-  expect(snapshot.run).toMatchObject({ status: "failed", projectName: "My documents" });
-  const failure = sql.mock.calls.find(([parts]) => parts.join("").includes("failure_count = "));
-  expect(failure).toBeDefined();
+  expect(snapshot.run).toMatchObject({ status: "processing", projectName: "My documents" });
+  expect(snapshot.temporal?.workflowStatus).toBe("FAILED");
+  expect(sql.mock.calls.some(([parts]) => /update |insert |delete /i.test(parts.join("")))).toBe(false);
 });
 it("does not fail a newly queued retry using the previous workflow's terminal state", async () => {
   const snapshot = await buildRunProgressSnapshot({ ...run, status: "queued", updatedAt: "2026-09-30T12:02:00.000Z" }, { recentEventLimit: 0 });
