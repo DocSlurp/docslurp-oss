@@ -104,8 +104,8 @@ describe("per-model provider preferences survive the generic retry", () => {
       sse([{ id: "g", model: DEEPSEEK, provider: "Together", choices: [{ delta: { content: "# Page" }, finish_reason: "stop" }], usage: { prompt_tokens: 1000, completion_tokens: 20 } }]),
     ]);
     const only = ["together", "fireworks", "parasail"];
-    expect(bodies[0]!.provider).toEqual({ only, sort: "price", allow_fallbacks: true, max_price: visionMaxPrice(DEEPSEEK) });
-    expect(bodies[1]!.provider).toEqual({ only, sort: "price", allow_fallbacks: true, ignore: ["StreamLake"], max_price: visionMaxPrice(DEEPSEEK) });
+    expect(bodies[0]!.provider).toEqual({ only, sort: "latency", allow_fallbacks: true, max_price: visionMaxPrice(DEEPSEEK) });
+    expect(bodies[1]!.provider).toEqual({ only, sort: "latency", allow_fallbacks: true, ignore: ["StreamLake"], max_price: visionMaxPrice(DEEPSEEK) });
     expect(result).toMatchObject({ text: "# Page", attempts: 2, inputTokens: 1400, outputTokens: 23 });
   });
 
@@ -146,7 +146,7 @@ describe("China-provider restriction (org or project opt-out)", () => {
       filtered("Together"),
       sse([{ id: "g", model: DEEPSEEK, provider: "Fireworks", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
     ], { allowChinaProviders: false });
-    expect(bodies[0]!.provider).toEqual({ only: ["together", "fireworks", "parasail"], sort: "price", allow_fallbacks: true, ignore: [...CHINA_PROVIDER_SLUGS], max_price: visionMaxPrice(DEEPSEEK) });
+    expect(bodies[0]!.provider).toEqual({ only: ["together", "fireworks", "parasail"], sort: "latency", allow_fallbacks: true, ignore: [...CHINA_PROVIDER_SLUGS], max_price: visionMaxPrice(DEEPSEEK) });
     expect(bodies[1]!.provider).toMatchObject({ only: ["together", "fireworks", "parasail"], ignore: ["Together", ...CHINA_PROVIDER_SLUGS] });
     for (const body of bodies) expectRestricted(body.provider);
   });
