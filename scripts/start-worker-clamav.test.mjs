@@ -234,3 +234,61 @@ for (const disabled of ["false", "0", "no", "off"])
       assert.deepEqual(await f.readCalls(), []);
     },
   );
+
+for (const target of ["WORKER_PID", "FRESHCLAM_PID"])
+  for (const signal of ["TERM", "INT"])
+    test(
+      signal + " during " + target + " capture reaps the owned child",
+      async (t) => {
+        const f = await fixture(t, { age: 1, workerSignal: true });
+        const pidFile = join(f.dir, "race-child-pid");
+        // Capture the worker's actual PID before accepting the injected signal.
+        await writeFile(
+          join(f.dir, "bin", "node"),
+          `#!${process.execPath}
+const fs=require('node:fs');if(process.argv[2]?.includes('check-worker-prerequisites'))process.exit(0);fs.writeFileSync(${JSON.stringify(pidFile)},String(process.pid));for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=>process.exit(0));setInterval(()=>{},1000);`,
+          { mode: 0o755 },
+        );
+        const envFile = join(f.dir, "bash-env");
+        const ready = target === "WORKER_PID" ? pidFile : f.calls;
+        await writeFile(
+          envFile,
+          `qa_inject_signal() {
+  if [[ "$1" == '${target}="$!"' ]]; then
+    for attempt in {1..100}; do [[ -s ${JSON.stringify(ready)} ]] && break; sleep 0.01; done
+    kill -${signal} "$$"
+  fi
+}
+set -T
+trap 'qa_inject_signal "$BASH_COMMAND"' DEBUG
+`,
+        );
+        f.env.BASH_ENV = envFile;
+        const child = spawn("bash", [startup], {
+          env: f.env,
+          stdio: ["ignore", "ignore", "ignore"],
+        });
+        const timer = setTimeout(() => child.kill("SIGKILL"), 5000);
+        const [code, endedBy] = await once(child, "exit");
+        clearTimeout(timer);
+        const calls = await f.readCalls();
+        const pids = calls
+          .filter((c) => c.args.includes("--daemon"))
+          .map((c) => c.pid);
+        try {
+          pids.push(Number(await readFile(pidFile, "utf8")));
+        } catch {}
+        let survivors = [];
+        for (const pid of pids) {
+          try {
+            process.kill(pid, 0);
+            survivors.push(pid);
+            process.kill(pid, "SIGKILL");
+          } catch {}
+        }
+        assert.equal(endedBy, null);
+        assert.equal(code, signal === "TERM" ? 143 : 130);
+        assert.ok(pids.length > 0);
+        assert.deepEqual(survivors, [], "no child survives its supervisor");
+      },
+    );

@@ -389,10 +389,19 @@ start_clamav_updater() {
     echo "[worker-start] error: managed ClamAV updater requires Bash 5.1 or newer" >&2
     return 1
   fi
+  # Queue shutdown until the new child has an owned PID, then honor it.
+  local pending_signal=""
+  trap 'pending_signal=TERM' TERM
+  trap 'pending_signal=INT' INT
   env -i PATH="${PATH}" HOME="${HOME:-${CLAMAV_RUN_DIR}}" LANG="${LANG:-C.UTF-8}" TZ="${TZ:-UTC}" \
     freshclam --daemon --foreground --checks=12 --stdout \
     --config-file="$(freshclam_config_file)" &
   FRESHCLAM_PID="$!"
+  trap - TERM INT
+  case "${pending_signal}" in
+    TERM) exit 143 ;;
+    INT) exit 130 ;;
+  esac
 }
 
 stop_worker() {
@@ -404,12 +413,18 @@ stop_worker() {
 }
 
 run_worker_with_updater() {
-  # Preserve graceful worker shutdown while owning the updater's lifetime.
-  trap 'trap - TERM INT; stop_worker TERM; exit 143' TERM
-  trap 'trap - TERM INT; stop_worker INT; exit 130' INT
+  # Queue shutdown across fork/PID capture, preserving owned child cleanup.
+  local pending_signal="" exited="" status=0
+  trap 'pending_signal=TERM' TERM
+  trap 'pending_signal=INT' INT
   node "${ROOT_DIR}/worker/dist/temporal/worker.js" &
   WORKER_PID="$!"
-  local exited="" status=0
+  trap 'trap - TERM INT; stop_worker TERM; exit 143' TERM
+  trap 'trap - TERM INT; stop_worker INT; exit 130' INT
+  case "${pending_signal}" in
+    TERM) stop_worker TERM; return 143 ;;
+    INT) stop_worker INT; return 130 ;;
+  esac
   wait -n -p exited "${WORKER_PID}" "${FRESHCLAM_PID}" || status="$?"
   if [[ "${exited:-}" != "${WORKER_PID}" ]]; then
     echo "[worker-start] error: ClamAV updater exited; stopping worker" >&2

@@ -35,7 +35,7 @@ The full entrypoint subprocess tests use synthetic tools and definitions, with
 no network or customer data. They cover old headers with new mtimes, failed
 refresh, missing/malformed/relative/future metadata, fractional age expiration,
 non-UTC hosts, sanitized updater environment, updater failure, worker exit status,
-TERM/INT cleanup and the external-updater opt-out.
+TERM/INT cleanup, signals during child PID capture, and the external-updater opt-out.
 
 Three independent read-only council reviewers inspected the security boundaries:
 Architect `clam_architect`, Ruthless Minimalist `clam_minimalist`, and adversarial
@@ -46,6 +46,8 @@ and added timezone, malformed-version and signal lifecycle regressions. The
 managed-path tool requirements are documented above. A final Architect review
 also found that false startup-update aliases still launched the daemon; the
 coordinator reused the existing boolean parser and added all four opt-out
-regressions. Fresh final rechecks are
-recorded in the pull request before merge. Synthetic tests do not establish the
+regressions. A subsequent Security review reproduced a signal between forking the worker
+and recording its PID. The coordinator queued TERM/INT until each new child PID
+was captured, covering both worker and updater launches with deterministic race
+regressions. Fresh final rechecks are recorded in the pull request before merge. Synthetic tests do not establish the
 availability of any particular mirror or replace VM scanning acceptance.
