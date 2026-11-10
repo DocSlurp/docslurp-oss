@@ -15,6 +15,14 @@ import { z } from "zod";
 
 /** The worker flag that turns figure extraction on for VM PDF runs (default off). */
 export const DOPPLER_IMAGE_EXTRACT_ENV = "DOCSLURP_DOPPLER_IMAGE_EXTRACT";
+/** DOCSLURP_DOPPLER_IMAGE_EXTRACT: `1`/`true`/`on` enables, unset/`0`/`false`/`off` disables; anything else throws (loud). */
+export function dopplerImageExtractEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  const raw = env[DOPPLER_IMAGE_EXTRACT_ENV]?.trim().toLowerCase() ?? "";
+  if (raw === "" || raw === "0" || raw === "false" || raw === "off") return false;
+  if (raw === "1" || raw === "true" || raw === "on") return true;
+  throw new Error(`${DOPPLER_IMAGE_EXTRACT_ENV} must be 1/true/on or 0/false/off`);
+}
+
 /** The wire version of the manifest the provider hands the worker. */
 export const DOPPLER_FIGURES_VERSION = "doppler-figures@1";
 export const DOPPLER_FIGURES_MANIFEST = "manifest.json";

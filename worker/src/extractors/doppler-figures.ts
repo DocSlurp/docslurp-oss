@@ -15,19 +15,14 @@ import { lstat, open, readdir } from "node:fs/promises";
 import path from "node:path";
 import {
   DOPPLER_FIGURE_FILE_NAME, DOPPLER_FIGURE_LIMITS, DOPPLER_FIGURE_MEDIA_TYPES, DOPPLER_FIGURES_INDEX_SLOT, DOPPLER_FIGURES_INDEX_VERSION,
-  DOPPLER_FIGURES_MANIFEST, DOPPLER_IMAGE_EXTRACT_ENV, dopplerFigureFileName, dopplerFigureManifestSchema, dopplerFigureSlot,
+  DOPPLER_FIGURES_MANIFEST, dopplerFigureFileName, dopplerImageExtractEnabled, dopplerFigureManifestSchema, dopplerFigureSlot,
   dopplerImageMarkerIds, type DopplerFigureEntry, type DopplerFigureFormat, type DopplerFigureRecord,
 } from "@docslurp/shared";
 
 import { documentArtifactRoot } from "../lib/artifact-root.js";
 
-/** DOCSLURP_DOPPLER_IMAGE_EXTRACT: `1`/`true`/`on` enables, unset/`0`/`false`/`off` disables; anything else is a startup error. */
-export function dopplerImageExtractEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const raw = env[DOPPLER_IMAGE_EXTRACT_ENV]?.trim().toLowerCase() ?? "";
-  if (raw === "" || raw === "0" || raw === "false" || raw === "off") return false;
-  if (raw === "1" || raw === "true" || raw === "on") return true;
-  throw new Error(`${DOPPLER_IMAGE_EXTRACT_ENV} must be 1/true/on or 0/false/off`);
-}
+/** DOCSLURP_DOPPLER_IMAGE_EXTRACT (shared, so the provider plugin reads it the same way). */
+export { dopplerImageExtractEnabled };
 
 /** Refused folder: the message names the rule, never a path or anything read from the folder. */
 export class DopplerFigureRejection extends Error {
