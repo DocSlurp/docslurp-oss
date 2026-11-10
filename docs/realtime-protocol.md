@@ -64,6 +64,21 @@ is bounded to 512 active/pending connections per host and eight per user,
 with at most 40 authenticated connection attempts per user per minute. Slow consumers force resync/close;
 never truncate terminal/delete semantics. Metrics contain counts/timing only.
 
+Run and activity projections omit artifact maps and arbitrary diagnostic
+payloads. They retain lifecycle/job/run identities, configured pipeline,
+structured progress and cost rollups, stage status/errors and event identity,
+message and timestamps. Numeric diagnostics use a fixed measurement allowlist;
+full diagnostics remain available through authorized HTTP detail reads.
+If a dashboard resource still exceeds 512 KiB (for example, a very large
+configured schema or task inventory), the server sends a scoped
+`error` with `code: snapshot_too_large` and detaches that subscription.
+It sends no partial inventory and leaves other subscriptions connected.
+The client treats this as an explicit unavailable resource, without automatic
+resubscription or paid work. Operation replay and slow-consumer queue overflow
+keep their existing recovery/close semantics.
+Dashboard projection failures likewise detach only that subscription with the
+fixed `projection_unavailable` error; they never expose the underlying cause.
+
 ## Coverage gate
 
 | Projection | Required committed changes | Current WS coverage |

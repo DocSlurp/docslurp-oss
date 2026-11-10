@@ -11,6 +11,7 @@ import { getProject } from "../services/projects.js";
 import { listDocumentIndexEntries, getRealtimeViewerPayload } from "../services/documents.js";
 import { mapProjectRun, type ProjectRunRow } from "../services/run-records.js";
 import { buildRunProgressSnapshot } from "../services/runs.js";
+import { realtimeRunProgress, realtimeRunRecord } from "./run-projection.js";
 
 /** One statement and one MVCC boundary for a socket's bounded resource sweep.
  * This matches getProjectAccess, including explicitly shared personal projects.
@@ -83,7 +84,7 @@ export const realtimeBackend: RealtimeBackend = {
           from project_runs r join projects w on w.id = r.project_id
           where r.id = ${resource.runId} and r.org_id = ${orgId}`;
         if (!row) throw new Error("not_found");
-        return await buildRunProgressSnapshot(mapProjectRun(row), { recentEventLimit: 100, readOnly: true, operator: await isConfiguredAdminUserSql(sql, userId) });
+        return realtimeRunProgress(await buildRunProgressSnapshot(mapProjectRun(row), { recentEventLimit: 100, readOnly: true, operator: await isConfiguredAdminUserSql(sql, userId) }));
       }
       case "activity": {
         const runs = await sql<ProjectRunRow[]>`
@@ -92,7 +93,7 @@ export const realtimeBackend: RealtimeBackend = {
           where r.org_id = ${orgId} and docslurp_project_access(w.id, ${userId})
           order by (r.status in ('queued','processing')) desc, r.updated_at desc, r.id limit 201`;
         const costs = await runUsageCostSummaries(runs.slice(0, 200).map(run => run.id));
-        return { runs: runs.slice(0, 200).map(run => mapProjectRun(run, costs.get(run.id))), truncated: runs.length > 200 };
+        return { runs: runs.slice(0, 200).map(run => realtimeRunRecord(mapProjectRun(run, costs.get(run.id)))), truncated: runs.length > 200 };
       }
       case "suggestions": return realtimeSuggestionsSnapshotSchema.parse(await readProjectSuggestions(userId, resource.projectId, { limit: 8 }));
       case "page-image": return await readPageImageReadiness(userId, resource);

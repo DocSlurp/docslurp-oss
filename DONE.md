@@ -1,3 +1,7 @@
+## Compact dashboard progress and isolated projection refusal (2026-11-10)
+
+- Keep streaming progress free of repeated arbitrary diagnostics and artifact maps while preserving lifecycle, parent/run identity, progress, costs and failures. Refuse oversized or failed dashboard projections per subscription without closing sibling resources or silently truncating inventory. Authorized detail reads and existing security/queue limits remain. Council review: `docs/realtime-projection-review-20261110.md`; broader live acceptance remains open.
+
 ## Constrained image-transcription endpoint selection (2026-11-10)
 
 - Restrict the pinned transcription profile and its pricing catalog to the remaining approved hosts. Initial requests and refusal retries preserve that allowlist, latency preference and existing price ceiling; request-body fixtures remain immutable.

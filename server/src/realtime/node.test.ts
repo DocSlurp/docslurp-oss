@@ -140,17 +140,46 @@ describe("real Node realtime Upgrade", () => {
     f.update({ runs: [] });
     await vi.waitFor(() => expect(second.frames.some(frame => frame.data?.runs?.length === 0)).toBe(true));
   });
-  it("bounds oversized snapshots with an explicit reconnect/resync close", async () => {
+  it("refuses an oversized dashboard snapshot without disconnecting other resources", async () => {
     const f = await fixture(); const { ws } = await connect(f.url);
-    const closed = new Promise<{code:number;reason:string}>(resolve => ws.once("close",(code,reason) => resolve({code,reason:reason.toString()})));
+    const frames: any[] = []; ws.on("message", raw => frames.push(JSON.parse(String(raw))));
+    const closed = vi.fn(); ws.on("close", closed);
     f.update({ text: "x".repeat(600_000) }); subscribe(ws);
-    expect(await closed).toEqual({code:1013,reason:"resync_required"});
+    await vi.waitFor(() => expect(frames.some(frame => frame.subscriptionId === "activity" && frame.type === "error" && frame.code === "snapshot_too_large")).toBe(true));
+    expect(frames.filter(frame => frame.type === "snapshot")).toEqual([]);
+    f.update({ runs: [{id: RUN, status: "completed"}] });
+    subscribe(ws, "other", {kind:"run",runId:RUN});
+    await vi.waitFor(() => expect(frames.some(frame => frame.subscriptionId === "other" && frame.type === "snapshot")).toBe(true));
+    expect(frames.filter(frame => frame.subscriptionId === "activity" && frame.type === "snapshot")).toEqual([]);
+    expect(closed).not.toHaveBeenCalled();
+    expect(ws.readyState).toBe(WebSocket.OPEN);
   });
   it("delivers ten distinct watched runs on one socket", async () => {
     const f = await fixture(); const { ws,frames } = await connect(f.url);
     for(let n=0;n<10;n++) subscribe(ws,`distinct-${n}`,{kind:"run",runId:`00000000-0000-4000-8000-${String(n+10).padStart(12,"0")}`});
     await vi.waitFor(() => expect(frames.filter(frame => frame.type === "snapshot")).toHaveLength(10));
     expect(f.backend.listen).toHaveBeenCalledTimes(1); expect(f.backend.project).toHaveBeenCalledTimes(10);
+  });
+
+  it("isolates malformed dashboard projection failures without leaking their cause or closing siblings", async () => {
+    const f = await fixture({authorizationRecheckMs: 60_000});
+    vi.mocked(f.backend.project).mockImplementation(async (_user, resource) => {
+      if (resource.kind === "activity") throw new Error("private diagnostic failure");
+      return {run: {id: RUN, status: "completed"}};
+    });
+    const {ws, frames} = await connect(f.url);
+    subscribe(ws);
+    subscribe(ws, "other", {kind:"run",runId:RUN});
+    await vi.waitFor(() => {
+      expect(frames.some(frame => frame.subscriptionId === "activity" && frame.type === "error" && frame.code === "projection_unavailable")).toBe(true);
+      expect(frames.some(frame => frame.subscriptionId === "other" && frame.type === "snapshot")).toBe(true);
+    });
+    expect(JSON.stringify(frames)).not.toContain("private diagnostic failure");
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+    const reads = vi.mocked(f.backend.project).mock.calls.filter(([, resource]) => resource.kind === "activity").length;
+    f.update({});
+    await vi.waitFor(() => expect(frames.filter(frame => frame.subscriptionId === "other" && frame.type === "snapshot").length).toBeGreaterThan(1));
+    expect(vi.mocked(f.backend.project).mock.calls.filter(([, resource]) => resource.kind === "activity")).toHaveLength(reads);
   });
 
   it("bounds concurrent connections per authenticated user", async () => {
