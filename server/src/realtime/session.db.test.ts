@@ -38,3 +38,24 @@ it("checks expiry, deletion, identity and current MFA policy without cached gran
   await sql`delete from session where id='socket-session'`;
   expect(await check(session,signal)).toBeNull();
 });
+
+it("requires fresh cohort membership and refuses foreign/deleted organizations", async () => {
+  const { hasRealtimeCanaryMembership } = await import("./session.js");
+  const org = "00000000-0000-4000-8000-000000000001";
+  await sql`insert into "user"(id,name,email) values('canary-owner','Canary','canary@example.test')`;
+  await sql`insert into organizations(id,name,slug,created_by_user_id) values(${org},'Canary','canary-scope','canary-owner')`;
+  await sql`insert into org_memberships(org_id,user_id,role) values(${org},'canary-owner','owner')`;
+  vi.stubEnv("REALTIME_CANARY_ORG_IDS", org);
+  try {
+    expect(await hasRealtimeCanaryMembership("canary-owner", org, signal)).toBe(true);
+    expect(await hasRealtimeCanaryMembership("canary-owner", undefined, signal)).toBe(true);
+    expect(await hasRealtimeCanaryMembership("foreign", org, signal)).toBe(false);
+    expect(await hasRealtimeCanaryMembership("canary-owner", "socket-org", signal)).toBe(false);
+    await sql`delete from org_memberships where org_id=${org}`;
+    expect(await hasRealtimeCanaryMembership("canary-owner", org, signal)).toBe(false);
+    await sql`insert into org_memberships(org_id,user_id,role) values(${org},'canary-owner','owner')`;
+    await sql`update organizations set deleted_at=now() where id=${org}`;
+    expect(await hasRealtimeCanaryMembership("canary-owner", org, signal)).toBe(false);
+    await expect(hasRealtimeCanaryMembership("canary-owner",org,AbortSignal.abort())).rejects.toBeDefined();
+  } finally { vi.unstubAllEnvs(); }
+});

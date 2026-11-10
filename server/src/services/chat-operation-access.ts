@@ -1,3 +1,4 @@
+import { realtimeCanaryOrgAllowed } from "../realtime/rollout-scope.js";
 import { nativeOperations } from "../agent-runtime/runtime.js";
 import { readChatRunDependencies } from "./chat-run-dependencies.js";
 import { sql } from "../db.js";
@@ -66,7 +67,8 @@ export function createChatOperationProvider(resolveActor: (userId: string) => Pr
       const authorize = async (id: string) => {
         const actor = await resolveActor(input.userId);
         if (!actor || actor.userId !== input.userId) throw new Error("operation_forbidden");
-        await authorizeChatOperation(actor, id);
+        const project = await authorizeChatOperation(actor, id);
+        if (!realtimeCanaryOrgAllowed(project.orgId)) throw new Error("operation_forbidden");
       };
       const tick = async () => {
         if (closed || input.signal.aborted) return null;
@@ -75,6 +77,7 @@ export function createChatOperationProvider(resolveActor: (userId: string) => Pr
         const recovery = await operationHub.shareRecovery(JSON.stringify([actor.userId, input.resource.operationId, cursor]),
           () => authorizedChatOperationSnapshot(actor, input.resource.operationId, cursor));
         await authorize(input.resource.operationId);
+        await revalidateOperationScopes(actor.userId, input.resource.operationId, verification.signal);
         if (closed || input.signal.aborted) return null;
         if (Buffer.byteLength(JSON.stringify(recovery)) > 524_288) throw new Error("operation_snapshot_limit");
         if (recovery.resync) await input.observer.resync(recovery, recovery.watermark, "cursor_invalid");

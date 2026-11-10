@@ -6,7 +6,7 @@ import { getRequestActor, loadActorScopedProject, resolveActorProjectId } from "
 import { authorizedChatOperationSnapshot, authorizeChatOperation } from "../services/chat-operation-access.js";
 import { cancelChatOperation, launchChatOperation, readChatOperation } from "../services/chat-operations.js";
 import { projectChatDisabledBody } from "../services/project-chat.js";
-import { revalidateRealtimeSession } from "../realtime/session.js";
+import { hasRealtimeCanaryMembership, revalidateRealtimeSession } from "../realtime/session.js";
 
 const launchSchema = z.object({ q: z.string().trim().min(1).max(64_000), project: z.string().max(128).optional(), sessionId: z.string().max(128).optional(), model: z.string().max(128).optional() }).strict();
 /** Session-only, opt-in route. Legacy API-key chat retains its existing contract. */
@@ -43,6 +43,7 @@ export const chatOperationRoutes = new Hono()
     const body=z.object({authorizeNewAttempt:z.literal(true),observedAttemptId:z.string().min(1).max(128)}).strict().parse(JSON.parse(raw));
     const actor=getRequestActor(c);
     const project=await authorizeChatOperation(actor,id);
+    if(!await hasRealtimeCanaryMembership(actor.userId,project.orgId ?? undefined))return c.json({error:"forbidden"},403);
     if(await projectChatDisabledBody(project.id,actor.userId))return c.json({error:"forbidden"},403);
     const accepted=await (await nativeOperations(async()=>actor)).retry(id,c.req.header("Idempotency-Key")??"",body.observedAttemptId);
     return c.json({operationId:accepted.operationId,rootId:accepted.rootId,status:accepted.status},202);
@@ -90,6 +91,7 @@ export async function durableChatLaunchHandler(c: Context, parentId?: string) {
   const id = parentProject?.id ?? await resolveActorProjectId(actor, body.project);
   const project = parentProject ?? await loadActorScopedProject(id, actor);
   if (!project?.orgId || await projectChatDisabledBody(id, actor.userId)) return c.json({ error: "forbidden" }, 403);
+  if (!await hasRealtimeCanaryMembership(actor.userId, project.orgId)) return c.json({ error: "forbidden" }, 403);
   const native=await nativeOperations(async()=>actor);
   const task = await launchChatOperation({ userId: actor.userId, projectId: id, orgId: project.orgId, key: c.req.header("Idempotency-Key") ?? "", input: { ...body, authSessionId: actor.sessionId }, parentId, runtime:"mastra" });
   const accepted=await native.launch(task.id);

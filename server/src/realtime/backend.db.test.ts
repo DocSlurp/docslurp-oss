@@ -131,3 +131,11 @@ it("batches mixed resource authorization in input order and observes membership 
   expect(await backend.authorizeMany!("stranger",[...resources])).toEqual([null,null,null,"foreign",null,null]);
   await expect(backend.authorizeMany!("member",Array(33).fill(resources[0]))).rejects.toThrow("subscription_limit");
 });
+
+it("refuses otherwise authorized resources outside the configured cohort", async () => {
+  vi.stubEnv("REALTIME_CANARY_ORG_IDS", "00000000-0000-4000-8000-000000000001");
+  try {
+    expect(await backend.authorize("owner", {kind:"project",projectId:"project"})).toBeNull();
+    await expect(backend.project("owner", {kind:"project",projectId:"project"})).rejects.toThrow("forbidden");
+  } finally { vi.unstubAllEnvs(); }
+});
