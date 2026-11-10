@@ -109,6 +109,10 @@ export interface PageRangeShardPlan {
 
 /** Recorded in workflow input so replay never depends on later env changes. */
 export interface DocumentShardingInput {
+  /** Explicit new-run opt-in; absent histories keep quarantine on one activity. */
+  quarantine?: boolean;
+  /** Recorded override for scans before trustworthy page counts exist. */
+  quarantineMinPagesPerShard?: number;
   /** Fewest documents worth a shard of their own. */
   minDocsPerShard: number;
   /** Most shards per stage; bounds workflow history. */
@@ -174,6 +178,11 @@ export interface FailRunInput {
    * recorded instead of `stage`.
    */
   stageGroup?: string[];
+  /**
+   * The Temporal ApplicationFailure type that ended the run, when there was one: "WorkerInterrupted" means the stage's
+   * infrastructure retries ran out (failure-classification.ts), and its unfinished documents get that public reason.
+   */
+  failureType?: string;
 }
 
 // ── Workflow input/output types ──
@@ -276,6 +285,8 @@ export interface VisionPageTask {
   inkCheck?: boolean;
   /** The page has usable native or OCR text to keep if vision gives nothing. */
   fallbackText?: boolean;
+  /** A scan beside native text: read by the VM OCR engine (DOCSLURP_OCR_MODE=vm), never a hosted vision model. */
+  vmOcr?: boolean;
   /** Set by slot-gated workflows only. */
   slotGate?: boolean;
 }

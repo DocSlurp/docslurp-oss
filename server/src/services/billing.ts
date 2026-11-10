@@ -1,6 +1,6 @@
 /**
  * Billing: prepaid credit packs and the single prepaid balance, per-unit
- * metering (PRICE_CARD), Stripe one-off checkout, webhooks and auto top-up.
+ * metering (pricing provider), Stripe one-off checkout, webhooks and auto top-up.
  * See docs/api-sdk.md (Credits) and the modules under ./billing/.
  */
 export {

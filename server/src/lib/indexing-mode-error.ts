@@ -1,6 +1,6 @@
 import type { Context } from "hono";
 import { apiStatusError } from "./api-error.js";
-import type { IndexingModeError } from "../services/workspace-indexing-mode.js";
+import type { IndexingModeError } from "../services/project-indexing-mode.js";
 
 /**
  * Native envelope for a deferred-indexing refusal. The envelope's `code` stays in

@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setVmIsolatedPageRangeStagesForTest } from "../pipeline/page-ranges.js";
-import { defaultPipelineFeatures } from "@docslurp/shared";
+import { defaultPipelineFeatures, pricingVersion } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
-import type { Document, StageState, WorkspaceRun, WorkspaceRunEvent } from "../models.js";
+import type { Document, StageState, ProjectRun, ProjectRunEvent } from "../models.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import {
   createStageExecution,
@@ -15,9 +15,9 @@ import { CommandTeardownError, recordUnverifiedTeardown, resetUnverifiedTeardown
 
 const config = { workerDocConcurrency: 2, workerAdaptiveTuning: false } as Config;
 
-function makeRun(overrides: Partial<WorkspaceRun> = {}): WorkspaceRun {
+function makeRun(overrides: Partial<ProjectRun> = {}): ProjectRun {
   return {
-    id: "run-1", orgId: "org-1", userId: "user-1", workspaceId: "ws-1", kind: "bulk-upload",
+    id: "run-1", orgId: "org-1", userId: "user-1", projectId: "ws-1", kind: "bulk-upload",
     status: "queued", stage: "queued", totalDocuments: 1, processedDocuments: 0, pagesTotal: 2,
     pagesProcessed: 0, spentCents: 0, pipeline: defaultPipelineFeatures,
     error: null, stats: {}, artifacts: { "doc-1:parse": "s3://db/parse" }, claimId: null,
@@ -39,7 +39,7 @@ class FakeStore implements StageExecutionStore {
   documents = [makeDocument()];
   checkpoints: StageState[] = [];
   completedPages = new Map<string, unknown>();
-  events: WorkspaceRunEvent[] = [];
+  events: ProjectRunEvent[] = [];
   calls: string[] = [];
   stageStatus = new Map<string, string>();
   runStatus = "queued";
@@ -68,7 +68,7 @@ class FakeStore implements StageExecutionStore {
     return total;
   }
   async updateProgress(state: WorkflowState) { this.runStatus = state.run.status; this.calls.push("updateProgress"); }
-  async appendEvent(event: WorkspaceRunEvent) { this.events.push(event); }
+  async appendEvent(event: ProjectRunEvent) { this.events.push(event); }
   async completeRun(state: WorkflowState) { this.runStatus = "completed"; this.calls.push(`completeRun:${state.totalStages}`); }
   async failRun(_runId: string, stage: string, message: string) { this.runStatus = "failed"; this.failures.push({ stage, message }); }
   currentStage: string | null = null;
@@ -220,7 +220,7 @@ describe("Stage Execution", () => {
     const output = await execution.startRun({ runId: "run-1", totalStages: 3 });
 
     expect(store.runStatus).toBe("processing");
-    expect(output).toEqual({ documentIds: ["doc-1"], artifacts: { "doc-1:parse": "s3://db/parse", "run:vision-routing-version": "v1" }, documentPages: [2], documentMimeTypes: ["application/pdf"] });
+    expect(output).toEqual({ documentIds: ["doc-1"], artifacts: { "doc-1:parse": "s3://db/parse", "run:vision-routing-version": "v3", "run:page-billing-rules": pricingVersion() }, documentPages: [2], documentMimeTypes: ["application/pdf"] });
     expect(store.events.map((event) => event.eventType)).toEqual(["run.started"]);
   });
 

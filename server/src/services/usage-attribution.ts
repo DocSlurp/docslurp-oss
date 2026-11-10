@@ -3,20 +3,20 @@ import { sql, type SqlClient } from "../db.js";
 import type { SqlFragment } from "../lib/sql-fragments.js";
 
 /**
- * Usage Event attribution: the single rule for which Workspace and
+ * Usage Event attribution: the single rule for which Project and
  * Organization a Usage Event counts against. Budgets, rate limits, billing,
  * and board telemetry all read spend through this module so they cannot drift.
  *
  * The rule lives in the `usage_attribution` SQL view (migration 0043), which
  * the worker's budget alerts read too:
- *  1. Writers stamp the scope at write time into the `org_id`, `workspace_id`
+ *  1. Writers stamp the scope at write time into the `org_id`, `project_id`
  *     and `api_key_id` columns (migration 0042), so spend survives run and
- *     workspace deletion. An event with `workspace_id` belongs to it.
- *  2. An event without one but with `metadata.workspaceIds[]` (cross-workspace
- *     answers) splits its cost and tokens evenly across those workspaces.
+ *     project deletion. An event with `project_id` belongs to it.
+ *  2. An event without one but with `metadata.projectIds[]` (cross-project
+ *     answers) splits its cost and tokens evenly across those projects.
  *  3. Anything else is org-only.
- * The org is `org_id` (else the workspace's org); a split row counts against
- * its split workspace's org, falling back to `org_id` once it is deleted.
+ * The org is `org_id` (else the project's org); a split row counts against
+ * its split project's org, falling back to `org_id` once it is deleted.
  *
  * API key attribution (per-key spend limits) is the `api_key_id` column:
  * the authenticating request's key, else the key that started the run.
@@ -41,7 +41,7 @@ export interface AttributedUsageRow {
   unit: string;
   metadata: Record<string, unknown>;
   api_key_id: string | null;
-  workspace_id: string | null;
+  project_id: string | null;
   org_id: string | null;
   source_kind: "ingest" | "search";
   share: number;
@@ -59,8 +59,8 @@ function windowPredicate(client: SqlClient, window: UsageWindow) {
 
 /**
  * Subquery fragment over the `usage_attribution` view, yielding one row per
- * (Usage Event, attributed workspace) with columns described by
- * `AttributedUsageRow`. Split events produce one row per workspace with
+ * (Usage Event, attributed project) with columns described by
+ * `AttributedUsageRow`. Split events produce one row per project with
  * proportional cost and tokens; aggregate distinct events with
  * `count(distinct id)`. Sums over it equal sums over the raw events.
  */
@@ -88,8 +88,8 @@ function toTotals(row: { tokens: unknown; cost_cents: unknown; event_count: unkn
   };
 }
 
-export async function workspaceUsageTotals(
-  workspaceId: string,
+export async function projectUsageTotals(
+  projectId: string,
   window: UsageWindow = "month",
   client: SqlClient = sql,
 ): Promise<UsageTotals> {
@@ -99,7 +99,7 @@ export async function workspaceUsageTotals(
       coalesce(sum(au.cost_cents), 0)::double precision as cost_cents,
       count(distinct au.id)::int as event_count
     from ${attributedUsage(window, client)} au
-    where au.workspace_id = ${workspaceId}
+    where au.project_id = ${projectId}
   `;
   return toTotals(row);
 }
@@ -299,15 +299,15 @@ export async function runUsageTotals(runId: string, client: SqlClient = sql): Pr
   return toAggregate(row);
 }
 
-/** Spend of a set of runs, counted only against one workspace (ingest report). */
+/** Spend of a set of runs, counted only against one project (ingest report). */
 /**
- * summarizeRunUsageCost over several runs of one workspace together (ingest
+ * summarizeRunUsageCost over several runs of one project together (ingest
  * report), so its cost agrees with the run records: billed spend plus the
- * flagged compute estimate. Scoped to the workspace, and by source run so
+ * flagged compute estimate. Scoped to the project, and by source run so
  * spend survives run deletion.
  */
-export async function workspaceRunsUsageCost(
-  workspaceId: string,
+export async function projectRunsUsageCost(
+  projectId: string,
   runIds: readonly string[],
   client: SqlClient = sql,
 ): Promise<RunUsageCostSummary> {
@@ -315,7 +315,7 @@ export async function workspaceRunsUsageCost(
   const [row] = await client<RunUsageCostTotalsRow[]>`
     select ${runUsageCostColumns(client)}
     from ${attributedUsage(null, client)} au
-    where au.workspace_id = ${workspaceId} and au.source_run_id = any(${client.array([...runIds])}::text[])
+    where au.project_id = ${projectId} and au.source_run_id = any(${client.array([...runIds])}::text[])
   `;
   return summarizeRunUsageCost(row);
 }
@@ -408,7 +408,7 @@ export async function orgIngestUsage(
       wr.stage as stage_name,
       au.created_at
     from ${attributedUsage(null, client)} au
-    left join workspace_runs wr on wr.id = au.run_id
+    left join project_runs wr on wr.id = au.run_id
     where au.org_id = ${args.orgId} and au.source_kind = 'ingest' ${runFilter}
     order by au.created_at desc
     limit ${args.limit}
@@ -433,7 +433,7 @@ export async function runCostBreakdown(
       round(coalesce(sum(au.input_tokens + au.output_tokens), 0))::int as tokens,
       coalesce(sum(au.cost_cents), 0)::double precision as cost_cents
     from ${attributedUsage(null, client)} au
-    left join workspace_runs wr on wr.id = au.run_id
+    left join project_runs wr on wr.id = au.run_id
     where au.source_run_id = ${args.runId} and au.org_id = ${args.orgId}
     group by wr.stage
     order by cost_cents desc
@@ -528,7 +528,7 @@ export async function runUsageCostTotals(
  *
  * `billedCostCents` is the ledger spend alone: the figure the run cost cap
  * (`pipeline.maxCostCents`) is enforced against, equal to
- * `workspace_runs.spent_cents` (kept by a usage_events trigger, migration
+ * `project_runs.spent_cents` (kept by a usage_events trigger, migration
  * 0056). `costCents = billedCostCents + estimatedComputeCents`.
  */
 export function summarizeRunUsageCost(row?: RunUsageCostTotalsRow | null) {
@@ -590,7 +590,7 @@ export interface ExtractUsageTotals {
 /**
  * Extract mode's own usage and cost, separable from uploads: every usage event
  * of an extract's run (also after the run is deleted, through source_run_id),
- * scoped to the org. Extract runs are workspace_runs with extract_id; the
+ * scoped to the org. Extract runs are project_runs with extract_id; the
  * extracts row outlives them, so the figures survive expiry.
  */
 export async function extractUsageTotals(orgId: string, since: UsageWindow, client: SqlClient = sql): Promise<ExtractUsageTotals> {
@@ -710,7 +710,7 @@ export async function providerCostLossItems(
     select i.kind, i.key, i.org_id, i.credit_cents, i.provider_cost_cents, i.estimated_cost_cents, i.refunded, i.top_model,
       case when i.kind = 'run' and wr.id is not null then greatest(i.last_event_at, wr.updated_at) else i.last_event_at end as judged_at
     from items i
-    left join workspace_runs wr on i.kind = 'run' and wr.id = i.key
+    left join project_runs wr on i.kind = 'run' and wr.id = i.key
     where i.provider_cost_cents > i.credit_cents + 0.000001
       and (i.kind <> 'search-session' or i.search_charged)
       and (i.kind <> 'run' or wr.id is null or wr.status = any(${TERMINAL_RUN_STATUSES}::text[]))

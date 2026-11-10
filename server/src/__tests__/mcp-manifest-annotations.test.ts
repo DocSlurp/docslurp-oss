@@ -11,7 +11,7 @@ describe("capability manifest annotations", () => {
   it("declares hints for every exposed MCP tool", () => {
     const manifest = mcpManifest("https://example.test", ["search", "chat", "ingest"]);
     const expected: Record<string, { readOnly: boolean; idempotent: boolean; consequential: boolean }> = {
-      listWorkspaces: { readOnly: true, idempotent: true, consequential: false },
+      listProjects: { readOnly: true, idempotent: true, consequential: false },
       upload: { readOnly: false, idempotent: false, consequential: true },
       extract: { readOnly: false, idempotent: false, consequential: true },
       completeUpload: { readOnly: false, idempotent: false, consequential: true },
@@ -26,11 +26,11 @@ describe("capability manifest annotations", () => {
       getJob: { readOnly: true, idempotent: true, consequential: false },
     };
     // Settings proposals are first-party-app only: no API key sees them, whatever its scopes.
-    const managed = mcpManifest("https://example.test", ["search", "workspaces:manage"], "server");
-    expect(managed.capabilities.some(tool => tool.id === "proposeWorkspaceSettings" || tool.id === "getWorkspaceSettings")).toBe(false);
+    const managed = mcpManifest("https://example.test", ["search", "projects:manage"], "server");
+    expect(managed.capabilities.some(tool => tool.id === "proposeProjectSettings" || tool.id === "getProjectSettings")).toBe(false);
     const app = mcpManifest("https://example.test", undefined, undefined, { firstPartyApp: true });
-    expect(app.capabilities.find(tool => tool.id === "getWorkspaceSettings")?.annotations).toMatchObject({ readOnly: true, idempotent: true, consequential: false });
-    expect(app.capabilities.find(tool => tool.id === "proposeWorkspaceSettings")?.annotations).toMatchObject({ readOnly: true, idempotent: true, consequential: false });
+    expect(app.capabilities.find(tool => tool.id === "getProjectSettings")?.annotations).toMatchObject({ readOnly: true, idempotent: true, consequential: false });
+    expect(app.capabilities.find(tool => tool.id === "proposeProjectSettings")?.annotations).toMatchObject({ readOnly: true, idempotent: true, consequential: false });
     expect(app.capabilities.some(tool => tool.id === "applySettingsProposal")).toBe(false);
     const tools = manifest.capabilities.filter((capability) => capability.category === "tool");
     expect(new Set(tools.map((tool) => tool.id))).toEqual(new Set(Object.keys(expected)));
@@ -53,7 +53,7 @@ describe("capability manifest annotations", () => {
 
   it("lists tools in product order with consistent sentence-case titles", () => {
     const tools = mcpManifest("https://example.test").capabilities.filter((capability) => capability.category === "tool");
-    expect(tools.slice(0, 5).map((tool) => tool.id)).toEqual(["listWorkspaces", "upload", "getUploadStatus", "search", "chat"]);
+    expect(tools.slice(0, 5).map((tool) => tool.id)).toEqual(["listProjects", "upload", "getUploadStatus", "search", "chat"]);
     expect(tools.at(-1)?.id).toBe("completeUpload");
     for (const tool of tools) {
       // Clients such as Claude.ai re-sort by id and show titles side by side, so no Title Case drift.

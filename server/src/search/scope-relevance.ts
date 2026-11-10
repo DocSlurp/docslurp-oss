@@ -6,12 +6,12 @@ import type { EvidenceRetrievalResult } from "./retrieval-adapters.js";
 /**
  * Server-side scope decline: a conservative UX shortcut, not a safety control.
  *
- * When a first-turn question is clearly unrelated to the workspace, chat can
+ * When a first-turn question is clearly unrelated to the project, chat can
  * answer with a templated polite decline and related questions instead of a
  * model turn. It fires only when every condition holds (decideScopeDecline):
  * a calibrated vector signal below the threshold, no conversation history, no
  * settings change from the message, no web tools, no request filters, a script
- * the scorer can segment, and a question that is not about the workspace
+ * the scorer can segment, and a question that is not about the project
  * itself, and no returned passage was found by a keyword, phrase, graph or
  * page-locator branch. In every other case the turn proceeds and the model applies the fixed
  * core rule (decline unrelated requests politely and suggest related ones).
@@ -75,18 +75,18 @@ export const SCOPE_MIN_CONTENT_TERMS = 3;
 const UNCALIBRATED_SCRIPT = /(?=\p{L})[^\p{Script=Latin}]/u;
 
 /**
- * Questions about the workspace itself (its files, uploads, processing, search
+ * Questions about the project itself (its files, uploads, processing, search
  * or settings) are in scope even though the documents rarely discuss them.
  */
-const WORKSPACE_META_TERMS = /^(?:workspaces?|uploads?|uploaded|uploading|files?|documents?|docs?|settings?|search(?:es|ed|ing)?|index(?:ed|ing|es)?|ingest(?:ed|ing|ion)?|process(?:ed|ing)?|pars(?:e|ed|ing|er)|extract(?:ed|ing|ion)?|ocr|pages?|pdfs?|videos?|audio|chat|citations?|cite[sd]?|corpus|folders?|sources?|attachments?)$/;
+const PROJECT_META_TERMS = /^(?:projects?|uploads?|uploaded|uploading|files?|documents?|docs?|settings?|search(?:es|ed|ing)?|index(?:ed|ing|es)?|ingest(?:ed|ing|ion)?|process(?:ed|ing)?|pars(?:e|ed|ing|er)|extract(?:ed|ing|ion)?|ocr|pages?|pdfs?|videos?|audio|chat|citations?|cite[sd]?|corpus|folders?|sources?|attachments?)$/;
 
-function isWorkspaceMetaQuestion(query: string): boolean {
-  return contentTerms(query).some(term => WORKSPACE_META_TERMS.test(term));
+function isProjectMetaQuestion(query: string): boolean {
+  return contentTerms(query).some(term => PROJECT_META_TERMS.test(term));
 }
 
-/** The workspace threshold, else CHAT_SCOPE_DECLINE_THRESHOLD, else the measured default; always within 0..1 (0 turns the shortcut off). */
-export function resolveScopeDeclineThreshold(workspaceThreshold: number | null | undefined, env: NodeJS.ProcessEnv = process.env): number {
-  if (typeof workspaceThreshold === "number" && Number.isFinite(workspaceThreshold)) return Math.max(0, Math.min(1, workspaceThreshold));
+/** The project threshold, else CHAT_SCOPE_DECLINE_THRESHOLD, else the measured default; always within 0..1 (0 turns the shortcut off). */
+export function resolveScopeDeclineThreshold(projectThreshold: number | null | undefined, env: NodeJS.ProcessEnv = process.env): number {
+  if (typeof projectThreshold === "number" && Number.isFinite(projectThreshold)) return Math.max(0, Math.min(1, projectThreshold));
   const raw = env.CHAT_SCOPE_DECLINE_THRESHOLD?.trim();
   if (raw) {
     const parsed = Number(raw);
@@ -97,7 +97,7 @@ export function resolveScopeDeclineThreshold(workspaceThreshold: number | null |
 
 export type ScopeDeclineSkip =
   | "disabled" | "history" | "search-configuration" | "web-tools" | "filters"
-  | "uncalibrated-script" | "short-question" | "workspace-meta" | "no-evidence" | "keyword-or-graph-evidence" | "uncalibrated";
+  | "uncalibrated-script" | "short-question" | "project-meta" | "no-evidence" | "keyword-or-graph-evidence" | "uncalibrated";
 
 export interface ScopeDeclineDecision {
   decline: boolean;
@@ -124,7 +124,7 @@ export interface ScopeDeclineInput {
 }
 
 /**
- * Whether this turn takes the templated decline. Workspace instructions take no
+ * Whether this turn takes the templated decline. Project instructions take no
  * part: an "answer anything" instruction cannot turn it off; only the threshold
  * setting (0) can.
  */
@@ -138,7 +138,7 @@ export function decideScopeDecline(input: ScopeDeclineInput): ScopeDeclineDecisi
   if (input.filtered) return skip("filters");
   if (UNCALIBRATED_SCRIPT.test(input.query)) return skip("uncalibrated-script");
   if (contentTerms(input.query).length < SCOPE_MIN_CONTENT_TERMS) return skip("short-question");
-  if (isWorkspaceMetaQuestion(input.query)) return skip("workspace-meta");
+  if (isProjectMetaQuestion(input.query)) return skip("project-meta");
   if (input.evidenceCount === 0) return skip("no-evidence");
   if (input.signal?.nonVectorEvidence) return skip("keyword-or-graph-evidence");
   if (input.signal?.relevance === null || input.signal?.relevance === undefined) return skip("uncalibrated");

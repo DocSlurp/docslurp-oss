@@ -7,14 +7,14 @@ import { escapeLikePattern } from "./filters.js";
 describe("native filter capabilities", () => {
   it("allows only explicitly implemented document filters", () => {
     expect(nativeScopeSupported(undefined)).toBe(true);
-    expect(nativeScopeSupported({ workspaceId: "workspace", documentIds: ["document"], tags: ["tag"] })).toBe(true);
+    expect(nativeScopeSupported({ projectId: "project", documentIds: ["document"], tags: ["tag"] })).toBe(true);
     expect(nativeScopeSupported({ language: "en" })).toBe(false);
     expect(nativeScopeSupported({ pageRange: { from: 1 } })).toBe(false);
   });
   it("fails closed for future filters, including geo", () => {
-    const filters: SearchFilters = { workspaceId: "workspace", geo: { field: "site", op: "bbox", bbox: [0, 0, 1, 1] } };
+    const filters: SearchFilters = { projectId: "project", geo: { field: "site", op: "bbox", bbox: [0, 0, 1, 1] } };
     expect(nativeScopeSupported(filters)).toBe(false);
-    const future = { workspaceId: "workspace", futurePredicate: {} };
+    const future = { projectId: "project", futurePredicate: {} };
     expect(nativeScopeSupported(future)).toBe(false);
   });
   it("matches filenameContains literally and filenameEquals exactly", () => {
@@ -23,7 +23,7 @@ describe("native filter capabilities", () => {
     expect(ilikeContainsMatcher(escapeLikePattern("report_1"))("report11.pdf")).toBe(false);
     expect(ilikeContainsMatcher(escapeLikePattern("report_1"))("Q3 REPORT_1.pdf")).toBe(true);
     const documents = ["report_1.pdf", "report11.pdf", "%.pdf"].map((filename) => ({ id: filename, filename, mimeType: "application/pdf", tags: [], runId: "r" }));
-    const set = { workspaceId: "w", documents } as unknown as Parameters<typeof scopeEligibleDocuments>[0];
+    const set = { projectId: "w", documents } as unknown as Parameters<typeof scopeEligibleDocuments>[0];
     const ids = (filters: SearchFilters) => scopeEligibleDocuments(set, filters, undefined).map((document) => document.id);
     expect(ids({ filenameContains: "report_1" })).toEqual(["report_1.pdf"]);
     expect(ids({ filenameContains: "%" })).toEqual(["%.pdf"]);

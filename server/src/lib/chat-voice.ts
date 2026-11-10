@@ -6,7 +6,7 @@ import { ProviderRegionRefusedError, assertProviderAllowed, authorizePrivateMode
 import { CHAT_VOICE_MODEL, CHAT_VOICE_MAX_BYTES } from "@docslurp/shared/chat-voice";
 import { recordUsageEvent, type UsageScope } from "./ai-usage.js";
 import { resolveOpenRouterApiKey } from "./ai.js";
-import { allowHostedCallForWorkspace, openRouterCall } from "./privacy.js";
+import { allowHostedCallForProject, openRouterCall } from "./privacy.js";
 
 export class ChatVoiceError extends Error {
   constructor(message: string, public status: 400 | 403 | 413 | 415 | 502 | 503, options?: ErrorOptions) {
@@ -37,9 +37,9 @@ const privateTranscriptionSchema = z.object({
 }).passthrough();
 
 /**
- * Operator speech-to-text route for workspaces that forbid hosted providers:
+ * Operator speech-to-text route for projects that forbid hosted providers:
  * `DOCSLURP_PRIVATE_STT_MODEL` when it names a registered `stt` model.
- * Standard workspaces keep the hosted route.
+ * Standard projects keep the hosted route.
  */
 export function privateSttModelFor(privacyMode: PrivacyMode): string | undefined {
   if (privacyModeAllowsHosted(privacyMode)) return undefined;
@@ -89,13 +89,13 @@ async function validateRecording(audio: unknown): Promise<{ audio: Blob; bytes: 
 /** Mastra's text-only listen contract, with provider usage persisted before returning.
  * A request-scoped adapter preserves JSON usage that text-only voice providers drop.
  */
-export class WorkspaceChatVoice extends MastraVoice {
+export class ProjectChatVoice extends MastraVoice {
   constructor(
     private readonly context: { userId: string; scope: UsageScope },
     /** Speech-to-text is hosted-only, so non-standard privacy modes disable it. */
     private readonly privacyMode: PrivacyMode,
   ) {
-    super({ name: "workspace-chat-voice", listeningModel: { name: CHAT_VOICE_MODEL } });
+    super({ name: "project-chat-voice", listeningModel: { name: CHAT_VOICE_MODEL } });
   }
 
   async getListener() {
@@ -106,7 +106,7 @@ export class WorkspaceChatVoice extends MastraVoice {
   }
 
   async speak(): Promise<never> {
-    throw new Error("Workspace voice supports speech input only");
+    throw new Error("Project voice supports speech input only");
   }
 
   async listen(input: unknown): Promise<string> {
@@ -116,20 +116,20 @@ export class WorkspaceChatVoice extends MastraVoice {
     if (privateModel) return await this.listenPrivate(audio, bytes, privateModel);
     const apiKey = resolveOpenRouterApiKey()?.trim();
     if (!apiKey) throw new ChatVoiceError("Voice input is not configured. You can still type your message.", 503);
-    // Audio is workspace input; refuse before reading it when the workspace forbids hosted providers.
-    if (!(await allowHostedCallForWorkspace({
+    // Audio is project input; refuse before reading it when the project forbids hosted providers.
+    if (!(await allowHostedCallForProject({
       privacyMode: this.privacyMode,
-      workspaceId: this.context.scope.workspaceId ?? null,
+      projectId: this.context.scope.projectId ?? null,
       call: openRouterCall("api.chat.transcription", CHAT_VOICE_MODEL),
     }))) {
       throw new ChatVoiceError(
-        `Voice input is unavailable because this workspace's privacy mode (${this.privacyMode}) does not allow hosted speech-to-text. You can still type your message.`,
+        `Voice input is unavailable because this project's privacy mode (${this.privacyMode}) does not allow hosted speech-to-text. You can still type your message.`,
         403,
       );
     }
     assertProviderAllowed(this.privacyMode, { provider: "openrouter", model: CHAT_VOICE_MODEL, operation: "api.chat.transcription", target: "hosted" });
 
-    await assertCanSpend(this.context.scope.orgId, this.context.scope.workspaceId);
+    await assertCanSpend(this.context.scope.orgId, this.context.scope.projectId);
     const body = JSON.stringify({
       model: CHAT_VOICE_MODEL,
       input_audio: { data: Buffer.from(bytes).toString("base64"), format: "wav" },
@@ -142,7 +142,7 @@ export class WorkspaceChatVoice extends MastraVoice {
     }, { kind: "client" });
     let response: Response;
     try {
-      // The routing fetch adds the org/workspace China-provider restriction (or refuses) like every OpenRouter call.
+      // The routing fetch adds the org/project China-provider restriction (or refuses) like every OpenRouter call.
       response = await span.run(() => createOpenRouterRoutingFetch()("https://openrouter.ai/api/v1/audio/transcriptions", {
         method: "POST",
         headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
@@ -205,13 +205,13 @@ export class WorkspaceChatVoice extends MastraVoice {
         modelUri,
         capability: "stt",
         operation: "api.chat.transcription",
-        auditScope: { workspaceId: this.context.scope.workspaceId ?? null },
+        auditScope: { projectId: this.context.scope.projectId ?? null },
       });
     } catch (error) {
       console.error(`[chat-voice] private_transcription_refused model=${modelUri} error=${error instanceof Error ? error.message : String(error)}`);
       throw new ChatVoiceError("Voice input is unavailable. You can still type your message.", 503, { cause: error });
     }
-    await assertCanSpend(this.context.scope.orgId, this.context.scope.workspaceId);
+    await assertCanSpend(this.context.scope.orgId, this.context.scope.projectId);
     const form = new FormData();
     form.append("file", new Blob([bytes], { type: "audio/wav" }), "recording.wav");
     form.append("model", call.model);

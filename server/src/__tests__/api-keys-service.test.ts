@@ -14,13 +14,13 @@ const { recordApiKeyRequest } = vi.hoisted(() => ({ recordApiKeyRequest: vi.fn()
 vi.mock("../services/api-key-usage.js", () => ({ recordApiKeyRequest }));
 
 vi.mock("../services/organizations.js", () => ({
-  ensurePersonalOrganization: vi.fn(),
+  resolveDefaultOrganization: vi.fn(),
   getOrganization: vi.fn(),
   withOrganizationLock: vi.fn(async (_orgId: string, _userId: string, operation: (tx: unknown, actor: { role: string }) => unknown) => operation(txMock, { role: "owner" })),
   OrganizationError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message); } }
 }));
 
-const { apiKeyTypeFromPrefix, ApiKeyTypeChangeError, ClientKeyOriginNotAllowedError, ClientKeyWorkspacesRequiredError, createApiKey, getLiveApiKeyById, rotateApiKey, updateApiKey, validateApiKey } = await import("../services/api-keys.js");
+const { apiKeyTypeFromPrefix, ApiKeyTypeChangeError, ClientKeyOriginNotAllowedError, ClientKeyProjectsRequiredError, createApiKey, getLiveApiKeyById, rotateApiKey, updateApiKey, validateApiKey } = await import("../services/api-keys.js");
 const organizations = await import("../services/organizations.js");
 
 function buildKeyRow(rawKey: string, overrides: Record<string, unknown> = {}) {
@@ -70,7 +70,7 @@ describe("validateApiKey", () => {
 
   it.each(["null", "invalid-origin"])("does not replace explicit opaque/invalid origin %s with an allowed referer", async (origin) => {
     const rawKey = "dslp_client";
-    sqlMock.mockResolvedValue([buildKeyRow(rawKey, { key_type: "client", allowed_domains: ["app.docslurp.dev"], workspace_ids: ["ws-1"] })]);
+    sqlMock.mockResolvedValue([buildKeyRow(rawKey, { key_type: "client", allowed_domains: ["app.docslurp.dev"], project_ids: ["ws-1"] })]);
     await expect(validateApiKey(rawKey, { origin, referer: "https://app.docslurp.dev/page" })).rejects.toMatchObject({ status: 403, code: "client_key_origin_not_allowed" });
     expect(sqlMock).toHaveBeenCalledTimes(1);
   });
@@ -124,7 +124,7 @@ describe("validateApiKey", () => {
     const keyRow = buildKeyRow(rawKey, {
       key_type: "client",
       allowed_domains: ["*.docslurp.dev"],
-      workspace_ids: ["ws-1"],
+      project_ids: ["ws-1"],
       scopes: ["search"],
       rate_limit_ppd: 10000
     });
@@ -168,7 +168,7 @@ describe("validateApiKey", () => {
     const rawKey = "dslp_docs_client";
     sqlMock.mockImplementation(async (strings: TemplateStringsArray) => {
       const text = strings.join(" ");
-      if (text.includes("select * from api_keys")) return [buildKeyRow(rawKey, { key_type: "client", allowed_domains: ["docslurp.io"], scopes: ["search"], workspace_ids: ["ws-1"] })];
+      if (text.includes("select * from api_keys")) return [buildKeyRow(rawKey, { key_type: "client", allowed_domains: ["docslurp.io"], scopes: ["search"], project_ids: ["ws-1"] })];
       if (text.includes("coalesce(sum")) return [{ request_count: 0, page_count: 0 }];
       return [];
     });
@@ -206,7 +206,7 @@ describe("validateApiKey", () => {
     [["bücher.example"], "https://xn--bcher-kva.example", true],
   ])("matches allowlist %j against Origin %s → %s", async (allowed, origin, accepted) => {
     const rawKey = "dslp_pub_origin_matrix";
-    sqlMock.mockResolvedValue([buildKeyRow(rawKey, { key_type: "client", allowed_domains: allowed, scopes: ["search"], workspace_ids: ["ws-1"] })]);
+    sqlMock.mockResolvedValue([buildKeyRow(rawKey, { key_type: "client", allowed_domains: allowed, scopes: ["search"], project_ids: ["ws-1"] })]);
     expect(await originAccepted(rawKey, { origin })).toBe(accepted);
   });
 
@@ -249,7 +249,7 @@ describe("typed key prefixes", () => {
   });
 });
 
-describe("client key scopes and workspace allowlists (G-03)", () => {
+describe("client key scopes and project allowlists (G-03)", () => {
   beforeEach(() => {
     sqlMock.mockReset();
     txMock.mockReset();
@@ -257,44 +257,44 @@ describe("client key scopes and workspace allowlists (G-03)", () => {
     vi.mocked(organizations.getOrganization).mockResolvedValue({ id: "org-1" } as never);
   });
 
-  it("creates client keys search-only by default, bound to the named workspaces", async () => {
+  it("creates client keys search-only by default, bound to the named projects", async () => {
     txMock.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const text = strings.join("?");
       if (text.includes("insert into api_keys")) {
-        return [buildKeyRow("x", { key_type: "client", allowed_domains: values[6], scopes: values[7], workspace_ids: values[11] })];
+        return [buildKeyRow("x", { key_type: "client", allowed_domains: values[6], scopes: values[7], project_ids: values[11] })];
       }
-      if (text.includes("from workspaces w")) return [{ id: "ws-1" }];
+      if (text.includes("from projects w")) return [{ id: "ws-1" }];
       return [];
     });
-    const { key } = await createApiKey("user-1", "Widget", { orgId: "org-1", keyType: "client", allowedDomains: ["*.DocSlurp.dev", "https://docs.example.com:8443/"], workspaceIds: ["ws-1"] });
+    const { key } = await createApiKey("user-1", "Widget", { orgId: "org-1", keyType: "client", allowedDomains: ["*.DocSlurp.dev", "https://docs.example.com:8443/"], projectIds: ["ws-1"] });
     expect(key.scopes).toEqual(["search"]);
-    expect(key.workspaceIds).toEqual(["ws-1"]);
+    expect(key.projectIds).toEqual(["ws-1"]);
     expect(key.allowedDomains).toEqual(["*.docslurp.dev", "https://docs.example.com:8443"]);
   });
 
-  it("refuses to create or save a browser key without a workspace allowlist", async () => {
-    txMock.mockImplementation(async (strings: TemplateStringsArray) => strings.join("?").includes("from workspaces w") ? [{ id: "ws-1" }] : []);
+  it("refuses to create or save a browser key without a project allowlist", async () => {
+    txMock.mockImplementation(async (strings: TemplateStringsArray) => strings.join("?").includes("from projects w") ? [{ id: "ws-1" }] : []);
     await expect(createApiKey("user-1", "Widget", { orgId: "org-1", keyType: "client", allowedDomains: ["docslurp.dev"] }))
-      .rejects.toMatchObject({ status: 400, code: "client_key_workspaces_required" });
-    await expect(createApiKey("user-1", "Widget", { orgId: "org-1", keyType: "client", allowedDomains: ["docslurp.dev"], workspaceIds: [] }))
-      .rejects.toMatchObject({ code: "client_key_workspaces_required" });
-    // A legacy key with none must name workspaces on its next save, and a save cannot empty the list.
+      .rejects.toMatchObject({ status: 400, code: "client_key_projects_required" });
+    await expect(createApiKey("user-1", "Widget", { orgId: "org-1", keyType: "client", allowedDomains: ["docslurp.dev"], projectIds: [] }))
+      .rejects.toMatchObject({ code: "client_key_projects_required" });
+    // A legacy key with none must name projects on its next save, and a save cannot empty the list.
     sqlMock.mockResolvedValue([{ org_id: "org-1" }]);
-    txMock.mockResolvedValueOnce([buildKeyRow("dslp_pub_legacy", { key_type: "client", allowed_domains: ["docslurp.dev"], scopes: ["search"], workspace_ids: [] })]);
-    await expect(updateApiKey("key-1", "user-1", { name: "Renamed" })).rejects.toMatchObject({ code: "client_key_workspaces_required" });
-    txMock.mockResolvedValueOnce([buildKeyRow("dslp_pub_bound", { key_type: "client", allowed_domains: ["docslurp.dev"], scopes: ["search"], workspace_ids: ["ws-1"] })]);
-    await expect(updateApiKey("key-1", "user-1", { workspaceIds: [] })).rejects.toMatchObject({ code: "client_key_workspaces_required" });
-    // The fix: a save that adds workspaces to the legacy key (here with new websites too) succeeds.
+    txMock.mockResolvedValueOnce([buildKeyRow("dslp_pub_legacy", { key_type: "client", allowed_domains: ["docslurp.dev"], scopes: ["search"], project_ids: [] })]);
+    await expect(updateApiKey("key-1", "user-1", { name: "Renamed" })).rejects.toMatchObject({ code: "client_key_projects_required" });
+    txMock.mockResolvedValueOnce([buildKeyRow("dslp_pub_bound", { key_type: "client", allowed_domains: ["docslurp.dev"], scopes: ["search"], project_ids: ["ws-1"] })]);
+    await expect(updateApiKey("key-1", "user-1", { projectIds: [] })).rejects.toMatchObject({ code: "client_key_projects_required" });
+    // The fix: a save that adds projects to the legacy key (here with new websites too) succeeds.
     txMock.mockReset();
     Object.assign(txMock, { array: (value: unknown) => value, json: (value: unknown) => value });
     txMock.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const text = strings.join("?");
-      if (text.includes("for update")) return [buildKeyRow("dslp_pub_legacy", { key_type: "client", allowed_domains: ["docslurp.dev"], scopes: ["search"], workspace_ids: [] })];
-      if (text.includes("from workspaces w")) return [{ id: "ws-1" }];
-      if (text.includes("update api_keys set")) return [buildKeyRow("dslp_pub_legacy", { key_type: "client", allowed_domains: values[1], scopes: ["search"], workspace_ids: ["ws-1"] })];
+      if (text.includes("for update")) return [buildKeyRow("dslp_pub_legacy", { key_type: "client", allowed_domains: ["docslurp.dev"], scopes: ["search"], project_ids: [] })];
+      if (text.includes("from projects w")) return [{ id: "ws-1" }];
+      if (text.includes("update api_keys set")) return [buildKeyRow("dslp_pub_legacy", { key_type: "client", allowed_domains: values[1], scopes: ["search"], project_ids: ["ws-1"] })];
       return [];
     });
-    await expect(updateApiKey("key-1", "user-1", { workspaceIds: ["ws-1"], allowedDomains: ["*.docslurp.dev"] })).resolves.toMatchObject({ workspaceIds: ["ws-1"] });
+    await expect(updateApiKey("key-1", "user-1", { projectIds: ["ws-1"], allowedDomains: ["*.docslurp.dev"] })).resolves.toMatchObject({ projectIds: ["ws-1"] });
   });
 
   it.each(["github.io", "*.github.io", "vercel.app", "https://netlify.app", "co.uk", "com", "*.com", "pages.dev:443",
@@ -302,55 +302,55 @@ describe("client key scopes and workspace allowlists (G-03)", () => {
     "*.s3.us-east-1.amazonaws.com", "*.blob.core.windows.net", "*.gitbook.io", "*.eu.org", "foo.ck",
     // Wildcards that sit above public suffixes, so they would cover other tenants' hosts.
     "*.amazonaws.com", "*.compute.amazonaws.com", "*.windows.net", "*.core.windows.net", "https://*.amazonaws.com:443"])("refuses public-suffix-only allowed domain %s at key creation", async (domain) => {
-    txMock.mockImplementation(async (strings: TemplateStringsArray) => strings.join("?").includes("from workspaces w") ? [{ id: "ws-1" }] : []);
-    await expect(createApiKey("user-1", "Widget", { orgId: "org-1", keyType: "client", allowedDomains: [domain], workspaceIds: ["ws-1"] }))
+    txMock.mockImplementation(async (strings: TemplateStringsArray) => strings.join("?").includes("from projects w") ? [{ id: "ws-1" }] : []);
+    await expect(createApiKey("user-1", "Widget", { orgId: "org-1", keyType: "client", allowedDomains: [domain], projectIds: ["ws-1"] }))
       .rejects.toMatchObject({ status: 400, code: "invalid_allowed_domain" });
   });
 
   it.each(["myname.github.io", "*.example.co.uk", "localhost:4321", "127.0.0.1:3000", "docs.example.com", "mybucket.s3.us-east-1.amazonaws.com", "www.ck", "*.mybucket.s3.us-east-1.amazonaws.com", "*.docs.example.com", "amazonaws.com"])("accepts an owned domain %s", async (domain) => {
     txMock.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const text = strings.join("?");
-      if (text.includes("insert into api_keys")) return [buildKeyRow("x", { key_type: "client", allowed_domains: values[6], scopes: values[7], workspace_ids: values[11] })];
-      return text.includes("from workspaces w") ? [{ id: "ws-1" }] : [];
+      if (text.includes("insert into api_keys")) return [buildKeyRow("x", { key_type: "client", allowed_domains: values[6], scopes: values[7], project_ids: values[11] })];
+      return text.includes("from projects w") ? [{ id: "ws-1" }] : [];
     });
-    await expect(createApiKey("user-1", "Widget", { orgId: "org-1", keyType: "client", allowedDomains: [domain], workspaceIds: ["ws-1"] })).resolves.toBeDefined();
+    await expect(createApiKey("user-1", "Widget", { orgId: "org-1", keyType: "client", allowedDomains: [domain], projectIds: ["ws-1"] })).resolves.toBeDefined();
   });
 
   it.each(["ftp://docslurp.io", "docslurp.io/path", "doc*slurp.io", "user@docslurp.io"])("refuses a malformed allowed domain %s", async (domain) => {
-    txMock.mockImplementation(async (strings: TemplateStringsArray) => strings.join("?").includes("from workspaces w") ? [{ id: "ws-1" }] : []);
-    await expect(createApiKey("user-1", "Widget", { orgId: "org-1", keyType: "client", allowedDomains: [domain], workspaceIds: ["ws-1"] }))
+    txMock.mockImplementation(async (strings: TemplateStringsArray) => strings.join("?").includes("from projects w") ? [{ id: "ws-1" }] : []);
+    await expect(createApiKey("user-1", "Widget", { orgId: "org-1", keyType: "client", allowedDomains: [domain], projectIds: ["ws-1"] }))
       .rejects.toMatchObject({ code: "invalid_allowed_domain" });
   });
 
-  it.each([["ingest"], ["artifacts"], ["web"], ["workspaces:manage"], ["organizations:read"], ["search", "ingest"]])("refuses a browser key asking for server scope %j, even with the old opt-in", async (...scopes) => {
-    txMock.mockImplementation(async (strings: TemplateStringsArray) => strings.join("?").includes("from workspaces w") ? [{ id: "ws-1" }] : []);
-    await expect(createApiKey("user-1", "Widget", { orgId: "org-1", keyType: "client", allowedDomains: ["docs.example.com"], workspaceIds: ["ws-1"], scopes, allowClientSensitiveScopes: true }))
+  it.each([["ingest"], ["artifacts"], ["web"], ["projects:manage"], ["organizations:read"], ["search", "ingest"]])("refuses a browser key asking for server scope %j, even with the old opt-in", async (...scopes) => {
+    txMock.mockImplementation(async (strings: TemplateStringsArray) => strings.join("?").includes("from projects w") ? [{ id: "ws-1" }] : []);
+    await expect(createApiKey("user-1", "Widget", { orgId: "org-1", keyType: "client", allowedDomains: ["docs.example.com"], projectIds: ["ws-1"], scopes, allowClientSensitiveScopes: true }))
       .rejects.toMatchObject({ status: 400, code: "invalid_key_scope" });
   });
 
-  it("rejects allowlisted workspaces outside the key's org", async () => {
+  it("rejects allowlisted projects outside the key's org", async () => {
     txMock.mockResolvedValue([]);
-    await expect(createApiKey("user-1", "Bound", { orgId: "org-1", workspaceIds: ["ws-elsewhere"] })).rejects.toThrow(/Workspace not found/);
+    await expect(createApiKey("user-1", "Bound", { orgId: "org-1", projectIds: ["ws-elsewhere"] })).rejects.toThrow(/Project not found/);
   });
 
-  it("refuses a legacy browser key with no workspace allowlist instead of widening it to the whole org", async () => {
+  it("refuses a legacy browser key with no project allowlist instead of widening it to the whole org", async () => {
     const rawKey = "dslp_pub_legacy";
-    sqlMock.mockResolvedValue([buildKeyRow(rawKey, { key_type: "client", allowed_domains: ["docslurp.dev"], scopes: ["ingest", "search", "artifacts"], workspace_ids: [] })]);
+    sqlMock.mockResolvedValue([buildKeyRow(rawKey, { key_type: "client", allowed_domains: ["docslurp.dev"], scopes: ["ingest", "search", "artifacts"], project_ids: [] })]);
     const refused = validateApiKey(rawKey, { origin: "https://docslurp.dev" });
-    await expect(refused).rejects.toBeInstanceOf(ClientKeyWorkspacesRequiredError);
-    await expect(validateApiKey(rawKey, { origin: "https://docslurp.dev" })).rejects.toThrow(/workspaceIds/);
+    await expect(refused).rejects.toBeInstanceOf(ClientKeyProjectsRequiredError);
+    await expect(validateApiKey(rawKey, { origin: "https://docslurp.dev" })).rejects.toThrow(/projectIds/);
     // The website check comes first.
     await expect(validateApiKey(rawKey, { origin: "https://evil.example" })).rejects.toBeInstanceOf(ClientKeyOriginNotAllowedError);
-    sqlMock.mockResolvedValue([buildKeyRow(rawKey, { key_type: "client", allowed_domains: ["docslurp.dev"], scopes: ["ingest", "search"], workspace_ids: ["ws-1"] })]);
-    // Bound to workspaces, but a browser key still never gets server scopes: legacy ingest is dropped.
-    expect(await validateApiKey(rawKey, { origin: "https://docslurp.dev" })).toMatchObject({ scopes: ["search"], workspaceIds: ["ws-1"] });
+    sqlMock.mockResolvedValue([buildKeyRow(rawKey, { key_type: "client", allowed_domains: ["docslurp.dev"], scopes: ["ingest", "search"], project_ids: ["ws-1"] })]);
+    // Bound to projects, but a browser key still never gets server scopes: legacy ingest is dropped.
+    expect(await validateApiKey(rawKey, { origin: "https://docslurp.dev" })).toMatchObject({ scopes: ["search"], projectIds: ["ws-1"] });
   });
 });
 
 it.each(["client", "server"])("missing stored scopes on a %s key never use creation defaults", async (keyType) => {
   sqlMock.mockReset();
   const rawKey = keyType === "client" ? "dslp_pub_missing" : "dslp_priv_missing";
-  sqlMock.mockResolvedValue([buildKeyRow(rawKey, { key_type: keyType, scopes: null, allowed_domains: ["docs.example.com"], workspace_ids: ["w"] })]);
+  sqlMock.mockResolvedValue([buildKeyRow(rawKey, { key_type: keyType, scopes: null, allowed_domains: ["docs.example.com"], project_ids: ["w"] })]);
   expect((await validateApiKey(rawKey, { origin: "https://docs.example.com" }))?.scopes).toEqual([]);
   expect((await getLiveApiKeyById("key-1"))?.scopes).toEqual([]);
 });

@@ -2,12 +2,12 @@
 
 DocSlurp's default models come mostly from Chinese labs (DeepSeek, Qwen, GLM), and by default those models
 may be served by China-based hosts when those hosts are the cheapest that meet quality. Organizations and
-workspaces can turn China-based providers off. This page covers the default, the opt-out, how a provider's
+projects can turn China-based providers off. This page covers the default, the opt-out, how a provider's
 region is decided, and what DocSlurp records.
 
 ## Default
 
-China-based providers are **allowed** by default (`allowChinaProviders: true` on organizations and workspaces).
+China-based providers are **allowed** by default (`allowChinaProviders: true` on organizations and projects).
 
 - **Vision (Rich pages):** the default model, `deepseek/deepseek-v4.1-flash-1017`, is served by Together,
   Fireworks or Parasail. OpenRouter picks the cheapest of them at request time
@@ -36,14 +36,14 @@ records (`china-ds1017-20261029-{tune,select}`). Endpoint prices: `docs/evals/vi
 
 - **Organization (owners and admins):** `PATCH /v1/organizations/:orgId { "allowChinaProviders": false }`
   (SDK `updateOrganization`).
-- **Workspace:** `PATCH /v1/workspaces/:workspace { "allowChinaProviders": false }` (SDK `updateWorkspace`). A
-  workspace can only narrow its organization's setting: a request may use China-based providers only when the
-  organization **and** every workspace whose content the request sends allow them. Setting a workspace to
+- **Project:** `PATCH /v1/projects/:project { "allowChinaProviders": false }` (SDK `updateProject`). A
+  project can only narrow its organization's setting: a request may use China-based providers only when the
+  organization **and** every project whose content the request sends allow them. Setting a project to
   `true` inside an organization that turned them off changes nothing.
 
 Changes apply within 30 seconds on the API and at the next run on the worker.
 
-When the setting is off, every hosted model request made for that organization or workspace is restricted:
+When the setting is off, every hosted model request made for that organization or project is restricted:
 
 - **OpenRouter:** the request carries `provider.only`, an allowlist of the providers with a known headquarters
   outside China, and `provider.ignore` with every China-based provider. Any `only` or `order` entry the code
@@ -56,15 +56,30 @@ When the setting is off, every hosted model request made for that organization o
   model's lab behind OpenRouter's `/systemone`) is not on the allowlist, and the page router falls back as it
   does for any unavailable model.
 - **Unknown scope fails closed.** Worker calls outside a run's provider scope, API calls with no user,
-  organization or workspace, and a missing organization or workspace are all treated as turned off.
+  organization or project, and a missing organization or project are all treated as turned off.
 
 The vision route retains the same three hosts with either setting. Turning the setting off can make
 some text models unavailable:
 
 - **`qwen/qwen3.5-flash-02-23` (the default pipeline text model) is served only by Alibaba.** With China-based
-  providers off, text stages that use it (summaries, document maps, propositions, structured extraction) have no
-  allowed host and fail. Choose a text model with non-China hosts for such workspaces
-  (`pipeline.textGeneration.model`). This was already the case before this change.
+  providers off, OpenRouter answers its requests with 404 "No allowed providers". Pipeline text calls (summaries,
+  graph extraction, document maps and other worker text stages, whichever pipeline model is set) and the API's
+  helpers on the default search model then fall back to an
+  open-weight model with non-China hosts, `openai/gpt-oss-120b` (Apache-2.0; 21 of 26 endpoints outside China on
+  2026-11-06), still under the same host restriction and at its lowest reasoning (`minimal`).
+  - Only text requests that set no routing of their own fall back. A request that pins providers, a price or
+    data policy, or lists `models`, `:free` variants, and requests with images, files or audio are never
+    re-targeted.
+  - Chat with a model the user chose (including the search-settings step that uses it), and purpose-built
+    classifiers such as output moderation, never fall back: another model cannot stand in for them.
+  - A speed-boost request first retries its base model, as before.
+  - A model found unservable is remembered for 30 minutes, so later restricted requests go straight to the
+    fallback. Requests that allow China-based hosts are never affected.
+  - Each fallback logs `[openrouter] region_fallback`. The usage record names the model that ran and keeps the
+    stage's model as `requestedModel`, with `regionFallback: true`.
+  - Set `OPENROUTER_RESTRICTED_FALLBACK_MODEL` to another model, or to `none` to turn the fallback off and fail
+    instead; a `:variant` or prohibited model is ignored. To choose the model that runs, set
+    `pipeline.textGeneration.model` to a model with non-China hosts; it then never needs the fallback.
 - Providers whose region is unknown (for example Relace, Typesafe, Liquid, NEAR AI, Makora) are never used
   while the setting is off.
 
@@ -100,7 +115,8 @@ changed row, and update the date. A provider missing from the table is `unknown`
 
 Vision and OpenRouter text usage records carry `servedProvider` (the host OpenRouter reported),
 `servedProviderSlug` and `servedProviderRegion` in their metadata, so spend can be broken down by host region.
-Billing still uses the served host's reported charge (`usage.cost`); list prices only bound requests.
+Billing still uses the served host's reported charge (`usage.cost`); list prices only bound requests. A
+request re-targeted at the restricted fallback is priced and recorded as the fallback model.
 
 ## Public disclosures
 

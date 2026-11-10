@@ -11,5 +11,4 @@ onlyBuiltDependencies:
   - protobufjs
   - sharp
 
-# Hold every newly resolved dependency for 24 hours, including native parsers.
 minimumReleaseAge: 1440

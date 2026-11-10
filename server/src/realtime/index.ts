@@ -1,4 +1,5 @@
-import { revalidateRealtimeSession } from "./session.js";
+import { durableChatAdmissionEnabled, realtimeCanaryOrgIds } from "./rollout-scope.js";
+import { hasRealtimeCanaryMembership, revalidateRealtimeSession } from "./session.js";
 import type { Server } from "node:http";
 import { attachRealtimeServer } from "./node.js";
 import { realtimeBackend } from "./backend.js";
@@ -7,6 +8,7 @@ import { sql } from "../db.js";
 import { createChatOperationProvider } from "../services/chat-operation-access.js";
 import { env } from "../config.js";
 import type { RealtimeOperationProvider } from "../services/realtime-operation.js";
+export { durableChatAdmissionEnabled, realtimeCanaryOrgAllowed } from "./rollout-scope.js";
 export { attachRealtimeServer } from "./node.js";
 export type { RealtimeHostOptions, RealtimeSession } from "./node.js";
 export type { RealtimeOperationProvider, RealtimeOperationObserver, RealtimeOperationSubscription } from "../services/realtime-operation.js";
@@ -17,13 +19,16 @@ export { revisionMaintenanceMetrics } from "./revision-maintenance.js";
  * actual Node server; mounting Hono's fetch handler alone cannot handle Upgrade.
  */
 export function attachFirstPartyRealtime(server: Server, options: { operations?: RealtimeOperationProvider } = {}) {
+  durableChatAdmissionEnabled(); // Validate policy without changing accepted execution.
+  realtimeCanaryOrgIds(); // Validate before attaching even when global flags are off.
   return attachRealtimeServer(server, {
     enabled: process.env.REALTIME_ENABLED === "true",
     allowedOrigins: process.env.CORS_ALLOWED_ORIGINS ? env.corsAllowedOrigins : [new URL(env.appUrl).origin],
     backend: realtimeBackend,
     operations: options.operations,
     authenticate: authenticateRealtimeSession,
-    revalidate: revalidateRealtimeSession,
+    revalidate: async (session, signal) => await revalidateRealtimeSession(session, signal)
+      && await hasRealtimeCanaryMembership(session.userId, undefined, signal) ? session : null,
     operationsForSession: (headers, session) => {
       if (options.operations || process.env.DOCSLURP_DURABLE_CHAT !== "1") return options.operations;
       return createChatOperationProvider(async userId => {
@@ -57,5 +62,5 @@ async function authenticateRealtimeActor(headers: Headers, signal?: AbortSignal)
 
 export async function authenticateRealtimeSession(headers: Headers, signal?: AbortSignal) {
   const actor = await authenticateRealtimeActor(headers, signal);
-  return actor ? { userId: actor.userId, sessionId: actor.sessionId } : null;
+  return actor && await hasRealtimeCanaryMembership(actor.userId, undefined, signal) ? { userId: actor.userId, sessionId: actor.sessionId } : null;
 }

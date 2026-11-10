@@ -439,7 +439,7 @@ describe("contextualizeChunksForEmbedding", () => {
     const result = await contextualizeChunksForEmbedding({ privacyMode: "standard",
       documentTitle: "document", documentText: "Some document content", chunks: [{ text: "Some content" }],
       config: { ...fromEnv(), openRouterApiKey: "test", textGenerationModel: "vendor/deployment" },
-      textGeneration: { model: "vendor/workspace", models: { "contextual-chunk-preamble": "vendor/task" } },
+      textGeneration: { model: "vendor/project", models: { "contextual-chunk-preamble": "vendor/task" } },
     });
     expect(textMock).toHaveBeenCalledWith(expect.objectContaining({ model: "vendor/task" }));
     expect(result.usage?.model).toBe("vendor/task");

@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const sqlMock = vi.fn();
-const canManageWorkspaceMock = vi.fn();
-const getWorkspaceAccessMock = vi.fn();
+const canManageProjectMock = vi.fn();
+const getProjectAccessMock = vi.fn();
 
 vi.mock("../db.js", () => ({
   sql: Object.assign(sqlMock, {
@@ -14,77 +14,77 @@ vi.mock("../db.js", () => ({
 }));
 
 vi.mock("../services/organizations.js", () => ({
-  canManageWorkspace: canManageWorkspaceMock,
-  getWorkspaceAccess: getWorkspaceAccessMock,
+  canManageProject: canManageProjectMock,
+  getProjectAccess: getProjectAccessMock,
 }));
 
 const {
-  authorizeWorkspaceSecretAccess,
-  listWorkspaceSecrets,
+  authorizeProjectSecretAccess,
+  listProjectSecrets,
 } = await import("../services/secrets.js");
 
-describe("workspace secrets service access", () => {
+describe("project secrets service access", () => {
   beforeEach(() => {
     sqlMock.mockReset();
-    canManageWorkspaceMock.mockReset();
-    getWorkspaceAccessMock.mockReset();
+    canManageProjectMock.mockReset();
+    getProjectAccessMock.mockReset();
 
-    getWorkspaceAccessMock.mockResolvedValue({
-      workspaceId: "ws-1",
+    getProjectAccessMock.mockResolvedValue({
+      projectId: "ws-1",
       orgId: "org-1",
-      workspaceOwnerUserId: "owner-1",
+      projectOwnerUserId: "owner-1",
       orgRole: "admin",
-      workspaceRole: null,
+      projectRole: null,
     });
-    canManageWorkspaceMock.mockReturnValue(true);
+    canManageProjectMock.mockReturnValue(true);
   });
 
-  it("authorizes secret access through workspace manage permissions", async () => {
-    const authorization = await authorizeWorkspaceSecretAccess({
-      workspaceId: "ws-1",
+  it("authorizes secret access through project manage permissions", async () => {
+    const authorization = await authorizeProjectSecretAccess({
+      projectId: "ws-1",
       userId: "user-1",
     });
 
     expect(authorization).toMatchObject({
       ok: true,
       grant: {
-        workspaceId: "ws-1",
+        projectId: "ws-1",
         userId: "user-1",
         orgId: "org-1",
       },
     });
-    expect(getWorkspaceAccessMock).toHaveBeenCalledWith("ws-1", "user-1");
-    expect(canManageWorkspaceMock).toHaveBeenCalledWith(
+    expect(getProjectAccessMock).toHaveBeenCalledWith("ws-1", "user-1");
+    expect(canManageProjectMock).toHaveBeenCalledWith(
       expect.objectContaining({ orgId: "org-1" }),
       "user-1",
     );
   });
 
-  it("does not read secrets when the actor cannot manage the workspace", async () => {
-    canManageWorkspaceMock.mockReturnValue(false);
+  it("does not read secrets when the actor cannot manage the project", async () => {
+    canManageProjectMock.mockReturnValue(false);
 
     await expect(
-      listWorkspaceSecrets({ workspaceId: "ws-1", userId: "viewer-1" }),
+      listProjectSecrets({ projectId: "ws-1", userId: "viewer-1" }),
     ).rejects.toThrow("Forbidden");
     expect(sqlMock).not.toHaveBeenCalled();
   });
 
   it("requires an explicit actor userId when no access grant is provided", async () => {
     await expect(
-      listWorkspaceSecrets({
-        workspaceId: "ws-1",
+      listProjectSecrets({
+        projectId: "ws-1",
         userId: "",
       }),
-    ).rejects.toThrow("Workspace secret access requires an actor userId");
-    expect(getWorkspaceAccessMock).not.toHaveBeenCalled();
+    ).rejects.toThrow("Project secret access requires an actor userId");
+    expect(getProjectAccessMock).not.toHaveBeenCalled();
     expect(sqlMock).not.toHaveBeenCalled();
   });
 
-  it("uses a pre-authorized grant without repeating workspace access checks", async () => {
+  it("uses a pre-authorized grant without repeating project access checks", async () => {
     sqlMock.mockResolvedValue([
       {
         id: "secret-1",
-        workspace_id: "ws-1",
+        project_id: "ws-1",
         name: "OpenAI",
         type: "api_key",
         encrypted_value: "redacted",
@@ -96,26 +96,26 @@ describe("workspace secrets service access", () => {
       },
     ]);
 
-    const secrets = await listWorkspaceSecrets({
+    const secrets = await listProjectSecrets({
       access: {
-        workspaceId: "ws-1",
+        projectId: "ws-1",
         userId: "user-1",
         orgId: "org-1",
         access: {
-          workspaceId: "ws-1",
+          projectId: "ws-1",
           orgId: "org-1",
-          workspaceOwnerUserId: "owner-1",
+          projectOwnerUserId: "owner-1",
           orgRole: "admin",
-          workspaceRole: null,
+          projectRole: null,
         },
       },
     });
 
-    expect(getWorkspaceAccessMock).not.toHaveBeenCalled();
+    expect(getProjectAccessMock).not.toHaveBeenCalled();
     expect(secrets).toEqual([
       expect.objectContaining({
         id: "secret-1",
-        workspaceId: "ws-1",
+        projectId: "ws-1",
         name: "OpenAI",
       }),
     ]);

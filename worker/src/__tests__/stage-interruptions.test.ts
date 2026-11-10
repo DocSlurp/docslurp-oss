@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Config } from "../config.js";
 import type { Store } from "../db/store.js";
 import { markWorkerShuttingDown, resetWorkerShutdownForTests } from "../lib/worker-lifecycle.js";
-import type { Document, StageState, WorkspaceRun } from "../models.js";
+import type { Document, StageState, ProjectRun } from "../models.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import { createActivities, toStageActivityFailure } from "../temporal/activities.js";
 import { HUNG_WORK_TIMEOUT, WORKER_INTERRUPTED } from "../temporal/failure-classification.js";
@@ -20,19 +20,19 @@ import { STAGE_ORDINARY_ATTEMPTS, STAGE_THROTTLED_ATTEMPTS } from "../temporal/s
 import { HungWorkError } from "../lib/hung-work.js";
 import type { ArtifactStore } from "../tools/storage.js";
 
-const run: WorkspaceRun = {
-  id: "run-1", orgId: "org-1", userId: "user-1", workspaceId: "ws-1", kind: "bulk-upload",
+const run: ProjectRun = {
+  id: "run-1", orgId: "org-1", userId: "user-1", projectId: "ws-1", kind: "bulk-upload",
   status: "processing", stage: "extract-markdown", totalDocuments: 1, processedDocuments: 0, pagesTotal: 400,
   pagesProcessed: 0, spentCents: 0, pipeline: defaultPipelineFeatures,
   error: null, stats: {}, artifacts: {}, claimId: null, createdAt: new Date(), updatedAt: new Date(),
-} as WorkspaceRun;
+} as ProjectRun;
 const document = {
   id: "doc-1", userId: "user-1", runId: "run-1", filename: "book.pdf", mimeType: "application/pdf",
   sourceKey: "raw/book.pdf", status: "processing", extractionMode: "hybrid", pageCount: 400,
   createdAt: new Date(), updatedAt: new Date(),
 } as Document;
 
-/** Stage checkpoints as workspace_run_stage_states keeps them, including stats.ordinaryFailures. */
+/** Stage checkpoints as project_run_stage_states keeps them, including stats.ordinaryFailures. */
 class CheckpointStore {
   stages = new Map<string, StageState & { ordinaryFailures: number }>();
   readonly pageTasks = { completed: async () => new Map() };

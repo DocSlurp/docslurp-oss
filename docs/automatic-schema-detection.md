@@ -4,9 +4,9 @@
 
 ## Summary
 
-DocSlurp should help a workspace learn the structured outputs its documents need without silently changing production behavior. The feature detects recurring document shapes, proposes schemas or schema improvements, lets a user edit and test them, and assigns approved immutable schema revisions to future documents.
+DocSlurp should help a project learn the structured outputs its documents need without silently changing production behavior. The feature detects recurring document shapes, proposes schemas or schema improvements, lets a user edit and test them, and assigns approved immutable schema revisions to future documents.
 
-The product term is **Workspace**, not project. Workspace ownership is the default because workspaces are DocSlurp's configuration boundary. Organizations may publish schemas into a reusable library, but schema inference and automatic matching must not cross workspace boundaries unless a user deliberately opts into an organization-owned schema.
+The product term is **Project**, not project. Project ownership is the default because projects are DocSlurp's configuration boundary. Organizations may publish schemas into a reusable library, but schema inference and automatic matching must not cross project boundaries unless a user deliberately opts into an organization-owned schema.
 
 The central safety rule is:
 
@@ -18,7 +18,7 @@ Automatic behavior may select among already-approved revisions. It must not sile
 
 The current product already has several useful pieces:
 
-- `pipeline.outputSchema` stores one inline JSON Schema-like object on a workspace.
+- `pipeline.outputSchema` stores one inline JSON Schema-like object on a project.
 - `structured-extract` produces a structured artifact with confidence, evidence, validation, and review policy.
 - `classify-route` identifies broad document classes such as invoices, contracts, reports, and forms.
 - canonical blocks and table metadata preserve page, region, row, and cell provenance.
@@ -28,9 +28,9 @@ What is missing is a managed lifecycle around those pieces: named schemas, immut
 
 ## Product principles
 
-1. **Workspace-first ownership.** A workspace may have several schemas because a corpus can contain invoices, statements, forms, and reports together.
+1. **Project-first ownership.** A project may have several schemas because a corpus can contain invoices, statements, forms, and reports together.
 2. **Contract and source layout are different.** The schema defines the desired output. Table geometry, form labels, aliases, and layout fingerprints are extraction hints attached to a revision, not the output contract itself.
-3. **Suggest before changing.** Novel structure creates a proposal. Approved schemas may be matched automatically according to workspace policy.
+3. **Suggest before changing.** Novel structure creates a proposal. Approved schemas may be matched automatically according to project policy.
 4. **Pin every result.** Every structured result records the exact schema revision and assignment decision used to produce it.
 5. **Preserve evidence.** Fields, rows, and cells retain page/block/region provenance so users can inspect why a value or inferred column exists.
 6. **Fail open to normal ingestion.** Schema detection or matching failure must not block markdown extraction, indexing, or search. Structured extraction may be skipped and surfaced as unassigned.
@@ -38,7 +38,7 @@ What is missing is a managed lifecycle around those pieces: named schemas, immut
 
 ## User-facing modes
 
-Each workspace has one schema automation mode:
+Each project has one schema automation mode:
 
 | Mode | Discovery | Assignment | Production changes |
 | --- | --- | --- | --- |
@@ -46,7 +46,7 @@ Each workspace has one schema automation mode:
 | `suggest` | Create and refresh proposals | Suggest an approved revision; user confirms | None without user action |
 | `automatic` | Create and refresh proposals | Automatically select among approved revisions above the configured confidence threshold | Never auto-publish a proposal |
 
-`off` is the platform default because the feature is optional. The settings UI should recommend `suggest` when a user enables it. `automatic` is appropriate only after the workspace has approved schemas and reviewed matching behavior.
+`off` is the platform default because the feature is optional. The settings UI should recommend `suggest` when a user enables it. `automatic` is appropriate only after the project has approved schemas and reviewed matching behavior.
 
 ## Core domain model
 
@@ -54,10 +54,10 @@ Each workspace has one schema automation mode:
 
 A stable named identity such as `AP Invoice`, `Lab Intake Form`, or `Monthly Holdings Rows`. It has an owner scope:
 
-- `workspace`: available only in one workspace.
-- `organization`: reusable by workspaces in the same organization after an explicit binding.
+- `project`: available only in one project.
+- `organization`: reusable by projects in the same organization after an explicit binding.
 
-Organization schemas are a library, not inheritance. Publishing an organization revision must not automatically change bound workspaces.
+Organization schemas are a library, not inheritance. Publishing an organization revision must not automatically change bound projects.
 
 ### Schema Revision
 
@@ -95,8 +95,8 @@ A document pins one exact schema revision. Assignment precedence is:
 
 1. manual document override;
 2. explicit schema in the run/API request;
-3. workspace automatic match among approved bindings;
-4. workspace default revision;
+3. project automatic match among approved bindings;
+4. project default revision;
 5. no structured extraction.
 
 The assignment records match confidence, reasons, candidate scores, decision source, and who overrode it. Reprocessing against a different revision creates a new result; it does not rewrite the historical assignment.
@@ -133,7 +133,7 @@ Candidate fields and types should start from deterministic evidence. An LLM may 
 
 ### 3. Match or cluster
 
-First compare the observation with approved workspace bindings. Matching signals may include:
+First compare the observation with approved project bindings. Matching signals may include:
 
 - normalized label/header overlap;
 - field presence and inferred types;
@@ -142,7 +142,7 @@ First compare the observation with approved workspace bindings. Matching signals
 - layout fingerprint for repeated form templates;
 - validation success on a dry-run sample.
 
-If no approved revision clears the threshold, add the document observation to a workspace-local candidate cluster. Create a proposal only after enough consistent evidence exists. A single document may produce a user-requested proposal, but it should be labeled low-support.
+If no approved revision clears the threshold, add the document observation to a project-local candidate cluster. Create a proposal only after enough consistent evidence exists. A single document may produce a user-requested proposal, but it should be labeled low-support.
 
 Recommended initial thresholds:
 
@@ -214,7 +214,7 @@ The UI should show support, counterexamples, affected documents, validation delt
 
 “Similar projects” should initially mean one of:
 
-- other documents in the same workspace;
+- other documents in the same project;
 - organization schemas deliberately published into the organization library;
 - DocSlurp-owned starter schemas built without customer content.
 
@@ -222,9 +222,9 @@ Cross-customer learning should be deferred until there is an explicit privacy mo
 
 ## UI design
 
-### Workspace navigation
+### Project navigation
 
-Add **Schemas** as a first-class workspace settings section rather than hiding the feature below the current raw `outputSchema` textarea. Keep a compact schema health card on the workspace cockpit showing:
+Add **Schemas** as a first-class project settings section rather than hiding the feature below the current raw `outputSchema` textarea. Keep a compact schema health card on the project cockpit showing:
 
 - active schemas;
 - assigned document coverage;
@@ -261,15 +261,15 @@ The document inspector shows the assigned revision, why it matched, other candid
 Suggested resource-oriented endpoints:
 
 ```text
-GET    /v1/workspaces/:workspaceId/schemas
-POST   /v1/workspaces/:workspaceId/schemas
+GET    /v1/projects/:projectId/schemas
+POST   /v1/projects/:projectId/schemas
 GET    /v1/schemas/:schemaId
 POST   /v1/schemas/:schemaId/revisions
 POST   /v1/schemas/:schemaId/revisions/:revisionId/activate
 POST   /v1/schemas/:schemaId/revisions/:revisionId/retire
 POST   /v1/schemas/:schemaId/revisions/:revisionId/evaluate
 
-GET    /v1/workspaces/:workspaceId/schema-proposals
+GET    /v1/projects/:projectId/schema-proposals
 POST   /v1/schema-proposals/:proposalId/accept
 POST   /v1/schema-proposals/:proposalId/reject
 
@@ -278,7 +278,7 @@ PUT    /v1/documents/:documentId/schema-assignment
 POST   /v1/documents/:documentId/structured-reprocess
 ```
 
-Run creation may accept `schemaRevisionId` or `schemaMode: "workspace" | "none"`. It must not accept arbitrary organization schema IDs without the normal organization/workspace access check and an explicit workspace binding.
+Run creation may accept `schemaRevisionId` or `schemaMode: "project" | "none"`. It must not accept arbitrary organization schema IDs without the normal organization/project access check and an explicit project binding.
 
 For live runs, schema detection and proposal events should flow through the existing progress/SSE channel. Polling the same resources remains the non-streaming fallback.
 
@@ -288,15 +288,15 @@ Recommended tables:
 
 ### `extraction_schemas`
 
-Stable identity and ownership: `id`, `org_id`, nullable `workspace_id`, `name`, `slug`, `description`, `created_by_user_id`, timestamps, and archive state. A non-null workspace ID means workspace-owned; a null workspace ID means organization-owned.
+Stable identity and ownership: `id`, `org_id`, nullable `project_id`, `name`, `slug`, `description`, `created_by_user_id`, timestamps, and archive state. A non-null project ID means project-owned; a null project ID means organization-owned.
 
 ### `extraction_schema_revisions`
 
 Immutable revision data: `id`, `schema_id`, monotonically increasing `revision`, lifecycle status, `json_schema`, `output_shape`, `source_hints`, `extraction_config`, `provenance`, `change_summary`, `created_by_user_id`, and timestamps. Enforce uniqueness on `(schema_id, revision)` and at most one active revision per schema.
 
-### `workspace_schema_bindings`
+### `project_schema_bindings`
 
-Deliberate availability and matching policy: `workspace_id`, `schema_id`, optional pinned active revision, priority, default flag, match rules, automatic threshold, and enabled state. This prevents organization schema updates from silently changing workspace behavior.
+Deliberate availability and matching policy: `project_id`, `schema_id`, optional pinned active revision, priority, default flag, match rules, automatic threshold, and enabled state. This prevents organization schema updates from silently changing project behavior.
 
 ### `document_schema_assignments`
 
@@ -304,11 +304,11 @@ Historical decision record: `document_id`, `run_id`, `schema_revision_id`, decis
 
 ### `schema_proposals`
 
-Workspace-local proposed schema/revision diff, evidence summary, confidence, support/counterexample counts, status, suppression fingerprint, source document references, decision user, and timestamps.
+Project-local proposed schema/revision diff, evidence summary, confidence, support/counterexample counts, status, suppression fingerprint, source document references, decision user, and timestamps.
 
 ### `schema_observations`
 
-Aggregated structural and quality evidence keyed by workspace, document, and optional schema revision: field/header presence, inferred types, table/layout fingerprints, validation outcome, correction signals, and hashes needed for clustering. Keep raw values in governed document artifacts, not this learning table.
+Aggregated structural and quality evidence keyed by project, document, and optional schema revision: field/header presence, inferred types, table/layout fingerprints, validation outcome, correction signals, and hashes needed for clustering. Keep raw values in governed document artifacts, not this learning table.
 
 Structured result metadata should be queryable in Postgres even if the full output remains an object-storage artifact. At minimum persist result ID, artifact URI, schema revision, policy, confidence, validation counts, and cost/latency rollups.
 
@@ -316,8 +316,8 @@ Structured result metadata should be queryable in Postgres even if the full outp
 
 This project is pre-release, so prefer the clean v1 model over preserving two permanent configuration paths:
 
-1. Convert each non-empty inline `pipeline.outputSchema` into a workspace-owned `Imported workspace schema` revision.
-2. Bind and activate that revision for the workspace.
+1. Convert each non-empty inline `pipeline.outputSchema` into a project-owned `Imported project schema` revision.
+2. Bind and activate that revision for the project.
 3. Change `structured-extract` to consume a document assignment.
 4. Remove `pipeline.outputSchema` after the migration; one-shot requests reference a revision or provide an explicitly ephemeral run schema.
 
@@ -325,9 +325,9 @@ An ephemeral run schema may remain useful for one-shot APIs, but its full contra
 
 ## Permissions, privacy, and audit
 
-- Workspace viewers may inspect schemas and results; editors may create drafts and manual assignments; admins may activate/retire revisions and publish to the organization library.
+- Project viewers may inspect schemas and results; editors may create drafts and manual assignments; admins may activate/retire revisions and publish to the organization library.
 - All create, edit, activate, retire, bind, accept/reject, override, and reprocess actions write audit events.
-- Schema discovery respects workspace privacy mode. `local-only` and `strict-privacy` must not send observations to hosted models.
+- Schema discovery respects project privacy mode. `local-only` and `strict-privacy` must not send observations to hosted models.
 - Treat document content, field labels, and schema descriptions as untrusted content and reuse the trusted document task boundary.
 - Do not expose sample values in org-wide catalog cards or proposal notifications.
 - Every LLM call logs and persists actual token usage. Detection-specific metrics should distinguish schema matching, proposal generation, and evaluation.
@@ -350,7 +350,7 @@ Avoid optimizing proposal volume. A quiet system with a few high-confidence prop
 
 ### Phase 1: managed schemas
 
-- named workspace schemas and immutable revisions;
+- named project schemas and immutable revisions;
 - visual editor plus raw JSON;
 - document assignments and explicit run overrides;
 - migrate inline `outputSchema`;
@@ -361,22 +361,22 @@ Avoid optimizing proposal volume. A quiet system with a few high-confidence prop
 
 - add `schema-detect` and structural observations;
 - propose schemas for native tables, headerless continued tables, native PDF fields, and scanned key/value forms;
-- proposal review and workspace schema health UI;
+- proposal review and project schema health UI;
 - no automatic assignment by default.
 
 ### Phase 3: approved automatic assignment
 
-- match documents only to approved workspace bindings;
+- match documents only to approved project bindings;
 - confidence thresholds and candidate diagnostics;
 - correction-driven improvement proposals;
-- org library publishing and explicit workspace binding;
+- org library publishing and explicit project binding;
 - optional backfill with forecast and approval.
 
 ## MVP acceptance criteria
 
 - With automation `off`, ingestion performs no schema discovery work or discovery model calls.
-- A workspace can own multiple schemas, and every structured result identifies an immutable revision.
-- A user can create, edit, test, activate, retire, and manually assign a schema without editing workspace pipeline JSON.
+- A project can own multiple schemas, and every structured result identifies an immutable revision.
+- A user can create, edit, test, activate, retire, and manually assign a schema without editing project pipeline JSON.
 - In `suggest` mode, novel documents can create proposals but cannot alter active extraction behavior.
 - In `automatic` mode, only approved revisions can be selected automatically, and low-confidence documents remain unassigned or use the explicit default.
 - A multi-page table with missing later-page headers can produce one row collection with inherited-column provenance and review diagnostics.

@@ -7,7 +7,7 @@ export type RetainedVersionStorage = { bytes: number; pages: number; monthlyCred
 /**
  * Archived (retained, non-current) versions that still hold files: browsable but never searchable.
  * Exposed separately from the storage totals so the billing page can show what retention costs.
- * `monthlyCredits` is their source bytes at PRICE_CARD.storageGbMonth and is null when the deployment
+ * `monthlyCredits` is their source bytes at the provider's storage price and is null when the deployment
  * does not bill.
  */
 export async function getRetainedVersionStorage(

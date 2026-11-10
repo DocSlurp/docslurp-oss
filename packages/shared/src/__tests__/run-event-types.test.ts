@@ -2,7 +2,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { workspaceRunEventTypeSchema } from "../run.js";
+import { projectRunEventTypeSchema } from "../run.js";
 
 const workerSrc = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../worker/src");
 
@@ -21,7 +21,7 @@ describe("run event types", () => {
       for (const match of readFileSync(file, "utf8").matchAll(/eventType:\s*"([a-z_]+\.[a-z_]+)"/g)) written.add(match[1]!);
     }
     expect(written.size).toBeGreaterThan(3);
-    const known = new Set<string>(workspaceRunEventTypeSchema.options);
+    const known = new Set<string>(projectRunEventTypeSchema.options);
     expect([...written].filter((type) => !known.has(type))).toEqual([]);
   });
 });

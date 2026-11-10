@@ -1,10 +1,10 @@
 import { withBackgroundSpan } from "@docslurp/shared/observability";
-import type { WorkspaceRunEvent } from "@docslurp/shared";
+import type { ProjectRunEvent } from "@docslurp/shared";
 
 /**
  * Live run-event fan-out for one API process.
  *
- * `workspace_run_events` is the source of truth; NOTIFY on `run_events` is
+ * `project_run_events` is the source of truth; NOTIFY on `run_events` is
  * only a wake-up hint (`{"runIds":[…]}`) that workers send at most once per
  * flush window (worker/src/db/run-event-store.ts). On a hint the hub reads
  * new rows for the hinted runs by cursor (index `(run_id, created_at)`) in one
@@ -25,7 +25,7 @@ export function encodeRunEventHint(runIds: string[]): string {
 }
 
 export interface RunEventHubRow {
-  event: WorkspaceRunEvent;
+  event: ProjectRunEvent;
   /** Exact `created_at` (microseconds) used as the paging cursor. */
   cursor: string;
 }
@@ -55,7 +55,7 @@ const DEFAULT_OPTIONS: RunEventHubOptions = {
 
 type Subscriber = {
   runId: string | null;
-  onEvent: (event: WorkspaceRunEvent) => void | Promise<void>;
+  onEvent: (event: ProjectRunEvent) => void | Promise<void>;
   chain: Promise<void>;
 };
 
@@ -230,7 +230,7 @@ export class RunEventHub {
     }
   }
 
-  private dispatch(event: WorkspaceRunEvent): void {
+  private dispatch(event: ProjectRunEvent): void {
     for (const subscriber of this.subscribers) {
       if (subscriber.runId !== null && subscriber.runId !== event.runId) continue;
       // Per-subscriber chain: in order for each subscriber, and a slow one never blocks the others.

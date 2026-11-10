@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 
-import type { PipelineFeatureOverrides, WorkspaceTemplateKey } from "@docslurp/shared";
+import type { PipelineFeatureOverrides, ProjectTemplateKey } from "@docslurp/shared";
 
 import { sql } from "../db.js";
+import { sanitizeUploadFilename } from "../lib/filenames.js";
 import { env } from "../config.js";
 import { reserveDirectUploadLockConnection } from "../lib/direct-upload-locks.js";
 import { normalizeUploadPath } from "../lib/canonical-id.js";
@@ -19,17 +20,23 @@ import {
 } from "../lib/storage.js";
 import {
   admitIntakeFile,
+  allRejectedError,
   rawSourceKey,
-  WorkspaceIntakeError,
+  rejectionCode,
+  ProjectIntakeError,
   type IntakeExtract,
-  type WorkspaceIntakeItem,
-} from "./workspace-intake.js";
+  type RejectedIntakeFile,
+  type ProjectIntakeErrorCode,
+  type ProjectIntakeItem,
+} from "./project-intake.js";
 
 const SIGNED_UPLOAD_TTL_SECONDS = 900;
 const MULTIPART_THRESHOLD_BYTES = 32 * 1024 * 1024;
 const MULTIPART_PART_SIZE_BYTES = 8 * 1024 * 1024;
 
 export interface DirectUploadSessionFileInput {
+  /** The client's own id for this file; echoed on the session's file and on a rejection so clients never match by filename. */
+  clientId?: string;
   filename: string;
   mimeType: string;
   sizeBytes?: number;
@@ -42,14 +49,14 @@ export interface DirectUploadSessionFileInput {
 
 export interface CreateDirectUploadSessionInput {
   apiKeyId?: string | null;
-  allowedWorkspaceIds?: readonly string[] | null;
+  allowedProjectIds?: readonly string[] | null;
   tags?: string[];
   userId: string;
   orgId?: string | null;
-  workspaceId?: string | null;
-  workspaceName?: string | null;
-  templateKey?: WorkspaceTemplateKey | null;
-  /** Upload overrides, merged onto the target workspace pipeline at confirm. */
+  projectId?: string | null;
+  projectName?: string | null;
+  templateKey?: ProjectTemplateKey | null;
+  /** Upload overrides, merged onto the target project pipeline at confirm. */
   pipeline: PipelineFeatureOverrides;
   files: DirectUploadSessionFileInput[];
   /** Extract mode: sources are stored under the extract's prefix and confirm creates the extract's run. */
@@ -69,14 +76,14 @@ export type UploadSessionRow = {
   result?: unknown;
   last_error?: string | null;
   api_key_id?: string | null;
-  allowed_workspace_ids?: string[] | null;
+  allowed_project_ids?: string[] | null;
   tags?: string[];
   extract_id?: string | null;
   id: string;
   user_id: string;
   org_id: string | null;
-  workspace_id: string | null;
-  workspace_name: string | null;
+  project_id: string | null;
+  project_name: string | null;
   template_key: string | null;
   pipeline: PipelineFeatureOverrides | null;
   status: string;
@@ -97,6 +104,9 @@ export type UploadSessionFileRow = {
   completed_parts: Array<{ partNumber: number; etag: string }> | null;
   canonical_id?: string | null;
   source_path?: string | null;
+  /** Position of the file in the create request. */
+  request_index?: number | null;
+  client_id?: string | null;
 };
 
 export interface LoadedDirectUploadSession {
@@ -104,9 +114,9 @@ export interface LoadedDirectUploadSession {
   files: UploadSessionFileRow[];
 }
 
-export interface PreparedDirectUploadWorkspaceIntake {
+export interface PreparedDirectUploadProjectIntake {
   session: UploadSessionRow;
-  items: WorkspaceIntakeItem[];
+  items: ProjectIntakeItem[];
 }
 
 export function toDirectUploadPartCount(
@@ -121,7 +131,7 @@ export async function loadDirectUploadSession(
   userId: string,
 ): Promise<LoadedDirectUploadSession | null> {
   const [session] = await sql<UploadSessionRow[]>`
-    select id, user_id, org_id, workspace_id, workspace_name, template_key, pipeline, tags, status, result, last_error, api_key_id, allowed_workspace_ids, extract_id
+    select id, user_id, org_id, project_id, project_name, template_key, pipeline, tags, status, result, last_error, api_key_id, allowed_project_ids, extract_id
     from upload_sessions
     where id = ${sessionId} and user_id = ${userId}
     limit 1
@@ -149,10 +159,12 @@ export async function loadDirectUploadSession(
       completed_parts,
       canonical_id,
       source_path,
-      unknown_size
+      unknown_size,
+      request_index,
+      client_id
     from upload_session_files
     where session_id = ${sessionId}
-    order by created_at asc
+    order by request_index asc nulls last, created_at asc
   `;
 
   // PostgreSQL bigint columns arrive as strings; browser file matching and
@@ -165,10 +177,28 @@ export async function loadDirectUploadSession(
   return { session, files };
 }
 
+/** How a client matches a session file to the file it sent: its position in the request and its own id. */
+function fileRef(file: UploadSessionFileRow): { index: number | null; clientId: string | null } {
+  return { index: file.request_index ?? null, clientId: file.client_id ?? null };
+}
+
+async function storedPartsAtExpectedSize(file: UploadSessionFileRow, partSize: number, partCount: number): Promise<Array<{ partNumber: number; etag: string }>> {
+  if (file.status !== "pending" || !file.upload_id) return [];
+  try {
+    const parts = await listMultipartUploadParts({ key: file.source_key, uploadId: file.upload_id });
+    return parts.filter((part) => part.partNumber <= partCount
+      && part.sizeBytes === Math.min(partSize, file.size_bytes - (part.partNumber - 1) * partSize));
+  } catch {
+    // The upload closed (completed or aborted) or storage is unreachable: report what the database already knows.
+    return [];
+  }
+}
+
 export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow) {
-  if (file.status === "completed" || file.status === "aborted") return { id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, mode: file.upload_mode as "single" | "multipart", status: file.status };
+  if (file.status === "completed" || file.status === "aborted") return { ...fileRef(file), id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, mode: file.upload_mode as "single" | "multipart", status: file.status };
   if (file.upload_mode === "single") {
     return {
+      ...fileRef(file),
       id: file.id,
       filename: file.filename,
       mimeType: file.mime_type,
@@ -191,9 +221,13 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
   if (!file.upload_id) {
     throw new Error(`Multipart session missing upload id for ${file.id}`);
   }
-  const completed = new Set(
-    (file.completed_parts ?? []).map((part) => part.partNumber),
-  );
+  // Storage is authoritative for which parts arrived: a client that lost a connection resumes from these pendingParts
+  // instead of re-sending the whole file. A part counts only at its exact expected size.
+  const stored = file.unknown_size ? [] : await storedPartsAtExpectedSize(file, partSize, partCount);
+  const completed = new Set([
+    ...(file.completed_parts ?? []).map((part) => part.partNumber),
+    ...stored.map((part) => part.partNumber),
+  ]);
   const pendingParts: Array<{
     partNumber: number;
     sizeBytes: number;
@@ -219,6 +253,7 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
   }
 
   return {
+    ...fileRef(file),
     id: file.id,
     filename: file.filename,
     mimeType: file.mime_type,
@@ -230,24 +265,44 @@ export async function buildDirectUploadFileDescriptor(file: UploadSessionFileRow
     partCount,
     unknownSize: Boolean(file.unknown_size),
     pendingParts,
-    completedParts: file.completed_parts ?? [],
+    completedParts: file.completed_parts?.length ? file.completed_parts : stored,
   };
 }
 
 export async function createDirectUploadSession(input: CreateDirectUploadSessionInput) {
-  if (input.files.some(file => file.singlePart && (file.sizeBytes === undefined || file.sizeBytes > 5 * 1024 ** 3))) {
-    throw new WorkspaceIntakeError("Single-part uploads cannot exceed 5 GiB", 400);
-  }
-  // Workspace Intake's policy screens declared files before any upload target exists.
-  const files = input.files.map((file) => ({
-    ...file,
-    unknownSize: file.sizeBytes === undefined,
-    sizeBytes: file.sizeBytes ?? 0,
-    ...admitIntakeFile(
-      { filename: file.filename, mimeType: file.mimeType, sizeBytes: file.sizeBytes ?? 0 },
-      "direct-upload",
-    ),
-  }));
+  // Project Intake's policy screens each declared file before any upload target exists. One bad file never fails the
+  // request: the good files get a session and the rest come back as per-file rejections keyed by request index. Only a
+  // request in which nothing is acceptable fails, with every rejection named.
+  const rejected: RejectedIntakeFile[] = [];
+  const files: Array<DirectUploadSessionFileInput & { index: number; unknownSize: boolean; sizeBytes: number; filename: string; mimeType: string }> = [];
+  input.files.forEach((file, index) => {
+    try {
+      if (file.singlePart && (file.sizeBytes === undefined || file.sizeBytes > 5 * 1024 ** 3)) {
+        throw new ProjectIntakeError("Single-part uploads cannot exceed 5 GiB", 413);
+      }
+      files.push({
+        ...file,
+        index,
+        unknownSize: file.sizeBytes === undefined,
+        sizeBytes: file.sizeBytes ?? 0,
+        ...admitIntakeFile(
+          { filename: file.filename, mimeType: file.mimeType, sizeBytes: file.sizeBytes ?? 0 },
+          "direct-upload",
+        ),
+      });
+    } catch (error) {
+      if (!(error instanceof ProjectIntakeError)) throw error;
+      rejected.push({
+        index,
+        ...(file.clientId ? { clientId: file.clientId } : {}),
+        filename: sanitizeUploadFilename(file.filename),
+        statusCode: error.statusCode,
+        code: rejectionCode(error),
+        message: error.message,
+      });
+    }
+  });
+  if (files.length === 0) throw allRejectedError(rejected);
 
   const sessionId = randomUUID();
   await sql`
@@ -255,13 +310,13 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
       id,
       user_id,
       org_id,
-      workspace_id,
-      workspace_name,
+      project_id,
+      project_name,
       template_key,
       pipeline,
       tags,
       api_key_id,
-      allowed_workspace_ids,
+      allowed_project_ids,
       extract_id,
       status
     )
@@ -269,13 +324,13 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
       ${sessionId},
       ${input.userId},
       ${input.orgId ?? null},
-      ${input.workspaceId ?? null},
-      ${input.workspaceName ?? null},
+      ${input.projectId ?? null},
+      ${input.projectName ?? null},
       ${input.templateKey ?? null},
       ${sql.json(JSON.parse(JSON.stringify(input.pipeline)))},
       ${sql.array(input.tags ?? [])},
       ${input.apiKeyId ?? null},
-      ${input.allowedWorkspaceIds ? sql.array([...input.allowedWorkspaceIds]) : null},
+      ${input.allowedProjectIds ? sql.array([...input.allowedProjectIds]) : null},
       ${input.extract?.id ?? null},
       'initializing'
     )
@@ -305,7 +360,9 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
         sha256,
         canonical_id,
         source_path,
-        unknown_size
+        unknown_size,
+        request_index,
+        client_id
       )
       values (
         ${fileId},
@@ -321,7 +378,9 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
         ${file.sha256 ?? null},
         ${file.canonicalId ?? null},
         ${normalizeUploadPath(file.path)},
-        ${file.unknownSize}
+        ${file.unknownSize},
+        ${file.index},
+        ${file.clientId ?? null}
       )
     `;
   }
@@ -329,9 +388,9 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
   await sql`update upload_sessions set status = 'pending', next_reconcile_at = now() where id = ${sessionId}`;
   const loaded = await loadDirectUploadSession(sessionId, input.userId);
   if (!loaded) {
-    throw new WorkspaceIntakeError("Upload session not found", 404);
+    throw new ProjectIntakeError("Upload session not found", 404);
   }
-  return await describeDirectUploadSession(loaded);
+  return { ...(await describeDirectUploadSession(loaded)), ...(rejected.length > 0 ? { rejected } : {}) };
 }
 
 export async function describeDirectUploadSession(
@@ -339,7 +398,7 @@ export async function describeDirectUploadSession(
   statusOnly = false,
 ) {
   const files = await Promise.all(
-    loaded.files.map(async (file) => statusOnly || ["confirmed", "failed", "aborted"].includes(loaded.session.status) ? { id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, mode: file.upload_mode as "single" | "multipart", status: file.status } : await buildDirectUploadFileDescriptor(file)),
+    loaded.files.map(async (file) => statusOnly || ["confirmed", "failed", "aborted"].includes(loaded.session.status) ? { ...fileRef(file), id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes, mode: file.upload_mode as "single" | "multipart", status: file.status } : await buildDirectUploadFileDescriptor(file)),
   );
   return {
     sessionId: loaded.session.id,
@@ -351,9 +410,9 @@ export async function describeDirectUploadSession(
 }
 
 /** A native key may only operate on sessions created in its organization. */
-export async function directUploadSessionBelongsToOrganization(sessionId: string, userId: string, orgId: string, allowedWorkspaceIds?: readonly string[] | null): Promise<boolean> {
+export async function directUploadSessionBelongsToOrganization(sessionId: string, userId: string, orgId: string, allowedProjectIds?: readonly string[] | null): Promise<boolean> {
   const loaded = await loadDirectUploadSession(sessionId, userId);
-  return loaded?.session.org_id === orgId && (!allowedWorkspaceIds?.length || Boolean(loaded.session.workspace_id && allowedWorkspaceIds.includes(loaded.session.workspace_id)));
+  return loaded?.session.org_id === orgId && (!allowedProjectIds?.length || Boolean(loaded.session.project_id && allowedProjectIds.includes(loaded.session.project_id)));
 }
 
 export async function getDirectUploadSessionDescription(
@@ -366,11 +425,11 @@ export async function getDirectUploadSessionDescription(
 }
 
 /** Cross-process serialization: the dedicated connection owns the lock until release. */
-export async function withDirectUploadLock<T>(sessionId: string, run: () => Promise<T>): Promise<T> {
+export async function withDirectUploadLock<T>(sessionId: string, run: () => Promise<T>, busyMessage = "Upload session is being finalized; retry shortly", busyCode?: ProjectIntakeErrorCode): Promise<T> {
   const { connection, release } = await reserveDirectUploadLockConnection();
   try {
     const [lock] = await connection`select pg_try_advisory_lock(hashtextextended(${`upload:${sessionId}`}, 0)) as acquired`;
-    if (!lock?.acquired) throw new WorkspaceIntakeError("Upload session is being finalized; retry shortly", 409);
+    if (!lock?.acquired) throw new ProjectIntakeError(busyMessage, 409, undefined, busyCode);
     try { return await run(); }
     finally { await connection`select pg_advisory_unlock(hashtextextended(${`upload:${sessionId}`}, 0))`; }
   } finally { release(); }
@@ -387,7 +446,7 @@ export async function finalizeDirectUploadFile(file: UploadSessionFileRow, final
   if (file.status !== "pending") return false;
   if (file.unknown_size && finalSize === undefined) return false;
   if (finalSize !== undefined) {
-    if (!file.unknown_size && finalSize !== file.size_bytes) throw new WorkspaceIntakeError("Declared upload size cannot change", 400);
+    if (!file.unknown_size && finalSize !== file.size_bytes) throw new ProjectIntakeError("Declared upload size cannot change", 400);
     admitIntakeFile({ filename: file.filename, mimeType: file.mime_type, sizeBytes: finalSize }, "direct-upload");
     file = { ...file, size_bytes: finalSize };
     // Persist EOS before provider completion so recovery can verify an already assembled object.
@@ -397,7 +456,7 @@ export async function finalizeDirectUploadFile(file: UploadSessionFileRow, final
   try {
     verified = await verifyCompletedDirectUpload(file);
   } catch (error) {
-    if (!isStorageNotFound(error) && !(error instanceof WorkspaceIntakeError && error.message.startsWith("No object found"))) throw error;
+    if (!isStorageNotFound(error) && !(error instanceof ProjectIntakeError && error.message.startsWith("No object found"))) throw error;
     if (file.upload_mode !== "multipart" || !file.upload_id) return false;
     const parts = await listMultipartUploadParts({ key: file.source_key, uploadId: file.upload_id });
     if (!validMultipartLayout(parts, file.size_bytes, file.part_size ?? MULTIPART_PART_SIZE_BYTES)) return false;
@@ -432,7 +491,7 @@ export async function finalizeDirectUploadFile(file: UploadSessionFileRow, final
       where id = ${file.id} and exists (select 1 from queued)
       returning id, source_key`;
     if (published.length !== 1 || published[0]?.id !== file.id || published[0]?.source_key !== sourceKey) {
-      throw new WorkspaceIntakeError("Upload ownership changed during finalization", 409);
+      throw new ProjectIntakeError("Upload ownership changed during finalization", 409);
     }
     // The original stays writable until its URL expires; nothing reads it again. Best effort.
     await deleteUploadedObject(file.source_key).catch(() =>
@@ -451,13 +510,13 @@ export function sealedSourceKey(file: Pick<UploadSessionFileRow, "id" | "source_
 }
 
 async function sealSingleUpload(file: UploadSessionFileRow, etag: string | null): Promise<string> {
-  if (!etag) throw new WorkspaceIntakeError(`Unable to verify the uploaded version of ${file.filename}`, 400);
+  if (!etag) throw new ProjectIntakeError(`Unable to verify the uploaded version of ${file.filename}`, 400);
   const sealed = sealedSourceKey(file);
   try {
     await copyUploadedObject({ fromKey: file.source_key, toKey: sealed, ifMatch: etag });
   } catch (error) {
     if (storageErrorName(error) === "PreconditionFailed" || (error as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode === 412) {
-      throw new WorkspaceIntakeError(`${file.filename} changed while its upload was being completed; upload it again`, 409);
+      throw new ProjectIntakeError(`${file.filename} changed while its upload was being completed; upload it again`, 409);
     }
     throw error;
   }
@@ -469,23 +528,23 @@ async function sealSingleUpload(file: UploadSessionFileRow, etag: string | null)
 export async function completeDirectUploadFile(input: CompleteDirectUploadFileInput) {
   await withDirectUploadLock(input.sessionId, async () => {
     const loaded = await loadDirectUploadSession(input.sessionId, input.userId);
-    if (!loaded) throw new WorkspaceIntakeError("Upload session not found", 404);
-    if (["aborted", "failed"].includes(loaded.session.status)) throw new WorkspaceIntakeError("Upload session is closed", 409);
+    if (!loaded) throw new ProjectIntakeError("Upload session not found", 404);
+    if (["aborted", "failed"].includes(loaded.session.status)) throw new ProjectIntakeError("Upload session is closed", 409);
     const file = loaded.files.find(item => item.id === input.fileId);
-    if (!file) throw new WorkspaceIntakeError("Upload file not found", 404);
-    if (!await finalizeDirectUploadFile(file, input.sizeBytes)) throw new WorkspaceIntakeError("Upload parts are incomplete or have incorrect sizes", 409);
+    if (!file) throw new ProjectIntakeError("Upload file not found", 404);
+    if (!await finalizeDirectUploadFile(file, input.sizeBytes)) throw new ProjectIntakeError("Upload parts are incomplete or have incorrect sizes", 409);
     await sql`update upload_sessions set next_reconcile_at = now() where id = ${input.sessionId}`;
   });
 }
 
 export async function signDirectUploadParts(sessionId: string, userId: string, fileId: string, partNumbers: number[]) {
   const loaded = await loadDirectUploadSession(sessionId, userId);
-  if (!loaded) throw new WorkspaceIntakeError("Upload session not found", 404);
-  if (!["pending", "uploading"].includes(loaded.session.status)) throw new WorkspaceIntakeError("Upload session is closed", 409);
+  if (!loaded) throw new ProjectIntakeError("Upload session not found", 404);
+  if (!["pending", "uploading"].includes(loaded.session.status)) throw new ProjectIntakeError("Upload session is closed", 409);
   const file = loaded.files.find(item => item.id === fileId);
-  if (!file || file.status !== "pending" || !file.upload_id) throw new WorkspaceIntakeError("Open multipart file not found", 404);
+  if (!file || file.status !== "pending" || !file.upload_id) throw new ProjectIntakeError("Open multipart file not found", 404);
   return { parts: await Promise.all(partNumbers.map(async partNumber => {
-    if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > 10_000 || partNumber > Math.max(1, Math.ceil(env.maxUploadBytes / (file.part_size ?? MULTIPART_PART_SIZE_BYTES))) || (!file.unknown_size && partNumber > toDirectUploadPartCount(file.size_bytes, file.part_size ?? MULTIPART_PART_SIZE_BYTES))) throw new WorkspaceIntakeError("Invalid part number", 400);
+    if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > 10_000 || partNumber > Math.max(1, Math.ceil(env.maxUploadBytes / (file.part_size ?? MULTIPART_PART_SIZE_BYTES))) || (!file.unknown_size && partNumber > toDirectUploadPartCount(file.size_bytes, file.part_size ?? MULTIPART_PART_SIZE_BYTES))) throw new ProjectIntakeError("Invalid part number", 400);
     return { partNumber, url: await signMultipartUploadPart({ key: file.source_key, uploadId: file.upload_id!, partNumber }) };
   })) };
 }
@@ -499,7 +558,7 @@ async function abortDirectUploadSessionUnlocked(
     return false;
   }
 
-  if (loaded.session.status === "confirmed" || loaded.session.status === "ingesting") throw new WorkspaceIntakeError("Ingested uploads cannot be aborted", 409);
+  if (loaded.session.status === "confirmed" || loaded.session.status === "ingesting") throw new ProjectIntakeError("Ingested uploads cannot be aborted", 409);
 
   await sql`
     update upload_session_files
@@ -531,28 +590,28 @@ export function assertDirectUploadSessionReadyForIntake(
   loaded: LoadedDirectUploadSession,
 ): void {
   if (loaded.session.status === "confirmed") {
-    throw new WorkspaceIntakeError(
+    throw new ProjectIntakeError(
       "Upload session is already confirmed",
       409,
     );
   }
 
   if (["aborted", "failed"].includes(loaded.session.status)) {
-    throw new WorkspaceIntakeError("Upload session has been aborted", 409);
+    throw new ProjectIntakeError("Upload session has been aborted", 409);
   }
 
   if (loaded.files.length === 0) {
-    throw new WorkspaceIntakeError("Upload session has no files", 400);
+    throw new ProjectIntakeError("Upload session has no files", 400);
   }
 }
 
-export async function prepareDirectUploadWorkspaceIntake(
+export async function prepareDirectUploadProjectIntake(
   sessionId: string,
   userId: string,
-): Promise<PreparedDirectUploadWorkspaceIntake> {
+): Promise<PreparedDirectUploadProjectIntake> {
   const loaded = await loadDirectUploadSession(sessionId, userId);
   if (!loaded) {
-    throw new WorkspaceIntakeError("Upload session not found", 404);
+    throw new ProjectIntakeError("Upload session not found", 404);
   }
 
   assertDirectUploadSessionReadyForIntake(loaded);
@@ -565,13 +624,13 @@ export async function prepareDirectUploadWorkspaceIntake(
 
 export async function markDirectUploadSessionConfirmed(args: {
   sessionId: string;
-  workspaceId: string;
+  projectId: string;
   orgId: string;
 }): Promise<void> {
   await sql`
     update upload_sessions
     set status = 'confirmed',
-        workspace_id = ${args.workspaceId},
+        project_id = ${args.projectId},
         org_id = ${args.orgId},
         updated_at = now()
     where id = ${args.sessionId}
@@ -585,7 +644,7 @@ export async function markDirectUploadSessionConfirmed(args: {
  */
 export function directUploadIntakeItems(
   loaded: LoadedDirectUploadSession,
-): WorkspaceIntakeItem[] {
+): ProjectIntakeItem[] {
   return loaded.files.map((file) => ({
     filename: file.filename,
     mimeType: file.mime_type,
@@ -594,7 +653,7 @@ export function directUploadIntakeItems(
     path: file.source_path ?? "",
     content: file.status === "completed"
       ? { storedKey: file.source_key, verifiedSizeBytes: file.size_bytes }
-      : { rejected: new WorkspaceIntakeError(`${file.filename} did not finish uploading`, 409) },
+      : { rejected: new ProjectIntakeError(`${file.filename} did not finish uploading`, 409) },
   }));
 }
 
@@ -606,7 +665,7 @@ async function verifyCompletedDirectUpload(
     metadata = await getUploadedObjectMetadata(file.source_key);
   } catch (error) {
     if (isStorageNotFound(error)) {
-      throw new WorkspaceIntakeError(
+      throw new ProjectIntakeError(
         file.upload_mode === "single"
           ? `No object found in storage for ${file.filename}: this file uses single-part mode, so PUT its bytes to the file's putUrl before completing (the session has no parts to upload)`
           : `No object found in storage for ${file.filename} after completing the multipart upload`,
@@ -617,14 +676,14 @@ async function verifyCompletedDirectUpload(
   }
   const actualSize = metadata.contentLength;
   if (actualSize === null) {
-    throw new WorkspaceIntakeError(`Unable to verify upload size for ${file.filename}`, 400);
+    throw new ProjectIntakeError(`Unable to verify upload size for ${file.filename}`, 400);
   }
   admitIntakeFile(
     { filename: file.filename, mimeType: file.mime_type, sizeBytes: actualSize },
     "direct-upload",
   );
   if (actualSize !== file.size_bytes) {
-    throw new WorkspaceIntakeError(
+    throw new ProjectIntakeError(
       `Uploaded size for ${file.filename} (${actualSize} bytes) did not match the declared size (${file.size_bytes} bytes)`,
       400,
     );
@@ -648,13 +707,13 @@ function isStorageNotFound(error: unknown): boolean {
 function multipartCompletionError(error: unknown, filename: string): unknown {
   switch (storageErrorName(error)) {
     case "InvalidPart":
-      return new WorkspaceIntakeError(`Multipart completion for ${filename} failed: a part is missing or its etag does not match the uploaded part (InvalidPart)`, 400);
+      return new ProjectIntakeError(`Multipart completion for ${filename} failed: a part is missing or its etag does not match the uploaded part (InvalidPart)`, 400);
     case "InvalidPartOrder":
-      return new WorkspaceIntakeError(`Multipart completion for ${filename} failed: parts must be in ascending partNumber order (InvalidPartOrder)`, 400);
+      return new ProjectIntakeError(`Multipart completion for ${filename} failed: parts must be in ascending partNumber order (InvalidPartOrder)`, 400);
     case "EntityTooSmall":
-      return new WorkspaceIntakeError(`Multipart completion for ${filename} failed: a non-final part is smaller than the storage provider's minimum part size (EntityTooSmall)`, 400);
+      return new ProjectIntakeError(`Multipart completion for ${filename} failed: a non-final part is smaller than the storage provider's minimum part size (EntityTooSmall)`, 400);
     case "NoSuchUpload":
-      return new WorkspaceIntakeError(`Multipart upload for ${filename} is no longer open (expired, aborted or already completed); create a new upload session`, 400);
+      return new ProjectIntakeError(`Multipart upload for ${filename} is no longer open (expired, aborted or already completed); create a new upload session`, 400);
     default:
       return error;
   }
@@ -674,7 +733,7 @@ export async function queueAbandonedDirectUploadCleanup(sessionId: string): Prom
   }
   await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, artifact_uris, reason, not_before)
     select 'storage_prefix', coalesce(s.org_id, ''), s.user_id || '/' || s.id || '/',
-      jsonb_build_object('workspaceId', s.workspace_id), array_agg(f.source_key), 'abandoned_upload', now() + interval '16 minutes'
+      jsonb_build_object('projectId', s.project_id), array_agg(f.source_key), 'abandoned_upload', now() + interval '16 minutes'
     from upload_sessions s join upload_session_files f on f.session_id = s.id
     where s.id = ${sessionId} and s.status in ('aborted', 'failed')
     group by s.id

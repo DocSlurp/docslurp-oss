@@ -1,4 +1,4 @@
-import { PRICE_CARD, dailyStorageCredits, daysInUtcMonth, unitChargeMetadata } from "@docslurp/shared";
+import { storageCreditsPerMonth, dailyStorageCredits, daysInUtcMonth, unitChargeMetadata } from "@docslurp/shared";
 import { sql, type SqlClient } from "../../db.js";
 import { recordCostEvent } from "../../lib/ai-usage.js";
 import { STORAGE_USAGE_METRIC, STORAGE_USAGE_PROVIDER } from "../usage-attribution.js";
@@ -32,7 +32,7 @@ export function utcDay(now: Date): string {
 
 /**
  * Charge one day of storage per org per UTC day (design gotcha 10) at
- * PRICE_CARD.storageGbMonth / days in the month, on every stored byte
+ * the pricing provider's monthly storage price / days in the month, on every stored byte
  * (objects + indexes; no included GB). The
  * storage_meter_days primary key makes each (org, day) charge idempotent
  * across sweeps and instances; the Usage Event id is derived from the same
@@ -44,7 +44,7 @@ export async function runStorageMeter(options: { now?: Date } = {}): Promise<{ m
   }
   const day = utcDay(options.now ?? new Date());
   // Usage is attributed to the creator, or to an owner once the creator's
-  // account is deleted. Deleted orgs have no workspaces left to meter.
+  // account is deleted. Deleted orgs have no projects left to meter.
   const orgs = await sql<{ id: string; created_by_user_id: string }[]>`
     select o.id, coalesce(o.created_by_user_id, (
       select om.user_id from org_memberships om
@@ -55,8 +55,8 @@ export async function runStorageMeter(options: { now?: Date } = {}): Promise<{ m
     where o.deleted_at is null
       and not exists (select 1 from storage_meter_days d where d.org_id = o.id and d.day = ${day}::date)
       and exists (
-        select 1 from workspaces w
-        join workspace_corpus_stats s on s.workspace_id = w.id
+        select 1 from projects w
+        join project_corpus_stats s on s.project_id = w.id
         where w.org_id = o.id and (s.source_bytes > 0 or s.page_count > 0)
       )
     limit ${ORGS_PER_SWEEP}
@@ -107,7 +107,7 @@ async function meterOrgDay(org: { id: string; created_by_user_id: string }, day:
         metadata: unitChargeMetadata({
           day,
           daysInMonth,
-          storageGbMonth: PRICE_CARD.storageGbMonth,
+          storageCreditsPerGbMonth: storageCreditsPerMonth(BYTES_PER_GB),
           objectBytes: storage.objectBytes,
           indexBytes: storage.indexBytes,
           sourceBytes: storage.sourceBytes,

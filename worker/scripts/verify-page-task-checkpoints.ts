@@ -16,13 +16,13 @@ const admin = postgres(url, {prepare:false});
 await admin.unsafe(`create schema ${schema}`);
 const sql = postgres(url, {max:20, prepare:false, connection:{search_path:schema}});
 try {
-  await sql.unsafe(`create table workspace_runs(id text primary key,spent_cents numeric(24,12) not null default 0,updated_at timestamptz);
+  await sql.unsafe(`create table project_runs(id text primary key,spent_cents numeric(24,12) not null default 0,updated_at timestamptz);
     create table documents(id text primary key);
     create table organizations(id text primary key,credit_balance_cents numeric(24,12),updated_at timestamptz,${CREDIT_POOL_ORG_COLUMNS});
     create table usage_events(id text primary key,user_id text,run_id text,provider text,model text,metric text,amount numeric,unit text,cost_cents numeric(24,12),input_tokens int,output_tokens int,metadata jsonb);
     ${CREDIT_LEDGER_TABLE};
     create table page_stage_states(run_id text,document_id text,stage_name text,page_number int,status text,completed_at timestamptz,unique(run_id,document_id,stage_name,page_number));
-    insert into workspace_runs(id) values('run'); insert into documents values('doc'); insert into organizations(id,credit_balance_cents,updated_at) values('org',2000,now());`);
+    insert into project_runs(id) values('run'); insert into documents values('doc'); insert into organizations(id,credit_balance_cents,updated_at) values('org',2000,now());`);
   await installCreditPoolSql(sql);
   await installRunSpentTrigger(sql);
   await sql.unsafe(await readFile(new URL("../../server/db/migrations/0014_distributed_page_tasks.sql", import.meta.url),"utf8"));
@@ -43,7 +43,7 @@ try {
   await assert.rejects(store.finish(tasks[0]!,claims[0]!,makeState(0),{}),/lease lost/);
   assert.equal(Number((await sql`select count(*)::int n from credit_debits_pending`)[0]!.n),20);
   await flushPendingCreditDebits(sql);
-  const [totals] = await sql`select (select spent_cents::text from workspace_runs) cost,
+  const [totals] = await sql`select (select spent_cents::text from project_runs) cost,
     (select sum(cost_cents)::text from usage_events) usage,
     (select credit_balance_cents::text from organizations) balance,
     (select count(*)::int from credit_ledger) debits`;

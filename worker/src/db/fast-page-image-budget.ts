@@ -1,6 +1,6 @@
 import type { Sql } from "postgres";
 
-/** The document is not one of the run's own documents (same run, workspace and organization); nothing is reserved. */
+/** The document is not one of the run's own documents (same run, project and organization); nothing is reserved. */
 export class FastPageImageBudgetRefused extends Error {
   constructor(runId: string, documentId: string) {
     super(`fast page-image budget refused: document ${documentId} does not belong to run ${runId}`);
@@ -19,7 +19,7 @@ export class FastPageImageBudgetRefused extends Error {
  * storage error) still uses its share of the budget, and a retry gets the same stored grant back rather than a new
  * one. Failed renders therefore never let a run render more than `perRun` pages in total.
  *
- * The document must be one of the run's own documents (`documents.run_id`, in the run's workspace and organization),
+ * The document must be one of the run's own documents (`documents.run_id`, in the run's project and organization),
  * checked in the reservation transaction before the budget is touched; any other pair throws
  * FastPageImageBudgetRefused and reserves nothing. Migration 0101's grant trigger enforces the same rule.
  */
@@ -33,9 +33,9 @@ export async function reserveFastPageImageRenders(
     const client = tx as unknown as Sql<Record<string, unknown>>;
     const [owned] = await client<{ id: string }[]>`
       select d.id from documents d
-      join workspace_runs r on r.id = d.run_id
+      join project_runs r on r.id = d.run_id
       where d.id = ${args.documentId} and r.id = ${args.runId}
-        and d.workspace_id is not distinct from r.workspace_id
+        and d.project_id is not distinct from r.project_id
         and d.org_id is not distinct from r.org_id
       for share of d
     `;

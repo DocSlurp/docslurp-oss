@@ -3,22 +3,22 @@ import type {
   PipelineFeatureOverrides,
   PipelineFeatures,
   RunStage,
-  WorkspaceRunEventType as SharedWorkspaceRunEventType,
+  ProjectRunEventType as SharedProjectRunEventType,
 } from "@docslurp/shared";
 import { normalizePipelineFeatures } from "@docslurp/shared";
 
 export type JsonMap = Record<string, unknown>;
 
-export interface WorkspaceRun {
+export interface ProjectRun {
   id: string;
   orgId: string | null;
   /** The billed org's plan, so AI on bonus plans carries the plan-neutral credit factor. */
   /** Whether the run's org has ever had a paid grant (organizations.funded_at). */
   orgFunded?: boolean;
-  /** True when the org and the run's workspace both allow China-based model providers; unset is restricted. */
+  /** True when the org and the run's project both allow China-based model providers; unset is restricted. */
   allowChinaProviders?: boolean;
   userId: string;
-  workspaceId?: string;
+  projectId?: string;
   kind: string;
   status: string;
   stage: string;
@@ -27,7 +27,7 @@ export interface WorkspaceRun {
   pagesTotal: number;
   pagesProcessed: number;
   /**
-   * Committed billed spend of the run (`workspace_runs.spent_cents`): the sum
+   * Committed billed spend of the run (`project_runs.spent_cents`): the sum
    * of cost_cents of every usage event persisted for it, kept by a trigger on
    * usage_events (migration 0056) and refreshed by each progress checkpoint.
    * Add the ledger's pending billable cents for the live figure the run cost
@@ -40,7 +40,7 @@ export interface WorkspaceRun {
   stats: JsonMap;
   artifacts: Record<string, string>;
   claimId: string | null;
-  /** Extract runs (workspace_runs.extract_id) write every artifact under this prefix instead of <user>/<run>. */
+  /** Extract runs (project_runs.extract_id) write every artifact under this prefix instead of <user>/<run>. */
   storagePrefix?: string | null;
   extractId?: string | null;
   createdAt: Date;
@@ -59,6 +59,23 @@ export interface Document {
   status: string;
   extractionMode: string;
   pageCount: number;
+  /**
+   * Pages the document bills when they differ from `pageCount` (the page basis the text splits into): the worker's measured count of an
+   * Office, slide, sheet or EPUB file (documents.billing_pages). Null/absent: it bills `pageCount`.
+   */
+  billingPages?: number | null;
+  /** How `billingPages` was found (documents.billing_pages_method); a layout conversion's count is capped by the text it holds when features bill. */
+  billingPagesMethod?: string | null;
+  /** `counted` or `assumed` (documents.page_count_source): `assumed` is intake's estimate, replaced by the worker's count. */
+  pageCountSource?: "counted" | "assumed" | null;
+  /**
+   * The page count admission priced (documents.intake_page_count, migration 0130): set at insert, never rewritten. Measured
+   * pages above it are authorized against the balance on every attempt (lib/measured-page-authorization.ts). Null on rows
+   * from before 0130, read as pageCount.
+   */
+  intakePageCount?: number | null;
+  /** What intake sniffed the bytes to be (documents.file_facts); absent for documents ingested before it existed. */
+  fileFacts?: import("@docslurp/shared").FileFacts | null;
   createdAt: Date;
   updatedAt: Date;
   /** Set for documents of an extract run: the run's storage prefix (see runArtifactRoot). */
@@ -126,15 +143,15 @@ export interface StageState {
   updatedAt: Date;
 }
 
-export type WorkspaceRunEventType = SharedWorkspaceRunEventType | string;
+export type ProjectRunEventType = SharedProjectRunEventType | string;
 
-export interface WorkspaceRunEvent {
+export interface ProjectRunEvent {
   id?: string;
   userId: string;
   runId: string;
   documentId?: string;
   stageName?: string;
-  eventType: WorkspaceRunEventType | string;
+  eventType: ProjectRunEventType | string;
   status?: string;
   message?: string;
   progress?: JsonMap;
@@ -152,7 +169,7 @@ export interface EmbeddingProfile {
   model: string;
   baseUrl: string | null;
   dimensions: number;
-  /** Explicitly configured workspace dimensions, sent to servers that support them. */
+  /** Explicitly configured project dimensions, sent to servers that support them. */
   requestedDimensions?: number;
   task: EmbeddingConfig["task"];
   normalize: boolean;

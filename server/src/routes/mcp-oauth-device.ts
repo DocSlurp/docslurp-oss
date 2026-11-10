@@ -210,7 +210,7 @@ ${requesterIp !== "unknown" && ip && requesterIp !== ip ? `<p class="warn">The r
 <ul>${base.map((scope) => `<li>${escapeHtml(SCOPE_COPY[scope] ?? scope)}</li>`).join("") || "<li>Nothing unless you tick an option below</li>"}</ul>
 ${extras.length ? `<p class="meta">It also asked for these. They are off unless you tick them:</p>
 ${extras.map((scope) => `<label class="opt"><input type="checkbox" name="optIn" value="${escapeHtml(scope)}"> <span>${escapeHtml(SCOPE_COPY[scope] ?? scope)}</span></label>`).join("")}` : ""}
-<p class="meta">It can never change workspace settings, manage your organization or create API keys.</p>
+<p class="meta">It can never change project settings, manage your organization or create API keys.</p>
 <input type="hidden" name="user_code" value="${escapeHtml(formatUserCode(code!))}">
 <label class="meta" for="org">Organization</label>
 <select id="org" name="orgId">${orgs.map((org) => `<option value="${escapeHtml(org.id)}">${escapeHtml(org.name)}</option>`).join("")}</select>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseRealtimeClientFrame, realtimeSuggestionsSnapshotSchema, realtimeViewerSnapshotSchema, REALTIME_LIMITS } from "./realtime.js";
+import { parseRealtimeClientFrame, realtimePageImageSnapshotSchema, realtimeSuggestionsSnapshotSchema, realtimeViewerSnapshotSchema, REALTIME_LIMITS } from "./realtime.js";
 
 const subscribe = { v: 1, type: "subscribe", subscriptionId: "run", generation: 1,
   resource: { kind: "run", runId: "00000000-0000-4000-8000-000000000001" } };
@@ -33,7 +33,7 @@ it("strictly bounds suggestions and rejects viewer artifact fields", () => {
   expect(realtimeSuggestionsSnapshotSchema.safeParse({...suggestions,suggestions:["x".repeat(1025)]}).success).toBe(false);
   expect(realtimeSuggestionsSnapshotSchema.safeParse({...suggestions,secret:"unexpected"}).success).toBe(false);
   const viewer = {
-    document: { id: "doc", workspaceId: "workspace", runId: null, status: "processing", title: null,
+    document: { id: "doc", projectId: "project", runId: null, status: "processing", title: null,
       statusReason: null, pageCount: 0, versionNumber: 1, previousVersionId: null, supersededAt: null,
       supersededByDocumentId: null, updatedAt: "2026-11-03T00:00:00Z" },
     tags: [], stages: [], pageStats: { pageCount: 0, chunkCount: 0, pageTextCount: 0 }, run: null,
@@ -44,4 +44,17 @@ it("strictly bounds suggestions and rejects viewer artifact fields", () => {
   expect(realtimeViewerSnapshotSchema.safeParse({...viewer,artifacts:[{url:"private"}]}).success).toBe(false);
   expect(realtimeViewerSnapshotSchema.safeParse({...viewer,document:{...viewer.document,sourceKey:"private"}}).success).toBe(false);
   expect(realtimeViewerSnapshotSchema.safeParse({...viewer,tags:Array(65).fill("tag")}).success).toBe(false);
+});
+
+it("bounds exact page readiness identities and excludes URLs or commands",()=>{
+  const resource={kind:"page-image",documentId:"00000000-0000-4000-8000-000000000001",runId:"00000000-0000-4000-8000-000000000002",pageNumber:3,quality:"reader"};
+  const frame=parseRealtimeClientFrame(JSON.stringify({...subscribe,resource}));
+  if(frame.type!=="subscribe")throw new Error("expected subscribe");
+  expect(frame.resource).toEqual(resource);
+  for(const mutation of [{pageNumber:0},{pageNumber:1_000_000},{quality:"arbitrary"},{runId:"../other"},{userId:"victim"},{dpi:10000}]) {
+    expect(()=>parseRealtimeClientFrame(JSON.stringify({...subscribe,resource:{...resource,...mutation}}))).toThrow();
+  }
+  expect(realtimePageImageSnapshotSchema.parse({resource,status:"ready"})).toEqual({resource,status:"ready"});
+  expect(()=>realtimePageImageSnapshotSchema.parse({resource,status:"ready",url:"s3://secret"})).toThrow();
+  expect(()=>parseRealtimeClientFrame(JSON.stringify({...subscribe,resource:{...resource,extra:"x".repeat(9000)}}))).toThrow("frame_too_large");
 });

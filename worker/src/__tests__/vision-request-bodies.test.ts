@@ -44,12 +44,20 @@ async function requestBody(model: string, prompt?: string) {
 
 describe("vision request bodies", () => {
   // Golden bodies captured from the pre-registry-refactor HEAD (fake fetch, default and explicit `layout` prompts).
-  it("sends the same full request body for each model as before the single-registry refactor", async () => {
+  it("preserves full request bodies except the approved provider selection", async () => {
     const golden = JSON.parse(await readFile(join(import.meta.dirname, "fixtures/vision-request-bodies.json"), "utf8")) as Record<string, unknown>;
     const actual: Record<string, unknown> = {};
     for (const model of MODELS) for (const prompt of [undefined, "layout"]) actual[`${model}|${prompt ?? ""}`] = await requestBody(model, prompt);
     expect(Object.keys(actual)).toEqual(Object.keys(golden));
-    for (const key of Object.keys(golden)) expect(actual[key], key).toEqual(golden[key]);
+    for (const key of Object.keys(golden)) {
+      const expected = structuredClone(golden[key]) as Record<string, any>;
+      if (key.startsWith("deepseek/deepseek-v4.1-flash-1017|")) {
+        expect(expected.provider.sort).toBe("price");
+        expected.provider.sort = "latency";
+        expected.provider.only = ["fireworks", "parasail"];
+      }
+      expect(actual[key], key).toEqual(expected);
+    }
   });
 
   // The pre-stream fixtures are the bodies captured before the stream guard; streaming must change nothing else.

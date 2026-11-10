@@ -8,7 +8,7 @@ type AuditLogRow = {
   id: string;
   org_id: string | null;
   user_id: string | null;
-  workspace_id: string | null;
+  project_id: string | null;
   run_id: string | null;
   document_id: string | null;
   api_key_id: string | null;
@@ -24,7 +24,7 @@ export interface AuditLogEntry {
   id: string;
   orgId: string | null;
   userId: string | null;
-  workspaceId: string | null;
+  projectId: string | null;
   runId: string | null;
   documentId: string | null;
   apiKeyId: string | null;
@@ -40,7 +40,7 @@ export interface AuditLogListInput {
   actorUserId?: string;
   orgId?: string;
   userId?: string;
-  workspaceId?: string;
+  projectId?: string;
   runId?: string;
   documentId?: string;
   apiKeyId?: string;
@@ -60,7 +60,7 @@ function mapAuditRow(row: AuditLogRow): AuditLogEntry {
     id: row.id,
     orgId: row.org_id,
     userId: row.user_id,
-    workspaceId: row.workspace_id,
+    projectId: row.project_id,
     runId: row.run_id,
     documentId: row.document_id,
     apiKeyId: row.api_key_id,
@@ -76,7 +76,7 @@ function mapAuditRow(row: AuditLogRow): AuditLogEntry {
 export async function appendAuditLog(args: {
   orgId?: string | null;
   userId?: string | null;
-  workspaceId?: string | null;
+  projectId?: string | null;
   runId?: string | null;
   documentId?: string | null;
   apiKeyId?: string | null;
@@ -97,7 +97,7 @@ export async function appendAuditLog(args: {
       id,
       org_id,
       user_id,
-      workspace_id,
+      project_id,
       run_id,
       document_id,
       api_key_id,
@@ -112,7 +112,7 @@ export async function appendAuditLog(args: {
       ${randomUUID()},
       ${args.orgId ?? null},
       ${args.userId ?? null},
-      ${args.workspaceId ?? null},
+      ${args.projectId ?? null},
       ${args.runId ?? null},
       ${args.documentId ?? null},
       ${args.apiKeyId ?? null},
@@ -127,7 +127,7 @@ export async function appendAuditLog(args: {
       id,
       org_id,
       user_id,
-      workspace_id,
+      project_id,
       run_id,
       document_id,
       api_key_id,
@@ -157,15 +157,15 @@ export function buildAuditLogListQuery(args?: AuditLogListInput): {
       org_id in (
         select org_id from org_memberships where user_id = ${actorParam}
       )
-      or workspace_id in (
+      or project_id in (
         select w.id
-        from workspaces w
+        from projects w
         join org_memberships om on om.org_id = w.org_id
         where om.user_id = ${actorParam}
       )
       or run_id in (
         select r.id
-        from workspace_runs r
+        from project_runs r
         join org_memberships om on om.org_id = r.org_id
         where om.user_id = ${actorParam}
       )
@@ -188,9 +188,9 @@ export function buildAuditLogListQuery(args?: AuditLogListInput): {
     conditions.push(`user_id = $${params.length}`);
   }
 
-  if (args?.workspaceId) {
-    params.push(args.workspaceId);
-    conditions.push(`workspace_id = $${params.length}`);
+  if (args?.projectId) {
+    params.push(args.projectId);
+    conditions.push(`project_id = $${params.length}`);
   }
 
   if (args?.runId) {
@@ -231,7 +231,7 @@ export function buildAuditLogListQuery(args?: AuditLogListInput): {
       id,
       org_id,
       user_id,
-      workspace_id,
+      project_id,
       run_id,
       document_id,
       api_key_id,
@@ -257,7 +257,7 @@ export async function listAuditLogPage(args?: AuditLogListInput): Promise<AuditL
       id,
       org_id,
       user_id,
-      workspace_id,
+      project_id,
       run_id,
       document_id,
       api_key_id,
@@ -298,15 +298,15 @@ function buildAuditLogListSql(args?: AuditLogListInput): {
       org_id in (
         select org_id from org_memberships where user_id = ${args.actorUserId}
       )
-      or workspace_id in (
+      or project_id in (
         select w.id
-        from workspaces w
+        from projects w
         join org_memberships om on om.org_id = w.org_id
         where om.user_id = ${args.actorUserId}
       )
       or run_id in (
         select r.id
-        from workspace_runs r
+        from project_runs r
         join org_memberships om on om.org_id = r.org_id
         where om.user_id = ${args.actorUserId}
       )
@@ -327,8 +327,8 @@ function buildAuditLogListSql(args?: AuditLogListInput): {
     conditions.push(sql`user_id = ${args.userId}`);
   }
 
-  if (args?.workspaceId) {
-    conditions.push(sql`workspace_id = ${args.workspaceId}`);
+  if (args?.projectId) {
+    conditions.push(sql`project_id = ${args.projectId}`);
   }
 
   if (args?.runId) {

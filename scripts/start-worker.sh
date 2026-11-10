@@ -44,11 +44,11 @@ default_bool_for_env() {
 }
 
 if [[ -z "${CLAMAV_MANAGE_DAEMON}" ]]; then
-  CLAMAV_MANAGE_DAEMON="$(default_bool_for_env true false)"
+  CLAMAV_MANAGE_DAEMON="false"
 fi
 
 if [[ -z "${CLAMAV_REQUIRE_DAEMON}" ]]; then
-  CLAMAV_REQUIRE_DAEMON="$(default_bool_for_env true false)"
+  CLAMAV_REQUIRE_DAEMON="false"
 fi
 
 if [[ -z "${CLAMAV_FAIL_OPEN_ON_STALE_DB}" ]]; then
@@ -450,6 +450,13 @@ bootstrap_deferred_python() {
 
   if [[ "${current_hash}" == "${expected_hash}" ]]; then
     echo "[worker-start] deferred Python deps already present (${expected_hash})."
+    return
+  fi
+
+  # The image's venv is root-owned (council W #1: a parser must not rewrite it). Deferred installs need a venv this user
+  # owns: point DOCSLURP_WORKER_VENV at one. Without it the heavy parsers stay unavailable, loudly.
+  if [[ ! -w "${VENV}" ]]; then
+    echo "[worker-start] WARNING: ${VENV} is not writable by $(id -un); deferred Python deps NOT installed. Set DOCSLURP_WORKER_VENV to a writable venv to install them." >&2
     return
   fi
 

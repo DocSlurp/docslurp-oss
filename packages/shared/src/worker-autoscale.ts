@@ -191,25 +191,21 @@ export async function queryWorkerScalerSnapshot(sql: ScalerSql, params: WorkerSc
         where status = 'queued'
           and coalesce(control_state, '') not in ('paused', 'cancelled')
       ), 0)::int as queued_pages,
-        (select count(*)::int from page_work_tasks p join workspace_runs r on r.id=p.run_id
+        (select count(*)::int from page_work_tasks p join project_runs r on r.id=p.run_id
           where p.status in ('queued','processing') and r.status='processing'
           and coalesce(r.control_state,'') not in ('paused','cancel_requested','cancelled')) as pending_page_tasks,
         (select coalesce(json_agg(d), '[]'::json) from (
           select org_key, max(slots)::int as slots,
             sum(greatest(1, least(fanout_cap, page_demand), least(slots, shard_demand)))::int as demand
           from (
-            select coalesce(r.org_id, 'workspace:' || r.workspace_id) as org_key,
+            select coalesce(r.org_id, 'project:' || r.project_id) as org_key,
               coalesce(o.worker_slots, ${params.defaultOrgSlots}) as slots,
               case when r.status = 'processing' then r.shard_demand else 0 end as shard_demand,
               least(${params.pageFanout}, coalesce(o.worker_slots, ${params.defaultOrgSlots}), 128) as fanout_cap,
-              greatest(
-                (select count(*) from page_work_tasks p where p.run_id = r.id and p.status in ('queued','processing')),
-                case when coalesce((r.pipeline->>'visionFallback')::boolean,false)
-                  and coalesce((r.pipeline->>'maxCostCents')::numeric,0)=0
-                  and not exists(select 1 from workspace_run_stage_states s where s.run_id=r.id and s.stage_name='vision-extract' and s.status='completed')
-                then r.pages_total else 0 end
-              ) as page_demand
-            from workspace_runs r
+              -- Only persisted page work is runnable. Future vision pages must not
+              -- start a fleet while this run is still in document-stage barriers.
+              (select count(*) from page_work_tasks p where p.run_id = r.id and p.status in ('queued','processing')) as page_demand
+            from project_runs r
             left join organizations o on o.id = r.org_id
             where (r.status = 'queued' and coalesce(r.control_state,'') not in ('paused','cancelled'))
               or (r.status = 'processing' and coalesce(r.control_state,'') not in ('paused','cancel_requested','cancelled')
@@ -255,7 +251,7 @@ export async function queryWorkerScalerSnapshot(sql: ScalerSql, params: WorkerSc
         where status = 'queued'
           and coalesce(control_state, '') not in ('paused', 'cancelled')
       )) as oldest_queued_run_created_at_seconds
-    from workspace_runs
+    from project_runs
   `;
   return (rows[0] as WorkerScalerSnapshot | undefined) ?? EMPTY_WORKER_SCALER_SNAPSHOT;
 }

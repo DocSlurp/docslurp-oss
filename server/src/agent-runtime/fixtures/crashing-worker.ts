@@ -20,7 +20,7 @@ const host=await createNativeChatHost({pool,redisUrl:redis,namespace:process.env
 process.on("message", async (message: {start?: string}) => {
   if (!message.start) return;
   const id=message.start;
-  await host.mastra.backgroundTaskManager!.enqueue({agentId:"docslurp-workspace-chat",runId:id,toolCallId:id,
+  await host.mastra.backgroundTaskManager!.enqueue({agentId:"docslurp-project-chat",runId:id,toolCallId:id,
     toolName:"crashFixture",args:{operationId:id},resourceId:"fixture",maxRetries:0,timeoutMs:600000},{executor:host.mastra.backgroundTaskManager!.getStaticExecutor("crashFixture")!},{pinToWorker:true});
 });
 process.send?.({ready:true});

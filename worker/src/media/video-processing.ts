@@ -1,4 +1,4 @@
-import { PRICE_CARD, pageCredits, priceAiUsageEvent } from "@docslurp/shared";
+import { mediaRichPages, pageCredits, priceAiUsageEvent } from "@docslurp/shared";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, stat, unlink } from "node:fs/promises";
 import path from "node:path";
@@ -22,8 +22,11 @@ export async function describeVideoChunk(args: { state: WorkflowState; scope: Me
   const hash = createHash("sha256").update(JSON.stringify([scope, provider.id, provider.model, "video-gray96-v1", frames.map(f=>f.seconds)]));
   for (const f of frames) hash.update(f.bytes);
   const { receipt, acquired } = await journal.admit({ scope, key: hash.digest("hex"), provider: provider.id, model: provider.model,
-    // Reserve the Rich pages these frames add on top of the audio minutes (video minutes bill as videoMinuteRichPages).
-    reserveCents: Math.max(0.001, pageCredits("rich", Math.max(1, frames[frames.length - 1]!.seconds - frames[0]!.seconds) / 60 * (PRICE_CARD.videoMinuteRichPages - PRICE_CARD.audioMinuteRichPages))), maxRunCostCents: state.run.pipeline.maxCostCents ?? null,
+    // Reserve the Rich pages these frames add on top of the audio minutes (the provider's video minus audio pages).
+    reserveCents: Math.max(0.001, (() => {
+      const seconds = Math.max(1, frames[frames.length - 1]!.seconds - frames[0]!.seconds);
+      return pageCredits("rich", Math.max(0, mediaRichPages("video", seconds) - mediaRichPages("audio", seconds)));
+    })()), maxRunCostCents: state.run.pipeline.maxCostCents ?? null,
     maxDocumentCostCents: policy.maxCostCents, maxConcurrent: config.maxConcurrent, dailyBudgetCents: config.dailyBudgetCents });
   if (!acquired && receipt.status !== "completed") throw new Error("Video request requires reconciliation before retry");
   const resultKey = receipt.resultKey ?? `${scope.runId === state.run.id ? runArtifactRoot(state.run, state.run.userId) : `${state.run.userId}/${scope.runId}`}/media/receipts/${receipt.id}.json`;

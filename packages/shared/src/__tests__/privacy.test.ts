@@ -10,7 +10,7 @@ import {
   PrivacyModeViolationError,
   privacyModeAuditsBlockedCalls,
   resolveProviderTarget,
-  workspaceTemplates,
+  projectTemplates,
 } from "../index.js";
 
 const hosted = { provider: "openrouter", model: "vendor/model", operation: "test.text" };
@@ -54,8 +54,8 @@ describe("privacy guard", () => {
   it("audits only strict-privacy and marks rows as blocked", () => {
     expect(privacyModeAuditsBlockedCalls("strict-privacy")).toBe(true);
     expect(privacyModeAuditsBlockedCalls("local-only")).toBe(false);
-    expect(buildBlockedPrivacyAuditEntry({ privacyMode: "strict-privacy", call: hosted, workspaceId: "ws", runId: "run" }))
-      .toEqual({ workspaceId: "ws", runId: "run", documentId: null, modelId: "openrouter/vendor/model", endpoint: "blocked:test.text", privacyMode: "strict-privacy" });
+    expect(buildBlockedPrivacyAuditEntry({ privacyMode: "strict-privacy", call: hosted, projectId: "ws", runId: "run" }))
+      .toEqual({ projectId: "ws", runId: "run", documentId: null, modelId: "openrouter/vendor/model", endpoint: "blocked:test.text", privacyMode: "strict-privacy" });
   });
 });
 
@@ -78,7 +78,7 @@ describe("privacyMode pipeline validation", () => {
   });
 
   it("keeps strict-privacy templates free of hosted routes", () => {
-    const strict = workspaceTemplates.filter((template) => template.pipeline.privacyMode !== "standard");
+    const strict = projectTemplates.filter((template) => template.pipeline.privacyMode !== "standard");
     expect(strict.length).toBeGreaterThan(0);
     for (const template of strict) {
       expect(template.pipeline.embedding.target).toBe("local");

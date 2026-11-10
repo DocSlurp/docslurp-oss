@@ -13,7 +13,7 @@
 /** Measured cost of one stage on one executor class. */
 export interface ShardCostProfile {
   stage: string;
-  /** Executor class, e.g. `doppler-vm` or `fly-shared-1vcpu-2gb`. */
+  /** Executor class, e.g. `fly-shared-slot` or a provider's VM class. */
   executor: string;
   /** Per-shard overhead: dispatch, source fetch and open, VM boot. */
   fixedMs: number;

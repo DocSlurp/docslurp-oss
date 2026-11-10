@@ -1,3 +1,4 @@
+import { WorkflowExecutionAlreadyStartedError } from "@temporalio/client";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../db.js", () => ({ sql: {} }));
@@ -22,7 +23,7 @@ function lifecycle(startWorkflow: (...args: unknown[]) => Promise<void>) {
   queries = [];
   const sql = (async (strings: TemplateStringsArray) => {
     queries.push(strings.join("?").replace(/\s+/g, " ").trim());
-    return strings.join("?").includes("select id, execution_generation from workspace_runs") ? [{ id: "run-1", execution_generation: "generation-1" }] : [];
+    return strings.join("?").includes("select id, execution_generation from project_runs") ? [{ id: "run-1", execution_generation: "generation-1" }] : [];
   }) as unknown as SqlClient;
   Object.assign(sql, { begin: async (fn: (tx: SqlClient) => Promise<unknown>) => fn(sql) });
   return createRunLifecycle({ sql, startWorkflow, failureThreshold: 3 });
@@ -47,7 +48,7 @@ describe("Run Lifecycle start", () => {
   it("still reports the outcome when the start marker cannot be written", async () => {
     vi.spyOn(console, "warn").mockImplementationOnce(() => {});
     const sql = (async (strings: TemplateStringsArray) => {
-      if (strings.join("?").includes("select id, execution_generation from workspace_runs")) return [{ id: "run-1", execution_generation: "generation-1" }];
+      if (strings.join("?").includes("select id, execution_generation from project_runs")) return [{ id: "run-1", execution_generation: "generation-1" }];
       throw new Error("db down");
     }) as unknown as SqlClient;
     Object.assign(sql, { begin: async (fn: (tx: SqlClient) => Promise<unknown>) => fn(sql) });
@@ -56,9 +57,14 @@ describe("Run Lifecycle start", () => {
   });
 
   it("treats an already-started workflow as running unless a restart was requested", async () => {
-    const alreadyStarted = vi.fn(async () => { throw new Error("Workflow execution already started"); });
+    const alreadyStarted = vi.fn(async () => { throw new WorkflowExecutionAlreadyStartedError("Workflow execution already started", "run-1", "pipeline"); });
     await expect(lifecycle(alreadyStarted).start(run)).resolves.toEqual({ status: "already-started" });
     await expect(lifecycle(alreadyStarted).start(run, { restartExisting: true })).rejects.toThrow("already started");
+  });
+
+  it("does not treat an error that merely says 'already started' as a racing start", async () => {
+    const lookalike = vi.fn(async () => { throw new Error("worker machine already started; pool exhausted"); });
+    await expect(lifecycle(lookalike).start(run)).rejects.toThrow("already started");
   });
 
   it("surfaces other orchestration errors", async () => {

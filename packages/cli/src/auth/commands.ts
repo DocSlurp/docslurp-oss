@@ -12,7 +12,7 @@ const err = (line: string) => process.stderr.write(`${line}\n`);
 type WhoAmI = {
   user?: { id: string; email: string | null; name: string | null };
   organization?: { id: string; name: string; slug?: string } | null;
-  defaultWorkspace?: { id: string; name: string; slug: string | null } | null;
+  defaultProject?: { id: string; name: string; slug: string | null } | null;
   credential?: { type: string; client?: string; scopes?: string[]; apiKeyScopes?: string[]; expiresAt?: string | null };
 };
 
@@ -58,7 +58,7 @@ export async function loginCommand(flags: Flags, apiUrl: string): Promise<void> 
   const who = me.body?.user?.email ?? me.body?.user?.name ?? "your account";
   console.log(`Signed in to ${new URL(apiUrl).origin} as ${who}.`);
   if (me.body?.organization) console.log(`Organization: ${me.body.organization.name} (${me.body.organization.id})`);
-  if (me.body?.defaultWorkspace) console.log(`Default workspace: ${me.body.defaultWorkspace.name} (${me.body.defaultWorkspace.slug ?? me.body.defaultWorkspace.id})`);
+  if (me.body?.defaultProject) console.log(`Default project: ${me.body.defaultProject.name} (${me.body.defaultProject.slug ?? me.body.defaultProject.id})`);
   console.log(`Scopes: ${credential.scopes.join(" ")}`);
   console.log(`Stored in ${store}${profile === "default" ? "" : ` (profile ${profile})`}.`);
 }
@@ -111,7 +111,7 @@ export async function whoamiCommand(flags: Flags, apiUrl: string, detailed: bool
     status: me.body ? "valid" : me.status === 401 || me.status === 403 ? "rejected" : "unreachable",
     user: me.body?.user ?? stored?.user ?? null,
     organization: me.body?.organization ?? stored?.organization ?? null,
-    defaultWorkspace: me.body?.defaultWorkspace ?? null,
+    defaultProject: me.body?.defaultProject ?? null,
     scopes: me.body?.credential?.scopes ?? stored?.scopes ?? [],
     accessTokenExpiresAt: me.body?.credential?.expiresAt ?? stored?.accessTokenExpiresAt ?? null,
     ...(detailed ? { apiKeyScopes: me.body?.credential?.apiKeyScopes ?? null, shadowedStoredLogin: auth.source !== "stored login" && Boolean(await loadCredential(credentialAccount(auth.profile, apiUrl)).catch(() => null)) } : {}),
@@ -122,7 +122,7 @@ export async function whoamiCommand(flags: Flags, apiUrl: string, detailed: bool
     const user = summary.user;
     console.log(user ? `Signed in as ${user.email ?? user.name ?? user.id}` : "Signed in");
     if (summary.organization) console.log(`Organization: ${summary.organization.name} (${summary.organization.id})`);
-    if (summary.defaultWorkspace) console.log(`Default workspace: ${summary.defaultWorkspace.name} (${summary.defaultWorkspace.slug ?? summary.defaultWorkspace.id})`);
+    if (summary.defaultProject) console.log(`Default project: ${summary.defaultProject.name} (${summary.defaultProject.slug ?? summary.defaultProject.id})`);
     console.log(`Scopes: ${summary.scopes.join(" ") || "-"}`);
     console.log(`Token expires: ${relative(summary.accessTokenExpiresAt)}`);
     console.log(`Credential: ${summary.credentialSource}${summary.store ? ` (${summary.store})` : ""}`);
@@ -157,14 +157,14 @@ export async function authTokenCommand(flags: Flags, apiUrl: string): Promise<vo
 
 /**
  * Runs `<cmd...>` with a fresh short-lived DOCSLURP_TOKEN, DOCSLURP_URL and
- * (when chosen) DOCSLURP_WORKSPACE in its environment only: never on disk,
+ * (when chosen) DOCSLURP_PROJECT in its environment only: never on disk,
  * never in argv. The child's exit status becomes ours.
  */
-export async function execCommand(flags: Flags, apiUrl: string, workspace: string | null, argv: string[]): Promise<void> {
+export async function execCommand(flags: Flags, apiUrl: string, project: string | null, argv: string[]): Promise<void> {
   if (!argv.length) throw new Error("Usage: docslurp exec [--profile <name>] -- <command> [args...]");
   const auth = await requireOAuth(flags, apiUrl, "docslurp exec");
   const env: NodeJS.ProcessEnv = { ...process.env, DOCSLURP_TOKEN: await auth.token({ minValiditySeconds: 300 }), DOCSLURP_URL: apiUrl };
-  if (workspace) env.DOCSLURP_WORKSPACE = workspace;
+  if (project) env.DOCSLURP_PROJECT = project;
   delete env.DOCSLURP_API_KEY;
   const [command, ...args] = argv as [string, ...string[]];
   // Windows: resolve PATHEXT ourselves; only .cmd/.bat go through cmd.exe, with every argument escaped.

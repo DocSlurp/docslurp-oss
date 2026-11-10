@@ -1,4 +1,6 @@
 import { realtimeMetrics } from "./realtime/broker.js";
+import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
+import { sql as pricingStateSql } from "./db.js";
 import { closeDirectUploadLockPool } from "./lib/direct-upload-locks.js";
 import { tigrisUploadWebhookRoutes } from "./routes/tigris-upload-webhook.js";
 import { startDirectUploadReconciler, stopDirectUploadReconciler } from "./services/direct-upload-reconciler.js";
@@ -9,7 +11,7 @@ import { existsSync } from "node:fs";
 import { initializeObservability } from "@docslurp/shared/observability";
 import { startRevisionMaintenance } from "./realtime/revision-maintenance.js";
 import { envFlags, formatEnvFlags } from "@docslurp/shared/env-flags";
-import { startLiveModelPriceRefresh } from "@docslurp/shared";
+import { QuoteSettingsError, startLiveModelPriceRefresh } from "@docslurp/shared";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { dirname, resolve } from "node:path";
@@ -31,21 +33,23 @@ import { sessionAuth } from "./middleware/session-auth.js";
 import { chatCompletionsRoutes } from "./routes/chat-completions.js";
 import { documentsRoutes } from "./routes/documents.js";
 import { exportsRoutes } from "./routes/exports.js";
-import { extractorRoutes } from "./routes/extractors.js";
+import { configureApiExtractorIdAliases, extractorRoutes } from "./routes/extractors.js";
 import { docsRoutes } from "./routes/docs.js";
 import { healthRoutes } from "./routes/health.js";
 import { organizationsRoutes } from "./routes/organizations.js";
 import { runsRoutes } from "./routes/runs.js";
 import { jobsRoutes } from "./routes/jobs.js";
 import { uploadEstimateRoutes, uploadsRoutes } from "./routes/uploads.js";
+import { estimateRoutes } from "./routes/estimate.js";
 import { webhooksRoutes } from "./routes/webhooks.js";
-import { workspacesRoutes } from "./routes/workspaces.js";
+import { projectsRoutes } from "./routes/projects.js";
 import { chatInstructionsRoutes } from "./routes/chat-instructions.js";
 import { assertOutputModerationConfig } from "./services/chat-output-moderation.js";
+import { warnOrgLimitAboveOneWithUniqueIndex } from "./services/org-membership-limit.js";
 import { apiKeysRoutes } from "./routes/api-keys.js";
-import { searchRoutes, searchesRoutes, workspaceChatRoutes } from "./routes/search.js";
+import { searchRoutes, searchesRoutes, projectChatRoutes } from "./routes/search.js";
 import { webRoutes } from "./routes/web.js";
-import { workspaceGraphRoutes } from "./routes/workspace-graph.js";
+import { projectGraphRoutes } from "./routes/project-graph.js";
 import { artifactsRoutes } from "./routes/artifacts.js";
 import { inviteRoutes, metaRoutes, dashboardRoutes, waitlistRoutes } from "./routes/frontend.js";
 import { filesRoutes } from "./routes/files.js";
@@ -81,10 +85,11 @@ import { startWebhookOutboxListener, stopWebhookOutboxListener } from "./service
 import { startOrgSpendChangedListener, stopOrgSpendChangedListener } from "./services/spend-paused-runs.js";
 import { replaceProcessTask } from "./lib/process-singleton.js";
 import { startDbWatchdog } from "./services/db-watchdog.js";
-import { workspaceRefPath } from "./middleware/workspace-ref-path.js";
+import { projectRefPath } from "./middleware/project-ref-path.js";
 import { spendAwareErrorHandler } from "./services/billing/spend-guard.js";
 import { UnreadableSourceError } from "./services/source-metadata.js";
 import { warmDefaultLocalEmbedding } from "./lib/ai.js";
+import { rejectLegacyProjectSelection } from "./lib/reject-legacy-project-selection.js";
 import { rejectNulBytes } from "./lib/reject-nul.js";
 import { registerProviderPolicy } from "./lib/provider-policy.js";
 
@@ -125,6 +130,7 @@ export function createApiApp(): Hono {
   app.onError(nativeErrorHandler((error, c) => {
     // The request span records it (message, stack) once the response is sent.
     setCurrentRequestError(error);
+    if (error instanceof QuoteSettingsError) return c.json({ error: error.message, code: "invalid_request" }, 400);
     return error instanceof UnreadableSourceError
       ? c.json({ error: error.message, code: error.code }, error.statusCode)
       : spendAwareErrorHandler(error, c);
@@ -173,10 +179,11 @@ export function createApiApp(): Hono {
   // The Algolia adapter reads JSON itself; bound it like the other compat adapters.
   app.use("/compat/algolia/*", nativeBodyLimit(256 * 1024));
   app.use("*", rejectNulBytes);
-  // `/v1/workspaces/:slug|default/...` → resolved workspace UUID routes.
-  const workspaceRefs = workspaceRefPath([workspacesRoutes, chatInstructionsRoutes, connectorsRoutes, secretsRoutes, workspaceGraphRoutes]);
-  app.use("/v1/workspaces/:workspaceRef", workspaceRefs);
-  app.use("/v1/workspaces/:workspaceRef/*", workspaceRefs);
+  app.use("/v1/*", rejectLegacyProjectSelection);
+  // `/v1/projects/:slug|default/...` → resolved project UUID routes.
+  const projectRefs = projectRefPath([projectsRoutes, chatInstructionsRoutes, connectorsRoutes, secretsRoutes, projectGraphRoutes]);
+  app.use("/v1/projects/:projectRef", projectRefs);
+  app.use("/v1/projects/:projectRef/*", projectRefs);
 
   app.route("/", healthRoutes);
   app.route("/", docsRoutes);
@@ -191,13 +198,14 @@ export function createApiApp(): Hono {
   app.get("/v1/realtime", c => c.json({ error: "WebSocket Upgrade required" }, process.env.REALTIME_ENABLED === "true" ? 426 : 404));
   app.route("/v1/runs", runsRoutes);
   app.route("/v1/jobs", jobsRoutes);
-  app.route("/v1/workspaces", workspacesRoutes);
-  app.route("/v1/workspaces", chatInstructionsRoutes);
+  app.route("/v1/projects", projectsRoutes);
+  app.route("/v1/projects", chatInstructionsRoutes);
   app.route("/v1/documents", documentsRoutes);
   app.route("/v1/exports", exportsRoutes);
   app.route("/v1/extractors", extractorRoutes);
   // Deprecated alias of /v1/uploads, kept while browser-key uploads depend on its widget CORS policy (middleware/widget-cors.ts).
   app.route("/v1/ingest", uploadsRoutes);
+  app.route("/v1/estimate", estimateRoutes);
   app.route("/v1/uploads", uploadEstimateRoutes);
   app.route("/v1/uploads", uploadsRoutes);
   app.route("/v1/extracts", extractsRoutes);
@@ -211,7 +219,7 @@ export function createApiApp(): Hono {
   app.route("/v1/search", searchRoutes);
   app.route("/v1/web", webRoutes);
   app.route("/v1/searches", searchesRoutes);
-  app.route("/v1/chat", workspaceChatRoutes);
+  app.route("/v1/chat", projectChatRoutes);
   app.route("/v1", chatCompletionsRoutes);
   app.route("/v1", suggestRoutes);
   app.route("/v1/mcp", mcpRoutes);
@@ -219,12 +227,12 @@ export function createApiApp(): Hono {
   app.route("/compat/algolia", algoliaCompatRoutes);
   app.route("/compat", searchCompatRoutes);
   app.route("/v1/auth", samlCallbackRoutes);
-  app.route("/v1/workspaces", connectorsRoutes);
+  app.route("/v1/projects", connectorsRoutes);
   app.route("/v1/billing", billingRoutes);
   app.route("/v1/admin/billing", adminBillingRoutes);
   app.route("/v1/admin/users", adminUsersRoutes);
-  app.route("/v1/workspaces", secretsRoutes);
-  app.route("/v1/workspaces", workspaceGraphRoutes);
+  app.route("/v1/projects", secretsRoutes);
+  app.route("/v1/projects", projectGraphRoutes);
   app.route("/v1/user-settings", userSettingsRoutes);
   app.route("/v1/account", accountRoutes);
   app.route("/v1/whoami", whoamiRoutes);
@@ -285,8 +293,15 @@ export function ensureApiStartup(): Promise<void> {
   if (!startupPromise) {
     startupPromise = (async () => {
       initializeObservability({ serviceName: "docslurp-api" });
+      // The pricing provider (DOCSLURP_PRICING_PLUGIN) prices every quote and charge; the service profile refuses to
+      // start without one rather than price with the open default.
+      // Its durable state (pricing_provider_state, 0131) is read-only through this process's pool; only the operator raises it.
+      // It also refuses to start when this process's role could move the mark (refusePricingStateWriter, council M #1).
+      await loadPricingProvider(process.env, { durableState: pricingDurableStateFromSql(pricingStateSql), sql: pricingStateSql });
       // Invalid private endpoint config fails startup; the /models probe never blocks it.
       initializePrivateModelEndpoints();
+      // Legacy extractor ids must be installed before any stored or incoming config is parsed; a bad alias fails startup.
+      configureApiExtractorIdAliases();
       if (shouldRunStartupMigrations()) {
         await runStartupMigrations();
       }
@@ -341,6 +356,12 @@ export function ensureApiStartup(): Promise<void> {
       logRateLimitBackendAtStartup();
       // A bad CHAT_OUTPUT_MODERATION value fails the boot, not a chat turn.
       assertOutputModerationConfig();
+      // DOCSLURP_MAX_ORGS_PER_USER above 1 while migration 0127's unique index still refuses a second membership.
+      void warnOrgLimitAboveOneWithUniqueIndex(async () => {
+        const { sql } = await import("./db.js");
+        const [row] = await sql<{ present: boolean }[]>`select to_regclass('public.org_memberships_one_org_per_user') is not null as present`;
+        return Boolean(row?.present);
+      });
       void warnSelfHostedBrowserKeysWithoutTrustedProxy(async () => {
         const { sql } = await import("./db.js");
         return (await sql`select 1 from api_keys where key_type = 'client' and revoked_at is null limit 1`).length > 0;

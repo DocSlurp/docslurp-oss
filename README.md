@@ -9,7 +9,7 @@ Send DocSlurp any file. Get back page-by-page Markdown and structured fields, hy
 
 1. **Ingest and extraction:** PDFs, Office files, EPUBs, HTML, images, audio and video become page-by-page Markdown, page images, chunks and, against a JSON schema, structured fields.
 2. **RAG search:** hybrid search and RAG context with page citations, over REST, the SDK, the CLI, MCP and drop-in Algolia, Meilisearch, Typesense and Pagefind clients.
-3. **Configurable chat endpoint:** cited answers from `/v1/chat` and the OpenAI-compatible `/v1/chat/completions`, with streaming and per-workspace settings.
+3. **Configurable chat endpoint:** cited answers from `/v1/chat` and the OpenAI-compatible `/v1/chat/completions`, with streaming and per-project settings.
 
 This repository holds the **DocSlurp server** (API and worker), the **database migrations**, the **CLI**, the **client SDKs** and the search integrations. The hosted product and its web dashboard are developed separately at <https://docslurp.io>.
 

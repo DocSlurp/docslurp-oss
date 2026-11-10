@@ -10,11 +10,11 @@ import { spatialPredicate, validateSpatialPredicate } from "./geo-predicate.js";
 export class GeoSearchError extends Error {
   constructor(message: string, readonly status: 400 | 409 | 503) { super(message); }
 }
-/** Call only AFTER workspace and API-key authorization. Never cache this eligibility result. */
-export async function resolveGeoDocumentScope(scope: {workspaceId: string; orgId: string},
+/** Call only AFTER project and API-key authorization. Never cache this eligibility result. */
+export async function resolveGeoDocumentScope(scope: {projectId: string; orgId: string},
   filters: SearchFilters, schema: unknown, runId?: string): Promise<SearchFilters> {
   if (!filters.geo) return filters;
-  if (!schema || typeof schema !== "object" || Array.isArray(schema)) throw new GeoSearchError("Workspace has no geo schema",400);
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) throw new GeoSearchError("Project has no geo schema",400);
   const output = schema as Record<string, unknown>;
   validateGeoAnnotations(output);
   const properties = output.properties as Record<string, {format?: unknown}> | undefined;
@@ -29,18 +29,18 @@ export async function resolveGeoDocumentScope(scope: {workspaceId: string; orgId
   catch (error) { if (isSearchBoundError(error)) throw error; throw new GeoSearchError("Invalid spatial predicate or polygon topology",400); }
   const digest = createHash("sha256").update(canonicalGeoProjectionJson(output)).digest("hex");
   const {geo: ignoredGeo, geoSchemaDigest: ignoredDigest, ...metadata} = filters;
-  const documentScope = retrievalScope({workspaceId:scope.workspaceId,filters:metadata,runId}).vectorDocument();
-  const eligible = sql`d.workspace_id=${scope.workspaceId} and d.org_id=${scope.orgId}
+  const documentScope = retrievalScope({projectId:scope.projectId,filters:metadata,runId}).vectorDocument();
+  const eligible = sql`d.project_id=${scope.projectId} and d.org_id=${scope.orgId}
     and ${lexicalSearchableDocument("d")} and ${documentScope}`;
   const [coverage] = await boundedSearchQuery(client => client`select exists(select 1 from documents d where ${eligible}
     and not exists(select 1 from ready_geo_projection_generations g where g.document_id=d.id
-      and g.workspace_id=${scope.workspaceId} and g.org_id=${scope.orgId} and g.schema_digest=${digest})) as incomplete`);
+      and g.project_id=${scope.projectId} and g.org_id=${scope.orgId} and g.schema_digest=${digest})) as incomplete`);
   if (coverage?.incomplete) throw new GeoSearchError("Spatial index is missing or stale; reprocess or review the selected documents",409);
   const rows = await boundedSearchQuery(client => client<{id:string}[]>`select distinct d.id from geo_projection_features f
-    join ready_geo_projection_generations g on (g.document_id,g.workspace_id,g.org_id,g.source_revision)=
-      (f.document_id,f.workspace_id,f.org_id,f.source_revision)
+    join ready_geo_projection_generations g on (g.document_id,g.project_id,g.org_id,g.source_revision)=
+      (f.document_id,f.project_id,f.org_id,f.source_revision)
     join documents d on d.id=g.document_id
-    where ${eligible} and g.workspace_id=${scope.workspaceId} and g.org_id=${scope.orgId}
+    where ${eligible} and g.project_id=${scope.projectId} and g.org_id=${scope.orgId}
       and g.schema_digest=${digest} and f.field_path=${geoProjectionFieldPointer(geo.field)}
       and ${spatialPredicate(geo,sql`f.geom`)} limit 10001`);
   if (rows.length > 10000) throw new GeoSearchError("Spatial filter matches too many documents; narrow its area or metadata filters",400);

@@ -21,11 +21,11 @@ beforeAll(async () => {
   await pg.db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
-    insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, processed_documents, stats, creation_ready_at)
+    insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, processed_documents, stats, creation_ready_at)
       values ('run-failed', 'o1', 'u1', 'w', 'upload', 'failed', 'index', '{}', 3, 0, '{}', now()),
              ('run-partial', 'o1', 'u1', 'w', 'upload', 'completed', 'completed', '{}', 3, 3, '{"failedDocuments":2}', now());
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count, lexical_searchable_at)
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, lexical_searchable_at)
       values ('f-embed-failed', 'o1', 'u1', 'w', 'run-failed', 'a.pdf', 'application/pdf', 'k1', 'failed', 1, now()),
              ('f-index-failed', 'o1', 'u1', 'w', 'run-failed', 'b.pdf', 'application/pdf', 'k2', 'failed', 1, now()),
              ('f-done', 'o1', 'u1', 'w', 'run-failed', 'c.pdf', 'application/pdf', 'k3', 'completed', 1, now()),

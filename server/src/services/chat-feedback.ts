@@ -5,7 +5,7 @@ import { sql } from "../db.js";
 export type ChatFeedbackRating = "up" | "down";
 
 export interface UpsertChatFeedbackInput {
-  workspaceId: string;
+  projectId: string;
   userId: string;
   messageId: string;
   rating: ChatFeedbackRating;
@@ -54,13 +54,13 @@ export async function upsertChatFeedback(input: UpsertChatFeedbackInput): Promis
 
   const [row] = await sql<ChatFeedbackRow[]>`
     INSERT INTO chat_message_feedback (
-      id, workspace_id, user_id, thread_id, message_id, rating, comment, question, answer, model
+      id, project_id, user_id, thread_id, message_id, rating, comment, question, answer, model
     ) VALUES (
-      ${randomUUID()}, ${input.workspaceId}, ${input.userId}, ${value(input.threadId)},
+      ${randomUUID()}, ${input.projectId}, ${input.userId}, ${value(input.threadId)},
       ${input.messageId}, ${input.rating}, ${value(input.comment)}, ${value(input.question)},
       ${value(input.answer)}, ${value(input.model)}
     )
-    ON CONFLICT (user_id, workspace_id, message_id) DO UPDATE SET
+    ON CONFLICT (user_id, project_id, message_id) DO UPDATE SET
       rating = EXCLUDED.rating,
       thread_id = CASE WHEN ${keep(input.threadId)} THEN chat_message_feedback.thread_id ELSE EXCLUDED.thread_id END,
       comment = CASE WHEN ${keep(input.comment)} THEN chat_message_feedback.comment ELSE EXCLUDED.comment END,
@@ -76,7 +76,7 @@ export async function upsertChatFeedback(input: UpsertChatFeedbackInput): Promis
   }
 
   console.log(
-    `[chat-feedback] write rating=${input.rating} workspaceId=${input.workspaceId} messageId=${input.messageId} hasComment=${row.comment !== null}`,
+    `[chat-feedback] write rating=${input.rating} projectId=${input.projectId} messageId=${input.messageId} hasComment=${row.comment !== null}`,
   );
 
   return toRecord(row);
@@ -84,14 +84,14 @@ export async function upsertChatFeedback(input: UpsertChatFeedbackInput): Promis
 
 /** Removes one user's rating for a message. Idempotent. */
 export async function deleteChatFeedback(args: {
-  workspaceId: string;
+  projectId: string;
   userId: string;
   messageId: string;
 }): Promise<void> {
   await sql`
     DELETE FROM chat_message_feedback
     WHERE user_id = ${args.userId}
-      AND workspace_id = ${args.workspaceId}
+      AND project_id = ${args.projectId}
       AND message_id = ${args.messageId}
   `;
 }

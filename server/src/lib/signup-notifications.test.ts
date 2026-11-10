@@ -100,8 +100,8 @@ describe("Telegram signup delivery", () => {
     expect(query.mock.calls.map(([sql]) => sql)).toEqual([
       expect.stringContaining('select name from "user"'),
       expect.stringContaining("as ready"),
-      expect.stringContaining("promoted_orgs"),
-      // Account-kind rules (staff/test labelling) run on every sign-in.
+      // Sign-in no longer promotes an ADMIN_EMAILS user's memberships; only the
+      // account-kind rules (staff/test labelling) run on every sign-in.
       expect.stringContaining("account_kind_source"),
     ]);
     expect(transport).toHaveBeenCalledTimes(1);

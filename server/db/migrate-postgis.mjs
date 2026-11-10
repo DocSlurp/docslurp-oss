@@ -11,6 +11,10 @@ export async function migratePostgis(client) {
     if (!capability.rowCount) throw new Error("PostGIS migrations require an already installed postgis extension");
     // Ledger DDL is itself migration-owned.
     await client.query(await readFile(new URL("./migrations/postgis/ledger.sql", import.meta.url), "utf8"));
+    // The main chain has already applied the projects cutover. Preserve the
+    // historical source hashes while binding the two old bootstrap scripts to
+    // the current table/column names on a fresh PostGIS installation.
+    const projectSchema = await client.query("SELECT to_regclass('public.projects') IS NOT NULL AS projects");
     const journal = JSON.parse(await readFile(new URL("./migrations/postgis/journal.json", import.meta.url), "utf8"));
     for (const name of journal) {
       if (!/^\d{4}_[a-z_]+\.sql$/.test(name)) throw new Error("Invalid PostGIS journal entry");
@@ -21,7 +25,10 @@ export async function migratePostgis(client) {
         if (applied.rows[0].digest !== digest) throw new Error(`PostGIS migration changed: ${name}`);
         continue;
       }
-      await client.query(source);
+      const executionSource = projectSchema.rows[0]?.projects && ["0001_projection.sql", "0002_final_source.sql"].includes(name)
+        ? source.replaceAll("workspace_id", "project_id").replaceAll("workspaces", "projects")
+        : source;
+      await client.query(executionSource);
       await client.query("INSERT INTO postgis_migration_ledger(name,digest) VALUES ($1,$2)", [name, digest]);
     }
     await client.query("COMMIT");

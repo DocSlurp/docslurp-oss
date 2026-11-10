@@ -9,7 +9,7 @@ import type { WorkflowState } from "../pipeline/pipeline.js";
 
 /** Minimal immutable run snapshot needed to scope and price persisted events. */
 export type RunUsageState = {
-  run: Pick<WorkflowState["run"], "id" | "userId" | "orgId" | "workspaceId" | "stats">;
+  run: Pick<WorkflowState["run"], "id" | "userId" | "orgId" | "projectId" | "stats">;
   usageLedger: Pick<WorkflowState["usageLedger"], "speedBoost">;
 };
 
@@ -49,12 +49,12 @@ function stringOrNull(value: unknown): string | null {
 /** The scope every Usage Event of a run is stamped with at write time. */
 export function runUsageScope(state: RunUsageState): {
   orgId: string | null;
-  workspaceId: string | null;
+  projectId: string | null;
   apiKeyId: string | null;
 } {
   return {
     orgId: state.run.orgId ?? null,
-    workspaceId: state.run.workspaceId ?? null,
+    projectId: state.run.projectId ?? null,
     apiKeyId: stringOrNull(state.run.stats?.apiKeyId),
   };
 }
@@ -67,9 +67,9 @@ function runUsageRows(client: Sql<Record<string, unknown>>, state: RunUsageState
     id: usage.id ?? randomUUID(),
     user_id: state.run.userId,
     run_id: state.run.id,
-    // Tenant columns (migration 0041): spend outlives run and workspace deletion.
+    // Tenant columns (migration 0041): spend outlives run and project deletion.
     org_id: scope.orgId,
-    workspace_id: scope.workspaceId,
+    project_id: scope.projectId,
     api_key_id: stringOrNull(usage.metadata?.apiKeyId) ?? scope.apiKeyId,
     provider: usage.provider,
     model: usage.model,
@@ -104,7 +104,7 @@ function chargedVisionTickets(usageEvents: UsageEvent[]): { eventIds: string[]; 
 
 const USAGE_EVENT_COLUMNS = [
   "id", "user_id", "run_id", "provider", "model", "metric", "amount", "unit",
-  "cost_cents", "input_tokens", "output_tokens", "metadata", "org_id", "workspace_id", "api_key_id",
+  "cost_cents", "input_tokens", "output_tokens", "metadata", "org_id", "project_id", "api_key_id",
 ] as const;
 
 /**
@@ -146,7 +146,7 @@ export async function persistRunUsageEvents(args: {
   }
 
   // Non-unit events are written at cost_cents = 0, so this is exactly what
-  // the usage_events trigger adds to workspace_runs.spent_cents (0056): the
+  // the usage_events trigger adds to project_runs.spent_cents (0056): the
   // run's spend delta for the cap, the credit debit and the credit lease.
   return inserted.reduce((total, row) => total + Number(row.cost_cents ?? 0), 0);
 }
@@ -178,7 +178,7 @@ export function runUsageEventStatements(args: {
       ), total as (select coalesce(sum(cost_cents), 0) as cents from inserted),
       debit as (
         select enqueue_org_credit_debit(
-          ${orgId}, total.cents, ${state.run.userId}, 'usage', ${state.run.id}, ${state.run.workspaceId ?? null}, '{}'::jsonb
+          ${orgId}, total.cents, ${state.run.userId}, 'usage', ${state.run.id}, ${state.run.projectId ?? null}, '{}'::jsonb
         ) from total
       ),
       released as (
@@ -197,7 +197,7 @@ export function runUsageEventStatements(args: {
       ), total as (select coalesce(sum(cost_cents), 0) as cents from inserted),
       debit as (
         select enqueue_org_credit_debit(
-          ${orgId}, total.cents, ${state.run.userId}, 'usage', ${state.run.id}, ${state.run.workspaceId ?? null}, '{}'::jsonb
+          ${orgId}, total.cents, ${state.run.userId}, 'usage', ${state.run.id}, ${state.run.projectId ?? null}, '{}'::jsonb
         ) from total
       )
       select id, cost_cents, (select count(*) from debit) as debits from inserted`
@@ -220,7 +220,7 @@ export function runUsageEventStatements(args: {
 export async function persistScopedUsageEvents(args: {
   client: Sql<Record<string, unknown>>;
   userId: string;
-  scope: { orgId: string | null; workspaceId: string | null; apiKeyId?: string | null };
+  scope: { orgId: string | null; projectId: string | null; apiKeyId?: string | null };
   usageEvents: UsageEvent[];
   debitMetadata?: Record<string, unknown>;
 }): Promise<number> {
@@ -240,11 +240,11 @@ export async function persistScopedUsageEvents(args: {
     output_tokens: usage.outputTokens ?? 0,
     metadata: toJson(client, {
       ...persistedMetadata(usage),
-      ...(scope.workspaceId ? { workspaceId: scope.workspaceId } : {}),
+      ...(scope.projectId ? { projectId: scope.projectId } : {}),
       ...(scope.orgId ? { orgId: scope.orgId } : {}),
     }),
     org_id: scope.orgId,
-    workspace_id: scope.workspaceId,
+    project_id: scope.projectId,
     api_key_id: stringOrNull(usage.metadata?.apiKeyId) ?? scope.apiKeyId ?? null,
   }));
   const billableIds = new Set(rows.filter((row) => Number(row.cost_cents) > 0).map((row) => row.id));
@@ -254,7 +254,7 @@ export async function persistScopedUsageEvents(args: {
       insert into usage_events ${client(
         batch,
         "id", "user_id", "run_id", "provider", "model", "metric", "amount", "unit",
-        "cost_cents", "input_tokens", "output_tokens", "metadata", "org_id", "workspace_id", "api_key_id",
+        "cost_cents", "input_tokens", "output_tokens", "metadata", "org_id", "project_id", "api_key_id",
       )}
       on conflict (id) do nothing
       returning id, cost_cents
@@ -264,7 +264,7 @@ export async function persistScopedUsageEvents(args: {
   if (cost > 0 && scope.orgId) {
     await client`
       select enqueue_org_credit_debit(
-        ${scope.orgId}, ${cost}, ${userId}, 'usage', null, ${scope.workspaceId},
+        ${scope.orgId}, ${cost}, ${userId}, 'usage', null, ${scope.projectId},
         ${toJson(client, args.debitMetadata ?? {})}
       )
     `;
@@ -304,7 +304,7 @@ export async function debitRunUsageCredits(args: {
       ${state.run.userId},
       'usage',
       ${state.run.id},
-      ${state.run.workspaceId ?? null},
+      ${state.run.projectId ?? null},
       '{}'::jsonb
     )
   `;

@@ -5,7 +5,7 @@ import {
   estimateGraphBuild,
   graphConfigFingerprint,
   graphWindowsForDocument,
-  updateWorkspaceGraphSchema,
+  updateProjectGraphSchema,
 } from "../index.js";
 
 const pricing = { costPer1kInputTokens: 0.01, costPer1kOutputTokens: 0.03 };
@@ -63,9 +63,9 @@ describe("estimateGraphBuild", () => {
   });
 });
 
-describe("updateWorkspaceGraphSchema", () => {
+describe("updateProjectGraphSchema", () => {
   it("normalizes entity types and rejects unknown keys", () => {
-    expect(updateWorkspaceGraphSchema.parse({ entityTypes: ["Payment Term"] })).toEqual({ entityTypes: ["payment_term"] });
-    expect(updateWorkspaceGraphSchema.safeParse({ graphRag: true }).success).toBe(false);
+    expect(updateProjectGraphSchema.parse({ entityTypes: ["Payment Term"] })).toEqual({ entityTypes: ["payment_term"] });
+    expect(updateProjectGraphSchema.safeParse({ graphRag: true }).success).toBe(false);
   });
 });

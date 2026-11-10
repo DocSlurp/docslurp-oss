@@ -12,7 +12,7 @@ This index lists the documentation published in the public source tree. The file
 | Passkeys, two-factor authentication and the org MFA policy | passkeys-and-mfa.md |
 | Chat voice input | chat-voice.md |
 | Model configuration and private endpoints | model-configuration.md |
-| Document and workspace summaries, costs and limits | document-summaries.md |
+| Document and project summaries, costs and limits | document-summaries.md |
 | Worker images and supply chain | worker-image.md |
 | Page router and extraction paths | page-router.md |
 | Extraction feature matrix | extraction-feature-matrix.md |

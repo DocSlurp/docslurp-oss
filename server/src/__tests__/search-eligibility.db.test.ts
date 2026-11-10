@@ -21,7 +21,7 @@ beforeAll(async () => {
   vi.doMock("../db.js", () => ({ sql }));
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1')`;
-  await sql`insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W'), ('w2', 'o1', 'u1', 'Other')`;
+  await sql`insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W'), ('w2', 'o1', 'u1', 'Other')`;
   eligibility = await import("../search/eligibility.js");
   ({ loadSearchAvailability } = await import("../search/session-setup.js"));
   ({ deriveSearchAvailability } = await import("../services/search.js"));
@@ -37,15 +37,15 @@ beforeEach(async () => {
   await sql`delete from document_run_stage_states`;
   await sql`delete from document_chunks`;
   await sql`delete from documents`;
-  await sql`delete from workspace_runs`;
+  await sql`delete from project_runs`;
 });
 
 let clock = 0;
 
-async function run(id: string, args: { status?: string; controlState?: string | null; workspaceId?: string } = {}) {
+async function run(id: string, args: { status?: string; controlState?: string | null; projectId?: string } = {}) {
   await sql`
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, control_state, lease_expires_at)
-    values (${id}, 'o1', 'u1', ${args.workspaceId ?? "w"}, 'bulk-upload', ${args.status ?? "processing"}, 'embed', '{}'::jsonb,
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, control_state, lease_expires_at)
+    values (${id}, 'o1', 'u1', ${args.projectId ?? "w"}, 'bulk-upload', ${args.status ?? "processing"}, 'embed', '{}'::jsonb,
       ${args.controlState ?? null}, now() + interval '5 minutes')
   `;
 }
@@ -58,13 +58,13 @@ async function doc(id: string, args: {
   canonicalId?: string;
   lexical?: boolean;
   pages?: number;
-  workspaceId?: string;
+  projectId?: string;
 }) {
   clock += 1;
   await sql`
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status,
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status,
       page_count, canonical_id, lexical_searchable_at, created_at)
-    values (${id}, 'o1', 'u1', ${args.workspaceId ?? "w"}, ${args.runId}, ${`${id}.pdf`}, 'application/pdf', ${`raw/${id}`},
+    values (${id}, 'o1', 'u1', ${args.projectId ?? "w"}, ${args.runId}, ${`${id}.pdf`}, 'application/pdf', ${`raw/${id}`},
       ${args.status}, ${args.pages ?? 4}, ${args.canonicalId ?? null}, ${args.lexical ? new Date() : null},
       to_timestamp(${1_800_000_000 + clock}))
   `;
@@ -74,13 +74,13 @@ async function doc(id: string, args: {
   `;
 }
 
-async function keywordHits(word: string, enabled = true, workspaceId = "w"): Promise<string[]> {
+async function keywordHits(word: string, enabled = true, projectId = "w"): Promise<string[]> {
   const rows = await sql<{ document_id: string }[]>`
     select c.document_id
     from document_chunks c
     join documents d on d.id = c.document_id
     where ${eligibility.lexicalSearchableDocument("d", enabled)}
-      and d.workspace_id = ${workspaceId}
+      and d.project_id = ${projectId}
       and c.ts_content @@ websearch_to_tsquery('english', ${word})
     order by c.document_id
   `;
@@ -120,7 +120,7 @@ describe("early lexical eligibility", () => {
     expect(await keywordHits("escrow")).toEqual(["newer"]);
 
     // A newer version whose run was cancelled hands search back to the older one.
-    await sql`update workspace_runs set control_state = 'cancelled' where id = 'rb'`;
+    await sql`update project_runs set control_state = 'cancelled' where id = 'rb'`;
     expect(await keywordHits("escrow")).toEqual(["older"]);
   });
 
@@ -140,11 +140,11 @@ describe("early lexical eligibility", () => {
     expect(await keywordHits("arbitration")).toEqual(["ok"]);
   });
 
-  it("keeps workspace scoping", async () => {
+  it("keeps project scoping", async () => {
     await run("r-w");
-    await run("r-w2", { workspaceId: "w2" });
+    await run("r-w2", { projectId: "w2" });
     await doc("here", { runId: "r-w", status: "embed", word: "novation", lexical: true });
-    await doc("there", { runId: "r-w2", status: "embed", word: "novation", lexical: true, workspaceId: "w2" });
+    await doc("there", { runId: "r-w2", status: "embed", word: "novation", lexical: true, projectId: "w2" });
 
     expect(await keywordHits("novation", true, "w")).toEqual(["here"]);
     expect(await keywordHits("novation", true, "w2")).toEqual(["there"]);
@@ -164,7 +164,7 @@ describe("search availability while documents process", () => {
       values ('r-live', 'waiting', 'index', 'completed')
     `;
 
-    const row = await loadSearchAvailability({ workspaceId: "w" });
+    const row = await loadSearchAvailability({ projectId: "w" });
     expect(row).toMatchObject({
       total_documents: 3,
       indexed_documents: 1,
@@ -177,7 +177,7 @@ describe("search availability while documents process", () => {
       processing_runs: 1,
     });
 
-    const availability = deriveSearchAvailability(row, { workspaceId: "w" });
+    const availability = deriveSearchAvailability(row, { projectId: "w" });
     expect(availability).toMatchObject({
       status: "partial",
       isPartial: true,
@@ -193,7 +193,7 @@ describe("search availability while documents process", () => {
     await run("r-new");
     await doc("v2", { runId: "r-new", status: "graph-enrich", word: "delta", canonicalId: "c9", lexical: true, pages: 5 });
 
-    const row = await loadSearchAvailability({ workspaceId: "w", runId: "r-new" });
+    const row = await loadSearchAvailability({ projectId: "w", runId: "r-new" });
     expect(row).toMatchObject({ total_documents: 1, keyword_only_documents: 0, searchable_documents: 0, in_progress_documents: 1 });
   });
 
@@ -209,7 +209,7 @@ describe("search availability while documents process", () => {
       await sql`insert into document_pages (id, document_id, run_id, user_id, page_number, text) values (${`${id}-p1`}, ${id}, 'r-new', 'u1', 1, 'omega page')`;
     }
 
-    const row = await loadSearchAvailability({ workspaceId: "w", runId: "r-new" });
+    const row = await loadSearchAvailability({ projectId: "w", runId: "r-new" });
     // The replacement (completed sibling serves) and the failed document are not served from pages.
     expect(row).toMatchObject({ total_documents: 3, page_only_documents: 1, searchable_documents: 1, searchable_pages: 1 });
   });

@@ -3,8 +3,8 @@ import { afterEach, expect, it, vi } from "vitest";
 // Real OpenRouter AI SDK provider and usage capture; only the network is faked.
 const record = vi.fn();
 vi.mock("../lib/ai-usage.js", () => ({ recordUsageEvent: record }));
-vi.mock("../lib/privacy.js", () => ({ allowHostedCallForWorkspace: vi.fn(async () => true), loadWorkspacePrivacyMode: vi.fn(async () => "standard"), openRouterCall: vi.fn() }));
-vi.mock("./workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => ({ id: "ws" })) }));
+vi.mock("../lib/privacy.js", () => ({ allowHostedCallForProject: vi.fn(async () => true), loadProjectPrivacyMode: vi.fn(async () => "standard"), openRouterCall: vi.fn() }));
+vi.mock("./projects.js", () => ({ resolveProjectRef: vi.fn(async () => ({ id: "ws" })) }));
 vi.mock("../lib/posthog-ai-observability.js", () => ({ posthogAiTelemetry: () => ({}) }));
 vi.mock("./mcp-tools.js", () => ({ createMcpDispatcher: () => vi.fn(), mcpManifest: () => ({ capabilities: [] }) }));
 const { runChatMcpAgent } = await import("./chat-mcp-agent.js");
@@ -30,7 +30,7 @@ it.each(["deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash:nitro", "
   vi.stubGlobal("fetch", fetchMock);
   const result = await runChatMcpAgent({
     actor: { type: "session", userId: "user", sessionId: "s", user: { id: "user", name: "User", email: "" } },
-    workspaceId: "ws", orgId: "org", sessionId: "conversation", query: "Say hello", history: [], apiKey: "fake",
+    projectId: "ws", orgId: "org", sessionId: "conversation", query: "Say hello", history: [], apiKey: "fake",
     privacyMode: "standard", model, maxOutputTokens: 100,
   });
   expect(fetchMock).toHaveBeenCalledOnce();
@@ -54,7 +54,7 @@ it.each(["headers", "heartbeat"])("ends a stalled %s response at the first-token
   try {
     await expect(runChatMcpAgent({
       actor: { type: "session", userId: "user", sessionId: "s", user: { id: "user", name: "User", email: "" } },
-      workspaceId: "ws", orgId: "org", sessionId: "conversation", query: "Say hello", history: [], apiKey: "fake",
+      projectId: "ws", orgId: "org", sessionId: "conversation", query: "Say hello", history: [], apiKey: "fake",
       privacyMode: "standard", model: "deepseek/deepseek-v4.1-flash", maxOutputTokens: 100,
       timeBudget: { turnDeadlineMs: 500, stepTimeoutMs: 400, toolTimeoutMs: 100, finalReserveMs: 100 },
       abortedStepLookupDelayMs: 0,
@@ -63,7 +63,7 @@ it.each(["headers", "heartbeat"])("ends a stalled %s response at the first-token
     expect(Date.now() - startedAt).toBeLessThan(250);
     expect(fetchMock.mock.calls.filter(call => String(call[0]).includes("chat/completions"))).toHaveLength(1);
     await vi.waitFor(() => expect(record).toHaveBeenCalledOnce());
-    expect(record.mock.calls[0]![0]).toMatchObject({ scope: { orgId: "org", workspaceId: "ws", sessionId: "conversation" },
+    expect(record.mock.calls[0]![0]).toMatchObject({ scope: { orgId: "org", projectId: "ws", sessionId: "conversation" },
       usage: { metadata: { turnOutcome: "aborted", usageEstimated: true } } });
   } finally { vi.unstubAllEnvs(); }
 });
@@ -87,7 +87,7 @@ it.each(["content", "reasoning"])("allows %s output to continue beyond the first
   try {
     const result = await runChatMcpAgent({
       actor: { type: "session", userId: "user", sessionId: "s", user: { id: "user", name: "User", email: "" } },
-      workspaceId: "ws", orgId: "org", sessionId: "conversation", query: "Say hello", history: [], apiKey: "fake",
+      projectId: "ws", orgId: "org", sessionId: "conversation", query: "Say hello", history: [], apiKey: "fake",
       privacyMode: "standard", model: "deepseek/deepseek-v4.1-flash", maxOutputTokens: 100,
     });
     expect(result.answer).toContain("answer");

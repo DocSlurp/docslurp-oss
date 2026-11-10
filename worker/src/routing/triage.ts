@@ -10,6 +10,7 @@
  * the whole request: a half-parsed triage would silently skew routing.
  */
 
+import { TRUST_RULE } from "./trust.js";
 import {
   decisionQuestionIds,
   imageKinds,
@@ -136,7 +137,7 @@ export interface TriageDecision {
   reason: string;
 }
 
-const MATH_RATIO_TRIAGE_FLOOR = 0.02;
+const MATH_RATIO_TRIAGE_FLOOR = TRUST_RULE.mathGlyphRatio;
 
 /** Skip rule: nothing to look at when every page has a healthy text layer and no images. */
 export function shouldTriage(pages: readonly PageInput[]): TriageDecision {

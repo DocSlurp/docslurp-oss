@@ -85,7 +85,7 @@ stale concurrent publishers to resurrect a rejected/corrected value.
 
 The storage migration should establish:
 
-- Identity: org, workspace, document version, run, schema digest, accepted result
+- Identity: org, project, document version, run, schema digest, accepted result
   digest/revision, field pointer, value pointer and normalizer version.
 - Canonical `geometry(Geometry,4326)`, restricted to 2D nonempty valid Point,
   MultiPoint, Polygon and MultiPolygon, plus original-value/evidence provenance.
@@ -95,11 +95,11 @@ The storage migration should establish:
   complete generation, including a valid zero-location generation. Rejection/null
   replaces or removes prior geometry. A partially populated generation cannot be
   queried as ready.
-- Composite scoped foreign keys/uniqueness joining org/workspace/document/run,
+- Composite scoped foreign keys/uniqueness joining org/project/document/run,
   not independent foreign keys that permit a foreign tenant's document. Determine
   parent composite keys from the owning migrations before adding constraints.
 - GiST geometry index; partial geography expression index for Point/MultiPoint
-  radius; B-tree org/workspace/field/generation lookup. Queries must include
+  radius; B-tree org/project/field/generation lookup. Queries must include
   authorization and current document eligibility, not rely on indexes for scope.
 - Transactional compare-and-publish of source revision, deletion/purge cascades,
   schema invalidation and result cache generation. Test correction-vs-publish,

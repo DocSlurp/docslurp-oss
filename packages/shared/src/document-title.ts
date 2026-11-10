@@ -100,7 +100,13 @@ const INSTRUCTION_LIKE: readonly RegExp[] = [
   /\bprompt\s+injection\b/i,
 ];
 
-const URL_LIKE = /\b(?:https?:\/\/|ftp:\/\/|www\.)\S+|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|net|org|io|dev|ai|co|app|info|biz|xyz|ru|cn)(?:\/\S*)?\b/i;
+/** A link anywhere in the title is dropped: titles are display-only text from untrusted files. */
+const URL_LIKE = /\b(?:https?:\/\/|ftp:\/\/|www\.)\S+/i;
+/**
+ * A title that is nothing but a lower-case host name, with or without a path ("example.com/docs"). A dotted name inside a real title
+ * ("ASP.NET Core in Action", "Node.js Design Patterns", "Learning .NET 8") is a name, not a link.
+ */
+const BARE_DOMAIN_TITLE = /^[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|net|org|io|dev|ai|co|app|info|biz|xyz|ru|cn)(?:\/\S*)?$/;
 const EMAIL_LIKE = /[^\s@]+@[^\s@]+\.[^\s@]+/;
 
 const HTML_ENTITIES: Record<string, string> = {
@@ -186,7 +192,7 @@ export function cleanDocumentTitle(raw: unknown, options: { filename?: string | 
 
   if (value.length < DOCUMENT_TITLE_MIN_LENGTH || value.length > DOCUMENT_TITLE_MAX_RAW_LENGTH) return null;
   if (INSTRUCTION_LIKE.some((pattern) => pattern.test(value))) return null;
-  if (URL_LIKE.test(value) || EMAIL_LIKE.test(value)) return null;
+  if (URL_LIKE.test(value) || BARE_DOMAIN_TITLE.test(value) || EMAIL_LIKE.test(value)) return null;
 
   const letters = (value.match(/\p{L}/gu) ?? []).length;
   if (letters < DOCUMENT_TITLE_MIN_LENGTH || letters / value.length < 0.4) return null;

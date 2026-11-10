@@ -9,6 +9,8 @@ export type WorkerTableSpec = {
 };
 export declare const DEFAULT_DB_ROLES: Readonly<DbRoles>;
 export declare const WORKER_TABLES: Readonly<Record<string, WorkerTableSpec>>;
+/** SECURITY DEFINER functions a runtime role may reach (equal to @docslurp/shared RUNTIME_SECURITY_DEFINER_ALLOWLIST). */
+export declare const RUNTIME_SECURITY_DEFINER_ALLOWLIST: readonly string[];
 export declare const WORKER_DENIED_TABLES: Readonly<Record<string, string>>;
 export declare function quoteIdent(name: string): string;
 export declare function roleGrantStatements(options: {

@@ -15,7 +15,7 @@ import { validationHook } from "../lib/validation.js";
 const apiKeyScopeSchema = z.enum(supportedApiKeyScopes);
 const apiKeyTypeSchema = z.enum(apiKeyTypes);
 const allowedDomainSchema = z.string().min(1).max(255);
-const workspaceIdsSchema = z.array(z.string().min(1).max(200)).max(100);
+const projectIdsSchema = z.array(z.string().min(1).max(200)).max(100);
 
 const createApiKeySchema = z.object({
   orgId: z.string().optional(),
@@ -27,11 +27,11 @@ const createApiKeySchema = z.object({
   rateLimitRpm: z.number().int().positive().nullable().optional(),
   rateLimitPpd: z.number().int().positive().optional(),
   rateLimits: apiKeyRateLimitRulesSchema.optional(),
-  /** Limit the key to these workspaces (IDs in the key's org). Required for browser keys; omitted/empty on a server key: all of them. */
-  workspaceIds: workspaceIdsSchema.optional(),
+  /** Limit the key to these projects (IDs in the key's org). Required for browser keys; omitted/empty on a server key: all of them. */
+  projectIds: projectIdsSchema.optional(),
   /** Deprecated, ignored: browser keys can only search and chat. */
   allowClientSensitiveScopes: z.boolean().optional(),
-  /** Caps on query-time page parsing for this key; narrower than workspace/server defaults only. */
+  /** Caps on query-time page parsing for this key; narrower than project/server defaults only. */
   materializationPolicy: materializationPolicyOverridesSchema.optional(),
   /** ISO date-time the key stops working (at most 365 days ahead); null for no expiry. */
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
@@ -50,9 +50,9 @@ const updateApiKeySchema = z.object({
   rateLimitRpm: z.number().int().positive().nullable().optional(),
   rateLimitPpd: z.number().int().positive().optional(),
   rateLimits: apiKeyRateLimitRulesSchema.optional(),
-  workspaceIds: workspaceIdsSchema.optional(),
+  projectIds: projectIdsSchema.optional(),
   allowClientSensitiveScopes: z.boolean().optional(),
-  /** Caps on query-time page parsing for this key; narrower than workspace/server defaults only. */
+  /** Caps on query-time page parsing for this key; narrower than project/server defaults only. */
   materializationPolicy: materializationPolicyOverridesSchema.optional(),
   /** ISO date-time the key stops working (at most 365 days ahead); null for no expiry. */
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
@@ -85,7 +85,7 @@ export const apiKeysRoutes = new Hono()
         rpm: body.rateLimitRpm,
         ppd: body.rateLimitPpd,
         rateLimits: body.rateLimits,
-        workspaceIds: body.workspaceIds,
+        projectIds: body.projectIds,
         allowClientSensitiveScopes: body.allowClientSensitiveScopes,
         materializationPolicy: body.materializationPolicy,
         expiresAt: body.expiresAt,
@@ -112,7 +112,7 @@ export const apiKeysRoutes = new Hono()
         rateLimitRpm: result.key.rateLimitRpm,
         rateLimitPpd: result.key.rateLimitPpd,
         rateLimits: result.key.rateLimits,
-        workspaceIds: result.key.workspaceIds,
+        projectIds: result.key.projectIds,
         userAgent: requestUserAgent(c)
       }
     });
@@ -136,7 +136,7 @@ export const apiKeysRoutes = new Hono()
         rateLimitRpm: body.rateLimitRpm,
         rateLimitPpd: body.rateLimitPpd,
         rateLimits: body.rateLimits,
-        workspaceIds: body.workspaceIds,
+        projectIds: body.projectIds,
         allowClientSensitiveScopes: body.allowClientSensitiveScopes,
         materializationPolicy: body.materializationPolicy,
         expiresAt: body.expiresAt,
@@ -168,7 +168,7 @@ export const apiKeysRoutes = new Hono()
         rateLimitRpm: key.rateLimitRpm,
         rateLimitPpd: key.rateLimitPpd,
         rateLimits: key.rateLimits,
-        workspaceIds: key.workspaceIds,
+        projectIds: key.projectIds,
         userAgent: requestUserAgent(c)
       }
     });

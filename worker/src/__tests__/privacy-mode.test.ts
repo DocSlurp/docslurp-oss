@@ -23,7 +23,7 @@ vi.mock("../lib/provider-retry.js", async (importOriginal) => ({
 function stateFor(pipeline: PipelineFeatureOverrides) {
   const audit = vi.fn(async () => {});
   const state = {
-    run: { id: "run-1", workspaceId: "ws-1", pipeline: normalizePipelineFeatures(pipeline) },
+    run: { id: "run-1", projectId: "ws-1", pipeline: normalizePipelineFeatures(pipeline) },
     documents: [{ id: "doc-1", userId: "user", filename: "a.pdf", mimeType: "application/pdf", pageCount: 2 }],
     documentStages: new Map(),
     docConcurrency: 1,
@@ -91,7 +91,7 @@ describe("privacyMode enforcement in worker stages", () => {
     expect(generateText).not.toHaveBeenCalled();
     expect(audit).toHaveBeenCalledWith([
       expect.objectContaining({
-        workspaceId: "ws-1",
+        projectId: "ws-1",
         runId: "run-1",
         documentId: "doc-1",
         endpoint: "blocked:worker.text.structured-extraction",

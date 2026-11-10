@@ -17,13 +17,13 @@ beforeAll(async()=>{
     values('native-session','native-test-token','native-owner',now()+interval '1 day',now(),now())`;
   await sql`insert into organizations(id,name,slug,created_by_user_id) values('native-org','Native','native-policy','native-owner')`;
   await sql`insert into org_memberships(org_id,user_id,role) values('native-org','native-owner','owner') on conflict do nothing`;
-  await sql`insert into workspaces(id,org_id,user_id,name) values('00000000-0000-4000-8000-000000000319','native-org','native-owner','Native')`;
-  operationId=(await ops.launchChatOperation({userId:"native-owner",orgId:"native-org",workspaceId:"00000000-0000-4000-8000-000000000319",key:"native_binding",input:{q:"fixture"}})).id;
+  await sql`insert into projects(id,org_id,user_id,name) values('00000000-0000-4000-8000-000000000319','native-org','native-owner','Native')`;
+  operationId=(await ops.launchChatOperation({userId:"native-owner",orgId:"native-org",projectId:"00000000-0000-4000-8000-000000000319",key:"native_binding",input:{q:"fixture"}})).id;
 },120000);
 afterAll(async()=>{await sql?.end();await stop?.();});
-it("authorizes session and workspace before exposing a persisted native binding",async()=>{
+it("authorizes session and project before exposing a persisted native binding",async()=>{
   const policy=createPolicy(async()=>actor);
-  expect(await policy.authorize(operationId)).toMatchObject({id:operationId,userId:actor.userId,workspaceId:"00000000-0000-4000-8000-000000000319"});
+  expect(await policy.authorize(operationId)).toMatchObject({id:operationId,userId:actor.userId,projectId:"00000000-0000-4000-8000-000000000319"});
   await expect(createPolicy(async()=>({...actor,userId:"native-foreign"})).authorize(operationId)).rejects.toThrow("operation_forbidden");
   await expect(createPolicy(async()=>null).authorize(operationId)).rejects.toThrow("operation_forbidden");
   await sql`update session set "expiresAt"=now()-interval '1 second' where id=${actor.sessionId}`;
@@ -35,9 +35,17 @@ it("authorizes session and workspace before exposing a persisted native binding"
 });
 it("records root cancellation before refusing any subsequent native acceptance",async()=>{
   const policy=createPolicy(async()=>actor);const binding=await policy.authorize(operationId);
-  const accept=vi.fn(async()=>"accepted");
+  const accept=vi.fn(async(admit:()=>Promise<void>)=>{await admit();return "accepted";});
   expect(await policy.serializeAcceptance(binding,accept)).toBe("accepted");
   await policy.recordCancellation(binding,"tree");
   await expect(policy.serializeAcceptance(binding,accept)).rejects.toThrow("operation_cancelled_or_expired");
-  expect(accept).toHaveBeenCalledTimes(1);
+  expect(accept).toHaveBeenCalledTimes(2);
+});
+it("returns persisted parent identity for nested native task summaries", async () => {
+  const root=await ops.launchChatOperation({userId:actor.userId,orgId:"native-org",projectId:"00000000-0000-4000-8000-000000000319",key:"nested_policy_root",input:{q:"root"}});
+  const child=await ops.launchChatOperation({userId:actor.userId,orgId:"native-org",projectId:"00000000-0000-4000-8000-000000000319",key:"nested_policy_child",input:{q:"child"},parentId:root.id});
+  const grandchild=await ops.launchChatOperation({userId:actor.userId,orgId:"native-org",projectId:"00000000-0000-4000-8000-000000000319",key:"nested_policy_grandchild",input:{q:"grandchild"},parentId:child.id});
+  const policy=createPolicy(async()=>actor);
+  expect(await policy.authorize(root.id)).toMatchObject({rootId:root.id,parentId:null});
+  expect(await policy.authorize(grandchild.id)).toMatchObject({rootId:root.id,parentId:child.id});
 });

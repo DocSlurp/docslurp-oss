@@ -10,6 +10,7 @@ import {
   legacyOrgTable,
   type SupersededPurgeOptions,
 } from "@docslurp/worker/testing";
+import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
 
 /**
  * Tenant offboarding against a migrated Postgres (docs/data-deletion.md):
@@ -25,6 +26,7 @@ let deps: import("../services/tenant-offboarding.js").OffboardingDeps;
 
 beforeAll(async () => {
   const pg = await startMigratedPostgres();
+  await pg.db.exec(LIFT_ONE_ORG_PER_USER_POLICY);
   stop = pg.stop;
   sql = postgres(pg.url, { max: 1, prepare: false, onnotice: () => {} });
   vi.doMock("../db.js", () => ({ sql }));
@@ -40,8 +42,8 @@ afterAll(async () => {
 
 async function reset() {
   for (const table of [
-    "workspaces", "document_cleanup_queue", "storage_cleanup_queue", "org_memberships", "api_keys",
-    "credit_ledger", "usage_events", "audit_log", "webhooks", "session", "account",
+    "projects", "document_cleanup_queue", "storage_cleanup_queue", "org_memberships", "api_keys",
+    "credit_ledger", "usage_events", "audit_log", "webhooks", "webhook_outbox", "session", "account",
   ]) {
     await sql`delete from ${sql(table)}`;
   }
@@ -63,17 +65,17 @@ async function seedOrg(id: string, name: string, members: Array<[userId: string,
   }
 }
 
-/** A workspace with a finished run, an in-flight run, a document and its vectors. */
-async function seedWorkspace(id: string, orgId: string, userId: string) {
-  await sql`insert into workspaces(id, org_id, user_id, name) values (${id}, ${orgId}, ${userId}, ${`WS ${id}`})`;
+/** A project with a finished run, an in-flight run, a document and its vectors. */
+async function seedProject(id: string, orgId: string, userId: string) {
+  await sql`insert into projects(id, org_id, user_id, name) values (${id}, ${orgId}, ${userId}, ${`WS ${id}`})`;
   for (const [runId, status] of [[`${id}-done`, "completed"], [`${id}-live`, "processing"]] as const) {
     await sql`
-      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, total_documents, pipeline)
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pipeline)
       values (${runId}, ${orgId}, ${userId}, ${id}, 'bulk-upload', ${status}, ${status}, 1, '{}'::jsonb)
     `;
   }
   await sql`
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status)
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status)
     values (${`${id}-doc`}, ${orgId}, ${userId}, ${id}, ${`${id}-done`}, 'a.pdf', 'application/pdf', ${`${userId}/up-${id}/raw/a.pdf`}, 'completed')
   `;
   await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension)
@@ -87,9 +89,10 @@ describe("organization deletion", () => {
     await seedUser("owner");
     await seedUser("member");
     await seedOrg("team", "Acme Team", [["owner", "owner"], ["member", "member"]]);
-    await seedWorkspace("ws", "team", "member");
+    await seedProject("ws", "team", "member");
     await sql`insert into api_keys (id, user_id, org_id, key_hash, name, key_type) values ('key', 'member', 'team', 'h', 'CI key', 'server')`;
     await sql`insert into credit_ledger (id, user_id, org_id, delta, reason) values ('ledger', 'member', 'team', -5, 'usage')`;
+    await sql`insert into webhooks (id, user_id, org_id, url, secret) values ('team-hook', 'owner', 'team', 'https://example.test/team', 's')`;
     await sql`insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, cost_cents)
       values ('usage', 'member', 'ws-done', 'openai', 'm', 'embed', 1, 'tokens', 2)`;
   });
@@ -107,11 +110,12 @@ describe("organization deletion", () => {
   it("turns off auto top-up, cancels runs, revokes access, enqueues cleanup and keeps anonymized billing history", async () => {
     const result = await offboarding.deleteOrganization({ orgId: "team", userId: "owner", confirmation: "Acme Team" }, deps);
 
-    expect(result).toMatchObject({ orgId: "team", workspaces: 1, documents: 1, runsCancelled: 1 });
+    expect(result).toMatchObject({ orgId: "team", projects: 1, documents: 1, runsCancelled: 1 });
     expect(cancelWorkflow.mock.calls.map(([runId]) => runId)).toEqual(["ws-live"]);
-    expect(await sql`select count(*)::int as count from workspaces`).toEqual([{ count: 0 }]);
+    expect(await sql`select count(*)::int as count from projects`).toEqual([{ count: 0 }]);
     expect(await sql`select count(*)::int as count from org_memberships where org_id = 'team'`).toEqual([{ count: 0 }]);
     expect(await sql`select revoked_at is not null as revoked, name from api_keys`).toEqual([{ revoked: true, name: "Deleted key" }]);
+    expect(await sql`select id from webhooks where org_id = 'team'`).toEqual([]);
     expect(await sql`select document_id from document_cleanup_queue`).toEqual([{ document_id: "ws-doc" }]);
     expect(await sql`select kind, target from storage_cleanup_queue order by kind, target`).toEqual([
       { kind: "storage_prefix", target: "member/ws-done/" },
@@ -158,7 +162,7 @@ describe("organization deletion", () => {
     await drainStorageCleanupQueue(db, storage, options);
 
     expect([...objects]).toEqual(["other/keep.json"]);
-    // Only the deleted org's workspace databases go.
+    // Only the deleted org's project databases go.
     expect([...tables]).toEqual(["/lance/team/other-ws/vectors-model-x-4#chunks"]);
     // The table is dropped whole, so no per-document vector deletes.
     expect(vectorRowDeletes).toEqual([]);
@@ -185,7 +189,7 @@ describe("creator and member FKs", () => {
     await seedUser("owner");
     await seedUser("member");
     await seedOrg("org", "Org", [["owner", "owner"], ["member", "member"]]);
-    await seedWorkspace("ws", "org", "member");
+    await seedProject("ws", "org", "member");
     await expect(sql`delete from "user" where id = 'member'`).rejects.toThrow(/foreign key/);
     expect(await sql`select count(*)::int as count from documents`).toEqual([{ count: 1 }]);
   });
@@ -197,12 +201,12 @@ describe("account deletion", () => {
     await reset();
     await seedUser("leaver");
     await seedUser("teammate");
-    await seedOrg("personal", "Leaver Workspace", [["leaver", "owner"]], "leaver");
+    await seedOrg("personal", "Leaver Project", [["leaver", "owner"]], "leaver");
     await seedOrg("solo", "Side project", [["leaver", "owner"]]);
     await seedOrg("team", "Team", [["leaver", "owner"], ["teammate", "member"]]);
-    await seedWorkspace("mine", "personal", "leaver");
-    await seedWorkspace("shared", "team", "leaver");
-    await sql`insert into webhooks (id, user_id, url, secret, events) values ('hook', 'leaver', 'https://example.test', 's', '{}')`;
+    await seedProject("mine", "personal", "leaver");
+    await seedProject("shared", "team", "leaver");
+    await sql`insert into webhooks (id, user_id, org_id, url, secret, events) values ('hook', 'leaver', 'personal', 'https://example.test', 's', '{}')`;
     await sql`insert into "session" (id, "expiresAt", token, "createdAt", "updatedAt", "userId")
       values ('s1', now() + interval '1 day', 't1', now(), now(), 'leaver')`;
     await sql`insert into "account" (id, "accountId", "providerId", "userId", "createdAt", "updatedAt")
@@ -214,14 +218,24 @@ describe("account deletion", () => {
     expect(plan).toEqual({
       blockers: [{ orgId: "team", name: "Team", memberCount: 2 }],
       deleteOrganizations: [
-        { orgId: "personal", name: "Leaver Workspace", isPersonal: true },
+        { orgId: "personal", name: "Leaver Project", isPersonal: true },
         { orgId: "solo", name: "Side project", isPersonal: false },
       ],
       leaveOrganizations: [],
     });
     await expect(offboarding.deleteAccount({ userId: "leaver", confirmation: "leaver@example.test" }, deps))
       .rejects.toMatchObject({ status: 409, code: "ownership_transfer_required" });
-    expect(await sql`select count(*)::int as count from workspaces`).toEqual([{ count: 2 }]);
+    expect(await sql`select count(*)::int as count from projects`).toEqual([{ count: 2 }]);
+  });
+
+  it("keeps queued webhook events of an organization the user only leaves, and drops those of the organizations it purges", async () => {
+    await sql`update org_memberships set role = 'owner' where org_id = 'team' and user_id = 'teammate'`;
+    await sql`insert into webhook_outbox (id, user_id, event_type, payload) values
+      ('queued-team', 'leaver', 'run.completed', ${sql.json({ projectId: "shared", runId: "shared-done" } as never)}),
+      ('queued-mine', 'leaver', 'run.completed', ${sql.json({ projectId: "mine", runId: "mine-done" } as never)}),
+      ('queued-teammate', 'teammate', 'run.completed', ${sql.json({ projectId: "shared", runId: "shared-live" } as never)})`;
+    await offboarding.deleteAccount({ userId: "leaver", confirmation: "leaver@example.test" }, deps);
+    expect((await sql`select id from webhook_outbox order by id`).map((row) => row.id)).toEqual(["queued-team", "queued-teammate"]);
   });
 
   it("purges personal and solo orgs, leaves team orgs with their content, and tombstones the user", async () => {
@@ -234,7 +248,7 @@ describe("account deletion", () => {
     const result = await offboarding.deleteAccount({ userId: "leaver", confirmation: " Leaver@Example.test " }, deps);
 
     expect(result).toEqual({ deletedOrganizations: ["personal", "solo"], leftOrganizations: ["team"] });
-    expect(await sql`select id from workspaces`).toEqual([{ id: "shared" }]);
+    expect(await sql`select id from projects`).toEqual([{ id: "shared" }]);
     expect(await sql`select user_id from documents`).toEqual([{ user_id: "leaver" }]);
     expect(await sql`select org_id, user_id from org_memberships`).toEqual([{ org_id: "team", user_id: "teammate" }]);
     expect(await sql`select name, email, deleted_at is not null as deleted from "user" where id = 'leaver'`)

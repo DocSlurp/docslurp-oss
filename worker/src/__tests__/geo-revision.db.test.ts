@@ -9,9 +9,9 @@ beforeAll(async()=>{
  db=await createMigratedDatabase();
  await db.exec(`insert into "user"(id,name,email) values ('u','U','geo@example.com');
  insert into organizations(id,name,slug,created_by_user_id) values('o','O','geo','u');
- insert into workspaces(id,org_id,user_id,name) values('w','o','u','W');
- insert into workspace_runs(id,org_id,user_id,workspace_id,kind,status,stage,pipeline) values('r','o','u','w','upload','processing','structured-extract','{}');
- insert into documents(id,org_id,user_id,workspace_id,run_id,filename,mime_type,source_key,status)
+ insert into projects(id,org_id,user_id,name) values('w','o','u','W');
+ insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline) values('r','o','u','w','upload','processing','structured-extract','{}');
+ insert into documents(id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status)
  values('d','o','u','w','r','d.txt','text/plain','source','processing');`);
 },60000);
 afterAll(async()=>{await db?.close();});
@@ -21,8 +21,8 @@ it("operational completion preserves revision, source change invalidates",async(
  expect(await revision()).toBe(old);
  await db.exec("update documents set source_key='replacement' where id='d'");expect(await revision()).not.toBe(old);
 });
-it("workspace schema mutation invalidates",async()=>{
- const old=await revision();await db.exec(`update workspaces set pipeline='{"outputSchema":{"type":"object"}}' where id='w'`);
+it("project schema mutation invalidates",async()=>{
+ const old=await revision();await db.exec(`update projects set pipeline='{"outputSchema":{"type":"object"}}' where id='w'`);
  expect(await revision()).not.toBe(old);
 });
 it("unavailable PostGIS refuses publication and rolls back source",async()=>{
@@ -43,7 +43,7 @@ it("the actual checkpoint store cannot mark a geo stage complete after publicati
  try {
   const state=await loadRunState(store,"r");
   await expect(store.completeDocumentStage(state,"d","structured-extract","s3://partial",{}, {
-   documentId:"d",workspaceId:"w",orgId:"o",runId:"r",revision:await revision(),
+   documentId:"d",projectId:"w",orgId:"o",runId:"r",revision:await revision(),
    schemaDigest:"a".repeat(64),resultDigest:"b".repeat(64),features:[],
   })).rejects.toThrow("spatial migrations");
   const rows=await db.query<{status:string}>("select status from document_run_stage_states where document_id='d' and stage_name='structured-extract'");

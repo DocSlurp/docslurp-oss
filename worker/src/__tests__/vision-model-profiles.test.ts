@@ -50,13 +50,13 @@ describe("per-model vision profiles", () => {
     expect(body.max_tokens).toBe(8_192);
     expect(body.temperature).toBe(0);
     expect(body.reasoning).toEqual({ effort: "none" });
-    expect(body.provider).toEqual({ only: ["together", "fireworks", "parasail"], sort: "price", allow_fallbacks: true, max_price: visionMaxPrice(SNAPSHOT) });
+    expect(body.provider).toEqual({ only: ["fireworks", "parasail"], sort: "latency", allow_fallbacks: true, max_price: visionMaxPrice(SNAPSHOT) });
   });
 
-  it("sends a default org to the cheapest measured host, China-based ones included, under the route's max_price", async () => {
+  it("keeps the measured endpoint allowlist and price ceiling when prioritizing latency", async () => {
     const { body } = await send(SNAPSHOT);
-    expect(body.provider.sort).toBe("price");
-    expect(body.provider.only).toEqual(["together", "fireworks", "parasail"]);
+    expect(body.provider.sort).toBe("latency");
+    expect(body.provider.only).toEqual(["fireworks", "parasail"]);
     expect(body.provider.ignore).toBeUndefined();
   });
 

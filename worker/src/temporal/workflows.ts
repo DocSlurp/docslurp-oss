@@ -274,17 +274,22 @@ export async function documentPipeline(
     initialized = true;
     let artifacts = initResult.artifacts;
 
+    // Only recorded input enables new shard commands; existing histories are unchanged.
+    const shardable = (stageName: string): boolean => SHARDABLE_STAGES.includes(stageName)
+      || (stageName === "quarantine" && input.documentSharding?.quarantine === true);
     /** Document shards this run dispatches for a stage (fewer than two: none). */
     const shardPlan = (stageName: string): string[][] => {
       const sharding = input.documentSharding;
-      if (!sharding || !scaling || !SHARDABLE_STAGES.includes(stageName)) return [];
+      if (!sharding || !scaling || !shardable(stageName)) return [];
       // Only the documents this stage works on; the stage pass takes the rest as no-ops.
       const types = initResult.documentMimeTypes;
       const picked = initResult.documentIds.flatMap((id, index) => !types || stageWorksOn(stageName, types[index]) ? [index] : []);
       return planDocumentShards(
         picked.map((index) => initResult.documentIds[index]!),
         initResult.documentPages ? picked.map((index) => initResult.documentPages![index]!) : undefined,
-        sharding,
+        stageName === "quarantine" && sharding.quarantineMinPagesPerShard !== undefined
+          ? { ...sharding, minPagesPerShard: sharding.quarantineMinPagesPerShard }
+          : sharding,
       );
     };
     // Recorded in workflow input: runs started without it keep LIGHT_STAGES grouping (or none).
@@ -296,6 +301,9 @@ export async function documentPipeline(
     const needsPreWork = (stageName: string): boolean =>
       (stageName === "vision-extract" && (input.pageConcurrency ?? 0) > 1) || shardPlan(stageName).length > 1
       || (pageRangeStages?.has(stageName) ?? false);
+
+    const legacyGroupable = (stageName: string): boolean => LIGHT_STAGES.includes(stageName)
+      && !(stageName === "quarantine" && input.documentSharding?.quarantine === true);
 
     // Execute each stage sequentially
     for (let i = 0; i < stageOrder.length; i++) {
@@ -310,9 +318,9 @@ export async function documentPipeline(
       const stageName = stageOrder[i]!;
 
       // Recorded in workflow input: runs started without it keep one activity per stage.
-      if (!groupable && input.groupLightStages && scaling && LIGHT_STAGES.includes(stageName)) {
+      if (!groupable && input.groupLightStages && scaling && legacyGroupable(stageName)) {
         let end = i;
-        while (end < stageOrder.length && LIGHT_STAGES.includes(stageOrder[end]!)) end++;
+        while (end < stageOrder.length && legacyGroupable(stageOrder[end]!)) end++;
         const group = stageOrder.slice(i, end);
         if (group.length > 1) {
           progress = {
@@ -464,7 +472,7 @@ export async function documentPipeline(
       }
 
       // Recorded in workflow input: runs started without it keep one activity per stage.
-      if (input.documentSharding && scaling && SHARDABLE_STAGES.includes(stageName)) {
+      if (input.documentSharding && scaling && shardable(stageName)) {
         const shards = shardPlan(stageName);
         if (shards.length > 1) {
           const shardActivities = shardActivityProxies(input.activityTaskQueue);
@@ -573,6 +581,7 @@ export async function documentPipeline(
     // Record failure in DB (best-effort — don't let this throw mask the real error)
     const message =
       rootCause(error) ?? (error instanceof Error ? error.message : String(error));
+    const failureType = applicationFailureType(error);
     await CancellationScope.nonCancellable(() => (scaling?.quick ?? quickActivities)
       .failPipelineRun({
         ...(input.executionGeneration ? { executionGeneration: input.executionGeneration } : {}),
@@ -580,11 +589,22 @@ export async function documentPipeline(
         stage: progress.stage,
         message,
         ...(progress.stageGroup?.length ? { stageGroup: progress.stageGroup } : {}),
+        ...(failureType ? { failureType } : {}),
       })
       .catch(() => {}));
 
     throw error;
   }
+}
+
+/** The type of the first ApplicationFailure in `error`'s cause chain (deterministic: reads the failure only). */
+function applicationFailureType(error: unknown): string | undefined {
+  let current: unknown = error;
+  for (let depth = 0; current && depth < 8; depth += 1) {
+    if (current instanceof ApplicationFailure && current.type) return current.type;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return undefined;
 }
 
 /**

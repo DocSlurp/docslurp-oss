@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # CI-only: two bounded attempts, retaining Ubuntu archive signature verification.
+# DOCSLURP_INSTALL_OCR=1 also builds the local OCR runtime (scripts/install-ocr-runtime.sh); off by default.
 set -euo pipefail
 
-packages=(bubblewrap poppler-data poppler-utils pandoc tesseract-ocr tesseract-ocr-eng ffmpeg)
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+packages=(bubblewrap poppler-data poppler-utils pandoc ffmpeg)
 # Pass packages as positional arguments, rather than through shell interpolation.
 bounded_install() {
   sudo timeout --signal=TERM --kill-after=15s 5m bash -euc '
@@ -22,7 +24,7 @@ if [[ "$ID" != ubuntu || "$VERSION_ID" != 24.04 || "$(dpkg --print-architecture)
 fi
 }
 
-main() {
+install_packages() {
 network=(-o Acquire::Retries=1 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
 if bounded_install "${network[@]}"; then
   return 0
@@ -53,6 +55,17 @@ bounded_install "${network[@]}" \
   -o "Dir::Etc::sourcelist=$scratch/ubuntu.sources" \
   -o Dir::Etc::sourceparts=- \
   -o "Dir::State::lists=$scratch/lists"
+}
+
+maybe_install_ocr() {
+  if [[ "${DOCSLURP_INSTALL_OCR:-0}" == 1 ]]; then
+    bash "$ROOT_DIR/scripts/install-ocr-runtime.sh" ${DOCSLURP_OCR_PREFIX:+"$DOCSLURP_OCR_PREFIX"}
+  fi
+}
+
+main() {
+  install_packages
+  maybe_install_ocr
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

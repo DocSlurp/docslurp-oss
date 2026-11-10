@@ -7,6 +7,7 @@ from datetime import datetime,timezone
 from pathlib import Path
 import fitz
 from contract import file_hash,identity_hash,immutable_json,validate_policy_receipt,validate_manifest,evaluation_identity
+from execution_guard import assert_eval_execution
 from measure import invoke,features,ocr,OCR_BINARY_HASH,OCR_LANGUAGE_HASH
 from optimize import choose
 
@@ -53,6 +54,7 @@ if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('--dataset',type=Path,required=True);p.add_argument('--run',type=Path,required=True)
     p.add_argument('--scorers',type=Path,required=True)
     p.add_argument('--policy',type=Path,required=True);p.add_argument('--out',type=Path,required=True);a=p.parse_args()
+    assert_eval_execution(a.dataset)
     os.environ.setdefault('TMPDIR','/home/dan/tmp/agents');os.environ['MIXED_EVAL_WORKERS']='1'
     identity=json.loads((a.run/'evaluation-identity.json').read_text());receipt=json.loads(a.policy.read_text())
     live=evaluation_identity(a.dataset,a.scorers,Path(__file__).with_name('measure.py'),OCR_BINARY_HASH,OCR_LANGUAGE_HASH,fitz.VersionBind)

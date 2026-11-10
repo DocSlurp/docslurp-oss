@@ -38,7 +38,7 @@ function command(overrides: Partial<Parameters<typeof buildSandboxCommand>[0]> =
 
 describe("sandbox command construction", () => {
   it("rejects broad writable mounts", () => {
-    expect(() => command({ configuredWritablePaths: ["/tmp"] })).toThrow("private DocSlurp temporary workspaces");
+    expect(() => command({ configuredWritablePaths: ["/tmp"] })).toThrow("private DocSlurp temporary projects");
   });
 
   it("describes the command without launcher details", () => {
@@ -67,40 +67,55 @@ describe("sandbox command construction", () => {
     expect(spec.env.STORAGE_URI).toBeUndefined();
   });
 
-  it("grants parser output write access to DocSlurp temp workspaces", () => {
-    const tempWorkspace = path.join(tmpdir(), "docslurp-source-test");
-    const sourcePath = path.join(tempWorkspace, "sample.pdf");
+  it("grants parser output write access to DocSlurp temp projects", () => {
+    const tempProject = path.join(tmpdir(), "docslurp-source-test");
+    const sourcePath = path.join(tempProject, "sample.pdf");
     const spec = command({
       plan: {
-        binary: "node",
-        args: ["kreuzberg_extract.mjs", "--input", sourcePath, "--output", `${sourcePath}.kreuzberg.md`],
+        binary: "python3",
+        args: ["office_markdown.py", "--kind", "pptx", "--input", sourcePath, "--output", `${sourcePath}.pptx.md`],
         available: true,
       },
     });
 
-    expect(spec.writablePaths).toEqual([tempWorkspace]);
+    expect(spec.writablePaths).toEqual([tempProject]);
   });
 
-  it("declares only existing file arguments inside DocSlurp temp workspaces as inputs", () => {
-    const workspace = mkdtempSync(path.join(tmpdir(), "docslurp-inputs-test-"));
+  it("declares only existing file arguments inside DocSlurp temp projects as inputs", () => {
+    const project = mkdtempSync(path.join(tmpdir(), "docslurp-inputs-test-"));
     const outside = mkdtempSync(path.join(tmpdir(), "inputs-outside-"));
     try {
-      const input = path.join(workspace, "in.pdf");
+      const input = path.join(project, "in.pdf");
       const hostFile = path.join(outside, "host.pdf");
       writeFileSync(input, "pdf");
       writeFileSync(hostFile, "pdf");
       const spec = command({
         plan: {
           binary: process.execPath,
-          args: [path.join(scriptsDir, "parse.mjs"), input, hostFile, path.join(workspace, "out.md"), workspace],
+          args: [path.join(scriptsDir, "parse.mjs"), input, hostFile, path.join(project, "out.md"), project],
           available: true,
         },
       });
       expect(spec.inputPaths).toEqual([input]);
     } finally {
-      rmSync(workspace, { recursive: true, force: true });
+      rmSync(project, { recursive: true, force: true });
       rmSync(outside, { recursive: true, force: true });
     }
+  });
+
+  it("stages signature files for directory-based health checks without writable input access", () => {
+    const project = mkdtempSync(path.join(tmpdir(), "docslurp-signatures-test-"));
+    try {
+      const signature = path.join(project, "daily.cvd");
+      writeFileSync(signature, "synthetic signature header");
+      const spec = command({ plan: { binary: "clamscan", args: ["--database", project, "--version"], available: true, stagedInputs: [signature], readOnlyInputs: true } });
+      expect(spec.inputPaths).toEqual([signature]);
+      expect(spec.writablePaths).toEqual([]);
+    } finally { rmSync(project, { recursive: true, force: true }); }
+  });
+
+  it("refuses auxiliary inputs outside private staging", () => {
+    expect(() => command({ plan: { ...samplePlan, stagedInputs: ["/etc/passwd"] } })).toThrow(/Auxiliary parser inputs/);
   });
 
   it("does not infer a writable checkout from scripts in a temporary worktree", () => {
@@ -206,19 +221,19 @@ describe("parser sandbox launcher with a custom temp root", () => {
     });
   }
 
-  it.skipIf(!hasBwrap || process.platform !== "linux")("mounts private workspaces under a non-/tmp temp root and still refuses broad paths", () => {
+  it.skipIf(!hasBwrap || process.platform !== "linux")("mounts private projects under a non-/tmp temp root and still refuses broad paths", () => {
     const tmpRoot = mkdtempSync(path.join(process.env.HOME ?? process.cwd(), ".docslurp-sandbox-root-"));
     try {
-      const workspace = path.join(tmpRoot, "docslurp-work");
-      mkdirSync(workspace);
-      writeFileSync(path.join(workspace, "in.txt"), "hello");
+      const project = path.join(tmpRoot, "docslurp-work");
+      mkdirSync(project);
+      writeFileSync(path.join(project, "in.txt"), "hello");
 
-      const ok = runLauncher(tmpRoot, workspace, "cat", path.join(workspace, "in.txt"));
+      const ok = runLauncher(tmpRoot, project, "cat", path.join(project, "in.txt"));
       expect(ok.stderr).toBe("");
       expect(ok.stdout).toBe("hello");
 
       expect(runLauncher(tmpRoot, tmpRoot, "true").status).toBe(70);
-      expect(runLauncher(tmpRoot, `${workspace}/../../escape`, "true").status).toBe(70);
+      expect(runLauncher(tmpRoot, `${project}/../../escape`, "true").status).toBe(70);
     } finally {
       rmSync(tmpRoot, { recursive: true, force: true });
     }

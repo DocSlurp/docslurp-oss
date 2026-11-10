@@ -1,4 +1,4 @@
-import { workspaceRefParameter } from "./state-management-openapi.js";
+import { projectRefParameter } from "./state-management-openapi.js";
 
 const security = [{ bearerAuth: [] }, { sessionAuth: [] }];
 const jobIdParameter = { in: "path", name: "jobId", required: true, schema: { type: "string", minLength: 1 } };
@@ -34,35 +34,35 @@ export const configChangePaths = {
       responses: { "200": { description: "text/event-stream" }, "404": { description: "Job not found" } },
     },
   },
-  // POST /v1/workspaces/{workspaceId}/settings-proposals/apply is a DocSlurp-app (session) endpoint, not public API.
-  "/v1/workspaces/{workspaceId}/estimate": {
+  // POST /v1/projects/{projectId}/settings-proposals/apply is a DocSlurp-app (session) endpoint, not public API.
+  "/v1/projects/{projectId}/estimate": {
     post: {
-      tags: ["workspaces"],
-      summary: "Estimate a workspace update",
-      description: "Same body as PATCH /v1/workspaces/{workspaceId}. Returns `{ impact, estimate, billing }`: whether the change needs a re-index (none, search-only, new-uploads, reindex-recommended, reindex-required) and what it would cost.",
+      tags: ["projects"],
+      summary: "Estimate a project update",
+      description: "Same body as PATCH /v1/projects/{projectId}. Returns `{ impact, estimate, billing }`: whether the change needs a re-index (none, search-only, new-uploads, reindex-recommended, reindex-required) and what it would cost.",
       security,
-      parameters: [workspaceRefParameter],
+      parameters: [projectRefParameter],
       requestBody: body,
       responses: estimateResponses,
     },
   },
-  "/v1/workspaces/{workspaceId}/search-settings/estimate": {
+  "/v1/projects/{projectId}/search-settings/estimate": {
     post: {
-      tags: ["workspaces"],
+      tags: ["projects"],
       summary: "Estimate a search settings update",
-      description: "Same body and access as PATCH /v1/workspaces/{workspaceId}/search-settings (session, or a server key with workspaces:manage). Returns `{ impact, estimate, billing }` and changes nothing.",
+      description: "Same body and access as PATCH /v1/projects/{projectId}/search-settings (session, or a server key with projects:manage). Returns `{ impact, estimate, billing }` and changes nothing.",
       security,
-      parameters: [workspaceRefParameter],
+      parameters: [projectRefParameter],
       requestBody: body,
       responses: estimateResponses,
     },
   },
-  "/v1/workspaces/{workspaceId}/full-index/estimate": {
+  "/v1/projects/{projectId}/full-index/estimate": {
     post: {
-      tags: ["workspaces"],
-      summary: "Estimate a workspace full index",
+      tags: ["projects"],
+      summary: "Estimate a project full index",
       security,
-      parameters: [workspaceRefParameter],
+      parameters: [projectRefParameter],
       requestBody: body,
       responses: estimateResponses,
     },
@@ -76,13 +76,13 @@ export const configChangePaths = {
       responses: estimateResponses,
     },
   },
-  "/v1/workspaces/{workspaceId}/graph/jobs/estimate": {
+  "/v1/projects/{projectId}/graph/jobs/estimate": {
     post: {
-      tags: ["workspaces"],
+      tags: ["projects"],
       summary: "Estimate a knowledge graph rebuild",
       description: "Same body as POST …/graph/rebuild.",
       security,
-      parameters: [workspaceRefParameter],
+      parameters: [projectRefParameter],
       requestBody: body,
       responses: estimateResponses,
     },
@@ -91,8 +91,18 @@ export const configChangePaths = {
     post: {
       tags: ["ingest"],
       summary: "Estimate an upload",
-      description: "Body `{ files: [{ name, size, pages?, type?, durationSeconds? }], workspace? }` (workspace ID, slug or name; omitted: the default workspace). Pages default to about one per 75 KB. Audio and video files (by `type` or extension) are priced by duration: pass `durationSeconds` when known, otherwise it is guessed from the size. The response names the `orgId` whose credits the upload would spend (and `billingExempt` when that organization is never charged) and adds `media` when any file is audio or video: its credits (`low` reads video from the audio track only, `high` also reads frames), whether durations were assumed, and `lighter`, the upload pipeline override that skips video frames for the lower price.",
+      description: "Body `{ files: [{ name, size, pages?, type?, durationSeconds?, profile? }], project? }` (project ID, slug or name; omitted: the default project; at most 1,000 files). Pages default to one for an image file and about one per 75 KB otherwise. `profile` is the file profile the offline profiler (`@docslurp/estimate`) measured on the caller's machine: neutral facts (page counts, PDF page facts, media duration). It is validated, clamped against `size` and used only to narrow the estimate; it never affects what an upload is charged. Audio and video files (by `type` or extension) are priced by duration: pass `durationSeconds` when known, otherwise it is guessed from the size. The response names the `orgId` whose credits the upload would spend (and `billingExempt` when that organization is never charged) and adds `media` when any file is audio or video: its credits (`low` reads video from the audio track only, `high` also reads frames), whether durations were assumed, and `lighter`, the upload pipeline override that skips video frames for the lower price. `kind` is always `estimate`; `profile` is the project's estimate profile and `pricingVersion` the pricing version that priced it.",
       security,
+      requestBody: body,
+      responses: estimateResponses,
+    },
+  },
+  "/v1/estimate": {
+    post: {
+      tags: ["ingest"],
+      summary: "Quote files before uploading (public)",
+      description: "No account needed. Body `{ files: [{ name, size, type?, pages?, durationSeconds?, profile? }], settings? }` with at most 200 files, each `profile` from the offline profiler `@docslurp/estimate` (files never leave the caller's machine). `settings` are the quote's knobs: `quality` (fast, auto, good), `indexing` (full, on-demand, visual; visual cannot be combined with fast), `documentSummary`, `structuredFields`, `knowledgeGraph`, `propositions`, `videoFrames`, `speedBoost`, `hostingMonths` (1-60), `searchesPerMonth`, `chatAnswersPerMonth`, `chatTier`. Answers an estimate (`kind: estimate`, never a charge): ingest credits, monthly hosting and usage credits, neutral `lines`, page and byte ranges, `pricingVersion` and `validUntil`. Rate limited per client IP and per quote session (an opaque `ds_estimate_session` cookie); reads no account data and stores nothing. Signed-in callers quote a project with `POST /v1/uploads/estimate`.",
+      security: [],
       requestBody: body,
       responses: estimateResponses,
     },

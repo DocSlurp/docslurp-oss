@@ -17,7 +17,7 @@ export function isReservedCanonicalId(value: string): boolean {
 /**
  * Canonical IDs name the logical source a document represents, such as a URL,
  * a site path like `/products`, or any caller-chosen key. They are compared
- * exactly (after trimming) within a workspace.
+ * exactly (after trimming) within a project.
  */
 export function normalizeCanonicalId(value: unknown): string | null {
   if (value === undefined || value === null) return null;

@@ -19,9 +19,9 @@ import type { WorkflowState } from "../pipeline/pipeline.js";
 import { currentPerfContext } from "./perf-context.js";
 
 /**
- * Stage-level privacy gate. Returns true when the workspace privacy mode allows
+ * Stage-level privacy gate. Returns true when the project privacy mode allows
  * the call. Otherwise it logs the block, records audit rows for strict-privacy
- * workspaces (one per document), and returns false so the caller can skip the
+ * projects (one per document), and returns false so the caller can skip the
  * optional work. Clients also call `assertProviderAllowed` directly, so a
  * missed stage gate still fails closed.
  */
@@ -42,7 +42,7 @@ export async function allowHostedCall(
         targets.map((documentId) => buildBlockedPrivacyAuditEntry({
           privacyMode: mode,
           call,
-          workspaceId: state.run.workspaceId ?? null,
+          projectId: state.run.projectId ?? null,
           runId: state.run.id,
           documentId,
         })),
@@ -70,8 +70,8 @@ export function openRouterTextCall(operation: string, model: string): ProviderCa
 const privacyAuditScope = new AsyncLocalStorage<PrivateCallAuditScope>();
 
 /**
- * Attributes private endpoint calls made inside `fn` to a workspace and run.
- * Strict-privacy private calls without a workspace scope are refused, so every
+ * Attributes private endpoint calls made inside `fn` to a project and run.
+ * Strict-privacy private calls without a project scope are refused, so every
  * worker entry that runs AI stages wraps its work here.
  */
 export function runWithPrivacyAuditScope<T>(scope: PrivateCallAuditScope, fn: () => Promise<T>): Promise<T> {
@@ -104,13 +104,13 @@ export async function insertPrivacyAuditRows(
   const rows = entries.map((entry) => ({
     document_id: entry.documentId,
     run_id: entry.runId,
-    workspace_id: entry.workspaceId,
+    project_id: entry.projectId,
     model_id: entry.modelId,
     endpoint: entry.endpoint,
     privacy_mode: entry.privacyMode,
   }));
   await sql`
-    insert into privacy_audit_log ${sql(rows, "document_id", "run_id", "workspace_id", "model_id", "endpoint", "privacy_mode")}
+    insert into privacy_audit_log ${sql(rows, "document_id", "run_id", "project_id", "model_id", "endpoint", "privacy_mode")}
   `;
 }
 
@@ -118,17 +118,17 @@ export async function insertPrivacyAuditRows(
  * Privacy gate for background jobs that run outside a WorkflowState (graph
  * rebuilds). Same policy and audit behaviour as {@link allowHostedCall}.
  */
-export async function allowHostedCallForWorkspace(
+export async function allowHostedCallForProject(
   sql: Sql<Record<string, unknown>>,
-  args: { privacyMode: string; workspaceId: string; call: ProviderCallDescriptor },
+  args: { privacyMode: string; projectId: string; call: ProviderCallDescriptor },
 ): Promise<boolean> {
   if (isProviderCallAllowed(args.privacyMode, args.call)) return true;
-  console.warn(`${formatPrivacyBlockLog(args.privacyMode, args.call)} workspace=${args.workspaceId}`);
+  console.warn(`${formatPrivacyBlockLog(args.privacyMode, args.call)} project=${args.projectId}`);
   if (privacyModeAuditsBlockedCalls(args.privacyMode)) {
     try {
-      await insertPrivacyAuditRows(sql, [buildBlockedPrivacyAuditEntry({ privacyMode: args.privacyMode, call: args.call, workspaceId: args.workspaceId })]);
+      await insertPrivacyAuditRows(sql, [buildBlockedPrivacyAuditEntry({ privacyMode: args.privacyMode, call: args.call, projectId: args.projectId })]);
     } catch (error) {
-      console.error(`[privacy] audit write failed workspace=${args.workspaceId}: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(`[privacy] audit write failed project=${args.projectId}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   return false;

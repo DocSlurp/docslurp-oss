@@ -26,7 +26,7 @@ export interface SpendPausedRunsDeps {
   signals?: { pause(runId: string): Promise<void>; resume(runId: string): Promise<void> };
 }
 
-type PausedRunRow = { id: string; org_id: string; workspace_id: string; user_id: string; pause_reason: string };
+type PausedRunRow = { id: string; org_id: string; project_id: string; user_id: string; pause_reason: string };
 
 export const ORG_SPEND_CHANGED_CHANNEL = "org_spend_changed";
 
@@ -55,7 +55,7 @@ export async function resumeSpendPausedRunOutcome(runId: string, deps: SpendPaus
   // Resolve fleet capability before reserving a transaction connection: it may
   // query the same pool (including one-connection test/self-hosted pools).
   const [candidate] = await sql<PausedRunRow[]>`
-    select id, org_id, workspace_id, user_id, pause_reason from workspace_runs
+    select id, org_id, project_id, user_id, pause_reason from project_runs
     where id = ${runId} and status = 'processing' and control_state = 'paused' and pause_reason is not null
   `;
   if (!candidate) return { status: "not-spend-paused" };
@@ -67,25 +67,25 @@ export async function resumeSpendPausedRunOutcome(runId: string, deps: SpendPaus
       const client = tx as unknown as SqlClient;
       await tx`select pg_advisory_xact_lock(90105, hashtext(${runId}))`;
       const [row] = await tx<PausedRunRow[]>`
-        select id, org_id, workspace_id, user_id, pause_reason from workspace_runs
+        select id, org_id, project_id, user_id, pause_reason from project_runs
         where id = ${runId} and status = 'processing' and control_state = 'paused'
-          and pause_reason in ('credit_exhausted', 'workspace_budget_paused', 'org_budget_paused', 'plan_not_entitled')
+          and pause_reason in ('credit_exhausted', 'project_budget_paused', 'org_budget_paused', 'plan_not_entitled')
         for no key update
       `;
       if (!row) return { status: "not-spend-paused" } as const;
       if (!spendGuardsSkipped()) {
-        const reason = spendBlockReason(await loadSpendStatus(row.org_id, row.workspace_id, { client }));
+        const reason = spendBlockReason(await loadSpendStatus(row.org_id, row.project_id, { client }));
         if (reason) return { status: "blocked", reason: reason.code } as const;
       }
       await tx`
-        update workspace_runs set control_state = null, control_requested_at = null,
+        update project_runs set control_state = null, control_requested_at = null,
           pause_reason = null, spend_unchecked_pages = 0, spend_unchecked_credits = 0,
           last_heartbeat_at = now(), lease_expires_at = now() + interval '5 minutes', updated_at = now()
         where id = ${runId}
       `;
       if (leases) {
         // Fail closed on lease errors: retain the pause and retry the sweep.
-        const grant = await grantRunCreditLease(client, { runId, orgId: row.org_id, workspaceId: row.workspace_id });
+        const grant = await grantRunCreditLease(client, { runId, orgId: row.org_id, projectId: row.project_id });
         if (!grant) throw new Error("Credit lease response missing");
         if (grant.blockReason || !Number.isFinite(grant.remaining) || grant.remaining <= 0) {
           blockedReason = grant.blockReason ?? row.pause_reason;
@@ -98,7 +98,7 @@ export async function resumeSpendPausedRunOutcome(runId: string, deps: SpendPaus
       await signals.resume(runId);
       await tx`
         with inserted as (
-          insert into workspace_run_events (id, user_id, run_id, event_type, status, message, payload)
+          insert into project_run_events (id, user_id, run_id, event_type, status, message, payload)
           values (gen_random_uuid()::text, ${row.user_id}, ${runId}, 'run.progress', 'processing',
             'Resumed: the organization can spend again.',
             ${JSON.stringify({ spendResume: { previousReason: row.pause_reason } })}::text::jsonb)
@@ -122,8 +122,8 @@ export async function sweepSpendPausedRuns(
   const sql = deps.sql ?? defaultSql;
   const signals = deps.signals ?? { pause: signalPipelinePause, resume: signalPipelineResume };
   const rows = await sql<PausedRunRow[]>`
-    select id, org_id, workspace_id, user_id, pause_reason
-    from workspace_runs
+    select id, org_id, project_id, user_id, pause_reason
+    from project_runs
     where pause_reason is not null
       and control_state = 'paused'
       and status = 'processing'
@@ -135,7 +135,7 @@ export async function sweepSpendPausedRuns(
   let stillBlocked = 0;
   for (const row of rows) {
     const allowed = spendGuardsSkipped()
-      || spendBlockReason(await loadSpendStatus(row.org_id, row.workspace_id, { client: sql })) === null;
+      || spendBlockReason(await loadSpendStatus(row.org_id, row.project_id, { client: sql })) === null;
     if (allowed) {
       if (await resumeSpendPausedRun(row.id, { sql, signals })) resumed += 1;
       else stillBlocked += 1;

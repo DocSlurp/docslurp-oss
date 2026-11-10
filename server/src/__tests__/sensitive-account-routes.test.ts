@@ -66,7 +66,7 @@ beforeEach(() => {
   // Route tests exercise the helper's contract; its database ownership, expiry
   // and liveness predicates are independently covered in auth-sensitive-access tests.
   mocks.sensitive.mockImplementation(async (_pool, userId, sessionId) => userId === "actor" && sessionId === "verified-session");
-  const key = { id: "key", name: "Integration", scopes: ["search"], allowedDomains: [], rateLimits: [], workspaceIds: [] };
+  const key = { id: "key", name: "Integration", scopes: ["search"], allowedDomains: [], rateLimits: [], projectIds: [] };
   mocks.createKey.mockResolvedValue({ key, rawKey: "one-time-secret" });
   mocks.updateKey.mockResolvedValue(key); mocks.rotateKey.mockResolvedValue({ key, rawKey: "replacement-secret" });
   mocks.revokeKey.mockResolvedValue(key); mocks.revokeAll.mockResolvedValue([]);

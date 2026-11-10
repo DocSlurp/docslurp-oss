@@ -9,7 +9,7 @@ import type { Config } from "../config.js";
 import { priceVisionResult } from "../lib/guarded-vision-call.js";
 import type { VisionServedRoute } from "../lib/vision-pricing.js";
 import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
-import { budgetCritiquePages, mergeCritiquedPages, recordCritiqueUsage, selectCritiquePages } from "../stages/extract-markdown.js";
+import { budgetCritiquePages, buildPerPageHeatmap, mergeCritiquedPages, recordCritiqueUsage, selectCritiquePages } from "../stages/extract-markdown.js";
 import { CommandRunner } from "../tools/runner.js";
 import { configuredVisionServedRoute, executeVisionRuntime } from "../tools/vision-runtime.js";
 import { scoreExtractionPlausibility } from "../lib/extracted-markdown.js";
@@ -43,6 +43,34 @@ describe("mergeCritiquedPages", () => {
     );
 
     expect(merged).toBe("first page\fsecond page corrected\fthird page");
+  });
+
+  it("keeps an empty page in place so page N stays page N", () => {
+    expect(mergeCritiquedPages("one\f\fthree", 3, [{ pageNumber: 3, text: "three corrected" }])).toBe("one\f\fthree corrected");
+  });
+
+  it("never invents page breaks: text whose breaks do not match the page count comes back unchanged", () => {
+    const sentences = "Alpha beta gamma. ".repeat(40);
+    const corrections = [{ pageNumber: 2, text: "corrected" }];
+    // No form feed at all (equal-length slicing would have cut it into three and joined them with form feeds).
+    expect(mergeCritiquedPages(sentences, 3, corrections)).toBe(sentences);
+    // Markdown rules are not page breaks.
+    const ruled = "first\n\n---\n\nsecond\n\n---\n\nthird";
+    expect(mergeCritiquedPages(ruled, 3, corrections)).toBe(ruled);
+    // Form feeds for two pages in a three-page document.
+    expect(mergeCritiquedPages("one\ftwo", 3, corrections)).toBe("one\ftwo");
+    // Nothing to merge into.
+    expect(mergeCritiquedPages("", 3, corrections)).toBe("");
+  });
+});
+
+describe("buildPerPageHeatmap", () => {
+  it("scores only pages the text says exist, never equal-length slices", () => {
+    const paged = buildPerPageHeatmap("One page of text.\fAnother page of text.\fA third page.", 3, "base");
+    expect(paged.map((page) => page.pageNumber)).toEqual([1, 2, 3]);
+    expect(buildPerPageHeatmap("Alpha beta gamma. ".repeat(40), 3, "base")).toEqual([]);
+    expect(buildPerPageHeatmap("one\ftwo", 3, "base")).toEqual([]);
+    expect(buildPerPageHeatmap("Just one page.", 1, "base")).toHaveLength(1);
   });
 });
 

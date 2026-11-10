@@ -16,7 +16,7 @@ export interface EvidenceRetrievalContext {
   /** May still be in flight: only the vector leg waits for it. */
   queryVector: number[] | null | Promise<number[] | null>;
   userId: string;
-  workspaceId: string;
+  projectId: string;
   options: SearchOptions;
 }
 
@@ -39,7 +39,7 @@ export interface EvidenceRetrievalFns {
     /** The query text, so a previous index can embed it with its own model. */
     query?: string;
     userId: string;
-    workspaceId: string;
+    projectId: string;
     options: SearchOptions;
   }): Promise<SearchChunk[]>;
   textSearch(args: {
@@ -49,12 +49,12 @@ export interface EvidenceRetrievalFns {
   }): Promise<SearchChunk[]>;
   graphNeighborSearch(args: {
     query: string;
-    workspaceId: string;
+    projectId: string;
     options: SearchOptions;
   }): Promise<SearchChunk[]>;
   communitySummarySearch(args: {
     query: string;
-    workspaceId: string;
+    projectId: string;
     options: SearchOptions;
   }): Promise<SearchChunk[]>;
   progressivePageSearch(args: {
@@ -64,7 +64,7 @@ export interface EvidenceRetrievalFns {
   }): Promise<SearchChunk[]>;
   completedPageSearch(args: {
     query: string;
-    workspaceId: string;
+    projectId: string;
     options: SearchOptions;
     shouldSearch: boolean;
   }): Promise<SearchChunk[]>;
@@ -89,7 +89,7 @@ export function createEvidenceRetrievalAdapters(
         context.options.enableGraphExpansion
           ? fns.graphNeighborSearch({
               query: context.effectiveQuery ?? context.query,
-              workspaceId: context.workspaceId,
+              projectId: context.projectId,
               options: context.options,
             })
           : Promise.resolve([]),
@@ -100,7 +100,7 @@ export function createEvidenceRetrievalAdapters(
         context.options.enableCommunityExpansion
           ? fns.communitySummarySearch({
               query: context.query,
-              workspaceId: context.workspaceId,
+              projectId: context.projectId,
               options: context.options,
             })
           : Promise.resolve([]),
@@ -119,7 +119,7 @@ export function createEvidenceRetrievalAdapters(
       retrieve: (context, previousResults) =>
         fns.completedPageSearch({
           query: context.textQuery,
-          workspaceId: context.workspaceId,
+          projectId: context.projectId,
           options: context.options,
           shouldSearch: (previousResults.lexical ?? []).length === 0,
         }),
@@ -133,7 +133,7 @@ export function createEvidenceRetrievalAdapters(
               queryVector,
               query: context.query,
               userId: context.userId,
-              workspaceId: context.workspaceId,
+              projectId: context.projectId,
               options: context.options,
             })
           : [];

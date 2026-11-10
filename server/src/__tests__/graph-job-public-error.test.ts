@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 
-const { graphJobPublicError } = await import("../services/workspace-graph.js");
+const { graphJobPublicError } = await import("../services/project-graph.js");
 
 describe("graphJobPublicError", () => {
   it("never returns the worker's failure text", () => {

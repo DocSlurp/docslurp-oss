@@ -137,3 +137,26 @@ describe("overlap on text-only responses", () => {
     expect(w2.ownStart).toBe(600);
   });
 });
+
+describe("overlap on text-only responses without spaces", () => {
+  const [, w1] = planChunkWindows(900, 300, 30);
+
+  it("trims Japanese by characters instead of keeping the whole overlap", () => {
+    // 300 own seconds + 30 s overlap on each side; 360 characters, one per second.
+    const text = Array.from({ length: 360 }, (_, i) => String.fromCodePoint(0x4e00 + i)).join("");
+    const [segment] = toTimedSegments({ text, segments: [] }, w1);
+    const kept = Array.from(segment.text);
+    expect(kept.length).toBeGreaterThan(285);
+    expect(kept.length).toBeLessThan(315);
+    expect(kept[0]).toBe(String.fromCodePoint(0x4e00 + 30));
+  });
+
+  it("keeps the original spacing and never splits a surrogate pair", () => {
+    const text = Array.from({ length: 360 }, (_, i) => String.fromCodePoint(0x20000 + i)).join("");
+    const [segment] = toTimedSegments({ text, segments: [] }, w1);
+    expect(segment.text).not.toMatch(/\s/);
+    expect(segment.text).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])/);
+    expect(Array.from(segment.text).length).toBeGreaterThan(285);
+  });
+});
+

@@ -28,7 +28,7 @@ beforeAll(async () => {
   }
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id, retain_document_versions) values ('o1', 'Org', 'org', 'u1', 1)`;
-  await sql`insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W')`;
+  await sql`insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W')`;
 }, 60_000);
 
 afterAll(async () => {
@@ -41,7 +41,7 @@ beforeEach(async () => {
   vi.restoreAllMocks();
   await sql`delete from documents`;
   await sql`delete from kg_nodes`;
-  await sql`delete from workspace_runs`;
+  await sql`delete from project_runs`;
   // The delete triggers just enqueued cleanup for the rows above.
   await sql`delete from document_cleanup_queue`;
   await sql`delete from storage_cleanup_queue`;
@@ -49,12 +49,12 @@ beforeEach(async () => {
 
 async function seedEntity(nodeId: string, chunkIds: string[]) {
   await sql`
-    insert into kg_nodes (id, workspace_id, run_id, user_id, canonical_name, normalized_name, entity_type, mention_count, source_document_count)
+    insert into kg_nodes (id, project_id, run_id, user_id, canonical_name, normalized_name, entity_type, mention_count, source_document_count)
     values (${nodeId}, 'w', 'run-1', 'u1', ${nodeId}, ${nodeId}, 'thing', ${chunkIds.length * 2}, ${chunkIds.length})
   `;
   for (const chunkId of chunkIds) {
     await sql`
-      insert into chunk_entities (chunk_id, workspace_id, run_id, user_id, node_id, entity_name, entity_type, mention_count)
+      insert into chunk_entities (chunk_id, project_id, run_id, user_id, node_id, entity_name, entity_type, mention_count)
       values (${chunkId}, 'w', 'run-1', 'u1', ${nodeId}, ${nodeId}, 'thing', 2)
     `;
   }
@@ -62,14 +62,14 @@ async function seedEntity(nodeId: string, chunkIds: string[]) {
 
 async function seedRun(id: string) {
   await sql`
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, total_documents, pipeline)
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pipeline)
     values (${id}, 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'completed', 1, '{}'::jsonb)
   `;
 }
 
 async function seedVersion(args: { id: string; runId: string; createdAt: string; dedupedFrom?: string }) {
   await sql`
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status,
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status,
       canonical_id, created_at, page_count, file_size, deduped_from_document_id)
     values (${args.id}, 'o1', 'u1', 'w', ${args.runId}, 'products.mdx', 'text/markdown', 'u1/src/raw/products.mdx',
       'queued', '/products', ${args.createdAt}, 2, 10, ${args.dedupedFrom ?? null})
@@ -104,7 +104,7 @@ const options = (deleteVectorRows: DeleteVectorRows, graceSeconds = 0) => ({
 });
 
 describe("superseded version purge", () => {
-  it.skipIf(!realUrl)("defers cleanup while graph extraction owns the workspace lock, then purges after release", async () => {
+  it.skipIf(!realUrl)("defers cleanup while graph extraction owns the project lock, then purges after release", async () => {
     await seedRun("run-1");
     await seedRun("run-2");
     await seedVersion({ id: "v1", runId: "run-1", createdAt: "2026-01-01" });
@@ -138,9 +138,9 @@ describe("superseded version purge", () => {
     await seedVersion({ id: "v2", runId: "run-2", createdAt: "2026-01-02" });
 
     // While v2 processes, the corpus counts only v1.
-    expect((await sql`select page_count::int as pages from workspace_corpus_stats where workspace_id = 'w'`)[0]).toEqual({ pages: 2 });
+    expect((await sql`select page_count::int as pages from project_corpus_stats where project_id = 'w'`)[0]).toEqual({ pages: 2 });
     await sql`update documents set status = 'completed' where id = 'v2'`;
-    expect((await sql`select document_count::int as docs, page_count::int as pages from workspace_corpus_stats where workspace_id = 'w'`)[0])
+    expect((await sql`select document_count::int as docs, page_count::int as pages from project_corpus_stats where project_id = 'w'`)[0])
       .toEqual({ docs: 1, pages: 2 });
 
     const vectorDeletes: Parameters<DeleteVectorRows>[0][] = [];
@@ -159,7 +159,7 @@ describe("superseded version purge", () => {
     expect(v1).toEqual({ purged: true, superseded_by_document_id: "v2" });
     expect(await sql`select document_id from document_chunks order by document_id`).toEqual([{ document_id: "v2" }]);
     expect(await sql`select document_id from vector_indexes order by document_id`).toEqual([{ document_id: "v2" }]);
-    expect(await sql`select event_type, document_id from workspace_run_events where event_type = 'document.purged'`)
+    expect(await sql`select event_type, document_id from project_run_events where event_type = 'document.purged'`)
       .toEqual([{ event_type: "document.purged", document_id: "v2" }]);
 
     // Idempotent: nothing left to purge.
@@ -175,7 +175,7 @@ describe("superseded version purge", () => {
     for (const id of ["v1", "v2"]) {
       await sql`insert into document_page_states (document_id, page_number, state) values (${id}, 1, 'indexed'), (${id}, 2, 'unseen')`;
       await sql`insert into document_maps (document_id, run_id, nodes) values (${id}, ${id === "v1" ? "run-1" : "run-2"}, '[]'::jsonb)`;
-      await sql`insert into document_page_vectors (document_id, page_number, model, dims, bits, int8, scale, workspace_id, org_id)
+      await sql`insert into document_page_vectors (document_id, page_number, model, dims, bits, int8, scale, project_id, org_id)
         values (${id}, 1, 'img', 8, decode('00','hex'), decode('00','hex'), 1, 'w', 'o1')`;
     }
     await sql`update documents set status = 'completed' where id = 'v2'`;
@@ -196,7 +196,7 @@ describe("superseded version purge", () => {
     await seedVersion({ id: "v1", runId: "run-1", createdAt: "2026-01-01" });
     await sql`update documents set status = 'completed' where id = 'v1'`;
     await sql`
-      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, deduped_from_document_id)
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, deduped_from_document_id)
       values ('copy', 'o1', 'u1', 'w', 'run-3', 'products.mdx', 'text/markdown', 'k', 'completed', 'v1')
     `;
     await seedVersion({ id: "v2", runId: "run-2", createdAt: "2026-01-02" });
@@ -211,19 +211,19 @@ describe("superseded version purge", () => {
     expect(await sql`select document_id from document_chunks where document_id = 'v1'`).toEqual([]);
   });
 
-  it("deletes a version's vectors when only a copy in another workspace remains, but keeps its artifacts", async () => {
+  it("deletes a version's vectors when only a copy in another project remains, but keeps its artifacts", async () => {
     await seedRun("run-1");
     await seedRun("run-2");
-    await sql`insert into workspaces(id, org_id, user_id, name) values ('w2', 'o1', 'u1', 'W2') on conflict do nothing`;
+    await sql`insert into projects(id, org_id, user_id, name) values ('w2', 'o1', 'u1', 'W2') on conflict do nothing`;
     await sql`
-      insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, total_documents, pipeline)
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pipeline)
       values ('run-w2', 'o1', 'u1', 'w2', 'bulk-upload', 'completed', 'completed', 1, '{}'::jsonb)
     `;
     await seedVersion({ id: "v1", runId: "run-1", createdAt: "2026-01-01" });
     await sql`update documents set status = 'completed' where id = 'v1'`;
     // The copy owns its own rows in w2's database.
     await sql`
-      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, deduped_from_document_id)
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, deduped_from_document_id)
       values ('copy', 'o1', 'u1', 'w2', 'run-w2', 'products.mdx', 'text/markdown', 'k', 'completed', 'v1')
     `;
     await seedVersion({ id: "v2", runId: "run-2", createdAt: "2026-01-02" });
@@ -380,10 +380,10 @@ describe("superseded version purge", () => {
 
   it("cleans storage, LanceDB and graph counts for documents deleted by hand", async () => {
     await seedRun("run-1");
-    await sql`insert into kg_nodes (id, workspace_id, run_id, user_id, canonical_name, normalized_name, entity_type, mention_count)
+    await sql`insert into kg_nodes (id, project_id, run_id, user_id, canonical_name, normalized_name, entity_type, mention_count)
       values ('gone', 'w', 'run-1', 'u1', 'gone', 'gone', 'thing', 2)`;
     await sql`
-      insert into document_cleanup_queue (document_id, org_id, user_id, workspace_id, run_id, source_key,
+      insert into document_cleanup_queue (document_id, org_id, user_id, project_id, run_id, source_key,
         delete_source, keep_shared_artifacts, vector_targets, artifact_uris, kg_node_ids)
       values ('deleted', 'o1', 'u1', 'w', 'run-1', 'u1/src/raw/deleted.pdf', true, false,
         '[{"backend":"lancedb","embeddingModel":"model/x","dimension":4}]'::jsonb,
@@ -403,7 +403,7 @@ describe("superseded version purge", () => {
   it("compacts LanceDB history away when an expired extract's vectors are deleted", async () => {
     const ext = `ext_${"d".repeat(32)}`;
     await sql`
-      insert into document_cleanup_queue (document_id, org_id, user_id, workspace_id, run_id, source_key,
+      insert into document_cleanup_queue (document_id, org_id, user_id, project_id, run_id, source_key,
         delete_source, keep_shared_artifacts, vector_targets, artifact_uris, kg_node_ids)
       values ('extract-doc', 'o1', 'u1', 'w', null, ${`extracts/o1/${ext}/raw/x.pdf`}, true, false,
         '[{"backend":"lancedb","embeddingModel":"model/x","dimension":4}]'::jsonb, '{}', '{}')
@@ -430,7 +430,7 @@ describe("superseded version purge", () => {
 
   it("keeps queue entries for retry when external cleanup fails", async () => {
     await sql`
-      insert into document_cleanup_queue (document_id, org_id, user_id, workspace_id, vector_targets)
+      insert into document_cleanup_queue (document_id, org_id, user_id, project_id, vector_targets)
       values ('stuck', 'o1', 'u1', 'w', '[{"backend":"lancedb","embeddingModel":"m","dimension":4}]'::jsonb)
     `;
     const { storage } = fakeStorage([]);

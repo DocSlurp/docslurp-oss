@@ -96,6 +96,7 @@ function billedFailureUsage(
       inputTokens: billed.inputTokens,
       outputTokens: billed.outputTokens,
       metadata: {
+        ...billed.costMetadata,
         runtime: route.runtime,
         ...metadata,
         outcome: "failure",

@@ -1,7 +1,6 @@
 /**
  * Executors for the neutral native-pdf targets (`native:pdf-markdown`, `native:pdf-text`,
- * `ocr:pdf-ocr-fill`, `ocr:pdf-ocr`) plus the generic per-page native extractor shared with
- * `native:kreuzberg`. The engine behind them is a swappable adapter
+ * `ocr:pdf-ocr-fill`, `ocr:pdf-ocr`) plus the generic per-page native extractor they share. The engine behind them is a swappable adapter
  * (worker/src/native-pdf); nothing here names it.
  */
 
@@ -16,7 +15,7 @@ import { isUnsupported, logNativePdfFallback } from "../../native-pdf/types.js";
 
 import {
   NATIVE_OTHER_SCRIPT_MIN,
-  TESSERACT_WORDLIKE_MIN,
+  PRIMARY_OCR_WORDLIKE_MIN,
   nativeOcrDropout,
   otherScriptShare,
   wordLikeShare,
@@ -37,7 +36,7 @@ export const NATIVE_PDF_TEXT_EXTRACTOR = "native-pdf-text";
 
 /**
  * Native extractors per page. The extractor runs per page when the adapter supports it; when
- * it does not (kreuzberg is document-level, or the native-pdf engine is absent), the canonical
+ * it does not (the native-pdf engine is absent), the canonical
  * document's text for the page is the slice.
  */
 export function nativeExtractor(id: string, extractorId: string): TargetExecutor {
@@ -80,16 +79,17 @@ async function withScopedRaster<T>(request: ExecutionRequest, deps: ExecutorDeps
   return await deps.withRaster(pageNumber, (raster) => deps.withCrop(raster, bbox, fn));
 }
 
-type TesseractResult = { text: string; latencyMs: number; model: string };
+type PrimaryOcrResult = { text: string; latencyMs: number; model: string };
 
 /**
- * Page OCR for the `ocr:pdf-ocr-fill` / `ocr:pdf-ocr` targets. Tesseract on the page raster is primary (see
- * ocr-policy.ts for the evidence). With NATIVE_PDF_OCR=scripts (default) the native-pdf engine runs only when
- * tesseract's output does not look like words in its languages, and serves the page only when its own output is
- * mostly another script and passes the dropout guard. NATIVE_PDF_OCR=prefer runs the engine first (guarded, with
- * tesseract as fallback and cross-check); off never calls it. The engine OCRs the whole page from the source, so
- * image/region assignments always use tesseract on their crop. Without OCR models the engine rejects
- * NATIVE_PDF_UNSUPPORTED and tesseract serves silently; other engine errors fall back with a warning.
+ * Page OCR for the `ocr:pdf-ocr-fill` / `ocr:pdf-ocr` targets. The OCR engine (PP-OCR in its boundary) on the page
+ * raster is primary (see ocr-policy.ts). The native-pdf engine OCRs in the worker process, so `deps.nativePdfOcr` exists
+ * only in DOCSLURP_OCR_MODE=local (deps.ts); elsewhere these targets are PP-OCR reads. With NATIVE_PDF_OCR=scripts
+ * (default) the native-pdf engine runs only when the primary's output does not look like words, and serves the page only
+ * when its own output is mostly another script and passes the dropout guard. NATIVE_PDF_OCR=prefer runs the engine first
+ * (guarded, with the primary as fallback and cross-check); off never calls it. The engine OCRs the whole page from the
+ * source, so image/region assignments always use the primary on their crop. Without OCR models the engine rejects
+ * NATIVE_PDF_UNSUPPORTED and the primary serves silently; other engine errors fall back with a warning.
  */
 function nativePdfOcr(id: string, mode: "fill" | "full"): TargetExecutor {
   return {
@@ -97,20 +97,20 @@ function nativePdfOcr(id: string, mode: "fill" | "full"): TargetExecutor {
     needsRaster: false,
     async run(request, deps, signal): Promise<ExecutorOutput | null> {
       const pageNumber = request.assignment.pageNumber;
-      const tesseract = async (): Promise<TesseractResult | null> =>
+      const primaryOcr = async (): Promise<PrimaryOcrResult | null> =>
         await withScopedRaster(request, deps, (raster) => deps.ocr(raster, { pageNumber, signal }));
-      const fromTesseract = (result: TesseractResult, fallback?: string): ExecutorOutput => ({
+      const fromPrimary = (result: PrimaryOcrResult, fallback?: string): ExecutorOutput => ({
         ...baseOutput(request),
         text: result.text,
         model: result.model,
-        runtime: "tesseract",
+        runtime: "ppocr",
         latencyMs: result.latencyMs,
-        fallback: fallback ?? "ocr:tesseract",
+        fallback: fallback ?? "ocr:ppocr",
       });
       const policy = deps.nativeOcrPolicy ?? "scripts";
       if (!deps.nativePdfOcr || policy === "off" || request.assignment.scope.kind !== "page") {
-        const result = await tesseract();
-        return result ? fromTesseract(result) : null;
+        const result = await primaryOcr();
+        return result ? fromPrimary(result) : null;
       }
 
       const native = async () => {
@@ -119,7 +119,7 @@ function nativePdfOcr(id: string, mode: "fill" | "full"): TargetExecutor {
           return out && out.markdown.trim() !== "" ? out : null;
         } catch (error) {
           if (signal?.aborted) throw error;
-          if (!isUnsupported(error)) logNativePdfFallback(`ocr page=${pageNumber}`, error, "tesseract");
+          if (!isUnsupported(error)) logNativePdfFallback(`ocr page=${pageNumber}`, error, "ppocr");
           return null;
         }
       };
@@ -127,18 +127,18 @@ function nativePdfOcr(id: string, mode: "fill" | "full"): TargetExecutor {
       const fromNative = (out: NativePdfOcrResult): ExecutorOutput => ({
         ...baseOutput(request), text: out.markdown, model: out.engine, runtime: "native", latencyMs: out.latencyMs,
       });
-      const rejected = (reason: string) => console.warn(`[native-pdf] ocr page=${pageNumber} rejected reason=${reason} next=tesseract`);
+      const rejected = (reason: string) => console.warn(`[native-pdf] ocr page=${pageNumber} rejected reason=${reason} next=ppocr`);
 
       if (policy === "scripts") {
-        const primary = await tesseract();
-        if (primary && wordLikeShare(primary.text) >= TESSERACT_WORDLIKE_MIN) return fromTesseract(primary);
+        const primary = await primaryOcr();
+        if (primary && wordLikeShare(primary.text) >= PRIMARY_OCR_WORDLIKE_MIN) return fromPrimary(primary);
         const out = await native();
         if (out && otherScriptShare(out.markdown) >= NATIVE_OTHER_SCRIPT_MIN) {
           const verdict = nativeOcrDropout({ output: out.markdown, layerChars: await layerChars(), pageAreaIn2: out.pageAreaIn2 ?? null, crossCheckChars: null });
           if (verdict.ok) return fromNative(out);
           rejected(verdict.reason);
         }
-        return primary ? fromTesseract(primary) : null;
+        return primary ? fromPrimary(primary) : null;
       }
 
       // prefer: engine first, guarded.
@@ -147,17 +147,17 @@ function nativePdfOcr(id: string, mode: "fill" | "full"): TargetExecutor {
         const expected = await layerChars();
         let verdict = nativeOcrDropout({ output: out.markdown, layerChars: expected, pageAreaIn2: out.pageAreaIn2 ?? null, crossCheckChars: null });
         if (!verdict.ok && verdict.reason === "low-density") {
-          const check = await tesseract();
+          const check = await primaryOcr();
           verdict = nativeOcrDropout({ output: out.markdown, layerChars: expected, pageAreaIn2: out.pageAreaIn2 ?? null, crossCheckChars: check ? check.text.replace(/\s+/g, "").length : 0 });
           if (verdict.ok) return fromNative(out);
           rejected(verdict.reason);
-          return check ? fromTesseract(check, "ocr:tesseract-dropout") : null;
+          return check ? fromPrimary(check, "ocr:ppocr-dropout") : null;
         }
         if (verdict.ok) return fromNative(out);
         rejected(verdict.reason);
       }
-      const result = await tesseract();
-      return result ? fromTesseract(result, out ? "ocr:tesseract-dropout" : undefined) : null;
+      const result = await primaryOcr();
+      return result ? fromPrimary(result, out ? "ocr:ppocr-dropout" : undefined) : null;
     },
   };
 }

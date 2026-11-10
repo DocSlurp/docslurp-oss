@@ -5,8 +5,8 @@
  *     scripts/search-native-bench-seed.ts --docs 2000 --chunks 140 --other-chunks 100000 --queries 200 --out qrels.json
  *
  * Writes into a migrated, empty database (never production):
- * - one large workspace (default 2,000 documents x 140 chunks = 280K chunks, about the
- *   size of the 58K-page eval workspace) with document_chunks, vector_indexes and a LanceDB
+ * - one large project (default 2,000 documents x 140 chunks = 280K chunks, about the
+ *   size of the 58K-page eval project) with document_chunks, vector_indexes and a LanceDB
  *   table written through the worker's own record builder (hydration columns included), then
  *   runLanceDbMaintenance with LANCEDB_FTS_INDEX=1 (vector index, id btree, FTS index);
  * - other tenants' chunks (Postgres only) that share the GIN index, as in production;
@@ -81,8 +81,8 @@ await sql.unsafe("set session_replication_role = replica");
 await sql`insert into "user" (id, name, email) values ('bench-user', 'Bench', 'bench@example.test') on conflict do nothing`;
 await sql`insert into organizations (id, name, slug, created_by_user_id) values ('benchorg', 'Bench', 'bench', 'bench-user') on conflict do nothing`;
 await sql`insert into org_memberships (org_id, user_id, role) values ('benchorg', 'bench-user', 'owner') on conflict do nothing`;
-await sql`insert into workspaces (id, org_id, user_id, name, pipeline) values ('bench-ws', 'benchorg', 'bench-user', 'Bench', ${sql.json(PIPELINE)}) on conflict do nothing`;
-await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline) values ('bench-run', 'benchorg', 'bench-user', 'bench-ws', 'bulk-upload', 'completed', 'completed', '{}') on conflict do nothing`;
+await sql`insert into projects (id, org_id, user_id, name, pipeline) values ('bench-ws', 'benchorg', 'bench-user', 'Bench', ${sql.json(PIPELINE)}) on conflict do nothing`;
+await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values ('bench-run', 'benchorg', 'bench-user', 'bench-ws', 'bulk-upload', 'completed', 'completed', '{}') on conflict do nothing`;
 
 type Target = { id: string; documentId: string; chunkIndex: number };
 const targets = new Map<string, { kind: "keyword" | "conversational"; planted: string[] }>();
@@ -106,7 +106,7 @@ function plan(planted: { kind: "keyword" | "conversational"; planted: string[] }
   return planted.kind === "keyword" ? [...planted.planted, ...planted.planted] : planted.planted;
 }
 const vectorsByChunk = new Map<string, number[]>();
-log(`workspace bench-ws: ${DOCS} documents x ${CHUNKS} chunks, ${DIM}-d (${route.model})`);
+log(`project bench-ws: ${DOCS} documents x ${CHUNKS} chunks, ${DIM}-d (${route.model})`);
 const { root } = resolveLanceDbConfig();
 const location = VectorNamespaceManager.getEmbeddingLocation(root, "benchorg", "bench-ws", route.model, DIM);
 const BATCH_DOCS = 20;
@@ -118,7 +118,7 @@ for (let start = 1; start <= DOCS; start += BATCH_DOCS) {
   const lanceRecords = [];
   for (let d = start; d < Math.min(DOCS + 1, start + BATCH_DOCS); d += 1) {
     const documentId = `bdoc${d}`;
-    docRows.push({ id: documentId, org_id: "benchorg", user_id: "bench-user", workspace_id: "bench-ws", run_id: "bench-run",
+    docRows.push({ id: documentId, org_id: "benchorg", user_id: "bench-user", project_id: "bench-ws", run_id: "bench-run",
       filename: `manual-${d}.pdf`, mime_type: "application/pdf", source_key: `k${d}`, status: "completed", page_count: Math.ceil(CHUNKS / 5),
       chunk_count: CHUNKS, stored_page_count: Math.ceil(CHUNKS / 5) });
     indexRows.push({ id: `bvi${d}`, document_id: documentId, backend: "lancedb", bucket: "b", path: "p", embedding_model: route.model, dimension: DIM });
@@ -161,7 +161,7 @@ for (let start = 1; start <= DOCS; start += BATCH_DOCS) {
 
 log(`other tenants: ${OTHER_CHUNKS} chunks (Postgres only)`);
 for (let t = 0; t < 10; t += 1) {
-  await sql`insert into workspaces (id, org_id, user_id, name) values (${`other-ws-${t}`}, 'benchorg', 'bench-user', 'Other') on conflict do nothing`;
+  await sql`insert into projects (id, org_id, user_id, name) values (${`other-ws-${t}`}, 'benchorg', 'bench-user', 'Other') on conflict do nothing`;
 }
 const perDoc = 100;
 for (let i = 0; i < OTHER_CHUNKS; i += 2000) {
@@ -169,7 +169,7 @@ for (let i = 0; i < OTHER_CHUNKS; i += 2000) {
   const rows: Record<string, unknown>[] = [];
   for (let j = i; j < Math.min(OTHER_CHUNKS, i + 2000); j += 1) {
     const documentId = `odoc${Math.floor(j / perDoc)}`;
-    if (j % perDoc === 0) docs.push({ id: documentId, org_id: "benchorg", user_id: "bench-user", workspace_id: `other-ws-${Math.floor(j / perDoc) % 10}`,
+    if (j % perDoc === 0) docs.push({ id: documentId, org_id: "benchorg", user_id: "bench-user", project_id: `other-ws-${Math.floor(j / perDoc) % 10}`,
       run_id: "bench-run", filename: `${documentId}.pdf`, mime_type: "application/pdf", source_key: documentId, status: "completed", chunk_count: perDoc });
     rows.push({ id: `${documentId}-${j % perDoc}`, document_id: documentId, run_id: "bench-run", user_id: "bench-user", chunk_index: j % perDoc,
       text: chunkText(), heading_path: [], page_number: 1, token_estimate: 300, metadata: {} });
@@ -200,6 +200,6 @@ for (const target of plannedTargets) {
 const sizes = await sql<{ name: string; mb: number }[]>`
   select relname as name, round(pg_total_relation_size(oid) / 1048576.0)::int as mb from pg_class
   where relname in ('document_chunks', 'documents', 'document_chunks_ts_content_idx', 'document_chunks_ts_content_idx1') order by 2 desc`;
-writeFileSync(OUT, JSON.stringify({ workspaceId: "bench-ws", userId: "bench-user", pipeline: PIPELINE, dimension: DIM, sizes, queries }));
+writeFileSync(OUT, JSON.stringify({ projectId: "bench-ws", userId: "bench-user", pipeline: PIPELINE, dimension: DIM, sizes, queries }));
 log(`wrote ${queries.length} queries to ${OUT}; sizes ${JSON.stringify(sizes)}`);
 await sql.end();

@@ -42,6 +42,26 @@ describe("resolveWorkflowScalingInput", () => {
       .toBeUndefined();
   });
 
+  it("records scan threshold only for upgraded workers", () => {
+    const env = { WORKER_SHARD_QUARANTINE: "true", WORKER_MIN_PAGES_PER_SHARD: "32" };
+    const old = resolveWorkflowScalingInput(env, undefined, undefined, new Set(["workflow.quarantine-shards"]));
+    expect(old.documentSharding?.quarantineMinPagesPerShard).toBeUndefined();
+    const upgraded = resolveWorkflowScalingInput(env, undefined, undefined, new Set(["workflow.quarantine-shards", "workflow.quarantine-document-threshold"]));
+    expect(upgraded.documentSharding).toMatchObject({ quarantine: true, quarantineMinPagesPerShard: 1, minPagesPerShard: 32 });
+  });
+
+  it("records quarantine sharding only with explicit opt-in and a capable fleet", () => {
+    const env = { WORKER_SHARD_QUARANTINE: "true" };
+    const capable = new Set(["workflow.quarantine-shards" as const]);
+    expect(resolveWorkflowScalingInput(env, undefined, undefined, capable).documentSharding?.quarantine).toBe(true);
+    for (const capabilities of [undefined, null, new Set<never>()]) {
+      expect(resolveWorkflowScalingInput(env, undefined, undefined, capabilities).documentSharding?.quarantine).toBeUndefined();
+    }
+    expect(resolveWorkflowScalingInput({}, undefined, undefined, capable).documentSharding?.quarantine).toBeUndefined();
+    expect(resolveWorkflowScalingInput(env, undefined, { workerSlots: 1 }, capable).documentSharding).toBeUndefined();
+    expect(resolveWorkflowScalingInput({ ...env, WORKER_DOCUMENT_SHARDING: "false" }, undefined, undefined, capable).documentSharding).toBeUndefined();
+  });
+
   it("shards documents up to the org's worker slots", () => {
     expect(resolveWorkflowScalingInput({}, { loadtest: false }, { workerSlots: 64 }).documentSharding)
       .toEqual({ minDocsPerShard: 2, maxShards: 32, minPagesPerShard: 16 });

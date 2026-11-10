@@ -28,18 +28,19 @@
       "effort": "minimal"
     },
     "provider": {
-      "order": [
-        "wafer/nvfp4",
-        "friendli",
-        "inference-net/fp4"
-      ],
-      "allow_fallbacks": false,
+      "allow_fallbacks": true,
       "max_price": {
         "prompt": 0.15,
         "completion": 0.5,
         "image": 0.0012002999999999998,
         "request": 0
-      }
+      },
+      "only": [
+        "wafer/nvfp4",
+        "friendli",
+        "inference-net/fp4"
+      ],
+      "sort": "price"
     },
     "stream": true,
     "stream_options": {

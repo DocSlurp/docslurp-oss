@@ -61,7 +61,7 @@ describe("usage_events ownership", () => {
     expect(offenders(/\b(?:into|update)\s+usage_events\b/i, WRITE_OWNERS)).toEqual([]);
   });
 
-  it("leaves workspace_runs.spent_cents to the usage_events trigger (migration 0056)", () => {
+  it("leaves project_runs.spent_cents to the usage_events trigger (migration 0056)", () => {
     // The run cost cap reads it; any other writer would drift from the ledger.
     expect(offenders(/\bspent_cents\s*=(?!=)/i, new Set())).toEqual([]);
   });

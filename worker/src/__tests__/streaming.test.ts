@@ -12,9 +12,9 @@ import { documentExtractorRegistry } from "../extractors/registry.js";
 import { ExtractHtmlStage } from "../stages/extract-html.js";
 import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 
-function createRun(): WorkspaceRun {
+function createRun(): ProjectRun {
   return {
     id: "run-1",
     orgId: "org-1",

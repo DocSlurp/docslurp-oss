@@ -3,7 +3,7 @@
 // Only the 5.5 generation is supported. Any older Claude model id — native
 // (`claude-sonnet-4-5-20250929`) or OpenRouter (`anthropic/claude-sonnet-4.5`)
 // — is deprecated and resolves to its family's 5.5 replacement at call time,
-// so stored settings, saved workspaces and API callers keep working. Fable and
+// so stored settings, saved projects and API callers keep working. Fable and
 // Mythos map to Opus 5.5 (their $50/MTok output price is also outside the
 // internal cost policy). Prices verified 2026-10-25 against
 // platform.claude.com pricing and the OpenRouter models API.

@@ -21,7 +21,7 @@ export interface LandlockConfig {
    */
   binary: string;
   scratchRoot: string;
-  /** Extra private DocSlurp workspaces the runner merges into every command's writable paths. */
+  /** Extra private DocSlurp projects the runner merges into every command's writable paths. */
   writablePaths: string[];
 }
 
@@ -48,7 +48,7 @@ const configSchema: SandboxConfigSchema = {
     },
     writablePaths: {
       type: "string",
-      description: "Comma-separated private DocSlurp temporary workspaces every parser command may write.",
+      description: "Comma-separated private DocSlurp temporary projects every parser command may write.",
       default: "",
       env: "DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS",
     },

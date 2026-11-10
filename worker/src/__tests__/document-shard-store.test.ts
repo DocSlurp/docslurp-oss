@@ -3,7 +3,7 @@ import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import type postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { parseOrgDemand, queryWorkerScalerSnapshot } from "@docslurp/shared";
+import { calculateWorkerTargetMachines, parseOrgDemand, queryWorkerScalerSnapshot } from "@docslurp/shared";
 import { Store } from "../db/store.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
@@ -28,8 +28,8 @@ beforeAll(async () => {
   sql = (store as unknown as { sql: postgres.Sql<Record<string, unknown>> }).sql;
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('big', 'Big', 'big', 'u1', 64, 1000), ('small', 'Small', 'small', 'u1', 2, 1000)`;
-  await sql`insert into workspaces(id, org_id, user_id, name) values ('wb', 'big', 'u1', 'B'), ('ws', 'small', 'u1', 'S')`;
-  await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts) values
+  await sql`insert into projects(id, org_id, user_id, name) values ('wb', 'big', 'u1', 'B'), ('ws', 'small', 'u1', 'S')`;
+  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts) values
     ('run-big', 'big', 'u1', 'wb', 'bulk-upload', 'processing', 'document-summary', '{}', '{"doc-0:markdown":"s3://m0"}'),
     ('run-small', 'small', 'u1', 'ws', 'bulk-upload', 'processing', 'document-summary', '{}', '{}')`;
   // Spend from before the shards, counted by the usage_events trigger (0056).
@@ -74,7 +74,7 @@ describe("document shard checkpoints", () => {
     expect(a.run.spentCents).toBe(18);
 
     const [row] = await sql<{ artifacts: Record<string, string>; spent_cents: string; status: string; stage: string; shard_demand: number }[]>`
-      select artifacts, spent_cents, status, stage, shard_demand from workspace_runs where id = 'run-big'`;
+      select artifacts, spent_cents, status, stage, shard_demand from project_runs where id = 'run-big'`;
     expect(row!.artifacts).toEqual({
       "doc-0:markdown": "s3://m0",
       "doc-1:embeddings": "s3://e1",
@@ -88,7 +88,7 @@ describe("document shard checkpoints", () => {
   });
 
   it("count a shard's cost once when its documents checkpoint concurrently", async () => {
-    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts)
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts)
       values ('run-cost', 'small', 'u1', 'ws', 'bulk-upload', 'completed', 'index', '{}', '{}')`;
     const state = await shardState("run-cost", ["doc-9"]);
     state.usageLedger.enqueue({ provider: "docslurp", model: "price-card", metric: "ingest-page-rich", amount: 20, unit: "page", costCents: 5,
@@ -96,7 +96,7 @@ describe("document shard checkpoints", () => {
     // Each delta is taken against the last committed checkpoint, so overlapping
     // checkpoints of one state must not both add it.
     await Promise.all([store.updateProgress(state), store.updateProgress(state), store.finishShard(state)]);
-    const [row] = await sql<{ spent_cents: string }[]>`select spent_cents from workspace_runs where id = 'run-cost'`;
+    const [row] = await sql<{ spent_cents: string }[]>`select spent_cents from project_runs where id = 'run-cost'`;
     expect(Number(row!.spent_cents)).toBe(5);
     expect(state.run.spentCents).toBe(5);
     const [usage] = await sql<{ cents: string }[]>`select coalesce(sum(cost_cents), 0) as cents from usage_events where run_id = 'run-cost'`;
@@ -113,7 +113,7 @@ describe("document shard checkpoints", () => {
     // The stage's own pass starts once its shards are done.
     const state = WorkflowState.create(await store.loadRun("run-big"), []);
     await store.startRunStage(state, "embed");
-    const [row] = await sql<{ shard_demand: number }[]>`select shard_demand from workspace_runs where id = 'run-big'`;
+    const [row] = await sql<{ shard_demand: number }[]>`select shard_demand from project_runs where id = 'run-big'`;
     expect(row!.shard_demand).toBe(0);
   });
 });
@@ -121,9 +121,9 @@ describe("document shard checkpoints", () => {
 describe("scaler demand for runs between activities", () => {
   it("count a processing run whose lease lapsed within the grace window, not one long dead", async () => {
     await sql`insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('lease', 'Lease', 'lease', 'u1', 8, 1000)`;
-    await sql`insert into workspaces(id, org_id, user_id, name) values ('wl', 'lease', 'u1', 'L')`;
+    await sql`insert into projects(id, org_id, user_id, name) values ('wl', 'lease', 'u1', 'L')`;
     // A run waiting in the task queue for its next activity has no worker renewing its lease.
-    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, artifacts, lease_expires_at) values
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts, lease_expires_at) values
       ('run-waiting', 'lease', 'u1', 'wl', 'bulk-upload', 'processing', 'format-detect', '{}', '{}', now() - interval '2 minutes'),
       ('run-dead', 'lease', 'u1', 'wl', 'bulk-upload', 'processing', 'format-detect', '{}', '{}', now() - interval '20 minutes')`;
     const params = { pageFanout: 128, defaultOrgSlots: 2, loadtestMaxMachines: 125 };
@@ -134,5 +134,60 @@ describe("scaler demand for runs between activities", () => {
     expect(await demand()).toBe(1);
     expect(await demand(0)).toBe(0);
     expect(await demand(30 * 60)).toBe(2);
+  });
+});
+
+describe("autoscaler demand follows runnable page work", () => {
+  it("bootstraps a vision-enabled run without counting future pages, then scales from its queued tasks", async () => {
+    await sql`insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents)
+      values ('runnable', 'Runnable', 'runnable', 'u1', 250, 1000)`;
+    await sql`insert into projects(id, org_id, user_id, name) values ('runnable-project', 'runnable', 'u1', 'Runnable')`;
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, pages_total, lease_expires_at)
+      values ('runnable-run', 'runnable', 'u1', 'runnable-project', 'bulk-upload', 'queued', 'quarantine',
+        '{"visionFallback":true,"maxCostCents":0}', 500, now() + interval '1 minute')`;
+    const params = { pageFanout: 128, defaultOrgSlots: 2, loadtestMaxMachines: 125 };
+    const read = async () => {
+      const snapshot = await queryWorkerScalerSnapshot(sql, params);
+      return parseOrgDemand(snapshot.org_demand).filter((org) => org.orgKey === "runnable");
+    };
+    const target = async (globalSlotCap = 1000, maxMachines = 125) => calculateWorkerTargetMachines({ orgs: await read(), workerActive: 1 }, {
+      slotsPerMachine: 2, globalSlotCap, headroom: 1, maxMachines, excludedOrgKeys: new Set(),
+    });
+    const demand = async () => (await read())[0]?.demand ?? 0;
+    // One slot starts the producer even before any page task exists.
+    expect(await demand()).toBe(1);
+    expect(await target()).toBe(1);
+    await sql`update project_runs set status='processing', stage='format-detect' where id='runnable-run'`;
+    expect(await demand()).toBe(1);
+    await sql`update project_runs set stage='vision-extract' where id='runnable-run'`;
+    expect(await demand()).toBe(1);
+    await sql`insert into documents(id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status)
+      values ('runnable-doc', 'runnable', 'u1', 'runnable-project', 'runnable-run', 'document.pdf', 'application/pdf', 'raw/document', 'processing')`;
+    await sql`insert into page_work_tasks(run_id, document_id, page_number)
+      select 'runnable-run', 'runnable-doc', generate_series(1, 130)`;
+    expect(await demand()).toBe(128); // workflow fan-out bounds real task backlog
+    expect(await target()).toBe(64);
+    expect(await target(10)).toBe(5); // global slot cap
+    expect(await target(1000, 3)).toBe(3); // fleet machine cap
+    await sql`update page_work_tasks set status='processing' where run_id='runnable-run' and page_number <= 4`;
+    await sql`update page_work_tasks set status='completed' where run_id='runnable-run' and page_number > 4`;
+    expect(await demand()).toBe(4); // processing work counts, completed work does not
+    // Organization caps still apply independently of the task backlog.
+    await sql`update organizations set worker_slots=2 where id='runnable'`;
+    expect(await demand()).toBe(2);
+    for (const control of ['paused', 'cancel_requested', 'cancelled']) {
+      await sql`update project_runs set control_state=${control} where id='runnable-run'`;
+      expect(await demand()).toBe(0);
+    }
+    await sql`update project_runs set control_state=null where id='runnable-run'`;
+    await sql`update page_work_tasks set status='completed' where run_id='runnable-run'`;
+    expect(await demand()).toBe(1); // keep the stage tail runnable
+    await sql`update project_runs set shard_demand=8 where id='runnable-run'`;
+    await sql`update organizations set worker_slots=250 where id='runnable'`;
+    expect(await demand()).toBe(8); // document-shard demand is unchanged
+    for (const status of ['completed', 'failed', 'cancelled']) {
+      await sql`update project_runs set status=${status} where id='runnable-run'`;
+      expect(await demand()).toBe(0);
+    }
   });
 });

@@ -1,3 +1,4 @@
+import { pageCredits, speedBoostMultiplier } from "@docslurp/shared";
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { defaultPipelineFeatures } from "@docslurp/shared";
@@ -15,7 +16,7 @@ import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
 /**
  * The run cost cap (pipeline.maxCostCents) is checked against one figure:
- * workspace_runs.spent_cents (every billed usage event of the run, kept by a
+ * project_runs.spent_cents (every billed usage event of the run, kept by a
  * usage_events trigger) plus the ledger's still-buffered billable events.
  * It must equal the ledger total users see as billed spend, across shards,
  * retried stages, duplicate event inserts and every event kind.
@@ -33,11 +34,11 @@ beforeAll(async () => {
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 100000);
-    insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-    insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, total_documents, pages_total)
+    insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
       values ('r1', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'vision-extract', '${pipeline(null)}', 4, 8),
              ('r2', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'embed', '${pipeline(5)}', 4, 8);
-    insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, page_count) values
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count) values
       ${DOCS.map((id) => `('${id}', 'o1', 'u1', 'w', 'r1', '${id}.pdf', 'application/pdf', 'raw/${id}', 'processing', 2)`).join(", ")},
       ${DOCS.map((id) => `('r2-${id}', 'o1', 'u1', 'w', 'r2', '${id}.pdf', 'application/pdf', 'raw/${id}', 'processing', 2)`).join(", ")};
   `);
@@ -63,7 +64,7 @@ async function scalar(query: string): Promise<number> {
   const { rows } = await db.query<{ v: string }>(query);
   return Number(rows[0]?.v ?? 0);
 }
-const spentCents = (runId: string) => scalar(`select spent_cents::text as v from workspace_runs where id = '${runId}'`);
+const spentCents = (runId: string) => scalar(`select spent_cents::text as v from project_runs where id = '${runId}'`);
 const billedLedgerCents = (runId: string) =>
   scalar(`select coalesce(sum(cost_cents), 0)::text as v from usage_attribution where run_id = '${runId}'`);
 
@@ -196,27 +197,29 @@ describe("run cost cap figure", () => {
 
   it("counts boosted credits before and after persistence, without changing provider costs or double-charging retries", async () => {
     const boostPipeline = JSON.stringify({ ...defaultPipelineFeatures, speedBoost: true, maxCostCents: 1 });
-    await db.query(`insert into workspace_runs (id,org_id,user_id,workspace_id,kind,status,stage,pipeline)
+    await db.query(`insert into project_runs (id,org_id,user_id,project_id,kind,status,stage,pipeline)
       values ('r-boost','o1','u1','w','bulk-upload','processing','embed',$1::jsonb)`, [boostPipeline]);
     const state = WorkflowState.create(await store.loadRun("r-boost"), []);
     state.run.pipeline.speedBoost = false; // persisted opt-in was captured before mutable stage state changes
     state.usageLedger.record({ provider: "openrouter", model: "z-ai/glm-5.3-flash:nitro", metric: "page-analysis",
       inputTokens: 100, outputTokens: 50, costCents: 0.37, metadata: { documentId: "boost-doc", pageNumber: 1 } });
     const charge = state.usageLedger.snapshot().find(event => event.metric === "ingest-page-rich")!;
-    expect(runSpentCents(state)).toBe(1);
-    expect(isCostCapExceeded(state)).toBe(true);
+    const boosted = charge.costCents;
+    expect(boosted).toBeCloseTo(pageCredits("rich", 1) * speedBoostMultiplier(true), 9);
+    expect(runSpentCents(state)).toBe(boosted);
+    expect(isCostCapExceeded(state)).toBe(boosted >= 1);
     await store.updateProgress(state);
-    expect(await spentCents("r-boost")).toBe(1);
-    expect(await billedLedgerCents("r-boost")).toBe(1);
+    expect(await spentCents("r-boost")).toBeCloseTo(boosted, 9);
+    expect(await billedLedgerCents("r-boost")).toBeCloseTo(boosted, 9);
     expect(await scalar(`select (metadata->>'providerCostCents')::text as v from usage_attribution where run_id='r-boost' and metric='page-analysis'`)).toBe(0.37);
     state.usageLedger.enqueue(charge);
     await store.updateProgress(state);
-    expect(await spentCents("r-boost")).toBe(1);
-    expect(await scalar(`select count(*)::text as v from usage_attribution where run_id='r-boost' and metric='ingest-page-rich' and org_id='o1' and workspace_id='w'`)).toBe(1);
+    expect(await spentCents("r-boost")).toBeCloseTo(boosted, 9);
+    expect(await scalar(`select count(*)::text as v from usage_attribution where run_id='r-boost' and metric='ingest-page-rich' and org_id='o1' and project_id='w'`)).toBe(1);
   });
 
   it("ignores the deprecated run-row counters", async () => {
-    await db.exec(`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline, input_cost_cents, output_cost_cents)
+    await db.exec(`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, input_cost_cents, output_cost_cents)
       values ('r-old', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'embed', '${pipeline(10)}', 40, 40)`);
     const state = WorkflowState.create(await store.loadRun("r-old"), []);
     expect(state.run.spentCents).toBe(0);
@@ -241,7 +244,7 @@ describe("migration 0056 backfill", () => {
           ('e3', 'u1', 'a', 'local-compute', 'w', 'worker-stage', 1, 'cent', 0, 'w', 'o1');
       `);
       await applyRemainingMigrations(old, "run_spent_cents");
-      const spent = async (id: string) => Number((await old.query<{ v: string }>(`select spent_cents::text as v from workspace_runs where id = '${id}'`)).rows[0]!.v);
+      const spent = async (id: string) => Number((await old.query<{ v: string }>(`select spent_cents::text as v from project_runs where id = '${id}'`)).rows[0]!.v);
       expect(await spent("a")).toBe(1);
       expect(await spent("b")).toBe(0);
       await old.exec(`

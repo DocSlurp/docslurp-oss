@@ -50,8 +50,8 @@ beforeAll(async () => {
   ({ resumeSpendPausedRunOutcome: recover } = await import("../services/spend-paused-runs.js"));
   await sql`insert into "user"(id, name, email) values ('deadline-user', 'Deadline', 'deadline@example.test')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('deadline-org', 'Deadline', 'deadline-org', 'deadline-user', 10)`;
-  await sql`insert into workspaces(id, org_id, user_id, name) values ('deadline-ws', 'deadline-org', 'deadline-user', 'Deadline')`;
-  await sql`insert into workspace_runs(id, org_id, workspace_id, user_id, kind, status, stage, pipeline, control_state, pause_reason)
+  await sql`insert into projects(id, org_id, user_id, name) values ('deadline-ws', 'deadline-org', 'deadline-user', 'Deadline')`;
+  await sql`insert into project_runs(id, org_id, project_id, user_id, kind, status, stage, pipeline, control_state, pause_reason)
     values ('deadline-run', 'deadline-org', 'deadline-ws', 'deadline-user', 'bulk-upload', 'processing', 'vision-extract', '{}', 'paused', 'credit_exhausted')`;
 }, 60000);
 
@@ -72,12 +72,12 @@ it("cancels a stalled resume RPC, releases SQL/credit locks and retries without 
   expect(Date.now() - started).toBeLessThan(3000);
   await vi.waitFor(() => expect(cancelled).toBe(1));
   // max:1 means these SELECTs also prove the transaction released its connection.
-  expect((await sql`select control_state, pause_reason from workspace_runs where id = 'deadline-run'`)[0])
+  expect((await sql`select control_state, pause_reason from project_runs where id = 'deadline-run'`)[0])
     .toMatchObject({ control_state: "paused", pause_reason: "credit_exhausted" });
   expect(Number((await sql`select org_outstanding_credit_leases('deadline-org') as credits`)[0]!.credits)).toBe(0);
-  expect(await sql`select id from workspace_run_events where run_id = 'deadline-run'`).toHaveLength(0);
+  expect(await sql`select id from project_run_events where run_id = 'deadline-run'`).toHaveLength(0);
   expect(await recover("deadline-run", { sql: sql as never, signals: signalDeps })).toEqual({ status: "resumed" });
   expect(await recover("deadline-run", { sql: sql as never, signals: signalDeps })).toEqual({ status: "not-spend-paused" });
   expect(signals).toBe(2);
-  expect(await sql`select id from workspace_run_events where run_id = 'deadline-run'`).toHaveLength(1);
+  expect(await sql`select id from project_run_events where run_id = 'deadline-run'`).toHaveLength(1);
 }, 10000);

@@ -19,7 +19,6 @@ import {
   planRecursiveSearchMode,
   prepareSearchSessionRetrievalPlan,
 } from "./session-planner.js";
-import { expandGraphTextQuery } from "./graph-expansion.js";
 import type {
   SearchAvailability,
   SearchChunk,
@@ -40,18 +39,18 @@ export interface SearchSessionRunnerAdapters {
   ): SearchAvailability;
   completedPageSearch(args: {
     query: string;
-    workspaceId: string;
+    projectId: string;
     options: SearchOptions;
     shouldSearch: boolean;
   }): Promise<SearchChunk[]>;
   communitySummarySearch(args: {
     query: string;
-    workspaceId: string;
+    projectId: string;
     options: SearchOptions;
   }): Promise<SearchChunk[]>;
   graphNeighborSearch(args: {
     query: string;
-    workspaceId: string;
+    projectId: string;
     options: SearchOptions;
   }): Promise<SearchChunk[]>;
   progressivePageSearch(args: {
@@ -74,7 +73,7 @@ export interface SearchSessionRunnerAdapters {
     /** The query text, so a previous index can embed it with its own model. */
     query?: string;
     userId: string;
-    workspaceId: string;
+    projectId: string;
     options: SearchOptions;
   }): Promise<SearchChunk[]>;
   wholeCorpusFallback(filters?: SearchOptions["filters"]): Promise<SearchResult[]>;
@@ -94,7 +93,7 @@ export interface SearchSessionRunnerAdapters {
 
 function embeddingPipelineOf(setup: SearchSetup): string | null {
   try {
-    const embedding = setup.workspacePipeline.embedding;
+    const embedding = setup.projectPipeline.embedding;
     const route = resolveEmbeddingRoute(embedding);
     return embeddingPipelineId({
       provider: route.provider,
@@ -140,7 +139,7 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
       input: args.query,
       metadata: {
         userId: args.userId,
-        workspaceId: args.setup.normalizedScope.workspaceId,
+        projectId: args.setup.normalizedScope.projectId,
         sessionId: args.setup.session.sessionId,
         ...(currentChatSessionId() ? { chatSessionId: currentChatSessionId() } : {}),
       },
@@ -153,7 +152,7 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
     },
     async () => {
       const { adapters, query, setup, userId } = args;
-      const { session, normalizedScope, workspaceSettings, openRouterApiKey, privacyMode } =
+      const { session, normalizedScope, projectSettings, openRouterApiKey, privacyMode } =
         setup;
       const syntax = args.options.selfQuery ? parseSelfQuerySyntax(query) : { query, tags: [] };
       const retrievalQuery = syntax.query;
@@ -166,7 +165,7 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
         ...options,
         filters: {
           ...options.filters,
-          workspaceId: normalizedScope.workspaceId,
+          projectId: normalizedScope.projectId,
         },
       };
 
@@ -191,14 +190,14 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
           userId,
           session,
           options,
-          workspaceId: normalizedScope.workspaceId,
+          projectId: normalizedScope.projectId,
           availability,
           chunks: recursivePlan.chunks,
           effectiveQuery: recursivePlan.effectiveQuery,
           filters: effectiveOptions.filters,
           selfQueryReasons,
           variant: options.variant,
-          workspaceSettings,
+          projectSettings,
           retrievalChain: recursivePlan.retrievalChain,
           wholeCorpusFallback: adapters.wholeCorpusFallback,
           relevanceFloor: {
@@ -213,10 +212,10 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
         userId,
         options,
         effectiveOptions,
-        workspaceId: normalizedScope.workspaceId,
+        projectId: normalizedScope.projectId,
         orgId: normalizedScope.orgId,
-        workspaceSettings,
-        embedding: setup.workspacePipeline.embedding,
+        projectSettings,
+        embedding: setup.projectPipeline.embedding,
         openRouterApiKey,
         privacyMode,
         session,
@@ -225,14 +224,9 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
       selfQueryReasons = [...selfQueryReasons, ...retrievalPlan.selfQueryReasons];
       const effectiveQuery = retrievalPlan.effectiveQuery;
       const queryVector = retrievalPlan.queryVector;
-      const textQuery = await timePhase("graphQuery", () => expandGraphTextQuery({
-        enabled: effectiveOptions.enableGraphExpansion,
-        query: retrievalQuery,
-        textQuery: retrievalPlan.textQuery,
-        filters: effectiveOptions.filters,
-        runId: effectiveOptions.runId,
-        workspaceId: normalizedScope.workspaceId,
-      }));
+      // Graph expansion adds its own candidate list (the "graph" adapter). It used to also append up to four
+      // entity names to every keyword query, which AND-ed them in and emptied the strict match.
+      const textQuery = retrievalPlan.textQuery;
 
       let deferred: { stats: DeferredSearchStats; documentIds: string[] } | null = null;
       let scopeSignal: ScopeSignal | null = null;
@@ -243,7 +237,7 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
         userId,
         session,
         options: effectiveOptions,
-        workspaceId: normalizedScope.workspaceId,
+        projectId: normalizedScope.projectId,
         limit: options.limit ?? 20,
         retrieveCandidateLists: async () => {
           // Runs alongside normal retrieval, not before it: the hot path adds no
@@ -272,7 +266,7 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
               textQuery,
               queryVector,
               userId,
-              workspaceId: normalizedScope.workspaceId,
+              projectId: normalizedScope.projectId,
               options: { ...effectiveOptions, limit: acquisitionDepth(effectiveOptions, options.limit ?? 20) },
             },
             { parallel: adapters.parallelRetrieval },
@@ -304,7 +298,7 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
         filters: effectiveOptions.filters,
         selfQueryReasons,
         variant: options.variant,
-        workspaceSettings,
+        projectSettings,
         wholeCorpusFallback: adapters.wholeCorpusFallback,
         openRouterApiKey,
         rerankApiKey: setup.rerankApiKey,

@@ -13,21 +13,31 @@ beforeAll(async () => {
   stop = database.stop;
   sql = postgres(database.url, { max: external ? 5 : 1, prepare: false, onnotice: () => {} });
   vi.doMock("../db.js", () => ({ sql }));
-  vi.doMock("../lib/request-actor.js", () => ({ getRequestActor: (c: {get:(key:string)=>unknown})=>c.get("requestActor"), resolveActorWorkspaceId:async()=>"w", loadActorScopedWorkspace: async (_id: string, actor: { userId: string }) => runtime.allowed && actor.userId === "u" ? {id:"w",orgId:"o"} : null }));
+  vi.doMock("../lib/request-actor.js", () => ({ getRequestActor: (c: {get:(key:string)=>unknown})=>c.get("requestActor"), resolveActorProjectId:async()=>"w", loadActorScopedProject: async (_id: string, actor: { userId: string }) => runtime.allowed && actor.userId === "u" ? {id:"w",orgId:"o"} : null }));
   vi.doMock("../config.js", () => ({env:{publicChatAgentEnabled:true}}));
-  vi.doMock("../services/workspace-chat.js", () => ({ chatWorkspace:runtime.chat,workspaceChatDisabledBody:async()=>null }));
+  vi.doMock("../services/project-chat.js", () => ({ chatProject:runtime.chat,projectChatDisabledBody:async()=>null }));
   ops = await import("../services/chat-operations.js");
   await sql`insert into "user" (id,name,email) values ('u','Owner','owner@example.test'),('v','Other','other@example.test')`;
   await sql`insert into organizations (id,name,slug,created_by_user_id) values ('o','Org','durable','u')`;
-  await sql`insert into workspaces (id,org_id,user_id,name) values ('w','o','u','Workspace')`;
+  await sql`insert into org_memberships(org_id,user_id,role) values('o','u','owner')`;
+  await sql`insert into projects (id,org_id,user_id,name) values ('w','o','u','Project')`;
 }, 120_000);
 beforeEach(async () => { runtime.allowed=true; runtime.chat.mockReset(); await sql`delete from chat_operations`; });
 afterAll(async () => { await sql?.end(); await stop?.(); });
-const launch = (key: string, parentId?: string) => ops.launchChatOperation({ userId: "u", workspaceId: "w", orgId: "o", key, input: { q: "hello" }, parentId });
+const launch = (key: string, parentId?: string) => ops.launchChatOperation({ userId: "u", projectId: "w", orgId: "o", key, input: { q: "hello" }, parentId });
+it.each(["deadline", "retention", "runtime"])("refuses a child under an unavailable %s root without inserting it", async reason => {
+  const root = await launch(`child_guard_${reason}`);
+  if (reason === "deadline") await sql`update chat_operations set deadline=clock_timestamp()-interval '1 second' where id=${root.id}`;
+  if (reason === "retention") await sql`update chat_operations set expires_at=clock_timestamp()-interval '1 second' where id=${root.id}`;
+  const before = await sql`select id from chat_operations`;
+  await expect(ops.launchChatOperation({userId:"u",projectId:"w",orgId:"o",key:`guarded_child_${reason}`,input:{q:"child"},parentId:root.id,
+    runtime:reason === "runtime" ? "mastra" : "legacy"})).rejects.toThrow();
+  expect(await sql`select id from chat_operations`).toEqual(before);
+});
 it("deduplicates a lost launch ACK, rejects changed input and claims exactly once", async () => {
   const [a,b] = await Promise.all([launch("lost_ack_1"),launch("lost_ack_1")]);
   expect(a.id).toBe(b.id);
-  await expect(ops.launchChatOperation({ userId:"u",workspaceId:"w",orgId:"o",key:"lost_ack_1",input:{q:"changed"} })).rejects.toThrow(/Idempotency/);
+  await expect(ops.launchChatOperation({ userId:"u",projectId:"w",orgId:"o",key:"lost_ack_1",input:{q:"changed"} })).rejects.toThrow(/Idempotency/);
   const claim = await ops.claimChatOperation(); expect(claim?.id).toBe(a.id);
   expect(await ops.claimChatOperation()).toBeNull();
   await ops.appendChatOperation(a.id,claim!.attempt_id!,"text",{text:"partial"});
@@ -59,15 +69,15 @@ it("expired executor leases preserve output and interrupt without repeating a pa
   await expect(ops.appendChatOperation(root.id,claim!.attempt_id!,"text",{text:"late"})).rejects.toThrow(/lease/);
 });
 it("bounds hostile launch payloads and refuses a foreign parent",async()=>{
-  await expect(ops.launchChatOperation({userId:"u",workspaceId:"w",orgId:"o",key:"oversized",input:{q:"x".repeat(128001)}})).rejects.toThrow(/size/);
+  await expect(ops.launchChatOperation({userId:"u",projectId:"w",orgId:"o",key:"oversized",input:{q:"x".repeat(128001)}})).rejects.toThrow(/size/);
   const root=await launch("foreign_root");
-  await expect(ops.launchChatOperation({userId:"v",workspaceId:"w",orgId:"o",key:"foreign_child",input:{q:"hi"},parentId:root.id})).rejects.toThrow(/Parent/);
+  await expect(ops.launchChatOperation({userId:"v",projectId:"w",orgId:"o",key:"foreign_child",input:{q:"hi"},parentId:root.id})).rejects.toThrow(/Parent/);
 });
 
 it("disconnect detaches an observer while the executor completes; another instance recovers", async () => {
   const actor = {type:"session" as const,userId:"u",sessionId:"browser",user:{id:"u",name:"Owner",email:"owner@example.test"}};
   await sql`insert into "session" (id,token,"userId","expiresAt") values ('browser','test-token','u',now()+interval '1 hour')`;
-  const task = await ops.launchChatOperation({userId:"u",workspaceId:"w",orgId:"o",key:"disconnect_1",input:{q:"hello",authSessionId:"browser"}});
+  const task = await ops.launchChatOperation({userId:"u",projectId:"w",orgId:"o",key:"disconnect_1",input:{q:"hello",authSessionId:"browser"}});
   const claim = await ops.claimChatOperation();
   let release!: () => void;
   const paused = new Promise<void>(resolve => {release=resolve;});
@@ -110,7 +120,7 @@ it("cancel-one leaves accepted siblings running and output budgets fail closed",
 
 it("revoking the initiating session cancels the executor, independently of transport",async()=>{
   await sql`insert into "session" (id,token,"userId","expiresAt") values ('revoked','revoked-token','u',now()+interval '1 hour')`;
-  const task=await ops.launchChatOperation({userId:"u",workspaceId:"w",orgId:"o",key:"revocation_test",input:{q:"hello",authSessionId:"revoked"}});
+  const task=await ops.launchChatOperation({userId:"u",projectId:"w",orgId:"o",key:"revocation_test",input:{q:"hello",authSessionId:"revoked"}});
   const claimed=await ops.claimChatOperation();
   let started!:()=>void;const start=new Promise<void>(resolve=>{started=resolve;});
   runtime.chat.mockImplementation(async(args:{signal:AbortSignal})=>{
@@ -142,7 +152,7 @@ it.each(["cancel", "deadline"])("rejects late output and successful completion a
 
 it("consumes rejected synchronous evidence callbacks and preserves executor cancellation context", async () => {
   await sql`insert into "session" (id,token,"userId","expiresAt") values ('evidence','evidence-token','u',now()+interval '1 hour')`;
-  const task = await ops.launchChatOperation({userId:"u",workspaceId:"w",orgId:"o",key:"evidence_rejection",input:{q:"hello",authSessionId:"evidence"}});
+  const task = await ops.launchChatOperation({userId:"u",projectId:"w",orgId:"o",key:"evidence_rejection",input:{q:"hello",authSessionId:"evidence"}});
   const claim = await ops.claimChatOperation();
   const { getDeferredContext } = await import("../search/deferred/deferred-context.js");
   runtime.chat.mockImplementation(async (args: {signal: AbortSignal; onEvidence: (event: unknown) => void}) => {
@@ -216,7 +226,7 @@ it("requires an active-root slot when adding a child to a completed root",async(
   await expect(launch("reactivate_child",dormant.id)).resolves.toBeTruthy();
 });
 it("keeps native bindings out of even a legacy queued-status claim",async()=>{
-  const native=await ops.launchChatOperation({userId:"u",workspaceId:"w",orgId:"o",key:"native_unclaimable",input:{},runtime:"mastra"});
+  const native=await ops.launchChatOperation({userId:"u",projectId:"w",orgId:"o",key:"native_unclaimable",input:{},runtime:"mastra"});
   expect(native.status).toBe("waiting");
   expect(await ops.claimChatOperation()).toBeNull();
 });

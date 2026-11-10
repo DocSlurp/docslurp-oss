@@ -101,7 +101,7 @@ export function envelopeForError(c: Context, error: unknown, status: number, ori
 }
 
 /**
- * Turns errors thrown inside a native router (blocked spend, workspace access,
+ * Turns errors thrown inside a native router (blocked spend, project access,
  * unexpected failures) into the same envelope the router's handlers return.
  * Hono hands thrown errors to the app's `onError` (which reports them), so
  * this reads `c.error` after the handlers ran and only reshapes the body.

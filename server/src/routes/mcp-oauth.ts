@@ -131,7 +131,9 @@ mcpOAuthRoutes.post("/token", async (c) => {
   const body = await c.req.parseBody();
   const reject = (status: 400 | 401, error: string, description: string, reason: string, grantId?: string) => {
     logTokenRejection(reason, { grantType: body.grant_type, clientId: body.client_id, grantId });
-    return c.json({ error, error_description: description }, status);
+    // One machine-readable reason is public: a client that lost a refresh race must tell it from a revoked login
+    // without parsing prose. Every other reason stays in the log so a response cannot be used to probe grants.
+    return c.json({ error, error_description: description, ...(reason === "refresh_reused_within_leeway" ? { docslurp_reason: "refresh_token_just_rotated" } : {}) }, status);
   };
   if (body.grant_type !== "authorization_code" && body.grant_type !== "refresh_token" && body.grant_type !== DEVICE_CODE_GRANT_TYPE)
     return reject(400, "unsupported_grant_type", `Supported grant types: authorization_code, refresh_token, ${DEVICE_CODE_GRANT_TYPE}`, "unsupported_grant_type");

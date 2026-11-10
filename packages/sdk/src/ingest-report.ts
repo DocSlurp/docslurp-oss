@@ -1,6 +1,6 @@
 /**
- * Ingest report (GET /v1/workspaces/:workspace/ingest-report): what DocSlurp
- * observed in a workspace's files, the settings behind it and rule-based
+ * Ingest report (GET /v1/projects/:project/ingest-report): what DocSlurp
+ * observed in a project's files, the settings behind it and rule-based
  * recommendations. Mirrors ingestReportSchema in the service.
  */
 export type IngestReportHistogram = {
@@ -24,7 +24,7 @@ export type IngestReportRecommendation = {
   id: string; severity: "high" | "medium" | "info"; title: string; reason: string; effect: string;
   affectedPages: number; affectedDocuments: number;
   cost: { centsPer100Pages: number | null; reprocessCents: number | null; basis: string };
-  /** Pipeline change a workspace editor can apply from the dashboard. */
+  /** Pipeline change a project editor can apply from the dashboard. */
   patch: Record<string, unknown> | null;
   reprocessDocumentIds: string[];
 };
@@ -33,7 +33,7 @@ export type IngestReportFileItem = {
   pages: number | null; searchablePages: number | null; error: string | null;
 };
 export type IngestReport = {
-  workspaceId: string; workspaceName: string; generatedAt: string;
+  projectId: string; projectName: string; generatedAt: string;
   scope: { runId: string | null; documentIds: string[] | null; matchedDocuments: number; documents: number; pageDetailDocuments: number; truncated: boolean };
   files: { total: number; byType: Array<{ type: string; files: number; pages: number; bytes: number }>; byStatus: { completed: number; processing: number; queued: number; failed: number; other: number };
     /** Run-scoped reports only (at most 50, newest first). */

@@ -14,10 +14,10 @@ import { legacyEmbeddingLocations, legacyOrgTable } from "../stages/lancedb-lega
 import { relocateAllOrgVectors, relocateOrgVectors } from "../stages/lancedb-relocate.js";
 
 /**
- * Moving org-level LanceDB tables into per-workspace databases against
+ * Moving org-level LanceDB tables into per-project databases against
  * migrated Postgres and real local LanceDB: rows follow their document's
- * workspace, same-workspace dedup copies keep reading their source's rows, a
- * copy in another workspace gets its own rebound rows, orphans stay behind,
+ * project, same-project dedup copies keep reading their source's rows, a
+ * copy in another project gets its own rebound rows, orphans stay behind,
  * reruns converge and --drop-legacy removes the old tables.
  */
 const MODEL = "provider/model.v1";
@@ -65,7 +65,7 @@ async function texts(uri: string) {
   } finally { db.close(); }
 }
 
-const workspaceUri = (workspaceId: string) => VectorNamespaceManager.getEmbeddingLocation(lanceDir, "org1", workspaceId, MODEL, DIM).uri;
+const projectUri = (projectId: string) => VectorNamespaceManager.getEmbeddingLocation(lanceDir, "org1", projectId, MODEL, DIM).uri;
 
 beforeAll(async () => {
   lanceDir = await mkdtemp(path.join(process.env.TMPDIR ?? tmpdir(), "lance-relocate-"));
@@ -76,24 +76,24 @@ beforeAll(async () => {
   sql = postgres(database.url, { max: 1, prepare: false, onnotice: () => {} });
   await sql`insert into "user" (id, name, email) values ('u', 'User', 'relocate@example.test')`;
   await sql`insert into organizations (id, name, slug, created_by_user_id) values ('org1', 'Org', 'relocate', 'u')`;
-  for (const workspace of ["w1", "w2"]) {
-    await sql`insert into workspaces (id, org_id, user_id, name) values (${workspace}, 'org1', 'u', ${workspace})`;
-    await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline)
-      values (${`run-${workspace}`}, 'org1', 'u', ${workspace}, 'bulk-upload', 'completed', 'completed', '{}')`;
+  for (const project of ["w1", "w2"]) {
+    await sql`insert into projects (id, org_id, user_id, name) values (${project}, 'org1', 'u', ${project})`;
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
+      values (${`run-${project}`}, 'org1', 'u', ${project}, 'bulk-upload', 'completed', 'completed', '{}')`;
   }
   const documents = [
-    { id: "a", workspace: "w1", dedupedFrom: null },
-    { id: "b", workspace: "w2", dedupedFrom: null },
-    { id: "same-copy", workspace: "w1", dedupedFrom: "a" },
-    { id: "cross-copy", workspace: "w2", dedupedFrom: "a" },
+    { id: "a", project: "w1", dedupedFrom: null },
+    { id: "b", project: "w2", dedupedFrom: null },
+    { id: "same-copy", project: "w1", dedupedFrom: "a" },
+    { id: "cross-copy", project: "w2", dedupedFrom: "a" },
   ];
   for (const document of documents) {
-    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, deduped_from_document_id)
-      values (${document.id}, 'org1', 'u', ${document.workspace}, ${`run-${document.workspace}`}, 'f.pdf', 'application/pdf', 'k', 'completed', ${document.dedupedFrom})`;
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, deduped_from_document_id)
+      values (${document.id}, 'org1', 'u', ${document.project}, ${`run-${document.project}`}, 'f.pdf', 'application/pdf', 'k', 'completed', ${document.dedupedFrom})`;
     await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension)
       values (${`vi-${document.id}`}, ${document.id}, 'lancedb', 'b', 'p', ${MODEL}, ${DIM})`;
   }
-  // Current chunks. The cross-workspace copy was seeded with random chunk ids and has no chunk 1;
+  // Current chunks. The cross-project copy was seeded with random chunk ids and has no chunk 1;
   // a-002 was replaced by a reprocess (its legacy row is stale).
   for (const [id, documentId, runId, index] of [
     ["a-000", "a", "run-w1", 0], ["a-001", "a", "run-w1", 1], ["b-000", "b", "run-w2", 0], ["b-old", "b", "run-w2", 5],
@@ -112,7 +112,7 @@ beforeAll(async () => {
   const org = legacyOrgTable(lanceDir, "org1");
   await createTable(org.uri, org.table, [{ ...row("b-old", "b", 5, 5), chunkIndex: null }, { ...row("a-000", "a", 0, 1), text: "older a-000" }]);
   // Written by the worker after the upgrade: relocation never replaces it.
-  await createTable(workspaceUri("w2"), "chunks", [{ ...row("b-000", "b", 0, 3, "run-new"), text: "reindexed" }]);
+  await createTable(projectUri("w2"), "chunks", [{ ...row("b-000", "b", 0, 3, "run-new"), text: "reindexed" }]);
 }, 180_000);
 
 afterAll(async () => {
@@ -127,17 +127,17 @@ describe("lancedb relocate", () => {
     const result = await relocateOrgVectors({ sql, orgId: "org1", dryRun: true, log: () => {} });
     expect(result).toMatchObject({ orphanRows: 1, staleRows: 1, unmatchedCopyRows: 1, skippedExisting: 3, errors: [], droppedLegacy: [] });
     expect(result.sources.map((source) => [source.rows, source.read])).toEqual([[5, 5], [2, 2]]);
-    expect(await readRows(workspaceUri("w1"))).toBeNull();
+    expect(await readRows(projectUri("w1"))).toBeNull();
   }, 60_000);
 
-  it("moves every row into the workspace databases that read it, then converges on a rerun", async () => {
+  it("moves every row into the project databases that read it, then converges on a rerun", async () => {
     const result = await relocateOrgVectors({ sql, orgId: "org1", log: () => {} });
     expect(result.errors).toEqual([]);
-    expect(await readRows(workspaceUri("w1"))).toEqual([
+    expect(await readRows(projectUri("w1"))).toEqual([
       expect.objectContaining({ id: "a-000", documentId: "a", runId: "run-1" }),
       expect.objectContaining({ id: "a-001", documentId: "a" }),
     ]);
-    const w2 = await readRows(workspaceUri("w2"));
+    const w2 = await readRows(projectUri("w2"));
     expect(w2!.map((entry) => [entry.id, entry.documentId])).toEqual([
       ["b-000", "b"], ["b-old", "b"], ["cross-uuid-0", "cross-copy"],
     ]);
@@ -145,26 +145,26 @@ describe("lancedb relocate", () => {
     const copy = w2!.find((entry) => entry.id === "cross-uuid-0")!;
     expect(copy.runId).toBe("run-w2");
     expect(decodeLanceChunkHydration(copy.hydration)).toMatchObject({ runId: "run-w2", metadata: { documentId: "cross-copy" } });
-    expect(await texts(workspaceUri("w1"))).toEqual({ "a-000": "text a-000", "a-001": "text a-001" });
-    expect((await texts(workspaceUri("w2")))["cross-uuid-0"]).toBe("text a-000");
+    expect(await texts(projectUri("w1"))).toEqual({ "a-000": "text a-000", "a-001": "text a-001" });
+    expect((await texts(projectUri("w2")))["cross-uuid-0"]).toBe("text a-000");
 
     const again = await relocateOrgVectors({ sql, orgId: "org1", log: () => {} });
     expect(again.errors).toEqual([]);
     expect(again.written).toEqual([]);
-    expect((await readRows(workspaceUri("w2")))!.map((entry) => entry.id)).toEqual(w2!.map((entry) => entry.id));
+    expect((await readRows(projectUri("w2")))!.map((entry) => entry.id)).toEqual(w2!.map((entry) => entry.id));
   }, 120_000);
 
   it("registers maintained tables for the sweep, and --maintain-all also maintains already-relocated ones", async () => {
     const keys = async () => (await sql<{ table_key: string; lance_uri: string }[]>`select table_key, lance_uri from vector_index_tables order by 1`)
       .map((entry) => entry.lance_uri);
-    expect(await keys()).toEqual([workspaceUri("w1"), workspaceUri("w2")].sort());
+    expect(await keys()).toEqual([projectUri("w1"), projectUri("w2")].sort());
     await sql`delete from vector_index_tables`;
     const quiet = await relocateOrgVectors({ sql, orgId: "org1", log: () => {} });
     expect(quiet.maintained).toEqual([]);
     const all = await relocateOrgVectors({ sql, orgId: "org1", maintainAll: true, log: () => {} });
     expect(all.errors).toEqual([]);
-    expect(all.maintained.map((entry) => entry.uri).sort()).toEqual([workspaceUri("w1"), workspaceUri("w2")].sort());
-    expect(await keys()).toEqual([workspaceUri("w1"), workspaceUri("w2")].sort());
+    expect(all.maintained.map((entry) => entry.uri).sort()).toEqual([projectUri("w1"), projectUri("w2")].sort());
+    expect(await keys()).toEqual([projectUri("w1"), projectUri("w2")].sort());
   }, 120_000);
 
   it("drops the legacy tables only with --drop-legacy, after a clean run", async () => {
@@ -174,19 +174,20 @@ describe("lancedb relocate", () => {
     const [embedding] = legacyEmbeddingLocations(lanceDir, "org1", MODEL, DIM);
     expect(await readRows(embedding!.uri, embedding!.table)).toBeNull();
     expect(await readRows(lanceDir, legacyOrgTable(lanceDir, "org1").table)).toBeNull();
-    expect((await readRows(workspaceUri("w1")))!.map((entry) => entry.id)).toEqual(["a-000", "a-001"]);
+    expect((await readRows(projectUri("w1")))!.map((entry) => entry.id)).toEqual(["a-000", "a-001"]);
   }, 120_000);
 
-  it("points pending vector writes queued with the org-level layout at the workspace database", async () => {
+  it("points pending vector writes queued with the org-level layout at the project database", async () => {
     const migration = await readFile(path.join(path.dirname(fileURLToPath(import.meta.url)),
       "../../../server/db/migrations/0082_workspace_vector_databases.sql"), "utf8");
     const rewrite = migration.split("--> statement-breakpoint").find((statement) => statement.includes("UPDATE vector_index_outbox"))!;
     const oldUri = `${lanceDir}/org1/vectors/provider%2Fmodel%2Ev1/4`;
     await sql`insert into vector_index_outbox (table_key, lance_uri, lance_table, org_id, document_id, run_id, artifact_key, metadata, record_count)
       values (${`${oldUri}#chunks`}, ${oldUri}, 'chunks', 'org1', 'b', 'run-w2', 'k', '{}', 1)`;
-    await sql.unsafe(rewrite);
+    // Exercise historical relocation SQL against the renamed column in this fixture.
+    await sql.unsafe(rewrite.replaceAll("workspace_id", "project_id"));
     const newUri = `${lanceDir}/org1/w2/vectors-provider%2Fmodel%2Ev1-4`;
-    expect(newUri).toBe(workspaceUri("w2"));
+    expect(newUri).toBe(projectUri("w2"));
     expect(await sql`select lance_uri, table_key from vector_index_outbox where document_id = 'b'`)
       .toEqual([{ lance_uri: newUri, table_key: `${newUri}#chunks` }]);
   }, 60_000);

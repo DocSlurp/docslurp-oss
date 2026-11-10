@@ -3,7 +3,7 @@ import { CapacityController } from "./controller.js";
 import { capacityEndpoint, isTailnetAddress } from "./network.js";
 import type { CapacityLease, CapacityLeaseStore, CapacityProvider, CapacityResource } from "./types.js";
 vi.mock("@docslurp/shared/observability", () => ({ emitTelemetryLog: vi.fn(), recordMediaTelemetry: vi.fn() }));
-const lease: CapacityLease = { id: "lease", provider: "test", name: "unique-name", scope: { orgId: "o", workspaceId: "w", runId: "r", documentId: "d" },
+const lease: CapacityLease = { id: "lease", provider: "test", name: "unique-name", scope: { orgId: "o", projectId: "w", runId: "r", documentId: "d" },
   createdAt: 1000, deadline: 5000, resourceId: null, beforeIds: ["existing"], hourlyUsd: 1, reservedUsd: 1, status: "creating", costUsd: null };
 function fixture() {
   let inventory: CapacityResource[] = [{ id: "existing", name: "existing", createdAt: 0, state: "running" }];

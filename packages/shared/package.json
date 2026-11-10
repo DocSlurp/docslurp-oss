@@ -54,9 +54,9 @@
       "types": "./dist/file-token-path.d.ts",
       "import": "./dist/file-token-path.js"
     },
-    "./workspace-chat-models": {
-      "types": "./dist/workspace-chat-models.d.ts",
-      "import": "./dist/workspace-chat-models.js"
+    "./project-chat-models": {
+      "types": "./dist/project-chat-models.d.ts",
+      "import": "./dist/project-chat-models.js"
     },
     "./lancedb-ddb": {
       "types": "./dist/lancedb-ddb.d.ts",
@@ -82,9 +82,13 @@
       "types": "./dist/chat-voice.d.ts",
       "import": "./dist/chat-voice.js"
     },
-    "./workspace-chat-ui": {
-      "types": "./dist/workspace-chat-ui.d.ts",
-      "import": "./dist/workspace-chat-ui.js"
+    "./project-chat-ui": {
+      "types": "./dist/project-chat-ui.d.ts",
+      "import": "./dist/project-chat-ui.js"
+    },
+    "./pricing-loader": {
+      "types": "./dist/pricing-loader.d.ts",
+      "import": "./dist/pricing-loader.js"
     }
   },
   "files": [

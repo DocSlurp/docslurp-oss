@@ -11,16 +11,16 @@ describe("resolveSandboxProviderId", () => {
     expect(resolveSandboxProviderId({ DOCSLURP_PARSER_SANDBOX: "  " }, "linux")).toBe("bubblewrap");
   });
 
-  it("defaults to bubblewrap on linux in production", () => {
-    expect(resolveSandboxProviderId({ NODE_ENV: "production" }, "linux")).toBe("bubblewrap");
+  it("defaults to the VM provider on linux in production", () => {
+    expect(resolveSandboxProviderId({ NODE_ENV: "production" }, "linux")).toBe("modal");
   });
 
   it("defaults to none on non-linux outside production", () => {
     expect(resolveSandboxProviderId({}, "darwin")).toBe("none");
   });
 
-  it("defaults to bubblewrap on non-linux in production", () => {
-    expect(resolveSandboxProviderId({ NODE_ENV: "production" }, "darwin")).toBe("bubblewrap");
+  it("defaults to the VM provider on non-linux in production", () => {
+    expect(resolveSandboxProviderId({ NODE_ENV: "production" }, "darwin")).toBe("modal");
   });
 
   it("honors an explicit provider, trimmed and lowercased", () => {

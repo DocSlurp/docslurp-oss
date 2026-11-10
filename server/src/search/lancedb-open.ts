@@ -19,7 +19,7 @@ export async function openLanceTable<T>(name: string, open: () => Promise<T>, na
   const span = startDependencySpan("lancedb.openTable", {
     "db.system.name": "lancedb",
     "db.collection.name": name,
-    // Every workspace database holds a table named "chunks": the namespace says whose.
+    // Every project database holds a table named "chunks": the namespace says whose.
     ...(namespace ? { "db.namespace": namespace } : {}),
     "docslurp.dependency.type": "vector",
     "docslurp.dependency.provider": "lancedb",

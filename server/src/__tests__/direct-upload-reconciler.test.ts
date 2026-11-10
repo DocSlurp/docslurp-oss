@@ -8,10 +8,10 @@ vi.mock("../services/direct-upload-session.js", () => ({
   abortDirectUploadSession: mocks.abort, queueAbandonedDirectUploadCleanup: mocks.cleanup,
   withDirectUploadLock: async (_id: string, work: () => Promise<unknown>) => work(),
 }));
-vi.mock("../services/workspace-intake-actions.js", () => ({ confirmDirectUploadWorkspaceIntake: mocks.confirm }));
-vi.mock("../services/workspace-intake.js", () => ({ WorkspaceIntakeError: class extends Error { constructor(message: string, public statusCode: number) { super(message); } } }));
+vi.mock("../services/project-intake-actions.js", () => ({ confirmDirectUploadProjectIntake: mocks.confirm }));
+vi.mock("../services/project-intake.js", () => ({ ProjectIntakeError: class extends Error { constructor(message: string, public statusCode: number) { super(message); } } }));
 import { reconcileDirectUploads, stopDirectUploadReconciler } from "../services/direct-upload-reconciler.js";
-import { WorkspaceIntakeError } from "../services/workspace-intake.js";
+import { ProjectIntakeError } from "../services/project-intake.js";
 const session = { id: "session-1", user_id: "user-1", expired: false, status: "pending" };
 let scheduled: typeof session[];
 beforeEach(() => {
@@ -52,7 +52,7 @@ describe("automatic upload reconciler", () => {
     await reconcileDirectUploads();
     expect(queryValues("next_reconcile_at = now() +")[0]?.[0]).toBe(300);
     expect(mocks.cleanup).not.toHaveBeenCalled();
-    mocks.finalize.mockRejectedValueOnce(new WorkspaceIntakeError("size mismatch",400));
+    mocks.finalize.mockRejectedValueOnce(new ProjectIntakeError("size mismatch",400));
     await reconcileDirectUploads();
     expect(queryValues("set status = 'failed'")).toHaveLength(1);
     expect(mocks.cleanup).toHaveBeenCalledWith("session-1");

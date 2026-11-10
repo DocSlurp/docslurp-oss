@@ -1,6 +1,6 @@
 import { writeFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
-import { loadWorkspaceEnvFiles } from "../src/env-files.js";
+import { loadProjectEnvFiles } from "../src/env-files.js";
 
 import { buildCatalogFeedRows, catalogFeedCsv, DEFAULT_CATALOG_IMAGES, fetchStripeCatalogPrices, uploadCatalogFeed } from "../src/services/billing/catalog-feed.js";
 
@@ -32,7 +32,7 @@ const { values } = parseArgs({
 });
 
 if (values.env !== "local" && values.env !== "production") throw new Error("--env must be local or production");
-loadWorkspaceEnvFiles(import.meta.url, values.env === "production");
+loadProjectEnvFiles(import.meta.url, values.env === "production");
 const link = values.link ?? process.env.STRIPE_CATALOG_LINK;
 const productIds = values["stripe-product"].length ? values["stripe-product"]
   : process.env.STRIPE_CATALOG_PRODUCTS?.split(",").map((id) => id.trim()).filter(Boolean) ?? [];

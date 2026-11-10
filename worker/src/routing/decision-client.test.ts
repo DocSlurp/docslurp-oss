@@ -145,6 +145,13 @@ describe("privacy", () => {
     await expect(client.ask(catalogModel("typesafe/jev-1.13"), "s", questions)).rejects.toBeInstanceOf(PrivacyModeViolationError);
   });
 
+  it("refuses local image sidecars in production before invoking an override", async () => {
+    const runSidecar = vi.fn();
+    const client = createDecisionClient({ privacyMode: "local-only", env: { NODE_ENV: "production", DECISION_LOCAL_SIDECAR_CMD: "sidecar" }, runSidecar });
+    await expect(client.ask(catalogModel("local/LiquidAI/d1-omni-600M"), "s", questions)).rejects.toThrow(/VM boundary/);
+    expect(runSidecar).not.toHaveBeenCalled();
+  });
+
   it("local sidecar runs in local-only mode and is unavailable when unconfigured", async () => {
     const model = catalogModel("local/LiquidAI/d1-omni-600M");
     const runSidecar = vi.fn(async () => okBody(50));

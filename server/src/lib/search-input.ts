@@ -12,13 +12,13 @@ const dateFilter = z.string().trim().max(64).optional()
   });
 // A query of only NUL bytes is empty once they are stripped before the Postgres lookups.
 const query = z.string().trim().min(1).max(16000).refine((value) => value.replaceAll("\u0000", "").trim().length > 0);
-const workspaceRef = id.optional().describe("Workspace ID, slug or name (names match by slug, so \"Legal Contracts\" finds legal-contracts). Omitted: the organization default workspace.");
+const projectRef = id.optional().describe("Project ID, slug or name (names match by slug, so \"Legal Contracts\" finds legal-contracts). Omitted: the organization default project.");
 
 export const searchInputSchema = z.object({
   geo: geoPredicateSchema.optional(),
   q: query,
-  /** Omitted: the organization's default workspace. */
-  workspace: workspaceRef,
+  /** Omitted: the organization's default project. */
+  project: projectRef,
   orgId: id.optional(),
   runId: id.optional(),
   documentId: id.optional(),
@@ -39,7 +39,7 @@ export const searchInputSchema = z.object({
   resultOrder: searchResultOrderSchema.optional(),
   mmr: z.boolean().optional(),
   mmrLambda: z.number().min(0).max(1).optional(),
-  /** Relevance floor, 0..1; 0 disables it. Omitted: workspace default, else SEARCH_MIN_SCORE. */
+  /** Relevance floor, 0..1; 0 disables it. Omitted: project default, else SEARCH_MIN_SCORE. */
   minScore: z.number().min(0).max(1).optional().describe("Relevance floor: drop weaker matches (0 disables). The response reports noMatch when nothing relevant remains."),
   parentRetrieval: z.boolean().optional(),
   summarySeed: z.boolean().optional(),
@@ -72,10 +72,10 @@ export function searchFormError(input: Record<string, unknown>): string | undefi
     ? "Send either q for one query or queries for a batch, not both."
     : `With queries, put ${stray.join(", ")} inside each queries item; only concurrency may accompany queries.`;
 }
-export const workspaceChatInputSchema = z.object({
+export const projectChatInputSchema = z.object({
   speedBoost: z.boolean().optional(),
   q: query,
-  workspace: workspaceRef,
+  project: projectRef,
   orgId: id.optional(),
   sessionId: id.optional(),
   /** Browser (client) keys: the `sessionToken` returned with the previous answer, required to continue `sessionId`. */
@@ -90,18 +90,18 @@ export const workspaceChatInputSchema = z.object({
 }).strict();
 
 /**
- * Omitted retrieval flags stay undefined so the workspace's Retrieval Controls
+ * Omitted retrieval flags stay undefined so the project's Retrieval Controls
  * decide. Provider-backed enhancements remain opt-in: they default off in the
- * workspace settings unless the workspace owner enables them.
+ * project settings unless the project owner enables them.
  */
-export function searchOptions(body: SearchInput & { workspaceId: string }) {
+export function searchOptions(body: SearchInput & { projectId: string }) {
   return {
     runId: body.runId,
     limit: body.limit,
     variant: body.variant,
     filters: { ...parseFilters({
       documentId: body.documentId ?? "", runId: body.runId ?? "",
-      workspaceId: body.workspaceId, filenameContains: body.filenameContains ?? "",
+      projectId: body.projectId, filenameContains: body.filenameContains ?? "",
       mimeTypes: body.mimeTypes ?? "", tags: body.tags ?? "",
       pageFrom: body.pageFrom ?? "", pageTo: body.pageTo ?? "",
       language: body.language ?? "", heading: body.heading ?? "",

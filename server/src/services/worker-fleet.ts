@@ -85,6 +85,7 @@ export function configuredGatedFlags(env: Env = process.env): Record<string, boo
   const nonProduction = env.NODE_ENV !== "production";
   const earlyLexical = env.SEARCH_EARLY_LEXICAL?.trim().toLowerCase() ?? "";
   return {
+    WORKER_SHARD_QUARANTINE: envFlag(env.WORKER_SHARD_QUARANTINE, false),
     WORKER_INDEX_BEFORE_ENRICH: envFlag(env.WORKER_INDEX_BEFORE_ENRICH, nonProduction),
     WORKER_GROUP_ADJACENT_STAGES: envFlag(env.WORKER_GROUP_LIGHT_STAGES, true) && envFlag(env.WORKER_GROUP_ADJACENT_STAGES, nonProduction),
     WORKER_CREDIT_LEASES: resolveCreditLeaseConfig(env).enabled,

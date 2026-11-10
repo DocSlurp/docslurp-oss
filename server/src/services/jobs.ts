@@ -8,17 +8,14 @@ import {
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
-import { apiKeyCanUseWorkspace, type ApiKeyWorkspaceScope } from "../lib/api-key-workspace-scope.js";
-import { getWorkspaceAccess } from "./organizations.js";
+import { apiKeyCanUseProject, type ApiKeyProjectScope } from "../lib/api-key-project-scope.js";
+import { getProjectAccess } from "./organizations.js";
 
 /**
- * Shared job resource: a thin, read-only view over `workspace_runs` (re-index, full-index, reprocess,
+ * Shared job resource: a thin, read-only view over `project_runs` (re-index, full-index, reprocess,
  * backfill jobs) and `graph_jobs` (graph rebuilds). One job is one or more runs; the job id is the first
  * run's id and every run of the job carries `stats.job = { id, kind, estimate?, estimateUrl? }`.
  */
-
-/** Inline estimates must compute within this budget; otherwise the job carries `estimateUrl`. */
-export const INLINE_ESTIMATE_BUDGET_MS = 150;
 
 export const jobStatusUrl = (id: string) => `/v1/jobs/${id}`;
 
@@ -40,7 +37,7 @@ export type JobStatusWithProgress = JobStatus & { progress: JobProgress };
 
 type JobRunRow = {
   id: string;
-  workspace_id: string;
+  project_id: string;
   org_id: string;
   kind: string;
   status: string;
@@ -115,7 +112,7 @@ function jobFromRunRows(rows: JobRunRow[], jobId: string): JobStatusWithProgress
 type GraphJobRow = {
   id: string;
   org_id: string;
-  workspace_id: string;
+  project_id: string;
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
   estimate: Record<string, unknown> | null;
   documents_total: number;
@@ -164,40 +161,40 @@ export const isJobTerminal = (job: Pick<JobStatus, "status">) =>
 
 /**
  * Reads one job (a run, any run of a multi-run job, or a graph job) the user may see; null when it does not
- * exist or the workspace is not accessible. A single query reads the job's runs with their queue position.
+ * exist or the project is not accessible. A single query reads the job's runs with their queue position.
  */
 export async function getJobStatus(
   jobId: string,
   userId: string,
-  options: { apiKey?: ApiKeyWorkspaceScope | null; env?: Record<string, string | undefined> } = {},
+  options: { apiKey?: ApiKeyProjectScope | null; env?: Record<string, string | undefined> } = {},
 ): Promise<JobStatusWithProgress | null> {
   const rows = await sql<JobRunRow[]>`
-    select r.id, r.workspace_id, r.org_id, r.kind, r.status, r.blocked_reason, r.control_state,
+    select r.id, r.project_id, r.org_id, r.kind, r.status, r.blocked_reason, r.control_state,
       r.total_documents, r.processed_documents, r.pages_total, r.pages_processed,
       r.stats -> 'job' as job, r.job_id, r.created_at,
       (
-        select count(*)::int from workspace_runs q
+        select count(*)::int from project_runs q
         where q.org_id = r.org_id and q.status in ('queued', 'processing') and q.kind <> 'materialize'
           and (q.created_at, q.id) < (r.created_at, r.id)
       ) as ahead
-    from workspace_runs r
+    from project_runs r
     where r.id = ${jobId} or r.job_id = ${jobId}
     order by r.created_at, r.id
   `;
   if (rows.length > 0) {
     const first = rows[0]!;
-    if (options.apiKey && !apiKeyCanUseWorkspace(options.apiKey, { id: first.workspace_id, orgId: first.org_id })) return null;
-    const access = await getWorkspaceAccess(first.workspace_id, userId);
+    if (options.apiKey && !apiKeyCanUseProject(options.apiKey, { id: first.project_id, orgId: first.org_id })) return null;
+    const access = await getProjectAccess(first.project_id, userId);
     if (!access) return null;
     return jobFromRunRows(rows, first.job_id ?? first.id);
   }
   const [graph] = await sql<GraphJobRow[]>`
-    select id, org_id, workspace_id, status, estimate, documents_total, documents_processed, documents_failed
+    select id, org_id, project_id, status, estimate, documents_total, documents_processed, documents_failed
     from graph_jobs where id = ${jobId}
   `;
   if (!graph) return null;
-  if (options.apiKey && !apiKeyCanUseWorkspace(options.apiKey, { id: graph.workspace_id, orgId: graph.org_id })) return null;
-  if (!(await getWorkspaceAccess(graph.workspace_id, userId))) return null;
+  if (options.apiKey && !apiKeyCanUseProject(options.apiKey, { id: graph.project_id, orgId: graph.org_id })) return null;
+  if (!(await getProjectAccess(graph.project_id, userId))) return null;
   return jobFromGraphRow(graph, options.env);
 }
 
@@ -205,7 +202,7 @@ export async function getJobStatus(
 export async function recordJobMeta(runIds: string[], meta: JobMeta, client: typeof sql = sql): Promise<void> {
   if (runIds.length === 0) return;
   await client`
-    update workspace_runs
+    update project_runs
     set job_id = ${meta.id},
         stats = coalesce(stats, '{}'::jsonb) || jsonb_build_object('job', ${client.json(JSON.parse(JSON.stringify(meta)))}::jsonb)
     where id = any(${runIds})
@@ -239,18 +236,16 @@ export async function jobStatusForMutation(
 }
 
 /**
- * The estimate a mutation reports inline: computed (target loading included) within the budget, else null with
- * an `estimateUrl` to the matching estimate route.
+ * The estimate a mutation reports inline: the same estimate its estimate route (`estimateUrl`) returns, target loading
+ * included. The mutation waits for it either way, so a computed estimate is never dropped for being slow; null only when
+ * the work has none.
  */
 export async function inlineEstimate(
   compute: () => Promise<CostEstimate | null> | CostEstimate | null,
   estimateUrl: string,
-  budgetMs = INLINE_ESTIMATE_BUDGET_MS,
 ): Promise<{ estimate: CostEstimate | null; estimateUrl?: string }> {
-  const started = performance.now();
   const estimate = await compute();
-  if (performance.now() - started > budgetMs) return { estimate: null, estimateUrl };
-  return { estimate };
+  return { estimate, estimateUrl };
 }
 
 /** Job metadata from an inline estimate result. */
@@ -258,7 +253,7 @@ export function jobMetaFor(id: string, kind: JobKind, inline: { estimate: CostEs
   return { id, kind, estimate: inline.estimate, ...(inline.estimateUrl ? { estimateUrl: inline.estimateUrl } : {}) };
 }
 
-/** Whether `workspaceId` is visible to the user (job routes for graph jobs). */
-export async function canSeeWorkspace(workspaceId: string, userId: string): Promise<boolean> {
-  return Boolean(await getWorkspaceAccess(workspaceId, userId));
+/** Whether `projectId` is visible to the user (job routes for graph jobs). */
+export async function canSeeProject(projectId: string, userId: string): Promise<boolean> {
+  return Boolean(await getProjectAccess(projectId, userId));
 }

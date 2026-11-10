@@ -1,5 +1,5 @@
 /**
- * Org-level credit leases (docs/pricing-and-credits.md, "Credit leases";
+ * Org-level credit leases (docs/billing/credits.md, "Credit leases";
  * migration 0052). The app (first lease at run admission and resume) and the
  * worker (consume, renew, pause) read the same configuration, so both sides
  * agree on whether leases are on and how they are sized.

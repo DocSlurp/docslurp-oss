@@ -59,12 +59,12 @@ export interface OpenRouterProviderPreferences {
 
 /**
  * First-attempt OpenRouter routing: a pinned `order`, or an `only` allowlist of measured hosts that OpenRouter
- * sorts by current price. An org or workspace without China-based providers narrows either to its allowed hosts
+ * sorts by current price. An org or project without China-based providers narrows either to its allowed hosts
  * (openrouter-routing.ts `restrictToNonChinaProviders`, applied before every send).
  */
 export type OpenRouterRoute =
   | OpenRouterProviderPreferences
-  | { only: string[]; sort: "price"; allow_fallbacks: boolean };
+  | { only: string[]; sort: "price" | "latency"; allow_fallbacks: boolean };
 
 export interface VisionModelProfile {
   /** Prompt template key used in place of the generic `<OCR>` default. Explicit other keys are kept. */
@@ -113,8 +113,8 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
     maxOutputTokens: 8_192,
     // Effort `none` returns zero reasoning tokens; `low` cost 6.4x per page and lowered math.
     reasoning: { effort: "none" },
-    // Keep the established hosts until disclosure, notice and rollout gates pass.
-    openRouterProvider: { only: ["together", "fireworks", "parasail"], sort: "price", allow_fallbacks: true },
+    // Keep requests and fallback inside the approved transcription endpoints.
+    openRouterProvider: { only: ["fireworks", "parasail"], sort: "latency", allow_fallbacks: true },
   },
   // 2026-10-21 tune: with `<OCR>` MiMo writes plain text: tables flatten into runs of cells, standalone
   // formulas come back as bare LaTeX with no `$`/`$$`, and figure text becomes an image placeholder.
@@ -151,8 +151,8 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
   // reading order 0.781 -> 0.838 and math 0.837 -> 0.988 at the same token cost.
   // Routing: quality was flat across 15 endpoints (fp4 matched fp8), except OpenInference, which drops the
   // image (~590 input tokens a page) and invents the page. Wafer was fastest and about half Friendli's
-  // reported cost; Friendli and InferenceNet back it up. Fallbacks stay off so a page never reaches an
-  // endpoint that ignores the image.
+  // reported cost; Friendli and InferenceNet back it up. The explicit allowlist confines failover
+  // to these measured endpoints, excluding hosts that ignore the image.
   // Output: the longest complete page was ~2.4k tokens; rare separator loops (`- - -`, `_ _ _`) ran to the
   // 16k cap, so 8k bounds their cost and latency and can only lower a smaller shared cap.
   "z-ai/glm-5.3-flash": {
@@ -162,7 +162,7 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
     // Same as the shared chat floor, pinned here so chat changes never move vision. Its endpoints reject
     // `none` and `{ enabled: false }` ("Reasoning is mandatory"); minimal spends ~1 reasoning token a page.
     reasoning: { effort: "minimal" },
-    openRouterProvider: { order: ["wafer/nvfp4", "friendli", "inference-net/fp4"], allow_fallbacks: false },
+    openRouterProvider: { only: ["wafer/nvfp4", "friendli", "inference-net/fp4"], sort: "price", allow_fallbacks: true },
     // ~3% of its pipe tables (course lists, price lists) arrive without the `| --- |` row and would render
     // as literal text; the repair restored them (tables tolerant +0.32 and +0.51 on the affected pages).
     postProcess: insertMissingTableDelimiters,

@@ -23,7 +23,7 @@ import { Worker } from "node:worker_threads";
  *
  * Each thread keeps at most one model loaded (a request for another model
  * replaces it), so memory stays at pool size x one model however many distinct
- * models the workspaces ask for. Results carry the thread's own measured model
+ * models the projects ask for. Results carry the thread's own measured model
  * load and run times, so callers' batch tuning and logs exclude queue wait.
  *
  * DOCSLURP_LOCAL_EMBED_THREAD=off restores in-process inference. If no

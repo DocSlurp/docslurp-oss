@@ -39,7 +39,7 @@ describe("connector sync durability", () => {
       runConnectorSync(
         {
           id: "conn-1",
-          workspace_id: "ws-1",
+          project_id: "ws-1",
           type: "s3",
           name: "Bucket",
           credentials_encrypted: "iv:tag:data",
@@ -55,7 +55,7 @@ describe("connector sync durability", () => {
 
     const statements = sqlMock.mock.calls.map(queryText);
     expect(statements.some((text) => text.includes("update connector_sync_log") && text.includes("'failed'"))).toBe(true);
-    expect(statements.some((text) => text.includes("update workspace_connectors set status = 'error'"))).toBe(true);
+    expect(statements.some((text) => text.includes("update project_connectors set status = 'error'"))).toBe(true);
   });
 
   it("fails syncs left running past the timeout and flags their connectors", async () => {
@@ -65,6 +65,6 @@ describe("connector sync durability", () => {
 
     await expect(sweepInterruptedConnectorSyncs()).resolves.toBe(2);
     const statements = sqlMock.mock.calls.map(queryText);
-    expect(statements.some((text) => text.includes("update workspace_connectors"))).toBe(true);
+    expect(statements.some((text) => text.includes("update project_connectors"))).toBe(true);
   });
 });

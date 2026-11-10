@@ -60,7 +60,7 @@ export function creditLeasesActive(): boolean {
 export interface LeaseRun {
   id: string;
   orgId: string | null;
-  workspaceId?: string | null;
+  projectId?: string | null;
   userId: string;
 }
 
@@ -114,7 +114,7 @@ export async function consumeRunCreditLease(
 /** grant_credit_lease() for a run, sized by `config`. */
 export async function grantRunCreditLease(
   client: Client,
-  run: Pick<LeaseRun, "id" | "orgId" | "workspaceId">,
+  run: Pick<LeaseRun, "id" | "orgId" | "projectId">,
   config: CreditLeaseConfig = creditLeaseConfig(),
 ): Promise<LeaseGrant> {
   if (!run.orgId) throw new Error("grantRunCreditLease: run has no org");
@@ -127,7 +127,7 @@ export async function grantRunCreditLease(
     block_reason: string | null;
   }[]>`
     select * from grant_credit_lease(
-      ${run.orgId}::text, ${run.workspaceId ?? null}::text, 'run', ${run.id}::text,
+      ${run.orgId}::text, ${run.projectId ?? null}::text, 'run', ${run.id}::text,
       ${config.minCredits}::numeric, ${config.maxCredits}::numeric, ${config.initialCredits}::numeric,
       ${config.fraction}::numeric, ${config.horizonSeconds}::numeric, ${config.ttlSeconds}::int,
       ${isBillingExemptOrg(run.orgId)}::boolean,

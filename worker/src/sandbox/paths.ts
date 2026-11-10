@@ -17,15 +17,20 @@ export function resolveCommandPaths(args: {
   scriptsDir: string;
 }): { readablePaths: string[]; inputPaths: string[]; writablePaths: string[] } {
   const runtimeProjectDir = path.dirname(path.dirname(args.scriptsDir));
+  const auxiliary = (args.plan.stagedInputs ?? []).map((file) => {
+    if (!path.isAbsolute(file) || !inferDocslurpTempAncestor(path.dirname(file)) || !lstatSync(file).isFile()) throw new Error("Auxiliary parser inputs must be regular files in private DocSlurp temporary projects");
+    return path.resolve(file);
+  });
+  const auxiliaryDirectories = new Set(auxiliary.map(file => path.dirname(file)));
   return {
-    readablePaths: resolveSandboxReadablePaths(args),
-    inputPaths: resolveSandboxInputPaths({ commandArgs: args.plan.args, runtimeProjectDir }),
+    readablePaths: [...resolveSandboxReadablePaths(args), ...auxiliary],
+    inputPaths: [...new Set([...resolveSandboxInputPaths({ commandArgs: args.plan.args, runtimeProjectDir }), ...auxiliary])],
     writablePaths: resolveSandboxWritablePaths({
       configuredPaths: args.configuredWritablePaths,
       // Inputs of a readOnlyInputs plan stay read-only (bound as readable files above), and so does
       // a registered shared source in any plan: its directory never becomes writable.
       commandArgs: args.plan.args.filter(
-        (arg) => !(path.isAbsolute(arg) && (isReadOnlySource(arg) || (args.plan.readOnlyInputs && isExistingFile(arg)))),
+        (arg) => !(path.isAbsolute(arg) && (isReadOnlySource(arg) || (args.plan.readOnlyInputs && (isExistingFile(arg) || auxiliaryDirectories.has(path.resolve(arg)))))),
       ),
       runtimeProjectDir,
     }),
@@ -62,7 +67,7 @@ function isExistingFile(candidate: string): boolean {
 }
 
 /**
- * The command's file inputs: absolute file arguments inside a DocSlurp temp workspace.
+ * The command's file inputs: absolute file arguments inside a DocSlurp temp project.
  * Remote providers upload exactly these; the parser runtime (scripts, node_modules,
  * venv, interpreters) comes from the provider's image, never from the host.
  */
@@ -91,28 +96,28 @@ export function resolveSandboxWritablePaths(args: {
   for (const configured of args.configuredPaths) {
     const resolved = path.resolve(configured);
     if (inferDocslurpTempAncestor(resolved) !== resolved || args.runtimeProjectDir === resolved || args.runtimeProjectDir.startsWith(`${resolved}${path.sep}`)) {
-      throw new Error("Parser writable paths must be private DocSlurp temporary workspaces");
+      throw new Error("Parser writable paths must be private DocSlurp temporary projects");
     }
     writable.add(resolved);
   }
   for (const arg of args.commandArgs) {
     const resolvedArg = path.resolve(arg);
     if (resolvedArg === args.runtimeProjectDir || resolvedArg.startsWith(`${args.runtimeProjectDir}${path.sep}`)) continue;
-    const tempWorkspace = inferDocslurpTempWorkspace(arg);
-    if (tempWorkspace) {
+    const tempProject = inferDocslurpTempProject(arg);
+    if (tempProject) {
       // Fail closed: a shared read-only source (registerReadOnlySource) never shares a writable directory.
       for (const source of readOnlySources) {
-        if (source.startsWith(`${tempWorkspace}${path.sep}`)) {
-          throw new Error(`refusing to make the directory of a shared source writable: ${tempWorkspace}`);
+        if (source.startsWith(`${tempProject}${path.sep}`)) {
+          throw new Error(`refusing to make the directory of a shared source writable: ${tempProject}`);
         }
       }
-      writable.add(tempWorkspace);
+      writable.add(tempProject);
     }
   }
   return Array.from(writable);
 }
 
-export function inferDocslurpTempWorkspace(arg: string): string | null {
+export function inferDocslurpTempProject(arg: string): string | null {
   if (!path.isAbsolute(arg)) {
     return null;
   }
@@ -133,6 +138,19 @@ export function inferDocslurpTempAncestor(candidate: string): string | null {
   return null;
 }
 
+/**
+ * The install prefixes a venv interpreter needs inside the sandbox: the prefix its symlink chain names (which may itself
+ * be a symlinked directory, as uv's `cpython-3.13-...` is) and the real one. Empty when the interpreter is missing.
+ */
+export function interpreterRoots(python: string): string[] {
+  if (!existsSync(python)) return [];
+  let interpreter = python;
+  while (lstatSync(interpreter).isSymbolicLink()) {
+    interpreter = path.resolve(path.dirname(interpreter), readlinkSync(interpreter));
+  }
+  return [path.dirname(path.dirname(interpreter)), path.dirname(path.dirname(realpathSync(python)))];
+}
+
 export function resolveSandboxReadablePaths(args: {
   plan: CommandPlan;
   venvBin: string;
@@ -147,14 +165,7 @@ export function resolveSandboxReadablePaths(args: {
     ...(path.isAbsolute(args.plan.binary) ? [args.plan.binary] : []),
     ...args.plan.args.filter((arg) => path.isAbsolute(arg) && existsSync(arg) && statSync(arg).isFile()),
     ...(args.plan.bundleRoots ?? [])];
-  const python = path.join(args.venvBin, "python3");
-  if (existsSync(python)) {
-    let interpreter = python;
-    while (lstatSync(interpreter).isSymbolicLink()) {
-      interpreter = path.resolve(path.dirname(interpreter), readlinkSync(interpreter));
-    }
-    candidates.push(path.dirname(path.dirname(interpreter)), path.dirname(path.dirname(realpathSync(python))));
-  }
+  candidates.push(...interpreterRoots(path.join(args.venvBin, "python3")));
   // Isolated worktrees can link packages through a different checkout's
   // node_modules. Include code-only link targets, never that checkout itself.
   for (const modules of [path.join(workerDir, "node_modules"), path.join(projectDir, "node_modules")]) {

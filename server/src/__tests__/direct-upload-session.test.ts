@@ -29,8 +29,8 @@ import {
   toDirectUploadPartCount,
   type LoadedDirectUploadSession,
 } from "../services/direct-upload-session.js";
-import { intakeIntoWorkspace, WorkspaceIntakeError } from "../services/workspace-intake.js";
-import { createWorkspaceIntakeFakes } from "./helpers/workspace-intake-fakes.js";
+import { intakeIntoProject, ProjectIntakeError } from "../services/project-intake.js";
+import { createProjectIntakeFakes } from "./helpers/project-intake-fakes.js";
 
 function directUploadSessionFixture(
   overrides: {
@@ -43,8 +43,8 @@ function directUploadSessionFixture(
       id: "session-1",
       user_id: "user-1",
       org_id: "org-1",
-      workspace_id: null,
-      workspace_name: null,
+      project_id: null,
+      project_name: null,
       template_key: null,
       pipeline: {} as LoadedDirectUploadSession["session"]["pipeline"],
       status: "uploading",
@@ -70,9 +70,9 @@ function directUploadSessionFixture(
 
 describe("Direct Upload Session Module", () => {
   it("preserves verified object bytes through direct-upload intake into run creation", async () => {
-    const fakes = createWorkspaceIntakeFakes();
-    await intakeIntoWorkspace({
-      userId: "user-1", orgId: "org-1", kind: "direct-upload", newWorkspace: true,
+    const fakes = createProjectIntakeFakes();
+    await intakeIntoProject({
+      userId: "user-1", orgId: "org-1", kind: "direct-upload", newProject: true,
       items: directUploadIntakeItems(directUploadSessionFixture()),
     }, fakes.ports);
     expect(fakes.runs[0].files[0].fileSize).toBe(42);
@@ -115,6 +115,61 @@ describe("Direct Upload Session Module", () => {
   it("rejects oversized single-part uploads before creating a session", async () => {
     sqlMock.mockClear();
     await expect(createDirectUploadSession({ userId: "user-1", pipeline: {}, files: [{ filename: "large.pdf", mimeType: "application/pdf", sizeBytes: 5 * 1024 ** 3 + 1, singlePart: true }] })).rejects.toThrow("5 GiB");
+    expect(sqlMock).not.toHaveBeenCalled();
+  });
+
+  it("accepts the good files of a batch, rejects the unsupported one by request index, and echoes client ids", async () => {
+    sqlMock.mockReset();
+    const stored: Array<Record<string, unknown>> = [];
+    sqlMock.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const query = strings.join("?");
+      if (query.includes("insert into upload_session_files")) stored.push({ filename: values[2], index: values[13], clientId: values[14] });
+      if (query.includes("from upload_sessions")) return [{ id: "s", user_id: "user-1", org_id: "org-1", status: "pending" }];
+      if (query.includes("from upload_session_files")) return stored.map((file, i) => ({ id: `file-${i}`, session_id: "s", filename: file.filename, mime_type: "application/pdf", size_bytes: 10, source_key: `k${i}`, upload_mode: "single", status: "pending", request_index: file.index, client_id: file.clientId }));
+      return [];
+    });
+    const result = await createDirectUploadSession({
+      userId: "user-1", orgId: "org-1", pipeline: {},
+      files: [
+        { clientId: "a", filename: "What is RAG?.pdf", mimeType: "application/pdf", sizeBytes: 10 },
+        { clientId: "b", filename: "payload.exe", mimeType: "application/x-msdownload", sizeBytes: 10 },
+        { clientId: "c", filename: "Scan  001.pdf", mimeType: "application/pdf", sizeBytes: 10 },
+      ],
+    });
+    // The sanitized names differ from what the client sent; index and clientId are how it finds its files.
+    expect(result.files.map((file) => [file.index, file.clientId, file.filename])).toEqual([[0, "a", "What is RAG-.pdf"], [2, "c", "Scan 001.pdf"]]);
+    expect(result.rejected).toEqual([expect.objectContaining({ index: 1, clientId: "b", filename: "payload.exe", statusCode: 415, code: "unsupported_type" })]);
+  });
+
+  it("rejects an oversized file by index while the rest of the batch is accepted", async () => {
+    sqlMock.mockReset();
+    sqlMock.mockImplementation(async (strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("from upload_sessions")) return [{ id: "s", user_id: "user-1", org_id: "org-1", status: "pending" }];
+      if (query.includes("from upload_session_files")) return [{ id: "f", session_id: "s", filename: "ok.pdf", mime_type: "application/pdf", size_bytes: 10, source_key: "k", upload_mode: "single", status: "pending", request_index: 1, client_id: "ok" }];
+      return [];
+    });
+    const result = await createDirectUploadSession({
+      userId: "user-1", orgId: "org-1", pipeline: {},
+      files: [
+        { clientId: "huge", filename: "huge.pdf", mimeType: "application/pdf", sizeBytes: 10 ** 13 },
+        { clientId: "ok", filename: "ok.pdf", mimeType: "application/pdf", sizeBytes: 10 },
+      ],
+    });
+    expect(result.rejected).toEqual([expect.objectContaining({ index: 0, clientId: "huge", statusCode: 413, code: "file_too_large" })]);
+    expect(result.files).toHaveLength(1);
+  });
+
+  it("fails the request, naming every file, only when nothing can be accepted", async () => {
+    sqlMock.mockReset();
+    const error = await createDirectUploadSession({
+      userId: "user-1", orgId: "org-1", pipeline: {},
+      files: [{ filename: "a.exe", mimeType: "application/x-msdownload", sizeBytes: 1 }, { filename: "b.dll", mimeType: "application/x-msdownload", sizeBytes: 1 }],
+    }).catch((caught) => caught);
+    expect(error).toBeInstanceOf(ProjectIntakeError);
+    expect(error.statusCode).toBe(415);
+    expect(error.message).toContain("a.exe");
+    expect(error.message).toContain("b.dll");
     expect(sqlMock).not.toHaveBeenCalled();
   });
 
@@ -261,7 +316,7 @@ describe("Direct Upload Session Module", () => {
     expect(toDirectUploadPartCount(9, 8)).toBe(2);
   });
 
-  it("turns completed session files into a Workspace Intake source", () => {
+  it("turns completed session files into a Project Intake source", () => {
     expect(
       directUploadIntakeItems(directUploadSessionFixture()),
     ).toEqual([
@@ -285,7 +340,7 @@ describe("Direct Upload Session Module", () => {
       assertDirectUploadSessionReadyForIntake(
         directUploadSessionFixture({ session: { status: "confirmed" } }),
       ),
-    ).toThrow(WorkspaceIntakeError);
+    ).toThrow(ProjectIntakeError);
 
     // An unfinished file does not block the session; intake reports it instead.
     expect(() =>
@@ -305,8 +360,8 @@ describe("Direct Upload Session Module", () => {
       }),
     );
     expect(done?.content).toEqual({ storedKey: "user-1/raw/contracts.pdf", verifiedSizeBytes: 42 });
-    expect(unfinished?.content).toEqual({ rejected: expect.any(WorkspaceIntakeError) });
-    expect((unfinished?.content as { rejected: WorkspaceIntakeError }).rejected).toMatchObject({
+    expect(unfinished?.content).toEqual({ rejected: expect.any(ProjectIntakeError) });
+    expect((unfinished?.content as { rejected: ProjectIntakeError }).rejected).toMatchObject({
       statusCode: 409,
       message: "late.pdf did not finish uploading",
     });

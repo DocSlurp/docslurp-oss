@@ -13,10 +13,10 @@ async function connect() {
 async function seed(client: Client, prefix: string) {
   await client.query(`insert into "user" (id,name,email) values ($1,'Test',$2)`, [prefix, `${prefix}@example.test`]);
   await client.query(`insert into organizations (id,name,slug,created_by_user_id) values ($1,'Test',$1,$1)`, [prefix]);
-  await client.query(`insert into workspaces (id,org_id,user_id,name) values ($1,$1,$1,'Test')`, [prefix]);
-  await client.query(`insert into workspace_runs (id,org_id,user_id,workspace_id,kind,status,stage,pipeline)
+  await client.query(`insert into projects (id,org_id,user_id,name) values ($1,$1,$1,'Test')`, [prefix]);
+  await client.query(`insert into project_runs (id,org_id,user_id,project_id,kind,status,stage,pipeline)
     values ($1,$2,$2,$2,'upload','failed','embed','{}'),($3,$2,$2,$2,'upload','processing','index','{}')`, [`${prefix}-old`, prefix, `${prefix}-new`]);
-  await client.query(`insert into documents (id,org_id,user_id,workspace_id,run_id,filename,mime_type,source_key,status,canonical_id,created_at)
+  await client.query(`insert into documents (id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status,canonical_id,created_at)
     values ($1,$2,$2,$2,$3,'a.txt','text/plain','old','queued','/a','2026-01-01'),
       ($4,$2,$2,$2,$5,'a.txt','text/plain','new','queued','/a','2026-01-02')`,
   [`${prefix}-old-doc`, prefix, `${prefix}-old`, `${prefix}-new-doc`, `${prefix}-new`]);
@@ -26,14 +26,14 @@ it.skipIf(!url)("retry-first skips the locked Run and preserves its active pendi
   const retry = await connect(), retire = await connect();
   await seed(retry, 'retry-first');
   await retry.query('begin');
-  await retry.query("update workspace_runs set status='processing' where id='retry-first-old'");
+  await retry.query("update project_runs set status='processing' where id='retry-first-old'");
   await retire.query("update documents set status='completed' where id='retry-first-new-doc'");
   await retry.query("update documents set status='queued' where run_id='retry-first-old' and superseded_at is null and status <> 'cancelled'");
   await retry.query('commit');
   expect((await retire.query("select status,superseded_at from documents where id='retry-first-old-doc'")).rows)
     .toEqual([{ status: 'queued', superseded_at: null }]);
   // A later terminal transition can safely repair the skipped history.
-  await retry.query("update workspace_runs set status='failed' where id='retry-first-old'");
+  await retry.query("update project_runs set status='failed' where id='retry-first-old'");
   await retire.query("select retire_replaced_pending_documents('retry-first-old')");
   expect((await retire.query("select status from documents where id='retry-first-old-doc'")).rows[0].status).toBe('cancelled');
 });
@@ -45,7 +45,7 @@ it.skipIf(!url)("retirement-first holds the Run claim through commit so retry ca
   await retire.query("update documents set status='completed' where id='retire-first-new-doc'");
   const pid = (await retry.query('select pg_backend_pid() as pid')).rows[0].pid;
   await retry.query('begin');
-  const starting = retry.query("update workspace_runs set status='processing' where id='retire-first-old'");
+  const starting = retry.query("update project_runs set status='processing' where id='retire-first-old'");
   let waiting = false;
   for (let attempt = 0; attempt < 100; attempt++) {
     waiting = (await observer.query('select 1 from pg_locks where pid=$1 and not granted', [pid])).rowCount! > 0;
@@ -68,16 +68,16 @@ it.skipIf(!url)("same-org publishers commit out of order without waiting or losi
   const revision=async()=>BigInt((await observer.query("select revision from realtime_revisions where org_id='revision-order'")).rows[0].revision);
   const before=await revision();
   await first.query('begin');
-  await first.query("update workspace_runs set stage='first' where id='revision-order-old'");
+  await first.query("update project_runs set stage='first' where id='revision-order-old'");
   await second.query('begin');
-  await second.query("update workspace_runs set stage='second' where id='revision-order-new'");
+  await second.query("update project_runs set stage='second' where id='revision-order-new'");
   await second.query('commit');
   expect(await revision()).toBe(before+1n);
   await first.query('rollback');
   expect(await revision()).toBe(before+1n);
   await first.query('begin');
-  for(let i=0;i<20;i++)await first.query("update workspace_runs set stage='first-again' where id='revision-order-old'");
-  await second.query("update workspace_runs set stage='second-again' where id='revision-order-new'");
+  for(let i=0;i<20;i++)await first.query("update project_runs set stage='first-again' where id='revision-order-old'");
+  await second.query("update project_runs set stage='second-again' where id='revision-order-new'");
   expect(await revision()).toBe(before+2n);
   await first.query('commit');
   expect(await revision()).toBe(before+3n);

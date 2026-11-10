@@ -18,7 +18,7 @@ it("backfills readiness for complete legacy manifests without publishing incompl
     `);
     await applyRemainingMigrations(db, "run_creation_readiness");
     expect((await db.query(`select id, creation_ready_at is not null as ready,
-      creation_expires_at is not null as pending from workspace_runs order by id`)).rows)
+      creation_expires_at is not null as pending from project_runs order by id`)).rows)
       .toEqual([
         { id: "complete", ready: true, pending: false },
         { id: "partial", ready: false, pending: true },

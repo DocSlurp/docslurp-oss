@@ -1,20 +1,28 @@
+import { durableChatAdmissionEnabled } from "../realtime/rollout-scope.js";
 import { nativeOperations } from "../agent-runtime/runtime.js";
 import { sql } from "../db.js";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import { getRequestActor, loadActorScopedWorkspace, resolveActorWorkspaceId } from "../lib/request-actor.js";
+import { getRequestActor, loadActorScopedProject, resolveActorProjectId } from "../lib/request-actor.js";
 import { authorizedChatOperationSnapshot, authorizeChatOperation } from "../services/chat-operation-access.js";
 import { cancelChatOperation, launchChatOperation, readChatOperation } from "../services/chat-operations.js";
-import { workspaceChatDisabledBody } from "../services/workspace-chat.js";
+import { projectChatDisabledBody } from "../services/project-chat.js";
+import { hasRealtimeCanaryMembership, revalidateRealtimeSession } from "../realtime/session.js";
 
-const launchSchema = z.object({ q: z.string().trim().min(1).max(64_000), workspace: z.string().max(128).optional(), sessionId: z.string().max(128).optional(), model: z.string().max(128).optional() }).strict();
+const launchSchema = z.object({ q: z.string().trim().min(1).max(64_000), project: z.string().max(128).optional(), sessionId: z.string().max(128).optional(), model: z.string().max(128).optional() }).strict();
+function operationErrorResponse(error: unknown, c: Context) {
+  if (error instanceof Error && error.message === "durable_chat_invalid_admission_policy") console.error("[native-chat] admission_refused invalid_policy");
+  return error instanceof Error && error.message === "operation_forbidden"
+    ? c.json({error:"forbidden"},403)
+    : c.json({error:"operation_unavailable"},409);
+}
 /** Session-only, opt-in route. Legacy API-key chat retains its existing contract. */
 export const chatOperationRoutes = new Hono()
-  .onError((_error,c) => c.json({error:"operation_unavailable"},409))
+  .onError(operationErrorResponse)
   .use("*", async (c, next) => {
     if (process.env.DOCSLURP_DURABLE_CHAT !== "1") return c.json({ error: "not_enabled" }, 404);
     if (getRequestActor(c).type !== "session") return c.json({ error: "session_required" }, 403);
-    try { await next(); } catch { return c.json({ error: "operation_unavailable" }, 409); }
+    try { await next(); } catch (error) { return operationErrorResponse(error,c); }
   })
   .get("/", async c => {
     const actor = getRequestActor(c);
@@ -25,7 +33,29 @@ export const chatOperationRoutes = new Hono()
     }
     return c.json({operations});
   })
-  .post("/", durableChatLaunchHandler)
+  .post("/", c => durableChatLaunchHandler(c))
+  .post("/:id/tasks", c => durableChatLaunchHandler(c, z.uuid().parse(c.req.param("id"))))
+  .post("/:id/retry", async c => {
+    if (!durableChatAdmissionEnabled()) return c.json({error:"admission_paused"},403);
+    const id=z.uuid().parse(c.req.param("id"));
+    // No replacement query/model/native identity is accepted on a retry.
+    if(Number(c.req.header("content-length")??0)>256)return c.json({error:"input_too_large"},413);
+    const reader=c.req.raw.body?.getReader();
+    let raw="";let bytes=0;
+    if(reader)try {
+      const decoder=new TextDecoder();
+      for(;;){const {done,value}=await reader.read();if(done)break;bytes+=value.byteLength;
+        if(bytes>256){await reader.cancel();return c.json({error:"input_too_large"},413);}raw+=decoder.decode(value,{stream:true});}
+      raw+=decoder.decode();
+    }finally{reader.releaseLock();}
+    const body=z.object({authorizeNewAttempt:z.literal(true),observedAttemptId:z.string().min(1).max(128)}).strict().parse(JSON.parse(raw));
+    const actor=getRequestActor(c);
+    const project=await authorizeChatOperation(actor,id);
+    if(!await hasRealtimeCanaryMembership(actor.userId,project.orgId ?? undefined))return c.json({error:"forbidden"},403);
+    if(await projectChatDisabledBody(project.id,actor.userId))return c.json({error:"forbidden"},403);
+    const accepted=await (await nativeOperations(async()=>actor)).retry(id,c.req.header("Idempotency-Key")??"",body.observedAttemptId);
+    return c.json({operationId:accepted.operationId,rootId:accepted.rootId,status:accepted.status},202);
+  })
   .get("/:id", async c => {
     const actor = getRequestActor(c);
     await authorizeChatOperation(actor, c.req.param("id"));
@@ -41,7 +71,8 @@ export const chatOperationRoutes = new Hono()
     return c.json({ accepted: true });
   });
 
-export async function durableChatLaunchHandler(c: Context) {
+export async function durableChatLaunchHandler(c: Context, parentId?: string) {
+  if (!durableChatAdmissionEnabled()) return c.json({error:"admission_paused"},403);
   if (Number(c.req.header("content-length") ?? 0) > 128_000) return c.json({ error: "input_too_large" }, 413);
   const reader = c.req.raw.body?.getReader();
   const chunks: Uint8Array[] = [];
@@ -61,11 +92,17 @@ export async function durableChatLaunchHandler(c: Context) {
   const body = launchSchema.parse(JSON.parse(raw));
   const actor = getRequestActor(c);
   if (actor.type !== "session") return c.json({ error: "forbidden" }, 403);
-  const id = await resolveActorWorkspaceId(actor, body.workspace);
-  const workspace = await loadActorScopedWorkspace(id, actor);
-  if (!workspace?.orgId || await workspaceChatDisabledBody(id, actor.userId)) return c.json({ error: "forbidden" }, 403);
+  if (!await revalidateRealtimeSession(actor, AbortSignal.timeout(5000))) throw new Error("operation_forbidden");
+  // A child inherits its authorized parent's project and organization. Request
+  // selectors never redirect accepted work into a different task tree scope.
+  if (parentId && body.project !== undefined) return c.json({ error: "project_inherited" }, 400);
+  const parentProject = parentId ? await authorizeChatOperation(actor, parentId) : undefined;
+  const id = parentProject?.id ?? await resolveActorProjectId(actor, body.project);
+  const project = parentProject ?? await loadActorScopedProject(id, actor);
+  if (!project?.orgId || await projectChatDisabledBody(id, actor.userId)) return c.json({ error: "forbidden" }, 403);
+  if (!await hasRealtimeCanaryMembership(actor.userId, project.orgId)) return c.json({ error: "forbidden" }, 403);
   const native=await nativeOperations(async()=>actor);
-  const task = await launchChatOperation({ userId: actor.userId, workspaceId: id, orgId: workspace.orgId, key: c.req.header("Idempotency-Key") ?? "", input: { ...body, authSessionId: actor.sessionId }, runtime:"mastra" });
+  const task = await launchChatOperation({ userId: actor.userId, projectId: id, orgId: project.orgId, key: c.req.header("Idempotency-Key") ?? "", input: { ...body, authSessionId: actor.sessionId }, parentId, runtime:"mastra" });
   const accepted=await native.launch(task.id);
   return c.json({operationId:accepted.operationId,rootId:accepted.rootId,status:accepted.status},202);
 }

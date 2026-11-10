@@ -2,23 +2,23 @@ import { addTraceMetadata } from "@docslurp/shared/observability";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 
-import { apiError, parseWorkspaceInput, type WorkspaceInputRef, type WorkspaceRecord } from "@docslurp/shared";
+import { apiError, parseProjectInput, type ProjectInputRef, type ProjectRecord } from "@docslurp/shared";
 
 import { apiErrorResponse } from "./api-error.js";
 import { auth, appDbPool } from "./auth.js";
 import { isConfiguredAdminUser } from "./admin-emails.js";
 import { evaluateMfaPolicy } from "./auth-mfa.js";
-import { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace } from "./api-key-workspace-scope.js";
+import { apiKeyAllowsProject, apiKeyCanUseProject } from "./api-key-project-scope.js";
 
-export { apiKeyAllowsWorkspace, apiKeyCanUseWorkspace };
+export { apiKeyAllowsProject, apiKeyCanUseProject };
 export { isFirstPartyAppActor } from "./first-party-app.js";
-import { setCurrentRequestApiKeyId, setCurrentRequestApiKeyWorkspaceIds, setCurrentRequestOrgId, setCurrentRequestSessionId, setCurrentRequestUserId } from "./request-context.js";
-import { ApiKeyPolicyError, ClientKeyWorkspacesRequiredError, validateApiKey, type ValidatedKey } from "../services/api-keys.js";
+import { setCurrentRequestApiKeyId, setCurrentRequestApiKeyProjectIds, setCurrentRequestOrgId, setCurrentRequestSessionId, setCurrentRequestUserId } from "./request-context.js";
+import { ApiKeyPolicyError, ClientKeyProjectsRequiredError, validateApiKey, type ValidatedKey } from "../services/api-keys.js";
 
-export { ApiKeyPolicyError, ClientKeyWorkspacesRequiredError };
+export { ApiKeyPolicyError, ClientKeyProjectsRequiredError };
 import { validateOAuthApiToken } from "../services/mcp-oauth.js";
-import { ensureDefaultWorkspace, findWorkspaceForInput, getWorkspace, type WorkspaceInputScope } from "../services/workspaces.js";
-import { invalidWorkspaceInputError, WorkspaceAccessError, workspaceInputNotFoundError } from "../services/default-workspace.js";
+import { ensureDefaultProject, findProjectForInput, getProject, type ProjectInputScope } from "../services/projects.js";
+import { invalidProjectInputError, ProjectAccessError, projectInputNotFoundError } from "../services/default-project.js";
 
 export interface SessionUser {
   isAdmin?: boolean;
@@ -141,7 +141,7 @@ export function setRequestActor(c: Context, actor: RequestActor): void {
   c.set("requestActor", actor);
   setCurrentRequestUserId(actor.userId);
   setCurrentRequestApiKeyId(actor.type === "apiKey" ? actor.apiKey.keyId : null);
-  setCurrentRequestApiKeyWorkspaceIds(actor.type === "apiKey" ? actor.apiKey.workspaceIds : null);
+  setCurrentRequestApiKeyProjectIds(actor.type === "apiKey" ? actor.apiKey.projectIds : null);
   setCurrentRequestSessionId(actor.type === "session" ? actor.sessionId : null);
   if (actor.type === "apiKey") setCurrentRequestOrgId(actor.apiKey.orgId);
 
@@ -241,63 +241,63 @@ export function assertActorServerApiKey(actor: RequestActor | null | undefined):
   }
 }
 
-export function assertActorWorkspaceOrgScope(
+export function assertActorProjectOrgScope(
   actor: RequestActor | null | undefined,
-  workspace: { id?: string; workspaceId?: string; orgId: string },
+  project: { id?: string; projectId?: string; orgId: string },
 ): void {
   if (!actor || actor.type !== "apiKey") {
     return;
   }
 
-  if (!actor.apiKey.orgId || workspace.orgId !== actor.apiKey.orgId) {
-    throw new Error("API key is not scoped to this workspace organization");
+  if (!actor.apiKey.orgId || project.orgId !== actor.apiKey.orgId) {
+    throw new Error("API key is not scoped to this project organization");
   }
-  if (!apiKeyAllowsWorkspace(actor.apiKey, workspace.workspaceId ?? workspace.id)) {
-    throw new Error("API key is not allowed to use this workspace");
+  if (!apiKeyAllowsProject(actor.apiKey, project.projectId ?? project.id)) {
+    throw new Error("API key is not allowed to use this project");
   }
 }
 
-export async function loadActorScopedWorkspace(
-  workspaceRef: string,
+export async function loadActorScopedProject(
+  projectRef: string,
   actor: RequestActor,
   options: { refineNames?: boolean } = {},
-): Promise<WorkspaceRecord | null> {
-  // A blank reference (e.g. a missing stored ID) is never the default workspace here.
-  if (!workspaceRef?.trim()) return null;
-  const ref = parseWorkspaceInput(workspaceRef);
-  const workspaceId = ref.kind === "id"
+): Promise<ProjectRecord | null> {
+  // A blank reference (e.g. a missing stored ID) is never the default project here.
+  if (!projectRef?.trim()) return null;
+  const ref = parseProjectInput(projectRef);
+  const projectId = ref.kind === "id"
     ? ref.id
     : ref.kind === "default"
-      ? await resolveActorWorkspaceId(actor, null)
+      ? await resolveActorProjectId(actor, null)
       : ref.kind === "slug"
-        ? (await findWorkspaceForInput(ref, actorWorkspaceScope(actor)))?.id
+        ? (await findProjectForInput(ref, actorProjectScope(actor)))?.id
         : undefined;
-  if (!workspaceId) return null;
-  const workspace = await getWorkspace(workspaceId, actor.userId, options);
-  if (!workspace) {
+  if (!projectId) return null;
+  const project = await getProject(projectId, actor.userId, options);
+  if (!project) {
     return null;
   }
 
-  if (actor.type === "apiKey" && !apiKeyCanUseWorkspace(actor.apiKey, workspace)) {
+  if (actor.type === "apiKey" && !apiKeyCanUseProject(actor.apiKey, project)) {
     return null;
   }
 
-  addTraceMetadata({ workspaceId: workspace.id, orgId: workspace.orgId });
-  setCurrentRequestOrgId(workspace.orgId);
-  return workspace;
+  addTraceMetadata({ projectId: project.id, orgId: project.orgId });
+  setCurrentRequestOrgId(project.orgId);
+  return project;
 }
 
 /**
- * Checks API key scope and workspace access for a given request.
+ * Checks API key scope and project access for a given request.
  *
  * - If the actor is NOT an API key, returns null (session users pass through).
  * - If the actor IS an API key but lacks the required scope, returns a 403 response.
- * - If the actor IS an API key with the scope but the workspace is not accessible, returns a 404 response.
- * - Returns null when access is granted, so callers can do: `const denied = await assertApiKeyWorkspaceAccess(...); if (denied) return denied;`
+ * - If the actor IS an API key with the scope but the project is not accessible, returns a 404 response.
+ * - Returns null when access is granted, so callers can do: `const denied = await assertApiKeyProjectAccess(...); if (denied) return denied;`
  */
-export async function assertApiKeyWorkspaceAccess(
+export async function assertApiKeyProjectAccess(
   c: Context,
-  workspaceId: string,
+  projectId: string,
   scope: string,
 ): Promise<Response | null> {
   const actor = getRequestActor(c);
@@ -307,118 +307,118 @@ export async function assertApiKeyWorkspaceAccess(
   if (!actorHasAnyApiKeyScope(actor, [scope])) {
     return apiErrorResponse(c, 403, "forbidden", "Forbidden");
   }
-  const workspace = await loadActorScopedWorkspace(workspaceId, actor);
-  return workspace ? null : apiErrorResponse(c, 404, "workspace_not_found", "Workspace not found");
+  const project = await loadActorScopedProject(projectId, actor);
+  return project ? null : apiErrorResponse(c, 404, "project_not_found", "Project not found");
 }
 
 /**
- * Where an actor's `workspace` values may resolve: an API key only inside its
- * organization and workspace allowlist; a session inside `orgId` when the
- * request names one, otherwise any workspace the user can reach.
+ * Where an actor's `project` values may resolve: an API key only inside its
+ * organization and project allowlist; a session inside `orgId` when the
+ * request names one, otherwise any project the user can reach.
  */
-export function actorWorkspaceScope(actor: RequestActor, orgId?: string | null): WorkspaceInputScope {
+export function actorProjectScope(actor: RequestActor, orgId?: string | null): ProjectInputScope {
   if (actor.type === "apiKey") {
-    return { userId: actor.userId, orgId: actor.apiKey.orgId ?? null, allowedWorkspaceIds: actor.apiKey.workspaceIds ?? null };
+    return { userId: actor.userId, orgId: actor.apiKey.orgId ?? null, allowedProjectIds: actor.apiKey.projectIds ?? null };
   }
   return { userId: actor.userId, orgId: orgId?.trim() || null };
 }
 
 /**
- * Looks up a public `workspace` value (UUID, slug, former slug or name; see
- * parseWorkspaceInput) among the workspaces the actor may use. Returns the
- * parsed reference with the match, or `workspace: null` when nothing matches,
- * so uploads can create the workspace. Omitted and "default" values come back
+ * Looks up a public `project` value (UUID, slug, former slug or name; see
+ * parseProjectInput) among the projects the actor may use. Returns the
+ * parsed reference with the match, or `project: null` when nothing matches,
+ * so uploads can create the project. Omitted and "default" values come back
  * as `{ kind: "default" }` for the caller's default handling. Throws a 400 for
  * a value with no letters or digits.
  */
-export async function lookupActorWorkspace(
+export async function lookupActorProject(
   actor: RequestActor,
   input: string | null | undefined,
   orgId?: string | null,
 ): Promise<
   | { ref: { kind: "default" } }
-  | { ref: Extract<WorkspaceInputRef, { kind: "id" } | { kind: "slug" }>; workspace: { id: string; orgId: string } | null }
+  | { ref: Extract<ProjectInputRef, { kind: "id" } | { kind: "slug" }>; project: { id: string; orgId: string } | null }
 > {
-  const ref = parseWorkspaceInput(input);
-  if (ref.kind === "invalid") throw invalidWorkspaceInputError(ref.input);
+  const ref = parseProjectInput(input);
+  if (ref.kind === "invalid") throw invalidProjectInputError(ref.input);
   if (ref.kind === "default") return { ref };
-  return { ref, workspace: await findWorkspaceForInput(ref, actorWorkspaceScope(actor, orgId)) };
+  return { ref, project: await findProjectForInput(ref, actorProjectScope(actor, orgId)) };
 }
 
 /**
- * Resolves the workspace a request targets to its UUID. An explicit UUID,
- * slug, former slug or name wins and must name a workspace the actor can use
- * (404 `workspace_not_found` naming the slug otherwise); an omitted value or
- * the reserved "default" lands in the organization's default workspace (the
+ * Resolves the project a request targets to its UUID. An explicit UUID,
+ * slug, former slug or name wins and must name a project the actor can use
+ * (404 `project_not_found` naming the slug otherwise); an omitted value or
+ * the reserved "default" lands in the organization's default project (the
  * API key's org, the requested org, or the user's personal org).
  */
-export async function resolveActorWorkspaceId(
+export async function resolveActorProjectId(
   actor: RequestActor,
-  workspace?: string | null,
+  project?: string | null,
   orgId?: string | null,
 ): Promise<string> {
-  const lookup = await lookupActorWorkspace(actor, workspace, orgId);
+  const lookup = await lookupActorProject(actor, project, orgId);
   if (lookup.ref.kind !== "default") {
-    const found = "workspace" in lookup ? lookup.workspace : null;
-    if (!found) throw workspaceInputNotFoundError(lookup.ref.kind === "slug" ? { slug: lookup.ref.slug } : { id: lookup.ref.id });
+    const found = "project" in lookup ? lookup.project : null;
+    if (!found) throw projectInputNotFoundError(lookup.ref.kind === "slug" ? { slug: lookup.ref.slug } : { id: lookup.ref.id });
     // The lookup is already scoped to the key's allowlist; checked again here as the request boundary.
-    if (actor.type === "apiKey" && !apiKeyAllowsWorkspace(actor.apiKey, found.id)) throw new ApiKeyWorkspaceNotAllowedError();
+    if (actor.type === "apiKey" && !apiKeyAllowsProject(actor.apiKey, found.id)) throw new ApiKeyProjectNotAllowedError();
     return found.id;
   }
   if (actor.type === "apiKey") {
-    const allowlist = actor.apiKey.workspaceIds ?? [];
-    const defaultWorkspace = await ensureDefaultWorkspace({ userId: actor.userId, orgId: actor.apiKey.orgId });
-    // A key bound to workspaces defaults to the org default only when it is
-    // allowlisted; otherwise to the key's first allowlisted workspace.
-    return allowlist.length === 0 || allowlist.includes(defaultWorkspace.id) ? defaultWorkspace.id : allowlist[0]!;
+    const allowlist = actor.apiKey.projectIds ?? [];
+    const defaultProject = await ensureDefaultProject({ userId: actor.userId, orgId: actor.apiKey.orgId });
+    // A key bound to projects defaults to the org default only when it is
+    // allowlisted; otherwise to the key's first allowlisted project.
+    return allowlist.length === 0 || allowlist.includes(defaultProject.id) ? defaultProject.id : allowlist[0]!;
   }
-  const defaultWorkspace = await ensureDefaultWorkspace({ userId: actor.userId, orgId });
-  return defaultWorkspace.id;
+  const defaultProject = await ensureDefaultProject({ userId: actor.userId, orgId });
+  return defaultProject.id;
 }
 
 /**
- * An explicit workspace outside the API key's allowlist. It answers 404 like
- * any other inaccessible workspace (Hono renders an HTTPException's response).
+ * An explicit project outside the API key's allowlist. It answers 404 like
+ * any other inaccessible project (Hono renders an HTTPException's response).
  */
-export class ApiKeyWorkspaceNotAllowedError extends HTTPException {
-  /** Same code the workspace-access errors use, so one condition never splits across two codes. */
-  readonly code = "workspace_not_found";
+export class ApiKeyProjectNotAllowedError extends HTTPException {
+  /** Same code the project-access errors use, so one condition never splits across two codes. */
+  readonly code = "project_not_found";
   constructor() {
-    super(404, { message: "Workspace not found", res: Response.json(apiError("workspace_not_found", "Workspace not found"), { status: 404 }) });
+    super(404, { message: "Project not found", res: Response.json(apiError("project_not_found", "Project not found"), { status: 404 }) });
   }
 }
 
 /**
- * The workspace boundary for routes that act on one workspace: resolves a UUID,
+ * The project boundary for routes that act on one project: resolves a UUID,
  * slug, former slug, name, `default` or omitted reference (see
- * resolveActorWorkspaceId), then checks the actor can see it. Throws a 404
- * WorkspaceAccessError rather than handing an unknown ID to SQL.
+ * resolveActorProjectId), then checks the actor can see it. Throws a 404
+ * ProjectAccessError rather than handing an unknown ID to SQL.
  */
-export async function requireActorWorkspace(
+export async function requireActorProject(
   actor: RequestActor,
-  workspaceRef?: string | null,
+  projectRef?: string | null,
   orgId?: string | null,
-): Promise<WorkspaceRecord> {
-  const workspaceId = await resolveActorWorkspaceId(actor, workspaceRef, orgId);
-  const workspace = await loadActorScopedWorkspace(workspaceId, actor);
-  if (!workspace) {
-    throw new WorkspaceAccessError(404, "workspace_not_found", "Workspace not found");
+): Promise<ProjectRecord> {
+  const projectId = await resolveActorProjectId(actor, projectRef, orgId);
+  const project = await loadActorScopedProject(projectId, actor);
+  if (!project) {
+    throw new ProjectAccessError(404, "project_not_found", "Project not found");
   }
-  return workspace;
+  return project;
 }
 
 /**
- * The workspace boundary for list and filter routes, where an omitted
- * reference means "every workspace the actor can see" rather than the default
- * workspace. Any given reference, including `default`, must resolve to an
- * accessible workspace and comes back as its UUID.
+ * The project boundary for list and filter routes, where an omitted
+ * reference means "every project the actor can see" rather than the default
+ * project. Any given reference, including `default`, must resolve to an
+ * accessible project and comes back as its UUID.
  */
-export async function resolveActorWorkspaceFilter(
+export async function resolveActorProjectFilter(
   actor: RequestActor,
-  workspaceRef?: string | null,
+  projectRef?: string | null,
   orgId?: string | null,
 ): Promise<string | undefined> {
-  const ref = workspaceRef?.trim();
+  const ref = projectRef?.trim();
   if (!ref) return undefined;
-  return (await requireActorWorkspace(actor, ref, orgId)).id;
+  return (await requireActorProject(actor, ref, orgId)).id;
 }

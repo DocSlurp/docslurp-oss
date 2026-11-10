@@ -7,12 +7,13 @@
  */
 
 import { isShutdownMessage } from "../temporal/failure-classification.js";
+import { findArtifactReadError } from "./artifact-read-error.js";
 import { findHungWorkError, HungWorkError } from "./hung-work.js";
 import { findProviderRetryableError } from "./provider-retry.js";
 
 /**
  * A Run-wide stop that is not the Document's fault: a spend cap reached, or a
- * workspace policy (privacy mode, disabled provider) that forbids the work for
+ * project policy (privacy mode, disabled provider) that forbids the work for
  * every Document. It fails the stage instead of skipping one Document.
  */
 export class RunPolicyError extends Error {
@@ -44,6 +45,14 @@ const INFRASTRUCTURE_ERROR_NAMES = new Set([
   // The worker, not the Document: a command's teardown failed here, or this worker is quarantined.
   "CommandTeardownError",
   "WorkerQuarantinedError",
+  // OCR could not run (VM creation, capacity, a deadline): retried, never the Document's fault.
+  "OcrInfrastructureError",
+  // The parser sandbox failed (VM creation or hardening, a leftover kill, a control deadline): retried (real-Modal F1).
+  "SandboxInfrastructureError",
+  // A charge's spend check could not decide (db/spend-check.ts): refused, retried, never a verdict on the Document.
+  "SpendCheckUnavailableError",
+  // The PDF page counter is missing or broke its contract (lib/pdf-page-count.ts): the platform's fault, retried.
+  "PdfPageCountUnavailableError",
 ]);
 
 function causeChain(error: unknown): unknown[] {
@@ -58,6 +67,11 @@ function causeChain(error: unknown): unknown[] {
 
 export function isDocumentLevelFailure(error: unknown, signal?: AbortSignal): boolean {
   if (signal?.aborted) return false;
+  // A recorded artifact that is missing, malformed or outside the bucket is a verdict on the document (it fails with
+  // the reason, no strategy or retry reads it differently). A failed read of a healthy artifact is the store's: the
+  // stage reruns the document.
+  const unreadable = findArtifactReadError(error);
+  if (unreadable) return !unreadable.retryable;
   for (const link of causeChain(error)) {
     if (!(link instanceof Error)) continue;
     if (link instanceof RunPolicyError) return false;

@@ -6,15 +6,15 @@ Choose a tool based on the result you need:
 
 | Tool | Result | AI generation |
 | --- | --- | --- |
-| `listWorkspaces` | Authorized workspaces, slugs, default, document/page counts and processing status | None |
-| `upload` | Storage transfer descriptors for up to 10 files, small inline files, or direct server-side ingestion from remote URLs | Workspace ingestion settings |
-| `completeUpload` | Optional single-PUT completion fallback; normal uploads finalize automatically | Workspace ingestion settings |
+| `listProjects` | Authorized projects, slugs, default, document/page counts and processing status | None |
+| `upload` | Storage transfer descriptors for up to 10 files, small inline files, or direct server-side ingestion from remote URLs | Project ingestion settings |
+| `completeUpload` | Optional single-PUT completion fallback; normal uploads finalize automatically | Project ingestion settings |
 | `suggestQueries` | Prior queries and suggestions | None |
 | `search` | Portable text passages with document/page citation metadata | None |
-| `chat` | Grounded answer, citations, conversation session and usage | Workspace-configured model |
+| `chat` | Grounded answer, citations, conversation session and usage | Project-configured model |
 | `openUploader` | MCP Apps upload widget; only listed when `DOCSLURP_MCP_APPS_UI_ENABLED=true` ([details](#mcp-apps-uploader-openuploader)) | None |
-| `getUploadStatus` | Session acceptance with `sessionId`, or how the workspace's files processed: pages, text and images per page, vision, searchable pages with reasons, settings and recommendations | None |
-| `extract` | Same inputs as `upload` plus `retentionDays`, `notifyEmail` and `download`; the files and every output are deleted when the retention window ends (48 hours free by default) | Workspace ingestion settings |
+| `getUploadStatus` | Session acceptance with `sessionId`, or how the project's files processed: pages, text and images per page, vision, searchable pages with reasons, settings and recommendations | None |
+| `extract` | Same inputs as `upload` plus `retentionDays`, `notifyEmail` and `download`; the files and every output are deleted when the retention window ends (48 hours free by default) | Project ingestion settings |
 | `getMediaEvidence` | An indexed video or audio document's transcript, timestamped frame descriptions and summary, with `nextOffset` for continuation | None |
 | `webSearch` | Ranked public web results (URL, title, snippet, date), optionally with page Markdown; listed only when the deployment enables web tools (`WEB_TOOLS_ENABLED=true`) and a provider is configured ([web tools](web-tools.md)) | None (charged in web credits) |
 
@@ -24,9 +24,9 @@ Search and chat need only a question:
 {"q":"What are the support hours?"}
 ```
 
-Without `workspace`, tools use the organization default workspace. Add `"workspace":"legal-contracts"` (a workspace ID, slug or name: `"Legal Contracts"` finds the same workspace) to target another one. The `upload` tool creates the workspace when a name matches none of yours, so agents should pass a new name only when the user asks for a new workspace; every other tool answers `workspace_not_found`. See [Workspaces](https://docslurp.io/docs/http#workspaces).
+Without `project`, tools use the organization default project. Add `"project":"legal-contracts"` (a project ID, slug or name: `"Legal Contracts"` finds the same project) to target another one. The `upload` tool creates the project when a name matches none of yours, so agents should pass a new name only when the user asks for a new project; every other tool answers `project_not_found`. See [Projects](https://docslurp.io/docs/http#projects).
 
-Continue a chat by passing its returned `sessionId`. Search is independent of the answer model: pass the returned text and citations to any LLM for your own RAG workflow. Retrieval can incur embedding usage; chat additionally incurs generation usage. `search` requires the `search` scope and `chat` requires the `chat` scope; both check workspace access against the authenticated organization. An OAuth client that omits `scope` is granted all four MCP scopes (`search`, `chat`, `read`, `ingest`); request fewer to narrow it.
+Continue a chat by passing its returned `sessionId`. Search is independent of the answer model: pass the returned text and citations to any LLM for your own RAG workflow. Retrieval can incur embedding usage; chat additionally incurs generation usage. `search` requires the `search` scope and `chat` requires the `chat` scope; both check project access against the authenticated organization. An OAuth client that omits `scope` is granted all four MCP scopes (`search`, `chat`, `read`, `ingest`); request fewer to narrow it.
 
 Run multiple retrieval queries in one call:
 
@@ -34,23 +34,23 @@ Run multiple retrieval queries in one call:
 {
   "queries": [
     {"q":"Support hours?"},
-    {"workspace":"legal-contracts","q":"Escalation process?"}
+    {"project":"legal-contracts","q":"Escalation process?"}
   ]
 }
 ```
 
-Parallel retrieval defaults to at most four in-flight queries; set `concurrency` from 1 through 8 when needed. Each query supports optional `workspace`, `limit`, `minScore` (relevance floor, 0 disables it; responses carry `noMatch` when nothing relevant remains), `documentId`, `filenameContains`, and comma-separated `tags`. The batch envelope is validated before retrieval starts. Results stay in input order:
+Parallel retrieval defaults to at most four in-flight queries; set `concurrency` from 1 through 8 when needed. Each query supports optional `project`, `limit`, `minScore` (relevance floor, 0 disables it; responses carry `noMatch` when nothing relevant remains), `documentId`, `filenameContains`, and comma-separated `tags`. The batch envelope is validated before retrieval starts. Results stay in input order:
 
 ```json
 {
   "results": [
     {"ok":true,"data":{"results":[],"sessionId":"SEARCH_SESSION_ID","availability":{}}},
-    {"ok":false,"error":{"code":"WORKSPACE_NOT_FOUND","message":"Workspace not found","status":404}}
+    {"ok":false,"error":{"code":"PROJECT_NOT_FOUND","message":"Project not found","status":404}}
   ]
 }
 ```
 
-Read-only estimate tools (`updateEstimate`, `searchSettingsEstimate`, `reprocessEstimate`, `fullIndexEstimate`, `indexingModeEstimate`, `graphRebuildEstimate`, `uploadEstimate`) price an operation before you start it, and `getJob` reads a background job; `getJob` needs a `search` or `ingest` key. An estimate tool is listed only to keys that could perform the operation: `updateEstimate`, `indexingModeEstimate` and `graphRebuildEstimate` need `workspaces:manage` on a server key, `fullIndexEstimate` and `uploadEstimate` need `ingest`, `reprocessEstimate` needs `ingest` on a server key, and `searchSettingsEstimate` is available to signed-in sessions only. See [config-change jobs](config-change-jobs.md).
+Read-only estimate tools (`updateEstimate`, `searchSettingsEstimate`, `reprocessEstimate`, `fullIndexEstimate`, `indexingModeEstimate`, `graphRebuildEstimate`, `uploadEstimate`) price an operation before you start it, and `getJob` reads a background job; `getJob` needs a `search` or `ingest` key. An estimate tool is listed only to keys that could perform the operation: `updateEstimate`, `indexingModeEstimate` and `graphRebuildEstimate` need `projects:manage` on a server key, `fullIndexEstimate` and `uploadEstimate` need `ingest`, `reprocessEstimate` needs `ingest` on a server key, and `searchSettingsEstimate` is available to signed-in sessions only. See [config-change jobs](config-change-jobs.md).
 
 The remote endpoint supports modern per-request MCP and stateless legacy Streamable HTTP clients. Stdio-only clients can use `docslurp mcp-server` (alias `docslurp mcp`) from `@docslurp/cli`; it relays to the REST tool adapters (`/v1/mcp/tools`) and exposes the same tools except `openUploader`, which needs an MCP Apps host. It uses a stored `docslurp login` or `DOCSLURP_API_KEY`. Transport and adapter calls share the same authorization and search/chat implementation, without an internal network hop or forwarding credentials.
 
@@ -62,8 +62,8 @@ Which hosts render it: hosts that implement the MCP Apps extension (`io.modelcon
 
 What it does:
 
-- `openUploader` is read-only. It resolves an existing workspace (default if omitted), lists up to 50 workspaces the caller may upload to and returns the limits (10 files per batch, 5 GiB per file). It never creates a workspace and never returns upload URLs. An unknown workspace name fails with `Workspace not found`.
-- The workspace list and the resolved workspace follow the same rule as the upload route: members who can write to a workspace, and viewers of the default workspace, may upload. Viewers of other read-only shares may not, and those workspaces are not listed.
+- `openUploader` is read-only. It resolves an existing project (default if omitted), lists up to 50 projects the caller may upload to and returns the limits (10 files per batch, 5 GiB per file). It never creates a project and never returns upload URLs. An unknown project name fails with `Project not found`.
+- The project list and the resolved project follow the same rule as the upload route: members who can write to a project, and viewers of the default project, may upload. Viewers of other read-only shares may not, and those projects are not listed.
 - The widget calls `uploadEstimate` and `upload` through the host, PUTs each file directly to the presigned URL from the browser, then calls `completeUpload` and polls `getUploadStatus`. The widget requests single-part uploads (`singlePart: true`), so every file is one PUT and the 32 MiB multipart threshold does not apply. The server rejects a single-part file over 5 GiB, so larger files fail at `upload`; use the CLI or SDK for those.
 - Presigned URLs live 15 minutes (900 s). The widget does not send file bytes through DocSlurp or the MCP endpoint.
 - Widget tool calls carry `_meta` `docslurp/origin: "mcp-app-upload"` and `docslurp/widgetVersion`. The server records both values in the MCP request log and span, so widget traffic can be told apart from model traffic. Only these two whitelisted values are recorded, never tool arguments. Hosts may strip `_meta`; a missing tag means the origin is unknown, not that the call came from the model.
@@ -227,7 +227,7 @@ Each item carries exactly one of `text` (UTF-8) or `contentBase64` (standard or
 URL-safe). Up to 10 files and 512 KiB of decoded bytes per call fit the 1 MiB MCP
 request limit. `mimeType` is optional; the extension decides when it is omitted.
 Inline files go through the same intake as multipart uploads, so ingestion starts
-immediately. The response carries workspace and run IDs for `getUploadStatus`;
+immediately. The response carries project and run IDs for `getUploadStatus`;
 there is no `sessionId`. Reuse `idempotencyKey` when you retry.
 
 ## Testing with real clients
@@ -253,8 +253,8 @@ a stub.
 - `server/src/lib/mcp-pi.test.ts` wraps discovered tools for Pi's agent loop and
   checks argument validation and error delivery.
 - `server/src/__tests__/chat-completions-openai-sdk.test.ts` drives `/v1/models` and
-  `/v1/chat/completions` with the official `openai` SDK: `workspace:default` and
-  `workspace:<slug>`, streaming to `[DONE]`, and the SDK's 401/404/400 error classes.
+  `/v1/chat/completions` with the official `openai` SDK: `project:default` and
+  `project:<slug>`, streaming to `[DONE]`, and the SDK's 401/404/400 error classes.
 
 To try Pi against a running server by hand (a real sign-in in your browser; model
 calls are billed by whichever provider Pi uses):
@@ -308,4 +308,4 @@ References: [MCP tools](https://modelcontextprotocol.io/specification/2026-07-28
 
 ### One search surface
 
-Use `search({ q: "notice period" })` for one query or `search({ queries: [{ q: "notice period" }, { q: "eligibility" }], concurrency: 2 })` for a batch. Batches accept 1–20 queries, preserve input order, and return `{ results: [{ ok, data?, error? }] }`. Put workspace and filters inside each query. The SDK and `POST /v1/search` accept the same two forms.
+Use `search({ q: "notice period" })` for one query or `search({ queries: [{ q: "notice period" }, { q: "eligibility" }], concurrency: 2 })` for a batch. Batches accept 1–20 queries, preserve input order, and return `{ results: [{ ok, data?, error? }] }`. Put project and filters inside each query. The SDK and `POST /v1/search` accept the same two forms.

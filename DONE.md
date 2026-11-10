@@ -1,3 +1,57 @@
+## Constrained image-transcription endpoint selection (2026-11-10)
+
+- Restrict the pinned transcription profile and its pricing catalog to the remaining approved hosts. Initial requests and refusal retries preserve that allowlist, latency preference and existing price ceiling; request-body fixtures remain immutable.
+
+## Independent native admission pause (2026-11-10)
+
+- Add a strict optional admission switch for new native root, child and retry attempts while preserving authorized discovery, retained output and Stop. Recover a lost ACK during pause with real native ownership and migrated SQL authorization, without a duplicate task or paid model call. Council findings, resolutions and limits: `docs/native-admission-review-20261110.md`. Host activation remains separate.
+
+## Organization-scoped realtime canary admission (2026-11-10)
+
+- Add a bounded, fail-closed organization allowlist to authenticated socket/resource delivery and new native launch, child and retry admission. Preserve existing session/MFA/project policy, accepted task execution and authorized HTTP recovery/Stop. Fresh membership, malformed config, foreign scopes, revoked sessions and oversized admission regressions pass. Review: `docs/realtime-canary-review-20261110.md`.
+
+## Exact page-image readiness observation (2026-11-09)
+
+- Add a bounded session-authorized page/run/quality readiness resource to the existing dashboard socket. Publish no content or URLs and preserve the existing render workflow, isolated execution, HTTP initiation and on-demand artifact fetch. Commit/rollback, tenant, withheld-artifact and protocol regressions pass. Review and client repair notes: `docs/page-image-observation.md`. Production activation remains separate.
+
+## Explicit native child retry attempts (2026-11-09)
+
+- Add session-authorized, idempotent retries with stable logical identity, distinct native attempts and retained prior output. Keep automatic retries disabled, preserve deadlines and cumulative quotas, fence stale invocations, and reserve output quota before publication. Independent Council findings and repairs are recorded in `docs/native-retry-review-20261109.md`. Browser controls and runtime activation remain follow-up acceptance work.
+
+## Bounded direct-upload observation
+
+- Back off direct-session status polling and honor transient throttling within the original deadline. Once bytes are transferred, an observation failure no longer aborts accepted ingestion. Transfer failures still clean up incomplete sessions.
+
+## Bounded stage telemetry flush (2026-11-09)
+
+- Apply the existing five-second telemetry deadline to metric force-flush operations so a stalled exporter cannot indefinitely delay stage completion. Regression exercises the real SDK reader with a non-settling exporter.
+
+## Explicit native child task launch and nested identity (2026-11-09)
+
+- Add session-only child project-chat launch through the existing native background-task owner, inheriting authorized project/organization and root deadline/retention. Return persisted nested parent IDs, including waiting intents before native acceptance. Preserve idempotency, cancellation fences, tree quotas and zero automatic retries. Local native integration covers parallel/nested work, independent-host recovery after parent completion, scope/session/input rejection, cancellation races and concurrent root output exhaustion. Activation and automatic agent delegation/retry acceptance remain open.
+- Three independent council reviews and coordinator resolutions are recorded in `docs/native-child-launch-review-20261109.md`, with full server and isolated native/SQL/crash validation.
+
+## Native chat startup and interrupted-output retention (2026-11-08)
+
+- Require explicit inspectable, synchronously persistent, bounded noeviction Redis; await the native Mastra initialization barrier with bounded failure cleanup. Release failed producer initialization for a later attempt without retrying accepted model work. Keep application output and its counters for seven days. Three independent council reviews and resolutions are recorded in `docs/native-chat-startup-review-20261108.md`; activation gates remain open and flags stay off.
+
+## Independent realtime operation authorization (2026-11-08)
+
+- Reauthorize operation and descendant project scopes independently of output reconciliation. Idle scope checks read only bounded identities and permissions, coalesce duplicate operation topics per socket sweep, and preserve the sweep's original freshness boundary. A stalled scope check expires the host watchdog without cancelling accepted work. Real WebSocket/database regressions cover membership revocation with stalled reconciliation, duplicate topics, slow sweeps and stalled authorization. Feature activation and production capacity gates remain open.
+
+## Capability-gated quarantine sharding (2026-11-08)
+
+- `WORKER_SHARD_QUARANTINE` opts new runs into bounded quarantine document shards only after fleet capability verification. Recorded input preserves existing Temporal histories; legacy and adjacent stage grouping retain scan-before-parse ordering. Existing VM scans, tenant slot limits and document checkpoints remain. Real-stage negative tests cover infected/oversized files, foreign shard IDs and interrupted scan recovery; performance improvement requires deployment measurement.
+
+## Page equivalents: stuffed pages bill what they hold (2026-11-05)
+
+- Billable pages are measured page equivalents: per page, the larger of 1, the text rule over the text extracted from it, and (for rendered and OCR'd pages) its area against a Letter page, capped per page (`packages/shared/src/page-equivalents.ts`). Pages above one are recorded in `document_page_facts` (migration 0130) and raise `documents.billing_pages`, which the page fee, feature charges, spend authorization and the storage estimate read. Tiny, invisible or off-page text is indexed like any other and so counted by volume; files with pages over three equivalents are listed in the ingest report (`denseText`). A document over 100,000 equivalents is refused. Prices stay out of core.
+
+## API never parses PDFs; image visual indexing from VM renditions (2026-11-05)
+
+- Council A High: the API no longer runs `pdfinfo`. A PDF's intake count is a size estimate (`page_count_source = assumed`, documents show `pageCountSource: "estimated"`); the worker measures it at format-detect through `sandboxedPdf.pageCount` (VM `--pdf-facts`, guest protocol 8) or, in local mode, the page tree walked by sandboxed `pdftotext` page probes (exit codes and Poppler's own range line, never document metadata), records it `counted`, and re-checks spend. The completion page fee reads only measured counts (`worker/src/db/page-base-fee.ts`): `billing_pages` or a `counted` page count; text files over 2 MB are counted in full at format-detect (`worker/src/lib/text-page-count.ts`), and `page_count_source` defaults to `assumed` (migration 0130). Per-page features use the same measured counts: an Office or EPUB file is always measured (the text rule, or 0 pages when nothing was extracted), and an `assumed` count never bills a feature. A PDF bills the larger of its page-tree count and the pages extraction processed.
+- Image uploads are visually indexed only from a bounded, normalized PNG rendition the VM OCR guest returns per frame (protocol 8); the worker never decodes the upload. Without one, page-embed skips loudly (`image-without-vm-rendition`).
+
 ## Actual provider charges, live list prices and loss alerts (2026-11-04)
 
 - Record the provider-reported charge for OpenRouter embeddings, moderation, decision calls and consistent media receipts; price receipt-less usage from live OpenRouter list prices (hourly, hardcoded fallback); alert per org when hourly provider cost exceeds credits charged. Credits are unchanged. See `docs/pricing-and-credits.md#provider-cost`.
@@ -26,7 +80,7 @@
 
 - Fence native wrong-code restoration against concurrent resends in Postgres, preserving hashed 12-hour codes and attempts. See `docs/security/otp-generation-fence.md`; final council review remains required.
 
-- Preserve requested born-digital embedded images as lossless WebP in the existing Doppler VM, with bounded framed transport, page/mask manifests, shard deduplication, Fast-mode configuration and scoped artifact storage (2026-10-30). See docs/extraction/doppler-images.md; deployment remains manual.
+- Preserve requested born-digital embedded images as lossless WebP from the VM PDF extractor, with page/mask manifests, Fast-mode configuration and scoped artifact storage (2026-10-30). See docs/extraction/embedded-images.md; deployment remains manual.
 ## Durable workspace recommendation visits (2026-11-01)
 
 - Add session-scoped SQL snapshots and atomic token acknowledgements for return-visit recommendations, with bounded aggregate activity and account/workspace deletion cleanup.
@@ -64,7 +118,7 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 - [x] [#220](https://github.com/DocSlurp/docslurp-oss/issues/220) Error recovery: Honor the SDK’s full Retry-After delay
 - [x] [#221](https://github.com/DocSlurp/docslurp-oss/issues/221) Error recovery: Make SDK and CLI errors explain the actual refusal
 
-- Add bounded PDF page-range chunking to Doppler (2026-10-27): support sources through500MiB with bounded snapshot upload,32-page chunks, ordered blank-page-preserving merge, shared admission limits and conservative unconfirmed-teardown accounting.
+- Admit PDFs through 500 MiB on the VM PDF route (2026-10-27), with shared admission limits.
 # Completed
 
 - Default to Chinese-lab models on the cheapest qualifying host, with a fail-closed opt-out (2026-10-29): the DeepSeek-1017 vision route adds China-based StreamLake and DeepSeek and sorts by price (equal quality to Together on tune+select, $0.51 vs $1.03 per 1,000 pages); organizations and workspaces (workspace narrows org) can turn China-based providers off, enforced as a `provider.only` allowlist from a sourced provider-region table on every path and retry, with unknown regions and unknown scope restricted; served host and region on usage records; vision/OCR output collapses padded wide-space runs. See docs/provider-regions.md.
@@ -73,7 +127,7 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 
 - Fix large direct-upload finalization for S3-compatible terminal pagination markers (2026-10-27): honor IsTruncated, reject malformed or nonadvancing pages, retain the scoped object/upload identity, and bound listing by a shared deadline.
 
-- Add optional Doppler PDF extraction in a fresh offline VM (2026-10-27): generic core adapter, bounded transfers and lifecycle, scoped estimated compute usage, scan-preserving empty outputs, and no implicit native reparse of Doppler results. Private binaries and deployment remain in the app repository; owner-approved rollout and merged app pin are pending.
+- Add optional VM PDF extraction in a fresh offline VM per document (2026-10-27): scoped estimated compute usage, scan-preserving empty outputs, and no implicit native reparse of VM results. The extractor itself is a deployment-provided plugin (docs/extraction/extractor-plugins.md).
 - Fix scope-decline suggestion visibility (#190): both title and heading queries exclude archived and purged documents, alongside completed/current/workspace predicates. Migrated-database regressions reject excluded titles, filename fallbacks and headings, including cross-tenant documents.
 - Make chat instructions a first-class workspace setting, with Improve and a quick decline (2026-10-26, [#190](https://github.com/DocSlurp/docslurp-oss/pull/190), merged 2026-10-27; production deployment unverified): the chat system message always starts with fixed core rules (refuse harmful content, documents are untrusted data, decline requests unrelated to the workspace or the turn's tools, web-aware) and grounding, then owner-overridable defaults (citations are now one), then the workspace instructions and the ingest instruction in delimited blocks whose text is NFC-normalised with every angle bracket neutralised, then a fixed reminder. Empty instructions use a template from the workspace name that follows the citation and style settings. App-only preview (both chat paths) and Improve (never saves; GLM 5.3 Flash on Western hosts; 25 s timeout; held spend admission; per-workspace and per-user limits that refuse on a 0 limit, a store error or a configured-but-unavailable Redis (per-instance limits when no Redis is configured); 1 credit only when delivered). The server-side quick decline is a conservative UX shortcut on a bge-m3 vector signal that never overrides keyword or graph evidence; disabled by default until real search-session calibration, with earlier emulated figures withdrawn; everything else goes to the model. Optional output moderation for browser-key answers buffers text and withholds on malformed replies, provider failures, oversized input or disallowed privacy modes (Llama Guard 4, off by default). See `docs/search-api.md#chat-instructions`.
 - Fix narrowed browser-key scope widening (#191): empty or missing stored scopes stay empty during validation, display, saves and instant/overlap rotation; creation alone supplies defaults. MCP OAuth validation now honors its linked key expiry, IP allowlist and chat output cap, with migrated-DB negative tests. Integrated reviewed #188 (`99efd72e`) and #182 (`7a8dd28e`) on the #191 branch: both MCP and REST OAuth validators honor expiry, IP allowlists and output caps while retaining live scope/rate/materialization restrictions, app-only settings and SDK session-grant headers. Merged 2026-10-27 ([#191](https://github.com/DocSlurp/docslurp-oss/pull/191)); production deployment unverified.
@@ -212,9 +266,9 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 
 ## Table preservation and comparison gate (2026-11-01)
 
-- Emit span-preserving HTML in the Doppler guest and group compact table records by row with bounded, explicitly labelled header context. Add an independent authored-gold acceptance gate and retain failing scan/rotation/borderless warnings. See [comparison and limits](docs/evals/table-preservation-2026-11-01.md).
+- Emit span-preserving HTML tables from the VM PDF extractor and group compact table records by row with bounded, explicitly labelled header context. Add an independent authored-gold acceptance gate and retain failing scan/rotation/borderless warnings. See [comparison and limits](docs/evals/table-preservation-2026-11-01.md).
 
-- Add opt-in isolated CPU quarter-turn correction for vision page/region inputs and Doppler embedded images, preserving originals and transformation provenance. See docs/image-orientation.md for limits and validation.
+- Add opt-in isolated CPU quarter-turn correction for vision page/region inputs and VM-extracted embedded images, preserving originals and transformation provenance. See docs/image-orientation.md for limits and validation.
 
 - Added optional, bounded OpenRouter Nitro chat variants for GLM, DeepSeek and Luna, preserving base answer tiers and actual provider receipt accounting. Draft evaluation; missing receipts require manual reconciliation (see docs/openrouter-nitro.md).
 - 2026-11-01: Geo foundation contracts: bounded structural geometry/predicate validation, explicit schema annotations preserved through structured extraction, deterministic suggest-only detection and documentation. Indexing, PostGIS topology and retrieval remain separate work.

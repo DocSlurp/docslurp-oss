@@ -81,7 +81,7 @@ describe("OCR provenance in page triage", () => {
   });
 
   it("keeps a table route for an OCR'd scan whose text keeps numeric rows", () => {
-    const rows = ["Item Qty Price", "Bolts 12 4.50", "Nuts 30 2.10", "Washers 100 1.25", "Total 142 7.85"].join("\n");
+    const rows = ["Item Qty Price", "Bolts 12 4.50", "Nuts 30 2.10", "Washers 100 1.25", "Pins 40 0.60", "Total 182 8.45"].join("\n");
     const routed = surface({
       text: rows,
       evidence: [{ pageNumber: 1, wordCount: 0, imageCount: 1, imageCoverage: 1, largestImageCoverage: 1 }],
@@ -114,44 +114,75 @@ describe("documents without any extracted text", () => {
   });
 });
 
-describe("legacy vision page selector", () => {
-  it("admits formula pages", () => {
-    const formula = classifyAdaptivePage(1, [
-      "The loss is defined as follows.",
-      "L(x) = \\sum_i \\alpha_i (y_i - f(x_i))^2",
-      "where f(x) = w^T x + b and the gradient is",
-      "dL/dw = -2 \\sum_i \\alpha_i (y_i - f(x_i)) x_i",
-    ].join("\n"), V2);
+describe("evidence vision page selector", () => {
+  const FORMULA = [
+    "The loss is defined as follows.",
+    "L(x) = \\sum_i \\alpha_i (y_i - f(x_i))^2",
+    "where f(x) = w^T x + b and the gradient is",
+    "dL/dw = -2 \\sum_i \\alpha_i (y_i - f(x_i)) x_i",
+  ].join("\n");
+
+  it("labels formula pages but never reads them on their words", () => {
+    const formula = classifyAdaptivePage(1, FORMULA, V2);
     expect(formula.route).toBe("formula-heavy");
-    expect(selectLegacyVisionPages([formula], V2)).toEqual([1]);
+    expect(selectLegacyVisionPages([formula], V2)).toEqual([]);
+    const unicodeMath = classifyAdaptivePage(1, `${OCR_PROSE}\nWith key dimension 𝑑𝑘 = 64 the score is 𝑞 · 𝑘 / √𝑑𝑘 and Σ weights ≤ 1.`, V2);
+    expect(unicodeMath.route).toBe("formula-heavy");
+    expect(selectLegacyVisionPages([unicodeMath], V2)).toEqual([]);
   });
 
-  it("lets the text route decide when raster evidence does not authorize OCR", () => {
+  it("never lets a text route add or remove a page: only the page's own authorization decides", () => {
     const chart = classifyAdaptivePage(1, "Figure 3: quarterly revenue chart with legend and axis labels, Q1 Q2 Q3 up 12%", V2);
-    expect(chart.extractorHint).toBe("vision-rescue");
-    const minorImage = { ...chart, ocrDecision: { authorized: false, confidence: 0.8, signals: ["ocr-not-authorized:minor-images=1"] } };
-    expect(selectLegacyVisionPages([minorImage], V2)).toEqual([1]);
-    const blank = { ...chart, ocrDecision: { authorized: false, confidence: 0.9, signals: ["ocr-not-authorized:blank-page"] } };
+    expect(chart.extractorHint).not.toBe("vision-rescue");
+    expect(chart.route).not.toBe("chart-or-figure");
+    expect(selectLegacyVisionPages([chart], V2)).toEqual([]);
+    const authorized = { ...chart, ocrDecision: { authorized: true, confidence: 0.9, signals: ["ocr-authorized:raster-page-without-text"] } };
+    expect(selectLegacyVisionPages([authorized], V2)).toEqual([1]);
+    const blank = { ...authorized, ocrDecision: { authorized: false, confidence: 0.9, signals: ["ocr-not-authorized:blank-page"] } };
     expect(selectLegacyVisionPages([blank], V2)).toEqual([]);
   });
 
-  it("leaves dense prose pages on native text", () => {
-    expect(selectLegacyVisionPages([classifyAdaptivePage(1, OCR_PROSE, V2)], V2)).toEqual([]);
+  it("does not read prose that merely contains words about images, charts or figures", () => {
+    const prose = (sentence: string) => Array.from({ length: 6 }, () => sentence).join(" ");
+    for (const text of [
+      prose("The photovoltaic array produced an image-stabilised figure of 12% more energy than the paragraph 4(b) estimate."),
+      prose("Series A investors expect 12% growth; the candidate will update the date of the diagram review."),
+      "| Item | Qty | Price |\n|---|---|---|\n| Bolts | 12 | 4.50 |\n| Nuts | 30 | 2.10 |",
+      "Глава 3. Введение",
+      "12",
+    ]) {
+      expect(selected(surface({ text }))).toEqual([]);
+    }
   });
 
-  it("admits text layers carrying Unicode math", () => {
-    const page = classifyAdaptivePage(1, `${OCR_PROSE}\nWith key dimension 𝑑𝑘 = 64 the score is 𝑞 · 𝑘 / √𝑑𝑘 and Σ weights ≤ 1.`, V2);
-    expect(page.route).toBe("formula-heavy");
-    expect(selectLegacyVisionPages([page], V2)).toEqual([1]);
-  });
-
-  it("sends garbled text layers (fonts without a Unicode map) to vision", () => {
+  it("reads a page whose text layer is garbled, with or without plenty of words", () => {
     const garbled = Array.from({ length: 8 }, (_, index) => `## ${index}KHPDWUL[SURGXFWFRPSDUHVHDFKTXHU\\ZLWK QRUPDOL]DWLRQ7KHUHVXOWLQJZHLJKWV`).join("\n");
-    const page = classifyAdaptivePage(1, garbled, V2);
-    expect(page.signals).toContain("garbled-text");
-    expect(selectLegacyVisionPages([page], V2)).toEqual([1]);
-    // Long identifiers inside ordinary prose do not trip it.
-    expect(classifyAdaptivePage(1, `${OCR_PROSE} see ABCDEFGHIJKLMNOPQRSTUV123`, V2).signals).not.toContain("garbled-text");
+    const evidence: PageImageEvidence = {
+      pageNumber: 1, wordCount: 400, imageCount: 0, imageCoverage: 0, largestImageCoverage: 0,
+      textLayer: { verdict: "garbled", reasons: ["glyph-shift"], source: "text-layer" },
+    };
+    const routed = surface({ text: garbled, evidence: [evidence] });
+    expect(selected(routed)).toEqual([1]);
+    expect(routed.status === "ready" && routed.pages[0]!.signals).toContain("garbled-text");
+    // Long identifiers inside ordinary prose are not a broken layer: the same page without the verdict is not read.
+    expect(selected(surface({ text: `${OCR_PROSE} see ABCDEFGHIJKLMNOPQRSTUV123` }))).toEqual([]);
+  });
+
+  it("reads a suspect text layer only after an OCR of the page disagrees with it", () => {
+    const suspect = (matchesOcr: boolean | null): PageImageEvidence => ({
+      pageNumber: 1, wordCount: 400, imageCount: 0, imageCoverage: 0, largestImageCoverage: 0,
+      textLayer: { verdict: "suspect", reasons: ["unusual-letter-pairs"], matchesOcr, source: "text-layer" },
+    });
+    expect(selected(surface({ text: OCR_PROSE, evidence: [suspect(false)] }))).toEqual([1]);
+    expect(selected(surface({ text: OCR_PROSE, evidence: [suspect(true)] }))).toEqual([]);
+    expect(selected(surface({ text: OCR_PROSE, evidence: [suspect(null)] }))).toEqual([]);
+  });
+
+  it("makes no page labels from text whose page boundaries are unknown", () => {
+    const text = `${OCR_PROSE}\f${OCR_PROSE}`;
+    const routed = surface({ text, pageCount: 3 });
+    expect(routed.status === "ready" && routed.pages.map((page) => page.signals.includes("page-text-unknown"))).toEqual([false, false, false].map(() => true));
+    expect(selected(routed)).toEqual([]);
   });
 });
 
@@ -246,6 +277,12 @@ describe("drawn bytes per page", () => {
     expect(drawnBytesPerPage(2 * 1024 ** 2 + 12 * 1024, totalEmbeddedImageBytes(listing), 2)).toBe(1024);
   });
 
+  it("counts inline images and images without an object reference", () => {
+    // poppler prints the object and ID columns of these rows as one `[inline]` or `[none]` token.
+    const listing = header + [row(1, 7, "10K"), row(1, 7, "4000B").replace("7  0", "[inline]"), row(2, 7, "1K").replace("7  0", "[none]")].join("\n");
+    expect(totalEmbeddedImageBytes(listing)).toBe(10 * 1024 + 4000 + 1024);
+  });
+
   it("is unknown when the file size or any image size is unknown", () => {
     expect(totalEmbeddedImageBytes(header + row(1, 7, "??"))).toBeNull();
     expect(drawnBytesPerPage(null, 0, 1)).toBeNull();
@@ -286,7 +323,7 @@ describe("bounded text scans", () => {
 });
 
 describe("visual relationships through the decision surface", () => {
-  it("already selects dense figure page 3 without fabricating an extractor hint", () => {
+  it("leaves a dense page with a figure caption on native text: its words say nothing about its pixels", () => {
     const result = surface({
       text: [OCR_PROSE, "", OCR_PROSE + "\nFigure: quarterly chart with axis and legend. Q1 growth 12%"].join("\f"),
       pageCount: 3,
@@ -296,8 +333,7 @@ describe("visual relationships through the decision surface", () => {
       ],
     });
     expect(result.status).toBe("ready");
-    expect(result.pages[2]?.route).toBe("chart-or-figure");
-    expect(result.pages[2]?.extractorHint).toBe("vision-rescue");
-    expect(selected(result)).toEqual([3]);
+    expect(result.pages[2]?.extractorHint).not.toBe("vision-rescue");
+    expect(selected(result)).toEqual([]);
   });
 });

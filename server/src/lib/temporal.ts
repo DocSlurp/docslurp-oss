@@ -33,7 +33,7 @@ import {
   type PipelineFeatures,
   type PipelineRunStage,
   type WorkerCapability,
-  type WorkspaceRunTemporal,
+  type ProjectRunTemporal,
 } from "@docslurp/shared";
 import { formatTemporalConnectionError } from "@docslurp/shared/temporal-connection";
 import { createTemporalSecurityConfig } from "@docslurp/shared/temporal-security";
@@ -190,7 +190,7 @@ export function resolvePageConcurrency(envValue: string | undefined, orgWorkerSl
 }
 
 interface RunSlotScope {
-  /** Org id, or workspace:<id> for runs without an org — matches worker_slot_leases.org_key. */
+  /** Org id, or project:<id> for runs without an org — matches worker_slot_leases.org_key. */
   orgKey: string;
   workerSlots: number | null;
 }
@@ -198,8 +198,8 @@ interface RunSlotScope {
 async function runSlotScope(runId: string): Promise<RunSlotScope | null> {
   try {
     const [row] = await sql<{ org_key: string; worker_slots: number | null }[]>`
-      select coalesce(r.org_id, 'workspace:' || r.workspace_id) as org_key, o.worker_slots
-      from workspace_runs r
+      select coalesce(r.org_id, 'project:' || r.project_id) as org_key, o.worker_slots
+      from project_runs r
       left join organizations o on o.id = r.org_id
       where r.id = ${runId}
       limit 1
@@ -237,7 +237,7 @@ export function resolveWorkflowScalingInput(
   slotGate?: boolean;
   pageChildBatchSize?: number;
   activityTaskQueue?: string;
-  documentSharding?: { minDocsPerShard: number; maxShards: number; minPagesPerShard: number };
+  documentSharding?: { minDocsPerShard: number; maxShards: number; minPagesPerShard: number; quarantine?: boolean; quarantineMinPagesPerShard?: number };
   groupLightStages?: boolean;
   groupableStages?: string[];
   pageRangeSharding?: { stages: string[]; maxShards: number };
@@ -253,6 +253,9 @@ export function resolveWorkflowScalingInput(
   );
   const sharding = envFlag(env.WORKER_DOCUMENT_SHARDING, true) && maxShards >= 2
     ? {
+        ...(envFlag(env.WORKER_SHARD_QUARANTINE, false)
+          && capabilities?.has("workflow.quarantine-shards") ? { quarantine: true, ...(capabilities.has("workflow.quarantine-document-threshold")
+            ? { quarantineMinPagesPerShard: 1 } : {}) } : {}),
         minDocsPerShard: Math.max(1, Number.parseInt(env.WORKER_MIN_DOCS_PER_SHARD ?? "2", 10) || 2),
         maxShards,
         // A shard costs ~2-4 s of fixed overhead (cross-region DB round trips),
@@ -392,7 +395,7 @@ export async function startPipelineWorkflow(
   // (services/worker-fleet.ts); unknown resolves to the old behaviour. Skipped
   // when no workflow-input flag is on (nothing to gate).
   const configured = configuredGatedFlags();
-  const capabilities = configured.WORKER_INDEX_BEFORE_ENRICH || configured.WORKER_GROUP_ADJACENT_STAGES
+  const capabilities = configured.WORKER_INDEX_BEFORE_ENRICH || configured.WORKER_GROUP_ADJACENT_STAGES || configured.WORKER_SHARD_QUARANTINE
     ? await effectiveFleetCapabilities(route.taskQueue)
     : null;
   let restartExisting = options?.restartExisting;
@@ -530,7 +533,7 @@ export async function describePipelineWorkflow(
 
 export async function getPipelineTemporalSnapshot(
   runId: string
-): Promise<WorkspaceRunTemporal | null> {
+): Promise<ProjectRunTemporal | null> {
   const queriedAt = new Date().toISOString();
   const [description, progress] = await Promise.all([
     describePipelineWorkflow(runId),

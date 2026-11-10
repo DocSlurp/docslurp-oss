@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { batchSearchInputSchema, searchInputSchema, workspaceChatInputSchema } from "./search-input.js";
+import { batchSearchInputSchema, searchInputSchema, projectChatInputSchema } from "./search-input.js";
 import { apiErrorOpenApiResponse } from "./api-error-openapi.js";
-import { chatRetrievalOverridesSchema, searchResultSchema, workspaceChatResponseSchema } from "@docslurp/shared";
+import { chatRetrievalOverridesSchema, searchResultSchema, projectChatResponseSchema } from "@docslurp/shared";
 
 const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
 const json = (schema: object) => ({ "application/json": { schema } });
@@ -10,15 +10,15 @@ const request = (schema: object) => ({ required: true, content: json(schema) });
 const serviceSecurity = [{ bearerAuth: [] }, { sessionAuth: [] }];
 const keySecurity = [{ bearerAuth: [] }];
 const scopedQuery = z.toJSONSchema(searchInputSchema);
-const minScoreDescription = "Relevance floor, 0..1: drop results whose raw match strength is lower, and report noMatch when none remain. 0 disables it. Omitted: the workspace's retrieval default, else SEARCH_MIN_SCORE (0.1).";
-const workspaceRef = { type: "string", maxLength: 256, description: "Workspace ID, slug or name. Names match by slug, so \"Legal Contracts\", \"legal-contracts\" and \"LEGAL CONTRACTS\" are the same workspace; former slugs of renamed workspaces keep working. Omitted (or \"default\"): the organization default workspace. No match: 404 workspace_not_found naming the slug looked up." };
+const minScoreDescription = "Relevance floor, 0..1: drop results whose raw match strength is lower, and report noMatch when none remain. 0 disables it. Omitted: the project's retrieval default, else SEARCH_MIN_SCORE (0.1).";
+const projectRef = { type: "string", maxLength: 256, description: "Project ID, slug or name. Names match by slug, so \"Legal Contracts\", \"legal-contracts\" and \"LEGAL CONTRACTS\" are the same project; former slugs of renamed projects keep working. Omitted (or \"default\"): the organization default project. No match: 404 project_not_found naming the slug looked up." };
 const uploadTags = { type: "array", maxItems: 24, items: { type: "string", minLength: 1, maxLength: 100 }, description: "Case-sensitive document labels; trimmed and deduplicated. Commas and NUL are not allowed. Applied to every accepted file." };
 const uploadTarget = {
   tags: uploadTags,
-  workspace: { ...workspaceRef, description: "Upload into this workspace: an ID, slug or name (names match by slug). A slug or name that matches none of your workspaces creates one with that display name, using its slug when free. Omitted without newWorkspace or templateKey: the organization default workspace." },
-  newWorkspace: { type: "boolean", description: "Without workspace: create a new self-titled workspace instead of using the default workspace. Multipart sends the string \"true\"." },
-  templateKey: { type: "string", description: "Template for a workspace this request creates. Without workspace: create a new self-titled workspace from it." },
-  orgId: { type: "string", description: "Session callers only: target this organization's default workspace. API keys use their organization." },
+  project: { ...projectRef, description: "Upload into this project: an ID, slug or name (names match by slug). A slug or name that matches none of your projects creates one with that display name, using its slug when free. Omitted without newProject or templateKey: the organization default project." },
+  newProject: { type: "boolean", description: "Without project: create a new self-titled project instead of using the default project. Multipart sends the string \"true\"." },
+  templateKey: { type: "string", description: "Template for a project this request creates. Without project: create a new self-titled project from it." },
+  orgId: { type: "string", description: "Session callers only: target this organization's default project. API keys use their organization." },
 };
 const errors = {
   "400": apiErrorOpenApiResponse("Invalid request"),
@@ -45,15 +45,15 @@ function nestedSchema(schema: z.ZodType) {
 
 export const simpleServiceSchemas = {
   SearchResult: z.toJSONSchema(searchResultSchema),
-  WorkspaceChatResponse: z.toJSONSchema(workspaceChatResponseSchema),
+  ProjectChatResponse: z.toJSONSchema(projectChatResponseSchema),
   Run: {
-    type: "object", required: ["id", "workspaceId", "status"],
-    properties: { id: { type: "string" }, workspaceId: { type: "string" }, status: { type: "string", enum: ["queued", "processing", "completed", "failed"] }, controlState: { type: ["string", "null"] }, error: { type: ["string", "null"] } },
+    type: "object", required: ["id", "projectId", "status"],
+    properties: { id: { type: "string" }, projectId: { type: "string" }, status: { type: "string", enum: ["queued", "processing", "completed", "failed"] }, controlState: { type: ["string", "null"] }, error: { type: ["string", "null"] } },
   },
   UploadResponse: {
-    type: "object", required: ["workspace", "run", "documents", "warnings"],
+    type: "object", required: ["project", "run", "documents", "warnings"],
     properties: {
-      workspace: { type: "object", required: ["id", "name"], properties: { id: { type: "string" }, name: { type: "string" } } },
+      project: { type: "object", required: ["id", "name"], properties: { id: { type: "string" }, name: { type: "string" } } },
       run: ref("Run"),
       documents: { type: "array", items: { type: "object", required: ["id", "filename", "status"], properties: { id: { type: "string" }, filename: { type: "string" }, status: { type: "string" } } } },
       warnings: { type: "array", items: { type: "string" } },
@@ -74,7 +74,7 @@ export const simpleServiceSchemas = {
       status: { enum: ["empty", "pending", "partial", "complete"] },
       isPartial: { type: "boolean" },
       keywordOnly: { type: "boolean" },
-      scope: { type: "object", properties: { workspaceId: { type: "string" }, runId: { type: ["string", "null"] } } },
+      scope: { type: "object", properties: { projectId: { type: "string" }, runId: { type: ["string", "null"] } } },
       coverage: {
         type: "object",
         properties: Object.fromEntries([
@@ -91,7 +91,7 @@ export const simpleServiceSchemas = {
     type: "object", required: ["results", "sessionId", "availability"],
     properties: {
       results: { type: "array", items: ref("SearchResult") }, sessionId: { type: "string" }, availability: ref("SearchAvailability"),
-      noMatch: { type: "boolean", description: "True when the workspace is searchable but search returned no results: either nothing cleared the relevance floor (relevanceFloor.dropped > 0) or nothing was retrieved at all, e.g. a filter that matches nothing (dropped is 0). Say \"no good match\" instead of answering from weak passages; availability explains an empty or still-indexing corpus instead." },
+      noMatch: { type: "boolean", description: "True when the project is searchable but search returned no results: either nothing cleared the relevance floor (relevanceFloor.dropped > 0) or nothing was retrieved at all, e.g. a filter that matches nothing (dropped is 0). Say \"no good match\" instead of answering from weak passages; availability explains an empty or still-indexing corpus instead." },
       relevanceFloor: { type: "object", description: "The relevance floor applied to this search. Each result's relevance (0..1) is a raw match strength that does not depend on the other hits.", properties: {
         minScore: { type: "number", minimum: 0, maximum: 1, description: "Floor applied; 0 means disabled." }, dropped: { type: "integer", minimum: 0, description: "Retrieved candidates removed for being below the floor." },
       } },
@@ -101,19 +101,19 @@ export const simpleServiceSchemas = {
     type: "object", required: ["results"], properties: { results: { type: "array", minItems: 1, maxItems: 20, items: { oneOf: [
       { type: "object", required: ["ok", "data"], properties: { ok: { const: true }, data: ref("SearchResponse") } },
       { type: "object", required: ["ok", "error"], properties: { ok: { const: false }, error: { type: "object", required: ["code", "message", "status"], properties: {
-        code: { enum: ["FORBIDDEN", "WORKSPACE_NOT_FOUND", "INVALID_SEARCH_SCOPE", "SEARCH_FAILED", "SEARCH_UNAVAILABLE", "REQUEST_ABORTED"] }, message: { type: "string" }, status: { type: "integer" },
+        code: { enum: ["FORBIDDEN", "PROJECT_NOT_FOUND", "INVALID_SEARCH_SCOPE", "SEARCH_FAILED", "SEARCH_UNAVAILABLE", "REQUEST_ABORTED"] }, message: { type: "string" }, status: { type: "integer" },
       } } } },
     ] } } },
   },
-  WorkspaceModel: {
+  ProjectModel: {
     type: "object", required: ["id", "object", "created", "owned_by"],
-    properties: { id: { type: "string", pattern: "^workspace:" }, object: { const: "model" }, created: { type: "integer" }, owned_by: { const: "docslurp" }, name: { type: "string" } },
+    properties: { id: { type: "string", pattern: "^project:" }, object: { const: "model" }, created: { type: "integer" }, owned_by: { const: "docslurp" }, name: { type: "string" } },
   },
   ChatCompletionRequest: {
     type: "object", additionalProperties: false, required: ["model", "messages"],
-    description: "Text-only workspace chat. Include history; end with a nonempty user message. Unsupported controls are rejected.",
+    description: "Text-only project chat. Include history; end with a nonempty user message. Unsupported controls are rejected.",
     properties: {
-      model: { type: "string", pattern: "^workspace:(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*)$", description: "The workspace to answer from, not an inference model: workspace:default for the organization default workspace, workspace:<slug>, or workspace:<uuid> from GET /v1/models. Choose the inference model with docslurp.model." },
+      model: { type: "string", pattern: "^project:(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*)$", description: "The project to answer from, not an inference model: project:default for the organization default project, project:<slug>, or project:<uuid> from GET /v1/models. Choose the inference model with docslurp.model." },
       messages: { type: "array", minItems: 1, maxItems: 64, items: { type: "object", additionalProperties: false, required: ["role", "content"], properties: {
         role: { enum: ["system", "developer", "user", "assistant"] },
         content: { oneOf: [{ type: "string", maxLength: 64000 }, { type: "array", minItems: 1, maxItems: 16, items: { type: "object", additionalProperties: false, required: ["type", "text"], properties: { type: { const: "text" }, text: { type: "string", maxLength: 64000 } } } }] },
@@ -123,7 +123,7 @@ export const simpleServiceSchemas = {
       max_completion_tokens: { type: "integer", minimum: 1, maximum: 16384 },
       max_tokens: { type: "integer", minimum: 1, maximum: 16384, description: "Alias; cannot be combined with max_completion_tokens" },
       n: { const: 1 }, user: { type: "string", maxLength: 256 },
-      tool_choice: { enum: ["auto", "none"], default: "auto", description: "auto: the workspace agent may call its own search, web and settings tools before answering. none: a direct grounded answer from one retrieval and one model call (lower latency and fewer tokens; still streams). Client-defined tools are not supported, so `tools` and other tool_choice forms are rejected with 400." },
+      tool_choice: { enum: ["auto", "none"], default: "auto", description: "auto: the project agent may call its own search, web and settings tools before answering. none: a direct grounded answer from one retrieval and one model call (lower latency and fewer tokens; still streams). Client-defined tools are not supported, so `tools` and other tool_choice forms are rejected with 400." },
       docslurp: { type: "object", additionalProperties: false, description: "DocSlurp extension (extra_body in OpenAI SDKs).", properties: {
         model: { type: "string", maxLength: 256, examples: ["llm://openrouter/anthropic/claude-haiku-5.5"], description: "Inference model for this request, as model on POST /v1/chat: an llm://openrouter/<vendor>/<model> URI (or the bare OpenRouter id) from the chat model catalog. Omitted: the default. A model you may not use is refused with 400 model_not_allowed, never swapped for the default." },
         speedBoost: { type: "boolean", default: false, description: "Opt in to Nitro throughput routing for this request." },
@@ -142,31 +142,31 @@ export const simpleServiceSchemas = {
   },
 };
 
-const qualityDescription = "Processing quality for these files; omitted uses the workspace's (auto by default). fast: text layer only, scanned pages kept as page images and not read ($0.05 per 1,000 pages). auto: each page read the cheapest faithful way ($0.05 to $2.50). good: a vision model reads every page ($2.50).";
+const qualityDescription = "Processing quality for these files; omitted uses the project's (auto by default). fast: text layer only, scanned pages kept as page images and not read ($0.05 per 1,000 pages). auto: each page read the cheapest faithful way ($0.05 to $2.50). good: a vision model reads every page ($2.50).";
 const pipelineOverrides = {
-  type: "object", description: "Per-upload pipeline overrides merged onto the workspace pipeline.",
+  type: "object", description: "Per-upload pipeline overrides merged onto the project pipeline.",
   properties: { quality: { type: "string", enum: ["fast", "auto", "good"], description: qualityDescription } },
 };
 
 const canonicalServicePaths = {
-  "/v1/workspaces/{workspaceId}/tags": { get: {
-    tags: ["workspaces"], summary: "List workspace document tags", security: serviceSecurity,
-    description: "Lists distinct case-sensitive tags and document counts for current (non-superseded) documents, including pending uploads. Sorted by tag. Requires workspace access and an ingest, search, artifacts or workspaces:manage key scope.",
-    parameters: [{ in: "path", name: "workspaceId", required: true, schema: workspaceRef }],
-    responses: { "200": response("Workspace tags", { type: "object", properties: { tags: { type: "array", items: { type: "object", required: ["tag", "documentCount"], properties: { tag: { type: "string" }, documentCount: { type: "integer" } } } } } }), ...errors },
+  "/v1/projects/{projectId}/tags": { get: {
+    tags: ["projects"], summary: "List project document tags", security: serviceSecurity,
+    description: "Lists distinct case-sensitive tags and document counts for current (non-superseded) documents, including pending uploads. Sorted by tag. Requires project access and an ingest, search, artifacts or projects:manage key scope.",
+    parameters: [{ in: "path", name: "projectId", required: true, schema: projectRef }],
+    responses: { "200": response("Project tags", { type: "object", properties: { tags: { type: "array", items: { type: "object", required: ["tag", "documentCount"], properties: { tag: { type: "string" }, documentCount: { type: "integer" } } } } } }), ...errors },
   } },
   "/v1/uploads/bulk": { post: {
-    tags: ["ingest"], summary: "Upload files into the default workspace, a chosen workspace, or a new one", security: serviceSecurity,
+    tags: ["ingest"], summary: "Upload files into the default project, a chosen project, or a new one", security: serviceSecurity,
     description: "One buffered multipart request, capped at MAX_MULTIPART_UPLOAD_BYTES (25 MB by default; 413 code multipart_upload_too_large above it). Upload larger files with a direct upload session: POST /v1/uploads/direct/sessions, PUT to the returned URLs, then confirm.",
     parameters: [{ in: "header", name: "Idempotency-Key", schema: { type: "string" }, description: "Reuse only for identical uploads" }],
     requestBody: { required: true, content: { "multipart/form-data": { schema: { type: "object", required: ["files"], properties: {
-      files: { type: "array", minItems: 1, items: { type: "string", format: "binary" } }, ...uploadTarget, tags: { type: "string", description: "JSON array of document tags, e.g. [\"finance\",\"FY26\"]. Up to 24 labels of 1–100 characters." }, newWorkspace: { type: "string", enum: ["true"], description: uploadTarget.newWorkspace.description },
+      files: { type: "array", minItems: 1, items: { type: "string", format: "binary" } }, ...uploadTarget, tags: { type: "string", description: "JSON array of document tags, e.g. [\"finance\",\"FY26\"]. Up to 24 labels of 1–100 characters." }, newProject: { type: "string", enum: ["true"], description: uploadTarget.newProject.description },
       pipeline: { type: "string", description: `JSON pipeline overrides, e.g. {"quality":"fast"}. ${qualityDescription}` },
     } } } } },
     responses: { "201": response("Accepted for asynchronous processing. Poll run progress before searching.", ref("UploadResponse")), ...errors },
   } },
   "/v1/uploads/url": { post: {
-    tags: ["ingest"], summary: "Ingest remote documents into a workspace", security: serviceSecurity,
+    tags: ["ingest"], summary: "Ingest remote documents into a project", security: serviceSecurity,
     requestBody: request({ type: "object", required: ["urls"], properties: { urls: { type: "array", minItems: 1, items: { type: "string", format: "uri" } }, ...uploadTarget, pipeline: pipelineOverrides } }),
     responses: { "201": response("Ingestion accepted", ref("UploadResponse")), ...errors },
   } },
@@ -176,36 +176,36 @@ const canonicalServicePaths = {
     responses: { "200": response("Progress snapshot; run.status reports completion", { type: "object", required: ["run"], properties: { run: ref("Run") } }), ...errors },
   } },
   "/v1/search": {
-    get: { tags: ["search"], summary: "Search a workspace", security: serviceSecurity, parameters: [
-      { in: "query", name: "q", required: true, schema: { type: "string" } }, { in: "query", name: "workspace", description: workspaceRef.description, schema: { type: "string" } }, { in: "query", name: "limit", schema: { type: "integer", minimum: 1, maximum: 100 } },
+    get: { tags: ["search"], summary: "Search a project", security: serviceSecurity, parameters: [
+      { in: "query", name: "q", required: true, schema: { type: "string" } }, { in: "query", name: "project", description: projectRef.description, schema: { type: "string" } }, { in: "query", name: "limit", schema: { type: "integer", minimum: 1, maximum: 100 } },
       { in: "query", name: "minScore", description: minScoreDescription, schema: { type: "number", minimum: 0, maximum: 1 } },
     ], responses: { "200": response("Cited passages with corpus availability", ref("SearchResponse")), ...errors } },
-    post: { tags: ["search"], summary: "Search a workspace", security: serviceSecurity, requestBody: request({ oneOf: [scopedQuery, z.toJSONSchema(batchSearchInputSchema)] }), responses: { "200": response("Single-query passages or ordered batch outcomes", { oneOf: [ref("SearchResponse"), ref("BatchSearchResponse")] }), ...errors } },
+    post: { tags: ["search"], summary: "Search a project", security: serviceSecurity, requestBody: request({ oneOf: [scopedQuery, z.toJSONSchema(batchSearchInputSchema)] }), responses: { "200": response("Single-query passages or ordered batch outcomes", { oneOf: [ref("SearchResponse"), ref("BatchSearchResponse")] }), ...errors } },
   },
   "/v1/chat": { post: {
-    tags: ["chat"], summary: "Ask a grounded workspace question", security: serviceSecurity,
+    tags: ["chat"], summary: "Ask a grounded project question", security: serviceSecurity,
     description: "Parallel requests may use independent conversations. Await each reply before sending the next turn with the same sessionId; concurrent turns in one conversation have no ordering guarantee.",
-    requestBody: request(z.toJSONSchema(workspaceChatInputSchema)),
-    responses: { "200": response("Grounded answer, citations and actual usage", ref("WorkspaceChatResponse")), ...errors },
+    requestBody: request(z.toJSONSchema(projectChatInputSchema)),
+    responses: { "200": response("Grounded answer, citations and actual usage", ref("ProjectChatResponse")), ...errors },
   } },
   "/v1/whoami": { get: {
     tags: ["account"], summary: "Identity behind the presented server key or CLI OAuth token", security: serviceSecurity,
-    description: "User, organization, default workspace, scopes and (for OAuth access tokens from docslurp login) granted scopes and expiry. Client (browser) keys get 403. Never returns the credential.",
-    responses: { "200": response("Credential identity", { type: "object", required: ["user", "organization", "defaultWorkspace", "credential"], properties: {
+    description: "User, organization, default project, scopes and (for OAuth access tokens from docslurp login) granted scopes and expiry. Client (browser) keys get 403. Never returns the credential.",
+    responses: { "200": response("Credential identity", { type: "object", required: ["user", "organization", "defaultProject", "credential"], properties: {
       user: { type: "object", properties: { id: { type: "string" }, name: { type: ["string", "null"] }, email: { type: ["string", "null"] } } },
       organization: { type: ["object", "null"], properties: { id: { type: "string" }, name: { type: "string" }, slug: { type: "string" } } },
-      defaultWorkspace: { type: ["object", "null"], properties: { id: { type: "string" }, name: { type: "string" }, slug: { type: ["string", "null"] } } },
+      defaultProject: { type: ["object", "null"], properties: { id: { type: "string" }, name: { type: "string" }, slug: { type: ["string", "null"] } } },
       credential: { type: "object", required: ["type", "scopes"], properties: { type: { enum: ["apiKey", "oauth", "session"] }, client: { type: "string" }, scopes: { type: "array", items: { type: "string" } }, apiKeyScopes: { type: "array", items: { type: "string" } }, expiresAt: { type: ["string", "null"], format: "date-time" } } },
     } }), ...errors },
   } },
   "/v1/models": { get: {
-    tags: ["chat"], summary: "List accessible workspaces as chat models", security: keySecurity,
-    responses: { "200": response("Workspace model list", { type: "object", required: ["object", "data"], properties: { object: { const: "list" }, data: { type: "array", items: ref("WorkspaceModel") } } }), ...openAiErrors },
+    tags: ["chat"], summary: "List accessible projects as chat models", security: keySecurity,
+    responses: { "200": response("Project model list", { type: "object", required: ["object", "data"], properties: { object: { const: "list" }, data: { type: "array", items: ref("ProjectModel") } } }), ...openAiErrors },
   } },
   "/v1/chat/completions": { post: {
-    tags: ["chat"], summary: "OpenAI-compatible workspace chat", security: keySecurity,
+    tags: ["chat"], summary: "OpenAI-compatible project chat", security: keySecurity,
     requestBody: request(ref("ChatCompletionRequest")),
-    responses: { "200": { description: "Completion JSON, or data-only SSE chunks ending with [DONE]. include_usage adds a final usage chunk. Usage covers answer generation; retrieval is logged separately.", content: { ...json(ref("ChatCompletion")), "text/event-stream": { schema: { type: "string" } } } }, ...openAiErrors, "500": { description: "Workspace answer failed" } },
+    responses: { "200": { description: "Completion JSON, or data-only SSE chunks ending with [DONE]. include_usage adds a final usage chunk. Usage covers answer generation; retrieval is logged separately.", content: { ...json(ref("ChatCompletion")), "text/event-stream": { schema: { type: "string" } } } }, ...openAiErrors, "500": { description: "Project answer failed" } },
   } },
 };
 

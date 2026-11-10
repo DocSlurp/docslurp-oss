@@ -9,7 +9,7 @@ import {
 
 import { WorkflowState } from "../pipeline/pipeline.js";
 import type { Config } from "../config.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 import type { PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { DecisionRequestError, type DecisionAnswer, type DecisionClient, type DecisionQuestion } from "../routing/decision-client.js";
@@ -68,7 +68,7 @@ function makeState(options: { mode?: PageRouterMode; pageRouter?: Partial<PageRo
       maxCostCents: options.maxCostCents ?? null,
       pageRouter: { ...defaultPageRouterConfig, router: "decision-model", triageFormat: "text-state", ...options.pageRouter, mode: options.mode },
     },
-  } as unknown as WorkspaceRun, [document]);
+  } as unknown as ProjectRun, [document]);
   state.docConcurrency = 1;
   return state;
 }
@@ -110,7 +110,7 @@ const fitted = { decisionModel: "cloudflare/clef-flash" } as const;
 const health = () => new DecisionModelHealthRegistry();
 
 describe("RoutePagesStage", () => {
-  it("is a no-op when the env ceiling is off, even if the workspace opted in", async () => {
+  it("is a no-op when the env ceiling is off, even if the project opted in", async () => {
     const storage = makeStorage();
     const state = makeState({ mode: "active" });
     await new RoutePagesStage(storage, envCfg("off"), sources, undefined, { probe, catalog }).run(state);
@@ -120,7 +120,7 @@ describe("RoutePagesStage", () => {
     expect(state.usageLedger.pendingCount).toBe(0);
   });
 
-  it("is a no-op when the workspace has not opted in", async () => {
+  it("is a no-op when the project has not opted in", async () => {
     const storage = makeStorage();
     const state = makeState({ mode: undefined });
     await new RoutePagesStage(storage, envCfg("active"), sources, undefined, { probe, catalog }).run(state);

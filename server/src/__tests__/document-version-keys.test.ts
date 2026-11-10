@@ -7,7 +7,7 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 /**
  * Upload version keys against a database built from db/migrations: every
- * upload is keyed by workspace + folder path + filename (or the caller's
+ * upload is keyed by project + folder path + filename (or the caller's
  * canonicalId), and the existing supersede trigger keeps one current version.
  */
 let stop: () => Promise<void>;
@@ -26,12 +26,12 @@ beforeAll(async () => {
     isTemporalClientConnected: () => true, onTemporalClientConnected: vi.fn(), warmTemporalClient: vi.fn(),
   }));
   vi.doMock("../services/source-metadata.js", () => ({
-    resolveSourceMetadata: async (file: { sourceKey: string }) => ({ pageCount: 1, sourceSha256: `sha-${file.sourceKey}` }),
+    resolveSourceMetadata: async (file: { sourceKey: string }) => ({ pageCount: 1, sourceSha256: `sha-${file.sourceKey}`, fileFacts: { mimeType: "application/pdf", format: "pdf", mismatch: "none" } }),
   }));
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 100000)`;
   await sql`insert into org_memberships(org_id, user_id, role) values ('o1', 'u1', 'owner')`;
-  await sql`insert into workspaces(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W1'), ('w2', 'o1', 'u1', 'W2')`;
+  await sql`insert into projects(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W1'), ('w2', 'o1', 'u1', 'W2')`;
   ({ runCreation } = await import("../services/run-creation.js"));
   eligibility = await import("../search/eligibility.js");
   uploads = await import("../lib/canonical-id.js");
@@ -45,17 +45,17 @@ afterAll(async () => {
 beforeEach(async () => {
   await sql`delete from document_chunks`;
   await sql`delete from documents`;
-  await sql`delete from workspace_runs`;
+  await sql`delete from project_runs`;
 });
 
 let counter = 0;
 
 /** One upload: a run, a document row (created in order) and a chunk containing the upload's marker word. */
-async function upload(workspaceId: string, filename: string, path = "", extra: { canonicalId?: string } = {}) {
+async function upload(projectId: string, filename: string, path = "", extra: { canonicalId?: string } = {}) {
   counter += 1;
   const created = await runCreation.create({
     userId: "u1",
-    workspaceId,
+    projectId,
     kind: "bulk-upload",
     pipeline: defaultPipelineFeatures,
     sources: { kind: "files", files: [{ filename, mimeType: "application/pdf", sourceKey: `raw/${counter}`, path, ...extra }] },
@@ -72,20 +72,20 @@ async function upload(workspaceId: string, filename: string, path = "", extra: {
 
 const complete = (id: string) => sql`update documents set status = 'completed' where id = ${id}`;
 
-async function liveIds(workspaceId: string): Promise<string[]> {
+async function liveIds(projectId: string): Promise<string[]> {
   const rows = await sql<{ id: string }[]>`
     select d.id from documents d
-    where d.workspace_id = ${workspaceId} and d.status = 'completed' and d.superseded_at is null
+    where d.project_id = ${projectId} and d.status = 'completed' and d.superseded_at is null
     order by d.created_at
   `;
   return rows.map((row) => row.id);
 }
 
-async function searchHits(workspaceId: string): Promise<string[]> {
+async function searchHits(projectId: string): Promise<string[]> {
   const rows = await sql<{ document_id: string }[]>`
     select c.document_id from document_chunks c join documents d on d.id = c.document_id
     where ${eligibility.lexicalSearchableDocument("d", false)}
-      and d.workspace_id = ${workspaceId}
+      and d.project_id = ${projectId}
       and c.ts_content @@ websearch_to_tsquery('english', 'shared')
     order by c.document_id
   `;
@@ -116,7 +116,7 @@ describe("path-keyed document versions", () => {
     expect(await searchHits("w1")).toEqual([v2]);
   });
 
-  it("keeps the same name in two workspaces independent", async () => {
+  it("keeps the same name in two projects independent", async () => {
     const a = await upload("w1", "report.pdf", "x");
     const b = await upload("w2", "report.pdf", "x");
     await complete(a);

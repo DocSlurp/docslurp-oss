@@ -47,7 +47,7 @@ let warnedMissingOtlp = false;
 export const mapsObservationAiUsage = () => !getRuntime()?.nativeAiTelemetry;
 function bestEffort(run: () => void): void { try { run(); } catch { /* Telemetry never changes application outcomes. */ } }
 const timeoutMillis = 5000;
-const correlationKeys = new Set(["requestId", "runId", "documentId", "workspaceId", "orgId", "stageName", "scope"]);
+const correlationKeys = new Set(["requestId", "runId", "documentId", "projectId", "orgId", "stageName", "scope"]);
 
 function numberSetting(value: string | undefined, fallback: number, min: number, max: number): number {
   const result = value?.trim() ? Number(value) : fallback;
@@ -261,7 +261,7 @@ function registerRuntimeMetrics(provider: MeterProvider): void {
 export async function flushObservability(): Promise<void> {
   const runtime = getRuntime();
   if (!runtime || runtime.shutdown) return;
-  await Promise.allSettled([() => runtime.traces.forceFlush(), () => runtime.metrics?.forceFlush(), () => runtime.logs?.forceFlush({ timeoutMillis })].map(run => Promise.resolve().then(run)));
+  await Promise.allSettled([() => runtime.traces.forceFlush(), () => runtime.metrics?.forceFlush({ timeoutMillis }), () => runtime.logs?.forceFlush({ timeoutMillis })].map(run => Promise.resolve().then(run)));
 }
 
 export async function shutdownObservability(): Promise<void> {
@@ -456,6 +456,20 @@ export function recordMediaTelemetry(args: { provider: string; model: string; op
   });
 }
 
+/**
+ * Provider usage the worker could not record on a run's usage ledger (no stage context to hold it), so it never reaches
+ * `usage_events`: a counter and its provider cost, for the loss alert. Labels are bounded provider/model/metric categories.
+ */
+export function recordUnrecordedUsageTelemetry(args: { provider: string; model: string; metric: string; costCents: number; reason: string }): void {
+  const meter = getRuntime()?.metrics?.getMeter("docslurp.usage");
+  if (!meter) return;
+  const labels = { provider: args.provider, model: args.model, metric: args.metric, reason: args.reason };
+  bestEffort(() => {
+    meter.createCounter("docslurp.usage.unrecorded").add(1, labels);
+    if (args.costCents > 0) meter.createCounter("docslurp.usage.unrecorded_cost", { unit: "cents" }).add(args.costCents, labels);
+  });
+}
+
 const dependencyScopeKey = createContextKey("docslurp.dependency.scope");
 export function withDependencyScope<T>(scope: Record<string, unknown>, run: () => T): T {
   return context.with(context.active().setValue(dependencyScopeKey, scope), run);
@@ -471,7 +485,7 @@ export function startDependencySpan(name: string, attributes: Attributes) {
   const started = performance.now();
   const scope = context.active().getValue(dependencyScopeKey) as Record<string, unknown> | undefined;
   const correlation = Object.fromEntries(Object.entries(scope ?? {}).filter(([key, value]) =>
-    ["requestId", "runId", "documentId", "workspaceId", "orgId", "sessionId", "stageName"].includes(key) && typeof value === "string")
+    ["requestId", "runId", "documentId", "projectId", "orgId", "sessionId", "stageName"].includes(key) && typeof value === "string")
     .map(([key, value]) => [`docslurp.${key}`, value as string]));
   attributes = { ...correlation, ...attributes };
   const runtime = getRuntime();

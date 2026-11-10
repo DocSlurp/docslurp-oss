@@ -4,7 +4,7 @@ const mocks = vi.hoisted(() => ({ observe: vi.fn(), generate: vi.fn(), usage: vi
 vi.mock("@docslurp/shared/observability", async (importOriginal) => ({ ...await importOriginal<typeof import("@docslurp/shared/observability")>(), withObservation: mocks.observe, aiResultDetails: () => ({ usageDetails: { input: 10, output: 2 } }) }));
 vi.mock("@docslurp/shared", async (importOriginal) => ({
   ...await importOriginal<typeof import("@docslurp/shared")>(),
-  createOpenRouterUsageCapture: () => ({ fetch: vi.fn(), usage: () => undefined, providerName: () => undefined }),
+  createOpenRouterUsageCapture: () => ({ fetch: vi.fn(), usage: () => undefined, providerName: () => undefined, sentModel: () => undefined }),
   resolveOpenRouterUsage: mocks.usage,
 }));
 vi.mock("@ai-sdk/openai", () => ({ createOpenAI: () => (model: string) => model }));
@@ -27,7 +27,7 @@ describe("worker text observation identity", () => {
     expect(mocks.observe.mock.calls[0][0].metadata).toMatchObject({ maxOutputTokens: 128, textGenerationProfile: "grounded-low", reasoningEffort: "low" });
   });
 
-  it("honors task overrides and lets a workspace opt out of the deployment profile", async () => {
+  it("honors task overrides and lets a project opt out of the deployment profile", async () => {
     await generateOpenRouterText({ operation: "community-summary", apiKey: "test", privacyMode: "standard", model: "vendor/model", prompt: "source", system: "task", maxOutputTokens: 220, deploymentProfile: "grounded-low", textGeneration: { model: null, models: {}, profile: "provider-default", reasoningEfforts: { "community-summary": "high" }, maxOutputTokens: { "community-summary": 700 } } });
     expect(mocks.generate).toHaveBeenCalledWith(expect.objectContaining({ system: "task", maxOutputTokens: 700, providerOptions: { openai: { reasoningEffort: "high", forceReasoning: true } } }));
   });

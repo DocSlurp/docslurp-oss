@@ -26,8 +26,8 @@ vi.mock("../search/query-bounds.js", async () => {
   const store = new AsyncLocalStorage<{ signal?: AbortSignal }>();
   return { withSearchSignal: <T>(signal: AbortSignal | undefined, fn: () => Promise<T>) => store.run({ signal }, fn), currentSearchSignal: () => store.getStore()?.signal };
 });
-vi.mock("../lib/privacy.js", () => ({ allowHostedCallForWorkspace: vi.fn(async () => true), loadWorkspacePrivacyMode: vi.fn(async () => "standard"), openRouterCall: vi.fn() }));
-vi.mock("../services/workspaces.js", () => ({ resolveWorkspaceRef: vi.fn(async () => ({ id: "ws" })) }));
+vi.mock("../lib/privacy.js", () => ({ allowHostedCallForProject: vi.fn(async () => true), loadProjectPrivacyMode: vi.fn(async () => "standard"), openRouterCall: vi.fn() }));
+vi.mock("../services/projects.js", () => ({ resolveProjectRef: vi.fn(async () => ({ id: "ws" })) }));
 vi.mock("../lib/posthog-ai-observability.js", () => ({ posthogAiTelemetry: () => ({}) }));
 vi.mock("../services/mcp-tools.js", () => ({
   createMcpDispatcher: () => mocks.dispatch,
@@ -73,7 +73,7 @@ describe("chat agent client disconnect over HTTP", () => {
 
     let turn!: Promise<unknown>;
     const api = new Hono().post("/v1/chat", async (c) => {
-      turn = runChatMcpAgent({ actor, workspaceId: "ws", orgId: "org", sessionId: "chat", query: "What is the policy?", history: [],
+      turn = runChatMcpAgent({ actor, projectId: "ws", orgId: "org", sessionId: "chat", query: "What is the policy?", history: [],
         apiKey: "fake", privacyMode: "standard", model: "test", maxOutputTokens: 100, signal: c.req.raw.signal, abortedStepLookupDelayMs: 0 });
       await turn.catch(() => undefined);
       return c.json({ ok: true });

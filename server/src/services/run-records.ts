@@ -4,24 +4,24 @@ import {
   defaultPipelineFeatures,
   documentSchema,
   publicDiagnostics,
-  workspaceRunSchema,
+  projectRunSchema,
   type DocumentRecord,
   type PipelineFeatures,
-  type WorkspaceRun,
+  type ProjectRun,
 } from "@docslurp/shared";
 
 import type { RunUsageCostSummary } from "./usage-attribution.js";
 
-// Row shapes and mappers for workspace_runs and documents. A leaf module: it
+// Row shapes and mappers for project_runs and documents. A leaf module: it
 // imports neither runs.ts nor run-creation.ts, which both depend on it.
 
-export type WorkspaceRunRow = {
+export type ProjectRunRow = {
   job_id?: string | null;
   id: string;
   org_id: string;
   user_id: string;
-  workspace_id: string;
-  workspace_name: string | null;
+  project_id: string;
+  project_name: string | null;
   kind: string;
   status: string;
   priority: number;
@@ -51,7 +51,7 @@ export type DocumentRow = {
   id: string;
   org_id: string;
   user_id: string;
-  workspace_id: string;
+  project_id: string;
   run_id: string | null;
   filename: string;
   mime_type: string;
@@ -59,9 +59,15 @@ export type DocumentRow = {
   status: string;
   extraction_mode: string;
   page_count: number;
+  /** The worker's measured page count of an Office, slide, sheet or EPUB file (migration 0126); null until measured. */
+  billing_pages?: number | null;
+  /** How billing_pages was found (pdf-conversion, slides, sheet-rows, text-pages, text-rule, size-estimate). */
+  billing_pages_method?: string | null;
+  /** `counted` (from the bytes or the worker's measurement) or `assumed` (an estimate the worker replaces); see PageCountSource. */
+  page_count_source?: string | null;
   source_sha256?: string | null;
   deduped_from_document_id?: string | null;
-  dedup_scope?: "workspace" | "org" | null;
+  dedup_scope?: "project" | "org" | null;
   version_number: number;
   previous_version_id: string | null;
   canonical_id?: string | null;
@@ -97,7 +103,7 @@ export function jsonRecord<T extends Record<string, unknown>>(value: unknown): T
 /**
  * `cost` comes from the usage ledger (usage_attribution). billedCostCents is
  * the figure the worker enforces the run cost cap against (it equals
- * workspace_runs.spent_cents); costCents adds the unbilled compute estimate.
+ * project_runs.spent_cents); costCents adds the unbilled compute estimate.
  * Runs mapped without it (just created) have spent nothing; listed runs go
  * through withRunCosts.
  */
@@ -106,19 +112,19 @@ function failedDocumentsOf(stats: Record<string, unknown>): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
 
-export function mapWorkspaceRun(row: WorkspaceRunRow, cost?: Pick<RunUsageCostSummary, "costCents" | "computeEstimated" | "billedCostCents">): WorkspaceRun {
-  return workspaceRunSchema.parse({
+export function mapProjectRun(row: ProjectRunRow, cost?: Pick<RunUsageCostSummary, "costCents" | "computeEstimated" | "billedCostCents">): ProjectRun {
+  return projectRunSchema.parse({
     id: row.id,
     jobId: row.job_id ?? row.id,
     userId: row.user_id,
     orgId: row.org_id,
-    workspaceId: row.workspace_id,
-    workspaceName: row.workspace_name,
+    projectId: row.project_id,
+    projectName: row.project_name,
     kind: row.kind,
     status: row.status,
     priority: row.priority ?? 0,
     controlState: row.control_state ?? null,
-    pauseReason: ["credit_exhausted", "workspace_budget_paused", "org_budget_paused", "plan_not_entitled"].includes(row.pause_reason ?? "") ? row.pause_reason : null,
+    pauseReason: ["credit_exhausted", "project_budget_paused", "org_budget_paused", "plan_not_entitled"].includes(row.pause_reason ?? "") ? row.pause_reason : null,
     controlRequestedAt: serializeOptionalTimestamp(row.control_requested_at),
     stage: row.stage,
     totalDocuments: row.total_documents,
@@ -144,7 +150,7 @@ export function mapDocument(row: DocumentRow): DocumentRecord {
     id: row.id,
     userId: row.user_id,
     orgId: row.org_id,
-    workspaceId: row.workspace_id,
+    projectId: row.project_id,
     runId: row.run_id,
     filename: row.filename,
     mimeType: row.mime_type,
@@ -152,6 +158,8 @@ export function mapDocument(row: DocumentRow): DocumentRecord {
     status: row.status,
     extractionMode: row.extraction_mode,
     pageCount: row.page_count,
+    // Describes pageCount: measured only when it was counted from the bytes or by the worker; any other source is an estimate.
+    pageCountSource: row.page_count_source === "counted" ? "measured" : "estimated",
     sourceSha256: row.source_sha256 ?? null,
     dedupedFromDocumentId: row.deduped_from_document_id ?? null,
     dedupScope: row.dedup_scope ?? null,

@@ -6,7 +6,7 @@ vi.mock("./admin-emails.js", () => ({ isConfiguredAdminUser }));
 const { isPlatformAdminActor } = await import("./request-actor.js");
 
 const key = (userId: string, keyType: "server" | "client") => ({ type: "apiKey" as const, userId,
-  apiKey: { keyId: "k", userId, orgId: "org", keyType, allowedDomains: [], scopes: ["search"], rateLimitRpm: 60, rateLimitPpd: 1, rateLimits: [], workspaceIds: [] } });
+  apiKey: { keyId: "k", userId, orgId: "org", keyType, allowedDomains: [], scopes: ["search"], rateLimitRpm: 60, rateLimitPpd: 1, rateLimits: [], projectIds: [] } });
 
 it("treats ADMIN_EMAILS sessions and their server keys as platform admins, never client keys", async () => {
   expect(await isPlatformAdminActor(undefined)).toBe(false);

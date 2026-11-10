@@ -1,11 +1,11 @@
 import type { z } from "zod";
-import { getWorkspaceSearchSettings } from "./search-controls.js";
-import { workspaceSettingsPipelinePatchSchema } from "./workspace-settings-proposal-input.js";
-import { workspaceSettingsProposalInputSchema } from "./workspace-settings-proposal-input.js";
+import { getProjectSearchSettings } from "./search-controls.js";
+import { projectSettingsPipelinePatchSchema } from "./project-settings-proposal-input.js";
+import { projectSettingsProposalInputSchema } from "./project-settings-proposal-input.js";
 import { currentChatSessionId, inChatAgentContext } from "../lib/chat-agent-context.js";
 import { enforceActorCategoryRateLimit } from "../middleware/rate-limit.js";
 import { acquireChatSlot } from "../middleware/chat-concurrency.js";
-import { proposeWorkspaceSettings, SettingsProposalError } from "./workspace-settings-proposals.js";
+import { proposeProjectSettings, SettingsProposalError } from "./project-settings-proposals.js";
 import { publicErrorMiddleware } from "../lib/public-errors.js";
 import { apiErrorResponse, apiStatusError, usesNativeErrorEnvelope } from "../lib/api-error.js";
 import { mapValidationIssues, type ValidationErrorSource } from "../lib/validation.js";
@@ -14,24 +14,24 @@ import { Hono, type Context, type MiddlewareHandler } from "hono";
 import type { ApiErrorCode } from "@docslurp/shared";
 
 import { apiKeyHasAnyScope } from "../lib/api-key-authorization.js";
-import { getApiKey, getRequestActor, isFirstPartyAppActor, loadActorScopedWorkspace, resolveActorWorkspaceId, setRequestActor, type RequestActor } from "../lib/request-actor.js";
-import { listWorkspaces } from "./workspaces.js";
-import { listEditableWorkspaceIds } from "./organizations.js";
-import { apiKeyCanUseWorkspace } from "../lib/api-key-workspace-scope.js";
-import { completeUploadInput, extractInput, INLINE_UPLOAD_MAX_BYTES, mediaEvidenceInput, fullIndexInput, listWorkspacesInput, mcpManifest, mcpTools, openUploaderInput, suggestQueriesInput, uploadInput, uploadStatusInput } from "./mcp-catalog.js";
+import { getApiKey, getRequestActor, isFirstPartyAppActor, loadActorScopedProject, resolveActorProjectId, setRequestActor, type RequestActor } from "../lib/request-actor.js";
+import { listProjects } from "./projects.js";
+import { listEditableProjectIds } from "./organizations.js";
+import { apiKeyCanUseProject } from "../lib/api-key-project-scope.js";
+import { completeUploadInput, extractInput, INLINE_UPLOAD_MAX_BYTES, mediaEvidenceInput, fullIndexInput, listProjectsInput, mcpManifest, mcpTools, openUploaderInput, suggestQueriesInput, uploadInput, uploadStatusInput } from "./mcp-catalog.js";
 import { UPLOAD_UI_URI } from "../lib/mcp-ui-resources.js";
 import { mcpOrigin } from "../lib/mcp-origin.js";
-import { groundedWorkspaceChatRoutes, searchRoutes } from "../routes/search.js";
+import { groundedProjectChatRoutes, searchRoutes } from "../routes/search.js";
 import { sql } from "../db.js";
 import { isProtectedStoredQuery } from "../search/session.js";
 import { deferredProfilesEnabled } from "@docslurp/shared";
 import { getRun } from "./runs.js";
 import { runLifecycle } from "./run-lifecycle.js";
 import { resolveMaterializationPolicy } from "./materialization-policy.js";
-import { IndexingModeError, requestFullIndex } from "./workspace-indexing-mode.js";
+import { IndexingModeError, requestFullIndex } from "./project-indexing-mode.js";
 import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
 import {
-  apiKeyMayUseEstimateTool, estimateToolUsesWorkspace, forwardInProcess, isEstimateToolName, jobsGetInputSchema, planEstimateTool,
+  apiKeyMayUseEstimateTool, estimateToolUsesProject, forwardInProcess, isEstimateToolName, jobsGetInputSchema, planEstimateTool,
 } from "./mcp-estimate-tools.js";
 import { spendAwareErrorHandler } from "./billing/spend-guard.js";
 import { loadIngestReport, summarizeIngestReport } from "./ingest-report.js";
@@ -114,26 +114,26 @@ const mcpAdapterRoutes = new Hono()
       return adapterError(c, 400, "Expected a JSON object");
     }
 
-    if (toolId === "getWorkspaceSettings") {
-      if (Object.keys(body).some(key => key !== "workspace") || (body.workspace !== undefined && typeof body.workspace !== "string")) return adapterError(c, 400, "Invalid settings request");
-      const workspace = await loadActorScopedWorkspace(await resolveActorWorkspaceId(actor, typeof body.workspace === "string" ? body.workspace : undefined), actor);
-      if (!workspace) return adapterError(c, 404, "Workspace not found", "workspace_not_found");
-      const settings = await getWorkspaceSearchSettings(workspace.id, actor.userId);
-      return c.json({ workspaceId: workspace.id,
-        pipeline: Object.fromEntries(Object.keys(workspaceSettingsPipelinePatchSchema.shape).map(key => [key, key === "mediaVideo" ? { enabled: workspace.pipeline.mediaVideo?.enabled !== false }
-          : workspace.pipeline[key as keyof typeof workspace.pipeline]])),
+    if (toolId === "getProjectSettings") {
+      if (Object.keys(body).some(key => key !== "project") || (body.project !== undefined && typeof body.project !== "string")) return adapterError(c, 400, "Invalid settings request");
+      const project = await loadActorScopedProject(await resolveActorProjectId(actor, typeof body.project === "string" ? body.project : undefined), actor);
+      if (!project) return adapterError(c, 404, "Project not found", "project_not_found");
+      const settings = await getProjectSearchSettings(project.id, actor.userId);
+      return c.json({ projectId: project.id,
+        pipeline: Object.fromEntries(Object.keys(projectSettingsPipelinePatchSchema.shape).map(key => [key, key === "mediaVideo" ? { enabled: project.pipeline.mediaVideo?.enabled !== false }
+          : project.pipeline[key as keyof typeof project.pipeline]])),
         chat: settings.chat, retrieval: settings.retrievalDefaults });
     }
 
-    if (toolId === "proposeWorkspaceSettings") {
-      const parsed = workspaceSettingsProposalInputSchema.safeParse(body);
+    if (toolId === "proposeProjectSettings") {
+      const parsed = projectSettingsProposalInputSchema.safeParse(body);
       if (!parsed.success) return invalidInput(c, parsed.error);
       const sessionId = currentChatSessionId();
-      if (!sessionId) return adapterError(c, 403, "Settings proposals require a workspace chat session");
-      const workspace = await loadActorScopedWorkspace(await resolveActorWorkspaceId(actor, parsed.data.workspace), actor);
-      if (!workspace) return adapterError(c, 404, "Workspace not found", "workspace_not_found");
+      if (!sessionId) return adapterError(c, 403, "Settings proposals require a project chat session");
+      const project = await loadActorScopedProject(await resolveActorProjectId(actor, parsed.data.project), actor);
+      if (!project) return adapterError(c, 404, "Project not found", "project_not_found");
       try {
-        const settingsProposal = await proposeWorkspaceSettings({ actor, workspaceId: workspace.id, sessionId, changes: parsed.data.changes });
+        const settingsProposal = await proposeProjectSettings({ actor, projectId: project.id, sessionId, changes: parsed.data.changes });
         return c.json({ settingsProposal });
       } catch (error) {
         if (error instanceof SettingsProposalError) return adapterError(c, error.status, error.message);
@@ -141,36 +141,36 @@ const mcpAdapterRoutes = new Hono()
       }
     }
 
-    if (toolId === "listWorkspaces") {
-      const parsed = listWorkspacesInput.safeParse(body);
+    if (toolId === "listProjects") {
+      const parsed = listProjectsInput.safeParse(body);
       if (!parsed.success) return invalidInput(c, parsed.error);
-      const accessible = (await listWorkspaces(actor.userId, { refineNames: false }))
-        .filter(workspace => !apiKey || apiKeyCanUseWorkspace(apiKey, workspace));
+      const accessible = (await listProjects(actor.userId, { refineNames: false }))
+        .filter(project => !apiKey || apiKeyCanUseProject(apiKey, project));
       const { offset, limit } = parsed.data;
-      return c.json({ workspaces: accessible.slice(offset, offset + limit).map(workspace => ({
-        id: workspace.id, slug: workspace.slug, name: workspace.name, isDefault: workspace.isDefault,
-        documentCount: workspace.documentCount, totalPageCount: workspace.totalPageCount,
-        pendingDocumentCount: workspace.pendingDocumentCount, latestRunId: workspace.latestRunId,
-        latestRunStatus: workspace.latestRunStatus,
+      return c.json({ projects: accessible.slice(offset, offset + limit).map(project => ({
+        id: project.id, slug: project.slug, name: project.name, isDefault: project.isDefault,
+        documentCount: project.documentCount, totalPageCount: project.totalPageCount,
+        pendingDocumentCount: project.pendingDocumentCount, latestRunId: project.latestRunId,
+        latestRunStatus: project.latestRunStatus,
       })), total: accessible.length, nextOffset: offset + limit < accessible.length ? offset + limit : null });
     }
 
     if (toolId === "openUploader") {
       const parsed = openUploaderInput.safeParse(body);
       if (!parsed.success) return invalidInput(c, parsed.error);
-      // Read-only: resolves a target for the widget and never creates a workspace or returns upload URLs.
-      const workspace = await loadActorScopedWorkspace(await resolveActorWorkspaceId(actor, parsed.data.workspace), actor);
-      if (!workspace) return adapterError(c, 404, "Workspace not found", "workspace_not_found");
-      // Same rule as the upload route's run creation (canContributeToWorkspace): editors and admins of a
-      // workspace, plus any org member for the default workspace. Read-only shares are not offered.
-      const editable = new Set(await listEditableWorkspaceIds(actor.userId));
-      if (!editable.has(workspace.id)) return adapterError(c, 403, "You do not have permission to upload to this workspace", "forbidden");
-      const accessible = (await listWorkspaces(actor.userId, { refineNames: false }))
-        .filter(item => editable.has(item.id) && (!apiKey || apiKeyCanUseWorkspace(apiKey, item)));
+      // Read-only: resolves a target for the widget and never creates a project or returns upload URLs.
+      const project = await loadActorScopedProject(await resolveActorProjectId(actor, parsed.data.project), actor);
+      if (!project) return adapterError(c, 404, "Project not found", "project_not_found");
+      // Same rule as the upload route's run creation (canContributeToProject): editors and admins of a
+      // project, plus any org member for the default project. Read-only shares are not offered.
+      const editable = new Set(await listEditableProjectIds(actor.userId));
+      if (!editable.has(project.id)) return adapterError(c, 403, "You do not have permission to upload to this project", "forbidden");
+      const accessible = (await listProjects(actor.userId, { refineNames: false }))
+        .filter(item => editable.has(item.id) && (!apiKey || apiKeyCanUseProject(apiKey, item)));
       const summary = (item: { id: string; slug: string; name: string; isDefault: boolean }) => ({ id: item.id, slug: item.slug, name: item.name, isDefault: item.isDefault });
       return c.json({
-        workspace: summary(accessible.find(item => item.id === workspace.id) ?? { ...workspace, isDefault: false }),
-        workspaces: accessible.slice(0, 50).map(summary),
+        project: summary(accessible.find(item => item.id === project.id) ?? { ...project, isDefault: false }),
+        projects: accessible.slice(0, 50).map(summary),
         limits: { maxFiles: 10, maxFileBytes: 5 * 1024 ** 3 },
         uploader: { resourceUri: UPLOAD_UI_URI },
         hint: "Ask the user to drop files into the uploader. Hosts without MCP Apps: use upload with urls.",
@@ -181,7 +181,7 @@ const mcpAdapterRoutes = new Hono()
       const parsed = (toolId === "extract" ? extractInput : uploadInput).safeParse(body);
       if (!parsed.success) return invalidInput(c, parsed.error);
       const input = parsed.data as z.infer<typeof extractInput>;
-      // Reuse upload (or extract) authorization, workspace resolution (find or create; a
+      // Reuse upload (or extract) authorization, project resolution (find or create; a
       // restricted key can do neither outside its allowlist), URL validation,
       // admission, spend checks and idempotency.
       const routes = toolId === "extract"
@@ -207,7 +207,7 @@ const mcpAdapterRoutes = new Hono()
           return adapterError(c, 413, `Inline files exceed ${INLINE_UPLOAD_MAX_BYTES / 1024} KiB in total; use files for direct storage upload or urls`);
         }
         const form = new FormData();
-        if (input.workspace) form.set("workspace", input.workspace);
+        if (input.project) form.set("project", input.project);
         if (input.quality) form.set("pipeline", JSON.stringify({ quality: input.quality }));
         for (const [name, value] of Object.entries(extractFields)) form.set(name, String(value));
         for (const file of decoded) form.append("files", new File([new Uint8Array(file.bytes!)], file.filename, { type: file.mimeType ?? "" }));
@@ -215,7 +215,7 @@ const mcpAdapterRoutes = new Hono()
       }
       headers.set("Content-Type", "application/json");
       return native.request(`http://mcp.internal/${input.urls ? "url" : "direct/sessions"}`, {
-        method: "POST", headers, body: JSON.stringify({ workspace: input.workspace,
+        method: "POST", headers, body: JSON.stringify({ project: input.project,
           ...(input.urls ? { urls: input.urls } : { files: input.files }),
           ...(input.quality ? { pipeline: { quality: input.quality } } : {}),
           ...extractFields,
@@ -229,7 +229,7 @@ const mcpAdapterRoutes = new Hono()
       const { loadDirectUploadSession } = await import("./direct-upload-session.js");
       const loaded = await loadDirectUploadSession(parsed.data.sessionId, actor.userId);
       if (!loaded || (apiKey && (loaded.session.org_id !== apiKey.orgId ||
-        (loaded.session.workspace_id ? !await loadActorScopedWorkspace(loaded.session.workspace_id, actor) : Boolean(apiKey.workspaceIds?.length))))) {
+        (loaded.session.project_id ? !await loadActorScopedProject(loaded.session.project_id, actor) : Boolean(apiKey.projectIds?.length))))) {
         return adapterError(c, 404, "Upload session not found");
       }
       if (!["pending", "uploading"].includes(loaded.session.status)) return adapterError(c, 409, "Upload session is already confirmed or closed");
@@ -271,7 +271,7 @@ const mcpAdapterRoutes = new Hono()
       const native = new Hono().use("*", publicErrorMiddleware).use("*", async (inner, next) => {
         setRequestActor(inner, actor);
         await next();
-      }).route("/", toolId === "chat" ? groundedWorkspaceChatRoutes : searchRoutes);
+      }).route("/", toolId === "chat" ? groundedProjectChatRoutes : searchRoutes);
       native.onError(spendAwareErrorHandler);
       try {
         const response = await native.request("http://mcp.internal/", {
@@ -288,29 +288,29 @@ const mcpAdapterRoutes = new Hono()
     if (toolId === "getMediaEvidence") {
       const parsed = mediaEvidenceInput.safeParse(body);
       if (!parsed.success) return invalidInput(c, parsed.error);
-      const workspace = await loadActorScopedWorkspace(await resolveActorWorkspaceId(actor, parsed.data.workspace), actor);
-      if (!workspace) return adapterError(c, 404, "Workspace not found", "workspace_not_found");
+      const project = await loadActorScopedProject(await resolveActorProjectId(actor, parsed.data.project), actor);
+      if (!project) return adapterError(c, 404, "Project not found", "project_not_found");
       const { loadMediaEvidence } = await import("./media-evidence.js");
-      const evidence = await loadMediaEvidence(workspace.id, parsed.data.documentId, parsed.data.offset);
+      const evidence = await loadMediaEvidence(project.id, parsed.data.documentId, parsed.data.offset);
       return evidence ? c.json(evidence) : adapterError(c, 404, "Indexed media not found");
     }
 
     if (toolId === "fullIndex") {
       const parsed = fullIndexInput.safeParse(body);
       if (!parsed.success) return invalidInput(c, parsed.error);
-      const workspace = await loadActorScopedWorkspace(await resolveActorWorkspaceId(actor, parsed.data.workspace), actor);
-      if (!workspace) return adapterError(c, 404, "Workspace not found", "workspace_not_found");
+      const project = await loadActorScopedProject(await resolveActorProjectId(actor, parsed.data.project), actor);
+      if (!project) return adapterError(c, 404, "Project not found", "project_not_found");
       const resolved = await resolveMaterializationPolicy({
-        workspacePipeline: workspace.pipeline,
+        projectPipeline: project.pipeline,
         apiKey,
         capabilityHeader: c.req.header("X-DocSlurp-Capability"),
         origin: c.req.header("Origin"),
-        workspaceId: workspace.id,
+        projectId: project.id,
       });
       if ("error" in resolved) return adapterError(c, 403, "Invalid capability");
       try {
         const result = await requestFullIndex({
-          orgId: workspace.orgId, workspaceId: workspace.id, documentIds: parsed.data.documentIds, actor, policy: resolved.policy,
+          orgId: project.orgId, projectId: project.id, documentIds: parsed.data.documentIds, actor, policy: resolved.policy,
         });
         const run = await getRun(result.runId, actor.userId);
         if (run) await runLifecycle.start(run);
@@ -328,18 +328,18 @@ const mcpAdapterRoutes = new Hono()
         const { loadDirectUploadSession, describeDirectUploadSession } = await import("./direct-upload-session.js");
         const loaded = await loadDirectUploadSession(parsed.data.sessionId, actor.userId);
         if (!loaded || (apiKey && (loaded.session.org_id !== apiKey.orgId ||
-          (loaded.session.workspace_id ? !await loadActorScopedWorkspace(loaded.session.workspace_id, actor) : Boolean(apiKey.workspaceIds?.length))))) {
+          (loaded.session.project_id ? !await loadActorScopedProject(loaded.session.project_id, actor) : Boolean(apiKey.projectIds?.length))))) {
           return adapterError(c, 404, "Upload session not found");
         }
         return c.json({ tool: toolId, ...await describeDirectUploadSession(loaded, true) });
       }
-      const workspace = await loadActorScopedWorkspace(
-        await resolveActorWorkspaceId(c.get("requestActor"), parsed.data.workspace),
+      const project = await loadActorScopedProject(
+        await resolveActorProjectId(c.get("requestActor"), parsed.data.project),
         actor,
       );
-      if (!workspace) return adapterError(c, 404, "Workspace not found", "workspace_not_found");
+      if (!project) return adapterError(c, 404, "Project not found", "project_not_found");
       const report = await loadIngestReport({
-        workspace, canEdit: false, runId: parsed.data.runId ?? null, documentIds: parsed.data.documentIds ?? null,
+        project, canEdit: false, runId: parsed.data.runId ?? null, documentIds: parsed.data.documentIds ?? null,
       });
       return c.json({ tool: toolId, summary: summarizeIngestReport(report), report });
     }
@@ -355,14 +355,14 @@ const mcpAdapterRoutes = new Hono()
     if (isEstimateToolName(toolId)) {
       // Estimates are read-only, but a key may only price work it could start (same scope and key type as the mutation).
       if (apiKey && !apiKeyMayUseEstimateTool(toolId, apiKey)) return adapterError(c, 403, "Forbidden");
-      let workspaceRef = "";
-      if (estimateToolUsesWorkspace(toolId, body)) {
-        const requested = typeof body.workspace === "string" ? body.workspace : undefined;
-        const workspace = await loadActorScopedWorkspace(await resolveActorWorkspaceId(actor, requested), actor);
-        if (!workspace) return adapterError(c, 404, "Workspace not found", "workspace_not_found");
-        workspaceRef = workspace.id;
+      let projectRef = "";
+      if (estimateToolUsesProject(toolId, body)) {
+        const requested = typeof body.project === "string" ? body.project : undefined;
+        const project = await loadActorScopedProject(await resolveActorProjectId(actor, requested), actor);
+        if (!project) return adapterError(c, 404, "Project not found", "project_not_found");
+        projectRef = project.id;
       }
-      const planned = planEstimateTool(toolId, body, workspaceRef);
+      const planned = planEstimateTool(toolId, body, projectRef);
       if (!planned.ok) return invalidInput(c, { issues: planned.issues });
       const response = await forwardInProcess(actor, "POST", planned.plan.path, planned.plan.body, c.req.raw.signal);
       if (!response.ok) return response;
@@ -373,21 +373,21 @@ const mcpAdapterRoutes = new Hono()
       const parsed = suggestQueriesInput.safeParse(body);
       if (!parsed.success) return invalidInput(c, parsed.error);
       const suggestBody = parsed.data;
-      const workspace = await loadActorScopedWorkspace(
-        await resolveActorWorkspaceId(c.get("requestActor"), suggestBody.workspace),
+      const project = await loadActorScopedProject(
+        await resolveActorProjectId(c.get("requestActor"), suggestBody.project),
         actor,
       );
-      if (!workspace) return adapterError(c, 404, "Workspace not found", "workspace_not_found");
+      if (!project) return adapterError(c, 404, "Project not found", "project_not_found");
       const like = (suggestBody.q ?? "").trim() ? `${(suggestBody.q ?? "").trim()}%` : "%";
       const limit = Math.min(25, Math.max(1, suggestBody.limit ?? 8));
       const suggestions = await sql<{ phrase: string }[]>`
         select phrase
         from (
-          select phrase, weight, created_at from query_suggestions where workspace_id = ${workspace.id}
+          select phrase, weight, created_at from query_suggestions where project_id = ${project.id}
             and user_id = ${actor.userId} and phrase ilike ${like}
           union all
           select s.query as phrase, 10 as weight, s.created_at from search_sessions s
-            where s.user_id = ${actor.userId} and (s.metadata ->> 'workspaceId') = ${workspace.id}
+            where s.user_id = ${actor.userId} and (s.metadata ->> 'projectId') = ${project.id}
               and s.query not like 'enc:%' and s.query not like 'redacted:%' and s.query ilike ${like}
         ) x
         group by phrase
@@ -409,14 +409,14 @@ const mcpAdapterRoutes = new Hono()
     return adapterError(c, 404, "Unknown MCP resource");
   })
   .get("/prompts/:id", async (c) => {
-    if (c.req.param("id") !== "workspace-grounded-answer") {
+    if (c.req.param("id") !== "project-grounded-answer") {
       return adapterError(c, 404, "Unknown MCP prompt");
     }
 
     return c.json({
-      id: "workspace-grounded-answer",
+      id: "project-grounded-answer",
       prompt: [
-        "Answer using only the supplied workspace excerpts.",
+        "Answer using only the supplied project excerpts.",
         "Every material claim must include citations like [1] or [2].",
         "If the evidence is insufficient, say so plainly."
       ].join("\n")

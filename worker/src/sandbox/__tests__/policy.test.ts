@@ -14,32 +14,26 @@ const NONE_NO_PID_NAMESPACE = iso(false, "none", false);
 const PROD = { NODE_ENV: "production" };
 
 describe("assertSandboxPolicy in production", () => {
-  it.each([
-    ["fs + full network isolation", "bubblewrap", iso(true, "full")],
-    ["fs + tcp-only network isolation", "landlock", iso(true, "tcp-only")],
-  ])("accepts %s", (_name, providerId, isolation) => {
-    expect(assertSandboxPolicy({ providerId, isolation, env: PROD })).toEqual({ warnings: [] });
-  });
-
-  it.each([
-    ["no network isolation", iso(true, "none")],
-    ["no filesystem isolation", iso(false, "full")],
-  ])("rejects %s", (_name, isolation) => {
-    expect(() => assertSandboxPolicy({ providerId: "bubblewrap", isolation, env: PROD })).toThrow(SandboxPolicyError);
-  });
-
-  it("rejects none without the override and names it", () => {
-    expect(() => assertSandboxPolicy({ providerId: "none", isolation: NONE_ISOLATION, env: PROD })).toThrow(
-      /DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED/,
-    );
-  });
-
-  it("allows none with the override and warns", () => {
+  it.each(["bubblewrap", "landlock", "none"])("refuses local %s even with the unisolated override", (providerId) => {
     const env = { ...PROD, DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED: "true" };
-    expect(assertSandboxPolicy({ providerId: "none", isolation: NONE_ISOLATION, env })).toEqual({
-      warnings: ["[parser-sandbox] status=unisolated"],
-    });
+    expect(() => assertSandboxPolicy({ providerId, isolation: iso(true, "full"), env })).toThrow(/VM boundary/);
   });
+
+  it("accepts the remote Modal VM boundary", () => {
+    expect(assertSandboxPolicy({ providerId: "modal", isolation: { ...iso(true, "full"), location: "remote" }, env: PROD }))
+      .toEqual({ warnings: [] });
+  });
+
+  it.each([
+    ["unknown remote provider", "custom", { ...iso(true, "full"), location: "remote" as const }],
+    ["Modal claiming local execution", "modal", iso(true, "full")],
+    ["remote without filesystem isolation", "modal", { ...iso(false, "full"), location: "remote" as const }],
+    ["remote with only TCP isolation", "modal", { ...iso(true, "tcp-only"), location: "remote" as const }],
+    ["remote without network isolation", "modal", { ...iso(true, "none"), location: "remote" as const }],
+  ])("refuses %s", (_name, providerId, isolation) => {
+    expect(() => assertSandboxPolicy({ providerId, isolation, env: PROD })).toThrow(SandboxPolicyError);
+  });
+
 });
 
 describe("assertSandboxPolicy outside production", () => {

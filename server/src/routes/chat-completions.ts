@@ -7,19 +7,19 @@ import { z } from "zod";
 
 import {
   actorHasAnyApiKeyScope,
-  apiKeyAllowsWorkspace,
+  apiKeyAllowsProject,
   getRequestActor,
-  loadActorScopedWorkspace,
-  resolveActorWorkspaceId,
+  loadActorScopedProject,
+  resolveActorProjectId,
 } from "../lib/request-actor.js";
 import { apiKeyAuth } from "../middleware/api-key-auth.js";
 import { createChatConcurrencyLimit } from "../middleware/chat-concurrency.js";
 import { assertCanSpend, isSpendBlockedError, type SpendBlockedError } from "../services/billing/spend-guard.js";
 import { upgradeLinkHeader, upgradeLinksFor } from "../lib/upgrade-links.js";
-import { chatWorkspace, workspaceChatDisabledBody } from "../services/workspace-chat.js";
-import { listWorkspaces } from "../services/workspaces.js";
-import { WorkspaceAccessError } from "../services/default-workspace.js";
-import { chatRetrievalOverridesSchema, normalizeExtractedText, type WorkspaceChatResponse, type WorkspaceChatTurn } from "@docslurp/shared";
+import { chatProject, projectChatDisabledBody } from "../services/project-chat.js";
+import { listProjects } from "../services/projects.js";
+import { ProjectAccessError } from "../services/default-project.js";
+import { chatRetrievalOverridesSchema, normalizeExtractedText, type ProjectChatResponse, type ProjectChatTurn } from "@docslurp/shared";
 import { authenticatedByRoute } from "../lib/route-auth.js";
 import { env } from "../config.js";
 import { ChatToolBlockedError } from "../services/chat-tool-error.js";
@@ -31,12 +31,12 @@ const textContent = z.union([
   z.array(z.object({ type: z.literal("text"), text: z.string().max(64_000) }).strict()).min(1).max(16),
 ]);
 const requestSchema = z.object({
-  // workspace:<uuid>, workspace:<slug> (current or former) or workspace:default.
+  // project:<uuid>, project:<slug> (current or former) or project:default.
   // The inference model is docslurp.model (an llm:// URI), never this field.
-  model: z.string().regex(/^workspace:(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[a-z0-9]+(?:-[a-z0-9]+)*)$/i, {
+  model: z.string().regex(/^project:(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[a-z0-9]+(?:-[a-z0-9]+)*)$/i, {
     error: (issue) => typeof issue.input === "string" && /^llm:\/\//i.test(issue.input.trim())
-      ? "model selects a workspace (workspace:default, workspace:<slug> or an id from GET /v1/models). Send the llm:// inference model as docslurp.model instead."
-      : "model must be workspace:default, workspace:<slug> or a workspace model id from GET /v1/models",
+      ? "model selects a project (project:default, project:<slug> or an id from GET /v1/models). Send the llm:// inference model as docslurp.model instead."
+      : "model must be project:default, project:<slug> or a project model id from GET /v1/models",
   }),
   messages: z.array(z.object({
     role: z.enum(["system", "developer", "user", "assistant"]),
@@ -49,11 +49,11 @@ const requestSchema = z.object({
   n: z.literal(1).optional(),
   user: z.string().max(256).optional(),
   /**
-   * "auto" (default): the workspace agent may call its own tools (search, web)
-   * before answering; workspace settings tools are DocSlurp-app only. "none": answer directly from one retrieval and
+   * "auto" (default): the project agent may call its own tools (search, web)
+   * before answering; project settings tools are DocSlurp-app only. "none": answer directly from one retrieval and
    * one model call. Client-defined tools are not supported.
    */
-  tool_choice: z.enum(["auto", "none"], { error: 'tool_choice must be "auto" or "none"; DocSlurp runs its own workspace tools and does not accept client-defined tools' }).optional(),
+  tool_choice: z.enum(["auto", "none"], { error: 'tool_choice must be "auto" or "none"; DocSlurp runs its own project tools and does not accept client-defined tools' }).optional(),
   /** DocSlurp extension (send it with extra_body in OpenAI SDKs), mirroring the response's `docslurp` field. */
   docslurp: z.object({
     speedBoost: z.boolean().default(false),
@@ -95,11 +95,11 @@ function spendBlockedBody(c: Context, error: SpendBlockedError) {
   return links ? { error: { ...body.error, links } } : body;
 }
 
-function completionFinishReason(response: WorkspaceChatResponse): "stop" | "length" | "content_filter" {
+function completionFinishReason(response: ProjectChatResponse): "stop" | "length" | "content_filter" {
   return response.finishReason === "length" ? "length" : response.finishReason === "content-filter" ? "content_filter" : "stop";
 }
 
-function completionUsage(response: WorkspaceChatResponse) {
+function completionUsage(response: ProjectChatResponse) {
   return {
     prompt_tokens: response.usage.inputTokens,
     completion_tokens: response.usage.outputTokens,
@@ -108,7 +108,7 @@ function completionUsage(response: WorkspaceChatResponse) {
 }
 
 /** Plain clients retain clickable source provenance; richer clients can read the extension. */
-function sourceList(response: WorkspaceChatResponse): string {
+function sourceList(response: ProjectChatResponse): string {
   if (!response.citations.length) return "";
   return "\n\nSources:\n" + response.citations.map((result, index) => {
     const citation = result.citation;
@@ -126,7 +126,7 @@ const compatibleChatAuth: MiddlewareHandler = async (c, next) => {
       if (retryAfter) c.header("Retry-After", retryAfter);
       return c.json(errorBody("Request rate limit exceeded. Retry later.", "rate_limit_error", "rate_limit_exceeded"), 429);
     }
-    // A browser key refused for a fixable reason (no workspace allowlist, a website it
+    // A browser key refused for a fixable reason (no project allowlist, a website it
     // doesn't allow) is a permission error with its own code, not an unknown key.
     const policy = c.get("apiKeyPolicyRefusal");
     if (policy) return c.json(errorBody(policy.message, "permission_error", policy.code), 403);
@@ -135,7 +135,7 @@ const compatibleChatAuth: MiddlewareHandler = async (c, next) => {
     c.header("WWW-Authenticate", 'Bearer realm="docslurp"');
     return c.json(errorBody("A valid DocSlurp API key is required", "authentication_error", "invalid_api_key"), 401);
   }
-  // Workspace models generate answers: the key needs `chat`, not just `search`.
+  // Project models generate answers: the key needs `chat`, not just `search`.
   if (!actorHasAnyApiKeyScope(getRequestActor(c), ["chat"])) {
     return c.json(errorBody("API key needs chat access", "permission_error", "insufficient_scope"), 403);
   }
@@ -148,17 +148,17 @@ export const chatCompletionsRoutes = new Hono()
   .use("/chat/completions", createChatConcurrencyLimit((c) => c.json(errorBody("Too many chat requests in progress for this key. Retry later.", "rate_limit_error", "rate_limit_exceeded"), 429)))
   .get("/models", async (c) => {
     const actor = getRequestActor(c);
-    const workspaces = await listWorkspaces(actor.userId);
+    const projects = await listProjects(actor.userId);
     const orgId = actor.type === "apiKey" ? actor.apiKey.orgId : null;
     return c.json({
       object: "list",
-      data: workspaces.filter((workspace) => !workspace.archivedAt && (!orgId || workspace.orgId === orgId)
-        && (actor.type !== "apiKey" || apiKeyAllowsWorkspace(actor.apiKey, workspace.id))).map((workspace) => ({
-        id: `workspace:${workspace.id}`,
+      data: projects.filter((project) => !project.archivedAt && (!orgId || project.orgId === orgId)
+        && (actor.type !== "apiKey" || apiKeyAllowsProject(actor.apiKey, project.id))).map((project) => ({
+        id: `project:${project.id}`,
         object: "model",
-        created: Math.floor(new Date(workspace.createdAt).getTime() / 1000),
+        created: Math.floor(new Date(project.createdAt).getTime() / 1000),
         owned_by: "docslurp",
-        name: workspace.name,
+        name: project.name,
       })),
     });
   })
@@ -176,31 +176,31 @@ export const chatCompletionsRoutes = new Hono()
       const key = issue.code === "unrecognized_keys" ? issue.keys[0] : undefined;
       const param = [...issue.path, ...(key ? [key] : [])].join(".");
       const message = issue.path.length === 0 && (key === "tools" || key === "functions")
-        ? `Unsupported parameter: ${key}. DocSlurp runs its own workspace tools; use tool_choice "none" for a direct answer without them.`
+        ? `Unsupported parameter: ${key}. DocSlurp runs its own project tools; use tool_choice "none" for a direct answer without them.`
         : issue.message;
       return c.json(errorBody(message, "invalid_request_error", key ? "unsupported_parameter" : null, param || null), 400);
     }
     const input = parsed.data;
     const actor = getRequestActor(c);
-    // The same resolver as every `workspace` field: UUID, current or former slug, or "default".
-    const workspaceId = await resolveActorWorkspaceId(actor, input.model.slice("workspace:".length)).catch((error: unknown) => {
-      if (error instanceof WorkspaceAccessError) return null;
+    // The same resolver as every `project` field: UUID, current or former slug, or "default".
+    const projectId = await resolveActorProjectId(actor, input.model.slice("project:".length)).catch((error: unknown) => {
+      if (error instanceof ProjectAccessError) return null;
       throw error;
     });
-    if (!workspaceId || !await loadActorScopedWorkspace(workspaceId, actor)) {
-      return c.json(errorBody("Workspace model not found", "invalid_request_error", "model_not_found", "model"), 404);
+    if (!projectId || !await loadActorScopedProject(projectId, actor)) {
+      return c.json(errorBody("Project model not found", "invalid_request_error", "model_not_found", "model"), 404);
     }
-    const chatDisabled = await workspaceChatDisabledBody(workspaceId, actor.userId);
+    const chatDisabled = await projectChatDisabledBody(projectId, actor.userId);
     if (chatDisabled) {
       return c.json(errorBody(chatDisabled.error, "permission_error", chatDisabled.code, "model"), 403);
     }
     // Refused before any streaming starts, as on POST /v1/chat.
-    if (input.docslurp?.model && await chatModelRefused(actor, input.docslurp.model, workspaceId)) {
+    if (input.docslurp?.model && await chatModelRefused(actor, input.docslurp.model, projectId)) {
       return c.json(errorBody(new ChatModelNotAllowedError().message, "invalid_request_error", "model_not_allowed", "docslurp.model"), 400);
     }
     // A browser (client) key is public: anyone who reads the page can send any
     // messages. Its callers' system/developer messages would sit beside the
-    // workspace instructions with system authority, so they are dropped; only
+    // project instructions with system authority, so they are dropped; only
     // server keys may set system instructions.
     const systemAllowed = actor.type !== "apiKey" || actor.apiKey.keyType === "server";
     if (!systemAllowed) {
@@ -210,18 +210,18 @@ export const chatCompletionsRoutes = new Hono()
         eventName: "docslurp.chat.denied_instructions",
         severityText: "warn",
         body: "Discarded browser-key privileged instructions",
-        attributes: { "docslurp.workspaceId": workspaceId, "docslurp.denied.system_count": systemCount,
+        attributes: { "docslurp.projectId": projectId, "docslurp.denied.system_count": systemCount,
           "docslurp.denied.developer_count": developerCount },
       });
     }
-    const history: Array<Pick<WorkspaceChatTurn, "role" | "content">> = input.messages.slice(0, -1)
+    const history: Array<Pick<ProjectChatTurn, "role" | "content">> = input.messages.slice(0, -1)
       .filter((message) => systemAllowed || (message.role !== "system" && message.role !== "developer"))
       .map((message) => ({
         role: message.role === "developer" ? "system" : message.role,
         content: contentText(message.content),
       }));
     const args = {
-      workspaceId,
+      projectId,
       speedBoost: input.docslurp?.speedBoost === true,
       userId: actor.userId,
       actor, allowAgentTools: env.publicChatAgentEnabled && input.tool_choice !== "none", signal: c.req.raw.signal,
@@ -237,7 +237,7 @@ export const chatCompletionsRoutes = new Hono()
     const base = { id, created, model: input.model };
     if (!input.stream) {
       try {
-        const response = await chatWorkspace(args);
+        const response = await chatProject(args);
         return c.json({
           ...base,
           object: "chat.completion",
@@ -251,13 +251,13 @@ export const chatCompletionsRoutes = new Hono()
         if (error instanceof ChatToolBlockedError) return c.json(errorBody(error.message, "server_error", error.code), error.statusCode);
         if (isChatTurnDeadlineError(error)) return c.json(errorBody(error.message, "timeout_error", error.code), error.statusCode);
         reportPublicError(error, { operation: "chat-completions" }, c.req.raw.signal);
-        return c.json(errorBody("Workspace answer failed. Try again.", "server_error"), 500);
+        return c.json(errorBody("Project answer failed. Try again.", "server_error"), 500);
       }
     }
     // Refuse before the stream opens, so a blocked spend is a 402, not an SSE error.
     try {
-      // Pre-check only: chatWorkspace takes the interactive hold.
-      await assertCanSpend(null, workspaceId, { kind: "interactive", hold: false });
+      // Pre-check only: chatProject takes the interactive hold.
+      await assertCanSpend(null, projectId, { kind: "interactive", hold: false });
     } catch (error) {
       if (isSpendBlockedError(error)) return c.json(spendBlockedBody(c, error), 402);
       throw error;
@@ -276,7 +276,7 @@ export const chatCompletionsRoutes = new Hono()
       stream.onAbort(() => { disconnected = true; });
       try {
         await stream.writeSSE({ data: JSON.stringify(chunk({ role: "assistant", content: "" })) });
-        const response = await chatWorkspace({
+        const response = await chatProject({
           ...args,
           onTextDelta: async (text) => {
             if (disconnected) return;
@@ -301,7 +301,7 @@ export const chatCompletionsRoutes = new Hono()
         if (!disconnected) await stream.writeSSE({ data: JSON.stringify(error instanceof ChatToolBlockedError
           ? errorBody(error.message, "server_error", error.code)
           : isChatTurnDeadlineError(error) ? errorBody(error.message, "timeout_error", error.code)
-          : errorBody("Workspace stream failed. Retry without streaming.", "server_error")) });
+          : errorBody("Project stream failed. Retry without streaming.", "server_error")) });
       }
     });
   });

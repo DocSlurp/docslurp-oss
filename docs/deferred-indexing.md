@@ -18,13 +18,13 @@ Design: [deferred search profiles](superpowers/specs/2026-10-12-deferred-search-
 
 - **Every organization** starts with `full`. `map` and `visual` are explicit, cheaper choices open to everyone (`visual` is never a default: no template or credit balance selects it for you). The default does not depend on what an organization has bought. Indexing work is admitted against the credit balance like any other spend, so an organization with no credits gets the usual 402 (`credit_exhausted`) when the work starts.
 
-Pages are billed as they are indexed, at the same per-page prices as `full` (5 credits per 1,000 text pages, 250 per 1,000 pages read by OCR or embedded as images). A page is billed once, whether a query or a full index materializes it. When two queries race for the same page, only the run that still holds the page's claim publishes its text, chunks and vectors; the other publishes nothing. The page then carries one charge. It is Rich if any run read that page of that document version with a model, even a run whose result was not used, and Fast otherwise.
+Pages are billed as they are indexed, at the same per-page prices as `full` (Fast for text pages, Rich for pages read by OCR or embedded as images; prices on [docslurp.io/pricing](https://docslurp.io/pricing)). A page is billed once, whether a query or a full index materializes it. When two queries race for the same page, only the run that still holds the page's claim publishes its text, chunks and vectors; the other publishes nothing. The page then carries one charge. It is Rich if any run read that page of that document version with a model, even a run whose result was not used, and Fast otherwise.
 
-The mode is resolved most-specific first: the upload request's `indexingMode` (those documents only), the workspace setting, the workspace template's recommendation, then the organization default. The mode is stored per document, so one workspace can hold documents ingested under different modes.
+The mode is resolved most-specific first: the upload request's `indexingMode` (those documents only), the project setting, the project template's recommendation, then the organization default. The mode is stored per document, so one project can hold documents ingested under different modes.
 
 ## Switching modes
 
-Set it with `PATCH /v1/workspaces/:id { "indexingMode": "map" }`, or in workspace settings (a three-option control with a cost hint). The switch never marks existing chunks stale.
+Set it with `PATCH /v1/projects/:id { "indexingMode": "map" }`, or in project settings (a three-option control with a cost hint). The switch never marks existing chunks stale.
 
 | From to | What happens | Cost |
 | --- | --- | --- |
@@ -53,7 +53,7 @@ Each query that materializes pages is bounded by a `MaterializationPolicy`:
 
 The effective policy is resolved in this order, and **the most restrictive value wins** at each step (lowest number, AND of booleans, and the lower router setting, with `off` < `auto` < `always`):
 
-1. Workspace default (`searchRetrievalDefaults.materialization`).
+1. Project default (`searchRetrievalDefaults.materialization`).
 2. API key policy (`materializationPolicy`, editable under Advanced in API key settings, with the effective policy shown read-only).
 3. Capability token (below). A token can only narrow its issuer's policy, never widen it.
 
@@ -68,7 +68,7 @@ curl -X POST https://docslurp.io/v1/capabilities \
   -H "Authorization: Bearer $DOCSLURP_SERVER_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "workspaceIds": ["ws_01hxyz"],
+    "projectIds": ["ws_01hxyz"],
     "policy": { "maxPagesPerQuery": 20, "maxCreditsPerQuery": 10, "allowFullIndexRequest": false },
     "ttlSeconds": 900,
     "boundClientKeyId": "key_client_123",
@@ -84,7 +84,7 @@ curl -X POST https://docslurp.io/v1/search \
   -H "Authorization: Bearer $DOCSLURP_CLIENT_KEY" \
   -H "X-DocSlurp-Capability: $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"q":"limitation of liability","workspace":"ws_01hxyz"}'
+  -d '{"q":"limitation of liability","project":"ws_01hxyz"}'
 ```
 
 The token is AES-256-GCM sealed and expires within one hour (`ttlSeconds` defaults to and is capped at 3600).
@@ -93,7 +93,7 @@ Security notes:
 
 - Without `boundClientKeyId` and `allowedOrigins` the token is a **bearer token**: whoever holds it can use it until it expires.
 - `allowedOrigins` checks the `Origin` header, which is spoofable outside browsers. Treat it as a guard against other websites, not against a determined non-browser client.
-- Tokens issued from a dashboard session are not re-validated for the user's workspace membership before `exp`. Keep the TTL short.
+- Tokens issued from a dashboard session are not re-validated for the user's project membership before `exp`. Keep the TTL short.
 
 ## Streaming materialization
 
@@ -109,7 +109,7 @@ Polling fallback for clients without SSE: `GET /v1/searches/:sessionId/materiali
 
 ## Search response: `deferred` stats
 
-Search responses for workspaces with deferred documents add a `deferred` block:
+Search responses for projects with deferred documents add a `deferred` block:
 
 | Field | Meaning |
 | --- | --- |

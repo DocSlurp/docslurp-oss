@@ -16,7 +16,7 @@ vi.mock("ai", async (importOriginal) => ({
 }));
 
 const { generateOpenRouterText, generateOpenRouterDocumentText, embedConfiguredText } = await import("../lib/ai.js");
-const { privacyModeOf, strictestPrivacyMode, loadWorkspacePrivacyMode, hostedApiKeyForWorkspace, hostedApiKeyForWorkspaces, openRouterCall } = await import("../lib/privacy.js");
+const { privacyModeOf, strictestPrivacyMode, loadProjectPrivacyMode, hostedApiKeyForProject, hostedApiKeyForProjects, openRouterCall } = await import("../lib/privacy.js");
 const { hydeExpand } = await import("../search/hyde.js");
 
 beforeEach(() => {
@@ -38,9 +38,9 @@ describe("privacy mode resolution", () => {
     expect(strictestPrivacyMode([])).toBe("standard");
   });
 
-  it("treats a failed workspace lookup as local-only", async () => {
+  it("treats a failed project lookup as local-only", async () => {
     mocks.sql.mockImplementationOnce(() => Promise.reject(new Error("db down")));
-    expect(await loadWorkspacePrivacyMode("ws")).toBe("local-only");
+    expect(await loadProjectPrivacyMode("ws")).toBe("local-only");
   });
 });
 
@@ -67,8 +67,8 @@ describe("app AI clients refuse hosted calls outside standard mode", () => {
 
   it("search strategies degrade to the original query when the key is withheld", async () => {
     const usage = { record: vi.fn() };
-    const apiKey = await hostedApiKeyForWorkspace({
-      apiKey: "k", privacyMode: "local-only", workspaceId: "ws", call: openRouterCall("api.search.strategies", "m"),
+    const apiKey = await hostedApiKeyForProject({
+      apiKey: "k", privacyMode: "local-only", projectId: "ws", call: openRouterCall("api.search.strategies", "m"),
     });
     expect(apiKey).toBeUndefined();
     expect(await hydeExpand("what is the policy", apiKey ?? "", usage, "local-only"))
@@ -81,24 +81,24 @@ describe("app AI clients refuse hosted calls outside standard mode", () => {
 describe("privacy audit log", () => {
   it("records strict-privacy blocks only", async () => {
     const call = openRouterCall("api.chat", "vendor/model");
-    expect(await hostedApiKeyForWorkspace({ apiKey: "k", privacyMode: "standard", workspaceId: "ws", call })).toBe("k");
-    expect(await hostedApiKeyForWorkspace({ apiKey: "k", privacyMode: "strict-privacy", workspaceId: "ws", call })).toBeUndefined();
+    expect(await hostedApiKeyForProject({ apiKey: "k", privacyMode: "standard", projectId: "ws", call })).toBe("k");
+    expect(await hostedApiKeyForProject({ apiKey: "k", privacyMode: "strict-privacy", projectId: "ws", call })).toBeUndefined();
     expect(auditCalls()).toHaveLength(1);
     expect(mocks.sql).toHaveBeenCalledWith(
-      [expect.objectContaining({ workspace_id: "ws", model_id: "openrouter/vendor/model", endpoint: "blocked:api.chat", privacy_mode: "strict-privacy" })],
-      "document_id", "run_id", "workspace_id", "model_id", "endpoint", "privacy_mode",
+      [expect.objectContaining({ project_id: "ws", model_id: "openrouter/vendor/model", endpoint: "blocked:api.chat", privacy_mode: "strict-privacy" })],
+      "document_id", "run_id", "project_id", "model_id", "endpoint", "privacy_mode",
     );
   });
 
-  it("uses the strictest workspace for cross-workspace answers", async () => {
+  it("uses the strictest project for cross-project answers", async () => {
     mocks.sql.mockImplementation((...args: unknown[]) => {
       const text = Array.isArray(args[0]) ? (args[0] as string[]).join("") : "";
-      if (text.includes("select pipeline from workspaces")) {
+      if (text.includes("select pipeline from projects")) {
         return Promise.resolve([{ pipeline: args[1] === "private" ? { privacyMode: "strict-privacy" } : {} }]);
       }
       return Promise.resolve([]);
     });
-    const result = await hostedApiKeyForWorkspaces({ apiKey: "k", workspaceIds: ["public", "private", "public"], call: openRouterCall("api.aggregate-rag.answer", "m") });
+    const result = await hostedApiKeyForProjects({ apiKey: "k", projectIds: ["public", "private", "public"], call: openRouterCall("api.aggregate-rag.answer", "m") });
     expect(result).toEqual({ apiKey: undefined, privacyMode: "strict-privacy" });
     expect(auditCalls()).toHaveLength(1);
   });

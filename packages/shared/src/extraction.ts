@@ -1,9 +1,10 @@
+import { dropRetiredExtractorIds, normalizeDocumentExtractionAliases } from "./extractor-aliases.js";
+import { hostPdfExtractorsUnderSandbox } from "./extractors.js";
 import { z } from "zod";
 import { layoutRegionSchema } from "./layout.js";
 
 export const extractionAdapterSchema = z.enum([
   "auto",
-  "kreuzberg",
   "dolphin",
 ]);
 export type ExtractionAdapter = z.infer<typeof extractionAdapterSchema>;
@@ -26,11 +27,14 @@ export type ExtractionResultFormat = z.infer<
   typeof extractionResultFormatSchema
 >;
 
-export const extractionOcrBackendSchema = z.enum([
-  "tesseract",
-  "paddleocr",
-  "easyocr",
-]);
+/**
+ * OCR engine. PP-OCR (worker/src/ocr) is the only one; any engine name stored before it is read as PP-OCR, so older
+ * project and run configs still parse.
+ */
+export const extractionOcrBackendSchema = z.preprocess(
+  (value) => (typeof value === "string" ? "ppocr" : value),
+  z.literal("ppocr"),
+);
 export type ExtractionOcrBackend = z.infer<typeof extractionOcrBackendSchema>;
 
 export const extractionOcrModelTierSchema = z.enum(["mobile", "server"]);
@@ -57,7 +61,7 @@ export const dolphinModelFlavorSchema = z.enum([
 export type DolphinModelFlavor = z.infer<typeof dolphinModelFlavorSchema>;
 
 export const extractionOcrConfigSchema = z.object({
-  backend: extractionOcrBackendSchema.default("tesseract"),
+  backend: extractionOcrBackendSchema.default("ppocr"),
   language: z.string().trim().min(2).max(16).default("eng"),
   autoRotate: z.boolean().default(true),
   modelTier: extractionOcrModelTierSchema.default("mobile"),
@@ -112,16 +116,23 @@ export const extractionJsonOptionsSchema = z
   .default(null);
 
 /**
- * An OCR language list as Tesseract names it (`eng`, `chi_sim`, `chi_sim_vert`, `eng+deu`): a three-letter code with
+ * An OCR language list as three-letter codes (`eng`, `chi_sim`, `chi_sim_vert`, `eng+deu`; the vocabulary Tesseract
+ * introduced, kept as the public API and mapped to PP-OCR recognisers in worker/src/ocr/languages.ts): a code with
  * up to two `_suffix` parts, joined by `+`. No paths, flags or other characters.
  */
 export const ocrLanguageSchema = z.string().trim()
-  .regex(/^[a-z]{3}(_[a-z]{2,5}){0,2}(\+[a-z]{3}(_[a-z]{2,5}){0,2})*$/, "OCR language must be Tesseract codes such as eng, chi_sim_vert or eng+deu")
+  .regex(/^[a-z]{3}(_[a-z]{2,5}){0,2}(\+[a-z]{3}(_[a-z]{2,5}){0,2})*$/, "OCR language must be language codes such as eng, chi_sim_vert or eng+deu")
   .max(64);
 
 /**
- * Dolphin options a workspace may set. The repository and model paths, and the Python binary, come only from the
- * worker environment (DOLPHIN_REPO_PATH, DOLPHIN_MODEL_PATH, DOLPHIN_PYTHON_BIN): a path from a workspace would
+ * Project OCR language: `auto` detects each page's script and runs the matching installed packs; anything else
+ * is language codes. English was the only language before, which turned Arabic, Chinese and Hindi scans into junk.
+ */
+export const ocrLanguageSettingSchema = z.union([z.literal("auto"), ocrLanguageSchema]);
+
+/**
+ * Dolphin options a project may set. The repository and model paths, and the Python binary, come only from the
+ * worker environment (DOLPHIN_REPO_PATH, DOLPHIN_MODEL_PATH, DOLPHIN_PYTHON_BIN): a path from a project would
  * let it choose which script the worker runs.
  */
 export const dolphinExtractorOptionsSchema = z.object({
@@ -131,44 +142,22 @@ export const dolphinExtractorOptionsSchema = z.object({
 export type DolphinExtractorOptions = z.infer<typeof dolphinExtractorOptionsSchema>;
 
 /**
- * Kreuzberg options a workspace may set. The worker spreads them into Kreuzberg's extractFile config, so only these
- * keys are accepted: anything else (structured extraction, a VLM OCR config with its own base URL, cache
- * namespaces) would let a workspace make the parser call out or share caches. Unknown keys are rejected.
- *
- * `disableOcr` is a marker for the worker, not a Kreuzberg switch: @kreuzberg/node 4.10.2 drops it (and
- * `ocr.enabled`) in normalizeExtractionConfig and OCRs every image regardless, so the extractor registry refuses
- * image inputs to Kreuzberg when it is set (Fast sets it).
- */
-export const kreuzbergExtractorOptionsSchema = z.object({
-  outputFormat: z.literal("markdown").optional(),
-  forceOcr: z.boolean().optional(),
-  forceOcrPages: z.array(z.number().int().positive()).max(5_000).optional(),
-  disableOcr: z.boolean().optional(),
-  ocr: z.object({
-    backend: extractionOcrBackendSchema.optional(),
-    language: ocrLanguageSchema.optional(),
-  }).strict().optional(),
-}).strict();
-export type KreuzbergExtractorOptions = z.infer<typeof kreuzbergExtractorOptionsSchema>;
-
-/**
  * Option schemas by extractor id. Only these extractors take options; every other id, and every key a schema does
  * not name, is rejected. The worker re-parses each id before handing options to a script (parseExtractorOptions).
  */
-export const dopplerExtractorOptionsSchema = z.object({
+export const vmPdfExtractorOptionsSchema = z.object({
   images: extractionImageConfigSchema.strict().optional(),
   pdf: extractionPdfOptionsSchema.pick({ extractImages: true }).strict().optional(),
 }).strict();
 
 export const extractorOptionSchemas = {
-  doppler: dopplerExtractorOptionsSchema,
-  kreuzberg: kreuzbergExtractorOptionsSchema,
+  "vm-pdf": vmPdfExtractorOptionsSchema,
   dolphin: dolphinExtractorOptionsSchema,
 } as const;
 
 /** Extractor options by extractor id (extractorOptionSchemas); unknown ids and keys are rejected. */
 export const documentExtractorOptionsSchema = z
-  .object({ kreuzberg: kreuzbergExtractorOptionsSchema.optional(), dolphin: dolphinExtractorOptionsSchema.optional(), doppler: dopplerExtractorOptionsSchema.optional() })
+  .object({ dolphin: dolphinExtractorOptionsSchema.optional(), "vm-pdf": vmPdfExtractorOptionsSchema.optional() })
   .strict();
 
 /**
@@ -208,17 +197,39 @@ function dropInvalid(schema: z.ZodTypeAny, value: Record<string, unknown>, prefi
 }
 
 /**
- * Reads the `documentExtraction` of a stored pipeline (a workspace row, a run row) that predates the strict extractor
+ * Reads the `documentExtraction` of a stored pipeline (a project row, a run row) that predates the strict extractor
  * option schemas: drops options for extractor ids without a schema, keys a schema does not allow, invalid option
  * values and an invalid `ocr.language`, and lists every dropped path. Nothing dropped is kept, so a stored
  * `dolphin.repoPath` never reaches a script. Requests stay strict (`documentExtractionConfigSchema` rejects all of
- * these); only reads of stored settings use this, so one stale row cannot fail an org's workspace list or a run load.
+ * these); only reads of stored settings use this, so one stale row cannot fail an org's project list or a run load.
  */
 export function sanitizeStoredDocumentExtraction(value: unknown): { value: unknown; dropped: string[] } {
   if (!isPlainObject(value)) return { value, dropped: [] };
-  const next: Record<string, unknown> = structuredClone(value);
-  const dropped: string[] = [];
-  if (isPlainObject(next.ocr) && next.ocr.language !== undefined && !ocrLanguageSchema.safeParse(next.ocr.language).success) {
+  // Retired ids are dropped and reported; configured legacy ids are then rewritten, so a renamed extractor's options are
+  // kept under its new id rather than dropped.
+  const retired = dropRetiredExtractorIds(value);
+  const next: Record<string, unknown> = structuredClone(normalizeDocumentExtractionAliases(retired.value) as Record<string, unknown>);
+  const dropped: string[] = retired.dropped.map((entry) => `documentExtraction.${entry}`);
+  // A stored host PDF extractor under a sandboxed deployment is dropped (the PDF then takes the sandboxed default), never run.
+  const hostPdf = hostPdfExtractorsUnderSandbox(next);
+  if (hostPdf.length > 0) {
+    if (isPlainObject(next.order) && Array.isArray(next.order.pdf)) {
+      delete next.order.pdf;
+      dropped.push("documentExtraction.order.pdf");
+    }
+    for (const key of ["pages", "enrich"] as const) {
+      if (Array.isArray(next[key]) && (next[key] as unknown[]).some((id) => id !== "vm-pdf")) {
+        next[key] = (next[key] as unknown[]).filter((id) => id === "vm-pdf");
+        dropped.push(`documentExtraction.${key}`);
+      }
+    }
+    if (isPlainObject(next.voting) && hostPdf.some((entry) => entry.path[0] === "voting")) {
+      // Explicitly the next extractor of the (now vm-pdf-only) order, never a host parser.
+      next.voting.secondary = "next-in-order";
+      dropped.push("documentExtraction.voting.secondary");
+    }
+  }
+  if (isPlainObject(next.ocr) && next.ocr.language !== undefined && !ocrLanguageSettingSchema.safeParse(next.ocr.language).success) {
     delete next.ocr.language;
     dropped.push("documentExtraction.ocr.language");
   }
@@ -242,8 +253,11 @@ export function sanitizeStoredDocumentExtraction(value: unknown): { value: unkno
   return { value: next, dropped };
 }
 
-/** A workspace policy. The document router can emit the same ordered IDs per document. */
-export const documentExtractionConfigSchema = z.object({
+/**
+ * A project policy. The document router can emit the same ordered IDs per document. Configured legacy extractor ids
+ * (DOCSLURP_EXTRACTOR_ID_ALIASES, extractor-aliases.ts) are rewritten to their canonical id before validation.
+ */
+export const documentExtractionConfigSchema = z.preprocess(normalizeDocumentExtractionAliases, z.object({
   target: z.string().min(1).default("document/markdown"),
   enrich: z.array(z.string().min(1)).default([]),
   order: z.record(z.string(), z.array(z.string().min(1)).min(1)).default({}),
@@ -260,10 +274,15 @@ export const documentExtractionConfigSchema = z.object({
   options: documentExtractorOptionsSchema.default({}),
   forceOcr: z.boolean().default(false),
   ocr: z.object({
-    language: ocrLanguageSchema.default("eng"),
+    language: ocrLanguageSettingSchema.default("auto"),
     autoRotate: z.boolean().default(true),
-  }).default({ language: "eng", autoRotate: true }),
-});
+  }).default({ language: "auto", autoRotate: true }),
+}).superRefine((config, ctx) => {
+  // A sandboxed PDF deployment never lets a project route PDFs to a host parser (fail closed, 400 at the API).
+  for (const { path, id } of hostPdfExtractorsUnderSandbox(config)) {
+    ctx.addIssue({ code: "custom", path, message: `extractor ${id} parses PDFs on the worker host; this deployment runs PDFs only in the sandboxed extractor (vm-pdf)` });
+  }
+}));
 export type DocumentExtractionConfig = z.infer<typeof documentExtractionConfigSchema>;
 
 export const defaultDocumentExtractionConfig: DocumentExtractionConfig = {
@@ -275,7 +294,7 @@ export const defaultDocumentExtractionConfig: DocumentExtractionConfig = {
   voting: { enabled: false, secondary: "next-in-order" },
   options: {},
   forceOcr: false,
-  ocr: { language: "eng", autoRotate: true },
+  ocr: { language: "auto", autoRotate: true },
 };
 
 export const extractionImageSchema = z.object({

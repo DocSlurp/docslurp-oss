@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { HOSTED_EQUIVALENT_REFERENCES } from "../billing.js";
 import { CHAT_MODEL_PRICES_USD_PER_MTOK } from "../chat-model-prices.js";
 import {
   DEFAULT_OPENROUTER_VISION_MODEL,
@@ -17,7 +16,7 @@ import {
   type RoutingModelPriceMap,
 } from "../routing-targets.js";
 import { defaultAiUsagePricingCatalog } from "../usage.js";
-import { DEFAULT_WORKSPACE_CHAT_MODEL, WORKSPACE_CHAT_MODELS } from "../workspace-chat-models.js";
+import { DEFAULT_PROJECT_CHAT_MODEL, PROJECT_CHAT_MODELS } from "../project-chat-models.js";
 
 // scripts/lib/model-prices.json keeps prohibited models (OpenAI Pro/Ultra, output >= $50 per 1M tokens) only as
 // historical evidence for old traces and tests. This suite fails if any selectable catalog, default or preset can
@@ -33,8 +32,8 @@ const everyEnv = new Proxy({}, { get: () => true }) as Readonly<Record<string, b
 function selectableModelIds(): Map<string, string> {
   const ids = new Map<string, string>();
   const add = (id: string, where: string) => ids.set(id, ids.has(id) ? `${ids.get(id)}, ${where}` : where);
-  for (const { id } of WORKSPACE_CHAT_MODELS) add(id, "WORKSPACE_CHAT_MODELS");
-  add(DEFAULT_WORKSPACE_CHAT_MODEL, "DEFAULT_WORKSPACE_CHAT_MODEL");
+  for (const { id } of PROJECT_CHAT_MODELS) add(id, "PROJECT_CHAT_MODELS");
+  add(DEFAULT_PROJECT_CHAT_MODEL, "DEFAULT_PROJECT_CHAT_MODEL");
   add(DEFAULT_PIPELINE_TEXT_MODEL, "DEFAULT_PIPELINE_TEXT_MODEL");
   add(DEFAULT_OPENROUTER_VISION_MODEL, "DEFAULT_OPENROUTER_VISION_MODEL");
   for (const model of Object.keys(CHAT_MODEL_PRICES_USD_PER_MTOK)) add(model, "CHAT_MODEL_PRICES_USD_PER_MTOK");
@@ -43,7 +42,6 @@ function selectableModelIds(): Map<string, string> {
     if (profile.config.modelUri) add(modelIdOfUri(profile.config.modelUri), `visionProfileCatalog.${key}`);
   }
   for (const [key, profile] of Object.entries(embeddingProfileCatalog)) add(modelIdOfUri(profile.config.modelUri), `embeddingProfileCatalog.${key}`);
-  for (const reference of Object.values(HOSTED_EQUIVALENT_REFERENCES)) add(reference.model, "HOSTED_EQUIVALENT_REFERENCES");
   for (const entry of defaultAiUsagePricingCatalog) add(entry.model, "defaultAiUsagePricingCatalog");
   const routing = buildRoutingTargetCatalog({ prices: registry, visionCatalog: visionModelCatalog, env: everyEnv });
   for (const target of routing.targets) if (target.ref.modelUri) add(modelIdOfUri(target.ref.modelUri), `page router ${target.id}`);

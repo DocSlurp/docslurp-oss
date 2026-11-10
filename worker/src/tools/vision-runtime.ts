@@ -24,7 +24,9 @@ import {
   effectiveVisionBaseUrl,
   findVisionServedRoute,
   isBilledVisionRoute,
+  isDeepInfraVisionBaseUrl,
   isOpenRouterBaseUrl,
+  readDeepInfraVisionCharge,
   UnpricedVisionRouteError,
   VISION_MAX_PROMPT_BYTES,
   visionImageTokenBound,
@@ -68,6 +70,7 @@ import {
   inferModelTarget,
   type PrivacyMode,
   OPENROUTER_BASE_URL,
+  DEEPINFRA_VISION_BASE_URL,
   resolveVisionRoute,
   type VisionConfig,
   type VisionExecutionConfig,
@@ -209,7 +212,7 @@ export async function executeVisionRuntime(args: {
   cfg: Config;
   runner: CommandRunner;
   outputSchema?: Record<string, unknown> | null;
-  /** Workspace privacy mode; hosted vision routes are refused outside `standard`. */
+  /** Project privacy mode; hosted vision routes are refused outside `standard`. */
   privacyMode: PrivacyMode;
   signal?: AbortSignal;
   /**
@@ -239,7 +242,7 @@ export async function executeVisionRuntime(args: {
         return "unknown";
       }
     })();
-    // Never fail over to a hosted model when the workspace forbids it.
+    // Never fail over to a hosted model when the project forbids it.
     if (!isProviderCallAllowed(args.privacyMode, { provider: fallbackProvider, model: "", modelUri: selected.remoteFallbackModelUri, capability: "vision" })) {
       throw error;
     }
@@ -463,12 +466,16 @@ function readBoolean(value: string | undefined, fallback: boolean): boolean {
 }
 
 /**
- * The key a vision request carries: the OpenRouter key only to the official OpenRouter endpoint, the OpenAI key
- * only to the configured OpenAI base URL, and no key anywhere else (loopback servers, local runtimes).
+ * The key a vision request carries: the OpenRouter key only to the official OpenRouter endpoint, the DeepInfra key
+ * only to DeepInfra's official OpenAI-compatible endpoint, the OpenAI key only to the configured OpenAI base URL,
+ * and no key anywhere else (loopback servers, local runtimes).
  */
-function resolveVisionApiKey(billing: VisionRouteBilling, baseUrl: string | null, cfg: Config): string {
+export function resolveVisionApiKey(billing: VisionRouteBilling, baseUrl: string | null, cfg: Pick<Config, "openRouterApiKey" | "openAiApiKey" | "deepInfraApiKey">): string {
   if (billing === "openrouter") {
     return baseUrl?.replace(/\/+$/, "") === OPENROUTER_BASE_URL ? cfg.openRouterApiKey : "";
+  }
+  if (billing === "deepinfra") {
+    return baseUrl?.replace(/\/+$/, "") === DEEPINFRA_VISION_BASE_URL ? cfg.deepInfraApiKey ?? "" : "";
   }
   if (billing === "openai") return cfg.openAiApiKey;
   return "";
@@ -504,7 +511,7 @@ export function buildSchemaAwareVisionPrompt(
   if (!properties || typeof properties !== "object" || Array.isArray(properties)) return base;
   const labels = schemaPromptLabels(Object.keys(properties));
   if (labels.length === 0) return base;
-  return `${base}\n\nWorkspace-requested labels: ${JSON.stringify(labels)}. Return one clearly labelled value for every requested label.`;
+  return `${base}\n\nProject-requested labels: ${JSON.stringify(labels)}. Return one clearly labelled value for every requested label.`;
 }
 
 /** Schema labels sent in a vision prompt: at most 100, each cut to 80 characters, 4 KB in total. */
@@ -672,7 +679,7 @@ export async function runVisionRequest(args: {
         // Per-model routing restricted to providers measured to transcribe faithfully.
         ...(isOpenRouter ? openRouterProviderParams(args.model) : {}),
       };
-      // An org or workspace that turned off China-based providers keeps them out of every attempt: the
+      // An org or project that turned off China-based providers keeps them out of every attempt: the
       // restriction is applied right before each send (vision-stream.ts `withProviderPolicy`).
       // No upstream provider (or OpenRouter fallback) may bill above the price the guard weighed this
       // request at; OpenRouter refuses the request when none qualifies. Kept on the alternate-route retry.
@@ -697,6 +704,8 @@ export async function runVisionRequest(args: {
         inputTokenEstimate: estimateTokens(args.prompt) + VISION_IMAGE_TOKEN_ESTIMATE,
         // Profiles that measured a refusal-free route send refused or filtered pages there on the single retry.
         preferredRetryRoute: contentFilterRetryProvider(args.model),
+        // DeepInfra reports its charge as `usage.estimated_cost`; every other route reads `usage.cost`.
+        ...(isDeepInfraVisionBaseUrl(args.baseUrl) ? { providerCharge: (usage: unknown) => readDeepInfraVisionCharge(args.model, usage) } : {}),
         gate: args.gate,
       });
       const text = postProcessVisionText(args.model, result.text);
@@ -721,6 +730,7 @@ export async function runVisionRequest(args: {
           // The swapped call was served and billed even though its output is refused.
           attachVisionBilledUsage(error, {
             inputTokens: result.inputTokens, outputTokens: result.outputTokens,
+            costMetadata: result.costMetadata,
             ...(result.costCents !== undefined ? { costCents: result.costCents, ...(result.chargedTokens ? { chargedTokens: result.chargedTokens } : {}) } : {}),
           });
           throw error;

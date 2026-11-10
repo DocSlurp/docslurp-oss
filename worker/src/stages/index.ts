@@ -31,8 +31,9 @@ import { QuarantineStage } from "./quarantine.js";
 import { GraphEnrichStage } from "./graph-enrich.js";
 import { PiiDetectStage } from "./pii-detect.js";
 import { PageEmbedStage } from "./page-embed.js";
+import { configurePageAreaSink, createPageAreaSink } from "../pipeline/page-area-sink.js";
 
-/** Placeholder until the deferred-indexing stage lands; only reachable when a workspace opts into that mode. */
+/** Placeholder until the deferred-indexing stage lands; only reachable when a project opts into that mode. */
 
 export function createStages(args: {
   runner: CommandRunner;
@@ -42,12 +43,22 @@ export function createStages(args: {
   capacityStore?: CapacityLeaseStore;
   /** Database client for the deferred-indexing stages. */
   sql?: Sql<Record<string, unknown>>;
+  /** Store the rendered-area authorization reads the run and the balance from; required with `sql`. */
+  store?: Parameters<typeof createPageAreaSink>[1];
 }): Stage[] {
+  // Rendered page areas raise the page's measured equivalents (db/page-equivalents.ts), from every raster cache instance.
+  if (args.sql) {
+    const sql = args.sql;
+    // Fail closed: a worker that can raise billing_pages from rendered areas must be able to authorize them.
+    const store = args.store;
+    if (!store) throw new Error("createStages: rendered page areas need a store to authorize measured pages");
+    configurePageAreaSink(createPageAreaSink(sql, store));
+  }
   const sourceCache = new PdfSourceCache(args.storage);
   const rasterCache = new PdfRasterCache(args.runner, args.storage, sourceCache);
   const stages: Record<PipelineRunStage, () => Stage> = {
     quarantine: () => new QuarantineStage(args.runner, args.storage, args.config),
-    "format-detect": () => new FormatDetectStage(args.storage),
+    "format-detect": () => new FormatDetectStage(args.storage, args.runner),
     "to-canonical": () => new ToCanonicalStage(args.runner, args.storage),
     "format-tooling": () => new FormatToolingStage(args.runner, args.storage),
     normalize: () => new NormalizeStage(args.runner),

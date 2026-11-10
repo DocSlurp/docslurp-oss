@@ -6,7 +6,7 @@ vi.mock("../lib/ai.js", async (importOriginal) => ({
   embedConfiguredText,
 }));
 vi.mock("../db.js", () => ({ sql: vi.fn() }));
-vi.mock("../services/organizations.js", () => ({ getWorkspaceAccess: vi.fn() }));
+vi.mock("../services/organizations.js", () => ({ getProjectAccess: vi.fn() }));
 
 import { defaultEmbeddingConfig } from "@docslurp/shared";
 import { createEmbeddingCache, embeddingCacheKey, normalizeEmbeddingQuery, resetEmbeddingCacheForTests, type EmbeddingCacheIdentity } from "../search/embedding-cache.js";
@@ -85,8 +85,8 @@ describe("query embedding through the search planner", () => {
     // The planner starts the embedding without awaiting it; the vector leg awaits it. Settle it here.
     return collectSearchTimings(async () => {
       const planned = await prepareSearchSessionRetrievalPlan({
-        query, userId: "u", options: {} as never, effectiveOptions: {} as never, workspaceId: "ws", orgId,
-        workspaceSettings: {}, embedding, privacyMode, session: session as never,
+        query, userId: "u", options: {} as never, effectiveOptions: {} as never, projectId: "ws", orgId,
+        projectSettings: {}, embedding, privacyMode, session: session as never,
       });
       return { ...planned, queryVector: await planned.queryVector };
     });

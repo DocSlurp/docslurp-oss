@@ -20,8 +20,8 @@ beforeAll(async () => {
   sql = postgres(`postgres://postgres@127.0.0.1:${served.port}/postgres`, { max: 1, prepare: false, onnotice: () => {} });
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1')`;
-  await sql`insert into workspaces(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W')`;
-  await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, total_documents, pipeline)
+  await sql`insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W')`;
+  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pipeline)
     values ('run', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'completed', 1, '{}'::jsonb)`;
 }, 60_000);
 
@@ -38,9 +38,9 @@ beforeEach(async () => {
   await sql`delete from document_cleanup_queue`;
   await sql`delete from storage_cleanup_queue`;
   await sql`update organizations set retain_document_versions = null where id = 'o1'`;
-  await sql`update workspaces set retain_document_versions = null where id = 'w'`;
+  await sql`update projects set retain_document_versions = null where id = 'w'`;
   await sql`update organizations set retention_changed_at = null, retention_swept_at = null`;
-  await sql`update workspaces set retention_changed_at = null, retention_swept_at = null`;
+  await sql`update projects set retention_changed_at = null, retention_swept_at = null`;
 });
 
 /** Creates versions v1..vN of one canonical document; vN is current. */
@@ -48,7 +48,7 @@ async function seedChain(count: number, canonicalId = "/chain", prefix = "v") {
   for (let i = 1; i <= count; i += 1) {
     const id = `${prefix}${i}`;
     await sql`
-      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status,
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status,
         canonical_id, created_at, page_count, file_size)
       values (${id}, 'o1', 'u1', 'w', 'run', 'a.md', 'text/markdown', 'u1/src/a.md', 'queued',
         ${canonicalId}, ${`2026-01-${String(i).padStart(2, "0")}`}, 2, 10)
@@ -100,7 +100,7 @@ describe("retention-aware superseded purge", () => {
 
     // Re-index of the current version v2: v3 supersedes v2 and records reindex_of.
     await sql`
-      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status,
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status,
         canonical_id, created_at, page_count, file_size, reindex_of, previous_version_id)
       values ('v3', 'o1', 'u1', 'w', 'run', 'a.md', 'text/markdown', 'u1/src/a.md', 'queued',
         '/chain', '2026-01-03', 2, 10, 'v2', 'v2')
@@ -160,9 +160,9 @@ describe("retention-aware superseded purge", () => {
     expect(s.v4!.archived).toBe(true);
   });
 
-  it("workspace override wins over the org setting", async () => {
+  it("project override wins over the org setting", async () => {
     await sql`update organizations set retain_document_versions = 5 where id = 'o1'`;
-    await sql`update workspaces set retain_document_versions = 1 where id = 'w'`;
+    await sql`update projects set retain_document_versions = 1 where id = 'w'`;
     await seedChain(3);
     await sweep();
     const s = await states();
@@ -172,7 +172,7 @@ describe("retention-aware superseded purge", () => {
   it("keeps dedup-shared vector rows while copies are live", async () => {
     await seedChain(2);
     await sql`
-      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, deduped_from_document_id)
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, deduped_from_document_id)
       values ('copy', 'o1', 'u1', 'w', 'run', 'a.md', 'text/markdown', 'k', 'completed', 'v1')
     `;
     const deletes: string[] = [];
@@ -184,7 +184,7 @@ describe("retention-aware superseded purge", () => {
 
   it("archived versions keep no search data and stay superseded, so search paths exclude them", async () => {
     await seedChain(2);
-    await sql`insert into document_page_vectors (document_id, page_number, model, dims, bits, int8, scale, workspace_id, org_id)
+    await sql`insert into document_page_vectors (document_id, page_number, model, dims, bits, int8, scale, project_id, org_id)
       values ('v1', 1, 'img', 8, decode('00','hex'), decode('00','hex'), 1, 'w', 'o1')`;
     await sweep();
     const [row] = await sql`
@@ -198,7 +198,7 @@ describe("retention-aware superseded purge", () => {
 
   it("failed newest uploads do not take a retention slot", async () => {
     await seedChain(2);
-    await sql`insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status, canonical_id, created_at)
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, canonical_id, created_at)
       values ('bad', 'o1', 'u1', 'w', 'run', 'a.md', 'text/markdown', 'k', 'failed', '/chain', '2026-02-01')`;
     await sql`update documents set superseded_at = null, superseded_by_document_id = null where id = 'bad'`;
     await sweep();
@@ -211,8 +211,8 @@ describe("retention-aware superseded purge", () => {
       for (const ws of settings) {
         await sql`delete from documents`;
         await sql`update organizations set retain_document_versions = ${org} where id = 'o1'`;
-        await sql`update workspaces set retain_document_versions = ${ws} where id = 'w'`;
-        const expected = effectiveRetainedVersions({ orgSetting: org, workspaceSetting: ws });
+        await sql`update projects set retain_document_versions = ${ws} where id = 'w'`;
+        const expected = effectiveRetainedVersions({ orgSetting: org, projectSetting: ws });
         await seedChain(5);
         await sweep();
         const s = await states();
@@ -256,7 +256,7 @@ describe("retention-aware superseded purge", () => {
 
   async function insertVersion(id: string, status: string, createdAt: string, extra: { reindexOf?: string; supersede?: boolean } = {}) {
     await sql`
-      insert into documents (id, org_id, user_id, workspace_id, run_id, filename, mime_type, source_key, status,
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status,
         canonical_id, created_at, page_count, file_size, reindex_of)
       values (${id}, 'o1', 'u1', 'w', 'run', 'a.md', 'text/markdown', 'u1/src/a.md', ${status},
         '/chain', ${createdAt}, 2, 10, ${extra.reindexOf ?? null})`;
@@ -328,7 +328,7 @@ describe("retention-aware superseded purge", () => {
     expect(await sql`select count(*)::int as n from documents where purged_at is not null`).toEqual([{ n: 20 }]);
     await sweep();
     expect(await candidates()).toBe(0);
-    await sql`update workspaces set retain_document_versions = 2 where id = 'w'`;
+    await sql`update projects set retain_document_versions = 2 where id = 'w'`;
     expect(await candidates()).toBe(0); // nothing non-purged remains to examine
   }, 60_000);
 

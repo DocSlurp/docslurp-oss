@@ -9,7 +9,7 @@ fi
 umask 077
 
 SANDBOX_ROOT="${DOCSLURP_PARSER_SANDBOX_ROOT:-/tmp/docslurp-parser-sandbox}"
-# The worker creates its private scratch workspaces under the host temp root,
+# The worker creates its private scratch projects under the host temp root,
 # which follows TMPDIR and is not always /tmp. TMPDIR is rewritten below.
 HOST_TMP_ROOT="${DOCSLURP_PARSER_SANDBOX_TMP_ROOT:-${TMPDIR:-/tmp}}"
 HOST_TMP_ROOT="${HOST_TMP_ROOT%/}"

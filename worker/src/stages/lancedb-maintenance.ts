@@ -26,7 +26,7 @@ export type LanceDbMaintenanceOptions = {
 };
 
 /**
- * How documents reach a workspace table. `queued` (default): enqueue to the Postgres
+ * How documents reach a project table. `queued` (default): enqueue to the Postgres
  * outbox and let the table's single write-lease holder commit pending documents in one
  * batch. `direct`: every document commits its own merge-insert (optimistic, conflicts
  * under concurrency; kept as a fallback for setups without the worker database).
@@ -169,6 +169,11 @@ export type LanceDbMaintenanceResult = {
   /** Vector index segments and rows not yet covered by it, after this run. */
   indexSegments?: number | null;
   unindexedRows?: number | null;
+  /** The chunk-text FTS index was (re)built by this pass, and how long that took. */
+  ftsRebuilt?: boolean;
+  ftsMs?: number;
+  /** The FTS build failed (the older index keeps serving) or is waiting out its back-off. */
+  ftsError?: string;
   /** Fragments merged away by compaction and old versions / bytes removed by cleanup. */
   fragmentsRemoved?: number;
   versionsRemoved?: number;
@@ -268,14 +273,122 @@ export function lanceDbFtsIndexEnabled(env: NodeJS.ProcessEnv = process.env): bo
   return !["0", "false", "off", "no"].includes((env.LANCEDB_FTS_INDEX ?? "").trim().toLowerCase());
 }
 
-/** The chunk-text FTS index: English stemming and stop words, no positions (no phrase queries). */
-export function chunkTextFtsIndex(): Index {
-  return Index.fts({ withPosition: false, language: "English", stem: true, removeStopWords: true, lowercase: true, asciiFolding: true });
+/**
+ * Name of the chunk-text FTS index for the language-neutral (ICU) analyzer. An index under any other name was built
+ * with another analyzer and is replaced by maintenance, once the current one exists.
+ */
+export const CHUNK_TEXT_FTS_INDEX_NAME = "text_fts_icu_v1";
+
+/**
+ * LANCEDB_FTS_LANGUAGE selects the analyzer of the chunk-text index. Unset (or
+ * `auto`) is the language-neutral default: ICU dictionary word segmentation
+ * (Japanese, Chinese, Thai and every other script), lower-casing and accent
+ * folding, no stemming and no stop-word list, since either one is per-language
+ * and silently damages every other language in the table (an English stemmer
+ * and stop list on German text). Naming a language (`English`, `German`, ...)
+ * restores stemming and stop words for a deployment whose documents are in
+ * that one language.
+ */
+export function chunkTextFtsLanguage(env: NodeJS.ProcessEnv = process.env): string | null {
+  const value = (env.LANCEDB_FTS_LANGUAGE ?? "").trim();
+  return !value || value.toLowerCase() === "auto" ? null : value;
 }
 
+/**
+ * The current index's name, which carries its analyzer: `text_fts_icu_v1` for the language-neutral one,
+ * `text_fts_<language>_v1` for a named language. Changing LANCEDB_FTS_LANGUAGE therefore changes the name, and
+ * maintenance rebuilds under the new name instead of keeping an index built with the old analyzer.
+ */
+export function chunkTextFtsIndexName(env: NodeJS.ProcessEnv = process.env): string {
+  const language = chunkTextFtsLanguage(env);
+  if (!language) return CHUNK_TEXT_FTS_INDEX_NAME;
+  const slug = language.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 32);
+  return `text_fts_${slug || "language"}_v1`;
+}
+
+/** The chunk-text FTS index: no positions (no phrase queries). */
+export function chunkTextFtsIndex(env: NodeJS.ProcessEnv = process.env): Index {
+  const language = chunkTextFtsLanguage(env);
+  if (language) {
+    return Index.fts({ withPosition: false, baseTokenizer: "simple", language, stem: true, removeStopWords: true, lowercase: true, asciiFolding: true });
+  }
+  return Index.fts({ withPosition: false, baseTokenizer: "icu", stem: false, removeStopWords: false, lowercase: true, asciiFolding: true });
+}
+
+type IndexInfo = { name?: string; indexType?: string; columns: string[] };
+
+const isTextFtsIndex = (index: IndexInfo) => index.columns.includes("text") && /fts|inverted/i.test(index.indexType ?? "");
+
 /** True when the table has an FTS index on `text`. */
-export function hasChunkTextFtsIndex(indices: Array<{ indexType?: string; columns: string[] }>): boolean {
-  return indices.some((index) => index.columns.includes("text") && /fts|inverted/i.test(index.indexType ?? ""));
+export function hasChunkTextFtsIndex(indices: IndexInfo[]): boolean {
+  return indices.some(isTextFtsIndex);
+}
+
+/** True when the table's FTS index on `text` is the current one (current analyzer and version). */
+export function hasCurrentChunkTextFtsIndex(indices: IndexInfo[], env: NodeJS.ProcessEnv = process.env): boolean {
+  const current = chunkTextFtsIndexName(env);
+  return indices.some((index) => isTextFtsIndex(index) && index.name === current);
+}
+
+/** Failed rebuilds back off per table: a full FTS build is expensive and every maintenance pass would retry it. */
+const FTS_RETRY_BASE_MS = 10 * 60_000;
+const FTS_RETRY_MAX_MS = 6 * 60 * 60_000;
+const ftsFailures = new Map<string, { failedAt: number; failures: number }>();
+
+/** Milliseconds until a failed FTS rebuild of `key` may be tried again (0 when it may be tried now). */
+export function ftsRebuildBackoffMs(key: string, now = Date.now()): number {
+  const failure = ftsFailures.get(key);
+  if (!failure) return 0;
+  const wait = Math.min(FTS_RETRY_MAX_MS, FTS_RETRY_BASE_MS * 2 ** (failure.failures - 1));
+  return Math.max(0, failure.failedAt + wait - now);
+}
+
+export function resetFtsRebuildBackoff(): void {
+  ftsFailures.clear();
+}
+
+export interface FtsEnsureResult {
+  /** The current index was built by this call. */
+  rebuilt: boolean;
+  /** Time spent building (and dropping the old index), 0 when nothing was built. */
+  ms: number;
+  /** A failed rebuild is waiting out its back-off; the older index, if any, keeps serving. */
+  backedOff?: boolean;
+  /** The build failed; the older index, if any, keeps serving. */
+  error?: string;
+}
+
+/**
+ * Makes the current FTS index exist. The new index is built under its own name first and the old one is dropped only
+ * after the build succeeded, so search never has a gap and a failed build leaves the old index serving. A failed
+ * build is not thrown (the rest of maintenance still counts) and is not retried until its back-off passes.
+ */
+export async function ensureChunkTextFtsIndex(
+  table: Table,
+  indices: IndexInfo[],
+  options: { key?: string; env?: NodeJS.ProcessEnv; now?: number } = {},
+): Promise<FtsEnsureResult> {
+  const env = options.env ?? process.env;
+  if (hasCurrentChunkTextFtsIndex(indices, env)) return { rebuilt: false, ms: 0 };
+  const key = options.key ?? "";
+  const now = options.now ?? Date.now();
+  if (ftsRebuildBackoffMs(key, now) > 0) return { rebuilt: false, ms: 0, backedOff: true };
+  const name = chunkTextFtsIndexName(env);
+  const started = performance.now();
+  try {
+    await table.createIndex("text", { config: chunkTextFtsIndex(env), name, replace: true });
+  } catch (error) {
+    const failures = (ftsFailures.get(key)?.failures ?? 0) + 1;
+    ftsFailures.set(key, { failedAt: now, failures });
+    return { rebuilt: false, ms: Math.round(performance.now() - started), error: error instanceof Error ? error.message : String(error) };
+  }
+  ftsFailures.delete(key);
+  // Only now is the older analyzer's index redundant. A failed drop leaves a spare index and is retried next pass.
+  for (const stale of indices.filter((index) => isTextFtsIndex(index) && index.name !== name)) {
+    if (stale.name) await table.dropIndex(stale.name).catch((error: unknown) => console.warn(
+      `[lancedb] could not drop the old fts index ${stale.name}: ${error instanceof Error ? error.message : String(error)}`));
+  }
+  return { rebuilt: true, ms: Math.round(performance.now() - started) };
 }
 
 /** Choose ANN parameters; L2 matches the app's default vectorSearch distance. */
@@ -297,6 +410,7 @@ export async function runLanceDbMaintenance(
   let optimizedMs: number | null = null;
   let indexCreated = false;
   let consolidated = false;
+  let fts: FtsEnsureResult | null = null;
   try {
     db = await connectLanceDb(uri);
     table = await db.openTable(tableName);
@@ -334,8 +448,9 @@ export async function runLanceDbMaintenance(
       // merge-insert joins on "id"; a btree lets it look keys up instead of scanning the table.
       await table.createIndex("id", { config: Index.btree(), replace: false });
     }
-    if (lanceDbFtsIndexEnabled() && rows > 0 && !hasChunkTextFtsIndex(indices)) {
-      await table.createIndex("text", { config: chunkTextFtsIndex(), replace: false });
+    if (lanceDbFtsIndexEnabled() && rows > 0) {
+      fts = await ensureChunkTextFtsIndex(table, indices, { key: lanceMaintenanceKey(uri, tableName) });
+      if (fts.error) console.warn(`[lancedb] fts rebuild failed table=${tableName} fts_ms=${fts.ms} error=${fts.error.split("\n")[0]}`);
     }
     if (indexCreated || consolidated) {
       indices = await table.listIndices();
@@ -350,11 +465,14 @@ export async function runLanceDbMaintenance(
       `[lancedb] maintenance table=${tableName} rows=${rows} optimized_ms=${optimizedMs} ` +
         `fragments_removed=${fragmentsRemoved} versions_removed=${versionsRemoved} bytes_removed=${bytesRemoved} ` +
         `index_created=${indexCreated} consolidated=${consolidated} index_segments=${indexSegments ?? "-"} ` +
-        `unindexed_rows=${unindexedRows ?? "-"} total_ms=${Math.round(performance.now() - started)}`,
+        `unindexed_rows=${unindexedRows ?? "-"} fts_rebuilt=${fts?.rebuilt ?? false} fts_ms=${fts?.ms ?? 0} ` +
+        `total_ms=${Math.round(performance.now() - started)}`,
     );
     return {
       ok: true, rows, optimizedMs, indexCreated, consolidated, indexSegments, unindexedRows,
       fragmentsRemoved, versionsRemoved, bytesRemoved,
+      ftsRebuilt: fts?.rebuilt ?? false, ftsMs: fts?.ms ?? 0,
+      ...(fts?.error ? { ftsError: fts.error } : fts?.backedOff ? { ftsError: "rebuild backed off after a failure" } : {}),
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

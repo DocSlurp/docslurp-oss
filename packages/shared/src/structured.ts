@@ -101,7 +101,20 @@ export const structuredResultEnvelopeSchema = z.object({
   createdAt: z.string(),
   overallConfidence: z.number().min(0).max(1).default(0),
   overallPolicy: z.enum(["auto-accept", "needs-review", "reject"]).default("needs-review"),
-  fields: z.record(z.string(), fieldResultSchema)
+  fields: z.record(z.string(), fieldResultSchema),
+  /**
+   * What the model read. A long document is read in windows; when it is longer
+   * than the stage reads, `truncated` is true and a null field may simply be
+   * outside the pages read.
+   */
+  coverage: z.object({
+    windows: z.number().int().nonnegative(),
+    pagesRead: z.number().int().nonnegative(),
+    pagesTotal: z.number().int().nonnegative(),
+    charsRead: z.number().int().nonnegative(),
+    charsTotal: z.number().int().nonnegative(),
+    truncated: z.boolean(),
+  }).optional()
 });
 export type StructuredResultEnvelope = z.infer<typeof structuredResultEnvelopeSchema>;
 

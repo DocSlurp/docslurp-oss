@@ -1,7 +1,7 @@
 import { setOpenRouterProviderPolicyResolver, type OpenRouterProviderPolicy } from "@docslurp/shared";
 
 import { sql } from "../db.js";
-import { currentProviderPolicyWorkspaceIds, currentRequestOrgId, currentRequestUserId } from "./request-context.js";
+import { currentProviderPolicyProjectIds, currentRequestOrgId, currentRequestUserId } from "./request-context.js";
 
 /** Short enough that a changed setting applies within the minute on every instance. */
 const CACHE_TTL_MS = 30_000;
@@ -22,9 +22,9 @@ export function forgetProviderPolicy(orgId: string): void {
   for (const key of cache.keys()) if (key.startsWith("user:") || key.startsWith("ws:")) cache.delete(key);
 }
 
-/** Drops cached policy after a workspace changes its setting. */
-export function forgetWorkspaceProviderPolicy(workspaceId: string): void {
-  cache.delete(`ws:${workspaceId}`);
+/** Drops cached policy after a project changes its setting. */
+export function forgetProjectProviderPolicy(projectId: string): void {
+  cache.delete(`ws:${projectId}`);
 }
 
 /** The org's setting; a missing org is restricted. */
@@ -35,31 +35,31 @@ async function orgAllows(orgId: string): Promise<boolean> {
   });
 }
 
-/** The workspace's own setting AND its organization's; a missing workspace or org is restricted. */
-async function workspaceAllows(workspaceId: string): Promise<boolean> {
-  return await cached(`ws:${workspaceId}`, async () => {
+/** The project's own setting AND its organization's; a missing project or org is restricted. */
+async function projectAllows(projectId: string): Promise<boolean> {
+  return await cached(`ws:${projectId}`, async () => {
     const [row] = await sql<{ allow: boolean | null }[]>`
       select w.allow_china_providers and coalesce(o.allow_china_providers, false) as allow
-      from workspaces w left join organizations o on o.id = w.org_id
-      where w.id = ${workspaceId}`;
+      from projects w left join organizations o on o.id = w.org_id
+      where w.id = ${projectId}`;
     return row?.allow === true;
   });
 }
 
 /**
- * The request's China-provider policy: allowed only when the request's org (API key or resolved workspace)
- * and every workspace whose content the request sends to a hosted call (`noteProviderPolicyWorkspace`) allow
- * it. A workspace can narrow its org's setting, never widen it. A session request without an org or workspace
+ * The request's China-provider policy: allowed only when the request's org (API key or resolved project)
+ * and every project whose content the request sends to a hosted call (`noteProviderPolicyProject`) allow
+ * it. A project can narrow its org's setting, never widen it. A session request without an org or project
  * is restricted when any of the user's organizations turned the providers off. A request with no user, org or
- * workspace (startup and background tasks) is restricted: unknown scope fails closed.
+ * project (startup and background tasks) is restricted: unknown scope fails closed.
  */
 export async function requestProviderPolicy(): Promise<OpenRouterProviderPolicy> {
   const orgId = currentRequestOrgId();
-  const workspaceIds = currentProviderPolicyWorkspaceIds();
-  if (orgId || workspaceIds.length) {
+  const projectIds = currentProviderPolicyProjectIds();
+  if (orgId || projectIds.length) {
     const checks = await Promise.all([
       ...(orgId ? [orgAllows(orgId)] : []),
-      ...workspaceIds.map((id) => workspaceAllows(id)),
+      ...projectIds.map((id) => projectAllows(id)),
     ]);
     return { allowChinaProviders: checks.every(Boolean) };
   }

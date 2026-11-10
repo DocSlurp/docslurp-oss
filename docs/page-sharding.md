@@ -1,8 +1,9 @@
 # Page-range sharding for long documents
 
 Status (2026-10-28): planner, priors and calibration (`worker/src/temporal/page-shards.ts`,
-`page-shard-profiles.ts`, `worker/src/pipeline/shard-calibration.ts`); Doppler parallel VMs behind
-`DOCSLURP_DOPPLER_SHARDS` (see doppler-vm.md). All off by default.
+`page-shard-profiles.ts`, `worker/src/pipeline/shard-calibration.ts`). A sandboxed PDF extractor plugin may
+shard its own VM work: it registers its prior under its own profile key (`registerShardProfile`) and the runner
+hands it the calibrated profile ([extractor plugins](extraction/extractor-plugins.md)). All off by default.
 
 Document sharding (`document-shards.ts`) spreads whole documents across worker slots, so a
 500-page PDF still runs every per-document stage on one executor. In production a 477-page
@@ -19,7 +20,6 @@ Production, 14 PDFs (3–477 pages), Theil–Sen fit of checkpoint stage duratio
 | route-pages (probe; shadow in production) | ≈0 s | 52.8 ms | worker slot |
 | vision-extract (already fans out per page) | 2.0 s | 28.6 ms | model provider |
 | embed | 2.8 s | 22.4 ms | worker slot / provider |
-| extract-markdown (Doppler) | 2.5 s | 12.6 ms | VM, 0.5 core |
 | index | 1.3 s | 12.6 ms | worker slot |
 | quarantine (whole-file scan, not splittable) | 3.4 s | 10.3 ms | worker |
 | render-images | 1.0 s | 6.5 ms | worker slot |
@@ -31,11 +31,8 @@ poppler `pdfseparate`+`pdfunite` took 38.6 s for 142 pages with 89× output infl
 chunks duplicate shared fonts and images: 3.4× the source bytes at 8 pages, 1.4–1.8× at 32 and
 1.2–1.3× at 128 for text PDFs; scans stay at 1.0×.
 
-Parsers that take page ranges do not need a physical split at all. Doppler extraction with
-`-f/-l` on the full file over 8 local workers: 492 pages 2.52 → 0.71 s (3.6×), 998 pages 3.52 →
-0.90 s (3.9×); each extra shard costs 20–25 ms to reopen the file. Presplitting first was slower
-locally (1.19 s and 1.55 s) because the split is serial. Range shards aligned to 32 pages are
-byte-identical to today's sequential 32-page chunks (3 fixtures, 142–998 pages).
+Parsers that take page ranges do not need a physical split at all: each shard opens the full file with a page
+range, and shards aligned to the parser's own internal chunk size keep output identical.
 
 ## Planner
 
@@ -53,9 +50,6 @@ greedy list schedule over ready executors plus executors that arrive after `scal
 from observed shard timings with Theil–Sen, weighted against the prior, so a cold start or
 contended run cannot swing the plan. Profiles are keyed by stage and executor class; a model or
 hardware class gets its own profile.
-
-Predicted with the priors (Doppler on 16 VMs, `maxCostOverhead` 1): 477 pages 7.9 → 3.1 s,
-998 pages 14.5 → 3.5 s, 3,000 pages 39.7 → 4.3 s; ≤142 pages stays whole.
 
 ## Where splitting runs
 
@@ -75,12 +69,12 @@ which is the known isolation gap; sharding them must not widen it and needs a co
 ## Integration order (each behind a flag, Temporal changes `patched()` per
 temporal-workflow-changes.md)
 
-1. Doppler extraction: guest accepts `{first, last, documentPages}` and converts its range in one
-   streaming `pdftomarkdown` pass with 16 context pages either side; host runs the planned shards as
-   parallel VMs, merges in page order and, on any shard failure, runs one whole-document VM once (all VM
-   costs recorded). Running headers are judged as in a whole-document pass; the body font size comes
-   from each shard's first window, so headings and emphasis across a short shard with atypical opening
-   pages (an index, say) can differ from a whole-document run, as with the earlier per-chunk guest.
+1. VM PDF extraction: the provider plugin runs range shards as parallel VMs and merges them in page order (its
+   own contract; see extractor-plugins.md). The Doppler guest converts each range `{first, last, documentPages}` in one
+   streaming `pdftomarkdown` pass with 16 context pages either side; on any shard failure the host runs one
+   whole-document VM once (all VM costs recorded). Running headers are judged as in a whole-document pass; the body
+   font size comes from each shard's first window, so headings and emphasis across a short shard with atypical
+   opening pages can differ from a whole-document run.
 2. Page-range shard activity: extend `runPipelineStageShard` from document IDs to
    `(documentId, pageRange)` for render-images and embed.
 3. Feed observed shard timings back through `calibrateShardProfile` (per stage, executor class).

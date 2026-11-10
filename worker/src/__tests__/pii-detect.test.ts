@@ -4,14 +4,14 @@ import { normalizePipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, type CanonicalD
 
 import { fromEnv } from "../config.js";
 import { buildCanonicalChunksFromDocument } from "../lib/canonical-document.js";
-import type { Document, WorkspaceRun } from "../models.js";
+import type { Document, ProjectRun } from "../models.js";
 import { indexableDocuments, isPiiBlockedDocument } from "../pipeline/pii-gate.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { EmbedStage } from "../stages/embed.js";
 import { extractTextForEmbedding } from "../stages/embedding-runtime.js";
 import { buildSummaryEvidence } from "../stages/summary-evidence.js";
 import { readSummarySource } from "../stages/summary-source.js";
-import { PiiDetectStage, type PiiDetectionArtifact, type PiiDetectionSink, type PiiDocumentOutcome } from "../stages/pii-detect.js";
+import { PiiDetectStage, PiiScanIncompleteError, resolvePolicy, type PiiDetectionArtifact, type PiiDetectionSink, type PiiDocumentOutcome } from "../stages/pii-detect.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 
@@ -114,7 +114,7 @@ function setup(action: "flag_for_review" | "block_indexing" | "redact_artifacts"
       allowlistPatterns: options.allowlistPatterns ?? [],
     },
   });
-  const run = { id: "run-1", userId: "u1", orgId: "o1", workspaceId: "w1", stage: "pii-detect", status: "processing", pipeline, stats: {}, artifacts } as unknown as WorkspaceRun;
+  const run = { id: "run-1", userId: "u1", orgId: "o1", projectId: "w1", stage: "pii-detect", status: "processing", pipeline, stats: {}, artifacts } as unknown as ProjectRun;
   const state = WorkflowState.create(run, [document]);
   const stage = new PiiDetectStage({} as CommandRunner, storage as unknown as ArtifactStore, fromEnv(), sink);
   return { storage, sink, state, stage, document, prefix, documentId };
@@ -353,5 +353,66 @@ describe("piiPolicy redact_artifacts and summary evidence", () => {
     expect(storage.objects.has(evidenceKey)).toBe(false);
     expect(await readSummarySource(storage, document, undefined, undefined,
       state.artifactLedger.readDocument(documentId, "summary-evidence"))).toBeNull();
+  });
+});
+
+describe("piiPolicy fails closed when text cannot be read", () => {
+  async function runExpectingFailure(mutate: (ctx: ReturnType<typeof setup>) => void) {
+    const ctx = setup("block_indexing");
+    mutate(ctx);
+    await ctx.stage.run(ctx.state);
+    return ctx;
+  }
+
+  it.each([
+    ["the markdown", (ctx: ReturnType<typeof setup>) => ctx.storage.objects.delete(`${ctx.prefix}/markdown/candidate-a.md`)],
+    ["the canonical document", (ctx: ReturnType<typeof setup>) => ctx.storage.objects.delete(`${ctx.prefix}/canonical/${ctx.documentId}.json`)],
+    ["the extraction contract", (ctx: ReturnType<typeof setup>) => ctx.storage.objects.delete(`${ctx.prefix}/extraction/${ctx.documentId}.contract.json`)],
+    ["the HTML rendering", (ctx: ReturnType<typeof setup>) => ctx.storage.objects.delete(`${ctx.prefix}/html/${ctx.documentId}.html`)],
+  ])("does not report %s as clean when it cannot be read", async (_name, mutate) => {
+    const { sink, state, document } = await runExpectingFailure(mutate);
+    // The stage did not complete as "no PII": no clean outcome was recorded and nothing is indexable.
+    expect(sink.outcomes).toEqual([]);
+    expect(sink.detections).toEqual([]);
+    expect(document.status).not.toBe("completed");
+    expect(state.documentStages.get(document.id)?.get("pii-detect")?.status).not.toBe("completed");
+  });
+
+  it("does not skip a markdown artifact that is not valid UTF-8", async () => {
+    const { storage, sink, state, document, prefix } = setup("block_indexing");
+    const original = storage.getBytes.bind(storage);
+    storage.getBytes = async (key: string) => key.endsWith("candidate-a.md") ? Buffer.from([0xff, 0xfe, 0x41, 0xc3]) : original(key);
+    await new PiiDetectStage({} as CommandRunner, storage as unknown as ArtifactStore, fromEnv(), sink).run(state);
+    expect(sink.outcomes).toEqual([]);
+    expect(state.documentStages.get(document.id)?.get("pii-detect")?.status).not.toBe("completed");
+    expect(prefix).toBeTruthy();
+  });
+
+  it("fails when the source text cannot be extracted instead of treating it as empty", async () => {
+    const { storage, sink, state, document } = setup("block_indexing", { withExtraction: false, sourceText: "SSN 123-45-6789" });
+    storage.objects.delete(document.sourceKey);
+    await new PiiDetectStage({} as CommandRunner, storage as unknown as ArtifactStore, fromEnv(), sink).run(state);
+    expect(sink.outcomes).toEqual([]);
+    expect(state.documentStages.get(document.id)?.get("pii-detect")?.status).not.toBe("completed");
+  });
+
+  it("refuses a policy that names a pattern this worker cannot detect", () => {
+    const pipeline = normalizePipelineFeatures({ piiPolicy: { enabled: true, patterns: ["ssn"], action: "block_indexing", allowlistPatterns: [] } });
+    (pipeline.piiPolicy as { patterns: string[] }).patterns = ["ssn", "uk-nino"];
+    expect(() => resolvePolicy(pipeline)).toThrow(PiiScanIncompleteError);
+    (pipeline.piiPolicy as { enabled: boolean }).enabled = false;
+    expect(() => resolvePolicy(pipeline)).not.toThrow();
+  });
+});
+
+describe("piiPolicy detections carry honest offsets", () => {
+  it("records UTF-8 byte offsets next to UTF-16 character offsets for multibyte text", async () => {
+    const { storage, sink, state, stage, prefix, documentId } = setup("flag_for_review", { withExtraction: false, sourceText: "é😀 SSN 123-45-6789" });
+    await stage.run(state);
+    const [match] = sink.detections[0]!.matches;
+    const text = "é😀 SSN 123-45-6789";
+    expect(match?.charOffset).toBe(text.indexOf("123"));
+    expect(match?.byteOffset).toBe(Buffer.byteLength(text.slice(0, text.indexOf("123"))));
+    expect(piiArtifact(storage, prefix, documentId).matches[0]).toMatchObject({ byteOffset: match?.byteOffset, charOffset: match?.charOffset });
   });
 });

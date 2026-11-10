@@ -22,7 +22,7 @@ Each resume serializes on the run ID and rechecks spend eligibility inside a
 transaction. A refused lease, database failure or failed Temporal resume signal
 rolls back the pause change, lease and progress event. Subsequent sweeps retry.
 A successful resume writes one progress event; repeated sweeps see an unpaused
-run and do nothing. Manual resume keeps the existing workspace access checks and
+run and do nothing. Manual resume keeps the existing project access checks and
 cannot fall through to the operator resume when delivery is deferred.
 
 The transaction includes signal delivery. The actual Temporal resume RPC uses

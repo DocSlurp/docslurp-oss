@@ -22,13 +22,13 @@ For the OpenAI-compatible endpoint, put the opt-in under `docslurp`:
 
 ```json
 {
-  "model": "workspace:default",
+  "model": "project:default",
   "messages": [{ "role": "user", "content": "Summarize the document" }],
   "docslurp": { "speedBoost": true }
 }
 ```
 
-The workspace must resolve to an eligible model. Both streaming and non-streaming chat support the explicit choice; SDK `chatStream` carries it as a query parameter. URL uploads, direct upload sessions and multipart uploads carry it as a top-level boolean (the multipart field uses `"true"` or `"false"`).
+The project must resolve to an eligible model. Both streaming and non-streaming chat support the explicit choice; SDK `chatStream` carries it as a query parameter. URL uploads, direct upload sessions and multipart uploads carry it as a top-level boolean (the multipart field uses `"true"` or `"false"`).
 
 Nitro prioritizes throughput and admits priority service tiers; it does not guarantee lower time to first token or the same price. DocSlurp's ordinary GLM and DeepSeek paths already sort providers by price, so comparisons against the app baseline must retain that setting. See [OpenRouter routing](https://openrouter.ai/docs/guides/routing/provider-selection).
 

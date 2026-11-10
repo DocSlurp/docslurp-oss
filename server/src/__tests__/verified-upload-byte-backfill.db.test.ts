@@ -8,11 +8,11 @@ describe("verified direct-upload byte backfill", () => {
       await db.exec(`
         insert into "user" (id, name, email) values ('u', 'Test', 'bytes-a@example.test'), ('u2', 'Other', 'bytes-b@example.test');
         insert into organizations (id, name, slug, created_by_user_id) values ('o', 'Test', 'bytes-a', 'u'), ('o2', 'Other', 'bytes-b', 'u2');
-        insert into workspaces (id, org_id, user_id, name) values ('w', 'o', 'u', 'Test'), ('w2', 'o2', 'u2', 'Other'), ('w3', 'o', 'u', 'Another workspace');
+        insert into workspaces (id, org_id, user_id, name) values ('w', 'o', 'u', 'Test'), ('w2', 'o2', 'u2', 'Other'), ('w3', 'o', 'u', 'Another project');
         insert into upload_sessions (id, user_id, org_id, workspace_id, status) values
           ('s', 'u', 'o', 'w', 'confirmed'), ('pending', 'u', 'o', 'w', 'uploading'),
           ('other-org', 'u2', 'o2', 'w2', 'confirmed'), ('other-user', 'u2', 'o', 'w', 'confirmed'),
-          ('other-workspace', 'u', 'o', 'w3', 'confirmed');
+          ('other-project', 'u', 'o', 'w3', 'confirmed');
         insert into upload_session_files (id, session_id, filename, mime_type, size_bytes, source_key, upload_mode, status) values
           ('trusted', 's', 'a.txt', 'text/plain', 42, 'trusted', 'single', 'completed'),
           ('known', 's', 'a.txt', 'text/plain', 42, 'known', 'single', 'completed'),
@@ -21,7 +21,7 @@ describe("verified direct-upload byte backfill", () => {
           ('mismatch', 's', 'a.txt', 'text/plain', 42, 'different-key', 'single', 'completed'),
           ('cross-org', 'other-org', 'a.txt', 'text/plain', 42, 'cross-org', 'single', 'completed'),
           ('cross-user', 'other-user', 'a.txt', 'text/plain', 42, 'cross-user', 'single', 'completed'),
-          ('cross-workspace', 'other-workspace', 'a.txt', 'text/plain', 42, 'cross-workspace', 'single', 'completed'),
+          ('cross-project', 'other-project', 'a.txt', 'text/plain', 42, 'cross-project', 'single', 'completed'),
           ('measured', 's', 'a.txt', 'text/plain', 42, 'measured-zero', 'single', 'completed'),
           ('conflict-a', 's', 'a.txt', 'text/plain', 42, 'conflict', 'single', 'completed'),
           ('conflict-b', 's', 'a.txt', 'text/plain', 84, 'conflict', 'single', 'completed');
@@ -30,7 +30,7 @@ describe("verified direct-upload byte backfill", () => {
             case when id = 'known' then 99 else 0 end,
             case when id = 'measured-zero' then '{"sourceSizeMeasured":true}'::jsonb
               else '{"sourceSizeMeasured":false,"keep":"metadata"}'::jsonb end
-          from unnest(array['trusted','known','unfinished','unconfirmed','mismatch','cross-org','cross-user','cross-workspace','measured-zero','conflict']) id;
+          from unnest(array['trusted','known','unfinished','unconfirmed','mismatch','cross-org','cross-user','cross-project','measured-zero','conflict']) id;
       `);
       const before = await db.query<{ bytes: string }>("select file_size::text as bytes from documents where id = 'trusted'");
       expect(before.rows[0]?.bytes).toBe("0");
@@ -41,7 +41,7 @@ describe("verified direct-upload byte backfill", () => {
       expect(result.rows.find(row => row.id === 'trusted')).toEqual({ id: 'trusted', bytes: '42', measured: 'true', keep: 'metadata' });
       expect(result.rows.find(row => row.id === 'known')?.bytes).toBe('99');
       for (const row of result.rows.filter(row => !['trusted', 'known'].includes(row.id))) expect(row.bytes, row.id).toBe('0');
-      const corpus = await db.query<{ bytes: string }>("select source_bytes::text as bytes from workspace_corpus_stats where workspace_id = 'w'");
+      const corpus = await db.query<{ bytes: string }>("select source_bytes::text as bytes from project_corpus_stats where project_id = 'w'");
       expect(corpus.rows[0]?.bytes).toBe('141');
     } finally { await db.close(); }
   }, 120_000);

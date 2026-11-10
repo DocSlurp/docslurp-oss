@@ -2,7 +2,7 @@
 
 Web tools let API, MCP and chat callers search the public web, read pages as
 Markdown, list a site's URLs, crawl a site and ingest a crawled site into a
-workspace. The server routes each call to one of several third-party web
+project. The server routes each call to one of several third-party web
 providers behind one generic interface. Callers never see which provider served
 a call.
 
@@ -23,7 +23,7 @@ routes for fetch, map, crawl and ingest.
 
 Server API keys need the `search` scope (`ingest` for `/v1/web/ingest`).
 Browser (client) keys also need the opt-in `web` scope, which requires a
-workspace allowlist; without it they get `403 web_scope_required`. Every
+project allowlist; without it they get `403 web_scope_required`. Every
 response carries `cached` and `usage.credits`. An identical request within the
 cache window is served without a new provider call and is still charged.
 
@@ -35,7 +35,7 @@ canonical ID is its URL.
 The chat assistant can only ever get `webSearch` and `webFetch` (today only `webSearch` is listed). It never gets crawl,
 map or ingest. In chat, `webFetch` reads only URLs from the user's own messages
 or from `webSearch` results in the same turn. This stops document or web text
-from steering the model into fetching an attacker URL that carries workspace
+from steering the model into fetching an attacker URL that carries project
 data. Instruction-like lines in web text are suppressed before the model reads
 them, and pages are capped at 6,000 characters.
 
@@ -45,11 +45,11 @@ them, and pages are capped at 6,000 characters.
   `TAVILY_API_KEY`, `EXA_API_KEY`, `FIRECRAWL_API_KEY` or `JINA_API_KEY`.
   Each tool is listed only while some configured provider supports it.
   `WEB_TOOLS_CHAT_ENABLED=false` keeps web tools out of chat.
-- **Workspace:** the workspace pipeline's `webTools` setting, default `true`.
-  Migration 0080 writes `webTools: true` into every existing workspace. Set
-  `pipeline.webTools: false` through the workspace settings API to opt a
-  workspace out.
-- **Privacy:** `local-only` and `strict-privacy` workspaces never use web
+- **Project:** the project pipeline's `webTools` setting, default `true`.
+  Migration 0080 writes `webTools: true` into every existing project. Set
+  `pipeline.webTools: false` through the project settings API to opt a
+  project out.
+- **Privacy:** `local-only` and `strict-privacy` projects never use web
   tools, because queries go to a hosted provider.
 
 ## Render ladder for page reads
@@ -154,7 +154,7 @@ Customers pay the `web-search`, `web-page` and `web-map` price card units.
 ## Tracing
 
 Each call is one `web <capability>` span (tracer `docslurp.web`). It carries the
-capability, surface, call ID, workspace and org, cache hit, result count, cost
+capability, surface, call ID, project and org, cache hit, result count, cost
 in cents, credits, attempts and outcome. Each provider attempt is a child client
 span, `web.provider <capability>`, with the provider, attempt number, outcome,
 HTTP status, runtime and cost. One `[web] call ...` log line per call, and one

@@ -2,17 +2,17 @@
 
 [Package docs](https://docslurp.io/docs/packages/sdk) · [GitHub](https://github.com/DocSlurp/docslurp-oss/tree/main/packages/sdk) · [npm](https://www.npmjs.com/package/@docslurp/sdk)
 
-> **Version:** This reference matches `@docslurp/sdk` 0.4.0. 0.4.0 names workspaces with one `workspace` field (ID, slug or name; `workspace` in the embeds) and adds `extract()`, `chatStream()`, `accessToken`, `listRuns()`, `createCapability()` and the document, tag, job, estimate, retention, re-index and workspace-settings methods. 0.3.0 and older use `workspaceId` and `workspaceName` (`workspaceId` and `workspace-id` in the embeds). Upgrade the SDK separately when updating a self-hosted API.
+> **Version:** This reference matches `@docslurp/sdk` 0.4.0. 0.4.0 names projects with one `project` field (ID, slug or name; `project` in the embeds) and adds `extract()`, `chatStream()`, `accessToken`, `listRuns()`, `createCapability()` and the document, tag, job, estimate, retention, re-index and project-settings methods. 0.3.0 and older use `projectId` and `projectName` (`projectId` and `project-id` in the embeds). Upgrade the SDK separately when updating a self-hosted API.
 
-The SDK covers DocSlurp's three jobs from Node.js: upload documents and follow their extraction, search them for passages that cite their document and page, and ask the workspace chat endpoint for a cited answer. You keep your own application and LLM: use the results as evidence for your model, or let DocSlurp write the answer. The SDK has no runtime npm dependencies and ships TypeScript declarations.
+The SDK covers DocSlurp's three jobs from Node.js: upload documents and follow their extraction, search them for passages that cite their document and page, and ask the project chat endpoint for a cited answer. You keep your own application and LLM: use the results as evidence for your model, or let DocSlurp write the answer. The SDK has no runtime npm dependencies and ships TypeScript declarations.
 
-Start with the [quickstart](#from-file-to-search-results). Then see [live progress](#live-counts-and-performance), the [method reference](#method-reference), [response examples](#request-and-response-examples) (including [workspace state](#workspace-state-response) and [organizations](#organization-response-examples)), and [failure handling](#timeouts-cancellation-and-errors). Prefer the terminal? Use the [CLI](https://docslurp.io/docs/cli).
+Start with the [quickstart](#from-file-to-search-results). Then see [live progress](#live-counts-and-performance), the [method reference](#method-reference), [response examples](#request-and-response-examples) (including [project state](#project-state-response) and [organizations](#organization-response-examples)), and [failure handling](#timeouts-cancellation-and-errors). Prefer the terminal? Use the [CLI](https://docslurp.io/docs/cli).
 
 [![Animated upload, indexing, and cited search workflow](https://docslurp.io/demos/integration.gif)](https://docslurp.io/docs/sdk#demo)
 
 *A five-second illustration with sample data and compressed timing. [Watch the 20-second walkthrough](https://docslurp.io/demos/integration.mp4).*
 
-**Versions:** progress, workspace state, organizations, `streamActivity`, canonical IDs and the integration exports need v0.2.0 or newer; v0.1.x has only upload, search, chat, raw streaming and wait methods. `buildDocumentPreviewPages`, the browser key check (`assertBrowserSafeApiKey`, `apiKeyKind`, `UnsafeApiKeyError`), `@docslurp/sdk/embed` (formerly `@docslurp/embed-sdk`) and the [`@docslurp/contrib-search-compat`](https://docslurp.io/docs/packages/contrib-search-compat) package need 0.3.0.
+**Versions:** progress, project state, organizations, `streamActivity`, canonical IDs and the integration exports need v0.2.0 or newer; v0.1.x has only upload, search, chat, raw streaming and wait methods. `buildDocumentPreviewPages`, the browser key check (`assertBrowserSafeApiKey`, `apiKeyKind`, `UnsafeApiKeyError`), `@docslurp/sdk/embed` (formerly `@docslurp/embed-sdk`) and the [`@docslurp/contrib-search-compat`](https://docslurp.io/docs/packages/contrib-search-compat) package need 0.3.0.
 
 ## From file to search results
 
@@ -30,12 +30,12 @@ import { createReadStream } from "node:fs";
 import { createDocSlurpClient } from "@docslurp/sdk";
 
 const client = createDocSlurpClient(); // Reads DOCSLURP_API_KEY.
-const { workspace, run, warnings } = await client.upload(
+const { project, run, warnings } = await client.upload(
   createReadStream("handbook.pdf"),
 );
 
 // Save these IDs so a restarted process can check the same run instead of uploading again.
-console.log({ workspace: workspace.slug, runId: run.id });
+console.log({ project: project.slug, runId: run.id });
 for (const warning of warnings ?? []) console.error(warning);
 await client.waitForRun(run.id, { timeoutMs: 600_000 });
 
@@ -48,16 +48,16 @@ for await (const hit of client.search({
 }
 ```
 
-**Processing happens after `upload()` returns.** `upload()` returns the workspace, run and document records before indexing finishes. `waitForRun()` waits for that one run, while a search's `availability` describes the whole workspace, which may still have other uploads in progress. No results from a partly indexed workspace doesn't mean the answer isn't there.
+**Processing happens after `upload()` returns.** `upload()` returns the project, run and document records before indexing finishes. `waitForRun()` waits for that one run, while a search's `availability` describes the whole project, which may still have other uploads in progress. No results from a partly indexed project doesn't mean the answer isn't there.
 
-With no workspace configured, uploads, search and chat all use your organization's default workspace (`"default"`, exported as `DEFAULT_WORKSPACE`), so most integrations never need one. To keep documents separate, pass `workspace` (or set `DOCSLURP_WORKSPACE`) with a workspace ID, slug or name: `workspace: "Legal Contracts"` and `workspace: "legal-contracts"` are the same workspace, and the first upload into a name that matches nothing creates it. To upload into a new workspace that titles itself from its content, pass `newWorkspace: true` (or a `templateKey`) without `workspace`. Former slugs also work; see [Workspaces](https://docslurp.io/docs/http#workspaces).
+With no project configured, uploads, search and chat all use your organization's default project (`"default"`, exported as `DEFAULT_PROJECT`), so most integrations never need one. To keep documents separate, pass `project` (or set `DOCSLURP_PROJECT`) with a project ID, slug or name: `project: "Legal Contracts"` and `project: "legal-contracts"` are the same project, and the first upload into a name that matches nothing creates it. To upload into a new project that titles itself from its content, pass `newProject: true` (or a `templateKey`) without `project`. Former slugs also work; see [Projects](https://docslurp.io/docs/http#projects).
 
 ### Re-index a page without duplicates
 
 Give each source a `canonicalId`: a URL, a site path such as `/products`, or any key you control. Uploading again with the same `canonicalId` replaces the previous version:
 
 - The old version keeps answering searches while the new one processes, so search never has a gap.
-- When the new version finishes, the switch happens in one database transaction. Search results and workspace document and page counts never include both.
+- When the new version finishes, the switch happens in one database transaction. Search results and project document and page counts never include both.
 - About a minute later, the old version's chunks, page images, vectors and other derived data are deleted. Its version-history entry and original upload are kept.
 
 URL ingestion uses each URL as its canonical ID unless you set one.
@@ -75,7 +75,7 @@ for await (const event of client.streamActivity({ types: ["document.replaced"] }
 }
 ```
 
-`streamActivity()` is a server-sent event stream that ends after `timeoutMs` (default one hour), so reconnect to keep listening. Its `workspaceId` filter matches the workspace UUID (as reported on events), not a slug or name. Where long-lived connections aren't practical, subscribe a webhook to `document.replaced` instead.
+`streamActivity()` is a server-sent event stream that ends after `timeoutMs` (default one hour), so reconnect to keep listening. Its `projectId` filter matches the project UUID (as reported on events), not a slug or name. Where long-lived connections aren't practical, subscribe a webhook to `document.replaced` instead.
 
 [Download the runnable quickstart](https://docslurp.io/docs/examples/quickstart.mjs). The npm package also includes the `examples/` directory.
 
@@ -105,11 +105,11 @@ console.log(usage.totalTokens, usage.costCents);
 ```js
 import { createDocSlurpClient, formatSearchContext } from "@docslurp/sdk";
 
-// Searches your organization's default workspace unless DOCSLURP_WORKSPACE is set.
+// Searches your organization's default project unless DOCSLURP_PROJECT is set.
 const client = createDocSlurpClient();
 const evidence = await client.search({ q: "How are urgent incidents escalated?" });
 if (evidence.availability?.status !== "complete") {
-  throw new Error("Wait for the workspace to finish indexing before answering.");
+  throw new Error("Wait for the project to finish indexing before answering.");
 }
 if (!evidence.results.length) throw new Error("No supporting evidence found.");
 
@@ -148,7 +148,7 @@ const files = await Promise.all(["handbook.pdf", "benefits.pdf"].map(async (file
 })));
 const accepted = await client.upload({
   files,
-  workspace: "Legal contracts", // Optional ID, slug or name (created if none matches); omit for the default workspace.
+  project: "Legal contracts", // Optional ID, slug or name (created if none matches); omit for the default project.
 });
 await client.waitForRun(accepted.run.id);
 ```
@@ -184,7 +184,7 @@ const zipUrl = await client.getExtractDownloadUrl(extract.id); // two-minute sig
 ```js
 const batch = await client.search({ queries: [
   { q: "leave eligibility" },
-  { workspace: "legal-contracts", q: "notice requirements", filenameContains: "handbook" },
+  { project: "legal-contracts", q: "notice requirements", filenameContains: "handbook" },
 ], concurrency: 2 }, { signal: AbortSignal.timeout(30_000) });
 
 for (const [index, result] of batch.results.entries()) {
@@ -205,7 +205,7 @@ for await (const snapshot of client.streamProgress(run.id, {
   console.log(snapshot.progress?.pageRollup, snapshot.progress?.usageTotals);
   console.log(snapshot.progress?.resourceTotals);
 }
-const state = await client.getWorkspaceState(undefined, { recentWindowHours: 24 });
+const state = await client.getProjectState(undefined, { recentWindowHours: 24 });
 console.log(state.pages.indexed, state.pages.notIndexed, state.storage.sourceMb);
 console.log(state.searches.latencyMs.p95, state.performance.pagesPerMinute);
 ```
@@ -229,13 +229,13 @@ Limit the watch with these options:
 
 `getRunProgress` returns the same full snapshot without opening a stream. `streamRun` is the raw stream of run, stage and document events; it has no polling fallback and no replay.
 
-`getWorkspaceState` needs a signed-in session or a server key with the `ingest`, `search`, `artifacts` or `workspaces:manage` scope. Without one, it uses the client's workspace (the `workspace` option, then `DOCSLURP_WORKSPACE`, then `default`). `recentWindowHours` is an integer from 1 to 720 and defaults to 24.
+`getProjectState` needs a signed-in session or a server key with the `ingest`, `search`, `artifacts` or `projects:manage` scope. Without one, it uses the client's project (the `project` option, then `DOCSLURP_PROJECT`, then `default`). `recentWindowHours` is an integer from 1 to 720 and defaults to 24.
 
 - Indexed pages are unique page numbers with nonblank page or chunk text in completed documents' current runs, capped at each document's known page count. They don't measure vector embedding coverage.
 - Documents with unknown page counts are counted separately, not guessed.
 - MB means 1,000,000 bytes. Vector and artifact byte totals are unknown and reported as `null`.
 - Text bytes add up stored page and chunk text, so text stored in both forms counts twice. It isn't total object storage.
-- Recent throughput includes queue time and reruns; page coverage describes the workspace as it is now.
+- Recent throughput includes queue time and reruns; page coverage describes the project as it is now.
 - Performance measurements with no samples are `null`.
 
 ### Organization access and management
@@ -253,7 +253,7 @@ Organization methods work with a signed-in session or a server key that has the 
 
 - A key works only for its own organization and never exceeds its user's role. Creating an organization needs a session.
 - Owners manage owner and admin roles; admins manage member and billing roles. Every member can read the member directory.
-- Membership alone doesn't give ordinary members access to every workspace. Details count only the workspaces they can access; owners and admins see all.
+- Membership alone doesn't give ordinary members access to every project. Details count only the projects they can access; owners and admins see all.
 - Removal, role changes and `leaveOrganization` can't remove the last owner or change a personal organization.
 - Key listings return metadata, never the raw key. Revoking all organization keys also revokes the key making the request.
 
@@ -265,32 +265,32 @@ The adapters keep the supported search call shapes and return cited results. The
 
 ### Search box widget (`@docslurp/sdk/widget`)
 
-`defineDocSlurpSearch()` registers a framework-free `<docslurp-search-box>` element; calling it during SSR does nothing. It takes `client-key` (a `dslp_pub_` browser key; server keys are refused), optional `workspace` (ID, slug or name; default `default`), `api-url` (default `https://docslurp.io`) and `placeholder`. To keep the key off the page, set `search-endpoint` to your own proxy instead: the widget posts `{ q }` to it and expects a search response. `@docslurp/sdk/astro` renders this element from `clientKey`, `workspace`, `apiUrl` and `placeholder` props.
+`defineDocSlurpSearch()` registers a framework-free `<docslurp-search-box>` element; calling it during SSR does nothing. It takes `client-key` (a `dslp_pub_` browser key; server keys are refused), optional `project` (ID, slug or name; default `default`), `api-url` (default `https://docslurp.io`) and `placeholder`. To keep the key off the page, set `search-endpoint` to your own proxy instead: the widget posts `{ q }` to it and expects a search response. `@docslurp/sdk/astro` renders this element from `clientKey`, `project`, `apiUrl` and `placeholder` props.
 
 ```html
 <script type="module">
   import { defineDocSlurpSearch } from "@docslurp/sdk/widget";
   defineDocSlurpSearch();
 </script>
-<docslurp-search-box client-key="dslp_pub_…" workspace="product-manuals"></docslurp-search-box>
+<docslurp-search-box client-key="dslp_pub_…" project="product-manuals"></docslurp-search-box>
 ```
 
 ## Embeds and offline search (`@docslurp/sdk/embed`)
 
-Moved here from the former `@docslurp/embed-sdk` package with the same exports. The `workspaceId` prop and `workspace-id` attribute are now `workspace`. React (19) is an optional peer dependency, needed only for `SearchEmbed`, `ChatEmbed` and `ViewerEmbed`; `@huggingface/transformers` and `@lancedb/lancedb` are optional peers for offline search.
+Moved here from the former `@docslurp/embed-sdk` package with the same exports. The `projectId` prop and `project-id` attribute are now `project`. React (19) is an optional peer dependency, needed only for `SearchEmbed`, `ChatEmbed` and `ViewerEmbed`; `@huggingface/transformers` and `@lancedb/lancedb` are optional peers for offline search.
 
 Add DocSlurp search, chat and a document viewer to your site as React components or Web Components. You can also build an offline search bundle so a static site searches without calling the API.
 
 | Export | What it does |
 | --- | --- |
 | `SearchEmbed` | Search box with cited results. Calls `GET /v1/search`. |
-| `ChatEmbed` | Chat over a workspace. Calls `POST /v1/chat`. |
+| `ChatEmbed` | Chat over a project. Calls `POST /v1/chat`. |
 | `ViewerEmbed` | Shows one document through a same-origin authenticated session or backend proxy. Public keys cannot read private artifacts. |
 | `defineDocSlurpElements()` | Registers `<docslurp-search>`, `<docslurp-chat>` and `<docslurp-viewer>`. |
 | `createOfflineSearchBundle()` | Builds a JSON bundle (and optionally a LanceDB table) for offline search. |
 | `createOfflineSearchClient()` | Searches that bundle in the browser or in Node. |
 
-Search and chat take `apiUrl` (default `https://docslurp.io`), a `dslp_pub_` browser `clientKey` (with the `search` scope; `ChatEmbed` also needs `chat`), and `workspace` (an ID, slug or name, or `default`; default `default`; the custom elements' attribute is also `workspace`). Browser integrations reject server and untyped legacy keys. API origins must use HTTPS, except exact localhost/loopback addresses for development.
+Search and chat take `apiUrl` (default `https://docslurp.io`), a `dslp_pub_` browser `clientKey` (with the `search` scope; `ChatEmbed` also needs `chat`), and `project` (an ID, slug or name, or `default`; default `default`; the custom elements' attribute is also `project`). Browser integrations reject server and untyped legacy keys. API origins must use HTTPS, except exact localhost/loopback addresses for development.
 
 For `ViewerEmbed`, pass `apiUrl=""` for the same-origin API and `documentId`, with no `clientKey`. On your own site, authenticate users in a backend proxy and authorize each requested document there. Keep the server key in that backend. Proxy both document metadata and artifact URLs (rewrite artifact URLs to same-origin authenticated routes): the viewer iframe uses cookies and cannot attach a bearer header. Never put server credentials into an embed or an artifact URL.
 
@@ -311,7 +311,7 @@ await createOfflineSearchBundle({
   outputPath: "./public/docslurp-search/bundle.json",
   // Optional: also write a LanceDB table for Node/SSR search.
   lancedbPath: "./public/docslurp-search/lancedb",
-  lancedbTableName: "workspace_docs",
+  lancedbTableName: "project_docs",
   embedding: {
     model: "Xenova/bge-m3",
     // Serve model files from your own site instead of a remote hub.
@@ -343,7 +343,7 @@ import { SearchEmbed } from "@docslurp/sdk/embed";
     bundleUrl: "/docslurp-search/bundle.json",
     // Used only in Node/SSR, where the site can read its own filesystem.
     lancedbPath: "./public/docslurp-search/lancedb",
-    lancedbTableName: "workspace_docs",
+    lancedbTableName: "project_docs",
     embedding: {
       model: "Xenova/bge-m3",
       modelBaseUrl: "/docslurp-models"
@@ -363,7 +363,7 @@ Call `defineDocSlurpElements()` once in a client script, then use the element:
   offline-model="Xenova/bge-m3"
   offline-model-base-url="/docslurp-models"
   offline-lancedb-path="./public/docslurp-search/lancedb"
-  offline-lancedb-table="workspace_docs"
+  offline-lancedb-table="project_docs"
 ></docslurp-search>
 ```
 
@@ -399,7 +399,7 @@ To change colors, set these CSS variables on a parent element. The widget's own 
 const client = createDocSlurpClient({
   apiKey: process.env.DOCSLURP_API_KEY,
   apiUrl: "https://docslurp.io", // Service origin. Don't add /v1.
-  workspace: "legal-contracts", // Optional ID, slug or name. Defaults to DOCSLURP_WORKSPACE, then "default".
+  project: "legal-contracts", // Optional ID, slug or name. Defaults to DOCSLURP_PROJECT, then "default".
   timeoutMs: 30_000,
 });
 ```
@@ -409,13 +409,13 @@ const client = createDocSlurpClient({
 | API key | `apiKey`, then `DOCSLURP_API_KEY` on the server |
 | OAuth access token | `accessToken` (a string, or a provider `({ forceRefresh }) => token` called per request and refreshed once after a 401), then `DOCSLURP_TOKEN` on the server. Used only when no API key is set; see [`docslurp login`](https://docslurp.io/docs/packages/cli) |
 | Service origin | `apiUrl`, then `DOCSLURP_URL`, then `https://docslurp.io` |
-| Workspace | Per-call `workspace`, then the client option, then `DOCSLURP_WORKSPACE`, then `"default"` (the organization's default workspace). Accepts IDs, slugs, former slugs, names (matched by slug) and `default`. |
+| Project | Per-call `project`, then the client option, then `DOCSLURP_PROJECT`, then `"default"` (the organization's default project). Accepts IDs, slugs, former slugs, names (matched by slug) and `default`. |
 | Request deadline | Per-call `timeoutMs`, then the client option, then 30 seconds |
 | Run wait and stream lifetime | Per-call `timeoutMs`, then 5 minutes (one hour for `streamActivity`). The client's request deadline doesn't apply. |
 | Polling interval | `pollIntervalMs`, then 1 second |
 | HTTP transport | The `fetch` option, then the global `fetch` |
 
-Environment variables are read once, when the client is created, and only on the server. An empty or blank `workspace` falls through to the next setting. For file and URL uploads, `newWorkspace: true` or a `templateKey` creates a new self-titled workspace instead of using the configured one, unless you also pass a per-call `workspace` (which then wins; the server finds it or creates it from the name, applying `templateKey` only when it creates it). Other methods answer HTTP 404 `workspace_not_found` for a workspace that matches nothing.
+Environment variables are read once, when the client is created, and only on the server. An empty or blank `project` falls through to the next setting. For file and URL uploads, `newProject: true` or a `templateKey` creates a new self-titled project instead of using the configured one, unless you also pass a per-call `project` (which then wins; the server finds it or creates it from the name, applying `templateKey` only when it creates it). Other methods answer HTTP 404 `project_not_found` for a project that matches nothing.
 
 **In the browser:** never put a server key in public code; call DocSlurp through your backend instead. Inside a signed-in DocSlurp dashboard session, `createDocSlurpClient({ apiUrl: "" })` uses same-origin cookies. Browser clients don't read environment variables. On the server, `apiKey: ""` turns off the environment key. You can pass browser `File` objects straight to `upload()`. Releases after 0.2.0 throw `UnsafeApiKeyError` if a `dslp_priv_` server key is used in a browser.
 
@@ -423,16 +423,16 @@ Environment variables are read once, when the client is created, and only on the
 
 | Method | Returns | Key scope |
 | --- | --- | --- |
-| `upload(fileOrStream, options?)` | `{ workspace, run, documents, warnings? }` | `ingest` |
+| `upload(fileOrStream, options?)` | `{ project, run, documents, warnings? }` | `ingest` |
 | `upload({ files, ...metadata }, options?)` | Same accepted ingestion response | `ingest` |
 | `upload({ urls, ...metadata }, options?)` | Same accepted ingestion response (`uploadUrls(input)` is the same call) | `ingest` |
 | `extract(input, options?)` | The upload response plus `extract` (`id`, `expiresAt`, download state) | `ingest` |
 | `getExtract(id, request?)` / `listExtracts({ limit? }?)` | Extract record / records | `ingest` or `artifacts` |
 | `deleteExtract(id, request?)` | `{ extract }`, expired now | `ingest` |
 | `getExtractDownloadUrl(id, request?)` | Two-minute signed zip URL | Server key with `artifacts` |
-| `listWorkspaces(options?)` | Accessible workspace records | `ingest`, `search`, `artifacts` or `workspaces:manage` |
-| `getWorkspace(id, options?)` | Workspace record | Same as listing |
-| `listWorkspaceTags(workspace?, request?)` | `[{ tag, documentCount }]` | Same as listing |
+| `listProjects(options?)` | Accessible project records | `ingest`, `search`, `artifacts` or `projects:manage` |
+| `getProject(id, options?)` | Project record | Same as listing |
+| `listProjectTags(project?, request?)` | `[{ tag, documentCount }]` | Same as listing |
 | `createUploadSession(input, options?)` | Session ID, status and signed transfer descriptors | `ingest` |
 | `getUploadSession(id, options?)` | Session status, accepted `result` and refreshed transfer URLs | `ingest` |
 | `signUploadParts(id, fileId, partNumbers, options?)` | Signed URLs for requested multipart parts | `ingest` |
@@ -443,31 +443,31 @@ Environment variables are read once, when the client is created, and only on the
 | `listRuns(request?)` | Your recent runs, newest first | Server key with any of `ingest`, `search`, `artifacts` |
 | `getRunProgress(runId, request?)` | Full typed progress snapshot | Same as `getRun` |
 | `streamProgress(runId, options?)` | Async iterable of full snapshots with polling fallback | Same as `getRun` |
-| `getWorkspaceState(workspace?, options?)` | Current workspace counts, MB, searches, recent performance and usage | Server key with any of `ingest`, `search`, `artifacts`, `workspaces:manage` |
-| `getIngestReport(workspace?, { runId?, documentIds? })` | How files processed: pages, bytes and text per page, images, vision, searchable pages with reasons, settings and recommendations (no AI) | Server key with any of `ingest`, `search`, `artifacts`, `workspaces:manage` |
+| `getProjectState(project?, options?)` | Current project counts, MB, searches, recent performance and usage | Server key with any of `ingest`, `search`, `artifacts`, `projects:manage` |
+| `getIngestReport(project?, { runId?, documentIds? })` | How files processed: pages, bytes and text per page, images, vision, searchable pages with reasons, settings and recommendations (no AI) | Server key with any of `ingest`, `search`, `artifacts`, `projects:manage` |
 | `waitForRun(runId, options?)` | Completed run, or throws | Same as `getRun` |
 | `streamRun(runId, options?)` | Async iterable of `{ event, id?, data }` | Same as `getRun` |
-| `streamActivity(options?)` | Async iterable of account activity events, filtered by `types` and workspace UUID | Same as `getRun` |
+| `streamActivity(options?)` | Async iterable of account activity events, filtered by `types` and project UUID | Same as `getRun` |
 | `search(input, request?)` | Async iterable of hits; await for `{ results, availability, sessionId, usage }` | `search` |
 | `search({ queries, concurrency? }, options?)` | `{ results: [{ ok, data?, error? }] }` | `search` |
-| `chat({ q, workspace?, sessionId? }, request?)` | Answer, citations, availability, session IDs, usage, runtime | `chat` |
-| `chatStream(input, request?)` | Async iterable of `status`, `message` (the full `ChatResponse`) and `done` events; sends `q`, `workspace`, `sessionId`, `sessionToken`, `model`, `filters` and `speedBoost`, not `retrieval` or `agent` | `chat` |
-| `listDocuments({ workspace?, runId?, tags? }?, request?)` | Document records, newest first | `artifacts` |
+| `chat({ q, project?, sessionId? }, request?)` | Answer, citations, availability, session IDs, usage, runtime | `chat` |
+| `chatStream(input, request?)` | Async iterable of `status`, `message` (the full `ChatResponse`) and `done` events; sends `q`, `project`, `sessionId`, `sessionToken`, `model`, `filters` and `speedBoost`, not `retrieval` or `agent` | `chat` |
+| `listDocuments({ project?, runId?, tags? }?, request?)` | Document records, newest first | `artifacts` |
 | `listDocumentVersions(documentId, request?)` | Version chain, newest first | `artifacts` |
-| `updateWorkspace(id, input, request?)` | `{ workspace, impact?, job? }`; `apply` is `"new-uploads"` or `"reindex"` | `workspaces:manage` |
-| `updateWorkspaceEstimate(id, input, request?)` | `{ estimate, billing, impact }` without changing anything | Server key with `workspaces:manage` |
-| `fullIndex({ workspace?, documentIds? }?, request?)` / `fullIndexDocument(documentId, request?)` | `{ runId, pages, estimatedCredits, billing?, job? }`; indexes unindexed pages in the background | `ingest` |
-| `fullIndexEstimate({ documentId } or { workspace?, documentIds? }, request?)` / `uploadEstimate({ files, workspace? }, request?)` | `{ estimate, billing }` | `ingest` |
-| `estimateIndexingMode(mode, input?, request?)` / `setIndexingModeEstimate(...)` / `rebuildGraphEstimate(input?, request?)` | Pages and credits for switching indexing mode / rebuilding the graph | Server key with `workspaces:manage` |
-| `updateSearchSettings(id, input, request?)` / `updateSearchSettingsEstimate(id, input, request?)` | The stored search settings (`retrievalDefaults`, `chat`, ranking controls) / `{ impact, estimate, billing }` | Server key with `workspaces:manage`; the key owner must be able to edit the workspace |
+| `updateProject(id, input, request?)` | `{ project, impact?, job? }`; `apply` is `"new-uploads"` or `"reindex"` | `projects:manage` |
+| `updateProjectEstimate(id, input, request?)` | `{ estimate, billing, impact }` without changing anything | Server key with `projects:manage` |
+| `fullIndex({ project?, documentIds? }?, request?)` / `fullIndexDocument(documentId, request?)` | `{ runId, pages, estimatedCredits, billing?, job? }`; indexes unindexed pages in the background | `ingest` |
+| `fullIndexEstimate({ documentId } or { project?, documentIds? }, request?)` / `uploadEstimate({ files, project? }, request?)` | `{ estimate, billing }` | `ingest` |
+| `estimateIndexingMode(mode, input?, request?)` / `setIndexingModeEstimate(...)` / `rebuildGraphEstimate(input?, request?)` | Pages and credits for switching indexing mode / rebuilding the graph | Server key with `projects:manage` |
+| `updateSearchSettings(id, input, request?)` / `updateSearchSettingsEstimate(id, input, request?)` | The stored search settings (`retrievalDefaults`, `chat`, ranking controls) / `{ impact, estimate, billing }` | Server key with `projects:manage`; the key owner must be able to edit the project |
 | `reprocessRun(runId, { stageFrom?, stages? }?, request?)` / `reprocessEstimate(runId, input?, request?)` | `{ run, job?, warnings }` / `{ estimate, billing }`. Reprocessing re-extracts files a re-upload of identical bytes would not | Server key with `ingest` |
 | `deleteDocument(documentId, request?)` / `setDocumentTags(documentId, tags, request?)` | Removed identities / `{ documentId, tags }` | Server key with `ingest` |
-| `bulkDocuments({ action, documentIds, tags? }, request?)` | Per-action result (`reprocess`, `apply-tags`, `remove-tags`, `delete`, `export-artifacts`) | Server key with `ingest` (`artifacts` for `export-artifacts`); every document in the key's workspaces |
-| `reprocessIngestRecommendation(workspace?, { recommendationId, runId?, documentIds? })` / `applyIngestRecommendation(...)` | Created runs / applied settings patch | Server key with `ingest` / `workspaces:manage` |
-| `setRetention({ orgId } or { workspace? }, versions or null, request?)` | Updated record; 1 to 100 versions kept | `organizations:manage` / `workspaces:manage` |
+| `bulkDocuments({ action, documentIds, tags? }, request?)` | Per-action result (`reprocess`, `apply-tags`, `remove-tags`, `delete`, `export-artifacts`) | Server key with `ingest` (`artifacts` for `export-artifacts`); every document in the key's projects |
+| `reprocessIngestRecommendation(project?, { recommendationId, runId?, documentIds? })` / `applyIngestRecommendation(...)` | Created runs / applied settings patch | Server key with `ingest` / `projects:manage` |
+| `setRetention({ orgId } or { project? }, versions or null, request?)` | Updated record; 1 to 100 versions kept | `organizations:manage` / `projects:manage` |
 | `getJob(jobId, request?)` / `streamJob(jobId, options?)` | `JobStatus` / async iterable of `status`, `progress` (counts merged into `job.progress`) and `done` events (SSE, polling fallback; the timeout never applies while a job is `blocked`) | Same as `getRun` |
 | `getDocument(documentId, request?)` | Typed document viewer envelope (`viewer.document`) | `artifacts` |
-| `createCapability({ workspaceIds?, policy?, ttlSeconds?, boundClientKeyId?, allowedOrigins? }?, request?)` | `{ token, expiresAt }`: a sealed `X-DocSlurp-Capability` token for a browser | Server API key with `search` (not an OAuth token) |
+| `createCapability({ projectIds?, policy?, ttlSeconds?, boundClientKeyId?, allowedOrigins? }?, request?)` | `{ token, expiresAt }`: a sealed `X-DocSlurp-Capability` token for a browser | Server API key with `search` (not an OAuth token) |
 | `listOrganizations(request?)` / `getOrganization(id, request?)` | Organization records | `organizations:read` or `organizations:manage` |
 | `getOrganizationDetails(id, request?)` / `getOrganizationAccess(id, request?)` | Counts and capabilities / actor access | Same as organization reads |
 | `createOrganization(input, request?)` | New organization record | Session only |
@@ -482,9 +482,9 @@ Environment variables are read once, when the client is created, and only on the
 | `formatSearchContext(searchResponse)` | Numbered source excerpts as a string | None (no request) |
 | `buildDocumentPreviewPages({ documentId, artifacts, manifest })` | Page images for a document viewer, by page number (after 0.2.0) | None (no request) |
 
-- **`SearchInput`:** `q` (required); optional `workspace` (ID, slug, former slug, name or `default`), `limit` (1 to 100), `minScore` (relevance floor from 0 to 1; 0 disables it), `documentId`, `filenameContains`, `tags` (a string), `candidateDepth` (per-retriever candidate cap, 1 to 200), `resultOrder` (`relevance`, or `prompt` to pack the same passages for a prompt) and `geo` (a radius, bounding-box or polygon filter on a GeoJSON field; coordinates are `[longitude, latitude]`). The response has `noMatch: true` when the workspace is searchable but search returns nothing (nothing cleared the floor, or nothing was retrieved at all).
-- **Upload metadata:** `workspace` (ID, slug or name; created when none matches), `newWorkspace`, `orgId`, `templateKey`, `idempotencyKey`, `tags` (labels for every accepted document), `quality` (`fast`, `auto` or `good`; omitted uses the workspace's), `indexingMode` (`full`, `map` or `visual`), `speedBoost` (explicit opt-in at 4× service credits), and `canonicalId` and `path` (a folder such as `contracts/2025`) in upload options for one file, or on each `{ data, filename, canonicalId, path }` entry. Canonical IDs must not start with `docslurp:`. Files the server rejects come back in `rejected` while the rest are accepted. Direct sessions ignore `idempotencyKey`; HTTP bulk and URL ingestion support it. Set canonical IDs per URL for URL ingestion.
-- **`ChatInput`:** `q` (required); optional `workspace`, `sessionId`, `sessionToken` (browser keys: the token from the previous answer, needed to continue `sessionId`), `model` (an unavailable model returns HTTP 400 `model_not_allowed`), `filters` (`documentIds`, `mimeTypes`, `tags`, `dateFrom`, `dateTo`, `geo`), `retrieval` overrides for this request (`resultCount` 1 to 12, `useHyDE`, `useRerank`, `useMmr`, `mmrLambda`, `parentRetrieval`), `agent` budgets (`maxSteps`, `maxToolCalls`, `searchConcurrency`, `tools`, `web`; `chat()` only) and `speedBoost`.
+- **`SearchInput`:** `q` (required); optional `project` (ID, slug, former slug, name or `default`), `limit` (1 to 100), `minScore` (relevance floor from 0 to 1; 0 disables it), `documentId`, `filenameContains`, `tags` (a string), `candidateDepth` (per-retriever candidate cap, 1 to 200), `resultOrder` (`relevance`, or `prompt` to pack the same passages for a prompt) and `geo` (a radius, bounding-box or polygon filter on a GeoJSON field; coordinates are `[longitude, latitude]`). The response has `noMatch: true` when the project is searchable but search returns nothing (nothing cleared the floor, or nothing was retrieved at all).
+- **Upload metadata:** `project` (ID, slug or name; created when none matches), `newProject`, `orgId`, `templateKey`, `idempotencyKey`, `tags` (labels for every accepted document), `quality` (`fast`, `auto` or `good`; omitted uses the project's), `indexingMode` (`full`, `map` or `visual`), `speedBoost` (explicit opt-in at 4× service credits), and `canonicalId` and `path` (a folder such as `contracts/2025`) in upload options for one file, or on each `{ data, filename, canonicalId, path }` entry. Canonical IDs must not start with `docslurp:`. Files the server rejects come back in `rejected` while the rest are accepted. Direct sessions ignore `idempotencyKey`; HTTP bulk and URL ingestion support it. Set canonical IDs per URL for URL ingestion.
+- **`ChatInput`:** `q` (required); optional `project`, `sessionId`, `sessionToken` (browser keys: the token from the previous answer, needed to continue `sessionId`), `model` (an unavailable model returns HTTP 400 `model_not_allowed`), `filters` (`documentIds`, `mimeTypes`, `tags`, `dateFrom`, `dateTo`, `geo`), `retrieval` overrides for this request (`resultCount` 1 to 12, `useHyDE`, `useRerank`, `useMmr`, `mmrLambda`, `parentRetrieval`), `agent` budgets (`maxSteps`, `maxToolCalls`, `searchConcurrency`, `tools`, `web`; `chat()` only) and `speedBoost`.
 - **Template keys:** `legal-contracts`, `medical-records`, `financial-reports`, `engineering-docs`, `meeting-notes`.
 - **Citations:** `documentId`, `filename`, `pageNumber`, `pageNumbers`, `headingPath`, `chunkIndex`, `blockIds` and `source`. Some formats have no meaningful page numbers; when the list is empty, don't invent a page.
 - **Locators:** `citation.locator` says exactly where the evidence is, keyed by `kind`: `page` (`pageNumber`, `charStart`/`charEnd`, normalized `boxes`), `slide` (`slideNumber`, `notes`, `boxes`), `sheet` (`sheetName`, A1 `range`, `headerRow`), `media` (`startSeconds`, `endSeconds`, `mode` of `said` or `shown`, `speaker`, `timing` of `word`, `segment` or `chunk`) and `image` (`boxes`). It is `null` or absent for content indexed before locators existed (re-index to get them); for recordings, decks and sheets branch on `kind` rather than `pageNumber`. The `CitationLocator` type is exported.
@@ -500,17 +500,17 @@ All outputs below are **illustrative**, not measurements or IDs from a real acco
 ### Upload and URL acceptance
 
 ```js
-const accepted = await client.upload(new Blob(["Policy text"]), { filename: "policy.txt" }); // Default workspace.
-// The same upload as a file list, into the "policies" workspace:
-await client.upload({ files: [{ data: new Blob(["Policy text"]), filename: "policy.txt" }], workspace: "policies" });
-const remote = await client.upload({ urls: ["https://files.example/policy.pdf"], workspace: "policies" });
+const accepted = await client.upload(new Blob(["Policy text"]), { filename: "policy.txt" }); // Default project.
+// The same upload as a file list, into the "policies" project:
+await client.upload({ files: [{ data: new Blob(["Policy text"]), filename: "policy.txt" }], project: "policies" });
+const remote = await client.upload({ urls: ["https://files.example/policy.pdf"], project: "policies" });
 ```
 
 Both methods return the same shape. Illustrative **excerpt**:
 
 ```json
 {
-  "workspace": {
+  "project": {
     "id": "ws_1",
     "slug": "policies",
     "name": "Policies"
@@ -532,7 +532,7 @@ Both methods return the same shape. Illustrative **excerpt**:
 }
 ```
 
-`upload` also takes a single `File`, a `{ data, filename? }` object, a Node byte stream, any async byte iterable, or an array of files. Metadata is optional (see the [reference above](#method-reference)); options in the second argument override metadata in the upload object. Put `filename`, `signal` and `timeoutMs` in the second argument. URL uploads require `urls` and accept workspace metadata and an optional `idempotencyKey`. A PDF's page count can still be zero when the upload is accepted.
+`upload` also takes a single `File`, a `{ data, filename? }` object, a Node byte stream, any async byte iterable, or an array of files. Metadata is optional (see the [reference above](#method-reference)); options in the second argument override metadata in the upload object. Put `filename`, `signal` and `timeoutMs` in the second argument. URL uploads require `urls` and accept project metadata and an optional `idempotencyKey`. A PDF's page count can still be zero when the upload is accepted.
 
 ### Run reads, waits and both streams
 
@@ -625,7 +625,7 @@ Both return the same typed snapshot. Illustrative **excerpt** (the full response
 }
 ```
 
-- `progress` is optional. Its counters cover this run and its stages, and can change once page totals are known; they don't describe the whole workspace.
+- `progress` is optional. Its counters cover this run and its stages, and can change once page totals are known; they don't describe the whole project.
 - `percentComplete` is the pipeline's combined progress. It isn't necessarily pages completed divided by total.
 - Usage is recorded tokens and cents. CPU is in milliseconds and RSS in bytes.
 - The server sends combined snapshots, so you may not see every intermediate count. `streamProgress` never yields the server's heartbeat frames; set `heartbeatMs` for your own.
@@ -658,20 +658,20 @@ Illustrative raw event **excerpt**:
 
 Raw `streamRun` can also yield `snapshot` and `heartbeat` frames, and event data varies; it doesn't always contain `run`. Raw streams don't end on their own when the run finishes, and they don't reconnect, poll or replay. They time out after five minutes by default; break out of the loop to close them sooner. For counts and state, use `streamProgress` instead.
 
-### Workspace state response
+### Project state response
 
 ```js
-// The client's workspace: the workspace option, then DOCSLURP_WORKSPACE, then "default".
-const defaultState = await client.getWorkspaceState();
-// Any workspace, by ID, slug, former slug or name:
-const state = await client.getWorkspaceState("legal-contracts", { recentWindowHours: 24 });
+// The client's project: the project option, then DOCSLURP_PROJECT, then "default".
+const defaultState = await client.getProjectState();
+// Any project, by ID, slug, former slug or name:
+const state = await client.getProjectState("legal-contracts", { recentWindowHours: 24 });
 ```
 
 Complete illustrative response:
 
 ```json
 {
-  "workspaceId": "ws_1",
+  "projectId": "ws_1",
   "orgId": "org_1",
   "observedAt": "2026-10-06T18:00:00.000Z",
   "recentWindow": {
@@ -743,17 +743,17 @@ Complete illustrative response:
 }
 ```
 
-- Document, page, storage and run totals, and attributed usage, describe the workspace now, across all time.
+- Document, page, storage and run totals, and attributed usage, describe the project now, across all time.
 - Search `total` is all-time; the `recent*` counts and the latency distribution cover the selected window.
 - Run performance covers runs that completed or failed in the window, by their last update time. Only completed runs with a positive wall-clock duration add throughput and duration samples.
 - Throughput is completed pages divided by total run wall-clock time, so reruns can count the same work twice. It isn't total worker capacity. `minutesPer100Pages = 100 / pagesPerMinute`.
 - `unknownPageCount` counts **documents** without a known page count; their pages are left out of `total` and `notIndexed`. Blank pages and chunks without a page don't count as indexed.
-- An empty workspace returns zero counts, `sampleCount: 0`, and `null` for latency and throughput.
+- An empty project returns zero counts, `sampleCount: 0`, and `null` for latency and throughput.
 
 ### Search, batches, chat and formatting
 
 ```js
-const result = await client.search({ q: "leave notice", workspace: "policies", limit: 5, filenameContains: "policy", tags: "hr" });
+const result = await client.search({ q: "leave notice", project: "policies", limit: 5, filenameContains: "policy", tags: "hr" });
 for await (const hit of client.search({ q: "leave notice" })) console.log(hit.citation);
 ```
 
@@ -802,7 +802,7 @@ Illustrative full search response with one hit (every hit field shown):
 Pass `documentId` to search a single document. A search with no hits still returns `sessionId`, `usage` and `availability`, with `results: []`, and iterating it yields nothing. Hits can include `parentText`, and `availability` can be `null`.
 
 ```js
-const batch = await client.search({ queries: [{ q: "leave notice" }, { q: "eligibility", workspace: "policies" }], concurrency: 2 });
+const batch = await client.search({ queries: [{ q: "leave notice" }, { q: "eligibility", project: "policies" }], concurrency: 2 });
 ```
 
 Illustrative **excerpt**. Each successful `data` is a full search response like the one above:
@@ -1010,7 +1010,7 @@ Complete illustrative details result:
   },
   "counts": {
     "members": 3,
-    "workspaces": 2
+    "projects": 2
   }
 }
 ```
@@ -1098,7 +1098,7 @@ console.log(removed, left); // undefined undefined: both resolve with no value.
 - Any member can leave an organization that isn't personal. An owner can leave only if another owner remains.
 - Personal organization memberships can't be changed.
 - Demoting or removing the last owner returns 409, even when requests race.
-- Removing or leaving revokes that user's API keys for the organization. Workspaces shared with them directly stay shared.
+- Removing or leaving revokes that user's API keys for the organization. Projects shared with them directly stay shared.
 
 ```js
 const keys = await client.listOrganizationApiKeys("org_1");
@@ -1172,7 +1172,7 @@ try {
 
 | Operation | Automatic retries |
 | --- | --- |
-| Every SDK read: `getRun`, `getRunProgress`, `getWorkspaceState`, `getDocument`, and organization, member and key reads | Up to 2 retries on HTTP 429, 502, 503 or 504 |
+| Every SDK read: `getRun`, `getRunProgress`, `getProjectState`, `getDocument`, and organization, member and key reads | Up to 2 retries on HTTP 429, 502, 503 or 504 |
 | HTTP bulk Blob or File upload (`directUpload: false`) **with** an `idempotencyKey` | Same as reads |
 | URL ingestion with an `idempotencyKey` | Same as reads |
 | Direct session creation, stream HTTP requests, bulk upload or URL ingestion without an `idempotencyKey` | None |
@@ -1181,9 +1181,9 @@ try {
 
 Retries honor the full `Retry-After` delay and stay within the original request deadline. If that delay cannot fit, the SDK immediately throws `DocSlurpApiError` with `retryAfterSeconds` (also in `details`) rather than retrying early. These rules apply to API requests. Replayable storage PUTs have separate retries: up to two retries for network errors or HTTP 408, 429, 500, 502, 503 and 504. API network errors aren't retried, though `streamProgress` in `auto` mode can fall back to polling. When you abort with a signal, the SDK rejects with the signal's reason.
 
-## Workspace discovery and signed uploads
+## Project discovery and signed uploads
 
-`listWorkspaces()` returns the accessible workspace records. Pass a returned ID to `getWorkspace(id)` for details. Upload, search and chat use the default workspace when none is supplied. `upload({ files, workspace: "Product manuals" })` or `upload({ urls, workspace: "Product manuals" })` uploads into the workspace with that name, creating it on first use.
+`listProjects()` returns the accessible project records. Pass a returned ID to `getProject(id)` for details. Upload, search and chat use the default project when none is supplied. `upload({ files, project: "Product manuals" })` or `upload({ urls, project: "Product manuals" })` uploads into the project with that name, creating it on first use.
 
 `upload()` transfers known-size files with presigned storage PUTs (a single PUT for small files, multipart for large files). The server verifies stored bytes and starts ingestion automatically; the SDK waits for the accepted run response. You do not call a completion method yourself. Acceptance returns a run ID; use `waitForRun()` or `streamProgress()` to follow processing. `directUpload: false` selects the size-limited multipart HTTP compatibility transport.
 
@@ -1193,7 +1193,7 @@ Agents that transfer bytes separately can use:
 
 ```js
 const session = await client.createUploadSession({
-  workspace: "Product manuals",
+  project: "Product manuals",
   files: [{ filename: "manual.pdf", mimeType: "application/pdf", sizeBytes: bytes.byteLength, singlePart: true }],
 });
 const file = session.files[0];

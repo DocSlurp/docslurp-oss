@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
 
-import { getRequestActor, resolveActorWorkspaceFilter } from "../lib/request-actor.js";
+import { getRequestActor, resolveActorProjectFilter } from "../lib/request-actor.js";
 import {
   getNotificationPreferences,
   listNotificationInbox,
@@ -18,23 +18,23 @@ const updatePreferencesSchema = z.object({
   runFailed: z.boolean().optional(),
   plausibilityWarning: z.boolean().optional(),
   costAlert: z.boolean().optional(),
-  workspaceInvite: z.boolean().optional()
+  projectInvite: z.boolean().optional()
 });
 
 const readAllSchema = z.object({
-  /** Workspace ID, slug or name; omitted marks every workspace's notifications read. */
-  workspace: z.string().max(256).optional()
+  /** Project ID, slug or name; omitted marks every project's notifications read. */
+  project: z.string().max(256).optional()
 });
 
 export const notificationsRoutes = new Hono()
   .get("/inbox", async (c) => {
     const userId = c.get("sessionUser").id;
-    const workspaceId = await resolveActorWorkspaceFilter(getRequestActor(c), c.req.query("workspace"));
+    const projectId = await resolveActorProjectFilter(getRequestActor(c), c.req.query("project"));
     const event = c.req.query("event") as Parameters<typeof listNotificationInbox>[0]["event"];
     const limit = Number(c.req.query("limit") ?? "25");
     const inbox = await listNotificationInbox({
       userId,
-      workspaceId,
+      projectId,
       event,
       limit: Number.isFinite(limit) ? limit : 25,
     });
@@ -58,7 +58,7 @@ export const notificationsRoutes = new Hono()
     const body = c.req.valid("json");
     const updatedCount = await markAllNotificationsRead({
       userId,
-      workspaceId: await resolveActorWorkspaceFilter(getRequestActor(c), body.workspace)
+      projectId: await resolveActorProjectFilter(getRequestActor(c), body.project)
     });
 
     return c.json({ updatedCount });

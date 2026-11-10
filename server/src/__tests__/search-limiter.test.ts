@@ -32,8 +32,8 @@ describe("search limiter", () => {
     expect(resolveSearchLimiterOptions({ SEARCH_LANCEDB_NATIVE: "0", SEARCH_FAIR_ADMISSION: "1" })).toMatchObject({ maxSlotsPerGroup: 2, fairTenants: true });
     expect(resolveSearchLimiterOptions({ SEARCH_FAIR_ADMISSION: "true" })).toMatchObject({ maxSlotsPerGroup: 2, fairTenants: true });
     expect(resolveSearchLimiterOptions({ SEARCH_LANCEDB_NATIVE: "1", SEARCH_FAIR_ADMISSION: "0" })).toMatchObject({ maxSlotsPerGroup: 0, fairTenants: false });
-    // A per-workspace trial does not change process-wide admission.
-    expect(resolveSearchLimiterOptions({ SEARCH_LANCEDB_NATIVE: "0", SEARCH_LANCEDB_NATIVE_WORKSPACES: "w1" })).toMatchObject({ maxSlotsPerGroup: 0, fairTenants: false });
+    // A per-project trial does not change process-wide admission.
+    expect(resolveSearchLimiterOptions({ SEARCH_LANCEDB_NATIVE: "0", SEARCH_LANCEDB_NATIVE_PROJECTS: "w1" })).toMatchObject({ maxSlotsPerGroup: 0, fairTenants: false });
     expect(resolveSearchLimiterOptions({ SEARCH_MAX_SLOTS_PER_TURN: "3" }).maxSlotsPerGroup).toBe(3);
   });
 

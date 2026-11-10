@@ -45,7 +45,7 @@ describe("hosted vision catalog", () => {
   it("catalogs the tuned opt-in models with list prices and never a Pro/Ultra or :free variant", () => {
     const tuned = {
       // Priced at the most expensive host the route allows ($0.30/$1.20: US hosts, DeepSeek at peak), not the $0.15/$0.60 list price.
-      "deepseek/deepseek-v4.1-flash-1017": { input: 0.3, output: 1.2, perPage: 0.103, checked: "2026-10-26", route: ["together", "fireworks", "parasail"] },
+      "deepseek/deepseek-v4.1-flash-1017": { input: 0.3, output: 1.2, perPage: 0.103, checked: "2026-10-26", route: ["fireworks", "parasail"] },
       "xiaomi/mimo-v2.6-flash": { input: 0.14, output: 0.28, perPage: 0.056 },
       "openai/gpt-6-luna": { input: 0.1, output: 0.5, perPage: 0.061 },
       "z-ai/glm-5.3-flash": { input: 0.15, output: 0.5, perPage: 0.073 },
@@ -89,7 +89,7 @@ describe("hosted vision catalog", () => {
       expect(applyDefaultVisionOverride(base, { DOCSLURP_VISION_MODEL_URI: defaultUri })).toBe(base);
     });
 
-    it("lets an explicit workspace model, profile or privacy mode win", () => {
+    it("lets an explicit project model, profile or privacy mode win", () => {
       const env = { DOCSLURP_VISION_MODEL_URI: luna };
       const explicitModel = pipeline(visionConfigSchema.parse({ modelUri: "llm://openrouter/z-ai/glm-5.3-flash" }));
       const explicitProfile = pipeline(visionConfigSchema.parse({ profile: "cheapest-hosted" }));

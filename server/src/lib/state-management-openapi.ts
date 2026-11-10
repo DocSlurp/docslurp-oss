@@ -3,7 +3,7 @@ import {
   createOrganizationInviteSchema, createOrganizationSchema, defaultPipelineFeatures, organizationInviteSchema,
   organizationAccessSchema, organizationDetailsSchema, organizationMemberSchema,
   organizationMembershipSchema, organizationRoleSchema, organizationSchema,
-  updateOrganizationSchema, workspaceRunProgressSnapshotSchema, workspaceStateSchema,
+  updateOrganizationSchema, projectRunProgressSnapshotSchema, projectStateSchema,
   applyIngestRecommendationSchema, ingestReportSchema,
 } from "@docslurp/shared";
 import { apiErrorOpenApiResponse } from "./api-error-openapi.js";
@@ -16,14 +16,14 @@ const schema = (value: z.ZodType) => z.toJSONSchema(value, { unrepresentable: "a
 const inputSchema = (value: z.ZodType) => z.toJSONSchema(value, { unrepresentable: "any", io: "input" });
 const serviceSecurity = [{ bearerAuth: [] }, { sessionAuth: [] }];
 const parameter = (name: string) => ({ in: "path", name, required: true, schema: { type: "string", minLength: 1 } });
-/** `/v1/workspaces/{workspaceId}` takes any workspace reference; see docs/api-sdk.md#workspaces. */
-export const workspaceRefDescription = 'Workspace UUID, current slug (e.g. "legal-contracts"), former slug (renamed workspaces keep resolving), or "default" for the organization default workspace. Session callers may add ?orgId= to pick the default workspace of another organization; API keys use their organization.';
-export const workspaceRefParameter = { in: "path", name: "workspaceId", required: true, description: workspaceRefDescription, schema: { type: "string", minLength: 1, examples: ["default", "legal-contracts", "6f1c2a7e-0d4b-4c39-9a51-2f0e8b7d3c11"] } };
+/** `/v1/projects/{projectId}` takes any project reference; see docs/api-sdk.md#projects. */
+export const projectRefDescription = 'Project UUID, current slug (e.g. "legal-contracts"), former slug (renamed projects keep resolving), or "default" for the organization default project. Session callers may add ?orgId= to pick the default project of another organization; API keys use their organization.';
+export const projectRefParameter = { in: "path", name: "projectId", required: true, description: projectRefDescription, schema: { type: "string", minLength: 1, examples: ["default", "legal-contracts", "6f1c2a7e-0d4b-4c39-9a51-2f0e8b7d3c11"] } };
 /** Sent when the path used a slug, former slug or "default". */
-export const workspaceRefHeaders = {
-  "X-DocSlurp-Workspace-Id": { description: "Resolved workspace UUID", schema: { type: "string" } },
-  "X-DocSlurp-Workspace-Slug": { description: "Current workspace slug; prefer it in stored links", schema: { type: "string" } },
-  "X-DocSlurp-Workspace-Renamed-From": { description: "Present when the path used a former slug; update stored links to X-DocSlurp-Workspace-Slug", schema: { type: "string" } },
+export const projectRefHeaders = {
+  "X-DocSlurp-Project-Id": { description: "Resolved project UUID", schema: { type: "string" } },
+  "X-DocSlurp-Project-Slug": { description: "Current project slug; prefer it in stored links", schema: { type: "string" } },
+  "X-DocSlurp-Project-Renamed-From": { description: "Present when the path used a former slug; update stored links to X-DocSlurp-Project-Slug", schema: { type: "string" } },
 };
 const object = (properties: Record<string, object>) => ({ type: "object", required: Object.keys(properties), properties });
 const array = (name: string) => ({ type: "array", items: ref(name) });
@@ -44,7 +44,7 @@ const mutationErrors = {
 };
 const orgRead = "Session membership or a server API key with organizations:read or organizations:manage, bound to this organization. Key scopes never grant more than the user's role.";
 const orgManage = "Session authentication or an organization-bound server key with organizations:manage. Owners manage owner/admin roles; admins manage member/billing roles. Membership changes serialize authorization and last-owner checks. Personal memberships cannot be changed.";
-const readScopes = "Session workspace access or an organization-bound key with any of ingest, search, artifacts.";
+const readScopes = "Session project access or an organization-bound key with any of ingest, search, artifacts.";
 
 const organizationApiKeySchema = z.object({
   id: z.string(), userId: z.string(), orgId: z.string().nullable(), name: z.string(),
@@ -53,8 +53,8 @@ const organizationApiKeySchema = z.object({
   createdAt: z.string(), revokedAt: z.string().nullable(), requestsLastMinute: z.number().optional(), pagesToday: z.number().optional(),
 });
 export const stateManagementSchemas = {
-  RunProgressSnapshot: schema(workspaceRunProgressSnapshotSchema),
-  WorkspaceState: schema(workspaceStateSchema),
+  RunProgressSnapshot: schema(projectRunProgressSnapshotSchema),
+  ProjectState: schema(projectStateSchema),
   IngestReport: schema(ingestReportSchema),
   IngestRecommendationAction: inputSchema(applyIngestRecommendationSchema),
   Organization: schema(organizationSchema),
@@ -70,15 +70,15 @@ export const stateManagementSchemas = {
   OrganizationApiKey: schema(organizationApiKeySchema),
 };
 
-export const runProgressExample = workspaceRunProgressSnapshotSchema.parse({
-  run: { id: "run-123", userId: "user-123", orgId: "org-123", workspaceId: "workspace-123", workspaceName: "Research", kind: "bulk-upload",
+export const runProgressExample = projectRunProgressSnapshotSchema.parse({
+  run: { id: "run-123", userId: "user-123", orgId: "org-123", projectId: "project-123", projectName: "Research", kind: "bulk-upload",
     status: "queued", stage: "queued", totalDocuments: 1, processedDocuments: 0, pagesTotal: 3, pagesProcessed: 0,
     costCents: 0, pipeline: defaultPipelineFeatures, error: null,
     createdAt: "2026-10-06T12:00:00Z", updatedAt: "2026-10-06T12:00:00Z" },
   stages: [], recentEvents: [],
 });
-export const workspaceStateExample = workspaceStateSchema.parse({
-  workspaceId: "workspace-123", orgId: "org-123", observedAt: "2026-10-06T12:00:00Z",
+export const projectStateExample = projectStateSchema.parse({
+  projectId: "project-123", orgId: "org-123", observedAt: "2026-10-06T12:00:00Z",
   recentWindow: { from: "2026-10-05T12:00:00Z", to: "2026-10-06T12:00:00Z", hours: 24 },
   documents: { total: 1, queued: 1, processing: 0, completed: 1, failed: 0, unknownPageCount: 0 },
   pages: { total: 3, indexed: 2, notIndexed: 1, basis: "text-searchable-unique-pages" },
@@ -95,7 +95,7 @@ const orgGet = (summary: string, name: string, description = orgRead) => ({
 
 export const stateManagementPaths = {
   "/v1/runs/{runId}/progress": { get: {
-    tags: ["runs"], summary: "Read full run progress", description: `${readScopes} Authoritative snapshot includes run/document/page counts, stage progress, usage, runtime, events, and artifacts. Stage progress may infer completion; it is not current workspace searchable-page coverage.`,
+    tags: ["runs"], summary: "Read full run progress", description: `${readScopes} Authoritative snapshot includes run/document/page counts, stage progress, usage, runtime, events, and artifacts. Stage progress may infer completion; it is not current project searchable-page coverage.`,
     security: serviceSecurity, parameters: [parameter("runId")],
     responses: { "200": response("Full run snapshot; non-streaming fallback for live progress", ref("RunProgressSnapshot"), runProgressExample), ...authErrors },
   } },
@@ -109,57 +109,57 @@ export const stateManagementPaths = {
       "x-sse-events": { snapshot: ref("RunProgressSnapshot"), heartbeat: object({}), error: object({ code: { const: "access_revoked" }, error: { type: "string" } }) },
     }, ...authErrors },
   } },
-  "/v1/workspaces/{workspaceId}/state": { get: {
-    tags: ["workspaces"], summary: "Read current workspace corpus and recent performance",
-    description: `${readScopes} Requires a server key for bearer access. documents.total/completed, pages.total, and storage cover the current corpus: completed documents not superseded by a newer version, so a re-ingest never double counts. documents.queued/processing count in-flight documents in any non-terminal status; documents.failed counts failed documents. Pages indexed are unique nonempty text-searchable pages in completed current documents; notIndexed = known total minus indexed. Unknown page counts are counted separately. Source bytes are measured logical document bytes; documentsWithUnknownSize makes missing measurements explicit, so sourceMb can be a lower bound. Text bytes cover persisted page/chunk text, not physical object or index storage. MB = bytes/1,000,000; vector/artifact bytes are unknown (null). Searches include scalar and multi-workspace sessions. Recent search latency and completed-run wall-time distributions use the selected window. Run throughput includes queue time and reruns; corpus coverage never sums run history. Empty latency/throughput samples yield null. Usage is all-time attributed recorded usage, not a complete economic-price estimate.`,
-    security: serviceSecurity, parameters: [workspaceRefParameter, { in: "query", name: "recentWindowHours", schema: { type: "integer", minimum: 1, maximum: 720, default: 24 } }],
-    responses: { "200": { ...response("Current counts and storage, recent search/runtime distributions, and all-time usage", ref("WorkspaceState"), workspaceStateExample), headers: workspaceRefHeaders }, "400": apiErrorOpenApiResponse("recentWindowHours must be an integer from 1 to 720"), ...authErrors },
+  "/v1/projects/{projectId}/state": { get: {
+    tags: ["projects"], summary: "Read current project corpus and recent performance",
+    description: `${readScopes} Requires a server key for bearer access. documents.total/completed, pages.total, and storage cover the current corpus: completed documents not superseded by a newer version, so a re-ingest never double counts. documents.queued/processing count in-flight documents in any non-terminal status; documents.failed counts failed documents. Pages indexed are unique nonempty text-searchable pages in completed current documents; notIndexed = known total minus indexed. Unknown page counts are counted separately. Source bytes are measured logical document bytes; documentsWithUnknownSize makes missing measurements explicit, so sourceMb can be a lower bound. Text bytes cover persisted page/chunk text, not physical object or index storage. MB = bytes/1,000,000; vector/artifact bytes are unknown (null). Searches include scalar and multi-project sessions. Recent search latency and completed-run wall-time distributions use the selected window. Run throughput includes queue time and reruns; corpus coverage never sums run history. Empty latency/throughput samples yield null. Usage is all-time attributed recorded usage, not a complete economic-price estimate.`,
+    security: serviceSecurity, parameters: [projectRefParameter, { in: "query", name: "recentWindowHours", schema: { type: "integer", minimum: 1, maximum: 720, default: 24 } }],
+    responses: { "200": { ...response("Current counts and storage, recent search/runtime distributions, and all-time usage", ref("ProjectState"), projectStateExample), headers: projectRefHeaders }, "400": apiErrorOpenApiResponse("recentWindowHours must be an integer from 1 to 720"), ...authErrors },
   } },
-  "/v1/workspaces/{workspaceId}/ingest-report": { get: {
-    tags: ["workspaces"], summary: "Read the ingest report: observed content, relevant settings and recommendations",
-    description: `${readScopes} Requires a server key for bearer access. No model call. Covers the current corpus (completed or in-flight documents not superseded), or one run (runId) or up to 100 documents (documentIds, comma-separated), newest first and capped at ${500} files and 20,000 pages read page by page (scope.truncated). Reports files and pages by type and status; bytes per file and per page with a file-size histogram; plain-text bytes of each page's native text layer and of its indexed chunks (histograms with p50/p95, zero and near-zero text pages); images per page and scanned-looking pages (images with almost no text layer); vision outcome per page (extracted, not selected by page triage, kept as a page image in fast quality, past the former per-file page limit, failed, stopped by the cost cap); searchable pages (a page with chunks) and a reason for each unsearchable page; skipped and failed stages; detected languages; audio/video counts; table-heavy pages; cost, pages per minute and pages per $1 (run wall time including queueing). Per-page text and image facts exist for files processed from ${"2026-10-14"}; older files report them as not recorded (coverage.note). config lists the pipeline settings that shaped the result; recommendations are deterministic rules with the evidence, the expected effect, an estimated cost per 100 future pages and to reprocess the affected files, and the pipeline patch a workspace editor can apply. permissions.canEdit is true when the caller may act on recommendations: an editor of the workspace, and for API keys a server key with ingest or workspaces:manage.`,
+  "/v1/projects/{projectId}/ingest-report": { get: {
+    tags: ["projects"], summary: "Read the ingest report: observed content, relevant settings and recommendations",
+    description: `${readScopes} Requires a server key for bearer access. No model call. Covers the current corpus (completed or in-flight documents not superseded), or one run (runId) or up to 100 documents (documentIds, comma-separated), newest first and capped at ${500} files and 20,000 pages read page by page (scope.truncated). Reports files and pages by type and status; bytes per file and per page with a file-size histogram; plain-text bytes of each page's native text layer and of its indexed chunks (histograms with p50/p95, zero and near-zero text pages); images per page and scanned-looking pages (images with almost no text layer); vision outcome per page (extracted, not selected by page triage, kept as a page image in fast quality, past the former per-file page limit, failed, stopped by the cost cap); searchable pages (a page with chunks) and a reason for each unsearchable page; skipped and failed stages; detected languages; audio/video counts; table-heavy pages; cost, pages per minute and pages per $1 (run wall time including queueing). Per-page text and image facts exist for files processed from ${"2026-10-14"}; older files report them as not recorded (coverage.note). config lists the pipeline settings that shaped the result; recommendations are deterministic rules with the evidence, the expected effect, an estimated cost per 100 future pages and to reprocess the affected files, and the pipeline patch a project editor can apply. permissions.canEdit is true when the caller may act on recommendations: an editor of the project, and for API keys a server key with ingest or projects:manage.`,
     security: serviceSecurity,
-    parameters: [workspaceRefParameter,
-      { in: "query", name: "runId", schema: { type: "string", maxLength: 128 }, description: "Only documents of this run (in this workspace)." },
-      { in: "query", name: "documentIds", schema: { type: "string" }, description: "Comma-separated document IDs (at most 100) in this workspace." }],
-    responses: { "200": { ...response("Ingest report", ref("IngestReport")), headers: workspaceRefHeaders }, "400": apiErrorOpenApiResponse("More than 100 document IDs or an invalid runId"), ...authErrors },
+    parameters: [projectRefParameter,
+      { in: "query", name: "runId", schema: { type: "string", maxLength: 128 }, description: "Only documents of this run (in this project)." },
+      { in: "query", name: "documentIds", schema: { type: "string" }, description: "Comma-separated document IDs (at most 100) in this project." }],
+    responses: { "200": { ...response("Ingest report", ref("IngestReport")), headers: projectRefHeaders }, "400": apiErrorOpenApiResponse("More than 100 document IDs or an invalid runId"), ...authErrors },
   } },
-  "/v1/workspaces/{workspaceId}/ingest-report/apply": { post: {
-    tags: ["workspaces"], summary: "Apply an ingest report recommendation's setting change",
-    description: "Session, or a server API key with workspaces:manage (the scope PATCH /v1/workspaces/{workspaceId} needs) for a workspace it can use. The caller must be able to edit the workspace (owner, org owner/admin, workspace admin/editor, or any member on the org default workspace). The server recomputes the report and merges the recommendation's own patch onto the stored pipeline through the regular workspace update (audit log workspace.updated with source ingest-report). The request names a recommendation; it cannot carry settings. 409 when the recommendation no longer applies or a workspace template locks the setting.",
-    security: serviceSecurity, parameters: [workspaceRefParameter], requestBody: request(ref("IngestRecommendationAction"), { recommendationId: "vision-all-pages" }),
+  "/v1/projects/{projectId}/ingest-report/apply": { post: {
+    tags: ["projects"], summary: "Apply an ingest report recommendation's setting change",
+    description: "Session, or a server API key with projects:manage (the scope PATCH /v1/projects/{projectId} needs) for a project it can use. The caller must be able to edit the project (owner, org owner/admin, project admin/editor, or any member on the org default project). The server recomputes the report and merges the recommendation's own patch onto the stored pipeline through the regular project update (audit log project.updated with source ingest-report). The request names a recommendation; it cannot carry settings. 409 when the recommendation no longer applies or a project template locks the setting.",
+    security: serviceSecurity, parameters: [projectRefParameter], requestBody: request(ref("IngestRecommendationAction"), { recommendationId: "vision-all-pages" }),
     responses: { "200": response("Applied patch and the resulting pipeline", object({ recommendationId: { type: "string" }, patch: { type: ["object", "null"] }, pipeline: { type: "object" } })), "400": apiErrorOpenApiResponse("Invalid request fields"), "409": apiErrorOpenApiResponse("Recommendation no longer applies or the setting is locked"), ...authErrors },
   } },
-  "/v1/workspaces/{workspaceId}/ingest-report/reprocess": { post: {
-    tags: ["workspaces"], summary: "Reprocess the files an ingest report recommendation affects",
-    description: "Session, or a server API key with ingest for a workspace it can use; the caller must be a workspace editor. Re-runs up to 100 of the recommendation's affected files as new versions with the workspace's current settings (budget caps apply). The report shows the estimated cost first (cost.reprocessCents).",
-    security: serviceSecurity, parameters: [workspaceRefParameter], requestBody: request(ref("IngestRecommendationAction"), { recommendationId: "vision-all-pages" }),
+  "/v1/projects/{projectId}/ingest-report/reprocess": { post: {
+    tags: ["projects"], summary: "Reprocess the files an ingest report recommendation affects",
+    description: "Session, or a server API key with ingest for a project it can use; the caller must be a project editor. Re-runs up to 100 of the recommendation's affected files as new versions with the project's current settings (budget caps apply). The report shows the estimated cost first (cost.reprocessCents).",
+    security: serviceSecurity, parameters: [projectRefParameter], requestBody: request(ref("IngestRecommendationAction"), { recommendationId: "vision-all-pages" }),
     responses: { "201": response("Created runs", object({ runs: { type: "array", items: object({ id: { type: "string" } }) }, documentIds: { type: "array", items: { type: "string" } }, skippedDocuments: { type: "integer" }, estimatedCents: { type: ["number", "null"] } })), "400": apiErrorOpenApiResponse("Invalid request fields"), "409": apiErrorOpenApiResponse("Recommendation no longer applies or has no files to reprocess"), ...authErrors },
   } },
-  "/v1/workspaces/{workspaceId}": {
-    get: { tags: ["workspaces"], summary: "Read a workspace", description: `${readScopes} The record includes its slug and isDefault. Bearer keys are limited to their organization.`, security: serviceSecurity, parameters: [workspaceRefParameter],
-      responses: { "200": { description: "Workspace record", headers: workspaceRefHeaders }, ...authErrors } },
-    patch: { tags: ["workspaces"], summary: "Update a workspace, including renaming its slug", description: "Dashboard session, or a server API key with the opt-in workspaces:manage scope bound to the workspace organization (the key owner's workspace role still applies). slug must be 3-63 characters of lowercase letters, digits and single hyphens, must not look like a UUID, and must not be a reserved word (default, board, templates, invites, new, settings, api, app, admin, workspaces, search, docs). The previous slug keeps resolving to this workspace and can never be claimed by another workspace.", security: serviceSecurity, parameters: [workspaceRefParameter],
-      requestBody: request({ type: "object", minProperties: 1, properties: { name: { type: "string", minLength: 1, maxLength: 120 }, slug: { type: "string", minLength: 3, maxLength: 63, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }, systemPrompt: { type: ["string", "null"], maxLength: 2000 }, monthlyBudgetCents: { type: ["integer", "null"], minimum: 0 }, pipeline: { type: "object", description: "Pipeline settings. pipeline.quality (fast | auto | good, default auto) sets processing quality for new uploads: fast reads the text layer only and keeps scanned pages as page images, not read ($0.05 per 1,000 pages); auto reads each page the cheapest faithful way ($0.05 to $2.50 per 1,000 pages); good reads every page with a vision model ($2.50 per 1,000 pages). The retired parserPlaybook and vision.forceAllPages are still accepted and mapped to quality. pipeline.indexingMode (full | map | visual) changes how new uploads index; deferred modes parse pages when queries need them. Ignored (treated as full) unless deferred indexing is enabled. A mode change never marks chunks stale.", properties: { quality: { type: "string", enum: ["fast", "auto", "good"], default: "auto" }, indexingMode: { type: "string", enum: ["full", "map", "visual"] } } }, indexAll: { type: "boolean", description: "With pipeline.indexingMode full on a deferred workspace, also index every unindexed page now (a background run). Otherwise only new uploads are affected." } } }, { slug: "legal-contracts" }),
-      responses: { "200": { description: "Updated workspace record", headers: workspaceRefHeaders }, "400": apiErrorOpenApiResponse("Invalid fields, malformed slug, or reserved slug; code visual_mode_privacy when visual mode is refused by the privacy mode or PII policy, visual_mode_quality when it is combined with Fast quality"), "402": apiErrorOpenApiResponse("code credits_required_for_full_index: full indexing on a plan without credits"), "409": apiErrorOpenApiResponse("Slug is a current or former slug of another workspace"), ...authErrors } },
+  "/v1/projects/{projectId}": {
+    get: { tags: ["projects"], summary: "Read a project", description: `${readScopes} The record includes its slug and isDefault. Bearer keys are limited to their organization.`, security: serviceSecurity, parameters: [projectRefParameter],
+      responses: { "200": { description: "Project record", headers: projectRefHeaders }, ...authErrors } },
+    patch: { tags: ["projects"], summary: "Update a project, including renaming its slug", description: "Dashboard session, or a server API key with the opt-in projects:manage scope bound to the project organization (the key owner's project role still applies). slug must be 3-63 characters of lowercase letters, digits and single hyphens, must not look like a UUID, and must not be a reserved word (default, board, templates, invites, new, settings, api, app, admin, projects, search, docs). The previous slug keeps resolving to this project and can never be claimed by another project.", security: serviceSecurity, parameters: [projectRefParameter],
+      requestBody: request({ type: "object", minProperties: 1, properties: { name: { type: "string", minLength: 1, maxLength: 120 }, slug: { type: "string", minLength: 3, maxLength: 63, pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$" }, systemPrompt: { type: ["string", "null"], maxLength: 2000 }, monthlyBudgetCents: { type: ["integer", "null"], minimum: 0 }, pipeline: { type: "object", description: "Pipeline settings. pipeline.quality (fast | auto | good, default auto) sets processing quality for new uploads: fast reads the text layer only and keeps scanned pages as page images, not read ($0.05 per 1,000 pages); auto reads each page the cheapest faithful way ($0.05 to $2.50 per 1,000 pages); good reads every page with a vision model ($2.50 per 1,000 pages). The retired parserPlaybook and vision.forceAllPages are still accepted and mapped to quality. pipeline.indexingMode (full | map | visual) changes how new uploads index; deferred modes parse pages when queries need them. Ignored (treated as full) unless deferred indexing is enabled. A mode change never marks chunks stale.", properties: { quality: { type: "string", enum: ["fast", "auto", "good"], default: "auto" }, indexingMode: { type: "string", enum: ["full", "map", "visual"] } } }, indexAll: { type: "boolean", description: "With pipeline.indexingMode full on a deferred project, also index every unindexed page now (a background run). Otherwise only new uploads are affected." } } }, { slug: "legal-contracts" }),
+      responses: { "200": { description: "Updated project record", headers: projectRefHeaders }, "400": apiErrorOpenApiResponse("Invalid fields, malformed slug, or reserved slug; code visual_mode_privacy when visual mode is refused by the privacy mode or PII policy, visual_mode_quality when it is combined with Fast quality"), "402": apiErrorOpenApiResponse("code credits_required_for_full_index: full indexing on a plan without credits"), "409": apiErrorOpenApiResponse("Slug is a current or former slug of another project"), ...authErrors } },
   },
-  "/v1/workspaces/{workspaceId}/search-settings": { patch: {
-    tags: ["workspaces"], summary: "Update a workspace's search and chat settings", description: "Dashboard session, or a server API key with the opt-in workspaces:manage scope (the scope PATCH /v1/workspaces/{workspaceId} needs) bound to the workspace organization and allowlist; the key owner must be able to edit the workspace. Browser keys and OAuth tokens are refused. Changes retrieval defaults (retrievalDefaults), ranking controls (typoTolerance, dedupeByFilename, rankingRules, boosts, pinnedResults, synonyms) and chat settings (chat: enabled, mode, answerStyle, citations, searchInstructions). Omitted fields keep their values. rankingRules, synonyms and pinnedResults are limited to 500 entries and 64 KB each. Audit log workspace.search-settings.updated records the key id.", security: serviceSecurity, parameters: [workspaceRefParameter],
+  "/v1/projects/{projectId}/search-settings": { patch: {
+    tags: ["projects"], summary: "Update a project's search and chat settings", description: "Dashboard session, or a server API key with the opt-in projects:manage scope (the scope PATCH /v1/projects/{projectId} needs) bound to the project organization and allowlist; the key owner must be able to edit the project. Browser keys and OAuth tokens are refused. Changes retrieval defaults (retrievalDefaults), ranking controls (typoTolerance, dedupeByFilename, rankingRules, boosts, pinnedResults, synonyms) and chat settings (chat: enabled, mode, answerStyle, citations, searchInstructions). Omitted fields keep their values. rankingRules, synonyms and pinnedResults are limited to 500 entries and 64 KB each. Audit log project.search-settings.updated records the key id.", security: serviceSecurity, parameters: [projectRefParameter],
     requestBody: request({ type: "object" }, { retrievalDefaults: { resultCount: 8 }, chat: { answerStyle: "concise" } }),
     responses: { "200": response("Stored search settings", { type: "object" }), "400": apiErrorOpenApiResponse("Invalid fields"), ...authErrors },
   } },
-  "/v1/workspaces/{workspaceId}/full-index": { post: {
-    tags: ["workspaces"], summary: "Index every remaining page of a deferred workspace", description: "Starts a background reprocess run in full mode for documents with unindexed pages (optionally only documentIds). Requires deferred indexing to be enabled (404 otherwise), edit access, and a key or capability policy with allowFullIndexRequest (client keys default to false). Spends credits; 402 when out of credits.", security: serviceSecurity, parameters: [workspaceRefParameter],
+  "/v1/projects/{projectId}/full-index": { post: {
+    tags: ["projects"], summary: "Index every remaining page of a deferred project", description: "Starts a background reprocess run in full mode for documents with unindexed pages (optionally only documentIds). Requires deferred indexing to be enabled (404 otherwise), edit access, and a key or capability policy with allowFullIndexRequest (client keys default to false). Spends credits; 402 when out of credits.", security: serviceSecurity, parameters: [projectRefParameter],
     requestBody: request({ type: "object", properties: { documentIds: { type: "array", items: { type: "string" }, maxItems: 500 } } }, {}),
     responses: { "202": response("Run started", object({ runId: { type: "string" }, pages: { type: "integer" }, estimatedCredits: { type: ["number", "null"] }, billing: { type: "string", enum: ["enforced", "disabled"] } })), ...mutationErrors, "400": apiErrorOpenApiResponse("code nothing_to_index, or invalid body"), "403": apiErrorOpenApiResponse("code full_index_not_allowed, or no edit access") },
   } },
-  "/v1/workspaces/{workspaceId}/indexing-mode/estimate": { post: {
-    tags: ["workspaces"], summary: "Estimate the job a mode switch would start", description: "Counts only pages that are not yet searchable. job is none, full-index, build-maps or embed-pages. 404 unless deferred indexing is enabled.", security: serviceSecurity, parameters: [workspaceRefParameter],
+  "/v1/projects/{projectId}/indexing-mode/estimate": { post: {
+    tags: ["projects"], summary: "Estimate the job a mode switch would start", description: "Counts only pages that are not yet searchable. job is none, full-index, build-maps or embed-pages. 404 unless deferred indexing is enabled.", security: serviceSecurity, parameters: [projectRefParameter],
     requestBody: request({ type: "object", required: ["mode"], properties: { mode: { type: "string", enum: ["full", "map", "visual"] } } }, { mode: "full" }),
     responses: { "200": response("Estimate", object({ pages: { type: "integer" }, estimatedCredits: { type: ["number", "null"] }, billing: { type: "string", enum: ["enforced", "disabled"] }, job: { type: "string", enum: ["none", "full-index", "build-maps", "embed-pages"] } })), ...authErrors },
   } },
   "/v1/documents/{documentId}/full-index": { post: {
-    tags: ["documents"], summary: "Fully index one deferred document", description: "Same contract as the workspace full-index endpoint, scoped to one document.", security: serviceSecurity, parameters: [parameter("documentId")],
+    tags: ["documents"], summary: "Fully index one deferred document", description: "Same contract as the project full-index endpoint, scoped to one document.", security: serviceSecurity, parameters: [parameter("documentId")],
     responses: { "202": response("Run started", object({ runId: { type: "string" }, pages: { type: "integer" }, estimatedCredits: { type: ["number", "null"] }, billing: { type: "string", enum: ["enforced", "disabled"] } })), ...mutationErrors, "403": apiErrorOpenApiResponse("code full_index_not_allowed, or no edit access") },
   } },
   "/v1/organizations": {
@@ -173,7 +173,7 @@ export const stateManagementPaths = {
     patch: { tags: ["organizations"], summary: "Update organization name or slug", description: `${orgManage} Requires owner/admin role. Supply at least name or slug; null slug clears it. Identity, ownership, credits, and membership cannot be changed here.`, security: serviceSecurity,
       parameters: [parameter("orgId")], requestBody: request(ref("UpdateOrganization"), { name: "Research library", slug: null }), responses: { "200": response("Updated organization details", ref("OrganizationDetails")), ...mutationErrors } },
   },
-  "/v1/organizations/{orgId}/details": { get: orgGet("Read organization details and counts", "OrganizationDetails", `${orgRead} Member count is organization-wide. Workspace count includes all organization workspaces for owners/admins; other roles see only owned or explicitly shared workspaces.`) },
+  "/v1/organizations/{orgId}/details": { get: orgGet("Read organization details and counts", "OrganizationDetails", `${orgRead} Member count is organization-wide. Project count includes all organization projects for owners/admins; other roles see only owned or explicitly shared projects.`) },
   "/v1/organizations/{orgId}/access": { get: orgGet("Read current organization role and capabilities", "OrganizationAccess", `${orgRead} Capabilities reflect role, personal/last-owner invariants, and the current key scopes. A read-only organization key receives false mutation capabilities. Read permissions do not authorize member/key mutations.`) },
   "/v1/organizations/{orgId}/members": {
     get: { ...orgGet("List organization members", "OrganizationMember"), responses: { "200": response("Members with identity and role", object({ memberships: array("OrganizationMember") })), ...authErrors } },
@@ -190,11 +190,11 @@ export const stateManagementPaths = {
   "/v1/organizations/{orgId}/members/{memberUserId}": {
     patch: { tags: ["organizations"], summary: "Change organization member role", description: orgManage, security: serviceSecurity, parameters: [parameter("orgId"), parameter("memberUserId")], requestBody: request(ref("UpdateOrganizationMember"), { role: "admin" }),
       responses: { "200": response("Updated membership", ref("OrganizationMembership")), ...mutationErrors } },
-    delete: { tags: ["organizations"], summary: "Remove organization membership", description: `${orgManage} Users may remove themselves unless personal or last owner. Removal revokes the user's organization-bound keys and MCP grants, transfers their workspaces to an organization owner, removes their workspace shares in the organization, and stops webhook deliveries for its workspaces.`, security: serviceSecurity, parameters: [parameter("orgId"), parameter("memberUserId")],
+    delete: { tags: ["organizations"], summary: "Remove organization membership", description: `${orgManage} Users may remove themselves unless personal or last owner. Removal revokes the user's organization-bound keys and MCP grants, transfers their projects to an organization owner, removes their project shares in the organization, and stops webhook deliveries for its projects.`, security: serviceSecurity, parameters: [parameter("orgId"), parameter("memberUserId")],
       responses: { "200": response("Membership removed", ok), ...mutationErrors } },
   },
   "/v1/organizations/{orgId}/leave": { post: {
-    tags: ["organizations"], summary: "Leave organization", description: `${orgManage} Any member can leave, except personal memberships and the last owner. Revokes the user's organization-bound keys and MCP grants, hands their workspaces to an organization owner and removes their workspace shares in the organization.`, security: serviceSecurity, parameters: [parameter("orgId")],
+    tags: ["organizations"], summary: "Leave organization", description: `${orgManage} Any member can leave, except personal memberships and the last owner. Revokes the user's organization-bound keys and MCP grants, hands their projects to an organization owner and removes their project shares in the organization.`, security: serviceSecurity, parameters: [parameter("orgId")],
     responses: { "200": response("Membership removed", ok), ...mutationErrors },
   } },
   "/v1/organizations/{orgId}/api-keys": {

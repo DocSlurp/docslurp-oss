@@ -10,8 +10,8 @@ describe("blocking tool errors at the production native boundary", () => {
     const app = new Hono();
     app.onError(nativeErrorHandler(spendAwareErrorHandler));
     app.use("*", async (c, next) => { c.header("X-Request-ID", "blocked-request"); await next(); });
-    app.post("/v1/workspaces/ws/chat", () => { throw new ChatToolBlockedError("search", code); });
-    const response = await app.request("/v1/workspaces/ws/chat", { method: "POST" });
+    app.post("/v1/projects/ws/chat", () => { throw new ChatToolBlockedError("search", code); });
+    const response = await app.request("/v1/projects/ws/chat", { method: "POST" });
     expect(response.status).toBe(status);
     expect(response.headers.get("X-Request-ID")).toBe("blocked-request");
     const body = await response.json();

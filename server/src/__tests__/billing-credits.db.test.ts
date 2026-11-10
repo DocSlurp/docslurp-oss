@@ -125,7 +125,7 @@ describe.skipIf(!databaseUrl)("billing credits (database)", () => {
 
   it("pending debits count against admission at once and land in the balance on the next flush", async () => {
     await Promise.all(Array.from({ length: 50 }, (_, i) =>
-      credits.enqueueOrgCreditDebit(sql, { orgId: ORG, credits: 10.5, runId: `run-${i % 4}`, workspaceId: "ws" })));
+      credits.enqueueOrgCreditDebit(sql, { orgId: ORG, credits: 10.5, runId: `run-${i % 4}`, projectId: "ws" })));
     // Balance untouched; admission and the overview row already subtract the 525 pending.
     expect((await org()).prepaid).toBe(1000);
     expect(await credits.getAvailableCredits(ORG)).toEqual({ balance: 1000, pending: 525, available: 475 });

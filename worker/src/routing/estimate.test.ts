@@ -1,3 +1,4 @@
+import { DISTINCT_TEST_PRICING, installTestPricing } from "@docslurp/shared";
 import { describe, expect, it } from "vitest";
 import {
   aiBilledUsd,
@@ -56,13 +57,15 @@ describe("estimateTargetCost", () => {
 
 describe("receipt revenue parity", () => {
   it("does not turn CPU/GPU internal list references into customer revenue", () => {
+    installTestPricing({ ...DISTINCT_TEST_PRICING, internalCost: { ...DISTINCT_TEST_PRICING.internalCost!, listCredits: () => 3 } });
     const receipt = buildLocalComputeUsageEvent({
       metric: "worker-page",
       observation: { cpuSeconds: 1, memoryGbSeconds: 2, gpuSeconds: 1 },
       env: { DOCSLURP_BILL_COMPUTE: "true" },
     });
     expect(receipt.metadata?.billable).toBe(false);
-    expect(Number(receipt.metadata?.internalListCredits)).toBeGreaterThan(0);
+    expect(Number(receipt.metadata?.internalListCredits)).toBe(3);
+    installTestPricing(DISTINCT_TEST_PRICING);
     for (const target of catalog.filter((x) => ["native", "local-ocr", "local-labeler", "private-vlm"].includes(x.kind))) {
       for (const scope of [page, { kind: "region", bbox: { x: 0, y: 0, width: 10, height: 10 } } as const]) {
         const estimate = estimateTargetCost(target, "ocr", scope, undefined, { [target.id]: { cost: 2 } });

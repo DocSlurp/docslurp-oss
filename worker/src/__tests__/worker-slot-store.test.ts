@@ -33,8 +33,8 @@ beforeAll(async () => {
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id, worker_slots)
     values ('free', 'Free', 'free', 'u1', 2), ('gold', 'Gold', 'gold', 'u1', 5)`;
-  await sql`insert into workspaces(id, org_id, user_id, name) values ('wf', 'free', 'u1', 'F'), ('wg', 'gold', 'u1', 'G'), ('wn', null, 'u1', 'N')`;
-  await sql`insert into workspace_runs (id, org_id, user_id, workspace_id, kind, status, stage, pipeline) values
+  await sql`insert into projects(id, org_id, user_id, name) values ('wf', 'free', 'u1', 'F'), ('wg', 'gold', 'u1', 'G'), ('wn', null, 'u1', 'N')`;
+  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values
     ('run-free-1', 'free', 'u1', 'wf', 'bulk-upload', 'processing', 'vision-extract', '{}'),
     ('run-free-2', 'free', 'u1', 'wf', 'bulk-upload', 'processing', 'vision-extract', '{}'),
     ('run-gold', 'gold', 'u1', 'wg', 'bulk-upload', 'processing', 'vision-extract', '{}'),
@@ -178,12 +178,12 @@ describe("worker slot semaphore", () => {
     expect(free).toMatchObject({ acquired: false, reason: "global-cap" });
   });
 
-  it("gives runs without an org the default slots, keyed by workspace", async () => {
+  it("gives runs without an org the default slots, keyed by project", async () => {
     const semaphore = slots();
     const claims = [];
     for (let i = 0; i < 3; i++) claims.push(await semaphore.acquire({ runId: "run-orgless", kind: "page", workerId: `n${i}` }));
     expect(claims.map((claim) => claim.acquired)).toEqual([true, true, false]);
-    expect(claims[0]!.orgKey).toBe("workspace:wn");
+    expect(claims[0]!.orgKey).toBe("project:wn");
   });
 
   it("withWorkerSlot releases on failure and reports a full org as WORKER_SLOT_UNAVAILABLE", async () => {

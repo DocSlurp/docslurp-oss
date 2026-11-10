@@ -194,7 +194,7 @@ describe("MCP OAuth with the official MCP client SDK", () => {
 
     const client = await connect(provider);
     const { tools } = await client.listTools();
-    expect(tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(["search", "chat", "listWorkspaces", "upload"]));
+    expect(tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(["search", "chat", "listProjects", "upload"]));
     expect(tools.find((tool) => tool.name === "search")?.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false });
     const search = await client.callTool({ name: "search", arguments: { q: "renewal" } });
     expect(search.isError).toBe(false);
@@ -258,13 +258,17 @@ describe("MCP OAuth with the official MCP client SDK", () => {
     // Two processes sharing a credential store both refresh: the loser is refused, the winner keeps working.
     const duplicate = await refresh(original);
     expect(duplicate.status).toBe(400);
-    expect(await duplicate.json()).toMatchObject({ error: "invalid_grant" });
+    // The race is told apart by a machine-readable reason, not by the prose of the description.
+    expect(await duplicate.json()).toMatchObject({ error: "invalid_grant", docslurp_reason: "refresh_token_just_rotated" });
     const grantState = async () => (await pool.current!.query<{ revoked_at: Date | null }>("select g.revoked_at from mcp_oauth_grants g join mcp_oauth_clients c on c.id = g.client_id where c.id = $1", [clientId])).rows[0]!.revoked_at;
     expect(await grantState()).toBeNull();
 
     // Past the leeway, presenting a rotated token is treated as theft (OAuth 2.1 §4.3.1).
     await pool.current!.query("update mcp_oauth_tokens set consumed_at = now() - interval '5 minutes' where consumed_at is not null");
-    expect((await refresh(original)).status).toBe(400);
+    const replay = await refresh(original);
+    expect(replay.status).toBe(400);
+    // A replay past the leeway is theft, not a race: no reason that would make a client keep polling, and no internal reason leaks.
+    expect(await replay.json()).not.toHaveProperty("docslurp_reason");
     expect(await grantState()).not.toBeNull();
     expect((await refresh(next.refresh_token)).status).toBe(400);
   });

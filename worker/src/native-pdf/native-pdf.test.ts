@@ -213,7 +213,7 @@ describe("shadow mode", () => {
     const engine = fakeEngine([{ markdownText: "alpha beta gamma" }, { markdownText: "delta" }]);
     const rows = await runNativePdfShadow({
       engine, sourcePath: "/x.pdf", documentId: "doc1", stageName: "extract-markdown",
-      referencePages: ["alpha beta gamma", "something else"], referenceText: "", referenceExtractor: "kreuzberg",
+      referencePages: ["alpha beta gamma", "something else"], referenceText: "", referenceExtractor: "poppler-text",
     });
     const pageRows = rows.filter((r) => r.scope === "page");
     expect(pageRows.map((r) => [r.pageNumber, r.value])).toEqual([[1, 1], [2, 0]]);
@@ -226,13 +226,13 @@ describe("shadow mode", () => {
   it("falls back to a document-only row without page boundaries and reports engine errors as rows", async () => {
     const engine = fakeEngine([{ markdownText: "alpha beta" }]);
     const rows = await runNativePdfShadow({
-      engine, sourcePath: "/x.pdf", documentId: "d", stageName: "s", referencePages: null, referenceText: "alpha beta", referenceExtractor: "kreuzberg",
+      engine, sourcePath: "/x.pdf", documentId: "d", stageName: "s", referencePages: null, referenceText: "alpha beta", referenceExtractor: "poppler-text",
     });
     expect(rows).toHaveLength(1);
     expect(rows[0]!.value).toBe(1);
     const failed = await runNativePdfShadow({
       engine: fakeEngine([{ markdownText: "a" }], { failOpen: true }), sourcePath: "/x.pdf", documentId: "d", stageName: "s",
-      referencePages: [], referenceText: "", referenceExtractor: "kreuzberg",
+      referencePages: [], referenceText: "", referenceExtractor: "poppler-text",
     });
     expect(failed).toHaveLength(1);
     expect(failed[0]).toMatchObject({ unit: "error", metadata: { code: "NATIVE_PDF_FAILED" } });
@@ -250,7 +250,7 @@ describe("mode, loader and engines", () => {
     expect(resolveNativePdfMode({})).toBe("off");
     expect(resolveNativePdfMode({ DOCSLURP_PDF_ENGINE: "shadow" })).toBe("shadow");
     expect(resolveNativePdfMode({ DOCSLURP_PDF_ENGINE: "native-pdf" })).toBe("native-pdf");
-    expect(resolveNativePdfMode({ DOCSLURP_PDF_ENGINE: "kreuzberg" })).toBe("off");
+    expect(resolveNativePdfMode({ DOCSLURP_PDF_ENGINE: "retired-engine" })).toBe("off");
   });
 
   it("reports absence without throwing", async () => {
@@ -281,11 +281,15 @@ describe("mode, loader and engines", () => {
   });
 
   it("serves text pages from poppler output and rejects geometry", async () => {
+    const extractText = vi.fn(async (_source: string, _pages: number) => ({ binary: "pdftotext", args: [], available: true }));
     const runner = {
-      extractText: async () => ({ binary: "pdftotext", args: [], available: true }),
-      run: async () => ({ stdout: "Page   one\n\nline\fPage two\f", stderr: "" }),
+      extractText,
+      // The walked page count (pdfpagecount) bounds pdftotext's range.
+      pdfPageCount: async () => ({ binary: "prlimit", args: [], available: true }),
+      run: async (plan: { binary: string }) => ({ stdout: plan.binary === "prlimit" ? "2\n" : "Page   one\n\nline\fPage two\f", stderr: "" }),
     };
     const result = await extractNativePdf(new PopplerNativePdfEngine(runner), "/x.pdf");
+    expect(extractText).toHaveBeenCalledWith("/x.pdf", 2, true);
     expect(result.pageCount).toBe(2);
     expect(result.markdown).toBe("Page one\n\nline\fPage two");
   });
@@ -298,17 +302,16 @@ describe("registry integration", () => {
     else process.env.DOCSLURP_PDF_ENGINE = prior;
   });
 
-  it("leaves the pdf order unchanged when off and prepends native-pdf in native-pdf mode", () => {
+  it("keeps native-pdf after doppler-md and before poppler-text in the local-mode pdf order, in every engine mode", () => {
     const registry = new ExtractorRegistry();
-    delete process.env.DOCSLURP_PDF_ENGINE;
-    expect(registry.resolve("pdf")).toEqual(["kreuzberg", "native-pdf", "poppler-text"]);
-    process.env.DOCSLURP_PDF_ENGINE = "shadow";
-    expect(registry.resolve("pdf")[0]).toBe("kreuzberg");
-    process.env.DOCSLURP_PDF_ENGINE = "native-pdf";
-    expect(registry.resolve("pdf")).toEqual(["native-pdf", "kreuzberg", "poppler-text"]);
+    for (const mode of [undefined, "off", "shadow", "native-pdf"]) {
+      if (mode === undefined) delete process.env.DOCSLURP_PDF_ENGINE;
+      else process.env.DOCSLURP_PDF_ENGINE = mode;
+      expect(registry.resolve("pdf"), mode).toEqual(["doppler-md", "native-pdf", "poppler-text"]);
+    }
   });
 
-  it("marks native-pdf unavailable when no engine is installed so kreuzberg runs", async () => {
+  it("marks native-pdf unavailable when no engine is installed so poppler-text runs", async () => {
     const registry = new ExtractorRegistry();
     setNativePdfEngineForTesting("absent");
     const runner = { extractText: async () => ({ binary: "", args: [], available: false }), run: async () => ({ stdout: "", stderr: "" }) };
@@ -630,7 +633,7 @@ describe.skipIf(!realModule.ok)("native-pdf on the installed binding", () => {
       ["Helvetica-Bold", 16, "Installation guide"],
       ["Helvetica", 11, "Run the following commands before the first start of the service."],
       ["Courier", 10, "npm install --global docslurp"],
-      ["Courier", 10, "docslurp init --workspace demo"],
+      ["Courier", 10, "docslurp init --project demo"],
       ["Courier", 10, "docslurp ingest ./reports"],
       ["Helvetica", 11, "The ingest command prints one line for every processed document."],
     ]));
@@ -688,7 +691,7 @@ describe.skipIf(!realModule.ok)("native-pdf on the installed binding", () => {
     doc.close();
   });
 
-  it("reports OCR without models as NATIVE_PDF_UNSUPPORTED (the executor's tesseract fallback)", async () => {
+  it("reports OCR without models as NATIVE_PDF_UNSUPPORTED", async () => {
     const saved = process.env.PDFUST_OCR_MODEL_DIR;
     delete process.env.PDFUST_OCR_MODEL_DIR;
     try {
