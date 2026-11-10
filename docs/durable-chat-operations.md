@@ -259,3 +259,19 @@ four seconds. If the process deadline wins, retained output stays recoverable an
 unsettled execution becomes interrupted after lease expiry; no paid retry occurs.
 The 30-second platform kill allowance remains a safety margin, not extra time for
 generation. See the bounded-I/O evidence in `realtime-council-review.md`.
+
+### Pause new admission during rollback
+
+With `DOCSLURP_DURABLE_CHAT=1`, set `DOCSLURP_DURABLE_CHAT_ADMISSION=0` to refuse
+new root, child and retry attempts before native launch or paid work. Authorized
+discovery, retained output, cancellation and accepted native execution keep their
+existing policies. Missing admission configuration preserves the existing global
+opt-in; explicit values must be `0` or `1`, otherwise admission fails closed.
+First-party realtime host attachment also validates the policy at startup. HTTP-only hosts report a generic unavailable
+response and log a constant invalid-policy refusal without logging its value.
+
+Do not disable the global durable feature while accepted work needs recovery or
+Stop. Browser hosts should also reflect the new-admission decision in their
+server-rendered eligibility marker, while retaining accepted-handle recovery.
+The admission switch never substitutes for session, MFA, owner, project, cohort,
+deadline or budget checks and does not automatically retry accepted tasks.
