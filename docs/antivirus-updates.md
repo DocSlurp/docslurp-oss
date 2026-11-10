@@ -49,5 +49,7 @@ coordinator reused the existing boolean parser and added all four opt-out
 regressions. A subsequent Security review reproduced a signal between forking the worker
 and recording its PID. The coordinator queued TERM/INT until each new child PID
 was captured, covering both worker and updater launches with deterministic race
-regressions. Fresh final rechecks are recorded in the pull request before merge. Synthetic tests do not establish the
+regressions. A final Architect then reproduced a second signal interrupting
+worker drain; repeated TERM/INT now coalesce throughout drain and cleanup,
+with four signal-combination regressions. Fresh final rechecks are recorded in the pull request before merge. Synthetic tests do not establish the
 availability of any particular mirror or replace VM scanning acceptance.

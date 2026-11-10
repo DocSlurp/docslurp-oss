@@ -19,6 +19,7 @@ async function fixture(
     daemonFails = false,
     workerCode = 0,
     workerSignal = false,
+    drainMs = 0,
   } = {},
 ) {
   const dir = await mkdtemp(join(tmpdir(), "clam-startup-"));
@@ -55,7 +56,7 @@ else {if(${updateFails})process.exit(23);fs.writeFileSync(${JSON.stringify(versi
     join(bin, "node"),
     `#!${process.execPath}
 const fs=require('node:fs');if(process.argv[2]?.includes('check-worker-prerequisites'))process.exit(0);fs.writeFileSync(${JSON.stringify(worker)},'started');
-${workerSignal ? `for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=>{fs.writeFileSync(${JSON.stringify(worker)},signal);process.exit(0)});setInterval(()=>{},1000);` : `setTimeout(()=>process.exit(${workerCode}),300);`}
+${workerSignal ? `for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=>{fs.writeFileSync(${JSON.stringify(worker)},signal);setTimeout(()=>process.exit(0),${drainMs})});setInterval(()=>{},1000);` : `setTimeout(()=>process.exit(${workerCode}),300);`}
 `,
     { mode: 0o755 },
   );
@@ -290,5 +291,54 @@ trap 'qa_inject_signal "$BASH_COMMAND"' DEBUG
         assert.equal(code, signal === "TERM" ? 143 : 130);
         assert.ok(pids.length > 0);
         assert.deepEqual(survivors, [], "no child survives its supervisor");
+      },
+    );
+
+for (const first of ["SIGTERM", "SIGINT"])
+  for (const repeated of ["SIGTERM", "SIGINT"])
+    test(
+      repeated +
+        " during " +
+        first +
+        " drain coalesces without orphaning children",
+      async (t) => {
+        const f = await fixture(t, {
+          age: 1,
+          workerSignal: true,
+          drainMs: 400,
+        });
+        const child = spawn("bash", [startup], {
+          env: f.env,
+          stdio: ["ignore", "ignore", "ignore"],
+        });
+        t.after(() => {
+          if (child.exitCode === null) child.kill("SIGKILL");
+        });
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline) {
+          try {
+            if ((await readFile(f.worker, "utf8")) === "started") break;
+          } catch {}
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        await new Promise((r) => setTimeout(r, 50));
+        const exit = once(child, "exit");
+        child.kill(first);
+        while (Date.now() < deadline) {
+          if ((await readFile(f.worker, "utf8")) === first) break;
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        assert.equal(await readFile(f.worker, "utf8"), first);
+        child.kill(repeated);
+        const timer = setTimeout(() => child.kill("SIGKILL"), 5000);
+        const [code, endedBy] = await exit;
+        clearTimeout(timer);
+        assert.equal(endedBy, null);
+        assert.equal(code, first === "SIGTERM" ? 143 : 130);
+        assert.equal(await readFile(f.worker, "utf8"), first);
+        for (const c of (await f.readCalls()).filter((c) =>
+          c.args.includes("--daemon"),
+        ))
+          assert.throws(() => process.kill(c.pid, 0), { code: "ESRCH" });
       },
     );

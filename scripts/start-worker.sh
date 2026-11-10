@@ -87,8 +87,9 @@ clamav_warn_or_exit() {
 }
 
 clamav_cleanup() {
+  trap '' TERM INT
   local pid
-  for pid in "${FRESHCLAM_PID}" "${CLAMD_PID}"; do
+  for pid in "${WORKER_PID}" "${FRESHCLAM_PID}" "${CLAMD_PID}"; do
     if [[ -n "${pid}" ]]; then
       kill "${pid}" >/dev/null 2>&1 || true
       wait "${pid}" 2>/dev/null || true
@@ -405,6 +406,8 @@ start_clamav_updater() {
 }
 
 stop_worker() {
+  # Once draining, further shutdown signals coalesce instead of orphaning a child.
+  trap '' TERM INT
   if [[ -n "${WORKER_PID}" ]]; then
     kill -"${1:-TERM}" "${WORKER_PID}" 2>/dev/null || true
     wait "${WORKER_PID}" 2>/dev/null || true
@@ -419,8 +422,8 @@ run_worker_with_updater() {
   trap 'pending_signal=INT' INT
   node "${ROOT_DIR}/worker/dist/temporal/worker.js" &
   WORKER_PID="$!"
-  trap 'trap - TERM INT; stop_worker TERM; exit 143' TERM
-  trap 'trap - TERM INT; stop_worker INT; exit 130' INT
+  trap 'stop_worker TERM; exit 143' TERM
+  trap 'stop_worker INT; exit 130' INT
   case "${pending_signal}" in
     TERM) stop_worker TERM; return 143 ;;
     INT) stop_worker INT; return 130 ;;
