@@ -8,6 +8,7 @@ import { actorHasAnyApiKeyScope, getRequestActor } from "../lib/request-actor.js
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { userCanAccessArtifactUri } from "../services/documents.js";
 import { apiStatusError } from "../lib/api-error.js";
+import { DOPPLER_FIGURE_MEDIA_TYPES, parseArtifactUri, type DopplerFigureFormat } from "@docslurp/shared";
 
 /**
  * The file proxy: the only way a client reads a stored document or artifact.
@@ -60,6 +61,19 @@ const SANDBOX_CSP = "default-src 'none'; img-src 'self'; media-src 'self'; style
  * in their own sandbox; only framing is restricted (same-origin inspector).
  */
 const PDF_CSP = "frame-ancestors 'self'";
+
+/**
+ * Doppler figure files (worker extractors/doppler-figures.ts) live at `<artifact root>/doppler-figures/<document>/<id>.<format>`.
+ * Their type is fixed by that name, never by stored metadata or the bytes. They are the only SVG this proxy renders,
+ * and only with a CSP that loads nothing and runs nothing (the worker keeps SVGs that the VM's allowlist produced).
+ */
+const DOPPLER_FIGURE_KEY = /\/doppler-figures\/[A-Za-z0-9-]{1,64}\/p[1-9][0-9]{0,8}\.g?(?:0|[1-9][0-9]{0,5})\.(webp|svg|png)$/;
+const FIGURE_SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
+
+export function dopplerFigureFormat(uri: string): DopplerFigureFormat | null {
+  const match = DOPPLER_FIGURE_KEY.exec(parseArtifactUri(uri)?.key ?? "");
+  return match ? (match[1] as DopplerFigureFormat) : null;
+}
 
 function notFound(c: Context) {
   c.header("Cache-Control", "no-store");
@@ -142,7 +156,8 @@ export const filesRoutes = new Hono()
       throw error;
     }
 
-    const { type, inline } = responseType(object.ContentType, claims.name);
+    const figure = dopplerFigureFormat(claims.uri);
+    const { type, inline } = figure ? { type: DOPPLER_FIGURE_MEDIA_TYPES[figure], inline: true } : responseType(object.ContentType, claims.name);
     const headers = new Headers({
       "Content-Type": type,
       "Content-Disposition": contentDisposition(inline, claims.name),
@@ -151,7 +166,7 @@ export const filesRoutes = new Hono()
       Vary: "Cookie, Authorization",
       "Accept-Ranges": "bytes",
       "X-Content-Type-Options": "nosniff",
-      "Content-Security-Policy": type === "application/pdf" ? PDF_CSP : SANDBOX_CSP,
+      "Content-Security-Policy": figure === "svg" ? FIGURE_SVG_CSP : type === "application/pdf" ? PDF_CSP : SANDBOX_CSP,
       "Cross-Origin-Resource-Policy": "same-origin",
       "Referrer-Policy": "no-referrer",
       "X-Frame-Options": "SAMEORIGIN"

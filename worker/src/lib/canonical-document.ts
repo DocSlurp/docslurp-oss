@@ -5,6 +5,8 @@ import {
   isPageImageReferenceBlock,
   normalizePageNumbers,
   parseImageAnchorLine,
+  parseDopplerImageMarkerLine,
+  stripDopplerImageMarkers,
   imageAnchorsToAltText,
   splitTextIntoPagesStrict,
   type CanonicalBlock,
@@ -229,6 +231,19 @@ export function buildCanonicalDocumentFromMarkdown(args: {
 
       // An image reference (docslurp-artifact:...) is its own block. Its text is the alt text only: the link target is an
       // internal artifact id and would be noise in an embedding. Position and artifact stay in the block's metadata.
+      // A Doppler figure marker (doppler-image:pN.M) is an image block with no text: its alt is Doppler's generic "image".
+      // The figure id stays in metadata; the stored figure index resolves it to a file (extractors/doppler-figures.ts).
+      const dopplerMarker = parseDopplerImageMarkerLine(line);
+      if (dopplerMarker) {
+        lineIndex++;
+        blocks.push(createBlock({
+          documentId: args.documentId, order: order++, type: "paragraph", text: "",
+          headingPath: activeHeadingPath(headingStack), pageNumber, lineStart: startLine, lineEnd: startLine,
+          metadata: { extractor: "doppler-figure", dopplerImageId: dopplerMarker.id },
+        }));
+        continue;
+      }
+
       const imageAnchor = parseImageAnchorLine(line);
       if (imageAnchor) {
         lineIndex++;
@@ -253,7 +268,8 @@ export function buildCanonicalDocumentFromMarkdown(args: {
           /^ {0,3}<table(?=\s|>|$)/i.test(nextLine) ||
           isListLine(nextLine) ||
           QUOTE_RE.test(nextLine) ||
-          parseImageAnchorLine(nextLine) !== null
+          parseImageAnchorLine(nextLine) !== null ||
+          parseDopplerImageMarkerLine(nextLine) !== null
         ) {
           break;
         }
@@ -265,7 +281,7 @@ export function buildCanonicalDocumentFromMarkdown(args: {
         documentId: args.documentId,
         order: order++,
         type: "paragraph",
-        text: paragraphLines.join("\n").trim(),
+        text: stripDopplerImageMarkers(paragraphLines.join("\n")).trim(),
         headingPath: activeHeadingPath(headingStack),
         pageNumber,
         lineStart: startLine,

@@ -15,6 +15,8 @@
  *   replaces that blockquote; nothing else in the page changes.
  */
 
+import { DOPPLER_IMAGE_SCHEME, parseDopplerImageMarkerLine, stripDopplerImageMarkers } from "./doppler-figures.js";
+
 export const IMAGE_ANCHOR_SCHEME = "docslurp-artifact:";
 export const MAX_IMAGE_ANCHOR_ALT_CHARS = 200;
 export const MAX_MERGED_IMAGE_TEXT_CHARS = 65_536;
@@ -178,12 +180,16 @@ export function imageAnchorLineText(line: string): string | null {
  * everything that reads Markdown as text uses this.
  */
 export function imageAnchorsToAltText(markdown: string): string {
-  if (!markdown.includes(IMAGE_ANCHOR_SCHEME)) return markdown;
+  const doppler = markdown.includes(DOPPLER_IMAGE_SCHEME);
+  if (!markdown.includes(IMAGE_ANCHOR_SCHEME) && !doppler) return markdown;
   return markdown.split("\f").map((page) => page.split("\n").flatMap((line) => {
+    // Doppler's figure markers (`![image](doppler-image:pN.M)`) carry no words: a marker line goes, inline markers too.
+    if (doppler && parseDopplerImageMarkerLine(line)) return [];
     const alt = imageAnchorLineText(line);
     if (alt !== null) return alt ? [alt] : [];
     // A reference inside a line (not where the producer puts them, but untrusted text may) becomes its alt text too.
-    return [line.replace(INLINE_ANCHOR, (_match, raw: string) => raw.replace(/\\([\\[\]])/g, "$1"))];
+    const text = line.replace(INLINE_ANCHOR, (_match, raw: string) => raw.replace(/\\([\\[\]])/g, "$1"));
+    return [doppler ? stripDopplerImageMarkers(text) : text];
   }).join("\n")).join("\f");
 }
 
