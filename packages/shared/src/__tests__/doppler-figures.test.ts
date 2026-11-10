@@ -116,3 +116,16 @@ describe("doppler-image markers", () => {
       .toEqual([["p3.1", "/f/1"], ["p4.1", "/f/1"]]);
   });
 });
+
+describe("doppler figure entries without a file (Doppler writes width and height 0)", () => {
+  const skipped = raster({ id: "p3.4", file: null, format: null, bytes: 0, sha256: null, width: 0, height: 0, fate: "small" });
+
+  it("accepts a skipped figure with zero size", () => {
+    expect(dopplerFigureManifestSchema.safeParse(manifest([raster(), skipped])).success).toBe(true);
+  });
+
+  it("still refuses a file with zero or missing size", () => {
+    expect(dopplerFigureManifestSchema.safeParse(manifest([raster({ width: 0 })])).success).toBe(false);
+    expect(dopplerFigureManifestSchema.safeParse(manifest([raster({ height: null })])).success).toBe(false);
+  });
+});

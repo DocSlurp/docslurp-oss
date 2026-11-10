@@ -86,9 +86,9 @@ export const dopplerFigureEntrySchema = z.strictObject({
   format: z.enum(DOPPLER_FIGURE_FORMATS).nullable(),
   bytes: z.number().int().min(0).max(DOPPLER_FIGURE_LIMITS.maxFileBytes).nullable(),
   sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
-  /** Pixels for a raster file; points for an SVG. */
-  width: side.nullable(),
-  height: side.nullable(),
+  /** Pixels for a raster file; points for an SVG; 0 (Doppler) or null when there is no file. */
+  width: z.union([z.literal(0), side]).nullable(),
+  height: z.union([z.literal(0), side]).nullable(),
   /** The figure whose file this one reuses (identical image drawn again). */
   repeat_of: z.string().regex(DOPPLER_FIGURE_ID).optional(),
   /** Why the file is not in the figure's natural format (a vector drawing rasterised, for example). */
@@ -101,7 +101,7 @@ export const dopplerFigureEntrySchema = z.strictObject({
   if (id && id.vector !== (entry.kind === "vector")) ctx.addIssue({ code: "custom", message: "figure id does not match its kind" });
   if (entry.file !== null) {
     if (entry.format === null || entry.file !== `${entry.id}.${entry.format}`) ctx.addIssue({ code: "custom", message: "figure file name is not derived from its id" });
-    if (entry.bytes === null || entry.bytes < 1 || entry.sha256 === null || entry.width === null || entry.height === null) {
+    if (entry.bytes === null || entry.bytes < 1 || entry.sha256 === null || !entry.width || !entry.height) {
       ctx.addIssue({ code: "custom", message: "figure file needs bytes, sha256, width and height" });
     }
     if (entry.format !== "svg" && ((entry.width !== null && !Number.isInteger(entry.width)) || (entry.height !== null && !Number.isInteger(entry.height)))) {
