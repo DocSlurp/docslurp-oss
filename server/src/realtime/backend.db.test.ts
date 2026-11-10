@@ -67,6 +67,39 @@ it("bounds read-only suggestions and viewer metadata without leaking content or 
     expect(await backend.authorize("owner",{kind:"viewer",documentId:"view-doc"})).toBeNull();
   } finally { fetch.mockRestore(); }
 });
+it("observes exact committed page readiness without URLs, work initiation or cross-tenant delivery",async()=>{
+  await sql`insert into documents(id,user_id,org_id,project_id,run_id,filename,mime_type,source_key,status,page_count)
+    values('image-doc','owner','org','project','run-a','page.pdf','application/pdf','private-source-secret','completed',3)`;
+  const resource={kind:"page-image",documentId:"image-doc",runId:"run-a",pageNumber:2,quality:"reader"} as const;
+  const fetch=vi.spyOn(globalThis,"fetch");
+  try {
+    expect(await backend.authorize("stranger",resource)).toBeNull();
+    await expect(backend.project("stranger",resource)).rejects.toThrow("forbidden");
+    expect(await backend.project("owner",resource)).toEqual({resource,status:"unavailable"});
+    await sql`insert into document_page_renders(document_id,run_id,org_id,project_id,page_number,quality,dpi,expires_at)
+      values('image-doc','run-a','org','project',2,'reader',120,now()+interval '10 minutes')`;
+    expect(await backend.project("owner",resource)).toEqual({resource,status:"pending"});
+    const revision=async()=>Number((await sql`select revision from realtime_revisions where org_id='org'`)[0]!.revision);
+    const before=await revision();
+    await expect(sql.begin(async tx=>{await tx`update project_runs set artifacts=${tx.json({"image-doc:raster-v3-reader-120dpi-page-2":"s3://private-image-secret"})} where id='run-a'`;throw new Error("rollback");})).rejects.toThrow("rollback");
+    expect(await revision()).toBe(before);expect(await backend.project("owner",resource)).toEqual({resource,status:"pending"});
+    await sql.begin(async tx=>{
+      await tx`update project_runs set artifacts=${tx.json({"image-doc:raster-v3-reader-120dpi-page-2":"s3://private-image-secret"})} where id='run-a'`;
+      await tx`delete from document_page_renders where document_id='image-doc'`;
+    });
+    expect(await revision()).toBeGreaterThan(before);
+    const ready=await backend.project("owner",resource);expect(ready).toEqual({resource,status:"ready"});
+    for(const secret of ["private-source-secret","private-image-secret","s3://"])expect(JSON.stringify(ready)).not.toContain(secret);
+    expect(await backend.project("owner",{...resource,pageNumber:1})).toMatchObject({status:"unavailable"});
+    expect(await backend.project("owner",{...resource,quality:"export"})).toMatchObject({status:"unavailable"});
+    await sql`update documents set metadata='{"pii":{"withheldArtifactUris":["s3://private-image-secret"]}}'::jsonb where id='image-doc'`;
+    expect(await backend.project("owner",resource)).toMatchObject({status:"unavailable"});
+    await sql`update documents set run_id='run-b' where id='image-doc'`;
+    expect(await backend.authorize("owner",resource)).toBeNull();
+    await expect(backend.project("owner",resource)).rejects.toThrow("forbidden");
+    expect(fetch).not.toHaveBeenCalled();
+  } finally {fetch.mockRestore();}
+});
 it("revokes billing on downgrade and project access on membership removal", async () => {
   await sql`update org_memberships set role='member' where user_id='owner' and org_id='org'`;
   expect(await backend.authorize("owner", { kind: "billing", orgId: "org" })).toBeNull();

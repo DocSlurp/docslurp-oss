@@ -1,3 +1,4 @@
+import { readPageImageReadiness } from "../services/page-image-readiness.js";
 import { realtimeSuggestionsSnapshotSchema } from "@docslurp/shared";
 import { readProjectSuggestions } from "../services/project-suggestions.js";
 import type { RealtimeBackend, DashboardResource } from "./broker.js";
@@ -31,9 +32,10 @@ async function authorizeMany(userId: string, resources: DashboardResource[]): Pr
         then w.org_id end end as org_id
     from requested x
     left join project_runs r on x.kind='run' and r.id=x."runId"
-    left join documents d on x.kind='viewer' and d.id=x."documentId"
+    left join documents d on x.kind in ('viewer','page-image') and d.id=x."documentId"
+      and (x.kind<>'page-image' or d.run_id=x."runId")
     left join projects w on w.id=case when x.kind='run' then r.project_id
-      when x.kind='viewer' then d.project_id else x."projectId" end
+      when x.kind in ('viewer','page-image') then d.project_id else x."projectId" end
     left join organizations o on o.id=case when x.kind in ('activity','billing','economics')
       then x."orgId" else w.org_id end
     left join org_memberships om on om.org_id=o.id and om.user_id=${userId}
@@ -92,6 +94,7 @@ export const realtimeBackend: RealtimeBackend = {
         return { runs: runs.slice(0, 200).map(run => mapProjectRun(run, costs.get(run.id))), truncated: runs.length > 200 };
       }
       case "suggestions": return realtimeSuggestionsSnapshotSchema.parse(await readProjectSuggestions(userId, resource.projectId, { limit: 8 }));
+      case "page-image": return await readPageImageReadiness(userId, resource);
       case "viewer": {
         const viewer = await getRealtimeViewerPayload(resource.documentId, userId);
         if (!viewer) throw new Error("not_found");

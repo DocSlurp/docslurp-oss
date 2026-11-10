@@ -8,12 +8,18 @@ export const REALTIME_LIMITS = Object.freeze({
 });
 const id = z.string().min(1).max(128).regex(/^[a-zA-Z0-9_-]+$/);
 const sequence = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+export const realtimePageImageResourceSchema = z.object({ kind: z.literal("page-image"), documentId: z.uuid(), runId: z.uuid(),
+  pageNumber: z.number().int().min(1).max(999_999), quality: z.enum(["reader", "export"]) }).strict();
+export const realtimePageImageSnapshotSchema = z.object({ resource: realtimePageImageResourceSchema,
+  status: z.enum(["pending", "ready", "unavailable"]) }).strict();
+export type RealtimePageImageResource = z.infer<typeof realtimePageImageResourceSchema>;
 export const realtimeResourceSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("activity"), orgId: z.uuid() }).strict(),
   z.object({ kind: z.literal("run"), runId: z.uuid() }).strict(),
   z.object({ kind: z.literal("project"), projectId: z.uuid() }).strict(),
   z.object({ kind: z.literal("suggestions"), projectId: z.uuid() }).strict(),
   z.object({ kind: z.literal("viewer"), documentId: z.uuid() }).strict(),
+  realtimePageImageResourceSchema,
   z.object({ kind: z.literal("documents"), projectId: z.uuid(), page: z.number().int().min(0).max(1000).default(0) }).strict(),
   z.object({ kind: z.literal("billing"), orgId: z.uuid() }).strict(),
   z.object({ kind: z.literal("economics"), orgId: z.uuid(), page: z.number().int().min(0).max(1000).default(0) }).strict(),
