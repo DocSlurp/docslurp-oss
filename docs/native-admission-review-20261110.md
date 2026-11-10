@@ -39,7 +39,9 @@ Coordinator evidence:
   and revoked-session regressions remain in the focused suite.
 
 Server TypeScript checking and the core workspace build passed after the new
-integration test was added. The full server suite is running separately.
+integration test was added. The complete server Vitest suite passed: 386 files,
+4,405 tests passed; 24 files and 156 opt-in tests skipped. These skips are not
+claimed as live native Redis or production validation.
 
 Limits: the native integration uses in-memory native storage with real migrated SQL
 identity and authorization. It does not replace separate durable Redis crash tests,
