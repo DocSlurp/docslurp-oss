@@ -1,3 +1,7 @@
+## Constrained image-transcription endpoint selection (2026-11-10)
+
+- Restrict the pinned transcription profile and its pricing catalog to the remaining approved hosts. Initial requests and refusal retries preserve that allowlist, latency preference and existing price ceiling; request-body fixtures remain immutable.
+
 ## Organization-scoped realtime canary admission (2026-11-10)
 
 - Add a bounded, fail-closed organization allowlist to authenticated socket/resource delivery and new native launch, child and retry admission. Preserve existing session/MFA/project policy, accepted task execution and authorized HTTP recovery/Stop. Fresh membership, malformed config, foreign scopes, revoked sessions and oversized admission regressions pass. Review: `docs/realtime-canary-review-20261110.md`.
