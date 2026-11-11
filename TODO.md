@@ -22,23 +22,11 @@
   shares a VM with clamd. One document per session already bounds it to the document that ran the exploit.
 - [ ] Build the scanner snapshot in the background when freshclam updates the signatures (today the first scan after an
   update waits about 34 s for the build), and share one snapshot across workers instead of one build per worker process.
-- [ ] RAR content is never malware-scanned: Debian's ClamAV has no unrar module (libclamunrar is non-free), so every RAR,
-  encrypted or not, scans clean (council re-check 2 matrix). Top-level RAR bytes are now refused under any declared type
-  (file-sniff RAR_MIME), but a RAR stored inside an accepted container (a DOCX/EPUB/ODT member) is still unscanned. Our
-  extractors never open it; it is only served back with the original. Decide: install libclamunrar in the worker and
-  scanner images, or refuse containers whose members are RAR (needs member magic, read in the VM).
-- [ ] libclamav 1.4.3 skips ZIP64 members (a local header with 0xFFFFFFFF sizes: "stream out of file"); a 68-byte EICAR
-  in one scans OK (council re-check 2 matrix, `zip64-member-eicar.zip`). Top level, the archive inspection refuses ZIP64
-  (archive-inspection-failed); a ZIP64 archive nested inside an accepted container is unscanned. Extractors never open
-  nested archives. Decide: report upstream and pin a fixed ClamAV, or have the VM inspection walk nested ZIPs.
-- [ ] libclamav 1.4.3 truncates an archive member larger than MaxFileSize (1024 MiB) to that size and scans only the
-  prefix, with no alert even under AlertExceedsMax ("trimming output size to maxfilesize"); bytes past 1 GiB of a member
-  are never scanned. Top level the 128 MiB entry limit refuses it; nested inside an accepted container it is a gap (the
-  same remedy as nested ZIP64 applies).
-- [ ] libclamav 1.4.3 decrypts an unfiltered stream of an owner-password-only PDF, discards the plaintext and scans the
-  ciphertext (debug: "no non-forced filters decoded, returning raw stream"); Flate streams are scanned. So an owner-only
-  PDF can carry content ClamAV never reads, which our PDF extractors (in the VM) do read. Decide: decrypt owner-only PDFs
-  in the scanner VM (qpdf --decrypt) and scan the copy as well, refuse owner-only PDFs with unfiltered streams, or accept.
+- [ ] Residual after the nested-archive walk (PR #339, owner decision 2026-11-11): the in-VM walk recognises nested
+  containers by their leading magic only. An archive embedded at an offset inside another member (a polyglot, a
+  self-extractor, a ZIP appended to an image) is not walked, while libclamav's embedded-file scan may open it and skip a
+  ZIP64 or over-size member there. A PDF embedded in a DOCX/EPUB member with an empty user password is scanned by
+  libclamav alone (no qpdf copy). Extractors never open nested members; they are only served back with the original.
 - [ ] Q3 (concurrent quarantine and extraction): split quarantine into the intake inspection (stays first: format-detect
   reads its verified file facts) and the malware scan, and gate every served artifact on a clean verdict before running
   the scan beside extraction. Coordinate with the first-pass plan's quarantine precondition.

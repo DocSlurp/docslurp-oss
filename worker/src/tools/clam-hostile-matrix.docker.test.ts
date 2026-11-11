@@ -54,7 +54,7 @@ const MATRIX: Array<{ file: string; clamav: Verdict; decision: Decision; note: s
   { file: "pdf-empty-user-owner-flate-marker.pdf", clamav: "marker", decision: "marker", note: "empty user password, Flate streams: libclamav decrypts and scans them" },
   { file: "pdf-empty-user-owner-raw-marker.pdf", clamav: "clean", decision: "marker", note: "FIXED: libclamav scans the unfiltered stream's ciphertext (clean); the in-VM qpdf copy is scanned and the marker found" },
   { file: "pdf-owner-raw-marker-broken-xref.pdf", clamav: "clean", decision: "marker", note: "the same with a broken startxref: qpdf reconstructs the xref, decrypts, and the copy's marker is found" },
-  { file: "pdf-literal-encrypt-text.pdf", clamav: "clean", decision: "refused:malware-scan-pdf-decrypt-failed", note: "fail-closed cost: an unencrypted PDF showing the text /Encrypt; qpdf says not encrypted, which the check cannot settle" },
+  { file: "pdf-literal-encrypt-text.pdf", clamav: "unscannable", decision: "unscannable", note: "fail-closed cost: an unencrypted PDF showing the text /Encrypt. libclamav's own /Encrypt heuristic already reports it encrypted (refused before qpdf runs); had it scanned clean, qpdf's \"not encrypted\" would be refused as malware-scan-pdf-decrypt-failed (pdf-decrypt.test.ts)" },
   { file: "pdf-owner-only-restricted.pdf", clamav: "clean", decision: "clean", note: "control: an ordinary permissions-restricted PDF is decrypted, its copy scanned clean, and accepted" },
   { file: "pdf-incremental-encrypt.pdf", clamav: "unscannable", decision: "unscannable", note: "/Encrypt only in the incremental update's trailer" },
   { file: "pdf-objstm-user-password.pdf", clamav: "unscannable", decision: "unscannable", note: "objects in object streams" },
