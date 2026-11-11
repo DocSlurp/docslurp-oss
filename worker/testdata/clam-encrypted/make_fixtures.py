@@ -256,3 +256,164 @@ with zipfile.ZipFile(at("nested-oversized-member.zip"), "w", zipfile.ZIP_STORED)
 zeros_zip("limit-max-scansize.zip", 3, 800 * (1 << 20))           # 2400 MiB scanned past MaxScanSize (2000M)
 with open(at("limit-max-filesize-raw.bin"), "wb") as f:           # a sparse 1100 MiB file past MaxFileSize
     f.truncate(1100 * (1 << 20))
+
+
+
+# --- Council re-check 4 (PR #339): magic bytes behind a prefix, offset containers, OLE2 amplification ---------------
+def simple_pdf(content, info=b""):
+    objects = [
+        b"<</Type/Catalog/Pages 2 0 R>>",
+        b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Resources<<>>/Contents 4 0 R>>",
+        b"<</Length %d>>stream\n%s\nendstream" % (len(content), content),
+    ]
+    if info:
+        objects.append(info)
+    data, offsets = b"%PDF-1.4\n", []
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(data))
+        data += b"%d 0 obj\n%s\nendobj\n" % (number, body)
+    xref = len(data)
+    data += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1) + b"".join(b"%010d 00000 n \n" % o for o in offsets)
+    data += b"trailer\n<</Size %d/Root 1 0 R%s>>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, b"/Info 5 0 R" if info else b"", xref)
+    return data
+
+
+def write(name, data):
+    with open(at(name), "wb") as f:
+        f.write(data)
+
+
+def zip_bytes(entries, zip64=False, method=zipfile.ZIP_DEFLATED):
+    import io
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", method) as z:
+        for name, payload in entries:
+            with z.open(name, "w", force_zip64=zip64) as w:
+                w.write(payload)
+    return buf.getvalue()
+
+
+# Correctness High: ordinary unencrypted PDFs that merely contain the bytes /Encrypt (a comment, an /Info string, an
+# uncompressed content stream). qpdf finds no encryption; quarantine rewrites them, scans the rewrite and accepts them.
+plain_text = b"BT (Quarterly results beat the forecast) Tj ET"
+write("pdf-literal-encrypt-comment.pdf", simple_pdf(plain_text) + b"\n% /Encrypt\n")
+write("pdf-literal-encrypt-string.pdf", simple_pdf(plain_text, b"<</Title (/Encrypt and /Decrypt notes)>>"))
+# Adversarial case 6: /Encrypt in the base trailer, dropped by an incremental update that replaces the page content with
+# a plaintext Flate stream holding the marker. libclamav honours the base /Encrypt and scans ciphertext; qpdf's effective
+# trailer is unencrypted, so its rewrite is scanned and the marker found.
+run("qpdf", "--encrypt", "", "owner-secret", "256", "--", at("marker-plain.pdf"), at("enc-base.pdf"))
+base = open(at("enc-base.pdf"), "rb").read()
+os.remove(at("enc-base.pdf"))
+contents = int(re.search(rb"/Contents (\d+) 0 R", base).group(1))
+base_xref = int(re.findall(rb"startxref\s+(\d+)", base)[-1])
+base_trailer = base[base_xref:]
+size = int(re.search(rb"/Size (\d+)", base_trailer).group(1))
+root = re.search(rb"/Root (\d+ \d+ R)", base_trailer).group(1)
+stream = zlib.compress(b"BT (Earnings beat " + MARKER + b" forecast) Tj ET")
+update_offset = len(base)
+update = b"%d 0 obj\n<< /Filter /FlateDecode /Length %d >>\nstream\n" % (contents, len(stream)) + stream + b"\nendstream\nendobj\n"
+xref = update_offset + len(update)
+update += b"xref\n%d 1\n%010d 00000 n \ntrailer\n<< /Size %d /Root %s /Prev %d >>\nstartxref\n%d\n%%%%EOF\n" % (contents, update_offset, size, root, base_xref, xref)
+write("pdf-incremental-drop-encrypt-marker.pdf", base + update)
+# L2: an owner-password PDF qpdf can only partly rewrite: an incremental update gives the page an /Extra entry pointing at
+# 200,000 nested arrays, which qpdf drops ("ignoring excessively deeply nested data structure", exit 3).
+write("deep-src.pdf", simple_pdf(plain_text))
+run("qpdf", "--encrypt", "", "owner-secret", "256", "--", at("deep-src.pdf"), at("deep-enc.pdf"))
+base = open(at("deep-enc.pdf"), "rb").read()
+for name in ("deep-src.pdf", "deep-enc.pdf"):
+    os.remove(at(name))
+base_xref = int(re.findall(rb"startxref\s+(\d+)", base)[-1])
+base_trailer = base[base_xref:]
+size = int(re.search(rb"/Size (\d+)", base_trailer).group(1))
+root = re.search(rb"/Root (\d+ \d+ R)", base_trailer).group(1)
+encrypt = re.search(rb"/Encrypt (\d+ \d+ R)", base_trailer).group(1)
+ident = re.search(rb"/ID \[[^\]]*\]", base_trailer).group(0)
+page_number, page_dict = next((int(m.group(1)), m.group(2)) for m in re.finditer(rb"(\d+) 0 obj\s*(<<(?:(?!endobj).)*?/Type\s*/Page(?!s)(?:(?!endobj).)*?>>)\s*endobj", base, re.S))
+page_offset = len(base)
+update = b"%d 0 obj\n%s/Extra %d 0 R>>\nendobj\n" % (page_number, page_dict.rstrip()[:-2], size)
+deep_offset = page_offset + len(update)
+update += b"%d 0 obj\n%s\nendobj\n" % (size, b"[" * 200000 + b"]" * 200000)
+xref = page_offset + len(update)
+update += b"xref\n%d 1\n%010d 00000 n \n%d 1\n%010d 00000 n \n" % (page_number, page_offset, size, deep_offset)
+update += b"trailer\n<< /Size %d /Root %s /Encrypt %s %s /Prev %d >>\nstartxref\n%d\n%%%%EOF\n" % (size + 1, root, encrypt, ident, base_xref, xref)
+write("pdf-owner-deep-nesting.pdf", base + update)
+
+# H1/H2: a container or PDF behind 16 NUL bytes (40 binary comment lines for the PDF). Extractors tolerate the prefix
+# (openpyxl/zipfile find the end record; pdf.js and poppler find %PDF- in the first KB); ClamAV types the file by its first
+# bytes and parses neither. Quarantine refuses them: a declared type with magic bytes is never confirmed by an empty sniff.
+PREFIX = b"\0" * 16
+ooxml_types = b'<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>'
+marker_xml = b"<t>" + MARKER + b"</t>"
+write("prefixed-zip64-marker.xlsx", PREFIX + zip_bytes([("[Content_Types].xml", ooxml_types), ("xl/workbook.xml", b"<workbook/>"), ("xl/sharedStrings.xml", marker_xml)], zip64=True))
+write("prefixed-traversal.docx", PREFIX + zip_bytes([("[Content_Types].xml", ooxml_types), ("word/document.xml", b"<document/>"), ("../../outside.txt", b"expansion plan")]))
+write("prefixed-marker.pptx", PREFIX + zip_bytes([("[Content_Types].xml", ooxml_types), ("ppt/presentation.xml", b"<presentation/>"), ("ppt/slides/slide1.xml", marker_xml)]))
+write("prefixed-marker.epub", PREFIX + zip_bytes([("mimetype", b"application/epub+zip"), ("META-INF/container.xml", b"<container/>"), ("OEBPS/chapter1.xhtml", marker_xml)], method=zipfile.ZIP_STORED))
+write("prefixed-marker.odt", PREFIX + zip_bytes([("mimetype", b"application/vnd.oasis.opendocument.text"), ("content.xml", marker_xml)], method=zipfile.ZIP_STORED))
+pdf_prefix = b"%\0\1\2\3 quarterly report padding line\n" * 40
+write("prefixed-owner-raw-marker.pdf", pdf_prefix + open(at("pdf-empty-user-owner-raw-marker.pdf"), "rb").read())
+write("prefixed-flate-marker.pdf", pdf_prefix + open(at("pdf-empty-user-owner-flate-marker.pdf"), "rb").read())
+# M3: containers a few bytes into a member, and a PDF that carries a ZIP (with a ZIP64 member) inside.
+zip64_eicar = open(at("zip64-member-eicar.zip"), "rb").read()
+write("offset-zip64-member.zip", zip_bytes([("media/image1.bin", b"JUNKJUNK" + zip64_eicar)], method=zipfile.ZIP_STORED))
+write("offset-rar-member.zip", zip_bytes([("media/image1.bin", b"J" + open(at("rar5-password.rar"), "rb").read())], method=zipfile.ZIP_STORED))
+head = b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[]/Count 0>>endobj\n"
+write("pdf-zip-polyglot.pdf", head + zip_bytes([("inner.zip", zip64_eicar)], method=zipfile.ZIP_STORED) + b"\ntrailer<</Root 1 0 R>>\n%%EOF\n")
+# Control: an Office printer-settings blob (DEVMODE driver data) holding a CAB cabinet a little way in, as real
+# spreadsheets do. ClamAV opens CAB; quarantine accepts it.
+devmode = b"\0" * 1258 + b"MSCF\0\0\0\0" + b"\0" * 64
+write("printer-settings-cab.xlsx", zip_bytes([("[Content_Types].xml", ooxml_types), ("xl/workbook.xml", b"<workbook/>"), ("xl/printerSettings/printerSettings1.bin", devmode)]))
+# L4: a local entry no central-directory entry lists, holding the marker.
+hidden_name, hidden = b"hidden.txt", MARKER * 4
+hidden_local = struct.pack("<IHHHHHIIIHH", 0x04034B50, 20, 0, 0, 0, 0x21, zlib.crc32(hidden) & 0xFFFFFFFF, len(hidden), len(hidden), len(hidden_name), 0) + hidden_name + hidden
+listed = stored_zip([("notes.txt", b"quarterly results beat the forecast")])
+end = listed.rindex(b"PK\x05\x06")
+directory_offset = struct.unpack("<I", listed[end + 16:end + 20])[0]
+central = bytearray(listed[directory_offset:end])
+struct.pack_into("<I", central, 42, len(hidden_local))  # the listed entry now starts after the hidden one
+write("hidden-local-entry.zip", hidden_local + listed[:directory_offset] + bytes(central) + struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, 1, 1, len(central), len(hidden_local) + directory_offset, 0))
+
+
+# M1: an OLE2 compound file (version 4, 4 KiB sectors) with 2,000 stream entries sharing one 64 MiB chain, in a ZIP with
+# 400 KiB of incompressible padding (ratio under 250). 0.5 MB on disk; reading every entry would materialise 125 GiB.
+def shared_chain_ole(entries, stream_bytes):
+    sector = 4096
+    data_sectors = stream_bytes // sector
+    dir_sectors = -(-((entries + 1) * 128) // sector)
+    fat_sectors = 1
+    while data_sectors + fat_sectors + dir_sectors > fat_sectors * (sector // 4):
+        fat_sectors += 1
+    total = data_sectors + fat_sectors + dir_sectors
+    buf = bytearray(sector * (1 + total))
+    buf[0:8] = bytes([0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1])
+    struct.pack_into("<HHHHH", buf, 0x18, 0x3E, 4, 0xFFFE, 12, 6)
+    struct.pack_into("<III", buf, 0x2C, fat_sectors, data_sectors + fat_sectors, 0)
+    struct.pack_into("<IIIII", buf, 0x38, 4096, 0xFFFFFFFE, 0, 0xFFFFFFFE, 0)
+    for index in range(109):
+        struct.pack_into("<I", buf, 0x4C + index * 4, data_sectors + index if index < fat_sectors else 0xFFFFFFFF)
+    fat = [0xFFFFFFFF] * (fat_sectors * sector // 4)
+    for index in range(data_sectors):
+        fat[index] = index + 1 if index + 1 < data_sectors else 0xFFFFFFFE
+    for index in range(fat_sectors):
+        fat[data_sectors + index] = 0xFFFFFFFD
+    for index in range(dir_sectors):
+        at_sector = data_sectors + fat_sectors + index
+        fat[at_sector] = at_sector + 1 if index + 1 < dir_sectors else 0xFFFFFFFE
+    struct.pack_into("<%dI" % len(fat), buf, sector * (1 + data_sectors), *fat)
+    directory = bytearray(dir_sectors * sector)
+    def entry(index, name, kind, start, size):
+        at_entry = index * 128
+        encoded = (name + "\0").encode("utf-16-le")
+        directory[at_entry:at_entry + len(encoded)] = encoded
+        struct.pack_into("<HBB", directory, at_entry + 0x40, len(encoded), kind, 1)
+        struct.pack_into("<III", directory, at_entry + 0x44, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF)
+        struct.pack_into("<II", directory, at_entry + 0x74, start, size)
+    entry(0, "Root Entry", 5, 0xFFFFFFFE, 0)
+    for index in range(1, entries + 1):
+        entry(index, "S%d" % index, 2, 0, stream_bytes)
+    start = sector * (1 + data_sectors + fat_sectors)
+    buf[start:start + len(directory)] = directory
+    return bytes(buf)
+
+
+write("ole-shared-chain.zip", zip_bytes([("word/embeddings/oleObject1.bin", shared_chain_ole(2000, 64 << 20)), ("word/media/noise.bin", os.urandom(400 * 1024))]))

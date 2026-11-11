@@ -370,3 +370,127 @@ describe("quarantine: an encrypted PDF's decrypted copy is scanned too (owner de
     expect(codes).toEqual(["malware-detected"]);
   });
 });
+
+describe("council re-check 4 (PR #339): offset containers, OLE2 amplification, hidden entries", () => {
+  const zip64Eicar = () => zip([{ name: "e.txt", data: Buffer.from("benign note"), method: 0, zip64Local: true }]);
+
+  it("M3: a ZIP or RAR a few bytes into a member is refused, stored or deflated", () => {
+    expect(issuesOf(docxWith(Buffer.concat([Buffer.from("JUNKJUNK"), zip64Eicar()])))).toEqual(["archive-nested-embedded-container"]);
+    expect(issuesOf(zip([{ name: "word/document.xml", data: DOC_XML }, { name: "word/media/image1.bin", data: Buffer.concat([Buffer.from("JUNKJUNK"), zip64Eicar()]), method: 8 }]))).toEqual(["archive-nested-embedded-container"]);
+    expect(issuesOf(docxWith(Buffer.concat([Buffer.from("J"), fixture("rar5-password.rar")])))).toEqual(["archive-nested-embedded-container"]);
+    // A ZIP end record near the end of a member (a ZIP appended to an image) is found too.
+    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(8000, 7)]);
+    expect(issuesOf(docxWith(Buffer.concat([png, zip64Eicar()]), "word/media/image1.png"))).toEqual(["archive-nested-embedded-container"]);
+  });
+
+  it("correctness M3: a CAB inside printer settings (real spreadsheets carry them), and nested formats ClamAV opens, are accepted", () => {
+    const devmode = Buffer.concat([Buffer.alloc(1258), Buffer.from("MSCF\0\0\0\0", "latin1"), Buffer.alloc(64)]);
+    expect(issuesOf(docxWith(devmode, "xl/printerSettings/printerSettings1.bin"))).toEqual([]);
+  });
+
+  it("M3: a PDF (or any non-container) carrying a ZIP whose end record a ZIP reader finds is refused at the top level", () => {
+    const pdf = Buffer.concat([Buffer.from("%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"), zip([{ name: "inner.zip", data: zip64Eicar(), method: 0 }]), Buffer.from("\ntrailer<</Root 1 0 R>>\n%%EOF\n")]);
+    expect(inspectQuarantineBytes(pdf, "report.pdf", policy).archive?.issues).toEqual(["archive-embedded-container"]);
+    expect(inspectQuarantineBytes(Buffer.from("%PDF-1.4\ntrailer<</Root 1 0 R>>\n%%EOF\n"), "report.pdf", policy).archive).toBeNull();
+  });
+
+  it("H1: a ZIP behind a prefix gets no archive inspection, so the declared type is refused by the facts (shared file-sniff tests)", () => {
+    const prefixed = Buffer.concat([Buffer.alloc(16), docxWith(zip64Eicar())]);
+    const inspection = inspectQuarantineBytes(prefixed, "plan.docx", policy);
+    expect(inspection.sniffed.mimeType).toBeNull();
+  });
+
+  it("M1: OLE2 entries sharing one chain are refused fast, without reading the stream once per entry", () => {
+    // 200 entries pointing at one 16 KiB chain (the reproducer used 2,000 x 64 MiB: 125 GiB if materialised).
+    const sector = 512;
+    const dataSectors = 32;
+    const dirSectors = 51; // 201 entries of 128 bytes
+    const ole = Buffer.alloc(sector * (1 + dataSectors + 1 + dirSectors));
+    Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]).copy(ole, 0);
+    ole.writeUInt16LE(0x3e, 0x18); ole.writeUInt16LE(3, 0x1a); ole.writeUInt16LE(0xfffe, 0x1c); ole.writeUInt16LE(9, 0x1e); ole.writeUInt16LE(6, 0x20);
+    ole.writeUInt32LE(1, 0x2c); ole.writeUInt32LE(dataSectors + 1, 0x30); ole.writeUInt32LE(4096, 0x38); ole.writeUInt32LE(0xfffffffe, 0x3c); ole.writeUInt32LE(0xfffffffe, 0x44);
+    for (let index = 0; index < 109; index += 1) ole.writeUInt32LE(index === 0 ? dataSectors : 0xffffffff, 0x4c + index * 4);
+    const fatAt = sector * (1 + dataSectors);
+    ole.fill(0xff, fatAt, fatAt + sector);
+    for (let index = 0; index < dataSectors; index += 1) ole.writeUInt32LE(index + 1 < dataSectors ? index + 1 : 0xfffffffe, fatAt + index * 4);
+    ole.writeUInt32LE(0xfffffffd, fatAt + dataSectors * 4);
+    for (let index = 0; index < dirSectors; index += 1) ole.writeUInt32LE(index + 1 < dirSectors ? dataSectors + 2 + index : 0xfffffffe, fatAt + (dataSectors + 1 + index) * 4);
+    const dirAt = sector * (2 + dataSectors);
+    for (let slot = 0; slot <= 200; slot += 1) {
+      const base = dirAt + slot * 128;
+      const name = Buffer.from(`${slot ? `S${slot}` : "Root Entry"}\0`, "utf16le");
+      name.copy(ole, base);
+      ole.writeUInt16LE(name.length, base + 0x40);
+      ole[base + 0x42] = slot ? 2 : 5;
+      ole.writeUInt32LE(0xffffffff, base + 0x44); ole.writeUInt32LE(0xffffffff, base + 0x48); ole.writeUInt32LE(0xffffffff, base + 0x4c);
+      ole.writeUInt32LE(slot ? 0 : 0xfffffffe, base + 0x74);
+      ole.writeUInt32LE(slot ? dataSectors * sector : 0, base + 0x78);
+    }
+    expect(readCompoundFileStreams(ole, 1 << 20)).toEqual({ error: "shared" });
+    const started = performance.now();
+    expect(issuesOf(docxWith(ole, "word/embeddings/oleObject1.bin"))).toEqual(["archive-nested-ole-shared-sectors"]);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
+  it("M1: OLE2 streams are charged to the walk's byte budget before they are read", () => {
+    const big = compoundFile([{ name: "A", data: Buffer.alloc(20_000, 1) }, { name: "B", data: Buffer.alloc(20_000, 2) }]);
+    // The top level (one ~46 KB member) is within 60 KB; the member plus its first 20 KB stream is not.
+    expect(issuesOf(docxWith(big), { quarantineMaxTotalUncompressedBytes: 60_000 })).toEqual(["archive-nested-expanded-bytes-limit"]);
+  });
+
+  it("L4: a local entry the central directory does not list is refused (top level and nested)", () => {
+    const hidden = zip([{ name: "hidden.txt", data: Buffer.from("not listed"), method: 0 }]);
+    const listed = zip([{ name: "word/document.xml", data: DOC_XML }]);
+    const directory = listed.readUInt32LE(listed.length - 6);
+    const central = Buffer.from(listed.subarray(directory, listed.length - 22));
+    const hiddenLocal = hidden.subarray(0, hidden.readUInt32LE(hidden.length - 6));
+    central.writeUInt32LE(hiddenLocal.length, 42);
+    const end = Buffer.from(listed.subarray(listed.length - 22));
+    end.writeUInt32LE(hiddenLocal.length + directory, 16);
+    const smuggled = Buffer.concat([hiddenLocal, listed.subarray(0, directory), central, end]);
+    expect(issuesOf(smuggled)).toEqual(["archive-hidden-entry"]);
+    expect(issuesOf(docxWith(smuggled, "attachments/inner.zip"))).toEqual(["archive-hidden-entry"]);
+    // A data descriptor between entries is not a hidden entry.
+    expect(issuesOf(zip([{ name: "word/document.xml", data: DOC_XML }, { name: "b.txt", data: Buffer.from("b") }]))).toEqual([]);
+  });
+});
+
+describe("council re-check 4, L1: the host cross-checks the guest's PDF and archive verdicts", () => {
+  const clean = { engine: "clamscan", available: true, status: "clean", signature: null, stdout: "", stderr: "", exitCode: 0, databaseStatus: "fresh" } as unknown as MalwareScanResult;
+  const scanWith = async (bytes: Buffer, inspection: Parameters<typeof scanDocumentForQuarantine>[0]["inspection"], outcome: PdfDecryptOutcome = { status: "decrypted", path: "", bytes: 1, ms: 1, encrypted: true }) => {
+    const calls: string[] = [];
+    const runner = {
+      scanForMalware: async () => { calls.push("scan"); return clean; },
+      decryptPdfForScan: async (_source: string, dir: string) => { calls.push("decrypt"); return outcome.status === "decrypted" ? { ...outcome, path: `${dir}/decrypted.pdf` } : outcome; },
+    };
+    const artifact = await scanDocumentForQuarantine({ documentId: "d", filename: "report.pdf", declaredMimeType: "application/pdf", bytes, tempFile: "/nonexistent/report.pdf", runner: runner as never, policy, inspection });
+    return { calls, codes: artifact.reasons.filter((reason) => reason.severity === "error").map((reason) => reason.code), decision: artifact.decision };
+  };
+  const encrypted = Buffer.from("%PDF-1.7\ntrailer<</Root 1 0 R/Encrypt 5 0 R>>", "latin1");
+  const pdfSniff = { mimeType: "application/pdf", container: null, encoding: null } as const;
+
+  it("a guest that says encryptName:false for a PDF the host sees /Encrypt in: the decryption check runs anyway", async () => {
+    const { calls } = await scanWith(encrypted, { sniffed: pdfSniff, archive: null, pdf: { encryptName: false } });
+    expect(calls).toEqual(["scan", "decrypt", "scan"]);
+  });
+
+  it("a guest that says 'not a PDF' (pdf: null) for bytes starting %PDF-: refused", async () => {
+    expect((await scanWith(encrypted, { sniffed: pdfSniff, archive: null, pdf: null })).codes).toContain("quarantine-inspection-inconsistent");
+  });
+
+  it("a guest that skips the archive inspection of a ZIP: refused", async () => {
+    const docx = docxWith(Buffer.from("x"));
+    const artifact = await scanDocumentForQuarantine({
+      documentId: "d", filename: "plan.docx", declaredMimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", bytes: docx, tempFile: "/nonexistent/plan.docx",
+      runner: { scanForMalware: async () => clean } as never, policy,
+      inspection: { sniffed: { mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", container: "zip", encoding: null }, archive: null, pdf: null },
+    });
+    expect(artifact.reasons.map((reason) => reason.code)).toContain("quarantine-inspection-inconsistent");
+  });
+
+  it("the host's search only adds the VM check: an unencrypted PDF qpdf rewrites is accepted (correctness High)", async () => {
+    const literal = Buffer.from("%PDF-1.4\ntrailer<</Root 1 0 R>>\n%%EOF\n% /Encrypt\n", "latin1");
+    const result = await scanWith(literal, { sniffed: pdfSniff, archive: null, pdf: { encryptName: true } }, { status: "decrypted", path: "", bytes: 400, ms: 3, encrypted: false });
+    expect(result).toMatchObject({ decision: "accepted", codes: [], calls: ["scan", "decrypt", "scan"] });
+  });
+});

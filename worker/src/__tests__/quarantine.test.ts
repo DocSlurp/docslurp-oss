@@ -298,7 +298,9 @@ describe("scanDocumentForQuarantine", () => {
       expect.arrayContaining([
         expect.objectContaining({
           code: "malware-detected",
-          message: expect.stringContaining("Win.Test.EICAR_HDB-1")
+          // The message is fixed text; the signature is in details (artifact, telemetry), never the stage error.
+          message: "malware detected",
+          details: expect.objectContaining({ signature: "Win.Test.EICAR_HDB-1" })
         })
       ])
     );

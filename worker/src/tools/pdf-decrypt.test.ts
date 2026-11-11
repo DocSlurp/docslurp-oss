@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { setDefaultParserSandbox } from "../sandbox/startup.js";
 import type { ParserSandboxProvider, SandboxCommand } from "../sandbox/types.js";
-import { CommandRunner, PDF_DECRYPT_LIMITS, pdfDecryptArgv, pdfEncryptionCheckArgv } from "./runner.js";
+import { CommandRunner, PDF_DECRYPT_LIMITS, pdfDecryptArgv, pdfEncryptionCheckArgv, pdfShowEncryptionArgv, qpdfWarningsBenign } from "./runner.js";
 
 /**
  * Owner decision on PR #339: an empty-user-password PDF is decrypted in the parser VM (qpdf, bounded by prlimit) and the
@@ -16,7 +16,7 @@ import { CommandRunner, PDF_DECRYPT_LIMITS, pdfDecryptArgv, pdfEncryptionCheckAr
 describe("CommandRunner.decryptPdfForScan", () => {
   let dir: string;
   let commands: SandboxCommand[];
-  let replies: Array<{ exitCode: number; stderr?: string; write?: number }>;
+  let replies: Array<{ exitCode: number; stdout?: string; stderr?: string; write?: number }>;
 
   function register(tools: string[]) {
     const provider = {
@@ -29,7 +29,7 @@ describe("CommandRunner.decryptPdfForScan", () => {
           const reply = replies.shift() ?? { exitCode: 0 };
           // A decrypt that "wrote" its copy: the output argument is the last one.
           if (reply.write !== undefined) await writeFile(command.args.at(-1)!, Buffer.alloc(reply.write));
-          return { exitCode: reply.exitCode, stdout: "", stderr: reply.stderr ?? "", cpuSeconds: 0 };
+          return { exitCode: reply.exitCode, stdout: reply.stdout ?? "", stderr: reply.stderr ?? "", cpuSeconds: 0 };
         },
         close: async () => {},
       }),
@@ -76,6 +76,32 @@ describe("CommandRunner.decryptPdfForScan", () => {
     expect(await decrypt()).toMatchObject({ status: "decrypted" });
   });
 
+  it("qpdf hit its memory limit, dropped a nested object or left a stream undecoded (exit 3): failed, never a partial copy (council L2)", async () => {
+    for (const stderr of [
+      "qpdf: std::bad_alloc\nWARNING: upload.pdf (offset 499): stream will be re-processed without filtering to avoid data loss\nqpdf: operation succeeded with warnings; resulting file may have some problems",
+      "WARNING: upload.pdf (object 6 0, offset 1757): ignoring excessively deeply nested data structure\nqpdf: operation succeeded with warnings; resulting file may have some problems",
+      "qpdf: operation succeeded with warnings; resulting file may have some problems",
+    ]) {
+      replies = [{ exitCode: 3 }, { exitCode: 3, write: 10, stderr }];
+      expect(await decrypt()).toMatchObject({ status: "failed", reason: expect.stringMatching(/--decrypt failed \(exit 3\)/) });
+    }
+  });
+
+  it("only cross-reference and stream-length recoveries are benign qpdf warnings", () => {
+    expect(qpdfWarningsBenign("WARNING: a.pdf: file is damaged\nWARNING: a.pdf (offset 12): xref not found\nWARNING: a.pdf: Attempting to reconstruct cross-reference table\nqpdf: operation succeeded with warnings; resulting file may have some problems\n")).toBe(true);
+    expect(qpdfWarningsBenign("WARNING: a.pdf (object 4 0, offset 90): expected endstream\nWARNING: a.pdf (object 4 0, offset 90): attempting to recover stream length\nWARNING: a.pdf (object 4 0, offset 90): recovered stream length: 120\n")).toBe(true);
+    expect(qpdfWarningsBenign("")).toBe(false);
+    expect(qpdfWarningsBenign("WARNING: a.pdf: file is damaged\nqpdf: std::bad_alloc")).toBe(false);
+    expect(qpdfWarningsBenign("WARNING: a.pdf (offset 1): stream will be re-processed without filtering to avoid data loss")).toBe(false);
+  });
+
+  it("qpdf --requires-password exits 2 but --show-encryption finds no encryption (a literal /Encrypt in a comment, string or stream): the PDF is rewritten and the rewrite scanned, not refused (correctness council, High)", async () => {
+    replies = [{ exitCode: 2 }, { exitCode: 0, stdout: "File is not encrypted\n" }, { exitCode: 0, write: 812 }];
+    expect(await decrypt()).toMatchObject({ status: "decrypted", bytes: 812, encrypted: false });
+    expect(commands.map((command) => command.args[command.args.indexOf("qpdf") + 1])).toEqual(["--requires-password", "--show-encryption", "--decrypt"]);
+    expect(pdfShowEncryptionArgv("/w/in.pdf")).toEqual(["prlimit", `--as=${PDF_DECRYPT_LIMITS.addressSpaceMiB * 1024 * 1024}`, `--cpu=${PDF_DECRYPT_LIMITS.cpuSeconds}`, "--", "qpdf", "--show-encryption", "/w/in.pdf"]);
+  });
+
   it("a user password is required (exit 0): requires-password, nothing decrypted", async () => {
     replies = [{ exitCode: 0 }];
     expect(await decrypt()).toMatchObject({ status: "requires-password" });
@@ -83,8 +109,10 @@ describe("CommandRunner.decryptPdfForScan", () => {
   });
 
   it.each([
-    ["qpdf says not encrypted although the bytes name /Encrypt (exit 2)", [{ exitCode: 2 }], /could not settle the encryption \(exit 2\)/],
-    ["qpdf errors on a damaged file (exit 2, warnings)", [{ exitCode: 2, stderr: "WARNING: file is damaged" }], /exit 2\): WARNING: file is damaged/],
+    ["qpdf cannot read the file (exit 2) and --show-encryption cannot either", [{ exitCode: 2 }, { exitCode: 2, stderr: "qpdf: upload.pdf: unable to find trailer dictionary" }], /could not settle the encryption \(exit 2\)/],
+    ["qpdf errors on a damaged file (exit 2, warnings) and --show-encryption reports encryption", [{ exitCode: 2, stderr: "WARNING: file is damaged" }, { exitCode: 0, stdout: "R = 4\nP = -4\n" }], /exit 2\): WARNING: file is damaged/],
+    ["--show-encryption says not encrypted but with a non-benign warning", [{ exitCode: 2 }, { exitCode: 3, stdout: "File is not encrypted\n", stderr: "WARNING: upload.pdf: ignoring excessively deeply nested data structure" }], /could not settle/],
+    ["not encrypted, but the rewrite fails", [{ exitCode: 2 }, { exitCode: 0, stdout: "File is not encrypted\n" }, { exitCode: 2, stderr: "qpdf: operation failed" }], /--decrypt failed \(exit 2\)/],
     ["the check is killed (prlimit CPU, exit 137)", [{ exitCode: 137 }], /exit 137/],
     ["the decryption fails", [{ exitCode: 3 }, { exitCode: 2, stderr: "qpdf: operation failed" }], /--decrypt failed \(exit 2\)/],
     ["the copy hits RLIMIT_FSIZE (SIGXFSZ, exit 153)", [{ exitCode: 3 }, { exitCode: 153 }], /--decrypt failed \(exit 153\)/],

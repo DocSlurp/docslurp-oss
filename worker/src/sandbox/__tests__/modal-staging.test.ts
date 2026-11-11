@@ -451,9 +451,12 @@ function fakeSdk(
         state.scannerEvents.push(`self-test:${vm}`);
         return finished(opts.selfTestExit === 0 ? "" : `${argv.at(-1)}: Eicar-Test-Signature FOUND`, opts.selfTestExit ?? 1);
       }
-      if (argv[0] === "clamdscan" && argv.at(-1)?.endsWith("-canary.zip")) {
+      if (argv[0] === "clamdscan" && /-canary\.\w+$/.test(argv.at(-1) ?? "")) {
         const file = argv.at(-1)!;
-        const kind = file.endsWith("encrypted-canary.zip") ? "encrypted" : "recursion";
+        const kind = /([a-z0-9]+)-canary\.\w+$/.exec(file)![1]!;
+        // Content canaries (PDF, ZIP member, OLE2 stream, HTML data URI) are EICAR detections; no event, so the
+        // recorded build order stays the alert canaries'.
+        if (!["encrypted", "recursion"].includes(kind)) return finished(`${file}: Eicar-Test-Signature FOUND`, 1);
         state.scannerEvents.push(`policy-${kind}:${vm}`);
         if (opts.policyCanaryClean === kind) return finished("", 0);
         return finished(`${file}: ${kind === "encrypted" ? "Heuristics.Encrypted.Zip" : "Heuristics.Limits.Exceeded.MaxRecursion"} FOUND`, 1);

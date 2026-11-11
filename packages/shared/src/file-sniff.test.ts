@@ -298,3 +298,32 @@ describe("header-only inspection (what the API does with customer bytes)", () =>
     expect(fileFactsFor(zip([{ name: "word/document.xml" }]), { filename: "r.docx", declaredMimeType: DOCX }).inspection).toBe("full");
   });
 });
+
+describe("an empty sniff never confirms a type with magic bytes (council #339 H1/H2)", () => {
+  const prefixed = (bytes: Buffer) => Buffer.concat([Buffer.alloc(16), bytes]);
+  const pdfPrefix = Buffer.from("%\0\x01\x02\x03 quarterly report padding line\n".repeat(40), "latin1");
+  const pdf = Buffer.from("%PDF-1.7\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n");
+  it.each([
+    ["a PDF behind binary comments", Buffer.concat([pdfPrefix, pdf]), "q.pdf", "application/pdf"],
+    ["an XLSX behind NULs", prefixed(Buffer.from("PK\x03\x04 rest of a workbook", "latin1")), "q.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
+    ["a DOCX behind NULs, declared octet-stream (routed on the extension)", prefixed(Buffer.from("PK\x03\x04", "latin1")), "q.docx", "application/octet-stream"],
+    ["a PPTX behind NULs, an unknown declared type", prefixed(Buffer.from("PK\x03\x04", "latin1")), "q.pptx", "application/x-unknown"],
+    ["an EPUB behind NULs", prefixed(Buffer.from("PK\x03\x04", "latin1")), "q.epub", "application/epub+zip"],
+    ["an ODT behind NULs", prefixed(Buffer.from("PK\x03\x04", "latin1")), "q.odt", "application/vnd.oasis.opendocument.text"],
+    ["a .doc behind NULs", prefixed(Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1])), "q.doc", "application/msword"],
+    ["a PNG behind NULs", prefixed(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])), "q.png", "image/png"],
+    ["an empty .docx", Buffer.alloc(0), "q.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+  ])("%s: unresolved, at header and full depth", (_label, bytes, filename, declaredMimeType) => {
+    expect(fileFactsFor(bytes, { filename, declaredMimeType }).mismatch).toBe("unresolved");
+    expect(fileFactsFor(bytes, { filename, declaredMimeType }, { depth: "header" }).mismatch).toBe("unresolved");
+  });
+
+  it.each([
+    ["an MP3 that starts mid-frame", "q.mp3", "audio/mpeg"],
+    ["an older QuickTime file (moov first)", "q.mov", "video/quicktime"],
+    ["a HEIC image", "q.heic", "image/heic"],
+    ["an unknown binary", "q.bin", "application/octet-stream"],
+  ])("types without fixed magic keep their declaration: %s", (_label, filename, declaredMimeType) => {
+    expect(fileFactsFor(Buffer.from([0, 0, 0, 0, 1, 2, 3]), { filename, declaredMimeType }).mismatch).toBe("none");
+  });
+});

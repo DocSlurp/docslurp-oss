@@ -6,11 +6,13 @@ import { fileURLToPath } from "node:url";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { fileFactsFromSniff, MIME_BY_EXTENSION, fileExtension } from "@docslurp/shared";
+
 import { fromEnv } from "../config.js";
 import { inspectQuarantineBytes, type QuarantineInspection } from "../lib/quarantine-bytes.js";
 import { clamdConfig } from "../sandbox/providers/modal/scanner.js";
 import { clamscanLimitArgs, isClamEncryptedAlert, isClamLimitAlert } from "./clam-limits.js";
-import { clamDetection, pdfDecryptArgv, pdfEncryptionCheckArgv } from "./runner.js";
+import { clamDetection, pdfDecryptArgv, pdfEncryptionCheckArgv, pdfShowEncryptionArgv, qpdfReportsNotEncrypted, qpdfWarningsBenign } from "./runner.js";
 
 /**
  * Council re-check 2: the hostile matrix, with real ClamAV, on all three scan configurations quarantine uses:
@@ -54,7 +56,24 @@ const MATRIX: Array<{ file: string; clamav: Verdict; decision: Decision; note: s
   { file: "pdf-empty-user-owner-flate-marker.pdf", clamav: "marker", decision: "marker", note: "empty user password, Flate streams: libclamav decrypts and scans them" },
   { file: "pdf-empty-user-owner-raw-marker.pdf", clamav: "clean", decision: "marker", note: "FIXED: libclamav scans the unfiltered stream's ciphertext (clean); the in-VM qpdf copy is scanned and the marker found" },
   { file: "pdf-owner-raw-marker-broken-xref.pdf", clamav: "clean", decision: "marker", note: "the same with a broken startxref: qpdf reconstructs the xref, decrypts, and the copy's marker is found" },
-  { file: "pdf-literal-encrypt-text.pdf", clamav: "unscannable", decision: "unscannable", note: "fail-closed cost: an unencrypted PDF showing the text /Encrypt. libclamav's own /Encrypt heuristic already reports it encrypted (refused before qpdf runs); had it scanned clean, qpdf's \"not encrypted\" would be refused as malware-scan-pdf-decrypt-failed (pdf-decrypt.test.ts)" },
+  { file: "pdf-literal-encrypt-text.pdf", clamav: "unscannable", decision: "unscannable", note: "an unencrypted PDF showing the text /Encrypt in an uncompressed content stream: libclamav's own /Encrypt heuristic reports it encrypted (Heuristics.Encrypted.PDF), before qpdf runs" },
+  { file: "pdf-literal-encrypt-comment.pdf", clamav: "clean", decision: "clean", note: "FIXED (correctness High): /Encrypt only in a comment. qpdf --show-encryption: not encrypted; the rewrite scans clean and the PDF is accepted" },
+  { file: "pdf-literal-encrypt-string.pdf", clamav: "clean", decision: "clean", note: "FIXED (correctness High): /Encrypt only in an /Info string; as above" },
+  { file: "pdf-incremental-drop-encrypt-marker.pdf", clamav: "clean", decision: "marker", note: "FIXED (adversarial check 6): the update drops /Encrypt and adds a plaintext Flate marker libclamav decrypts into noise; qpdf's rewrite is scanned and the marker found" },
+  { file: "pdf-owner-deep-nesting.pdf", clamav: "clean", decision: "refused:malware-scan-pdf-decrypt-failed", note: "FIXED (L2): qpdf drops 200,000 nested arrays (exit 3, not a benign warning): the copy is not the whole file, so refused" },
+  { file: "prefixed-owner-raw-marker.pdf", clamav: "clean", decision: "refused:mime-mismatch", note: "FIXED (H2): 1440 bytes of binary comments before %PDF-; ClamAV does not type it as a PDF; poppler and pdf.js read it" },
+  { file: "prefixed-flate-marker.pdf", clamav: "clean", decision: "refused:mime-mismatch", note: "FIXED (H2): the same prefix on a Flate marker PDF: ClamAV skips its PDF parsing entirely" },
+  { file: "prefixed-zip64-marker.xlsx", clamav: "clean", decision: "refused:mime-mismatch", note: "FIXED (H1): 16 NUL bytes before an XLSX whose parts are ZIP64; openpyxl reads it" },
+  { file: "prefixed-traversal.docx", clamav: "clean", decision: "refused:mime-mismatch", note: "FIXED (H1): the prefix used to skip archive-unsafe-path" },
+  { file: "prefixed-marker.pptx", clamav: "marker", decision: "refused:mime-mismatch", note: "FIXED (H1): PPTX behind the prefix (ClamAV finds the marker as an embedded ZIP here, but the walk never ran)" },
+  { file: "prefixed-marker.epub", clamav: "marker", decision: "refused:mime-mismatch", note: "FIXED (H1): EPUB behind the prefix" },
+  { file: "prefixed-marker.odt", clamav: "marker", decision: "refused:mime-mismatch", note: "FIXED (H1): ODT behind the prefix" },
+  { file: "offset-zip64-member.zip", clamav: "clean", decision: "refused:archive-nested-embedded-container", note: "FIXED (M3): a ZIP64 EICAR ZIP 8 bytes into a member" },
+  { file: "offset-rar-member.zip", clamav: "clean", decision: "refused:archive-nested-embedded-container", note: "FIXED (M3): an encrypted RAR 1 byte into a member" },
+  { file: "pdf-zip-polyglot.pdf", clamav: "clean", decision: "refused:archive-embedded-container", note: "FIXED (M3): a PDF carrying a ZIP (ZIP64 EICAR inside) whose end record a ZIP reader finds" },
+  { file: "hidden-local-entry.zip", clamav: "clean", decision: "refused:archive-hidden-entry", note: "FIXED (L4): a marker entry with a local header the central directory does not list" },
+  { file: "ole-shared-chain.zip", clamav: "clean", decision: "refused:archive-nested-ole-shared-sectors", note: "FIXED (M1): 2,000 OLE2 entries sharing one 64 MiB chain (0.5 MB upload); refused in milliseconds instead of an OOM" },
+  { file: "printer-settings-cab.xlsx", clamav: "clean", decision: "clean", note: "control (correctness M3): a printer-settings blob with a CAB cabinet 1,258 bytes in, as real spreadsheets carry" },
   { file: "pdf-owner-only-restricted.pdf", clamav: "clean", decision: "clean", note: "control: an ordinary permissions-restricted PDF is decrypted, its copy scanned clean, and accepted" },
   { file: "pdf-incremental-encrypt.pdf", clamav: "unscannable", decision: "unscannable", note: "/Encrypt only in the incremental update's trailer" },
   { file: "pdf-objstm-user-password.pdf", clamav: "unscannable", decision: "unscannable", note: "objects in object streams" },
@@ -84,6 +103,10 @@ const MATRIX: Array<{ file: string; clamav: Verdict; decision: Decision; note: s
 ];
 
 const CONFIGS = ["vm", "image", "clamscan"] as const;
+/** One scan or qpdf run: past ClamAV's MaxScanTime (300 s), so its own limit alert lands first. */
+const CASE_TIMEOUT_S = Number(process.env.DOCSLURP_CLAMAV_MATRIX_CASE_TIMEOUT_S ?? 360);
+/** The whole container: generous, but a hang fails the suite instead of stalling it. */
+const MATRIX_TIMEOUT_MS = 45 * 60_000;
 
 function verdictOf(code: number, output: string): Verdict {
   if (code === 0) return "clean";
@@ -97,18 +120,25 @@ function verdictOf(code: number, output: string): Verdict {
 }
 
 /** The scan verdict quarantine acts on for one configuration (copy: the decrypted copy's). */
-function decide(file: string, config: Config, inspection: QuarantineInspection | "download-cap", scans: Map<string, { verdict: Verdict }>, qpdf: Map<string, { check: number; decrypt: number | null }>): Decision {
-  if (inspection === "download-cap") return "refused:download-cap";
-  const issues = inspection.archive?.issues ?? [];
-  if (issues.length) return `refused:${issues.join("+")}`;
+type QpdfRun = { check: number; shown: { exitCode: number; stdout: string; stderr: string } | null; decrypt: number | null; decryptStderr: string };
+type Inspected = { inspection: QuarantineInspection; mismatch: boolean; hostEncrypt: boolean } | "download-cap";
+
+function decide(file: string, config: Config, inspected: Inspected, scans: Map<string, { verdict: Verdict }>, qpdf: Map<string, QpdfRun>): Decision {
+  if (inspected === "download-cap") return "refused:download-cap";
+  const { inspection } = inspected;
+  // scanDocumentForQuarantine: a declared type the bytes cannot confirm (fileFactsFromSniff) and the archive issues.
+  const refusals = [...(inspected.mismatch ? ["mime-mismatch"] : []), ...(inspection.archive?.issues ?? [])];
+  if (refusals.length) return `refused:${refusals.join("+")}`;
   const original = scans.get(`${config} ${file}`)?.verdict;
   if (!original) throw new Error(`no verdict for ${config} ${file}`);
-  // scanDocumentForQuarantine: only a clean PDF that names /Encrypt goes to the decryption.
-  if (original !== "clean" || !inspection.pdf?.encryptName) return original;
+  // Only a clean PDF that names /Encrypt (the VM's check, or the host's literal search) goes to the decryption.
+  if (original !== "clean" || !(inspection.pdf?.encryptName || inspected.hostEncrypt)) return original;
   const run = qpdf.get(file);
   if (!run) throw new Error(`no qpdf run for ${file}`);
+  // runner.decryptPdfForScan: 0 needs a password; 3 decrypt; 2 only when --show-encryption says "not encrypted".
   if (run.check === 0) return "refused:malware-scan-encrypted-content";
-  if (run.check !== 3 || (run.decrypt !== 0 && run.decrypt !== 3)) return "refused:malware-scan-pdf-decrypt-failed";
+  if (run.check !== 3 && !(run.check === 2 && run.shown && qpdfReportsNotEncrypted(run.shown))) return "refused:malware-scan-pdf-decrypt-failed";
+  if (run.decrypt !== 0 && !(run.decrypt === 3 && qpdfWarningsBenign(run.decryptStderr))) return "refused:malware-scan-pdf-decrypt-failed";
   const copy = scans.get(`${config}-copy ${file}`)?.verdict;
   if (!copy) return "refused:malware-scan-pdf-decrypt-failed";
   return copy;
@@ -121,8 +151,8 @@ const shell = (argv: string[]) => argv.map((arg) => `'${arg.replace(/'/g, "'\\''
 describe.skipIf(!image)("real ClamAV hostile matrix (council re-check 2; owner decision, PR #339)", () => {
   let dir: string;
   const scans = new Map<string, { verdict: Verdict; signature: string; ms: number }>();
-  const qpdf = new Map<string, { check: number; decrypt: number | null; ms: number; bytes: number | null }>();
-  const inspections = new Map<string, QuarantineInspection | "download-cap">();
+  const qpdf = new Map<string, QpdfRun & { ms: number; bytes: number | null }>();
+  const inspections = new Map<string, Inspected>();
 
   beforeAll(() => {
     dir = mkdtempSync(path.join(tmpdir(), "docslurp-clam-matrix-"));
@@ -150,9 +180,12 @@ describe.skipIf(!image)("real ClamAV hostile matrix (council re-check 2; owner d
         inspections.set(row.file, "download-cap");
         continue;
       }
-      const inspection = inspectQuarantineBytes(readFileSync(file), row.file, policy);
-      inspections.set(row.file, inspection);
-      if (inspection.pdf?.encryptName) toDecrypt.push(row.file);
+      const bytes = readFileSync(file);
+      const inspection = inspectQuarantineBytes(bytes, row.file, policy);
+      const facts = fileFactsFromSniff(inspection.sniffed, { filename: row.file, declaredMimeType: MIME_BY_EXTENSION[fileExtension(row.file)] ?? null });
+      const hostEncrypt = bytes.subarray(0, 5).toString("latin1") === "%PDF-" && bytes.includes("/Encrypt");
+      inspections.set(row.file, { inspection, mismatch: facts.mismatch === "corrected" || facts.mismatch === "unresolved", hostEncrypt });
+      if (inspection.pdf?.encryptName || hostEncrypt) toDecrypt.push(row.file);
     }
 
     // The scanner VM config, adapted only in paths and the daemon user (an unprivileged container).
@@ -162,14 +195,18 @@ describe.skipIf(!image)("real ClamAV hostile matrix (council re-check 2; owner d
       .join("\n");
     writeFileSync(path.join(dir, "vm.conf"), vm);
     const now = "$(date +%s%N)";
+    // Each scan is bounded (CASE_TIMEOUT_S, above ClamAV's own 300 s MaxScanTime, so a scan-time alert still arrives): a
+    // stuck case is a loud `error:124/137` row, never a stalled matrix. The three configurations of one file run at once.
+    const bound = `timeout -k 10 ${CASE_TIMEOUT_S}`;
     const scanAll = (label: string, file: string, target: string) => [
-      `s=${now}; clamdscan --config-file=/m/vm.conf --fdpass --no-summary --infected ${target} > /m/out/vm${label}.${file} 2>&1; c=$?; echo "vm${label} ${file} $c $(( (${now} - s) / 1000000 ))"`,
-      `s=${now}; clamdscan --config-file=/m/image.conf --fdpass --no-summary --infected ${target} > /m/out/image${label}.${file} 2>&1; c=$?; echo "image${label} ${file} $c $(( (${now} - s) / 1000000 ))"`,
-      `s=${now}; clamscan -d /m/db ${clamscanLimitArgs().join(" ")} --no-summary --infected ${target} > /m/out/clamscan${label}.${file} 2>&1; c=$?; echo "clamscan${label} ${file} $c $(( (${now} - s) / 1000000 ))"`,
+      `( s=${now}; ${bound} clamdscan --config-file=/m/vm.conf --fdpass --no-summary --infected ${target} > /m/out/vm${label}.${file} 2>&1; c=$?; echo "vm${label} ${file} $c $(( (${now} - s) / 1000000 ))" > /m/res/vm${label}.${file} ) &`,
+      `( s=${now}; ${bound} clamdscan --config-file=/m/image.conf --fdpass --no-summary --infected ${target} > /m/out/image${label}.${file} 2>&1; c=$?; echo "image${label} ${file} $c $(( (${now} - s) / 1000000 ))" > /m/res/image${label}.${file} ) &`,
+      `( s=${now}; ${bound} clamscan -d /m/db ${clamscanLimitArgs().join(" ")} --no-summary --infected ${target} > /m/out/clamscan${label}.${file} 2>&1; c=$?; echo "clamscan${label} ${file} $c $(( (${now} - s) / 1000000 ))" > /m/res/clamscan${label}.${file} ) &`,
+      "wait",
     ];
     const script = [
       "set -u",
-      "mkdir -p /m/db /m/tmp-vm /m/tmp-image /m/out /m/copy",
+      "mkdir -p /m/db /m/tmp-vm /m/tmp-image /m/out /m/copy /m/res",
       // Official signatures plus the matrix marker, in one database directory for both daemons.
       "for f in /var/lib/clamav/*.cvd /var/lib/clamav/*.cld; do [ -e \"$f\" ] && ln -s \"$f\" /m/db/; done",
       "cp /m/work/marker.ndb /m/db/",
@@ -184,21 +221,33 @@ describe.skipIf(!image)("real ClamAV hostile matrix (council re-check 2; owner d
       ...MATRIX.flatMap((row) => scanAll("", row.file, `/m/work/${row.file}`)),
       // The in-VM decryption, with the runner's exact argv (prlimit bounds included), then each copy scanned on every config.
       ...toDecrypt.flatMap((file) => [
-        `s=${now}; ${shell(pdfEncryptionCheckArgv(`/m/work/${file}`))} > /m/out/check.${file} 2>&1; check=$?; decrypt=none`,
-        `if [ $check = 3 ]; then ${shell(pdfDecryptArgv(`/m/work/${file}`, `/m/copy/${file}`))} > /m/out/decrypt.${file} 2>&1; decrypt=$?; fi`,
-        `echo "qpdf ${file} $check $decrypt $(( (${now} - s) / 1000000 )) $(stat -c %s /m/copy/${file} 2>/dev/null || echo none)"`,
+        `s=${now}; ${bound} ${shell(pdfEncryptionCheckArgv(`/m/work/${file}`))} > /m/out/check.${file} 2>&1; check=$?; decrypt=none; shown=none`,
+        `if [ $check = 2 ]; then ${bound} ${shell(pdfShowEncryptionArgv(`/m/work/${file}`))} > /m/out/shown.${file} 2> /m/out/shown-err.${file}; shown=$?; fi`,
+        `if [ $check = 3 ] || grep -qx 'File is not encrypted' /m/out/shown.${file} 2>/dev/null; then ${bound} ${shell(pdfDecryptArgv(`/m/work/${file}`, `/m/copy/${file}`))} > /m/out/decrypt.${file} 2>&1; decrypt=$?; fi`,
+        `echo "qpdf ${file} $check $shown $decrypt $(( (${now} - s) / 1000000 )) $(stat -c %s /m/copy/${file} 2>/dev/null || echo none)" > /m/res/qpdf.${file}`,
         `if [ -f /m/copy/${file} ]; then`,
         ...scanAll("-copy", file, `/m/copy/${file}`),
         "fi",
       ]),
+      "cat /m/res/*",
     ].join("\n");
-    const result = spawnSync("docker", ["run", "--rm", "--network", "none", "--user", `${process.getuid!()}:${process.getgid!()}`, "--cpus", "2", "--memory", "6g", "-v", `${dir}:/m`, "--entrypoint", "sh", image!, "-c", script], { encoding: "utf8", timeout: 3_000_000 });
+    const started = Date.now();
+    const result = spawnSync("docker", ["run", "--rm", "--network", "none", "--user", `${process.getuid!()}:${process.getgid!()}`, "--cpus", "4", "--memory", "8g", "-v", `${dir}:/m`, "--entrypoint", "sh", image!, "-c", script], { encoding: "utf8", timeout: MATRIX_TIMEOUT_MS });
+    console.log(`[matrix] container wall time ${Math.round((Date.now() - started) / 1000)} s`);
     if (result.status !== 0) throw new Error(`matrix container failed (${result.status}): ${result.stderr.slice(-2000)}`);
     for (const line of result.stdout.trim().split("\n")) {
       const parts = line.split(" ");
       if (parts[0] === "qpdf") {
-        const [, file, check, decrypt, ms, bytes] = parts;
-        qpdf.set(file!, { check: Number(check), decrypt: decrypt === "none" ? null : Number(decrypt), ms: Number(ms), bytes: bytes === "none" ? null : Number(bytes) });
+        const [, file, check, shown, decrypt, ms, bytes] = parts;
+        const read = (name: string) => { try { return readFileSync(path.join(dir, "out", `${name}.${file}`), "utf8"); } catch { return ""; } };
+        qpdf.set(file!, {
+          check: Number(check),
+          shown: shown === "none" ? null : { exitCode: Number(shown), stdout: read("shown"), stderr: read("shown-err") },
+          decrypt: decrypt === "none" ? null : Number(decrypt),
+          decryptStderr: read("decrypt"),
+          ms: Number(ms),
+          bytes: bytes === "none" ? null : Number(bytes),
+        });
         continue;
       }
       const [config, file, code, ms] = parts;
@@ -228,7 +277,7 @@ describe.skipIf(!image)("real ClamAV hostile matrix (council re-check 2; owner d
     ].join("\n");
     if (process.env.DOCSLURP_CLAMAV_MATRIX_OUT) writeFileSync(process.env.DOCSLURP_CLAMAV_MATRIX_OUT, `${table}\n\n${timing}\n`);
     console.log(`${table}\n\n${timing}`);
-  }, 3_000_000);
+  }, MATRIX_TIMEOUT_MS + 600_000);
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
   for (const config of CONFIGS) {
@@ -243,9 +292,9 @@ describe.skipIf(!image)("real ClamAV hostile matrix (council re-check 2; owner d
     });
   }
 
-  it("the owner-password PDF with a hidden marker in an unfiltered stream is never clean, on any config", () => {
+  it("no hidden-marker case (owner-password raw stream, dropped /Encrypt, prefixed PDF or XLSX) is ever clean, on any config", () => {
     for (const config of CONFIGS) {
-      for (const file of ["pdf-empty-user-owner-raw-marker.pdf", "pdf-owner-raw-marker-broken-xref.pdf"]) {
+      for (const file of ["pdf-empty-user-owner-raw-marker.pdf", "pdf-owner-raw-marker-broken-xref.pdf", "pdf-incremental-drop-encrypt-marker.pdf", "prefixed-owner-raw-marker.pdf", "prefixed-flate-marker.pdf", "prefixed-zip64-marker.xlsx"]) {
         expect(decide(file, config, inspections.get(file)!, scans, qpdf), `${config} ${file}`).not.toBe("clean");
       }
     }
