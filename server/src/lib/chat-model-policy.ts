@@ -12,9 +12,12 @@ import {
   type ChatAgentLimitsInput,
 } from "@docslurp/shared";
 import {
+  DEFAULT_CHAT_REASONING,
   DEFAULT_PROJECT_CHAT_MODEL,
   isProjectChatModelId,
   normalizeChatModelRef,
+  parseChatModelOptions,
+  type ChatReasoningLevel,
 } from "@docslurp/shared/project-chat-models";
 import { isPlatformAdminActor, type RequestActor } from "./request-actor.js";
 import { getProjectAccess } from "../services/organizations.js";
@@ -110,12 +113,17 @@ export type ChatModelSource = "default" | "catalog" | "eval";
  * callers with eval access only (`isAdmin`: see chatEvalAccess). Anything else, including a non-admin naming an eval model, is a
  * 400 rather than a silent fallback, so a comparison never measures the wrong model.
  */
-export function resolveChatModelRequest(args: { requested: string | null | undefined; isAdmin: boolean; evalModels?: ReadonlySet<string> }): { model: string; source: ChatModelSource } {
-  const requested = args.requested ? normalizeChatModelRef(args.requested) : undefined;
-  if (!requested) return { model: DEFAULT_PROJECT_CHAT_MODEL, source: "default" };
-  if (isProjectChatModelId(requested)) return { model: requested, source: "catalog" };
+export function resolveChatModelRequest(args: { requested: string | null | undefined; isAdmin: boolean; evalModels?: ReadonlySet<string> }): { model: string; source: ChatModelSource; reasoning: ChatReasoningLevel } {
+  // `?reasoning=` (or the native `reasoning_effort` / `effort`) sets the turn's reasoning; any other option, or a
+  // level DocSlurp does not know, refuses the model rather than ignoring the option.
+  const options = args.requested?.trim() ? parseChatModelOptions(args.requested) : { model: "" };
+  if (!options) throw new ChatModelNotAllowedError();
+  const reasoning = options.reasoning ?? DEFAULT_CHAT_REASONING;
+  const requested = options.model ? normalizeChatModelRef(options.model) : undefined;
+  if (!requested) return { model: DEFAULT_PROJECT_CHAT_MODEL, source: "default", reasoning };
+  if (isProjectChatModelId(requested)) return { model: requested, source: "catalog", reasoning };
   const evalModels = args.evalModels ?? configuredChatEvalModels();
-  if (args.isAdmin && evalModels.has(requested) && !isProhibitedRoutingModelId(requested)) return { model: requested, source: "eval" };
+  if (args.isAdmin && evalModels.has(requested) && !isProhibitedRoutingModelId(requested)) return { model: requested, source: "eval", reasoning };
   throw new ChatModelNotAllowedError();
 }
 

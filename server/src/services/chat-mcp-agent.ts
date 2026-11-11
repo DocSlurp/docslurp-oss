@@ -7,6 +7,7 @@ import { performance } from "node:perf_hooks";
 import { assertProviderAllowed, isProviderCallAllowed, CHAT_AGENT_BASE_STEPS, CHAT_AGENT_EXTENSION_INPUT_TOKENS, CHAT_AGENT_LIMIT_DEFAULTS, createOpenRouterUsageCapture, resolveOpenRouterUsage, type ChatAgentLimits, type ChatAgentModes, type ChatAgentStepUsage, type ChatAgentStopReason, type ChatAgentTimeBudgetDebug, type PrivacyMode, type ProjectChatTurn } from "@docslurp/shared";
 import { evalBaggageAttributes, recordChatAgentTelemetry, startTelemetrySpan, type TelemetrySpan } from "@docslurp/shared/observability";
 import type { RequestActor } from "../lib/request-actor.js";
+import { DEFAULT_CHAT_REASONING, type ChatReasoningLevel } from "@docslurp/shared/project-chat-models";
 import { isFirstPartyAppActor } from "../lib/first-party-app.js";
 import { recordUsageEvent } from "../lib/ai-usage.js";
 import { posthogAiTelemetry } from "../lib/posthog-ai-observability.js";
@@ -248,6 +249,8 @@ export async function runChatMcpAgent(args: {
   actor: RequestActor; projectId: string; orgId: string; sessionId: string;
   query: string; history: Array<Pick<ProjectChatTurn, "role" | "content">>;
   apiKey: string; privacyMode: PrivacyMode; model: string; maxOutputTokens: number;
+  /** The chat model reference's `?reasoning=` option. Default none: each model's verified lowest setting. */
+  reasoning?: ChatReasoningLevel;
   /** The client's signal (disconnect). The turn deadline is layered on top of it. */
   signal?: AbortSignal;
   /** When the request reached chat (epoch ms); the turn deadline counts from here. Default: now. */
@@ -339,7 +342,9 @@ export async function runChatMcpAgent(args: {
     web: webMode(args.web, Boolean(context.tools.webSearch || context.tools.webFetch)),
     suggestions: suggestions && Boolean(context.tools.getProjectSettings && context.tools.proposeProjectSettings),
   };
-  agentSpan.set({ "docslurp.chat.mode.web": modes.web, "docslurp.chat.mode.suggestions": modes.suggestions });
+  // The chat model reference's `?reasoning=` option; none (each model's lowest setting) unless it asked for more.
+  const turnReasoning = args.reasoning ?? DEFAULT_CHAT_REASONING;
+  agentSpan.set({ "docslurp.chat.mode.web": modes.web, "docslurp.chat.mode.suggestions": modes.suggestions, "docslurp.chat.reasoning": turnReasoning });
   const accounting = createOpenRouterUsageCapture();
   // costCents: provider cost of the agent's own model calls. Tool work is reported separately in toolCostCents.
   const usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, costCents: 0, toolCostCents: 0,
@@ -379,7 +384,7 @@ export async function runChatMcpAgent(args: {
   // Each model call gets its own budget (a child of the turn signal) and is
   // observed so an aborted step can still be recorded (see recordAbortedStep).
   const model = wrapLanguageModel({
-    model: createChatAgentModel({ apiKey: args.apiKey, model: args.model, fetch: accounting.fetch }),
+    model: createChatAgentModel({ apiKey: args.apiKey, model: args.model, fetch: accounting.fetch, reasoning: turnReasoning }),
     middleware: {
       specificationVersion: "v4",
       transformParams: async ({ params }) => {
@@ -688,7 +693,7 @@ export async function runChatMcpAgent(args: {
         maxOutputTokens,
         maxRetries: 0,
         abortSignal: signal,
-        providerOptions: chatAgentProviderOptions(args.model),
+        providerOptions: chatAgentProviderOptions(args.model, turnReasoning),
         onStepFinish: async (step) => { await recordStep(step); },
       }));
       await consume(result);

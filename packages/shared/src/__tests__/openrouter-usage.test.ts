@@ -25,13 +25,19 @@ describe("OpenRouter thinking controls", () => {
   });
 });
 describe("GPT-6 Luna chat reasoning", () => {
-  // Luna's vision floor lives in the vision profile; the shared chat table must not change chat requests.
-  it("leaves a reasoning-less chat body untouched", async () => {
+  // Reasoning is off by default for chat too (2026-11-10): a reasoning-less request gets effort none.
+  it("sends a reasoning-less chat body at the verified floor", async () => {
     const baseFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}"));
     const init = { method: "POST", body: JSON.stringify({ model: "openai/gpt-6-luna", messages: [{ role: "user", content: "hi" }] }) };
     await createOpenRouterReasoningFetch(baseFetch)("https://openrouter.ai/api/v1/chat/completions", init);
+    expect(JSON.parse(baseFetch.mock.calls[0][1]!.body as string).reasoning).toEqual({ effort: "none" });
+    expect(lowestOpenRouterReasoning("openai/gpt-6-luna")).toEqual({ effort: "none" });
+  });
+  it("passes an explicit chat reasoning level through", async () => {
+    const baseFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}"));
+    const init = { method: "POST", body: JSON.stringify({ model: "openai/gpt-6-luna", reasoning: { effort: "high" }, messages: [] }) };
+    await createOpenRouterReasoningFetch(baseFetch)("https://openrouter.ai/api/v1/chat/completions", init);
     expect(baseFetch.mock.calls[0][1]).toBe(init);
-    expect(lowestOpenRouterReasoning("openai/gpt-6-luna")).toBeUndefined();
   });
 });
 describe("lowest accepted reasoning", () => {
@@ -96,13 +102,14 @@ describe("lowest accepted reasoning", () => {
     expect((await call({ model: "z-ai/glm-5.3-flash", reasoning_effort: "high" })).reasoning).toBeUndefined();
     expect((await call({ model: "z-ai/glm-5.3-flash", reasoning: { effort: "high" } })).reasoning).toEqual({ effort: "high" });
   });
-  it("leaves reasoning-less chat requests for vision-tuned models untouched (their floors live in the vision profiles)", async () => {
-    for (const model of ["xiaomi/mimo-v2.6-flash", "deepseek/deepseek-v4.1-flash-1017"]) {
+  it("gives reasoning-less chat requests for the catalog chat models their verified floor", async () => {
+    for (const [model, floor] of [["xiaomi/mimo-v2.6-flash", { effort: "none" }], ["deepseek/deepseek-v4.1-flash-1017", { effort: "none" }],
+      ["openai/gpt-6-luna", { effort: "none" }], ["openai/gpt-6.1-sol", { effort: "minimal" }]] as const) {
       const baseFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}"));
       const body = { model, messages: [{ role: "user", content: "hi" }] };
       await createOpenRouterReasoningFetch(baseFetch)("https://openrouter.ai/api/v1/chat/completions", { method: "POST", body: JSON.stringify(body) });
-      expect(JSON.parse(baseFetch.mock.calls[0][1]!.body as string)).toEqual(body);
-      expect(lowestOpenRouterReasoning(model)).toBeUndefined();
+      expect(JSON.parse(baseFetch.mock.calls[0][1]!.body as string)).toEqual({ ...body, reasoning: floor });
+      expect(lowestOpenRouterReasoning(model)).toEqual(floor);
     }
   });
   it("adds a reasoning body fragment only for verified models", () => {

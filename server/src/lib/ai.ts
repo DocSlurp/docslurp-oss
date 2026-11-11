@@ -1,3 +1,4 @@
+import { DEFAULT_CHAT_REASONING, type ChatReasoningLevel } from "@docslurp/shared/project-chat-models";
 import { assertProviderAllowed, authorizePrivateModelCall, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, createOpenRouterUsageCapture, createOpenRouterChargeTotal, isPrivateModelUri, readProviderCharge, PRIVATE_MODEL_PROVIDER, resolveOpenRouterUsage, servedTextModel, regionFallbackUsageMetadata, resolveSupportedModelIdWithWarning, type PrivacyMode, type PrivateCallAuditScope, type ProviderTextUsage } from "@docslurp/shared";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
@@ -22,12 +23,6 @@ export const SEARCH_EMBEDDING_MODEL = parseLlmModelUri(
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 const DEFAULT_LOCAL_TRANSFORMERSJS_DTYPE = "q8";
-const OPENROUTER_DEEPSEEK_LOW_THINKING_OPTIONS = {
-  openai: {
-    reasoningEffort: "low" as const,
-    forceReasoning: true,
-  },
-};
 const localEmbeddingPipelineCache = new Map<
   string,
   Promise<LocalEmbeddingPipeline>
@@ -148,10 +143,12 @@ function resolveLocalTransformersJsDtype(): string {
   return aliases[value] ?? DEFAULT_LOCAL_TRANSFORMERSJS_DTYPE;
 }
 
-function resolveOpenRouterProviderOptions(model: string) {
-  return model.startsWith("deepseek/deepseek-v4")
-    ? OPENROUTER_DEEPSEEK_LOW_THINKING_OPTIONS
-    : undefined;
+/**
+ * Provider options for a chat answer's reasoning level. `none` (the default) sends nothing: the reasoning fetch
+ * forces each model's verified lowest setting. `minimal` to `high` ask for that effort explicitly.
+ */
+function chatAnswerReasoningOptions(reasoning: ChatReasoningLevel) {
+  return reasoning === "none" ? undefined : { openai: { reasoningEffort: reasoning, forceReasoning: true } };
 }
 
 /** Sets the request body's `provider` preferences before routing merges its own (the caller's win). */
@@ -208,7 +205,8 @@ export async function generateOpenRouterText(args: {
     async () => {
       const accounting = createOpenRouterUsageCapture();
       const provider = createOpenAI({
-        fetch: createOpenRouterReasoningFetch(withProviderPreferences(createOpenRouterRoutingFetch(instrumentFetch("openrouter", "chat", accounting.fetch), { restrictedFallback: (args.model ?? SEARCH_OPENROUTER_MODEL) === SEARCH_OPENROUTER_MODEL }), args.providerPreferences)),
+        // Search helpers (rewrites, HyDE, planning, compression) never need reasoning: force each model's floor.
+        fetch: createOpenRouterReasoningFetch(withProviderPreferences(createOpenRouterRoutingFetch(instrumentFetch("openrouter", "chat", accounting.fetch), { restrictedFallback: (args.model ?? SEARCH_OPENROUTER_MODEL) === SEARCH_OPENROUTER_MODEL }), args.providerPreferences), "none"),
         apiKey: args.apiKey,
         baseURL: OPENROUTER_BASE_URL,
       });
@@ -231,7 +229,6 @@ export async function generateOpenRouterText(args: {
         prompt: args.prompt,
         maxOutputTokens: args.maxOutputTokens,
         abortSignal: args.signal,
-        providerOptions: resolveOpenRouterProviderOptions(model),
       });
 
       return {
@@ -270,6 +267,8 @@ export async function generateOpenRouterDocumentText(args: {
     context?: string;
   }>;
   model?: string;
+  /** Hosted answers: the chat model reference's `?reasoning=` option. Default none (each model's lowest setting). */
+  reasoning?: ChatReasoningLevel;
   maxOutputTokens: number;
   /** Strictest privacy mode across the projects whose documents are included. */
   privacyMode: PrivacyMode;
@@ -301,14 +300,15 @@ export async function generateOpenRouterDocumentText(args: {
     return { ...generated, sources: [] };
   }
   assertProviderAllowed(args.privacyMode, { provider: "openrouter", model: args.model ?? SEARCH_OPENROUTER_MODEL, operation: "api.text.openrouter-documents", target: "hosted" });
+  const reasoning = args.reasoning ?? DEFAULT_CHAT_REASONING;
   const accounting = createOpenRouterUsageCapture();
   const provider = createOpenAI({
-    fetch: createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(instrumentFetch("openrouter", "chat", accounting.fetch))),
+    fetch: createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(instrumentFetch("openrouter", "chat", accounting.fetch)), reasoning === "none" ? "none" : undefined),
     apiKey: args.apiKey,
     baseURL: OPENROUTER_BASE_URL,
   });
   const model = resolveSupportedModelIdWithWarning(args.model ?? SEARCH_OPENROUTER_MODEL);
-  const providerOptions = resolveOpenRouterProviderOptions(model);
+  const providerOptions = chatAnswerReasoningOptions(reasoning);
 
   async function collectStreamResult(
     result: ReturnType<typeof streamText>,

@@ -42,9 +42,9 @@ describe("DOCSLURP_CHAT_EVAL_MODELS", () => {
 
 describe("chat model resolution", () => {
   it("uses the default only when model is omitted and honours catalog models for everyone", () => {
-    expect(resolveChatModelRequest({ requested: undefined, isAdmin: false, evalModels })).toEqual({ model: "z-ai/glm-5.3-flash", source: "default" });
+    expect(resolveChatModelRequest({ requested: undefined, isAdmin: false, evalModels })).toMatchObject({ model: "z-ai/glm-5.3-flash", source: "default" });
     expect(resolveChatModelRequest({ requested: "  ", isAdmin: false, evalModels }).source).toBe("default");
-    expect(resolveChatModelRequest({ requested: "anthropic/claude-haiku-5.5", isAdmin: false, evalModels })).toEqual({ model: "anthropic/claude-haiku-5.5", source: "catalog" });
+    expect(resolveChatModelRequest({ requested: "anthropic/claude-haiku-5.5", isAdmin: false, evalModels })).toMatchObject({ model: "anthropic/claude-haiku-5.5", source: "catalog" });
   });
 
   it("refuses unknown models instead of silently falling back", () => {
@@ -54,9 +54,9 @@ describe("chat model resolution", () => {
   });
 
   it("accepts llm://openrouter/<id> wherever a bare id works, resolving to the bare id", () => {
-    expect(resolveChatModelRequest({ requested: " llm://openrouter/anthropic/claude-haiku-5.5 ", isAdmin: false, evalModels })).toEqual({ model: "anthropic/claude-haiku-5.5", source: "catalog" });
-    expect(resolveChatModelRequest({ requested: "LLM://OpenRouter/z-ai/glm-5.3-flash:nitro", isAdmin: false, evalModels })).toEqual({ model: "z-ai/glm-5.3-flash:nitro", source: "catalog" });
-    expect(resolveChatModelRequest({ requested: "llm://openrouter/inception/mercury-3", isAdmin: true, evalModels })).toEqual({ model: "inception/mercury-3", source: "eval" });
+    expect(resolveChatModelRequest({ requested: " llm://openrouter/anthropic/claude-haiku-5.5 ", isAdmin: false, evalModels })).toMatchObject({ model: "anthropic/claude-haiku-5.5", source: "catalog" });
+    expect(resolveChatModelRequest({ requested: "LLM://OpenRouter/z-ai/glm-5.3-flash:nitro", isAdmin: false, evalModels })).toMatchObject({ model: "z-ai/glm-5.3-flash:nitro", source: "catalog" });
+    expect(resolveChatModelRequest({ requested: "llm://openrouter/inception/mercury-3", isAdmin: true, evalModels })).toMatchObject({ model: "inception/mercury-3", source: "eval" });
     expect(chatTurnNeedsEvalAccess("llm://openrouter/anthropic/claude-haiku-5.5")).toBe(false);
     expect(chatTurnNeedsEvalAccess("llm://openrouter/inception/mercury-3")).toBe(true);
     expect(parseChatEvalModels("llm://openrouter/inception/mercury-3").models).toEqual(["inception/mercury-3"]);
@@ -74,7 +74,7 @@ describe("chat model resolution", () => {
   });
 
   it("allows eval models to admins only", () => {
-    expect(resolveChatModelRequest({ requested: "inception/mercury-3", isAdmin: true, evalModels })).toEqual({ model: "inception/mercury-3", source: "eval" });
+    expect(resolveChatModelRequest({ requested: "inception/mercury-3", isAdmin: true, evalModels })).toMatchObject({ model: "inception/mercury-3", source: "eval" });
     expect(() => resolveChatModelRequest({ requested: "inception/mercury-3", isAdmin: false, evalModels })).toThrow(ChatModelNotAllowedError);
   });
 
@@ -90,11 +90,24 @@ describe("chat model resolution", () => {
     expect(await chatModelRefused(undefined, "unknown/model")).toBe(true);
   });
 
-  it("applies DeepSeek V4 reasoning options to aliases and dated builds", () => {
-    for (const model of ["deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash-1017"]) {
-      expect(chatAgentProviderOptions(model)).toEqual({ openrouter: { reasoning: { effort: "low" } } });
+  it("asks for reasoning only when the model reference requests it", () => {
+    for (const model of ["deepseek/deepseek-v4.1-flash-1017", "z-ai/glm-5.3-flash"]) {
+      expect(chatAgentProviderOptions(model)).toBeUndefined();
+      expect(chatAgentProviderOptions(model, "none")).toBeUndefined();
+      expect(chatAgentProviderOptions(model, "high")).toEqual({ openrouter: { reasoning: { effort: "high" } } });
     }
-    expect(chatAgentProviderOptions("z-ai/glm-5.3-flash")).toBeUndefined();
+  });
+
+  it("reads the reasoning level from the model reference's options", () => {
+    expect(resolveChatModelRequest({ requested: undefined, isAdmin: false })).toMatchObject({ model: "z-ai/glm-5.3-flash", reasoning: "none" });
+    expect(resolveChatModelRequest({ requested: "llm://openrouter/deepseek/deepseek-v4.1-flash-1017?reasoning=high", isAdmin: false }))
+      .toEqual({ model: "deepseek/deepseek-v4.1-flash-1017", source: "catalog", reasoning: "high" });
+    expect(resolveChatModelRequest({ requested: "z-ai/glm-5.3-flash?effort=low", isAdmin: false })).toMatchObject({ model: "z-ai/glm-5.3-flash", reasoning: "low" });
+    expect(resolveChatModelRequest({ requested: "z-ai/glm-5.3-flash?reasoning_effort=minimal", isAdmin: false })).toMatchObject({ reasoning: "minimal" });
+    expect(resolveChatModelRequest({ requested: "z-ai/glm-5.3-flash?reasoning=off", isAdmin: false })).toMatchObject({ reasoning: "none" });
+    for (const requested of ["z-ai/glm-5.3-flash?reasoning=max", "z-ai/glm-5.3-flash?temperature=2", "z-ai/glm-5.3-flash?reasoning=low&effort=high", "z-ai/glm-5.3-flash#x"]) {
+      expect(() => resolveChatModelRequest({ requested, isAdmin: true, evalModels: new Set() }), requested).toThrow(ChatModelNotAllowedError);
+    }
   });
 });
 

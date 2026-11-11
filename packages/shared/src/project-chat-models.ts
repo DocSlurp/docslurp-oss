@@ -35,7 +35,9 @@ export function isProjectChatModelId(model: unknown): model is ProjectChatModelI
  * so the caller can refuse them.
  */
 export function normalizeChatModelRef(model: string): string {
-  const id = normalizeHostedModelRef(model);
+  // Options (`?reasoning=high`) are not part of the model's identity; an unreadable option keeps the query so the
+  // reference matches no catalog model and is refused.
+  const id = normalizeHostedModelRef(parseChatModelOptions(model)?.model ?? model);
   return CHAT_MODEL_ALIASES[id] ?? id;
 }
 
@@ -77,4 +79,52 @@ const SPEED_BOOST_DEFAULT_MAX_PRICE = { prompt: 0.3, completion: 1.2 } as const;
 /** The Speed boost price ceiling for a base model id, USD per 1M tokens. */
 export function speedBoostMaxPrice(base: string): { prompt: number; completion: number } {
   return SPEED_BOOST_MAX_PRICE[base] ?? SPEED_BOOST_DEFAULT_MAX_PRICE;
+}
+
+/**
+ * How much a chat turn's answering model reasons, in OpenRouter's native effort names. `none` (the default) sends
+ * each model's verified lowest setting: reasoning is the largest source of chat latency (measured 2026-11-10 on
+ * DeepSeek V4.1 Flash 1017: 1.18 s p50 a call at the provider default against 0.56 s with reasoning off, on the
+ * same host). `minimal` to `high` ask for more, for long multi-query questions. Search helpers (query rewrites,
+ * HyDE, planning) always run at the floor.
+ */
+export const CHAT_REASONING_LEVELS = ["none", "minimal", "low", "medium", "high"] as const;
+export type ChatReasoningLevel = (typeof CHAT_REASONING_LEVELS)[number];
+export const DEFAULT_CHAT_REASONING: ChatReasoningLevel = "none";
+
+/** Option keys that name the reasoning level: DocSlurp's `reasoning` and the native `reasoning_effort` / `effort`. */
+const CHAT_REASONING_KEYS = new Set(["reasoning", "reasoning_effort", "effort"]);
+const CHAT_REASONING_ALIASES: Readonly<Record<string, ChatReasoningLevel>> = { off: "none", false: "none", disabled: "none" };
+
+export function isChatReasoningLevel(value: unknown): value is ChatReasoningLevel {
+  return typeof value === "string" && (CHAT_REASONING_LEVELS as readonly string[]).includes(value);
+}
+
+/**
+ * A chat model reference split from its options: `llm://openrouter/<id>?reasoning=high`, or the bare
+ * `<id>?effort=low`. The only option is the reasoning level (keys `reasoning`, `reasoning_effort`, `effort`; values
+ * none, minimal, low, medium, high, plus `off` for none). Null for an unknown option, an invalid or conflicting
+ * level, or a fragment: a reference DocSlurp cannot honour exactly is refused, never read loosely.
+ */
+export function parseChatModelOptions(ref: string): { model: string; reasoning?: ChatReasoningLevel } | null {
+  const trimmed = ref.trim();
+  if (trimmed.includes("#")) return null;
+  const at = trimmed.indexOf("?");
+  if (at < 0) return { model: trimmed };
+  const model = trimmed.slice(0, at);
+  let reasoning: ChatReasoningLevel | undefined;
+  for (const [rawKey, rawValue] of new URLSearchParams(trimmed.slice(at + 1))) {
+    if (!CHAT_REASONING_KEYS.has(rawKey.toLowerCase())) return null;
+    const value = rawValue.trim().toLowerCase();
+    const level = CHAT_REASONING_ALIASES[value] ?? (isChatReasoningLevel(value) ? value : undefined);
+    if (!level || (reasoning && reasoning !== level)) return null;
+    reasoning = level;
+  }
+  return reasoning ? { model, reasoning } : { model };
+}
+
+/** `model` with a reasoning option; the default level leaves the reference bare. */
+export function withChatReasoning(model: string, reasoning: ChatReasoningLevel): string {
+  const base = parseChatModelOptions(model)?.model ?? model;
+  return reasoning === DEFAULT_CHAT_REASONING ? base : `${base}?reasoning=${reasoning}`;
 }

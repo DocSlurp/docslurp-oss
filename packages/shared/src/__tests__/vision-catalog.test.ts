@@ -162,7 +162,7 @@ describe("hosted vision catalog", () => {
 
   it("switches Nemotron reasoning off for page transcription", () => {
     expect(openRouterReasoningParams(NEMOTRON_SUPER_VL_VISION_MODEL)).toEqual({ reasoning: { enabled: false } });
-    expect(openRouterReasoningParams(DEFAULT_OPENROUTER_VISION_MODEL)).toEqual({});
+    expect(openRouterReasoningParams(DEFAULT_OPENROUTER_VISION_MODEL)).toEqual({ reasoning: { effort: "none" } });
   });
 });
 

@@ -120,6 +120,15 @@ export type OpenRouterReasoning = { enabled: false } | { effort: "none" | "minim
  */
 export const OPENROUTER_LOWEST_REASONING: Readonly<Record<string, OpenRouterReasoning>> = {
   "deepseek/deepseek-v4.1-flash": { effort: "none" },
+  // 2026-11-10 chat probes (one-sentence answer): effort `none` returns HTTP 200 with zero reasoning tokens; the
+  // provider default spent 47 reasoning tokens and took 0.41 s against 0.53 s cold, 1.18 s against 0.56 s p50 over
+  // 8 RAG calls. Vision profiles set their own reasoning and are unaffected.
+  "deepseek/deepseek-v4.1-flash-1017": { effort: "none" },
+  "openai/gpt-6-luna": { effort: "none" },
+  "xiaomi/mimo-v2.6-flash": { effort: "none" },
+  // 2026-11-10: `{ enabled: false }` and effort `none` return HTTP 400 "Reasoning is mandatory"; `minimal` returns
+  // HTTP 200 with zero reasoning tokens on a short answer.
+  "openai/gpt-6.1-sol": { effort: "minimal" },
   "z-ai/glm-5.3-flash": { effort: "minimal" },
   "inclusionai/ling-3.0-flash-vl": { effort: "none" }, // EV1: HTTP 200 with zero reasoning tokens on 95+28 pages (2026-10-13)
   "anthropic/claude-haiku-5.5": { enabled: false },

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { stepCountIs, streamText, tool } from "ai";
 import { z } from "zod";
 import { createOpenRouterUsageCapture, readProviderCharge } from "@docslurp/shared";
+import type { ChatReasoningLevel } from "@docslurp/shared/project-chat-models";
 import { chatAgentProviderOptions, createChatAgentModel } from "./chat-agent-model.js";
 
 // Live OpenRouter SSE responses recorded on 2026-10-20 (2-step lookup_bin loop).
@@ -12,7 +13,7 @@ function fixture(name: string): { model: string; responses: string[] } {
 
 type ChatRequest = { model: string; reasoning?: unknown; usage?: unknown; messages: Array<Record<string, any>> };
 
-async function replayToolLoop(name: string) {
+async function replayToolLoop(name: string, reasoning?: ChatReasoningLevel) {
   const { model, responses } = fixture(name);
   const requests: ChatRequest[] = [];
   const replay: typeof fetch = async (_input, init) => {
@@ -23,7 +24,7 @@ async function replayToolLoop(name: string) {
   const accounting = createOpenRouterUsageCapture(replay);
   const receipts: Array<{ costCents?: number; provider?: string; responseModel?: string; generationId?: string; reasoning: string }> = [];
   const result = streamText({
-    model: createChatAgentModel({ apiKey: "test", model, fetch: accounting.fetch }),
+    model: createChatAgentModel({ apiKey: "test", model, fetch: accounting.fetch, reasoning }),
     system: "You answer questions about a fictional warehouse. Always call lookup_bin before answering; then answer in one short sentence.",
     messages: [{ role: "user", content: "Which aisle holds bin K-77, and what is 6 times its aisle number?" }],
     tools: { lookup_bin: tool({ description: "Look up the aisle for a warehouse bin id.", inputSchema: z.object({ bin: z.string() }),
@@ -31,7 +32,7 @@ async function replayToolLoop(name: string) {
     stopWhen: stepCountIs(2),
     prepareStep: ({ stepNumber }) => (stepNumber === 0 ? { toolChoice: "required" as const } : { toolChoice: "none" as const }),
     maxRetries: 0,
-    providerOptions: chatAgentProviderOptions(model),
+    providerOptions: chatAgentProviderOptions(model, reasoning),
     onStepFinish: step => {
       receipts.push({ costCents: readProviderCharge(accounting.usage()).costCents, provider: accounting.providerName(),
         responseModel: accounting.responseModel(), generationId: step.response.id, reasoning: step.reasoningText ?? "" });
@@ -47,7 +48,7 @@ async function replayToolLoop(name: string) {
 
 describe("chat agent model reasoning round-trip (recorded OpenRouter fixtures)", () => {
   it("sends beam-1.0's step reasoning back on the assistant turn at messages[2]", async () => {
-    const { requests, receipts, answer } = await replayToolLoop("beam-1.0");
+    const { requests, receipts, answer } = await replayToolLoop("beam-1.0", "low");
     expect(requests).toHaveLength(2);
     expect(receipts[0]!.reasoning.length).toBeGreaterThan(0);
     // The turn production rejected: "The assistant turn at messages[2] is missing its reasoning."
@@ -62,15 +63,16 @@ describe("chat agent model reasoning round-trip (recorded OpenRouter fixtures)",
   it("keeps OpenRouter usage receipts, the routed provider and the response model", async () => {
     const { model, requests, receipts } = await replayToolLoop("beam-1.0");
     for (const request of requests) expect(request).toMatchObject({ model, usage: { include: true } });
-    expect(requests[0]).not.toHaveProperty("reasoning");
+    // No `?reasoning=` option: a model without a verified floor is asked for no reasoning.
+    expect(requests[0]!.reasoning).toEqual({ enabled: false });
     for (const receipt of receipts) {
       expect(receipt).toMatchObject({ provider: "Together", responseModel: model, generationId: expect.stringMatching(/^gen-/) });
       expect(receipt.costCents).toBeGreaterThan(0);
     }
   });
 
-  it("round-trips DeepSeek V4 reasoning and keeps its low reasoning effort on every step", async () => {
-    const { requests, receipts } = await replayToolLoop("deepseek-v4.1-flash");
+  it("round-trips DeepSeek V4 reasoning and keeps a requested low effort on every step", async () => {
+    const { requests, receipts } = await replayToolLoop("deepseek-v4.1-flash", "low");
     for (const request of requests) expect(request.reasoning).toEqual({ effort: "low" });
     const assistant = requests[1]!.messages.find(message => message.role === "assistant")!;
     expect(receipts[0]!.reasoning.length).toBeGreaterThan(0);
@@ -91,8 +93,8 @@ describe("chat agent model reasoning round-trip (recorded OpenRouter fixtures)",
 });
 
 describe("chatAgentProviderOptions", () => {
-  it("requests low reasoning for DeepSeek V4 aliases and dated builds only", () => {
-    expect(chatAgentProviderOptions("deepseek/deepseek-v4.1-flash-1017")).toEqual({ openrouter: { reasoning: { effort: "low" } } });
-    expect(chatAgentProviderOptions("reflection/beam-1.0-501b-a23b")).toBeUndefined();
+  it("leaves reasoning to the floor by default and passes an explicit level through", () => {
+    expect(chatAgentProviderOptions("deepseek/deepseek-v4.1-flash-1017")).toBeUndefined();
+    expect(chatAgentProviderOptions("reflection/beam-1.0-501b-a23b", "medium")).toEqual({ openrouter: { reasoning: { effort: "medium" } } });
   });
 });
