@@ -7,7 +7,7 @@ dropped by the delivery function, including recovery messages.
 
 The existing provider-fetch wrapper observes actual upstream responses for
 OpenAI, OpenRouter, DeepInfra, Anthropic and Perplexity inference/embedding,
-Gemini page/query embeddings, Resend authentication/run notification emails,
+Gemini page/query embeddings, Resend authentication, invite and download emails,
 Fly worker-floor machine API calls, and existing Vast/DeepInfra capacity calls.
 Google query-key and x-goog-api-key authentication, and FlyV1 credentials, are
 matched without emitting their values. A response is eligible only on the

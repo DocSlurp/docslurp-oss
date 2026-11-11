@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isReservedTestEmail } from "@docslurp/shared";
 import type { Pool } from "pg";
 
 import { configuredAdminEmails } from "../lib/admin-emails.js";
@@ -48,11 +49,7 @@ export function globMatches(parts: readonly string[], value: string): boolean {
   return true;
 }
 
-/** Matches `docslurp_reserved_test_email` in migration 0094. */
-export function isReservedTestEmail(email: string): boolean {
-  const domain = email.trim().toLowerCase().split("@")[1] ?? "";
-  return /(^|\.)((test|example|invalid|localhost|local)|example\.(com|net|org))$/.test(domain);
-}
+export { isReservedTestEmail };
 
 export interface AccountKindRules { patterns: string[][]; staffDomains: string[]; adminEmails: string[] }
 

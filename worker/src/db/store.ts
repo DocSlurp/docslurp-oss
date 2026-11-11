@@ -2,7 +2,7 @@ import { sandboxedPdfBatchProvider } from "../extractors/sandboxed-pdf-batch.js"
 import { buildRunCompletedEvent } from "../pipeline/run-ledger.js";
 import { assertPlanningOwnership, assertExecutionOwnership, type ExecutionOwner, StaleExecutionError } from "./execution-ownership.js";
 import { beginGeoAttempt, type GeoFinalSource } from "./geo-final-source.js";
-import { instrumentFetch } from "@docslurp/shared/observability";
+import { emitEventLog } from "@docslurp/shared/error-reporting";
 import { instrumentPostgres } from "@docslurp/shared/observability";
 import { dbTraceStatementHook } from "../lib/db-trace.js";
 import { pipelineTransaction, pipelineInTransaction } from "./transaction-pipeline.js";
@@ -2190,7 +2190,7 @@ export class Store {
       lines.push(PUBLIC_ERROR_MESSAGES.processing);
     }
 
-    await this.deliverNotificationEmail({
+    await this.recordNotificationEvent({
       deliveryId: randomUUID(),
       userId: row.user_id,
       orgId: row.org_id,
@@ -2261,7 +2261,7 @@ export class Store {
       `Threshold: ${this.plausibilityWarningThreshold.toFixed(3)}`,
     ];
 
-    await this.deliverNotificationEmail({
+    await this.recordNotificationEvent({
       deliveryId: randomUUID(),
       userId: row.user_id,
       orgId: row.org_id,
@@ -2335,7 +2335,7 @@ export class Store {
       ].join("\n");
       const html = `<p>${text.replaceAll("\n", "<br/>")}</p>`;
 
-      await this.deliverNotificationEmail({
+      await this.recordNotificationEvent({
         deliveryId: randomUUID(),
         userId: row.owner_user_id,
         orgId: null,
@@ -4008,7 +4008,7 @@ export class Store {
         : `Status: monthly spend crossed ${args.thresholdPercent}% of budget.`,
     ];
 
-    await this.deliverNotificationEmail({
+    await this.recordNotificationEvent({
       deliveryId: randomUUID(),
       userId: args.userId,
       orgId: args.orgId,
@@ -4029,7 +4029,11 @@ export class Store {
     });
   }
 
-  private async deliverNotificationEmail(args: {
+  /**
+   * Workers never send email. Each notification event goes to SigNoz as a
+   * structured log and to the in-app inbox (notification_deliveries).
+   */
+  private async recordNotificationEvent(args: {
     deliveryId: string;
     userId: string;
     orgId?: string | null;
@@ -4048,42 +4052,19 @@ export class Store {
     html: string;
     metadata?: Record<string, unknown>;
   }): Promise<void> {
-    const resendApiKey = process.env.RESEND_API_KEY;
-    let delivered = true;
-    let provider = "console";
-    let responseText: string | null = null;
-
-    if (!resendApiKey) {
-      console.log(
-        `[notification] provider=console delivery=${args.deliveryId} event=${args.event} to=${args.recipient} subject=${JSON.stringify(args.subject)}`,
-      );
-    } else {
-      provider = "resend";
-      const response = await instrumentFetch("resend", "email")("https://api.resend.com/emails", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${resendApiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          from: process.env.EMAIL_FROM ?? "DocSlurp <noreply@docslurp.local>",
-          to: [args.recipient],
-          reply_to: process.env.EMAIL_REPLY_TO
-            ? [process.env.EMAIL_REPLY_TO]
-            : undefined,
-          subject: args.subject,
-          text: args.text,
-          html: args.html,
-        }),
-      });
-      delivered = response.ok;
-      responseText = await response.text().catch(() => null);
-      if (!response.ok) {
-        console.error(
-          `notification delivery failed for ${args.event} ${args.deliveryId}: ${responseText ?? response.statusText}`,
-        );
-      }
-    }
+    const provider = "log";
+    emitEventLog(`notification.${args.event}`, {
+      "notification.id": args.deliveryId,
+      "notification.event": args.event,
+      "notification.subject": args.subject,
+      "notification.text": args.text,
+      "enduser.id": args.userId,
+      "docslurp.org_id": args.orgId,
+      "docslurp.project_id": args.projectId,
+      "docslurp.run_id": args.runId,
+      "docslurp.document_id": args.documentId,
+      "notification.metadata": args.metadata,
+    });
 
     await this.sql`
       insert into notification_deliveries (
@@ -4108,12 +4089,11 @@ export class Store {
         ${provider},
         ${args.recipient},
         ${args.subject},
-        ${delivered},
+        true,
         ${this.toJson({
           ...(args.metadata ?? {}),
           runId: args.runId ?? null,
           documentId: args.documentId ?? null,
-          response: responseText,
         })}::jsonb,
         now()
       )
@@ -4125,24 +4105,16 @@ export class Store {
       projectId: args.projectId ?? null,
       runId: args.runId ?? null,
       documentId: args.documentId ?? null,
-      action: delivered ? "notification.sent" : "notification.failed",
+      action: "notification.logged",
       resourceType: "notification",
       resourceId: args.deliveryId,
       metadata: {
         event: args.event,
         provider,
-        recipient: args.recipient,
         subject: args.subject,
         ...(args.metadata ?? {}),
-        response: responseText,
       },
     });
-
-    if (!delivered) {
-      throw new Error(
-        `email delivery failed: ${responseText ?? "unknown error"}`,
-      );
-    }
   }
 
   private async appendAuditLog(args: {
