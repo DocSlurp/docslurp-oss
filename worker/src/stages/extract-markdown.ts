@@ -1,7 +1,7 @@
 import { reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { EMBEDDED_IMAGE_TARGETS, embeddedImageGraph, resolveEmbeddedImageRequest } from "../extractors/embedded-images.js";
 import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
-import { DopplerFigureRejection, dopplerImageExtractEnabled, readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler-figures.js";
+import { DopplerFigureRejection, DopplerFigureStoreError, dopplerImageExtractEnabled, readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler-figures.js";
 import {
   SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, requireSandboxedPdfProvider, sandboxedPdfFigures, sandboxedPdfProvider, sandboxedPdfLayoutFacts, sandboxedPdfOcrPages,
 } from "../extractors/plugins.js";
@@ -2944,8 +2944,9 @@ export class ExtractMarkdownStage implements Stage {
 
   /**
    * Validate and store the winning candidate's Doppler figures. Never fails the document: a provider that could not
-   * extract images (Doppler exit 5) or a folder that fails validation leaves the Markdown as it is and stores no figure.
-   * The raw reason goes to telemetry (this log line) only; stage stats carry a fixed status.
+   * extract images (Doppler exit 5), a folder that fails validation or cannot be read, and a failed object or index
+   * upload each leave the Markdown as it is and record no figure. The raw exit-5 reason goes to telemetry (this log
+   * line) only; stage stats carry a fixed status. Cancellation still aborts the document.
    */
   private async storeWinningDopplerFigures(args: {
     document: import("../models.js").Document; runId: string; candidate: ExtractedCandidate; markdown: string; signal?: AbortSignal;
@@ -2963,15 +2964,38 @@ export class ExtractMarkdownStage implements Stage {
     try {
       validated = await readDopplerFigureDir(figures.dir, { pageCount: args.document.pageCount, signal: args.signal });
     } catch (error) {
-      if (!(error instanceof DopplerFigureRejection)) throw error;
+      if (args.signal?.aborted) throw error;
+      if (!(error instanceof DopplerFigureRejection)) return this.dopplerFiguresFailed(args.document.id, "read-failed", imagesConfined, error);
       console.warn(`[doppler-figures] document=${args.document.id} status=rejected rule=${error.rule} confined=${imagesConfined}`);
       pushPerfMetric({ metric: "doppler-figures-failed", value: 1, unit: "count", tags: ["doppler-figures", "rejected"], metadata: { documentId: args.document.id, rule: error.rule } });
       return { slots: [], stats: { status: "rejected", rule: error.rule, imagesConfined } };
     }
-    const stored = await storeDopplerFigures({ storage: this.storage, document: args.document, runId: args.runId, figures: validated, markdown: args.markdown, signal: args.signal });
+    let stored;
+    try {
+      stored = await storeDopplerFigures({ storage: this.storage, document: args.document, runId: args.runId, figures: validated, markdown: args.markdown, signal: args.signal });
+    } catch (error) {
+      if (args.signal?.aborted || !(error instanceof DopplerFigureStoreError)) throw error;
+      return this.dopplerFiguresFailed(args.document.id, error.reason, imagesConfined, error.cause, error.cleanup);
+    }
     const stats = { ...stored.stats, imagesConfined, validateMs: Date.now() - started - stored.stats.storeMs };
     console.log(`[doppler-figures] document=${args.document.id} status=stored entries=${stats.entries} files=${stats.files} bytes=${stats.bytes} markers=${stats.markers} resolved=${stats.markersResolved} confined=${imagesConfined} ms=${Date.now() - started}`);
     return { slots: stored.slots, stats };
+  }
+
+  /**
+   * A figure-only failure after the Markdown is final (reading the validated folder, storing objects or the index):
+   * no slot is recorded, so the document has no figures rather than some. Stage stats and the metric carry a fixed
+   * reason slug; the log line adds only the error's class and code, never its message (which could echo content).
+   */
+  private dopplerFiguresFailed(
+    documentId: string, reason: "read-failed" | "store-object-failed" | "store-index-failed", imagesConfined: boolean | null,
+    cause: unknown, cleanup?: string,
+  ): { slots: Array<{ slot: string; uri: string }>; stats: Record<string, unknown> } {
+    const name = cause instanceof Error ? cause.name : typeof cause;
+    const code = (cause as { code?: unknown } | null)?.code;
+    console.warn(`[doppler-figures] document=${documentId} status=failed reason=${reason} error=${name}${typeof code === "string" ? ` code=${code}` : ""}${cleanup ? ` cleanup=${cleanup}` : ""} confined=${imagesConfined}`);
+    pushPerfMetric({ metric: "doppler-figures-failed", value: 1, unit: "count", tags: ["doppler-figures", reason], metadata: { documentId, reason } });
+    return { slots: [], stats: { status: "failed", reason, ...(cleanup ? { cleanup } : {}), imagesConfined } };
   }
 
   private async enrichDocumentArtifacts(args: {

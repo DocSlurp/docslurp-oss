@@ -164,6 +164,26 @@ export interface DopplerFigureStorage {
   putBytes(key: string, data: Uint8Array, contentType: string): Promise<void>;
   putJson(key: string, value: unknown): Promise<void>;
   uri(key: string): string;
+  /** Removes partial uploads after a failed store; without it they stay unrecorded (unreachable) orphans. */
+  deleteKeys?(keys: string[]): Promise<void>;
+}
+
+/** Why storing a validated figure set failed: a fixed slug for stage stats and telemetry, never the storage error text. */
+export type DopplerFigureStoreFailure = "store-object-failed" | "store-index-failed";
+
+/**
+ * Storing figures failed part way. Nothing was recorded, so no figure (and no index) is reachable for the document;
+ * `cleanup` says whether the objects written so far were deleted too.
+ */
+export class DopplerFigureStoreError extends Error {
+  constructor(
+    readonly reason: DopplerFigureStoreFailure,
+    readonly cleanup: "deleted" | "failed" | "unavailable" | "none",
+    options: { cause: unknown },
+  ) {
+    super(`Doppler figures were not stored (${reason})`, options);
+    this.name = "DopplerFigureStoreError";
+  }
 }
 
 export interface DopplerFigureStats {
@@ -198,22 +218,41 @@ export async function storeDopplerFigures(args: {
 }): Promise<StoredDopplerFigures> {
   const started = Date.now();
   const slots: StoredDopplerFigures["slots"] = [];
-  for (const file of args.figures.files) {
-    args.signal?.throwIfAborted();
-    const key = dopplerFigureStorageKey(args.document, args.runId, dopplerFigureFileName(file.id, file.format));
-    await args.storage.putBytes(key, file.bytes, file.mediaType);
-    slots.push({ slot: dopplerFigureSlot(file.id), uri: args.storage.uri(key) });
-  }
   const records = dopplerFigureRecords(args.figures.entries);
   const resolvable = new Set(records.filter((record) => record.fileOf).map((record) => record.id));
   const markers = dopplerImageMarkerIds(args.markdown);
   const indexKey = dopplerFigureStorageKey(args.document, args.runId, "index.json");
-  await args.storage.putJson(indexKey, {
-    version: DOPPLER_FIGURES_INDEX_VERSION, documentId: args.document.id,
-    // Ids the Markdown's markers name that this index resolves; the rest stay unresolved (text could imitate a marker).
-    markers: markers.filter((id) => resolvable.has(id)),
-    figures: records,
-  });
+  // Files first, the index last: until the index is written (and the caller records the slots) the set is not visible.
+  // Any failure removes what this call wrote, best effort, including an index whose write may have landed anyway.
+  const written: string[] = [];
+  let phase: DopplerFigureStoreFailure = "store-object-failed";
+  try {
+    for (const file of args.figures.files) {
+      args.signal?.throwIfAborted();
+      const key = dopplerFigureStorageKey(args.document, args.runId, dopplerFigureFileName(file.id, file.format));
+      written.push(key);
+      await args.storage.putBytes(key, file.bytes, file.mediaType);
+      slots.push({ slot: dopplerFigureSlot(file.id), uri: args.storage.uri(key) });
+    }
+    args.signal?.throwIfAborted();
+    phase = "store-index-failed";
+    written.push(indexKey);
+    await args.storage.putJson(indexKey, {
+      version: DOPPLER_FIGURES_INDEX_VERSION, documentId: args.document.id,
+      // Ids the Markdown's markers name that this index resolves; the rest stay unresolved (text could imitate a marker).
+      markers: markers.filter((id) => resolvable.has(id)),
+      figures: records,
+    });
+  } catch (error) {
+    let cleanup: DopplerFigureStoreError["cleanup"] = "none";
+    if (written.length > 0) {
+      if (!args.storage.deleteKeys) cleanup = "unavailable";
+      else cleanup = await args.storage.deleteKeys(written).then(() => "deleted" as const, () => "failed" as const);
+    }
+    // Cancellation stays cancellation: the caller must stop the document, not record a figure failure.
+    if (args.signal?.aborted) throw error;
+    throw new DopplerFigureStoreError(phase, cleanup, { cause: error });
+  }
   slots.unshift({ slot: DOPPLER_FIGURES_INDEX_SLOT, uri: args.storage.uri(indexKey) });
   const count = <K extends string>(values: K[]) => values.reduce<Record<string, number>>((acc, v) => ({ ...acc, [v]: (acc[v] ?? 0) + 1 }), {});
   const stats: DopplerFigureStats = {

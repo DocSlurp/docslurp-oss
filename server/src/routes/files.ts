@@ -69,7 +69,7 @@ const PDF_CSP = "frame-ancestors 'self'";
  * is only a correctness filter: this CSP is what keeps a compromised figure inert).
  */
 const DOPPLER_FIGURE_KEY = /\/doppler-figures\/[A-Za-z0-9-]{1,64}\/p[1-9][0-9]{0,8}\.g?(?:0|[1-9][0-9]{0,5})\.(webp|svg|png)$/;
-const FIGURE_SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
+const FIGURE_SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'; sandbox; frame-ancestors 'self'";
 
 export function dopplerFigureFormat(uri: string): DopplerFigureFormat | null {
   const match = DOPPLER_FIGURE_KEY.exec(parseArtifactUri(uri)?.key ?? "");
