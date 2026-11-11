@@ -182,7 +182,10 @@ export interface FirstPassBatchDeps {
 
 export interface FirstPassBatchResult {
   usage: UsageSummary;
-  /** Documents the first pass made keyword searchable and indexed. */
+  /**
+   * Documents the first pass made keyword searchable and whose `index` checkpoint is durably completed (council #340 N1):
+   * a document embedded but not confirmed indexed is handed back ("index-unconfirmed"), and the stage loop indexes it.
+   */
   indexed: string[];
   /** Documents whose text the batch extracted but that the stage loop finishes (pages that need OCR or vision). */
   extracted: string[];
@@ -245,7 +248,8 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
   const work = await mkdtemp(path.join(tmpdir(), "docslurp-first-pass-"));
   const staged: string[] = [];
   const handedBack: FirstPassBatchResult["handedBack"] = [];
-  const indexed: string[] = [];
+  /** Embedded by a drain (embed checkpoint completed); indexed only once the index checkpoint is confirmed too. */
+  const embedded: string[] = [];
   const extracted: string[] = [];
   let usage = zeroUsage();
   const timings = { firstTextMs: null as number | null, allTextMs: null as number | null, firstSearchableMs: null as number | null, allSearchableMs: null as number | null, batchMs: 0, pages: 0 };
@@ -318,13 +322,13 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
         if (publishable.length) {
           usage = addUsage(usage, await deps.runStage("embed", publishable, batch.signal));
           // Only what the embed stage durably completed counts (a stage that no-ops for a document leaves it to the loop).
-          const embedded = await loadRunState(deps.store, input.runId, { hydrate: true });
-          const done = publishable.filter((id) => embedded.documentStages.get(id)?.get("embed")?.status === "completed");
+          const afterEmbed = await loadRunState(deps.store, input.runId, { hydrate: true });
+          const done = publishable.filter((id) => afterEmbed.documentStages.get(id)?.get("embed")?.status === "completed");
           if (done.length) {
             const searchable = now() - started;
             timings.firstSearchableMs ??= searchable;
             timings.allSearchableMs = searchable;
-            indexed.push(...done);
+            embedded.push(...done);
           }
         }
       } catch (error) {
@@ -438,7 +442,11 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
       }, batch.signal);
     }
 
-    if (indexed.length) usage = addUsage(usage, await deps.runStage("index", indexed, batch.signal));
+    if (embedded.length) usage = addUsage(usage, await deps.runStage("index", embedded, batch.signal));
+    // Indexed only what the index stage durably completed (N1): a stage that skipped a document, left its checkpoint
+    // incomplete or failed it is handed back, and the stage loop (which skips completed embed checkpoints) indexes it once.
+    const indexed = await confirmedIndexed(deps.store, input.runId, embedded, pipeline.indexVectors !== false);
+    for (const documentId of embedded) if (!indexed.includes(documentId)) handedBack.push({ documentId, reason: "index-unconfirmed" });
 
     // Every document exactly once: what the first pass neither indexed nor left extracted is handed back (withheld by its
     // gate, a failed or incomplete stage), so the workflow never counts it finished.
@@ -474,6 +482,18 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
     for (const source of staged) await cleanupTempFile(source).catch(() => undefined);
     await rm(work, { recursive: true, force: true });
   }
+}
+
+/**
+ * The embedded documents whose index checkpoint the database holds as completed. Reads the checkpoints again (never the
+ * in-memory state the stage wrote), so only a durable completion counts. A pipeline without vector indexing has no index
+ * checkpoint to wait for: there, the embed checkpoint is the document's last first-pass stage.
+ */
+async function confirmedIndexed(store: FirstPassStore, runId: string, embedded: string[], indexVectors: boolean): Promise<string[]> {
+  if (!embedded.length || !indexVectors) return [...embedded];
+  const after = await loadRunState(store, runId, { hydrate: true });
+  return embedded.filter((id) => after.documentStages.get(id)?.get("index")?.status === "completed"
+    && after.documentStages.get(id)?.get("embed")?.status === "completed");
 }
 
 /** The VM route counts pages with the provider; the host runner is never used for a PDF here. */

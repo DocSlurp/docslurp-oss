@@ -101,6 +101,10 @@ const textEvent = (index: number, pages = 1, words = 50) => ({
 let seen: Array<{ stage: string; documentId: string; pageCount?: number; served?: string }>;
 let piiFails: Set<string>;
 let visionReplaces: Set<string>;
+/** N1: the index stage skips these documents (no checkpoint), as a stage that silently no-ops would. */
+let indexSkips: Set<string>;
+/** N1: the index stage throws for these documents (after embed completed). */
+let indexThrows: Set<string>;
 /** Embedding of these documents waits until released (a slow provider call). */
 let embedHold: { ids: Set<string>; until: Promise<void> } | null = null;
 
@@ -109,6 +113,7 @@ function stages(): Stage[] {
     name,
     run: async (state) => {
       for (const document of [...state.documents]) {
+        if (name === "index" && indexSkips.has(document.id)) continue;
         await runDocumentStage(state, document, name, `${document.id}:${name}`, name, async () => ({ stats: (await body(state, document)) ?? {} }));
       }
     },
@@ -147,7 +152,10 @@ function stages(): Stage[] {
       seen.push({ stage: "embed", documentId: document.id });
       await store.markDocumentLexicalSearchable(document.id);
     }),
-    perDocument("index", async (_state, document) => { seen.push({ stage: "index", documentId: document.id }); }),
+    perDocument("index", async (_state, document) => {
+      seen.push({ stage: "index", documentId: document.id });
+      if (indexThrows.has(document.id)) throw new Error("vector store unavailable");
+    }),
   ];
 }
 
@@ -196,7 +204,7 @@ beforeEach(async () => {
   setFirstPassPublishGate(recordedVerdictGate);
   registerFakeProvider();
   batchCalls = 0; singleRuns = 0; pageCounts = 0; lastJob = undefined; seen = []; piiFails = new Set(); embedHold = null;
-  stored = new Map(); downloads = []; sourceBytes = new Map(); visionReplaces = new Set();
+  stored = new Map(); downloads = []; sourceBytes = new Map(); visionReplaces = new Set(); indexSkips = new Set(); indexThrows = new Set();
   // Production's PDF route: every PDF in a VM, page counts included.
   vi.stubEnv("DOCSLURP_PDF_MODE", "vm");
   await seed();
@@ -499,5 +507,36 @@ describe("first pass: council #340 regressions", () => {
     expect(singleRuns).toBe(0);
     // Same Markdown as the first pass: no second PII scan or embedding.
     expect(seen.filter((s) => s.stage === "pii-detect" || s.stage === "embed")).toEqual([]);
+  });
+
+  it("N1: a document whose index checkpoint the index stage did not complete is never reported indexed; the loop indexes it exactly once", async () => {
+    indexSkips = new Set(["d1"]);
+    script = all3;
+    const result = await runFirstPassBatch(deps(), { runId: "r1", documentIds: DOCS });
+    expect(result.indexed.sort()).toEqual(["d0", "d2"]);
+    expect(result.handedBack).toEqual([{ documentId: "d1", reason: "index-unconfirmed" }]);
+    const ids = [...result.indexed, ...result.extracted, ...result.handedBack.map((x) => x.documentId)].sort();
+    expect(ids).toEqual(DOCS);
+    expect(await docStage("d1", "embed")).toBe("completed");
+    expect(await docStage("d1", "index")).toBeUndefined();
+    // The stage loop: embed is not run again, index runs for d1 alone, and a second loop pass runs nothing.
+    indexSkips = new Set();
+    seen = [];
+    for (const stage of ["embed", "index"]) await loopStage(stage);
+    expect(seen.map((s) => `${s.stage}:${s.documentId}`)).toEqual(["index:d1"]);
+    seen = [];
+    for (const stage of ["embed", "index"]) await loopStage(stage);
+    expect(seen).toEqual([]);
+    expect(await docStage("d1", "index")).toBe("completed");
+  });
+
+  it("N1: an index failure after embed fails that document as the ordinary loop would; it is handed back, never reported indexed", async () => {
+    indexThrows = new Set(["d2"]);
+    script = all3;
+    const result = await runFirstPassBatch(deps(), { runId: "r1", documentIds: DOCS });
+    expect(result.indexed.sort()).toEqual(["d0", "d1"]);
+    expect(result.handedBack).toEqual([{ documentId: "d2", reason: "index-unconfirmed" }]);
+    expect(await docStage("d2", "embed")).toBe("completed");
+    expect(await docStage("d2", "index")).toBe("failed");
   });
 });
