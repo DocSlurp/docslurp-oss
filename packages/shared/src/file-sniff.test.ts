@@ -112,6 +112,26 @@ describe("sniffFileBytes", () => {
   });
 });
 
+describe("RAR bytes (council re-check 2)", () => {
+  const rar5 = new Uint8Array([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00, 0x33, 0x92, 0xb5, 0xe5]);
+  const rar4 = new Uint8Array([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00, 0xcf, 0x90, 0x73, 0x00]);
+
+  it("are sniffed as RAR, which is not an accepted type, at either depth", () => {
+    for (const bytes of [rar4, rar5]) {
+      expect(sniffFileBytes(bytes, "report.pdf").mimeType).toBe("application/vnd.rar");
+      expect(sniffFileBytes(bytes, "report.pdf", { depth: "header" }).mimeType).toBe("application/vnd.rar");
+    }
+  });
+
+  it("under any declared or extension type are an unresolved mismatch, never accepted as that type", () => {
+    for (const [filename, declaredMimeType] of [["report.pdf", "application/pdf"], ["notes.txt", "text/plain"], ["deck.docx", null], ["photo.png", "image/png"]] as const) {
+      for (const depth of ["full", "header"] as const) {
+        expect(fileFactsFor(rar5, { filename, declaredMimeType }, { depth }).mismatch, `${filename} ${depth}`).toBe("unresolved");
+      }
+    }
+  });
+});
+
 describe("fileFactsFor", () => {
   it("accepts a CSV declared application/vnd.ms-excel as a warning, stored as CSV", () => {
     const facts = fileFactsFor(Buffer.from("a,b\n1,2\n3,4\n"), { filename: "data.csv", declaredMimeType: "application/vnd.ms-excel" });

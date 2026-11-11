@@ -68,6 +68,10 @@ export interface FileFacts {
 
 const ZIP_SIGNATURES = [[0x50, 0x4b, 0x03, 0x04], [0x50, 0x4b, 0x05, 0x06], [0x50, 0x4b, 0x07, 0x08]];
 const OLE_SIGNATURE = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+/** `Rar!\x1a\x07` (RAR 4 and 5). Not an accepted format, and the worker's malware scanner cannot open it. */
+const RAR_SIGNATURE = [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07];
+/** The sniffed type of RAR bytes: unsupported, so any declared type is an unresolved mismatch (refused). */
+export const RAR_MIME = "application/vnd.rar";
 const SAMPLE_BYTES = 8192;
 const MAX_ZIP_NAMES = 10_000;
 const ZIP_END_SIGNATURE = 0x06054b50;
@@ -307,6 +311,9 @@ export function sniffFileBytes(input: Uint8Array, filename = "", options: SniffO
     if (head.includes("matroska")) return { ...none, mimeType: "video/x-matroska" };
     return { ...none, mimeType: fileExtension(filename) === ".weba" ? "audio/webm" : "video/webm" };
   }
+  // RAR under any declared type is refused: ClamAV builds without the non-free unrar module (Debian's) report every RAR
+  // clean, encrypted or not (council re-check 2 matrix), so it must never pass as the type it claims.
+  if (startsWith(bytes, RAR_SIGNATURE)) return { ...none, mimeType: RAR_MIME };
   if (ascii(bytes, 0, 4) === "OggS") return { ...none, mimeType: "audio/ogg" };
   if (ascii(bytes, 0, 4) === "fLaC") return { ...none, mimeType: "audio/flac" };
   if (ascii(bytes, 0, 3) === "ID3") return { ...none, mimeType: "audio/mpeg" };

@@ -22,6 +22,11 @@
   shares a VM with clamd. One document per session already bounds it to the document that ran the exploit.
 - [ ] Build the scanner snapshot in the background when freshclam updates the signatures (today the first scan after an
   update waits about 34 s for the build), and share one snapshot across workers instead of one build per worker process.
+- [ ] RAR content is never malware-scanned: Debian's ClamAV has no unrar module (libclamunrar is non-free), so every RAR,
+  encrypted or not, scans clean (council re-check 2 matrix). Top-level RAR bytes are now refused under any declared type
+  (file-sniff RAR_MIME), but a RAR stored inside an accepted container (a DOCX/EPUB/ODT member) is still unscanned. Our
+  extractors never open it; it is only served back with the original. Decide: install libclamunrar in the worker and
+  scanner images, or refuse containers whose members are RAR (needs member magic, read in the VM).
 - [ ] Q3 (concurrent quarantine and extraction): split quarantine into the intake inspection (stays first: format-detect
   reads its verified file facts) and the malware scan, and gate every served artifact on a clean verdict before running
   the scan beside extraction. Coordinate with the first-pass plan's quarantine precondition.
