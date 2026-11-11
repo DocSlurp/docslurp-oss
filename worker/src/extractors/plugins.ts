@@ -32,6 +32,7 @@ import { parsePageLayoutFacts, type PageLayoutFacts } from "../lib/page-layout-f
 import { planPageShards, type ShardCostProfile } from "../temporal/page-shards.js";
 import { registerShardProfile } from "../temporal/page-shard-profiles.js";
 import { resolveModalImage, type ModalSdk } from "../sandbox/providers/modal/index.js";
+import { validBatchProvider, type SandboxedPdfBatchProvider } from "./sandboxed-pdf-batch.js";
 
 export const EXTRACTOR_PLUGIN_API_VERSION = 1;
 /** The extractor id a registered sandboxed PDF provider serves. */
@@ -145,6 +146,11 @@ export interface SandboxedPdfExtractorProvider {
    * document fails the same way in both modes.
    */
   pageCount?(job: { input: string }, signal?: AbortSignal): Promise<{ pages: number; usage?: UsageEvent }>;
+  /**
+   * Present when the provider can convert many PDFs of one run in one VM job, streaming each file's result as it is ready
+   * (the first pass; extractors/sandboxed-pdf-batch.ts). The same isolation rules apply to every file of the batch.
+   */
+  batch?: SandboxedPdfBatchProvider;
 }
 
 /**
@@ -266,6 +272,7 @@ export function registerExtractorPlugin(plugin: ExtractorPlugin): void {
       throw new Error("Sandboxed PDF provider embeddedImages needs read() and a producerId");
     }
     if (pdf.figures && !PROVIDER_ID.test(pdf.figures.producerId ?? "")) throw new Error("Sandboxed PDF provider figures needs a producerId");
+    if (pdf.batch !== undefined && !validBatchProvider(pdf.batch)) throw new Error("Sandboxed PDF provider batch needs run() and positive limits");
   }
   const orientation = plugin.imageOrientation;
   if (orientation) {
