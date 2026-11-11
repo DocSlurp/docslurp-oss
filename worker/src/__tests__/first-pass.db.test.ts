@@ -539,4 +539,38 @@ describe("first pass: council #340 regressions", () => {
     expect(await docStage("d2", "embed")).toBe("completed");
     expect(await docStage("d2", "index")).toBe("failed");
   });
+
+  it("C1: index freshness: Markdown replaced after the first pass re-runs PII, embed and index once for that document only", async () => {
+    await seed({ documentExtraction: { order: { pdf: ["vm-pdf"] } }, visionFallback: false, piiPolicy: { enabled: true, mode: "block", patterns: ["ssn"] } });
+    script = all3;
+    const result = await runFirstPassBatch(deps(), { runId: "r1", documentIds: DOCS });
+    expect(result.indexed.sort()).toEqual(DOCS);
+    seen = [];
+    visionReplaces = new Set(["d1"]);
+    for (const stage of ["extract-markdown", "vision-extract", "pii-detect", "embed", "index"]) await loopStage(stage);
+    expect(seen.filter((s) => s.stage !== "vision-extract").map((s) => `${s.stage}:${s.documentId}`)).toEqual(["pii-detect:d1", "embed:d1", "index:d1"]);
+    // A second loop pass (a retried activity) re-runs nothing: the re-run checkpoints are ordinary ones now.
+    seen = [];
+    visionReplaces = new Set();
+    for (const stage of ["pii-detect", "embed", "index"]) await loopStage(stage);
+    expect(seen).toEqual([]);
+  });
+
+  it("C1: a textless (OCR/vision) document is extracted by the first pass, then PII, embed and index run once in the loop on the replaced Markdown", async () => {
+    await seed({ documentExtraction: { order: { pdf: ["vm-pdf"] } }, visionFallback: false, quality: "good", piiPolicy: { enabled: true, mode: "block", patterns: ["ssn"] } });
+    script = async (_job, emit) => { await emit(textEvent(0, 2, 0)); await emit(textEvent(1)); await emit(textEvent(2)); };
+    const result = await runFirstPassBatch(deps(), { runId: "r1", documentIds: DOCS });
+    expect(result.extracted).toEqual(["d0"]);
+    expect(result.indexed.sort()).toEqual(["d1", "d2"]);
+    expect(seen.filter((s) => s.documentId === "d0").map((s) => s.stage)).toEqual(["extract-markdown", "pii-detect"]);
+    seen = [];
+    visionReplaces = new Set(["d0"]);
+    for (const stage of ["extract-markdown", "vision-extract", "pii-detect", "embed", "index"]) await loopStage(stage);
+    // Any extract-markdown the loop re-runs is served from the batch result, never a second VM.
+    expect(seen.filter((s) => s.stage === "extract-markdown").every((s) => s.served?.startsWith(`doc ${s.documentId} page 1`))).toBe(true);
+    expect(singleRuns).toBe(0);
+    expect(seen.filter((s) => s.stage !== "vision-extract" && s.stage !== "extract-markdown").map((s) => `${s.stage}:${s.documentId}`))
+      .toEqual(["pii-detect:d0", "embed:d0", "index:d0"]);
+    expect(await docStage("d0", "index")).toBe("completed");
+  });
 });
