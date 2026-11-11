@@ -17,6 +17,7 @@
  */
 
 import {
+  TargetHold,
   formatWorkerScalerMetricLines,
   type WorkerScalerConfig,
   type WorkerScalerQueryParams,
@@ -45,8 +46,11 @@ export function hasWork(snapshot: WorkerScalerSnapshot): boolean {
 export class ScalerPublisher {
   private cached: { at: number; snapshot: Promise<WorkerScalerSnapshot> } | null = null;
   private lastKeepAliveError = 0;
+  private readonly hold: TargetHold;
 
-  constructor(private readonly deps: ScalerPublisherDeps) {}
+  constructor(private readonly deps: ScalerPublisherDeps) {
+    this.hold = new TargetHold(deps.config.scaleDownHoldMs ?? 0);
+  }
 
   private now(): number {
     return this.deps.now?.() ?? Date.now();
@@ -72,7 +76,9 @@ export class ScalerPublisher {
       "# TYPE docslurp_worker_scaler_leader gauge",
       `docslurp_worker_scaler_leader ${leader ? 1 : 0}`,
     ];
-    if (leader) lines.push(...formatWorkerScalerMetricLines(await this.snapshot(), this.deps.config, this.deps.params));
+    // The hold lives on the leader only: a handover starts a fresh window (the next leader publishes demand alone).
+    if (leader) lines.push(...formatWorkerScalerMetricLines(await this.snapshot(), this.deps.config, this.deps.params,
+      (target) => this.hold.apply(target, this.now())));
     return `${lines.join("\n")}\n`;
   }
 

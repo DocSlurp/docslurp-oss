@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFile, writeFile } from "node:fs/promises";
 
 import { normalizePipelineFeatures } from "@docslurp/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -43,7 +44,7 @@ import { fromEnv } from "../config.js";
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
 import type { Document, ProjectRun } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
-import { EmbedStage } from "../stages/embed.js";
+import { EmbedStage, embedPreambleMode } from "../stages/embed.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 
@@ -77,7 +78,7 @@ const markdown = Array.from({ length: PAGES }, (_, page) =>
     `## Part ${page + 1}.${section}\n\n${`Page ${page + 1} part ${section} lists step ${section} of the procedure. `.repeat(20)}`).join("\n\n")}`,
 ).join("\n\f");
 
-async function embedOnce(env: Record<string, string>, documents = ["doc"], pipelineOverrides: Record<string, unknown> = {}, allowFailure = false) {
+async function embedOnce(env: Record<string, string>, documents = ["doc"], pipelineOverrides: Record<string, unknown> = {}, allowFailure = false, text = markdown, runner: Partial<CommandRunner> = {}) {
   Object.assign(process.env, env);
   Object.assign(calls, { embed: 0, inFlight: 0, peak: 0, preamble: 0, progress: 0, pages: [] });
   const storage = new MemoryStorage();
@@ -85,7 +86,7 @@ async function embedOnce(env: Record<string, string>, documents = ["doc"], pipel
   const artifacts: Record<string, string> = {};
   for (const id of documents) {
     const key = `u1/run/canonical/${id}.json`;
-    const canonical = buildCanonicalDocumentFromMarkdown({ documentId: id, text: markdown, pageCount: PAGES, extractor: "test" });
+    const canonical = buildCanonicalDocumentFromMarkdown({ documentId: id, text, pageCount: PAGES, extractor: "test" });
     for (const block of canonical.blocks) block.metadata = { ...block.metadata,
       parserArtifactUri: `s3://t/u1/run/parser/${id}.json`, sourceArtifactUri: `s3://t/u1/run/source/${id}.pdf` };
     await storage.putJson(key, canonical);
@@ -108,7 +109,7 @@ async function embedOnce(env: Record<string, string>, documents = ["doc"], pipel
     },
   } as unknown as WorkflowState["store"];
   let error: unknown;
-  await new EmbedStage({} as CommandRunner, storage as unknown as ArtifactStore, { ...fromEnv(), openRouterApiKey: "k", openAiApiKey: "k" })
+  await new EmbedStage(runner as CommandRunner, storage as unknown as ArtifactStore, { ...fromEnv(), openRouterApiKey: "k", openAiApiKey: "k" })
     .run(state).catch((caught: unknown) => { error = caught; });
   if (error && !allowFailure) throw error;
   const artifactUri = state.artifactLedger.readDocument(documents[0]!, "embeddings");
@@ -119,7 +120,7 @@ async function embedOnce(env: Record<string, string>, documents = ["doc"], pipel
   return { state, artifact, materialized, objects: storage.objects, error, calls: { ...calls, pages: calls.pages.map((pages) => [...pages]) } };
 }
 
-const ENV_KEYS = ["EMBED_BATCH_CONCURRENCY", "EMBED_PREAMBLE_MODE", "EMBED_PROGRESS_INTERVAL_MS", "DOCSLURP_EMBED_MAX_WINDOW_CHUNKS"];
+const ENV_KEYS = ["DOCSLURP_SERVICE_PROFILE", "EMBED_BATCH_CONCURRENCY", "EMBED_PREAMBLE_MODE", "EMBED_PROGRESS_INTERVAL_MS", "DOCSLURP_EMBED_MAX_WINDOW_CHUNKS"];
 const saved = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
 afterEach(() => {
   for (const key of ENV_KEYS) {
@@ -194,6 +195,56 @@ describe("EmbedStage concurrency", () => {
     expect(preambles).toHaveLength(2);
     expect(preambles.map((event) => event.metadata?.discarded ?? null)).toEqual([null, "deduplicated"]);
     expect(result.state.documentStage("second", "embed")?.stats).toMatchObject({ deduplicated: true });
+  });
+
+  it("defaults to auto and accepts only known modes", () => {
+    expect(embedPreambleMode({})).toBe("auto");
+    expect(embedPreambleMode({ EMBED_PREAMBLE_MODE: " Inline " })).toBe("inline");
+    expect(embedPreambleMode({ EMBED_PREAMBLE_MODE: "concurrent" })).toBe("concurrent");
+    expect(embedPreambleMode({ EMBED_PREAMBLE_MODE: "bogus" })).toBe("auto");
+  });
+
+  it("auto mode keeps the inline order when chunking has no parser-VM table work", async () => {
+    const result = await embedOnce({}, ["first", "second"]);
+    expect(result.calls.preamble).toBe(1);
+  });
+
+  it("auto mode starts the summary call before the parser-VM table round trip", async () => {
+    const tableMarkdown = `${markdown}\n\n<table><tr><th>Region</th><th>Revenue</th></tr><tr><td>West</td><td>42</td></tr></table>\n`;
+    const order: string[] = [];
+    const runner = {
+      run: vi.fn(async (plan: { args: string[] }) => {
+        order.push(`vm:preamble-started=${calls.preamble}`);
+        const [, input, output] = plan.args;
+        const batch = JSON.parse(await readFile(input!, "utf8")) as string[];
+        await sleep(30);
+        await writeFile(output!, JSON.stringify(batch.map(() => null)));
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }),
+    };
+    const result = await embedOnce({ DOCSLURP_SERVICE_PROFILE: "service" }, ["doc"], {}, false, tableMarkdown, runner as never);
+    expect(runner.run).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(["vm:preamble-started=1"]);
+    expect(result.calls.preamble).toBe(1);
+    expect(result.artifact.chunks.length).toBeGreaterThan(0);
+    const preambles = result.state.usageLedger.snapshot().filter((event) => event.metric === "contextual-chunk-preamble");
+    expect(preambles).toHaveLength(1);
+  });
+
+  it("inline mode still waits for the table round trip before the summary call", async () => {
+    const tableMarkdown = `${markdown}\n\n<table><tr><th>Region</th><th>Revenue</th></tr><tr><td>West</td><td>42</td></tr></table>\n`;
+    const order: string[] = [];
+    const runner = {
+      run: vi.fn(async (plan: { args: string[] }) => {
+        order.push(`vm:preamble-started=${calls.preamble}`);
+        const [, input, output] = plan.args;
+        const batch = JSON.parse(await readFile(input!, "utf8")) as string[];
+        await writeFile(output!, JSON.stringify(batch.map(() => null)));
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }),
+    };
+    await embedOnce({ DOCSLURP_SERVICE_PROFILE: "service", EMBED_PREAMBLE_MODE: "inline" }, ["doc"], {}, false, tableMarkdown, runner as never);
+    expect(order).toEqual(["vm:preamble-started=0"]);
   });
 
   it("inline mode skips the preamble call for an in-run duplicate", async () => {
