@@ -932,6 +932,13 @@
       "when": 1793834400000,
       "tag": "0132_projects",
       "breakpoints": true
+    },
+    {
+      "idx": 133,
+      "version": "7",
+      "when": 1793920800000,
+      "tag": "0133_vision_attempts_table_rescue_purpose",
+      "breakpoints": true
     }
   ]
 }

@@ -25,6 +25,7 @@ import {
   type AdaptiveSpecializedContentKind,
   type AdaptiveSpecializedContentSummary,
   type ParserPlaybookKey,
+  tableLeakPageCap,
   tableReliability,
   TABLE_LEAK_SIGNALS,
 } from "@docslurp/shared";
@@ -43,6 +44,13 @@ import { resolveRunRoutingV2, routingVersion, type RoutingVersionOptions } from 
 
 /** A page whose extracted table is unreliable or leaked out of the tables (tableReliability): a model reads it, billed Rich. */
 export const TABLE_UNRELIABLE_SIGNAL = "ocr-authorized:table-unreliable";
+/**
+ * Authorized by leak signals alone (TABLE_LEAK_SIGNALS on a page that is not a table-heavy page with an unreliable table):
+ * counted against the document's tableLeakPageCap here, and read under the guard's `table-rescue` page budget.
+ */
+export const TABLE_LEAK_ONLY_SIGNAL = "table:leak-only";
+/** A leak-qualified page past the document's cap: served from the extraction, recorded for telemetry. */
+export const TABLE_LEAK_CAPPED_SIGNAL = "table:leak-capped";
 
 export class ClassifyRouteStage implements Stage {
   readonly name = "classify-route";
@@ -348,7 +356,7 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
   const { label, confidence, signals } = classifyTextAndFilename(args.text, args.filename, { routingV2 });
   const pageCount = Math.max(1, args.pageCount);
   const pages = routingV2
-    ? buildEvidencePages(args, pageCount)
+    ? capTableLeakPages(buildEvidencePages(args, pageCount), pageCount)
     : buildLegacyPages(args, pageCount);
   const summary = summarizeAdaptiveRouting(pages);
   const specializedContentSummary = summarizeSpecializedContent(pages);
@@ -494,11 +502,14 @@ function buildEvidencePages(
       ? tableReliability(text).filter((signal) => page.route === "table-heavy" || TABLE_LEAK_SIGNALS.has(signal))
       : [];
     if (tableSignals.length > 0) {
+      const leakOnly = !(page.route === "table-heavy" && tableSignals.some((signal) => !TABLE_LEAK_SIGNALS.has(signal)));
       return {
         ...page,
         extractorHint: "vision-rescue" as const,
         signals: [...page.signals, ...ocrDecision.signals, ...tableSignals],
-        ocrDecision: { authorized: true, confidence: 0.7, signals: [TABLE_UNRELIABLE_SIGNAL, ...tableSignals] },
+        ocrDecision: { authorized: true, confidence: 0.7, signals: [TABLE_UNRELIABLE_SIGNAL, ...tableSignals, ...(leakOnly ? [TABLE_LEAK_ONLY_SIGNAL] : [])] },
+        // What the page is without the leak read, for capTableLeakPages.
+        ...(leakOnly ? { [UNCAPPED]: { ...page, signals: [...page.signals, ...ocrDecision.signals, ...tableSignals, TABLE_LEAK_CAPPED_SIGNAL], ocrDecision } } : {}),
       };
     }
     if (!ocrDecision.authorized) {
@@ -514,6 +525,27 @@ function buildEvidencePages(
       signals: [...page.signals, ...ocrDecision.signals, ...(ocrDecision.signals.includes(GARBLED_TEXT_LAYER_SIGNAL) || decision.kind === "garbled-text-layer" ? ["garbled-text"] : [])],
       ocrDecision,
     };
+  });
+}
+
+const UNCAPPED = Symbol("table-leak-uncapped");
+
+/**
+ * At most tableLeakPageCap(pageCount) pages of a document are read for leak signals alone (TABLE_LEAK_PAGE_CAP): the
+ * pages with the most leak signals first, then in page order. The rest keep the decision they had without the signal.
+ */
+function capTableLeakPages(pages: AdaptivePageRoutingEntry[], pageCount: number): AdaptivePageRoutingEntry[] {
+  type Capped = AdaptivePageRoutingEntry & { [UNCAPPED]?: AdaptivePageRoutingEntry };
+  const leak = (pages as Capped[])
+    .map((page, index) => ({ page, index, strength: page.ocrDecision?.signals.filter((signal) => TABLE_LEAK_SIGNALS.has(signal)).length ?? 0 }))
+    .filter(({ page }) => page[UNCAPPED] !== undefined)
+    .sort((a, b) => b.strength - a.strength || a.index - b.index);
+  const cap = tableLeakPageCap(pageCount);
+  const dropped = new Set(leak.slice(cap).map(({ index }) => index));
+  if (dropped.size) console.log(`[classify-route] table-leak cap=${cap} pages=${leak.length} capped=${dropped.size}`);
+  return (pages as Capped[]).map((page, index) => {
+    const { [UNCAPPED]: uncapped, ...kept } = page;
+    return dropped.has(index) && uncapped ? uncapped : kept;
   });
 }
 

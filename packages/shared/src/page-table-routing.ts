@@ -281,29 +281,46 @@ export const TABLE_UNRELIABLE_EMPTY_CELL_SHARE = 0.4;
  * rows as text, kept only its header, or merged numeric columns into one cell). Each signal is a document class seen in
  * financial, statistical and government tables, measured from the page's own Markdown:
  *
- * - `table:numeric-prose`: at least `numericProseMinLines` text lines outside every table that each hold at least
- *   `numericProseMinNumbers` numeric tokens making up at least `numericProseMinShare` of the line's tokens, beside at least
- *   one word (a row label), and that neither end a sentence nor are list items. Dot leaders do not count as tokens. Table
- *   rows written as text.
- * - `table:header-only`: a table of at most `headerOnlyMaxRows` rows and at least `headerOnlyMinColumns` columns, no
- *   cell mostly made of numbers, no value-like cell (a date or an identifier: digits joined by `/` or `-`, or a run of five
- *   or more digits) and only short cells (at most `headerOnlyMaxCellWords` words): a header separated from its body. A form's
- *   label row over its filled-in values is not one.
- * - `table:merged-numeric-cell`: a cell holding at least `mergedCellMinNumbers` numeric tokens that make up at least half
- *   its tokens, two of them measured values (a decimal or thousands separator, a percent or parentheses): columns
- *   collapsed into one. Phone numbers and digit-per-box form fields are plain digit groups and do not count.
+ * - `table:numeric-prose`: at least `numericProseMinLines` consecutive text lines outside every table (blank lines between
+ *   them allowed, any other line breaks the run) that each hold at least `numericProseMinNumbers` numeric tokens making up
+ *   at least `numericProseMinShare` of the line's tokens, at least `numericProseMinMeasured` of them measured values (a
+ *   decimal or thousands separator, a percent or parentheses), beside at least one word (a row label), and that neither
+ *   end a sentence nor are list items. Dot leaders do not count as tokens. Phone and fax numbers, chart-axis tick runs and
+ *   enumerations (numbers in arithmetic progression: `0 20 40 60`, `1 2 3 4`) never count. Table rows written as text.
+ * - `table:header-only`: a table of at most `headerOnlyMaxRows` rows that are all header-like (one header row, or a
+ *   two-row header with no body row at all), at least `headerOnlyMinColumns` columns, no cell
+ *   mostly made of numbers, no value-like cell (a date or an identifier: digits joined by `/` or `-`, or a run of five or
+ *   more digits) and only short cells (at most `headerOnlyMaxCellWords` words), on a page that also has at least
+ *   `numericProseMinLines` number-heavy text lines (its body, written as text). An empty form's label row is not one.
+ * - `table:merged-numeric-cell`: cells holding at least `mergedCellMinNumbers` numeric tokens that make up at least half
+ *   their tokens, two of them measured values, on at least `mergedCellMinRows` rows of one table: columns collapsed into
+ *   one. Phone numbers and digit-per-box form fields are plain digit groups and do not count.
  *
- * These signals qualify any page with a text layer for a model read, table-heavy or not (classify-route).
+ * These signals qualify any page with a text layer for a model read, table-heavy or not (classify-route), at most
+ * tableLeakPageCap(pages) pages per document.
  */
 export const TABLE_LEAK = {
-  numericProseMinLines: 2,
+  numericProseMinLines: 3,
   numericProseMinNumbers: 4,
   numericProseMinShare: 0.5,
-  headerOnlyMaxRows: 4,
+  numericProseMinMeasured: 2,
+  headerOnlyMaxRows: 2,
   headerOnlyMinColumns: 3,
   headerOnlyMaxCellWords: 8,
   mergedCellMinNumbers: 3,
+  mergedCellMinRows: 2,
 } as const;
+
+/**
+ * Pages of one document the leak signals may send to a model read: `base` plus `share` of its pages, at most `max`. A leak
+ * signal is evidence from the page's own text, which a hostile or unusual document controls, so it can never select every
+ * page: a 10-page report gets 3, a 100-page one 8, anything from 340 pages up 20. Real leaks cluster on a document's few
+ * statistical tables; the cap keeps the worst case a fixed, small number of Rich reads per document.
+ */
+export const TABLE_LEAK_PAGE_CAP = { base: 3, share: 0.05, max: 20 } as const;
+export function tableLeakPageCap(pageCount: number, cap: typeof TABLE_LEAK_PAGE_CAP = TABLE_LEAK_PAGE_CAP): number {
+  return Math.min(cap.max, cap.base + Math.floor(Math.max(0, pageCount) * cap.share));
+}
 
 export const TABLE_LEAK_SIGNALS: ReadonlySet<string> = new Set(["table:numeric-prose", "table:header-only", "table:merged-numeric-cell"]);
 
@@ -315,55 +332,90 @@ const LEAK_NUMBER = /^[-+−–—(*$€£¥]{0,3}\d[\d,.]*[)%*]{0,2}$|^[-–—
 const isLeakNumber = (token: string) => token.length <= 32 && LEAK_NUMBER.test(token);
 const LETTERS = /\p{L}{2,}/u;
 const DOT_LEADER = /^[.·…]+$/;
+/** Tested on a token's last 64 characters only, so a long token cannot make the unanchored scan quadratic. */
 const SENTENCE_END = /\p{Ll}{2,}[.!?]["'”’)]?$/u;
+const endsSentence = (token: string) => SENTENCE_END.test(token.length > 64 ? token.slice(-64) : token);
+/** A phone or fax number: optional country code, then 3-3-4 or 3-4 digit groups. */
+const PHONE = /(?:^|\s)(?:\+?\d{1,3}[\s.-])?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}(?:\s|$)/;
 const LIST_MARKER = /^(?:[-*+•·▪◦–—]|\d{1,3}[.)]|\(?[a-z]\))$/i;
 /** A measured value as tables print it: a decimal or thousands separator, a percent, or parentheses (`1,409`, `0.3`, `(12)`). */
 const MEASURED_NUMBER = /\d[.,]\d|%|^[-+−–—*$€£¥]{0,3}\(/;
 /** A date or identifier (`02/19/2026`, `R-26-018842`, `20211694530`): a value, never a header label. */
 const VALUE_TOKEN = /\d[/-]\d|\d{5,}/;
 
-/** Text lines outside every HTML and pipe table: the page with HTML table spans removed, then pipe rows dropped. */
-function nonTableLines(page: string): string[] {
+/**
+ * The page's lines with every HTML table and pipe-table row replaced by a run break (null); blank lines dropped. Runs of
+ * number-heavy lines are counted over this list, so a table between two lines separates them.
+ */
+function nonTableLines(page: string): Array<string | null> {
   const parts: string[] = [];
   let at = 0;
-  for (const table of htmlElements(page, ["table"])) { parts.push(page.slice(at, table.start)); at = table.end; }
+  for (const table of htmlElements(page, ["table"])) { parts.push(page.slice(at, table.start), "\n\u0000\n"); at = table.end; }
   parts.push(page.slice(at));
-  return parts.join("\n").split("\n").filter((line) => line.trim() && pipeRowInner(line) === null && !isSeparatorLine(line));
+  const lines: Array<string | null> = [];
+  for (const line of parts.join("").split("\n")) {
+    if (!line.trim()) continue;
+    lines.push(line === "\u0000" || pipeRowInner(line) !== null || isSeparatorLine(line) ? null : line);
+  }
+  return lines;
+}
+
+const numericValue = (token: string) => Number(token.replace(/[^\d.-]/g, "").replace(/(?!^)-/g, ""));
+
+/** Four or more numbers in arithmetic progression: a chart axis's ticks or an enumeration, not a table row. */
+function isArithmeticRun(numbers: string[]): boolean {
+  if (numbers.length < 4) return false;
+  const values = numbers.map(numericValue);
+  if (values.some((value) => !Number.isFinite(value))) return false;
+  const step = values[1]! - values[0]!;
+  return step !== 0 && values.every((value, index) => index === 0 || Math.abs(value - values[index - 1]! - step) < 1e-9);
+}
+
+/** A line with the shape of a table row written as text (before the measured-value and pattern exclusions). */
+function numericProseTokens(line: string, rules: typeof TABLE_LEAK): string[] | null {
+  if (line.length > TABLE_MAX_LINE_CHARS) return null;
+  const tokens = line.trim().split(/\s+/).filter((token) => !DOT_LEADER.test(token));
+  if (tokens.length === 0 || LIST_MARKER.test(tokens[0]!)) return null;
+  const numbers = tokens.filter(isLeakNumber);
+  if (numbers.length < rules.numericProseMinNumbers || numbers.length / tokens.length < rules.numericProseMinShare) return null;
+  // A row label: without one, a run of numbers is more often a chart's tick labels or an equation than a table row.
+  if (!tokens.some((token) => !isLeakNumber(token) && LETTERS.test(token))) return null;
+  return endsSentence(tokens[tokens.length - 1]!) ? null : numbers;
 }
 
 function isNumericProseLine(line: string, rules: typeof TABLE_LEAK): boolean {
-  if (line.length > TABLE_MAX_LINE_CHARS) return false;
-  const tokens = line.trim().split(/\s+/).filter((token) => !DOT_LEADER.test(token));
-  if (tokens.length === 0 || LIST_MARKER.test(tokens[0]!)) return false;
-  const numbers = tokens.filter(isLeakNumber).length;
-  if (numbers < rules.numericProseMinNumbers || numbers / tokens.length < rules.numericProseMinShare) return false;
-  // A row label: without one, a run of numbers is more often a chart's tick labels or an equation than a table row.
-  if (!tokens.some((token) => !isLeakNumber(token) && LETTERS.test(token))) return false;
-  return !SENTENCE_END.test(tokens[tokens.length - 1]!);
+  const numbers = numericProseTokens(line, rules);
+  if (!numbers || PHONE.test(line) || isArithmeticRun(numbers)) return false;
+  return numbers.filter((token) => MEASURED_NUMBER.test(token)).length >= rules.numericProseMinMeasured;
 }
 
 function leakSignals(page: string, tables: ReadonlyArray<{ header: string[]; body: string[][] }>, rules: typeof TABLE_LEAK): string[] {
   const signals: string[] = [];
-  let numericLines = 0;
+  let run = 0;
+  let numberHeavyLines = 0;
   for (const line of nonTableLines(page)) {
-    if (isNumericProseLine(line, rules) && ++numericLines >= rules.numericProseMinLines) { signals.push("table:numeric-prose"); break; }
+    if (line !== null && numericProseTokens(line, rules) && !PHONE.test(line)) numberHeavyLines += 1;
+    run = line !== null && isNumericProseLine(line, rules) ? run + 1 : 0;
+    if (run >= rules.numericProseMinLines && !signals.includes("table:numeric-prose")) signals.push("table:numeric-prose");
   }
   const tokens = (cell: string) => cell.split(/\s+/).filter(Boolean);
   const words = (cell: string) => tokens(cell).length;
   for (const table of tables) {
     const rows = [table.header, ...table.body];
     const columns = Math.max(...rows.map((cells) => cells.length));
-    if (rows.length <= rules.headerOnlyMaxRows && columns >= rules.headerOnlyMinColumns &&
+    // A header with no body row at all, and the body's numbers written as text elsewhere on the page.
+    if (rows.length <= rules.headerOnlyMaxRows && numberHeavyLines >= rules.numericProseMinLines && columns >= rules.headerOnlyMinColumns &&
         rows.every((cells) => cells.every((cell) => !VALUE_TOKEN.test(cell) && words(cell) <= rules.headerOnlyMaxCellWords &&
           tokens(cell).filter(isLeakNumber).length * 2 <= words(cell) && !isLeakNumber(cell))) &&
-        rows.some((cells) => cells.some((cell) => LETTERS.test(cell)))) {
+        rows.some((cells) => cells.some((cell) => LETTERS.test(cell))) && !signals.includes("table:header-only")) {
       signals.push("table:header-only");
     }
-    if (rows.some((cells) => cells.some((cell) => {
+    const mergedRows = rows.filter((cells) => cells.some((cell) => {
       const numbers = tokens(cell).filter(isLeakNumber);
       return numbers.length >= rules.mergedCellMinNumbers && numbers.length * 2 >= words(cell) &&
         numbers.filter((token) => MEASURED_NUMBER.test(token)).length >= 2;
-    }))) signals.push("table:merged-numeric-cell");
+    })).length;
+    if (mergedRows >= rules.mergedCellMinRows && !signals.includes("table:merged-numeric-cell")) signals.push("table:merged-numeric-cell");
   }
   return signals;
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { PAGE_TABLE_ROUTING, TABLE_LEAK, TABLE_LEAK_SIGNALS, TABLE_SCAN_MAX_PAGE_CHARS, isTableHeavy, markdownTables, repairMarkdownTables, tableReliability } from "./page-table-routing.js";
+import { PAGE_TABLE_ROUTING, TABLE_LEAK, TABLE_LEAK_PAGE_CAP, TABLE_LEAK_SIGNALS, TABLE_SCAN_MAX_PAGE_CHARS, isTableHeavy, markdownTables, repairMarkdownTables, tableLeakPageCap, tableReliability } from "./page-table-routing.js";
 
 const pipe = (rows: number) => ["| a | b | c |", "| --- | --- | --- |", ...Array.from({ length: rows - 1 }, (_, i) => `| ${i} | x | y |`)].join("\n");
 
@@ -173,25 +173,60 @@ describe("tables that leaked out of the extracted tables (authored pages)", () =
     expect(tableReliability(pipe)).toEqual([]);
   });
 
-  it("flags a header without its body, but not a short text table or a table with numbers", () => {
-    expect(tableReliability(html(["", "All markets", "", "New markets", ""], ["Segment", "Revenue", "Margin", "Revenue", "Margin"])))
-      .toEqual(["table:header-only"]);
+  // Body rows written as text after the header: the corroboration header-only needs (council #338 routing Medium).
+  const leakedBody = ["Enterprise 412.5 18.2% 398.1 17.9%", "Mid-market 288.0 12.7% 251.3 11.3%", "Startups 190.4 8.4% 170.2 7.1%"].join("\n");
+
+  it("flags a header without its body only when the body's numbers leaked out as text", () => {
+    const header = html(["", "All markets", "", "New markets", ""], ["Segment", "Revenue", "Margin", "Revenue", "Margin"]);
+    expect(tableReliability(`${header}\n\n${leakedBody}`)).toEqual(expect.arrayContaining(["table:header-only"]));
+    // The same header alone (no numbers anywhere) is not evidence of a missing body.
+    expect(tableReliability(header)).toEqual([]);
     // Two columns of long text (a glossary) is a table of its own.
     expect(tableReliability(html(["Term", "Meaning"], ["Launch", "The day a new product reaches its first customers in a market"]))).toEqual([]);
     // Short, but its numbers make it a body.
     expect(tableReliability(html(["Region", "Q1", "Q2"], ["North", "412", "398"]))).toEqual([]);
     // A form's label row over its filled-in values (a date, an identifier) is a table of its own.
     expect(tableReliability(html(["Received", "Reviewed by", "Status", "Receipt no."], ["02/19/2026", "A. Rivera", "Approved", "R-26-018842"]))).toEqual([]);
-    // Five rows of labels is a body, not a header.
-    expect(tableReliability(html(...Array.from({ length: TABLE_LEAK.headerOnlyMaxRows + 1 }, (_, i) => [`Office ${"ABCDE"[i]}`, "Opened", "Expanding"])))).toEqual([]);
+    // Three rows of labels is a body, not a header, even beside leaked numbers.
+    expect(tableReliability(`${html(...Array.from({ length: TABLE_LEAK.headerOnlyMaxRows + 1 }, (_, i) => [`Office ${"ABCDE"[i]}`, "Opened", "Expanding"]))}\n\nIntro`)).toEqual([]);
   });
 
-  it("flags a cell holding several numbers (columns collapsed into one)", () => {
-    expect(tableReliability(html(["Region", "Bookings"], ["North", "412.5 398.1 14.4"], ["South", "288.0"], ["West", "190.4"]))).toEqual(["table:merged-numeric-cell"]);
+  // Council #338 routing Mediums: ordinary tables, forms and number-bearing text stay off the paid read.
+  it("feature matrices, empty forms, status tables, measurements, phones, axes and enumerations are not leaks", () => {
+    for (const page of [
+      "| Feature | Basic | Pro |\n| --- | --- | --- |\n| Search | Yes | Yes |\n| Export | No | Yes |",
+      "| Name | Date of birth | Signature |\n|---|---|---|\n",
+      "| Product | Region | Quarter | Notes |\n|---|---|---|---|\n| Widget | West | Q1 | strong |",
+      "Measurements: 12 24 36 48\nReadings: 10 20 30 40",
+      "| Location | Coordinates |\n| --- | --- |\n| Sample | 12.34 56.78 90.12 |",
+      "# Acme Expansion Partners\n\nPhone +1 415 555 0100\nFax +1 415 555 0101\nMain +1 415 555 0102\n\nDear Ms. Rivera,",
+      "Revenue 0 20 40 60 80 100\nMargin 0 5 10 15 20 25\nGrowth 0 2.5 5.0 7.5 10.0\n\nFigure 2: Revenue and margin by quarter.",
+      "Contents\n\nIntroduction 1 2 3 4\nMethods 5 6 7 8\nResults 9 10 11 12",
+      "Results\n\nTeam A 3 1 2 0\nTeam B 2 2 1 1\nTeam C 1 3 0 2",
+      "Release notes v 2 3 1 build 4567 8901\nPatch 1 2 3 4 notes",
+      // Two number rows are not enough: three consecutive measured rows are.
+      "Enterprise 412.5 18.2% 398.1 17.9%\nMid-market 288.0 12.7% 251.3 11.3%",
+      // A prose line between number rows breaks the run.
+      "Enterprise 412.5 18.2% 398.1 17.9%\nMid-market 288.0 12.7% 251.3 11.3%\nGrowth slowed in the second half for these segments\nStartups 190.4 8.4% 170.2 7.1%",
+    ]) expect(tableReliability(page), page).toEqual([]);
+    expect(tableReliability(leakedBody)).toEqual(["table:numeric-prose"]);
+    // Blank lines between leaked rows do not break the run.
+    expect(tableReliability(leakedBody.replace(/\n/g, "\n\n"))).toEqual(["table:numeric-prose"]);
+  });
+
+  it("flags cells holding several numbers on two or more rows (columns collapsed into one)", () => {
+    expect(tableReliability(html(["Region", "Bookings"], ["North", "412.5 398.1 14.4"], ["South", "288.0 251.3 36.7"], ["West", "190.4"]))).toEqual(["table:merged-numeric-cell"]);
+    // One such cell (a coordinate triple, a range) is a value.
+    expect(tableReliability(html(["Region", "Bookings"], ["North", "412.5 398.1 14.4"], ["South", "288.0"], ["West", "190.4"]))).toEqual([]);
     // Phone numbers and digit-per-box form fields are digit groups, not collapsed columns.
     expect(tableReliability(html(["Office", "Phone", "Postcode"], ["Lyon", "04 72 55 01 38", "6 9 0 0 7"], ["Paris", "01 44 20 10 10", "7 5 0 0 1"]))).toEqual([]);
     // A date or two numbers in a cell are values.
     expect(tableReliability(html(["Milestone", "Date", "Deals"], ["Launch", "12 Nov 2026", "40"], ["Expansion", "3 Mar 2027", "55"]))).toEqual([]);
+  });
+
+  it("caps the pages one document's leak signals may route: base plus a share of its pages, bounded", () => {
+    expect([1, 10, 40, 100, 339, 340, 10_000].map((pages) => tableLeakPageCap(pages))).toEqual([3, 3, 5, 8, 19, 20, 20]);
+    expect(tableLeakPageCap(0)).toBe(TABLE_LEAK_PAGE_CAP.base);
   });
 
   it("leak signals are the routing set; structural signals stay table-heavy only", () => {
@@ -207,6 +242,8 @@ describe("tables that leaked out of the extracted tables (authored pages)", () =
       "<table>".repeat(near / 7),
       `<table><tr><td>${"9 ".repeat(near / 2 - 40)}</td></tr></table>`,
       "x 1 2 3 4\n".repeat(near / 10),
+      // Adversarial L4: a number row ending in one long lowercase token (SENTENCE_END is checked on its last 64 chars).
+      Array.from({ length: Math.floor(near / 8_030) }, () => `Revenue 1.5 2.5 3.5 4.5 ${"a".repeat(8_000)}`).join("\n"),
     ]) {
       expect(elapsed(() => tableReliability(page))).toBeLessThan(500);
     }

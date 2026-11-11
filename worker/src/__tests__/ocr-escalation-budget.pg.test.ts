@@ -78,6 +78,27 @@ describe.skipIf(!url)("OCR escalation budget on real Postgres", () => {
     await admin`delete from vision_run_attempts where document_id = 'check-doc'`;
   });
 
+  // Council #338: table-leak reads have their own durable per-document page budget (tableLeakPageCap).
+  it("0133: the purpose check accepts table-rescue, whose page budget holds across a retried activity", async () => {
+    await admin`insert into vision_run_attempts (run_id, document_id, page_number, purpose, attempts) values (${runId}, 'check-doc', 3, 'table-rescue', 1)`;
+    await admin`delete from vision_run_attempts where document_id = 'check-doc'`;
+    const cap = 3;
+    const admit = async (guard: VisionRunGuard, pageNumber: number) => {
+      const gate = guard.call({ documentId: "leak-doc", pageNumber, purpose: "table-rescue", documentPageLimit: cap });
+      try { await gate.admit({ weightCents: 0.01 }); return true; } catch { return false; } finally { await gate.finish(); }
+    };
+    const first = new VisionRunGuard({ id: runId, orgId: "ocrb-org" }, config, store().visionAttempts);
+    const results = [];
+    for (let page = 1; page <= 10; page++) results.push(await admit(first, page));
+    expect(results.filter(Boolean)).toHaveLength(cap);
+    // A restarted worker (fresh pool and guard) cannot read a new leak page; ordinary page reads are not counted against it.
+    const retry = new VisionRunGuard({ id: runId, orgId: "ocrb-org" }, config, store().visionAttempts);
+    expect(await admit(retry, 11)).toBe(false);
+    const page = retry.call({ documentId: "leak-doc", pageNumber: 12, purpose: "page" });
+    await expect(page.admit({ weightCents: 0.01 })).resolves.toBeUndefined();
+    await page.finish();
+  }, 60_000);
+
   it("admits at most the budget between concurrent activities on one run and document, and a retry keeps it", async () => {
     // Two activities with their own pools race for 40 distinct pages of one document, 20 each, interleaved.
     const activities = [store(), store()].map((created) => new VisionRunGuard({ id: runId, orgId: "ocrb-org" }, config, created.visionAttempts));
