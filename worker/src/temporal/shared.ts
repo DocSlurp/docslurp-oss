@@ -25,6 +25,8 @@ export interface StageInput {
   artifacts: Record<string, string>;
   /** Hold an org worker slot while running (absent on pre-slot workflow histories). */
   slotGate?: boolean;
+  /** The workflow recorded the first pass (PipelineWorkflowInput.firstPass); absent on every other history. */
+  firstPass?: boolean;
 }
 
 export interface StageOutput {
@@ -213,6 +215,8 @@ export interface PipelineWorkflowInput {
   pageRangeSharding?: PageRangeShardingInput;
   /** Run adjacent LIGHT_STAGES in one activity (absent = one activity per stage). */
   groupLightStages?: boolean;
+  /** Run the first pass after format-detect (recorded; absent on older histories, which replay unchanged). */
+  firstPass?: FirstPassInput;
   /**
    * Stages that may share one activity with their neighbours (stage-groups.ts).
    * Replaces LIGHT_STAGES grouping when set; absent on older histories.
@@ -229,6 +233,39 @@ export interface StageGroupInput {
   slotGate?: boolean;
   /** Stop before the next stage when the run has a pause or cancel request; report stagesRun. */
   yieldToControl?: boolean;
+  /** The workflow recorded the first pass (PipelineWorkflowInput.firstPass); absent on every other history. */
+  firstPass?: boolean;
+}
+
+/** Recorded in workflow input when the run takes the first pass (pipeline/first-pass.ts); absent = today's stage loop only. */
+export interface FirstPassInput {
+  /** Batches running at once (each one VM). */
+  maxParallelBatches: number;
+  /** `none`: stop after the first pass (no stage loop for the documents it finished); `auto`: the stage loop follows. */
+  afterFirstPass: "auto" | "none";
+}
+
+export interface FirstPassPlanInput {
+  runId: string;
+}
+
+export interface FirstPassPlanOutput {
+  batches: string[][];
+}
+
+export interface FirstPassBatchInput {
+  runId: string;
+  batchIndex: number;
+  documentIds: string[];
+  totalStages: number;
+  slotGate?: boolean;
+}
+
+export interface FirstPassBatchOutput {
+  usage: UsageSummary;
+  indexed: string[];
+  handedBack: Array<{ documentId: string; reason: string }>;
+  timings: Record<string, number | null>;
 }
 
 /**

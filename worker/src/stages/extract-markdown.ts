@@ -1,3 +1,4 @@
+import { firstPassServesDocument } from "../pipeline/first-pass.js";
 import { reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { EMBEDDED_IMAGE_TARGETS, embeddedImageGraph, resolveEmbeddedImageRequest } from "../extractors/embedded-images.js";
 import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
@@ -504,7 +505,8 @@ export class ExtractMarkdownStage implements Stage {
                   }
                 }
                 // Doppler figures (DOCSLURP_DOPPLER_IMAGE_EXTRACT): from the same VM job, into an empty host folder per candidate.
-                if (isPdf && dopplerImageExtractEnabled() && sandboxedPdfProvider()?.figures) {
+                // A first-pass document's figures come from its batch and are stored by the first pass itself.
+                if (isPdf && dopplerImageExtractEnabled() && sandboxedPdfProvider()?.figures && !firstPassServesDocument(state.run.id, document.id)) {
                   for (const prepared of [isolated.primary.extractor, isolated.secondary?.extractor]) {
                     if (!prepared?.plan.sandboxedPdf) continue;
                     const dir = await mkdtemp(path.join(path.dirname(prepared.plan.sandboxedPdf.output), ".doppler-figures-"));

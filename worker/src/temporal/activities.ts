@@ -1,9 +1,10 @@
+import { firstPassPipeline, planFirstPass, runFirstPassBatch } from "../pipeline/first-pass.js";
 import { withPlanningProgress } from "./planning-progress.js";
 import { renderDocumentPage } from "../deferred/render-page.js";
 import { buildDocumentExport, DOCUMENT_EXPORT_MAX_ATTEMPTS } from "../exports/build-document-export.js";
 import { runPageBundle } from "./page-bundle.js";
 import { VisionExtractStage } from "../stages/vision-extract.js";
-import type { VisionPageTask } from "./shared.js";
+import type { FirstPassBatchInput, FirstPassBatchOutput, FirstPassPlanInput, FirstPassPlanOutput, VisionPageTask } from "./shared.js";
 import { runWithProviderRateScope } from "../lib/provider-rate-limit.js";
 import { runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
 /**
@@ -309,6 +310,7 @@ export function createActivities(deps: ActivityDependencies) {
             attempt: context.info.attempt,
             classifyError: classify,
             onStageFailure: (failure) => { ordinaryFailures = failure.ordinaryFailures; },
+            ...(input.firstPass ? { firstPassRun: true } : {}),
           }));
       } catch (error) {
         const classification = classify(error);
@@ -373,6 +375,7 @@ export function createActivities(deps: ActivityDependencies) {
                 preloadRunState: position < input.stageNames.length - 1,
                 preloaded,
                 onStageFailure: (failure) => { ordinaryFailures = failure.ordinaryFailures; },
+                ...(input.firstPass ? { firstPassRun: true } : {}),
               });
               controlRequested = output.controlRequested;
               preloaded = output.preloaded;
@@ -448,6 +451,49 @@ export function createActivities(deps: ActivityDependencies) {
             ...(input.pageRanges ? { pageRanges: input.pageRanges, shardIndex: input.shardIndex, shardCount: input.shardCount } : {}),
           }));
         return output.usage;
+      } catch (error) {
+        const classification = classify(error);
+        if (classification === "interruption") throw interruptionFailure(error);
+        if (classification === "hung") throw hungWorkFailure(error);
+        if (classification === "teardown") throw teardownFailure(error);
+        throw toActivityFailure(error);
+      }
+    },
+
+    /** The run's first-pass batches (pipeline/first-pass.ts). Planned in an activity so the workflow replays the recorded plan. */
+    async planFirstPass(input: FirstPassPlanInput): Promise<FirstPassPlanOutput> {
+      const plan = await planFirstPass(store, input.runId);
+      return { batches: plan.batches };
+    },
+
+    /**
+     * One first-pass batch: one VM job for these documents, each document extracted, embedded (keyword searchable) and
+     * indexed as its result arrives. Documents it does not finish are left to the stage loop.
+     */
+    async runFirstPassBatch(input: FirstPassBatchInput): Promise<FirstPassBatchOutput> {
+      const context = Context.current();
+      const classify = (error: unknown) => classifyActivityError(error, { signal: context.cancellationSignal });
+      try {
+        return await withWorkerSlot(store, { runId: input.runId, kind: "stage", enabled: slotsEnabled && input.slotGate === true }, async () => {
+          const result = await runFirstPassBatch({
+            store, storage: deps.storage, quarantineEnabled: deps.config.quarantineEnabled,
+            signal: context.cancellationSignal,
+            heartbeat: (details) => context.heartbeat(details),
+            runStage: async (stageName, documentIds) => (await execution.runStage(
+              { stageName, runId: input.runId, totalStages: input.totalStages, artifacts: {} },
+              {
+                signal: context.cancellationSignal,
+                heartbeat: (details) => context.heartbeat(details),
+                attempt: context.info.attempt,
+                classifyError: classify,
+                documentIds,
+                firstPassRun: true,
+                pipelineOverride: firstPassPipeline,
+              },
+            )).usage,
+          }, input);
+          return { usage: result.usage, indexed: result.indexed, handedBack: result.handedBack, timings: result.timings };
+        });
       } catch (error) {
         const classification = classify(error);
         if (classification === "interruption") throw interruptionFailure(error);

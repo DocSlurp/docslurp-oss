@@ -156,6 +156,11 @@ export class WorkflowState {
   runStages: Map<string, StageState>;
   documentStages: Map<string, Map<string, StageState>>;
   store?: CheckpointStore;
+  /**
+   * The run's workflow recorded the first pass (pipeline/first-pass.ts): format-detect leaves first-pass PDFs' page counts to
+   * the batch, which measures them in the same VM. Set by the stage runtime from recorded workflow input only.
+   */
+  firstPassRun?: boolean;
   totalStages: number;
   docConcurrency = 1;
   distributedVisionPages = new Map<string, unknown>();
