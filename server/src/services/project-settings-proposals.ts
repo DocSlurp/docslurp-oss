@@ -9,6 +9,7 @@ import { apiKeyCanUseProject } from "../lib/api-key-project-scope.js";
 import { openSettingsProposal, sealSettingsProposal } from "../lib/settings-proposal-tokens.js";
 import { mergeProjectSearchSettings, getProjectSearchSettings, upsertProjectSearchSettings } from "./search-controls.js";
 import { canEditProject, getProjectAccess } from "./organizations.js";
+import { ChartExportUnavailableError } from "./chart-export-availability.js";
 import { applyProjectChange, ConfigConflictError, planProjectChange, reindexTargetSignature, type ProjectChangePlan } from "./config-change.js";
 import { appendAuditLog } from "./audit-log.js";
 import { getRun } from "./runs.js";
@@ -50,6 +51,9 @@ function fingerprint(plan: ProjectChangePlan): string {
 const PIPELINE_LABELS: Record<string, string> = {
   "mediaVideo.enabled": "Video frame analysis",
   quality: "Processing quality",
+  "chartExport.enabled": "Chart and diagram export",
+  "chartExport.formats": "Chart export formats",
+  "chartExport.diagrams": "Export diagrams",
 };
 function changedValues(before: PipelineFeatures, after: PipelineFeatures, patch: z.infer<typeof projectSettingsPipelinePatchSchema>) {
   return Object.entries(patch).flatMap(([key, value]) => {
@@ -76,7 +80,13 @@ const CHAT_EFFECTS: Record<string, string> = {
 const RETRIEVAL_EFFECT = "Changes how searches rank and return passages. Applies to the next search; no documents are reprocessed.";
 async function plan(actor: RequestActor, projectId: string, changes: z.infer<typeof claimsSchema>["changes"]) {
   // The planner versions and loads one base snapshot before merging the proposal.
-  const config = await planProjectChange({ projectId, userId: actor.userId, input: { apply: "reindex" }, pipelineOverrides: changes.pipeline });
+  let config: Awaited<ReturnType<typeof planProjectChange>>;
+  try {
+    config = await planProjectChange({ projectId, userId: actor.userId, input: { apply: "reindex" }, pipelineOverrides: changes.pipeline });
+  } catch (error) {
+    if (error instanceof ChartExportUnavailableError) return fail(400, error.code, error.message);
+    throw error;
+  }
   if (!config || (actor.type === "apiKey" && !apiKeyCanUseProject(actor.apiKey, config.project))) return fail(403, "settings_proposal_forbidden", "Project is unavailable");
   const searchBefore = await getProjectSearchSettings(projectId, actor.userId);
   const searchAfter = mergeProjectSearchSettings(searchBefore, {

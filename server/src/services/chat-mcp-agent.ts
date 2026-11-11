@@ -16,7 +16,7 @@ import { ChatToolBlockedError } from "./chat-tool-error.js";
 import { isCancellation } from "@docslurp/shared/cancellation";
 import { createChatMcpTools, type ChatSearchCallStats, type ChatToolActivity } from "./chat-mcp-tools.js";
 import { ChatClientAbortError, ChatTurnDeadline, ChatTurnDeadlineError, chatTurnTimeBudget, raceAbort, type ChatTurnTimeBudget } from "./chat-turn-deadline.js";
-import type { SearchResult, ProjectSearchRetrievalDefaults } from "@docslurp/shared";
+import { detectVisualDataIntent, VISUAL_INTENT_THRESHOLD, type SearchResult, type ProjectSearchRetrievalDefaults } from "@docslurp/shared";
 
 const MAX_AGENT_OUTPUT_TOKENS = 4096;
 const DEFAULT_LIMITS: ChatAgentLimits = { ...CHAT_AGENT_LIMIT_DEFAULTS, baseSteps: CHAT_AGENT_BASE_STEPS, clamped: [] };
@@ -201,6 +201,37 @@ export function suggestionsInstruction(tools: { getUploadStatus: boolean }): str
   ].join(" ");
 }
 
+/** What suggestions mode knows about chart export before the turn: the project setting and free ingest signals. */
+export interface ChatChartExportContext {
+  /** `pipeline.chartExport.enabled`. */
+  enabled: boolean;
+  /** Charts/diagrams recorded at ingest that were not exported; null when unknown. */
+  unexportedVisuals?: number | null;
+}
+
+/**
+ * Suggestions-mode hint to offer chart export: only when the project has it off and either this question asks for
+ * data points, trends, tables or a diagram (free lexical detector) or ingest recorded charts/diagrams that were not
+ * exported. Returns null otherwise. The model still decides from this turn's evidence; nothing is proposed blindly.
+ * TODO: escalate ambiguous turns (score just under the threshold) to the cheapest decision model.
+ */
+export function chartExportSuggestionInstruction(query: string, chartExport: ChatChartExportContext | undefined): string | null {
+  if (!chartExport || chartExport.enabled) return null;
+  const intent = detectVisualDataIntent(query);
+  const unexported = Math.max(0, Math.floor(chartExport.unexportedVisuals ?? 0));
+  const asked = intent.score >= VISUAL_INTENT_THRESHOLD;
+  if (!asked && unexported === 0) return null;
+  const evidence = [
+    asked ? "this question asks for data points, trends, a table or a diagram" : null,
+    unexported > 0 ? `ingest recorded ${unexported} chart${unexported === 1 ? "" : "s"} or diagram${unexported === 1 ? "" : "s"} in this project that ${unexported === 1 ? "was" : "were"} not exported as data` : null,
+  ].filter(Boolean).join(", and ");
+  return [
+    `Chart export is off for this project, and ${evidence}.`,
+    "When the answer depends on values or structure inside a chart or diagram that the returned passages describe only as an image, a caption or a rough guess, you may prepare one proposal with proposeProjectSettings enabling chart export (pipeline change chartExport: { enabled: true }), say that it re-expresses charts and diagrams as a description, Mermaid and, if chosen, Vega-Lite, matplotlib or CSV, and that existing documents gain it only after re-indexing.",
+    "Do not propose it when the passages already give the needed numbers or steps as text or a table, and never claim chart values the evidence does not state.",
+  ].join(" ");
+}
+
 /** Effective web-tool mode: requested off, offered, or requested but blocked by policy. */
 function webMode(requested: boolean | undefined, offered: boolean): ChatAgentModes["web"] {
   if (requested === false) return "off";
@@ -280,6 +311,8 @@ export async function runChatMcpAgent(args: {
   projectInstructions?: string;
   /** Corpus facts read before the turn, so the agent knows which files already exist. */
   projectInventory?: ChatProjectInventory;
+  /** Suggestions mode only: chart export setting and free ingest signals (see chartExportSuggestionInstruction). */
+  chartExport?: ChatChartExportContext;
   retrievalDefaults?: ProjectSearchRetrievalDefaults;
   onTextDelta?: (delta: string) => void | Promise<void>;
   onToolActivity?: (activity: ChatToolActivity) => void;
@@ -589,6 +622,8 @@ export async function runChatMcpAgent(args: {
     ...(args.projectInventory ? [describeChatProjectInventory(args.projectInventory)] : []),
     composed?.project ?? args.projectInstructions ?? "",
     ...args.history.filter(turn => turn.role === "system").map(turn => turn.content),
+    // Depends on this question: last, so the project instructions above stay in the cached prefix.
+    ...(modes.suggestions ? [chartExportSuggestionInstruction(args.query, args.chartExport)].filter((line): line is string => line !== null) : []),
   ].join("\n");
   // Prompt caching: the tools and these instructions are identical on every
   // step, and each step's messages extend the previous step's, so the prefix

@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   aiBilledUsd,
   applyBudgetGuard,
+  budgetGuardDowngraded,
+  budgetGuardSkippedRole,
   estimateChunk,
   estimateRouterCost,
   estimateTargetCost,
@@ -147,6 +149,33 @@ describe("applyBudgetGuard", () => {
     expect(r.deferred).toHaveLength(1);
     expect(r.planned.find((p) => p.assignment.role === "skip")).toBeTruthy();
     expect(r.withinBudget).toBe(true);
+  });
+  it("marks chart roles it downgrades so chart export's end pass leaves them alone (council round 2, N4)", async () => {
+    const { candidatesFromPlan } = await import("../chart-export/session.js");
+    const r = applyBudgetGuard(
+      [planned("vlm", "chart-data", 0.05, [["ocr", 0.001, 0.6]]), planned("vlm2", "chart-data", 0.0001)],
+      router,
+      { limitUsd: 0.01, marginFloor: 0 },
+    );
+    const assignments = r.planned.map((p) => p.assignment);
+    expect(assignments.map((a) => budgetGuardDowngraded(a))).toEqual([true, false]);
+    expect(candidatesFromPlan({ assignments }).map((c) => c.id)).toEqual(["p1-a1"]);
+  });
+  it("names the chart roles it skips, and hands both downgrades and skips to chart export as guarded scopes (council round 4)", async () => {
+    const { guardedScopesFromPlan } = await import("../chart-export/session.js");
+    const skipped = applyBudgetGuard([planned("chart", "chart-data", 0.05)], router, { limitUsd: 0, marginFloor: 0 });
+    const skip = skipped.planned[0]!.assignment;
+    expect(skip.role).toBe("skip");
+    expect(budgetGuardSkippedRole(skip)).toBe("chart-data");
+    expect(budgetGuardSkippedRole({ role: "skip", reason: "router said skip" })).toBeNull();
+    expect(budgetGuardSkippedRole({ role: "chart-data", reason: skip.reason })).toBeNull();
+    const downgraded = applyBudgetGuard(
+      [planned("vlm", "chart-data", 0.05, [["ocr", 0.001, 0.6]]), planned("vlm2", "chart-data", 0.0001)],
+      router,
+      { limitUsd: 0.01, marginFloor: 0 },
+    );
+    const assignments = [...downgraded.planned.map((p) => p.assignment), { ...skip, pageNumber: 2 }];
+    expect(guardedScopesFromPlan({ assignments }).map((c) => [c.id, c.kind])).toEqual([["p1-a0", "chart"], ["p2-a2", "chart"]]);
   });
   it("enforces the margin floor, not just the limit", () => {
     // billed = 1.2x cost -> margin 16.7%; floor 0.5 forces degradation

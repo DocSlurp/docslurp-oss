@@ -5,6 +5,7 @@ import path from "node:path";
 import sharp from "sharp";
 import { describe, expect, it, vi } from "vitest";
 
+import { budgetGuardDowngraded } from "../estimate.js";
 import { createProductionExecutorDeps } from "./deps.js";
 import { RASTER_PX_PER_POINT } from "./merge.js";
 
@@ -29,6 +30,52 @@ function make(overrides: Record<string, unknown> = {}) {
 }
 
 describe("production executor deps", () => {
+  it("serves chart and diagram crops through chart export when it returns output, else the role's vision prompt", async () => {
+    const exported = { pageNumber: 1, runtime: "chart-export", model: "m", prompt: "chart-export", baseUrl: null, latencyMs: 1, inputTokens: 2, outputTokens: 3, usageSource: "provider", fallbackUsed: false, fallbackReason: null, text: "Chart body", costCents: 0.1 };
+    const exportVisual = vi.fn(async (args: { role: string }) => (args.role === "chart-data" ? { output: exported, modelCalled: true } : { output: null, modelCalled: false as const }));
+    const callVision = vi.fn(async () => ({ ...exported, runtime: "vision", text: "vision text" }));
+    const { deps } = make({ exportVisual, callVision, selection: { modelUri: "llm://openrouter/google/gemini-3.1-flash-lite" } });
+    const target = { id: "vlm:x", kind: "hosted-vlm", ref: { modelUri: "llm://openrouter/google/gemini-3.1-flash-lite" } } as never;
+    const raster = { path: "/x.png", mimeType: "image/png" };
+    const scope = { kind: "image", imageIndex: 0 } as const;
+    expect((await deps.vlm({ target, role: "chart-data", raster, pageNumber: 1, scope, assignmentIndex: 0 })).text).toBe("Chart body");
+    // Refused before any generator call (kind opted out, cap): the usual reading runs.
+    expect((await deps.vlm({ target, role: "diagram", raster, pageNumber: 1, scope, assignmentIndex: 1 })).text).toBe("vision text");
+    // Without a scope (the refusal-fallback leg) chart export is not consulted.
+    expect((await deps.vlm({ target, role: "chart-data", raster, pageNumber: 1 })).text).toBe("vision text");
+    expect(exportVisual).toHaveBeenCalledTimes(2);
+    expect(callVision).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the downgraded target's read for a chart role the budget guard downgraded (council round 3, F2/R3-3)", async () => {
+    const exported = { pageNumber: 1, runtime: "chart-export", model: "m", prompt: "chart-export", baseUrl: null, latencyMs: 1, inputTokens: 2, outputTokens: 3, usageSource: "provider", fallbackUsed: false, fallbackReason: null, text: "Chart body", costCents: 0.1 };
+    const exportVisual = vi.fn(async () => ({ output: exported, modelCalled: true }));
+    const callVision = vi.fn(async () => ({ ...exported, runtime: "vision", text: "vision text" }));
+    const { deps } = make({ exportVisual, callVision, selection: { modelUri: "llm://openrouter/google/gemini-3.1-flash-lite" } });
+    const target = { id: "vlm:x", kind: "hosted-vlm", ref: { modelUri: "llm://openrouter/google/gemini-3.1-flash-lite" } } as never;
+    const raster = { path: "/x.png", mimeType: "image/png" };
+    const scope = { kind: "image", imageIndex: 0 } as const;
+    const reason = "chart; budget(limit=$0.010000,floor=0.000100) downgraded from vlm:big";
+    expect(budgetGuardDowngraded({ reason })).toBe(true);
+    expect((await deps.vlm({ target, role: "chart-data", raster, pageNumber: 1, scope, assignmentIndex: 0, reason })).text).toBe("vision text");
+    expect((await deps.vlm({ target, role: "diagram", raster, pageNumber: 1, scope, assignmentIndex: 1, reason })).text).toBe("vision text");
+    expect(exportVisual).not.toHaveBeenCalled();
+    // Not downgraded: the generator serves the crop.
+    expect((await deps.vlm({ target, role: "chart-data", raster, pageNumber: 1, scope, assignmentIndex: 2, reason: "chart" })).text).toBe("Chart body");
+    expect(exportVisual).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not pay for a second vision read when the generator already called the model and got nothing usable", async () => {
+    const spent = { pageNumber: 1, runtime: "chart-export", model: "chart-export", prompt: "chart-export", baseUrl: null, latencyMs: 5, inputTokens: 900, outputTokens: 40, usageSource: "provider", fallbackUsed: false, fallbackReason: null, text: "", costCents: 0.2 };
+    const exportVisual = vi.fn(async () => ({ output: null, modelCalled: true as const, spent }));
+    const callVision = vi.fn(async () => ({ ...spent, runtime: "vision", text: "vision text" }));
+    const { deps } = make({ exportVisual, callVision, selection: { modelUri: "llm://openrouter/google/gemini-3.1-flash-lite" } });
+    const target = { id: "vlm:x", kind: "hosted-vlm", ref: { modelUri: "llm://openrouter/google/gemini-3.1-flash-lite" } } as never;
+    const out = await deps.vlm({ target, role: "chart-data", raster: { path: "/x.png", mimeType: "image/png" }, pageNumber: 1, scope: { kind: "image", imageIndex: 0 }, assignmentIndex: 0 });
+    expect(out).toEqual(spent);
+    expect(callVision).not.toHaveBeenCalled();
+  });
+
   it("crops page-point bboxes to raster pixels, clamped to the image", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "router-deps-"));
     const file = path.join(dir, "page.png");

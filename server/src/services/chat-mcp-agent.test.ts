@@ -47,7 +47,7 @@ vi.mock("@docslurp/shared/observability", () => ({
   recordChatAgentTelemetry: (metric: unknown) => { spans.metrics.push(metric); },
   evalBaggageAttributes: () => ({ "eval.run_id": "run-7", "eval.arm": "control" }),
 }));
-const { runChatMcpAgent, classifyChatAgentStop, createToolMarkupGuard, FINAL_ANSWER_INSTRUCTION, SEARCH_BEFORE_ANSWER_INSTRUCTION, SETTINGS_ON_REQUEST_INSTRUCTION, suggestionsInstruction, describeChatProjectInventory, QUIET_INJECTION_INSTRUCTION } = await import("./chat-mcp-agent.js");
+const { runChatMcpAgent, classifyChatAgentStop, createToolMarkupGuard, FINAL_ANSWER_INSTRUCTION, SEARCH_BEFORE_ANSWER_INSTRUCTION, SETTINGS_ON_REQUEST_INSTRUCTION, suggestionsInstruction, describeChatProjectInventory, QUIET_INJECTION_INSTRUCTION, chartExportSuggestionInstruction } = await import("./chat-mcp-agent.js");
 const { ChatTurnDeadlineError } = await import("./chat-turn-deadline.js");
 const actor = { type: "session" as const, userId: "user", sessionId: "browser-session", user: { id: "user", name: "User", email: "" } };
 const args = { actor, projectId: "ws", orgId: "org", sessionId: "conversation", query: "What is the policy?", history: [], apiKey: "fake", privacyMode: "standard" as const, model: "test", maxOutputTokens: 100 };
@@ -675,6 +675,34 @@ describe("agent modes", () => {
     expect(text).toContain("You cannot see which files failed, so state only the count");
     expect(text).not.toContain("getUploadStatus");
     expect(describeChatProjectInventory({ searchableDocuments: 2, processingDocuments: 1 })).toBe("Selected project inventory before this turn: 2 searchable documents, 1 still processing.");
+  });
+
+  it("offers chart export only while it is off and a data question or unexported charts justify it", () => {
+    const off = { enabled: false };
+    expect(chartExportSuggestionInstruction("Show the revenue trend by quarter as a chart", off)).toContain("chartExport: { enabled: true }");
+    expect(chartExportSuggestionInstruction("Who signed the lease?", off)).toBeNull();
+    expect(chartExportSuggestionInstruction("Who signed the lease?", { enabled: false, unexportedVisuals: 7 })).toContain("ingest recorded 7 charts or diagrams in this project that were not exported");
+    expect(chartExportSuggestionInstruction("Who signed the lease?", { enabled: false, unexportedVisuals: 1 })).toContain("1 chart or diagram in this project that was not exported");
+    expect(chartExportSuggestionInstruction("Plot bookings over time", { enabled: true, unexportedVisuals: 9 })).toBeNull();
+    expect(chartExportSuggestionInstruction("Plot bookings over time", undefined)).toBeNull();
+    const text = chartExportSuggestionInstruction("Plot bookings over time", off)!;
+    expect(text).toContain("Do not propose it when the passages already give the needed numbers");
+    expect(text).not.toContain("generatorModel");
+  });
+
+  it("adds the chart export hint in suggestions mode only", async () => {
+    mocks.manifestIds = ["search", "getProjectSettings", "proposeProjectSettings"];
+    const query = "Chart the quarterly bookings trend";
+    const on = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
+    mocks.provider.mockReturnValue(on);
+    await runChatMcpAgent({ ...args, query, suggestions: true, projectInstructions: "Answer in British English.", chartExport: { enabled: false, unexportedVisuals: 3 } });
+    expect(systemText(on)).toContain("Chart export is off for this project");
+    // The per-question hint comes after the project instructions, keeping them in the cached prompt prefix.
+    expect(systemText(on).indexOf("Chart export is off")).toBeGreaterThan(systemText(on).indexOf("Answer in British English."));
+    const offMode = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
+    mocks.provider.mockReturnValue(offMode);
+    await runChatMcpAgent({ ...args, query, chartExport: { enabled: false, unexportedVisuals: 3 } });
+    expect(systemText(offMode)).not.toContain("Chart export is off");
   });
 
   it("keeps settings facts uncited and answers free of visible self-corrections", async () => {

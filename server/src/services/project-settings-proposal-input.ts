@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { migrateLegacyQualitySettings, qualityModeSchema, type QualityMode, updateProjectSearchChatSettingsSchema, updateProjectSearchRetrievalDefaultsSchema } from "@docslurp/shared";
+import { chartExportFormatSchema, CHART_EXPORT_FORMATS, migrateLegacyQualitySettings, qualityModeSchema, type QualityMode, updateProjectSearchChatSettingsSchema, updateProjectSearchRetrievalDefaultsSchema } from "@docslurp/shared";
 
 /**
  * A retired `vision: { forceAllPages }` patch (older ingest-report recommendations) arrives as `quality`:
@@ -46,6 +46,16 @@ const projectSettingsPipelinePatchObjectSchema = z.object({
   pdfRegionExtraction: z.boolean().optional(), visionFallback: z.boolean().optional(),
   /** Processing quality (fast / auto / good): the setting the ingest report's vision recommendations change. */
   quality: qualityModeSchema.optional(),
+  /**
+   * Chart and diagram export. Bounded: on/off, formats and diagrams only. The generator model is an operator and
+   * settings-page choice that chat can never propose (it would route customer pages to another model).
+   */
+  chartExport: z.object({
+    enabled: z.boolean().optional(),
+    formats: z.array(chartExportFormatSchema).min(1).max(CHART_EXPORT_FORMATS.length)
+      .refine((formats) => new Set(formats).size === formats.length, "formats must not repeat").optional(),
+    diagrams: z.boolean().optional(),
+  }).strict().optional(),
 }).strict();
 export const projectSettingsPipelinePatchSchema = Object.assign(
   z.preprocess(migrateLegacyPatch, projectSettingsPipelinePatchObjectSchema),

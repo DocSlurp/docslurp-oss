@@ -19,6 +19,7 @@ import {
 import {
   estimateTargetCost,
   type CostBreakdown,
+  type ChartExportEstimateOptions,
   type EstimateCorrections,
 } from "./estimate.js";
 
@@ -206,6 +207,8 @@ export function buildScoredEstimate(args: {
 
 export interface PolicyEstimatorOptions {
   corrections?: EstimateCorrections;
+  /** Chart export settings: chart/diagram roles are priced as generator calls (estimate.ts). */
+  chartExport?: ChartExportEstimateOptions;
   /**
    * Decision model whose answers feed the estimator. Its own target mappings (fit on its calibrated answers) win;
    * targets without one use the default mapping.
@@ -234,7 +237,7 @@ export function createPolicyEstimator(
   return ({ page, role, scope, target, probs }) => {
     const mapping = byTarget.get(target.id);
     if (!mapping) return null;
-    const cost = estimateTargetCost(target, role, scope, page, opts.corrections);
+    const cost = estimateTargetCost(target, role, scope, page, opts.corrections, opts.chartExport);
     if (!cost.priced && mapping.n > 0) {
       cost.costUsd = mapping.cost.meanUsd;
       cost.billedUsd = Math.max(cost.billedUsd, mapping.cost.meanUsd);

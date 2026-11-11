@@ -1,5 +1,6 @@
 import { tableChunks, TableBoundary } from "./table-chunking.js";
 import { leadingFrontmatterLineCount, parseAtxHeading, plainHeadingText } from "../lib/markdown-structure.js";
+import { stripVisualMarkerComments } from "../lib/visual-markers.js";
 import { atomizeSized, fitsLimits, headWords, normalizeNfc, tailWords, type SizeLimits } from "../lib/unicode-text.js";
 
 export interface ChunkMeta {
@@ -31,7 +32,8 @@ export function* chunkTextWithMeta(
     throw new RangeError("maxTokens must be a positive safe integer");
   }
   const limits: SizeLimits = { maxChars, maxTokens: options?.maxTokens };
-  const clean = normalizeNfc(text).trim();
+  // Chart export's visual group markers only matter to a reprocess: never chunked, embedded or shown as snippets.
+  const clean = stripVisualMarkerComments(normalizeNfc(text)).trim();
   if (!clean) {
     return;
   }

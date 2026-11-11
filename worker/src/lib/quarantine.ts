@@ -31,6 +31,11 @@ export interface ArchiveInspection {
   suspicious: boolean;
   inspectable: boolean;
   issues: string[];
+  /**
+   * Office chart parts (`word|ppt|xl/charts/chartN.xml`) by entry name: a free chart-presence signal for chart export
+   * stats. Optional: guests built before it was added omit it.
+   */
+  chartParts?: number;
 }
 
 export interface QuarantineArtifact {
@@ -285,6 +290,7 @@ async function inspectInVm(args: { bytes: Buffer; filename: string; tempFile: st
         if (!Number.isSafeInteger(archive[key]) || archive[key] < 0) throw new Error("invalid quarantine archive size");
       }
       if (!(archive.compressionRatio === null || Number.isFinite(archive.compressionRatio) && archive.compressionRatio >= 0)) throw new Error("invalid quarantine expansion ratio");
+      if (archive.chartParts !== undefined && !(Number.isSafeInteger(archive.chartParts) && archive.chartParts >= 0 && archive.chartParts <= archive.entryCount)) throw new Error("invalid quarantine chart part count");
     }
     return result;
   } finally { await rm(dir, { recursive: true, force: true }); }

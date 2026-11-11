@@ -37,6 +37,8 @@ import { z } from "zod";
 import type { BulkReprocessResult } from "./documents.js";
 import { sql, type SqlClient } from "../db.js";
 import { projectRunsUsageCost } from "./usage-attribution.js";
+import { aggregateVisualCandidates, type ProjectVisualCandidates } from "./visual-candidates.js";
+import { chartExportEnabledOnServer } from "./chart-export-availability.js";
 
 /**
  * Ingest report: per-file and per-page observations for a project (or one
@@ -101,6 +103,8 @@ export interface IngestReportStageRow {
   pdfPagesMeasured?: number | null;
   pdfPagesProcessed?: number | null;
   pdfPagesMismatch?: string | null;
+  /** Raw `stats.visualCandidates` (VisualCandidateStats the worker records), validated before use. */
+  visualCandidates?: unknown;
 }
 
 export interface IngestReportRunRow {
@@ -127,6 +131,8 @@ export interface IngestReportInput {
   canEdit: boolean;
   focusPages?: number[];
   now?: Date;
+  /** The chart export kill switch (default: the server's DOCSLURP_CHART_EXPORT). */
+  chartExportAvailable?: boolean;
 }
 
 type FileKind = "pdf" | "image" | "audio" | "video" | "office" | "html" | "text" | "epub" | "other";
@@ -413,6 +419,12 @@ export function buildIngestReport(input: IngestReportInput): IngestReport {
     : null;
 
   const failureList = listFailures(docs, stagesByDoc);
+  // Charts/diagrams recorded at ingest: the latest stage of the document's run that reported them (worker stage stats
+  // only; document metadata is never read, so a writable metadata field could not forge these counts).
+  const visuals = aggregateVisualCandidates(docs.filter((doc) => !doc.superseded).map((doc) => ({
+    documentId: doc.id,
+    stats: stagesByDoc.get(doc.id)?.findLast((stage) => stage.visualCandidates != null)?.visualCandidates ?? null,
+  })));
   const observed = {
     docs,
     failureList,
@@ -432,6 +444,8 @@ export function buildIngestReport(input: IngestReportInput): IngestReport {
     singleRun: input.scope.runId !== null || new Set(input.runs.map((run) => run.id)).size === 1,
     allRunPages,
     textPages: textPages.length,
+    visuals,
+    chartExportAvailable: input.chartExportAvailable ?? chartExportEnabledOnServer(),
   };
 
   return {
@@ -651,6 +665,10 @@ type Observed = {
   singleRun: boolean;
   allRunPages: number;
   textPages: number;
+  /** Charts and diagrams recorded at ingest (free signals), for the export-charts recommendation. */
+  visuals: ProjectVisualCandidates;
+  /** The deployment's chart export kill switch: off, export-charts is never recommended. */
+  chartExportAvailable?: boolean;
 };
 
 function onOff(value: boolean | undefined) {
@@ -759,6 +777,7 @@ export const INGEST_RECOMMENDATION_CATALOG = {
   "preserve-tables": { proposal: "pipeline-patch", note: "preserveTables is proposable." },
   "turn-on-embeddings": { proposal: "pipeline-patch", note: "embed and indexVectors are proposable." },
   "turn-on-video": { proposal: "pipeline-patch", note: "mediaVideo.enabled is proposable." },
+  "export-charts": { proposal: "pipeline-patch", note: "chartExport.enabled is proposable (generatorModel is not)." },
   "media-without-transcript": { proposal: "outside-allowlist", note: "Transcription is a platform setting for operators." },
   "reindex-pages-with-text": { proposal: "reprocess-only", note: "Nothing to change; reprocessing re-chunks the files." },
   "retry-failed-files": { proposal: "reprocess-only", note: "Nothing to change; reprocessing runs the files again (see failures for causes that will not clear)." },
@@ -950,6 +969,25 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
       cost: { centsPer100Pages: null, reprocessCents: null, basis: "Depends on video length and frame selection; mediaVideo.maxCostCents bounds it per file." },
       patch: { mediaVideo: { enabled: true } },
       reprocessDocumentIds: videos.map((doc) => doc.id),
+    });
+  }
+
+  const visuals = observed.visuals;
+  if (observed.chartExportAvailable === true && visuals.unexported > 0 && pipeline.chartExport?.enabled !== true) {
+    // Exports are not split by kind, so name the kind only when the project has just one.
+    const what = visuals.diagrams === 0 ? plural(visuals.unexported, "chart")
+      : visuals.charts === 0 ? plural(visuals.unexported, "diagram")
+        : `${visuals.unexported.toLocaleString("en-US")} ${visuals.unexported === 1 ? "chart or diagram" : "charts and diagrams"}`;
+    const files = visuals.documentIds.length;
+    recs.push({
+      id: "export-charts", severity: "info",
+      title: "Export charts and diagrams as data",
+      reason: `${what} in ${plural(files, "file")} ${agree(visuals.unexported, "was", "were")} kept as ${agree(visuals.unexported, "an image or a text guess", "images or text guesses")}, so answers cannot quote ${agree(visuals.unexported, "its", "their")} values or steps.`,
+      effect: "Turn on chart export: each chart or diagram is re-expressed as a description and Mermaid (plus Vega-Lite, matplotlib or CSV if chosen), so its data becomes searchable and citable. Applies to new uploads; reprocess the affected files to export existing charts.",
+      affectedPages: visuals.pagesWithUnexportedVisuals, affectedDocuments: files,
+      cost: { centsPer100Pages: null, reprocessCents: null, basis: "Charts that carry their own data (Office charts, embedded chart specs, vector graphics) export without a model call; others are billed per chart or diagram a model reads." },
+      patch: { chartExport: { enabled: true } },
+      reprocessDocumentIds: visuals.documentIds,
     });
   }
 
@@ -1220,6 +1258,7 @@ export async function loadIngestReport(args: {
       table_pages: string | number | null; duration_seconds: string | number | null; error: string | null; extractor_fallback: unknown;
       page_equivalents: string | number | null; dense_pages: unknown; dense_page_count: string | number | null;
       pdf_pages_measured: string | number | null; pdf_pages_processed: string | number | null; pdf_pages_mismatch: string | null;
+      visual_candidates: unknown;
     }[]>`
       select s.document_id, s.stage_name, s.status, left(s.error, 1000) as error,
         coalesce(s.stats -> 'skipped' = 'true'::jsonb, false) as skipped,
@@ -1235,7 +1274,8 @@ export async function loadIngestReport(args: {
         case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'densePageCount') = 'number' then (s.stats ->> 'densePageCount')::numeric end as dense_page_count,
         case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'pdfPagesMeasured') = 'number' then (s.stats ->> 'pdfPagesMeasured')::numeric end as pdf_pages_measured,
         case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'pdfPagesProcessed') = 'number' then (s.stats ->> 'pdfPagesProcessed')::numeric end as pdf_pages_processed,
-        case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'pdfPagesMismatch') = 'string' then left(s.stats ->> 'pdfPagesMismatch', 40) end as pdf_pages_mismatch
+        case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'pdfPagesMismatch') = 'string' then left(s.stats ->> 'pdfPagesMismatch', 40) end as pdf_pages_mismatch,
+        case when jsonb_typeof(s.stats -> 'visualCandidates') = 'object' then s.stats -> 'visualCandidates' end as visual_candidates
       from document_run_stage_states s
       join documents d on d.id = s.document_id and d.run_id = s.run_id
       where d.project_id = ${projectId} and d.id = any(${client.array(ids)}::text[])
@@ -1293,6 +1333,7 @@ export async function loadIngestReport(args: {
       pdfPagesMeasured: numOrNull(row.pdf_pages_measured),
       pdfPagesProcessed: numOrNull(row.pdf_pages_processed),
       pdfPagesMismatch: row.pdf_pages_mismatch,
+      visualCandidates: row.visual_candidates ?? null,
     })),
     runs: runRows.map((row) => ({ id: row.id, status: row.status, pagesProcessed: num(row.pages_processed), durationMs: num(row.duration_ms) })),
     costCents: cost?.costCents ?? null,

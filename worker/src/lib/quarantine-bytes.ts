@@ -28,6 +28,9 @@ export function sniffMimeType(bytes: Buffer, filename: string): string | null {
   return sniffFileBytes(bytes, filename).mimeType;
 }
 
+/** An OOXML chart part by its entry name (DOCX `word/`, PPTX `ppt/`, XLSX `xl/`). Names only: no part is read. */
+const OFFICE_CHART_PART = /^(?:word|ppt|xl)\/charts\/chart\d+\.xml$/;
+
 export function inspectArchive(bytes: Buffer, filename: string, policy: QuarantinePolicy): ArchiveInspection | null {
   if (!isZipBytes(bytes)) {
     return null;
@@ -45,7 +48,8 @@ export function inspectArchive(bytes: Buffer, filename: string, policy: Quaranti
       compressionRatio: null,
       suspicious: true,
       inspectable: false,
-      issues: ["archive-inspection-failed"]
+      issues: ["archive-inspection-failed"],
+      chartParts: 0
     };
   }
 
@@ -58,8 +62,10 @@ export function inspectArchive(bytes: Buffer, filename: string, policy: Quaranti
     totalCompressedBytes > 0 ? Number((totalUncompressedBytes / totalCompressedBytes).toFixed(2)) : null;
   const issues: string[] = [];
   const names = new Set<string>();
+  let chartParts = 0;
   for (const entry of parsed) {
     const normalized = entry.name.replace(/\\/g, "/");
+    if (OFFICE_CHART_PART.test(normalized)) chartParts += 1;
     if (!normalized || /[\x00-\x1f:]/.test(normalized) || normalized.startsWith("/") || normalized.split("/").includes("..")) {
       issues.push("archive-unsafe-path");
     }
@@ -98,7 +104,8 @@ export function inspectArchive(bytes: Buffer, filename: string, policy: Quaranti
     compressionRatio,
     suspicious: issues.length > 0,
     inspectable: true,
-    issues: [...new Set(issues)]
+    issues: [...new Set(issues)],
+    chartParts
   };
 }
 

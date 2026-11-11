@@ -1,7 +1,10 @@
 import { z } from "zod";
 
 import { QUALITY_RANK } from "./quality.js";
-import { FIXED_OVERHEAD_SECONDS, estimateIngest, isBillingEnforced, type PipelineProfileId } from "./billing.js";
+import { FIXED_OVERHEAD_SECONDS, estimateIngest, isBillingEnforced, visualExportCredits, type PipelineProfileId } from "./billing.js";
+import type { VisualCandidateStats } from "./chart-export.js";
+import { chartExportAvailable } from "./chart-export.js";
+import { chartExportConfigOf, expectedBillableVisuals, type VisualExportModes } from "./chart-export-estimate.js";
 import { sha256Hex } from "./hash.js";
 import { embeddingModelBaseUri,
   embeddingModelCatalogByUri, embeddingProfileCatalog } from "./embedding.js";
@@ -133,6 +136,14 @@ export const PIPELINE_FIELD_IMPACT: Record<keyof PipelineFeatures, FieldImpact> 
   pdfRegionExtraction: toggled("pdfRegionExtraction"),
   embed: toggled("embed"),
   indexVectors: toggled("indexVectors"),
+  // Enabling export, adding formats or turning diagrams on adds outputs old documents gain on re-index.
+  chartExport: (before, after) => {
+    if (!after.chartExport.enabled) return "new-uploads";
+    const gained = !before.chartExport.enabled
+      || after.chartExport.formats.some((format) => !before.chartExport.formats.includes(format))
+      || (after.chartExport.diagrams && !before.chartExport.diagrams);
+    return gained ? "reindex-recommended" : "new-uploads";
+  },
   // Future ingestion only.
   maxCostCents: "new-uploads",
   inferenceLane: "new-uploads",
@@ -164,6 +175,10 @@ const FIELD_EFFECTS: Partial<Record<keyof PipelineFeatures, Partial<Record<Confi
   quality: {
     "reindex-recommended": "New uploads use this processing quality. Existing documents keep their current text until you reprocess them; reprocessing re-reads their pages and is billed per page.",
     "new-uploads": "New uploads use this processing quality. Existing documents keep the text already extracted.",
+  },
+  chartExport: {
+    "reindex-recommended": "New uploads export charts and diagrams in the chosen formats. Existing documents gain them when you reprocess them.",
+    "new-uploads": "Applies to new uploads only. Existing documents keep the chart and diagram exports they already have.",
   },
   visionFallback: {
     "reindex-recommended": "New uploads can read scanned or image-only pages with vision. Existing documents keep their current text until you reprocess them.",
@@ -253,6 +268,36 @@ const STAGE_WEIGHT: Record<PipelineRunStage, number> = {
 
 const profileFor = (features: PipelineFeatures): PipelineProfileId => features.quality;
 
+/** Stages whose run re-exports charts and diagrams: the generator runs at the end of vision-extract (worker chart-export/stage.ts). */
+export const CHART_EXPORT_CHARGING_STAGES: readonly string[] = ["vision-extract"];
+
+/**
+ * Credits range for chart & diagram export over a run of `stages`: zero unless the option is on and a charging stage
+ * runs. Expected model-sourced visuals come from recorded stats when known, else a conservative per-page prior; every
+ * model-sourced visual is priced as `vision` (svg-assisted is billed the same way).
+ */
+function chartExportCredits(args: {
+  features: PipelineFeatures;
+  stages: readonly string[];
+  pages: number;
+  documents: number;
+  env: Record<string, string | undefined>;
+  visualStats?: Partial<VisualCandidateStats> | null;
+  modes?: VisualExportModes;
+}): { low: number; high: number; note: string | null } {
+  // The deployment kill switch (DOCSLURP_CHART_EXPORT) off means the worker never exports: nothing to price.
+  const config = chartExportAvailable(args.env) ? chartExportConfigOf(args.features) : null;
+  if (!config || !args.stages.some((stage) => CHART_EXPORT_CHARGING_STAGES.includes(stage))) return { low: 0, high: 0, note: null };
+  const visuals = expectedBillableVisuals({ config, pages: args.pages, documents: args.documents, stats: args.visualStats ?? null });
+  const price = (count: number) => visualExportCredits({ visuals: count, source: "vision", formats: config.formats, ...(args.modes ? { modes: args.modes } : {}) });
+  const range = visuals.low === visuals.high ? `${visuals.low}` : `${visuals.low} to ${visuals.high}`;
+  return {
+    low: price(visuals.low),
+    high: price(visuals.high),
+    note: `; chart export: ${range} model-read visuals (${visuals.basis === "measured" ? "recorded counts" : "per-page planning prior"})`,
+  };
+}
+
 /**
  * Price and time a set of stages over `pages` pages. Ported from the worker's `forecastRunCost` (per-document
  * overhead) and `estimateIngest` (rate card, page-class profiles, parallelism); the range runs from a text-only
@@ -268,6 +313,10 @@ export function estimatePipelineWork(args: {
   workerSlots?: number;
   /** Required: the caller decides which environment decides billing. Browsers pass their server-reported env. */
   env: Record<string, string | undefined>;
+  /** Recorded visual stats summed over the documents, when known (chart export then prices measured candidates). */
+  visualStats?: Partial<VisualCandidateStats> | null;
+  /** Per-format generation mode for chart export (default: every format derived from one spec). */
+  chartExportModes?: VisualExportModes;
 }): CostEstimate {
   const pages = Math.max(0, Math.round(args.pages));
   const documents = Math.max(0, Math.round(args.documents));
@@ -292,6 +341,16 @@ export function estimatePipelineWork(args: {
     (estimate.credits.totalCredits - estimate.credits.breakdown.features) * share + estimate.credits.breakdown.features;
   const low = run({ text: 1, complex: 0, scanned: 0 });
   const high = run({ text: 0.2, complex: 0.3, scanned: 0.5 });
+  // Chart & diagram export is charged per visual a model read whenever a charging stage runs (not by stage share).
+  const visuals = chartExportCredits({
+    features: args.features,
+    stages: selected,
+    pages,
+    documents: Math.max(1, documents),
+    env: args.env,
+    visualStats: args.visualStats ?? null,
+    ...(args.chartExportModes ? { modes: args.chartExportModes } : {}),
+  });
   const scaleSeconds = (wall: number) => (share > 0 && pages > 0 ? Math.max(0, wall - FIXED_OVERHEAD_SECONDS) * share + FIXED_OVERHEAD_SECONDS : 0);
 
   return costEstimateSchema.parse({
@@ -299,12 +358,13 @@ export function estimatePipelineWork(args: {
     documents,
     billing,
     credits: billing === "disabled" ? null : {
-      low: round(priced(low)),
-      high: round(priced(high)),
+      low: round(priced(low) + visuals.low),
+      high: round(priced(high) + visuals.high),
     },
     seconds: { low: round(scaleSeconds(low.wallSeconds)), high: round(scaleSeconds(high.wallSeconds)) },
     basis: `${profile} profile, ${selected.length} of ${Math.max(planned.size, selected.length)} stages; `
-      + "range from all-text to scan-heavy pages; modeled averages, not measured for this corpus",
+      + "range from all-text to scan-heavy pages; modeled averages, not measured for this corpus"
+      + (visuals.note ?? ""),
   });
 }
 

@@ -46,6 +46,11 @@ export interface ExecutorDeps {
     role: AssignmentRole;
     raster: RasterRef;
     pageNumber: number;
+    /** The assignment's scope and plan index (chart export keys visuals by image index). */
+    scope?: Assignment["scope"];
+    assignmentIndex?: number;
+    /** The assignment's planner reason (chart export skips roles the budget guard downgraded). */
+    reason?: string;
     signal?: AbortSignal;
   }): Promise<VisionPageOutput>;
 }
