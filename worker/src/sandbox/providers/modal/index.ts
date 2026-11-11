@@ -12,8 +12,10 @@ import {
   SandboxConfigError,
   SandboxInfrastructureError,
   SandboxOutputError,
+  SandboxPolicyError,
   SandboxRunError,
   type ParserSandboxProvider,
+  type ScannerSessionSpec,
   type SandboxCommand,
   type SandboxConfigSchema,
   type SandboxIsolation,
@@ -25,6 +27,24 @@ import { SessionStaging, type RemoteEntry, type RemoteFs, type RemoteSnapshot } 
 import { vmOnlyParsing } from "../../../lib/vm-only-parsing.js";
 import { defaultDocConcurrency, resolveActivityConcurrency } from "../../../concurrency.js";
 import { VmBudget } from "./vm-budget.js";
+import {
+  CLAMD_SELF_TEST_ARGV,
+  CLAMD_START_ARGV,
+  CLAMD_VERSION_ARGV,
+  clamdConfig,
+  EICAR,
+  jobRootsGained,
+  jobRootsListingArgv,
+  modalScannerRegions,
+  parseClamVersionLine,
+  readDefinitionFiles,
+  SCANNER_CONFIG_FILE,
+  scannerDefinitionsDir,
+  scannerSetupArgv,
+  ScannerSnapshotCache,
+  scannerSnapshotKey,
+  SELF_TEST_FILE,
+} from "./scanner.js";
 
 export type ModalSdk = typeof import("modal");
 
@@ -53,6 +73,8 @@ export interface ModalConfig {
   assetWriteDeadlineMs?: number;
   /** Tests only: when an unconfirmed creation's token is released at the latest (default: lifetime plus margins). */
   unconfirmedBackstopMs?: number;
+  /** Regions scanner snapshot VMs run in (modalScannerRegions). */
+  scannerRegions?: string[];
 }
 
 /**
@@ -477,6 +499,123 @@ export function buildModalUsageEvent(config: ModalConfig, activityId: string, wa
   };
 }
 
+/** Deadlines for one scanner snapshot build: the signature upload and clamd's load take tens of seconds at most. */
+const SCANNER_BUILD_STEP_MS = 5 * 60_000;
+const SCANNER_SNAPSHOT_TAKE_MS = 3 * 60_000;
+
+async function rootExec(vm: import("modal").Sandbox, argv: string[], timeoutMs = 60_000): Promise<{ code: number; stdout: string; stderr: string }> {
+  const proc = await withDeadline(vm.exec(argv, { timeoutMs, mode: "text" }), timeoutMs + 5_000);
+  const [stdout, stderr, code] = await withDeadline(Promise.all([
+    boundedJobOutput(proc.stdout, 4 * 1024 * 1024, "scanner build stdout").then((bytes) => bytes.toString("utf8")),
+    boundedJobOutput(proc.stderr, 1024 * 1024, "scanner build stderr").then((bytes) => bytes.toString("utf8")),
+    proc.wait(),
+  ]), timeoutMs + 5_000);
+  return { code, stdout, stderr };
+}
+
+async function rootExecChecked(vm: import("modal").Sandbox, argv: string[], failure: string, timeoutMs = 60_000): Promise<string> {
+  const result = await rootExec(vm, argv, timeoutMs);
+  // The build VM holds only the image, the worker's signatures and our config: its output is ours, never a document's.
+  if (result.code !== 0) throw new Error(`${failure} (exit ${result.code}): ${(result.stderr || result.stdout).trim().slice(-300)}`);
+  return result.stdout;
+}
+
+/**
+ * Build one scanner snapshot (scanner.ts): a fresh, hardened and locked VM loads the worker's own signature files into
+ * clamd, proves the daemon reports the expected signature version and detects EICAR, proves its job roots hold nothing
+ * the image did not ship, and is snapshotted. No job command or job input ever reaches this VM; it is terminated after
+ * the snapshot (or any failure). Throws on any failed check: no snapshot means no scan (fail closed).
+ */
+export async function buildScannerSnapshot(
+  sdk: ModalSdk,
+  client: InstanceType<ModalSdk["ModalClient"]>,
+  config: ModalConfig,
+  spec: ScannerSessionSpec,
+  onUsage: (event: UsageEvent | undefined) => void,
+): Promise<import("modal").SandboxSnapshot> {
+  const files = await readDefinitionFiles(spec.definitionsDir);
+  const app = await withDeadline(client.apps.fromName(config.app, { createIfMissing: true }), 30_000);
+  const registrySecret = config.registrySecret && !config.imageId ? await withDeadline(client.secrets.fromName(config.registrySecret), 30_000) : undefined;
+  const image = config.imageId ? await withDeadline(client.images.fromId(config.imageId), 30_000) : client.images.fromRegistry(config.image, registrySecret);
+  const name = `docslurp-scanner-build-${randomBytes(12).toString("hex")}`;
+  const started = Date.now();
+  let vm: import("modal").Sandbox | undefined;
+  let createdAt: number | undefined;
+  const steps: string[] = [];
+  const mark = (step: string) => steps.push(`${step}=${Date.now() - started}`);
+  try {
+    vm = await withDeadline(client.sandboxes.create(app, image, {
+      name,
+      runtime: "vm",
+      command: [...PARSER_VM_IDLE_COMMAND],
+      includeOidcIdentityToken: false,
+      env: {}, secrets: [], volumes: {}, cloudBucketMounts: {},
+      cpu: config.cpu, cpuLimit: config.cpu,
+      memoryMiB: config.memoryMb, memoryLimitMiB: config.memoryMb,
+      // Restored VMs keep this lifetime bound (measured on Modal: it runs from the restore), like every parser VM.
+      timeoutMs: config.sessionTimeoutSeconds * 1000,
+      blockNetwork: true,
+      regions: config.scannerRegions ?? ["us"],
+      experimentalEnableSnapshot: true,
+    }), CREATE_DEADLINE_MS);
+    createdAt = Date.now();
+    mark("created");
+    const jobRoots = parserJobRoots();
+    const before = await rootExecChecked(vm, jobRootsListingArgv(jobRoots), "scanner VM job roots could not be listed");
+    if ((await rootExec(vm, HARDEN_LINKS_ARGV, 10_000)).code !== 0) throw new Error("scanner VM kernel link protections could not be turned on");
+    await rootExecChecked(vm, lockImageArgv(jobRoots), "scanner VM image paths are writable by the parser user", 120_000);
+    await withDeadline(vm.filesystem.makeDirectory(CONTROL_DIR), 30_000);
+    await rootExecChecked(vm, ["/bin/chmod", "0711", "--", CONTROL_DIR], "scanner VM control directory setup failed");
+    mark("hardened");
+    // The worker's own signature files, root-owned and read-only, outside every job tree.
+    const vmDir = scannerDefinitionsDir(ASSET_ROOT, spec.signatureSetHash);
+    await withDeadline(vm.filesystem.makeDirectory(vmDir), 30_000);
+    for (const file of files) await withDeadline(vm.filesystem.writeBytes(file.data, `${vmDir}/${file.name}`), config.assetWriteDeadlineMs ?? ASSET_WRITE_DEADLINE_MS);
+    await rootExecChecked(vm, ["/bin/chmod", "0755", "--", ASSET_ROOT, vmDir], "scanner VM asset directory setup failed");
+    await rootExecChecked(vm, ["/bin/chmod", "0444", "--", ...files.map((file) => `${vmDir}/${file.name}`)], "scanner VM asset setup failed");
+    mark("signatures-staged");
+    await rootExecChecked(vm, scannerSetupArgv(), "scanner VM daemon directories could not be created");
+    await withDeadline(vm.filesystem.writeBytes(new TextEncoder().encode(clamdConfig(vmDir)), SCANNER_CONFIG_FILE), 30_000);
+    await rootExecChecked(vm, ["/bin/chmod", "0444", "--", SCANNER_CONFIG_FILE], "scanner VM daemon config setup failed");
+    // clamd loads every signature, then daemonizes as its unprivileged user: the expensive step, done once per set.
+    await rootExecChecked(vm, CLAMD_START_ARGV, "scanner VM malware daemon did not start", SCANNER_BUILD_STEP_MS);
+    mark("daemon-loaded");
+    const reported = parseClamVersionLine((await rootExecChecked(vm, CLAMD_VERSION_ARGV, "scanner VM malware daemon did not answer")).split("\n")[0] ?? "");
+    if (!reported || reported.version !== spec.expectedVersion) {
+      throw new Error(`scanner VM malware daemon loaded signature version ${reported?.version ?? "unknown"}, expected ${spec.expectedVersion}`);
+    }
+    await withDeadline(vm.filesystem.writeBytes(new TextEncoder().encode(EICAR), SELF_TEST_FILE), 30_000);
+    const selfTest = await rootExec(vm, CLAMD_SELF_TEST_ARGV);
+    if (selfTest.code !== 1 || !/Eicar.*FOUND/i.test(selfTest.stdout)) throw new Error(`scanner VM malware daemon failed its EICAR self-test (exit ${selfTest.code})`);
+    await rootExecChecked(vm, ["/bin/rm", "-f", "--", SELF_TEST_FILE], "scanner VM self-test file could not be removed");
+    // Nothing reached a job tree: the snapshot holds the image, the signatures, the config and the loaded daemon only.
+    const after = await rootExecChecked(vm, jobRootsListingArgv(jobRoots), "scanner VM job roots could not be listed");
+    const gained = jobRootsGained(before, after, CONTROL_DIR);
+    if (gained.length) throw new Error(`scanner VM job roots changed before the snapshot (${gained.length} entries); refusing to snapshot`);
+    mark("verified");
+    const snapshot = await withDeadline(vm.experimentalSnapshot(), SCANNER_SNAPSHOT_TAKE_MS);
+    mark("snapshot");
+    console.log(`[parser-sandbox] provider=modal status=scanner-snapshot-built signature_version=${spec.expectedVersion} signature_set=${spec.signatureSetHash.slice(0, 16)} ${steps.join(" ")}`);
+    return snapshot;
+  } catch (error) {
+    console.error(`[parser-sandbox] provider=modal status=scanner-snapshot-failed signature_set=${spec.signatureSetHash.slice(0, 16)} ${steps.join(" ")}: ${safeMessage(config, error)}`);
+    if (!vm) {
+      // A transport failure can hide a VM Modal made: find it by name and stop it (council W #6), best effort.
+      await withDeadline(client.sandboxes.fromName(config.app, name), 10_000).then((orphan) => withDeadline(orphan.terminate(), TERMINATE_REQUEST_MS)).catch(() => {});
+    }
+    throw new SandboxInfrastructureError(`modal scanner snapshot build failed: ${safeMessage(config, error)}`, undefined, { cause: error });
+  } finally {
+    if (vm) {
+      await withDeadline(vm.terminate(), TERMINATE_REQUEST_MS).catch((error: unknown) =>
+        console.error(`[parser-sandbox] provider=modal status=scanner-build-terminate-unconfirmed: ${safeMessage(config, error)}; its lifetime bound still applies`));
+      if (createdAt !== undefined) {
+        try { onUsage(buildModalUsageEvent(config, "scanner-snapshot-build", (Date.now() - createdAt) / 1000)); }
+        catch (error) { console.error(`[sandbox-usage] provider=modal status=unrecorded reason=meter-failed kind=scanner-build: ${safeMessage(config, error)}`); }
+      }
+    }
+  }
+}
+
 export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSandboxProvider<ModalConfig> {
   async function loadClient(config: ModalConfig) {
     assertCredentials(config);
@@ -495,6 +634,8 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
 
   /** One budget per worker process (one provider instance), sized by the first session's config. */
   let budget: VmBudget | undefined;
+  /** Scanner snapshots of this worker process, by image, size, region and signature set (scanner.ts). */
+  const scannerSnapshots = new ScannerSnapshotCache<import("modal").SandboxSnapshot>();
 
   const provider: ParserSandboxProvider<ModalConfig> = {
     id: "modal",
@@ -510,7 +651,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         throw new SandboxConfigError("production parser VM images must be pinned by sha256 digest");
       }
       if (config.imageId && !/^im-[A-Za-z0-9]+$/.test(config.imageId)) throw new SandboxConfigError("invalid DOCSLURP_MODAL_IMAGE_ID");
-      return { ...config, image, vmsPerActivity: modalVmsPerActivity(env), vmsPerWorker: modalVmsPerWorker(env), vmIdleSeconds: modalVmIdleSeconds(env) };
+      return { ...config, image, vmsPerActivity: modalVmsPerActivity(env), vmsPerWorker: modalVmsPerWorker(env), vmIdleSeconds: modalVmIdleSeconds(env), scannerRegions: modalScannerRegions(env) };
     },
     async probe(config) {
       let session: SandboxSession | undefined;
@@ -553,6 +694,12 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
       }
     },
     async openSession(config, context) {
+      const scanner = context.scanner;
+      if (scanner) {
+        if (!scanner.tenantKey || !/^[0-9a-f]{64}$/.test(scanner.signatureSetHash) || !Number.isSafeInteger(scanner.expectedVersion) || scanner.expectedVersion <= 0) {
+          throw new SandboxPolicyError("invalid scanner session: an organization, a signature set hash and its version are required");
+        }
+      }
       const { sdk, client } = await loadClient(config);
       const maxLanes = Math.max(1, Math.floor(config.vmsPerActivity ?? 1));
       const idleMs = Math.max(0.01, config.vmIdleSeconds ?? 20) * 1000;
@@ -748,13 +895,32 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           creating ??= (async () => {
             if (!holdsToken) { await vmBudget.acquire(() => closed || lane.dead); holdsToken = true; }
             if (closed || lane.dead) throw new Error("parser VM session closed during creation");
-            const app = await withDeadline(client.apps.fromName(config.app, { createIfMissing: true }), 30_000);
-            const registrySecret = config.registrySecret && !config.imageId ? await withDeadline(client.secrets.fromName(config.registrySecret), 30_000) : undefined;
-            const image = config.imageId ? await withDeadline(client.images.fromId(config.imageId), 30_000) : client.images.fromRegistry(config.image, registrySecret);
             // A unique name, so a VM whose create call failed in transit can be found and stopped (council W #6).
             const name = `docslurp-parser-${randomBytes(12).toString("hex")}`;
+            // A scanner session restores each VM from its clean snapshot (built once per signature set, before any job
+            // input exists); every other session creates a fresh VM from the image.
+            let scannerKey: string | undefined;
+            let scannerSnapshot: Promise<import("modal").SandboxSnapshot> | undefined;
+            if (scanner) {
+              scannerKey = scannerSnapshotKey(config, config, config.scannerRegions ?? ["us"], scanner);
+              scannerSnapshot = scannerSnapshots.get(scannerKey, () => buildScannerSnapshot(sdk, client, config, scanner, (event) => {
+                if (event && lane.recorder) lane.recorder(event);
+                else if (event) console.warn(`[sandbox-usage] provider=modal status=unrecorded reason=no-stage kind=scanner-build activity=${context.activityId}`);
+              }));
+              await scannerSnapshot;
+              if (closed || lane.dead) throw new Error("parser VM session closed during creation");
+            }
+            const app = scanner ? undefined : await withDeadline(client.apps.fromName(config.app, { createIfMissing: true }), 30_000);
+            const registrySecret = !scanner && config.registrySecret && !config.imageId ? await withDeadline(client.secrets.fromName(config.registrySecret), 30_000) : undefined;
+            const image = scanner ? undefined : config.imageId ? await withDeadline(client.images.fromId(config.imageId), 30_000) : client.images.fromRegistry(config.image, registrySecret);
             createRequestedAt = Date.now();
-            const create = client.sandboxes.create(app, image, {
+            const create = (scanner
+              ? client.sandboxes.experimentalFromSnapshot(await scannerSnapshot!, { name }).catch((error: unknown) => {
+                // A snapshot that no longer restores (expired, region gone) is rebuilt by the next scan.
+                scannerSnapshots.forget(scannerKey!, scannerSnapshot);
+                throw error;
+              })
+              : client.sandboxes.create(app!, image!, {
               name,
               runtime: "vm",
               command: [...PARSER_VM_IDLE_COMMAND],
@@ -764,7 +930,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
               memoryMiB: config.memoryMb, memoryLimitMiB: config.memoryMb,
               timeoutMs: config.sessionTimeoutSeconds * 1000,
               blockNetwork: true,
-            }).then(async (created) => {
+            })).then(async (created) => {
               lifetimeStart = Date.now();
               // Billing starts when Modal's create returns, as Modal bills it (real-Modal M1: metering from the request
               // overstated 4-9 s VMs by about a second each). Capacity accounting is unchanged: the token is held from the
@@ -791,8 +957,15 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
             if (closed || lane.dead) throw new Error("parser VM session closed during creation");
             if (!opened) throw new Error("parser VM creation returned no sandbox");
             // As root, once: kernel link protections on and read back as 1, or this VM runs nothing (council K #5, Modal check).
+            // A restored scanner VM was hardened before its snapshot; this re-applies and reads the settings back all the same.
             const hardened = await withDeadline(opened.exec(HARDEN_LINKS_ARGV, { timeoutMs: 10_000 }).then((proc) => proc.wait()), 15_000);
             if (hardened !== 0) throw new Error("parser VM kernel link protections could not be turned on");
+            if (scanner) {
+              // The image lock and the control directory are part of the snapshot, taken before any command could change
+              // them (scanner.ts); the restored VM is that state, byte for byte.
+              staging = new SessionStaging(buildRemoteFs(sdk, opened));
+              return;
+            }
             // As root, once: the image's runtime root-owned, then nothing outside scratch writable by the parser user
             // (council W #1), or this VM runs nothing.
             const locked = await withDeadline(opened.exec(lockImageArgv(parserJobRoots()), { timeoutMs: 120_000 }).then((proc) => proc.wait()), 125_000);
@@ -1256,6 +1429,12 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           // A closed session is the sandbox's failure, never the document's (recheck R #2).
           if (closed) throw new SandboxInfrastructureError("modal sandbox session is closed");
           if (signal?.aborted) throw new SandboxRunError("modal sandbox command aborted");
+          // A scanner VM serves one organization (Q2): a command of any other, or one without an organization, is refused
+          // before it can reach a VM. A command that needs the scanner daemon never runs on a plain parser VM.
+          if (scanner && command.tenantKey !== scanner.tenantKey) {
+            throw new SandboxPolicyError("scanner session refuses a command of another organization (or of none)");
+          }
+          if (!scanner && command.requiresScanner) throw new SandboxPolicyError("this command needs a malware scanner session");
           let lane = await acquireLane(command.affinityKey, signal);
           if (hooks?.recordUsage) lane.recorder = hooks.recordUsage;
           try {

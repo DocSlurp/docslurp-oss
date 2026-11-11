@@ -337,6 +337,14 @@ function fakeSdk(
     killGate?: Promise<void>;
     /** The leftover kill leaves a parser-user process alive (exit 4). */
     killFails?: boolean;
+    /** Scanner build: the daily version clamd reports (default 28180). */
+    scannerVersion?: number;
+    /** Scanner build: the EICAR self-test exit (default 1, detected). */
+    selfTestExit?: number;
+    /** Scanner build: a job root gains an entry between the two listings. */
+    jobRootGains?: boolean;
+    /** Scanner build: clamd fails to start. */
+    clamdFails?: boolean;
   } = {},
 ) {
   const remote = new MemoryRemoteFs();
@@ -368,6 +376,11 @@ function fakeSdk(
     commandVms: [] as number[],
     commandEnvs: [] as Array<Record<string, string>>,
     chmods: [] as string[][],
+    /** Scanner snapshots: builds (VM numbers), snapshots taken, restores, and the order of build/restore/command events. */
+    snapshots: 0,
+    restores: 0,
+    scannerEvents: [] as string[],
+    jobRootListings: 0,
     /** When each VM was created and terminated (index = VM number - 1). */
     createdAt: [] as number[],
     terminatedAt: [] as number[],
@@ -419,6 +432,20 @@ function fakeSdk(
     },
     exec: async (argv: string[], params?: { timeoutMs?: number }, vm = 1) => {
       if (argv[0] === "/bin/sh" && argv[2]?.includes("protected_hardlinks")) { state.hardened++; return finished("", opts.hardeningFails ? 3 : 0); }
+      // Scanner snapshot build (root): job-root listings, daemon setup, start, version, self-test.
+      if (argv[0] === "python3" && argv[3]?.includes("out.append('absent '")) {
+        state.jobRootListings++;
+        state.scannerEvents.push(`listing:${vm}`);
+        return finished(opts.jobRootGains && state.jobRootListings % 2 === 0 ? "/tmp/leftover 100000 10001 5\n/tmp 40000 0 0" : "/tmp 40000 0 0");
+      }
+      if (argv[0] === "/bin/sh" && argv[2]?.startsWith("set -eu\ninstall")) { state.scannerEvents.push(`setup:${vm}`); return finished("", 0); }
+      if (argv[0] === "/usr/sbin/clamd") { state.scannerEvents.push(`clamd:${vm}`); return finished("", opts.clamdFails ? 1 : 0); }
+      if (argv[0] === "clamdscan" && argv.includes("--version")) return finished(`ClamAV 1.4.6/${opts.scannerVersion ?? 28180}/Wed Nov 11 06:24:27 2026\n`);
+      if (argv[0] === "clamdscan" && argv.at(-1)?.endsWith("self-test.txt")) {
+        state.scannerEvents.push(`self-test:${vm}`);
+        return finished(opts.selfTestExit === 0 ? "" : `${argv.at(-1)}: Eicar-Test-Signature FOUND`, opts.selfTestExit ?? 1);
+      }
+      if (argv[0] === "/bin/rm" && argv[2] === "--") return finished("", 0);
       // Readback and listing run as the parser user (setpriv prefix): record it, then serve them.
       const asUser = argv[0] === "/usr/bin/setpriv" && argv.includes("--reuid=10001") ? argv.slice(argv.indexOf("--") + 1) : null;
       if (asUser?.[0] === "/bin/cat") {
@@ -461,6 +488,7 @@ function fakeSdk(
         return finished("", 0);
       }
       const command = argv.slice(7 + Number(argv[6]));
+      state.scannerEvents.push(`command:${vm}`);
       state.commands.push(command);
       state.events.push(`exec:${command.join(" ")}`);
       state.commandTimeouts.push(params?.timeoutMs);
@@ -490,7 +518,21 @@ function fakeSdk(
           const vm = state.createOptions.length;
           if (opts.createFailsFrom !== undefined && vm >= opts.createFailsFrom) throw new Error("no capacity");
           state.createdAt[vm - 1] = Date.now();
-          return { ...sandbox, sandboxId: `sb-${vm}`, terminate: async () => { await sandbox.terminate(); state.terminatedAt[vm - 1] = Date.now(); }, exec: (argv: string[], params?: { timeoutMs?: number }) => sandbox.exec(argv, params, vm) };
+          if ((options as { experimentalEnableSnapshot?: boolean }).experimentalEnableSnapshot) state.scannerEvents.push(`build-create:${vm}`);
+          return {
+            ...sandbox, sandboxId: `sb-${vm}`,
+            terminate: async () => { await sandbox.terminate(); state.terminatedAt[vm - 1] = Date.now(); state.scannerEvents.push(`terminate:${vm}`); },
+            exec: (argv: string[], params?: { timeoutMs?: number }) => sandbox.exec(argv, params, vm),
+            experimentalSnapshot: async () => { state.snapshots++; state.scannerEvents.push(`snapshot:${vm}`); return { snapshotId: `sn-${vm}`, vm }; },
+          };
+        },
+        experimentalFromSnapshot: async (snapshot: { snapshotId: string }) => {
+          state.createOptions.push({ restoredFrom: snapshot.snapshotId });
+          const vm = state.createOptions.length;
+          state.restores++;
+          state.createdAt[vm - 1] = Date.now();
+          state.scannerEvents.push(`restore:${vm}:${snapshot.snapshotId}`);
+          return { ...sandbox, sandboxId: `sb-${vm}`, terminate: async () => { await sandbox.terminate(); state.terminatedAt[vm - 1] = Date.now(); state.scannerEvents.push(`terminate:${vm}`); }, exec: (argv: string[], params?: { timeoutMs?: number }) => sandbox.exec(argv, params, vm) };
         },
       };
       close() {
@@ -1966,5 +2008,105 @@ describe("modal image default", () => {
     const read = () => provider.readConfig({ ...tokens });
     expect(read).toThrow(SandboxConfigError);
     expect(read).toThrow(/DOCSLURP_MODAL_IMAGE.*DOCSLURP_VERSION is unset/);
+  });
+});
+
+describe("modal scanner sessions (quarantine Q1/Q2)", () => {
+  const command = { binary: "clamdscan", args: ["--fdpass"], env: {}, readablePaths: [], inputPaths: [], writablePaths: [], limits: { timeoutMs: 5_000 } };
+  let sigDir: string;
+  const hash = "a".repeat(64);
+
+  beforeEach(async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    sigDir = await mkdtemp(path.join(tmpdir(), "docslurp-scanner-sigs-"));
+    await writeFile(path.join(sigDir, "daily.cvd"), "daily");
+    await writeFile(path.join(sigDir, "main.cvd"), "main");
+  });
+  afterEach(async () => { vi.restoreAllMocks(); await rm(sigDir, { recursive: true, force: true }); });
+
+  function open(opts: Parameters<typeof fakeSdk>[0] = {}) {
+    const { sdk, state } = fakeSdk({ exec: async () => finished(""), ...opts });
+    const provider = createModalProvider(async () => sdk);
+    const spec = (tenantKey = "org-a", signatureSetHash = hash) => ({ tenantKey, definitionsDir: sigDir, signatureSetHash, expectedVersion: 28180 });
+    return { state, provider, scanner: (tenantKey?: string, signatureSetHash?: string) => provider.openSession(lifecycleConfig, { activityId: "q", scanner: spec(tenantKey, signatureSetHash) }) };
+  }
+
+  it("takes the snapshot before any job input exists: the build VM runs no job command and is terminated; jobs run only in restored VMs", async () => {
+    const { state, scanner } = open();
+    const session = await scanner();
+    await session.run!({ ...command, tenantKey: "org-a" });
+    await session.close();
+    const events = state.scannerEvents;
+    const snapshotAt = events.indexOf("snapshot:1");
+    expect(events[0]).toBe("build-create:1");
+    expect(snapshotAt).toBeGreaterThan(events.indexOf("self-test:1"));
+    // The build VM (1) never runs a job command; it is terminated right after its snapshot, before the first restore.
+    expect(events.filter((event) => event === "command:1")).toHaveLength(0);
+    expect(events.indexOf("terminate:1")).toBeLessThan(events.findIndex((event) => event.startsWith("restore:")));
+    expect(events.findIndex((event) => event.startsWith("command:"))).toBeGreaterThan(snapshotAt);
+    // The job roots are listed before the build changes anything and again right before the snapshot.
+    expect(events.filter((event) => event === "listing:1")).toHaveLength(2);
+    // Nothing the build wrote is under a job root: only the signature assets, the daemon config, the EICAR self-test file
+    // (removed before the snapshot) and the control directory.
+    expect(state.rootWrites.length).toBeGreaterThan(0);
+    expect(state.rootWrites.filter((p) => !p.startsWith("/opt/docslurp-assets/") && !p.startsWith("/etc/docslurp-clamd/") && p !== "/tmp/.docslurp-modal-control")).toEqual([]);
+    expect(state.snapshots).toBe(1);
+  });
+
+  it("restores a fresh VM per session from one snapshot per signature set, and rebuilds when the signatures change", async () => {
+    const { state, scanner } = open();
+    for (let i = 0; i < 3; i++) {
+      const session = await scanner();
+      await session.run!({ ...command, tenantKey: "org-a" });
+      await session.close();
+    }
+    expect(state.snapshots).toBe(1);
+    expect(state.restores).toBe(3);
+    const updated = await scanner("org-a", "b".repeat(64));
+    await updated.close();
+    expect(state.snapshots).toBe(2);
+    // Every restored VM was terminated with its session.
+    const restored = state.scannerEvents.filter((event) => event.startsWith("restore:")).map((event) => event.split(":")[1]);
+    for (const vm of restored) expect(state.scannerEvents).toContain(`terminate:${vm}`);
+  });
+
+  it("refuses a command of another organization, or of none, before it reaches a VM (cross-tenant batch)", async () => {
+    const { state, scanner } = open();
+    const session = await scanner("org-a");
+    await expect(session.run!({ ...command, tenantKey: "org-b" })).rejects.toThrow(/another organization/);
+    await expect(session.run!({ ...command })).rejects.toThrow(/another organization/);
+    expect(state.commands).toHaveLength(0);
+    await session.run!({ ...command, tenantKey: "org-a" });
+    expect(state.commands).toHaveLength(1);
+    await session.close();
+  });
+
+  it("a plain parser session refuses a command that needs the scanner daemon", async () => {
+    const { sdk } = fakeSdk({ exec: async () => finished("") });
+    const session = await createModalProvider(async () => sdk).openSession(lifecycleConfig, { activityId: "plain" });
+    await expect(session.run!({ ...command, requiresScanner: true })).rejects.toThrow(/scanner session/);
+    await session.close();
+  });
+
+  it("refuses a scanner session without an organization or with a malformed signature set", async () => {
+    const { provider } = open();
+    await expect(provider.openSession(lifecycleConfig, { activityId: "q", scanner: { tenantKey: "", definitionsDir: sigDir, signatureSetHash: hash, expectedVersion: 1 } })).rejects.toThrow(/organization/);
+    await expect(provider.openSession(lifecycleConfig, { activityId: "q", scanner: { tenantKey: "org-a", definitionsDir: sigDir, signatureSetHash: "zz", expectedVersion: 1 } })).rejects.toThrow(/signature set/);
+  });
+
+  it.each([
+    ["the daemon loaded another signature version", { scannerVersion: 28179 }, /signature version 28179, expected 28180/],
+    ["the EICAR self-test was not detected", { selfTestExit: 0 }, /EICAR self-test/],
+    ["the daemon did not start", { clamdFails: true }, /daemon did not start/],
+    ["a job root changed before the snapshot", { jobRootGains: true }, /job roots changed/],
+  ])("fails closed with no snapshot when %s", async (_label, opts, message) => {
+    const { state, scanner } = open(opts);
+    await expect(scanner()).rejects.toThrow(message);
+    expect(state.snapshots).toBe(0);
+    expect(state.restores).toBe(0);
+    expect(state.commands).toHaveLength(0);
+    // The build VM is terminated on failure too.
+    expect(state.scannerEvents).toContain("terminate:1");
   });
 });
