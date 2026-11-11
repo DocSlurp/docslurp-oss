@@ -48,6 +48,14 @@ The scan policy comes from `resolveMalwareScanPolicy` in `worker/src/tools/runne
 | `DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS` | `24` | `24` | Age after which signatures count as stale. |
 | `DOCSLURP_CLAMAV_DB_DIR` | `/var/lib/clamav` | `/var/lib/clamav` | Signature directory. |
 
+With the Modal parser sandbox, two flags move the scan into VMs restored from a clean, signature-loaded snapshot. Both are off by default, and a provider without scanner sessions keeps the per-command scan:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DOCSLURP_QUARANTINE_SCAN_SNAPSHOT` | `off` | Run each document's quarantine in a VM restored from a memory snapshot. clamd has already loaded the staged signatures in that snapshot, which is built before any job input exists. Freshness is read on the worker from the staged daily header. Any failed check is an error verdict. |
+| `DOCSLURP_QUARANTINE_SCAN_BATCH` | `off` | With the snapshot flag, one scanner session serves a run's whole quarantine pass. Its VMs run commands of that run's organization only. |
+| `DOCSLURP_MODAL_SCANNER_REGIONS` | `us` | Region list for scanner snapshot VMs (memory snapshots of VM sandboxes need a region). |
+
 "Production" means `NODE_ENV=production`, which the Compose stack sets. If no scan engine is available at all and the daemon is not required, the scan result is `skipped-unavailable`.
 
 ## Secrets and encryption keys

@@ -13,6 +13,17 @@
 
 - Chart export suggestions (2026-11-10): chat offers `chartExport` from a free lexical detector (`packages/shared/src/visual-intent.ts`) plus ingest's visual candidate counts. Escalate ambiguous turns (score just under `VISUAL_INTENT_THRESHOLD`) to the cheapest calibrated decision model, recording usage through the ledger, once the eval shows the lexical detector's misses matter.
 
+## Quarantine scanner snapshots (2026-11-11, `perf/quarantine-latency`, flags off)
+
+- [ ] Council review of `DOCSLURP_QUARANTINE_SCAN_SNAPSHOT` / `_BATCH` (scanner VMs restored from a clamd memory snapshot;
+  one organization per scanner session), then enable on production and measure `quality=fast` and `quality=auto`
+  1-page uploads before/after (performance/quarantine-latency-2026-11-11/results.md).
+- [ ] Build the scanner snapshot in the background when freshclam updates the signatures (today the first scan after an
+  update waits about 34 s for the build), and share one snapshot across workers instead of one build per worker process.
+- [ ] Q3 (concurrent quarantine and extraction): split quarantine into the intake inspection (stays first: format-detect
+  reads its verified file facts) and the malware scan, and gate every served artifact on a clean verdict before running
+  the scan beside extraction. Coordinate with the first-pass plan's quarantine precondition.
+
 ## ClamAV definitions in parser VMs (2026-11-06)
 
 - [ ] Each parser VM spends 11–12 s staging the ClamAV definitions, and staging is serialized per worker (council W #7), so VM
