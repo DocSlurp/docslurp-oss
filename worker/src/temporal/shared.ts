@@ -253,7 +253,17 @@ export interface FirstPassPlanOutput {
   batches: string[][];
   /** Every document of the run is in a batch (none is left only to the stage loop). */
   coversRun?: boolean;
+  /** PDFs whose count format-detect deferred but that no batch takes: counted before the stage loop. */
+  countFirst?: string[];
 }
+
+export interface FirstPassCountInput {
+  runId: string;
+  documentIds: string[];
+}
+
+/** ApplicationFailure type of a first-pass activity stopped by run policy (credits, cost cap): the run stops, no handback. */
+export const FIRST_PASS_RUN_POLICY_FAILURE = "FirstPassRunPolicyStop";
 
 export interface FirstPassBatchInput {
   runId: string;

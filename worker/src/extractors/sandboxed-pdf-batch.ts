@@ -88,7 +88,9 @@ export const BATCH_USAGE_PROPERTY = "batchUsage";
 export function batchUsageOf(error: unknown): UsageEvent[] {
   if (!error || (typeof error !== "object" && typeof error !== "function")) return [];
   const raw = (error as Record<string, unknown>)[BATCH_USAGE_PROPERTY];
-  if (!Array.isArray(raw)) return [];
+  const usageEvent = (event: unknown): event is UsageEvent => !!event && typeof event === "object" && typeof (event as { metric?: unknown }).metric === "string";
+  // A provider that only set a SandboxRunError's single usage event: bill that one.
+  if (!Array.isArray(raw)) { const single = (error as { usage?: unknown }).usage; return usageEvent(single) ? [single] : []; }
   return raw.filter((event): event is UsageEvent => !!event && typeof event === "object" && typeof (event as { metric?: unknown }).metric === "string");
 }
 

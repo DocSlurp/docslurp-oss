@@ -76,6 +76,8 @@ export interface Document {
   intakePageCount?: number | null;
   /** What intake sniffed the bytes to be (documents.file_facts); absent for documents ingested before it existed. */
   fileFacts?: import("@docslurp/shared").FileFacts | null;
+  /** Source size in bytes (documents.file_size), when the loader read it. */
+  sourceBytes?: number | null;
   createdAt: Date;
   updatedAt: Date;
   /** Set for documents of an extract run: the run's storage prefix (see runArtifactRoot). */

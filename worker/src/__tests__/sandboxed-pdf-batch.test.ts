@@ -3,7 +3,7 @@ import {
   registerExtractorPlugin, resetExtractorPluginsForTest, EXTRACTOR_PLUGIN_API_VERSION, type SandboxedPdfExtractorProvider,
 } from "../extractors/plugins.js";
 import {
-  acceptSandboxedPdfBatchEvent, assertSingleScopeBatch, batchFileJob, sandboxedPdfBatchProvider, unfinishedBatchFiles,
+  acceptSandboxedPdfBatchEvent, assertSingleScopeBatch, batchFileJob, batchUsageOf, sandboxedPdfBatchProvider, unfinishedBatchFiles,
   type SandboxedPdfBatchJob,
 } from "../extractors/sandboxed-pdf-batch.js";
 
@@ -66,6 +66,12 @@ describe("assertSingleScopeBatch", () => {
 });
 
 describe("acceptSandboxedPdfBatchEvent", () => {
+  it("keeps the structural count and the processed slots apart (council #340 L2)", () => {
+    expect(acceptSandboxedPdfBatchEvent(job(), { ...text(0, 3), processedPages: 2 })).toMatchObject({ pages: 3, processedPages: 2 });
+    expect(acceptSandboxedPdfBatchEvent(job(), text(0, 3))).not.toHaveProperty("processedPages");
+    for (const bad of [0, 3, 4, 1.5, "2"]) expect(() => acceptSandboxedPdfBatchEvent(job(), { ...text(0, 3), processedPages: bad })).toThrow("processed pages");
+  });
+
   it("accepts text events in any order and records the per-file job", () => {
     const j = job();
     expect(acceptSandboxedPdfBatchEvent(j, text(2)).phase).toBe("text");
@@ -145,5 +151,16 @@ describe("batch provider registration", () => {
       .toThrow("batch needs run()");
     expect(() => registerExtractorPlugin({ apiVersion: EXTRACTOR_PLUGIN_API_VERSION, name: "fake", sandboxedPdf: provider({ maxFiles: 0, maxBatchBytes: 1, maxBatchPages: 1, run: async () => ({ usage: [] }) }) }))
       .toThrow("batch needs run()");
+  });
+});
+
+describe("batchUsageOf (council #340 C5)", () => {
+  const vm = { provider: "modal", model: "m", metric: "sandbox_compute", amount: 1, unit: "cent", costCents: 1 };
+  it("reads every VM usage event a rejection carries, or a SandboxRunError's single one", () => {
+    expect(batchUsageOf(Object.assign(new Error("x"), { batchUsage: [vm, vm, { bogus: true }] }))).toEqual([vm, vm]);
+    expect(batchUsageOf(Object.assign(new Error("x"), { usage: vm }))).toEqual([vm]);
+    expect(batchUsageOf(new Error("x"))).toEqual([]);
+    expect(batchUsageOf("x")).toEqual([]);
+    expect(batchUsageOf(null)).toEqual([]);
   });
 });

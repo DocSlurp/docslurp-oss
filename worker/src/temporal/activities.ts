@@ -1,10 +1,11 @@
-import { firstPassPipeline, planFirstPass, runFirstPassBatch } from "../pipeline/first-pass.js";
+import { countFirstPassPages, firstPassPipeline, planFirstPass, runFirstPassBatch } from "../pipeline/first-pass.js";
+import { RunPolicyError } from "../lib/document-failure.js";
 import { withPlanningProgress } from "./planning-progress.js";
 import { renderDocumentPage } from "../deferred/render-page.js";
 import { buildDocumentExport, DOCUMENT_EXPORT_MAX_ATTEMPTS } from "../exports/build-document-export.js";
 import { runPageBundle } from "./page-bundle.js";
 import { VisionExtractStage } from "../stages/vision-extract.js";
-import type { FirstPassBatchInput, FirstPassBatchOutput, FirstPassPlanInput, FirstPassPlanOutput, VisionPageTask } from "./shared.js";
+import { FIRST_PASS_RUN_POLICY_FAILURE, type FirstPassBatchInput, type FirstPassBatchOutput, type FirstPassCountInput, type FirstPassPlanInput, type FirstPassPlanOutput, type VisionPageTask } from "./shared.js";
 import { runWithProviderRateScope } from "../lib/provider-rate-limit.js";
 import { runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
 /**
@@ -139,6 +140,38 @@ export function toStageActivityFailure(
     case "ordinary":
       return toActivityFailure(error, args.ordinaryFailures ?? args.attempt, args.ordinaryAttemptLimit);
   }
+}
+
+/**
+ * Heartbeat a first-pass activity on a timer (every 10 s), independent of its events: staging, VM boot, the input upload
+ * and retry VMs can each run for minutes without one (council #340 M2).
+ */
+export async function withFirstPassHeartbeat<T>(context: { heartbeat(details?: unknown): void }, details: Record<string, unknown>, work: () => Promise<T>): Promise<T> {
+  const timer = setInterval(() => context.heartbeat({ ...details, alive: true }), 10_000);
+  timer.unref?.();
+  try {
+    context.heartbeat(details);
+    return await work();
+  } finally {
+    clearInterval(timer);
+  }
+}
+
+/**
+ * A first-pass activity's failure: a run-policy stop (credits, cost cap) is final and typed, so the workflow stops the run
+ * as a stage's policy stop does instead of handing the batch back; everything else is classified as a stage's failure.
+ */
+export function firstPassFailure(error: unknown, classify: (error: unknown) => ReturnType<typeof classifyActivityError>): unknown {
+  for (let link: unknown = error, depth = 0; link && depth < 8; depth++, link = (link as { cause?: unknown }).cause) {
+    if (link instanceof RunPolicyError) {
+      return ApplicationFailure.create({ type: FIRST_PASS_RUN_POLICY_FAILURE, message: link.message, nonRetryable: true, cause: link });
+    }
+  }
+  const classification = classify(error);
+  if (classification === "interruption") return interruptionFailure(error);
+  if (classification === "hung") return hungWorkFailure(error);
+  if (classification === "teardown") return teardownFailure(error);
+  return toActivityFailure(error);
 }
 
 export function workerIdentity(): string {
@@ -463,44 +496,58 @@ export function createActivities(deps: ActivityDependencies) {
     /** The run's first-pass batches (pipeline/first-pass.ts). Planned in an activity so the workflow replays the recorded plan. */
     async planFirstPass(input: FirstPassPlanInput): Promise<FirstPassPlanOutput> {
       const plan = await planFirstPass(store, input.runId);
-      return { batches: plan.batches, coversRun: plan.coversRun };
+      return { batches: plan.batches, coversRun: plan.coversRun, countFirst: plan.countFirst };
     },
 
     /**
      * One first-pass batch: one VM job for these documents, each document extracted, embedded (keyword searchable) and
-     * indexed as its result arrives. Documents it does not finish are left to the stage loop.
+     * indexed as its result arrives. Documents it does not finish are counted and left to the stage loop.
      */
     async runFirstPassBatch(input: FirstPassBatchInput): Promise<FirstPassBatchOutput> {
       const context = Context.current();
       const classify = (error: unknown) => classifyActivityError(error, { signal: context.cancellationSignal });
-      try {
-        return await withWorkerSlot(store, { runId: input.runId, kind: "stage", enabled: slotsEnabled && input.slotGate === true }, async () => {
-          const result = await runFirstPassBatch({
-            store, storage: deps.storage, quarantineEnabled: deps.config.quarantineEnabled,
-            signal: context.cancellationSignal,
-            heartbeat: (details) => context.heartbeat(details),
-            runStage: async (stageName, documentIds) => (await execution.runStage(
-              { stageName, runId: input.runId, totalStages: input.totalStages, artifacts: {} },
-              {
-                signal: context.cancellationSignal,
-                heartbeat: (details) => context.heartbeat(details),
-                attempt: context.info.attempt,
-                classifyError: classify,
-                documentIds,
-                firstPassRun: true,
-                pipelineOverride: firstPassPipeline,
-              },
-            )).usage,
-          }, input);
-          return { usage: result.usage, indexed: result.indexed, extracted: result.extracted, handedBack: result.handedBack, timings: result.timings };
-        });
-      } catch (error) {
-        const classification = classify(error);
-        if (classification === "interruption") throw interruptionFailure(error);
-        if (classification === "hung") throw hungWorkFailure(error);
-        if (classification === "teardown") throw teardownFailure(error);
-        throw toActivityFailure(error);
-      }
+      return await withFirstPassHeartbeat(context, { firstPass: "batch", batchIndex: input.batchIndex }, async () => {
+        try {
+          return await withWorkerSlot(store, { runId: input.runId, kind: "stage", enabled: slotsEnabled && input.slotGate === true }, async () => {
+            const result = await runFirstPassBatch({
+              store, storage: deps.storage, quarantineEnabled: deps.config.quarantineEnabled,
+              signal: context.cancellationSignal,
+              heartbeat: (details) => context.heartbeat(details),
+              runStage: async (stageName, documentIds, signal) => (await execution.runStage(
+                { stageName, runId: input.runId, totalStages: input.totalStages, artifacts: {} },
+                {
+                  signal: signal ?? context.cancellationSignal,
+                  heartbeat: (details) => context.heartbeat(details),
+                  attempt: context.info.attempt,
+                  classifyError: classify,
+                  documentIds,
+                  firstPassRun: true,
+                  pipelineOverride: firstPassPipeline,
+                },
+              )).usage,
+            }, input);
+            return { usage: result.usage, indexed: result.indexed, extracted: result.extracted, handedBack: result.handedBack, timings: result.timings };
+          });
+        } catch (error) {
+          throw firstPassFailure(error, classify);
+        }
+      });
+    },
+
+    /**
+     * Measure and authorize the PDFs of a first-pass run that no batch counted (a failed batch, unplanned documents) before
+     * the stage loop takes them (council #340 H2). A credit refusal fails the activity like any stage's.
+     */
+    async countFirstPassPages(input: FirstPassCountInput): Promise<{ counted: number }> {
+      const context = Context.current();
+      const classify = (error: unknown) => classifyActivityError(error, { signal: context.cancellationSignal });
+      return await withFirstPassHeartbeat(context, { firstPass: "count", documents: input.documentIds.length }, async () => {
+        try {
+          return await countFirstPassPages({ store, storage: deps.storage, runner: deps.runner, signal: context.cancellationSignal }, input);
+        } catch (error) {
+          throw firstPassFailure(error, classify);
+        }
+      });
     },
 
     /** Mark a run as completed. Triggers emails and webhooks. */

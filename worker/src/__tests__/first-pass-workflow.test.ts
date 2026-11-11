@@ -35,6 +35,7 @@ beforeEach(() => {
     planFirstPass: vi.fn(async () => ({ batches: [["a"], ["b"], ["c"]], coversRun: true })),
     runPipelineStages: vi.fn(async ({ stageNames }: { stageNames: string[] }) => ({ artifacts: {}, usage: zero, stagesRun: stageNames.length })),
     runFirstPassBatch: vi.fn(async ({ documentIds }: { documentIds: string[] }) => ({ usage: { ...zero, costCents: 1 }, indexed: documentIds, extracted: [], handedBack: [], timings: {} })),
+    countFirstPassPages: vi.fn(async ({ documentIds }: { documentIds: string[] }) => ({ counted: documentIds.length })),
   };
 });
 
@@ -89,6 +90,43 @@ describe("first pass in the pipeline workflow", () => {
     mocks.activities.runFirstPassBatch.mockImplementationOnce(async () => { throw new Error("VM capacity"); });
     await documentPipeline({ runId: "run", pipeline: {} as never, stageOrder: ORDER, slotGate: true, firstPass: { maxParallelBatches: 1, afterFirstPass: "none" } });
     expect(stageNames()).toEqual(["quarantine", "format-detect", "extract-markdown", "embed", "index"]);
+  });
+
+  it("a failed batch's PDFs are measured (countFirstPassPages) before the stage loop takes them", async () => {
+    mocks.activities.runFirstPassBatch.mockImplementationOnce(async () => { throw new Error("VM capacity"); });
+    await documentPipeline({ runId: "run", pipeline: {} as never, stageOrder: ORDER, slotGate: true, firstPass: { maxParallelBatches: 1, afterFirstPass: "auto" } });
+    expect(mocks.activities.countFirstPassPages).toHaveBeenCalledWith({ runId: "run", documentIds: ["a"] });
+    expect(mocks.calls.indexOf("countFirstPassPages")).toBeLessThan(mocks.calls.lastIndexOf("runPipelineStage"));
+    expect(stageNames()).toContain("extract-markdown");
+  });
+
+  it("a run-policy stop (credits) in a batch stops the run: no handback, no count, no stage loop", async () => {
+    const { ApplicationFailure } = await import("@temporalio/common");
+    const { FIRST_PASS_RUN_POLICY_FAILURE } = await import("../temporal/shared.js");
+    mocks.activities.runFirstPassBatch.mockImplementationOnce(async () => {
+      throw ApplicationFailure.create({ type: FIRST_PASS_RUN_POLICY_FAILURE, message: "Credits do not cover the measured pages; run paused", nonRetryable: true });
+    });
+    await expect(documentPipeline({ runId: "run", pipeline: {} as never, stageOrder: ORDER, slotGate: true, firstPass: { maxParallelBatches: 1, afterFirstPass: "none" } }))
+      .rejects.toThrow("Credits do not cover");
+    expect(mocks.activities.countFirstPassPages).not.toHaveBeenCalled();
+    expect(stageNames()).toEqual(["quarantine", "format-detect"]);
+    expect(mocks.activities.failPipelineRun).toHaveBeenCalledOnce();
+    expect(mocks.activities.completePipelineRun).not.toHaveBeenCalled();
+  });
+
+  it("PDFs the plan leaves out of every batch are measured before the batches and the stage loop", async () => {
+    mocks.activities.planFirstPass.mockImplementationOnce(async () => ({ batches: [["a"]], coversRun: false, countFirst: ["big"] }));
+    await documentPipeline({ runId: "run", pipeline: {} as never, stageOrder: ORDER, slotGate: true, firstPass: { maxParallelBatches: 1, afterFirstPass: "none" } });
+    expect(mocks.activities.countFirstPassPages).toHaveBeenCalledWith({ runId: "run", documentIds: ["big"] });
+    expect(mocks.calls.indexOf("countFirstPassPages")).toBeLessThan(mocks.calls.indexOf("runFirstPassBatch"));
+    expect(stageNames()).toContain("extract-markdown");
+  });
+
+  it("afterFirstPass none never stops a run whose batch indexed fewer documents than it was given", async () => {
+    // A batch that reports a document neither indexed nor handed back (it must not happen) still is not finished.
+    mocks.activities.runFirstPassBatch.mockImplementation(async () => ({ usage: zero, indexed: [], extracted: [], handedBack: [], timings: {} }));
+    await documentPipeline({ runId: "run", pipeline: {} as never, stageOrder: ORDER, slotGate: true, firstPass: { maxParallelBatches: 1, afterFirstPass: "none" } });
+    expect(stageNames()).toContain("extract-markdown");
   });
 
   it("without recorded first-pass input the command sequence is today's", async () => {

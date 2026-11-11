@@ -46,6 +46,7 @@ import {
   STAGE_THROTTLED_ATTEMPTS,
   stageWorksOn,
   WORKER_SLOT_UNAVAILABLE,
+  FIRST_PASS_RUN_POLICY_FAILURE,
   type PipelineWorkflowInput,
   type PipelineWorkflowOutput,
   type RunProgress,
@@ -315,7 +316,11 @@ export async function documentPipeline(
      */
     const runFirstPass = async (): Promise<boolean> => {
       const plan = await scaling!.quick.planFirstPass({ runId: input.runId });
+      // PDFs format-detect left to the first pass that no batch takes: measured and authorized before the stage loop.
+      if (plan.countFirst?.length) await scaling!.longRunning.countFirstPassPages({ runId: input.runId, documentIds: plan.countFirst });
       if (plan.batches.length === 0) return false;
+      const planned = plan.batches.reduce((sum, batch) => sum + batch.length, 0);
+      let indexed = 0;
       let unfinished = 0;
       await runPageFanOut({
         beforeDispatch: admit,
@@ -327,11 +332,16 @@ export async function documentPipeline(
               runId: input.runId, batchIndex, documentIds, totalStages: stageOrder.length,
               ...(input.slotGate ? { slotGate: true } : {}),
             });
+            indexed += out.indexed.length;
             unfinished += out.handedBack.length + (out.extracted?.length ?? 0);
             return out.usage;
           } catch (error) {
             if ((input.slotGate && isSlotUnavailable(error)) || cancelled) throw error;
-            // The stage loop takes this batch's documents the ordinary way.
+            // A run-policy stop (credits, cost cap) stops the run exactly as a stage's does: never handed back.
+            if (applicationFailureType(error) === FIRST_PASS_RUN_POLICY_FAILURE) throw error;
+            // The batch failed (provider, lost worker, heartbeat): its PDFs are measured and authorized, then the stage
+            // loop takes them the ordinary way. A failure to count them fails the run like any stage.
+            await scaling!.longRunning.countFirstPassPages({ runId: input.runId, documentIds });
             unfinished += documentIds.length;
             return { inputTokens: 0, outputTokens: 0, costCents: 0 };
           }
@@ -349,7 +359,8 @@ export async function documentPipeline(
         isCancelled: () => cancelled,
       });
       if (cancelled) throw ApplicationFailure.nonRetryable("Run cancelled by user");
-      return plan.coversRun === true && unfinished === 0;
+      // Finished only when every document of the run was in a batch and every one of them was indexed.
+      return plan.coversRun === true && unfinished === 0 && indexed === planned;
     };
     let stopAfterFirstPass = false;
 

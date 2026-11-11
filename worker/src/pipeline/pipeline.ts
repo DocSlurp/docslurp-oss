@@ -161,6 +161,13 @@ export class WorkflowState {
    * the batch, which measures them in the same VM. Set by the stage runtime from recorded workflow input only.
    */
   firstPassRun?: boolean;
+  /** This activity is one of the first pass's own document shards: the checkpoints it writes are provisional. */
+  firstPassShard?: boolean;
+  /**
+   * The run's pipeline extracts PDFs differently from the first pass's (firstPassPipeline): the ordinary loop re-runs a
+   * provisional extract-markdown checkpoint (pipeline/checkpoints.ts firstPassCheckpointStale).
+   */
+  firstPassExtractionDiffers?: boolean;
   totalStages: number;
   docConcurrency = 1;
   distributedVisionPages = new Map<string, unknown>();

@@ -127,6 +127,7 @@ type DocumentRow = {
   page_count_source?: string | null;
   intake_page_count?: number | null;
   file_facts?: import("@docslurp/shared").FileFacts | null;
+  file_size?: string | number | null;
   created_at: string | Date;
   updated_at: string | Date;
   /** Joined by the run document loaders: the run's extract storage prefix. */
@@ -4459,6 +4460,7 @@ function mapDocument(row: DocumentRow): Document {
     pageCountSource: row.page_count_source === "assumed" || row.page_count_source === "counted" ? row.page_count_source : null,
     intakePageCount: row.intake_page_count === null || row.intake_page_count === undefined ? null : Number(row.intake_page_count),
     fileFacts: row.file_facts ?? null,
+    ...(row.file_size === null || row.file_size === undefined ? {} : { sourceBytes: Number(row.file_size) }),
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.updated_at),
     ...(row.run_storage_prefix ? { artifactRoot: row.run_storage_prefix } : {}),
