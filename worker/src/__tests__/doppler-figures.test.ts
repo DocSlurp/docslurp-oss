@@ -91,6 +91,18 @@ describe("storeDopplerFigures: a failed upload stores nothing", () => {
     expect(error.name).toBe("AbortError");
     expect(live.size).toBe(0);
   });
+
+  it("cancellation during a successful final index write records no slots and removes everything written", async () => {
+    const set = await readDopplerFigureDir(dir, { pageCount: 5 });
+    const controller = new AbortController();
+    const { storage, live } = recordingStorage({});
+    storage.putJson.mockImplementationOnce(async (key: string) => { live.add(key); controller.abort(); });
+    const error = await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown: "", signal: controller.signal }).catch((e) => e);
+    expect(error).not.toBeInstanceOf(DopplerFigureStoreError);
+    expect(error.name).toBe("AbortError");
+    expect(storage.deleteKeys).toHaveBeenCalledTimes(1);
+    expect(live.size).toBe(0);
+  });
 });
 
 describe("readDopplerFigureDir: the happy path", () => {
