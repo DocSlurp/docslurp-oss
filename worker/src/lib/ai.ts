@@ -151,7 +151,7 @@ export async function generateOpenRouterText(args: {
     async () => {
       const accounting = createOpenRouterUsageCapture();
       const provider = createOpenAI({
-        fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(accounting.fetch, { restrictedFallback: true }), settings.reasoningEffort ?? "none")),
+        fetch: createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(instrumentFetch("openrouter", "chat", accounting.fetch), { restrictedFallback: true }), settings.reasoningEffort ?? "none"),
         apiKey: args.apiKey,
         baseURL: OPENROUTER_BASE_URL,
       });

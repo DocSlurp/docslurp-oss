@@ -1,5 +1,8 @@
 import { platformVendorScope, vendorBalanceMonitor, vendorBillingReason, VendorErrorFrames } from "./vendor-balance-alerts.js";
 import { startDependencySpan } from "./telemetry.js";
+import { LlmResponseScanner, llmRequestAttributes } from "./llm-span-attributes.js";
+
+const LLM_GENERATION_PATHS = new Set(["/api/v1/chat/completions", "/api/v1/completions", "/api/v1/responses"]);
 
 /** Instrument provider transport through response consumption, including streamed output. */
 export function instrumentFetch(provider: string, operation: string, http: typeof fetch = globalThis.fetch): typeof fetch {
@@ -12,10 +15,15 @@ export function instrumentFetch(provider: string, operation: string, http: typeo
       "server.address": url.hostname, "server.port": Number(url.port || (url.protocol === "https:" ? 443 : 80)),
       "http.request.method": method,
     });
+    // OpenRouter generations: record the requested route and, from the response, which upstream host served it.
+    const llm = provider === "openrouter" && LLM_GENERATION_PATHS.has(url.pathname);
+    if (llm) span.set(llmRequestAttributes(init?.body));
+    const started = performance.now();
     let response: Response;
     try { response = await span.run(() => http(input, init)); }
     catch (error) { span.end(error); throw error; }
     span.set({ "http.response.status_code": response.status,
+      ...(llm ? { "docslurp.llm.time_to_headers_ms": Math.round(performance.now() - started) } : {}),
       "docslurp.providerRequestId": response.headers.get("x-request-id") ?? response.headers.get("request-id") ?? undefined,
     });
     // RequestInit.headers replaces Request headers; it does not merge them.
@@ -57,12 +65,16 @@ export function instrumentFetch(provider: string, operation: string, http: typeo
     }
     const reader = response.body.getReader();
     let bytes = 0;
+    const scanner = llm && response.ok ? new LlmResponseScanner() : null;
+    const llmDecoder = new TextDecoder();
+    let identified = false;
     const body = new ReadableStream<Uint8Array>({
       async pull(controller) {
         try {
           const result = await span.run(() => reader.read());
           if (result.done) {
             if (sse) inspectSse(textDecoder.decode(), true);
+            if (scanner) { scanner.push(llmDecoder.decode()); span.set(scanner.final()); }
             if (vendorScope && response.ok && !upstreamError && !sse?.uninspectable) vendorBalanceMonitor.observe(vendorScope, provider, operation, response.status);
             span.set({ "http.response.body.size": bytes }); span.end(statusError); controller.close();
           } else {
@@ -75,6 +87,14 @@ export function instrumentFetch(provider: string, operation: string, http: typeo
                   upstreamError ||= /"error"\s*:/.test(scan);
                   errorTail = scan.slice(-64);
                 }
+              }
+            }
+            if (scanner) {
+              if (bytes === 0) span.set({ "docslurp.llm.time_to_first_chunk_ms": Math.round(performance.now() - started) });
+              scanner.push(llmDecoder.decode(result.value, { stream: true }));
+              if (!identified) {
+                const identity = scanner.identity();
+                if (identity["docslurp.llm.upstream_provider"]) { span.set(identity); identified = true; }
               }
             }
             bytes += result.value.byteLength; controller.enqueue(result.value);
