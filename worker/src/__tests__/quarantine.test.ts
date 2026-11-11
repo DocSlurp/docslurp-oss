@@ -332,6 +332,38 @@ describe("quarantine: ClamAV limit alerts (council M2)", () => {
   );
 });
 
+describe("quarantine: encrypted content (council re-check H1)", () => {
+  const scanWith = (status: string, signature: string, failOpen: boolean) => scanDocumentForQuarantine({
+    documentId: "doc-1",
+    filename: "sample.pdf",
+    declaredMimeType: "application/pdf",
+    bytes: Buffer.from("%PDF-1.7\nhello"),
+    tempFile: "/tmp/sample.pdf",
+    runner: {
+      scanForMalware: async () => ({
+        engine: "clamscan", available: true, status, signature,
+        stdout: `/tmp/sample.pdf: ${signature} FOUND`, stderr: "", exitCode: 1, databaseStatus: "fresh",
+      }),
+    } as any,
+    policy: { ...basePolicy, quarantineFailOpenOnToolMissing: failOpen },
+  });
+
+  it.each([
+    ["unscannable", "Heuristics.Encrypted.PDF", true],
+    ["unscannable", "Heuristics.Encrypted.Zip", false],
+    // A transport that reports the alert as infected is mapped the same way.
+    ["infected", "Heuristics.Encrypted.RAR", true],
+  ])("refuses %s %s as encrypted content, never as malware and never clean (fail-open %s)", async (status, signature, failOpen) => {
+    const artifact = await scanWith(status, signature, failOpen);
+    expect(artifact.decision).toBe("quarantined");
+    const reason = artifact.reasons.find((item) => item.code === "malware-scan-encrypted-content");
+    expect(reason).toMatchObject({ severity: "error", message: expect.stringContaining("remove the password and upload again"), details: { signature } });
+    // The user-facing message carries no engine detail; the signature stays in details.
+    expect(reason!.message).not.toContain("Heuristics");
+    expect(artifact.reasons.some((item) => item.code === "malware-detected")).toBe(false);
+  });
+});
+
 describe("quarantine file facts", () => {
   const scan = (filename: string, declaredMimeType: string, bytes: Buffer) => scanDocumentForQuarantine({
     documentId: "doc-1", filename, declaredMimeType, bytes, tempFile: `/tmp/${filename}`,

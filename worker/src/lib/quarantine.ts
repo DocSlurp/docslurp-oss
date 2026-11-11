@@ -12,7 +12,7 @@ import { DocumentStageError } from "../pipeline/checkpoints.js";
 import type { MalwareScanResult } from "../tools/runner.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { vmOnlyParsing } from "./vm-only-parsing.js";
-import { isClamLimitAlert } from "../tools/clam-limits.js";
+import { isClamEncryptedAlert, isClamLimitAlert } from "../tools/clam-limits.js";
 
 export interface QuarantineReason {
   code: string;
@@ -145,7 +145,20 @@ export async function scanDocumentForQuarantine(args: {
   }
 
   const malwareScan = await args.runner.scanForMalware(args.tempFile, args.signal);
-  if (malwareScan.status === "infected" && isClamLimitAlert(malwareScan.signature)) {
+  if (malwareScan.status === "unscannable" || (malwareScan.status === "infected" && isClamEncryptedAlert(malwareScan.signature))) {
+    // AlertEncryptedArchive/AlertEncryptedDoc (clam-limits.ts): encrypted archive members or a PDF that needs a user
+    // password, which the scanner cannot read. Not malware and never clean: refused whatever the fail-open policy says.
+    // The message is user-safe; the engine and signature stay in details (telemetry).
+    reasons.push({
+      code: "malware-scan-encrypted-content",
+      severity: "error",
+      message: "file is encrypted or password-protected, so it cannot be scanned for malware; remove the password and upload again",
+      details: {
+        engine: malwareScan.engine,
+        signature: malwareScan.signature
+      }
+    });
+  } else if (malwareScan.status === "infected" && isClamLimitAlert(malwareScan.signature)) {
     // AlertExceedsMax (clam-limits.ts): the scanner stopped at a size, file-count, depth or time limit, so part of this
     // file was never scanned. Refused whatever the fail-open policy says: an unscanned file is never accepted as clean.
     reasons.push({

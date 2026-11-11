@@ -111,6 +111,9 @@ RUN groupadd --system --gid 10001 docslurp \
     && sed -ri 's|^#?LocalSocket .*|LocalSocket /tmp/clamav/clamd.ctl|' /etc/clamav/clamd.conf \
     && sed -ri 's/^#?LocalSocketGroup .*/LocalSocketGroup docslurp/' /etc/clamav/clamd.conf \
     && sed -ri 's|^#?PidFile .*|PidFile /tmp/clamav/clamd.pid|' /etc/clamav/clamd.conf \
+    # Encrypted archives and documents are detections, never skipped as clean (src/tools/clam-limits.ts; council re-check H1).
+    && sed -ri '/^#?(ArchiveBlockEncrypted|AlertEncrypted(Archive|Doc)?)[[:space:]]/d' /etc/clamav/clamd.conf \
+    && printf 'AlertEncryptedArchive yes\nAlertEncryptedDoc yes\n' >> /etc/clamav/clamd.conf \
     && sed -ri 's/^#?DatabaseOwner .*/DatabaseOwner docslurp/' /etc/clamav/freshclam.conf \
     && mkdir -p /tmp/docslurp-parser-sandbox /tmp/clamav /var/log/clamav /var/lib/clamav \
     && chmod +x ./worker/scripts/parser-sandbox.sh ./scripts/start-worker.sh \

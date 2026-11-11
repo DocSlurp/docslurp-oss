@@ -64,7 +64,7 @@ import {
   resolveWorkerDeploymentProfile,
 } from "../pipeline/local-compute-cost.js";
 import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
-import { CLAM_SCAN_COMMAND_TIMEOUT_MS, clamscanLimitArgs } from "./clam-limits.js";
+import { CLAM_SCAN_COMMAND_TIMEOUT_MS, clamscanLimitArgs, isClamEncryptedAlert } from "./clam-limits.js";
 
 export interface CommandPlan {
   /** Isolated-VM PDF extraction through the registered provider plugin; dispatched before any local provider or backend. */
@@ -180,7 +180,11 @@ const REMOTE_PROGRESS_INTERVAL_MS = 30_000;
 export interface MalwareScanResult {
   engine: "clamscan" | "clamdscan" | null;
   available: boolean;
-  status: "clean" | "infected" | "skipped-unavailable" | "error";
+  /**
+   * `unscannable`: the scanner exited with a detection that only says the content could not be scanned (encrypted archive
+   * members, a PDF needing a user password; isClamEncryptedAlert). Neither malware nor clean; quarantine refuses it.
+   */
+  status: "clean" | "infected" | "unscannable" | "skipped-unavailable" | "error";
   signature: string | null;
   databaseStatus: "fresh" | "stale" | "missing" | "unknown";
   databaseUpdatedAt: string | null;
@@ -1281,7 +1285,7 @@ export class CommandRunner {
     const { exitCode: code, stdout, stderr } = outcome;
     const result = { ...base, stdout, stderr, exitCode: code };
     if (code === 0) return { ...result, status: "clean", signature: null };
-    if (code === 1) return { ...result, status: "infected", signature: parseClamSignature(stdout) ?? parseClamSignature(stderr) };
+    if (code === 1) return { ...result, ...clamDetection(stdout, stderr) };
     return { ...result, status: "error", signature: null };
   }
 
@@ -1403,7 +1407,7 @@ export class CommandRunner {
     };
     if (code === 0) return { ...base, status: "clean", signature: null };
     if (code === 1) {
-      return { ...base, status: "infected", signature: parseClamSignature(stdout) ?? parseClamSignature(stderr) };
+      return { ...base, ...clamDetection(stdout, stderr) };
     }
     return { ...base, status: "error", signature: null };
   }
@@ -2537,6 +2541,18 @@ export function isVectorBackendCommand(commandArgs: string[], scriptsDir: string
   // Only trusted entrypoints receive backend credentials; input filenames are never capabilities.
   return ["vector_backend_write.py", "orama_write.mjs"].some((script) =>
     commandArgs[0] === path.join(scriptsDir, script));
+}
+
+/**
+ * The verdict of a scan that exited 1. Encrypted-content alerts alone are "unscannable"; any other signature (malware, a
+ * limit alert) is "infected" and reported in preference to an encryption alert. No signature at all stays "infected".
+ */
+export function clamDetection(stdout: string, stderr: string): { status: "infected" | "unscannable"; signature: string | null } {
+  const found = [...`${stdout}\n${stderr}`.matchAll(/:\s+(.+?)\s+FOUND$/gm)].map((match) => match[1]!.trim());
+  const other = found.find((signature) => !isClamEncryptedAlert(signature));
+  if (other) return { status: "infected", signature: other };
+  if (found.length) return { status: "unscannable", signature: found[0]! };
+  return { status: "infected", signature: parseClamSignature(stdout) ?? parseClamSignature(stderr) };
 }
 
 export function parseClamSignature(output: string): string | null {

@@ -50,6 +50,8 @@ The scan policy comes from `resolveMalwareScanPolicy` in `worker/src/tools/runne
 
 Both scan paths apply the same limits (`worker/src/tools/clam-limits.ts`). libclamav's defaults skip files over 100 MB and report them clean. They also stop at a scan size, embedded-file count, nesting depth or scan time and report the remainder clean. DocSlurp raises the size limits above anything quarantine downloads (uploads default to 500 MiB) and sets `AlertExceedsMax`. Any limit that is still hit becomes a `Heuristics.Limits.Exceeded.*` detection, and quarantine refuses the file as `malware-scan-limit-exceeded` whatever the fail-open policy says.
 
+Encrypted content gets the same treatment. libclamav cannot read a password-protected ZIP, RAR or 7z member or a PDF that needs a user password, and by default it skips the content and reports the file clean, even when the encrypted archive is nested inside a plain one. Both scan paths set `AlertEncryptedArchive` and `AlertEncryptedDoc` (`--alert-encrypted-archive=yes --alert-encrypted-doc=yes` for clamscan). Such files become `Heuristics.Encrypted.*` detections, and quarantine refuses them as `malware-scan-encrypted-content`, whatever the fail-open policy says: "file is encrypted or password-protected, so it cannot be scanned for malware; remove the password and upload again". A PDF with only an owner password (no password needed to open it) is decrypted and scanned, and is accepted when clean. The worker image adds both options to `/etc/clamav/clamd.conf`. If you point `DOCSLURP_CLAMAV_CLAMD_CONF` at your own clamd config, add them there too.
+
 | Limit | Value | libclamav default |
 | --- | --- | --- |
 | File size | 1024 MiB | 100 MB |

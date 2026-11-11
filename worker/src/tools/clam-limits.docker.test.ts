@@ -1,13 +1,14 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, openSync, closeSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { mkdtempSync, openSync, closeSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { clamdConfig } from "../sandbox/providers/modal/scanner.js";
 import { isClamLimitAlert } from "./clam-limits.js";
-import { CommandRunner, parseClamSignature } from "./runner.js";
+import { CommandRunner, clamDetection, parseClamSignature } from "./runner.js";
 
 /**
  * Real ClamAV against the council M2 reproducer: files over libclamav's default 100 MB MaxFileSize. Opt-in, because it
@@ -86,5 +87,104 @@ describe.skipIf(!image)("real ClamAV over 100 MB (council M2)", () => {
     const result = docker(["sh", image!, "-c", script]);
     expect(result.stdout).toContain("Eicar-Test-Signature FOUND");
     expect(result.stdout).toContain("exit=1");
+  }, 600_000);
+});
+
+/**
+ * Council re-check H1: encrypted content. Without the encryption alerts, libclamav skips what it cannot decrypt and reports
+ * it clean: an EICAR in a password-protected ZIP nested in a plain ZIP, and a PDF that needs a user password, both exited 0
+ * on both paths. Fixtures are written by the host's qpdf, zip and python, never by a parser under test.
+ */
+describe.skipIf(!image)("real ClamAV on encrypted content (council re-check H1)", () => {
+  let dir: string;
+  const docker = (args: string[]) => spawnSync("docker", ["run", "--rm", "--network", "none", "--user", `${process.getuid!()}:${process.getgid!()}`, "--cpus", "2", "--memory", "4g", "-v", `${dir}:/work`, "--entrypoint", ...args], { encoding: "utf8", timeout: 600_000 });
+  const files = {
+    "user-password.pdf": "unscannable",
+    "user-password-rc4.pdf": "unscannable",
+    "encrypted.zip": "unscannable",
+    "nested-encrypted.zip": "unscannable",
+    "owner-only.pdf": "clean",
+    "owner-only-restricted.pdf": "clean",
+    "owner-only-rc4.pdf": "clean",
+    "plain.pdf": "clean",
+    "plain.docx": "clean",
+    "plain.png": "clean",
+    "eicar.com": "infected",
+  } as const;
+
+  beforeAll(() => {
+    dir = mkdtempSync(path.join(tmpdir(), "docslurp-clam-h1-"));
+    const at = (name: string) => path.join(dir, name);
+    const source = fileURLToPath(new URL("../../testdata/pdf-fixtures/academic-latex-ligatures.pdf", import.meta.url));
+    execFileSync("qpdf", [source, at("plain.pdf")]);
+    execFileSync("qpdf", ["--encrypt", "user-secret", "owner-secret", "256", "--", source, at("user-password.pdf")]);
+    execFileSync("qpdf", ["--allow-weak-crypto", "--encrypt", "user-secret", "owner-secret", "128", "--", source, at("user-password-rc4.pdf")]);
+    // Owner password only (empty user password): the common "permissions" PDF anyone can open.
+    execFileSync("qpdf", ["--encrypt", "", "owner-secret", "256", "--", source, at("owner-only.pdf")]);
+    execFileSync("qpdf", ["--encrypt", "", "owner-secret", "256", "--print=none", "--modify=none", "--extract=n", "--", source, at("owner-only-restricted.pdf")]);
+    execFileSync("qpdf", ["--allow-weak-crypto", "--encrypt", "", "owner-secret", "128", "--", source, at("owner-only-rc4.pdf")]);
+    writeFileSync(at("eicar.com"), EICAR);
+    execFileSync("zip", ["-q", "-j", "-P", "zip-secret", at("encrypted.zip"), at("eicar.com")]);
+    execFileSync("python3", ["-I", "-c", [
+      "import sys, zipfile",
+      "with zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_STORED) as z:",
+      "    z.write(sys.argv[2], 'inner/encrypted.zip')",
+      "with zipfile.ZipFile(sys.argv[3], 'w', zipfile.ZIP_DEFLATED) as z:",
+      "    z.writestr('[Content_Types].xml', '<?xml version=\"1.0\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>')",
+      "    z.writestr('word/document.xml', '<?xml version=\"1.0\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>Quarterly earnings beat</w:t></w:r></w:p></w:body></w:document>')",
+    ].join("\n"), at("nested-encrypted.zip"), at("encrypted.zip"), at("plain.docx")]);
+    // A valid 1x1 PNG.
+    writeFileSync(at("plain.png"), Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64"));
+  }, 120_000);
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  const verdict = (code: number | null, stdout: string, stderr: string) =>
+    code === 0 ? "clean" : code === 1 ? clamDetection(stdout, stderr).status : `error:${code}`;
+
+  it("the per-command clamscan plan: encrypted content is unscannable, owner-only PDFs and plain files are clean", async () => {
+    const lines: string[] = [];
+    for (const file of Object.keys(files)) {
+      const plan = await new CommandRunner().clamScan(`/work/${file}`);
+      const result = docker(["clamscan", image!, "-d", "/var/lib/clamav", ...plan.args]);
+      lines.push(`${file} ${verdict(result.status, result.stdout, result.stderr)}`);
+    }
+    expect(lines).toEqual(Object.entries(files).map(([file, expected]) => `${file} ${expected}`));
+  }, 600_000);
+
+  it("the scanner VMs' clamd config gives the same verdicts through clamdscan --fdpass", () => {
+    const config = clamdConfig("/var/lib/clamav").split("\n")
+      .filter((line) => !line.startsWith("User "))
+      .map((line) => line.replace(/^LocalSocket .*/, "LocalSocket /work/clamd.sock").replace(/^TemporaryDirectory .*/, "TemporaryDirectory /work"))
+      .join("\n");
+    writeFileSync(path.join(dir, "clamd.conf"), config);
+    const script = [
+      "clamd --config-file=/work/clamd.conf || exit 9",
+      ...Object.keys(files).map((file) => `clamdscan --config-file=/work/clamd.conf --fdpass --no-summary --infected /work/${file} > /work/${file}.out 2>&1; echo "${file} $?"`),
+    ].join("\n");
+    const result = docker(["sh", image!, "-c", script]);
+    const lines = result.stdout.trim().split("\n").map((line) => {
+      const [file, code] = line.split(" ");
+      const out = readFileSync(path.join(dir, `${file}.out`), "utf8");
+      return `${file} ${verdict(Number(code), out, "")}`;
+    });
+    expect(lines).toEqual(Object.entries(files).map(([file, expected]) => `${file} ${expected}`));
+  }, 600_000);
+
+  it("the self-host image's /etc/clamav/clamd.conf, edited as worker/Dockerfile does, alerts on encrypted content", () => {
+    const script = [
+      "cp /etc/clamav/clamd.conf /work/selfhost.conf",
+      // The Dockerfile's edit (keep in sync with worker/Dockerfile).
+      "sed -ri '/^#?(ArchiveBlockEncrypted|AlertEncrypted(Archive|Doc)?)[[:space:]]/d' /work/selfhost.conf",
+      "printf 'AlertEncryptedArchive yes\\nAlertEncryptedDoc yes\\n' >> /work/selfhost.conf",
+      // Unprivileged test adaptations: socket, pid and temp paths, no user switch, foreground off.
+      "sed -ri '/^#?(User|LocalSocket|LocalSocketGroup|PidFile|TemporaryDirectory|LogFile|Foreground|DatabaseDirectory)[[:space:]]/d' /work/selfhost.conf",
+      "printf 'LocalSocket /work/selfhost.sock\\nTemporaryDirectory /work\\nDatabaseDirectory /var/lib/clamav\\nForeground no\\n' >> /work/selfhost.conf",
+      "clamd --config-file=/work/selfhost.conf || exit 9",
+      "for f in nested-encrypted.zip user-password.pdf owner-only.pdf; do clamdscan --config-file=/work/selfhost.conf --fdpass --no-summary /work/$f; echo \"exit=$?\"; done",
+    ].join("\n");
+    const result = docker(["sh", image!, "-c", script]);
+    expect(result.stdout).toContain("/work/nested-encrypted.zip: Heuristics.Encrypted.Zip FOUND");
+    expect(result.stdout).toContain("/work/user-password.pdf: Heuristics.Encrypted.PDF FOUND");
+    expect(result.stdout).toContain("/work/owner-only.pdf: OK");
   }, 600_000);
 });

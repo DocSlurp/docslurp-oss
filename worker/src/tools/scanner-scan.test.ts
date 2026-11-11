@@ -7,9 +7,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runWithPerfContext } from "../lib/perf-context.js";
 import { setDefaultParserSandbox } from "../sandbox/startup.js";
 import { SandboxPolicyError, type ParserSandboxProvider, type SandboxCommand, type SandboxSessionContext } from "../sandbox/types.js";
-import { CLAM_SCAN_COMMAND_TIMEOUT_MS, CLAM_SCAN_LIMITS, clamdLimitLines, clamscanLimitArgs, isClamLimitAlert } from "./clam-limits.js";
+import { CLAM_SCAN_COMMAND_TIMEOUT_MS, CLAM_SCAN_LIMITS, clamdLimitLines, clamscanLimitArgs, isClamEncryptedAlert, isClamLimitAlert } from "./clam-limits.js";
 import { clamdConfig } from "../sandbox/providers/modal/scanner.js";
-import { CommandRunner, parseClamDefinitionsHeader, readClamDefinitionsHeader } from "./runner.js";
+import { CommandRunner, clamDetection, parseClamDefinitionsHeader, readClamDefinitionsHeader } from "./runner.js";
 
 /** A ClamAV database header (cvd/cld layout), stime in seconds. */
 function header(version: number, stimeSeconds: number): string {
@@ -133,6 +133,11 @@ describe("malware scans in a scanner session", () => {
     expect(commands[0]!.limits.timeoutMs).toBeGreaterThanOrEqual(CLAM_SCAN_COMMAND_TIMEOUT_MS);
   });
 
+  it("an encrypted-content alert from clamd is unscannable, not infected and not clean (council re-check H1)", async () => {
+    exit = 1; stdout = "/tmp/upload.pdf: Heuristics.Encrypted.PDF FOUND\n";
+    expect(await scan()).toMatchObject({ status: "unscannable", signature: "Heuristics.Encrypted.PDF" });
+  });
+
   it("M1: the scanner session is opened for one document (its activity names the document)", async () => {
     await scan();
     expect(contexts[0]!.activityId).toBe("scanner:run:doc");
@@ -210,6 +215,32 @@ describe("ClamAV scan limits (council M2: files over 100 MB scanned clean)", () 
     expect(config).toMatch(/^AlertExceedsMax yes$/m);
     expect(config).toMatch(/^MaxFileSize 1024M$/m);
     expect(config).toMatch(/^StreamMaxLength 1024M$/m);
+  });
+
+  it("both scan paths alert on encrypted archives and documents (council re-check H1)", async () => {
+    const plan = await new CommandRunner().clamScan("/tmp/upload.zip");
+    expect(plan.args).toEqual(expect.arrayContaining(["--alert-encrypted-archive=yes", "--alert-encrypted-doc=yes"]));
+    const config = clamdConfig("/opt/docslurp-assets/clam-x").split("\n");
+    expect(config).toEqual(expect.arrayContaining(["AlertEncryptedArchive yes", "AlertEncryptedDoc yes"]));
+  });
+
+  it("recognizes ClamAV's encrypted-content alerts and nothing else", () => {
+    expect(isClamEncryptedAlert("Heuristics.Encrypted.Zip")).toBe(true);
+    expect(isClamEncryptedAlert("Heuristics.Encrypted.PDF")).toBe(true);
+    expect(isClamEncryptedAlert("Heuristics.Encrypted")).toBe(true);
+    expect(isClamEncryptedAlert("Heuristics.EncryptedX")).toBe(false);
+    expect(isClamEncryptedAlert("Heuristics.Limits.Exceeded.MaxFileSize")).toBe(false);
+    expect(isClamEncryptedAlert("Eicar-Test-Signature")).toBe(false);
+    expect(isClamEncryptedAlert(null)).toBe(false);
+  });
+
+  it("an exit-1 verdict is unscannable only when every detection is an encryption alert", () => {
+    expect(clamDetection("/w/a.zip: Heuristics.Encrypted.Zip FOUND\n", "")).toEqual({ status: "unscannable", signature: "Heuristics.Encrypted.Zip" });
+    // Malware next to an encrypted member is reported as malware.
+    expect(clamDetection("/w/a.zip: Heuristics.Encrypted.Zip FOUND\n/w/a.zip: Eicar-Test-Signature FOUND\n", ""))
+      .toEqual({ status: "infected", signature: "Eicar-Test-Signature" });
+    expect(clamDetection("/w/a.pdf: Heuristics.Limits.Exceeded.MaxFiles FOUND\n", "")).toEqual({ status: "infected", signature: "Heuristics.Limits.Exceeded.MaxFiles" });
+    expect(clamDetection("", "")).toEqual({ status: "infected", signature: null });
   });
 
   it("recognizes ClamAV's limit alerts and nothing else", () => {
