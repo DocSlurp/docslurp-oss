@@ -2,6 +2,8 @@ import path from "node:path";
 
 import { sniffFileBytes, type SniffedBytes } from "@docslurp/shared";
 
+import { CLAM_SCAN_LIMITS } from "../tools/clam-limits.js";
+import { inspectNestedArchives, parseZip } from "./archive-nesting.js";
 import type { ArchiveInspection, QuarantinePolicy } from "./quarantine.js";
 
 /*
@@ -9,19 +11,18 @@ import type { ArchiveInspection, QuarantinePolicy } from "./quarantine.js";
  * so production runs them in the parser VM (scripts/quarantine-inspect.mjs, through the runner); elsewhere in-process.
  */
 
-type ZipEntry = {
-  name: string;
-  compressedSize: number;
-  uncompressedSize: number;
-  flags: number;
-  unixMode: number;
-};
 
 /** What quarantine reads from the bytes: the sniff (shared sniffFileBytes) and the ZIP inspection. Facts follow from the sniff. */
-export interface QuarantineInspection { sniffed: SniffedBytes; archive: ArchiveInspection | null }
+export interface QuarantineInspection {
+  sniffed: SniffedBytes;
+  archive: ArchiveInspection | null;
+  /** PDFs (by libclamav's own test): whether an /Encrypt name appears, which sends the file to the in-VM decryption check. */
+  pdf: { encryptName: boolean } | null;
+}
 
 export function inspectQuarantineBytes(bytes: Buffer, filename: string, policy: QuarantinePolicy): QuarantineInspection {
-  return { sniffed: sniffFileBytes(bytes, filename), archive: inspectArchive(bytes, filename, policy) };
+  const encryptName = pdfHasEncryptName(bytes);
+  return { sniffed: sniffFileBytes(bytes, filename), archive: inspectArchive(bytes, filename, policy), pdf: encryptName === null ? null : { encryptName } };
 }
 
 export function sniffMimeType(bytes: Buffer, filename: string): string | null {
@@ -36,8 +37,8 @@ export function inspectArchive(bytes: Buffer, filename: string, policy: Quaranti
     return null;
   }
 
-  const parsed = parseZipEntries(bytes);
-  if (!parsed) {
+  const zip = parseZip(bytes);
+  if ("error" in zip) {
     return {
       kind: "zip",
       entryCount: 0,
@@ -52,6 +53,7 @@ export function inspectArchive(bytes: Buffer, filename: string, policy: Quaranti
       chartParts: 0
     };
   }
+  const parsed = zip.entries;
 
   const entryCount = parsed.length;
   const totalCompressedBytes = parsed.reduce((sum, entry) => sum + entry.compressedSize, 0);
@@ -94,6 +96,19 @@ export function inspectArchive(bytes: Buffer, filename: string, policy: Quaranti
     issues.push("archive-expansion-ratio-limit");
   }
 
+  // Only an archive that passed its own checks is opened: every member read whole, every nested container walked
+  // (archive-nesting.ts), up to ClamAV's recursion limit.
+  const nesting = issues.length === 0
+    ? inspectNestedArchives(bytes, parsed, {
+        maxDepth: CLAM_SCAN_LIMITS.maxRecursion,
+        maxEntryBytes: policy.quarantineMaxSingleEntryBytes,
+        maxTotalBytes: policy.quarantineMaxTotalUncompressedBytes,
+        maxEntriesPerArchive: policy.quarantineMaxArchiveEntries,
+        maxObjects: CLAM_SCAN_LIMITS.maxFiles,
+      })
+    : { issues: [], nestedContainers: 0, maxNestingDepth: 1 };
+  issues.push(...nesting.issues);
+
   return {
     kind: "zip",
     entryCount,
@@ -105,7 +120,9 @@ export function inspectArchive(bytes: Buffer, filename: string, policy: Quaranti
     suspicious: issues.length > 0,
     inspectable: true,
     issues: [...new Set(issues)],
-    chartParts
+    chartParts,
+    nestedContainers: nesting.nestedContainers,
+    maxNestingDepth: nesting.maxNestingDepth
   };
 }
 
@@ -115,6 +132,19 @@ export function describeArchiveIssue(issue: string, archive: ArchiveInspection):
     case "archive-duplicate-path": return "archive contains ambiguous duplicate paths";
     case "archive-special-file": return "archive contains a link or special filesystem entry";
     case "archive-encrypted-entry": return "encrypted archive entries cannot be scanned safely";
+    case "archive-entry-size-mismatch": return "an archive entry's size does not match its headers";
+    case "archive-entry-corrupt": return "an archive entry is corrupt and cannot be read";
+    case "archive-compression-unsupported": return "an archive entry uses a compression method that cannot be inspected";
+    case "archive-nested-zip64": return "a nested archive uses ZIP64, which the malware scanner skips";
+    case "archive-nested-entry-size-limit": return "a nested archive entry exceeds the entry size limit";
+    case "archive-nested-entry-count-limit": return "a nested archive has too many entries";
+    case "archive-nested-encrypted-entry": return "a nested archive has encrypted entries, which cannot be scanned";
+    case "archive-nested-unsupported-format": return "a nested archive is in a format the malware scanner cannot open (such as RAR)";
+    case "archive-nested-uninspectable": return "a nested archive is in a format that cannot be inspected (such as 7z or tar)";
+    case "archive-nested-depth-limit": return "archives are nested deeper than the malware scanner's recursion limit";
+    case "archive-nested-inspection-failed": return "a nested archive could not be inspected safely";
+    case "archive-nested-expanded-bytes-limit": return "nested archives expand past the total size limit";
+    case "archive-nested-object-count-limit": return "nested archives hold more objects than the malware scanner's file limit";
     case "archive-entry-count-limit":
       return `archive entry count ${archive.entryCount} exceeds limit`;
     case "archive-depth-limit":
@@ -141,93 +171,40 @@ function isZipBytes(bytes: Buffer): boolean {
   return hasPrefix(bytes, [0x50, 0x4b, 0x03, 0x04]) || hasPrefix(bytes, [0x50, 0x4b, 0x05, 0x06]) || hasPrefix(bytes, [0x50, 0x4b, 0x07, 0x08]);
 }
 
-function parseZipEntries(bytes: Buffer): ZipEntry[] | null {
-  const endOffset = findEndOfCentralDirectory(bytes);
-  if (endOffset < 0 || endOffset + 22 > bytes.length) {
-    return null;
-  }
+/**
+ * Whether a PDF names an encryption dictionary: an `/Encrypt` name token anywhere in the bytes, `#xx` escapes decoded (a
+ * name may spell itself `/Encr#79pt`). libclamav treats a file as a PDF when `%PDF-` is in its first 1024 bytes, so that
+ * is the test here too, whatever the sniff said. A literal `/Encrypt` elsewhere (in a string or an unused object) also
+ * counts: the decryption check that follows (runner.pdfEncryptionPlan) then decides, and refuses what it cannot settle.
+ */
+/** Bytes that end a PDF name: whitespace, controls and the delimiters. */
+const PDF_NAME_END = (() => {
+  const table = new Uint8Array(256);
+  for (let byte = 0; byte <= 0x20; byte += 1) table[byte] = 1;
+  table[0x7f] = 1;
+  for (const char of "()<>[]{}/%") table[char.charCodeAt(0)] = 1;
+  return table;
+})();
 
-  const entryCount = bytes.readUInt16LE(endOffset + 10);
-  const centralDirectoryOffset = bytes.readUInt32LE(endOffset + 16);
-  const centralDirectorySize = bytes.readUInt32LE(endOffset + 12);
-  if (bytes.readUInt16LE(endOffset + 4) !== 0 || bytes.readUInt16LE(endOffset + 6) !== 0 ||
-      bytes.readUInt16LE(endOffset + 8) !== entryCount ||
-      endOffset + 22 + bytes.readUInt16LE(endOffset + 20) !== bytes.length ||
-      centralDirectoryOffset + centralDirectorySize !== endOffset) return null;
-  if (entryCount === 0xffff || centralDirectoryOffset === 0xffffffff) {
-    return null;
-  }
-
-  const entries: ZipEntry[] = [];
-  const ranges: Array<[number, number]> = [];
-  let offset = centralDirectoryOffset;
-  for (let index = 0; index < entryCount; index += 1) {
-    if (offset + 46 > endOffset || bytes.readUInt32LE(offset) !== 0x02014b50) {
-      return null;
-    }
-
-    const compressedSize = bytes.readUInt32LE(offset + 20);
-    const uncompressedSize = bytes.readUInt32LE(offset + 24);
-    const fileNameLength = bytes.readUInt16LE(offset + 28);
-    const extraLength = bytes.readUInt16LE(offset + 30);
-    const commentLength = bytes.readUInt16LE(offset + 32);
-    const nameStart = offset + 46;
-    const nameEnd = nameStart + fileNameLength;
-    if (nameEnd + extraLength + commentLength > endOffset || compressedSize === 0xffffffff || uncompressedSize === 0xffffffff) {
-      return null;
-    }
-
-    // Reject conflicting alternate path encodings and ZIP64 metadata. Parsers
-    // must not interpret a different extraction path from the one we inspect.
-    for (const [extraStart, extraEnd] of [[nameEnd, nameEnd + extraLength]]) {
-      let extraOffset = extraStart;
-      while (extraOffset < extraEnd) {
-        if (extraOffset + 4 > extraEnd) return null;
-        const tag = bytes.readUInt16LE(extraOffset);
-        const length = bytes.readUInt16LE(extraOffset + 2);
-        if (extraOffset + 4 + length > extraEnd || tag === 1) return null;
-        if (tag === 0x7075 && (length < 5 || !bytes.subarray(extraOffset + 9, extraOffset + 4 + length).equals(bytes.subarray(nameStart, nameEnd)))) return null;
-        extraOffset += 4 + length;
+export function pdfHasEncryptName(bytes: Buffer): boolean | null {
+  const head = bytes.subarray(0, 1024);
+  if (head.indexOf("%PDF-", 0, "latin1") < 0) return null;
+  for (let slash = bytes.indexOf(0x2f); slash >= 0; slash = bytes.indexOf(0x2f, slash + 1)) {
+    let name = "";
+    for (let index = slash + 1; index < bytes.length && name.length <= 8; index += 1) {
+      const byte = bytes[index]!;
+      if (PDF_NAME_END[byte]) break;
+      if (byte === 0x23 && index + 2 < bytes.length) {
+        const hex = bytes.subarray(index + 1, index + 3).toString("latin1");
+        if (/^[0-9a-fA-F]{2}$/.test(hex)) {
+          name += String.fromCharCode(parseInt(hex, 16));
+          index += 2;
+          continue;
+        }
       }
+      name += String.fromCharCode(byte);
     }
-    const flags = bytes.readUInt16LE(offset + 8);
-    const localOffset = bytes.readUInt32LE(offset + 42);
-    if (bytes.readUInt16LE(offset + 34) !== 0 || localOffset + 30 > centralDirectoryOffset ||
-        bytes.readUInt32LE(localOffset) !== 0x04034b50) return null;
-    const localNameLength = bytes.readUInt16LE(localOffset + 26);
-    const localExtraLength = bytes.readUInt16LE(localOffset + 28);
-    const dataOffset = localOffset + 30 + localNameLength + localExtraLength;
-    if (dataOffset + compressedSize > centralDirectoryOffset ||
-        bytes.readUInt16LE(localOffset + 6) !== flags ||
-        bytes.readUInt16LE(localOffset + 8) !== bytes.readUInt16LE(offset + 10) ||
-        !bytes.subarray(localOffset + 30, localOffset + 30 + localNameLength).equals(bytes.subarray(nameStart, nameEnd))) return null;
-    for (const [localField, centralField] of [[14, 16], [18, 20], [22, 24]]) {
-      const value = bytes.readUInt32LE(localOffset + localField);
-      if (value !== bytes.readUInt32LE(offset + centralField) && (!(flags & 8) || value !== 0)) return null;
-    }
-    ranges.push([localOffset, dataOffset + compressedSize]);
-    entries.push({
-      flags,
-      unixMode: bytes.readUInt32LE(offset + 38) >>> 16,
-      name: bytes.subarray(nameStart, nameEnd).toString("utf8"),
-      compressedSize,
-      uncompressedSize
-    });
-    offset = nameEnd + extraLength + commentLength;
+    if (name === "Encrypt") return true;
   }
-
-  if (offset !== endOffset) return null;
-  ranges.sort((a, b) => a[0] - b[0]);
-  if (ranges.some((range, index) => index > 0 && range[0] < ranges[index - 1][1])) return null;
-  return entries;
-}
-
-function findEndOfCentralDirectory(bytes: Buffer): number {
-  const minOffset = Math.max(0, bytes.length - 65_557);
-  for (let offset = bytes.length - 22; offset >= minOffset; offset -= 1) {
-    if (bytes.readUInt32LE(offset) === 0x06054b50) {
-      return offset;
-    }
-  }
-  return -1;
+  return false;
 }

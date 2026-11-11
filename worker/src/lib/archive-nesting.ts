@@ -1,0 +1,487 @@
+import { gunzipSync, inflateRawSync } from "node:zlib";
+
+/*
+ * Nested-archive inspection for quarantine (parser VM only in production: it inflates hostile bytes).
+ *
+ * libclamav 1.4.3 leaves three holes inside archives that it reports clean with no alert (clam-hostile-matrix.docker.test.ts):
+ * a ZIP64 member is skipped, a member over MaxFileSize is truncated and only the head is scanned, and the image has no RAR
+ * engine. The top-level ZIP inspection already refuses a ZIP64 container and members over the entry limit; this walk applies
+ * the same rules to every container nested in an accepted ZIP, at any depth up to ClamAV's recursion limit, and refuses
+ * what it cannot inspect. It reads members whole (bounded by the entry and total limits), so a size the headers understate
+ * is caught too.
+ *
+ * Walked: ZIP (stored and Deflate members), gzip, and OLE2 compound files (Office embeddings, `\x01Ole10Native` packages).
+ * Refused when nested: RAR, ACE, zstd, LZ4, lzip and WIM (ClamAV here cannot open them), 7z, bzip2, xz, tar, CAB, ARJ, cpio,
+ * XAR, ALZ, ISO 9660 and SZDD/KWAJ (ClamAV opens them but this walk does not, so what they hold is unchecked), and ZIP members
+ * compressed with anything but Stored or Deflate. Containers are recognised by their leading magic only: an archive
+ * embedded at an offset inside another file (a polyglot or self-extractor) is not walked (docs/self-host/security.md).
+ */
+
+export interface NestingLimits {
+  /** Containers enclosing an object, the top-level ZIP being 1; deeper is refused (ClamAV MaxRecursion). */
+  maxDepth: number;
+  /** Largest member, stream or decompressed payload. */
+  maxEntryBytes: number;
+  /** Bytes inflated across the whole walk. */
+  maxTotalBytes: number;
+  /** Entries in one nested ZIP. */
+  maxEntriesPerArchive: number;
+  /** Objects visited across the whole walk (ClamAV MaxFiles). */
+  maxObjects: number;
+}
+
+export interface NestingResult {
+  issues: string[];
+  /** Nested containers walked (ZIP, gzip, OLE2). */
+  nestedContainers: number;
+  /** Deepest container reached, the top-level ZIP being 1. */
+  maxNestingDepth: number;
+}
+
+export type ZipEntryLocation = {
+  name: string;
+  flags: number;
+  /** Unix mode from the external attributes (high 16 bits). */
+  unixMode: number;
+  method: number;
+  dataOffset: number;
+  compressedSize: number;
+  uncompressedSize: number;
+};
+
+export type ContainerKind =
+  | { kind: "zip" | "gzip" | "ole" }
+  | { kind: "unsupported"; format: string }
+  | { kind: "uninspectable"; format: string }
+  | null;
+
+const at = (bytes: Buffer, offset: number, magic: number[]) => bytes.length >= offset + magic.length && magic.every((value, index) => bytes[offset + index] === value);
+const ascii = (text: string) => [...Buffer.from(text, "latin1")];
+
+/** A nested object's container format, from its leading bytes. */
+export function classifyContainer(bytes: Buffer): ContainerKind {
+  if (at(bytes, 0, [0x50, 0x4b, 0x03, 0x04]) || at(bytes, 0, [0x50, 0x4b, 0x05, 0x06]) || at(bytes, 0, [0x50, 0x4b, 0x07, 0x08]) || at(bytes, 0, [0x50, 0x4b, 0x30, 0x30])) return { kind: "zip" };
+  if (at(bytes, 0, [0x1f, 0x8b])) return { kind: "gzip" };
+  if (at(bytes, 0, [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1])) return { kind: "ole" };
+  // ClamAV in the worker image cannot open these (no libclamunrar; no ACE, zstd, LZ4, lzip or WIM support).
+  if (at(bytes, 0, ascii("Rar!\x1a\x07"))) return { kind: "unsupported", format: "rar" };
+  if (at(bytes, 7, ascii("**ACE**"))) return { kind: "unsupported", format: "ace" };
+  if (at(bytes, 0, [0x28, 0xb5, 0x2f, 0xfd])) return { kind: "unsupported", format: "zstd" };
+  if (at(bytes, 0, [0x04, 0x22, 0x4d, 0x18])) return { kind: "unsupported", format: "lz4" };
+  if (at(bytes, 0, ascii("LZIP"))) return { kind: "unsupported", format: "lzip" };
+  if (at(bytes, 0, ascii("MSWIM\0\0\0"))) return { kind: "unsupported", format: "wim" };
+  // ClamAV opens these; this walk does not, so their members are unchecked.
+  if (at(bytes, 0, [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c])) return { kind: "uninspectable", format: "7z" };
+  if (at(bytes, 0, ascii("BZh")) && bytes.length > 3 && bytes[3]! >= 0x31 && bytes[3]! <= 0x39) return { kind: "uninspectable", format: "bzip2" };
+  if (at(bytes, 0, [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00])) return { kind: "uninspectable", format: "xz" };
+  if (at(bytes, 257, ascii("ustar"))) return { kind: "uninspectable", format: "tar" };
+  if (at(bytes, 0, ascii("MSCF\0\0\0\0"))) return { kind: "uninspectable", format: "cab" };
+  if (at(bytes, 0, [0x60, 0xea])) return { kind: "uninspectable", format: "arj" };
+  if (at(bytes, 0, ascii("07070")) || at(bytes, 0, [0xc7, 0x71]) || at(bytes, 0, [0x71, 0xc7])) return { kind: "uninspectable", format: "cpio" };
+  if (at(bytes, 0, ascii("xar!"))) return { kind: "uninspectable", format: "xar" };
+  if (at(bytes, 0, ascii("ALZ\x01"))) return { kind: "uninspectable", format: "alz" };
+  if (at(bytes, 0x8001, ascii("CD001"))) return { kind: "uninspectable", format: "iso9660" };
+  if (at(bytes, 0, ascii("SZDD")) || at(bytes, 0, ascii("KWAJ"))) return { kind: "uninspectable", format: "ms-compress" };
+  return null;
+}
+
+type ZipParse = { entries: ZipEntryLocation[] } | { error: "zip64" | "malformed" };
+
+/**
+ * The ZIP's entries from its central directory, cross-checked against each local header; `zip64` when any header uses
+ * ZIP64 sizes or offsets (libclamav does not follow them), `malformed` for anything else this parser will not trust.
+ */
+export function parseZip(bytes: Buffer): ZipParse {
+  const endOffset = findEndOfCentralDirectory(bytes);
+  if (endOffset < 0 || endOffset + 22 > bytes.length) return { error: hasZip64Record(bytes) ? "zip64" : "malformed" };
+  const entryCount = bytes.readUInt16LE(endOffset + 10);
+  const centralDirectoryOffset = bytes.readUInt32LE(endOffset + 16);
+  const centralDirectorySize = bytes.readUInt32LE(endOffset + 12);
+  if (entryCount === 0xffff || centralDirectoryOffset === 0xffffffff || centralDirectorySize === 0xffffffff || hasZip64Record(bytes, endOffset)) return { error: "zip64" };
+  if (bytes.readUInt16LE(endOffset + 4) !== 0 || bytes.readUInt16LE(endOffset + 6) !== 0 ||
+      bytes.readUInt16LE(endOffset + 8) !== entryCount ||
+      endOffset + 22 + bytes.readUInt16LE(endOffset + 20) !== bytes.length ||
+      centralDirectoryOffset + centralDirectorySize !== endOffset) return { error: "malformed" };
+
+  const entries: ZipEntryLocation[] = [];
+  const ranges: Array<[number, number]> = [];
+  let offset = centralDirectoryOffset;
+  for (let index = 0; index < entryCount; index += 1) {
+    if (offset + 46 > endOffset || bytes.readUInt32LE(offset) !== 0x02014b50) return { error: "malformed" };
+    const compressedSize = bytes.readUInt32LE(offset + 20);
+    const uncompressedSize = bytes.readUInt32LE(offset + 24);
+    const fileNameLength = bytes.readUInt16LE(offset + 28);
+    const extraLength = bytes.readUInt16LE(offset + 30);
+    const commentLength = bytes.readUInt16LE(offset + 32);
+    const nameStart = offset + 46;
+    const nameEnd = nameStart + fileNameLength;
+    if (nameEnd + extraLength + commentLength > endOffset) return { error: "malformed" };
+    if (compressedSize === 0xffffffff || uncompressedSize === 0xffffffff || bytes.readUInt32LE(offset + 42) === 0xffffffff || bytes.readUInt16LE(offset + 34) === 0xffff) return { error: "zip64" };
+    // Reject conflicting alternate path encodings and ZIP64 metadata. Parsers must not interpret a different extraction
+    // path from the one we inspect.
+    const extra = checkExtraFields(bytes, nameEnd, nameEnd + extraLength, bytes.subarray(nameStart, nameEnd));
+    if (extra) return { error: extra };
+    const flags = bytes.readUInt16LE(offset + 8);
+    const localOffset = bytes.readUInt32LE(offset + 42);
+    if (bytes.readUInt16LE(offset + 34) !== 0 || localOffset + 30 > centralDirectoryOffset ||
+        bytes.readUInt32LE(localOffset) !== 0x04034b50) return { error: "malformed" };
+    const localNameLength = bytes.readUInt16LE(localOffset + 26);
+    const localExtraLength = bytes.readUInt16LE(localOffset + 28);
+    const localNameEnd = localOffset + 30 + localNameLength;
+    const dataOffset = localNameEnd + localExtraLength;
+    if (dataOffset > centralDirectoryOffset) return { error: "malformed" };
+    // A local header deferring its sizes to a ZIP64 extra field: libclamav 1.4.3 does not follow it and skips the member.
+    if (bytes.readUInt32LE(localOffset + 18) === 0xffffffff || bytes.readUInt32LE(localOffset + 22) === 0xffffffff) return { error: "zip64" };
+    // Local extra fields: only a ZIP64 field matters (some writers pad this area without a valid layout; the sizes used
+    // are the central directory's, checked against the local header below).
+    if (checkExtraFields(bytes, localNameEnd, dataOffset, null) === "zip64") return { error: "zip64" };
+    if (dataOffset + compressedSize > centralDirectoryOffset ||
+        bytes.readUInt16LE(localOffset + 6) !== flags ||
+        bytes.readUInt16LE(localOffset + 8) !== bytes.readUInt16LE(offset + 10) ||
+        !bytes.subarray(localOffset + 30, localNameEnd).equals(bytes.subarray(nameStart, nameEnd))) return { error: "malformed" };
+    for (const [localField, centralField] of [[14, 16], [18, 20], [22, 24]] as const) {
+      const value = bytes.readUInt32LE(localOffset + localField);
+      if (value !== bytes.readUInt32LE(offset + centralField) && (!(flags & 8) || value !== 0)) return { error: "malformed" };
+    }
+    ranges.push([localOffset, dataOffset + compressedSize]);
+    entries.push({
+      name: bytes.subarray(nameStart, nameEnd).toString("utf8"),
+      flags,
+      unixMode: bytes.readUInt32LE(offset + 38) >>> 16,
+      method: bytes.readUInt16LE(offset + 10),
+      dataOffset,
+      compressedSize,
+      uncompressedSize,
+    });
+    offset = nameEnd + extraLength + commentLength;
+  }
+  if (offset !== endOffset) return { error: "malformed" };
+  ranges.sort((a, b) => a[0] - b[0]);
+  if (ranges.some((range, index) => index > 0 && range[0] < ranges[index - 1]![1])) return { error: "malformed" };
+  return { entries };
+}
+
+/** The extra fields of one header: `zip64` for a ZIP64 field (id 1), `malformed` for a bad layout or a conflicting Unicode path. */
+function checkExtraFields(bytes: Buffer, start: number, end: number, name: Buffer | null): "zip64" | "malformed" | null {
+  let offset = start;
+  while (offset < end) {
+    if (offset + 4 > end) return "malformed";
+    const tag = bytes.readUInt16LE(offset);
+    const length = bytes.readUInt16LE(offset + 2);
+    if (offset + 4 + length > end) return "malformed";
+    if (tag === 1) return "zip64";
+    if (name && tag === 0x7075 && (length < 5 || !bytes.subarray(offset + 9, offset + 4 + length).equals(name))) return "malformed";
+    offset += 4 + length;
+  }
+  return null;
+}
+
+/** A ZIP64 end-of-central-directory record or locator just before the classic end record (or anywhere, with none). */
+function hasZip64Record(bytes: Buffer, endOffset?: number): boolean {
+  if (endOffset !== undefined) return endOffset >= 20 && bytes.readUInt32LE(endOffset - 20) === 0x07064b50;
+  return bytes.includes(Buffer.from([0x50, 0x4b, 0x06, 0x07])) || bytes.includes(Buffer.from([0x50, 0x4b, 0x06, 0x06]));
+}
+
+function findEndOfCentralDirectory(bytes: Buffer): number {
+  const minOffset = Math.max(0, bytes.length - 65_557);
+  for (let offset = bytes.length - 22; offset >= minOffset; offset -= 1) {
+    if (bytes.readUInt32LE(offset) === 0x06054b50) return offset;
+  }
+  return -1;
+}
+
+class WalkState {
+  readonly issues = new Set<string>();
+  inflated = 0;
+  objects = 0;
+  nestedContainers = 0;
+  maxNestingDepth = 1;
+  constructor(readonly limits: NestingLimits) {}
+  /** False once a walk-wide limit is hit: the walk stops (the issue already refuses the file). */
+  get going(): boolean {
+    return !this.issues.has("archive-nested-expanded-bytes-limit") && !this.issues.has("archive-nested-object-count-limit");
+  }
+  visit(): boolean {
+    this.objects += 1;
+    if (this.objects > this.limits.maxObjects) this.issues.add("archive-nested-object-count-limit");
+    return this.going;
+  }
+  charge(bytes: number): boolean {
+    this.inflated += bytes;
+    if (this.inflated > this.limits.maxTotalBytes) this.issues.add("archive-nested-expanded-bytes-limit");
+    return this.going;
+  }
+}
+
+/**
+ * Walk every member of a top-level ZIP that passed its own checks (the members' sizes are within the entry limit), and
+ * every container nested in it. Issues are quarantine reason codes.
+ */
+export function inspectNestedArchives(bytes: Buffer, entries: ZipEntryLocation[], limits: NestingLimits): NestingResult {
+  const state = new WalkState(limits);
+  walkZipEntries(bytes, entries, 1, state);
+  return { issues: [...state.issues], nestedContainers: state.nestedContainers, maxNestingDepth: state.maxNestingDepth };
+}
+
+/** Members of a ZIP at `depth` (1 = top level): each is read whole and, when it is a container, walked at depth + 1. */
+function walkZipEntries(bytes: Buffer, entries: ZipEntryLocation[], depth: number, state: WalkState): void {
+  const nested = depth > 1;
+  for (const entry of entries) {
+    if (!state.visit()) return;
+    // Encrypted members are refused by ClamAV (AlertEncryptedArchive) and, top level, by the inspection.
+    if (entry.flags & 0x41) {
+      if (nested) state.issues.add("archive-nested-encrypted-entry");
+      continue;
+    }
+    if (entry.uncompressedSize > state.limits.maxEntryBytes) {
+      if (nested) state.issues.add("archive-nested-entry-size-limit");
+      continue;
+    }
+    const data = readZipMember(bytes, entry, state, nested);
+    if (!data) {
+      if (!state.going) return;
+      continue;
+    }
+    walkObject(data, depth + 1, state);
+    if (!state.going) return;
+  }
+}
+
+/** One member's bytes, verified against the size its headers declare; null (with an issue) when it cannot be read. */
+function readZipMember(bytes: Buffer, entry: ZipEntryLocation, state: WalkState, nested: boolean): Buffer | null {
+  const compressed = bytes.subarray(entry.dataOffset, entry.dataOffset + entry.compressedSize);
+  if (entry.method === 0) {
+    if (entry.compressedSize !== entry.uncompressedSize) {
+      state.issues.add("archive-entry-size-mismatch");
+      return null;
+    }
+    return compressed;
+  }
+  if (entry.method !== 8) {
+    // Deflate64, BZip2, LZMA, PPMd, Zstandard...: what the member holds cannot be checked here.
+    state.issues.add("archive-compression-unsupported");
+    return null;
+  }
+  if (!state.charge(entry.uncompressedSize)) return null;
+  let data: Buffer;
+  try {
+    // One byte of headroom: a member that inflates past its declared size throws instead of being cut to it.
+    data = inflateRawSync(compressed, { maxOutputLength: entry.uncompressedSize + 1 });
+  } catch (error) {
+    state.issues.add((error as { code?: string }).code === "ERR_BUFFER_TOO_LARGE" ? "archive-entry-size-mismatch" : nested ? "archive-nested-inspection-failed" : "archive-entry-corrupt");
+    return null;
+  }
+  if (data.length !== entry.uncompressedSize) {
+    state.issues.add("archive-entry-size-mismatch");
+    return null;
+  }
+  return data;
+}
+
+/** A member, stream or payload at `depth` containers deep: walked when it is a container, refused when it cannot be. */
+function walkObject(data: Buffer, depth: number, state: WalkState): void {
+  const container = classifyContainer(data);
+  if (!container) return;
+  if (container.kind === "unsupported") {
+    state.issues.add("archive-nested-unsupported-format");
+    return;
+  }
+  if (container.kind === "uninspectable") {
+    state.issues.add("archive-nested-uninspectable");
+    return;
+  }
+  if (depth > state.limits.maxDepth) {
+    state.issues.add("archive-nested-depth-limit");
+    return;
+  }
+  state.nestedContainers += 1;
+  state.maxNestingDepth = Math.max(state.maxNestingDepth, depth);
+  if (container.kind === "zip") {
+    const parsed = parseZip(data);
+    if ("error" in parsed) {
+      state.issues.add(parsed.error === "zip64" ? "archive-nested-zip64" : "archive-nested-inspection-failed");
+      return;
+    }
+    if (parsed.entries.length > state.limits.maxEntriesPerArchive) {
+      state.issues.add("archive-nested-entry-count-limit");
+      return;
+    }
+    walkZipEntries(data, parsed.entries, depth, state);
+    return;
+  }
+  if (container.kind === "gzip") {
+    let inner: Buffer;
+    try {
+      inner = gunzipSync(data, { maxOutputLength: state.limits.maxEntryBytes });
+    } catch (error) {
+      state.issues.add((error as { code?: string }).code === "ERR_BUFFER_TOO_LARGE" ? "archive-nested-entry-size-limit" : "archive-nested-inspection-failed");
+      return;
+    }
+    if (!state.charge(inner.length) || !state.visit()) return;
+    walkObject(inner, depth + 1, state);
+    return;
+  }
+  const streams = readCompoundFileStreams(data, state.limits.maxEntryBytes);
+  if ("error" in streams) {
+    state.issues.add(streams.error === "size" ? "archive-nested-entry-size-limit" : "archive-nested-inspection-failed");
+    return;
+  }
+  for (const stream of streams.streams) {
+    if (!state.visit()) return;
+    walkObject(stream.data, depth + 1, state);
+    if (!state.going) return;
+    // An OLE Package object holds its file after a header (MS-OLEDS 2.3.6, as libclamav's cli_ole10native reads it).
+    if (stream.name === "\x01Ole10Native") {
+      const payloads = [stream.data.subarray(4), ole10NativePayload(stream.data)].filter((payload): payload is Buffer => !!payload);
+      for (const payload of payloads) {
+        walkObject(payload, depth + 1, state);
+        if (!state.going) return;
+      }
+    }
+  }
+}
+
+/** The embedded file of an `\x01Ole10Native` Package stream, or null when the stream is not one. */
+function ole10NativePayload(stream: Buffer): Buffer | null {
+  let offset = 4 + 2;
+  const cstring = () => {
+    const end = stream.indexOf(0, offset);
+    if (end < 0) return false;
+    offset = end + 1;
+    return true;
+  };
+  if (stream.length < offset || !cstring() || !cstring()) return null;
+  offset += 4;
+  if (offset + 4 > stream.length) return null;
+  offset += 4 + stream.readUInt32LE(offset);
+  if (offset + 4 > stream.length) return null;
+  const size = stream.readUInt32LE(offset);
+  offset += 4;
+  if (offset + size > stream.length) return null;
+  return stream.subarray(offset, offset + size);
+}
+
+const FREE = 0xffffffff;
+const END_OF_CHAIN = 0xfffffffe;
+
+/**
+ * Every stream of an OLE2 compound file (MS-CFB): directory entries of type stream, read through the FAT or, below the
+ * mini-stream cutoff, the mini FAT. Any structural inconsistency (a chain that loops, leaves the file or is shorter than
+ * the stream) is an error: what this cannot read is refused, not skipped.
+ */
+export function readCompoundFileStreams(bytes: Buffer, maxStreamBytes: number): { streams: Array<{ name: string; data: Buffer }> } | { error: "malformed" | "size" } {
+  if (bytes.length < 512) return { error: "malformed" };
+  const sectorShift = bytes.readUInt16LE(0x1e);
+  const miniShift = bytes.readUInt16LE(0x20);
+  if ((sectorShift !== 9 && sectorShift !== 12) || miniShift !== 6 || bytes.readUInt16LE(0x1c) !== 0xfffe) return { error: "malformed" };
+  const sectorSize = 1 << sectorShift;
+  const miniSize = 1 << miniShift;
+  const sectorCount = Math.floor((bytes.length - sectorSize) / sectorSize) + (((bytes.length - sectorSize) % sectorSize) > 0 ? 1 : 0);
+  const sector = (index: number): Buffer | null => {
+    if (index >= sectorCount) return null;
+    const start = (index + 1) * sectorSize;
+    const out = Buffer.alloc(sectorSize);
+    bytes.copy(out, 0, start, Math.min(bytes.length, start + sectorSize));
+    return out;
+  };
+
+  // FAT sectors: 109 in the header, then the DIFAT chain.
+  const fatSectors: number[] = [];
+  for (let index = 0; index < 109; index += 1) {
+    const value = bytes.readUInt32LE(0x4c + index * 4);
+    if (value !== FREE) fatSectors.push(value);
+  }
+  let difat = bytes.readUInt32LE(0x44);
+  for (let hops = 0; difat !== END_OF_CHAIN && difat !== FREE; hops += 1) {
+    if (hops > sectorCount) return { error: "malformed" };
+    const block = sector(difat);
+    if (!block) return { error: "malformed" };
+    for (let index = 0; index < sectorSize / 4 - 1; index += 1) {
+      const value = block.readUInt32LE(index * 4);
+      if (value !== FREE) fatSectors.push(value);
+    }
+    difat = block.readUInt32LE(sectorSize - 4);
+  }
+  if (fatSectors.length > sectorCount) return { error: "malformed" };
+  const fat: number[] = [];
+  for (const index of fatSectors) {
+    const block = sector(index);
+    if (!block) return { error: "malformed" };
+    for (let offset = 0; offset < sectorSize; offset += 4) fat.push(block.readUInt32LE(offset));
+  }
+
+  const chain = (start: number, table: number[], limit: number): number[] | null => {
+    const out: number[] = [];
+    for (let at = start; at !== END_OF_CHAIN; at = table[at]!) {
+      if (at >= table.length || out.length > limit) return null;
+      out.push(at);
+    }
+    return out;
+  };
+  const readChain = (start: number, size: number): Buffer | null => {
+    if (size === 0) return Buffer.alloc(0);
+    const sectors = chain(start, fat, sectorCount);
+    if (!sectors || sectors.length * sectorSize < size) return null;
+    const parts: Buffer[] = [];
+    for (const index of sectors) {
+      const block = sector(index);
+      if (!block) return null;
+      parts.push(block);
+    }
+    return Buffer.concat(parts).subarray(0, size);
+  };
+
+  const directorySectors = chain(bytes.readUInt32LE(0x30), fat, sectorCount);
+  if (!directorySectors) return { error: "malformed" };
+  const directoryBlocks = directorySectors.map(sector);
+  if (directoryBlocks.some((block) => !block)) return { error: "malformed" };
+  const dir = Buffer.concat(directoryBlocks as Buffer[]);
+  const entries: Array<{ name: string; type: number; start: number; size: number }> = [];
+  for (let offset = 0; offset + 128 <= dir.length; offset += 128) {
+    const type = dir[offset + 0x42]!;
+    if (type === 0) continue;
+    const nameLength = Math.min(64, dir.readUInt16LE(offset + 0x40));
+    const name = dir.subarray(offset, offset + Math.max(0, nameLength - 2)).toString("utf16le");
+    const high = dir.readUInt32LE(offset + 0x7c);
+    // Version 3 files leave the high size word undefined; version 4 sizes above 4 GiB are out of reach anyway.
+    if (sectorShift === 12 && high !== 0) return { error: "size" };
+    entries.push({ name, type, start: dir.readUInt32LE(offset + 0x74), size: dir.readUInt32LE(offset + 0x78) });
+  }
+  const root = entries.find((entry) => entry.type === 5);
+  if (!root) return { error: "malformed" };
+
+  const cutoff = bytes.readUInt32LE(0x38);
+  let miniStream: Buffer | null = null;
+  let miniFat: number[] | null = null;
+  const streams: Array<{ name: string; data: Buffer }> = [];
+  for (const entry of entries) {
+    if (entry.type !== 2) continue;
+    if (entry.size > maxStreamBytes) return { error: "size" };
+    if (entry.size < cutoff) {
+      if (!miniStream) {
+        miniStream = readChain(root.start, root.size);
+        const miniFatBytes = readChain(bytes.readUInt32LE(0x3c), bytes.readUInt32LE(0x40) * sectorSize);
+        if (!miniStream || !miniFatBytes) return { error: "malformed" };
+        miniFat = [];
+        for (let offset = 0; offset + 4 <= miniFatBytes.length; offset += 4) miniFat.push(miniFatBytes.readUInt32LE(offset));
+      }
+      if (entry.size === 0) {
+        streams.push({ name: entry.name, data: Buffer.alloc(0) });
+        continue;
+      }
+      const sectors = chain(entry.start, miniFat!, miniStream.length / miniSize);
+      if (!sectors || sectors.length * miniSize < entry.size) return { error: "malformed" };
+      const parts: Buffer[] = [];
+      for (const index of sectors) {
+        if ((index + 1) * miniSize > miniStream.length) return { error: "malformed" };
+        parts.push(miniStream.subarray(index * miniSize, (index + 1) * miniSize));
+      }
+      streams.push({ name: entry.name, data: Buffer.concat(parts).subarray(0, entry.size) });
+    } else {
+      const data = readChain(entry.start, entry.size);
+      if (!data) return { error: "malformed" };
+      streams.push({ name: entry.name, data });
+    }
+  }
+  return { streams };
+}

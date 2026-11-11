@@ -392,7 +392,8 @@ describe("quarantine file facts", () => {
   });
 
   it("accepts a .docx declared application/msword with a same-family warning", async () => {
-    const zip = buildZipBuffer([{ name: "word/document.xml", compressedSize: 12, uncompressedSize: 64 }]);
+    // Stored: compressed and uncompressed sizes agree (the member is read whole; a mismatch is refused).
+    const zip = buildZipBuffer([{ name: "word/document.xml", compressedSize: 64, uncompressedSize: 64 }]);
     const artifact = await scan("report.docx", "application/msword", zip);
     expect(artifact.decision).toBe("accepted");
     expect(artifact.reasons.map((reason) => reason.code)).toContain("mime-mismatch-same-family");
