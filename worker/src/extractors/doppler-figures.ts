@@ -243,6 +243,8 @@ export async function storeDopplerFigures(args: {
       markers: markers.filter((id) => resolvable.has(id)),
       figures: records,
     });
+    // A cancellation that arrived during the final write still cancels: nothing is recorded and what was written is removed.
+    args.signal?.throwIfAborted();
   } catch (error) {
     let cleanup: DopplerFigureStoreError["cleanup"] = "none";
     if (written.length > 0) {
