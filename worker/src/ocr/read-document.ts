@@ -158,5 +158,5 @@ async function hostedDocument(input: OcrDocumentInput): Promise<OcrDocumentResul
 async function rebuildPageTables(pages: Array<{ text: string }>, input: OcrDocumentInput): Promise<void> {
   const { texts, stats } = await sanitizeVisionPageTables(pages.map((page) => page.text), input.runner, { documentId: input.documentId, ...(input.signal ? { signal: input.signal } : {}) });
   pages.forEach((page, index) => { page.text = texts[index]!; });
-  if (stats.pages) console.log(`[vision-tables] document=${input.documentId} pages=${stats.pages} tables=${stats.tables} escapedPages=${stats.escapedPages} vmCalls=${stats.vmCalls} vmMs=${stats.vmMs}`);
+  if (stats.pages) console.log(`[vision-tables] document=${input.documentId} pages=${stats.pages} tables=${stats.tables} escapedPages=${stats.escapedPages} rawRegions=${stats.rawRegions}${stats.rawRegions ? ` rawReasons=${JSON.stringify(stats.rawReasons)}` : ""} vmCalls=${stats.vmCalls} vmMs=${stats.vmMs}`);
 }

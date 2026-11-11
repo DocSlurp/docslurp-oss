@@ -13,6 +13,12 @@
  *   spans are dropped to a plain grid; short rows are padded; a grid wider than MAX_COLUMNS becomes plain text lines;
  * - a table larger than the app renderer accepts (RENDER_MAX_CHARS characters / RENDER_MAX_TAGS tags) becomes a GFM
  *   pipe table, so every kept table renders.
+ * Text never leaves an HTML block as Markdown syntax: GFM cells, text outside cells and plain-text fallbacks go through
+ * escapeMarkdownText, so a cell's `[x](url)`, `**b**`, `` `c` ``, `<b>`, `<https://…>`, `#`, `>`, `-` or `1.` stays text.
+ * (GFM's autolink literals are the one exception a renderer applies after escapes: a bare `https://…`, `www.…` or
+ * `name@host.tld` in a GFM cell is still linked, as it is anywhere else in page text; only those schemes can form.)
+ * No text is ever dropped: a region the guest could not rebuild without truncating or dropping something (`raw`, with a
+ * reason) is kept as its own source, escaped the same way, and counted in `stats.rawRegions` / `stats.rawReasons`.
  * Everything outside a table region is copied verbatim; stray table tags outside a table are escaped.
  *
  * Fail closed: if the VM path is unavailable or its result is invalid, the page's table tags are escaped (the model's
@@ -34,12 +40,15 @@ import {
   readVisionTablesBatch,
   VISION_TABLE_MAX_CELLS,
   VISION_TABLE_MAX_PAGE_CHARS,
+  VISION_TABLE_MAX_EXTRA,
   VISION_TABLE_MAX_PAGES,
   VISION_TABLE_MAX_ROWS,
+  VISION_TABLE_RAW_REASONS,
   VISION_TABLE_MAX_SPAN,
   VISION_TABLE_MAX_TEXT_CHARS,
   type VisionTableCell,
   type VisionTablePageResult,
+  type VisionTableRawReason,
   type VisionTableRow,
 } from "./vision-tables-guest.js";
 
@@ -63,13 +72,28 @@ export function escapeVisionTableTags(text: string): string {
 export const escapeHtmlText = (text: string) =>
   text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
+/**
+ * Text that renders as itself in CommonMark/GFM: every ASCII punctuation character is backslash-escaped (CommonMark
+ * allows escaping any of them), so no link, image, emphasis, code span, raw HTML, autolink, entity, heading, quote,
+ * list marker, thematic break, table pipe or `$` math delimiter can form. Letters, digits, spaces and newlines are kept.
+ */
+export function escapeMarkdownText(text: string): string {
+  return text.replace(/[!-/:-@[-`{-~]/g, "\\$&");
+}
+
 /** Controls (C0, DEL, C1), lone surrogates and noncharacters out; whitespace collapsed. */
 export function cleanCellText(text: string): string {
   return text.replace(/[\p{Cc}\p{Cs}\p{Noncharacter_Code_Point}]/gu, " ").replace(/\s+/g, " ").trim();
 }
 
-export interface VisionTableStats { pages: number; tables: number; spansDropped: number; gfm: number; textFallback: number; escapedPages: number; vmMs: number; vmCalls: number }
-const emptyStats = (): VisionTableStats => ({ pages: 0, tables: 0, spansDropped: 0, gfm: 0, textFallback: 0, escapedPages: 0, vmMs: 0, vmCalls: 0 });
+export interface VisionTableStats {
+  pages: number; tables: number; spansDropped: number; gfm: number; textFallback: number; escapedPages: number;
+  /** Regions kept as their own escaped source because a rebuild would have cut text, by reason. */
+  rawRegions: number; rawReasons: Partial<Record<VisionTableRawReason, number>>;
+  vmMs: number; vmCalls: number;
+}
+const emptyStats = (): VisionTableStats => ({ pages: 0, tables: 0, spansDropped: 0, gfm: 0, textFallback: 0, escapedPages: 0, rawRegions: 0, rawReasons: {}, vmMs: 0, vmCalls: 0 });
+const RAW_REASONS = new Set<string>(VISION_TABLE_RAW_REASONS);
 
 class InvalidResult extends Error {}
 const isInt = (value: unknown, min: number, max: number): value is number => Number.isInteger(value) && (value as number) >= min && (value as number) <= max;
@@ -149,7 +173,9 @@ function renderHtml(sections: Placed[][]): string {
   return `${html}</table>`;
 }
 
-const gfmCell = (text: string) => cleanCellText(text).replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/</g, "&lt;");
+const gfmCell = (text: string) => escapeMarkdownText(cleanCellText(text));
+/** Text outside an HTML block: whitespace-collapsed, then inert Markdown. */
+const inertText = (text: string) => escapeMarkdownText(cleanCellText(text));
 
 function renderGfm(width: number, sections: Placed[][], rowCounts: number[]): string {
   const lines: string[] = [];
@@ -175,7 +201,7 @@ function renderTable(rows: VisionTableRow[], stats: VisionTableStats): string {
   if (!grid) {
     // Wider than any renderer keeps: every cell's text, one row per line.
     stats.textFallback += 1;
-    return [...sections[0]!, ...sections[1]!].map((row) => row.cells.map((c) => escapeHtmlText(cleanCellText(c.t))).filter(Boolean).join(" | ")).filter(Boolean).join("\n");
+    return [...sections[0]!, ...sections[1]!].map((row) => row.cells.map((c) => inertText(c.t)).filter(Boolean).join(" \\| ")).filter(Boolean).join("\n\n");
   }
   if (grid.spansDropped) stats.spansDropped += 1;
   const html = renderHtml(grid.sections);
@@ -207,12 +233,22 @@ function renderPage(text: string, result: VisionTablePageResult, stats: VisionTa
       write("&lt;");
       continue;
     }
-    if (segment.k !== "table" || !/^<table[\s/>]/i.test(text.slice(segment.from, segment.from + 7))) throw new InvalidResult("kind");
-    const rows = validRows(segment.rows);
-    if (!Array.isArray(segment.extra) || segment.extra.length > 4096 || !segment.extra.every(isText)) throw new InvalidResult("extra");
-    const table = renderTable(rows, stats);
-    const extra = segment.extra.map((t) => escapeHtmlText(cleanCellText(t))).filter(Boolean).join("\n\n");
-    const block = [table, extra].filter(Boolean).join("\n\n");
+    if ((segment.k !== "table" && segment.k !== "raw") || !/^<table[\s/>]/i.test(text.slice(segment.from, segment.from + 7))) throw new InvalidResult("kind");
+    let block: string;
+    if (segment.k === "raw") {
+      // Kept as its own source, every character, as inert text: a rebuild would have had to cut something.
+      if (typeof segment.reason !== "string" || !RAW_REASONS.has(segment.reason)) throw new InvalidResult("raw reason");
+      stats.rawRegions += 1;
+      stats.rawReasons[segment.reason] = (stats.rawReasons[segment.reason] ?? 0) + 1;
+      // Line-edge whitespace goes too, so an indented line cannot become a code block (which would show the escapes).
+      block = escapeMarkdownText(text.slice(segment.from, segment.to)).replace(/^[ \t]+|[ \t]+$/gm, "").replace(/^\n+|\n+$/g, "");
+    } else {
+      const rows = validRows(segment.rows);
+      if (!Array.isArray(segment.extra) || segment.extra.length > VISION_TABLE_MAX_EXTRA || !segment.extra.every(isText)) throw new InvalidResult("extra");
+      const table = renderTable(rows, stats);
+      const extra = segment.extra.map(inertText).filter(Boolean).join("\n\n");
+      block = [table, extra].filter(Boolean).join("\n\n");
+    }
     if (!block) continue;
     // A table is a block: a blank line on each side keeps it and the Markdown around it intact.
     const lead = out.length === 0 || tail === "\n\n" ? "" : tail.endsWith("\n") ? "\n" : "\n\n";

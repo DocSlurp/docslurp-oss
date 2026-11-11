@@ -667,7 +667,7 @@ export class VisionExtractStage implements Stage {
     if (stats.pages === 0) return outputs;
     console.log(
       `[vision-tables] document=${document.id} pages=${stats.pages} tables=${stats.tables} spansDropped=${stats.spansDropped} ` +
-        `gfm=${stats.gfm} textFallback=${stats.textFallback} escapedPages=${stats.escapedPages} vmCalls=${stats.vmCalls} vmMs=${stats.vmMs}`,
+        `gfm=${stats.gfm} textFallback=${stats.textFallback} escapedPages=${stats.escapedPages} rawRegions=${stats.rawRegions}${stats.rawRegions ? ` rawReasons=${JSON.stringify(stats.rawReasons)}` : ""} vmCalls=${stats.vmCalls} vmMs=${stats.vmMs}`,
     );
     state.pendingPerformance.push({
       documentId: document.id, scope: "document", stageName: this.name, metric: "vision-table-rebuild-latency",

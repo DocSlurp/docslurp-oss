@@ -455,7 +455,7 @@ export async function materializePageRange(
   if (modelRead.length) {
     const { texts, stats } = await sanitizeVisionPageTables(modelRead.map((entry) => entry.text), deps.runner, { documentId });
     modelRead.forEach((entry, index) => { entry.text = texts[index]!; });
-    if (stats.pages) console.log(`[vision-tables] document=${documentId} pages=${stats.pages} tables=${stats.tables} escapedPages=${stats.escapedPages} vmCalls=${stats.vmCalls} vmMs=${stats.vmMs}`);
+    if (stats.pages) console.log(`[vision-tables] document=${documentId} pages=${stats.pages} tables=${stats.tables} escapedPages=${stats.escapedPages} rawRegions=${stats.rawRegions}${stats.rawRegions ? ` rawReasons=${JSON.stringify(stats.rawReasons)}` : ""} vmCalls=${stats.vmCalls} vmMs=${stats.vmMs}`);
   }
 
   // 2. PII check with the project policy.

@@ -96,6 +96,6 @@ describe("host validation of the guest's result (a compromised or buggy guest)",
       table([{ head: false, cells: [{ h: false, rs: 1, cs: 1, t: '<script>alert(1)</script>"' }] }], ["<img src=x onerror=1>"]),
       { k: "keep", from: 35, to: 36 },
     ]])[0]!;
-    expect(out).toBe("a\n\n<table>\n<tbody>\n<tr><td>&lt;script&gt;alert(1)&lt;/script&gt;&quot;</td></tr>\n</tbody>\n</table>\n\n&lt;img src=x onerror=1&gt;\n\nb");
+    expect(out).toBe("a\n\n<table>\n<tbody>\n<tr><td>&lt;script&gt;alert(1)&lt;/script&gt;&quot;</td></tr>\n</tbody>\n</table>\n\n\\<img src\\=x onerror\\=1\\>\n\nb");
   });
 });
