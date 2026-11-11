@@ -104,6 +104,26 @@ describe("degeneration detector", () => {
 });
 
 describe("guarded hosted vision request", () => {
+  it.each(["# Page\n" + "xy".repeat(2000), "# Page\n" + " ".repeat(1800), "Header" + "xy".repeat(750)])(
+    "rejects degenerate JSON output and preserves both attempt charges", async (text) => {
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const json = (content: string, provider: string, cost: number) => new Response(JSON.stringify({
+        id: `gen-${provider}`, provider, choices: [{ message: { content }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1000, completion_tokens: 500, cost },
+      }), { headers: { "content-type": "application/json" } });
+      const { bodies } = stubFetch([json(text, "ProvA", .002), json("# Clean page", "ProvB", .001)]);
+      const result = await run({ ...cfg, visionStreaming: false });
+      expect(result.text).toBe("# Clean page");
+      expect(result.attempts).toBe(2);
+      expect(result.degenerate).toBeDefined();
+      expect(result.costCents).toBeCloseTo(.3);
+      expect(result.inputTokens).toBe(2000);
+      expect(result.outputTokens).toBe(1000);
+      expect(bodies[1]!.provider.ignore).toContain("ProvA");
+    },
+  );
+
   it("streams a normal response and takes provider usage and cost", async () => {
     const logs = vi.spyOn(console, "log").mockImplementation(() => {});
     const { bodies } = stubFetch([okStream()]);

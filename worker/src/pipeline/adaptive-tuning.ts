@@ -1,3 +1,5 @@
+import { ResourceCapacityError } from "../lib/resource-capacity.js";
+export { ResourceCapacityError } from "../lib/resource-capacity.js";
 import { readFileSync } from "node:fs";
 import os from "node:os";
 
@@ -11,11 +13,14 @@ export interface ResourceSnapshot {
   cpuCount: number;
   rssBytes: number;
   totalMemoryBytes: number;
+  /** Effective free memory, including sibling processes and parser children. */
+  availableMemoryBytes?: number;
 }
 
 export interface MemoryLimitReader {
   read(path: string): string | undefined;
   osTotalMemoryBytes: number;
+  osFreeMemoryBytes?: number;
   flyMachineMemoryMb?: string;
 }
 
@@ -89,45 +94,68 @@ function parseMemoryBytes(
   return unit === "mb" ? parsed * 1024 * 1024 : parsed;
 }
 
-export function captureResourceSnapshot(): ResourceSnapshot {
+function systemMemoryReader(): MemoryLimitReader {
   return {
-    cpuCount:
-      typeof os.availableParallelism === "function"
-        ? os.availableParallelism()
-        : os.cpus().length,
-    rssBytes: process.memoryUsage().rss,
-    totalMemoryBytes: detectMemoryLimitBytes(),
+    read: (path: string) => {
+      try { return readFileSync(path, "utf8"); } catch { return undefined; }
+    },
+    osTotalMemoryBytes: os.totalmem(),
+    osFreeMemoryBytes: os.freemem(),
+    flyMachineMemoryMb: process.env.FLY_MACHINE_MEMORY_MB,
   };
 }
 
-export function detectMemoryLimitBytes(reader?: MemoryLimitReader): number {
-  const source = reader ?? {
-    read: (path: string) => {
-      try {
-        return readFileSync(path, "utf8");
-      } catch {
-        return undefined;
-      }
-    },
-    osTotalMemoryBytes: os.totalmem(),
-    flyMachineMemoryMb: process.env.FLY_MACHINE_MEMORY_MB,
+export function captureResourceSnapshot(): ResourceSnapshot {
+  const reader = systemMemoryReader();
+  const rssBytes = process.memoryUsage().rss;
+  return {
+    cpuCount: typeof os.availableParallelism === "function" ? os.availableParallelism() : os.cpus().length,
+    rssBytes,
+    totalMemoryBytes: detectMemoryLimitBytes(reader),
+    availableMemoryBytes: detectAvailableMemoryBytes(reader, rssBytes),
   };
-  const flyMemoryBytes = parseMemoryBytes(source.flyMachineMemoryMb, "mb");
-  if (flyMemoryBytes) {
-    return flyMemoryBytes;
-  }
+}
 
-  for (const path of [
-    "/sys/fs/cgroup/memory.max",
-    "/sys/fs/cgroup/memory/memory.limit_in_bytes",
-  ]) {
-    const memoryBytes = parseMemoryBytes(source.read(path), "bytes");
-    if (memoryBytes) {
-      return Math.min(memoryBytes, source.osTotalMemoryBytes);
+export function detectMemoryLimitBytes(reader: MemoryLimitReader = systemMemoryReader()): number {
+  const limits = [reader.osTotalMemoryBytes];
+  const fly = parseMemoryBytes(reader.flyMachineMemoryMb, "mb");
+  if (fly !== null) limits.push(fly);
+  for (const path of ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]) {
+    const limit = parseMemoryBytes(reader.read(path), "bytes");
+    if (limit !== null) limits.push(limit);
+  }
+  return Math.min(...limits);
+}
+
+/** Never infer headroom from Node RSS alone when the VM also runs parser children. */
+export function detectAvailableMemoryBytes(reader: MemoryLimitReader, rssBytes: number): number {
+  const limit = detectMemoryLimitBytes(reader);
+  const candidates = [Math.max(0, limit - rssBytes)];
+  const meminfo = reader.read("/proc/meminfo");
+  const available = meminfo?.match(/^MemAvailable:\s+(\d+)\s+kB$/m);
+  if (available) candidates.push(Number(available[1]) * 1024);
+  else if (reader.osFreeMemoryBytes !== undefined) candidates.push(reader.osFreeMemoryBytes);
+  for (const [limitPath, usagePath, statPath, inactiveKey] of [
+    ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory.stat", "inactive_file"],
+    ["/sys/fs/cgroup/memory/memory.limit_in_bytes", "/sys/fs/cgroup/memory/memory.usage_in_bytes", "/sys/fs/cgroup/memory/memory.stat", "total_inactive_file"],
+  ] as const) {
+    const finiteLimit = parseMemoryBytes(reader.read(limitPath), "bytes");
+    const raw = reader.read(usagePath)?.trim();
+    const used = raw && /^\d+$/.test(raw) ? Number(raw) : NaN;
+    if (Number.isSafeInteger(used)) {
+      const inactive = reader.read(statPath)?.match(new RegExp(`^${inactiveKey}\\s+(\\d+)$`, "m"));
+      const cache = inactive ? Number(inactive[1]) : 0;
+      // Inactive file cache is reclaimable, unlike anonymous parser memory. The system
+      // MemAvailable bound and 20% admission reserve still apply.
+      const reclaimable = Number.isSafeInteger(cache) ? Math.min(used, cache) : 0;
+      candidates.push(Math.max(0, limit - used + reclaimable));
+    }
+    else if (finiteLimit !== null) {
+      // A bounded cgroup with unreadable usage cannot safely borrow host free memory.
+      candidates.push(0);
     }
   }
-
-  return source.osTotalMemoryBytes;
+  return Math.max(0, Math.min(...candidates));
 }
 
 export function resolveAdaptiveStageTuning(args: {
@@ -135,6 +163,8 @@ export function resolveAdaptiveStageTuning(args: {
   state: WorkflowState;
   stageName: string;
   resources?: ResourceSnapshot;
+  /** Actual command/request admission; stage sizing alone never blocks cache finalization. */
+  admitWork?: boolean;
 }): AdaptiveStageTuning {
   const { config, state, stageName } = args;
   const resources = args.resources ?? captureResourceSnapshot();
@@ -142,7 +172,8 @@ export function resolveAdaptiveStageTuning(args: {
   const cpuCount = positiveInt(resources.cpuCount, 1);
   const totalMemoryBytes = Math.max(1, resources.totalMemoryBytes);
   const rssBytes = Math.max(0, resources.rssBytes);
-  const memoryHeadroomBytes = Math.max(0, totalMemoryBytes - rssBytes);
+  const memoryHeadroomBytes = Math.max(0, Math.min(totalMemoryBytes - rssBytes,
+    resources.availableMemoryBytes ?? totalMemoryBytes - rssBytes));
   const memoryHeadroomRatio = memoryHeadroomBytes / totalMemoryBytes;
   const totalPages = Math.max(
     1,
@@ -176,8 +207,12 @@ export function resolveAdaptiveStageTuning(args: {
     config,
     embeddingRoute.runtime,
   );
+  const usableMemoryBytes = Math.max(0, memoryHeadroomBytes - totalMemoryBytes * 0.2);
+  if (args.admitWork && usableMemoryBytes < stageMemoryMb * 1024 * 1024) {
+    throw new ResourceCapacityError();
+  }
   const memoryLimited = clamp(
-    Math.floor(memoryHeadroomBytes / 1024 / 1024 / stageMemoryMb),
+    Math.floor(usableMemoryBytes / 1024 / 1024 / stageMemoryMb),
     1,
     maxDocConcurrency,
   );
@@ -208,7 +243,8 @@ export function resolveAdaptiveStageTuning(args: {
     memoryHeadroomRatio > 0.45 &&
     !HEAVY_STAGE_NAMES.has(stageName)
   ) {
-    const boosted = Math.min(maxDocConcurrency, docConcurrency + 1);
+    const boosted = Math.min(maxDocConcurrency, memoryLimited,
+      CPU_HEAVY_STAGE_NAMES.has(stageName) ? cpuCount : maxDocConcurrency, docConcurrency + 1);
     if (boosted > docConcurrency) {
       reasons.push("slow prior stage with memory headroom nudges concurrency up");
       docConcurrency = boosted;

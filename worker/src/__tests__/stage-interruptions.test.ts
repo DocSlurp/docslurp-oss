@@ -15,7 +15,8 @@ import { markWorkerShuttingDown, resetWorkerShutdownForTests } from "../lib/work
 import type { Document, StageState, ProjectRun } from "../models.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import { createActivities, toStageActivityFailure } from "../temporal/activities.js";
-import { HUNG_WORK_TIMEOUT, WORKER_INTERRUPTED } from "../temporal/failure-classification.js";
+import { ResourceCapacityError } from "../lib/resource-capacity.js";
+import { classifyActivityError, HUNG_WORK_TIMEOUT, WORKER_INTERRUPTED } from "../temporal/failure-classification.js";
 import { STAGE_ORDINARY_ATTEMPTS, STAGE_THROTTLED_ATTEMPTS } from "../temporal/shared.js";
 import { HungWorkError } from "../lib/hung-work.js";
 import type { ArtifactStore } from "../tools/storage.js";
@@ -168,5 +169,20 @@ describe("stage retries across infrastructure interruptions", () => {
   it("passes server-requested cancellation through unchanged", () => {
     const cancelled = new Error("CANCELLED");
     expect(toStageActivityFailure(cancelled, { classification: "cancelled", attempt: 5, ordinaryAttemptLimit: 3 })).toBe(cancelled);
+  });
+});
+
+
+describe("resource pressure admission retries", () => {
+  it("does not exhaust ordinary attempts before any document starts", () => {
+    const error = new Error("stage admission", { cause: new ResourceCapacityError() });
+    const classification = classifyActivityError(error, { shuttingDown: () => false });
+    expect(classification).toBe("interruption");
+    const failure = toStageActivityFailure(error, { classification, attempt: 8, ordinaryAttemptLimit: 3 });
+    expect(failure).toBeInstanceOf(ApplicationFailure);
+    if (!(failure instanceof ApplicationFailure)) throw new Error("missing application failure");
+    expect(failure.nonRetryable).toBe(false);
+    expect(failure.type).toBe(WORKER_INTERRUPTED);
+    expect(failure.nextRetryDelay).toBe(2000);
   });
 });

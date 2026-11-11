@@ -10,6 +10,8 @@ import {
   adaptiveUnstructuredSettingsForStage,
   applyAdaptiveStageTuning,
   detectMemoryLimitBytes,
+  detectAvailableMemoryBytes,
+  ResourceCapacityError,
   resolveAdaptiveStageTuning,
   type ResourceSnapshot,
 } from "../pipeline/adaptive-tuning.js";
@@ -194,6 +196,69 @@ describe("memory limit detection", () => {
   });
 });
 
+describe("whole allocation memory headroom", () => {
+  const mb = 1024 * 1024;
+  it("honors the tighter cgroup even with a larger Fly declaration", () => {
+    expect(detectMemoryLimitBytes(memoryReader({ flyMachineMemoryMb: "8192", files: {
+      "/sys/fs/cgroup/memory.max": String(2048 * mb),
+    } }))).toBe(2048 * mb);
+  });
+  it("accounts for child processes charged to cgroup v2", () => {
+    expect(detectAvailableMemoryBytes(memoryReader({ files: {
+      "/sys/fs/cgroup/memory.max": String(4096 * mb),
+      "/sys/fs/cgroup/memory.current": String(3500 * mb),
+    } }), 200 * mb)).toBe(596 * mb);
+  });
+  it("backs off when other VM processes consume system memory", () => {
+    expect(detectAvailableMemoryBytes(memoryReader({ files: {
+      "/proc/meminfo": "MemAvailable: 262144 kB\n",
+    } }), 200 * mb)).toBe(256 * mb);
+  });
+  it("handles v1 pressure above the allocation without negative headroom", () => {
+    expect(detectAvailableMemoryBytes(memoryReader({ osMb: 2048, files: {
+      "/sys/fs/cgroup/memory/memory.usage_in_bytes": String(2200 * mb),
+    } }), 200 * mb)).toBe(0);
+  });
+  it.each([undefined, "invalid"])("refuses bounded cgroup headroom with unreadable usage %s", (usage) => {
+    const reader = memoryReader({ files: { "/sys/fs/cgroup/memory.max": String(4096 * mb) } });
+    expect(detectAvailableMemoryBytes({ ...reader, read: (path) => path.endsWith("memory.current") ? usage : reader.read(path),
+      osFreeMemoryBytes: 8192 * mb }, 100 * mb)).toBe(0);
+  });
+  it("allows reclaimable inactive file cache without ignoring anonymous usage", () => {
+    expect(detectAvailableMemoryBytes(memoryReader({ osMb: 4096, files: {
+      "/sys/fs/cgroup/memory.max": String(4096 * mb),
+      "/sys/fs/cgroup/memory.current": String(3900 * mb),
+      "/sys/fs/cgroup/memory.stat": `inactive_file ${3000 * mb}\nanon ${900 * mb}\n`,
+      "/proc/meminfo": "MemAvailable: 3145728 kB\n",
+    } }), 200 * mb)).toBe(3072 * mb);
+  });
+  it("uses OS free memory if Linux telemetry is absent", () => {
+    expect(detectAvailableMemoryBytes({ ...memoryReader({}), osFreeMemoryBytes: 500 * mb }, 200 * mb)).toBe(500 * mb);
+  });
+  it("permits completed-stage bookkeeping under pressure without readmitting work", () => {
+    const state = makeState([makeDocument("doc-1", 1)]);
+    state.setDocumentStage({ runId: "run-1", documentId: "doc-1", stageName: "vision-extract",
+      status: "completed", attempts: 1, artifactUri: "done", stats: {}, error: "",
+      startedAt: null, completedAt: null, updatedAt: new Date() });
+    expect(() => resolveAdaptiveStageTuning({ config: baseConfig(), state, stageName: "vision-extract",
+      resources: { cpuCount: 8, rssBytes: 200 * mb, totalMemoryBytes: 8192 * mb, availableMemoryBytes: 0 } })).not.toThrow();
+  });
+  it.each(["fast", "cached"])("allows %s vision bookkeeping without parser capacity", (mode) => {
+    const state = makeState([makeDocument("doc-1", 2)]);
+    state.run.pipeline.visionFallback = true;
+    if (mode === "fast") state.run.pipeline.quality = "fast";
+    else { state.distributedVisionPages.set("doc-1:1", {}); state.distributedVisionPages.set("doc-1:2", {}); }
+    expect(() => resolveAdaptiveStageTuning({ config: baseConfig(), state, stageName: "vision-extract",
+      resources: { cpuCount: 8, rssBytes: 200 * mb, totalMemoryBytes: 8192 * mb, availableMemoryBytes: 0 } })).not.toThrow();
+  });
+  it("uses allocation pressure instead of the small coordinator RSS for tuning", () => {
+    const state = makeState([makeDocument("doc-1", 1), makeDocument("doc-2", 1)]);
+    state.run.pipeline.visionFallback = true;
+    expect(() => resolveAdaptiveStageTuning({ config: baseConfig(), state, stageName: "vision-extract",
+      admitWork: true, resources: { cpuCount: 8, rssBytes: 200 * mb, totalMemoryBytes: 8192 * mb, availableMemoryBytes: 256 * mb } })).toThrow(ResourceCapacityError);
+  });
+});
+
 describe("adaptive stage tuning", () => {
   it("backs heavy document concurrency down when memory headroom is tight", () => {
     const state = makeState([makeDocument("doc-1", 10), makeDocument("doc-2", 12)]);
@@ -202,11 +267,11 @@ describe("adaptive stage tuning", () => {
       config: baseConfig({ workerDocConcurrency: 4 }),
       state,
       stageName: "extract-markdown",
-      resources: resources({ rssMb: 3500, totalMemoryMb: 4096 }),
+      resources: resources({ rssMb: 2200, totalMemoryMb: 4096 }),
     });
 
     expect(tuning.docConcurrency).toBe(1);
-    expect(tuning.resource.memoryHeadroomMb).toBe(596);
+    expect(tuning.resource.memoryHeadroomMb).toBe(1896);
     expect(tuning.reasons.join(" ")).toContain("memory headroom");
   });
 
@@ -364,11 +429,11 @@ describe("adaptive stage tuning", () => {
       config: baseConfig(),
       state,
       stageName: "embed",
-      resources: resources({ rssMb: 3900, totalMemoryMb: 4096 }),
+      resources: resources({ rssMb: 2200, totalMemoryMb: 4096 }),
     });
     applyAdaptiveStageTuning(state, tuning);
 
-    expect(adaptiveEmbeddingBatchSizeForStage(state, "embed", 24)).toBe(8);
+    expect(adaptiveEmbeddingBatchSizeForStage(state, "embed", 24)).toBe(16);
     expect(adaptiveEmbeddingBatchSizeForStage(state, "extract-markdown", 24)).toBe(24);
   });
 

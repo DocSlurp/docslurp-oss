@@ -1,3 +1,4 @@
+import { withResourceCapacityGuard } from "../lib/resource-capacity.js";
 import { reportException, initializeWorkerErrorReporting } from "@docslurp/shared/error-reporting";
 import type { PreloadedRunState } from "../db/store.js";
 import { extendDbTraceLabel } from "../lib/db-trace.js";
@@ -497,9 +498,11 @@ export function createStageExecution(deps: {
         // Run-level provider calls (graph extraction, community summaries) carry the run's org and China-provider
         // policy, as per-document stages do; without it they fail closed to non-China providers only.
         () => runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.allowChinaProviders, speedBoost: state.run.pipeline.speedBoost },
-          () => runWithProgressTracker(tracker, () => pageRanges
-            ? stage.runPageRanges!(state, pageRanges, stageSignal)
-            : stage.run(state, stageSignal)))));
+          () => withResourceCapacityGuard(
+            () => { resolveAdaptiveStageTuning({ config, state, stageName, admitWork: true }); },
+            () => runWithProgressTracker(tracker, () => pageRanges
+              ? stage.runPageRanges!(state, pageRanges, stageSignal)
+              : stage.run(state, stageSignal))))));
 
       const durationMs = Date.now() - startedAt;
       if (pageRanges) {

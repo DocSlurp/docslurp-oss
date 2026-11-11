@@ -1,3 +1,4 @@
+import { assertResourceCapacity } from "../lib/resource-capacity.js";
 import { dopplerBinDir } from "./doppler.js";
 import {
   acceptSandboxedPdfResult, requireSandboxedOcrProvider, requireSandboxedPdfProvider, type SandboxedOcrJob, type SandboxedPdfJob,
@@ -263,6 +264,7 @@ export class CommandRunner {
   }
 
   async run(plan: CommandPlan, signal?: AbortSignal): Promise<CommandResult> {
+    assertResourceCapacity();
     if (plan.vendorBundle) {
       // Throws VendorBundleUnavailableError (a clear, per-candidate failure) when it cannot be fetched.
       const bundle = await ensureVendorBundle(plan.vendorBundle, { signal });
@@ -1526,7 +1528,9 @@ export class CommandRunner {
   }
 
   async launch(plan: CommandPlan, signal?: AbortSignal): Promise<LaunchedCommand> {
+    assertResourceCapacity();
     await admitCommand();
+    assertResourceCapacity();
     if (plan.sandboxedOcr) {
       const provider = requireSandboxedOcrProvider();
       const frames = plan.pages ?? plan.sandboxedOcr.maxFrames;
@@ -1564,6 +1568,7 @@ export class CommandRunner {
     });
     const { session, release } = await this.acquireSession();
     try {
+      assertResourceCapacity();
       if (session.spawn) {
         assertProcessTeardown(session);
         assertUnixSocketFilter(session, command);

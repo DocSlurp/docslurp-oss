@@ -1,3 +1,5 @@
+import { ResourceCapacityError, findResourceCapacityError } from "../lib/resource-capacity.js";
+import { isDocumentLevelFailure } from "../lib/document-failure.js";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -350,4 +352,26 @@ it("keeps earlier capped-page results in the partial manifest when a later page 
   vi.spyOn(rasters, "renderSelectedPages").mockRejectedValue(unavailable);
   await expect(internals.extractVisionPagesFromCache(state, document, state.run.pipeline.vision, [1, 2, 3]))
     .rejects.toBe(unavailable);
+});
+
+it("retains resource admission identity through real vision partial-output handling", async () => {
+  const document = { id: "pressure-doc", filename: "scan.pdf", mimeType: "application/pdf", sourceKey: "scan.pdf" } as Document;
+  const state = WorkflowState.create({ id: "pressure-run", spentCents: 0, pipeline: { ...defaultPipelineFeatures, maxCostCents: 10 } } as never, [document]);
+  const putJson = vi.fn(async () => {});
+  const storage = { putJson, uri: (key: string) => `s3://bucket/${key}`,
+    downloadToTempFile: async () => join(await mkdtemp(join(tmpdir(), "vision-pressure-")), "page.png") };
+  const rasters = { renderSelectedPages: async ({ pageNumbers }: { pageNumbers: number[] }) => pageNumbers.map(pageNumber => ({
+    pageNumber, artifactKey: `p${pageNumber}`, artifactUri: `s3://bucket/p${pageNumber}`, mimeType: "image/png",
+  })) };
+  const stage = new VisionExtractStage({} as CommandRunner, storage as unknown as ArtifactStore, {} as Config, rasters as never);
+  const internals = stage as unknown as { callVisionOnImage: (...args: any[]) => Promise<any>; extractVisionPagesFromCache: (...args: any[]) => Promise<any[]> };
+  const capacity = new ResourceCapacityError();
+  vi.spyOn(internals, "callVisionOnImage").mockImplementation(async (_state, _doc, _vision, image) => {
+    if (image.pageNumber === 2) throw capacity;
+    return { pageNumber: image.pageNumber, inputTokens: 100, outputTokens: 50, latencyMs: 1, text: "retained result" };
+  });
+  const failure = await internals.extractVisionPagesFromCache(state, document, state.run.pipeline.vision, [1, 2], undefined, "manifest.json").catch(error => error);
+  expect(findResourceCapacityError(failure)).toBe(capacity);
+  expect(isDocumentLevelFailure(failure)).toBe(false);
+  expect(putJson).toHaveBeenLastCalledWith("manifest.json", expect.objectContaining({ partial: true, processedPages: 1 }));
 });

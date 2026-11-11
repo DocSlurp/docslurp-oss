@@ -1,3 +1,5 @@
+import { withResourceCapacityGuard } from "../lib/resource-capacity.js";
+import { resolveAdaptiveStageTuning } from "../pipeline/adaptive-tuning.js";
 import { withPlanningProgress } from "./planning-progress.js";
 import { renderDocumentPage } from "../deferred/render-page.js";
 import { buildDocumentExport, DOCUMENT_EXPORT_MAX_ATTEMPTS } from "../exports/build-document-export.js";
@@ -525,7 +527,9 @@ export function createActivities(deps: ActivityDependencies) {
       try {
         const result = await runWithProviderRateScope({ orgId: state.run.orgId, allowChinaProviders: state.run.allowChinaProviders, speedBoost: state.run.pipeline.speedBoost },
           () => runWithPrivacyAuditScope({ projectId: state.run.projectId ?? null, runId: task.runId, documentId: task.documentId },
-            () => stage.runPageTask(state, task, controller.signal)));
+            () => withResourceCapacityGuard(
+              () => { resolveAdaptiveStageTuning({ config: deps.config, state, stageName: "vision-extract", admitWork: true }); },
+              () => stage.runPageTask(state, task, controller.signal))));
         recordPageCompute();
         await store.pageTasks.finish(task, ownedLease, state, result);
         await store.appendEvent({ userId: state.run.userId, runId: task.runId, documentId: task.documentId,

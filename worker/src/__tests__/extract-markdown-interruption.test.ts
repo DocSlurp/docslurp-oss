@@ -1,3 +1,4 @@
+import { ResourceCapacityError } from "../lib/resource-capacity.js";
 import { describe, expect, it } from "vitest";
 
 import { defaultPipelineFeatures } from "@docslurp/shared";
@@ -62,6 +63,14 @@ function stageWith(extract: (label: string) => Promise<never>) {
 }
 
 describe("extract-markdown interruptions", () => {
+  it("preserves pressure from a real candidate without fallback or document failure", async () => {
+    const capacity = new ResourceCapacityError();
+    const { stage, state, attempted } = stageWith(async () => { throw new Error("parser wrapper", { cause: capacity }); });
+    await expect(stage.run(state)).rejects.toBe(capacity);
+    expect(attempted).toEqual(["native-pdf"]);
+    expect(state.documentStage("doc-1", "extract-markdown")?.status).not.toBe("failed");
+  });
+
   it("rethrows an activity cancellation as an interruption instead of 'no extractor produced output'", async () => {
     const controller = new AbortController();
     const { stage, state, attempted } = stageWith(async () => {
