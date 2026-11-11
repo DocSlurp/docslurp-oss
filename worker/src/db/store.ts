@@ -1,3 +1,4 @@
+import { sandboxedPdfBatchProvider } from "../extractors/sandboxed-pdf-batch.js";
 import { buildRunCompletedEvent } from "../pipeline/run-ledger.js";
 import { assertPlanningOwnership, assertExecutionOwnership, type ExecutionOwner, StaleExecutionError } from "./execution-ownership.js";
 import { beginGeoAttempt, type GeoFinalSource } from "./geo-final-source.js";
@@ -2497,6 +2498,7 @@ export class Store {
       capabilities: () => resolveWorkerCapabilities({
         creditLeasesActive: () => this.creditLeases.active(),
         lexicalColumnPresent,
+        firstPassBatch: () => sandboxedPdfBatchProvider() !== null,
       }),
     });
   }

@@ -463,7 +463,7 @@ export function createActivities(deps: ActivityDependencies) {
     /** The run's first-pass batches (pipeline/first-pass.ts). Planned in an activity so the workflow replays the recorded plan. */
     async planFirstPass(input: FirstPassPlanInput): Promise<FirstPassPlanOutput> {
       const plan = await planFirstPass(store, input.runId);
-      return { batches: plan.batches };
+      return { batches: plan.batches, coversRun: plan.coversRun };
     },
 
     /**
@@ -492,7 +492,7 @@ export function createActivities(deps: ActivityDependencies) {
               },
             )).usage,
           }, input);
-          return { usage: result.usage, indexed: result.indexed, handedBack: result.handedBack, timings: result.timings };
+          return { usage: result.usage, indexed: result.indexed, extracted: result.extracted, handedBack: result.handedBack, timings: result.timings };
         });
       } catch (error) {
         const classification = classify(error);

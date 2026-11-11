@@ -134,3 +134,20 @@ describe("resolveGroupableStages", () => {
     expect(stages).toContain("index");
   });
 });
+
+describe("first pass in workflow input", () => {
+  it("records nothing unless the deploy flag, the pipeline, a capable fleet and scaling activities all allow it", async () => {
+    const { resolveFirstPassInput } = await import("../lib/temporal.js");
+    const fleet = new Set(["workflow.first-pass"] as const);
+    const scaling = { slotGate: true };
+    const pipeline = { firstPass: "auto", afterFirstPass: "auto" } as const;
+    expect(resolveFirstPassInput({}, pipeline, fleet, scaling)).toEqual({});
+    expect(resolveFirstPassInput({ DOCSLURP_FIRST_PASS: "on" }, pipeline, new Set(), scaling)).toEqual({});
+    expect(resolveFirstPassInput({ DOCSLURP_FIRST_PASS: "on" }, pipeline, null, scaling)).toEqual({});
+    expect(resolveFirstPassInput({ DOCSLURP_FIRST_PASS: "on" }, { ...pipeline, firstPass: "off" }, fleet, scaling)).toEqual({});
+    expect(resolveFirstPassInput({ DOCSLURP_FIRST_PASS: "on" }, pipeline, fleet, {})).toEqual({});
+    expect(resolveFirstPassInput({ DOCSLURP_FIRST_PASS: "on" }, pipeline, fleet, scaling)).toEqual({ firstPass: { maxParallelBatches: 4, afterFirstPass: "auto" } });
+    expect(resolveFirstPassInput({ DOCSLURP_FIRST_PASS: "on", DOCSLURP_FIRST_PASS_PARALLEL_BATCHES: "99" }, { ...pipeline, afterFirstPass: "none" }, fleet, scaling))
+      .toEqual({ firstPass: { maxParallelBatches: 32, afterFirstPass: "none" } });
+  });
+});

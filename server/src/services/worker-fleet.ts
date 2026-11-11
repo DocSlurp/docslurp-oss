@@ -89,6 +89,7 @@ export function configuredGatedFlags(env: Env = process.env): Record<string, boo
     WORKER_INDEX_BEFORE_ENRICH: envFlag(env.WORKER_INDEX_BEFORE_ENRICH, nonProduction),
     WORKER_GROUP_ADJACENT_STAGES: envFlag(env.WORKER_GROUP_LIGHT_STAGES, true) && envFlag(env.WORKER_GROUP_ADJACENT_STAGES, nonProduction),
     WORKER_CREDIT_LEASES: resolveCreditLeaseConfig(env).enabled,
+    DOCSLURP_FIRST_PASS: env.DOCSLURP_FIRST_PASS?.trim().toLowerCase() === "on",
     SEARCH_EARLY_LEXICAL: ["1", "true", "on", "yes"].includes(earlyLexical)
       ? true
       : ["0", "false", "off", "no"].includes(earlyLexical)

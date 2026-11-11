@@ -251,6 +251,8 @@ export interface FirstPassPlanInput {
 
 export interface FirstPassPlanOutput {
   batches: string[][];
+  /** Every document of the run is in a batch (none is left only to the stage loop). */
+  coversRun?: boolean;
 }
 
 export interface FirstPassBatchInput {
@@ -264,6 +266,8 @@ export interface FirstPassBatchInput {
 export interface FirstPassBatchOutput {
   usage: UsageSummary;
   indexed: string[];
+  /** Extracted, but the stage loop embeds them (pages need OCR or vision). */
+  extracted?: string[];
   handedBack: Array<{ documentId: string; reason: string }>;
   timings: Record<string, number | null>;
 }

@@ -125,12 +125,14 @@ export interface FirstPassStore {
 export interface FirstPassPlan {
   batches: string[][];
   limits: FirstPassBatchLimits | null;
+  /** Every document of the run is in a batch. */
+  coversRun: boolean;
 }
 
 /** The run's first-pass batches: candidates only, never another run's documents. Empty without a batch provider. */
 export async function planFirstPass(store: FirstPassStore, runId: string): Promise<FirstPassPlan> {
   const provider = sandboxedPdfBatchProvider();
-  if (!provider) return { batches: [], limits: null };
+  if (!provider) return { batches: [], limits: null, coversRun: false };
   const state = await loadRunState(store, runId, { hydrate: true });
   const scopes = await store.documentScopes(state.documents.map((document) => document.id));
   const candidates = state.documents.flatMap((document) => {
@@ -142,7 +144,7 @@ export async function planFirstPass(store: FirstPassStore, runId: string): Promi
     return [{ documentId: document.id, pages: document.pageCount, bytes: scope.bytes }];
   });
   const limits = { maxFiles: provider.maxFiles, maxBatchBytes: provider.maxBatchBytes, maxBatchPages: provider.maxBatchPages };
-  return { batches: planFirstPassBatches(candidates, limits), limits };
+  return { batches: planFirstPassBatches(candidates, limits), limits, coversRun: candidates.length === state.documents.length };
 }
 
 // ── One batch ──

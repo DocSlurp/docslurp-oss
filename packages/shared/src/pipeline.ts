@@ -456,6 +456,14 @@ export const pipelineFeaturesSchema = z
   .object({
     // Deferred indexing: `full` indexes eagerly; `map`/`visual` defer parsing until a query needs pages.
     speedBoost: z.boolean().default(false),
+    /**
+     * The first pass: the run's PDFs converted in sandboxed batches, each document keyword searchable as soon as its result
+     * arrives. `auto` follows the deploy flag DOCSLURP_FIRST_PASS; `on` asks for it (the deploy flag still has to be on:
+     * unsetting it is the rollback); `off` never.
+     */
+    firstPass: z.enum(["auto", "on", "off"]).default("auto"),
+    /** After the first pass: `auto` runs the project's pipeline for what it did not finish; `none` stops when it finished everything. */
+    afterFirstPass: z.enum(["auto", "none"]).default("auto"),
     indexingMode: indexingModeSchema.default("full"),
     materialization: materializationPolicyOverridesSchema.default({}),
     visualPages: z
@@ -575,6 +583,9 @@ export const pipelineFeaturesSchema = z
     chartExport: chartExportConfigSchema.default(defaultChartExportConfig),
   })
   .superRefine((value, ctx) => {
+    if (value.afterFirstPass === "none" && value.firstPass === "off") {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["afterFirstPass"], message: "afterFirstPass 'none' needs the first pass (firstPass is 'off')" });
+    }
     try { assertPipelineSpeedBoost(value); } catch (error) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["speedBoost"], message: error instanceof Error ? error.message : "Nitro requires Speed boost" });
     }
@@ -673,6 +684,8 @@ export type PipelineFeatures = z.infer<typeof pipelineFeaturesSchema>;
 
 export const defaultPipelineFeatures: PipelineFeatures = {
   speedBoost: false,
+  firstPass: "auto",
+  afterFirstPass: "auto",
   indexingMode: "full",
   materialization: {},
   visualPages: { route: "auto", coarseFallback: false },
@@ -1571,6 +1584,8 @@ export function parseStoredPipelineFeatures(stored: unknown, sourceName = "a sto
  */
 const FIELD_SEED_STAGES: Record<keyof PipelineFeatures, readonly PipelineRunStage[]> = {
   speedBoost: [],
+  firstPass: [],
+  afterFirstPass: [],
   indexingMode: [],
   materialization: [],
   visualPages: [],
@@ -1643,4 +1658,13 @@ function stableJson(value: unknown): string {
 /** Deep equality for pipeline feature values, independent of object key order. */
 export function pipelineValuesEqual(a: unknown, b: unknown): boolean {
   return a === b || stableJson(a) === stableJson(b);
+}
+
+/**
+ * Whether a run takes the first pass: the deploy flag DOCSLURP_FIRST_PASS=on and the pipeline not `off`. The deploy flag
+ * always wins (unsetting it is the rollback), so `on` without it is today's pipeline.
+ */
+export function resolveFirstPass(features: Pick<PipelineFeatures, "firstPass">, env: Record<string, string | undefined> = {}): boolean {
+  if (env.DOCSLURP_FIRST_PASS?.trim().toLowerCase() !== "on") return false;
+  return features.firstPass !== "off";
 }
