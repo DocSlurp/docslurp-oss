@@ -30,7 +30,10 @@ import { Worker } from "@temporalio/worker";
 
 import type { Activities } from "../../temporal/activities.js";
 import {
+  FIRST_PASS_RUN_POLICY_FAILURE,
   PROVIDER_RATE_LIMITED,
+  type FirstPassBatchInput,
+  type FirstPassBatchOutput,
   WORKER_SLOT_UNAVAILABLE,
   type PipelineWorkflowInput,
   type StageInput,
@@ -72,6 +75,9 @@ interface Behaviour {
   pageTotal?: number;
   /** Stage groups: how many stages the group ran before yielding. */
   groupStagesRun?: (stageNames: string[]) => number;
+  /** First pass: the plan and each batch's outcome (default: every planned document indexed). */
+  firstPassPlan?: { batches: string[][]; coversRun: boolean; countFirst: string[] };
+  firstPassBatch?: (input: FirstPassBatchInput, attempt: number) => Promise<FirstPassBatchOutput | undefined>;
 }
 
 let behaviour: Behaviour = {};
@@ -110,6 +116,16 @@ const activities: Activities = {
   },
   async loadVisionPageBatch(input: { runId: string; offset: number; limit: number }) {
     return pageTasks(input.runId, behaviour.pageTotal ?? 0).slice(input.offset, input.offset + input.limit);
+  },
+  async planFirstPass() {
+    return behaviour.firstPassPlan ?? { batches: [], coversRun: false, countFirst: [] };
+  },
+  async countFirstPassPages(input: { documentIds: string[] }) {
+    return { counted: input.documentIds.length };
+  },
+  async runFirstPassBatch(input: FirstPassBatchInput) {
+    const custom = await behaviour.firstPassBatch?.(input, Context.current().info.attempt);
+    return custom ?? { usage, indexed: input.documentIds, extracted: [], handedBack: [], timings: { batchMs: 10 } };
   },
   async runVisionPageTask(task: VisionPageTask) {
     await behaviour.page?.([task], Context.current().info.attempt);
@@ -267,6 +283,51 @@ const scenarios: Scenario[] = [
     behaviour: () => ({ pageTotal: 0 }),
     children: 0,
     expect: "completed",
+  },
+  {
+    name: "first-pass-success",
+    description:
+      "DOCSLURP_FIRST_PASS input (firstPass, afterFirstPass none): after format-detect, two first-pass batches index every " +
+      "document of the run, so the workflow stops without the stage loop.",
+    input: {
+      runId: "fixture-first-pass", pipeline, stageOrder: ["quarantine", "format-detect", "extract-markdown", "embed", "index"],
+      slotGate: true, pageChildBatchSize: 500, firstPass: { maxParallelBatches: 2, afterFirstPass: "none" },
+    },
+    behaviour: () => ({ firstPassPlan: { batches: [["doc-a"], ["doc-b"]], coversRun: true, countFirst: [] } }),
+    expect: "completed",
+  },
+  {
+    name: "first-pass-partial-batch-failure",
+    description:
+      "First pass with afterFirstPass auto: an unplanned PDF is counted first, one batch fails (its PDFs counted, then handed " +
+      "to the stage loop), the other hands back a document whose index was not confirmed; the stage loop follows.",
+    input: {
+      runId: "fixture-first-pass-partial", pipeline, stageOrder: ["quarantine", "format-detect", "extract-markdown", "embed", "index"],
+      slotGate: true, pageChildBatchSize: 500, firstPass: { maxParallelBatches: 1, afterFirstPass: "auto" },
+    },
+    behaviour: () => ({
+      firstPassPlan: { batches: [["doc-a"], ["doc-b"]], coversRun: false, countFirst: ["doc-c"] },
+      async firstPassBatch(input) {
+        if (input.batchIndex === 0) throw ApplicationFailure.create({ message: "batch VM lost", nonRetryable: true });
+        return { usage, indexed: [], extracted: [], handedBack: input.documentIds.map((documentId) => ({ documentId, reason: "index-unconfirmed" })), timings: { batchMs: 10 } };
+      },
+    }),
+    expect: "completed",
+  },
+  {
+    name: "first-pass-credit-refusal",
+    description: "First pass whose batch is stopped by run policy (credits): the run fails, nothing is handed back to the stage loop.",
+    input: {
+      runId: "fixture-first-pass-credits", pipeline, stageOrder: ["quarantine", "format-detect", "extract-markdown", "embed", "index"],
+      slotGate: true, pageChildBatchSize: 500, firstPass: { maxParallelBatches: 2, afterFirstPass: "auto" },
+    },
+    behaviour: () => ({
+      firstPassPlan: { batches: [["doc-a", "doc-b"]], coversRun: true, countFirst: [] },
+      async firstPassBatch() {
+        throw ApplicationFailure.create({ type: FIRST_PASS_RUN_POLICY_FAILURE, message: "insufficient credits", nonRetryable: true });
+      },
+    }),
+    expect: "failed",
   },
   {
     name: "stage-failure",

@@ -194,3 +194,9 @@ uses its existing failure finalizer. Retry the failed run explicitly after
 capacity recovers; this does not automatically retry the workflow or introduce
 Continue-As-New/terminal transaction ownership changes. Existing histories
 without the patch retain their original commands and unbounded wait behavior.
+
+## First pass (`firstPass` in workflow input)
+
+Runs started with `firstPass` recorded plan batches (`planFirstPass`) after format-detect and run them with `runPageFanOut`
+(`runFirstPassBatch`, at most `maxParallelBatches` at once), then continue with the unchanged stage loop. Stage inputs of
+such runs carry `firstPass: true`. Runs without it keep their command sequence; `test:temporal-replay` must pass unchanged.

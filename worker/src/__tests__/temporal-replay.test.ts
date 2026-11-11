@@ -30,6 +30,9 @@ describe("Temporal workflow replay safety", () => {
       "stage-failure",
       "pause-resume-cancel-signals",
       "temporal-cancel-mid-stage",
+      "first-pass-success",
+      "first-pass-partial-batch-failure",
+      "first-pass-credit-refusal",
     ]) {
       expect(scenarios, `missing fixture scenario ${scenario}`).toContain(scenario);
     }

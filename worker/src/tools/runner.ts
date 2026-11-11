@@ -1,3 +1,4 @@
+import { serveFirstPassResult } from "../pipeline/first-pass.js";
 import { dopplerBinDir } from "./doppler.js";
 import {
   acceptSandboxedPdfResult, requireSandboxedOcrProvider, requireSandboxedPdfProvider, type SandboxedOcrJob, type SandboxedPdfJob,
@@ -1764,6 +1765,11 @@ export class CommandRunner {
     if (plan.sandboxedPdf) {
       const provider = requireSandboxedPdfProvider();
       const pages = plan.pages ?? currentPerfContext()?.pageCount ?? 0;
+      // The first pass already converted this document in a batch VM: serve that result instead of booting another VM.
+      const served = await serveFirstPassResult(currentPerfContext(), plan.sandboxedPdf);
+      if (served) {
+        return { remote: Promise.resolve(acceptSandboxedPdfResult(plan.sandboxedPdf, served, pages)), timeoutMs: provider.timeoutMs(pages), release: async () => {} };
+      }
       // The provider shards long documents itself and notes progress as shards finish.
       return {
         remote: provider.run(plan.sandboxedPdf, this.sandboxedPdfContext(pages, provider.shardProfile?.key), signal)

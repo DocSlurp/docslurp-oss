@@ -121,11 +121,16 @@ export async function recordMeasuredPdfPageCount(args: {
   sourcePath: () => Promise<string>;
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
+  /** format-detect of a first-pass run: the batch counts this PDF (firstPassDefersPageCount). */
+  deferToFirstPass?: boolean;
 }): Promise<{ pages: number; method: "vm" | "local"; estimate: number } | null> {
   const { state, document } = args;
   if (!sniffedPdf(document) || document.pageCountSource !== "assumed") return null;
   const mode = resolvePdfMode(args.env ?? process.env);
   if (mode === "off") return null;
+  // The first pass measures this PDF in its batch VM and records the count before anything bills; a file the batch does not
+  // count is counted here by the first pass itself (pipeline/first-pass.ts) before the stage loop takes it.
+  if (mode === "vm" && args.deferToFirstPass) return null;
   const estimate = Math.max(1, Math.trunc(document.pageCount) || 1);
   let pages: number | null;
   if (mode === "vm") {

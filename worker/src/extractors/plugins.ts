@@ -32,6 +32,7 @@ import { parsePageLayoutFacts, type PageLayoutFacts } from "../lib/page-layout-f
 import { planPageShards, type ShardCostProfile } from "../temporal/page-shards.js";
 import { registerShardProfile } from "../temporal/page-shard-profiles.js";
 import { resolveModalImage, type ModalSdk } from "../sandbox/providers/modal/index.js";
+import { validBatchProvider, type SandboxedPdfBatchProvider } from "./sandboxed-pdf-batch.js";
 
 export const EXTRACTOR_PLUGIN_API_VERSION = 1;
 /** The extractor id a registered sandboxed PDF provider serves. */
@@ -145,6 +146,11 @@ export interface SandboxedPdfExtractorProvider {
    * document fails the same way in both modes.
    */
   pageCount?(job: { input: string }, signal?: AbortSignal): Promise<{ pages: number; usage?: UsageEvent }>;
+  /**
+   * Present when the provider can convert many PDFs of one run in one VM job, streaming each file's result as it is ready
+   * (the first pass; extractors/sandboxed-pdf-batch.ts). The same isolation rules apply to every file of the batch.
+   */
+  batch?: SandboxedPdfBatchProvider;
 }
 
 /**
@@ -226,6 +232,20 @@ export interface ExtractorPluginHost {
   resolveModalImage(ref: string): string;
   planPageShards: typeof planPageShards;
   currentPerfContext: typeof currentPerfContext;
+  /**
+   * What the worker's database says owns each document id (organization and run). Providers use it to refuse a batch
+   * that names a document outside the job's scope, independently of core's own check. Rejects when the worker has no
+   * database bound (setExtractorDocumentOwners): a provider must then refuse the batch, never skip the check.
+   */
+  documentOwners(documentIds: readonly string[]): Promise<ReadonlyMap<string, { orgId: string | null; runId: string }>>;
+}
+
+type DocumentOwnersLookup = ExtractorPluginHost["documentOwners"];
+let documentOwnersLookup: DocumentOwnersLookup | undefined;
+
+/** Bind the database lookup behind ExtractorPluginHost.documentOwners (worker startup; tests). */
+export function setExtractorDocumentOwners(lookup: DocumentOwnersLookup | undefined): void {
+  documentOwnersLookup = lookup;
 }
 
 export interface ExtractorPluginModule {
@@ -240,6 +260,10 @@ export function createExtractorPluginHost(): ExtractorPluginHost {
     resolveModalImage: (ref) => resolveModalImage(ref, undefined),
     planPageShards,
     currentPerfContext,
+    documentOwners: async (documentIds) => {
+      if (!documentOwnersLookup) throw new SandboxRunError("Document ownership lookup is not bound in this worker");
+      return await documentOwnersLookup(documentIds);
+    },
   };
 }
 
@@ -266,6 +290,7 @@ export function registerExtractorPlugin(plugin: ExtractorPlugin): void {
       throw new Error("Sandboxed PDF provider embeddedImages needs read() and a producerId");
     }
     if (pdf.figures && !PROVIDER_ID.test(pdf.figures.producerId ?? "")) throw new Error("Sandboxed PDF provider figures needs a producerId");
+    if (pdf.batch !== undefined && !validBatchProvider(pdf.batch)) throw new Error("Sandboxed PDF provider batch needs run() and positive limits");
   }
   const orientation = plugin.imageOrientation;
   if (orientation) {

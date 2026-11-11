@@ -28,6 +28,7 @@ import {
   executionStageOrder,
   getPipelineStageOrder,
   pipelineStageOrder,
+  resolveFirstPass,
   runStageSchema,
   type MaterializePagesInput,
   type PipelineFeatures,
@@ -276,6 +277,29 @@ export function resolveWorkflowScalingInput(
 }
 
 /**
+ * The first pass, recorded in workflow input only when every gate is on: the deploy flag DOCSLURP_FIRST_PASS=on (unset is the
+ * rollback), the pipeline's `firstPass` not `off`, a fleet that advertises workflow.first-pass (strict: unknown capabilities
+ * record nothing, unlike the ungated test default of other flags), and scaling activities to run its batches on.
+ * DOCSLURP_FIRST_PASS_ORGS (comma-separated org ids) narrows a rollout to those orgs: when it is set, a run whose org
+ * is unknown or not listed gets no first pass. Unset or empty applies the deploy flag to every org.
+ */
+export function resolveFirstPassInput(
+  env: NodeJS.ProcessEnv,
+  pipeline: Pick<PipelineFeatures, "firstPass" | "afterFirstPass">,
+  capabilities: ReadonlySet<WorkerCapability> | null | undefined,
+  scaling: { slotGate?: boolean; pageChildBatchSize?: number; activityTaskQueue?: string },
+  orgKey?: string | null,
+): { firstPass?: { maxParallelBatches: number; afterFirstPass: "auto" | "none" } } {
+  if (!resolveFirstPass(pipeline, env)) return {};
+  const orgs = (env.DOCSLURP_FIRST_PASS_ORGS ?? "").split(",").map((org) => org.trim()).filter(Boolean);
+  if (orgs.length > 0 && (!orgKey || !orgs.includes(orgKey))) return {};
+  if (!capabilities?.has("workflow.first-pass")) return {};
+  if (!scaling.slotGate && !scaling.pageChildBatchSize && !scaling.activityTaskQueue) return {};
+  const parallel = Number.parseInt(env.DOCSLURP_FIRST_PASS_PARALLEL_BATCHES ?? "4", 10);
+  return { firstPass: { maxParallelBatches: Math.max(1, Math.min(32, Number.isFinite(parallel) ? parallel : 4)), afterFirstPass: pipeline.afterFirstPass ?? "auto" } };
+}
+
+/**
  * WORKER_PAGE_RANGE_SHARDS (default off): long PDFs are split into page-range shards for
  * render-images, sized by the worker's calibrated cost model and capped like document shards
  * by the org's worker slots. Recorded only when every worker advertises
@@ -396,6 +420,7 @@ export async function startPipelineWorkflow(
   // when no workflow-input flag is on (nothing to gate).
   const configured = configuredGatedFlags();
   const capabilities = configured.WORKER_INDEX_BEFORE_ENRICH || configured.WORKER_GROUP_ADJACENT_STAGES || configured.WORKER_SHARD_QUARANTINE
+    || configured.DOCSLURP_FIRST_PASS
     ? await effectiveFleetCapabilities(route.taskQueue)
     : null;
   let restartExisting = options?.restartExisting;
@@ -415,7 +440,8 @@ export async function startPipelineWorkflow(
     workflowId: `${WORKFLOW_ID_PREFIX}${runId}`,
     args: [{ runId, pipeline, ...(options?.executionGeneration ? { executionGeneration: options.executionGeneration } : {}), stageOrder: resolveWorkflowStageOrder(pipeline, process.env, capabilities),
       pageBundleSize: Math.max(1, Math.min(8, Number.parseInt(process.env.WORKER_PAGE_BUNDLE_SIZE ?? "1", 10) || 1)),
-      pageConcurrency, ...resolveWorkflowScalingInput(process.env, route, scope, capabilities) }],
+      pageConcurrency, ...resolveWorkflowScalingInput(process.env, route, scope, capabilities),
+      ...resolveFirstPassInput(process.env, pipeline, capabilities, resolveWorkflowScalingInput(process.env, route, scope, capabilities), scope?.orgKey) }],
     ...(priority ? { priority } : {}),
     // Let queued runs survive worker deploys and heavy-doc retries without
     // leaving SQL state stranded in "processing" when Temporal closes them.

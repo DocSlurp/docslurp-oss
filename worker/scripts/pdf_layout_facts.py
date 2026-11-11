@@ -1058,17 +1058,19 @@ def struct_alt_text(file):
     return out
 
 
-def walk_document(path, first, last, deadline=None, only_pages=None):
+def walk_document(path, first, last, deadline=None, only_pages=None, content=True):
     """Walk pages [first, last]. Returns {page: PageWalk}; a page with `unknown` set carries no reliable draws.
 
     Raises Unknown only for whole-file reasons (encrypted, unreadable xref); callers treat every page as unknown then.
+    `content=False`: the page tree's geometry only (media and crop boxes, rotation), no content stream is read: every page
+    has no draws, and is unknown only when its geometry cannot be read. Enough for the visible box (tables and grids).
     """
     if last - first + 1 > MAX_PAGES_WALKED:
         raise Unknown('range')
     file = PdfFile(path, deadline)
     try:
         try:
-            alt = struct_alt_text(file)
+            alt = struct_alt_text(file) if content else {}
         except (Unknown, RecursionError, MemoryError, ValueError, TypeError, IndexError, KeyError, struct.error):
             alt = {}
         walker = Walker(file, alt)
@@ -1080,8 +1082,9 @@ def walk_document(path, first, last, deadline=None, only_pages=None):
             pages[number] = walk
             try:
                 _page_geometry(file, page, trail, walk)
-                resources = file.deref(_inherited(file, page, 'Resources', [page] + trail))
-                walker.walk_page(walk, page, resources if isinstance(resources, dict) else {})
+                if content:
+                    resources = file.deref(_inherited(file, page, 'Resources', [page] + trail))
+                    walker.walk_page(walk, page, resources if isinstance(resources, dict) else {})
             except Unknown as error:
                 walk.unknown, walk.draws = str(error) or 'unknown', []
             except (RecursionError, MemoryError, ValueError, TypeError, IndexError, KeyError, OverflowError, struct.error):
@@ -1665,7 +1668,7 @@ def union_coverage(boxes, visible_box_):
     return round(len(covered) / (n * n), 4)
 
 
-def layout_facts(path, listing_text, xhtml_text, page_markdowns, first, last, deadline=None, repeated=None):
+def layout_facts(path, listing_text, xhtml_text, page_markdowns, first, last, deadline=None, repeated=None, content=True):
     """Structural layout facts for routing, per page in [first, last]:
 
     * images: each listed image drawn on the page with its placement (walker), stream facts (`pdfimages -list`: pixel
@@ -1680,11 +1683,15 @@ def layout_facts(path, listing_text, xhtml_text, page_markdowns, first, last, de
     then reported as unknown (null), never as zero. `repeated` is the set of page-furniture object ids when the caller
     works through a longer range in chunks (`repeated_objects` over the whole range's listing rows); by default it is
     computed from `listing_text` over [first, last].
+
+    `content=False` (tables only): the page tree's geometry without reading content streams (walk_document), for callers
+    that need the tables, grids and table coverage alone: those are the same as a full walk's for every page whose content
+    the full walk can read; images are then unknown (null) and must not be read from the result.
     """
     if last - first + 1 > MAX_LAYOUT_PAGES:
         raise Unknown('range')
     try:
-        walks = walk_document(path, first, last, deadline)
+        walks = walk_document(path, first, last, deadline, content=content)
     except Unknown as error:
         walks, whole_unknown = {}, str(error) or 'unknown'
     else:
@@ -1738,7 +1745,7 @@ def layout_facts(path, listing_text, xhtml_text, page_markdowns, first, last, de
                     'repeated': row['objectId'] in repeated,
                     'wordsInside': inside,
                 })
-        entry['images'] = images if listing_text is not None and entry['known'] else None
+        entry['images'] = images if listing_text is not None and entry['known'] and content else None
         markdown = (page_markdowns or {}).get(number)
         if markdown is None:
             entry['tables'] = None
@@ -1782,6 +1789,7 @@ def main(argv):
     parser.add_argument('--xhtml')
     parser.add_argument('--markdown', help='the extractor output, one form feed between pages, starting at --first')
     parser.add_argument('--seconds', type=float, default=60.0)
+    parser.add_argument('--tables-only', action='store_true', help='page geometry only, no content streams (images unknown)')
     args = parser.parse_args(argv)
     if not 1 <= args.first <= args.last or args.last - args.first + 1 > MAX_LAYOUT_PAGES:
         parser.error('invalid page range')
@@ -1790,7 +1798,8 @@ def main(argv):
     xhtml = read(args.xhtml, 256 * 1024 * 1024)
     markdown = read(args.markdown, 256 * 1024 * 1024)
     pages = {args.first + index: text for index, text in enumerate(markdown.split('\f'))} if markdown is not None else None
-    facts = layout_facts(args.input, listing, xhtml, pages, args.first, args.last, deadline=time.monotonic() + args.seconds)
+    facts = layout_facts(args.input, listing, xhtml, pages, args.first, args.last, deadline=time.monotonic() + args.seconds,
+                         content=not args.tables_only)
     sys.stdout.write(json.dumps(facts, separators=(',', ':')))
     return 0
 
