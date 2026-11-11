@@ -54,17 +54,74 @@ function blankLineBlocks(page: string): string[] {
   return blocks;
 }
 
+const HTML_TABLE_BLOCK = /^\s{0,3}<table(?=\s|>|$)/i;
+
+/**
+ * Whether a page holds anything the HTML table scanner would read: an ASCII case-insensitive `<table`. A presence check
+ * only (no tag, attribute, entity or structure is read); a page without it has no HTML table, so it never needs the
+ * parser VM. The `i` flag without `u` folds ASCII only, like the scanner.
+ */
+export const hasHtmlTableMarkup = (page: string): boolean => /<table/i.test(page);
+
+/** How many of a page's blank-line blocks start with `<table` (markdownTables' HTML blocks): a presence check per block. */
+export function htmlTableBlockCount(page: string): number {
+  let count = 0;
+  for (const block of blankLineBlocks(page)) if (HTML_TABLE_BLOCK.test(block)) count += 1;
+  return count;
+}
+
+/**
+ * What the HTML table scanner read from one page (scanPageTables). In the service profile it is produced only by the
+ * parser-VM guest (worker `table-routing-guest.ts`) and validated by the host before any function below uses it.
+ */
+export interface HtmlTableScan {
+  /** Every `<table>…</table>` element, left to right, not overlapping: its span and its rows' cell texts. */
+  tables: ScannedHtmlTable[];
+  /** Row and column counts of each blank-line block that starts with `<table`, in block order (htmlTableBlockCount). */
+  blocks: Array<{ rows: number; columns: number }>;
+}
+export interface ScannedHtmlTable {
+  start: number;
+  end: number;
+  /** Cell texts (entities decoded, `<br>` as a space, whitespace collapsed), one array per `<tr>`. */
+  rows: string[][];
+  /** False when a cell spans rows or columns or holds markup other than text. */
+  simple: boolean;
+}
+
+let tableScanGuest = false;
+/** Called only by the parser-VM guest's entry script: this process is the VM guest and may scan HTML tables. */
+export function enterTableScanGuest(): void {
+  tableScanGuest = true;
+}
+
+/**
+ * The HTML table scanner reads customer and model text (Doppler passes PDF prose through `--html` unescaped; vision
+ * models write tables as HTML). Under NODE_ENV=production or DOCSLURP_SERVICE_PROFILE=service it runs only in the parser
+ * VM; on the host it refuses loudly (fail closed) rather than parse.
+ */
+function assertTableScanAllowed(): void {
+  if (tableScanGuest) return;
+  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
+  if (env.NODE_ENV?.trim().toLowerCase() === "production" || env.DOCSLURP_SERVICE_PROFILE?.trim().toLowerCase() === "service") {
+    throw new Error("refusing to scan HTML tables on the host in the service profile; use the parser VM (table-routing guest)");
+  }
+}
+
 /**
  * Tables in one page's Markdown: GFM pipe tables (a block of two or more pipe rows, the separator not counted) and HTML
- * tables (`<tr>` rows). Mirrors `markdown_tables` in pdf_layout_facts.py.
+ * tables (`<tr>` rows). Mirrors `markdown_tables` in pdf_layout_facts.py. The HTML blocks' counts come from `scan` (the
+ * parser VM's reading of this page); without one they are scanned here, which the service profile refuses on the host.
+ * `scan: null` (the VM could not read the page) counts no HTML table.
  */
-export function markdownTables(page: string): Array<{ rows: number; columns: number }> {
+export function markdownTables(page: string, scan?: HtmlTableScan | null): Array<{ rows: number; columns: number }> {
   const tables: Array<{ rows: number; columns: number }> = [];
+  const blocks = scan === undefined ? (hasHtmlTableMarkup(page) ? scanPageTables(page).blocks : []) : scan?.blocks ?? null;
+  let htmlBlock = 0;
   for (const block of blankLineBlocks(page)) {
-    const html = /^\s{0,3}<table(?=\s|>|$)/i.exec(block);
-    if (html) {
-      const rows = block.split(/<tr[\s>]/i).slice(1);
-      if (rows.length > 0) tables.push({ rows: rows.length, columns: Math.max(...rows.map((row) => (row.match(/<t[dh][\s>]/gi) ?? []).length)) });
+    if (HTML_TABLE_BLOCK.test(block)) {
+      const counts = blocks?.[htmlBlock++];
+      if (counts && counts.rows > 0) tables.push({ rows: counts.rows, columns: counts.columns });
       continue;
     }
     const lines = block.split("\n").filter((line) => line.trim());
@@ -193,19 +250,46 @@ function htmlText(value: string): string {
 
 const escapeHtml = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-function htmlTables(page: string): HtmlTable[] {
-  const tables: HtmlTable[] = [];
-  for (const table of htmlElements(page, ["table"])) {
+/**
+ * The HTML table scanner: every table element's span and cell texts (pages up to TABLE_SCAN_MAX_PAGE_CHARS; a larger page
+ * is not scanned for them), and markdownTables' HTML block counts (any page). It reads customer and model text, so in the
+ * service profile it runs only inside the parser VM (assertTableScanAllowed); the host uses its validated result.
+ */
+export function scanPageTables(page: string): HtmlTableScan {
+  assertTableScanAllowed();
+  const tables: ScannedHtmlTable[] = page.length > TABLE_SCAN_MAX_PAGE_CHARS ? [] : htmlElements(page, ["table"]).map((table) => {
     let simple = true;
     const rows = htmlElements(table.inner, ["tr"]).map((row) => htmlElements(row.inner, ["td", "th"]).map((cell) => {
       if (/\b(?:colspan|rowspan)\s*=/i.test(cell.attributes) || /<(?!br\s*\/?>)[a-z]/i.test(cell.inner)) simple = false;
       return htmlText(cell.inner);
     }));
-    if (rows.length === 0) continue;
-    tables.push({ start: table.start, end: table.end, header: rows[0]!, body: rows.slice(1), simple });
+    return { start: table.start, end: table.end, rows, simple };
+  });
+  const blocks: HtmlTableScan["blocks"] = [];
+  for (const block of blankLineBlocks(page)) {
+    if (!HTML_TABLE_BLOCK.test(block)) continue;
+    const rows = block.split(/<tr[\s>]/i).slice(1);
+    let columns = 0;
+    for (const row of rows) columns = Math.max(columns, (row.match(/<t[dh][\s>]/gi) ?? []).length);
+    blocks.push({ rows: rows.length, columns });
   }
-  return tables;
+  return { tables, blocks };
 }
+
+/** The scanned tables with at least one row, the first row as the header. */
+function htmlTables(scanned: readonly ScannedHtmlTable[]): HtmlTable[] {
+  return scanned.filter((table) => table.rows.length > 0)
+    .map((table) => ({ start: table.start, end: table.end, header: table.rows[0]!, body: table.rows.slice(1), simple: table.simple }));
+}
+
+/**
+ * The scan a page's table checks use: the caller's (`scanFor`, the parser VM's validated reading; null when it could not
+ * read the page), else this process's own scanner, which the service profile refuses on the host. A page without
+ * `<table` needs no scan.
+ */
+export type ScanFor = (page: string, index: number) => HtmlTableScan | null;
+const localScan: ScanFor = (page) => scanPageTables(page);
+const EMPTY_SCAN: HtmlTableScan = { tables: [], blocks: [] };
 
 const htmlRow = (values: string[], cell: "td" | "th") => `<tr>${values.map((value) => `<${cell}>${escapeHtml(value)}</${cell}>`).join("")}</tr>`;
 
@@ -214,17 +298,19 @@ const htmlRow = (values: string[], cell: "td" | "th") => `<tr>${values.map((valu
  * header Doppler split becomes one header row (`Revenue Q1`, `Revenue Q2`, ...); a bulleted or numbered list it laid out
  * in columns becomes a list again. Pages are separated by form feeds and keep their count. Measured structure only.
  */
-export function repairMarkdownTables(markdown: string): { markdown: string; repairs: TableRepairs } {
+export function repairMarkdownTables(markdown: string, scanFor: ScanFor = localScan): { markdown: string; repairs: TableRepairs } {
   const repairs: TableRepairs = { mergedHeaders: 0, listsRestored: 0 };
-  const pages = markdown.split("\f").map((raw) => {
+  const pages = markdown.split("\f").map((raw, index) => {
     // An oversized page is left as extracted; tableReliability reports it unreliable.
     if (raw.length > TABLE_SCAN_MAX_PAGE_CHARS) return raw;
+    // A page the scanner could not read (scan null: the parser VM was unavailable) gets no HTML repair (fail closed).
+    const scan = hasHtmlTableMarkup(raw) ? scanFor(raw, index) : EMPTY_SCAN;
     // HTML tables (Doppler --html, the VM guest's output) get the same repairs as pipe tables, as HTML. One forward pass
     // over the page (tables are in order and do not overlap): never a splice or re-slice per table, which is quadratic
     // on a page of many small tables (council K #1).
     const parts: string[] = [];
     let at = 0;
-    for (const table of htmlTables(raw)) {
+    for (const table of htmlTables(scan?.tables ?? [])) {
       if (!table.simple) continue;
       let replacement: string | null = null;
       if (isListAsTable(table)) {
@@ -272,6 +358,9 @@ export function repairMarkdownTables(markdown: string): { markdown: string; repa
   });
   return { markdown: pages.join("\f"), repairs };
 }
+
+/** tableReliability's reason for a page whose HTML tables the parser VM could not read (unavailable, failed, invalid). */
+export const TABLE_HTML_UNSCANNED_SIGNAL = "table:html-unscanned";
 
 /** Body cells empty above this share make a table unreliable (merged or misplaced cells). */
 export const TABLE_UNRELIABLE_EMPTY_CELL_SHARE = 0.4;
@@ -348,10 +437,10 @@ const VALUE_TOKEN = /\d[/-]\d|\d{5,}/;
  * The page's lines with every HTML table and pipe-table row replaced by a run break (null); blank lines dropped. Runs of
  * number-heavy lines are counted over this list, so a table between two lines separates them.
  */
-function nonTableLines(page: string): Array<string | null> {
+function nonTableLines(page: string, htmlTableSpans: readonly ScannedHtmlTable[]): Array<string | null> {
   const parts: string[] = [];
   let at = 0;
-  for (const table of htmlElements(page, ["table"])) { parts.push(page.slice(at, table.start), "\n\u0000\n"); at = table.end; }
+  for (const table of htmlTableSpans) { parts.push(page.slice(at, table.start), "\n\u0000\n"); at = table.end; }
   parts.push(page.slice(at));
   const lines: Array<string | null> = [];
   for (const line of parts.join("").split("\n")) {
@@ -394,11 +483,11 @@ function isNumericProseLine(line: string, rules: typeof TABLE_LEAK): boolean {
 const numericRows = (table: { header: string[]; body: string[][] }) =>
   [table.header, ...table.body].filter((cells) => cells.filter((cell) => cell.trim() !== "" && cell.trim().split(/\s+/).every(isLeakNumber)).length >= 2).length;
 
-function leakSignals(page: string, tables: ReadonlyArray<{ header: string[]; body: string[][] }>, rules: typeof TABLE_LEAK): string[] {
+function leakSignals(page: string, htmlTableSpans: readonly ScannedHtmlTable[], tables: ReadonlyArray<{ header: string[]; body: string[][] }>, rules: typeof TABLE_LEAK): string[] {
   const signals: string[] = [];
   let run = 0;
   let numberHeavyLines = 0;
-  for (const line of nonTableLines(page)) {
+  for (const line of nonTableLines(page, htmlTableSpans)) {
     if (line !== null && numericProseTokens(line, rules) && !PHONE.test(line)) numberHeavyLines += 1;
     run = line !== null && isNumericProseLine(line, rules) ? run + 1 : 0;
     if (run >= rules.numericProseMinLines && !signals.includes("table:numeric-prose")) signals.push("table:numeric-prose");
@@ -435,12 +524,15 @@ function leakSignals(page: string, tables: ReadonlyArray<{ header: string[]; bod
  * page with a text layer is read by a model (classify-route) when it is table-heavy and has any of these, or has a leak
  * signal (TABLE_LEAK_SIGNALS) whether or not it is table-heavy; otherwise Doppler's table is served.
  */
-export function tableReliability(page: string, rules: typeof TABLE_LEAK = TABLE_LEAK): string[] {
+export function tableReliability(page: string, rules: typeof TABLE_LEAK = TABLE_LEAK, scan?: HtmlTableScan | null): string[] {
   // An oversized page is not scanned (customer text; bounded work): its tables are unknown, so it is a model's to read.
   if (page.length > TABLE_SCAN_MAX_PAGE_CHARS) return ["table:oversized-page"];
+  const html = !hasHtmlTableMarkup(page) ? EMPTY_SCAN : scan === undefined ? scanPageTables(page) : scan;
+  // The parser VM could not read the page's HTML tables: they are unknown, so (like an oversized page) a model's to read.
+  if (html === null) return [TABLE_HTML_UNSCANNED_SIGNAL];
   const signals = new Set<string>();
   // A spanning HTML table's row lengths do not show its columns; it is judged only by its empty cells.
-  const tables = [...pipeTables(page.split("\n")).map((table) => ({ ...table, simple: true })), ...htmlTables(page)];
+  const tables = [...pipeTables(page.split("\n")).map((table) => ({ ...table, simple: true })), ...htmlTables(html.tables)];
   for (const table of tables) {
     if (table.body.length === 0) continue;
     if (table.simple && table.body.some((cells) => cells.length !== table.header.length)) signals.add("table:inconsistent-columns");
@@ -449,6 +541,6 @@ export function tableReliability(page: string, rules: typeof TABLE_LEAK = TABLE_
     const body = table.body.flatMap((cells) => (!cells[0] && cells.slice(1).every(Boolean) ? cells.slice(1) : cells));
     if (body.length > 0 && body.filter((cell) => !cell).length / body.length > TABLE_UNRELIABLE_EMPTY_CELL_SHARE) signals.add("table:mostly-empty-cells");
   }
-  for (const signal of leakSignals(page, tables, rules)) signals.add(signal);
+  for (const signal of leakSignals(page, html.tables, tables, rules)) signals.add(signal);
   return [...signals];
 }

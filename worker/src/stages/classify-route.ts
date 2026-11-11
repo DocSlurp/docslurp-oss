@@ -27,7 +27,11 @@ import {
   type ParserPlaybookKey,
   tableLeakPageCap,
   tableReliability,
+  hasHtmlTableMarkup,
+  TABLE_HTML_UNSCANNED_SIGNAL,
+  TABLE_LEAK,
   TABLE_LEAK_SIGNALS,
+  type HtmlTableScan,
 } from "@docslurp/shared";
 import type { Stage } from "../pipeline/pipeline.js";
 import { runDocumentStage, runDocuments, } from "../pipeline/checkpoints.js";
@@ -38,6 +42,19 @@ import { parsePageLayoutFacts, type PageLayoutFacts } from "../lib/page-layout-f
 import { SPARSE_PAGE_WORDS, pageAlignedTexts, pageEvidenceWordCount, type PageImageEvidence, type PageTextLayerEvidence } from "../lib/page-image-evidence.js";
 import { pageTextYield } from "../lib/page-yield-evidence.js";
 import { resolveRunRoutingV2, routingVersion, type RoutingVersionOptions } from "../lib/vision-routing-v2.js";
+import { scanDocumentTables } from "../pipeline/table-routing-vm.js";
+import type { CommandRunner } from "../tools/runner.js";
+
+/**
+ * The parser VM's reading of each page text's HTML tables (scanDocumentTables), by page text; null for a page it did not
+ * read. Given, a page with `<table` that is missing from it counts as unread (never scanned on the host).
+ */
+export type PageTableScans = ReadonlyMap<string, HtmlTableScan | null>;
+
+function tableScanOf(text: string, scans: PageTableScans | undefined): HtmlTableScan | null | undefined {
+  if (!scans || !hasHtmlTableMarkup(text)) return undefined;
+  return scans.get(text) ?? null;
+}
 
 // Lightweight document-type classification using filename + extracted/canonical text heuristics.
 // Emits a classification artifact and (optionally) a suggested parser playbook override per document.
@@ -55,7 +72,21 @@ export const TABLE_LEAK_CAPPED_SIGNAL = "table:leak-capped";
 export class ClassifyRouteStage implements Stage {
   readonly name = "classify-route";
 
-  constructor(private readonly storage: ArtifactStore) {}
+  constructor(private readonly storage: ArtifactStore, private readonly runner: Pick<CommandRunner, "run"> | null = null) {}
+
+  /**
+   * Every candidate page text's HTML tables, scanned in the parser VM in one batched job per document (none when no page
+   * holds `<table`): routing's table checks read these, never a host scan.
+   */
+  private async scanPageTables(text: string, pageCount: number, documentId: string, signal?: AbortSignal): Promise<PageTableScans> {
+    const candidates = new Set([...(pageAlignedTexts(text, pageCount) ?? []), ...splitTextIntoPages(text, pageCount)].filter(hasHtmlTableMarkup));
+    const texts = [...candidates];
+    const { scans, stats } = await scanDocumentTables(texts, this.runner, { documentId, ...(signal ? { signal } : {}) });
+    if (stats.pages > 0) {
+      console.log(`[classify-route] document=${documentId} table-scan htmlPages=${stats.pages} unscanned=${stats.unscanned} vmCalls=${stats.vmCalls} vmMs=${stats.vmMs}`);
+    }
+    return new Map(texts.map((page, index) => [page, scans[index] ?? null]));
+  }
 
   async run(state: import("../pipeline/pipeline.js").WorkflowState, signal?: AbortSignal): Promise<void> {
     await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
@@ -73,6 +104,7 @@ export class ClassifyRouteStage implements Stage {
           const imageEvidence = await this.loadPageImageEvidence(state, document.id);
           const routingV2 = resolveRunRoutingV2(state);
           const pageLayout = routingV2 ? await this.loadPageLayoutFacts(state, document.id) : null;
+          const tableScans = await this.scanPageTables(evidence?.text ?? "", Math.max(1, document.pageCount), document.id, signal);
           const surface = buildAdaptiveRoutingDecisionSurface({
             documentId: document.id,
             filename: document.filename,
@@ -92,6 +124,7 @@ export class ClassifyRouteStage implements Stage {
             pageImageEvidence: imageEvidence?.pages,
             drawnBytesPerPage: imageEvidence?.drawnBytesPerPage ?? null,
             ...(pageLayout ? { pageLayout } : {}),
+            tableScans,
             routingV2,
           });
 
@@ -341,6 +374,11 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
   drawnBytesPerPage?: number | null;
   /** Legacy vision routing v2 (lib/vision-routing-v2.ts). Off reproduces v1 routing. */
   routingV2?: boolean;
+  /**
+   * The parser VM's scans of the page texts' HTML tables (ClassifyRouteStage). Omitted, the tables are scanned
+   * in-process, which the service profile refuses on the host.
+   */
+  tableScans?: PageTableScans;
 }): AdaptiveRoutingDecisionSurface {
   const routingV2 = args.routingV2 === true;
   const hasPageEvidence =
@@ -401,7 +439,7 @@ function buildLegacyPages(
   const documentWithoutText = !args.text.trim();
   const drawnContent = () =>
     documentWithoutText && args.drawnBytesPerPage != null && args.drawnBytesPerPage >= DRAWN_CONTENT_MIN_BYTES_PER_PAGE;
-  return buildAdaptivePageRoutesFromTexts(pageTexts, pageCount, { routingV2 }).map((page) => {
+  return buildAdaptivePageRoutesFromTexts(pageTexts, pageCount, { routingV2, ...(args.tableScans ? { tableScans: args.tableScans } : {}) }).map((page) => {
     const complexity = args.structuredComplexity?.get(page.pageNumber);
     const imageEvidence = args.pageImageEvidence?.get(page.pageNumber);
     if (!complexity && !imageEvidence) return page;
@@ -456,7 +494,7 @@ function buildEvidencePages(
   return texts.map((text, index) => {
     const pageNumber = index + 1;
     const layout = args.pageLayout?.get(pageNumber);
-    const page = classifyAdaptivePage(pageNumber, text, { routingV2: true, layout: layout ?? null });
+    const page = classifyAdaptivePage(pageNumber, text, { routingV2: true, layout: layout ?? null, ...(args.tableScans ? { tableScans: args.tableScans } : {}) });
     const complexity = args.structuredComplexity?.get(pageNumber);
     const imageEvidence = evidence?.get(pageNumber);
     const layoutKnown = layout !== undefined && layout.images !== null;
@@ -499,7 +537,7 @@ function buildEvidencePages(
     // repairs extract-markdown made): then a model reads the page. A table that leaked out of the extracted tables (rows
     // written as text, a header without its body, merged numeric columns) qualifies any page, table-heavy or not.
     const tableSignals = !ocrDecision.authorized && aligned !== null
-      ? tableReliability(text).filter((signal) => page.route === "table-heavy" || TABLE_LEAK_SIGNALS.has(signal))
+      ? tableReliability(text, TABLE_LEAK, tableScanOf(text, args.tableScans)).filter((signal) => page.route === "table-heavy" || TABLE_LEAK_SIGNALS.has(signal))
       : [];
     if (tableSignals.length > 0) {
       const leakOnly = !(page.route === "table-heavy" && tableSignals.some((signal) => !TABLE_LEAK_SIGNALS.has(signal)));
@@ -978,7 +1016,7 @@ export function buildAdaptivePageRoutes(
 function buildAdaptivePageRoutesFromTexts(
   pageTexts: string[],
   pageCount: number,
-  options: RoutingVersionOptions,
+  options: RoutingVersionOptions & { tableScans?: PageTableScans },
 ): AdaptivePageRoutingEntry[] {
   const resolvedPages = pageTexts.length > 0 ? pageTexts : Array.from({ length: Math.max(1, pageCount) }, () => "");
   return resolvedPages.map((pageText, index) => classifyAdaptivePage(index + 1, pageText, options));
@@ -993,10 +1031,10 @@ const ALIGNED_TABLE_MIN_ROWS = 3;
  * HTML tables), rows a layout-preserving extractor or OCR kept aligned, and, when known, the layout walker's tables with
  * their coverage. Never words that name a table ("total", "amount").
  */
-function pageIsTableHeavy(args: { text: string; alignedRows: number; numericRows: number; layout?: PageLayoutFacts | null }): boolean {
+function pageIsTableHeavy(args: { text: string; alignedRows: number; numericRows: number; layout?: PageLayoutFacts | null; tableScan?: HtmlTableScan | null }): boolean {
   const tables: PageTable[] = args.layout?.tables
     ? [...args.layout.tables]
-    : markdownTables(args.text).map((table) => ({ ...table, coverage: null }));
+    : markdownTables(args.text, args.tableScan).map((table) => ({ ...table, coverage: null }));
   // Ruled grids: a drawn table the extractor flattened still counts by its rows.
   tables.push(...(args.layout?.grids ?? []));
   if (args.alignedRows >= ALIGNED_TABLE_MIN_ROWS) tables.push({ rows: args.alignedRows, columns: 3, coverage: null });
@@ -1023,9 +1061,10 @@ function isAlignedNumericRow(line: string): boolean {
 export function classifyAdaptivePage(
   pageNumber: number,
   text: string,
-  options: RoutingVersionOptions & { layout?: PageLayoutFacts | null } = {},
+  options: RoutingVersionOptions & { layout?: PageLayoutFacts | null; tableScans?: PageTableScans } = {},
 ): AdaptivePageRoutingEntry {
   const routingV2 = options.routingV2 === true;
+  const tableScan = tableScanOf(text, options.tableScans);
   const normalized = text.trim();
   const charCount = normalized.length;
   // Same count as splitting on whitespace, without an array of every word on the page.
@@ -1107,7 +1146,7 @@ export function classifyAdaptivePage(
     extractorHint = "layout-aware";
     confidence = 0.79;
     signals.push("field-markers", "label-value-layout");
-  } else if (pageIsTableHeavy({ text, alignedRows: alignedTableRowLines, numericRows: numericRowLines, layout: options.layout })) {
+  } else if (pageIsTableHeavy({ text, alignedRows: alignedTableRowLines, numericRows: numericRowLines, layout: options.layout, ...(tableScan !== undefined ? { tableScan } : {}) })) {
     route = "table-heavy";
     extractorHint = "layout-aware";
     confidence = 0.76;
@@ -1129,6 +1168,8 @@ export function classifyAdaptivePage(
   if (digitCount > Math.max(12, charCount * 0.18)) {
     signals.push("numeric-heavy");
   }
+  // The parser VM did not read this page's HTML tables: none was counted (fail closed), and the reason is kept.
+  if (tableScan === null) signals.push(TABLE_HTML_UNSCANNED_SIGNAL);
 
   return {
     pageNumber,
