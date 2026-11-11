@@ -7,9 +7,9 @@
  * (`table-routing-vm.ts`) before the shared repair and reliability checks read it: no HTML from the guest is copied into a
  * page except as cell text the host escapes.
  */
-import { scanPageTables, type HtmlTableScan } from "@docslurp/shared";
+import { scanPageTables, type HtmlTableScan } from "@docslurp/shared/page-table-routing";
 
-export { enterTableScanGuest } from "@docslurp/shared";
+export { enterTableScanGuest } from "@docslurp/shared/page-table-routing";
 
 /** Pages in one VM job. */
 export const TABLE_ROUTING_MAX_PAGES = 4096;
