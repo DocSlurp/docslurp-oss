@@ -87,7 +87,7 @@ for await (const event of client.streamActivity({ types: ["document.replaced"] }
 
 ```js
 const search = client.search({
-  q: "How are urgent incidents escalated?",
+  q: "Are we on track to beat our FY2027 earnings?",
 });
 for await (const hit of search) {
   console.log(hit.text, hit.citation);
@@ -107,7 +107,7 @@ import { createDocSlurpClient, formatSearchContext } from "@docslurp/sdk";
 
 // Searches your organization's default project unless DOCSLURP_PROJECT is set.
 const client = createDocSlurpClient();
-const evidence = await client.search({ q: "How are urgent incidents escalated?" });
+const evidence = await client.search({ q: "Are we on track to beat our FY2027 earnings?" });
 if (evidence.availability?.status !== "complete") {
   throw new Error("Wait for the project to finish indexing before answering.");
 }

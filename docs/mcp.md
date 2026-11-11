@@ -34,7 +34,7 @@ Run multiple retrieval queries in one call:
 {
   "queries": [
     {"q":"Support hours?"},
-    {"project":"legal-contracts","q":"Escalation process?"}
+    {"project":"legal-contracts","q":"When does the Larkspur acquisition close?"}
   ]
 }
 ```
