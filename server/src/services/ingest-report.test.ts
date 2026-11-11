@@ -42,6 +42,7 @@ function build(args: {
   costCents?: number | null;
   canEdit?: boolean;
   focusPages?: number[];
+  chartExportAvailable?: boolean;
 }) {
   const docs = args.documents.map((entry) => {
     const own = (args.pages ?? []).filter((page) => page.documentId === entry.id);
@@ -59,6 +60,7 @@ function build(args: {
     canEdit: args.canEdit ?? true,
     focusPages: args.focusPages,
     now: new Date("2026-10-14T12:00:00.000Z"),
+    chartExportAvailable: args.chartExportAvailable ?? true,
   });
   // Every report must satisfy the public schema (API, SDK and chat data part).
   expect(ingestReportSchema.parse(report)).toEqual(report);
@@ -485,6 +487,11 @@ describe("ingest report: recommendations reach the settings proposal tool", () =
       documents: [doc("fast-scan", { pageCount: 2 })],
       pages: pages("fast-scan", [{ text: 2000, images: 0, chunks: 1 }, { text: 0, images: 1, vision: "kept-as-image" }]),
     }),
+    build({
+      documents: [doc("deck")],
+      pages: pages("deck", [{ text: 2000, images: 1, chunks: 1 }]),
+      stages: [stage("deck", "vision-extract", { visualCandidates: { charts: 2, diagrams: 1, pagesWithUnexportedVisuals: [2, 3] } })],
+    }),
   ];
 
   it("accounts for every recommendation id the report can emit", () => {
@@ -718,5 +725,67 @@ describe("ingest report: extractor fallbacks", () => {
   it("parses stored reports without the field as none", () => {
     const { extractionWarnings: _omitted, ...stored } = build({ documents: [doc("x")] });
     expect(ingestReportSchema.parse(stored).extractionWarnings).toEqual({ total: 0, examples: [] });
+  });
+});
+
+describe("ingest report: chart export", () => {
+  const candidates = (charts: number, diagrams: number, pagesWithUnexportedVisuals: number[], exported = 0) =>
+    ({ charts, diagrams, pagesWithUnexportedVisuals, exported });
+  /** The worker records visual candidate stats on the document's vision-extract stage row. */
+  const visualStage = (documentId: string, visualCandidates: unknown): Input["stages"][number] => ({
+    documentId, stage: "vision-extract", status: "completed", skipped: false, reason: null, selectedPages: null, pages: null,
+    costCents: null, tablePages: null, durationSeconds: null, visualCandidates,
+  });
+
+  it("recommends chart export with a pipeline patch when ingest recorded unexported charts", () => {
+    const report = build({
+      documents: [doc("q3"), doc("plain"), doc("flows")],
+      stages: [visualStage("q3", candidates(3, 0, [2, 4])), visualStage("flows", candidates(0, 1, [1]))],
+    });
+    const rec = report.recommendations.find((entry) => entry.id === "export-charts");
+    expect(rec).toMatchObject({
+      severity: "info", affectedPages: 3, affectedDocuments: 2,
+      patch: { chartExport: { enabled: true } }, reprocessDocumentIds: ["q3", "flows"],
+    });
+    expect(rec?.reason).toContain("4 charts and diagrams in 2 files were kept as images or text guesses");
+    expect(rec?.cost.reprocessCents).toBeNull();
+  });
+
+  it("names a single kind", () => {
+    const report = build({ documents: [doc("deck")], stages: [visualStage("deck", candidates(1, 0, [5]))] });
+    expect(report.recommendations.find((entry) => entry.id === "export-charts")?.reason).toMatch(/^1 chart in 1 file was kept as an image or a text guess/);
+  });
+
+  it("never recommends it while the deployment kill switch is off", () => {
+    const report = build({ documents: [doc("q3")], stages: [visualStage("q3", candidates(3, 0, [2]))], chartExportAvailable: false });
+    expect(report.recommendations.some((entry) => entry.id === "export-charts")).toBe(false);
+  });
+
+  it("stays quiet when export is on, everything was exported, or the stats are malformed", () => {
+    const on = build({ pipeline: pipeline({ chartExport: { enabled: true } }), documents: [doc("a")], stages: [visualStage("a", candidates(2, 0, [1]))] });
+    expect(on.recommendations.some((entry) => entry.id === "export-charts")).toBe(false);
+    const done = build({ documents: [doc("a")], stages: [visualStage("a", candidates(2, 0, [], 2))] });
+    expect(done.recommendations.some((entry) => entry.id === "export-charts")).toBe(false);
+    for (const bad of [{ charts: -1 }, { charts: "9" }, [1, 2], "charts", { charts: 1.5 }]) {
+      const report = build({ documents: [doc("a")], stages: [visualStage("a", bad)] });
+      expect(report.recommendations.some((entry) => entry.id === "export-charts"), JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it("ignores superseded versions", () => {
+    const report = build({ documents: [doc("old", { superseded: true })], stages: [visualStage("old", candidates(4, 0, [1]))] });
+    expect(report.recommendations.some((entry) => entry.id === "export-charts")).toBe(false);
+  });
+
+  it("the proposal schema accepts bounded chart export patches and never the generator model", async () => {
+    const { projectSettingsProposalInputSchema } = await import("./project-settings-proposal-input.js");
+    const parse = (pipeline: unknown) => projectSettingsProposalInputSchema.safeParse({ changes: { pipeline } });
+    expect(parse({ chartExport: { enabled: true } }).success).toBe(true);
+    expect(parse({ chartExport: { enabled: true, formats: ["description", "mermaid", "csv"], diagrams: false } }).success).toBe(true);
+    expect(parse({ chartExport: { generatorModel: "llm://openrouter/some/model" } }).success).toBe(false);
+    expect(parse({ chartExport: { enabled: true, generatorModel: null } }).success).toBe(false);
+    expect(parse({ chartExport: { formats: [] } }).success).toBe(false);
+    expect(parse({ chartExport: { formats: ["png"] } }).success).toBe(false);
+    expect(parse({ chartExport: { formats: ["csv", "csv"] } }).success).toBe(false);
   });
 });

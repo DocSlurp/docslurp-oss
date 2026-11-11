@@ -10,6 +10,8 @@ import {
   type PageMode,
 } from "./pricing-provider.js";
 import { qualityModeSchema, type QualityMode } from "./quality.js";
+import type { ChartExportFormat, VisualSource } from "./chart-export.js";
+import { chartExportModelCallsPerVisual, isBillableVisualSource, type VisualExportModes } from "./chart-export-estimate.js";
 
 export {
   CHAT_ANSWER_TIERS,
@@ -21,6 +23,7 @@ export {
   type PageClass,
   type PageMix,
   type PageMode,
+  type VisualExportChargeInput,
 } from "./pricing-provider.js";
 
 // ---------------------------------------------------------------------------
@@ -65,6 +68,26 @@ export function pricingVersion(): string {
 /** Credits for one optional feature over one document of `pages` pages (media files pass their Rich-equivalent pages). */
 export function featureCredits(feature: DocumentFeature, pages: number): number {
   return pricing().featureCredits(feature, pages);
+}
+
+/**
+ * Credits for exporting charts and diagrams. Only model sources are charged: a deterministic source (Office chart XML,
+ * embedded spec, SVG geometry) is free whatever the provider says. `modes` says which formats a model writes directly
+ * (one call each) instead of deriving them from one shared spec.
+ */
+export function visualExportCredits(args: {
+  visuals: number;
+  source: VisualSource;
+  formats: readonly ChartExportFormat[];
+  modes?: VisualExportModes;
+}): number {
+  if (!isBillableVisualSource(args.source)) return 0;
+  const visuals = Math.max(0, Math.trunc(Number.isFinite(args.visuals) ? args.visuals : 0));
+  const callsPerVisual = chartExportModelCallsPerVisual(args.formats, args.modes);
+  if (visuals === 0 || callsPerVisual === 0) return 0;
+  const credits = pricing().visualExportCredits({ visuals, callsPerVisual, formats: [...new Set(args.formats)] });
+  if (!Number.isFinite(credits) || credits < 0) throw new Error("pricing provider returned invalid visual export credits");
+  return credits;
 }
 
 /**
@@ -199,6 +222,8 @@ export const BILLABLE_UNIT_METRICS = {
   structuredFields: "feature-structured-fields",
   knowledgeGraph: "feature-knowledge-graph",
   propositions: "feature-propositions",
+  /** Chart & diagram export, per visual a generator model read (exported or not). */
+  chartExport: "feature-chart-export",
   webSearch: "web-search",
   webPage: "web-page",
   webMap: "web-map",

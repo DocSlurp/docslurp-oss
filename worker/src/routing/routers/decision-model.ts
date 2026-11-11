@@ -10,7 +10,7 @@ import {
   type RoutingObjective,
   type RoutingTarget,
 } from "@docslurp/shared";
-import { aiBilledUsd, estimateRouterCost } from "../estimate.js";
+import { aiBilledUsd, estimateRouterCost, type ChartExportEstimateOptions } from "../estimate.js";
 import {
   DEFAULT_PLANNER_CONFIG,
   assemblePlan,
@@ -72,6 +72,8 @@ export interface DecisionModelRouterOptions {
   beforeTriage?: () => Promise<void>;
   /** Billed calls of earlier chain attempts for this document; folded into this plan's totals. */
   carry?: { calls: DecisionModelCall[]; costUsd: number };
+  /** Project chart export settings: chart/diagram roles are priced as generator calls. */
+  chartExport?: ChartExportEstimateOptions;
   /** Fraction of the chunk budget the router itself may spend before triage is skipped. */
   maxRouterBudgetShare?: number;
   /**
@@ -337,7 +339,7 @@ export class DecisionModelRouter implements Router {
       pages,
       catalog,
       objective,
-      estimator: createPolicyEstimator(this.o.pack, { decisionModel: this.o.model.id }),
+      estimator: createPolicyEstimator(this.o.pack, { decisionModel: this.o.model.id, ...(this.o.chartExport ? { chartExport: this.o.chartExport } : {}) }),
       config: this.o.config,
     });
     return assemblePlan({

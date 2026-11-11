@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { chartExportConfigOf, FORMAT_MODE } from "../chart-export/config.js";
 import {
   adaptiveRoutingDecisionSurfaceSchema,
   defaultPageRouterConfig,
@@ -448,11 +449,15 @@ export class RoutePagesStage implements Stage {
     const { state, document, settings } = args;
     const ids = { documentId: document.id, runId: state.run.id };
     const disallowedPrivacy = new Set<string>(args.privacyMode === "standard" ? [] : ["hosted"]);
+    // Chart export replaces chart/diagram readings with generator calls: the planner prices those instead.
+    const chartExportConfig = chartExportConfigOf(state.run.pipeline);
+    const chartExport = chartExportConfig.enabled ? { chartExport: { config: chartExportConfig, modes: FORMAT_MODE } } : {};
     const heuristic = () => new HeuristicRouter(ids);
     const baseline = (carry?: ConstructorParameters<typeof BaselineRouter>[0]["carry"]) => new BaselineRouter({
       pack: loadRuntimePolicyPack("baseline"),
       ...ids,
       config: { disallowedPrivacy },
+      ...chartExport,
       ...(carry ? { carry } : {}),
     });
 
@@ -546,6 +551,7 @@ export class RoutePagesStage implements Stage {
       ...(this.deps.embeddingPrefilter ? { prefilter: this.deps.embeddingPrefilter } : {}),
       ...ids,
       config: { disallowedPrivacy },
+      ...chartExport,
       signal: args.signal,
     });
     return { router: chain, chain };

@@ -311,7 +311,8 @@ export const extractionChartSchema = z.object({
   path: z.string(),
   description: z.string().nullable().default(null),
   data: z.record(z.string(), z.unknown()).nullable().default(null),
-  pageNumber: z.number().int().positive(),
+  /** Null when the document has no known pages (the chart is cited like the document's unpaged text). */
+  pageNumber: z.number().int().positive().nullable(),
   bbox: layoutRegionSchema.nullable().default(null),
 });
 export type ExtractionChart = z.infer<typeof extractionChartSchema>;

@@ -62,6 +62,7 @@ import {
 } from "../services/projects.js";
 import { listProjectTags } from "../services/project-tags.js";
 import { getProjectState } from "../services/project-state.js";
+import { ChartExportUnavailableError } from "../services/chart-export-availability.js";
 import { applyProjectChange, billingState, ConfigConflictError, estimateProjectChange, planProjectChange } from "../services/config-change.js";
 import { mergeProjectSearchSettings } from "../services/search-controls.js";
 import { analyzeSearchSettingsChange } from "@docslurp/shared";
@@ -1520,6 +1521,7 @@ export const projectsRoutes = new Hono()
       } catch (error) {
         if (error instanceof ProjectSlugError) return apiStatusError(c, error.status, error.message);
         if (error instanceof ConfigConflictError) return apiStatusError(c, error.status, error.message, { details: { category: error.code } });
+        if (error instanceof ChartExportUnavailableError) return apiStatusError(c, error.status, error.message, { details: { category: error.code } });
         return fail(error);
       }
 

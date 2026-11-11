@@ -1,5 +1,6 @@
 import {
   splitTextIntoPagesStrict,
+  type ExtractionChart,
   type ExtractionContract,
   type ExtractionHeader,
   type ExtractionLink,
@@ -68,6 +69,8 @@ export function buildExtractionContract(args: {
   extractionTimeMs: number;
   pageCount: number;
   canonicalDocument?: CanonicalDocument;
+  /** Exported charts and diagrams (chart-export/contract.ts `toExtractionCharts`). */
+  charts?: ExtractionChart[];
 }): ExtractionContract {
   const {
     documentId,
@@ -184,7 +187,7 @@ export function buildExtractionContract(args: {
     markdown,
     rawText,
     images: [], // Populated later by vision/render stages
-    charts: [], // Populated later
+    charts: args.charts ?? [], // Chart export fills these (vision-extract); empty until it runs
     tables,
     headers,
     links,

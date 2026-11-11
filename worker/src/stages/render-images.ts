@@ -2,6 +2,7 @@ import {
   adaptiveRoutingDecisionSurfaceSchema,
   canonicalDocumentSchema,
   qualityAllowsPageReading,
+  VISUAL_CANDIDATE_STATS_KEY,
   type AdaptiveRoutingDecisionSurface,
   type CanonicalDocument,
 } from "@docslurp/shared";
@@ -24,6 +25,8 @@ import {
   pagesKeptAsImage,
 } from "../lib/page-image-references.js";
 import { recordPageFacts } from "../pipeline/page-facts.js";
+import { freeVisualCandidateStats } from "../chart-export/free-stats.js";
+import { chartExportActive } from "../chart-export/config.js";
 
 export class RenderImagesStage implements Stage {
   readonly name = "render-images";
@@ -106,10 +109,13 @@ export class RenderImagesStage implements Stage {
           });
 
           await completeDocumentPages(state, document, this.name, remaining, pageCount, false);
+          const visualCandidates = await this.freeVisualCandidates(state, document, request);
 
           return {
             artifactUri: this.storage.uri(key),
             stats: {
+              ...(visualCandidates ? { [VISUAL_CANDIDATE_STATS_KEY]: visualCandidates.stats } : {}),
+              ...(visualCandidates?.lowConfidence ? { lowConfidenceVisualCandidates: visualCandidates.lowConfidence } : {}),
               rasterPolicy: "selected-pages-only",
               requestedPages: pageNumbers.length,
               renderedPages: pages.filter((page) => !page.cacheHit).length,
@@ -125,6 +131,21 @@ export class RenderImagesStage implements Stage {
         signal,
       );
     });
+  }
+
+  /**
+   * Free chart/diagram candidate stats whenever chart export is not active (with export on, `vision-extract` records
+   * what it exported): the classification this stage already read, plus the stored router plan, media map, Doppler
+   * figure index and quarantine counts the document has slots for. Best effort.
+   */
+  private async freeVisualCandidates(state: import("../pipeline/pipeline.js").WorkflowState, document: import("../models.js").Document, classification: AdaptiveRoutingDecisionSurface | null) {
+    if (chartExportActive(state.run.pipeline)) return null;
+    try {
+      return await freeVisualCandidateStats({ storage: this.storage, ledger: state.artifactLedger, document, run: state.run, classification });
+    } catch (error) {
+      console.warn(`[chart-export] free candidate stats failed document=${document.id} error=${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
   }
 
   /** Pages this document renders, chosen the same way for whole documents and page-range shards. */

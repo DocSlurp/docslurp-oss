@@ -496,5 +496,6 @@ export async function estimateFullIndex(args: {
     pages: todo.reduce((sum, row) => sum + row.unindexed, 0),
     orgId: args.orgId,
     env: args.env,
+    visualScope: { projectId: args.projectId, documentIds: todo.map((row) => row.id) },
   });
 }

@@ -28,6 +28,7 @@ import {
 } from "./deferred-indexing.js";
 import { isPrivateModelUri, parsePrivateModelUri } from "./private-endpoints.js";
 import { normalizeHostedModelRef } from "./model-uri.js";
+import { chartExportConfigSchema, defaultChartExportConfig } from "./chart-export.js";
 
 export const organizationRoleSchema = z.enum([
   "owner",
@@ -567,6 +568,11 @@ export const pipelineFeaturesSchema = z
       maxClipSeconds: z.number().min(1).max(120).optional(),
       maxCostCents: z.number().positive().max(10000).optional(),
     }).default({ enabled: true }),
+    /**
+     * Chart and diagram export: re-express detected charts/diagrams as description, Mermaid, Vega-Lite,
+     * matplotlib and CSV. Off by default; enabling it or adding formats recommends a reindex.
+     */
+    chartExport: chartExportConfigSchema.default(defaultChartExportConfig),
   })
   .superRefine((value, ctx) => {
     try { assertPipelineSpeedBoost(value); } catch (error) {
@@ -718,6 +724,7 @@ export const defaultPipelineFeatures: PipelineFeatures = {
   webTools: true,
   pageRouter: defaultPageRouterConfig,
   mediaVideo: { enabled: true },
+  chartExport: defaultChartExportConfig,
 };
 
 const alwaysEnabled = () => true;
@@ -833,7 +840,8 @@ const basePipelineStagePlan: readonly PipelineStagePlanItem[] = [
     label: "Vision",
     phase: "extract",
     phaseLabel: "Extract",
-    isEnabled: (features) => features.visionFallback,
+    // Chart export runs here too, with or without general vision fallback.
+    isEnabled: (features) => features.visionFallback || features.chartExport?.enabled === true,
   },
   {
     stage: "pii-detect",
@@ -927,8 +935,9 @@ export const pipelineStageLabels: Record<RunStage, string> = {
 
 export type PipelineFeatureOverrides = Omit<
   Partial<PipelineFeatures>,
-  "vision" | "embedding" | "piiPolicy" | "documentExtraction" | "textGeneration" | "graph" | "structuredExtraction" | "webhooks"
+  "vision" | "embedding" | "piiPolicy" | "documentExtraction" | "textGeneration" | "graph" | "structuredExtraction" | "webhooks" | "chartExport"
 > & {
+  chartExport?: Partial<PipelineFeatures["chartExport"]> | null;
   structuredExtraction?: Partial<PipelineFeatures["structuredExtraction"]> | null;
   webhooks?: Partial<ProjectWebhookSettings> | null;
   graph?: Partial<GraphConfig> | null;
@@ -1019,6 +1028,10 @@ export function normalizePipelineFeatures(
     graph: {
       ...defaultGraphConfig,
       ...(source?.graph ?? {}),
+    },
+    chartExport: {
+      ...defaultChartExportConfig,
+      ...(source?.chartExport ?? {}),
     },
     structuredExtraction: {
       ...defaultStructuredExtractionConfig,
@@ -1597,6 +1610,8 @@ const FIELD_SEED_STAGES: Record<keyof PipelineFeatures, readonly PipelineRunStag
   webTools: [],
   pageRouter: ["route-pages"],
   mediaVideo: ["extract-markdown"],
+  // Routed visual extraction (chart-data / diagram assignments) runs in vision-extract; exports attach there.
+  chartExport: ["vision-extract"],
 };
 
 /**

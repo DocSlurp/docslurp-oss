@@ -26,6 +26,15 @@ export const CHAT_ANSWER_TIERS: readonly ChatAnswerTier[] = ["standard", "advanc
 /** Optional per-document features, charged once per document when their stage runs. */
 export const DOCUMENT_FEATURES = ["documentSummary", "structuredFields", "knowledgeGraph", "propositions"] as const;
 export type DocumentFeature = (typeof DOCUMENT_FEATURES)[number];
+/**
+ * One charge for chart & diagram export: `visuals` model-sourced visuals (deterministic sources are never passed here),
+ * each needing `callsPerVisual` generator calls for the requested `formats` (chart-export-estimate.ts).
+ */
+export type VisualExportChargeInput = {
+  visuals: number;
+  callsPerVisual: number;
+  formats: readonly import("./chart-export.js").ChartExportFormat[];
+};
 export type PageClass = "text" | "complex" | "scanned";
 export type PageMix = Record<PageClass, number>;
 
@@ -146,6 +155,8 @@ export interface PricingProvider {
   chatAnswerCredits(opts: { model?: string | null; tier?: ChatAnswerTier; totalTokens?: number | null }): number;
   /** Credits for one optional feature over one document of `pages` pages. */
   featureCredits(feature: DocumentFeature, pages: number): number;
+  /** Credits for chart & diagram export (per visual a generator model read, exported or not). */
+  visualExportCredits(input: VisualExportChargeInput): number;
   /** Multiplier on unit charges for the opt-in speed boost (1 when off). */
   speedBoostMultiplier(speedBoost: boolean): number;
   /** Share of the completion page charge a run pays, given the stages it executes and reuses. */
@@ -185,7 +196,7 @@ export interface PricingProvider {
 const REQUIRED_METHODS: ReadonlyArray<keyof PricingProvider> = [
   "pageCredits", "richPagesForOutputTokens", "mediaRichPages", "storageCreditsPerMonth", "extractRetentionCredits",
   "searchUnits", "searchCredits", "webSearchCredits", "webPageCredits", "webMapCredits", "chatModelTier",
-  "chatAnswerUnits", "chatAnswerCredits", "featureCredits", "speedBoostMultiplier", "pageChargeShare",
+  "chatAnswerUnits", "chatAnswerCredits", "featureCredits", "visualExportCredits", "speedBoostMultiplier", "pageChargeShare",
   "qualityModePricing", "publicPrices", "estimateIngest", "quoteUpload", "quote",
 ];
 

@@ -1,4 +1,5 @@
 import {
+  chartExportConfigOf,
   compilePipelinePlan,
   effectiveIndexingMode,
   estimateProfileFor,
@@ -41,13 +42,18 @@ export async function estimateRunReprocess(args: {
     ...(args.options?.stageFrom && !args.options?.stages?.length ? { restartFromStage: args.options.stageFrom } : {}),
   };
   // Price the selected stages against the run's full plan.
+  const stages = compilePipelinePlan(features).stageOrder;
+  const documentIds = run.projectId && chartExportConfigOf(features)
+    ? (await sql<{ id: string }[]>`select id from documents where run_id = ${run.id} and org_id = ${run.orgId} and project_id = ${run.projectId}`).map((row) => row.id)
+    : [];
   return await estimateWork({
     features: withoutStageSelection(features),
-    stages: compilePipelinePlan(features).stageOrder,
+    stages,
     documents: run.totalDocuments,
     pages: run.pagesTotal,
     orgId: run.orgId,
     env: args.env,
+    ...(run.projectId && documentIds.length ? { visualScope: { projectId: run.projectId, documentIds } } : {}),
   });
 }
 
@@ -65,22 +71,23 @@ export async function estimateDocumentReprocess(args: {
 }): Promise<CostEstimate | null> {
   const projectIds = await listEditableProjectIds(args.userId);
   if (projectIds.length === 0 || args.documentIds.length === 0) return null;
-  const rows = await sql<{ project_id: string; org_id: string; page_count: number; indexing_mode: string | null; pipeline: PipelineFeatures | null }[]>`
-    select d.project_id, d.org_id, d.page_count, d.indexing_mode,
+  const rows = await sql<{ id: string; project_id: string; org_id: string; page_count: number; indexing_mode: string | null; pipeline: PipelineFeatures | null }[]>`
+    select d.id, d.project_id, d.org_id, d.page_count, d.indexing_mode,
       (select wr.pipeline from project_runs wr where wr.id = d.run_id) as pipeline
     from documents d
     where d.project_id = any(${sql.array(projectIds)}) and d.id = any(${sql.array(args.documentIds)})
       ${args.projectId ? sql`and d.project_id = ${args.projectId}` : sql``}
   `;
-  const groups = new Map<string, { orgId: string; features: PipelineFeatures; documents: number; pages: number }>();
+  const groups = new Map<string, { orgId: string; projectId: string; features: PipelineFeatures; documents: number; pages: number; documentIds: string[] }>();
   for (const row of rows) {
     // Same lenient read as the mutation: drop stored extractor settings the strict schemas now reject.
     const base = sanitizeStoredPipeline((row.pipeline ?? {}) as PipelineFeatures, `a run in project ${row.project_id}`);
     base.speedBoost = args.speedBoost === true;
     const features = row.indexing_mode ? { ...base, indexingMode: effectiveIndexingMode(row.indexing_mode as PipelineFeatures["indexingMode"]) } : base;
     const key = `${row.project_id}:${JSON.stringify(features)}`;
-    const group = groups.get(key) ?? { orgId: row.org_id, features, documents: 0, pages: 0 };
+    const group = groups.get(key) ?? { orgId: row.org_id, projectId: row.project_id, features, documents: 0, pages: 0, documentIds: [] };
     group.documents += 1;
+    group.documentIds.push(row.id);
     group.pages += Math.max(0, row.page_count ?? 0);
     groups.set(key, group);
   }
@@ -93,6 +100,7 @@ export async function estimateDocumentReprocess(args: {
       pages: group.pages,
       orgId: group.orgId,
       env: args.env,
+      visualScope: { projectId: group.projectId, documentIds: group.documentIds },
     }));
   }
   return sumEstimates(parts);

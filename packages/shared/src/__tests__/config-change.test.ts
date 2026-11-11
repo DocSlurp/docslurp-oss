@@ -7,7 +7,7 @@ import {
   estimatePipelineWork,
   indexConfigOf,
 } from "../config-change.js";
-import { affectedStages, defaultPipelineFeatures, normalizePipelineFeatures, pipelineFeaturesSchema, compilePipelinePlan } from "../index.js";
+import { affectedStages, defaultPipelineFeatures, normalizePipelineFeatures, pipelineFeaturesSchema, pipelineStagePlan, compilePipelinePlan } from "../index.js";
 
 const ctx = { documents: 3, pages: 120 };
 const base = normalizePipelineFeatures(defaultPipelineFeatures);
@@ -111,6 +111,35 @@ describe("analyzePipelineChange", () => {
     expect(impact.stages).toContain("embed");
     const order = compilePipelinePlan(withF({ summarize: true })).stageOrder;
     expect(impact.stages).toEqual(order.filter((s) => impact.stages.includes(s)));
+  });
+  it("chart export: enabling or adding formats is recommended and re-runs vision-extract onward", () => {
+    const on = withF({ chartExport: { enabled: true } });
+    const enabled = analyzePipelineChange(base, on, ctx);
+    expect(enabled.kind).toBe("reindex-recommended");
+    expect(enabled.stages[0]).toBe("vision-extract");
+    expect(enabled.reasons.find((r) => r.field === "chartExport")?.effect).toMatch(/reprocess/);
+    const more = withF({ chartExport: { enabled: true, formats: ["description", "mermaid", "csv"] } });
+    expect(analyzePipelineChange(on, more, ctx).kind).toBe("reindex-recommended");
+    // Dropping a format, disabling, or changing only the generator applies to new uploads.
+    expect(analyzePipelineChange(more, on, ctx).kind).toBe("new-uploads");
+    expect(analyzePipelineChange(on, base, ctx).kind).toBe("new-uploads");
+    expect(analyzePipelineChange(on, withF({ chartExport: { enabled: true, generatorModel: "llm://openrouter/x/y" } }), ctx).kind).toBe("new-uploads");
+    // Formats edited while export is off do nothing to stored data.
+    expect(analyzePipelineChange(base, withF({ chartExport: { enabled: false, formats: ["csv"] } }), ctx).kind).toBe("new-uploads");
+  });
+  it("chart export: still recommends a reindex through vision-extract when vision fallback is off", () => {
+    const noVision = withF({ visionFallback: false });
+    const on = withF({ visionFallback: false, chartExport: { enabled: true } });
+    const impact = analyzePipelineChange(noVision, on, ctx);
+    expect(impact.kind).toBe("reindex-recommended");
+    expect(impact.stages).toContain("vision-extract");
+    expect(pipelineStagePlan.find((item) => item.stage === "vision-extract")!.isEnabled(noVision)).toBe(false);
+    expect(pipelineStagePlan.find((item) => item.stage === "vision-extract")!.isEnabled(on)).toBe(true);
+  });
+  it("chart export defaults to off and rejects unknown keys", () => {
+    expect(base.chartExport).toEqual({ enabled: false, formats: ["description", "mermaid"], diagrams: true, generatorModel: null });
+    expect(() => pipelineFeaturesSchema.parse({ chartExport: { enabled: true, bogus: 1 } })).toThrow();
+    expect(() => pipelineFeaturesSchema.parse({ chartExport: { formats: ["png"] } })).toThrow();
   });
   it("is fast", () => {
     const after = withF({ summarize: true, chunkOverlap: true });
