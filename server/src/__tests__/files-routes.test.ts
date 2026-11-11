@@ -127,7 +127,7 @@ describe("file proxy", () => {
       expect(res.status).toBe(200);
       expect(access).toHaveBeenCalledWith(figureUri("p3.g2.svg"), "user-a", undefined);
       expect(res.headers.get("content-type")).toBe("image/svg+xml");
-      expect(res.headers.get("content-security-policy")).toBe("default-src 'none'; style-src 'unsafe-inline'; sandbox");
+      expect(res.headers.get("content-security-policy")).toBe("default-src 'none'; style-src 'unsafe-inline'; sandbox; frame-ancestors 'self'");
       expect(res.headers.get("x-content-type-options")).toBe("nosniff");
       expect(res.headers.get("content-disposition")).toMatch(/^inline; filename="p3.g2.svg"/);
       expect(res.headers.get("cache-control")).toBe("private, no-store");
@@ -142,7 +142,9 @@ describe("file proxy", () => {
       expect(res.status).toBe(200);
       expect(res.headers.get("content-type")).toBe("image/svg+xml");
       const csp = res.headers.get("content-security-policy") ?? "";
-      expect(csp.split(";").map((d) => d.trim())).toEqual(expect.arrayContaining(["default-src 'none'", "sandbox"]));
+      expect(csp.split(";").map((d) => d.trim())).toEqual(expect.arrayContaining(["default-src 'none'", "sandbox", "frame-ancestors 'self'"]));
+      // Only the same-origin inspector may frame it: no other site can embed the figure under the app origin.
+      expect(res.headers.get("x-frame-options")).toBe("SAMEORIGIN");
       expect(csp).not.toMatch(/script-src|allow-scripts|connect-src|frame-src|'unsafe-eval'/);
       expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     });
