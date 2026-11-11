@@ -420,6 +420,83 @@ describe("council round 4 M1: model table tags never survive raw, in code or not
   });
 });
 
+/** Any table-family tag start, end of text included (the round 5 delimiter). */
+const ANY_TABLE_TAG = /<\/?(?:table|thead|tbody|tfoot|tr|th|td|caption|colgroup|col)(?=[\s/>]|$)/i;
+
+describe("council round 5 M2: a table tag cut at the end of a page never becomes live when pages are joined", () => {
+  const A = `style="display:none" onmouseover="alert(1)"`;
+  // The reviewer's reproducer (r5/probe-eofjoin.mts): the next page supplies the attributes, often with no tag at all.
+  const documents: Array<[string, string[]]> = [
+    ["line <table, next page an HTML block", ["Intro\n<table", `<div ${A}>\nHIDDEN\n</div>`]],
+    ["line <table, next page an img", ["Intro\n<table", `<img src=x onerror="alert(1)">`]],
+    ["inline <table", ["Intro <table", `<div ${A}>x</div>`]],
+    ["page is only <table, next page tagless attribute text", ["<table", `${A}>HIDDEN`]],
+    ["uppercase <TABLE", ["x\n<TABLE", `${A}>HIDDEN`]],
+    ["<td after an open div", ["<div>\n<td", `<div ${A}>x</div>`]],
+    ["closing </table", ["x\n</table", `${A}>`]],
+  ];
+  for (const [name, pages] of documents) {
+    it(`${name}: stored (\\f) and export (blank line) joins hold no table tag`, async () => {
+      const { texts, stats } = await sanitizeVisionPageTables(pages, null, { vmOnly: false });
+      expect(stats.pages).toBeGreaterThan(0);
+      for (const text of texts) expect(text).not.toMatch(ANY_TABLE_TAG);
+      for (const joined of [texts.join("\f"), texts.join("\n\n")]) {
+        expect(joined).not.toMatch(ANY_TABLE_TAG);
+        walk(parse(joined), (node) => { if (node.type === "html") expect(node.value).not.toMatch(ANY_TABLE_TAG); });
+      }
+    });
+  }
+  it("a forged whole-page keep over a trailing tag is refused (escaped page)", async () => {
+    const { renderVisionTablePages } = await import("./vision-tables-vm.js");
+    const pages = documents.map(([, p]) => p[0]!);
+    const out = renderVisionTablePages(pages, pages.map((p) => [{ k: "keep", from: 0, to: p.length }]));
+    for (const text of out) expect(text).not.toMatch(ANY_TABLE_TAG);
+  });
+  it("text ending in a non-table tag name or a longer name is unchanged", async () => {
+    const { texts, stats } = await sanitizeVisionPageTables(["a <tablet", "b <trx", "c <div"], null, { vmOnly: false });
+    expect(texts).toEqual(["a <tablet", "b <trx", "c <div"]);
+    expect(stats.pages).toBe(0);
+  });
+});
+
+describe("council round 5 M3: a reserved marker can never re-join a split table tag", () => {
+  const A = `style="display:none" onmouseover="alert(1)"`;
+  const MARK = "<!-- docslurp:visual chart 0123456789abcdef -->";
+  const shapes: Array<[string, string]> = [
+    ["marker inside <table", `<ta${MARK}ble ${A}><tr><td>HIDDEN</td></tr></table>`],
+    ["marker inside <td", `<table><tr><t${MARK}d ${A}>HIDDEN</td></tr></table>`],
+    ["close marker inside <table", `<ta${MARK.replace("<!-- ", "<!-- /")}ble ${A}>HIDDEN`],
+    ["marker on its own line before a split tag", `${MARK}\n<ta${MARK}ble ${A}>HIDDEN`],
+  ];
+  const projections = async (text: string) => {
+    const { chunkText } = await import("./chunking.js");
+    const { buildCanonicalDocumentFromMarkdown, buildCanonicalChunksFromDocument, canonicalDocumentToText } = await import("../lib/canonical-document.js");
+    const canonical = buildCanonicalDocumentFromMarkdown({ documentId: "d", text, pageCount: 1, extractor: "test" });
+    return [
+      ...chunkText(text, 2000),
+      canonicalDocumentToText(canonical),
+      ...buildCanonicalChunksFromDocument(canonical, "f.pdf").map((c) => c.text),
+    ];
+  };
+  for (const [name, input] of shapes) {
+    it(`${name}: stored page, chunks and canonical text hold no table tag`, async () => {
+      const { out } = await clean(input);
+      expect(out).not.toMatch(ANY_TABLE_TAG);
+      expect(out).not.toContain("<!-- docslurp:");
+      expect(out).not.toContain("<!-- /docslurp:");
+      for (const text of await projections(out)) expect(text, text.slice(0, 200)).not.toMatch(ANY_TABLE_TAG);
+    });
+    it(`${name}: projections alone never join a tag (a marker inside a line is not a marker)`, async () => {
+      // The split tag stays split: no tag carrying the hostile attributes forms.
+      for (const text of await projections(input)) expect(text, text.slice(0, 200)).not.toMatch(/<t(?:able|d)\s+style/i);
+    });
+  }
+  it("markers on their own lines are still stripped from projections", async () => {
+    const text = `Before.\n\n${MARK}\n\nRevenue grows.\n\n${MARK.replace("<!-- ", "<!-- /")}\n\nAfter.`;
+    for (const projected of await projections(text)) expect(projected).not.toContain("docslurp:visual");
+  });
+});
+
 /** Council round 4 L6: the guest's code scan is linear (was ~n^1.5 on distinct backtick run lengths); the host has none. */
 describe("council round 4 L6: bounded work on hostile backtick runs, 1–4 MiB", () => {
   it("guest read and host render stay linear; pages over the parse limit are only escaped", async () => {

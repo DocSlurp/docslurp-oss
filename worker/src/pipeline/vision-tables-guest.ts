@@ -62,8 +62,9 @@ export type VisionTableSegment =
  */
 export type VisionTablePageResult = VisionTableSegment[] | null | false;
 
-const TABLE_FAMILY = /<(\/?)(?:table|thead|tbody|tfoot|tr|th|td|caption|colgroup|col)(?=[\s/>])/gi;
-const HAS_TABLE_MARKUP = /<\/?(?:table|thead|tbody|tfoot|tr|th|td|caption|colgroup|col)[\s/>]/i;
+// End of text delimits a tag name (as `isDelimiter` does): a page's trailing `<table` is a tag once pages are joined.
+const TABLE_FAMILY = /<(\/?)(?:table|thead|tbody|tfoot|tr|th|td|caption|colgroup|col)(?=[\s/>]|$)/gi;
+const HAS_TABLE_MARKUP = /<\/?(?:table|thead|tbody|tfoot|tr|th|td|caption|colgroup|col)(?:[\s/>]|$)/i;
 
 /** Lowercase A–Z only: one UTF-16 unit in, one out, so indexes match the original string. */
 export function asciiLower(text: string): string {

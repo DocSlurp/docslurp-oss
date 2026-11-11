@@ -68,8 +68,17 @@ const MAX_SLOTS = 200_000;
 const MAX_BATCH_BYTES = 32 * 1024 * 1024;
 const MAX_RESULT_BYTES = 64 * 1024 * 1024;
 
-const HAS_TABLE_MARKUP = /<\/?(?:table|thead|tbody|tfoot|tr|th|td|caption|colgroup|col)[\s/>]/i;
-const TABLE_FAMILY = /<(\/?(?:table|thead|tbody|tfoot|tr|th|td|caption|colgroup|col)(?=[\s/>]))/gi;
+// End of text delimits a tag name too: a page ending `<table` becomes a live tag once pages are joined (`\f` in the
+// stored artifact, a blank line in exports) and the next page supplies its attributes (council round 5 M2).
+const HAS_TABLE_MARKUP = /<\/?(?:table|thead|tbody|tfoot|tr|th|td|caption|colgroup|col)(?:[\s/>]|$)/i;
+const TABLE_FAMILY = /<(\/?(?:table|thead|tbody|tfoot|tr|th|td|caption|colgroup|col)(?=[\s/>]|$))/gi;
+/**
+ * DocSlurp's reserved comment markers (`<!-- docslurp:visual … -->`, chart-export/markdown.ts) in model text, broken the
+ * way the export's own backstop breaks them: text projections strip markers, so one inside a tag name would re-join it
+ * after this check (council round 5 M3). Only the export, after this step, writes real markers.
+ */
+const RESERVED_MARKER = /<!--(?=[ \t]*\/?[ \t]*docslurp:)/gi;
+export const neutralizeReservedMarkers = (text: string) => /docslurp:/i.test(text) ? text.replace(RESERVED_MARKER, "<!\u200b--") : text;
 
 /** Fail-closed fallback: every table-family tag's `<` escaped, so the model's table renders as text. */
 export function escapeVisionTableTags(text: string): string {
@@ -251,7 +260,7 @@ function renderPage(text: string, result: VisionTablePageResult, stats: VisionTa
       write("&lt;");
       continue;
     }
-    if ((segment.k !== "table" && segment.k !== "raw") || !/^<table[\s/>]/i.test(text.slice(segment.from, segment.from + 7))) throw new InvalidResult("kind");
+    if ((segment.k !== "table" && segment.k !== "raw") || !/^<table(?:[\s/>]|$)/i.test(text.slice(segment.from, segment.from + 7))) throw new InvalidResult("kind");
     let block: string;
     if (segment.k === "raw") {
       // Kept as its own source, every character, as inert text: a rebuild would have had to cut something.
@@ -319,6 +328,7 @@ export async function sanitizeVisionPageTables(
   options: { signal?: AbortSignal; documentId?: string; vmOnly?: boolean } = {},
 ): Promise<{ texts: string[]; stats: VisionTableStats }> {
   const stats = emptyStats();
+  texts = texts.map(neutralizeReservedMarkers);
   const out = [...texts];
   const work = texts.map((text, index) => ({ text, index })).filter(({ text }) => HAS_TABLE_MARKUP.test(text));
   if (!work.length) return { texts: out, stats };
