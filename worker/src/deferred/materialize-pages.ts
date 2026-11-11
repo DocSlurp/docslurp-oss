@@ -36,6 +36,7 @@ import { resolvePolicy } from "../stages/pii-detect.js";
 import { embedTextChunks, estimateTokens, type RemoteEmbeddingUsage, type VectorBackendRecord } from "../stages/embedding-runtime.js";
 import { deleteLanceDbRecords, writeLanceDbRecords } from "../stages/lancedb-writer.js";
 import type { CommandRunner } from "../tools/runner.js";
+import { sanitizeVisionPageTables } from "../pipeline/vision-tables-vm.js";
 import type { ArtifactStore } from "../tools/storage.js";
 import { executeVisionRuntime, type VisionPrimaryFailure } from "../tools/vision-runtime.js";
 import { guardedVisionCall, priceVisionResult, type GuardedVisionOutcome } from "../lib/guarded-vision-call.js";
@@ -448,6 +449,14 @@ export async function materializePageRange(
       modelReads.set(page, richPages);
     }
   });
+
+  // Model HTML tables: every model-read page of this document goes to the parser VM in one job (vision-tables-vm.ts).
+  const modelRead = [...prepared.values()].filter((entry) => modelReads.has(entry.page));
+  if (modelRead.length) {
+    const { texts, stats } = await sanitizeVisionPageTables(modelRead.map((entry) => entry.text), deps.runner, { documentId });
+    modelRead.forEach((entry, index) => { entry.text = texts[index]!; });
+    if (stats.pages) console.log(`[vision-tables] document=${documentId} pages=${stats.pages} tables=${stats.tables} escapedPages=${stats.escapedPages} rawRegions=${stats.rawRegions}${stats.rawRegions ? ` rawReasons=${JSON.stringify(stats.rawReasons)}` : ""} vmCalls=${stats.vmCalls} vmMs=${stats.vmMs}`);
+  }
 
   // 2. PII check with the project policy.
   const policy = resolvePolicy(pipeline);

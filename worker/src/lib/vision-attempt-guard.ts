@@ -63,7 +63,7 @@ import { configuredVisionModel, maxCatalogWorstCaseVisionRequestCents, worstCase
  * leave the page bound, the breaker and the org count. Throttles are bounded per call by
  * `VISION_THROTTLE_ALLOWANCE` (default 5); past it the wait goes to Temporal with its Retry-After.
  */
-export type VisionAttemptPurpose = "page" | "region" | "map-ocr" | "critique" | "ocr";
+export type VisionAttemptPurpose = "page" | "region" | "map-ocr" | "critique" | "ocr" | "table-rescue";
 
 export interface VisionAttemptTarget {
   documentId: string;

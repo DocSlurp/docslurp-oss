@@ -36,7 +36,6 @@ import {
   sandboxedPdfConfigured,
   type ExtractionContract,
   type ExtractionArtifactRef,
-  repairMarkdownTables,
 } from "@docslurp/shared";
 import { readJsonFile } from "../tools/storage.js";
 import { documentArtifactRoot, runArtifactRoot } from "../lib/artifact-root.js";
@@ -101,6 +100,7 @@ import { runLocalPdfArtifactGraph } from "../extractors/local-graph-runner.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { type ArtifactStore } from "../tools/storage.js";
 import { PdfRasterCache, PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
+import { repairDocumentTables } from "../pipeline/table-routing-vm.js";
 import { pageFactsEnabled, probePdfPageFacts, recordPageFacts, splitFormFeedPages } from "../pipeline/page-facts.js";
 import { configuredVisionServedRoute, executeVisionRuntime, visionCall } from "../tools/vision-runtime.js";
 import { guardedVisionCall, priceVisionResult } from "../lib/guarded-vision-call.js";
@@ -277,7 +277,7 @@ function measuredPagesOf(value: string | undefined): PageCountResult | null {
   }
 }
 
-/** PDF extractors whose Markdown is Doppler's (local doppler-md, the sandboxed vm-pdf): their tables get repairMarkdownTables. */
+/** PDF extractors whose Markdown is Doppler's (local doppler-md, the sandboxed vm-pdf): their tables get repairMarkdownTables (repairDocumentTables). */
 const DOPPLER_PDF_EXTRACTORS = new Set(["doppler-md", VM_PDF_EXTRACTOR_ID]);
 
 export class ExtractMarkdownStage implements Stage {
@@ -2022,7 +2022,11 @@ export class ExtractMarkdownStage implements Stage {
     const original = await readFile(candidate.tempTextPath, "utf8");
     const sanitized = sanitizeExtractedMarkdown(original);
     // Doppler's tables: a two-line header it split becomes one header row, a list it laid out in columns a list again.
-    const tables = DOPPLER_PDF_EXTRACTORS.has(candidate.label) ? repairMarkdownTables(sanitized.markdown) : null;
+    // Its HTML tables are scanned in the parser VM in the service profile (table-routing-vm.ts), never on this host.
+    const tables = DOPPLER_PDF_EXTRACTORS.has(candidate.label) ? await repairDocumentTables(sanitized.markdown, this.runner) : null;
+    if (tables && tables.stats.pages > 0) {
+      console.log(`[extract-tables] extractor=${candidate.label} htmlPages=${tables.stats.pages} unscanned=${tables.stats.unscanned} vmCalls=${tables.stats.vmCalls} vmMs=${tables.stats.vmMs}`);
+    }
     if (tables && (tables.repairs.mergedHeaders > 0 || tables.repairs.listsRestored > 0)) {
       sanitized.markdown = tables.markdown;
       console.log(`[extract-tables] extractor=${candidate.label} mergedHeaders=${tables.repairs.mergedHeaders} listsRestored=${tables.repairs.listsRestored}`);

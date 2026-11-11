@@ -12,6 +12,7 @@ import { escalateOcrPages, type EscalationSummary } from "./escalation.js";
 import { HOSTED_OCR_MAX_BYTES, HOSTED_OCR_MIME_TYPES, HostedOcrSkipped, ocrEscalationEnabled, type HostedOcrReader } from "./hosted-reader.js";
 import { imageTooManyFramesError } from "./image-frames.js";
 import { recordOcrReads } from "./ledger.js";
+import { sanitizeVisionPageTables } from "../pipeline/vision-tables-vm.js";
 import { OcrRefusedError, resolveOcrMode } from "./mode.js";
 
 export interface OcrDocumentInput {
@@ -117,6 +118,8 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
       pages.push({ pageNumber: page.pageNumber, text: page.text, reader: page.recogniser, ...(rendition ? { rendition } : {}),
         ...(page.sourceWidth && page.sourceHeight ? { sourceWidth: page.sourceWidth, sourceHeight: page.sourceHeight } : {}) });
     }
+    // A hosted escalation read may hold model HTML tables: read in the parser VM (one job per document) and rebuilt.
+    if (escalation) await rebuildPageTables(pages, input);
     return {
       mode: outcome.mode,
       pages,
@@ -142,9 +145,18 @@ async function hostedDocument(input: OcrDocumentInput): Promise<OcrDocumentResul
   if (!input.hostedReader) throw new OcrRefusedError("DOCSLURP_OCR_MODE=hosted has no hosted reader here", "hosted-unavailable");
   try {
     const read = await input.hostedReader.read({ documentId: input.documentId, pageNumber: 1, imagePath: input.source, mimeType }, "hosted-ocr", input.signal);
-    return { mode: "hosted", pages: [{ pageNumber: 1, text: read.text, reader: `hosted:${read.model}` }], chargedPages: [1], truncatedFrames: false, unreadPages: [], escalation: null };
+    const pages = [{ pageNumber: 1, text: read.text, reader: `hosted:${read.model}` }];
+    await rebuildPageTables(pages, input);
+    return { mode: "hosted", pages, chargedPages: [1], truncatedFrames: false, unreadPages: [], escalation: null };
   } catch (error) {
     if (error instanceof HostedOcrSkipped) throw new OcrRefusedError(`hosted OCR refused: ${error.message}`, `hosted-${error.reason}`);
     throw error;
   }
+}
+
+/** Model HTML tables in the document's page texts, rebuilt from the parser VM's typed reading (in place). */
+async function rebuildPageTables(pages: Array<{ text: string }>, input: OcrDocumentInput): Promise<void> {
+  const { texts, stats } = await sanitizeVisionPageTables(pages.map((page) => page.text), input.runner, { documentId: input.documentId, ...(input.signal ? { signal: input.signal } : {}) });
+  pages.forEach((page, index) => { page.text = texts[index]!; });
+  if (stats.pages) console.log(`[vision-tables] document=${input.documentId} pages=${stats.pages} tables=${stats.tables} escapedPages=${stats.escapedPages} rawRegions=${stats.rawRegions}${stats.rawRegions ? ` rawReasons=${JSON.stringify(stats.rawReasons)}` : ""} vmCalls=${stats.vmCalls} vmMs=${stats.vmMs}`);
 }

@@ -54,17 +54,102 @@ function blankLineBlocks(page: string): string[] {
   return blocks;
 }
 
+const HTML_TABLE_BLOCK = /^\s{0,3}<table(?=\s|>|$)/i;
+
+/**
+ * Whether a page holds anything the HTML table scanner would read: an ASCII case-insensitive `<table`. A presence check
+ * only (no tag, attribute, entity or structure is read); a page without it has no HTML table, so it never needs the
+ * parser VM. The `i` flag without `u` folds ASCII only, like the scanner.
+ */
+export const hasHtmlTableMarkup = (page: string): boolean => /<table/i.test(page);
+
+/** How many of a page's blank-line blocks start with `<table` (markdownTables' HTML blocks): a presence check per block. */
+export function htmlTableBlockCount(page: string): number {
+  let count = 0;
+  for (const block of blankLineBlocks(page)) if (HTML_TABLE_BLOCK.test(block)) count += 1;
+  return count;
+}
+
+const ROW_TAG = /<tr[\s>]/gi;
+const CELL_TAG = /<t[dh][\s>]/gi;
+const countMatches = (text: string, pattern: RegExp) => { let n = 0; pattern.lastIndex = 0; while (pattern.exec(text)) n += 1; return n; };
+
+/**
+ * Tag-start counts in a slice of page text: `<tr` openings and `<td`/`<th` openings, the same ASCII case-insensitive
+ * patterns the scanner's block counts and element search use. A count of tag starts only (no attribute, nesting or
+ * structure is read), so the host can bound a VM scan's row and cell counts without reading HTML.
+ */
+export function htmlTagStarts(text: string): { rows: number; cells: number } {
+  return { rows: countMatches(text, ROW_TAG), cells: countMatches(text, CELL_TAG) };
+}
+
+/**
+ * For each blank-line block that starts with `<table` (htmlTableBlockCount's blocks): its `<tr` openings, which are
+ * exactly scanPageTables' row count for that block, and the `<td`/`<th` openings from its first `<tr` on, whose total
+ * bounds the block's column count (at most all of them, at least their average per row).
+ */
+export function htmlTableBlockTagCounts(page: string): Array<{ rows: number; cellsInRows: number }> {
+  const counts: Array<{ rows: number; cellsInRows: number }> = [];
+  for (const block of blankLineBlocks(page)) {
+    if (!HTML_TABLE_BLOCK.test(block)) continue;
+    const firstRow = block.search(/<tr[\s>]/i);
+    counts.push({ rows: countMatches(block, ROW_TAG), cellsInRows: firstRow === -1 ? 0 : countMatches(block.slice(firstRow), CELL_TAG) });
+  }
+  return counts;
+}
+
+/**
+ * What the HTML table scanner read from one page (scanPageTables). In the service profile it is produced only by the
+ * parser-VM guest (worker `table-routing-guest.ts`) and validated by the host before any function below uses it.
+ */
+export interface HtmlTableScan {
+  /** Every `<table>…</table>` element, left to right, not overlapping: its span and its rows' cell texts. */
+  tables: ScannedHtmlTable[];
+  /** Row and column counts of each blank-line block that starts with `<table`, in block order (htmlTableBlockCount). */
+  blocks: Array<{ rows: number; columns: number }>;
+}
+export interface ScannedHtmlTable {
+  start: number;
+  end: number;
+  /** Cell texts (entities decoded, `<br>` as a space, whitespace collapsed), one array per `<tr>`. */
+  rows: string[][];
+  /** False when a cell spans rows or columns or holds markup other than text. */
+  simple: boolean;
+}
+
+let tableScanGuest = false;
+/** Called only by the parser-VM guest's entry script: this process is the VM guest and may scan HTML tables. */
+export function enterTableScanGuest(): void {
+  tableScanGuest = true;
+}
+
+/**
+ * The HTML table scanner reads customer and model text (Doppler passes PDF prose through `--html` unescaped; vision
+ * models write tables as HTML). Under NODE_ENV=production or DOCSLURP_SERVICE_PROFILE=service it runs only in the parser
+ * VM; on the host it refuses loudly (fail closed) rather than parse.
+ */
+function assertTableScanAllowed(): void {
+  if (tableScanGuest) return;
+  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
+  if (env.NODE_ENV?.trim().toLowerCase() === "production" || env.DOCSLURP_SERVICE_PROFILE?.trim().toLowerCase() === "service") {
+    throw new Error("refusing to scan HTML tables on the host in the service profile; use the parser VM (table-routing guest)");
+  }
+}
+
 /**
  * Tables in one page's Markdown: GFM pipe tables (a block of two or more pipe rows, the separator not counted) and HTML
- * tables (`<tr>` rows). Mirrors `markdown_tables` in pdf_layout_facts.py.
+ * tables (`<tr>` rows). Mirrors `markdown_tables` in pdf_layout_facts.py. The HTML blocks' counts come from `scan` (the
+ * parser VM's reading of this page); without one they are scanned here, which the service profile refuses on the host.
+ * `scan: null` (the VM could not read the page) counts no HTML table.
  */
-export function markdownTables(page: string): Array<{ rows: number; columns: number }> {
+export function markdownTables(page: string, scan?: HtmlTableScan | null): Array<{ rows: number; columns: number }> {
   const tables: Array<{ rows: number; columns: number }> = [];
+  const blocks = scan === undefined ? (hasHtmlTableMarkup(page) ? scanPageTables(page).blocks : []) : scan?.blocks ?? null;
+  let htmlBlock = 0;
   for (const block of blankLineBlocks(page)) {
-    const html = /^\s{0,3}<table(?=\s|>|$)/i.exec(block);
-    if (html) {
-      const rows = block.split(/<tr[\s>]/i).slice(1);
-      if (rows.length > 0) tables.push({ rows: rows.length, columns: Math.max(...rows.map((row) => (row.match(/<t[dh][\s>]/gi) ?? []).length)) });
+    if (HTML_TABLE_BLOCK.test(block)) {
+      const counts = blocks?.[htmlBlock++];
+      if (counts && counts.rows > 0) tables.push({ rows: counts.rows, columns: counts.columns });
       continue;
     }
     const lines = block.split("\n").filter((line) => line.trim());
@@ -193,19 +278,55 @@ function htmlText(value: string): string {
 
 const escapeHtml = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-function htmlTables(page: string): HtmlTable[] {
-  const tables: HtmlTable[] = [];
-  for (const table of htmlElements(page, ["table"])) {
+/**
+ * HTML cell text (already entity-decoded by the scanner) as inert Markdown text: `& < >` become entities, so no raw HTML
+ * reaches the stored Markdown even for a reader that never parses Markdown (API, MCP, export), and every other ASCII
+ * punctuation character is backslash-escaped, so no link, image, emphasis, code span, heading, quote or list marker forms.
+ */
+export function escapeMarkdownCellText(value: string): string {
+  return value.replace(/[!-/:-@[-`{-~]/g, (char) => char === "&" ? "&amp;" : char === "<" ? "&lt;" : char === ">" ? "&gt;" : `\\${char}`);
+}
+
+/**
+ * The HTML table scanner: every table element's span and cell texts (pages up to TABLE_SCAN_MAX_PAGE_CHARS; a larger page
+ * is not scanned for them), and markdownTables' HTML block counts (any page). It reads customer and model text, so in the
+ * service profile it runs only inside the parser VM (assertTableScanAllowed); the host uses its validated result.
+ */
+export function scanPageTables(page: string): HtmlTableScan {
+  assertTableScanAllowed();
+  const tables: ScannedHtmlTable[] = page.length > TABLE_SCAN_MAX_PAGE_CHARS ? [] : htmlElements(page, ["table"]).map((table) => {
     let simple = true;
     const rows = htmlElements(table.inner, ["tr"]).map((row) => htmlElements(row.inner, ["td", "th"]).map((cell) => {
       if (/\b(?:colspan|rowspan)\s*=/i.test(cell.attributes) || /<(?!br\s*\/?>)[a-z]/i.test(cell.inner)) simple = false;
       return htmlText(cell.inner);
     }));
-    if (rows.length === 0) continue;
-    tables.push({ start: table.start, end: table.end, header: rows[0]!, body: rows.slice(1), simple });
+    return { start: table.start, end: table.end, rows, simple };
+  });
+  const blocks: HtmlTableScan["blocks"] = [];
+  for (const block of blankLineBlocks(page)) {
+    if (!HTML_TABLE_BLOCK.test(block)) continue;
+    const rows = block.split(/<tr[\s>]/i).slice(1);
+    let columns = 0;
+    for (const row of rows) columns = Math.max(columns, (row.match(/<t[dh][\s>]/gi) ?? []).length);
+    blocks.push({ rows: rows.length, columns });
   }
-  return tables;
+  return { tables, blocks };
 }
+
+/** The scanned tables with at least one row, the first row as the header. */
+function htmlTables(scanned: readonly ScannedHtmlTable[]): HtmlTable[] {
+  return scanned.filter((table) => table.rows.length > 0)
+    .map((table) => ({ start: table.start, end: table.end, header: table.rows[0]!, body: table.rows.slice(1), simple: table.simple }));
+}
+
+/**
+ * The scan a page's table checks use: the caller's (`scanFor`, the parser VM's validated reading; null when it could not
+ * read the page), else this process's own scanner, which the service profile refuses on the host. A page without
+ * `<table` needs no scan.
+ */
+export type ScanFor = (page: string, index: number) => HtmlTableScan | null;
+const localScan: ScanFor = (page) => scanPageTables(page);
+const EMPTY_SCAN: HtmlTableScan = { tables: [], blocks: [] };
 
 const htmlRow = (values: string[], cell: "td" | "th") => `<tr>${values.map((value) => `<${cell}>${escapeHtml(value)}</${cell}>`).join("")}</tr>`;
 
@@ -214,23 +335,26 @@ const htmlRow = (values: string[], cell: "td" | "th") => `<tr>${values.map((valu
  * header Doppler split becomes one header row (`Revenue Q1`, `Revenue Q2`, ...); a bulleted or numbered list it laid out
  * in columns becomes a list again. Pages are separated by form feeds and keep their count. Measured structure only.
  */
-export function repairMarkdownTables(markdown: string): { markdown: string; repairs: TableRepairs } {
+export function repairMarkdownTables(markdown: string, scanFor: ScanFor = localScan): { markdown: string; repairs: TableRepairs } {
   const repairs: TableRepairs = { mergedHeaders: 0, listsRestored: 0 };
-  const pages = markdown.split("\f").map((raw) => {
+  const pages = markdown.split("\f").map((raw, index) => {
     // An oversized page is left as extracted; tableReliability reports it unreliable.
     if (raw.length > TABLE_SCAN_MAX_PAGE_CHARS) return raw;
+    // A page the scanner could not read (scan null: the parser VM was unavailable) gets no HTML repair (fail closed).
+    const scan = hasHtmlTableMarkup(raw) ? scanFor(raw, index) : EMPTY_SCAN;
     // HTML tables (Doppler --html, the VM guest's output) get the same repairs as pipe tables, as HTML. One forward pass
     // over the page (tables are in order and do not overlap): never a splice or re-slice per table, which is quadratic
     // on a page of many small tables (council K #1).
     const parts: string[] = [];
     let at = 0;
-    for (const table of htmlTables(raw)) {
+    for (const table of htmlTables(scan?.tables ?? [])) {
       if (!table.simple) continue;
       let replacement: string | null = null;
       if (isListAsTable(table)) {
         replacement = [table.header, ...table.body].map((cells) => {
           const marker = /^\d/.test(cells[0]!) ? `${cells[0]!.replace(/\)$/, ".")} ` : "- ";
-          return marker + cells.slice(1).filter(Boolean).join(" — ");
+          // Cell text came out of HTML (entity-decoded): it is escaped, never written into the Markdown as markup.
+          return marker + cells.slice(1).filter(Boolean).map(escapeMarkdownCellText).join(" — ");
         }).join("\n");
         repairs.listsRestored += 1;
       } else {
@@ -273,20 +397,180 @@ export function repairMarkdownTables(markdown: string): { markdown: string; repa
   return { markdown: pages.join("\f"), repairs };
 }
 
+/** tableReliability's reason for a page whose HTML tables the parser VM could not read (unavailable, failed, invalid). */
+export const TABLE_HTML_UNSCANNED_SIGNAL = "table:html-unscanned";
+
 /** Body cells empty above this share make a table unreliable (merged or misplaced cells). */
 export const TABLE_UNRELIABLE_EMPTY_CELL_SHARE = 0.4;
 
 /**
- * Why a page's tables (after repairMarkdownTables) cannot be served as extracted: rows with different column counts, or most
- * body cells empty. Empty when every table looks sound. A table-heavy page with a text layer and any of these is read by a
- * model (classify-route); otherwise Doppler's table is served.
+ * A table that leaked out of the extractor's tables (Doppler cut a borderless table at a gap between row groups, wrote its
+ * rows as text, kept only its header, or merged numeric columns into one cell). Each signal is a document class seen in
+ * financial, statistical and government tables, measured from the page's own Markdown:
+ *
+ * - `table:numeric-prose`: at least `numericProseMinLines` consecutive text lines outside every table (blank lines between
+ *   them allowed, any other line breaks the run) that each hold at least `numericProseMinNumbers` numeric tokens making up
+ *   at least `numericProseMinShare` of the line's tokens, at least `numericProseMinMeasured` of them measured values (a
+ *   decimal or thousands separator, a percent or parentheses), beside at least one word (a row label), and that neither
+ *   end a sentence nor are list items. Dot leaders do not count as tokens. Phone and fax numbers, chart-axis tick runs and
+ *   enumerations (numbers in arithmetic progression: `0 20 40 60`, `1 2 3 4`) never count. Table rows written as text.
+ * - `table:header-only`: a table of at most `headerOnlyMaxRows` rows that are all header-like (one header row, or a
+ *   two-row header with no body row at all), at least `headerOnlyMinColumns` columns, no cell
+ *   mostly made of numbers, no value-like cell (a date or an identifier: digits joined by `/` or `-`, or a run of five or
+ *   more digits) and only short cells (at most `headerOnlyMaxCellWords` words), whose body is elsewhere on the page: at
+ *   least `numericProseMinLines` number-heavy text lines, or another table with two or more rows of numbers. An empty
+ *   form's label row or a feature matrix alone is not one.
+ * - `table:merged-numeric-cell`: at least `mergedCellMinCells` cells of one table each holding at least
+ *   `mergedCellMinNumbers` numeric tokens that make up at least half their tokens, two of them measured values: columns
+ *   collapsed into one (a single such cell, like a coordinate triple, is a value). Phone numbers and digit-per-box form fields are plain digit groups and do not count.
+ *
+ * These signals qualify any page with a text layer for a model read, table-heavy or not (classify-route), at most
+ * tableLeakPageCap(pages) pages per document.
  */
-export function tableReliability(page: string): string[] {
+export const TABLE_LEAK = {
+  numericProseMinLines: 3,
+  numericProseMinNumbers: 4,
+  numericProseMinShare: 0.5,
+  numericProseMinMeasured: 2,
+  headerOnlyMaxRows: 2,
+  headerOnlyMinColumns: 3,
+  headerOnlyMaxCellWords: 8,
+  mergedCellMinNumbers: 3,
+  mergedCellMinCells: 2,
+} as const;
+
+/**
+ * Pages of one document the leak signals may send to a model read: `base` plus `share` of its pages, at most `max`. A leak
+ * signal is evidence from the page's own text, which a hostile or unusual document controls, so it can never select every
+ * page: a 10-page report gets 3, a 100-page one 8, anything from 340 pages up 20. Real leaks cluster on a document's few
+ * statistical tables; the cap keeps the worst case a fixed, small number of Rich reads per document.
+ */
+export const TABLE_LEAK_PAGE_CAP = { base: 3, share: 0.05, max: 20 } as const;
+export function tableLeakPageCap(pageCount: number, cap: typeof TABLE_LEAK_PAGE_CAP = TABLE_LEAK_PAGE_CAP): number {
+  return Math.min(cap.max, cap.base + Math.floor(Math.max(0, pageCount) * cap.share));
+}
+
+export const TABLE_LEAK_SIGNALS: ReadonlySet<string> = new Set(["table:numeric-prose", "table:header-only", "table:merged-numeric-cell"]);
+
+/**
+ * A number as statistical tables print it: optional sign, currency, parentheses, footnote star or percent around digits
+ * with separators (`-1,234.5`, `(12)`, `$4.2`, `*–0.5`, `18%`), or a missing-value placeholder (`–`, `—`, `(X)`, `n.a.`).
+ */
+const LEAK_NUMBER = /^[-+−–—(*$€£¥]{0,3}\d[\d,.]*[)%*]{0,2}$|^[-–—]$|^\(x\)$|^n\.?a\.?$/i;
+const isLeakNumber = (token: string) => token.length <= 32 && LEAK_NUMBER.test(token);
+const LETTERS = /\p{L}{2,}/u;
+const DOT_LEADER = /^[.·…]+$/;
+/** Tested on a token's last 64 characters only, so a long token cannot make the unanchored scan quadratic. */
+const SENTENCE_END = /\p{Ll}{2,}[.!?]["'”’)]?$/u;
+const endsSentence = (token: string) => SENTENCE_END.test(token.length > 64 ? token.slice(-64) : token);
+/** A phone or fax number: optional country code, then 3-3-4 or 3-4 digit groups. */
+const PHONE = /(?:^|\s)(?:\+?\d{1,3}[\s.-])?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}(?:\s|$)/;
+const LIST_MARKER = /^(?:[-*+•·▪◦–—]|\d{1,3}[.)]|\(?[a-z]\))$/i;
+/** A measured value as tables print it: a decimal or thousands separator, a percent, or parentheses (`1,409`, `0.3`, `(12)`). */
+const MEASURED_NUMBER = /\d[.,]\d|%|^[-+−–—*$€£¥]{0,3}\(/;
+/** A date or identifier (`02/19/2026`, `R-26-018842`, `20211694530`): a value, never a header label. */
+const VALUE_TOKEN = /\d[/-]\d|\d{5,}/;
+
+/**
+ * The page's lines with every HTML table and pipe-table row replaced by a run break (null); blank lines dropped. Runs of
+ * number-heavy lines are counted over this list, so a table between two lines separates them.
+ */
+function nonTableLines(page: string, htmlTableSpans: readonly ScannedHtmlTable[]): Array<string | null> {
+  const parts: string[] = [];
+  let at = 0;
+  for (const table of htmlTableSpans) { parts.push(page.slice(at, table.start), "\n\u0000\n"); at = table.end; }
+  parts.push(page.slice(at));
+  const lines: Array<string | null> = [];
+  for (const line of parts.join("").split("\n")) {
+    if (!line.trim()) continue;
+    lines.push(line === "\u0000" || pipeRowInner(line) !== null || isSeparatorLine(line) ? null : line);
+  }
+  return lines;
+}
+
+const numericValue = (token: string) => Number(token.replace(/[^\d.-]/g, "").replace(/(?!^)-/g, ""));
+
+/** Four or more numbers in arithmetic progression: a chart axis's ticks or an enumeration, not a table row. */
+function isArithmeticRun(numbers: string[]): boolean {
+  if (numbers.length < 4) return false;
+  const values = numbers.map(numericValue);
+  if (values.some((value) => !Number.isFinite(value))) return false;
+  const step = values[1]! - values[0]!;
+  return step !== 0 && values.every((value, index) => index === 0 || Math.abs(value - values[index - 1]! - step) < 1e-9);
+}
+
+/** A line with the shape of a table row written as text (before the measured-value and pattern exclusions). */
+function numericProseTokens(line: string, rules: typeof TABLE_LEAK): string[] | null {
+  if (line.length > TABLE_MAX_LINE_CHARS) return null;
+  const tokens = line.trim().split(/\s+/).filter((token) => !DOT_LEADER.test(token));
+  if (tokens.length === 0 || LIST_MARKER.test(tokens[0]!)) return null;
+  const numbers = tokens.filter(isLeakNumber);
+  if (numbers.length < rules.numericProseMinNumbers || numbers.length / tokens.length < rules.numericProseMinShare) return null;
+  // A row label: without one, a run of numbers is more often a chart's tick labels or an equation than a table row.
+  if (!tokens.some((token) => !isLeakNumber(token) && LETTERS.test(token))) return null;
+  return endsSentence(tokens[tokens.length - 1]!) ? null : numbers;
+}
+
+function isNumericProseLine(line: string, rules: typeof TABLE_LEAK): boolean {
+  const numbers = numericProseTokens(line, rules);
+  if (!numbers || PHONE.test(line) || isArithmeticRun(numbers)) return false;
+  return numbers.filter((token) => MEASURED_NUMBER.test(token)).length >= rules.numericProseMinMeasured;
+}
+
+/** Rows of a table with at least two numeric cells. */
+const numericRows = (table: { header: string[]; body: string[][] }) =>
+  [table.header, ...table.body].filter((cells) => cells.filter((cell) => cell.trim() !== "" && cell.trim().split(/\s+/).every(isLeakNumber)).length >= 2).length;
+
+function leakSignals(page: string, htmlTableSpans: readonly ScannedHtmlTable[], tables: ReadonlyArray<{ header: string[]; body: string[][] }>, rules: typeof TABLE_LEAK): string[] {
+  const signals: string[] = [];
+  let run = 0;
+  let numberHeavyLines = 0;
+  for (const line of nonTableLines(page, htmlTableSpans)) {
+    if (line !== null && numericProseTokens(line, rules) && !PHONE.test(line)) numberHeavyLines += 1;
+    run = line !== null && isNumericProseLine(line, rules) ? run + 1 : 0;
+    if (run >= rules.numericProseMinLines && !signals.includes("table:numeric-prose")) signals.push("table:numeric-prose");
+    // Both facts the page can give are known: stop scanning (bounded work on long pages).
+    if (signals.length && numberHeavyLines >= rules.numericProseMinLines) break;
+  }
+  const tokens = (cell: string) => cell.split(/\s+/).filter(Boolean);
+  const words = (cell: string) => tokens(cell).length;
+  for (const table of tables) {
+    const rows = [table.header, ...table.body];
+    const columns = Math.max(...rows.map((cells) => cells.length));
+    // A header with no body row at all, and its body elsewhere on the page: written as number-heavy text, or extracted as
+    // a separate table of numbers.
+    const bodyElsewhere = numberHeavyLines >= rules.numericProseMinLines || tables.some((other) => other !== table && numericRows(other) >= 2);
+    if (rows.length <= rules.headerOnlyMaxRows && bodyElsewhere && columns >= rules.headerOnlyMinColumns &&
+        rows.every((cells) => cells.every((cell) => !VALUE_TOKEN.test(cell) && words(cell) <= rules.headerOnlyMaxCellWords &&
+          tokens(cell).filter(isLeakNumber).length * 2 <= words(cell) && !isLeakNumber(cell))) &&
+        rows.some((cells) => cells.some((cell) => LETTERS.test(cell))) && !signals.includes("table:header-only")) {
+      signals.push("table:header-only");
+    }
+    const mergedCells = rows.reduce((sum, cells) => sum + cells.filter((cell) => {
+      const numbers = tokens(cell).filter(isLeakNumber);
+      return numbers.length >= rules.mergedCellMinNumbers && numbers.length * 2 >= words(cell) &&
+        numbers.filter((token) => MEASURED_NUMBER.test(token)).length >= 2;
+    }).length, 0);
+    if (mergedCells >= rules.mergedCellMinCells && !signals.includes("table:merged-numeric-cell")) signals.push("table:merged-numeric-cell");
+  }
+  return signals;
+}
+
+/**
+ * Why a page's tables (after repairMarkdownTables) cannot be served as extracted: rows with different column counts, most
+ * body cells empty, or a table that leaked out of the extracted tables (TABLE_LEAK). Empty when every table looks sound. A
+ * page with a text layer is read by a model (classify-route) when it is table-heavy and has any of these, or has a leak
+ * signal (TABLE_LEAK_SIGNALS) whether or not it is table-heavy; otherwise Doppler's table is served.
+ */
+export function tableReliability(page: string, rules: typeof TABLE_LEAK = TABLE_LEAK, scan?: HtmlTableScan | null): string[] {
   // An oversized page is not scanned (customer text; bounded work): its tables are unknown, so it is a model's to read.
   if (page.length > TABLE_SCAN_MAX_PAGE_CHARS) return ["table:oversized-page"];
+  const html = !hasHtmlTableMarkup(page) ? EMPTY_SCAN : scan === undefined ? scanPageTables(page) : scan;
+  // The parser VM could not read the page's HTML tables: they are unknown, so (like an oversized page) a model's to read.
+  if (html === null) return [TABLE_HTML_UNSCANNED_SIGNAL];
   const signals = new Set<string>();
   // A spanning HTML table's row lengths do not show its columns; it is judged only by its empty cells.
-  const tables = [...pipeTables(page.split("\n")).map((table) => ({ ...table, simple: true })), ...htmlTables(page)];
+  const tables = [...pipeTables(page.split("\n")).map((table) => ({ ...table, simple: true })), ...htmlTables(html.tables)];
   for (const table of tables) {
     if (table.body.length === 0) continue;
     if (table.simple && table.body.some((cells) => cells.length !== table.header.length)) signals.add("table:inconsistent-columns");
@@ -295,5 +579,6 @@ export function tableReliability(page: string): string[] {
     const body = table.body.flatMap((cells) => (!cells[0] && cells.slice(1).every(Boolean) ? cells.slice(1) : cells));
     if (body.length > 0 && body.filter((cell) => !cell).length / body.length > TABLE_UNRELIABLE_EMPTY_CELL_SHARE) signals.add("table:mostly-empty-cells");
   }
+  for (const signal of leakSignals(page, html.tables, tables, rules)) signals.add(signal);
   return [...signals];
 }

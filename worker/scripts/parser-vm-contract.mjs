@@ -2,7 +2,9 @@
 import { access, constants } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-for (const file of ["image-task.mjs", "pdf-structure.mjs", "quarantine-inspect.mjs", "structured-json.mjs", "html-embeds.mjs", "table-cells.mjs", "chart-export-extract.mjs", "../dist/chart-export/extractors/index.js", "../dist/extractors/structured-json-guest.js", "../dist/routing/html-embeds-guest.js", "../dist/pipeline/table-cells-guest.js", "../dist/pipeline/html-table-limits.js", "../dist/deferred/pdf-structure-guest.js", "../dist/lib/quarantine-bytes.js"]) await access(fileURLToPath(new URL(file, import.meta.url)));
+for (const file of ["image-task.mjs", "pdf-structure.mjs", "quarantine-inspect.mjs", "structured-json.mjs", "html-embeds.mjs", "table-cells.mjs", "vision-tables.mjs", "table-routing.mjs", "chart-export-extract.mjs", "../dist/chart-export/extractors/index.js", "../dist/extractors/structured-json-guest.js", "../dist/routing/html-embeds-guest.js", "../dist/pipeline/table-cells-guest.js", "../dist/pipeline/vision-tables-guest.js", "../dist/pipeline/table-routing-guest.js", "../dist/pipeline/html-table-limits.js", "../dist/deferred/pdf-structure-guest.js", "../dist/lib/quarantine-bytes.js"]) await access(fileURLToPath(new URL(file, import.meta.url)));
+// The table-routing guest scans with @docslurp/shared's scanner: the package must resolve from this image's worker.
+await access(fileURLToPath(import.meta.resolve("@docslurp/shared/page-table-routing")));
 // parser-vm@2: quarantine inspection returns { sniffed, archive } (the host derives the file facts); an older image is refused.
 // tools: the command-line tools present in this image (PATH and the Python venv), so the host decides availability from the
 // VM, not its own PATH (validation N7).

@@ -75,7 +75,7 @@ export function createStages(args: {
     }),
     "render-images": () => new RenderImagesStage(rasterCache, args.storage, args.config),
     // Classify after initial canonical/format prep so downstream stages can honor playbook overrides.
-    "classify-route": () => new ClassifyRouteStage(args.storage),
+    "classify-route": () => new ClassifyRouteStage(args.storage, args.runner),
     "route-pages": () => new RoutePagesStage(args.storage, args.config, sourceCache, args.runner),
     "extract-markdown": () => new ExtractMarkdownStage(args.runner, args.storage, args.config, sourceCache, args.mediaJournal, args.capacityStore),
     "extract-html": () => new ExtractHtmlStage(args.runner, args.storage, sourceCache),
