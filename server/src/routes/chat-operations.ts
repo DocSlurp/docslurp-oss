@@ -3,6 +3,7 @@ import { nativeOperations } from "../agent-runtime/runtime.js";
 import { sql } from "../db.js";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
+import { chatModelRefused } from "../lib/chat-model-policy.js";
 import { durableChatOptionsShape } from "../agent-runtime/chat-turn-options.js";
 import { getRequestActor, loadActorScopedProject, resolveActorProjectId } from "../lib/request-actor.js";
 import { authorizedChatOperationSnapshot, authorizeChatOperation } from "../services/chat-operation-access.js";
@@ -102,6 +103,8 @@ export async function durableChatLaunchHandler(c: Context, parentId?: string) {
   const project = parentProject ?? await loadActorScopedProject(id, actor);
   if (!project?.orgId || await projectChatDisabledBody(id, actor.userId)) return c.json({ error: "forbidden" }, 403);
   if (!await hasRealtimeCanaryMembership(actor.userId, project.orgId)) return c.json({ error: "forbidden" }, 403);
+  // Same model policy as the streaming route, before any work is queued.
+  if (await chatModelRefused(actor, body.model, id)) return c.json({ error: "model_not_allowed" }, 400);
   const native=await nativeOperations(async()=>actor);
   const task = await launchChatOperation({ userId: actor.userId, projectId: id, orgId: project.orgId, key: c.req.header("Idempotency-Key") ?? "", input: { ...body, authSessionId: actor.sessionId }, parentId, runtime:"mastra" });
   const accepted=await native.launch(task.id);

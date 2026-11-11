@@ -127,6 +127,8 @@ export function createProjectChatExecutor(manager:BackgroundTaskManager,pubsub:P
           projectId:binding.project_id,userId:binding.user_id,query:String(binding.input.q),
           sessionId:binding.input.sessionId as string|undefined,model:binding.input.model as string|undefined,
           ...durableChatTurnOptions(binding.input,actor),
+          // Signed-in app turn: "/status" gets the free ingest report, as in the streaming route.
+          answerIngestReport:true,
           actor,allowAgentTools:env.publicChatAgentEnabled,allowConfiguration:false,signal,
           onTextDelta:text=>append("text",{text}),
           onToolActivity:event=>{void append("tool",event);},onEvidence:event=>{void append("evidence",event);},
