@@ -2228,6 +2228,52 @@ describe("scanner session council fixes (PR #339)", () => {
     expect(build).toHaveBeenCalledTimes(2);
   });
 
+  it("re-check L1: a build in flight is never evicted, so A, B, C, A builds A once (reviewer's reproducer)", async () => {
+    const cache = new ScannerSnapshotCache<string>();
+    const finish: Array<(value: string) => void> = [];
+    let builds = 0;
+    const build = () => { builds++; return new Promise<string>((resolve) => finish.push(resolve)); };
+    const a = cache.get("A", build), b = cache.get("B", build), c = cache.get("C", build), again = cache.get("A", build);
+    expect(builds).toBe(3);
+    expect(again).toBe(a);
+    expect(cache.pendingBuilds).toBe(3);
+    finish.forEach((resolve, index) => resolve(`snapshot-${index}`));
+    expect(await Promise.all([a, b, c, again])).toEqual(["snapshot-0", "snapshot-1", "snapshot-2", "snapshot-0"]);
+    // Completed snapshots are bounded by the LRU (two kept); nothing is left building.
+    expect(cache.size).toBe(2);
+    expect(cache.pendingBuilds).toBe(0);
+  });
+
+  it("re-check L1: out-of-order completions and failures of a superseded build do not touch the current one", async () => {
+    let now = 0;
+    const cache = new ScannerSnapshotCache<string>(2, 60_000, () => now);
+    const settle: Array<{ resolve: (value: string) => void; reject: (error: Error) => void }> = [];
+    const build = vi.fn(() => new Promise<string>((resolve, reject) => settle.push({ resolve, reject })));
+    const first = cache.get("A", build);
+    // The first build's snapshot is dropped while it is still building (as a failed restore would): a new build starts.
+    cache.forget("A", first);
+    const second = cache.get("A", build);
+    expect(build).toHaveBeenCalledTimes(2);
+    // The superseded build fails late: no backoff is recorded, and the current build is unaffected.
+    settle[0]!.reject(new Error("late failure from a superseded build"));
+    await expect(first).rejects.toThrow(/superseded/);
+    expect(cache.get("A", build)).toBe(second);
+    settle[1]!.resolve("current");
+    await expect(second).resolves.toBe("current");
+    expect(await cache.get("A", build)).toBe("current");
+    expect(build).toHaveBeenCalledTimes(2);
+    // A superseded build that succeeds late does not replace the current snapshot either.
+    const third = cache.get("B", build);
+    cache.forget("B", third);
+    const fourth = cache.get("B", build);
+    settle[3]!.resolve("current-b");
+    await fourth;
+    settle[2]!.resolve("stale-b");
+    await third;
+    expect(await cache.get("B", build)).toBe("current-b");
+    expect(cache.size).toBe(2);
+  });
+
   it("L4/correctness Low: with the snapshot flag off, a bad DOCSLURP_MODAL_SCANNER_REGIONS is ignored; on, it is refused", () => {
     expect(modalScannerRegions({ DOCSLURP_MODAL_SCANNER_REGIONS: "invalid region" })).toBeUndefined();
     expect(modalScannerRegions({ DOCSLURP_QUARANTINE_SCAN_SNAPSHOT: "off", DOCSLURP_MODAL_SCANNER_REGIONS: "EU" })).toBeUndefined();

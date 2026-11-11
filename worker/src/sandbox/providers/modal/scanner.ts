@@ -170,9 +170,14 @@ export function scannerSnapshotKey(image: { image: string; imageId?: string }, s
  * signature sets staged side by side during an update (A, B, A, B) build twice, not four times (council L3). A failed
  * build is remembered for `failureBackoffMs`: scans in that window fail at once (an error verdict, fail closed) instead
  * of each paying for another full build that would fail the same way; the first scan after it retries.
+ *
+ * Builds in flight live in their own map and are never evicted, so the LRU bound (completed snapshots only) cannot start
+ * a second build of a key that is still building (council re-check L1: A, B, C, A built A twice). A build's completion or
+ * failure updates the cache only while it is still that key's current build: one dropped by `forget` changes nothing.
  */
 export class ScannerSnapshotCache<T> {
   private readonly entries = new Map<string, Promise<T>>();
+  private readonly building = new Map<string, Promise<T>>();
   private readonly failures = new Map<string, { until: number; error: unknown }>();
 
   constructor(
@@ -184,34 +189,49 @@ export class ScannerSnapshotCache<T> {
   get(key: string, build: () => Promise<T>): Promise<T> {
     const failed = this.failures.get(key);
     if (failed && failed.until > this.now()) return Promise.reject(failed.error);
-    let entry = this.entries.get(key);
+    const entry = this.entries.get(key);
     if (entry) {
       // Most recently used last.
       this.entries.delete(key);
       this.entries.set(key, entry);
       return entry;
     }
-    entry = build();
-    this.entries.set(key, entry);
-    while (this.entries.size > Math.max(1, this.keep)) this.entries.delete(this.entries.keys().next().value!);
-    const settled = entry;
-    settled.then(
-      () => { this.failures.delete(key); },
+    const pending = this.building.get(key);
+    if (pending) return pending;
+    const started = build();
+    this.building.set(key, started);
+    started.then(
+      () => {
+        if (this.building.get(key) !== started) return;
+        this.building.delete(key);
+        this.failures.delete(key);
+        this.entries.delete(key);
+        this.entries.set(key, started);
+        while (this.entries.size > Math.max(1, this.keep)) this.entries.delete(this.entries.keys().next().value!);
+      },
       (error: unknown) => {
-        if (this.entries.get(key) === settled) this.entries.delete(key);
+        if (this.building.get(key) !== started) return;
+        this.building.delete(key);
         this.failures.set(key, { until: this.now() + this.failureBackoffMs, error });
       },
     );
-    return entry;
+    return started;
   }
 
   /** Drop a snapshot that failed to restore, so the next scan builds a new one (no backoff: the build itself worked). */
   forget(key: string, entry?: Promise<T>): void {
     if (!entry || this.entries.get(key) === entry) this.entries.delete(key);
+    if (!entry || this.building.get(key) === entry) this.building.delete(key);
   }
 
+  /** Completed snapshots held (builds in flight are not counted). */
   get size(): number {
     return this.entries.size;
+  }
+
+  /** Builds in flight. */
+  get pendingBuilds(): number {
+    return this.building.size;
   }
 }
 
