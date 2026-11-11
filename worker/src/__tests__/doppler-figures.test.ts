@@ -9,7 +9,7 @@ import { DOPPLER_FIGURE_LIMITS, dopplerFigureUrls, imageAnchorsToAltText, resolv
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
 
 import {
-  DopplerFigureRejection, dopplerFigureMagicMatches, dopplerFigureStorageKey, dopplerImageExtractEnabled, readDopplerFigureDir, storeDopplerFigures,
+  DopplerFigureRejection, DopplerFigureStoreError, dopplerFigureMagicMatches, dopplerFigureStorageKey, dopplerImageExtractEnabled, readDopplerFigureDir, storeDopplerFigures,
 } from "../extractors/doppler-figures.js";
 import {
   acceptSandboxedPdfResult, assertExtractorPluginConfiguration, registerExtractorPlugin, resetExtractorPluginsForTest, sandboxedPdfFigures,
@@ -43,6 +43,55 @@ async function rejection(pageCount = 10): Promise<string> {
   }
   throw new Error("expected a rejection");
 }
+
+describe("storeDopplerFigures: a failed upload stores nothing", () => {
+  const recordingStorage = (fail: { bytes?: string; json?: boolean }, withDelete = true) => {
+    const live = new Set<string>();
+    const storage = {
+      putBytes: vi.fn(async (key: string) => { if (fail.bytes && key.endsWith(fail.bytes)) throw new Error("boom"); live.add(key); }),
+      putJson: vi.fn(async (key: string) => { live.add(key); if (fail.json) throw new Error("boom"); }),
+      uri: (key: string) => `s3://bucket/${key}`,
+      ...(withDelete ? { deleteKeys: vi.fn(async (keys: string[]) => { for (const key of keys) live.delete(key); }) } : {}),
+    };
+    return { storage, live };
+  };
+
+  it("an object failure deletes the files already written and names the phase", async () => {
+    const set = await readDopplerFigureDir(dir, { pageCount: 5 });
+    const { storage, live } = recordingStorage({ bytes: "/p5.g1.png" });
+    const error = await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown: "" }).catch((e) => e);
+    expect(error).toBeInstanceOf(DopplerFigureStoreError);
+    expect(error).toMatchObject({ reason: "store-object-failed", cleanup: "deleted" });
+    expect(storage.putJson).not.toHaveBeenCalled();
+    expect(live.size).toBe(0);
+  });
+
+  it("an index failure deletes the files and the index, even when the index write landed", async () => {
+    const set = await readDopplerFigureDir(dir, { pageCount: 5 });
+    const { storage, live } = recordingStorage({ json: true });
+    const error = await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown: "" }).catch((e) => e);
+    expect(error).toMatchObject({ reason: "store-index-failed", cleanup: "deleted" });
+    expect(live.size).toBe(0);
+  });
+
+  it("without deleteKeys the failure still reports, with cleanup unavailable", async () => {
+    const set = await readDopplerFigureDir(dir, { pageCount: 5 });
+    const { storage } = recordingStorage({ json: true }, false);
+    await expect(storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown: "" }))
+      .rejects.toMatchObject({ reason: "store-index-failed", cleanup: "unavailable" });
+  });
+
+  it("cancellation stays an abort, not a figure failure", async () => {
+    const set = await readDopplerFigureDir(dir, { pageCount: 5 });
+    const controller = new AbortController();
+    const { storage, live } = recordingStorage({});
+    storage.putBytes.mockImplementationOnce(async (key: string) => { live.add(key); controller.abort(); });
+    const error = await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown: "", signal: controller.signal }).catch((e) => e);
+    expect(error).not.toBeInstanceOf(DopplerFigureStoreError);
+    expect(error.name).toBe("AbortError");
+    expect(live.size).toBe(0);
+  });
+});
 
 describe("readDopplerFigureDir: the happy path", () => {
   it("accepts the fixture folder: raster, vector, PNG fallback, a repeat and a failed figure", async () => {

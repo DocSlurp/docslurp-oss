@@ -24,7 +24,9 @@ function registerProvider(figures: boolean) {
  * Runs the real ExtractMarkdownStage over a faked VM. `vm` plays the provider: it gets the job the stage built and
  * returns the provider result (the runner normally passes it through acceptSandboxedPdfResult).
  */
-async function runStage(vm: (job: any) => Promise<Partial<SandboxedPdfResult>>) {
+type StorageFaults = { putBytes?: (key: string) => boolean; putJson?: (key: string) => boolean };
+
+async function runStage(vm: (job: any) => Promise<Partial<SandboxedPdfResult>>, faults: StorageFaults = {}) {
   const { defaultPipelineFeatures, defaultDocumentExtractionConfig } = await import("@docslurp/shared");
   const { WorkflowState } = await import("../pipeline/pipeline.js");
   const dir = await mkdtemp(path.join(tmpdir(), "vm-figures-stage-"));
@@ -34,8 +36,16 @@ async function runStage(vm: (job: any) => Promise<Partial<SandboxedPdfResult>>) 
   const json = new Map<string, any>();
   const storage = {
     uri: (key: string) => `s3://test/${key}`,
-    putBytes: async (key: string, data: Uint8Array, type: string) => { objects.set(key, { bytes: Buffer.from(data), type }); },
-    putJson: async (key: string, value: unknown) => { json.set(key, value); },
+    putBytes: async (key: string, data: Uint8Array, type: string) => {
+      if (faults.putBytes?.(key)) throw Object.assign(new Error(`upload of ${key} failed: Prose before the figure.`), { code: "SlowDown" });
+      objects.set(key, { bytes: Buffer.from(data), type });
+    },
+    putJson: async (key: string, value: unknown) => {
+      // The write lands, then the call fails: cleanup must still remove the index.
+      json.set(key, value);
+      if (faults.putJson?.(key)) throw new Error(`upload of ${key} failed`);
+    },
+    deleteKeys: async (keys: string[]) => { for (const key of keys) { objects.delete(key); json.delete(key); } },
     streamText: async (key: string, value: string) => { objects.set(key, { bytes: Buffer.from(value) }); },
     streamToStorage: async (key: string, stream: AsyncIterable<Buffer>) => { const parts: Buffer[] = []; for await (const b of stream) parts.push(b); objects.set(key, { bytes: Buffer.concat(parts) }); },
     createMultipartUploadStream: (key: string) => {
@@ -142,5 +152,43 @@ describe("Doppler figures in the extraction stage", () => {
     expect(out.stageState?.stats?.dopplerFigures).toEqual({ status: "rejected", rule: "size-mismatch", imagesConfined: null });
     expect([...out.objects.keys()].some((key) => key.includes("doppler-figures"))).toBe(false);
     expect(out.markdown).toBe(MARKDOWN);
+  });
+
+  const figureFolder = async (job: any) => {
+    await cp(FIXTURE, job.figures.dir, { recursive: true });
+    return { figures: { status: "extracted" as const, confined: true } };
+  };
+
+  it("a failed figure object upload keeps the Markdown, removes partial figures and records no figure or index", async () => {
+    registerProvider(true);
+    vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "1");
+    const warn = vi.spyOn(console, "warn");
+    const out = await runStage(figureFolder, { putBytes: (key) => key.endsWith("/p3.g2.svg") });
+    expect(out.stageState?.status).toBe("completed");
+    expect(out.markdown).toBe(MARKDOWN);
+    expect(out.stageState?.stats?.dopplerFigures).toEqual({ status: "failed", reason: "store-object-failed", cleanup: "deleted", imagesConfined: true });
+    expect([...out.objects.keys()].some((key) => key.includes("doppler-figures"))).toBe(false);
+    expect([...out.json.keys()].some((key) => key.includes("doppler-figures"))).toBe(false);
+    expect(Object.keys(out.ledger).some((slot) => slot.includes("doppler-figure"))).toBe(false);
+    // Other document artifacts are still recorded.
+    expect(out.ledger[`${DOC_ID}:markdown-manifest`]).toBeTruthy();
+    const line = warn.mock.calls.map(([l]) => String(l)).find((l) => l.includes("[doppler-figures]") && l.includes("status=failed"));
+    expect(line).toContain("reason=store-object-failed");
+    expect(line).toContain("code=SlowDown");
+    expect(line).not.toContain("Prose before");
+    expect(JSON.stringify(out.stageState?.stats)).not.toContain("Prose before");
+  });
+
+  it("a failed figure index upload keeps the Markdown and leaves no index or figure visible", async () => {
+    registerProvider(true);
+    vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "1");
+    const out = await runStage(figureFolder, { putJson: (key) => key === `${figureRoot}/index.json` });
+    expect(out.stageState?.status).toBe("completed");
+    expect(out.markdown).toBe(MARKDOWN);
+    expect(out.stageState?.stats?.dopplerFigures).toEqual({ status: "failed", reason: "store-index-failed", cleanup: "deleted", imagesConfined: true });
+    expect(out.json.has(`${figureRoot}/index.json`)).toBe(false);
+    expect([...out.objects.keys()].some((key) => key.includes("doppler-figures"))).toBe(false);
+    expect(Object.keys(out.ledger).some((slot) => slot.includes("doppler-figure"))).toBe(false);
+    expect(out.ledger[`${DOC_ID}:markdown-manifest`]).toBeTruthy();
   });
 });
