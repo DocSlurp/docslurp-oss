@@ -52,7 +52,7 @@ import {
   type CanonicalReconciliationDecision,
 } from "../lib/canonical-reconciliation.js";
 import { loadActiveRoutePlan } from "../routing/active-plan.js";
-import { DRAWN_CONTENT_SIGNAL, selectLegacyVisionPages } from "./classify-route.js";
+import { DRAWN_CONTENT_SIGNAL, selectLegacyVisionPages, TABLE_LEAK_ONLY_SIGNAL } from "./classify-route.js";
 import { inkCheckVerdict, readPngFileFacts } from "../lib/page-image-evidence.js";
 import {
   findVisionGuardStop,
@@ -60,6 +60,7 @@ import {
   visionGuardFor,
   withVisionCall,
   type VisionAttemptPurpose,
+  type VisionAttemptTarget,
   type VisionGuardStop,
 } from "../lib/vision-attempt-guard.js";
 import { findVisionServedRoute, isBilledVisionRoute, type VisionServedRoute } from "../lib/vision-pricing.js";
@@ -77,7 +78,7 @@ import {
   type RoutedExecution,
 } from "../routing/runtime.js";
 import type { PlanValidation, RoutePlan } from "@docslurp/shared";
-import { MIXED_SCAN_IMAGE_SIGNAL } from "@docslurp/shared";
+import { MIXED_SCAN_IMAGE_SIGNAL, tableLeakPageCap } from "@docslurp/shared";
 import { buildVisionPageFacts, recordPageFacts, type VisionPageOutcome } from "../pipeline/page-facts.js";
 import { VISUAL_CANDIDATE_STATS_KEY, type BBox } from "@docslurp/shared";
 import { chargeChartExports, chartExportCanSpend } from "../chart-export/billing.js";
@@ -97,6 +98,7 @@ import type { ChartModelClient } from "../chart-export/types.js";
 import { deterministicSourceKind } from "../chart-export/vm-extractor.js";
 import chartSharp from "../tools/isolated-image.js";
 import type { DocumentStageResult } from "../pipeline/checkpoints.js";
+import { sanitizeVisionPageTables } from "../pipeline/vision-tables-vm.js";
 
 export interface VisionPageOutput {
   pageNumber: number;
@@ -140,6 +142,11 @@ export interface LegacyPageHints {
    * scanned pages are, never rasterized on the host for a hosted vision model.
    */
   vmOcrPages?: ReadonlySet<number>;
+  /**
+   * Pages authorized by table-leak signals alone (TABLE_LEAK_ONLY_SIGNAL): read under the guard's durable `table-rescue`
+   * budget of tableLeakPageCap(pages) distinct pages per document, so retries and restarts cannot widen the cap.
+   */
+  tableRescuePages?: ReadonlySet<number>;
 }
 
 export { VisionGuardStopError } from "../lib/vision-attempt-guard.js";
@@ -157,14 +164,16 @@ export function legacyPageHints(pages: Array<{ pageNumber: number; textDensitySc
   const inkCheckPages = new Set<number>();
   const fallbackTextPages = new Set<number>();
   const vmOcrPages = new Set<number>();
+  const tableRescuePages = new Set<number>();
   for (const page of pages) {
+    if (page.ocrDecision?.signals.includes(TABLE_LEAK_ONLY_SIGNAL)) tableRescuePages.add(page.pageNumber);
     if (page.ocrDecision?.signals.includes(DRAWN_CONTENT_SIGNAL)) inkCheckPages.add(page.pageNumber);
     if (page.ocrDecision?.signals.includes(MIXED_SCAN_IMAGE_SIGNAL)) vmOcrPages.add(page.pageNumber);
     if (page.textDensityScore >= USABLE_FALLBACK_DENSITY && !page.signals.includes("garbled-text")) {
       fallbackTextPages.add(page.pageNumber);
     }
   }
-  return { inkCheckPages, fallbackTextPages, vmOcrPages };
+  return { inkCheckPages, fallbackTextPages, vmOcrPages, tableRescuePages };
 }
 
 /** Errors whose vision attempt `recordFailedVisionAttempt` already recorded (once per call). */
@@ -487,6 +496,11 @@ export class VisionExtractStage implements Stage {
               };
             }
 
+            // Model HTML tables are read in the parser VM, all of this document's pages in one job, and rebuilt on the host
+            // from the typed result (vision-tables-vm.ts); nothing reads the model's own table markup after this.
+            outputs = await this.rebuildModelTables(state, document, outputs, signal);
+            if (routedResult) routedResult = { ...routedResult, outputs };
+
             const routedValidation = routed && routedResult
               ? await this.recordRoutedValidation(state, document, routed.plan, routed.execution, routedResult, key)
               : null;
@@ -644,6 +658,23 @@ export class VisionExtractStage implements Stage {
         );
       },
     );
+  }
+
+  private async rebuildModelTables<T extends { text?: string | null }>(
+    state: WorkflowState, document: import("../models.js").Document, outputs: T[], signal?: AbortSignal,
+  ): Promise<T[]> {
+    const { texts, stats } = await sanitizeVisionPageTables(outputs.map((page) => page.text ?? ""), this.runner, { signal, documentId: document.id });
+    if (stats.pages === 0) return outputs;
+    console.log(
+      `[vision-tables] document=${document.id} pages=${stats.pages} tables=${stats.tables} spansDropped=${stats.spansDropped} ` +
+        `gfm=${stats.gfm} textFallback=${stats.textFallback} escapedPages=${stats.escapedPages} rawRegions=${stats.rawRegions}${stats.rawRegions ? ` rawReasons=${JSON.stringify(stats.rawReasons)}` : ""} vmCalls=${stats.vmCalls} vmMs=${stats.vmMs}`,
+    );
+    state.pendingPerformance.push({
+      documentId: document.id, scope: "document", stageName: this.name, metric: "vision-table-rebuild-latency",
+      value: stats.vmMs, unit: "ms", tags: ["document", "vision", "tables"],
+      metadata: { ...stats },
+    });
+    return outputs.map((page, index) => (texts[index] === (page.text ?? "") ? page : { ...page, text: texts[index]! }));
   }
 
   private async checkNeedsVision(
@@ -1306,6 +1337,8 @@ export class VisionExtractStage implements Stage {
             widthPx: image.widthPx, heightPx: image.heightPx },
           signal,
           usageSink,
+          hints.tableRescuePages?.has(page.pageNumber) ? "table-rescue" : "page",
+          hints.tableRescuePages?.has(page.pageNumber) ? { documentPageLimit: tableLeakPageCap(maxInt(1, document.pageCount)) } : {},
         );
         const result = { inputTokens: output.inputTokens, outputTokens: output.outputTokens, latencyMs: output.latencyMs };
         await emitDocumentPageProgress(
@@ -1388,6 +1421,7 @@ export class VisionExtractStage implements Stage {
     signal?: AbortSignal,
     usageSink?: (event: UsageEvent | null, pageNumber: number) => void,
     purpose: VisionAttemptPurpose = "page",
+    limits: Pick<VisionAttemptTarget, "documentPageLimit" | "documentAttemptLimit"> = {},
   ): Promise<VisionPageOutput> {
     const imagePath = image.imagePath;
     const page = { mimeType: image.mimeType, pageNumber: image.pageNumber, artifactUri: image.artifactUri ?? "" };
@@ -1396,7 +1430,7 @@ export class VisionExtractStage implements Stage {
     // Every request of every vision call of the run (legacy page, routed region, refusal fallback,
     // cascade leg; first try, inline retries, streaming fallback, alternate route) is admitted by the
     // run's attempt guard through this gate before it is sent.
-    return await withVisionCall(state, { ...pageRef, purpose }, async (gate) => {
+    return await withVisionCall(state, { ...pageRef, purpose, ...limits }, async (gate) => {
       let skippedLimit = false;
       const normalized = imageOrientationEnabled() ? await withOrientationAdmission(gate, async () => {
         if (isCostCapExceeded(state)) throw new Error("Image orientation refused: run cost cap exceeded");

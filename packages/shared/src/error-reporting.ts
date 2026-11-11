@@ -90,3 +90,22 @@ function reportCancellation(attributes: Record<string, string | number | boolean
     logger.emit({ severityNumber: 9, severityText: "INFO", body: "public_operation_cancelled", attributes: { ...attributes, "docslurp.outcome": "cancelled" } });
   } catch { /* telemetry must never replace the original outcome */ }
 }
+
+/**
+ * A product event worth reading in SigNoz (logs), not an error. Attributes are
+ * redacted like exception text; nested values are JSON-encoded.
+ */
+export function emitEventLog(body: string, attributes: Record<string, unknown> = {}): void {
+  const safe: Record<string, string | number | boolean> = {};
+  for (const [key, value] of Object.entries(attributes)) {
+    if (value === undefined || value === null) continue;
+    if (typeof value === "number" || typeof value === "boolean") safe[key] = value;
+    else safe[key] = redactExceptionText(typeof value === "string" ? value : JSON.stringify(value));
+  }
+  try { console.info(`[event] ${body}`, safe); } catch { /* best effort */ }
+  try {
+    const logger = hasSharedLogProvider() ? logs.getLogger("docslurp.events")
+      : workerLoggerProvider?.getLogger("docslurp.events") ?? logs.getLogger("docslurp.events");
+    logger.emit({ severityNumber: 9, severityText: "INFO", body, attributes: safe });
+  } catch { /* telemetry must never break the caller */ }
+}

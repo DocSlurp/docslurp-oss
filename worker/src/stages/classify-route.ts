@@ -25,7 +25,14 @@ import {
   type AdaptiveSpecializedContentKind,
   type AdaptiveSpecializedContentSummary,
   type ParserPlaybookKey,
+  tableLeakPageCap,
   tableReliability,
+  hasHtmlTableMarkup,
+  TABLE_HTML_UNSCANNED_SIGNAL,
+  TABLE_LEAK,
+  TABLE_LEAK_SIGNALS,
+  TABLE_SCAN_MAX_PAGE_CHARS,
+  type HtmlTableScan,
 } from "@docslurp/shared";
 import type { Stage } from "../pipeline/pipeline.js";
 import { runDocumentStage, runDocuments, } from "../pipeline/checkpoints.js";
@@ -36,17 +43,51 @@ import { parsePageLayoutFacts, type PageLayoutFacts } from "../lib/page-layout-f
 import { SPARSE_PAGE_WORDS, pageAlignedTexts, pageEvidenceWordCount, type PageImageEvidence, type PageTextLayerEvidence } from "../lib/page-image-evidence.js";
 import { pageTextYield } from "../lib/page-yield-evidence.js";
 import { resolveRunRoutingV2, routingVersion, type RoutingVersionOptions } from "../lib/vision-routing-v2.js";
+import { scanDocumentTables } from "../pipeline/table-routing-vm.js";
+import type { CommandRunner } from "../tools/runner.js";
+
+/**
+ * The parser VM's reading of each page text's HTML tables (scanDocumentTables), by page text; null for a page it did not
+ * read. Given, a page with `<table` that is missing from it counts as unread (never scanned on the host).
+ */
+export type PageTableScans = ReadonlyMap<string, HtmlTableScan | null>;
+
+function tableScanOf(text: string, scans: PageTableScans | undefined): HtmlTableScan | null | undefined {
+  if (!scans || !hasHtmlTableMarkup(text)) return undefined;
+  return scans.get(text) ?? null;
+}
 
 // Lightweight document-type classification using filename + extracted/canonical text heuristics.
 // Emits a classification artifact and (optionally) a suggested parser playbook override per document.
 
-/** A table-heavy page whose extracted table is unreliable (tableReliability): a model reads it, billed Rich. */
+/** A page whose extracted table is unreliable or leaked out of the tables (tableReliability): a model reads it, billed Rich. */
 export const TABLE_UNRELIABLE_SIGNAL = "ocr-authorized:table-unreliable";
+/**
+ * Authorized by leak signals alone (TABLE_LEAK_SIGNALS on a page that is not a table-heavy page with an unreliable table):
+ * counted against the document's tableLeakPageCap here, and read under the guard's `table-rescue` page budget.
+ */
+export const TABLE_LEAK_ONLY_SIGNAL = "table:leak-only";
+/** A leak-qualified page past the document's cap: served from the extraction, recorded for telemetry. */
+export const TABLE_LEAK_CAPPED_SIGNAL = "table:leak-capped";
 
 export class ClassifyRouteStage implements Stage {
   readonly name = "classify-route";
 
-  constructor(private readonly storage: ArtifactStore) {}
+  constructor(private readonly storage: ArtifactStore, private readonly runner: Pick<CommandRunner, "run"> | null = null) {}
+
+  /**
+   * Every candidate page text's HTML tables, scanned in the parser VM in one batched job per document (none when no page
+   * holds `<table`): routing's table checks read these, never a host scan.
+   */
+  private async scanPageTables(text: string, pageCount: number, documentId: string, signal?: AbortSignal): Promise<PageTableScans> {
+    const candidates = new Set([...(pageAlignedTexts(text, pageCount) ?? []), ...splitTextIntoPages(text, pageCount)].filter(hasHtmlTableMarkup));
+    const texts = [...candidates];
+    const { scans, stats } = await scanDocumentTables(texts, this.runner, { documentId, ...(signal ? { signal } : {}) });
+    if (stats.pages > 0) {
+      console.log(`[classify-route] document=${documentId} table-scan htmlPages=${stats.pages} unscanned=${stats.unscanned} vmCalls=${stats.vmCalls} vmMs=${stats.vmMs}`);
+    }
+    return new Map(texts.map((page, index) => [page, scans[index] ?? null]));
+  }
 
   async run(state: import("../pipeline/pipeline.js").WorkflowState, signal?: AbortSignal): Promise<void> {
     await runDocuments(healthyDocuments(state), state.docConcurrency, async (document) => {
@@ -64,6 +105,7 @@ export class ClassifyRouteStage implements Stage {
           const imageEvidence = await this.loadPageImageEvidence(state, document.id);
           const routingV2 = resolveRunRoutingV2(state);
           const pageLayout = routingV2 ? await this.loadPageLayoutFacts(state, document.id) : null;
+          const tableScans = await this.scanPageTables(evidence?.text ?? "", Math.max(1, document.pageCount), document.id, signal);
           const surface = buildAdaptiveRoutingDecisionSurface({
             documentId: document.id,
             filename: document.filename,
@@ -83,6 +125,7 @@ export class ClassifyRouteStage implements Stage {
             pageImageEvidence: imageEvidence?.pages,
             drawnBytesPerPage: imageEvidence?.drawnBytesPerPage ?? null,
             ...(pageLayout ? { pageLayout } : {}),
+            tableScans,
             routingV2,
           });
 
@@ -332,6 +375,11 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
   drawnBytesPerPage?: number | null;
   /** Legacy vision routing v2 (lib/vision-routing-v2.ts). Off reproduces v1 routing. */
   routingV2?: boolean;
+  /**
+   * The parser VM's scans of the page texts' HTML tables (ClassifyRouteStage). Omitted, the tables are scanned
+   * in-process, which the service profile refuses on the host.
+   */
+  tableScans?: PageTableScans;
 }): AdaptiveRoutingDecisionSurface {
   const routingV2 = args.routingV2 === true;
   const hasPageEvidence =
@@ -347,7 +395,7 @@ export function buildAdaptiveRoutingDecisionSurface(args: {
   const { label, confidence, signals } = classifyTextAndFilename(args.text, args.filename, { routingV2 });
   const pageCount = Math.max(1, args.pageCount);
   const pages = routingV2
-    ? buildEvidencePages(args, pageCount)
+    ? capTableLeakPages(buildEvidencePages(args, pageCount), pageCount)
     : buildLegacyPages(args, pageCount);
   const summary = summarizeAdaptiveRouting(pages);
   const specializedContentSummary = summarizeSpecializedContent(pages);
@@ -392,7 +440,7 @@ function buildLegacyPages(
   const documentWithoutText = !args.text.trim();
   const drawnContent = () =>
     documentWithoutText && args.drawnBytesPerPage != null && args.drawnBytesPerPage >= DRAWN_CONTENT_MIN_BYTES_PER_PAGE;
-  return buildAdaptivePageRoutesFromTexts(pageTexts, pageCount, { routingV2 }).map((page) => {
+  return buildAdaptivePageRoutesFromTexts(pageTexts, pageCount, { routingV2, ...(args.tableScans ? { tableScans: args.tableScans } : {}) }).map((page) => {
     const complexity = args.structuredComplexity?.get(page.pageNumber);
     const imageEvidence = args.pageImageEvidence?.get(page.pageNumber);
     if (!complexity && !imageEvidence) return page;
@@ -447,7 +495,7 @@ function buildEvidencePages(
   return texts.map((text, index) => {
     const pageNumber = index + 1;
     const layout = args.pageLayout?.get(pageNumber);
-    const page = classifyAdaptivePage(pageNumber, text, { routingV2: true, layout: layout ?? null });
+    const page = classifyAdaptivePage(pageNumber, text, { routingV2: true, layout: layout ?? null, ...(args.tableScans ? { tableScans: args.tableScans } : {}) });
     const complexity = args.structuredComplexity?.get(pageNumber);
     const imageEvidence = evidence?.get(pageNumber);
     const layoutKnown = layout !== undefined && layout.images !== null;
@@ -487,14 +535,20 @@ function buildEvidencePages(
         }
       : { authorized: decision.read, confidence: decision.confidence, signals: decision.signals };
     // A born-digital table page is served from the extractor's table unless that table is unreliable (after the structural
-    // repairs extract-markdown made): then a model reads the page.
-    const tableSignals = !ocrDecision.authorized && page.route === "table-heavy" && aligned !== null ? tableReliability(text) : [];
+    // repairs extract-markdown made): then a model reads the page. A table that leaked out of the extracted tables (rows
+    // written as text, a header without its body, merged numeric columns) qualifies any page, table-heavy or not.
+    const tableSignals = !ocrDecision.authorized && aligned !== null
+      ? tableReliability(text, TABLE_LEAK, tableScanOf(text, args.tableScans)).filter((signal) => page.route === "table-heavy" || TABLE_LEAK_SIGNALS.has(signal))
+      : [];
     if (tableSignals.length > 0) {
+      const leakOnly = !(page.route === "table-heavy" && tableSignals.some((signal) => !TABLE_LEAK_SIGNALS.has(signal)));
       return {
         ...page,
         extractorHint: "vision-rescue" as const,
         signals: [...page.signals, ...ocrDecision.signals, ...tableSignals],
-        ocrDecision: { authorized: true, confidence: 0.7, signals: [TABLE_UNRELIABLE_SIGNAL, ...tableSignals] },
+        ocrDecision: { authorized: true, confidence: 0.7, signals: [TABLE_UNRELIABLE_SIGNAL, ...tableSignals, ...(leakOnly ? [TABLE_LEAK_ONLY_SIGNAL] : [])] },
+        // What the page is without the leak read, for capTableLeakPages.
+        ...(leakOnly ? { [UNCAPPED]: { ...page, signals: [...page.signals, ...ocrDecision.signals, ...tableSignals, TABLE_LEAK_CAPPED_SIGNAL], ocrDecision } } : {}),
       };
     }
     if (!ocrDecision.authorized) {
@@ -510,6 +564,27 @@ function buildEvidencePages(
       signals: [...page.signals, ...ocrDecision.signals, ...(ocrDecision.signals.includes(GARBLED_TEXT_LAYER_SIGNAL) || decision.kind === "garbled-text-layer" ? ["garbled-text"] : [])],
       ocrDecision,
     };
+  });
+}
+
+const UNCAPPED = Symbol("table-leak-uncapped");
+
+/**
+ * At most tableLeakPageCap(pageCount) pages of a document are read for leak signals alone (TABLE_LEAK_PAGE_CAP): the
+ * pages with the most leak signals first, then in page order. The rest keep the decision they had without the signal.
+ */
+function capTableLeakPages(pages: AdaptivePageRoutingEntry[], pageCount: number): AdaptivePageRoutingEntry[] {
+  type Capped = AdaptivePageRoutingEntry & { [UNCAPPED]?: AdaptivePageRoutingEntry };
+  const leak = (pages as Capped[])
+    .map((page, index) => ({ page, index, strength: page.ocrDecision?.signals.filter((signal) => TABLE_LEAK_SIGNALS.has(signal)).length ?? 0 }))
+    .filter(({ page }) => page[UNCAPPED] !== undefined)
+    .sort((a, b) => b.strength - a.strength || a.index - b.index);
+  const cap = tableLeakPageCap(pageCount);
+  const dropped = new Set(leak.slice(cap).map(({ index }) => index));
+  if (dropped.size) console.log(`[classify-route] table-leak cap=${cap} pages=${leak.length} capped=${dropped.size}`);
+  return (pages as Capped[]).map((page, index) => {
+    const { [UNCAPPED]: uncapped, ...kept } = page;
+    return dropped.has(index) && uncapped ? uncapped : kept;
   });
 }
 
@@ -942,7 +1017,7 @@ export function buildAdaptivePageRoutes(
 function buildAdaptivePageRoutesFromTexts(
   pageTexts: string[],
   pageCount: number,
-  options: RoutingVersionOptions,
+  options: RoutingVersionOptions & { tableScans?: PageTableScans },
 ): AdaptivePageRoutingEntry[] {
   const resolvedPages = pageTexts.length > 0 ? pageTexts : Array.from({ length: Math.max(1, pageCount) }, () => "");
   return resolvedPages.map((pageText, index) => classifyAdaptivePage(index + 1, pageText, options));
@@ -957,10 +1032,10 @@ const ALIGNED_TABLE_MIN_ROWS = 3;
  * HTML tables), rows a layout-preserving extractor or OCR kept aligned, and, when known, the layout walker's tables with
  * their coverage. Never words that name a table ("total", "amount").
  */
-function pageIsTableHeavy(args: { text: string; alignedRows: number; numericRows: number; layout?: PageLayoutFacts | null }): boolean {
+function pageIsTableHeavy(args: { text: string; alignedRows: number; numericRows: number; layout?: PageLayoutFacts | null; tableScan?: HtmlTableScan | null }): boolean {
   const tables: PageTable[] = args.layout?.tables
     ? [...args.layout.tables]
-    : markdownTables(args.text).map((table) => ({ ...table, coverage: null }));
+    : markdownTables(args.text, args.tableScan).map((table) => ({ ...table, coverage: null }));
   // Ruled grids: a drawn table the extractor flattened still counts by its rows.
   tables.push(...(args.layout?.grids ?? []));
   if (args.alignedRows >= ALIGNED_TABLE_MIN_ROWS) tables.push({ rows: args.alignedRows, columns: 3, coverage: null });
@@ -984,12 +1059,47 @@ function isAlignedNumericRow(line: string): boolean {
   return cells.length >= 3 && cells.filter((cell) => /^[-+(]?[$€£¥]?\d[\d,.:/%)]*$/.test(cell)).length >= 2;
 }
 
+/**
+ * The page with its HTML tables replaced by a line break, so table markup is never read as code, formula or chemistry.
+ * The spans are the parser VM's validated reading (`tableScan`, offsets into the untrimmed page; `shift` maps them into
+ * the trimmed one). Without a scan (unread page, no scans given, or a page over the scan limit) only closed
+ * `<table…</table>` pairs are removed, found with indexOf (a tag-presence search, no tree). Never text after an unclosed
+ * `<table`: prose there stays visible to the content checks (council round 3 L1).
+ */
+function withoutHtmlTables(normalized: string, shift: number, tableScan: HtmlTableScan | null | undefined): string {
+  if (!/<table[\s>]/i.test(normalized)) return normalized;
+  const spans: Array<[number, number]> = [];
+  if (tableScan && tableScan.tables.length && normalized.length + shift <= TABLE_SCAN_MAX_PAGE_CHARS) {
+    for (const table of tableScan.tables) spans.push([table.start - shift, table.end - shift]);
+  } else if (!tableScan || normalized.length + shift > TABLE_SCAN_MAX_PAGE_CHARS) {
+    const lower = normalized.replace(/[A-Z]+/g, (letters) => letters.toLowerCase());
+    for (let at = lower.indexOf("<table"); at !== -1; at = lower.indexOf("<table", at + 1)) {
+      const next = lower.charAt(at + 6);
+      if (next !== ">" && !/\s/.test(next)) continue;
+      const close = lower.indexOf("</table>", at + 6);
+      if (close === -1) break;
+      spans.push([at, close + 8]);
+      at = close + 7;
+    }
+  }
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const [start, end] of spans) {
+    if (start < cursor || start < 0 || end > normalized.length) continue;
+    parts.push(normalized.slice(cursor, start), "\n");
+    cursor = end;
+  }
+  parts.push(normalized.slice(cursor));
+  return parts.join("");
+}
+
 export function classifyAdaptivePage(
   pageNumber: number,
   text: string,
-  options: RoutingVersionOptions & { layout?: PageLayoutFacts | null } = {},
+  options: RoutingVersionOptions & { layout?: PageLayoutFacts | null; tableScans?: PageTableScans } = {},
 ): AdaptivePageRoutingEntry {
   const routingV2 = options.routingV2 === true;
+  const tableScan = tableScanOf(text, options.tableScans);
   const normalized = text.trim();
   const charCount = normalized.length;
   // Same count as splitting on whitespace, without an array of every word on the page.
@@ -1039,8 +1149,7 @@ export function classifyAdaptivePage(
   ].filter(Boolean).length;
   const textDensityScore = Math.min(1, (charCount / 900) * 0.6 + (wordCount / 180) * 0.4);
   const signals: string[] = [];
-  const withoutTables = normalized
-    .replace(/<table[\s>][\s\S]*?(?:<\/table>|$)/gi, "\n")
+  const withoutTables = withoutHtmlTables(normalized, text.length - text.trimStart().length, tableScan)
     .split("\n").filter((line) => !/^\s*\|.*\|\s*$/.test(line)).join("\n");
   const specializedContent = detectSpecializedContent(withoutTables, withoutTables.split(/\n+/).filter(Boolean), routingV2);
 
@@ -1071,7 +1180,7 @@ export function classifyAdaptivePage(
     extractorHint = "layout-aware";
     confidence = 0.79;
     signals.push("field-markers", "label-value-layout");
-  } else if (pageIsTableHeavy({ text, alignedRows: alignedTableRowLines, numericRows: numericRowLines, layout: options.layout })) {
+  } else if (pageIsTableHeavy({ text, alignedRows: alignedTableRowLines, numericRows: numericRowLines, layout: options.layout, ...(tableScan !== undefined ? { tableScan } : {}) })) {
     route = "table-heavy";
     extractorHint = "layout-aware";
     confidence = 0.76;
@@ -1093,6 +1202,8 @@ export function classifyAdaptivePage(
   if (digitCount > Math.max(12, charCount * 0.18)) {
     signals.push("numeric-heavy");
   }
+  // The parser VM did not read this page's HTML tables: none was counted (fail closed), and the reason is kept.
+  if (tableScan === null) signals.push(TABLE_HTML_UNSCANNED_SIGNAL);
 
   return {
     pageNumber,

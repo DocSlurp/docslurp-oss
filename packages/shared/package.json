@@ -89,6 +89,10 @@
     "./pricing-loader": {
       "types": "./dist/pricing-loader.d.ts",
       "import": "./dist/pricing-loader.js"
+    },
+    "./page-table-routing": {
+      "types": "./dist/page-table-routing.d.ts",
+      "import": "./dist/page-table-routing.js"
     }
   },
   "files": [

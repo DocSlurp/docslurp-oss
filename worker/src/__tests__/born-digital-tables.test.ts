@@ -1,10 +1,11 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-import { repairMarkdownTables, tableReliability } from "@docslurp/shared";
+import { repairMarkdownTables, tableLeakPageCap, tableReliability } from "@docslurp/shared";
 import { describe, expect, it } from "vitest";
 
-import { buildAdaptiveRoutingDecisionSurface, TABLE_UNRELIABLE_SIGNAL } from "../stages/classify-route.js";
+import { buildAdaptiveRoutingDecisionSurface, TABLE_LEAK_CAPPED_SIGNAL, TABLE_LEAK_ONLY_SIGNAL, TABLE_UNRELIABLE_SIGNAL } from "../stages/classify-route.js";
+import { legacyPageHints } from "../stages/vision-extract.js";
 
 /** Doppler's recorded Markdown (pinned commit) for a generated fixture, repaired as extract-markdown repairs it. */
 const recorded = (name: string) => repairMarkdownTables(readFileSync(path.resolve("testdata/pdf-fixtures/doppler-md", `${name}.pdf.md`), "utf8"));
@@ -23,6 +24,41 @@ const route = (text: string) => {
 const FINANCIAL = [["Account", "2024", "2025", "Change"], ["Revenue", "48,210", "52,934", "+9.8%"], ["Cost of sales", "21,877", "23,015", "+5.2%"],
   ["Gross profit", "26,333", "29,919", "+13.6%"], ["Operating expenses", "15,012", "15,890", "+5.8%"], ["Operating income", "11,321", "14,029", "+23.9%"],
   ["Interest expense", "1,204", "1,187", "-1.4%"], ["Pre-tax income", "10,117", "12,842", "+26.9%"], ["Income tax", "2,529", "3,211", "+27.0%"]];
+
+const routeDocument = (pages: string[]) => {
+  const surface = buildAdaptiveRoutingDecisionSurface({
+    documentId: "d", filename: "d.pdf", text: pages.join("\f"), pageCount: pages.length, evidence: { source: "canonical-document", artifactUri: "s3://b/c.json" },
+    pageImageEvidence: new Map(pages.map((_, i) => [i + 1, { pageNumber: i + 1, wordCount: 120, imageCount: 0, imageCoverage: 0, largestImageCoverage: 0 }])), routingV2: true,
+  });
+  if (surface.status !== "ready") throw new Error("not ready");
+  return surface.pages;
+};
+const LEAKED_ROWS = ["Bookings by segment", "", "Enterprise 412.5 18.2% 398.1 17.9%", "Mid-market 288.0 12.7% 251.3 11.3%", "Startups 190.4 8.4% 170.2 7.1%"].join("\n");
+
+// Council #338 routing Mediums: leak signals cannot force every page of a document to a paid read.
+describe("table-leak reads are capped per document", () => {
+  it("a document whose every page carries leaked rows reads only tableLeakPageCap(pages) of them; the rest stay Fast", () => {
+    const pages = Array.from({ length: 60 }, (_, i) => `${LEAKED_ROWS}\n\nPage ${i + 1} of the expansion plan.`);
+    const routed = routeDocument(pages);
+    const read = routed.filter((page) => page.ocrDecision?.authorized);
+    expect(read).toHaveLength(tableLeakPageCap(60));
+    expect(read.every((page) => page.ocrDecision!.signals.includes(TABLE_LEAK_ONLY_SIGNAL))).toBe(true);
+    const capped = routed.filter((page) => !page.ocrDecision?.authorized);
+    expect(capped).toHaveLength(60 - tableLeakPageCap(60));
+    expect(capped.every((page) => page.signals.includes(TABLE_LEAK_CAPPED_SIGNAL))).toBe(true);
+    // The pages read are budgeted by the guard's durable table-rescue purpose.
+    expect([...legacyPageHints(routed).tableRescuePages!].sort((a, b) => a - b)).toEqual(read.map((page) => page.pageNumber));
+  });
+
+  it("clean prose, letterheads and chart axes stay free under auto", () => {
+    const routed = routeDocument([
+      "# Acme Expansion Partners\n\nPhone +1 415 555 0100\nFax +1 415 555 0101\nMain +1 415 555 0102\n\nWe are delighted to confirm the London office opening.",
+      "Quarterly revenue grew every quarter.\n\nRevenue 0 20 40 60 80 100\nMargin 0 5 10 15 20 25\nGrowth 0 2.5 5.0 7.5 10.0",
+      "In 2026, revenue rose 12% to $4.2 billion from $3.8 billion, and margins expanded 3.1 points to 24.5%.",
+    ]);
+    expect(routed.map((page) => page.ocrDecision?.authorized ?? false)).toEqual([false, false, false]);
+  });
+});
 
 describe("born-digital tables are served from Doppler (owner policy 2026-11-05)", () => {
   it("a clean financial statement keeps every row and cell, and stays Fast", () => {

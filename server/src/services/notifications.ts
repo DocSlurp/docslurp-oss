@@ -1,5 +1,5 @@
 import { instrumentFetch } from "@docslurp/shared/observability";
-import { PUBLIC_ERROR_MESSAGES, publicDiagnostics } from "@docslurp/shared";
+import { isReservedTestEmail, publicDiagnostics } from "@docslurp/shared";
 import { randomUUID } from "node:crypto";
 
 import { sql } from "../db.js";
@@ -148,6 +148,15 @@ async function deliverEmail(args: {
   const from = process.env.EMAIL_FROM ?? "DocSlurp <noreply@docslurp.local>";
   const replyTo = process.env.EMAIL_REPLY_TO;
 
+  // Reserved test domains (seed, e2e, agent accounts) can never receive mail;
+  // sending there only bounces and hurts the sender's reputation.
+  if (isReservedTestEmail(args.recipient)) {
+    console.log(
+      `[notification] provider=suppressed delivery=${args.deliveryId} to=${args.recipient} reason=reserved-domain subject=${JSON.stringify(args.subject)}`
+    );
+    return { delivered: false, provider: "suppressed" };
+  }
+
   if (!resendApiKey) {
     console.log(
       `[notification] provider=console delivery=${args.deliveryId} to=${args.recipient} subject=${JSON.stringify(args.subject)}`
@@ -179,6 +188,11 @@ async function deliverEmail(args: {
     provider: "resend",
     responseText: await response.text().catch(() => "")
   };
+}
+
+/** A suppressed send (reserved test domain) is intentional, not a failure. */
+function deliveryFailed(delivery: { delivered: boolean; provider: string }): boolean {
+  return !delivery.delivered && delivery.provider !== "suppressed";
 }
 
 export async function getNotificationPreferences(userId: string): Promise<NotificationPreferences> {
@@ -365,102 +379,6 @@ export async function isNotificationEnabled(userId: string, event: NotificationE
   }
 }
 
-export async function sendNotificationEmail(args: {
-  userId: string;
-  event: NotificationEvent;
-  subject: string;
-  html: string;
-  text: string;
-  metadata?: Record<string, unknown>;
-}): Promise<EmailDeliveryResult | null> {
-  const enabled = await isNotificationEnabled(args.userId, args.event);
-  if (!enabled) {
-    return null;
-  }
-
-  const user = await getUser(args.userId);
-  if (!user) {
-    return null;
-  }
-
-  const deliveryId = randomUUID();
-  const delivery = await deliverEmail({
-    deliveryId,
-    recipient: user.email,
-    subject: args.subject,
-    html: args.html,
-    text: args.text
-  });
-  await logDelivery({
-    id: deliveryId,
-    userId: args.userId,
-    orgId: null,
-    projectId: null,
-    event: args.event,
-    provider: delivery.provider,
-    recipient: user.email,
-    subject: args.subject,
-    delivered: delivery.delivered,
-    metadata: {
-      ...(args.metadata ?? {}),
-      response: delivery.responseText ?? null
-    }
-  });
-
-  if (!delivery.delivered) {
-    throw new Error(`email delivery failed: ${delivery.responseText ?? "unknown error"}`);
-  }
-
-  return {
-    id: deliveryId,
-    delivered: delivery.delivered,
-    provider: delivery.provider
-  };
-}
-
-export async function sendRunStatusEmail(args: {
-  userId: string;
-  projectName: string;
-  runId: string;
-  status: "completed" | "failed";
-  stage?: string | null;
-  error?: string | null;
-}): Promise<EmailDeliveryResult | null> {
-  const subject =
-    args.status === "completed"
-      ? `Run completed: ${args.projectName}`
-      : `Run failed: ${args.projectName}`;
-
-  const lines = [
-    `Project: ${args.projectName}`,
-    `Run ID: ${args.runId}`,
-    `Status: ${args.status}`
-  ];
-
-  if (args.stage) {
-    lines.push(`Stage: ${args.stage}`);
-  }
-  if (args.error) {
-    lines.push(PUBLIC_ERROR_MESSAGES.processing);
-  }
-
-  const bodyText = lines.join("\n");
-  const html = `<p>${lines.map((line) => escapeHtml(line)).join("<br />")}</p>`;
-
-  return await sendNotificationEmail({
-    userId: args.userId,
-    event: args.status === "completed" ? "run.completed" : "run.failed",
-    subject,
-    html,
-    text: bodyText,
-    metadata: {
-      runId: args.runId,
-      projectName: args.projectName,
-      stage: args.stage ?? null
-    }
-  });
-}
-
 export async function sendProjectInviteEmail(args: {
   actorUserId: string;
   recipientEmail: string;
@@ -549,7 +467,7 @@ export async function sendExportReadyEmail(args: {
     delivered: delivery.delivered,
     metadata: { orgId: args.orgId, projectId: args.projectId, response: delivery.responseText ?? null }
   }).catch(() => undefined);
-  if (!delivery.delivered) throw new Error(`email provider ${delivery.provider} refused the export email`);
+  if (deliveryFailed(delivery)) throw new Error(`email provider ${delivery.provider} refused the export email`);
 }
 
 /**
@@ -592,7 +510,7 @@ export async function sendExtractReadyEmail(args: {
     delivered: delivery.delivered,
     metadata: { orgId: args.orgId, projectId: args.projectId, extractId: args.extractId, response: delivery.responseText ?? null }
   }).catch(() => undefined);
-  if (!delivery.delivered) throw new Error(`email provider ${delivery.provider} refused the extract email`);
+  if (deliveryFailed(delivery)) throw new Error(`email provider ${delivery.provider} refused the extract email`);
 }
 
 /** The signed-in accept page (dashboard). */
