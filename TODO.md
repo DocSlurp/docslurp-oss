@@ -27,6 +27,14 @@
   (file-sniff RAR_MIME), but a RAR stored inside an accepted container (a DOCX/EPUB/ODT member) is still unscanned. Our
   extractors never open it; it is only served back with the original. Decide: install libclamunrar in the worker and
   scanner images, or refuse containers whose members are RAR (needs member magic, read in the VM).
+- [ ] libclamav 1.4.3 skips ZIP64 members (a local header with 0xFFFFFFFF sizes: "stream out of file"); a 68-byte EICAR
+  in one scans OK (council re-check 2 matrix, `zip64-member-eicar.zip`). Top level, the archive inspection refuses ZIP64
+  (archive-inspection-failed); a ZIP64 archive nested inside an accepted container is unscanned. Extractors never open
+  nested archives. Decide: report upstream and pin a fixed ClamAV, or have the VM inspection walk nested ZIPs.
+- [ ] libclamav 1.4.3 decrypts an unfiltered stream of an owner-password-only PDF, discards the plaintext and scans the
+  ciphertext (debug: "no non-forced filters decoded, returning raw stream"); Flate streams are scanned. So an owner-only
+  PDF can carry content ClamAV never reads, which our PDF extractors (in the VM) do read. Decide: decrypt owner-only PDFs
+  in the scanner VM (qpdf --decrypt) and scan the copy as well, refuse owner-only PDFs with unfiltered streams, or accept.
 - [ ] Q3 (concurrent quarantine and extraction): split quarantine into the intake inspection (stays first: format-detect
   reads its verified file facts) and the malware scan, and gate every served artifact on a clean verdict before running
   the scan beside extraction. Coordinate with the first-pass plan's quarantine precondition.

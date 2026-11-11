@@ -51,12 +51,14 @@ pdf += b"trailer\n<</Size %d/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF\n" % (len(obje
 with open(at("marker-src.pdf"), "wb") as f:
     f.write(pdf)
 run("qpdf", "--stream-data=uncompress", at("marker-src.pdf"), at("marker-plain.pdf"))
-# Empty user password + owner password: anyone can open it; libclamav decrypts and scans it.
-run("qpdf", "--stream-data=uncompress", "--encrypt", "", "owner-secret", "256", "--", at("marker-plain.pdf"), at("pdf-empty-user-owner-marker.pdf"))
+# Empty user password + owner password: anyone can open it. libclamav decrypts it and scans Flate streams, but an
+# unfiltered stream's decrypted bytes are discarded and the ciphertext is scanned (ClamAV 1.4.3), so both are built.
+run("qpdf", "--stream-data=compress", "--encrypt", "", "owner-secret", "256", "--", at("marker-plain.pdf"), at("pdf-empty-user-owner-flate-marker.pdf"))
+run("qpdf", "--stream-data=uncompress", "--encrypt", "", "owner-secret", "256", "--", at("marker-plain.pdf"), at("pdf-empty-user-owner-raw-marker.pdf"))
 run("qpdf", "--encrypt", "user-secret", "owner-secret", "256", "--", source_pdf, at("pdf-user-password.pdf"))
 # Objects in object streams (encrypted with a user password, and owner-only with the marker).
 run("qpdf", "--object-streams=generate", "--encrypt", "user-secret", "owner-secret", "256", "--", source_pdf, at("pdf-objstm-user-password.pdf"))
-run("qpdf", "--object-streams=generate", "--stream-data=uncompress", "--encrypt", "", "owner-secret", "256", "--", at("marker-plain.pdf"), at("pdf-objstm-owner-only-marker.pdf"))
+run("qpdf", "--object-streams=generate", "--stream-data=compress", "--encrypt", "", "owner-secret", "256", "--", at("marker-plain.pdf"), at("pdf-objstm-owner-only-flate-marker.pdf"))
 # Encryption added in an incremental update: the base section's trailer has no /Encrypt; the update's does.
 run("qpdf", "--object-streams=disable", "--encrypt", "user-secret", "owner-secret", "256", "--", source_pdf, at("enc-classic.pdf"))
 data = open(at("enc-classic.pdf"), "rb").read()
@@ -139,12 +141,22 @@ nest(at("eicar.com"), 3, "nested-3-eicar.zip")
 # Past MaxRecursion (17): 20 levels around a plain note.
 nest(at("note.txt"), 20, "limit-max-recursion.zip")
 
-# --- Scan limits (zeros deflate ~1000:1, so these are a few MB on disk) -----------------------------------------------
+# ZIP64 local headers (sizes 0xFFFFFFFF, real sizes in the ZIP64 extra): libclamav 1.4.3 does not follow them and skips the
+# member ("local header - stream out of file"), so a 68-byte EICAR in one scans OK. Top level, quarantine's archive
+# inspection refuses them (archive-inspection-failed); nested inside a plain ZIP it does not look.
+with zipfile.ZipFile(at("zip64-member-eicar.zip"), "w", zipfile.ZIP_DEFLATED) as z:
+    with z.open("eicar.com", "w", force_zip64=True) as w:
+        w.write(EICAR)
+with zipfile.ZipFile(at("nested-zip64-eicar.zip"), "w", zipfile.ZIP_STORED) as z:
+    z.write(at("zip64-member-eicar.zip"), "inner/zip64-member-eicar.zip")
+
+
+# --- Scan limits (zeros deflate ~1000:1, so these are a few MB on disk; no ZIP64, which ClamAV would skip) ------------
 def zeros_zip(name, members, member_bytes):
     chunk = b"\0" * (1 << 20)
-    with zipfile.ZipFile(at(name), "w", zipfile.ZIP_DEFLATED, allowZip64=True) as z:
+    with zipfile.ZipFile(at(name), "w", zipfile.ZIP_DEFLATED, allowZip64=False) as z:
         for index in range(members):
-            with z.open("zeros-%d.bin" % index, "w", force_zip64=True) as w:
+            with z.open("zeros-%d.bin" % index, "w") as w:
                 for _ in range(member_bytes // len(chunk)):
                     w.write(chunk)
 
