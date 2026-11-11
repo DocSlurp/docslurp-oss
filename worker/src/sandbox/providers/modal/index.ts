@@ -29,6 +29,7 @@ import { defaultDocConcurrency, resolveActivityConcurrency } from "../../../conc
 import { VmBudget } from "./vm-budget.js";
 import {
   CLAMD_SELF_TEST_ARGV,
+  clamdSelfTestArgv,
   CLAMD_START_ARGV,
   CLAMD_VERSION_ARGV,
   clamdConfig,
@@ -44,8 +45,10 @@ import {
   scannerSetupArgv,
   ScannerSnapshotCache,
   scannerSnapshotKey,
+  SCANNER_CONFIG_DIR,
   SELF_TEST_FILE,
 } from "./scanner.js";
+import { judgeCanary, policyCanaries } from "../../../tools/clamd-policy.js";
 
 export type ModalSdk = typeof import("modal");
 
@@ -597,6 +600,15 @@ export async function buildScannerSnapshot(
     const selfTest = await rootExec(vm, CLAMD_SELF_TEST_ARGV);
     if (selfTest.code !== 1 || !/Eicar.*FOUND/i.test(selfTest.stdout)) throw new Error(`scanner VM malware daemon failed its EICAR self-test (exit ${selfTest.code})`);
     await rootExecChecked(vm, ["/bin/rm", "-f", "--", SELF_TEST_FILE], "scanner VM self-test file could not be removed");
+    // The loaded daemon's effective policy (clamd-policy.ts): encrypted content and limit hits must be detections.
+    for (const canary of policyCanaries()) {
+      const file = `${SCANNER_CONFIG_DIR}/${canary.name}`;
+      await withDeadline(vm.filesystem.writeBytes(canary.data, file), 30_000);
+      const result = await rootExec(vm, clamdSelfTestArgv(file));
+      const refusal = judgeCanary(canary.kind, { exitCode: result.code, stdout: result.stdout, stderr: result.stderr }, file);
+      if (refusal) throw new Error(`scanner VM malware daemon failed its policy self-test: ${refusal}`);
+      await rootExecChecked(vm, ["/bin/rm", "-f", "--", file], "scanner VM self-test file could not be removed");
+    }
     // Nothing reached a job tree: the snapshot holds the image, the signatures, the config and the loaded daemon only.
     const after = await rootExecChecked(vm, jobRootsListingArgv(jobRoots), "scanner VM job roots could not be listed");
     const changed = jobRootsChanged(before, after);

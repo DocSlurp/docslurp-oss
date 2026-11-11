@@ -65,6 +65,7 @@ import {
 } from "../pipeline/local-compute-cost.js";
 import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 import { CLAM_SCAN_COMMAND_TIMEOUT_MS, clamscanLimitArgs, isClamEncryptedAlert } from "./clam-limits.js";
+import { ClamdPolicyCache, type ClamdPolicyVerdict, type ClamdProbeResult } from "./clamd-policy.js";
 
 export interface CommandPlan {
   /** Isolated-VM PDF extraction through the registered provider plugin; dispatched before any local provider or backend. */
@@ -1154,16 +1155,48 @@ export class CommandRunner {
   }
 
   async clamDaemonScan(source: string): Promise<CommandPlan> {
-    const configFile =
-      process.env.DOCSLURP_CLAMAV_CLAMD_CONF?.trim() ||
-      "/etc/clamav/clamd.conf";
     return await this.plan(
       "clamdscan",
       "--no-summary",
       "--fdpass",
-      `--config-file=${configFile}`,
+      `--config-file=${localClamdConfigFile()}`,
       source,
     );
+  }
+
+  /**
+   * Whether the local clamd (clamdscan's config, outside production) may be trusted: its effective policy must report
+   * encrypted content and limit hits as detections (clamd-policy.ts canaries), checked through the same plan a document
+   * scan uses. Cached per config and signature version; null when no clamdscan is available. A refusal is logged loudly.
+   */
+  async verifyLocalClamDaemon(signal?: AbortSignal, databaseUpdatedAt?: string | null): Promise<ClamdPolicyVerdict | null> {
+    const probePlan = await this.clamDaemonScan("/dev/null");
+    if (!probePlan.available) return null;
+    const key = await localClamdPolicyKey(databaseUpdatedAt ?? inspectClamDatabaseHealth(resolveMalwareScanPolicy()).updatedAt);
+    const verdict = await localClamdPolicy.verify(key, async (file): Promise<ClamdProbeResult> => {
+      const outcome = await this.runScanPlan(await this.clamDaemonScan(file), signal);
+      return { exitCode: outcome.exitCode, stdout: outcome.stdout, stderr: outcome.stderr };
+    });
+    if (signal?.aborted) {
+      localClamdPolicy.invalidate(key);
+      signal.throwIfAborted();
+    }
+    if (!verdict.trusted) {
+      console.error(`[quarantine] status=clamd-policy-refused config=${JSON.stringify(localClamdConfigFile())} reason=${JSON.stringify(verdict.reason)}: the local clamd is not used`);
+    }
+    return verdict;
+  }
+
+  /** Launch a scan plan and collect its outcome (local child or remote session), releasing the launch either way. */
+  private async runScanPlan(plan: CommandPlan, signal?: AbortSignal): Promise<SandboxResult> {
+    const launched = await this.launch(plan, signal);
+    try {
+      return "remote" in launched
+        ? await this.settleRemote(plan, launched, "malware-scan")
+        : await this.collectChild(plan, launched.child, launched.supervised, "malware-scan");
+    } finally {
+      await launched.release();
+    }
   }
 
   private async clamVmDatabaseHealth(policy: MalwareScanPolicy, signal: AbortSignal | undefined, databaseArgs: string[], assetDir?: string): Promise<ClamDatabaseHealth> {
@@ -1299,7 +1332,7 @@ export class CommandRunner {
     const databaseHealth = process.env.NODE_ENV === "production"
       ? await this.clamVmDatabaseHealth(policy, signal, databaseArgs, assetDir)
       : inspectClamDatabaseHealth(policy);
-    const daemonPlan = process.env.NODE_ENV === "production"
+    let daemonPlan = process.env.NODE_ENV === "production"
       ? { binary: "clamdscan", args: [], available: false }
       : await this.clamDaemonScan(source);
     const directPlan = await this.clamScan(source);
@@ -1307,6 +1340,17 @@ export class CommandRunner {
     directPlan.readOnlyInputs = true;
     if (assetDir) directPlan.readOnlyAssetDir = assetDir;
     const healthWarnings: string[] = [];
+
+    // A running daemon's effective policy is unknown to its client: trust it only after the canaries (clamd-policy.ts).
+    let daemonRefusal: string | null = null;
+    if (daemonPlan.available) {
+      const verdict = await this.verifyLocalClamDaemon(signal, databaseHealth.updatedAt);
+      if (verdict && !verdict.trusted) {
+        daemonRefusal = verdict.reason;
+        daemonPlan = { ...daemonPlan, available: false };
+        healthWarnings.push(`clamd refused: ${verdict.reason}`);
+      }
+    }
 
     const databaseWarning = describeClamDatabaseHealth(
       databaseHealth,
@@ -1321,7 +1365,8 @@ export class CommandRunner {
       healthWarnings.push(databaseWarning);
     }
 
-    if (policy.requireDaemon && !daemonPlan.available) {
+    if ((policy.requireDaemon && !daemonPlan.available) || (daemonRefusal && !directPlan.available)) {
+      // A refused daemon with no clamscan to fall back on is an error verdict, never "skipped" (which may fail open).
       return {
         engine: null,
         available: false,
@@ -1333,7 +1378,9 @@ export class CommandRunner {
         databaseSource: databaseHealth.source,
         healthWarnings,
         stdout: "",
-        stderr: "clamdscan is required but unavailable",
+        stderr: daemonRefusal
+          ? `clamd's effective policy could not be verified (${daemonRefusal}); refusing to scan with it`
+          : "clamdscan is required but unavailable",
         exitCode: null,
       };
     }
@@ -1361,7 +1408,7 @@ export class CommandRunner {
       };
     }
 
-    if (selected.engine === "clamscan" && daemonPlan.available === false) {
+    if (selected.engine === "clamscan" && daemonPlan.available === false && !daemonRefusal) {
       healthWarnings.push("clamdscan unavailable, falling back to clamscan");
     }
 
@@ -1382,17 +1429,10 @@ export class CommandRunner {
       };
     }
 
-    const launched = await this.launch(selected.plan, signal);
-    let outcome: SandboxResult;
-    try {
-      outcome =
-        "remote" in launched
-          ? await this.settleRemote(selected.plan, launched, "malware-scan")
-          : await this.collectChild(selected.plan, launched.child, launched.supervised, "malware-scan");
-    } finally {
-      await launched.release();
-    }
+    const outcome = await this.runScanPlan(selected.plan, signal);
     const { exitCode: code, stdout, stderr } = outcome;
+    // The daemon did not answer as a scan (gone, restarted, reconnecting): verify it again before it is trusted next.
+    if (selected.engine === "clamdscan" && code !== 0 && code !== 1) localClamdPolicy.invalidate();
     const base = {
       engine: selected.engine,
       available: true as const,
@@ -2563,6 +2603,26 @@ export function parseClamSignature(output: string): string | null {
 
   const match = trimmed.match(/:\s+(.+?)\s+FOUND$/m);
   return match?.[1]?.trim() ?? null;
+}
+
+/** clamdscan's config for the local daemon path (non-production). */
+function localClamdConfigFile(): string {
+  return process.env.DOCSLURP_CLAMAV_CLAMD_CONF?.trim() || "/etc/clamav/clamd.conf";
+}
+
+/** Verified policies of local daemons (clamd-policy.ts), process-wide. */
+const localClamdPolicy = new ClamdPolicyCache();
+
+/** Test hook: forget every verified daemon policy. */
+export function resetLocalClamdPolicyCache(): void {
+  localClamdPolicy.invalidate();
+}
+
+/** One verification per config file (path and modification time) and loaded signature version. */
+async function localClamdPolicyKey(databaseUpdatedAt: string | null): Promise<string> {
+  const configFile = localClamdConfigFile();
+  const mtime = await stat(configFile).then((info) => info.mtimeMs, () => "missing");
+  return `${configFile}|${mtime}|${databaseUpdatedAt ?? "unknown"}`;
 }
 
 /** A scan's wall-clock budget: the page-based one, but never less than the scan time limit allows (clam-limits.ts). */

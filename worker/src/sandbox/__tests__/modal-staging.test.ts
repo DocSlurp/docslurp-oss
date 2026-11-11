@@ -342,6 +342,8 @@ function fakeSdk(
     scannerVersion?: number;
     /** Scanner build: the EICAR self-test exit (default 1, detected). */
     selfTestExit?: number;
+    /** Scanner build: the daemon's policy self-test answers like a daemon without the alert options (clean). */
+    policyCanaryClean?: "encrypted" | "recursion";
     /** Scanner build: a job root gains an entry between the two listings. */
     jobRootGains?: boolean;
     /** Scanner build: clamd fails to start. */
@@ -448,6 +450,13 @@ function fakeSdk(
       if (argv[0] === "clamdscan" && argv.at(-1)?.endsWith("self-test.txt")) {
         state.scannerEvents.push(`self-test:${vm}`);
         return finished(opts.selfTestExit === 0 ? "" : `${argv.at(-1)}: Eicar-Test-Signature FOUND`, opts.selfTestExit ?? 1);
+      }
+      if (argv[0] === "clamdscan" && argv.at(-1)?.endsWith("-canary.zip")) {
+        const file = argv.at(-1)!;
+        const kind = file.endsWith("encrypted-canary.zip") ? "encrypted" : "recursion";
+        state.scannerEvents.push(`policy-${kind}:${vm}`);
+        if (opts.policyCanaryClean === kind) return finished("", 0);
+        return finished(`${file}: ${kind === "encrypted" ? "Heuristics.Encrypted.Zip" : "Heuristics.Limits.Exceeded.MaxRecursion"} FOUND`, 1);
       }
       if (argv[0] === "/bin/rm" && argv[2] === "--") return finished("", 0);
       // Readback and listing run as the parser user (setpriv prefix): record it, then serve them.
@@ -2045,14 +2054,17 @@ describe("modal scanner sessions (quarantine Q1)", () => {
     const snapshotAt = events.indexOf("snapshot:1");
     expect(events[0]).toBe("build-create:1");
     expect(snapshotAt).toBeGreaterThan(events.indexOf("self-test:1"));
+    // The daemon's effective policy was proven before the snapshot: encrypted content and limit hits are detections.
+    expect(events.indexOf("policy-encrypted:1")).toBeGreaterThan(events.indexOf("self-test:1"));
+    expect(snapshotAt).toBeGreaterThan(events.indexOf("policy-recursion:1"));
     // The build VM (1) never runs a job command; it is terminated right after its snapshot, before the first restore.
     expect(events.filter((event) => event === "command:1")).toHaveLength(0);
     expect(events.indexOf("terminate:1")).toBeLessThan(events.findIndex((event) => event.startsWith("restore:")));
     expect(events.findIndex((event) => event.startsWith("command:"))).toBeGreaterThan(snapshotAt);
     // The job roots are listed before the build changes anything and again right before the snapshot.
     expect(events.filter((event) => event === "listing:1")).toHaveLength(2);
-    // Nothing the build wrote is under a job root: only the signature assets, the daemon config, the EICAR self-test file
-    // (removed before the snapshot) and the control directory.
+    // Nothing the build wrote is under a job root: only the signature assets, the daemon config, the EICAR and policy
+    // self-test files (removed before the snapshot) and the control directory.
     expect(state.rootWrites.length).toBeGreaterThan(0);
     expect(state.rootWrites.filter((p) => !p.startsWith("/opt/docslurp-assets/") && !p.startsWith("/etc/docslurp-clamd/") && p !== "/tmp/.docslurp-modal-control")).toEqual([]);
     expect(state.snapshots).toBe(1);
@@ -2102,6 +2114,8 @@ describe("modal scanner sessions (quarantine Q1)", () => {
   it.each([
     ["the daemon loaded another signature version", { scannerVersion: 28179 }, /signature version 28179, expected 28180/],
     ["the EICAR self-test was not detected", { selfTestExit: 0 }, /EICAR self-test/],
+    ["the daemon reported the encrypted canary clean", { policyCanaryClean: "encrypted" as const }, /policy self-test: encrypted ZIP canary/],
+    ["the daemon reported the recursion canary clean", { policyCanaryClean: "recursion" as const }, /policy self-test: nested ZIP canary/],
     ["the daemon did not start", { clamdFails: true }, /daemon did not start/],
     ["a job root changed before the snapshot", { jobRootGains: true }, /job roots changed/],
   ])("fails closed with no snapshot when %s", async (_label, opts, message) => {

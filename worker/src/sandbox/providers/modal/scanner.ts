@@ -85,7 +85,12 @@ export const CLAMD_VERSION_ARGV = ["clamdscan", `--config-file=${SCANNER_CONFIG_
  */
 export const EICAR = "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
 export const SELF_TEST_FILE = `${SCANNER_CONFIG_DIR}/self-test.txt`;
-export const CLAMD_SELF_TEST_ARGV = ["clamdscan", `--config-file=${SCANNER_CONFIG_FILE}`, "--fdpass", "--no-summary", "--infected", SELF_TEST_FILE];
+export const CLAMD_SELF_TEST_ARGV = clamdSelfTestArgv(SELF_TEST_FILE);
+
+/** clamdscan of one root-owned self-test file through the scanner VM's daemon. */
+export function clamdSelfTestArgv(file: string): string[] {
+  return ["clamdscan", `--config-file=${SCANNER_CONFIG_FILE}`, "--fdpass", "--no-summary", "--infected", file];
+}
 
 /**
  * Lists every entry under the job roots (path, full mode, owner, group, size), sorted, as root. Taken right after the
