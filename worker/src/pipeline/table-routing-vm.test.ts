@@ -125,6 +125,12 @@ describe("host validation of the guest's scan (a compromised or buggy guest)", (
     ["simple not boolean", { ...good, tables: [{ ...table, simple: "yes" }] }],
     ["block count mismatch", { ...good, blocks: [] }],
     ["negative counts", { ...good, blocks: [{ rows: -1, columns: 2 }] }],
+    // Council round 4 (correctness Low): counts the page's own tag starts cannot hold.
+    ["zero block counts for a table with rows", { ...good, blocks: [{ rows: 0, columns: 0 }] }],
+    ["inflated block rows", { ...good, blocks: [{ ...good.blocks[0]!, rows: 30 }] }],
+    ["inflated block columns", { ...good, blocks: [{ ...good.blocks[0]!, columns: 30 }] }],
+    ["more rows than <tr> starts", { ...good, tables: [{ ...table, rows: [...table.rows, ...table.rows] }] }],
+    ["more cells than <td>/<th> starts", { ...good, tables: [{ ...table, rows: table.rows.map((row) => [...row, ...row]) }] }],
   ];
   it.each(forged)("refuses %s", async (_name, scan) => {
     expect(() => validateTableScan(page, scan)).toThrow();
@@ -135,6 +141,23 @@ describe("host validation of the guest's scan (a compromised or buggy guest)", (
   });
   it("accepts the guest's own scan", () => {
     expect(validateTableScan(page, JSON.parse(JSON.stringify(good)))).toEqual(good);
+  });
+  it("accepts the guest's own scan on ordinary, spanning, empty and multi-table pages (tag-start bounds hold)", () => {
+    for (const text of [
+      "<table><tr><th>A</th><th>B</th></tr><tr><td>1</td></tr></table>",
+      '<table>\n<tr><td colspan="3">wide</td></tr>\n<tr><td>a</td><td>b</td><td>c</td></tr>\n</table>\n\n<table><tr><td>x</td></tr></table>',
+      "<table></table>",
+      "<TABLE><TR><TD>x</TD></TR></TABLE>\n\n<table>\n<tr>\n<td>nested <table><tr><td>in</td></tr></table></td>\n</tr>\n</table>",
+    ]) {
+      const own = asGuest(() => scanPageTables(text));
+      expect(validateTableScan(text, JSON.parse(JSON.stringify(own)))).toEqual(own);
+    }
+  });
+  // Documented residual: the host cannot tell an omitted table from none without reading HTML. Under-reporting only
+  // removes this page's own repair and reliability signals (fail-safe direction for spend; the uploader's own document).
+  it("an under-reported tables list is accepted but cannot add rows, cells or signals", () => {
+    expect(validateTableScan(page, { ...good, tables: [] })).toEqual({ ...good, tables: [] });
+    expect(tableReliability(page, undefined, { ...good, tables: [] })).toEqual([]);
   });
 });
 

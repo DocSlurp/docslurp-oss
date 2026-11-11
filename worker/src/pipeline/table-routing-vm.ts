@@ -7,7 +7,9 @@
  * runs only in the VM guest (`table-routing-guest.ts`); all of a document's pages that hold `<table` go together, in as
  * few jobs as MAX_BATCH_BYTES / TABLE_ROUTING_MAX_PAGES allow (one for nearly every document). The host checks the typed
  * result against the page (spans in order, inside the page, starting at `<table` and ending at `</table>`; cell text no
- * longer than its table's source; block counts matching its own presence count) before the shared repair and
+ * longer than its table's source; no more rows or cells than the span has `<tr` / `<td`/`<th` tag starts; block counts
+ * matching its own presence count, block rows equal to the block's `<tr` starts and columns within its cell starts)
+ * before the shared repair and
  * reliability checks use it. Outside the service profile the same scanner runs in-process. Guest cell text reaches a
  * page only through the shared repairs, which escape it on every path: a merged header as HTML text (`& < >` entities),
  * a restored list as inert Markdown (escapeMarkdownCellText: `& < >` entities, other punctuation backslash-escaped).
@@ -15,6 +17,12 @@
  * Fail closed: a page the VM did not read (unavailable, failed, invalid result, too large for a job) gets `null`: no
  * HTML repair (repairMarkdownTables), `table:html-unscanned` from tableReliability, and no HTML table counted toward
  * table-heavy. Never a host scan.
+ *
+ * What the host cannot verify without reading HTML: that the guest reported every table (an empty or short `tables` list
+ * passes), which cells span or hold markup (`simple`), and the cell texts within their bounds. A wrong answer there can
+ * only add or remove this page's own repair and reliability signals: routing for the uploader's own document, with any
+ * resulting read billed to that document's org under its existing spend guards. It cannot reach another tenant, and it
+ * cannot place raw HTML (repairs escape all guest text).
  *
  * Host-side, without a scan: GFM pipe tables (line shape checks, no HTML) and the `<table` presence checks
  * (`hasHtmlTableMarkup`, `htmlTableBlockCount`) that decide which pages need the VM.
@@ -25,7 +33,8 @@ import path from "node:path";
 
 import {
   hasHtmlTableMarkup,
-  htmlTableBlockCount,
+  htmlTableBlockTagCounts,
+  htmlTagStarts,
   repairMarkdownTables,
   scanPageTables,
   TABLE_SCAN_MAX_PAGE_CHARS,
@@ -61,11 +70,16 @@ const asciiLower = (value: string) => value.replace(/[A-Z]+/g, (letters) => lett
 export function validateTableScan(page: string, raw: unknown): HtmlTableScan {
   const scan = raw as Partial<HtmlTableScan> | null;
   if (!scan || typeof scan !== "object" || !Array.isArray(scan.tables) || !Array.isArray(scan.blocks)) throw new InvalidScan("shape");
-  if (scan.blocks.length !== htmlTableBlockCount(page)) throw new InvalidScan("blocks");
-  for (const block of scan.blocks as unknown[]) {
+  // Block counts are bounded by tag starts the host counts itself (htmlTableBlockTagCounts: regex counts, no HTML read):
+  // rows equal the block's `<tr` openings, and columns lie between the average and the total of its cell openings, so a
+  // guest cannot invent rows or columns the page does not have (council round 4, correctness Low).
+  const bounds = htmlTableBlockTagCounts(page);
+  if (scan.blocks.length !== bounds.length) throw new InvalidScan("blocks");
+  (scan.blocks as unknown[]).forEach((block, index) => {
     const counts = block as { rows?: unknown; columns?: unknown } | null;
-    if (!counts || !isInt(counts.rows, 0, page.length) || !isInt(counts.columns, 0, page.length)) throw new InvalidScan("block");
-  }
+    const { rows, cellsInRows } = bounds[index]!;
+    if (!counts || counts.rows !== rows || !isInt(counts.columns, rows === 0 ? 0 : Math.ceil(cellsInRows / rows), cellsInRows)) throw new InvalidScan("block");
+  });
   if (page.length > TABLE_SCAN_MAX_PAGE_CHARS && scan.tables.length > 0) throw new InvalidScan("oversized");
   let cursor = 0;
   for (const entry of scan.tables as unknown[]) {
@@ -76,10 +90,17 @@ export function validateTableScan(page: string, raw: unknown): HtmlTableScan {
     if (!open.startsWith("<table") || !(open[6] === ">" || /\s/.test(open[6] ?? ""))) throw new InvalidScan("open");
     if (end - start < 15 || asciiLower(page.slice(end - 8, end)) !== "</table>") throw new InvalidScan("close");
     if (typeof table.simple !== "boolean" || !Array.isArray(table.rows)) throw new InvalidScan("table");
+    // Every row and cell the scanner reports starts at its own `<tr` / `<td` / `<th` in the table's span: no more of them
+    // than the span holds (tag-start counts, no HTML read).
+    const starts = htmlTagStarts(page.slice(start, end));
+    if (table.rows.length > starts.rows) throw new InvalidScan("row count");
+    let cells = 0;
     // Cell text is the source's own text, entity-decoded and whitespace-collapsed: never longer than the table's source.
     let chars = 0;
     for (const row of table.rows as unknown[]) {
       if (!Array.isArray(row)) throw new InvalidScan("row");
+      cells += row.length;
+      if (cells > starts.cells) throw new InvalidScan("cell count");
       for (const cell of row as unknown[]) {
         if (typeof cell !== "string") throw new InvalidScan("cell");
         chars += cell.length + 1;

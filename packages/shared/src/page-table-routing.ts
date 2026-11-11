@@ -70,6 +70,34 @@ export function htmlTableBlockCount(page: string): number {
   return count;
 }
 
+const ROW_TAG = /<tr[\s>]/gi;
+const CELL_TAG = /<t[dh][\s>]/gi;
+const countMatches = (text: string, pattern: RegExp) => { let n = 0; pattern.lastIndex = 0; while (pattern.exec(text)) n += 1; return n; };
+
+/**
+ * Tag-start counts in a slice of page text: `<tr` openings and `<td`/`<th` openings, the same ASCII case-insensitive
+ * patterns the scanner's block counts and element search use. A count of tag starts only (no attribute, nesting or
+ * structure is read), so the host can bound a VM scan's row and cell counts without reading HTML.
+ */
+export function htmlTagStarts(text: string): { rows: number; cells: number } {
+  return { rows: countMatches(text, ROW_TAG), cells: countMatches(text, CELL_TAG) };
+}
+
+/**
+ * For each blank-line block that starts with `<table` (htmlTableBlockCount's blocks): its `<tr` openings, which are
+ * exactly scanPageTables' row count for that block, and the `<td`/`<th` openings from its first `<tr` on, whose total
+ * bounds the block's column count (at most all of them, at least their average per row).
+ */
+export function htmlTableBlockTagCounts(page: string): Array<{ rows: number; cellsInRows: number }> {
+  const counts: Array<{ rows: number; cellsInRows: number }> = [];
+  for (const block of blankLineBlocks(page)) {
+    if (!HTML_TABLE_BLOCK.test(block)) continue;
+    const firstRow = block.search(/<tr[\s>]/i);
+    counts.push({ rows: countMatches(block, ROW_TAG), cellsInRows: firstRow === -1 ? 0 : countMatches(block.slice(firstRow), CELL_TAG) });
+  }
+  return counts;
+}
+
 /**
  * What the HTML table scanner read from one page (scanPageTables). In the service profile it is produced only by the
  * parser-VM guest (worker `table-routing-guest.ts`) and validated by the host before any function below uses it.
