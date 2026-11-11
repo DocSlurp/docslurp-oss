@@ -6,9 +6,9 @@ export const PROJECT_CHAT_MODELS = [
   { id: "deepseek/deepseek-v4.1-flash-1017", label: "DeepSeek V4.1 Flash", description: "Efficient reasoning" },
   { id: "openai/gpt-6.1-sol", label: "GPT-6.1 Sol", description: "Complex reasoning" },
   { id: "openai/gpt-6-luna", label: "GPT-6 Luna", description: "Fast, focused answers" },
-  { id: "z-ai/glm-5.3-flash:nitro", label: "GLM 5.3 Flash (Nitro)", description: "Throughput routing; variable provider cost" },
-  { id: "deepseek/deepseek-v4.1-flash-1017:nitro", label: "DeepSeek V4.1 Flash (Nitro)", description: "Throughput routing; variable provider cost" },
-  { id: "openai/gpt-6-luna:nitro", label: "GPT-6 Luna (Nitro)", description: "Throughput routing; variable provider cost" },
+  { id: "z-ai/glm-5.3-flash:nitro", label: "GLM 5.3 Flash (Nitro)", description: "Cheapest fast host, price capped" },
+  { id: "deepseek/deepseek-v4.1-flash-1017:nitro", label: "DeepSeek V4.1 Flash (Nitro)", description: "Cheapest fast host, price capped" },
+  { id: "openai/gpt-6-luna:nitro", label: "GPT-6 Luna (Nitro)", description: "Cheapest fast host, price capped" },
 ] as const;
 
 export type ProjectChatModelId = (typeof PROJECT_CHAT_MODELS)[number]["id"];
@@ -58,4 +58,23 @@ export function resolveProjectChatModel(
 /** Only these reviewed variants inherit base-model policy; never strip arbitrary suffixes. */
 export function nitroBaseModel(model: string): string | undefined {
   return model.endsWith(":nitro") && isProjectChatModelId(model) ? model.slice(0, -6) : undefined;
+}
+
+/**
+ * Speed boost price ceilings (USD per 1M tokens) at each model's first-party list price, so a host repricing
+ * above it is never chosen. With no host under the ceiling OpenRouter answers 404 and the request falls back to
+ * the model's normal price-sorted route (createOpenRouterRoutingFetch in
+ * openrouter-routing.ts). Open-weight hosts list from a fraction of these to several times them, and the spread moves.
+ */
+const SPEED_BOOST_MAX_PRICE: Readonly<Record<string, { prompt: number; completion: number }>> = {
+  "deepseek/deepseek-v4.1-flash-1017": { prompt: 0.3, completion: 1.2 },
+  "z-ai/glm-5.3-flash": { prompt: 0.15, completion: 0.5 },
+  "openai/gpt-6-luna": { prompt: 0.1, completion: 0.5 },
+};
+/** The ceiling for a reviewed variant without its own entry. */
+const SPEED_BOOST_DEFAULT_MAX_PRICE = { prompt: 0.3, completion: 1.2 } as const;
+
+/** The Speed boost price ceiling for a base model id, USD per 1M tokens. */
+export function speedBoostMaxPrice(base: string): { prompt: number; completion: number } {
+  return SPEED_BOOST_MAX_PRICE[base] ?? SPEED_BOOST_DEFAULT_MAX_PRICE;
 }

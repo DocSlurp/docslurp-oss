@@ -27,8 +27,10 @@ function harness(options: { restrictedFallback?: boolean; alsoBlocked?: string[]
     const body = JSON.parse(String(init?.body ?? (input instanceof Request ? await input.clone().text() : "")));
     sent.push(body);
     const restricted = Array.isArray(body.provider?.ignore) && body.provider.ignore.includes("alibaba");
-    const model = String(body.model).replace(/:nitro$/, "");
-    return restricted && (blocked.has(model) || String(body.model).endsWith(":nitro")) ? noAllowedProviders(model) : ok(body.model);
+    const model = String(body.model);
+    // A Speed boost attempt carries its latency preferences; this upstream has no fast host for it.
+    const boosted = body.provider?.preferred_max_latency !== undefined;
+    return restricted && (blocked.has(model) || boosted) ? noAllowedProviders(model) : ok(body.model);
   });
   return { sent, upstream, fetch: createOpenRouterRoutingFetch(upstream as unknown as typeof fetch, options) };
 }
@@ -121,8 +123,11 @@ describe("restricted-provider fallback", () => {
     setOpenRouterProviderPolicyResolver(() => ({ allowChinaProviders: false, speedBoost: true }));
     const { sent, fetch } = harness();
     await fetch(CHAT, textRequest({ model: `${OPEN}:nitro` }));
-    // The base model has non-China hosts: Nitro falls back to it and no region fallback happens.
-    expect(models(sent)).toEqual([`${OPEN}:nitro`, OPEN]);
+    // The base model has non-China hosts: Speed boost falls back to its normal route and no region fallback happens.
+    // Both attempts send the base id (OpenRouter would read a `:nitro` suffix as a throughput sort).
+    expect(models(sent)).toEqual([OPEN, OPEN]);
+    expect(sent[0]!.provider.preferred_max_latency).toBeDefined();
+    expect(sent[1]!.provider.preferred_max_latency).toBeUndefined();
   });
 
   it("never re-targets image, file or audio requests, which the text-only fallback cannot read", async () => {

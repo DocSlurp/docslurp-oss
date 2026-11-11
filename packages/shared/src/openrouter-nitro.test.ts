@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { chatModelTier } from "./billing.js";
 import { isProjectChatModelId, nitroBaseModel } from "./project-chat-models.js";
-import { withOpenRouterProviderPreferences } from "./openrouter-routing.js";
+import { SPEED_BOOST_PERFORMANCE, speedBoostMaxPrice, withOpenRouterProviderPreferences } from "./openrouter-routing.js";
 import { lowestOpenRouterReasoning, resolveOpenRouterUsage } from "./openrouter-usage.js";
 
 describe("reviewed Nitro variants", () => {
@@ -12,8 +12,9 @@ describe("reviewed Nitro variants", () => {
       expect(nitroBaseModel(model)).toBe(base);
       expect(chatModelTier(model)).toBe(chatModelTier(base));
       expect(lowestOpenRouterReasoning(model)).toEqual(lowestOpenRouterReasoning(base));
-      const body = withOpenRouterProviderPreferences({ model, provider: { max_price: { prompt: 500, completion: 500 }, sort: "price" } });
-      expect(body.provider).toMatchObject({ sort: "throughput", max_price: { prompt: 1, completion: 5 } });
+      const body = withOpenRouterProviderPreferences({ model, provider: { max_price: { prompt: 500, completion: 500 }, sort: "throughput" } });
+      expect(body.model).toBe(base);
+      expect(body.provider).toMatchObject({ sort: "price", max_price: speedBoostMaxPrice(base), ...SPEED_BOOST_PERFORMANCE });
     });
   }
   it("rejects arbitrary and prohibited variants", () => {
@@ -24,8 +25,8 @@ describe("reviewed Nitro variants", () => {
     }
   });
   it("retains stricter prices and regional restrictions", () => {
-    const body = withOpenRouterProviderPreferences({ model: "z-ai/glm-5.3-flash:nitro", provider: { max_price: { prompt: 0.2, completion: 0.7 } } }, { allowChinaProviders: false });
-    expect(body.provider).toMatchObject({ max_price: { prompt: 0.2, completion: 0.7 } });
+    const body = withOpenRouterProviderPreferences({ model: "z-ai/glm-5.3-flash:nitro", provider: { max_price: { prompt: 0.1, completion: 0.3 } } }, { allowChinaProviders: false });
+    expect(body.provider).toMatchObject({ max_price: { prompt: 0.1, completion: 0.3 } });
     expect(body.provider?.only).toBeDefined();
     expect(() => withOpenRouterProviderPreferences({ model: "z-ai/glm-5.3-flash:nitro", provider: { only: ["z-ai"] } }, { allowChinaProviders: false })).toThrow();
   });
@@ -42,7 +43,14 @@ describe("reviewed Nitro variants", () => {
   });
   it("preserves usage with a marked ceiling estimate when receipts are missing", async () => {
     const actual = await resolveOpenRouterUsage({ apiKey: "unused", model: "z-ai/glm-5.3-flash:nitro", usage: { inputTokens: 100, outputTokens: 20 } });
-    expect(actual).toMatchObject({ inputTokens: 100, outputTokens: 20, costCents: 0.02 });
+    // GLM 5.3 Flash ceiling: $0.15 / $0.50 per 1M tokens.
+    expect(actual).toMatchObject({ inputTokens: 100, outputTokens: 20 });
+    expect(actual.costCents).toBeCloseTo(0.0025);
     expect(actual.metadata).toMatchObject({ costSource: "estimate", reconciliationRequired: true, pricingSource: "nitro-endpoint-ceiling-estimate" });
+  });
+  it("caps every Speed boost model at its first-party list price, below the old $1 / $5 ceiling", () => {
+    expect(speedBoostMaxPrice("deepseek/deepseek-v4.1-flash-1017")).toEqual({ prompt: 0.3, completion: 1.2 });
+    expect(speedBoostMaxPrice("z-ai/glm-5.3-flash")).toEqual({ prompt: 0.15, completion: 0.5 });
+    expect(speedBoostMaxPrice("openai/gpt-6-luna")).toEqual({ prompt: 0.1, completion: 0.5 });
   });
 });
