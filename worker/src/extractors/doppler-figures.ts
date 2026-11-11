@@ -4,7 +4,8 @@
  *
  * The host never decodes or parses a figure. It reads the manifest (bounded JSON), reads each file's bytes to hash and
  * store them, and looks only at their leading signature bytes (WebP RIFF, PNG signature, SVG text prefix). SVGs were
- * reduced to an allowlist inside the VM; they are served sandboxed (server routes/files.ts). File names are derived from
+ * reduced to an allowlist inside the VM (a correctness filter, not the boundary); serving them sandboxed is the boundary
+ * (server routes/files.ts). File names are derived from
  * validated ids, never taken from the folder, and storage keys from database ids plus that id.
  *
  * Design: docs/extraction/doppler-figures.md.

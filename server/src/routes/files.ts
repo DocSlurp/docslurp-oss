@@ -65,7 +65,8 @@ const PDF_CSP = "frame-ancestors 'self'";
 /**
  * Doppler figure files (worker extractors/doppler-figures.ts) live at `<artifact root>/doppler-figures/<document>/<id>.<format>`.
  * Their type is fixed by that name, never by stored metadata or the bytes. They are the only SVG this proxy renders,
- * and only with a CSP that loads nothing and runs nothing (the worker keeps SVGs that the VM's allowlist produced).
+ * and only with a CSP that loads nothing and runs nothing (the VM's SVG allowlist
+ * is only a correctness filter: this CSP is what keeps a compromised figure inert).
  */
 const DOPPLER_FIGURE_KEY = /\/doppler-figures\/[A-Za-z0-9-]{1,64}\/p[1-9][0-9]{0,8}\.g?(?:0|[1-9][0-9]{0,5})\.(webp|svg|png)$/;
 const FIGURE_SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'; sandbox";

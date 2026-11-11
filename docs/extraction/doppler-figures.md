@@ -63,7 +63,10 @@ the Markdown. Nothing in the folder is trusted. The worker (`worker/src/extracto
   `<?xml ` or `<svg` (after an optional BOM and whitespace).
 
 The worker never decodes a figure. It reads each file to hash it and store it, and looks only at its leading bytes. SVGs
-are reduced to an allowlist inside the VM before they leave it.
+are reduced to an allowlist inside the VM before they leave it, but that is a correctness filter, not the security
+boundary: code running in the VM (a decoder compromise) could rewrite a file after it ran. The boundary is how figures
+are served: a fixed `image/svg+xml` type, `nosniff`, and `default-src 'none'; style-src 'unsafe-inline'; sandbox`, so an
+SVG carrying script or remote references stays inert (pinned by a server test).
 
 A refused folder stores no figure and keeps the Markdown; the stage stats say `dopplerFigures.status: "rejected"` with the
 rule that refused it, and the worker logs `[doppler-figures] ... status=rejected rule=<rule>`.

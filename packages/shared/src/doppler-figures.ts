@@ -6,7 +6,7 @@
  * per figure (`<id>.webp`, `<id>.svg` or `<id>.png`) plus `manifest.json`. The provider hands that folder to the worker,
  * which validates it here, strictly and with bounds, before any byte reaches storage: file names are derived from ids,
  * never taken from the folder; sizes and hashes must match; only the leading signature bytes are looked at (the SVG
- * allowlist already ran in the VM). The Markdown keeps Doppler's markers byte for byte; a reader resolves
+ * allowlist already ran in the VM, as a correctness filter; serving under a sandbox CSP is the security boundary). The Markdown keeps Doppler's markers byte for byte; a reader resolves
  * `![image](doppler-image:<id>)` to the figure's served URL at read time (see `resolveDopplerImageMarkers`).
  *
  * Design: docs/extraction/doppler-figures.md.
