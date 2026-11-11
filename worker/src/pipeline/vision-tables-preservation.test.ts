@@ -164,7 +164,8 @@ describe("original council reproducers (correctness reproduce.mjs, adversarial p
     ["wide", `<table><tr>${'<td colspan="100">x</td>'.repeat(105)}</tr></table>`, ["x"]],
   ])("correctness %s", async (_name, input, texts) => {
     const { out } = await clean(input);
-    if (texts === null) expect(out).toBe(input); // code and GFM rows are never rewritten
+    // Code and GFM rows keep their shape; only their table tags are escaped (council round 4 M1).
+    if (texts === null) expect(out).toBe(input.replace(/<(\/?table[\s/>])/g, "&lt;$1"));
     else for (const text of texts) expect(renderedText(out)).toContain(text);
     expectNoRegionMarkup(input, out, readVisionTables(input));
   });
@@ -369,4 +370,87 @@ describe("property: text preservation and no markup from table regions, over ran
       expect(rendered.length).toBeGreaterThan(0);
     }
   });
+});
+
+/**
+ * Council round 4 M1: the reviewer's seven shapes where a per-page "Markdown code or pipe row" reading disagreed with
+ * CommonMark, so the model's own `<table style>` / `<td on*>` reached stored Markdown. No table-family tag written by the
+ * model may stay raw anywhere: in the stored text, and in the CommonMark/GFM tree (html nodes) a renderer would emit.
+ */
+describe("council round 4 M1: model table tags never survive raw, in code or not", () => {
+  const T = `<table style="display:none"><tr><td onmouseover="alert(1)">HIDDEN</td></tr></table>`;
+  const shapes: Array<[string, string]> = [
+    ["backticks inside an HTML block", `<div>\`${T}\`</div>\n\nAfter`],
+    ["fence inside an HTML block", `<div>\n\`\`\`\n${T}\n\`\`\`\n</div>\n\nAfter`],
+    ["escaped backtick", `Text \\\`${T}\` tail`],
+    ["a tag attribute eats the backtick", `<a title="\`">x</a> ${T} \`tail`],
+    ["bare CR line ending after a pipe line", `| a |\r${T}\rafter`],
+    ["pipe line without a delimiter row", `| ${T} |`],
+    ["GFM table cell", `| h |\n| --- |\n| ${T} |`],
+    // Pages are joined: an earlier page (or customer text) can leave a fence or <pre> open, so local code is not proof.
+    ["fence closed by an earlier page's open fence", `\`\`\`\n${T}\n\`\`\``],
+    ["fence inside an open <pre> block", `<pre>\n\n\`\`\`\n${T}\n\`\`\`\n</pre>`],
+  ];
+  /** A table-family tag a renderer would emit from a raw html node: only the rebuilt allow-list form may appear. */
+  const liveModelTags = (markdownText: string) => {
+    const found: string[] = [];
+    walk(parse(markdownText), (node) => {
+      if (node.type !== "html") return;
+      if (STRICT_TABLE.test(node.value!)) return;
+      for (const m of node.value!.matchAll(/<\/?(?:table|thead|tbody|tfoot|tr|th|td|caption|colgroup|col)(?=[\s/>])[^>]*>?/gi)) found.push(m[0]);
+    });
+    return found;
+  };
+  for (const [name, input] of shapes) {
+    it(`${name}: no raw model table tag in stored Markdown`, async () => {
+      const { out } = await clean(input);
+      expect(out).not.toMatch(/<(?:table|tr|td)[\s>]/i);
+      expect(liveModelTags(out)).toEqual([]);
+      // Joined after a page that leaves a fence or HTML block open, the stored page is still inert.
+      for (const before of ["```\n", "<pre>\n", "<div>\n", "- ```\n"]) expect(liveModelTags(before + out)).toEqual([]);
+      expect(out).toContain("HIDDEN");
+    });
+  }
+  it("a forged keep over any of these shapes is refused (escaped page)", async () => {
+    const { renderVisionTablePages } = await import("./vision-tables-vm.js");
+    for (const [, input] of shapes) {
+      const [out] = renderVisionTablePages([input], [[{ k: "keep", from: 0, to: input.length }]]);
+      expect(out).not.toMatch(/<(?:table|tr|td)[\s>]/i);
+    }
+  });
+});
+
+/** Council round 4 L6: the guest's code scan is linear (was ~n^1.5 on distinct backtick run lengths); the host has none. */
+describe("council round 4 L6: bounded work on hostile backtick runs, 1–4 MiB", () => {
+  it("guest read and host render stay linear; pages over the parse limit are only escaped", async () => {
+    const { renderVisionTablePages } = await import("./vision-tables-vm.js");
+    const runs = (n: number, ascending: boolean) => {
+      const parts: string[] = [];
+      let length = 0;
+      for (let k = 2; length < n; k++) { parts.push("`".repeat(k) + "x"); length += k + 1; }
+      if (!ascending) parts.reverse();
+      return ("Use `<td>` here.\n" + parts.join("")).slice(0, n);
+    };
+    for (const mib of [1, 2, 4]) {
+      for (const ascending of [true, false]) {
+        const text = runs(mib * 1024 * 1024, ascending);
+        let started = performance.now();
+        const result = readVisionTables(text);
+        const guestMs = performance.now() - started;
+        started = performance.now();
+        const [out] = renderVisionTablePages([text], [result === false ? [{ k: "keep", from: 0, to: text.length }] : result]);
+        const hostMs = performance.now() - started;
+        expect(guestMs, `guest ${mib} MiB`).toBeLessThan(1_500);
+        expect(hostMs, `host ${mib} MiB`).toBeLessThan(1_500);
+        expect(out).not.toMatch(/<td[\s>]/);
+        if (text.length > VISION_TABLE_MAX_PAGE_CHARS) {
+          expect(result).toBe(false);
+          const sanitizeStart = performance.now();
+          const { out: escaped } = await clean(text);
+          expect(performance.now() - sanitizeStart).toBeLessThan(1_500);
+          expect(escaped).toContain("`&lt;td>`");
+        }
+      }
+    }
+  }, 60_000);
 });

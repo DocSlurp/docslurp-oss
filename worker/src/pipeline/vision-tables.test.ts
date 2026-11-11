@@ -84,8 +84,9 @@ describe("vision HTML tables: rebuilt from the VM guest's typed reading", () => 
       .toBe("<table>\n<tbody>\n<tr><td>a b</td></tr>\n</tbody>\n</table>\n\n## Next section\n\nParagraph one.");
   });
 
-  // Correctness Medium: code and GFM content are kept verbatim.
-  it("preserves code spans, fences and GFM rows that mention table tags", async () => {
+  // Correctness Medium: code and GFM content keep their shape. Council round 4 M1: their table tags are escaped too (no
+  // per-page reading can prove a tag is inside code once pages are joined), and only those tags change.
+  it("keeps code spans, fences and GFM rows in place and escapes only their table tags", async () => {
     for (const text of [
       "Use `<table>` for markup. Keep these words.",
       "| Tag | Description |\n| --- | --- |\n| `<table>` | Keep words |\n\nFollowing prose",
@@ -93,7 +94,7 @@ describe("vision HTML tables: rebuilt from the VM guest's typed reading", () => 
       "~~~\n<table>\n~~~",
       "Inline ``code with ` and <table> inside`` stays.",
       "| a | <td>b</td> |\n| --- | --- |",
-    ]) expect(await clean(text)).toBe(text);
+    ]) expect(await clean(text)).toBe(text.replace(/<(\/?(?:table|tr|td)[\s/>])/g, "&lt;$1"));
   });
 
   it("leaves output without table markup untouched", async () => {

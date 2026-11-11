@@ -8,6 +8,11 @@
  *
  * Region rules (so a broken table never deletes page content):
  * - a table starts at an ASCII case-insensitive `<table` outside fenced code, inline code spans and GFM pipe-table rows;
+ * - every table-family tag inside fenced code, an inline code span or a pipe-table row is escaped (an `lt` segment), never
+ *   kept verbatim: whether text is Markdown code depends on the whole stored document (an earlier page, or customer text
+ *   before this page, can leave a fence or an HTML block such as `<pre>` open), so no per-page reading can prove a table
+ *   tag inert. The host accepts no table-family tag in a `keep` segment at all. Code detection here
+ *   (`protectedRanges`) only decides between escaping a tag in place and rebuilding a table: never what stays raw;
  * - it ends after the `>` of its own matching `</table>`, or, when the model never closed it, before the first blank line
  *   that is followed by a line not starting with `<`, or at MAX_REGION_CHARS; text after that is kept verbatim;
  * - a `</table>` that ends its line, followed by a line not starting with `<`, also ends the region at any nesting depth
@@ -68,8 +73,10 @@ export function asciiLower(text: string): string {
 const isDelimiter = (code: number) => Number.isNaN(code) || code === 62 || code === 47 || code === 32 || (code >= 9 && code <= 13);
 
 /**
- * Ranges [from, to) of the input that are code (fences, inline code spans) or GFM pipe-table rows. Markdown line and
- * backtick scanning only (no HTML is read), so the host also runs it to verify the guest's `keep` segments.
+ * Ranges [from, to) of the input that look like code (fences, inline code spans) or GFM pipe-table rows: a table-family tag
+ * there is escaped in place instead of starting a table region, so a code sample or a pipe row keeps its shape. Markdown
+ * line and backtick scanning only (no HTML is read). This is a presentation choice, not a safety check: it need not agree
+ * with CommonMark, because a tag it covers is escaped too. Linear in the input (council round 4 L6).
  */
 export function protectedRanges(text: string): Array<[number, number]> {
   const ranges: Array<[number, number]> = [];
@@ -100,8 +107,9 @@ export function protectedRanges(text: string): Array<[number, number]> {
     lineStart = newline + 1;
   }
   if (fence) ranges.push([fence.start, text.length]);
-  // Inline code spans: a run of N backticks closes at the next run of exactly N in the same paragraph. A length with no
-  // closer is remembered, so the scan stays linear in the paragraph.
+  // Inline code spans: a run of N backticks closes at the next run of exactly N in the same paragraph. Each paragraph's
+  // runs are listed once and linked to the next run of the same length, so the scan is linear however many distinct run
+  // lengths a paragraph holds (a rescan per failed length was ~n^1.5: council round 4 L6).
   // Forward-only backtick search shared by all paragraphs, so a page with no backticks is scanned once, not per paragraph.
   let cachedFrom = -1, cachedTick = -1;
   const nextTick = (from: number) => {
@@ -109,27 +117,27 @@ export function protectedRanges(text: string): Array<[number, number]> {
     return cachedTick;
   };
   for (const [start, end] of paragraphs) {
-    const failed = new Set<number>();
-    let at = start;
-    while (at < end) {
+    const runs: Array<[number, number]> = [];
+    for (let at = start; at < end;) {
       const tick = nextTick(at);
       if (tick === -1 || tick >= end) break;
       let runEnd = tick;
       while (runEnd < end && text.charCodeAt(runEnd) === 96) runEnd += 1;
-      const length = runEnd - tick;
-      if (failed.has(length)) { at = runEnd; continue; }
-      let search = runEnd, close = -1;
-      while (search < end) {
-        const next = nextTick(search);
-        if (next === -1 || next >= end) break;
-        let stop = next;
-        while (stop < end && text.charCodeAt(stop) === 96) stop += 1;
-        if (stop - next === length) { close = stop; break; }
-        search = stop;
-      }
-      if (close === -1) { failed.add(length); at = runEnd; continue; }
-      ranges.push([tick, close]);
-      at = close;
+      runs.push([tick, runEnd]);
+      at = runEnd;
+    }
+    const next = new Int32Array(runs.length).fill(-1);
+    const lastOfLength = new Map<number, number>();
+    for (let i = runs.length - 1; i >= 0; i--) {
+      const length = runs[i]![1] - runs[i]![0];
+      next[i] = lastOfLength.get(length) ?? -1;
+      lastOfLength.set(length, i);
+    }
+    for (let i = 0; i < runs.length;) {
+      const close = next[i]!;
+      if (close === -1) { i += 1; continue; }
+      ranges.push([runs[i]![0], runs[close]![1]]);
+      i = close + 1;
     }
   }
   return ranges.sort((a, b) => a[0] - b[0]);
@@ -333,11 +341,10 @@ export function readVisionTables(text: string): VisionTablePageResult {
   while ((match = TABLE_FAMILY.exec(text)) !== null) {
     const at = match.index;
     if (at < kept) continue;
-    const covered = guard.covering(at);
-    if (covered !== -1) { TABLE_FAMILY.lastIndex = Math.max(TABLE_FAMILY.lastIndex, covered); continue; }
     const isTableOpen = !match[1] && lower.startsWith("<table", at) && isDelimiter(lower.charCodeAt(at + 6));
-    if (!isTableOpen) {
-      // A stray table-family tag outside any table: its `<` is escaped so it renders as text.
+    if (!isTableOpen || guard.covering(at) !== -1) {
+      // A stray table-family tag outside any table, or any table-family tag in code or a pipe row: its `<` is escaped so
+      // no Markdown context can make it a tag (`&lt;` never opens one; inside code a reader sees the entity, not markup).
       keepTo(at);
       segments.push({ k: "lt", from: at, to: at + 1 });
       kept = at + 1;

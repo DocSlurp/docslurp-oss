@@ -5,8 +5,8 @@
  * Model output is untrusted (the page image can carry instructions), so its HTML is parsed only by the VM guest
  * (`vision-tables-guest.ts`, parse5) in the service profile. The host never tokenizes, entity-decodes or builds a tree
  * from model text: it checks the guest's typed result (contiguous offsets into the page, integer spans, bounded
- * strings, and no table-family tag left in a verbatim `keep` segment outside Markdown code), then renders each table
- * itself from that data:
+ * strings, and no table-family tag start anywhere in a verbatim `keep` segment, Markdown code included), then renders
+ * each table itself from that data:
  *
  * - elements `table`, `thead`, `tbody`, `tr`, `th`, `td` only, attributes `rowspan`/`colspan` only;
  * - cell text with controls, lone surrogates and noncharacters removed, whitespace collapsed, `& < > "` escaped;
@@ -21,7 +21,10 @@
  * `name@host.tld` in a GFM cell is still linked, as it is anywhere else in page text; only those schemes can form.)
  * No text is ever dropped: a region the guest could not rebuild without truncating or dropping something (`raw`, with a
  * reason) is kept as its own source, escaped the same way, and counted in `stats.rawRegions` / `stats.rawReasons`.
- * Everything outside a table region is copied verbatim; stray table tags outside a table are escaped.
+ * Everything outside a table region is copied verbatim except table-family tags: a stray one, or one inside Markdown
+ * code or a pipe-table row, is escaped (`&lt;`). There is no code exemption: whether text is code depends on the whole
+ * stored document (an earlier page can leave a fence or a `<pre>` HTML block open), so the host never trusts a per-page
+ * claim that a table tag is inert (council round 4 M1). A code sample that shows table markup reads `&lt;table>`.
  *
  * Fail closed: if the VM path is unavailable or its result is invalid, the page's table tags are escaped (the model's
  * text is kept, as text). The service profile never falls back to parsing on the host.
@@ -41,8 +44,6 @@ import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { resolveScriptsDir } from "../tools/scripts-dir.js";
 import {
-  Protected,
-  protectedRanges,
   readVisionTablesBatch,
   VISION_TABLE_MAX_CELLS,
   VISION_TABLE_MAX_PAGE_CHARS,
@@ -225,14 +226,12 @@ function renderPage(text: string, result: VisionTablePageResult, stats: VisionTa
   }
   if (result === false) { stats.escapedPages += 1; return escapeVisionTableTags(text); }
   if (!Array.isArray(result) || result.length > 2 * text.length + 1) throw new InvalidResult("segments");
-  // `keep` copies source verbatim, so the host checks it holds no table markup the guest should have rebuilt or escaped:
-  // every table-family tag start (the same pattern the fallback escapes) inside a `keep` must lie in Markdown code or a
-  // pipe-table row (protectedRanges, recomputed here: line and backtick scanning, no HTML). A keep over a real table is
-  // a contract violation (fail closed), however well-formed its offsets are.
+  // `keep` copies source verbatim, so it must hold no table-family tag start at all (the same pattern the fallback
+  // escapes; one linear regex pass, no HTML or Markdown parsing). A tag in code is escaped by the guest too (`lt`), so a
+  // keep over any table tag, in code or not, is a contract violation (fail closed), however well-formed its offsets are.
   const tagStarts: number[] = [];
   for (const match of text.matchAll(TABLE_FAMILY)) tagStarts.push(match.index);
   let nextTag = 0;
-  let guard: Protected | null = null;
   let cursor = 0;
   const out: string[] = [];
   // The last two characters written: a rope's slice would flatten it on every table (quadratic on many tables).
@@ -243,10 +242,7 @@ function renderPage(text: string, result: VisionTablePageResult, stats: VisionTa
     cursor = segment.to;
     while (nextTag < tagStarts.length && tagStarts[nextTag]! < segment.from) nextTag += 1;
     if (segment.k === "keep") {
-      for (; nextTag < tagStarts.length && tagStarts[nextTag]! < segment.to; nextTag += 1) {
-        guard ??= new Protected(protectedRanges(text));
-        if (guard.covering(tagStarts[nextTag]!) === -1) throw new InvalidResult("keep holds table markup");
-      }
+      if (nextTag < tagStarts.length && tagStarts[nextTag]! < segment.to) throw new InvalidResult("keep holds table markup");
       write(text.slice(segment.from, segment.to));
       continue;
     }

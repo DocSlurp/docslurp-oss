@@ -120,11 +120,19 @@ describe("council round 3 (blocking): a shape-valid keep over table markup fails
       expect(renderVisionTablePages([page], [result])).toEqual([escaped]);
     });
   }
-  it("table markup inside Markdown code stays verbatim (the guest's honest keep is verified, not refused)", () => {
+  // Council round 4 M1: no code exemption on the host. Whether text is code depends on the whole stored document, so the
+  // guest escapes table tags in code too, and a keep over one (honest-looking or forged) is refused.
+  it("table markup inside Markdown code is escaped by the guest, and a keep over it is refused", () => {
     const code = "Example:\n\n```html\n<table><tr><td>x</td></tr></table>\n```\n\nInline `<td>` too.";
-    const honest = guestModule.readVisionTables(code);
-    expect(honest).toEqual([{ k: "keep", from: 0, to: code.length }]);
-    expect(renderVisionTablePages([code], [honest])).toEqual([code]);
+    const honest = guestModule.readVisionTables(code) as Array<{ k: string }>;
+    expect(honest.filter((s) => s.k === "lt")).toHaveLength(7);
+    expect(honest.some((s) => s.k === "table" || s.k === "raw")).toBe(false);
+    expect(renderVisionTablePages([code], [honest])).toEqual([
+      "Example:\n\n```html\n&lt;table>&lt;tr>&lt;td>x&lt;/td>&lt;/tr>&lt;/table>\n```\n\nInline `&lt;td>` too.",
+    ]);
+    const stats = { pages: 0, tables: 0, spansDropped: 0, gfm: 0, textFallback: 0, escapedPages: 0, rawRegions: 0, rawReasons: {}, vmMs: 0, vmCalls: 0 };
+    expect(renderVisionTablePages([code], [[{ k: "keep", from: 0, to: code.length }]], stats)[0]).not.toMatch(/<t[dr]/);
+    expect(stats.escapedPages).toBe(1);
   });
   it("model cell text never becomes raw HTML on the GFM, raw-region or text paths", () => {
     const wide = `<table><tr>${Array.from({ length: 101 }, (_, i) => `<td>c${i}&lt;img src=x onerror=1&gt;</td>`).join("")}</tr></table>`;
