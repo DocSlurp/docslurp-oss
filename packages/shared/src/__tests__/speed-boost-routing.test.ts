@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { createOpenRouterRoutingFetch, isSpeedBoostEligible, speedBoostModel, setOpenRouterProviderPolicyResolver } from "../openrouter-routing.js";
 afterEach(() => setOpenRouterProviderPolicyResolver(undefined));
 it("maps only reviewed eligible identities on explicit opt-in", () => {
-  for (const base of ["z-ai/glm-5.3-flash", "deepseek/deepseek-v4.1-flash", "openai/gpt-6-luna"]) {
+  for (const base of ["z-ai/glm-5.3-flash", "deepseek/deepseek-v4.1-flash-1017", "openai/gpt-6-luna"]) {
     expect(isSpeedBoostEligible(base)).toBe(true);
     expect(speedBoostModel(base, false)).toBe(base);
     expect(speedBoostModel(base, true)).toBe(`${base}:nitro`);

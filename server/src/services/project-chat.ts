@@ -109,7 +109,7 @@ type ProjectChatRuntimeSummary = {
 };
 
 const PROJECT_CHAT_FAILOVER_MODEL: ProjectChatModelId =
-  "deepseek/deepseek-v4.1-flash";
+  "deepseek/deepseek-v4.1-flash-1017";
 const DEFAULT_PENDING_SEARCH_RETRY = {
   maxAttempts: 8,
   intervalMs: 2000,
@@ -1041,8 +1041,11 @@ async function chatProjectInTurn(args: {
   const isAdmin = chatTurnNeedsEvalAccess(args.model, args.agent) && await chatEvalAccess(args.actor, args.projectId);
   const resolved = resolveChatModelRequest({ requested: args.model, isAdmin });
   if (args.speedBoost === true && await loadProjectPrivacyMode(args.projectId) !== "standard") throw new ChatModelNotAllowedError();
+  const turnModel = resolveSpeedBoostChatModel(resolved.model, args.speedBoost === true);
   const policy: ChatTurnPolicy = {
-    model: resolveSpeedBoostChatModel(resolved.model, args.speedBoost === true), failover: args.speedBoost !== true && resolved.source !== "eval",
+    model: turnModel, failover: args.speedBoost !== true && resolved.source !== "eval",
+    // A Speed boost model swap bills at the chosen model's answer tier; the boost multiplier prices the swap.
+    ...(turnModel !== `${resolved.model}:nitro` && turnModel !== resolved.model ? { tierModel: resolved.model } : {}),
     requestedModel: args.model?.trim() || null,
     limits: resolveChatAgentLimits(args.agent, isAdmin),
   };
@@ -1155,7 +1158,7 @@ async function chargeChatAnswer(
   if (response.scopeDecline && !response.debug?.model) return;
   const model = typeof response.debug?.model === "string" && response.debug.model ? response.debug.model : policy.model;
   const totalTokens = Number(response.usage?.totalTokens ?? 0) || 0;
-  const tier = chatModelTier(model);
+  const tier = chatModelTier(policy.tierModel ?? model);
   await recordUnitCharge({
     userId: args.userId,
     scope: { projectId: args.projectId, sessionId },
@@ -1203,7 +1206,7 @@ async function answerIngestReportTurn(args: ChatProjectArgs): Promise<ProjectCha
   };
 }
 
-type ChatTurnPolicy = { model: string; failover: boolean; requestedModel: string | null; limits: ChatAgentLimits };
+type ChatTurnPolicy = { model: string; failover: boolean; requestedModel: string | null; limits: ChatAgentLimits; tierModel?: string };
 
 async function chatProjectTurn(
   args: ChatProjectArgs,

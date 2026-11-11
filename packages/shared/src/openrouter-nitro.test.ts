@@ -5,7 +5,7 @@ import { withOpenRouterProviderPreferences } from "./openrouter-routing.js";
 import { lowestOpenRouterReasoning, resolveOpenRouterUsage } from "./openrouter-usage.js";
 
 describe("reviewed Nitro variants", () => {
-  for (const base of ["z-ai/glm-5.3-flash", "deepseek/deepseek-v4.1-flash", "openai/gpt-6-luna"]) {
+  for (const base of ["z-ai/glm-5.3-flash", "deepseek/deepseek-v4.1-flash-1017", "openai/gpt-6-luna"]) {
     it(`keeps ${base} attribution and enforces endpoint ceilings`, () => {
       const model = `${base}:nitro`;
       expect(isProjectChatModelId(model)).toBe(true);

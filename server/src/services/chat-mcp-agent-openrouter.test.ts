@@ -25,7 +25,7 @@ function openRouterStream(model: string): Response {
   return new Response(body, { headers: { "content-type": "text/event-stream" } });
 }
 
-it.each(["deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash:nitro", "z-ai/glm-5.3-flash:nitro", "openai/gpt-6-luna:nitro"])("records the actual routed charge for %s", async (model) => {
+it.each(["deepseek/deepseek-v4.1-flash-1017", "deepseek/deepseek-v4.1-flash-1017:nitro", "z-ai/glm-5.3-flash:nitro", "openai/gpt-6-luna:nitro"])("records the actual routed charge for %s", async (model) => {
   const fetchMock = vi.fn(async () => openRouterStream("deepseek/deepseek-v4.1-flash-20261017"));
   vi.stubGlobal("fetch", fetchMock);
   const result = await runChatMcpAgent({

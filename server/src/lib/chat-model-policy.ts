@@ -1,4 +1,5 @@
 import { isSpeedBoostEligible, speedBoostModel } from "@docslurp/shared";
+import { SPEED_BOOST_MODEL_SWAPS } from "@docslurp/shared/project-chat-models";
 import {
   CHAT_AGENT_BASE_STEPS,
   CHAT_AGENT_LIMIT_DEFAULTS,
@@ -151,8 +152,12 @@ export async function chatModelRefused(actor: RequestActor | undefined, model: s
   }
 }
 
-/** A Nitro model cannot bypass explicit credit opt-in. Unsupported routes fail before spending. */
+/**
+ * A Nitro model cannot bypass explicit credit opt-in. Unsupported routes fail before spending.
+ * Speed boost on GLM 5.3 Flash (default or picked) answers with DeepSeek V4.1 Flash on Nitro
+ * (SPEED_BOOST_MODEL_SWAPS); an explicit `:nitro` id is honoured as named.
+ */
 export function resolveSpeedBoostChatModel(model: string, enabled: boolean = false): string {
   if ((model.endsWith(":nitro") && !enabled) || (enabled && !isSpeedBoostEligible(model))) throw new ChatModelNotAllowedError();
-  return speedBoostModel(model, enabled);
+  return (enabled ? SPEED_BOOST_MODEL_SWAPS[model] : undefined) ?? speedBoostModel(model, enabled);
 }
