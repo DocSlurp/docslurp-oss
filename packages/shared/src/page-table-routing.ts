@@ -277,11 +277,104 @@ export function repairMarkdownTables(markdown: string): { markdown: string; repa
 export const TABLE_UNRELIABLE_EMPTY_CELL_SHARE = 0.4;
 
 /**
- * Why a page's tables (after repairMarkdownTables) cannot be served as extracted: rows with different column counts, or most
- * body cells empty. Empty when every table looks sound. A table-heavy page with a text layer and any of these is read by a
- * model (classify-route); otherwise Doppler's table is served.
+ * A table that leaked out of the extractor's tables (Doppler cut a borderless table at a gap between row groups, wrote its
+ * rows as text, kept only its header, or merged numeric columns into one cell). Each signal is a document class seen in
+ * financial, statistical and government tables, measured from the page's own Markdown:
+ *
+ * - `table:numeric-prose`: at least `numericProseMinLines` text lines outside every table that each hold at least
+ *   `numericProseMinNumbers` numeric tokens making up at least `numericProseMinShare` of the line's tokens, beside at least
+ *   one word (a row label), and that neither end a sentence nor are list items. Dot leaders do not count as tokens. Table
+ *   rows written as text.
+ * - `table:header-only`: a table of at most `headerOnlyMaxRows` rows and at least `headerOnlyMinColumns` columns, no
+ *   cell mostly made of numbers, no value-like cell (a date or an identifier: digits joined by `/` or `-`, or a run of five
+ *   or more digits) and only short cells (at most `headerOnlyMaxCellWords` words): a header separated from its body. A form's
+ *   label row over its filled-in values is not one.
+ * - `table:merged-numeric-cell`: a cell holding at least `mergedCellMinNumbers` numeric tokens that make up at least half
+ *   its tokens, two of them measured values (a decimal or thousands separator, a percent or parentheses): columns
+ *   collapsed into one. Phone numbers and digit-per-box form fields are plain digit groups and do not count.
+ *
+ * These signals qualify any page with a text layer for a model read, table-heavy or not (classify-route).
  */
-export function tableReliability(page: string): string[] {
+export const TABLE_LEAK = {
+  numericProseMinLines: 2,
+  numericProseMinNumbers: 4,
+  numericProseMinShare: 0.5,
+  headerOnlyMaxRows: 4,
+  headerOnlyMinColumns: 3,
+  headerOnlyMaxCellWords: 8,
+  mergedCellMinNumbers: 3,
+} as const;
+
+export const TABLE_LEAK_SIGNALS: ReadonlySet<string> = new Set(["table:numeric-prose", "table:header-only", "table:merged-numeric-cell"]);
+
+/**
+ * A number as statistical tables print it: optional sign, currency, parentheses, footnote star or percent around digits
+ * with separators (`-1,234.5`, `(12)`, `$4.2`, `*–0.5`, `18%`), or a missing-value placeholder (`–`, `—`, `(X)`, `n.a.`).
+ */
+const LEAK_NUMBER = /^[-+−–—(*$€£¥]{0,3}\d[\d,.]*[)%*]{0,2}$|^[-–—]$|^\(x\)$|^n\.?a\.?$/i;
+const isLeakNumber = (token: string) => token.length <= 32 && LEAK_NUMBER.test(token);
+const LETTERS = /\p{L}{2,}/u;
+const DOT_LEADER = /^[.·…]+$/;
+const SENTENCE_END = /\p{Ll}{2,}[.!?]["'”’)]?$/u;
+const LIST_MARKER = /^(?:[-*+•·▪◦–—]|\d{1,3}[.)]|\(?[a-z]\))$/i;
+/** A measured value as tables print it: a decimal or thousands separator, a percent, or parentheses (`1,409`, `0.3`, `(12)`). */
+const MEASURED_NUMBER = /\d[.,]\d|%|^[-+−–—*$€£¥]{0,3}\(/;
+/** A date or identifier (`02/19/2026`, `R-26-018842`, `20211694530`): a value, never a header label. */
+const VALUE_TOKEN = /\d[/-]\d|\d{5,}/;
+
+/** Text lines outside every HTML and pipe table: the page with HTML table spans removed, then pipe rows dropped. */
+function nonTableLines(page: string): string[] {
+  const parts: string[] = [];
+  let at = 0;
+  for (const table of htmlElements(page, ["table"])) { parts.push(page.slice(at, table.start)); at = table.end; }
+  parts.push(page.slice(at));
+  return parts.join("\n").split("\n").filter((line) => line.trim() && pipeRowInner(line) === null && !isSeparatorLine(line));
+}
+
+function isNumericProseLine(line: string, rules: typeof TABLE_LEAK): boolean {
+  if (line.length > TABLE_MAX_LINE_CHARS) return false;
+  const tokens = line.trim().split(/\s+/).filter((token) => !DOT_LEADER.test(token));
+  if (tokens.length === 0 || LIST_MARKER.test(tokens[0]!)) return false;
+  const numbers = tokens.filter(isLeakNumber).length;
+  if (numbers < rules.numericProseMinNumbers || numbers / tokens.length < rules.numericProseMinShare) return false;
+  // A row label: without one, a run of numbers is more often a chart's tick labels or an equation than a table row.
+  if (!tokens.some((token) => !isLeakNumber(token) && LETTERS.test(token))) return false;
+  return !SENTENCE_END.test(tokens[tokens.length - 1]!);
+}
+
+function leakSignals(page: string, tables: ReadonlyArray<{ header: string[]; body: string[][] }>, rules: typeof TABLE_LEAK): string[] {
+  const signals: string[] = [];
+  let numericLines = 0;
+  for (const line of nonTableLines(page)) {
+    if (isNumericProseLine(line, rules) && ++numericLines >= rules.numericProseMinLines) { signals.push("table:numeric-prose"); break; }
+  }
+  const tokens = (cell: string) => cell.split(/\s+/).filter(Boolean);
+  const words = (cell: string) => tokens(cell).length;
+  for (const table of tables) {
+    const rows = [table.header, ...table.body];
+    const columns = Math.max(...rows.map((cells) => cells.length));
+    if (rows.length <= rules.headerOnlyMaxRows && columns >= rules.headerOnlyMinColumns &&
+        rows.every((cells) => cells.every((cell) => !VALUE_TOKEN.test(cell) && words(cell) <= rules.headerOnlyMaxCellWords &&
+          tokens(cell).filter(isLeakNumber).length * 2 <= words(cell) && !isLeakNumber(cell))) &&
+        rows.some((cells) => cells.some((cell) => LETTERS.test(cell)))) {
+      signals.push("table:header-only");
+    }
+    if (rows.some((cells) => cells.some((cell) => {
+      const numbers = tokens(cell).filter(isLeakNumber);
+      return numbers.length >= rules.mergedCellMinNumbers && numbers.length * 2 >= words(cell) &&
+        numbers.filter((token) => MEASURED_NUMBER.test(token)).length >= 2;
+    }))) signals.push("table:merged-numeric-cell");
+  }
+  return signals;
+}
+
+/**
+ * Why a page's tables (after repairMarkdownTables) cannot be served as extracted: rows with different column counts, most
+ * body cells empty, or a table that leaked out of the extracted tables (TABLE_LEAK). Empty when every table looks sound. A
+ * page with a text layer is read by a model (classify-route) when it is table-heavy and has any of these, or has a leak
+ * signal (TABLE_LEAK_SIGNALS) whether or not it is table-heavy; otherwise Doppler's table is served.
+ */
+export function tableReliability(page: string, rules: typeof TABLE_LEAK = TABLE_LEAK): string[] {
   // An oversized page is not scanned (customer text; bounded work): its tables are unknown, so it is a model's to read.
   if (page.length > TABLE_SCAN_MAX_PAGE_CHARS) return ["table:oversized-page"];
   const signals = new Set<string>();
@@ -295,5 +388,6 @@ export function tableReliability(page: string): string[] {
     const body = table.body.flatMap((cells) => (!cells[0] && cells.slice(1).every(Boolean) ? cells.slice(1) : cells));
     if (body.length > 0 && body.filter((cell) => !cell).length / body.length > TABLE_UNRELIABLE_EMPTY_CELL_SHARE) signals.add("table:mostly-empty-cells");
   }
+  for (const signal of leakSignals(page, tables, rules)) signals.add(signal);
   return [...signals];
 }

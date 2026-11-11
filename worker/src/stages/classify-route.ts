@@ -26,6 +26,7 @@ import {
   type AdaptiveSpecializedContentSummary,
   type ParserPlaybookKey,
   tableReliability,
+  TABLE_LEAK_SIGNALS,
 } from "@docslurp/shared";
 import type { Stage } from "../pipeline/pipeline.js";
 import { runDocumentStage, runDocuments, } from "../pipeline/checkpoints.js";
@@ -40,7 +41,7 @@ import { resolveRunRoutingV2, routingVersion, type RoutingVersionOptions } from 
 // Lightweight document-type classification using filename + extracted/canonical text heuristics.
 // Emits a classification artifact and (optionally) a suggested parser playbook override per document.
 
-/** A table-heavy page whose extracted table is unreliable (tableReliability): a model reads it, billed Rich. */
+/** A page whose extracted table is unreliable or leaked out of the tables (tableReliability): a model reads it, billed Rich. */
 export const TABLE_UNRELIABLE_SIGNAL = "ocr-authorized:table-unreliable";
 
 export class ClassifyRouteStage implements Stage {
@@ -487,8 +488,11 @@ function buildEvidencePages(
         }
       : { authorized: decision.read, confidence: decision.confidence, signals: decision.signals };
     // A born-digital table page is served from the extractor's table unless that table is unreliable (after the structural
-    // repairs extract-markdown made): then a model reads the page.
-    const tableSignals = !ocrDecision.authorized && page.route === "table-heavy" && aligned !== null ? tableReliability(text) : [];
+    // repairs extract-markdown made): then a model reads the page. A table that leaked out of the extracted tables (rows
+    // written as text, a header without its body, merged numeric columns) qualifies any page, table-heavy or not.
+    const tableSignals = !ocrDecision.authorized && aligned !== null
+      ? tableReliability(text).filter((signal) => page.route === "table-heavy" || TABLE_LEAK_SIGNALS.has(signal))
+      : [];
     if (tableSignals.length > 0) {
       return {
         ...page,
