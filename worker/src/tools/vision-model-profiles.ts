@@ -8,6 +8,7 @@ import { openRouterReasoningParams, type OpenRouterReasoning } from "@docslurp/s
 
 import { unwrapWholeMarkdownFence } from "./vision-markdown-fence.js";
 import { normalizeMarkdownMathDelimiters } from "./vision-math-delimiters.js";
+import { sanitizeVisionHtmlTables } from "./vision-html-tables.js";
 import { insertMissingTableDelimiters } from "./vision-table-delimiter.js";
 import { normalizeVisionWhitespace } from "./vision-whitespace.js";
 
@@ -19,9 +20,13 @@ export const VISUAL_RELATIONSHIP_INSTRUCTIONS = [
   "For diagrams, preserve visible arrow direction and endpoints, containment, and label-to-node or label-to-edge relationships as concise Markdown lines. Preserve visible relationships rather than flattening labels into an unrelated list. Never invent relationships; explicitly mark unclear endpoints, labels or direction as uncertain.",
 ].join("\n");
 
-/** Markdown transcription that asks for LaTeX math, keeps text inside figures, and forbids layout padding or paraphrase. */
+/**
+ * Markdown transcription that asks for LaTeX math, keeps text inside figures, and forbids layout padding or paraphrase.
+ * Tables with merged cells or multi-row headers may come back as HTML; postProcessVisionText rebuilds them from an
+ * allow-list (vision-html-tables.ts) before anything else reads them.
+ */
 export const MARKDOWN_LATEX_VISION_PROMPT =
-  "Transcribe this document page into GitHub-flavored Markdown, exactly as written. Copy every word verbatim in reading order; do not paraphrase, summarize, translate, correct the text or add unrelated descriptions. Include text, labels and formulas printed inside figures and diagrams. Use Markdown headings for headings, GFM tables for tables and lists for lists. Write every mathematical formula in LaTeX: inline math as $...$ and display equations as $$...$$ on their own lines. Do not reproduce column alignment, padding spaces or the page's line wrapping. Output only the Markdown." + "\n" + VISUAL_RELATIONSHIP_INSTRUCTIONS;
+  "Transcribe this document page into GitHub-flavored Markdown, exactly as written. Copy every word verbatim in reading order; do not paraphrase, summarize, translate, correct the text or add unrelated descriptions. Include text, labels and formulas printed inside figures and diagrams. Use Markdown headings for headings and lists for lists. Write simple tables as GFM pipe tables. Write a table with merged cells or a header of more than one row as an HTML <table> instead, with <thead> for the header rows, <tbody>, <tr>, <th> and <td>, and rowspan or colspan on each merged cell; put only plain text in its cells and use no other tags or attributes. Write every mathematical formula in LaTeX: inline math as $...$ and display equations as $$...$$ on their own lines. Do not reproduce column alignment, padding spaces or the page's line wrapping. Output only the Markdown." + "\n" + VISUAL_RELATIONSHIP_INSTRUCTIONS;
 
 /**
  * Markdown transcription with explicit rules for tables (real tabular data only), multi-column reading order,
@@ -31,7 +36,7 @@ export const MARKDOWN_TRANSCRIPTION_VISION_PROMPT = [
   "Transcribe this document page into GitHub-flavored Markdown, exactly as printed and in natural reading order (in multi-column layouts, finish each column before starting the next).",
   "- Copy every visible word verbatim in its original language and script. Do not translate, summarize or add unrelated commentary.",
   "- Mark titles and section headings with # headings and bulleted or numbered items as Markdown lists.",
-  "- Use a Markdown pipe table only for real tabular data: rows of values under column headers, such as line items, schedules, registers and timetables. Keep one table row per printed row. Do not turn page columns, side-by-side articles, cards, adverts or form fields into tables; write those as ordinary text, one block after another, and form fields as \"Label: value\" lines.",
+  "- Use a table only for real tabular data: rows of values under column headers, such as line items, schedules, registers and timetables. Keep one table row per printed row. Write simple tables as GFM pipe tables. Write a table with merged cells or a header of more than one row as an HTML <table> instead, with <thead> for the header rows, <tbody>, <tr>, <th> and <td>, and rowspan or colspan on each merged cell; put only plain text in its cells and use no other tags or attributes. Do not turn page columns, side-by-side articles, cards, adverts or form fields into tables; write those as ordinary text, one block after another, and form fields as \"Label: value\" lines.",
   "- Write mathematical formulas and equations in LaTeX: inline formulas inside $...$ and each displayed equation inside its own $$...$$ block on separate lines, one block per printed equation line. Never output a formula without these delimiters. Keep ordinary words, numbers, footnote markers, identifiers and code as plain text.",
   "- Transcribe the text, labels and formulas printed inside figures, charts and diagrams, then their captions. Do not add image placeholders or unrelated picture descriptions.",
   "- Write each paragraph as a single line and separate paragraphs with a blank line.",
@@ -39,12 +44,12 @@ export const MARKDOWN_TRANSCRIPTION_VISION_PROMPT = [
   "Output only the Markdown transcription.",
 ].join("\n");
 
-/** Page-wide Markdown transcription with LaTeX math, GFM tables for printed tables, and text inside figures. */
+/** Page-wide Markdown transcription with LaTeX math, GFM or (merged cells) HTML tables, and text inside figures. */
 export const PAGE_MARKDOWN_LATEX_VISION_PROMPT = [
   "Transcribe this document page into GitHub-flavored Markdown. Copy every visible word verbatim in natural reading order: finish each column before starting the next, and keep headers, footers, captions and labels where they appear. Do not summarize, translate or add unrelated commentary.",
   "- Headings as # headings; lists as - or numbered lists.",
   "- Math: write every formula and equation in LaTeX, inline as $...$ and each equation set on its own line as $$...$$ (keep equation numbers with \\tag{}). Never write math as Unicode symbols, plain text or \\( \\) delimiters.",
-  "- Tables: transcribe content printed as a table (ruled or column-aligned rows) as a GFM pipe table with one row per line, keeping header rows and every cell. Do not turn other content, such as diagrams or label-value lines, into tables.",
+  "- Tables: transcribe content printed as a table (ruled or column-aligned rows), one row per printed row, keeping header rows and every cell. Write simple tables as GFM pipe tables. Write a table with merged cells or a header of more than one row as an HTML <table> instead, with <thead> for the header rows, <tbody>, <tr>, <th> and <td>, and rowspan or colspan on each merged cell; put only plain text in its cells and use no other tags or attributes. Do not turn other content, such as diagrams or label-value lines, into tables.",
   "- Text inside charts, diagrams and figures: transcribe it with its visible relationships.",
   VISUAL_RELATIONSHIP_INSTRUCTIONS,
   "- Do not pad lines with alignment spaces. Output only the Markdown.",
@@ -204,11 +209,12 @@ export function visionOutputCapForModel(model: string | undefined, shared: { val
 
 /**
  * Post-process a page transcription from any vision/OCR model: the model's profile repair (if any), then the
- * shared padding-whitespace collapse. Runs after the repair so a whole-page fence is unwrapped before the
- * collapse skips fenced code.
+ * shared padding-whitespace collapse, then the HTML table allow-list. Runs after the repair so a whole-page fence is
+ * unwrapped before the collapse skips fenced code.
  */
 export function postProcessVisionText(model: string | undefined, text: string): string {
-  return normalizeVisionWhitespace(visionModelProfile(model)?.postProcess?.(text) ?? text);
+  // Last: model HTML never survives as written; every table is rebuilt from the allow-list, whatever the prompt asked.
+  return sanitizeVisionHtmlTables(normalizeVisionWhitespace(visionModelProfile(model)?.postProcess?.(text) ?? text));
 }
 
 /** Request-body fragment with the reasoning control for `model`: the profile's, else the shared verified floor. */
