@@ -33,6 +33,28 @@ describe("worker scaler publisher", () => {
     expect(read).toHaveBeenCalledTimes(1);
   });
 
+  it("holds the published target through short gaps when DOCSLURP_WORKER_SCALE_DOWN_HOLD_SECONDS is set", async () => {
+    let now = 0;
+    let snapshot: WorkerScalerSnapshot = busy;
+    const { instance } = publisher({ config: { ...config, scaleDownHoldMs: 300_000 }, read: async () => snapshot, cacheMs: 0, now: () => now });
+    expect(await instance.metrics()).toContain("docslurp_worker_target_machines 3");
+    snapshot = EMPTY_WORKER_SCALER_SNAPSHOT;
+    now = 60_000;
+    const gap = await instance.metrics();
+    expect(gap).toContain("docslurp_worker_target_machines 3");
+    expect(gap).toContain("docslurp_worker_demand_target_machines 0");
+    now = 300_001;
+    expect(await instance.metrics()).toContain("docslurp_worker_target_machines 0");
+  });
+
+  it("publishes demand alone without a hold (default)", async () => {
+    let snapshot: WorkerScalerSnapshot = busy;
+    const { instance } = publisher({ read: async () => snapshot, cacheMs: 0 });
+    expect(await instance.metrics()).toContain("docslurp_worker_target_machines 3");
+    snapshot = EMPTY_WORKER_SCALER_SNAPSHOT;
+    expect(await instance.metrics()).toContain("docslurp_worker_target_machines 0");
+  });
+
   it("keeps the app awake only while work exists", async () => {
     const { instance, fetchImpl } = publisher();
     expect(await instance.tick()).toEqual({ work: true, pinged: true });

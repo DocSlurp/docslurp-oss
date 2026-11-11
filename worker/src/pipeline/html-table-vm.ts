@@ -9,10 +9,17 @@ import type { HtmlTableCell } from "./table-cells-guest.js";
 import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 const cellsContext = new AsyncLocalStorage<Map<string, HtmlTableCell[] | null>>();
 export function preparedHtmlTableCells(source: string): HtmlTableCell[] | null | undefined { return cellsContext.getStore()?.get(source); }
+function vmTableSources(sources: string[]): string[] {
+  return [...new Set(sources.map(s => s.trim()).filter(s => /^<table(?=\s|>|$)/i.test(s) && s.length > 0 && s.length <= HTML_TABLE_MAX_SOURCE_CHARS))];
+}
+/** True when withPreparedHtmlTables would send these sources to a parser VM (no I/O). */
+export function hasVmHtmlTableWork(sources: string[]): boolean {
+  return vmOnlyParsing() && vmTableSources(sources).length > 0;
+}
 /** Prepare flat typed records in the VM, then keep synchronous chunking scoped to this document. */
 export async function withPreparedHtmlTables<T>(sources: string[], runner: Pick<CommandRunner, "run">, fn: () => T, signal?: AbortSignal): Promise<T> {
   if (!vmOnlyParsing()) return fn();
-  const unique = [...new Set(sources.map(s => s.trim()).filter(s => /^<table(?=\s|>|$)/i.test(s) && s.length > 0 && s.length <= HTML_TABLE_MAX_SOURCE_CHARS))];
+  const unique = vmTableSources(sources);
   if (unique.length > 1024) throw new Error("HTML table count exceeds VM limit");
   if (unique.reduce((total, source) => total + source.length, 0) > 32 * 1024 * 1024) throw new Error("HTML table document source exceeds limit");
   const prepared = new Map<string, HtmlTableCell[] | null>();
