@@ -179,6 +179,9 @@ describe("tables that leaked out of the extracted tables (authored pages)", () =
   it("flags a header without its body only when the body's numbers leaked out as text", () => {
     const header = html(["", "All markets", "", "New markets", ""], ["Segment", "Revenue", "Margin", "Revenue", "Margin"]);
     expect(tableReliability(`${header}\n\n${leakedBody}`)).toEqual(expect.arrayContaining(["table:header-only"]));
+    // ... or its body extracted as a separate table of numbers.
+    expect(tableReliability(`${header}\n\n${html(["Enterprise", "412.5", "18.2", "398.1", "17.9"], ["Mid-market", "288.0", "12.7", "251.3", "11.3"], ["Startups", "190.4", "8.4", "170.2", "7.1"])}`))
+      .toEqual(["table:header-only"]);
     // The same header alone (no numbers anywhere) is not evidence of a missing body.
     expect(tableReliability(header)).toEqual([]);
     // Two columns of long text (a glossary) is a table of its own.
@@ -214,7 +217,7 @@ describe("tables that leaked out of the extracted tables (authored pages)", () =
     expect(tableReliability(leakedBody.replace(/\n/g, "\n\n"))).toEqual(["table:numeric-prose"]);
   });
 
-  it("flags cells holding several numbers on two or more rows (columns collapsed into one)", () => {
+  it("flags two or more cells holding several numbers (columns collapsed into one)", () => {
     expect(tableReliability(html(["Region", "Bookings"], ["North", "412.5 398.1 14.4"], ["South", "288.0 251.3 36.7"], ["West", "190.4"]))).toEqual(["table:merged-numeric-cell"]);
     // One such cell (a coordinate triple, a range) is a value.
     expect(tableReliability(html(["Region", "Bookings"], ["North", "412.5 398.1 14.4"], ["South", "288.0"], ["West", "190.4"]))).toEqual([]);

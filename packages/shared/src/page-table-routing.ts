@@ -290,11 +290,12 @@ export const TABLE_UNRELIABLE_EMPTY_CELL_SHARE = 0.4;
  * - `table:header-only`: a table of at most `headerOnlyMaxRows` rows that are all header-like (one header row, or a
  *   two-row header with no body row at all), at least `headerOnlyMinColumns` columns, no cell
  *   mostly made of numbers, no value-like cell (a date or an identifier: digits joined by `/` or `-`, or a run of five or
- *   more digits) and only short cells (at most `headerOnlyMaxCellWords` words), on a page that also has at least
- *   `numericProseMinLines` number-heavy text lines (its body, written as text). An empty form's label row is not one.
- * - `table:merged-numeric-cell`: cells holding at least `mergedCellMinNumbers` numeric tokens that make up at least half
- *   their tokens, two of them measured values, on at least `mergedCellMinRows` rows of one table: columns collapsed into
- *   one. Phone numbers and digit-per-box form fields are plain digit groups and do not count.
+ *   more digits) and only short cells (at most `headerOnlyMaxCellWords` words), whose body is elsewhere on the page: at
+ *   least `numericProseMinLines` number-heavy text lines, or another table with two or more rows of numbers. An empty
+ *   form's label row or a feature matrix alone is not one.
+ * - `table:merged-numeric-cell`: at least `mergedCellMinCells` cells of one table each holding at least
+ *   `mergedCellMinNumbers` numeric tokens that make up at least half their tokens, two of them measured values: columns
+ *   collapsed into one (a single such cell, like a coordinate triple, is a value). Phone numbers and digit-per-box form fields are plain digit groups and do not count.
  *
  * These signals qualify any page with a text layer for a model read, table-heavy or not (classify-route), at most
  * tableLeakPageCap(pages) pages per document.
@@ -308,7 +309,7 @@ export const TABLE_LEAK = {
   headerOnlyMinColumns: 3,
   headerOnlyMaxCellWords: 8,
   mergedCellMinNumbers: 3,
-  mergedCellMinRows: 2,
+  mergedCellMinCells: 2,
 } as const;
 
 /**
@@ -389,6 +390,10 @@ function isNumericProseLine(line: string, rules: typeof TABLE_LEAK): boolean {
   return numbers.filter((token) => MEASURED_NUMBER.test(token)).length >= rules.numericProseMinMeasured;
 }
 
+/** Rows of a table with at least two numeric cells. */
+const numericRows = (table: { header: string[]; body: string[][] }) =>
+  [table.header, ...table.body].filter((cells) => cells.filter((cell) => cell.trim() !== "" && cell.trim().split(/\s+/).every(isLeakNumber)).length >= 2).length;
+
 function leakSignals(page: string, tables: ReadonlyArray<{ header: string[]; body: string[][] }>, rules: typeof TABLE_LEAK): string[] {
   const signals: string[] = [];
   let run = 0;
@@ -397,25 +402,29 @@ function leakSignals(page: string, tables: ReadonlyArray<{ header: string[]; bod
     if (line !== null && numericProseTokens(line, rules) && !PHONE.test(line)) numberHeavyLines += 1;
     run = line !== null && isNumericProseLine(line, rules) ? run + 1 : 0;
     if (run >= rules.numericProseMinLines && !signals.includes("table:numeric-prose")) signals.push("table:numeric-prose");
+    // Both facts the page can give are known: stop scanning (bounded work on long pages).
+    if (signals.length && numberHeavyLines >= rules.numericProseMinLines) break;
   }
   const tokens = (cell: string) => cell.split(/\s+/).filter(Boolean);
   const words = (cell: string) => tokens(cell).length;
   for (const table of tables) {
     const rows = [table.header, ...table.body];
     const columns = Math.max(...rows.map((cells) => cells.length));
-    // A header with no body row at all, and the body's numbers written as text elsewhere on the page.
-    if (rows.length <= rules.headerOnlyMaxRows && numberHeavyLines >= rules.numericProseMinLines && columns >= rules.headerOnlyMinColumns &&
+    // A header with no body row at all, and its body elsewhere on the page: written as number-heavy text, or extracted as
+    // a separate table of numbers.
+    const bodyElsewhere = numberHeavyLines >= rules.numericProseMinLines || tables.some((other) => other !== table && numericRows(other) >= 2);
+    if (rows.length <= rules.headerOnlyMaxRows && bodyElsewhere && columns >= rules.headerOnlyMinColumns &&
         rows.every((cells) => cells.every((cell) => !VALUE_TOKEN.test(cell) && words(cell) <= rules.headerOnlyMaxCellWords &&
           tokens(cell).filter(isLeakNumber).length * 2 <= words(cell) && !isLeakNumber(cell))) &&
         rows.some((cells) => cells.some((cell) => LETTERS.test(cell))) && !signals.includes("table:header-only")) {
       signals.push("table:header-only");
     }
-    const mergedRows = rows.filter((cells) => cells.some((cell) => {
+    const mergedCells = rows.reduce((sum, cells) => sum + cells.filter((cell) => {
       const numbers = tokens(cell).filter(isLeakNumber);
       return numbers.length >= rules.mergedCellMinNumbers && numbers.length * 2 >= words(cell) &&
         numbers.filter((token) => MEASURED_NUMBER.test(token)).length >= 2;
-    })).length;
-    if (mergedRows >= rules.mergedCellMinRows && !signals.includes("table:merged-numeric-cell")) signals.push("table:merged-numeric-cell");
+    }).length, 0);
+    if (mergedCells >= rules.mergedCellMinCells && !signals.includes("table:merged-numeric-cell")) signals.push("table:merged-numeric-cell");
   }
   return signals;
 }
