@@ -16,8 +16,7 @@ The stage's sniff and ZIP inspection also runs as a VM command, on the same pool
 
 | Flag | Effect |
 |---|---|
-| `DOCSLURP_QUARANTINE_SCAN_SNAPSHOT=on` (Q1) | Each document's quarantine (inspection and scan) runs in a scanner session. Its VM is restored from a Modal memory snapshot in which clamd has already loaded the signatures. Signature freshness is read on the worker from the staged daily header. |
-| `DOCSLURP_QUARANTINE_SCAN_BATCH=on` (Q2, needs Q1) | One scanner session serves a run's whole quarantine pass. It runs up to `DOCSLURP_MODAL_VMS_PER_ACTIVITY` restored VMs, all for that run's organization only. |
+| `DOCSLURP_QUARANTINE_SCAN_SNAPSHOT=on` (Q1) | Each document's quarantine (inspection and scan) runs in its own scanner session. Its VM is restored from a Modal memory snapshot in which clamd has already loaded the signatures. Signature freshness is read on the worker from the staged daily header. |
 | `DOCSLURP_MODAL_SCANNER_REGIONS` (default `us`) | The region the snapshot VMs run in. Memory snapshots of VM sandboxes need a region pin. |
 
 ### Snapshot build
@@ -46,7 +45,8 @@ Any failed check means no snapshot, and the scan returns an error verdict (fail 
 - **Restored VMs:** a restored VM inherits the snapshot VM's lifetime bound, counted from the restore. A live probe of a 60 s bound saw the VM gone at 61 s.
 - **Network:** network stays blocked on restored VMs, measured on restore.
 - **Teardown:** every restored VM is terminated when its session closes.
-- **Organization boundary:** a scanner session refuses any command whose organization differs from its own, or that has none. The Q2 stage pass also refuses any document of another run before anything is downloaded.
+- **Organization and document boundary:** a scanner session refuses any command whose organization differs from its own, or that has none. It also serves one document: its first command binds it, and a command of any other document is refused (council M1).
+- **Egress check:** before a restored VM runs anything, a root check confirms it cannot connect to public addresses (council L1).
 
 ## Measurements (Modal, 2 vCPU / 4 GiB, production defaults)
 
@@ -80,6 +80,7 @@ These numbers come from the worker's own Modal provider and `CommandRunner`. The
 
 - **Verdicts:** EICAR was `infected` (`Eicar-Test-Signature`) and the PDFs were `clean` in every arm.
 - **Cross-tenant check:** a command of another organization was refused inside the Q2 session.
+- **Q2 removed after council review:** the measured Q2 arm (one session for a run's whole pass) is no longer possible. A clamd that one document compromised could have answered for every later document of the run. Q1 already restores a fresh VM per document in about 1 s, so Q2 saved about 0.7–0.9 s per document.
 - **Upload location:** the "before" arm uploaded the signatures from a home connection, so its signature upload is slower than production's from Fly `lax`. Production measured 18.8–29 s for the same path.
 
 ### Expected production effect (estimate, not yet measured end to end)
@@ -92,6 +93,28 @@ These numbers come from the worker's own Modal provider and `CommandRunner`. The
 To measure end to end after the flags are enabled in a deployed environment, use the comparison harness. Upload the same 1-page dev PDFs at `quality=fast` and `quality=auto`, in separate projects so the bytes are not deduplicated, 3 runs per arm. Read per-stage times from the run API's stage `updated_at` values and from SigNoz `[temporal] stage=quarantine durationMs`.
 
 Spend for this exercise: about $0.11 of Modal.
+
+## Council review (PR #339)
+
+Two independent reviewers: adversarial (Claude Opus 5.5) and correctness (GPT-6.1). Neither found a High.
+
+### M2: files over 100 MB were scanned clean (existing bypass, flags off too)
+
+libclamav's default `MaxFileSize` is 100 MB, while uploads reach 500 MiB. Over the limit, clamscan and clamd skip the file and exit 0. On hitting `MaxScanSize`, `MaxFiles`, `MaxRecursion` or `MaxScanTime`, they report the rest clean. Both scan paths now use `worker/src/tools/clam-limits.ts`: limits above the 512 MiB quarantine download cap, plus `AlertExceedsMax`. A limit that is still hit is a `Heuristics.Limits.Exceeded.*` detection, and quarantine refuses it.
+
+Measured with ClamAV 1.4.3 from the worker image, 2 vCPU / 4 GiB, no network:
+
+| File | Before (libclamav defaults) | After |
+|---|---|---|
+| Body-signature marker after 110 MB of zeros | exit 0, clean | exit 1, detected (26 s) |
+| EICAR inside a 110 MB stored ZIP | exit 0, clean | exit 1, `Eicar-Test-Signature` (18 s) |
+| Marker after 510 MB of zeros | (skipped) | exit 1, detected (70 s) |
+| 510 MB random bytes | (skipped) | exit 0, clean (71 s, 1.07 GB peak RSS) |
+| 510 MB zeros | (skipped) | 123 s of scan time (`Limits.Exceeded.MaxScanTime` at the 120 s default) |
+| Synthetic 5,000-page PDF | not measured | clean (106 s) |
+| Synthetic 20,000-page PDF | not measured; libclamav stops at 10,000 embedded objects and reports clean | `Limits.Exceeded.MaxScanTime`, refused |
+
+Times include about 15 s of signature loading. Peak RSS is about 0.96 GB for the signatures and at most 110 MB more for a 510 MB scan. The scan time limit is 300 s, and the scan command's budget is that plus 90 s. Pathological files that need longer are refused as unscanned rather than passed.
 
 ## Q3: concurrent quarantine and extraction (designed, not implemented)
 

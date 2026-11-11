@@ -48,13 +48,31 @@ The scan policy comes from `resolveMalwareScanPolicy` in `worker/src/tools/runne
 | `DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS` | `24` | `24` | Age after which signatures count as stale. |
 | `DOCSLURP_CLAMAV_DB_DIR` | `/var/lib/clamav` | `/var/lib/clamav` | Signature directory. |
 
-With the Modal parser sandbox, two flags move the scan into VMs restored from a clean, signature-loaded snapshot. Both are off by default, and a provider without scanner sessions keeps the per-command scan:
+Both scan paths apply the same limits (`worker/src/tools/clam-limits.ts`). libclamav's defaults skip files over 100 MB and report them clean. They also stop at a scan size, embedded-file count, nesting depth or scan time and report the remainder clean. DocSlurp raises the size limits above anything quarantine downloads (uploads default to 500 MiB) and sets `AlertExceedsMax`. Any limit that is still hit becomes a `Heuristics.Limits.Exceeded.*` detection, and quarantine refuses the file as `malware-scan-limit-exceeded` whatever the fail-open policy says.
+
+| Limit | Value | libclamav default |
+| --- | --- | --- |
+| File size | 1024 MiB | 100 MB |
+| Scan size per file | 2000 MiB | 400 MB |
+| Embedded files per file | 50,000 | 10,000 |
+| Nesting depth | 17 | 17 |
+| Scan time per file | 300 s | 120 s |
+
+Measured with ClamAV 1.4.3 on 2 vCPU: a 510 MB file scans in 56–123 s at about 1.07 GB peak memory, most of it the loaded signatures. A synthetic 5,000-page PDF scans in about 106 s. A synthetic 20,000-page PDF exceeds the scan time limit and is refused as unscanned.
+
+With the Modal parser sandbox, `DOCSLURP_QUARANTINE_SCAN_SNAPSHOT` moves the scan into VMs restored from a clean, signature-loaded snapshot. It is off by default, and a provider without scanner sessions keeps the per-command scan:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `DOCSLURP_QUARANTINE_SCAN_SNAPSHOT` | `off` | Run each document's quarantine in a VM restored from a memory snapshot. clamd has already loaded the staged signatures in that snapshot, which is built before any job input exists. Freshness is read on the worker from the staged daily header. Any failed check is an error verdict. |
-| `DOCSLURP_QUARANTINE_SCAN_BATCH` | `off` | With the snapshot flag, one scanner session serves a run's whole quarantine pass. Its VMs run commands of that run's organization only. |
-| `DOCSLURP_MODAL_SCANNER_REGIONS` | `us` | Region list for scanner snapshot VMs (memory snapshots of VM sandboxes need a region). |
+| `DOCSLURP_QUARANTINE_SCAN_SNAPSHOT` | `off` | Run each document's quarantine in its own scanner session, on VMs restored from a memory snapshot. clamd has already loaded the staged signatures in that snapshot, which is built before any job input exists. Freshness is read on the worker from the staged daily header. Any failed check is an error verdict. |
+| `DOCSLURP_MODAL_SCANNER_REGIONS` | `us` | Region list for scanner snapshot VMs (memory snapshots of VM sandboxes need a region). Read only when the snapshot flag is on. |
+
+Scanner sessions follow these rules:
+
+- **One document per session.** The session's first command binds it to that document. A command of another document, of no document or of another organization is refused before it reaches a VM. clamd outlives each command, so a document that compromised it could otherwise answer for later documents.
+- **Network blocked after restore.** Before a restored VM runs anything, a root check confirms it cannot connect to public addresses. Otherwise the VM is refused.
+- **No per-VM secrets in the snapshot.** Every restored VM starts from the same memory, including userspace random-number state. The snapshot holds only the image, the signatures, the clamd config and the loaded daemon. Nothing that needs per-VM randomness, such as keys, tokens or nonces, may be added to it.
+- **Platform-cost builds.** The snapshot build serves every organization, so its VM time is logged as platform cost (`[sandbox-usage] status=platform kind=scanner-build`). It is never charged to the organization whose scan triggered it. A failed build is not retried for 60 s, and scans in that window return an error verdict.
 
 "Production" means `NODE_ENV=production`, which the Compose stack sets. If no scan engine is available at all and the daemon is not required, the scan result is `skipped-unavailable`.
 

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,17 +51,16 @@ async function fixture(extra: Document[] = []) {
   } as unknown as ArtifactStore;
   // The scanner double reports what clamd reports for these bytes; the real stage, refusal and checkpoint code run.
   const sessions: Array<{ tenantKey: string | null | undefined; scanned: string[] }> = [];
-  let current: { tenantKey: string | null | undefined; scanned: string[] } | null = null;
+  const current = new AsyncLocalStorage<{ tenantKey: string | null | undefined; scanned: string[] }>();
   const runner = {
     scanForMalware: vi.fn(async (p: string) => {
-      current?.scanned.push(p);
+      current.getStore()?.scanned.push(p);
       return { status: (await readFile(p, "utf8")) === EICAR ? "infected" : "clean", engine: "clamdscan", signature: "Eicar-Test-Signature", databaseStatus: "fresh", healthWarnings: [] };
     }),
     withMalwareScanner: vi.fn(async (tenantKey: string | null | undefined, fn: () => Promise<unknown>) => {
       const session = { tenantKey, scanned: [] as string[] };
       sessions.push(session);
-      const previous = current; current = session;
-      try { return await fn(); } finally { current = previous; }
+      return await current.run(session, fn);
     }),
   } as unknown as CommandRunner;
   const config = { quarantineEnabled: true, quarantineFailOpenOnToolMissing: false, quarantineMaxArchiveEntries: 10, quarantineMaxArchiveDepth: 3,
@@ -72,7 +72,8 @@ describe("quarantine scanner flags", () => {
   it.each([
     ["both off", "off", "off", 0],
     ["snapshot (Q1: one scanner session per document)", "on", "off", 2],
-    ["snapshot and batch (Q2: one scanner session per run)", "on", "on", 1],
+    // The batch flag was removed (council M1): a stale setting changes nothing, each document still gets its own session.
+    ["snapshot with the removed batch flag still set", "on", "on", 2],
     ["batch without snapshot (ignored)", "off", "on", 0],
   ])("EICAR is refused and never reaches extraction or indexing: %s", async (_label, snapshot, batch, scannerSessions) => {
     vi.stubEnv("DOCSLURP_QUARANTINE_SCAN_SNAPSHOT", snapshot);
@@ -86,17 +87,7 @@ describe("quarantine scanner flags", () => {
     // Snapshot off: the stage never opens a scanner session (exactly today's path).
     expect(f.runner.withMalwareScanner).toHaveBeenCalledTimes(scannerSessions);
     expect(f.sessions.every((session) => session.tenantKey === "org-a")).toBe(true);
-    if (scannerSessions === 1) expect(f.sessions[0]!.scanned).toHaveLength(2);
-  });
-
-  it("Q2 refuses a batch holding a document of another run before anything is downloaded or scanned", async () => {
-    vi.stubEnv("DOCSLURP_QUARANTINE_SCAN_SNAPSHOT", "on");
-    vi.stubEnv("DOCSLURP_QUARANTINE_SCAN_BATCH", "on");
-    const now = new Date();
-    const f = await fixture([{ id: "foreign", userId: "v", runId: "other-run", filename: "foreign.txt", mimeType: "text/plain", sourceKey: "foreign.txt",
-      status: "queued", extractionMode: "hybrid", pageCount: 1, createdAt: now, updatedAt: now } as Document]);
-    await expect(f.stage.run(f.state)).rejects.toThrow(/belongs to another run/);
-    expect(f.runner.scanForMalware).not.toHaveBeenCalled();
-    expect(f.runner.withMalwareScanner).not.toHaveBeenCalled();
+    // M1: no scanner session ever scans a second document.
+    expect(f.sessions.every((session) => session.scanned.length === 1)).toBe(true);
   });
 });

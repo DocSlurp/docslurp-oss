@@ -15,9 +15,11 @@
 
 ## Quarantine scanner snapshots (2026-11-11, `perf/quarantine-latency`, flags off)
 
-- [ ] Council review of `DOCSLURP_QUARANTINE_SCAN_SNAPSHOT` / `_BATCH` (scanner VMs restored from a clamd memory snapshot;
-  one organization per scanner session), then enable on production and measure `quality=fast` and `quality=auto`
-  1-page uploads before/after (performance/quarantine-latency-2026-11-11/results.md).
+- [ ] Enable `DOCSLURP_QUARANTINE_SCAN_SNAPSHOT` on production (council reviewed in PR #339; batch flag removed) and
+  measure `quality=fast` and `quality=auto` 1-page uploads before/after
+  (performance/quarantine-latency-2026-11-11/results.md).
+- [ ] Optional hardening (council M1): run the intake inspection in a plain parser session, so a parser-tool exploit never
+  shares a VM with clamd. One document per session already bounds it to the document that ran the exploit.
 - [ ] Build the scanner snapshot in the background when freshclam updates the signatures (today the first scan after an
   update waits about 34 s for the build), and share one snapshot across workers instead of one build per worker process.
 - [ ] Q3 (concurrent quarantine and extraction): split quarantine into the intake inspection (stays first: format-detect

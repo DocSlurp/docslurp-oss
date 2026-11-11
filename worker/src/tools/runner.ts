@@ -32,7 +32,7 @@ import type { Writable } from "node:stream";
 
 import { interpreterRoots, resolveCommandPaths } from "../sandbox/paths.js";
 import { closeSandboxQuietly, latchedTeardownError, noteSandboxInfrastructureError, runWithSandboxScope, SandboxSessionScope, sandboxScopeStorage } from "../sandbox/session-context.js";
-import { SCANNER_CONFIG_FILE } from "../sandbox/providers/modal/scanner.js";
+import { quarantineScanSnapshotEnabled, SCANNER_CONFIG_FILE } from "../sandbox/providers/modal/scanner.js";
 import { admitCommandSource } from "../sandbox/source-quarantine.js";
 import { assertTeardownBreakerClosed } from "../sandbox/teardown-breaker.js";
 import { defaultParserSandbox, registeredParserSandbox } from "../sandbox/startup.js";
@@ -64,6 +64,7 @@ import {
   resolveWorkerDeploymentProfile,
 } from "../pipeline/local-compute-cost.js";
 import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
+import { CLAM_SCAN_COMMAND_TIMEOUT_MS, clamscanLimitArgs } from "./clam-limits.js";
 
 export interface CommandPlan {
   /** Isolated-VM PDF extraction through the registered provider plugin; dispatched before any local provider or backend. */
@@ -1141,8 +1142,11 @@ export class CommandRunner {
     return await this.plan("tiffcp", "-s", source, outputPattern);
   }
 
+  /** clamscan with CLAM_SCAN_LIMITS: files up to the quarantine download cap are scanned, and a limit hit is a detection. */
   async clamScan(source: string): Promise<CommandPlan> {
-    return await this.plan("clamscan", "--no-summary", "--infected", source);
+    const plan = await this.plan("clamscan", ...clamscanLimitArgs(), "--no-summary", "--infected", source);
+    plan.timeoutMs = clamScanTimeoutMs();
+    return plan;
   }
 
   async clamDaemonScan(source: string): Promise<CommandPlan> {
@@ -1179,7 +1183,7 @@ export class CommandRunner {
   }
 
   /**
-   * Run `fn` (one document's quarantine, or a run's quarantine pass) in a malware scanner session when
+   * Run `fn` (one document's quarantine: never more than one document per session, council M1) in a malware scanner session when
    * DOCSLURP_QUARANTINE_SCAN_SNAPSHOT is on: its VMs are restored from a clean snapshot in which clamd already holds the
    * staged signatures (providers/modal/scanner.ts), and serve only `tenantKey`'s commands. Signature freshness is read on
    * this host from the staged daily header, so no VM runs `clamscan --version`. Off, or without VM-only parsing, `fn`
@@ -1199,8 +1203,9 @@ export class CommandRunner {
       const header = await readClamDefinitionsHeader(staged.files);
       const parent = sandboxScopeStorage.getStore();
       const runId = currentPerfContext()?.runId ?? "none";
+      const documentId = currentPerfContext()?.documentId ?? "none";
       const scope = new SandboxSessionScope(() => sandbox.provider.openSession(sandbox.config, {
-        activityId: `scanner:${runId}`,
+        activityId: `scanner:${runId}:${documentId}`,
         scanner: { tenantKey, definitionsDir: staged.dir, signatureSetHash: staged.hash, expectedVersion: header.version },
       }));
       try {
@@ -1262,6 +1267,8 @@ export class CommandRunner {
     if (!plan.available) return { ...base, available: false, status: "error", signature: null, stdout: "", stderr: "clamdscan unavailable in the scanner VM", exitCode: null };
     plan.readOnlyInputs = true;
     plan.requiresScanner = true;
+    // clamd applies CLAM_SCAN_LIMITS from its config (scanner.ts clamdConfig); this bounds the command around it.
+    plan.timeoutMs = clamScanTimeoutMs();
     const launched = await this.launch(plan, signal);
     let outcome: SandboxResult;
     try {
@@ -1679,7 +1686,7 @@ export class CommandRunner {
         const started = new Promise<void>((resolve) => (onStart = resolve));
         // Bound to this stage's context: a pooled VM's idle time is recorded in this stage's ledger when the VM is reaped.
         const recordUsage = AsyncResource.bind((event: UsageEvent) => recordRemoteUsage(event));
-        // The run's organization travels with every remote command: a scanner session runs only its own (Q2).
+        // The run's organization travels with every remote command: a scanner session runs only its own.
         const orgId = currentPerfContext()?.orgId;
         const remote = session.run({ ...command, ...(documentId ? { affinityKey: documentId } : {}), ...(orgId ? { tenantKey: orgId } : {}) }, signal, { onStart, recordUsage });
         if (!session.reportsStart) return { remote, timeoutMs: command.limits.timeoutMs, release };
@@ -2532,7 +2539,7 @@ export function isVectorBackendCommand(commandArgs: string[], scriptsDir: string
     commandArgs[0] === path.join(scriptsDir, script));
 }
 
-function parseClamSignature(output: string): string | null {
+export function parseClamSignature(output: string): string | null {
   const trimmed = output.trim();
   if (!trimmed) {
     return null;
@@ -2542,15 +2549,12 @@ function parseClamSignature(output: string): string | null {
   return match?.[1]?.trim() ?? null;
 }
 
-/** DOCSLURP_QUARANTINE_SCAN_SNAPSHOT: scan in VMs restored from a clean, signature-loaded snapshot (default off). */
-export function quarantineScanSnapshotEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return readBooleanFlag(env.DOCSLURP_QUARANTINE_SCAN_SNAPSHOT, false);
+/** A scan's wall-clock budget: the page-based one, but never less than the scan time limit allows (clam-limits.ts). */
+function clamScanTimeoutMs(): number {
+  return Math.max(resolveCommandTimeoutMs(currentPerfContext()?.pageCount), CLAM_SCAN_COMMAND_TIMEOUT_MS);
 }
 
-/** DOCSLURP_QUARANTINE_SCAN_BATCH: one scanner session (one organization) for a run's whole quarantine pass (default off). */
-export function quarantineScanBatchEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return quarantineScanSnapshotEnabled(env) && readBooleanFlag(env.DOCSLURP_QUARANTINE_SCAN_BATCH, false);
-}
+export { quarantineScanSnapshotEnabled };
 
 export interface ClamDefinitionsHeader {
   /** The daily signature version (the number `clamscan --version` prints second). */
@@ -2578,20 +2582,28 @@ export function parseClamDefinitionsHeader(header: Buffer | string): ClamDefinit
   return { version, signatureTimeMs: stime * 1000 };
 }
 
-/** The staged daily header (daily.cld preferred over daily.cvd, as ClamAV loads it). Throws when absent or malformed. */
+/**
+ * The staged daily header ClamAV loads: of daily.cld and daily.cvd, the one with the higher version, as libclamav picks
+ * it (council L3; a cld left behind next to a newer cvd must not pin the expected version to the old one). Throws when
+ * none is staged or any staged daily header is malformed.
+ */
 export async function readClamDefinitionsHeader(files: readonly string[]): Promise<ClamDefinitionsHeader> {
-  const daily = files.find((file) => path.basename(file) === "daily.cld") ?? files.find((file) => path.basename(file) === "daily.cvd");
-  if (!daily) throw new Error("ClamAV daily signatures are not staged; refusing to scan");
-  const handle = await open(daily, "r");
-  try {
-    const buffer = Buffer.alloc(512);
-    const { bytesRead } = await handle.read(buffer, 0, 512, 0);
-    const header = parseClamDefinitionsHeader(buffer.subarray(0, bytesRead));
-    if (!header) throw new Error("ClamAV daily signature header is malformed; refusing to scan");
-    return header;
-  } finally {
-    await handle.close();
+  const dailies = files.filter((file) => path.basename(file) === "daily.cld" || path.basename(file) === "daily.cvd");
+  if (!dailies.length) throw new Error("ClamAV daily signatures are not staged; refusing to scan");
+  let newest: ClamDefinitionsHeader | undefined;
+  for (const daily of dailies) {
+    const handle = await open(daily, "r");
+    try {
+      const buffer = Buffer.alloc(512);
+      const { bytesRead } = await handle.read(buffer, 0, 512, 0);
+      const header = parseClamDefinitionsHeader(buffer.subarray(0, bytesRead));
+      if (!header) throw new Error("ClamAV daily signature header is malformed; refusing to scan");
+      if (!newest || header.version > newest.version) newest = header;
+    } finally {
+      await handle.close();
+    }
   }
+  return newest!;
 }
 
 export function resolveMalwareScanPolicy(

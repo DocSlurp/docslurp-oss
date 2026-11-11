@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runWithPerfContext } from "../lib/perf-context.js";
 import { setDefaultParserSandbox } from "../sandbox/startup.js";
 import { SandboxPolicyError, type ParserSandboxProvider, type SandboxCommand, type SandboxSessionContext } from "../sandbox/types.js";
+import { CLAM_SCAN_COMMAND_TIMEOUT_MS, CLAM_SCAN_LIMITS, clamdLimitLines, clamscanLimitArgs, isClamLimitAlert } from "./clam-limits.js";
+import { clamdConfig } from "../sandbox/providers/modal/scanner.js";
 import { CommandRunner, parseClamDefinitionsHeader, readClamDefinitionsHeader } from "./runner.js";
 
 /** A ClamAV database header (cvd/cld layout), stime in seconds. */
@@ -29,13 +31,19 @@ describe("ClamAV definitions header (host-side freshness)", () => {
     expect(parseClamDefinitionsHeader(text)).toBeNull();
   });
 
-  it("prefers daily.cld over daily.cvd, as ClamAV loads it, and refuses when no daily file is staged", async () => {
+  it("reads the newer of daily.cld and daily.cvd, as ClamAV loads it, and refuses when no daily file is staged", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "docslurp-clam-header-"));
     try {
       await writeFile(path.join(dir, "daily.cvd"), header(1, 1_700_000_000));
       await writeFile(path.join(dir, "daily.cld"), header(2, 1_700_000_000));
       await writeFile(path.join(dir, "main.cvd"), header(3, 1_700_000_000));
-      expect((await readClamDefinitionsHeader([path.join(dir, "main.cvd"), path.join(dir, "daily.cvd"), path.join(dir, "daily.cld")])).version).toBe(2);
+      const files = [path.join(dir, "main.cvd"), path.join(dir, "daily.cvd"), path.join(dir, "daily.cld")];
+      expect((await readClamDefinitionsHeader(files)).version).toBe(2);
+      // A stale cld left next to a newer cvd (council L3): the cvd is what loads.
+      await writeFile(path.join(dir, "daily.cvd"), header(5, 1_700_000_000));
+      expect((await readClamDefinitionsHeader(files)).version).toBe(5);
+      await writeFile(path.join(dir, "daily.cld"), "garbage");
+      await expect(readClamDefinitionsHeader(files)).rejects.toThrow(/malformed/);
       await expect(readClamDefinitionsHeader([path.join(dir, "main.cvd")])).rejects.toThrow(/daily signatures are not staged/);
       await writeFile(path.join(dir, "daily.cvd"), "garbage");
       await expect(readClamDefinitionsHeader([path.join(dir, "daily.cvd")])).rejects.toThrow(/malformed/);
@@ -119,6 +127,17 @@ describe("malware scans in a scanner session", () => {
     expect(await scan()).toMatchObject({ status: "infected", signature: "Eicar-Test-Signature" });
   });
 
+  it("a limit alert from clamd (AlertExceedsMax) is not clean: exit 1 with its Heuristics.Limits signature (council M2)", async () => {
+    exit = 1; stdout = "/tmp/upload.pdf: Heuristics.Limits.Exceeded.MaxFileSize FOUND\n";
+    expect(await scan()).toMatchObject({ status: "infected", signature: "Heuristics.Limits.Exceeded.MaxFileSize" });
+    expect(commands[0]!.limits.timeoutMs).toBeGreaterThanOrEqual(CLAM_SCAN_COMMAND_TIMEOUT_MS);
+  });
+
+  it("M1: the scanner session is opened for one document (its activity names the document)", async () => {
+    await scan();
+    expect(contexts[0]!.activityId).toBe("scanner:run:doc");
+  });
+
   it.each([2, null])("a scanner failure (exit %s) is an error verdict, never clean or skipped (fail closed)", async (code) => {
     exit = code as number;
     expect((await scan()).status).toBe("error");
@@ -160,5 +179,44 @@ describe("malware scans in a scanner session", () => {
     expect(await new CommandRunner().withMalwareScanner("org-a", async () => "ran")).toBe("ran");
     expect(contexts).toHaveLength(0);
     expect(error).toHaveBeenCalledWith(expect.stringContaining("scanner-snapshot-unsupported"));
+  });
+});
+
+describe("ClamAV scan limits (council M2: files over 100 MB scanned clean)", () => {
+  const MiB = 1024 * 1024;
+  const bytes = (size: string) => Number(size.replace(/M$/, "")) * MiB;
+
+  it("covers every byte quarantine downloads (default upload 500 MiB, download cap 512 MiB) and stays within libclamav's 2 GiB", () => {
+    expect(bytes(CLAM_SCAN_LIMITS.maxFileSize)).toBeGreaterThanOrEqual(512 * MiB);
+    expect(bytes(CLAM_SCAN_LIMITS.maxScanSize)).toBeGreaterThanOrEqual(bytes(CLAM_SCAN_LIMITS.maxFileSize));
+    expect(bytes(CLAM_SCAN_LIMITS.maxScanSize)).toBeLessThan(2048 * MiB);
+    expect(CLAM_SCAN_COMMAND_TIMEOUT_MS).toBeGreaterThan(CLAM_SCAN_LIMITS.maxScanTimeMs);
+  });
+
+  it("the per-command clamscan plan (flags off, today's production path) applies the limits and alerts on any limit hit", async () => {
+    // Reviewer's reproducer shape: an EICAR followed by more than 100 MB of padding. Before the fix clamscan ran with
+    // libclamav's 100 MB MaxFileSize, skipped the file and exited 0 (clean).
+    const plan = await new CommandRunner().clamScan("/tmp/docslurp-quarantine-eicar-110mb.bin");
+    expect(plan.args).toEqual(expect.arrayContaining(clamscanLimitArgs()));
+    expect(plan.args).toContain("--alert-exceeds-max=yes");
+    expect(plan.args).toContain("--max-filesize=1024M");
+    expect(plan.args.at(-1)).toBe("/tmp/docslurp-quarantine-eicar-110mb.bin");
+    expect(plan.timeoutMs).toBeGreaterThanOrEqual(CLAM_SCAN_COMMAND_TIMEOUT_MS);
+  });
+
+  it("the scanner VMs' clamd config carries the same limits and AlertExceedsMax", () => {
+    const config = clamdConfig("/opt/docslurp-assets/clam-x");
+    for (const line of clamdLimitLines()) expect(config.split("\n")).toContain(line);
+    expect(config).toMatch(/^AlertExceedsMax yes$/m);
+    expect(config).toMatch(/^MaxFileSize 1024M$/m);
+    expect(config).toMatch(/^StreamMaxLength 1024M$/m);
+  });
+
+  it("recognizes ClamAV's limit alerts and nothing else", () => {
+    expect(isClamLimitAlert("Heuristics.Limits.Exceeded.MaxFileSize")).toBe(true);
+    expect(isClamLimitAlert("Heuristics.Limits.Exceeded")).toBe(true);
+    expect(isClamLimitAlert("Eicar-Test-Signature")).toBe(false);
+    expect(isClamLimitAlert("Heuristics.Encrypted.PDF")).toBe(false);
+    expect(isClamLimitAlert(null)).toBe(false);
   });
 });

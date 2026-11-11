@@ -1,6 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
+import { clamdLimitLines } from "../../../tools/clam-limits.js";
 import type { ScannerSessionSpec } from "../../types.js";
 
 /**
@@ -9,8 +10,13 @@ import type { ScannerSessionSpec } from "../../types.js";
  * A scanner snapshot is a memory snapshot of a hardened, locked parser VM in which clamd has loaded one signature set and
  * nothing else has happened: it is built from the worker's own signature files before any job input exists, and no job
  * command ever runs in the VM it is taken from. Scan jobs restore fresh VMs from it, so the signature load (seconds of CPU
- * per VM) and the image lock happen once per signature set instead of once per document. A restored VM serves one
- * organization and is terminated with its session; nothing a job wrote is ever in a snapshot.
+ * per VM) and the image lock happen once per signature set instead of once per document. A scanner session serves one
+ * document of one organization, its VMs are terminated with it, and nothing a job wrote is ever in a snapshot.
+ *
+ * Every restored VM resumes the same memory, userspace random-number state included (council L2: a Python process started
+ * before the snapshot printed the same random() in two restores; the kernel RNG is reseeded). The snapshot therefore holds
+ * nothing that needs per-VM randomness or secrecy, such as keys, tokens or nonces: only the image, the worker's signature
+ * files, the clamd config and the loaded daemon. Keep it that way.
  */
 
 /** Root-owned home of the clamd configuration in a scanner VM, outside every job tree. */
@@ -32,8 +38,8 @@ export function scannerDefinitionsDir(assetRoot: string, signatureSetHash: strin
 }
 
 /**
- * clamd configuration for a scanner VM. Scan limits are clamd's defaults, which are libclamav's, the same ones clamscan
- * applies today: a scanner verdict is the verdict clamscan would give for the same file and signatures.
+ * clamd configuration for a scanner VM. Scan limits are CLAM_SCAN_LIMITS, the ones the per-command clamscan applies too
+ * (clam-limits.ts): every byte quarantine accepts is scanned, and a limit hit is a detection, never a clean verdict.
  */
 export function clamdConfig(definitionsDir: string): string {
   return [
@@ -49,6 +55,7 @@ export function clamdConfig(definitionsDir: string): string {
     "SelfCheck 0",
     "ConcurrentDatabaseReload no",
     "MaxThreads 4",
+    ...clamdLimitLines(),
     "LogTime no",
     "",
   ].join("\n");
@@ -81,9 +88,9 @@ export const SELF_TEST_FILE = `${SCANNER_CONFIG_DIR}/self-test.txt`;
 export const CLAMD_SELF_TEST_ARGV = ["clamdscan", `--config-file=${SCANNER_CONFIG_FILE}`, "--fdpass", "--no-summary", "--infected", SELF_TEST_FILE];
 
 /**
- * Lists every entry under the job roots (path, type, owner, size), sorted, as root. Taken right after the build VM starts
- * and again right before its snapshot: the two must match apart from the control directory, so the snapshot provably holds
- * nothing in a job tree beyond what the image itself ships (and the build never uploads into one).
+ * Lists every entry under the job roots (path, full mode, owner, group, size), sorted, as root. Taken right after the
+ * build VM is hardened and locked (the state of any fresh parser VM) and again right before its snapshot: the two must
+ * match exactly, so the snapshot's job trees are a fresh parser VM's, and the build provably left nothing in them.
  */
 export function jobRootsListingArgv(jobRoots: readonly string[]): string[] {
   const script = [
@@ -96,20 +103,40 @@ export function jobRootsListingArgv(jobRoots: readonly string[]): string[] {
     "            p = base if name is None else os.path.join(base, name)",
     "            try: st = os.lstat(p)",
     "            except OSError: continue",
-    "            out.append('%s %o %d %d' % (p, stat.S_IFMT(st.st_mode), st.st_uid, st.st_size if stat.S_ISREG(st.st_mode) else 0))",
+    "            out.append('%r %o %d %d %d' % (p, st.st_mode, st.st_uid, st.st_gid, st.st_size if stat.S_ISREG(st.st_mode) else 0))",
     "print('\\n'.join(sorted(set(out))))",
   ].join("\n");
   return ["python3", "-I", "-c", script, ...jobRoots];
 }
 
-/** What a job-root listing gained between two listings, ignoring the control directory (which holds no job data yet). */
-export function jobRootsGained(before: string, after: string, controlDir: string): string[] {
-  const seen = new Set(before.split("\n").filter(Boolean));
-  return after.split("\n").filter(Boolean).filter((line) => !seen.has(line)).filter((line) => {
-    const entry = line.split(" ")[0]!;
-    return entry !== controlDir && !entry.startsWith(`${controlDir}/`) && !controlDir.startsWith(`${entry}/`);
-  });
+/**
+ * Every line two job-root listings disagree on (added, removed or changed), compared exactly: nothing is exempt, not
+ * the control directory nor any ancestor of it, so a changed mode or owner of, say, /tmp is reported (council L5).
+ */
+export function jobRootsChanged(before: string, after: string): string[] {
+  const lines = (text: string) => new Set(text.split("\n").filter(Boolean));
+  const was = lines(before);
+  const now = lines(after);
+  return [...[...now].filter((line) => !was.has(line)), ...[...was].filter((line) => !now.has(line))];
 }
+
+/**
+ * Root-side egress check for a VM restored from a snapshot: connecting to public addresses must fail (exit 0). Exit 3 when
+ * any connection succeeds. A blocked network refuses at once (measured: OSError, not a timeout), so this costs one exec.
+ */
+export const RESTORED_EGRESS_CHECK_ARGV = [
+  "python3", "-I", "-c",
+  [
+    "import socket, sys",
+    "for family, addr in ((socket.AF_INET, ('1.1.1.1', 443)), (socket.AF_INET, ('8.8.8.8', 53)), (socket.AF_INET6, ('2606:4700:4700::1111', 443))):",
+    "    try:",
+    "        s = socket.socket(family, socket.SOCK_STREAM); s.settimeout(2); s.connect(addr)",
+    "    except OSError:",
+    "        continue",
+    "    print('egress open', addr[0]); sys.exit(3)",
+    "print('egress blocked')",
+  ].join("\n"),
+];
 
 /** The daily version and date a clamd/clamscan version line reports, or null when it is not one. */
 export function parseClamVersionLine(line: string): { version: number; date: string } | null {
@@ -139,24 +166,46 @@ export function scannerSnapshotKey(image: { image: string; imageId?: string }, s
 }
 
 /**
- * Process-wide scanner snapshots by key. One build at a time per key; a failed build is forgotten so the next scan
- * retries it. Only the newest signature set is kept: a new key replaces older entries (their VMs are already gone).
+ * Process-wide scanner snapshots by key. One build at a time per key. The two most recently used keys are kept, so two
+ * signature sets staged side by side during an update (A, B, A, B) build twice, not four times (council L3). A failed
+ * build is remembered for `failureBackoffMs`: scans in that window fail at once (an error verdict, fail closed) instead
+ * of each paying for another full build that would fail the same way; the first scan after it retries.
  */
 export class ScannerSnapshotCache<T> {
   private readonly entries = new Map<string, Promise<T>>();
+  private readonly failures = new Map<string, { until: number; error: unknown }>();
+
+  constructor(
+    private readonly keep = 2,
+    private readonly failureBackoffMs = 60_000,
+    private readonly now: () => number = Date.now,
+  ) {}
 
   get(key: string, build: () => Promise<T>): Promise<T> {
+    const failed = this.failures.get(key);
+    if (failed && failed.until > this.now()) return Promise.reject(failed.error);
     let entry = this.entries.get(key);
-    if (!entry) {
-      for (const old of [...this.entries.keys()]) if (old !== key) this.entries.delete(old);
-      entry = build();
+    if (entry) {
+      // Most recently used last.
+      this.entries.delete(key);
       this.entries.set(key, entry);
-      entry.catch(() => { if (this.entries.get(key) === entry) this.entries.delete(key); });
+      return entry;
     }
+    entry = build();
+    this.entries.set(key, entry);
+    while (this.entries.size > Math.max(1, this.keep)) this.entries.delete(this.entries.keys().next().value!);
+    const settled = entry;
+    settled.then(
+      () => { this.failures.delete(key); },
+      (error: unknown) => {
+        if (this.entries.get(key) === settled) this.entries.delete(key);
+        this.failures.set(key, { until: this.now() + this.failureBackoffMs, error });
+      },
+    );
     return entry;
   }
 
-  /** Drop a snapshot that failed to restore, so the next scan builds a new one. */
+  /** Drop a snapshot that failed to restore, so the next scan builds a new one (no backoff: the build itself worked). */
   forget(key: string, entry?: Promise<T>): void {
     if (!entry || this.entries.get(key) === entry) this.entries.delete(key);
   }
@@ -166,8 +215,19 @@ export class ScannerSnapshotCache<T> {
   }
 }
 
-/** Regions scanner snapshot VMs run in (DOCSLURP_MODAL_SCANNER_REGIONS, comma list; default "us": memory snapshots of VM sandboxes need a region). */
-export function modalScannerRegions(env: NodeJS.ProcessEnv = process.env): string[] {
+/** DOCSLURP_QUARANTINE_SCAN_SNAPSHOT: scan in VMs restored from a clean, signature-loaded snapshot (default off). */
+export function quarantineScanSnapshotEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.DOCSLURP_QUARANTINE_SCAN_SNAPSHOT?.trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
+/**
+ * Regions scanner snapshot VMs run in (DOCSLURP_MODAL_SCANNER_REGIONS, comma list; default "us": memory snapshots of VM
+ * sandboxes need a region). Read only when the snapshot flag is on: with it off the variable is ignored, as it was before
+ * scanner snapshots existed, so a bad value cannot take the parser sandbox down (council L4).
+ */
+export function modalScannerRegions(env: NodeJS.ProcessEnv = process.env): string[] | undefined {
+  if (!quarantineScanSnapshotEnabled(env)) return undefined;
   const raw = (env.DOCSLURP_MODAL_SCANNER_REGIONS ?? "us").split(",").map((item) => item.trim()).filter(Boolean);
   for (const region of raw) if (!/^[a-z0-9-]{1,32}$/.test(region)) throw new Error(`invalid DOCSLURP_MODAL_SCANNER_REGIONS entry: ${region}`);
   return raw.length ? raw : ["us"];

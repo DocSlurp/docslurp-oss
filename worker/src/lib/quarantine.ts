@@ -12,6 +12,7 @@ import { DocumentStageError } from "../pipeline/checkpoints.js";
 import type { MalwareScanResult } from "../tools/runner.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { vmOnlyParsing } from "./vm-only-parsing.js";
+import { isClamLimitAlert } from "../tools/clam-limits.js";
 
 export interface QuarantineReason {
   code: string;
@@ -144,7 +145,19 @@ export async function scanDocumentForQuarantine(args: {
   }
 
   const malwareScan = await args.runner.scanForMalware(args.tempFile, args.signal);
-  if (malwareScan.status === "infected") {
+  if (malwareScan.status === "infected" && isClamLimitAlert(malwareScan.signature)) {
+    // AlertExceedsMax (clam-limits.ts): the scanner stopped at a size, file-count, depth or time limit, so part of this
+    // file was never scanned. Refused whatever the fail-open policy says: an unscanned file is never accepted as clean.
+    reasons.push({
+      code: "malware-scan-limit-exceeded",
+      severity: "error",
+      message: `file exceeds the malware scanner's limits (${malwareScan.signature}) and was not fully scanned`,
+      details: {
+        engine: malwareScan.engine,
+        signature: malwareScan.signature
+      }
+    });
+  } else if (malwareScan.status === "infected") {
     reasons.push({
       code: "malware-detected",
       severity: "error",

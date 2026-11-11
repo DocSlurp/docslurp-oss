@@ -7,7 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CommandRunner, resolveVenvBin } from "../../tools/runner.js";
 import { resolveScriptsDir } from "../../tools/scripts-dir.js";
-import { buildModalUsageEvent, createModalProvider, modalVmIdleSeconds, modalVmsPerActivity, modalVmsPerWorker, type ModalSdk } from "../providers/modal/index.js";
+import { buildModalUsageEvent, buildScannerSnapshot, createModalProvider, modalVmIdleSeconds, modalVmsPerActivity, modalVmsPerWorker, type ModalSdk } from "../providers/modal/index.js";
+import { jobRootsChanged, modalScannerRegions, ScannerSnapshotCache } from "../providers/modal/scanner.js";
 import { SessionStaging, type RemoteFs } from "../providers/modal/staging.js";
 import { SandboxConfigError, SandboxInfrastructureError, SandboxOutputError, SandboxRunError } from "../types.js";
 
@@ -345,6 +346,8 @@ function fakeSdk(
     jobRootGains?: boolean;
     /** Scanner build: clamd fails to start. */
     clamdFails?: boolean;
+    /** Restored scanner VM: the root egress check reaches the internet (exit 3). */
+    egressOpen?: boolean;
   } = {},
 ) {
   const remote = new MemoryRemoteFs();
@@ -438,6 +441,7 @@ function fakeSdk(
         state.scannerEvents.push(`listing:${vm}`);
         return finished(opts.jobRootGains && state.jobRootListings % 2 === 0 ? "/tmp/leftover 100000 10001 5\n/tmp 40000 0 0" : "/tmp 40000 0 0");
       }
+      if (argv[0] === "python3" && argv[3]?.includes("egress blocked")) { state.scannerEvents.push(`egress:${vm}`); return finished(opts.egressOpen ? "egress open 1.1.1.1" : "egress blocked", opts.egressOpen ? 3 : 0); }
       if (argv[0] === "/bin/sh" && argv[2]?.startsWith("set -eu\ninstall")) { state.scannerEvents.push(`setup:${vm}`); return finished("", 0); }
       if (argv[0] === "/usr/sbin/clamd") { state.scannerEvents.push(`clamd:${vm}`); return finished("", opts.clamdFails ? 1 : 0); }
       if (argv[0] === "clamdscan" && argv.includes("--version")) return finished(`ClamAV 1.4.6/${opts.scannerVersion ?? 28180}/Wed Nov 11 06:24:27 2026\n`);
@@ -2011,8 +2015,8 @@ describe("modal image default", () => {
   });
 });
 
-describe("modal scanner sessions (quarantine Q1/Q2)", () => {
-  const command = { binary: "clamdscan", args: ["--fdpass"], env: {}, readablePaths: [], inputPaths: [], writablePaths: [], limits: { timeoutMs: 5_000 } };
+describe("modal scanner sessions (quarantine Q1)", () => {
+  const command = { binary: "clamdscan", args: ["--fdpass"], env: {}, readablePaths: [], inputPaths: [], writablePaths: [], limits: { timeoutMs: 5_000 }, affinityKey: "doc-1" };
   let sigDir: string;
   const hash = "a".repeat(64);
 
@@ -2071,7 +2075,7 @@ describe("modal scanner sessions (quarantine Q1/Q2)", () => {
     for (const vm of restored) expect(state.scannerEvents).toContain(`terminate:${vm}`);
   });
 
-  it("refuses a command of another organization, or of none, before it reaches a VM (cross-tenant batch)", async () => {
+  it("refuses a command of another organization, or of none, before it reaches a VM (cross-tenant)", async () => {
     const { state, scanner } = open();
     const session = await scanner("org-a");
     await expect(session.run!({ ...command, tenantKey: "org-b" })).rejects.toThrow(/another organization/);
@@ -2108,5 +2112,137 @@ describe("modal scanner sessions (quarantine Q1/Q2)", () => {
     expect(state.commands).toHaveLength(0);
     // The build VM is terminated on failure too.
     expect(state.scannerEvents).toContain("terminate:1");
+  });
+});
+
+describe("scanner session council fixes (PR #339)", () => {
+  const command = { binary: "clamdscan", args: ["--fdpass"], env: {}, readablePaths: [], inputPaths: [], writablePaths: [], limits: { timeoutMs: 5_000 } };
+  let sigDir: string;
+
+  beforeEach(async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    sigDir = await mkdtemp(path.join(tmpdir(), "docslurp-scanner-sigs-"));
+    await writeFile(path.join(sigDir, "daily.cvd"), "daily");
+  });
+  afterEach(async () => { vi.useRealTimers(); vi.restoreAllMocks(); await rm(sigDir, { recursive: true, force: true }); });
+
+  function scanner(opts: Parameters<typeof fakeSdk>[0] = {}) {
+    const { sdk, state } = fakeSdk({ exec: async () => finished(""), ...opts });
+    const provider = createModalProvider(async () => sdk);
+    const open = () => provider.openSession(lifecycleConfig, { activityId: "q", scanner: { tenantKey: "org-a", definitionsDir: sigDir, signatureSetHash: "c".repeat(64), expectedVersion: 28180 } });
+    return { state, open };
+  }
+
+  it("M1: a scanner session serves one document; a second document's command never reaches a VM the first touched", async () => {
+    const { state, open } = scanner();
+    const session = await open();
+    await session.run!({ ...command, tenantKey: "org-a", affinityKey: "doc-1" });
+    await session.run!({ ...command, tenantKey: "org-a", affinityKey: "doc-1" });
+    const ran = state.commands.length;
+    await expect(session.run!({ ...command, tenantKey: "org-a", affinityKey: "doc-2" })).rejects.toThrow(/one document/);
+    await expect(session.run!({ ...command, tenantKey: "org-a" })).rejects.toThrow(/without a document/);
+    expect(state.commands).toHaveLength(ran);
+    await session.close();
+    // The next document gets its own session, and with it a VM freshly restored from the snapshot.
+    const next = await open();
+    await next.run!({ ...command, tenantKey: "org-a", affinityKey: "doc-2" });
+    await next.close();
+    const vms = state.scannerEvents.filter((event) => event.startsWith("command:")).map((event) => event.split(":")[1]);
+    const doc1Vm = vms[0]!;
+    expect(vms.at(-1)).not.toBe(doc1Vm);
+    expect(state.scannerEvents).toContain(`terminate:${doc1Vm}`);
+    expect(state.scannerEvents.indexOf(`terminate:${doc1Vm}`)).toBeLessThan(state.scannerEvents.lastIndexOf(`command:${vms.at(-1)}`));
+    expect(state.restores).toBe(2);
+  });
+
+  it("L1: a restored VM that can reach the internet is refused before it runs anything", async () => {
+    const { state, open } = scanner({ egressOpen: true });
+    await expect(open()).rejects.toThrow(/not network-blocked/);
+    expect(state.commands).toHaveLength(0);
+    const restored = state.scannerEvents.find((event) => event.startsWith("restore:"))!.split(":")[1];
+    expect(state.scannerEvents).toContain(`egress:${restored}`);
+    expect(state.scannerEvents).toContain(`terminate:${restored}`);
+  });
+
+  it("L1: a network-blocked restored VM passes the egress check before its first command", async () => {
+    const { state, open } = scanner();
+    const session = await open();
+    await session.run!({ ...command, tenantKey: "org-a", affinityKey: "doc-1" });
+    await session.close();
+    const restored = state.scannerEvents.find((event) => event.startsWith("restore:"))!.split(":")[1];
+    expect(state.scannerEvents.indexOf(`egress:${restored}`)).toBeLessThan(state.scannerEvents.indexOf(`command:${restored}`));
+    // The build VM is created with blockNetwork; it is never egress-checked because it never runs a job command.
+    expect(state.scannerEvents).not.toContain("egress:1");
+  });
+
+  it("L3: the snapshot build's VM time is platform cost, never recorded in the triggering organization's ledger", async () => {
+    const { open } = scanner();
+    const log = vi.mocked(console.log);
+    const session = await open();
+    const recorded: unknown[] = [];
+    await session.run!({ ...command, tenantKey: "org-a", affinityKey: "doc-1" }, undefined, { recordUsage: (event) => recorded.push(event) });
+    await session.close();
+    expect(log.mock.calls.some(([line]) => String(line).includes("status=platform kind=scanner-build"))).toBe(true);
+    expect(recorded.every((event) => (event as { metadata?: { activityId?: string } }).metadata?.activityId !== "scanner-snapshot-build")).toBe(true);
+  });
+
+  it("correctness Medium: a build VM whose create resolves after the deadline is terminated and metered, never orphaned", async () => {
+    let finish!: (value: unknown) => void;
+    const pending = new Promise((resolve) => { finish = resolve; });
+    const terminate = vi.fn(async () => {});
+    const fromName = vi.fn(async () => { throw new Error("not found yet"); });
+    const create = vi.fn(() => pending);
+    const client = { apps: { fromName: async () => ({}) }, images: { fromId: async () => ({}) }, sandboxes: { create, fromName } };
+    const usage: unknown[] = [];
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const outcome = buildScannerSnapshot({} as ModalSdk, client as never, { ...lifecycleConfig, imageId: "im-test" } as never,
+      { tenantKey: "org-a", definitionsDir: sigDir, signatureSetHash: "a".repeat(64), expectedVersion: 1 }, (event) => usage.push(event)).catch((error: Error) => error);
+    // Real file I/O (the signature read) runs before create; setImmediate is not faked. Bounded by real time, not turns.
+    const waitUntil = performance.now() + 10_000;
+    while (!create.mock.calls.length && performance.now() < waitUntil) await new Promise((resolve) => setImmediate(resolve));
+    expect(create).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(30_001);
+    expect(((await outcome) as Error).message).toMatch(/snapshot build failed/);
+    expect(fromName).toHaveBeenCalledOnce();
+    expect(terminate).not.toHaveBeenCalled();
+    finish({ sandboxId: "sb-late", terminate });
+    await vi.advanceTimersByTimeAsync(0);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(terminate).toHaveBeenCalledOnce();
+    expect(usage).toHaveLength(1);
+  });
+
+  it("L3: a failed build backs off instead of rebuilding for every scan, and two signature sets in turn build once each", async () => {
+    let now = 0;
+    const cache = new ScannerSnapshotCache<string>(2, 60_000, () => now);
+    const failing = vi.fn(async () => { throw new Error("daemon reported another version"); });
+    await expect(cache.get("A", failing)).rejects.toThrow(/another version/);
+    await expect(cache.get("A", failing)).rejects.toThrow(/another version/);
+    expect(failing).toHaveBeenCalledOnce();
+    now = 60_001;
+    await expect(cache.get("A", failing)).rejects.toThrow();
+    expect(failing).toHaveBeenCalledTimes(2);
+    const build = vi.fn(async () => "snapshot");
+    for (const key of ["B", "C", "B", "C", "B"]) await cache.get(key, build);
+    expect(build).toHaveBeenCalledTimes(2);
+  });
+
+  it("L4/correctness Low: with the snapshot flag off, a bad DOCSLURP_MODAL_SCANNER_REGIONS is ignored; on, it is refused", () => {
+    expect(modalScannerRegions({ DOCSLURP_MODAL_SCANNER_REGIONS: "invalid region" })).toBeUndefined();
+    expect(modalScannerRegions({ DOCSLURP_QUARANTINE_SCAN_SNAPSHOT: "off", DOCSLURP_MODAL_SCANNER_REGIONS: "EU" })).toBeUndefined();
+    expect(() => modalScannerRegions({ DOCSLURP_QUARANTINE_SCAN_SNAPSHOT: "on", DOCSLURP_MODAL_SCANNER_REGIONS: "EU" })).toThrow(/SCANNER_REGIONS/);
+    expect(modalScannerRegions({ DOCSLURP_QUARANTINE_SCAN_SNAPSHOT: "on" })).toEqual(["us"]);
+    const provider = createModalProvider(async () => ({}) as ModalSdk);
+    const env = { NODE_ENV: "test", MODAL_TOKEN_ID: "authored-id", MODAL_TOKEN_SECRET: "authored-secret", DOCSLURP_MODAL_IMAGE: "example/image:test", DOCSLURP_MODAL_SCANNER_REGIONS: "invalid region" };
+    expect(() => provider.readConfig(env)).not.toThrow();
+  });
+
+  it("L5: any changed entry under a job root is reported, including the control directory and its ancestors", () => {
+    const before = "'/tmp' 41777 0 0 0\n'/tmp/.docslurp-modal-control' 40711 0 0 0";
+    expect(jobRootsChanged(before, before)).toEqual([]);
+    expect(jobRootsChanged(before, "'/tmp' 40711 0 0 0\n'/tmp/.docslurp-modal-control' 40711 0 0 0")).toHaveLength(2);
+    expect(jobRootsChanged(before, `${before}\n'/tmp/.docslurp-modal-control/x' 100644 10001 10001 3`)).toEqual(["'/tmp/.docslurp-modal-control/x' 100644 10001 10001 3"]);
+    expect(jobRootsChanged(before, "'/tmp' 41777 0 0 0")).toEqual(["'/tmp/.docslurp-modal-control' 40711 0 0 0"]);
   });
 });

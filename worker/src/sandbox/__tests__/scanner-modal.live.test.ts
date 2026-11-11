@@ -12,7 +12,7 @@ import type { ParserSandboxProvider } from "../types.js";
 import { CommandRunner } from "../../tools/runner.js";
 
 /**
- * Live Modal check of the scanner snapshot path (Q1/Q2) against the per-command path it replaces. Runs only with
+ * Live Modal check of the scanner snapshot path (Q1) against the per-command path it replaces. Runs only with
  * DOCSLURP_SCANNER_LIVE_IMAGE_ID (a Modal image with clamav, clamav-daemon, python3 and util-linux), MODAL_TOKEN_ID,
  * MODAL_TOKEN_SECRET and DOCSLURP_SCANNER_LIVE_SIGS (a directory with main/daily/bytecode .cvd). Timings are appended to
  * DOCSLURP_SCANNER_LIVE_OUT when set.
@@ -97,27 +97,22 @@ async function record(row: Record<string, unknown>): Promise<void> {
     await record({ arm: "Q1-total", ms: Date.now() - coldStart });
   });
 
-  it("Q2: one scanner session for a run's batch; a command of another organization is refused", async () => {
+  it("one document per scanner session: a second document and another organization are refused; the restored VM is network-blocked", async () => {
     process.env.DOCSLURP_QUARANTINE_SCAN_SNAPSHOT = "on";
-    const files = await Promise.all(Array.from({ length: 10 }, (_, i) => file(`batch-${i}.pdf`, PDF)));
-    const eicar = await file("batch-eicar.txt", EICAR);
-    const started = Date.now();
-    const results = await runner.withMalwareScanner("org-a", async () => {
-      const out: string[] = [];
-      const perFileMs: number[] = [];
-      for (const [i, source] of [...files, eicar].entries()) {
-        const t = Date.now();
-        out.push((await inContext("org-a", `doc-${i}`, () => runner.scanForMalware(source))).status);
-        perFileMs.push(Date.now() - t);
-      }
-      await record({ arm: "Q2-per-file", perFileMs });
-      // The same session, a command of organization B: refused before it reaches a VM.
-      const foreign = await inContext("org-b", "doc-b", () => runner.scanForMalware(files[0]!)).then(() => "ran", (error: unknown) => (error as Error).message);
-      return { out, foreign };
-    });
-    await record({ arm: "Q2-batch-11-files", ms: Date.now() - started, statuses: results.out, foreign: results.foreign });
-    expect(results.out.slice(0, 10).every((status) => status === "clean")).toBe(true);
-    expect(results.out[10]).toBe("infected");
-    expect(results.foreign).toMatch(/another organization/);
+    const log = vi.spyOn(console, "log");
+    const [first, second] = await Promise.all([file("one.pdf", PDF), file("two.pdf", PDF)]);
+    const results = await inContext("org-a", "doc-one", () => runner.withMalwareScanner("org-a", async () => {
+      const status = (await runner.scanForMalware(first)).status;
+      const refuse = (orgId: string, documentId: string) => inContext(orgId, documentId, () => runner.scanForMalware(second)).then(() => "ran", (error: unknown) => (error as Error).message);
+      return { status, otherDocument: await refuse("org-a", "doc-two"), otherOrg: await refuse("org-b", "doc-one") };
+    }));
+    // The root egress check ran on the restored VM and found no route out (council L1).
+    const restored = log.mock.calls.filter(([line]) => String(line).includes("status=scanner-vm-restored egress=blocked"));
+    log.mockRestore();
+    await record({ arm: "one-document-per-session", ...results, egressChecks: restored.length });
+    expect(results.status).toBe("clean");
+    expect(results.otherDocument).toMatch(/one document/);
+    expect(results.otherOrg).toMatch(/another organization/);
+    expect(restored.length).toBeGreaterThanOrEqual(1);
   });
 });

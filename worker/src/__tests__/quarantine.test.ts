@@ -305,6 +305,33 @@ describe("scanDocumentForQuarantine", () => {
   });
 });
 
+describe("quarantine: ClamAV limit alerts (council M2)", () => {
+  it.each(["MaxFileSize", "MaxScanSize", "MaxFiles", "MaxScanTime", "MaxRecursion"])(
+    "refuses a file the scanner did not fully scan (Heuristics.Limits.Exceeded.%s), even with fail-open on",
+    async (limit) => {
+      const artifact = await scanDocumentForQuarantine({
+        documentId: "doc-1",
+        filename: "sample.pdf",
+        declaredMimeType: "application/pdf",
+        bytes: Buffer.from("%PDF-1.7\nhello"),
+        tempFile: "/tmp/sample.pdf",
+        runner: {
+          scanForMalware: async () => ({
+            engine: "clamscan", available: true, status: "infected", signature: `Heuristics.Limits.Exceeded.${limit}`,
+            stdout: `/tmp/sample.pdf: Heuristics.Limits.Exceeded.${limit} FOUND`, stderr: "", exitCode: 1, databaseStatus: "fresh",
+          }),
+        } as any,
+        policy: { ...basePolicy, quarantineFailOpenOnToolMissing: true },
+      });
+      expect(artifact.decision).toBe("quarantined");
+      expect(artifact.reasons).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: "malware-scan-limit-exceeded", severity: "error", message: expect.stringContaining("not fully scanned") }),
+      ]));
+      expect(artifact.reasons.some((reason) => reason.code === "malware-detected")).toBe(false);
+    },
+  );
+});
+
 describe("quarantine file facts", () => {
   const scan = (filename: string, declaredMimeType: string, bytes: Buffer) => scanDocumentForQuarantine({
     documentId: "doc-1", filename, declaredMimeType, bytes, tempFile: `/tmp/${filename}`,

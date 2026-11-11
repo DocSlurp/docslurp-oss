@@ -12,8 +12,7 @@ import {
   sourceStorageKey
 } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
-import { quarantineScanBatchEnabled, quarantineScanSnapshotEnabled, type CommandRunner } from "../tools/runner.js";
-import { SandboxPolicyError } from "../sandbox/types.js";
+import { quarantineScanSnapshotEnabled, type CommandRunner } from "../tools/runner.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { sha256Bytes, verifyStagedSource } from "../sandbox/source-integrity.js";
 
@@ -32,18 +31,12 @@ export class QuarantineStage implements Stage {
     }
 
     const documents = healthyDocuments(state);
-    // Q2: one scanner session for the run's whole pass. Its VMs serve this run's organization only: a document of any
-    // other run is refused before anything is staged, and the session refuses commands of another organization.
-    const batch = quarantineScanBatchEnabled();
-    if (batch) {
-      const foreign = documents.find((document) => document.runId !== state.run.id);
-      if (foreign) throw new SandboxPolicyError(`quarantine batch refused: document ${foreign.id} belongs to another run`);
-    }
-    // Q1 alone: one scanner session (one restored VM) per document, terminated when its checks finish.
-    // Both flags off: the stage runs exactly as before.
+    // Snapshot flag on: each document's checks run in their own scanner session, whose VMs are restored from the clean
+    // snapshot and terminated when the document's checks finish. No VM ever serves a second document (council M1): a
+    // document that compromised the daemon could otherwise answer for every later one. Off: the stage runs as before.
     const snapshot = quarantineScanSnapshotEnabled();
-    const perDocument = <T>(fn: () => Promise<T>): Promise<T> => snapshot && !batch ? this.runner.withMalwareScanner(state.run.orgId, fn) : fn();
-    const pass = () => runDocuments(documents, state.docConcurrency, async (document) => {
+    const perDocument = <T>(fn: () => Promise<T>): Promise<T> => snapshot ? this.runner.withMalwareScanner(state.run.orgId, fn) : fn();
+    await runDocuments(documents, state.docConcurrency, async (document) => {
       const key = buildArtifactStorageKey(...runArtifactRoot(state.run, document.userId).split("/"), "quarantine", `${document.id}.json`);
       const artifactSlot = `${document.id}:quarantine`;
 
@@ -113,6 +106,5 @@ export class QuarantineStage implements Stage {
         signal
       );
     });
-    await (batch ? this.runner.withMalwareScanner(state.run.orgId, pass) : pass());
   }
 }
