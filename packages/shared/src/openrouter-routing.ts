@@ -10,8 +10,11 @@ export { nitroBaseModel } from "./project-chat-models.js";
  * - Open-weight models served by many hosts (GLM, DeepSeek) are sorted by
  *   price, so OpenRouter tries the cheapest host first and keeps using it for
  *   later steps (the same host is also what makes prompt-cache reads hit).
- *   Hosts must serve at least FP8 weights: the cheapest listings are often
- *   FP4/NVFP4 or undisclosed quantizations.
+ *   Hosts serving FP4/NVFP4/MXFP4 weights are excluded. Hosts that do not
+ *   disclose their quantization are allowed: they include the fastest
+ *   first-party GLM and DeepSeek hosts, so excluding them left Nitro with no
+ *   fast endpoint (measured 2026-11-10: GLM Nitro 4.7-15 s per step on the
+ *   remaining FP8 host vs 2.3-2.7 s with undisclosed hosts allowed).
  * - China-based providers are allowed by default. An organization, or a
  *   project inside an allowing organization, can turn them off
  *   (`allowChinaProviders`). A restricted request then carries an allowlist,
@@ -27,8 +30,8 @@ import { CHINA_PROVIDER_SLUGS, NON_CHINA_PROVIDER_SLUGS, isProviderAllowedByRegi
 /** Models routed to their cheapest host (by model id prefix). */
 const PRICE_ROUTED_MODEL_PREFIXES = ["z-ai/glm-", "deepseek/deepseek-"] as const;
 
-/** Weight precisions a price-routed host may serve; excludes FP4 variants and undisclosed quantizations. */
-const PRICE_ROUTED_QUANTIZATIONS = ["fp8", "fp16", "bf16", "fp32"] as const;
+/** Weight precisions a price-routed host may serve; excludes FP4 variants, allows undisclosed ("unknown"). */
+const PRICE_ROUTED_QUANTIZATIONS = ["fp8", "fp16", "bf16", "fp32", "unknown"] as const;
 
 export interface OpenRouterProviderPolicy {
   /** False when the organization or project turned off China-based providers. */

@@ -129,6 +129,6 @@ describe("project allowChinaProviders", () => {
     expect(chat[0]!.provider).toMatchObject({ sort: "price", only: [...NON_CHINA_PROVIDER_SLUGS], ignore: expect.arrayContaining([...CHINA_PROVIDER_SLUGS]) });
     for (const slug of chat[0]!.provider.only) expect(providerRegion(slug)).toBe("other");
     // The default (allowing) project goes to the cheapest host, China-based ones included.
-    expect(chat[1]!.provider).toEqual({ sort: "price", quantizations: ["fp8", "fp16", "bf16", "fp32"], allow_fallbacks: true });
+    expect(chat[1]!.provider).toEqual({ sort: "price", quantizations: ["fp8", "fp16", "bf16", "fp32", "unknown"], allow_fallbacks: true });
   });
 });
