@@ -72,7 +72,7 @@ Chunks reach keyword search once the embed stage has written every chunk row of 
 {
   "queries": [
     {"q": "support hours", "limit": 3},
-    {"q": "urgent incidents", "project": "operations-runbooks", "tags": "operations"}
+    {"q": "FY2027 earnings outlook", "project": "board-materials", "tags": "finance"}
   ],
   "concurrency": 4
 }
@@ -229,12 +229,12 @@ Any failed tool (including an HTTP-200 batch with failed items), invalid tool ca
 
 ```bash
 curl -sS -X POST "$DOCSLURP_URL/v1/chat" -H "Authorization: Bearer $DOCSLURP_API_KEY" -H "Content-Type: application/json" \
-  -d '{"q": "Which plan covers on-call pagers?", "model": "anthropic/claude-haiku-5.5", "agent": {"maxSteps": 4, "maxToolCalls": 6, "searchConcurrency": 2}}'
+  -d '{"q": "How far above our margin target are we?", "model": "anthropic/claude-haiku-5.5", "agent": {"maxSteps": 4, "maxToolCalls": 6, "searchConcurrency": 2}}'
 ```
 
 ```json
 {
-  "answer": "The Team plan covers pagers [1].",
+  "answer": "Operating margin is projected at 24%, 4 points above the 20% target [1].",
   "debug": {
     "model": "anthropic/claude-haiku-5.5",
     "requestedModel": "anthropic/claude-haiku-5.5",

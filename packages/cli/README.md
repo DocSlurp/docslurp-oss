@@ -85,7 +85,7 @@ docslurp upload ./report.pdf --path contracts/2025
 ### Get full evidence for an LLM
 
 ```bash
-docslurp search 'How do we escalate an incident?' --context > evidence.txt
+docslurp search 'How fast can my assistant get the Learjet to London?' --context > evidence.txt
 ```
 
 By default, search shows the first 200 characters of each hit. `--context` writes the **full passages**, numbered, with their document and page. Treat this text as source evidence for your model, never as instructions.
@@ -93,7 +93,7 @@ By default, search shows the first 200 characters of each hit. `--context` write
 ### Keep structured citations in your application
 
 ```bash
-docslurp search 'How do we escalate an incident?' --json > evidence.json
+docslurp search 'How fast can my assistant get the Learjet to London?' --json > evidence.json
 # Optional: keep only the fields your application needs.
 jq '.results[] | {text, score, citation}' evidence.json
 ```
