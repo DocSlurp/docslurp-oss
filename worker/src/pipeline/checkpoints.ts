@@ -235,6 +235,39 @@ export function needsDocumentProgressCheckpoint(state: WorkflowState, now = Date
     || now - state.lastProgressFlushAt >= DOCUMENT_PROGRESS_CHECKPOINT_MS;
 }
 
+/** Stats key the first pass stamps on the checkpoints it writes (provisional; see firstPassCheckpointStale). */
+export const FIRST_PASS_CHECKPOINT = "firstPass";
+/** Stages whose output depends on the document's extracted content: re-run when that content changed after the first pass. */
+const FIRST_PASS_CONTENT_STAGES = new Set(["pii-detect", "embed", "index"]);
+
+/**
+ * Whether a completed checkpoint the first pass wrote must run again in the ordinary stage loop (council #340 C1):
+ * - extract-markdown, when the run's own pipeline extracts PDFs differently from the first pass's (vision evidence, other
+ *   extractors or options): the loop extracts it the ordinary way (served from the persisted batch result, no VM);
+ * - a content stage (PII, embed, index), when the document's Markdown is no longer the one it read: a later stage replaced
+ *   it (vision or OCR reconciliation) or extract-markdown ran again. Stage order keeps PII before embed, so replaced
+ *   content is never published before its PII gate passes; the first pass's earlier chunks stay until embed replaces them.
+ * Never inside a first-pass shard itself, and never for an ordinary (unstamped) checkpoint.
+ */
+export function firstPassCheckpointStale(
+  state: Pick<WorkflowState, "firstPassShard" | "firstPassExtractionDiffers" | "artifactLedger" | "documentStage">,
+  documentId: string,
+  stageName: string,
+  checkpoint: { stats?: unknown },
+): boolean {
+  if (state.firstPassShard) return false;
+  const stamp = (checkpoint.stats as Record<string, unknown> | undefined)?.[FIRST_PASS_CHECKPOINT] as { markdown?: unknown } | undefined;
+  if (!stamp || typeof stamp !== "object") return false;
+  if (stageName === "extract-markdown") return state.firstPassExtractionDiffers === true;
+  if (!FIRST_PASS_CONTENT_STAGES.has(stageName)) return false;
+  // extract-markdown ran again in the loop: stale when its Markdown differs from what this stage read (or is unknown).
+  const extracted = (state.documentStage(documentId, "extract-markdown")?.stats as { markdownSha256?: unknown } | undefined)?.markdownSha256 ?? null;
+  const read = (stamp as { markdownSha256?: unknown }).markdownSha256 ?? null;
+  if (extracted === null || read === null || extracted !== read) return true;
+  // A later stage (vision or OCR reconciliation) replaced the document's Markdown.
+  return (state.artifactLedger.readDocument(documentId, "markdown") ?? null) !== (stamp.markdown ?? null);
+}
+
 export async function runDocumentStage(
   state: WorkflowState,
   document: Document,
@@ -257,7 +290,7 @@ export async function runDocumentStage(
   }
 
   const checkpoint = state.documentStage(document.id, stageName);
-  if (checkpoint?.status === "completed") {
+  if (checkpoint?.status === "completed" && !firstPassCheckpointStale(state, document.id, stageName, checkpoint)) {
     console.log(
       `[checkpoint-debug] document=${document.id} stage=${stageName} skipped=already-completed ` +
         `artifact=${checkpoint.artifactUri ?? "none"}`,
@@ -336,7 +369,15 @@ export async function runDocumentStage(
       // A command teardown that failed in this activity ends it, even if the stage swallowed it.
       const latched = latchedTeardownError();
       if (latched) throw latched;
-      const stats = result.stats ?? {};
+      const stats = state.firstPassShard
+        // The first pass's checkpoints are provisional: the ordinary loop re-runs them when the content they read changed.
+        ? { ...(result.stats ?? {}), [FIRST_PASS_CHECKPOINT]: {
+          markdown: state.artifactLedger.readDocument(document.id, "markdown") ?? null,
+          markdownSha256: stageName === "extract-markdown"
+            ? (result.stats as { markdownSha256?: unknown } | undefined)?.markdownSha256 ?? null
+            : (state.documentStage(document.id, "extract-markdown")?.stats as { markdownSha256?: unknown } | undefined)?.markdownSha256 ?? null,
+        } }
+        : result.stats ?? {};
 
       const plausibilityDecision = shouldEscalateForLowPlausibility(stats, attempt);
       if (plausibilityDecision.escalate) {

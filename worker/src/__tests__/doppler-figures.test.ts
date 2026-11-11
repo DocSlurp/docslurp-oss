@@ -246,6 +246,10 @@ describe("readDopplerFigureDir: hostile folders", () => {
   it("checks signatures on leading bytes only", () => {
     expect(dopplerFigureMagicMatches("svg", Buffer.from("﻿  <?xml version=\"1.0\"?><svg/>"))).toBe(true);
     expect(dopplerFigureMagicMatches("svg", Buffer.from("<svgx>"))).toBe(false);
+    // Scans copied out unchanged: a whole JPEG (SOI ... EOI), never a truncated one or a PNG named .jpg.
+    expect(dopplerFigureMagicMatches("jpg", Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0xff, 0xd9]))).toBe(true);
+    expect(dopplerFigureMagicMatches("jpg", Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]))).toBe(false);
+    expect(dopplerFigureMagicMatches("jpg", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xd9]))).toBe(false);
     expect(dopplerFigureMagicMatches("svg", Buffer.from("<!DOCTYPE svg><svg/>"))).toBe(false);
     expect(dopplerFigureMagicMatches("webp", Buffer.from("RIFF\x04\x00\x00\x00WEBP", "latin1"))).toBe(false);
     expect(dopplerFigureMagicMatches("png", Buffer.from("\x89PNG", "latin1"))).toBe(false);

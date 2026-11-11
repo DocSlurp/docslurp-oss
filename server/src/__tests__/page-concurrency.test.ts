@@ -134,3 +134,29 @@ describe("resolveGroupableStages", () => {
     expect(stages).toContain("index");
   });
 });
+
+describe("first pass in workflow input", () => {
+  it("records nothing unless the deploy flag, the pipeline, a capable fleet and scaling activities all allow it", async () => {
+    const { resolveFirstPassInput } = await import("../lib/temporal.js");
+    const fleet = new Set(["workflow.first-pass"] as const);
+    const scaling = { slotGate: true };
+    const pipeline = { firstPass: "auto", afterFirstPass: "auto" } as const;
+    expect(resolveFirstPassInput({}, pipeline, fleet, scaling)).toEqual({});
+    expect(resolveFirstPassInput({ DOCSLURP_FIRST_PASS: "on" }, pipeline, new Set(), scaling)).toEqual({});
+    expect(resolveFirstPassInput({ DOCSLURP_FIRST_PASS: "on" }, pipeline, null, scaling)).toEqual({});
+    expect(resolveFirstPassInput({ DOCSLURP_FIRST_PASS: "on" }, { ...pipeline, firstPass: "off" }, fleet, scaling)).toEqual({});
+    expect(resolveFirstPassInput({ DOCSLURP_FIRST_PASS: "on" }, pipeline, fleet, {})).toEqual({});
+    expect(resolveFirstPassInput({ DOCSLURP_FIRST_PASS: "on" }, pipeline, fleet, scaling)).toEqual({ firstPass: { maxParallelBatches: 4, afterFirstPass: "auto" } });
+    // DOCSLURP_FIRST_PASS_ORGS narrows the rollout; unknown or unlisted orgs get nothing.
+    const allow = { DOCSLURP_FIRST_PASS: "on", DOCSLURP_FIRST_PASS_ORGS: " org-a , org-b " };
+    expect(resolveFirstPassInput(allow, pipeline, fleet, scaling, "org-a")).toEqual({ firstPass: { maxParallelBatches: 4, afterFirstPass: "auto" } });
+    expect(resolveFirstPassInput(allow, pipeline, fleet, scaling, "org-c")).toEqual({});
+    expect(resolveFirstPassInput(allow, pipeline, fleet, scaling, null)).toEqual({});
+    expect(resolveFirstPassInput(allow, pipeline, fleet, scaling)).toEqual({});
+    expect(resolveFirstPassInput({ ...allow, DOCSLURP_FIRST_PASS: "off" }, pipeline, fleet, scaling, "org-a")).toEqual({});
+    expect(resolveFirstPassInput({ DOCSLURP_FIRST_PASS: "on", DOCSLURP_FIRST_PASS_ORGS: " , " }, pipeline, fleet, scaling, "org-c"))
+      .toEqual({ firstPass: { maxParallelBatches: 4, afterFirstPass: "auto" } });
+    expect(resolveFirstPassInput({ DOCSLURP_FIRST_PASS: "on", DOCSLURP_FIRST_PASS_PARALLEL_BATCHES: "99" }, { ...pipeline, afterFirstPass: "none" }, fleet, scaling))
+      .toEqual({ firstPass: { maxParallelBatches: 32, afterFirstPass: "none" } });
+  });
+});

@@ -20,6 +20,8 @@ import {
 type Client = Sql<Record<string, unknown>>;
 
 export interface WorkerCapabilityProbes {
+  /** A sandboxed PDF batch provider is registered in this worker (the first pass can run here). */
+  firstPassBatch?: () => boolean;
   /** Credit leases are on in this worker and their schema (0052 + 0053) exists. */
   creditLeasesActive: () => Promise<boolean>;
   /** documents.lexical_searchable_at exists (0051). */
@@ -42,6 +44,8 @@ export async function resolveWorkerCapabilities(probes: WorkerCapabilityProbes):
   ]);
   if (leases) capabilities.push("billing.credit-leases");
   if (lexical) capabilities.push("search.early-lexical");
+  // Only a worker whose PDF provider converts batches can run a first pass: without it the fleet never records one.
+  if (probes.firstPassBatch?.()) capabilities.push("workflow.first-pass");
   return capabilities.sort();
 }
 

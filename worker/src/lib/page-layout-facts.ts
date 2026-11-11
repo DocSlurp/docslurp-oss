@@ -15,7 +15,13 @@ export interface PageLayoutFacts {
   /** The page's visible box in points (the walker's measure of the page structure); null when unknown. */
   widthPt?: number | null;
   heightPt?: number | null;
+  /** Words of the text layer drawn invisibly (render mode 3: an OCR layer over a scan); absent when unknown. */
+  invisibleWords?: number | null;
+  /** What the page's text layer is: none, invisible (an OCR layer), visible or mixed; absent when unknown. */
+  textLayer?: "none" | "invisible" | "visible" | "mixed" | null;
 }
+
+const TEXT_LAYERS = new Set(["none", "invisible", "visible", "mixed"]);
 
 /** Parse a pdf-layout-facts@1 payload into per-page facts; malformed pages are dropped (unknown), never guessed. */
 export function parsePageLayoutFacts(payload: unknown, maxPage = 100_000): Map<number, PageLayoutFacts> {
@@ -46,8 +52,13 @@ export function parsePageLayoutFacts(payload: unknown, maxPage = 100_000): Map<n
     // A page size from the walk (its visible box), bounded: 1 pt to the PDF limit of 14,400 pt per side.
     const side = (value: unknown) => { const n = num(value); return n !== null && n >= 1 && n <= 14_400 ? n : null; };
     const widthPt = side(page.widthPt), heightPt = side(page.heightPt);
+    // Invisible-layer evidence (the batch guest's walk): a non-negative count, a known layer kind; anything else is unknown.
+    const invisible = num(page.invisibleWords);
+    const invisibleWords = invisible !== null && Number.isSafeInteger(invisible) && invisible >= 0 ? invisible : null;
+    const textLayer = typeof page.textLayer === "string" && TEXT_LAYERS.has(page.textLayer) ? page.textLayer as NonNullable<PageLayoutFacts["textLayer"]> : null;
     out.set(pageNumber, { images, tables, words: num(page.words), grids, tableCoverage: num(page.tableCoverage),
-      ...(widthPt !== null && heightPt !== null ? { widthPt, heightPt } : {}) });
+      ...(widthPt !== null && heightPt !== null ? { widthPt, heightPt } : {}),
+      ...(invisibleWords !== null ? { invisibleWords } : {}), ...(textLayer !== null ? { textLayer } : {}) });
   }
   return out;
 }

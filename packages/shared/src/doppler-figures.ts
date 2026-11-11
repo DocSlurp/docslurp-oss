@@ -30,13 +30,15 @@ export const DOPPLER_IMAGE_SCHEME = "doppler-image:";
 
 /** `p<page>.<n>` (raster) or `p<page>.g<n>` (vector), as Doppler numbers them. */
 export const DOPPLER_FIGURE_ID = /^p([1-9][0-9]{0,8})\.(g?)(0|[1-9][0-9]{0,5})$/;
-export const DOPPLER_FIGURE_FORMATS = ["webp", "svg", "png"] as const;
+export const DOPPLER_FIGURE_FORMATS = ["webp", "svg", "png", "jpg"] as const;
 export type DopplerFigureFormat = (typeof DOPPLER_FIGURE_FORMATS)[number];
 /** Fixed content types: served exactly as these, never as anything the bytes or the storage metadata claim. */
 export const DOPPLER_FIGURE_MEDIA_TYPES: Readonly<Record<DopplerFigureFormat, string>> = {
   webp: "image/webp",
   svg: "image/svg+xml",
   png: "image/png",
+  /** Full-page scans copied out of the PDF unchanged (DCT streams), never re-encoded. */
+  jpg: "image/jpeg",
 };
 
 /** Host-side bounds. The guest has its own; these hold whatever it sends. */
@@ -67,7 +69,7 @@ export function dopplerFigureFileName(id: string, format: DopplerFigureFormat): 
 }
 
 /** Every name a valid folder may hold: the manifest, and `<id>.<format>` files. */
-export const DOPPLER_FIGURE_FILE_NAME = /^p[1-9][0-9]{0,8}\.g?(?:0|[1-9][0-9]{0,5})\.(?:webp|svg|png)$/;
+export const DOPPLER_FIGURE_FILE_NAME = /^p[1-9][0-9]{0,8}\.g?(?:0|[1-9][0-9]{0,5})\.(?:webp|svg|png|jpg)$/;
 
 const slug = z.string().regex(/^[a-z0-9][a-z0-9_.:-]{0,63}$/);
 const coordinate = z.number().finite().min(-1e7).max(1e7);

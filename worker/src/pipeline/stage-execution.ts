@@ -1,3 +1,4 @@
+import { firstPassExtractionDiffers } from "./first-pass-pipeline.js";
 import { reportException, initializeWorkerErrorReporting } from "@docslurp/shared/error-reporting";
 import type { PreloadedRunState } from "../db/store.js";
 import { extendDbTraceLabel } from "../lib/db-trace.js";
@@ -120,6 +121,10 @@ export interface StageRuntime {
   preloaded?: PreloadedRunState;
   /** Called after a failure checkpoint with the stage's ordinary failure total. */
   onStageFailure?(failure: { classification: StageFailureClass; ordinaryFailures: number | undefined }): void;
+  /** The workflow recorded the first pass: format-detect leaves first-pass PDFs' page counts to the batch. */
+  firstPassRun?: boolean;
+  /** The pipeline this stage runs with, derived from the run's (the first pass's document shards). */
+  pipelineOverride?: (pipeline: import("@docslurp/shared").PipelineFeatures) => import("@docslurp/shared").PipelineFeatures;
 }
 
 export type StageFailureClass = "interruption" | "cancelled" | "throttled" | "hung" | "teardown" | "ordinary";
@@ -327,6 +332,15 @@ export function createStageExecution(deps: {
       preloaded: runtime.preloaded,
     });
     const shard = runtime.documentIds !== undefined;
+    if (runtime.firstPassRun) state.firstPassRun = true;
+    if (runtime.pipelineOverride) {
+      if (!shard) throw new Error("a pipeline override is only for document shards");
+      // Only the first pass overrides the pipeline: its checkpoints are provisional (pipeline/checkpoints.ts).
+      state.firstPassShard = true;
+      state.run.pipeline = runtime.pipelineOverride(state.run.pipeline);
+    } else if (runtime.firstPassRun) {
+      state.firstPassExtractionDiffers = firstPassExtractionDiffers(state.run.pipeline);
+    }
     if (runtime.pageRanges && !runtime.documentIds) throw new Error("page-range shard requires its document ids");
     if (runtime.documentIds) state.beginShard(runtime.documentIds);
     const { documents } = state;

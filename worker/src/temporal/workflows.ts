@@ -46,6 +46,7 @@ import {
   STAGE_THROTTLED_ATTEMPTS,
   stageWorksOn,
   WORKER_SLOT_UNAVAILABLE,
+  FIRST_PASS_RUN_POLICY_FAILURE,
   type PipelineWorkflowInput,
   type PipelineWorkflowOutput,
   type RunProgress,
@@ -305,6 +306,64 @@ export async function documentPipeline(
     const legacyGroupable = (stageName: string): boolean => LIGHT_STAGES.includes(stageName)
       && !(stageName === "quarantine" && input.documentSharding?.quarantine === true);
 
+    // Recorded in workflow input: runs started without it never plan a first pass, and replay unchanged.
+    const firstPassAfter = input.firstPass && scaling ? stageOrder.indexOf("format-detect") : -1;
+    let firstPassPending = firstPassAfter >= 0;
+    const firstPassFlag = input.firstPass ? { firstPass: true } : {};
+    /**
+     * The first pass (pipeline/first-pass.ts): the run's PDFs in sandboxed batches, each document searchable as its batch
+     * result arrives. Returns whether it finished every document of the run (then afterFirstPass "none" may stop).
+     */
+    const runFirstPass = async (): Promise<boolean> => {
+      const plan = await scaling!.quick.planFirstPass({ runId: input.runId });
+      // PDFs format-detect left to the first pass that no batch takes: measured and authorized before the stage loop.
+      if (plan.countFirst?.length) await scaling!.longRunning.countFirstPassPages({ runId: input.runId, documentIds: plan.countFirst });
+      if (plan.batches.length === 0) return false;
+      const planned = plan.batches.reduce((sum, batch) => sum + batch.length, 0);
+      let indexed = 0;
+      let unfinished = 0;
+      await runPageFanOut({
+        beforeDispatch: admit,
+        bundles: plan.batches.map((documentIds, batchIndex) => ({ documentIds, batchIndex })),
+        concurrency: Math.max(1, Math.min(plan.batches.length, input.firstPass!.maxParallelBatches)),
+        run: async ({ documentIds, batchIndex }) => {
+          try {
+            const out = await scaling!.longRunning.runFirstPassBatch({
+              runId: input.runId, batchIndex, documentIds, totalStages: stageOrder.length,
+              ...(input.slotGate ? { slotGate: true } : {}),
+            });
+            indexed += out.indexed.length;
+            unfinished += out.handedBack.length + (out.extracted?.length ?? 0);
+            return out.usage;
+          } catch (error) {
+            if ((input.slotGate && isSlotUnavailable(error)) || cancelled) throw error;
+            // A run-policy stop (credits, cost cap) stops the run exactly as a stage's does: never handed back.
+            if (applicationFailureType(error) === FIRST_PASS_RUN_POLICY_FAILURE) throw error;
+            // The batch failed (provider, lost worker, heartbeat): its PDFs are measured and authorized, then the stage
+            // loop takes them the ordinary way. A failure to count them fails the run like any stage.
+            await scaling!.longRunning.countFirstPassPages({ runId: input.runId, documentIds });
+            unfinished += documentIds.length;
+            return { inputTokens: 0, outputTokens: 0, costCents: 0 };
+          }
+        },
+        onUsage: (batchUsage) => {
+          usage = addUsage(usage, batchUsage);
+          progress = { ...progress, usage: { ...usage } };
+        },
+        isSlotUnavailable: (error) => input.slotGate === true && isSlotUnavailable(error),
+        waitFor: (predicate) => condition(predicate),
+        sleep: (ms) => sleep(ms),
+        now: () => Date.now(),
+        random: () => Math.random(),
+        isPaused: () => paused,
+        isCancelled: () => cancelled,
+      });
+      if (cancelled) throw ApplicationFailure.nonRetryable("Run cancelled by user");
+      // Finished only when every document of the run was in a batch and every one of them was indexed.
+      return plan.coversRun === true && unfinished === 0 && indexed === planned;
+    };
+    let stopAfterFirstPass = false;
+
     // Execute each stage sequentially
     for (let i = 0; i < stageOrder.length; i++) {
       // Handle pause/cancel signals
@@ -315,12 +374,23 @@ export async function documentPipeline(
         throw ApplicationFailure.nonRetryable("Run cancelled by user");
       }
 
+      if (firstPassPending && i > firstPassAfter) {
+        firstPassPending = false;
+        const finished = await runFirstPass();
+        if (finished && input.firstPass!.afterFirstPass === "none") {
+          stopAfterFirstPass = true;
+          break;
+        }
+      }
+
       const stageName = stageOrder[i]!;
 
       // Recorded in workflow input: runs started without it keep one activity per stage.
       if (!groupable && input.groupLightStages && scaling && legacyGroupable(stageName)) {
         let end = i;
         while (end < stageOrder.length && legacyGroupable(stageOrder[end]!)) end++;
+        // A group never runs past format-detect while the first pass is pending: the first pass goes between them.
+        if (firstPassPending && i <= firstPassAfter) end = Math.min(end, firstPassAfter + 1);
         const group = stageOrder.slice(i, end);
         if (group.length > 1) {
           progress = {
@@ -339,6 +409,7 @@ export async function documentPipeline(
             totalStages: stageOrder.length,
             artifacts,
             ...(input.slotGate ? { slotGate: true } : {}),
+            ...firstPassFlag,
           };
           const result = await withStageSlot(() => scaling.longStage.runPipelineStages(groupInput));
           artifacts = { ...artifacts, ...result.artifacts };
@@ -512,9 +583,11 @@ export async function documentPipeline(
       }
 
       // The stage pass, plus the following stages that need no pre-work, in one activity.
-      const groupEnd = groupable && scaling
+      const plannedEnd = groupable && scaling
         ? planStageGroupEnd({ stageOrder, start: i, groupable, needsPreWork })
         : i + 1;
+      // A group never runs past format-detect while the first pass is pending: the first pass goes between them.
+      const groupEnd = firstPassPending && i <= firstPassAfter ? Math.min(plannedEnd, firstPassAfter + 1) : plannedEnd;
       if (groupEnd - i > 1 && scaling) {
         const group = stageOrder.slice(i, groupEnd);
         const groupInput = {
@@ -525,6 +598,7 @@ export async function documentPipeline(
           // Stop between stages on a pause request; the loop resumes at the next stage.
           yieldToControl: true,
           ...(input.slotGate ? { slotGate: true } : {}),
+          ...firstPassFlag,
         };
         // Queries and the failure record learn the group (not part of the command sequence).
         progress = { ...progress, stageGroup: [...group] };
@@ -548,6 +622,7 @@ export async function documentPipeline(
         totalStages: stageOrder.length,
         artifacts,
         ...(input.slotGate ? { slotGate: true } : {}),
+        ...firstPassFlag,
       };
       const result = await withStageSlot(() => stageActivities.runPipelineStage(stageInput));
 
@@ -558,6 +633,12 @@ export async function documentPipeline(
         outputTokens: usage.outputTokens + result.usage.outputTokens,
         costCents: usage.costCents + result.usage.costCents,
       };
+    }
+
+    // A run whose format-detect was its last stage still gets its first pass.
+    if (firstPassPending && !stopAfterFirstPass) {
+      firstPassPending = false;
+      await runFirstPass();
     }
 
     // Mark run as completed

@@ -32,7 +32,7 @@ import { configureSourceQuarantine, postgresSourceQuarantine } from "../sandbox/
 import { onTeardownBreakerOpen, quarantineForceExitMs, scheduleQuarantineForceExit, workerShutdownForceMs } from "../sandbox/teardown-breaker.js";
 import { initializeParserSandbox, setDefaultParserSandbox } from "../sandbox/startup.js";
 import { loadPricingThenParserSandbox } from "./startup-order.js";
-import { loadExtractorPlugins } from "../extractors/plugins.js";
+import { loadExtractorPlugins, setExtractorDocumentOwners } from "../extractors/plugins.js";
 import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
 import { ocrLanguageSettingFromEnv } from "../ocr/languages.js";
 import { assertOcrConfiguration } from "../ocr/mode.js";
@@ -140,6 +140,8 @@ async function main(): Promise<void> {
   });
   // Extractor plugins named by DOCSLURP_EXTRACTOR_PLUGINS load before taking work; a missing or broken one, or a
   // configuration that selects the VM PDF extractor without a provider, refuses to start.
+  // Providers check batch ownership against the database themselves (ExtractorPluginHost.documentOwners).
+  setExtractorDocumentOwners((documentIds) => store.documentScopes(documentIds));
   await loadExtractorPlugins(process.env).catch((error) => {
     throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
   });

@@ -1,3 +1,4 @@
+import { firstPassDefersPageCount } from "../pipeline/first-pass.js";
 import type { Document } from "../models.js";
 import type { Stage } from "../pipeline/pipeline.js";
 import { runDocumentStage } from "../pipeline/checkpoints.js";
@@ -65,7 +66,7 @@ export class FormatDetectStage implements Stage {
           // before any stage uses it or anything bills.
           let temp: string | null = null;
           const pdfPages = this.runner ? await recordMeasuredPdfPageCount({
-            state, document, runner: this.runner, signal,
+            state, document, runner: this.runner, signal, deferToFirstPass: firstPassDefersPageCount(state, document),
             sourcePath: async () => (temp ??= await this.storage.downloadSourceToTempFile(sourceStorageKey(document.sourceKey), trustedTempDownloadPattern("docslurp-pdf-pages-", document))),
           }).finally(async () => { if (temp) await cleanupTempFile(temp); }) : null;
           // A text file intake could not count in full (sampled over 2 MB, or no evidence): the same text rule over the whole text.

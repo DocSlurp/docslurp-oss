@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { countDeferredPdfPages, firstPassServesDocument, primeFirstPassResults } from "../pipeline/first-pass.js";
 import { reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { EMBEDDED_IMAGE_TARGETS, embeddedImageGraph, resolveEmbeddedImageRequest } from "../extractors/embedded-images.js";
 import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
@@ -300,6 +302,28 @@ export class ExtractMarkdownStage implements Stage {
     if (!state.run.pipeline.markdownExtraction) {
       return;
     }
+    if (state.firstPassRun) {
+      // Fail closed (council #340 H2): a PDF whose count format-detect left to the first pass and that nothing counted
+      // since (a lost batch, an unplanned file) is measured and authorized here, before anything bills its pages.
+      await countDeferredPdfPages({
+        state, storage: this.storage, runner: this.runner, signal,
+        documents: healthyDocuments(state).filter((document) => document.pageCountSource === "assumed"),
+        reason: () => "extract-markdown",
+      });
+    }
+    // A first-pass document extracted again the ordinary way is served from its persisted batch result (no second VM).
+    const release = await primeFirstPassResults(state, this.storage, signal);
+    try {
+      await this.extractDocuments(state, signal);
+    } finally {
+      await release();
+    }
+  }
+
+  private async extractDocuments(
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    signal?: AbortSignal,
+  ): Promise<void> {
 
     await runDocuments(
       healthyDocuments(state),
@@ -504,7 +528,8 @@ export class ExtractMarkdownStage implements Stage {
                   }
                 }
                 // Doppler figures (DOCSLURP_DOPPLER_IMAGE_EXTRACT): from the same VM job, into an empty host folder per candidate.
-                if (isPdf && dopplerImageExtractEnabled() && sandboxedPdfProvider()?.figures) {
+                // A first-pass document's figures come from its batch and are stored by the first pass itself.
+                if (isPdf && dopplerImageExtractEnabled() && sandboxedPdfProvider()?.figures && !firstPassServesDocument(state.run.id, document.id)) {
                   for (const prepared of [isolated.primary.extractor, isolated.secondary?.extractor]) {
                     if (!prepared?.plan.sandboxedPdf) continue;
                     const dir = await mkdtemp(path.join(path.dirname(prepared.plan.sandboxedPdf.output), ".doppler-figures-"));
@@ -1131,6 +1156,8 @@ export class ExtractMarkdownStage implements Stage {
                   const completedResult: DocumentStageResult = {
                     artifactUri,
                     stats: {
+                      // What later stages read: a first-pass checkpoint after this one runs again only if it changed (C1).
+                      markdownSha256: createHash("sha256").update(winningText).digest("hex"),
                       strategy,
                       similarity,
                       needsVision,
