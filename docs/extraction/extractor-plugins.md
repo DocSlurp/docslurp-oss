@@ -165,8 +165,18 @@ batch?: {
   `oversized`, `vm-lost`, `invalid`). The host validates every event (`acceptSandboxedPdfBatchEvent`): a known index, one
   text result per file, figures only after text, page counts within bounds, and the same result checks as a single-file run.
   A malformed event fails the batch; a failed file fails only itself.
-- **Billing.** The measured page count arrives on the `text` event and is recorded before anything bills. A file without a
-  text event is counted the ordinary way before the stage loop takes it, so nothing bills an estimate.
+- **Billing.** The measured page count arrives on the `text` event and is recorded before anything bills; `processedPages`
+  (when the converter read fewer pages) is the Markdown's slot count, billed and flagged partially extracted as for a
+  single-file run. A file without a text event, every PDF of a failed batch and every PDF no batch takes is counted the
+  ordinary way before the stage loop takes it, so nothing bills an estimate.
+- **Host refusals end the batch.** When `onEvent` rejects (a credit refusal, a failed write, a malformed event) the provider
+  stops every VM, starts no retry, sends nothing more and rejects with that same error. Every rejection carries the cost
+  of every VM the batch ran as `batchUsage` (`batchUsageOf`). Providers also check ownership themselves through
+  `host.documentOwners`, which fails closed when the worker has no database bound.
+- **Admission.** Each source is staged against its upload hash and admitted like any parser command (quarantined sources
+  and organizations, the teardown breaker) before it enters a batch; a refused document never reaches the VM.
+- **Provisional checkpoints.** The checkpoints the first pass writes are re-run by the ordinary loop when the run extracts
+  PDFs differently (served from the persisted batch result, no second VM) or when the Markdown a later stage read changed.
 - **Isolation.** The same rules as single-file runs: a fresh VM per batch, no credentials or network in it, bounded output.
   Every file of the batch belongs to the same organization.
 - **Options.** `math` (the project's `documentExtraction.options["vm-pdf"].math`) and `figures` (the deploy's figure

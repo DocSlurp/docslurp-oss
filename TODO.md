@@ -3,9 +3,8 @@
 - First pass (sandboxed PDF batches, 2026-11-11; `DOCSLURP_FIRST_PASS`, default off). Remaining before it is on by default:
   council review of the seam, the activity and the workflow wiring (one organization per batch, the publish gate, page-count
   billing); measurement on the run (`first_keyword_searchable_at`, `fully_indexed_at`, pages per minute and per $1 through
-  usage attribution, realtime fields); SDK, CLI and MCP switches for `firstPass`/`afterFirstPass`; the background upgrade
-  re-embedding pages that OCR or vision rewrite after the first pass (documents the first pass embedded skip the loop's embed
-  today; it embeds early only text-layer documents, or every document in fast quality); figure links rewritten to export
+  usage attribution, realtime fields); SDK, CLI and MCP switches for `firstPass`/`afterFirstPass`; batch layout facts
+  without tables/grids/tableCoverage (the single-file path's second walk is not run per file in the batch VM); figure links rewritten to export
   paths; and `DOCSLURP_FIRST_PASS_MATH` stays off until the math reader follow-up above is closed.
 - Doppler 705d2c7 follow-ups (council, 2026-11-10; still open at 5626992): before anyone enables `pdftomarkdown --math`, bound the cluster x prose-run `across_bar` scan in `docslurp/doppler-md/src/math/mod.rs` (a few MB of hostile page content reaches ~21 s per page inside the page caps); retain fewer bytes per glyph in non-streaming `--math`; add tests that compare late `-f` slices with an unsliced extraction and cover consecutive empty content streams; correct the "error checks remain unchanged" comment in `pdftotext.cc` (a skipped prefix page is no longer built, so its `Page::isOk` rejection no longer hides later pages).
 - Doppler security advisory tracking (council A L-B, 2026-11-05): the worker images and the VM guest run the pinned Doppler fork (`worker/doppler.json`), which does not receive Debian's poppler-utils patches (host probes stay Debian's). Before each release, and at least monthly, compare Poppler upstream security fixes and the Debian `src:poppler` tracker with the fork's base, cherry-pick or rebase in DocSlurp/doppler, and move the pin. Automate as a scheduled CI check that fails when upstream Poppler has a security tag newer than the fork's base.
