@@ -92,6 +92,8 @@ const textEvent = (index: number, pages = 1, words = 50) => ({
 /** What each fake stage saw, in order. */
 let seen: Array<{ stage: string; documentId: string; pageCount?: number; served?: string }>;
 let piiFails: Set<string>;
+/** Embedding of these documents waits until released (a slow provider call). */
+let embedHold: { ids: Set<string>; until: Promise<void> } | null = null;
 
 function stages(): Stage[] {
   const perDocument = (name: string, body: (state: any, document: any) => Promise<void>): Stage => ({
@@ -117,6 +119,7 @@ function stages(): Stage[] {
       if (piiFails.has(document.id)) throw Object.assign(new Error("pii blocked"), {});
     }),
     perDocument("embed", async (_state, document) => {
+      if (embedHold?.ids.has(document.id)) await embedHold.until;
       seen.push({ stage: "embed", documentId: document.id });
       await store.markDocumentLexicalSearchable(document.id);
     }),
@@ -153,7 +156,7 @@ beforeEach(async () => {
   resetFirstPassResultsForTest();
   setFirstPassPublishGate(recordedVerdictGate);
   registerFakeProvider();
-  batchCalls = 0; singleRuns = 0; seen = []; piiFails = new Set();
+  batchCalls = 0; singleRuns = 0; seen = []; piiFails = new Set(); embedHold = null;
   // Production's PDF route: every PDF in a VM, page counts included.
   vi.stubEnv("DOCSLURP_PDF_MODE", "vm");
   await seed();
@@ -282,5 +285,26 @@ describe("first pass", () => {
     expect(await docStage("d0", "extract-markdown")).toBe("completed");
     expect(await docStage("d0", "embed")).toBeUndefined();
     expect(await searchable()).toEqual({ d0: false, d1: true, d2: true });
+  });
+
+  it("a slow embedding of one group does not hold back documents that arrive after it", async () => {
+    let release!: () => void;
+    embedHold = { ids: new Set(["d0"]), until: new Promise<void>((resolve) => (release = resolve)) };
+    let sent!: () => void;
+    const allSent = new Promise<void>((resolve) => (sent = resolve));
+    script = async (_job, emit) => {
+      await emit(textEvent(0));
+      await new Promise((r) => setTimeout(r, 50));
+      await emit(textEvent(1));
+      await emit(textEvent(2));
+      sent();
+    };
+    const running = runFirstPassBatch(deps(), { runId: "r1", documentIds: DOCS });
+    await allSent;
+    await until(async () => { const s = await searchable(); return s.d1 && s.d2; });
+    expect((await searchable()).d0).toBe(false);
+    release();
+    await running;
+    expect(await searchable()).toEqual({ d0: true, d1: true, d2: true });
   });
 });

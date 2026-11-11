@@ -41,6 +41,12 @@ import { firstPassPublishGate } from "./first-pass-gate.js";
 export const FIRST_PASS_PAGE_COUNT_STAGE = "first-pass:page-count";
 export const FIRST_PASS_FIGURES_STAGE = "first-pass:figures";
 
+/** Groups of documents the first pass advances at once (DOCSLURP_FIRST_PASS_DRAINS, 1..16, default 4). */
+export function firstPassDrainConcurrency(env: NodeJS.ProcessEnv = process.env): number {
+  const value = Number.parseInt(env.DOCSLURP_FIRST_PASS_DRAINS ?? "4", 10);
+  return Number.isSafeInteger(value) ? Math.max(1, Math.min(16, value)) : 4;
+}
+
 /** The pipeline the first pass runs its stages with: PDFs through the sandboxed PDF route only, no vision fallback. */
 export function firstPassPipeline(pipeline: PipelineFeatures): PipelineFeatures {
   return {
@@ -226,39 +232,48 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
     /** Documents whose text layer misses pages: extracted now, embedded by the stage loop after OCR or vision. */
     const extractOnly = new Set<string>();
     const figureReady = new Map<string, string>();
-    let draining: Promise<void> = Promise.resolve();
     let drainFailure: unknown;
-    const drain = () => {
-      draining = draining.then(async () => {
-        if (drainFailure || ready.length === 0) return;
-        const ids = ready.splice(0, ready.length);
-        try {
-          usage = addUsage(usage, await deps.runStage("extract-markdown", ids));
-          if (pipeline.piiPolicy?.enabled) usage = addUsage(usage, await deps.runStage("pii-detect", ids));
-          const fresh = await loadRunState(deps.store, input.runId, { hydrate: true });
-          const publishable: string[] = [];
-          for (const id of ids) {
-            if (extractOnly.has(id)) continue;
-            const stages = fresh.documentStages.get(id);
-            if (stages?.get("extract-markdown")?.status !== "completed") continue;
-            if (pipeline.piiPolicy?.enabled && stages.get("pii-detect")?.status !== "completed") continue;
-            if (!(await firstPassPublishGate().awaitClean({ state: fresh, documentId: id, quarantineEnabled: deps.quarantineEnabled, signal: deps.signal }))) continue;
-            publishable.push(id);
-          }
-          if (publishable.length) {
-            usage = addUsage(usage, await deps.runStage("embed", publishable));
-            const searchable = now() - started;
-            timings.firstSearchableMs ??= searchable;
-            timings.allSearchableMs = searchable;
-            indexed.push(...publishable);
-          }
-        } catch (error) {
-          drainFailure = error;
+    // Several coalesced groups advance at once (each a document shard of the ordinary stages); later documents never wait
+    // behind one slow embedding call.
+    const drainSlots = firstPassDrainConcurrency();
+    let activeDrains = 0;
+    const inflight = new Set<Promise<void>>();
+    const drainGroup = async (ids: string[]) => {
+      try {
+        usage = addUsage(usage, await deps.runStage("extract-markdown", ids));
+        if (pipeline.piiPolicy?.enabled) usage = addUsage(usage, await deps.runStage("pii-detect", ids));
+        const fresh = await loadRunState(deps.store, input.runId, { hydrate: true });
+        const publishable: string[] = [];
+        for (const id of ids) {
+          if (extractOnly.has(id)) continue;
+          const stages = fresh.documentStages.get(id);
+          if (stages?.get("extract-markdown")?.status !== "completed") continue;
+          if (pipeline.piiPolicy?.enabled && stages.get("pii-detect")?.status !== "completed") continue;
+          if (!(await firstPassPublishGate().awaitClean({ state: fresh, documentId: id, quarantineEnabled: deps.quarantineEnabled, signal: deps.signal }))) continue;
+          publishable.push(id);
         }
-        deps.heartbeat({ firstPass: "drained", documents: ids.length });
-      });
-      return draining;
+        if (publishable.length) {
+          usage = addUsage(usage, await deps.runStage("embed", publishable));
+          const searchable = now() - started;
+          timings.firstSearchableMs ??= searchable;
+          timings.allSearchableMs = searchable;
+          indexed.push(...publishable);
+        }
+      } catch (error) {
+        drainFailure ??= error;
+      }
+      deps.heartbeat({ firstPass: "drained", documents: ids.length });
     };
+    const drain = () => {
+      while (!drainFailure && ready.length > 0 && activeDrains < drainSlots) {
+        activeDrains++;
+        // Free slots share the backlog, so a burst of results spreads across the drains instead of queueing behind one.
+        const ids = ready.splice(0, Math.max(1, Math.ceil(ready.length / (drainSlots - activeDrains + 1))));
+        const running: Promise<void> = drainGroup(ids).finally(() => { activeDrains--; inflight.delete(running); drain(); });
+        inflight.add(running);
+      }
+    };
+    const settled = async () => { while (inflight.size) await Promise.all([...inflight]); };
 
     const onEvent = async (raw: SandboxedPdfBatchEvent) => {
       // The text result as the provider sent it: extract-markdown accepts it again when it is served (layout facts, OCR pages).
@@ -290,13 +305,13 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
         extractOnly.add(file.documentId);
       }
       ready.push(file.documentId);
-      void drain();
+      drain();
     };
 
     const run = await provider.run(job, onEvent, deps.signal);
     for (const event of run.usage) state.usageLedger.enqueue(event as UsageEvent);
-    await drain();
-    await draining;
+    drain();
+    await settled();
     if (drainFailure) throw drainFailure;
 
     // Files with no text: counted the ordinary way (or failed) so none bills an estimate, then left to the stage loop.
