@@ -33,6 +33,7 @@ beforeEach(() => {
     completePipelineRun: vi.fn(async () => ({})),
     failPipelineRun: vi.fn(async () => {}),
     planFirstPass: vi.fn(async () => ({ batches: [["a"], ["b"], ["c"]], coversRun: true })),
+    runPipelineStages: vi.fn(async ({ stageNames }: { stageNames: string[] }) => ({ artifacts: {}, usage: zero, stagesRun: stageNames.length })),
     runFirstPassBatch: vi.fn(async ({ documentIds }: { documentIds: string[] }) => ({ usage: { ...zero, costCents: 1 }, indexed: documentIds, extracted: [], handedBack: [], timings: {} })),
   };
 });
@@ -56,6 +57,26 @@ describe("first pass in the pipeline workflow", () => {
     expect(order.at(-1)).toBe("completePipelineRun");
     // Format-detect and the following stages know the run recorded the first pass.
     expect(mocks.activities.runPipelineStage.mock.calls.every(([input]: [{ firstPass?: boolean }]) => input.firstPass === true)).toBe(true);
+  });
+
+  it("a recorded stage group ends at format-detect so the first pass runs before extraction", async () => {
+    const groupable = ["quarantine", "format-detect", "extract-markdown", "embed", "index"];
+    await documentPipeline({ runId: "run", pipeline: {} as never, stageOrder: ORDER, slotGate: true, groupableStages: groupable,
+      firstPass: { maxParallelBatches: 2, afterFirstPass: "auto" } });
+    const groups = mocks.activities.runPipelineStages.mock.calls.map(([input]: [{ stageNames: string[] }]) => input.stageNames);
+    expect(groups[0]).toEqual(["quarantine", "format-detect"]);
+    const order = mocks.calls;
+    expect(order.indexOf("planFirstPass")).toBeGreaterThan(order.indexOf("runPipelineStages"));
+    expect(order.indexOf("planFirstPass")).toBeLessThan(order.lastIndexOf("runPipelineStages"));
+    expect(groups.at(-1)).toEqual(["extract-markdown", "embed", "index"]);
+  });
+
+  it("legacy light-stage grouping also stops at format-detect for the first pass", async () => {
+    await documentPipeline({ runId: "run", pipeline: {} as never, stageOrder: ["quarantine", "format-detect", "to-canonical", "extract-markdown"] as never,
+      slotGate: true, groupLightStages: true, firstPass: { maxParallelBatches: 2, afterFirstPass: "auto" } });
+    const groups = mocks.activities.runPipelineStages.mock.calls.map(([input]: [{ stageNames: string[] }]) => input.stageNames);
+    expect(groups[0]).toEqual(["quarantine", "format-detect"]);
+    expect(mocks.calls.indexOf("planFirstPass")).toBeGreaterThan(mocks.calls.indexOf("runPipelineStages"));
   });
 
   it("afterFirstPass none stops after a first pass that finished every document", async () => {

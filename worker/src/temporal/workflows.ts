@@ -378,6 +378,8 @@ export async function documentPipeline(
       if (!groupable && input.groupLightStages && scaling && legacyGroupable(stageName)) {
         let end = i;
         while (end < stageOrder.length && legacyGroupable(stageOrder[end]!)) end++;
+        // A group never runs past format-detect while the first pass is pending: the first pass goes between them.
+        if (firstPassPending && i <= firstPassAfter) end = Math.min(end, firstPassAfter + 1);
         const group = stageOrder.slice(i, end);
         if (group.length > 1) {
           progress = {
@@ -570,9 +572,11 @@ export async function documentPipeline(
       }
 
       // The stage pass, plus the following stages that need no pre-work, in one activity.
-      const groupEnd = groupable && scaling
+      const plannedEnd = groupable && scaling
         ? planStageGroupEnd({ stageOrder, start: i, groupable, needsPreWork })
         : i + 1;
+      // A group never runs past format-detect while the first pass is pending: the first pass goes between them.
+      const groupEnd = firstPassPending && i <= firstPassAfter ? Math.min(plannedEnd, firstPassAfter + 1) : plannedEnd;
       if (groupEnd - i > 1 && scaling) {
         const group = stageOrder.slice(i, groupEnd);
         const groupInput = {
