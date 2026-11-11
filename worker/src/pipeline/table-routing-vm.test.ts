@@ -160,3 +160,25 @@ describe("council round 3 L2/L3: guest cell text is escaped on every path into t
     expect(repaired.markdown).toContain("FORGED&lt;img");
   });
 });
+
+describe("council round 3 L1: an unclosed <table never hides the prose after it from routing", () => {
+  const ragged = "| a | b | c |\n| --- | --- | --- |\n| 1 | 2 |\n| 3 | 4 | 5 |\n| 6 |\n| 7 | 8 | 9 |\n| x |";
+  const code = "```python\ndef f(x):\n    return x * 2\nfor i in range(10):\n    print(f(i))\n```\n\n$$\\int_0^1 x^2 \\, dx = \\frac{1}{3}$$";
+  const route = (text: string, scan: "vm" | "unread") => {
+    const scans = new Map([[text, scan === "vm" ? asGuest(() => scanPageTables(text)) : null]]);
+    const pageImageEvidence = new Map([[1, { wordCount: 60, imageCount: 0, imageCoverage: 0, largestImageCoverage: 0, imagesKnown: true, textLayer: { verdict: "good" as const, reasons: [], source: "text-layer" as const } }]]);
+    const surface = buildAdaptiveRoutingDecisionSurface({
+      documentId: "d", filename: "r.pdf", text, pageCount: 1, evidence: { source: "markdown-manifest", artifactUri: "s3://bucket/d.md" },
+      pageImageEvidence: pageImageEvidence as never, tableScans: scans, routingV2: true,
+    });
+    const page = surface.pages[0]!;
+    return { route: page.route, read: page.ocrDecision?.authorized === true };
+  };
+  it.each(["vm", "unread"] as const)("routes the same with or without the unclosed tag (%s scan)", (scan) => {
+    production();
+    const baseline = route(`Notes\n\n${ragged}\n\n${code}`, scan);
+    expect(baseline).toEqual({ route: "code-heavy", read: false });
+    expect(route(`Notes see <table here\n\n${ragged}\n\n${code}`, scan)).toEqual(baseline);
+    expect(route(`Notes see <table>x</table> here\n\n${ragged}\n\n${code}`, scan)).toEqual(baseline);
+  });
+});

@@ -31,6 +31,7 @@ import {
   TABLE_HTML_UNSCANNED_SIGNAL,
   TABLE_LEAK,
   TABLE_LEAK_SIGNALS,
+  TABLE_SCAN_MAX_PAGE_CHARS,
   type HtmlTableScan,
 } from "@docslurp/shared";
 import type { Stage } from "../pipeline/pipeline.js";
@@ -1058,6 +1059,40 @@ function isAlignedNumericRow(line: string): boolean {
   return cells.length >= 3 && cells.filter((cell) => /^[-+(]?[$€£¥]?\d[\d,.:/%)]*$/.test(cell)).length >= 2;
 }
 
+/**
+ * The page with its HTML tables replaced by a line break, so table markup is never read as code, formula or chemistry.
+ * The spans are the parser VM's validated reading (`tableScan`, offsets into the untrimmed page; `shift` maps them into
+ * the trimmed one). Without a scan (unread page, no scans given, or a page over the scan limit) only closed
+ * `<table…</table>` pairs are removed, found with indexOf (a tag-presence search, no tree). Never text after an unclosed
+ * `<table`: prose there stays visible to the content checks (council round 3 L1).
+ */
+function withoutHtmlTables(normalized: string, shift: number, tableScan: HtmlTableScan | null | undefined): string {
+  if (!/<table[\s>]/i.test(normalized)) return normalized;
+  const spans: Array<[number, number]> = [];
+  if (tableScan && tableScan.tables.length && normalized.length + shift <= TABLE_SCAN_MAX_PAGE_CHARS) {
+    for (const table of tableScan.tables) spans.push([table.start - shift, table.end - shift]);
+  } else if (!tableScan || normalized.length + shift > TABLE_SCAN_MAX_PAGE_CHARS) {
+    const lower = normalized.replace(/[A-Z]+/g, (letters) => letters.toLowerCase());
+    for (let at = lower.indexOf("<table"); at !== -1; at = lower.indexOf("<table", at + 1)) {
+      const next = lower.charAt(at + 6);
+      if (next !== ">" && !/\s/.test(next)) continue;
+      const close = lower.indexOf("</table>", at + 6);
+      if (close === -1) break;
+      spans.push([at, close + 8]);
+      at = close + 7;
+    }
+  }
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const [start, end] of spans) {
+    if (start < cursor || start < 0 || end > normalized.length) continue;
+    parts.push(normalized.slice(cursor, start), "\n");
+    cursor = end;
+  }
+  parts.push(normalized.slice(cursor));
+  return parts.join("");
+}
+
 export function classifyAdaptivePage(
   pageNumber: number,
   text: string,
@@ -1114,8 +1149,7 @@ export function classifyAdaptivePage(
   ].filter(Boolean).length;
   const textDensityScore = Math.min(1, (charCount / 900) * 0.6 + (wordCount / 180) * 0.4);
   const signals: string[] = [];
-  const withoutTables = normalized
-    .replace(/<table[\s>][\s\S]*?(?:<\/table>|$)/gi, "\n")
+  const withoutTables = withoutHtmlTables(normalized, text.length - text.trimStart().length, tableScan)
     .split("\n").filter((line) => !/^\s*\|.*\|\s*$/.test(line)).join("\n");
   const specializedContent = detectSpecializedContent(withoutTables, withoutTables.split(/\n+/).filter(Boolean), routingV2);
 
