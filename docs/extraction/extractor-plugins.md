@@ -143,6 +143,39 @@ to start; it never moves OCR to the worker host or to a hosted model instead. Se
 
 At load the worker lists the capability as `vm-ocr` (`[extractor-plugins] loaded api=1 providers=...,vm-ocr`).
 
+## Sandboxed PDF batch (`sandboxedPdf.batch`)
+
+A sandboxed PDF provider may also declare `batch`: many PDFs of one run converted in one isolated VM job, with each file's
+result streamed back as soon as it is ready. The first pass (`worker/src/pipeline/first-pass.ts`) uses it so that a run's
+documents become keyword searchable one by one instead of waiting for a VM per file and for the slowest document at every
+stage.
+
+```ts
+batch?: {
+  maxFiles: number; maxBatchBytes: number; maxBatchPages: number;
+  run(job: SandboxedPdfBatchJob, onEvent: (event: SandboxedPdfBatchEvent) => Promise<void>, signal?: AbortSignal): Promise<{ usage: UsageEvent[] }>;
+}
+```
+
+- **One run per batch.** `job.scope` names the run and organization. The host checks every document against the database
+  before any VM work (`assertSingleScopeBatch`) and refuses a batch that mixes runs or organizations; the provider refuses it
+  again. Document ids never go to the VM.
+- **Events.** Per file, in any order across files: `text` (the Markdown is in the file's `output`, with the VM's structural
+  page count), then `figures` when the job asked for them, or `failed` with a fixed reason (`page-count`, `timeout`, `parser`,
+  `oversized`, `vm-lost`, `invalid`). The host validates every event (`acceptSandboxedPdfBatchEvent`): a known index, one
+  text result per file, figures only after text, page counts within bounds, and the same result checks as a single-file run.
+  A malformed event fails the batch; a failed file fails only itself.
+- **Billing.** The measured page count arrives on the `text` event and is recorded before anything bills. A file without a
+  text event is counted the ordinary way before the stage loop takes it, so nothing bills an estimate.
+- **Isolation.** The same rules as single-file runs: a fresh VM per batch, no credentials or network in it, bounded output.
+  Every file of the batch belongs to the same organization.
+- **Options.** `math` (the project's `documentExtraction.options["vm-pdf"].math`) and `figures` (the deploy's figure
+  extraction). Workers advertise `workflow.first-pass` only when a batch provider is registered.
+
+The first pass runs only when the deploy sets `DOCSLURP_FIRST_PASS=on`, the pipeline's `firstPass` is not `off`, and the
+whole fleet advertises the capability; unsetting the flag is the rollback. Nothing becomes searchable before the document's
+publish gate passes (`worker/src/pipeline/first-pass-gate.ts`: a clean malware verdict).
+
 ## Isolation requirements
 
 Untrusted files are processed behind a VM or microVM boundary (`AGENTS.md`). A provider must:
