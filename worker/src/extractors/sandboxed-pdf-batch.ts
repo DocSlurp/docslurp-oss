@@ -74,7 +74,8 @@ export interface SandboxedPdfBatchProvider {
    * A rejection from `onEvent` is the host refusing the batch (a credit refusal, a failed page-count write, a malformed
    * event): the provider stops every VM of the batch, starts no retry VM, emits no further event and rejects with that same
    * error object (never a wrapped or swallowed one). Every rejection carries the cost of every VM the batch ran, as
-   * `batchUsage` (BATCH_USAGE_PROPERTY, read with batchUsageOf), so the host can bill what was spent on any exit.
+   * `batchUsage` (BATCH_USAGE_PROPERTY, read with batchUsageOf), so the host can bill what was spent on any exit. A rejection
+   * that sets BATCH_FINAL_PROPERTY is never re-run as a batch.
    */
   run(job: SandboxedPdfBatchJob, onEvent: (event: SandboxedPdfBatchEvent) => Promise<void>, signal?: AbortSignal): Promise<{ usage: UsageEvent[] }>;
 }
@@ -92,6 +93,23 @@ export function batchUsageOf(error: unknown): UsageEvent[] {
   // A provider that only set a SandboxRunError's single usage event: bill that one.
   if (!Array.isArray(raw)) { const single = (error as { usage?: unknown }).usage; return usageEvent(single) ? [single] : []; }
   return raw.filter((event): event is UsageEvent => !!event && typeof event === "object" && typeof (event as { metric?: unknown }).metric === "string");
+}
+
+/**
+ * The property a provider's rejection sets (to `true`) when the batch VM itself could not be trusted to have run as required:
+ * the guest could not confine itself, could not verify a file's cleanup, or never reported an explicit exit status. Running
+ * the same batch again cannot fix that, so the host never re-runs it: the batch activity fails without retry and its
+ * documents take the ordinary per-document stages once (temporal/activities.ts firstPassFailure).
+ */
+export const BATCH_FINAL_PROPERTY = "batchFinal";
+
+/** Whether a rejection, or any error in its cause chain, carries BATCH_FINAL_PROPERTY (never throws). */
+export function isFinalBatchFailure(error: unknown): boolean {
+  for (let link: unknown = error, depth = 0; link && depth < 8; depth++, link = (link as { cause?: unknown }).cause) {
+    if (typeof link !== "object" && typeof link !== "function") return false;
+    try { if ((link as Record<string, unknown>)[BATCH_FINAL_PROPERTY] === true) return true; } catch { return false; }
+  }
+  return false;
 }
 
 /** The registered provider's batch capability, or null when it has none. */

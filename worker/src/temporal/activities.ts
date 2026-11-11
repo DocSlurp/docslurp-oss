@@ -1,11 +1,12 @@
 import { countFirstPassPages, firstPassPipeline, planFirstPass, runFirstPassBatch } from "../pipeline/first-pass.js";
 import { RunPolicyError } from "../lib/document-failure.js";
+import { isFinalBatchFailure } from "../extractors/sandboxed-pdf-batch.js";
 import { withPlanningProgress } from "./planning-progress.js";
 import { renderDocumentPage } from "../deferred/render-page.js";
 import { buildDocumentExport, DOCUMENT_EXPORT_MAX_ATTEMPTS } from "../exports/build-document-export.js";
 import { runPageBundle } from "./page-bundle.js";
 import { VisionExtractStage } from "../stages/vision-extract.js";
-import { FIRST_PASS_RUN_POLICY_FAILURE, type FirstPassBatchInput, type FirstPassBatchOutput, type FirstPassCountInput, type FirstPassPlanInput, type FirstPassPlanOutput, type VisionPageTask } from "./shared.js";
+import { FIRST_PASS_BATCH_FINAL_FAILURE, FIRST_PASS_RUN_POLICY_FAILURE, type FirstPassBatchInput, type FirstPassBatchOutput, type FirstPassCountInput, type FirstPassPlanInput, type FirstPassPlanOutput, type VisionPageTask } from "./shared.js";
 import { runWithProviderRateScope } from "../lib/provider-rate-limit.js";
 import { runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
 /**
@@ -159,7 +160,9 @@ export async function withFirstPassHeartbeat<T>(context: { heartbeat(details?: u
 
 /**
  * A first-pass activity's failure: a run-policy stop (credits, cost cap) is final and typed, so the workflow stops the run
- * as a stage's policy stop does instead of handing the batch back; everything else is classified as a stage's failure.
+ * as a stage's policy stop does instead of handing the batch back. A batch the provider failed closed (BATCH_FINAL_PROPERTY:
+ * guest confinement unavailable, file cleanup unverified, no explicit exit status) is final too, so Temporal never re-runs
+ * its VM; the workflow hands its documents to the ordinary stages once. Everything else is classified as a stage's failure.
  */
 export function firstPassFailure(error: unknown, classify: (error: unknown) => ReturnType<typeof classifyActivityError>): unknown {
   for (let link: unknown = error, depth = 0; link && depth < 8; depth++, link = (link as { cause?: unknown }).cause) {
@@ -168,6 +171,11 @@ export function firstPassFailure(error: unknown, classify: (error: unknown) => R
     }
   }
   const classification = classify(error);
+  // A batch VM that could not be trusted is never re-run as a batch (no Temporal retry); cancellation, interruption, a hung
+  // activity and a sandbox teardown failure keep their own handling.
+  if (classification === "ordinary" && isFinalBatchFailure(error)) {
+    return ApplicationFailure.create({ type: FIRST_PASS_BATCH_FINAL_FAILURE, message: "First-pass batch VM failed closed; its documents take the ordinary stages", nonRetryable: true });
+  }
   if (classification === "interruption") return interruptionFailure(error);
   if (classification === "hung") return hungWorkFailure(error);
   if (classification === "teardown") return teardownFailure(error);

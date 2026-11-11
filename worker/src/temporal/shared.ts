@@ -264,6 +264,11 @@ export interface FirstPassCountInput {
 
 /** ApplicationFailure type of a first-pass activity stopped by run policy (credits, cost cap): the run stops, no handback. */
 export const FIRST_PASS_RUN_POLICY_FAILURE = "FirstPassRunPolicyStop";
+/**
+ * ApplicationFailure type of a first-pass batch whose VM could not be trusted (BATCH_FINAL_PROPERTY): never retried; the
+ * workflow hands its documents to the ordinary stages, as for any other failed batch.
+ */
+export const FIRST_PASS_BATCH_FINAL_FAILURE = "FirstPassBatchFinal";
 
 export interface FirstPassBatchInput {
   runId: string;

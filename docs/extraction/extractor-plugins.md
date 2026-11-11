@@ -173,6 +173,10 @@ batch?: {
   stops every VM, starts no retry, sends nothing more and rejects with that same error. Every rejection carries the cost
   of every VM the batch ran as `batchUsage` (`batchUsageOf`). Providers also check ownership themselves through
   `host.documentOwners`, which fails closed when the worker has no database bound.
+- **Failed closed is final.** A provider that cannot trust its own VM run (the guest could not confine itself, could not
+  verify a file's cleanup, or never reported an explicit exit status) sets `batchFinal: true` on its rejection
+  (`BATCH_FINAL_PROPERTY`, `isFinalBatchFailure`). The batch activity then fails without retry, and its documents are
+  counted and take the ordinary per-document stages once; the batch never runs again.
 - **Admission.** Each source is staged against its upload hash and admitted like any parser command (quarantined sources
   and organizations, the teardown breaker) before it enters a batch; a refused document never reaches the VM.
 - **Provisional checkpoints.** The checkpoints the first pass writes are re-run by the ordinary loop when the run extracts

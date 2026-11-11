@@ -100,6 +100,25 @@ describe("first pass in the pipeline workflow", () => {
     expect(stageNames()).toContain("extract-markdown");
   });
 
+  it("L-A: a batch failed closed (final, non-retryable) hands its documents to the stage loop once; other batches still run", async () => {
+    const { ApplicationFailure } = await import("@temporalio/common");
+    const { FIRST_PASS_BATCH_FINAL_FAILURE } = await import("../temporal/shared.js");
+    mocks.activities.runFirstPassBatch.mockImplementationOnce(async () => {
+      throw ApplicationFailure.create({ type: FIRST_PASS_BATCH_FINAL_FAILURE, message: "First-pass batch VM failed closed", nonRetryable: true });
+    });
+    await documentPipeline({ runId: "run", pipeline: {} as never, stageOrder: ORDER, slotGate: true, firstPass: { maxParallelBatches: 1, afterFirstPass: "none" } });
+    // Each batch dispatched exactly once: the failed one is never re-dispatched by the workflow.
+    expect(mocks.activities.runFirstPassBatch).toHaveBeenCalledTimes(3);
+    expect(mocks.activities.runFirstPassBatch.mock.calls.map(([input]: [{ documentIds: string[] }]) => input.documentIds)).toEqual([["a"], ["b"], ["c"]]);
+    expect(mocks.activities.countFirstPassPages).toHaveBeenCalledOnce();
+    expect(mocks.activities.countFirstPassPages).toHaveBeenCalledWith({ runId: "run", documentIds: ["a"] });
+    // The ordinary stages run once, after the count; the run is not stopped.
+    expect(stageNames()).toEqual(["quarantine", "format-detect", "extract-markdown", "embed", "index"]);
+    expect(mocks.calls.indexOf("countFirstPassPages")).toBeLessThan(mocks.calls.lastIndexOf("runPipelineStage"));
+    expect(mocks.activities.completePipelineRun).toHaveBeenCalledOnce();
+    expect(mocks.activities.failPipelineRun).not.toHaveBeenCalled();
+  });
+
   it("a run-policy stop (credits) in a batch stops the run: no handback, no count, no stage loop", async () => {
     const { ApplicationFailure } = await import("@temporalio/common");
     const { FIRST_PASS_RUN_POLICY_FAILURE } = await import("../temporal/shared.js");
