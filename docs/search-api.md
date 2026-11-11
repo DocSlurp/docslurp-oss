@@ -120,6 +120,17 @@ Omit `model` to use the default (`z-ai/glm-5.3-flash`). Any project chat catalog
 
 Operators can list extra OpenRouter ids in `DOCSLURP_CHAT_EVAL_MODELS` (comma-separated; `:free` suffixes allowed) for model evaluations. Only platform admins can request them: a session whose verified email is in `ADMIN_EMAILS`, or a server API key owned by such a user. Client (publishable) keys and organization owners or admins do not qualify. For an evaluation account that should not be a platform admin, list its organization in `DOCSLURP_CHAT_EVAL_ORG_IDS` (comma-separated org ids): a turn whose project is owned by a listed organization may then use the eval models and the full `agent` limit range, from a session or a server API key (never a client key). The project's owning organization decides, not the caller's memberships, and the setting grants nothing else. When the configuration loads, the server logs and drops ids that match the Pro/Ultra prohibition, ids without a verified price in `packages/shared/src/chat-model-prices.ts` (mirrored from `scripts/lib/model-prices.json`), and ids whose output price is $50 per million tokens or more. An eval model answers on its own: if it fails, chat does not fail over to another model.
 
+### Reasoning
+
+Chat answers with reasoning off by default: each model runs at its lowest verified reasoning setting, the fastest answer (2026-11-10, DeepSeek V4.1 Flash on one host: 0.56 s a call with reasoning off against 1.18 s at the provider default). For long, multi-part questions you can ask for more by adding a `reasoning` option to the model reference:
+
+```text
+llm://openrouter/deepseek/deepseek-v4.1-flash-1017?reasoning=high
+z-ai/glm-5.3-flash?reasoning=low
+```
+
+Levels use OpenRouter's native effort names: `none` (the default; `off` is accepted), `minimal`, `low`, `medium` and `high`. The native keys `reasoning_effort` and `effort` work too. More reasoning adds latency and output tokens; a chat answer counts once more per 100,000 total tokens. The option applies to the answering model only: query rewrites, HyDE and other search helpers always run at the floor. Any other option, an unknown level, or conflicting levels returns HTTP 400 `model_not_allowed`. On `POST /v1/chat/completions` put it on `docslurp.model`.
+
 ### Direct answers
 
 By default a `/v1/chat` turn runs the search agent: the model decides which project tools to call (search, web, settings) before it answers. That is the most thorough path, but it costs extra model steps before the first answer token. For a quick cited answer, such as an "Ask" box in a docs search palette, turn the agent off for the request:

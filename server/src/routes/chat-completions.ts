@@ -57,7 +57,7 @@ const requestSchema = z.object({
   /** DocSlurp extension (send it with extra_body in OpenAI SDKs), mirroring the response's `docslurp` field. */
   docslurp: z.object({
     speedBoost: z.boolean().default(false),
-    /** Inference model for this request, as `model` on POST /v1/chat: `llm://openrouter/<vendor>/<model>` or the bare id. */
+    /** Inference model for this request, as `model` on POST /v1/chat: `llm://openrouter/<vendor>/<model>` or the bare id, with an optional `?reasoning=` level. */
     model: z.string().trim().min(1).max(256).optional(),
     /** Per-request retrieval overrides, as `retrieval` on POST /v1/chat. */
     retrieval: chatRetrievalOverridesSchema.optional(),

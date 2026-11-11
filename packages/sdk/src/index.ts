@@ -643,7 +643,9 @@ export type ChatInput = {
   /**
    * Chat model for this request, as an `llm://` model URI such as
    * `llm://openrouter/anthropic/claude-haiku-5.5` (the bare OpenRouter id also
-   * works). Omitted: the default. An unavailable model is refused with HTTP 400
+   * works). Omitted: the default. Add `?reasoning=low|medium|high` (OpenRouter's
+   * native effort names; default `none`, the fastest answer) for long multi-part
+   * questions. An unavailable model or option is refused with HTTP 400
    * `model_not_allowed`, never replaced by the default.
    */
   model?: string;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { chatModelTier } from "./billing.js";
-import { isProjectChatModelId, nitroBaseModel } from "./project-chat-models.js";
+import { isProjectChatModelId, nitroBaseModel, normalizeChatModelRef, parseChatModelOptions, withChatReasoning } from "./project-chat-models.js";
 import { SPEED_BOOST_PERFORMANCE, speedBoostMaxPrice, withOpenRouterProviderPreferences } from "./openrouter-routing.js";
 import { lowestOpenRouterReasoning, resolveOpenRouterUsage } from "./openrouter-usage.js";
 
@@ -52,5 +52,26 @@ describe("reviewed Nitro variants", () => {
     expect(speedBoostMaxPrice("deepseek/deepseek-v4.1-flash-1017")).toEqual({ prompt: 0.3, completion: 1.2 });
     expect(speedBoostMaxPrice("z-ai/glm-5.3-flash")).toEqual({ prompt: 0.15, completion: 0.5 });
     expect(speedBoostMaxPrice("openai/gpt-6-luna")).toEqual({ prompt: 0.1, completion: 0.5 });
+  });
+});
+
+describe("chat model reasoning options", () => {
+  it("reads ?reasoning= and the native reasoning_effort / effort keys", () => {
+    expect(parseChatModelOptions("llm://openrouter/z-ai/glm-5.3-flash?reasoning=high")).toEqual({ model: "llm://openrouter/z-ai/glm-5.3-flash", reasoning: "high" });
+    expect(parseChatModelOptions("openai/gpt-6-luna?reasoning_effort=low")).toEqual({ model: "openai/gpt-6-luna", reasoning: "low" });
+    expect(parseChatModelOptions("openai/gpt-6-luna?effort=MINIMAL")).toEqual({ model: "openai/gpt-6-luna", reasoning: "minimal" });
+    expect(parseChatModelOptions("openai/gpt-6-luna?reasoning=off")).toEqual({ model: "openai/gpt-6-luna", reasoning: "none" });
+    expect(parseChatModelOptions("openai/gpt-6-luna")).toEqual({ model: "openai/gpt-6-luna" });
+  });
+  it("refuses unknown options, unknown or conflicting levels and fragments", () => {
+    for (const ref of ["a/b?reasoning=max", "a/b?temperature=1", "a/b?reasoning=low&effort=high", "a/b#x", "a/b?reasoning="]) {
+      expect(parseChatModelOptions(ref), ref).toBeNull();
+    }
+    expect(parseChatModelOptions("a/b?reasoning=low&effort=low")).toEqual({ model: "a/b", reasoning: "low" });
+  });
+  it("keeps the model identity without its options", () => {
+    expect(normalizeChatModelRef("llm://openrouter/deepseek/deepseek-v4.1-flash?reasoning=high")).toBe("deepseek/deepseek-v4.1-flash-1017");
+    expect(withChatReasoning("z-ai/glm-5.3-flash?reasoning=low", "high")).toBe("z-ai/glm-5.3-flash?reasoning=high");
+    expect(withChatReasoning("z-ai/glm-5.3-flash?reasoning=low", "none")).toBe("z-ai/glm-5.3-flash");
   });
 });

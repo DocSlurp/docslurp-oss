@@ -26,7 +26,7 @@ Where each field accepts them:
 
 | Field | Accepts | Notes |
 | --- | --- | --- |
-| `model` on `POST /v1/chat`, `/v1/chat/stream`, chat operations | `llm://openrouter/...` or the bare id, from the chat model catalog | An unavailable model is a 400 `model_not_allowed`, never the default. |
+| `model` on `POST /v1/chat`, `/v1/chat/stream`, chat operations | `llm://openrouter/...` or the bare id, from the chat model catalog, with an optional `?reasoning=` option ([reasoning](search-api.md#reasoning)) | An unavailable model, an unknown option or an unknown reasoning level is a 400 `model_not_allowed`, never the default. |
 | `docslurp.model` on `POST /v1/chat/completions` | Same as `/v1/chat` | `model` on this endpoint selects a project (`project:default`); an `llm://` value there is a 400 naming `docslurp.model`. |
 | `pipeline.textGeneration.model`, `.models.<task>`, `pipeline.structuredExtraction.model` | `llm://openrouter/...`, the bare id, or `llm://private/...` | Hosted URIs are stored as the bare OpenRouter id. |
 | `pipeline.vision.modelUri`, `.remoteFallbackModelUri` | An `llm://` URI from the vision catalog | Bare ids are not accepted. |

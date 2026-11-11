@@ -1,3 +1,4 @@
+import type { ChatReasoningLevel } from "@docslurp/shared/project-chat-models";
 import { resolveSpeedBoostChatModel, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { getDeferredContext } from "../search/deferred/deferred-context.js";
@@ -492,6 +493,8 @@ async function generateProjectChatTextWithFailover(args: {
   preferredModel: string;
   /** False for eval-allowlist models, which must answer themselves or fail. */
   failover?: boolean;
+  /** The model reference's `?reasoning=` option for hosted answers; private routes keep their own settings. */
+  reasoning?: ChatReasoningLevel;
   /** Non-standard projects: answer with this private route instead of hosted models (no failover). */
   privateModel?: PrivateChatModel;
   projectId?: string;
@@ -527,6 +530,7 @@ async function generateProjectChatTextWithFailover(args: {
         apiKey: args.apiKey,
         privacyMode: args.privacyMode,
         model,
+        reasoning: args.reasoning,
         system: args.system,
         prompt: args.prompt,
         documents: args.documents,
@@ -1048,6 +1052,7 @@ async function chatProjectInTurn(args: {
     ...(turnModel !== `${resolved.model}:nitro` && turnModel !== resolved.model ? { tierModel: resolved.model } : {}),
     requestedModel: args.model?.trim() || null,
     limits: resolveChatAgentLimits(args.agent, isAdmin),
+    reasoning: resolved.reasoning,
   };
   // "/status" and "how did my files process?" are answered from the ingest report, without a model.
   if (args.answerIngestReport && !args.filters?.geo && args.filters?.documentIds?.length !== 0 && requestsIngestReport(args.query, { natural: ingestReportNaturalIntents() })) {
@@ -1206,7 +1211,9 @@ async function answerIngestReportTurn(args: ChatProjectArgs): Promise<ProjectCha
   };
 }
 
-type ChatTurnPolicy = { model: string; failover: boolean; requestedModel: string | null; limits: ChatAgentLimits; tierModel?: string };
+type ChatTurnPolicy = { model: string; failover: boolean; requestedModel: string | null; limits: ChatAgentLimits; tierModel?: string;
+  /** The model reference's `?reasoning=` option (default none: each model's lowest setting). */
+  reasoning: ChatReasoningLevel };
 
 async function chatProjectTurn(
   args: ChatProjectArgs,
@@ -1278,7 +1285,7 @@ async function chatProjectTurn(
     ]);
     const generated = await runChatMcpAgent({
       actor: args.actor, projectId: args.projectId, orgId: project.orgId, sessionId,
-      query: args.query, history, apiKey: chatApiKey, privacyMode, model,
+      query: args.query, history, apiKey: chatApiKey, privacyMode, model, reasoning: policy.reasoning,
       projectWebTools: (project.pipeline as { webTools?: unknown } | null)?.webTools !== false,
       web: args.agent?.web, suggestions: firstPartyApp && args.agent?.suggestions === true,
       retrievalDefaults: searchSettings.retrievalDefaults, projectInventory,
@@ -1350,7 +1357,7 @@ async function chatProjectTurn(
         const generated = await generateProjectChatTextWithFailover({
           apiKey: openRouterApiKey,
           privacyMode,
-          preferredModel: model, failover: policy.failover,
+          preferredModel: model, failover: policy.failover, reasoning: policy.reasoning,
           privateModel: privateChatModel,
           projectId: args.projectId,
           system: buildSystemInstructions({
@@ -1589,7 +1596,7 @@ async function chatProjectTurn(
     const generated = await generateProjectChatTextWithFailover({
       apiKey: openRouterApiKey,
       privacyMode,
-      preferredModel: model, failover: policy.failover,
+      preferredModel: model, failover: policy.failover, reasoning: policy.reasoning,
       privateModel: privateChatModel,
       projectId: args.projectId,
       system: buildSystemInstructions({
