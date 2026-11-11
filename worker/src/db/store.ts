@@ -1,3 +1,4 @@
+import { sandboxedPdfBatchProvider } from "../extractors/sandboxed-pdf-batch.js";
 import { buildRunCompletedEvent } from "../pipeline/run-ledger.js";
 import { assertPlanningOwnership, assertExecutionOwnership, type ExecutionOwner, StaleExecutionError } from "./execution-ownership.js";
 import { beginGeoAttempt, type GeoFinalSource } from "./geo-final-source.js";
@@ -126,6 +127,7 @@ type DocumentRow = {
   page_count_source?: string | null;
   intake_page_count?: number | null;
   file_facts?: import("@docslurp/shared").FileFacts | null;
+  file_size?: string | number | null;
   created_at: string | Date;
   updated_at: string | Date;
   /** Joined by the run document loaders: the run's extract storage prefix. */
@@ -2497,6 +2499,7 @@ export class Store {
       capabilities: () => resolveWorkerCapabilities({
         creditLeasesActive: () => this.creditLeases.active(),
         lexicalColumnPresent,
+        firstPassBatch: () => sandboxedPdfBatchProvider() !== null,
       }),
     });
   }
@@ -2750,6 +2753,18 @@ export class Store {
    * page rows, citations, strict page splitting and the completion charge count the pages the Markdown holds. Intake counts every
    * image as one page. Scoped to the run's own document.
    */
+  /**
+   * The organization and run each document belongs to, read from the database (never from a request or a provider): what a
+   * sandboxed PDF batch is checked against before any VM work (assertSingleScopeBatch).
+   */
+  async documentScopes(documentIds: readonly string[]): Promise<Map<string, { orgId: string | null; runId: string; bytes: number }>> {
+    if (documentIds.length === 0) return new Map();
+    const rows = await this.sql<{ id: string; org_id: string | null; run_id: string; file_size: string | number }[]>`
+      select id, org_id, run_id, file_size from documents where id = any(${this.sql.array([...documentIds])}::text[])
+    `;
+    return new Map(rows.map((row) => [row.id, { orgId: row.org_id, runId: row.run_id, bytes: Number(row.file_size) || 0 }]));
+  }
+
   async setDocumentPageCount(runId: string, documentId: string, pageCount: number): Promise<boolean> {
     const rows = await this.sql`
       update documents set page_count = ${pageCount}, page_count_source = 'counted', updated_at = now()
@@ -4445,6 +4460,7 @@ function mapDocument(row: DocumentRow): Document {
     pageCountSource: row.page_count_source === "assumed" || row.page_count_source === "counted" ? row.page_count_source : null,
     intakePageCount: row.intake_page_count === null || row.intake_page_count === undefined ? null : Number(row.intake_page_count),
     fileFacts: row.file_facts ?? null,
+    ...(row.file_size === null || row.file_size === undefined ? {} : { sourceBytes: Number(row.file_size) }),
     createdAt: toDate(row.created_at),
     updatedAt: toDate(row.updated_at),
     ...(row.run_storage_prefix ? { artifactRoot: row.run_storage_prefix } : {}),

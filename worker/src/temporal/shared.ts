@@ -25,6 +25,8 @@ export interface StageInput {
   artifacts: Record<string, string>;
   /** Hold an org worker slot while running (absent on pre-slot workflow histories). */
   slotGate?: boolean;
+  /** The workflow recorded the first pass (PipelineWorkflowInput.firstPass); absent on every other history. */
+  firstPass?: boolean;
 }
 
 export interface StageOutput {
@@ -213,6 +215,8 @@ export interface PipelineWorkflowInput {
   pageRangeSharding?: PageRangeShardingInput;
   /** Run adjacent LIGHT_STAGES in one activity (absent = one activity per stage). */
   groupLightStages?: boolean;
+  /** Run the first pass after format-detect (recorded; absent on older histories, which replay unchanged). */
+  firstPass?: FirstPassInput;
   /**
    * Stages that may share one activity with their neighbours (stage-groups.ts).
    * Replaces LIGHT_STAGES grouping when set; absent on older histories.
@@ -229,6 +233,58 @@ export interface StageGroupInput {
   slotGate?: boolean;
   /** Stop before the next stage when the run has a pause or cancel request; report stagesRun. */
   yieldToControl?: boolean;
+  /** The workflow recorded the first pass (PipelineWorkflowInput.firstPass); absent on every other history. */
+  firstPass?: boolean;
+}
+
+/** Recorded in workflow input when the run takes the first pass (pipeline/first-pass.ts); absent = today's stage loop only. */
+export interface FirstPassInput {
+  /** Batches running at once (each one VM). */
+  maxParallelBatches: number;
+  /** `none`: stop after the first pass (no stage loop for the documents it finished); `auto`: the stage loop follows. */
+  afterFirstPass: "auto" | "none";
+}
+
+export interface FirstPassPlanInput {
+  runId: string;
+}
+
+export interface FirstPassPlanOutput {
+  batches: string[][];
+  /** Every document of the run is in a batch (none is left only to the stage loop). */
+  coversRun?: boolean;
+  /** PDFs whose count format-detect deferred but that no batch takes: counted before the stage loop. */
+  countFirst?: string[];
+}
+
+export interface FirstPassCountInput {
+  runId: string;
+  documentIds: string[];
+}
+
+/** ApplicationFailure type of a first-pass activity stopped by run policy (credits, cost cap): the run stops, no handback. */
+export const FIRST_PASS_RUN_POLICY_FAILURE = "FirstPassRunPolicyStop";
+/**
+ * ApplicationFailure type of a first-pass batch whose VM could not be trusted (BATCH_FINAL_PROPERTY): never retried; the
+ * workflow hands its documents to the ordinary stages, as for any other failed batch.
+ */
+export const FIRST_PASS_BATCH_FINAL_FAILURE = "FirstPassBatchFinal";
+
+export interface FirstPassBatchInput {
+  runId: string;
+  batchIndex: number;
+  documentIds: string[];
+  totalStages: number;
+  slotGate?: boolean;
+}
+
+export interface FirstPassBatchOutput {
+  usage: UsageSummary;
+  indexed: string[];
+  /** Extracted, but the stage loop embeds them (pages need OCR or vision). */
+  extracted?: string[];
+  handedBack: Array<{ documentId: string; reason: string }>;
+  timings: Record<string, number | null>;
 }
 
 /**

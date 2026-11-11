@@ -456,6 +456,47 @@ class LayoutFactsTest(unittest.TestCase):
         self.assertEqual(chunk[0]['images'], whole[1]['images'])
         self.assertFalse(facts.layout_facts(str(source), listing, None, None, 2, 2, repeated=set())['pages'][0]['images'][0]['repeated'])
 
+    def test_tables_only_gives_the_full_walks_tables_grids_and_coverage(self):
+        """content=False (the first-pass batch's table facts, council #340 C7): no content stream is read, and every public
+        fixture's tables, grids and table coverage equal the full walk's. Synthetic word boxes and ruling lines (a ruled
+        4x5 grid and a table's cells) so the test needs no external binary; Poppler's own XHTML too when it is installed."""
+        def xhtml_for(pages):
+            body = []
+            for _ in range(pages):
+                rules = ''.join(f'<rule xMin="72" yMin="{100 + 30 * r}" xMax="540" yMax="{100.5 + 30 * r}"/>' for r in range(6))
+                rules += ''.join(f'<rule xMin="{72 + 117 * c}" yMin="100" xMax="{72.5 + 117 * c}" yMax="250"/>' for c in range(5))
+                words = ''.join(f'<word xMin="{80 + 40 * i}" yMin="300" xMax="{110 + 40 * i}" yMax="310">w{i}</word>' for i in range(6))
+                body.append(f'<page width="612" height="792"><flow><block><line>{words}</line></block></flow>{rules}</page>')
+            return '<html><body><doc>' + ''.join(body) + '</doc></body></html>'
+        names = sorted(p.name for p in self.FIXTURES.glob('*.pdf'))
+        self.assertGreater(len(names), 10)
+        compared = 0
+        for name in names:
+            source = str(self.FIXTURES / name)
+            md_path = self.FIXTURES / 'doppler-md' / (name + '.md')
+            markdown = md_path.read_text().split('\f') if md_path.exists() else ['| a | b |\n| --- | --- |\n| w0 | w1 |']
+            pages = min(len(markdown), 8)
+            texts = [xhtml_for(pages)]
+            if shutil.which('pdftotext'):
+                with tempfile.TemporaryDirectory() as d:
+                    out = Path(d) / 'layout.xhtml'
+                    if subprocess.run(['pdftotext', '-bbox-layout', '-f', '1', '-l', str(pages), source, str(out)], capture_output=True).returncode == 0:
+                        texts.append(out.read_text(errors='replace'))
+            for xhtml in texts:
+                md = {i + 1: m for i, m in enumerate(markdown[:pages])}
+                full = facts.layout_facts(source, None, xhtml, md, 1, pages)['pages']
+                lean = facts.layout_facts(source, None, xhtml, md, 1, pages, content=False)['pages']
+                for a, b in zip(full, lean):
+                    if not a['known']:
+                        continue  # the full walk gave up on this page's content: the batch then reports more, never less
+                    with self.subTest(fixture=name, page=a['pageNumber']):
+                        self.assertTrue(b['known'])
+                        self.assertEqual((b['tables'], b['grids'], b['tableCoverage'], b.get('widthPt'), b.get('heightPt')),
+                                         (a['tables'], a['grids'], a['tableCoverage'], a.get('widthPt'), a.get('heightPt')))
+                        self.assertIsNone(b['images'])
+                        compared += 1
+        self.assertGreater(compared, 10)
+
     def test_unknown_inputs_are_null_never_zero(self):
         data = PdfBuilder().build() if hasattr(PdfBuilder(), 'build') else None
         if data is None:

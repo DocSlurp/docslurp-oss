@@ -147,6 +147,8 @@ export type DolphinExtractorOptions = z.infer<typeof dolphinExtractorOptionsSche
  */
 export const vmPdfExtractorOptionsSchema = z.object({
   images: extractionImageConfigSchema.strict().optional(),
+  /** Read typeset math as LaTeX (inline and display); off unless the project asks, since it costs extra CPU per page. */
+  math: z.boolean().optional(),
   pdf: extractionPdfOptionsSchema.pick({ extractImages: true }).strict().optional(),
 }).strict();
 
