@@ -13,7 +13,7 @@ function check(candidates: FirstPassCandidate[], plan: string[][], l = limits) {
     expect(batch.length).toBeGreaterThan(0);
     if (batch.length === 1) continue; // an oversize document may run alone
     expect(batch.length).toBeLessThanOrEqual(l.maxFiles);
-    expect(batch.reduce((s, id) => s + Math.max(1, byId.get(id)!.pages), 0)).toBeLessThanOrEqual(l.maxBatchPages);
+    expect(batch.reduce((s, id) => { const p = byId.get(id)!.pages; return s + (Number.isFinite(p) && p > 0 ? Math.ceil(p) : 1); }, 0)).toBeLessThanOrEqual(l.maxBatchPages);
     expect(batch.reduce((s, id) => s + byId.get(id)!.bytes, 0)).toBeLessThanOrEqual(l.maxBatchBytes);
   }
 }
