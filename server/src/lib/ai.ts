@@ -208,7 +208,7 @@ export async function generateOpenRouterText(args: {
     async () => {
       const accounting = createOpenRouterUsageCapture();
       const provider = createOpenAI({
-        fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(withProviderPreferences(createOpenRouterRoutingFetch(accounting.fetch, { restrictedFallback: (args.model ?? SEARCH_OPENROUTER_MODEL) === SEARCH_OPENROUTER_MODEL }), args.providerPreferences))),
+        fetch: createOpenRouterReasoningFetch(withProviderPreferences(createOpenRouterRoutingFetch(instrumentFetch("openrouter", "chat", accounting.fetch), { restrictedFallback: (args.model ?? SEARCH_OPENROUTER_MODEL) === SEARCH_OPENROUTER_MODEL }), args.providerPreferences)),
         apiKey: args.apiKey,
         baseURL: OPENROUTER_BASE_URL,
       });
@@ -303,7 +303,7 @@ export async function generateOpenRouterDocumentText(args: {
   assertProviderAllowed(args.privacyMode, { provider: "openrouter", model: args.model ?? SEARCH_OPENROUTER_MODEL, operation: "api.text.openrouter-documents", target: "hosted" });
   const accounting = createOpenRouterUsageCapture();
   const provider = createOpenAI({
-    fetch: instrumentFetch("openrouter", "chat", createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(accounting.fetch))),
+    fetch: createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(instrumentFetch("openrouter", "chat", accounting.fetch))),
     apiKey: args.apiKey,
     baseURL: OPENROUTER_BASE_URL,
   });

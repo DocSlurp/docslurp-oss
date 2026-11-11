@@ -50,7 +50,6 @@ vi.mock("@aws-sdk/client-s3", () => ({
 
 const {
   buildRunProcessingPreview,
-  shouldFailStaleProcessingRun,
   listRuns,
   listRunEventsForRunId,
   summarizeRunUsageCost,
@@ -288,63 +287,6 @@ describe("run preview", () => {
       .toContain("scan-like inputs raise the quality bar for fallback vision");
   });
 });
-
-describe("stale processing run reconciliation", () => {
-  it("flags processing runs whose worker lease has gone cold while Temporal is still running", () => {
-    expect(
-      shouldFailStaleProcessingRun({
-        runStatus: "processing",
-        temporalStatus: "RUNNING",
-        lastHeartbeatAt: "2026-05-20T12:00:00.000Z",
-        leaseExpiresAt: "2026-05-20T12:01:00.000Z",
-        updatedAt: "2026-05-20T12:00:00.000Z",
-        nowMs: new Date("2026-05-20T12:07:00.000Z").getTime(),
-        graceMs: 5 * 60_000,
-      }),
-    ).toBe(true);
-  });
-
-  it("keeps fresh processing runs live", () => {
-    expect(
-      shouldFailStaleProcessingRun({
-        runStatus: "processing",
-        temporalStatus: "RUNNING",
-        lastHeartbeatAt: "2026-05-20T12:04:30.000Z",
-        leaseExpiresAt: "2026-05-20T12:05:30.000Z",
-        updatedAt: "2026-05-20T12:04:30.000Z",
-        nowMs: new Date("2026-05-20T12:07:00.000Z").getTime(),
-        graceMs: 5 * 60_000,
-      }),
-    ).toBe(false);
-  });
-
-  it("does not reinterpret terminal or non-processing runs as stale", () => {
-    expect(
-      shouldFailStaleProcessingRun({
-        runStatus: "completed",
-        temporalStatus: "RUNNING",
-        lastHeartbeatAt: "2026-05-20T12:00:00.000Z",
-        leaseExpiresAt: "2026-05-20T12:01:00.000Z",
-        updatedAt: "2026-05-20T12:00:00.000Z",
-        nowMs: new Date("2026-05-20T12:07:00.000Z").getTime(),
-        graceMs: 5 * 60_000,
-      }),
-    ).toBe(false);
-
-    expect(
-      shouldFailStaleProcessingRun({
-        runStatus: "processing",
-        temporalStatus: "FAILED",
-        lastHeartbeatAt: "2026-05-20T12:00:00.000Z",
-        leaseExpiresAt: "2026-05-20T12:01:00.000Z",
-        updatedAt: "2026-05-20T12:00:00.000Z",
-        nowMs: new Date("2026-05-20T12:07:00.000Z").getTime(),
-        graceMs: 5 * 60_000,
-      }),
-    ).toBe(false);
-  });
-});
-
 
 describe("global activity inventory", () => {
   it("includes old live work instead of truncating at the latest 50 records", async () => {

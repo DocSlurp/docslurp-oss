@@ -207,7 +207,7 @@ describe("served model and provider from a streamed result", () => {
 
 it("routes opted-in vision through Nitro with bounded prices and actual route attribution", async () => {
   const { bodies, result } = await run(GLM, [sse([{ id: "g", model: GLM, provider: "Together", choices: [{ delta: { content: "# Page" }, finish_reason: "stop" }], usage: { prompt_tokens: 1000, completion_tokens: 20, cost: 0.01 } }])], { allowChinaProviders: false, speedBoost: true });
-  expect(bodies[0]).toMatchObject({ model: `${GLM}:nitro`, provider: { sort: "throughput", quantizations: ["fp8", "fp16", "bf16", "fp32"] } });
+  expect(bodies[0]).toMatchObject({ model: `${GLM}:nitro`, provider: { sort: "throughput", quantizations: ["fp8", "fp16", "bf16", "fp32", "unknown"] } });
   expect(bodies[0]!.provider.max_price.completion).toBeLessThanOrEqual(5);
   expect(bodies[0]!.provider.only).toEqual([...NON_CHINA_PROVIDER_SLUGS]);
   expect(result.route.model).toBe(`${GLM}:nitro`);

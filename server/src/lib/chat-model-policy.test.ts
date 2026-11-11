@@ -174,9 +174,13 @@ describe("explicit Speed boost admission", () => {
     expect(resolveSpeedBoostChatModel("z-ai/glm-5.3-flash", flag)).toBe("z-ai/glm-5.3-flash");
     expect(() => resolveSpeedBoostChatModel("z-ai/glm-5.3-flash:nitro", flag)).toThrow(ChatModelNotAllowedError);
   });
-  it.each(["z-ai/glm-5.3-flash", "deepseek/deepseek-v4.1-flash", "openai/gpt-6-luna"])("routes explicit opt-in for %s", (model) => {
+  it.each(["deepseek/deepseek-v4.1-flash-1017", "openai/gpt-6-luna"])("routes explicit opt-in for %s", (model) => {
     expect(resolveSpeedBoostChatModel(model, true)).toBe(`${model}:nitro`);
     expect(resolveSpeedBoostChatModel(`${model}:nitro`, true)).toBe(`${model}:nitro`);
+  });
+  it("answers boosted GLM 5.3 Flash with DeepSeek V4.1 Flash on Nitro, keeping an explicit GLM Nitro id", () => {
+    expect(resolveSpeedBoostChatModel("z-ai/glm-5.3-flash", true)).toBe("deepseek/deepseek-v4.1-flash-1017:nitro");
+    expect(resolveSpeedBoostChatModel("z-ai/glm-5.3-flash:nitro", true)).toBe("z-ai/glm-5.3-flash:nitro");
   });
   it.each(["openai/gpt-6-luna-pro", "arbitrary/model", "openai/gpt-6.1-sol"])("refuses unsupported boost %s before spending", (model) => {
     expect(() => resolveSpeedBoostChatModel(model, true)).toThrow(ChatModelNotAllowedError);

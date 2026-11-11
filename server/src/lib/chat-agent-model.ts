@@ -1,5 +1,6 @@
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { createOpenRouterReasoningFetch, createOpenRouterRoutingFetch } from "@docslurp/shared";
+import { instrumentFetch } from "@docslurp/shared/observability";
 
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
@@ -29,9 +30,11 @@ export function promptCacheBreakpoint(model: string) {
  * encrypted blocks) on the assistant message; OpenRouter maps them to each
  * upstream's format (for example `reasoning_content`).
  * `fetch` is the usage-capture fetch; the verified reasoning floor wraps it.
+ * Each agent step gets an `openrouter.chat-agent` span carrying the routed
+ * model, provider sort, upstream host, time to first chunk and usage.
  */
 export function createChatAgentModel(args: { apiKey: string; model: string; fetch: typeof fetch }) {
   const provider = createOpenRouter({ apiKey: args.apiKey, baseURL: OPENROUTER_BASE_URL, compatibility: "strict",
-    fetch: createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(args.fetch)) });
+    fetch: createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(instrumentFetch("openrouter", "chat-agent", args.fetch))) });
   return provider.chat(args.model, { usage: { include: true } });
 }

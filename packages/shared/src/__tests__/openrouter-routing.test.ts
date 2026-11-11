@@ -9,7 +9,7 @@ import { CHINA_PROVIDER_SLUGS, NON_CHINA_PROVIDER_SLUGS, providerRegion } from "
 afterEach(() => setOpenRouterProviderPolicyResolver(undefined));
 
 const RESTRICTED = { allowChinaProviders: false };
-const PRICE = { sort: "price", quantizations: ["fp8", "fp16", "bf16", "fp32"], allow_fallbacks: true };
+const PRICE = { sort: "price", quantizations: ["fp8", "fp16", "bf16", "fp32", "unknown"], allow_fallbacks: true };
 
 /** Every slug a restricted request could reach: its allowlist minus its ignore list. */
 function reachable(provider: Record<string, unknown>): string[] {

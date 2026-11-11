@@ -94,197 +94,6 @@ type ProjectRunEventRow = {
   created_at: string | Date;
 };
 
-const temporalTerminalRunMessages = {
-  FAILED:
-    "Temporal workflow failed before pipeline cleanup could persist the final run state.",
-  TIMED_OUT:
-    "Temporal workflow timed out before pipeline cleanup could persist the final run state.",
-  CANCELLED:
-    "Temporal workflow was cancelled before pipeline cleanup could persist the final run state.",
-  TERMINATED:
-    "Temporal workflow was terminated before pipeline cleanup could persist the final run state.",
-} as const;
-
-const STALLED_RUN_HEARTBEAT_GRACE_MS = Math.max(
-  60_000,
-  Number(process.env.RUN_STALLED_HEARTBEAT_GRACE_MS ?? 5 * 60_000),
-);
-
-type RunHeartbeatRow = {
-  last_heartbeat_at: string | Date | null;
-  lease_expires_at: string | Date | null;
-  updated_at: string | Date;
-};
-
-function timestampMs(value: string | Date | null | undefined): number | null {
-  if (!value) {
-    return null;
-  }
-
-  const ms = new Date(value).getTime();
-  return Number.isFinite(ms) ? ms : null;
-}
-
-export function shouldFailStaleProcessingRun(args: {
-  runStatus: ProjectRun["status"];
-  temporalStatus: string | null;
-  lastHeartbeatAt: string | Date | null;
-  leaseExpiresAt: string | Date | null;
-  updatedAt: string | Date;
-  nowMs?: number;
-  graceMs?: number;
-}): boolean {
-  if (args.runStatus !== "processing") {
-    return false;
-  }
-
-  if (
-    args.temporalStatus &&
-    !["RUNNING", "UNKNOWN", "UNSPECIFIED"].includes(args.temporalStatus)
-  ) {
-    return false;
-  }
-
-  const referenceMs =
-    timestampMs(args.leaseExpiresAt) ??
-    timestampMs(args.lastHeartbeatAt) ??
-    timestampMs(args.updatedAt);
-  if (referenceMs === null) {
-    return false;
-  }
-
-  return (args.nowMs ?? Date.now()) - referenceMs > (args.graceMs ?? STALLED_RUN_HEARTBEAT_GRACE_MS);
-}
-
-async function loadRunHeartbeat(runId: string): Promise<RunHeartbeatRow | null> {
-  const [row] = await sql<RunHeartbeatRow[]>`
-    select last_heartbeat_at, lease_expires_at, updated_at
-    from project_runs
-    where id = ${runId}
-    limit 1
-  `;
-
-  return row ?? null;
-}
-
-async function markRunFailedFromReconciliation(args: {
-  run: ProjectRun;
-  stage: ProjectRun["stage"];
-  message: string;
-  stats: Record<string, unknown>;
-  payload: Record<string, unknown>;
-}): Promise<ProjectRun> {
-  const row = await runLifecycle.fail(args.run.id, {
-    stage: args.stage,
-    message: args.message,
-    fromStatuses: ["queued", "processing"],
-    stats: args.stats,
-    payload: args.payload,
-  });
-
-  if (!row) {
-    return args.run;
-  }
-
-  return mapProjectRun({
-    ...(row as unknown as ProjectRunRow),
-    project_name: args.run.projectName,
-  }, args.run);
-}
-
-async function reconcileTemporalRunState(
-  run: ProjectRun,
-  temporal: Awaited<ReturnType<typeof getPipelineTemporalSnapshot>>,
-): Promise<ProjectRun> {
-  const workflowStatus = temporal?.workflowStatus ?? null;
-  if (
-    run.status === "completed" ||
-    run.status === "failed"
-  ) {
-    return run;
-  }
-
-  // A newly queued retry may briefly observe the previous workflow execution.
-  if (run.status === "queued" && temporal?.closeTime &&
-      new Date(temporal.closeTime).getTime() < new Date(run.updatedAt).getTime()) {
-    return run;
-  }
-
-  const terminalMessage =
-    temporalTerminalRunMessages[
-      workflowStatus as keyof typeof temporalTerminalRunMessages
-    ] ?? null;
-
-  if (terminalMessage) {
-    const nowIso = new Date().toISOString();
-    const nextStage = temporal?.stage ?? run.stage;
-    const nextStats = {
-      ...(run.stats ?? {}),
-      temporalReconciledAt: nowIso,
-      temporalWorkflowStatus: workflowStatus,
-      temporalCloseTime: temporal?.closeTime ?? null,
-    };
-
-    return await markRunFailedFromReconciliation({
-      run,
-      stage: nextStage,
-      message: terminalMessage,
-      stats: nextStats,
-      payload: {
-        reconciledFromStatus: run.status,
-        workflowStatus,
-        workflowRunId: temporal?.workflowRunId ?? null,
-      },
-    });
-  }
-
-  const heartbeat = run.status === "processing"
-    ? await loadRunHeartbeat(run.id)
-    : null;
-  const stalled = heartbeat
-    ? shouldFailStaleProcessingRun({
-        runStatus: run.status,
-        temporalStatus: workflowStatus,
-        lastHeartbeatAt: heartbeat.last_heartbeat_at,
-        leaseExpiresAt: heartbeat.lease_expires_at,
-        updatedAt: heartbeat.updated_at,
-      })
-    : false;
-
-  if (!stalled) {
-    return run;
-  }
-
-  const nowIso = new Date().toISOString();
-  const nextStage = temporal?.stage ?? run.stage;
-  const lastHeartbeatAt = serializeOptionalTimestamp(heartbeat?.last_heartbeat_at ?? null);
-  const leaseExpiresAt = serializeOptionalTimestamp(heartbeat?.lease_expires_at ?? null);
-  const message = workflowStatus === "RUNNING"
-    ? "Worker heartbeat expired while Temporal still reports the workflow running. Marked failed so indexing can be restarted."
-    : "Worker heartbeat expired and no active Temporal progress was available. Marked failed so indexing can be restarted.";
-  const nextStats = {
-    ...(run.stats ?? {}),
-    stalledReconciledAt: nowIso,
-    temporalWorkflowStatus: workflowStatus,
-    lastHeartbeatAt,
-    leaseExpiresAt,
-  };
-
-  return await markRunFailedFromReconciliation({
-    run,
-    stage: nextStage,
-    message,
-    stats: nextStats,
-    payload: {
-      reconciledFromStatus: run.status,
-      workflowStatus,
-      workflowRunId: temporal?.workflowRunId ?? null,
-      lastHeartbeatAt,
-      leaseExpiresAt,
-    },
-  });
-}
-
 /** Fill runs' cost from the usage ledger in one statement. */
 export async function withRunCosts(runs: ProjectRun[]): Promise<ProjectRun[]> {
   if (runs.length === 0) return runs;
@@ -344,20 +153,9 @@ export async function listRuns(userId: string, activityOnly = false): Promise<Pr
         and (runs.status in ('queued', 'processing') or runs.updated_at > now() - interval '5 minutes')
       order by runs.updated_at desc
     `;
-    const result: ProjectRun[] = [];
-    // Reconcile cold leases without asking Temporal about every healthy upload.
-    for (let index = 0; index < rows.length; index += 8) {
-      result.push(...await Promise.all(rows.slice(index, index + 8).map(async row => {
-        const run = mapProjectRun(row);
-        if (run.controlState === "paused" || !shouldFailStaleProcessingRun({
-          runStatus: run.status, temporalStatus: null,
-          lastHeartbeatAt: row.last_heartbeat_at ?? null,
-          leaseExpiresAt: row.lease_expires_at ?? null, updatedAt: run.updatedAt,
-        })) return run;
-        return reconcileTemporalRunState(run, await getPipelineTemporalSnapshot(run.id));
-      })));
-    }
-    return await withRunCosts(result);
+    // Reading inventory has no authority to terminate or retry work. A cold
+    // database lease may belong to a live workflow waiting for activity slots.
+    return await withRunCosts(rows.map(row => mapProjectRun(row)));
   }
 
   return (await listRunsPage(userId, {})).runs;
@@ -916,7 +714,7 @@ export async function buildRunProgressSnapshot(
   run: ProjectRun,
   options?: {
     recentEventLimit?: number;
-    /** Observe persisted state without querying/reconciling the executor. */
+    /** Observe persisted state without querying the executor. */
     readOnly?: boolean;
     /**
      * The caller is a platform operator and may see worker CPU/RAM, regions and
@@ -928,12 +726,14 @@ export async function buildRunProgressSnapshot(
   const recentEventLimit = options?.recentEventLimit ?? 100;
 
   const temporal = options?.readOnly ? null : await getPipelineTemporalSnapshot(run.id);
-  const reconciledRun = options?.readOnly ? run : await reconcileTemporalRunState(run, temporal);
+  // Executor observations can be unavailable or belong to an earlier attempt.
+  // Only the lifecycle owner may persist terminal state with its execution fence;
+  // fetching progress must not fail work, change failure history or enable retry.
   const [stages, recentEvents, perfRows, usageRows, pageProgressRows] = await Promise.all([
-    listRunStageStatesForRunId(reconciledRun.id, options?.readOnly ? 1_001 : undefined),
+    listRunStageStatesForRunId(run.id, options?.readOnly ? 1_001 : undefined),
     recentEventLimit > 0
       ? listRunEventsForRunId({
-          runId: reconciledRun.id,
+          runId: run.id,
           limit: recentEventLimit,
           newest: options?.readOnly,
         })
@@ -941,18 +741,18 @@ export async function buildRunProgressSnapshot(
     sql<StageResourceRow[]>`
       select stage_name, metric, sum(value)::double precision as total, max(value)::double precision as peak
       from performance_log
-      where run_id = ${reconciledRun.id}
+      where run_id = ${run.id}
         and metric in ('stage-cpu-user', 'stage-cpu-system', 'stage-rss-delta', 'stage-rss-peak')
       group by stage_name, metric
     `,
-    runUsageCostTotals(reconciledRun.id),
+    runUsageCostTotals(run.id),
     sql<{ document_id: string; stage_name: string; completed_pages: number }[]>`
       select
         document_id,
         stage_name,
         count(*)::int as completed_pages
       from page_stage_states
-      where run_id = ${reconciledRun.id}
+      where run_id = ${run.id}
         and status = 'completed'
       group by document_id, stage_name
       ${options?.readOnly ? sql`limit 2001` : sql``}
@@ -971,7 +771,7 @@ export async function buildRunProgressSnapshot(
   }
 
   const stats: Record<string, unknown> = {
-    ...(reconciledRun.stats ?? {}),
+    ...(run.stats ?? {}),
     cpuUserMs,
     cpuSystemMs,
     cpuTotalMs: cpuUserMs + cpuSystemMs,
@@ -983,7 +783,7 @@ export async function buildRunProgressSnapshot(
     pageProgress,
   };
   const progress = buildProgressModule({
-    run: reconciledRun,
+    run: run,
     stages,
     temporal,
     pageProgress,
@@ -997,13 +797,13 @@ export async function buildRunProgressSnapshot(
 
   const snapshot = projectRunProgressSnapshotSchema.parse({
     // One cost on every surface: the run record carries progress.usageTotals.costCents.
-    run: { ...reconciledRun, costCents: cost.costCents, computeEstimated: cost.computeEstimated, billedCostCents: cost.billedCostCents },
+    run: { ...run, costCents: cost.costCents, computeEstimated: cost.computeEstimated, billedCostCents: cost.billedCostCents },
     stages,
     recentEvents,
     temporal,
     progress,
     stats,
-    artifacts: reconciledRun.artifacts ?? {},
+    artifacts: run.artifacts ?? {},
   });
   return options?.operator === true ? snapshot : redactOperatorRunFields(snapshot);
 }

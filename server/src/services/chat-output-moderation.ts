@@ -1,3 +1,4 @@
+import { instrumentFetch } from "@docslurp/shared/observability";
 import { createOpenRouterRoutingFetch, liveModelPrice, readProviderCharge, type PrivacyMode, type ProjectChatResponse } from "@docslurp/shared";
 
 import { recordUsageEvent } from "../lib/ai-usage.js";
@@ -49,7 +50,7 @@ export const LLAMA_GUARD_PRICE = { input: 0.18, output: 0.18 } as const;
 /** Llama Guard 4 over OpenRouter's chat completions API. `fetch` is injectable for tests. */
 export function llamaGuardOutputModerator(args: { apiKey: string; fetch?: typeof fetch; baseUrl?: string; timeoutMs?: number }): OutputModerator {
   // Hosts follow the org/project China-provider policy, like every OpenRouter call (DeepInfra is US-based).
-  const doFetch = createOpenRouterRoutingFetch(args.fetch ?? fetch);
+  const doFetch = createOpenRouterRoutingFetch(instrumentFetch("openrouter", "moderation", args.fetch ?? fetch));
   return {
     name: "llama-guard-4",
     async moderate(input, signal) {

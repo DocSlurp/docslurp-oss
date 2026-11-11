@@ -4,7 +4,10 @@ it('defaults new and invalid model selections to GLM 5.3 Flash while preserving 
   expect(DEFAULT_PROJECT_CHAT_MODEL).toBe('z-ai/glm-5.3-flash');
   expect(resolveProjectChatModel(null)).toBe(DEFAULT_PROJECT_CHAT_MODEL);
   expect(resolveProjectChatModel('missing')).toBe(DEFAULT_PROJECT_CHAT_MODEL);
-  expect(resolveProjectChatModel('deepseek/deepseek-v4.1-flash')).toBe('deepseek/deepseek-v4.1-flash');
+  expect(resolveProjectChatModel('deepseek/deepseek-v4.1-flash-1017')).toBe('deepseek/deepseek-v4.1-flash-1017');
+  // The undated alias is the 2026-09-10 build; chat follows the latest dated build.
+  expect(resolveProjectChatModel('deepseek/deepseek-v4.1-flash')).toBe('deepseek/deepseek-v4.1-flash-1017');
+  expect(resolveProjectChatModel('deepseek/deepseek-v4.1-flash:nitro')).toBe('deepseek/deepseek-v4.1-flash-1017:nitro');
   expect(PROJECT_CHAT_MODELS[0].id).toBe(DEFAULT_PROJECT_CHAT_MODEL);
 });
 

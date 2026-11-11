@@ -152,23 +152,32 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
           };
           const frameFor = (id: string, generation: number, resource: RealtimeResource, type: string, revision: number, data?: unknown, code?: string) =>
             ({ v: 1, type, subscriptionId: id, generation, resource, epoch, revision, data, code });
-          const revokeSubscription = async (id: string, generation: number, resource: RealtimeResource, revision: number) => {
+          const refuseSubscription = async (id: string, generation: number, resource: RealtimeResource, revision: number, code = "access_revoked") => {
             const sub = subscriptions.get(id);
             if (!sub || sub.generation !== generation) return;
             subscriptions.delete(id);
-            send(frameFor(id, generation, resource, "error", revision, undefined, "access_revoked"));
+            send(frameFor(id, generation, resource, "error", revision, undefined, code));
             await sub.close();
           };
           const deliver = async (id: string, generation: number, resource: RealtimeResource, type: string, revision: number, data: unknown) => {
             if (subscriptions.get(id)?.generation !== generation || !await live()) return;
             if (resource.kind !== "operation" && !await options.backend.authorize(session.userId, resource)) {
-              await revokeSubscription(id, generation, resource, revision); return;
+              await refuseSubscription(id, generation, resource, revision); return;
             }
             if (resource.kind === "activity" && (!options.backend.authorizeDelivery || !await options.backend.authorizeDelivery(session.userId, resource, data))) {
-              await revokeSubscription(id, generation, resource, revision); return;
+              await refuseSubscription(id, generation, resource, revision); return;
             }
             if (subscriptions.get(id)?.generation !== generation || controller.signal.aborted) return;
-            send(frameFor(id, generation, resource, type, revision, data));
+            const frame = frameFor(id, generation, resource, type, revision, data);
+            // A large dashboard resource must not repeatedly disconnect every
+            // other subscription in the tab. Refuse that resource explicitly;
+            // never silently trim its inventory or lower its revision.
+            if (resource.kind !== "operation" && Buffer.byteLength(JSON.stringify(frame)) > LIMITS.snapshotBytes) {
+              realtimeMetrics.resyncs++;
+              await refuseSubscription(id, generation, resource, revision, "snapshot_too_large");
+              return;
+            }
+            send(frame);
           };
           ws.on("message", (raw, binary) => {
             if (binary) return close(1003, "text_only");
@@ -212,12 +221,12 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
                   subscription.revalidate = () => observer.revalidate();
                 } else dispose = await broker.subscribe(session.userId, frame.resource, Object.assign(
                   (data: unknown, revision: number) => deliverFrame("snapshot", data, revision),
-                  { failed: () => close(1013, "projection_unavailable"), revoked: async () => {
+                  { failed: () => { void refuseSubscription(frame.subscriptionId, frame.generation, frame.resource, 0, "projection_unavailable").catch(() => close(1013, "projection_unavailable")); }, revoked: async () => {
                     send(frameFor(frame.subscriptionId, frame.generation, frame.resource, "error", 0, undefined, "access_revoked"));
                     await subscription.close();
                     if (subscriptions.get(frame.subscriptionId) === subscription) subscriptions.delete(frame.subscriptionId);
                   } }));
-                if (controller.signal.aborted) await subscription.close();
+                if (controller.signal.aborted || abort.signal.aborted || subscriptions.get(frame.subscriptionId) !== subscription) await subscription.close();
                 else send(frameFor(frame.subscriptionId, frame.generation, frame.resource, "ack", 0));
               } catch {
                 await subscription.close(); subscriptions.delete(frame.subscriptionId);
@@ -250,7 +259,7 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
                 let check = operationChecks.get(operationId);
                 if (!check) { check = sub.revalidate!(); operationChecks.set(operationId, check); }
                 try { await check; }
-                catch { await revokeSubscription(id, sub.generation, sub.resource, 0); }
+                catch { await refuseSubscription(id, sub.generation, sub.resource, 0); }
               }));
               // Capture generations before awaiting: a late sweep cannot revoke
               // a replacement subscription. Delivery still checks access afresh.
@@ -263,7 +272,7 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
               if (allowed.length !== pending.length) throw new Error("authorization_incomplete");
               for (let index = 0; index < pending.length; index++) {
                 const [id, sub] = pending[index]!;
-                if (!allowed[index]) await revokeSubscription(id, sub.generation, sub.resource, 0);
+                if (!allowed[index]) await refuseSubscription(id, sub.generation, sub.resource, 0);
               }
               // A slow later scope must not renew an earlier decision's lease.
               resourcesVerifiedAt = verificationStartedAt;

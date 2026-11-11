@@ -100,6 +100,28 @@ it("observes exact committed page readiness without URLs, work initiation or cro
     expect(fetch).not.toHaveBeenCalled();
   } finally {fetch.mockRestore();}
 });
+it("keeps ordinary progress and activity below the frame cap when diagnostics grow", async () => {
+  const diagnostics = { diagnostic: "x".repeat(300_000), completedPages: 10 };
+  const artifacts = { output: "x".repeat(300_000) };
+  await sql`update project_runs set stats=${sql.json(diagnostics)},artifacts=${sql.json(artifacts)} where id='run-a'`;
+  await sql`insert into documents(id,user_id,org_id,project_id,run_id,filename,mime_type,source_key,status)
+    values('size-doc','owner','org','project','run-a','measurement.txt','text/plain','synthetic-source','completed')`;
+  await sql`insert into document_run_stage_states(run_id,document_id,stage_name,status,stats)
+    values('run-a','size-doc','quarantine','completed',${sql.json(diagnostics)})`;
+  try {
+    const snapshot = await backend.project("owner", {kind:"run",runId:"run-a"});
+    expect(Buffer.byteLength(JSON.stringify(snapshot))).toBeLessThan(100_000);
+    expect(snapshot).toMatchObject({run:{id:"run-a",status:"processing",jobId:"parent"},stages:[expect.objectContaining({stage:"quarantine",status:"completed"})]});
+    const activity = await backend.project("owner",{kind:"activity",orgId:"org"});
+    expect(Buffer.byteLength(JSON.stringify(activity))).toBeLessThan(100_000);
+    // Compact transport projections must not erase diagnostics at rest.
+    expect((await sql`select artifacts from project_runs where id='run-a'`)[0]!.artifacts).toEqual(artifacts);
+  } finally {
+    await sql`update project_runs set stats='{}'::jsonb,artifacts='{}'::jsonb where id='run-a'`;
+    await sql`delete from document_run_stage_states where run_id='run-a' and stage_name='quarantine'`;
+    await sql`delete from documents where id='size-doc'`;
+  }
+});
 it("revokes billing on downgrade and project access on membership removal", async () => {
   await sql`update org_memberships set role='member' where user_id='owner' and org_id='org'`;
   expect(await backend.authorize("owner", { kind: "billing", orgId: "org" })).toBeNull();

@@ -4,8 +4,24 @@ Workers deploy with a Fly rolling strategy, and a run can stay open for up to 24
 (`TEMPORAL_WORKFLOW_EXECUTION_TIMEOUT`). After a deploy, new workers pick up runs that
 old code started and rebuild their state by replaying the recorded history through the
 new code. If the new code issues a different sequence of commands, the workflow task
-fails with a `NondeterminismError`. Temporal retries that task indefinitely, the run's
-lease expires, and SQL marks the run failed while Temporal still shows it as running.
+fails with a `NondeterminismError`. Temporal can keep retrying that task while the
+run's database lease expires. An expired lease does not prove that the workflow
+has terminated; inspect its history and restore compatible worker code.
+
+## Observing a run does not control its lifecycle
+
+Activity inventory and progress reads preserve the persisted run status and failure
+history. Displayed lifecycle and current stage also follow persisted owner state;
+raw Temporal diagnostics can disagree and are not authority for those fields. Progress may include a Temporal snapshot for diagnosis, but `RUNNING`,
+unavailable or unknown executor state cannot authorize failure. Even a terminal
+snapshot can belong to an earlier execution after a concurrent retry. Reads never
+fail, cancel, restart or readmit the run, and do not grant another execution attempt.
+
+The workflow owner persists terminal state using its tenant, project and execution
+generation fence. If it could not finish cleanup, investigate the exact execution
+before using explicit lifecycle controls. Do not infer ownership from a heartbeat
+age or a close timestamp, and do not retry while the prior execution may still run.
+Existing failed records are not automatically resurrected by observation.
 
 ## What counts as workflow code
 

@@ -40,7 +40,7 @@ describe("pipeline text calls and the China-provider policy", () => {
 
   it("a default run sends price-routed models to their cheapest host, China-based ones included", async () => {
     const [body] = await textBodies("z-ai/glm-5.3-flash", { allowChinaProviders: true });
-    expect(body!.provider).toEqual({ sort: "price", quantizations: ["fp8", "fp16", "bf16", "fp32"], allow_fallbacks: true });
+    expect(body!.provider).toEqual({ sort: "price", quantizations: ["fp8", "fp16", "bf16", "fp32", "unknown"], allow_fallbacks: true });
     const [qwen] = await textBodies(DEFAULT_PIPELINE_TEXT_MODEL, { allowChinaProviders: true });
     expect(qwen!.provider).toBeUndefined();
   });
