@@ -1,0 +1,98 @@
+{
+ "version": "doppler-figures@1",
+ "images": [
+  {
+   "id": "p3.1",
+   "page": 3,
+   "bbox": [
+    72,
+    100,
+    300,
+    260
+   ],
+   "kind": "picture",
+   "fate": "block",
+   "file": "p3.1.webp",
+   "format": "webp",
+   "bytes": 42,
+   "sha256": "10726d0a636801b110952777391956b9d6ded7853adab18d42f4fee745d7d299",
+   "width": 6,
+   "height": 4
+  },
+  {
+   "id": "p3.g2",
+   "page": 3,
+   "bbox": [
+    72,
+    300,
+    112,
+    330
+   ],
+   "kind": "vector",
+   "fate": "block",
+   "file": "p3.g2.svg",
+   "format": "svg",
+   "bytes": 154,
+   "sha256": "a2b455627fb8a5164c8f70faddf697e03c85669732e625454c935dee394b72a7",
+   "width": 40,
+   "height": 30
+  },
+  {
+   "id": "p4.1",
+   "page": 4,
+   "bbox": [
+    72,
+    100,
+    300,
+    260
+   ],
+   "kind": "picture",
+   "fate": "duplicate",
+   "file": null,
+   "format": null,
+   "bytes": null,
+   "sha256": null,
+   "width": null,
+   "height": null,
+   "repeat_of": "p3.1"
+  },
+  {
+   "id": "p5.g1",
+   "page": 5,
+   "bbox": [
+    10,
+    10,
+    50,
+    50
+   ],
+   "kind": "vector",
+   "fate": "block",
+   "file": "p5.g1.png",
+   "format": "png",
+   "bytes": 80,
+   "sha256": "d5783f6b51eb7fbb0633d0430a5592a6f324b9ee87c598882aabe7c60ec167ee",
+   "width": 3,
+   "height": 3,
+   "fallback": "raster"
+  },
+  {
+   "id": "p5.2",
+   "page": 5,
+   "bbox": [
+    60,
+    60,
+    90,
+    90
+   ],
+   "kind": "picture",
+   "fate": "block",
+   "file": null,
+   "format": null,
+   "bytes": null,
+   "sha256": null,
+   "width": null,
+   "height": null,
+   "error": "pixels"
+  }
+ ]
+}

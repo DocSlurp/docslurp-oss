@@ -1,4 +1,4 @@
-import { nitroBaseModel } from "../project-chat-models.js";
+import { nitroBaseModel, speedBoostMaxPrice } from "../project-chat-models.js";
 import { openRouterProviderPreferences } from "../openrouter-routing.js";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
@@ -21,7 +21,7 @@ describe("chat model prices", () => {
     for (const { id } of PROJECT_CHAT_MODELS) {
       if (nitroBaseModel(id)) {
         // Dynamic Nitro endpoints have no static base price: enforce an explicit low ceiling instead.
-        expect(openRouterProviderPreferences(id)?.max_price, id).toEqual({ prompt: 1, completion: 5 });
+        expect(openRouterProviderPreferences(id)?.max_price, id).toEqual(speedBoostMaxPrice(nitroBaseModel(id)!));
         expect(chatModelPricePerToken(id), id).toBeUndefined();
       } else expect(CHAT_MODEL_PRICES_USD_PER_MTOK[id], id).toBeDefined();
     }

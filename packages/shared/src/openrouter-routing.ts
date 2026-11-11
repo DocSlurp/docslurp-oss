@@ -1,7 +1,7 @@
 import { lowestOpenRouterReasoning } from "./openrouter-usage.js";
 import { isProhibitedRoutingModelId } from "./routing-targets.js";
-import { nitroBaseModel } from "./project-chat-models.js";
-export { nitroBaseModel } from "./project-chat-models.js";
+import { nitroBaseModel, speedBoostMaxPrice } from "./project-chat-models.js";
+export { nitroBaseModel, speedBoostMaxPrice } from "./project-chat-models.js";
 /**
  * OpenRouter host routing: which upstream providers may serve a request, and
  * in what order. Applied to request bodies by `createOpenRouterRoutingFetch`
@@ -40,6 +40,19 @@ export interface OpenRouterProviderPolicy {
   speedBoost?: boolean;
 }
 
+/**
+ * Speed boost (`:nitro` ids) routing: the cheapest host that is fast now, never the fastest host at any price.
+ * OpenRouter's own Nitro (throughput sort) picked hosts at up to 25x the price of an equally fast one: measured
+ * 2026-11-10 on DeepSeek V4.1 Flash 1017 with a ~3k-token prompt, 8 calls each, Nitro answered in 1.18 s p50
+ * for 0.118 cents a call (CoreWeave), and price sort with these thresholds in 0.57 s p50 for 0.055 cents uncached,
+ * 0.0045 cents with prompt-cache hits (Cohere). The thresholds are OpenRouter preferences over its rolling
+ * per-host stats: hosts that miss them are tried last, never refused. Latency is time to first token, in seconds.
+ */
+export const SPEED_BOOST_PERFORMANCE = {
+  preferred_max_latency: { p50: 1, p90: 2.5 },
+  preferred_min_throughput: { p50: 120, p90: 50 },
+} as const;
+
 /** Only reviewed routing variants can be selected by the Speed boost option. */
 export function isSpeedBoostEligible(model: string): boolean {
   return nitroBaseModel(model) !== undefined || nitroBaseModel(`${model}:nitro`) !== undefined;
@@ -70,8 +83,8 @@ export function openRouterProviderPreferences(model: string): Record<string, unk
   if (model.endsWith(":nitro")) {
     const base = nitroBaseModel(model);
     if (!base) throw new Error("Unsupported OpenRouter Nitro model");
-    return { sort: "throughput", ...(isPriceRoutedModel(base) ? { quantizations: [...PRICE_ROUTED_QUANTIZATIONS] } : {}),
-      max_price: { prompt: 1, completion: 5 }, allow_fallbacks: true };
+    return { sort: "price", ...(isPriceRoutedModel(base) ? { quantizations: [...PRICE_ROUTED_QUANTIZATIONS] } : {}),
+      max_price: { ...speedBoostMaxPrice(base) }, ...SPEED_BOOST_PERFORMANCE, allow_fallbacks: true };
   }
   return isPriceRoutedModel(model)
     ? { sort: "price", quantizations: [...PRICE_ROUTED_QUANTIZATIONS], allow_fallbacks: true }
@@ -117,12 +130,15 @@ export function withOpenRouterProviderPreferences<T extends Record<string, unkno
   const preferences = openRouterProviderPreferences(model);
   const own = body.provider && typeof body.provider === "object" && !Array.isArray(body.provider) ? body.provider as Record<string, unknown> : undefined;
   const merged = preferences || own ? { ...preferences, ...own } : undefined;
-  if (nitroBaseModel(model) && merged) {
+  const nitroBase = nitroBaseModel(model);
+  if (nitroBase && merged) {
     // Request preferences may narrow, but cannot remove or raise the endpoint ceiling.
     const price = own?.max_price as Record<string, unknown> | undefined;
+    const ceiling = speedBoostMaxPrice(nitroBase);
     const cap = (value: unknown, ceiling: number) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.min(value, ceiling) : ceiling;
-    merged.max_price = { prompt: cap(price?.prompt, 1), completion: cap(price?.completion, 5) };
-    merged.sort = "throughput";
+    merged.max_price = { prompt: cap(price?.prompt, ceiling.prompt), completion: cap(price?.completion, ceiling.completion) };
+    merged.sort = "price";
+    Object.assign(merged, SPEED_BOOST_PERFORMANCE);
     if (isPriceRoutedModel(nitroBaseModel(model)!)) {
       const requested = stringList(own?.quantizations);
       const allowed = [...PRICE_ROUTED_QUANTIZATIONS].filter((value) => !requested || requested.includes(value));
@@ -132,7 +148,9 @@ export function withOpenRouterProviderPreferences<T extends Record<string, unkno
   }
   const routed = policy ? applyOpenRouterProviderPolicy(merged, policy) : merged;
   if (!routed || (routed === own && !preferences)) return body;
-  return { ...body, provider: routed };
+  // OpenRouter reads a `:nitro` suffix as a throughput sort, which would override the price sort above. Send the
+  // base model id; `:nitro` stays the internal id for tiers, billing and usage attribution.
+  return { ...body, ...(nitroBase ? { model: nitroBase } : {}), provider: routed };
 }
 
 type PolicyResolver = () => OpenRouterProviderPolicy | undefined | Promise<OpenRouterProviderPolicy | undefined>;
@@ -336,12 +354,12 @@ export function createOpenRouterRoutingFetch(baseFetch: typeof fetch = fetch, op
     if (canFallBack && regionBlocked(requested)) return sendFallback("remembered");
     const routed = withOpenRouterProviderPreferences(body, policy);
     let response = routed === original ? await baseFetch(input, init) : await baseFetch(input, { ...init, body: JSON.stringify(routed) });
-    const base = typeof routed.model === "string" ? nitroBaseModel(routed.model) : undefined;
+    const base = typeof body.model === "string" ? nitroBaseModel(body.model) : undefined;
     if (response.status === 404 && base) {
-      // Nitro routing (throughput sort, price ceiling, quantization filter) can leave
-      // no endpoint, which OpenRouter answers with 404. Retry once on the base
-      // model's normal route instead of failing the call.
-      console.warn(`[openrouter] nitro_fallback model=${routed.model} base=${base} status=404`);
+      // Speed boost routing (price ceiling, quantization filter) can leave no
+      // endpoint, which OpenRouter answers with 404. Retry once on the base
+      // model's normal price-sorted route instead of failing the call.
+      console.warn(`[openrouter] nitro_fallback model=${body.model} base=${base} status=404`);
       await response.body?.cancel().catch(() => undefined);
       const fallback = withOpenRouterProviderPreferences({ ...original, model: base }, policy && { ...policy, speedBoost: false });
       response = await baseFetch(input, { ...init, body: JSON.stringify(fallback) });

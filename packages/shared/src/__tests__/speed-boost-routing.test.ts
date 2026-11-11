@@ -19,7 +19,9 @@ it("boosts generation but never embeddings and preserves negative provider const
   const wrapped = createOpenRouterRoutingFetch(send);
   await wrapped("https://openrouter.ai/api/v1/chat/completions", { body: JSON.stringify({ model: "z-ai/glm-5.3-flash", provider: { quantizations: ["fp16"], max_price: { prompt: 0.2, completion: 0.3 } } }) });
   const body = JSON.parse(send.mock.calls[0]![1]!.body as string);
-  expect(body).toMatchObject({ model: "z-ai/glm-5.3-flash:nitro", provider: { sort: "throughput", quantizations: ["fp16"], max_price: { prompt: 0.2, completion: 0.3 } } });
+  // The wire model is the base id; the price ceiling is the stricter of the caller's and GLM's ($0.15 / $0.50).
+  expect(body).toMatchObject({ model: "z-ai/glm-5.3-flash", provider: { sort: "price", quantizations: ["fp16"], max_price: { prompt: 0.15, completion: 0.3 },
+    preferred_max_latency: { p50: 1, p90: 2.5 }, preferred_min_throughput: { p50: 120, p90: 50 } } });
   expect(body.provider.only.length).toBeGreaterThan(0);
   await wrapped("https://openrouter.ai/api/v1/embeddings", { body: JSON.stringify({ model: "openai/gpt-6-luna", input: "text" }) });
   expect(JSON.parse(send.mock.calls[1]![1]!.body as string).model).toBe("openai/gpt-6-luna");
@@ -36,14 +38,16 @@ it("retries a Nitro 404 once on the base model's normal route", async () => {
   setOpenRouterProviderPolicyResolver(() => ({ allowChinaProviders: false, speedBoost: true }));
   const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
   const send = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
-    JSON.parse(init!.body as string).model.endsWith(":nitro") ? new Response("no endpoints", { status: 404 }) : Response.json({ ok: true }));
+    JSON.parse(init!.body as string).provider?.preferred_max_latency ? new Response("no endpoints", { status: 404 }) : Response.json({ ok: true }));
   const wrapped = createOpenRouterRoutingFetch(send);
   const response = await wrapped("https://openrouter.ai/api/v1/chat/completions", { body: JSON.stringify({ model: "z-ai/glm-5.3-flash" }) });
   expect(response.status).toBe(200);
   expect(send).toHaveBeenCalledTimes(2);
   const retry = JSON.parse(send.mock.calls[1]![1]!.body as string);
   expect(retry.model).toBe("z-ai/glm-5.3-flash");
-  expect(retry.provider.sort).not.toBe("throughput");
+  expect(retry.provider.sort).toBe("price");
+  expect(retry.provider.max_price).toBeUndefined();
+  expect(retry.provider.preferred_max_latency).toBeUndefined();
   expect(retry.provider.only.length).toBeGreaterThan(0);
   expect(warn).toHaveBeenCalledWith(expect.stringContaining("nitro_fallback"));
   warn.mockRestore();

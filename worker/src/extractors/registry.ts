@@ -28,6 +28,8 @@ export interface ExtractedCandidate {
   layoutFacts?: Map<number, import("../lib/page-layout-facts.js").PageLayoutFacts>;
   /** The extractor already charged its OCR reads through the ledger (the OCR engine does); the stage must not again. */
   ocrCharged?: boolean;
+  /** Doppler figures the sandboxed PDF provider returned from the same VM job: the folder (unvalidated) and the outcome. */
+  figures?: { dir: string; outcome: import("./plugins.js").SandboxedPdfFigureOutcome };
 }
 
 export interface CandidateExecutors {

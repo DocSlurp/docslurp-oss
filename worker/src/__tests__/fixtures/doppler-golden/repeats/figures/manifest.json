@@ -1,0 +1,9 @@
+{"version":1,"dpi":150,"min_side_pt":11.52,"repeats":"link",
+"images":[
+{"id":"p1.1","page":1,"bbox":[72.00,202.00,272.00,352.00],"kind":"picture","fate":"block","file":"p1.1.webp","format":"webp","bytes":8906,"sha256":"49a3da238cee74dcac999cfbb47debf9d04c748b9a4d793a49a40a0af052b16d","width":417,"height":313},
+{"id":"p2.1","page":2,"bbox":[300.00,222.00,500.00,372.00],"kind":"picture","fate":"block","file":null,"format":null,"bytes":0,"sha256":null,"width":0,"height":0,"repeat_of":"p1.1","skipped":"repeat"},
+{"id":"p3.1","page":3,"bbox":[150.00,212.00,350.00,362.00],"kind":"picture","fate":"block","file":"p3.1.webp","format":"webp","bytes":8708,"sha256":"d22ae70d9137fc88a6cca765cd890c4d965777e24c0e8e9f2dbaf3304484cd59","width":417,"height":313},
+{"id":"p3.2","page":3,"bbox":[250.00,532.00,450.00,682.00],"kind":"picture","fate":"block","file":null,"format":null,"bytes":0,"sha256":null,"width":0,"height":0,"repeat_of":"p3.1","skipped":"repeat"},
+{"id":"p4.1","page":4,"bbox":[100.00,217.00,300.00,367.00],"kind":"picture","fate":"block","file":null,"format":null,"bytes":0,"sha256":null,"width":0,"height":0,"repeat_of":"p1.1","skipped":"repeat"}
+],
+"totals":{"images":5,"marked":5,"written":2,"bytes":17614,"repeats":3,"small":0,"fallbacks":0,"errors":0}}

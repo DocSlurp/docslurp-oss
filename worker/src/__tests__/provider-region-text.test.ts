@@ -57,7 +57,7 @@ it("explicit boost routes text and retains actual receipt cost", async () => {
       usage: { input_tokens: 3, output_tokens: 1, cost: 0.01 } });
   }));
   const result = await runWithProviderRateScope({ orgId: "org", allowChinaProviders: false, speedBoost: true }, () => generateOpenRouterText({ apiKey: "k", model: "z-ai/glm-5.3-flash", operation: "document-summary", prompt: "Summarize.", maxOutputTokens: 16, privacyMode: "standard" }));
-  expect(body).toMatchObject({ model: "z-ai/glm-5.3-flash:nitro", provider: { sort: "throughput", max_price: { prompt: 1, completion: 5 } } });
+  expect(body).toMatchObject({ model: "z-ai/glm-5.3-flash", provider: { sort: "price", max_price: { prompt: 0.15, completion: 0.5 }, preferred_max_latency: { p50: 1, p90: 2.5 } } });
   expect(body.provider.only).toEqual([...NON_CHINA_PROVIDER_SLUGS]);
   expect(result.usage).toMatchObject({ costCents: 1, metadata: { costSource: "provider", routedModel: "z-ai/glm-5.3-flash:nitro" } });
 });

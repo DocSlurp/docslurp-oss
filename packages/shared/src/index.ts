@@ -26,6 +26,7 @@ export * from "./media-map.js";
 export * from "./ocr-result.js";
 export * from "./image-routing.js";
 export * from "./image-anchors.js";
+export * from "./doppler-figures.js";
 export * from "./structured.js";
 export * from "./connectors.js";
 export * from "./artifacts.js";
