@@ -155,6 +155,7 @@ export function dopplerFigureRecords(entries: readonly DopplerFigureEntry[]): Do
       width: entry.width, height: entry.height, fileOf, slot: fileOf ? dopplerFigureSlot(fileOf) : null,
       ...(entry.fallback === undefined ? {} : { fallback: entry.fallback }),
       ...(entry.error === undefined ? {} : { error: entry.error }),
+      ...(entry.skipped === undefined ? {} : { skipped: entry.skipped }),
     };
   });
 }

@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 
+import { imageAnchorsToAltText } from "../image-anchors.js";
 import {
   DOPPLER_FIGURE_FILE_NAME, DOPPLER_FIGURE_LIMITS, DOPPLER_FIGURES_VERSION, dopplerFigureFileName, dopplerFigureManifestSchema,
   dopplerFigureUrls, dopplerImageMarkerIds, parseDopplerFigureId, parseDopplerImageMarkerLine, resolveDopplerImageMarkers,
-  stripDopplerImageMarkers, type DopplerFigureEntry,
+  stripDopplerImageMarkers, isDopplerContinuationLine, type DopplerFigureEntry,
 } from "../doppler-figures.js";
 
 const sha = "a".repeat(64);
@@ -127,5 +128,23 @@ describe("doppler figure entries without a file (Doppler writes width and height
   it("still refuses a file with zero or missing size", () => {
     expect(dopplerFigureManifestSchema.safeParse(manifest([raster({ width: 0 })])).success).toBe(false);
     expect(dopplerFigureManifestSchema.safeParse(manifest([raster({ height: null })])).success).toBe(false);
+  });
+});
+
+describe("Doppler continuation comments", () => {
+  // As Doppler writes them with --markers (the paragraph one seen on a real arXiv paper, end of line).
+  const md = "...of the masked<!-- doppler:paragraph-continued -->\n\nword based objective.\f<!-- doppler:table-continued header=repeated -->\n| a | b |\n|---|---|\n| 1 | 2 |";
+
+  it("strips them from text, dropping comment-only lines whole", () => {
+    expect(stripDopplerImageMarkers(md)).toBe("...of the masked\n\nword based objective.\f| a | b |\n|---|---|\n| 1 | 2 |");
+    expect(imageAnchorsToAltText(md)).toBe("...of the masked\n\nword based objective.\f| a | b |\n|---|---|\n| 1 | 2 |");
+  });
+
+  it("recognises only Doppler's own comments", () => {
+    expect(isDopplerContinuationLine("<!-- doppler:table-continued header=inherited -->")).toBe(true);
+    expect(isDopplerContinuationLine("  <!-- doppler:paragraph-continued -->  ")).toBe(true);
+    expect(isDopplerContinuationLine("<!-- page 3 -->")).toBe(false);
+    expect(isDopplerContinuationLine("text <!-- doppler:paragraph-continued -->")).toBe(false);
+    expect(stripDopplerImageMarkers("<!-- note: doppler:x -->")).toBe("<!-- note: doppler:x -->");
   });
 });

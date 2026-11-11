@@ -44,7 +44,14 @@ Unset, `0`, `false` or `off` leaves extraction exactly as before: no `--markers`
 other value stops the worker at startup.
 
 With the flag on, Doppler also writes its other restitching markers into the Markdown (`<!-- doppler:table-continued ... -->`
-and `<!-- doppler:paragraph-continued -->`, see the Doppler README).
+and `<!-- doppler:paragraph-continued -->`, see the Doppler README). They stay in the stored Markdown and are removed,
+like the image markers, from canonical blocks, chunks, embeddings, summaries and search text. Exports keep the raw
+Markdown.
+
+Stage stats record `dopplerFigures.imagesConfined`: whether Doppler's renderer (`pdfregions`) confined itself inside the
+VM, from Doppler's report (`null` when it did not say). Figures run with `--images-confine auto` for now. The index
+keeps Doppler's `skipped` reason (`repeat`, `fate`, ...) for figures without a file; repeats are requested in `link`
+mode, so a repeat resolves to its first figure's file.
 
 ## How the worker handles the folder
 

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DOPPLER_FIGURE_LIMITS, imageAnchorsToAltText } from "@docslurp/shared";
+import { DOPPLER_FIGURE_LIMITS, dopplerFigureUrls, imageAnchorsToAltText, resolveDopplerImageMarkers } from "@docslurp/shared";
 
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
 
@@ -251,5 +251,62 @@ describe("markers in text", () => {
     const figure = doc.blocks.find((block) => block.metadata.dopplerImageId === "p3.1");
     expect(figure).toMatchObject({ text: "", metadata: { extractor: "doppler-figure" } });
     expect(doc.blocks.map((block) => block.text).join("\n")).not.toContain("doppler-image");
+  });
+});
+
+describe("golden folders from a real Doppler run (fixtures/doppler-golden, see PROVENANCE.json)", () => {
+  const GOLDEN = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "doppler-golden");
+  // What the guest does to Doppler's manifest (worker-plugins/doppler guest collect_figures): keep the documented fields.
+  const FIELDS = ["id", "page", "bbox", "kind", "fate", "file", "format", "bytes", "sha256", "width", "height", "repeat_of", "fallback", "error", "skipped"];
+  async function asGuestHandsIt(name: string): Promise<{ folder: string; markdown: string }> {
+    const folder = path.join(work, name);
+    await cp(path.join(GOLDEN, name, "figures"), folder, { recursive: true });
+    const raw = JSON.parse(await readFile(path.join(folder, "manifest.json"), "utf8")) as { version: number; images: Array<Record<string, unknown>> };
+    expect(raw.version).toBe(1); // Doppler's own manifest version
+    const images = raw.images.map((entry) => Object.fromEntries(Object.entries(entry).filter(([key]) => FIELDS.includes(key))));
+    await writeFile(path.join(folder, "manifest.json"), JSON.stringify({ version: "doppler-figures@1", images }));
+    return { folder, markdown: await readFile(path.join(GOLDEN, name, "doc.md"), "utf8") };
+  }
+  async function storeAndResolve(name: string, pageCount: number) {
+    const { folder, markdown } = await asGuestHandsIt(name);
+    const set = await readDopplerFigureDir(folder, { pageCount });
+    const json = new Map<string, any>();
+    const storage = { putBytes: async () => {}, putJson: async (key: string, value: unknown) => { json.set(key, value); }, uri: (key: string) => `s3://bucket/${key}` };
+    const stored = await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown });
+    const index = [...json.values()][0] as { figures: Array<{ id: string; fileOf: string | null; skipped?: string }> };
+    const artifacts = stored.slots.map(({ slot, uri }) => ({ slot: `${DOC.id}:${slot}`, url: `/v1/files/t/${uri.split("/").pop()}` }));
+    const urls = dopplerFigureUrls(DOC.id, artifacts, index.figures);
+    return { set, index, markdown, resolved: resolveDopplerImageMarkers(markdown, (id) => urls.get(id)), urls };
+  }
+
+  it("repeats (link mode): every marker resolves, repeats to their first figure's file", async () => {
+    const { set, index, resolved, urls } = await storeAndResolve("repeats", 4);
+    expect(set.files.map((f) => f.id)).toEqual(["p1.1", "p3.1"]);
+    expect(index.figures.filter((f) => f.skipped === "repeat").map((f) => [f.id, f.fileOf])).toEqual([["p2.1", "p1.1"], ["p3.2", "p3.1"], ["p4.1", "p1.1"]]);
+    expect(urls.get("p4.1")).toBe("/v1/files/t/p1.1.webp");
+    expect(resolved).not.toContain("doppler-image:");
+    expect(resolved.match(/!\[image\]\(\/v1\/files\/t\/p[13]\.1\.webp\)/g)).toHaveLength(5);
+  });
+
+  it("typst: a raster and an SVG resolve; figures Doppler skipped by fate keep `skipped` and no file", async () => {
+    const { set, index, resolved } = await storeAndResolve("typst", 4);
+    expect(set.files.map((f) => [f.id, f.mediaType])).toEqual([["p1.1", "image/webp"], ["p3.g1", "image/svg+xml"]]);
+    expect(index.figures.filter((f) => f.skipped).map((f) => [f.id, f.skipped, f.fileOf])).toEqual([["p2.1", "fate", null], ["p4.1", "fate", null]]);
+    expect(resolved).toContain("](/v1/files/t/p3.g1.svg)");
+    expect(resolved).not.toContain("doppler-image:");
+  });
+
+  it("refuses the raw Doppler manifest: only the guest's doppler-figures@1 shape crosses", async () => {
+    const folder = path.join(work, "raw");
+    await cp(path.join(GOLDEN, "repeats", "figures"), folder, { recursive: true });
+    await expect(readDopplerFigureDir(folder, { pageCount: 4 })).rejects.toMatchObject({ rule: "manifest-invalid" });
+  });
+});
+
+describe("continuation comments in canonical blocks", () => {
+  it("never become block text", () => {
+    const md = "Intro of the masked<!-- doppler:paragraph-continued -->\n\n<!-- doppler:table-continued header=repeated -->\n\nword based objective.";
+    const doc = buildCanonicalDocumentFromMarkdown({ documentId: "doc-1", text: md, pageCount: 1, sourceArtifactUri: "s3://b/doc.md", extractor: "vm-pdf" });
+    expect(doc.blocks.map((block) => block.text)).toEqual(["Intro of the masked", "word based objective."]);
   });
 });

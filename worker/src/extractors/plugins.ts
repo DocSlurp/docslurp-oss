@@ -103,7 +103,10 @@ export interface SandboxedPdfResult extends SandboxResult {
    * all of it), `failed` when Doppler kept the Markdown but could not extract images (its exit status 5). `reason` is raw
    * diagnostic text for telemetry only; it never reaches a user or an API response.
    */
-  figures?: { status: "extracted" } | { status: "failed"; reason: string };
+  figures?: ({ status: "extracted" } | { status: "failed"; reason: string }) & {
+    /** Doppler's report `images_confined`: whether its renderer confined itself in the VM. Omit when unknown. */
+    confined?: boolean;
+  };
 }
 
 /** Upper bound on a provider's Markdown output, checked before the host reads it. */
@@ -299,7 +302,7 @@ const reportedLayoutFacts = new WeakMap<SandboxedPdfJob, Map<number, PageLayoutF
 const reportedFigures = new WeakMap<SandboxedPdfJob, SandboxedPdfFigureOutcome>();
 
 /** What a figure request came back as. `reason` is telemetry only (bounded, control characters removed). */
-export type SandboxedPdfFigureOutcome = { status: "extracted" } | { status: "failed"; reason: string };
+export type SandboxedPdfFigureOutcome = ({ status: "extracted" } | { status: "failed"; reason: string }) & { confined?: boolean };
 const MAX_FIGURE_REASON_CHARS = 500;
 
 function figureOutcome(job: SandboxedPdfJob, raw: unknown): SandboxedPdfFigureOutcome | undefined {
@@ -307,12 +310,13 @@ function figureOutcome(job: SandboxedPdfJob, raw: unknown): SandboxedPdfFigureOu
     if (raw !== undefined) throw new SandboxRunError("Sandboxed PDF provider returned unrequested figures");
     return undefined;
   }
-  const value = raw as { status?: unknown; reason?: unknown } | undefined;
-  if (value?.status === "extracted") return { status: "extracted" };
+  const value = raw as { status?: unknown; reason?: unknown; confined?: unknown } | undefined;
+  const confined = typeof value?.confined === "boolean" ? { confined: value.confined } : {};
+  if (value?.status === "extracted") return { status: "extracted", ...confined };
   if (value?.status === "failed") {
     // eslint-disable-next-line no-control-regex
     const reason = typeof value.reason === "string" ? value.reason.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").slice(0, MAX_FIGURE_REASON_CHARS) : "";
-    return { status: "failed", reason: reason || "unspecified" };
+    return { status: "failed", reason: reason || "unspecified", ...confined };
   }
   // A provider that was asked and did not answer extracted nothing the host may trust.
   return { status: "failed", reason: "provider-reported-no-figure-outcome" };

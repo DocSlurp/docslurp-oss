@@ -6,6 +6,7 @@ import {
   normalizePageNumbers,
   parseImageAnchorLine,
   parseDopplerImageMarkerLine,
+  isDopplerContinuationLine,
   stripDopplerImageMarkers,
   imageAnchorsToAltText,
   splitTextIntoPagesStrict,
@@ -92,6 +93,12 @@ export function buildCanonicalDocumentFromMarkdown(args: {
       const startLine = lineIndex + 1;
       const line = lines[lineIndex] ?? "";
       const pageNumber = pagesKnown ? pageIndex + 1 : null;
+
+      // Doppler's continuation comments (table/paragraph continued on the next page) are layout notes, not content.
+      if (isDopplerContinuationLine(line)) {
+        lineIndex++;
+        continue;
+      }
 
       if (CODE_FENCE_RE.test(line.trim())) {
         const codeLines = [line];

@@ -95,6 +95,8 @@ export const dopplerFigureEntrySchema = z.strictObject({
   fallback: z.union([z.boolean(), slug]).optional(),
   /** Why this figure has no file, when extraction failed for it alone. */
   error: slug.optional(),
+  /** Why Doppler wrote no file for it (`repeat`, `fate`, `min-side`, ...), when it says. */
+  skipped: slug.optional(),
 }).superRefine((entry, ctx) => {
   const id = parseDopplerFigureId(entry.id);
   if (!id || id.pageNumber !== entry.page) ctx.addIssue({ code: "custom", message: "figure id does not match its page" });
@@ -158,6 +160,7 @@ export const dopplerFigureRecordSchema = z.strictObject({
   slot: z.string().nullable(),
   fallback: z.union([z.boolean(), slug]).optional(),
   error: slug.optional(),
+  skipped: slug.optional(),
 });
 export type DopplerFigureRecord = z.infer<typeof dopplerFigureRecordSchema>;
 
@@ -209,9 +212,41 @@ export function resolveDopplerImageMarkers(markdown: string, resolve: (id: strin
 }
 
 /** Text for search and embeddings: markers carry no words (Doppler's alt is the generic "image"), so they go. */
+/**
+ * Doppler's other restitching markers, which `--markers` also writes: `<!-- doppler:table-continued header=... -->` above a
+ * table that goes on from the previous page and `<!-- doppler:paragraph-continued -->` (at the end of a line or on its own).
+ * Comments, not words: they never reach chunks, embeddings or search.
+ */
+export const DOPPLER_CONTINUATION_SCHEME = "<!-- doppler:";
+const CONTINUATION = /<!--\s*doppler:(?:table|paragraph)-continued\b[^<>\n]{0,200}-->/g;
+const CONTINUATION_LINE = /^\s*(?:<!--\s*doppler:(?:table|paragraph)-continued\b[^<>\n]{0,200}-->\s*)+$/;
+
+/** True for a line that holds nothing but Doppler continuation comments. */
+export function isDopplerContinuationLine(line: string): boolean {
+  return CONTINUATION_LINE.test(line);
+}
+
+/** True when the text holds any Doppler marker (image or continuation). */
+export function hasDopplerMarkers(markdown: string): boolean {
+  return markdown.includes(DOPPLER_IMAGE_SCHEME) || markdown.includes("doppler:");
+}
+
+/**
+ * Text for search and embeddings: image markers carry no words (Doppler's alt is the generic "image") and continuation
+ * comments are layout notes, so both go. A line that held only a continuation comment is removed with its newline.
+ */
 export function stripDopplerImageMarkers(markdown: string): string {
-  if (!markdown.includes(DOPPLER_IMAGE_SCHEME)) return markdown;
-  return markdown.replace(MARKER, "");
+  if (!hasDopplerMarkers(markdown)) return markdown;
+  const withoutImages = markdown.includes(DOPPLER_IMAGE_SCHEME) ? markdown.replace(MARKER, "") : markdown;
+  if (!withoutImages.includes("doppler:")) return withoutImages;
+  return withoutImages.split(/(\n|\f)/).reduce<string[]>((out, part, i, parts) => {
+    if (part !== "\n" && part !== "\f" && isDopplerContinuationLine(part) && parts[i + 1] === "\n") {
+      parts[i + 1] = ""; // drop the line and its newline
+      return out;
+    }
+    out.push(part === "\n" || part === "\f" ? part : part.replace(CONTINUATION, ""));
+    return out;
+  }, []).join("");
 }
 
 /**

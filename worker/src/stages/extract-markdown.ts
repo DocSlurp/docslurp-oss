@@ -2952,23 +2952,25 @@ export class ExtractMarkdownStage implements Stage {
   }): Promise<{ slots: Array<{ slot: string; uri: string }>; stats: Record<string, unknown> }> {
     const figures = args.candidate.figures!;
     const started = Date.now();
+    // Whether Doppler's renderer confined itself (pdfregions Landlock + seccomp inside the VM): telemetry until it is required.
+    const imagesConfined = figures.outcome.confined ?? null;
     if (figures.outcome.status === "failed") {
-      console.warn(`[doppler-figures] document=${args.document.id} status=extraction-failed reason=${JSON.stringify(figures.outcome.reason)}`);
+      console.warn(`[doppler-figures] document=${args.document.id} status=extraction-failed confined=${imagesConfined} reason=${JSON.stringify(figures.outcome.reason)}`);
       pushPerfMetric({ metric: "doppler-figures-failed", value: 1, unit: "count", tags: ["doppler-figures", "extraction-failed"], metadata: { documentId: args.document.id } });
-      return { slots: [], stats: { status: "extraction-failed" } };
+      return { slots: [], stats: { status: "extraction-failed", imagesConfined } };
     }
     let validated;
     try {
       validated = await readDopplerFigureDir(figures.dir, { pageCount: args.document.pageCount, signal: args.signal });
     } catch (error) {
       if (!(error instanceof DopplerFigureRejection)) throw error;
-      console.warn(`[doppler-figures] document=${args.document.id} status=rejected rule=${error.rule}`);
+      console.warn(`[doppler-figures] document=${args.document.id} status=rejected rule=${error.rule} confined=${imagesConfined}`);
       pushPerfMetric({ metric: "doppler-figures-failed", value: 1, unit: "count", tags: ["doppler-figures", "rejected"], metadata: { documentId: args.document.id, rule: error.rule } });
-      return { slots: [], stats: { status: "rejected", rule: error.rule } };
+      return { slots: [], stats: { status: "rejected", rule: error.rule, imagesConfined } };
     }
     const stored = await storeDopplerFigures({ storage: this.storage, document: args.document, runId: args.runId, figures: validated, markdown: args.markdown, signal: args.signal });
-    const stats = { ...stored.stats, validateMs: Date.now() - started - stored.stats.storeMs };
-    console.log(`[doppler-figures] document=${args.document.id} status=stored entries=${stats.entries} files=${stats.files} bytes=${stats.bytes} markers=${stats.markers} resolved=${stats.markersResolved} ms=${Date.now() - started}`);
+    const stats = { ...stored.stats, imagesConfined, validateMs: Date.now() - started - stored.stats.storeMs };
+    console.log(`[doppler-figures] document=${args.document.id} status=stored entries=${stats.entries} files=${stats.files} bytes=${stats.bytes} markers=${stats.markers} resolved=${stats.markersResolved} confined=${imagesConfined} ms=${Date.now() - started}`);
     return { slots: stored.slots, stats };
   }
 

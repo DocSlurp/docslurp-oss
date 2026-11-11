@@ -100,8 +100,9 @@ describe("Doppler figures in the extraction stage", () => {
     vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "1");
     const out = await runStage(async (job) => {
       await cp(FIXTURE, job.figures.dir, { recursive: true });
-      return { figures: { status: "extracted" } };
+      return { figures: { status: "extracted", confined: false } };
     });
+    expect(out.stageState?.stats?.dopplerFigures).toMatchObject({ imagesConfined: false });
     expect(out.jobs[0].figures.dir).toMatch(/\.doppler-figures-/);
     expect(out.stageState?.status).toBe("completed");
     expect(out.objects.get(`${figureRoot}/p3.1.webp`)?.type).toBe("image/webp");
@@ -119,12 +120,12 @@ describe("Doppler figures in the extraction stage", () => {
     registerProvider(true);
     vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "1");
     const warn = vi.spyOn(console, "warn");
-    const out = await runStage(async () => ({ figures: { status: "failed", reason: "pdfregions: limit hit (memory)" } }));
+    const out = await runStage(async () => ({ figures: { status: "failed", reason: "pdfregions: limit hit (memory)", confined: true } }));
     expect(out.stageState?.status).toBe("completed");
     expect(out.markdown).toBe(MARKDOWN);
     expect([...out.objects.keys()].some((key) => key.includes("doppler-figures"))).toBe(false);
     expect(Object.keys(out.ledger).some((slot) => slot.includes("doppler-figure"))).toBe(false);
-    expect(out.stageState?.stats?.dopplerFigures).toEqual({ status: "extraction-failed" });
+    expect(out.stageState?.stats?.dopplerFigures).toEqual({ status: "extraction-failed", imagesConfined: true });
     expect(JSON.stringify(out.stageState?.stats)).not.toContain("pdfregions");
     expect(warn.mock.calls.some(([line]) => String(line).includes("[doppler-figures]") && String(line).includes("pdfregions: limit hit (memory)"))).toBe(true);
   });
@@ -138,7 +139,7 @@ describe("Doppler figures in the extraction stage", () => {
       return { figures: { status: "extracted" } };
     });
     expect(out.stageState?.status).toBe("completed");
-    expect(out.stageState?.stats?.dopplerFigures).toEqual({ status: "rejected", rule: "size-mismatch" });
+    expect(out.stageState?.stats?.dopplerFigures).toEqual({ status: "rejected", rule: "size-mismatch", imagesConfined: null });
     expect([...out.objects.keys()].some((key) => key.includes("doppler-figures"))).toBe(false);
     expect(out.markdown).toBe(MARKDOWN);
   });
