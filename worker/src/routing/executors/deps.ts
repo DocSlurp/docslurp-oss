@@ -11,6 +11,8 @@ import path from "node:path";
 import sharp from "../../tools/isolated-image.js";
 import {
   canonicalDocumentSchema,
+  type Assignment,
+  type AssignmentRole,
   type BBox,
   type VisionConfig,
 } from "@docslurp/shared";
@@ -29,6 +31,7 @@ import { extractNativePdfDocument } from "../../native-pdf/extract.js";
 import { loadNativePdfEngine } from "../../native-pdf/loader.js";
 import { logNativePdfFallback } from "../../native-pdf/types.js";
 import type { NativePdfDocument } from "../../native-pdf/types.js";
+import { budgetGuardDowngraded } from "../estimate.js";
 import { readRoutingFlags } from "../flags.js";
 import { visionConfigForModel } from "../routed-vision.js";
 import { RASTER_PX_PER_POINT } from "./merge.js";
@@ -61,7 +64,25 @@ export interface ProductionExecutorDepsInput {
   /** The hosted escalation reader (ocr/hosted-reader.ts) for a page OCR read poorly; null disables escalation. */
   hostedReader?: HostedOcrReader | null;
   labelerModel?: string;
+  /**
+   * Chart export (chart-export/session.ts): serves a chart-data/diagram crop through the chart-export generator in
+   * place of the role's vision prompt. `output` null with `modelCalled` false keeps the usual reading (nothing was
+   * spent); with `modelCalled` true the generator already paid for this crop, so it is not read a second time.
+   */
+  exportVisual?: (args: {
+    role: AssignmentRole;
+    scope: Assignment["scope"];
+    assignmentIndex: number;
+    raster: RasterRef;
+    pageNumber: number;
+    signal?: AbortSignal;
+  }) => Promise<ExportVisualOutcome>;
 }
+
+export type ExportVisualOutcome =
+  | { output: VisionPageOutput; modelCalled: boolean }
+  | { output: null; modelCalled: false }
+  | { output: null; modelCalled: true; spent: VisionPageOutput };
 
 /** Model label for router OCR reads in usage rows and route outputs. */
 const OCR_MODEL = "ppocr-v6-small";
@@ -313,7 +334,17 @@ export function createProductionExecutorDeps(input: ProductionExecutorDepsInput)
       }
     },
 
-    async vlm({ target, role, raster, pageNumber, signal }) {
+    async vlm({ target, role, raster, pageNumber, scope, assignmentIndex, reason, signal }) {
+      // A role the budget guard downgraded to a cheaper target keeps that target's read: the generator would re-spend
+      // what the guard cut.
+      const exportable = (role === "chart-data" || role === "diagram") && !budgetGuardDowngraded({ reason: reason ?? "" });
+      if (input.exportVisual && scope && assignmentIndex !== undefined && exportable) {
+        const exported = await input.exportVisual({ role, scope, assignmentIndex, raster, pageNumber, ...(signal ? { signal } : {}) });
+        if (exported.output) return exported.output;
+        // Generator calls were made and nothing usable came back: return their (empty) reading with its usage instead
+        // of paying for a second vision read of the same crop. The merge drops empty inserts.
+        if (exported.modelCalled) return exported.spent;
+      }
       const modelUri = target.ref.modelUri;
       if (!modelUri) throw new Error(`target ${target.id} has no model uri`);
       const vision = visionConfigForModel(input.selection, modelUri, role);

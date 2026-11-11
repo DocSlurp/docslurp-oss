@@ -322,3 +322,18 @@ describe("chunking large documents", () => {
     expect(chunks.some((chunk) => chunk.text.includes("```ts\nconst value = compute(input);\n") && chunk.text.trimEnd().endsWith("```"))).toBe(true);
   });
 });
+
+describe("chart export visual markers (council round 2, N7)", () => {
+  it("never reach chunks, from plain text or from canonical blocks; the visual's content stays searchable", async () => {
+    const { wrapVisualGroup } = await import("../chart-export/markdown.js");
+    const { buildCanonicalDocumentFromMarkdown, buildCanonicalChunksFromDocument } = await import("../lib/canonical-document.js");
+    const markdown = `Quarterly report.\n\n**Chart data (image 1)**\n\n${wrapVisualGroup("p1-i0", "0123456789abcdef", "Revenue grows from 10 to 15.")}\n\nOutro.`;
+    const plain = [...chunkTextWithMeta(markdown, 2000)].map((c) => c.text).join("\n");
+    expect(plain).not.toContain("docslurp:visual");
+    expect(plain).toContain("Revenue grows from 10 to 15.");
+    const canonical = buildCanonicalDocumentFromMarkdown({ documentId: "d", text: markdown, pageCount: 1, extractor: "test" });
+    const chunks = buildCanonicalChunksFromDocument(canonical, "f.pdf").map((c) => c.text).join("\n");
+    expect(chunks).not.toContain("docslurp:visual");
+    expect(chunks).toContain("Revenue grows from 10 to 15.");
+  });
+});

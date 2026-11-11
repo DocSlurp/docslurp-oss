@@ -4,7 +4,7 @@
  * One flat, published rule, so a self-hosted operator can predict every charge:
  * - every page costs OPEN_CREDITS_PER_PAGE, whichever way it was read;
  * - an audio or video file counts one page per started minute;
- * - storage, searches, chat answers, web tools and optional features cost nothing;
+ * - storage, searches, chat answers, web tools, optional features and chart & diagram export cost nothing;
  * - no speed boost surcharge, no output-token surcharge, every run pays its full page charge.
  *
  * Self-hosted deployments usually run with billing disabled (no Stripe), where nothing is charged at all and estimates
@@ -152,6 +152,7 @@ export const OPEN_PRICING: PricingProvider = {
   chatAnswerUnits: () => 1,
   chatAnswerCredits: () => 0,
   featureCredits: () => 0,
+  visualExportCredits: () => 0,
   speedBoostMultiplier: (speedBoost) => {
     if (typeof speedBoost !== "boolean") throw new Error("speedBoost must be a boolean");
     return 1;

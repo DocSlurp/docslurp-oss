@@ -32,6 +32,8 @@ import { GraphEnrichStage } from "./graph-enrich.js";
 import { PiiDetectStage } from "./pii-detect.js";
 import { PageEmbedStage } from "./page-embed.js";
 import { configurePageAreaSink, createPageAreaSink } from "../pipeline/page-area-sink.js";
+import { setDeterministicVisualExtractor } from "../chart-export/types.js";
+import { createVmDeterministicVisualExtractor } from "../chart-export/vm-extractor.js";
 
 /** Placeholder until the deferred-indexing stage lands; only reachable when a project opts into that mode. */
 
@@ -54,6 +56,8 @@ export function createStages(args: {
     if (!store) throw new Error("createStages: rendered page areas need a store to authorize measured pages");
     configurePageAreaSink(createPageAreaSink(sql, store));
   }
+  // Chart export's deterministic rungs: staged inputs go to the parser-VM guest through this worker's runner.
+  setDeterministicVisualExtractor(createVmDeterministicVisualExtractor({ runner: args.runner, storage: args.storage }));
   const sourceCache = new PdfSourceCache(args.storage);
   const rasterCache = new PdfRasterCache(args.runner, args.storage, sourceCache);
   const stages: Record<PipelineRunStage, () => Stage> = {

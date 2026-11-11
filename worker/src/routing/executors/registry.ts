@@ -58,6 +58,9 @@ const vlm: TargetExecutor = {
       role: request.assignment.role,
       raster,
       pageNumber: request.assignment.pageNumber,
+      scope: request.assignment.scope,
+      assignmentIndex: request.index,
+      reason: request.assignment.reason,
       signal,
     });
     return {

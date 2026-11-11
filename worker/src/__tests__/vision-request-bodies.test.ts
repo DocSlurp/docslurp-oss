@@ -20,7 +20,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function requestBody(model: string, prompt?: string) {
+async function requestBody(model: string, prompt?: string, reasoning?: { effort: "none" | "minimal" }) {
   const bodies: Array<Record<string, any>> = [];
   vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
     bodies.push(JSON.parse(String(init.body)));
@@ -36,6 +36,7 @@ async function requestBody(model: string, prompt?: string) {
     cfg: { openRouterApiKey: "or-key", openAiApiKey: "", openAiBaseUrl: "https://api.openai.com/v1" } as Config,
     runner: new CommandRunner(),
     privacyMode: "standard",
+    ...(reasoning ? { reasoning } : {}),
   }));
   const body = bodies[0]!;
   body.messages[1].content[1].image_url.url = "<image>";
@@ -73,6 +74,13 @@ describe("vision request bodies", () => {
       expect(rest, key).toEqual(before[key]);
       expect(before[key], key).not.toHaveProperty("stream");
     }
+  });
+
+  it("sends a per-call reasoning override (chart export) without changing page reads of the same model", async () => {
+    const pageRead = await requestBody("google/gemini-3.1-flash-lite");
+    const chartCall = await requestBody("google/gemini-3.1-flash-lite", undefined, { effort: "minimal" });
+    expect(chartCall.reasoning).toEqual({ effort: "minimal" });
+    expect(pageRead.reasoning).not.toEqual({ effort: "minimal" });
   });
 
   it("keeps effort none on the tuned DeepSeek vision request", async () => {

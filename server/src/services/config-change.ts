@@ -4,6 +4,8 @@ import {
   assertPipelineSpeedBoost,
   mergePipelineFeatures, type PipelineFeatureOverrides,
   analyzePipelineChange,
+  CHART_EXPORT_CHARGING_STAGES,
+  chartExportConfigOf,
   speedBoostMultiplier,
   compilePipelinePlan,
   deferredProfilesEnabled,
@@ -26,6 +28,8 @@ import {
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
+import { loadVisualStatsForEstimate, VISUAL_CANDIDATES_DOCUMENT_LIMIT, type VisualEstimateStats } from "./visual-candidates.js";
+import { assertChartExportChangeAllowed } from "./chart-export-availability.js";
 import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { nextVersionNumber } from "./version-number.js";
 import { validateModeSwitch } from "./project-indexing-mode.js";
@@ -172,17 +176,39 @@ export async function estimateWork(args: {
   pages: number;
   orgId: string;
   env?: EstimateEnv;
+  /**
+   * The documents being estimated, so chart export prices their recorded visual counts instead of the per-page prior
+   * (only when every one of them has recorded stats). Read scoped to `orgId` and `projectId`.
+   */
+  visualScope?: { projectId: string; documentIds: readonly string[] };
 }): Promise<CostEstimate> {
+  const [workerSlots, visualStats] = await Promise.all([orgWorkerSlots(args.orgId), recordedVisualStats(args)]);
   const estimate = estimatePipelineWork({
     features: args.features,
     stages: args.stages,
     documents: args.documents,
     pages: args.pages,
-    workerSlots: await orgWorkerSlots(args.orgId),
+    workerSlots,
     env: args.env ?? process.env,
+    ...(visualStats ? { visualStats } : {}),
   });
   const multiplier = speedBoostMultiplier(args.features.speedBoost);
   return { ...estimate, credits: estimate.credits ? { low: estimate.credits.low * multiplier, high: estimate.credits.high * multiplier } : null };
+}
+
+/** Recorded visual stats for an estimate's documents, or null (prior) when export is off or any document lacks them. */
+async function recordedVisualStats(args: Parameters<typeof estimateWork>[0]): Promise<VisualEstimateStats | null> {
+  const scope = args.visualScope;
+  if (!scope || !chartExportConfigOf(args.features) || !args.stages.some((stage) => CHART_EXPORT_CHARGING_STAGES.includes(stage))) return null;
+  const ids = [...new Set(scope.documentIds)];
+  if (ids.length === 0 || ids.length > VISUAL_CANDIDATES_DOCUMENT_LIMIT) return null;
+  try {
+    const stats = await loadVisualStatsForEstimate({ orgId: args.orgId, projectId: scope.projectId, documentIds: ids });
+    return stats.documents >= ids.length ? stats : null;
+  } catch (error) {
+    console.warn(`[estimate] visual stats unavailable project=${scope.projectId} error=${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
 }
 
 /**
@@ -240,6 +266,8 @@ export async function planProjectChange(args: {
   if (!project) return null;
   if (args.pipelineOverrides) input.pipeline = mergePipelineFeatures(project.pipeline, args.pipelineOverrides);
   const nextPipeline = await resolveUpdatedPipeline(project.id, project, input, { indexingMode: args.indexingMode });
+  // The deployment kill switch: chart export cannot be turned on while it is off (a stored "on" stays inert).
+  assertChartExportChangeAllowed(project.pipeline, nextPipeline, args.env ?? process.env);
   const base = analyzePipelineChange(project.pipeline, nextPipeline, { documents: 0, pages: 0 });
   const reindex: ReindexMode | null =
     base.kind === "reindex-required" ? "required" : base.kind === "reindex-recommended" ? "recommended" : null;
@@ -267,13 +295,14 @@ export async function planProjectChange(args: {
   if (reindex && targets.length > 0 && impact.stages.length > 0) {
     // Price what will be queued: documents whose in-flight re-index runs get cancelled owe those runs' stages too.
     const carry: StageCarry = reindex === "required" && hashChanged ? await loadStageCarry(sql, project.id) : new Map();
-    const groups = new Map<string, { stages: PipelineRunStage[]; documents: number; pages: number }>();
+    const groups = new Map<string, { stages: PipelineRunStage[]; documents: number; pages: number; documentIds: string[] }>();
     const everything = compilePipelinePlan(nextPipeline).stageOrder;
     for (const doc of targets) {
       const owed = stagesFor(doc.id, impact.stages, carry);
       const stages = owed ? compiledStages(nextPipeline, owed) : everything;
-      const group = groups.get(stages.join(",")) ?? { stages, documents: 0, pages: 0 };
+      const group = groups.get(stages.join(",")) ?? { stages, documents: 0, pages: 0, documentIds: [] };
       group.documents += 1;
+      group.documentIds.push(doc.id);
       // Priced on the pages the document bills, not the page basis its text splits into (one page for a measured DOCX).
       group.pages += billedPages(doc);
       groups.set(stages.join(","), group);
@@ -282,6 +311,7 @@ export async function planProjectChange(args: {
     for (const group of groups.values()) {
       parts.push(await estimateWork({
         features: { ...nextPipeline, speedBoost: input.speedBoost === true }, stages: group.stages, documents: group.documents, pages: group.pages, orgId: project.orgId, env: args.env,
+        visualScope: { projectId: project.id, documentIds: group.documentIds },
       }));
     }
     estimate = parts.length === 1 ? parts[0]! : sumEstimates(parts);

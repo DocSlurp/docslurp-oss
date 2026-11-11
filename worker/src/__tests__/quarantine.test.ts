@@ -87,6 +87,17 @@ describe("sniffMimeType", () => {
 });
 
 describe("inspectArchive", () => {
+  it("counts Office chart parts by entry name only", () => {
+    const zip = buildZipBuffer([
+      { name: "ppt/charts/chart1.xml", compressedSize: 1, uncompressedSize: 1 },
+      { name: "ppt/charts/chart12.xml", compressedSize: 1, uncompressedSize: 1 },
+      { name: "ppt/charts/_rels/chart1.xml.rels", compressedSize: 1, uncompressedSize: 1 },
+      { name: "ppt/charts/style1.xml", compressedSize: 1, uncompressedSize: 1 },
+      { name: "evil/charts/chart3.xml", compressedSize: 1, uncompressedSize: 1 },
+    ]);
+    expect(inspectArchive(zip, "deck.pptx", basePolicy)?.chartParts).toBe(2);
+  });
+
   it.each(["../escape", "/absolute", "C:\\escape", "dir/../../escape", "dir\\..\\escape", "file:stream", "bad\u0000name"])("rejects unsafe archive path %s", (name) => {
     const zip = buildZipBuffer([{ name, compressedSize: 1, uncompressedSize: 1 }]);
     expect(inspectArchive(zip, "unsafe.zip", basePolicy)?.issues).toContain("archive-unsafe-path");

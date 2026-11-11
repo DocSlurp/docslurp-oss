@@ -13,7 +13,7 @@ import type {
   RoutingObjective,
   RoutingTarget,
 } from "@docslurp/shared";
-import { aiBilledUsd, estimateTargetCost } from "../estimate.js";
+import { aiBilledUsd, estimateTargetCost, type ChartExportEstimateOptions } from "../estimate.js";
 import { DEFAULT_PLANNER_CONFIG as DEFAULTS, assemblePlan, needsFromFeatures, planPages, type PlannerConfig } from "../planner.js";
 import {
   buildScoredEstimate,
@@ -104,14 +104,14 @@ function betaLowerBound(b: BetaPosterior, z = 1.2816): number {
   return Math.max(0, m - z * Math.sqrt((m * (1 - m)) / (n + 1)));
 }
 
-export function createBaselineEstimator(pack: PolicyPack): TargetEstimator {
-  const prior = createPolicyEstimator(pack);
+export function createBaselineEstimator(pack: PolicyPack, chartExport?: ChartExportEstimateOptions): TargetEstimator {
+  const prior = createPolicyEstimator(pack, chartExport ? { chartExport } : {});
   if (!pack.baseline) return prior;
   const cells = new BaselineCells(pack.baseline);
   return (ctx) => {
     const stats = cells.statsFor(cells.cellFor(ctx.page), ctx.target.id);
     if (!stats) return prior({ ...ctx, probs: {} });
-    const cost = estimateTargetCost(ctx.target, ctx.role, ctx.scope, ctx.page);
+    const cost = estimateTargetCost(ctx.target, ctx.role, ctx.scope, ctx.page, undefined, chartExport);
     if (!cost.priced && stats.n > 0) {
       cost.costUsd = stats.cost.meanUsd;
       cost.latencyP50Ms = stats.latency.p50Ms || cost.latencyP50Ms;
@@ -144,6 +144,8 @@ export interface BaselineRouterOptions {
   config?: Partial<PlannerConfig>;
   /** Decision-model spend already incurred for this document before falling back to the baseline. */
   carry?: { calls: DecisionModelCall[]; costUsd: number; skippedReason: string };
+  /** Project chart export settings: chart/diagram roles are priced as generator calls. */
+  chartExport?: ChartExportEstimateOptions;
 }
 
 export class BaselineRouter implements Router {
@@ -152,7 +154,7 @@ export class BaselineRouter implements Router {
   private readonly estimator: TargetEstimator;
   constructor(private readonly opts: BaselineRouterOptions) {
     this.id = opts.id ?? "baseline:beta-cells";
-    this.estimator = createBaselineEstimator(opts.pack);
+    this.estimator = createBaselineEstimator(opts.pack, opts.chartExport);
   }
   get hasBaselineCells(): boolean {
     return !!this.opts.pack.baseline;

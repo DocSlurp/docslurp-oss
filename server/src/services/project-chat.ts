@@ -52,6 +52,8 @@ import { beginChatTurn, chatTurnFailureReason } from "./billing/chat-turn-billin
 import { claimChatTurnAnswerId, currentChatTurn } from "../lib/chat-turn-context.js";
 import { sql } from "../db.js";
 import { loadChatProjectInventory } from "./chat-project-inventory.js";
+import { loadChatVisualCandidates } from "./visual-candidates.js";
+import { chartExportEnabledOnServer } from "./chart-export-availability.js";
 import { classifyUntrustedEvidenceText, logInjectionIndicators } from "./prompt-injection.js";
 import {
   hybridSearch,
@@ -1275,13 +1277,24 @@ async function chatProjectTurn(
     // No server-side scope decline on the agent path: the agent's own searches
     // decide relevance, and the model applies the fixed core rule (decline
     // unrelated requests politely and suggest related ones).
-    const [{ runChatMcpAgent }, projectInventory] = await Promise.all([
+    const suggestionsRequested = firstPartyApp && args.agent?.suggestions === true;
+    const chartExportEnabled = (project.pipeline as { chartExport?: { enabled?: unknown } } | null)?.chartExport?.enabled === true;
+    // Deployment kill switch off: chart export is never suggested (and the candidate query is skipped).
+    const chartExportOffered = chartExportEnabledOnServer();
+    const [{ runChatMcpAgent }, projectInventory, visualCandidates] = await Promise.all([
       import("./chat-mcp-agent.js"),
       // The inventory is a prompt hint: without it the agent still runs, just without counts.
-      loadChatProjectInventory(args.projectId, firstPartyApp && args.agent?.suggestions === true).catch((error: unknown) => {
+      loadChatProjectInventory(args.projectId, suggestionsRequested).catch((error: unknown) => {
         console.warn("[chat-agent] project inventory unavailable:", error instanceof Error ? error.message : String(error));
         return undefined;
       }),
+      // Suggestions only, and only while chart export is off: unexported charts are a reason to offer it.
+      suggestionsRequested && chartExportOffered && !chartExportEnabled && project.orgId
+        ? loadChatVisualCandidates({ orgId: project.orgId, projectId: args.projectId }).catch((error: unknown) => {
+          console.warn("[chat-agent] visual candidates unavailable:", error instanceof Error ? error.message : String(error));
+          return null;
+        })
+        : Promise.resolve(null),
     ]);
     const generated = await runChatMcpAgent({
       actor: args.actor, projectId: args.projectId, orgId: project.orgId, sessionId,
@@ -1289,6 +1302,7 @@ async function chatProjectTurn(
       projectWebTools: (project.pipeline as { webTools?: unknown } | null)?.webTools !== false,
       web: args.agent?.web, suggestions: firstPartyApp && args.agent?.suggestions === true,
       retrievalDefaults: searchSettings.retrievalDefaults, projectInventory,
+      ...(chartExportOffered ? { chartExport: { enabled: chartExportEnabled, unexportedVisuals: visualCandidates?.unexported ?? null } } : {}),
       instructionsFor: ({ webTools }) => composeAgentProjectInstructions({
         ingestInstructions: project.systemPrompt,
         searchInstructions: searchSettings.chat.searchInstructions,

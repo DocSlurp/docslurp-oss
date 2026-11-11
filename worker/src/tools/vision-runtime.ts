@@ -1,5 +1,5 @@
 import { currentProviderPolicy } from "../lib/provider-rate-limit.js";
-import { nitroBaseModel, speedBoostModel, withOpenRouterProviderPreferences, resolveSupportedModelIdWithWarning, withServedProviderRegion } from "@docslurp/shared";
+import { nitroBaseModel, speedBoostModel, type OpenRouterReasoning, withOpenRouterProviderPreferences, resolveSupportedModelIdWithWarning, withServedProviderRegion } from "@docslurp/shared";
 import { withObservation } from "@docslurp/shared/observability";
 import { ProviderRetryableError, providerFromBaseUrl } from "../lib/provider-retry.js";
 import {
@@ -221,8 +221,19 @@ export async function executeVisionRuntime(args: {
    * run (benchmarks).
    */
   gate: VisionRequestGate | null;
+  /**
+   * Prompt text sent in place of the config's template (chart export builds per-visual prompts). Bounded by
+   * `assertVisionPromptSize` like every prompt; the fallback route gets the same text.
+   */
+  promptText?: string;
+  /**
+   * Reasoning control sent in place of the model's page-transcription default (chart export pins the setting its
+   * evaluation measured). OpenRouter routes only; the fallback route gets the same value.
+   */
+  reasoning?: OpenRouterReasoning;
 }): Promise<VisionExecutionResult> {
-  const selected = normalizeVisionConfig(args.vision, args.cfg, args.outputSchema);
+  const normalized = normalizeVisionConfig(args.vision, args.cfg, args.outputSchema);
+  const selected = args.promptText !== undefined ? { ...normalized, prompt: args.promptText } : normalized;
   assertProviderAllowed(args.privacyMode, visionCall(selected));
 
   try {
@@ -345,7 +356,7 @@ function weightedGate(gate: VisionRequestGate, weightCents: number, route: Visio
 async function runRouteVisionRequest(
   route: VisionExecutionConfig,
   prompt: string,
-  args: { imagePath: string; mimeType?: string; outputPath: string; runner: CommandRunner; signal?: AbortSignal; cfg: Config; privacyMode: PrivacyMode; gate: VisionRequestGate | null },
+  args: { imagePath: string; mimeType?: string; outputPath: string; runner: CommandRunner; signal?: AbortSignal; cfg: Config; privacyMode: PrivacyMode; gate: VisionRequestGate | null; reasoning?: OpenRouterReasoning },
 ): Promise<VisionExecutionResult> {
   // The prompt can carry tenant schema labels: bounded before anything is admitted or sent.
   assertVisionPromptSize(prompt);
@@ -370,7 +381,7 @@ async function runRouteVisionRequest(
 async function sendRouteVisionRequest(
   route: VisionExecutionConfig,
   prompt: string,
-  args: { imagePath: string; mimeType?: string; outputPath: string; runner: CommandRunner; signal?: AbortSignal; cfg: Config; privacyMode: PrivacyMode; gate: VisionRequestGate | null },
+  args: { imagePath: string; mimeType?: string; outputPath: string; runner: CommandRunner; signal?: AbortSignal; cfg: Config; privacyMode: PrivacyMode; gate: VisionRequestGate | null; reasoning?: OpenRouterReasoning },
   billing: VisionRouteBilling,
   model: string,
   onUsageModel: (model: string) => void,
@@ -402,6 +413,7 @@ async function sendRouteVisionRequest(
     gate: args.gate ? weightedGate(args.gate, pricing.weightCents, servedRoute(route, args.cfg, model)) : null,
     runtime: route.runtime,
     prompt,
+    ...(args.reasoning ? { reasoning: args.reasoning } : {}),
   };
   if (!isPrivate) {
     return await runVisionRequest({ ...base, model: route.model, baseUrl: route.baseUrl, apiKey: resolveVisionApiKey(billing, route.baseUrl, args.cfg), swapPolicy: args.cfg.visionModelSwapPolicy, maxPrice: pricing.maxPrice, streaming: args.cfg.visionStreaming });
@@ -561,6 +573,8 @@ export async function runVisionRequest(args: {
   gate: VisionRequestGate | null;
   /** Prices and fee caps the request's guard weight assumes; sent to OpenRouter as `provider.max_price`. */
   maxPrice?: VisionMaxPrice | null;
+  /** Overrides the model's page-transcription reasoning default (OpenRouter only). */
+  reasoning?: OpenRouterReasoning;
 }): Promise<VisionRequestResult> {
   args = { ...args, model: isOpenRouterBaseUrl(args.baseUrl) ? speedBoostModel(resolveSupportedModelIdWithWarning(args.model), currentProviderPolicy().speedBoost === true) : resolveSupportedModelIdWithWarning(args.model) };
   return withObservation(
@@ -675,7 +689,7 @@ export async function runVisionRequest(args: {
         temperature: 0,
         max_tokens: visionMaxOutputTokens(args.model),
         // Page transcription never needs thinking: pin each verified model to its lowest accepted effort.
-        ...(isOpenRouter ? visionReasoningParams(args.model) : {}),
+        ...(isOpenRouter ? (args.reasoning ? { reasoning: { ...args.reasoning } } : visionReasoningParams(args.model)) : {}),
         // Per-model routing restricted to providers measured to transcribe faithfully.
         ...(isOpenRouter ? openRouterProviderParams(args.model) : {}),
       };

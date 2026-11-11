@@ -79,6 +79,24 @@ import {
 import type { PlanValidation, RoutePlan } from "@docslurp/shared";
 import { MIXED_SCAN_IMAGE_SIGNAL } from "@docslurp/shared";
 import { buildVisionPageFacts, recordPageFacts, type VisionPageOutcome } from "../pipeline/page-facts.js";
+import { VISUAL_CANDIDATE_STATS_KEY, type BBox } from "@docslurp/shared";
+import { chargeChartExports, chartExportCanSpend } from "../chart-export/billing.js";
+import { chartExportActive, chartExportConfigOf } from "../chart-export/config.js";
+import { chartExportReasoning, chartExportVisionConfig } from "../chart-export/model-selection.js";
+import { ChartExportSession, type ChartExportRunBudget } from "../chart-export/session.js";
+import {
+  clearChartExport,
+  finishChartExport,
+  prepareChartExport,
+  type ChartExportPassInput,
+  type PageImage,
+  type PreparedChartExport,
+} from "../chart-export/stage.js";
+import { quarantineChartPresence, storedRoutePlan } from "../chart-export/free-stats.js";
+import type { ChartModelClient } from "../chart-export/types.js";
+import { deterministicSourceKind } from "../chart-export/vm-extractor.js";
+import chartSharp from "../tools/isolated-image.js";
+import type { DocumentStageResult } from "../pipeline/checkpoints.js";
 
 export interface VisionPageOutput {
   pageNumber: number;
@@ -258,14 +276,18 @@ export class VisionExtractStage implements Stage {
   }
 
   async run(state: WorkflowState, signal?: AbortSignal): Promise<void> {
-    if (!state.run.pipeline.visionFallback) {
-      return;
-    }
     // Fast never reads a page; pages without a text layer were kept as page images (render-images).
-    if (!qualityAllowsPageReading(state.run.pipeline.quality)) {
-      return;
-    }
-    if (!(await this.visionAllowed(state))) {
+    const readsPages = state.run.pipeline.visionFallback
+      && qualityAllowsPageReading(state.run.pipeline.quality)
+      && (await this.visionAllowed(state));
+    const exportCharts = chartExportActive(state.run.pipeline);
+    if (!readsPages) {
+      // Chart export is its own opt-in: it runs without general vision (each model call is gated by privacy mode and
+      // the cost cap on its own), so enabling it and reindexing exports charts whatever the vision settings are. With
+      // export off the stage stays as inert as before (render-images records the free candidate stats); only a
+      // reprocess of a document an earlier run exported charts for removes those blocks.
+      if (exportCharts) await this.runChartExportOnly(state, signal);
+      else await this.clearStaleChartExports(state);
       return;
     }
 
@@ -304,6 +326,7 @@ export class VisionExtractStage implements Stage {
         const selection: VisionConfig = state.run.pipeline.vision;
         const route = resolveVisionRoute(selection);
         const routingV2 = resolveRunRoutingV2(state);
+        const chartExport = exportCharts ? this.chartExportSession(state, document) : null;
 
         console.log(
           `[extract-debug] stage=${this.name} document=${document.id} ` +
@@ -317,7 +340,7 @@ export class VisionExtractStage implements Stage {
           this.name,
           artifactSlot,
           "vision fallback manifest ready",
-          async () => {
+          async () => this.withChartExport(state, document, chartExport, signal, async () => {
             if (document.mimeType.startsWith("text/")) {
               await this.storage.putJson(key, {
                 documentId: document.id,
@@ -390,7 +413,7 @@ export class VisionExtractStage implements Stage {
 
             try {
               if (routed) {
-                routedResult = await this.extractRoutedPages(state, document, selection, routed, signal, key, skips);
+                routedResult = await this.extractRoutedPages(state, document, selection, routed, signal, key, skips, chartExport ?? undefined);
                 outputs = routedResult.outputs;
               } else {
                 outputs = await this.extractVisionPagesFromCache(
@@ -616,7 +639,7 @@ export class VisionExtractStage implements Stage {
                 })),
               },
             };
-          },
+          }),
           signal,
         );
       },
@@ -871,6 +894,7 @@ export class VisionExtractStage implements Stage {
     signal: AbortSignal | undefined,
     key: string,
     skips: Map<number, VisionPageSkip> = new Map(),
+    chartExport?: ChartExportSession,
   ): Promise<RoutedVisionResult> {
     const allow = (vision: VisionConfig) => allowHostedCall(state, visionCall(resolveVisionRoute(vision)), [document.id]);
     // Routed plans choose pixels themselves (no ink check); triage still says which pages keep usable text.
@@ -917,6 +941,23 @@ export class VisionExtractStage implements Stage {
             recordOcrReads(state.usageLedger, document.id, outcome, { stage: this.name, kind: document.mimeType.startsWith("image/") ? "image" : "pdf" });
           },
           hostedReader: createHostedOcrReader({ state, cfg: this.cfg, runner: this.runner }),
+          // Chart export on: chart/diagram crops go through the generator instead of the role's vision prompt.
+          ...(chartExport?.enabled ? {
+            exportVisual: async ({ role, scope, assignmentIndex, raster, pageNumber, signal: abort }) => {
+              const out = await chartExport.exportRouted({
+                assignment: { role, scope, pageNumber }, assignmentIndex, image: { path: raster.path, mimeType: raster.mimeType }, ...(abort ? { signal: abort } : {}),
+              });
+              const reading = (text: string, model: string): VisionPageOutput => ({
+                pageNumber, runtime: "chart-export", model, prompt: "chart-export", baseUrl: null,
+                latencyMs: out.usage.latencyMs, inputTokens: out.usage.inputTokens, outputTokens: out.usage.outputTokens, usageSource: "provider",
+                fallbackUsed: false, fallbackReason: null, text, costCents: out.usage.costCents,
+              });
+              if (out.result) return { output: reading(out.result.text, out.result.model), modelCalled: out.modelCalled };
+              return out.modelCalled
+                ? { output: null, modelCalled: true as const, spent: reading("", "chart-export") }
+                : { output: null, modelCalled: false as const };
+            },
+          } : {}),
           recordLocalUsage: (event) => {
             state.usageLedger.record({
                 provider: "vision-runtime",
@@ -1621,6 +1662,249 @@ export class VisionExtractStage implements Stage {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Chart export without general vision (vision fallback off, Fast quality, or vision refused by privacy mode): no page
+   * is re-read; each document runs only the chart export pass, which exports detected visuals from crops or page
+   * rasters. Documents run one at a time under a cost cap, like the vision path, so the cap cannot be overshot.
+   */
+  private async runChartExportOnly(state: WorkflowState, signal?: AbortSignal): Promise<void> {
+    await runDocuments(healthyDocuments(state), (state.run.pipeline.maxCostCents ?? 0) > 0 ? 1 : state.docConcurrency, async (document) => {
+      if (isCostCapExceeded(state)) {
+        console.log(`[extract-debug] stage=${this.name} document=${document.id} chart-export-skipped=cost-cap`);
+        return;
+      }
+      const session = this.chartExportSession(state, document);
+      await runDocumentStage(state, document, this.name, `${document.id}:vision`, "chart export ready", async () =>
+        this.withChartExport(state, document, session, signal, async () => ({
+          stats: { pages: 0, skipped: true, reason: "chart-export-only", selectedPages: [] },
+        })));
+    });
+  }
+
+  /**
+   * Export off and vision not reading pages: nothing runs, except that a partial reprocess of a document an earlier run
+   * exported charts for (its seeded `chart-export` slot) removes those blocks and `charts[]`. No slot, no read.
+   */
+  private async clearStaleChartExports(state: WorkflowState): Promise<void> {
+    const documents = healthyDocuments(state).filter((document) => state.artifactLedger.readDocument(document.id, "chart-export"));
+    if (documents.length === 0) return;
+    await runDocuments(documents, state.docConcurrency, async (document) => {
+      await this.clearChartExportFor(state, document);
+    });
+  }
+
+  private async clearChartExportFor(state: WorkflowState, document: import("../models.js").Document): Promise<void> {
+    try {
+      if (await clearChartExport({ document, run: state.run, storage: this.storage, ledger: state.artifactLedger })) {
+        console.log(`[chart-export] cleared previous export document=${document.id} reason=chart-export-off`);
+      }
+    } catch (error) {
+      console.warn(`[chart-export] clearing previous export failed document=${document.id} error=${toError(error).message}`);
+    }
+  }
+
+  /** Generator calls across this run's documents (per-run cap). */
+  private readonly chartRunBudgets = new WeakMap<WorkflowState, ChartExportRunBudget>();
+
+  /** Chart export for one document: config, admitted generator catalog, model client, usage ledger and caps. */
+  private chartExportSession(state: WorkflowState, document: import("../models.js").Document): ChartExportSession {
+    let runBudget = this.chartRunBudgets.get(state);
+    if (!runBudget) {
+      runBudget = { calls: 0 };
+      this.chartRunBudgets.set(state, runBudget);
+    }
+    const config = chartExportConfigOf(state.run.pipeline);
+    const session: ChartExportSession = new ChartExportSession({
+      documentId: document.id,
+      config,
+      catalog: () => buildRuntimeCatalog({ privacyMode: state.run.pipeline.privacyMode }).targets,
+      envModel: process.env.CHART_EXPORT_GENERATOR_MODEL?.trim() || null,
+      client: this.chartModelClient(state, document),
+      recordUsage: (input) => { state.usageLedger.record(input); },
+      // The session combines this with its per-document and per-run call caps.
+      canCallModel: () => chartExportCanSpend(state),
+      runBudget,
+      // Charged as soon as the read is done (idempotent), so the cost cap and credit lease see it before the next call.
+      onModelRead: (attempt) => {
+        chargeChartExports(state, { documentId: document.id, attempts: [attempt], calls: session.calls, config });
+      },
+    });
+    return session;
+  }
+
+  /**
+   * One chart-export model call through the vision runtime: privacy gate, the run's attempt guard, model-swap and
+   * fallback handling. Billed failures are recorded like any vision attempt; the generator records the success.
+   */
+  private chartModelClient(state: WorkflowState, document: import("../models.js").Document): ChartModelClient {
+    return {
+      complete: async (request) => {
+        // Never the project's vision fallback model: chart calls are priced per visual, not per page read.
+        const vision = chartExportVisionConfig(state.run.pipeline.vision, request.modelUri);
+        if (!(await allowHostedCall(state, visionCall(resolveVisionRoute(vision)), [document.id]))) {
+          throw new Error("chart export model refused by privacy mode");
+        }
+        const page = { documentId: document.id, pageNumber: request.pageNumber, rasterArtifactUri: "" };
+        const outputPath = `${request.image.path}.chart-export-${request.purpose}-${Date.now()}.json`;
+        return await withVisionCall(state, { documentId: document.id, pageNumber: request.pageNumber, purpose: "region" }, async (gate) => {
+          try {
+            const result = await executeVisionRuntime({
+              imagePath: request.image.path,
+              mimeType: request.image.mimeType,
+              outputPath,
+              vision,
+              cfg: this.cfg,
+              runner: this.runner,
+              privacyMode: state.run.pipeline.privacyMode,
+              outputSchema: null,
+              gate,
+              promptText: request.prompt,
+              ...(chartExportReasoning(request.modelUri) ? { reasoning: chartExportReasoning(request.modelUri)! } : {}),
+              ...(request.signal ? { signal: request.signal } : {}),
+            });
+            recordVisionFailureUsages(state, primaryFailureUsages(result.primaryFailure, this.cfg, page));
+            return {
+              text: result.text,
+              model: result.model,
+              provider: result.route.provider,
+              inputTokens: result.inputTokens,
+              outputTokens: result.outputTokens,
+              costCents: priceVisionResult(result, this.cfg),
+              latencyMs: result.latencyMs,
+              finishReason: result.finishReason ?? null,
+            };
+          } catch (error) {
+            if (!findVisionGuardStop(error)) {
+              this.recordFailedVisionAttempt(state, document, vision, { pageNumber: request.pageNumber, artifactUri: "" }, toError(error).message, error);
+            } else {
+              recordVisionFailureUsages(state, visionFailureUsages(error, vision, this.cfg, page));
+            }
+            throw error;
+          } finally {
+            await rm(outputPath, { force: true }).catch(() => undefined);
+          }
+        });
+      },
+    };
+  }
+
+  /**
+   * Runs the stage body inside the document's chart export pass: candidates and deterministic partials first (so
+   * routed crops in the body see them), the body, then the end-of-stage export. With export off (`session` null) the
+   * body runs alone, plus the removal of a previous run's blocks when a reprocess seeded them. Export is optional
+   * enrichment: its failure is logged and the stage result stands. Every generator call is billed per visual, whatever
+   * happens to the pass.
+   */
+  private async withChartExport(
+    state: WorkflowState,
+    document: import("../models.js").Document,
+    session: ChartExportSession | null,
+    signal: AbortSignal | undefined,
+    body: () => Promise<DocumentStageResult>,
+  ): Promise<DocumentStageResult> {
+    if (!session) {
+      const result = await body();
+      if (state.artifactLedger.readDocument(document.id, "chart-export")) await this.clearChartExportFor(state, document);
+      return result;
+    }
+    try {
+      let input: ChartExportPassInput | null = null;
+      let prepared: PreparedChartExport | null = null;
+      try {
+        input = await this.chartPassInput(state, document, session, signal);
+        prepared = await prepareChartExport(input);
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        console.warn(`[chart-export] prepare failed document=${document.id} error=${toError(error).message}`);
+      }
+      const result = await body();
+      if (!input || !prepared) return result;
+      try {
+        const pass = await finishChartExport(input, prepared);
+        const totals = session.calls.reduce((acc, call) => ({
+          calls: acc.calls + 1, inputTokens: acc.inputTokens + call.inputTokens, outputTokens: acc.outputTokens + call.outputTokens, costCents: acc.costCents + call.costCents,
+        }), { calls: 0, inputTokens: 0, outputTokens: 0, costCents: 0 });
+        return {
+          ...result,
+          stats: {
+            ...result.stats,
+            [VISUAL_CANDIDATE_STATS_KEY]: pass.stats,
+            chartExport: { ...totals, lowConfidenceCandidates: pass.lowConfidence, changedPages: pass.changedPages, artifactUri: pass.artifactUri },
+          },
+        };
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        console.warn(`[chart-export] pass failed document=${document.id} error=${toError(error).message}`);
+        return result;
+      }
+    } finally {
+      // Each read is charged when it completes (`onModelRead`); this sweep in `finally` catches anything not yet charged
+      // whatever happened to the pass. Idempotent per visual (ledger slot and event id), so a retried document stage
+      // never charges a visual twice.
+      if (session.modelReads.size > 0) {
+        chargeChartExports(state, { documentId: document.id, attempts: [...session.modelReads.values()], calls: session.calls, config: session.config });
+      }
+    }
+  }
+
+  /** The pass's inputs: stored plan or classifier pages, quarantine presence (Office sources), rasters and crops. */
+  private async chartPassInput(
+    state: WorkflowState,
+    document: import("../models.js").Document,
+    session: ChartExportSession,
+    signal: AbortSignal | undefined,
+  ): Promise<ChartExportPassInput> {
+    const routed = await this.loadRoutedExecution(state, document).catch(() => null);
+    // Without routed vision, any stored plan (shadow included) still names the chart and diagram pages.
+    const routedPlan = routed?.plan ?? await storedRoutePlan(this.storage, state.artifactLedger, document.id);
+    const adaptive = routedPlan ? null : await this.loadAdaptiveRouting(state, document.id);
+    const presence = deterministicSourceKind(document.mimeType) === "office"
+      ? await quarantineChartPresence(this.storage, state.artifactLedger, document.id)
+      : undefined;
+    return {
+      session,
+      document,
+      run: state.run,
+      storage: this.storage,
+      ledger: state.artifactLedger,
+      routedPlan,
+      legacyPages: adaptive?.pages ?? [],
+      ...(presence ? { presence } : {}),
+      pageImage: async (pageNumber) => {
+        const [raster] = await this.rasters.renderSelectedPages({ document, runId: state.run.id, pageNumbers: [pageNumber], signal });
+        if (!raster) return null;
+        const path = await this.storage.downloadToTempFile(raster.artifactKey, trustedTempDownloadPattern("docslurp-chart-export-raster-", document));
+        return {
+          path, mimeType: raster.mimeType ?? "image/png", dpi: raster.dpi ?? null, release: () => cleanupTempFile(path),
+          // A customer's own image (an image document) is never decoded here, so it is never cropped.
+          ...(raster.customerOriginal ? { customerOriginal: true } : {}),
+        } as PageImage;
+      },
+      cropImage: (image, bbox) => this.cropChartImage(image, bbox),
+      // Parser-VM time of the deterministic extractor: a cost-only event in this run's ledger, scoped to the document.
+      recordUsage: (event) => { state.usageLedger.enqueue(event); },
+      ...(signal ? { signal } : {}),
+    };
+  }
+
+  /** A placement crop of a page raster we rendered (page points -> raster pixels), through the isolated image codec. */
+  private async cropChartImage(image: PageImage & { customerOriginal?: boolean }, bbox: BBox): Promise<PageImage | null> {
+    if (image.customerOriginal || !(bbox.width > 0 && bbox.height > 0)) return null;
+    const scale = (image.dpi && image.dpi > 0 ? image.dpi : 150) / 72;
+    const decoded = chartSharp(image.path);
+    const meta = await decoded.metadata();
+    const width = meta.width ?? 0;
+    const height = meta.height ?? 0;
+    if (width < 1 || height < 1) return null;
+    const left = Math.max(0, Math.min(width - 1, Math.floor(bbox.x * scale)));
+    const top = Math.max(0, Math.min(height - 1, Math.floor(bbox.y * scale)));
+    const cropWidth = Math.max(1, Math.min(width - left, Math.ceil(bbox.width * scale)));
+    const cropHeight = Math.max(1, Math.min(height - top, Math.ceil(bbox.height * scale)));
+    const path = `${image.path}.chart-crop-${left}-${top}-${cropWidth}x${cropHeight}.png`;
+    await decoded.extract({ left, top, width: cropWidth, height: cropHeight }).png().toFile(path);
+    return { path, mimeType: "image/png", dpi: image.dpi ?? null, release: () => rm(path, { force: true }) };
   }
 
   private async reconcileExtractionArtifacts(

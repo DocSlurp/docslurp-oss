@@ -12,6 +12,7 @@ internal cost.
 | `pageCredits(mode, pages)`, `richPagesForOutputTokens(tokens)` | worker page charges (Fast at completion, Rich per model read) |
 | `mediaRichPages(kind, seconds)` | worker media charges, media spend reserves, upload estimates |
 | `featureCredits(feature, pages)` | worker optional-feature charges (summary, structured fields, knowledge graph, propositions) |
+| `visualExportCredits({ visuals, callsPerVisual, formats })` | chart & diagram export, per model-sourced visual (deterministic sources are never passed; core computes `callsPerVisual` from the per-format mode); the open default charges 0 |
 | `pageChargeShare(plan)` | the completion page charge of partial reprocess runs |
 | `speedBoostMultiplier(boost)` | unit charges of opt-in speed-boosted runs (must be a finite number ≥ 1) |
 | `storageCreditsPerMonth(bytes)`, `extractRetentionCredits(bytes, months)` | the daily storage meter, extract retention |

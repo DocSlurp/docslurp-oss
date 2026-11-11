@@ -21,7 +21,7 @@ export function installTestPricing(overrides: Partial<PricingProvider> = {}): Pr
 /**
  * Test prices. Per page, Fast 5 and Rich 250 credits per 1,000 pages; these and everything else is arbitrary and distinct, not any deployment's rule: one more Rich page per
  * started 800 output tokens past the first 800, a video minute two pages and an audio minute one, a feature 0.4 per started
- * 8 pages, storage 7 credits per GB-month, an LLM search three searches, speed boost 4x, a reindex-only run half the page
+ * 8 pages, an exported visual 0.07 per generator call, storage 7 credits per GB-month, an LLM search three searches, speed boost 4x, a reindex-only run half the page
  * charge, and remote sandboxes at 0.002 cents per core-second plus 0.0005 per GiB-second.
  */
 export const DISTINCT_TEST_PRICING: Partial<PricingProvider> = {
@@ -33,6 +33,7 @@ export const DISTINCT_TEST_PRICING: Partial<PricingProvider> = {
   searchCredits: (searches, { llmStrategies }) => Math.max(0, searches) * (llmStrategies ? 3 : 1) * 0.01,
   chatAnswerCredits: () => 2,
   featureCredits: (feature, pages) => (feature === "documentSummary" ? 0.3 : 0.4 * Math.max(1, Math.ceil(Math.max(0, pages) / 8))),
+  visualExportCredits: ({ visuals, callsPerVisual }) => Math.max(0, visuals) * Math.max(0, callsPerVisual) * 0.07,
   speedBoostMultiplier: (speedBoost) => (speedBoost ? 4 : 1),
   pageChargeShare: (plan) => (plan.reusedStages.length === 0 ? 1 : 0.5),
   extractRetentionCredits: (bytes, months) => (Math.max(0, bytes) / 1024 ** 3) * Math.max(0, months) * 11,

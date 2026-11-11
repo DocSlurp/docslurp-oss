@@ -23,6 +23,7 @@ import {
 } from "@docslurp/shared";
 import { buildChunkLocator, evidenceBoundary, mergeLocators } from "./chunk-locator.js";
 import { leadingFrontmatterLineCount, parseAtxHeading, plainHeadingText } from "./markdown-structure.js";
+import { stripVisualMarkerComments } from "./visual-markers.js";
 
 export interface CanonicalChunk {
   text: string;
@@ -337,7 +338,7 @@ export function buildCanonicalDocumentFromMarkdown(args: {
 export function canonicalDocumentToText(document: CanonicalDocument): string {
   return document.blocks
     .filter((block) => !isPageImageReferenceBlock(block))
-    .map((block) => block.text.trim())
+    .map((block) => stripVisualMarkerComments(block.text).trim())
     .filter(Boolean)
     .join("\n\n");
 }
@@ -360,8 +361,10 @@ export function buildCanonicalChunksFromDocument(
     throw new RangeError("maxTokens must be a positive safe integer");
   }
   const limits: SizeLimits = { maxChars, maxTokens: options?.maxTokens };
-  // Image-only pages carry no text to embed.
-  const meaningfulBlocks = document.blocks.filter((block) => block.text.trim().length > 0 && !isPageImageReferenceBlock(block));
+  // Image-only pages carry no text to embed. Chart export's visual group markers only matter to a reprocess: dropped.
+  const meaningfulBlocks = document.blocks
+    .map((block) => block.text.includes("docslurp:visual") ? { ...block, text: stripVisualMarkerComments(block.text) } : block)
+    .filter((block) => block.text.trim().length > 0 && !isPageImageReferenceBlock(block));
 
   if (meaningfulBlocks.length === 0) {
     return [{

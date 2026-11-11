@@ -1,5 +1,7 @@
 import {
   pricing,
+  type ChartExportConfig,
+  type ChartExportFormat,
   type Assignment,
   type AssignmentRole,
   type AssignmentScope,
@@ -10,6 +12,8 @@ import {
   type RoutingBudget,
   type RoutingTarget,
 } from "@docslurp/shared";
+
+import { FORMAT_MODE } from "../chart-export/config.js";
 
 // ---------------------------------------------------------------------------
 // Cost / latency estimation and the budget guard.
@@ -80,6 +84,56 @@ export const ESTIMATE_ASSUMPTIONS = {
   questionTokens: 18,
 } as const;
 
+/**
+ * Chart export (chart-export/): what one exported visual costs in generator calls. Derived formats share one spec
+ * call (plus a repair retry at `repairRate`); each direct format is its own call with the image. Token counts are
+ * assumptions until the chart-export evaluation (S4) reports measured ones.
+ */
+export const CHART_EXPORT_ESTIMATE = {
+  promptTokens: { spec: 700, direct: 200 },
+  specOutputTokens: { chart: 900, diagram: 700 },
+  directOutputTokens: { description: 150, mermaid: 400, "vega-lite": 700, matplotlib: 700, csv: 350 } as Record<ChartExportFormat, number>,
+  repairRate: 0.1,
+} as const;
+
+export interface ChartExportCallEstimate {
+  /** Expected calls, each sending the image once. */
+  calls: number;
+  promptTokens: number;
+  outputTokens: number;
+}
+
+/** Calls and tokens for one visual of `kind` under the project's formats and the per-format modes. */
+export function chartExportCallEstimate(
+  kind: "chart" | "diagram",
+  config: Pick<ChartExportConfig, "formats">,
+  modes: Record<ChartExportFormat, "derived" | "direct">,
+): ChartExportCallEstimate {
+  const E = CHART_EXPORT_ESTIMATE;
+  const formats = [...new Set(config.formats)].filter((f) => kind === "chart" || f === "description" || f === "mermaid");
+  const direct = formats.filter((f) => modes[f] === "direct");
+  const derived = formats.length > direct.length;
+  const specCalls = derived ? 1 + E.repairRate : 0;
+  return {
+    calls: specCalls + direct.length,
+    promptTokens: specCalls * E.promptTokens.spec + direct.length * E.promptTokens.direct,
+    outputTokens: specCalls * E.specOutputTokens[kind] + direct.reduce((sum, f) => sum + E.directOutputTokens[f], 0),
+  };
+}
+
+/** Chart export settings an estimate prices (modes default to `FORMAT_MODE`, chart-export/config.ts). */
+export interface ChartExportEstimateOptions {
+  config: Pick<ChartExportConfig, "enabled" | "formats" | "diagrams">;
+  modes?: Record<ChartExportFormat, "derived" | "direct">;
+}
+
+function chartExportFor(role: AssignmentRole, options: ChartExportEstimateOptions | undefined): ChartExportCallEstimate | null {
+  if (!options?.config.enabled) return null;
+  if (role === "chart-data") return chartExportCallEstimate("chart", options.config, options.modes ?? FORMAT_MODE);
+  if (role === "diagram" && options.config.diagrams) return chartExportCallEstimate("diagram", options.config, options.modes ?? FORMAT_MODE);
+  return null;
+}
+
 const slotCostUsdPerSec = () => (pricing().internalCost.workerSlotUsdPerHour() ?? 0) / 3600;
 
 export interface CostBreakdown {
@@ -97,7 +151,9 @@ export type EstimateCorrections = Record<
   { cost?: number; latency?: number }
 >;
 
-export function pageOutputTokens(role: AssignmentRole, page?: PageInput): number {
+export function pageOutputTokens(role: AssignmentRole, page?: PageInput, chartExport?: ChartExportEstimateOptions): number {
+  const exported = chartExportFor(role, chartExport);
+  if (exported) return Math.round(exported.outputTokens);
   const base = ESTIMATE_ASSUMPTIONS.outputTokensByRole[role] ?? 0;
   const words = page?.textFacts.wordCount ?? page?.features.native.wordCount;
   if (
@@ -126,6 +182,7 @@ export function estimateTargetCost(
   scope: AssignmentScope,
   page?: PageInput,
   corrections?: EstimateCorrections,
+  chartExport?: ChartExportEstimateOptions,
 ): CostBreakdown {
   const A = ESTIMATE_ASSUMPTIONS;
   let costUsd = 0;
@@ -138,8 +195,10 @@ export function estimateTargetCost(
     // free
   } else if (target.kind === "hosted-vlm") {
     const imgTok = (pr.imageTokensPerImage ?? A.defaultImageTokensPerImage) * scopeImageFraction(scope, page);
-    const inTok = imgTok + A.promptTokens;
-    const outTok = pageOutputTokens(role, page);
+    // Chart export sends the image once per generator call, with its own prompts.
+    const exported = chartExportFor(role, chartExport);
+    const inTok = exported ? exported.calls * imgTok + exported.promptTokens : imgTok + A.promptTokens;
+    const outTok = exported ? exported.outputTokens : pageOutputTokens(role, page);
     if (pr.inputUsdPerMTok === undefined || pr.outputUsdPerMTok === undefined) priced = false;
     costUsd = (inTok * (pr.inputUsdPerMTok ?? 0) + outTok * (pr.outputUsdPerMTok ?? 0)) / 1e6;
   } else {
@@ -317,6 +376,28 @@ export interface GuardResult {
 
 /** Roles that are enrichment: skipped (not deferred) when nothing cheaper exists. */
 const SKIPPABLE_ROLES = new Set<AssignmentRole>(["image-label", "chart-data", "diagram"]);
+
+/** The tag the budget guard writes into a downgraded assignment's reason (`budget(limit=...) downgraded from <id>`). */
+const BUDGET_DOWNGRADE_TAG = /(?:^|; )budget\(limit=\$[0-9.]+,floor=[0-9.e-]+\) downgraded from /;
+
+/**
+ * Whether the budget guard moved this assignment to a cheaper target to fit the chunk's budget. Chart export's end
+ * pass honours that: it does not spend a generator call on a chart role the guard priced out (a guard skip already
+ * turns the role into `skip`).
+ */
+export function budgetGuardDowngraded(assignment: Pick<Assignment, "reason">): boolean {
+  return BUDGET_DOWNGRADE_TAG.test(assignment.reason ?? "");
+}
+
+/** The tag the budget guard writes into a skipped enrichment role's reason (`budget(limit=...) skipped <role>`). */
+const BUDGET_SKIP_TAG = /(?:^|; )budget\(limit=\$[0-9.]+,floor=[0-9.e-]+\) skipped ([a-z-]+)$/;
+
+/** The role the budget guard skipped to fit the chunk's budget (the assignment is now `skip`), or null. */
+export function budgetGuardSkippedRole(assignment: Pick<Assignment, "role" | "reason">): AssignmentRole | null {
+  if (assignment.role !== "skip") return null;
+  const role = BUDGET_SKIP_TAG.exec(assignment.reason ?? "")?.[1];
+  return role && SKIPPABLE_ROLES.has(role as AssignmentRole) ? (role as AssignmentRole) : null;
+}
 
 const withEstimate = (
   p: PlannedAssignment,

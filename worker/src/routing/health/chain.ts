@@ -54,6 +54,8 @@ export interface DecisionChainOptions {
   documentId?: string;
   runId?: string;
   config?: Partial<PlannerConfig>;
+  /** Project chart export settings, passed to every chain router's estimator. */
+  chartExport?: DecisionModelRouterOptions["chartExport"];
   signal?: AbortSignal;
 }
 
@@ -114,6 +116,7 @@ export class DecisionModelChainRouter implements Router {
         documentId: this.o.documentId,
         runId: this.o.runId,
         config: this.o.config,
+        ...(this.o.chartExport ? { chartExport: this.o.chartExport } : {}),
         triageOptions: { ...entry.triageOptions, signal: this.o.signal },
         failOnTriageError: true,
         ...(entry.insetGate !== undefined ? { insetGate: entry.insetGate } : {}),

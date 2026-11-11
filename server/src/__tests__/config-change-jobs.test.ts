@@ -503,6 +503,37 @@ describe("job resource", () => {
   });
 });
 
+describe("chart export estimates", () => {
+  it("price recorded visual counts when every estimated document has them, else the per-page prior", async () => {
+    await seed({ credits: 10_000, documents: 2 });
+    // Seeded where the worker records them: the vision-extract stage stats of the document's run.
+    await sql`insert into document_run_stage_states (run_id, document_id, stage_name, status, stats)
+      values ('src', 'd0', 'vision-extract', 'completed', ${sql.json({ visualCandidates: { charts: 3, diagrams: 0, pagesWithUnexportedVisuals: [1], exported: 0, bySource: {} } })})`;
+    const features = pipeline({ chartExport: { enabled: true, formats: ["description", "mermaid"], diagrams: true, generatorModel: null } });
+    const estimate = (documentIds: string[], projectId = "w") => change.estimateWork({
+      features, stages: ["vision-extract"], documents: documentIds.length, pages: 10, orgId: "o1", env: { ...process.env, DOCSLURP_CHART_EXPORT: "on" },
+      visualScope: { projectId, documentIds },
+    });
+    expect((await estimate(["d0"])).basis).toMatch(/chart export: 3 model-read visuals \(recorded counts\)/);
+    // d1 has no recorded stats: the whole estimate falls back to the prior rather than under-counting.
+    expect((await estimate(["d0", "d1"])).basis).toMatch(/per-page planning prior/);
+    // Another project's id never reads these documents.
+    expect((await estimate(["d0"], "other")).basis).toMatch(/per-page planning prior/);
+  });
+
+  it("refuses to turn chart export on while the deployment kill switch is off", async () => {
+    await seed({ credits: 10_000, documents: 1 });
+    const { ChartExportUnavailableError } = await import("../services/chart-export-availability.js");
+    await expect(change.planProjectChange({
+      projectId: "w", userId: "u1", input: { pipeline: { chartExport: { enabled: true } } } as never, env: { DOCSLURP_CHART_EXPORT: "off" },
+    })).rejects.toBeInstanceOf(ChartExportUnavailableError);
+    const allowed = await change.planProjectChange({
+      projectId: "w", userId: "u1", input: { pipeline: { chartExport: { enabled: true } } } as never, env: { ...process.env, DOCSLURP_CHART_EXPORT: "on" },
+    });
+    expect(allowed?.nextPipeline.chartExport.enabled).toBe(true);
+  });
+});
+
 describe("inline estimates", () => {
   it("a slow estimate is still the mutation's estimate, with the estimate route beside it", async () => {
     const estimate = { pages: 1, documents: 1, billing: "disabled" as const, credits: null, seconds: null, basis: "x" };

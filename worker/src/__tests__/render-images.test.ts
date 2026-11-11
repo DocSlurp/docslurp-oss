@@ -125,3 +125,30 @@ describe("page-range shards", () => {
     // The stage pass asks for every page again; the raster cache (keyed per page) serves the sharded ones as hits.
   });
 });
+
+describe("free chart candidate stats", () => {
+  const classification = {
+    status: "ready", documentId: "doc", label: "mixed", confidence: 0.8, signals: [], suggestedPlaybook: "balanced",
+    documentComplexity: "mixed", dominantRoutes: ["chart-or-figure"], visionPolicy: "selective", specializedContentSummary: [],
+    evidence: { source: "canonical-document", artifactUri: "s3://bucket/c.json", characterCount: 1000, pageCount: 2 },
+    pages: [{ pageNumber: 2, route: "chart-or-figure", confidence: 0.8, textDensityScore: 0.1, signals: [], extractorHint: "vision-rescue", specializedContent: [] }],
+  };
+
+  it("records them whenever chart export is not active (vision on or off), reusing the classification it read, and leaves them to vision-extract when export is on", async () => {
+    const getJson = vi.fn(async () => { throw new Error("no read expected"); });
+    const stage = new RenderImagesStage({} as PdfRasterCache, { bucket: "bucket", getJson, putJson: vi.fn(), uri: (key: string) => `s3://bucket/${key}` } as unknown as ArtifactStore);
+    const document = { id: "doc", userId: "user", pageCount: 2, mimeType: "application/pdf" };
+    const stateWith = (pipeline: Record<string, unknown>) => ({ artifactLedger: DocumentArtifactLedger.create({}), run: { id: "run", pipeline } }) as unknown as WorkflowState;
+    const free = (stage as unknown as { freeVisualCandidates: (s: WorkflowState, d: unknown, c: unknown) => Promise<unknown> }).freeVisualCandidates.bind(stage);
+    // Keyword-only chart page: counted as low confidence, not as a priced candidate. No storage read (no slots).
+    expect(await free(stateWith({ visionFallback: true, chartExport: { enabled: true, formats: ["description"], diagrams: true, generatorModel: null } }), document, classification))
+      .toEqual({ stats: { charts: 0, diagrams: 0, pagesWithUnexportedVisuals: [], exported: 0, bySource: {} }, lowConfidence: 1 });
+    expect(getJson).not.toHaveBeenCalled();
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    try {
+      expect(await free(stateWith({ visionFallback: true, chartExport: { enabled: true, formats: ["description"], diagrams: true, generatorModel: null } }), document, classification)).toBeNull();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
