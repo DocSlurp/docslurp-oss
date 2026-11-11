@@ -47,7 +47,7 @@ async function record(row: Record<string, unknown>): Promise<void> {
     process.env.NODE_ENV = "production";
     process.env.DOCSLURP_CLAMAV_DB_DIR = sigs;
     process.env.DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS = "72";
-    setDefaultParserSandbox({ provider: provider as unknown as ParserSandboxProvider, config, isolation: { filesystem: true, network: "full", processes: true, location: "remote" }, tools: ["clamscan", "clamdscan", "python3"] });
+    setDefaultParserSandbox({ provider: provider as unknown as ParserSandboxProvider, config: config as unknown as Record<string, unknown>, isolation: { filesystem: true, network: "full", processes: true, location: "remote" }, tools: ["clamscan", "clamdscan", "python3"] });
     dir = await mkdtemp(path.join(tmpdir(), "docslurp-scanner-live-"));
   });
   afterAll(async () => {
