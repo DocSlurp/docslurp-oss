@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { fileFactsFromSniff, isSupportedFileType, sniffFileBytes } from "@docslurp/shared";
 import { unsupportedSourceReason } from "../extractors/registry.js";
+import { fromEnv } from "../config.js";
 import { inspectArchive } from "../lib/quarantine.js";
 import { crc32 } from "../tools/clamd-policy.js";
 
@@ -97,3 +98,51 @@ describe("ZIP64 members, which ClamAV skips, are refused by the archive inspecti
     expect(inspection).toMatchObject({ inspectable: false, issues: ["archive-inspection-failed"] });
   });
 });
+
+describe("a member past ClamAV's MaxFileSize is refused by the archive inspection's default limits (council re-check 2 matrix)", () => {
+  it("libclamav truncates such a member to MaxFileSize (1024 MiB) and scans only that, with no alert; the 128 MiB entry limit refuses it first", () => {
+    const config = fromEnv();
+    const policy = {
+      quarantineFailOpenOnToolMissing: false,
+      quarantineMaxArchiveEntries: config.quarantineMaxArchiveEntries,
+      quarantineMaxArchiveDepth: config.quarantineMaxArchiveDepth,
+      quarantineMaxTotalUncompressedBytes: config.quarantineMaxTotalUncompressedBytes,
+      quarantineMaxSingleEntryBytes: config.quarantineMaxSingleEntryBytes,
+      quarantineMaxExpansionRatio: config.quarantineMaxExpansionRatio,
+    };
+    expect(config.quarantineMaxSingleEntryBytes).toBeLessThan(1024 * 1024 * 1024);
+    // A plain (non-ZIP64) entry claiming 1100 MiB.
+    const plain = storedClaim(1100 * 1024 * 1024);
+    expect(inspectArchive(plain, "deck.pptx", policy)?.issues).toEqual(expect.arrayContaining(["archive-entry-size-limit"]));
+  });
+});
+
+/** One deflated entry whose headers claim `uncompressedSize` (16 bytes of payload; never inflated by the inspection). */
+function storedClaim(uncompressedSize: number): Buffer {
+  const name = Buffer.from("media/zeros.bin");
+  const data = Buffer.alloc(16);
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(20, 4);
+  local.writeUInt16LE(8, 8);
+  local.writeUInt32LE(data.length, 18);
+  local.writeUInt32LE(uncompressedSize, 22);
+  local.writeUInt16LE(name.length, 26);
+  const central = Buffer.alloc(46);
+  central.writeUInt32LE(0x02014b50, 0);
+  central.writeUInt16LE(20, 4);
+  central.writeUInt16LE(20, 6);
+  central.writeUInt16LE(8, 10);
+  central.writeUInt32LE(data.length, 20);
+  central.writeUInt32LE(uncompressedSize, 24);
+  central.writeUInt16LE(name.length, 28);
+  const body = Buffer.concat([local, name, data]);
+  const directory = Buffer.concat([central, name]);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(1, 8);
+  end.writeUInt16LE(1, 10);
+  end.writeUInt32LE(directory.length, 12);
+  end.writeUInt32LE(body.length, 16);
+  return Buffer.concat([body, directory, end]);
+}

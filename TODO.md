@@ -31,6 +31,10 @@
   in one scans OK (council re-check 2 matrix, `zip64-member-eicar.zip`). Top level, the archive inspection refuses ZIP64
   (archive-inspection-failed); a ZIP64 archive nested inside an accepted container is unscanned. Extractors never open
   nested archives. Decide: report upstream and pin a fixed ClamAV, or have the VM inspection walk nested ZIPs.
+- [ ] libclamav 1.4.3 truncates an archive member larger than MaxFileSize (1024 MiB) to that size and scans only the
+  prefix, with no alert even under AlertExceedsMax ("trimming output size to maxfilesize"); bytes past 1 GiB of a member
+  are never scanned. Top level the 128 MiB entry limit refuses it; nested inside an accepted container it is a gap (the
+  same remedy as nested ZIP64 applies).
 - [ ] libclamav 1.4.3 decrypts an unfiltered stream of an owner-password-only PDF, discards the plaintext and scans the
   ciphertext (debug: "no non-forced filters decoded, returning raw stream"); Flate streams are scanned. So an owner-only
   PDF can carry content ClamAV never reads, which our PDF extractors (in the VM) do read. Decide: decrypt owner-only PDFs
