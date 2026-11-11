@@ -329,3 +329,7 @@ aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" --endpoint-url "
 ```
 
 Merge this rule into any existing lifecycle configuration (such as incomplete-multipart expiry) rather than replacing it.
+
+## Worker notification events
+
+Workers never send email. Run completed/failed, extraction plausibility warnings, budget alerts and secret-expiry alerts are written to the in-app notification inbox and emitted as `notification.<event>` OTLP log records (logger `docslurp.events`), so they show up in SigNoz with the run, document, project and organization IDs as attributes. The API sends email only for sign-in codes and links, organization and project invites, and export or extract downloads, and it never sends to reserved domains (`*.local`, `*.test`, `*.invalid`, `*.example`, `localhost`, `example.com/net/org`); those sends are logged as `provider=suppressed`.
