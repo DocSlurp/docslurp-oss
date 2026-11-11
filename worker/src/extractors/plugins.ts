@@ -20,8 +20,9 @@ import { accessSync, constants as fsConstants } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { dopplerBinDir, dopplerConverterPath } from "../tools/doppler.js";
 import path from "node:path";
+import { dopplerImageExtractEnabled } from "./doppler-figures.js";
 import {
-  localPdfModeRequested, PDF_EXTRACTION_UNCONFIGURED, resolvePdfMode, sandboxedPdfConfigured, type EmbeddedImageFacts, type EmbeddedImageMediaType, type MediaMap, type OrientationResultRecord,
+  DOPPLER_IMAGE_EXTRACT_ENV, localPdfModeRequested, PDF_EXTRACTION_UNCONFIGURED, resolvePdfMode, sandboxedPdfConfigured, type EmbeddedImageFacts, type EmbeddedImageMediaType, type MediaMap, type OrientationResultRecord,
 } from "@docslurp/shared";
 
 import { SandboxRunError, type SandboxResult } from "../sandbox/types.js";
@@ -42,6 +43,13 @@ export interface SandboxedPdfJob {
   output: string;
   /** Return embedded images beside the Markdown, from the same VM job. Bounds in pixels, 1..4096. */
   embeddedImages?: { minWidth: number; minHeight: number };
+  /**
+   * Return Doppler's figure crops (`pdftomarkdown --images-dir`) from the same VM job: the provider writes the validated
+   * folder (`manifest.json` plus `<id>.<format>` files, docs/extraction/doppler-figures.md) into `dir`, which the host
+   * created empty, and reports `figures` on its result. Only when the provider declares `figures` and
+   * DOCSLURP_DOPPLER_IMAGE_EXTRACT is on.
+   */
+  figures?: { dir: string };
 }
 
 export interface SandboxedPdfRunContext {
@@ -90,6 +98,15 @@ export interface SandboxedPdfResult extends SandboxResult {
    * document. Omit when unknown; missing or malformed facts never authorize a read.
    */
   layoutFacts?: unknown;
+  /**
+   * Required when the job asked for `figures`: `extracted` when the provider wrote the folder (the host still validates
+   * all of it), `failed` when Doppler kept the Markdown but could not extract images (its exit status 5). `reason` is raw
+   * diagnostic text for telemetry only; it never reaches a user or an API response.
+   */
+  figures?: ({ status: "extracted" } | { status: "failed"; reason: string }) & {
+    /** Doppler's report `images_confined`: whether its renderer confined itself in the VM. Omit when unknown. */
+    confined?: boolean;
+  };
 }
 
 /** Upper bound on a provider's Markdown output, checked before the host reads it. */
@@ -116,6 +133,8 @@ export interface SandboxedPdfExtractorProvider {
     /** Read and fully validate the images a run wrote for `output`. Throws on anything malformed. */
     read(output: string, signal?: AbortSignal): Promise<EmbeddedImageSet>;
   };
+  /** Present when the provider can return Doppler figure crops beside the Markdown (SandboxedPdfJob.figures). */
+  figures?: { producerId: string };
   /** Page-shard cost profile: calibration refines the prior from observed shard timings under `key`. */
   shardProfile?: { key: string; prior: ShardCostProfile };
   /**
@@ -246,6 +265,7 @@ export function registerExtractorPlugin(plugin: ExtractorPlugin): void {
     if (pdf.embeddedImages && (typeof pdf.embeddedImages.read !== "function" || !PROVIDER_ID.test(pdf.embeddedImages.producerId ?? ""))) {
       throw new Error("Sandboxed PDF provider embeddedImages needs read() and a producerId");
     }
+    if (pdf.figures && !PROVIDER_ID.test(pdf.figures.producerId ?? "")) throw new Error("Sandboxed PDF provider figures needs a producerId");
   }
   const orientation = plugin.imageOrientation;
   if (orientation) {
@@ -279,6 +299,28 @@ export function requireSandboxedPdfProvider(): SandboxedPdfExtractorProvider {
 
 const reportedOcrPages = new WeakMap<SandboxedPdfJob, number[]>();
 const reportedLayoutFacts = new WeakMap<SandboxedPdfJob, Map<number, PageLayoutFacts>>();
+const reportedFigures = new WeakMap<SandboxedPdfJob, SandboxedPdfFigureOutcome>();
+
+/** What a figure request came back as. `reason` is telemetry only (bounded, control characters removed). */
+export type SandboxedPdfFigureOutcome = ({ status: "extracted" } | { status: "failed"; reason: string }) & { confined?: boolean };
+const MAX_FIGURE_REASON_CHARS = 500;
+
+function figureOutcome(job: SandboxedPdfJob, raw: unknown): SandboxedPdfFigureOutcome | undefined {
+  if (!job.figures) {
+    if (raw !== undefined) throw new SandboxRunError("Sandboxed PDF provider returned unrequested figures");
+    return undefined;
+  }
+  const value = raw as { status?: unknown; reason?: unknown; confined?: unknown } | undefined;
+  const confined = typeof value?.confined === "boolean" ? { confined: value.confined } : {};
+  if (value?.status === "extracted") return { status: "extracted", ...confined };
+  if (value?.status === "failed") {
+    // eslint-disable-next-line no-control-regex
+    const reason = typeof value.reason === "string" ? value.reason.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").slice(0, MAX_FIGURE_REASON_CHARS) : "";
+    return { status: "failed", reason: reason || "unspecified", ...confined };
+  }
+  // A provider that was asked and did not answer extracted nothing the host may trust.
+  return { status: "failed", reason: "provider-reported-no-figure-outcome" };
+}
 
 /**
  * Validate a provider run's `ocrPages` against the page count and keep them for the job. A malformed list refuses the
@@ -287,6 +329,10 @@ const reportedLayoutFacts = new WeakMap<SandboxedPdfJob, Map<number, PageLayoutF
 export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: SandboxedPdfResult, pages: number): SandboxedPdfResult {
   reportedOcrPages.delete(job);
   reportedLayoutFacts.delete(job);
+  reportedFigures.delete(job);
+  const figures = figureOutcome(job, result.figures);
+  if (figures) reportedFigures.set(job, figures);
+  if (result.figures !== undefined) result = { ...result, figures: undefined };
   if (result.layoutFacts !== undefined) {
     // Routing evidence, not billing evidence: a malformed payload is dropped (routing then has no layout facts), never repaired.
     const layout = parsePageLayoutFacts(result.layoutFacts, Number.isSafeInteger(pages) && pages > 0 ? pages : MAX_REPORTED_PAGES);
@@ -309,6 +355,11 @@ export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: Sandboxed
 /** The validated layout facts a finished job returned, or undefined when it returned none usable. */
 export function sandboxedPdfLayoutFacts(job: SandboxedPdfJob): Map<number, PageLayoutFacts> | undefined {
   return reportedLayoutFacts.get(job);
+}
+
+/** The figure outcome of a finished job that asked for figures, or undefined when it did not ask. */
+export function sandboxedPdfFigures(job: SandboxedPdfJob): SandboxedPdfFigureOutcome | undefined {
+  return reportedFigures.get(job);
 }
 
 /** The validated pages a finished job reported it OCR'd, or undefined when the provider did not say. */
@@ -394,7 +445,8 @@ export async function loadExtractorPlugins(
  *  - a VM selection (or the service profile) without a sandboxed PDF provider;
  *  - a provider loaded without the VM selection (PDFs would otherwise not run in it);
  *  - DOCSLURP_PDF_MODE=local beside a VM selection or a loaded provider, or outside DOCSLURP_SERVICE_PROFILE=self-hosted, or
- *    without Doppler's pdftomarkdown installed.
+ *    without Doppler's pdftomarkdown installed;
+ *  - DOCSLURP_DOPPLER_IMAGE_EXTRACT on without the VM route and a provider that returns figures.
  * With neither a VM nor local mode the worker starts (other formats still run) and says loudly that PDFs are refused.
  */
 export function assertExtractorPluginConfiguration(env: NodeJS.ProcessEnv = process.env, deps: { dopplerInstalled?: () => boolean } = {}): void {
@@ -416,6 +468,13 @@ export function assertExtractorPluginConfiguration(env: NodeJS.ProcessEnv = proc
       throw new Error(`DOCSLURP_PDF_MODE=local needs Doppler's pdftomarkdown and pdfpagecount at ${dopplerBinDir(env)}, and prlimit on PATH (worker images ship them; DOCSLURP_DOPPLER_BIN_DIR points elsewhere); refusing to start`);
     }
     console.warn("[pdf] mode=local: Doppler (doppler-md) parses customer PDFs on the worker host, in the parser sandbox, not a VM (customer-owned execution)");
+  }
+  // Figure extraction is a VM feature: Doppler crops figures only inside the PDF VM, never on this host.
+  if (dopplerImageExtractEnabled(env)) {
+    if (!sandboxed || !sandboxedPdfProvider()?.figures) {
+      throw new Error(`${DOPPLER_IMAGE_EXTRACT_ENV}=1 needs the ${VM_PDF_EXTRACTOR_ID} PDF route with a provider that returns Doppler figures; refusing to start`);
+    }
+    console.log(`[pdf] doppler figures on (${DOPPLER_IMAGE_EXTRACT_ENV}=1)`);
   }
   const mode = resolvePdfMode(env);
   if (mode === "off") console.error(`[pdf] mode=off: ${PDF_EXTRACTION_UNCONFIGURED}; PDFs will be refused`);

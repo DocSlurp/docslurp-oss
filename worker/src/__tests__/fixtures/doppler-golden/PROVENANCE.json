@@ -1,0 +1,13 @@
+{
+ "doppler": {
+  "repository": "https://github.com/DocSlurp/doppler",
+  "branch": "feat/image-extraction",
+  "commit": "2a25c323"
+ },
+ "command": "PDFTOTEXT=build/utils/pdftotext PDFREGIONS=build/utils/pdfregions pdftomarkdown --stream --html --report --markers --images-max 2048 --images-max-bytes 67108864 --images-max-file-bytes 8388608 --images-repeats link --images-timeout 60 --images-confine auto --images-dir figures -f 1 -l 4 -- source.pdf > doc.md",
+ "note": "Real Doppler output, regenerate when the Doppler pin moves. --images-pages was not in this build. Inputs are authored (make_pdf.py: one image object on pages 1, 2 and 4, a pixel-identical twin twice on page 3, a hairline image; source.typ: one image on pages 1, 2 and 4 plus a vector drawing on page 3).",
+ "inputs": {
+  "repeats/source.pdf": "017a0711bbf5322f99af9446a18d1181da4e9f37e26961eadfbe75a9ed50ddb4",
+  "typst/source.pdf": "d3a15f5479c004def97b2ee048dd2bff4d6a393864c0c89ab446d7189f92ad21"
+ }
+}

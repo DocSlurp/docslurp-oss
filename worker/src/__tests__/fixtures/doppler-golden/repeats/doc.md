@@ -1,0 +1,19 @@
+This is a benign paragraph line number 1 used to give the page some body text. This is a benign paragraph line number 2 used to give the page some body text. This is a benign paragraph line number 3 used to give the page some body text. This is a benign paragraph line number 4 used to give the page some body text. This is a benign paragraph line number 5 used to give the page some body text.
+
+![image](doppler-image:p1.1)
+
+This is a benign paragraph line number 0 used to give the page some body text. This is a benign paragraph line number 1 used to give the page some body text. This is a benign paragraph line number 2 used to give the page some body text. This is a benign paragraph line number 3 used to give the page some body text. This is a benign paragraph line number 4 used to give the page some body text. This is a benign paragraph line number 5 used to give the page some body text.This is a benign paragraph line number 1 used to give the page some body text. This is a benign paragraph line number 2 used to give the page some body text. This is a benign paragraph line number 3 used to give the page some body text. This is a benign paragraph line number 4 used to give the page some body text. This is a benign paragraph line number 5 used to give the page some body text.
+
+![image](doppler-image:p2.1)
+
+This is a benign paragraph line number 0 used to give the page some body text. This is a benign paragraph line number 1 used to give the page some body text. This is a benign paragraph line number 2 used to give the page some body text. This is a benign paragraph line number 3 used to give the page some body text. This is a benign paragraph line number 4 used to give the page some body text. This is a benign paragraph line number 5 used to give the page some body text.This is a benign paragraph line number 1 used to give the page some body text. This is a benign paragraph line number 2 used to give the page some body text. This is a benign paragraph line number 3 used to give the page some body text. This is a benign paragraph line number 4 used to give the page some body text. This is a benign paragraph line number 5 used to give the page some body text.
+
+![image](doppler-image:p3.1)
+
+This is a benign paragraph line number 0 used to give the page some body text. This is a benign paragraph line number 1 used to give the page some body text. This is a benign paragraph line number 2 used to give the page some body text. This is a benign paragraph line number 3 used to give the page some body text. This is a benign paragraph line number 4 used to give the page some body text. This is a benign paragraph line number 5 used to give the page some body text.
+
+![image](doppler-image:p3.2)This is a benign paragraph line number 1 used to give the page some body text. This is a benign paragraph line number 2 used to give the page some body text. This is a benign paragraph line number 3 used to give the page some body text. This is a benign paragraph line number 4 used to give the page some body text. This is a benign paragraph line number 5 used to give the page some body text.
+
+![image](doppler-image:p4.1)
+
+This is a benign paragraph line number 0 used to give the page some body text. This is a benign paragraph line number 1 used to give the page some body text. This is a benign paragraph line number 2 used to give the page some body text. This is a benign paragraph line number 3 used to give the page some body text. This is a benign paragraph line number 4 used to give the page some body text. This is a benign paragraph line number 5 used to give the page some body text.

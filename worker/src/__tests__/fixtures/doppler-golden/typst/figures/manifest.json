@@ -1,0 +1,8 @@
+{"version":1,"dpi":150,"min_side_pt":11.52,"repeats":"link",
+"images":[
+{"id":"p1.1","page":1,"bbox":[72.00,125.01,272.00,258.34],"kind":"picture","fate":"block","file":"p1.1.webp","format":"webp","bytes":11750,"sha256":"6bc3e9994047a4f5396e308b03b0e7487ad54ba67dee30112759e0b751351089","width":417,"height":278},
+{"id":"p2.1","page":2,"bbox":[72.00,106.83,272.00,240.16],"kind":"picture","fate":"watermark","file":null,"format":null,"bytes":0,"sha256":null,"width":0,"height":0,"skipped":"fate"},
+{"id":"p3.g1","page":3,"bbox":[72.00,100.78,372.00,300.78],"kind":"vector","fate":"block","file":"p3.g1.svg","format":"svg","bytes":3372,"sha256":"6c3ec5e81eda86b3242f4230ce740ffa66eb6971adbec7f4a02bc6655607caca","width":300,"height":200},
+{"id":"p4.1","page":4,"bbox":[72.00,106.83,272.00,240.16],"kind":"picture","fate":"watermark","file":null,"format":null,"bytes":0,"sha256":null,"width":0,"height":0,"skipped":"fate"}
+],
+"totals":{"images":4,"marked":2,"written":2,"bytes":15122,"repeats":0,"small":0,"fallbacks":0,"errors":0}}

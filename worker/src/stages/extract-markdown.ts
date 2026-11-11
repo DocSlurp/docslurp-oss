@@ -1,8 +1,9 @@
 import { reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { EMBEDDED_IMAGE_TARGETS, embeddedImageGraph, resolveEmbeddedImageRequest } from "../extractors/embedded-images.js";
 import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
+import { DopplerFigureRejection, dopplerImageExtractEnabled, readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler-figures.js";
 import {
-  SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, requireSandboxedPdfProvider, sandboxedPdfLayoutFacts, sandboxedPdfOcrPages,
+  SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, requireSandboxedPdfProvider, sandboxedPdfFigures, sandboxedPdfProvider, sandboxedPdfLayoutFacts, sandboxedPdfOcrPages,
 } from "../extractors/plugins.js";
 import { buildSummaryEvidence } from "./summary-evidence.js";
 import type { CapacityLeaseStore } from "../media/capacity/types.js";
@@ -502,6 +503,15 @@ export class ExtractMarkdownStage implements Stage {
                     if (prepared?.plan.sandboxedPdf) prepared.plan.sandboxedPdf.embeddedImages = { minWidth: requestedImages.minWidth, minHeight: requestedImages.minHeight };
                   }
                 }
+                // Doppler figures (DOCSLURP_DOPPLER_IMAGE_EXTRACT): from the same VM job, into an empty host folder per candidate.
+                if (isPdf && dopplerImageExtractEnabled() && sandboxedPdfProvider()?.figures) {
+                  for (const prepared of [isolated.primary.extractor, isolated.secondary?.extractor]) {
+                    if (!prepared?.plan.sandboxedPdf) continue;
+                    const dir = await mkdtemp(path.join(path.dirname(prepared.plan.sandboxedPdf.output), ".doppler-figures-"));
+                    candidateDirs.push(dir);
+                    prepared.plan.sandboxedPdf.figures = { dir };
+                  }
+                }
                 const [resultA, resultB] = await this.collectCandidateResults({
                   primary: isolated.primary.extractor,
                   primaryKey: candidateAKey,
@@ -967,6 +977,12 @@ export class ExtractMarkdownStage implements Stage {
                   if (pageLayoutFactsUri) {
                     state.artifactLedger.recordDocument(document.id, "page-layout-facts", pageLayoutFactsUri);
                   }
+                  // Doppler figures of the winning VM candidate: validated whole, stored under the document's artifact root, and
+                  // recorded as document artifact slots so the artifact and PII guards (and the file proxy) apply to each file.
+                  const dopplerFigures = winningCandidate.figures
+                    ? await this.storeWinningDopplerFigures({ document, runId: state.run.id, candidate: winningCandidate, markdown: winningText, signal })
+                    : null;
+                  for (const { slot, uri } of dopplerFigures?.slots ?? []) state.artifactLedger.recordDocument(document.id, slot, uri);
                   if (graph) {
                     state.artifactLedger.recordDocument(document.id, "artifact-graph", graph.manifestUri);
                     // Exact child URIs are authorized and withheld by the existing artifact/PII guards.
@@ -1130,6 +1146,7 @@ export class ExtractMarkdownStage implements Stage {
                       artifactGraphOutputCount: graph?.outputCount ?? 0,
                       artifactGraphLatencyMs: graph?.latencyMs ?? 0,
                       artifactGraphStats: graph?.stats ?? null,
+                      ...(dopplerFigures ? { dopplerFigures: dopplerFigures.stats } : {}),
                       canonicalUri,
                       parserArtifactUri:
                         parserAwareCanonicalDocument.source.parserArtifactUri,
@@ -1958,6 +1975,7 @@ export class ExtractMarkdownStage implements Stage {
     await upload.done;
     const ocrPages = plan.sandboxedPdf ? sandboxedPdfOcrPages(plan.sandboxedPdf) : undefined;
     const layoutFacts = plan.sandboxedPdf ? sandboxedPdfLayoutFacts(plan.sandboxedPdf) : undefined;
+    const figureOutcome = plan.sandboxedPdf?.figures ? sandboxedPdfFigures(plan.sandboxedPdf) : undefined;
 
     return {
       label,
@@ -1967,6 +1985,7 @@ export class ExtractMarkdownStage implements Stage {
       tempTextPath: outputPath,
       ...(ocrPages ? { ocrPages: [...ocrPages] } : {}),
       ...(layoutFacts ? { layoutFacts } : {}),
+      ...(plan.sandboxedPdf?.figures && figureOutcome ? { figures: { dir: plan.sandboxedPdf.figures.dir, outcome: figureOutcome } } : {}),
     };
   }
 
@@ -2921,6 +2940,38 @@ export class ExtractMarkdownStage implements Stage {
     }
     await this.runner.run(plan, withTimeoutSignal(args.signal, args.timeoutMs));
     return await readJsonFile(args.outputPath);
+  }
+
+  /**
+   * Validate and store the winning candidate's Doppler figures. Never fails the document: a provider that could not
+   * extract images (Doppler exit 5) or a folder that fails validation leaves the Markdown as it is and stores no figure.
+   * The raw reason goes to telemetry (this log line) only; stage stats carry a fixed status.
+   */
+  private async storeWinningDopplerFigures(args: {
+    document: import("../models.js").Document; runId: string; candidate: ExtractedCandidate; markdown: string; signal?: AbortSignal;
+  }): Promise<{ slots: Array<{ slot: string; uri: string }>; stats: Record<string, unknown> }> {
+    const figures = args.candidate.figures!;
+    const started = Date.now();
+    // Whether Doppler's renderer confined itself (pdfregions Landlock + seccomp inside the VM): telemetry until it is required.
+    const imagesConfined = figures.outcome.confined ?? null;
+    if (figures.outcome.status === "failed") {
+      console.warn(`[doppler-figures] document=${args.document.id} status=extraction-failed confined=${imagesConfined} reason=${JSON.stringify(figures.outcome.reason)}`);
+      pushPerfMetric({ metric: "doppler-figures-failed", value: 1, unit: "count", tags: ["doppler-figures", "extraction-failed"], metadata: { documentId: args.document.id } });
+      return { slots: [], stats: { status: "extraction-failed", imagesConfined } };
+    }
+    let validated;
+    try {
+      validated = await readDopplerFigureDir(figures.dir, { pageCount: args.document.pageCount, signal: args.signal });
+    } catch (error) {
+      if (!(error instanceof DopplerFigureRejection)) throw error;
+      console.warn(`[doppler-figures] document=${args.document.id} status=rejected rule=${error.rule} confined=${imagesConfined}`);
+      pushPerfMetric({ metric: "doppler-figures-failed", value: 1, unit: "count", tags: ["doppler-figures", "rejected"], metadata: { documentId: args.document.id, rule: error.rule } });
+      return { slots: [], stats: { status: "rejected", rule: error.rule, imagesConfined } };
+    }
+    const stored = await storeDopplerFigures({ storage: this.storage, document: args.document, runId: args.runId, figures: validated, markdown: args.markdown, signal: args.signal });
+    const stats = { ...stored.stats, imagesConfined, validateMs: Date.now() - started - stored.stats.storeMs };
+    console.log(`[doppler-figures] document=${args.document.id} status=stored entries=${stats.entries} files=${stats.files} bytes=${stats.bytes} markers=${stats.markers} resolved=${stats.markersResolved} confined=${imagesConfined} ms=${Date.now() - started}`);
+    return { slots: stored.slots, stats };
   }
 
   private async enrichDocumentArtifacts(args: {

