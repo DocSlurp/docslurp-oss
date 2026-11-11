@@ -80,3 +80,16 @@ it.each(["","true","not-a-policy"])("invalid policy refuses before creating work
     expect(log).toHaveBeenCalledWith("[native-chat] admission_refused invalid_policy");
   } finally {log.mockRestore();}
 });
+it("stores the composer options with the launch",async()=>{
+  vi.stubEnv("DOCSLURP_DURABLE_CHAT","1");vi.stubEnv("DOCSLURP_DURABLE_CHAT_ADMISSION","1");state.admitted=true;
+  state.create.mockResolvedValueOnce({id});state.launch.mockResolvedValueOnce({operationId:id,rootId:id,status:"queued"});
+  const options={speedBoost:true,webTools:true,suggestions:false,retrieval:{resultCount:6},filters:{documentIds:["doc-1"]}};
+  expect((await app.request("/",{method:"POST",body:JSON.stringify({q:"hello",...options})})).status).toBe(202);
+  expect(state.create).toHaveBeenCalledWith(expect.objectContaining({input:expect.objectContaining({q:"hello",...options})}));
+});
+it.each([{webTools:"yes"},{retrieval:{resultCount:500}},{filters:{projectId:"other"}},{orgId:"other-org"}])("refuses malformed composer options before creating work: %j",async extra=>{
+  vi.stubEnv("DOCSLURP_DURABLE_CHAT","1");vi.stubEnv("DOCSLURP_DURABLE_CHAT_ADMISSION","1");state.admitted=true;
+  const response=await app.request("/",{method:"POST",body:JSON.stringify({q:"hello",...extra})});
+  expect(response.status).toBeGreaterThanOrEqual(400);
+  expect(state.create).not.toHaveBeenCalled();
+});

@@ -3,13 +3,14 @@ import { nativeOperations } from "../agent-runtime/runtime.js";
 import { sql } from "../db.js";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
+import { durableChatOptionsShape } from "../agent-runtime/chat-turn-options.js";
 import { getRequestActor, loadActorScopedProject, resolveActorProjectId } from "../lib/request-actor.js";
 import { authorizedChatOperationSnapshot, authorizeChatOperation } from "../services/chat-operation-access.js";
 import { cancelChatOperation, launchChatOperation, readChatOperation } from "../services/chat-operations.js";
 import { projectChatDisabledBody } from "../services/project-chat.js";
 import { hasRealtimeCanaryMembership, revalidateRealtimeSession } from "../realtime/session.js";
 
-const launchSchema = z.object({ q: z.string().trim().min(1).max(64_000), project: z.string().max(128).optional(), sessionId: z.string().max(128).optional(), model: z.string().max(128).optional() }).strict();
+const launchSchema = z.object({ q: z.string().trim().min(1).max(64_000), project: z.string().max(128).optional(), sessionId: z.string().max(128).optional(), model: z.string().max(128).optional(), ...durableChatOptionsShape }).strict();
 function operationErrorResponse(error: unknown, c: Context) {
   if (error instanceof Error && error.message === "durable_chat_invalid_admission_policy") console.error("[native-chat] admission_refused invalid_policy");
   return error instanceof Error && error.message === "operation_forbidden"
