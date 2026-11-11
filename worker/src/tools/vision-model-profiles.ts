@@ -8,7 +8,6 @@ import { openRouterReasoningParams, type OpenRouterReasoning } from "@docslurp/s
 
 import { unwrapWholeMarkdownFence } from "./vision-markdown-fence.js";
 import { normalizeMarkdownMathDelimiters } from "./vision-math-delimiters.js";
-import { sanitizeVisionHtmlTables } from "./vision-html-tables.js";
 import { insertMissingTableDelimiters } from "./vision-table-delimiter.js";
 import { normalizeVisionWhitespace } from "./vision-whitespace.js";
 
@@ -22,8 +21,8 @@ export const VISUAL_RELATIONSHIP_INSTRUCTIONS = [
 
 /**
  * Markdown transcription that asks for LaTeX math, keeps text inside figures, and forbids layout padding or paraphrase.
- * Tables with merged cells or multi-row headers may come back as HTML; postProcessVisionText rebuilds them from an
- * allow-list (vision-html-tables.ts) before anything else reads them.
+ * Tables with merged cells or multi-row headers may come back as HTML; the stage that assembles a document's pages
+ * rebuilds them from the parser VM's typed reading (pipeline/vision-tables-vm.ts), never by parsing on the host.
  */
 export const MARKDOWN_LATEX_VISION_PROMPT =
   "Transcribe this document page into GitHub-flavored Markdown, exactly as written. Copy every word verbatim in reading order; do not paraphrase, summarize, translate, correct the text or add unrelated descriptions. Include text, labels and formulas printed inside figures and diagrams. Use Markdown headings for headings and lists for lists. Write simple tables as GFM pipe tables. Write a table with merged cells or a header of more than one row as an HTML <table> instead, with <thead> for the header rows, <tbody>, <tr>, <th> and <td>, and rowspan or colspan on each merged cell; put only plain text in its cells and use no other tags or attributes. Write every mathematical formula in LaTeX: inline math as $...$ and display equations as $$...$$ on their own lines. Do not reproduce column alignment, padding spaces or the page's line wrapping. Output only the Markdown." + "\n" + VISUAL_RELATIONSHIP_INSTRUCTIONS;
@@ -209,12 +208,11 @@ export function visionOutputCapForModel(model: string | undefined, shared: { val
 
 /**
  * Post-process a page transcription from any vision/OCR model: the model's profile repair (if any), then the
- * shared padding-whitespace collapse, then the HTML table allow-list. Runs after the repair so a whole-page fence is
- * unwrapped before the collapse skips fenced code.
+ * shared padding-whitespace collapse. Runs after the repair so a whole-page fence is unwrapped before the collapse
+ * skips fenced code. Pure text: HTML tables are rebuilt later, per document, from the parser VM (vision-tables-vm.ts).
  */
 export function postProcessVisionText(model: string | undefined, text: string): string {
-  // Last: model HTML never survives as written; every table is rebuilt from the allow-list, whatever the prompt asked.
-  return sanitizeVisionHtmlTables(normalizeVisionWhitespace(visionModelProfile(model)?.postProcess?.(text) ?? text));
+  return normalizeVisionWhitespace(visionModelProfile(model)?.postProcess?.(text) ?? text);
 }
 
 /** Request-body fragment with the reasoning control for `model`: the profile's, else the shared verified floor. */

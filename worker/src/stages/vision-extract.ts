@@ -97,6 +97,7 @@ import type { ChartModelClient } from "../chart-export/types.js";
 import { deterministicSourceKind } from "../chart-export/vm-extractor.js";
 import chartSharp from "../tools/isolated-image.js";
 import type { DocumentStageResult } from "../pipeline/checkpoints.js";
+import { sanitizeVisionPageTables } from "../pipeline/vision-tables-vm.js";
 
 export interface VisionPageOutput {
   pageNumber: number;
@@ -487,6 +488,11 @@ export class VisionExtractStage implements Stage {
               };
             }
 
+            // Model HTML tables are read in the parser VM, all of this document's pages in one job, and rebuilt on the host
+            // from the typed result (vision-tables-vm.ts); nothing reads the model's own table markup after this.
+            outputs = await this.rebuildModelTables(state, document, outputs, signal);
+            if (routedResult) routedResult = { ...routedResult, outputs };
+
             const routedValidation = routed && routedResult
               ? await this.recordRoutedValidation(state, document, routed.plan, routed.execution, routedResult, key)
               : null;
@@ -644,6 +650,23 @@ export class VisionExtractStage implements Stage {
         );
       },
     );
+  }
+
+  private async rebuildModelTables<T extends { text?: string | null }>(
+    state: WorkflowState, document: import("../models.js").Document, outputs: T[], signal?: AbortSignal,
+  ): Promise<T[]> {
+    const { texts, stats } = await sanitizeVisionPageTables(outputs.map((page) => page.text ?? ""), this.runner, { signal, documentId: document.id });
+    if (stats.pages === 0) return outputs;
+    console.log(
+      `[vision-tables] document=${document.id} pages=${stats.pages} tables=${stats.tables} spansDropped=${stats.spansDropped} ` +
+        `gfm=${stats.gfm} textFallback=${stats.textFallback} escapedPages=${stats.escapedPages} vmCalls=${stats.vmCalls} vmMs=${stats.vmMs}`,
+    );
+    state.pendingPerformance.push({
+      documentId: document.id, scope: "document", stageName: this.name, metric: "vision-table-rebuild-latency",
+      value: stats.vmMs, unit: "ms", tags: ["document", "vision", "tables"],
+      metadata: { ...stats },
+    });
+    return outputs.map((page, index) => (texts[index] === (page.text ?? "") ? page : { ...page, text: texts[index]! }));
   }
 
   private async checkNeedsVision(
