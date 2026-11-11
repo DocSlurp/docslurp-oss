@@ -1,4 +1,4 @@
-import { nitroBaseModel } from "./project-chat-models.js";
+import { nitroBaseModel, speedBoostMaxPrice } from "./project-chat-models.js";
 import { withServedProviderRegion } from "./provider-regions.js";
 import { chatModelPricePerToken } from "./chat-model-prices.js";
 import { liveModelPrice, refreshStaleLiveModelPrices } from "./live-model-prices.js";
@@ -59,15 +59,19 @@ async function resolveOpenRouterUsageInner(args: {
       }
     }
   }
-  // Nitro can select priority endpoints. A base-model listing cannot price this call.
-  // Preserve tokens using an explicitly estimated ceiling. This is NOT a held budget reserve:
+  // Speed boost picks any host under its price ceiling, so a base-model listing cannot price this call.
+  // Preserve tokens at the ceiling, marked as an estimate. This is NOT a held budget reserve:
   // operators must reconcile missing receipts manually; no automatic reconciliation exists.
-  if (args.model.endsWith(":nitro")) return { ...base,
-    costCents: (base.inputTokens * 1 + base.outputTokens * 5) / 10_000,
-    metadata: { costSource: "estimate", accountingStatus: "receipt-missing", reconciliationRequired: true,
-      pricingSource: "nitro-endpoint-ceiling-estimate", generationId: args.generationId ?? null,
-      ...(args.providerName ? { providerName: args.providerName } : {}) },
-  };
+  const nitroBase = nitroBaseModel(args.model);
+  if (nitroBase) {
+    const ceiling = speedBoostMaxPrice(nitroBase);
+    return { ...base,
+      costCents: (base.inputTokens * ceiling.prompt + base.outputTokens * ceiling.completion) / 10_000,
+      metadata: { costSource: "estimate", accountingStatus: "receipt-missing", reconciliationRequired: true,
+        pricingSource: "nitro-endpoint-ceiling-estimate", generationId: args.generationId ?? null,
+        ...(args.providerName ? { providerName: args.providerName } : {}) },
+    };
+  }
   // No receipt: estimate from the live list price, then the hardcoded verified
   // table. A missing or stale snapshot is refreshed in the background, never
   // awaited on this (often user-facing) path.

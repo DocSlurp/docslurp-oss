@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
+import { speedBoostMaxPrice } from "@docslurp/shared";
 
 // Real OpenRouter AI SDK provider and usage capture; only the network is faked.
 const record = vi.fn();
@@ -34,8 +35,9 @@ it.each(["deepseek/deepseek-v4.1-flash-1017", "deepseek/deepseek-v4.1-flash-1017
     privacyMode: "standard", model, maxOutputTokens: 100,
   });
   expect(fetchMock).toHaveBeenCalledOnce();
-  expect(JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string).model).toBe(model);
-  if (model.endsWith(":nitro")) expect(JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string).provider).toMatchObject({ sort: "throughput", max_price: { prompt: 1, completion: 5 } });
+  // Speed boost sends the base id with price-sorted, latency-gated routing under the model's price ceiling.
+  expect(JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string).model).toBe(model.replace(/:nitro$/, ""));
+  if (model.endsWith(":nitro")) expect(JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string).provider).toMatchObject({ sort: "price", max_price: speedBoostMaxPrice(model.replace(/:nitro$/, "")), preferred_max_latency: { p50: 1, p90: 2.5 } });
   expect(result.answer).toBe("Hello there.");
   expect(result.debug).toMatchObject({ resolvedModel: "deepseek/deepseek-v4.1-flash-20261017", resolvedProvider: "DeepSeek",
     stepUsage: [{ step: 0, model: "deepseek/deepseek-v4.1-flash-20261017", inputTokens: 120, outputTokens: 6 }] });
