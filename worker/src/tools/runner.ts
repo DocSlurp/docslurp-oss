@@ -123,6 +123,23 @@ export const PDF_DECRYPT_LIMITS = {
   maxOutputBytes: 768 * 1024 * 1024,
 } as const;
 
+const pdfQpdfLimitArgs = () => ["prlimit", `--as=${PDF_DECRYPT_LIMITS.addressSpaceMiB * 1024 * 1024}`, `--cpu=${PDF_DECRYPT_LIMITS.cpuSeconds}`];
+
+/** `qpdf --requires-password` under PDF_DECRYPT_LIMITS: exit 0 a user password is needed, 3 none is, 2 not encrypted or an error. */
+export function pdfEncryptionCheckArgv(source: string): string[] {
+  const planned = planDocumentToolInvocation({ binary: "qpdf", args: ["--requires-password", source], fileArgIndexes: [1], supportsDoubleDash: false });
+  return [...pdfQpdfLimitArgs(), "--", planned.binary, ...planned.args];
+}
+
+/**
+ * `qpdf --decrypt` to a plaintext copy for the scanner: QDF, no object streams, every generalized filter decoded, under
+ * PDF_DECRYPT_LIMITS (RLIMIT_FSIZE: qpdf is killed, SIGXFSZ, rather than write a copy past maxOutputBytes).
+ */
+export function pdfDecryptArgv(source: string, output: string): string[] {
+  const planned = planDocumentToolInvocation({ binary: "qpdf", args: ["--decrypt", "--qdf", "--object-streams=disable", "--stream-data=uncompress", source, output], fileArgIndexes: [4, 5], supportsDoubleDash: false });
+  return [...pdfQpdfLimitArgs(), `--fsize=${PDF_DECRYPT_LIMITS.maxOutputBytes}`, "--", planned.binary, ...planned.args];
+}
+
 /** What the in-VM decryption made of an encrypted PDF (CommandRunner.decryptPdfForScan); `ms` is the wall time it took. */
 export type PdfDecryptOutcome =
   | { status: "requires-password"; ms: number }
@@ -1217,10 +1234,9 @@ export class CommandRunner {
     }
   }
 
-  /** `prlimit`-bounded qpdf over one PDF (PDF_DECRYPT_LIMITS); unavailable unless both tools are. */
-  private async boundedQpdfPlan(args: string[], fileArgIndexes: number[], extraLimits: string[] = []): Promise<CommandPlan> {
-    const planned = planDocumentToolInvocation({ binary: "qpdf", args, fileArgIndexes, supportsDoubleDash: false });
-    const plan = await this.plan("prlimit", `--as=${PDF_DECRYPT_LIMITS.addressSpaceMiB * 1024 * 1024}`, `--cpu=${PDF_DECRYPT_LIMITS.cpuSeconds}`, ...extraLimits, "--", planned.binary, ...planned.args);
+  /** A `prlimit`-bounded qpdf command (pdfEncryptionCheckArgv / pdfDecryptArgv); unavailable unless both tools are. */
+  private async boundedQpdfPlan(argv: string[]): Promise<CommandPlan> {
+    const plan = await this.plan(argv[0]!, ...argv.slice(1));
     return { ...plan, available: plan.available && await this.isAvailable("qpdf"), timeoutMs: PDF_DECRYPT_LIMITS.wallMs, readOnlyInputs: true };
   }
 
@@ -1236,7 +1252,7 @@ export class CommandRunner {
   async decryptPdfForScan(source: string, outputDir: string, signal?: AbortSignal): Promise<PdfDecryptOutcome> {
     const started = performance.now();
     const elapsed = () => Math.round(performance.now() - started);
-    const check = await this.boundedQpdfPlan(["--requires-password", source], [1]);
+    const check = await this.boundedQpdfPlan(pdfEncryptionCheckArgv(source));
     if (!check.available) return { status: "failed", reason: "qpdf unavailable", ms: elapsed() };
     let checked: SandboxResult;
     try {
@@ -1251,12 +1267,7 @@ export class CommandRunner {
     if (checked.exitCode === 0) return { status: "requires-password", ms: elapsed() };
     if (checked.exitCode !== 3) return { status: "failed", reason: `qpdf could not settle the encryption (exit ${checked.exitCode ?? "none"})${checked.stderr ? `: ${checked.stderr.trim().slice(0, 500)}` : ""}`, ms: elapsed() };
     const output = path.join(outputDir, "decrypted.pdf");
-    const decrypt = await this.boundedQpdfPlan(
-      ["--decrypt", "--qdf", "--object-streams=disable", "--stream-data=uncompress", source, output],
-      [4, 5],
-      // RLIMIT_FSIZE: qpdf is killed (SIGXFSZ) rather than write a copy past the limit.
-      [`--fsize=${PDF_DECRYPT_LIMITS.maxOutputBytes}`],
-    );
+    const decrypt = await this.boundedQpdfPlan(pdfDecryptArgv(source, output));
     let decrypted: SandboxResult;
     try {
       decrypted = await this.runScanPlan(decrypt, signal, "pdf-decrypt");

@@ -89,6 +89,87 @@ with open(at("pdf-incremental-encrypt.pdf"), "wb") as f:
 for name in ("marker-src.pdf", "enc-classic.pdf"):
     os.remove(at(name))
 
+# Control: an ordinary permissions-restricted PDF (owner password only, printing/editing/extraction denied). Anyone can
+# open it, so quarantine decrypts it in the VM, scans the copy and must accept it.
+run("qpdf", "--encrypt", "", "owner-secret", "256", "--print=none", "--modify=none", "--extract=n", "--", source_pdf, at("pdf-owner-only-restricted.pdf"))
+# Hostile: the raw-marker PDF with a broken startxref, so readers must reconstruct the cross-reference table to find the
+# /Encrypt trailer. Quarantine must decrypt and find the marker, or refuse; never pass it clean.
+data = open(at("pdf-empty-user-owner-raw-marker.pdf"), "rb").read()
+data = re.sub(rb"startxref\s+\d+", b"startxref\n999999", data)
+with open(at("pdf-owner-raw-marker-broken-xref.pdf"), "wb") as f:
+    f.write(data)
+# The fail-closed cost: an unencrypted PDF whose content merely shows the text "/Encrypt". The VM check sees the name,
+# qpdf says the file is not encrypted, and that disagreement is refused (malware-scan-pdf-decrypt-failed).
+content = b"BT (see /Encrypt in the spec) Tj ET"
+objects = [
+    b"<</Type/Catalog/Pages 2 0 R>>",
+    b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
+    b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Resources<<>>/Contents 4 0 R>>",
+    b"<</Length %d>>stream\n%s\nendstream" % (len(content), content),
+]
+pdf, offsets = b"%PDF-1.4\n", []
+for number, body in enumerate(objects, 1):
+    offsets.append(len(pdf))
+    pdf += b"%d 0 obj\n%s\nendobj\n" % (number, body)
+xref = len(pdf)
+pdf += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1) + b"".join(b"%010d 00000 n \n" % o for o in offsets)
+pdf += b"trailer\n<</Size %d/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+with open(at("pdf-literal-encrypt-text.pdf"), "wb") as f:
+    f.write(pdf)
+
+# Timing: representative owner-password PDFs (AES-256, permissions restricted), for the added scan time. Every page has
+# its own content (qpdf --pages would share repeated objects): text pages with Flate content streams, and pages with a
+# Flate-encoded 900x1200 RGB image each (a photo-like gradient with noise, about 3:1), which the copy stores decoded.
+def build_pdf(path, pages):
+    objects = [b"<</Type/Catalog/Pages 2 0 R>>", None]
+    kids = []
+    for text, image in pages:
+        resources = b"<<>>"
+        if image is not None:
+            width, height, pixels = image
+            objects.append(b"<</Type/XObject/Subtype/Image/Width %d/Height %d/ColorSpace/DeviceRGB/BitsPerComponent 8/Filter/FlateDecode/Length %d>>stream\n" % (width, height, len(pixels)) + pixels + b"\nendstream")
+            resources = b"<</XObject<</Im0 %d 0 R>>>>" % len(objects)
+            text = b"q 500 0 0 660 50 80 cm /Im0 Do Q " + text
+        stream = zlib.compress(text)
+        objects.append(b"<</Length %d/Filter/FlateDecode>>stream\n" % len(stream) + stream + b"\nendstream")
+        objects.append(b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources %s/Contents %d 0 R>>" % (resources, len(objects)))
+        kids.append(len(objects))
+    objects[1] = b"<</Type/Pages/Kids[%s]/Count %d>>" % (b" ".join(b"%d 0 R" % k for k in kids), len(kids))
+    out, offsets = b"%PDF-1.7\n", []
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % number + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1) + b"".join(b"%010d 00000 n \n" % o for o in offsets)
+    out += b"trailer\n<</Size %d/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+    with open(path, "wb") as f:
+        f.write(out)
+
+
+def text_page(number):
+    lines = [b"BT /F1 10 Tf 50 %d Td (Quarter %d, line %d: revenue rose %d.%d percent on expansion into %d new markets.) Tj ET" % (740 - line * 12, number, line, (number * 7 + line) % 40, line % 10, (number + line) % 17) for line in range(55)]
+    return b"\n".join(lines)
+
+
+def photo(seed, width=900, height=1200):
+    state = seed * 2654435761 & 0xFFFFFFFF
+    rows = []
+    for y in range(height):
+        row = bytearray()
+        for x in range(width):
+            state = (state * 1103515245 + 12345) & 0x7FFFFFFF
+            noise = (state >> 16) & 0x1F
+            row += bytes(((x * 255 // width + noise) & 0xFF, (y * 255 // height + noise) & 0xFF, ((x + y + seed * 37) & 0xFF) ^ noise))
+        rows.append(b"\0" + bytes(row))
+    return width, height, zlib.compress(b"".join(rows), 6)
+
+
+build_pdf(at("perf-src-text.pdf"), [(text_page(n), None) for n in range(300)])
+build_pdf(at("perf-src-images.pdf"), [(text_page(n), photo(n)) for n in range(40)])
+for name, source in (("perf-owner-text-300p.pdf", "perf-src-text.pdf"), ("perf-owner-images-40p.pdf", "perf-src-images.pdf")):
+    run("qpdf", "--encrypt", "", "owner-secret", "256", "--print=none", "--modify=none", "--", at(source), at(name))
+    os.remove(at(source))
+
 # --- ZIPs -------------------------------------------------------------------------------------------------------------
 note = b"Quarterly results beat the forecast.\n"
 with open(at("note.txt"), "wb") as f:
@@ -149,6 +230,13 @@ with zipfile.ZipFile(at("zip64-member-eicar.zip"), "w", zipfile.ZIP_DEFLATED) as
         w.write(EICAR)
 with zipfile.ZipFile(at("nested-zip64-eicar.zip"), "w", zipfile.ZIP_STORED) as z:
     z.write(at("zip64-member-eicar.zip"), "inner/zip64-member-eicar.zip")
+# A RAR nested in a plain ZIP (the committed benign RAR5): ClamAV here has no RAR engine; the in-VM walk must refuse it.
+with zipfile.ZipFile(at("nested-rar.zip"), "w", zipfile.ZIP_DEFLATED) as z:
+    z.write(at("rar5-password.rar"), "attachments/archive.rar")
+# Control: an ordinary ZIP (deflated text members), which must stay clean.
+with zipfile.ZipFile(at("zip-plain.zip"), "w", zipfile.ZIP_DEFLATED) as z:
+    z.writestr("notes/summary.txt", note * 50)
+    z.writestr("notes/forecast.csv", b"quarter,revenue\nQ1,120\nQ2,135\n")
 
 
 # --- Scan limits (zeros deflate ~1000:1, so these are a few MB on disk; no ZIP64, which ClamAV would skip) ------------
@@ -162,6 +250,9 @@ def zeros_zip(name, members, member_bytes):
 
 
 zeros_zip("limit-max-filesize-member.zip", 1, 1100 * (1 << 20))   # a member past MaxFileSize (1024M)
+# The same member nested in a plain ZIP: ClamAV truncates it without an alert; the in-VM walk must refuse it.
+with zipfile.ZipFile(at("nested-oversized-member.zip"), "w", zipfile.ZIP_STORED) as z:
+    z.write(at("limit-max-filesize-member.zip"), "inner/limit-max-filesize-member.zip")
 zeros_zip("limit-max-scansize.zip", 3, 800 * (1 << 20))           # 2400 MiB scanned past MaxScanSize (2000M)
 with open(at("limit-max-filesize-raw.bin"), "wb") as f:           # a sparse 1100 MiB file past MaxFileSize
     f.truncate(1100 * (1 << 20))

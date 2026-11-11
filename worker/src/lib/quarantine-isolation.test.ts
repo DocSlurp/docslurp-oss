@@ -14,7 +14,7 @@ describe("quarantine production boundary", () => {
       const encoded = await readFile(plan.args[2], "utf8");
       expect(encoded).not.toContain("credential-sentinel");
       expect(Object.keys(JSON.parse(encoded).policy)).toHaveLength(6);
-      await writeFile(plan.args[3], JSON.stringify({ sniffed: { mimeType: "application/pdf", container: null, encoding: null }, archive: null }));
+      await writeFile(plan.args[3], JSON.stringify({ sniffed: { mimeType: "application/pdf", container: null, encoding: null }, archive: null, pdf: { encryptName: false } }));
     });
     expect((await scanDocumentForQuarantine(args(run))).decision).toBe("accepted"); expect(run).toHaveBeenCalledOnce();
   });
@@ -37,9 +37,22 @@ describe("quarantine production boundary", () => {
       { mimeType: "a".repeat(300), container: null, encoding: null },
       null,
     ]) {
-      const run = vi.fn(async (plan) => writeFile(plan.args[3], JSON.stringify({ sniffed, archive: null })));
+      const run = vi.fn(async (plan) => writeFile(plan.args[3], JSON.stringify({ sniffed, archive: null, pdf: null })));
       await expect(scanDocumentForQuarantine(args(run)), JSON.stringify(sniffed)).rejects.toThrow(/invalid quarantine MIME result/);
     }
   });
-});
+  it("refuses a guest result without the PDF encryption check (an older image), or a forged one, never reading it as not encrypted", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    for (const pdf of [undefined, { encryptName: "no" }, { encryptName: false, trusted: true }, [], "false"]) {
+      const run = vi.fn(async (plan) => writeFile(plan.args[3], JSON.stringify({ sniffed: { mimeType: "application/pdf", container: null, encoding: null }, archive: null, ...(pdf === undefined ? {} : { pdf }) })));
+      await expect(scanDocumentForQuarantine(args(run)), JSON.stringify(pdf)).rejects.toThrow(/invalid quarantine PDF result/);
+    }
+  });
 
+  it("rejects forged nesting counts from a compromised guest", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const archive = { issues: [], kind: "zip", suspicious: false, inspectable: true, entryCount: 1, totalCompressedBytes: 1, totalUncompressedBytes: 1, maxEntryUncompressedBytes: 1, maxPathDepth: 1, compressionRatio: 1, nestedContainers: -1 };
+    const run = vi.fn(async (plan) => writeFile(plan.args[3], JSON.stringify({ sniffed: { mimeType: null, container: "zip", encoding: null }, archive, pdf: null })));
+    await expect(scanDocumentForQuarantine(args(run))).rejects.toThrow(/invalid quarantine nesting count/);
+  });
+});
