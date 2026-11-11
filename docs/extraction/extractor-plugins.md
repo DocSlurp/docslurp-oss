@@ -187,7 +187,9 @@ batch?: {
   extraction). Workers advertise `workflow.first-pass` only when a batch provider is registered.
 
 The first pass runs only when the deploy sets `DOCSLURP_FIRST_PASS=on`, the pipeline's `firstPass` is not `off`, and the
-whole fleet advertises the capability; unsetting the flag is the rollback. Nothing becomes searchable before the document's
+whole fleet advertises the capability; unsetting the flag is the rollback. To roll out to a few organizations first, also
+set `DOCSLURP_FIRST_PASS_ORGS` to a comma-separated list of org ids: runs of any other org, or of a run without an org, then
+skip the first pass. Nothing becomes searchable before the document's
 publish gate passes (`worker/src/pipeline/first-pass-gate.ts`: a clean malware verdict).
 
 ## Isolation requirements

@@ -147,6 +147,15 @@ describe("first pass in workflow input", () => {
     expect(resolveFirstPassInput({ DOCSLURP_FIRST_PASS: "on" }, { ...pipeline, firstPass: "off" }, fleet, scaling)).toEqual({});
     expect(resolveFirstPassInput({ DOCSLURP_FIRST_PASS: "on" }, pipeline, fleet, {})).toEqual({});
     expect(resolveFirstPassInput({ DOCSLURP_FIRST_PASS: "on" }, pipeline, fleet, scaling)).toEqual({ firstPass: { maxParallelBatches: 4, afterFirstPass: "auto" } });
+    // DOCSLURP_FIRST_PASS_ORGS narrows the rollout; unknown or unlisted orgs get nothing.
+    const allow = { DOCSLURP_FIRST_PASS: "on", DOCSLURP_FIRST_PASS_ORGS: " org-a , org-b " };
+    expect(resolveFirstPassInput(allow, pipeline, fleet, scaling, "org-a")).toEqual({ firstPass: { maxParallelBatches: 4, afterFirstPass: "auto" } });
+    expect(resolveFirstPassInput(allow, pipeline, fleet, scaling, "org-c")).toEqual({});
+    expect(resolveFirstPassInput(allow, pipeline, fleet, scaling, null)).toEqual({});
+    expect(resolveFirstPassInput(allow, pipeline, fleet, scaling)).toEqual({});
+    expect(resolveFirstPassInput({ ...allow, DOCSLURP_FIRST_PASS: "off" }, pipeline, fleet, scaling, "org-a")).toEqual({});
+    expect(resolveFirstPassInput({ DOCSLURP_FIRST_PASS: "on", DOCSLURP_FIRST_PASS_ORGS: " , " }, pipeline, fleet, scaling, "org-c"))
+      .toEqual({ firstPass: { maxParallelBatches: 4, afterFirstPass: "auto" } });
     expect(resolveFirstPassInput({ DOCSLURP_FIRST_PASS: "on", DOCSLURP_FIRST_PASS_PARALLEL_BATCHES: "99" }, { ...pipeline, afterFirstPass: "none" }, fleet, scaling))
       .toEqual({ firstPass: { maxParallelBatches: 32, afterFirstPass: "none" } });
   });
