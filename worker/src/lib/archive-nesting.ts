@@ -13,8 +13,13 @@ import { gunzipSync, inflateRawSync } from "node:zlib";
  * Walked: ZIP (stored and Deflate members), gzip, and OLE2 compound files (Office embeddings, `\x01Ole10Native` packages).
  * Refused when nested: RAR, ACE, zstd, LZ4, lzip and WIM (ClamAV here cannot open them), 7z, bzip2, xz, tar, CAB, ARJ, cpio,
  * XAR, ALZ, ISO 9660 and SZDD/KWAJ (ClamAV opens them but this walk does not, so what they hold is unchecked), and ZIP members
- * compressed with anything but Stored or Deflate. Containers are recognised by their leading magic only: an archive
- * embedded at an offset inside another file (a polyglot or self-extractor) is not walked (docs/self-host/security.md).
+ * compressed with anything but Stored or Deflate. 7z, bzip2, xz, tar, CAB, ARJ, cpio, XAR, ALZ, ISO 9660 and SZDD/KWAJ
+ * members are left to ClamAV, which opens them: they are reported as a warning notice (archive-nested-uninspectable),
+ * not refused (correctness council M3), so a ZIP64 or RAR inside one of them is the scanner's alone to judge.
+ * Containers are walked from their leading magic; a member that is not one but holds a ZIP or RAR a little way in (an archive behind a few junk bytes, a polyglot or self-extractor) is refused:
+ * findEmbeddedContainer looks for the strong magic numbers in a member's first EMBEDDED_HEAD_BYTES and for a ZIP end
+ * record in its last 64 KiB, which is where ZIP readers look. A container deeper inside a member, with no end record near
+ * its end, is not found (docs/self-host/security.md); no extractor opens one there.
  */
 
 export interface NestingLimits {
@@ -32,6 +37,8 @@ export interface NestingLimits {
 
 export interface NestingResult {
   issues: string[];
+  /** Warning-only findings: `archive-nested-uninspectable`. */
+  notices: string[];
   /** Nested containers walked (ZIP, gzip, OLE2). */
   nestedContainers: number;
   /** Deepest container reached, the top-level ZIP being 1. */
@@ -85,7 +92,43 @@ export function classifyContainer(bytes: Buffer): ContainerKind {
   return null;
 }
 
-type ZipParse = { entries: ZipEntryLocation[] } | { error: "zip64" | "malformed" };
+/** How far into a non-container object findEmbeddedContainer looks for a container's leading magic. */
+export const EMBEDDED_HEAD_BYTES = 4096;
+/** The ZIP end record sits in the last 22 + 65,535 (comment) bytes, which is all a ZIP reader searches. */
+const ZIP_END_SEARCH_BYTES = 65_557;
+
+/**
+ * The containers searched for at an offset: the two whose contents ClamAV 1.4.3 leaves unscanned without an alert (a ZIP,
+ * whose ZIP64 members it skips, and RAR, which this image cannot open) and that readers find behind leading bytes (ZIP and
+ * RAR self-extractors). Containers ClamAV opens are not: Office printer settings (DEVMODE driver data) carry CAB
+ * cabinets a little way in (2 of 1,112 local Office files, correctness council M3).
+ */
+const EMBEDDED_MAGICS: ReadonlyArray<readonly [string, Buffer]> = [
+  ["zip", Buffer.from([0x50, 0x4b, 0x03, 0x04])],
+  ["rar", Buffer.from("Rar!\x1a\x07", "latin1")],
+];
+
+/**
+ * A ZIP or RAR that does not start at offset 0 of `bytes` but that a tolerant reader would still find: a ZIP local header
+ * or RAR signature in the first EMBEDDED_HEAD_BYTES past offset 0, or a ZIP end-of-central-directory record in the last 64 KiB (Python's zipfile,
+ * openpyxl and most ZIP readers locate an archive from that record, wherever it starts). Null when there is none.
+ * Bounded: at most EMBEDDED_HEAD_BYTES + 64 KiB are searched, whatever the object's size.
+ */
+export function findEmbeddedContainer(bytes: Buffer, options: { tailZip?: boolean } = {}): { format: string; offset: number } | null {
+  const head = bytes.subarray(0, EMBEDDED_HEAD_BYTES + 16);
+  for (const [format, magic] of EMBEDDED_MAGICS) {
+    const offset = head.indexOf(magic, 1);
+    if (offset > 0 && offset < EMBEDDED_HEAD_BYTES) return { format, offset };
+  }
+  if (options.tailZip !== false) {
+    const tailStart = Math.max(0, bytes.length - ZIP_END_SEARCH_BYTES);
+    const end = bytes.subarray(tailStart).lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+    if (end >= 0 && tailStart + end > 0) return { format: "zip-end-record", offset: tailStart + end };
+  }
+  return null;
+}
+
+type ZipParse = { entries: ZipEntryLocation[] } | { error: "zip64" | "malformed" | "hidden-entry" };
 
 /**
  * The ZIP's entries from its central directory, cross-checked against each local header; `zip64` when any header uses
@@ -158,6 +201,15 @@ export function parseZip(bytes: Buffer): ZipParse {
   if (offset !== endOffset) return { error: "malformed" };
   ranges.sort((a, b) => a[0] - b[0]);
   if (ranges.some((range, index) => index > 0 && range[0] < ranges[index - 1]![1])) return { error: "malformed" };
+  // Bytes no central-directory entry covers (before the first entry, between entries, before the directory) may hold only
+  // data descriptors and padding: a local header there is an entry the directory hides from this walk and from ClamAV,
+  // which streaming (local-header) readers would still extract.
+  const localHeader = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+  let covered = 0;
+  for (const [start, end] of [...ranges, [centralDirectoryOffset, centralDirectoryOffset] as [number, number]]) {
+    if (start > covered && bytes.subarray(covered, start).indexOf(localHeader) >= 0) return { error: "hidden-entry" };
+    covered = Math.max(covered, end);
+  }
   return { entries };
 }
 
@@ -192,6 +244,8 @@ function findEndOfCentralDirectory(bytes: Buffer): number {
 
 class WalkState {
   readonly issues = new Set<string>();
+  /** Warning-only findings (a nested format ClamAV opens but this walk does not). */
+  readonly notices = new Set<string>();
   inflated = 0;
   objects = 0;
   nestedContainers = 0;
@@ -220,7 +274,7 @@ class WalkState {
 export function inspectNestedArchives(bytes: Buffer, entries: ZipEntryLocation[], limits: NestingLimits): NestingResult {
   const state = new WalkState(limits);
   walkZipEntries(bytes, entries, 1, state);
-  return { issues: [...state.issues], nestedContainers: state.nestedContainers, maxNestingDepth: state.maxNestingDepth };
+  return { issues: [...state.issues], notices: [...state.notices], nestedContainers: state.nestedContainers, maxNestingDepth: state.maxNestingDepth };
 }
 
 /** Members of a ZIP at `depth` (1 = top level): each is read whole and, when it is a container, walked at depth + 1. */
@@ -279,15 +333,18 @@ function readZipMember(bytes: Buffer, entry: ZipEntryLocation, state: WalkState,
 }
 
 /** A member, stream or payload at `depth` containers deep: walked when it is a container, refused when it cannot be. */
-function walkObject(data: Buffer, depth: number, state: WalkState): void {
+function walkObject(data: Buffer, depth: number, state: WalkState, options: { embedded?: boolean } = {}): void {
   const container = classifyContainer(data);
-  if (!container) return;
+  if (!container) {
+    if (options.embedded !== false && findEmbeddedContainer(data)) state.issues.add("archive-nested-embedded-container");
+    return;
+  }
   if (container.kind === "unsupported") {
     state.issues.add("archive-nested-unsupported-format");
     return;
   }
   if (container.kind === "uninspectable") {
-    state.issues.add("archive-nested-uninspectable");
+    state.notices.add("archive-nested-uninspectable");
     return;
   }
   if (depth > state.limits.maxDepth) {
@@ -299,7 +356,7 @@ function walkObject(data: Buffer, depth: number, state: WalkState): void {
   if (container.kind === "zip") {
     const parsed = parseZip(data);
     if ("error" in parsed) {
-      state.issues.add(parsed.error === "zip64" ? "archive-nested-zip64" : "archive-nested-inspection-failed");
+      state.issues.add(parsed.error === "zip64" ? "archive-nested-zip64" : parsed.error === "hidden-entry" ? "archive-hidden-entry" : "archive-nested-inspection-failed");
       return;
     }
     if (parsed.entries.length > state.limits.maxEntriesPerArchive) {
@@ -321,19 +378,26 @@ function walkObject(data: Buffer, depth: number, state: WalkState): void {
     walkObject(inner, depth + 1, state);
     return;
   }
-  const streams = readCompoundFileStreams(data, state.limits.maxEntryBytes);
+  // Every stream is charged to the walk's byte budget and counted as an object before it is read (council M1: 2,000
+  // directory entries sharing one 64 MiB chain must not be materialised 2,000 times).
+  const streams = readCompoundFileStreams(data, state.limits.maxEntryBytes, (size) => state.visit() && state.charge(size));
   if ("error" in streams) {
-    state.issues.add(streams.error === "size" ? "archive-nested-entry-size-limit" : "archive-nested-inspection-failed");
+    if (streams.error === "budget") return; // the walk-wide limit already refuses the file
+    state.issues.add(streams.error === "size" ? "archive-nested-entry-size-limit" : streams.error === "shared" ? "archive-nested-ole-shared-sectors" : "archive-nested-inspection-failed");
     return;
   }
   for (const stream of streams.streams) {
-    if (!state.visit()) return;
-    walkObject(stream.data, depth + 1, state);
+    // An OLE Package object holds its file after a header (MS-OLEDS 2.3.6, as libclamav's cli_ole10native reads it): its
+    // payload is walked where the header puts it, so the stream itself is not refused for holding it at that offset.
+    const ole10Native = stream.name === "\x01Ole10Native";
+    const payload = ole10Native ? ole10NativePayload(stream.data) : null;
+    walkObject(stream.data, depth + 1, state, { embedded: !payload });
     if (!state.going) return;
-    // An OLE Package object holds its file after a header (MS-OLEDS 2.3.6, as libclamav's cli_ole10native reads it).
-    if (stream.name === "\x01Ole10Native") {
-      const payloads = [stream.data.subarray(4), ole10NativePayload(stream.data)].filter((payload): payload is Buffer => !!payload);
-      for (const payload of payloads) {
+    if (ole10Native) {
+      walkObject(stream.data.subarray(4), depth + 1, state, { embedded: !payload });
+      if (!state.going) return;
+      if (payload) {
+        if (!state.visit() || !state.charge(payload.length)) return;
         walkObject(payload, depth + 1, state);
         if (!state.going) return;
       }
@@ -369,7 +433,12 @@ const END_OF_CHAIN = 0xfffffffe;
  * mini-stream cutoff, the mini FAT. Any structural inconsistency (a chain that loops, leaves the file or is shorter than
  * the stream) is an error: what this cannot read is refused, not skipped.
  */
-export function readCompoundFileStreams(bytes: Buffer, maxStreamBytes: number): { streams: Array<{ name: string; data: Buffer }> } | { error: "malformed" | "size" } {
+export function readCompoundFileStreams(
+  bytes: Buffer,
+  maxStreamBytes: number,
+  /** Called with each stream's size before it is read; false stops the read (`budget`). */
+  admit: (size: number) => boolean = () => true,
+): { streams: Array<{ name: string; data: Buffer }> } | { error: "malformed" | "size" | "shared" | "budget" } {
   if (bytes.length < 512) return { error: "malformed" };
   const sectorShift = bytes.readUInt16LE(0x1e);
   const miniShift = bytes.readUInt16LE(0x20);
@@ -410,17 +479,27 @@ export function readCompoundFileStreams(bytes: Buffer, maxStreamBytes: number): 
     for (let offset = 0; offset < sectorSize; offset += 4) fat.push(block.readUInt32LE(offset));
   }
 
-  const chain = (start: number, table: number[], limit: number): number[] | null => {
+  // Every sector (and mini sector) belongs to at most one chain: a chain that loops, or two directory entries, the
+  // directory, the mini FAT or the mini stream sharing sectors, is refused (`shared`). That bounds the bytes read to the
+  // file's own size, however many entries point at the same data.
+  const usedSectors = new Set<number>();
+  const usedMiniSectors = new Set<number>();
+  let shared = false;
+  const chain = (start: number, table: number[], limit: number, used?: Set<number>): number[] | null => {
     const out: number[] = [];
     for (let at = start; at !== END_OF_CHAIN; at = table[at]!) {
       if (at >= table.length || out.length > limit) return null;
+      if (used) {
+        if (used.has(at)) { shared = true; return null; }
+        used.add(at);
+      }
       out.push(at);
     }
     return out;
   };
   const readChain = (start: number, size: number): Buffer | null => {
     if (size === 0) return Buffer.alloc(0);
-    const sectors = chain(start, fat, sectorCount);
+    const sectors = chain(start, fat, sectorCount, usedSectors);
     if (!sectors || sectors.length * sectorSize < size) return null;
     const parts: Buffer[] = [];
     for (const index of sectors) {
@@ -431,8 +510,8 @@ export function readCompoundFileStreams(bytes: Buffer, maxStreamBytes: number): 
     return Buffer.concat(parts).subarray(0, size);
   };
 
-  const directorySectors = chain(bytes.readUInt32LE(0x30), fat, sectorCount);
-  if (!directorySectors) return { error: "malformed" };
+  const directorySectors = chain(bytes.readUInt32LE(0x30), fat, sectorCount, usedSectors);
+  if (!directorySectors) return { error: shared ? "shared" : "malformed" };
   const directoryBlocks = directorySectors.map(sector);
   if (directoryBlocks.some((block) => !block)) return { error: "malformed" };
   const dir = Buffer.concat(directoryBlocks as Buffer[]);
@@ -457,11 +536,12 @@ export function readCompoundFileStreams(bytes: Buffer, maxStreamBytes: number): 
   for (const entry of entries) {
     if (entry.type !== 2) continue;
     if (entry.size > maxStreamBytes) return { error: "size" };
+    if (!admit(entry.size)) return { error: "budget" };
     if (entry.size < cutoff) {
       if (!miniStream) {
         miniStream = readChain(root.start, root.size);
         const miniFatBytes = readChain(bytes.readUInt32LE(0x3c), bytes.readUInt32LE(0x40) * sectorSize);
-        if (!miniStream || !miniFatBytes) return { error: "malformed" };
+        if (!miniStream || !miniFatBytes) return { error: shared ? "shared" : "malformed" };
         miniFat = [];
         for (let offset = 0; offset + 4 <= miniFatBytes.length; offset += 4) miniFat.push(miniFatBytes.readUInt32LE(offset));
       }
@@ -469,8 +549,8 @@ export function readCompoundFileStreams(bytes: Buffer, maxStreamBytes: number): 
         streams.push({ name: entry.name, data: Buffer.alloc(0) });
         continue;
       }
-      const sectors = chain(entry.start, miniFat!, miniStream.length / miniSize);
-      if (!sectors || sectors.length * miniSize < entry.size) return { error: "malformed" };
+      const sectors = chain(entry.start, miniFat!, miniStream.length / miniSize, usedMiniSectors);
+      if (!sectors || sectors.length * miniSize < entry.size) return { error: shared ? "shared" : "malformed" };
       const parts: Buffer[] = [];
       for (const index of sectors) {
         if ((index + 1) * miniSize > miniStream.length) return { error: "malformed" };
@@ -479,7 +559,7 @@ export function readCompoundFileStreams(bytes: Buffer, maxStreamBytes: number): 
       streams.push({ name: entry.name, data: Buffer.concat(parts).subarray(0, entry.size) });
     } else {
       const data = readChain(entry.start, entry.size);
-      if (!data) return { error: "malformed" };
+      if (!data) return { error: shared ? "shared" : "malformed" };
       streams.push({ name: entry.name, data });
     }
   }

@@ -9,7 +9,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setDefaultParserSandbox } from "../sandbox/startup.js";
 import type { ParserSandboxProvider, SandboxCommand } from "../sandbox/types.js";
 import { clamdLimitLines } from "./clam-limits.js";
-import { ClamdPolicyCache, crc32, encryptedZipCanary, nestedZipCanary, storedZip, verifyClamdPolicy, type ClamdProbeResult } from "./clamd-policy.js";
+import { inflateSync } from "node:zlib";
+import { readCompoundFileStreams, parseZip } from "../lib/archive-nesting.js";
+import { ClamdPolicyCache, crc32, deflatedZipCanary, EICAR_TEST_FILE, encryptedZipCanary, flatePdfCanary, htmlDataUriCanary, nestedZipCanary, ole2Canary, policyCanaries, storedZip, verifyClamdPolicy, type ClamdProbeResult } from "./clamd-policy.js";
 import { CommandRunner, resetLocalClamdPolicyCache } from "./runner.js";
 
 const hasPython = spawnSync("python3", ["-I", "-c", "import zipfile"]).status === 0;
@@ -18,6 +20,7 @@ const hasPython = spawnSync("python3", ["-I", "-c", "import zipfile"]).status ==
 function goodDaemon(file: string): ClamdProbeResult {
   if (file.endsWith("encrypted-canary.zip")) return { exitCode: 1, stdout: `${file}: Heuristics.Encrypted.Zip FOUND\n`, stderr: "" };
   if (file.endsWith("recursion-canary.zip")) return { exitCode: 1, stdout: `${file}: Heuristics.Limits.Exceeded.MaxRecursion FOUND\n`, stderr: "" };
+  if (/(?:pdf|archive|ole2|html)-canary\.\w+$/.test(file)) return { exitCode: 1, stdout: `${file}: Eicar-Test-Signature FOUND\n`, stderr: "" };
   return { exitCode: 0, stdout: `${file}: OK\n`, stderr: "" };
 }
 /** A daemon started without the alert options: everything is OK (the council reproducer). */
@@ -67,19 +70,37 @@ describe("clamd policy canaries", () => {
     expect(await verifyClamdPolicy(async () => { throw new Error("spawn failed"); })).toMatchObject({ trusted: false, transient: true, reason: expect.stringMatching(/spawn failed/) });
   });
 
+  it("content canaries carry EICAR only where a PDF, ZIP or OLE2 parser reaches it (council re-check 4, M2)", () => {
+    for (const canary of policyCanaries()) expect(canary.data.includes(EICAR_TEST_FILE)).toBe(false);
+    expect(htmlDataUriCanary().toString("latin1")).toContain(`base64,${EICAR_TEST_FILE.toString("base64")}"`);
+    const pdf = flatePdfCanary();
+    const start = pdf.indexOf("stream\n") + 7;
+    expect(inflateSync(pdf.subarray(start, pdf.indexOf("\nendstream"))).equals(EICAR_TEST_FILE)).toBe(true);
+    const zip = deflatedZipCanary();
+    const parsed = parseZip(zip);
+    expect("entries" in parsed && parsed.entries[0]).toMatchObject({ method: 8, uncompressedSize: EICAR_TEST_FILE.length });
+    const ole = readCompoundFileStreams(ole2Canary(), 1024);
+    expect("streams" in ole && ole.streams.map((stream) => [stream.name, stream.data.equals(EICAR_TEST_FILE)])).toEqual([["Canary", true]]);
+  });
+
+  it.each(["pdf-canary.pdf", "archive-canary.zip", "ole2-canary.doc", "html-canary.html"])("refuses a daemon that reports %s clean (ScanPDF/ScanArchive/ScanOLE2/ScanHTML off), not transiently", async (name) => {
+    const verdict = await verifyClamdPolicy(async (file) => (file.endsWith(name) ? defaultDaemon(file) : goodDaemon(file)));
+    expect(verdict).toMatchObject({ trusted: false, transient: false, reason: expect.stringMatching(/content canary.*not detected/) });
+  });
+
   it("caches verdicts per key for the TTL, re-verifies after it, never caches transient refusals, and stays bounded", async () => {
     let now = 0;
     const cache = new ClamdPolicyCache(() => 1_000, () => now, 2);
     const probe = vi.fn(async (file: string) => goodDaemon(file));
     expect(await cache.verify("a", probe)).toEqual({ trusted: true });
     expect(await cache.verify("a", probe)).toEqual({ trusted: true });
-    expect(probe).toHaveBeenCalledTimes(2); // two canaries, one verification
+    expect(probe).toHaveBeenCalledTimes(6); // six canaries, one verification
     now = 1_000;
     await cache.verify("a", probe);
-    expect(probe).toHaveBeenCalledTimes(4);
+    expect(probe).toHaveBeenCalledTimes(12);
     cache.invalidate("a");
     await cache.verify("a", probe);
-    expect(probe).toHaveBeenCalledTimes(6);
+    expect(probe).toHaveBeenCalledTimes(18);
 
     const down = vi.fn(async (): Promise<ClamdProbeResult> => ({ exitCode: 2, stdout: "", stderr: "connect failed" }));
     expect(await cache.verify("b", down)).toMatchObject({ trusted: false, transient: true });
@@ -185,16 +206,33 @@ describe("local clamd scans verify the daemon's policy first (council re-check 2
     expect(commands.filter((command) => command.binary.endsWith("clamscan"))).toHaveLength(0);
   });
 
-  it("a daemon that stops answering is re-verified, so one restarted without the options is refused", async () => {
-    expect(await scan()).toMatchObject({ engine: "clamdscan", status: "clean" });
-    // The daemon goes away mid-run (restart): the scan is an error, and its verified policy is forgotten.
-    daemon = () => ({ exitCode: 2, stdout: "", stderr: "ERROR: Could not connect to clamd on LocalSocket" });
-    expect(await scan()).toMatchObject({ status: "error" });
-    // It comes back with the distribution's default config.
-    daemon = defaultDaemon;
+  it("a daemon restarted with another identity is re-verified within the TTL (council L3)", async () => {
+    let version = "ClamAV 1.4.3/28175/Fri Nov  6 06:24:43 2026";
+    daemon = (file) => (file === "--version" ? { exitCode: 0, stdout: `${version}\n`, stderr: "" } : goodDaemon(file));
+    expect(await scan()).toMatchObject({ engine: "clamdscan" });
+    expect(await scan()).toMatchObject({ engine: "clamdscan" });
+    expect(daemonScansOf("pdf-canary.pdf")).toBe(1);
+    // Same config path and signature date, but the daemon answers as another build (a restart): verified again, and a
+    // daemon that no longer scans PDFs is refused.
+    version = "ClamAV 1.4.4/28175/Fri Nov  6 06:24:43 2026";
+    daemon = (file) => (file === "--version" ? { exitCode: 0, stdout: `${version}\n`, stderr: "" } : file.endsWith("pdf-canary.pdf") ? defaultDaemon(file) : goodDaemon(file));
     vi.spyOn(console, "error").mockImplementation(() => {});
     expect(await scan()).toMatchObject({ engine: "clamscan" });
-    expect(daemonScansOf("encrypted-canary.zip")).toBe(2);
+    expect(daemonScansOf("pdf-canary.pdf")).toBe(2);
+  });
+
+  it("a daemon that stops answering is re-verified, so one restarted without the options is refused", async () => {
+    expect(await scan()).toMatchObject({ engine: "clamdscan", status: "clean" });
+    // The daemon goes away mid-run (restart): its identity (`clamdscan --version`) no longer answers, so the cached verdict
+    // does not apply; verification fails transiently and the scan takes the per-command clamscan path, never the daemon.
+    daemon = () => ({ exitCode: 2, stdout: "", stderr: "ERROR: Could not connect to clamd on LocalSocket" });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(await scan()).toMatchObject({ engine: "clamscan" });
+    // It comes back (a new process: another identity) with the distribution's default config.
+    daemon = (file) => (file === "--version" ? { exitCode: 0, stdout: "ClamAV 1.4.3/28176/Sat Nov  7 06:24:43 2026\n", stderr: "" } : defaultDaemon(file));
+    expect(await scan()).toMatchObject({ engine: "clamscan" });
+    expect(daemonScansOf("encrypted-canary.zip")).toBe(3);
+    expect(daemonScansOf("upload.zip")).toBe(1);
   });
 });
 

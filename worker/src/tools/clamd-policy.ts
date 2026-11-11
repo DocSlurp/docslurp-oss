@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { deflateRawSync, deflateSync } from "node:zlib";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -16,9 +17,24 @@ import { CLAM_SCAN_LIMITS, isClamEncryptedAlert, isClamLimitAlert } from "./clam
  * - an encrypted ZIP (ZipCrypto, random password, benign contents) must be a `Heuristics.Encrypted.*` detection;
  * - ZIPs nested deeper than CLAM_SCAN_LIMITS.maxRecursion must be a `Heuristics.Limits.Exceeded.*` detection.
  *
+ * The scan also relies on the daemon opening what it is given (council re-check 4, M2: a daemon started with `ScanPDF no`
+ * passed both canaries and then reported a Flate-compressed PDF stream clean). So four content canaries carry the EICAR
+ * test file where only that parser can reach it, each of which must be an EICAR detection:
+ *
+ * - a PDF whose one stream is the EICAR file, Flate-compressed (ScanPDF);
+ * - a ZIP whose one member is the EICAR file, Deflate-compressed (ScanArchive);
+ * - an OLE2 compound file whose one stream is the EICAR file, its two mini sectors stored in reverse order so the bytes
+ *   appear in order only to an OLE2 reader (ScanOLE2);
+ * - an HTML page with the EICAR file as a base64 `data:` URI, which libclamav's HTML parser decodes (ScanHTML).
+ *
+ * The EICAR signatures (a hash of the 68-byte file and a body signature at offset 0) never match the canary files
+ * themselves, only what a parser extracts from them. Measured with ClamAV 1.4.3: each canary is detected with the full
+ * policy and reported OK when only its own parser is turned off (--scan-pdf/-ole2/-archive/-html=no).
+ *
  * Anything else (clean, another signature, an error) means the daemon's effective policy is not ours, and it is not used.
- * Results are cached per daemon config (and signature version) for a short TTL and dropped when a scan through the daemon
- * fails to talk to it (a restart or reconnect), so a daemon restarted with another config is re-verified.
+ * Results are cached per daemon identity (config, its socket's inode and change time, the version and signature version
+ * the daemon reports) for a short TTL and dropped when a scan through the daemon fails to talk to it, so a daemon
+ * restarted with another config is re-verified (council L3).
  */
 
 const CRC_TABLE = (() => {
@@ -133,6 +149,132 @@ export function nestedZipCanary(depth = CLAM_SCAN_LIMITS.maxRecursion + 3): Buff
   return data;
 }
 
+/** The EICAR anti-virus test file (eicar.org): detected by every ClamAV signature set, harmless. */
+export const EICAR_TEST_FILE = Buffer.from("X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*", "latin1");
+
+/** A one-page PDF whose only stream is `payload`, Flate-compressed: a daemon that scans PDFs extracts and matches it. */
+export function flatePdfCanary(payload: Buffer = EICAR_TEST_FILE): Buffer {
+  const stream = deflateSync(payload);
+  const parts: Buffer[] = [Buffer.from("%PDF-1.4\n%\xe2\xe3\xcf\xd3\n", "latin1")];
+  const offsets: number[] = [];
+  const add = (body: Buffer) => {
+    offsets.push(parts.reduce((sum, part) => sum + part.length, 0));
+    parts.push(body);
+  };
+  add(Buffer.from("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n", "latin1"));
+  add(Buffer.from("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n", "latin1"));
+  add(Buffer.from("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>\nendobj\n", "latin1"));
+  add(Buffer.concat([Buffer.from(`4 0 obj\n<< /Length ${stream.length} /Filter /FlateDecode >>\nstream\n`, "latin1"), stream, Buffer.from("\nendstream\nendobj\n", "latin1")]));
+  const xref = parts.reduce((sum, part) => sum + part.length, 0);
+  const table = ["xref", `0 ${offsets.length + 1}`, "0000000000 65535 f ", ...offsets.map((offset) => `${String(offset).padStart(10, "0")} 00000 n `)].join("\n");
+  parts.push(Buffer.from(`${table}\ntrailer\n<< /Size ${offsets.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`, "latin1"));
+  return Buffer.concat(parts);
+}
+
+/** A ZIP whose one member is `payload`, Deflate-compressed: a daemon that scans archives inflates and matches it. */
+export function deflatedZipCanary(payload: Buffer = EICAR_TEST_FILE, name = "canary.com"): Buffer {
+  const nameBytes = Buffer.from(name, "utf8");
+  const body = deflateRawSync(payload);
+  const crc = crc32(payload);
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(20, 4);
+  local.writeUInt16LE(0x0800, 6);
+  local.writeUInt16LE(8, 8);
+  local.writeUInt16LE(0x21, 12);
+  local.writeUInt32LE(crc, 14);
+  local.writeUInt32LE(body.length, 18);
+  local.writeUInt32LE(payload.length, 22);
+  local.writeUInt16LE(nameBytes.length, 26);
+  const central = Buffer.alloc(46);
+  central.writeUInt32LE(0x02014b50, 0);
+  central.writeUInt16LE(20, 4);
+  central.writeUInt16LE(20, 6);
+  central.writeUInt16LE(0x0800, 8);
+  central.writeUInt16LE(8, 10);
+  central.writeUInt16LE(0x21, 14);
+  central.writeUInt32LE(crc, 16);
+  central.writeUInt32LE(body.length, 20);
+  central.writeUInt32LE(payload.length, 24);
+  central.writeUInt16LE(nameBytes.length, 28);
+  const directory = Buffer.concat([central, nameBytes]);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(1, 8);
+  end.writeUInt16LE(1, 10);
+  end.writeUInt32LE(directory.length, 12);
+  end.writeUInt32LE(local.length + nameBytes.length + body.length, 16);
+  return Buffer.concat([local, nameBytes, body, directory, end]);
+}
+
+/**
+ * A version 3 OLE2 compound file (MS-CFB) with one stream, `Canary`, holding `payload` (at most 128 bytes) in the mini
+ * stream, its mini sectors stored in reverse order: the payload's bytes are in order only when an OLE2 reader follows the
+ * mini FAT chain. Sectors: 0 the FAT, 1 the directory, 2 the mini FAT, 3 the mini stream.
+ */
+export function ole2Canary(payload: Buffer = EICAR_TEST_FILE): Buffer {
+  if (payload.length === 0 || payload.length > 128) throw new Error("OLE2 canary payload must be 1-128 bytes");
+  const SECTOR = 512;
+  const FREESECT = 0xffffffff;
+  const ENDOFCHAIN = 0xfffffffe;
+  const FATSECT = 0xfffffffd;
+  const header = Buffer.alloc(SECTOR);
+  Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]).copy(header, 0);
+  header.writeUInt16LE(0x3e, 0x18);
+  header.writeUInt16LE(3, 0x1a);
+  header.writeUInt16LE(0xfffe, 0x1c);
+  header.writeUInt16LE(9, 0x1e);
+  header.writeUInt16LE(6, 0x20);
+  header.writeUInt32LE(1, 0x2c); // FAT sectors
+  header.writeUInt32LE(1, 0x30); // directory start
+  header.writeUInt32LE(4096, 0x38); // mini stream cutoff
+  header.writeUInt32LE(2, 0x3c); // mini FAT start
+  header.writeUInt32LE(1, 0x40); // mini FAT sectors
+  header.writeUInt32LE(ENDOFCHAIN, 0x44); // no DIFAT sectors
+  for (let index = 0; index < 109; index += 1) header.writeUInt32LE(index === 0 ? 0 : FREESECT, 0x4c + index * 4);
+  const fat = Buffer.alloc(SECTOR, 0xff);
+  fat.writeUInt32LE(FATSECT, 0);
+  fat.writeUInt32LE(ENDOFCHAIN, 4);
+  fat.writeUInt32LE(ENDOFCHAIN, 8);
+  fat.writeUInt32LE(ENDOFCHAIN, 12);
+  // Mini sectors: the payload's first 64 bytes go to mini sector 1, the rest to mini sector 0; the chain is 1 -> 0.
+  const miniFat = Buffer.alloc(SECTOR, 0xff);
+  const twoSectors = payload.length > 64;
+  miniFat.writeUInt32LE(ENDOFCHAIN, 0);
+  if (twoSectors) miniFat.writeUInt32LE(0, 4);
+  const miniStream = Buffer.alloc(SECTOR);
+  if (twoSectors) {
+    payload.copy(miniStream, 64, 0, 64);
+    payload.copy(miniStream, 0, 64);
+  } else {
+    payload.copy(miniStream, 0);
+  }
+  const directory = Buffer.alloc(SECTOR);
+  const entry = (index: number, name: string, type: number, child: number, start: number, size: number) => {
+    const at = index * 128;
+    directory.write(name, at, "utf16le");
+    directory.writeUInt16LE((name.length + 1) * 2, at + 0x40);
+    directory[at + 0x42] = type;
+    directory[at + 0x43] = 1; // black
+    directory.writeUInt32LE(FREESECT, at + 0x44);
+    directory.writeUInt32LE(FREESECT, at + 0x48);
+    directory.writeUInt32LE(child, at + 0x4c);
+    directory.writeUInt32LE(start, at + 0x74);
+    directory.writeUInt32LE(size, at + 0x78);
+  };
+  entry(0, "Root Entry", 5, 1, 3, twoSectors ? 128 : 64);
+  entry(1, "Canary", 2, FREESECT, twoSectors ? 1 : 0, payload.length);
+  for (const index of [2, 3]) {
+    for (const offset of [0x44, 0x48, 0x4c]) directory.writeUInt32LE(FREESECT, index * 128 + offset);
+  }
+  return Buffer.concat([header, fat, directory, miniFat, miniStream]);
+}
+
+/** An HTML page carrying `payload` as a base64 `data:` URI: a daemon that scans HTML decodes and matches it. */
+export function htmlDataUriCanary(payload: Buffer = EICAR_TEST_FILE): Buffer {
+  return Buffer.from(`<!doctype html>\n<html><body><p>DocSlurp clamd HTML canary</p><img alt="" src="data:application/octet-stream;base64,${payload.toString("base64")}"></body></html>\n`, "latin1");
+}
+
 export interface ClamdProbeResult {
   exitCode: number | null;
   stdout: string;
@@ -158,17 +300,30 @@ function describe(result: ClamdProbeResult): string {
   return `exit ${result.exitCode ?? "none"}${text ? `: ${text}` : ""}`;
 }
 
-/** The two policy canaries, generated fresh each time (random contents and password). */
-export function policyCanaries(): Array<{ kind: "encrypted" | "recursion"; name: string; data: Buffer }> {
+export type ClamdCanaryKind = "encrypted" | "recursion" | "pdf" | "archive" | "ole2" | "html";
+
+/** The policy canaries, generated fresh each time (random contents and password for the alert canaries). */
+export function policyCanaries(): Array<{ kind: ClamdCanaryKind; name: string; data: Buffer }> {
   return [
     { kind: "encrypted", name: "encrypted-canary.zip", data: encryptedZipCanary() },
     { kind: "recursion", name: "recursion-canary.zip", data: nestedZipCanary() },
+    { kind: "pdf", name: "pdf-canary.pdf", data: flatePdfCanary() },
+    { kind: "archive", name: "archive-canary.zip", data: deflatedZipCanary() },
+    { kind: "ole2", name: "ole2-canary.doc", data: ole2Canary() },
+    { kind: "html", name: "html-canary.html", data: htmlDataUriCanary() },
   ];
 }
 
+const CONTENT_CANARY_PARSER: Record<"pdf" | "archive" | "ole2" | "html", string> = { pdf: "ScanPDF", archive: "ScanArchive", ole2: "ScanOLE2", html: "ScanHTML" };
+
 /** Why a daemon's answer for one canary shows a policy other than ours, or null when it is the expected detection. */
-export function judgeCanary(kind: "encrypted" | "recursion", result: ClamdProbeResult, file: string): string | null {
+export function judgeCanary(kind: ClamdCanaryKind, result: ClamdProbeResult, file: string): string | null {
   const found = detections(result, file);
+  if (kind === "pdf" || kind === "archive" || kind === "ole2" || kind === "html") {
+    return result.exitCode === 1 && found.some((signature) => /eicar/i.test(signature))
+      ? null
+      : `${kind} content canary (EICAR only a ${kind} parser reaches) was not detected (${CONTENT_CANARY_PARSER[kind]} off?): ${describe(result)}`;
+  }
   if (kind === "encrypted") {
     return result.exitCode === 1 && found.some(isClamEncryptedAlert)
       ? null

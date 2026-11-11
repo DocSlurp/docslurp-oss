@@ -3,7 +3,7 @@ import path from "node:path";
 import { sniffFileBytes, type SniffedBytes } from "@docslurp/shared";
 
 import { CLAM_SCAN_LIMITS } from "../tools/clam-limits.js";
-import { inspectNestedArchives, parseZip } from "./archive-nesting.js";
+import { findEmbeddedContainer, inspectNestedArchives, parseZip } from "./archive-nesting.js";
 import type { ArchiveInspection, QuarantinePolicy } from "./quarantine.js";
 
 /*
@@ -22,7 +22,32 @@ export interface QuarantineInspection {
 
 export function inspectQuarantineBytes(bytes: Buffer, filename: string, policy: QuarantinePolicy): QuarantineInspection {
   const encryptName = pdfHasEncryptName(bytes);
-  return { sniffed: sniffFileBytes(bytes, filename), archive: inspectArchive(bytes, filename, policy), pdf: encryptName === null ? null : { encryptName } };
+  const sniffed = sniffFileBytes(bytes, filename);
+  const archive = inspectArchive(bytes, filename, policy) ?? (sniffed.container === null ? embeddedContainerInspection(bytes) : null);
+  return { sniffed, archive, pdf: encryptName === null ? null : { encryptName } };
+}
+
+/**
+ * A file that is not a ZIP or OLE2 container at offset 0 but holds one where a tolerant reader would find it (a ZIP end
+ * record in its last 64 KiB, or a container's magic in its first few KB: archive-nesting.ts findEmbeddedContainer): a
+ * PDF+ZIP polyglot or a self-extractor. Refused as `archive-embedded-container`; null when there is none. OLE2 files are
+ * left to ClamAV's own OLE2 parser, since Office embeds packages (a DOCX inside a .doc) at offsets inside its streams.
+ */
+function embeddedContainerInspection(bytes: Buffer): ArchiveInspection | null {
+  if (!findEmbeddedContainer(bytes)) return null;
+  return {
+    kind: "zip",
+    entryCount: 0,
+    totalCompressedBytes: 0,
+    totalUncompressedBytes: 0,
+    maxEntryUncompressedBytes: 0,
+    maxPathDepth: 0,
+    compressionRatio: null,
+    suspicious: true,
+    inspectable: false,
+    issues: ["archive-embedded-container"],
+    chartParts: 0
+  };
 }
 
 export function sniffMimeType(bytes: Buffer, filename: string): string | null {
@@ -39,6 +64,9 @@ export function inspectArchive(bytes: Buffer, filename: string, policy: Quaranti
 
   const zip = parseZip(bytes);
   if ("error" in zip) {
+    if (zip.error === "hidden-entry") {
+      return { kind: "zip", entryCount: 0, totalCompressedBytes: 0, totalUncompressedBytes: 0, maxEntryUncompressedBytes: 0, maxPathDepth: 0, compressionRatio: null, suspicious: true, inspectable: false, issues: ["archive-hidden-entry"], chartParts: 0 };
+    }
     return {
       kind: "zip",
       entryCount: 0,
@@ -106,7 +134,7 @@ export function inspectArchive(bytes: Buffer, filename: string, policy: Quaranti
         maxEntriesPerArchive: policy.quarantineMaxArchiveEntries,
         maxObjects: CLAM_SCAN_LIMITS.maxFiles,
       })
-    : { issues: [], nestedContainers: 0, maxNestingDepth: 1 };
+    : { issues: [], notices: [], nestedContainers: 0, maxNestingDepth: 1 };
   issues.push(...nesting.issues);
 
   return {
@@ -121,6 +149,7 @@ export function inspectArchive(bytes: Buffer, filename: string, policy: Quaranti
     inspectable: true,
     issues: [...new Set(issues)],
     chartParts,
+    ...(nesting.notices.length ? { notices: nesting.notices } : {}),
     nestedContainers: nesting.nestedContainers,
     maxNestingDepth: nesting.maxNestingDepth
   };
@@ -140,11 +169,15 @@ export function describeArchiveIssue(issue: string, archive: ArchiveInspection):
     case "archive-nested-entry-count-limit": return "a nested archive has too many entries";
     case "archive-nested-encrypted-entry": return "a nested archive has encrypted entries, which cannot be scanned";
     case "archive-nested-unsupported-format": return "a nested archive is in a format the malware scanner cannot open (such as RAR)";
-    case "archive-nested-uninspectable": return "a nested archive is in a format that cannot be inspected (such as 7z or tar)";
+    case "archive-nested-uninspectable": return "a nested archive is in a format only the malware scanner opens (such as 7z, tar or CAB)";
     case "archive-nested-depth-limit": return "archives are nested deeper than the malware scanner's recursion limit";
     case "archive-nested-inspection-failed": return "a nested archive could not be inspected safely";
     case "archive-nested-expanded-bytes-limit": return "nested archives expand past the total size limit";
     case "archive-nested-object-count-limit": return "nested archives hold more objects than the malware scanner's file limit";
+    case "archive-nested-embedded-container": return "an archive member hides another archive or container behind leading bytes";
+    case "archive-nested-ole-shared-sectors": return "an embedded Office (OLE2) file has streams that share or loop through the same sectors";
+    case "archive-embedded-container": return "file holds an archive or container that does not start at its first byte (a polyglot or self-extractor)";
+    case "archive-hidden-entry": return "archive holds an entry its central directory does not list";
     case "archive-entry-count-limit":
       return `archive entry count ${archive.entryCount} exceeds limit`;
     case "archive-depth-limit":

@@ -191,8 +191,10 @@ describe("nested archive walk: refused cases (owner decision, PR #339)", () => {
     ["bzip2", Buffer.from("BZh91AY&SY")],
     ["tar", Buffer.concat([Buffer.alloc(257), Buffer.from("ustar\0" + "00"), Buffer.alloc(247)])],
     ["cab", Buffer.from("MSCF\0\0\0\0rest")],
-  ])("a nested %s, which this walk does not open: archive-nested-uninspectable", (_format, data) => {
-    expect(issuesOf(docxWith(data))).toEqual(["archive-nested-uninspectable"]);
+  ])("a nested %s, which ClamAV opens but this walk does not: accepted with an archive-nested-uninspectable notice (correctness M3)", (_format, data) => {
+    const archive = inspectArchive(docxWith(data), "quarterly.docx", policy);
+    expect(archive?.issues).toEqual([]);
+    expect(archive?.notices).toEqual(["archive-nested-uninspectable"]);
   });
 
   it.each([["zstd", [0x28, 0xb5, 0x2f, 0xfd, 0]], ["lz4", [0x04, 0x22, 0x4d, 0x18, 0]]] as const)("a nested %s: archive-nested-unsupported-format", (_format, magic) => {
@@ -324,7 +326,7 @@ describe("quarantine: an encrypted PDF's decrypted copy is scanned too (owner de
   const ENCRYPTED = "%PDF-1.7\ntrailer<</Root 1 0 R/Encrypt 5 0 R>>";
 
   it("an owner-password PDF whose plaintext copy is clean is accepted (permissions-restricted PDFs still upload)", async () => {
-    const { artifact, calls, codes } = await run(ENCRYPTED, { status: "decrypted", path: "", bytes: 4495, ms: 40 });
+    const { artifact, calls, codes } = await run(ENCRYPTED, { status: "decrypted", path: "", bytes: 4495, ms: 40, encrypted: true });
     expect(calls).toEqual(["scan original", "decrypt", "scan copy"]);
     expect(codes).toEqual([]);
     expect(artifact.decision).toBe("accepted");
@@ -332,7 +334,7 @@ describe("quarantine: an encrypted PDF's decrypted copy is scanned too (owner de
   });
 
   it("the plaintext copy infected (the hidden-stream case): refused as malware-detected", async () => {
-    const { artifact, codes } = await run(ENCRYPTED, { status: "decrypted", path: "", bytes: 4495, ms: 40 }, scan("clean"), scan("infected", "Eicar-Test-Signature"));
+    const { artifact, codes } = await run(ENCRYPTED, { status: "decrypted", path: "", bytes: 4495, ms: 40, encrypted: true }, scan("clean"), scan("infected", "Eicar-Test-Signature"));
     expect(codes).toEqual(["malware-detected"]);
     expect(artifact.reasons.find((reason) => reason.code === "malware-detected")?.details).toMatchObject({ scanned: "decrypted-copy" });
   });
@@ -341,7 +343,7 @@ describe("quarantine: an encrypted PDF's decrypted copy is scanned too (owner de
     ["the copy hit a scan limit", scan("infected", "Heuristics.Limits.Exceeded.MaxScanSize"), "malware-scan-limit-exceeded"],
     ["the copy's scan errored", scan("error"), "malware-scan-error"],
   ] as const)("%s: refused (%s)", async (_label, copy, code) => {
-    expect((await run(ENCRYPTED, { status: "decrypted", path: "", bytes: 1, ms: 1 }, scan("clean"), copy)).codes).toEqual([code]);
+    expect((await run(ENCRYPTED, { status: "decrypted", path: "", bytes: 1, ms: 1, encrypted: true }, scan("clean"), copy)).codes).toEqual([code]);
   });
 
   it("qpdf failed, timed out or hit its limits: refused as malware-scan-pdf-decrypt-failed, with qpdf's reason only in details", async () => {

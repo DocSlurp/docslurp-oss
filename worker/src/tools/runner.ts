@@ -19,7 +19,7 @@ import {
 import { recordUnrecordedUsageTelemetry, withObservation } from "@docslurp/shared/observability";
 import { DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@docslurp/shared";
 import { existsSync, readFileSync, readdirSync, readlinkSync, lstatSync, realpathSync, statSync } from "node:fs";
-import { access, chmod, copyFile, lstat, mkdtemp, open, readdir, rm, stat } from "node:fs/promises";
+import { access, chmod, copyFile, lstat, mkdtemp, open, readFile, readdir, rm, stat } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
@@ -133,6 +133,22 @@ export function pdfEncryptionCheckArgv(source: string): string[] {
 }
 
 /**
+ * `qpdf --show-encryption` under PDF_DECRYPT_LIMITS: whether the effective trailer names an encryption dictionary. Prints
+ * `File is not encrypted` (exit 0) for a PDF that is not; asked only after `--requires-password` exited 2, which is both
+ * "not encrypted" and "could not read the file".
+ */
+export function pdfShowEncryptionArgv(source: string): string[] {
+  const planned = planDocumentToolInvocation({ binary: "qpdf", args: ["--show-encryption", source], fileArgIndexes: [1], supportsDoubleDash: false });
+  return [...pdfQpdfLimitArgs(), "--", planned.binary, ...planned.args];
+}
+
+/** Whether a `qpdf --show-encryption` result says the file is not encrypted: exit 0 (or 3 with only benign warnings) and that line. */
+export function qpdfReportsNotEncrypted(result: { exitCode: number | null; stdout: string; stderr: string }): boolean {
+  const said = /^File is not encrypted$/m.test(result.stdout);
+  return said && (result.exitCode === 0 || (result.exitCode === 3 && qpdfWarningsBenign(result.stderr)));
+}
+
+/**
  * `qpdf --decrypt` to a plaintext copy for the scanner: QDF, no object streams, every generalized filter decoded, under
  * PDF_DECRYPT_LIMITS (RLIMIT_FSIZE: qpdf is killed, SIGXFSZ, rather than write a copy past maxOutputBytes).
  */
@@ -141,10 +157,32 @@ export function pdfDecryptArgv(source: string, output: string): string[] {
   return [...pdfQpdfLimitArgs(), `--fsize=${PDF_DECRYPT_LIMITS.maxOutputBytes}`, "--", planned.binary, ...planned.args];
 }
 
+/**
+ * qpdf warnings (exit 3) that leave the decrypted copy complete: recoveries of a damaged cross-reference table or stream
+ * length that every PDF reader performs the same way. Any other line, or no warning at all, is not benign.
+ */
+const QPDF_BENIGN_WARNINGS: readonly RegExp[] = [
+  /: file is damaged$/,
+  /: Attempting to reconstruct cross-reference table$/,
+  /: reported number of objects \(\d+\) is not one plus the highest object number \(\d+\)$/,
+  /: xref not found$/,
+  /: expected endstream$/,
+  /: attempting to recover stream length$/,
+  /: recovered stream length: \d+$/,
+  /: object has offset 0$/,
+];
+const QPDF_WARNINGS_TRAILER = "qpdf: operation succeeded with warnings; resulting file may have some problems";
+
+export function qpdfWarningsBenign(stderr: string): boolean {
+  const lines = stderr.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).filter((line) => line !== QPDF_WARNINGS_TRAILER);
+  return lines.length > 0 && lines.length <= 1000 && lines.every((line) => line.startsWith("WARNING: ") && QPDF_BENIGN_WARNINGS.some((pattern) => pattern.test(line)));
+}
+
 /** What the in-VM decryption made of an encrypted PDF (CommandRunner.decryptPdfForScan); `ms` is the wall time it took. */
 export type PdfDecryptOutcome =
   | { status: "requires-password"; ms: number }
-  | { status: "decrypted"; path: string; bytes: number; ms: number }
+  /** `encrypted: false`: the bytes name /Encrypt but qpdf found no encryption in the effective trailer; the copy is qpdf's normalised rewrite. */
+  | { status: "decrypted"; path: string; bytes: number; ms: number; encrypted: boolean }
   | { status: "failed"; reason: string; ms: number };
 
 /** Budgets for one `pdfpagecount` run (lib/pdf-page-count.ts PDF_PAGE_COUNT_LIMITS). */
@@ -1208,7 +1246,17 @@ export class CommandRunner {
   async verifyLocalClamDaemon(signal?: AbortSignal, databaseUpdatedAt?: string | null): Promise<ClamdPolicyVerdict | null> {
     const probePlan = await this.clamDaemonScan("/dev/null");
     if (!probePlan.available) return null;
-    const key = await localClamdPolicyKey(databaseUpdatedAt ?? inspectClamDatabaseHealth(resolveMalwareScanPolicy()).updatedAt);
+    // The daemon's own identity is part of the key (council L3): `clamdscan --version` asks the daemon for its version and
+    // signature version, and its socket's inode and change time differ after any restart, so a daemon restarted with a
+    // weaker config is verified again rather than inheriting the cached verdict.
+    let daemonVersion = "unknown";
+    try {
+      const version = await this.runScanPlan(await this.plan("clamdscan", `--config-file=${localClamdConfigFile()}`, "--version"), signal);
+      if (version.exitCode === 0) daemonVersion = version.stdout.trim().slice(0, 200);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+    }
+    const key = await localClamdPolicyKey(databaseUpdatedAt ?? inspectClamDatabaseHealth(resolveMalwareScanPolicy()).updatedAt, daemonVersion);
     const verdict = await localClamdPolicy.verify(key, async (file): Promise<ClamdProbeResult> => {
       const outcome = await this.runScanPlan(await this.clamDaemonScan(file), signal);
       return { exitCode: outcome.exitCode, stdout: outcome.stdout, stderr: outcome.stderr };
@@ -1266,7 +1314,24 @@ export class CommandRunner {
     // error. The bytes name /Encrypt, so "not encrypted" is a disagreement this cannot settle (a damaged file, or an
     // /Encrypt qpdf does not honour but another reader might): refused, never scanned as the original alone.
     if (checked.exitCode === 0) return { status: "requires-password", ms: elapsed() };
-    if (checked.exitCode !== 3) return { status: "failed", reason: `qpdf could not settle the encryption (exit ${checked.exitCode ?? "none"})${checked.stderr ? `: ${checked.stderr.trim().slice(0, 500)}` : ""}`, ms: elapsed() };
+    let encrypted = true;
+    if (checked.exitCode === 2) {
+      // 2 is both "not encrypted" and "could not read": --show-encryption tells them apart (correctness council, High: a
+      // literal /Encrypt in a comment, string or content stream of an ordinary PDF must not refuse it). A PDF qpdf calls
+      // unencrypted is still rewritten and the rewrite scanned: libclamav may have honoured an /Encrypt that qpdf's
+      // effective trailer does not (an incremental update that drops it), scanning plaintext streams as ciphertext.
+      let shown: SandboxResult;
+      try {
+        shown = await this.runScanPlan(await this.boundedQpdfPlan(pdfShowEncryptionArgv(source)), signal, "pdf-decrypt");
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        return { status: "failed", reason: `encryption check did not complete: ${error instanceof Error ? error.message : String(error)}`, ms: elapsed() };
+      }
+      if (!qpdfReportsNotEncrypted(shown)) return { status: "failed", reason: `qpdf could not settle the encryption (exit ${checked.exitCode})${checked.stderr ? `: ${checked.stderr.trim().slice(0, 500)}` : ""}`, ms: elapsed() };
+      encrypted = false;
+    } else if (checked.exitCode !== 3) {
+      return { status: "failed", reason: `qpdf could not settle the encryption (exit ${checked.exitCode ?? "none"})${checked.stderr ? `: ${checked.stderr.trim().slice(0, 500)}` : ""}`, ms: elapsed() };
+    }
     const output = path.join(outputDir, "decrypted.pdf");
     const decrypt = await this.boundedQpdfPlan(pdfDecryptArgv(source, output));
     let decrypted: SandboxResult;
@@ -1276,8 +1341,10 @@ export class CommandRunner {
       if (signal?.aborted) throw error;
       return { status: "failed", reason: `decryption did not complete: ${error instanceof Error ? error.message : String(error)}`, ms: elapsed() };
     }
-    // 3: written with warnings (a damaged file qpdf recovered); the copy is what qpdf read, and it is scanned.
-    if (decrypted.exitCode !== 0 && decrypted.exitCode !== 3) return { status: "failed", reason: `qpdf --decrypt failed (exit ${decrypted.exitCode ?? "none"})${decrypted.stderr ? `: ${decrypted.stderr.trim().slice(0, 500)}` : ""}`, ms: elapsed() };
+    // 3: written with warnings. Accepted only when every warning is a recovery on the benign allow-list (a damaged
+    // cross-reference table qpdf rebuilt, a stream length it recounted); a warning qpdf gives when it hit its memory limit
+    // (bad_alloc), skipped a deeply nested object or left a stream undecoded means the copy is not all of the file (council L2).
+    if (decrypted.exitCode !== 0 && !(decrypted.exitCode === 3 && qpdfWarningsBenign(decrypted.stderr))) return { status: "failed", reason: `qpdf --decrypt failed (exit ${decrypted.exitCode ?? "none"})${decrypted.stderr ? `: ${decrypted.stderr.trim().slice(0, 500)}` : ""}`, ms: elapsed() };
     let size: number;
     try {
       const info = await lstat(output);
@@ -1287,7 +1354,7 @@ export class CommandRunner {
       return { status: "failed", reason: "decrypted copy missing", ms: elapsed() };
     }
     if (size >= PDF_DECRYPT_LIMITS.maxOutputBytes) return { status: "failed", reason: `decrypted copy reached the ${PDF_DECRYPT_LIMITS.maxOutputBytes}-byte limit`, ms: elapsed() };
-    return { status: "decrypted", path: output, bytes: size, ms: elapsed() };
+    return { status: "decrypted", path: output, bytes: size, ms: elapsed(), encrypted };
   }
 
   private async clamVmDatabaseHealth(policy: MalwareScanPolicy, signal: AbortSignal | undefined, databaseArgs: string[], assetDir?: string): Promise<ClamDatabaseHealth> {
@@ -2715,10 +2782,29 @@ export function resetLocalClamdPolicyCache(): void {
 }
 
 /** One verification per config file (path and modification time) and loaded signature version. */
-async function localClamdPolicyKey(databaseUpdatedAt: string | null): Promise<string> {
+async function localClamdPolicyKey(databaseUpdatedAt: string | null, daemonVersion = "unknown"): Promise<string> {
   const configFile = localClamdConfigFile();
   const mtime = await stat(configFile).then((info) => info.mtimeMs, () => "missing");
-  return `${configFile}|${mtime}|${databaseUpdatedAt ?? "unknown"}`;
+  return `${configFile}|${mtime}|${databaseUpdatedAt ?? "unknown"}|${await localClamdSocketIdentity(configFile)}|${daemonVersion}`;
+}
+
+/**
+ * The inode and change time of the local daemon's socket (the config's LocalSocket, an operator-owned file, not customer
+ * bytes): a restarted daemon recreates its socket, so these change. `unknown` when the socket is not visible here.
+ */
+async function localClamdSocketIdentity(configFile: string): Promise<string> {
+  try {
+    const config = (await readFile(configFile, "utf8")).slice(0, 256 * 1024);
+    const socket = /^\s*LocalSocket\s+(\S+)/m.exec(config)?.[1];
+    if (!socket) {
+      const tcp = /^\s*TCPSocket\s+(\d+)/m.exec(config)?.[1];
+      return tcp ? `tcp:${tcp}` : "no-socket";
+    }
+    const info = await stat(socket);
+    return `${info.ino}:${info.ctimeMs}`;
+  } catch {
+    return "unknown";
+  }
 }
 
 /** A scan's wall-clock budget: the page-based one, but never less than the scan time limit allows (clam-limits.ts). */

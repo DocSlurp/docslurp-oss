@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolveScriptsDir } from "../tools/scripts-dir.js";
 
-import { fileFactsFromSniff, type FileFacts } from "@docslurp/shared";
+import { fileFactsFromSniff, quarantineFailureText, type FileFacts } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import { DocumentStageError } from "../pipeline/checkpoints.js";
@@ -37,6 +37,8 @@ export interface ArchiveInspection {
    * stats. Optional: guests built before it was added omit it.
    */
   chartParts?: number;
+  /** Warning-only findings of the nested walk (`archive-nested-uninspectable`); optional, older guests omit it. */
+  notices?: string[];
   /** Nested containers (ZIP, gzip, OLE2) the in-VM walk opened (archive-nesting.ts). */
   nestedContainers?: number;
   /** Deepest container reached, the top-level ZIP being 1. */
@@ -58,7 +60,7 @@ export interface QuarantineArtifact {
    * An encrypted PDF's in-VM decryption (CommandRunner.decryptPdfForScan) and the scan of its plaintext copy; null when
    * the file is not a PDF naming /Encrypt or its own scan was not clean.
    */
-  pdfDecryption?: { status: "requires-password" | "decrypted" | "failed"; ms: number; bytes?: number; malwareScan?: MalwareScanResult } | null;
+  pdfDecryption?: { status: "requires-password" | "decrypted" | "failed"; ms: number; bytes?: number; encrypted?: boolean; malwareScan?: MalwareScanResult } | null;
   decision: "accepted" | "quarantined";
   reasons: QuarantineReason[];
 }
@@ -134,8 +136,26 @@ export async function scanDocumentForQuarantine(args: {
     });
   }
 
+  // Council L1: the guest's verdicts are cross-checked against what this host already knows from the leading bytes (the same
+  // magic numbers intake reads) and a bounded byte search, never a parse. A PDF header with no PDF result, or a ZIP header
+  // with no archive result, means the guest's answer does not describe these bytes: refused.
+  const hostPdf = hasLeadingBytes(args.bytes, PDF_MAGIC);
+  if ((hostPdf && inspected.pdf === null) || (hasLeadingBytes(args.bytes, ZIP_LOCAL_MAGIC) && inspected.archive === null)) {
+    reasons.push({
+      code: "quarantine-inspection-inconsistent",
+      severity: "error",
+      message: "file could not be inspected safely",
+      details: { hostPdfHeader: hostPdf, guestPdf: inspected.pdf !== null, guestArchive: inspected.archive !== null },
+    });
+  }
+  // The guest's "no /Encrypt" is not taken alone: a literal /Encrypt in the bytes sends the file to the decryption check.
+  const encryptName = !!inspected.pdf?.encryptName || (hostPdf && args.bytes.includes(ENCRYPT_NAME));
+
   const archive = inspected.archive;
   if (archive) {
+    for (const notice of archive.notices ?? []) {
+      reasons.push({ code: notice, severity: "warning", message: describeArchiveIssue(notice, archive) });
+    }
     for (const issue of archive.issues) {
       reasons.push({
         code: issue,
@@ -160,7 +180,7 @@ export async function scanDocumentForQuarantine(args: {
   // that names /Encrypt and scanned clean is decrypted in the parser VM and the plaintext copy scanned too. Clean only if
   // both are; anything the decryption cannot settle is refused.
   let pdfDecryption: QuarantineArtifact["pdfDecryption"] = null;
-  if (inspected.pdf?.encryptName && malwareScan.status === "clean") {
+  if (encryptName && malwareScan.status === "clean") {
     const dir = await mkdtemp(path.join(tmpdir(), "docslurp-quarantine-pdf-"));
     try {
       const outcome = await args.runner.decryptPdfForScan(args.tempFile, dir, args.signal);
@@ -173,7 +193,7 @@ export async function scanDocumentForQuarantine(args: {
         reasons.push({ code: "malware-scan-pdf-decrypt-failed", severity: "error", message: "encrypted PDF could not be decrypted for a malware scan; remove its encryption and upload again", details: { reason: outcome.reason } });
       } else {
         const copyScan = await args.runner.scanForMalware(outcome.path, args.signal);
-        pdfDecryption = { status: outcome.status, ms: outcome.ms, bytes: outcome.bytes, malwareScan: copyScan };
+        pdfDecryption = { status: outcome.status, ms: outcome.ms, bytes: outcome.bytes, encrypted: outcome.encrypted, malwareScan: copyScan };
         for (const reason of malwareScanReasons(copyScan, args.policy)) {
           reason.details = { ...reason.details, scanned: "decrypted-copy" };
           if (!reasons.some((existing) => existing.code === reason.code)) reasons.push(reason);
@@ -228,6 +248,14 @@ export async function scanDocumentForQuarantine(args: {
   };
 }
 
+const PDF_MAGIC = Buffer.from("%PDF-", "latin1");
+const ZIP_LOCAL_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+const ENCRYPT_NAME = Buffer.from("/Encrypt", "latin1");
+
+function hasLeadingBytes(bytes: Buffer, magic: Buffer): boolean {
+  return bytes.length >= magic.length && bytes.subarray(0, magic.length).equals(magic);
+}
+
 const ENCRYPTED_CONTENT_MESSAGE = "file is encrypted or password-protected, so it cannot be scanned for malware; remove the password and upload again";
 
 /** The quarantine reasons one malware scan verdict gives (none for a clean scan). */
@@ -252,7 +280,7 @@ function malwareScanReasons(malwareScan: MalwareScanResult, policy: QuarantinePo
     reasons.push({
       code: "malware-scan-limit-exceeded",
       severity: "error",
-      message: `file exceeds the malware scanner's limits (${malwareScan.signature}) and was not fully scanned`,
+      message: "file exceeds the malware scanner's limits and was not fully scanned",
       details: {
         engine: malwareScan.engine,
         signature: malwareScan.signature
@@ -262,7 +290,7 @@ function malwareScanReasons(malwareScan: MalwareScanResult, policy: QuarantinePo
     reasons.push({
       code: "malware-detected",
       severity: "error",
-      message: `malware signature ${malwareScan.signature ?? "unknown"} detected`,
+      message: "malware detected",
       details: {
         engine: malwareScan.engine,
         signature: malwareScan.signature
@@ -273,10 +301,8 @@ function malwareScanReasons(malwareScan: MalwareScanResult, policy: QuarantinePo
     reasons.push({
       code: malwareScan.status === "error" ? "malware-scan-error" : "malware-scan-unavailable",
       severity: failClosed ? "error" : "warning",
-      message:
-        malwareScan.status === "error"
-          ? `malware scan failed${malwareScan.stderr ? `: ${malwareScan.stderr.trim()}` : ""}`
-          : "malware scanner unavailable",
+      // Fixed text: the scanner's stderr stays in details (artifact, telemetry), never in the stage error.
+      message: malwareScan.status === "error" ? "malware scan failed" : "malware scanner unavailable",
       details: {
         engine: malwareScan.engine,
         stderr: malwareScan.stderr || null,
@@ -293,11 +319,10 @@ export function assertAcceptedQuarantine(artifact: QuarantineArtifact, artifactU
     return;
   }
 
-  const summary = artifact.reasons
-    .filter((reason) => reason.severity === "error")
-    .map((reason) => reason.message)
-    .join("; ");
-  throw new DocumentStageError(`quarantined: ${summary}`, {
+  const errors = artifact.reasons.filter((reason) => reason.severity === "error");
+  // The reason codes lead the stage error so the API can map them to reviewed copy (public-errors.ts); messages are this
+  // module's own fixed text, raw scanner output stays in reason details (the artifact and telemetry).
+  throw new DocumentStageError(quarantineFailureText(errors.map((reason) => reason.code), errors.map((reason) => reason.message)), {
     artifactUri,
     stats: buildQuarantineStats(artifact)
   });
@@ -368,6 +393,7 @@ async function inspectInVm(args: { bytes: Buffer; filename: string; tempFile: st
         if (!Number.isSafeInteger(archive[key]) || archive[key] < 0) throw new Error("invalid quarantine archive size");
       }
       if (!(archive.compressionRatio === null || Number.isFinite(archive.compressionRatio) && archive.compressionRatio >= 0)) throw new Error("invalid quarantine expansion ratio");
+      if (archive.notices !== undefined && !(Array.isArray(archive.notices) && archive.notices.length <= 10 && archive.notices.every((notice) => notice === "archive-nested-uninspectable"))) throw new Error("invalid quarantine archive notices");
       if (archive.chartParts !== undefined && !(Number.isSafeInteger(archive.chartParts) && archive.chartParts >= 0 && archive.chartParts <= archive.entryCount)) throw new Error("invalid quarantine chart part count");
       for (const key of ["nestedContainers", "maxNestingDepth"] as const) {
         if (archive[key] !== undefined && !(Number.isSafeInteger(archive[key]) && archive[key]! >= 0 && archive[key]! <= 1_000_000)) throw new Error("invalid quarantine nesting count");
