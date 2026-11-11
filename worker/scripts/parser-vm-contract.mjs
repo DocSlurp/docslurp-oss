@@ -2,8 +2,10 @@
 import { access, constants } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-for (const file of ["image-task.mjs", "pdf-structure.mjs", "quarantine-inspect.mjs", "structured-json.mjs", "html-embeds.mjs", "table-cells.mjs", "chart-export-extract.mjs", "../dist/chart-export/extractors/index.js", "../dist/extractors/structured-json-guest.js", "../dist/routing/html-embeds-guest.js", "../dist/pipeline/table-cells-guest.js", "../dist/pipeline/html-table-limits.js", "../dist/deferred/pdf-structure-guest.js", "../dist/lib/quarantine-bytes.js"]) await access(fileURLToPath(new URL(file, import.meta.url)));
-// parser-vm@2: quarantine inspection returns { sniffed, archive } (the host derives the file facts); an older image is refused.
+for (const file of ["image-task.mjs", "pdf-structure.mjs", "quarantine-inspect.mjs", "structured-json.mjs", "html-embeds.mjs", "table-cells.mjs", "chart-export-extract.mjs", "../dist/chart-export/extractors/index.js", "../dist/extractors/structured-json-guest.js", "../dist/routing/html-embeds-guest.js", "../dist/pipeline/table-cells-guest.js", "../dist/pipeline/html-table-limits.js", "../dist/deferred/pdf-structure-guest.js", "../dist/lib/quarantine-bytes.js", "../dist/lib/archive-nesting.js"]) await access(fileURLToPath(new URL(file, import.meta.url)));
+// parser-vm@3: quarantine inspection returns { sniffed, archive, pdf } (pdf: the /Encrypt check that sends an encrypted PDF to
+// the in-VM qpdf decryption; archive: the nested-archive walk); an older image is refused. qpdfVersion: the image's qpdf,
+// which quarantine needs (the host refuses an image without it).
 // tools: the command-line tools present in this image (PATH and the Python venv), so the host decides availability from the
 // VM, not its own PATH (validation N7).
 const TOOLS = ["pandoc", "clamscan", "clamdscan", "pdfinfo", "pdftotext", "pdftoppm", "pdfimages", "pdfseparate", "pdfunite", "pdftohtml", "qpdf", "tiffcp", "catdoc", "unrtf", "xlsx2csv", "prlimit", "python3", "node", "ffmpeg", "ffprobe"];
@@ -25,4 +27,7 @@ const hardening = { suidDumpable: await kernel("/proc/sys/fs/suid_dumpable"), pt
 let cgroupV2 = false;
 try { await access("/sys/fs/cgroup/cgroup.controllers"); cgroupV2 = true; } catch { /* no unified hierarchy */ }
 // uid: the user the host launched this as; the host refuses root (parser commands drop privileges in the VM).
-console.log(JSON.stringify({ protocol: "parser-vm@2", uid: process.getuid?.() ?? null, tools, links, hardening, cgroupV2 }));
+import { execFileSync } from "node:child_process";
+let qpdfVersion = null;
+try { qpdfVersion = /^qpdf version (\d+\.\d+\.\d+)/m.exec(execFileSync("qpdf", ["--version"], { encoding: "utf8", timeout: 10_000 }))?.[1] ?? null; } catch { /* absent */ }
+console.log(JSON.stringify({ protocol: "parser-vm@3", uid: process.getuid?.() ?? null, tools, links, hardening, cgroupV2, qpdfVersion }));

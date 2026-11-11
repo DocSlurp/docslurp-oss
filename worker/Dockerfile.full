@@ -204,7 +204,8 @@ RUN apt-get update \
        zlib1g \
        python3 \
        python3-venv \
-       qpdf \
+       qpdf=12.2.0-1 \
+       libqpdf30=12.2.0-1 \
        webp \
        unrtf \
     && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/info/* \

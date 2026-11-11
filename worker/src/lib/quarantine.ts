@@ -37,6 +37,10 @@ export interface ArchiveInspection {
    * stats. Optional: guests built before it was added omit it.
    */
   chartParts?: number;
+  /** Nested containers (ZIP, gzip, OLE2) the in-VM walk opened (archive-nesting.ts). */
+  nestedContainers?: number;
+  /** Deepest container reached, the top-level ZIP being 1. */
+  maxNestingDepth?: number;
 }
 
 export interface QuarantineArtifact {
@@ -50,6 +54,11 @@ export interface QuarantineArtifact {
   fileFacts: Pick<FileFacts, "sniffedMimeType" | "encoding" | "container" | "mismatch">;
   archive: ArchiveInspection | null;
   malwareScan: MalwareScanResult;
+  /**
+   * An encrypted PDF's in-VM decryption (CommandRunner.decryptPdfForScan) and the scan of its plaintext copy; null when
+   * the file is not a PDF naming /Encrypt or its own scan was not clean.
+   */
+  pdfDecryption?: { status: "requires-password" | "decrypted" | "failed"; ms: number; bytes?: number; malwareScan?: MalwareScanResult } | null;
   decision: "accepted" | "quarantined";
   reasons: QuarantineReason[];
 }
@@ -145,56 +154,34 @@ export async function scanDocumentForQuarantine(args: {
   }
 
   const malwareScan = await args.runner.scanForMalware(args.tempFile, args.signal);
-  if (malwareScan.status === "unscannable" || (malwareScan.status === "infected" && isClamEncryptedAlert(malwareScan.signature))) {
-    // AlertEncryptedArchive/AlertEncryptedDoc (clam-limits.ts): encrypted archive members or a PDF that needs a user
-    // password, which the scanner cannot read. Not malware and never clean: refused whatever the fail-open policy says.
-    // The message is user-safe; the engine and signature stay in details (telemetry).
-    reasons.push({
-      code: "malware-scan-encrypted-content",
-      severity: "error",
-      message: "file is encrypted or password-protected, so it cannot be scanned for malware; remove the password and upload again",
-      details: {
-        engine: malwareScan.engine,
-        signature: malwareScan.signature
+  reasons.push(...malwareScanReasons(malwareScan, args.policy));
+
+  // libclamav scans an owner-password PDF's unfiltered streams as ciphertext (clam-hostile-matrix.docker.test.ts): a PDF
+  // that names /Encrypt and scanned clean is decrypted in the parser VM and the plaintext copy scanned too. Clean only if
+  // both are; anything the decryption cannot settle is refused.
+  let pdfDecryption: QuarantineArtifact["pdfDecryption"] = null;
+  if (inspected.pdf?.encryptName && malwareScan.status === "clean") {
+    const dir = await mkdtemp(path.join(tmpdir(), "docslurp-quarantine-pdf-"));
+    try {
+      const outcome = await args.runner.decryptPdfForScan(args.tempFile, dir, args.signal);
+      if (outcome.status === "requires-password") {
+        pdfDecryption = { status: outcome.status, ms: outcome.ms };
+        reasons.push({ code: "malware-scan-encrypted-content", severity: "error", message: ENCRYPTED_CONTENT_MESSAGE, details: { engine: "qpdf", signature: null } });
+      } else if (outcome.status === "failed") {
+        pdfDecryption = { status: outcome.status, ms: outcome.ms };
+        // The reason (qpdf's own stderr) stays in details for telemetry; the message is user-safe.
+        reasons.push({ code: "malware-scan-pdf-decrypt-failed", severity: "error", message: "encrypted PDF could not be decrypted for a malware scan; remove its encryption and upload again", details: { reason: outcome.reason } });
+      } else {
+        const copyScan = await args.runner.scanForMalware(outcome.path, args.signal);
+        pdfDecryption = { status: outcome.status, ms: outcome.ms, bytes: outcome.bytes, malwareScan: copyScan };
+        for (const reason of malwareScanReasons(copyScan, args.policy)) {
+          reason.details = { ...reason.details, scanned: "decrypted-copy" };
+          if (!reasons.some((existing) => existing.code === reason.code)) reasons.push(reason);
+        }
       }
-    });
-  } else if (malwareScan.status === "infected" && isClamLimitAlert(malwareScan.signature)) {
-    // AlertExceedsMax (clam-limits.ts): the scanner stopped at a size, file-count, depth or time limit, so part of this
-    // file was never scanned. Refused whatever the fail-open policy says: an unscanned file is never accepted as clean.
-    reasons.push({
-      code: "malware-scan-limit-exceeded",
-      severity: "error",
-      message: `file exceeds the malware scanner's limits (${malwareScan.signature}) and was not fully scanned`,
-      details: {
-        engine: malwareScan.engine,
-        signature: malwareScan.signature
-      }
-    });
-  } else if (malwareScan.status === "infected") {
-    reasons.push({
-      code: "malware-detected",
-      severity: "error",
-      message: `malware signature ${malwareScan.signature ?? "unknown"} detected`,
-      details: {
-        engine: malwareScan.engine,
-        signature: malwareScan.signature
-      }
-    });
-  } else if (malwareScan.status === "skipped-unavailable" || malwareScan.status === "error") {
-    const failClosed = !args.policy.quarantineFailOpenOnToolMissing;
-    reasons.push({
-      code: malwareScan.status === "error" ? "malware-scan-error" : "malware-scan-unavailable",
-      severity: failClosed ? "error" : "warning",
-      message:
-        malwareScan.status === "error"
-          ? `malware scan failed${malwareScan.stderr ? `: ${malwareScan.stderr.trim()}` : ""}`
-          : "malware scanner unavailable",
-      details: {
-        engine: malwareScan.engine,
-        stderr: malwareScan.stderr || null,
-        exitCode: malwareScan.exitCode
-      }
-    });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   }
 
   if (malwareScan.databaseStatus === "stale" || malwareScan.databaseStatus === "missing") {
@@ -235,9 +222,70 @@ export async function scanDocumentForQuarantine(args: {
     fileFacts: { sniffedMimeType, encoding: facts.encoding, container: facts.container, mismatch: facts.mismatch },
     archive,
     malwareScan,
+    pdfDecryption,
     decision: reasons.some((reason) => reason.severity === "error") ? "quarantined" : "accepted",
     reasons
   };
+}
+
+const ENCRYPTED_CONTENT_MESSAGE = "file is encrypted or password-protected, so it cannot be scanned for malware; remove the password and upload again";
+
+/** The quarantine reasons one malware scan verdict gives (none for a clean scan). */
+function malwareScanReasons(malwareScan: MalwareScanResult, policy: QuarantinePolicy): QuarantineReason[] {
+  const reasons: QuarantineReason[] = [];
+  if (malwareScan.status === "unscannable" || (malwareScan.status === "infected" && isClamEncryptedAlert(malwareScan.signature))) {
+    // AlertEncryptedArchive/AlertEncryptedDoc (clam-limits.ts): encrypted archive members or a PDF that needs a user
+    // password, which the scanner cannot read. Not malware and never clean: refused whatever the fail-open policy says.
+    // The message is user-safe; the engine and signature stay in details (telemetry).
+    reasons.push({
+      code: "malware-scan-encrypted-content",
+      severity: "error",
+      message: ENCRYPTED_CONTENT_MESSAGE,
+      details: {
+        engine: malwareScan.engine,
+        signature: malwareScan.signature
+      }
+    });
+  } else if (malwareScan.status === "infected" && isClamLimitAlert(malwareScan.signature)) {
+    // AlertExceedsMax (clam-limits.ts): the scanner stopped at a size, file-count, depth or time limit, so part of this
+    // file was never scanned. Refused whatever the fail-open policy says: an unscanned file is never accepted as clean.
+    reasons.push({
+      code: "malware-scan-limit-exceeded",
+      severity: "error",
+      message: `file exceeds the malware scanner's limits (${malwareScan.signature}) and was not fully scanned`,
+      details: {
+        engine: malwareScan.engine,
+        signature: malwareScan.signature
+      }
+    });
+  } else if (malwareScan.status === "infected") {
+    reasons.push({
+      code: "malware-detected",
+      severity: "error",
+      message: `malware signature ${malwareScan.signature ?? "unknown"} detected`,
+      details: {
+        engine: malwareScan.engine,
+        signature: malwareScan.signature
+      }
+    });
+  } else if (malwareScan.status === "skipped-unavailable" || malwareScan.status === "error") {
+    const failClosed = !policy.quarantineFailOpenOnToolMissing;
+    reasons.push({
+      code: malwareScan.status === "error" ? "malware-scan-error" : "malware-scan-unavailable",
+      severity: failClosed ? "error" : "warning",
+      message:
+        malwareScan.status === "error"
+          ? `malware scan failed${malwareScan.stderr ? `: ${malwareScan.stderr.trim()}` : ""}`
+          : "malware scanner unavailable",
+      details: {
+        engine: malwareScan.engine,
+        stderr: malwareScan.stderr || null,
+        exitCode: malwareScan.exitCode
+      }
+    });
+  }
+
+  return reasons;
 }
 
 export function assertAcceptedQuarantine(artifact: QuarantineArtifact, artifactUri?: string): void {
@@ -272,7 +320,11 @@ export function buildQuarantineStats(artifact: QuarantineArtifact): Record<strin
     malwareSignature: artifact.malwareScan.signature,
     malwareDatabaseStatus: artifact.malwareScan.databaseStatus,
     malwareDatabaseUpdatedAt: artifact.malwareScan.databaseUpdatedAt,
-    malwareDatabaseAgeHours: artifact.malwareScan.databaseAgeHours
+    malwareDatabaseAgeHours: artifact.malwareScan.databaseAgeHours,
+    pdfDecryptionStatus: artifact.pdfDecryption?.status ?? null,
+    pdfDecryptionMs: artifact.pdfDecryption?.ms ?? null,
+    pdfDecryptedCopyStatus: artifact.pdfDecryption?.malwareScan?.status ?? null,
+    archiveNestedContainers: artifact.archive?.nestedContainers ?? null
   };
 }
 
@@ -317,7 +369,13 @@ async function inspectInVm(args: { bytes: Buffer; filename: string; tempFile: st
       }
       if (!(archive.compressionRatio === null || Number.isFinite(archive.compressionRatio) && archive.compressionRatio >= 0)) throw new Error("invalid quarantine expansion ratio");
       if (archive.chartParts !== undefined && !(Number.isSafeInteger(archive.chartParts) && archive.chartParts >= 0 && archive.chartParts <= archive.entryCount)) throw new Error("invalid quarantine chart part count");
+      for (const key of ["nestedContainers", "maxNestingDepth"] as const) {
+        if (archive[key] !== undefined && !(Number.isSafeInteger(archive[key]) && archive[key]! >= 0 && archive[key]! <= 1_000_000)) throw new Error("invalid quarantine nesting count");
+      }
     }
+    // parser-vm@3: an image without the PDF encryption check (no `pdf` key) is refused, never read as "not encrypted".
+    const pdf = result.pdf as unknown;
+    if (pdf !== null && !(pdf && typeof pdf === "object" && Object.keys(pdf).length === 1 && typeof (pdf as { encryptName?: unknown }).encryptName === "boolean")) throw new Error("invalid quarantine PDF result");
     return result;
   } finally { await rm(dir, { recursive: true, force: true }); }
 }

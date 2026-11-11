@@ -221,6 +221,18 @@ function defaultModalImage(env: NodeJS.ProcessEnv): string {
 
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 
+/** Oldest qpdf the parser VM may carry (worker/Dockerfile.lean pins the exact Debian package). */
+export const MIN_PARSER_VM_QPDF = "11.0.0";
+
+/** Whether a contract's `qpdfVersion` is a qpdf release at or above MIN_PARSER_VM_QPDF. */
+export function supportedQpdfVersion(version: unknown): boolean {
+  if (typeof version !== "string" || !/^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(version)) return false;
+  const have = version.split(".").map(Number);
+  const need = MIN_PARSER_VM_QPDF.split(".").map(Number);
+  for (let index = 0; index < 3; index += 1) if (have[index] !== need[index]) return have[index]! > need[index]!;
+  return true;
+}
+
 /**
  * The image reference sandboxes pull. A configured digest replaces the tag
  * (`repo:tag` becomes `repo@sha256:...`), so a re-pushed tag cannot change what
@@ -709,8 +721,11 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
       try {
         session = await provider.openSession({ ...config, sessionTimeoutSeconds: Math.min(config.sessionTimeoutSeconds, PROBE_SESSION_TIMEOUT_SECONDS) }, { activityId: "startup-probe", unmetered: true });
         const result = await session.run!({ binary: "node", args: ["/app/worker/scripts/parser-vm-contract.mjs"], env: { PATH: "/usr/local/bin:/usr/bin:/bin" }, readablePaths: [], inputPaths: [], writablePaths: [], limits: { timeoutMs: 30_000 } });
-        const contract = result.exitCode === 0 ? JSON.parse(result.stdout) as { protocol?: unknown; uid?: unknown; tools?: unknown; links?: { hardlinks?: unknown; symlinks?: unknown }; hardening?: { suidDumpable?: unknown; ptraceScope?: unknown }; cgroupV2?: unknown } : null;
-        if (contract?.protocol !== "parser-vm@2") throw new Error("parser VM image contract unavailable");
+        const contract = result.exitCode === 0 ? JSON.parse(result.stdout) as { protocol?: unknown; uid?: unknown; tools?: unknown; links?: { hardlinks?: unknown; symlinks?: unknown }; hardening?: { suidDumpable?: unknown; ptraceScope?: unknown }; cgroupV2?: unknown; qpdfVersion?: unknown } : null;
+        if (contract?.protocol !== "parser-vm@3") throw new Error("parser VM image contract unavailable");
+        // Quarantine decrypts empty-user-password PDFs with the image's qpdf (runner.decryptPdfForScan); without a supported
+        // one every such PDF would be refused, so the image is refused at startup instead.
+        if (!supportedQpdfVersion(contract.qpdfVersion)) throw new Error(`parser VM qpdf is missing or older than ${MIN_PARSER_VM_QPDF} (${JSON.stringify(contract.qpdfVersion ?? null)})`);
         // Parser commands drop root in the VM (control.ts); a contract run as root means they would parse as root (N10).
         if (typeof contract.uid !== "number" || contract.uid === 0) throw new Error("parser VM commands do not drop root privileges");
         // Kernel link protections (council K #5, N #2): both must be reported exactly 1; off, absent, null or malformed fails.

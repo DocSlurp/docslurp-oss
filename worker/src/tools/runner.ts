@@ -111,6 +111,24 @@ export interface CommandPlan {
   readOnlyInputs?: boolean;
 }
 
+/**
+ * Bounds of the in-VM qpdf encryption check and decryption (CommandRunner.decryptPdfForScan): address space, CPU time and
+ * wall clock per qpdf run, and the largest decrypted copy (RLIMIT_FSIZE, then checked again). A copy at the limit is a
+ * refusal, never a partial scan. The copy is scanned under the same ClamAV limits, whose MaxFileSize (1024 MiB) is above it.
+ */
+export const PDF_DECRYPT_LIMITS = {
+  addressSpaceMiB: 3072,
+  cpuSeconds: 120,
+  wallMs: 180_000,
+  maxOutputBytes: 768 * 1024 * 1024,
+} as const;
+
+/** What the in-VM decryption made of an encrypted PDF (CommandRunner.decryptPdfForScan); `ms` is the wall time it took. */
+export type PdfDecryptOutcome =
+  | { status: "requires-password"; ms: number }
+  | { status: "decrypted"; path: string; bytes: number; ms: number }
+  | { status: "failed"; reason: string; ms: number };
+
 /** Budgets for one `pdfpagecount` run (lib/pdf-page-count.ts PDF_PAGE_COUNT_LIMITS). */
 export interface PdfPageCountLimits {
   maxPages: number;
@@ -1187,16 +1205,77 @@ export class CommandRunner {
     return verdict;
   }
 
-  /** Launch a scan plan and collect its outcome (local child or remote session), releasing the launch either way. */
-  private async runScanPlan(plan: CommandPlan, signal?: AbortSignal): Promise<SandboxResult> {
+  /** Launch a plan and collect its outcome (local child or remote session) whatever its exit code, releasing the launch either way. */
+  private async runScanPlan(plan: CommandPlan, signal?: AbortSignal, metricPrefix = "malware-scan"): Promise<SandboxResult> {
     const launched = await this.launch(plan, signal);
     try {
       return "remote" in launched
-        ? await this.settleRemote(plan, launched, "malware-scan")
-        : await this.collectChild(plan, launched.child, launched.supervised, "malware-scan");
+        ? await this.settleRemote(plan, launched, metricPrefix)
+        : await this.collectChild(plan, launched.child, launched.supervised, metricPrefix);
     } finally {
       await launched.release();
     }
+  }
+
+  /** `prlimit`-bounded qpdf over one PDF (PDF_DECRYPT_LIMITS); unavailable unless both tools are. */
+  private async boundedQpdfPlan(args: string[], fileArgIndexes: number[], extraLimits: string[] = []): Promise<CommandPlan> {
+    const planned = planDocumentToolInvocation({ binary: "qpdf", args, fileArgIndexes, supportsDoubleDash: false });
+    const plan = await this.plan("prlimit", `--as=${PDF_DECRYPT_LIMITS.addressSpaceMiB * 1024 * 1024}`, `--cpu=${PDF_DECRYPT_LIMITS.cpuSeconds}`, ...extraLimits, "--", planned.binary, ...planned.args);
+    return { ...plan, available: plan.available && await this.isAvailable("qpdf"), timeoutMs: PDF_DECRYPT_LIMITS.wallMs, readOnlyInputs: true };
+  }
+
+  /**
+   * Owner-decision fix for libclamav's owner-password PDF gap (quarantine): a PDF with an empty user password opens for
+   * anyone, and libclamav 1.4.3 decrypts it but scans an unfiltered stream's ciphertext, so content every PDF reader shows
+   * is never scanned. In the parser VM, never on this host: `qpdf --requires-password` settles the encryption (exit 3: no
+   * password needed), then `qpdf --decrypt` writes a plaintext copy with every stream decoded and no object streams, which
+   * quarantine scans as well as the original. Called only for a PDF whose bytes name /Encrypt (pdfHasEncryptName, in the
+   * VM). Anything qpdf cannot settle, any failure, timeout or limit hit, and a copy over PDF_DECRYPT_LIMITS.maxOutputBytes is
+   * `failed`: quarantine refuses the file (malware-scan-pdf-decrypt-failed), never scans the original alone.
+   */
+  async decryptPdfForScan(source: string, outputDir: string, signal?: AbortSignal): Promise<PdfDecryptOutcome> {
+    const started = performance.now();
+    const elapsed = () => Math.round(performance.now() - started);
+    const check = await this.boundedQpdfPlan(["--requires-password", source], [1]);
+    if (!check.available) return { status: "failed", reason: "qpdf unavailable", ms: elapsed() };
+    let checked: SandboxResult;
+    try {
+      checked = await this.runScanPlan(check, signal, "pdf-decrypt");
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      return { status: "failed", reason: `encryption check did not complete: ${error instanceof Error ? error.message : String(error)}`, ms: elapsed() };
+    }
+    // qpdf --requires-password: 0 a user password is needed, 3 encrypted but no password is needed, 2 not encrypted or an
+    // error. The bytes name /Encrypt, so "not encrypted" is a disagreement this cannot settle (a damaged file, or an
+    // /Encrypt qpdf does not honour but another reader might): refused, never scanned as the original alone.
+    if (checked.exitCode === 0) return { status: "requires-password", ms: elapsed() };
+    if (checked.exitCode !== 3) return { status: "failed", reason: `qpdf could not settle the encryption (exit ${checked.exitCode ?? "none"})${checked.stderr ? `: ${checked.stderr.trim().slice(0, 500)}` : ""}`, ms: elapsed() };
+    const output = path.join(outputDir, "decrypted.pdf");
+    const decrypt = await this.boundedQpdfPlan(
+      ["--decrypt", "--qdf", "--object-streams=disable", "--stream-data=uncompress", source, output],
+      [4, 5],
+      // RLIMIT_FSIZE: qpdf is killed (SIGXFSZ) rather than write a copy past the limit.
+      [`--fsize=${PDF_DECRYPT_LIMITS.maxOutputBytes}`],
+    );
+    let decrypted: SandboxResult;
+    try {
+      decrypted = await this.runScanPlan(decrypt, signal, "pdf-decrypt");
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      return { status: "failed", reason: `decryption did not complete: ${error instanceof Error ? error.message : String(error)}`, ms: elapsed() };
+    }
+    // 3: written with warnings (a damaged file qpdf recovered); the copy is what qpdf read, and it is scanned.
+    if (decrypted.exitCode !== 0 && decrypted.exitCode !== 3) return { status: "failed", reason: `qpdf --decrypt failed (exit ${decrypted.exitCode ?? "none"})${decrypted.stderr ? `: ${decrypted.stderr.trim().slice(0, 500)}` : ""}`, ms: elapsed() };
+    let size: number;
+    try {
+      const info = await lstat(output);
+      if (!info.isFile()) return { status: "failed", reason: "decrypted copy is not a regular file", ms: elapsed() };
+      size = info.size;
+    } catch {
+      return { status: "failed", reason: "decrypted copy missing", ms: elapsed() };
+    }
+    if (size >= PDF_DECRYPT_LIMITS.maxOutputBytes) return { status: "failed", reason: `decrypted copy reached the ${PDF_DECRYPT_LIMITS.maxOutputBytes}-byte limit`, ms: elapsed() };
+    return { status: "decrypted", path: output, bytes: size, ms: elapsed() };
   }
 
   private async clamVmDatabaseHealth(policy: MalwareScanPolicy, signal: AbortSignal | undefined, databaseArgs: string[], assetDir?: string): Promise<ClamDatabaseHealth> {
