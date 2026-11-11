@@ -99,6 +99,29 @@ describe.skipIf(!url)("OCR escalation budget on real Postgres", () => {
     await page.finish();
   }, 60_000);
 
+  // Council #338 re-check: the table-rescue cap holds between concurrent activities, per run and document, and does not
+  // touch the page purpose's count or another document's budget.
+  it("table-rescue: concurrent activities admit at most the cap between them; other documents and purposes are separate", async () => {
+    const cap = 4;
+    const activities = [store(), store(), store()].map((created) => new VisionRunGuard({ id: runId, orgId: "ocrb-org" }, config, created.visionAttempts));
+    const admit = async (guard: VisionRunGuard, documentId: string, pageNumber: number, purpose: "table-rescue" | "page" = "table-rescue") => {
+      const gate = guard.call({ documentId, pageNumber, purpose, ...(purpose === "table-rescue" ? { documentPageLimit: cap } : {}) });
+      try { await gate.admit({ weightCents: 0.01 }); return true; } catch { return false; } finally { await gate.finish(); }
+    };
+    const results = await Promise.all(Array.from({ length: 30 }, (_, index) => admit(activities[index % 3]!, "leak-race-doc", index + 1)));
+    expect(results.filter(Boolean)).toHaveLength(cap);
+    const [rows] = await admin<{ pages: number }[]>`
+      select count(*)::int as pages from vision_run_attempts where run_id = ${runId} and document_id = 'leak-race-doc' and purpose = 'table-rescue' and attempts > 0`;
+    expect(rows?.pages).toBe(cap);
+    // A retry of an admitted page is the same page (its own per-page attempt bound applies), not a new one.
+    const admittedPage = results.findIndex(Boolean) + 1;
+    expect(await admit(activities[0]!, "leak-race-doc", admittedPage)).toBe(true);
+    expect(await admit(activities[1]!, "leak-race-doc", 31)).toBe(false);
+    // Ordinary page reads of the same document and another document's leak budget are unaffected.
+    expect(await admit(activities[2]!, "leak-race-doc", 32, "page")).toBe(true);
+    expect(await admit(activities[2]!, "leak-race-doc-2", 1)).toBe(true);
+  }, 60_000);
+
   it("admits at most the budget between concurrent activities on one run and document, and a retry keeps it", async () => {
     // Two activities with their own pools race for 40 distinct pages of one document, 20 each, interleaved.
     const activities = [store(), store()].map((created) => new VisionRunGuard({ id: runId, orgId: "ocrb-org" }, config, created.visionAttempts));

@@ -217,6 +217,24 @@ describe("tables that leaked out of the extracted tables (authored pages)", () =
     expect(tableReliability(leakedBody.replace(/\n/g, "\n\n"))).toEqual(["table:numeric-prose"]);
   });
 
+  // The adversarial council reviewer's probe-fp.ts inputs, verbatim: none may route a page to a paid read.
+  it("council #338 probe-fp reproducers stay free", () => {
+    const probes: Record<string, string> = {
+      letterhead: "# Acme Expansion Partners\n\nPhone +1 415 555 0100\nFax +1 415 555 0101\n\nDear Ms. Rivera,\n\nWe are delighted to confirm the London office opening.",
+      chartAxis: "Quarterly revenue grew every quarter.\n\nRevenue 0 20 40 60 80 100\nMargin 0 5 10 15 20 25\n\nFigure 2: Revenue and margin by quarter.",
+      address: "Shipping to:\n\nSuite 1200 455 Market St 94105\nUnit 4 22 King St 10012\n",
+      scoreboard: "Results\n\nTeam A 3 1 2 0\nTeam B 2 2 1 1\n",
+      pageNumbers: "Contents\n\nIntroduction 1 2 3 4\nMethods 5 6 7 8\n",
+      version: "Release notes v 2 3 1 build 4567 8901\nPatch 1 2 3 4 notes\n",
+      prose: "In 2023, revenue rose 12% to $4.2 billion from $3.8 billion in 2022, and margins expanded 3.1 points to 24.5%.\n\nThe board approved a 10% dividend increase for 2024.",
+      formHeader: "| Name | Date of birth | Signature |\n|---|---|---|\n",
+      pipeHeaderOnly: "| Product | Region | Quarter | Notes |\n|---|---|---|---|\n| Widget | West | Q1 | strong |",
+      mergedPhone: "| Contact | Number |\n|---|---|\n| Office | 415 555 0100 |",
+      mergedMoney: "| Item | Amounts |\n|---|---|\n| Revenue | 1,200.5 3,400.2 4,600.1 |",
+    };
+    for (const [name, page] of Object.entries(probes)) expect(tableReliability(page), name).toEqual([]);
+  });
+
   it("flags two or more cells holding several numbers (columns collapsed into one)", () => {
     expect(tableReliability(html(["Region", "Bookings"], ["North", "412.5 398.1 14.4"], ["South", "288.0 251.3 36.7"], ["West", "190.4"]))).toEqual(["table:merged-numeric-cell"]);
     // One such cell (a coordinate triple, a range) is a value.
