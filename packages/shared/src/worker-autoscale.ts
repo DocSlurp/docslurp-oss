@@ -24,6 +24,12 @@ export interface WorkerScalerConfig {
   maxMachines: number;
   /** Orgs whose work runs on a separate (load-test) fleet; excluded here. */
   excludedOrgKeys: ReadonlySet<string>;
+  /**
+   * DOCSLURP_WORKER_SCALE_DOWN_HOLD_SECONDS (default 0 = off): a stateful publisher (the worker
+   * leader) reports the largest target of this trailing window, so a fleet started for a burst
+   * stays up through short gaps instead of stopping and cold-starting again.
+   */
+  scaleDownHoldMs?: number;
 }
 
 function positiveNumber(value: string | undefined, fallback: number): number {
@@ -51,7 +57,31 @@ export function resolveWorkerScalerConfig(
     headroom: Math.max(1, positiveNumber(env.DOCSLURP_WORKER_SCALE_HEADROOM, 1)),
     maxMachines: Math.max(1, Math.floor(positiveNumber(env.DOCSLURP_WORKER_MAX_AUTOSCALE_MACHINES, 12))),
     excludedOrgKeys: parseOrgList(env.TEMPORAL_LOADTEST_ORG_IDS),
+    scaleDownHoldMs: scaleDownHoldMs(env),
   };
+}
+
+/** DOCSLURP_WORKER_SCALE_DOWN_HOLD_SECONDS in ms: 0 (off) unless a positive number, at most one hour. */
+export function scaleDownHoldMs(env: NodeJS.ProcessEnv = process.env): number {
+  const seconds = Number(env.DOCSLURP_WORKER_SCALE_DOWN_HOLD_SECONDS);
+  return Number.isFinite(seconds) && seconds > 0 ? Math.round(Math.min(seconds, 3_600) * 1_000) : 0;
+}
+
+/**
+ * Trailing-window maximum of the published machine target. Scale-up passes through at once;
+ * scale-down waits until the higher targets age out of the window. Stateful: one per publisher.
+ */
+export class TargetHold {
+  private samples: Array<{ at: number; target: number }> = [];
+
+  constructor(private readonly holdMs: number) {}
+
+  apply(target: number, now: number): number {
+    if (this.holdMs <= 0) return target;
+    this.samples = this.samples.filter((sample) => now - sample.at < this.holdMs && sample.target > target);
+    this.samples.push({ at: now, target });
+    return Math.max(...this.samples.map((sample) => sample.target));
+  }
 }
 
 /** Σ_org min(demand, slots) over orgs not served by another fleet. */
@@ -270,9 +300,12 @@ export function formatWorkerScalerMetricLines(
   queue: WorkerScalerSnapshot,
   config: WorkerScalerConfig,
   params: Pick<WorkerScalerQueryParams, "loadtestMaxMachines">,
+  /** Applied to the published worker target (e.g. TargetHold); the raw target is also exported. */
+  adjustTarget?: (target: number) => number,
 ): string[] {
   const orgs = parseOrgDemand(queue.org_demand);
-  const workerTargetMachines = calculateWorkerTargetMachines({ orgs, workerActive: Number(queue.worker_active ?? 0) }, config);
+  const demandTargetMachines = calculateWorkerTargetMachines({ orgs, workerActive: Number(queue.worker_active ?? 0) }, config);
+  const workerTargetMachines = adjustTarget ? Math.max(demandTargetMachines, adjustTarget(demandTargetMachines)) : demandTargetMachines;
   const gauge = (name: string, help: string, value: number) => [`# HELP ${name} ${help}`, `# TYPE ${name} gauge`, metricLine(name, value)];
   return [
     ...gauge("docslurp_pending_page_tasks", "Independently queued or processing page activities.", Number(queue.pending_page_tasks ?? 0)),
@@ -285,6 +318,9 @@ export function formatWorkerScalerMetricLines(
     ...gauge("docslurp_worker_target_machines",
       "Fly worker Machine target: ceil(min(sum over orgs of min(demand, worker_slots), global cap) / slots per machine x headroom), zero when idle, capped by DOCSLURP_WORKER_MAX_AUTOSCALE_MACHINES.",
       workerTargetMachines),
+    ...gauge("docslurp_worker_demand_target_machines",
+      "Worker Machine target from current demand alone, before any scale-down hold (DOCSLURP_WORKER_SCALE_DOWN_HOLD_SECONDS).",
+      demandTargetMachines),
     ...gauge("docslurp_worker_slot_demand", "Runnable work in worker slots, capped per org by plan worker_slots.", slotDemand(orgs, config.excludedOrgKeys)),
     ...gauge("docslurp_worker_demand_orgs", "Orgs with runnable work.", orgs.filter((org) => org.demand > 0 && !config.excludedOrgKeys.has(org.orgKey)).length),
     ...gauge("docslurp_worker_slots_per_machine", "Configured activity slots per worker Machine.", config.slotsPerMachine),
