@@ -1,4 +1,4 @@
-import { withPreparedHtmlTables } from "../pipeline/html-table-vm.js";
+import { hasVmHtmlTableWork, withPreparedHtmlTables } from "../pipeline/html-table-vm.js";
 import { htmlTableSources } from "../pipeline/chunking.js";
 import { createHash } from "node:crypto";
 
@@ -199,7 +199,17 @@ export class EmbedStage implements Stage {
           // and the event loop gets one turn to dispatch it before the
           // synchronous chunking and hashing run beside the remote call.
           let contextTask: Promise<DocumentContext> | undefined;
-          if (preamblesEnabled && embedPreambleMode() === "concurrent") {
+          // HTML tables are parsed into cells in a parser VM before chunking (a fresh VM per
+          // embed activity: ~4.8 s p50 in production, 2026-11-11). `auto` overlaps the summary
+          // call with that round trip and keeps the inline order when there is nothing to wait on.
+          const tableSources = [
+            ...(extracted.canonicalDocument?.blocks.flatMap(block => [block.text.trim(), ...htmlTableSources(block.text)]) ?? []),
+            ...htmlTableSources(extracted.text),
+          ];
+          const preambleMode = embedPreambleMode();
+          const startContextEarly = preambleMode === "concurrent"
+            || (preambleMode === "auto" && hasVmHtmlTableWork(tableSources));
+          if (preamblesEnabled && startContextEarly) {
             await lookupReusableContext();
             contextTask = resolveDocumentContext({
               textGeneration: state.run.pipeline.textGeneration,
@@ -253,10 +263,7 @@ export class EmbedStage implements Stage {
           let existingUri: string | undefined;
           let prepFailed = true;
           try {
-            chunkDrafts = await withPreparedHtmlTables([
-              ...(extracted.canonicalDocument?.blocks.flatMap(block => [block.text.trim(), ...htmlTableSources(block.text)]) ?? []),
-              ...htmlTableSources(extracted.text),
-            ], this.runner, async () => extracted.canonicalDocument
+            chunkDrafts = await withPreparedHtmlTables(tableSources, this.runner, async () => extracted.canonicalDocument
               ? buildCanonicalChunksFromDocument(extracted.canonicalDocument, document.filename, {
                   chunkOverlap: state.run.pipeline.chunkOverlap,
                   maxTokens: chunkMaxTokens,
@@ -1060,12 +1067,18 @@ export function embedProgressIntervalMs(env: NodeJS.ProcessEnv = process.env): n
 
 /**
  * When the document-context summary call starts (EMBED_PREAMBLE_MODE):
- * `inline` (default) after the in-run dedup check; `concurrent` before
- * chunking and hashing. Those take ~20-30 ms for 100-500 pages, so
- * `concurrent` saves little and pays for the call on an in-run duplicate.
+ * - `auto` (default): before chunking when the document has HTML tables that
+ *   chunking first parses in a parser VM (a multi-second round trip the call
+ *   can overlap), otherwise inline;
+ * - `inline`: after the in-run dedup check (plain chunking and hashing take
+ *   ~20-30 ms for 100-500 pages, so starting early saves little there);
+ * - `concurrent`: always before chunking.
+ * Starting early pays for the call on an in-run duplicate; the usage is still
+ * recorded (`discarded: "deduplicated"`).
  */
-export function embedPreambleMode(env: NodeJS.ProcessEnv = process.env): "inline" | "concurrent" {
-  return env.EMBED_PREAMBLE_MODE?.trim().toLowerCase() === "concurrent" ? "concurrent" : "inline";
+export function embedPreambleMode(env: NodeJS.ProcessEnv = process.env): "auto" | "inline" | "concurrent" {
+  const mode = env.EMBED_PREAMBLE_MODE?.trim().toLowerCase();
+  return mode === "concurrent" || mode === "inline" ? mode : "auto";
 }
 
 function maxEmbedWindowPages(): number {
