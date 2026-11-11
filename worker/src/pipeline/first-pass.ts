@@ -299,8 +299,9 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
       await recordBatchPageCount(deps.store, state, document, event.pages);
       results.set(key(input.runId, file.documentId), { markdownPath: file.output, result: { ...event.result, ...(sent?.layoutFacts !== undefined ? { layoutFacts: sent.layoutFacts } : {}) } });
       cachedKeys.push(key(input.runId, file.documentId));
-      if (textlessPages(sandboxedPdfLayoutFacts(batchFileJob(job, event.index)!), event.pages) > 0) {
-        // The text layer misses pages: extract now (served from the batch), embed after the stage loop reads them.
+      if (pipeline.quality !== "fast" && textlessPages(sandboxedPdfLayoutFacts(batchFileJob(job, event.index)!), event.pages) > 0) {
+        // The text layer misses pages the project reads (OCR or vision): extract now (served from the batch), embed after
+        // the stage loop reads them. Fast quality reads the text layer only, so its documents are embedded now.
         extracted.push(file.documentId);
         extractOnly.add(file.documentId);
       }

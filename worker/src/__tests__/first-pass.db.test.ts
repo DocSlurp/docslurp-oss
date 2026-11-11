@@ -307,4 +307,12 @@ describe("first pass", () => {
     await running;
     expect(await searchable()).toEqual({ d0: true, d1: true, d2: true });
   });
+
+  it("fast quality reads the text layer only: a document with textless pages is embedded by the first pass", async () => {
+    await seed({ quality: "fast" });
+    script = async (_job, emit) => { await emit(textEvent(0, 2, 0)); await emit(textEvent(1)); await emit(textEvent(2)); };
+    const result = await runFirstPassBatch(deps(), { runId: "r1", documentIds: DOCS });
+    expect(result.extracted).toEqual([]);
+    expect(await searchable()).toEqual({ d0: true, d1: true, d2: true });
+  });
 });
