@@ -232,6 +232,20 @@ export interface ExtractorPluginHost {
   resolveModalImage(ref: string): string;
   planPageShards: typeof planPageShards;
   currentPerfContext: typeof currentPerfContext;
+  /**
+   * What the worker's database says owns each document id (organization and run). Providers use it to refuse a batch
+   * that names a document outside the job's scope, independently of core's own check. Rejects when the worker has no
+   * database bound (setExtractorDocumentOwners): a provider must then refuse the batch, never skip the check.
+   */
+  documentOwners(documentIds: readonly string[]): Promise<ReadonlyMap<string, { orgId: string | null; runId: string }>>;
+}
+
+type DocumentOwnersLookup = ExtractorPluginHost["documentOwners"];
+let documentOwnersLookup: DocumentOwnersLookup | undefined;
+
+/** Bind the database lookup behind ExtractorPluginHost.documentOwners (worker startup; tests). */
+export function setExtractorDocumentOwners(lookup: DocumentOwnersLookup | undefined): void {
+  documentOwnersLookup = lookup;
 }
 
 export interface ExtractorPluginModule {
@@ -246,6 +260,10 @@ export function createExtractorPluginHost(): ExtractorPluginHost {
     resolveModalImage: (ref) => resolveModalImage(ref, undefined),
     planPageShards,
     currentPerfContext,
+    documentOwners: async (documentIds) => {
+      if (!documentOwnersLookup) throw new SandboxRunError("Document ownership lookup is not bound in this worker");
+      return await documentOwnersLookup(documentIds);
+    },
   };
 }
 

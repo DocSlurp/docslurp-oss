@@ -51,8 +51,12 @@ export const SANDBOXED_PDF_BATCH_FAILURES = ["page-count", "timeout", "parser", 
 export type SandboxedPdfBatchFailure = (typeof SANDBOXED_PDF_BATCH_FAILURES)[number];
 
 export type SandboxedPdfBatchEvent =
-  /** The file's Markdown is written to its `output`; `pages` is the structural count the VM measured. */
-  | { index: number; phase: "text"; pages: number; result: SandboxedPdfResult }
+  /**
+   * The file's Markdown is written to its `output`; `pages` is the structural count the VM measured (what bills and is
+   * authorized). `processedPages`, when the converter read fewer pages than that (1..pages-1), is the number of page slots in
+   * the Markdown; the host flags the document partially extracted, as for a single-file run.
+   */
+  | { index: number; phase: "text"; pages: number; processedPages?: number; result: SandboxedPdfResult }
   /** The file's figures (only when the job asked for them), after its text. `extracted`: `figures.dir` holds them. */
   | { index: number; phase: "figures"; figures: SandboxedPdfFigureOutcome }
   | { index: number; phase: "failed"; reason: SandboxedPdfBatchFailure; pageCountOutcome?: string };
@@ -66,11 +70,27 @@ export interface SandboxedPdfBatchProvider {
    * Convert every file, calling `onEvent` as each result is ready (awaited: the provider must not run ahead of the host's
    * handling by more than its own buffering). Resolves with the provider cost of every VM it ran, including retries; throws
    * only when the batch as a whole could not run (no VM, aborted). Files it could not finish get a `failed` event.
+   *
+   * A rejection from `onEvent` is the host refusing the batch (a credit refusal, a failed page-count write, a malformed
+   * event): the provider stops every VM of the batch, starts no retry VM, emits no further event and rejects with that same
+   * error object (never a wrapped or swallowed one). Every rejection carries the cost of every VM the batch ran, as
+   * `batchUsage` (BATCH_USAGE_PROPERTY, read with batchUsageOf), so the host can bill what was spent on any exit.
    */
   run(job: SandboxedPdfBatchJob, onEvent: (event: SandboxedPdfBatchEvent) => Promise<void>, signal?: AbortSignal): Promise<{ usage: UsageEvent[] }>;
 }
 
 export const MAX_BATCH_DOCUMENT_PAGES = 100_000;
+
+/** The property a provider's rejection carries its incurred VM usage on (SandboxedPdfBatchProvider.run). */
+export const BATCH_USAGE_PROPERTY = "batchUsage";
+
+/** The VM usage a batch rejection carries (validated shape; never throws). */
+export function batchUsageOf(error: unknown): UsageEvent[] {
+  if (!error || (typeof error !== "object" && typeof error !== "function")) return [];
+  const raw = (error as Record<string, unknown>)[BATCH_USAGE_PROPERTY];
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((event): event is UsageEvent => !!event && typeof event === "object" && typeof (event as { metric?: unknown }).metric === "string");
+}
 
 /** The registered provider's batch capability, or null when it has none. */
 export function sandboxedPdfBatchProvider(): SandboxedPdfBatchProvider | null {
@@ -141,17 +161,22 @@ export function acceptSandboxedPdfBatchEvent(job: SandboxedPdfBatchJob, raw: unk
       if (before) fail("second text result");
       const pages = (event as { pages?: unknown }).pages;
       if (typeof pages !== "number" || !Number.isSafeInteger(pages) || pages < 1 || pages > MAX_BATCH_DOCUMENT_PAGES) fail("page count out of bounds");
+      const processed = (event as { processedPages?: unknown }).processedPages;
+      if (processed !== undefined && (typeof processed !== "number" || !Number.isSafeInteger(processed) || processed < 1 || processed >= (pages as number))) {
+        fail("processed pages out of bounds");
+      }
       const result = (event as { result?: unknown }).result as SandboxedPdfResult | undefined;
       if (!result || typeof result !== "object") fail("text without a result");
       // Figures arrive on their own event; the text result never carries them.
       if (result!.figures !== undefined) fail("figures on a text result");
       const single: SandboxedPdfJob = { input: file.input, output: file.output };
-      const accepted = acceptSandboxedPdfResult(single, result!, pages as number);
+      const slots = (processed as number | undefined) ?? (pages as number);
+      const accepted = acceptSandboxedPdfResult(single, result!, slots);
       const jobs = textJobs.get(job) ?? new Map<number, SandboxedPdfJob>();
       textJobs.set(job, jobs);
       jobs.set(index as number, single);
       seen.set(index as number, job.options.figures ? "text" : "figures");
-      return { index: index as number, phase: "text", pages: pages as number, result: accepted };
+      return { index: index as number, phase: "text", pages: pages as number, ...(processed === undefined ? {} : { processedPages: processed as number }), result: accepted };
     }
     case "figures": {
       if (!job.options.figures) fail("figures were not requested");
