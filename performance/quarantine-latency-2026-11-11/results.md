@@ -116,6 +116,16 @@ Measured with ClamAV 1.4.3 from the worker image, 2 vCPU / 4 GiB, no network:
 
 Times include about 15 s of signature loading. Peak RSS is about 0.96 GB for the signatures and at most 110 MB more for a 510 MB scan. The scan time limit is 300 s, and the scan command's budget is that plus 90 s. Pathological files that need longer are refused as unscanned rather than passed.
 
+### Live check after the fixes (Modal, 2 vCPU / 4 GiB, ClamAV 1.4.6, signatures 28180)
+
+| Arm | Per document |
+|---|---|
+| Before: per-command path | 23.1–28.0 s |
+| Q1 cold, including the snapshot build | 29.7 s |
+| Q1 warm, egress check included | 1.82–1.86 s |
+
+In one scanner session, a second document's command and another organization's command were both refused. The restored VM passed the root egress check. No sandboxes were left running. Cost was about $0.02.
+
 ## Q3: concurrent quarantine and extraction (designed, not implemented)
 
 The smallest change that is safe under Temporal replay:
