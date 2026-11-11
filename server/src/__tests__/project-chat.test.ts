@@ -1817,7 +1817,7 @@ describe("chatProject", () => {
     });
 
     expect(response.answer).toBe("Fallback answer [1]");
-    expect(response.debug.model).toBe("deepseek/deepseek-v4.1-flash");
+    expect(response.debug.model).toBe("deepseek/deepseek-v4.1-flash-1017");
     expect(generateAnthropicDocumentText).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({
@@ -1827,7 +1827,7 @@ describe("chatProject", () => {
     expect(generateAnthropicDocumentText).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({
-        model: "deepseek/deepseek-v4.1-flash",
+        model: "deepseek/deepseek-v4.1-flash-1017",
       }),
     );
   });

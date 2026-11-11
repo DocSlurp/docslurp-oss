@@ -5,8 +5,10 @@ Speed boost is a request-level opt-in. The dashboard control starts on; API and 
 The eligible chat model families are:
 
 - `z-ai/glm-5.3-flash:nitro`
-- `deepseek/deepseek-v4.1-flash:nitro`
+- `deepseek/deepseek-v4.1-flash-1017:nitro`
 - `openai/gpt-6-luna:nitro`
+
+Speed boost on GLM 5.3 Flash (the default chat model) answers with `deepseek/deepseek-v4.1-flash-1017:nitro`, the fastest eligible route, and bills at GLM's answer tier times the Speed boost multiplier. The response's `debug.model` names the model that answered. Naming `z-ai/glm-5.3-flash:nitro` explicitly keeps GLM.
 
 Pass `speedBoost: true` with either the base model ID or its listed Nitro variant. Naming `:nitro` without the flag is rejected. Boosted chat requests for unsupported models are rejected rather than silently routed normally. Each variant retains its base answer tier and reasoning policy; the 4× credit multiplier is applied separately.
 
