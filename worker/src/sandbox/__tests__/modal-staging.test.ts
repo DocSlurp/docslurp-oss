@@ -2288,6 +2288,43 @@ describe("scanner session council fixes (PR #339)", () => {
     expect(cache.size).toBe(2);
   });
 
+  it("re-check 2 L1: failed keys expire after their backoff and are bounded, whatever keys keep failing (reviewer's reproducer)", async () => {
+    let now = 0;
+    const cache = new ScannerSnapshotCache<string>(2, 1_000, () => now, 4, 3);
+    const failing = vi.fn(async () => { throw new Error("build failed"); });
+    for (const key of ["A", "B", "C", "D", "E"]) await expect(cache.get(key, failing)).rejects.toThrow(/build failed/);
+    // Never more than maxFailures held: the oldest dropped first.
+    expect(cache.failedKeys).toBe(3);
+    // Past the backoff, a get for a new key sweeps every expired failure.
+    now = 1_001;
+    await expect(cache.get("F", failing)).rejects.toThrow();
+    expect(cache.failedKeys).toBe(1);
+    // A still-backed-off key fails at once without another build.
+    const calls = failing.mock.calls.length;
+    await expect(cache.get("F", failing)).rejects.toThrow(/build failed/);
+    expect(failing.mock.calls.length).toBe(calls);
+  });
+
+  it("re-check 2 L1: builds in flight are bounded; a scan past the bound fails closed and starts nothing", async () => {
+    const cache = new ScannerSnapshotCache<string>(2, 60_000, Date.now, 2);
+    const finish: Array<(value: string) => void> = [];
+    const build = vi.fn(() => new Promise<string>((resolve) => finish.push(resolve)));
+    const a = cache.get("A", build), b = cache.get("B", build);
+    await expect(cache.get("C", build)).rejects.toThrow(/at their limit/);
+    expect(build).toHaveBeenCalledTimes(2);
+    expect(cache.pendingBuilds).toBe(2);
+    // A key already building still joins its build.
+    expect(cache.get("A", build)).toBe(a);
+    finish.forEach((resolve, index) => resolve(`snapshot-${index}`));
+    await Promise.all([a, b]);
+    // Once the builds finish there is room again.
+    const c = cache.get("C", build);
+    expect(build).toHaveBeenCalledTimes(3);
+    finish[2]!("snapshot-2");
+    expect(await c).toBe("snapshot-2");
+    expect(cache.pendingBuilds).toBe(0);
+  });
+
   it("L4/correctness Low: with the snapshot flag off, a bad DOCSLURP_MODAL_SCANNER_REGIONS is ignored; on, it is refused", () => {
     expect(modalScannerRegions({ DOCSLURP_MODAL_SCANNER_REGIONS: "invalid region" })).toBeUndefined();
     expect(modalScannerRegions({ DOCSLURP_QUARANTINE_SCAN_SNAPSHOT: "off", DOCSLURP_MODAL_SCANNER_REGIONS: "EU" })).toBeUndefined();

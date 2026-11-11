@@ -179,6 +179,10 @@ export function scannerSnapshotKey(image: { image: string; imageId?: string }, s
  * Builds in flight live in their own map and are never evicted, so the LRU bound (completed snapshots only) cannot start
  * a second build of a key that is still building (council re-check L1: A, B, C, A built A twice). A build's completion or
  * failure updates the cache only while it is still that key's current build: one dropped by `forget` changes nothing.
+ *
+ * Every map is bounded (council re-check 2, L1): failures expire after their backoff and at most `maxFailures` are held
+ * (oldest dropped: that key may then retry early, never pass); at most `maxBuilding` builds run at once, and a scan that
+ * would start another fails at once (an error verdict, fail closed) rather than growing the map.
  */
 export class ScannerSnapshotCache<T> {
   private readonly entries = new Map<string, Promise<T>>();
@@ -189,11 +193,15 @@ export class ScannerSnapshotCache<T> {
     private readonly keep = 2,
     private readonly failureBackoffMs = 60_000,
     private readonly now: () => number = Date.now,
+    private readonly maxBuilding = 4,
+    private readonly maxFailures = 16,
   ) {}
 
   get(key: string, build: () => Promise<T>): Promise<T> {
+    const now = this.now();
+    for (const [failedKey, failure] of this.failures) if (failure.until <= now) this.failures.delete(failedKey);
     const failed = this.failures.get(key);
-    if (failed && failed.until > this.now()) return Promise.reject(failed.error);
+    if (failed) return Promise.reject(failed.error);
     const entry = this.entries.get(key);
     if (entry) {
       // Most recently used last.
@@ -203,6 +211,9 @@ export class ScannerSnapshotCache<T> {
     }
     const pending = this.building.get(key);
     if (pending) return pending;
+    if (this.building.size >= Math.max(1, this.maxBuilding)) {
+      return Promise.reject(new Error(`scanner snapshot builds in flight are at their limit (${this.maxBuilding}); refusing to start another`));
+    }
     const started = build();
     this.building.set(key, started);
     started.then(
@@ -217,7 +228,9 @@ export class ScannerSnapshotCache<T> {
       (error: unknown) => {
         if (this.building.get(key) !== started) return;
         this.building.delete(key);
+        this.failures.delete(key);
         this.failures.set(key, { until: this.now() + this.failureBackoffMs, error });
+        while (this.failures.size > Math.max(1, this.maxFailures)) this.failures.delete(this.failures.keys().next().value!);
       },
     );
     return started;
@@ -237,6 +250,11 @@ export class ScannerSnapshotCache<T> {
   /** Builds in flight. */
   get pendingBuilds(): number {
     return this.building.size;
+  }
+
+  /** Failed keys still held (expired ones are dropped on the next `get`). */
+  get failedKeys(): number {
+    return this.failures.size;
   }
 }
 
