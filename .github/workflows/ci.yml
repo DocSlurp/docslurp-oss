@@ -67,6 +67,7 @@ jobs:
         run: |
           node --test scripts/install-worker-test-tools.test.mjs
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bash scripts/ci/apt-mirrors.sh
           bash scripts/install-worker-test-tools.sh
       # Doppler from the pinned source (worker/doppler.json), the images' recipe: the PDF page count (pdfpagecount) and
       # the fork's utilities under /usr/lib/doppler. Built once per pin and cached; real-tool tests must run, not skip.
@@ -258,6 +259,7 @@ jobs:
       - run: pnpm --filter @docslurp/shared build
       - name: Install bubblewrap, poppler and test fonts
         run: |
+          bash scripts/ci/apt-mirrors.sh
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bubblewrap poppler-utils fonts-dejavu-core fonts-noto-cjk
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

@@ -10,6 +10,7 @@ import { withDeferredContext } from "../search/deferred/deferred-context.js";
 import { withNativeChatRunOwner } from "../services/chat-run-dependencies.js";
 import { operationOutputTopic, publishOperationOutput } from "./operation-delivery.js";
 import { executionAttempt } from "./native-attempts.js";
+import { durableChatTurnOptions } from "./chat-turn-options.js";
 
 /** Native static executor: reconstructs application policy after cross-process
  * dispatch. Native task leases, timeouts, cancellation and stale-worker recovery
@@ -125,6 +126,9 @@ export function createProjectChatExecutor(manager:BackgroundTaskManager,pubsub:P
         ()=>withDeferredContext({signal},()=>chatProject({
           projectId:binding.project_id,userId:binding.user_id,query:String(binding.input.q),
           sessionId:binding.input.sessionId as string|undefined,model:binding.input.model as string|undefined,
+          ...durableChatTurnOptions(binding.input,actor),
+          // Signed-in app turn: "/status" gets the free ingest report, as in the streaming route.
+          answerIngestReport:true,
           actor,allowAgentTools:env.publicChatAgentEnabled,allowConfiguration:false,signal,
           onTextDelta:text=>append("text",{text}),
           onToolActivity:event=>{void append("tool",event);},onEvidence:event=>{void append("evidence",event);},

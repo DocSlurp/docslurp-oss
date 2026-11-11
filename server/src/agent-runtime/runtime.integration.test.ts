@@ -508,7 +508,8 @@ it.runIf(enabled)("cancels one child independently and fences a child-launch rac
     const children=await Promise.all([post(`/v1/chat/operations/${root}/tasks`,"native_cancel_child_a","cancel child a"),post(`/v1/chat/operations/${root}/tasks`,"native_cancel_child_b","cancel child b")]);
     expect(children.map(r=>r.status)).toEqual([202,202]);
     const [a,b]=await Promise.all(children.map(async r=>(await r.json()).operationId));
-    await vi.waitFor(async()=>expect((await (await app.request(`/v1/chat/operations/${b}`)).json()).operation.snapshot.text).toBe("child running"),{timeout:10000});
+    // Both children must be running before one is cancelled; launches start in either order.
+    for(const child of [a,b])await vi.waitFor(async()=>expect((await (await app.request(`/v1/chat/operations/${child}`)).json()).operation.snapshot.text).toBe("child running"),{timeout:10000});
     expect((await cancel(a,"task")).status).toBe(200);
     await vi.waitFor(()=>expect(aborted.has("cancel child a")).toBe(true),{timeout:5000});
     expect(aborted.has("cancel child b")).toBe(false);
