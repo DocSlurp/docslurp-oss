@@ -96,6 +96,40 @@ describe("host validation of the guest's result (a compromised or buggy guest)",
       table([{ head: false, cells: [{ h: false, rs: 1, cs: 1, t: '<script>alert(1)</script>"' }] }], ["<img src=x onerror=1>"]),
       { k: "keep", from: 35, to: 36 },
     ]])[0]!;
-    expect(out).toBe("a\n\n<table>\n<tbody>\n<tr><td>&lt;script&gt;alert(1)&lt;/script&gt;&quot;</td></tr>\n</tbody>\n</table>\n\n\\<img src\\=x onerror\\=1\\>\n\nb");
+    expect(out).toBe("a\n\n<table>\n<tbody>\n<tr><td>&lt;script&gt;alert(1)&lt;/script&gt;&quot;</td></tr>\n</tbody>\n</table>\n\n&lt;img src\\=x onerror\\=1&gt;\n\nb");
+  });
+});
+
+describe("council round 3 (blocking): a shape-valid keep over table markup fails closed", () => {
+  it("the reviewer's reproducer: one keep covering a whole table is refused and the page escaped", () => {
+    const x = "<table><tr><td>VALUE</td></tr></table>";
+    const stats = { pages: 0, tables: 0, spansDropped: 0, gfm: 0, textFallback: 0, escapedPages: 0, rawRegions: 0, rawReasons: {}, vmMs: 0, vmCalls: 0 };
+    expect(renderVisionTablePages([x], [[{ k: "keep", from: 0, to: x.length }]], stats)).toEqual(["&lt;table>&lt;tr>&lt;td>VALUE&lt;/td>&lt;/tr>&lt;/table>"]);
+    expect(stats.escapedPages).toBe(1);
+  });
+  const page = "a<table><tr><td>x</td></tr></table>b";
+  const escaped = "a&lt;table>&lt;tr>&lt;td>x&lt;/td>&lt;/tr>&lt;/table>b";
+  const forged: Array<[string, unknown]> = [
+    ["keep around the table", [{ k: "keep", from: 0, to: 36 }]],
+    ["keep split inside a tag", [{ k: "keep", from: 0, to: 3 }, { k: "keep", from: 3, to: 36 }]],
+    ["stray close tag kept", [{ k: "keep", from: 0, to: 1 }, { k: "table", from: 1, to: 35, rows: [{ head: false, cells: [{ h: false, rs: 1, cs: 1, t: "x" }] }], extra: [] }, { k: "keep", from: 35, to: 36 }].map((s, i) => i === 1 ? { ...s, to: 27 } : i === 2 ? { ...s, from: 27 } : s)],
+    ["only the inner rows kept", [{ k: "keep", from: 0, to: 1 }, { k: "lt", from: 1, to: 2 }, { k: "keep", from: 2, to: 36 }]],
+  ];
+  for (const [name, result] of forged) {
+    it(`escapes the page on ${name}`, () => {
+      expect(renderVisionTablePages([page], [result])).toEqual([escaped]);
+    });
+  }
+  it("table markup inside Markdown code stays verbatim (the guest's honest keep is verified, not refused)", () => {
+    const code = "Example:\n\n```html\n<table><tr><td>x</td></tr></table>\n```\n\nInline `<td>` too.";
+    const honest = guestModule.readVisionTables(code);
+    expect(honest).toEqual([{ k: "keep", from: 0, to: code.length }]);
+    expect(renderVisionTablePages([code], [honest])).toEqual([code]);
+  });
+  it("model cell text never becomes raw HTML on the GFM, raw-region or text paths", () => {
+    const wide = `<table><tr>${Array.from({ length: 101 }, (_, i) => `<td>c${i}&lt;img src=x onerror=1&gt;</td>`).join("")}</tr></table>`;
+    const [out] = renderVisionTablePages([wide], [guestModule.readVisionTables(wide)]);
+    expect(out).not.toMatch(/<img/i);
+    expect(out).toContain("c100&lt;img src\\=x onerror\\=1&gt;");
   });
 });

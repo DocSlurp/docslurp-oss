@@ -44,6 +44,13 @@ describe("born-digital tables: structural repairs and reliability", () => {
     expect(repairMarkdownTables(numbered).markdown.split("\n")).toEqual(["1. Open — Chair", "2. Review — Planning", "3. Close — Chair"]);
   });
 
+  it("an HTML list restored as Markdown keeps entity-escaped cell text inert (council round 3 L3)", () => {
+    const html = "<table><tr><td>-</td><td>&lt;img src=x onerror=alert(1)&gt;</td></tr><tr><td>-</td><td>[x](javascript:alert(1))</td></tr><tr><td>-</td><td># Q4 &amp; *beat*</td></tr></table>";
+    const { markdown, repairs } = repairMarkdownTables(`Intro\n\n${html}\n\nOutro`);
+    expect(repairs.listsRestored).toBe(1);
+    expect(markdown).toBe("Intro\n\n- &lt;img src\\=x onerror\\=alert\\(1\\)&gt;\n- \\[x\\]\\(javascript\\:alert\\(1\\)\\)\n- \\# Q4 &amp; \\*beat\\*\n\nOutro");
+  });
+
   it("leaves sound tables, and tables that only look similar, as they are", () => {
     const sound = table(["Account", "2024", "2025"], ["Revenue", "48,210", "52,934"], ["Cost", "21,877", "23,015"]);
     // One dash row among real rows is a value, not a list.

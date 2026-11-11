@@ -67,8 +67,11 @@ export function asciiLower(text: string): string {
 
 const isDelimiter = (code: number) => Number.isNaN(code) || code === 62 || code === 47 || code === 32 || (code >= 9 && code <= 13);
 
-/** Ranges [from, to) of the input that are code (fences, inline code spans) or GFM pipe-table rows. */
-function protectedRanges(text: string): Array<[number, number]> {
+/**
+ * Ranges [from, to) of the input that are code (fences, inline code spans) or GFM pipe-table rows. Markdown line and
+ * backtick scanning only (no HTML is read), so the host also runs it to verify the guest's `keep` segments.
+ */
+export function protectedRanges(text: string): Array<[number, number]> {
   const ranges: Array<[number, number]> = [];
   const paragraphs: Array<[number, number]> = [];
   let fence: { char: string; length: number; start: number } | null = null;
@@ -133,7 +136,7 @@ function protectedRanges(text: string): Array<[number, number]> {
 }
 
 /** Skip-list over protected ranges, queried with increasing positions. */
-class Protected {
+export class Protected {
   private index = 0;
   constructor(private readonly ranges: Array<[number, number]>) {}
   /** The end of the protected range holding `at`, or -1. */

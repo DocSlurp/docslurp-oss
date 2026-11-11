@@ -137,3 +137,26 @@ describe("host validation of the guest's scan (a compromised or buggy guest)", (
     expect(validateTableScan(page, JSON.parse(JSON.stringify(good)))).toEqual(good);
   });
 });
+
+describe("council round 3 L2/L3: guest cell text is escaped on every path into the stored Markdown", () => {
+  const hostile = "<table><tr><td>-</td><td>&lt;img src=x onerror=alert(1)&gt;</td></tr><tr><td>-</td><td>[x](javascript:alert(1))</td></tr><tr><td>-</td><td>Z &amp; co</td></tr></table>";
+  it("the honest guest: an entity-escaped cell restored as a list never becomes raw HTML or a live link", async () => {
+    production();
+    const repaired = await repairDocumentTables(`Intro\n\n${hostile}\n\nOutro`, vmRunner());
+    expect(repaired.repairs.listsRestored).toBe(1);
+    expect(repaired.markdown).not.toMatch(/<img|\]\(javascript/i);
+    expect(repaired.markdown).toContain("- &lt;img src\\=x onerror\\=alert\\(1\\)&gt;");
+    expect(repaired.markdown).toContain("- Z &amp; co");
+  });
+  it("a forged guest scan: cell text it fabricates is escaped too", async () => {
+    production();
+    const page = `Intro\n\n${LIST_TABLE}\n\nOutro`;
+    const forge = (result: unknown[]) => (result as Array<{ tables: Array<{ rows: string[][] }> }>).map((scan) => ({
+      ...scan, tables: scan.tables.map((table) => ({ ...table, rows: [["-", "FORGED<img src=x onerror=alert(1)>"], ["-", "[x](javascript:alert(1))"], ["-", "Z"]] })),
+    }));
+    const repaired = await repairDocumentTables(page, vmRunner(forge));
+    expect(repaired.repairs.listsRestored).toBe(1);
+    expect(repaired.markdown).not.toMatch(/<img|\]\(javascript/i);
+    expect(repaired.markdown).toContain("FORGED&lt;img");
+  });
+});

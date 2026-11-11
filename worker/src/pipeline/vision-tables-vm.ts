@@ -5,7 +5,8 @@
  * Model output is untrusted (the page image can carry instructions), so its HTML is parsed only by the VM guest
  * (`vision-tables-guest.ts`, parse5) in the service profile. The host never tokenizes, entity-decodes or builds a tree
  * from model text: it checks the guest's typed result (contiguous offsets into the page, integer spans, bounded
- * strings), then renders each table itself from that data:
+ * strings, and no table-family tag left in a verbatim `keep` segment outside Markdown code), then renders each table
+ * itself from that data:
  *
  * - elements `table`, `thead`, `tbody`, `tr`, `th`, `td` only, attributes `rowspan`/`colspan` only;
  * - cell text with controls, lone surrogates and noncharacters removed, whitespace collapsed, `& < > "` escaped;
@@ -13,8 +14,9 @@
  *   spans are dropped to a plain grid; short rows are padded; a grid wider than MAX_COLUMNS becomes plain text lines;
  * - a table larger than the app renderer accepts (RENDER_MAX_CHARS characters / RENDER_MAX_TAGS tags) becomes a GFM
  *   pipe table, so every kept table renders.
- * Text never leaves an HTML block as Markdown syntax: GFM cells, text outside cells and plain-text fallbacks go through
- * escapeMarkdownText, so a cell's `[x](url)`, `**b**`, `` `c` ``, `<b>`, `<https://…>`, `#`, `>`, `-` or `1.` stays text.
+ * Text never leaves an HTML block as Markdown syntax or raw HTML: GFM cells, text outside cells, raw regions and
+ * plain-text fallbacks go through escapeMarkdownText (`& < >` as entities, other punctuation backslash-escaped), so a
+ * cell's `[x](url)`, `**b**`, `` `c` ``, `<b>`, `<https://…>`, `#`, `>`, `-` or `1.` stays text.
  * (GFM's autolink literals are the one exception a renderer applies after escapes: a bare `https://…`, `www.…` or
  * `name@host.tld` in a GFM cell is still linked, as it is anywhere else in page text; only those schemes can form.)
  * No text is ever dropped: a region the guest could not rebuild without truncating or dropping something (`raw`, with a
@@ -33,10 +35,14 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { escapeMarkdownCellText } from "@docslurp/shared";
+
 import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { resolveScriptsDir } from "../tools/scripts-dir.js";
 import {
+  Protected,
+  protectedRanges,
   readVisionTablesBatch,
   VISION_TABLE_MAX_CELLS,
   VISION_TABLE_MAX_PAGE_CHARS,
@@ -73,13 +79,13 @@ export const escapeHtmlText = (text: string) =>
   text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 /**
- * Text that renders as itself in CommonMark/GFM: every ASCII punctuation character is backslash-escaped (CommonMark
- * allows escaping any of them), so no link, image, emphasis, code span, raw HTML, autolink, entity, heading, quote,
- * list marker, thematic break, table pipe or `$` math delimiter can form. Letters, digits, spaces and newlines are kept.
+ * Text that renders as itself in CommonMark/GFM: `& < >` become entities (so no raw HTML reaches the stored Markdown, even
+ * for an API, MCP or export reader that never parses Markdown) and every other ASCII punctuation character is
+ * backslash-escaped (CommonMark allows escaping any of them), so no link, image, emphasis, code span, raw HTML, autolink,
+ * entity, heading, quote, list marker, thematic break, table pipe or `$` math delimiter can form. Letters, digits, spaces
+ * and newlines are kept.
  */
-export function escapeMarkdownText(text: string): string {
-  return text.replace(/[!-/:-@[-`{-~]/g, "\\$&");
-}
+export const escapeMarkdownText = escapeMarkdownCellText;
 
 /** Controls (C0, DEL, C1), lone surrogates and noncharacters out; whitespace collapsed. */
 export function cleanCellText(text: string): string {
@@ -219,6 +225,14 @@ function renderPage(text: string, result: VisionTablePageResult, stats: VisionTa
   }
   if (result === false) { stats.escapedPages += 1; return escapeVisionTableTags(text); }
   if (!Array.isArray(result) || result.length > 2 * text.length + 1) throw new InvalidResult("segments");
+  // `keep` copies source verbatim, so the host checks it holds no table markup the guest should have rebuilt or escaped:
+  // every table-family tag start (the same pattern the fallback escapes) inside a `keep` must lie in Markdown code or a
+  // pipe-table row (protectedRanges, recomputed here: line and backtick scanning, no HTML). A keep over a real table is
+  // a contract violation (fail closed), however well-formed its offsets are.
+  const tagStarts: number[] = [];
+  for (const match of text.matchAll(TABLE_FAMILY)) tagStarts.push(match.index);
+  let nextTag = 0;
+  let guard: Protected | null = null;
   let cursor = 0;
   const out: string[] = [];
   // The last two characters written: a rope's slice would flatten it on every table (quadratic on many tables).
@@ -227,7 +241,15 @@ function renderPage(text: string, result: VisionTablePageResult, stats: VisionTa
   for (const segment of result) {
     if (!segment || !isInt(segment.from, 0, text.length) || segment.from !== cursor || !isInt(segment.to, segment.from + 1, text.length)) throw new InvalidResult("offsets");
     cursor = segment.to;
-    if (segment.k === "keep") { write(text.slice(segment.from, segment.to)); continue; }
+    while (nextTag < tagStarts.length && tagStarts[nextTag]! < segment.from) nextTag += 1;
+    if (segment.k === "keep") {
+      for (; nextTag < tagStarts.length && tagStarts[nextTag]! < segment.to; nextTag += 1) {
+        guard ??= new Protected(protectedRanges(text));
+        if (guard.covering(tagStarts[nextTag]!) === -1) throw new InvalidResult("keep holds table markup");
+      }
+      write(text.slice(segment.from, segment.to));
+      continue;
+    }
     if (segment.k === "lt") {
       if (segment.to !== segment.from + 1 || text[segment.from] !== "<") throw new InvalidResult("lt");
       write("&lt;");

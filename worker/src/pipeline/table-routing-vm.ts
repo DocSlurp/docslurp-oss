@@ -8,7 +8,9 @@
  * few jobs as MAX_BATCH_BYTES / TABLE_ROUTING_MAX_PAGES allow (one for nearly every document). The host checks the typed
  * result against the page (spans in order, inside the page, starting at `<table` and ending at `</table>`; cell text no
  * longer than its table's source; block counts matching its own presence count) before the shared repair and
- * reliability checks use it. Outside the service profile the same scanner runs in-process.
+ * reliability checks use it. Outside the service profile the same scanner runs in-process. Guest cell text reaches a
+ * page only through the shared repairs, which escape it on every path: a merged header as HTML text (`& < >` entities),
+ * a restored list as inert Markdown (escapeMarkdownCellText: `& < >` entities, other punctuation backslash-escaped).
  *
  * Fail closed: a page the VM did not read (unavailable, failed, invalid result, too large for a job) gets `null`: no
  * HTML repair (repairMarkdownTables), `table:html-unscanned` from tableReliability, and no HTML table counted toward

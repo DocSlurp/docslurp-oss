@@ -251,6 +251,15 @@ function htmlText(value: string): string {
 const escapeHtml = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 /**
+ * HTML cell text (already entity-decoded by the scanner) as inert Markdown text: `& < >` become entities, so no raw HTML
+ * reaches the stored Markdown even for a reader that never parses Markdown (API, MCP, export), and every other ASCII
+ * punctuation character is backslash-escaped, so no link, image, emphasis, code span, heading, quote or list marker forms.
+ */
+export function escapeMarkdownCellText(value: string): string {
+  return value.replace(/[!-/:-@[-`{-~]/g, (char) => char === "&" ? "&amp;" : char === "<" ? "&lt;" : char === ">" ? "&gt;" : `\\${char}`);
+}
+
+/**
  * The HTML table scanner: every table element's span and cell texts (pages up to TABLE_SCAN_MAX_PAGE_CHARS; a larger page
  * is not scanned for them), and markdownTables' HTML block counts (any page). It reads customer and model text, so in the
  * service profile it runs only inside the parser VM (assertTableScanAllowed); the host uses its validated result.
@@ -316,7 +325,8 @@ export function repairMarkdownTables(markdown: string, scanFor: ScanFor = localS
       if (isListAsTable(table)) {
         replacement = [table.header, ...table.body].map((cells) => {
           const marker = /^\d/.test(cells[0]!) ? `${cells[0]!.replace(/\)$/, ".")} ` : "- ";
-          return marker + cells.slice(1).filter(Boolean).join(" — ");
+          // Cell text came out of HTML (entity-decoded): it is escaped, never written into the Markdown as markup.
+          return marker + cells.slice(1).filter(Boolean).map(escapeMarkdownCellText).join(" — ");
         }).join("\n");
         repairs.listsRestored += 1;
       } else {

@@ -5,7 +5,7 @@
  * `enterTableScanGuest` first); the host never scans HTML tables there (`@docslurp/shared` `scanPageTables` refuses). The
  * result is typed data per page (table spans, cell texts, row/column counts) that the host validates
  * (`table-routing-vm.ts`) before the shared repair and reliability checks read it: no HTML from the guest is copied into a
- * page except as cell text the host escapes.
+ * page except as cell text the shared repairs escape (HTML text in a merged header, inert Markdown in a restored list).
  */
 import { scanPageTables, type HtmlTableScan } from "@docslurp/shared/page-table-routing";
 
