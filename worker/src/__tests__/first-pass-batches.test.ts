@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { planFirstPassBatches, type FirstPassCandidate } from "../temporal/first-pass-batches.js";
+import { firstPassBatchOptions } from "../pipeline/first-pass.js";
 
 const limits = { maxFiles: 4, maxBatchBytes: 1_000, maxBatchPages: 100 };
 const doc = (id: string, pages: number, bytes = 10): FirstPassCandidate => ({ documentId: id, pages, bytes });
@@ -64,5 +65,14 @@ describe("planFirstPassBatches", () => {
     const pages = docs.reduce((s, d) => s + d.pages, 0);
     const lower = Math.max(Math.ceil(pages / l.maxBatchPages), Math.ceil(docs.length / l.maxFiles));
     expect(plan.length).toBeLessThanOrEqual(lower + 1);
+  });
+});
+
+describe("firstPassBatchOptions", () => {
+  const withMath = { documentExtraction: { options: { "vm-pdf": { math: true } } } } as never;
+  it("reads math only when the project asks and the deploy flag allows it (default off)", () => {
+    expect(firstPassBatchOptions(withMath, {}).math).toBe(false);
+    expect(firstPassBatchOptions(withMath, { DOCSLURP_FIRST_PASS_MATH: "on" }).math).toBe(true);
+    expect(firstPassBatchOptions({ documentExtraction: {} } as never, { DOCSLURP_FIRST_PASS_MATH: "on" }).math).toBe(false);
   });
 });

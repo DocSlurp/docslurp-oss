@@ -63,7 +63,9 @@ export function firstPassPipeline(pipeline: PipelineFeatures): PipelineFeatures 
 export function firstPassBatchOptions(pipeline: PipelineFeatures, env: NodeJS.ProcessEnv = process.env): SandboxedPdfBatchJob["options"] {
   const vmOptions = (pipeline.documentExtraction?.options as Record<string, { math?: unknown } | undefined> | undefined)?.["vm-pdf"];
   return {
-    math: vmOptions?.math === true,
+    // Math reading stays behind its own deploy flag (default off) until the open council follow-up on the math reader is
+    // closed (TODO.md: bound its scan on hostile pages); the project's request alone never turns it on.
+    math: vmOptions?.math === true && env.DOCSLURP_FIRST_PASS_MATH?.trim().toLowerCase() === "on",
     figures: dopplerImageExtractEnabled(env) && !!sandboxedPdfProvider()?.figures,
   };
 }
