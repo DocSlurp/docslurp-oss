@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { assertParseSourceDecided } from "../lib/parse-source.js";
 import { createReadStream } from "node:fs";
 import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -194,6 +195,8 @@ export class PdfSourceCache {
    * its directory.
    */
   async get(document: Document): Promise<CachedPdfSource> {
+    // No parse decision from this build's quarantine: refused before a byte is fetched (lib/parse-source.ts).
+    assertParseSourceDecided(document);
     const { entry, cacheHit } = await this.entry(document);
     try {
       verifyStagedSource(document, entry.sha256);

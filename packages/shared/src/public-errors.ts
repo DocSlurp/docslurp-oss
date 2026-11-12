@@ -116,6 +116,7 @@ export const QUARANTINE_PUBLIC_REASONS = {
   "quarantine-archive": "This file contains an attachment or embedded archive that can’t be scanned safely (encrypted, in an unsupported format, or hidden). Remove the attachment and upload it again.",
   "quarantine-scan-limit": "This file is too large, holds too many files, or is nested too deeply for the malware scanner to check completely. Split or simplify it and upload it again.",
   "quarantine-scan-failed": "We couldn’t finish the malware scan for this file. Please try again.",
+  "quarantine-rescan-required": "This file must be scanned again by the current malware checks before it can be read. Reprocess it to continue.",
 } as const;
 export type QuarantinePublicReason = keyof typeof QUARANTINE_PUBLIC_REASONS;
 
@@ -126,12 +127,14 @@ const QUARANTINE_REASON_PRIORITY: readonly QuarantinePublicReason[] = [
   "quarantine-file-type",
   "quarantine-archive",
   "quarantine-scan-limit",
+  "quarantine-rescan-required",
   "quarantine-scan-failed",
 ];
 
 /** The public reason of one worker quarantine reason code; unknown codes are a scan failure, never echoed. */
 export function quarantinePublicReason(code: string): QuarantinePublicReason {
   if (code === "malware-detected") return "quarantine-malware";
+  if (code === "parse-source-unscanned") return "quarantine-rescan-required";
   if (code === "malware-scan-encrypted-content" || code === "malware-scan-pdf-decrypt-failed" || code === "pdf-encryption-inconsistent" || code === "archive-encrypted-entry" || code === "archive-nested-encrypted-entry" || code === "archive-nested-encrypted-pdf") return "quarantine-encrypted";
   if (code === "mime-mismatch" || code === "archive-embedded-container" || code === "quarantine-inspection-inconsistent") return "quarantine-file-type";
   if (code === "malware-scan-limit-exceeded" || /^archive-(?:nested-)?(?:entry-count|depth|expanded-bytes|entry-size|expansion-ratio|object-count)-limit$/.test(code)) return "quarantine-scan-limit";

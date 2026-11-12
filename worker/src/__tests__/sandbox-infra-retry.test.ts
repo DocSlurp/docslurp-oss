@@ -43,9 +43,9 @@ beforeEach(async () => {
     delete from run_terminal_receipts;
     insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total, execution_generation)
       values ('r1', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{}', 2, 4, 'g1');
-    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
-      values ('x', 'o1', 'u1', 'w', 'r1', 'x.pdf', 'application/pdf', 'k1', 'processing', 2),
-             ('y', 'o1', 'u1', 'w', 'r1', 'y.pdf', 'application/pdf', 'k2', 'processing', 2);
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, parse_source_scan_version)
+      values ('x', 'o1', 'u1', 'w', 'r1', 'x.pdf', 'application/pdf', 'k1', 'processing', 2, 1),
+             ('y', 'o1', 'u1', 'w', 'r1', 'y.pdf', 'application/pdf', 'k2', 'processing', 2, 1);
   `);
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});

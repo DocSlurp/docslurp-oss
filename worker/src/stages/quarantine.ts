@@ -17,7 +17,7 @@ import { runArtifactRoot } from "../lib/artifact-root.js";
 import { quarantineScanSnapshotEnabled, type CommandRunner } from "../tools/runner.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { sha256Bytes, verifyStagedSource } from "../sandbox/source-integrity.js";
-import { applyParseSource, hasScannedParseCopy, originalSourceForQuarantine } from "../lib/parse-source.js";
+import { applyParseSource, clearParseSource, originalSourceForQuarantine } from "../lib/parse-source.js";
 
 export class QuarantineStage implements Stage {
   readonly name = "quarantine";
@@ -104,12 +104,20 @@ export class QuarantineStage implements Stage {
                 await this.storage.putBytes(copyKey, copy, "application/pdf");
                 artifact.pdfDecryption.parseSource = { uri: this.storage.uri(copyKey), sha256: parseCopy.sha256, storeMs: Math.round(performance.now() - stored) };
               }
-              if (parseCopy || hasScannedParseCopy(document)) {
-                // Recorded before the verdict is: no later stage of this or another attempt may see the document without it.
-                if (!state.store?.setDocumentParseSource) throw new Error("scanned parse copy cannot be recorded: the store cannot persist it");
-                if (!(await state.store.setDocumentParseSource(state.run.id, document.id, parseCopy))) throw new Error(`scanned parse copy of document ${document.id} was not recorded`);
-                applyParseSource(document, parseCopy);
+              // Fail closed (council R7-H1): every accepted document gets this build's parse decision on its own row (its scanned
+              // copy, or the upload it scanned) before the verdict is recorded, and a refused one loses any decision. Nothing
+              // parses a document without one (lib/parse-source.ts).
+              const accepted = artifact.decision === "accepted";
+              if (state.store?.setDocumentParseSource) {
+                if (!(await state.store.setDocumentParseSource(state.run.id, document.id, accepted ? { copy: parseCopy } : null))) {
+                  throw new Error(`parse decision of document ${document.id} was not recorded`);
+                }
+              } else if (parseCopy || document.parseSourceDecision !== undefined) {
+                // A loaded document (or a copy to point at) needs the decision persisted: later activities reload it.
+                throw new Error("parse decision cannot be recorded: the store cannot persist it");
               }
+              if (accepted) applyParseSource(document, parseCopy);
+              else clearParseSource(document);
 
               await this.storage.putArtifactJson(key, artifact);
               const artifactUri = this.storage.uri(key);
@@ -134,7 +142,10 @@ export class QuarantineStage implements Stage {
             }
           });
         },
-        signal
+        signal,
+        // A document with no parse decision from this build re-runs quarantine over its completed checkpoint (one left by
+        // an earlier build, or seeded by an older stored plan): it is never parsed on another scan's verdict.
+        { rerunCompleted: document.parseSourceDecision === "unscanned" }
       );
     });
   }

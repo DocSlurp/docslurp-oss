@@ -3,7 +3,8 @@ import type { Document } from "../models.js";
 import type { Stage } from "../pipeline/pipeline.js";
 import { runDocumentStage } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
-import { cleanupTempFile, sourceStorageKey, type ArtifactStore } from "../tools/storage.js";
+import { cleanupTempFile, type ArtifactStore } from "../tools/storage.js";
+import { readSourceBytes, stageSourceFile } from "../sandbox/source-integrity.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { recordMeasuredPdfPageCount } from "../lib/pdf-page-count.js";
 import { recordMeasuredTextPageCount } from "../lib/text-page-count.js";
@@ -67,12 +68,13 @@ export class FormatDetectStage implements Stage {
           let temp: string | null = null;
           const pdfPages = this.runner ? await recordMeasuredPdfPageCount({
             state, document, runner: this.runner, signal, deferToFirstPass: firstPassDefersPageCount(state, document),
-            sourcePath: async () => (temp ??= await this.storage.downloadSourceToTempFile(sourceStorageKey(document.sourceKey), trustedTempDownloadPattern("docslurp-pdf-pages-", document))),
+            // Hash-bound like every parser read (council R7-L2): bytes that are not the decided parse source are refused.
+            sourcePath: async () => (temp ??= await stageSourceFile(this.storage, document, trustedTempDownloadPattern("docslurp-pdf-pages-", document))),
           }).finally(async () => { if (temp) await cleanupTempFile(temp); }) : null;
           // A text file intake could not count in full (sampled over 2 MB, or no evidence): the same text rule over the whole text.
           const textPages = await recordMeasuredTextPageCount({
             state, document, format: normalizedFormat,
-            readSource: (maxBytes) => this.storage.getBytes(sourceStorageKey(document.sourceKey), { maxBytes }),
+            readSource: (maxBytes) => readSourceBytes(this.storage, document, { maxBytes }),
           });
           // Every attempt, including a retry that finds the measurement already persisted: authorize the measured pages above
           // what admission priced, from durable state (intake_page_count), before any later stage runs.

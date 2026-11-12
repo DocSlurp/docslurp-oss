@@ -214,6 +214,7 @@ describe("no host parser runs to count Office, RTF, EPUB or PPTX pages", () => {
       putJson: vi.fn(async () => undefined),
       uri: (key: string) => `s3://test/${key}`,
       downloadSourceToTempFile: downloads,
+      downloadToTempFile: downloads,
       getBytes: downloads,
     } as unknown as ArtifactStore;
     return { storage, downloads };

@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { inspectArchive } from "../lib/quarantine-bytes.js";
 import { inspectQuarantineBytes } from "../lib/quarantine-bytes.js";
-import { applyParseSource, hasScannedParseCopy, originalSourceForQuarantine, pdfBytesForParsing, resolveDocumentSource } from "../lib/parse-source.js";
+import { applyParseSource, bindDocumentUpload, hasScannedParseCopy, originalSourceForQuarantine, PARSE_SOURCE_SCAN_VERSION, pdfBytesForParsing, resolveDocumentSource, type ParseSourceRow, type SourcedDocument } from "../lib/parse-source.js";
 import { pdfEncryptionStructure } from "../lib/pdf-encryption-structure.js";
 import { ParseSourceError, readSourceBytes, resetStagedSourcesForTests, SourceIntegrityError, sha256Bytes, stagedSourceSha256, stageSourceFile, verifyStagedSource } from "../sandbox/source-integrity.js";
 
@@ -31,39 +31,46 @@ const policy = {
 describe("R6-H1: every parser reads the scanned copy of an encrypted PDF (lib/parse-source.ts)", () => {
   const original = "a".repeat(64);
   const copy = "b".repeat(64);
-  const row = { source_key: "u1/uploads/board-pack.pdf", source_sha256: original, parse_source_key: "u1/run/quarantine/d1.scanned.pdf", parse_source_sha256: copy };
+  const row = { id: "d1", source_key: "u1/uploads/board-pack.pdf", source_sha256: original, parse_source_key: "u1/run/quarantine/d1.scanned.pdf", parse_source_sha256: copy, parse_source_scan_version: PARSE_SOURCE_SCAN_VERSION };
+  const loaded = (source: ParseSourceRow) => {
+    const document = { id: source.id, ...resolveDocumentSource(source) };
+    bindDocumentUpload(document, source);
+    return document;
+  };
 
-  it("the loader resolves the document to the scanned copy, keeping the upload aside", () => {
-    expect(resolveDocumentSource(row)).toEqual({ sourceKey: row.parse_source_key, sourceSha256: copy, originalSourceKey: row.source_key, originalSourceSha256: original });
-    expect(resolveDocumentSource({ source_key: "k", source_sha256: original })).toEqual({ sourceKey: "k", sourceSha256: original });
-    const document = { id: "d1", ...resolveDocumentSource(row) };
+  it("the loader resolves the document to the scanned copy; the upload's key is reachable only through quarantine", () => {
+    expect(resolveDocumentSource(row)).toEqual({ sourceKey: row.parse_source_key, sourceSha256: copy, originalSourceSha256: original, parseSourceDecision: "scanned-copy" });
+    expect(resolveDocumentSource({ id: "d1", source_key: "k", source_sha256: original, parse_source_scan_version: PARSE_SOURCE_SCAN_VERSION })).toEqual({ sourceKey: "k", sourceSha256: original, parseSourceDecision: "original" });
+    const document = loaded(row);
     expect(pdfBytesForParsing(document)).toEqual({ key: row.parse_source_key, sha256: copy });
     expect(originalSourceForQuarantine(document)).toEqual({ id: "d1", sourceKey: row.source_key, sourceSha256: original });
+    expect(JSON.stringify(document)).not.toContain(row.source_key);
   });
 
   it("a half-recorded copy fails loudly instead of falling back to the original", () => {
     expect(() => resolveDocumentSource({ ...row, parse_source_sha256: null })).toThrow(/incomplete scanned parse copy/);
     expect(() => resolveDocumentSource({ ...row, parse_source_key: null })).toThrow(/incomplete scanned parse copy/);
     expect(() => resolveDocumentSource({ ...row, parse_source_sha256: "not-a-hash" })).toThrow(/incomplete scanned parse copy/);
+    expect(() => resolveDocumentSource({ ...row, parse_source_scan_version: null })).toThrow(/incomplete scanned parse copy/);
   });
 
-  it("applyParseSource points a document at its copy and back", () => {
-    const document: { id: string; sourceKey: string; sourceSha256?: string | null; originalSourceKey?: string; originalSourceSha256?: string | null } = { id: "d1", sourceKey: row.source_key, sourceSha256: original };
+  it("applyParseSource points a document at its copy and back to the upload it scanned", () => {
+    const document: SourcedDocument = { id: "d1", sourceKey: row.source_key, sourceSha256: original };
     applyParseSource(document, { key: row.parse_source_key, sha256: copy });
-    expect(document).toEqual({ id: "d1", sourceKey: row.parse_source_key, sourceSha256: copy, originalSourceKey: row.source_key, originalSourceSha256: original });
+    expect(document).toEqual({ id: "d1", sourceKey: row.parse_source_key, sourceSha256: copy, originalSourceSha256: original, parseSourceDecision: "scanned-copy" });
     expect(hasScannedParseCopy(document)).toBe(true);
     // A retried quarantine re-points from the original, not from the copy.
     applyParseSource(document, { key: "u1/run/quarantine/d1.scanned.pdf", sha256: "c".repeat(64) });
-    expect(document.originalSourceKey).toBe(row.source_key);
+    expect(originalSourceForQuarantine(document).sourceKey).toBe(row.source_key);
     applyParseSource(document, null);
-    expect(document).toEqual({ id: "d1", sourceKey: row.source_key, sourceSha256: original });
+    expect(document).toEqual({ id: "d1", sourceKey: row.source_key, sourceSha256: original, parseSourceDecision: "original" });
   });
 
   describe("staging: a reader that fetched the original of a document with a scanned copy is refused", () => {
     let dir: string;
     const originalBytes = Buffer.from("%PDF-1.7 encrypted original");
     const copyBytes = Buffer.from("%PDF-1.7 scanned copy");
-    const document = { id: "d2", ...resolveDocumentSource({ source_key: "u1/uploads/x.pdf", source_sha256: sha256Bytes(originalBytes), parse_source_key: "u1/run/quarantine/d2.scanned.pdf", parse_source_sha256: sha256Bytes(copyBytes) }) };
+    const document = loaded({ id: "d2", source_key: "u1/uploads/x.pdf", source_sha256: sha256Bytes(originalBytes), parse_source_key: "u1/run/quarantine/d2.scanned.pdf", parse_source_sha256: sha256Bytes(copyBytes), parse_source_scan_version: PARSE_SOURCE_SCAN_VERSION });
     const storage = (objects: Record<string, Buffer>) => ({
       downloadToTempFile: async (key: string) => {
         const file = path.join(dir, `${Math.random().toString(36).slice(2)}`, "f.pdf");
@@ -77,7 +84,7 @@ describe("R6-H1: every parser reads the scanned copy of an encrypted PDF (lib/pa
     afterAll(async () => { await rm(dir, { recursive: true, force: true }); });
 
     it("stageSourceFile and readSourceBytes read the copy by its key", async () => {
-      const store = storage({ [document.sourceKey]: copyBytes, [document.originalSourceKey!]: originalBytes });
+      const store = storage({ [document.sourceKey]: copyBytes, "u1/uploads/x.pdf": originalBytes });
       const staged = await stageSourceFile(store, document, "x");
       expect(await readFile(staged)).toEqual(copyBytes);
       expect(await readSourceBytes(store, document)).toEqual(copyBytes);
@@ -98,18 +105,15 @@ describe("R6-H1: every parser reads the scanned copy of an encrypted PDF (lib/pa
     });
   });
 
-  it("only the quarantine stage reads the upload: no other worker module names the original source", async () => {
-    // Every parser reads `document.sourceKey` (the loader's resolved parse source). The upload's key is named only where it
-    // is resolved, recorded, quarantined, exported for download or purged; a new reader of it fails here.
+  it("tripwire: only the quarantine stage reads the upload; no other worker module names the original source", async () => {
+    // A tripwire only (council R7-L2: a name built at runtime passes it). The runtime guards are the loader keeping the
+    // upload's key off the document (parse-source-council-r7.test.ts) and hash-bound staging.
     const root = fileURLToPath(new URL("../", import.meta.url));
     const allowed: Record<string, RegExp> = {
       "lib/parse-source.ts": /originalSource|source_key/,
       "stages/quarantine.ts": /originalSourceForQuarantine/,
-      "models.ts": /originalSource/,
-      // Planning only: an encrypted PDF with a scanned copy is left to the stage loop.
-      "pipeline/first-pass.ts": /originalSourceKey/,
-      // Integrity: refuses the original's hash for a document with a scanned copy.
-      "sandbox/source-integrity.ts": /originalSourceSha256/,
+      // Log field names only.
+      "sandbox/source-integrity.ts": /source_key/,
       // Raw document rows: the loader, cleanup, retention, exports (download original) and vector relocation metadata.
       "db/store.ts": /source_key/,
       "db/superseded-purge.ts": /source_key/,
@@ -124,7 +128,7 @@ describe("R6-H1: every parser reads the scanned copy of an encrypted PDF (lib/pa
         if (!entry.name.endsWith(".ts") || entry.name.endsWith(".test.ts")) continue;
         const relative = path.relative(root, full).split(path.sep).join("/");
         const text = await readFile(full, "utf8");
-        if (/originalSource|\bsource_key\b/.test(text) && !allowed[relative]) offenders.push(relative);
+        if (/originalSourceKey|originalSourceForQuarantine|bindDocumentUpload|\bsource_key\b/.test(text) && !allowed[relative]) offenders.push(relative);
       }
     };
     await walk(root);

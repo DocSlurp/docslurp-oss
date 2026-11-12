@@ -23,23 +23,25 @@ describe("partial pipeline plans", () => {
     const full = getPipelineStageOrder(defaultPipelineFeatures);
     const plan = compilePipelinePlan({ ...defaultPipelineFeatures, restartFromStage: "embed" });
 
-    expect(plan.stageOrder).toEqual(["embed", "index"]);
-    expect(plan.reusedStages).toEqual(full.slice(0, full.indexOf("embed")));
-    expect(plan.addedStages).toEqual([]);
-    expect(plan.phases.map((phase) => phase.key)).toEqual(["index"]);
+    // Quarantine re-runs in every partial plan (council R7-H1): parsers read only this run's own scan decision.
+    expect(plan.stageOrder).toEqual(["quarantine", "embed", "index"]);
+    expect(plan.reusedStages).toEqual(full.slice(1, full.indexOf("embed")));
+    expect(plan.addedStages).toEqual([expect.objectContaining({ stage: "quarantine" })]);
+    expect(plan.phases.map((phase) => phase.key)).toEqual(["intake", "index"]);
   });
 
   it("restartFromStage on a disabled stage starts at the next enabled one", () => {
     // extract-html is disabled by default.
     const plan = compilePipelinePlan({ ...defaultPipelineFeatures, restartFromStage: "extract-html" });
-    expect(plan.stageOrder[0]).toBe("classify-route");
+    expect(plan.stageOrder.slice(0, 2)).toEqual(["quarantine", "classify-route"]);
     expect(plan.reusedStages).toContain("extract-markdown");
   });
 
   it("stageSubset runs exactly the selected stages", () => {
     const plan = compilePipelinePlan({ ...defaultPipelineFeatures, stageSubset: ["embed", "index"] });
-    expect(plan.stageOrder).toEqual(["embed", "index"]);
-    expect(plan.addedStages).toEqual([]);
+    expect(plan.stageOrder).toEqual(["quarantine", "embed", "index"]);
+    expect(plan.addedStages.map((added) => added.stage)).toEqual(["quarantine"]);
+    expect(plan.reusedStages).not.toContain("quarantine");
     expect(plan.reusedStages).toContain("extract-markdown");
     expect(plan.reusedStages).not.toContain("embed");
   });
@@ -52,8 +54,8 @@ describe("partial pipeline plans", () => {
       stageSubset: ["document-summary"],
     });
 
-    expect(plan.stageOrder).toEqual(["pii-detect", "document-summary", "embed", "index"]);
-    expect(plan.addedStages.map((added) => added.stage).sort()).toEqual(["embed", "index", "pii-detect"]);
+    expect(plan.stageOrder).toEqual(["quarantine", "pii-detect", "document-summary", "embed", "index"]);
+    expect(plan.addedStages.map((added) => added.stage).sort()).toEqual(["embed", "index", "pii-detect", "quarantine"]);
   });
 
   it("re-runs every enabled downstream consumer of a re-run stage's outputs, transitively", () => {
@@ -65,6 +67,7 @@ describe("partial pipeline plans", () => {
     });
 
     expect(plan.stageOrder).toEqual([
+      "quarantine",
       "extract-markdown",
       "classify-route",
       "render-images",
@@ -81,7 +84,7 @@ describe("partial pipeline plans", () => {
     expect(reasons["document-summary"]).toContain("extract-markdown");
     // Untouched earlier stages stay reused.
     expect(plan.reusedStages).toEqual(
-      expect.arrayContaining(["quarantine", "format-detect", "split-pages"]),
+      expect.arrayContaining(["format-detect", "split-pages"]),
     );
     expect(plan.reusedStages).not.toContain("document-summary");
   });
@@ -93,13 +96,13 @@ describe("partial pipeline plans", () => {
       propositionIndex: true,
       stageSubset: ["document-summary"],
     });
-    expect(plan.stageOrder).toEqual(["document-summary", "embed", "index"]);
+    expect(plan.stageOrder).toEqual(["quarantine", "document-summary", "embed", "index"]);
     expect(plan.reusedStages).toContain("proposition-index");
   });
 
   it("re-runs page-index when embed rewrites the chunks it links", () => {
     const plan = compilePipelinePlan({ ...defaultPipelineFeatures, pageIndex: true, stageSubset: ["index"] });
-    expect(plan.stageOrder).toEqual(["embed", "page-index", "index"]);
+    expect(plan.stageOrder).toEqual(["quarantine", "embed", "page-index", "index"]);
     expect(plan.addedStages.find((added) => added.stage === "page-index")?.reason).toContain("embed");
   });
 
@@ -111,7 +114,7 @@ describe("partial pipeline plans", () => {
       piiPolicy: { ...pii, action: "flag_for_review" },
       stageSubset: ["index"],
     });
-    expect(flagOnly.stageOrder).toEqual(["pii-detect", "embed", "index"]);
+    expect(flagOnly.stageOrder).toEqual(["quarantine", "pii-detect", "embed", "index"]);
 
     const redacting = compilePipelinePlan({
       ...defaultPipelineFeatures,
@@ -119,13 +122,14 @@ describe("partial pipeline plans", () => {
       piiPolicy: { ...pii, action: "redact_artifacts" },
       stageSubset: ["index"],
     });
-    expect(redacting.stageOrder).toEqual(["pii-detect", "document-summary", "embed", "index"]);
+    expect(redacting.stageOrder).toEqual(["quarantine", "pii-detect", "document-summary", "embed", "index"]);
   });
 
   it("restarting at index pulls embed back in", () => {
     const plan = compilePipelinePlan({ ...defaultPipelineFeatures, restartFromStage: "index" });
-    expect(plan.stageOrder).toEqual(["embed", "index"]);
+    expect(plan.stageOrder).toEqual(["quarantine", "embed", "index"]);
     expect(plan.addedStages).toEqual([
+      expect.objectContaining({ stage: "quarantine" }),
       expect.objectContaining({ stage: "embed" }),
     ]);
   });

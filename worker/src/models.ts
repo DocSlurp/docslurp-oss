@@ -60,12 +60,13 @@ export interface Document {
    */
   sourceSha256?: string | null;
   /**
-   * The upload as received (documents.source_key), set only when quarantine's scanned copy of an encrypted PDF replaces it
-   * for parsing (documents.parse_source_key, lib/parse-source.ts). Parsers never read it; only quarantine does.
+   * The upload's server sha256 (documents.source_sha256), set only when quarantine's scanned copy of an encrypted PDF replaces
+   * it for parsing: staged reads refuse bytes that hash to it. The upload's key is never on a document whose decision is not
+   * "original" (lib/parse-source.ts): only quarantine reaches it.
    */
-  originalSourceKey?: string;
-  /** The server's sha256 of the upload (documents.source_sha256), beside `originalSourceKey`. */
   originalSourceSha256?: string | null;
+  /** What this build's quarantine decided parsers read (lib/parse-source.ts); "unscanned" is refused everywhere else. */
+  parseSourceDecision?: import("./lib/parse-source.js").ParseSourceDecision;
   status: string;
   extractionMode: string;
   pageCount: number;

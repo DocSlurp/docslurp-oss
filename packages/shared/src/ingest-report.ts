@@ -94,6 +94,7 @@ export const ingestReportFailureReasonSchema = z.enum([
   "quarantine-archive",
   "quarantine-scan-limit",
   "quarantine-scan-failed",
+  "quarantine-rescan-required",
   "unknown",
 ]);
 export type IngestReportFailureReason = z.infer<typeof ingestReportFailureReasonSchema>;
@@ -230,6 +231,7 @@ const FAILURE_COPY: Record<IngestReportFailureReason, { message: string; retryab
   "quarantine-archive": { message: QUARANTINE_PUBLIC_REASONS["quarantine-archive"], retryable: false },
   "quarantine-scan-limit": { message: QUARANTINE_PUBLIC_REASONS["quarantine-scan-limit"], retryable: false },
   "quarantine-scan-failed": { message: QUARANTINE_PUBLIC_REASONS["quarantine-scan-failed"], retryable: true },
+  "quarantine-rescan-required": { message: QUARANTINE_PUBLIC_REASONS["quarantine-rescan-required"], retryable: true },
   unknown: { message: "Processing failed and the cause was not recorded.", retryable: true },
 };
 

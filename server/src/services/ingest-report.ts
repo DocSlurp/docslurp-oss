@@ -553,7 +553,7 @@ export function buildIngestReport(input: IngestReportInput): IngestReport {
 }
 
 const FAILURE_EXAMPLE_LIMIT = 20;
-const FAILURE_REASON_ORDER: IngestReportFailureReason[] = ["quarantine-malware", "quarantine-encrypted", "quarantine-file-type", "quarantine-archive", "quarantine-scan-limit", "quarantine-scan-failed", "ocr_unavailable", "extractor_failed", "unreadable_file", "unsupported_format", "policy_blocked", "provider_failed", "timeout", "unknown", "cancelled"];
+const FAILURE_REASON_ORDER: IngestReportFailureReason[] = ["quarantine-malware", "quarantine-encrypted", "quarantine-file-type", "quarantine-archive", "quarantine-scan-limit", "quarantine-rescan-required", "quarantine-scan-failed", "ocr_unavailable", "extractor_failed", "unreadable_file", "unsupported_format", "policy_blocked", "provider_failed", "timeout", "unknown", "cancelled"];
 
 /** Failed files with the classified reason, failed stage and a reviewed detail phrase (never the stored error's text). */
 function listFailures(docs: IngestReportDocumentRow[], stagesByDoc: Map<string, IngestReportStageRow[]>): IngestReportFailure[] {

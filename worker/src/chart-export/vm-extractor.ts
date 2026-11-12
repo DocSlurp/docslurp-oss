@@ -189,7 +189,11 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
     if (sourceKind && document.sourceKey && reason) {
       const path = await stageSourceFile(
         deps.storage,
-        { id: document.id, sourceKey: document.sourceKey, sourceSha256: document.sourceSha256 ?? null },
+        {
+          id: document.id, sourceKey: document.sourceKey, sourceSha256: document.sourceSha256 ?? null,
+          originalSourceSha256: document.originalSourceSha256 ?? null,
+          ...(document.parseSourceDecision ? { parseSourceDecision: document.parseSourceDecision } : {}),
+        },
         trustedTempDownloadPattern("docslurp-chart-source-", document),
       );
       try {

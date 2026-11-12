@@ -48,6 +48,18 @@ export class ParseSourceError extends SourceRefusalError {
   }
 }
 
+/**
+ * A document with no parse decision from this build's quarantine (lib/parse-source.ts): refused before any parser reads a
+ * byte. The text leads with a quarantine reason code, which public-errors.ts maps to reviewed copy.
+ */
+export class UnscannedParseSourceError extends SourceRefusalError {
+  static readonly CODE = "parse-source-unscanned";
+  constructor(documentId: string, detail = "it has no parse decision from this build's quarantine") {
+    super(`quarantined [${UnscannedParseSourceError.CODE}]: document ${documentId} refused: ${detail}`, documentId);
+    this.name = "UnscannedParseSourceError";
+  }
+}
+
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const STAGED_LIMIT = 4096;
 /** documentId -> sha256 of the bytes this process staged for it (bounded, oldest first out). */
@@ -64,6 +76,19 @@ interface HashedDocument {
   sourceSha256?: string | null;
   /** Set when quarantine's scanned copy replaces the upload for parsing (lib/parse-source.ts): the upload's hash. */
   originalSourceSha256?: string | null;
+  /** lib/parse-source.ts: "unscanned" (no decision from this build's quarantine) is refused before any byte is read. */
+  parseSourceDecision?: string;
+}
+
+/**
+ * lib/parse-source.ts assertParseSourceDecided (which imports this module): an unscanned document, or its unreadable key
+ * (lib/parse-source.ts unscannedParseSourceKey starts with a NUL byte), is refused before any byte is read.
+ */
+function assertDecided(document: HashedDocument): void {
+  if (document.parseSourceDecision === "unscanned" || (typeof document.sourceKey === "string" && document.sourceKey.startsWith("\u0000"))) {
+    console.error(`[worker-source] status=parse-source-unscanned metric=parse_source_unscanned document=${document.id}`);
+    throw new UnscannedParseSourceError(document.id);
+  }
 }
 
 /**
@@ -71,6 +96,7 @@ interface HashedDocument {
  * Throws SourceIntegrityError (logged) when they differ.
  */
 export function verifyStagedSource(document: HashedDocument, stagedSha256: string): void {
+  assertDecided(document);
   const actual = stagedSha256.toLowerCase();
   const expected = document.sourceSha256?.trim().toLowerCase() || null;
   // Scan what we parse: the original of a document with a scanned copy is never parsed, whatever key it was fetched by.
@@ -111,6 +137,7 @@ export async function stageSourceFile(
   pattern: string,
   options?: StorageReadOptions,
 ): Promise<string> {
+  assertDecided(document);
   const filePath = await storage.downloadToTempFile(document.sourceKey, pattern, options);
   try {
     verifyStagedSource(document, await sha256File(filePath));
@@ -124,8 +151,9 @@ export async function stageSourceFile(
 }
 
 /** Read a document's source bytes and verify them. */
-export async function readSourceBytes(storage: Pick<ArtifactStore, "getBytes">, document: HashedDocument): Promise<Buffer> {
-  const bytes = await storage.getBytes(document.sourceKey);
+export async function readSourceBytes(storage: Pick<ArtifactStore, "getBytes">, document: HashedDocument, options?: StorageReadOptions): Promise<Buffer> {
+  assertDecided(document);
+  const bytes = await storage.getBytes(document.sourceKey, options);
   verifyStagedSource(document, sha256Bytes(bytes));
   return bytes;
 }

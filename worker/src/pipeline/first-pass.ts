@@ -68,11 +68,11 @@ export function firstPassBatchOptions(pipeline: PipelineFeatures, env: NodeJS.Pr
 }
 
 /** Whether a document goes through the first pass: a sniffed PDF the batch provider accepts, not already failed. */
-export function firstPassCandidate(document: Pick<Document, "mimeType" | "fileFacts" | "status" | "originalSourceKey">, bytes: number, provider = sandboxedPdfProvider()): boolean {
+export function firstPassCandidate(document: Pick<Document, "mimeType" | "fileFacts" | "status" | "parseSourceDecision">, bytes: number, provider = sandboxedPdfProvider()): boolean {
   if (!provider?.batch || !sniffedPdf(document) || document.status === "failed") return false;
   // An encrypted PDF parses from quarantine's scanned copy (lib/parse-source.ts), whose size the planner does not know: the
-  // stage loop takes it.
-  if (document.originalSourceKey !== undefined) return false;
+  // stage loop takes it. A document with no parse decision from this build is refused there, never batched.
+  if (document.parseSourceDecision === "scanned-copy" || document.parseSourceDecision === "unscanned") return false;
   return bytes <= provider.maxSourceBytes;
 }
 
@@ -82,7 +82,7 @@ export function firstPassCandidate(document: Pick<Document, "mimeType" | "fileFa
  * (firstPassCandidate, size included), so no PDF is deferred without a batch. A document whose size is unknown is counted
  * by format-detect. Whatever the first pass then does not count is counted before the stage loop (countDeferredPdfPages).
  */
-export function firstPassDefersPageCount(state: Pick<WorkflowState, "firstPassRun">, document: Pick<Document, "mimeType" | "fileFacts" | "status" | "sourceBytes" | "originalSourceKey">): boolean {
+export function firstPassDefersPageCount(state: Pick<WorkflowState, "firstPassRun">, document: Pick<Document, "mimeType" | "fileFacts" | "status" | "sourceBytes" | "parseSourceDecision">): boolean {
   if (state.firstPassRun !== true) return false;
   const bytes = Number(document.sourceBytes);
   if (!Number.isFinite(bytes) || bytes <= 0) return false;

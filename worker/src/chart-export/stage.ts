@@ -44,7 +44,7 @@ export const CHART_EXPORT_ARTIFACT_SLOT = "chart-export";
 const CLEARED_SUFFIX = ".cleared.json";
 
 type PassStorage = Pick<ArtifactStore, "bucket" | "getJson" | "putJson" | "putBytes" | "uri" | "deleteKeys">;
-type PassDocument = Pick<Document, "id" | "userId" | "mimeType" | "pageCount"> & Partial<Pick<Document, "sourceKey" | "sourceSha256">>;
+type PassDocument = Pick<Document, "id" | "userId" | "mimeType" | "pageCount"> & Partial<Pick<Document, "sourceKey" | "sourceSha256" | "originalSourceSha256" | "parseSourceDecision">>;
 
 export type PageImage = VisualImage & { release: () => Promise<void>; dpi?: number | null };
 
@@ -155,6 +155,8 @@ export async function prepareChartExport(input: ChartExportPassInput): Promise<P
         document: {
           id: document.id, mimeType: document.mimeType, pageCount: Math.max(1, document.pageCount),
           sourceKey: document.sourceKey ?? null, sourceSha256: document.sourceSha256 ?? null,
+          originalSourceSha256: document.originalSourceSha256 ?? null,
+          ...(document.parseSourceDecision ? { parseSourceDecision: document.parseSourceDecision } : {}),
         },
         candidates: session.candidates,
         artifacts: {

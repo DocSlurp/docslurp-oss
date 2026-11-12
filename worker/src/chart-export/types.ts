@@ -67,7 +67,11 @@ export interface DeterministicVisualInput {
    * The document; `sourceKey`/`sourceSha256` let the VM adapter stage the verified source for the parser guest (the
    * host never parses it).
    */
-  document: { id: string; mimeType: string; pageCount: number; sourceKey?: string | null; sourceSha256?: string | null };
+  document: {
+    id: string; mimeType: string; pageCount: number; sourceKey?: string | null; sourceSha256?: string | null;
+    /** lib/parse-source.ts: the upload's hash behind a scanned copy, and quarantine's decision; staging checks both. */
+    originalSourceSha256?: string | null; parseSourceDecision?: import("../lib/parse-source.js").ParseSourceDecision;
+  };
   /** Candidates the router or classifier found, so the extractor can align partials with images. */
   candidates: readonly VisualCandidate[];
   /**

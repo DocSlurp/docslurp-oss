@@ -107,8 +107,11 @@ export interface CheckpointStore {
    * MIME type with the one the bytes are. Scoped to the run's own document.
    */
   setDocumentFileFacts?(runId: string, documentId: string, facts: import("@docslurp/shared").FileFacts): Promise<boolean>;
-  /** Quarantine's scanned copy of an encrypted PDF as the document's parse source, or null to clear it (lib/parse-source.ts). */
-  setDocumentParseSource?(runId: string, documentId: string, copy: { key: string; sha256: string } | null): Promise<boolean>;
+  /**
+   * Quarantine's parse decision for this run's own document (lib/parse-source.ts): `{ copy }` (an encrypted PDF's scanned copy),
+   * `{ copy: null }` (the upload it scanned), or null to clear it (refused).
+   */
+  setDocumentParseSource?(runId: string, documentId: string, decision: { copy: { key: string; sha256: string } | null } | null): Promise<boolean>;
   /** Newest observed page-shard timings for one `${stage}:${executor}` profile (shard calibration). */
   loadShardObservations?(profileKey: string, limit?: number): Promise<Array<{ pages: number; ms: number; maxRssMiB?: number }>>;
 }

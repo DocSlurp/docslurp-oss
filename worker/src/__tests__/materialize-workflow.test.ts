@@ -41,10 +41,10 @@ beforeAll(async () => {
       values ('up', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{"indexingMode":"map"}', 2),
              ('m1', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1),
              ('m2', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1);
-    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode, page_count_source)
-      values ('full', 'o1', 'u1', 'w', 'up', 'a.pdf', 'application/pdf', 'k1', 'processing', 3, 'full', 'counted'),
-             ('mapped', 'o1', 'u1', 'w', 'up', 'b.pdf', 'application/pdf', 'k2', 'processing', 5, 'map', 'counted'),
-             ('d1', 'o1', 'u1', 'w', 'up', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'map', 'counted');
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode, page_count_source, parse_source_scan_version)
+      values ('full', 'o1', 'u1', 'w', 'up', 'a.pdf', 'application/pdf', 'k1', 'processing', 3, 'full', 'counted', 1),
+             ('mapped', 'o1', 'u1', 'w', 'up', 'b.pdf', 'application/pdf', 'k2', 'processing', 5, 'map', 'counted', 1),
+             ('d1', 'o1', 'u1', 'w', 'up', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'map', 'counted', 1);
   `);
   const served = await serveOnRandomPort(db);
   server = served.server;
@@ -293,8 +293,8 @@ describe("runMaterializeRange activity", () => {
 
   describe("document deleted while pages materialize", () => {
     const seedDoomed = async (id: string) => {
-      await db.exec(`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode, page_count_source)
-        values ('${id}', 'o1', 'u1', 'w', 'up', '${id}.pdf', 'application/pdf', 'k-${id}', 'completed', 6, 'map', 'counted')`);
+      await db.exec(`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode, page_count_source, parse_source_scan_version)
+        values ('${id}', 'o1', 'u1', 'w', 'up', '${id}.pdf', 'application/pdf', 'k-${id}', 'completed', 6, 'map', 'counted', 1)`);
     };
     const usageRows = async () => (await db.query<{ n: number }>(`select count(*)::int as n from usage_events where run_id = 'm2' and metric = 'ingest-page-fast'`)).rows[0]!.n;
 
@@ -423,8 +423,8 @@ describe("runMaterializeRange activity", () => {
       insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
         values ('m-bare', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1),
                ('up-bare', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{}', 1);
-      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode, page_count_source)
-        values ('bare', 'o1', 'u1', 'w', 'up-bare', 'z.pdf', 'application/pdf', 'kz', 'processing', 2, 'map', 'counted');`);
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode, page_count_source, parse_source_scan_version)
+        values ('bare', 'o1', 'u1', 'w', 'up-bare', 'z.pdf', 'application/pdf', 'kz', 'processing', 2, 'map', 'counted', 1);`);
     await expect(runMaterializeRange(deps() as never, { ...input("m-bare", [1]), documentId: "bare" })).rejects.toThrow(/refusing to run on defaults/);
   });
 
@@ -434,8 +434,8 @@ describe("runMaterializeRange activity", () => {
       delete from usage_events where run_id in ('fi'); delete from documents where id = 'd1-full'; delete from project_runs where id = 'fi';
       insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
         values ('fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
-      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode, page_count_source)
-        values ('d1-full', 'o1', 'u1', 'w', 'fi', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'd1', 'full', 'counted');`);
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode, page_count_source, parse_source_scan_version)
+        values ('d1-full', 'o1', 'u1', 'w', 'fi', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'd1', 'full', 'counted', 1);`);
     await ensurePageRows(sql, "d1", 12);
     await runMaterializeRange(deps() as never, input("m1", [3, 4, 5]));
     await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("fi"), []));
@@ -897,8 +897,8 @@ describe("runMaterializeRange activity", () => {
             delete from documents where id = 'd1-full'; delete from project_runs where id = 'fi';
             insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
               values ('fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
-            insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode, page_count_source)
-              values ('d1-full', 'o1', 'u1', 'w', 'fi', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'd1', 'full', 'counted');`);
+            insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode, page_count_source, parse_source_scan_version)
+              values ('d1-full', 'o1', 'u1', 'w', 'fi', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'd1', 'full', 'counted', 1);`);
           try {
             const blocked = await runMaterializeRange(withOps("m1", t, {
               async ocrPage(_d, page) { return { text: `${LONG} SSN 123-45-6789 page ${page}`, model: "vision-x", provider: "test", inputTokens: 100, outputTokens: 50, costCents: 1 }; },
@@ -1131,8 +1131,8 @@ describe("runMaterializeRange activity", () => {
         delete from documents where id = 'd1-full'; delete from project_runs where id = 'fi';
         insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
           values ('fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
-        insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode, page_count_source)
-          values ('d1-full', 'o1', 'u1', 'w', 'fi', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'd1', 'full', 'counted');`);
+        insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode, page_count_source, parse_source_scan_version)
+          values ('d1-full', 'o1', 'u1', 'w', 'fi', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'd1', 'full', 'counted', 1);`);
       try {
         await runMaterializeRange(ocrDeps(), input("m1", [3, 4]));
         await recordPageBaseFee(sql, WorkflowState.create(await store.loadRun("fi"), []));
@@ -1153,8 +1153,8 @@ describe("runMaterializeRange activity", () => {
       delete from usage_events where run_id in ('m1', 'fi'); delete from documents where id = 'd1-full'; delete from project_runs where id = 'fi';
       insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
         values ('fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
-      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode, page_count_source)
-        values ('d1-full', 'o1', 'u1', 'w', 'fi', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'd1', 'full', 'counted');`);
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode, page_count_source, parse_source_scan_version)
+        values ('d1-full', 'o1', 'u1', 'w', 'fi', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'd1', 'full', 'counted', 1);`);
     try {
       await ensurePageRows(sql, "d1", 12);
       await db.exec(`update project_runs set status = 'processing' where id = 'm1'`);
@@ -1178,8 +1178,8 @@ describe("runMaterializeRange activity", () => {
       delete from usage_events where run_id in ('m1', 'fi'); delete from documents where id = 'd1-full'; delete from project_runs where id = 'fi';
       insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
         values ('fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
-      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode, page_count_source)
-        values ('d1-full', 'o1', 'u1', 'w', 'fi', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'd1', 'full', 'counted');`);
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode, page_count_source, parse_source_scan_version)
+        values ('d1-full', 'o1', 'u1', 'w', 'fi', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'd1', 'full', 'counted', 1);`);
     try {
       await ensurePageRows(sql, "d1", 12);
       await runMaterializeRange(deps() as never, input("m1", [3, 4]));

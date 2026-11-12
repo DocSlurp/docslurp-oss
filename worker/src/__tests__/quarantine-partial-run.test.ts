@@ -197,13 +197,14 @@ describe("scan what we parse (council round 6, R6-H1)", () => {
       expect(scanned).toEqual([expect.stringContaining("k-enc"), "decrypted.pdf"]);
       // The stored copy is byte for byte the copy the scan read.
       expect(objects.get(copyKey)).toEqual(scannedCopy);
-      expect(state.documents[0]).toMatchObject({ sourceKey: copyKey, sourceSha256: sha256Bytes(scannedCopy), originalSourceKey: "k-enc" });
+      expect(state.documents[0]).toMatchObject({ sourceKey: copyKey, sourceSha256: sha256Bytes(scannedCopy), parseSourceDecision: "scanned-copy" });
       expect(state.documentStage("doc-enc", "quarantine")?.stats).toMatchObject({ pdfParseCopy: true, pdfParseCopyBytes: scannedCopy.length });
 
       // Every later stage (and the deferred materializer, which loads by id) gets the copy from the loader.
       const fresh = await loadRunState(store, "run-enc", { totalStages: 1 });
       const document = fresh.documents[0]!;
-      expect(document).toMatchObject({ sourceKey: copyKey, originalSourceKey: "k-enc" });
+      expect(document).toMatchObject({ sourceKey: copyKey, parseSourceDecision: "scanned-copy" });
+      expect(JSON.stringify(document)).not.toContain("k-enc");
       expect((await store.loadDocument("doc-enc")).sourceKey).toBe(copyKey);
       // A parser's staged read gets the scanned copy.
       const staged = await stageSourceFile(storage, document, "x");
@@ -230,19 +231,20 @@ describe("scan what we parse (council round 6, R6-H1)", () => {
     const { storage, runner } = harness({ ...clean, status: "infected", signature: "Docslurp.Test.MatrixMarker" });
     try {
       const state = await loadRunState(store, "run-enc", { totalStages: 1 });
-      expect(state.documents[0]?.originalSourceKey).toBe("k-enc");
+      expect(state.documents[0]?.parseSourceDecision).toBe("scanned-copy");
       await db.exec(`delete from document_run_stage_states where document_id = 'doc-enc'`);
       const retry = await loadRunState(store, "run-enc", { totalStages: 1 });
       await new QuarantineStage(runner, storage, config).run(retry);
       expect(retry.documentStage("doc-enc", "quarantine")?.status).toBe("failed");
-      expect(retry.documents[0]).toMatchObject({ sourceKey: "k-enc" });
-      expect(retry.documents[0]?.originalSourceKey).toBeUndefined();
+      // Refused: no decision, and nothing may read the upload.
+      expect(retry.documents[0]?.parseSourceDecision).toBe("unscanned");
+      expect(retry.documents[0]?.sourceKey).not.toContain("k-enc");
     } finally {
       await store.close();
       warn.mockRestore();
       vi.unstubAllEnvs();
     }
-    const [row] = (await db.query<{ parse_source_key: string | null }>(`select parse_source_key from documents where id = 'doc-enc'`)).rows;
-    expect(row).toEqual({ parse_source_key: null });
+    const [row] = (await db.query<{ parse_source_key: string | null; parse_source_scan_version: number | null }>(`select parse_source_key, parse_source_scan_version from documents where id = 'doc-enc'`)).rows;
+    expect(row).toEqual({ parse_source_key: null, parse_source_scan_version: null });
   });
 });
