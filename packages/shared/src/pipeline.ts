@@ -62,6 +62,13 @@ export const runStageSchema = z.enum([
   "queued",
   "quarantine",
   "format-detect",
+  /**
+   * The run's first pass (sandboxed PDF batches that make documents searchable
+   * early). A public reporting stage only: the worker records it per document as
+   * `first-pass:page-count` / `first-pass:figures` (see publicRunStage), and it is
+   * never a plan stage, restart point or stage-subset entry.
+   */
+  "first-pass",
   "to-canonical",
   "format-tooling",
   "normalize",
@@ -86,8 +93,25 @@ export const runStageSchema = z.enum([
   "completed",
 ]);
 export type RunStage = z.infer<typeof runStageSchema>;
-export type PipelineRunStage = Exclude<RunStage, "queued" | "completed">;
-export const pipelineRunStageSchema = runStageSchema.exclude(["queued", "completed"]);
+export type PipelineRunStage = Exclude<RunStage, "queued" | "completed" | "first-pass">;
+export const pipelineRunStageSchema = runStageSchema.exclude(["queued", "completed", "first-pass"]);
+
+/** Public stage reported for every internal first-pass checkpoint (`first-pass`, `first-pass:<step>`). */
+export const FIRST_PASS_PUBLIC_STAGE = "first-pass" satisfies RunStage;
+
+/**
+ * Maps a stage name the worker recorded (run row, stage checkpoint, run event)
+ * to the public stage enum. Internal sub-stages the contract does not list are
+ * folded into their public stage; anything else unknown returns null so the
+ * caller can substitute a safe value instead of failing response validation.
+ */
+export function publicRunStage(raw: unknown): RunStage | null {
+  if (typeof raw !== "string") return null;
+  const parsed = runStageSchema.safeParse(raw);
+  if (parsed.success) return parsed.data;
+  if (raw.startsWith(`${FIRST_PASS_PUBLIC_STAGE}:`)) return FIRST_PASS_PUBLIC_STAGE;
+  return null;
+}
 export type PipelineStagePhaseKey = "intake" | "prep" | "extract" | "index";
 
 export type PipelineStagePlanItem = {
@@ -648,12 +672,7 @@ export const pipelineFeaturesSchema = z
     }
 
     if (value.restartFromStage !== undefined) {
-      const parsedStage = runStageSchema.safeParse(value.restartFromStage);
-      if (
-        !parsedStage.success ||
-        parsedStage.data === "queued" ||
-        parsedStage.data === "completed"
-      ) {
+      if (!pipelineRunStageSchema.safeParse(value.restartFromStage).success) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["restartFromStage"],
@@ -940,6 +959,7 @@ export const runStageOrder: RunStage[] = [
 
 export const pipelineStageLabels: Record<RunStage, string> = {
   queued: "Queued",
+  "first-pass": "First pass",
   ...(Object.fromEntries(
     pipelineStagePlan.map((item) => [item.stage, item.label]),
   ) as Record<PipelineRunStage, string>),
