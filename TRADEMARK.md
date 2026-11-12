@@ -2,7 +2,7 @@
 
 Last updated: 2026-10-19
 
-"**DocSlurp**", the DocSlurp logo and related names, logos and visual identity (together, the "**Marks**") identify the DocSlurp service and software published by DocSlurp, Inc. ("DocSlurp", "we"). The source code in this repository is available under the licenses in [LICENSE](LICENSE) (SSPL-1.0 with an Apache-2.0 future grant for the server, worker, CLI and server-side adapter; MIT for the SDKs, shared contracts and client integrations). **Those licenses cover the code. They do not grant any right to use the Marks**, except as this policy says. This is true for the MIT-licensed packages too.
+"**DocSlurp**", the DocSlurp logo and related names, logos and visual identity (together, the "**Marks**") identify the DocSlurp service and software published by 17th Street Labs, LLC, doing business as "DocSlurp, by 17th Street Labs" ("DocSlurp", "we"). The source code in this repository is available under the licenses in [LICENSE](LICENSE) (SSPL-1.0 with an Apache-2.0 future grant for the server, worker, CLI and server-side adapter; MIT for the SDKs, shared contracts and client integrations). **Those licenses cover the code. They do not grant any right to use the Marks**, except as this policy says. This is true for the MIT-licensed packages too.
 
 Registration status: **unregistered; registration pending.** We claim common-law rights in the Marks and may register them in one or more jurisdictions. Use of the symbols TM or (R) is not required of you, and the lack of a registration does not make the Marks free to use.
 
@@ -26,7 +26,7 @@ You may do the following without asking, if you do not suggest endorsement:
 ## Uses that need our written permission
 
 - Naming a **fork, product, service, company, organization, app, domain or social account** "DocSlurp" or something confusingly similar (misspellings, "DocSlurp Pro", "DocSlurp.ai", look-alikes, translations or phonetic variants).
-- Offering the software, or a modified version of it, as a **hosted or managed service** to third parties under the DocSlurp name or logo. (SSPL section 13 obligations for hosted services are separate and still apply; this policy adds no permission to operate such a service.)
+- Offering the software, or a modified version of it, as a **hosted or managed service** to third parties under the DocSlurp name or logo. (The software license separately limits hosted services; this policy adds no permission to operate one.)
 - **Implying endorsement, sponsorship, partnership or affiliation**, including "official", "certified" or "partner" wording or badges, or statements that DocSlurp reviewed or approved your product.
 - Using the **logo or visual identity** in a way that suggests your offering is official, in your own logo, in app icons or store listings, or on merchandise.
 - Using the Marks in advertising keywords, or registering them as part of a trademark, domain name, handle or app name, without our written consent.

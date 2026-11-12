@@ -45,7 +45,7 @@ test("license is available without credentials or network access", async () => {
   const result = await invoke(["--license"], () => { throw new Error("License must be local"); }, { noKey: true });
   assert.equal(result.code, 0, result.stderr);
   assert.deepEqual(result.requests, []);
-  assert.match(result.stdout, /Server Side Public License/);
+  assert.match(result.stdout, /Business Source License 1\.1/);
 });
 
 test("search scopes to project and authenticates", async () => {
