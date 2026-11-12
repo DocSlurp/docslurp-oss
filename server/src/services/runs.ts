@@ -58,6 +58,7 @@ import {
   summarizeRunUsageCost,
 } from "./usage-attribution.js";
 import { processSingleton } from "../lib/process-singleton.js";
+import { toPublicRunStage } from "../lib/public-run-stage.js";
 import { extractNotReprocessable, ReprocessRejectedError } from "./reprocess-errors.js";
 
 export { summarizeRunUsageCost };
@@ -104,11 +105,19 @@ export async function withRunCosts(runs: ProjectRun[]): Promise<ProjectRun[]> {
   });
 }
 
-function mapStageState(row: StageStateRow): ProjectRunStageState {
-  return projectRunStageStateSchema.parse({
+/**
+ * A checkpoint whose stage the public contract cannot name (an internal stage
+ * newer than this API) is left out of the public list rather than failing the
+ * whole response; toPublicRunStage logs its raw name. Internal first-pass
+ * checkpoints are reported as the public `first-pass` stage.
+ */
+function mapStageState(row: StageStateRow): ProjectRunStageState[] {
+  const stage = toPublicRunStage(row.stage_name, { source: "stage-state", runId: row.run_id });
+  if (!stage) return [];
+  return [projectRunStageStateSchema.parse({
     runId: row.run_id,
     documentId: row.document_id,
-    stage: row.stage_name,
+    stage,
     status: row.status,
     attempts: row.attempts,
     artifactUri: row.artifact_uri,
@@ -117,7 +126,7 @@ function mapStageState(row: StageStateRow): ProjectRunStageState {
     startedAt: serializeOptionalTimestamp(row.started_at),
     completedAt: serializeOptionalTimestamp(row.completed_at),
     updatedAt: serializeTimestamp(row.updated_at),
-  });
+  })];
 }
 
 function mapProjectRunEvent(row: ProjectRunEventRow): ProjectRunEvent {
@@ -126,7 +135,7 @@ function mapProjectRunEvent(row: ProjectRunEventRow): ProjectRunEvent {
     userId: row.user_id,
     runId: row.run_id,
     documentId: row.document_id,
-    stage: row.stage_name,
+    stage: toPublicRunStage(row.stage_name, { source: "run-event", runId: row.run_id }),
     type: row.event_type,
     status: row.status,
     message: row.message ? publicProcessingMessage(row.status ?? row.event_type.split(".").at(-1) ?? null) : null,
@@ -622,7 +631,7 @@ async function listRunStageStatesForRunId(
     ${limit ? sql`limit ${limit}` : sql``}
   `;
 
-  return rows.map(mapStageState);
+  return rows.flatMap(mapStageState);
 }
 
 export async function listRunEvents(args: {
