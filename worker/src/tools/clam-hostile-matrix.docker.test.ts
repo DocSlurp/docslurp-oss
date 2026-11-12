@@ -118,12 +118,27 @@ const MATRIX: Array<{ file: string; clamav: Verdict; decision: Decision; note: s
   { file: "exempt-id3-pdf.mp3", clamav: "clean", decision: "refused:archive-embedded-container", note: "FIXED (N-L2): behind an ID3 tag" },
   { file: "html-late-datauri-11m.html", clamav: "marker", decision: "marker", note: "FIXED (N-M2): a data: URI after 11 MiB of paragraphs; the image config used to keep Debian's 10M MaxHTMLNormalize and miss it" },
   { file: "html-early-datauri.html", clamav: "marker", decision: "marker", note: "control: the same URI near the start" },
+  // Council round 6 (adversarial re-check 3); reproducers committed as r6-*.
+  { file: "r6-lin-o6-S.pdf", clamav: "clean", decision: "clean", note: "R6-H1: linearized RC4, the first-page section maps the content object to the marker ciphertext and the main section to benign text. The copy (qpdf's view) is clean and accepted; poppler shows the marker in the ORIGINAL only, and every parser now reads the copy (parse leg below)" },
+  { file: "r6-linreach-o6-S.pdf", clamav: "clean", decision: "clean", note: "R6-H1: the same with every section reachable from startxref; as above" },
+  { file: "r6-lin-o6-P.pdf", clamav: "clean", decision: "marker", note: "R6-H1 control: directions swapped, the copy carries the marker and is refused" },
+  { file: "r6-linearized-rc4.pdf", clamav: "clean", decision: "clean", note: "FIXED (R6-M1): an ordinary qpdf --linearize RC4 PDF, main trailer without /Encrypt: accepted (was pdf-encryption-inconsistent)" },
+  { file: "r6-linearized-aes256.pdf", clamav: "clean", decision: "clean", note: "FIXED (R6-M1): linearized AES-256; as above" },
+  { file: "r6-tar-pax-size.xlsx", clamav: "clean", decision: "refused:archive-nested-embedded-container", note: "FIXED (R6-M2): pax size=696 over a zero ustar size; the member opens with a zero block, then the ZIP64 marker ZIP" },
+  { file: "r6-tar-v7.xlsx", clamav: "clean", decision: "refused:archive-nested-zip64", note: "FIXED (R6-M2): V7 tar (no ustar magic), recognised by its header checksum" },
+  { file: "r6-tar-control.xlsx", clamav: "clean", decision: "refused:archive-nested-zip64", note: "control: plain ustar" },
+  { file: "r6-tar-lone-zero.xlsx", clamav: "clean", decision: "refused:archive-nested-zip64", note: "R6-M2: a member after one zero block is walked too (tolerant readers go on reading)" },
+  { file: "r6-xlsx-member-encpdf.xlsx", clamav: "clean", decision: "refused:archive-nested-encrypted-pdf", note: "FIXED (R6-L2): an owner-password PDF as an XLSX part is never decrypted for the scan: refused" },
+  { file: "r6-far-enc-raw.mp3", clamav: "clean", decision: "refused:archive-embedded-container", note: "FIXED (R6-L3): an owner-password marker PDF 71 KiB into MPEG frames (past the old 64 KiB window)" },
+  { file: "r6-far-base-raw.mp3", clamav: "clean", decision: "refused:archive-embedded-container", note: "FIXED (R6-L3): the same with an unencrypted Flate PDF" },
   { file: "eicar.com", clamav: "infected", decision: "infected", note: "control" },
   { file: "plain.pdf", clamav: "clean", decision: "clean", note: "control" },
   { file: "marker-plain.pdf", clamav: "marker", decision: "marker", note: "control: the marker signature is loaded" },
 ];
 
 const CONFIGS = ["vm", "image", "clamscan"] as const;
+/** The matrix marker and the round-6 council marker, as text a parser extracts. */
+const MARKERS = /DOCSLURP-MATRIX-MARKER-0123456789abcdef|COUNCILHIDDENMARKER42/;
 /** One scan or qpdf run: past ClamAV's MaxScanTime (300 s), so its own limit alert lands first. */
 const CASE_TIMEOUT_S = Number(process.env.DOCSLURP_CLAMAV_MATRIX_CASE_TIMEOUT_S ?? 360);
 /** The whole container: generous, but a hang fails the suite instead of stalling it. */
@@ -177,6 +192,8 @@ describe.skipIf(!image)("real ClamAV hostile matrix (council re-check 2; owner d
   const scans = new Map<string, { verdict: Verdict; signature: string; ms: number }>();
   const qpdf = new Map<string, QpdfRun & { ms: number }>();
   const inspections = new Map<string, Inspected>();
+  /** Poppler on the parse copy (what every parser reads) and on the original, per decrypted PDF (council R6-H1). */
+  const parsed = new Map<string, { copyText: number; copyPng: number; copyMs: number; copyMarker: boolean; originalText: number; originalPng: number; originalMs: number; originalMarker: boolean; sha256: string }>();
 
   beforeAll(() => {
     dir = mkdtempSync(path.join(tmpdir(), "docslurp-clam-matrix-"));
@@ -252,6 +269,11 @@ describe.skipIf(!image)("real ClamAV hostile matrix (council re-check 2; owner d
         `echo "qpdf ${file} $check $shown $decrypt $(( (${now} - s) / 1000000 )) $(stat -c %s /m/copy/${file} 2>/dev/null || echo none)" > /m/res/qpdf.${file}`,
         `if [ -f /m/copy/${file} ]; then`,
         ...scanAll("-copy", file, `/m/copy/${file}`),
+        // Council R6-H1, scan what we parse: the copy is the parse source (lib/parse-source.ts). Poppler, the production
+        // raster and text engine, reads exactly these bytes; the original is read too, to show what it alone would expose.
+        `p=${now}; ${bound} pdftotext /m/copy/${file} /m/out/parse-text.${file} 2>/dev/null; pt=$?; ${bound} pdftoppm -r 40 -png /m/copy/${file} /m/out/parse-png.${file} 2>/dev/null; pp=$?; pms=$(( (${now} - p) / 1000000 ))`,
+        `o=${now}; ${bound} pdftotext /m/work/${file} /m/out/orig-text.${file} 2>/dev/null; ot=$?; ${bound} pdftoppm -r 40 -png /m/work/${file} /m/out/orig-png.${file} 2>/dev/null; op=$?; oms=$(( (${now} - o) / 1000000 ))`,
+        `echo "parse ${file} $pt $pp $pms $ot $op $oms $(sha256sum /m/copy/${file} | cut -c1-64)" > /m/res/parse.${file}`,
         "fi",
       ]),
       "cat /m/res/*",
@@ -264,6 +286,13 @@ describe.skipIf(!image)("real ClamAV hostile matrix (council re-check 2; owner d
     if (result.status !== 0) throw new Error(`matrix container failed (${result.status}${result.error ? `, ${result.error.message}` : ""}): ${(result.stderr ?? "").slice(-2000)}`);
     for (const line of result.stdout.trim().split("\n")) {
       const parts = line.split(" ");
+      if (parts[0] === "parse") {
+        const [, file, copyText, copyPng, copyMs, originalText, originalPng, originalMs, sha256] = parts;
+        const marked = (name: string) => { try { return MARKERS.test(readFileSync(path.join(dir, "out", `${name}.${file}`), "latin1")); } catch { return false; } };
+        parsed.set(file!, { copyText: Number(copyText), copyPng: Number(copyPng), copyMs: Number(copyMs), copyMarker: marked("parse-text"),
+          originalText: Number(originalText), originalPng: Number(originalPng), originalMs: Number(originalMs), originalMarker: marked("orig-text"), sha256: sha256! });
+        continue;
+      }
       if (parts[0] === "qpdf") {
         const [, file, check, shown, decrypt, ms, bytes] = parts;
         const read = (name: string) => { try { return readFileSync(path.join(dir, "out", `${name}.${file}`), "utf8"); } catch { return ""; } };
@@ -303,8 +332,13 @@ describe.skipIf(!image)("real ClamAV hostile matrix (council re-check 2; owner d
         return `| \`${file}\` | ${statSync(path.join(work, file)).size} B | ${original} ms | ${run.ms} ms | ${run.bytes} B | ${copy} ms | ${run.ms + copy} ms | ${run.ms + copyClamscan} ms |`;
       }),
     ].join("\n");
-    if (process.env.DOCSLURP_CLAMAV_MATRIX_OUT) writeFileSync(process.env.DOCSLURP_CLAMAV_MATRIX_OUT, `${table}\n\n${timing}\n`);
-    console.log(`${table}\n\n${timing}`);
+    const parseTable = [
+      "| Decrypted PDF | Copy sha256 (the parse source) | pdftotext copy | pdftoppm copy | Marker in copy text | Copy poppler ms | Marker in ORIGINAL text | Original poppler ms |",
+      "| --- | --- | --- | --- | --- | --- | --- | --- |",
+      ...[...parsed].map(([file, run]) => `| \`${file}\` | ${run.sha256.slice(0, 16)}… | exit ${run.copyText} | exit ${run.copyPng} | ${run.copyMarker ? "**MARK**" : "none"} | ${run.copyMs} | ${run.originalMarker ? "**MARK**" : "none"} | ${run.originalMs} |`),
+    ].join("\n");
+    if (process.env.DOCSLURP_CLAMAV_MATRIX_OUT) writeFileSync(process.env.DOCSLURP_CLAMAV_MATRIX_OUT, `${table}\n\n${timing}\n\n${parseTable}\n`);
+    console.log(`${table}\n\n${timing}\n\n${parseTable}`);
   }, MATRIX_TIMEOUT_MS + 600_000);
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -320,10 +354,25 @@ describe.skipIf(!image)("real ClamAV hostile matrix (council re-check 2; owner d
     });
   }
 
+  it("council R6-H1, scan what we parse: every accepted encrypted PDF's parse source (the scanned copy) shows poppler no marker", () => {
+    for (const config of CONFIGS) {
+      for (const row of MATRIX) {
+        const run = parsed.get(row.file);
+        if (!run || decide(row.file, config, inspections.get(row.file)!, scans, qpdf) !== "clean") continue;
+        expect(run.copyText, `${row.file} pdftotext copy`).toBe(0);
+        expect(run.copyPng, `${row.file} pdftoppm copy`).toBe(0);
+        expect(run.copyMarker, `${config} ${row.file}: poppler finds the marker in the bytes the pipeline parses`).toBe(false);
+      }
+    }
+    // The reproducers are real: poppler shows the marker in the original, which no parser reads any more.
+    for (const file of ["r6-lin-o6-S.pdf", "r6-linreach-o6-S.pdf"]) expect(parsed.get(file)?.originalMarker, file).toBe(true);
+  });
+
   it("no hidden-marker case (owner-password raw stream, dropped /Encrypt, prefixed PDF or XLSX) is ever clean, on any config", () => {
     for (const config of CONFIGS) {
       for (const file of ["pdf-empty-user-owner-raw-marker.pdf", "pdf-owner-raw-marker-broken-xref.pdf", "pdf-incremental-drop-encrypt-marker.pdf", "prefixed-owner-raw-marker.pdf", "prefixed-flate-marker.pdf", "prefixed-zip64-marker.xlsx",
-        "pdf-twokey-broken-xref.pdf", "pdf-twokey-three-trailers.pdf", "pdf-twokey-objstm.pdf", "pdf-twokey-escaped-name.pdf", "pdf-trailer-encrypt-first.pdf", "nested-tar-zip64.xlsx", "nested-bz2-zip64.xlsx", "nested-xz-zip64.xlsx", "nested-tar-bz2-zip64.xlsx", "exempt-pdf-payload.mp3", "exempt-id3-pdf.mp3", "html-late-datauri-11m.html"]) {
+        "pdf-twokey-broken-xref.pdf", "pdf-twokey-three-trailers.pdf", "pdf-twokey-objstm.pdf", "pdf-twokey-escaped-name.pdf", "pdf-trailer-encrypt-first.pdf", "nested-tar-zip64.xlsx", "nested-bz2-zip64.xlsx", "nested-xz-zip64.xlsx", "nested-tar-bz2-zip64.xlsx", "exempt-pdf-payload.mp3", "exempt-id3-pdf.mp3", "html-late-datauri-11m.html",
+        "r6-lin-o6-P.pdf", "r6-tar-pax-size.xlsx", "r6-tar-v7.xlsx", "r6-tar-lone-zero.xlsx", "r6-xlsx-member-encpdf.xlsx", "r6-far-enc-raw.mp3", "r6-far-base-raw.mp3"]) {
         expect(decide(file, config, inspections.get(file)!, scans, qpdf), `${config} ${file}`).not.toBe("clean");
       }
     }

@@ -30,6 +30,8 @@ with open(at("eicar.com"), "wb") as f:
     f.write(EICAR)
 with open(at("marker.ndb"), "w") as f:
     f.write("Docslurp.Test.MatrixMarker:0:*:%s\n" % MARKER.hex())
+    # The round-6 council reproducers (r6-*, committed) carry the council's own marker.
+    f.write("Docslurp.Test.MatrixMarker.Council:0:*:%s\n" % b"COUNCILHIDDENMARKER42".hex())
 
 # --- PDFs -------------------------------------------------------------------------------------------------------------
 run("qpdf", source_pdf, at("plain.pdf"))
