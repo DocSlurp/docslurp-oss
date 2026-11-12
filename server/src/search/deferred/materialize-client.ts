@@ -21,6 +21,8 @@ export const MATERIALIZE_POLL_MS = 250;
 export interface PageState {
   state: string;
   costCredits: number;
+  /** document_page_states.failure_reason of a failed page (worker-authored codes, never error text). */
+  failureReason?: string | null;
 }
 
 export interface MaterializeDeps {
@@ -53,12 +55,12 @@ export const defaultMaterializeDeps: MaterializeDeps = {
   async loadPageStates(pairs) {
     const result = new Map<string, PageState>();
     if (pairs.length === 0) return result;
-    const rows = await sql<{ document_id: string; page_number: number; state: string; cost: number | string }[]>`
-      select s.document_id, s.page_number, s.state, s.cost_credits::float8 as cost
+    const rows = await sql<{ document_id: string; page_number: number; state: string; cost: number | string; failure_reason: string | null }[]>`
+      select s.document_id, s.page_number, s.state, s.cost_credits::float8 as cost, s.failure_reason
       from unnest(${sql.array(pairs.map((p) => p.documentId), 25)}, ${sql.array(pairs.map((p) => p.page), 23)}) as c(document_id, page_number)
       join document_page_states s on s.document_id = c.document_id and s.page_number = c.page_number
     `;
-    for (const row of rows) result.set(pageKey(row.document_id, row.page_number), { state: row.state, costCredits: Number(row.cost) || 0 });
+    for (const row of rows) result.set(pageKey(row.document_id, row.page_number), { state: row.state, costCredits: Number(row.cost) || 0, failureReason: row.failure_reason });
     return result;
   },
   async canSpend(orgId, projectId) {

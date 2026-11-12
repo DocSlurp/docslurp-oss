@@ -11,7 +11,7 @@ import { assertCanSpend } from "../services/billing/spend-guard.js";
 import { enforceActorCategoryRateLimit } from "../middleware/rate-limit.js";
 import { acquireChatSlot } from "../middleware/chat-concurrency.js";
 
-import { aggregateProjectRagSearchRequestSchema, deferredProfilesEnabled, type ApiErrorCode } from "@docslurp/shared";
+import { aggregateProjectRagSearchRequestSchema, deferredProfilesEnabled, PARSE_SOURCE_RESCAN_REASON, type ApiErrorCode } from "@docslurp/shared";
 
 import {
   actorHasAnyApiKeyScope,
@@ -670,7 +670,12 @@ export const searchesRoutes = new Hono().get("/:sessionId/materialization", asyn
       typeof p?.documentId === "string" && Number.isInteger(p?.page))
     .map((p) => ({ documentId: p.documentId, page: p.page }));
   const states = await defaultMaterializeDeps.loadPageStates(candidates);
-  const pages = candidates.map((p) => ({ ...p, state: states.get(pageKey(p.documentId, p.page))?.state ?? "unseen" }));
+  const pages = candidates.map((p) => {
+    const page = states.get(pageKey(p.documentId, p.page));
+    // A page the worker refused because its document predates the current scan (PR #339): stable reason, never raw text.
+    const rescan = page?.state === "failed" && page.failureReason === "source-unscanned";
+    return { ...p, state: page?.state ?? "unseen", ...(rescan ? { reason: PARSE_SOURCE_RESCAN_REASON } : {}) };
+  });
   const failed = pages.filter((p) => p.state === "failed" || p.state === "blocked-pii").length;
   const ready = pages.filter((p) => p.state === "indexed").length;
   return c.json({

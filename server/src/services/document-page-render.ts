@@ -1,4 +1,4 @@
-import { pageRenderSlot, pageRenderDpi, pageRenderCapabilities } from "@docslurp/shared";
+import { pageRenderSlot, pageRenderDpi, pageRenderCapabilities, parseSourceRescanRequired, type ParseSourceDecisionColumns } from "@docslurp/shared";
 import { canEditProject, getProjectAccess } from "./organizations.js";
 import { sql } from "../db.js";
 import { startPageRenderWorkflow } from "../lib/temporal.js";
@@ -30,6 +30,15 @@ export async function requestDocumentPageRender(documentId: string, pageNumber: 
   if (artifact) return { status: "ready" as const, dpi, capabilities, observation, artifact: { ...artifact, slot: `${documentId}:page-${pageNumber}` } };
   // Withheld sources may never be recreated as unredacted page images.
   if (doc.mimeType !== "application/pdf" || doc.status !== "completed" || !doc.runId || !viewer.source?.url) return { status: "unavailable" as const };
+  // Scan what we parse (PR #339): the worker refuses to render a document without a parse decision from the current scan
+  // (one quarantined before it). Say so, stably, instead of queueing a render that can only fail and polling "pending".
+  const [decision] = await sql<ParseSourceDecisionColumns[]>`
+    select source_sha256, parse_source_key, parse_source_sha256, parse_source_scan_version from documents where id = ${doc.id}`;
+  if (!decision) return { status: "missing" as const };
+  if (parseSourceRescanRequired(decision)) {
+    console.warn(`[page-render] status=rescan-required metric=page_render_rescan_required document=${doc.id} run=${doc.runId} page=${pageNumber}`);
+    return { status: "rescan-required" as const, documentId: doc.id };
+  }
   if (!start) return { status: "pending" as const, dpi, capabilities, observation };
   await assertCanSpend(doc.orgId, doc.projectId, { kind: "interactive" });
   const admitted = await sql.begin(async tx => {
