@@ -62,7 +62,7 @@ AI-assisted contributions are welcome. You are responsible for reviewing the cod
 
 DocSlurp uses different licenses for different parts of the tree (BUSL-1.1, converting to Apache-2.0 after three years, for the server, worker and CLI; MIT for the SDKs, shared contracts and client integrations; see [LICENSE](LICENSE)). To keep that model workable, and to let us offer commercial terms, **every contributor signs the [Contributor License Agreement](CLA.md)** before a pull request can be merged.
 
-- **You keep the copyright** in your contribution. You grant 17th Street Labs (DocSlurp) a copyright and patent license that includes the right to relicense it, and you confirm the work is yours to contribute. It is modelled on the Apache individual and corporate CLAs.
+- **You keep the copyright** in your contribution. You grant 17th Street Labs, LLC (DocSlurp) a copyright and patent license that includes the right to relicense it, and you confirm the work is yours to contribute. It is modelled on the Apache individual and corporate CLAs.
 - **Individuals:** open a pull request. The CLA Assistant bot comments with the exact sentence to reply with; the check turns green once you have signed. You sign once; it covers later pull requests under the same CLA version.
 - **Employees:** if your employer may own what you write, ask it to sign the corporate CLA (Part B of [CLA.md](CLA.md)) and email it to **legal@docslurp.io**, listing your GitHub username. Do this before you contribute.
 - **Not required:** DocSlurp organization members, and bots such as Dependabot.

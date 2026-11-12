@@ -1,5 +1,5 @@
 DocSlurp CLI
-Copyright 2025-2026 17th Street Labs and contributors
+Copyright 2025-2026 17th Street Labs, LLC and contributors
 
 This CLI is part of the DocSlurp Licensed Work and is licensed under the
 Business Source License 1.1 (BUSL-1.1), with the parameters below and the
@@ -10,13 +10,13 @@ its own license. See NOTICE.
 
 Business Source License 1.1 parameters
 
-Licensor:             17th Street Labs, doing business as "DocSlurp, by
+Licensor:             17th Street Labs, LLC, doing business as "DocSlurp, by
                       17th Street Labs"
 
 Licensed Work:        DocSlurp, including the server (server/, including
                       server/db/), the worker (worker/), the CLI
                       (packages/cli/) and server tooling. The Licensed Work
-                      is (c) 2025-2026 17th Street Labs and contributors.
+                      is (c) 2025-2026 17th Street Labs, LLC and contributors.
 
 Additional Use Grant: You may make production use of the Licensed Work,
                       provided that:

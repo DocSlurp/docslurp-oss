@@ -1,6 +1,6 @@
 ## Server, worker and CLI move to BUSL-1.1 with a free tier (2026-11-12)
 
-- New versions of the server, worker and CLI use the Business Source License 1.1. Production use is free for a deployment of up to 16 vCPUs across at most 4 worker or GPU instances, and not as a hosted ingestion/search service for third parties; above that needs a commercial license. Each version converts to Apache-2.0 three years after release. It is an honor system: no key, telemetry or runtime check. Earlier SSPL and Apache grants are kept. Licensor and copyright holder: 17th Street Labs (DocSlurp). Details: `docs/licensing.md`.
+- New versions of the server, worker and CLI use the Business Source License 1.1. Production use is free for a deployment of up to 16 vCPUs across at most 4 worker or GPU instances, and not as a hosted ingestion/search service for third parties; above that needs a commercial license. Each version converts to Apache-2.0 three years after release. It is an honor system: no key, telemetry or runtime check. Earlier SSPL and Apache grants are kept. Licensor and copyright holder: 17th Street Labs, LLC (DocSlurp). Details: `docs/licensing.md`.
 
 ## $1 starter grant (2026-11-12)
 

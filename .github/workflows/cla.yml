@@ -84,7 +84,7 @@ jobs:
             echo "exempt=true" >> "$GITHUB_OUTPUT"
           fi
       # Organization members are exempt: their rights come from employment/contribution terms with
-      # 17th Street Labs (DocSlurp). Needs a token with read:org (CLA_BOT_TOKEN below).
+      # 17th Street Labs, LLC (DocSlurp). Needs a token with read:org (CLA_BOT_TOKEN below).
       - name: List organization members
         if: steps.trusted.outputs.exempt != 'true'
         id: members

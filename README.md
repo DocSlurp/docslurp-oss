@@ -83,7 +83,7 @@ DocSlurp is **source-available, not OSI-approved open source**.
 - **SDKs, clients, shared contracts and the WordPress plugin**: MIT. Using them to talk to a DocSlurp server over HTTP does not bring your application under BUSL.
 - Third-party components keep their own licenses. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [docs/licensing.md](docs/licensing.md).
 
-"DocSlurp" and the DocSlurp logo are trademarks of 17th Street Labs (unregistered, registration pending); the licenses above do not grant rights to them. See [TRADEMARK.md](TRADEMARK.md).
+"DocSlurp" and the DocSlurp logo are trademarks of 17th Street Labs, LLC (unregistered, registration pending); the licenses above do not grant rights to them. See [TRADEMARK.md](TRADEMARK.md).
 
 ## Repository ownership
 

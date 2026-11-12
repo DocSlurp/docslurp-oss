@@ -2,7 +2,7 @@
 
 Last updated: 2026-10-19
 
-"**DocSlurp**", the DocSlurp logo and related names, logos and visual identity (together, the "**Marks**") identify the DocSlurp service and software published by 17th Street Labs, doing business as "DocSlurp, by 17th Street Labs" ("DocSlurp", "we"). The source code in this repository is available under the licenses in [LICENSE](LICENSE) (SSPL-1.0 with an Apache-2.0 future grant for the server, worker, CLI and server-side adapter; MIT for the SDKs, shared contracts and client integrations). **Those licenses cover the code. They do not grant any right to use the Marks**, except as this policy says. This is true for the MIT-licensed packages too.
+"**DocSlurp**", the DocSlurp logo and related names, logos and visual identity (together, the "**Marks**") identify the DocSlurp service and software published by 17th Street Labs, LLC, doing business as "DocSlurp, by 17th Street Labs" ("DocSlurp", "we"). The source code in this repository is available under the licenses in [LICENSE](LICENSE) (SSPL-1.0 with an Apache-2.0 future grant for the server, worker, CLI and server-side adapter; MIT for the SDKs, shared contracts and client integrations). **Those licenses cover the code. They do not grant any right to use the Marks**, except as this policy says. This is true for the MIT-licensed packages too.
 
 Registration status: **unregistered; registration pending.** We claim common-law rights in the Marks and may register them in one or more jurisdictions. Use of the symbols TM or (R) is not required of you, and the lack of a registration does not make the Marks free to use.
 

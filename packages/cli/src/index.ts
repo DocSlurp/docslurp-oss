@@ -112,7 +112,7 @@ deleted when the retention window ends: 48 hours free by default, --retention-da
 (charged as storage). It emails a sign-in download link when done unless --no-email is set;
 extract-download prints a two-minute signed URL for the results zip.
 
-Copyright 2025-2026 17th Street Labs and contributors. No warranty.
+Copyright 2025-2026 17th Street Labs, LLC and contributors. No warranty.
 Licensed under the Business Source License 1.1; each version becomes
 Apache-2.0 three years after release. Run docslurp --license for the terms.
 Source: https://github.com/DocSlurp/docslurp-oss/tree/main/packages/cli`);

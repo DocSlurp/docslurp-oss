@@ -7,7 +7,7 @@ shared contracts and client integrations are MIT; they are listed in the root
 `LICENSE` and carry package-local licenses. The BUSL text is unmodified
 (`LICENSES/BUSL-1.1.txt`); DocSlurp fills in only its parameters.
 
-Licensor and copyright holder: **17th Street Labs**, doing business as
+Licensor and copyright holder: **17th Street Labs, LLC**, doing business as
 "DocSlurp, by 17th Street Labs" (owner, 2026-11-12).
 
 ## The free tier (Additional Use Grant)
@@ -92,8 +92,7 @@ the public tree to `DocSlurp/docslurp-oss` (private until the owner flips it).
 
 - Root `LICENSE` scope now names `server/` and states that the private
   frontend (`app/`) is not part of the public tree and is all rights reserved.
-  `app/LICENSE` still carries the old SSPL text; owner decision whether the
-  frontend is proprietary or BUSL while it stays private.
+  `app/LICENSE` is all rights reserved (owner, 2026-11-12).
 - `app`, `worker` and `packages/shared` are `"private": true`; only
   `releasePackages` can be published.
 - Public messaging: "source-available server (BUSL-1.1, free up to 16 worker vCPUs / 4 instances,
@@ -103,7 +102,7 @@ the public tree to `DocSlurp/docslurp-oss` (private until the owner flips it).
 - Contributions: owner decision 2026-10-15 is a **CLA** (not DCO), so the right to
   relicense (BUSL with an Apache-2.0 Change License, plus commercial terms) is granted by each
   contributor. [CLA.md](../CLA.md) is modelled on the Apache ICLA/CCLA (individual Part A,
-  entity Part B), names 17th Street Labs (DocSlurp) and is a draft for counsel review. The public repo
+  entity Part B), names 17th Street Labs, LLC (DocSlurp) and is a draft for counsel review. The public repo
   enforces it with `contributor-assistant/github-action` (template
   `ops/oss-export/templates/.github/workflows/cla.yml`; setup in
   open-source-cla-setup.md).
@@ -111,9 +110,10 @@ the public tree to `DocSlurp/docslurp-oss` (private until the owner flips it).
   (`docs/public/TRADEMARK.md`, exported as `TRADEMARK.md`) requires modified forks and
   hosted offerings to rebrand. Registration status: unregistered, pending.
 - Contact for legal, licensing, security, conduct and trademark requests:
-  **legal@docslurp.io**. The licensor and copyright holder is "17th Street Labs and
-  contributors" in `LICENSE` (owner, 2026-11-12); counsel should confirm the exact
-  registered entity name and that it holds the rights (see the release review below).
+  **legal@docslurp.io**. The licensor and copyright holder is "17th Street Labs, LLC
+  and contributors" in `LICENSE` (owner, 2026-11-12). Existing CLA signatures cover the
+  BUSL relicensing and the licensor name change (owner, 2026-11-12); the CLA stays at
+  version 1.0.
 - Model weights: none. The YOLO26 layout models (Ultralytics, AGPL-3.0) were an unused experiment and
   were dropped on 2026-10-15 (code, weights manifest, fetch script and mirror copies); nothing in the
   worker, server or app ever loaded them.
