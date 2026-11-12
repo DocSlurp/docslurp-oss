@@ -123,6 +123,48 @@ const ADAPTERS = {
     return out;
   },
 
+  // Cross-feature benchmark JSONL (`docslurp-benchmark-item@v1`), one row per case:
+  //   { id, split, categories: { capability, features[], failureModes[], ... }, input: { uri: "s3://bucket/key", sha256,
+  //     bytes, mediaType, ... }, expected: { reference?: path | { path, sha256 }, ...inline labels }, source: { corpus, caseId,
+  //     license, localPath? } }
+  // Inputs live in object storage: only `s3://` URIs are accepted, and a harness presigns them at run time, so no item
+  // carries an expiring or credentialed URL. With `localRoot`, each row's `source.localPath` is hashed and must match
+  // `input.sha256`, proving the uploaded object and the local source are the same bytes. Categories are kept as given
+  // and flattened into sorted `tags` (`capability:page-ocr`, `feature:tables`, ...) for filtering in Langfuse.
+  async benchmark(spec, base, ctx) {
+    const path = at(base, spec.manifest);
+    const raw = await readFile(path, "utf8");
+    const rows = await readJsonl(path);
+    const root = dirname(path);
+    const localRoot = spec.localRoot ? at(base, spec.localRoot) : null;
+    const maxBytes = spec.inlineReferenceMaxBytes ?? DEFAULT_INLINE_REFERENCE_MAX_BYTES;
+    const out = [];
+    for (const [split, entries] of groupBy(rows, (row) => row.split)) {
+      const records = [];
+      for (const row of entries) {
+        const { id, split: _split, categories, input, expected, source, ...rest } = row;
+        if (!categories || typeof categories.capability !== "string" || !categories.capability) throw new Error(`Benchmark case ${id}: categories.capability is required`);
+        if (!input || typeof input.uri !== "string" || !/^s3:\/\/[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]\/\S+$/.test(input.uri)) throw new Error(`Benchmark case ${id}: input.uri must be an s3://bucket/key URI`);
+        if (!/^[0-9a-f]{64}$/.test(input.sha256 ?? "")) throw new Error(`Benchmark case ${id}: input.sha256 must be a hex SHA-256`);
+        if (!source?.license) throw new Error(`Benchmark case ${id}: source.license is required`);
+        if (localRoot) {
+          if (!source.localPath) throw new Error(`Benchmark case ${id}: source.localPath is required with localRoot`);
+          const bytes = await readContained(localRoot, source.localPath);
+          if (hash(bytes) !== input.sha256) throw new Error(`Benchmark case ${id}: ${source.localPath} does not match input.sha256`);
+          if (input.bytes != null && input.bytes !== bytes.length) throw new Error(`Benchmark case ${id}: input.bytes does not match ${source.localPath}`);
+        }
+        const { reference, ...labels } = expected ?? {};
+        const expectedOutput = { ...labels, ...(reference ? { reference: await referenceFor(root, reference, maxBytes) } : {}) };
+        const tags = Object.entries(categories).flatMap(([key, value]) => (Array.isArray(value) ? value : [value]).filter((item) => item !== null && item !== undefined && item !== "").map((item) => `${key}:${item}`)).sort();
+        const { localPath: _localPath, ...publicSource } = source;
+        records.push({ id, split, input: { caseId: id, ...input }, expectedOutput, metadata: { categories, tags, source: publicSource, licenseBasis: spec.license, ...rest } });
+      }
+      const name = datasetNameFor(spec.prefix, split);
+      out.push({ name, split, items: buildRecordItems({ name, split, records, commit: ctx.commit, config: ctx.config }), sourceHashes: { manifest: hash(raw) } });
+    }
+    return out;
+  },
+
   // A harness case list (one ID per line) over a catalog that is synced separately. Items point at the parent items
   // instead of duplicating labels; lists that span splits are partitioned so every dataset stays split-pure.
   async "case-list"(spec, base, ctx) {
