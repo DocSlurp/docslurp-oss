@@ -45,7 +45,7 @@ export const DISTINCT_TEST_PRICING: Partial<PricingProvider> = {
     priceNote: "Test price note.",
   }),
   pageEquivalentAllowance: DEFAULT_PAGE_EQUIVALENT_ALLOWANCE,
-  plans: { creditPacksCents: [2_500, 5_000, 10_000], starterCredits: 250, workerSlots: { starter: 50, funded: 250 }, privateDedicatedMonthlyUsd: null },
+  plans: { creditPacksCents: [2_500, 5_000, 10_000], starterCredits: 100, workerSlots: { starter: 50, funded: 250 }, privateDedicatedMonthlyUsd: null },
   publicPrices: () => ({ rule: "test", summary: "Test summary: pay per page." }),
   // A simple test quote over the provider's own delegates: the fewest pages all Fast to the most pages all Rich, media by
   // duration, times the speed boost. Not any deployment's quote.

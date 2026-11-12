@@ -156,7 +156,7 @@ describe("enforceRunSpend", () => {
 describe("chat reserve", () => {
   it("pauses a run once available credits fall below the org's reserve", async () => {
     setChatReserveConfig(resolveChatCreditReserveConfig({}));
-    // 5 credits in a starter org: below the 100-credit reserve.
+    // 5 credits in a starter org: below the 20-credit reserve.
     expect(await enforceRunSpend(sql, { id: "run-1", orgId: "org-1", projectId: "ws-1", userId: "u1" }, "stage-boundary"))
       .toMatchObject({ blocked: true, paused: true, reason: "credit_exhausted" });
     await sql`update project_runs set control_state = null, pause_reason = null where id = 'run-1'`;
@@ -178,7 +178,7 @@ describe("chat reserve", () => {
     const row = { org_id: "org-1", available: 150, project_budget_paused: false, org_budget_paused: false, project_in_org: true };
     expect(spendBlockCode({ ...row, funded: false })).toBeNull();
     expect(spendBlockCode({ ...row, funded: true })).toBe("credit_exhausted");
-    expect(spendBlockCode({ ...row, funded: false, available: 99 })).toBe("credit_exhausted");
+    expect(spendBlockCode({ ...row, funded: false, available: 19 })).toBe("credit_exhausted");
   });
 });
 

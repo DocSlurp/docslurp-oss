@@ -17,7 +17,7 @@
  * are never credit-gated either way.
  *
  * 1 credit = 1 US cent. Defaults: $3 reserve and overdraft for funded orgs
- * (ever had a paid grant), $1 for starter orgs. Set the values to 0 to turn
+ * (ever had a paid grant), $0.20 for starter orgs (most of the $1 starter grant stays spendable on ingestion). Set the values to 0 to turn
  * either part off. Only orgs that have received credits at least once
  * (starter, top-up) may overdraw,
  * so creating extra empty orgs does not mint chat credit.
@@ -47,7 +47,7 @@ type Env = Record<string, string | undefined>;
 export const CHAT_CREDIT_RESERVE_MAX = 10_000;
 
 export const DEFAULT_FUNDED_CHAT_RESERVE_CREDITS = 300;
-export const DEFAULT_STARTER_CHAT_RESERVE_CREDITS = 100;
+export const DEFAULT_STARTER_CHAT_RESERVE_CREDITS = 20;
 
 function readCredits(env: Env, name: string, fallback: number, max = CHAT_CREDIT_RESERVE_MAX): number {
   const raw = env[name];

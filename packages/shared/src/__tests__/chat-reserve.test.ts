@@ -3,12 +3,12 @@ import { describe, expect, it } from "vitest";
 import { chatCreditOverdraft, chatCreditReserve, resolveChatCreditReserveConfig } from "../chat-reserve.js";
 
 describe("chat credit reserve config", () => {
-  it("defaults to $1 for starter orgs and $3 for funded orgs, overdraft equal to the reserve", () => {
+  it("defaults to $0.20 for starter orgs and $3 for funded orgs, overdraft equal to the reserve", () => {
     const config = resolveChatCreditReserveConfig({});
-    expect(chatCreditReserve(false, config)).toBe(100);
+    expect(chatCreditReserve(false, config)).toBe(20);
     expect(chatCreditReserve(true, config)).toBe(300);
     expect(chatCreditOverdraft(true, true, config)).toBe(300);
-    expect(chatCreditOverdraft(false, true, config)).toBe(100);
+    expect(chatCreditOverdraft(false, true, config)).toBe(20);
     expect(config).toMatchObject({ holdCredits: 5, holdTtlSeconds: 120 });
   });
 

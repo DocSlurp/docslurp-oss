@@ -39,7 +39,8 @@ const config: CreditLeaseConfig = {
 
 const noReserve = resolveChatCreditReserveConfig({ CHAT_CREDIT_RESERVE_CREDITS: "0", CHAT_CREDIT_RESERVE_STARTER_CREDITS: "0" });
 /** Defaults: 100 credits for starter orgs, 300 for funded orgs. */
-const withReserve = resolveChatCreditReserveConfig({});
+// The numbers below assume a $1 starter reserve (the default is lower).
+const withReserve = resolveChatCreditReserveConfig({ CHAT_CREDIT_RESERVE_STARTER_CREDITS: "100" });
 
 let db: PGlite;
 let server: PGLiteSocketServer;

@@ -1,3 +1,7 @@
+## $1 starter grant (2026-11-12)
+
+- New accounts get 100 starter credits ($1) instead of 250 (migration 0136; existing grants and one-time claims are kept). The default starter-org chat reserve and overdraft drop from 100 to 20 credits so most of the $1 stays spendable on ingestion.
+
 ## Compact dashboard progress and isolated projection refusal (2026-11-10)
 
 - Keep streaming progress free of repeated arbitrary diagnostics and artifact maps while preserving lifecycle, parent/run identity, progress, costs and failures. Refuse oversized or failed dashboard projections per subscription without closing sibling resources or silently truncating inventory. Authorized detail reads and existing security/queue limits remain. Council review: `docs/realtime-projection-review-20261110.md`; broader live acceptance remains open.
