@@ -91,7 +91,26 @@ async function listExperimentItems(api, prepared) {
     for (const row of page.data) if (row.experimentItemId) out.set(row.experimentItemId, row);
     cursor = page.meta?.cursor ?? null;
   } while (cursor && ++guard < 1000);
+  await fillScoreConfigIds(api, out);
   return out;
+}
+
+/**
+ * Some Langfuse v4 builds return experiment-item scores (ScoreV3) without `configId`. Read those scores back by id from
+ * GET /v2/scores, which carries it, and copy only `configId` onto the matching score. A score the lookup does not
+ * return keeps no config and still fails verification (fail closed); nothing else from the lookup is trusted here.
+ */
+async function fillScoreConfigIds(api, rows) {
+  const missing = [...rows.values()].flatMap((row) => (row.scores ?? []).filter((score) => score.configId === undefined && typeof score.id === "string"));
+  const configOf = new Map();
+  const ids = [...new Set(missing.map((score) => score.id))];
+  for (let i = 0; i < ids.length; i += 50) {
+    const batch = ids.slice(i, i + 50);
+    const page = await api(`/v2/scores?${new URLSearchParams({ scoreIds: batch.join(","), limit: "50" })}`);
+    if (!page || !Array.isArray(page.data)) throw new Error("Score readback failed");
+    for (const score of page.data) if (batch.includes(score.id) && typeof score.configId === "string") configOf.set(score.id, score.configId);
+  }
+  for (const score of missing) if (configOf.has(score.id)) score.configId = configOf.get(score.id);
 }
 const remoteOutputSha = (row) => row?.experimentItemMetadata?.outputSha256 ?? null;
 // API shapes: https://github.com/langfuse/langfuse/blob/main/fern/apis/server/definition/experiments.yml

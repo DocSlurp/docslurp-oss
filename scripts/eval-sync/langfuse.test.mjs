@@ -55,7 +55,7 @@ import { desiredScoreConfigs, syncScoreConfigs } from "./score-configs.mjs";
 import { otlpPayload, prepareRun, scoreId, syncRun } from "./runs.mjs";
 
 /** In-memory stand-in for the subset of the Langfuse public API the sync uses. */
-function fakeLangfuse({ failOn = null } = {}) {
+function fakeLangfuse({ failOn = null, experimentScoresWithoutConfig = false, scoreLookupDrops = () => false } = {}) {
   const state = { datasets: new Map(), items: new Map(), configs: new Map(), spans: new Map(), scores: new Map(), writes: [], patches: 0 };
   const api = async (path, body, { method } = {}) => {
     const [route, query = ""] = path.split("?");
@@ -80,9 +80,14 @@ function fakeLangfuse({ failOn = null } = {}) {
         traceId: state.spans.get(a["langfuse.experiment.item.root_observation_id"])?.traceId,
         experimentItemId: a["langfuse.experiment.item.id"],
         experimentItemMetadata: { outputSha256: a["langfuse.experiment.item.metadata.outputSha256"] },
-        scores: [...state.scores.values()].filter((s) => s.observationId === a["langfuse.experiment.item.root_observation_id"]).map((s) => structuredClone(s)),
+        scores: [...state.scores.values()].filter((s) => s.observationId === a["langfuse.experiment.item.root_observation_id"]).map((s) => structuredClone(s))
+          .map(({ configId, ...rest }) => (experimentScoresWithoutConfig ? rest : { configId, ...rest })),
       }));
       return { data: rows, meta: {} };
+    }
+    if (route === "/v2/scores") {
+      const ids = (params.get("scoreIds") ?? "").split(",").filter(Boolean);
+      return { data: ids.map((id) => state.scores.get(id)).filter((score) => score && !scoreLookupDrops(score)).map((score) => structuredClone(score)), meta: { totalPages: 1 } };
     }
     throw new Error(`fake: unhandled ${route}`);
   };
@@ -423,4 +428,25 @@ test("benchmark kind: s3 inputs, verified local bytes, categories flattened into
   // A local path may not escape the local root.
   await write(join(dir, "bench.jsonl"), lines([row("b", "development", { source: { corpus: "x", caseId: "b", license: "x", localPath: "../../etc/hostname" } })]));
   await assert.rejects(loadManifest(await manifest("escape.json")), /escapes the corpus root|ENOENT/);
+});
+
+test("run readback fills a missing ScoreV3 configId from /v2/scores and still fails closed without it", async () => {
+  const setup = async (options) => {
+    const fake = fakeLangfuse(options);
+    const items = buildRecordItems({ name: "fixture/corpus-v1/development", split: "development", records: [{ id: "doc-1", split: "development", input: { caseId: "doc-1" }, expectedOutput: null, metadata: {} }], commit: "c" });
+    await syncDataset(fake.api, { name: "fixture/corpus-v1/development", split: "development", items, sourceHashes: {}, commit: "c" });
+    await syncScoreConfigs(fake.api, desiredScoreConfigs(registry()).configs);
+    const run = { schema: "docslurp-eval-run@v1", experiment: { name: "arm-v3 judge-v3.5" }, dataset: { name: "fixture/corpus-v1/development", split: "development" }, startedAt: "2026-10-26T10:00:00Z", endedAt: "2026-10-26T10:01:00Z", timing: "scoring-window", items: [{ caseId: "doc-1", output: { markdown: "# doc-1" }, scores: { "judge-v3.5.contentTokenF1": 0.9 } }] };
+    return { ...fake, prepared: prepareRun(run, { manifestSha256: "m" }) };
+  };
+  const ok = await setup({ experimentScoresWithoutConfig: true });
+  const first = await syncRun(ok.api, ok.prepared, { sleep: async () => {} });
+  assert.equal(first.readbackVerified, true);
+  const writes = ok.state.writes.length;
+  const again = await syncRun(ok.api, ok.prepared, { sleep: async () => {} });
+  assert.equal(again.itemsWritten + again.scoresWritten, 0, "a verified score is not rewritten");
+  assert.equal(ok.state.writes.length, writes);
+  // The lookup cannot vouch for a score it does not return: verification fails closed.
+  const closed = await setup({ experimentScoresWithoutConfig: true, scoreLookupDrops: () => true });
+  await assert.rejects(syncRun(closed.api, closed.prepared, { sleep: async () => {}, timeoutMs: 0 }), /missing scores/);
 });
