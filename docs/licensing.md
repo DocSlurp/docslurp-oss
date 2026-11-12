@@ -1,57 +1,88 @@
 # DocSlurp licensing
 
-The server (`server/`, the Hono API with its database code in `server/db/`), worker, CLI and server-side Algolia adapter use SSPL-1.0,
-with an irrevocable Apache-2.0 future grant three years after each version is
-first publicly available under these terms. The license text is unmodified;
-the scope notice and future grant are separate from it. The MIT exceptions are
-listed in the root LICENSE and carry package-local licenses.
+The server (`server/`, the Hono API with its database code in `server/db/`),
+worker and CLI use the **Business Source License 1.1** (BUSL-1.1). Each version
+converts to Apache-2.0 three years after it is first published. The SDKs,
+shared contracts and client integrations are MIT; they are listed in the root
+`LICENSE` and carry package-local licenses. The BUSL text is unmodified
+(`LICENSES/BUSL-1.1.txt`); DocSlurp fills in only its parameters.
 
-## Why this split
+Licensor and copyright holder: **17th Street Labs**, doing business as
+"DocSlurp, by 17th Street Labs" (owner, 2026-11-12).
 
-[Inngest's server license](https://github.com/inngest/inngest/blob/main/LICENSE.md)
-uses SSPL plus a three-year Apache-2.0 grant. Inngest's SDKs use Apache-2.0;
-DocSlurp intentionally uses MIT for its SDKs and client integrations.
+## The free tier (Additional Use Grant)
 
-| Option | Hosted-service consequence | Fit for this change |
+Modelled on [boxd.sh](https://boxd.sh/self-hosting/)'s self-host license:
+free up to a fixed amount of compute, a commercial license above it.
+
+- **Production use is free** when the whole deployment, including affiliates,
+  runs on **no more than 16 vCPUs in total across no more than 4 worker or GPU
+  instances**.
+- A **worker or GPU instance** is any machine, VM, microVM, container or
+  sandbox that runs the worker, processes its jobs (parser and OCR sandboxes
+  count) or provides GPU acceleration, including self-hosted GPU inference.
+  Model inference bought per request from a third-party API does not count.
+  API, database, queue and storage hosts do not count.
+- **vCPUs** are each instance's logical CPUs (its CPU quota, if lower), added
+  up at the busiest moment.
+- Offering DocSlurp, or a derivative, to third parties as a hosted document
+  ingestion, extraction, search, retrieval or chat service is not covered.
+- Non-production use (development, testing, evaluation) is always allowed by
+  BUSL itself, at any size. So is using the CLI against a DocSlurp service run
+  by the Licensor.
+- Above the grant: commercial license from legal@docslurp.io.
+
+**Honor system (owner, 2026-11-12).** No license key, no sign-up, no telemetry
+and no runtime check. The software never refuses work because of the limit.
+Do not add phone-home or vCPU enforcement code without an owner decision. The
+license is the control; in source-available code a check is trivially removed.
+
+## Why BUSL
+
+| Option | Hosted-service consequence | Fit |
 | --- | --- | --- |
-| SSPL-1.0 | Offering the program's functionality to third parties as a service triggers section 13's Service Source Code requirement, including service infrastructure | Matches Inngest's model; chosen for the server, worker and CLI |
-| Business Source License 1.1 (BUSL-1.1) | Production permissions depend on a custom Additional Use Grant; requires change-license/date parameters | Alternative if we want a targeted competing-service restriction instead of service-wide source disclosure |
-| AGPLv3 | Modified network services must offer corresponding source; compliant competing services remain permitted | Appropriate for an open-source network copyleft strategy, but does not reproduce SSPL's service-wide requirement |
+| BUSL-1.1 | Production use only within the Additional Use Grant; the rest needs a commercial license. Converts to the Change License per version | **Chosen 2026-11-12**: the only common source-available license that can carry a size-based free tier |
+| SSPL-1.0 (previous) | Offering the program as a service triggers section 13's service-source requirement; GPLv3-style "no further restrictions" rules out a vCPU cap | Used until 2026-11-12, following [Inngest](https://github.com/inngest/inngest/blob/main/LICENSE.md) |
+| PolyForm Internal Use | Internal use only, no redistribution | What boxd.sh uses, with binary-only distribution. Incompatible with a public source repo and npm-published CLI |
+| AGPLv3 | Modified network services must offer source; competing services stay permitted | Open source, but no paid tier |
 
-SSPL and BUSL are source-available licenses, not OSI-approved open-source
-licenses. Do not describe the whole service as MIT or open source. BSL-1.0 is
-the Boost Software License, not the Business Source License.
+BUSL's covenants require a GPL-compatible Change License (Apache-2.0 is, via
+GPLv3), a Change Date no later than four years after release, and no other
+edits to the text. BUSL is source-available, not OSI-approved open source.
+Do not call the server open source. BSL-1.0 is the Boost license, not this one.
 
-References: [SSPL section 13](https://www.mongodb.com/legal/licensing/server-side-public-license),
-[BUSL 1.1](https://mariadb.com/bsl11/),
-[AGPLv3](https://www.gnu.org/licenses/agpl-3.0.html).
+References: [BUSL 1.1](https://mariadb.com/bsl11/),
+[SSPL](https://www.mongodb.com/legal/licensing/server-side-public-license).
+
+## Earlier versions
+
+- Versions published before 2026-11-12 under SSPL-1.0 keep SSPL-1.0 and their
+  irrevocable three-year Apache-2.0 future grant (`LICENSES/SSPL-1.0.txt`).
+- The 0.1.x SDK and CLI npm releases keep Apache-2.0.
+- Relicensing future versions relies on the CLA's relicensing grant from every
+  contributor; see `CLA.md`.
 
 ## Boundaries and use
 
 - The SDK (including `@docslurp/sdk/embed`), the Astro component and the search compatibility package are MIT.
-  Applications can use them under MIT without adopting SSPL merely because
+  Applications can use them under MIT without adopting BUSL merely because
   they communicate with DocSlurp over HTTP.
 - Shared contracts are MIT because both server and client integrations may
   need them. They do not import dashboard or worker implementation code.
 - `packages/contrib-algolia-server` is MIT (owner decision, 2026-10-15). It is
   a client-side wrapper that syncs Algolia-style settings, synonyms, rules and
   imports into DocSlurp over HTTP, so it sits with the other client packages in
-  the root `LICENSE` MIT list. `0.2.0` was already published as MIT, so the
-  licence never changed on npm.
+  the root `LICENSE` MIT list.
   `packages/contrib-wordpress` is an MIT client integration, including its website
   proxy; it talks to the service rather than implementing the ingestion service.
 - `docslurp --license` prints the CLI's license. SDK npm packages include MIT
-  text, NOTICE and the historical Apache text. CLI packages include SSPL and
-  its future grant, NOTICE and the future Apache text.
-- Internal use and self-hosting remain possible subject to the actual terms
-  and dependency licenses. SSPL is not a blanket noncommercial license.
-  Serving functionality to third parties may trigger section 13 even when
-  the code is unmodified. A closed competing service needs separately granted
-  rights or a different implementation; paying for an SDK does not grant them.
-- User documents and extraction output are not automatically SSPL-covered;
-  output is covered only when its content itself constitutes a covered work.
-- Existing Apache-2.0 grants are irrevocable subject to their conditions.
-  This change does not revoke old release rights or erase upstream notices.
+  text, NOTICE and the historical Apache text. CLI packages include BUSL-1.1
+  with its parameters, NOTICE and the Apache text (the Change License).
+- User documents and extraction output are not covered by BUSL; output is
+  covered only when its content itself constitutes a covered work.
+- Existing Apache-2.0 and SSPL-1.0 grants are irrevocable subject to their
+  conditions. This change does not revoke old release rights or erase
+  upstream notices.
 
 ## Open-source split status
 
@@ -62,17 +93,17 @@ the public tree to `DocSlurp/docslurp-oss` (private until the owner flips it).
 - Root `LICENSE` scope now names `server/` and states that the private
   frontend (`app/`) is not part of the public tree and is all rights reserved.
   `app/LICENSE` still carries the old SSPL text; owner decision whether the
-  frontend is proprietary or SSPL while it stays private.
+  frontend is proprietary or BUSL while it stays private.
 - `app`, `worker` and `packages/shared` are `"private": true`; only
   `releasePackages` can be published.
-- Public messaging: "source-available server (SSPL-1.0 + future Apache-2.0
-  grant), MIT SDKs". Do not call the server open source.
+- Public messaging: "source-available server (BUSL-1.1, free up to 16 worker vCPUs / 4 instances,
+  Apache-2.0 after three years), MIT SDKs". Do not call the server open source.
 - Public-repo drafts live in `docs/public/` (README, AGENTS, TRADEMARK) plus
   `CONTRIBUTING.public.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md` and `CLA.md`.
 - Contributions: owner decision 2026-10-15 is a **CLA** (not DCO), so the right to
-  relicense (dual SSPL/Apache-future-grant plus commercial terms) is granted by each
+  relicense (BUSL with an Apache-2.0 Change License, plus commercial terms) is granted by each
   contributor. [CLA.md](../CLA.md) is modelled on the Apache ICLA/CCLA (individual Part A,
-  entity Part B), names DocSlurp, Inc. and is a draft for counsel review. The public repo
+  entity Part B), names 17th Street Labs (DocSlurp) and is a draft for counsel review. The public repo
   enforces it with `contributor-assistant/github-action` (template
   `ops/oss-export/templates/.github/workflows/cla.yml`; setup in
   open-source-cla-setup.md).
@@ -80,9 +111,9 @@ the public tree to `DocSlurp/docslurp-oss` (private until the owner flips it).
   (`docs/public/TRADEMARK.md`, exported as `TRADEMARK.md`) requires modified forks and
   hosted offerings to rebrand. Registration status: unregistered, pending.
 - Contact for legal, licensing, security, conduct and trademark requests:
-  **legal@docslurp.io**. The licensor and copyright holder is named as "DocSlurp, Inc. and
-  contributors" in `LICENSE`; the owner must confirm that this is the correct legal
-  entity name and that it holds the rights (see the release review below).
+  **legal@docslurp.io**. The licensor and copyright holder is "17th Street Labs and
+  contributors" in `LICENSE` (owner, 2026-11-12); counsel should confirm the exact
+  registered entity name and that it holds the rights (see the release review below).
 - Model weights: none. The YOLO26 layout models (Ultralytics, AGPL-3.0) were an unused experiment and
   were dropped on 2026-10-15 (code, weights manifest, fetch script and mirror copies); nothing in the
   worker, server or app ever loaded them.
@@ -124,7 +155,8 @@ For every public release, preserve the exact source commit, first publication
 date under these terms, and third-anniversary date in the release record.
 Do not start the clock from the original Apache release of inherited code.
 Ship the matching source/build scripts alongside binary download links or
-provide equivalent source access that satisfies SSPL section 6. A main-branch
+provide equivalent source access (BUSL is a source license; SSPL section 6
+still applies to old SSPL binaries). A main-branch
 URL alone is not enough to identify the source for an old binary.
 
 Retain dependency notices and licenses in npm packages, browser bundles and

@@ -19,9 +19,9 @@ This repository holds the **DocSlurp server** (API and worker), the **database m
 
 | Path | What it is | License |
 | --- | --- | --- |
-| `server/` | The Hono API (`@docslurp/server`): ingestion, search, RAG context, chat, MCP, webhooks, auth | SSPL-1.0 (+ Apache-2.0 future grant) |
-| `worker/` | Temporal-driven ingestion pipeline: parsing, OCR, chunking, embedding, indexing, extraction | SSPL-1.0 (+ Apache-2.0 future grant) |
-| `packages/cli` | `@docslurp/cli`: upload files, watch runs, retrieve cited evidence | SSPL-1.0 (+ Apache-2.0 future grant) |
+| `server/` | The Hono API (`@docslurp/server`): ingestion, search, RAG context, chat, MCP, webhooks, auth | BUSL-1.1 (→ Apache-2.0 after 3 years) |
+| `worker/` | Temporal-driven ingestion pipeline: parsing, OCR, chunking, embedding, indexing, extraction | BUSL-1.1 (→ Apache-2.0 after 3 years) |
+| `packages/cli` | `@docslurp/cli`: upload files, watch runs, retrieve cited evidence | BUSL-1.1 (→ Apache-2.0 after 3 years) |
 | `packages/contrib-algolia-server` | Server-side Algolia-style sync adapter | MIT |
 | `packages/sdk` (incl. `@docslurp/sdk/embed`), `contrib-astro`, `contrib-search-compat`, `shared` | TypeScript SDK and embeddable widgets, Astro component, Algolia/Meilisearch/Typesense/Pagefind-compatible clients, shared contracts | MIT |
 | `packages/contrib-wordpress` | WordPress search plugin | MIT |
@@ -75,11 +75,15 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md) and [CODE_OF_
 
 DocSlurp is **source-available, not OSI-approved open source**.
 
-- **Server** (`server/` including `server/db/`, `worker/`, CLI): [SSPL-1.0](LICENSES/SSPL-1.0.txt) with an irrevocable Apache-2.0 grant for each version three years after it is first publicly available under these terms. Self-hosting for your own use is allowed; offering the functionality to third parties as a service triggers SSPL section 13.
-- **SDKs, clients, shared contracts and the WordPress plugin**: MIT. Using them to talk to a DocSlurp server over HTTP does not make your application SSPL.
+- **Server** (`server/` including `server/db/`, `worker/`, CLI): [Business Source License 1.1](LICENSE). Each version becomes Apache-2.0 three years after it is first published.
+  - **Free production use** for a deployment of up to **16 vCPUs across at most 4 worker or GPU instances** (parser/OCR sandboxes and self-hosted GPU inference count; per-request model APIs do not). No license key, no sign-up: it is an honor system and the software does not check.
+  - **Larger deployments** need a commercial license: email legal@docslurp.io.
+  - Offering DocSlurp to third parties as a hosted document ingestion, extraction, search or chat service is not covered by the free grant.
+  - Earlier versions keep the licenses they were published under (SSPL-1.0 with an Apache-2.0 future grant; Apache-2.0 for 0.1.x packages).
+- **SDKs, clients, shared contracts and the WordPress plugin**: MIT. Using them to talk to a DocSlurp server over HTTP does not bring your application under BUSL.
 - Third-party components keep their own licenses. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [docs/licensing.md](docs/licensing.md).
 
-"DocSlurp" and the DocSlurp logo are trademarks of DocSlurp, Inc. (unregistered, registration pending); the licenses above do not grant rights to them. See [TRADEMARK.md](TRADEMARK.md).
+"DocSlurp" and the DocSlurp logo are trademarks of 17th Street Labs (unregistered, registration pending); the licenses above do not grant rights to them. See [TRADEMARK.md](TRADEMARK.md).
 
 ## Repository ownership
 

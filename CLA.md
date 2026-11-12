@@ -2,7 +2,7 @@
 
 Version 1.0 (2026-10-15)
 
-Thank you for contributing to DocSlurp. This agreement keeps the project's licensing clear: it lets DocSlurp, Inc. ("**DocSlurp**", "**we**", "**us**") distribute your contribution under the licenses used across this repository (SSPL-1.0 with an Apache-2.0 future grant for the server, worker, CLI and server-side adapter; MIT for the SDKs, shared contracts and client integrations) and under other terms we may adopt later, including commercial terms. **You keep ownership of your contribution.** You grant us the rights below.
+Thank you for contributing to DocSlurp. This agreement keeps the project's licensing clear: it lets 17th Street Labs, doing business as "DocSlurp, by 17th Street Labs" ("**DocSlurp**", "**we**", "**us**") distribute your contribution under the licenses used across this repository (the Business Source License 1.1, converting to Apache-2.0, for the server, worker and CLI; MIT for the SDKs, shared contracts and client integrations) and under other terms we may adopt later, including commercial terms. **You keep ownership of your contribution.** You grant us the rights below.
 
 There are two parts. Sign **Part A** if you contribute as an individual. If you contribute on behalf of an employer or other legal entity, that entity signs **Part B** (and Part A is still needed from each individual who contributes, unless the entity's signature covers them as a Designated Employee).
 
@@ -69,7 +69,7 @@ This agreement continues until all rights granted under it end under its terms, 
 
 ## Part B: Corporate Contributor License Agreement
 
-This Part B is between DocSlurp, Inc. and the legal entity named in the signature block ("**Entity**"), and applies to Contributions submitted by the Entity and by its Designated Employees. Entity accepts and agrees to the following.
+This Part B is between 17th Street Labs (DocSlurp) and the legal entity named in the signature block ("**Entity**"), and applies to Contributions submitted by the Entity and by its Designated Employees. Entity accepts and agrees to the following.
 
 ### B1. Grants
 

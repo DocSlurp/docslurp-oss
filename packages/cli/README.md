@@ -278,7 +278,7 @@ Commands exit with **0** on success and **1** when a command fails or a watched 
 
 HTTP failures print a reviewed message for known error codes, plus a support request ID when the server sent one; raw response text is never shown. With `--json`, a failed request writes `{ "error": { "status", "code", "message", "requestId", "retryAfterSeconds" } }` to stderr (optional fields may be absent) and exits nonzero.
 
-Pre-release: pin the version you validate in CI. Licensed under SSPL-1.0, with an Apache-2.0 grant for each version three years after release. See [LICENSE](LICENSE).
+Pre-release: pin the version you validate in CI. Licensed under the Business Source License 1.1; each version becomes Apache-2.0 three years after release. Calling a DocSlurp service is always permitted. See [LICENSE](LICENSE).
 
 ## Primary sponsor
 
