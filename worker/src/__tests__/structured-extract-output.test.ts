@@ -33,6 +33,13 @@ describe("parseStructuredFields", () => {
     expect(findStructuredField(fields, "registration_code")?.value).toBe("483920");
   });
 
+  it("keeps evidence a model wrote as plain strings", () => {
+    expect(parseStructuredFields('{"fields":{"fee":{"value":128500,"evidence":["fee of $128,500",""," ",{"text":"net 30"},7]}}}'))
+      .toEqual({ fee: { value: 128500, evidence: [{ text: "fee of $128,500" }, { text: "net 30" }] } });
+    expect(findStructuredField(parseStructuredFields('[{"label":"Fee","value":1,"evidence":["fee of 1"]}]'), "fee")?.evidence)
+      .toEqual([{ text: "fee of 1" }]);
+  });
+
   it("fails closed for malformed output", () => {
     expect(parseStructuredFields("not json")).toEqual({});
   });

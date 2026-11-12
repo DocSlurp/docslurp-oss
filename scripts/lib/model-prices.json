@@ -197,6 +197,15 @@
       "note": "Free OpenRouter lane; chat search-agent eval candidate; image input not verified.",
       "unavailable": "Not listed in official OpenRouter catalog on 2026-10-25; historical prices only."
     },
+    "minimax/minimax-m3.1-flash": {
+      "input": 0.15,
+      "output": 0.6,
+      "source": "https://openrouter.ai/api/v1/models",
+      "checked": "2026-11-11",
+      "vision": true,
+      "contextWindow": 1048576,
+      "note": "Reasoning is mandatory on every host (enabled:false and effort none return HTTP 400); effort minimal is the floor and still spends 0-700 reasoning tokens. Eleven hosts on 2026-11-11, $0.1125-$0.15 input; Nebius and InferenceNet serve FP4."
+    },
     "deepseek/deepseek-v4.1-flash-1017": {
       "input": 0.15,
       "output": 0.6,

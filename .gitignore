@@ -23,3 +23,6 @@ terraform.tfstate.*
 
 # Native PDF engine artifact (fetched at image build time, never committed)
 vendor-artifacts/
+
+# Model calibration raw run output (summaries are promoted to docs/evals/)
+scripts/model-calibration/runs/
