@@ -3,7 +3,7 @@ import { Hono } from "hono";
 
 import { sql } from "../db.js";
 import { awaitSearchSessionWrites } from "../search/session.js";
-import { actorHasAnyApiKeyScope, getRequestActor, loadActorScopedProject, resolveActorProjectId } from "../lib/request-actor.js";
+import { actorCanSearch, getRequestActor, loadActorScopedProject, resolveActorProjectId } from "../lib/request-actor.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiStatusError } from "../lib/api-error.js";
 
@@ -29,7 +29,7 @@ export const suggestRoutes = new Hono()
     const sessionId = c.req.query("sessionId");
     if (!sessionId) return apiStatusError(c, 400, "Missing sessionId");
     const actor = getRequestActor(c);
-    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["search"])) {
+    if (actor.type === "apiKey" && !actorCanSearch(actor)) {
       return apiStatusError(c, 403, "Forbidden");
     }
 

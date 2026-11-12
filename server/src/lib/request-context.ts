@@ -47,6 +47,8 @@ type RequestContextState = {
   orgId?: string | null;
   /** The API key actor's project allowlist; null when unrestricted or not a key. */
   apiKeyProjectIds?: readonly string[] | null;
+  /** True when the API key may only run keyword search (`search:keyword` without `search`). */
+  apiKeyKeywordOnly?: boolean;
   /** Aborts when the client disconnects before the response finished (search cancels its SQL). */
   signal?: AbortSignal;
   performanceEvents: Array<{
@@ -229,6 +231,16 @@ export function currentRequestUserId(): string | null {
 export function setCurrentRequestApiKeyProjectIds(projectIds: readonly string[] | null | undefined): void {
   const store = requestContextStorage.getStore();
   if (store) store.apiKeyProjectIds = projectIds?.length ? [...projectIds] : null;
+}
+
+export function setCurrentRequestKeywordOnly(keywordOnly: boolean): void {
+  const store = requestContextStorage.getStore();
+  if (store) store.apiKeyKeywordOnly = keywordOnly;
+}
+
+/** The request's API key is limited to keyword search: no embeddings, vectors, reranking or AI query strategies. */
+export function currentRequestKeywordOnly(): boolean {
+  return requestContextStorage.getStore()?.apiKeyKeywordOnly === true;
 }
 
 export function currentRequestApiKeyProjectIds(): readonly string[] | null {

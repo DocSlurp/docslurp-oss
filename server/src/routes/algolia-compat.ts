@@ -17,7 +17,8 @@ import { apiKeyAuth } from "../middleware/api-key-auth.js";
 import { hybridSearch } from "../services/search.js";
 import { cacheableApiKeyId, readCachedResponse, responseCacheTicket, searchResponseCacheTtlMs, storeResponse } from "../search/response-cache.js";
 import { highlightMatches } from "../search/highlight.js";
-import { currentRequestApiKeyId } from "../lib/request-context.js";
+import { currentRequestApiKeyId, currentRequestKeywordOnly } from "../lib/request-context.js";
+import { SEARCH_RETRIEVAL_SCOPES } from "../lib/request-actor.js";
 import type { ValidatedKey } from "../services/api-keys.js";
 import type { SearchFilters } from "../search/filters.js";
 import { AlgoliaFilterError, parseAlgoliaCompatFilters } from "../search/algolia-compat-filters.js";
@@ -199,7 +200,7 @@ async function compatSearch(args: { query: string; apiKey: ValidatedKey; project
   const ticket = ttl > 0 && apiKeyId !== undefined
     ? await responseCacheTicket({
         userId: args.apiKey.userId, apiKeyId, projectIds: [args.projectId],
-        request: { surface: "algolia-compat", query: args.query, limit: args.limit, filters: args.filters, retrieval: compatRetrievalOptions },
+        request: { surface: "algolia-compat", query: args.query, limit: args.limit, filters: args.filters, retrieval: compatRetrievalOptions, keywordOnly: currentRequestKeywordOnly() },
       })
     : null;
   const cached = ticket ? readCachedResponse(ticket, ttl) as Pick<CompatSearchResponse, "results" | "sessionId"> | undefined : undefined;
@@ -280,7 +281,7 @@ async function loadScopedProject(indexName: string, apiKey: ValidatedKey) {
 }
 
 function requireSearchKey(apiKey: ValidatedKey): Response | null {
-  return apiKeyHasAnyScope(apiKey, ["search"]) ? null : Response.json({ message: "search scope required" }, { status: 403 });
+  return apiKeyHasAnyScope(apiKey, [...SEARCH_RETRIEVAL_SCOPES]) ? null : Response.json({ message: "search scope required" }, { status: 403 });
 }
 
 /**

@@ -1,3 +1,7 @@
+## Keyword-only API keys (2026-11-12)
+
+- New `search:keyword` key scope (server and browser keys): search runs by keyword only, with no query embedding, vector, graph or community leg, hosted reranker or LLM query strategy, whatever the project settings or request say. The request context carries the flag from the key, so every search route (REST, batch, aggregate, compat clients) is clamped in the search service, not per route. A key holds `search` or `search:keyword`, never both; keyword keys get no web tools, MCP tools or capability tokens and cannot chat without `chat`.
+
 ## $1 starter grant (2026-11-12)
 
 - New accounts get 100 starter credits ($1) instead of 250 (migration 0136; existing grants and one-time claims are kept). The default starter-org chat reserve and overdraft drop from 100 to 20 credits so most of the $1 stays spendable on ingestion.

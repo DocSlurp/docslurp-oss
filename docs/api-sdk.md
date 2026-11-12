@@ -39,10 +39,10 @@ There are two kinds of API key. The prefix tells you, and secret scanners, where
 
 | Prefix | Type | Where it may live | Can do |
 | --- | --- | --- | --- |
-| `dslp_priv_` | Server key | Backend secrets, CI, agent configuration | The scopes you grant: `ingest`, `search`, `chat`, `artifacts`, and opt-in organization/project management |
-| `dslp_pub_` | Browser key | Page HTML and browser bundles | `search`, plus `chat` for an answer widget. Nothing else, ever: only on your allowed websites, and only in the projects you name |
+| `dslp_priv_` | Server key | Backend secrets, CI, agent configuration | The scopes you grant: `ingest`, `search` (or `search:keyword`), `chat`, `artifacts`, and opt-in organization/project management |
+| `dslp_pub_` | Browser key | Page HTML and browser bundles | `search` or `search:keyword`, plus `chat` for an answer widget. Nothing else, ever: only on your allowed websites, and only in the projects you name |
 
-`search` returns passages. `chat` generates answers on your credits: `/v1/chat`, `/v1/chat/stream`, `/v1/chat/completions` (and its `/v1/models` list) and the MCP `chat` tool need it. Keys created before `chat` existed kept chat access wherever they had `search`.
+`search` returns passages. `search:keyword` returns passages by keyword matching only: the search never embeds the query, never runs vector, graph or community retrieval, and never calls a model (HyDE, query rewriting, decomposition, stepback, self-query, compression or a hosted reranker), even when the project's search settings or the request turn those on. The free BM25 rerank still applies when asked for. It covers the same endpoints as `search` (`/v1/search`, batches, `/v1/search/aggregate` without `generateAnswer`, and the Algolia, Meilisearch, Typesense and Pagefind compatible routes). A key holds `search` or `search:keyword`, not both. `search:keyword` never unlocks web tools, MCP tools or `/v1/capabilities`. A key with `search:keyword` and `chat` still chats, and its answers retrieve as chat always does. `chat` generates answers on your credits: `/v1/chat`, `/v1/chat/stream`, `/v1/chat/completions` (and its `/v1/models` list) and the MCP `chat` tool need it. Keys created before `chat` existed kept chat access wherever they had `search`.
 
 ### Never embed a server key
 

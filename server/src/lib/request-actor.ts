@@ -12,7 +12,7 @@ import { apiKeyAllowsProject, apiKeyCanUseProject } from "./api-key-project-scop
 
 export { apiKeyAllowsProject, apiKeyCanUseProject };
 export { isFirstPartyAppActor } from "./first-party-app.js";
-import { setCurrentRequestApiKeyId, setCurrentRequestApiKeyProjectIds, setCurrentRequestOrgId, setCurrentRequestSessionId, setCurrentRequestUserId } from "./request-context.js";
+import { setCurrentRequestApiKeyId, setCurrentRequestApiKeyProjectIds, setCurrentRequestKeywordOnly, setCurrentRequestOrgId, setCurrentRequestSessionId, setCurrentRequestUserId } from "./request-context.js";
 import { ApiKeyPolicyError, ClientKeyProjectsRequiredError, validateApiKey, type ValidatedKey } from "../services/api-keys.js";
 
 export { ApiKeyPolicyError, ClientKeyProjectsRequiredError };
@@ -142,6 +142,7 @@ export function setRequestActor(c: Context, actor: RequestActor): void {
   setCurrentRequestUserId(actor.userId);
   setCurrentRequestApiKeyId(actor.type === "apiKey" ? actor.apiKey.keyId : null);
   setCurrentRequestApiKeyProjectIds(actor.type === "apiKey" ? actor.apiKey.projectIds : null);
+  setCurrentRequestKeywordOnly(actor.type === "apiKey" && apiKeyScopesKeywordOnly(actor.apiKey.scopes));
   setCurrentRequestSessionId(actor.type === "session" ? actor.sessionId : null);
   if (actor.type === "apiKey") setCurrentRequestOrgId(actor.apiKey.orgId);
 
@@ -212,6 +213,19 @@ export function requireApiKey(c: Context): ValidatedKey {
     throw new Error("API key actor is required");
   }
   return apiKey;
+}
+
+/** Scopes that may run retrieval. `search:keyword` runs it keyword-only. */
+export const SEARCH_RETRIEVAL_SCOPES = ["search", "search:keyword"] as const;
+
+/** Keyword-only: the key holds `search:keyword` and not the full `search` scope. */
+export function apiKeyScopesKeywordOnly(scopes: readonly string[]): boolean {
+  return scopes.includes("search:keyword") && !scopes.includes("search");
+}
+
+/** May this actor run retrieval (full or keyword-only)? Session actors are checked elsewhere. */
+export function actorCanSearch(actor: RequestActor | null | undefined): boolean {
+  return actorHasAnyApiKeyScope(actor, [...SEARCH_RETRIEVAL_SCOPES]);
 }
 
 export function actorHasAnyApiKeyScope(actor: RequestActor | null | undefined, scopes: string[]): boolean {
@@ -304,7 +318,8 @@ export async function assertApiKeyProjectAccess(
   if (actor.type !== "apiKey") {
     return null;
   }
-  if (!actorHasAnyApiKeyScope(actor, [scope])) {
+  // `search` admits keyword-only keys too; the search service keeps them keyword-only.
+  if (!actorHasAnyApiKeyScope(actor, scope === "search" ? [...SEARCH_RETRIEVAL_SCOPES] : [scope])) {
     return apiErrorResponse(c, 403, "forbidden", "Forbidden");
   }
   const project = await loadActorScopedProject(projectId, actor);

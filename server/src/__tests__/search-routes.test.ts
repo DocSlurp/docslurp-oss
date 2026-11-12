@@ -443,6 +443,38 @@ describe("searchRoutes", () => {
     expect(chatProject).not.toHaveBeenCalled();
   });
 
+  describe("keyword-only keys (search:keyword)", () => {
+    const keywordActor = (scopes: string[] = ["search:keyword"], keyType: "server" | "client" = "client") => ({ type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "kw", userId: "user-1", orgId: "org", keyType, allowedDomains: [], scopes, rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], projectIds: ["ws-kw"] } });
+    const empty = { results: [], sessionId: "s-kw", availability: { status: "complete", isPartial: false, scope: { projectId: "ws-kw", runId: null } } };
+
+    it("may search its own project; the engine (not the route) clamps it", async () => {
+      getProject.mockResolvedValue({ id: "ws-kw", orgId: "org" });
+      hybridSearch.mockResolvedValueOnce(empty);
+      const response = await buildApp(keywordActor()).request("/search?q=pump&project=ws-kw");
+      expect(response.status).toBe(200);
+      expect(hybridSearch).toHaveBeenCalledTimes(1);
+    });
+
+    it("refuses another project", async () => {
+      getProject.mockResolvedValue({ id: "ws-other", orgId: "org" });
+      expect((await buildApp(keywordActor()).request("/search?q=pump&project=ws-other")).status).toBe(404);
+      expect(hybridSearch).not.toHaveBeenCalled();
+    });
+
+    it("cannot chat, generate aggregate answers or reach search without a search scope", async () => {
+      getProject.mockResolvedValue({ id: "ws-kw", orgId: "org" });
+      const chat = await buildApp(keywordActor()).request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", project: "ws-kw" }) });
+      expect(chat.status).toBe(403);
+      expect(chatProject).not.toHaveBeenCalled();
+      const answer = await buildApp(keywordActor(["search:keyword"], "server")).request("/search/aggregate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "q", generateAnswer: true }) });
+      expect(answer.status).toBe(403);
+      expect(aggregateProjectRagSearch).not.toHaveBeenCalled();
+      // A misspelt or partial scope is not a search scope.
+      expect((await buildApp(keywordActor(["search:kw"])).request("/search?q=pump&project=ws-kw")).status).toBe(403);
+      expect(hybridSearch).not.toHaveBeenCalled();
+    });
+  });
+
   describe("browser-key chat session grants (route level)", () => {
     const session = "11111111-1111-4111-8111-111111111111";
     const visitor = () => ({ type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "pub-1", userId: "user-1", orgId: "org", keyType: "client" as const, allowedDomains: ["docs.example.com"], scopes: ["search", "chat"], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [], projectIds: ["ws-chat"] } });

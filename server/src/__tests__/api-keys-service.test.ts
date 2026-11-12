@@ -272,6 +272,25 @@ describe("client key scopes and project allowlists (G-03)", () => {
     expect(key.allowedDomains).toEqual(["*.docslurp.dev", "https://docs.example.com:8443"]);
   });
 
+  it.each([[["search:keyword"], "client"], [["search:keyword", "chat"], "client"], [["search:keyword"], "server"]] as const)("creates a keyword-only key %j (%s)", async (scopes, keyType) => {
+    txMock.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const text = strings.join("?");
+      if (text.includes("insert into api_keys")) {
+        return [buildKeyRow("x", { key_type: keyType, allowed_domains: values[6], scopes: values[7], project_ids: values[11] })];
+      }
+      if (text.includes("from projects w")) return [{ id: "ws-1" }];
+      return [];
+    });
+    const { key } = await createApiKey("user-1", "Keyword", { orgId: "org-1", keyType, allowedDomains: keyType === "client" ? ["docs.example.com"] : [], projectIds: ["ws-1"], scopes: [...scopes] });
+    expect(key.scopes).toEqual(scopes);
+  });
+
+  it.each([["client"], ["server"]] as const)("refuses a %s key holding both search and search:keyword", async (keyType) => {
+    txMock.mockImplementation(async (strings: TemplateStringsArray) => strings.join("?").includes("from projects w") ? [{ id: "ws-1" }] : []);
+    await expect(createApiKey("user-1", "Both", { orgId: "org-1", keyType, allowedDomains: keyType === "client" ? ["docs.example.com"] : [], projectIds: ["ws-1"], scopes: ["search", "search:keyword"] }))
+      .rejects.toMatchObject({ status: 400, code: "invalid_key_scope" });
+  });
+
   it("refuses to create or save a browser key without a project allowlist", async () => {
     txMock.mockImplementation(async (strings: TemplateStringsArray) => strings.join("?").includes("from projects w") ? [{ id: "ws-1" }] : []);
     await expect(createApiKey("user-1", "Widget", { orgId: "org-1", keyType: "client", allowedDomains: ["docslurp.dev"] }))

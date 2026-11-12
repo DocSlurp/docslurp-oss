@@ -18,6 +18,7 @@ import {
   assertApiKeyProjectAccess,
   getRequestActor,
   resolveActorProjectId,
+  actorCanSearch,
 } from "../lib/request-actor.js";
 import { withDeferredContext, type DeferredRequestContext, type MaterializeEvent } from "../search/deferred/deferred-context.js";
 import { defaultMaterializeDeps, pageKey } from "../search/deferred/materialize-client.js";
@@ -35,7 +36,7 @@ import { InvalidRetrievalQueryError, parseRetrievalQueryFlags } from "../lib/ret
 import { publicSearchResponse } from "../lib/search-usage.js";
 import { sql } from "../db.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
-import { currentRequestApiKeyId } from "../lib/request-context.js";
+import { currentRequestApiKeyId, currentRequestKeywordOnly } from "../lib/request-context.js";
 import { cacheableApiKeyId, createCacheScopeMemo, readCachedResponse, responseCacheTicket, searchResponseCacheTtlMs, storeResponse, type CacheScopeMemo } from "../search/response-cache.js";
 export { clearSearchResponseCacheForTests } from "../search/response-cache.js";
 import { SearchCapacityError, withSearchAdmissionGroup } from "../search/search-limiter.js";
@@ -414,7 +415,7 @@ async function retrieve(body: SearchInput & { projectId: string }, userId: strin
   const apiKeyId = cacheableApiKeyId(actorApiKeyId, currentRequestApiKeyId());
   // Keyed on the exact request, query as sent: the search runs on that same text.
   const ticket = ttl > 0 && apiKeyId !== undefined
-    ? await responseCacheTicket({ userId, apiKeyId, projectIds: [body.projectId], request: { ...body }, memo })
+    ? await responseCacheTicket({ userId, apiKeyId, projectIds: [body.projectId], request: { ...body, keywordOnly: currentRequestKeywordOnly() }, memo })
     : null;
   const cached = ticket ? readCachedResponse(ticket, ttl) as SearchData | undefined : undefined;
   if (cached) {
@@ -546,7 +547,7 @@ export const searchRoutes = new Hono()
     }
 
     const actor = getRequestActor(c);
-    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["search"])) {
+    if (actor.type === "apiKey" && !actorCanSearch(actor)) {
       return apiErrorResponse(c, 403, "forbidden", "Forbidden");
     }
     // A generated answer is a model call billed like chat, so it needs the
@@ -612,7 +613,7 @@ export const searchRoutes = new Hono()
     }
     const actor = getRequestActor(c);
     const apiKey = actor.type === "apiKey" ? actor.apiKey : null;
-    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["search"])) {
+    if (actor.type === "apiKey" && !actorCanSearch(actor)) {
       return apiErrorResponse(c, 403, "forbidden", "Forbidden");
     }
 

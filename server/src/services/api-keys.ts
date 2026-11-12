@@ -43,7 +43,7 @@ export const defaultApiKeyScopes = ["ingest", "search", "chat", "artifacts"] as 
 /** Client (browser) keys are search-only unless the creator adds `chat`. */
 export const defaultClientApiKeyScopes = ["search"] as const;
 /** Everything a browser (client) key may ever hold: it sits in page source, so never more than search and chat. */
-export const clientApiKeyScopes = ["search", "chat"] as const;
+export const clientApiKeyScopes = ["search", "search:keyword", "chat"] as const;
 /**
  * Scopes a browser key never holds. Keys written before this rule may still
  * carry them; effectiveKeyScopes drops them at request time.
@@ -62,9 +62,11 @@ export const API_KEY_MAX_ROTATION_OVERLAP_SECONDS = 7 * 24 * 60 * 60;
 export const API_KEY_MAX_IP_ALLOWLIST = 50;
 /**
  * Opt-in scopes; never granted by default. projects:manage renames projects and changes their settings.
+ * `search:keyword` searches by keyword only (no embeddings, vectors, reranking or AI query strategies),
+ * so a key holding it spends no model calls; it cannot be combined with full `search`.
  * `web` is client-key only: server keys use web tools through `search`.
  */
-export const supportedApiKeyScopes = [...defaultApiKeyScopes, "web", "organizations:read", "organizations:manage", "projects:manage"] as const;
+export const supportedApiKeyScopes = [...defaultApiKeyScopes, "search:keyword", "web", "organizations:read", "organizations:manage", "projects:manage"] as const;
 export const apiKeyTypes = ["server", "client"] as const;
 export type ApiKeyType = (typeof apiKeyTypes)[number];
 
@@ -412,6 +414,12 @@ function assertOrganizationKeyScopes(keyType: ApiKeyType, scopes: string[], role
   const serverOnly = keyType === "client" ? scopes.filter(scope => !(clientApiKeyScopes as readonly string[]).includes(scope)) : [];
   if (serverOnly.length > 0) {
     throw new OrganizationError(400, "invalid_key_scope", `Browser keys can only search and chat. ${serverOnly.join(", ")} needs a server key used from your backend.`);
+  }
+  if (scopes.includes("search:keyword") && scopes.includes("search")) {
+    throw new OrganizationError(400, "invalid_key_scope", "Choose search or search:keyword, not both: search:keyword limits the key to keyword search");
+  }
+  if (keyType === "client" && scopes.includes("search:keyword") && scopes.includes("web")) {
+    throw new OrganizationError(400, "invalid_key_scope", "Keyword-only keys cannot use web tools");
   }
   if (keyType !== "client" && scopes.includes("web")) {
     throw new OrganizationError(400, "invalid_key_scope", "The web scope applies to client API keys; server keys use web tools with search");

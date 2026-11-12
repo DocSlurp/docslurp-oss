@@ -6,13 +6,13 @@ import { apiKeyHasAnyScope, loadApiKeyScopedProject } from "../lib/api-key-autho
 import { hybridSearch } from "../services/search.js";
 import { publicSearchResponse } from "../lib/search-usage.js";
 import { searchOptions } from "../lib/search-input.js";
-import { resolveActorProjectId } from "../lib/request-actor.js";
+import { resolveActorProjectId, SEARCH_RETRIEVAL_SCOPES } from "../lib/request-actor.js";
 import { ProjectAccessError } from "../services/default-project.js";
 
 async function execute(c: Context, provider: SearchProvider, requestedProjectId: string, params: unknown) {
   adapterQuery(provider, requestedProjectId, params);
   const key = c.get("apiKey");
-  if (!apiKeyHasAnyScope(key, ["search"])) return Response.json({ error: "search scope required" }, { status: 403 });
+  if (!apiKeyHasAnyScope(key, [...SEARCH_RETRIEVAL_SCOPES])) return Response.json({ error: "search scope required" }, { status: 403 });
   // Index/collection "default" maps to the key's organization default project.
   const projectId = await resolveActorProjectId({ type: "apiKey", userId: key.userId, apiKey: key }, requestedProjectId).catch((error: unknown) => {
     if (error instanceof ProjectAccessError) return null;
@@ -62,7 +62,7 @@ export const searchCompatRoutes = new Hono()
     });
     // Authorize every collection before any retrieval/AI usage is incurred.
     const key = c.get("apiKey");
-    if (!apiKeyHasAnyScope(key, ["search"])) return c.json({ error: "search scope required" }, 403);
+    if (!apiKeyHasAnyScope(key, [...SEARCH_RETRIEVAL_SCOPES])) return c.json({ error: "search scope required" }, 403);
     for (const entry of searches) if (!await loadApiKeyScopedProject(entry.collection, key)) return c.json({ error: "Project not found" }, 404);
     const results = [];
     for (const entry of searches) {

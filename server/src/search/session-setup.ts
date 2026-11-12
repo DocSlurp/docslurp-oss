@@ -22,6 +22,7 @@ import { createSearchSessionJournal, searchSessionWriteBehindEnabled, type Searc
 import { resolveProjectRetrievalControls } from "./project-retrieval-session.js";
 import { parseIndexConfigs, type IndexConfigMap } from "./index-serving.js";
 import { earlyLexicalDocument, fullyIndexedDocument, servableInProgressVersion } from "./eligibility.js";
+import { clampKeywordOnly, searchIsKeywordOnly } from "./keyword-only.js";
 
 /**
  * The project does not exist or the caller may not see it (the two are indistinguishable by design).
@@ -136,7 +137,9 @@ export async function resolveSearchSetup(
     pipeline: projectPipeline,
   });
   session.recordDiagnostic("retrievalControls", retrievalControls.diagnostics);
-  const resolvedOptions = retrievalControls.options;
+  // A keyword-only key (or caller) is clamped after project defaults, so no project setting re-enables model calls.
+  const resolvedOptions = searchIsKeywordOnly(options) ? clampKeywordOnly(retrievalControls.options) : retrievalControls.options;
+  if (resolvedOptions.keywordOnly) session.recordDiagnostic("retrievalMode", "keyword");
   const availabilityPromise = (lanceNative ? loadCachedSearchAvailability : loadSearchAvailability)({
     projectId: normalizedScope.projectId,
     runId:
@@ -154,7 +157,10 @@ export async function resolveSearchSetup(
   );
   // HyDE, rewrite, stepback, self-query, compression and multi-hop are optional
   // and skip without a key, so a privacy block withholds the key.
-  const openRouterApiKey = wantsHostedStrategies
+  // Keyword-only never holds a model key, so no later step can make a model call.
+  const openRouterApiKey = resolvedOptions.keywordOnly
+    ? undefined
+    : wantsHostedStrategies
     ? await hostedApiKeyForProject({
         apiKey: resolveOpenRouterApiKey(),
         privacyMode,

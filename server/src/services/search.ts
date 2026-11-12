@@ -174,6 +174,11 @@ export interface SearchOptions {
   suppressSessionLog?: boolean;
   rootSessionId?: string;
   /**
+   * Keyword-only retrieval (search/keyword-only.ts): no embedding, vector,
+   * graph, hosted rerank or LLM query strategy. Forced for `search:keyword` keys.
+   */
+  keywordOnly?: boolean;
+  /**
    * Relevance floor, 0..1: results whose raw relevance is lower are dropped.
    * 0 disables it. Omitted: the project default, else SEARCH_MIN_SCORE.
    */
@@ -1735,6 +1740,8 @@ async function executeHybridSearch(
   // Native search skips page branches the cached coverage says have nothing to serve.
   const pageOnlyDocuments = setup.availabilityRow?.page_only_documents;
   const skipProgressive = Boolean(native) && pageOnlyDocuments === 0;
+  // Keyword-only: no vector, graph, community or deferred (model-materialized) legs, and no index warm-up.
+  const keywordOnly = setup.resolvedOptions.keywordOnly === true;
   const pageOnlyCompleted = async (): Promise<boolean> => {
     if (!native) return true;
     const embedding = resolveEmbeddingRoute(native.pipeline.embedding);
@@ -1749,7 +1756,7 @@ async function executeHybridSearch(
     setup,
     adapters: {
       parallelRetrieval: Boolean(native),
-      warmVectorIndex: native && process.env.SEARCH_LANCE_WARM !== "0" ? () => {
+      warmVectorIndex: native && !keywordOnly && process.env.SEARCH_LANCE_WARM !== "0" ? () => {
         const embedding = resolveEmbeddingRoute(native.pipeline.embedding);
         void warmLanceDbSearch({ orgId: native.orgId, projectId: native.projectId, embeddingModel: embedding.model, dimension: embedding.dimensions, hydrate: true });
       } : undefined,
@@ -1763,8 +1770,9 @@ async function executeHybridSearch(
           chunks,
         ),
       runSearch: hybridSearch,
-      vectorSearch: ({ queryVector, userId, projectId, options, query }) =>
-        timePhase("vector", () => servedVectorSearch({
+      vectorSearch: ({ queryVector, userId, projectId, options, query }) => keywordOnly
+        ? Promise.resolve([])
+        : timePhase("vector", () => servedVectorSearch({
           projectId,
           pipeline: setup.projectPipeline,
           indexConfigs: setup.indexConfigs,
@@ -1780,16 +1788,18 @@ async function executeHybridSearch(
         })),
       textSearch: ({ query, options }) =>
         timePhase("text", () => nativeTextOrLegacy(query, options)),
-      graphNeighborSearch: ({ query, projectId, options }) =>
-        timePhase("graph", () => graphNeighborSearch(query, projectId, options)),
-      communitySummarySearch: ({ query, projectId, options }) =>
-        timePhase("community", () => communitySummarySearch(query, projectId, options)),
+      graphNeighborSearch: ({ query, projectId, options }) => keywordOnly
+        ? Promise.resolve([])
+        : timePhase("graph", () => graphNeighborSearch(query, projectId, options)),
+      communitySummarySearch: ({ query, projectId, options }) => keywordOnly
+        ? Promise.resolve([])
+        : timePhase("community", () => communitySummarySearch(query, projectId, options)),
       progressivePageSearch: ({ query, userId, options }) => skipProgressive
         ? Promise.resolve([])
         : timePhase("progressive", () => progressivePageSearch(query, userId, options)),
       completedPageSearch: async (args) => args.shouldSearch && await pageOnlyCompleted() ? completedPageSearch(args) : [],
       wholeCorpusFallback,
-      ...(deferredProfilesEnabled()
+      ...(deferredProfilesEnabled() && !keywordOnly
         ? {
             deferredPageSearch: async (deferredArgs: Parameters<NonNullable<SearchSessionRunnerAdapters["deferredPageSearch"]>>[0]) => {
               const context = getDeferredContext();
