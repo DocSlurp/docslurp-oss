@@ -27,6 +27,7 @@ import { assertCanSpend } from "./billing/spend-guard.js";
 import type { ValidatedKey } from "./api-keys.js";
 import { apiKeyCanUseProject } from "../lib/api-key-project-scope.js";
 import { hybridSearch, ProjectNotFoundError, type SearchOptions } from "./search.js";
+import { SearchModeLimitError } from "../search/search-mode-limits.js";
 import {
   buildFallbackAnswer,
   buildNativeDocumentInputs,
@@ -365,6 +366,8 @@ export async function aggregateProjectRagSearch(args: {
           error: null,
         };
       } catch (error) {
+        // A key's per-mode search limit refuses the whole request (429 with Retry-After), not one project.
+        if (error instanceof SearchModeLimitError) throw error;
         return {
           projectId: project.id,
           projectName: project.name,

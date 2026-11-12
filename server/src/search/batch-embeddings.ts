@@ -9,6 +9,7 @@ import { METERED_EMBEDDING_PROVIDERS, queryEmbeddingApiKey, queryEmbeddingCacheK
 import { loadSearchProjectContext } from "./session-setup.js";
 import { resolveProjectRetrievalControls } from "./project-retrieval-session.js";
 import { effectiveSearchMode } from "./search-mode.js";
+import { currentRequestSearchLimits } from "../lib/request-context.js";
 
 /** Options that make a search embed something other than its query text. */
 function embedsQueryText(options: SearchOptions): boolean {
@@ -35,8 +36,13 @@ export async function prefetchBatchQueryEmbeddings(
   signal?: AbortSignal,
 ): Promise<{ prefetched: number; calls: number }> {
   const byProject = new Map<string, typeof items>();
-  // Keyword searches never embed, so their queries are not prefetched.
-  for (const item of items.filter(item => !item.options.filters?.geo && effectiveSearchMode(item.options) !== "keyword")) byProject.set(item.projectId, [...(byProject.get(item.projectId) ?? []), item]);
+  // Keyword searches never embed, so their queries are not prefetched. Nor are searches in a mode the key
+  // limits: each of those embeds only after its limit admits it, so a key past its limit spends nothing.
+  const limited = new Set((currentRequestSearchLimits()?.rules ?? []).map((rule) => rule.mode));
+  for (const item of items.filter(item => {
+    const mode = effectiveSearchMode(item.options);
+    return !item.options.filters?.geo && mode !== "keyword" && !limited.has(mode);
+  })) byProject.set(item.projectId, [...(byProject.get(item.projectId) ?? []), item]);
   let prefetched = 0;
   let calls = 0;
   await Promise.all([...byProject].map(async ([projectId, group]) => {

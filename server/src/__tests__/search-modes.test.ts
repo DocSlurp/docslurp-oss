@@ -185,12 +185,12 @@ describe("request ceiling", () => {
 
 describe("clampToSearchMode", () => {
   it("keyword turns off vectors and every model step, keeping the free BM25 rerank", () => {
-    expect(clampToSearchMode(everythingOn, "keyword")).toMatchObject({ ...modelSteps, searchMode: "keyword", queryVector: undefined, summarySeed: false });
+    expect(clampToSearchMode(everythingOn, "keyword")).toMatchObject({ ...modelSteps, useRerank: true, searchMode: "keyword", queryVector: undefined, summarySeed: false });
     expect(clampToSearchMode({ useRerank: true }, "keyword")).toMatchObject({ useRerank: true, rerankProvider: "bm25" });
   });
 
-  it("hybrid keeps vectors and summary seeding but no graph, hosted rerank or LLM step", () => {
-    expect(clampToSearchMode(everythingOn, "hybrid")).toMatchObject({ ...modelSteps, searchMode: "hybrid", queryVector: [0.1, 0.2], summarySeed: true });
+  it("hybrid keeps vectors and summary seeding but no graph, hosted rerank or LLM step; a requested rerank runs on BM25", () => {
+    expect(clampToSearchMode(everythingOn, "hybrid")).toMatchObject({ ...modelSteps, useRerank: true, searchMode: "hybrid", queryVector: [0.1, 0.2], summarySeed: true });
   });
 
   it("deep leaves the options as they are", () => {
@@ -204,7 +204,7 @@ describe("search setup and plan by mode", () => {
   it.each([["search:keyword", "keyword"], ["search:hybrid", "hybrid"]] as const)("a %s key gets no model keys even when the project turns HyDE and the hosted reranker on", async (scope, mode) => {
     hydeProject();
     const setup = await inRequestAs(keyActor([scope]), () => resolveSearchSetup("user-1", { filters: { projectId: "ws-kw" }, ...everythingOn }));
-    expect(setup.resolvedOptions).toMatchObject({ searchMode: mode, useHyDE: false, queryRewrite: false, useRerank: false });
+    expect(setup.resolvedOptions).toMatchObject({ searchMode: mode, useHyDE: false, queryRewrite: false, rerankProvider: "bm25" });
     expect(setup.openRouterApiKey).toBeUndefined();
     expect(setup.rerankApiKey).toBeUndefined();
     expect(mocks.hostedApiKeyForProject).not.toHaveBeenCalled();
@@ -244,6 +244,13 @@ describe("search setup and plan by mode", () => {
     expect(mocks.hyde).not.toHaveBeenCalled();
     expect(mocks.rewrite).not.toHaveBeenCalled();
     expect(mocks.selfQuery).not.toHaveBeenCalled();
+  });
+
+  it("skips the batch embedding prefetch for a mode the key limits, so a key past its limit spends nothing", async () => {
+    const items = ["pump seals", "valve torque", "bearing wear"].map((query) => ({ query, projectId: "ws-kw", options: {} }));
+    const limited = keyActor(["search:hybrid"], "server", [{ metric: "searches", mode: "hybrid", limit: 1, windowSeconds: 60 }], "prefetch-limited");
+    expect(await inRequestAs(limited, () => prefetchBatchQueryEmbeddings(items, "user-1"))).toEqual({ prefetched: 0, calls: 0 });
+    expect(mocks.embedConfiguredTexts).not.toHaveBeenCalled();
   });
 
   it("skips the batch embedding prefetch for keyword searches", async () => {
@@ -288,6 +295,21 @@ describe("per-mode search limits", () => {
     await inRequestAs(keyActor(["search:deep"], "server", deepTwoPerMinute, "limit-4"), () => consumeSearchModeLimit("deep"));
     await inRequestAs({ type: "session", userId: "user-1", sessionId: "s", user: { id: "user-1" } }, async () => {
       for (let i = 0; i < 5; i++) await consumeSearchModeLimit("deep");
+    });
+  });
+
+  it("hybridSearch counts root searches against the limit before running them", async () => {
+    const { hybridSearch } = await import("../services/search.js");
+    const refusal = (run: () => Promise<unknown>) => run().then(() => null, (error: unknown) => error);
+    await inRequestAs(keyActor(["search:deep"], "server", [{ metric: "searches", mode: "deep", limit: 1, windowSeconds: 60 }], "limit-hybrid"), async () => {
+      const first = await refusal(() => hybridSearch("pump", "user-1", { filters: { projectId: "ws-kw" } }));
+      expect(first).not.toBeInstanceOf(SearchModeLimitError);
+      mocks.sql.mockClear();
+      expect(await refusal(() => hybridSearch("pump", "user-1", { filters: { projectId: "ws-kw" } }))).toBeInstanceOf(SearchModeLimitError);
+      // Refused before setup: no database work for the refused search.
+      expect(mocks.sql).not.toHaveBeenCalled();
+      // A cheaper mode is counted separately.
+      expect(await refusal(() => hybridSearch("pump", "user-1", { filters: { projectId: "ws-kw" }, searchMode: "keyword" }))).not.toBeInstanceOf(SearchModeLimitError);
     });
   });
 

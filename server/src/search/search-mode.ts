@@ -41,8 +41,8 @@ export function clampToSearchMode<T extends SearchOptions>(options: T, mode: Sea
     enableGraphExpansion: false,
     enableCommunityExpansion: false,
     enableWebFallback: false,
-    // An unset provider means BM25 (search/session.ts); only the hosted reranker is removed.
-    useRerank: options.useRerank === true && (options.rerankProvider ?? "bm25") === "bm25",
+    // A rerank the project or request asked for stays, on the free BM25 reranker instead of the hosted one.
+    useRerank: options.useRerank,
     rerankProvider: "bm25",
     rerankModel: undefined,
   };

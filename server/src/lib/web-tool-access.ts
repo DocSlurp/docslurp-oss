@@ -1,3 +1,5 @@
+import { searchModeOfScopes } from "./search-tiers.js";
+
 /**
  * Web tools (webSearch, webFetch, webMap, webCrawl, ingestWebsite) make paid
  * calls to the open web on the key owner's credits. A public client key sits in
@@ -8,7 +10,7 @@
  */
 export function apiKeyCanUseWebTools(key: { scopes: readonly string[]; keyType?: string; oauth?: { audience: string } }, ingest = false): boolean {
   // Paid web calls belong to deep search only: keyword and hybrid keys never make them.
-  if (!key.scopes.includes(ingest ? "ingest" : "search:deep")) return false;
+  if (ingest ? !key.scopes.includes("ingest") : searchModeOfScopes(key.scopes) !== "deep") return false;
   // A CLI (REST-audience) OAuth token is a delegated credential: paid web
   // calls need their own `web` scope, granted explicitly at login.
   if (key.oauth?.audience === "api") return key.scopes.includes("web");
