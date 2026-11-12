@@ -10,16 +10,16 @@ const {
 } = await import("./chat-model-policy.js");
 const { chatAgentProviderOptions } = await import("../services/chat-mcp-agent.js");
 
-const evalModels = new Set(["inception/mercury-3", "minimax/minimax-m3.1-flash:free"]);
+const evalModels = new Set(["liquid/lfm-2.5-24b-a2b", "minimax/minimax-m3.1-flash:free"]);
 
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
 describe("DOCSLURP_CHAT_EVAL_MODELS", () => {
   it("admits priced OpenRouter ids and rejects retired, prohibited, unpriced and malformed ids", () => {
     const { models, rejected } = parseChatEvalModels(
-      " inception/mercury-3, minimax/minimax-m3.1-flash:free,inception/mercury-3, openai/gpt-6-sol-pro, acme/ultra-1, acme/unpriced-model, not a model, openai/gpt-6-astra",
+      " liquid/lfm-2.5-24b-a2b, minimax/minimax-m3.1-flash:free,liquid/lfm-2.5-24b-a2b, openai/gpt-6-sol-pro, acme/ultra-1, acme/unpriced-model, not a model, openai/gpt-6-astra",
     );
-    expect(models).toEqual(["inception/mercury-3"]);
+    expect(models).toEqual(["liquid/lfm-2.5-24b-a2b"]);
     expect(rejected).toEqual([
       { id: "minimax/minimax-m3.1-flash:free", reason: "missing-price" },
       { id: "openai/gpt-6-sol-pro", reason: "prohibited-model" },
@@ -56,17 +56,17 @@ describe("chat model resolution", () => {
   it("accepts llm://openrouter/<id> wherever a bare id works, resolving to the bare id", () => {
     expect(resolveChatModelRequest({ requested: " llm://openrouter/anthropic/claude-haiku-5.5 ", isAdmin: false, evalModels })).toMatchObject({ model: "anthropic/claude-haiku-5.5", source: "catalog" });
     expect(resolveChatModelRequest({ requested: "LLM://OpenRouter/z-ai/glm-5.3-flash:nitro", isAdmin: false, evalModels })).toMatchObject({ model: "z-ai/glm-5.3-flash:nitro", source: "catalog" });
-    expect(resolveChatModelRequest({ requested: "llm://openrouter/inception/mercury-3", isAdmin: true, evalModels })).toMatchObject({ model: "inception/mercury-3", source: "eval" });
+    expect(resolveChatModelRequest({ requested: "llm://openrouter/liquid/lfm-2.5-24b-a2b", isAdmin: true, evalModels })).toMatchObject({ model: "liquid/lfm-2.5-24b-a2b", source: "eval" });
     expect(chatTurnNeedsEvalAccess("llm://openrouter/anthropic/claude-haiku-5.5")).toBe(false);
-    expect(chatTurnNeedsEvalAccess("llm://openrouter/inception/mercury-3")).toBe(true);
-    expect(parseChatEvalModels("llm://openrouter/inception/mercury-3").models).toEqual(["inception/mercury-3"]);
+    expect(chatTurnNeedsEvalAccess("llm://openrouter/liquid/lfm-2.5-24b-a2b")).toBe(true);
+    expect(parseChatEvalModels("llm://openrouter/liquid/lfm-2.5-24b-a2b").models).toEqual(["liquid/lfm-2.5-24b-a2b"]);
   });
 
   it("refuses llm:// URIs that do not name an allowed hosted chat model", () => {
     for (const requested of [
       "llm://openrouter/", "llm://openrouter/anthropic/claude-haiku-5.5?x=1", "llm://openrouter/anthropic/claude-haiku-5.5#a",
       "llm://anthropic/claude-haiku-5.5", "llm://private/gpu1/anthropic/claude-haiku-5.5", "llm://openrouter/openai/gpt-6-sol-pro",
-      "llm://openrouter/inception/mercury-3",
+      "llm://openrouter/liquid/lfm-2.5-24b-a2b",
     ]) {
       expect(() => resolveChatModelRequest({ requested, isAdmin: false, evalModels }), requested).toThrow(ChatModelNotAllowedError);
     }
@@ -74,8 +74,8 @@ describe("chat model resolution", () => {
   });
 
   it("allows eval models to admins only", () => {
-    expect(resolveChatModelRequest({ requested: "inception/mercury-3", isAdmin: true, evalModels })).toMatchObject({ model: "inception/mercury-3", source: "eval" });
-    expect(() => resolveChatModelRequest({ requested: "inception/mercury-3", isAdmin: false, evalModels })).toThrow(ChatModelNotAllowedError);
+    expect(resolveChatModelRequest({ requested: "liquid/lfm-2.5-24b-a2b", isAdmin: true, evalModels })).toMatchObject({ model: "liquid/lfm-2.5-24b-a2b", source: "eval" });
+    expect(() => resolveChatModelRequest({ requested: "liquid/lfm-2.5-24b-a2b", isAdmin: false, evalModels })).toThrow(ChatModelNotAllowedError);
   });
 
   it("never admits a prohibited id even if it reaches the allowlist", () => {
@@ -153,10 +153,10 @@ describe("DOCSLURP_CHAT_EVAL_ORG_IDS", () => {
 
   it("pre-checks stream models against the turn's project", async () => {
     vi.stubEnv("DOCSLURP_CHAT_EVAL_ORG_IDS", "org-eval");
-    vi.stubEnv("DOCSLURP_CHAT_EVAL_MODELS", "inception/mercury-3");
-    expect(await chatModelRefused(session, "inception/mercury-3", "ws-eval")).toBe(false);
-    expect(await chatModelRefused(session, "inception/mercury-3", "ws-plain")).toBe(true);
-    expect(await chatModelRefused(key("client"), "inception/mercury-3", "ws-eval")).toBe(true);
+    vi.stubEnv("DOCSLURP_CHAT_EVAL_MODELS", "liquid/lfm-2.5-24b-a2b");
+    expect(await chatModelRefused(session, "liquid/lfm-2.5-24b-a2b", "ws-eval")).toBe(false);
+    expect(await chatModelRefused(session, "liquid/lfm-2.5-24b-a2b", "ws-plain")).toBe(true);
+    expect(await chatModelRefused(key("client"), "liquid/lfm-2.5-24b-a2b", "ws-eval")).toBe(true);
   });
 });
 
@@ -167,7 +167,7 @@ describe("eval access lookups", () => {
     expect(chatTurnNeedsEvalAccess(undefined)).toBe(false);
     expect(chatTurnNeedsEvalAccess("  ")).toBe(false);
     expect(chatTurnNeedsEvalAccess("z-ai/glm-5.3-flash", { maxSteps: 6, maxToolCalls: 2, searchConcurrency: 4 })).toBe(false);
-    expect(chatTurnNeedsEvalAccess("inception/mercury-3")).toBe(true);
+    expect(chatTurnNeedsEvalAccess("liquid/lfm-2.5-24b-a2b")).toBe(true);
     expect(chatTurnNeedsEvalAccess(undefined, { maxSteps: 9 })).toBe(true);
     expect(chatTurnNeedsEvalAccess(undefined, { searchConcurrency: 8 })).toBe(true);
   });

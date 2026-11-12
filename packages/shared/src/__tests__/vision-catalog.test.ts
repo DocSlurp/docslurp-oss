@@ -152,10 +152,10 @@ describe("hosted vision catalog", () => {
       if (entry.target === "hosted") expect(entry.tokenPricing, entry.id).not.toBeNull();
       else expect(entry.tokenPricing, entry.id).toBeNull();
     }
-    expect(visionModelTokenPricing(NEMOTRON_URI)).toMatchObject({ inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.5 });
+    expect(visionModelTokenPricing(NEMOTRON_URI)).toMatchObject({ inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.47 });
     expect(visionModelTokenPricing(NEMOTRON_SUPER_VL_VISION_MODEL)).toMatchObject({ inputUsdPerMillion: 0.15 });
-    // 2,000 input + 1,000 output tokens: $0.0003 + $0.0005 = 0.08 cents.
-    expect(visionListPriceCents(NEMOTRON_SUPER_VL_VISION_MODEL, { inputTokens: 2_000, outputTokens: 1_000 })).toBeCloseTo(0.08, 12);
+    // 2,000 input + 1,000 output tokens: $0.0003 + $0.00047 = 0.077 cents.
+    expect(visionListPriceCents(NEMOTRON_SUPER_VL_VISION_MODEL, { inputTokens: 2_000, outputTokens: 1_000 })).toBeCloseTo(0.077, 12);
     expect(visionListPriceCents("Qwen/Qwen2-VL-2B-Instruct", { inputTokens: 1, outputTokens: 1 })).toBeNull();
     expect(visionListPriceCents("vendor/unknown", { inputTokens: 1, outputTokens: 1 })).toBeNull();
   });

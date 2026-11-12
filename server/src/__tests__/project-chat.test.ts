@@ -441,10 +441,10 @@ describe("chatProject", () => {
   it("refuses an unknown or non-admin eval model before spending or opening a session", async () => {
     getProjectSearchSettings.mockResolvedValue(buildSearchSettings());
     const previous = process.env.DOCSLURP_CHAT_EVAL_MODELS;
-    process.env.DOCSLURP_CHAT_EVAL_MODELS = "inception/mercury-3";
+    process.env.DOCSLURP_CHAT_EVAL_MODELS = "liquid/lfm-2.5-24b-a2b";
     const member = { type: "session" as const, userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "User" } };
     try {
-      for (const model of ["unknown/model", "inception/mercury-3"]) {
+      for (const model of ["unknown/model", "liquid/lfm-2.5-24b-a2b"]) {
         await expect(chatProject({ projectId: "ws-1", userId: "user-1", query: "hello", model, actor: member }))
           .rejects.toMatchObject({ name: "ChatModelNotAllowedError", status: 400, code: "model_not_allowed" });
       }
@@ -458,19 +458,19 @@ describe("chatProject", () => {
     sqlMock.mockResolvedValue([]);
     getProject.mockResolvedValue({ id: "ws-1", orgId: "org-1", systemPrompt: null });
     getProjectSearchSettings.mockResolvedValue(buildSearchSettings());
-    const agentDebug = { requestedModel: "inception/mercury-3", resolvedModel: "inception/mercury-3-20261001", stopReason: "answered", steps: 2 };
+    const agentDebug = { requestedModel: "liquid/lfm-2.5-24b-a2b", resolvedModel: "liquid/lfm-2.5-24b-a2b-20261001", stopReason: "answered", steps: 2 };
     runChatMcpAgent.mockResolvedValue({ answer: "Supported answer", citations: [], toolCalls: [], finishReason: "stop",
       usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14, costCents: 0.01 }, debug: agentDebug });
     const previous = { key: process.env.OPENROUTER_API_KEY, models: process.env.DOCSLURP_CHAT_EVAL_MODELS };
     process.env.OPENROUTER_API_KEY = "fake";
-    process.env.DOCSLURP_CHAT_EVAL_MODELS = "inception/mercury-3";
+    process.env.DOCSLURP_CHAT_EVAL_MODELS = "liquid/lfm-2.5-24b-a2b";
     try {
       const response = await chatProject({ projectId: "ws-1", userId: "user-1", query: "Find evidence", history: [], allowConfiguration: false,
-        model: "inception/mercury-3", agent: { maxSteps: 10, searchConcurrency: 8 },
+        model: "liquid/lfm-2.5-24b-a2b", agent: { maxSteps: 10, searchConcurrency: 8 },
         actor: { type: "session", userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "Admin", isAdmin: true } } });
-      expect(runChatMcpAgent).toHaveBeenCalledWith(expect.objectContaining({ model: "inception/mercury-3", requestedModel: "inception/mercury-3",
+      expect(runChatMcpAgent).toHaveBeenCalledWith(expect.objectContaining({ model: "liquid/lfm-2.5-24b-a2b", requestedModel: "liquid/lfm-2.5-24b-a2b",
         limits: { maxSteps: 10, baseSteps: 10, maxToolCalls: 16, searchConcurrency: 8, clamped: [] } }));
-      expect(response.debug).toMatchObject({ model: "inception/mercury-3", ...agentDebug });
+      expect(response.debug).toMatchObject({ model: "liquid/lfm-2.5-24b-a2b", ...agentDebug });
     } finally {
       if (previous.key === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previous.key;
       if (previous.models === undefined) delete process.env.DOCSLURP_CHAT_EVAL_MODELS; else process.env.DOCSLURP_CHAT_EVAL_MODELS = previous.models;
@@ -489,18 +489,18 @@ describe("chatProject", () => {
       usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, costCents: 0 }, debug: {} });
     const previous = { key: process.env.OPENROUTER_API_KEY, models: process.env.DOCSLURP_CHAT_EVAL_MODELS, orgs: process.env.DOCSLURP_CHAT_EVAL_ORG_IDS };
     process.env.OPENROUTER_API_KEY = "fake";
-    process.env.DOCSLURP_CHAT_EVAL_MODELS = "inception/mercury-3";
+    process.env.DOCSLURP_CHAT_EVAL_MODELS = "liquid/lfm-2.5-24b-a2b";
     process.env.DOCSLURP_CHAT_EVAL_ORG_IDS = "org-eval";
     const member = { type: "session" as const, userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "Member" } };
     try {
       const turn = (model?: string) => chatProject({ projectId: "ws-1", userId: "user-1", query: "Find evidence", history: [], allowConfiguration: false,
         model, agent: { maxSteps: 10, maxToolCalls: 20, searchConcurrency: 8 }, actor: member });
       if (allowed) {
-        await turn("inception/mercury-3");
-        expect(runChatMcpAgent).toHaveBeenLastCalledWith(expect.objectContaining({ model: "inception/mercury-3",
+        await turn("liquid/lfm-2.5-24b-a2b");
+        expect(runChatMcpAgent).toHaveBeenLastCalledWith(expect.objectContaining({ model: "liquid/lfm-2.5-24b-a2b",
           limits: { maxSteps: 10, baseSteps: 10, maxToolCalls: 20, searchConcurrency: 8, clamped: [] } }));
       } else {
-        await expect(turn("inception/mercury-3")).rejects.toMatchObject({ status: 400, code: "model_not_allowed" });
+        await expect(turn("liquid/lfm-2.5-24b-a2b")).rejects.toMatchObject({ status: 400, code: "model_not_allowed" });
         await turn();
         expect(runChatMcpAgent).toHaveBeenLastCalledWith(expect.objectContaining({
           limits: { maxSteps: 8, baseSteps: 8, maxToolCalls: 16, searchConcurrency: 6, clamped: ["maxSteps", "maxToolCalls", "searchConcurrency"] } }));
