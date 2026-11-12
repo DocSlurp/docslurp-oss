@@ -13,7 +13,7 @@ const remote = { filesystem: true, network: "full", processes: true, location: "
 describe("VM tool availability", () => {
   it("the Modal probe returns the tools the VM image reports, dropping malformed names", async () => {
     vi.spyOn(modal, "openSession").mockResolvedValue({
-      run: async () => ({ exitCode: 0, stdout: JSON.stringify({ protocol: "parser-vm@3", uid: 10001, links: { hardlinks: 1, symlinks: 1 }, hardening: { suidDumpable: 0, ptraceScope: 1 }, qpdfVersion: "12.2.0", tools: ["pandoc", "ffmpeg", "../x", 7] }), stderr: "" }),
+      run: async () => ({ exitCode: 0, stdout: JSON.stringify({ protocol: "parser-vm@4", uid: 10001, links: { hardlinks: 1, symlinks: 1 }, hardening: { suidDumpable: 0, ptraceScope: 1 }, qpdfVersion: "12.2.0", tools: ["pandoc", "ffmpeg", "../x", 7] }), stderr: "" }),
       close: async () => {},
     } as unknown as SandboxSession);
     const probe = await modal.probe(modal.readConfig({ MODAL_TOKEN_ID: "t", MODAL_TOKEN_SECRET: "s", DOCSLURP_MODAL_IMAGE: `ghcr.io/docslurp/worker-full@sha256:${"a".repeat(64)}` }));

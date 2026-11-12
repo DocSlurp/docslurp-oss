@@ -81,6 +81,33 @@ function zip(members: Member[]): Buffer {
   return Buffer.concat([...locals, directory, end]);
 }
 
+function fixTarChecksum(block: Buffer, offset: number): void {
+  block.fill(0x20, offset + 148, offset + 156);
+  let sum = 0;
+  for (let index = 0; index < 512; index += 1) sum += block[offset + index]!;
+  block.write(`${sum.toString(8).padStart(6, "0")}\0 `, offset + 148, "latin1");
+}
+
+/** A POSIX ustar archive of the given members (type flag '0' unless given). */
+function tar(members: Array<{ name: string; data: Buffer; type?: string }>): Buffer {
+  const blocks: Buffer[] = [];
+  for (const member of members) {
+    const header = Buffer.alloc(512);
+    header.write(member.name, 0, 100, "latin1");
+    header.write("0000644\0", 100, "latin1");
+    header.write("0000000\0", 108, "latin1");
+    header.write("0000000\0", 116, "latin1");
+    header.write(`${member.data.length.toString(8).padStart(11, "0")}\0`, 124, "latin1");
+    header.write("00000000000\0", 136, "latin1");
+    header.write(member.type ?? "0", 156, "latin1");
+    header.write("ustar\0" + "00", 257, "latin1");
+    fixTarChecksum(header, 0);
+    blocks.push(header, member.data, Buffer.alloc((512 - (member.data.length % 512)) % 512));
+  }
+  blocks.push(Buffer.alloc(1024));
+  return Buffer.concat(blocks);
+}
+
 /** A DOCX-shaped ZIP with `embedded` stored under word/embeddings/. */
 const docxWith = (embedded: Buffer, name = "word/embeddings/object1.bin") => zip([{ name: "word/document.xml", data: DOC_XML }, { name, data: embedded }]);
 
@@ -189,12 +216,58 @@ describe("nested archive walk: refused cases (owner decision, PR #339)", () => {
     ["7z", fixture("7z-password.7z")],
     ["xz", Buffer.from([0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00, 0, 0])],
     ["bzip2", Buffer.from("BZh91AY&SY")],
-    ["tar", Buffer.concat([Buffer.alloc(257), Buffer.from("ustar\0" + "00"), Buffer.alloc(247)])],
+  ])("council N-M1: a nested %s, which this walk cannot decode, is refused (archive-nested-unsupported-format), not a warning", (_format, data) => {
+    expect(issuesOf(docxWith(data))).toEqual(["archive-nested-unsupported-format"]);
+    expect(issuesOf(docxWith(gzipSync(data), "word/media/image1.emz"))).toEqual(["archive-nested-unsupported-format"]);
+  });
+
+  it.each([
     ["cab", Buffer.from("MSCF\0\0\0\0rest")],
+    ["cpio", Buffer.from("070701rest")],
   ])("a nested %s, which ClamAV opens but this walk does not: accepted with an archive-nested-uninspectable notice (correctness M3)", (_format, data) => {
     const archive = inspectArchive(docxWith(data), "quarterly.docx", policy);
     expect(archive?.issues).toEqual([]);
     expect(archive?.notices).toEqual(["archive-nested-uninspectable"]);
+  });
+
+  describe("council N-M1: nested tar is walked, so every refused condition applies inside it", () => {
+    const zip64Inner = () => zip([{ name: "note.txt", data: Buffer.from("benign note"), method: 0, zip64Local: true }]);
+
+    it("a benign tar is accepted without a notice", () => {
+      const archive = inspectArchive(docxWith(tar([{ name: "notes/q3.txt", data: Buffer.from("Quarterly results beat the forecast.") }])), "quarterly.docx", policy);
+      expect(archive?.issues).toEqual([]);
+      expect(archive?.notices ?? []).toEqual([]);
+    });
+
+    it("a ZIP64 inside a tar inside the DOCX: archive-nested-zip64 (the reviewer's tar-zip64.xlsx shape)", () => {
+      expect(issuesOf(docxWith(tar([{ name: "deck.zip", data: zip64Inner() }]), "xl/embeddings/oleObject1.bin"))).toEqual(["archive-nested-zip64"]);
+    });
+
+    it("a ZIP64 inside a tar inside a gzip: archive-nested-zip64", () => {
+      expect(issuesOf(docxWith(gzipSync(tar([{ name: "deck.zip", data: zip64Inner() }])), "word/media/image1.emz"))).toEqual(["archive-nested-zip64"]);
+    });
+
+    it("a ZIP64 behind a pax header and under an unknown type flag (tar readers extract it as a file): archive-nested-zip64", () => {
+      const archive = tar([{ name: "PaxHeaders/deck.zip", data: Buffer.from("30 path=quarterly/deck.zip\n"), type: "x" }, { name: "deck.zip", data: zip64Inner(), type: "Z" }]);
+      expect(issuesOf(docxWith(archive))).toEqual(["archive-nested-zip64"]);
+    });
+
+    it("a RAR and an encrypted ZIP inside a tar are refused as they are anywhere else", () => {
+      expect(issuesOf(docxWith(tar([{ name: "a.rar", data: fixture("rar5-password.rar") }])))).toEqual(["archive-nested-unsupported-format"]);
+      expect(issuesOf(docxWith(tar([{ name: "a.zip", data: fixture("zip-aes256.zip") }])))).toEqual(["archive-nested-encrypted-entry"]);
+    });
+
+    it("a tar header with a bad checksum, a GNU base-256 size, or a member past the end: archive-nested-inspection-failed", () => {
+      const good = tar([{ name: "deck.zip", data: zip64Inner() }]);
+      const badSum = Buffer.from(good);
+      badSum[0] = 0x41;
+      expect(issuesOf(docxWith(badSum))).toEqual(["archive-nested-inspection-failed"]);
+      const base256 = Buffer.from(good);
+      base256[124] = 0x80;
+      fixTarChecksum(base256, 0);
+      expect(issuesOf(docxWith(base256))).toEqual(["archive-nested-inspection-failed"]);
+      expect(issuesOf(docxWith(good.subarray(0, 600)))).toEqual(["archive-nested-inspection-failed"]);
+    });
   });
 
   it.each([["zstd", [0x28, 0xb5, 0x2f, 0xfd, 0]], ["lz4", [0x04, 0x22, 0x4d, 0x18, 0]]] as const)("a nested %s: archive-nested-unsupported-format", (_format, magic) => {
@@ -296,7 +369,7 @@ describe("PDF /Encrypt detection (in the VM, by libclamav's PDF test)", () => {
     expect(pdfHasEncryptName(Buffer.concat([Buffer.alloc(900, 0x20), Buffer.from("%PDF-1.4 trailer<</Encrypt 1 0 R>>")]))).toBe(true);
     expect(pdfHasEncryptName(Buffer.concat([Buffer.alloc(1100, 0x20), Buffer.from("%PDF-1.4 trailer<</Encrypt 1 0 R>>")]))).toBeNull();
     expect(inspectQuarantineBytes(Buffer.from("hello"), "a.txt", policy).pdf).toBeNull();
-    expect(inspectQuarantineBytes(Buffer.from("%PDF-1.7\n<</Encrypt 1 0 R>>"), "a.pdf", policy).pdf).toEqual({ encryptName: true });
+    expect(inspectQuarantineBytes(Buffer.from("%PDF-1.7\n<</Encrypt 1 0 R>>"), "a.pdf", policy).pdf).toEqual({ encryptName: true, encryptConflict: false });
   });
 });
 
@@ -323,7 +396,8 @@ describe("quarantine: an encrypted PDF's decrypted copy is scanned too (owner de
     });
     return { artifact, calls, codes: artifact.reasons.filter((reason) => reason.severity === "error").map((reason) => reason.code) };
   };
-  const ENCRYPTED = "%PDF-1.7\ntrailer<</Root 1 0 R/Encrypt 5 0 R>>";
+  // A structurally consistent encrypted PDF (one trailer, an /ID, startxref at its xref section: council N-H1).
+  const ENCRYPTED = "%PDF-1.7\nxref\n0 1\n0000000000 65535 f \ntrailer<</Root 1 0 R/Encrypt 5 0 R/ID[<aa><aa>]>>\nstartxref\n9\n%%EOF\n";
 
   it("an owner-password PDF whose plaintext copy is clean is accepted (permissions-restricted PDFs still upload)", async () => {
     const { artifact, calls, codes } = await run(ENCRYPTED, { status: "decrypted", path: "", bytes: 4495, ms: 40, encrypted: true });
@@ -470,8 +544,25 @@ describe("council re-check 4, L1: the host cross-checks the guest's PDF and arch
   const pdfSniff = { mimeType: "application/pdf", container: null, encoding: null } as const;
 
   it("a guest that says encryptName:false for a PDF the host sees /Encrypt in: the decryption check runs anyway", async () => {
-    const { calls } = await scanWith(encrypted, { sniffed: pdfSniff, archive: null, pdf: { encryptName: false } });
+    const { calls } = await scanWith(encrypted, { sniffed: pdfSniff, archive: null, pdf: { encryptName: false, encryptConflict: false } });
     expect(calls).toEqual(["scan", "decrypt", "scan"]);
+  });
+
+  it("council N-L3: a guest that says encryptName:false for a PDF naming /En#63rypt (escaped): the decryption check runs anyway", async () => {
+    const escaped = Buffer.from("%PDF-1.7\ntrailer<</Root 1 0 R/En#63rypt 5 0 R>>", "latin1");
+    expect(escaped.includes("/Encrypt")).toBe(false);
+    for (const name of ["/En#63rypt", "/#45ncrypt", "/Encryp#74", "/#45#6e#63#72#79#70#74"]) {
+      const bytes = Buffer.from(`%PDF-1.7\ntrailer<</Root 1 0 R${name} 5 0 R>>`, "latin1");
+      const { calls } = await scanWith(bytes, { sniffed: pdfSniff, archive: null, pdf: { encryptName: false, encryptConflict: false } });
+      expect(calls, name).toEqual(["scan", "decrypt", "scan"]);
+    }
+  });
+
+  it("council N-H1: the guest's encryption conflict refuses the PDF without trusting a decryption", async () => {
+    const result = await scanWith(encrypted, { sniffed: pdfSniff, archive: null, pdf: { encryptName: true, encryptConflict: true } });
+    expect(result.decision).toBe("quarantined");
+    expect(result.codes).toEqual(["pdf-encryption-inconsistent"]);
+    expect(result.calls).toEqual(["scan"]);
   });
 
   it("a guest that says 'not a PDF' (pdf: null) for bytes starting %PDF-: refused", async () => {
@@ -490,7 +581,7 @@ describe("council re-check 4, L1: the host cross-checks the guest's PDF and arch
 
   it("the host's search only adds the VM check: an unencrypted PDF qpdf rewrites is accepted (correctness High)", async () => {
     const literal = Buffer.from("%PDF-1.4\ntrailer<</Root 1 0 R>>\n%%EOF\n% /Encrypt\n", "latin1");
-    const result = await scanWith(literal, { sniffed: pdfSniff, archive: null, pdf: { encryptName: true } }, { status: "decrypted", path: "", bytes: 400, ms: 3, encrypted: false });
+    const result = await scanWith(literal, { sniffed: pdfSniff, archive: null, pdf: { encryptName: true, encryptConflict: false } }, { status: "decrypted", path: "", bytes: 400, ms: 3, encrypted: false });
     expect(result).toMatchObject({ decision: "accepted", codes: [], calls: ["scan", "decrypt", "scan"] });
   });
 });

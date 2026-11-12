@@ -10,12 +10,14 @@ import { gunzipSync, inflateRawSync } from "node:zlib";
  * what it cannot inspect. It reads members whole (bounded by the entry and total limits), so a size the headers understate
  * is caught too.
  *
- * Walked: ZIP (stored and Deflate members), gzip, and OLE2 compound files (Office embeddings, `\x01Ole10Native` packages).
- * Refused when nested: RAR, ACE, zstd, LZ4, lzip and WIM (ClamAV here cannot open them), 7z, bzip2, xz, tar, CAB, ARJ, cpio,
- * XAR, ALZ, ISO 9660 and SZDD/KWAJ (ClamAV opens them but this walk does not, so what they hold is unchecked), and ZIP members
- * compressed with anything but Stored or Deflate. 7z, bzip2, xz, tar, CAB, ARJ, cpio, XAR, ALZ, ISO 9660 and SZDD/KWAJ
- * members are left to ClamAV, which opens them: they are reported as a warning notice (archive-nested-uninspectable),
- * not refused (correctness council M3), so a ZIP64 or RAR inside one of them is the scanner's alone to judge.
+ * Walked: ZIP (stored and Deflate members), gzip, POSIX tar, and OLE2 compound files (Office embeddings, `\x01Ole10Native`
+ * packages). Every refused condition (ZIP64, encrypted or oversized members, unsupported formats, depth) applies wherever
+ * it appears inside any of them. Refused when nested: RAR, ACE, zstd, LZ4, lzip and WIM (ClamAV here cannot open them),
+ * and 7z, bzip2 and xz (council N-M1: ClamAV opens them but this walk cannot decode them, so a ZIP64 member inside one
+ * would be the scanner's alone to judge, and it skips ZIP64 members without an alert; Office files never embed them).
+ * ZIP members compressed with anything but Stored or Deflate are refused too. CAB, ARJ, cpio, XAR, ALZ, ISO 9660 and
+ * SZDD/KWAJ are left to ClamAV, which opens them: they are reported as a warning notice (archive-nested-uninspectable),
+ * not refused (correctness council M3: Office printer settings carry CAB cabinets).
  * Containers are walked from their leading magic; a member that is not one but holds a ZIP or RAR a little way in (an archive behind a few junk bytes, a polyglot or self-extractor) is refused:
  * findEmbeddedContainer looks for the strong magic numbers in a member's first EMBEDDED_HEAD_BYTES and for a ZIP end
  * record in its last 64 KiB, which is where ZIP readers look. A container deeper inside a member, with no end record near
@@ -57,7 +59,7 @@ export type ZipEntryLocation = {
 };
 
 export type ContainerKind =
-  | { kind: "zip" | "gzip" | "ole" }
+  | { kind: "zip" | "gzip" | "ole" | "tar" }
   | { kind: "unsupported"; format: string }
   | { kind: "uninspectable"; format: string }
   | null;
@@ -77,11 +79,12 @@ export function classifyContainer(bytes: Buffer): ContainerKind {
   if (at(bytes, 0, [0x04, 0x22, 0x4d, 0x18])) return { kind: "unsupported", format: "lz4" };
   if (at(bytes, 0, ascii("LZIP"))) return { kind: "unsupported", format: "lzip" };
   if (at(bytes, 0, ascii("MSWIM\0\0\0"))) return { kind: "unsupported", format: "wim" };
-  // ClamAV opens these; this walk does not, so their members are unchecked.
-  if (at(bytes, 0, [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c])) return { kind: "uninspectable", format: "7z" };
-  if (at(bytes, 0, ascii("BZh")) && bytes.length > 3 && bytes[3]! >= 0x31 && bytes[3]! <= 0x39) return { kind: "uninspectable", format: "bzip2" };
-  if (at(bytes, 0, [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00])) return { kind: "uninspectable", format: "xz" };
-  if (at(bytes, 257, ascii("ustar"))) return { kind: "uninspectable", format: "tar" };
+  // ClamAV opens these but this walk cannot decode them (council N-M1): refused, so nothing inside is left unchecked.
+  if (at(bytes, 0, [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c])) return { kind: "unsupported", format: "7z" };
+  if (at(bytes, 0, ascii("BZh")) && bytes.length > 3 && bytes[3]! >= 0x31 && bytes[3]! <= 0x39) return { kind: "unsupported", format: "bzip2" };
+  if (at(bytes, 0, [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00])) return { kind: "unsupported", format: "xz" };
+  if (at(bytes, 257, ascii("ustar"))) return { kind: "tar" };
+  // ClamAV opens these; this walk does not, so their members are unchecked (a warning).
   if (at(bytes, 0, ascii("MSCF\0\0\0\0"))) return { kind: "uninspectable", format: "cab" };
   if (at(bytes, 0, [0x60, 0xea])) return { kind: "uninspectable", format: "arj" };
   if (at(bytes, 0, ascii("07070")) || at(bytes, 0, [0xc7, 0x71]) || at(bytes, 0, [0x71, 0xc7])) return { kind: "uninspectable", format: "cpio" };
@@ -366,6 +369,10 @@ function walkObject(data: Buffer, depth: number, state: WalkState, options: { em
     walkZipEntries(data, parsed.entries, depth, state);
     return;
   }
+  if (container.kind === "tar") {
+    walkTar(data, depth, state);
+    return;
+  }
   if (container.kind === "gzip") {
     let inner: Buffer;
     try {
@@ -402,6 +409,45 @@ function walkObject(data: Buffer, depth: number, state: WalkState, options: { em
         if (!state.going) return;
       }
     }
+  }
+}
+
+/**
+ * Members of a POSIX (ustar) tar at `depth`: every record's data is walked at depth + 1. Headers are 512-byte blocks with an
+ * octal size; GNU base-256 sizes, a header checksum that does not add up, or a member running past the end are refused as
+ * `archive-nested-inspection-failed`.
+ */
+function walkTar(data: Buffer, depth: number, state: WalkState): void {
+  let offset = 0;
+  let entries = 0;
+  while (offset + 512 <= data.length) {
+    const header = data.subarray(offset, offset + 512);
+    if (header.every((byte) => byte === 0)) return; // end-of-archive block
+    const stored = parseInt(header.subarray(148, 156).toString("latin1").replace(/[\0 ]+$/, "").trim(), 8);
+    let sum = 0;
+    for (let index = 0; index < 512; index += 1) sum += index >= 148 && index < 156 ? 0x20 : header[index]!;
+    const sizeField = header.subarray(124, 136);
+    if (!Number.isSafeInteger(stored) || stored !== sum || sizeField[0]! & 0x80) {
+      state.issues.add("archive-nested-inspection-failed");
+      return;
+    }
+    const size = parseInt(sizeField.toString("latin1").replace(/[\0 ]+$/, "").trim() || "0", 8);
+    const start = offset + 512;
+    if (!Number.isSafeInteger(size) || size < 0 || start + size > data.length) {
+      state.issues.add("archive-nested-inspection-failed");
+      return;
+    }
+    if (++entries > state.limits.maxEntriesPerArchive) {
+      state.issues.add("archive-nested-entry-count-limit");
+      return;
+    }
+    if (!state.visit()) return;
+    // Every record's data is walked whatever its type flag: tar readers (Python's tarfile among them) extract unknown types
+    // as regular files, and pax or long-name records are short text that walks as nothing.
+    if (size > state.limits.maxEntryBytes) state.issues.add("archive-nested-entry-size-limit");
+    else if (size > 0) walkObject(data.subarray(start, start + size), depth + 1, state);
+    if (!state.going) return;
+    offset = start + Math.ceil(size / 512) * 512;
   }
 }
 

@@ -1,5 +1,5 @@
 import path from "node:path";
-import { describeArchiveIssue, inspectQuarantineBytes, type QuarantineInspection } from "./quarantine-bytes.js";
+import { describeArchiveIssue, inspectQuarantineBytes, pdfHasEncryptName, type QuarantineInspection } from "./quarantine-bytes.js";
 export { sniffMimeType, inspectArchive, type QuarantineInspection } from "./quarantine-bytes.js";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -148,8 +148,14 @@ export async function scanDocumentForQuarantine(args: {
       details: { hostPdfHeader: hostPdf, guestPdf: inspected.pdf !== null, guestArchive: inspected.archive !== null },
     });
   }
-  // The guest's "no /Encrypt" is not taken alone: a literal /Encrypt in the bytes sends the file to the decryption check.
-  const encryptName = !!inspected.pdf?.encryptName || (hostPdf && args.bytes.includes(ENCRYPT_NAME));
+  // The guest's "no /Encrypt" is not taken alone: an /Encrypt name in the bytes, `#xx` escapes included (council N-L3:
+  // `/En#63rypt`), sends the file to the decryption check. A bounded byte search over name tokens, never a parse.
+  const encryptName = !!inspected.pdf?.encryptName || (hostPdf && (args.bytes.includes(ENCRYPT_NAME) || pdfHasEncryptName(args.bytes) === true));
+  // Council N-H1: readers may disagree on this PDF's encryption (two encryption dictionaries, trailers that disagree, a
+  // cross-reference chain readers must rebuild), so what the decryption copy shows is not what every reader shows.
+  if (inspected.pdf?.encryptConflict) {
+    reasons.push({ code: "pdf-encryption-inconsistent", severity: "error", message: "encrypted PDF has an inconsistent structure and cannot be scanned reliably; remove its encryption and upload again" });
+  }
 
   const archive = inspected.archive;
   if (archive) {
@@ -180,7 +186,7 @@ export async function scanDocumentForQuarantine(args: {
   // that names /Encrypt and scanned clean is decrypted in the parser VM and the plaintext copy scanned too. Clean only if
   // both are; anything the decryption cannot settle is refused.
   let pdfDecryption: QuarantineArtifact["pdfDecryption"] = null;
-  if (encryptName && malwareScan.status === "clean") {
+  if (encryptName && malwareScan.status === "clean" && !inspected.pdf?.encryptConflict) {
     const dir = await mkdtemp(path.join(tmpdir(), "docslurp-quarantine-pdf-"));
     try {
       const outcome = await args.runner.decryptPdfForScan(args.tempFile, dir, args.signal);
@@ -328,6 +334,16 @@ export function assertAcceptedQuarantine(artifact: QuarantineArtifact, artifactU
   });
 }
 
+/**
+ * The scan engine and signature of a refused or flagged document, for telemetry only (council N-L4): stage stats are
+ * public, so these go to the worker log (SigNoz) and the artifact's reason details instead.
+ */
+export function quarantineTelemetryLine(artifact: QuarantineArtifact): string | null {
+  const copy = artifact.pdfDecryption?.malwareScan;
+  if (!artifact.malwareScan.signature && !copy?.signature && artifact.decision === "accepted") return null;
+  return `[quarantine] document=${artifact.documentId} decision=${artifact.decision} reasons=${artifact.reasons.map((reason) => reason.code).join(",") || "none"} engine=${artifact.malwareScan.engine} signature=${JSON.stringify(artifact.malwareScan.signature ?? null)} copySignature=${JSON.stringify(copy?.signature ?? null)}`;
+}
+
 export function buildQuarantineStats(artifact: QuarantineArtifact): Record<string, unknown> {
   return {
     decision: artifact.decision,
@@ -340,9 +356,9 @@ export function buildQuarantineStats(artifact: QuarantineArtifact): Record<strin
     archiveEntryCount: artifact.archive?.entryCount ?? null,
     archiveExpandedBytes: artifact.archive?.totalUncompressedBytes ?? null,
     archiveCompressionRatio: artifact.archive?.compressionRatio ?? null,
+    // Council N-L4: no signature or engine name. Stage stats are returned by the public document API; the signature and
+    // engine stay in the artifact's reason details and the quarantine log line (telemetry).
     malwareStatus: artifact.malwareScan.status,
-    malwareEngine: artifact.malwareScan.engine,
-    malwareSignature: artifact.malwareScan.signature,
     malwareDatabaseStatus: artifact.malwareScan.databaseStatus,
     malwareDatabaseUpdatedAt: artifact.malwareScan.databaseUpdatedAt,
     malwareDatabaseAgeHours: artifact.malwareScan.databaseAgeHours,
@@ -399,9 +415,11 @@ async function inspectInVm(args: { bytes: Buffer; filename: string; tempFile: st
         if (archive[key] !== undefined && !(Number.isSafeInteger(archive[key]) && archive[key]! >= 0 && archive[key]! <= 1_000_000)) throw new Error("invalid quarantine nesting count");
       }
     }
-    // parser-vm@3: an image without the PDF encryption check (no `pdf` key) is refused, never read as "not encrypted".
+    // parser-vm@4: an image without the PDF encryption check (no `pdf` key) is refused, never read as "not encrypted".
     const pdf = result.pdf as unknown;
-    if (pdf !== null && !(pdf && typeof pdf === "object" && Object.keys(pdf).length === 1 && typeof (pdf as { encryptName?: unknown }).encryptName === "boolean")) throw new Error("invalid quarantine PDF result");
+    // parser-vm@4: `encryptConflict` (council N-H1) is required; an image without it is refused.
+    if (pdf !== null && !(pdf && typeof pdf === "object" && Object.keys(pdf).length === 2
+      && typeof (pdf as { encryptName?: unknown }).encryptName === "boolean" && typeof (pdf as { encryptConflict?: unknown }).encryptConflict === "boolean")) throw new Error("invalid quarantine PDF result");
     return result;
   } finally { await rm(dir, { recursive: true, force: true }); }
 }

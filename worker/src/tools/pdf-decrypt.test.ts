@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { setDefaultParserSandbox } from "../sandbox/startup.js";
 import type { ParserSandboxProvider, SandboxCommand } from "../sandbox/types.js";
-import { CommandRunner, PDF_DECRYPT_LIMITS, pdfDecryptArgv, pdfEncryptionCheckArgv, pdfShowEncryptionArgv, qpdfWarningsBenign } from "./runner.js";
+import { CommandRunner, PDF_DECRYPT_LIMITS, PDF_REWRITE_EXPANSION, pdfDecryptArgv, pdfEncryptionCheckArgv, pdfRewriteOutputLimit, pdfShowEncryptionArgv, qpdfDecryptComplete, qpdfReportsNotEncrypted, qpdfWarningsBenign } from "./runner.js";
 
 /**
  * Owner decision on PR #339: an empty-user-password PDF is decrypted in the parser VM (qpdf, bounded by prlimit) and the
@@ -71,9 +71,49 @@ describe("CommandRunner.decryptPdfForScan", () => {
     expect(commands.every((command) => command.binary === "prlimit" && command.limits.timeoutMs === PDF_DECRYPT_LIMITS.wallMs)).toBe(true);
   });
 
-  it("qpdf recovered a damaged file while decrypting (exit 3): the copy is still scanned", async () => {
-    replies = [{ exitCode: 3 }, { exitCode: 3, write: 10, stderr: "WARNING: file is damaged" }];
+  it("qpdf recovered a stream length while decrypting an encrypted PDF (exit 3): the copy is still scanned", async () => {
+    replies = [{ exitCode: 3 }, { exitCode: 3, write: 10, stderr: "WARNING: upload.pdf (object 4 0, offset 90): expected endstream\nWARNING: upload.pdf (object 4 0, offset 90): attempting to recover stream length\nWARNING: upload.pdf (object 4 0, offset 90): recovered stream length: 120" }];
     expect(await decrypt()).toMatchObject({ status: "decrypted" });
+  });
+
+  it("council N-H1: qpdf had to reconstruct an encrypted PDF's cross-reference table (exit 3): failed, readers may pick another trailer and key", async () => {
+    for (const stderr of [
+      "WARNING: upload.pdf: file is damaged\nWARNING: upload.pdf (offset 999999): xref not found\nWARNING: upload.pdf: Attempting to reconstruct cross-reference table\nqpdf: operation succeeded with warnings; resulting file may have some problems",
+      "WARNING: upload.pdf: file is damaged",
+      "WARNING: upload.pdf (object 7 0): object has offset 0",
+    ]) {
+      replies = [{ exitCode: 3 }, { exitCode: 3, write: 10, stderr }];
+      expect(await decrypt(), stderr).toMatchObject({ status: "failed", reason: expect.stringMatching(/--decrypt failed \(exit 3\)/) });
+    }
+  });
+
+  it("an unencrypted PDF (a literal /Encrypt) whose xref qpdf rebuilt: the rewrite is still scanned", async () => {
+    replies = [{ exitCode: 2 }, { exitCode: 0, stdout: "File is not encrypted\n" }, { exitCode: 3, write: 10, stderr: "WARNING: upload.pdf: file is damaged\nWARNING: upload.pdf: Attempting to reconstruct cross-reference table" }];
+    expect(await decrypt()).toMatchObject({ status: "decrypted", encrypted: false });
+  });
+
+  it("council N-L1: an unencrypted PDF's rewrite is capped at a small multiple of the input (RLIMIT_FSIZE and the size check)", async () => {
+    replies = [{ exitCode: 2 }, { exitCode: 0, stdout: "File is not encrypted\n" }, { exitCode: 0, write: 10 }];
+    await decrypt();
+    const rewrite = commands.at(-1)!;
+    const sourceBytes = "%PDF-1.7\ntrailer<</Encrypt 5 0 R>>".length;
+    expect(rewrite.args).toContain(`--fsize=${pdfRewriteOutputLimit(sourceBytes)}`);
+    expect(pdfRewriteOutputLimit(204_000)).toBe(PDF_REWRITE_EXPANSION.floorBytes);
+    expect(pdfRewriteOutputLimit(10 * 1024 * 1024)).toBe(PDF_REWRITE_EXPANSION.multiple * 10 * 1024 * 1024);
+    expect(pdfRewriteOutputLimit(400 * 1024 * 1024)).toBe(PDF_DECRYPT_LIMITS.maxOutputBytes);
+    // A rewrite at the cap (a 200 MiB Flate bomb behind one literal /Encrypt) is refused, never scanned.
+    const source = path.join(dir, "bomb.pdf");
+    await writeFile(source, "%PDF-1.4\n% /Encrypt\n");
+    const out = await mkdtemp(path.join(dir, "out-"));
+    await writeFile(path.join(out, "decrypted.pdf"), "");
+    await truncate(path.join(out, "decrypted.pdf"), PDF_REWRITE_EXPANSION.floorBytes);
+    replies = [{ exitCode: 2 }, { exitCode: 0, stdout: "File is not encrypted\n" }, { exitCode: 0 }];
+    expect(await new CommandRunner().decryptPdfForScan(source, out)).toMatchObject({ status: "failed", reason: expect.stringMatching(/reached the \d+-byte limit/) });
+    // An encrypted PDF keeps the full limit.
+    replies = [{ exitCode: 3 }, { exitCode: 0, write: 10 }];
+    commands = [];
+    await decrypt();
+    expect(commands.at(-1)!.args).toContain(`--fsize=${PDF_DECRYPT_LIMITS.maxOutputBytes}`);
   });
 
   it("qpdf hit its memory limit, dropped a nested object or left a stream undecoded (exit 3): failed, never a partial copy (council L2)", async () => {
@@ -93,6 +133,22 @@ describe("CommandRunner.decryptPdfForScan", () => {
     expect(qpdfWarningsBenign("")).toBe(false);
     expect(qpdfWarningsBenign("WARNING: a.pdf: file is damaged\nqpdf: std::bad_alloc")).toBe(false);
     expect(qpdfWarningsBenign("WARNING: a.pdf (offset 1): stream will be re-processed without filtering to avoid data loss")).toBe(false);
+    // Council N-H1: for an encrypted PDF, cross-reference reconstruction is not benign; stream-length recovery still is.
+    expect(qpdfWarningsBenign("WARNING: a.pdf: file is damaged\nWARNING: a.pdf: Attempting to reconstruct cross-reference table", { encrypted: true })).toBe(false);
+    expect(qpdfWarningsBenign("WARNING: a.pdf (offset 12): xref not found", { encrypted: true })).toBe(false);
+    expect(qpdfWarningsBenign("WARNING: a.pdf (object 4 0, offset 90): recovered stream length: 120", { encrypted: true })).toBe(true);
+    expect(qpdfDecryptComplete({ exitCode: 0, stderr: "" }, true)).toBe(true);
+    expect(qpdfDecryptComplete({ exitCode: 3, stderr: "WARNING: a.pdf: file is damaged" }, true)).toBe(false);
+    expect(qpdfDecryptComplete({ exitCode: 3, stderr: "WARNING: a.pdf: file is damaged" }, false)).toBe(true);
+  });
+
+  it("council N-L5: qpdf 12.2's --show-encryption closing line (no 'resulting file' clause) is allowed after benign warnings", () => {
+    const stderr = "WARNING: trailer-enc-first.pdf: file is damaged\nWARNING: trailer-enc-first.pdf (offset 999999): xref not found\nWARNING: trailer-enc-first.pdf: Attempting to reconstruct cross-reference table\nqpdf: operation succeeded with warnings\n";
+    expect(qpdfWarningsBenign(stderr)).toBe(true);
+    expect(qpdfReportsNotEncrypted({ exitCode: 3, stdout: "File is not encrypted\n", stderr })).toBe(true);
+    // The closing line alone is still not a benign warning set, and it does not excuse another line.
+    expect(qpdfWarningsBenign("qpdf: operation succeeded with warnings\n")).toBe(false);
+    expect(qpdfWarningsBenign("WARNING: a.pdf: ignoring excessively deeply nested data structure\nqpdf: operation succeeded with warnings")).toBe(false);
   });
 
   it("qpdf --requires-password exits 2 but --show-encryption finds no encryption (a literal /Encrypt in a comment, string or stream): the PDF is rewritten and the rewrite scanned, not refused (correctness council, High)", async () => {

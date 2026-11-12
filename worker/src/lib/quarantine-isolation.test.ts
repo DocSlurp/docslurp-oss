@@ -14,7 +14,7 @@ describe("quarantine production boundary", () => {
       const encoded = await readFile(plan.args[2], "utf8");
       expect(encoded).not.toContain("credential-sentinel");
       expect(Object.keys(JSON.parse(encoded).policy)).toHaveLength(6);
-      await writeFile(plan.args[3], JSON.stringify({ sniffed: { mimeType: "application/pdf", container: null, encoding: null }, archive: null, pdf: { encryptName: false } }));
+      await writeFile(plan.args[3], JSON.stringify({ sniffed: { mimeType: "application/pdf", container: null, encoding: null }, archive: null, pdf: { encryptName: false, encryptConflict: false } }));
     });
     expect((await scanDocumentForQuarantine(args(run))).decision).toBe("accepted"); expect(run).toHaveBeenCalledOnce();
   });

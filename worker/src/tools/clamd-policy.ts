@@ -27,6 +27,12 @@ import { CLAM_SCAN_LIMITS, isClamEncryptedAlert, isClamLimitAlert } from "./clam
  *   appear in order only to an OLE2 reader (ScanOLE2);
  * - an HTML page with the EICAR file as a base64 `data:` URI, which libclamav's HTML parser decodes (ScanHTML).
  *
+ * Council N-M2: the content limits AlertExceedsMax does not cover (CLAM_SCAN_LIMITS.maxHtmlNormalize and the rest) stop
+ * libclamav silently. One size canary puts the same `data:` URI after HTML_SIZE_CANARY_PADDING bytes of whitespace, past
+ * both Debian's packaged MaxHTMLNormalize (10M) and libclamav's own default (40M): a daemon whose HTML normalize limit is
+ * below that reports it OK and is not trusted. Whitespace keeps it cheap (about 0.1-0.6 s on 2 vCPU, against seconds for
+ * the same size of text). Limits between the canary's size and the policy are not probed; they are set on every path.
+ *
  * The EICAR signatures (a hash of the 68-byte file and a body signature at offset 0) never match the canary files
  * themselves, only what a parser extracts from them. Measured with ClamAV 1.4.3: each canary is detected with the full
  * policy and reported OK when only its own parser is turned off (--scan-pdf/-ole2/-archive/-html=no).
@@ -275,6 +281,20 @@ export function htmlDataUriCanary(payload: Buffer = EICAR_TEST_FILE): Buffer {
   return Buffer.from(`<!doctype html>\n<html><body><p>DocSlurp clamd HTML canary</p><img alt="" src="data:application/octet-stream;base64,${payload.toString("base64")}"></body></html>\n`, "latin1");
 }
 
+/** Whitespace before the size canary's `data:` URI: past Debian's 10M and libclamav's 40M default MaxHTMLNormalize. */
+export const HTML_SIZE_CANARY_PADDING = 48 * 1024 * 1024;
+let htmlSizeCanaryBytes: Buffer | null = null;
+
+/** The HTML data: URI canary behind HTML_SIZE_CANARY_PADDING bytes of whitespace (built once; its contents are fixed). */
+export function htmlSizeCanary(): Buffer {
+  htmlSizeCanaryBytes ??= Buffer.concat([
+    Buffer.from("<!doctype html>\n<html><body>\n", "latin1"),
+    Buffer.alloc(HTML_SIZE_CANARY_PADDING, 0x20),
+    htmlDataUriCanary().subarray("<!doctype html>\n<html><body>".length),
+  ]);
+  return htmlSizeCanaryBytes;
+}
+
 export interface ClamdProbeResult {
   exitCode: number | null;
   stdout: string;
@@ -300,7 +320,7 @@ function describe(result: ClamdProbeResult): string {
   return `exit ${result.exitCode ?? "none"}${text ? `: ${text}` : ""}`;
 }
 
-export type ClamdCanaryKind = "encrypted" | "recursion" | "pdf" | "archive" | "ole2" | "html";
+export type ClamdCanaryKind = "encrypted" | "recursion" | "pdf" | "archive" | "ole2" | "html" | "html-size";
 
 /** The policy canaries, generated fresh each time (random contents and password for the alert canaries). */
 export function policyCanaries(): Array<{ kind: ClamdCanaryKind; name: string; data: Buffer }> {
@@ -311,6 +331,7 @@ export function policyCanaries(): Array<{ kind: ClamdCanaryKind; name: string; d
     { kind: "archive", name: "archive-canary.zip", data: deflatedZipCanary() },
     { kind: "ole2", name: "ole2-canary.doc", data: ole2Canary() },
     { kind: "html", name: "html-canary.html", data: htmlDataUriCanary() },
+    { kind: "html-size", name: "html-size-canary.html", data: htmlSizeCanary() },
   ];
 }
 
@@ -319,6 +340,11 @@ const CONTENT_CANARY_PARSER: Record<"pdf" | "archive" | "ole2" | "html", string>
 /** Why a daemon's answer for one canary shows a policy other than ours, or null when it is the expected detection. */
 export function judgeCanary(kind: ClamdCanaryKind, result: ClamdProbeResult, file: string): string | null {
   const found = detections(result, file);
+  if (kind === "html-size") {
+    return result.exitCode === 1 && found.some((signature) => /eicar/i.test(signature))
+      ? null
+      : `HTML size canary (a data: URI after ${HTML_SIZE_CANARY_PADDING} bytes) was not detected (MaxHTMLNormalize below ${CLAM_SCAN_LIMITS.maxHtmlNormalize}?): ${describe(result)}`;
+  }
   if (kind === "pdf" || kind === "archive" || kind === "ole2" || kind === "html") {
     return result.exitCode === 1 && found.some((signature) => /eicar/i.test(signature))
       ? null

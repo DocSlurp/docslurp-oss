@@ -32,6 +32,24 @@ export const CLAM_SCAN_LIMITS = {
   maxRecursion: 17,
   /** Per-file scan time. A synthetic 20,000-page PDF needs longer and is refused as unscanned, not passed. */
   maxScanTimeMs: 300_000,
+  /**
+   * Council N-M2: the content limits that AlertExceedsMax does not cover. Past them libclamav silently stops normalizing
+   * HTML or scripts (a `data:` URI past Debian's 10M MaxHTMLNormalize was never decoded), looking for embedded PE files or
+   * matching PCRE signatures. They sit at maxFileSize, so nothing quarantine downloads is past them, on every scan path:
+   * the clamscan arguments, the scanner VMs' clamd and the worker image's clamd (scripts/apply-clamd-policy.sh).
+   */
+  maxEmbeddedPe: "1024M",
+  maxHtmlNormalize: "1024M",
+  maxHtmlNoTags: "1024M",
+  maxScriptNormalize: "1024M",
+  pcreMaxFileSize: "1024M",
+  /** Counts and recursion limits at libclamav 1.4's own defaults, set explicitly so a packaged config cannot lower them. */
+  maxZipTypeRcg: "1M",
+  maxPartitions: 50,
+  maxIconsPe: 100,
+  maxRecHwp3: 16,
+  pcreMatchLimit: 100_000,
+  pcreRecMatchLimit: 2_000,
 } as const;
 
 /** Wall-clock budget of one scan command: the scan time limit plus the signature load (15–30 s) and margin. */
@@ -49,6 +67,17 @@ export function clamscanLimitArgs(): string[] {
     `--max-files=${CLAM_SCAN_LIMITS.maxFiles}`,
     `--max-recursion=${CLAM_SCAN_LIMITS.maxRecursion}`,
     `--max-scantime=${CLAM_SCAN_LIMITS.maxScanTimeMs}`,
+    `--max-embeddedpe=${CLAM_SCAN_LIMITS.maxEmbeddedPe}`,
+    `--max-htmlnormalize=${CLAM_SCAN_LIMITS.maxHtmlNormalize}`,
+    `--max-htmlnotags=${CLAM_SCAN_LIMITS.maxHtmlNoTags}`,
+    `--max-scriptnormalize=${CLAM_SCAN_LIMITS.maxScriptNormalize}`,
+    `--max-ziptypercg=${CLAM_SCAN_LIMITS.maxZipTypeRcg}`,
+    `--max-partitions=${CLAM_SCAN_LIMITS.maxPartitions}`,
+    `--max-iconspe=${CLAM_SCAN_LIMITS.maxIconsPe}`,
+    `--max-rechwp3=${CLAM_SCAN_LIMITS.maxRecHwp3}`,
+    `--pcre-match-limit=${CLAM_SCAN_LIMITS.pcreMatchLimit}`,
+    `--pcre-recmatch-limit=${CLAM_SCAN_LIMITS.pcreRecMatchLimit}`,
+    `--pcre-max-filesize=${CLAM_SCAN_LIMITS.pcreMaxFileSize}`,
     "--alert-exceeds-max=yes",
     ...CLAMSCAN_ENCRYPTION_ALERT_ARGS,
   ];
@@ -63,6 +92,17 @@ export function clamdLimitLines(): string[] {
     `MaxFiles ${CLAM_SCAN_LIMITS.maxFiles}`,
     `MaxRecursion ${CLAM_SCAN_LIMITS.maxRecursion}`,
     `MaxScanTime ${CLAM_SCAN_LIMITS.maxScanTimeMs}`,
+    `MaxEmbeddedPE ${CLAM_SCAN_LIMITS.maxEmbeddedPe}`,
+    `MaxHTMLNormalize ${CLAM_SCAN_LIMITS.maxHtmlNormalize}`,
+    `MaxHTMLNoTags ${CLAM_SCAN_LIMITS.maxHtmlNoTags}`,
+    `MaxScriptNormalize ${CLAM_SCAN_LIMITS.maxScriptNormalize}`,
+    `MaxZipTypeRcg ${CLAM_SCAN_LIMITS.maxZipTypeRcg}`,
+    `MaxPartitions ${CLAM_SCAN_LIMITS.maxPartitions}`,
+    `MaxIconsPE ${CLAM_SCAN_LIMITS.maxIconsPe}`,
+    `MaxRecHWP3 ${CLAM_SCAN_LIMITS.maxRecHwp3}`,
+    `PCREMatchLimit ${CLAM_SCAN_LIMITS.pcreMatchLimit}`,
+    `PCRERecMatchLimit ${CLAM_SCAN_LIMITS.pcreRecMatchLimit}`,
+    `PCREMaxFileSize ${CLAM_SCAN_LIMITS.pcreMaxFileSize}`,
     "AlertExceedsMax yes",
     ...CLAMD_ENCRYPTION_ALERT_LINES,
   ];

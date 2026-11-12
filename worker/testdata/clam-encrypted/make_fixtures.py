@@ -425,3 +425,148 @@ def shared_chain_ole(entries, stream_bytes):
 
 
 write("ole-shared-chain.zip", zip_bytes([("word/embeddings/oleObject1.bin", shared_chain_ole(2000, 64 << 20)), ("word/media/noise.bin", os.urandom(400 * 1024))]))
+
+
+# --- Council round 5 (PR #339 adversarial re-check 2) -------------------------------------------------------------
+QPDF_RECOVERY = [r": file is damaged$", r": Attempting to reconstruct cross-reference table$", r": reported number of objects \(\d+\) is not one plus the highest object number \(\d+\)$", r": xref not found$", r": expected endstream$", r": attempting to recover stream length$", r": recovered stream length: \d+$", r": object has offset 0$"]
+
+
+def qpdf_recovery_only(stderr):
+    lines = [line.strip() for line in stderr.splitlines() if line.strip() and not line.strip().startswith("qpdf: operation succeeded with warnings")]
+    return bool(lines) and all(line.startswith("WARNING: ") and any(re.search(p, line) for p in QPDF_RECOVERY) for line in lines)
+
+
+# N-H1: an outline title and page text carrying the marker, RC4-128 with an empty user password (raw streams).
+def outline_pdf():
+    text = b"BT /F1 12 Tf 72 700 Td (Earnings beat " + MARKER + b" forecast) Tj ET"
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R /Outlines 6 0 R /PageMode /UseOutlines >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+        b"<< /Length %d >>\nstream\n%s\nendstream" % (len(text), text),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Type /Outlines /First 7 0 R /Last 7 0 R /Count 1 >>",
+        b"<< /Title (Earnings beat " + MARKER + b" forecast) /Parent 6 0 R /Dest [3 0 R /Fit] >>",
+    ]
+    data, offsets = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n", []
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(data))
+        data += b"%d 0 obj\n%s\nendobj\n" % (number, body)
+    xref = len(data)
+    data += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1) + b"".join(b"%010d 00000 n \n" % o for o in offsets)
+    data += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+    return data
+
+
+write("r5-outline-src.pdf", outline_pdf())
+
+
+def rc4(owner, out_name, extra=()):
+    run("qpdf", "--static-id", "--allow-weak-crypto", "--stream-data=preserve", *extra, "--encrypt", "", owner, "128", "--use-aes=n", "--", at("r5-outline-src.pdf"), at(out_name))
+    return open(at(out_name), "rb").read()
+
+
+key_a = rc4("ownerpw", "r5-key-a.pdf", ("--object-streams=disable",))
+enc_a = int(re.search(rb"/Encrypt (\d+) 0 R", key_a).group(1))
+trailer_a = re.search(rb"trailer\s*(<<.*?>>)\s*startxref", key_a, re.S).group(1)
+body_a = key_a[:key_a.rfind(b"\nxref\n") + 1]
+
+
+def dict_b(owner):
+    data = rc4(owner, "r5-key-b.pdf", ("--object-streams=disable",))
+    number = int(re.search(rb"/Encrypt (\d+) 0 R", data).group(1))
+    return re.search(rb"\n%d 0 obj\n(.*?)\nendobj\n" % number, data, re.S).group(1)
+
+
+trailer_b = trailer_a.replace(b"/Encrypt %d 0 R" % enc_a, b"/Encrypt 99 0 R").replace(b"/Size ", b"/Size 100 /OldSize ")
+# The reviewer's twokey3 shape: dict B under a second trailer, startxref broken, and dict B's owner password searched until
+# qpdf's key-B "decryption" exits with only xref-recovery warnings (so only the structure check can refuse it).
+for attempt in range(40):
+    dict_b_bytes = dict_b("quarterly%d" % attempt)
+    candidate = body_a + b"99 0 obj\n" + dict_b_bytes + b"\nendobj\ntrailer\n" + trailer_a + b"\n%%EOF\ntrailer\n" + trailer_b + b"\nstartxref\n999999\n%%EOF\n"
+    write("pdf-twokey-broken-xref.pdf", candidate)
+    probe = subprocess.run(["qpdf", "--decrypt", "--qdf", "--object-streams=disable", "--stream-data=uncompress", at("pdf-twokey-broken-xref.pdf"), at("r5-probe.pdf")], capture_output=True, text=True)
+    if probe.returncode == 0 or (probe.returncode == 3 and qpdf_recovery_only(probe.stderr)):
+        break
+else:
+    raise SystemExit("no benign two-key candidate")
+os.remove(at("r5-probe.pdf"))
+# Three trailers (A, B, A), startxref broken.
+write("pdf-twokey-three-trailers.pdf", body_a + b"99 0 obj\n" + dict_b_bytes + b"\nendobj\ntrailer\n" + trailer_a + b"\n%%EOF\ntrailer\n" + trailer_b + b"\n%%EOF\ntrailer\n" + trailer_a + b"\nstartxref\n999999\n%%EOF\n")
+# A valid /Prev chain whose incremental update switches to dict B (every reader follows the chain; still two dictionaries).
+a_xref = int(re.findall(rb"startxref\s+(\d+)", key_a)[-1])
+update_offset = len(key_a)
+update = b"99 0 obj\n" + dict_b_bytes + b"\nendobj\n"
+update_xref = update_offset + len(update)
+update += b"xref\n99 1\n%010d 00000 n \ntrailer\n" % update_offset + trailer_b.replace(b"<<", b"<< /Prev %d" % a_xref, 1) + b"\nstartxref\n%d\n%%%%EOF\n" % update_xref
+write("pdf-twokey-prev-chain.pdf", key_a + update)
+# Object streams: key A written with a cross-reference stream, then dict B under an appended trailer, startxref broken.
+key_a_objstm = rc4("ownerpw", "r5-key-a-objstm.pdf", ("--object-streams=generate",))
+write("pdf-twokey-objstm.pdf", key_a_objstm + b"99 0 obj\n" + dict_b_bytes + b"\nendobj\ntrailer\n" + trailer_b + b"\nstartxref\n999999\n%%EOF\n")
+# The second trailer's /Encrypt spelled with a name escape.
+write("pdf-twokey-escaped-name.pdf", candidate.replace(b"/Encrypt 99 0 R", b"/En#63rypt 99 0 R"))
+# N-L5: /Encrypt only on the first of two trailers, startxref broken (qpdf: not encrypted; pdf.js: encrypted).
+write("pdf-trailer-encrypt-first.pdf", body_a + b"trailer\n" + trailer_a + b"\n%%EOF\ntrailer\n" + re.sub(rb"/Encrypt \d+ 0 R", b"", trailer_a) + b"\nstartxref\n999999\n%%EOF\n")
+for name in ("r5-key-a.pdf", "r5-key-b.pdf", "r5-key-a-objstm.pdf", "r5-outline-src.pdf"):
+    os.remove(at(name))
+
+# N-M1: a ZIP64 ZIP holding the marker inside one tar, bzip2 or xz layer, embedded in an XLSX; a benign tar control.
+import bz2
+import io
+import lzma
+import tarfile
+
+
+def tar_bytes(name, payload):
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+        info = tarfile.TarInfo(name)
+        info.size = len(payload)
+        info.mtime = 0
+        archive.addfile(info, io.BytesIO(payload))
+    return buf.getvalue()
+
+
+zip64_marker = zip_bytes([("e.txt", MARKER)], zip64=True, method=zipfile.ZIP_STORED)
+def xlsx_with(embedded):
+    return zip_bytes([("[Content_Types].xml", ooxml_types), ("xl/workbook.xml", b"<workbook/>"), ("xl/embeddings/oleObject1.bin", embedded)])
+
+
+write("nested-tar-zip64.xlsx", xlsx_with(tar_bytes("deck.zip", zip64_marker)))
+write("nested-bz2-zip64.xlsx", xlsx_with(bz2.compress(zip64_marker)))
+write("nested-xz-zip64.xlsx", xlsx_with(lzma.compress(zip64_marker)))
+write("nested-tar-bz2-zip64.xlsx", xlsx_with(bz2.compress(tar_bytes("deck.zip", zip64_marker))))
+write("nested-tar-plain.xlsx", xlsx_with(tar_bytes("notes/q3.txt", b"Quarterly results beat the forecast.\n")))
+
+# N-L2: an owner-password raw-marker PDF behind 1,440 NUL bytes (or an ID3 tag) under types with no magic check.
+raw_marker_pdf = open(at("pdf-empty-user-owner-raw-marker.pdf"), "rb").read()
+for name in ("exempt-pdf-payload.mp3", "exempt-pdf-payload.mov", "exempt-pdf-payload.aac"):
+    write(name, b"\0" * 1440 + raw_marker_pdf)
+write("exempt-id3-pdf.mp3", b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\0" * 1440 + raw_marker_pdf)
+
+# N-M2: the marker as a data: URI after 11 MiB of ordinary paragraphs (past Debian's 10M MaxHTMLNormalize), and a control
+# with the same URI near the start.
+import base64
+uri = b'<a href="data:text/plain;base64,' + base64.b64encode(b"Q3 notes " + MARKER) + b'">notes</a>'
+paragraph = b"<p>Quarterly results beat the forecast; the team flew to London to open the new office.</p>\n"
+write("html-late-datauri-11m.html", b"<!doctype html>\n<html><body>\n" + paragraph * (11 * 1024 * 1024 // len(paragraph) + 1) + uri + b"</body></html>\n")
+write("html-early-datauri.html", b"<!doctype html>\n<html><body>\n" + uri + paragraph * 100 + b"</body></html>\n")
+
+# N-L1: an unencrypted PDF whose one Flate stream inflates to 200 MiB of zeros, plus a literal /Encrypt comment: qpdf's
+# rewrite is capped at max(64 MiB, 16x the input) and refused, instead of a 200 MiB copy and a second scan.
+zeros = zlib.compressobj(9)
+bomb = b"".join(zeros.compress(b"\0" * (1 << 20)) for _ in range(200)) + zeros.flush()
+bomb_objects = [
+    b"<</Type/Catalog/Pages 2 0 R>>",
+    b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
+    b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Resources<<>>/Contents 4 0 R>>",
+    b"<</Length %d/Filter/FlateDecode>>stream\n%s\nendstream" % (len(bomb), bomb),
+]
+bomb_pdf, bomb_offsets = b"%PDF-1.4\n% /Encrypt\n", []
+for number, body in enumerate(bomb_objects, 1):
+    bomb_offsets.append(len(bomb_pdf))
+    bomb_pdf += b"%d 0 obj\n%s\nendobj\n" % (number, body)
+bomb_xref = len(bomb_pdf)
+bomb_pdf += b"xref\n0 5\n0000000000 65535 f \n" + b"".join(b"%010d 00000 n \n" % o for o in bomb_offsets)
+bomb_pdf += b"trailer\n<</Size 5/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF\n" % bomb_xref
+write("pdf-literal-encrypt-flate-bomb.pdf", bomb_pdf)

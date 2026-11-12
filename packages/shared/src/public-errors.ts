@@ -132,7 +132,7 @@ const QUARANTINE_REASON_PRIORITY: readonly QuarantinePublicReason[] = [
 /** The public reason of one worker quarantine reason code; unknown codes are a scan failure, never echoed. */
 export function quarantinePublicReason(code: string): QuarantinePublicReason {
   if (code === "malware-detected") return "quarantine-malware";
-  if (code === "malware-scan-encrypted-content" || code === "malware-scan-pdf-decrypt-failed" || code === "archive-encrypted-entry" || code === "archive-nested-encrypted-entry") return "quarantine-encrypted";
+  if (code === "malware-scan-encrypted-content" || code === "malware-scan-pdf-decrypt-failed" || code === "pdf-encryption-inconsistent" || code === "archive-encrypted-entry" || code === "archive-nested-encrypted-entry") return "quarantine-encrypted";
   if (code === "mime-mismatch" || code === "archive-embedded-container" || code === "quarantine-inspection-inconsistent") return "quarantine-file-type";
   if (code === "malware-scan-limit-exceeded" || /^archive-(?:nested-)?(?:entry-count|depth|expanded-bytes|entry-size|expansion-ratio|object-count)-limit$/.test(code)) return "quarantine-scan-limit";
   if (code.startsWith("archive-")) return "quarantine-archive";

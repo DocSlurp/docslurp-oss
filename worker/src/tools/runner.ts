@@ -21,7 +21,7 @@ import { DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@do
 import { existsSync, readFileSync, readdirSync, readlinkSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { access, chmod, copyFile, lstat, mkdtemp, open, readFile, readdir, rm, stat } from "node:fs/promises";
 import { createReadStream } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { AsyncLocalStorage, AsyncResource } from "node:async_hooks";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -150,32 +150,59 @@ export function qpdfReportsNotEncrypted(result: { exitCode: number | null; stdou
 
 /**
  * `qpdf --decrypt` to a plaintext copy for the scanner: QDF, no object streams, every generalized filter decoded, under
- * PDF_DECRYPT_LIMITS (RLIMIT_FSIZE: qpdf is killed, SIGXFSZ, rather than write a copy past maxOutputBytes).
+ * PDF_DECRYPT_LIMITS (RLIMIT_FSIZE: qpdf is killed, SIGXFSZ, rather than write a copy past `maxOutputBytes`, by default
+ * PDF_DECRYPT_LIMITS.maxOutputBytes; pdfRewriteOutputLimit for a PDF qpdf calls unencrypted).
  */
-export function pdfDecryptArgv(source: string, output: string): string[] {
+export function pdfDecryptArgv(source: string, output: string, maxOutputBytes: number = PDF_DECRYPT_LIMITS.maxOutputBytes): string[] {
   const planned = planDocumentToolInvocation({ binary: "qpdf", args: ["--decrypt", "--qdf", "--object-streams=disable", "--stream-data=uncompress", source, output], fileArgIndexes: [4, 5], supportsDoubleDash: false });
-  return [...pdfQpdfLimitArgs(), `--fsize=${PDF_DECRYPT_LIMITS.maxOutputBytes}`, "--", planned.binary, ...planned.args];
+  return [...pdfQpdfLimitArgs(), `--fsize=${Math.min(maxOutputBytes, PDF_DECRYPT_LIMITS.maxOutputBytes)}`, "--", planned.binary, ...planned.args];
 }
 
 /**
- * qpdf warnings (exit 3) that leave the decrypted copy complete: recoveries of a damaged cross-reference table or stream
- * length that every PDF reader performs the same way. Any other line, or no warning at all, is not benign.
+ * Council N-L1: the rewrite of a PDF that only names /Encrypt (qpdf calls it unencrypted) is capped at a small multiple of
+ * the input, so one literal `/Encrypt` cannot turn a 200 KB Flate bomb into a 200 MB copy and a second full scan. Ordinary
+ * PDFs decompress well within it (text about 3-10x); a rewrite that would pass it is refused, never truncated.
  */
-const QPDF_BENIGN_WARNINGS: readonly RegExp[] = [
-  /: file is damaged$/,
-  /: Attempting to reconstruct cross-reference table$/,
+export const PDF_REWRITE_EXPANSION = { multiple: 16, floorBytes: 64 * 1024 * 1024 } as const;
+export function pdfRewriteOutputLimit(inputBytes: number): number {
+  return Math.min(PDF_DECRYPT_LIMITS.maxOutputBytes, Math.max(PDF_REWRITE_EXPANSION.floorBytes, PDF_REWRITE_EXPANSION.multiple * Math.max(0, inputBytes)));
+}
+
+/**
+ * qpdf warnings (exit 3) that leave the decrypted copy complete: recoveries of a stream length every PDF reader performs
+ * the same way, and of a damaged cross-reference table. Any other line, or no warning at all, is not benign.
+ *
+ * Council N-H1: a cross-reference table qpdf had to reconstruct is benign only for a PDF that is not encrypted. Rebuilding
+ * an encrypted file's xref lets readers disagree on which trailer, and so which encryption dictionary and key, applies
+ * (qpdf and poppler take the last trailer, pdf.js the first): the copy qpdf decrypts is then not what pdf.js decrypts.
+ */
+const QPDF_STREAM_RECOVERY_WARNINGS: readonly RegExp[] = [
   /: reported number of objects \(\d+\) is not one plus the highest object number \(\d+\)$/,
-  /: xref not found$/,
   /: expected endstream$/,
   /: attempting to recover stream length$/,
   /: recovered stream length: \d+$/,
+];
+const QPDF_XREF_RECONSTRUCTION_WARNINGS: readonly RegExp[] = [
+  /: file is damaged$/,
+  /: Attempting to reconstruct cross-reference table$/,
+  /: xref not found$/,
   /: object has offset 0$/,
 ];
-const QPDF_WARNINGS_TRAILER = "qpdf: operation succeeded with warnings; resulting file may have some problems";
+/** qpdf's closing line after warnings: `--decrypt` adds the "resulting file" clause, `--show-encryption` (12.2) does not (council N-L5). */
+const QPDF_WARNINGS_TRAILERS = new Set([
+  "qpdf: operation succeeded with warnings; resulting file may have some problems",
+  "qpdf: operation succeeded with warnings",
+]);
 
-export function qpdfWarningsBenign(stderr: string): boolean {
-  const lines = stderr.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).filter((line) => line !== QPDF_WARNINGS_TRAILER);
-  return lines.length > 0 && lines.length <= 1000 && lines.every((line) => line.startsWith("WARNING: ") && QPDF_BENIGN_WARNINGS.some((pattern) => pattern.test(line)));
+export function qpdfWarningsBenign(stderr: string, options: { encrypted?: boolean } = {}): boolean {
+  const allowed = options.encrypted ? QPDF_STREAM_RECOVERY_WARNINGS : [...QPDF_STREAM_RECOVERY_WARNINGS, ...QPDF_XREF_RECONSTRUCTION_WARNINGS];
+  const lines = stderr.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).filter((line) => !QPDF_WARNINGS_TRAILERS.has(line));
+  return lines.length > 0 && lines.length <= 1000 && lines.every((line) => line.startsWith("WARNING: ") && allowed.some((pattern) => pattern.test(line)));
+}
+
+/** Whether a `qpdf --decrypt` result is a complete copy: exit 0, or 3 with only benign warnings (strict for an encrypted PDF). */
+export function qpdfDecryptComplete(result: { exitCode: number | null; stderr: string }, encrypted: boolean): boolean {
+  return result.exitCode === 0 || (result.exitCode === 3 && qpdfWarningsBenign(result.stderr, { encrypted }));
 }
 
 /** What the in-VM decryption made of an encrypted PDF (CommandRunner.decryptPdfForScan); `ms` is the wall time it took. */
@@ -1256,11 +1283,12 @@ export class CommandRunner {
     } catch (error) {
       if (signal?.aborted) throw error;
     }
-    const key = await localClamdPolicyKey(databaseUpdatedAt ?? inspectClamDatabaseHealth(resolveMalwareScanPolicy()).updatedAt, daemonVersion);
+    const { key, cacheable } = await localClamdPolicyKey(databaseUpdatedAt ?? inspectClamDatabaseHealth(resolveMalwareScanPolicy()).updatedAt, daemonVersion);
     const verdict = await localClamdPolicy.verify(key, async (file): Promise<ClamdProbeResult> => {
       const outcome = await this.runScanPlan(await this.clamDaemonScan(file), signal);
       return { exitCode: outcome.exitCode, stdout: outcome.stdout, stderr: outcome.stderr };
     });
+    if (!cacheable) localClamdPolicy.invalidate(key);
     if (signal?.aborted) {
       localClamdPolicy.invalidate(key);
       signal.throwIfAborted();
@@ -1333,7 +1361,16 @@ export class CommandRunner {
       return { status: "failed", reason: `qpdf could not settle the encryption (exit ${checked.exitCode ?? "none"})${checked.stderr ? `: ${checked.stderr.trim().slice(0, 500)}` : ""}`, ms: elapsed() };
     }
     const output = path.join(outputDir, "decrypted.pdf");
-    const decrypt = await this.boundedQpdfPlan(pdfDecryptArgv(source, output));
+    // An unencrypted PDF's rewrite is capped at a small multiple of its size (council N-L1); an encrypted one at the full limit.
+    let outputLimit: number = PDF_DECRYPT_LIMITS.maxOutputBytes;
+    if (!encrypted) {
+      try {
+        outputLimit = pdfRewriteOutputLimit((await lstat(source)).size);
+      } catch {
+        return { status: "failed", reason: "source PDF missing", ms: elapsed() };
+      }
+    }
+    const decrypt = await this.boundedQpdfPlan(pdfDecryptArgv(source, output, outputLimit));
     let decrypted: SandboxResult;
     try {
       decrypted = await this.runScanPlan(decrypt, signal, "pdf-decrypt");
@@ -1341,10 +1378,11 @@ export class CommandRunner {
       if (signal?.aborted) throw error;
       return { status: "failed", reason: `decryption did not complete: ${error instanceof Error ? error.message : String(error)}`, ms: elapsed() };
     }
-    // 3: written with warnings. Accepted only when every warning is a recovery on the benign allow-list (a damaged
-    // cross-reference table qpdf rebuilt, a stream length it recounted); a warning qpdf gives when it hit its memory limit
-    // (bad_alloc), skipped a deeply nested object or left a stream undecoded means the copy is not all of the file (council L2).
-    if (decrypted.exitCode !== 0 && !(decrypted.exitCode === 3 && qpdfWarningsBenign(decrypted.stderr))) return { status: "failed", reason: `qpdf --decrypt failed (exit ${decrypted.exitCode ?? "none"})${decrypted.stderr ? `: ${decrypted.stderr.trim().slice(0, 500)}` : ""}`, ms: elapsed() };
+    // 3: written with warnings. Accepted only when every warning is a recovery on the benign allow-list (a stream length it
+    // recounted; for an unencrypted PDF also a damaged cross-reference table qpdf rebuilt). A warning qpdf gives when it hit
+    // its memory limit (bad_alloc), skipped a deeply nested object or left a stream undecoded means the copy is not all of
+    // the file (council L2); an encrypted PDF whose xref was rebuilt may decrypt differently in other readers (N-H1).
+    if (!qpdfDecryptComplete(decrypted, encrypted)) return { status: "failed", reason: `qpdf --decrypt failed (exit ${decrypted.exitCode ?? "none"})${decrypted.stderr ? `: ${decrypted.stderr.trim().slice(0, 500)}` : ""}`, ms: elapsed() };
     let size: number;
     try {
       const info = await lstat(output);
@@ -1353,7 +1391,7 @@ export class CommandRunner {
     } catch {
       return { status: "failed", reason: "decrypted copy missing", ms: elapsed() };
     }
-    if (size >= PDF_DECRYPT_LIMITS.maxOutputBytes) return { status: "failed", reason: `decrypted copy reached the ${PDF_DECRYPT_LIMITS.maxOutputBytes}-byte limit`, ms: elapsed() };
+    if (size >= outputLimit) return { status: "failed", reason: `decrypted copy reached the ${outputLimit}-byte limit`, ms: elapsed() };
     return { status: "decrypted", path: output, bytes: size, ms: elapsed(), encrypted };
   }
 
@@ -2781,29 +2819,51 @@ export function resetLocalClamdPolicyCache(): void {
   localClamdPolicy.invalidate();
 }
 
-/** One verification per config file (path and modification time) and loaded signature version. */
-async function localClamdPolicyKey(databaseUpdatedAt: string | null, daemonVersion = "unknown"): Promise<string> {
+/**
+ * One verification per config file (path and modification time), loaded signature version, daemon version and daemon
+ * identity (localClamdSocketIdentity). A daemon whose identity cannot be read here is never cached: a unique key makes every
+ * scan verify it again (prior council L3).
+ */
+async function localClamdPolicyKey(databaseUpdatedAt: string | null, daemonVersion = "unknown"): Promise<{ key: string; cacheable: boolean }> {
   const configFile = localClamdConfigFile();
   const mtime = await stat(configFile).then((info) => info.mtimeMs, () => "missing");
-  return `${configFile}|${mtime}|${databaseUpdatedAt ?? "unknown"}|${await localClamdSocketIdentity(configFile)}|${daemonVersion}`;
+  const identity = await localClamdSocketIdentity(configFile);
+  return { key: `${configFile}|${mtime}|${databaseUpdatedAt ?? "unknown"}|${identity ?? `uncached:${randomUUID()}`}|${daemonVersion}`, cacheable: identity !== null };
 }
 
 /**
- * The inode and change time of the local daemon's socket (the config's LocalSocket, an operator-owned file, not customer
- * bytes): a restarted daemon recreates its socket, so these change. `unknown` when the socket is not visible here.
+ * The local daemon's identity, from operator-owned files (its config, the socket and /proc/net), never customer bytes: a
+ * restarted daemon recreates its socket, so the identity changes.
+ *
+ * - `LocalSocket`: the socket file's inode and change time.
+ * - `TCPSocket`: the inode of the listening socket on that port in /proc/net/tcp and tcp6 (`procNet`), which a restarted
+ *   daemon also replaces. A daemon in another network namespace or on another host is not visible there: null.
+ *
+ * Null when no identity can be read (no socket configured, the socket missing, nothing listening here). Exported for tests.
  */
-async function localClamdSocketIdentity(configFile: string): Promise<string> {
+export async function localClamdSocketIdentity(configFile: string, procNet = "/proc/net"): Promise<string | null> {
   try {
     const config = (await readFile(configFile, "utf8")).slice(0, 256 * 1024);
     const socket = /^\s*LocalSocket\s+(\S+)/m.exec(config)?.[1];
-    if (!socket) {
-      const tcp = /^\s*TCPSocket\s+(\d+)/m.exec(config)?.[1];
-      return tcp ? `tcp:${tcp}` : "no-socket";
+    if (socket) {
+      const info = await stat(socket);
+      return `unix:${info.ino}:${info.ctimeMs}`;
     }
-    const info = await stat(socket);
-    return `${info.ino}:${info.ctimeMs}`;
+    const port = Number(/^\s*TCPSocket\s+(\d+)/m.exec(config)?.[1]);
+    if (!Number.isInteger(port) || port <= 0 || port > 65_535) return null;
+    const portHex = port.toString(16).toUpperCase().padStart(4, "0");
+    const inodes: string[] = [];
+    for (const table of ["tcp", "tcp6"]) {
+      const text = await readFile(path.join(procNet, table), "utf8").catch(() => "");
+      for (const line of text.split("\n").slice(1)) {
+        const fields = line.trim().split(/\s+/);
+        // sl local_address rem_address st ... inode (field 9); st 0A is LISTEN.
+        if (fields.length > 9 && fields[1]?.endsWith(`:${portHex}`) && fields[3] === "0A" && /^[1-9]\d*$/.test(fields[9]!)) inodes.push(`${table}:${fields[1]}:${fields[9]}`);
+      }
+    }
+    return inodes.length ? `tcp:${port}:${inodes.sort().join(",")}` : null;
   } catch {
-    return "unknown";
+    return null;
   }
 }
 

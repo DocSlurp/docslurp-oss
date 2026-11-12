@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 
 import type { Config } from "../config.js";
 import type { Stage } from "../pipeline/pipeline.js";
-import { buildQuarantineStats, scanDocumentForQuarantine, assertAcceptedQuarantine, inspectQuarantine, verifyIntakeFileFacts } from "../lib/quarantine.js";
+import { buildQuarantineStats, scanDocumentForQuarantine, assertAcceptedQuarantine, inspectQuarantine, quarantineTelemetryLine, verifyIntakeFileFacts } from "../lib/quarantine.js";
 import { runDocumentStage, runDocuments, } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import {
@@ -92,6 +92,8 @@ export class QuarantineStage implements Stage {
                 document.fileFacts = verified.facts;
                 document.mimeType = verified.facts.mimeType;
               }
+              const telemetry = quarantineTelemetryLine(artifact);
+              if (telemetry) console.warn(telemetry);
               assertAcceptedQuarantine(artifact, artifactUri);
 
               return {

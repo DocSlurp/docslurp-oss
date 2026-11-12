@@ -11,6 +11,17 @@ StreamMaxLength 1024M
 MaxFiles 50000
 MaxRecursion 17
 MaxScanTime 300000
+MaxEmbeddedPE 1024M
+MaxHTMLNormalize 1024M
+MaxHTMLNoTags 1024M
+MaxScriptNormalize 1024M
+MaxZipTypeRcg 1M
+MaxPartitions 50
+MaxIconsPE 100
+MaxRecHWP3 16
+PCREMatchLimit 100000
+PCRERecMatchLimit 2000
+PCREMaxFileSize 1024M
 AlertExceedsMax yes
 AlertEncryptedArchive yes
 AlertEncryptedDoc yes'

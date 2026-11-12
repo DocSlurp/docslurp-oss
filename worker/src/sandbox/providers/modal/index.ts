@@ -722,7 +722,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         session = await provider.openSession({ ...config, sessionTimeoutSeconds: Math.min(config.sessionTimeoutSeconds, PROBE_SESSION_TIMEOUT_SECONDS) }, { activityId: "startup-probe", unmetered: true });
         const result = await session.run!({ binary: "node", args: ["/app/worker/scripts/parser-vm-contract.mjs"], env: { PATH: "/usr/local/bin:/usr/bin:/bin" }, readablePaths: [], inputPaths: [], writablePaths: [], limits: { timeoutMs: 30_000 } });
         const contract = result.exitCode === 0 ? JSON.parse(result.stdout) as { protocol?: unknown; uid?: unknown; tools?: unknown; links?: { hardlinks?: unknown; symlinks?: unknown }; hardening?: { suidDumpable?: unknown; ptraceScope?: unknown }; cgroupV2?: unknown; qpdfVersion?: unknown } : null;
-        if (contract?.protocol !== "parser-vm@3") throw new Error("parser VM image contract unavailable");
+        if (contract?.protocol !== "parser-vm@4") throw new Error("parser VM image contract unavailable");
         // Quarantine decrypts empty-user-password PDFs with the image's qpdf (runner.decryptPdfForScan); without a supported
         // one every such PDF would be refused, so the image is refused at startup instead.
         if (!supportedQpdfVersion(contract.qpdfVersion)) throw new Error(`parser VM qpdf is missing or older than ${MIN_PARSER_VM_QPDF} (${JSON.stringify(contract.qpdfVersion ?? null)})`);

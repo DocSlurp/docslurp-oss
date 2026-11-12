@@ -8,7 +8,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 import { setDefaultParserSandbox } from "../sandbox/startup.js";
 import type { ParserSandboxProvider, SandboxCommand } from "../sandbox/types.js";
-import { flatePdfCanary } from "./clamd-policy.js";
+import { EICAR_TEST_FILE, flatePdfCanary } from "./clamd-policy.js";
 import { CommandRunner, resetLocalClamdPolicyCache } from "./runner.js";
 
 /**
@@ -59,6 +59,9 @@ describe.skipIf(!image)("real clamd: the local daemon is trusted only after its 
     writeFileSync(path.join(dir, "eicar.com"), EICAR);
     writeFileSync(path.join(dir, "note.txt"), "Quarterly results beat the forecast.\n");
     writeFileSync(path.join(dir, "eicar-flate.pdf"), flatePdfCanary());
+    // N-M2: EICAR as a data: URI after 11 MiB of ordinary paragraphs.
+    const paragraph = "<p>Quarterly results beat the forecast; the team flew to London to open the new office.</p>\n";
+    writeFileSync(path.join(dir, "late-datauri.html"), `<!doctype html>\n<html><body>\n${paragraph.repeat(Math.ceil(11 * 1024 * 1024 / paragraph.length))}<img alt="" src="data:application/octet-stream;base64,${EICAR_TEST_FILE.toString("base64")}"></body></html>\n`);
     execFileSync("zip", ["-q", "-j", "-P", "zip-secret", path.join(dir, "encrypted.zip"), path.join(dir, "eicar.com")]);
     copyFileSync(fileURLToPath(new URL("../../scripts/apply-clamd-policy.sh", import.meta.url)), path.join(dir, "apply-clamd-policy.sh"));
     // The council reproducer's daemon: sockets and paths only.
@@ -74,9 +77,13 @@ describe.skipIf(!image)("real clamd: the local daemon is trusted only after its 
       // Council re-check 4, M2: the image's policy with PDF scanning off (every alert option still on).
       `sed -e '/^ScanPDF[[:space:]]/d' -e 's#^LocalSocket .*#LocalSocket ${dir}/weakpdf.sock#' ${dir}/image.conf > ${dir}/weakpdf.conf`,
       `printf 'ScanPDF no\\n' >> ${dir}/weakpdf.conf`,
+      // Council round 5, N-M2: the image's policy with Debian's packaged HTML normalize limit (every alert option still on).
+      `sed -e '/^MaxHTMLNormalize[[:space:]]/d' -e 's#^LocalSocket .*#LocalSocket ${dir}/weakhtml.sock#' ${dir}/image.conf > ${dir}/weakhtml.conf`,
+      `printf 'MaxHTMLNormalize 10M\\n' >> ${dir}/weakhtml.conf`,
       `clamd --config-file=${dir}/default.conf || exit 9`,
       `clamd --config-file=${dir}/image.conf || exit 9`,
       `clamd --config-file=${dir}/weakpdf.conf || exit 9`,
+      `clamd --config-file=${dir}/weakhtml.conf || exit 9`,
     ].join("\n");
     const ready = spawnSync("docker", ["exec", container, "sh", "-c", setup], { encoding: "utf8", timeout: 600_000 });
     if (ready.status !== 0) throw new Error(`daemons did not start: ${ready.stderr}`);
@@ -140,11 +147,23 @@ describe.skipIf(!image)("real clamd: the local daemon is trusted only after its 
     expect(daemonScanned("eicar-flate.pdf")).toBe(false);
   }, 600_000);
 
+  it("council round 5, N-M2: a daemon with Debian's MaxHTMLNormalize 10M is refused by the HTML size canary, and the late data: URI it would pass goes to clamscan", async () => {
+    const direct = await exec(["clamdscan", `--config-file=${dir}/weakhtml.conf`, "--fdpass", "--no-summary", path.join(dir, "late-datauri.html")]);
+    expect(direct).toMatchObject({ exitCode: 0 }); // the reproducer: that daemon reports it OK
+    vi.stubEnv("DOCSLURP_CLAMAV_CLAMD_CONF", `${dir}/weakhtml.conf`);
+    const result = await scan("late-datauri.html");
+    expect(result).toMatchObject({ engine: "clamscan", status: "infected", signature: "Eicar-Test-Signature" });
+    expect(result.healthWarnings.join("\n")).toMatch(/clamd refused: HTML size canary/);
+    expect(daemonScanned("late-datauri.html")).toBe(false);
+  }, 600_000);
+
   it("the worker image's daemon (apply-clamd-policy.sh) passes its canaries and is used", async () => {
     vi.stubEnv("DOCSLURP_CLAMAV_CLAMD_CONF", `${dir}/image.conf`);
     expect(await scan("encrypted.zip")).toMatchObject({ engine: "clamdscan", status: "unscannable", signature: "Heuristics.Encrypted.Zip" });
     expect(await scan("eicar.com")).toMatchObject({ engine: "clamdscan", status: "infected", signature: "Eicar-Test-Signature" });
     expect(await scan("note.txt")).toMatchObject({ engine: "clamdscan", status: "clean" });
+    // N-M2: the policy's HTML normalize limit reaches the late data: URI.
+    expect(await scan("late-datauri.html")).toMatchObject({ engine: "clamdscan", status: "infected", signature: "Eicar-Test-Signature" });
     expect(daemonScanned("encrypted.zip")).toBe(true);
     // Verified once for the three scans.
     expect(commands.filter((command) => command.args.at(-1)!.endsWith("encrypted-canary.zip"))).toHaveLength(1);

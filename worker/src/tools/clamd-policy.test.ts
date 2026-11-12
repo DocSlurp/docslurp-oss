@@ -20,7 +20,7 @@ const hasPython = spawnSync("python3", ["-I", "-c", "import zipfile"]).status ==
 function goodDaemon(file: string): ClamdProbeResult {
   if (file.endsWith("encrypted-canary.zip")) return { exitCode: 1, stdout: `${file}: Heuristics.Encrypted.Zip FOUND\n`, stderr: "" };
   if (file.endsWith("recursion-canary.zip")) return { exitCode: 1, stdout: `${file}: Heuristics.Limits.Exceeded.MaxRecursion FOUND\n`, stderr: "" };
-  if (/(?:pdf|archive|ole2|html)-canary\.\w+$/.test(file)) return { exitCode: 1, stdout: `${file}: Eicar-Test-Signature FOUND\n`, stderr: "" };
+  if (/(?:pdf|archive|ole2|html|html-size)-canary\.\w+$/.test(file)) return { exitCode: 1, stdout: `${file}: Eicar-Test-Signature FOUND\n`, stderr: "" };
   return { exitCode: 0, stdout: `${file}: OK\n`, stderr: "" };
 }
 /** A daemon started without the alert options: everything is OK (the council reproducer). */
@@ -83,6 +83,15 @@ describe("clamd policy canaries", () => {
     expect("streams" in ole && ole.streams.map((stream) => [stream.name, stream.data.equals(EICAR_TEST_FILE)])).toEqual([["Canary", true]]);
   });
 
+  it("council N-M2: the HTML size canary carries its data: URI past Debian's 10M and libclamav's 40M MaxHTMLNormalize", async () => {
+    const canary = policyCanaries().find((item) => item.kind === "html-size")!;
+    const uri = canary.data.indexOf("data:application/octet-stream;base64,");
+    expect(uri).toBeGreaterThan(48 * 1024 * 1024);
+    expect(canary.data.includes(EICAR_TEST_FILE)).toBe(false);
+    const refusal = await verifyClamdPolicy(async (file) => (file.endsWith("html-size-canary.html") ? defaultDaemon(file) : goodDaemon(file)));
+    expect(refusal).toMatchObject({ trusted: false, transient: false, reason: expect.stringMatching(/HTML size canary .*MaxHTMLNormalize below 1024M/) });
+  });
+
   it.each(["pdf-canary.pdf", "archive-canary.zip", "ole2-canary.doc", "html-canary.html"])("refuses a daemon that reports %s clean (ScanPDF/ScanArchive/ScanOLE2/ScanHTML off), not transiently", async (name) => {
     const verdict = await verifyClamdPolicy(async (file) => (file.endsWith(name) ? defaultDaemon(file) : goodDaemon(file)));
     expect(verdict).toMatchObject({ trusted: false, transient: false, reason: expect.stringMatching(/content canary.*not detected/) });
@@ -94,13 +103,13 @@ describe("clamd policy canaries", () => {
     const probe = vi.fn(async (file: string) => goodDaemon(file));
     expect(await cache.verify("a", probe)).toEqual({ trusted: true });
     expect(await cache.verify("a", probe)).toEqual({ trusted: true });
-    expect(probe).toHaveBeenCalledTimes(6); // six canaries, one verification
+    expect(probe).toHaveBeenCalledTimes(7); // seven canaries (the HTML size canary is council N-M2), one verification
     now = 1_000;
     await cache.verify("a", probe);
-    expect(probe).toHaveBeenCalledTimes(12);
+    expect(probe).toHaveBeenCalledTimes(14);
     cache.invalidate("a");
     await cache.verify("a", probe);
-    expect(probe).toHaveBeenCalledTimes(18);
+    expect(probe).toHaveBeenCalledTimes(21);
 
     const down = vi.fn(async (): Promise<ClamdProbeResult> => ({ exitCode: 2, stdout: "", stderr: "connect failed" }));
     expect(await cache.verify("b", down)).toMatchObject({ trusted: false, transient: true });
@@ -153,6 +162,10 @@ describe("local clamd scans verify the daemon's policy first (council re-check 2
     vi.stubEnv("DOCSLURP_CLAMAV_DB_DIR", dir);
     vi.stubEnv("DOCSLURP_CLAMAV_REQUIRE_DAEMON", "false");
     await writeFile(path.join(dir, "daily.cvd"), "signatures");
+    // A local daemon whose socket is visible here: its identity (inode, change time) keys the verified policy.
+    await writeFile(path.join(dir, "clamd.sock"), "");
+    await writeFile(path.join(dir, "clamd.conf"), `LocalSocket ${path.join(dir, "clamd.sock")}\n`);
+    vi.stubEnv("DOCSLURP_CLAMAV_CLAMD_CONF", path.join(dir, "clamd.conf"));
     register(["clamdscan", "clamscan"]);
   });
   afterEach(async () => {
@@ -204,6 +217,13 @@ describe("local clamd scans verify the daemon's policy first (council re-check 2
     vi.spyOn(console, "error").mockImplementation(() => {});
     expect(await scan()).toMatchObject({ status: "error", engine: null });
     expect(commands.filter((command) => command.binary.endsWith("clamscan"))).toHaveLength(0);
+  });
+
+  it("prior council L3: a daemon whose identity the worker cannot read (TCPSocket on another host) is verified before every scan, never cached", async () => {
+    await writeFile(path.join(dir, "clamd.conf"), "TCPSocket 3310\nTCPAddr 10.0.0.9\n");
+    expect(await scan()).toMatchObject({ engine: "clamdscan" });
+    expect(await scan()).toMatchObject({ engine: "clamdscan" });
+    expect(daemonScansOf("encrypted-canary.zip")).toBe(2);
   });
 
   it("a daemon restarted with another identity is re-verified within the TTL (council L3)", async () => {

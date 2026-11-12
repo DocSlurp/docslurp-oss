@@ -4,6 +4,7 @@ import { sniffFileBytes, type SniffedBytes } from "@docslurp/shared";
 
 import { CLAM_SCAN_LIMITS } from "../tools/clam-limits.js";
 import { findEmbeddedContainer, inspectNestedArchives, parseZip } from "./archive-nesting.js";
+import { pdfEncryptionStructure } from "./pdf-encryption-structure.js";
 import type { ArchiveInspection, QuarantinePolicy } from "./quarantine.js";
 
 /*
@@ -16,15 +17,19 @@ import type { ArchiveInspection, QuarantinePolicy } from "./quarantine.js";
 export interface QuarantineInspection {
   sniffed: SniffedBytes;
   archive: ArchiveInspection | null;
-  /** PDFs (by libclamav's own test): whether an /Encrypt name appears, which sends the file to the in-VM decryption check. */
-  pdf: { encryptName: boolean } | null;
+  /**
+   * PDFs (by libclamav's own test): whether an /Encrypt name appears, which sends the file to the in-VM decryption check,
+   * and whether its readers could disagree on the encryption (pdf-encryption-structure.ts, council N-H1): refused.
+   */
+  pdf: { encryptName: boolean; encryptConflict: boolean } | null;
 }
 
 export function inspectQuarantineBytes(bytes: Buffer, filename: string, policy: QuarantinePolicy): QuarantineInspection {
   const encryptName = pdfHasEncryptName(bytes);
   const sniffed = sniffFileBytes(bytes, filename);
-  const archive = inspectArchive(bytes, filename, policy) ?? (sniffed.container === null ? embeddedContainerInspection(bytes) : null);
-  return { sniffed, archive, pdf: encryptName === null ? null : { encryptName } };
+  const archive = inspectArchive(bytes, filename, policy)
+    ?? (sniffed.container === null ? embeddedContainerInspection(bytes, embeddedDocumentAllowed(sniffed, encryptName !== null)) : null);
+  return { sniffed, archive, pdf: encryptName === null ? null : { encryptName, encryptConflict: encryptName && pdfEncryptionStructure(bytes).conflict !== null } };
 }
 
 /**
@@ -33,8 +38,8 @@ export function inspectQuarantineBytes(bytes: Buffer, filename: string, policy: 
  * PDF+ZIP polyglot or a self-extractor. Refused as `archive-embedded-container`; null when there is none. OLE2 files are
  * left to ClamAV's own OLE2 parser, since Office embeds packages (a DOCX inside a .doc) at offsets inside its streams.
  */
-function embeddedContainerInspection(bytes: Buffer): ArchiveInspection | null {
-  if (!findEmbeddedContainer(bytes)) return null;
+function embeddedContainerInspection(bytes: Buffer, documentAllowed = true): ArchiveInspection | null {
+  if (!findEmbeddedContainer(bytes) && (documentAllowed || !findEmbeddedDocument(bytes))) return null;
   return {
     kind: "zip",
     entryCount: 0,
@@ -48,6 +53,37 @@ function embeddedContainerInspection(bytes: Buffer): ArchiveInspection | null {
     issues: ["archive-embedded-container"],
     chartParts: 0
   };
+}
+
+/**
+ * Council N-L2: a binary file that is neither a PDF nor a container by its leading bytes (MPEG audio, AAC, QuickTime and
+ * HEIC are accepted without a magic number: file-sniff.ts MAGIC_BOUND_MIMES; images and other media by theirs) must not
+ * carry a PDF or an OLE2 compound file where a reader finds one. pdf.js and poppler open a PDF whatever precedes `%PDF-`,
+ * and locate it from `startxref` at the end; ClamAV, typing the file by its first bytes, never parses it as a PDF. Text
+ * files are exempt (a note may quote `%PDF-`), and so is a file the PDF check already covers.
+ */
+function embeddedDocumentAllowed(sniffed: SniffedBytes, pdfHeader: boolean): boolean {
+  return pdfHeader || sniffed.encoding !== null || sniffed.mimeType === "application/pdf";
+}
+
+const PDF_HEADER = Buffer.from("%PDF-", "latin1");
+const PDF_STARTXREF = Buffer.from("startxref", "latin1");
+const OLE2_MAGIC = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+/** How far into a binary file a PDF header or an OLE2 header is searched for, and how much of its end for `startxref`. */
+const EMBEDDED_DOCUMENT_HEAD_BYTES = 64 * 1024;
+const EMBEDDED_DOCUMENT_TAIL_BYTES = 4 * 1024;
+
+/** A PDF (`%PDF-` near the start or `startxref` near the end) or an OLE2 header at an offset; bounded reads only. */
+export function findEmbeddedDocument(bytes: Buffer): { format: "pdf" | "ole2"; offset: number } | null {
+  const head = bytes.subarray(0, EMBEDDED_DOCUMENT_HEAD_BYTES);
+  const pdf = head.indexOf(PDF_HEADER);
+  if (pdf >= 0) return { format: "pdf", offset: pdf };
+  const tailStart = Math.max(0, bytes.length - EMBEDDED_DOCUMENT_TAIL_BYTES);
+  const startxref = bytes.subarray(tailStart).lastIndexOf(PDF_STARTXREF);
+  if (startxref >= 0) return { format: "pdf", offset: tailStart + startxref };
+  const ole = head.indexOf(OLE2_MAGIC, 1);
+  if (ole > 0) return { format: "ole2", offset: ole };
+  return null;
 }
 
 export function sniffMimeType(bytes: Buffer, filename: string): string | null {
@@ -168,8 +204,8 @@ export function describeArchiveIssue(issue: string, archive: ArchiveInspection):
     case "archive-nested-entry-size-limit": return "a nested archive entry exceeds the entry size limit";
     case "archive-nested-entry-count-limit": return "a nested archive has too many entries";
     case "archive-nested-encrypted-entry": return "a nested archive has encrypted entries, which cannot be scanned";
-    case "archive-nested-unsupported-format": return "a nested archive is in a format the malware scanner cannot open (such as RAR)";
-    case "archive-nested-uninspectable": return "a nested archive is in a format only the malware scanner opens (such as 7z, tar or CAB)";
+    case "archive-nested-unsupported-format": return "a nested archive is in a format that cannot be inspected (such as RAR, 7z, bzip2 or xz)";
+    case "archive-nested-uninspectable": return "a nested archive is in a format only the malware scanner opens (such as CAB)";
     case "archive-nested-depth-limit": return "archives are nested deeper than the malware scanner's recursion limit";
     case "archive-nested-inspection-failed": return "a nested archive could not be inspected safely";
     case "archive-nested-expanded-bytes-limit": return "nested archives expand past the total size limit";
