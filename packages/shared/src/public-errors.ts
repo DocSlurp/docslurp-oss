@@ -104,12 +104,68 @@ export const DOCUMENT_FAILURE_MARKERS = {
   imageFramesUnfunded: "Image frames counted beyond the balance",
 } as const;
 
+/**
+ * Public reasons a quarantine refusal reaches users as, with reviewed copy. The worker's stage error starts with
+ * `quarantined [<reason codes>]:` (quarantineFailureText); the codes are its own closed vocabulary, mapped here. Raw
+ * scanner output, qpdf stderr and signature names stay in the quarantine artifact and telemetry.
+ */
+export const QUARANTINE_PUBLIC_REASONS = {
+  "quarantine-malware": "This file was blocked because the malware scanner flagged it.",
+  "quarantine-encrypted": "This file is encrypted or password-protected, so it can’t be scanned for malware. Remove the password and upload it again.",
+  "quarantine-file-type": "This file’s contents don’t match its file type (for example, extra data before the file’s header, or a second file hidden inside it). Re-save or re-export it and upload it again.",
+  "quarantine-archive": "This file contains an attachment or embedded archive that can’t be scanned safely (encrypted, in an unsupported format, or hidden). Remove the attachment and upload it again.",
+  "quarantine-scan-limit": "This file is too large, holds too many files, or is nested too deeply for the malware scanner to check completely. Split or simplify it and upload it again.",
+  "quarantine-scan-failed": "We couldn’t finish the malware scan for this file. Please try again.",
+  "quarantine-rescan-required": "This file must be scanned again by the current malware checks before it can be read. Reprocess it to continue.",
+} as const;
+export type QuarantinePublicReason = keyof typeof QUARANTINE_PUBLIC_REASONS;
+
+/** Most specific first: a file refused for several reasons shows the one the uploader most needs to act on. */
+const QUARANTINE_REASON_PRIORITY: readonly QuarantinePublicReason[] = [
+  "quarantine-malware",
+  "quarantine-encrypted",
+  "quarantine-file-type",
+  "quarantine-archive",
+  "quarantine-scan-limit",
+  "quarantine-rescan-required",
+  "quarantine-scan-failed",
+];
+
+/** The public reason of one worker quarantine reason code; unknown codes are a scan failure, never echoed. */
+export function quarantinePublicReason(code: string): QuarantinePublicReason {
+  if (code === "malware-detected") return "quarantine-malware";
+  if (code === "parse-source-unscanned") return "quarantine-rescan-required";
+  if (code === "malware-scan-encrypted-content" || code === "malware-scan-pdf-decrypt-failed" || code === "pdf-encryption-inconsistent" || code === "archive-encrypted-entry" || code === "archive-nested-encrypted-entry" || code === "archive-nested-encrypted-pdf") return "quarantine-encrypted";
+  if (code === "mime-mismatch" || code === "archive-embedded-container" || code === "quarantine-inspection-inconsistent") return "quarantine-file-type";
+  if (code === "malware-scan-limit-exceeded" || /^archive-(?:nested-)?(?:entry-count|depth|expanded-bytes|entry-size|expansion-ratio|object-count)-limit$/.test(code)) return "quarantine-scan-limit";
+  if (code.startsWith("archive-")) return "quarantine-archive";
+  return "quarantine-scan-failed";
+}
+
+const QUARANTINE_TEXT = /\bquarantined \[([a-z0-9,-]{1,2000})\]/;
+
+/** The worker's stage error for a quarantine refusal: the reason codes in a parseable prefix, then the reviewed messages. */
+export function quarantineFailureText(codes: readonly string[], messages: readonly string[]): string {
+  const safe = [...new Set(codes.filter((code) => /^[a-z0-9-]{1,80}$/.test(code)))];
+  return `quarantined [${safe.join(",")}]: ${messages.join("; ")}`;
+}
+
+/** The public quarantine reason of a stored error, or null when it is not a quarantine refusal. */
+export function quarantineReasonOf(error: string | null | undefined): QuarantinePublicReason | null {
+  const match = error ? QUARANTINE_TEXT.exec(error) : null;
+  if (!match) return null;
+  const reasons = new Set(match[1]!.split(",").filter(Boolean).map(quarantinePublicReason));
+  return QUARANTINE_REASON_PRIORITY.find((reason) => reasons.has(reason)) ?? "quarantine-scan-failed";
+}
+
 /** Public copy for a stored Document, stage or Run error. Never echoes the raw text. */
 export function publicDocumentError(error: string | null | undefined): string | null {
   if (!error) return null;
   for (const [key, marker] of Object.entries(DOCUMENT_FAILURE_MARKERS)) {
     if (error.includes(marker)) return PUBLIC_ERROR_MESSAGES[key as keyof typeof DOCUMENT_FAILURE_MARKERS];
   }
+  const quarantine = quarantineReasonOf(error);
+  if (quarantine) return QUARANTINE_PUBLIC_REASONS[quarantine];
   return PUBLIC_ERROR_MESSAGES.processing;
 }
 

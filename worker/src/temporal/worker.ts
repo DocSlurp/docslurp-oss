@@ -177,6 +177,14 @@ async function main(): Promise<void> {
   configureSourceQuarantine(postgresSourceQuarantine(store.stageSql));
   const openSession = (activityId: string) => sandbox.provider.openSession(sandbox.config, { activityId });
   const runner = new CommandRunner({ openSession, shardCalibration: createShardCalibration(store) });
+  // Outside production a local clamd may serve quarantine scans: check its effective policy now (clamd-policy.ts), so a
+  // misconfigured daemon is reported at startup. Every scan checks again before trusting it; this only reports early.
+  if (process.env.NODE_ENV !== "production") {
+    void runner.verifyLocalClamDaemon().then(
+      (verdict) => { if (verdict?.trusted) console.log("[quarantine] status=clamd-policy-verified: the local clamd reports encrypted content and limit hits"); },
+      (error: unknown) => console.error(`[quarantine] status=clamd-policy-check-failed error=${JSON.stringify(error instanceof Error ? error.message : String(error))}`),
+    );
+  }
   const storage = new ArtifactStore(cfg);
   const stages = createStages({ runner, storage, config: cfg, mediaJournal: store.mediaJournal, capacityStore: store.capacityLeaseStore([]), sql: store.stageSql, store });
 

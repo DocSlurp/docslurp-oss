@@ -30,6 +30,7 @@ const tempRoots: string[] = [];
 
 function makeDocument(): Document {
   return {
+    parseSourceDecision: "unscanned-allowed",
     id: "doc-1",
     userId: "user-1",
     runId: "run-1",

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_OPENROUTER_VISION_MODEL, defaultPipelineFeatures, visionModelCatalogById, ingestReportSchema, mergePipelineFeatures, requestsIngestReport, ingestReportFocusPages, partialExtractionMessage, type PipelineFeatures } from "@docslurp/shared";
+import { QUARANTINE_PUBLIC_REASONS, DEFAULT_OPENROUTER_VISION_MODEL, defaultPipelineFeatures, visionModelCatalogById, ingestReportSchema, mergePipelineFeatures, requestsIngestReport, ingestReportFocusPages, partialExtractionMessage, type PipelineFeatures } from "@docslurp/shared";
 
 vi.mock("../db.js", () => ({ sql: vi.fn() }));
 vi.mock("./usage-attribution.js", () => ({ projectRunsUsageCost: vi.fn(async () => ({ costCents: 0, billedCostCents: 0, computeEstimated: false })) }));
@@ -325,6 +325,29 @@ describe("ingest report: failed files", () => {
     const visible = `${JSON.stringify(report)}\n${summarizeIngestReport(report)}`;
     expect(visible).not.toMatch(/hunter2|\/srv\/app/);
     expect(summarizeIngestReport(report)).toContain("The file is password-protected or encrypted.");
+  });
+
+  it.each([
+    ["quarantined [malware-detected]: malware detected", "quarantine-malware", false],
+    ["quarantined [malware-scan-encrypted-content]: file is encrypted or password-protected", "quarantine-encrypted", false],
+    ["quarantined [malware-scan-pdf-decrypt-failed]: encrypted PDF could not be decrypted for a malware scan", "quarantine-encrypted", false],
+    ["quarantined [mime-mismatch]: declared application/pdf but sniffed unknown", "quarantine-file-type", false],
+    ["quarantined [archive-embedded-container]: file holds an archive", "quarantine-file-type", false],
+    ["quarantined [archive-nested-zip64,archive-nested-embedded-container]: a nested archive uses ZIP64", "quarantine-archive", false],
+    ["quarantined [archive-nested-ole-shared-sectors]: an embedded Office (OLE2) file", "quarantine-archive", false],
+    ["quarantined [archive-nested-expanded-bytes-limit]: nested archives expand past the total size limit", "quarantine-scan-limit", false],
+    ["quarantined [malware-scan-limit-exceeded]: file exceeds the malware scanner's limits", "quarantine-scan-limit", false],
+    ["quarantined [malware-scan-error]: malware scan failed", "quarantine-scan-failed", true],
+    ["quarantined [archive-nested-zip64,malware-detected]: both", "quarantine-malware", false],
+  ] as const)("a quarantine refusal reaches the report as its own reason with reviewed copy: %s", (error, reason, retryable) => {
+    const report = build({
+      documents: [doc("q", { filename: "q.pdf", mimeType: "application/pdf", status: "failed", pageCount: 1 })],
+      stages: [{ documentId: "q", stage: "quarantine", status: "failed", skipped: false, reason: null, selectedPages: null, pages: null, costCents: null, tablePages: null, durationSeconds: null, error: `${error} (Win.Test.EICAR_HDB-1 at /srv/clam/tmp)` }],
+    });
+    expect(report.failures.byReason).toEqual([{ reason, documents: 1 }]);
+    const [failure] = report.failures.examples;
+    expect(failure).toMatchObject({ stage: "quarantine", reason, retryable, message: QUARANTINE_PUBLIC_REASONS[reason] });
+    expect(`${JSON.stringify(report)}\n${summarizeIngestReport(report)}`).not.toMatch(/EICAR_HDB|\/srv\/clam|quarantined \[/);
   });
 
   it("lists files with dense pages (possible hidden or stuffed text) and says so in the summary", () => {

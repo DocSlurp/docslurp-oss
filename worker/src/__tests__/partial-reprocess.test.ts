@@ -15,6 +15,7 @@ import type { ArtifactStore } from "../tools/storage.js";
 import { runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
 import type { Stage } from "../pipeline/pipeline.js";
 import { createStageExecution } from "../pipeline/stage-execution.js";
+import { applyParseSource } from "../lib/parse-source.js";
 import { resolvePipelineWorkflowStageOrder } from "../temporal/pipeline-workflow-plan.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
@@ -111,8 +112,11 @@ async function seedPartialRun(pipeline: PipelineFeatures, reusedFrom: string | n
   `;
 }
 
-/** Fake stages for every pipeline stage; they log what they run and the inputs they read. */
-function recordingStages() {
+/**
+ * Fake stages for every pipeline stage; they log what they run and the inputs they read. The fake quarantine records a
+ * parse decision as the real one does (lib/parse-source.ts): with `scannedCopy`, a copy under this run's own artifacts.
+ */
+function recordingStages(options: { scannedCopy?: boolean } = {}) {
   const executed: string[] = [];
   const inputs: Record<string, string | undefined> = {};
   const stages: Stage[] = pipelineStageOrder.map((name) => ({
@@ -122,9 +126,16 @@ function recordingStages() {
       await runDocuments(state.documents, 1, async (document) => {
         const slot = name === "embed" ? `${document.id}:embeddings` : `${document.id}:${name}`;
         await runDocumentStage(state, document, name, slot, `${name} ready`, async () => {
+          if (name === "quarantine") {
+            const copy = options.scannedCopy ? { key: `u1/${state.run.id}/quarantine/${document.id}.scanned.pdf`, sha256: "c".repeat(64) } : null;
+            const decision = { copy, scannedSha256: "a".repeat(64) };
+            await state.store!.setDocumentParseSource!(state.run.id, document.id, decision);
+            applyParseSource(document, decision);
+          }
           if (name === "embed") {
             inputs.embedMarkdown = state.artifactLedger.readDocument(document.id, "markdown");
             inputs.embedCanonical = state.artifactLedger.readDocument(document.id, "canonical-document");
+            inputs.embedSourceKey = document.sourceKey;
             state.usageLedger.record({
               provider: "openai", model: "text-embedding-3-small", metric: "embedding-tokens",
               amount: 40, unit: "token", inputTokens: 40, costCents: 0.01,
@@ -165,8 +176,9 @@ describe("partial reprocess", () => {
 
     const { stageOrder, artifacts } = await runWorkflow(stages, pipeline);
 
-    expect(stageOrder).toEqual(["embed", "index"]);
-    expect(executed).toEqual(["embed", "index"]);
+    // Quarantine always re-runs (council R7-H1): parsers read only this run's own scan decision.
+    expect(stageOrder).toEqual(["quarantine", "embed", "index"]);
+    expect(executed).toEqual(["quarantine", "embed", "index"]);
     // embed reads the source document's extraction, re-keyed to the new document.
     expect(inputs.embedMarkdown).toBe("s3://b/u1/run-src/markdown/src.md");
     expect(inputs.embedCanonical).toBe("s3://b/u1/run-src/canonical/src.json");
@@ -182,7 +194,7 @@ describe("partial reprocess", () => {
     `;
     const byStage = new Map(states.map((row) => [row.stage_name, row.reused]));
     expect(byStage.get("extract-markdown")).toBe(true);
-    expect(byStage.get("quarantine")).toBe(true);
+    expect(byStage.get("quarantine")).toBe(false);
     expect(byStage.get("embed")).toBe(false);
     expect(byStage.get("index")).toBe(false);
 
@@ -191,7 +203,7 @@ describe("partial reprocess", () => {
     const usage = await sql<{ metric: string; stage: string | null }[]>`
       select metric, metadata->>'stage' as stage from usage_events where run_id = 'run-re' order by metric, stage
     `;
-    expect(usage.filter((row) => row.metric === "worker-stage").map((row) => row.stage).sort()).toEqual(["embed", "index"]);
+    expect(usage.filter((row) => row.metric === "worker-stage").map((row) => row.stage).sort()).toEqual(["embed", "index", "quarantine"]);
     expect(usage.map((row) => row.metric)).not.toContain("vision-tokens");
     expect(usage.filter((row) => row.metric === "embedding-tokens")).toHaveLength(1);
 
@@ -213,7 +225,7 @@ describe("partial reprocess", () => {
 
     await runWorkflow(stages, pipeline);
 
-    expect(executed).toEqual(["page-index"]);
+    expect(executed).toEqual(["quarantine", "page-index"]);
     expect(inputs.pageIndexMarkdown).toBe("s3://b/u1/run-src/markdown/src.md");
     const chunks = await sql<{ text: string; run_id: string }[]>`select text, run_id from document_chunks where document_id = 're'`;
     expect(chunks).toEqual([{ text: "prior chunk", run_id: "run-re" }]);
@@ -246,8 +258,25 @@ describe("partial reprocess", () => {
     expect(await snapshot()).toEqual(before);
   }, 60_000);
 
+  it("a partial run re-runs quarantine and parses its own scanned copy, never the source run's copy or the original (council R7-H1)", async () => {
+    await seedSourceRun(defaultPipelineFeatures);
+    await sql`update documents set parse_source_key = 'u1/run-src/quarantine/src.scanned.pdf', parse_source_sha256 = ${"a".repeat(64)}, parse_source_scan_version = 1 where id = 'src'`;
+    const pipeline = { ...defaultPipelineFeatures, stageSubset: ["embed", "index"] };
+    await seedPartialRun(pipeline);
+    const { stages, inputs, executed } = recordingStages({ scannedCopy: true });
+
+    await runWorkflow(stages, pipeline);
+
+    expect(executed[0]).toBe("quarantine");
+    expect(inputs.embedSourceKey).toBe("u1/run-re/quarantine/re.scanned.pdf");
+    const [row] = await sql<{ parse_source_key: string | null; source_key: string; parse_source_scan_version: number | null }[]>`
+      select parse_source_key, source_key, parse_source_scan_version from documents where id = 're'`;
+    expect(row).toEqual({ parse_source_key: "u1/run-re/quarantine/re.scanned.pdf", source_key: "raw/a.pdf", parse_source_scan_version: 1 });
+  }, 60_000);
+
   it("retention skips a source run while a partial run reuses it, and run start re-checks after a purge", async () => {
     await seedSourceRun(defaultPipelineFeatures);
+    await sql`update documents set parse_source_key = 'u1/run-src/quarantine/src.scanned.pdf', parse_source_sha256 = ${"b".repeat(64)}, parse_source_scan_version = 1 where id = 'src'`;
     await sql`update projects set artifact_retention_days = 1 where id = 'w'`;
     await sql`update project_runs set created_at = now() - interval '10 days' where id = 'run-src'`;
     const pipeline = { ...defaultPipelineFeatures, restartFromStage: "embed" };
@@ -267,6 +296,8 @@ describe("partial reprocess", () => {
       await sql`update project_runs set status = 'failed' where id = 'run-re'`;
       await purge();
       expect(deleted).toContain("u1/run-src/markdown/src.md");
+      // The scanned parse copy of an encrypted PDF (lib/parse-source.ts) goes with the run's artifacts.
+      expect(deleted).toContain("u1/run-src/quarantine/src.scanned.pdf");
 
       // A run created before the purge finds the artifacts gone and fails clearly.
       await sql`update project_runs set status = 'queued' where id = 'run-re'`;

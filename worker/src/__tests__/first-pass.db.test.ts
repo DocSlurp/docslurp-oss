@@ -54,11 +54,11 @@ async function seed(pipeline: Record<string, unknown> = {}) {
     insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
       values ('r1', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '${JSON.stringify(pipeline)}', 3, 3),
              ('r2', 'o2', 'u1', 'w2', 'upload', 'processing', 'extract', '{}', 1, 1);
-    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_size)
-      values ('d0', 'o1', 'u1', 'w', 'r1', 'a.pdf', 'application/pdf', 'u1/k0', 'processing', 1, 'assumed', 100),
-             ('d1', 'o1', 'u1', 'w', 'r1', 'b.pdf', 'application/pdf', 'u1/k1', 'processing', 1, 'assumed', 100),
-             ('d2', 'o1', 'u1', 'w', 'r1', 'c.pdf', 'application/pdf', 'u1/k2', 'processing', 1, 'assumed', 100),
-             ('x0', 'o2', 'u1', 'w2', 'r2', 'x.pdf', 'application/pdf', 'u1/kx', 'processing', 1, 'assumed', 100);
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_size, parse_source_scan_version, parse_source_sha256)
+      values ('d0', 'o1', 'u1', 'w', 'r1', 'a.pdf', 'application/pdf', 'u1/k0', 'processing', 1, 'assumed', 100, 1, '${SOURCE_SHA}'),
+             ('d1', 'o1', 'u1', 'w', 'r1', 'b.pdf', 'application/pdf', 'u1/k1', 'processing', 1, 'assumed', 100, 1, '${SOURCE_SHA}'),
+             ('d2', 'o1', 'u1', 'w', 'r1', 'c.pdf', 'application/pdf', 'u1/k2', 'processing', 1, 'assumed', 100, 1, '${SOURCE_SHA}'),
+             ('x0', 'o2', 'u1', 'w2', 'r2', 'x.pdf', 'application/pdf', 'u1/kx', 'processing', 1, 'assumed', 100, 1, '${SOURCE_SHA}');
   `);
 }
 
@@ -160,6 +160,8 @@ function stages(): Stage[] {
 }
 
 const SOURCE = "%PDF-1.7 trusted test bytes; never parsed here";
+/** What quarantine scanned: the decision binds parsers to these bytes (PR #339 R8-L1). */
+const SOURCE_SHA = createHash("sha256").update(SOURCE).digest("hex");
 let stored: Map<string, unknown>;
 let downloads: string[];
 function fakeStorage() {
@@ -410,7 +412,7 @@ describe("first pass: council #340 regressions", () => {
   });
 
   it("H2: deferral uses the planner's predicate: an oversized or unsized PDF is counted by format-detect; the plan counts any PDF it leaves out", async () => {
-    const pdf = { mimeType: "application/pdf", fileFacts: null, status: "processing" };
+    const pdf = { mimeType: "application/pdf", fileFacts: null, status: "processing", parseSourceDecision: "original" as const };
     expect(firstPassDefersPageCount({ firstPassRun: true }, { ...pdf, sourceBytes: 100 })).toBe(true);
     expect(firstPassDefersPageCount({ firstPassRun: true }, { ...pdf, sourceBytes: 2 << 20 })).toBe(false);
     expect(firstPassDefersPageCount({ firstPassRun: true }, { ...pdf, sourceBytes: null })).toBe(false);

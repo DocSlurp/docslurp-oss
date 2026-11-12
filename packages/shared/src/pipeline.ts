@@ -1300,7 +1300,12 @@ export interface StageDataFlow {
 const extractedText = ["markdown", "canonical-document", "extraction-contract"] as const;
 
 export const stageDataFlow: Record<PipelineRunStage, StageDataFlow> = {
-  quarantine: { produces: ["quarantine"] },
+  quarantine: {
+    produces: ["quarantine"],
+    // Fail closed (council R7-H1): parsers read only what this run's own quarantine decided and scanned (worker
+    // lib/parse-source.ts); another run's decision predates this build or its copy goes with that run's retention.
+    alwaysRerun: "every parse reads the scan decision and scanned copy of this run's own quarantine",
+  },
   "format-detect": { produces: ["normalizedFormat"] },
   "to-canonical": { consumes: ["normalizedFormat"], produces: ["to-canonical"] },
   "format-tooling": { consumes: ["normalizedFormat"], produces: ["format-tooling"] },

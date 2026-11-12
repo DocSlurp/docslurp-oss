@@ -68,6 +68,10 @@ export interface FileFacts {
 
 const ZIP_SIGNATURES = [[0x50, 0x4b, 0x03, 0x04], [0x50, 0x4b, 0x05, 0x06], [0x50, 0x4b, 0x07, 0x08]];
 const OLE_SIGNATURE = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+/** `Rar!\x1a\x07` (RAR 4 and 5). Not an accepted format, and the worker's malware scanner cannot open it. */
+const RAR_SIGNATURE = [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07];
+/** The sniffed type of RAR bytes: unsupported, so any declared type is an unresolved mismatch (refused). */
+export const RAR_MIME = "application/vnd.rar";
 const SAMPLE_BYTES = 8192;
 const MAX_ZIP_NAMES = 10_000;
 const ZIP_END_SIGNATURE = 0x06054b50;
@@ -307,6 +311,9 @@ export function sniffFileBytes(input: Uint8Array, filename = "", options: SniffO
     if (head.includes("matroska")) return { ...none, mimeType: "video/x-matroska" };
     return { ...none, mimeType: fileExtension(filename) === ".weba" ? "audio/webm" : "video/webm" };
   }
+  // RAR under any declared type is refused: ClamAV builds without the non-free unrar module (Debian's) report every RAR
+  // clean, encrypted or not (council re-check 2 matrix), so it must never pass as the type it claims.
+  if (startsWith(bytes, RAR_SIGNATURE)) return { ...none, mimeType: RAR_MIME };
   if (ascii(bytes, 0, 4) === "OggS") return { ...none, mimeType: "audio/ogg" };
   if (ascii(bytes, 0, 4) === "fLaC") return { ...none, mimeType: "audio/flac" };
   if (ascii(bytes, 0, 3) === "ID3") return { ...none, mimeType: "audio/mpeg" };
@@ -324,6 +331,40 @@ export function sniffFileBytes(input: Uint8Array, filename = "", options: SniffO
 }
 
 const TEXT_FAMILY_MIME = (mimeType: string | null) => mimeFamily(mimeType) === "text";
+
+/**
+ * Types whose bytes start with a fixed magic number that sniffFileBytes recognises at offset 0: PDF, every ZIP-based and
+ * OLE2 Office type, EPUB and OpenDocument, and the image and media containers. MPEG audio and AAC (a frame sync, with an
+ * optional ID3 tag, that decoders resynchronise to), QuickTime (older files start with a `moov` or `mdat` atom, not
+ * `ftyp`) and HEIC (not sniffed) are not: an unrecognised sniff keeps those declared.
+ */
+export const MAGIC_BOUND_MIMES: ReadonlySet<string> = new Set([
+  "application/pdf",
+  ...ZIP_CONTAINER_MIMES,
+  ...OLE_CONTAINER_MIMES,
+  "image/png",
+  "image/jpeg",
+  "image/tiff",
+  "image/webp",
+  "audio/wav",
+  "audio/flac",
+  "audio/ogg",
+  "audio/mp4",
+  "audio/webm",
+  "video/mp4",
+  "video/webm",
+  "video/x-matroska",
+  "video/x-msvideo",
+]);
+
+/** Whether the type a document would be routed as (its MIME type, or the extension when the type names no format) has fixed magic bytes. */
+function magicBoundMime(mimeType: string, filename: string): boolean {
+  const canonical = canonicalMimeType(mimeType) ?? (MAGIC_BOUND_MIMES.has(bareMimeType(mimeType)) ? bareMimeType(mimeType) : null);
+  if (canonical) return MAGIC_BOUND_MIMES.has(canonical);
+  // An unknown declared type is routed on the extension (detectFileFormat), so the extension's type decides.
+  const extensionMime = MIME_BY_EXTENSION[fileExtension(filename)];
+  return !!extensionMime && MAGIC_BOUND_MIMES.has(extensionMime);
+}
 
 /**
  * The facts of a file: the sniffed type reconciled with the declared MIME type and the extension. Pure; intake runs it once
@@ -354,7 +395,11 @@ export function fileFactsFromSniff(sniffed: SniffedBytes, file: { filename: stri
   });
   const fallback = declared ?? extensionMime ?? (declaredBare || "application/octet-stream");
 
-  if (!sniffed.mimeType) return facts(fallback, "none");
+  // Bytes nothing recognises keep the declared type only when that type has no magic number: a PDF, ZIP or OLE file whose
+  // magic is not at offset 0 (junk or a prefix before it) is refused, never confirmed by an empty sniff. Extractors
+  // tolerate such prefixes (pdf.js and poppler look for `%PDF-` in the first KB, Python's zipfile finds the end record
+  // anywhere) while the malware scanner types the file by its first bytes and skips its PDF or ZIP parsing.
+  if (!sniffed.mimeType) return facts(fallback, magicBoundMime(fallback, file.filename) ? "unresolved" : "none");
 
   if (inspection === "header" && sniffed.container) {
     // The container's contents are the worker's to read. Here the declaration (or the extension) stands if a container of

@@ -1,4 +1,5 @@
 import { withPreparedHtmlTables } from "../pipeline/html-table-vm.js";
+import { effectiveParseSourceDecision, isUnscannedParseSourceKey } from "../lib/parse-source.js";
 import { randomBytes } from "node:crypto";
 import { rm } from "node:fs/promises";
 import path from "node:path";
@@ -327,6 +328,14 @@ export async function materializePageRange(
   if (sourceVersion.source_materialization_blocked) {
     await markPages(deps.sql, documentId, pages, "failed", { claimedBy: input.runId, failureReason: "source-content-invalidated" });
     result.failed = pages.map(page => ({ page, reason: "source-content-invalidated" }));
+    return result;
+  }
+  // Fail closed (council R7-H1): a document with no parse decision from this build's quarantine (quarantined before it) is
+  // never read from its upload; its pages fail until a reprocess re-quarantines it.
+  if (effectiveParseSourceDecision(document) === "unscanned" || isUnscannedParseSourceKey(document.sourceKey)) {
+    console.error(`[worker-source] status=parse-source-unscanned metric=parse_source_unscanned document=${documentId} run=${input.runId} pages=${pages.length}`);
+    await markPages(deps.sql, documentId, pages, "failed", { claimedBy: input.runId, failureReason: "source-unscanned" });
+    result.failed = pages.map(page => ({ page, reason: "source-unscanned" }));
     return result;
   }
 

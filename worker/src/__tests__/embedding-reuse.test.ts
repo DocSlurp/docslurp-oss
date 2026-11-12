@@ -168,6 +168,7 @@ async function runEmbed(args: EmbedArgs) {
   const sourceKey = `u1/${args.runId}/source/${args.documentId}.txt`;
   args.storage.objects.set(sourceKey, args.text ?? SECTIONS.join("\n\n"));
   const document: Document = {
+    parseSourceDecision: "unscanned-allowed",
     id: args.documentId, userId: "u1", runId: args.runId, filename: "handbook.txt", mimeType: "text/plain",
     sourceKey, status: "processing", extractionMode: "hybrid", pageCount: 1,
     createdAt: new Date(), updatedAt: new Date(),

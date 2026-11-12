@@ -37,6 +37,29 @@ export class SourceIntegrityError extends SourceRefusalError {
   }
 }
 
+/**
+ * A parser staged the original upload of a document whose quarantine replaced it with a scanned copy (lib/parse-source.ts):
+ * those bytes were never scanned as a parser reads them. Final, like any source refusal.
+ */
+export class ParseSourceError extends SourceRefusalError {
+  constructor(documentId: string) {
+    super(`document ${documentId} refused: a parser read its original instead of the scanned copy`, documentId);
+    this.name = "ParseSourceError";
+  }
+}
+
+/**
+ * A document with no parse decision from this build's quarantine (lib/parse-source.ts): refused before any parser reads a
+ * byte. The text leads with a quarantine reason code, which public-errors.ts maps to reviewed copy.
+ */
+export class UnscannedParseSourceError extends SourceRefusalError {
+  static readonly CODE = "parse-source-unscanned";
+  constructor(documentId: string, detail = "it has no parse decision from this build's quarantine") {
+    super(`quarantined [${UnscannedParseSourceError.CODE}]: document ${documentId} refused: ${detail}`, documentId);
+    this.name = "UnscannedParseSourceError";
+  }
+}
+
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const STAGED_LIMIT = 4096;
 /** documentId -> sha256 of the bytes this process staged for it (bounded, oldest first out). */
@@ -51,6 +74,23 @@ interface HashedDocument {
   id: string;
   sourceKey: string;
   sourceSha256?: string | null;
+  /** Set when quarantine's scanned copy replaces the upload for parsing (lib/parse-source.ts): the upload's hash. */
+  originalSourceSha256?: string | null;
+  /** lib/parse-source.ts: "unscanned" (no decision from this build's quarantine) is refused before any byte is read. */
+  parseSourceDecision?: string;
+}
+
+/**
+ * lib/parse-source.ts assertParseSourceDecided (which imports this module): an unscanned document, or its unreadable key
+ * (lib/parse-source.ts unscannedParseSourceKey starts with a NUL byte), is refused before any byte is read.
+ */
+function assertDecided(document: HashedDocument): void {
+  // A document with no decision field was not built by the loader (which always sets one): unscanned in production (I-1).
+  const missing = document.parseSourceDecision === undefined && (process.env.NODE_ENV ?? "").trim().toLowerCase() === "production";
+  if (missing || document.parseSourceDecision === "unscanned" || (typeof document.sourceKey === "string" && document.sourceKey.startsWith("\u0000"))) {
+    console.error(`[worker-source] status=parse-source-unscanned metric=parse_source_unscanned document=${document.id}`);
+    throw new UnscannedParseSourceError(document.id);
+  }
 }
 
 /**
@@ -58,8 +98,15 @@ interface HashedDocument {
  * Throws SourceIntegrityError (logged) when they differ.
  */
 export function verifyStagedSource(document: HashedDocument, stagedSha256: string): void {
+  assertDecided(document);
   const actual = stagedSha256.toLowerCase();
   const expected = document.sourceSha256?.trim().toLowerCase() || null;
+  // Scan what we parse: the original of a document with a scanned copy is never parsed, whatever key it was fetched by.
+  const original = document.originalSourceSha256?.trim().toLowerCase() || null;
+  if (original && original !== expected && original === actual) {
+    console.error(`[worker-source] status=parse-source-original metric=parse_source_original document=${document.id} source_key=${JSON.stringify(document.sourceKey)}`);
+    throw new ParseSourceError(document.id);
+  }
   if (expected && expected !== actual) {
     console.error(
       `[worker-source] status=source-hash-mismatch metric=source_hash_mismatch document=${document.id} ` +
@@ -69,7 +116,9 @@ export function verifyStagedSource(document: HashedDocument, stagedSha256: strin
   }
   if (!SHA256_HEX.test(actual)) throw new Error(`staged source hash is not a sha256: ${actual.slice(0, 80)}`);
   staged.delete(document.id);
-  staged.set(document.id, actual);
+  // The source quarantine (source-quarantine.ts) lists and checks uploads: a scanned copy (lib/parse-source.ts) is keyed by
+  // the upload it was made from, whose server hash is stable, never by the copy's own (qpdf's copies differ run to run).
+  staged.set(document.id, original && SHA256_HEX.test(original) ? original : actual);
   while (staged.size > STAGED_LIMIT) staged.delete(staged.keys().next().value!);
 }
 
@@ -90,6 +139,7 @@ export async function stageSourceFile(
   pattern: string,
   options?: StorageReadOptions,
 ): Promise<string> {
+  assertDecided(document);
   const filePath = await storage.downloadToTempFile(document.sourceKey, pattern, options);
   try {
     verifyStagedSource(document, await sha256File(filePath));
@@ -103,8 +153,9 @@ export async function stageSourceFile(
 }
 
 /** Read a document's source bytes and verify them. */
-export async function readSourceBytes(storage: Pick<ArtifactStore, "getBytes">, document: HashedDocument): Promise<Buffer> {
-  const bytes = await storage.getBytes(document.sourceKey);
+export async function readSourceBytes(storage: Pick<ArtifactStore, "getBytes">, document: HashedDocument, options?: StorageReadOptions): Promise<Buffer> {
+  assertDecided(document);
+  const bytes = await storage.getBytes(document.sourceKey, options);
   verifyStagedSource(document, sha256Bytes(bytes));
   return bytes;
 }

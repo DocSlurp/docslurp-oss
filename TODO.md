@@ -21,6 +21,26 @@
 
 - Chart export suggestions (2026-11-10): chat offers `chartExport` from a free lexical detector (`packages/shared/src/visual-intent.ts`) plus ingest's visual candidate counts. Escalate ambiguous turns (score just under `VISUAL_INTENT_THRESHOLD`) to the cheapest calibrated decision model, recording usage through the ledger, once the eval shows the lexical detector's misses matter.
 
+## Quarantine scanner snapshots (2026-11-11, `perf/quarantine-latency`, flags off)
+
+- [ ] Enable `DOCSLURP_QUARANTINE_SCAN_SNAPSHOT` on production (council reviewed in PR #339; batch flag removed) and
+  measure `quality=fast` and `quality=auto` 1-page uploads before/after
+  (performance/quarantine-latency-2026-11-11/results.md).
+- [ ] Optional hardening (council M1): run the intake inspection in a plain parser session, so a parser-tool exploit never
+  shares a VM with clamd. One document per session already bounds it to the document that ran the exploit.
+- [ ] Build the scanner snapshot in the background when freshclam updates the signatures (today the first scan after an
+  update waits about 34 s for the build), and share one snapshot across workers instead of one build per worker process.
+- [ ] Residual after the nested-archive walk (PR #339, council round 4, 2026-11-11): a ZIP or RAR is now found behind up
+  to 4 KiB of leading bytes, or by a ZIP end record in a member's last 64 KiB. One deeper inside a member, with no end
+  record near its end, is still not walked, while libclamav's embedded-file scan may open it and skip a ZIP64 member
+  there. Nested 7z, tar, CAB, bzip2, xz and the other formats ClamAV opens are accepted with an
+  `archive-nested-uninspectable` warning (a ZIP64 or RAR inside them is ClamAV's alone to judge); walking tar and the
+  others in the VM would close that. A PDF embedded in a DOCX/EPUB member with an empty user password is scanned by
+  libclamav alone (no qpdf copy). Extractors never open nested members; they are only served back with the original.
+- [ ] Q3 (concurrent quarantine and extraction): split quarantine into the intake inspection (stays first: format-detect
+  reads its verified file facts) and the malware scan, and gate every served artifact on a clean verdict before running
+  the scan beside extraction. Coordinate with the first-pass plan's quarantine precondition.
+
 ## ClamAV definitions in parser VMs (2026-11-06)
 
 - [ ] Each parser VM spends 11–12 s staging the ClamAV definitions, and staging is serialized per worker (council W #7), so VM

@@ -19,11 +19,11 @@ import {
 import { recordUnrecordedUsageTelemetry, withObservation } from "@docslurp/shared/observability";
 import { DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@docslurp/shared";
 import { existsSync, readFileSync, readdirSync, readlinkSync, lstatSync, realpathSync, statSync } from "node:fs";
-import { access, chmod, copyFile, lstat, mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { access, chmod, copyFile, lstat, mkdtemp, open, readFile, readdir, rm, stat } from "node:fs/promises";
 import { createReadStream } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import { AsyncResource } from "node:async_hooks";
+import { AsyncLocalStorage, AsyncResource } from "node:async_hooks";
 import { spawn, type ChildProcess } from "node:child_process";
 import { Readable } from "node:stream";
 import { platform, tmpdir } from "node:os";
@@ -32,7 +32,8 @@ import { finished } from "node:stream";
 import type { Writable } from "node:stream";
 
 import { interpreterRoots, resolveCommandPaths } from "../sandbox/paths.js";
-import { latchedTeardownError, noteSandboxInfrastructureError, sandboxScopeStorage } from "../sandbox/session-context.js";
+import { closeSandboxQuietly, latchedTeardownError, noteSandboxInfrastructureError, runWithSandboxScope, SandboxSessionScope, sandboxScopeStorage } from "../sandbox/session-context.js";
+import { quarantineScanSnapshotEnabled, SCANNER_CONFIG_FILE } from "../sandbox/providers/modal/scanner.js";
 import { admitCommandSource } from "../sandbox/source-quarantine.js";
 import { assertTeardownBreakerClosed } from "../sandbox/teardown-breaker.js";
 import { defaultParserSandbox, registeredParserSandbox } from "../sandbox/startup.js";
@@ -64,6 +65,8 @@ import {
   resolveWorkerDeploymentProfile,
 } from "../pipeline/local-compute-cost.js";
 import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
+import { CLAM_SCAN_COMMAND_TIMEOUT_MS, clamscanLimitArgs, isClamEncryptedAlert } from "./clam-limits.js";
+import { ClamdPolicyCache, type ClamdPolicyVerdict, type ClamdProbeResult } from "./clamd-policy.js";
 
 export interface CommandPlan {
   /** Isolated-VM PDF extraction through the registered provider plugin; dispatched before any local provider or backend. */
@@ -81,6 +84,8 @@ export interface CommandPlan {
    * is never uploaded into the command's job tree (real-Modal P1).
    */
   readOnlyAssetDir?: string;
+  /** Runs only in a malware scanner session (CommandRunner.withMalwareScanner); any other session refuses it. */
+  requiresScanner?: boolean;
   /** Page count for the wall-clock budget; defaults to the document in the perf context. */
   pages?: number;
   /** Explicit wall-clock budget, overriding the page-based one. */
@@ -106,6 +111,106 @@ export interface CommandPlan {
    */
   readOnlyInputs?: boolean;
 }
+
+/**
+ * Bounds of the in-VM qpdf encryption check and decryption (CommandRunner.decryptPdfForScan): address space, CPU time and
+ * wall clock per qpdf run, and the largest decrypted copy (RLIMIT_FSIZE, then checked again). A copy at the limit is a
+ * refusal, never a partial scan. The copy is scanned under the same ClamAV limits, whose MaxFileSize (1024 MiB) is above it.
+ */
+export const PDF_DECRYPT_LIMITS = {
+  addressSpaceMiB: 3072,
+  cpuSeconds: 120,
+  wallMs: 180_000,
+  maxOutputBytes: 768 * 1024 * 1024,
+} as const;
+
+const pdfQpdfLimitArgs = () => ["prlimit", `--as=${PDF_DECRYPT_LIMITS.addressSpaceMiB * 1024 * 1024}`, `--cpu=${PDF_DECRYPT_LIMITS.cpuSeconds}`];
+
+/** `qpdf --requires-password` under PDF_DECRYPT_LIMITS: exit 0 a user password is needed, 3 none is, 2 not encrypted or an error. */
+export function pdfEncryptionCheckArgv(source: string): string[] {
+  const planned = planDocumentToolInvocation({ binary: "qpdf", args: ["--requires-password", source], fileArgIndexes: [1], supportsDoubleDash: false });
+  return [...pdfQpdfLimitArgs(), "--", planned.binary, ...planned.args];
+}
+
+/**
+ * `qpdf --show-encryption` under PDF_DECRYPT_LIMITS: whether the effective trailer names an encryption dictionary. Prints
+ * `File is not encrypted` (exit 0) for a PDF that is not; asked only after `--requires-password` exited 2, which is both
+ * "not encrypted" and "could not read the file".
+ */
+export function pdfShowEncryptionArgv(source: string): string[] {
+  const planned = planDocumentToolInvocation({ binary: "qpdf", args: ["--show-encryption", source], fileArgIndexes: [1], supportsDoubleDash: false });
+  return [...pdfQpdfLimitArgs(), "--", planned.binary, ...planned.args];
+}
+
+/** Whether a `qpdf --show-encryption` result says the file is not encrypted: exit 0 (or 3 with only benign warnings) and that line. */
+export function qpdfReportsNotEncrypted(result: { exitCode: number | null; stdout: string; stderr: string }): boolean {
+  const said = /^File is not encrypted$/m.test(result.stdout);
+  return said && (result.exitCode === 0 || (result.exitCode === 3 && qpdfWarningsBenign(result.stderr)));
+}
+
+/**
+ * `qpdf --decrypt` to a plaintext copy for the scanner: QDF, no object streams, every generalized filter decoded, under
+ * PDF_DECRYPT_LIMITS (RLIMIT_FSIZE: qpdf is killed, SIGXFSZ, rather than write a copy past `maxOutputBytes`, by default
+ * PDF_DECRYPT_LIMITS.maxOutputBytes; pdfRewriteOutputLimit for a PDF qpdf calls unencrypted).
+ */
+export function pdfDecryptArgv(source: string, output: string, maxOutputBytes: number = PDF_DECRYPT_LIMITS.maxOutputBytes): string[] {
+  const planned = planDocumentToolInvocation({ binary: "qpdf", args: ["--decrypt", "--qdf", "--object-streams=disable", "--stream-data=uncompress", source, output], fileArgIndexes: [4, 5], supportsDoubleDash: false });
+  return [...pdfQpdfLimitArgs(), `--fsize=${Math.min(maxOutputBytes, PDF_DECRYPT_LIMITS.maxOutputBytes)}`, "--", planned.binary, ...planned.args];
+}
+
+/**
+ * Council N-L1: the rewrite of a PDF that only names /Encrypt (qpdf calls it unencrypted) is capped at a small multiple of
+ * the input, so one literal `/Encrypt` cannot turn a 200 KB Flate bomb into a 200 MB copy and a second full scan. Ordinary
+ * PDFs decompress well within it (text about 3-10x); a rewrite that would pass it is refused, never truncated.
+ */
+export const PDF_REWRITE_EXPANSION = { multiple: 16, floorBytes: 64 * 1024 * 1024 } as const;
+export function pdfRewriteOutputLimit(inputBytes: number): number {
+  return Math.min(PDF_DECRYPT_LIMITS.maxOutputBytes, Math.max(PDF_REWRITE_EXPANSION.floorBytes, PDF_REWRITE_EXPANSION.multiple * Math.max(0, inputBytes)));
+}
+
+/**
+ * qpdf warnings (exit 3) that leave the decrypted copy complete: recoveries of a stream length every PDF reader performs
+ * the same way, and of a damaged cross-reference table. Any other line, or no warning at all, is not benign.
+ *
+ * Council N-H1: a cross-reference table qpdf had to reconstruct is benign only for a PDF that is not encrypted. Rebuilding
+ * an encrypted file's xref lets readers disagree on which trailer, and so which encryption dictionary and key, applies
+ * (qpdf and poppler take the last trailer, pdf.js the first): the copy qpdf decrypts is then not what pdf.js decrypts.
+ */
+const QPDF_STREAM_RECOVERY_WARNINGS: readonly RegExp[] = [
+  /: reported number of objects \(\d+\) is not one plus the highest object number \(\d+\)$/,
+  /: expected endstream$/,
+  /: attempting to recover stream length$/,
+  /: recovered stream length: \d+$/,
+];
+const QPDF_XREF_RECONSTRUCTION_WARNINGS: readonly RegExp[] = [
+  /: file is damaged$/,
+  /: Attempting to reconstruct cross-reference table$/,
+  /: xref not found$/,
+  /: object has offset 0$/,
+];
+/** qpdf's closing line after warnings: `--decrypt` adds the "resulting file" clause, `--show-encryption` (12.2) does not (council N-L5). */
+const QPDF_WARNINGS_TRAILERS = new Set([
+  "qpdf: operation succeeded with warnings; resulting file may have some problems",
+  "qpdf: operation succeeded with warnings",
+]);
+
+export function qpdfWarningsBenign(stderr: string, options: { encrypted?: boolean } = {}): boolean {
+  const allowed = options.encrypted ? QPDF_STREAM_RECOVERY_WARNINGS : [...QPDF_STREAM_RECOVERY_WARNINGS, ...QPDF_XREF_RECONSTRUCTION_WARNINGS];
+  const lines = stderr.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).filter((line) => !QPDF_WARNINGS_TRAILERS.has(line));
+  return lines.length > 0 && lines.length <= 1000 && lines.every((line) => line.startsWith("WARNING: ") && allowed.some((pattern) => pattern.test(line)));
+}
+
+/** Whether a `qpdf --decrypt` result is a complete copy: exit 0, or 3 with only benign warnings (strict for an encrypted PDF). */
+export function qpdfDecryptComplete(result: { exitCode: number | null; stderr: string }, encrypted: boolean): boolean {
+  return result.exitCode === 0 || (result.exitCode === 3 && qpdfWarningsBenign(result.stderr, { encrypted }));
+}
+
+/** What the in-VM decryption made of an encrypted PDF (CommandRunner.decryptPdfForScan); `ms` is the wall time it took. */
+export type PdfDecryptOutcome =
+  | { status: "requires-password"; ms: number }
+  /** `encrypted: false`: the bytes name /Encrypt but qpdf found no encryption in the effective trailer; the copy is qpdf's normalised rewrite. */
+  | { status: "decrypted"; path: string; bytes: number; ms: number; encrypted: boolean }
+  | { status: "failed"; reason: string; ms: number };
 
 /** Budgets for one `pdfpagecount` run (lib/pdf-page-count.ts PDF_PAGE_COUNT_LIMITS). */
 export interface PdfPageCountLimits {
@@ -177,7 +282,11 @@ const REMOTE_PROGRESS_INTERVAL_MS = 30_000;
 export interface MalwareScanResult {
   engine: "clamscan" | "clamdscan" | null;
   available: boolean;
-  status: "clean" | "infected" | "skipped-unavailable" | "error";
+  /**
+   * `unscannable`: the scanner exited with a detection that only says the content could not be scanned (encrypted archive
+   * members, a PDF needing a user password; isClamEncryptedAlert). Neither malware nor clean; quarantine refuses it.
+   */
+  status: "clean" | "infected" | "unscannable" | "skipped-unavailable" | "error";
   signature: string | null;
   databaseStatus: "fresh" | "stale" | "missing" | "unknown";
   databaseUpdatedAt: string | null;
@@ -1139,21 +1248,151 @@ export class CommandRunner {
     return await this.plan("tiffcp", "-s", source, outputPattern);
   }
 
+  /** clamscan with CLAM_SCAN_LIMITS: files up to the quarantine download cap are scanned, and a limit hit is a detection. */
   async clamScan(source: string): Promise<CommandPlan> {
-    return await this.plan("clamscan", "--no-summary", "--infected", source);
+    const plan = await this.plan("clamscan", ...clamscanLimitArgs(), "--no-summary", "--infected", source);
+    plan.timeoutMs = clamScanTimeoutMs();
+    return plan;
   }
 
   async clamDaemonScan(source: string): Promise<CommandPlan> {
-    const configFile =
-      process.env.DOCSLURP_CLAMAV_CLAMD_CONF?.trim() ||
-      "/etc/clamav/clamd.conf";
     return await this.plan(
       "clamdscan",
       "--no-summary",
       "--fdpass",
-      `--config-file=${configFile}`,
+      `--config-file=${localClamdConfigFile()}`,
       source,
     );
+  }
+
+  /**
+   * Whether the local clamd (clamdscan's config, outside production) may be trusted: its effective policy must report
+   * encrypted content and limit hits as detections (clamd-policy.ts canaries), checked through the same plan a document
+   * scan uses. Cached per config and signature version; null when no clamdscan is available. A refusal is logged loudly.
+   */
+  async verifyLocalClamDaemon(signal?: AbortSignal, databaseUpdatedAt?: string | null): Promise<ClamdPolicyVerdict | null> {
+    const probePlan = await this.clamDaemonScan("/dev/null");
+    if (!probePlan.available) return null;
+    // The daemon's own identity is part of the key (council L3): `clamdscan --version` asks the daemon for its version and
+    // signature version, and its socket's inode and change time differ after any restart, so a daemon restarted with a
+    // weaker config is verified again rather than inheriting the cached verdict.
+    let daemonVersion = "unknown";
+    try {
+      const version = await this.runScanPlan(await this.plan("clamdscan", `--config-file=${localClamdConfigFile()}`, "--version"), signal);
+      if (version.exitCode === 0) daemonVersion = version.stdout.trim().slice(0, 200);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+    }
+    const { key, cacheable } = await localClamdPolicyKey(databaseUpdatedAt ?? inspectClamDatabaseHealth(resolveMalwareScanPolicy()).updatedAt, daemonVersion);
+    const verdict = await localClamdPolicy.verify(key, async (file): Promise<ClamdProbeResult> => {
+      const outcome = await this.runScanPlan(await this.clamDaemonScan(file), signal);
+      return { exitCode: outcome.exitCode, stdout: outcome.stdout, stderr: outcome.stderr };
+    });
+    if (!cacheable) localClamdPolicy.invalidate(key);
+    if (signal?.aborted) {
+      localClamdPolicy.invalidate(key);
+      signal.throwIfAborted();
+    }
+    if (!verdict.trusted) {
+      console.error(`[quarantine] status=clamd-policy-refused config=${JSON.stringify(localClamdConfigFile())} reason=${JSON.stringify(verdict.reason)}: the local clamd is not used`);
+    }
+    return verdict;
+  }
+
+  /** Launch a plan and collect its outcome (local child or remote session) whatever its exit code, releasing the launch either way. */
+  private async runScanPlan(plan: CommandPlan, signal?: AbortSignal, metricPrefix = "malware-scan"): Promise<SandboxResult> {
+    const launched = await this.launch(plan, signal);
+    try {
+      return "remote" in launched
+        ? await this.settleRemote(plan, launched, metricPrefix)
+        : await this.collectChild(plan, launched.child, launched.supervised, metricPrefix);
+    } finally {
+      await launched.release();
+    }
+  }
+
+  /** A `prlimit`-bounded qpdf command (pdfEncryptionCheckArgv / pdfDecryptArgv); unavailable unless both tools are. */
+  private async boundedQpdfPlan(argv: string[]): Promise<CommandPlan> {
+    const plan = await this.plan(argv[0]!, ...argv.slice(1));
+    return { ...plan, available: plan.available && await this.isAvailable("qpdf"), timeoutMs: PDF_DECRYPT_LIMITS.wallMs, readOnlyInputs: true };
+  }
+
+  /**
+   * Owner-decision fix for libclamav's owner-password PDF gap (quarantine): a PDF with an empty user password opens for
+   * anyone, and libclamav 1.4.3 decrypts it but scans an unfiltered stream's ciphertext, so content every PDF reader shows
+   * is never scanned. In the parser VM, never on this host: `qpdf --requires-password` settles the encryption (exit 3: no
+   * password needed), then `qpdf --decrypt` writes a plaintext copy with every stream decoded and no object streams, which
+   * quarantine scans as well as the original. Called only for a PDF whose bytes name /Encrypt (pdfHasEncryptName, in the
+   * VM). Anything qpdf cannot settle, any failure, timeout or limit hit, and a copy over PDF_DECRYPT_LIMITS.maxOutputBytes is
+   * `failed`: quarantine refuses the file (malware-scan-pdf-decrypt-failed), never scans the original alone.
+   */
+  async decryptPdfForScan(source: string, outputDir: string, signal?: AbortSignal): Promise<PdfDecryptOutcome> {
+    const started = performance.now();
+    const elapsed = () => Math.round(performance.now() - started);
+    const check = await this.boundedQpdfPlan(pdfEncryptionCheckArgv(source));
+    if (!check.available) return { status: "failed", reason: "qpdf unavailable", ms: elapsed() };
+    let checked: SandboxResult;
+    try {
+      checked = await this.runScanPlan(check, signal, "pdf-decrypt");
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      return { status: "failed", reason: `encryption check did not complete: ${error instanceof Error ? error.message : String(error)}`, ms: elapsed() };
+    }
+    // qpdf --requires-password: 0 a user password is needed, 3 encrypted but no password is needed, 2 not encrypted or an
+    // error. The bytes name /Encrypt, so "not encrypted" is a disagreement this cannot settle (a damaged file, or an
+    // /Encrypt qpdf does not honour but another reader might): refused, never scanned as the original alone.
+    if (checked.exitCode === 0) return { status: "requires-password", ms: elapsed() };
+    let encrypted = true;
+    if (checked.exitCode === 2) {
+      // 2 is both "not encrypted" and "could not read": --show-encryption tells them apart (correctness council, High: a
+      // literal /Encrypt in a comment, string or content stream of an ordinary PDF must not refuse it). A PDF qpdf calls
+      // unencrypted is still rewritten and the rewrite scanned: libclamav may have honoured an /Encrypt that qpdf's
+      // effective trailer does not (an incremental update that drops it), scanning plaintext streams as ciphertext.
+      let shown: SandboxResult;
+      try {
+        shown = await this.runScanPlan(await this.boundedQpdfPlan(pdfShowEncryptionArgv(source)), signal, "pdf-decrypt");
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        return { status: "failed", reason: `encryption check did not complete: ${error instanceof Error ? error.message : String(error)}`, ms: elapsed() };
+      }
+      if (!qpdfReportsNotEncrypted(shown)) return { status: "failed", reason: `qpdf could not settle the encryption (exit ${checked.exitCode})${checked.stderr ? `: ${checked.stderr.trim().slice(0, 500)}` : ""}`, ms: elapsed() };
+      encrypted = false;
+    } else if (checked.exitCode !== 3) {
+      return { status: "failed", reason: `qpdf could not settle the encryption (exit ${checked.exitCode ?? "none"})${checked.stderr ? `: ${checked.stderr.trim().slice(0, 500)}` : ""}`, ms: elapsed() };
+    }
+    const output = path.join(outputDir, "decrypted.pdf");
+    // An unencrypted PDF's rewrite is capped at a small multiple of its size (council N-L1); an encrypted one at the full limit.
+    let outputLimit: number = PDF_DECRYPT_LIMITS.maxOutputBytes;
+    if (!encrypted) {
+      try {
+        outputLimit = pdfRewriteOutputLimit((await lstat(source)).size);
+      } catch {
+        return { status: "failed", reason: "source PDF missing", ms: elapsed() };
+      }
+    }
+    const decrypt = await this.boundedQpdfPlan(pdfDecryptArgv(source, output, outputLimit));
+    let decrypted: SandboxResult;
+    try {
+      decrypted = await this.runScanPlan(decrypt, signal, "pdf-decrypt");
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      return { status: "failed", reason: `decryption did not complete: ${error instanceof Error ? error.message : String(error)}`, ms: elapsed() };
+    }
+    // 3: written with warnings. Accepted only when every warning is a recovery on the benign allow-list (a stream length it
+    // recounted; for an unencrypted PDF also a damaged cross-reference table qpdf rebuilt). A warning qpdf gives when it hit
+    // its memory limit (bad_alloc), skipped a deeply nested object or left a stream undecoded means the copy is not all of
+    // the file (council L2); an encrypted PDF whose xref was rebuilt may decrypt differently in other readers (N-H1).
+    if (!qpdfDecryptComplete(decrypted, encrypted)) return { status: "failed", reason: `qpdf --decrypt failed (exit ${decrypted.exitCode ?? "none"})${decrypted.stderr ? `: ${decrypted.stderr.trim().slice(0, 500)}` : ""}`, ms: elapsed() };
+    let size: number;
+    try {
+      const info = await lstat(output);
+      if (!info.isFile()) return { status: "failed", reason: "decrypted copy is not a regular file", ms: elapsed() };
+      size = info.size;
+    } catch {
+      return { status: "failed", reason: "decrypted copy missing", ms: elapsed() };
+    }
+    if (size >= outputLimit) return { status: "failed", reason: `decrypted copy reached the ${outputLimit}-byte limit`, ms: elapsed() };
+    return { status: "decrypted", path: output, bytes: size, ms: elapsed(), encrypted };
   }
 
   private async clamVmDatabaseHealth(policy: MalwareScanPolicy, signal: AbortSignal | undefined, databaseArgs: string[], assetDir?: string): Promise<ClamDatabaseHealth> {
@@ -1176,7 +1415,47 @@ export class CommandRunner {
     }
   }
 
+  /**
+   * Run `fn` (one document's quarantine: never more than one document per session, council M1) in a malware scanner session when
+   * DOCSLURP_QUARANTINE_SCAN_SNAPSHOT is on: its VMs are restored from a clean snapshot in which clamd already holds the
+   * staged signatures (providers/modal/scanner.ts), and serve only `tenantKey`'s commands. Signature freshness is read on
+   * this host from the staged daily header, so no VM runs `clamscan --version`. Off, or without VM-only parsing, `fn`
+   * runs unchanged. A provider without scanner sessions keeps the per-command path (same VM isolation), loudly logged.
+   */
+  async withMalwareScanner<T>(tenantKey: string | null | undefined, fn: () => Promise<T>, env: NodeJS.ProcessEnv = process.env): Promise<T> {
+    if (!quarantineScanSnapshotEnabled(env) || !vmOnlyParsing(env)) return fn();
+    const sandbox = registeredParserSandbox();
+    if (!sandbox || sandbox.provider.id !== "modal") {
+      console.error(`[quarantine] status=scanner-snapshot-unsupported provider=${sandbox?.provider.id ?? "none"}: DOCSLURP_QUARANTINE_SCAN_SNAPSHOT needs the modal parser sandbox; scanning per command`);
+      return fn();
+    }
+    if (!tenantKey) throw new SandboxPolicyError("a malware scanner session needs the run's organization");
+    const policy = resolveMalwareScanPolicy(env);
+    const staged = await stageClamDefinitions(policy.databaseDirectory);
+    try {
+      const header = await readClamDefinitionsHeader(staged.files);
+      const parent = sandboxScopeStorage.getStore();
+      const runId = currentPerfContext()?.runId ?? "none";
+      const documentId = currentPerfContext()?.documentId ?? "none";
+      const scope = new SandboxSessionScope(() => sandbox.provider.openSession(sandbox.config, {
+        activityId: `scanner:${runId}:${documentId}`,
+        scanner: { tenantKey, definitionsDir: staged.dir, signatureSetHash: staged.hash, expectedVersion: header.version },
+      }));
+      try {
+        return await runWithSandboxScope(scope, () => scannerDefinitionsStorage.run(header, fn));
+      } finally {
+        await closeSandboxQuietly(() => scope.close(), `scanner run=${runId}`);
+        // A teardown failure in the scanner session ends the activity like one in its own session.
+        if (scope.teardownError) parent?.latchTeardown(scope.teardownError);
+      }
+    } finally {
+      await staged.release();
+    }
+  }
+
   async scanForMalware(source: string, signal?: AbortSignal): Promise<MalwareScanResult> {
+    const scannerDefinitions = scannerDefinitionsStorage.getStore();
+    if (scannerDefinitions) return this.scanWithScannerDaemon(source, scannerDefinitions, signal);
     if (!vmOnlyParsing()) return this.scanForMalwareWithDefinitions(source, signal);
     // Copy only named signature assets, never host configuration or credentials. The host
     // updater keeps these fresh; the VM verifies the same staged definitions it will scan with.
@@ -1191,6 +1470,54 @@ export class CommandRunner {
     }
   }
 
+  /**
+   * Scan in the scanner session's VM: clamdscan hands the file descriptor to the clamd the snapshot already loaded. The
+   * verdict mapping is clamscan's (0 clean, 1 infected, anything else an error). Every failure is an error verdict, never
+   * "skipped": the scanner path has no fail-open.
+   */
+  private async scanWithScannerDaemon(source: string, definitions: ClamDefinitionsHeader, signal?: AbortSignal): Promise<MalwareScanResult> {
+    const policy = resolveMalwareScanPolicy();
+    const databaseHealth = assessClamDatabaseHealth({
+      maxSignatureAgeHours: policy.maxSignatureAgeHours,
+      // A header dated more than an hour ahead is malformed, as in parseClamVmDatabaseHealth.
+      entries: definitions.signatureTimeMs <= Date.now() + 3_600_000 ? [{ path: "host:staged-daily-header", updatedAtMs: definitions.signatureTimeMs }] : [],
+    });
+    const databaseWarning = describeClamDatabaseHealth(databaseHealth, policy.maxSignatureAgeHours);
+    const base = {
+      engine: "clamdscan" as const,
+      available: true,
+      databaseStatus: databaseHealth.status,
+      databaseUpdatedAt: databaseHealth.updatedAt,
+      databaseAgeHours: databaseHealth.ageHours,
+      databaseSource: databaseHealth.source,
+      healthWarnings: [] as string[],
+    };
+    if ((databaseHealth.status === "stale" || databaseHealth.status === "missing" || databaseHealth.status === "unknown") && !policy.failOpenOnStaleDefinitions) {
+      return { ...base, status: "error", signature: null, stdout: "", stderr: databaseWarning ?? "clamav signature database is unavailable", exitCode: null };
+    }
+    if (databaseWarning) base.healthWarnings.push(databaseWarning);
+    const plan = await this.plan("clamdscan", `--config-file=${SCANNER_CONFIG_FILE}`, "--fdpass", "--no-summary", "--infected", source);
+    if (!plan.available) return { ...base, available: false, status: "error", signature: null, stdout: "", stderr: "clamdscan unavailable in the scanner VM", exitCode: null };
+    plan.readOnlyInputs = true;
+    plan.requiresScanner = true;
+    // clamd applies CLAM_SCAN_LIMITS from its config (scanner.ts clamdConfig); this bounds the command around it.
+    plan.timeoutMs = clamScanTimeoutMs();
+    const launched = await this.launch(plan, signal);
+    let outcome: SandboxResult;
+    try {
+      outcome = "remote" in launched
+        ? await this.settleRemote(plan, launched, "malware-scan")
+        : await this.collectChild(plan, launched.child, launched.supervised, "malware-scan");
+    } finally {
+      await launched.release();
+    }
+    const { exitCode: code, stdout, stderr } = outcome;
+    const result = { ...base, stdout, stderr, exitCode: code };
+    if (code === 0) return { ...result, status: "clean", signature: null };
+    if (code === 1) return { ...result, ...clamDetection(stdout, stderr) };
+    return { ...result, status: "error", signature: null };
+  }
+
   private async scanForMalwareWithDefinitions(
     source: string,
     signal?: AbortSignal,
@@ -1201,7 +1528,7 @@ export class CommandRunner {
     const databaseHealth = process.env.NODE_ENV === "production"
       ? await this.clamVmDatabaseHealth(policy, signal, databaseArgs, assetDir)
       : inspectClamDatabaseHealth(policy);
-    const daemonPlan = process.env.NODE_ENV === "production"
+    let daemonPlan = process.env.NODE_ENV === "production"
       ? { binary: "clamdscan", args: [], available: false }
       : await this.clamDaemonScan(source);
     const directPlan = await this.clamScan(source);
@@ -1209,6 +1536,17 @@ export class CommandRunner {
     directPlan.readOnlyInputs = true;
     if (assetDir) directPlan.readOnlyAssetDir = assetDir;
     const healthWarnings: string[] = [];
+
+    // A running daemon's effective policy is unknown to its client: trust it only after the canaries (clamd-policy.ts).
+    let daemonRefusal: string | null = null;
+    if (daemonPlan.available) {
+      const verdict = await this.verifyLocalClamDaemon(signal, databaseHealth.updatedAt);
+      if (verdict && !verdict.trusted) {
+        daemonRefusal = verdict.reason;
+        daemonPlan = { ...daemonPlan, available: false };
+        healthWarnings.push(`clamd refused: ${verdict.reason}`);
+      }
+    }
 
     const databaseWarning = describeClamDatabaseHealth(
       databaseHealth,
@@ -1223,7 +1561,8 @@ export class CommandRunner {
       healthWarnings.push(databaseWarning);
     }
 
-    if (policy.requireDaemon && !daemonPlan.available) {
+    if ((policy.requireDaemon && !daemonPlan.available) || (daemonRefusal && !directPlan.available)) {
+      // A refused daemon with no clamscan to fall back on is an error verdict, never "skipped" (which may fail open).
       return {
         engine: null,
         available: false,
@@ -1235,7 +1574,9 @@ export class CommandRunner {
         databaseSource: databaseHealth.source,
         healthWarnings,
         stdout: "",
-        stderr: "clamdscan is required but unavailable",
+        stderr: daemonRefusal
+          ? `clamd's effective policy could not be verified (${daemonRefusal}); refusing to scan with it`
+          : "clamdscan is required but unavailable",
         exitCode: null,
       };
     }
@@ -1263,7 +1604,7 @@ export class CommandRunner {
       };
     }
 
-    if (selected.engine === "clamscan" && daemonPlan.available === false) {
+    if (selected.engine === "clamscan" && daemonPlan.available === false && !daemonRefusal) {
       healthWarnings.push("clamdscan unavailable, falling back to clamscan");
     }
 
@@ -1284,17 +1625,10 @@ export class CommandRunner {
       };
     }
 
-    const launched = await this.launch(selected.plan, signal);
-    let outcome: SandboxResult;
-    try {
-      outcome =
-        "remote" in launched
-          ? await this.settleRemote(selected.plan, launched, "malware-scan")
-          : await this.collectChild(selected.plan, launched.child, launched.supervised, "malware-scan");
-    } finally {
-      await launched.release();
-    }
+    const outcome = await this.runScanPlan(selected.plan, signal);
     const { exitCode: code, stdout, stderr } = outcome;
+    // The daemon did not answer as a scan (gone, restarted, reconnecting): verify it again before it is trusted next.
+    if (selected.engine === "clamdscan" && code !== 0 && code !== 1) localClamdPolicy.invalidate();
     const base = {
       engine: selected.engine,
       available: true as const,
@@ -1309,7 +1643,7 @@ export class CommandRunner {
     };
     if (code === 0) return { ...base, status: "clean", signature: null };
     if (code === 1) {
-      return { ...base, status: "infected", signature: parseClamSignature(stdout) ?? parseClamSignature(stderr) };
+      return { ...base, ...clamDetection(stdout, stderr) };
     }
     return { ...base, status: "error", signature: null };
   }
@@ -1597,7 +1931,9 @@ export class CommandRunner {
         const started = new Promise<void>((resolve) => (onStart = resolve));
         // Bound to this stage's context: a pooled VM's idle time is recorded in this stage's ledger when the VM is reaped.
         const recordUsage = AsyncResource.bind((event: UsageEvent) => recordRemoteUsage(event));
-        const remote = session.run(documentId ? { ...command, affinityKey: documentId } : command, signal, { onStart, recordUsage });
+        // The run's organization travels with every remote command: a scanner session runs only its own.
+        const orgId = currentPerfContext()?.orgId;
+        const remote = session.run({ ...command, ...(documentId ? { affinityKey: documentId } : {}), ...(orgId ? { tenantKey: orgId } : {}) }, signal, { onStart, recordUsage });
         if (!session.reportsStart) return { remote, timeoutMs: command.limits.timeoutMs, release };
         void remote.then(onStart, onStart); // a run that settles without admission (closed, aborted) ends the wait
         return { remote, timeoutMs: command.limits.timeoutMs, release, started };
@@ -2286,6 +2622,8 @@ const stagedDefinitionUse = new Map<string, { refs: number; retired: boolean }>(
 export interface StagedClamDefinitions {
   dir: string;
   files: string[];
+  /** sha256 over the files' names and contents (the scanner snapshot's key). */
+  hash: string;
   /** Done with the directory: a replaced one is removed once nobody uses it. Idempotent. */
   release: () => Promise<void>;
 }
@@ -2315,7 +2653,7 @@ async function removeIfUnused(dir: string): Promise<void> {
   await rm(dir, { recursive: true, force: true }).catch(() => {});
 }
 
-function acquireStaged(staged: { dir: string; files: string[] }): StagedClamDefinitions {
+function acquireStaged(staged: { dir: string; files: string[]; hash: string }): StagedClamDefinitions {
   const use = stagedDefinitionUse.get(staged.dir) ?? { refs: 0, retired: false };
   use.refs += 1;
   stagedDefinitionUse.set(staged.dir, use);
@@ -2363,7 +2701,8 @@ export async function stageClamDefinitions(directory: string): Promise<StagedCla
       hash.update(`${name}\0`);
       for await (const chunk of createReadStream(path.join(directory, name))) hash.update(chunk as Buffer);
     }
-    const dir = await mkdtemp(path.join(tmpdir(), `docslurp-clam-definitions-${hash.digest("hex").slice(0, 32)}-`));
+    const digest = hash.digest("hex");
+    const dir = await mkdtemp(path.join(tmpdir(), `docslurp-clam-definitions-${digest.slice(0, 32)}-`));
     try {
       await chmod(dir, 0o700);
       for (const name of names) {
@@ -2375,7 +2714,7 @@ export async function stageClamDefinitions(directory: string): Promise<StagedCla
       throw error;
     }
     stagedDefinitionUse.set(dir, { refs: 0, retired: false });
-    return { dir, files: names.map((name) => path.join(dir, name)), release: async () => {} };
+    return { dir, files: names.map((name) => path.join(dir, name)), hash: digest, release: async () => {} };
   })();
   stagedDefinitions = { signature, staging };
   const result = await staging;
@@ -2417,6 +2756,7 @@ export function buildSandboxCommand(args: {
     writablePaths: paths.writablePaths,
     limits: args.limits,
     ...(deniesUnixSockets(args.plan) ? { denyUnixSockets: true } : {}),
+    ...(args.plan.requiresScanner ? { requiresScanner: true } : {}),
   };
 }
 
@@ -2444,7 +2784,19 @@ export function isVectorBackendCommand(commandArgs: string[], scriptsDir: string
     commandArgs[0] === path.join(scriptsDir, script));
 }
 
-function parseClamSignature(output: string): string | null {
+/**
+ * The verdict of a scan that exited 1. Encrypted-content alerts alone are "unscannable"; any other signature (malware, a
+ * limit alert) is "infected" and reported in preference to an encryption alert. No signature at all stays "infected".
+ */
+export function clamDetection(stdout: string, stderr: string): { status: "infected" | "unscannable"; signature: string | null } {
+  const found = [...`${stdout}\n${stderr}`.matchAll(/:\s+(.+?)\s+FOUND$/gm)].map((match) => match[1]!.trim());
+  const other = found.find((signature) => !isClamEncryptedAlert(signature));
+  if (other) return { status: "infected", signature: other };
+  if (found.length) return { status: "unscannable", signature: found[0]! };
+  return { status: "infected", signature: parseClamSignature(stdout) ?? parseClamSignature(stderr) };
+}
+
+export function parseClamSignature(output: string): string | null {
   const trimmed = output.trim();
   if (!trimmed) {
     return null;
@@ -2452,6 +2804,124 @@ function parseClamSignature(output: string): string | null {
 
   const match = trimmed.match(/:\s+(.+?)\s+FOUND$/m);
   return match?.[1]?.trim() ?? null;
+}
+
+/** clamdscan's config for the local daemon path (non-production). */
+function localClamdConfigFile(): string {
+  return process.env.DOCSLURP_CLAMAV_CLAMD_CONF?.trim() || "/etc/clamav/clamd.conf";
+}
+
+/** Verified policies of local daemons (clamd-policy.ts), process-wide. */
+const localClamdPolicy = new ClamdPolicyCache();
+
+/** Test hook: forget every verified daemon policy. */
+export function resetLocalClamdPolicyCache(): void {
+  localClamdPolicy.invalidate();
+}
+
+/**
+ * One verification per config file (path and modification time), loaded signature version, daemon version and daemon
+ * identity (localClamdSocketIdentity). A daemon whose identity cannot be read here is never cached: a unique key makes every
+ * scan verify it again (prior council L3).
+ */
+async function localClamdPolicyKey(databaseUpdatedAt: string | null, daemonVersion = "unknown"): Promise<{ key: string; cacheable: boolean }> {
+  const configFile = localClamdConfigFile();
+  const mtime = await stat(configFile).then((info) => info.mtimeMs, () => "missing");
+  const identity = await localClamdSocketIdentity(configFile);
+  return { key: `${configFile}|${mtime}|${databaseUpdatedAt ?? "unknown"}|${identity ?? `uncached:${randomUUID()}`}|${daemonVersion}`, cacheable: identity !== null };
+}
+
+/**
+ * The local daemon's identity, from operator-owned files (its config, the socket and /proc/net), never customer bytes: a
+ * restarted daemon recreates its socket, so the identity changes.
+ *
+ * - `LocalSocket`: the socket file's inode and change time.
+ * - `TCPSocket`: the inode of the listening socket on that port in /proc/net/tcp and tcp6 (`procNet`), which a restarted
+ *   daemon also replaces. A daemon in another network namespace or on another host is not visible there: null.
+ *
+ * Null when no identity can be read (no socket configured, the socket missing, nothing listening here). Exported for tests.
+ */
+export async function localClamdSocketIdentity(configFile: string, procNet = "/proc/net"): Promise<string | null> {
+  try {
+    const config = (await readFile(configFile, "utf8")).slice(0, 256 * 1024);
+    const socket = /^\s*LocalSocket\s+(\S+)/m.exec(config)?.[1];
+    if (socket) {
+      const info = await stat(socket);
+      return `unix:${info.ino}:${info.ctimeMs}`;
+    }
+    const port = Number(/^\s*TCPSocket\s+(\d+)/m.exec(config)?.[1]);
+    if (!Number.isInteger(port) || port <= 0 || port > 65_535) return null;
+    const portHex = port.toString(16).toUpperCase().padStart(4, "0");
+    const inodes: string[] = [];
+    for (const table of ["tcp", "tcp6"]) {
+      const text = await readFile(path.join(procNet, table), "utf8").catch(() => "");
+      for (const line of text.split("\n").slice(1)) {
+        const fields = line.trim().split(/\s+/);
+        // sl local_address rem_address st ... inode (field 9); st 0A is LISTEN.
+        if (fields.length > 9 && fields[1]?.endsWith(`:${portHex}`) && fields[3] === "0A" && /^[1-9]\d*$/.test(fields[9]!)) inodes.push(`${table}:${fields[1]}:${fields[9]}`);
+      }
+    }
+    return inodes.length ? `tcp:${port}:${inodes.sort().join(",")}` : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A scan's wall-clock budget: the page-based one, but never less than the scan time limit allows (clam-limits.ts). */
+function clamScanTimeoutMs(): number {
+  return Math.max(resolveCommandTimeoutMs(currentPerfContext()?.pageCount), CLAM_SCAN_COMMAND_TIMEOUT_MS);
+}
+
+export { quarantineScanSnapshotEnabled };
+
+export interface ClamDefinitionsHeader {
+  /** The daily signature version (the number `clamscan --version` prints second). */
+  version: number;
+  /** The daily signature time (`clamscan --version`'s date), epoch ms. */
+  signatureTimeMs: number;
+}
+
+/** The definitions of the current scanner session (CommandRunner.withMalwareScanner). */
+const scannerDefinitionsStorage = new AsyncLocalStorage<ClamDefinitionsHeader>();
+
+/**
+ * Parse a ClamAV database header: the first 512 bytes of a .cvd or .cld, `ClamAV-VDB:<built>:<version>:<signatures>:
+ * <flevel>:<md5>:<dsig>:<builder>:<stime>`. `clamscan --version` prints the daily file's version and stime; these are
+ * the worker's own signature files (freshclam's), never customer bytes. Null when malformed.
+ */
+export function parseClamDefinitionsHeader(header: Buffer | string): ClamDefinitionsHeader | null {
+  const text = (typeof header === "string" ? header : header.subarray(0, 512).toString("latin1")).replace(/[\0 ]+$/, "");
+  const fields = text.split(":");
+  if (fields[0] !== "ClamAV-VDB" || fields.length < 9) return null;
+  const version = Number(fields[2]);
+  const stime = Number(fields[8]?.trim());
+  if (!/^\d+$/.test(fields[2] ?? "") || !Number.isSafeInteger(version) || version <= 0) return null;
+  if (!/^\d+$/.test(fields[8]?.trim() ?? "") || !Number.isSafeInteger(stime) || stime <= 0) return null;
+  return { version, signatureTimeMs: stime * 1000 };
+}
+
+/**
+ * The staged daily header ClamAV loads: of daily.cld and daily.cvd, the one with the higher version, as libclamav picks
+ * it (council L3; a cld left behind next to a newer cvd must not pin the expected version to the old one). Throws when
+ * none is staged or any staged daily header is malformed.
+ */
+export async function readClamDefinitionsHeader(files: readonly string[]): Promise<ClamDefinitionsHeader> {
+  const dailies = files.filter((file) => path.basename(file) === "daily.cld" || path.basename(file) === "daily.cvd");
+  if (!dailies.length) throw new Error("ClamAV daily signatures are not staged; refusing to scan");
+  let newest: ClamDefinitionsHeader | undefined;
+  for (const daily of dailies) {
+    const handle = await open(daily, "r");
+    try {
+      const buffer = Buffer.alloc(512);
+      const { bytesRead } = await handle.read(buffer, 0, 512, 0);
+      const header = parseClamDefinitionsHeader(buffer.subarray(0, bytesRead));
+      if (!header) throw new Error("ClamAV daily signature header is malformed; refusing to scan");
+      if (!newest || header.version > newest.version) newest = header;
+    } finally {
+      await handle.close();
+    }
+  }
+  return newest!;
 }
 
 export function resolveMalwareScanPolicy(

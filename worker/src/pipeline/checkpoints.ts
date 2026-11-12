@@ -8,6 +8,7 @@ import { runWithPerfContext } from "../lib/perf-context.js";
 import { latchedTeardownError, watchSandboxInfrastructure } from "../sandbox/session-context.js";
 import { SANDBOX_INFRASTRUCTURE_RETRIES, SandboxRepeatedFailureError } from "../sandbox/types.js";
 import { findQuarantinedSourceError } from "../sandbox/source-quarantine.js";
+import { assertParseSourceDecided } from "../lib/parse-source.js";
 import { noteWorkProgress } from "../lib/work-progress.js";
 import { hasFailedDocumentStage } from "./document-health.js";
 import { isDocumentLevelFailure } from "../lib/document-failure.js";
@@ -90,6 +91,8 @@ export function isCostCapExceeded(state: WorkflowState): boolean {
 
 export interface RunDocumentStageOptions {
   retryStrategies?: string[];
+  /** Run even over a completed checkpoint (quarantine of a document with no parse decision from this build). */
+  rerunCompleted?: boolean;
 }
 
 interface DocumentStageAttempt {
@@ -290,7 +293,7 @@ export async function runDocumentStage(
   }
 
   const checkpoint = state.documentStage(document.id, stageName);
-  if (checkpoint?.status === "completed" && !firstPassCheckpointStale(state, document.id, stageName, checkpoint)) {
+  if (checkpoint?.status === "completed" && options?.rerunCompleted !== true && !firstPassCheckpointStale(state, document.id, stageName, checkpoint)) {
     console.log(
       `[checkpoint-debug] document=${document.id} stage=${stageName} skipped=already-completed ` +
         `artifact=${checkpoint.artifactUri ?? "none"}`,
@@ -322,6 +325,8 @@ export async function runDocumentStage(
       // Strikes other documents' failures put on this one (council W #2: it broke the job tree they inherited) count too.
       const recorded = Number((checkpoint?.stats as { sandboxInfrastructureStrikes?: unknown } | undefined)?.sandboxInfrastructureStrikes ?? 0);
       if (recorded > SANDBOX_INFRASTRUCTURE_RETRIES) throw new SandboxRepeatedFailureError(recorded, "strikes recorded against this document");
+      // Fail closed (council R7-H1): only quarantine touches a document with no parse decision from this build.
+      if (stageName !== "quarantine") assertParseSourceDecided(document);
       const watched = await watchSandboxInfrastructure(() => runWithPerfContext({
         runId: state.run.id,
         documentId: document.id,

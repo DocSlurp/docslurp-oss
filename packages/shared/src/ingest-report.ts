@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { DOCUMENT_FAILURE_MARKERS, PUBLIC_ERROR_MESSAGES } from "./public-errors.js";
+import { DOCUMENT_FAILURE_MARKERS, PUBLIC_ERROR_MESSAGES, QUARANTINE_PUBLIC_REASONS, quarantineReasonOf } from "./public-errors.js";
 
 /**
  * Ingest report: what DocSlurp observed about a project's files (pages,
@@ -87,6 +87,14 @@ export const ingestReportFailureReasonSchema = z.enum([
   "pdf-structure-rejected",
   /** The run stopped after its infrastructure retries ran out (sandbox, network, database): nothing was found wrong with the file. */
   "infrastructure-retries-exhausted",
+  /** Quarantine refusals (worker quarantine stage, public-errors.ts QUARANTINE_PUBLIC_REASONS). */
+  "quarantine-malware",
+  "quarantine-encrypted",
+  "quarantine-file-type",
+  "quarantine-archive",
+  "quarantine-scan-limit",
+  "quarantine-scan-failed",
+  "quarantine-rescan-required",
   "unknown",
 ]);
 export type IngestReportFailureReason = z.infer<typeof ingestReportFailureReasonSchema>;
@@ -217,6 +225,13 @@ const FAILURE_COPY: Record<IngestReportFailureReason, { message: string; retryab
     message: "Processing stopped after repeated failures on our side, not because of this file. Upload it again to retry.",
     retryable: true,
   },
+  "quarantine-malware": { message: QUARANTINE_PUBLIC_REASONS["quarantine-malware"], retryable: false },
+  "quarantine-encrypted": { message: QUARANTINE_PUBLIC_REASONS["quarantine-encrypted"], retryable: false },
+  "quarantine-file-type": { message: QUARANTINE_PUBLIC_REASONS["quarantine-file-type"], retryable: false },
+  "quarantine-archive": { message: QUARANTINE_PUBLIC_REASONS["quarantine-archive"], retryable: false },
+  "quarantine-scan-limit": { message: QUARANTINE_PUBLIC_REASONS["quarantine-scan-limit"], retryable: false },
+  "quarantine-scan-failed": { message: QUARANTINE_PUBLIC_REASONS["quarantine-scan-failed"], retryable: true },
+  "quarantine-rescan-required": { message: QUARANTINE_PUBLIC_REASONS["quarantine-rescan-required"], retryable: true },
   unknown: { message: "Processing failed and the cause was not recorded.", retryable: true },
 };
 
@@ -252,8 +267,10 @@ const FAILURE_PATTERNS: Array<[IngestReportFailureReason, RegExp]> = [
 export function classifyIngestFailure(error: string | null | undefined, documentStatus?: string): { reason: IngestReportFailureReason; message: string; retryable: boolean } {
   const text = error ?? "";
   const marker = Object.entries(DOCUMENT_FAILURE_MARKERS).find(([, value]) => text.includes(value));
+  const quarantine = quarantineReasonOf(text);
   const reason: IngestReportFailureReason = documentStatus === "cancelled" ? "cancelled"
     : documentStatus === "pii_blocked" || marker ? "policy_blocked"
+      : quarantine ? quarantine
       : FAILURE_PATTERNS.find(([, pattern]) => pattern.test(text))?.[0] ?? "unknown";
   const copy = FAILURE_COPY[reason];
   // Conditions the uploader can act on keep their own reviewed copy (for example a silent video).

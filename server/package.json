@@ -25,6 +25,7 @@
     "db:migrate": "node db/migrate.mjs",
     "db:seed": "tsx db/seed.ts",
     "catalog:feed": "tsx scripts/stripe-catalog-feed.ts",
+    "reprocess:unscanned": "tsx scripts/reprocess-unscanned-documents.ts",
     "test:watch": "vitest"
   },
   "dependencies": {

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { spawnSync } from "node:child_process";
@@ -55,6 +56,8 @@ afterEach(() => configurePageAreaSink(null));
 afterAll(async () => { await store?.close(); await server?.stop(); await db?.close(); });
 
 let seq = 0;
+/** The bytes the raster harnesses stage; a parse decision binds parsers to what quarantine scanned (PR #339 R8-L1). */
+const STAGED_SHA = createHash("sha256").update("pdf bytes").digest("hex");
 /** A run with one counted document of `pages` pages; returns its state. */
 async function documentRun(pages: number, mime = "application/pdf", facts: object = pdfFacts, org: { org: string; project: string } = { org: "o1", project: "w1" }) {
   seq += 1;
@@ -62,8 +65,8 @@ async function documentRun(pages: number, mime = "application/pdf", facts: objec
   await db.exec(`
     insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
       values ('${runId}', '${org.org}', 'u1', '${org.project}', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 1, ${pages});
-    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts)
-      values ('${documentId}', '${org.org}', 'u1', '${org.project}', '${runId}', 'f', '${mime}', 'raw/${documentId}', 'processing', ${pages}, 'counted', '${JSON.stringify(facts)}');`);
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version, parse_source_sha256)
+      values ('${documentId}', '${org.org}', 'u1', '${org.project}', '${runId}', 'f', '${mime}', 'raw/${documentId}', 'processing', ${pages}, 'counted', '${JSON.stringify(facts)}', 1, '${STAGED_SHA}');`);
   const document = (await store.loadDocument(documentId))!;
   const state = WorkflowState.create(await store.loadRun(runId), [document]);
   state.store = store;
@@ -381,8 +384,11 @@ describe("whole-document text formats bill their true count from intake through 
 
   it("a text file over intake's sample: format-detect counts it in full, extraction adds nothing on top", async () => {
     const { state, document, runId, documentId } = await documentRun(2, "text/plain", textFacts);
-    await db.exec(`update documents set page_count_source = 'assumed' where id = '${documentId}'`);
+    // Quarantine scanned these bytes: the decision binds parsers to them (PR #339 R8-L1).
+    const scanned = createHash("sha256").update(text).digest("hex");
+    await db.exec(`update documents set page_count_source = 'assumed', parse_source_sha256 = '${scanned}' where id = '${documentId}'`);
     document.pageCountSource = "assumed";
+    document.sourceSha256 = scanned;
     await recordMeasuredTextPageCount({ state, document, format: "plain-text", readSource: async () => new Uint8Array(Buffer.from(text)) });
     expect(document.pageCount).toBe(10);
     await recordExtractedPageEquivalents(state, document, "plain-text", text);

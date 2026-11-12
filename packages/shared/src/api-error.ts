@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { PUBLIC_ERROR_MESSAGES } from "./public-errors.js";
+import { PARSE_SOURCE_RESCAN_MESSAGE } from "./parse-source-decision.js";
 
 /**
  * The native API error envelope: `{ error: { code, message, details?, requestId } }`.
@@ -51,6 +52,7 @@ export const API_ERROR_CODES = [
   "upload_session_closed",
   "file_too_large",
   "unreadable_source",
+  "quarantine_rescan_required",
   "payment_required",
   "credit_exhausted",
   "project_budget_paused",
@@ -152,6 +154,7 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   upload_session_closed: "The upload session for this Idempotency-Key can no longer take files (failed or aborted). Create a new session with a new Idempotency-Key.",
   file_too_large: PUBLIC_ERROR_MESSAGES.tooLarge,
   unreadable_source: PUBLIC_ERROR_MESSAGES.unreadableSource,
+  quarantine_rescan_required: PARSE_SOURCE_RESCAN_MESSAGE,
   payment_required: PUBLIC_ERROR_MESSAGES.creditExhausted,
   credit_exhausted: PUBLIC_ERROR_MESSAGES.creditExhausted,
   project_budget_paused: PUBLIC_ERROR_MESSAGES.budgetPaused,
@@ -195,7 +198,7 @@ export function apiErrorCodeForStatus(status: number): ApiErrorCode {
 }
 
 const SAFE_DETAIL_NUMBERS = ["retryAfterSeconds", "limitCents", "spentCents", "maxBytes", "availableCredits", "heldCredits", "chatReserveCredits", "maxRetentionDays", "requiredCredits"] as const;
-const SAFE_DETAIL_LABELS = ["category", "policy", "spendKind"] as const;
+const SAFE_DETAIL_LABELS = ["category", "policy", "spendKind", "action"] as const;
 
 /**
  * Where a caller can lift a limit (`details.links` on 402 and 429 responses):

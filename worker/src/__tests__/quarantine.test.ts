@@ -298,10 +298,71 @@ describe("scanDocumentForQuarantine", () => {
       expect.arrayContaining([
         expect.objectContaining({
           code: "malware-detected",
-          message: expect.stringContaining("Win.Test.EICAR_HDB-1")
+          // The message is fixed text; the signature is in details (artifact, telemetry), never the stage error.
+          message: "malware detected",
+          details: expect.objectContaining({ signature: "Win.Test.EICAR_HDB-1" })
         })
       ])
     );
+  });
+});
+
+describe("quarantine: ClamAV limit alerts (council M2)", () => {
+  it.each(["MaxFileSize", "MaxScanSize", "MaxFiles", "MaxScanTime", "MaxRecursion"])(
+    "refuses a file the scanner did not fully scan (Heuristics.Limits.Exceeded.%s), even with fail-open on",
+    async (limit) => {
+      const artifact = await scanDocumentForQuarantine({
+        documentId: "doc-1",
+        filename: "sample.pdf",
+        declaredMimeType: "application/pdf",
+        bytes: Buffer.from("%PDF-1.7\nhello"),
+        tempFile: "/tmp/sample.pdf",
+        runner: {
+          scanForMalware: async () => ({
+            engine: "clamscan", available: true, status: "infected", signature: `Heuristics.Limits.Exceeded.${limit}`,
+            stdout: `/tmp/sample.pdf: Heuristics.Limits.Exceeded.${limit} FOUND`, stderr: "", exitCode: 1, databaseStatus: "fresh",
+          }),
+        } as any,
+        policy: { ...basePolicy, quarantineFailOpenOnToolMissing: true },
+      });
+      expect(artifact.decision).toBe("quarantined");
+      expect(artifact.reasons).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: "malware-scan-limit-exceeded", severity: "error", message: expect.stringContaining("not fully scanned") }),
+      ]));
+      expect(artifact.reasons.some((reason) => reason.code === "malware-detected")).toBe(false);
+    },
+  );
+});
+
+describe("quarantine: encrypted content (council re-check H1)", () => {
+  const scanWith = (status: string, signature: string, failOpen: boolean) => scanDocumentForQuarantine({
+    documentId: "doc-1",
+    filename: "sample.pdf",
+    declaredMimeType: "application/pdf",
+    bytes: Buffer.from("%PDF-1.7\nhello"),
+    tempFile: "/tmp/sample.pdf",
+    runner: {
+      scanForMalware: async () => ({
+        engine: "clamscan", available: true, status, signature,
+        stdout: `/tmp/sample.pdf: ${signature} FOUND`, stderr: "", exitCode: 1, databaseStatus: "fresh",
+      }),
+    } as any,
+    policy: { ...basePolicy, quarantineFailOpenOnToolMissing: failOpen },
+  });
+
+  it.each([
+    ["unscannable", "Heuristics.Encrypted.PDF", true],
+    ["unscannable", "Heuristics.Encrypted.Zip", false],
+    // A transport that reports the alert as infected is mapped the same way.
+    ["infected", "Heuristics.Encrypted.RAR", true],
+  ])("refuses %s %s as encrypted content, never as malware and never clean (fail-open %s)", async (status, signature, failOpen) => {
+    const artifact = await scanWith(status, signature, failOpen);
+    expect(artifact.decision).toBe("quarantined");
+    const reason = artifact.reasons.find((item) => item.code === "malware-scan-encrypted-content");
+    expect(reason).toMatchObject({ severity: "error", message: expect.stringContaining("remove the password and upload again"), details: { signature } });
+    // The user-facing message carries no engine detail; the signature stays in details.
+    expect(reason!.message).not.toContain("Heuristics");
+    expect(artifact.reasons.some((item) => item.code === "malware-detected")).toBe(false);
   });
 });
 
@@ -333,7 +394,8 @@ describe("quarantine file facts", () => {
   });
 
   it("accepts a .docx declared application/msword with a same-family warning", async () => {
-    const zip = buildZipBuffer([{ name: "word/document.xml", compressedSize: 12, uncompressedSize: 64 }]);
+    // Stored: compressed and uncompressed sizes agree (the member is read whole; a mismatch is refused).
+    const zip = buildZipBuffer([{ name: "word/document.xml", compressedSize: 64, uncompressedSize: 64 }]);
     const artifact = await scan("report.docx", "application/msword", zip);
     expect(artifact.decision).toBe("accepted");
     expect(artifact.reasons.map((reason) => reason.code)).toContain("mime-mismatch-same-family");

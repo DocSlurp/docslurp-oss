@@ -56,7 +56,8 @@ elif command -v apt-get >/dev/null 2>&1; then
     python3 \
     python3-pip \
     python3-venv \
-    qpdf \
+    qpdf=12.2.0-1 \
+    libqpdf30=12.2.0-1 \
     webp \
     unrtf
   rm -rf /var/lib/apt/lists/*

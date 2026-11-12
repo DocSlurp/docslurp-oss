@@ -1,4 +1,5 @@
 import { instrumentS3Client } from "@docslurp/shared/observability";
+import { assertReadableSourceKey } from "../lib/parse-source.js";
 import {
   AbortMultipartUploadCommand,
   ListMultipartUploadsCommand,
@@ -519,6 +520,8 @@ export function collectOrphanedStorageKeys(
 }
 
 function validateStorageKey(key: string): void {
+  // An unscanned document's unreadable key (lib/parse-source.ts): refused by name, whichever reader asked.
+  assertReadableSourceKey(key);
   if (key !== key.trim() || key.length === 0) {
     throw new Error("storage key must be a non-empty trimmed string");
   }

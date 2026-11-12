@@ -54,8 +54,19 @@ export interface Document {
   filename: string;
   mimeType: string;
   sourceKey: string;
-  /** sha256 the server computed over the source bytes; staged sources are checked against it (sandbox/source-integrity.ts). */
+  /**
+   * sha256 of the bytes at `sourceKey`; staged sources are checked against it (sandbox/source-integrity.ts). With a scanned
+   * parse copy (lib/parse-source.ts) `sourceKey` and this name the copy, not the upload.
+   */
   sourceSha256?: string | null;
+  /**
+   * The upload's server sha256 (documents.source_sha256), set only when quarantine's scanned copy of an encrypted PDF replaces
+   * it for parsing: staged reads refuse bytes that hash to it. The upload's key is never on a document whose decision is not
+   * "original" (lib/parse-source.ts): only quarantine reaches it.
+   */
+  originalSourceSha256?: string | null;
+  /** What this build's quarantine decided parsers read (lib/parse-source.ts); "unscanned" is refused everywhere else. */
+  parseSourceDecision: import("./lib/parse-source.js").ParseSourceDecision;
   status: string;
   extractionMode: string;
   pageCount: number;

@@ -173,6 +173,11 @@ RUN apt-get update \
        zlib1g \
        python3 \
        webp \
+       # Quarantine decrypts empty-user-password PDFs in the parser VM before scanning them (runner.decryptPdfForScan).
+       # Pinned: the startup probe refuses an image without qpdf (parser-vm-contract.mjs).
+       qpdf=12.2.0-1 \
+       libqpdf30=12.2.0-1 \
+    && qpdf --version \
     && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/info/* \
     && rm -rf /opt/yarn-* /usr/local/bin/yarn /usr/local/bin/yarnpkg
 

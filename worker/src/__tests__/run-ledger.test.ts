@@ -13,6 +13,7 @@ import {
 
 function document(id: string, pageCount: number): Document {
   return {
+    parseSourceDecision: "unscanned-allowed",
     id,
     userId: "user-1",
     runId: "run-1",

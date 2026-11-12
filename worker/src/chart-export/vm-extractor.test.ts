@@ -94,7 +94,7 @@ describe("VM deterministic extractor adapter", () => {
     const run = vi.fn(async () => { throw new Error("no parser VM provider"); });
     const extract = createVmDeterministicVisualExtractor({ runner: { run }, storage: store, log: (m) => logs.push(m) });
     const result = await extract({
-      document: { id: "doc", mimeType: PPTX, pageCount: 2, sourceKey: "src/deck.pptx" },
+      document: { id: "doc", mimeType: PPTX, pageCount: 2, sourceKey: "src/deck.pptx", parseSourceDecision: "original" },
       candidates: [],
       artifacts: { dopplerFiguresIndexUri: "s3://b/run/index.json", mediaMapUri: null, artifactUri: (slot) => (slot.endsWith("p2.g0") ? "s3://b/fig/a.svg" : "s3://b/fig/b.svg") },
       signals: { officeChartParts: 1 },

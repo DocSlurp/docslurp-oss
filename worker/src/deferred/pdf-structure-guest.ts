@@ -1,4 +1,5 @@
 import type { OutlineNode, PdfStructure } from "./pdf-structure.js";
+import { pdfEncryptionStructure } from "../lib/pdf-encryption-structure.js";
 
 const MAX_OUTLINE_NODES = 5000;
 const MAX_OUTLINE_DEPTH = 8;
@@ -14,6 +15,11 @@ interface RawOutlineItem { title?: string; dest?: unknown; items?: RawOutlineIte
 
 /** Free structure: page count, outline (bookmarks) with resolved physical pages, and `/PageLabels`. Never renders or OCRs. */
 export async function readPdfStructure(bytes: Uint8Array): Promise<PdfStructure> {
+  // Council N-H1: pdf.js reads outline titles (document map nodes, search text, metadata.mapTitle) only from an encrypted
+  // PDF whose encryption every reader agrees on, the same check quarantine refuses on, so it never decrypts with a key
+  // other than the one qpdf used for the scanned copy. Quarantine has already refused such a file; this is the reader's own.
+  const encryption = pdfEncryptionStructure(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+  if (encryption.conflict) throw new Error("PDF encryption structure is inconsistent; structure not read");
   const lib = await loadPdfJs();
   let task: ReturnType<PdfJs["getDocument"]> | null = null;
   try {

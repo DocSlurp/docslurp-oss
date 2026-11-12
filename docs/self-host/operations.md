@@ -250,6 +250,39 @@ Rolling back the code reads the org-level tables again, which miss anything
 indexed after the upgrade: keep them until step 3 and reprocess documents
 uploaded since.
 
+### Rescanning documents after the parse-source upgrade (migrations 0134-0135)
+
+Quarantine now records a parse decision on each document it accepts: the scan
+version and the sha256 of the bytes parsers read. Every parser, the page
+renderer and materialization refuse a document without a decision from the
+current scan. That includes every document ingested before this upgrade. Its
+existing Markdown, search index and cached page images keep working. A page
+image that was never rendered gets HTTP 409 `quarantine_rescan_required`
+("This document needs to be scanned again; reprocess it to view pages"), and
+search materialization reports such pages with reason
+`quarantine-rescan-required`. Reprocessing a document runs quarantine again
+first and records a decision.
+
+1. Drain every worker running an older release before starting new workers.
+   An old worker parses without recording a decision, and a new one refuses
+   that work.
+2. List the documents that need a rescan. Nothing is changed:
+   `pnpm -C server reprocess:unscanned` (the same as `--dry-run`). It prints the
+   candidates per organization. Candidates are live, completed PDFs without a
+   current decision; add `--all-types` to include every format. Use `--org=<id>`
+   (repeatable) to scope the run and `--limit=<n>` (default 1000) to cap it.
+3. Reprocess them: add `--apply`, optionally with `--batch-size=<n>` (default
+   50, at most 500) and `--pause-ms=<ms>` between batches. Each batch is one bulk
+   reprocess, run as the organization's earliest owner. Reprocesses are billed
+   to the organization like any other reprocess, so make sure it has credits.
+   A refused batch is reported in `failedDocuments`/`errors` and is not
+   retried. Documents whose newer version is already queued or processing are
+   skipped, so you can rerun the command to resume.
+
+Turning on `DOCSLURP_QUARANTINE_SCAN_SNAPSHOT` before a large wave keeps each
+scan short. Users can also reprocess a single document from the reader when it
+shows the rescan message.
+
 ## Monitoring
 
 - `GET /health` returns `{"ok":true,...}` while the server process is up. The

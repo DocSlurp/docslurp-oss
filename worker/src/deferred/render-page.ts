@@ -10,6 +10,7 @@ import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { buildAllocatedResourceObservation, buildLocalComputeUsageEvent, resolveWorkerDeploymentProfile } from "../pipeline/local-compute-cost.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
+import { assertParseSourceDecided } from "../lib/parse-source.js";
 
 /** Revalidate the live document before rendering and under the final write lock. */
 export async function renderDocumentPage(deps: { store: Store; storage: ArtifactStore; runner: CommandRunner }, input: RenderDocumentPageInput, signal?: AbortSignal) {
@@ -20,6 +21,13 @@ export async function renderDocumentPage(deps: { store: Store; storage: Artifact
   const sql = store.stageSql;
   const document = await store.loadDocument(input.documentId);
   if (document.runId !== input.runId || document.status !== "completed" || document.mimeType !== "application/pdf" || !Number.isInteger(input.pageNumber) || input.pageNumber < 1 || input.pageNumber > document.pageCount) throw new Error("Document page is not renderable");
+  // Fail closed (council R7-H1): a document with no parse decision from this build's quarantine (one quarantined before it)
+  // is never rasterized from its upload. Final: a retry cannot decide it; a reprocess re-quarantines it.
+  try {
+    assertParseSourceDecided(document);
+  } catch (error) {
+    throw ApplicationFailure.nonRetryable("Document page needs a fresh scan: reprocess the document", "ParseSourceUnscanned", error instanceof Error ? error.name : "refused");
+  }
   const [row] = await sql<{ org_id: string; project_id: string; withheld: boolean; low: string | null; high: string | null }[]>`
     select d.org_id, d.project_id,
       coalesce(jsonb_array_length(d.metadata->'pii'->'withheldArtifactUris'), 0) > 0 as withheld,

@@ -249,6 +249,7 @@ const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 function makeDocument(overrides: Partial<Document> = {}): Document {
   return {
     id: "doc-1", userId: "user-1", runId: "run-1", filename: "a.pdf", mimeType: "application/pdf", sourceKey: "user-1/raw/a.pdf",
+    parseSourceDecision: "unscanned-allowed",
     status: "queued", extractionMode: "hybrid", pageCount: 1, createdAt: new Date(), updatedAt: new Date(), ...overrides,
   };
 }

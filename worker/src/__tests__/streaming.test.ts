@@ -39,6 +39,7 @@ function createRun(): ProjectRun {
 
 function createDocument(sourceKey: string): Document {
   return {
+    parseSourceDecision: "unscanned-allowed",
     id: "doc-1",
     userId: "demo-user",
     runId: "run-1",

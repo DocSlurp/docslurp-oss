@@ -31,7 +31,7 @@ async function fixture() {
   const now = new Date();
   const documents: Document[] = [...sources].map(([filename, bytes]) => ({
     id: filename, userId: "u", runId: "run", filename, mimeType: filename.endsWith("zip") ? "application/zip" : "text/plain",
-    sourceKey: filename, sourceSha256: sha256Bytes(bytes), status: "queued", extractionMode: "hybrid", pageCount: 1,
+    sourceKey: filename, sourceSha256: sha256Bytes(bytes), parseSourceDecision: "unscanned-allowed", status: "queued", extractionMode: "hybrid", pageCount: 1,
     createdAt: now, updatedAt: now,
   }));
   const run: ProjectRun = { id: "run", orgId: "org", projectId: "project", userId: "u", kind: "bulk-upload",

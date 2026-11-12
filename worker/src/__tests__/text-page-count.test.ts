@@ -41,10 +41,10 @@ beforeAll(async () => {
     insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
       values ('run1', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 1, ${apiEstimate}),
              ('run2', 'o2', 'u1', 'w2', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 1, ${apiEstimate});
-    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, source_sha256, file_facts) values
-      ('big', 'o1', 'u1', 'w1', 'run1', 'log.txt', 'text/plain', 'raw/big', 'processing', ${apiEstimate}, 'assumed', '${sha}', '${JSON.stringify(textFacts)}'),
-      ('poor', 'o2', 'u1', 'w2', 'run2', 'log.txt', 'text/plain', 'raw/poor', 'processing', ${apiEstimate}, 'assumed', '${sha}', '${JSON.stringify(textFacts)}'),
-      ('small', 'o1', 'u1', 'w1', 'run1', 'a.txt', 'text/plain', 'raw/small', 'processing', 2, 'counted', null, '${JSON.stringify(textFacts)}');
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, source_sha256, file_facts, parse_source_scan_version, parse_source_sha256) values
+      ('big', 'o1', 'u1', 'w1', 'run1', 'log.txt', 'text/plain', 'raw/big', 'processing', ${apiEstimate}, 'assumed', '${sha}', '${JSON.stringify(textFacts)}', 1, '${sha}'),
+      ('poor', 'o2', 'u1', 'w2', 'run2', 'log.txt', 'text/plain', 'raw/poor', 'processing', ${apiEstimate}, 'assumed', '${sha}', '${JSON.stringify(textFacts)}', 1, '${sha}'),
+      ('small', 'o1', 'u1', 'w1', 'run1', 'a.txt', 'text/plain', 'raw/small', 'processing', 2, 'counted', null, '${JSON.stringify(textFacts)}', 1, repeat('0', 64));
   `);
   const served = await serveOnRandomPort(db);
   server = served.server;

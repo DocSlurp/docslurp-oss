@@ -15,7 +15,7 @@ async function complete(statuses: string[]) {
   };
   const docs: Document[] = statuses.map((status, index) => ({
     id: `doc-${index}`, userId: run.userId, runId: run.id, filename: "text.txt", mimeType: "text/plain", sourceKey: `raw/${index}`,
-    status, extractionMode: "text", pageCount: 1, createdAt: new Date(), updatedAt: new Date(),
+    parseSourceDecision: "unscanned-allowed", status, extractionMode: "text", pageCount: 1, createdAt: new Date(), updatedAt: new Date(),
   }));
   // Lazy like postgres.js queries: pipelineTransaction starts them with execute().
   const lazy = (rows: unknown[] = []) => Object.assign(Promise.resolve(rows), { execute() { return this; } });

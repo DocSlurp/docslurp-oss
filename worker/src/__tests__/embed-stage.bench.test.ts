@@ -120,6 +120,7 @@ async function runBench(pages: number) {
   const canonicalKey = `u1/run/canonical/${documentId}.json`;
   await storage.putJson(canonicalKey, canonical);
   const document: Document = {
+    parseSourceDecision: "unscanned-allowed",
     id: documentId, userId: "u1", runId: "run", filename: "manual.pdf", mimeType: "application/pdf",
     sourceKey: "unused", status: "processing", extractionMode: "hybrid", pageCount: pages,
     createdAt: new Date(), updatedAt: new Date(),

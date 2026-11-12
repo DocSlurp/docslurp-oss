@@ -60,6 +60,7 @@ import { enforceRunSpend, enforceRunSpendForCharge, largestFundedCharge, pauseRu
 import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
 import { PostgresVisionAttemptBackend } from "./vision-attempt-store.js";
+import { assertParseSourceRecord, bindDocumentUpload, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource, type ParseSourceDecisionRecord } from "../lib/parse-source.js";
 import {
   lexicalColumnProbe,
   resolveWorkerCapabilities,
@@ -119,6 +120,11 @@ type DocumentRow = {
   mime_type: string;
   source_key: string;
   source_sha256?: string | null;
+  /** Quarantine's scanned copy of an encrypted PDF (migration 0134, lib/parse-source.ts). */
+  parse_source_key?: string | null;
+  parse_source_sha256?: string | null;
+  /** The quarantine scan version that recorded the parse decision (migration 0134); null or stale: unscanned. */
+  parse_source_scan_version?: number | null;
   status: string;
   extraction_mode: string;
   page_count: number;
@@ -415,7 +421,7 @@ function runDocumentRowsQuery(client: Sql<Record<string, unknown>>, runId: strin
     from documents d
     where d.run_id = ${runId}
       and d.superseded_at is null and d.status <> 'cancelled'
-    order by d.created_at asc
+    order by d.created_at asc, d.id asc
   `;
 }
 
@@ -2880,6 +2886,25 @@ export class Store {
     return rows.length > 0;
   }
 
+  /**
+   * Record quarantine's parse decision for this run's own document (lib/parse-source.ts, migrations 0134-0135): `{ copy }`
+   * parses the scanned copy (an encrypted PDF's), `{ copy: null }` the upload it scanned, and null clears the decision
+   * (refused: nothing may parse it). Either decision stores the sha256 of the bytes parsers read: the copy's, or the
+   * upload's as the scan read it (`scannedSha256`, council R8-L1), so a later swap of the object is refused whether or not
+   * the row has a server hash. Stamped with this build's scan version; false when no row matched.
+   */
+  async setDocumentParseSource(runId: string, documentId: string, decision: ParseSourceDecisionRecord | null): Promise<boolean> {
+    const copy = decision?.copy ?? null;
+    const sha = decision ? assertParseSourceRecord(decision) : null;
+    const rows = await this.sql`
+      update documents set parse_source_key = ${copy?.key ?? null}, parse_source_sha256 = ${sha},
+        parse_source_scan_version = ${decision ? PARSE_SOURCE_SCAN_VERSION : null}, updated_at = now()
+      where id = ${documentId} and run_id = ${runId}
+      returning id
+    `;
+    return rows.length > 0;
+  }
+
   async setDocumentTitleIfAbsent(documentId: string, title: DerivedDocumentTitle): Promise<boolean> {
     const rows = await this.sql`
       update documents
@@ -3129,7 +3154,10 @@ export class Store {
       });
       if (unavailable.length > 0) return { seededDocuments: 0, unavailable };
 
-      const reused = [...reusedStages];
+      // Quarantine is never reused (council R7-H1): its parse decision and scanned copy belong to the run that made them,
+      // and that run's retention purges the copy. Every partial plan re-runs it (stageDataFlow.quarantine.alwaysRerun);
+      // an older stored plan that still lists it gets no checkpoint, so this run's quarantine runs.
+      const reused = reusedStages.filter((stage) => stage !== "quarantine");
       for (const doc of docs) {
         const sourceId = doc.source_id!;
         const prefix = `${sourceId}:`;
@@ -3587,7 +3615,8 @@ export class Store {
         r.org_id,
         r.project_id,
         w.name as project_name,
-        array_remove(array_agg(distinct d.source_key), null) as source_keys,
+        -- Quarantine's scanned parse copies (migration 0134) are run artifacts and go with them.
+        array_remove(array_agg(distinct d.source_key) || array_agg(distinct d.parse_source_key), null) as source_keys,
         array_remove(
           array_agg(distinct artifact_value.value) filter (where artifact_value.value is not null),
           null
@@ -4416,14 +4445,15 @@ function formatCurrency(cents: number): string {
 }
 
 function mapDocument(row: DocumentRow): Document {
-  return {
+  const document: Document = {
     id: row.id,
     userId: row.user_id,
     runId: row.run_id,
     filename: row.filename,
     mimeType: row.mime_type,
-    sourceKey: row.source_key,
-    sourceSha256: row.source_sha256 ?? null,
+    // The bytes for parsing as this build's quarantine decided them: its scanned copy of an encrypted PDF, the upload it
+    // scanned, or (no decision) an unreadable key that every reader but quarantine refuses.
+    ...resolveDocumentSource(row),
     status: row.status,
     extractionMode: row.extraction_mode,
     pageCount: row.page_count,
@@ -4437,6 +4467,9 @@ function mapDocument(row: DocumentRow): Document {
     updatedAt: toDate(row.updated_at),
     ...(row.run_storage_prefix ? { artifactRoot: row.run_storage_prefix } : {}),
   };
+  // The upload's key stays off the document unless quarantine decided parsers read it: only quarantine reaches it.
+  bindDocumentUpload(document, row);
+  return document;
 }
 
 function mapStageState(row: StageStateRow): StageState {

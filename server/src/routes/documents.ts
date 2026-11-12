@@ -4,7 +4,7 @@ import { isSpendBlockedError, spendBlockedResponse } from "../services/billing/s
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { z } from "zod";
-import { documentTagsSchema } from "@docslurp/shared";
+import { documentTagsSchema, PARSE_SOURCE_RESCAN_MESSAGE, PARSE_SOURCE_RESCAN_REASON } from "@docslurp/shared";
 import { zValidator } from "@hono/zod-validator";
 
 import { getArtifactJson } from "../lib/artifacts.js";
@@ -147,6 +147,9 @@ export const documentsRoutes = new Hono()
       if (result.status === "busy") { c.header("Retry-After", "5"); return apiStatusError(c, 429, "Page image queue is busy"); }
       if (result.status === "missing") return apiStatusError(c, 404, "Document page not found");
       if (result.status === "unavailable") return apiStatusError(c, 409, "Page image unavailable");
+      if (result.status === "rescan-required") {
+        return apiErrorResponse(c, 409, "quarantine_rescan_required", PARSE_SOURCE_RESCAN_MESSAGE, { category: PARSE_SOURCE_RESCAN_REASON, action: "reprocess" });
+      }
       if (result.status === "pending") { c.header("Retry-After", "2"); return c.json(result, 202); }
       return c.json(result);
     } catch (error) {
