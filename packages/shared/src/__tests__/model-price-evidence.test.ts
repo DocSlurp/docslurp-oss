@@ -5,7 +5,7 @@ import { visionModelCatalog, type VisionTokenPricing } from "../embedding.js";
 import { DEFAULT_PIPELINE_TEXT_MODEL } from "../pipeline.js";
 import { defaultAiUsagePricing } from "../usage.js";
 
-const evidence = JSON.parse(readFileSync(new URL("../../../../docs/evals/model-prices-2026-10-26.json", import.meta.url), "utf8")) as {
+const evidence = JSON.parse(readFileSync(new URL("../../../../docs/evals/model-prices-2026-11-12.json", import.meta.url), "utf8")) as {
   models: { id: string; pricing: { prompt: string; completion: string }; context_length: number; architecture: { input_modalities: string[] } }[];
   unavailable: string[];
   endpoints: Record<string, { tag: string; pricing: { prompt: string; completion: string } }[]>;
@@ -19,9 +19,21 @@ const deepInfraEvidence = JSON.parse(readFileSync(new URL("../../../../docs/eval
   models: { model_name: string; pricing: { cents_per_input_token: number; cents_per_output_token: number } }[];
 };
 const registry = JSON.parse(readFileSync(new URL("../../../../scripts/lib/model-prices.json", import.meta.url), "utf8")) as {
-  models: Record<string, { input: number; output: number; vision?: boolean; contextWindow?: number; unavailable?: string }>;
+  models: Record<string, { input: number; output: number; vision?: boolean; contextWindow?: number; unavailable?: string; priceEndpoint?: string }>;
 };
-const prices = new Map(evidence.models.map(model => [model.id, model]));
+const listings = new Map(evidence.models.map(model => [model.id, model]));
+/** A model's list price: the endpoint its registry entry names (`priceEndpoint`), else OpenRouter's top-level price. */
+function listPrice(id: string): { prompt: string; completion: string } {
+  const named = registry.models[id]?.priceEndpoint;
+  if (named) {
+    const endpoint = evidence.endpoints[id]?.find((entry) => entry.tag === named);
+    expect(endpoint, `${id} priceEndpoint ${named}`).toBeDefined();
+    return endpoint!.pricing;
+  }
+  const live = listings.get(id);
+  expect(live, id).toBeDefined();
+  return live!.pricing;
+}
 
 describe("official model price evidence", () => {
   it("keeps available registry prices and capabilities consistent with the retained official response", () => {
@@ -31,10 +43,11 @@ describe("official model price evidence", () => {
         expect(CHAT_MODEL_PRICES_USD_PER_MTOK[id]).toBeUndefined();
         continue;
       }
-      const live = prices.get(id)!;
+      const live = listings.get(id)!;
       expect(live, id).toBeDefined();
-      expect(model.input, id).toBeCloseTo(Number(live.pricing.prompt) * 1e6, 10);
-      expect(model.output, id).toBeCloseTo(Number(live.pricing.completion) * 1e6, 10);
+      const price = listPrice(id);
+      expect(model.input, id).toBeCloseTo(Number(price.prompt) * 1e6, 10);
+      expect(model.output, id).toBeCloseTo(Number(price.completion) * 1e6, 10);
       expect(model.contextWindow, id).toBe(live.context_length);
       expect(model.vision, id).toBe(live.architecture.input_modalities.includes("image"));
     }
@@ -42,10 +55,9 @@ describe("official model price evidence", () => {
 
   it("keeps runtime chat, vision, default text and billing reference prices in agreement", () => {
     const rates = (id: string, input: number, output: number) => {
-      const live = prices.get(id)!;
-      expect(live, id).toBeDefined();
-      expect(input, id).toBeCloseTo(Number(live.pricing.prompt) * 1e6, 10);
-      expect(output, id).toBeCloseTo(Number(live.pricing.completion) * 1e6, 10);
+      const price = listPrice(id);
+      expect(input, id).toBeCloseTo(Number(price.prompt) * 1e6, 10);
+      expect(output, id).toBeCloseTo(Number(price.completion) * 1e6, 10);
     };
     for (const [id, price] of Object.entries(CHAT_MODEL_PRICES_USD_PER_MTOK)) rates(id, price.input, price.output);
     for (const model of visionModelCatalog) {
@@ -62,17 +74,26 @@ describe("official model price evidence", () => {
         continue;
       }
       const id = model.id === "gpt-4.1-mini" ? "openai/gpt-4.1-mini" : model.id;
-      expect(prices.get(id)!.architecture.input_modalities).toContain("image");
+      expect(listings.get(id)!.architecture.input_modalities).toContain("image");
       if (pricing.basis !== "pinned-route") {
         rates(id, pricing.inputUsdPerMillion, pricing.outputUsdPerMillion);
         continue;
       }
-      // A pinned route is priced at its most expensive pinned provider, from the retained endpoint response.
+      // A pinned route is priced at its most expensive pinned provider's cheapest endpoint, from the retained endpoint
+      // response: every pinned provider can serve at or under the route price. A provider's dearer variants (for
+      // example `fireworks/us`) never serve, since the request's max_price is the route price.
       const endpoints = [...(evidence.endpoints[id] ?? []), ...(routeEvidence.endpoints[id] ?? [])];
-      const pinned = endpoints.filter((endpoint) => pricing.providers!.some((provider) => endpoint.tag === provider || endpoint.tag.startsWith(`${provider}/`)));
-      expect(pinned.length, id).toBeGreaterThanOrEqual(pricing.providers!.length);
-      expect(pricing.inputUsdPerMillion, id).toBeCloseTo(Math.max(...pinned.map((endpoint) => Number(endpoint.pricing.prompt) * 1e6)), 10);
-      expect(pricing.outputUsdPerMillion, id).toBeCloseTo(Math.max(...pinned.map((endpoint) => Number(endpoint.pricing.completion) * 1e6)), 10);
+      const cheapestOf = (provider: string, side: "prompt" | "completion") => {
+        const own = endpoints.filter((endpoint) => endpoint.tag === provider || endpoint.tag.startsWith(`${provider}/`));
+        expect(own.length, `${id} ${provider}`).toBeGreaterThan(0);
+        // The endpoint that fits both prices at once: the cheapest by prompt among those under both route prices.
+        const fitting = own.filter((endpoint) => Number(endpoint.pricing.prompt) * 1e6 <= pricing.inputUsdPerMillion + 1e-9
+          && Number(endpoint.pricing.completion) * 1e6 <= pricing.outputUsdPerMillion + 1e-9);
+        expect(fitting.length, `${id} ${provider} has an endpoint at or under the route price`).toBeGreaterThan(0);
+        return Math.min(...fitting.map((endpoint) => Number(endpoint.pricing[side]) * 1e6));
+      };
+      expect(pricing.inputUsdPerMillion, id).toBeCloseTo(Math.max(...pricing.providers!.map((provider) => cheapestOf(provider, "prompt"))), 10);
+      expect(pricing.outputUsdPerMillion, id).toBeCloseTo(Math.max(...pricing.providers!.map((provider) => cheapestOf(provider, "completion"))), 10);
     }
     rates(DEFAULT_PIPELINE_TEXT_MODEL, defaultAiUsagePricing.costPer1kInputTokens * 10, defaultAiUsagePricing.costPer1kOutputTokens * 10);
   });

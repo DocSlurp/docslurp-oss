@@ -679,7 +679,7 @@ describe("searchRoutes", () => {
     expect(post.status).toBe(400);
     expect(await post.json()).toMatchObject({ error: { code: "model_not_allowed" } });
     chatProject.mockClear();
-    const stream = await app.request("/chat/stream?q=test&project=ws-chat&model=inception/mercury-3", { headers: { "Sec-Fetch-Site": "same-origin" } });
+    const stream = await app.request("/chat/stream?q=test&project=ws-chat&model=liquid/lfm-2.5-24b-a2b", { headers: { "Sec-Fetch-Site": "same-origin" } });
     expect(stream.status).toBe(400);
     expect(await stream.json()).toMatchObject({ error: { code: "model_not_allowed" } });
     expect(chatProject).not.toHaveBeenCalled();
