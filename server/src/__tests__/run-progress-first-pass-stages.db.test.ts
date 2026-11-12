@@ -71,7 +71,8 @@ describe("first-pass and unknown run stages on public run reads", () => {
     const eventStages = snapshot!.recentEvents.map((event) => event.stage);
     expect(eventStages).toEqual(["first-pass", "first-pass", "first-pass", null, "format-detect"]);
     // The reporting-only stage never enters the plan rollups.
-    expect(snapshot!.progress.expectedStages).not.toContain("first-pass");
+    expect(snapshot!.progress?.expectedStages ?? []).not.toContain("first-pass");
+    expect(snapshot!.progress?.expectedStages?.length ?? 0).toBeGreaterThan(0);
   });
 
   it("serves the SSE stream snapshot (no recent events) for the same run", async () => {
@@ -94,7 +95,7 @@ describe("first-pass and unknown run stages on public run reads", () => {
       expect((await runs.listRuns("u1")).find((run) => run.id === "odd")?.stage).toBe("queued");
       const snapshot = await runs.getRunProgress("odd", "u1", { recentEventLimit: 20 });
       expect(snapshot?.run.stage).toBe("queued");
-      expect(snapshot?.progress.currentStage).toBe("queued");
+      expect(snapshot?.progress?.currentStage).toBe("queued");
       const lines = warn.mock.calls.map((call) => String(call[0]));
       expect(lines.some((line) => line.includes("unknown_internal_stage") && line.includes(UNKNOWN_STAGE) && line.includes("source=run"))).toBe(true);
     } finally {
