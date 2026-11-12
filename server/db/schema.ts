@@ -353,6 +353,9 @@ export const documents = pgTable(
     previousVersionId: text("previous_version_id"),
     sourceSha256: text("source_sha256"),
     fileFacts: jsonb("file_facts"),
+    /** The scanned copy parsers read instead of the original: an encrypted PDF's qpdf-decrypted copy (migration 0134). */
+    parseSourceKey: text("parse_source_key"),
+    parseSourceSha256: text("parse_source_sha256"),
     /** Pages billed when they differ from `pageCount` (the page basis): the worker's measured count of an Office or EPUB file (migration 0126). */
     billingPages: integer("billing_pages"),
     billingPagesMethod: text("billing_pages_method"),

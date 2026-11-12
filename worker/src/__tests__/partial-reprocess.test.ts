@@ -125,6 +125,7 @@ function recordingStages() {
           if (name === "embed") {
             inputs.embedMarkdown = state.artifactLedger.readDocument(document.id, "markdown");
             inputs.embedCanonical = state.artifactLedger.readDocument(document.id, "canonical-document");
+            inputs.embedSourceKey = document.sourceKey;
             state.usageLedger.record({
               provider: "openai", model: "text-embedding-3-small", metric: "embedding-tokens",
               amount: 40, unit: "token", inputTokens: 40, costCents: 0.01,
@@ -246,8 +247,24 @@ describe("partial reprocess", () => {
     expect(await snapshot()).toEqual(before);
   }, 60_000);
 
+  it("a reused quarantine carries its scanned parse copy: later stages parse the copy, never the encrypted original (council R6-H1)", async () => {
+    await seedSourceRun(defaultPipelineFeatures);
+    const copy = "u1/run-src/quarantine/src.scanned.pdf";
+    await sql`update documents set parse_source_key = ${copy}, parse_source_sha256 = ${"a".repeat(64)} where id = 'src'`;
+    const pipeline = { ...defaultPipelineFeatures, stageSubset: ["embed", "index"] };
+    await seedPartialRun(pipeline);
+    const { stages, inputs } = recordingStages();
+
+    await runWorkflow(stages, pipeline);
+
+    expect(inputs.embedSourceKey).toBe(copy);
+    const [row] = await sql<{ parse_source_key: string | null; source_key: string }[]>`select parse_source_key, source_key from documents where id = 're'`;
+    expect(row).toEqual({ parse_source_key: copy, source_key: "raw/a.pdf" });
+  }, 60_000);
+
   it("retention skips a source run while a partial run reuses it, and run start re-checks after a purge", async () => {
     await seedSourceRun(defaultPipelineFeatures);
+    await sql`update documents set parse_source_key = 'u1/run-src/quarantine/src.scanned.pdf', parse_source_sha256 = ${"b".repeat(64)} where id = 'src'`;
     await sql`update projects set artifact_retention_days = 1 where id = 'w'`;
     await sql`update project_runs set created_at = now() - interval '10 days' where id = 'run-src'`;
     const pipeline = { ...defaultPipelineFeatures, restartFromStage: "embed" };
@@ -267,6 +284,8 @@ describe("partial reprocess", () => {
       await sql`update project_runs set status = 'failed' where id = 'run-re'`;
       await purge();
       expect(deleted).toContain("u1/run-src/markdown/src.md");
+      // The scanned parse copy of an encrypted PDF (lib/parse-source.ts) goes with the run's artifacts.
+      expect(deleted).toContain("u1/run-src/quarantine/src.scanned.pdf");
 
       // A run created before the purge finds the artifacts gone and fails clearly.
       await sql`update project_runs set status = 'queued' where id = 'run-re'`;

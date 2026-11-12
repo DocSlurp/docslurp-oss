@@ -1,0 +1,11 @@
+-- Scan what we parse (PR #339, council round 6). For an encrypted PDF, quarantine scans a qpdf-decrypted, normalized copy
+-- it makes in the parser VM. Readers resolve an encrypted file's objects differently (a linearized file's first-page
+-- cross-reference section against its main one), so every parser must read that scanned copy, never the original.
+-- Quarantine stores the copy as a run artifact and records it here; the worker's document loader hands parsers this key
+-- (worker/src/lib/parse-source.ts). `source_key` stays the original, used only for "download original" and exports.
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS parse_source_key text;
+--> statement-breakpoint
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS parse_source_sha256 text;
+--> statement-breakpoint
+ALTER TABLE documents ADD CONSTRAINT documents_parse_source_pair_check
+  CHECK ((parse_source_key IS NULL) = (parse_source_sha256 IS NULL)) NOT VALID;

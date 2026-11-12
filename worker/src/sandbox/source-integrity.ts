@@ -37,6 +37,17 @@ export class SourceIntegrityError extends SourceRefusalError {
   }
 }
 
+/**
+ * A parser staged the original upload of a document whose quarantine replaced it with a scanned copy (lib/parse-source.ts):
+ * those bytes were never scanned as a parser reads them. Final, like any source refusal.
+ */
+export class ParseSourceError extends SourceRefusalError {
+  constructor(documentId: string) {
+    super(`document ${documentId} refused: a parser read its original instead of the scanned copy`, documentId);
+    this.name = "ParseSourceError";
+  }
+}
+
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const STAGED_LIMIT = 4096;
 /** documentId -> sha256 of the bytes this process staged for it (bounded, oldest first out). */
@@ -51,6 +62,8 @@ interface HashedDocument {
   id: string;
   sourceKey: string;
   sourceSha256?: string | null;
+  /** Set when quarantine's scanned copy replaces the upload for parsing (lib/parse-source.ts): the upload's hash. */
+  originalSourceSha256?: string | null;
 }
 
 /**
@@ -60,6 +73,12 @@ interface HashedDocument {
 export function verifyStagedSource(document: HashedDocument, stagedSha256: string): void {
   const actual = stagedSha256.toLowerCase();
   const expected = document.sourceSha256?.trim().toLowerCase() || null;
+  // Scan what we parse: the original of a document with a scanned copy is never parsed, whatever key it was fetched by.
+  const original = document.originalSourceSha256?.trim().toLowerCase() || null;
+  if (original && original !== expected && original === actual) {
+    console.error(`[worker-source] status=parse-source-original metric=parse_source_original document=${document.id} source_key=${JSON.stringify(document.sourceKey)}`);
+    throw new ParseSourceError(document.id);
+  }
   if (expected && expected !== actual) {
     console.error(
       `[worker-source] status=source-hash-mismatch metric=source_hash_mismatch document=${document.id} ` +

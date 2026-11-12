@@ -60,6 +60,7 @@ import { enforceRunSpend, enforceRunSpendForCharge, largestFundedCharge, pauseRu
 import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
 import { PostgresVisionAttemptBackend } from "./vision-attempt-store.js";
+import { resolveDocumentSource } from "../lib/parse-source.js";
 import {
   lexicalColumnProbe,
   resolveWorkerCapabilities,
@@ -119,6 +120,9 @@ type DocumentRow = {
   mime_type: string;
   source_key: string;
   source_sha256?: string | null;
+  /** Quarantine's scanned copy of an encrypted PDF (migration 0134, lib/parse-source.ts). */
+  parse_source_key?: string | null;
+  parse_source_sha256?: string | null;
   status: string;
   extraction_mode: string;
   page_count: number;
@@ -2880,6 +2884,19 @@ export class Store {
     return rows.length > 0;
   }
 
+  /**
+   * Record (or clear, with null) quarantine's scanned copy of an encrypted PDF as the bytes every parser reads
+   * (lib/parse-source.ts, migration 0134). Only for this run's own document; false when no row matched.
+   */
+  async setDocumentParseSource(runId: string, documentId: string, copy: { key: string; sha256: string } | null): Promise<boolean> {
+    const rows = await this.sql`
+      update documents set parse_source_key = ${copy?.key ?? null}, parse_source_sha256 = ${copy?.sha256 ?? null}, updated_at = now()
+      where id = ${documentId} and run_id = ${runId}
+      returning id
+    `;
+    return rows.length > 0;
+  }
+
   async setDocumentTitleIfAbsent(documentId: string, title: DerivedDocumentTitle): Promise<boolean> {
     const rows = await this.sql`
       update documents
@@ -3133,6 +3150,16 @@ export class Store {
       for (const doc of docs) {
         const sourceId = doc.source_id!;
         const prefix = `${sourceId}:`;
+        // A reused quarantine verdict carries its scanned parse copy (lib/parse-source.ts): later stages of this run must
+        // parse what that quarantine scanned, never the original of an encrypted PDF.
+        if (reused.includes("quarantine")) {
+          await client`
+            update documents target
+            set parse_source_key = source.parse_source_key, parse_source_sha256 = source.parse_source_sha256, updated_at = now()
+            from documents source
+            where target.id = ${doc.id} and source.id = ${sourceId}
+          `;
+        }
         // Existing keys win: a retried start must not overwrite artifacts a
         // stage of this run already wrote.
         await client`
@@ -3587,7 +3614,8 @@ export class Store {
         r.org_id,
         r.project_id,
         w.name as project_name,
-        array_remove(array_agg(distinct d.source_key), null) as source_keys,
+        -- Quarantine's scanned parse copies (migration 0134) are run artifacts and go with them.
+        array_remove(array_agg(distinct d.source_key) || array_agg(distinct d.parse_source_key), null) as source_keys,
         array_remove(
           array_agg(distinct artifact_value.value) filter (where artifact_value.value is not null),
           null
@@ -4422,8 +4450,8 @@ function mapDocument(row: DocumentRow): Document {
     runId: row.run_id,
     filename: row.filename,
     mimeType: row.mime_type,
-    sourceKey: row.source_key,
-    sourceSha256: row.source_sha256 ?? null,
+    // The bytes for parsing: quarantine's scanned copy of an encrypted PDF when it recorded one, else the upload.
+    ...resolveDocumentSource(row),
     status: row.status,
     extractionMode: row.extraction_mode,
     pageCount: row.page_count,

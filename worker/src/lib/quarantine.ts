@@ -60,7 +60,20 @@ export interface QuarantineArtifact {
    * An encrypted PDF's in-VM decryption (CommandRunner.decryptPdfForScan) and the scan of its plaintext copy; null when
    * the file is not a PDF naming /Encrypt or its own scan was not clean.
    */
-  pdfDecryption?: { status: "requires-password" | "decrypted" | "failed"; ms: number; bytes?: number; encrypted?: boolean; malwareScan?: MalwareScanResult } | null;
+  pdfDecryption?: {
+    status: "requires-password" | "decrypted" | "failed";
+    ms: number;
+    bytes?: number;
+    encrypted?: boolean;
+    malwareScan?: MalwareScanResult;
+    /** The scanned copy on this host (with `scannedCopyDir`); never persisted: the stage stores the copy and drops this. */
+    copyPath?: string;
+    /**
+     * Where the stage stored the scanned copy every parser reads instead of the original (lib/parse-source.ts), with its
+     * sha256 and the time the store took.
+     */
+    parseSource?: { uri: string; sha256: string; storeMs: number };
+  } | null;
   decision: "accepted" | "quarantined";
   reasons: QuarantineReason[];
 }
@@ -107,6 +120,11 @@ export async function scanDocumentForQuarantine(args: {
   signal?: AbortSignal;
   /** The bytes' inspection, when the caller already took it (inspectQuarantine): the scan reads nothing again. */
   inspection?: QuarantineInspection;
+  /**
+   * Where the decrypted copy of an encrypted PDF is written and left (the caller owns and removes the directory): the copy
+   * the scan read is the copy every parser reads (lib/parse-source.ts). Without it the copy is removed after the scan.
+   */
+  scannedCopyDir?: string;
 }): Promise<QuarantineArtifact> {
   const reasons: QuarantineReason[] = [];
   // Production reads the bytes in the parser VM (MIME sniff, ZIP inspection); never in this process. Facts follow from the sniff.
@@ -187,7 +205,7 @@ export async function scanDocumentForQuarantine(args: {
   // both are; anything the decryption cannot settle is refused.
   let pdfDecryption: QuarantineArtifact["pdfDecryption"] = null;
   if (encryptName && malwareScan.status === "clean" && !inspected.pdf?.encryptConflict) {
-    const dir = await mkdtemp(path.join(tmpdir(), "docslurp-quarantine-pdf-"));
+    const dir = args.scannedCopyDir ?? await mkdtemp(path.join(tmpdir(), "docslurp-quarantine-pdf-"));
     try {
       const outcome = await args.runner.decryptPdfForScan(args.tempFile, dir, args.signal);
       if (outcome.status === "requires-password") {
@@ -199,14 +217,14 @@ export async function scanDocumentForQuarantine(args: {
         reasons.push({ code: "malware-scan-pdf-decrypt-failed", severity: "error", message: "encrypted PDF could not be decrypted for a malware scan; remove its encryption and upload again", details: { reason: outcome.reason } });
       } else {
         const copyScan = await args.runner.scanForMalware(outcome.path, args.signal);
-        pdfDecryption = { status: outcome.status, ms: outcome.ms, bytes: outcome.bytes, encrypted: outcome.encrypted, malwareScan: copyScan };
+        pdfDecryption = { status: outcome.status, ms: outcome.ms, bytes: outcome.bytes, encrypted: outcome.encrypted, malwareScan: copyScan, ...(args.scannedCopyDir ? { copyPath: outcome.path } : {}) };
         for (const reason of malwareScanReasons(copyScan, args.policy)) {
           reason.details = { ...reason.details, scanned: "decrypted-copy" };
           if (!reasons.some((existing) => existing.code === reason.code)) reasons.push(reason);
         }
       }
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      if (!args.scannedCopyDir) await rm(dir, { recursive: true, force: true });
     }
   }
 
@@ -365,6 +383,9 @@ export function buildQuarantineStats(artifact: QuarantineArtifact): Record<strin
     pdfDecryptionStatus: artifact.pdfDecryption?.status ?? null,
     pdfDecryptionMs: artifact.pdfDecryption?.ms ?? null,
     pdfDecryptedCopyStatus: artifact.pdfDecryption?.malwareScan?.status ?? null,
+    pdfParseCopy: artifact.pdfDecryption?.parseSource ? true : null,
+    pdfParseCopyBytes: artifact.pdfDecryption?.parseSource ? artifact.pdfDecryption.bytes ?? null : null,
+    pdfParseCopyStoreMs: artifact.pdfDecryption?.parseSource?.storeMs ?? null,
     archiveNestedContainers: artifact.archive?.nestedContainers ?? null
   };
 }
