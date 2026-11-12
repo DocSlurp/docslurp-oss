@@ -13,7 +13,7 @@ export const expectedLicenses = {
   "@docslurp/cli": "SEE LICENSE IN LICENSE",
   "@docslurp/contrib-algolia-server": "MIT",
 };
-const sspl = new Set(["@docslurp/cli"]);
+const busl = new Set(["@docslurp/cli"]);
 const forbidden = [/(^|\/)\.env/, /\.map$/, /(^|\/)src\//, /(^|\/)test\//, /\.test\.[cm]?[jt]sx?$/, /(^|\/)node_modules\//, /\.tsbuildinfo$/, /\.(pem|key)$/];
 
 function targets(value, out = new Set()) {
@@ -34,7 +34,7 @@ export function checkPackage({ manifest, files, readme, license }) {
   if (manifest.publishConfig?.access !== "public") problems.push("publishConfig.access must be public");
   if (manifest.private) problems.push("package is private");
   if (!files.has("LICENSE")) problems.push("LICENSE missing from tarball");
-  else if (sspl.has(name) !== /Server Side Public License|SSPL/i.test(license)) problems.push(sspl.has(name) ? "LICENSE is not SSPL" : "LICENSE unexpectedly SSPL");
+  else if (busl.has(name) !== /Business Source License|BUSL/i.test(license)) problems.push(busl.has(name) ? "LICENSE is not BUSL-1.1" : "LICENSE unexpectedly BUSL-1.1");
   if (!files.has("README.md")) problems.push("README.md missing from tarball");
   else if (!readme.split("\n", 1)[0].startsWith(`# ${name}`) || !/\[Package docs\]\(https:\/\/docslurp\.io\/docs\/packages\/[^)]+\) · \[GitHub\]\(.+\) · \[npm\]\(.+\)/.test(readme.split("\n").slice(1, 4).join("\n"))) problems.push("README must start with the title then a `Package docs · GitHub · npm` line");
   for (const field of ["dependencies", "peerDependencies", "optionalDependencies"]) {
