@@ -447,7 +447,9 @@ type KeyTransaction = postgres.TransactionSql<Record<string, postgres.PostgresTy
  * and binds the key to specific projects.
  */
 /** Runtime guard for rows written before the rule: a browser key keeps only search and chat. */
-export function effectiveKeyScopes(keyType: ApiKeyType, scopes: string[], _projectIds: string[]): string[] {
+export function effectiveKeyScopes(keyType: ApiKeyType, rawScopes: string[], _projectIds: string[]): string[] {
+  // A row holding both search scopes (refused on save) keeps only the narrower keyword-only one.
+  const scopes = rawScopes.includes("search:keyword") ? rawScopes.filter(scope => scope !== "search") : rawScopes;
   if (keyType !== "client") return scopes;
   // Narrowing an old row can remove every scope. Defaults belong to creation:
   // adding search here would grant a permission the owner never selected.

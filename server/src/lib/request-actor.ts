@@ -142,7 +142,12 @@ export function setRequestActor(c: Context, actor: RequestActor): void {
   setCurrentRequestUserId(actor.userId);
   setCurrentRequestApiKeyId(actor.type === "apiKey" ? actor.apiKey.keyId : null);
   setCurrentRequestApiKeyProjectIds(actor.type === "apiKey" ? actor.apiKey.projectIds : null);
-  setCurrentRequestKeywordOnly(actor.type === "apiKey" && apiKeyScopesKeywordOnly(actor.apiKey.scopes));
+  const keywordOnly = actor.type === "apiKey" && apiKeyScopesKeywordOnly(actor.apiKey.scopes);
+  // The search service reads keyword-only from the request context. Without one it could not
+  // clamp the key, so refuse rather than let it search with full (model-calling) retrieval.
+  if (!setCurrentRequestKeywordOnly(keywordOnly) && keywordOnly) {
+    throw new Error("Keyword-only API keys need a request context");
+  }
   setCurrentRequestSessionId(actor.type === "session" ? actor.sessionId : null);
   if (actor.type === "apiKey") setCurrentRequestOrgId(actor.apiKey.orgId);
 
@@ -218,9 +223,10 @@ export function requireApiKey(c: Context): ValidatedKey {
 /** Scopes that may run retrieval. `search:keyword` runs it keyword-only. */
 export const SEARCH_RETRIEVAL_SCOPES = ["search", "search:keyword"] as const;
 
-/** Keyword-only: the key holds `search:keyword` and not the full `search` scope. */
+/** Keyword-only: the key holds `search:keyword` (alone, as saving enforces; with `search` too, still keyword-only). */
 export function apiKeyScopesKeywordOnly(scopes: readonly string[]): boolean {
-  return scopes.includes("search:keyword") && !scopes.includes("search");
+  // The narrower scope wins: a row holding both (refused on save) still searches keyword-only.
+  return scopes.includes("search:keyword");
 }
 
 /** May this actor run retrieval (full or keyword-only)? Session actors are checked elsewhere. */

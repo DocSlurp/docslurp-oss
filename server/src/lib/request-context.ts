@@ -233,9 +233,12 @@ export function setCurrentRequestApiKeyProjectIds(projectIds: readonly string[] 
   if (store) store.apiKeyProjectIds = projectIds?.length ? [...projectIds] : null;
 }
 
-export function setCurrentRequestKeywordOnly(keywordOnly: boolean): void {
+/** Returns false when there is no request context to carry the flag. */
+export function setCurrentRequestKeywordOnly(keywordOnly: boolean): boolean {
   const store = requestContextStorage.getStore();
-  if (store) store.apiKeyKeywordOnly = keywordOnly;
+  if (!store) return false;
+  store.apiKeyKeywordOnly = keywordOnly;
+  return true;
 }
 
 /** The request's API key is limited to keyword search: no embeddings, vectors, reranking or AI query strategies. */

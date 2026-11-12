@@ -35,8 +35,9 @@ export function clampKeywordOnly<T extends SearchOptions>(options: T): T {
     enableGraphExpansion: false,
     enableCommunityExpansion: false,
     enableWebFallback: false,
-    useRerank: options.useRerank === true && options.rerankProvider === "bm25",
-    rerankProvider: options.rerankProvider === "bm25" ? "bm25" : undefined,
+    // An unset provider means BM25 (search/session.ts); only the hosted reranker is removed.
+    useRerank: options.useRerank === true && (options.rerankProvider ?? "bm25") === "bm25",
+    rerankProvider: "bm25",
     rerankModel: undefined,
   };
 }

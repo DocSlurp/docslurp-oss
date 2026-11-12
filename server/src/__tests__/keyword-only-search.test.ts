@@ -41,6 +41,7 @@ const { currentRequestKeywordOnly, requestContextMiddleware } = await import("..
 const { createChatTurnContext, runInChatTurnContext } = await import("../lib/chat-turn-context.js");
 const { apiKeyCanUseWebTools } = await import("../lib/web-tool-access.js");
 const { mcpManifest } = await import("../services/mcp-catalog.js");
+const { effectiveKeyScopes } = await import("../services/api-keys.js");
 
 /** Every option that could make a search call a model, all turned on. */
 const everythingOn = {
@@ -85,7 +86,10 @@ describe("search:keyword scope", () => {
   it("is keyword-only only without full search, and is a search scope but never chat", () => {
     expect(apiKeyScopesKeywordOnly(["search:keyword"])).toBe(true);
     expect(apiKeyScopesKeywordOnly(["search:keyword", "chat"])).toBe(true);
-    expect(apiKeyScopesKeywordOnly(["search", "search:keyword"])).toBe(false);
+    // Saving refuses both; a row that has them anyway fails closed to keyword-only.
+    expect(apiKeyScopesKeywordOnly(["search", "search:keyword"])).toBe(true);
+    expect(effectiveKeyScopes("server", ["search", "search:keyword", "ingest"], [])).toEqual(["search:keyword", "ingest"]);
+    expect(effectiveKeyScopes("client", ["search", "search:keyword"], ["ws"])).toEqual(["search:keyword"]);
     expect(apiKeyScopesKeywordOnly(["search"])).toBe(false);
     expect(apiKeyScopesKeywordOnly(["chat"])).toBe(false);
     expect(actorCanSearch(keyActor(["search:keyword"]))).toBe(true);
@@ -106,6 +110,12 @@ describe("search:keyword scope", () => {
 });
 
 describe("request flag", () => {
+  it("refuses a keyword-only key outside a request context instead of searching unclamped", () => {
+    const context = { set: vi.fn(), get: vi.fn() } as never;
+    expect(() => setRequestActor(context, keyActor(["search:keyword"]))).toThrow(/request context/);
+    expect(() => setRequestActor(context, keyActor(["search"]))).not.toThrow();
+  });
+
   it("is set for a keyword-only key and cleared for full-search keys and sessions", async () => {
     expect(await inRequestAs(keyActor(["search:keyword"]), () => currentRequestKeywordOnly())).toBe(true);
     expect(await inRequestAs(keyActor(["search:keyword"], "server"), () => currentRequestKeywordOnly())).toBe(true);
@@ -134,9 +144,11 @@ describe("clampKeywordOnly", () => {
       keywordOnly: true, queryVector: undefined, useHyDE: false, queryRewrite: false, queryDecompose: false, stepback: false,
       selfQuery: false, useContextualCompression: false, adaptiveRetrieval: false, iterativeMultiHop: false, summarySeed: false,
       enableGraphExpansion: false, enableCommunityExpansion: false, enableWebFallback: false,
-      useRerank: false, rerankProvider: undefined, rerankModel: undefined,
+      useRerank: false, rerankProvider: "bm25", rerankModel: undefined,
     });
     expect(clampKeywordOnly({ useRerank: true, rerankProvider: "bm25" })).toMatchObject({ useRerank: true, rerankProvider: "bm25" });
+    // `rerank=true` with no provider means BM25, which stays.
+    expect(clampKeywordOnly({ useRerank: true })).toMatchObject({ useRerank: true, rerankProvider: "bm25" });
   });
 });
 
