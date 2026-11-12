@@ -15,6 +15,7 @@ export const CHAT_MODEL_PRICES_USD_PER_MTOK: Readonly<Record<string, { input: nu
   "anthropic/claude-haiku-5.5": { input: 0.1, output: 0.5 },
   "deepseek/deepseek-v4.1-flash": { input: 0.14, output: 0.42 },
   "deepseek/deepseek-v4.1-flash-1017": { input: 0.15, output: 0.6 },
+  "minimax/minimax-m3.1-flash": { input: 0.15, output: 0.6 },
   "openai/gpt-6.1-sol": { input: 2, output: 10 },
   "openai/gpt-6-luna": { input: 0.1, output: 0.5 },
   "inception/mercury-3": { input: 0.1, output: 0.35 },

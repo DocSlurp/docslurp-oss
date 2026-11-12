@@ -1,0 +1,230 @@
+{
+  "source": "https://openrouter.ai/api/v1/models and /api/v1/models/minimax/minimax-m3.1-flash/endpoints",
+  "retrieved": "2026-11-11",
+  "models": [
+    {
+      "id": "minimax/minimax-m3.1-flash",
+      "name": "MiniMax: MiniMax M3.1 Flash",
+      "context_length": 1048576,
+      "architecture": {
+        "modality": "text+image+video->text",
+        "input_modalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "Other",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.00000015",
+        "completion": "0.0000006",
+        "input_cache_read": "0.000000015",
+        "overrides": [
+          {
+            "utc_start": 1500,
+            "utc_end": 100,
+            "prompt": "0.000000075",
+            "completion": "0.0000003",
+            "input_cache_read": "0.0000000075"
+          },
+          {
+            "utc_start": 100,
+            "utc_end": 1500,
+            "prompt": "0.00000015",
+            "completion": "0.0000006",
+            "input_cache_read": "0.000000015"
+          }
+        ]
+      },
+      "supported_parameters": [
+        "frequency_penalty",
+        "include_reasoning",
+        "logit_bias",
+        "logprobs",
+        "max_tokens",
+        "min_p",
+        "presence_penalty",
+        "reasoning",
+        "reasoning_effort",
+        "repetition_penalty",
+        "response_format",
+        "seed",
+        "stop",
+        "structured_outputs",
+        "temperature",
+        "tool_choice",
+        "tools",
+        "top_k",
+        "top_logprobs",
+        "top_p"
+      ]
+    }
+  ],
+  "endpoints": {
+    "minimax/minimax-m3.1-flash": [
+      {
+        "provider_name": "GMICloud",
+        "tag": "gmicloud/fp8",
+        "quantization": "fp8",
+        "context_length": 1048576,
+        "max_completion_tokens": 943718,
+        "pricing": {
+          "prompt": "0.0000001125",
+          "completion": "0.00000045",
+          "input_cache_read": "0.00000001125",
+          "discount": 0.25
+        }
+      },
+      {
+        "provider_name": "StreamLake",
+        "tag": "streamlake/fp8",
+        "quantization": "fp8",
+        "context_length": 1000000,
+        "max_completion_tokens": 512000,
+        "pricing": {
+          "prompt": "0.000000135",
+          "completion": "0.00000054",
+          "input_cache_read": "0.0000000135",
+          "discount": 0.1
+        }
+      },
+      {
+        "provider_name": "Fireworks",
+        "tag": "fireworks",
+        "quantization": "unknown",
+        "context_length": 1048576,
+        "max_completion_tokens": 943718,
+        "pricing": {
+          "prompt": "0.00000015",
+          "completion": "0.0000006",
+          "input_cache_read": "0.000000015",
+          "discount": 0
+        }
+      },
+      {
+        "provider_name": "InferenceNet",
+        "tag": "inference-net/fp4",
+        "quantization": "fp4",
+        "context_length": 1000000,
+        "max_completion_tokens": 524288,
+        "pricing": {
+          "prompt": "0.00000015",
+          "completion": "0.0000006",
+          "input_cache_read": "0.000000015",
+          "discount": 0
+        }
+      },
+      {
+        "provider_name": "DigitalOcean",
+        "tag": "digitalocean",
+        "quantization": "unknown",
+        "context_length": 1048576,
+        "max_completion_tokens": 943718,
+        "pricing": {
+          "prompt": "0.00000015",
+          "completion": "0.0000006",
+          "input_cache_read": "0.000000015",
+          "discount": 0
+        }
+      },
+      {
+        "provider_name": "Nebius",
+        "tag": "nebius/fp4",
+        "quantization": "fp4",
+        "context_length": 1048576,
+        "max_completion_tokens": 943718,
+        "pricing": {
+          "prompt": "0.00000015",
+          "completion": "0.0000006",
+          "input_cache_read": "0.000000015",
+          "discount": 0
+        }
+      },
+      {
+        "provider_name": "SambaNova",
+        "tag": "sambanova",
+        "quantization": "unknown",
+        "context_length": 1048576,
+        "max_completion_tokens": 943718,
+        "pricing": {
+          "prompt": "0.00000015",
+          "completion": "0.0000006",
+          "input_cache_read": "0.000000015",
+          "discount": 0.5
+        }
+      },
+      {
+        "provider_name": "Parasail",
+        "tag": "parasail/fp8",
+        "quantization": "fp8",
+        "context_length": 1048576,
+        "max_completion_tokens": 524288,
+        "pricing": {
+          "prompt": "0.00000015",
+          "completion": "0.0000006",
+          "input_cache_read": "0.000000015",
+          "discount": 0
+        }
+      },
+      {
+        "provider_name": "InferenceNet",
+        "tag": "inference-net/fp4/us",
+        "quantization": "fp4",
+        "context_length": 1000000,
+        "max_completion_tokens": 524288,
+        "pricing": {
+          "prompt": "0.00000015",
+          "completion": "0.0000006",
+          "input_cache_read": "0.000000015",
+          "discount": 0
+        }
+      },
+      {
+        "provider_name": "Together",
+        "tag": "together",
+        "quantization": "unknown",
+        "context_length": 1048576,
+        "max_completion_tokens": 943718,
+        "pricing": {
+          "prompt": "0.00000015",
+          "completion": "0.0000006",
+          "input_cache_read": "0.000000015",
+          "discount": 0
+        }
+      },
+      {
+        "provider_name": "Minimax",
+        "tag": "minimax",
+        "quantization": "unknown",
+        "context_length": 1048576,
+        "max_completion_tokens": 524288,
+        "pricing": {
+          "prompt": "0.00000015",
+          "completion": "0.0000006",
+          "input_cache_read": "0.000000015",
+          "discount": 0,
+          "overrides": [
+            {
+              "utc_start": 1500,
+              "utc_end": 100,
+              "prompt": "0.000000075",
+              "completion": "0.0000003",
+              "input_cache_read": "0.0000000075"
+            },
+            {
+              "utc_start": 100,
+              "utc_end": 1500,
+              "prompt": "0.00000015",
+              "completion": "0.0000006",
+              "input_cache_read": "0.000000015"
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

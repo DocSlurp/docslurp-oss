@@ -16,6 +16,25 @@ describe("OpenRouter thinking controls", () => {
     expect(body.reasoning_effort).toBe("none");
   });
 
+  it("gives a model that must reason its floor plus an output reserve, and only when the floor is applied", async () => {
+    const send = async (effort: string | undefined, body: Record<string, unknown>) => {
+      const baseFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}"));
+      await createOpenRouterReasoningFetch(baseFetch, effort)("https://openrouter.ai/api/v1/responses", { method: "POST", body: JSON.stringify(body) });
+      return JSON.parse(baseFetch.mock.calls[0][1]!.body as string);
+    };
+    const minimax = "minimax/minimax-m3.1-flash";
+    expect(lowestOpenRouterReasoning(minimax)).toEqual({ effort: "minimal" });
+    // Worker and search helpers ("none"): floor and reserve on whichever cap the body carries.
+    expect(await send("none", { model: minimax, max_output_tokens: 100, reasoning: { effort: "none" } }))
+      .toEqual({ model: minimax, max_output_tokens: 868, reasoning: { effort: "minimal" } });
+    expect(await send("none", { model: minimax, max_tokens: 256 })).toMatchObject({ max_tokens: 1024, reasoning: { effort: "minimal" } });
+    // Unset effort: same for a body without a reasoning choice; an explicit choice keeps its cap.
+    expect(await send(undefined, { model: minimax, max_tokens: 2048 })).toMatchObject({ max_tokens: 2816, reasoning: { effort: "minimal" } });
+    expect(await send(undefined, { model: minimax, max_tokens: 2048, reasoning: { effort: "high" } })).toEqual({ model: minimax, max_tokens: 2048, reasoning: { effort: "high" } });
+    // Models without a reserve keep their cap.
+    expect(await send("none", { model: "z-ai/glm-5.3-flash", max_tokens: 100 })).toMatchObject({ max_tokens: 100, reasoning: { effort: "minimal" } });
+  });
+
   it("leaves enabled efforts and requests without a JSON body untouched", async () => {
     const baseFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}"));
     expect(createOpenRouterReasoningFetch(baseFetch, "low")).toBe(baseFetch);
@@ -65,6 +84,15 @@ describe("lowest accepted reasoning", () => {
     expect(response.status).toBe(200);
     expect(JSON.parse(baseFetch.mock.calls[0][1]!.body as string).reasoning).toEqual({ enabled: false });
     expect(baseFetch.mock.calls[1][1]!.body).toBe(body);
+
+    // A caller that itself asked for no reasoning (worker text calls send effort `none`) retries with that choice removed.
+    for (const off of [{ reasoning: { effort: "none" } }, { reasoning: { enabled: false } }, { reasoning_effort: "none" }]) {
+      const retried = vi.fn<typeof fetch>().mockResolvedValueOnce(mandatory()).mockResolvedValueOnce(new Response("{}"));
+      const offBody = JSON.stringify({ model: "vendor/thinker", max_output_tokens: 256, ...off });
+      const ok = await createOpenRouterReasoningFetch(retried, "none")("https://openrouter.ai/api/v1/responses", { method: "POST", body: offBody });
+      expect(ok.status).toBe(200);
+      expect(JSON.parse(retried.mock.calls[1][1]!.body as string)).toEqual({ model: "vendor/thinker", max_output_tokens: 256 });
+    }
 
     // Composed as the worker does, the retry still carries a restricted run's provider allowlist.
     setOpenRouterProviderPolicyResolver(() => ({ allowChinaProviders: false }));

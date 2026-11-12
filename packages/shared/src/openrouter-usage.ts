@@ -142,10 +142,38 @@ export const OPENROUTER_LOWEST_REASONING: Readonly<Record<string, OpenRouterReas
   // 2026-11-06 probes on non-China hosts: `{ enabled: false }` and effort `none` return HTTP 400 "Reasoning is
   // mandatory"; `minimal` returns HTTP 200 with ~145 reasoning tokens (unset: ~750). The restricted fallback model.
   "openai/gpt-oss-120b": { effort: "minimal" },
+  // 2026-11-11 probes on all eleven hosts: `{ enabled: false }` and effort `none` return HTTP 400 "Reasoning is
+  // mandatory"; `minimal` returns HTTP 200. `reasoning.max_tokens` is not honored (a 16-token cap still spent 149).
+  // Calibration (docs/evals/minimax-m31-flash/plan.md): at `minimal` the 18 features spent p50 69 / p95 372 /
+  // p99 653 reasoning tokens, so it also carries an output reserve (OPENROUTER_REASONING_OUTPUT_RESERVE).
+  "minimax/minimax-m3.1-flash": { effort: "minimal" },
+};
+
+/**
+ * Output tokens added to a request's cap when its model's floor still reasons. OpenRouter counts reasoning against
+ * `max_tokens`, so a helper sized for its visible answer (100 tokens for a query rewrite, 256 for a summary) is cut
+ * off before it answers. Measured at the floor; it raises the cap only, so it costs nothing when unused.
+ */
+export const OPENROUTER_REASONING_OUTPUT_RESERVE: Readonly<Record<string, number>> = {
+  // 2026-11-11: +512 left 9 truncations in 875 development cases; +768 (over the p99 of 653) left none in 196
+  // held-out cases. Without it, 24-89% of rewrites, HyDE passages, self-query filters and summaries were cut off.
+  "minimax/minimax-m3.1-flash": 768,
 };
 
 export function lowestOpenRouterReasoning(model: string | undefined): OpenRouterReasoning | undefined {
   return model ? OPENROUTER_LOWEST_REASONING[nitroBaseModel(model) ?? model] : undefined;
+}
+
+/** `body` with its model's reasoning reserve added to whichever output-token cap it carries. */
+function withReasoningOutputReserve(body: Record<string, any>): Record<string, any> {
+  const model = typeof body.model === "string" ? body.model : undefined;
+  const reserve = model ? OPENROUTER_REASONING_OUTPUT_RESERVE[nitroBaseModel(model) ?? model] : undefined;
+  if (!reserve) return body;
+  const next = { ...body };
+  for (const key of ["max_tokens", "max_completion_tokens", "max_output_tokens"]) {
+    if (typeof next[key] === "number") next[key] += reserve;
+  }
+  return next;
 }
 
 /** Request-body fragment for page-transcription calls: the model's verified lowest reasoning, or nothing. */
@@ -176,7 +204,7 @@ export function createOpenRouterReasoningFetch(baseFetch: typeof fetch, effort?:
     if (floorWhenUnset) {
       const floor = lowestOpenRouterReasoning(typeof body.model === "string" ? body.model : undefined);
       if (!floor || body.reasoning !== undefined || body.reasoning_effort !== undefined) return baseFetch(input, init);
-      return baseFetch(input, { ...init, body: JSON.stringify({ ...body, reasoning: floor }) });
+      return baseFetch(input, { ...init, body: JSON.stringify(withReasoningOutputReserve({ ...body, reasoning: floor })) });
     }
     const floor = lowestOpenRouterReasoning(typeof body.model === "string" ? body.model : undefined);
     const original = init.body;
@@ -186,15 +214,38 @@ export function createOpenRouterReasoningFetch(baseFetch: typeof fetch, effort?:
     delete body.reasoning_effort;
     if (floor && "effort" in floor) body.reasoning.effort = floor.effort;
     else body.reasoning.enabled = false;
-    const response = await baseFetch(input, { ...init, body: JSON.stringify(body) });
+    const response = await baseFetch(input, { ...init, body: JSON.stringify(floor ? withReasoningOutputReserve(body) : body) });
     if (floor || response.status !== 400) return response;
-    // A model without a verified floor may require reasoning; send the request as the caller built it.
+    // A model without a verified floor may require reasoning; send the request as the caller built it,
+    // minus any "reasoning off" choice of its own.
     const detail = await response.clone().text().catch(() => "");
     if (!/reasoning is mandatory/i.test(detail)) return response;
     console.warn(`[openrouter] reasoning_floor_rejected model=${String(body.model)}; retrying with the provider default`);
     await response.body?.cancel().catch(() => undefined);
-    return baseFetch(input, { ...init, body: original });
+    return baseFetch(input, { ...init, body: withoutReasoningOff(original) });
   };
+}
+
+/**
+ * The caller's body for a retry after "Reasoning is mandatory", with an explicit "reasoning off" choice
+ * (`enabled: false`, effort `none`, `reasoning_effort: "none"`) removed so the provider default applies. Worker
+ * text calls send effort `none` themselves (AI SDK `reasoningEffort`), and resending that body failed the same way.
+ */
+function withoutReasoningOff(original: string): string {
+  const body = JSON.parse(original) as Record<string, any>;
+  let changed = false;
+  if (body.reasoning_effort === "none") {
+    delete body.reasoning_effort;
+    changed = true;
+  }
+  const reasoning = body.reasoning;
+  if (reasoning && typeof reasoning === "object" && (reasoning.enabled === false || reasoning.effort === "none")) {
+    const { enabled: _enabled, effort: _effort, ...rest } = reasoning;
+    if (Object.keys(rest).length) body.reasoning = rest;
+    else delete body.reasoning;
+    changed = true;
+  }
+  return changed ? JSON.stringify(body) : original;
 }
 
 /**

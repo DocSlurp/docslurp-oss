@@ -93,11 +93,24 @@ export function parseStructuredFields(
   return Object.fromEntries(
     Object.entries(source).map(([key, rawField]) => {
       if (isRecord(rawField) && "value" in rawField) {
-        return [key, rawField as RawStructuredField];
+        const field = rawField as RawStructuredField;
+        return [key, "evidence" in rawField ? { ...field, evidence: normalizeEvidence(rawField.evidence) } : field];
       }
       return [key, { value: rawField }];
     }),
   );
+}
+
+/**
+ * Evidence as `{ text }` items. Models often answer `"evidence": ["snippet"]` instead of the requested objects
+ * (the default pipeline text model did for every field in the 2026-11-11 calibration run); reading `.text` off
+ * those strings dropped the evidence and its page provenance.
+ */
+function normalizeEvidence(evidence: unknown): Array<{ text: string }> | undefined {
+  if (!Array.isArray(evidence)) return undefined;
+  return evidence.flatMap((item) => typeof item === "string"
+    ? (item.trim() ? [{ text: item }] : [])
+    : isRecord(item) && typeof item.text === "string" ? [item as { text: string }] : []);
 }
 
 function parseLabelValueEntries(entries: unknown[]): Record<string, RawStructuredField> {
@@ -109,9 +122,7 @@ function parseLabelValueEntries(entries: unknown[]): Record<string, RawStructure
     return [[label, {
       value: entry.value ?? entry.text ?? null,
       confidence: typeof entry.confidence === "number" ? entry.confidence : undefined,
-      evidence: Array.isArray(entry.evidence)
-        ? entry.evidence as Array<{ text: string }>
-        : undefined,
+      evidence: normalizeEvidence(entry.evidence),
     }]];
   }));
 }

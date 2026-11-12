@@ -21,7 +21,11 @@ const deepInfraEvidence = JSON.parse(readFileSync(new URL("../../../../docs/eval
 const registry = JSON.parse(readFileSync(new URL("../../../../scripts/lib/model-prices.json", import.meta.url), "utf8")) as {
   models: Record<string, { input: number; output: number; vision?: boolean; contextWindow?: number; unavailable?: string }>;
 };
-const prices = new Map(evidence.models.map(model => [model.id, model]));
+/** Official responses retained for models priced after the 2026-10-26 snapshot. */
+const laterEvidence = [
+  JSON.parse(readFileSync(new URL("../../../../docs/evals/minimax-m31-flash-prices-2026-11-11.json", import.meta.url), "utf8")) as Pick<typeof evidence, "models">,
+];
+const prices = new Map([...evidence.models, ...laterEvidence.flatMap((snapshot) => snapshot.models)].map(model => [model.id, model]));
 
 describe("official model price evidence", () => {
   it("keeps available registry prices and capabilities consistent with the retained official response", () => {
