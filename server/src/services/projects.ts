@@ -61,6 +61,7 @@ import { attributedUsage, sessionTokenUsage } from "./usage-attribution.js";
 import { cancelProjectRuns, deleteProjectData } from "./data-deletion.js";
 import { insertDefaultProject, ProjectAccessError } from "./default-project.js";
 import { isProtectedStoredQuery } from "../search/session.js";
+import { toPublicRunRowStage } from "../lib/public-run-stage.js";
 
 type ProjectRow = {
   id: string;
@@ -336,7 +337,7 @@ function mapProjectRun(row: ProjectRunRow): ProjectRun {
     projectName: row.project_name ?? "",
     kind: row.kind,
     status: row.status,
-    stage: row.stage,
+    stage: toPublicRunRowStage(row.stage, row.status, row.id),
     totalDocuments: row.total_documents,
     processedDocuments: row.processed_documents,
     pagesTotal: row.pages_total,

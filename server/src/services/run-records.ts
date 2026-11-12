@@ -11,6 +11,7 @@ import {
 } from "@docslurp/shared";
 
 import type { RunUsageCostSummary } from "./usage-attribution.js";
+import { toPublicRunRowStage } from "../lib/public-run-stage.js";
 
 // Row shapes and mappers for project_runs and documents. A leaf module: it
 // imports neither runs.ts nor run-creation.ts, which both depend on it.
@@ -126,7 +127,7 @@ export function mapProjectRun(row: ProjectRunRow, cost?: Pick<RunUsageCostSummar
     controlState: row.control_state ?? null,
     pauseReason: ["credit_exhausted", "project_budget_paused", "org_budget_paused", "plan_not_entitled"].includes(row.pause_reason ?? "") ? row.pause_reason : null,
     controlRequestedAt: serializeOptionalTimestamp(row.control_requested_at),
-    stage: row.stage,
+    stage: toPublicRunRowStage(row.stage, row.status, row.id),
     totalDocuments: row.total_documents,
     processedDocuments: row.processed_documents,
     pagesTotal: row.pages_total,

@@ -29,7 +29,6 @@ import {
   getPipelineStageOrder,
   pipelineStageOrder,
   resolveFirstPass,
-  runStageSchema,
   type MaterializePagesInput,
   type PipelineFeatures,
   type PipelineRunStage,
@@ -41,6 +40,7 @@ import { createTemporalSecurityConfig } from "@docslurp/shared/temporal-security
 
 import { sql } from "../db.js";
 import { configuredGatedFlags, effectiveFleetCapabilities, taskQueueForOrgKey } from "../services/worker-fleet.js";
+import { toPublicRunStage } from "./public-run-stage.js";
 
 const temporal = createTemporalSecurityConfig(process.env);
 const WORKFLOW_ID_PREFIX = "run-";
@@ -573,7 +573,7 @@ export async function getPipelineTemporalSnapshot(
   // Inside a stage group the workflow only knows the group's first stage; the
   // run row (updated as each stage starts) has the current one, so report none.
   const grouped = (progress?.stageGroup?.length ?? 0) > 0;
-  const parsedStage = progress?.stage && !grouped ? runStageSchema.safeParse(progress.stage) : null;
+  const stage = progress?.stage && !grouped ? toPublicRunStage(progress.stage, { source: "temporal", runId }) : null;
   const startTime = description?.startTime ?? null;
   const closeTime = description?.closeTime ?? null;
   const elapsedMs = startTime
@@ -587,7 +587,7 @@ export async function getPipelineTemporalSnapshot(
     workflowId: description?.workflowId ?? `${WORKFLOW_ID_PREFIX}${runId}`,
     workflowRunId: description?.workflowRunId ?? null,
     workflowStatus: description?.workflowStatus ?? null,
-    stage: parsedStage?.success ? parsedStage.data : null,
+    stage,
     stageIndex: grouped ? null : progress?.stageIndex ?? null,
     totalStages: progress?.totalStages ?? null,
     historyLength: description?.historyLength ?? null,
