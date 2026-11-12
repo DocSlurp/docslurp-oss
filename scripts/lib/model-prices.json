@@ -1,15 +1,15 @@
 {
-  "asOf": "2026-10-26",
+  "asOf": "2026-11-12",
   "currency": "usd",
   "unit": "per-million-tokens",
-  "note": "List prices used to estimate evaluation cost from measured token counts. Provider-reported cost, when a gateway returns it, always wins over these numbers. Re-check before quoting a cost in any report (pnpm pricing:watch in DocSlurp/app). Entries with `prohibited` are kept only as historical evidence for old traces and tests: never select them for evals, app options, presets or defaults (openai-pro: OpenAI Pro/Ultra model; output-price>=50: output at or above $50 per 1M tokens).",
+  "note": "List prices used to estimate evaluation cost from measured token counts. Provider-reported cost, when a gateway returns it, always wins over these numbers. Re-check before quoting a cost in any report (pnpm pricing:watch in DocSlurp/app). Entries with `prohibited` are kept only as historical evidence for old traces and tests: never select them for evals, app options, presets or defaults (openai-pro: OpenAI Pro/Ultra model; output-price>=50: output at or above $50 per 1M tokens). `priceEndpoint` names the OpenRouter endpoint whose price is the list price when the top-level price follows whichever host is cheapest at the moment.",
   "models": {
     "openai/gpt-5.6-luna": {
       "input": 0.2,
       "output": 1.2,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "contextWindow": 1050000
     },
     "openai/gpt-4.1-mini": {
@@ -17,7 +17,7 @@
       "output": 1.6,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "contextWindow": 1047576
     },
     "google/gemini-3.1-flash-lite": {
@@ -25,7 +25,7 @@
       "output": 1.5,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "contextWindow": 1048576
     },
     "google/gemini-3.7-flash": {
@@ -33,7 +33,7 @@
       "output": 3.75,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "contextWindow": 1048576
     },
     "openai/gpt-5.6-luna:batch": {
@@ -42,7 +42,7 @@
       "vision": true,
       "contextWindow": 1050000,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "note": "Latency-insensitive work such as eval runs and backfills can use this lane."
     },
     "openai/gpt-5.6-luna-pro": {
@@ -51,7 +51,7 @@
       "vision": true,
       "contextWindow": 1050000,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "prohibited": "openai-pro"
     },
     "openai/gpt-6-luna": {
@@ -59,7 +59,7 @@
       "output": 0.5,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "contextWindow": 1050000
     },
     "z-ai/glm-5.3-flashx": {
@@ -67,23 +67,24 @@
       "output": 1.25,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "contextWindow": 1048576
     },
     "deepseek/deepseek-v4.1-flash": {
-      "input": 0.14,
-      "output": 0.42,
+      "input": 0.3,
+      "output": 1.2,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
-      "contextWindow": 1048576
+      "checked": "2026-11-12",
+      "contextWindow": 1048576,
+      "note": "DeepSeek's own endpoint is no longer listed (2026-11-12); the list price is the common host price ($0.30/$1.20). Chat price routing reaches hosts from $0.022/$0.40."
     },
     "google/gemini-3.8-flash": {
       "input": 0.825,
       "output": 4.125,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "contextWindow": 1048576
     },
     "z-ai/glm-5.3-flash": {
@@ -91,15 +92,17 @@
       "output": 0.5,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
-      "contextWindow": 1048576
+      "checked": "2026-11-12",
+      "contextWindow": 1048576,
+      "priceEndpoint": "z-ai/fp8",
+      "note": "List price is Z.ai's own endpoint: OpenRouter's top-level price follows the cheapest host and moved between $0.027 and $0.15 input across 2026-11-04..12 runs."
     },
     "google/gemini-3.5-flash-lite": {
       "input": 0.3,
       "output": 2.5,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "contextWindow": 1048576
     },
     "openai/gpt-6-luna-pro": {
@@ -107,7 +110,7 @@
       "output": 0.5,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "contextWindow": 1050000,
       "prohibited": "openai-pro"
     },
@@ -116,7 +119,7 @@
       "output": 10,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "contextWindow": 1050000,
       "prohibited": "openai-pro"
     },
@@ -125,7 +128,7 @@
       "output": 10,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "contextWindow": 1050000
     },
     "openai/gpt-6-astra": {
@@ -133,7 +136,7 @@
       "output": 50,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "contextWindow": 1050000,
       "prohibited": "output-price>=50"
     },
@@ -142,7 +145,7 @@
       "output": 50,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "contextWindow": 1050000,
       "prohibited": "openai-pro, output-price>=50"
     },
@@ -151,7 +154,7 @@
       "output": 20,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "contextWindow": 1000000
     },
     "anthropic/claude-fable-5.1": {
@@ -159,7 +162,7 @@
       "output": 50,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "deprecated": "Anthropic models below 5.5 are deprecated (2026-10-09); output price is also >= $50/MTok",
       "contextWindow": 1000000,
       "prohibited": "output-price>=50"
@@ -169,7 +172,7 @@
       "output": 10,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "contextWindow": 1000000
     },
     "anthropic/claude-haiku-5.5": {
@@ -177,7 +180,7 @@
       "output": 0.5,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "note": "$0.50/$2.50 above 100K prompt tokens",
       "contextWindow": 1000000
     },
@@ -187,7 +190,8 @@
       "source": "https://openrouter.ai/api/v1/models",
       "checked": "2026-10-26",
       "vision": false,
-      "contextWindow": 1000000
+      "contextWindow": 1000000,
+      "unavailable": "Listed in OpenRouter's catalog with no serving endpoint on 2026-11-12; historical prices only."
     },
     "minimax/minimax-m3.1-flash:free": {
       "input": 0,
@@ -201,16 +205,16 @@
       "input": 0.15,
       "output": 0.6,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "vision": true,
       "contextWindow": 1048576,
-      "note": "List price is DeepSeek's own China-hosted endpoint. DocSlurp pins page transcription to US hosts (Together, Fireworks, Parasail) at $0.30/$1.20 per 1M tokens (endpoints checked 2026-10-26); the vision catalog prices that route."
+      "note": "List price is DeepSeek's own China-hosted endpoint, which charges 2x ($0.30/$1.20) on weekdays 01:00-04:00 and 06:00-10:00 UTC. DocSlurp page transcription uses only the approved Fireworks and Parasail endpoints, priced at their $0.30/$1.20 (endpoints checked 2026-11-12); the vision catalog prices that route."
     },
     "reflection/beam-1.0-501b-a23b": {
-      "input": 0.25,
+      "input": 0.3,
       "output": 1,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "vision": false,
       "contextWindow": 1048576
     },
@@ -218,7 +222,7 @@
       "input": 0.05,
       "output": 0.7,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "vision": false,
       "contextWindow": 128000
     },
@@ -226,7 +230,7 @@
       "input": 2,
       "output": 10,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "vision": true,
       "contextWindow": 1050000
     },
@@ -234,7 +238,7 @@
       "input": 0.14,
       "output": 0.28,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "vision": true,
       "contextWindow": 1050000
     },
@@ -242,15 +246,15 @@
       "input": 4,
       "output": 12,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "vision": true,
       "contextWindow": 1000000
     },
     "nvidia/nemotron-3.5-super-vl": {
       "input": 0.15,
-      "output": 0.5,
+      "output": 0.47,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-10-26",
+      "checked": "2026-11-12",
       "vision": true,
       "contextWindow": 1048576
     }

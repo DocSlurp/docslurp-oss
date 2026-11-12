@@ -43,6 +43,7 @@ Each target is synced and verified independently. A failure is recorded per data
 | `catalog` | `extract-eval-catalog@v1` / `math-fidelity-catalog@v1` `{ entries: [{ id, split, asset, reference, expect }] }` | catalog entry; the reference file is hash-checked and inlined up to `inlineReferenceMaxBytes` (256 KiB), else kept as path + sha256 |
 | `layout-jsonl` | `{ id, split, image_path, regions, metadata }` lines | page image (hashed) with its regions |
 | `queries` | query JSON/JSONL plus optional `qrels`; `split` (with `splitBasis`) when rows carry none | query with relevance judgements |
+| `benchmark` | `docslurp-benchmark-item@v1` JSONL: `{ id, split, categories: { capability, ... }, input: { uri: "s3://…", sha256, mediaType }, expected, source: { license, localPath? } }`; optional `localRoot` | case; inputs stay `s3://` URIs (presigned by the harness at run time), local bytes are hash-checked against `input.sha256`, categories are flattened into sorted `tags` |
 | `case-list` | harness ID list + parent `catalog` + `parentPrefix` | listed case, pointing at the parent dataset item |
 | `mirror` | `name`, `split`, `fromTarget` | item copied verbatim from a dataset that exists only on another target |
 

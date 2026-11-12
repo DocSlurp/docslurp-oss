@@ -1,0 +1,2350 @@
+{
+ "source": "https://openrouter.ai/api/v1/models",
+ "fetchedAt": "2026-11-12T18:24:25.000Z",
+ "models": [
+  {
+   "id": "anthropic/claude-fable-5.1",
+   "pricing": {
+    "prompt": "0.00001",
+    "completion": "0.00005",
+    "web_search": "0.01",
+    "input_cache_read": "0.00000025",
+    "input_cache_write": "0.0000125",
+    "input_cache_write_1h": "0.00002"
+   },
+   "context_length": 1000000,
+   "architecture": {
+    "modality": "text+image+file->text",
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Claude",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1000000,
+    "max_completion_tokens": 128000,
+    "is_moderated": true
+   }
+  },
+  {
+   "id": "anthropic/claude-haiku-5.5",
+   "pricing": {
+    "prompt": "0.0000001",
+    "completion": "0.0000005",
+    "web_search": "0.01",
+    "input_cache_read": "0.00000001",
+    "input_cache_write": "0.000000125",
+    "input_cache_write_1h": "0.0000002",
+    "overrides": [
+     {
+      "min_prompt_tokens": 100000,
+      "prompt": "0.0000005",
+      "completion": "0.0000025",
+      "input_cache_read": "0.00000005",
+      "input_cache_write": "0.000000625",
+      "input_cache_write_1h": "0.000001"
+     }
+    ]
+   },
+   "context_length": 1000000,
+   "architecture": {
+    "modality": "text+image+file->text",
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Claude",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1000000,
+    "max_completion_tokens": 128000,
+    "is_moderated": true
+   }
+  },
+  {
+   "id": "anthropic/claude-opus-5.5",
+   "pricing": {
+    "prompt": "0.000004",
+    "completion": "0.00002",
+    "web_search": "0.01",
+    "input_cache_read": "0.0000002",
+    "input_cache_write": "0.000005",
+    "input_cache_write_1h": "0.000008"
+   },
+   "context_length": 1000000,
+   "architecture": {
+    "modality": "text+image+file->text",
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Claude",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1000000,
+    "max_completion_tokens": 128000,
+    "is_moderated": true
+   }
+  },
+  {
+   "id": "anthropic/claude-sonnet-5.5",
+   "pricing": {
+    "prompt": "0.000002",
+    "completion": "0.00001",
+    "web_search": "0.01",
+    "input_cache_read": "0.0000001",
+    "input_cache_write": "0.0000025",
+    "input_cache_write_1h": "0.000004"
+   },
+   "context_length": 1000000,
+   "architecture": {
+    "modality": "text+image+file->text",
+    "input_modalities": [
+     "text",
+     "image",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Claude",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1000000,
+    "max_completion_tokens": 128000,
+    "is_moderated": true
+   }
+  },
+  {
+   "id": "deepseek/deepseek-v4.1-flash",
+   "pricing": {
+    "prompt": "0.0000003",
+    "completion": "0.0000012",
+    "input_cache_read": "0.000000006"
+   },
+   "context_length": 1048576,
+   "architecture": {
+    "modality": "text+image->text",
+    "input_modalities": [
+     "text",
+     "image"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "DeepSeek",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1048576,
+    "max_completion_tokens": 943718,
+    "is_moderated": false
+   }
+  },
+  {
+   "id": "deepseek/deepseek-v4.1-flash-1017",
+   "pricing": {
+    "prompt": "0.00000015",
+    "completion": "0.0000006",
+    "input_cache_read": "0.000000003",
+    "overrides": [
+     {
+      "utc_days": [
+       "saturday",
+       "sunday"
+      ],
+      "prompt": "0.00000015",
+      "completion": "0.0000006",
+      "input_cache_read": "0.000000003"
+     },
+     {
+      "utc_days": [
+       "monday",
+       "tuesday",
+       "wednesday",
+       "thursday",
+       "friday"
+      ],
+      "utc_start": 0,
+      "utc_end": 100,
+      "prompt": "0.00000015",
+      "completion": "0.0000006",
+      "input_cache_read": "0.000000003"
+     },
+     {
+      "utc_days": [
+       "monday",
+       "tuesday",
+       "wednesday",
+       "thursday",
+       "friday"
+      ],
+      "utc_start": 100,
+      "utc_end": 400,
+      "prompt": "0.0000003",
+      "completion": "0.0000012",
+      "input_cache_read": "0.000000006"
+     },
+     {
+      "utc_days": [
+       "monday",
+       "tuesday",
+       "wednesday",
+       "thursday",
+       "friday"
+      ],
+      "utc_start": 400,
+      "utc_end": 600,
+      "prompt": "0.00000015",
+      "completion": "0.0000006",
+      "input_cache_read": "0.000000003"
+     },
+     {
+      "utc_days": [
+       "monday",
+       "tuesday",
+       "wednesday",
+       "thursday",
+       "friday"
+      ],
+      "utc_start": 600,
+      "utc_end": 1000,
+      "prompt": "0.0000003",
+      "completion": "0.0000012",
+      "input_cache_read": "0.000000006"
+     },
+     {
+      "utc_days": [
+       "monday",
+       "tuesday",
+       "wednesday",
+       "thursday",
+       "friday"
+      ],
+      "utc_start": 1000,
+      "utc_end": 0,
+      "prompt": "0.00000015",
+      "completion": "0.0000006",
+      "input_cache_read": "0.000000003"
+     }
+    ]
+   },
+   "context_length": 1048576,
+   "architecture": {
+    "modality": "text+image->text",
+    "input_modalities": [
+     "text",
+     "image"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "DeepSeek",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1048576,
+    "max_completion_tokens": 393216,
+    "is_moderated": false
+   }
+  },
+  {
+   "id": "google/gemini-2.5-flash-lite",
+   "pricing": {
+    "prompt": "0.0000001",
+    "completion": "0.0000004",
+    "image": "0.0000001",
+    "audio": "0.0000003",
+    "input_audio_cache": "0.00000003",
+    "web_search": "0.014",
+    "internal_reasoning": "0.0000004",
+    "input_cache_read": "0.00000001",
+    "input_cache_write": "0.0000000833333333333333"
+   },
+   "context_length": 1048576,
+   "architecture": {
+    "modality": "text+image+file+audio+video->text",
+    "input_modalities": [
+     "text",
+     "image",
+     "file",
+     "audio",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Gemini",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1048576,
+    "max_completion_tokens": 65535,
+    "is_moderated": false
+   }
+  },
+  {
+   "id": "google/gemini-3.1-flash-lite",
+   "pricing": {
+    "prompt": "0.00000025",
+    "completion": "0.0000015",
+    "image": "0.00000025",
+    "audio": "0.0000005",
+    "input_audio_cache": "0.00000005",
+    "web_search": "0.014",
+    "internal_reasoning": "0.0000015",
+    "input_cache_read": "0.000000025",
+    "input_cache_write": "0.0000000833333333333333"
+   },
+   "context_length": 1048576,
+   "architecture": {
+    "modality": "text+image+file+audio+video->text",
+    "input_modalities": [
+     "text",
+     "image",
+     "video",
+     "file",
+     "audio"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Gemini",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1048576,
+    "max_completion_tokens": 65536,
+    "is_moderated": false
+   }
+  },
+  {
+   "id": "google/gemini-3.5-flash-lite",
+   "pricing": {
+    "prompt": "0.0000003",
+    "completion": "0.0000025",
+    "image": "0.0000003",
+    "audio": "0.0000003",
+    "input_audio_cache": "0.00000003",
+    "web_search": "0.014",
+    "internal_reasoning": "0.0000025",
+    "input_cache_read": "0.00000003",
+    "input_cache_write": "0.0000000833333333333333"
+   },
+   "context_length": 1048576,
+   "architecture": {
+    "modality": "text+image+file+audio+video->text",
+    "input_modalities": [
+     "text",
+     "image",
+     "video",
+     "file",
+     "audio"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Gemini",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1048576,
+    "max_completion_tokens": 65536,
+    "is_moderated": false
+   }
+  },
+  {
+   "id": "google/gemini-3.7-flash",
+   "pricing": {
+    "prompt": "0.00000075",
+    "completion": "0.00000375",
+    "image": "0.00000075",
+    "audio": "0.00000075",
+    "input_audio_cache": "0.000000075",
+    "web_search": "0.014",
+    "internal_reasoning": "0.00000375",
+    "input_cache_read": "0.000000075",
+    "input_cache_write": "0.0000000416666666666667"
+   },
+   "context_length": 1048576,
+   "architecture": {
+    "modality": "text+image+file+audio+video->text",
+    "input_modalities": [
+     "text",
+     "image",
+     "video",
+     "file",
+     "audio"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Gemini",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1048576,
+    "max_completion_tokens": 65536,
+    "is_moderated": false
+   }
+  },
+  {
+   "id": "google/gemini-3.8-flash",
+   "pricing": {
+    "prompt": "0.000000825",
+    "completion": "0.000004125",
+    "image": "0.000000825",
+    "audio": "0.000000825",
+    "input_audio_cache": "0.0000000825",
+    "web_search": "0.014",
+    "internal_reasoning": "0.000004125",
+    "input_cache_read": "0.0000000825",
+    "input_cache_write": "0.0000000416666666666667"
+   },
+   "context_length": 1048576,
+   "architecture": {
+    "modality": "text+image+file+audio+video->text",
+    "input_modalities": [
+     "text",
+     "image",
+     "video",
+     "file",
+     "audio"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Gemini",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1048576,
+    "max_completion_tokens": 65536,
+    "is_moderated": false
+   }
+  },
+  {
+   "id": "liquid/lfm-2.5-24b-a2b",
+   "pricing": {
+    "prompt": "0.00000005",
+    "completion": "0.0000007",
+    "input_cache_read": "0.000000025"
+   },
+   "context_length": 128000,
+   "architecture": {
+    "modality": "text->text",
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 128000,
+    "max_completion_tokens": 8192,
+    "is_moderated": false
+   }
+  },
+  {
+   "id": "nvidia/nemotron-3.5-super-vl",
+   "pricing": {
+    "prompt": "0.00000015",
+    "completion": "0.00000047",
+    "input_cache_read": "0.00000002"
+   },
+   "context_length": 1048576,
+   "architecture": {
+    "modality": "text+image+video->text",
+    "input_modalities": [
+     "text",
+     "image",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1048576,
+    "max_completion_tokens": 943718,
+    "is_moderated": false
+   }
+  },
+  {
+   "id": "openai/gpt-4.1-mini",
+   "pricing": {
+    "prompt": "0.0000004",
+    "completion": "0.0000016",
+    "web_search": "0.01",
+    "input_cache_read": "0.0000001"
+   },
+   "context_length": 1047576,
+   "architecture": {
+    "modality": "text+image+file->text",
+    "input_modalities": [
+     "image",
+     "text",
+     "file"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "GPT",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1047576,
+    "max_completion_tokens": 32768,
+    "is_moderated": true
+   }
+  },
+  {
+   "id": "openai/gpt-5.6-luna",
+   "pricing": {
+    "prompt": "0.0000002",
+    "completion": "0.0000012",
+    "web_search": "0.01",
+    "input_cache_read": "0.00000002",
+    "input_cache_write": "0.00000025",
+    "overrides": [
+     {
+      "min_prompt_tokens": 272000,
+      "prompt": "0.0000004",
+      "completion": "0.0000018",
+      "input_cache_read": "0.00000004",
+      "input_cache_write": "0.0000005"
+     }
+    ]
+   },
+   "context_length": 1050000,
+   "architecture": {
+    "modality": "text+image+file->text",
+    "input_modalities": [
+     "file",
+     "image",
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "GPT",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1050000,
+    "max_completion_tokens": 128000,
+    "is_moderated": true
+   }
+  },
+  {
+   "id": "openai/gpt-5.6-luna-pro",
+   "pricing": {
+    "prompt": "0.0000002",
+    "completion": "0.0000012",
+    "web_search": "0.01",
+    "input_cache_read": "0.00000002",
+    "input_cache_write": "0.00000025",
+    "overrides": [
+     {
+      "min_prompt_tokens": 272000,
+      "prompt": "0.0000004",
+      "completion": "0.0000018",
+      "input_cache_read": "0.00000004",
+      "input_cache_write": "0.0000005"
+     }
+    ]
+   },
+   "context_length": 1050000,
+   "architecture": {
+    "modality": "text+image+file->text",
+    "input_modalities": [
+     "file",
+     "image",
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "GPT",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1050000,
+    "max_completion_tokens": 128000,
+    "is_moderated": true
+   }
+  },
+  {
+   "id": "openai/gpt-5.6-luna:batch",
+   "pricing": {
+    "prompt": "0.0000001",
+    "completion": "0.0000006",
+    "web_search": "0.01",
+    "input_cache_read": "0.00000001",
+    "overrides": [
+     {
+      "min_prompt_tokens": 272000,
+      "prompt": "0.0000002",
+      "completion": "0.0000009",
+      "input_cache_read": "0.00000002"
+     }
+    ]
+   },
+   "context_length": 1050000,
+   "architecture": {
+    "modality": "text+image+file->text",
+    "input_modalities": [
+     "file",
+     "image",
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "GPT",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1050000,
+    "max_completion_tokens": 128000,
+    "is_moderated": true
+   }
+  },
+  {
+   "id": "openai/gpt-6-astra",
+   "pricing": {
+    "prompt": "0.00001",
+    "completion": "0.00005",
+    "web_search": "0.01",
+    "input_cache_read": "0.000001",
+    "input_cache_write": "0.0000125",
+    "overrides": [
+     {
+      "min_prompt_tokens": 272000,
+      "prompt": "0.00002",
+      "completion": "0.000075",
+      "input_cache_read": "0.000002",
+      "input_cache_write": "0.000025"
+     }
+    ]
+   },
+   "context_length": 1050000,
+   "architecture": {
+    "modality": "text+image+file->text",
+    "input_modalities": [
+     "file",
+     "image",
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "GPT",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1050000,
+    "max_completion_tokens": 128000,
+    "is_moderated": true
+   }
+  },
+  {
+   "id": "openai/gpt-6-astra-pro",
+   "pricing": {
+    "prompt": "0.00001",
+    "completion": "0.00005",
+    "web_search": "0.01",
+    "input_cache_read": "0.000001",
+    "input_cache_write": "0.0000125",
+    "overrides": [
+     {
+      "min_prompt_tokens": 272000,
+      "prompt": "0.00002",
+      "completion": "0.000075",
+      "input_cache_read": "0.000002",
+      "input_cache_write": "0.000025"
+     }
+    ]
+   },
+   "context_length": 1050000,
+   "architecture": {
+    "modality": "text+image+file->text",
+    "input_modalities": [
+     "file",
+     "image",
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "GPT",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1050000,
+    "max_completion_tokens": 128000,
+    "is_moderated": true
+   }
+  },
+  {
+   "id": "openai/gpt-6-luna",
+   "pricing": {
+    "prompt": "0.0000001",
+    "completion": "0.0000005",
+    "web_search": "0.01",
+    "input_cache_read": "0.00000001",
+    "input_cache_write": "0.000000125",
+    "overrides": [
+     {
+      "min_prompt_tokens": 272000,
+      "prompt": "0.0000002",
+      "completion": "0.00000075",
+      "input_cache_read": "0.00000002",
+      "input_cache_write": "0.00000025"
+     }
+    ]
+   },
+   "context_length": 1050000,
+   "architecture": {
+    "modality": "text+image+file->text",
+    "input_modalities": [
+     "file",
+     "image",
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "GPT",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1050000,
+    "max_completion_tokens": 128000,
+    "is_moderated": true
+   }
+  },
+  {
+   "id": "openai/gpt-6-luna-pro",
+   "pricing": {
+    "prompt": "0.0000001",
+    "completion": "0.0000005",
+    "web_search": "0.01",
+    "input_cache_read": "0.00000001",
+    "input_cache_write": "0.000000125",
+    "overrides": [
+     {
+      "min_prompt_tokens": 272000,
+      "prompt": "0.0000002",
+      "completion": "0.00000075",
+      "input_cache_read": "0.00000002",
+      "input_cache_write": "0.00000025"
+     }
+    ]
+   },
+   "context_length": 1050000,
+   "architecture": {
+    "modality": "text+image+file->text",
+    "input_modalities": [
+     "file",
+     "image",
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "GPT",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1050000,
+    "max_completion_tokens": 128000,
+    "is_moderated": true
+   }
+  },
+  {
+   "id": "openai/gpt-6-sol",
+   "pricing": {
+    "prompt": "0.000002",
+    "completion": "0.00001",
+    "web_search": "0.01",
+    "input_cache_read": "0.0000002",
+    "input_cache_write": "0.0000025",
+    "overrides": [
+     {
+      "min_prompt_tokens": 272000,
+      "prompt": "0.000004",
+      "completion": "0.000015",
+      "input_cache_read": "0.0000004",
+      "input_cache_write": "0.000005"
+     }
+    ]
+   },
+   "context_length": 1050000,
+   "architecture": {
+    "modality": "text+image+file->text",
+    "input_modalities": [
+     "file",
+     "image",
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "GPT",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1050000,
+    "max_completion_tokens": 128000,
+    "is_moderated": true
+   }
+  },
+  {
+   "id": "openai/gpt-6-sol-pro",
+   "pricing": {
+    "prompt": "0.000002",
+    "completion": "0.00001",
+    "web_search": "0.01",
+    "input_cache_read": "0.0000002",
+    "input_cache_write": "0.0000025",
+    "overrides": [
+     {
+      "min_prompt_tokens": 272000,
+      "prompt": "0.000004",
+      "completion": "0.000015",
+      "input_cache_read": "0.0000004",
+      "input_cache_write": "0.000005"
+     }
+    ]
+   },
+   "context_length": 1050000,
+   "architecture": {
+    "modality": "text+image+file->text",
+    "input_modalities": [
+     "file",
+     "image",
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "GPT",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1050000,
+    "max_completion_tokens": 128000,
+    "is_moderated": true
+   }
+  },
+  {
+   "id": "openai/gpt-6.1-sol",
+   "pricing": {
+    "prompt": "0.000002",
+    "completion": "0.00001",
+    "web_search": "0.01",
+    "input_cache_read": "0.0000001",
+    "input_cache_write": "0.0000025",
+    "overrides": [
+     {
+      "min_prompt_tokens": 272000,
+      "prompt": "0.000004",
+      "completion": "0.000015",
+      "input_cache_read": "0.0000002",
+      "input_cache_write": "0.000005"
+     }
+    ]
+   },
+   "context_length": 1050000,
+   "architecture": {
+    "modality": "text+image+file->text",
+    "input_modalities": [
+     "file",
+     "image",
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "GPT",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1050000,
+    "max_completion_tokens": 128000,
+    "is_moderated": true
+   }
+  },
+  {
+   "id": "qwen/qwen3.5-flash-02-23",
+   "pricing": {
+    "prompt": "0.000000065",
+    "completion": "0.00000026"
+   },
+   "context_length": 1000000,
+   "architecture": {
+    "modality": "text+image+video->text",
+    "input_modalities": [
+     "text",
+     "image",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Qwen3",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1000000,
+    "max_completion_tokens": 65536,
+    "is_moderated": false
+   }
+  },
+  {
+   "id": "qwen/qwen3.8-max-prime",
+   "pricing": {
+    "prompt": "0.000004",
+    "completion": "0.000012",
+    "input_cache_read": "0.0000005"
+   },
+   "context_length": 1000000,
+   "architecture": {
+    "modality": "text+image+video->text",
+    "input_modalities": [
+     "text",
+     "image",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Qwen",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1000000,
+    "max_completion_tokens": 131072,
+    "is_moderated": false
+   }
+  },
+  {
+   "id": "reflection/beam-1.0-501b-a23b",
+   "pricing": {
+    "prompt": "0.0000003",
+    "completion": "0.000001",
+    "input_cache_read": "0.00000004"
+   },
+   "context_length": 1048576,
+   "architecture": {
+    "modality": "text->text",
+    "input_modalities": [
+     "text"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1048576,
+    "max_completion_tokens": 943718,
+    "is_moderated": false
+   }
+  },
+  {
+   "id": "xiaomi/mimo-v2.6-flash",
+   "pricing": {
+    "prompt": "0.00000014",
+    "completion": "0.00000028",
+    "input_cache_read": "0.0000000028"
+   },
+   "context_length": 1050000,
+   "architecture": {
+    "modality": "text+image+audio+video->text",
+    "input_modalities": [
+     "text",
+     "image",
+     "video",
+     "audio"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1048576,
+    "max_completion_tokens": 131072,
+    "is_moderated": false
+   }
+  },
+  {
+   "id": "z-ai/glm-5.3-flash",
+   "pricing": {
+    "prompt": "0.0000000399",
+    "completion": "0.0000000784",
+    "input_cache_read": "0.00000003"
+   },
+   "context_length": 1048576,
+   "architecture": {
+    "modality": "text+image+video->text",
+    "input_modalities": [
+     "text",
+     "image",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1048576,
+    "max_completion_tokens": 131072,
+    "is_moderated": false
+   }
+  },
+  {
+   "id": "z-ai/glm-5.3-flashx",
+   "pricing": {
+    "prompt": "0.00000037",
+    "completion": "0.00000125",
+    "input_cache_read": "0.000000075"
+   },
+   "context_length": 1048576,
+   "architecture": {
+    "modality": "text+image+video->text",
+    "input_modalities": [
+     "text",
+     "image",
+     "video"
+    ],
+    "output_modalities": [
+     "text"
+    ],
+    "tokenizer": "Other",
+    "instruct_type": null
+   },
+   "top_provider": {
+    "context_length": 1048576,
+    "max_completion_tokens": 131072,
+    "is_moderated": false
+   }
+  }
+ ],
+ "unavailable": [
+  "inception/mercury-3",
+  "minimax/minimax-m3.1-flash:free"
+ ],
+ "endpointsSource": "https://openrouter.ai/api/v1/models/{id}/endpoints",
+ "endpointsFetchedAt": "2026-11-12T18:24:25.000Z",
+ "endpointsNote": "Every endpoint of the vision-routed models: pooled hosts' prices and the endpoints named by model-prices.json priceEndpoint.",
+ "endpoints": {
+  "deepseek/deepseek-v4.1-flash-1017": [
+   {
+    "tag": "morph/fp8",
+    "provider_name": "Morph",
+    "pricing": {
+     "prompt": "0.000000022",
+     "completion": "0.0000004",
+     "input_cache_read": "0.000000004",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "particle-ai/us/flex",
+    "provider_name": "Particle AI",
+    "pricing": {
+     "prompt": "0.000000035",
+     "completion": "0.00000025",
+     "input_cache_read": "0.000000003",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "wafer/us",
+    "provider_name": "Wafer",
+    "pricing": {
+     "prompt": "0.000000038",
+     "completion": "0.0000005",
+     "input_cache_read": "0.00000001",
+     "discount": 0
+    },
+    "quantization": "mxfp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "primeintellect",
+    "provider_name": "PrimeIntellect",
+    "pricing": {
+     "prompt": "0.00000004368",
+     "completion": "0.0000007",
+     "input_cache_read": "0.0000000024",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "particle-ai/us",
+    "provider_name": "Particle AI",
+    "pricing": {
+     "prompt": "0.00000007",
+     "completion": "0.0000005",
+     "input_cache_read": "0.000000006",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "open-inference/fp4",
+    "provider_name": "OpenInference",
+    "pricing": {
+     "prompt": "0.00000007",
+     "completion": "0.0000008",
+     "input_cache_read": "0.000000006",
+     "discount": 0
+    },
+    "quantization": "fp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "ionstream/flex",
+    "provider_name": "Ionstream",
+    "pricing": {
+     "prompt": "0.0000000775",
+     "completion": "0.0000002325",
+     "input_cache_read": "0.000000002325",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "deepinfra/fp8/flex",
+    "provider_name": "DeepInfra",
+    "pricing": {
+     "prompt": "0.0000000784",
+     "completion": "0.0000002352",
+     "input_cache_read": "0.000000002352",
+     "discount": 0.51
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "wafer/mxfp4",
+    "provider_name": "Wafer",
+    "pricing": {
+     "prompt": "0.000000079",
+     "completion": "0.0000005",
+     "input_cache_read": "0.0000000079",
+     "discount": 0
+    },
+    "quantization": "mxfp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "inference-net/us",
+    "provider_name": "InferenceNet",
+    "pricing": {
+     "prompt": "0.00000008",
+     "completion": "0.000000605",
+     "input_cache_read": "0.000000008",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1040000
+   },
+   {
+    "tag": "inference-net/fp8",
+    "provider_name": "InferenceNet",
+    "pricing": {
+     "prompt": "0.00000008",
+     "completion": "0.000000605",
+     "input_cache_read": "0.000000008",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1040000
+   },
+   {
+    "tag": "deepinfra/fp8",
+    "provider_name": "DeepInfra",
+    "pricing": {
+     "prompt": "0.000000098",
+     "completion": "0.000000294",
+     "input_cache_read": "0.00000000294",
+     "discount": 0.51
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "cloudflare",
+    "provider_name": "Cloudflare",
+    "pricing": {
+     "prompt": "0.0000001",
+     "completion": "0.0000006",
+     "input_cache_read": "0.000000003",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "stepfun/fp8",
+    "provider_name": "StepFun",
+    "pricing": {
+     "prompt": "0.000000105",
+     "completion": "0.00000042",
+     "input_cache_read": "0.0000000021",
+     "discount": 0.65
+    },
+    "quantization": "fp8",
+    "context_length": 1000000
+   },
+   {
+    "tag": "alibaba",
+    "provider_name": "Alibaba",
+    "pricing": {
+     "prompt": "0.000000105",
+     "completion": "0.00000042",
+     "input_cache_read": "0.0000000021",
+     "discount": 0,
+     "overrides": [
+      {
+       "utc_start": 0,
+       "utc_end": 1400,
+       "prompt": "0.00000021",
+       "completion": "0.00000084",
+       "input_cache_read": "0.0000000042"
+      },
+      {
+       "utc_start": 1400,
+       "utc_end": 0,
+       "prompt": "0.000000105",
+       "completion": "0.00000042",
+       "input_cache_read": "0.0000000021"
+      }
+     ]
+    },
+    "quantization": "unknown",
+    "context_length": 1000000
+   },
+   {
+    "tag": "streamlake/fp8",
+    "provider_name": "StreamLake",
+    "pricing": {
+     "prompt": "0.000000111",
+     "completion": "0.000000444",
+     "input_cache_read": "0.00000000222",
+     "discount": 0.63
+    },
+    "quantization": "fp8",
+    "context_length": 1024000
+   },
+   {
+    "tag": "river",
+    "provider_name": "River",
+    "pricing": {
+     "prompt": "0.00000012",
+     "completion": "0.00000048",
+     "input_cache_read": "0.0000000024",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "relace/fp4",
+    "provider_name": "Relace",
+    "pricing": {
+     "prompt": "0.00000012",
+     "completion": "0.0000005",
+     "input_cache_read": "0.000000003",
+     "discount": 0
+    },
+    "quantization": "fp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "deepinfra/fp8/priority",
+    "provider_name": "DeepInfra",
+    "pricing": {
+     "prompt": "0.000000147",
+     "completion": "0.000000441",
+     "input_cache_read": "0.00000000441",
+     "discount": 0.51
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "baidu/fp8",
+    "provider_name": "Baidu",
+    "pricing": {
+     "prompt": "0.0000001498",
+     "completion": "0.00000060455",
+     "input_cache_read": "0.00000000321",
+     "discount": 0.465
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "cohere/fp8",
+    "provider_name": "Cohere",
+    "pricing": {
+     "prompt": "0.00000015",
+     "completion": "0.0000005",
+     "input_cache_read": "0.000000003",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "deepseek",
+    "provider_name": "DeepSeek",
+    "pricing": {
+     "prompt": "0.00000015",
+     "completion": "0.0000006",
+     "input_cache_read": "0.000000003",
+     "discount": 0,
+     "overrides": [
+      {
+       "utc_days": [
+        "saturday",
+        "sunday"
+       ],
+       "prompt": "0.00000015",
+       "completion": "0.0000006",
+       "input_cache_read": "0.000000003"
+      },
+      {
+       "utc_start": 0,
+       "utc_end": 100,
+       "utc_days": [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday"
+       ],
+       "prompt": "0.00000015",
+       "completion": "0.0000006",
+       "input_cache_read": "0.000000003"
+      },
+      {
+       "utc_start": 100,
+       "utc_end": 400,
+       "utc_days": [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday"
+       ],
+       "prompt": "0.0000003",
+       "completion": "0.0000012",
+       "input_cache_read": "0.000000006"
+      },
+      {
+       "utc_start": 400,
+       "utc_end": 600,
+       "utc_days": [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday"
+       ],
+       "prompt": "0.00000015",
+       "completion": "0.0000006",
+       "input_cache_read": "0.000000003"
+      },
+      {
+       "utc_start": 600,
+       "utc_end": 1000,
+       "utc_days": [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday"
+       ],
+       "prompt": "0.0000003",
+       "completion": "0.0000012",
+       "input_cache_read": "0.000000006"
+      },
+      {
+       "utc_start": 1000,
+       "utc_end": 0,
+       "utc_days": [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday"
+       ],
+       "prompt": "0.00000015",
+       "completion": "0.0000006",
+       "input_cache_read": "0.000000003"
+      }
+     ]
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "makora/fp8",
+    "provider_name": "Makora",
+    "pricing": {
+     "prompt": "0.00000015",
+     "completion": "0.0000012",
+     "input_cache_read": "0.000000006",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "reka",
+    "provider_name": "Reka",
+    "pricing": {
+     "prompt": "0.00000016",
+     "completion": "0.0000011",
+     "input_cache_read": "0.000000008",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "ionstream",
+    "provider_name": "Ionstream",
+    "pricing": {
+     "prompt": "0.000000165",
+     "completion": "0.000000495",
+     "input_cache_read": "0.0000000105",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "novita/fp8",
+    "provider_name": "Novita",
+    "pricing": {
+     "prompt": "0.000000165",
+     "completion": "0.00000066",
+     "input_cache_read": "0.0000000033",
+     "discount": 0.45
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "dekallm",
+    "provider_name": "DekaLLM",
+    "pricing": {
+     "prompt": "0.00000018",
+     "completion": "0.00000068",
+     "input_cache_read": "0.000000006",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "digitalocean",
+    "provider_name": "DigitalOcean",
+    "pricing": {
+     "prompt": "0.00000018",
+     "completion": "0.00000072",
+     "input_cache_read": "0.000000006",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "gmicloud/fp8",
+    "provider_name": "GMICloud",
+    "pricing": {
+     "prompt": "0.00000018",
+     "completion": "0.00000072",
+     "input_cache_read": "0.0000000036",
+     "discount": 0.4
+    },
+    "quantization": "fp8",
+    "context_length": 1048575
+   },
+   {
+    "tag": "sail-research/fp4/us",
+    "provider_name": "Sail Research",
+    "pricing": {
+     "prompt": "0.0000001818",
+     "completion": "0.00000027",
+     "input_cache_read": "0.000000007",
+     "discount": 0
+    },
+    "quantization": "fp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "sail-research/fp4",
+    "provider_name": "Sail Research",
+    "pricing": {
+     "prompt": "0.0000001818",
+     "completion": "0.00000027",
+     "input_cache_read": "0.000000007",
+     "discount": 0
+    },
+    "quantization": "fp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "atlas-cloud/fp8",
+    "provider_name": "AtlasCloud",
+    "pricing": {
+     "prompt": "0.000000195",
+     "completion": "0.00000078",
+     "input_cache_read": "0.0000000039",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "fireworks/spot",
+    "provider_name": "Fireworks",
+    "pricing": {
+     "prompt": "0.00000021",
+     "completion": "0.00000084",
+     "input_cache_read": "0.0000000042",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "primalabs",
+    "provider_name": "PrimaLabs",
+    "pricing": {
+     "prompt": "0.00000024",
+     "completion": "0.00000096",
+     "input_cache_read": "0.0000000048",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "modal",
+    "provider_name": "Modal",
+    "pricing": {
+     "prompt": "0.00000025",
+     "completion": "0.000001",
+     "input_cache_read": "0.000000005",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "crusoe/fp8",
+    "provider_name": "Crusoe",
+    "pricing": {
+     "prompt": "0.00000029",
+     "completion": "0.0000012",
+     "input_cache_read": "0.000000007",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "siliconflow/fp8",
+    "provider_name": "SiliconFlow",
+    "pricing": {
+     "prompt": "0.0000003",
+     "completion": "0.00000055",
+     "input_cache_read": "0.000000006",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "mistral/fp8",
+    "provider_name": "Mistral",
+    "pricing": {
+     "prompt": "0.0000003",
+     "completion": "0.0000012",
+     "input_cache_read": "0.000000007",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "coreweave/fp8",
+    "provider_name": "CoreWeave",
+    "pricing": {
+     "prompt": "0.0000003",
+     "completion": "0.0000012",
+     "input_cache_read": "0.000000006",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "near-ai",
+    "provider_name": "Near AI",
+    "pricing": {
+     "prompt": "0.0000003",
+     "completion": "0.0000012",
+     "input_cache_read": "0.000000006",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "venice/fp8",
+    "provider_name": "Venice",
+    "pricing": {
+     "prompt": "0.0000003",
+     "completion": "0.0000012",
+     "input_cache_read": "0.0000000075",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1000000
+   },
+   {
+    "tag": "nebius/fp8",
+    "provider_name": "Nebius",
+    "pricing": {
+     "prompt": "0.0000003",
+     "completion": "0.0000012",
+     "input_cache_read": "0.000000006",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "together",
+    "provider_name": "Together",
+    "pricing": {
+     "prompt": "0.0000003",
+     "completion": "0.0000012",
+     "input_cache_read": "0.000000006",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "fireworks",
+    "provider_name": "Fireworks",
+    "pricing": {
+     "prompt": "0.0000003",
+     "completion": "0.0000012",
+     "input_cache_read": "0.000000006",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "baseten",
+    "provider_name": "BaseTen",
+    "pricing": {
+     "prompt": "0.0000003",
+     "completion": "0.0000012",
+     "input_cache_read": "0.000000007",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "parasail/fp8",
+    "provider_name": "Parasail",
+    "pricing": {
+     "prompt": "0.0000003",
+     "completion": "0.0000012",
+     "input_cache_read": "0.000000006",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "fireworks/us",
+    "provider_name": "Fireworks",
+    "pricing": {
+     "prompt": "0.00000045",
+     "completion": "0.0000018",
+     "input_cache_read": "0.000000009",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "baseten/fast",
+    "provider_name": "BaseTen",
+    "pricing": {
+     "prompt": "0.0000006",
+     "completion": "0.0000024",
+     "input_cache_read": "0.000000014",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   }
+  ],
+  "z-ai/glm-5.3-flash": [
+   {
+    "tag": "relace/fp4",
+    "provider_name": "Relace",
+    "pricing": {
+     "prompt": "0.0000000399",
+     "completion": "0.0000000784",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "fp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "wafer/us",
+    "provider_name": "Wafer",
+    "pricing": {
+     "prompt": "0.000000042",
+     "completion": "0.000000184",
+     "input_cache_read": "0.000000041",
+     "discount": 0
+    },
+    "quantization": "nvfp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "primeintellect",
+    "provider_name": "PrimeIntellect",
+    "pricing": {
+     "prompt": "0.0000000525",
+     "completion": "0.00000025",
+     "input_cache_read": "0.0000000105",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "open-inference/fp4",
+    "provider_name": "OpenInference",
+    "pricing": {
+     "prompt": "0.00000006",
+     "completion": "0.0000003",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "fp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "darkbloom/fp4",
+    "provider_name": "Darkbloom",
+    "pricing": {
+     "prompt": "0.000000065",
+     "completion": "0.00000018",
+     "input_cache_read": "0.000000012",
+     "discount": 0
+    },
+    "quantization": "fp4",
+    "context_length": 262144
+   },
+   {
+    "tag": "wafer/nvfp4",
+    "provider_name": "Wafer",
+    "pricing": {
+     "prompt": "0.000000065",
+     "completion": "0.00000024",
+     "input_cache_read": "0.000000064",
+     "discount": 0
+    },
+    "quantization": "nvfp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "tenstorrent/fp8",
+    "provider_name": "Tenstorrent",
+    "pricing": {
+     "prompt": "0.000000075",
+     "completion": "0.00000025",
+     "input_cache_read": "0.000000015",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 262000
+   },
+   {
+    "tag": "gmicloud/fp8",
+    "provider_name": "GMICloud",
+    "pricing": {
+     "prompt": "0.000000075",
+     "completion": "0.00000025",
+     "input_cache_read": "0.000000015",
+     "discount": 0.5
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "near-ai/fp8",
+    "provider_name": "Near AI",
+    "pricing": {
+     "prompt": "0.00000008",
+     "completion": "0.0000005",
+     "input_cache_read": "0.000000012",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "novita/fp8",
+    "provider_name": "Novita",
+    "pricing": {
+     "prompt": "0.000000084",
+     "completion": "0.00000028",
+     "input_cache_read": "0.0000000168",
+     "discount": 0.44
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "streamlake/fp8",
+    "provider_name": "StreamLake",
+    "pricing": {
+     "prompt": "0.0000000885",
+     "completion": "0.000000295",
+     "input_cache_read": "0.0000000177",
+     "discount": 0.41
+    },
+    "quantization": "fp8",
+    "context_length": 1024000
+   },
+   {
+    "tag": "siliconflow/fp8",
+    "provider_name": "SiliconFlow",
+    "pricing": {
+     "prompt": "0.0000001",
+     "completion": "0.0000004",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "dekallm",
+    "provider_name": "DekaLLM",
+    "pricing": {
+     "prompt": "0.0000001",
+     "completion": "0.0000005",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "inference-net/us",
+    "provider_name": "InferenceNet",
+    "pricing": {
+     "prompt": "0.000000108",
+     "completion": "0.00000035",
+     "input_cache_read": "0.000000035",
+     "discount": 0
+    },
+    "quantization": "fp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "inference-net/fp4",
+    "provider_name": "InferenceNet",
+    "pricing": {
+     "prompt": "0.000000108",
+     "completion": "0.00000035",
+     "input_cache_read": "0.000000035",
+     "discount": 0
+    },
+    "quantization": "fp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "digitalocean",
+    "provider_name": "DigitalOcean",
+    "pricing": {
+     "prompt": "0.0000001125",
+     "completion": "0.000000375",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "morph/fp8",
+    "provider_name": "Morph",
+    "pricing": {
+     "prompt": "0.000000116",
+     "completion": "0.000000122",
+     "input_cache_read": "0.00000005",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "reka",
+    "provider_name": "Reka",
+    "pricing": {
+     "prompt": "0.00000012",
+     "completion": "0.0000003",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "coreweave/nvfp4",
+    "provider_name": "CoreWeave",
+    "pricing": {
+     "prompt": "0.00000012",
+     "completion": "0.00000038",
+     "input_cache_read": "0.00000002",
+     "discount": 0
+    },
+    "quantization": "nvfp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "nextbit/fp4",
+    "provider_name": "NextBit",
+    "pricing": {
+     "prompt": "0.00000012",
+     "completion": "0.00000045",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "fp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "particle-ai/nvfp4",
+    "provider_name": "Particle AI",
+    "pricing": {
+     "prompt": "0.00000013",
+     "completion": "0.0000005",
+     "input_cache_read": "0.00000004",
+     "discount": 0
+    },
+    "quantization": "nvfp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "makora/fp4",
+    "provider_name": "Makora",
+    "pricing": {
+     "prompt": "0.00000014",
+     "completion": "0.00000024",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "fp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "mistral",
+    "provider_name": "Mistral",
+    "pricing": {
+     "prompt": "0.00000015",
+     "completion": "0.0000005",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "kt",
+    "provider_name": "KT",
+    "pricing": {
+     "prompt": "0.00000015",
+     "completion": "0.0000005",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "cohere/nvfp4",
+    "provider_name": "Cohere",
+    "pricing": {
+     "prompt": "0.00000015",
+     "completion": "0.0000005",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "nvfp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "nebius/fp4",
+    "provider_name": "Nebius",
+    "pricing": {
+     "prompt": "0.00000015",
+     "completion": "0.0000005",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "fp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "modal/fp4",
+    "provider_name": "Modal",
+    "pricing": {
+     "prompt": "0.00000015",
+     "completion": "0.0000005",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "fp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "baseten/fp8/us",
+    "provider_name": "BaseTen",
+    "pricing": {
+     "prompt": "0.00000015",
+     "completion": "0.0000005",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "crusoe/fp4",
+    "provider_name": "Crusoe",
+    "pricing": {
+     "prompt": "0.00000015",
+     "completion": "0.0000005",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "fp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "atlas-cloud/fp8",
+    "provider_name": "AtlasCloud",
+    "pricing": {
+     "prompt": "0.00000015",
+     "completion": "0.0000005",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "fireworks",
+    "provider_name": "Fireworks",
+    "pricing": {
+     "prompt": "0.00000015",
+     "completion": "0.0000005",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "friendli",
+    "provider_name": "Friendli",
+    "pricing": {
+     "prompt": "0.00000015",
+     "completion": "0.0000005",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "together",
+    "provider_name": "Together",
+    "pricing": {
+     "prompt": "0.00000015",
+     "completion": "0.0000005",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048575
+   },
+   {
+    "tag": "parasail/fp4",
+    "provider_name": "Parasail",
+    "pricing": {
+     "prompt": "0.00000015",
+     "completion": "0.0000005",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "fp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "baseten/fp8",
+    "provider_name": "BaseTen",
+    "pricing": {
+     "prompt": "0.00000015",
+     "completion": "0.0000005",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "venice",
+    "provider_name": "Venice",
+    "pricing": {
+     "prompt": "0.00000015",
+     "completion": "0.0000005",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "unknown",
+    "context_length": 1048576
+   },
+   {
+    "tag": "deepinfra/fp4",
+    "provider_name": "DeepInfra",
+    "pricing": {
+     "prompt": "0.00000015",
+     "completion": "0.0000005",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "fp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "z-ai/fp8",
+    "provider_name": "Z.AI",
+    "pricing": {
+     "prompt": "0.00000015",
+     "completion": "0.0000005",
+     "input_cache_read": "0.00000003",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "inceptron/fp8",
+    "provider_name": "Inceptron",
+    "pricing": {
+     "prompt": "0.000000175",
+     "completion": "0.00000047",
+     "input_cache_read": "0.00000004",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "sail-research/us",
+    "provider_name": "Sail Research",
+    "pricing": {
+     "prompt": "0.000000175",
+     "completion": "0.000000625",
+     "input_cache_read": "0.0000000225",
+     "discount": 0
+    },
+    "quantization": "fp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "sail-research/fp4",
+    "provider_name": "Sail Research",
+    "pricing": {
+     "prompt": "0.000000175",
+     "completion": "0.000000625",
+     "input_cache_read": "0.0000000225",
+     "discount": 0
+    },
+    "quantization": "fp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "parasail/fast",
+    "provider_name": "Parasail",
+    "pricing": {
+     "prompt": "0.0000001875",
+     "completion": "0.000000625",
+     "input_cache_read": "0.0000000375",
+     "discount": 0
+    },
+    "quantization": "fp4",
+    "context_length": 1048576
+   }
+  ],
+  "xiaomi/mimo-v2.6-flash": [
+   {
+    "tag": "darkbloom/fp4",
+    "provider_name": "Darkbloom",
+    "pricing": {
+     "prompt": "0.0000001",
+     "completion": "0.00000028",
+     "input_cache_read": "0.0000000028",
+     "discount": 0
+    },
+    "quantization": "fp4",
+    "context_length": 1048576
+   },
+   {
+    "tag": "gmicloud/bf16",
+    "provider_name": "GMICloud",
+    "pricing": {
+     "prompt": "0.000000112",
+     "completion": "0.000000224",
+     "input_cache_read": "0.0000000024",
+     "discount": 0.2
+    },
+    "quantization": "bf16",
+    "context_length": 1050000
+   },
+   {
+    "tag": "cohere/fp8",
+    "provider_name": "Cohere",
+    "pricing": {
+     "prompt": "0.00000014",
+     "completion": "0.00000028",
+     "input_cache_read": "0.000000003",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "deepinfra/fp8",
+    "provider_name": "DeepInfra",
+    "pricing": {
+     "prompt": "0.00000014",
+     "completion": "0.00000028",
+     "input_cache_read": "0.0000000028",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "xiaomi/fp8",
+    "provider_name": "Xiaomi",
+    "pricing": {
+     "prompt": "0.00000014",
+     "completion": "0.00000028",
+     "input_cache_read": "0.0000000028",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "tenstorrent/fp8",
+    "provider_name": "Tenstorrent",
+    "pricing": {
+     "prompt": "0.000000165",
+     "completion": "0.00000033",
+     "input_cache_read": "0.000000004",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "makora/fp8",
+    "provider_name": "Makora",
+    "pricing": {
+     "prompt": "0.00000017",
+     "completion": "0.00000035",
+     "input_cache_read": "0.000000004",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1048576
+   },
+   {
+    "tag": "venice/fp8",
+    "provider_name": "Venice",
+    "pricing": {
+     "prompt": "0.000000175",
+     "completion": "0.00000035",
+     "input_cache_read": "0.00000000375",
+     "discount": 0
+    },
+    "quantization": "fp8",
+    "context_length": 1000000
+   }
+  ]
+ }
+}

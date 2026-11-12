@@ -45,7 +45,7 @@ describe("hosted vision catalog", () => {
   it("catalogs the tuned opt-in models with list prices and never a Pro/Ultra or :free variant", () => {
     const tuned = {
       // Priced at the most expensive host the route allows ($0.30/$1.20: US hosts, DeepSeek at peak), not the $0.15/$0.60 list price.
-      "deepseek/deepseek-v4.1-flash-1017": { input: 0.3, output: 1.2, perPage: 0.103, checked: "2026-10-26", route: ["fireworks", "parasail"] },
+      "deepseek/deepseek-v4.1-flash-1017": { input: 0.3, output: 1.2, perPage: 0.103, checked: "2026-11-12", route: ["fireworks", "parasail"] },
       "xiaomi/mimo-v2.6-flash": { input: 0.14, output: 0.28, perPage: 0.056 },
       "openai/gpt-6-luna": { input: 0.1, output: 0.5, perPage: 0.061 },
       "z-ai/glm-5.3-flash": { input: 0.15, output: 0.5, perPage: 0.073 },
@@ -152,10 +152,10 @@ describe("hosted vision catalog", () => {
       if (entry.target === "hosted") expect(entry.tokenPricing, entry.id).not.toBeNull();
       else expect(entry.tokenPricing, entry.id).toBeNull();
     }
-    expect(visionModelTokenPricing(NEMOTRON_URI)).toMatchObject({ inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.5 });
+    expect(visionModelTokenPricing(NEMOTRON_URI)).toMatchObject({ inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.47 });
     expect(visionModelTokenPricing(NEMOTRON_SUPER_VL_VISION_MODEL)).toMatchObject({ inputUsdPerMillion: 0.15 });
-    // 2,000 input + 1,000 output tokens: $0.0003 + $0.0005 = 0.08 cents.
-    expect(visionListPriceCents(NEMOTRON_SUPER_VL_VISION_MODEL, { inputTokens: 2_000, outputTokens: 1_000 })).toBeCloseTo(0.08, 12);
+    // 2,000 input + 1,000 output tokens: $0.0003 + $0.00047 = 0.077 cents.
+    expect(visionListPriceCents(NEMOTRON_SUPER_VL_VISION_MODEL, { inputTokens: 2_000, outputTokens: 1_000 })).toBeCloseTo(0.077, 12);
     expect(visionListPriceCents("Qwen/Qwen2-VL-2B-Instruct", { inputTokens: 1, outputTokens: 1 })).toBeNull();
     expect(visionListPriceCents("vendor/unknown", { inputTokens: 1, outputTokens: 1 })).toBeNull();
   });
