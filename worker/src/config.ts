@@ -13,6 +13,7 @@ import {
 } from "@docslurp/shared";
 import { assertSupportedVectorBackends, resolveLanceDbConfig, resolveObjectStorageConfig, type LanceDbConfig, type ObjectStorageConfig } from "@docslurp/shared";
 import { lanceDbMaintenanceSettings } from "./stages/lancedb-maintenance.js";
+import { quarantineRequired } from "./lib/parse-source.js";
 
 const defaultDatabaseUrl =
   "postgres://docslurp:docslurp@localhost:5432/docslurp";
@@ -362,7 +363,8 @@ export function fromEnv(): Config {
     ),
     storageIntegritySweepPrefix:
       process.env.WORKER_INTEGRITY_SWEEP_PREFIX?.trim() || null,
-    quarantineEnabled: isProductionEnvironment() || readBoolean(process.env.QUARANTINE_ENABLED, true),
+    // The same rule the parse-source resolver applies (lib/parse-source.ts): with quarantine on, nothing parses unscanned.
+    quarantineEnabled: quarantineRequired(),
     quarantineFailOpenOnToolMissing: !isProductionEnvironment() && readBoolean(
       process.env.QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING,
       !isProductionEnvironment(),
