@@ -510,10 +510,12 @@ export const billingOverviewSchema = z.object({
     pending: z.number(),
     /** balance − pending: the real balance. May be negative. */
     available: z.number(),
-    /** Credits kept for chat and search: uploads and automation stop once the balance reaches this. */
+    /** Credits kept for chat and search: new uploads and automation are not admitted at or below this. */
     chatReserve: z.number(),
     /** How far below zero chat and search may take the balance (0: not at all). */
     chatOverdraft: z.number(),
+    /** How far below zero a job that is already running may take the balance to finish (RUN_CREDIT_OVERDRAFT_CREDITS). */
+    runOverdraft: z.number(),
   }),
   workers: z.object({
     /** Concurrent worker ceiling: the provider's starter or funded worker slots unless raised. */

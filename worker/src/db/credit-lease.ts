@@ -2,7 +2,7 @@ import type { Sql } from "postgres";
 
 import { isBillingExemptOrg, resolveCreditLeaseConfig, type CreditLeaseConfig } from "@docslurp/shared";
 
-import { chatReserveConfig } from "./chat-reserve.js";
+import { jobCreditReserve } from "./chat-reserve.js";
 
 import { enforceRunSpend, pauseRunForSpend, spendCheckConfig, type SpendCheckResult } from "./spend-check.js";
 
@@ -131,7 +131,7 @@ export async function grantRunCreditLease(
       ${config.minCredits}::numeric, ${config.maxCredits}::numeric, ${config.initialCredits}::numeric,
       ${config.fraction}::numeric, ${config.horizonSeconds}::numeric, ${config.ttlSeconds}::int,
       ${isBillingExemptOrg(run.orgId)}::boolean,
-      ${chatReserveConfig().fundedReserveCredits}::numeric, ${chatReserveConfig().starterReserveCredits}::numeric
+      ${jobCreditReserve()}::numeric, ${jobCreditReserve()}::numeric
     )
   `;
   return {

@@ -18,6 +18,8 @@ beforeAll(async () => {
   // Leases take everything free up to the 10-credit initial size, so the
   // numbers below are exact.
   process.env.WORKER_CREDIT_LEASE_FRACTION = "1";
+  // The numbers below assume a $1 starter reserve and overdraft (the default is lower).
+  process.env.CHAT_CREDIT_RESERVE_STARTER_CREDITS = "100";
   const pg = await startMigratedPostgres();
   stop = pg.stop;
   sql = postgres(pg.url, {
@@ -36,6 +38,7 @@ beforeAll(async () => {
 afterAll(async () => {
   delete process.env.WORKER_CREDIT_LEASES;
   delete process.env.WORKER_CREDIT_LEASE_FRACTION;
+  delete process.env.CHAT_CREDIT_RESERVE_STARTER_CREDITS;
   await sql?.end();
   await stop?.();
 });

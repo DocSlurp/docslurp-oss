@@ -156,6 +156,7 @@ export async function getBillingOverview(orgId: string, now = new Date()): Promi
       available: balance.available,
       chatReserve: chatCreditReserve(funded, reserveConfig),
       chatOverdraft: chatCreditOverdraft(funded, hasCreditGrants, reserveConfig),
+      runOverdraft: reserveConfig.runOverdraftCredits,
     },
     workers: { limit: Number(org.worker_slots), inUse },
     storage: {

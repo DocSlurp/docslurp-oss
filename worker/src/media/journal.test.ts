@@ -17,7 +17,7 @@ describe("remote media admission and accounting on migrated Postgres", () => {
     maxRunCostCents: 100, maxConcurrent: 1, dailyBudgetCents: 5 };
   beforeAll(async () => {
     // Admission mechanics at small balances, without the chat reserve.
-    setChatReserveConfig(resolveChatCreditReserveConfig({ CHAT_CREDIT_RESERVE_CREDITS: "0", CHAT_CREDIT_RESERVE_STARTER_CREDITS: "0" }));
+    setChatReserveConfig(resolveChatCreditReserveConfig({ CHAT_CREDIT_RESERVE_CREDITS: "0", CHAT_CREDIT_RESERVE_STARTER_CREDITS: "0", RUN_CREDIT_OVERDRAFT_CREDITS: "0" }));
     db = await startMigratedPostgres(); sql = postgres(db.url, { max: 1, prepare: false }); journal = new PostgresMediaJournal(sql);
     await sql`insert into "user"(id,name,email) values ('media-u','Media','media-test@example.com')`;
     await sql`insert into organizations(id,name,slug,created_by_user_id,credit_balance_cents)

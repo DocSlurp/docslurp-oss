@@ -14,7 +14,7 @@ const {
 } = await import("../services/billing/spend-guard.js");
 const { PipelineSpeedBoostRequiredError, resolveChatCreditReserveConfig } = await import("@docslurp/shared");
 
-// Defaults: $3 reserve/overdraft for funded orgs, $1 for starter orgs, 5-credit holds.
+// Defaults: $3 reserve/overdraft for funded orgs, $0.20 for starter orgs, 5-credit holds.
 const config = resolveChatCreditReserveConfig({});
 
 const status = (overrides: Partial<Parameters<typeof spendBlockReason>[0] & object> = {}) => ({
@@ -42,11 +42,11 @@ describe("spend admission rule", () => {
     expect(spendBlockReason(status({ available: 2, reserved: 2 }), "job", noReserve)?.code).toBe("credit_exhausted");
   });
 
-  it("keeps the chat reserve away from jobs: $1 for starter orgs, $3 for funded orgs", () => {
-    expect(config).toMatchObject({ starterReserveCredits: 100, fundedReserveCredits: 300, starterOverdraftCredits: 100, fundedOverdraftCredits: 300 });
-    expect(spendBlockReason(status({ available: 100 }), "job", config)?.code).toBe("credit_exhausted");
-    expect(spendBlockReason(status({ available: 100.5 }), "job", config)).toBeNull();
-    expect(spendBlockReason(status({ available: 150, reserved: 50 }), "job", config)?.code).toBe("credit_exhausted");
+  it("keeps the chat reserve away from jobs: $0.20 for starter orgs, $3 for funded orgs", () => {
+    expect(config).toMatchObject({ starterReserveCredits: 20, fundedReserveCredits: 300, starterOverdraftCredits: 20, fundedOverdraftCredits: 300 });
+    expect(spendBlockReason(status({ available: 20 }), "job", config)?.code).toBe("credit_exhausted");
+    expect(spendBlockReason(status({ available: 20.5 }), "job", config)).toBeNull();
+    expect(spendBlockReason(status({ available: 70, reserved: 50 }), "job", config)?.code).toBe("credit_exhausted");
     expect(spendBlockReason(status({ funded: true, available: 300 }), "job", config)?.code).toBe("credit_exhausted");
     expect(spendBlockReason(status({ funded: true, available: 301 }), "job", config)).toBeNull();
   });
@@ -55,10 +55,10 @@ describe("spend admission rule", () => {
     // Every credit leased by running ingestion: chat still works.
     expect(spendBlockReason(status({ available: 40, reserved: 40, hasCreditGrants: true }), "interactive", config)).toBeNull();
     // Leases count toward the overdraft floor once chat has spent credits jobs still hold.
-    expect(spendBlockReason(status({ available: 0, reserved: 99, hasCreditGrants: true }), "interactive", config)).toBeNull();
-    expect(spendBlockReason(status({ available: 0, reserved: 100, hasCreditGrants: true }), "interactive", config)?.code).toBe("credit_exhausted");
-    expect(spendBlockReason(status({ available: -99, hasCreditGrants: true }), "interactive", config)).toBeNull();
-    expect(spendBlockReason(status({ available: -100, hasCreditGrants: true }), "interactive", config)?.code).toBe("credit_exhausted");
+    expect(spendBlockReason(status({ available: 0, reserved: 19, hasCreditGrants: true }), "interactive", config)).toBeNull();
+    expect(spendBlockReason(status({ available: 0, reserved: 20, hasCreditGrants: true }), "interactive", config)?.code).toBe("credit_exhausted");
+    expect(spendBlockReason(status({ available: -19, hasCreditGrants: true }), "interactive", config)).toBeNull();
+    expect(spendBlockReason(status({ available: -20, hasCreditGrants: true }), "interactive", config)?.code).toBe("credit_exhausted");
     expect(spendBlockReason(status({ funded: true, available: -299, hasCreditGrants: true }), "interactive", config)).toBeNull();
     expect(spendBlockReason(status({ funded: true, available: -300, hasCreditGrants: true }), "interactive", config)?.code).toBe("credit_exhausted");
   });
@@ -114,7 +114,7 @@ describe("assertCanSpend", () => {
     sqlMock.mockResolvedValueOnce([row({ available: "-0.25" })]);
     await expect(assertCanSpend("org-1", "ws-1")).rejects.toMatchObject({ statusCode: 402, code: "credit_exhausted" });
     // Within the chat reserve: jobs are refused.
-    sqlMock.mockResolvedValueOnce([row({ available: "80" })]);
+    sqlMock.mockResolvedValueOnce([row({ available: "15" })]);
     await expect(assertCanSpend("org-1", "ws-1")).rejects.toMatchObject({ code: "credit_exhausted" });
     sqlMock.mockResolvedValueOnce([]);
     await expect(assertCanSpend(null, "ws-unknown")).rejects.toMatchObject({ code: "plan_not_entitled" });
@@ -130,23 +130,23 @@ describe("assertCanSpend", () => {
     sqlMock.begin.mockReset();
     const tx = vi.fn();
     sqlMock.begin.mockImplementation(async (fn: (client: unknown) => unknown) => await fn(tx));
-    sqlMock.mockResolvedValueOnce([row({ available: "-40" })]);
-    tx.mockResolvedValueOnce([{ admitted: true, available: "-40", held: "10" }]);
+    sqlMock.mockResolvedValueOnce([row({ available: "-10" })]);
+    tx.mockResolvedValueOnce([{ admitted: true, available: "-10", held: "5" }]);
     await expect(assertCanSpend(null, "ws-1", { kind: "interactive" })).resolves.toBeUndefined();
     const [strings, ...values] = tx.mock.calls[0]!;
     expect((strings as string[]).join("?")).toContain("admit_interactive_spend");
-    expect(values).toEqual(["org-1", "ws-1", 100, 5, 120]);
+    expect(values).toEqual(["org-1", "ws-1", 20, 5, 120]);
 
     // Refused once holds of concurrent chats use up the allowance.
-    sqlMock.mockResolvedValueOnce([row({ available: "-40" })]);
-    tx.mockResolvedValueOnce([{ admitted: false, available: "-40", held: "60" }]);
+    sqlMock.mockResolvedValueOnce([row({ available: "-10" })]);
+    tx.mockResolvedValueOnce([{ admitted: false, available: "-10", held: "15" }]);
     await expect(assertCanSpend(null, "ws-1", { kind: "interactive" })).rejects.toMatchObject({ statusCode: 402, code: "credit_exhausted" });
 
     // A pre-check takes no hold.
-    sqlMock.mockResolvedValueOnce([row({ available: "-40" })]);
-    tx.mockResolvedValueOnce([{ admitted: true, available: "-40", held: "0" }]);
+    sqlMock.mockResolvedValueOnce([row({ available: "-10" })]);
+    tx.mockResolvedValueOnce([{ admitted: true, available: "-10", held: "0" }]);
     await expect(assertCanSpend(null, "ws-1", { kind: "interactive", hold: false })).resolves.toBeUndefined();
-    expect(tx.mock.calls[2]!.slice(1)).toEqual(["org-1", "ws-1", 100, 0, 120]);
+    expect(tx.mock.calls[2]!.slice(1)).toEqual(["org-1", "ws-1", 20, 0, 120]);
   });
 
   it("has a non-throwing form for paths that degrade", async () => {
