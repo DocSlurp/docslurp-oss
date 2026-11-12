@@ -14,6 +14,9 @@ import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 import { StorageObjectTooLargeError } from "../tools/storage.js";
 
+// Spend mechanics below are exact at zero: no running-job overdraft (the default lets running jobs reach -25).
+process.env.RUN_CREDIT_OVERDRAFT_CREDITS = "0";
+
 /**
  * The API counts a text file over 2 MB from a 2 MB sample scaled by size (`assumed`). The worker counts the whole decoded
  * text with the same rule, records it `counted`, and billing reads only that. This file's sample under-counts: its first
@@ -36,7 +39,7 @@ beforeAll(async () => {
   db = await createMigratedDatabase();
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com');
-    insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 10000000), ('o2', 'Low', 'low', 'u1', 8, 21);
+    insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 10000000), ('o2', 'Low', 'low', 'u1', 8, 1);
     insert into projects(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W'), ('w2', 'o2', 'u1', 'L');
     insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
       values ('run1', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 1, ${apiEstimate}),

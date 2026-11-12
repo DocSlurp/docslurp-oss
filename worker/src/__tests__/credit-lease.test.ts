@@ -37,10 +37,10 @@ const config: CreditLeaseConfig = {
   renewAt: 0.8,
 };
 
-const noReserve = resolveChatCreditReserveConfig({ CHAT_CREDIT_RESERVE_CREDITS: "0", CHAT_CREDIT_RESERVE_STARTER_CREDITS: "0" });
-/** Defaults: 100 credits for starter orgs, 300 for funded orgs. */
-// The numbers below assume a $1 starter reserve (the default is lower).
-const withReserve = resolveChatCreditReserveConfig({ CHAT_CREDIT_RESERVE_STARTER_CREDITS: "100" });
+// Lease mechanics run with no reserve and no running-job overdraft, so the numbers below are exact.
+const noReserve = resolveChatCreditReserveConfig({ CHAT_CREDIT_RESERVE_CREDITS: "0", CHAT_CREDIT_RESERVE_STARTER_CREDITS: "0", RUN_CREDIT_OVERDRAFT_CREDITS: "0" });
+// A $1 chat reserve (which running jobs may use) and the default 25-credit running-job overdraft.
+const withOverdraft = resolveChatCreditReserveConfig({ CHAT_CREDIT_RESERVE_STARTER_CREDITS: "100", RUN_CREDIT_OVERDRAFT_CREDITS: "25" });
 
 let db: PGlite;
 let server: PGLiteSocketServer;
@@ -247,34 +247,37 @@ describe("grant_credit_lease", () => {
   });
 });
 
-describe("chat reserve", () => {
-  it("never grants into the reserve: live leases stay within available - reserve", async () => {
-    setChatReserveConfig(withReserve);
+describe("running-job floor", () => {
+  it("lets running jobs use the chat reserve and finish up to the overdraft below zero, never further", async () => {
+    setChatReserveConfig(withOverdraft);
     await seedOrg(sql, "small", 130);
     const runs = await seedRuns(sql, "small", 20);
-    for (let round = 0; round < 3; round++) {
+    // Grant and spend every lease until the floor refuses: leases never cover more than the balance plus the overdraft.
+    for (let round = 0; round < 40; round++) {
       for (const runId of runs) await grantRunCreditLease(sql, runOf("small", runId), config);
+      expect(await outstanding(sql, "small") - await available(sql, "small")).toBeLessThanOrEqual(25 + 1e-9);
+      for (const runId of runs) {
+        const [lease] = await sql<{ remaining: number }[]>`select greatest(granted - consumed, 0) as remaining from credit_leases where holder_id = ${runId}`;
+        if (Number(lease?.remaining ?? 0) > 0) await spend(sql, "small", runId, Number(lease!.remaining));
+      }
+      if (await available(sql, "small") <= -25 + 1e-6) break;
     }
-    expect(await outstanding(sql, "small")).toBeLessThanOrEqual(30 + 1e-9);
-    expect(await outstanding(sql, "small")).toBeGreaterThan(29);
-    // Spending every lease leaves the starter reserve for chat.
-    for (const runId of runs) {
-      const [lease] = await sql<{ remaining: number }[]>`select greatest(granted - consumed, 0) as remaining from credit_leases where holder_id = ${runId}`;
-      if (Number(lease?.remaining ?? 0) > 0) await spend(sql, "small", runId, Number(lease!.remaining));
-    }
-    expect(await available(sql, "small")).toBeCloseTo(100, 6);
+    expect(await available(sql, "small")).toBeCloseTo(-25, 6);
     const refused = await grantRunCreditLease(sql, runOf("small", runs[0]!), config);
     expect(refused).toMatchObject({ remaining: 0, blockReason: "credit_exhausted" });
-    // available_credits reports what jobs may still use.
+    // available_credits reports what running jobs may still use.
     expect(refused.available).toBeCloseTo(0, 6);
   });
 
-  it("uses the funded reserve for funded orgs and none for billing-exempt orgs", async () => {
-    setChatReserveConfig(withReserve);
-    await seedOrg(sql, "gold", 310);
+  it("gives funded and starter orgs the same floor, and billing-exempt orgs no limit", async () => {
+    setChatReserveConfig(withOverdraft);
+    await seedOrg(sql, "gold", 0);
     await sql`update organizations set funded_at = now() where id = 'gold'`;
     const [goldRun] = await seedRuns(sql, "gold", 1);
-    expect((await grantRunCreditLease(sql, runOf("gold", goldRun!), { ...config, fraction: 1, initialCredits: 50 })).remaining).toBeCloseTo(10, 6);
+    expect((await grantRunCreditLease(sql, runOf("gold", goldRun!), { ...config, fraction: 1, initialCredits: 50 })).remaining).toBeCloseTo(25, 6);
+    await seedOrg(sql, "tin", 0);
+    const [tinRun] = await seedRuns(sql, "tin", 1);
+    expect((await grantRunCreditLease(sql, runOf("tin", tinRun!), { ...config, fraction: 1, initialCredits: 50 })).remaining).toBeCloseTo(25, 6);
 
     process.env.BILLING_EXEMPT_ORG_IDS = "house";
     try {
@@ -545,8 +548,8 @@ describe.skipIf(!realUrl)("credit leases under real concurrency", () => {
     }
   }, 120_000);
 
-  it("concurrent grants never reach into the chat reserve", async () => {
-    setChatReserveConfig(withReserve);
+  it("concurrent grants stop at the running-job floor", async () => {
+    setChatReserveConfig(withOverdraft);
     await seedOrg(pg, "cc-reserve", 150);
     const runs = await seedRuns(pg, "cc-reserve", 20);
     let spent = 0;
@@ -570,9 +573,9 @@ describe.skipIf(!realUrl)("credit leases under real concurrency", () => {
       }
     };
     await Promise.all([...runs, ...runs].map((runId) => worker(runId)));
-    // Jobs spent at most the 50 credits above the Free reserve.
-    expect(spent).toBeLessThanOrEqual(50 + 1e-9);
-    expect(await available(pg, "cc-reserve")).toBeGreaterThanOrEqual(100 - 1e-9);
+    // Running jobs spent at most the balance plus the 25-credit overdraft.
+    expect(spent).toBeLessThanOrEqual(175 + 1e-9);
+    expect(await available(pg, "cc-reserve")).toBeGreaterThanOrEqual(-25 - 1e-9);
   }, 120_000);
 
   it("concurrent interactive admissions near zero stop at the overdraft allowance", async () => {

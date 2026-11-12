@@ -33,6 +33,9 @@ import { serveOnRandomPort } from "../test/migrated-postgres.js";
  * bills the page equivalents it holds, measured from what was extracted or rendered. Every fixture is generated here.
  */
 let db: PGlite;
+
+// "Unfunded" below means an empty balance with no running-job overdraft (the default lets running jobs reach -25).
+process.env.RUN_CREDIT_OVERDRAFT_CREDITS = "0";
 let server: PGLiteSocketServer;
 let store: Store;
 const pipeline = JSON.stringify({ ...defaultPipelineFeatures });

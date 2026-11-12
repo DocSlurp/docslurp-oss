@@ -39,6 +39,12 @@ export interface ChatCreditReserveConfig {
    */
   holdCredits: number;
   holdTtlSeconds: number;
+  /**
+   * How far below zero a job that is already running may take the balance so it can finish (credit leases, the
+   * worker's mid-run check, media admission). Running jobs ignore the chat reserve; new runs are still admitted only
+   * above it. 0 pauses running jobs at zero.
+   */
+  runOverdraftCredits: number;
 }
 
 type Env = Record<string, string | undefined>;
@@ -48,6 +54,10 @@ export const CHAT_CREDIT_RESERVE_MAX = 10_000;
 
 export const DEFAULT_FUNDED_CHAT_RESERVE_CREDITS = 300;
 export const DEFAULT_STARTER_CHAT_RESERVE_CREDITS = 20;
+/** $0.25: how far a running job may overdraw to complete. */
+export const DEFAULT_RUN_CREDIT_OVERDRAFT_CREDITS = 25;
+/** Upper bound for the running-job overdraft: $10 (grant_credit_lease clamps the same way, migration 0137). */
+export const RUN_CREDIT_OVERDRAFT_MAX = 1_000;
 
 function readCredits(env: Env, name: string, fallback: number, max = CHAT_CREDIT_RESERVE_MAX): number {
   const raw = env[name];
@@ -67,6 +77,7 @@ export function resolveChatCreditReserveConfig(env: Env = process.env): ChatCred
     starterOverdraftCredits: readCredits(env, "CHAT_CREDIT_OVERDRAFT_STARTER_CREDITS", starterReserveCredits),
     holdCredits: readCredits(env, "CHAT_CREDIT_HOLD_CREDITS", 5, 1_000),
     holdTtlSeconds: Math.round(readCredits(env, "CHAT_CREDIT_HOLD_TTL_SECONDS", 120, 3_600)) || 1,
+    runOverdraftCredits: readCredits(env, "RUN_CREDIT_OVERDRAFT_CREDITS", DEFAULT_RUN_CREDIT_OVERDRAFT_CREDITS, RUN_CREDIT_OVERDRAFT_MAX),
   };
 }
 
@@ -86,4 +97,12 @@ export function chatCreditOverdraft(
 ): number {
   if (!hasGrants) return 0;
   return funded ? config.fundedOverdraftCredits : config.starterOverdraftCredits;
+}
+
+/**
+ * The balance floor for a job that is already running: negative, so the job may finish up to `runOverdraftCredits`
+ * below zero. Spend checks for running work subtract this from available credits, as they did the chat reserve.
+ */
+export function runningJobCreditFloor(config: ChatCreditReserveConfig = resolveChatCreditReserveConfig()): number {
+  return -config.runOverdraftCredits;
 }

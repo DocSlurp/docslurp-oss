@@ -30,9 +30,9 @@ import { RUN_EVENTS_CHANNEL } from "./run-event-store.js";
  * Overdraft bound per run: the check interval (≤ 10 credits or 25 pages)
  * plus the work in flight when the pause lands.
  *
- * "Below 0" is measured above the chat reserve (migration 0053,
- * chat-reserve.ts): a run pauses once available credits fall below the
- * org's reserve, so the last few credits stay for chat and search.
+ * "Below 0" is measured against the running-job floor (migration 0137,
+ * chat-reserve.ts): an admitted run may use the chat reserve and finish up
+ * to RUN_CREDIT_OVERDRAFT_CREDITS (default 25) below zero, then pauses.
  *
  * With WORKER_CREDIT_LEASES on, org-level credit leases (credit-lease.ts)
  * replace this cadence; pauseRunForSpend is shared by both.
@@ -134,8 +134,9 @@ const BLOCK_MESSAGES: Record<string, string> = {
 
 /**
  * The block code for a status row, mirroring app billing/spend-guard.ts
- * spendBlockReason (kind "job", minus reservations): blocked once available
- * falls below the chat reserve for the org (funded or starter).
+ * spendBlockReason (kind "job", minus reservations), except that work already
+ * running is measured against the running-job floor (negative) instead of the
+ * chat reserve that admission uses.
  */
 export function spendBlockCode(row: {
   org_id?: string | null;

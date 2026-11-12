@@ -11,6 +11,9 @@ import { WorkflowState } from "../pipeline/pipeline.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
+// Spend mechanics below are exact at zero: no running-job overdraft (the default lets running jobs reach -25).
+process.env.RUN_CREDIT_OVERDRAFT_CREDITS = "0";
+
 /*
  * The frame-count spend check against a migrated database and the real spend check: a TIFF's counted frames are Rich pages
  * admission never priced (intake counted one), so the balance is checked for them before any is charged, summed over the
@@ -24,11 +27,11 @@ const pipeline = JSON.stringify({ ...defaultPipelineFeatures });
 
 beforeAll(async () => {
   db = await createMigratedDatabase();
-  // Balances above the 20-credit starter chat reserve: 5 and 10 spendable credits.
+  // Running jobs ignore the chat reserve: 5 and 10 spendable credits.
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com');
     insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents)
-      values ('o-low', 'Low', 'low', 'u1', 8, 25), ('o-ten', 'Ten', 'ten', 'u1', 8, 30);
+      values ('o-low', 'Low', 'low', 'u1', 8, 5), ('o-ten', 'Ten', 'ten', 'u1', 8, 10);
     insert into projects(id, org_id, user_id, name) values ('w-low', 'o-low', 'u1', 'L'), ('w-ten', 'o-ten', 'u1', 'T');
     insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
       values ('run-low', 'o-low', 'u1', 'w-low', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 1, 1),
