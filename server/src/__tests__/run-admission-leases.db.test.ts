@@ -62,6 +62,9 @@ function admit(runId: string, speedBoost = true, projectId = "admission-w1") {
   `, { leaseRunId: runId, speedBoost });
 }
 
+// Admission mechanics below are sized for a $1 starter chat reserve (the default is lower).
+beforeEach(() => { vi.stubEnv("CHAT_CREDIT_RESERVE_STARTER_CREDITS", "100"); });
+
 describe("mandatory run admission leases", () => {
   it.each([undefined, "", "   "])("rejects boosted admission without a lease owner (%s) before its callback", async leaseRunId => {
     const callback = vi.fn(async () => undefined);

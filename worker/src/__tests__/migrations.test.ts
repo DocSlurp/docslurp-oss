@@ -51,22 +51,22 @@ describe("server/db/migrations", () => {
 
 describe("starter credit allowance", () => {
   it("reduces future grants, preserves existing balances, and prevents repeat grants", async () => {
-    const db = await createMigratedDatabase({ stopBefore: "starter_credit_250" });
+    const db = await createMigratedDatabase({ stopBefore: "starter_credit_100" });
     try {
       await db.exec(`
         insert into "user" (id, name, email) values ('old', 'Old', 'old@example.test'), ('new', 'New', 'new@example.test');
         insert into organizations (id, name, is_personal, personal_owner_user_id, created_by_user_id)
           values ('old-org', 'Old', true, 'old', 'old');
       `);
-      await applyRemainingMigrations(db, "starter_credit_250");
+      await applyRemainingMigrations(db, "starter_credit_100");
       await db.exec(`insert into organizations (id, name, is_personal, personal_owner_user_id, created_by_user_id)
         values ('new-org', 'New', true, 'new', 'new');`);
       expect((await db.query(`select id, credit_balance_cents::float8 as credits from organizations order by id`)).rows)
-        .toEqual([{ id: "new-org", credits: 250 }, { id: "old-org", credits: 2500 }]);
+        .toEqual([{ id: "new-org", credits: 100 }, { id: "old-org", credits: 250 }]);
       expect((await db.query(`select credits::float8 as credits from credit_grants where org_id = 'new-org'`)).rows)
-        .toEqual([{ credits: 250 }]);
+        .toEqual([{ credits: 100 }]);
       expect((await db.query(`select delta::float8 as dollars, (metadata->>'amountCents')::int as credits
-        from credit_ledger where org_id = 'new-org'`)).rows).toEqual([{ dollars: 2.5, credits: 250 }]);
+        from credit_ledger where org_id = 'new-org'`)).rows).toEqual([{ dollars: 1, credits: 100 }]);
       await db.exec(`delete from organizations where id = 'new-org';
         insert into organizations (id, name, is_personal, personal_owner_user_id, created_by_user_id)
           values ('recreated', 'New', true, 'new', 'new');`);

@@ -70,6 +70,9 @@ async function splitSourceRuns() {
   await sql`update documents set run_id = 'src-purged' where id = 'd1'`;
 }
 
+// Admission mechanics below are sized for a $1 starter chat reserve (the default is lower).
+beforeEach(() => { vi.stubEnv("CHAT_CREDIT_RESERVE_STARTER_CREDITS", "100"); });
+
 describe("config-change transactional credit admission", () => {
   it.each([undefined, false, true])("uses the trusted request opt-in at low balance (%s)", async (speedBoost) => {
     await seed({ credits: 103 });

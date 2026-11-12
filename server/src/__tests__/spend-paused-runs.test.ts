@@ -67,7 +67,7 @@ describe("spend-paused run sweep", () => {
   });
 
   it("keeps runs paused while only the chat reserve is left", async () => {
-    respond({ "org-ok": 60, "org-blocked": 100 });
+    respond({ "org-ok": 15, "org-blocked": 20 });
     expect(await sweepSpendPausedRuns({ sql: sqlMock as never, signals })).toEqual({ resumed: 0, stillBlocked: 2 });
   });
 

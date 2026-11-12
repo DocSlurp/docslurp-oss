@@ -9,9 +9,9 @@ region is decided, and what DocSlurp records.
 
 China-based providers are **allowed** by default (`allowChinaProviders: true` on organizations and projects).
 
-- **Vision (Rich pages):** the default model, `deepseek/deepseek-v4.1-flash-1017`, is served by Together,
-  Fireworks or Parasail. OpenRouter picks the cheapest of them at request time
-  (`provider.only` plus `provider.sort: "price"`). Every request carries `provider.max_price`, so no host can
+- **Vision (Rich pages):** the default model, `deepseek/deepseek-v4.1-flash-1017`, is served by Fireworks
+  or Parasail. OpenRouter picks the one with the lowest recent latency at request time
+  (`provider.only` plus `provider.sort: "latency"`). Together is omitted (see below). Every request carries `provider.max_price`, so no host can
   bill above the route's price ceiling ($0.30 / $1.20 per million tokens).
 - **Text and chat:** GLM and DeepSeek models are sorted by price among hosts serving FP8 or better weights
   (`packages/shared/src/openrouter-routing.ts`). Other models use OpenRouter's default routing.
@@ -21,7 +21,7 @@ not run):
 
 | Host | Region | Content F1 | Tables | Math | Fail rate | p50 / p95 s | USD per 1,000 pages | Pages per $1 |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| Together (retained production host, select) | US | 0.962 | 0.648 | 0.947 | 0% | 2.2 / 5.3 | 1.03 | 972 |
+| Together (select, 2026-10-29; removed from the pool 2026-11-09) | US | 0.962 | 0.648 | 0.947 | 0% | 2.2 / 5.3 | 1.03 | 972 |
 | StreamLake (select) | CN | 0.962 | 0.662 | 0.947 | 0% | 4.3 / 10.6 | 0.51 | 1,940 |
 | StreamLake (tune) | CN | 0.970 | 0.677 | 0.968 | 0% | 4.1 / 11.5 | 0.49 | 2,051 |
 | DeepSeek (tune, billed at weekday peak) | CN | 0.969 | 0.672 | 0.968 | 0% | 3.3 / 9.8 | 0.98 | 1,023 |
@@ -125,11 +125,13 @@ subprocessor list are decided by the owner and legal@docslurp.io, not by this pa
 
 ## Merge and deployment gate
 
-The default vision profile retains its existing Together, Fireworks and Parasail
-allowlist. StreamLake and DeepSeek are **not enabled** by this release. Adding
+The default vision profile allows Fireworks and Parasail only. Together is omitted: on
+2026-11-12 its DeepSeek V4.1 Flash 1017 endpoint returned the right page title followed by invented
+body text, scoring 0.565 and then 0.301 on a 67-page development benchmark against Fireworks' 0.786 and
+0.784 (hallucinated-token rate 0.50 and 0.76 against 0.23). StreamLake and DeepSeek are **not enabled** by this release. Adding
 those hosts requires a separately reviewed rollout after public disclosures,
 notice commitments and representative held-out quality evidence are complete.
-The default catalog pricing and runtime route use the same three retained hosts.
+The default catalog pricing and runtime route use the same two hosts.
 
 Restricted audio transcription is refused before uploading any audio because
 provider-routing enforcement on that endpoint has not been verified. Use typed

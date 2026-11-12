@@ -380,7 +380,7 @@ const pageSource = async (id: string) => (await db.query<{ s: string }>(`select 
 
 describe("first pass: council #340 regressions", () => {
   it("H1: a credit refusal from the host's handler fails the batch with that RunPolicyError, even when the provider swallows it", async () => {
-    await db.exec(`update organizations set credit_balance_cents = 0 where id = 'o1'`);
+    await db.exec(`update organizations set credit_balance_cents = -30 where id = 'o1'`);
     // The reviewer's probe: a provider that catches the handler's rejection and carries on (the old host did).
     script = async (_job, emit) => {
       for (const event of [textEvent(0, 400), textEvent(1), textEvent(2)]) { try { await emit(event); } catch { /* swallowed */ } }
@@ -393,7 +393,7 @@ describe("first pass: council #340 regressions", () => {
   });
 
   it("H1: a provider that follows the contract (rethrows the handler's rejection) fails the batch with the same error", async () => {
-    await db.exec(`update organizations set credit_balance_cents = 0 where id = 'o1'`);
+    await db.exec(`update organizations set credit_balance_cents = -30 where id = 'o1'`);
     script = async (_job, emit) => { await emit(textEvent(0, 400)); await emit(textEvent(1)); };
     await expect(runFirstPassBatch(deps(), { runId: "r1", documentIds: DOCS })).rejects.toBeInstanceOf(RunPolicyError);
   });

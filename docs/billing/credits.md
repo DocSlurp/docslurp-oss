@@ -59,6 +59,12 @@ Ingestion and automation never spend an organization's last `reserve` credits, s
 search over what it uploaded. Interactive spend may carry a small negative balance (the overdraft), which the next
 top-up pays first. See `packages/shared/src/chat-reserve.ts` and migration `0053_chat_credit_reserve.sql`.
 
+A job that is already running may finish below zero: credit leases, the worker's mid-run check and media admission let
+it use the chat reserve and take the balance down to `-RUN_CREDIT_OVERDRAFT_CREDITS` (default 25 credits, $0.25), then
+pause it. New runs are still admitted only above the reserve. The balance shows the negative amount, and the next
+purchase pays it first. Set `RUN_CREDIT_OVERDRAFT_CREDITS=0` (on the worker) to pause running jobs at zero. See
+migration `0137_run_completion_overdraft.sql`.
+
 ## Run admission
 
 Credits are checked atomically when the run row is inserted (`admitRunSpend`). An admitted run is paused, not failed,

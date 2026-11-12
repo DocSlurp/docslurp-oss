@@ -51,7 +51,7 @@ beforeEach(async () => {
   // The cadence path: WORKER_CREDIT_LEASES=off (credit-lease.test.ts covers leases).
   setCreditLeaseConfig(resolveCreditLeaseConfig({ WORKER_CREDIT_LEASES: "off" }));
   // Cadence mechanics without the chat reserve; "chat reserve" below covers it.
-  setChatReserveConfig(resolveChatCreditReserveConfig({ CHAT_CREDIT_RESERVE_CREDITS: "0", CHAT_CREDIT_RESERVE_STARTER_CREDITS: "0" }));
+  setChatReserveConfig(resolveChatCreditReserveConfig({ CHAT_CREDIT_RESERVE_CREDITS: "0", CHAT_CREDIT_RESERVE_STARTER_CREDITS: "0", RUN_CREDIT_OVERDRAFT_CREDITS: "0" }));
   await sql`delete from project_run_events`;
   await sql`delete from page_work_tasks`;
   await sql`delete from documents`;
@@ -153,34 +153,38 @@ describe("enforceRunSpend", () => {
   });
 });
 
-describe("chat reserve", () => {
-  it("pauses a run once available credits fall below the org's reserve", async () => {
+describe("running-job floor", () => {
+  it("lets a running job use the chat reserve and finish up to 25 credits below zero, funded or not", async () => {
     setChatReserveConfig(resolveChatCreditReserveConfig({}));
-    // 5 credits in a starter org: below the 100-credit reserve.
-    expect(await enforceRunSpend(sql, { id: "run-1", orgId: "org-1", projectId: "ws-1", userId: "u1" }, "stage-boundary"))
-      .toMatchObject({ blocked: true, paused: true, reason: "credit_exhausted" });
+    const run = { id: "run-1", orgId: "org-1", projectId: "ws-1", userId: "u1" };
+    // 5 credits, inside the 20-credit starter chat reserve: a running job keeps going.
+    expect(await enforceRunSpend(sql, run, "stage-boundary")).toEqual({ blocked: false, paused: false });
+    await sql`update organizations set credit_balance_cents = -25 where id = 'org-1'`;
+    expect(await enforceRunSpend(sql, run, "stage-boundary")).toEqual({ blocked: false, paused: false });
+    await sql`update organizations set credit_balance_cents = -25.5 where id = 'org-1'`;
+    expect(await enforceRunSpend(sql, run, "stage-boundary")).toMatchObject({ blocked: true, paused: true, reason: "credit_exhausted" });
     await sql`update project_runs set control_state = null, pause_reason = null where id = 'run-1'`;
-    await sql`update organizations set credit_balance_cents = 150 where id = 'org-1'`;
-    expect(await enforceRunSpend(sql, { id: "run-1", orgId: "org-1", projectId: "ws-1", userId: "u1" }, "stage-boundary"))
-      .toEqual({ blocked: false, paused: false });
-    await sql`update organizations set credit_balance_cents = 150, funded_at = now() where id = 'org-1'`;
+    await sql`update organizations set credit_balance_cents = -10, funded_at = now() where id = 'org-1'`;
     try {
-      expect(await enforceRunSpend(sql, { id: "run-1", orgId: "org-1", projectId: "ws-1", userId: "u1" }, "stage-boundary"))
-        .toMatchObject({ blocked: true, reason: "credit_exhausted" });
+      expect(await enforceRunSpend(sql, run, "stage-boundary")).toEqual({ blocked: false, paused: false });
     } finally {
-      await sql`update organizations set funded_at = null where id = 'org-1'`;
+      await sql`update organizations set credit_balance_cents = 5, funded_at = null where id = 'org-1'`;
     }
   });
 
-  it("measures the block code against the org's reserve", async () => {
-    setChatReserveConfig(resolveChatCreditReserveConfig({}));
+  it("measures the block code against the floor, and RUN_CREDIT_OVERDRAFT_CREDITS=0 stops running jobs at zero", async () => {
     const { spendBlockCode } = await import("../db/spend-check.js");
-    const row = { org_id: "org-1", available: 150, project_budget_paused: false, org_budget_paused: false, project_in_org: true };
+    const row = { org_id: "org-1", available: -25, project_budget_paused: false, org_budget_paused: false, project_in_org: true };
+    setChatReserveConfig(resolveChatCreditReserveConfig({}));
     expect(spendBlockCode({ ...row, funded: false })).toBeNull();
-    expect(spendBlockCode({ ...row, funded: true })).toBe("credit_exhausted");
-    expect(spendBlockCode({ ...row, funded: false, available: 99 })).toBe("credit_exhausted");
+    expect(spendBlockCode({ ...row, funded: true })).toBeNull();
+    expect(spendBlockCode({ ...row, funded: false, available: -25.01 })).toBe("credit_exhausted");
+    setChatReserveConfig(resolveChatCreditReserveConfig({ RUN_CREDIT_OVERDRAFT_CREDITS: "0" }));
+    expect(spendBlockCode({ ...row, funded: false, available: -0.01 })).toBe("credit_exhausted");
+    expect(spendBlockCode({ ...row, funded: false, available: 0 })).toBeNull();
   });
 });
+
 
 describe("house org exemption", () => {
   it("never pauses an exempt org for credits, but still for budgets", async () => {
