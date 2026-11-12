@@ -447,15 +447,15 @@ function walkObject(data: Buffer, depth: number, state: WalkState, options: { em
  * blocks with an octal size; GNU base-256 sizes, a header checksum that does not add up, or a member running past the end
  * are refused as `archive-nested-inspection-failed`.
  *
- * Council R6-M2: a member's size is what tar readers use, so pax `size=` records (`x` for the next member, `g` for every
- * later one) override the header's octal size, as Python's tarfile, bsdtar and GNU tar do. An all-zero block does not end
+ * Council R6-M2: a member's size is what tar readers use, so a pax `x` record's `size=` overrides the next member's octal
+ * size, as Python's tarfile, bsdtar and GNU tar do. A global (`g`) record with `size=` is refused (council R7-L1): readers
+ * disagree on it. An all-zero block does not end
  * the walk while non-zero bytes follow it (`tar --ignore-zeros` and tolerant readers go on reading): later headers are
  * walked too, and trailing bytes that are not a valid header are refused.
  */
 function walkTar(data: Buffer, depth: number, state: WalkState): void {
   let offset = 0;
   let entries = 0;
-  let globalSize: number | null = null;
   let nextSize: number | null = null;
   while (offset + 512 <= data.length) {
     const header = data.subarray(offset, offset + 512);
@@ -477,7 +477,7 @@ function walkTar(data: Buffer, depth: number, state: WalkState): void {
     const type = String.fromCharCode(header[156]!);
     // pax and GNU extension records describe the next member; their own size is the octal one.
     const extension = type === "x" || type === "g" || type === "X" || type === "L" || type === "K";
-    const size = extension ? octal : nextSize ?? globalSize ?? octal;
+    const size = extension ? octal : nextSize ?? octal;
     const start = offset + 512;
     if (!Number.isSafeInteger(size) || size < 0 || start + size > data.length) {
       state.issues.add("archive-nested-inspection-failed");
@@ -495,8 +495,13 @@ function walkTar(data: Buffer, depth: number, state: WalkState): void {
         state.issues.add("archive-nested-inspection-failed");
         return;
       }
-      if (type === "g") globalSize = paxSize ?? globalSize;
-      else nextSize = paxSize;
+      // Council R7-L1: readers disagree on a global `size` (Python's tarfile applies it to the next member's data,
+      // bsdtar refuses it, GNU tar ignores it), so no single walk matches every reader. Refuse it.
+      if (type === "g" && paxSize !== null) {
+        state.issues.add("archive-nested-inspection-failed");
+        return;
+      }
+      if (type !== "g") nextSize = paxSize;
     } else if (!extension) {
       nextSize = null;
     }
