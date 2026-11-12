@@ -69,20 +69,43 @@ function embeddedDocumentAllowed(sniffed: SniffedBytes, pdfHeader: boolean): boo
 const PDF_HEADER = Buffer.from("%PDF-", "latin1");
 const PDF_STARTXREF = Buffer.from("startxref", "latin1");
 const OLE2_MAGIC = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
-/** How far into a binary file a PDF header or an OLE2 header is searched for, and how much of its end for `startxref`. */
-const EMBEDDED_DOCUMENT_HEAD_BYTES = 64 * 1024;
-const EMBEDDED_DOCUMENT_TAIL_BYTES = 4 * 1024;
+const ZIP_LOCAL_MAGIC = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+const RAR_MAGIC = Buffer.from("Rar!\x1a\x07", "latin1");
+/** ZIP compression methods a reader may open (APPNOTE 4.4.5): a local header with any other is not taken as one. */
+const ZIP_METHODS = new Set([0, 1, 6, 8, 9, 12, 14, 18, 19, 93, 94, 95, 96, 97, 98, 99]);
 
-/** A PDF (`%PDF-` near the start or `startxref` near the end) or an OLE2 header at an offset; bounded reads only. */
-export function findEmbeddedDocument(bytes: Buffer): { format: "pdf" | "ole2"; offset: number } | null {
-  const head = bytes.subarray(0, EMBEDDED_DOCUMENT_HEAD_BYTES);
-  const pdf = head.indexOf(PDF_HEADER);
-  if (pdf >= 0) return { format: "pdf", offset: pdf };
-  const tailStart = Math.max(0, bytes.length - EMBEDDED_DOCUMENT_TAIL_BYTES);
-  const startxref = bytes.subarray(tailStart).lastIndexOf(PDF_STARTXREF);
-  if (startxref >= 0) return { format: "pdf", offset: tailStart + startxref };
-  const ole = head.indexOf(OLE2_MAGIC, 1);
+/** Whether the four bytes at `offset` start a ZIP local header a streaming reader would extract (a plausible method and name). */
+function plausibleZipLocalHeader(bytes: Buffer, offset: number): boolean {
+  if (offset + 30 > bytes.length) return false;
+  const nameLength = bytes.readUInt16LE(offset + 26);
+  if (!ZIP_METHODS.has(bytes.readUInt16LE(offset + 8)) || (bytes[offset + 4]! > 63) || nameLength === 0 || nameLength > 1024 || offset + 30 + nameLength > bytes.length) return false;
+  for (let index = offset + 30; index < offset + 30 + nameLength; index += 1) if (bytes[index]! < 0x20 || bytes[index] === 0x7f) return false;
+  return true;
+}
+
+/**
+ * Council N-L2 and R6-L3: a PDF, an OLE2 compound file, a ZIP or a RAR anywhere in a binary file that is none of these by
+ * its leading bytes. pdf.js opens a PDF found anywhere (it rebuilds the cross-reference table from the objects), and
+ * ClamAV, typing the file by its first bytes (an MP3 by its frames), never parses it as one; a PDF 71 KiB into an MP3
+ * passed the old 64 KiB head window. So the whole object is searched, one linear pass per magic: `%PDF-` followed by a
+ * version digit, `startxref`, the OLE2 header, a RAR signature, and a ZIP local header with a plausible method and name.
+ * Bounded by the object's size (no parse); the magics are long enough that ordinary media do not carry them by chance
+ * (3,290 local media files: none).
+ */
+export function findEmbeddedDocument(bytes: Buffer): { format: "pdf" | "ole2" | "zip" | "rar"; offset: number } | null {
+  for (let pdf = bytes.indexOf(PDF_HEADER); pdf >= 0; pdf = bytes.indexOf(PDF_HEADER, pdf + 1)) {
+    const version = bytes[pdf + PDF_HEADER.length];
+    if (version !== undefined && version >= 0x30 && version <= 0x39) return { format: "pdf", offset: pdf };
+  }
+  const startxref = bytes.indexOf(PDF_STARTXREF);
+  if (startxref >= 0) return { format: "pdf", offset: startxref };
+  const ole = bytes.indexOf(OLE2_MAGIC, 1);
   if (ole > 0) return { format: "ole2", offset: ole };
+  const rar = bytes.indexOf(RAR_MAGIC, 1);
+  if (rar > 0) return { format: "rar", offset: rar };
+  for (let zip = bytes.indexOf(ZIP_LOCAL_MAGIC, 1); zip > 0; zip = bytes.indexOf(ZIP_LOCAL_MAGIC, zip + 1)) {
+    if (plausibleZipLocalHeader(bytes, zip)) return { format: "zip", offset: zip };
+  }
   return null;
 }
 
@@ -204,6 +227,7 @@ export function describeArchiveIssue(issue: string, archive: ArchiveInspection):
     case "archive-nested-entry-size-limit": return "a nested archive entry exceeds the entry size limit";
     case "archive-nested-entry-count-limit": return "a nested archive has too many entries";
     case "archive-nested-encrypted-entry": return "a nested archive has encrypted entries, which cannot be scanned";
+    case "archive-nested-encrypted-pdf": return "an encrypted PDF inside this file cannot be scanned for malware; remove its encryption and upload again";
     case "archive-nested-unsupported-format": return "a nested archive is in a format that cannot be inspected (such as RAR, 7z, bzip2 or xz)";
     case "archive-nested-uninspectable": return "a nested archive is in a format only the malware scanner opens (such as CAB)";
     case "archive-nested-depth-limit": return "archives are nested deeper than the malware scanner's recursion limit";

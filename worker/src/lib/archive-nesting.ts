@@ -1,5 +1,7 @@
 import { gunzipSync, inflateRawSync } from "node:zlib";
 
+import { pdfEncryptionStructure } from "./pdf-encryption-structure.js";
+
 /*
  * Nested-archive inspection for quarantine (parser VM only in production: it inflates hostile bytes).
  *
@@ -83,7 +85,8 @@ export function classifyContainer(bytes: Buffer): ContainerKind {
   if (at(bytes, 0, [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c])) return { kind: "unsupported", format: "7z" };
   if (at(bytes, 0, ascii("BZh")) && bytes.length > 3 && bytes[3]! >= 0x31 && bytes[3]! <= 0x39) return { kind: "unsupported", format: "bzip2" };
   if (at(bytes, 0, [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00])) return { kind: "unsupported", format: "xz" };
-  if (at(bytes, 257, ascii("ustar"))) return { kind: "tar" };
+  // ustar and GNU tar by magic; V7 and other pre-POSIX tar by a header checksum that adds up (council R6-M2).
+  if (at(bytes, 257, ascii("ustar")) || isTarHeader(bytes)) return { kind: "tar" };
   // ClamAV opens these; this walk does not, so their members are unchecked (a warning).
   if (at(bytes, 0, ascii("MSCF\0\0\0\0"))) return { kind: "uninspectable", format: "cab" };
   if (at(bytes, 0, [0x60, 0xea])) return { kind: "uninspectable", format: "arj" };
@@ -93,6 +96,27 @@ export function classifyContainer(bytes: Buffer): ContainerKind {
   if (at(bytes, 0x8001, ascii("CD001"))) return { kind: "uninspectable", format: "iso9660" };
   if (at(bytes, 0, ascii("SZDD")) || at(bytes, 0, ascii("KWAJ"))) return { kind: "uninspectable", format: "ms-compress" };
   return null;
+}
+
+/** The stored and computed checksums of the 512-byte tar header at `offset` (the checksum field counted as spaces). */
+function tarChecksum(bytes: Buffer, offset: number): { stored: number; sum: number } {
+  const field = bytes.subarray(offset + 148, offset + 156).toString("latin1").replace(/[\0 ]+$/, "").trim();
+  const stored = /^[0-7]{1,8}$/.test(field) ? parseInt(field, 8) : NaN;
+  let sum = 0;
+  for (let index = 0; index < 512; index += 1) sum += index >= 148 && index < 156 ? 0x20 : bytes[offset + index]!;
+  return { stored, sum };
+}
+
+/**
+ * A tar header without the ustar magic (V7, early GNU): a 512-byte block whose octal checksum adds up, with a name and an
+ * octal size field. A checksum that matches by chance in an ordinary file is about as likely as any 6-digit coincidence;
+ * a false match only makes the walk read the object as tar and refuse what does not parse.
+ */
+function isTarHeader(bytes: Buffer): boolean {
+  if (bytes.length < 512 || bytes[0] === 0) return false;
+  const { stored, sum } = tarChecksum(bytes, 0);
+  if (!Number.isSafeInteger(stored) || stored !== sum || sum === 8 * 0x20) return false;
+  return /^[0-7 \0]{11,12}$/.test(bytes.subarray(124, 136).toString("latin1"));
 }
 
 /** How far into a non-container object findEmbeddedContainer looks for a container's leading magic. */
@@ -338,6 +362,12 @@ function readZipMember(bytes: Buffer, entry: ZipEntryLocation, state: WalkState,
 /** A member, stream or payload at `depth` containers deep: walked when it is a container, refused when it cannot be. */
 function walkObject(data: Buffer, depth: number, state: WalkState, options: { embedded?: boolean } = {}): void {
   const container = classifyContainer(data);
+  // Council R6-L2: an encrypted PDF inside a container is never decrypted for the scan (only a top-level PDF is), so the
+  // scanner reads its streams as ciphertext. No extractor opens it, but a downloader does: refused as unscannable.
+  if (!container && nestedPdfNamesEncrypt(data)) {
+    state.issues.add("archive-nested-encrypted-pdf");
+    return;
+  }
   if (!container) {
     if (options.embedded !== false && findEmbeddedContainer(data)) state.issues.add("archive-nested-embedded-container");
     return;
@@ -413,25 +443,41 @@ function walkObject(data: Buffer, depth: number, state: WalkState, options: { em
 }
 
 /**
- * Members of a POSIX (ustar) tar at `depth`: every record's data is walked at depth + 1. Headers are 512-byte blocks with an
- * octal size; GNU base-256 sizes, a header checksum that does not add up, or a member running past the end are refused as
- * `archive-nested-inspection-failed`.
+ * Members of a tar (ustar, GNU, pax or V7) at `depth`: every record's data is walked at depth + 1. Headers are 512-byte
+ * blocks with an octal size; GNU base-256 sizes, a header checksum that does not add up, or a member running past the end
+ * are refused as `archive-nested-inspection-failed`.
+ *
+ * Council R6-M2: a member's size is what tar readers use, so pax `size=` records (`x` for the next member, `g` for every
+ * later one) override the header's octal size, as Python's tarfile, bsdtar and GNU tar do. An all-zero block does not end
+ * the walk while non-zero bytes follow it (`tar --ignore-zeros` and tolerant readers go on reading): later headers are
+ * walked too, and trailing bytes that are not a valid header are refused.
  */
 function walkTar(data: Buffer, depth: number, state: WalkState): void {
   let offset = 0;
   let entries = 0;
+  let globalSize: number | null = null;
+  let nextSize: number | null = null;
   while (offset + 512 <= data.length) {
     const header = data.subarray(offset, offset + 512);
-    if (header.every((byte) => byte === 0)) return; // end-of-archive block
-    const stored = parseInt(header.subarray(148, 156).toString("latin1").replace(/[\0 ]+$/, "").trim(), 8);
-    let sum = 0;
-    for (let index = 0; index < 512; index += 1) sum += index >= 148 && index < 156 ? 0x20 : header[index]!;
+    if (header.every((byte) => byte === 0)) {
+      // An end-of-archive block: only zeros may follow, or the rest is walked as more members.
+      const rest = data.subarray(offset + 512);
+      const next = rest.findIndex((byte) => byte !== 0);
+      if (next < 0) return;
+      offset += 512 + Math.floor(next / 512) * 512;
+      continue;
+    }
+    const { stored, sum } = tarChecksum(data, offset);
     const sizeField = header.subarray(124, 136);
     if (!Number.isSafeInteger(stored) || stored !== sum || sizeField[0]! & 0x80) {
       state.issues.add("archive-nested-inspection-failed");
       return;
     }
-    const size = parseInt(sizeField.toString("latin1").replace(/[\0 ]+$/, "").trim() || "0", 8);
+    const octal = parseInt(sizeField.toString("latin1").replace(/[\0 ]+$/, "").trim() || "0", 8);
+    const type = String.fromCharCode(header[156]!);
+    // pax and GNU extension records describe the next member; their own size is the octal one.
+    const extension = type === "x" || type === "g" || type === "X" || type === "L" || type === "K";
+    const size = extension ? octal : nextSize ?? globalSize ?? octal;
     const start = offset + 512;
     if (!Number.isSafeInteger(size) || size < 0 || start + size > data.length) {
       state.issues.add("archive-nested-inspection-failed");
@@ -442,13 +488,58 @@ function walkTar(data: Buffer, depth: number, state: WalkState): void {
       return;
     }
     if (!state.visit()) return;
+    const payload = data.subarray(start, start + size);
+    if (type === "x" || type === "g" || type === "X") {
+      const paxSize = paxRecordSize(payload);
+      if (paxSize === "malformed") {
+        state.issues.add("archive-nested-inspection-failed");
+        return;
+      }
+      if (type === "g") globalSize = paxSize ?? globalSize;
+      else nextSize = paxSize;
+    } else if (!extension) {
+      nextSize = null;
+    }
     // Every record's data is walked whatever its type flag: tar readers (Python's tarfile among them) extract unknown types
     // as regular files, and pax or long-name records are short text that walks as nothing.
     if (size > state.limits.maxEntryBytes) state.issues.add("archive-nested-entry-size-limit");
-    else if (size > 0) walkObject(data.subarray(start, start + size), depth + 1, state);
+    else if (size > 0) walkObject(payload, depth + 1, state);
     if (!state.going) return;
     offset = start + Math.ceil(size / 512) * 512;
   }
+  // Bytes after the last whole block: tar pads to 512, so a partial block that is not zeros is not a tar this walk read.
+  if (data.subarray(offset).some((byte) => byte !== 0)) state.issues.add("archive-nested-inspection-failed");
+}
+
+/** The `size` a pax extended header sets (null when it sets none); `malformed` when its records do not parse. */
+function paxRecordSize(records: Buffer): number | null | "malformed" {
+  let size: number | null = null;
+  let offset = 0;
+  while (offset < records.length) {
+    if (records[offset] === 0) break;
+    const space = records.indexOf(0x20, offset);
+    if (space < 0 || space - offset > 20) return "malformed";
+    const length = Number(records.subarray(offset, space).toString("latin1"));
+    if (!Number.isSafeInteger(length) || length <= space - offset + 1 || offset + length > records.length || records[offset + length - 1] !== 0x0a) return "malformed";
+    const record = records.subarray(space + 1, offset + length - 1).toString("latin1");
+    const equals = record.indexOf("=");
+    if (equals < 0) return "malformed";
+    if (record.slice(0, equals) === "size") {
+      const value = record.slice(equals + 1);
+      if (!/^\d{1,15}$/.test(value)) return "malformed";
+      size = Number(value);
+    }
+    offset += length;
+  }
+  return size;
+}
+
+const PDF_HEADER = Buffer.from("%PDF-", "latin1");
+const ENCRYPT_NAME = Buffer.from("/Encrypt", "latin1");
+/** Whether a nested object is a PDF (libclamav's test: `%PDF-` in its first 1 KiB) naming /Encrypt, escaped names included. */
+function nestedPdfNamesEncrypt(data: Buffer): boolean {
+  if (data.subarray(0, 1024).indexOf(PDF_HEADER) < 0) return false;
+  return data.includes(ENCRYPT_NAME) || pdfEncryptionStructure(data).encrypted;
 }
 
 /** The embedded file of an `\x01Ole10Native` Package stream, or null when the stream is not one. */

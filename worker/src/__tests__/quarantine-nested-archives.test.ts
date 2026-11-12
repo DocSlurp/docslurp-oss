@@ -248,7 +248,7 @@ describe("nested archive walk: refused cases (owner decision, PR #339)", () => {
     });
 
     it("a ZIP64 behind a pax header and under an unknown type flag (tar readers extract it as a file): archive-nested-zip64", () => {
-      const archive = tar([{ name: "PaxHeaders/deck.zip", data: Buffer.from("30 path=quarterly/deck.zip\n"), type: "x" }, { name: "deck.zip", data: zip64Inner(), type: "Z" }]);
+      const archive = tar([{ name: "PaxHeaders/deck.zip", data: Buffer.from("27 path=quarterly/deck.zip\n"), type: "x" }, { name: "deck.zip", data: zip64Inner(), type: "Z" }]);
       expect(issuesOf(docxWith(archive))).toEqual(["archive-nested-zip64"]);
     });
 

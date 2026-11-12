@@ -25,7 +25,7 @@ describe("publicDocumentError", () => {
 describe("quarantine refusals (council #339 correctness M2)", () => {
   it("maps every worker reason code to a public reason, unknown codes to a scan failure", () => {
     expect(quarantinePublicReason("malware-detected")).toBe("quarantine-malware");
-    for (const code of ["malware-scan-encrypted-content", "malware-scan-pdf-decrypt-failed", "archive-encrypted-entry", "archive-nested-encrypted-entry"]) expect(quarantinePublicReason(code)).toBe("quarantine-encrypted");
+    for (const code of ["malware-scan-encrypted-content", "malware-scan-pdf-decrypt-failed", "archive-encrypted-entry", "archive-nested-encrypted-entry", "archive-nested-encrypted-pdf"]) expect(quarantinePublicReason(code)).toBe("quarantine-encrypted");
     for (const code of ["mime-mismatch", "archive-embedded-container", "quarantine-inspection-inconsistent"]) expect(quarantinePublicReason(code)).toBe("quarantine-file-type");
     for (const code of ["malware-scan-limit-exceeded", "archive-entry-count-limit", "archive-depth-limit", "archive-expanded-bytes-limit", "archive-entry-size-limit", "archive-expansion-ratio-limit", "archive-nested-entry-size-limit", "archive-nested-entry-count-limit", "archive-nested-expanded-bytes-limit", "archive-nested-object-count-limit", "archive-nested-depth-limit"]) {
       expect(quarantinePublicReason(code), code).toBe("quarantine-scan-limit");

@@ -18,6 +18,11 @@
 
 /** Trailers and cross-reference sections examined; a file with more is refused as inconsistent. */
 const MAX_SECTIONS = 4096;
+/**
+ * `/XRef` name tokens examined (council R6-L1): each costs a bounded backward search, so a file of nothing but `/XRef `
+ * tokens is refused as inconsistent after this many instead of costing parser-VM minutes.
+ */
+const MAX_XREF_NAMES = 4 * MAX_SECTIONS;
 /** How far a trailer dictionary is read past its keyword or object header. */
 const DICT_WINDOW = 16 * 1024;
 
@@ -141,6 +146,28 @@ function readTrailer(bytes: Buffer, start: number): { encrypt: string | null; id
   return { encrypt, id, prev };
 }
 
+/**
+ * Council R6-M1: a linearized file's main trailer legitimately omits /Encrypt (qpdf and Acrobat write `<< /Size N /ID [...] >>`
+ * there; only the first-page trailer names the encryption dictionary). That trailer is the one exempt from agreeing on
+ * /Encrypt, and only when: the file opens with a linearization dictionary (its first object, within the first 1 KiB), the
+ * first trailer in file order names /Encrypt and its /Prev points at a section, and the trailer of exactly that section is the
+ * file's only trailer without /Encrypt. A plain file whose first trailer alone names /Encrypt (round-5 trailer-enc-first)
+ * has no linearization dictionary and stays refused. Since every parser reads quarantine's scanned copy (parse-source.ts),
+ * which sections a reader starts from no longer decides what is parsed; this check guards the original for download.
+ */
+function linearizedMainTrailer<T extends { encrypt: string | null; prev: number | null; section: number }>(bytes: Buffer, trailers: T[]): T | null {
+  const head = bytes.subarray(0, 1024).toString("latin1");
+  const firstObject = head.search(/\d+\s+\d+\s+obj\b/);
+  if (firstObject < 0 || !/^\d+\s+\d+\s+obj\s*<<[^>]*?\/Linearized\b/.test(head.slice(firstObject))) return null;
+  const withoutEncrypt = trailers.filter((trailer) => trailer.encrypt === null);
+  if (withoutEncrypt.length !== 1) return null;
+  const ordered = trailers.filter((trailer) => trailer.section >= 0).sort((a, b) => a.section - b.section);
+  const first = ordered[0];
+  if (!first || first.encrypt === null || first.prev === null) return null;
+  const main = withoutEncrypt[0]!;
+  return main.section === first.prev || (main.section >= 0 && skipSpace(bytes, first.prev, Math.min(bytes.length, first.prev + 64)) === main.section) ? main : null;
+}
+
 /** Whether `offset` starts a cross-reference section: the `xref` keyword or an `N G obj` cross-reference stream. */
 function isXrefSection(bytes: Buffer, offset: number, xrefStreams: Set<number>): boolean {
   if (!Number.isSafeInteger(offset) || offset < 0 || offset >= bytes.length) return false;
@@ -161,16 +188,21 @@ export function pdfEncryptionStructure(bytes: Buffer): PdfEncryptionStructure {
   const encryptValues = new Set<string>();
   // Cross-reference stream objects: `N G obj` whose dictionary has /Type /XRef, by the offset of their object header.
   const xrefStreams = new Map<number, number>();
+  let xrefNames = 0;
   for (let slash = bytes.indexOf(0x2f); slash >= 0; slash = bytes.indexOf(0x2f, slash + 1)) {
     const { name, end } = readName(bytes, slash);
     if (name === "Encrypt") {
       const value = readEncryptValue(bytes, end, Math.min(bytes.length, end + 64));
       if (value !== "other") encryptValues.add(value);
     } else if (name === "XRef") {
-      // `/Type /XRef`: the dictionary opens after the nearest preceding `obj` keyword.
+      if (++xrefNames > MAX_XREF_NAMES) return { encrypted: encryptValues.size > 0, conflict: "too many cross-reference stream names" };
+      // `/Type /XRef`: the dictionary opens after the nearest preceding `obj` keyword, searched for within DICT_WINDOW only
+      // (council R6-L1: an unbounded backward search made a file of `/XRef ` tokens quadratic).
       const windowStart = Math.max(0, slash - DICT_WINDOW);
-      const obj = bytes.lastIndexOf("obj", slash, "latin1");
-      if (obj >= windowStart) {
+      const window = bytes.subarray(windowStart, slash);
+      const found = window.lastIndexOf("obj", window.length, "latin1");
+      const obj = found >= 0 ? windowStart + found : -1;
+      if (obj >= 0) {
         let header = obj;
         // Back over `N G ` to the object number.
         let cursor = obj - 1;
@@ -183,29 +215,51 @@ export function pdfEncryptionStructure(bytes: Buffer): PdfEncryptionStructure {
           fields += 1;
           header = cursor + 1;
         }
-        if (fields === 2 && !xrefStreams.has(header)) xrefStreams.set(header, bytes.indexOf("<<", obj, "latin1"));
+        if (fields === 2 && !xrefStreams.has(header)) {
+          const open = bytes.subarray(obj, Math.min(bytes.length, slash)).indexOf("<<", 0, "latin1");
+          xrefStreams.set(header, open >= 0 ? obj + open : -1);
+        }
       }
     }
     if (xrefStreams.size > MAX_SECTIONS) return { encrypted: encryptValues.size > 0, conflict: "too many cross-reference sections" };
     slash = Math.max(slash, end - 1);
   }
 
-  const trailers: Array<{ encrypt: string | null; id: string | null; prev: number | null }> = [];
+  // `xref` keywords (not the tail of `startxref`), in file order: the section a classic trailer closes starts at the last
+  // one before it. One forward pass, so the lookup below is a binary search, never a backward scan per trailer.
+  const tableStarts: number[] = [];
+  for (let at = bytes.indexOf("xref", 0, "latin1"); at >= 0; at = bytes.indexOf("xref", at + 4, "latin1")) {
+    if (at < 5 || bytes.subarray(at - 5, at).toString("latin1") !== "start") tableStarts.push(at);
+    if (tableStarts.length > MAX_SECTIONS) return { encrypted: encryptValues.size > 0, conflict: "too many cross-reference sections" };
+  }
+  const sectionOf = (offset: number): number => {
+    let low = 0;
+    let high = tableStarts.length - 1;
+    let found = -1;
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      if (tableStarts[mid]! < offset) { found = tableStarts[mid]!; low = mid + 1; } else high = mid - 1;
+    }
+    return found;
+  };
+
+  const trailers: Array<{ encrypt: string | null; id: string | null; prev: number | null; section: number }> = [];
   for (let at = bytes.indexOf("trailer", 0, "latin1"); at >= 0; at = bytes.indexOf("trailer", at + 7, "latin1")) {
     const open = skipSpace(bytes, at + 7, Math.min(bytes.length, at + 7 + 1024));
     if (bytes[open] !== 0x3c || bytes[open + 1] !== 0x3c) continue;
-    trailers.push(readTrailer(bytes, open));
+    trailers.push({ ...readTrailer(bytes, open), section: sectionOf(at) });
     if (trailers.length > MAX_SECTIONS) return { encrypted: encryptValues.size > 0, conflict: "too many trailers" };
   }
-  for (const dict of xrefStreams.values()) {
-    if (dict >= 0) trailers.push(readTrailer(bytes, dict));
+  for (const [header, dict] of xrefStreams) {
+    if (dict >= 0) trailers.push({ ...readTrailer(bytes, dict), section: header });
   }
 
   const encrypted = trailers.some((trailer) => trailer.encrypt !== null);
   if (!encrypted) return { encrypted: false, conflict: null };
   if (encryptValues.size > 1) return { encrypted, conflict: "more than one encryption dictionary" };
-  const encrypts = new Set(trailers.map((trailer) => trailer.encrypt));
-  if (encrypts.size > 1 || encrypts.has("other") || encrypts.has("duplicate")) return { encrypted, conflict: "trailers disagree on /Encrypt" };
+  const linearizedMain = linearizedMainTrailer(bytes, trailers);
+  const encrypts = new Set(trailers.filter((trailer) => trailer !== linearizedMain).map((trailer) => trailer.encrypt));
+  if (encrypts.size > 1 || encrypts.has("other") || encrypts.has("duplicate") || encrypts.has(null)) return { encrypted, conflict: "trailers disagree on /Encrypt" };
   const ids = new Set(trailers.map((trailer) => trailer.id));
   if (ids.size > 1 || ids.has(null) || ids.has("malformed")) return { encrypted, conflict: "trailers disagree on /ID" };
 
