@@ -10,7 +10,7 @@ import { inspectArchive } from "../lib/quarantine-bytes.js";
 import { inspectQuarantineBytes } from "../lib/quarantine-bytes.js";
 import { applyParseSource, hasScannedParseCopy, originalSourceForQuarantine, pdfBytesForParsing, resolveDocumentSource } from "../lib/parse-source.js";
 import { pdfEncryptionStructure } from "../lib/pdf-encryption-structure.js";
-import { ParseSourceError, readSourceBytes, resetStagedSourcesForTests, SourceIntegrityError, sha256Bytes, stageSourceFile, verifyStagedSource } from "../sandbox/source-integrity.js";
+import { ParseSourceError, readSourceBytes, resetStagedSourcesForTests, SourceIntegrityError, sha256Bytes, stagedSourceSha256, stageSourceFile, verifyStagedSource } from "../sandbox/source-integrity.js";
 
 /**
  * PR #339 council round 6 (adversarial re-check 3): R6-H1 (scan what we parse), R6-M1 (linearized encrypted PDFs), R6-M2
@@ -90,6 +90,9 @@ describe("R6-H1: every parser reads the scanned copy of an encrypted PDF (lib/pa
       expect(() => verifyStagedSource(document, sha256Bytes(originalBytes))).toThrow(ParseSourceError);
       // Any other bytes are an ordinary integrity failure.
       expect(() => verifyStagedSource(document, sha256Bytes(Buffer.from("other")))).toThrow(SourceIntegrityError);
+      // The fleet source quarantine keys the document by its upload's hash, not the copy's (copies differ run to run).
+      verifyStagedSource(document, sha256Bytes(copyBytes));
+      expect(stagedSourceSha256(document.id)).toBe(sha256Bytes(originalBytes));
       // The quarantine stage's own view of the original verifies.
       expect(() => verifyStagedSource(originalSourceForQuarantine(document), sha256Bytes(originalBytes))).not.toThrow();
     });

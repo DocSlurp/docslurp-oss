@@ -88,7 +88,9 @@ export function verifyStagedSource(document: HashedDocument, stagedSha256: strin
   }
   if (!SHA256_HEX.test(actual)) throw new Error(`staged source hash is not a sha256: ${actual.slice(0, 80)}`);
   staged.delete(document.id);
-  staged.set(document.id, actual);
+  // The source quarantine (source-quarantine.ts) lists and checks uploads: a scanned copy (lib/parse-source.ts) is keyed by
+  // the upload it was made from, whose server hash is stable, never by the copy's own (qpdf's copies differ run to run).
+  staged.set(document.id, original && SHA256_HEX.test(original) ? original : actual);
   while (staged.size > STAGED_LIMIT) staged.delete(staged.keys().next().value!);
 }
 
