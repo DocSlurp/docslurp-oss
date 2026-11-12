@@ -55,7 +55,7 @@ describe("vision request bodies", () => {
       if (key.startsWith("deepseek/deepseek-v4.1-flash-1017|")) {
         expect(expected.provider.sort).toBe("price");
         expected.provider.sort = "latency";
-        expected.provider.only = ["fireworks", "parasail"];
+        expected.provider.only = ["together", "fireworks", "parasail"];
       }
       expect(actual[key], key).toEqual(expected);
     }

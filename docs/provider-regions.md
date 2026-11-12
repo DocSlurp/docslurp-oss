@@ -10,8 +10,8 @@ region is decided, and what DocSlurp records.
 China-based providers are **allowed** by default (`allowChinaProviders: true` on organizations and projects).
 
 - **Vision (Rich pages):** the default model, `deepseek/deepseek-v4.1-flash-1017`, is served by Together,
-  Fireworks or Parasail. OpenRouter picks the cheapest of them at request time
-  (`provider.only` plus `provider.sort: "price"`). Every request carries `provider.max_price`, so no host can
+  Fireworks or Parasail. OpenRouter picks the one with the lowest recent latency at request time
+  (`provider.only` plus `provider.sort: "latency"`). Every request carries `provider.max_price`, so no host can
   bill above the route's price ceiling ($0.30 / $1.20 per million tokens).
 - **Text and chat:** GLM and DeepSeek models are sorted by price among hosts serving FP8 or better weights
   (`packages/shared/src/openrouter-routing.ts`). Other models use OpenRouter's default routing.

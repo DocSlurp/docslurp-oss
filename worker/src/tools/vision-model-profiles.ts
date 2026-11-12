@@ -118,7 +118,7 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
     // Effort `none` returns zero reasoning tokens; `low` cost 6.4x per page and lowered math.
     reasoning: { effort: "none" },
     // Keep requests and fallback inside the approved transcription endpoints.
-    openRouterProvider: { only: ["fireworks", "parasail"], sort: "latency", allow_fallbacks: true },
+    openRouterProvider: { only: ["together", "fireworks", "parasail"], sort: "latency", allow_fallbacks: true },
   },
   // 2026-10-21 tune: with `<OCR>` MiMo writes plain text: tables flatten into runs of cells, standalone
   // formulas come back as bare LaTeX with no `$`/`$$`, and figure text becomes an image placeholder.

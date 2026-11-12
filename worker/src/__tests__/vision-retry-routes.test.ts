@@ -98,15 +98,15 @@ const filtered = (provider: string) => sse([
 ]);
 
 describe("per-model provider preferences survive the generic retry", () => {
-  it("DeepSeek-1017 keeps the excluded host out of initial and retry requests", async () => {
+  it("DeepSeek-1017 keeps initial and retry requests inside its approved pool", async () => {
     const { bodies, result } = await run(DEEPSEEK, [
       filtered("Fireworks"),
       sse([{ id: "g", model: DEEPSEEK, provider: "Parasail", choices: [{ delta: { content: "# Page" }, finish_reason: "stop" }], usage: { prompt_tokens: 1000, completion_tokens: 20 } }]),
     ]);
-    const only = ["fireworks", "parasail"];
+    const only = ["together", "fireworks", "parasail"];
     expect(bodies[0]!.provider).toEqual({ only, sort: "latency", allow_fallbacks: true, max_price: visionMaxPrice(DEEPSEEK) });
     expect(bodies[1]!.provider).toEqual({ only, sort: "latency", allow_fallbacks: true, ignore: ["Fireworks"], max_price: visionMaxPrice(DEEPSEEK) });
-    for (const body of bodies) expect(body.provider.only).not.toContain("together");
+    for (const body of bodies) expect(body.provider.only).toEqual(["together", "fireworks", "parasail"]);
     expect(result).toMatchObject({ text: "# Page", attempts: 2, inputTokens: 1400, outputTokens: 23 });
   });
 
@@ -147,8 +147,8 @@ describe("China-provider restriction (org or project opt-out)", () => {
       filtered("Together"),
       sse([{ id: "g", model: DEEPSEEK, provider: "Fireworks", choices: [{ delta: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } }]),
     ], { allowChinaProviders: false });
-    expect(bodies[0]!.provider).toEqual({ only: ["fireworks", "parasail"], sort: "latency", allow_fallbacks: true, ignore: [...CHINA_PROVIDER_SLUGS], max_price: visionMaxPrice(DEEPSEEK) });
-    expect(bodies[1]!.provider).toMatchObject({ only: ["fireworks", "parasail"], ignore: ["Together", ...CHINA_PROVIDER_SLUGS] });
+    expect(bodies[0]!.provider).toEqual({ only: ["together", "fireworks", "parasail"], sort: "latency", allow_fallbacks: true, ignore: [...CHINA_PROVIDER_SLUGS], max_price: visionMaxPrice(DEEPSEEK) });
+    expect(bodies[1]!.provider).toMatchObject({ only: ["together", "fireworks", "parasail"], ignore: ["Together", ...CHINA_PROVIDER_SLUGS] });
     for (const body of bodies) expectRestricted(body.provider);
   });
 
