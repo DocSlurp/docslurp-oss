@@ -651,3 +651,77 @@ describe("rate-limit coverage contract", () => {
     expect(uncovered).toEqual([]);
   });
 });
+
+// Exercise the actual sensitive-email SQL and production handler, not the unit
+// test's model of session storage. PGlite does not prove PostgreSQL lock contention.
+describe("sensitive email code database contract", () => {
+  async function signedIn() {
+    const user = await createUser();
+    const browser = new Browser();
+    expect((await browser.json("/sign-in/email", { email: user.email, password: PASSWORD })).status).toBe(200);
+    const session = await browser.session();
+    expect(session).not.toBeNull();
+    return { user, browser, sessionId: session!.session.id };
+  }
+  const send = (browser: Browser) => browser.json("/sensitive-access/email-otp/send", {});
+  const verify = (browser: Browser, code: string) => browser.json("/sensitive-access/email-otp/verify", { code });
+
+  it("stores a twelve-hour bound proof and accepts it after eleven hours", async () => {
+    const { user, browser, sessionId } = await signedIn();
+    expect((await send(browser)).status).toBe(200);
+    const code = lastCodeFor(user.email);
+    const { rows } = await pool.query(`select "sensitiveEmailOTPHash" as hash,
+      extract(epoch from ("sensitiveEmailOTPExpiresAt" - "sensitiveEmailOTPSentAt"))::int as lifetime
+      from session where id = $1`, [sessionId]);
+    expect(rows[0].lifetime).toBe(43_200);
+    expect(rows[0].hash).not.toBe(code);
+    // Age the database timestamps together, leaving an hour of original validity.
+    await pool.query(`update session set "sensitiveEmailOTPSentAt" = "sensitiveEmailOTPSentAt" - interval '11 hours',
+      "sensitiveEmailOTPExpiresAt" = "sensitiveEmailOTPExpiresAt" - interval '11 hours' where id = $1`, [sessionId]);
+    expect((await verify(browser, code)).status).toBe(200);
+    expect((await verify(browser, code)).status).toBe(400);
+  });
+
+  it("rejects expiry and five exhausted guesses through the real handler", async () => {
+    const { user, browser, sessionId } = await signedIn();
+    expect((await send(browser)).status).toBe(200);
+    let code = lastCodeFor(user.email);
+    await pool.query(`update session set "sensitiveEmailOTPExpiresAt" = now(),
+      "sensitiveEmailOTPSentAt" = now() - interval '61 seconds' where id = $1`, [sessionId]);
+    expect((await verify(browser, code)).status).toBe(400);
+    expect((await send(browser)).status).toBe(200);
+    code = lastCodeFor(user.email);
+    const wrong = code === "000000" ? "111111" : "000000";
+    const attempts = await Promise.all(Array.from({ length: 5 }, () => verify(browser, wrong)));
+    expect(attempts.map(result => result.status)).toEqual([400, 400, 400, 400, 400]);
+    expect((await verify(browser, code)).status).toBe(400);
+    const { rows } = await pool.query(`select "sensitiveEmailOTPAttempts" as attempts from session where id = $1`, [sessionId]);
+    expect(rows[0].attempts).toBe(5);
+  });
+
+  it("admits one overlapping resend and consumes the replacement once", async () => {
+    const { user, browser, sessionId } = await signedIn();
+    expect((await send(browser)).status).toBe(200);
+    const oldCode = lastCodeFor(user.email);
+    await pool.query(`update session set "sensitiveEmailOTPSentAt" = now() - interval '61 seconds' where id = $1`, [sessionId]);
+    const sends = await Promise.all([send(browser), send(browser)]);
+    expect(sends.map(result => result.status).sort()).toEqual([200, 429]);
+    const code = lastCodeFor(user.email);
+    // Random issuance can repeat the same six digits; do not make a flaky assertion.
+    if (code !== oldCode) expect((await verify(browser, oldCode)).status).toBe(400);
+    const proofs = await Promise.all([verify(browser, code), verify(browser, code)]);
+    expect(proofs.map(result => result.status).sort()).toEqual([200, 400]);
+  });
+
+  it("invalidates failed delivery and permits a new request after cooldown", async () => {
+    const { user, browser, sessionId } = await signedIn();
+    resendDown = true;
+    expect((await send(browser)).status).toBe(503);
+    const { rows } = await pool.query(`select "sensitiveEmailOTPHash" as hash from session where id = $1`, [sessionId]);
+    expect(rows[0].hash).toBeNull();
+    resendDown = false;
+    await pool.query(`update session set "sensitiveEmailOTPSentAt" = now() - interval '61 seconds' where id = $1`, [sessionId]);
+    expect((await send(browser)).status).toBe(200);
+    expect((await verify(browser, lastCodeFor(user.email))).status).toBe(200);
+  });
+});

@@ -26,7 +26,7 @@ const query = vi.fn(async (sql: string, params: unknown[] = []) => {
   if (sql.startsWith("select u.email")) return { rows: live ? [{ email: state.email, email_verified: state.emailVerified, two_factor_enabled: state.mfa, totp: state.totp, passkey: state.passkey }] : [] };
   if (sql.includes('"sensitiveEmailOTPSentAt" = now()')) {
     if (!live || !state.emailVerified || state.email !== params[3] || (state.sentAt !== null && state.sentAt > Date.now() - 60_000)) return { rows: [] };
-    state.hash = String(params[2]); state.sentAt = Date.now(); state.expiresAt = Date.now() + 600_000; state.attempts = 0;
+    state.hash = String(params[2]); state.sentAt = Date.now(); state.expiresAt = Date.now() + 12 * 60 * 60 * 1000; state.attempts = 0;
     return { rows: [{ id: sessionId }] };
   }
   if (sql.includes('"sensitiveEmailOTPAttempts" = s.')) {
@@ -110,7 +110,7 @@ describe("current-email sensitive verification", () => {
   it("rejects an expired code and locks out after five incorrect guesses", async () => {
     await send(); sessions.get("session")!.expiresAt = Date.now() - 1;
     await expect(verify()).rejects.toMatchObject({ body: { code: "INVALID_OTP" } });
-    sessions.get("session")!.expiresAt = Date.now() + 600_000;
+    sessions.get("session")!.expiresAt = Date.now() + 12 * 60 * 60 * 1000;
     for (let index = 0; index < 5; index++) await expect(verify("999999")).rejects.toMatchObject({ body: { code: "INVALID_OTP" } });
     await expect(verify()).rejects.toMatchObject({ body: { code: "INVALID_OTP" } });
     expect(mocks.grant).not.toHaveBeenCalled();
