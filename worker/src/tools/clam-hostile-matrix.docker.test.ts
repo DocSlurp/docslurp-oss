@@ -61,10 +61,10 @@ const MATRIX: Array<{ file: string; clamav: Verdict; decision: Decision; note: s
   { file: "pdf-literal-encrypt-string.pdf", clamav: "clean", decision: "clean", note: "FIXED (correctness High): /Encrypt only in an /Info string early in the body; as above" },
   { file: "pdf-literal-encrypt-stream.pdf", clamav: "clean", decision: "clean", note: "FIXED (correctness High): /Encrypt only in an uncompressed content stream early in the body; as above" },
   { file: "pdf-literal-encrypt-after-eof.pdf", clamav: "unscannable", decision: "unscannable", note: "the reviewer's reproducer shape (/Encrypt in a comment after %%EOF): libclamav's own trailer heuristic reports it encrypted, before qpdf runs" },
-  { file: "pdf-incremental-drop-encrypt-marker.pdf", clamav: "marker", decision: "marker", note: "adversarial check 6 shape (RC4 base, an update dropping /Encrypt with a plaintext Flate marker): libclamav finds it on this construction; had it not, qpdf's not-encrypted rewrite is scanned (pdf-decrypt.test.ts)" },
+  { file: "pdf-incremental-drop-encrypt-marker.pdf", clamav: "marker", decision: "refused:pdf-encryption-inconsistent", note: "adversarial check 6 shape (RC4 base, an update dropping /Encrypt with a plaintext Flate marker): libclamav finds it; its trailers now disagree on /Encrypt, so it is refused before decryption (N-H1)" },
   { file: "pdf-owner-deep-nesting.pdf", clamav: "clean", decision: "refused:malware-scan-pdf-decrypt-failed", note: "FIXED (L2): qpdf drops 200,000 nested arrays (exit 3, not a benign warning): the copy is not the whole file, so refused" },
-  { file: "prefixed-owner-raw-marker.pdf", clamav: "clean", decision: "refused:mime-mismatch", note: "FIXED (H2): 1440 bytes of binary comments before %PDF-; ClamAV does not type it as a PDF; poppler and pdf.js read it" },
-  { file: "prefixed-flate-marker.pdf", clamav: "clean", decision: "refused:mime-mismatch", note: "FIXED (H2): the same prefix on a Flate marker PDF: ClamAV skips its PDF parsing entirely" },
+  { file: "prefixed-owner-raw-marker.pdf", clamav: "clean", decision: "refused:mime-mismatch+archive-embedded-container", note: "FIXED (H2): 1440 bytes of binary comments before %PDF-; ClamAV does not type it as a PDF; poppler and pdf.js read it" },
+  { file: "prefixed-flate-marker.pdf", clamav: "clean", decision: "refused:mime-mismatch+archive-embedded-container", note: "FIXED (H2): the same prefix on a Flate marker PDF: ClamAV skips its PDF parsing entirely" },
   { file: "prefixed-zip64-marker.xlsx", clamav: "clean", decision: "refused:mime-mismatch+archive-embedded-container", note: "FIXED (H1): 16 NUL bytes before an XLSX whose parts are ZIP64; openpyxl reads it" },
   { file: "prefixed-traversal.docx", clamav: "clean", decision: "refused:mime-mismatch+archive-embedded-container", note: "FIXED (H1): the prefix used to skip archive-unsafe-path" },
   { file: "prefixed-marker.pptx", clamav: "marker", decision: "refused:mime-mismatch+archive-embedded-container", note: "FIXED (H1): PPTX behind the prefix (ClamAV finds the marker as an embedded ZIP here, but the walk never ran)" },
@@ -77,7 +77,7 @@ const MATRIX: Array<{ file: string; clamav: Verdict; decision: Decision; note: s
   { file: "ole-shared-chain.zip", clamav: "clean", decision: "refused:archive-nested-ole-shared-sectors", note: "FIXED (M1): 2,000 OLE2 entries sharing one 64 MiB chain (0.5 MB upload); refused in milliseconds instead of an OOM" },
   { file: "printer-settings-cab.xlsx", clamav: "clean", decision: "clean", note: "control (correctness M3): a printer-settings blob with a CAB cabinet 1,258 bytes in, as real spreadsheets carry" },
   { file: "pdf-owner-only-restricted.pdf", clamav: "clean", decision: "clean", note: "control: an ordinary permissions-restricted PDF is decrypted, its copy scanned clean, and accepted" },
-  { file: "pdf-incremental-encrypt.pdf", clamav: "unscannable", decision: "unscannable", note: "/Encrypt only in the incremental update's trailer" },
+  { file: "pdf-incremental-encrypt.pdf", clamav: "unscannable", decision: "refused:pdf-encryption-inconsistent", note: "/Encrypt only in the incremental update's trailer: libclamav calls it encrypted; its trailers disagree on /Encrypt (N-H1)" },
   { file: "pdf-objstm-user-password.pdf", clamav: "unscannable", decision: "unscannable", note: "objects in object streams" },
   { file: "pdf-objstm-owner-only-flate-marker.pdf", clamav: "marker", decision: "marker", note: "object streams, empty user password, Flate: decrypted and scanned" },
   { file: "perf-owner-text-300p.pdf", clamav: "clean", decision: "clean", note: "timing: 300 text pages, owner password" },
@@ -257,9 +257,11 @@ describe.skipIf(!image)("real ClamAV hostile matrix (council re-check 2; owner d
       "cat /m/res/*",
     ].join("\n");
     const started = Date.now();
-    const result = spawnSync("docker", ["run", "--rm", "--network", "none", "--user", `${process.getuid!()}:${process.getgid!()}`, "--cpus", "4", "--memory", "8g", "-v", `${dir}:/m`, "--entrypoint", "sh", image!, "-c", script], { encoding: "utf8", timeout: MATRIX_TIMEOUT_MS });
+    // The script is a mounted file: inline as one `sh -c` argument it passes Linux's per-argument limit (MAX_ARG_STRLEN, 128 KiB).
+    writeFileSync(path.join(dir, "matrix.sh"), script, { mode: 0o644 });
+    const result = spawnSync("docker", ["run", "--rm", "--network", "none", "--user", `${process.getuid!()}:${process.getgid!()}`, "--cpus", "4", "--memory", "8g", "-v", `${dir}:/m`, "--entrypoint", "sh", image!, "/m/matrix.sh"], { encoding: "utf8", timeout: MATRIX_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 });
     console.log(`[matrix] container wall time ${Math.round((Date.now() - started) / 1000)} s`);
-    if (result.status !== 0) throw new Error(`matrix container failed (${result.status}): ${result.stderr.slice(-2000)}`);
+    if (result.status !== 0) throw new Error(`matrix container failed (${result.status}${result.error ? `, ${result.error.message}` : ""}): ${(result.stderr ?? "").slice(-2000)}`);
     for (const line of result.stdout.trim().split("\n")) {
       const parts = line.split(" ");
       if (parts[0] === "qpdf") {

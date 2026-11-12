@@ -527,7 +527,8 @@ def tar_bytes(name, payload):
     return buf.getvalue()
 
 
-zip64_marker = zip_bytes([("e.txt", MARKER)], zip64=True, method=zipfile.ZIP_STORED)
+# Deflated, so the marker is not in the wrapper's raw bytes: only a reader that follows ZIP64 inflates it.
+zip64_marker = zip_bytes([("e.txt", b"Q3 notes " + MARKER * 4)], zip64=True)
 def xlsx_with(embedded):
     return zip_bytes([("[Content_Types].xml", ooxml_types), ("xl/workbook.xml", b"<workbook/>"), ("xl/embeddings/oleObject1.bin", embedded)])
 
