@@ -491,6 +491,14 @@ export type ProjectSearchPinnedResult = z.infer<
 >;
 
 /** Explicit retrieval windows are bounded independently of returned result count. */
+/**
+ * Search modes, cheapest first. `keyword`: keyword matching only, no model calls. `hybrid`: adds the query embedding
+ * and vector retrieval. `deep`: adds graph and community expansion, the hosted reranker and LLM query strategies.
+ * API keys hold one `search:<mode>` scope, the most a key may run; a request may ask for less with `mode`.
+ */
+export const SEARCH_MODES = ["keyword", "hybrid", "deep"] as const;
+export const searchModeSchema = z.enum(SEARCH_MODES);
+export type SearchMode = z.infer<typeof searchModeSchema>;
 export const searchCandidateDepthSchema = z.number().int().min(1).max(200);
 export const searchResultOrderSchema = z.enum(["relevance", "prompt"]);
 export type SearchResultOrder = z.infer<typeof searchResultOrderSchema>;

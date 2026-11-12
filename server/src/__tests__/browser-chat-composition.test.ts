@@ -28,7 +28,7 @@ const { projectChatRoutes } = await import("../routes/search.js");
 const { chatCompletionsRoutes } = await import("../routes/chat-completions.js");
 const id = "11111111-1111-4111-8111-111111111111";
 const foreign = "22222222-2222-4222-8222-222222222222";
-const key = { userId: "user-1", orgId: "org-1", keyId: "browser-key", keyType: "client", scopes: ["chat", "search"], projectIds: [id] };
+const key = { userId: "user-1", orgId: "org-1", keyId: "browser-key", keyType: "client", scopes: ["chat", "search:deep"], projectIds: [id] };
 const { apiKeyAuth } = await import("../middleware/api-key-auth.js");
 const app = new Hono().use("/v1/chat", apiKeyAuth).route("/v1/chat", projectChatRoutes).route("/v1", chatCompletionsRoutes);
 function request(path: string, extra = {}) {
@@ -78,7 +78,7 @@ for (const path of ["/v1/chat", "/v1/chat/completions"]) {
     expect(m.provider).not.toHaveBeenCalled(); expect(m.search).not.toHaveBeenCalled();
   });
   it(`${path} denies a search-only credential before composition`, async () => {
-    m.key.mockResolvedValue({ ...key, scopes: ["search"] });
+    m.key.mockResolvedValue({ ...key, scopes: ["search:deep"] });
     expect((await request(path)).status).toBe(403);
     expect(m.provider).not.toHaveBeenCalled(); expect(m.search).not.toHaveBeenCalled();
   });

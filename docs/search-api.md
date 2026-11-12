@@ -17,6 +17,18 @@ With the defaults, local reranking and parent-section retrieval are on, and grap
 
 When `selfQuery` is enabled, `budget tag:finance` searches for `budget` within documents tagged `finance`. Tag labels are case sensitive; quote labels containing spaces, for example `budget tag:"Finance Team"`. Explicit caller `tags` filters take precedence over labels in the query. Consumed labels are excluded from retrieval text, reranking, relevance scoring and derived model prompts; diagnostics retain the original query. Malformed labels and queries containing only tag labels return HTTP 400.
 
+## Search modes
+
+Every search runs in one mode. Pass `mode` on `GET`/`POST /v1/search`, batches and `/v1/search/aggregate` (SDK `mode`, CLI `--mode`); the response's `mode` says which ran.
+
+| `mode` | Runs | Key scope |
+| --- | --- | --- |
+| `keyword` | Keyword matching and the free BM25 rerank; no embedding or model call | `search:keyword` or higher |
+| `hybrid` | Adds the query embedding and vector search | `search:hybrid` or higher |
+| `deep` | Adds graph and community expansion, the hosted reranker, deferred pages and LLM query strategies the project or request turns on | `search:deep` |
+
+Omitted, a search runs in the key's mode (sessions: `deep`). A mode above the key's scope runs at the key's mode. Keys can cap searches per mode with `searches` limits; see [rate limits](api-sdk.md#rate-limits-and-headers).
+
 ## Citation locators
 
 Every citation (search results, `/v1/chat`, streamed chat citations, `/v1/chat/completions` extension data, Algolia-compatible hits) can carry `citation.locator`, a position inside the source keyed by `kind`:
@@ -54,7 +66,7 @@ Chunks reach keyword search once the embed stage has written every chunk row of 
 
 ## Aggregate search
 
-`POST /v1/search/aggregate` searches several projects at once (`projects`: IDs, slugs or names; empty means every project the caller can search, up to `maxProjects`) and merges their citations. It needs the `search` scope. It uses the same defaults as `POST /v1/search`: provider-backed steps (`hyde`, `compression`, `queryRewrite`, `queryDecompose`, `stepback`, `selfQuery`) stay off unless the request turns them on. When turned on they call a model, are billed to the project's organization and need only the `search` scope, as on `POST /v1/search`.
+`POST /v1/search/aggregate` searches several projects at once (`projects`: IDs, slugs or names; empty means every project the caller can search, up to `maxProjects`) and merges their citations. It needs a search scope and takes `mode` like `POST /v1/search`. It uses the same defaults as `POST /v1/search`: provider-backed steps (`hyde`, `compression`, `queryRewrite`, `queryDecompose`, `stepback`, `selfQuery`) stay off unless the request turns them on. When turned on they call a model, are billed to the project's organization and run only in `deep` mode (a `search:deep` key), as on `POST /v1/search`.
 
 `generateAnswer` (default `false`) also writes one answer over the merged citations with a model, billed as a chat answer:
 
@@ -80,7 +92,7 @@ Chunks reach keyword search once the embed stage has written every chunk row of 
 
 The batch contains 1–20 queries; concurrency is an integer from 1 to 8, defaulting to 4 (inside chat, the turn's `agent.searchConcurrency` caps it). The entire envelope is validated before any retrieval starts. The response is `{results: [...]}`, preserving query order even when requests complete out of order. Each result is either `{ok: true, data}`, where `data` is a full search response, or `{ok: false, error: {code, message, status}}`. A valid batch returns HTTP 200 even when individual items fail. Invalid envelopes return HTTP 400.
 
-Every item independently checks the API key's `search` scope and organization/project access. Item error codes include `FORBIDDEN` (403), `PROJECT_NOT_FOUND` (404), `INVALID_SEARCH_SCOPE` (400), `INVALID_RETRIEVAL_QUERY` (400), `SEARCH_FAILED` (500), and `SEARCH_UNAVAILABLE` (503, the process-wide search limit is full; retry shortly). Unexpected internal errors are sanitized. Disconnecting prevents queued retrieval from starting; in-flight retrieval may finish and record usage. Unstarted items carry `REQUEST_ABORTED` (499) if a response remains deliverable.
+Every item independently checks the API key's search scope and organization/project access. Item error codes include `FORBIDDEN` (403), `PROJECT_NOT_FOUND` (404), `SEARCH_LIMIT_EXCEEDED` (429, the key's limit for the item's mode), `INVALID_SEARCH_SCOPE` (400), `INVALID_RETRIEVAL_QUERY` (400), `SEARCH_FAILED` (500), and `SEARCH_UNAVAILABLE` (503, the process-wide search limit is full; retry shortly). Unexpected internal errors are sanitized. Disconnecting prevents queued retrieval from starting; in-flight retrieval may finish and record usage. Unstarted items carry `REQUEST_ABORTED` (499) if a response remains deliverable.
 
 ## Errors
 
@@ -93,7 +105,7 @@ Every error from the native JSON API (`/v1/*`, including authentication, rate li
 `code` is a closed set you can branch on:
 
 - Request and access: `invalid_request`, `unauthorized`, `forbidden`, `not_found`, `project_not_found`, `conflict`, `payload_too_large`, `session_required`, `mfa_required`, `REAUTH_REQUIRED` (a sensitive account action needs you to sign in again), `api_key_ip_not_allowed`, `client_key_projects_required`, `client_key_origin_not_allowed`, `invalid_search_scope`, `chat_disabled`, `chat_session_forbidden`, `model_not_allowed`, `chat_tool_failed` (HTTP 424: a required tool failed and the task is blocked), `chat_deadline_exceeded` (HTTP 424: a search-agent model/turn deadline was reached, even if partial text was streamed).
-- Limits: `rate_limited`, `spend_limit_exceeded`, `daily_page_limit`, `ip_temporarily_blocked`.
+- Limits: `rate_limited`, `spend_limit_exceeded`, `search_limit_exceeded`, `daily_page_limit`, `ip_temporarily_blocked`.
 - Billing: `payment_required`, `credit_exhausted`, `project_budget_paused`, `org_budget_paused`, `minimum_credit_required`, `plan_not_entitled`.
 - Uploads and extracts: `unsupported_type`, `remote_format_disabled`, `file_too_large`, `unreadable_source`, `extract_not_found`, `extract_expired`, `retention_exceeds_cap`, `download_not_ready`, `download_failed`.
 - Web tools and privacy: `web_disabled`, `web_scope_required`, `url_blocked`, `privacy_mode_blocked`.
@@ -152,7 +164,7 @@ curl -N https://docslurp.io/v1/chat/completions \
 
 ### Agent limits
 
-When the search agent answers (the default for `/v1/chat` with `DOCSLURP_PUBLIC_CHAT_AGENT_ENABLED` on, no document, type, tag, date or `geo` filters, and an API key that also has the `search` scope; a `chat`-only key always gets a direct answer), `agent` bounds that turn:
+When the search agent answers (the default for `/v1/chat` with `DOCSLURP_PUBLIC_CHAT_AGENT_ENABLED` on, no document, type, tag, date or `geo` filters, and an API key that also has the `search:deep` scope; a `chat`-only key always gets a direct answer), `agent` bounds that turn:
 
 | Field | Default | Range | Meaning |
 |---|---|---|---|

@@ -118,6 +118,7 @@ function buildSearchOptions(
 ): SearchOptions {
   return {
     limit: request.limitPerProject,
+    searchMode: request.mode,
     useHyDE: request.hyde,
     useRerank: request.rerank,
     useMmr: request.mmr,

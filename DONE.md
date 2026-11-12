@@ -1,6 +1,7 @@
-## Keyword-only API keys (2026-11-12)
+## Search modes and per-mode key limits (2026-11-12)
 
-- New `search:keyword` key scope (server and browser keys): search runs by keyword only, with no query embedding, vector, graph or community leg, hosted reranker or LLM query strategy, whatever the project settings or request say. The request context carries the flag from the key, so every search route (REST, batch, aggregate, compat clients) is clamped in the search service, not per route. A key holds `search` or `search:keyword`, never both; keyword keys get no web tools, MCP tools or capability tokens and cannot chat without `chat`.
+- Search runs in one of three nested modes: `keyword` (keyword matching, no model calls), `hybrid` (adds the query embedding and vector search) and `deep` (adds graph/community expansion, the hosted reranker, deferred pages and LLM query strategies). API key and OAuth scopes `search:keyword`, `search:hybrid` and `search:deep` replace `search` (migration 0138 maps existing keys and grants to `search:deep`; the OAuth endpoints still accept `search` from saved clients). A request may ask for a cheaper `mode`; the search service caps every search at the key's mode after project defaults resolve, on every route.
+- New `searches` key limit per mode (`{ metric: "searches", mode, limit, windowSeconds }`), answering 429 `search_limit_exceeded`; up to 8 limits per key.
 
 ## $1 starter grant (2026-11-12)
 

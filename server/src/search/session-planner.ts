@@ -223,8 +223,8 @@ export async function prepareSearchSessionRetrievalPlan(args: {
   }
 
   // Started now, awaited only by the vector leg: lexical and page legs overlap the (remote) embedding call.
-  // Keyword-only searches never embed: the vector leg sees no vector and skips.
-  const queryVector: Promise<number[] | null> = options.keywordOnly
+  // Keyword searches never embed: the vector leg sees no vector and skips.
+  const queryVector: Promise<number[] | null> = options.searchMode === "keyword"
     ? Promise.resolve(null)
     : options.queryVector
     ? Promise.resolve(options.queryVector)

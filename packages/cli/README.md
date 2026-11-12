@@ -16,7 +16,7 @@ You need **Node.js 20+**. Sign in with your browser (or use a [server key](https
 
 ```bash
 npm install --global @docslurp/cli
-docslurp login --scopes "search read ingest"
+docslurp login --scopes "search:deep read ingest"
 
 docslurp upload ./handbook.pdf --watch
 ```
@@ -214,7 +214,7 @@ DOCSLURP_API_KEY= DOCSLURP_TOKEN= docslurp import-search-compat export.json \
 
 ```bash
 docslurp login                         # browser sign-in; asks for search and read
-docslurp login --scopes "search read chat ingest"
+docslurp login --scopes "search:deep read chat ingest"
 docslurp login --device                # headless or SSH: enter a code on any device
 docslurp whoami                        # user, organization, default project, scopes, expiry
 docslurp auth status                   # also shows which credential is in use and where it is stored
@@ -223,15 +223,15 @@ docslurp logout                        # revokes the login on the server, then d
 
 - **Browser login** uses OAuth 2.1 authorization code with PKCE and a one-time listener on `127.0.0.1` on a random port. If the browser does not open, the CLI prints the URL; `--no-browser` only prints it.
 - **Device login** (`--device`, RFC 8628) prints a short code such as `WDJB-MJHT` and a page on your DocSlurp origin. Open the page on any signed-in device and type the code; there is no link with the code filled in. The approval page shows when and from which IP the request was made. It grants `search` and `read` only: any other scope you asked for (`chat`, `ingest`, `web`) stays off unless you tick it there. Never enter a code someone else sent you.
-- **Scopes** are least privilege by default: `search` and `read`. Add `chat` to ask questions (uses credits) and `ingest` to upload, ingest URLs or reprocess. A CLI login can never change project settings, manage an organization or mint API keys; use the dashboard or a server key with those scopes.
+- **Scopes** default to `search:deep` and `read`; pass `search:hybrid` or `search:keyword` for a cheaper search ceiling (the retired `search` means `search:deep`). Add `chat` to ask questions (uses credits) and `ingest` to upload, ingest URLs or reprocess. A CLI login can never change project settings, manage an organization or mint API keys; use the dashboard or a server key with those scopes.
 
 | Login scope | Lets the CLI |
 | --- | --- |
-| `search` | Search and list projects |
+| `search:keyword`, `search:hybrid` or `search:deep` | Search up to that mode (`docslurp search --mode`) and list projects |
 | `read` | Read document text, pages, files, runs and exports |
 | `chat` | Ask grounded questions (`docslurp chat`) |
 | `ingest` | Upload, ingest URLs, reprocess, retag or delete documents |
-| `web` | Paid web search, fetch, map and crawl (not included in `search` for CLI logins) |
+| `web` | Paid web search, fetch, map and crawl (not included in `search:deep` for CLI logins) |
 
 **Where the login is stored.** The CLI uses the OS keychain when it can: macOS Keychain, the Secret Service on Linux (through `secret-tool` from libsecret), or Windows Credential Manager. Otherwise it writes `~/.config/docslurp/credentials.json` (`$XDG_CONFIG_HOME`, `%APPDATA%` on Windows) with mode `0600` in a `0700` directory, and refuses to read that file if its permissions are looser. The keychain helpers are run only from system directories (`/usr/bin`, `%SystemRoot%\System32`), never from `PATH`. Concurrent CLI processes take a lock file next to `credentials.json`, so they never spend the same refresh token twice. `DOCSLURP_CREDENTIAL_STORE=keychain` requires the keychain; `file` forces the file. Each `--profile` (or `DOCSLURP_PROFILE`) keeps one login per API URL, so `docslurp login --profile work --api-url https://docs.example.com` does not replace your default login.
 
@@ -267,7 +267,7 @@ docslurp exec --project contracts -- python agent.py
 | Not signed in, or HTTP 401 | Run `docslurp login` (or `docslurp auth status` to see which credential is in use), or set `DOCSLURP_API_KEY` to a valid server key for this deployment. |
 | Login expired or revoked | Run `docslurp login` again. Logins refresh themselves for 30 days of use. |
 | `permissions ... are too open` | Run the `chmod` the message names, or `docslurp logout --force` and log in again. |
-| HTTP 403 | Check your project access and the scopes: `ingest` for uploads, `search` for search, `chat` for chat. For a login, add scopes with `docslurp login --scopes "search read chat ingest"`. |
+| HTTP 403 | Check your project access and the scopes: `ingest` for uploads, `search:keyword`, `search:hybrid` or `search:deep` for search, `chat` for chat. For a login, add scopes with `docslurp login --scopes "search:deep read chat ingest"`. |
 | Watch timed out | Run `docslurp status RUN_ID --watch`. The run may still be processing. |
 | Run failed, paused, cancelled or dead-lettered | Check its status and the project in the dashboard before uploading again. |
 | Search returns nothing or too little | Check `availability` in `search --json`, and confirm the project (`--project` or `DOCSLURP_PROJECT`, else `default`). |

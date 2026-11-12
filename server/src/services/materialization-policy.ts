@@ -94,7 +94,7 @@ export async function resolveMaterializationPolicy(args: {
     if (!claims.issuedByKeyId.startsWith("session:")) {
       const issuer = await issuerKey(claims.issuedByKeyId, nowMs);
       // The issuer's authority is re-checked now, not just at mint time.
-      if (!issuer || issuer.keyType !== "server" || !issuer.scopes.includes("search")) return { error: "capability_invalid" };
+      if (!issuer || issuer.keyType !== "server" || !issuer.scopes.includes("search:deep")) return { error: "capability_invalid" };
       if (issuer.projectIds.length > 0 && !issuer.projectIds.includes(args.projectId)) return { error: "capability_scope" };
       if (Object.keys(issuer.materializationPolicy).length > 0) {
         layers.push(issuer.materializationPolicy);

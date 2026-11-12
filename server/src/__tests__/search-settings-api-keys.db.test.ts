@@ -106,14 +106,14 @@ describe("search settings with API keys (real keys and middleware)", () => {
   });
 
   it("a search-only server key gets 403 and writes nothing", async () => {
-    const { rawKey } = await keys.createApiKey("owner", "search", { orgId: "org-owner", keyType: "server", scopes: ["search", "chat", "ingest", "artifacts"] });
+    const { rawKey } = await keys.createApiKey("owner", "search", { orgId: "org-owner", keyType: "server", scopes: ["search:deep", "chat", "ingest", "artifacts"] });
     expect((await send(rawKey, "ws-owner")).status).toBe(403);
     expect((await send(rawKey, "ws-owner", { estimate: true })).status).toBe(403);
     expect(await storedChat("ws-owner")).toBeNull();
   });
 
   it("a browser key is refused, from its own website or not, and writes nothing", async () => {
-    const { rawKey } = await keys.createApiKey("owner", "widget", { orgId: "org-owner", keyType: "client", allowedDomains: ["docs.example.com"], projectIds: ["ws-owner"], scopes: ["search", "chat"] });
+    const { rawKey } = await keys.createApiKey("owner", "widget", { orgId: "org-owner", keyType: "client", allowedDomains: ["docs.example.com"], projectIds: ["ws-owner"], scopes: ["search:deep", "chat"] });
     expect(rawKey.startsWith("dslp_pub_")).toBe(true);
     expect((await send(rawKey, "ws-owner", { origin: "https://docs.example.com" })).status).toBe(403);
     expect([401, 403]).toContain((await send(rawKey, "ws-owner")).status);

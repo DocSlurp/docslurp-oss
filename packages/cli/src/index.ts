@@ -73,11 +73,11 @@ function usage(): void {
   docslurp jobs watch <jobId> [--timeout <seconds>]
   docslurp status <runId> [--api-url <url>] [--watch] [--timeout <seconds>]
   docslurp runs [--limit <1-100>] [--cursor <nextCursor>] [--api-url <url>]
-  docslurp search <query> [--project <id|slug|name>] [--min-score <0..1>] [--json | --context]
+  docslurp search <query> [--project <id|slug|name>] [--min-score <0..1>] [--mode <keyword|hybrid|deep>] [--json | --context]
   docslurp search --queries-file <queries.json> [--project <id|slug|name>] [--concurrency <1..4>] [--json | --context]
   docslurp chat <question> [--project <id|slug|name>] [--session <id>] [--json]
   docslurp mcp-server [--api-url <url>] [--api-key <key>]   (alias: docslurp mcp)
-  docslurp login [--device] [--scopes "search read chat ingest"] [--no-browser] [--profile <name>] [--api-url <url>]
+  docslurp login [--device] [--scopes "search:deep read chat ingest"] [--no-browser] [--profile <name>] [--api-url <url>]
   docslurp logout [--profile <name>] [--force]
   docslurp whoami [--json]
   docslurp auth status [--json]
@@ -89,7 +89,7 @@ function usage(): void {
 
 API commands authenticate with, in order: --api-key <key>, DOCSLURP_API_KEY,
 DOCSLURP_TOKEN (a short-lived OAuth access token), then the stored login from
-docslurp login (refreshed automatically). docslurp login asks for search and read;
+docslurp login (refreshed automatically). docslurp login asks for search:deep and read;
 add chat or ingest with --scopes. Use --device on headless or SSH machines.
 docslurp auth token prints a fresh access token (valid at most 15 minutes);
 docslurp exec passes one to a child process as DOCSLURP_TOKEN without writing it to disk.
@@ -1170,7 +1170,9 @@ async function searchCommand(query: string, flags: Record<string, string | boole
   const rawMinScore = flags.minScore === undefined ? undefined : String(flags.minScore).trim();
   const minScore = rawMinScore === undefined ? undefined : rawMinScore === "" ? Number.NaN : Number(rawMinScore);
   if (minScore !== undefined && !(minScore >= 0 && minScore <= 1)) throw new Error("--min-score must be a number from 0 to 1.");
-  const params = new URLSearchParams({ q: query, ...(project ? { project } : {}), ...(minScore === undefined ? {} : { minScore: String(minScore) }) });
+  const mode = typeof flags.mode === "string" ? flags.mode.trim() : undefined;
+  if (flags.mode !== undefined && !["keyword", "hybrid", "deep"].includes(mode ?? "")) throw new Error("--mode must be keyword, hybrid or deep.");
+  const params = new URLSearchParams({ q: query, ...(project ? { project } : {}), ...(minScore === undefined ? {} : { minScore: String(minScore) }), ...(mode ? { mode } : {}) });
   const response = await apiFetch(`/v1/search?${params.toString()}`, flags);
   if (!response.ok) throw await responseFailure(response);
   const data = await response.json() as CliSearchResponse;

@@ -22,7 +22,7 @@ import { createSearchSessionJournal, searchSessionWriteBehindEnabled, type Searc
 import { resolveProjectRetrievalControls } from "./project-retrieval-session.js";
 import { parseIndexConfigs, type IndexConfigMap } from "./index-serving.js";
 import { earlyLexicalDocument, fullyIndexedDocument, servableInProgressVersion } from "./eligibility.js";
-import { clampKeywordOnly, searchIsKeywordOnly } from "./keyword-only.js";
+import { clampToSearchMode, effectiveSearchMode } from "./search-mode.js";
 
 /**
  * The project does not exist or the caller may not see it (the two are indistinguishable by design).
@@ -137,9 +137,9 @@ export async function resolveSearchSetup(
     pipeline: projectPipeline,
   });
   session.recordDiagnostic("retrievalControls", retrievalControls.diagnostics);
-  // A keyword-only key (or caller) is clamped after project defaults, so no project setting re-enables model calls.
-  const resolvedOptions = searchIsKeywordOnly(options) ? clampKeywordOnly(retrievalControls.options) : retrievalControls.options;
-  if (resolvedOptions.keywordOnly) session.recordDiagnostic("retrievalMode", "keyword");
+  // Clamped after project defaults, so no project setting runs more than the mode (and the key) allows.
+  const resolvedOptions = clampToSearchMode(retrievalControls.options, effectiveSearchMode(options));
+  session.recordDiagnostic("searchMode", resolvedOptions.searchMode);
   const availabilityPromise = (lanceNative ? loadCachedSearchAvailability : loadSearchAvailability)({
     projectId: normalizedScope.projectId,
     runId:
@@ -157,8 +157,8 @@ export async function resolveSearchSetup(
   );
   // HyDE, rewrite, stepback, self-query, compression and multi-hop are optional
   // and skip without a key, so a privacy block withholds the key.
-  // Keyword-only never holds a model key, so no later step can make a model call.
-  const openRouterApiKey = resolvedOptions.keywordOnly
+  // Only deep search holds an LLM key, so no later step of a keyword or hybrid search can call one.
+  const openRouterApiKey = resolvedOptions.searchMode !== "deep"
     ? undefined
     : wantsHostedStrategies
     ? await hostedApiKeyForProject({

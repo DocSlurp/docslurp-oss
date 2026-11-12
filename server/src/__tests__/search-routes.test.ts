@@ -366,7 +366,7 @@ describe("searchRoutes", () => {
     const empty = { query: "q", answer: null, citations: [], evidenceSpans: [], projects: [], warnings: [], partial: false, usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } };
 
     it("refuses generateAnswer from a search-only key before any lookup, search or model call", async () => {
-      const response = await aggregate(keyActor(["search"]), { generateAnswer: true });
+      const response = await aggregate(keyActor(["search:deep"]), { generateAnswer: true });
       expect(response.status).toBe(403);
       await expect(response.json()).resolves.toMatchObject({ error: { code: "forbidden" } });
       expect(aggregateProjectRagSearch).not.toHaveBeenCalled();
@@ -379,7 +379,7 @@ describe("searchRoutes", () => {
     });
 
     it("refuses generateAnswer from a browser key, even with chat", async () => {
-      const response = await aggregate(keyActor(["search", "chat"], "client"), { generateAnswer: true, projects: ["ws-1"] });
+      const response = await aggregate(keyActor(["search:deep", "chat"], "client"), { generateAnswer: true, projects: ["ws-1"] });
       expect(response.status).toBe(403);
       expect(aggregateProjectRagSearch).not.toHaveBeenCalled();
       expect(hybridSearch).not.toHaveBeenCalled();
@@ -388,15 +388,15 @@ describe("searchRoutes", () => {
     it("answers 404 for the typed project-not-found error and not for look-alike messages", async () => {
       const { ProjectNotFoundError } = await import("../services/search.js");
       aggregateProjectRagSearch.mockRejectedValueOnce(new ProjectNotFoundError());
-      expect((await aggregate(keyActor(["search"]), {})).status).toBe(404);
+      expect((await aggregate(keyActor(["search:deep"]), {})).status).toBe(404);
       // Control flow follows the error's type, not its wording.
       aggregateProjectRagSearch.mockRejectedValueOnce(new Error("Project not found: cache entry evicted"));
-      expect((await aggregate(keyActor(["search"]), {})).status).toBe(500);
+      expect((await aggregate(keyActor(["search:deep"]), {})).status).toBe(500);
     });
 
     it("runs a default request from a search-only key with every model-calling step off", async () => {
       aggregateProjectRagSearch.mockResolvedValueOnce(empty);
-      expect((await aggregate(keyActor(["search"]), {})).status).toBe(200);
+      expect((await aggregate(keyActor(["search:deep"]), {})).status).toBe(200);
       expect(aggregateProjectRagSearch).toHaveBeenCalledWith(expect.objectContaining({
         request: expect.objectContaining({ generateAnswer: false, queryRewrite: false, selfQuery: false, hyde: false, compression: false, queryDecompose: false, stepback: false }),
       }));
@@ -405,26 +405,26 @@ describe("searchRoutes", () => {
     it("counts an answer as chat-ai and refuses when that allowance is spent", async () => {
       aggregateProjectRagSearch.mockResolvedValue(empty);
       enforceActorCategoryRateLimit.mockClear();
-      expect((await aggregate(keyActor(["search"]), {})).status).toBe(200);
+      expect((await aggregate(keyActor(["search:deep"]), {})).status).toBe(200);
       expect(enforceActorCategoryRateLimit).not.toHaveBeenCalled();
-      expect((await aggregate(keyActor(["search", "chat"]), { generateAnswer: true })).status).toBe(200);
+      expect((await aggregate(keyActor(["search:deep", "chat"]), { generateAnswer: true })).status).toBe(200);
       expect(enforceActorCategoryRateLimit).toHaveBeenCalledWith(expect.anything(), "chat-ai");
       aggregateProjectRagSearch.mockClear();
       enforceActorCategoryRateLimit.mockResolvedValueOnce(new Response(null, { status: 429 }));
-      expect((await aggregate(keyActor(["search", "chat"]), { generateAnswer: true })).status).toBe(429);
+      expect((await aggregate(keyActor(["search:deep", "chat"]), { generateAnswer: true })).status).toBe(429);
       expect(aggregateProjectRagSearch).not.toHaveBeenCalled();
       aggregateProjectRagSearch.mockReset();
     });
 
     it("answers for a key with search and chat", async () => {
       aggregateProjectRagSearch.mockResolvedValueOnce({ ...empty, answer: "Answer [1]." });
-      expect((await aggregate(keyActor(["search", "chat"]), { generateAnswer: true })).status).toBe(200);
+      expect((await aggregate(keyActor(["search:deep", "chat"]), { generateAnswer: true })).status).toBe(200);
       expect(aggregateProjectRagSearch).toHaveBeenCalledWith(expect.objectContaining({ request: expect.objectContaining({ generateAnswer: true }) }));
     });
   });
 
   it("forwards a verified API actor and preserves scope and project denials", async () => {
-    const actor = { type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "key", userId: "user-1", orgId: "org", keyType: "server" as const, allowedDomains: [], scopes: ["search", "chat"], rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], projectIds: ["ws-chat"] } };
+    const actor = { type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "key", userId: "user-1", orgId: "org", keyType: "server" as const, allowedDomains: [], scopes: ["search:deep", "chat"], rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], projectIds: ["ws-chat"] } };
     getProject.mockResolvedValue({ id: "ws-chat", orgId: "org" });
     chatProject.mockResolvedValue({ answer: "Supported" });
     const request = () => buildApp(actor).request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", project: "ws-chat" }) });
@@ -434,10 +434,10 @@ describe("searchRoutes", () => {
     actor.apiKey.scopes = ["ingest"];
     expect((await request()).status).toBe(403);
     // Passages are not answers: a search-only key cannot generate one.
-    actor.apiKey.scopes = ["search"];
+    actor.apiKey.scopes = ["search:deep"];
     expect((await request()).status).toBe(403);
     expect(chatProject).not.toHaveBeenCalled();
-    actor.apiKey.scopes = ["search", "chat"];
+    actor.apiKey.scopes = ["search:deep", "chat"];
     actor.apiKey.projectIds = ["other"];
     expect((await request()).status).toBe(404);
     expect(chatProject).not.toHaveBeenCalled();
@@ -453,6 +453,21 @@ describe("searchRoutes", () => {
       const response = await buildApp(keywordActor()).request("/search?q=pump&project=ws-kw");
       expect(response.status).toBe(200);
       expect(hybridSearch).toHaveBeenCalledTimes(1);
+    });
+
+    it("answers 429 search_limit_exceeded when the key's limit for the mode is reached, single and batch", async () => {
+      const { SearchModeLimitError } = await import("../search/search-mode-limits.js");
+      getProject.mockResolvedValue({ id: "ws-kw", orgId: "org" });
+      const limit = () => new SearchModeLimitError("deep", { metric: "searches", mode: "deep", limit: 2, windowSeconds: 60 }, 30);
+      hybridSearch.mockRejectedValueOnce(limit());
+      const single = await buildApp(keywordActor(["search:deep"], "server")).request("/search?q=pump&project=ws-kw");
+      expect(single.status).toBe(429);
+      expect(single.headers.get("Retry-After")).toBe("30");
+      await expect(single.json()).resolves.toMatchObject({ error: { code: "search_limit_exceeded", details: { mode: "deep" } } });
+      hybridSearch.mockRejectedValueOnce(limit());
+      const batch = await buildApp(keywordActor(["search:deep"], "server")).request("/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ queries: [{ q: "pump", project: "ws-kw" }] }) });
+      expect(batch.status).toBe(200);
+      await expect(batch.json()).resolves.toMatchObject({ results: [{ ok: false, error: { code: "SEARCH_LIMIT_EXCEEDED", status: 429 } }] });
     });
 
     it("refuses another project", async () => {
@@ -477,7 +492,7 @@ describe("searchRoutes", () => {
 
   describe("browser-key chat session grants (route level)", () => {
     const session = "11111111-1111-4111-8111-111111111111";
-    const visitor = () => ({ type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "pub-1", userId: "user-1", orgId: "org", keyType: "client" as const, allowedDomains: ["docs.example.com"], scopes: ["search", "chat"], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [], projectIds: ["ws-chat"] } });
+    const visitor = () => ({ type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "pub-1", userId: "user-1", orgId: "org", keyType: "client" as const, allowedDomains: ["docs.example.com"], scopes: ["search:deep", "chat"], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [], projectIds: ["ws-chat"] } });
     beforeEach(() => { process.env.BETTER_AUTH_SECRET ||= "search-routes-session-grant-test-secret"; getProject.mockResolvedValue({ id: "ws-chat", orgId: "org" }); });
 
     it("round-trips the grant on POST; a session id without one starts a fresh session", async () => {
@@ -580,15 +595,15 @@ describe("searchRoutes", () => {
   });
 
   it("applies the same key scope and project denials to GET /chat/stream as to POST /chat", async () => {
-    const actor = { type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "key", userId: "user-1", orgId: "org", keyType: "server" as const, allowedDomains: [], scopes: ["search", "chat"], rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], projectIds: ["ws-chat"] } };
+    const actor = { type: "apiKey" as const, userId: "user-1", apiKey: { keyId: "key", userId: "user-1", orgId: "org", keyType: "server" as const, allowedDomains: [], scopes: ["search:deep", "chat"], rateLimitRpm: 60, rateLimitPpd: 1000, rateLimits: [], projectIds: ["ws-chat"] } };
     getProject.mockResolvedValue({ id: "ws-chat", orgId: "org" });
     chatProject.mockResolvedValue({ answer: "Supported", citations: [] });
     const request = () => buildApp(actor).request("/chat/stream?q=Question&project=ws-chat");
     // The allowed path is covered by the stream tests below; here only the denials, before any answer runs.
     // A search-only key reads passages; it cannot spend on an answer.
-    actor.apiKey.scopes = ["search"];
+    actor.apiKey.scopes = ["search:deep"];
     expect((await request()).status).toBe(403);
-    actor.apiKey.scopes = ["search", "chat"];
+    actor.apiKey.scopes = ["search:deep", "chat"];
     actor.apiKey.projectIds = ["other"];
     expect((await request()).status).toBe(404);
     expect(chatProject).not.toHaveBeenCalled();

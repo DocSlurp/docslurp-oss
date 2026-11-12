@@ -1,4 +1,5 @@
 import type postgres from "postgres";
+import { isSearchScope, searchModeOfScopes, SEARCH_SCOPE_BY_MODE, SEARCH_SCOPES } from "../lib/search-tiers.js";
 import { randomBytes, randomUUID, createHash } from "node:crypto";
 
 import { apiKeyRateLimitRulesSchema, materializationPolicyOverridesSchema, type ApiKeyRateLimitRule, type MaterializationPolicy } from "@docslurp/shared";
@@ -36,14 +37,15 @@ type ApiKeyRow = {
 };
 
 /**
- * `search` returns passages; `chat` generates answers (a model call on the
- * owner's credits) through /v1/chat, /v1/chat/completions and the MCP chat tool.
+ * `search:keyword`, `search:hybrid` and `search:deep` return passages, each up to its mode (lib/search-tiers.ts);
+ * a key holds at most one. `chat` generates answers (a model call on the owner's credits) through /v1/chat,
+ * /v1/chat/completions and the MCP chat tool.
  */
-export const defaultApiKeyScopes = ["ingest", "search", "chat", "artifacts"] as const;
-/** Client (browser) keys are search-only unless the creator adds `chat`. */
-export const defaultClientApiKeyScopes = ["search"] as const;
+export const defaultApiKeyScopes = ["ingest", "search:deep", "chat", "artifacts"] as const;
+/** Client (browser) keys search in hybrid mode unless the creator picks another mode or adds `chat`. */
+export const defaultClientApiKeyScopes = ["search:hybrid"] as const;
 /** Everything a browser (client) key may ever hold: it sits in page source, so never more than search and chat. */
-export const clientApiKeyScopes = ["search", "search:keyword", "chat"] as const;
+export const clientApiKeyScopes = [...SEARCH_SCOPES, "chat"] as const;
 /**
  * Scopes a browser key never holds. Keys written before this rule may still
  * carry them; effectiveKeyScopes drops them at request time.
@@ -62,11 +64,9 @@ export const API_KEY_MAX_ROTATION_OVERLAP_SECONDS = 7 * 24 * 60 * 60;
 export const API_KEY_MAX_IP_ALLOWLIST = 50;
 /**
  * Opt-in scopes; never granted by default. projects:manage renames projects and changes their settings.
- * `search:keyword` searches by keyword only (no embeddings, vectors, reranking or AI query strategies),
- * so a key holding it spends no model calls; it cannot be combined with full `search`.
- * `web` is client-key only: server keys use web tools through `search`.
+ * `web` is client-key only: server keys use web tools through `search:deep`.
  */
-export const supportedApiKeyScopes = [...defaultApiKeyScopes, "search:keyword", "web", "organizations:read", "organizations:manage", "projects:manage"] as const;
+export const supportedApiKeyScopes = ["ingest", ...SEARCH_SCOPES, "chat", "artifacts", "web", "organizations:read", "organizations:manage", "projects:manage"] as const;
 export const apiKeyTypes = ["server", "client"] as const;
 export type ApiKeyType = (typeof apiKeyTypes)[number];
 
@@ -415,14 +415,11 @@ function assertOrganizationKeyScopes(keyType: ApiKeyType, scopes: string[], role
   if (serverOnly.length > 0) {
     throw new OrganizationError(400, "invalid_key_scope", `Browser keys can only search and chat. ${serverOnly.join(", ")} needs a server key used from your backend.`);
   }
-  if (scopes.includes("search:keyword") && scopes.includes("search")) {
-    throw new OrganizationError(400, "invalid_key_scope", "Choose search or search:keyword, not both: search:keyword limits the key to keyword search");
-  }
-  if (keyType === "client" && scopes.includes("search:keyword") && scopes.includes("web")) {
-    throw new OrganizationError(400, "invalid_key_scope", "Keyword-only keys cannot use web tools");
+  if (scopes.filter(isSearchScope).length > 1) {
+    throw new OrganizationError(400, "invalid_key_scope", "Choose one search mode: search:keyword, search:hybrid or search:deep (each includes the ones before it)");
   }
   if (keyType !== "client" && scopes.includes("web")) {
-    throw new OrganizationError(400, "invalid_key_scope", "The web scope applies to client API keys; server keys use web tools with search");
+    throw new OrganizationError(400, "invalid_key_scope", "The web scope applies to client API keys; server keys use web tools with search:deep");
   }
   if (keyType === "client" && scopes.includes("projects:manage")) {
     throw new OrganizationError(400, "invalid_key_scope", "Client API keys cannot manage projects");
@@ -448,8 +445,9 @@ type KeyTransaction = postgres.TransactionSql<Record<string, postgres.PostgresTy
  */
 /** Runtime guard for rows written before the rule: a browser key keeps only search and chat. */
 export function effectiveKeyScopes(keyType: ApiKeyType, rawScopes: string[], _projectIds: string[]): string[] {
-  // A row holding both search scopes (refused on save) keeps only the narrower keyword-only one.
-  const scopes = rawScopes.includes("search:keyword") ? rawScopes.filter(scope => scope !== "search") : rawScopes;
+  // A row holding several search scopes (refused on save) keeps only the narrowest (fail closed).
+  const mode = searchModeOfScopes(rawScopes);
+  const scopes = rawScopes.filter(scope => !isSearchScope(scope) || scope === (mode && SEARCH_SCOPE_BY_MODE[mode]));
   if (keyType !== "client") return scopes;
   // Narrowing an old row can remove every scope. Defaults belong to creation:
   // adding search here would grant a permission the owner never selected.

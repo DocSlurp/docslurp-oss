@@ -37,7 +37,7 @@ describe("MCP estimate tools", () => {
     const all = ids();
     for (const name of ESTIMATE_TOOL_NAMES) expect(all).toContain(name);
     expect(all).toContain("getJob");
-    const searchOnly = ids(["search"]);
+    const searchOnly = ids(["search:deep"]);
     expect(searchOnly).toContain("getJob");
     // A search-only key can read jobs but could not start any estimated operation.
     expect(searchOnly.filter((id) => id.endsWith("Estimate"))).toEqual([]);
@@ -50,7 +50,7 @@ describe("MCP estimate tools", () => {
     expect(ids(["ingest"], "client")).not.toContain("reprocessEstimate");
     // The search-settings estimate needs the mutation's gate: a server key with projects:manage.
     expect(ids(["projects:manage"])).toContain("searchSettingsEstimate");
-    expect(ids(["search", "ingest"])).not.toContain("searchSettingsEstimate");
+    expect(ids(["search:deep", "ingest"])).not.toContain("searchSettingsEstimate");
     expect(ids(["projects:manage"], "client")).not.toContain("searchSettingsEstimate");
   });
 });

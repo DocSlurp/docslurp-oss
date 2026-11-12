@@ -21,7 +21,7 @@ MCP tools stay hidden until their capability is enabled
 (`webCapabilityAvailable` in `server/src/services/web/service.ts`). Use the REST
 routes for fetch, map, crawl and ingest.
 
-Server API keys need the `search` scope (`ingest` for `/v1/web/ingest`).
+Server API keys need the `search:deep` scope (`ingest` for `/v1/web/ingest`).
 Browser (client) keys also need the opt-in `web` scope, which requires a
 project allowlist; without it they get `403 web_scope_required`. Every
 response carries `cached` and `usage.credits`. An identical request within the

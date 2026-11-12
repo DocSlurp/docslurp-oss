@@ -12,7 +12,8 @@ import { apiKeyAllowsProject, apiKeyCanUseProject } from "./api-key-project-scop
 
 export { apiKeyAllowsProject, apiKeyCanUseProject };
 export { isFirstPartyAppActor } from "./first-party-app.js";
-import { setCurrentRequestApiKeyId, setCurrentRequestApiKeyProjectIds, setCurrentRequestKeywordOnly, setCurrentRequestOrgId, setCurrentRequestSessionId, setCurrentRequestUserId } from "./request-context.js";
+import { searchModeOfScopes, SEARCH_SCOPES } from "./search-tiers.js";
+import { setCurrentRequestApiKeyId, setCurrentRequestApiKeyProjectIds, setCurrentRequestSearchCeiling, setCurrentRequestSearchLimits, setCurrentRequestOrgId, setCurrentRequestSessionId, setCurrentRequestUserId } from "./request-context.js";
 import { ApiKeyPolicyError, ClientKeyProjectsRequiredError, validateApiKey, type ValidatedKey } from "../services/api-keys.js";
 
 export { ApiKeyPolicyError, ClientKeyProjectsRequiredError };
@@ -142,12 +143,16 @@ export function setRequestActor(c: Context, actor: RequestActor): void {
   setCurrentRequestUserId(actor.userId);
   setCurrentRequestApiKeyId(actor.type === "apiKey" ? actor.apiKey.keyId : null);
   setCurrentRequestApiKeyProjectIds(actor.type === "apiKey" ? actor.apiKey.projectIds : null);
-  const keywordOnly = actor.type === "apiKey" && apiKeyScopesKeywordOnly(actor.apiKey.scopes);
-  // The search service reads keyword-only from the request context. Without one it could not
-  // clamp the key, so refuse rather than let it search with full (model-calling) retrieval.
-  if (!setCurrentRequestKeywordOnly(keywordOnly) && keywordOnly) {
-    throw new Error("Keyword-only API keys need a request context");
+  // A key without a search scope reaches search only inside a chat turn (exempt), so outside one it is held to keyword.
+  const keyMode = actor.type === "apiKey" ? searchModeOfScopes(actor.apiKey.scopes) : null;
+  const ceiling = actor.type === "apiKey" ? keyMode ?? "keyword" : null;
+  // The search service reads the ceiling from the request context. Without one it could not hold a
+  // keyword or hybrid key to its mode, so refuse rather than let it search with model-calling retrieval.
+  if (!setCurrentRequestSearchCeiling(ceiling) && (keyMode === "keyword" || keyMode === "hybrid")) {
+    throw new Error("API keys limited to keyword or hybrid search need a request context");
   }
+  const searchRules = actor.type === "apiKey" ? (actor.apiKey.rateLimits ?? []).filter((rule) => rule.metric === "searches") : [];
+  setCurrentRequestSearchLimits(searchRules.length && actor.type === "apiKey" ? { keyId: actor.apiKey.keyId, rules: searchRules } : null);
   setCurrentRequestSessionId(actor.type === "session" ? actor.sessionId : null);
   if (actor.type === "apiKey") setCurrentRequestOrgId(actor.apiKey.orgId);
 
@@ -220,18 +225,10 @@ export function requireApiKey(c: Context): ValidatedKey {
   return apiKey;
 }
 
-/** Scopes that may run retrieval. `search:keyword` runs it keyword-only. */
-export const SEARCH_RETRIEVAL_SCOPES = ["search", "search:keyword"] as const;
-
-/** Keyword-only: the key holds `search:keyword` (alone, as saving enforces; with `search` too, still keyword-only). */
-export function apiKeyScopesKeywordOnly(scopes: readonly string[]): boolean {
-  // The narrower scope wins: a row holding both (refused on save) still searches keyword-only.
-  return scopes.includes("search:keyword");
-}
 
 /** May this actor run retrieval (full or keyword-only)? Session actors are checked elsewhere. */
 export function actorCanSearch(actor: RequestActor | null | undefined): boolean {
-  return actorHasAnyApiKeyScope(actor, [...SEARCH_RETRIEVAL_SCOPES]);
+  return actorHasAnyApiKeyScope(actor, [...SEARCH_SCOPES]);
 }
 
 export function actorHasAnyApiKeyScope(actor: RequestActor | null | undefined, scopes: string[]): boolean {
@@ -324,8 +321,8 @@ export async function assertApiKeyProjectAccess(
   if (actor.type !== "apiKey") {
     return null;
   }
-  // `search` admits keyword-only keys too; the search service keeps them keyword-only.
-  if (!actorHasAnyApiKeyScope(actor, scope === "search" ? [...SEARCH_RETRIEVAL_SCOPES] : [scope])) {
+  // `search` admits any search scope; the search service holds each key to its mode.
+  if (!actorHasAnyApiKeyScope(actor, scope === "search" ? [...SEARCH_SCOPES] : [scope])) {
     return apiErrorResponse(c, 403, "forbidden", "Forbidden");
   }
   const project = await loadActorScopedProject(projectId, actor);

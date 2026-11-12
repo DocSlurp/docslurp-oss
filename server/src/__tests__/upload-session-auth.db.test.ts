@@ -74,9 +74,9 @@ describe.each([false, true])("direct session authorization, statusOnly=%s", stat
     expect(mocks.describe).toHaveBeenCalledWith(id, "u", statusOnly);
   });
   it.each([
-    ["browser", { keyType: "client", scopes: ["search"] }, 403],
+    ["browser", { keyType: "client", scopes: ["search:deep"] }, 403],
     ["legacy elevated browser", { keyType: "client", scopes: ["ingest", "artifacts", "projects:manage"] }, 403],
-    ["wrong scope", { scopes: ["search"] }, 403],
+    ["wrong scope", { scopes: ["search:deep"] }, 403],
     ["other tenant", { orgId: "foreign" }, 404],
     ["other project", { projectIds: ["excluded"] }, 404],
     ["other owner", { userId: "other" }, 404],
@@ -183,7 +183,7 @@ describe("signed URLs for an existing session need current contribute access", (
 
   it.each([
     ["revoked key", async () => { await db.query("update api_keys set revoked_at = now() where id = 'key'"); }, 403],
-    ["key without upload scope", async () => { await seedKey({ userId: "other", projectIds: ["excluded"], scopes: ["search"] }); }, 403],
+    ["key without upload scope", async () => { await seedKey({ userId: "other", projectIds: ["excluded"], scopes: ["search:deep"] }); }, 403],
     ["key whose allowlist excludes the project", async () => { await seedKey({ userId: "other", projectIds: ["w"] }); }, 404],
   ])("refuses part signing for a %s and mints nothing", async (_label, setup, status) => {
     await setup();

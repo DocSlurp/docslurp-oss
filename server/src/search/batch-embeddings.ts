@@ -8,7 +8,7 @@ import { searchLanceDbNativeEnabled } from "./eligible-documents.js";
 import { METERED_EMBEDDING_PROVIDERS, queryEmbeddingApiKey, queryEmbeddingCacheKey } from "./session-planner.js";
 import { loadSearchProjectContext } from "./session-setup.js";
 import { resolveProjectRetrievalControls } from "./project-retrieval-session.js";
-import { searchIsKeywordOnly } from "./keyword-only.js";
+import { effectiveSearchMode } from "./search-mode.js";
 
 /** Options that make a search embed something other than its query text. */
 function embedsQueryText(options: SearchOptions): boolean {
@@ -35,8 +35,8 @@ export async function prefetchBatchQueryEmbeddings(
   signal?: AbortSignal,
 ): Promise<{ prefetched: number; calls: number }> {
   const byProject = new Map<string, typeof items>();
-  // Keyword-only searches never embed, so their queries are not prefetched.
-  for (const item of items.filter(item => !item.options.filters?.geo && !searchIsKeywordOnly(item.options))) byProject.set(item.projectId, [...(byProject.get(item.projectId) ?? []), item]);
+  // Keyword searches never embed, so their queries are not prefetched.
+  for (const item of items.filter(item => !item.options.filters?.geo && effectiveSearchMode(item.options) !== "keyword")) byProject.set(item.projectId, [...(byProject.get(item.projectId) ?? []), item]);
   let prefetched = 0;
   let calls = 0;
   await Promise.all([...byProject].map(async ([projectId, group]) => {

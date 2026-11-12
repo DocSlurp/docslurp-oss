@@ -37,11 +37,11 @@ afterAll(async () => {
 });
 
 const browser = (extra: Record<string, unknown> = {}) =>
-  keys.createApiKey("u1", "widget", { keyType: "client", allowedDomains: ["docs.example.com"], projectIds: [PROJECT], scopes: ["search", "chat"], ...extra });
+  keys.createApiKey("u1", "widget", { keyType: "client", allowedDomains: ["docs.example.com"], projectIds: [PROJECT], scopes: ["search:deep", "chat"], ...extra });
 
 describe("browser keys", () => {
   it("can't be created with a server scope, and default to a 1,000-token output cap", async () => {
-    for (const scopes of [["ingest"], ["search", "artifacts"], ["projects:manage"]]) {
+    for (const scopes of [["ingest"], ["search:deep", "artifacts"], ["projects:manage"]]) {
       await expect(browser({ scopes })).rejects.toMatchObject({ status: 400, code: "invalid_key_scope" });
     }
     const { rawKey, key } = await browser();
@@ -77,8 +77,8 @@ describe("browser keys", () => {
 
   it("drops legacy server scopes from a stored browser key at request time", async () => {
     const { rawKey, key } = await browser();
-    await sql`update api_keys set scopes = ${sql.array(["search", "ingest", "artifacts"])} where id = ${key.id}`;
-    expect((await keys.validateApiKey(rawKey, { origin: "https://docs.example.com" }))?.scopes).toEqual(["search"]);
+    await sql`update api_keys set scopes = ${sql.array(["search:deep", "ingest", "artifacts"])} where id = ${key.id}`;
+    expect((await keys.validateApiKey(rawKey, { origin: "https://docs.example.com" }))?.scopes).toEqual(["search:deep"]);
   });
 });
 
@@ -104,10 +104,10 @@ describe("server keys", () => {
   });
 
   it("rotate with an overlap: both secrets work until the old one expires, then only the new one", async () => {
-    const original = await keys.createApiKey("u1", "deploy", { scopes: ["search", "chat"], maxOutputTokens: 4000, ipAllowlist: [] });
+    const original = await keys.createApiKey("u1", "deploy", { scopes: ["search:deep", "chat"], maxOutputTokens: 4000, ipAllowlist: [] });
     const rotated = await keys.rotateApiKey(original.key.id, "u1", { overlapSeconds: 3600 });
     expect(rotated?.key.id).not.toBe(original.key.id);
-    expect(rotated?.key).toMatchObject({ rotatedFromKeyId: original.key.id, scopes: ["search", "chat"], maxOutputTokens: 4000 });
+    expect(rotated?.key).toMatchObject({ rotatedFromKeyId: original.key.id, scopes: ["search:deep", "chat"], maxOutputTokens: 4000 });
     expect(rotated?.previous?.expiresAt).toEqual(expect.any(String));
     expect(await keys.validateApiKey(original.rawKey)).toMatchObject({ keyId: original.key.id });
     expect(await keys.validateApiKey(rotated!.rawKey)).toMatchObject({ keyId: rotated!.key.id, maxOutputTokens: 4000 });

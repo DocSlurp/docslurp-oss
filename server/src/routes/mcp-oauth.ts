@@ -1,7 +1,7 @@
 import { Hono, type Context } from "hono";
 import { appDbPool } from "../lib/auth.js";
 import { resolveBetterAuthSessionActor } from "../lib/request-actor.js";
-import { getConsentRequest, MCP_SCOPES, FIRST_PARTY_SCOPES, mcpOrigin, mcpResource, apiResource, allowedResources, allowedScopes, createGrant, validRedirect, redirectMatches, parseScopes, transaction, oauthHash, pkceChallenge, issueTokens, secret, randomUUID, cleanupExpiredOAuthRequests, logTokenRejection, REFRESH_REUSE_LEEWAY_SECONDS, DEVICE_CODE_GRANT_TYPE, DEVICE_CODE_TTL_SECONDS, DEVICE_POLL_INTERVAL_SECONDS, generateUserCode, OAUTH_TOKEN_PREFIX } from "../services/mcp-oauth.js";
+import { getConsentRequest, MCP_SCOPES, FIRST_PARTY_SCOPES, mcpOrigin, mcpResource, apiResource, allowedResources, allowedScopes, createGrant, validRedirect, redirectMatches, parseScopes, normalizeOAuthScopes, transaction, oauthHash, pkceChallenge, issueTokens, secret, randomUUID, cleanupExpiredOAuthRequests, logTokenRejection, REFRESH_REUSE_LEEWAY_SECONDS, DEVICE_CODE_GRANT_TYPE, DEVICE_CODE_TTL_SECONDS, DEVICE_POLL_INTERVAL_SECONDS, generateUserCode, OAUTH_TOKEN_PREFIX } from "../services/mcp-oauth.js";
 import { deviceVerificationRoutes } from "./mcp-oauth-device.js";
 import { requestIp } from "../lib/request-context.js";
 export const mcpOAuthMetadataRoutes = new Hono();
@@ -188,7 +188,8 @@ mcpOAuthRoutes.post("/token", async (c) => {
       return tokenFailure("redirect_mismatch", "redirect_uri does not match the authorization request.", token.grant_id);
     if (kind === "code" && (typeof body.code_verifier !== "string" || !/^[A-Za-z0-9._~-]{43,128}$/.test(body.code_verifier) || token.challenge !== pkceChallenge(body.code_verifier)))
       return tokenFailure("pkce_mismatch", "code_verifier does not match the code_challenge.", token.grant_id);
-    if (body.scope !== undefined && (typeof body.scope !== "string" || [...new Set(body.scope.split(/\s+/).filter(Boolean))].sort().join(" ") !== [...token.scopes].sort().join(" ")))
+    // A client that saved a retired scope name (search) still matches the migrated grant (search:deep).
+    if (body.scope !== undefined && (typeof body.scope !== "string" || normalizeOAuthScopes(body.scope.split(/\s+/).filter(Boolean)).sort().join(" ") !== normalizeOAuthScopes(token.scopes).sort().join(" ")))
       return tokenFailure("scope_changed", `Scope must match the granted scope: ${token.scopes.join(" ")}`, token.grant_id, "invalid_scope");
     if (!(await db.query("SELECT 1 FROM org_memberships WHERE org_id=$1 AND user_id=$2", [token.org_id, token.user_id])).rowCount)
       return tokenFailure("membership_removed", "The user no longer belongs to the authorized organization.", token.grant_id);

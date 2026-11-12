@@ -86,7 +86,7 @@ const validatedKey: ValidatedKey = {
   orgId: "org-1",
   keyType: "server",
   allowedDomains: [],
-  scopes: ["search", "chat"],
+  scopes: ["search:deep", "chat"],
   rateLimitRpm: 60,
   rateLimitPpd: 10_000,
   rateLimits: [], projectIds: [],
@@ -369,9 +369,9 @@ describe("mcpRoutes", () => {
   });
 
   it.each([
-    { keyType: "server" as const, scopes: ["search"] },
-    { keyType: "server" as const, scopes: ["search", "ingest", "chat", "projects:manage"] },
-    { keyType: "client" as const, scopes: ["search", "projects:manage"] },
+    { keyType: "server" as const, scopes: ["search:deep"] },
+    { keyType: "server" as const, scopes: ["search:deep", "ingest", "chat", "projects:manage"] },
+    { keyType: "client" as const, scopes: ["search:deep", "projects:manage"] },
   ])("never lists or runs settings tools for an API key, whatever its scopes: %j", async ({ keyType, scopes }) => {
     validateApiKey.mockResolvedValue({ ...validatedKey, keyType, scopes });
     const response = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
@@ -390,7 +390,7 @@ describe("mcpRoutes", () => {
   });
 
   it("withholds both settings tools from an OAuth token on list, manifest and direct call", async () => {
-    validateMcpToken.mockResolvedValue({ ...validatedKey, scopes: ["search", "ingest", "projects:manage"] });
+    validateMcpToken.mockResolvedValue({ ...validatedKey, scopes: ["search:deep", "ingest", "projects:manage"] });
     const headers = { Authorization: "Bearer dsmcp_test", "Content-Type": "application/json" };
     const listed = await app.request("/mcp/tools", { headers });
     expect(listed.status).toBe(200);
@@ -438,11 +438,11 @@ describe("mcpRoutes", () => {
       const res = await app.request("/mcp/tools", { headers: { Authorization: "Bearer dslp_test" } });
       return (await res.json()).tools.map((tool: { id: string }) => tool.id).filter((id: string) => id.endsWith("Estimate"));
     };
-    expect(await listed({ scopes: ["search", "ingest", "projects:manage"], keyType: "server" })).toEqual([
+    expect(await listed({ scopes: ["search:deep", "ingest", "projects:manage"], keyType: "server" })).toEqual([
       "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "updateEstimate", "searchSettingsEstimate", "indexingModeEstimate", "graphRebuildEstimate",
     ]);
     expect(await listed({ scopes: ["ingest"] })).toEqual(["uploadEstimate", "fullIndexEstimate", "reprocessEstimate"]);
-    expect(await listed({ scopes: ["search"] })).toEqual([]);
+    expect(await listed({ scopes: ["search:deep"] })).toEqual([]);
   });
 
   describe("estimate tools and getJob", () => {
@@ -450,7 +450,7 @@ describe("mcpRoutes", () => {
       method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
     beforeEach(() => {
-      validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["search", "ingest", "projects:manage"] });
+      validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["search:deep", "ingest", "projects:manage"] });
       forwardInProcess.mockReset();
       forwardInProcess.mockImplementation(async () => Response.json({ estimate: { pages: 3 }, billing: "disabled" }));
     });
@@ -470,16 +470,16 @@ describe("mcpRoutes", () => {
 
     it("requires the mutation's scope and key type, and never offers session-only estimates to keys", async () => {
       expect((await post("uploadEstimate", { project: "ws-1", files: [{ name: "a.pdf", size: 1 }] })).status).toBe(200);
-      validateApiKey.mockResolvedValueOnce({ ...validatedKey, scopes: ["search"] });
+      validateApiKey.mockResolvedValueOnce({ ...validatedKey, scopes: ["search:deep"] });
       expect((await post("uploadEstimate", { project: "ws-1", files: [{ name: "a.pdf", size: 1 }] })).status).toBe(403);
-      validateApiKey.mockResolvedValueOnce({ ...validatedKey, scopes: ["search", "ingest"] });
+      validateApiKey.mockResolvedValueOnce({ ...validatedKey, scopes: ["search:deep", "ingest"] });
       expect((await post("updateEstimate", { project: "ws-1", changes: {} })).status).toBe(403);
-      validateApiKey.mockResolvedValueOnce({ ...validatedKey, scopes: ["search"] });
+      validateApiKey.mockResolvedValueOnce({ ...validatedKey, scopes: ["search:deep"] });
       expect((await post("reprocessEstimate", { runId: "r1" })).status).toBe(403);
       // The search-settings estimate needs the mutation's projects:manage server key.
-      validateApiKey.mockResolvedValueOnce({ ...validatedKey, scopes: ["search", "ingest", "chat"] });
+      validateApiKey.mockResolvedValueOnce({ ...validatedKey, scopes: ["search:deep", "ingest", "chat"] });
       expect((await post("searchSettingsEstimate", { project: "ws-1", changes: {} })).status).toBe(403);
-      validateApiKey.mockResolvedValueOnce({ ...validatedKey, keyType: "client", scopes: ["search", "projects:manage"] });
+      validateApiKey.mockResolvedValueOnce({ ...validatedKey, keyType: "client", scopes: ["search:deep", "projects:manage"] });
       expect((await post("searchSettingsEstimate", { project: "ws-1", changes: {} })).status).toBe(403);
       expect(forwardInProcess).toHaveBeenCalledTimes(1);
       expect((await post("searchSettingsEstimate", { project: "ws-1", changes: {} })).status).toBe(200);
@@ -507,7 +507,7 @@ describe("mcpRoutes", () => {
   });
 
   it("advertises safe names, explicit upload alternatives and mutation annotations", async () => {
-    validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["search", "chat", "ingest"] });
+    validateApiKey.mockResolvedValue({ ...validatedKey, scopes: ["search:deep", "chat", "ingest"] });
     const client = new Client({ name: "catalog-contract", version: "1" });
     await client.connect(new StreamableHTTPClientTransport(new URL("http://localhost:4321/mcp"), { requestInit: { headers: { Authorization: "Bearer key" } }, fetch: async (url, init) => app.request(new Request(url, init)) }));
     const tools = (await client.listTools()).tools;
