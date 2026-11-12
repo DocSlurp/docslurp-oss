@@ -376,3 +376,51 @@ test("score readback accepts bounded rounding and V3 boolean/subject identities,
   assert.equal(state.writes.length, writes);
   assert.equal([...state.scores.values()][0].id, scoreId(run.items[0], run.items[0].scores[0].name));
 });
+
+test("benchmark kind: s3 inputs, verified local bytes, categories flattened into tags, held-out split apart", async () => {
+  const { loadManifest } = await import("./adapters.mjs");
+  const { createHash } = await import("node:crypto");
+  const { mkdir } = await import("node:fs/promises");
+  const dir = await mkdtemp(join(tmpdir(), "eval-sync-bench-"));
+  await mkdir(join(dir, "src"), { recursive: true });
+  await mkdir(join(dir, "gold"), { recursive: true });
+  const pdf = Buffer.from("%PDF-1.7 fixture");
+  const sha = createHash("sha256").update(pdf).digest("hex");
+  await write(join(dir, "src/a.pdf"), pdf);
+  await write(join(dir, "gold/a.md"), "# Title\n\n| a | b |\n");
+  const row = (id, split, extra = {}) => ({
+    id, split,
+    categories: { capability: "page-ocr", features: ["tables", "prose"], failureModes: ["merged-cells"], script: "latin", sourceKind: "real" },
+    input: { uri: `s3://docslurp-evals/sha256/${sha}.pdf`, sha256: sha, bytes: pdf.length, mediaType: "application/pdf", page: 1 },
+    expected: { reference: "gold/a.md" },
+    source: { corpus: "fixture-v1", caseId: id, license: "CC0-1.0", localPath: "src/a.pdf" },
+    ...extra,
+  });
+  const lines = (rows) => rows.map((value) => JSON.stringify(value)).join("\n") + "\n";
+  await write(join(dir, "bench.jsonl"), lines([row("a1", "development"), row("a2", "heldout")]));
+  const manifest = (name, extra = {}) => write(join(dir, name), JSON.stringify({ sourceCommit: "fixture", authorization: { destinations: ["a"], scope: "test" }, datasets: [{ kind: "benchmark", prefix: "docslurp-evals/tier-benchmark-v1", manifest: "bench.jsonl", localRoot: ".", license: "per-row", ...extra }] })).then(() => join(dir, name));
+
+  const loaded = await loadManifest(await manifest("ok.json"));
+  const names = loaded.datasets.map((dataset) => dataset.name).sort();
+  assert.deepEqual(names, ["docslurp-evals/tier-benchmark-v1/development", "docslurp-evals/tier-benchmark-v1/heldout"]);
+  const dev = loaded.datasets.find((dataset) => dataset.split === "development").items[0];
+  assert.equal(dev.input.uri, `s3://docslurp-evals/sha256/${sha}.pdf`);
+  assert.deepEqual(dev.metadata.tags, ["capability:page-ocr", "failureModes:merged-cells", "features:prose", "features:tables", "script:latin", "sourceKind:real"]);
+  assert.equal(dev.metadata.source.localPath, undefined, "local paths stay out of Langfuse");
+  assert.equal(dev.expectedOutput.reference.inline, true);
+  assert.equal(loaded.datasets.find((dataset) => dataset.split === "heldout").heldout, true);
+
+  // Only s3 URIs; hashes must match the local bytes; every row needs a capability and a license.
+  for (const [bad, pattern] of [
+    [{ input: { ...row("b", "development").input, uri: "https://bucket.example/a.pdf?X-Amz-Signature=1" } }, /s3:\/\/bucket\/key/],
+    [{ input: { ...row("b", "development").input, sha256: "0".repeat(64) } }, /does not match input.sha256/],
+    [{ categories: { features: ["tables"] } }, /capability is required/],
+    [{ source: { corpus: "x", caseId: "b", localPath: "src/a.pdf" } }, /license is required/],
+  ]) {
+    await write(join(dir, "bench.jsonl"), lines([row("b", "development", bad)]));
+    await assert.rejects(loadManifest(await manifest("bad.json")), pattern);
+  }
+  // A local path may not escape the local root.
+  await write(join(dir, "bench.jsonl"), lines([row("b", "development", { source: { corpus: "x", caseId: "b", license: "x", localPath: "../../etc/hostname" } })]));
+  await assert.rejects(loadManifest(await manifest("escape.json")), /escapes the corpus root|ENOENT/);
+});
