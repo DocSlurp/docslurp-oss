@@ -97,7 +97,7 @@ These rules are mandatory and override speed and convenience. When in doubt, tre
 
 ## Licensing
 
-The server, worker and CLI are SSPL-1.0 with an Apache-2.0 future grant; the SDKs, clients (including `contrib-algolia-server`) and `packages/shared` are MIT. New files inherit the license of the package they live in. Do not copy code from incompatibly licensed projects (for example AGPL or GPL sources) into any package.
+The server, worker and CLI are BUSL-1.1 (free production use up to 16 worker vCPUs and 4 worker/GPU instances; each version converts to Apache-2.0 after three years); the SDKs, clients (including `contrib-algolia-server`) and `packages/shared` are MIT. New files inherit the license of the package they live in. Do not copy code from incompatibly licensed projects (for example AGPL or GPL sources) into any package.
 
 ## Pull requests
 
