@@ -131,6 +131,8 @@ const MATRIX: Array<{ file: string; clamav: Verdict; decision: Decision; note: s
   { file: "r6-xlsx-member-encpdf.xlsx", clamav: "clean", decision: "refused:archive-nested-encrypted-pdf", note: "FIXED (R6-L2): an owner-password PDF as an XLSX part is never decrypted for the scan: refused" },
   { file: "r6-far-enc-raw.mp3", clamav: "clean", decision: "refused:archive-embedded-container", note: "FIXED (R6-L3): an owner-password marker PDF 71 KiB into MPEG frames (past the old 64 KiB window)" },
   { file: "r6-far-base-raw.mp3", clamav: "clean", decision: "refused:archive-embedded-container", note: "FIXED (R6-L3): the same with an unencrypted Flate PDF" },
+  // Council round 7 (adversarial re-check 4); reproducer committed as r7-*.
+  { file: "r7-tar-pax-global-size.xlsx", clamav: "clean", decision: "refused:archive-nested-inspection-failed", note: "FIXED (R7-L1): a pax global size record Python's tarfile applies to the next member's data, hiding a ZIP64 behind the header sizes; refused" },
   { file: "eicar.com", clamav: "infected", decision: "infected", note: "control" },
   { file: "plain.pdf", clamav: "clean", decision: "clean", note: "control" },
   { file: "marker-plain.pdf", clamav: "marker", decision: "marker", note: "control: the marker signature is loaded" },
@@ -372,7 +374,7 @@ describe.skipIf(!image)("real ClamAV hostile matrix (council re-check 2; owner d
     for (const config of CONFIGS) {
       for (const file of ["pdf-empty-user-owner-raw-marker.pdf", "pdf-owner-raw-marker-broken-xref.pdf", "pdf-incremental-drop-encrypt-marker.pdf", "prefixed-owner-raw-marker.pdf", "prefixed-flate-marker.pdf", "prefixed-zip64-marker.xlsx",
         "pdf-twokey-broken-xref.pdf", "pdf-twokey-three-trailers.pdf", "pdf-twokey-objstm.pdf", "pdf-twokey-escaped-name.pdf", "pdf-trailer-encrypt-first.pdf", "nested-tar-zip64.xlsx", "nested-bz2-zip64.xlsx", "nested-xz-zip64.xlsx", "nested-tar-bz2-zip64.xlsx", "exempt-pdf-payload.mp3", "exempt-id3-pdf.mp3", "html-late-datauri-11m.html",
-        "r6-lin-o6-P.pdf", "r6-tar-pax-size.xlsx", "r6-tar-v7.xlsx", "r6-tar-lone-zero.xlsx", "r6-xlsx-member-encpdf.xlsx", "r6-far-enc-raw.mp3", "r6-far-base-raw.mp3"]) {
+        "r6-lin-o6-P.pdf", "r6-tar-pax-size.xlsx", "r6-tar-v7.xlsx", "r6-tar-lone-zero.xlsx", "r6-xlsx-member-encpdf.xlsx", "r6-far-enc-raw.mp3", "r6-far-base-raw.mp3", "r7-tar-pax-global-size.xlsx"]) {
         expect(decide(file, config, inspections.get(file)!, scans, qpdf), `${config} ${file}`).not.toBe("clean");
       }
     }
