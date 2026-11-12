@@ -24,11 +24,11 @@ const pipeline = JSON.stringify({ ...defaultPipelineFeatures });
 
 beforeAll(async () => {
   db = await createMigratedDatabase();
-  // Balances above the 100-credit starter chat reserve: 5 and 10 spendable credits.
+  // Balances above the 20-credit starter chat reserve: 5 and 10 spendable credits.
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com');
     insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents)
-      values ('o-low', 'Low', 'low', 'u1', 8, 105), ('o-ten', 'Ten', 'ten', 'u1', 8, 110);
+      values ('o-low', 'Low', 'low', 'u1', 8, 25), ('o-ten', 'Ten', 'ten', 'u1', 8, 30);
     insert into projects(id, org_id, user_id, name) values ('w-low', 'o-low', 'u1', 'L'), ('w-ten', 'o-ten', 'u1', 'T');
     insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
       values ('run-low', 'o-low', 'u1', 'w-low', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 1, 1),

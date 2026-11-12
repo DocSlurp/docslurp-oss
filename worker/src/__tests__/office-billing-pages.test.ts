@@ -29,7 +29,7 @@ beforeAll(async () => {
   db = await createMigratedDatabase();
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com');
-    insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 100000), ('o2', 'Poor', 'poor', 'u1', 8, 20), ('o3', 'Ten', 'ten', 'u1', 8, 110);
+    insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 100000), ('o2', 'Poor', 'poor', 'u1', 8, 20), ('o3', 'Ten', 'ten', 'u1', 8, 30);
     insert into projects(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W'), ('w2', 'o2', 'u1', 'P'), ('w3', 'o3', 'u1', 'T');
     insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
       values ('run1', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'embed', '${pipeline}', 1, 1),
@@ -119,7 +119,7 @@ describe("a measured DOCX: page rows and billing", () => {
   it("adds up the run's measured documents: ten large DOCX files that each fit a 10-credit balance cannot together overdraw it", async () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
     const run = await store.loadRun("run3");
-    // 10 credits above the starter chat reserve (100). 400 pages each: about 2 Fast credits of extra pages per file, under the
+    // 10 credits above the starter chat reserve (20). 400 pages each: about 2 Fast credits of extra pages per file, under the
     // balance alone, 20 credits for the ten.
     const each = extraCreditsForMeasuredPages(run.pipeline, 1, 400, "text-rule");
     expect(each).toBeLessThan(5);

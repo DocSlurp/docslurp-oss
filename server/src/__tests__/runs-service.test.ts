@@ -66,6 +66,9 @@ function createRun(input: { userId: string; projectId: string; kind: string; tot
   return createRunCreation({ sql: sqlMock as never, start: runCreationStart }).create({ ...rest, sources: { kind: "files", files: [] } });
 }
 
+// Admission mechanics below are sized for a $1 starter chat reserve (the default is lower).
+beforeEach(() => { vi.stubEnv("CHAT_CREDIT_RESERVE_STARTER_CREDITS", "100"); });
+
 describe("run events", () => {
   const row = (id: string, eventType: string) => ({
     id, user_id: "u", run_id: "run-1", document_id: "doc-1", stage_name: "extract-markdown", event_type: eventType,
