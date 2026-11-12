@@ -96,3 +96,12 @@ boolean scores remain exact. Both flat preview score IDs and ScoreV3 observation
 subjects are accepted; trace-level scores cannot stand in for observation scores.
 API contracts: [experiment items](https://github.com/langfuse/langfuse/blob/main/fern/apis/server/definition/experiments.yml),
 [ScoreV3](https://github.com/langfuse/langfuse/blob/main/fern/apis/server/definition/scores.yml).
+
+Score readback uses `/v3/scores?fields=details,subject` through the target's
+project-authenticated client. Experiment-item score projections omit configuration
+bindings; they cannot prove a score was registered against the intended scorer.
+The importer verifies the full score identity, configuration, value and manifest
+provenance before declaring success or skipping a write. `metadata.scoredAt`
+preserves the manifest's actual grading timestamp (or explicit `null` when
+unknown), independently of the server's ingestion timestamp. Never substitute
+an extraction end time for an unknown grading time.

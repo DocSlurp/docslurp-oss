@@ -47,7 +47,7 @@ export function prepareRun(run, { manifestSha256 }) {
       scores: scores.map(([name, value]) => ({ name, value: typeof value === "boolean" ? Number(value) : value })),
     };
   });
-  return { experimentId, name: run.experiment.name, description: run.experiment.description ?? null, metadata: run.experiment.metadata ?? {}, dataset: run.dataset, heldout, started, ended, timing: run.timing, costs: run.costs ?? { usd: null, status: "not-recorded" }, scoredAt: run.scoredAt ?? run.endedAt, environment: run.environment ?? "experiment", manifestSha256, items };
+  return { experimentId, name: run.experiment.name, description: run.experiment.description ?? null, metadata: run.experiment.metadata ?? {}, dataset: run.dataset, heldout, started, ended, timing: run.timing, costs: run.costs ?? { usd: null, status: "not-recorded" }, scoredAt: run.scoredAt == null ? null : (iso(run.scoredAt, "scoredAt"), run.scoredAt), environment: run.environment ?? "experiment", manifestSha256, items };
 }
 
 export function otlpPayload(prepared, datasetId, items = prepared.items) {
@@ -93,23 +93,49 @@ async function listExperimentItems(api, prepared) {
   } while (cursor && ++guard < 1000);
   return out;
 }
+// Experiment score projections omit details. Read the supported full score view through
+// the same project-authenticated client; never infer a config binding from a name.
+async function readScoreDetails(api, prepared, rows) {
+  for (const item of prepared.items) {
+    const row = rows.get(item.datasetItemId);
+    if (!matchesItem(row, item) || !item.scores.length) continue;
+    const scores = [];
+    const cursors = new Set();
+    let cursor = null;
+    do {
+      const query = new URLSearchParams({ traceId: item.traceId, observationId: item.spanId,
+        fields: "details,subject", limit: "100", ...(cursor ? { cursor } : {}) });
+      const page = await api(`/v3/scores?${query}`);
+      if (!Array.isArray(page?.data)) throw new Error("Full score readback failed");
+      scores.push(...page.data);
+      cursor = page.meta?.cursor ?? null;
+      if (cursor && (cursors.has(cursor) || cursors.size >= 1000)) throw new Error("Full score pagination did not finish");
+      if (cursor) cursors.add(cursor);
+    } while (cursor);
+    row.scores = scores;
+  }
+  return rows;
+}
+const scoreMetadata = (prepared, item) => ({ experimentId: prepared.experimentId, caseId: item.caseId,
+  runManifestSha256: prepared.manifestSha256, scoredAt: prepared.scoredAt });
 const remoteOutputSha = (row) => row?.experimentItemMetadata?.outputSha256 ?? null;
 // API shapes: https://github.com/langfuse/langfuse/blob/main/fern/apis/server/definition/experiments.yml
 // and scores.yml (ExperimentItem + ScoreV3).
 // Both item readback and skip decisions require the exact observation identity.
 const matchesItem = (row, item) => row?.id === item.spanId && row?.traceId === item.traceId && remoteOutputSha(row) === item.outputSha256;
 
-function hasVerifiedScore(row, item, score, config) {
+function hasVerifiedScore(row, item, score, config, prepared) {
   if (!matchesItem(row, item)) return false;
   return (row.scores ?? []).some((remote) => {
     // Experiment API v4 uses ScoreV3 subjects; older v4 previews used flat IDs.
     // Missing identity/config fields fail closed, rather than proving a name alone.
     const observationId = remote.subject ? (remote.subject.kind === "observation" ? remote.subject.id : null) : remote.observationId;
-    const traceId = remote.subject ? (remote.subject.traceId ?? row.traceId) : remote.traceId;
+    const traceId = remote.subject ? (remote.subject.traceId) : remote.traceId;
     const value = config.dataType === "BOOLEAN" && typeof remote.value === "boolean" ? Number(remote.value) : remote.value;
     // sameJson's documented relative 1e-12 tolerance handles JSON storage rounding;
     // boolean scores must still be exactly 0 or 1 and numeric strings are refused.
     return remote.id === scoreId(item, score.name) && remote.name === score.name
+      && Object.entries(scoreMetadata(prepared, item)).every(([key, value]) => Object.hasOwn(remote.metadata ?? {}, key) && sameJson(remote.metadata[key], value))
       && remote.configId === config.id && observationId === item.spanId && traceId === item.traceId
       && typeof value === "number" && Number.isFinite(value)
       && (config.dataType === "BOOLEAN" ? value === score.value : sameJson(value, score.value));
@@ -132,7 +158,7 @@ export async function syncRun(api, prepared, { targetName = null, allowHeldout =
   const scoreNames = new Set(prepared.items.flatMap((item) => item.scores.map((score) => score.name)));
   for (const name of scoreNames) if (!configs.get(name)?.id) throw new Error(`Score config ${name} is not registered on this target`);
 
-  let existing = await listExperimentItems(api, prepared);
+  let existing = await readScoreDetails(api, prepared, await listExperimentItems(api, prepared));
   const stale = prepared.items.filter((item) => !matchesItem(existing.get(item.datasetItemId), item));
   // Batch by count and by serialised size so large inline outputs never exceed request body limits.
   let chunk = [];
@@ -146,17 +172,17 @@ export async function syncRun(api, prepared, { targetName = null, allowHeldout =
   await flush();
   const scoreWrites = [];
   for (const item of prepared.items) {
-    for (const score of item.scores) if (stale.includes(item) || !hasVerifiedScore(existing.get(item.datasetItemId), item, score, configs.get(score.name))) scoreWrites.push({ item, score });
+    for (const score of item.scores) if (stale.includes(item) || !hasVerifiedScore(existing.get(item.datasetItemId), item, score, configs.get(score.name), prepared)) scoreWrites.push({ item, score });
   }
   for (const { item, score } of scoreWrites) {
     const config = configs.get(score.name);
-    await api("/scores", { id: scoreId(item, score.name), traceId: item.traceId, observationId: item.spanId, name: score.name, value: score.value, configId: config.id, environment: prepared.environment, timestamp: prepared.scoredAt, metadata: { experimentId: prepared.experimentId, caseId: item.caseId, runManifestSha256: prepared.manifestSha256 } });
+    await api("/scores", { id: scoreId(item, score.name), traceId: item.traceId, observationId: item.spanId, name: score.name, value: score.value, configId: config.id, environment: prepared.environment, ...(prepared.scoredAt ? { timestamp: prepared.scoredAt } : {}), metadata: scoreMetadata(prepared, item) });
   }
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    if (stale.length || scoreWrites.length) existing = await listExperimentItems(api, prepared);
+    if (stale.length || scoreWrites.length) existing = await readScoreDetails(api, prepared, await listExperimentItems(api, prepared));
     const pendingItems = prepared.items.filter((item) => !matchesItem(existing.get(item.datasetItemId), item));
-    const pendingScores = prepared.items.filter((item) => item.scores.some((score) => !hasVerifiedScore(existing.get(item.datasetItemId), item, score, configs.get(score.name))));
+    const pendingScores = prepared.items.filter((item) => item.scores.some((score) => !hasVerifiedScore(existing.get(item.datasetItemId), item, score, configs.get(score.name), prepared)));
     if (!pendingItems.length && !pendingScores.length) break;
     if (Date.now() > deadline) throw new Error(`Experiment readback incomplete: ${pendingItems.length} items, ${pendingScores.length} items with missing scores`);
     await sleep(pollMs);
