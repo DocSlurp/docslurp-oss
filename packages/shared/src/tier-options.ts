@@ -7,6 +7,8 @@
  * - chat pools: hosts serving the model at FP8 or better (or undisclosed, as the default chat routing allows), all
  *   from distinct providers.
  * - evalScore stays null until a recorded eval run measures the option; unmeasured options are never "best".
+ * - Together is omitted from every pool (owner, 2026-11-12): its DeepSeek V4.1 Flash 1017 endpoint fabricated page
+ *   bodies on the tier benchmark (quality 0.565 and 0.301 against Fireworks 0.786 and 0.784).
  */
 import type { TierOption } from "./provider-tiers.js";
 
@@ -42,7 +44,7 @@ export const TIER_OPTIONS: readonly TierOption[] = Object.freeze([
     id: "chat/glm-5.3-flash",
     capability: "chat",
     model: "z-ai/glm-5.3-flash",
-    pool: { hosts: ["together", "fireworks", "friendli"], sort: "price" },
+    pool: { hosts: ["fireworks", "friendli"], sort: "price" },
     tiers: ["cheapest", "fastest", "best"],
     evalScore: null,
     evalRef: null,
@@ -51,7 +53,7 @@ export const TIER_OPTIONS: readonly TierOption[] = Object.freeze([
     id: "chat/deepseek-v4.1-flash-1017",
     capability: "chat",
     model: "deepseek/deepseek-v4.1-flash-1017",
-    pool: { hosts: ["deepinfra/fp8", "together", "fireworks", "parasail/fp8"], sort: "price" },
+    pool: { hosts: ["deepinfra/fp8", "fireworks", "parasail/fp8"], sort: "price" },
     tiers: ["cheapest", "fastest", "best"],
     evalScore: null,
     evalRef: null,
