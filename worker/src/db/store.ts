@@ -60,7 +60,7 @@ import { enforceRunSpend, enforceRunSpendForCharge, largestFundedCharge, pauseRu
 import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
 import { PostgresVisionAttemptBackend } from "./vision-attempt-store.js";
-import { bindDocumentUpload, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource } from "../lib/parse-source.js";
+import { assertParseSourceRecord, bindDocumentUpload, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource, type ParseSourceDecisionRecord } from "../lib/parse-source.js";
 import {
   lexicalColumnProbe,
   resolveWorkerCapabilities,
@@ -421,7 +421,7 @@ function runDocumentRowsQuery(client: Sql<Record<string, unknown>>, runId: strin
     from documents d
     where d.run_id = ${runId}
       and d.superseded_at is null and d.status <> 'cancelled'
-    order by d.created_at asc
+    order by d.created_at asc, d.id asc
   `;
 }
 
@@ -2887,14 +2887,17 @@ export class Store {
   }
 
   /**
-   * Record quarantine's parse decision for this run's own document (lib/parse-source.ts, migration 0134): `{ copy }` parses
-   * the scanned copy (an encrypted PDF's), `{ copy: null }` the upload it scanned, and null clears the decision (refused:
-   * nothing may parse it). Stamped with this build's scan version; false when no row matched.
+   * Record quarantine's parse decision for this run's own document (lib/parse-source.ts, migrations 0134-0135): `{ copy }`
+   * parses the scanned copy (an encrypted PDF's), `{ copy: null }` the upload it scanned, and null clears the decision
+   * (refused: nothing may parse it). Either decision stores the sha256 of the bytes parsers read: the copy's, or the
+   * upload's as the scan read it (`scannedSha256`, council R8-L1), so a later swap of the object is refused whether or not
+   * the row has a server hash. Stamped with this build's scan version; false when no row matched.
    */
-  async setDocumentParseSource(runId: string, documentId: string, decision: { copy: { key: string; sha256: string } | null } | null): Promise<boolean> {
+  async setDocumentParseSource(runId: string, documentId: string, decision: ParseSourceDecisionRecord | null): Promise<boolean> {
     const copy = decision?.copy ?? null;
+    const sha = decision ? assertParseSourceRecord(decision) : null;
     const rows = await this.sql`
-      update documents set parse_source_key = ${copy?.key ?? null}, parse_source_sha256 = ${copy?.sha256 ?? null},
+      update documents set parse_source_key = ${copy?.key ?? null}, parse_source_sha256 = ${sha},
         parse_source_scan_version = ${decision ? PARSE_SOURCE_SCAN_VERSION : null}, updated_at = now()
       where id = ${documentId} and run_id = ${runId}
       returning id

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -48,11 +49,11 @@ beforeAll(async () => {
     insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
       values ('run1', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 4, 4),
              ('run2', 'o2', 'u1', 'w2', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 1, 1);
-    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version) values
-      ('local', 'o1', 'u1', 'w1', 'run1', 'a.pdf', 'application/pdf', 'raw/a', 'processing', 3, 'assumed', '${JSON.stringify(pdfFacts)}', 1),
-      ('vm', 'o1', 'u1', 'w1', 'run1', 'b.pdf', 'application/pdf', 'raw/b', 'processing', 3, 'assumed', '${JSON.stringify(pdfFacts)}', 1),
-      ('never', 'o1', 'u1', 'w1', 'run1', 'c.pdf', 'application/pdf', 'raw/c', 'completed', 5, 'assumed', '${JSON.stringify(pdfFacts)}', 1),
-      ('big', 'o2', 'u1', 'w2', 'run2', 'd.pdf', 'application/pdf', 'raw/d', 'processing', 1, 'assumed', '${JSON.stringify(pdfFacts)}', 1);
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version, parse_source_sha256) values
+      ('local', 'o1', 'u1', 'w1', 'run1', 'a.pdf', 'application/pdf', 'raw/a', 'processing', 3, 'assumed', '${JSON.stringify(pdfFacts)}', 1, repeat('0', 64)),
+      ('vm', 'o1', 'u1', 'w1', 'run1', 'b.pdf', 'application/pdf', 'raw/b', 'processing', 3, 'assumed', '${JSON.stringify(pdfFacts)}', 1, repeat('0', 64)),
+      ('never', 'o1', 'u1', 'w1', 'run1', 'c.pdf', 'application/pdf', 'raw/c', 'completed', 5, 'assumed', '${JSON.stringify(pdfFacts)}', 1, repeat('0', 64)),
+      ('big', 'o2', 'u1', 'w2', 'run2', 'd.pdf', 'application/pdf', 'raw/d', 'processing', 1, 'assumed', '${JSON.stringify(pdfFacts)}', 1, repeat('0', 64));
   `);
   const served = await serveOnRandomPort(db);
   server = served.server;
@@ -250,8 +251,8 @@ describe.skipIf(!realTool)("walked vs extracted with the real tools (owner decis
     await db.exec(`
       insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
         values ('run-p', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 1, 50);
-      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version)
-        values ('partial', 'o1', 'u1', 'w1', 'run-p', 'p.pdf', 'application/pdf', 'raw/p', 'processing', 50, 'counted', '${JSON.stringify(pdfFacts)}', 1);`);
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version, parse_source_sha256)
+        values ('partial', 'o1', 'u1', 'w1', 'run-p', 'p.pdf', 'application/pdf', 'raw/p', 'processing', 50, 'counted', '${JSON.stringify(pdfFacts)}', 1, repeat('0', 64));`);
     const { state, document } = await stateFor("run-p", "partial");
     expect(await reconcileProcessedPdfPages(state, document, processed)).toEqual({ measured: 50, processed: 1, mismatch: "processed-below-measured" });
     expect(await pageRow("partial")).toEqual({ page_count: 1, page_count_source: "counted" });
@@ -402,8 +403,8 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
     await db.exec(`
       insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
         values ('run-fail', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 1, 3);
-      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version)
-        values ('vm-fail', 'o1', 'u1', 'w1', 'run-fail', 'e.pdf', 'application/pdf', 'raw/e', 'processing', 3, 'assumed', '${JSON.stringify(pdfFacts)}', 1);`);
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version, parse_source_sha256)
+        values ('vm-fail', 'o1', 'u1', 'w1', 'run-fail', 'e.pdf', 'application/pdf', 'raw/e', 'processing', 3, 'assumed', '${JSON.stringify(pdfFacts)}', 1, repeat('0', 64));`);
     const usage = { provider: "modal", model: "doppler-vm", metric: "sandbox_compute", amount: 12, unit: "second", costCents: 0.42, inputTokens: 0, outputTokens: 0, metadata: { costRollup: "authoritative" } };
     const pageCount = vi.fn(async () => { throw new SandboxRunError("Document VM invalid page-count envelope", usage as never); });
     registerExtractorPlugin({ apiVersion: 1, name: "vm", sandboxedPdf: { id: "test-vm", maxSourceBytes: 1e9, assertConfigured() {}, run: vi.fn(), timeoutMs: () => 1, pageCount } as unknown as SandboxedPdfExtractorProvider });
@@ -430,8 +431,8 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
     await db.exec(`
       insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
         values ('run-retry', 'o2', 'u1', 'w2', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 1, 3);
-      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version)
-        values ('retry', 'o2', 'u1', 'w2', 'run-retry', 'r.pdf', 'application/pdf', 'raw/r', 'processing', 3, 'assumed', '${JSON.stringify(pdfFacts)}', 1);`);
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version, parse_source_sha256)
+        values ('retry', 'o2', 'u1', 'w2', 'run-retry', 'r.pdf', 'application/pdf', 'raw/r', 'processing', 3, 'assumed', '${JSON.stringify(pdfFacts)}', 1, repeat('0', 64));`);
     // Attempt 1: the count is measured and persisted, then the balance query fails (a dropped connection).
     const first = await stateFor("run-retry", "retry");
     const host = runner(5000);
@@ -460,13 +461,15 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
   it("a real upload bills its measured pages: intake's assumed PDF and counted text through format-detect, then the page fee", async () => {
     vi.stubEnv("DOCSLURP_PDF_MODE", "local");
     const textFacts = { declaredMimeType: "text/plain", sniffedMimeType: null, mimeType: "text/plain", format: "plain-text", container: null, encoding: "utf-8", mismatch: "none" };
+    // Quarantine scanned the staged bytes: the decision binds parsers to them (PR #339 R8-L1).
+    const STAGED_SHA = createHash("sha256").update("%PDF-1.7\n").digest("hex");
     // As run creation writes them: the PDF's size estimate is assumed, the small text file was counted from its bytes.
     await db.exec(`
       insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
         values ('run-e2e', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 2, 4);
-      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version)
-        values ('e2e-pdf', 'o1', 'u1', 'w1', 'run-e2e', 'f.pdf', 'application/pdf', 'raw/f', 'processing', 2, 'assumed', '${JSON.stringify(pdfFacts)}', 1),
-               ('e2e-txt', 'o1', 'u1', 'w1', 'run-e2e', 'g.txt', 'text/plain', 'raw/g', 'processing', 2, 'counted', '${JSON.stringify(textFacts)}', 1);`);
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version, parse_source_sha256)
+        values ('e2e-pdf', 'o1', 'u1', 'w1', 'run-e2e', 'f.pdf', 'application/pdf', 'raw/f', 'processing', 2, 'assumed', '${JSON.stringify(pdfFacts)}', 1, '${STAGED_SHA}'),
+               ('e2e-txt', 'o1', 'u1', 'w1', 'run-e2e', 'g.txt', 'text/plain', 'raw/g', 'processing', 2, 'counted', '${JSON.stringify(textFacts)}', 1, '${STAGED_SHA}');`);
     const storage = {
       putJson: vi.fn(async () => undefined), uri: (key: string) => `s3://b/${key}`,
       // As the real store does: a private docslurp-* directory per download, which format-detect removes afterwards. Read
@@ -494,8 +497,8 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
     await db.exec(`
       insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
         values ('run-off', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 1, 2);
-      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version)
-        values ('off-pdf', 'o1', 'u1', 'w1', 'run-off', 'h.pdf', 'application/pdf', 'raw/h', 'processing', 2, 'assumed', '${JSON.stringify(pdfFacts)}', 1);`);
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version, parse_source_sha256)
+        values ('off-pdf', 'o1', 'u1', 'w1', 'run-off', 'h.pdf', 'application/pdf', 'raw/h', 'processing', 2, 'assumed', '${JSON.stringify(pdfFacts)}', 1, repeat('0', 64));`);
     const storage = { putJson: vi.fn(async () => undefined), uri: (key: string) => `s3://b/${key}`, downloadSourceToTempFile: vi.fn(), downloadToTempFile: vi.fn(), getBytes: vi.fn() } as unknown as ArtifactStore;
     const host = runner(2);
     const state = WorkflowState.create(await store.loadRun("run-off"), [(await store.loadDocument("off-pdf"))!]);
@@ -512,9 +515,9 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
     await db.exec(`
       insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
         values ('run-x', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 2, 13);
-      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version)
-        values ('x-more', 'o1', 'u1', 'w1', 'run-x', 'm.pdf', 'application/pdf', 'raw/m', 'processing', 3, 'counted', '${JSON.stringify(pdfFacts)}', 1),
-               ('x-less', 'o1', 'u1', 'w1', 'run-x', 'l.pdf', 'application/pdf', 'raw/l', 'processing', 10, 'counted', '${JSON.stringify(pdfFacts)}', 1);`);
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version, parse_source_sha256)
+        values ('x-more', 'o1', 'u1', 'w1', 'run-x', 'm.pdf', 'application/pdf', 'raw/m', 'processing', 3, 'counted', '${JSON.stringify(pdfFacts)}', 1, repeat('0', 64)),
+               ('x-less', 'o1', 'u1', 'w1', 'run-x', 'l.pdf', 'application/pdf', 'raw/l', 'processing', 10, 'counted', '${JSON.stringify(pdfFacts)}', 1, repeat('0', 64));`);
     expect(processedPdfPages("a\fb\fc\fd\fe\f", "poppler-text")).toBe(5);
     // Blank pages count, trailing ones included (pdftotext ends every page with a form feed).
     expect(processedPdfPages("text one\f\ftext three\f\f", "poppler-text")).toBe(4);
@@ -544,9 +547,9 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
     await db.exec(`
       insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
         values ('run-blank', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 2, 6);
-      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version)
-        values ('blank-term', 'o1', 'u1', 'w1', 'run-blank', 't.pdf', 'application/pdf', 'raw/t', 'processing', 3, 'counted', '${JSON.stringify(pdfFacts)}', 1),
-               ('blank-sep', 'o1', 'u1', 'w1', 'run-blank', 's.pdf', 'application/pdf', 'raw/s', 'processing', 3, 'counted', '${JSON.stringify(pdfFacts)}', 1);`);
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version, parse_source_sha256)
+        values ('blank-term', 'o1', 'u1', 'w1', 'run-blank', 't.pdf', 'application/pdf', 'raw/t', 'processing', 3, 'counted', '${JSON.stringify(pdfFacts)}', 1, repeat('0', 64)),
+               ('blank-sep', 'o1', 'u1', 'w1', 'run-blank', 's.pdf', 'application/pdf', 'raw/s', 'processing', 3, 'counted', '${JSON.stringify(pdfFacts)}', 1, repeat('0', 64));`);
     // Three pages, the third blank: pdftotext terminates each page; Doppler, vm-pdf and native-pdf separate them.
     const outputs: Array<[string, string, string]> = [["blank-term", "poppler-text", "one\ftwo\f\f"], ["blank-sep", "doppler-md", "one\ftwo\f"]];
     for (const [id, extractor, markdown] of outputs) {

@@ -71,8 +71,10 @@ export class QuarantineStage implements Stage {
             const copyDir = await mkdtemp(path.join(tmpdir(), "docslurp-quarantine-copy-"));
             try {
               const bytes = await readFile(tempFile);
-              // The scanned bytes must be the bytes the server hashed.
-              verifyStagedSource(original, sha256Bytes(bytes));
+              // The scanned bytes must be the bytes the server hashed. Their hash is what the decision binds parsers of the
+              // upload to (council R8-L1), so a swap after this scan is refused even for a row without a server hash.
+              const scannedSha256 = sha256Bytes(bytes);
+              verifyStagedSource(original, scannedSha256);
               // The API only glanced at this file; this is the first full look, before any parser.
               // One inspection of the bytes (in the parser VM in production) serves the intake check and the scan.
               const inspection = await inspectQuarantine({ bytes, filename: document.filename, tempFile, runner: this.runner, policy: this.config, ...(signal ? { signal } : {}) });
@@ -108,15 +110,16 @@ export class QuarantineStage implements Stage {
               // copy, or the upload it scanned) before the verdict is recorded, and a refused one loses any decision. Nothing
               // parses a document without one (lib/parse-source.ts).
               const accepted = artifact.decision === "accepted";
+              const decision = { copy: parseCopy, scannedSha256 };
               if (state.store?.setDocumentParseSource) {
-                if (!(await state.store.setDocumentParseSource(state.run.id, document.id, accepted ? { copy: parseCopy } : null))) {
+                if (!(await state.store.setDocumentParseSource(state.run.id, document.id, accepted ? decision : null))) {
                   throw new Error(`parse decision of document ${document.id} was not recorded`);
                 }
-              } else if (parseCopy || document.parseSourceDecision !== undefined) {
+              } else if (parseCopy || (document.parseSourceDecision !== undefined && document.parseSourceDecision !== "unscanned-allowed")) {
                 // A loaded document (or a copy to point at) needs the decision persisted: later activities reload it.
                 throw new Error("parse decision cannot be recorded: the store cannot persist it");
               }
-              if (accepted) applyParseSource(document, parseCopy);
+              if (accepted) applyParseSource(document, decision);
               else clearParseSource(document);
 
               await this.storage.putArtifactJson(key, artifact);

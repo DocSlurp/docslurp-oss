@@ -111,7 +111,7 @@ export interface CheckpointStore {
    * Quarantine's parse decision for this run's own document (lib/parse-source.ts): `{ copy }` (an encrypted PDF's scanned copy),
    * `{ copy: null }` (the upload it scanned), or null to clear it (refused).
    */
-  setDocumentParseSource?(runId: string, documentId: string, decision: { copy: { key: string; sha256: string } | null } | null): Promise<boolean>;
+  setDocumentParseSource?(runId: string, documentId: string, decision: import("../lib/parse-source.js").ParseSourceDecisionRecord | null): Promise<boolean>;
   /** Newest observed page-shard timings for one `${stage}:${executor}` profile (shard calibration). */
   loadShardObservations?(profileKey: string, limit?: number): Promise<Array<{ pages: number; ms: number; maxRssMiB?: number }>>;
 }

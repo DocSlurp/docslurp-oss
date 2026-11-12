@@ -8,11 +8,14 @@
  * filter decoded) and every parser reads that copy. The original stays only for "download original" and exports.
  *
  * Fail closed (council round 7, R7-H1): no document is parsed without a parse decision that this build's quarantine
- * recorded on the document's own row (migration 0134):
+ * recorded on the document's own row (migrations 0134-0135):
  *
- * - `parse_source_scan_version` = PARSE_SOURCE_SCAN_VERSION and `parse_source_key` set: parse the scanned copy;
- * - `parse_source_scan_version` = PARSE_SOURCE_SCAN_VERSION and no key: the upload is what the scan read; parse it;
- * - anything else (a document quarantined by an earlier build, or never): **unscanned**. The loader hands parsers an
+ * - `parse_source_scan_version` = PARSE_SOURCE_SCAN_VERSION and `parse_source_key` set: parse the scanned copy, whose
+ *   sha256 is `parse_source_sha256`;
+ * - `parse_source_scan_version` = PARSE_SOURCE_SCAN_VERSION, no key and `parse_source_sha256` set: the upload is what the
+ *   scan read; parse it, hash-bound to the bytes the scan read (council R8-L1: never to `source_sha256`, which legacy rows
+ *   lack, so a swap of the object after the scan is refused either way);
+ * - anything else (a document quarantined by an earlier build, or never, or a decision without a hash): **unscanned**. The loader hands parsers an
  *   unreadable key (`unscannedParseSourceKey`), every stage but quarantine refuses the document, storage refuses the key,
  *   and staged reads refuse it. Quarantine re-runs for such a document and records a decision.
  *
@@ -26,10 +29,12 @@
  * document parses its upload ("unscanned-allowed"), exactly as before.
  */
 
+import { hasCurrentParseDecision, PARSE_SOURCE_SCAN_VERSION, quarantineRequired } from "@docslurp/shared";
+
 import { UnscannedParseSourceError } from "../sandbox/source-integrity.js";
 
-/** The scan that recorded a decision. Bump it to make every earlier decision unscanned (they re-quarantine on reprocess). */
-export const PARSE_SOURCE_SCAN_VERSION = 1;
+/** The scan version and the shared decision predicate live in @docslurp/shared (the API reports rescans with them). */
+export { PARSE_SOURCE_SCAN_VERSION, quarantineRequired };
 
 /** Where a document's parse bytes come from. */
 export type ParseSourceDecision =
@@ -42,7 +47,7 @@ export type ParseSourceDecision =
   /** Quarantine is disabled by configuration (never in production): the upload, as before. */
   | "unscanned-allowed";
 
-/** The row fields the resolver reads (documents.*, migration 0134). */
+/** The row fields the resolver reads (documents.*, migrations 0134-0135). */
 export interface ParseSourceRow {
   id: string;
   source_key: string;
@@ -58,6 +63,23 @@ export interface ScannedParseSource {
   sha256: string;
 }
 
+/** What quarantine records for an accepted document (Store.setDocumentParseSource). */
+export interface ParseSourceDecisionRecord {
+  /** The scanned copy parsers read instead of the upload (an encrypted PDF's), or null: they read the upload. */
+  copy: ScannedParseSource | null;
+  /** sha256 of the exact upload bytes the scan read: what parsers of the upload are bound to (council R8-L1). */
+  scannedSha256: string;
+}
+
+/** The hash a decision binds parsers to (the copy's, or the scanned upload's); throws on anything that is not a sha256. */
+export function assertParseSourceRecord(record: ParseSourceDecisionRecord): string {
+  const sha = (record.copy ? record.copy.sha256 : record.scannedSha256)?.trim().toLowerCase() ?? "";
+  if (!SHA256_HEX.test(sha) || !SHA256_HEX.test(record.scannedSha256?.trim().toLowerCase() ?? "")) {
+    throw new Error("a parse decision needs the sha256 of the bytes it scanned");
+  }
+  return sha;
+}
+
 export interface ResolvedDocumentSource {
   /** The bytes for parsing (the scanned copy, the scanned upload), or an unreadable key for an unscanned document. */
   sourceKey: string;
@@ -71,11 +93,8 @@ const SHA256_HEX = /^[0-9a-f]{64}$/;
 /** A NUL byte: no object store, filesystem or URL accepts it, and storage.ts refuses the prefix by name first. */
 const UNSCANNED_KEY_PREFIX = "\u0000unscanned-parse-source/";
 
-/** Whether quarantine must scan every document (config.quarantineEnabled): always in production. */
-export function quarantineRequired(env: NodeJS.ProcessEnv = process.env): boolean {
-  if ((env.NODE_ENV ?? "").trim().toLowerCase() === "production") return true;
-  const value = env.QUARANTINE_ENABLED?.trim().toLowerCase();
-  return !(value && ["0", "false", "no", "off"].includes(value));
+function isProduction(env: NodeJS.ProcessEnv): boolean {
+  return (env.NODE_ENV ?? "").trim().toLowerCase() === "production";
 }
 
 export { UnscannedParseSourceError };
@@ -94,20 +113,24 @@ export function assertReadableSourceKey(key: string): void {
 }
 
 /**
- * The document's parse source, from its row. A half-recorded copy (a key without a sha256 or the reverse, a hash that is not
- * one, a copy with no scan version) fails loudly: falling back to the original would hand parsers bytes nobody scanned.
+ * The document's parse source, from its row. A half-recorded copy (a key without a sha256, a hash that is not one, a copy
+ * with no scan version) fails loudly: falling back to the original would hand parsers bytes nobody scanned. A current
+ * decision without a hash, or whose hash is not the upload's server hash, is unscanned (council R8-L1).
  */
 export function resolveDocumentSource(row: ParseSourceRow, env: NodeJS.ProcessEnv = process.env): ResolvedDocumentSource {
   const key = row.parse_source_key ?? null;
   const sha = row.parse_source_sha256?.trim().toLowerCase() || null;
   const version = row.parse_source_scan_version ?? null;
-  if ((key === null) !== (sha === null) || (sha !== null && !SHA256_HEX.test(sha)) || (key !== null && version === null)) {
+  if ((key !== null && sha === null) || (sha !== null && !SHA256_HEX.test(sha)) || (key !== null && version === null)) {
     throw new Error(`document ${row.id} has an incomplete scanned parse copy record`);
   }
-  if (version === PARSE_SOURCE_SCAN_VERSION) {
+  if (hasCurrentParseDecision(row)) {
     return key
       ? { sourceKey: key, sourceSha256: sha, originalSourceSha256: row.source_sha256 ?? null, parseSourceDecision: "scanned-copy" }
-      : { sourceKey: row.source_key, sourceSha256: row.source_sha256 ?? null, parseSourceDecision: "original" };
+      : { sourceKey: row.source_key, sourceSha256: sha, parseSourceDecision: "original" };
+  }
+  if (version === PARSE_SOURCE_SCAN_VERSION) {
+    console.error(`[worker-source] status=parse-source-unbound metric=parse_source_unbound document=${row.id} has_hash=${sha !== null}`);
   }
   if (!quarantineRequired(env)) return { sourceKey: row.source_key, sourceSha256: row.source_sha256 ?? null, parseSourceDecision: "unscanned-allowed" };
   return { sourceKey: unscannedParseSourceKey(row.id), sourceSha256: null, parseSourceDecision: "unscanned" };
@@ -119,7 +142,17 @@ export interface SourcedDocument {
   sourceKey: string;
   sourceSha256?: string | null;
   originalSourceSha256?: string | null;
+  /** Required on loader documents (models.ts Document). Absent at runtime (a hand-built object): unscanned in production. */
   parseSourceDecision?: ParseSourceDecision;
+}
+
+/**
+ * The document's decision as the gates read it (informational I-1 tripwire): an object with no decision field was not
+ * built by the loader, which always sets one, so in production it is unscanned, never "its own upload".
+ */
+export function effectiveParseSourceDecision(document: Pick<SourcedDocument, "parseSourceDecision">, env: NodeJS.ProcessEnv = process.env): ParseSourceDecision | undefined {
+  if (document.parseSourceDecision === undefined && isProduction(env)) return "unscanned";
+  return document.parseSourceDecision;
 }
 
 interface UploadSource { key: string; sha256: string | null }
@@ -136,7 +169,7 @@ export function bindDocumentUpload(document: SourcedDocument, row: Pick<ParseSou
  * quarantine, the deferred page renderer and materialization call it before reading a byte.
  */
 export function assertParseSourceDecided(document: Pick<SourcedDocument, "id" | "parseSourceDecision" | "sourceKey">): void {
-  if (document.parseSourceDecision === "unscanned" || isUnscannedParseSourceKey(document.sourceKey)) {
+  if (effectiveParseSourceDecision(document) === "unscanned" || isUnscannedParseSourceKey(document.sourceKey)) {
     console.error(`[worker-source] status=parse-source-unscanned metric=parse_source_unscanned document=${document.id}`);
     throw new UnscannedParseSourceError(document.id);
   }
@@ -156,17 +189,20 @@ export function hasScannedParseCopy(document: Pick<SourcedDocument, "parseSource
 /**
  * The upload itself, for the quarantine stage only: it scans the original (and makes the copy). A loader document whose
  * binding is missing (copied or serialized after loading) fails: its key is not the upload's. A document built in memory
- * (no decision field: tests) is its own upload.
+ * (no decision field outside production, or "unscanned-allowed": tests) is its own upload.
  */
 export function originalSourceForQuarantine(document: SourcedDocument): { id: string; sourceKey: string; sourceSha256: string | null } {
   const upload = uploads.get(document);
   if (upload) return { id: document.id, sourceKey: upload.key, sourceSha256: upload.sha256 };
-  if (document.parseSourceDecision !== undefined) throw new Error(`document ${document.id}: quarantine has no upload binding for a loaded document`);
+  const decision = effectiveParseSourceDecision(document);
+  if (decision !== undefined && decision !== "unscanned-allowed") throw new Error(`document ${document.id}: quarantine has no upload binding for a loaded document`);
   return { id: document.id, sourceKey: document.sourceKey, sourceSha256: document.sourceSha256 ?? null };
 }
 
-/** Point an in-memory document at what quarantine decided: its scanned copy, or the upload it scanned (null). */
-export function applyParseSource(document: SourcedDocument, copy: ScannedParseSource | null): void {
+/** Point an in-memory document at what quarantine decided: its scanned copy, or the upload bytes it scanned. */
+export function applyParseSource(document: SourcedDocument, record: ParseSourceDecisionRecord): void {
+  assertParseSourceRecord(record);
+  const copy = record.copy;
   const original = originalSourceForQuarantine(document);
   uploads.set(document, { key: original.sourceKey, sha256: original.sourceSha256 });
   if (copy) {
@@ -176,7 +212,7 @@ export function applyParseSource(document: SourcedDocument, copy: ScannedParseSo
     document.parseSourceDecision = "scanned-copy";
   } else {
     document.sourceKey = original.sourceKey;
-    document.sourceSha256 = original.sourceSha256;
+    document.sourceSha256 = record.scannedSha256.trim().toLowerCase();
     delete document.originalSourceSha256;
     document.parseSourceDecision = "original";
   }

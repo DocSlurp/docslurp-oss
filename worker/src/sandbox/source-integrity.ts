@@ -85,7 +85,9 @@ interface HashedDocument {
  * (lib/parse-source.ts unscannedParseSourceKey starts with a NUL byte), is refused before any byte is read.
  */
 function assertDecided(document: HashedDocument): void {
-  if (document.parseSourceDecision === "unscanned" || (typeof document.sourceKey === "string" && document.sourceKey.startsWith("\u0000"))) {
+  // A document with no decision field was not built by the loader (which always sets one): unscanned in production (I-1).
+  const missing = document.parseSourceDecision === undefined && (process.env.NODE_ENV ?? "").trim().toLowerCase() === "production";
+  if (missing || document.parseSourceDecision === "unscanned" || (typeof document.sourceKey === "string" && document.sourceKey.startsWith("\u0000"))) {
     console.error(`[worker-source] status=parse-source-unscanned metric=parse_source_unscanned document=${document.id}`);
     throw new UnscannedParseSourceError(document.id);
   }

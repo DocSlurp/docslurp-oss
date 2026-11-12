@@ -15,7 +15,7 @@ import { Store } from "../db/store.js";
 import { materializePageRange } from "../deferred/materialize-pages.js";
 import { renderDocumentPage } from "../deferred/render-page.js";
 import { inspectArchive } from "../lib/quarantine-bytes.js";
-import { assertParseSourceDecided, originalSourceForQuarantine, UnscannedParseSourceError } from "../lib/parse-source.js";
+import { assertParseSourceDecided, originalSourceForQuarantine, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource, UnscannedParseSourceError, unscannedParseSourceKey } from "../lib/parse-source.js";
 import { runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
 import { PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import type { Stage } from "../pipeline/pipeline.js";
@@ -432,5 +432,82 @@ describe("R7-L1: a pax global size record is refused", () => {
   it("r7-tar-pax-global-size.xlsx (Python's tarfile extracts a ZIP the header sizes hide): refused", () => {
     const bytes = readFileSync(path.join(fixtures, "r7-tar-pax-global-size.xlsx"));
     expect(inspectArchive(bytes, "q3.xlsx", policy)?.issues).toEqual(["archive-nested-inspection-failed"]);
+  });
+});
+
+describe("R8-L1: an 'original' decision binds parsers to the bytes quarantine scanned, with or without a server hash", () => {
+  async function seedNullHashRow() {
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, execution_generation)
+      values ('run-swap', 'o1', 'u1', 'w', 'upload', 'processing', 'quarantine', '{}', 1, null)`;
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, source_sha256, status, page_count)
+      values ('swap', 'o1', 'u1', 'w', 'run-swap', 'notes.pdf', 'application/pdf', 'raw/swap.pdf', null, 'processing', 1)`;
+  }
+  const benign = Buffer.from("%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n");
+  const plainRunner = { scanForMalware: async () => clean, decryptPdfForScan: async () => ({ status: "not-encrypted", encrypted: false }) } as unknown as CommandRunner;
+
+  it("council P5: a legacy row with no source_sha256, scanned clean, then the object swapped: staging refuses the swapped bytes", async () => {
+    await seedNullHashRow();
+    const objects = new Map([["raw/swap.pdf", benign]]);
+    const { storage } = memoryStorage(objects);
+    const quiet = [vi.spyOn(console, "warn").mockImplementation(() => {}), vi.spyOn(console, "error").mockImplementation(() => {})];
+    try {
+      const scanned = await loadRunState(store, "run-swap", { totalStages: 2 });
+      await new QuarantineStage(plainRunner, storage, config).run(scanned);
+      expect(scanned.documentStage("swap", "quarantine")?.status).toBe("completed");
+      const [row] = await sql`select parse_source_key, parse_source_sha256, parse_source_scan_version from documents where id = 'swap'`;
+      expect(row).toEqual({ parse_source_key: null, parse_source_sha256: sha256Bytes(benign), parse_source_scan_version: 1 });
+
+      objects.set("raw/swap.pdf", Buffer.from("%PDF-1.4\n% SWAPPED AFTER SCAN\n%%EOF\n"));
+      resetStagedSourcesForTests();
+      const later = await loadRunState(store, "run-swap", { totalStages: 2 });
+      expect(later.documents[0]).toMatchObject({ parseSourceDecision: "original", sourceKey: "raw/swap.pdf", sourceSha256: sha256Bytes(benign) });
+      await expect(stageSourceFile(storage, later.documents[0]!, "x")).rejects.toMatchObject({ name: "SourceIntegrityError" });
+      await expect(readSourceBytes(storage, later.documents[0]!)).rejects.toMatchObject({ name: "SourceIntegrityError" });
+
+      // The unswapped bytes still parse.
+      objects.set("raw/swap.pdf", benign);
+      resetStagedSourcesForTests();
+      await expect(stageSourceFile(storage, later.documents[0]!, "x")).resolves.toEqual(expect.any(String));
+    } finally {
+      quiet.forEach((q) => q.mockRestore());
+    }
+  }, 60_000);
+
+  it("a current decision without a hash (an interim row), or whose hash is not the upload's, is unscanned and re-quarantines", async () => {
+    await seedNullHashRow();
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // An interim row (written before 0135 nulled such decisions; the schema now refuses it): resolved, not loaded.
+      expect(resolveDocumentSource({ id: "swap", source_key: "raw/swap.pdf", source_sha256: null, parse_source_scan_version: PARSE_SOURCE_SCAN_VERSION }))
+        .toEqual({ sourceKey: unscannedParseSourceKey("swap"), sourceSha256: null, parseSourceDecision: "unscanned" });
+      await sql`update documents set source_sha256 = ${"e".repeat(64)}, parse_source_sha256 = ${sha256Bytes(benign)}, parse_source_scan_version = 1 where id = 'swap'`;
+      expect((await store.loadDocument("swap")).parseSourceDecision).toBe("unscanned");
+    } finally {
+      quiet.mockRestore();
+    }
+    // The schema refuses a decision without a scanned-bytes hash for new writes (migration 0135).
+    await sql`update documents set source_sha256 = null, parse_source_sha256 = null, parse_source_scan_version = null where id = 'swap'`;
+    await expect(sql`update documents set parse_source_scan_version = 1 where id = 'swap'`).rejects.toThrow(/documents_parse_source_hash_check/);
+    await expect(sql`update documents set parse_source_scan_version = 1, parse_source_sha256 = 'not-a-hash' where id = 'swap'`).rejects.toThrow(/documents_parse_source_hash_check/);
+    await expect(store.setDocumentParseSource("run-swap", "swap", { copy: null, scannedSha256: "" })).rejects.toThrow(/sha256 of the bytes it scanned/);
+  });
+});
+
+describe("I-1: a document object not built by the loader is unscanned in production", () => {
+  it("staging, the PDF source cache and the decision gate refuse an object without a decision field", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const { storage, reads } = memoryStorage(new Map([["raw/a.pdf", attackPdf]]));
+    const adhoc = { id: "adhoc", sourceKey: "raw/a.pdf", sourceSha256: ORIGINAL_SHA } as never;
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(stageSourceFile(storage, adhoc, "x")).rejects.toBeInstanceOf(UnscannedParseSourceError);
+      await expect(readSourceBytes(storage, adhoc)).rejects.toBeInstanceOf(UnscannedParseSourceError);
+      await expect(new PdfSourceCache(storage).get(adhoc)).rejects.toBeInstanceOf(UnscannedParseSourceError);
+      expect(() => assertParseSourceDecided(adhoc)).toThrow(UnscannedParseSourceError);
+      expect(() => originalSourceForQuarantine(adhoc)).toThrow(/no upload binding/);
+    } finally {
+      error.mockRestore();
+    }
+    expect(reads).toEqual([]);
   });
 });

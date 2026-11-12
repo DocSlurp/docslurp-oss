@@ -80,6 +80,7 @@ function setup(action: "flag_for_review" | "block_indexing" | "redact_artifacts"
   const documentId = "doc-1";
   const prefix = `u1/run-1`;
   const document: Document = {
+    parseSourceDecision: "unscanned-allowed",
     id: documentId, userId: "u1", runId: "run-1", filename: options.withExtraction === false ? "notes.txt" : "record.pdf",
     mimeType: options.withExtraction === false ? "text/plain" : "application/pdf",
     sourceKey: `${prefix}/source/${documentId}`, status: "processing", extractionMode: "hybrid", pageCount: 2,

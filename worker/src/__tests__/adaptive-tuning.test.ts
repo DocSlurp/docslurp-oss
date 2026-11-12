@@ -84,6 +84,7 @@ function baseConfig(overrides: Partial<Config> = {}): Config {
 
 function makeDocument(id: string, pageCount: number): Document {
   return {
+    parseSourceDecision: "unscanned-allowed",
     id,
     userId: "user-1",
     runId: "run-1",

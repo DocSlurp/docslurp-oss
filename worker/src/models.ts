@@ -66,7 +66,7 @@ export interface Document {
    */
   originalSourceSha256?: string | null;
   /** What this build's quarantine decided parsers read (lib/parse-source.ts); "unscanned" is refused everywhere else. */
-  parseSourceDecision?: import("./lib/parse-source.js").ParseSourceDecision;
+  parseSourceDecision: import("./lib/parse-source.js").ParseSourceDecision;
   status: string;
   extractionMode: string;
   pageCount: number;

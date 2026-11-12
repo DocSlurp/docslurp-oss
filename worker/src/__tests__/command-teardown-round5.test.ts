@@ -236,6 +236,7 @@ function makeRun(): ProjectRun {
 
 function makeDocument(): Document {
   return {
+    parseSourceDecision: "unscanned-allowed",
     id: "doc-1", userId: "user-1", runId: "run-1", filename: "a.pdf", mimeType: "application/pdf", sourceKey: "raw/a.pdf",
     status: "queued", extractionMode: "hybrid", pageCount: 1, createdAt: new Date(), updatedAt: new Date(),
   };

@@ -99,6 +99,7 @@ export * from "./model-license.js";
 export * from "./page-routing.js";
 export * from "./routing-targets.js";
 export * from "./public-errors.js";
+export * from "./parse-source-decision.js";
 export * from "./api-error.js";
 export * from "./frontend-api.js";
 

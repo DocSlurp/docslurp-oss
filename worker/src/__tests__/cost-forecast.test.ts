@@ -30,6 +30,7 @@ function forecast(documents: Document[], pipeline: PipelineFeatures) {
 
 function makeDoc(pageCount: number, id = "doc-1"): Document {
   return {
+    parseSourceDecision: "unscanned-allowed",
     id,
     userId: "user-1",
     runId: "run-1",

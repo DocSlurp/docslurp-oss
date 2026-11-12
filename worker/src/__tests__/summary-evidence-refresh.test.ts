@@ -33,6 +33,7 @@ class MemoryStore {
 function setup() {
   const storage = new MemoryStore();
   const document: Document = {
+    parseSourceDecision: "unscanned-allowed",
     id: "doc-1", userId: "u1", runId: "run-1", filename: "scan.pdf", mimeType: "application/pdf",
     sourceKey: "u1/run-1/source/doc-1", status: "processing", extractionMode: "hybrid", pageCount: 2,
     createdAt: new Date(), updatedAt: new Date(),

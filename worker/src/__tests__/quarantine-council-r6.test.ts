@@ -40,7 +40,7 @@ describe("R6-H1: every parser reads the scanned copy of an encrypted PDF (lib/pa
 
   it("the loader resolves the document to the scanned copy; the upload's key is reachable only through quarantine", () => {
     expect(resolveDocumentSource(row)).toEqual({ sourceKey: row.parse_source_key, sourceSha256: copy, originalSourceSha256: original, parseSourceDecision: "scanned-copy" });
-    expect(resolveDocumentSource({ id: "d1", source_key: "k", source_sha256: original, parse_source_scan_version: PARSE_SOURCE_SCAN_VERSION })).toEqual({ sourceKey: "k", sourceSha256: original, parseSourceDecision: "original" });
+    expect(resolveDocumentSource({ id: "d1", source_key: "k", source_sha256: original, parse_source_sha256: original, parse_source_scan_version: PARSE_SOURCE_SCAN_VERSION })).toEqual({ sourceKey: "k", sourceSha256: original, parseSourceDecision: "original" });
     const document = loaded(row);
     expect(pdfBytesForParsing(document)).toEqual({ key: row.parse_source_key, sha256: copy });
     expect(originalSourceForQuarantine(document)).toEqual({ id: "d1", sourceKey: row.source_key, sourceSha256: original });
@@ -49,20 +49,19 @@ describe("R6-H1: every parser reads the scanned copy of an encrypted PDF (lib/pa
 
   it("a half-recorded copy fails loudly instead of falling back to the original", () => {
     expect(() => resolveDocumentSource({ ...row, parse_source_sha256: null })).toThrow(/incomplete scanned parse copy/);
-    expect(() => resolveDocumentSource({ ...row, parse_source_key: null })).toThrow(/incomplete scanned parse copy/);
     expect(() => resolveDocumentSource({ ...row, parse_source_sha256: "not-a-hash" })).toThrow(/incomplete scanned parse copy/);
     expect(() => resolveDocumentSource({ ...row, parse_source_scan_version: null })).toThrow(/incomplete scanned parse copy/);
   });
 
   it("applyParseSource points a document at its copy and back to the upload it scanned", () => {
     const document: SourcedDocument = { id: "d1", sourceKey: row.source_key, sourceSha256: original };
-    applyParseSource(document, { key: row.parse_source_key, sha256: copy });
+    applyParseSource(document, { copy: { key: row.parse_source_key, sha256: copy }, scannedSha256: original });
     expect(document).toEqual({ id: "d1", sourceKey: row.parse_source_key, sourceSha256: copy, originalSourceSha256: original, parseSourceDecision: "scanned-copy" });
     expect(hasScannedParseCopy(document)).toBe(true);
     // A retried quarantine re-points from the original, not from the copy.
-    applyParseSource(document, { key: "u1/run/quarantine/d1.scanned.pdf", sha256: "c".repeat(64) });
+    applyParseSource(document, { copy: { key: "u1/run/quarantine/d1.scanned.pdf", sha256: "c".repeat(64) }, scannedSha256: original });
     expect(originalSourceForQuarantine(document).sourceKey).toBe(row.source_key);
-    applyParseSource(document, null);
+    applyParseSource(document, { copy: null, scannedSha256: original });
     expect(document).toEqual({ id: "d1", sourceKey: row.source_key, sourceSha256: original, parseSourceDecision: "original" });
   });
 

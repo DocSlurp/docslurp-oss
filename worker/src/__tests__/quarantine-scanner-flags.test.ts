@@ -29,7 +29,7 @@ async function fixture(extra: Document[] = []) {
   const now = new Date();
   const documents: Document[] = [...sources].map(([filename, bytes]) => ({
     id: filename, userId: "u", runId: "run", filename, mimeType: "text/plain", sourceKey: filename, sourceSha256: sha256Bytes(bytes),
-    status: "queued", extractionMode: "hybrid", pageCount: 1, createdAt: now, updatedAt: now,
+    parseSourceDecision: "unscanned-allowed", status: "queued", extractionMode: "hybrid", pageCount: 1, createdAt: now, updatedAt: now,
   }));
   for (const document of extra) { documents.push(document); sources.set(document.sourceKey, Buffer.from("other")); }
   const run: ProjectRun = { id: "run", orgId: "org-a", projectId: "project", userId: "u", kind: "bulk-upload", status: "processing", stage: "quarantine",

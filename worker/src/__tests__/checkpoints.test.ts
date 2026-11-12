@@ -56,6 +56,7 @@ function makeDocument(overrides: Partial<Document> = {}): Document {
     filename: "sample.pdf",
     mimeType: "application/pdf",
     sourceKey: "user-1/run-1/raw/sample.pdf",
+    parseSourceDecision: "unscanned-allowed",
     status: "queued",
     extractionMode: "hybrid",
     pageCount: 1,

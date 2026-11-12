@@ -25,7 +25,7 @@ import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
 
 function document(filename: string, mimeType: string, pageCount = 1): Document {
-  return { id: "doc-1", userId: "u", runId: "run-1", filename, mimeType, sourceKey: `u/run/raw/${filename}`, status: "queued", extractionMode: "hybrid", pageCount, createdAt: new Date(), updatedAt: new Date() };
+  return { id: "doc-1", userId: "u", runId: "run-1", filename, mimeType, sourceKey: `u/run/raw/${filename}`, parseSourceDecision: "unscanned-allowed", status: "queued", extractionMode: "hybrid", pageCount, createdAt: new Date(), updatedAt: new Date() };
 }
 
 const DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";

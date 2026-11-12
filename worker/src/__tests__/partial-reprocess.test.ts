@@ -128,8 +128,9 @@ function recordingStages(options: { scannedCopy?: boolean } = {}) {
         await runDocumentStage(state, document, name, slot, `${name} ready`, async () => {
           if (name === "quarantine") {
             const copy = options.scannedCopy ? { key: `u1/${state.run.id}/quarantine/${document.id}.scanned.pdf`, sha256: "c".repeat(64) } : null;
-            await state.store!.setDocumentParseSource!(state.run.id, document.id, { copy });
-            applyParseSource(document, copy);
+            const decision = { copy, scannedSha256: "a".repeat(64) };
+            await state.store!.setDocumentParseSource!(state.run.id, document.id, decision);
+            applyParseSource(document, decision);
           }
           if (name === "embed") {
             inputs.embedMarkdown = state.artifactLedger.readDocument(document.id, "markdown");
