@@ -659,7 +659,7 @@ export const visionModelCatalog = [
     // Conservative like the Gemini entry. A 3-page smoke measured 0.02-0.07 cents per page (1.2k-3.2k input
     // tokens: images tile by resolution) against 0.09-0.16 for Gemini 3.1 Flash Lite; refine after the slice run.
     estimatedCostPerPageCents: 0.2,
-    tokenPricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.5, checked: "2026-10-25" },
+    tokenPricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.47, checked: "2026-11-12" },
     // Refused (council round 8, M3): 3,330 is the published processor's maximum (processor-max:nemotron-h-omni), but
     // neither the image framing nor any provider's serving configuration could be verified, and a raster ceiling is
     // not a proven serving maximum either. No image-token bound, so the guard cannot weigh it: not admitted.
@@ -687,7 +687,7 @@ export const visionModelCatalog = [
     tokenPricing: {
       inputUsdPerMillion: 0.3,
       outputUsdPerMillion: 1.2,
-      checked: "2026-10-26",
+      checked: "2026-11-12",
       basis: "pinned-route",
       providers: ["fireworks", "parasail"],
     },

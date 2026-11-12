@@ -43,7 +43,7 @@ describe("shouldFailOpenVisionError", () => {
     expect(price(at("vendor/x"), usage)).toBeCloseTo(0.0025, 10);
     // Without a provider charge, cataloged hosted models use their own list price, not the generic fallback.
     const tokens = { inputTokens: 2_000, outputTokens: 1_000 };
-    expect(price(at("nvidia/nemotron-3.5-super-vl"), tokens)).toBeCloseTo((2_000 * 0.15 + 1_000 * 0.5) / 1e4, 12);
+    expect(price(at("nvidia/nemotron-3.5-super-vl"), tokens)).toBeCloseTo((2_000 * 0.15 + 1_000 * 0.47) / 1e4, 12);
     expect(price(at(DEFAULT_OPENROUTER_VISION_MODEL), tokens))
       .toBeCloseTo(visionListPriceCents(DEFAULT_OPENROUTER_VISION_MODEL, { inputTokens: 2_000, outputTokens: 1_000 })!, 12);
     expect(price(at("google/gemini-3.1-flash-lite"), tokens)).toBeCloseTo((2_000 * 0.25 + 1_000 * 1.5) / 1e4, 12);
