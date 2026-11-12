@@ -260,7 +260,7 @@ with open(at("limit-max-filesize-raw.bin"), "wb") as f:           # a sparse 110
 
 
 # --- Council re-check 4 (PR #339): magic bytes behind a prefix, offset containers, OLE2 amplification ---------------
-def simple_pdf(content, info=b""):
+def simple_pdf(content, info=b"", header_comment=b"", info_first=False):
     objects = [
         b"<</Type/Catalog/Pages 2 0 R>>",
         b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
@@ -269,12 +269,15 @@ def simple_pdf(content, info=b""):
     ]
     if info:
         objects.append(info)
-    data, offsets = b"%PDF-1.4\n", []
-    for number, body in enumerate(objects, 1):
-        offsets.append(len(data))
-        data += b"%d 0 obj\n%s\nendobj\n" % (number, body)
+    order = list(range(1, len(objects) + 1))
+    if info and info_first:
+        order = [5, 1, 2, 3, 4]
+    data, offsets = b"%PDF-1.4\n" + header_comment, {}
+    for number in order:
+        offsets[number] = len(data)
+        data += b"%d 0 obj\n%s\nendobj\n" % (number, objects[number - 1])
     xref = len(data)
-    data += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1) + b"".join(b"%010d 00000 n \n" % o for o in offsets)
+    data += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1) + b"".join(b"%010d 00000 n \n" % offsets[n] for n in range(1, len(objects) + 1))
     data += b"trailer\n<</Size %d/Root 1 0 R%s>>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, b"/Info 5 0 R" if info else b"", xref)
     return data
 
@@ -294,15 +297,20 @@ def zip_bytes(entries, zip64=False, method=zipfile.ZIP_DEFLATED):
     return buf.getvalue()
 
 
-# Correctness High: ordinary unencrypted PDFs that merely contain the bytes /Encrypt (a comment, an /Info string, an
-# uncompressed content stream). qpdf finds no encryption; quarantine rewrites them, scans the rewrite and accepts them.
+# Correctness High: ordinary unencrypted PDFs that merely contain the bytes /Encrypt in their body (a comment after the
+# header, an /Info string, an uncompressed content stream), away from the trailer where libclamav's own /Encrypt heuristic
+# looks. ClamAV scans them clean; qpdf finds no encryption; quarantine rewrites them, scans the rewrite and accepts them.
+# The reviewer's reproducer (the comment after %%EOF) is reported encrypted by libclamav itself.
 plain_text = b"BT (Quarterly results beat the forecast) Tj ET"
-write("pdf-literal-encrypt-comment.pdf", simple_pdf(plain_text) + b"\n% /Encrypt\n")
-write("pdf-literal-encrypt-string.pdf", simple_pdf(plain_text, b"<</Title (/Encrypt and /Decrypt notes)>>"))
+body_text = b"BT (Quarterly results beat the forecast) Tj ET\n" * 200
+write("pdf-literal-encrypt-comment.pdf", simple_pdf(body_text, header_comment=b"% see /Encrypt in the PDF spec\n"))
+write("pdf-literal-encrypt-string.pdf", simple_pdf(body_text, b"<</Title (/Encrypt and /Decrypt notes)>>", info_first=True))
+write("pdf-literal-encrypt-stream.pdf", simple_pdf(b"BT (see /Encrypt in the spec) Tj ET\n" + body_text))
+write("pdf-literal-encrypt-after-eof.pdf", simple_pdf(plain_text) + b"\n% /Encrypt\n")
 # Adversarial case 6: /Encrypt in the base trailer, dropped by an incremental update that replaces the page content with
 # a plaintext Flate stream holding the marker. libclamav honours the base /Encrypt and scans ciphertext; qpdf's effective
 # trailer is unencrypted, so its rewrite is scanned and the marker found.
-run("qpdf", "--encrypt", "", "owner-secret", "256", "--", at("marker-plain.pdf"), at("enc-base.pdf"))
+run("qpdf", "--allow-weak-crypto", "--encrypt", "", "owner-secret", "128", "--use-aes=n", "--", at("marker-plain.pdf"), at("enc-base.pdf"))
 base = open(at("enc-base.pdf"), "rb").read()
 os.remove(at("enc-base.pdf"))
 contents = int(re.search(rb"/Contents (\d+) 0 R", base).group(1))

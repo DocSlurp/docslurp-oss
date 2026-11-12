@@ -8,6 +8,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 import { setDefaultParserSandbox } from "../sandbox/startup.js";
 import type { ParserSandboxProvider, SandboxCommand } from "../sandbox/types.js";
+import { flatePdfCanary } from "./clamd-policy.js";
 import { CommandRunner, resetLocalClamdPolicyCache } from "./runner.js";
 
 /**
@@ -57,6 +58,7 @@ describe.skipIf(!image)("real clamd: the local daemon is trusted only after its 
     writeFileSync(path.join(dir, "hostdb", "daily.cvd"), "signatures"); // host-side freshness only
     writeFileSync(path.join(dir, "eicar.com"), EICAR);
     writeFileSync(path.join(dir, "note.txt"), "Quarterly results beat the forecast.\n");
+    writeFileSync(path.join(dir, "eicar-flate.pdf"), flatePdfCanary());
     execFileSync("zip", ["-q", "-j", "-P", "zip-secret", path.join(dir, "encrypted.zip"), path.join(dir, "eicar.com")]);
     copyFileSync(fileURLToPath(new URL("../../scripts/apply-clamd-policy.sh", import.meta.url)), path.join(dir, "apply-clamd-policy.sh"));
     // The council reproducer's daemon: sockets and paths only.
@@ -69,8 +71,12 @@ describe.skipIf(!image)("real clamd: the local daemon is trusted only after its 
       `sh ${dir}/apply-clamd-policy.sh ${dir}/image.conf`,
       `sed -ri '/^#?(User|LocalSocket|LocalSocketGroup|PidFile|TemporaryDirectory|LogFile|Foreground)[[:space:]]/d' ${dir}/image.conf`,
       `printf 'LocalSocket ${dir}/image.sock\\nTemporaryDirectory ${dir}/tmp\\nForeground no\\n' >> ${dir}/image.conf`,
+      // Council re-check 4, M2: the image's policy with PDF scanning off (every alert option still on).
+      `sed -e '/^ScanPDF[[:space:]]/d' -e 's#^LocalSocket .*#LocalSocket ${dir}/weakpdf.sock#' ${dir}/image.conf > ${dir}/weakpdf.conf`,
+      `printf 'ScanPDF no\\n' >> ${dir}/weakpdf.conf`,
       `clamd --config-file=${dir}/default.conf || exit 9`,
       `clamd --config-file=${dir}/image.conf || exit 9`,
+      `clamd --config-file=${dir}/weakpdf.conf || exit 9`,
     ].join("\n");
     const ready = spawnSync("docker", ["exec", container, "sh", "-c", setup], { encoding: "utf8", timeout: 600_000 });
     if (ready.status !== 0) throw new Error(`daemons did not start: ${ready.stderr}`);
@@ -122,6 +128,16 @@ describe.skipIf(!image)("real clamd: the local daemon is trusted only after its 
     const result = await scan("encrypted.zip");
     expect(result).toMatchObject({ status: "error", engine: null });
     expect(daemonScanned("encrypted.zip")).toBe(false);
+  }, 600_000);
+
+  it("council re-check 4, M2: a daemon with ScanPDF off (alert options on) is refused, and the Flate PDF it would pass goes to clamscan", async () => {
+    const direct = await exec(["clamdscan", `--config-file=${dir}/weakpdf.conf`, "--fdpass", "--no-summary", path.join(dir, "eicar-flate.pdf")]);
+    expect(direct).toMatchObject({ exitCode: 0 }); // the reproducer: that daemon reports it OK
+    vi.stubEnv("DOCSLURP_CLAMAV_CLAMD_CONF", `${dir}/weakpdf.conf`);
+    const result = await scan("eicar-flate.pdf");
+    expect(result).toMatchObject({ engine: "clamscan", status: "infected", signature: "Eicar-Test-Signature" });
+    expect(result.healthWarnings.join("\n")).toMatch(/clamd refused: pdf content canary/);
+    expect(daemonScanned("eicar-flate.pdf")).toBe(false);
   }, 600_000);
 
   it("the worker image's daemon (apply-clamd-policy.sh) passes its canaries and is used", async () => {

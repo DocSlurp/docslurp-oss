@@ -30,10 +30,12 @@
   shares a VM with clamd. One document per session already bounds it to the document that ran the exploit.
 - [ ] Build the scanner snapshot in the background when freshclam updates the signatures (today the first scan after an
   update waits about 34 s for the build), and share one snapshot across workers instead of one build per worker process.
-- [ ] Residual after the nested-archive walk (PR #339, owner decision 2026-11-11): the in-VM walk recognises nested
-  containers by their leading magic only. An archive embedded at an offset inside another member (a polyglot, a
-  self-extractor, a ZIP appended to an image) is not walked, while libclamav's embedded-file scan may open it and skip a
-  ZIP64 or over-size member there. A PDF embedded in a DOCX/EPUB member with an empty user password is scanned by
+- [ ] Residual after the nested-archive walk (PR #339, council round 4, 2026-11-11): a ZIP or RAR is now found behind up
+  to 4 KiB of leading bytes, or by a ZIP end record in a member's last 64 KiB. One deeper inside a member, with no end
+  record near its end, is still not walked, while libclamav's embedded-file scan may open it and skip a ZIP64 member
+  there. Nested 7z, tar, CAB, bzip2, xz and the other formats ClamAV opens are accepted with an
+  `archive-nested-uninspectable` warning (a ZIP64 or RAR inside them is ClamAV's alone to judge); walking tar and the
+  others in the VM would close that. A PDF embedded in a DOCX/EPUB member with an empty user password is scanned by
   libclamav alone (no qpdf copy). Extractors never open nested members; they are only served back with the original.
 - [ ] Q3 (concurrent quarantine and extraction): split quarantine into the intake inspection (stays first: format-detect
   reads its verified file facts) and the malware scan, and gate every served artifact on a clean verdict before running
