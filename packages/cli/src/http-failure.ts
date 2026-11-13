@@ -16,6 +16,7 @@ const RECOVERY_MESSAGES: Record<string, string> = {
   invalid_search_scope: "Choose a valid search scope in this project and try again.",
   project_scope_forbidden: "Choose a project this API key can access.",
   model_not_allowed: "Choose a model allowed by this project.",
+  chat_capacity_unavailable: "Chat is temporarily unavailable. Wait a few seconds, then try again.",
   unavailable: "The service is temporarily unavailable. Try again later.",
 };
 

@@ -854,7 +854,7 @@ async function flushOne(
   }
 }
 
-// ---- Figures kept on every failure path: pending and stored rows, adopt, level-only writes (migration 0153) ----
+// ---- Figures kept on every failure path: pending and stored rows, adopt, level-only writes (migration 0156) ----
 
 type Tx = import("postgres").TransactionSql<Record<string, unknown>>;
 

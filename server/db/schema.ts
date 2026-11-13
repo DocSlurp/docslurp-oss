@@ -199,6 +199,8 @@ export const projectCorpusStats = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
+    /** The updated_at the automatic-title sweep last examined (0154); the project is pending while they differ. */
+    autoTitleCheckedAt: timestamp("auto_title_checked_at", { withTimezone: true, mode: "string" }),
   },
   (table) => [
     foreignKey({
@@ -1388,9 +1390,12 @@ export const searchSessions = pgTable(
       .notNull(),
     /** API-key keyword and hybrid searches only (0139); the maintenance sweep deletes the session after it. */
     expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }),
+    /** The searched project (0141). Project reads filter and date sessions by it, never by metadata. */
+    projectId: text("project_id"),
   },
   (table) => [
     index("search_sessions_expires_at_idx").on(table.expiresAt).where(sql`expires_at is not null`),
+    index("search_sessions_project_id_created_at_idx").using("btree", table.projectId, table.createdAt, table.id),
     index("search_sessions_user_id_created_at_idx").using(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),
@@ -1405,6 +1410,11 @@ export const searchSessions = pgTable(
       columns: [table.userId],
       foreignColumns: [user.id],
       name: "search_sessions_user_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "search_sessions_project_id_fkey",
     }).onDelete("cascade"),
   ],
 );
@@ -3332,7 +3342,7 @@ export const storageMeterDays = pgTable(
     objectBytes: bigint("object_bytes", { mode: "number" }).default(0).notNull(),
     // You can use { mode: "bigint" } if numbers are exceeding js number limitations
     indexBytes: bigint("index_bytes", { mode: "number" }).default(0).notNull(),
-    // Of objectBytes, the figure bytes measured from the asset ledger (migration 0152).
+    // Of objectBytes, the figure bytes measured from the asset ledger (migration 0155).
     measuredArtifactBytes: bigint("measured_artifact_bytes", { mode: "number" }).default(0).notNull(),
     credits: numeric({ precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
@@ -3599,7 +3609,7 @@ export const documentAssets = pgTable("document_assets", {
   linkPath: text("link_path"),
   fileOf: text("file_of"),
   storageKey: text("storage_key"),
-  // Migration 0153: none (no file), pending (written before its upload), stored (landed and checked; served and billed).
+  // Migration 0156: none (no file), pending (written before its upload), stored (landed and checked; served and billed).
   storageState: text("storage_state").default("none").notNull(),
   objNum: integer("obj_num"),
   objGen: integer("obj_gen"),
@@ -3653,9 +3663,9 @@ export const documentExtractionLevels = pgTable("document_extraction_levels", {
   sourceDecode: integer("source_decode").default(0).notNull(),
   sourceRender: integer("source_render").default(0).notNull(),
   assetBytes: bigint("asset_bytes", { mode: "number" }).default(0).notNull(),
-  // Migration 0153: false after a re-run that skipped the figure step (rows kept, not served, counted or billed).
+  // Migration 0156: false after a re-run that skipped the figure step (rows kept, not served, counted or billed).
   assetsCurrent: boolean("assets_current").default(true).notNull(),
-  // Migration 0153: uploads a crash left pending (resumable work, adopted without a VM) and the folder files' bytes.
+  // Migration 0156: uploads a crash left pending (resumable work, adopted without a VM) and the folder files' bytes.
   assetsPending: integer("assets_pending").default(0).notNull(),
   folderBytes: bigint("folder_bytes", { mode: "number" }).default(0).notNull(),
   gaps: jsonb(),

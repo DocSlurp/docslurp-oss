@@ -112,6 +112,7 @@ export function refusePricingStateWriter(env: Record<string, string | undefined>
  */
 export const RUNTIME_SECURITY_DEFINER_ALLOWLIST: readonly string[] = Object.freeze([
   "public.realtime_changed()",
+  "public.realtime_statement_changed()",
   "public.realtime_search_session_changed()",
   "public.realtime_materialization_changed()",
   "public.realtime_compact_revisions(text)",

@@ -1,6 +1,6 @@
 import { deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError } from "@docslurp/shared";
 import { chartExportDefaults, upgradeStoredPipelineChartExport } from "@docslurp/shared";
-import { markProjectAutoNamed, refineProjectNames } from "./project-naming.js";
+import { markProjectAutoNamed } from "./project-naming.js";
 import { forgetProjectProviderPolicy } from "../lib/provider-policy.js";
 import { jsonRecord } from "../lib/json-record.js";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -629,13 +629,26 @@ export async function ensurePersonalDefaultProject(userId: string): Promise<void
   await insertDefaultProject(sql, { orgId: organization.id, userId });
 }
 
-export async function getProject(projectId: string, userId: string, options: { refineNames?: boolean } = {}): Promise<ProjectRecord | null> {
+/** Read-only: automatic titles advance after ingest (project-naming.ts sweepProjectAutoTitles), never on a read. */
+export async function getProject(projectId: string, userId: string): Promise<ProjectRecord | null> {
   const access = await getProjectAccess(projectId, userId);
   if (!access) {
     return null;
   }
 
-  if (options.refineNames !== false) await refineProjectNames([projectId]);
+  return await readProject(projectId, access.orgId);
+}
+
+/**
+ * The project record for a caller that has already authorized the project in `orgId`
+ * (the realtime broker re-authorizes every subscription before projecting it): one
+ * statement, pinned to the organization, no access lookup and no name refinement.
+ */
+export async function getAuthorizedProjectRecord(projectId: string, orgId: string): Promise<ProjectRecord | null> {
+  return await readProject(projectId, orgId);
+}
+
+async function readProject(projectId: string, orgId: string): Promise<ProjectRecord | null> {
   const [row] = await sql<ProjectRow[]>`
     select
       w.id,
@@ -661,7 +674,7 @@ export async function getProject(projectId: string, userId: string, options: { r
       coalesce((
         select count(*)::int
         from search_sessions s
-        where s.metadata ->> 'projectId' = w.id
+        where s.project_id = w.id
       ), 0) as search_session_count,
       coalesce((
         select count(*)::int
@@ -686,7 +699,7 @@ export async function getProject(projectId: string, userId: string, options: { r
         coalesce((
           select max(s.created_at)
           from search_sessions s
-          where s.metadata ->> 'projectId' = w.id
+          where s.project_id = w.id
         ), w.updated_at),
         coalesce((
           select max(cs.created_at)
@@ -731,20 +744,19 @@ export async function getProject(projectId: string, userId: string, options: { r
       order by created_at desc
       limit 1
     ) recent on true
-    where w.id = ${projectId}
+    where w.id = ${projectId} and w.org_id = ${orgId}
   `;
 
   return row ? mapProject(row) : null;
 }
 
-/** Dashboard bootstrap disables lazy title refinement to keep its read side-effect free. */
-export async function listProjects(userId: string, options: { refineNames?: boolean } = {}): Promise<ProjectRecord[]> {
+/** Read-only, like getProject. */
+export async function listProjects(userId: string): Promise<ProjectRecord[]> {
   const projectIds = await listAccessibleProjectIds(userId);
   if (projectIds.length === 0) {
     return [];
   }
 
-  if (options.refineNames !== false) await refineProjectNames(projectIds);
   const rows = await sql<ProjectRow[]>`
     select
       w.id,
@@ -770,7 +782,7 @@ export async function listProjects(userId: string, options: { refineNames?: bool
       coalesce((
         select count(*)::int
         from search_sessions s
-        where s.metadata ->> 'projectId' = w.id
+        where s.project_id = w.id
       ), 0) as search_session_count,
       coalesce((
         select count(*)::int
@@ -795,7 +807,7 @@ export async function listProjects(userId: string, options: { refineNames?: bool
         coalesce((
           select max(s.created_at)
           from search_sessions s
-          where s.metadata ->> 'projectId' = w.id
+          where s.project_id = w.id
         ), w.updated_at),
         coalesce((
           select max(cs.created_at)
@@ -849,7 +861,7 @@ export async function listProjects(userId: string, options: { refineNames?: bool
       coalesce((
         select max(s.created_at)
         from search_sessions s
-        where s.metadata ->> 'projectId' = w.id
+        where s.project_id = w.id
       ), w.updated_at),
       coalesce((
         select max(cs.created_at)
@@ -1377,7 +1389,7 @@ export async function getProjectCockpit(
       coalesce((
         select count(*)::int
         from search_sessions s
-        where s.metadata ->> 'projectId' = ${projectId}
+        where s.project_id = ${projectId}
       ), 0) as search_sessions,
       coalesce((
         select count(*)::int
@@ -1580,7 +1592,7 @@ export async function getProjectTraceFeed(
       left join lateral ${sessionTokenUsage(userId, sql`s.id`)} tokens on true
       where s.user_id = ${userId}
         and (
-          s.metadata ->> 'projectId' = ${projectId}
+          s.project_id = ${projectId}
           or exists (
             select 1
             from search_session_results sx

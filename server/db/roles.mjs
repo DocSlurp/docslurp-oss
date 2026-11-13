@@ -143,6 +143,7 @@ export const WORKER_DENIED_TABLES = Object.freeze({
   chat_run_dependencies: "authorized chat task discovery links (API only); ingestion publishes through document_page_states",
   realtime_revision_counters: "private numeric publication storage; only validated triggers may write",
   realtime_revisions: "aggregate dashboard revision view (API only); ingestion triggers use realtime_revision_counters",
+  realtime_scope_revisions: "per-project/run dashboard revision view (API only, 0153); ingestion triggers use realtime_revision_counters",
   extracts: "extract retention, charges and deletion (API maintenance sweep only); the worker reads runs' storage_prefix",
   chat_turns: "chat (API only)",
   connector_sync_log: "connector administration (API only)",
@@ -210,6 +211,7 @@ export const WORKER_DENIED_TABLES = Object.freeze({
  */
 export const RUNTIME_SECURITY_DEFINER_ALLOWLIST = Object.freeze([
   "public.realtime_changed()",
+  "public.realtime_statement_changed()",
   "public.realtime_search_session_changed()",
   "public.realtime_materialization_changed()",
   "public.realtime_compact_revisions(text)",
@@ -284,14 +286,18 @@ export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, 
   }
   if (relations.includes("realtime_revision_counters")) {
     // Schema-wide application grants must never expose publication internals.
-    const functions = "public.realtime_changed(),public.realtime_search_session_changed(),public.realtime_materialization_changed(),public.realtime_record_change(text),public.realtime_fold_committed(text),public.realtime_compact_revisions(text)";
+    // realtime_scope_revisions and realtime_statement_changed() both arrive with 0153: the view is read like
+    // realtime_revisions, the function is revoked like the other triggers; both are absent before 0153.
+    const scoped = relations.includes("realtime_scope_revisions");
+    const functions = `public.realtime_changed(),${scoped ? "public.realtime_statement_changed()," : ""}public.realtime_search_session_changed(),public.realtime_materialization_changed(),public.realtime_record_change(text),public.realtime_fold_committed(text),public.realtime_compact_revisions(text)`;
+    const views = scoped ? "public.realtime_revisions,public.realtime_scope_revisions" : "public.realtime_revisions";
     statements.push(`revoke all on function ${functions} from public`,
-      "revoke all on public.realtime_revision_counters,public.realtime_revisions from public");
+      `revoke all on public.realtime_revision_counters,${views} from public`);
     for (const role of [roles.app, roles.worker].filter(has)) {
-      statements.push(`revoke all on public.realtime_revision_counters,public.realtime_revisions from ${quoteIdent(role)}`,
+      statements.push(`revoke all on public.realtime_revision_counters,${views} from ${quoteIdent(role)}`,
         `revoke all on function ${functions} from ${quoteIdent(role)}`);
     }
-    if (has(roles.app)) statements.push(`grant select on public.realtime_revisions to ${quoteIdent(roles.app)}`,
+    if (has(roles.app)) statements.push(`grant select on ${views} to ${quoteIdent(roles.app)}`,
       `grant execute on function public.realtime_compact_revisions(text) to ${quoteIdent(roles.app)}`);
   }
   if (relations.includes("pricing_provider_state")) {

@@ -398,7 +398,7 @@ same PDF and settings, validates the returned folder like any other, stores it, 
 
 ## Pending and stored files
 
-Migration 0153 makes the asset ledger keep extracted figures on every failure path:
+Migration 0156 makes the asset ledger keep extracted figures on every failure path:
 
 - **Pending, then stored.** Before each upload step (64 files), the figure step records the files as `pending` rows
   under their exact keys. After the step's uploads land and check out, it flips them to `stored`, in the same order for
