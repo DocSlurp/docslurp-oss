@@ -75,6 +75,8 @@ async function main(): Promise<void> {
   const queries = Array.from({ length: QUERIES }, () => vector());
   const terms = Array.from({ length: QUERIES }, (_, i) => `${WORDS[i % WORDS.length]} ${WORDS[(i * 7 + 3) % WORDS.length]}`);
 
+  // The first load also waits on the fleet capability check (early lexical); keep it out of the numbers.
+  await eligible.loadEligibleDocuments({ projectId: PROJECT, embeddingModel: MODEL, dimension: DIM });
   const reload: number[] = [];
   for (let i = 0; i < 5; i += 1) {
     eligible.invalidateSearchProject(PROJECT);
