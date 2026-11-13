@@ -1,4 +1,5 @@
 import postgres from "postgres";
+import { normalizePipelineFeatures } from "@docslurp/shared";
 import { Hono } from "hono";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -44,6 +45,9 @@ afterAll(async () => {
 });
 
 const pipeline = (patch: Partial<PipelineFeatures> = {}): PipelineFeatures => ({ ...defaultPipelineFeatures, ...patch });
+/** An embedding config chosen by profile (a category): the model comes from the profile, never a raw URI. */
+const profileEmbedding = (profile: "fastest-local" | "cheapest-local") =>
+  normalizePipelineFeatures({ ...defaultPipelineFeatures, embedding: { profile } } as never).embedding;
 
 async function seed(args: { credits: number; autoConfirm?: boolean; documents?: number; vectorized?: boolean }) {
   await sql`delete from project_runs`;
@@ -67,7 +71,7 @@ async function seed(args: { credits: number; autoConfirm?: boolean; documents?: 
   }
 }
 
-const embeddingChange = () => ({ pipeline: pipeline({ embedding: { ...defaultPipelineFeatures.embedding, target: "local" as const, modelUri: "llm://transformers.js/Xenova/gte-small" as never } }) });
+const embeddingChange = () => ({ pipeline: pipeline({ embedding: profileEmbedding("fastest-local") }) });
 
 async function patch(input: Record<string, unknown>) {
   const plan = await change.planProjectChange({ projectId: "w", userId: "u1", input: input as never });
@@ -194,7 +198,8 @@ describe("config-change jobs", () => {
     expect(applied!.job).toMatchObject({ status: "blocked", reason: "credits" });
     expect(applied!.queuedRunIds).toEqual([]);
     const [ws] = await sql<{ pipeline: PipelineFeatures }[]>`select pipeline from projects where id = 'w'`;
-    expect(ws!.pipeline.embedding.modelUri).toBe("llm://transformers.js/Xenova/gte-small");
+    // The row stores the category (managed form); the model comes from the profile when read.
+    expect(ws!.pipeline.embedding.profile).toBe("fastest-local");
 
     expect((await blocked.resumeBlockedRuns({ sql: sql as never })).resumed).toBe(0);
     await sql`update organizations set credit_balance_cents = 10000 where id = 'o1'`;
@@ -207,7 +212,7 @@ describe("config-change jobs", () => {
     await seed({ credits: 10_000, documents: 3, vectorized: true });
     const A = pipeline();
     const B = embeddingChange().pipeline;
-    const C = pipeline({ embedding: { ...defaultPipelineFeatures.embedding, target: "local" as const, modelUri: "llm://transformers.js/Xenova/all-MiniLM-L6-v2" as never } });
+    const C = pipeline({ embedding: profileEmbedding("cheapest-local") });
     const hashes = { A: indexConfigHash(indexConfigOf(A)), B: indexConfigHash(indexConfigOf(B)), C: indexConfigHash(indexConfigOf(C)) };
 
     const first = await patch({ pipeline: B });
@@ -259,7 +264,7 @@ describe("config-change jobs", () => {
     await seed({ credits: 0, documents: 2, vectorized: true });
     const first = await patch(embeddingChange());
     expect(first.applied!.job).toMatchObject({ status: "blocked" });
-    const second = await patch({ pipeline: pipeline({ embedding: { ...defaultPipelineFeatures.embedding, target: "local" as const, modelUri: "llm://transformers.js/Xenova/all-MiniLM-L6-v2" as never } }) });
+    const second = await patch({ pipeline: pipeline({ embedding: profileEmbedding("cheapest-local") }) });
     expect(second.applied!.job).toMatchObject({ status: "blocked" });
     const [cancelled] = await sql<{ status: string; control_state: string }[]>`select status, control_state from project_runs where id = ${first.applied!.job!.id}`;
     expect(cancelled).toEqual({ status: "failed", control_state: "cancelled" });
@@ -302,8 +307,8 @@ describe("config-change jobs", () => {
   const stagesOf = async (jobId: string) =>
     (await sql<{ s: string[] | null }[]>`select pipeline -> 'stageSubset' as s from project_runs where job_id = ${jobId} order by created_at`)
       .flatMap((row) => row.s ?? []);
-  const MINILM = "llm://transformers.js/Xenova/all-MiniLM-L6-v2" as never;
-  const embeddingTo = (pl: PipelineFeatures) => ({ pipeline: { ...pl, embedding: { ...pl.embedding, target: "local" as const, modelUri: MINILM } } });
+  // An embedding change is a profile change (a category): raw model URIs are managed, never a caller's choice.
+  const embeddingTo = (pl: PipelineFeatures) => ({ pipeline: { ...pl, embedding: profileEmbedding("cheapest-local") } });
 
   it("keeps a cancelled PII re-index's stages when an embedding change supersedes it", async () => {
     await seed({ credits: 10_000, documents: 2, vectorized: true });
@@ -379,7 +384,8 @@ describe("config-change jobs", () => {
 
 describe("concurrent PATCHes do not lose updates", () => {
   const plan = async (input: Record<string, unknown>) => (await change.planProjectChange({ projectId: "w", userId: "u1", input: input as never }))!;
-  const modelOf = async () => ((await sql`select pipeline from projects where id = 'w'`)[0]!.pipeline as PipelineFeatures).embedding.modelUri;
+  // The row stores the managed form (no default URIs); the model is what the stored categories resolve to.
+  const modelOf = async () => normalizePipelineFeatures((await sql`select pipeline from projects where id = 'w'`)[0]!.pipeline as PipelineFeatures).embedding.modelUri;
 
   it("an embedding change planned before a budget change keeps the budget (and the job matches the final index)", async () => {
     await seed({ credits: 10_000, documents: 2, vectorized: true });
@@ -420,7 +426,7 @@ describe("re-plan exhaustion", () => {
 
 describe("estimator prices the compiled plan the run will execute", () => {
   const fields: Array<[string, Partial<PipelineFeatures>]> = [
-    ["embedding model", { embedding: { ...defaultPipelineFeatures.embedding, target: "local" as const, modelUri: "llm://transformers.js/Xenova/gte-small" as never } }],
+    ["embedding model", { embedding: profileEmbedding("fastest-local") }],
     ["summarize", { summarize: true }],
     ["pii policy", { piiPolicy: { ...defaultPipelineFeatures.piiPolicy, enabled: true, action: "block_indexing" as const } }],
     ["structured extraction", { structuredExtraction: { ...defaultPipelineFeatures.structuredExtraction, supportingPrompt: "Extract totals." } }],
