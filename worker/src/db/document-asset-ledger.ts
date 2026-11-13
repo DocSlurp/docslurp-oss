@@ -505,7 +505,13 @@ export async function markAssetsPending(
   args: { scope: DocumentAssetLedgerScope; rows: readonly LedgerAsset[]; fence?: FigureFence },
 ): Promise<{ pending: number }> {
   assertScope(args.scope);
-  const rows = args.rows.map((row) => checkedRow({ ...row, storageKey: row.storageKey ?? null }, row.storageKey === undefined));
+  const rows = args.rows.map((row) => {
+    // The key is always derived below; a given one must equal it.
+    const { storageKey, ...rest } = row as LedgerAsset;
+    const checked = checkedRow(rest as DocumentAsset, true);
+    checked.storageKey = typeof storageKey === "string" ? storageKey : null;
+    return checked;
+  });
   if (rows.length > DOPPLER_MANIFEST_V2_LIMITS.maxEntries || rows.some((row) => row.status !== "extracted")) throw new DocumentAssetLedgerError("invalid-assets");
   if (rows.length === 0) return { pending: 0 };
   const { orgId, projectId, documentId, runId } = args.scope;

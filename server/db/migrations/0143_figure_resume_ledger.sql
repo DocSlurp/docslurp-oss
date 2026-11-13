@@ -26,8 +26,8 @@ UPDATE document_assets SET status = 'not-extracted', reason = 'aborted', resumab
 --> statement-breakpoint
 DO $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conname = 'document_assets_storage_state_check' AND conrelid = 'public.document_assets'::regclass) THEN
-    ALTER TABLE document_assets ADD CONSTRAINT document_assets_storage_state_check
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conname = 'document_assets_extracted_storage_check' AND conrelid = 'public.document_assets'::regclass) THEN
+    ALTER TABLE document_assets ADD CONSTRAINT document_assets_extracted_storage_check
       CHECK ((status = 'extracted') = (storage_state <> 'none'));
   END IF;
   -- The key ends in this document's folder, the path derived from the id, the first 16 hex digits of the file's SHA-256
