@@ -139,7 +139,7 @@ This continues the quickstart. Send follow-ups in a session one at a time, and o
 
 ### Show results as each retrieval leg lands
 
-`search()` waits for every leg, fusion and reranking. `searchStream()` yields each leg's hits as soon as it finishes, in completion order, then the authoritative list. Hits are provisional until `search.results`; `mergeSearchStream()` deduplicates them across legs and swaps in the final order. Await `stream.response` for the same body `search()` returns. See the [event reference](https://docslurp.io/docs/search-api#streaming-search).
+`search()` waits for every leg, fusion and reranking. `searchStream()` yields each leg's hits as soon as it finishes, in completion order, then the authoritative list. Hits are provisional until `search.results`: a hit's `score` is its leg's own score, and provisional hits can include rows the final ranking drops or merges. A hit body is sent once per stream; a later leg that finds the same passage sends only its id and rank, and `mergeSearchStream()` adds the leg to the earlier hit, deduplicates across legs and sub-searches (`view.subSearches` holds their legs and phases) and swaps in the final order. Ids include the stage for page-level results. `stream.response` resolves with the same body `search()` returns, before, after or without iterating. A stream can be iterated once. `availability` in that body reports indexing coverage; re-run the search to refresh while documents are still indexing. See the [event reference](https://docslurp.io/docs/search-api#streaming-search).
 
 ```ts
 import { createDocSlurpClient, emptySearchStreamView, mergeSearchStream } from "@docslurp/sdk";
@@ -154,7 +154,7 @@ for await (const event of stream) {
 const { results } = await stream.response;
 ```
 
-If the stream endpoint is unavailable, or the connection drops before `search.results`, the SDK calls `POST /v1/search` once and synthesizes `search.started`, `search.results` and `search.done`, so your loop doesn't change (`stream.transport` is then `"json"`). Authentication, billing, rate-limit and validation errors are thrown as `DocSlurpApiError`, as is a `search.error` event, and aborting through `signal` stops the request without a fallback. Pass `{ transport: "json" }` to skip streaming or `{ transport: "sse" }` to never fall back.
+A search is billed once it has produced hits, even if you disconnect, so the SDK calls `POST /v1/search` only when the stream never started: HTTP 404, 405, 406 or 501, a 2xx that is not `text/event-stream`, or a connection failure before any response. It then synthesizes `search.started`, `search.results` and `search.done`, so your loop doesn't change (`stream.transport` is then `"json"`). After the first event, a dropped connection, a malformed frame or a stream that ends without `search.results` throws `DocSlurpApiError` with `code: "stream_interrupted"` and never issues a second search; a drop after `search.results` still returns the answer. Authentication, billing, rate-limit and validation errors are thrown as `DocSlurpApiError`, as is a `search.error` event, and aborting through `signal` stops the request without a fallback. Pass `{ transport: "json" }` to skip streaming or `{ transport: "sse" }` to never fall back.
 
 ### Upload several files without reading them all into RAM
 
@@ -469,7 +469,7 @@ Environment variables are read once, when the client is created, and only on the
 | `streamActivity(options?)` | Async iterable of account activity events, filtered by `types` and project UUID | Same as `getRun` |
 | `search(input, request?)` | Async iterable of hits; await for `{ results, availability, sessionId, usage }` | Any search scope (`search:keyword`, `search:hybrid`, `search:deep`); `mode` picks a cheaper one |
 | `search({ queries, concurrency? }, options?)` | `{ results: [{ ok, data?, error? }] }` | Any search scope (`search:keyword`, `search:hybrid`, `search:deep`); `mode` picks a cheaper one |
-| `searchStream({ q, stats?, ...filters }, { transport?, signal?, timeoutMs? }?)` | Async iterable of typed `search.*` events (hits per retrieval leg as they land); `await stream.response` for the final `search()` body. Falls back to `POST /v1/search` when streaming is unavailable | Same as `search` |
+| `searchStream({ q, stats?, ...filters }, { transport?, signal?, timeoutMs? }?)` | Async iterable of typed `search.*` events (hits per retrieval leg as they land); `await stream.response` for the final `search()` body. Falls back to `POST /v1/search` only when the stream never started; later drops throw `stream_interrupted` | Same as `search` |
 | `mergeSearchStream(view, event)` | Pure fold of events into a view model: hits deduplicated across legs, replaced by the authoritative list on `search.results` | None |
 | `chat({ q, project?, sessionId? }, request?)` | Answer, citations, availability, session IDs, usage, runtime | `chat` |
 | `chatStream(input, request?)` | Async iterable of `status`, `message` (the full `ChatResponse`) and `done` events; sends `q`, `project`, `sessionId`, `sessionToken`, `model`, `filters` and `speedBoost`, not `retrieval` or `agent` | `chat` |

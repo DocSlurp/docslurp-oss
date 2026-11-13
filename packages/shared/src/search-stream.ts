@@ -13,13 +13,22 @@ import { searchResultSchema, type SearchResult } from "./search.js";
  * - `seq`: 0-based, strictly increasing per stream. Also sent as the SSE `id:`.
  * - `elapsedMs`: milliseconds since the server accepted the request.
  *
- * Order of events: `search.started` first; then any number of `search.phase`
- * and `search.hits` in completion order (not rank order); then
+ * Order of events: `search.started` first; then any number of `search.hits`
+ * (and, when the request sets `stats`, `search.phase`) in completion order,
+ * not rank order; then
  * `search.results` (the same body `POST /v1/search` returns) and
  * `search.done`. A failure after the stream opened is one `search.error`
  * followed by nothing. Hits are provisional: only `search.results` is the
- * answer, and it may drop, add or reorder hits. `POST /v1/search` remains the
- * non-streaming fallback and returns the same final body.
+ * answer, and it may drop, add or reorder hits. A hit's `score` is the leg's
+ * own score, not the final one. `POST /v1/search` remains the non-streaming
+ * fallback and returns the same final body. A search is billed once it has
+ * produced hits, whether or not the client stays connected, so a client falls
+ * back to the JSON endpoint only when the stream never started (no event
+ * received), never after `search.started`.
+ *
+ * The server sends `: keepalive` comments while a search is quiet. The stream
+ * ends after `search.done`; an `EventSource` client must `close()` on
+ * `search.done` or `search.error`, or it reconnects and runs the search again.
  */
 export const SEARCH_STREAM_PROTOCOL = 1;
 
@@ -55,17 +64,30 @@ const envelope = {
   elapsedMs: z.number().nonnegative(),
 };
 
-/** Stable identity of a result across legs and the final list. */
-export function searchResultId(citation: Pick<SearchResult["citation"], "documentId" | "chunkIndex" | "source">): string {
-  return `${citation.source ?? "document"}:${citation.documentId}:${citation.chunkIndex}`;
+/**
+ * Stable identity of a result across legs and the final list. Page-stage
+ * results (page text, map nodes, page images) number pages where chunk results
+ * number chunks, so the stage is part of the id.
+ */
+export function searchResultId(result: {
+  citation: Pick<SearchResult["citation"], "documentId" | "chunkIndex" | "source">;
+  retrieval?: { stage?: string } | undefined;
+}): string {
+  const stage = result.retrieval?.stage;
+  const prefix = `${result.citation.source ?? "document"}:${result.citation.documentId}`;
+  return stage && stage !== "chunk" ? `${prefix}:${stage}:${result.citation.chunkIndex}` : `${prefix}:${result.citation.chunkIndex}`;
 }
 
 export const searchStreamHitSchema = z.object({
-  /** `searchResultId(result.citation)`; the same id appears in `search.results.ids`. */
+  /** `searchResultId(result)`; the same id appears in `search.results.ids`. */
   id: z.string(),
   /** 0-based rank within this leg only. */
   legRank: z.number().int().nonnegative(),
-  result: searchResultSchema,
+  /**
+   * The hit body. Sent the first time an id appears on a stream; a later leg
+   * (or sub-search) that finds the same id sends `id` and `legRank` only.
+   */
+  result: searchResultSchema.optional(),
 });
 export type SearchStreamHit = z.infer<typeof searchStreamHitSchema>;
 
@@ -75,7 +97,6 @@ export const searchStreamStatsSchema = z.object({
   ms: z.number().nonnegative(),
   /** Candidates the leg retrieved before any provisional filtering. */
   candidates: z.number().int().nonnegative().optional(),
-  cacheHit: z.boolean().optional(),
   timedOut: z.boolean().optional(),
 });
 export type SearchStreamStats = z.infer<typeof searchStreamStatsSchema>;
@@ -106,7 +127,10 @@ export const searchStreamHitsEventSchema = z.object({
   subSearch: z.number().int().nonnegative().optional(),
   /** Hits this leg found, best first. Empty when the leg found nothing. */
   hits: z.array(searchStreamHitSchema),
-  /** More hits than were sent (`hits` is capped at the request's `limit`). */
+  /**
+   * More hits than were sent. `hits` is capped at the request's `limit` per
+   * leg, and one stream sends at most three times `limit` distinct hit bodies.
+   */
   truncated: z.boolean().default(false),
   stats: searchStreamStatsSchema.optional(),
 });

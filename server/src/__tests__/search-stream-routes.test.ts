@@ -4,7 +4,7 @@ import { searchStreamEventSchema, searchResultId } from "@docslurp/shared";
 
 const mocks = vi.hoisted(() => ({
   search: vi.fn(), access: vi.fn(), policy: vi.fn(), cached: { value: undefined as unknown }, store: vi.fn(), ticket: vi.fn(),
-  report: vi.fn(() => "Something went wrong"),
+  report: vi.fn(() => "Something went wrong"), actor: vi.fn(),
 }));
 vi.mock("../services/search.js", () => ({ hybridSearch: mocks.search, MissingProjectScopeError: class extends Error {}, CrossProjectScopeError: class extends Error {}, ProjectNotFoundError: class extends Error { constructor() { super("Project not found"); } } }));
 vi.mock("../services/project-chat.js", () => ({ chatProject: vi.fn(), projectChatDisabledBody: async () => null }));
@@ -19,7 +19,7 @@ vi.mock("../search/response-cache.js", () => ({
   responseCacheTicket: mocks.ticket, readCachedResponse: () => mocks.cached.value, storeResponse: mocks.store,
 }));
 vi.mock("../lib/request-actor.js", () => ({
-  assertApiKeyProjectAccess: mocks.access, getRequestActor: vi.fn(), actorHasAnyApiKeyScope: vi.fn(),
+  assertApiKeyProjectAccess: mocks.access, getRequestActor: mocks.actor, actorHasAnyApiKeyScope: vi.fn(),
   resolveActorProjectId: async (_actor: unknown, projectId?: string) => projectId ?? "default-project",
 }));
 vi.mock("../lib/search-access.js", () => ({
@@ -47,7 +47,7 @@ const finalBody = (timings?: Record<string, number>) => ({
   results: [result("doc-a"), result("doc-b")], sessionId: "session-1", availability: { status: "complete" }, ...(timings ? { timings } : {}),
 });
 // Minimal fixtures: the route never inspects hit bodies, so the full result type is not built here.
-const hit = (documentId: string, legRank = 0) => ({ id: searchResultId(citation(documentId)), legRank, result: result(documentId) as never });
+const hit = (documentId: string, legRank = 0) => ({ id: searchResultId(result(documentId)), legRank, result: result(documentId) as never });
 
 async function events(response: Response) {
   const text = await response.text();
@@ -62,6 +62,7 @@ describe("search stream", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     delete process.env.DOCSLURP_DEFERRED_PROFILES;
+    mocks.actor.mockReturnValue({ type: "api_key" });
     mocks.access.mockResolvedValue(null);
     mocks.cached.value = undefined;
     mocks.ticket.mockResolvedValue({ ticket: true });
@@ -80,7 +81,7 @@ describe("search stream", () => {
     const response = await app().request("/v1/search/stream", post({ q: "contracts", project: "p", stats: true }));
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("text/event-stream");
-    expect(response.headers.get("cache-control")).toBe("no-cache");
+    expect(response.headers.get("cache-control")).toBe("no-cache, no-transform");
     expect(response.headers.get("x-accel-buffering")).toBe("no");
     const frames = await events(response);
     expect(frames.map((f) => f.event)).toEqual(["search.started", "search.hits", "search.hits", "search.phase", "search.results", "search.done"]);
@@ -183,6 +184,176 @@ describe("search stream", () => {
     expect(searchSignal?.aborted).toBe(false);
     await reader.cancel();
     await vi.waitFor(() => expect(searchSignal?.aborted).toBe(true));
+  });
+
+  describe("detaching, keepalive, ordering and observability", () => {
+    const logLines = (spy: { mock: { calls: unknown[][] } }) => spy.mock.calls.map((call) => String(call[0])).filter((line) => line.startsWith("[search-stream]"));
+    const hitsEmit = () => emitSearchStreamEvent(() => ({ type: "search.hits", leg: "vector", hits: [hit("doc-a")], truncated: false }));
+    const phaseEmit = () => emitSearchStreamEvent(() => ({ type: "search.phase", phase: "plan", stats: { ms: 1 } }));
+    afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+    it("a disconnect after phase-only events still aborts the search (nothing delivered)", async () => {
+      let signal: AbortSignal | undefined;
+      mocks.search.mockImplementation(async () => {
+        signal = currentSearchSignal();
+        phaseEmit();
+        await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve()));
+        throw new Error("aborted");
+      });
+      const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+      const reader = (await app().request("/v1/search/stream", post({ q: "x", project: "p" }))).body!.getReader();
+      await reader.read();
+      await reader.cancel();
+      await vi.waitFor(() => expect(signal?.aborted).toBe(true));
+      await vi.waitFor(() => expect(logLines(info)).toHaveLength(1));
+      expect(logLines(info)[0]).toMatch(/outcome=aborted cached=false ttfhMs=- /);
+    });
+
+    it("a disconnect after the first search.hits lets the search finish detached, with the work completed and one detached log line", async () => {
+      let signal: AbortSignal | undefined;
+      let release!: () => void;
+      let finished = false;
+      mocks.search.mockImplementation(async () => {
+        signal = currentSearchSignal();
+        hitsEmit();
+        await new Promise<void>((resolve) => { release = resolve; });
+        emitSearchStreamEvent(() => ({ type: "search.hits", leg: "lexical", hits: [hit("doc-b")], truncated: false }));
+        finished = true;
+        return finalBody();
+      });
+      const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+      const reader = (await app().request("/v1/search/stream", post({ q: "x", project: "p" }))).body!.getReader();
+      await reader.read(); // started
+      await reader.read(); // the first hits
+      await reader.cancel();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(signal?.aborted).toBe(false);
+      release();
+      await vi.waitFor(() => expect(logLines(info)).toHaveLength(1));
+      expect(finished).toBe(true);
+      expect(signal?.aborted).toBe(false);
+      expect(logLines(info)[0]).toMatch(/sessionId=session-1 requestId=- outcome=detached cached=false ttfhMs=\d+ events=\d+ bytes=\d+ totalMs=\d+$/);
+      expect(logLines(info)[0]).not.toContain("contracts");
+    });
+
+    it("a detached search is bounded by the overall timeout and a detached failure is reported once", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      process.env.SEARCH_STREAM_DETACHED_TIMEOUT_MS = "5000";
+      try {
+        let signal: AbortSignal | undefined;
+        mocks.search.mockImplementation(async () => {
+          signal = currentSearchSignal();
+          hitsEmit();
+          await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve()));
+          throw new Error("raw boom");
+        });
+        vi.spyOn(console, "info").mockImplementation(() => undefined);
+        const reader = (await app().request("/v1/search/stream", post({ q: "x", project: "p" }))).body!.getReader();
+        await reader.read(); await reader.read();
+        await reader.cancel();
+        await vi.advanceTimersByTimeAsync(4000);
+        expect(signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1500);
+        expect(signal?.aborted).toBe(true);
+        await vi.waitFor(() => expect(mocks.report).toHaveBeenCalledTimes(1));
+      } finally { delete process.env.SEARCH_STREAM_DETACHED_TIMEOUT_MS; }
+    });
+
+    it("writes a keepalive comment every 15 s while the search is quiet", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "clearTimeout", "clearInterval"] });
+      let release!: () => void;
+      mocks.search.mockImplementation(async () => { phaseEmit(); await new Promise<void>((resolve) => { release = resolve; }); return finalBody(); });
+      vi.spyOn(console, "info").mockImplementation(() => undefined);
+      const reader = (await app().request("/v1/search/stream", post({ q: "x", project: "p" }))).body!.getReader();
+      const decoder = new TextDecoder();
+      const read = async () => decoder.decode((await reader.read()).value);
+      expect(await read()).toContain("event: search.started");
+      expect(await read()).toContain("event: search.phase");
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(await read()).toBe(": keepalive\n\n");
+      release();
+      let rest = "";
+      for (;;) { const chunk = await reader.read(); if (chunk.done) break; rest += decoder.decode(chunk.value); }
+      expect(rest).toContain("event: search.done");
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("gives up on a reader that stops reading after the search settled", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "clearTimeout", "clearInterval"] });
+      const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+      await app().request("/v1/search/stream", post({ q: "x", project: "p" })); // never read
+      await vi.advanceTimersByTimeAsync(16_000);
+      await vi.waitFor(() => expect(logLines(info)).toHaveLength(1));
+      expect(logLines(info)[0]).toContain("outcome=aborted");
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("a leg event after the outcome is decided consumes no seq", async () => {
+      mocks.search.mockImplementation(async () => {
+        phaseEmit();
+        setTimeout(() => emitSearchStreamEvent(() => ({ type: "search.phase", phase: "rerank", stats: { ms: 1 } })), 30);
+        throw new Error("leg failed");
+      });
+      const frames = await events(await app().request("/v1/search/stream", post({ q: "x", project: "p" })));
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(frames.map((f) => f.event)).toEqual(["search.started", "search.phase", "search.error"]);
+      expect(frames.map((f) => f.data.seq)).toEqual([0, 1, 2]);
+    });
+
+    it("sends an SSE retry of 24 h on done and error frames only", async () => {
+      const okText = await (await app().request("/v1/search/stream", post({ q: "x", project: "p" }))).text();
+      expect(okText.match(/retry: 86400000/g)).toHaveLength(1);
+      expect(okText.split("\n\n").find((f) => f.includes("search.done"))).toContain("retry: 86400000");
+      mocks.search.mockImplementation(async () => { phaseEmit(); throw new Error("x"); });
+      const errText = await (await app().request("/v1/search/stream", post({ q: "x", project: "p" }))).text();
+      expect(errText.split("\n\n").find((f) => f.includes("search.error"))).toContain("retry: 86400000");
+      expect(errText.match(/retry:/g)).toHaveLength(1);
+    });
+
+    it("logs one line per stream for done and error outcomes, without query text", async () => {
+      const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+      await (await app().request("/v1/search/stream", post({ q: "secret query", project: "p" }))).text();
+      mocks.search.mockImplementation(async () => { phaseEmit(); throw new Error("x"); });
+      await (await app().request("/v1/search/stream", post({ q: "secret query", project: "p" }))).text();
+      await vi.waitFor(() => expect(logLines(info)).toHaveLength(2));
+      const [done, error] = logLines(info);
+      expect(done).toMatch(/^\[search-stream\] searchId=\S+ sessionId=session-1 requestId=- outcome=done cached=false ttfhMs=- events=3 bytes=\d+ totalMs=\d+$/);
+      expect(error).toMatch(/outcome=error cached=false ttfhMs=- events=3 /);
+      expect(logLines(info).join()).not.toContain("secret");
+    });
+
+    it("a throw while building search.results becomes a public search.error", async () => {
+      mocks.search.mockImplementation(async () => ({ ...finalBody(), results: [{ text: "x" }] }));
+      const text = await (await app().request("/v1/search/stream", post({ q: "x", project: "p" }))).text();
+      expect(text).toContain("event: search.error");
+      expect(text).not.toContain("citation");
+    });
+
+    it("elapsedMs counts from the start of the request", async () => {
+      mocks.ticket.mockImplementation(async () => { await new Promise((resolve) => setTimeout(resolve, 40)); return { ticket: true }; });
+      const frames = await events(await app().request("/v1/search/stream", post({ q: "x", project: "p" })));
+      expect(frames[0]!.data.elapsedMs).toBeGreaterThanOrEqual(35);
+    });
+  });
+
+  describe("cookie GET guard", () => {
+    it("refuses a cross-site cookie GET before any search work, and allows same-origin and API-key GETs", async () => {
+      mocks.actor.mockReturnValue({ type: "session" });
+      const cross = await app().request("http://api.test/v1/search/stream?q=x&project=p", { headers: { Origin: "https://evil.example", "Sec-Fetch-Site": "cross-site" } });
+      expect(cross.status).toBe(403);
+      const bare = await app().request("http://api.test/v1/search/stream?q=x&project=p");
+      expect(bare.status).toBe(403);
+      expect(mocks.search).not.toHaveBeenCalled();
+      expect(mocks.ticket).not.toHaveBeenCalled();
+      const same = await app().request("http://api.test/v1/search/stream?q=x&project=p", { headers: { "Sec-Fetch-Site": "same-origin" } });
+      expect(same.status).toBe(200);
+      await same.text();
+      mocks.actor.mockReturnValue({ type: "api_key" });
+      const key = await app().request("http://api.test/v1/search/stream?q=x&project=p");
+      expect(key.status).toBe(200);
+      await key.text();
+      expect(mocks.search).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe("refusals happen before the stream opens", () => {

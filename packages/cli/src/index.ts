@@ -1247,8 +1247,10 @@ async function* sseFrames(body: AsyncIterable<Uint8Array>): AsyncGenerator<{ eve
 
 /**
  * `search --stream`: prints each retrieval leg's hits to stderr as they land (completion order, provisional), then the final ranked list
- * to stdout exactly as without `--stream`. With `--json` stdout is one event per line (NDJSON). Falls back to `GET /v1/search` when the
- * stream endpoint is unavailable or the connection drops before `search.results`.
+ * to stdout exactly as without `--stream`. With `--json` stdout is one event per line (NDJSON), each event verbatim. A search is billed once
+ * it has produced hits, so it falls back to `GET /v1/search` only when the stream never started: HTTP 404/405/406/501, a 2xx that is not an
+ * event stream, or a connection failure before any response. After the first event a drop, a malformed or oversized frame, or a stream that
+ * ends without `search.results` is an error and never a second search; a drop after `search.results` still prints the answer.
  */
 async function searchStreamCommand(input: { q: string; project?: string; minScore?: number; mode?: string; stats?: boolean }, flags: Record<string, string | boolean>): Promise<void> {
   const json = flags.json === true;
@@ -1258,55 +1260,81 @@ async function searchStreamCommand(input: { q: string; project?: string; minScor
   const emit = (event: CliSearchStreamEvent) => { if (json) console.log(JSON.stringify(event)); };
   const note = (line: string) => { if (!json) console.error(line); };
   const unavailable = (response: Response) => [404, 405, 406, 501].includes(response.status) || (response.ok && !response.headers.get("content-type")?.includes("text/event-stream"));
+  const interrupted = (why: string) => new Error(`The search stream ${why} after it started. Not retried: a search is billed once it has produced hits. Run the search again.`);
   let fallbackReason: string | undefined;
   {
-    const response = await apiFetch("/v1/search/stream", flags, {
-      method: "POST", headers: { "Content-Type": "application/json", Accept: "text/event-stream" }, body: JSON.stringify(input),
-    }, Number(flags.timeout ?? 120) * 1000);
-    if (unavailable(response)) {
-      await response.body?.cancel().catch(() => undefined);
-      fallbackReason = "stream endpoint unavailable";
-    } else if (!response.ok) throw await responseFailure(response);
-    else if (!response.body) fallbackReason = "stream endpoint unavailable";
-    else {
-      try {
-        for await (const frame of sseFrames(response.body as unknown as AsyncIterable<Uint8Array>)) {
-          let event: CliSearchStreamEvent;
-          try { event = JSON.parse(frame.data); } catch { continue; }
-          if (!event || typeof event.type !== "string") continue;
-          if (typeof event.seq === "number") seq = Math.max(seq, event.seq + 1);
-          if (event.type === "search.error") {
-            const error = event.error as { code?: string; status?: number } | undefined;
-            const status = typeof error?.status === "number" ? error.status : 500;
-            emit(event);
-            throw new CliApiError(status, safeHttpFailure(status, { error: { code: error?.code } }));
-          }
-          if (event.type === "search.hits") {
-            emit(event);
-            const hits = (event.hits as Array<{ legRank: number; result: CliSearchResponse["results"][number] }>) ?? [];
-            const stats = event.stats as { ms?: number; candidates?: number; cacheHit?: boolean; timedOut?: boolean } | undefined;
-            const detail = flags.stats && stats ? ` ${stats.ms}ms${stats.candidates === undefined ? "" : `, ${stats.candidates} candidates`}${stats.cacheHit ? ", cached" : ""}${stats.timedOut ? ", timed out" : ""}` : "";
-            note(`[${String(event.leg)}] ${hits.length} hit${hits.length === 1 ? "" : "s"}${event.truncated ? "+" : ""}${detail}`);
-            for (const hit of hits) {
-              const page = hit.result.citation.pageNumbers?.length ? hit.result.citation.pageNumbers.join(", ") : hit.result.citation.pageNumber ?? "-";
-              note(`  ${String(event.leg)} #${hit.legRank + 1} ${hit.result.citation.filename} (p.${page}) ${hit.result.text.slice(0, 100).replace(/\n/g, " ")}`);
+    let response: Response | undefined;
+    try {
+      response = await apiFetch("/v1/search/stream", flags, {
+        method: "POST", headers: { "Content-Type": "application/json", Accept: "text/event-stream" }, body: JSON.stringify(input),
+      }, Number(flags.timeout ?? 120) * 1000);
+    } catch (error) {
+      // A connection failure before any response: the search never started.
+      if (!(error instanceof TypeError)) throw error;
+      fallbackReason = "could not connect to the stream endpoint";
+    }
+    if (response) {
+      if (unavailable(response)) {
+        await response.body?.cancel().catch(() => undefined);
+        fallbackReason = "stream endpoint unavailable";
+      } else if (!response.ok) throw await responseFailure(response);
+      else if (!response.body) fallbackReason = "stream endpoint unavailable";
+      else {
+        let received = false;
+        // The first leg and rank of each hit body already printed, for hits a later leg reports by id only.
+        const printed = new Map<string, string>();
+        try {
+          for await (const frame of sseFrames(response.body as unknown as AsyncIterable<Uint8Array>)) {
+            received = true;
+            let event: CliSearchStreamEvent;
+            try { event = JSON.parse(frame.data); } catch { throw interrupted("sent a malformed event"); }
+            if (!event || typeof event.type !== "string") continue;
+            if (typeof event.seq === "number") seq = Math.max(seq, event.seq + 1);
+            if (event.type === "search.error") {
+              const error = event.error as { code?: string; status?: number } | undefined;
+              const status = typeof error?.status === "number" ? error.status : 500;
+              emit(event);
+              throw new CliApiError(status, safeHttpFailure(status, { error: { code: error?.code } }));
             }
-          } else if (event.type === "search.phase") {
-            emit(event);
-            const stats = event.stats as { ms?: number } | undefined;
-            if (flags.stats) note(`[${String(event.phase)}] ${stats?.ms}ms`);
-          } else if (event.type === "search.results") {
-            emit(event);
-            final = (event.response as CliSearchResponse);
-          } else if (event.type === "search.started" || event.type === "search.done") {
-            emit(event);
-            if (event.type === "search.done" && flags.stats && event.timings) note(`timings: ${Object.entries(event.timings as Record<string, number>).map(([name, ms]) => `${name} ${ms}ms`).join(", ")}`);
+            if (event.type === "search.hits") {
+              emit(event);
+              const hits = (event.hits as Array<{ id: string; legRank: number; result?: CliSearchResponse["results"][number] }>) ?? [];
+              const stats = event.stats as { ms?: number; candidates?: number; timedOut?: boolean } | undefined;
+              const detail = flags.stats && stats ? ` ${stats.ms}ms${stats.candidates === undefined ? "" : `, ${stats.candidates} candidates`}${stats.timedOut ? ", timed out" : ""}` : "";
+              const scope = typeof event.subSearch === "number" ? ` (sub-search ${event.subSearch + 1})` : "";
+              note(`[${String(event.leg)}]${scope} ${hits.length} hit${hits.length === 1 ? "" : "s"}${event.truncated ? "+" : ""}${detail}`);
+              for (const hit of hits) {
+                if (!hit.result) {
+                  note(`  ${String(event.leg)} #${hit.legRank + 1} also found by ${printed.get(hit.id) ?? "an earlier leg"}`);
+                  continue;
+                }
+                const page = hit.result.citation.pageNumbers?.length ? hit.result.citation.pageNumbers.join(", ") : hit.result.citation.pageNumber ?? "-";
+                if (!printed.has(hit.id)) printed.set(hit.id, `${String(event.leg)} #${hit.legRank + 1} (${hit.result.citation.filename}, p.${page})`);
+                note(`  ${String(event.leg)} #${hit.legRank + 1} ${hit.result.citation.filename} (p.${page}) ${hit.result.text.slice(0, 100).replace(/\n/g, " ")}`);
+              }
+            } else if (event.type === "search.phase") {
+              emit(event);
+              const stats = event.stats as { ms?: number } | undefined;
+              if (flags.stats) note(`[${String(event.phase)}] ${stats?.ms}ms`);
+            } else if (event.type === "search.results") {
+              emit(event);
+              final = (event.response as CliSearchResponse);
+            } else if (event.type === "search.started" || event.type === "search.done") {
+              emit(event);
+              if (event.type === "search.done" && flags.stats && event.timings) note(`timings: ${Object.entries(event.timings as Record<string, number>).map(([name, ms]) => `${name} ${ms}ms`).join(", ")}`);
+            }
           }
+          if (!final) {
+            if (received) throw interrupted("ended without the final results");
+            fallbackReason = "stream ended before any event";
+          }
+        } catch (error) {
+          // The answer arrived: a later drop does not matter. Otherwise nothing is retried once the stream started.
+          if (final) { /* print it below */ }
+          else if (error instanceof CliApiError || (error instanceof Error && error.message.startsWith("The search stream "))) throw error;
+          else if (received || (error instanceof Error && /exceeds 1 MiB/.test(error.message))) throw interrupted(error instanceof Error && /exceeds 1 MiB/.test(error.message) ? "sent an oversized event" : "dropped");
+          else fallbackReason = "stream dropped before any event";
         }
-        if (!final) fallbackReason = "stream ended before the final results";
-      } catch (error) {
-        if (error instanceof CliApiError || final) throw error;
-        fallbackReason = "stream dropped before the final results";
       }
     }
   }

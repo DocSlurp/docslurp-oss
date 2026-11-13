@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { searchStreamPhaseSchema, type SearchStreamPhase } from "@docslurp/shared";
 
-import { emitSearchStreamEvent } from "./stream-events.js";
+import { currentSearchStreamSink, emitSearchStreamEvent } from "./stream-events.js";
 
 /**
  * Per-search phase timings (setup, embed, vector, text, …), collected without
@@ -14,11 +14,12 @@ const store = new AsyncLocalStorage<Record<string, number>>();
 const STREAM_PHASES: ReadonlySet<string> = new Set(searchStreamPhaseSchema.options);
 
 export function emitSearchPhase(phase: SearchStreamPhase, ms: number): void {
+  if (!currentSearchStreamSink()?.stats) return;
   emitSearchStreamEvent((sink) => sink.stats ? { type: "search.phase", phase, stats: { ms: Math.round(ms) } } : null);
 }
 
 function reportStreamPhase(name: string, ms: number): void {
-  if (STREAM_PHASES.has(name)) emitSearchPhase(name as SearchStreamPhase, ms);
+  if (currentSearchStreamSink() && STREAM_PHASES.has(name)) emitSearchPhase(name as SearchStreamPhase, ms);
 }
 
 export type SearchTimings = Record<string, number>;

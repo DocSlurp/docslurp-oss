@@ -552,11 +552,10 @@ test("search --stream --json prints one event per line", async () => {
   assert.equal(result.stderr, "");
 });
 
-test("search --stream falls back to the JSON endpoint when the stream is unavailable or drops", async () => {
+test("search --stream falls back to the JSON endpoint only when the stream never started", async () => {
   for (const first of [
     (res) => { res.writeHead(404, { "content-type": "application/json" }); res.end("{}"); },
     (res) => { res.writeHead(200, { "content-type": "application/json" }); res.end("{}"); },
-    (res) => writeSse(res, streamEvents.slice(0, 2)),
   ]) {
     const result = await invokeStream(["search", "revenue", "--stream", "--json"], (req, res) => {
       if (req.url === "/v1/search/stream") return first(res);
@@ -568,6 +567,56 @@ test("search --stream falls back to the JSON endpoint when the stream is unavail
     assert.equal(types.at(-2), "search.results");
     assert.equal(types.at(-1), "search.done");
   }
+});
+
+test("search --stream never issues a second search after the stream started", async () => {
+  const dropped = (res) => { res.writeHead(200, { "content-type": "text/event-stream" }); res.write(`event: search.started\ndata: ${JSON.stringify(streamEvents[0])}\n\n`); setTimeout(() => res.destroy(), 20); };
+  const cases = [
+    (res) => writeSse(res, streamEvents.slice(0, 2)),
+    dropped,
+    (res) => { res.writeHead(200, { "content-type": "text/event-stream" }); res.end(`event: search.started\ndata: ${JSON.stringify(streamEvents[0])}\n\nevent: search.hits\ndata: {oops\n\n`); },
+    (res) => { res.writeHead(200, { "content-type": "text/event-stream" }); res.end(`event: search.started\ndata: ${JSON.stringify(streamEvents[0])}\n\ndata: ${"x".repeat(1_100_000)}\n\n`); },
+  ];
+  for (const first of cases) {
+    const result = await invokeStream(["search", "revenue", "--stream"], (req, res) => {
+      if (req.url === "/v1/search/stream") return first(res);
+      res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(streamFinal));
+    });
+    assert.notEqual(result.code, 0);
+    assert.deepEqual(result.requests.map((r) => r.url.split("?")[0]), ["/v1/search/stream"]);
+    assert.match(result.stderr, /Not retried/);
+  }
+  // A drop after search.results still prints the answer, with no second request.
+  const late = await invokeStream(["search", "revenue", "--stream"], (_req, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write(streamEvents.slice(0, 3).map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(""));
+    setTimeout(() => res.destroy(), 20);
+  });
+  assert.equal(late.code, 0, late.stderr);
+  assert.equal(late.requests.length, 1);
+  assert.match(late.stdout, /Final ranking/);
+});
+
+test("search --stream reports a later leg's body-less hit as found by the earlier leg; NDJSON stays verbatim", async () => {
+  const events = [
+    streamEvents[0], streamEvents[1],
+    { searchId: "s", seq: 2, elapsedMs: 35, type: "search.hits", leg: "lexical", hits: [{ id: "document:d1:0", legRank: 2 }], truncated: false },
+    { ...streamEvents[2], seq: 3 }, { ...streamEvents[3], seq: 4 },
+  ];
+  const text = await invokeStream(["search", "revenue", "--stream"], (_req, res) => writeSse(res, events));
+  assert.match(text.stderr, /lexical #3 also found by vector #1 \(earnings\.pdf, p\.4\)/);
+  assert.doesNotMatch(text.stderr, /lexical #3 earnings/);
+  const nd = await invokeStream(["search", "revenue", "--stream", "--json"], (_req, res) => writeSse(res, events));
+  assert.deepEqual(nd.stdout.trim().split("\n").map((line) => JSON.parse(line)), events);
+});
+
+test("search --stream falls back when the connection fails before any response", async () => {
+  const result = await invokeStream(["search", "revenue", "--stream", "--json"], (req, res) => {
+    if (req.url === "/v1/search/stream") return res.destroy();
+    res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(streamFinal));
+  });
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(result.requests.map((r) => r.url.split("?")[0]), ["/v1/search/stream", "/v1/search"]);
 });
 
 test("search --stream does not fall back on auth errors and surfaces search.error", async () => {

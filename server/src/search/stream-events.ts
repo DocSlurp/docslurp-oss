@@ -18,32 +18,39 @@ export interface SearchStreamSink {
   emit(event: SearchStreamEventBody): void;
 }
 
-interface SinkState {
-  sink: SearchStreamSink;
+/** The active stream's state. Allocated once per stream (and once per sub-search), never per read. */
+export interface SearchStreamState extends SearchStreamSink {
   /** Sub-search index while a decomposition, stepback or multi-hop child runs. */
   subSearch?: number;
+  /** Ids whose hit body was already sent on this stream; shared by the root search and its sub-searches only. */
+  sentIds: Set<string>;
 }
 
-const store = new AsyncLocalStorage<SinkState>();
+const store = new AsyncLocalStorage<SearchStreamState>();
 
 export function withSearchStreamSink<T>(sink: SearchStreamSink, fn: () => Promise<T>): Promise<T> {
-  return store.run({ sink }, fn);
+  const state: SearchStreamState = {
+    stats: sink.stats,
+    hitLimit: sink.hitLimit,
+    emit: (event) => sink.emit(event),
+    sentIds: new Set(),
+  };
+  return store.run(state, fn);
 }
 
 /** Label every event emitted inside `fn` as belonging to sub-search `index`. */
 export function withSearchStreamSubSearch<T>(index: number, fn: () => Promise<T>): Promise<T> {
   const state = store.getStore();
-  return state ? store.run({ sink: state.sink, subSearch: index }, fn) : fn();
+  return state ? store.run({ ...state, subSearch: index }, fn) : fn();
 }
 
-/** The active sink, or undefined outside a streaming request. Check it before building an event. */
-export function currentSearchStreamSink(): (SearchStreamSink & { subSearch?: number }) | undefined {
-  const state = store.getStore();
-  return state ? { ...state.sink, emit: state.sink.emit.bind(state.sink), subSearch: state.subSearch } : undefined;
+/** The active stream state, or undefined outside a streaming request. Allocation free; check it before building an event. */
+export function currentSearchStreamSink(): SearchStreamState | undefined {
+  return store.getStore();
 }
 
 /** Emit one event to the active sink. Never throws; a no-op outside a streaming request. */
-export function emitSearchStreamEvent(build: (sink: SearchStreamSink & { subSearch?: number }) => SearchStreamEventBody | null): void {
+export function emitSearchStreamEvent(build: (sink: SearchStreamState) => SearchStreamEventBody | null): void {
   const sink = currentSearchStreamSink();
   if (!sink) return;
   try {

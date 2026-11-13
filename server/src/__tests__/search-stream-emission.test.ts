@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { SearchStreamEventBody } from "@docslurp/shared";
+import { searchResultId, searchStreamEventSchema, type SearchStreamEventBody } from "@docslurp/shared";
 
 import {
   retrieveEvidence,
@@ -7,17 +7,18 @@ import {
   type EvidenceRetrievalAdapter,
   type EvidenceRetrievalContext,
 } from "../search/retrieval-adapters.js";
-import { createProvisionalHitPolicy, type ProvisionalHitPolicy } from "../search/stream-hits.js";
+import { createProvisionalHitPolicy, searchChunkId, type ProvisionalHitPolicy } from "../search/stream-hits.js";
 import { withSearchStreamSink, withSearchStreamSubSearch } from "../search/stream-events.js";
 import { collectSearchTimings, timePhase } from "../search/timings.js";
 import type { SearchChunk } from "../services/search.js";
+import { searchChunkToResult } from "../search/search-result.js";
 
-function chunk(id: string): SearchChunk {
+function chunk(id: string, chunkIndex = 0, documentId = `doc-${id}`): SearchChunk {
   return {
     id,
-    documentId: `doc-${id}`,
+    documentId,
     runId: `run-${id}`,
-    chunkIndex: 0,
+    chunkIndex,
     text: id,
     headingPath: [],
     pageNumber: null,
@@ -57,6 +58,8 @@ function sink(opts: { stats?: boolean; hitLimit?: number } = {}) {
   };
 }
 
+const open = (limit = 20, sent: ReadonlySet<string> = new Set(), newBodies = 3 * limit) => ({ limit, sent, newBodies });
+
 function policy(minScore = 0, candidateDepth?: number): ProvisionalHitPolicy {
   return createProvisionalHitPolicy({ query: "q", embeddingPipeline: null, minScore, candidateDepth, filters: undefined });
 }
@@ -84,7 +87,7 @@ describe("streaming leg events", () => {
     expect(results.map((result) => result.adapter)).toEqual(["lexical", "graph", "vector"]);
     const first = s.hits()[0]!.hits[0]!;
     expect(first).toMatchObject({ id: "document:doc-gr:0", legRank: 0 });
-    expect(first.result.citation.documentId).toBe("doc-gr");
+    expect(first.result!.citation.documentId).toBe("doc-gr");
   });
 
   it("emits sequential legs as each one finishes", async () => {
@@ -95,7 +98,7 @@ describe("streaming leg events", () => {
   });
 
   it("builds nothing without a sink", async () => {
-    const select = vi.fn(() => []);
+    const select = vi.fn(() => ({ hits: [], truncated: false }));
     const adapters = [adapter("lexical", async () => [chunk("a")]), adapter("vector", async () => [chunk("b")])];
     await retrieveEvidence(adapters, context({ select }), { parallel: true });
     await retrieveEvidence(adapters, context({ select }));
@@ -161,24 +164,107 @@ describe("provisional hit filters", () => {
   const scored = (id: string, queryRelevance: number): SearchChunk => ({ ...chunk(id), lexicalMatch: "partial", queryRelevance });
 
   it("drops lexical chunks the relevance floor would drop", () => {
-    const hits = policy(0.5).select("lexical", [scored("keep", 0.9), scored("drop", 0.2)]);
-    expect(hits.map((hit) => hit.citation.documentId)).toEqual(["doc-keep"]);
+    const hits = policy(0.5).select("lexical", [scored("keep", 0.9), scored("drop", 0.2)], open()).hits;
+    expect(hits.map((hit) => hit.result!.citation.documentId)).toEqual(["doc-keep"]);
   });
 
   it("applies the candidate window before the floor like the final path", () => {
-    const hits = policy(0, 1).select("lexical", [scored("a", 0.9), scored("b", 0.9)]);
+    const hits = policy(0, 1).select("lexical", [scored("a", 0.9), scored("b", 0.9)], open()).hits;
     expect(hits).toHaveLength(1);
   });
 
   it("qualifies community summaries with the scope like the final response", () => {
     const community = { ...chunk("c"), source: "community_summary" as const };
     const scoped = createProvisionalHitPolicy({ query: "q", embeddingPipeline: null, minScore: 0, filters: { documentIds: ["x"] } as never });
-    expect(scoped.select("community", [community])[0]!.text).toContain("Broader project context");
-    expect(policy().select("community", [community])[0]!.text).toBe("c");
+    expect(scoped.select("community", [community], open()).hits[0]!.result!.text).toContain("Broader project context");
+    expect(policy().select("community", [community], open()).hits[0]!.result!.text).toBe("c");
   });
 
   it("keeps unmeasured deferred chunks, as the final floor does", () => {
-    expect(policy(0.9).select("deferred", [chunk("d")])).toHaveLength(1);
+    expect(policy(0.9).select("deferred", [chunk("d")], open()).hits).toHaveLength(1);
+  });
+});
+
+describe("stream hit identity and dedupe", () => {
+  const pageChunk = (id: string): SearchChunk => ({ ...chunk(id, 3, "doc-same"), retrievalStage: "page-index" });
+  const emitted = (s: ReturnType<typeof sink>) => s.hits();
+
+  it("keeps page-stage and chunk ids apart for the same document and index", () => {
+    const page = pageChunk("p");
+    const plain = chunk("c", 3, "doc-same");
+    expect(searchChunkId(page)).toBe("document:doc-same:page-text:3");
+    expect(searchChunkId(plain)).toBe("document:doc-same:3");
+    // The cheap id equals the id of the converted result, so provisional and final ids match.
+    for (const c of [page, plain, { ...plain, deferredLocator: "map-node" as const }]) {
+      expect(searchChunkId(c)).toBe(searchResultId(searchChunkToResult(c)));
+    }
+  });
+
+  it("sends a body once: a second leg finds the same id and sends id and legRank only", async () => {
+    const s = sink();
+    const adapters = [adapter("lexical", async () => [chunk("a")]), adapter("vector", async () => [chunk("b"), chunk("a")])];
+    await withSearchStreamSink(s.sink, () => retrieveEvidence(adapters, context(policy())));
+    const [lex, vec] = emitted(s);
+    expect(lex!.hits[0]!.result).toBeDefined();
+    expect(vec!.hits[0]!.result).toBeDefined();
+    expect(vec!.hits[1]).toEqual({ id: "document:doc-a:0", legRank: 1 });
+  });
+
+  it("shares sent ids with sub-searches but not between streams", async () => {
+    const a = sink();
+    const adapters = [adapter("lexical", async () => [chunk("a")])];
+    await withSearchStreamSink(a.sink, async () => {
+      await retrieveEvidence(adapters, context(policy()));
+      await withSearchStreamSubSearch(0, () => retrieveEvidence(adapters, context(policy())));
+    });
+    expect(emitted(a)[0]!.hits[0]!.result).toBeDefined();
+    expect(emitted(a)[1]!.hits[0]!.result).toBeUndefined();
+    const b = sink();
+    await withSearchStreamSink(b.sink, () => retrieveEvidence(adapters, context(policy())));
+    expect(emitted(b)[0]!.hits[0]!.result).toBeDefined();
+  });
+
+  it("caps a stream at three times the limit of distinct bodies and flags truncation", async () => {
+    const s = sink({ hitLimit: 2 });
+    const leg = (prefix: string) => adapter("lexical", async () => [chunk(`${prefix}1`), chunk(`${prefix}2`)]);
+    await withSearchStreamSink(s.sink, async () => {
+      for (const prefix of ["x", "y", "z", "w"]) await retrieveEvidence([leg(prefix)], context(policy()));
+    });
+    const events = emitted(s);
+    expect(events.map((event) => event.hits.length)).toEqual([2, 2, 2, 0]);
+    expect(events.map((event) => event.truncated)).toEqual([false, false, false, true]);
+    expect(events.flatMap((event) => event.hits).filter((hit) => hit.result)).toHaveLength(6);
+  });
+
+  it("converts only the hits it sends", () => {
+    const chunks = [chunk("a"), chunk("b"), chunk("c"), chunk("d")];
+    const sent = new Set(["document:doc-a:0"]);
+    const selection = policy().select("lexical", chunks, open(2, sent));
+    expect(selection.hits.map((hit) => [hit.id, hit.result !== undefined])).toEqual([["document:doc-a:0", false], ["document:doc-b:0", true]]);
+    expect(selection.truncated).toBe(true);
+  });
+
+  it("does not annotate or convert past the limit except to detect truncation", () => {
+    const calls: string[] = [];
+    const chunks = [1, 2, 3, 4, 5].map((n) => ({ ...chunk(`n${n}`), get text() { calls.push(`n${n}`); return `n${n}`; } }));
+    const selection = policy().select("graph", chunks as SearchChunk[], open(2));
+    expect(selection.hits).toHaveLength(2);
+    expect(selection.truncated).toBe(true);
+    expect(new Set(calls).size).toBeLessThan(5);
+  });
+
+  it("reports no truncation when nothing more passes the floor", () => {
+    const chunks = [{ ...chunk("a"), lexicalMatch: "partial" as const, queryRelevance: 0.9 }, { ...chunk("b"), lexicalMatch: "partial" as const, queryRelevance: 0.1 }];
+    expect(policy(0.5).select("lexical", chunks, open(1)).truncated).toBe(false);
+  });
+
+  it("emits events that validate against the contract", async () => {
+    const s = sink({ stats: true });
+    const adapters = [adapter("lexical", async () => [chunk("a")]), adapter("vector", async () => [chunk("a"), chunk("b")])];
+    await withSearchStreamSink(s.sink, () => retrieveEvidence(adapters, context(policy())));
+    s.events.forEach((event, seq) => {
+      expect(() => searchStreamEventSchema.parse({ protocol: 1, searchId: "s1", seq, elapsedMs: 1, ...event })).not.toThrow();
+    });
   });
 });
 

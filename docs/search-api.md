@@ -126,22 +126,28 @@ Each event has an SSE `event:` name equal to its `type`, an `id:` equal to `seq`
 | Event | Meaning |
 | --- | --- |
 | `search.started` | First event: `protocol`, `projectId`, and `cached` (a recent identical answer was reused; `search.results` follows at once with no hits). |
-| `search.phase` | A step that is not a retrieval leg took `stats.ms`: `queue`, `setup`, `plan`, `prepare`, `embed`, `retrieve`, `fuse`, `rerank` or `finalize`. `subSearch` is set for a sub-search of decomposition, step-back or multi-hop. |
-| `search.hits` | One leg landed: `leg` (`lexical`, `vector`, `graph`, `community`, `progressive-page`, `completed-page` or `deferred`), its `hits` best first (each `{id, legRank, result}`), `truncated` when the leg found more than `limit`, and `stats` when requested. |
+| `search.phase` | Sent only when the request sets `stats`. A step that is not a retrieval leg took `stats.ms`: `queue`, `setup`, `plan`, `prepare`, `embed`, `retrieve`, `fuse`, `rerank` or `finalize`. `subSearch` is set for a sub-search of decomposition, step-back or multi-hop. |
+| `search.hits` | One leg landed: `leg` (`lexical`, `vector`, `graph`, `community`, `progressive-page`, `completed-page` or `deferred`), its `hits` best first (each `{id, legRank, result?}`), `truncated` when the leg found more than `limit` or the stream reached its cap on hit bodies, and `stats` when requested. |
 | `search.results` | The answer: `ids` in final rank order and `response`, exactly the body `POST /v1/search` returns. |
 | `search.error` | The search failed after the stream opened: `error: {code, message, status}`. Nothing follows it. |
 | `search.done` | Last event: `sessionId`, `resultCount`, and `timings` (phase times of the whole search) when `stats` is set. |
 
-Ordering guarantees:
+Ordering and content guarantees:
 
 - `search.started` is first. `search.phase` and `search.hits` follow in completion order, which is not rank order: a fast keyword leg can land before the vector leg, and a leg that finds nothing sends an empty `hits`.
-- Hits are provisional. The same passage can arrive from several legs under the same `id`, and the final list can drop, add or reorder passages. Only `search.results` is the answer.
+- A hit body (`result`) is sent the first time its `id` appears on the stream. When a later leg or sub-search finds the same passage, its hit carries only `id` and `legRank`; keep the earlier body and add the leg. A stream sends at most three times `limit` distinct hit bodies.
+- `id` is stable across legs and equals the matching entry of `search.results.ids`. It includes the retrieval stage for page-level results (page text, map nodes, page images), so a page hit and a chunk hit of the same document never share an id.
+- Hits are provisional. A hit's `score` is the leg's own score, not the final one, and provisional hits can include rows that the final ranking drops or merges. The final list can also add or reorder passages. Only `search.results` is the answer.
 - `search.results` comes before `search.done`. A request that is refused before the stream opens (authentication, scope, validation, rate limit) gets an ordinary JSON error response with its HTTP status, not an event stream.
 - Unknown event types and fields may be added; ignore what you don't recognize.
+- While a search is quiet the server sends `: keepalive` comment lines. They carry no event; ignore them. The final frame carries a `retry:` field.
+- `availability` in the final body reports indexing coverage. The stream does not wait for indexing to finish; re-run the search to refresh results while documents are still being indexed.
 
-Set `stats: true` for per-leg and per-phase milliseconds, candidate counts and cache or timeout flags. Without it those fields are omitted.
+Set `stats: true` for `search.phase` events, per-leg milliseconds and candidate counts, timeout flags and `timings` on `search.done`. Without it those are omitted. Every event carries `elapsedMs`, milliseconds since the server accepted the request.
 
-If the stream endpoint is unavailable (404, 405, 406 or 501, or a response that is not `text/event-stream`), or the connection drops before `search.results`, call `POST /v1/search`: it returns the same final body. The [SDK](https://docslurp.io/docs/packages/sdk) and [CLI](https://docslurp.io/docs/packages/cli) do this for you.
+A search is billed once it has produced hits, even if the client disconnects. So fall back to `POST /v1/search` (it returns the same final body) only when the stream never started: HTTP 404, 405, 406 or 501, a 2xx response that is not `text/event-stream`, or a connection failure before any response. After the first event has arrived, a dropped connection or a stream that ends without `search.results` is an error: do not run a second search, show the failure and let the user retry. A drop after `search.results` still leaves you with the answer. The [SDK](https://docslurp.io/docs/packages/sdk) and [CLI](https://docslurp.io/docs/packages/cli) follow this rule.
+
+`GET /v1/search/stream` exists for clients that can only open an `EventSource`. After `search.done` or `search.error` the server closes the stream, and an `EventSource` that is not closed reconnects and runs the search again, billed again. Call `close()` on those two events. A GET with a signed-in cookie session (not an API key) must be same-origin; the browser has to send `Sec-Fetch-Site: same-origin` or an `Origin` of the app itself, otherwise the request is refused.
 
 ```bash
 curl -N https://docslurp.io/v1/search/stream \

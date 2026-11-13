@@ -37,7 +37,7 @@ import { InvalidRetrievalQueryError, parseRetrievalQueryFlags } from "../lib/ret
 import { publicSearchResponse } from "../lib/search-usage.js";
 import { sql } from "../db.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
-import { currentRequestApiKeyId, currentRequestSearchCeiling } from "../lib/request-context.js";
+import { currentRequestApiKeyId, getRequestId, currentRequestSearchCeiling } from "../lib/request-context.js";
 import { cacheableApiKeyId, createCacheScopeMemo, primeCacheScope, readCachedResponse, responseCacheTicket, searchResponseCacheTtlMs, storeResponse, type CacheScopeMemo } from "../search/response-cache.js";
 import { authorizeActorProjectSearch, type AuthorizedProjectSearch } from "../lib/search-access.js";
 import type { SearchAccessScope } from "../search/access-scope.js";
@@ -599,7 +599,12 @@ function parseStatsFlag(value: unknown): boolean | undefined {
  * 200 stream. Only a failure after the first event becomes `search.error`.
  */
 async function searchStreamHandler(c: Context) {
+  const handlerStart = performance.now();
   const fromBody = c.req.method === "POST";
+  // A GET carries a cookie without any CSRF check, so a cross-site page could start (and bill) a search: same guard as GET /v1/chat/stream.
+  if (!fromBody && getRequestActor(c).type === "session" && !sameOriginBrowserRequest(c)) {
+    return apiErrorResponse(c, 403, "forbidden", "Cross-site request rejected");
+  }
   let statsValue: unknown;
   let prepared: PreparedSearch | Response;
   if (fromBody) {
@@ -631,40 +636,57 @@ async function searchStreamHandler(c: Context) {
   }
 
   const searchId = randomUUID();
-  const startedAt = performance.now();
+  const stamp = <T extends object>(event: T) => ({ ...event, searchId, seq: seq++, elapsedMs: Math.round(performance.now() - handlerStart) });
   let seq = 0;
-  const stamp = <T extends object>(event: T) => ({ ...event, searchId, seq: seq++, elapsedMs: Math.round(performance.now() - startedAt) });
   const started = stamp({ type: "search.started" as const, protocol: SEARCH_STREAM_PROTOCOL, projectId, cached: Boolean(lookup.hit) });
-  c.header("Cache-Control", "no-cache");
-  c.header("X-Accel-Buffering", "no");
 
   type Outcome = { ok: true; data: SearchData } | { ok: false; error: unknown };
+  type StreamEvent = Record<string, unknown> & { type: string; seq: number };
+  // Aborts the search itself. A client disconnect aborts it only while nothing has been delivered (see onClientGone).
   const abort = new AbortController();
   // Events stamped before the stream is attached wait here; after it, each is written in order.
-  const buffered: Array<Record<string, unknown> & { type: string; seq: number }> = [];
-  let writeEvent: ((event: Record<string, unknown> & { type: string; seq: number }) => void) | null = null;
-  let aborted = false;
+  const buffered: StreamEvent[] = [];
+  let writeEvent: ((event: StreamEvent) => void) | null = null;
+  let clientGone = false;
+  // The search function has returned or thrown: no further event is stamped or kept.
+  let settled = false;
+  // A `search.hits` event with hits has been written: the client has seen passages, so the search must finish (and be charged).
+  let contentDelivered = false;
+  let detachTimer: ReturnType<typeof setTimeout> | undefined;
   let opened!: () => void;
   const firstEvent = new Promise<void>((resolve) => { opened = resolve; });
 
+  const onClientGone = () => {
+    if (clientGone) return;
+    clientGone = true;
+    if (settled) return;
+    if (!contentDelivered) { abort.abort(); return; }
+    // Delivered content is billed: let the search finish detached from the client, under an overall bound.
+    detachTimer = setTimeout(() => abort.abort(), searchStreamDetachedTimeoutMs());
+  };
+
   let outcome: Promise<Outcome>;
   if (lookup.hit) {
+    settled = true;
     outcome = Promise.resolve({ ok: true, data: lookup.hit });
   } else {
-    const signal = AbortSignal.any([c.req.raw.signal, abort.signal]);
-    deferred.signal = signal;
+    deferred.signal = abort.signal;
     const sink: SearchStreamSink = {
       stats,
       hitLimit: prepared.limit,
       emit(body) {
-        if (aborted) return;
-        const event = stamp(body) as Record<string, unknown> & { type: string; seq: number };
+        if (settled || clientGone) return;
+        const event = stamp(body) as StreamEvent;
         if (writeEvent) writeEvent(event);
         else { buffered.push(event); opened(); }
       },
     };
-    outcome = withSearchStreamSink(sink, () => withSearchSignal(signal, lookup.run))
-      .then((data): Outcome => ({ ok: true, data }), (error: unknown): Outcome => ({ ok: false, error }));
+    outcome = withSearchStreamSink(sink, () => withSearchSignal(abort.signal, lookup.run))
+      .then((data): Outcome => ({ ok: true, data }), (error: unknown): Outcome => ({ ok: false, error }))
+      .then((result) => { settled = true; if (detachTimer) clearTimeout(detachTimer); return result; });
+    const rawSignal = c.req.raw.signal;
+    if (rawSignal.aborted) onClientGone();
+    else rawSignal.addEventListener("abort", onClientGone, { once: true });
   }
 
   if (!lookup.hit) {
@@ -676,35 +698,104 @@ async function searchStreamHandler(c: Context) {
     }
   }
 
-  return streamSSE(c, async (stream) => {
-    stream.onAbort(() => { aborted = true; abort.abort(); });
+  const response = streamSSE(c, async (stream) => {
+    const cached = Boolean(lookup.hit);
+    let eventCount = 0;
+    let bytes = 0;
+    let ttfhMs: number | undefined;
+    let sessionId: string | undefined;
+    let label: "done" | "error" | "aborted" | "detached" = "aborted";
+    let stalled = false;
+    let pending = 0;
     let chain: Promise<unknown> = Promise.resolve();
-    const send = (event: { type: string; seq: number }) => {
-      chain = chain
-        .then(() => aborted ? undefined : stream.writeSSE({ event: event.type, id: String(event.seq), data: JSON.stringify(event) }))
-        .catch(() => undefined);
+    const enqueue = (frame: string, event?: StreamEvent) => {
+      pending++;
+      chain = chain.then(async () => {
+        if (clientGone || stalled) return;
+        if (event?.type === "search.hits" && Array.isArray(event.hits) && event.hits.length > 0 && ttfhMs === undefined) {
+          contentDelivered = true;
+          ttfhMs = Math.round(performance.now() - handlerStart);
+        }
+        await stream.write(frame);
+        bytes += Buffer.byteLength(frame);
+        if (event) eventCount++;
+      }).catch(() => undefined).finally(() => { pending--; });
     };
-    send(started);
-    for (const event of buffered.splice(0)) send(event);
-    writeEvent = send;
-    const result = await outcome;
-    // Leg events first, in emission order, then the authoritative list.
-    await chain;
-    writeEvent = null;
-    if (aborted) return;
-    if (!result.ok) {
-      send(stamp({ type: "search.error" as const, error: await publicStreamError(c, result.error) }));
-      await chain;
-      return;
+    const send = (event: StreamEvent, retry?: number) => {
+      enqueue(`event: ${event.type}\ndata: ${JSON.stringify(event)}\nid: ${event.seq}${retry === undefined ? "" : `\nretry: ${retry}`}\n\n`, event);
+    };
+    // Waits for queued writes, but not for a reader that has stopped reading.
+    const flush = async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const flushed = await Promise.race([chain.then(() => true), new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), SEARCH_STREAM_FLUSH_TIMEOUT_MS); })]);
+      if (timer) clearTimeout(timer);
+      if (!flushed && !clientGone) { stalled = true; stream.abort(); }
+      return flushed;
+    };
+    stream.onAbort(onClientGone);
+    const keepalive = setInterval(() => { if (pending === 0 && !clientGone && !stalled) enqueue(": keepalive\n\n"); }, SEARCH_STREAM_KEEPALIVE_MS);
+    try {
+      send(started);
+      for (const event of buffered.splice(0)) send(event);
+      writeEvent = send;
+      const result = await outcome;
+      writeEvent = null;
+      if (clientGone) {
+        // Nobody is listening. A detached search that failed is reported once, never written.
+        if (!result.ok) await publicStreamError(c, result.error).catch(() => undefined);
+        else sessionId = result.data.sessionId;
+        label = contentDelivered ? "detached" : "aborted";
+        return;
+      }
+      // Leg events first, in emission order, then the authoritative list.
+      if (!await flush()) return;
+      if (!result.ok) {
+        send(stamp({ type: "search.error" as const, error: await publicStreamError(c, result.error) }), SEARCH_STREAM_RETRY_MS);
+        if (await flush()) label = "error";
+        return;
+      }
+      const data = result.data;
+      sessionId = data.sessionId;
+      try {
+        const ids = data.results.map((item) => searchResultId(item));
+        send(stamp({ type: "search.results" as const, ids, response: data }));
+        const timings = stats && data.timings && typeof data.timings === "object"
+          ? Object.fromEntries(Object.entries(data.timings as Record<string, unknown>).filter((entry): entry is [string, number] => typeof entry[1] === "number"))
+          : undefined;
+        send(stamp({ type: "search.done" as const, sessionId: data.sessionId, resultCount: data.results.length, ...(timings ? { timings } : {}) }), SEARCH_STREAM_RETRY_MS);
+      } catch (error) {
+        send(stamp({ type: "search.error" as const, error: await publicStreamError(c, error) }), SEARCH_STREAM_RETRY_MS);
+        if (await flush()) label = "error";
+        return;
+      }
+      if (await flush()) label = "done";
+    } finally {
+      clearInterval(keepalive);
+      if (detachTimer) clearTimeout(detachTimer);
+      c.req.raw.signal.removeEventListener("abort", onClientGone);
+      const totalMs = Math.round(performance.now() - handlerStart);
+      console.info(`[search-stream] searchId=${searchId} sessionId=${sessionId ?? "-"} requestId=${getRequestId(c) ?? "-"} outcome=${label} cached=${cached} ttfhMs=${ttfhMs ?? "-"} events=${eventCount} bytes=${bytes} totalMs=${totalMs}`);
     }
-    const data = result.data;
-    send(stamp({ type: "search.results" as const, ids: data.results.map((item) => searchResultId(item.citation)), response: data }));
-    const timings = stats && data.timings && typeof data.timings === "object"
-      ? Object.fromEntries(Object.entries(data.timings as Record<string, unknown>).filter((entry): entry is [string, number] => typeof entry[1] === "number"))
-      : undefined;
-    send(stamp({ type: "search.done" as const, sessionId: data.sessionId, resultCount: data.results.length, ...(timings ? { timings } : {}) }));
-    await chain;
   });
+  response.headers.set("Cache-Control", "no-cache, no-transform");
+  response.headers.set("X-Accel-Buffering", "no");
+  return response;
+}
+
+/** Quiet-stream comment cadence: proxies and load balancers close idle connections. */
+const SEARCH_STREAM_KEEPALIVE_MS = 15_000;
+/** Longest wait for queued writes to a reader that is not reading, once the search has settled. */
+const SEARCH_STREAM_FLUSH_TIMEOUT_MS = 15_000;
+/** SSE `retry:` on the closing frame: a native EventSource that forgets to close() waits a day, not 3 s, before re-running (and re-billing) the search. */
+const SEARCH_STREAM_RETRY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Overall bound on a search that outlives its client (it was billed once passages went out).
+ * Statement timeouts and the slot limiter bound its parts but not the whole, so this aborts the remainder.
+ */
+function searchStreamDetachedTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const parsed = Number(env.SEARCH_STREAM_DETACHED_TIMEOUT_MS);
+  return env.SEARCH_STREAM_DETACHED_TIMEOUT_MS?.trim() && Number.isFinite(parsed) && parsed >= 1000 ? Math.min(600_000, Math.trunc(parsed)) : 120_000;
 }
 
 /**

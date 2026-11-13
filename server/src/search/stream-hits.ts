@@ -1,6 +1,6 @@
 import {
   searchResultId,
-  type SearchResult,
+  type SearchStreamHit,
   type SearchStreamLeg,
 } from "@docslurp/shared";
 
@@ -23,9 +23,33 @@ import { currentSearchStreamSink, emitSearchStreamEvent } from "./stream-events.
  * scoped. Ranking-only steps (fusion, rerank, MMR, project search controls,
  * parent text) are skipped on purpose.
  */
+export interface ProvisionalSelection {
+  /** Hits in leg order. `result` is absent for an id already sent on this stream. */
+  hits: SearchStreamHit[];
+  /** More candidates remained that would have passed, or hits were withheld by the stream-wide body cap. */
+  truncated: boolean;
+}
+
 export interface ProvisionalHitPolicy {
-  /** The leg's chunks as the public results the final response would contain for them, best first. */
-  select(leg: SearchStreamLeg, chunks: SearchChunk[]): SearchResult[];
+  /**
+   * Walk the leg's candidate window in order and keep the first `limit` hits
+   * that pass the floor. Only kept hits whose id is not in `sent` (and while
+   * `newBodies` last) are converted to public results; nothing else is built.
+   */
+  select(
+    leg: SearchStreamLeg,
+    chunks: SearchChunk[],
+    budget: { limit: number; sent: ReadonlySet<string>; newBodies: number },
+  ): ProvisionalSelection;
+}
+
+/** The id `searchResultId` gives the result `searchChunkToResult(chunk)` builds, without building it. */
+export function searchChunkId(chunk: SearchChunk): string {
+  const stage = chunk.deferredLocator ?? (chunk.retrievalStage === "page-index" ? "page-text" : "chunk");
+  return searchResultId({
+    citation: { source: chunk.source, documentId: chunk.documentId, chunkIndex: chunk.chunkIndex },
+    retrieval: { stage },
+  });
 }
 
 export function createProvisionalHitPolicy(args: {
@@ -37,17 +61,41 @@ export function createProvisionalHitPolicy(args: {
   runId?: string;
 }): ProvisionalHitPolicy {
   return {
-    select(leg, chunks) {
-      const window = args.candidateDepth === undefined ? chunks : chunks.slice(0, args.candidateDepth);
-      // The deferred leg is not annotated on the final path either; unmeasured chunks pass the floor.
-      const annotated = leg === "deferred"
-        ? window
-        : annotateEvidenceRelevance([{ adapter: leg, chunks: window } as EvidenceRetrievalResult], {
-            query: args.query,
-            embeddingPipeline: args.embeddingPipeline,
-          })[0] ?? [];
-      const { kept } = applyRelevanceFloor(annotated, args.minScore);
-      return qualifyCommunityResults(kept.map((chunk) => searchChunkToResult(chunk)), args.filters, args.runId);
+    select(leg, chunks, budget) {
+      const windowSize = args.candidateDepth === undefined ? chunks.length : Math.min(chunks.length, args.candidateDepth);
+      const hits: SearchStreamHit[] = [];
+      const seen = new Set<string>();
+      let newBodies = budget.newBodies;
+      let truncated = false;
+      for (let index = 0; index < windowSize; index++) {
+        // Relevance is per chunk (no list-relative step), so annotating one at a
+        // time gives the values the whole-list pass would. The deferred leg is not
+        // annotated on the final path either; unmeasured chunks pass the floor.
+        const annotated = leg === "deferred"
+          ? chunks[index]!
+          : annotateEvidenceRelevance([{ adapter: leg, chunks: [chunks[index]!] } as EvidenceRetrievalResult], {
+              query: args.query,
+              embeddingPipeline: args.embeddingPipeline,
+            })[0]?.[0];
+        if (!annotated || applyRelevanceFloor([annotated], args.minScore).kept.length === 0) continue;
+        if (hits.length >= budget.limit) {
+          truncated = true; // a further candidate passes the floor
+          break;
+        }
+        const id = searchChunkId(annotated);
+        const legRank = hits.length;
+        if (budget.sent.has(id) || seen.has(id)) {
+          hits.push({ id, legRank });
+        } else if (newBodies > 0) {
+          const result = qualifyCommunityResults([searchChunkToResult(annotated)], args.filters, args.runId)[0]!;
+          hits.push({ id: searchResultId(result), legRank, result });
+          newBodies--;
+        } else {
+          truncated = true; // stream-wide body cap reached: omit the hit
+        }
+        seen.add(id);
+      }
+      return { hits, truncated };
     },
   };
 }
@@ -73,18 +121,22 @@ export function emitLegHits(args: {
   timedOut?: () => boolean;
 }): void {
   emitSearchStreamEvent((sink) => {
-    const results = args.policy ? args.policy.select(args.leg, args.chunks) : [];
-    const hits = results.slice(0, sink.hitLimit).map((result, legRank) => ({
-      id: searchResultId(result.citation),
-      legRank,
-      result,
-    }));
+    const selection = args.policy
+      ? args.policy.select(args.leg, args.chunks, {
+          limit: sink.hitLimit,
+          sent: sink.sentIds,
+          // One stream sends at most three times `limit` distinct bodies.
+          newBodies: Math.max(0, 3 * sink.hitLimit - sink.sentIds.size),
+        })
+      : { hits: [], truncated: false };
+    for (const hit of selection.hits) if (hit.result) sink.sentIds.add(hit.id);
+    const { hits } = selection;
     const timedOut = args.timedOut?.();
     return {
       type: "search.hits",
       leg: args.leg,
       hits,
-      truncated: results.length > hits.length,
+      truncated: selection.truncated,
       ...(sink.stats
         ? {
             stats: {
