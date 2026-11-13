@@ -635,9 +635,9 @@ et-xmlfile==2.0.0 \
     --hash=sha256:7a91720bc756843502c3b7504c77b8fe44217c85c537d85037f0f536151b2caa \
     --hash=sha256:dab3f4764309081ce75662649be815c4c9081e88f0837825f90fd28317d4da54
     # via openpyxl
-filelock==3.32.7 \
-    --hash=sha256:37b8a3d9811b0f9aef7e5ec5c71bb320de52df51e6ca9bcd6f5ad81187660da7 \
-    --hash=sha256:65ff0d0190ea42038b32bda4b77834fb05be2cad4c5b9b01aa4dfb3614536e52
+filelock==4.2.1 \
+    --hash=sha256:7be2662e9e826b9bba28afc0f843a123280d799a2ea44bb5d35ccec67905ae44 \
+    --hash=sha256:c4c937ccac2a813cee448e662a56366cfb374c0f8702e75f295c412cc1c5d5a3
     # via
     #   huggingface-hub
     #   torch
@@ -3562,9 +3562,9 @@ tzlocal==5.4.4 \
     --hash=sha256:8dbb8660838688a7b6ba4fed31d18dedf842afb4d47ca050d6d891c2c15f3be4 \
     --hash=sha256:aae09f0126a8a86fa736be266eb4a471380d26a0de3bc14844e7821fee3e2a15
     # via dateparser
-unstructured==0.27.33 \
-    --hash=sha256:9a90af9d95645e7e74e92e5fead3f49d177316aeb9f22fb168e526e75d76a3d1 \
-    --hash=sha256:e34dfdab88524c9a41153a985bf1082c2957bf8c25ed05836d49b7651d4edf94
+unstructured==0.27.37 \
+    --hash=sha256:27c31aa319a245fdd800dd5569654f358c7823f37cbba8271933d2b534a7cde2 \
+    --hash=sha256:97945cebd168957f96d4d42976cdd62f1d204d3bd2d13afcb16e5fd6c8921393
     # via -r worker/requirements-heavy.txt
 unstructured-client==0.46.4 \
     --hash=sha256:5fac534f60cb64f212890f33cc9a80940582e7343ed940d4571a9a7770fd6f62 \
