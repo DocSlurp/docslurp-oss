@@ -87,6 +87,8 @@ export type {
 } from "./layout.js";
 
 export * from "./openrouter-usage.js";
+export * from "./openrouter-prompt-cache.js";
+export * from "./chat-model-prompts.js";
 export * from "./openrouter-routing.js";
 export * from "./provider-pools.js";
 export * from "./automatic-model-selection.js";
