@@ -41,8 +41,9 @@ export interface TierOptionConfig {
   /** Tiers that may pick this option. */
   readonly tiers: readonly RouteTier[];
   /**
-   * Measured quality on the capability's eval (0-1, higher is better), from a recorded run (`evalRef`). Null means
-   * unmeasured: the option is never picked by "smart".
+   * The option's composite score on the capability's tier benchmark (0-1, higher is better): for page OCR the mean
+   * tolerant-markdown@v1 `content`, from a recorded run (`evalRef`) that keeps every component score. "smart" ranks by
+   * it. Null means unmeasured: the option is never picked by "smart".
    */
   readonly evalScore: number | null;
   readonly evalRef: string | null;
