@@ -339,7 +339,7 @@ describe("Doppler page facts as routing evidence on the sandboxed route", () => 
       // The ingest report's per-page rows: every page, no invented size.
       expect(sourceRows(h)).toEqual([
         { documentId: "doc-1", runId: "run-1", pageNumber: 1, textBytes: 17, wordCount: 410, imageCount: 1, factsSource: "doppler-facts" },
-        { documentId: "doc-1", runId: "run-1", pageNumber: 2, textBytes: 24, wordCount: 300, imageCount: 2, factsSource: "doppler-facts" },
+        { documentId: "doc-1", runId: "run-1", pageNumber: 2, textBytes: null, wordCount: 300, imageCount: 2, factsSource: "doppler-facts" },
         { documentId: "doc-1", runId: "run-1", pageNumber: 3, textBytes: 8, wordCount: 8, imageCount: 1, factsSource: "doppler-facts" },
       ]);
       expect(checkpoint?.stats).toMatchObject({ hostPdfProbes: "skipped-sandboxed-route", dopplerFactsEvidence: { status: "built", pages: 3, evidencePages: 1, rows: 3 } });

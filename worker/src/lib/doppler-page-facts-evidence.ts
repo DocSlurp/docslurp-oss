@@ -15,8 +15,9 @@
  *   no size and no read, and a caller must not write them for a run that bills scanned pages from page facts at completion
  *   (page-base-fee.ts runBillsScansAtCompletion).
  */
-import { MIN_SIGNIFICANT_IMAGE_COVERAGE, MIN_SIGNIFICANT_IMAGE_PIXELS, SPARSE_PAGE_WORDS, assessPageTextLayers, pageEvidenceWordCount, type PageImageEvidence } from "./page-image-evidence.js";
-import { repeatedDopplerImageObjects } from "./doppler-page-facts-layout.js";
+import { PAGE_RASTER_ROUTING } from "@docslurp/shared";
+
+import { MIN_SIGNIFICANT_IMAGE_COVERAGE, MIN_SIGNIFICANT_IMAGE_PIXELS, SPARSE_PAGE_WORDS, pageEvidenceWordCount, type PageImageEvidence } from "./page-image-evidence.js";
 import type { DopplerPageFacts, DopplerPageFactsDocument } from "./doppler-page-facts.js";
 import { PAGE_FACTS_MAX_PAGES, plainTextBytes, type PageFactUpsert } from "../pipeline/page-facts.js";
 
@@ -79,6 +80,37 @@ function itemCoverage(item: CoveredPage["images"]["items"][number], page: Covere
   return Math.max(0, Math.min(1, item.coverage, boxShare));
 }
 
+/** Pages whose image listing the probe reads for furniture beyond the sparse pages (page-image-evidence.ts LISTING_SCOPE_PAGES). */
+const LISTING_SCOPE_PAGES = 1000;
+
+/** An item's share of its page when it is significant as the probe judges a listed image (readable pixels, placed share), else null. */
+function significantShare(item: CoveredPage["images"]["items"][number], page: CoveredPage): number | null {
+  const share = itemCoverage(item, page);
+  return Math.min(item.px[0], item.px[1]) < MIN_SIGNIFICANT_IMAGE_PIXELS || !(share >= MIN_SIGNIFICANT_IMAGE_COVERAGE) ? null : share;
+}
+
+/**
+ * Furniture as the probe finds it (summarizeImageListing): an image object whose significant placements fall on at least
+ * repeatedImageMinPages pages, and on at least repeatedImageMinShare of the `scope` pages listed (pages 1..scope).
+ */
+function repeatedSignificantObjects(facts: DopplerPageFactsDocument, scope: number): Set<number> {
+  const pagesOf = new Map<number, Set<number>>();
+  for (let pageNumber = 1; pageNumber <= scope; pageNumber += 1) {
+    const page = facts.pages.get(pageNumber) as CoveredPage;
+    for (const item of page.images.items) {
+      if (item.obj === undefined || significantShare(item, page) === null) continue;
+      const set = pagesOf.get(item.obj) ?? new Set<number>();
+      set.add(pageNumber);
+      pagesOf.set(item.obj, set);
+    }
+  }
+  const out = new Set<number>();
+  for (const [obj, set] of pagesOf) {
+    if (set.size >= PAGE_RASTER_ROUTING.repeatedImageMinPages && set.size / Math.max(1, scope) >= PAGE_RASTER_ROUTING.repeatedImageMinShare) out.add(obj);
+  }
+  return out;
+}
+
 /**
  * The first page whose facts call it sparse (fewer than SPARSE_PAGE_WORDS words in its text layer) while the winning
  * extraction read SPARSE_PAGE_WORDS or more words from it without OCR, or null when every page agrees. Such a page is
@@ -102,8 +134,8 @@ export function dopplerFactsTextDisagreement(
 /**
  * Page-image evidence for classify-route from facts that cover the document (`dopplerFactsCoverEvidence`), the same shape the
  * `pdfimages` probe writes: sparse pages (fewer than SPARSE_PAGE_WORDS words in the text layer, invisible OCR words
- * included, as `pdftotext` reads them) with their significant, non-repeated image totals, plus any page whose extracted text
- * reads as garbled or suspect. `pageTexts` are the winning extraction's page-aligned texts; `ocrPages` the pages the provider
+ * included, as `pdftotext` reads them) with their significant, non-repeated image totals. No text-layer verdict (the facts
+ * carry no layer text). `pageTexts` are the winning extraction's page-aligned texts; `ocrPages` the pages the provider
  * reported it OCR'd. Null when the facts do not cover the document, when they disagree with the extracted text
  * (`dopplerFactsTextDisagreement`), or when no page needs evidence (as the probe returns).
  */
@@ -116,21 +148,24 @@ export function pageImageEvidenceFromDopplerFacts(args: {
   if (!dopplerFactsCoverEvidence(args.facts, args.pageCount).covered || args.pageTexts.length !== args.pageCount) return null;
   const facts = args.facts!;
   if (dopplerFactsTextDisagreement(facts, args.pageTexts, args.ocrPages) !== null) return null;
-  // The probe's furniture rule over the whole document (it lists at least the first 1,000 pages; the facts list them all).
-  const repeated = repeatedDopplerImageObjects(facts.pages.values(), args.pageCount);
+  const sparse = [...facts.pages.values()].filter((page) => (page.text?.wordCount ?? 0) < SPARSE_PAGE_WORDS).map((page) => page.page);
+  if (sparse.length === 0) return null;
+  // The probe's furniture rule and scope: significant placements only, over the pages it lists (the first 1,000, or up to the
+  // last sparse page when that is later).
+  const scope = Math.min(Math.max(Math.max(...sparse), Math.min(args.pageCount, LISTING_SCOPE_PAGES)), args.pageCount);
+  const repeated = repeatedSignificantObjects(facts, scope);
   const evidence = new Map<number, PageImageEvidence>();
-  for (let pageNumber = 1; pageNumber <= args.pageCount; pageNumber += 1) {
+  for (const pageNumber of sparse.sort((a, b) => a - b)) {
     const page = facts.pages.get(pageNumber) as CoveredPage;
     const words = page.text.wordCount;
-    if (words >= SPARSE_PAGE_WORDS) continue;
     let imageCount = 0;
     let repeatedImageCount = 0;
     let coverage = 0;
     let largest = 0;
     for (const item of page.images.items) {
       // Significant as the probe judges a listed image: readable size in pixels and a placed share of the page.
-      const share = itemCoverage(item, page);
-      if (Math.min(item.px[0], item.px[1]) < MIN_SIGNIFICANT_IMAGE_PIXELS || !(share >= MIN_SIGNIFICANT_IMAGE_COVERAGE)) continue;
+      const share = significantShare(item, page);
+      if (share === null) continue;
       if (item.obj !== undefined && repeated.has(item.obj)) { repeatedImageCount += 1; continue; }
       imageCount += 1;
       coverage += share;
@@ -149,15 +184,8 @@ export function pageImageEvidenceFromDopplerFacts(args: {
       embeddedImageBytes: null,
     });
   }
-  for (const [pageNumber, layer] of assessPageTextLayers(args.pageTexts, null).layers) {
-    const existing = evidence.get(pageNumber);
-    if (existing) existing.textLayer = layer;
-    else {
-      const page = facts.pages.get(pageNumber) as CoveredPage;
-      evidence.set(pageNumber, { pageNumber, wordCount: page.text.wordCount, imageCount: 0, imageCoverage: 0, largestImageCoverage: 0, textLayer: layer });
-    }
-  }
-  if (evidence.size === 0) return null;
+  // No text-layer verdict: the probe judges the PDF's own layer, which the facts do not carry, and judging the extracted
+  // Markdown or OCR text instead would call math, tables or OCR output garbled and authorize reads the probe never would.
   return [...evidence.values()].sort((a, b) => a.pageNumber - b.pageNumber);
 }
 
@@ -190,7 +218,8 @@ export function pageFactRowsFromDopplerFacts(args: {
       documentId: args.documentId,
       runId: args.runId,
       pageNumber,
-      textBytes: page.text.charCount === 0 ? 0 : plainTextBytes(args.pageTexts[pageNumber - 1] ?? "") || null,
+      // A page a model read holds OCR text, not its layer: its layer size is unknown.
+      textBytes: page.text.charCount === 0 ? 0 : args.ocrPages?.has(pageNumber) ? null : plainTextBytes(args.pageTexts[pageNumber - 1] ?? "") || null,
       wordCount: page.text.wordCount,
       imageCount: page.images.items.filter((item) => !item.imageMask).length,
       factsSource: DOPPLER_FACTS_EVIDENCE_SOURCE,

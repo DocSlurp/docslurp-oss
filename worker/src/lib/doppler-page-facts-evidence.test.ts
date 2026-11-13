@@ -117,12 +117,25 @@ describe("Doppler page facts as page-image evidence", () => {
     expect(pageImageEvidenceFromDopplerFacts({ facts, pageCount: 5, pageTexts: ["one"] })).toBeNull();
   });
 
-  it("reports a garbled extracted page even when it is not sparse, and nothing at all for a clean born-digital document", () => {
+  it("gives no text-layer verdict (the facts carry no layer text) and nothing for a clean born-digital document", () => {
     const clean = parse([docLine({ pageCount: 2 }), textPage(1), scanPage(2), runLine({ pagesEmitted: 2 })], 2);
     expect(pageImageEvidenceFromDopplerFacts({ facts: clean, pageCount: 2, pageTexts: ["Plain readable words here", "More readable words"] })).toBeNull();
-    const garbled = "�".repeat(400);
-    const pages = pageImageEvidenceFromDopplerFacts({ facts: clean, pageCount: 2, pageTexts: ["Plain readable words here", garbled] });
-    expect(pages).toEqual([expect.objectContaining({ pageNumber: 2, wordCount: 300, textLayer: expect.objectContaining({ verdict: "garbled", source: "extracted" }) })]);
+    // Markdown that reads as garbled (math, tables, OCR output) is never judged as if it were the PDF's layer.
+    expect(pageImageEvidenceFromDopplerFacts({ facts: clean, pageCount: 2, pageTexts: ["Plain readable words here", "\uFFFD".repeat(400)] })).toBeNull();
+  });
+
+  it("counts furniture as the probe does: significant placements only (a small icon elsewhere does not make a scan furniture)", () => {
+    const ICON: Drawn = { px: [40, 40], dpi: 300, bbox: [10, 10, 20, 20], obj: 9 };
+    const FULL: Drawn = { ...SCAN, obj: 9 };
+    const doc: Array<[number, Drawn[]]> = [[400, [ICON]], [400, [ICON]], [400, [ICON]], [400, [ICON]], [0, [FULL]]];
+    const f = parse([docLine({ pageCount: 5 }), ...doc.map(([words, images], i) => page(i + 1, words, images)), runLine({ pagesEmitted: 5 })], 5);
+    const texts = doc.map(([words]) => Array.from({ length: words }, (_, i) => `w${i}`).join(" "));
+    const listing = doc.flatMap(([, images], i) => images.map((image, n) => listingRow(i + 1, n, image))).join("\n");
+    const probe = buildPageImageEvidence({ sparsePages: findSparsePages(texts), listing: summarizeImageListing(listing, { pageAreas: new Map(), defaultPageArea: 612 * 792, pagesInScope: 5 }) });
+    const fromFacts = pageImageEvidenceFromDopplerFacts({ facts: f, pageCount: 5, pageTexts: texts });
+    expect(fromFacts?.map(({ pageNumber, imageCount, repeatedImageCount, largestImageCoverage }) => ({ pageNumber, imageCount, repeatedImageCount, largestImageCoverage })))
+      .toEqual(probe.map(({ pageNumber, imageCount, repeatedImageCount, largestImageCoverage }) => ({ pageNumber, imageCount, repeatedImageCount, largestImageCoverage })));
+    expect(fromFacts?.[0]).toMatchObject({ pageNumber: 5, imageCount: 1, repeatedImageCount: 0, largestImageCoverage: 1 });
   });
 
   it("refuses facts that call a page sparse while the extraction read it as text (not OCR), and builds nothing from them", () => {
@@ -135,6 +148,9 @@ describe("Doppler page facts as page-image evidence", () => {
     // A page the provider OCR'd has words from its pixels, not its layer: that is agreement, as the probe reads it.
     expect(dopplerFactsTextDisagreement(forged, texts, new Set([1]))).toBeNull();
     expect(pageImageEvidenceFromDopplerFacts({ facts: forged, pageCount: 2, pageTexts: texts, ocrPages: new Set([1]) })?.map((p) => p.pageNumber)).toEqual([1, 2]);
+    // ...and its row's text size is unknown (the extracted text is OCR output, not the layer).
+    const withText = parse([docLine({ pageCount: 2 }), page(1, 5, [SCAN]), page(2, 0, [SCAN]), runLine({ pagesEmitted: 2 })], 2);
+    expect(pageFactRowsFromDopplerFacts({ facts: withText, pageCount: 2, pageTexts: texts, ocrPages: new Set([1]), documentId: "d", runId: "r" })[0]).toMatchObject({ textBytes: null });
   });
 
   it("never counts more of the page than an image's own box covers (a forged coverage on a small box)", () => {

@@ -982,7 +982,9 @@ export class ExtractMarkdownStage implements Stage {
                   // facts stand in for them (page-image evidence, the ingest report's per-page rows) when they cover every page;
                   // otherwise the route goes without, as before. No command runs either way.
                   const factsEvidence = hostPdfProbes === "skipped-sandboxed-route"
-                    ? await this.recordDopplerFactsEvidence(document, state, winningCandidate, winningText)
+                    ? await this.recordDopplerFactsEvidence(document, state, winningCandidate, winningText,
+                      // Pages whose winning text a model read (the provider's OCR, host scan-fill, accepted critique): not the layer.
+                      new Set([...(winningCandidate.ocrPages ?? []), ...(scanFill?.pages ?? []), ...(critique?.acceptedPages ?? [])]))
                     : null;
                   const pageImageEvidenceUri = hostPdfProbes === "skipped-sandboxed-route"
                     ? factsEvidence?.pageImageEvidenceUri ?? this.skipHostPdfEvidence(document, "page-image-evidence", sandboxReason ?? "sandboxed-pdf-winner")
@@ -1744,6 +1746,7 @@ export class ExtractMarkdownStage implements Stage {
     state: import("../pipeline/pipeline.js").WorkflowState,
     candidate: ExtractedCandidate,
     winningText: string,
+    modelReadPages: ReadonlySet<number> = new Set(),
   ): Promise<{ pageImageEvidenceUri: string | null; stats: Record<string, unknown> }> {
     const skipped = (reason: string) => {
       console.log(`[doppler-page-facts] document=${document.id} evidence=skipped reason=${reason}`);
@@ -1759,7 +1762,7 @@ export class ExtractMarkdownStage implements Stage {
     if (!coverage.covered) return skipped(coverage.reason);
     const pageTexts = pageAlignedTexts(winningText, pageCount);
     if (!pageTexts) return skipped("text-not-page-aligned");
-    const ocrPages = new Set(candidate.ocrPages ?? []);
+    const ocrPages = new Set([...(candidate.ocrPages ?? []), ...modelReadPages]);
     const disagreement = dopplerFactsTextDisagreement(candidate.pageFacts, pageTexts, ocrPages);
     if (disagreement !== null) {
       console.warn(`[doppler-page-facts] document=${document.id} facts disagree with the extracted text page=${disagreement}`);

@@ -61,11 +61,13 @@ facts, with no command:
 - page-image evidence (`page-image-evidence`, `source: "doppler-facts"`, vision fallback on): the probe's sparse pages
   (fewer than `sparsePageWords` words in the text layer, invisible OCR words included, as `pdftotext` reads them), each
   with its significant, non-repeated image count and coverage under the probe's own rules (`minSignificantImagePixels`,
-  `minSignificantImageCoverage`, the repeated-furniture rule), plus any page whose extracted text reads as garbled or suspect.
-  `embeddedImageBytes` and `drawnBytesPerPage` are null: facts never read a stream;
+  `minSignificantImageCoverage`, and the repeated-furniture rule over significant placements in the probe's listing scope).
+  No text-layer verdict: the probe judges the PDF's own layer, which facts do not carry, and judging the extracted Markdown or
+  OCR text instead would call math, tables or OCR output garbled. `embeddedImageBytes` and `drawnBytesPerPage` are null:
+  facts never read a stream, so the drawn-content hint stays off;
 - per-page rows in `document_page_facts` (`facts_source = 'doppler-facts'`): `word_count`, `image_count` (image rows, as
   `pdfimages -list` counts them) and `text_bytes`, which is 0 for a page with no text layer and otherwise the extracted page's
-  whitespace-collapsed bytes (facts count characters, never bytes).
+  whitespace-collapsed bytes, or null for a page a model read (its text is OCR output, not the layer).
 
 Only facts that cover the document count: a complete stream (a run line last), no dropped line, no failed page, no document
 error or lock, every page of the host's own count present with the `text` and `geometry` families and a complete
@@ -79,7 +81,8 @@ without a page billing pin, which still bills pages with no text bytes and an im
 (`runBillsScansAtCompletion`). The evidence is routing evidence, though: like the probe's, it can make classify-route send a
 sparse scan page to a vision read, and that read bills Rich when it happens, for a project with vision fallback on. To keep a
 counting gap or hostile facts from turning text pages into reads, the facts must agree with the extraction: a page the facts
-call sparse while the winning extraction read `sparsePageWords` or more words from it (not by OCR) refuses the whole
+call sparse while the winning extraction read `sparsePageWords` or more words from it without a model (the provider's OCR,
+host scan-fill and accepted critique pages are exempt) refuses the whole
 document's evidence (`words-disagree`), and an image never counts for more of the page than its own box covers.
 
 Commands the facts cannot retire, and why:
