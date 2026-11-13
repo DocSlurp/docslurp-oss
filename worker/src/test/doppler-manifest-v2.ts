@@ -116,7 +116,12 @@ export async function writeV3Folder(dir: string, text: string, files: ReadonlyMa
 export function v3ShardText(manifest: V2Manifest, range: [number, number], options: { settings?: string; mutateLines?: (lines: string[]) => void; context?: ReadonlyArray<V2Manifest["images"][number]> } = {}): string {
   // `context`: entries a real shard also lists for its context pages (outside `range`), in id order with the rest.
   const images = [...manifest.images.filter((entry) => (entry.page as number) >= range[0] && (entry.page as number) <= range[1]), ...(options.context ?? [])]
-    .sort((a, b) => (a.page as number) - (b.page as number) || String(a.id).localeCompare(String(b.id)));
+    .sort((a, b) => {
+      // id order: page, pictures before figures, numeric index (as the validator requires).
+      const key = (id: unknown) => { const m = /^p(\d+)\.(g?)(\d+)$/.exec(String(id))!; return [Number(m[1]), m[2] ? 1 : 0, Number(m[3])]; };
+      const [x, y] = [key(a.id), key(b.id)];
+      return x[0]! - y[0]! || x[1]! - y[1]! || x[2]! - y[2]!;
+    });
   const batches = [{ pages: [range[0], range[0] + 63], status: images.some((e) => e.resumable) ? "budget" : "ok", ...(images.some((e) => e.resumable) ? { cut_page: range[1] } : {}) }];
   const count = (status: string) => images.filter((entry) => entry.status === status).length;
   const extracted = images.filter((entry) => entry.status === "extracted");
