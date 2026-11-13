@@ -1703,8 +1703,8 @@ async function chargeSearch(result: SearchResponse, userId: string, searchId: st
   }
   const llmMode = result.searchMode ?? "deep";
   const credits = searchCredits(1, { llmStrategies, mode: llmMode });
-  // Committed after the response within SEARCH_WRITE_BEHIND_MAX_CREDITS; the id makes a retry idempotent.
-  await writeBehindWithinCap(credits, async () => { try {
+  // Committed after the response within SEARCH_WRITE_BEHIND_MAX_CREDITS, retried until it lands; the id makes a retry idempotent.
+  await writeBehindWithinCap(credits, async () => {
     await recordUnitCharge({
       userId,
       scope: { projectId, sessionId: result.sessionId },
@@ -1717,10 +1717,10 @@ async function chargeSearch(result: SearchResponse, userId: string, searchId: st
         metadata: { llmStrategies, searchMode: llmMode, searchUnits: searchUnits({ llmStrategies, mode: llmMode }) },
       },
     });
-  } catch (error) {
+  }, {
     // A failed charge never fails the search the user already has.
-    console.error(`[search] charge failed session=${result.sessionId}: ${error instanceof Error ? error.message : String(error)}`);
-  } }).done;
+    onError: (error, attempt) => console.error(`[search] charge failed session=${result.sessionId} attempt=${attempt + 1}: ${error instanceof Error ? error.message : String(error)}`),
+  }).done;
 }
 
 async function executeHybridSearch(
