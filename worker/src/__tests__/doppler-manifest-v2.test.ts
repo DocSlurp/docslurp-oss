@@ -13,7 +13,7 @@ async function rowsOf(set: DopplerFigureSet) {
   for await (const row of readLedgerSpill(set.ledger.spill)) rows.push(row);
   return rows;
 }
-import { v2Manifest, writeV2Folder, type V2Manifest } from "../test/doppler-manifest-v2.js";
+import { v2Manifest, writeV2Folder, V2_SOURCE_SHA, type V2Manifest } from "../test/doppler-manifest-v2.js";
 
 const DOC = { id: "0b6f7e8c-3c1a-4f7e-9a51-2a1d3e4f5a6b", userId: "user-1", runId: "run-1" };
 
@@ -204,7 +204,7 @@ describe("manifest v2: hostile or oversized manifests are refused", () => {
   it("refuses a link prefix other than the images/ folder the host asks for, and a manifest of another PDF", async () => {
     expect(await rule((m) => { m.link_prefix = "img/"; for (const e of m.images) if (e.link) e.link = `img/${e.path}`; })).toBe("link-prefix");
     expect(await rule(() => undefined, { sourceSha256: "c".repeat(64) })).toBe("source-mismatch");
-    expect(await rule(() => undefined, { sourceSha256: "a".repeat(64) })).toBe("accepted");
+    expect(await rule(() => undefined, { sourceSha256: V2_SOURCE_SHA })).toBe("accepted");
   });
 
   it("refuses files the manifest does not name, misplaced files, links and nesting", async () => {
