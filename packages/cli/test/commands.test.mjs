@@ -282,6 +282,19 @@ test("chat supports sessions and machine-readable answers", async () => {
   assert.deepEqual(JSON.parse(result.stdout), body);
 });
 
+test("chat sends a tier and refuses --model before any request", async () => {
+  const body = { answer: "A", sessionId: "s", citations: [] };
+  const tiered = await invoke(["chat", "Why?", "--tier", "smart", "--reasoning", "low", "--json"], () => ({ body }), { project: "project" });
+  assert.equal(tiered.code, 0, tiered.stderr);
+  assert.deepEqual(JSON.parse(tiered.requests[0].body), { q: "Why?", project: "project", tier: "smart", reasoning: "low" });
+  for (const args of [["--model", "anthropic/claude-haiku-5.5"], ["--tier", "openai/gpt-6.1-sol"]]) {
+    const refused = await invoke(["chat", "Why?", ...args], () => ({ body }), { project: "project" });
+    assert.notEqual(refused.code, 0);
+    assert.match(refused.stderr, /fastest, balanced, smart/);
+    assert.equal(refused.requests.length, 0);
+  }
+});
+
 test("search context emits full cited text and JSON emits the API envelope", async () => {
   const text = "Long evidence ".repeat(50);
   const body = { results: [{ score: 1, text, citation: { filename: "policy.pdf", documentId: "doc", pageNumbers: [2] } }], availability: null };

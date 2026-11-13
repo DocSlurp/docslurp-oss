@@ -75,7 +75,7 @@ function usage(): void {
   docslurp runs [--limit <1-100>] [--cursor <nextCursor>] [--api-url <url>]
   docslurp search <query> [--project <id|slug|name>] [--min-score <0..1>] [--mode <keyword|hybrid|deep>] [--json | --context]
   docslurp search --queries-file <queries.json> [--project <id|slug|name>] [--concurrency <1..4>] [--json | --context]
-  docslurp chat <question> [--project <id|slug|name>] [--session <id>] [--json]
+  docslurp chat <question> [--project <id|slug|name>] [--session <id>] [--tier fastest|balanced|smart] [--reasoning none|minimal|low|medium|high] [--json]
   docslurp mcp-server [--api-url <url>] [--api-key <key>]   (alias: docslurp mcp)
   docslurp login [--device] [--scopes "search:deep read chat ingest"] [--no-browser] [--profile <name>] [--api-url <url>]
   docslurp logout [--profile <name>] [--force]
@@ -1179,13 +1179,20 @@ async function searchCommand(query: string, flags: Record<string, string | boole
   if (flags.json) console.log(JSON.stringify(data)); else printSearch(data, flags);
 }
 
+const CHAT_TIERS = ["fastest", "balanced", "smart"] as const;
+
 async function chatCommand(question: string, flags: Record<string, string | boolean>): Promise<void> {
   const project = resolveProject(flags);
   if (!question.trim()) throw new Error("Chat question required.");
   if (flags.context || flags.queriesFile || flags.concurrency) throw new Error("Chat accepts one question; batch/context options are for search.");
+  if (flags.model !== undefined) throw new Error(`Chat models are managed by DocSlurp. Use --tier (${CHAT_TIERS.join(", ")}) instead of --model.`);
+  const tier = flags.tier === undefined ? undefined : String(flags.tier);
+  if (tier !== undefined && !(CHAT_TIERS as readonly string[]).includes(tier)) throw new Error(`--tier must be one of ${CHAT_TIERS.join(", ")}.`);
+  const reasoning = flags.reasoning === undefined ? undefined : String(flags.reasoning);
+  if (reasoning !== undefined && !["none", "minimal", "low", "medium", "high"].includes(reasoning)) throw new Error("--reasoning must be one of none, minimal, low, medium, high.");
   const response = await apiFetch("/v1/chat", flags, {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ q: question, ...(project ? { project } : {}), ...(flags.session ? { sessionId: String(flags.session) } : {}) }),
+    body: JSON.stringify({ q: question, ...(project ? { project } : {}), ...(flags.session ? { sessionId: String(flags.session) } : {}), ...(tier ? { tier } : {}), ...(reasoning ? { reasoning } : {}) }),
   });
   if (!response.ok) throw await responseFailure(response);
   const data = await response.json() as { answer: string; sessionId: string; citations: CliSearchResponse["results"]; usage?: unknown; availability?: { message?: string | null } };
