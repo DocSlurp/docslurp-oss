@@ -169,7 +169,7 @@ describe("projectsRoutes validation", () => {
   it("returns current project state with a validated window for an authorized server key", async () => {
     getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
     getProjectStateMock.mockResolvedValue({ projectId: "ws-1", pages: { indexed: 2, notIndexed: 1 } });
-    const response = await buildApp({ orgId: "org-1", scopes: ["search"] }).request("/projects/ws-1/state?recentWindowHours=48");
+    const response = await buildApp({ orgId: "org-1", scopes: ["search:deep"] }).request("/projects/ws-1/state?recentWindowHours=48");
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ pages: { indexed: 2, notIndexed: 1 } });
     expect(getProjectStateMock).toHaveBeenCalledWith({ projectId: "ws-1", orgId: "org-1", recentWindowHours: 48 });
@@ -178,8 +178,8 @@ describe("projectsRoutes validation", () => {
   it("rejects cross-organization, public, and unscoped keys before computing state", async () => {
     getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
     for (const [key, status] of [
-      [{ orgId: "other-org", scopes: ["search"] }, 404],
-      [{ orgId: "org-1", scopes: ["search"], keyType: "public" }, 403],
+      [{ orgId: "other-org", scopes: ["search:deep"] }, 404],
+      [{ orgId: "org-1", scopes: ["search:deep"], keyType: "public" }, 403],
       [{ orgId: "org-1", scopes: ["chat"] }, 403],
     ] as const) {
       const response = await buildApp({ ...key, scopes: [...key.scopes] }).request("/projects/ws-1/state");
@@ -214,8 +214,8 @@ describe("projectsRoutes validation", () => {
     expect((await app.request("/projects/ws-1/ingest-report")).status).toBe(404);
     getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
     for (const [key, status] of [
-      [{ orgId: "other-org", scopes: ["search"] }, 404],
-      [{ orgId: "org-1", scopes: ["search"], keyType: "public" }, 403],
+      [{ orgId: "other-org", scopes: ["search:deep"] }, 404],
+      [{ orgId: "org-1", scopes: ["search:deep"], keyType: "public" }, 403],
       [{ orgId: "org-1", scopes: ["chat"] }, 403],
     ] as const) {
       const response = await buildApp({ ...key, scopes: [...key.scopes] }).request("/projects/ws-1/ingest-report");
@@ -229,7 +229,7 @@ describe("projectsRoutes validation", () => {
   it("gives a search-only key a read-only report and an ingest key the editor's actions", async () => {
     getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
     loadIngestReportMock.mockResolvedValue({ projectId: "ws-1" });
-    const response = await buildApp({ orgId: "org-1", scopes: ["search"] }).request("/projects/ws-1/ingest-report");
+    const response = await buildApp({ orgId: "org-1", scopes: ["search:deep"] }).request("/projects/ws-1/ingest-report");
     expect(response.status).toBe(200);
     expect(loadIngestReportMock).toHaveBeenLastCalledWith(expect.objectContaining({ canEdit: false }));
     await buildApp({ orgId: "org-1", scopes: ["ingest"] }).request("/projects/ws-1/ingest-report");
@@ -287,7 +287,7 @@ describe("projectsRoutes validation", () => {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ recommendationId: "preserve-tables" }),
     });
     for (const [key, action, status] of [
-      [{ orgId: "org-1", scopes: ["search"] }, "reprocess", 403],
+      [{ orgId: "org-1", scopes: ["search:deep"] }, "reprocess", 403],
       [{ orgId: "org-1", scopes: ["ingest"], keyType: "client" }, "reprocess", 403],
       [{ orgId: "other-org", scopes: ["ingest"] }, "reprocess", 404],
       [{ orgId: "org-1", scopes: ["ingest"] }, "apply", 403],
@@ -689,7 +689,7 @@ describe("projectsRoutes validation", () => {
   it.each([{ keyType: "server" }, { keyType: "client" }])("never gives API keys suggestions mode on the dashboard chat routes, even when they ask: %j", async ({ keyType }) => {
     getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
     chatProjectMock.mockResolvedValue({ id: "answer", debug: { model: null, fallback: true }, citations: [] });
-    const keyApp = buildApp({ orgId: "org-1", scopes: ["search", "chat", "projects:manage"], keyType });
+    const keyApp = buildApp({ orgId: "org-1", scopes: ["search:deep", "chat", "projects:manage"], keyType });
     const send = (body: Record<string, unknown>) => keyApp.request("/projects/ws-1/chat", { method: "POST",
       headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "hi", ...body }) });
     chatProjectMock.mockClear();
@@ -700,7 +700,7 @@ describe("projectsRoutes validation", () => {
   });
 
   it("refuses settings-proposal Apply for API keys before any change", async () => {
-    const keyApp = buildApp({ orgId: "org-1", scopes: ["search", "chat", "projects:manage"], keyType: "server" });
+    const keyApp = buildApp({ orgId: "org-1", scopes: ["search:deep", "chat", "projects:manage"], keyType: "server" });
     const response = await keyApp.request("/projects/ws-1/settings-proposals/apply", { method: "POST",
       headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: "forged", reprocessExisting: false }) });
     expect(response.status).toBe(403);
@@ -1286,12 +1286,12 @@ describe("projectsRoutes validation", () => {
 
 describe("project bearer resource reads", () => {
   it.each(["/projects", "/projects/one"])("rejects public keys before reading metadata at %s", async (path) => {
-    const response = await buildApp({ orgId: "org-a", scopes: ["search"], keyType: "public" }).request(path);
+    const response = await buildApp({ orgId: "org-a", scopes: ["search:deep"], keyType: "public" }).request(path);
     expect(response.status).toBe(403);
   });
   it("filters listings to the key organization", async () => {
     listProjectsMock.mockResolvedValueOnce([{ id: "one", orgId: "org-a" }, { id: "two", orgId: "org-b" }] as never);
-    const response = await buildApp({ orgId: "org-a", scopes: ["search"] }).request("/projects");
+    const response = await buildApp({ orgId: "org-a", scopes: ["search:deep"] }).request("/projects");
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ projects: [{ id: "one", orgId: "org-a" }] });
   });
@@ -1320,7 +1320,7 @@ describe("project rename via API keys", () => {
   });
 
   it("requires the opt-in projects:manage scope on a server key", async () => {
-    expect((await patch(buildApp({ orgId: "org-1", scopes: ["ingest", "search"] }))).status).toBe(403);
+    expect((await patch(buildApp({ orgId: "org-1", scopes: ["ingest", "search:deep"] }))).status).toBe(403);
     expect((await patch(buildApp({ orgId: "org-1", scopes: ["projects:manage"], keyType: "client" }))).status).toBe(403);
     expect(updateProjectMock).not.toHaveBeenCalled();
   });
@@ -1377,7 +1377,7 @@ describe("project search settings via API keys", () => {
   it("refuses a wrong key before validating the body, so it never sees a schema error", async () => {
     for (const method of ["PATCH", "POST"]) {
       const path = method === "POST" ? `${settingsPath}/estimate` : settingsPath;
-      const response = await buildApp({ orgId: "org-1", scopes: ["search"] }).request(path, {
+      const response = await buildApp({ orgId: "org-1", scopes: ["search:deep"] }).request(path, {
         method, headers: { "content-type": "application/json" }, body: JSON.stringify({ synonyms: "not-an-object" }),
       });
       expect(response.status, path).toBe(403);
@@ -1395,7 +1395,7 @@ describe("project search settings via API keys", () => {
   });
 
   it.each([
-    ["search-only server key", { orgId: "org-1", scopes: ["search", "chat", "ingest"] }],
+    ["search-only server key", { orgId: "org-1", scopes: ["search:deep", "chat", "ingest"] }],
     ["browser key with projects:manage", { orgId: "org-1", scopes: ["projects:manage"], keyType: "client", projectIds: ["ws-1"] }],
     ["OAuth token, even if it held projects:manage", { orgId: "org-1", scopes: ["projects:manage"], oauth: { audience: "api", grantId: "g", clientId: "docslurp-cli", clientName: "CLI", resource: "x", grantedScopes: [], expiresAt: "2099-01-01T00:00:00Z" } }],
   ])("refuses a %s with 403 and writes nothing", async (_name, key) => {
@@ -1431,14 +1431,14 @@ describe("project tags API", () => {
   it("lists counts using the resolved project ID", async () => {
     getProjectMock.mockResolvedValueOnce({ id: "ws-1", orgId: "org-a" });
     listProjectTagsMock.mockResolvedValueOnce([{ tag: "finance", documentCount: 3 }]);
-    const response = await buildApp({ orgId: "org-a", scopes: ["search"] }).request("/projects/my-project/tags");
+    const response = await buildApp({ orgId: "org-a", scopes: ["search:deep"] }).request("/projects/my-project/tags");
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ tags: [{ tag: "finance", documentCount: 3 }] });
     expect(listProjectTagsMock).toHaveBeenCalledWith("ws-1");
   });
   it("hides tags outside the key organization", async () => {
     getProjectMock.mockResolvedValueOnce({ id: "foreign", orgId: "org-b" });
-    expect((await buildApp({ orgId: "org-a", scopes: ["search"] }).request("/projects/foreign/tags")).status).toBe(404);
+    expect((await buildApp({ orgId: "org-a", scopes: ["search:deep"] }).request("/projects/foreign/tags")).status).toBe(404);
     expect(listProjectTagsMock).not.toHaveBeenCalled();
   });
   it("requires a read scope", async () => {

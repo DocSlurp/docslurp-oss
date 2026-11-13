@@ -182,7 +182,7 @@ describe("authorization code flow for the CLI", () => {
     expect(body.user).toMatchObject({ id: "owner", email: "owner@example.test" });
     expect(body.organization).toMatchObject({ id: "org-owner" });
     expect(body.defaultProject).toMatchObject({ id: "ws-org-owner" });
-    expect(body.credential).toMatchObject({ type: "oauth", client: "DocSlurp CLI", scopes: ["search", "read"], apiKeyScopes: ["search", "artifacts"] });
+    expect(body.credential).toMatchObject({ type: "oauth", client: "DocSlurp CLI", scopes: ["search:deep", "read"], apiKeyScopes: ["search:deep", "artifacts"] });
     expect(Date.parse(body.credential.expiresAt)).toBeGreaterThan(Date.now());
     expect(JSON.stringify(body)).not.toContain(issued.body.access_token);
   });
@@ -300,7 +300,7 @@ describe("delegated tokens are never platform admins", () => {
       const keyRow = (await q("select id from mcp_oauth_grants where user_id = 'owner' limit 1")).rows[0];
       expect(keyRow).toBeTruthy();
       // Control: a plain server key of the same user is an admin.
-      const plain = { type: "apiKey" as const, userId: "owner", apiKey: { keyId: "k", userId: "owner", orgId: "org-owner", keyType: "server" as const, allowedDomains: [], scopes: ["search"], rateLimitRpm: null, rateLimitPpd: 1, rateLimits: [], projectIds: [] } };
+      const plain = { type: "apiKey" as const, userId: "owner", apiKey: { keyId: "k", userId: "owner", orgId: "org-owner", keyType: "server" as const, allowedDomains: [], scopes: ["search:deep"], rateLimitRpm: null, rateLimitPpd: 1, rateLimits: [], projectIds: [] } };
       expect(await requestActor.isPlatformAdminActor(plain)).toBe(true);
 
       const registered = await (await fetch(`${origin}/oauth/mcp/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ client_name: "Admin MCP", redirect_uris: ["http://127.0.0.1/callback"] }) })).json() as { client_id: string };
@@ -328,7 +328,7 @@ describe("scope mapping on the REST API", () => {
     const key = await oauth.validateOAuthApiToken(issued.access_token);
     const patch = (user: string) => fetch(`${api}/api-keys/${key!.keyId}`, {
       method: "PATCH", headers: { cookie: cookie(user), origin, "content-type": "application/json" },
-      body: JSON.stringify({ scopes: ["search"], rateLimitRpm: 7, rateLimitPpd: 23, materializationPolicy: { maxPagesPerQuery: 2 } }),
+      body: JSON.stringify({ scopes: ["search:deep"], rateLimitRpm: 7, rateLimitPpd: 23, materializationPolicy: { maxPagesPerQuery: 2 } }),
     });
     const unverified = await patch("owner");
     expect(unverified.status).toBe(403);
@@ -345,7 +345,7 @@ describe("scope mapping on the REST API", () => {
     expect(refreshed.status).toBe(200);
     for (const access of [issued.access_token, refreshed.body.access_token]) {
       const current = await oauth.validateOAuthApiToken(access);
-      expect(current).toMatchObject({ scopes: ["search"], rateLimitRpm: 7, rateLimitPpd: 23, materializationPolicy: { maxPagesPerQuery: 2 } });
+      expect(current).toMatchObject({ scopes: ["search:deep"], rateLimitRpm: 7, rateLimitPpd: 23, materializationPolicy: { maxPagesPerQuery: 2 } });
       expect(current!.scopes).not.toContain("artifacts");
     }
   });
@@ -357,7 +357,7 @@ describe("scope mapping on the REST API", () => {
     const withWeb = await requestActor.resolveApiKeyActor(`Bearer ${(await login({ scope: "search web" })).access_token}`);
     expect(apiKeyCanUseWebTools(withWeb!.apiKey)).toBe(true);
     expect(apiKeyCanUseWebTools(withWeb!.apiKey, true)).toBe(false);
-    expect(apiKeyCanUseWebTools({ scopes: ["search"], keyType: "server", oauth: { audience: "mcp" } })).toBe(true);
+    expect(apiKeyCanUseWebTools({ scopes: ["search:deep"], keyType: "server", oauth: { audience: "mcp" } })).toBe(true);
     // The MCP catalog (and so tools/call) hides web tools from a CLI token without `web`.
     const listed = async (token: string) => ((await (await fetch(`${mcp}/tools`, { headers: { authorization: `Bearer ${token}` } })).json()) as { tools: Array<{ id: string }> }).tools.map((tool) => tool.id);
     const plain = await login({ scope: "search" });
@@ -371,7 +371,7 @@ describe("scope mapping on the REST API", () => {
   });
 
   it("maps OAuth scopes to API-key scopes and never to settings or organization scopes", () => {
-    expect(oauth.oauthScopesToApiKeyScopes(["search", "chat", "read", "ingest"]).sort()).toEqual(["artifacts", "chat", "ingest", "search"]);
+    expect(oauth.oauthScopesToApiKeyScopes(["search", "chat", "read", "ingest"]).sort()).toEqual(["artifacts", "chat", "ingest", "search:deep"]);
     expect(oauth.oauthScopesToApiKeyScopes(["read"])).toEqual(["artifacts"]);
     expect(oauth.oauthScopesToApiKeyScopes(["projects:manage", "organizations:manage", "admin"])).toEqual([]);
     expect(oauth.oauthScopesToApiKeyScopes(["web"])).toEqual(["web"]);
@@ -486,7 +486,7 @@ describe("device authorization grant", () => {
     expect(issued.body.access_token.startsWith("dscli_")).toBe(true);
     const me = await (await whoami(issued.body.access_token)).json() as Record<string, any>;
     expect(me.organization.id).toBe("org-owner");
-    expect(me.credential.scopes).toEqual(["search", "read"]);
+    expect(me.credential.scopes).toEqual(["search:deep", "read"]);
 
     // Redeeming the device code again revokes the grant it produced.
     await allowNextPoll(started.device_code);
@@ -567,7 +567,7 @@ describe("device authorization grant", () => {
     expect((await verify("owner", { action: "approve", user_code: capped.user_code, orgId: "org-owner" })).status).toBe(200);
     await allowNextPoll(capped.device_code);
     const cappedTokens = await poll(capped.device_code);
-    expect(cappedTokens.body.scope).toBe("search read");
+    expect(cappedTokens.body.scope).toBe("search:deep read");
 
     const opted = await startDevice("search read chat ingest");
     const body = new URLSearchParams({ action: "approve", user_code: opted.user_code, orgId: "org-owner" });
@@ -576,9 +576,9 @@ describe("device authorization grant", () => {
     expect((await fetch(`${origin}/oauth/mcp/device`, { method: "POST", headers: { cookie: cookie("owner"), origin }, body })).status).toBe(200);
     await allowNextPoll(opted.device_code);
     const optedTokens = await poll(opted.device_code);
-    expect(optedTokens.body.scope).toBe("search read chat");
+    expect(optedTokens.body.scope).toBe("search:deep read chat");
     const me = await (await whoami(optedTokens.body.access_token)).json() as Record<string, any>;
-    expect(me.credential.apiKeyScopes.sort()).toEqual(["artifacts", "chat", "search"]);
+    expect(me.credential.apiKeyScopes.sort()).toEqual(["artifacts", "chat", "search:deep"]);
   });
 
   it.skipIf(!process.env.CLI_OAUTH_TEST_DATABASE_URL)("serializes different accounts sharing the last IP attempt", async () => {

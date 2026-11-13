@@ -183,6 +183,7 @@ describe("hybridSearch", () => {
       hybridSearch("test", "user-1", { runId: "run-1", onSearchActivity }),
     ).resolves.toEqual({
       timings: expect.objectContaining({ totalMs: expect.any(Number), setupMs: expect.any(Number) }),
+      searchMode: "deep",
       results: [],
       sessionId: expect.any(String),
       relevanceFloor: { minScore: 0.1, dropped: 0, noMatch: true },

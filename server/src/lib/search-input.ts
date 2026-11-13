@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { geoPredicateSchema, chatAgentLimitsInputSchema, chatRetrievalOverridesSchema, chatSearchFiltersSchema, searchCandidateDepthSchema, searchResultOrderSchema } from "@docslurp/shared";
+import { geoPredicateSchema, searchModeSchema, chatAgentLimitsInputSchema, chatRetrievalOverridesSchema, chatSearchFiltersSchema, searchCandidateDepthSchema, searchResultOrderSchema } from "@docslurp/shared";
 import { parseFilters } from "../search/filters.js";
 
 const id = z.string().trim().min(1).max(256);
@@ -33,6 +33,7 @@ export const searchInputSchema = z.object({
   heading: filter,
   dateFrom: dateFilter,
   dateTo: dateFilter,
+  mode: searchModeSchema.optional().describe("keyword (keyword matching, no model calls), hybrid (adds vector search) or deep (adds graph expansion, hosted rerank and AI query strategies). Omitted: the most your key allows. A mode above your key's search scope runs at the key's mode."),
   hyde: z.boolean().optional(),
   rerank: z.boolean().optional(),
   candidateDepth: searchCandidateDepthSchema.optional(),
@@ -107,6 +108,7 @@ export function searchOptions(body: SearchInput & { projectId: string }) {
       language: body.language ?? "", heading: body.heading ?? "",
       dateFrom: body.dateFrom ?? "", dateTo: body.dateTo ?? "",
     }), ...(body.geo ? {geo:body.geo} : {}) },
+    searchMode: body.mode,
     useHyDE: body.hyde, useRerank: body.rerank,
     candidateDepth: body.candidateDepth, resultOrder: body.resultOrder,
     useMmr: body.mmr, mmrLambda: body.mmrLambda,

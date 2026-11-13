@@ -15,9 +15,10 @@ import { trustedUnixBinary, windowsSystemBinary } from "./credentials.js";
  */
 
 export const CLI_CLIENT_ID = "docslurp-cli";
-export const SUPPORTED_SCOPES = ["search", "chat", "read", "ingest", "web"] as const;
-/** Least privilege: search and read document text. Add chat or ingest with --scopes. */
-export const DEFAULT_SCOPES = ["search", "read"] as const;
+/** Search modes nest: search:deep includes hybrid and keyword. Pick one; chat, ingest and web are opt-in. */
+export const SUPPORTED_SCOPES = ["search:keyword", "search:hybrid", "search:deep", "chat", "read", "ingest", "web"] as const;
+/** Search (every mode) and read document text. Add chat or ingest with --scopes. */
+export const DEFAULT_SCOPES = ["search:deep", "read"] as const;
 const DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
 const LOGIN_TIMEOUT_MS = 5 * 60_000;
 
@@ -40,7 +41,8 @@ const safeText = (value: unknown) => typeof value === "string" ? value.replace(/
 
 export function parseScopes(value: unknown): string[] {
   const scopes = typeof value === "string" && value.trim()
-    ? [...new Set(value.split(/[\s,]+/).filter(Boolean))]
+    // `search` is the retired name for search:deep.
+    ? [...new Set(value.split(/[\s,]+/).filter(Boolean).map((scope) => scope === "search" ? "search:deep" : scope))]
     : [...DEFAULT_SCOPES];
   const unknown = scopes.filter((scope) => !(SUPPORTED_SCOPES as readonly string[]).includes(scope));
   if (unknown.length) throw new OAuthError(`Unknown scope ${unknown.join(", ")}. Supported scopes: ${SUPPORTED_SCOPES.join(", ")}.`);

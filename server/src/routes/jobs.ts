@@ -1,4 +1,5 @@
 import { Hono, type Context } from "hono";
+import { SEARCH_SCOPES } from "../lib/search-tiers.js";
 import { streamSSE } from "hono/streaming";
 
 import { apiErrorResponse } from "../lib/api-error.js";
@@ -11,7 +12,7 @@ const JOB_STREAM_MAX_MS = 10 * 60_000;
 
 async function readJob(c: Context): Promise<JobStatusWithProgress | Response> {
   const actor = getRequestActor(c);
-  if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "projects:manage"])) {
+  if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["ingest", ...SEARCH_SCOPES, "artifacts", "projects:manage"])) {
     return apiErrorResponse(c, 403, "forbidden", "Forbidden");
   }
   const job = await getJobStatus(c.req.param("jobId") ?? "", c.get("sessionUser").id, {

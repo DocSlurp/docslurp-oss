@@ -15,6 +15,10 @@
 import type { CostEstimate } from "./jobs.js";
 import { OPEN_PRICING } from "./pricing-open.js";
 import type { QualityMode } from "./quality.js";
+import type { SearchMode } from "./project.js";
+
+/** What a search is priced on: the mode it ran in and whether LLM query strategies ran. */
+export type SearchPriceOptions = { llmStrategies?: boolean; mode?: SearchMode };
 
 export const PRICING_PROVIDER_API_VERSION = 1;
 
@@ -142,9 +146,9 @@ export interface PricingProvider {
   /** Credits for keeping `bytes` for `months` (30-day months) beyond an extract's free window. */
   extractRetentionCredits(bytes: number, months: number): number;
   /** Searches one search counts as (LLM query strategies may count more). */
-  searchUnits(opts: { llmStrategies?: boolean }): number;
-  /** Credits for `searches` searches. */
-  searchCredits(searches: number, opts: { llmStrategies?: boolean }): number;
+  searchUnits(opts: SearchPriceOptions): number;
+  /** Credits for `searches` searches; `mode` is the search mode that ran (omitted: deep). */
+  searchCredits(searches: number, opts: SearchPriceOptions): number;
   webSearchCredits(opts: { deep?: boolean; includeContent?: boolean }): number;
   webPageCredits(pages: number): number;
   webMapCredits(urls: number): number;

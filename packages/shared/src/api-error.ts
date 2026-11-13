@@ -42,6 +42,7 @@ export const API_ERROR_CODES = [
   "payload_too_large",
   "rate_limited",
   "spend_limit_exceeded",
+  "search_limit_exceeded",
   "daily_page_limit",
   "ip_temporarily_blocked",
   "session_required",
@@ -144,6 +145,7 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   payload_too_large: PUBLIC_ERROR_MESSAGES.tooLarge,
   rate_limited: PUBLIC_ERROR_MESSAGES.rateLimit,
   spend_limit_exceeded: PUBLIC_ERROR_MESSAGES.spendLimit,
+  search_limit_exceeded: PUBLIC_ERROR_MESSAGES.searchLimit,
   daily_page_limit: PUBLIC_ERROR_MESSAGES.dailyPageLimit,
   ip_temporarily_blocked: PUBLIC_ERROR_MESSAGES.ipBlocked,
   session_required: PUBLIC_ERROR_MESSAGES.sessionRequired,
@@ -197,8 +199,8 @@ export function apiErrorCodeForStatus(status: number): ApiErrorCode {
   return "internal";
 }
 
-const SAFE_DETAIL_NUMBERS = ["retryAfterSeconds", "limitCents", "spentCents", "maxBytes", "availableCredits", "heldCredits", "chatReserveCredits", "maxRetentionDays", "requiredCredits"] as const;
-const SAFE_DETAIL_LABELS = ["category", "policy", "spendKind", "action"] as const;
+const SAFE_DETAIL_NUMBERS = ["retryAfterSeconds", "limit", "windowSeconds", "limitCents", "spentCents", "maxBytes", "availableCredits", "heldCredits", "chatReserveCredits", "maxRetentionDays", "requiredCredits"] as const;
+const SAFE_DETAIL_LABELS = ["category", "policy", "spendKind", "action", "mode"] as const;
 
 /**
  * Where a caller can lift a limit (`details.links` on 402 and 429 responses):
@@ -247,6 +249,7 @@ export function publicApiErrorMessage(code: ApiErrorCode, details?: ApiErrorDeta
     case "ip_temporarily_blocked":
       return links.docs ? `${base} Rate limits: ${links.docs}` : base;
     case "spend_limit_exceeded":
+    case "search_limit_exceeded":
     case "daily_page_limit":
       return links.apiKeys ? `${base} Change the key's limits at ${links.apiKeys}.` : base;
     case "credit_exhausted":

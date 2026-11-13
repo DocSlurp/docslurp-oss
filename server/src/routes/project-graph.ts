@@ -1,4 +1,5 @@
 import { Hono, type Context } from "hono";
+import { SEARCH_SCOPES } from "../lib/search-tiers.js";
 import { streamSSE } from "hono/streaming";
 import { zValidator } from "@hono/zod-validator";
 import { startGraphRebuildSchema, updateProjectGraphSchema, type GraphJob } from "@docslurp/shared";
@@ -36,7 +37,7 @@ async function authorizeApiKey(c: Context, projectRef: string, write: boolean): 
   if (actor.type !== "apiKey") return null;
   const allowed = write
     ? actor.apiKey.keyType === "server" && actorHasAnyApiKeyScope(actor, ["projects:manage"])
-    : actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "projects:manage"]);
+    : actorHasAnyApiKeyScope(actor, ["ingest", ...SEARCH_SCOPES, "artifacts", "projects:manage"]);
   if (!allowed) {
     return apiStatusError(c, 403, write
         ? "This endpoint requires a server API key with the projects:manage scope"

@@ -68,6 +68,11 @@ export interface UsageRecorder {
 
 type UsageClient = SqlClient | TransactionSql;
 
+/** Persist an already logged and priced Usage Event (a batch of them summed, search/lean-logging.ts). */
+export async function persistUsageEvent(args: { userId: string; scope: UsageScope; event: UsageEvent }): Promise<UsageEvent> {
+  return await insertUsageEvent(sql, args.userId, args.scope, args.event);
+}
+
 /** Build, log, and persist one Usage Event in the given scope. */
 export async function recordUsageEvent(args: {
   userId: string;
@@ -185,6 +190,11 @@ export interface UsageLedger extends UsageRecorder {
   adopt(events: Iterable<UsageEvent | undefined>): void;
   /** Every recorded or adopted event, including ones already flushed. */
   events(): UsageEvent[];
+  /**
+   * Hands unflushed events matching `filter` to the caller, which persists them some other way (batched usage,
+   * search/lean-logging.ts); they stay in events() but flush never writes them.
+   */
+  divert(filter: (event: UsageEvent) => boolean): UsageEvent[];
   /** Persist events not yet flushed, stamped with the ledger scope. */
   flush(options?: UsageFlushOptions): Promise<UsageEvent[]>;
   /**
@@ -210,11 +220,12 @@ export function createUsageLedger(args: {
   scope?: UsageScope;
 }): UsageLedger {
   const events: UsageEvent[] = [];
+  const diverted = new Set<UsageEvent>();
   let flushedCount = 0;
 
   const flushWithin: UsageLedger["flushWithin"] = async (client, options) => {
     const end = events.length;
-    const pending = events.slice(flushedCount, end);
+    const pending = events.slice(flushedCount, end).filter((event) => !diverted.has(event));
     const written: UsageEvent[] = [];
     if (pending.length > 0) {
       const userId = options?.userId ?? args.userId;
@@ -250,6 +261,11 @@ export function createUsageLedger(args: {
     },
     events() {
       return [...events];
+    },
+    divert(filter) {
+      const taken = events.slice(flushedCount).filter((event) => !diverted.has(event) && filter(event));
+      for (const event of taken) diverted.add(event);
+      return taken;
     },
     async flush(options) {
       const batch = await flushWithin(sql, options);

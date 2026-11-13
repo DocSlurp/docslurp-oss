@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { routePath } from "hono/route";
 
 import type { Context } from "hono";
+import type { ApiKeyRateLimitRule, SearchMode } from "@docslurp/shared";
 import type { MiddlewareHandler } from "hono";
 import { sql } from "../db.js";
 import { emitPostHogApiLog } from "./posthog-ai-observability.js";
@@ -47,6 +48,10 @@ type RequestContextState = {
   orgId?: string | null;
   /** The API key actor's project allowlist; null when unrestricted or not a key. */
   apiKeyProjectIds?: readonly string[] | null;
+  /** The most the request's API key may search (its `search:<mode>` scope); null for sessions. */
+  apiKeySearchCeiling?: SearchMode | null;
+  /** The request's API key and its `searches` limits per mode (search/search-mode-limits.ts). */
+  apiKeySearchLimits?: { keyId: string; rules: ApiKeyRateLimitRule[] } | null;
   /** Aborts when the client disconnects before the response finished (search cancels its SQL). */
   signal?: AbortSignal;
   performanceEvents: Array<{
@@ -229,6 +234,29 @@ export function currentRequestUserId(): string | null {
 export function setCurrentRequestApiKeyProjectIds(projectIds: readonly string[] | null | undefined): void {
   const store = requestContextStorage.getStore();
   if (store) store.apiKeyProjectIds = projectIds?.length ? [...projectIds] : null;
+}
+
+/** Returns false when there is no request context to carry the ceiling. */
+export function setCurrentRequestSearchCeiling(ceiling: SearchMode | null): boolean {
+  const store = requestContextStorage.getStore();
+  if (!store) return false;
+  store.apiKeySearchCeiling = ceiling;
+  return true;
+}
+
+export function setCurrentRequestSearchLimits(limits: { keyId: string; rules: ApiKeyRateLimitRule[] } | null): void {
+  const store = requestContextStorage.getStore();
+  if (store) store.apiKeySearchLimits = limits;
+}
+
+/** The request key's `searches` limits; null for sessions and keys without any. */
+export function currentRequestSearchLimits(): { keyId: string; rules: ApiKeyRateLimitRule[] } | null {
+  return requestContextStorage.getStore()?.apiKeySearchLimits ?? null;
+}
+
+/** The most the request's API key may search (search/search-mode.ts); null when unrestricted. */
+export function currentRequestSearchCeiling(): SearchMode | null {
+  return requestContextStorage.getStore()?.apiKeySearchCeiling ?? null;
 }
 
 export function currentRequestApiKeyProjectIds(): readonly string[] | null {

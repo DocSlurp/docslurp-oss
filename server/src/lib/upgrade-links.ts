@@ -52,7 +52,7 @@ export const CREDITS_DOCS_PATH = "/docs/http#credits-and-budgets";
 
 const CREDIT_CODES = new Set<ApiErrorCode>(["credit_exhausted", "minimum_credit_required", "payment_required"]);
 const BUDGET_CODES = new Set<ApiErrorCode>(["project_budget_paused", "org_budget_paused"]);
-const KEY_LIMIT_CODES = new Set<ApiErrorCode>(["spend_limit_exceeded", "daily_page_limit"]);
+const KEY_LIMIT_CODES = new Set<ApiErrorCode>(["spend_limit_exceeded", "search_limit_exceeded", "daily_page_limit"]);
 
 /**
  * Links for an error `code`, or undefined when the code has none or this

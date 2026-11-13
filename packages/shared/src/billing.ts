@@ -9,6 +9,7 @@ import {
   type IngestEstimateInput,
   type PageMode,
 } from "./pricing-provider.js";
+import type { SearchPriceOptions } from "./pricing-provider.js";
 import { qualityModeSchema, type QualityMode } from "./quality.js";
 import type { ChartExportFormat, VisualSource } from "./chart-export.js";
 import { chartExportModelCallsPerVisual, isBillableVisualSource, type VisualExportModes } from "./chart-export-estimate.js";
@@ -162,12 +163,12 @@ export function daysInUtcMonth(day: string | Date): number {
 }
 
 /** Searches one search counts as. */
-export function searchUnits(opts: { llmStrategies?: boolean } = {}): number {
+export function searchUnits(opts: SearchPriceOptions = {}): number {
   return pricing().searchUnits(opts);
 }
 
 /** Credits for `searches` searches. */
-export function searchCredits(searches: number, opts: { llmStrategies?: boolean } = {}): number {
+export function searchCredits(searches: number, opts: SearchPriceOptions = {}): number {
   return pricing().searchCredits(searches, opts);
 }
 

@@ -971,8 +971,22 @@
     {
       "idx": 138,
       "version": "7",
-      "when": 1794104400000,
-      "tag": "0138_provider_endpoint_observations",
+      "when": 1794200000000,
+      "tag": "0138_search_mode_scopes",
+      "breakpoints": true
+    },
+    {
+      "idx": 139,
+      "version": "7",
+      "when": 1794300000000,
+      "tag": "0139_search_session_expiry",
+      "breakpoints": true
+    },
+    {
+      "idx": 140,
+      "version": "7",
+      "when": 1794400000000,
+      "tag": "0140_provider_endpoint_observations",
       "breakpoints": true
     }
   ]

@@ -1271,7 +1271,7 @@ async function chatProjectTurn(
   // `agent.tools: false` (or tool_choice "none" on /v1/chat/completions) asks for it too.
   // Chat-only keys may receive grounded answers, but cannot invoke raw search
   // tools. Keep them on the existing direct answer path without widening scope.
-  const canUseSearchTools = args.actor?.type !== "apiKey" || args.actor.apiKey.scopes.includes("search");
+  const canUseSearchTools = args.actor?.type !== "apiKey" || args.actor.apiKey.scopes.includes("search:deep");
   if (canUseSearchTools && args.allowAgentTools !== false && args.agent?.tools !== false && args.actor && env.chatMcpEnabled && chatApiKey && !filterDocumentIds && !narrowingFilters) {
     if (!project) throw new Error("Project not found");
     // No server-side scope decline on the agent path: the agent's own searches

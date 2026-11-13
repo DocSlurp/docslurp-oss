@@ -11,13 +11,14 @@ import { assertCanSpend } from "../services/billing/spend-guard.js";
 import { enforceActorCategoryRateLimit } from "../middleware/rate-limit.js";
 import { acquireChatSlot } from "../middleware/chat-concurrency.js";
 
-import { aggregateProjectRagSearchRequestSchema, deferredProfilesEnabled, PARSE_SOURCE_RESCAN_REASON, type ApiErrorCode } from "@docslurp/shared";
+import { aggregateProjectRagSearchRequestSchema, deferredProfilesEnabled, PARSE_SOURCE_RESCAN_REASON, PUBLIC_ERROR_MESSAGES, type ApiErrorCode } from "@docslurp/shared";
 
 import {
   actorHasAnyApiKeyScope,
   assertApiKeyProjectAccess,
   getRequestActor,
   resolveActorProjectId,
+  actorCanSearch,
 } from "../lib/request-actor.js";
 import { withDeferredContext, type DeferredRequestContext, type MaterializeEvent } from "../search/deferred/deferred-context.js";
 import { defaultMaterializeDeps, pageKey } from "../search/deferred/materialize-client.js";
@@ -35,10 +36,11 @@ import { InvalidRetrievalQueryError, parseRetrievalQueryFlags } from "../lib/ret
 import { publicSearchResponse } from "../lib/search-usage.js";
 import { sql } from "../db.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
-import { currentRequestApiKeyId } from "../lib/request-context.js";
+import { currentRequestApiKeyId, currentRequestSearchCeiling } from "../lib/request-context.js";
 import { cacheableApiKeyId, createCacheScopeMemo, readCachedResponse, responseCacheTicket, searchResponseCacheTtlMs, storeResponse, type CacheScopeMemo } from "../search/response-cache.js";
 export { clearSearchResponseCacheForTests } from "../search/response-cache.js";
 import { SearchCapacityError, withSearchAdmissionGroup } from "../search/search-limiter.js";
+import { SearchModeLimitError } from "../search/search-mode-limits.js";
 import { awaitSearchSessionWrites } from "../search/session.js";
 import { randomUUID } from "node:crypto";
 import { env } from "../config.js";
@@ -389,9 +391,10 @@ function expectedSearchFailure(error: unknown): SearchFailure | null {
   }
   return null;
 }
-function searchError(error: unknown): { code: string; message: string; status: 400 | 403 | 404 | 409 | 499 | 500 | 503 } {
+function searchError(error: unknown): { code: string; message: string; status: 400 | 403 | 404 | 409 | 429 | 499 | 500 | 503 } {
   // Load shedding and disconnects are expected outcomes, not internal failures: keep them out of error reports.
   if (error instanceof SearchCapacityError) return { code: "SEARCH_UNAVAILABLE", message: "Search capacity is full; retry shortly", status: 503 };
+  if (error instanceof SearchModeLimitError) return { code: "SEARCH_LIMIT_EXCEEDED", message: PUBLIC_ERROR_MESSAGES.searchLimit, status: 429 };
   if (error instanceof Error && error.name === "AbortError") return { code: "REQUEST_ABORTED", message: "Request aborted before search finished", status: 499 };
   return expectedSearchFailure(error) ?? { code: "SEARCH_FAILED", message: reportPublicError(error), status: 500 };
 }
@@ -414,7 +417,7 @@ async function retrieve(body: SearchInput & { projectId: string }, userId: strin
   const apiKeyId = cacheableApiKeyId(actorApiKeyId, currentRequestApiKeyId());
   // Keyed on the exact request, query as sent: the search runs on that same text.
   const ticket = ttl > 0 && apiKeyId !== undefined
-    ? await responseCacheTicket({ userId, apiKeyId, projectIds: [body.projectId], request: { ...body }, memo })
+    ? await responseCacheTicket({ userId, apiKeyId, projectIds: [body.projectId], request: { ...body, searchCeiling: currentRequestSearchCeiling() }, memo })
     : null;
   const cached = ticket ? readCachedResponse(ticket, ttl) as SearchData | undefined : undefined;
   if (cached) {
@@ -546,7 +549,7 @@ export const searchRoutes = new Hono()
     }
 
     const actor = getRequestActor(c);
-    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["search"])) {
+    if (actor.type === "apiKey" && !actorCanSearch(actor)) {
       return apiErrorResponse(c, 403, "forbidden", "Forbidden");
     }
     // A generated answer is a model call billed like chat, so it needs the
@@ -612,7 +615,7 @@ export const searchRoutes = new Hono()
     }
     const actor = getRequestActor(c);
     const apiKey = actor.type === "apiKey" ? actor.apiKey : null;
-    if (actor.type === "apiKey" && !actorHasAnyApiKeyScope(actor, ["search"])) {
+    if (actor.type === "apiKey" && !actorCanSearch(actor)) {
       return apiErrorResponse(c, 403, "forbidden", "Forbidden");
     }
 

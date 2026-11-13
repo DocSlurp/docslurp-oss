@@ -61,7 +61,7 @@ A query that is blocked by policy or by credits does not fail: it returns the re
 
 ## Capability tokens
 
-A server (holding a server key with the `search` scope, or a dashboard session) mints a sealed token so a browser or edge client can search directly with a narrower policy. Client keys cannot mint.
+A server (holding a server key with the `search:deep` scope, or a dashboard session) mints a sealed token so a browser or edge client can search directly with a narrower policy. Client keys cannot mint. On-demand page materialization runs only in `deep` mode, so a browser key bound to a capability needs `search:deep` for its searches to materialize deferred pages; a keyword or hybrid key searches only what is already indexed.
 
 ```bash
 curl -X POST https://docslurp.io/v1/capabilities \

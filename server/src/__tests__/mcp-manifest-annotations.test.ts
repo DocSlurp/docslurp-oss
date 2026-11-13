@@ -9,7 +9,7 @@ import { mcpManifest } from "../services/mcp-tools.js";
  */
 describe("capability manifest annotations", () => {
   it("declares hints for every exposed MCP tool", () => {
-    const manifest = mcpManifest("https://example.test", ["search", "chat", "ingest"]);
+    const manifest = mcpManifest("https://example.test", ["search:deep", "chat", "ingest"]);
     const expected: Record<string, { readOnly: boolean; idempotent: boolean; consequential: boolean }> = {
       listProjects: { readOnly: true, idempotent: true, consequential: false },
       upload: { readOnly: false, idempotent: false, consequential: true },
@@ -26,7 +26,7 @@ describe("capability manifest annotations", () => {
       getJob: { readOnly: true, idempotent: true, consequential: false },
     };
     // Settings proposals are first-party-app only: no API key sees them, whatever its scopes.
-    const managed = mcpManifest("https://example.test", ["search", "projects:manage"], "server");
+    const managed = mcpManifest("https://example.test", ["search:deep", "projects:manage"], "server");
     expect(managed.capabilities.some(tool => tool.id === "proposeProjectSettings" || tool.id === "getProjectSettings")).toBe(false);
     const app = mcpManifest("https://example.test", undefined, undefined, { firstPartyApp: true });
     expect(app.capabilities.find(tool => tool.id === "getProjectSettings")?.annotations).toMatchObject({ readOnly: true, idempotent: true, consequential: false });
@@ -47,7 +47,7 @@ describe("capability manifest annotations", () => {
     try {
       const tool = mcpManifest("https://example.test", ["ingest"]).capabilities.find(item => item.id === "openUploader");
       expect(tool?.annotations).toMatchObject({ readOnly: true, idempotent: true, consequential: false });
-      expect(ids(["search"])).not.toContain("openUploader");
+      expect(ids(["search:deep"])).not.toContain("openUploader");
     } finally { env.mcpAppsUiEnabled = false; }
   });
 

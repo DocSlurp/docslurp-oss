@@ -1,4 +1,5 @@
 import { quoteStoredDocuments } from "../services/stored-quote.js";
+import { SEARCH_SCOPES } from "../lib/search-tiers.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { Hono, type Context } from "hono";
 import { zValidator } from "@hono/zod-validator";
@@ -62,7 +63,7 @@ async function denyRunContentUpdate(c: Context, runId: string): Promise<Response
  */
 function apiKeyMayReadRuns(actor: RequestActor): boolean {
   return actor.type !== "apiKey"
-    || (actor.apiKey.keyType === "server" && actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"]));
+    || (actor.apiKey.keyType === "server" && actorHasAnyApiKeyScope(actor, ["ingest", ...SEARCH_SCOPES, "artifacts"]));
 }
 
 const STREAM_HEARTBEAT_MS = 4_000;
@@ -172,7 +173,7 @@ export const runsRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const actor = getRequestActor(c);
     if (actor.type === "apiKey") {
-      if (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
+      if (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", ...SEARCH_SCOPES, "artifacts"])) {
         return apiStatusError(c, 403, "Forbidden");
       }
       const run = await getRun(c.req.param("runId"), userId, { cost: false });
@@ -205,7 +206,7 @@ export const runsRoutes = new Hono()
         stream,
         subscribe: invalidate => listenForRunEvents(event => { if (event.runId === runId) invalidate(); }, { runId }),
         snapshot: async () => {
-          if (actor.type === "apiKey" && !await isApiKeyLive(actor.apiKey, ["ingest", "search", "artifacts"])) return null;
+          if (actor.type === "apiKey" && !await isApiKeyLive(actor.apiKey, ["ingest", ...SEARCH_SCOPES, "artifacts"])) return null;
           const snapshot = await getRunProgress(runId, actor.userId, { recentEventLimit: 0, operator });
           if (!snapshot || !await loadActorScopedProject(snapshot.run.projectId, actor)) return null;
           return snapshot;
@@ -220,7 +221,7 @@ export const runsRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const actor = getRequestActor(c);
     if (actor.type === "apiKey") {
-      if (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts"])) {
+      if (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", ...SEARCH_SCOPES, "artifacts"])) {
         return apiStatusError(c, 403, "Forbidden");
       }
       const run = await getRun(c.req.param("runId"), userId, { cost: false });

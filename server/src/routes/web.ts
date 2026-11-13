@@ -69,7 +69,7 @@ function createWebRoutes(surface: WebSurface) {
     const actor = getRequestActor(c);
     const ingest = c.req.path.endsWith("/ingest");
     if (actor.type === "apiKey" && !apiKeyCanUseWebTools(actor.apiKey, ingest)) {
-      return actor.apiKey.keyType === "client" && actorHasAnyApiKeyScope(actor, [ingest ? "ingest" : "search"])
+      return actor.apiKey.keyType === "client" && actorHasAnyApiKeyScope(actor, [ingest ? "ingest" : "search:deep"])
         ? apiStatusError(c, 403, "Client API keys need the web scope to use web tools", { code: "web_scope_required" })
         : apiStatusError(c, 403, "Forbidden");
     }
