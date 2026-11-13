@@ -7,6 +7,10 @@ import {
   DOCUMENT_EXPORT_TTL_DAYS,
   documentExportFolderNames,
   isPageImageReferenceBlock,
+  isPageWithheld,
+  piiWithheldPageText,
+  piiWithholding,
+  withheldPageOfSlot,
   safeExportName,
   type DocumentExportContent,
 } from "@docslurp/shared";
@@ -204,9 +208,16 @@ export async function* documentExportEntries(
     const folder = folders[index]!;
     const stem = folder.slice(folder.lastIndexOf("/") + 1);
     const modifiedAt = new Date(row.updated_at);
-    const withheld = withheldUris(row.metadata);
-    const completed = row.status === "completed";
     const prefix = `${row.id}:`;
+    // Page-scoped PII: per-page artifacts of withheld pages (renders written after the scan included) are withheld too.
+    const piiState = piiWithholding({ status: row.status, metadata: row.metadata });
+    const withheld = withheldUris(row.metadata);
+    for (const [slot, uri] of Object.entries(row.artifacts ?? {})) {
+      if (!slot.startsWith(prefix)) continue;
+      const page = withheldPageOfSlot(slot.slice(prefix.length));
+      if (piiState.scope === "document" || (page !== null && isPageWithheld(piiState, page))) withheld.add(uri);
+    }
+    const completed = row.status === "completed";
     const artifacts = completed
       ? Object.entries(row.artifacts ?? {})
           .filter(([slot, uri]) => slot.startsWith(prefix) && !withheld.has(uri) && keyOf(uri))
@@ -220,7 +231,11 @@ export async function* documentExportEntries(
         if (target) skipped.push({ path: `${folder}/${target.path}`, reason: "withheld by the project's privacy (PII) policy" });
       }
     }
-    const pages = completed ? await source.pages(row.id) : [];
+    // A withheld page's stored text is already the placeholder; it is replaced here as well, never read through.
+    const pages = (completed ? await source.pages(row.id) : []).map((page) =>
+      isPageWithheld(piiState, page.page_number) && piiState.scope !== "document"
+        ? { ...page, text: piiWithheldPageText(page.page_number) }
+        : page);
     const imagePlan = completed ? await documentImagePlan(source, artifacts, withheld, artifactKey("artifact-graph"), args.content === "all") : null;
     if (imagePlan?.problem) skipped.push({ path: `${folder}/images/`, reason: `embedded images left out: ${imagePlan.problem}` });
     const links = new Map<string, string>();

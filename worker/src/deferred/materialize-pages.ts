@@ -15,6 +15,7 @@ import {
   richPagesForOutputTokens,
   type MaterializePagesInput,
   type PipelineFeatures,
+  isPageWithheld,
 } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
@@ -34,6 +35,7 @@ import type { WorkflowState } from "../pipeline/pipeline.js";
 import { projectVectorLocation } from "../stages/lancedb-location.js";
 import type { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { resolvePolicy } from "../stages/pii-detect.js";
+import { loadDocumentPiiWithholding } from "../pipeline/pii-gate.js";
 import { embedTextChunks, estimateTokens, type RemoteEmbeddingUsage, type VectorBackendRecord } from "../stages/embedding-runtime.js";
 import { deleteLanceDbRecords, writeLanceDbRecords } from "../stages/lancedb-writer.js";
 import type { CommandRunner } from "../tools/runner.js";
@@ -475,12 +477,21 @@ export async function materializePageRange(
   const blocked: number[] = [];
   /** Pages with any PII match: their read is never kept, so a retry re-reads under the policy in force then. */
   const piiMatched = new Set<number>();
+  // Pages the document's ingest scan withheld stay withheld, whatever this read finds (page-scoped PII, one helper).
+  const recorded = await loadDocumentPiiWithholding(deps.sql as never, documentId);
+  for (const entry of [...prepared.values()]) {
+    if (!isPageWithheld(recorded, entry.page)) continue;
+    piiMatched.add(entry.page);
+    prepared.delete(entry.page);
+    blocked.push(entry.page);
+  }
   if (scan) {
     for (const entry of [...prepared.values()]) {
       const scanned = scan(entry.text, entry.page);
       if (scanned.matches.length === 0) continue;
       piiMatched.add(entry.page);
-      if (policy.action === "block_indexing") {
+      // Deferred pages are read one by one, so both blocking actions withhold the page that matched.
+      if (policy.action === "block_indexing" || policy.action === "block_document") {
         prepared.delete(entry.page);
         blocked.push(entry.page);
       } else if (policy.action === "redact_artifacts") {

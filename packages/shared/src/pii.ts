@@ -25,10 +25,19 @@ export const piiPatternTypeSchema = z.enum([
 ]);
 export type PiiPatternType = z.infer<typeof piiPatternTypeSchema>;
 
+/**
+ * What a match does:
+ * - `flag_for_review`: record and flag; nothing withheld.
+ * - `redact_artifacts`: replace each matched value; artifacts the scan did not rewrite are withheld.
+ * - `block_indexing`: withhold the page holding each match (its text, chunks, images and figures); the rest of the
+ *   document completes and is served. See `pii-withholding.ts`.
+ * - `block_document`: any match withholds the whole document (status `pii_blocked`).
+ */
 export const piiPolicyActionSchema = z.enum([
   "flag_for_review",
   "redact_artifacts",
   "block_indexing",
+  "block_document",
 ]);
 export type PiiPolicyAction = z.infer<typeof piiPolicyActionSchema>;
 

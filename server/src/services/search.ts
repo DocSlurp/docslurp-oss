@@ -1,4 +1,5 @@
 import { GeoSearchError, resolveGeoDocumentScope } from "../search/geo-scope.js";
+import { filterPiiWithheldResults } from "./pii-artifact-guard.js";
 import type { ScopeSignal } from "../search/scope-relevance.js";
 import { randomUUID } from "node:crypto";
 import { qualifyCommunitySummary } from "../search/community-context.js";
@@ -438,7 +439,18 @@ type WholeCorpusSummaryRow = {
   char_estimate: number;
 };
 
-export async function loadProjectWholeCorpusContext(args: {
+/**
+ * The whole project as chat context (small corpora). Page-scoped PII: hits on withheld pages are dropped; a corpus
+ * keeps its other hits.
+ */
+export async function loadProjectWholeCorpusContext(args: Parameters<typeof loadProjectWholeCorpusContextUnfiltered>[0]): Promise<WholeCorpusProjectContext> {
+  const context = await loadProjectWholeCorpusContextUnfiltered(args);
+  if (context.results.length === 0) return context;
+  const kept = await filterPiiWithheldResults(context.results);
+  return kept.length === context.results.length ? context : { ...context, results: kept };
+}
+
+async function loadProjectWholeCorpusContextUnfiltered(args: {
   projectId: string;
   filters?: SearchFilters;
   runId?: string;
@@ -1847,6 +1859,8 @@ async function executeHybridSearch(
   });
   // The mode the search ran in: billing categories and the public response read it.
   response.searchMode = mode;
+  // Page-scoped PII: nothing on a withheld page is served, whichever index or leg returned it.
+  response.results = await filterPiiWithheldResults(response.results);
   return response;
 }
 

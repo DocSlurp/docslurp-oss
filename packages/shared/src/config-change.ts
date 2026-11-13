@@ -88,7 +88,7 @@ const toggled = (key: "summarize" | "pageIndex" | "propositionIndex" | "graphRag
   "visionFallback" | "embed" | "indexVectors"): FieldImpact =>
   (before, after) => (after[key] && !before[key] ? "reindex-recommended" : "new-uploads");
 
-const PII_ACTION_RANK = { flag_for_review: 1, redact_artifacts: 2, block_indexing: 3 } as const;
+const PII_ACTION_RANK = { flag_for_review: 1, redact_artifacts: 2, block_indexing: 3, block_document: 4 } as const;
 const piiStrictness = (features: PipelineFeatures): number =>
   features.piiPolicy.enabled ? PII_ACTION_RANK[features.piiPolicy.action] : 0;
 

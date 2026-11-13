@@ -1,4 +1,4 @@
-import { pageRenderDpi, pageRenderSlot, type RealtimePageImageResource } from "@docslurp/shared";
+import { isPageWithheld, piiWithholding, pageRenderDpi, pageRenderSlot, type RealtimePageImageResource } from "@docslurp/shared";
 import { sql } from "../db.js";
 
 /** Read-only readiness for one authorized page/version. Never signs URLs, loads
@@ -7,8 +7,8 @@ export async function readPageImageReadiness(userId:string,resource:RealtimePage
   const {documentId,runId,pageNumber,quality}=resource;
   const slots=[pageRenderSlot(documentId,pageNumber,quality,pageRenderDpi(quality)),
     ...(quality==="reader"?[`${documentId}:page-${pageNumber}`,`${documentId}:raster-v2-reader-page-${pageNumber}`]:[])];
-  const [row]=await sql<{ready:boolean;available:boolean}[]>`
-    select d.status='completed' and exists (
+  const [row]=await sql<{ready:boolean;available:boolean;status:string|null;pii:unknown}[]>`
+    select d.status, d.metadata->'pii' as pii, d.status='completed' and exists (
       select 1 from unnest(${sql.array(slots)}::text[]) slot
       where jsonb_typeof(r.artifacts->slot)='string' and length(r.artifacts->>slot)>0
         and not coalesce((d.metadata->'pii'->'withheldArtifactUris') ? (r.artifacts->>slot),false)
@@ -22,5 +22,7 @@ export async function readPageImageReadiness(userId:string,resource:RealtimePage
     where d.id=${documentId} and d.run_id=${runId} and d.page_count>=${pageNumber} and ${pageNumber}>0
       and docslurp_project_access(d.project_id,${userId})`;
   if(!row)throw new Error("not_found");
+  // Page-scoped PII: a withheld page reads as unavailable, never ready.
+  if(isPageWithheld(piiWithholding({status:row.status,metadata:row.pii==null?{}:{pii:row.pii}}),pageNumber))return {resource,status:"unavailable" as const};
   return {resource,status:row.ready?"ready" as const:row.available?"pending" as const:"unavailable" as const};
 }

@@ -1,3 +1,10 @@
+## PII withholding is page-scoped (2026-11-13, behaviour change)
+
+- One PII page no longer blocks a whole document. Under `piiPolicy.action = "block_indexing"` a match withholds its page: that page's text becomes a fixed placeholder before summary, embedding and indexing, and its images, renders and figures are refused. The rest of the document completes and is served. Unpaged documents withhold the section holding the match. A match that cannot be placed on a page still blocks the whole document (fail closed). See `docs/pii-page-withholding.md`.
+- **Behaviour change:** existing projects using `block_indexing` start serving the clean pages of documents they block today, once those documents are rescanned or reprocessed. Stored policies are not migrated. The new action `block_document` keeps whole-document blocking for projects that want it.
+- Documents already `pii_blocked` are not rescanned automatically. `scripts/pii-page-scope-dry-run.sql` counts, read-only, how many would become partly available after a rescan.
+- Search, chat, the file proxy, page renders, exports and deferred materialization enforce withheld pages at serve time. The ingest report (`piiWithheld`) and document detail (`piiWithheld`) say "N pages withheld for privacy" with page numbers, never content.
+
 ## Search modes and per-mode key limits (2026-11-12)
 
 - Search runs in one of three nested modes: `keyword` (keyword matching, no model calls), `hybrid` (adds the query embedding and vector search) and `deep` (adds graph/community expansion, the hosted reranker, deferred pages and LLM query strategies). API key and OAuth scopes `search:keyword`, `search:hybrid` and `search:deep` replace `search` (migration 0138 maps existing keys and grants to `search:deep`; the OAuth endpoints still accept `search` from saved clients). A request may ask for a cheaper `mode`; the search service caps every search at the key's mode after project defaults resolve, on every route.
