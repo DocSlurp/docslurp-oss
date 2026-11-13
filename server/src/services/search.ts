@@ -1733,6 +1733,8 @@ async function chargeSearch(result: SearchResponse, userId: string, searchId: st
       },
     });
   }, {
+    // Deferred against this org's own allowance; without an org the charge is written before the response.
+    orgId,
     // A failed charge never fails the search the user already has.
     onError: (error, attempt) => console.error(`[search] charge failed session=${result.sessionId} attempt=${attempt + 1}: ${error instanceof Error ? error.message : String(error)}`),
   }).done;

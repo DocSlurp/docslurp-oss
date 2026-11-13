@@ -15,6 +15,8 @@ async function settles(promise: Promise<unknown>): Promise<boolean> {
   return done;
 }
 
+const ORG = { orgId: "org-a" };
+
 afterEach(() => { vi.unstubAllEnvs(); resetBilledWriteBehindForTests(); });
 
 describe("billed write-behind cap", () => {
@@ -29,10 +31,10 @@ describe("billed write-behind cap", () => {
     vi.stubEnv("SEARCH_WRITE_BEHIND_MAX_CREDITS", "5");
     const first = gate();
     const second = gate();
-    expect(await settles(writeBehindWithinCap(3, () => first.promise).done)).toBe(true);
+    expect(await settles(writeBehindWithinCap(3, () => first.promise, ORG).done)).toBe(true);
     expect(billedWriteBehindCredits()).toBe(3);
     // 3 + 3 > 5: this request waits for its own write.
-    const waiting = writeBehindWithinCap(3, () => second.promise).done;
+    const waiting = writeBehindWithinCap(3, () => second.promise, ORG).done;
     expect(await settles(waiting)).toBe(false);
     second.release();
     await waiting;
@@ -50,7 +52,7 @@ describe("billed write-behind cap", () => {
       const result = writeBehindWithinCap(4, async () => {
         attempts += 1;
         if (attempts < 3) throw new Error("insert failed");
-      }, { onError: (_error, attempt) => errors.push(attempt) });
+      }, { ...ORG, onError: (_error, attempt) => errors.push(attempt) });
       await expect(result.done).resolves.toBeUndefined();
       await vi.advanceTimersByTimeAsync(0);
       expect(attempts).toBe(1);
@@ -77,7 +79,7 @@ describe("billed write-behind cap", () => {
       const { done } = writeBehindWithinCap(1, async () => {
         if (before >= 10) inlineAttempts += 1;
         throw new Error("database down");
-      });
+      }, ORG);
       if (billedWriteBehindCredits() > before) deferred += 1;
       await done;
     }
@@ -90,7 +92,7 @@ describe("billed write-behind cap", () => {
     expect(billedWriteBehindPending()).toBe(0);
     expect(billedWriteBehindCredits()).toBe(10);
     const later = gate();
-    const next = writeBehindWithinCap(1, () => later.promise).done;
+    const next = writeBehindWithinCap(1, () => later.promise, ORG).done;
     expect(await settles(next)).toBe(false);
     later.release();
     await next;
@@ -98,7 +100,7 @@ describe("billed write-behind cap", () => {
 
   it("shutdown drain retries without waiting for the backoff", async () => {
     let attempts = 0;
-    writeBehindWithinCap(2, async () => { attempts += 1; if (attempts < 2) throw new Error("once"); });
+    writeBehindWithinCap(2, async () => { attempts += 1; if (attempts < 2) throw new Error("once"); }, ORG);
     await new Promise((resolve) => setTimeout(resolve, 5));
     const started = Date.now();
     await drainBilledWriteBehind();
@@ -110,7 +112,7 @@ describe("billed write-behind cap", () => {
   it("writes before answering when the cap is 0", async () => {
     vi.stubEnv("SEARCH_WRITE_BEHIND_MAX_CREDITS", "0");
     const write = gate();
-    const result = writeBehindWithinCap(1, () => write.promise).done;
+    const result = writeBehindWithinCap(1, () => write.promise, ORG).done;
     expect(await settles(result)).toBe(false);
     write.release();
     await result;
@@ -122,7 +124,7 @@ describe("billed write-behind cap", () => {
     const result = writeBehindWithinCap(3, async () => {
       attempts += 1;
       throw Object.assign(new Error("insert violates foreign key constraint"), { code: "23503" });
-    });
+    }, ORG);
     await result.settled;
     expect(attempts).toBe(1);
     expect(billedWriteBehindLost()).toBe(lost + 1);
@@ -132,7 +134,7 @@ describe("billed write-behind cap", () => {
   it("never defers with a cap of 0, even a zero-credit write", async () => {
     vi.stubEnv("SEARCH_WRITE_BEHIND_MAX_CREDITS", "0");
     const write = gate();
-    const result = writeBehindWithinCap(0, () => write.promise).done;
+    const result = writeBehindWithinCap(0, () => write.promise, ORG).done;
     expect(await settles(result)).toBe(false);
     write.release();
     await result;
@@ -141,13 +143,58 @@ describe("billed write-behind cap", () => {
   it("bounds zero-credit writes by SEARCH_WRITE_BEHIND_MAX_PENDING", async () => {
     vi.stubEnv("SEARCH_WRITE_BEHIND_MAX_PENDING", "3");
     const write = gate();
-    const deferred = Array.from({ length: 3 }, () => writeBehindWithinCap(0, () => write.promise).done);
+    const deferred = Array.from({ length: 3 }, () => writeBehindWithinCap(0, () => write.promise, ORG).done);
     for (const done of deferred) expect(await settles(done)).toBe(true);
     expect(billedWriteBehindPending()).toBe(3);
-    const fourth = writeBehindWithinCap(0, () => write.promise).done;
+    const fourth = writeBehindWithinCap(0, () => write.promise, ORG).done;
     expect(await settles(fourth)).toBe(false);
     write.release();
     await fourth;
     await drainBilledWriteBehind();
+  });
+
+  it("keeps each org's allowance separate: one org's unwritten or lost charges never make another org wait", async () => {
+    vi.stubEnv("SEARCH_WRITE_BEHIND_MAX_CREDITS", "5");
+    // org-a fills its allowance with abandoned (lost) charges.
+    for (let i = 0; i < 5; i += 1) {
+      await writeBehindWithinCap(1, async () => { throw Object.assign(new Error("fk"), { code: "23503" }); }, ORG).settled;
+    }
+    expect(billedWriteBehindCredits("org-a")).toBe(5);
+    const blockedA = gate();
+    const a = writeBehindWithinCap(1, () => blockedA.promise, ORG).done;
+    expect(await settles(a)).toBe(false);
+    // org-b still has its whole allowance.
+    const slowB = gate();
+    expect(await settles(writeBehindWithinCap(5, () => slowB.promise, { orgId: "org-b" }).done)).toBe(true);
+    expect(billedWriteBehindCredits("org-b")).toBe(5);
+    blockedA.release();
+    slowB.release();
+    await a;
+    await drainBilledWriteBehind();
+    expect(billedWriteBehindCredits("org-b")).toBe(0);
+    expect(billedWriteBehindCredits("org-a")).toBe(5);
+  });
+
+  it("counts pending writes per org, with a process-wide memory bound", async () => {
+    vi.stubEnv("SEARCH_WRITE_BEHIND_MAX_PENDING", "2");
+    vi.stubEnv("SEARCH_WRITE_BEHIND_MAX_PENDING_TOTAL", "3");
+    const write = gate();
+    for (let i = 0; i < 2; i += 1) expect(await settles(writeBehindWithinCap(0, () => write.promise, ORG).done)).toBe(true);
+    expect(await settles(writeBehindWithinCap(0, () => write.promise, ORG).done)).toBe(false);
+    expect(await settles(writeBehindWithinCap(0, () => write.promise, { orgId: "org-b" }).done)).toBe(true);
+    // Three deferred in the process: the memory bound now makes every org write first.
+    expect(await settles(writeBehindWithinCap(0, () => write.promise, { orgId: "org-c" }).done)).toBe(false);
+    write.release();
+    await drainBilledWriteBehind();
+  });
+
+  it("never defers a write without an org", async () => {
+    const write = gate();
+    for (const orgId of [null, undefined, " "]) {
+      const done = writeBehindWithinCap(1, () => write.promise, { orgId }).done;
+      expect(await settles(done)).toBe(false);
+    }
+    expect(billedWriteBehindCredits()).toBe(0);
+    write.release();
   });
 });

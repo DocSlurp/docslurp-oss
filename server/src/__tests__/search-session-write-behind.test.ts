@@ -103,6 +103,52 @@ describe("write-behind backpressure", () => {
   });
 });
 
+describe("write-behind isolation between orgs", () => {
+  const journalFor = (orgId: string) => createSearchSessionJournal({ writeBehind: true, scope: { orgId, projectId: `${orgId}-project` } });
+
+  it("one org's full backlog never makes another org's search wait", async () => {
+    vi.stubEnv("SEARCH_WRITE_BEHIND_CONCURRENCY", "1");
+    vi.stubEnv("SEARCH_WRITE_BEHIND_MAX_PENDING", "1");
+    try {
+      let release!: () => void;
+      await journalFor("org-a").afterWrites(() => new Promise<void>((resolve) => { release = resolve; }));
+      await journalFor("org-a").afterWrites(async () => {});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      // org-a has one write waiting: its next search waits for its own write...
+      let aReturned = false;
+      const a = journalFor("org-a").afterWrites(async () => {}).then(() => { aReturned = true; });
+      // ...while org-b answers at once.
+      let bReturned = false;
+      await journalFor("org-b").afterWrites(async () => {}).then(() => { bReturned = true; });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(bReturned).toBe(true);
+      expect(aReturned).toBe(false);
+      release();
+      await a;
+      await drainSearchSessionWrites();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("serves orgs in turn for background write slots", async () => {
+    vi.stubEnv("SEARCH_WRITE_BEHIND_CONCURRENCY", "1");
+    try {
+      const order: string[] = [];
+      let release!: () => void;
+      await journalFor("org-a").afterWrites(() => new Promise<void>((resolve) => { release = resolve; }));
+      for (let i = 1; i <= 3; i += 1) await journalFor("org-a").afterWrites(async () => { order.push(`a${i}`); });
+      await journalFor("org-b").afterWrites(async () => { order.push("b1"); });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      release();
+      await drainSearchSessionWrites();
+      expect(order).toEqual(["a1", "b1", "a2", "a3"]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
 describe("write-behind search usage", () => {
   /** Every usage insert waits for `release`, so a test can see whether the search waited for it. */
   function gateInserts() {
