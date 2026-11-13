@@ -43,8 +43,10 @@ function score(spec, t) {
     const s = spec.series.find((x) => x.name === name) ?? (Object.keys(t.series).length === 1 ? spec.series[0] : null);
     t.categories.forEach((cat, i) => {
       total += 1;
-      const p = s?.points.find((pt) => String(t.type === "hbar" ? pt.y : pt.x) === cat);
-      const v = p ? Number(t.type === "hbar" ? p.x : p.y) : NaN;
+      // The category is whichever coordinate is a string (the extractor writes x = category, y = value for every bar
+      // orientation; older output put a horizontal bar's category in y).
+      const p = s?.points.find((pt) => String(typeof pt.x === "string" ? pt.x : pt.y) === cat);
+      const v = p ? Number(typeof p.x === "string" ? p.y : p.x) : NaN;
       if (Math.abs(v - values[i]) <= tol) matched += 1;
     });
   }

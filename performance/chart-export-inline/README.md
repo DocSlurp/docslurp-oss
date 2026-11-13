@@ -166,3 +166,49 @@ PDF text layer inside the figure bbox plus 60 pt.
 ## Spend
 
 Modal VMs: about 55 VM-seconds at 2 vCPU and 4 GiB, about $0.01. No model calls.
+
+## Council round 3 re-measure (`results-vm-r3.json`)
+
+- **Same slice** (106 documents, 207 pages), **same VM shape and prices** (2 vCPU / 4 GiB: VM $0.00010552/s plus worker
+  slot $0.000035/s; quarantine VM $0.000197 per document). Five runs per arm, interleaved, a fresh process per command.
+- **Arms:**
+  - `before`: round 2's guest pack, run as the driver runs a baseline (without the V8 flag);
+  - `now`: this round's guest, run as the host runs it (`--disallow-code-generation-from-strings`).
+- **Changes measured:**
+  - the linear script-tag prefilter (H1);
+  - every inspectable EPUB runs (M3);
+  - the worker's soft deadline (M2);
+  - the inspection written before charts (L1).
+  The table compares `now` with round 2's `now`, the like-for-like arm (both under the flag).
+
+| | Σ added time | workers started | visuals | pages per $1, page-only (63,878) | counting each document's quarantine VM (8,591) | pages per minute (200) |
+|---|--:|--:|--:|--:|--:|--:|
+| round 2 `now` | 3.52 s | 43 | 90 | 55,411 (−13.3%) | 8,418 (−2.0%) | 189.3 (−5.4%) |
+| **round 3 `now`** | **3.52 s** | **48** | **96** | **55,409 (−13.3%)** | **8,418 (−2.0%)** | **189.3 (−5.4%)** |
+
+Median added time per document, by class (round 3 `now`):
+
+| class (n) | added | workers |
+|---|--:|--:|
+| Office (32: 25 with charts, 7 without) | +67 ms | the 25 with chart parts |
+| SVG (5) | +65 ms | 5/5 |
+| EPUB (5) | +67 ms | 5/5 (was 0/5) |
+| HTML (14) | +6 ms | those with a signal |
+| JSON (22) | +6 ms | those with a signal |
+| no inline kind (28: images, PDFs) | 0 ms | 0 |
+
+- **M3:** every EPUB now starts a worker, +67 ms each. The 6 inline-XHTML visuals lost in round 2 are back (96 visuals).
+  The cost per EPUB page shrinks with its length; the generated EPUBs here are 1–2 pages, the worst case.
+- **H1:** the linear prefilter costs nothing measurable (HTML and JSON stay at +6 ms). It plans 5 MiB of hostile
+  `<script` tags in 25–29 ms; the old regexes took 7.9 s on 160 KB.
+- **Workers ran faster this round** (+65–67 ms against +71–74 ms in round 2, same code path). Within run-to-run noise on a
+  shared Modal host, that offsets the 5 EPUB workers, so Σ is unchanged.
+- **Gate:** unchanged from round 2.
+  - Page-only, as defined: −13.3%, a fail.
+  - Counting the quarantine VM every document pays: −2.0%, at the ≤2% edge.
+  - A signalled one-page document still loses ~4.5% of its full cost; an unsignalled one ~0.3%.
+- **Modal spend this round:** 70.5 VM-seconds, about $0.01.
+
+`pdf-figure-words.mjs` now reads a point's category from whichever coordinate is a string: the extractor writes
+`x` = category and `y` = value for horizontal bars too. With Doppler #41's tightened bar rule (3341aa747), the truth PDF
+still scores 52 of 60 values exact, 9 of 9 figures.
