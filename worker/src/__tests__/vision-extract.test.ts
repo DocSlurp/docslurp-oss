@@ -615,6 +615,24 @@ describe("chart export in vision-extract (real pass, fake model client)", () => 
     }
   });
 
+  it("free tier, inline mode: a document with no chart signal does no chart work at all (no reads, no extractor, no VM)", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    vi.stubEnv("DOCSLURP_CHART_EXPORT_INLINE", "1");
+    const calls: unknown[] = [];
+    const previous = setDeterministicVisualExtractor(async (input) => { calls.push(input); return { partials: [] }; });
+    try {
+      const { stage, state, storage, requests } = await setup({ visionFallback: false, quality: "fast", chartExport: { ...CHART_EXPORT, tier: "free" } });
+      await stage.run(state);
+      expect(calls).toEqual([]);
+      expect(requests).toEqual([]);
+      expect(storage.reads).toEqual([]);
+      expect(chartCharges(state)).toEqual([]);
+      expect(state.documentStage("doc-c", "vision-extract")).toBeUndefined();
+    } finally {
+      setDeterministicVisualExtractor(previous);
+    }
+  });
+
   it("models tier is unchanged: the client is built and each model read is charged", async () => {
     installTestPricing(DISTINCT_TEST_PRICING);
     vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
