@@ -16,7 +16,7 @@
  */
 import { createHash } from "node:crypto";
 import { constants, type Stats } from "node:fs";
-import { lstat, mkdir, mkdtemp, open, opendir, realpath, rm, stat, type FileHandle } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, open, opendir, readdir, realpath, rm, stat, type FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Readable } from "node:stream";
@@ -94,8 +94,6 @@ export interface DopplerFigureSet {
   files: DopplerFigureFile[];
   /** The ledger rows, one JSON line each in id order, spilled to a private temporary file (see disposeDopplerFigureSet). */
   ledger: { spill: string; rows: number; counts: DocumentAssetCounts };
-  /** `page-facts.jsonl` beside the manifest (version 2 and 3), when the provider returned it. */
-  pageFacts: { size: number } | null;
   caps: DopplerAssetCaps;
 }
 
@@ -300,6 +298,9 @@ function magicMatchesHeadTail(format: DopplerFigureFormat, head: Buffer, tail: B
   return dopplerFigureMagicMatches("svg", head);
 }
 
+/** A whole-JSON (version 1 or 2) manifest parse peaks near this many times its size (JSON.parse plus the strict schema). */
+const V2_PARSE_FACTOR = 10;
+
 /** Version 2 and 3 page folders and the file names inside them. */
 const PAGE_DIR = /^page-[0-9]{4,10}$/;
 const PAGE_FILE = /^(?:image|figure)-[0-9]{3,7}\.(?:webp|svg|png|jpg)$/;
@@ -315,14 +316,17 @@ function idOrder(a: string, b: string): number {
 }
 
 /**
- * Read a version 3 `manifest.jsonl` line by line: at most 64 KiB per line, ASCII only, `\n`-terminated, hashed as it is
- * read (the end line carries the hash of every byte before it). Holds one line and one read buffer at a time.
+ * Read a version 3 `manifest.jsonl` line by line: at most 64 KiB per line (and its type's own cap), ASCII only,
+ * `\n`-terminated, hashed as it is read (the end line carries the hash of every byte before it), and at most `maxBytes`
+ * in all (what is left of the folder's manifest byte cap). Holds one line and one read buffer at a time.
  */
 async function readManifestLines(
   root: FolderRoot, validator: DopplerManifestV3Validator, onImage: (accepted: NonNullable<ReturnType<DopplerManifestV3Validator["accept"]>>) => Promise<void>,
-  signal?: AbortSignal, relative: string = DOPPLER_MANIFEST_V3_FILE,
+  signal: AbortSignal | undefined, relative: string, maxBytes: number,
 ): Promise<{ size: number; sha256: string }> {
-  const { handle, size } = await openFolderFile(root, relative, null, Number.MAX_SAFE_INTEGER);
+  // A manifest past the cap is refused before a line is read (openFolderFile: `oversized-file`), and one that grows
+  // past it while it is read stops there (`file-changed`).
+  const { handle, size } = await openFolderFile(root, relative, null, maxBytes);
   const whole = createHash("sha256");
   const preceding = createHash("sha256");
   const buffer = Buffer.allocUnsafe(DOPPLER_MANIFEST_V3_LINE_BYTES);
@@ -384,7 +388,7 @@ async function readManifestLines(
  * has exited and nothing else writes it.
  *
  * Version 3 (`manifest.jsonl`, `doppler-images/3`) and version 2 (`manifest.json`): the manifest, optionally
- * `page-facts.jsonl`, and `page-NNNN` real directories holding only `(image|figure)-NNN.<format>` regular files.
+ * `page-facts.jsonl` (allowed, never read or stored), and `page-NNNN` real directories holding only `(image|figure)-NNN.<format>` regular files.
  * Version 1 (`doppler-figures@1`): `manifest.json` and `<id>.<format>` regular files. Always: no links (symbolic or
  * hard), no other names or nesting, directories read entry by entry with a cap; the manifest is strict and within the
  * caps for the document's page count (`dopplerAssetCaps`); every image's page is in the document; a version 2 or 3
@@ -399,7 +403,11 @@ async function readManifestLines(
  */
 export async function readDopplerFigureDir(
   dir: string,
-  args: { pageCount: number; signal?: AbortSignal; expect?: DopplerFigureExpectation; sourceSha256?: string | null; hooks?: DopplerFigureReadHooks },
+  args: {
+    pageCount: number; signal?: AbortSignal; expect?: DopplerFigureExpectation; sourceSha256?: string | null; hooks?: DopplerFigureReadHooks;
+    /** Where a legacy (version 1 or 2) manifest's whole-JSON parse is reserved; the worker's figure budget by default. */
+    parseBudget?: ByteBudget;
+  },
 ): Promise<DopplerFigureSet> {
   const pageCount = Number.isSafeInteger(args.pageCount) && args.pageCount > 0 ? args.pageCount : 0;
   const caps = dopplerAssetCaps(pageCount);
@@ -444,8 +452,13 @@ export async function readDopplerFigureDir(
     }
     if (shardRanges.length === 0) throw new DopplerFigureRejection("missing-manifest");
     shardRanges.sort((a, b) => a[0] - b[0]);
-    // Shard ranges never overlap: page paths are global, and each page belongs to one shard's manifest.
+    // Shard ranges never overlap: page paths are global, and each page belongs to one shard's manifest. They start at
+    // page 1 and follow each other with no hole (the provider splits the document in order), and none ends past the
+    // document's last page.
     for (let i = 1; i < shardRanges.length; i += 1) if (shardRanges[i]![0] <= shardRanges[i - 1]![1]) throw new DopplerFigureRejection("shards-overlap");
+    if (shardRanges[0]![0] !== 1) throw new DopplerFigureRejection("shards-not-contiguous");
+    for (let i = 1; i < shardRanges.length; i += 1) if (shardRanges[i]![0] !== shardRanges[i - 1]![1] + 1) throw new DopplerFigureRejection("shards-not-contiguous");
+    if (shardRanges.at(-1)![1] > pageCount) throw new DopplerFigureRejection("page-outside-document");
   }
   // Page folders as listed (device and inode), to refuse one swapped before it is opened.
   const listedDirs = new Map<string, Stats>();
@@ -471,6 +484,8 @@ export async function readDopplerFigureDir(
   const manifests: DopplerManifestFile[] = [];
   let run: DopplerManifestRunFacts | null;
   let complete: boolean;
+  /** Releases the version 2 parse reservation (idempotent). */
+  let releaseParse: (() => void) | null = null;
   try {
     if (manifestFile === DOPPLER_MANIFEST_V3_FILE || hasShards) {
       version = 3;
@@ -480,6 +495,8 @@ export async function readDopplerFigureDir(
         ? shardRanges.map((range) => ({ relative: `shards/${dopplerShardFolder(range[0], range[1])}/${DOPPLER_MANIFEST_V3_FILE}`, range }))
         : [{ relative: DOPPLER_MANIFEST_V3_FILE, range: null }];
       let linesLeft = caps.entries;
+      // Every manifest of the folder counts against one byte cap, and toward the folder's total bytes.
+      let bytesLeft = caps.manifestV3Bytes;
       let first: DopplerManifestV3Header | null = null;
       for (const job of jobs) {
         const validator = new DopplerManifestV3Validator({ maxLines: linesLeft, maxPage: pageCount, ...(job.range ? { range: job.range } : {}) });
@@ -497,7 +514,10 @@ export async function readDopplerFigureDir(
           if (file) addFile(file.path, file.id, file.format, file.bytes, file.sha256, dopplerEntryFileCap(file, caps));
           if (row.resumable) resumable += 1;
           await spill.add({ r: row, x: recordOf(row, error) });
-        }, args.signal, job.relative);
+        }, args.signal, job.relative, bytesLeft);
+        bytesLeft -= read.size;
+        fileBytes += read.size;
+        if (fileBytes > caps.totalBytes) throw new DopplerFigureRejection("total-bytes");
         const summary = validator.finish();
         if (!checked) checkHeader(summary.header);
         first ??= summary.header;
@@ -513,7 +533,17 @@ export async function readDopplerFigureDir(
       };
     } else {
       const cap = Math.min(caps.manifestBytes, DOPPLER_MANIFEST_V2_LIMITS.maxManifestBytes);
-      const raw = await readFolderFile(root, manifestFile!, null, cap);
+      // A legacy manifest is parsed whole: JSON.parse plus the strict schema peak near 10x its size (measured), so that
+      // much is reserved from the worker's figure budget until the rows are spilled. Version 2 is dropped once the
+      // Doppler pin writes version 3 (docs/extraction/doppler-figures.md).
+      const probe = await openFolderFile(root, manifestFile!, null, cap);
+      await probe.handle.close();
+      const parseBudget = args.parseBudget ?? dopplerWorkerBudget();
+      const held = await parseBudget.acquire(V2_PARSE_FACTOR * probe.size, args.signal);
+      let released = false;
+      releaseParse = () => { if (!released) { released = true; parseBudget.release(held); } };
+      const raw = await readFolderFile(root, manifestFile!, probe.size, cap);
+      fileBytes += raw.length;
       let json: unknown;
       try { json = JSON.parse(raw.toString("utf8")); } catch { throw new DopplerFigureRejection("manifest-not-json"); }
       const manifest = parseDopplerManifest(json);
@@ -545,9 +575,9 @@ export async function readDopplerFigureDir(
         run = dopplerManifestRunFacts(manifest);
         complete = m.complete;
       }
-      // Spill in id order, with each entry's index record.
+      // Spill in id order, with each entry's index record (the rows computed once, and the records from them).
       const rows = dopplerLedgerAssets(manifest);
-      const records = dopplerFigureRecords(manifest);
+      const records = dopplerFigureRecords(manifest, rows);
       const order = rows.map((_, i) => i).sort((a, b) => idOrder(rows[a]!.assetId, rows[b]!.assetId));
       for (const i of order) {
         if (rows[i]!.resumable) counts.resumable += 1;
@@ -557,6 +587,7 @@ export async function readDopplerFigureDir(
         relative: manifestFile!, size: raw.length, sha256: createHash("sha256").update(raw).digest("hex"), range: null, run, complete,
         resumable: counts.resumable,
       });
+      releaseParse();
     }
     if ((args.expect === "partial" && complete) || (args.expect === "complete" && !complete)) throw new DopplerFigureRejection("outcome-mismatch");
 
@@ -588,20 +619,18 @@ export async function readDopplerFigureDir(
       const { handle } = await openFolderFile(root, entry.relative, entry.size, entry.cap);
       await handle.close();
     }
-    let pageFacts: DopplerFigureSet["pageFacts"] = null;
-    if (hasPageFacts) {
-      const { handle, size } = await openFolderFile(root, DOPPLER_STORE_LAYOUT.pageFacts, null, caps.pageFactsBytes);
-      await handle.close();
-      pageFacts = { size };
-    }
+    // `page-facts.jsonl` (when present) is never read or stored: its document line can carry the PDF's own producer
+    // and creator strings, untrusted text. Facts are stored only once a validating reader re-serialises them.
     await spill.close();
     return {
       dir, version, manifests, run, complete, files: [...expected.values()],
-      ledger: { spill: spill.path, rows: spill.rows, counts: spill.counts }, pageFacts, caps,
+      ledger: { spill: spill.path, rows: spill.rows, counts: spill.counts }, caps,
     };
   } catch (error) {
     await spill.discard();
     throw error;
+  } finally {
+    releaseParse?.();
   }
 }
 
@@ -644,14 +673,15 @@ export function dopplerFolderKey(
     case "index": return `${prefix}${DOPPLER_STORE_LAYOUT.index}`;
     case "manifest": return `${images}${DOPPLER_STORE_LAYOUT.manifest}`;
     case "manifestV3": return `${images}${DOPPLER_MANIFEST_V3_FILE}`;
+    // Written by extract-markdown from the host's validated facts (dopplerPageFactsJsonl), never copied from the provider's folder.
     case "pageFacts": return `${images}${DOPPLER_STORE_LAYOUT.pageFacts}`;
   }
 }
 
 /** Index records: one per manifest entry, with the slot of the file it shows (its own, or the one it shares). */
-export function dopplerFigureRecords(manifest: DopplerManifest): DopplerFigureRecord[] {
+export function dopplerFigureRecords(manifest: DopplerManifest, ledgerAssets?: readonly DocumentAsset[]): DopplerFigureRecord[] {
   if (manifest.version === 2) {
-    const assets = dopplerLedgerAssets(manifest);
+    const assets = ledgerAssets ?? dopplerLedgerAssets(manifest);
     return manifest.manifest.images.map((entry, i) => {
       const fileOf = assets[i]!.fileOf;
       const format = entry.status === "extracted" ? entry.format : null;
@@ -727,14 +757,14 @@ export interface DopplerFigureStats {
 
 /** Document artifact slots of the Doppler folder (beside `doppler-figure:<id>` per file and the `doppler-figures` index). */
 export const DOPPLER_MANIFEST_SLOT = "doppler-manifest";
-export const DOPPLER_PAGE_FACTS_SLOT = "doppler-page-facts";
 export const DOPPLER_MARKDOWN_SLOT = "doppler-markdown";
+/** The host's canonical page facts (`images/page-facts.jsonl`, extract-markdown), never the provider's file. */
+export const DOPPLER_PAGE_FACTS_SLOT = "doppler-page-facts";
 
 export interface StoredDopplerFigures {
   indexUri: string;
   /**
-   * Artifact slots to record for the document: the index, the manifest, the page facts, the Markdown and one per stored
-   * file. `source.json` has none: it names the source object, which is never served through an artifact.
+   * Artifact slots to record for the document: the index, the manifest(s), the Markdown and one per stored file. `source.json` has none: it names the source object, which is never served through an artifact.
    */
   slots: Array<{ slot: string; uri: string }>;
   /** Storage key of each stored file, by the id that owns it. */
@@ -771,13 +801,19 @@ const magicCheck = (format: DopplerFigureFormat) => (head: Buffer, tail: Buffer,
 async function uploadChecked(args: {
   storage: DopplerFigureStorage; budgets: DopplerStoreBudgets; key: string; contentType: string; size: number;
   open: () => Promise<FileHandle>; check: StreamCheck; signal?: AbortSignal;
+  /** Called once, just before the first byte may reach storage (the caller tracks what it must clean up). */
+  onStart?: () => void;
 }): Promise<void> {
   const streaming = !!args.storage.putStream && args.size > DOPPLER_UPLOAD_SMALL_FILE_BYTES;
+  // The budget is a hard ceiling: a whole-file read larger than the job's or the worker's budget is refused (a store
+  // without streaming uploads cannot hold it), never reserved at the clamped limit while the full size is allocated.
+  if (!streaming && (args.size > args.budgets.job.limit || args.size > args.budgets.worker.limit)) throw new DopplerFigureRejection("file-over-memory-budget");
   const release = await reserve(args.budgets, streaming ? Math.min(args.size, 2 * DOPPLER_UPLOAD_CHUNK_BYTES) : args.size, args.signal);
   let handle: FileHandle | null = null;
   try {
     args.signal?.throwIfAborted();
     handle = await args.open();
+    args.onStart?.();
     if (streaming) {
       try {
         await args.storage.putStream!(args.key, checkedFileStream(handle, args.check), args.size, args.contentType);
@@ -819,9 +855,9 @@ async function openHostFile(file: string): Promise<{ size: number; open: () => P
 /**
  * Store a validated images folder in the document's Doppler folder (`DOPPLER_STORE_LAYOUT`): every image file at its page
  * path, uploaded concurrently (DopplerStoreBudgets.concurrency) within the fixed memory budget and verified while it
- * streams; then, once every file has landed and checked out, the manifest bytes unchanged, the page facts, the Markdown
+ * streams; then, once every file has landed and checked out, the manifest bytes unchanged, the Markdown
  * as Doppler wrote it and `source.json`; DocSlurp's index last. Until the caller records the slots nothing is reachable;
- * any failure removes what this call wrote, best effort.
+ * any failure removes what this call started writing (never a committed object), best effort.
  */
 export async function storeDopplerFigures(args: {
   storage: DopplerFigureStorage;
@@ -834,6 +870,11 @@ export async function storeDopplerFigures(args: {
   dopplerMarkdownPath?: string | null;
   /** `source.json`; the folder has none when absent. */
   source?: DopplerSourcePointer | null;
+  /**
+   * URIs the document's slots (or ledger rows) already reference: committed objects. A failed store never deletes one of
+   * them, even when this call wrote the same key again.
+   */
+  committedUris?: ReadonlySet<string>;
   budgets?: DopplerStoreBudgets;
   signal?: AbortSignal;
 }): Promise<StoredDopplerFigures> {
@@ -846,32 +887,33 @@ export async function storeDopplerFigures(args: {
   const root = await openRoot(set.dir);
   const slots: StoredDopplerFigures["slots"] = [];
   const keys = new Map<string, string>();
+  /** Keys this call started writing (never every planned key): a failure removes only these, minus committed ones. */
   const written: string[] = [];
   let phase: DopplerFigureStoreFailure = "store-object-failed";
   let work: string | null = null;
   try {
     // 1. Every image file, concurrently, each verified as it streams.
     for (const file of set.files) keys.set(file.id, key({ id: file.id, format: file.format }));
-    written.push(...keys.values());
     await boundedPool(set.files, budgets.concurrency, (file) => uploadChecked({
       storage: args.storage, budgets, key: keys.get(file.id)!, contentType: file.mediaType, size: file.size, signal: args.signal,
       open: async () => (await openFolderFile(root, file.relative, file.size, file.cap)).handle,
       check: { expectedSize: file.size, sha256: file.sha256, magic: magicCheck(file.format) },
+      onStart: () => { written.push(keys.get(file.id)!); },
     }), args.signal);
     for (const file of set.files) slots.push({ slot: dopplerFigureSlot(file.id), uri: args.storage.uri(keys.get(file.id)!) });
     args.signal?.throwIfAborted();
 
-    // 2. Only now the manifest, the page facts, the Markdown and the source pointer.
+    // 2. Only now the manifest, the Markdown and the source pointer (never the provider's page facts).
     const tail: Array<() => Promise<void>> = [];
     const storedManifests: StoredDopplerFigures["manifests"] = [];
     for (const manifest of set.manifests) {
       const manifestKey = manifest.range ? key({ shard: manifest.range }) : singleManifestKey;
-      written.push(manifestKey);
       tail.push(() => uploadChecked({
         storage: args.storage, budgets, key: manifestKey, contentType: set.version === 3 ? "text/plain; charset=utf-8" : "application/json",
         size: manifest.size, signal: args.signal,
-        open: async () => (await openFolderFile(root, manifest.relative, manifest.size, Number.MAX_SAFE_INTEGER)).handle,
+        open: async () => (await openFolderFile(root, manifest.relative, manifest.size, manifest.size)).handle,
         check: { expectedSize: manifest.size, sha256: manifest.sha256, magic: null },
+        onStart: () => { written.push(manifestKey); },
       }));
       storedManifests.push({ key: manifestKey, sha256: manifest.sha256, range: manifest.range });
       slots.push({
@@ -879,32 +921,23 @@ export async function storeDopplerFigures(args: {
         uri: args.storage.uri(manifestKey),
       });
     }
-    if (set.pageFacts) {
-      const factsKey = key("pageFacts");
-      const facts = set.pageFacts;
-      written.push(factsKey);
-      tail.push(() => uploadChecked({
-        storage: args.storage, budgets, key: factsKey, contentType: "text/plain; charset=utf-8", size: facts.size, signal: args.signal,
-        open: async () => (await openFolderFile(root, DOPPLER_STORE_LAYOUT.pageFacts, facts.size, set.caps.pageFactsBytes)).handle,
-        check: { expectedSize: facts.size, sha256: null, magic: null },
-      }));
-      slots.push({ slot: DOPPLER_PAGE_FACTS_SLOT, uri: args.storage.uri(factsKey) });
-    }
     if (args.dopplerMarkdownPath) {
       const markdownKey = key("markdown");
       const host = await openHostFile(args.dopplerMarkdownPath);
-      written.push(markdownKey);
       tail.push(() => uploadChecked({
         storage: args.storage, budgets, key: markdownKey, contentType: "text/markdown; charset=utf-8", size: host.size, signal: args.signal,
         open: host.open, check: { expectedSize: host.size, sha256: null, magic: null },
+        onStart: () => { written.push(markdownKey); },
       }));
       slots.push({ slot: DOPPLER_MARKDOWN_SLOT, uri: args.storage.uri(markdownKey) });
     }
     if (args.source) {
       const sourceKey = key("source");
       const source = args.source;
-      written.push(sourceKey);
-      tail.push(() => args.storage.putJson(sourceKey, { sourceKey: source.sourceKey, sha256: source.sha256, pageCount: source.pageCount, mimeType: source.mimeType }));
+      tail.push(() => {
+        written.push(sourceKey);
+        return args.storage.putJson(sourceKey, { sourceKey: source.sourceKey, sha256: source.sha256, pageCount: source.pageCount, mimeType: source.mimeType });
+      });
     }
     await boundedPool(tail, budgets.concurrency, (task) => task(), args.signal);
     args.signal?.throwIfAborted();
@@ -913,11 +946,11 @@ export async function storeDopplerFigures(args: {
     phase = "store-index-failed";
     work = await mkdtemp(path.join(tmpdir(), "doppler-index-"));
     const built = await writeIndexFile(path.join(work, "index.json"), set, args.document.id, args.markdown);
-    written.push(indexKey);
     const host = await openHostFile(built.path);
     await uploadChecked({
       storage: args.storage, budgets, key: indexKey, contentType: "application/json", size: host.size, signal: args.signal,
       open: host.open, check: { expectedSize: host.size, sha256: null, magic: null },
+      onStart: () => { written.push(indexKey); },
     });
     // A cancellation that arrived during the final write still cancels: nothing is recorded and what was written is removed.
     args.signal?.throwIfAborted();
@@ -940,9 +973,12 @@ export async function storeDopplerFigures(args: {
     return { indexUri: args.storage.uri(indexKey), slots, keys, manifest: single ? { key: single.key, sha256: single.sha256 } : null, manifests: storedManifests, stats };
   } catch (error) {
     let cleanup: DopplerFigureStoreError["cleanup"] = "none";
-    if (written.length > 0) {
+    // Only keys this call started writing, and never one a slot or ledger row already references (a committed object
+    // rewritten by a resume stays: deleting it would break what is already served).
+    const removable = [...new Set(written)].filter((key) => !args.committedUris?.has(args.storage.uri(key)));
+    if (removable.length > 0) {
       if (!args.storage.deleteKeys) cleanup = "unavailable";
-      else cleanup = await args.storage.deleteKeys(written).then(() => "deleted" as const, () => "failed" as const);
+      else cleanup = await args.storage.deleteKeys(removable).then(() => "deleted" as const, () => "failed" as const);
     }
     // Cancellation stays cancellation: the caller must stop the document, not record a figure failure.
     if (args.signal?.aborted) throw error;
@@ -993,7 +1029,7 @@ export interface DopplerFolderReader {
 }
 
 /** Download one object to a new file (mode 0600, never replacing one), checking its size and SHA-256 as it streams. */
-async function downloadChecked(reader: DopplerFolderReader, key: string, file: string, expected: { size: number | null; sha256: string }, signal?: AbortSignal): Promise<void> {
+async function downloadChecked(reader: DopplerFolderReader, key: string, file: string, expected: { size: number | null; sha256: string; max?: number }, signal?: AbortSignal): Promise<void> {
   const handle = await open(file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
   const hash = createHash("sha256");
   let total = 0;
@@ -1004,6 +1040,7 @@ async function downloadChecked(reader: DopplerFolderReader, key: string, file: s
       signal?.throwIfAborted();
       total += chunk.length;
       if (expected.size !== null && total > expected.size) throw new DopplerFigureRejection("size-mismatch");
+      if (expected.max !== undefined && total > expected.max) throw new DopplerFigureRejection("oversized-file");
       hash.update(chunk);
       await handle.write(chunk);
     }
@@ -1020,7 +1057,8 @@ async function downloadChecked(reader: DopplerFolderReader, key: string, file: s
  * `images/manifest.jsonl` (its SHA-256 must be the one the extraction level recorded) and every file it lists as
  * extracted, each downloaded from the key derived from its id (never a listing) to its page path and checked against the
  * manifest's size and SHA-256. Streamed throughout. `page-facts.jsonl` stays out: Doppler's DIR holds only the manifest
- * and page folders. `dir` must be empty or absent.
+ * and page folders. `dir` must be absent (it is created, mode 0700) or an empty real directory: a download never mixes
+ * with files already there.
  */
 export async function downloadDopplerImagesDir(args: {
   storage: DopplerFolderReader;
@@ -1031,14 +1069,21 @@ export async function downloadDopplerImagesDir(args: {
   dir: string;
   signal?: AbortSignal;
 }): Promise<{ files: number; bytes: number }> {
-  await mkdir(args.dir, { recursive: true, mode: 0o700 });
-  const manifestPath = path.join(args.dir, DOPPLER_MANIFEST_V3_FILE);
-  await downloadChecked(args.storage, dopplerFolderKey(args.document, args.runId, "manifestV3"), manifestPath, { size: null, sha256: args.manifestSha256 }, args.signal);
+  await mkdir(path.dirname(args.dir), { recursive: true, mode: 0o700 });
+  try {
+    await mkdir(args.dir, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const info = await lstat(args.dir);
+    if (!info.isDirectory() || info.isSymbolicLink() || (await readdir(args.dir)).length > 0) throw new DopplerFigureRejection("resume-dir-not-empty");
+  }
   const caps = dopplerAssetCaps(args.pageCount);
+  const manifestPath = path.join(args.dir, DOPPLER_MANIFEST_V3_FILE);
+  await downloadChecked(args.storage, dopplerFolderKey(args.document, args.runId, "manifestV3"), manifestPath, { size: null, sha256: args.manifestSha256, max: caps.manifestV3Bytes }, args.signal);
   const validator = new DopplerManifestV3Validator({ maxLines: caps.entries, maxPage: args.pageCount });
   const root = await openRoot(args.dir);
   const files: Array<{ id: string; path: string; format: DopplerFigureFormat; bytes: number; sha256: string }> = [];
-  await readManifestLines(root, validator, async ({ file }) => { if (file) files.push(file); }, args.signal);
+  await readManifestLines(root, validator, async ({ file }) => { if (file) files.push(file); }, args.signal, DOPPLER_MANIFEST_V3_FILE, caps.manifestV3Bytes);
   let bytes = 0;
   for (const file of files) {
     args.signal?.throwIfAborted();

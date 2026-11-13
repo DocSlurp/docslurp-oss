@@ -7,6 +7,7 @@ import { openFileToken } from "../lib/file-tokens.js";
 import { actorHasAnyApiKeyScope, getRequestActor } from "../lib/request-actor.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { userCanAccessArtifactUri } from "../services/documents.js";
+import { dopplerFolderServable, isDopplerSourcePointer } from "../services/document-assets.js";
 import { apiStatusError } from "../lib/api-error.js";
 import { DOPPLER_FIGURE_MEDIA_TYPES, parseArtifactUri, type DopplerFigureFormat } from "@docslurp/shared";
 
@@ -73,7 +74,8 @@ const DOPPLER_FIGURE_KEY = /\/doppler\/[A-Za-z0-9-]{1,64}\/images\/page-[0-9]{4,
 const FIGURE_SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'; sandbox; frame-ancestors 'self'";
 /**
  * The folder's other files, typed by their fixed names and never rendered as active content: the manifest and the
- * index as JSON, the page facts and the Markdown as text. All of them still pass the artifact check (recorded slot,
+ * index as JSON, the Markdown and the page facts as text. (The page facts are the host's canonical lines re-serialized from
+ * validated facts, never the provider's file.) All of them still pass the artifact check (recorded slot,
  * project, organization, PII withholding) like any other artifact.
  */
 const DOPPLER_FOLDER_FILE_KEY = /\/doppler\/[A-Za-z0-9-]{1,64}\/(images\/manifest\.jsonl?|images\/shards\/[0-9]{4,10}-[0-9]{4,10}\/manifest\.jsonl|images\/page-facts\.jsonl|document\.md|index\.json)$/;
@@ -84,15 +86,13 @@ const DOPPLER_FOLDER_FILE_TYPES: Readonly<Record<string, string>> = {
   "images/page-facts.jsonl": "text/plain; charset=utf-8",
   "document.md": "text/markdown; charset=utf-8",
 };
-/** The source pointer (`source.json`) names the upload's storage key: it is never served, whatever records it. */
-const DOPPLER_SOURCE_POINTER_KEY = /\/doppler\/[A-Za-z0-9-]{1,64}\/source\.json$/;
 
 export function dopplerFigureFormat(uri: string): DopplerFigureFormat | null {
   const match = DOPPLER_FIGURE_KEY.exec(parseArtifactUri(uri)?.key ?? "");
   return match ? (match[1] as DopplerFigureFormat) : null;
 }
 
-/** The fixed content type of a Doppler folder file (manifest, page facts, Markdown, index), or null. */
+/** The fixed content type of a Doppler folder file (manifest, Markdown, index), or null. */
 export function dopplerFolderFileType(uri: string): string | null {
   const match = DOPPLER_FOLDER_FILE_KEY.exec(parseArtifactUri(uri)?.key ?? "");
   if (!match) return null;
@@ -100,10 +100,8 @@ export function dopplerFolderFileType(uri: string): string | null {
   return DOPPLER_FOLDER_FILE_TYPES[match[1]!.startsWith("images/shards/") ? "images/manifest.jsonl" : match[1]!] ?? null;
 }
 
-/** Whether a URI names a document's Doppler source pointer, which is never served. */
-export function isDopplerSourcePointer(uri: string): boolean {
-  return DOPPLER_SOURCE_POINTER_KEY.test(parseArtifactUri(uri)?.key ?? uri);
-}
+/** Whether a URI names a document's Doppler source pointer, which is never served (services/document-assets.ts). */
+export { isDopplerSourcePointer };
 
 function notFound(c: Context) {
   c.header("Cache-Control", "no-store");
@@ -161,6 +159,8 @@ export const filesRoutes = new Hono()
     if (isDopplerSourcePointer(claims.uri)) return notFound(c);
     const orgId = actor.type === "apiKey" ? actor.apiKey.orgId : undefined;
     if (!(await userCanAccessArtifactUri(claims.uri, actor.userId, orgId))) return notFound(c);
+    // A Doppler folder file is served only for a `completed` document (defense in depth behind the PII withholding).
+    if (!(await dopplerFolderServable(claims.uri))) return notFound(c);
 
     const range = c.req.header("range");
     let object: Awaited<ReturnType<typeof openArtifactObject>>;
