@@ -18,6 +18,11 @@ const deleteProjectMock = vi.fn();
 const getProjectMock = vi.fn();
 const getProjectStateMock = vi.fn();
 const listProjectTagsMock = vi.fn();
+// Route access reads (lib/search-access.ts) answered from this file's getProject mock with the real scope rules.
+vi.mock("../lib/search-access.js", async () => {
+  const { authorizeFromProjectMock } = await import("./helpers/search-access.js");
+  return { authorizeActorProjectSearch: authorizeFromProjectMock(async (id, userId) => (await import("../services/projects.js")).getProject(id, userId)) };
+});
 vi.mock("../services/project-tags.js", () => ({ listProjectTags: listProjectTagsMock }));
 vi.mock("../services/project-state.js", () => ({ getProjectState: getProjectStateMock }));
 const chatProjectMock = vi.fn();
@@ -584,7 +589,7 @@ describe("projectsRoutes validation", () => {
         filters: expect.objectContaining({
           projectId: "ws-1",
         }),
-      }),
+      }), expect.objectContaining({ orgId: expect.any(String) })
     );
     expect(hybridSearchMock).toHaveBeenNthCalledWith(
       2,
@@ -595,7 +600,7 @@ describe("projectsRoutes validation", () => {
         filters: expect.objectContaining({
           projectId: "ws-1",
         }),
-      }),
+      }), expect.objectContaining({ orgId: expect.any(String) })
     );
     expect(hybridSearchMock.mock.calls[0]?.[2].rootSessionId).toBe(
       hybridSearchMock.mock.calls[1]?.[2].rootSessionId,
@@ -689,7 +694,8 @@ describe("projectsRoutes validation", () => {
   it.each([{ keyType: "server" }, { keyType: "client" }])("never gives API keys suggestions mode on the dashboard chat routes, even when they ask: %j", async ({ keyType }) => {
     getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
     chatProjectMock.mockResolvedValue({ id: "answer", debug: { model: null, fallback: true }, citations: [] });
-    const keyApp = buildApp({ orgId: "org-1", scopes: ["search:deep", "chat", "projects:manage"], keyType });
+    // Browser keys always carry a project allowlist (a client key without one reaches no project).
+    const keyApp = buildApp({ orgId: "org-1", scopes: ["search:deep", "chat", "projects:manage"], keyType, projectIds: ["ws-1"] });
     const send = (body: Record<string, unknown>) => keyApp.request("/projects/ws-1/chat", { method: "POST",
       headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "hi", ...body }) });
     chatProjectMock.mockClear();

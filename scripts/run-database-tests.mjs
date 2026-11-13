@@ -45,6 +45,7 @@ export const GATED = {
   "server/src/__tests__/runtime-identity.db.test.ts": { db: ["RUNTIME_IDENTITY_TEST_DATABASE_URL"] },
   "server/src/__tests__/query-bounds.pg.test.ts": { db: ["SEARCH_BOUNDS_PG_URL"] },
   "server/src/__tests__/rate-limit.redis.test.ts": { redis: ["RATE_LIMIT_TEST_REDIS_URL"] },
+  "server/src/__tests__/chat-concurrency.redis.test.ts": { redis: ["CHAT_CONCURRENCY_TEST_REDIS_URL"] },
   "server/src/__tests__/run-lifecycle.db.test.ts": { db: ["RUN_LIFECYCLE_DATABASE_URL"] },
   "server/src/__tests__/run-start-recovery.db.test.ts": { db: ["RUN_LIFECYCLE_DATABASE_URL"] },
   "server/src/__tests__/usage-attribution.db.test.ts": { db: ["USAGE_ATTRIBUTION_DATABASE_URL"] },

@@ -10,7 +10,7 @@ import { readChatOperation, type Operation } from "./chat-operations.js";
 export async function authorizeChatOperation(actor: RequestActor, id: string) {
   if (actor.type !== "session") throw new Error("operation_forbidden");
   const [row] = await sql<{ project_id: string; org_id: string }[]>`select project_id,org_id from chat_operations where id=${id} and user_id=${actor.userId} and expires_at > now()`;
-  const project = row && await loadActorScopedProject(row.project_id, actor, { refineNames: false });
+  const project = row && await loadActorScopedProject(row.project_id, actor);
   if (!project || project.orgId !== row!.org_id) throw new Error("operation_forbidden");
   return project;
 }
@@ -23,7 +23,7 @@ export async function authorizedChatOperationSnapshot(actor: RequestActor, id: s
     const recovery=await (await nativeOperations(async()=>actor)).read(id,after);
     const dependencies=await readChatRunDependencies(recovery.operation.root_id,actor.userId);
     for(const dependency of dependencies) {
-      const project=await loadActorScopedProject(dependency.project_id,actor,{refineNames:false});
+      const project=await loadActorScopedProject(dependency.project_id,actor);
       if(project?.orgId!==dependency.org_id)throw new Error("operation_forbidden");
     }
     await authorizeChatOperation(actor,id);
@@ -40,7 +40,7 @@ export async function authorizedChatOperationSnapshot(actor: RequestActor, id: s
   const scopes = new Map<string, string>();
   for (const task of [...tasks, ...dependencies]) {
     if (!scopes.has(task.project_id)) {
-      const project = await loadActorScopedProject(task.project_id, actor, { refineNames: false });
+      const project = await loadActorScopedProject(task.project_id, actor);
       if (!project) throw new Error("operation_forbidden");
       scopes.set(task.project_id, project.orgId);
     }
