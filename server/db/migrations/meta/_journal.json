@@ -1037,6 +1037,20 @@
       "when": 1796400000000,
       "tag": "0154_project_auto_title_checked_at",
       "breakpoints": true
+    },
+    {
+      "idx": 148,
+      "version": "7",
+      "when": 1796500000000,
+      "tag": "0155_figure_storage_billing",
+      "breakpoints": true
+    },
+    {
+      "idx": 149,
+      "version": "7",
+      "when": 1796600000000,
+      "tag": "0156_figure_storage_state",
+      "breakpoints": true
     }
   ]
 }

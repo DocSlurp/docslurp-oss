@@ -18,7 +18,7 @@ import { WorkerSlotStore, resolveWorkerSlotOptions, tryMaintenanceLease, type Wo
 import { randomUUID, createHmac } from "node:crypto";
 
 import postgres, { type JSONValue, type PendingQuery, type Sql } from "postgres";
-import { flushAssetLedger, listHostPageImagePages, writeDocumentAssetLedger, type DocumentAssetLedgerResult, type DocumentAssetLedgerWrite } from "./document-asset-ledger.js";
+import { adoptPendingAssets, flushAssetLedger, listHostPageImagePages, markAssetsLost, markAssetsPending, markAssetsStored, replaceUnvouchedObject, writeDocumentAssetLedger, type FigureObjectReader, type DocumentAssetLedgerResult, type DocumentAssetLedgerWrite } from "./document-asset-ledger.js";
 import { applyDefaultVisionOverride, defaultPipelineFeatures, normalizeStoredPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
 
 import { adoptBackfillDocuments } from "../deferred/backfill-adoption.js";
@@ -2707,6 +2707,29 @@ export class Store {
 
   async writeDocumentAssetLedger(write: DocumentAssetLedgerWrite): Promise<DocumentAssetLedgerResult> {
     return await writeDocumentAssetLedger(this.sql, write);
+  }
+
+  /** Figure uploads in progress (document-asset-ledger.ts): pending rows before an upload step, stored once it landed. */
+  async markAssetsPending(args: Parameters<typeof markAssetsPending>[1]): Promise<{ pending: number }> {
+    return await markAssetsPending(this.sql, args);
+  }
+
+  async markAssetsStored(args: Parameters<typeof markAssetsStored>[1]): Promise<{ stored: number }> {
+    return await markAssetsStored(this.sql, args);
+  }
+
+  /** The adopt pass: pending rows checked against storage (streamed SHA-256), no VM. */
+  async adoptPendingAssets(reader: FigureObjectReader, args: Parameters<typeof adoptPendingAssets>[2]) {
+    return await adoptPendingAssets(this.sql, reader, args);
+  }
+
+  async markAssetsLost(args: Parameters<typeof markAssetsLost>[1]): Promise<{ lost: number }> {
+    return await markAssetsLost(this.sql, args);
+  }
+
+  /** Repair a figure object of other bytes under the document's ledger lock (document-asset-ledger.ts). */
+  async replaceUnvouchedObject(args: Parameters<typeof replaceUnvouchedObject>[1]): Promise<void> {
+    await replaceUnvouchedObject(this.sql, args);
   }
 
   /**

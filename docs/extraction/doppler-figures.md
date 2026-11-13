@@ -396,6 +396,62 @@ its size and SHA-256. `DIR` must be absent or an empty directory. It then runs `
 same PDF and settings, validates the returned folder like any other, stores it, and writes the ledger with
 `resume: true`. Nothing runs resumes yet.
 
+## Pending and stored files
+
+Migration 0156 makes the asset ledger keep extracted figures on every failure path:
+
+- **Pending, then stored.** Before each upload step (64 files), the figure step records the files as `pending` rows
+  under their exact keys. After the step's uploads land and check out, it flips them to `stored`, in the same order for
+  the first pass and `extract-markdown`. It does this as soon as the VM job returns, before the Markdown is stored, so a
+  later failure keeps them. Such failures include the Markdown or text pass, a later stage, a cancelled or failed run, or
+  a worker killed mid-upload. The level stays honest: `markdown_complete = false` until the checkpoint commits the
+  Markdown, and `partial` or `resumable` from the rows.
+- **Only stored rows count.** Only stored rows are served (slots, the assets route) or billed (`asset_bytes`). A crash
+  can leave unbilled orphans, never billed ghosts.
+- **Adopt, no VM.** The next attempt checks each pending row of the document's current run by streaming its object and
+  hashing it (`adoptPendingAssets`). An object of exactly the row's size and SHA-256 becomes `stored`. A missing object,
+  or one with other bytes, turns the image back into a resumable `aborted` one.
+- **Never overwritten.** Keys stay exactly Doppler's layout, so the stored `images/` folder is a plain `--images-resume`
+  DIR and `document.md`'s relative links resolve. Each figure is created with `If-None-Match: *`; Tigris returns 412
+  for a taken key, for both buffered and streamed bodies (probed 2026-11-13). An object already at the key is accepted
+  only when its SHA-256 is the manifest's, else the folder is refused (`object-conflict`) and the object is left as it
+  is. A store without conditional creates still writes under the run's own artifact root, and a stale run's ledger writes
+  are refused (`stale-write`).
+- **Never deleted on failure.** No failure path deletes a figure object or row:
+  - a failed upload reports `cleanup: "kept"`;
+  - the failed-figures and no-figures ledger writes are level-only.
+  A re-run that skips the figure step still takes the document off the resume queue: the level becomes that run's
+  (`none` or `disabled`, with no rows of that run).
+- **Only the level's run is current.** Rows an earlier run left are never served, counted or billed as current. The
+  assets route reads only rows of the level's run, and slots come from the document's current run.
+- **Who deletes.** Deleting the document or tenant purges its folder, as before. Run artifact retention purges a run's
+  prefix. Otherwise, the orphan GC sweep (`figure-orphan-gc` in the maintenance sweeper, resume runner PR) is the only
+  deleter: it removes objects under a document's `images/` folder that no ledger row vouches for, 24 hours after their
+  last write. Objects of a failed run that still have rows are kept until that run's purge or the document's deletion.
+- **A resume only adds.** It never rewrites or prunes a stored file (`resume-rewrite`). Its input is the shard's
+  `manifest.jsonl` alone: `downloadDopplerImagesDir` defaults to `manifestOnly`, so finished figures never travel back
+  into the VM.
+
+## Storage billing
+
+Stored figures are billed as storage, measured rather than estimated. The daily storage meter
+(`server/src/services/billing/storage-meter.ts`) reads `getOrgStorage`, which adds the sum of
+`document_extraction_levels.asset_bytes` to `objectBytes`. The figure bytes follow the same rules as source bytes:
+
+- Live documents (completed, not superseded) count. The daily meter leaves out extracts, which pay for their own
+  retention window.
+- Archived versions that are not yet purged also count.
+- Superseded, purged and failed documents add nothing.
+- Every sum is filtered by the organization, and the ledger's composite foreign key ties each row to its document's own
+  organization.
+
+The per-page artifact estimate (96 KiB per page) never included figures, so nothing is counted twice. The figure bytes
+are charged through the existing daily storage event and credit debit, once per organization per day. The event's
+metadata records `measuredArtifactBytes`, and so does `storage_meter_days.measured_artifact_bytes`. Pending uploads and
+orphaned objects that no committed ledger row vouches for are never billed. A failed document's figures are not billed
+while it is failed, exactly like its source file (the meter counts completed, non-superseded documents plus archived,
+not purged ones); they are billed once a retry completes it.
+
 ## Not yet
 
 - Figures are not merged into search results, chat citations or exports; they are artifacts and markers only.

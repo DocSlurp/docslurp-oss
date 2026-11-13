@@ -24,8 +24,8 @@ import {
 import { markFirstPassServedFigures, sandboxedPdfLayoutFacts, sandboxedPdfProvider, type SandboxedPdfFigureOutcome, type SandboxedPdfJob, type SandboxedPdfResult } from "../extractors/plugins.js";
 import type { PageLayoutFacts } from "../lib/page-layout-facts.js";
 import { pageFactsForResend } from "../extractors/sandboxed-pdf-page-facts.js";
-import { DopplerFigureRejection, disposeDopplerFigureSet, dopplerSourcePointer, readDopplerFigureDir, storeDopplerFigures, type DopplerFigureStorage } from "../extractors/doppler-figures.js";
-import { ledgerWriteForFailedFigures, ledgerWriteForStoredFigures, queueAssetLedger } from "../db/document-asset-ledger.js";
+import { DopplerFigureRejection, disposeDopplerFigureSet, dopplerFigureUris, dopplerSourcePointer, readDopplerFigureDir, storeDopplerFigures, type DopplerFigureStorage } from "../extractors/doppler-figures.js";
+import { figureLedgerHooks, ledgerWriteForFailedFigures, ledgerWriteForStoredFigures, queueAssetLedger } from "../db/document-asset-ledger.js";
 import { planFirstPassBatches, type FirstPassBatchLimits } from "../temporal/first-pass-batches.js";
 import { sniffedPdf } from "../lib/sniffed-pdf.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
@@ -665,28 +665,26 @@ export async function storeFirstPassFigures(args: {
     return { stats: { dopplerFigures: { status: "failed", rule: "pii-unverifiable", ledger } } };
   }
   let figures: Awaited<ReturnType<typeof readDopplerFigureDir>> | null = null;
+  // Pending, then stored, per upload step: kept whatever later fails (owner rule).
+  const ledgerHooks = figureLedgerHooks(state, documentId);
   try {
     const withhold = piiEnabled ? await pii!.documentPiiWithholds!(documentId) : false;
     figures = await readDopplerFigureDir(args.dir, {
       pageCount: document.pageCount, signal: args.signal, expect: outcome.status === "partial" ? "partial" : "complete",
-      sourceSha256: document.sourceSha256 ?? null,
+      sourceSha256: document.sourceSha256 ?? null, gaps: outcome.gaps ?? null,
     });
     const committedUris = committedDocumentUris(state, documentId);
+    // Withheld before any byte is uploaded or any row is marked stored (the ledger serves stored rows): every object this
+    // store can make reachable joins the list first. A failed append stores nothing (fail closed) and deletes nothing.
+    if (withhold) await pii!.appendWithheldArtifactUris!(documentId, dopplerFigureUris(args.storage, document, args.runId, figures));
     const stored = await storeDopplerFigures({
       storage: args.storage, document, runId: args.runId, figures, markdown: args.markdownSlot?.toString("utf8") ?? "",
       documentMarkdown: withhold ? null : args.markdownSlot, source: dopplerSourcePointer(document), signal: args.signal,
       committedUris,
+      ...(ledgerHooks ? { ledger: ledgerHooks } : {}),
     });
-    if (withhold) {
-      try {
-        await pii!.appendWithheldArtifactUris!(documentId, stored.slots.map(({ uri }) => uri));
-      } catch (error) {
-        // Nothing records these objects: remove them (never a committed one) rather than leave them unreachable.
-        const removable = stored.objectKeys.filter((objectKey) => !committedUris.has(args.storage.uri(objectKey)));
-        if (removable.length > 0) await args.storage.deleteKeys?.(removable).catch(() => undefined);
-        throw error;
-      }
-    }
+    // Every recorded slot is withheld (a no-op union when the list above already covers it); never a delete.
+    if (withhold) await pii!.appendWithheldArtifactUris!(documentId, stored.slots.map(({ uri }) => uri));
     for (const { slot, uri } of stored.slots) state.artifactLedger.recordDocument(documentId, slot, uri);
     // The ledger write takes over the reader's spill (it removes it once written).
     const ledger = queueAssetLedger(state, documentId, ledgerWriteForStoredFigures({ set: figures, stored, outcome }));
