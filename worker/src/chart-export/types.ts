@@ -7,7 +7,7 @@
  * - `ChartModelClient`: one image + prompt model call. The production client goes through the vision runtime (attempt
  *   guard, privacy gate, model-swap and fallback handling); tests use a fake.
  */
-import type { BBox, ChartExportFormat, ExportedVisual, VisualSource, VisualSpec } from "@docslurp/shared";
+import type { BBox, ChartExportFormat, DeferredVisual, ExportedVisual, VisualSource, VisualSpec } from "@docslurp/shared";
 
 import type { UsageEvent } from "../models.js";
 
@@ -121,6 +121,10 @@ export interface DeterministicVisualResult {
   /** Free presence counts the extractor saw without exporting (Office chart parts, SVG figures). */
   /** `svgFigures` is telemetry only: SVG figures are also candidates (Doppler figures), so stats do not add it. */
   presence?: { officeChartParts?: number; svgFigures?: number; embeddedSpecs?: number };
+  /** Visuals deferred to a later pass (recorded in the candidate stats, never dropped). */
+  deferred?: DeferredVisual[];
+  /** Candidates and refusals past a per-input list cap or the guest deadline, not listed individually: their count. */
+  overflow?: number;
 }
 
 /** S2's entry (`extractDeterministicVisuals`) satisfies this; the default does nothing. */

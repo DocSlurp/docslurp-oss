@@ -18,6 +18,8 @@ export default defineConfig({
       "@docslurp/shared/error-reporting": path.resolve(__dirname, "../packages/shared/src/error-reporting.ts"),
       "@docslurp/shared/env-flags": path.resolve(__dirname, "../packages/shared/src/env-flags.ts"),
       "@docslurp/shared/page-table-routing": path.resolve(__dirname, "../packages/shared/src/page-table-routing.ts"),
+      "@docslurp/shared/chart-export": path.resolve(__dirname, "../packages/shared/src/chart-export.ts"),
+      "@docslurp/shared/file-sniff": path.resolve(__dirname, "../packages/shared/src/file-sniff.ts"),
       "@docslurp/shared/observability": path.resolve(__dirname, "../packages/shared/src/observability.ts"),
       "@docslurp/shared/lancedb-s3-cache": path.resolve(__dirname, "../packages/shared/src/lancedb-s3-cache.ts"),
       "@docslurp/shared/lancedb-s3-trace": path.resolve(__dirname, "../packages/shared/src/lancedb-s3-trace.ts"),

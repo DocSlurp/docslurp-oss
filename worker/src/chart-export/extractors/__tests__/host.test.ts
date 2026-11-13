@@ -49,9 +49,10 @@ describe("deterministic chart extraction: parser VM boundary", () => {
     vi.stubEnv("NODE_ENV", "production");
     await withInput(genericBar(["a", "b"], [1, 2], 4), async (input) => {
       const run = vi.fn(async (plan: { args: string[] }) => {
-        expect(plan.args[0]).toMatch(/chart-export-extract\.mjs$/);
-        expect(plan.args[1]).toBe(input);
-        await writeFile(plan.args[3]!, JSON.stringify(goodResult));
+        expect(plan.args[0]).toBe("--disallow-code-generation-from-strings");
+        expect(plan.args[1]).toMatch(/chart-export-extract\.mjs$/);
+        expect(plan.args[2]).toBe(input);
+        await writeFile(plan.args[4]!, JSON.stringify(goodResult));
         return { stdout: "", stderr: "" };
       });
       const result = await extractDeterministicVisualsFile({ inputPath: input, kind: "svg", runner: { run } as never, log: () => {} });
@@ -85,12 +86,12 @@ describe("deterministic chart extraction: parser VM boundary", () => {
     ];
     for (const payload of bad) {
       await withInput("<svg/>", async (input) => {
-        const run = vi.fn(async (plan: { args: string[] }) => { await writeFile(plan.args[3]!, JSON.stringify(payload)); return { stdout: "", stderr: "" }; });
+        const run = vi.fn(async (plan: { args: string[] }) => { await writeFile(plan.args[4]!, JSON.stringify(payload)); return { stdout: "", stderr: "" }; });
         await expect(extractDeterministicVisualsFile({ inputPath: input, kind: "svg", runner: { run } as never, log: () => {} })).rejects.toThrow(/invalid-guest-result/);
       });
     }
     await withInput("<svg/>", async (input) => {
-      const run = vi.fn(async (plan: { args: string[] }) => { await writeFile(plan.args[3]!, "{not json"); return { stdout: "", stderr: "" }; });
+      const run = vi.fn(async (plan: { args: string[] }) => { await writeFile(plan.args[4]!, "{not json"); return { stdout: "", stderr: "" }; });
       await expect(extractDeterministicVisualsFile({ inputPath: input, kind: "svg", runner: { run } as never, log: () => {} })).rejects.toThrow(/not-json/);
       const silent = vi.fn(async () => ({ stdout: "", stderr: "" }));
       await expect(extractDeterministicVisualsFile({ inputPath: input, kind: "svg", runner: { run: silent } as never, log: () => {} })).rejects.toThrow(/no-output/);
@@ -134,10 +135,11 @@ describe("deterministic chart extraction: parser VM boundary", () => {
     vi.stubEnv("NODE_ENV", "production");
     await withInput(genericBar(["a"], [1], 2), async (input) => {
       const run = vi.fn(async (plan: { args: string[]; timeoutMs: number }) => {
-        expect(plan.args[1]).toBe(input);
-        expect(plan.args.slice(4)).toEqual([input, input]);
+        expect(plan.args[2]).toBe(input);
+        expect(plan.args[0]).toBe("--disallow-code-generation-from-strings");
+        expect(plan.args.slice(5)).toEqual([input, input]);
         expect(plan.timeoutMs).toBe(66_000);
-        await writeFile(plan.args[3]!, JSON.stringify({ schemaVersion: "chart-export-deterministic-batch@v1", results: [goodResult, goodResult, goodResult] }));
+        await writeFile(plan.args[4]!, JSON.stringify({ schemaVersion: "chart-export-deterministic-batch@v1", results: [goodResult, goodResult, goodResult] }));
         return { stdout: "", stderr: "" };
       });
       const results = await extractDeterministicVisualsBatch({ inputPaths: [input, input, input], runner: { run } as never, log: () => {} });
