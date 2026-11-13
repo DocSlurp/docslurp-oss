@@ -67,7 +67,7 @@ export async function getOrgStorage(
     : db`(select 0 as bytes, 0 as pages)`;
   const excludeExtracts = options.excludeExtracts === true;
   const [row] = await db<{
-    source_bytes: string | number; pages: string | number; extra_pages: string | number; artifact_bytes: string | number;
+    source_bytes: string | number; pages: string | number; extra_pages: string | number; artifact_bytes: string | number; withheld_bytes: string | number;
   }[]>`
     with extract_docs as ${extracts}
     select
