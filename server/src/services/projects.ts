@@ -619,6 +619,32 @@ export async function ensureDefaultProject(args: {
 }
 
 /**
+ * The id of the organization's default project (created when missing), without the access read and project record
+ * `ensureDefaultProject` adds. Membership of an explicit `orgId` is still checked. The caller MUST authorize the
+ * returned id (for search: `authorizeActorProjectSearch`) before reading anything of the project; this is only the
+ * reference resolution. Reads first and inserts only when the default is missing, so a warm request issues no write.
+ */
+export async function resolveDefaultProjectId(args: { userId: string; orgId?: string | null }): Promise<string> {
+  const orgId = args.orgId
+    ? await sql<{ id: string }[]>`
+        select om.org_id as id
+        from org_memberships om
+        where om.org_id = ${args.orgId} and om.user_id = ${args.userId}
+        limit 1
+      `.then((rows) => rows[0]?.id ?? null)
+    : (await resolveDefaultOrganization(args.userId)).id;
+  if (!orgId) throw new ProjectAccessError(404, "organization_not_found", "Organization not found");
+  const readDefault = async () => (await sql<{ id: string }[]>`select id from projects where org_id = ${orgId} and is_default limit 1`)[0]?.id;
+  let id = await readDefault();
+  if (!id) {
+    await insertDefaultProject(sql, { orgId, userId: args.userId });
+    id = await readDefault();
+  }
+  if (!id) throw new ProjectAccessError(403, "project_forbidden", "Default project is not accessible");
+  return id;
+}
+
+/**
  * Read-only lookup of the organization's default project (personal org when `orgId` is omitted). Unlike
  * `ensureDefaultProject` it creates nothing: null when the org, membership or default project is missing.
  */

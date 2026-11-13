@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { resolveGeoDocumentScope } from "./geo-scope.js";
 import {
   defaultProjectSearchSettings,
@@ -108,7 +109,7 @@ export async function resolveSearchSetup(
   let projectSettings: ProjectSearchSettings;
   let projectIndexing: { pipeline: PipelineFeatures; indexConfigs: IndexConfigMap };
   if (lanceNative && requestedProjectId) {
-    // Access, settings and pipeline in one round trip (never cached: they decide authorization and privacy).
+    // Access, settings and pipeline in one round trip (never cached across requests: they decide authorization and privacy).
     ({ scope: normalizedScope, settings: projectSettings, indexing: projectIndexing } =
       await loadSearchProjectContext(requestedProjectId, userId, accessScope));
   } else {
@@ -223,14 +224,46 @@ type SearchProjectContextRow = Partial<SettingsRow> & {
 export async function loadSearchProjectContext(projectId: string, userId: string, accessScope: SearchAccessScope, options: {
   /** Rethrow unreadable stored settings instead of using defaults (chat: a malformed `chat.enabled` must not turn chat on). */
   strictSettings?: boolean;
-} = {}): Promise<{
+} = {}): Promise<SearchProjectContext> {
+  assertSearchAccessScope(accessScope);
+  const memo = requestContextMemo.getStore();
+  if (!memo) return await readSearchProjectContext(projectId, userId, accessScope, options);
+  // Same request only (the store exists for one `withSearchRequestMemo` call). The key holds everything the read is scoped
+  // by: user, project, the scope's org and project list, the request key's allowlist and how settings errors are handled.
+  const key = JSON.stringify([userId, projectId, accessScope.orgId, accessScope.projectIds, effectiveProjectAllowlist(accessScope), options.strictSettings === true]);
+  let read = memo.get(key);
+  if (!read) {
+    read = readSearchProjectContext(projectId, userId, accessScope, options);
+    memo.set(key, read);
+    // A refusal or failure is not kept: the next search of the request asks again.
+    read.catch(() => { if (memo.get(key) === read) memo.delete(key); });
+  }
+  // Each search gets its own copy, so one cannot change what another resolves.
+  return structuredClone(await read);
+}
+
+type SearchProjectContext = {
   scope: SearchProjectScope;
   settings: ProjectSearchSettings;
   indexing: { pipeline: PipelineFeatures; indexConfigs: IndexConfigMap };
   /** The project's name and system prompt, for chat turns. */
   project: { name: string; systemPrompt: string | null };
-}> {
-  assertSearchAccessScope(accessScope);
+};
+
+const requestContextMemo = new AsyncLocalStorage<Map<string, Promise<SearchProjectContext>>>();
+
+/**
+ * Runs `fn` (one HTTP request's searches, such as a batch) so that repeated `loadSearchProjectContext` reads for the same
+ * user, project, access scope and strictness are answered by the first. The memo lives only for this call and never
+ * outlives the request, so a revoked key or removed member loses access on the next request.
+ */
+export function withSearchRequestMemo<T>(fn: () => Promise<T>): Promise<T> {
+  return requestContextMemo.run(new Map(), fn);
+}
+
+async function readSearchProjectContext(projectId: string, userId: string, accessScope: SearchAccessScope, options: {
+  strictSettings?: boolean;
+}): Promise<SearchProjectContext> {
   const allowlist = effectiveProjectAllowlist(accessScope);
   if (allowlist && !allowlist.includes(projectId)) throw new ProjectNotFoundError();
   const [row] = await sql<SearchProjectContextRow[]>`

@@ -8,6 +8,7 @@
 const CJK_CLASS = "\\u3040-\\u30ff\\u3400-\\u4dbf\\u4e00-\\u9fff\\uac00-\\ud7af\\uf900-\\ufaff\\uff66-\\uff9f";
 const CJK_CHAR = new RegExp(`[${CJK_CLASS}]`, "u");
 const CJK_SPLIT = new RegExp(`[${CJK_CLASS}]+|[^${CJK_CLASS}]+`, "gu");
+const ASCII_ONLY = /^[\u0000-\u007f]*$/;
 const TERM_SEPARATORS = /[^\p{L}\p{N}\p{M}-]+/u;
 
 /** True when the text contains CJK, kana or Hangul characters, which have no word boundaries. */
@@ -22,6 +23,8 @@ export function hasNonAscii(text: string): boolean {
 
 /** Lowercase with Latin diacritics removed (NFD, drop combining marks U+0300-036F, NFC). */
 export function foldText(text: string): string {
+  // ASCII has no diacritics and is its own NFD/NFC form, so lowercasing is the whole fold.
+  if (ASCII_ONLY.test(text)) return text.toLowerCase();
   return text.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").normalize("NFC");
 }
 

@@ -28,6 +28,7 @@ import { aggregateProjectRagSearch } from "../services/aggregate-rag.js";
 import { resolveDefaultOrganization } from "../services/organizations.js";
 import { ProjectAccessError } from "../services/default-project.js";
 import { CrossProjectScopeError, hybridSearch, MissingProjectScopeError, ProjectNotFoundError } from "../services/search.js";
+import { withSearchRequestMemo } from "../search/session-setup.js";
 import { prefetchBatchQueryEmbeddings } from "../search/batch-embeddings.js";
 import { chatProject, projectChatDisabledBody } from "../services/project-chat.js";
 import { ProjectChatDisabledError } from "../services/project-chat-errors.js";
@@ -71,11 +72,19 @@ async function runSearchBatch(c: Context, parsed: { queries: SearchInput[]; conc
   if (signal.aborted) return results;
   // One access and privacy lookup per project for the whole batch, never reused by another request.
   const memo = createCacheScopeMemo();
+  const references = new Map<string, Promise<string>>();
   const authorizations = new Map<string, Promise<AuthorizedProjectSearch | { ok: false; status: 403 | 404 }>>();
   // Scope and API-key checks first, so embeddings are only prefetched for queries that will run.
   const inputs = await Promise.all(queries.map(async (query, index) => {
     try {
-      const projectId = await resolveActorProjectId(getRequestActor(c), query.project, query.orgId);
+      // Items naming the same project reference resolve it once; the actor is the request's, so (reference, org) is the whole key.
+      const referenceKey = JSON.stringify([query.project ?? null, query.orgId ?? null]);
+      let reference = references.get(referenceKey);
+      if (!reference) {
+        reference = resolveActorProjectId(getRequestActor(c), query.project, query.orgId, { authorization: "caller" });
+        references.set(referenceKey, reference);
+      }
+      const projectId = await reference;
       let authorization = authorizations.get(projectId);
       if (!authorization) {
         authorization = authorizeActorProjectSearch(getRequestActor(c), projectId, "search");
@@ -118,8 +127,8 @@ async function runSearchBatch(c: Context, parsed: { queries: SearchInput[]; conc
       }
     }
   }
-  await withSearchAdmissionGroup(`batch:${randomUUID()}`, () =>
-    Promise.all(Array.from({ length: Math.min(concurrency, queries.length) }, () => worker())));
+  await withSearchRequestMemo(() => withSearchAdmissionGroup(`batch:${randomUUID()}`, () =>
+    Promise.all(Array.from({ length: Math.min(concurrency, queries.length) }, () => worker()))));
   return results;
 }
 
@@ -211,7 +220,7 @@ async function handleProjectChat(c: Context, mode: "public" | "grounded") {
   const body = parsed.data;
   const userId = c.get("sessionUser")?.id;
   if (!userId) return apiErrorResponse(c, 401, "unauthorized", "Missing session");
-  const projectId = await resolveActorProjectId(getRequestActor(c), body.project, body.orgId);
+  const projectId = await resolveActorProjectId(getRequestActor(c), body.project, body.orgId, { authorization: "caller" });
   const authorized = await authorizeProject(c, projectId, "chat");
   if (authorized instanceof Response) return authorized;
   // Before the turn starts, so a disabled chat is a plain 403 (chatProject enforces it too, for every caller).
@@ -317,7 +326,7 @@ async function projectChatStreamHandler(c: Context) {
   const { q: query, sessionToken, model } = parsed.data;
 
   const userId = c.get("sessionUser").id;
-  const projectId = await resolveActorProjectId(getRequestActor(c), parsed.data.project, parsed.data.orgId);
+  const projectId = await resolveActorProjectId(getRequestActor(c), parsed.data.project, parsed.data.orgId, { authorization: "caller" });
   const authorized = await authorizeProject(c, projectId, "chat");
   if (authorized instanceof Response) return authorized;
   // Checked before the stream opens so a disabled chat is a real 403, not an error event.
@@ -502,6 +511,7 @@ async function prepareGetSearch(c: Context): Promise<PreparedSearch | Response> 
     getRequestActor(c),
     c.req.query("project"),
     c.req.query("orgId"),
+    { authorization: "caller" },
   );
   const authorized = await authorizeProject(c, projectId);
   if (authorized instanceof Response) return authorized;
@@ -559,7 +569,7 @@ async function prepareGetSearch(c: Context): Promise<PreparedSearch | Response> 
 async function preparePostSearch(c: Context, input: SearchInput): Promise<PreparedSearch | Response> {
   const userId = c.get("sessionUser")?.id;
   if (!userId) return apiErrorResponse(c, 401, "unauthorized", "Missing session");
-  const projectId = await resolveActorProjectId(getRequestActor(c), input.project, input.orgId);
+  const projectId = await resolveActorProjectId(getRequestActor(c), input.project, input.orgId, { authorization: "caller" });
   const authorized = await authorizeProject(c, projectId);
   if (authorized instanceof Response) return authorized;
   const deferred = await deferredRequestContext(c, projectId);
