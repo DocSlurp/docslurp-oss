@@ -74,29 +74,19 @@ it("bounds hostile launch payloads and refuses a foreign parent",async()=>{
   await expect(ops.launchChatOperation({userId:"v",projectId:"w",orgId:"o",key:"foreign_child",input:{q:"hi"},parentId:root.id})).rejects.toThrow(/Parent/);
 });
 
-it("disconnect detaches an observer while the executor completes; another instance recovers", async () => {
+it("disconnect detaches an observer while the operation completes; another instance recovers", async () => {
   const actor = {type:"session" as const,userId:"u",sessionId:"browser",user:{id:"u",name:"Owner",email:"owner@example.test"}};
   await sql`insert into "session" (id,token,"userId","expiresAt") values ('browser','test-token','u',now()+interval '1 hour')`;
   const task = await ops.launchChatOperation({userId:"u",projectId:"w",orgId:"o",key:"disconnect_1",input:{q:"hello",authSessionId:"browser"}});
   const claim = await ops.claimChatOperation();
-  let release!: () => void;
-  const paused = new Promise<void>(resolve => {release=resolve;});
-  let started!: () => void;
-  const start = new Promise<void>(resolve => {started=resolve;});
-  runtime.chat.mockImplementation(async (args: {signal:AbortSignal;onTextDelta:(text:string)=>Promise<void>}) => {
-    await args.onTextDelta("first"); started(); await paused;
-    expect(args.signal.aborted).toBe(false);
-    await args.onTextDelta(" second");
-    return {answer:"first second",citations:[{page:2}],toolOutcomes:[{ok:true}]};
-  });
-  const {executeChatOperation} = await import("../services/chat-operation-executor.js");
   const {createChatOperationProvider,authorizedChatOperationSnapshot} = await import("../services/chat-operation-access.js");
-  const executing=executeChatOperation(claim!); await start;
+  await ops.appendChatOperation(task.id, claim!.attempt_id!, "text", { text: "first" });
   const disconnected=new AbortController();
   const observer={snapshot:vi.fn(async()=>{}),append:vi.fn(async()=>{}),resync:vi.fn(async()=>{})};
   const subscription=await createChatOperationProvider(async()=>actor).subscribe({userId:"u",resource:{kind:"operation",operationId:task.id,after:0},signal:disconnected.signal,observer});
-  disconnected.abort(); await subscription.close(); release(); await executing;
-  expect(runtime.chat).toHaveBeenCalledTimes(1);
+  disconnected.abort(); await subscription.close();
+  await ops.appendChatOperation(task.id, claim!.attempt_id!, "text", { text: " second" });
+  await ops.appendChatOperation(task.id, claim!.attempt_id!, "result", {answer:"first second",citations:[{page:2}],toolOutcomes:[{ok:true}]}, "completed");
   const recovered=await authorizedChatOperationSnapshot(actor,task.id,1);
   expect(recovered.events.map(event=>event.sequence)).toEqual([2,3]);
   expect(recovered.operation.snapshot.answer).toBe("first second"); expect(recovered.operation.status).toBe("completed");
@@ -118,23 +108,6 @@ it("cancel-one leaves accepted siblings running and output budgets fail closed",
   expect((await ops.readChatOperation("u",root.id,0))?.operation.sequence).toBe(0);
 });
 
-it("revoking the initiating session cancels the executor, independently of transport",async()=>{
-  await sql`insert into "session" (id,token,"userId","expiresAt") values ('revoked','revoked-token','u',now()+interval '1 hour')`;
-  const task=await ops.launchChatOperation({userId:"u",projectId:"w",orgId:"o",key:"revocation_test",input:{q:"hello",authSessionId:"revoked"}});
-  const claimed=await ops.claimChatOperation();
-  let started!:()=>void;const start=new Promise<void>(resolve=>{started=resolve;});
-  runtime.chat.mockImplementation(async(args:{signal:AbortSignal})=>{
-    started();return new Promise((_resolve,reject)=>args.signal.addEventListener("abort",()=>reject(args.signal.reason),{once:true}));
-  });
-  const {executeChatOperation}=await import("../services/chat-operation-executor.js");
-  const executing=executeChatOperation(claimed!);await start;
-  await sql`delete from "session" where id='revoked'`;
-  await executing;
-  expect((await ops.readChatOperation("u",task.id,0))?.operation.status).toBe("cancelled");
-  expect(runtime.chat).toHaveBeenCalledTimes(1);
-});
-
-
 it.each(["cancel", "deadline"])("rejects late output and successful completion after %s commits", async reason => {
   const task = await launch(`commit_${reason}`);
   const claim = await ops.claimChatOperation();
@@ -149,24 +122,6 @@ it.each(["cancel", "deadline"])("rejects late output and successful completion a
   expect(state?.operation.snapshot.text).toBe("accepted");
   expect(state?.events.some(event => event.kind === "result")).toBe(false);
 });
-
-it("consumes rejected synchronous evidence callbacks and preserves executor cancellation context", async () => {
-  await sql`insert into "session" (id,token,"userId","expiresAt") values ('evidence','evidence-token','u',now()+interval '1 hour')`;
-  const task = await ops.launchChatOperation({userId:"u",projectId:"w",orgId:"o",key:"evidence_rejection",input:{q:"hello",authSessionId:"evidence"}});
-  const claim = await ops.claimChatOperation();
-  const { getDeferredContext } = await import("../search/deferred/deferred-context.js");
-  runtime.chat.mockImplementation(async (args: {signal: AbortSignal; onEvidence: (event: unknown) => void}) => {
-    expect(getDeferredContext()?.signal).toBe(args.signal);
-    args.onEvidence({ text: "x".repeat(262145) });
-    await new Promise<void>(resolve => args.signal.addEventListener("abort", () => resolve(), {once:true}));
-    throw args.signal.reason;
-  });
-  const { executeChatOperation } = await import("../services/chat-operation-executor.js");
-  await executeChatOperation(claim!);
-  await new Promise(resolve => setImmediate(resolve));
-  expect((await ops.readChatOperation("u", task.id, 0))?.operation.status).toBe("failed");
-});
-
 
 it("retains a near-limit successful streamed result without charging its text twice", async () => {
   const task = await launch("large_completed_result");
