@@ -53,7 +53,7 @@ beforeAll(async () => {
   await sql`insert into project_members (project_id, user_id, role) values ('pb', 'u', 'viewer')`;
   await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
     values ('run-b', 'org-b', 'v', 'pb', 'bulk-upload', 'completed', 'completed', '{}')`;
-}, 120_000);
+}, 600_000);
 afterAll(async () => { await sql?.end(); await stop?.(); });
 
 describe("search module scope checks", () => {

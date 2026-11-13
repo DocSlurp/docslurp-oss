@@ -58,7 +58,7 @@ describe("GET /dashboard/bootstrap", () => {
     expect(mocks.ensure).not.toHaveBeenCalled();
     expect(mocks.admit).not.toHaveBeenCalled();
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
-    expect(mocks.listProjects).toHaveBeenCalledExactlyOnceWith("u1", { refineNames: false });
+    expect(mocks.listProjects).toHaveBeenCalledExactlyOnceWith("u1");
     expect(mocks.listOrganizations).toHaveBeenCalledExactlyOnceWith("u1");
   });
   it("is session-only: an API key is refused and nothing is listed", async () => {

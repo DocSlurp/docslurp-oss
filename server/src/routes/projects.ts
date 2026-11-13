@@ -1342,6 +1342,8 @@ export const projectsRoutes = new Hono()
       return apiErrorResponse(c, 404, "project_not_found", "Project not found");
     }
     const project = { id: authorized.access.projectId, orgId: authorized.access.orgId };
+    const chatDisabled = await projectChatDisabledBody(project.id, userId);
+    if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
 
     let response: Awaited<ReturnType<typeof chatProject>>;
     try {

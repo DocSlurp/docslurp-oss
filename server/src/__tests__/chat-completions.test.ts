@@ -1,4 +1,9 @@
 import { emitTelemetryLog } from "@docslurp/shared/observability";
+// Route access reads (lib/search-access.ts) answered from this file's getProject mock with the real scope rules.
+vi.mock("../lib/search-access.js", async () => {
+  const { authorizeFromProjectMock } = await import("./helpers/search-access.js");
+  return { authorizeActorProjectSearch: authorizeFromProjectMock(async (id, userId) => (await import("../services/projects.js")).getProject(id, userId)) };
+});
 vi.mock("@docslurp/shared/observability", async (original) => ({ ...await original<typeof import("@docslurp/shared/observability")>(), emitTelemetryLog: vi.fn() }));
 import { ChatToolBlockedError } from "../services/chat-tool-error.js";
 import { Hono } from "hono";

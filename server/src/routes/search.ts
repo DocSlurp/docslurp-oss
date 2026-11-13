@@ -211,8 +211,9 @@ async function handleProjectChat(c: Context, mode: "public" | "grounded") {
   const projectId = await resolveActorProjectId(getRequestActor(c), body.project, body.orgId);
   const authorized = await authorizeProject(c, projectId, "chat");
   if (authorized instanceof Response) return authorized;
-  // A project with chat turned off is refused inside chatProject (403 chat_disabled below), from the same read as
-  // its settings, before any spend or model call.
+  // Before the turn starts, so a disabled chat is a plain 403 (chatProject enforces it too, for every caller).
+  const chatDisabled = await projectChatDisabledBody(projectId, userId);
+  if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
   // Before the turn starts: a browser key continues a session only with its grant
   // (no grant: a fresh session; a bad grant: 403).
   const sessionId = chatSessionForRequest(getRequestActor(c), { projectId, sessionId: body.sessionId, sessionToken: body.sessionToken });

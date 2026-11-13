@@ -14,6 +14,7 @@ import { resolveOpenRouterApiKey, SEARCH_OPENROUTER_MODEL } from "../lib/ai.js";
 import { hostedApiKeyForProject, openRouterCall } from "../lib/privacy.js";
 import { canSpend } from "../services/billing/spend-guard.js";
 import { assertSearchAccessScope, effectiveProjectAllowlist, type SearchAccessScope } from "./access-scope.js";
+import { getProjectAccess } from "../services/organizations.js";
 import { getProjectSearchSettings, parseProjectSearchSettingsRow, type SettingsRow } from "../services/search-controls.js";
 import { loadCachedSearchAvailability, searchLanceDbNativeEnabled } from "./eligible-documents.js";
 import type { SearchOptions } from "../services/search.js";
@@ -282,16 +283,10 @@ async function resolveSearchProjectScope(args: {
   const requestedProjectId = args.filters?.projectId?.trim();
   if (requestedProjectId) {
     if (allowlist && !allowlist.includes(requestedProjectId)) throw new ProjectNotFoundError();
-    const [row] = await sql<{ project_id: string; org_id: string }[]>`
-      select w.id as project_id, w.org_id
-      from projects w
-      where w.id = ${requestedProjectId}
-        and w.org_id = ${orgId}
-        and docslurp_project_access(w.id, ${args.userId})
-      limit 1
-    `;
-    if (!row || row.org_id !== orgId) throw new ProjectNotFoundError();
-    return { projectId: row.project_id, orgId: row.org_id };
+    // The user's own access (G-06, plus the request key's allowlist), then the scope's org.
+    const access = await getProjectAccess(requestedProjectId, args.userId);
+    if (!access || access.projectId !== requestedProjectId || access.orgId !== orgId) throw new ProjectNotFoundError();
+    return { projectId: access.projectId, orgId: access.orgId };
   }
 
   const documentIds = args.filters?.documentIds?.length
