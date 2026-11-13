@@ -137,6 +137,34 @@ export class ArtifactStore {
     await this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: body, ContentLength: size, ContentType: contentType }));
   }
 
+  /**
+   * Conditional create (`If-None-Match: *`): writes only when the key is free; `exists` when an object is already there
+   * (HTTP 412, or 409 for a concurrent conditional write), which is left untouched. Doppler figures use it so a stored
+   * figure is never overwritten (extractors/doppler-figures.ts uploadChecked compares the existing object's SHA-256).
+   */
+  async putBytesIfAbsent(key: string, data: Uint8Array, contentType: string): Promise<"created" | "exists"> {
+    try {
+      await this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: data, ContentType: contentType, IfNoneMatch: "*" }));
+      return "created";
+    } catch (error) {
+      if (isConditionalConflict(error)) return "exists";
+      throw error;
+    }
+  }
+
+  async putStreamIfAbsent(key: string, body: Readable, size: number, contentType: string): Promise<"created" | "exists"> {
+    try {
+      await this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: body, ContentLength: size, ContentType: contentType, IfNoneMatch: "*" }));
+      return "created";
+    } catch (error) {
+      if (isConditionalConflict(error)) {
+        body.destroy();
+        return "exists";
+      }
+      throw error;
+    }
+  }
+
   /** Files go up with their real size; any other stream goes through the multipart uploader. */
   async streamToStorage(key: string, stream: Readable, contentType: string): Promise<void> {
     const filePath = (stream as Readable & { path?: string | Buffer }).path;
@@ -799,4 +827,11 @@ class MultipartUploadWriter extends Writable {
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+/** A conditional write that found the key taken: 412 Precondition Failed, or 409 for a concurrent conditional write. */
+function isConditionalConflict(error: unknown): boolean {
+  const e = error as { name?: unknown; Code?: unknown; $metadata?: { httpStatusCode?: unknown } } | null;
+  const status = e?.$metadata?.httpStatusCode;
+  return status === 412 || status === 409 || e?.name === "PreconditionFailed" || e?.Code === "PreconditionFailed" || e?.name === "ConditionalRequestConflict";
 }
