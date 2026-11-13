@@ -28,5 +28,29 @@
    "v3-scan-copy/source.pdf": "db30416be6a7dcd7eb1328d2aaf1bfd9460eef891ca26ae1fb4da3f770f6c64c"
   },
   "output": "v3-scan-copy/: document.md and images/ (manifest.jsonl, doppler-images/3, and the page folders) exactly as written"
+ },
+ "v3-scan-xref": {
+  "repository": "https://github.com/DocSlurp/doppler",
+  "branch": "feat/scan-copy-only",
+  "commit": "8312f8ed4",
+  "pull_request": "DocSlurp/doppler#39",
+  "command": "python3 docslurp/doppler-md/tests/fixtures/scan_pdfs.py OUT; PDFTOTEXT=build/utils/pdftotext PDFREGIONS=build/utils/pdfregions pdftomarkdown --scan-pages copy --images-dir images -- OUT/rebuilt.pdf > document.md",
+  "note": "source.pdf is Doppler's rebuilt.pdf: p1 a DCT scan, p2 a Flate grey scan, p3 the DCT scan again, with the third content stream's cross-reference entry pointing at the font, so poppler rebuilds the table after pages 1 and 2 were found copyable. p1 is a linked page scan, not-extracted, reason copy, error xref (no file); p2 and p3 are unlinked scan-not-copyable backdrops; no batch line.",
+  "inputs": {
+   "v3-scan-xref/source.pdf": "140b00fb748d039507353f1ce081dd50bfb3865e83b5fd40ada8d17daf6c8c9d"
+  },
+  "output": "v3-scan-xref/: document.md and images/ (manifest.jsonl only) exactly as written"
+ },
+ "v3-scan-kinds": {
+  "repository": "https://github.com/DocSlurp/doppler",
+  "branch": "feat/scan-copy-only",
+  "commit": "8312f8ed4",
+  "pull_request": "DocSlurp/doppler#39",
+  "command": "python3 docslurp/doppler-md/tests/fixtures/scan_pdfs.py OUT; PDFTOTEXT=build/utils/pdftotext PDFREGIONS=build/utils/pdfregions pdftomarkdown --scan-pages copy --images-dir images -- OUT/kinds.pdf > document.md",
+  "note": "source.pdf is Doppler's kinds.pdf, one page per kind of scan: p1, p2 and p7 copied or decoded; p3 (visible page number), p4 (JPX), p5 (tiled strips) and p6 (JPX under a full-page stencil mask, reported as kind mask) unlinked scan-not-copyable backdrops.",
+  "inputs": {
+   "v3-scan-kinds/source.pdf": "1c32d7fff16a93012238b37c4eba25a3afcf751173da83d57a41ff74b843ac4d"
+  },
+  "output": "v3-scan-kinds/: document.md and images/ exactly as written"
  }
 }

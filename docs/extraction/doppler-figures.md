@@ -100,8 +100,13 @@ Doppler's images manifest comes in two newer shapes, accepted beside version 1 u
 
 `scan_pages` is one of `copy`, `image`, `skip` or `render`. `copy` is Doppler's default from Doppler PR #39: a full-page
 scan that can be copied as its own bytes (a JPEG or bilevel stream, upright) gets its marker and file; any other scan
-(JPEG 2000, Flate, tiled, layered, turned, ...) gets no marker and no file, and its page image comes from the host's page
-rendering. Doppler reports that scan as an `unlinked` image with `fate: background` and `reason: scan-not-copyable`.
+(JPEG 2000, Flate, tiled, layered, turned, ...) gets no marker and no file, and Doppler reports it as an `unlinked`
+image with `fate: background` (a `picture`, or the `mask` of a layered scan) and `reason: scan-not-copyable`. A page
+scan whose copy failed its checks is `not-extracted` with `reason: copy` (for example `error: xref`, a cross-reference
+table the producer rebuilt) and keeps its link, with no file. For both, when the project keeps page images
+(`preserveImages`), render-images renders that page from the asset ledger (the write still waiting for its checkpoint,
+or the stored rows of the document's organization), so the page image is the host's; Fast quality keeps its own
+page-image rule (textless pages, within its caps).
 
 The worker reads version 3 **one line at a time in fixed memory** (`DopplerManifestV3Validator`,
 `packages/shared/src/doppler-assets.ts`): each line is parsed and validated as it arrives and becomes one ledger row,
@@ -123,21 +128,21 @@ Doppler says a resume would retry them. The worker checks the outcome against th
 folder (`outcome-mismatch`) otherwise.
 
 Either way the folder holds only the manifest, optionally `page-facts.jsonl` (allowed, but never read or stored: see
-"Page facts" below), and `page-NNNN` real directories holding
-only `(image|figure)-NNN.<format>` regular files. Every entry is checked strictly: unknown fields, values outside each
-closed enum (`status`, `reason`, `fate`, `source`, batch `status`, `fallback`), non-finite or out-of-range numbers and
-over-long strings refuse it. A linked image's `path` must be exactly the one derived from its own id and format, with no
-extra leading zeros; only an image without a file of its own may share the path of the image it repeats, which must be an
-earlier linked image that is not itself a repeat (no chains, no cycles). `link` must be the manifest's `link_prefix`
-followed by that path, and the prefix must be `images/`, the one the host asks for (so the stored Markdown resolves with
-no rewriting). Only page scans are copied or decoded, and a decoded scan is never a JPEG. A `reason` must fit the
-status: a `not-extracted` image has one of the not-extracted reasons below, an `unlinked` image has none or
-`scan-not-copyable` (only with `fate: background`), and an `extracted` image has none; anything else refuses the folder. `complete` with a stopped batch
-or an image a stopped batch left is refused, as is `resumable` disagreeing with the images. Every total (`images`,
-`linked`, `extracted`, `not_extracted`, `unlinked`, `bytes`, `repeats`, `fallbacks`, `scans`, `scan_bytes`, `batches`,
-`batches_cut`: the batches whose status is not `ok`) must match the entries. The manifest must name this document's PDF
-(`source_sha256`, when the host knows it). The files present must be exactly the paths of the `extracted` images, each of
-its stated size.
+"Page facts" below), and `page-NNNN` real directories holding only `(image|figure)-NNN.<format>` regular files. Every
+entry is checked strictly: unknown fields, values outside each closed enum (`status`, `reason`, `fate`, `source`, batch
+`status`, `fallback`), non-finite or out-of-range numbers and over-long strings refuse it. A linked image's `path` must
+be exactly the one derived from its own id and format, with no extra leading zeros; only an image without a file of its
+own may share the path of the image it repeats, which must be an earlier linked image that is not itself a repeat (no
+chains, no cycles). `link` must be the manifest's `link_prefix` followed by that path, and the prefix must be `images/`,
+the one the host asks for (so the stored Markdown resolves with no rewriting). Only page scans are copied or decoded,
+and a decoded scan is never a JPEG. A `reason` must fit the status: a `not-extracted` image has one of the not-extracted
+reasons below, an `unlinked` image has none or `scan-not-copyable` (only on a `background` `picture` or `mask`, never
+with `repeat_of`; an `unlinked` image never repeats another), and an `extracted` image has none; anything else refuses
+the folder. `complete` with a stopped batch or an image a stopped batch left is refused, as is `resumable` disagreeing
+with the images. Every total (`images`, `linked`, `extracted`, `not_extracted`, `unlinked`, `bytes`, `repeats`,
+`fallbacks`, `scans`, `scan_bytes`, `batches`, `batches_cut`: the batches whose status is not `ok`) must match the
+entries. The manifest must name this document's PDF (`source_sha256`, when the host knows it). The files present must be
+exactly the paths of the `extracted` images, each of its stated size.
 
 **Sharded documents.** A provider that converts a long document in page ranges (one VM per shard, each running Doppler
 with its own `-f/-l` and `--images-pages`) cannot merge the shards into one valid manifest: each shard's settings digest
@@ -285,13 +290,14 @@ version 2 is held to fewer entries and its parse is reserved from the worker bud
 
 ## Asset ledger
 
-Every image Doppler reports for a document, whether or not it has a file, is a row of `document_assets` (migration
-0141; 0150 lets an unlinked image carry `scan-not-copyable`), and the document's extraction level is a row of `document_extraction_levels`. The figure step **queues** the write
-on the run's state; the store writes it in one transaction after the stage checkpoint that records the Markdown and the
-image slots commits, never before (`worker/src/db/document-asset-ledger.ts`, `Store.writeProgress`). `markdown_complete`
-is whether that committed checkpoint holds the document's Markdown. An attempt that fails or is escalated drops its queued
-write. The write never fails the document: a refused, stale or failed write is logged
-(`[asset-ledger] document=... status=refused rule=...`, `status=stale-write`) and the stage stats say `ledger: "queued"`.
+Every image Doppler reports for a document, whether or not it has a file, is a row of `document_assets` (migration 0141;
+0150 lets an unlinked image carry `scan-not-copyable`), and the document's extraction level is a row of
+`document_extraction_levels`. The figure step **queues** the write on the run's state; the store writes it in one
+transaction after the stage checkpoint that records the Markdown and the image slots commits, never before
+(`worker/src/db/document-asset-ledger.ts`, `Store.writeProgress`). `markdown_complete` is whether that committed
+checkpoint holds the document's Markdown. An attempt that fails or is escalated drops its queued write. The write never
+fails the document: a refused, stale or failed write is logged (`[asset-ledger] document=... status=refused rule=...`,
+`status=stale-write`) and the stage stats say `ledger: "queued"`.
 
 **Scope.** Both tables carry `org_id` and `project_id` (NOT NULL) and reference the document's own
 `(id, project_id, org_id)` with a composite foreign key, so a row cannot name another organization's or project's
@@ -323,10 +329,10 @@ rows and records `images_status: failed`.
 | `repeat` | Same image as `repeat_of`; `file_of` names the image whose file shows it. |
 | `min_side`, `bbox`, `id`, `pages` | Too small, an unusable box or id, or outside `--images-pages`. |
 | `file_bytes`, `encode`, `error` | Over the per-file cap, the encoder failed, or the renderer reported an error for this image. |
-| `scan-pages`, `copy` | Page scans skipped (`--scan-pages skip`), or a scan copy failed its checks. |
+| `scan-pages`, `copy` | Page scans skipped (`--scan-pages skip`), or a scan copy failed its checks (`copy`; on a `page-scan`, render-images renders the page). |
 | `budget`, `doc_budget`, `timeout`, `deadline`, `aborted` | The batch or document stopped; `resumable` is true when Doppler says a resume retries it. |
 | `renderer` | The batch's renderer failed; not resumable. |
-| `scan-not-copyable` | Only on an `unlinked` image with `fate: background`: a page scan `--scan-pages copy` could not copy, left to the host's page image. Not resumable. |
+| `scan-not-copyable` | Only on an `unlinked` `picture` or `mask` with `fate: background` and no `repeat_of`: a page scan `--scan-pages copy` could not copy; render-images renders the page. Not resumable. |
 | `other` | A version 1 skip reason outside this vocabulary. |
 
 | `source` | Meaning |

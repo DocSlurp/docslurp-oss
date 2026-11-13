@@ -561,6 +561,42 @@ export interface ResumableDocument {
 }
 
 /**
+ * Whether Doppler left this image's page to the host's page image: a scan `--scan-pages copy` could not copy (unlinked,
+ * `scan-not-copyable`), or a page scan whose copy failed its checks (not extracted, `copy`, e.g. `error: xref`), so the
+ * Markdown has no file for it. render-images renders those pages when the project keeps page images.
+ */
+export function assetNeedsHostPageImage(row: { status: string; reason: string | null; fate: string }): boolean {
+  return (row.status === "unlinked" && row.reason === "scan-not-copyable")
+    || (row.status === "not-extracted" && row.reason === "copy" && row.fate === "page-scan");
+}
+
+/** Pages of one document whose image Doppler left to the host (assetNeedsHostPageImage), from the pending write's rows. */
+export async function hostPageImagePagesOf(assets: LedgerAssets): Promise<number[]> {
+  const pages = new Set<number>();
+  const rows: AsyncIterable<DocumentAsset> | Iterable<DocumentAsset> = Array.isArray(assets) ? assets as readonly DocumentAsset[]
+    : readLedgerSpill((assets as { spill: string }).spill);
+  for await (const row of rows) if (assetNeedsHostPageImage(row)) pages.add(row.pageNumber);
+  return [...pages].sort((a, b) => a - b);
+}
+
+/**
+ * The same pages from the stored ledger: read-only, one document, scoped to its organization (a document id alone never
+ * selects rows). Ascending, distinct.
+ */
+export async function listHostPageImagePages(sql: Sql<Record<string, unknown>>, scope: { orgId: string; documentId: string }): Promise<number[]> {
+  if (typeof scope.orgId !== "string" || !ID.test(scope.orgId) || typeof scope.documentId !== "string" || !ID.test(scope.documentId)) {
+    throw new DocumentAssetLedgerError("invalid-scope");
+  }
+  const rows = await sql<Array<{ page_number: number }>>`
+    select distinct page_number from document_assets
+    where org_id = ${scope.orgId} and document_id = ${scope.documentId}
+      and ((status = 'unlinked' and reason = 'scan-not-copyable')
+        or (status = 'not-extracted' and reason = 'copy' and fate = 'page-scan'))
+    order by page_number`;
+  return rows.map((row) => row.page_number);
+}
+
+/**
  * Resumable work of one organization (optionally one project), oldest first, with a keyset cursor: a document with a
  * single manifest whose `images_status` is `resumable`, or one shard of a sharded document whose shard is resumable (a
  * resume runs per shard, with that shard's manifest and range). Only live documents, with a stored manifest, and below

@@ -301,12 +301,18 @@ type EntryFields = z.infer<z.ZodObject<typeof entryShape>>;
 
 /**
  * The reason an image's status allows: `not-extracted` needs one of DOPPLER_ASSET_REASONS (or `other`, version 1 only),
- * `unlinked` has none or one of DOPPLER_UNLINKED_REASONS (`scan-not-copyable` only on a `background` image), and
- * `extracted` has none. The manifest entry, the ledger row and the database (migration 0150) apply the same rule.
+ * `unlinked` has none or one of DOPPLER_UNLINKED_REASONS, and `extracted` has none. `scan-not-copyable` is only on a
+ * `background` picture or mask (a layered scan's stencil mask is reported too; a vector is never a scan). An unlinked
+ * image never repeats another (Doppler decides `unlinked` before repeats), so it has no `repeat_of`. The manifest entry,
+ * the ledger row and the database (migration 0150) apply the same rule.
  */
-function dopplerStatusReasonOk(status: string, reason: string | null, fate: string): boolean {
+function dopplerStatusReasonOk(row: { status: string; reason: string | null; fate: string; kind: string; repeatOf: string | null }): boolean {
+  const { status, reason } = row;
   if (status === "not-extracted") return reason !== null && !(DOPPLER_UNLINKED_REASONS as readonly string[]).includes(reason);
-  if (status === "unlinked") return reason === null || (reason === "scan-not-copyable" && fate === "background");
+  if (status === "unlinked") {
+    if (row.repeatOf !== null) return false;
+    return reason === null || (reason === "scan-not-copyable" && row.fate === "background" && (row.kind === "picture" || row.kind === "mask"));
+  }
   return reason === null;
 }
 
@@ -327,7 +333,9 @@ function refineEntry(entry: EntryFields, ctx: z.RefinementCtx): void {
     }
     if (entry.link === null) issue("a linked image has no link");
   }
-  if (!dopplerStatusReasonOk(entry.status, entry.reason ?? null, entry.fate)) issue("reason does not fit the status");
+  if (!dopplerStatusReasonOk({ status: entry.status, reason: entry.reason ?? null, fate: entry.fate, kind: entry.kind, repeatOf: entry.repeat_of ?? null })) {
+    issue("reason or repeat does not fit the status");
+  }
   if (entry.resumable && !(DOPPLER_RESUMABLE_REASONS as readonly string[]).includes(entry.reason ?? "")) issue("resumable needs a batch reason");
   if (entry.error !== undefined && entry.reason !== "error" && entry.reason !== "copy") issue("error goes with reason error or copy");
   if (entry.status === "extracted") {
@@ -672,8 +680,9 @@ export class DopplerManifestV3Validator {
       file = { id: entry.id, path: entry.path!, format: entry.format!, bytes: entry.bytes, sha256: entry.sha256!, fate: entry.fate, source: entry.source };
     } else if (entry.status === "not-extracted") s.notExtracted += 1;
     else s.unlinked += 1;
+    // As version 2: only a linked image (one with a path) shows another image's file.
     const fileOf = entry.status === "extracted" ? entry.id
-      : entry.repeat_of !== undefined && this.withFile.has(entry.repeat_of) ? entry.repeat_of : null;
+      : entry.path !== null && entry.repeat_of !== undefined && this.withFile.has(entry.repeat_of) ? entry.repeat_of : null;
     const row: DocumentAsset = {
       assetId: entry.id, pageNumber: entry.page, kind: entry.kind, fate: entry.fate, status: entry.status,
       reason: entry.reason ?? null, resumable: entry.resumable === true, source: entry.source,
@@ -746,7 +755,7 @@ export const documentAssetSchema = z.strictObject({
   bbox: z.tuple([coordinate, coordinate, coordinate, coordinate]).nullable(),
 }).superRefine((row, ctx) => {
   const issue = (message: string) => ctx.addIssue({ code: "custom", message });
-  if (!dopplerStatusReasonOk(row.status, row.reason, row.fate)) issue("reason does not fit the status");
+  if (!dopplerStatusReasonOk(row)) issue("reason or repeat does not fit the status");
   if (row.resumable && row.status !== "not-extracted") issue("only a not-extracted image is resumable");
   if (row.status === "extracted" && (row.bytes === null || row.sha256 === null || row.format === null || row.fileOf !== row.assetId)) {
     issue("an extracted image owns a file");
@@ -785,7 +794,7 @@ export function isDocumentAssetRow(row: unknown): row is DocumentAsset {
   if (r.obj !== null && !(Array.isArray(r.obj) && r.obj.length === 2 && intIn(r.obj[0], 0, 2_147_483_647, false) && intIn(r.obj[1], 0, 65_535, false))) return false;
   if (r.bbox !== null && !(Array.isArray(r.bbox) && r.bbox.length === 4 && r.bbox.every((v) => typeof v === "number" && Number.isFinite(v) && v >= -1e9 && v <= 1e9))) return false;
   // The status rules (documentAssetSchema's superRefine).
-  if (!dopplerStatusReasonOk(r.status as string, r.reason as string | null, r.fate as string)) return false;
+  if (!dopplerStatusReasonOk(r as { status: string; reason: string | null; fate: string; kind: string; repeatOf: string | null })) return false;
   if (r.resumable && r.status !== "not-extracted") return false;
   if (r.status === "extracted" && (r.bytes === null || r.sha256 === null || r.format === null || r.fileOf !== r.assetId)) return false;
   if (r.status !== "extracted" && (r.bytes !== null || r.sha256 !== null || r.source !== null)) return false;
@@ -821,9 +830,11 @@ function v1Fate(fate: string): DopplerLedgerFate {
   return (DOPPLER_ASSET_FATES as readonly string[]).includes(fate) ? fate as DopplerLedgerFate : "other";
 }
 
-const V1_SKIPPED: Readonly<Record<string, DopplerLedgerReason>> = {
+// A null-prototype map, read with Object.hasOwn: a manifest's `skipped: "constructor"` (or `__proto__`) is an unknown
+// reason (`other`), never an inherited property.
+const V1_SKIPPED: Readonly<Record<string, DopplerLedgerReason>> = Object.assign(Object.create(null) as Record<string, DopplerLedgerReason>, {
   repeat: "repeat", "min-side": "min_side", min_side: "min_side", pages: "pages", bbox: "bbox", id: "id",
-};
+});
 
 /**
  * Ledger rows for a parsed manifest: one per image, in manifest order. Version 1 maps with what it has: a file is
@@ -866,7 +877,7 @@ export function dopplerLedgerAssets(parsed: DopplerManifest): DocumentAsset[] {
     if (entry.skipped === "fate" && entry.repeat_of === undefined) return { ...base, ...none, status: "unlinked", reason: null, fileOf: null };
     const reason: DopplerLedgerReason = entry.repeat_of !== undefined ? "repeat"
       : entry.error !== undefined ? "error"
-        : V1_SKIPPED[entry.skipped ?? ""] ?? "other";
+        : typeof entry.skipped === "string" && Object.hasOwn(V1_SKIPPED, entry.skipped) ? V1_SKIPPED[entry.skipped]! : "other";
     return { ...base, ...none, status: "not-extracted", reason, fileOf: entry.repeat_of ?? null };
   });
 }
