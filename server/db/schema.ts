@@ -3654,7 +3654,7 @@ export const documentExtractionLevels = pgTable("document_extraction_levels", {
   assetsPending: integer("assets_pending").default(0).notNull(),
   folderBytes: bigint("folder_bytes", { mode: "number" }).default(0).notNull(),
 
-  // Migration 0148: the resume runner's queue and lease (one per document).
+  // Migration 0154: the resume runner's queue and lease (one per document).
   resumeAfter: timestamp("resume_after", { withTimezone: true, mode: "string" }),
   resumeLeaseUntil: timestamp("resume_lease_until", { withTimezone: true, mode: "string" }),
   resumeLeaseOwner: text("resume_lease_owner"),
@@ -3684,7 +3684,7 @@ export const documentExtractionLevels = pgTable("document_extraction_levels", {
   index("document_extraction_levels_run_idx").on(table.runId).where(sql`run_id IS NOT NULL`),
 ]);
 
-/** Migration 0148: resume VM time per organization per UTC day (the runner's daily budget). */
+/** Migration 0154: resume VM time per organization per UTC day (the runner's daily budget). */
 export const figureResumeOrgDays = pgTable("figure_resume_org_days", {
   orgId: text("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
   day: date().notNull(),
@@ -3693,7 +3693,7 @@ export const figureResumeOrgDays = pgTable("figure_resume_org_days", {
   reservedMs: bigint("reserved_ms", { mode: "number" }).default(0).notNull(),
 }, (table) => [primaryKey({ columns: [table.orgId, table.day], name: "figure_resume_org_days_pkey" })]);
 
-/** Migration 0148: applied figure resume proposals (single-use chat tokens). */
+/** Migration 0154: applied figure resume proposals (single-use chat tokens). */
 export const figureResumeProposalUses = pgTable("figure_resume_proposal_uses", {
   jti: text().primaryKey().notNull(),
   orgId: text("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
