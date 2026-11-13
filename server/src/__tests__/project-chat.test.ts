@@ -132,6 +132,9 @@ describe("chat failover order", () => {
     expect(buildModelFailoverOrder("anthropic/claude-haiku-5.5")).toEqual(["anthropic/claude-haiku-5.5", "openai/gpt-6-luna"]);
     expect(buildModelFailoverOrder("deepseek/deepseek-v4.1-flash-1017")).toEqual(["deepseek/deepseek-v4.1-flash-1017", "openai/gpt-6-luna"]);
     expect(buildModelFailoverOrder("openai/gpt-6-luna", false)).toEqual(["openai/gpt-6-luna"]);
+    // A Speed boost variant is the same model: its failover is a different model.
+    expect(buildModelFailoverOrder("openai/gpt-6-luna:nitro")).toEqual(["openai/gpt-6-luna:nitro", "anthropic/claude-haiku-5.5"]);
+    expect(buildModelFailoverOrder("z-ai/glm-5.3-flash:nitro")).toEqual(["z-ai/glm-5.3-flash:nitro", "openai/gpt-6-luna"]);
     for (const model of ["z-ai/glm-5.3-flash", "openai/gpt-6-luna", "anthropic/claude-haiku-5.5", "deepseek/deepseek-v4.1-flash-1017"]) {
       const order = buildModelFailoverOrder(model);
       expect(order.length).toBeLessThanOrEqual(2);

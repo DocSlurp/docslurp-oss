@@ -48,12 +48,22 @@ describe("models never selected automatically", () => {
       "llm://openrouter/deepseek%2Fdeepseek-v4.1-flash%ZZ",
       // A route label with its setting after the id.
       "deepseek/deepseek-v4.1-flash (effort none)",
+      // Council round 2, L3.
+      "deepseek/deepseek-v4-1-flash",
+      "deepseek/deepseek_v4_1_flash",
+      "deepseek.deepseek-v4.1-flash-v1:0",
+      "us.deepseek.deepseek-v4.1-flash-v1:0",
+      "deepseek/deepseek-v4.1-flash.1017",
+      "deepseek\\deepseek-v4.1-flash",
+      "deepseek%5Cdeepseek-v4.1-flash",
     ]) expect(isAutomaticSelectionDenied(ref), ref).toBe(true);
+    // Provider aliases that do not name the family are not caught (documented).
+    expect(isAutomaticSelectionDenied("deepseek/deepseek-chat")).toBe(false);
     expect(isAutomaticSelectionDenied("z-ai/glm-5.3-flash (effort minimal)")).toBe(false);
   });
 
   it("does not catch neighbouring models", () => {
-    for (const ref of ["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4.1", "deepseek/deepseek-v4.1-pro", "deepseek/deepseek-v4p1", "deepseek/deepseek-v4.1-flashy", "z-ai/glm-5.3-flash", "z-ai/glm-5.3-flash@wafer:nitro", "openai/gpt-6-luna", "", null, undefined]) {
+    for (const ref of ["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-1017", "deepseek/deepseek-v4.11-flash", "deepseek/deepseek-v4.1", "deepseek/deepseek-v4.1-pro", "deepseek/deepseek-v4p1", "deepseek/deepseek-v4.1-flashy", "z-ai/glm-5.3-flash", "z-ai/glm-5.3-flash@wafer:nitro", "openai/gpt-6-luna", "", null, undefined]) {
       expect(isAutomaticSelectionDenied(ref), String(ref)).toBe(false);
     }
     expect(withoutAutomaticSelectionDenied(["openai/gpt-6-luna", "deepseek/deepseek-v4.1-flash-1017", "z-ai/glm-5.3-flash"]))

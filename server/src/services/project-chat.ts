@@ -1,4 +1,4 @@
-import type { ChatReasoningLevel } from "@docslurp/shared/project-chat-models";
+import { nitroBaseModel, type ChatReasoningLevel } from "@docslurp/shared/project-chat-models";
 import { resolveSpeedBoostChatModel, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { getDeferredContext } from "../search/deferred/deferred-context.js";
@@ -507,7 +507,9 @@ export function buildModelFailoverOrder(
   failover = true,
 ): string[] {
   if (!failover) return [preferredModel];
-  const next = withoutAutomaticSelectionDenied(PROJECT_CHAT_FAILOVER_MODELS).find((model) => model !== preferredModel);
+  // A Speed boost variant is the same model: a Luna Nitro project fails over to Haiku, never to plain Luna.
+  const base = nitroBaseModel(preferredModel) ?? preferredModel;
+  const next = withoutAutomaticSelectionDenied(PROJECT_CHAT_FAILOVER_MODELS).find((model) => model !== base);
   return next ? [preferredModel, next] : [preferredModel];
 }
 
