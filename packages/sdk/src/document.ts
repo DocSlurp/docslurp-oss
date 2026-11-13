@@ -69,7 +69,11 @@ export type DocumentViewerPayload = {
 };
 
 /** A document's ingest version against the workspace's current one (GET /v1/documents/:id `ingest`). */
-export type IngestStatus = { version: number; capabilities: string[]; currentVersion: number; updateAvailable: boolean };
+export type IngestStatus = {
+  version: number; capabilities: string[]; currentVersion: number; updateAvailable: boolean;
+  /** True only when an update is available and this caller may start the reprocess. */
+  canReprocess?: boolean;
+};
 /** GET /v1/ingest-version. */
 export type WorkspaceIngestVersion = { ingestVersion: number; capabilities: string[] };
 /** Why the API cannot show data the caller may see. A closed vocabulary; never error text. */

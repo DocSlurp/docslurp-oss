@@ -15,7 +15,8 @@ produced it. The serving API answers data it cannot show with a typed
   gets the same value. Sessions and API keys can read it.
 - Document records carry `ingestVersion` and `ingestCapabilities`.
   `GET /v1/documents/:id` also returns `ingest`: `{ version, capabilities,
-  currentVersion, updateAvailable }`.
+  currentVersion, updateAvailable, canReprocess }`. `canReprocess` is true only
+  when an update is available and the caller may start the reprocess.
 - Runs carry `ingestVersion` and `ingestCapabilities`. A run's capabilities are
   what its pipeline build supports. A document's capabilities are measured from
   what its run actually stored:

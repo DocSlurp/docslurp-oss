@@ -130,14 +130,22 @@ describe("document detail", () => {
   it("carries the document's ingest status against the workspace's", async () => {
     const body = await (await app.request("/documents/doc-old", as("ua"))).json();
     expect(body.document).toMatchObject({ ingestVersion: 0, ingestCapabilities: [] });
-    expect(body.ingest).toEqual({ version: 0, capabilities: [], currentVersion: CURRENT_INGEST_VERSION, updateAvailable: true });
+    expect(body.ingest).toEqual({ version: 0, capabilities: [], currentVersion: CURRENT_INGEST_VERSION, updateAvailable: true, canReprocess: true });
+  });
+
+  it("offers the update only to a caller who may reprocess", async () => {
+    expect((await (await app.request("/documents/doc-old", as("uv"))).json()).ingest).toMatchObject({ updateAvailable: true, canReprocess: false });
+    // ue edits project C but only views A, where doc-old lives.
+    expect((await (await app.request("/documents/doc-old", as("ue"))).json()).ingest).toMatchObject({ updateAvailable: true, canReprocess: false });
+    const { rawKey: readOnly } = await keys.createApiKey("ua", "artifacts-only", { orgId: "org-a", scopes: ["artifacts"], projectIds: ["proj-a"] });
+    expect((await (await app.request("/documents/doc-old", bearer(readOnly))).json()).ingest).toMatchObject({ canReprocess: false });
   });
 
   it("reports a stamped document as current, with its measured capabilities", async () => {
     await sql`update documents set ingest_version = ${CURRENT_INGEST_VERSION}, ingest_capabilities = '{pageFacts}' where id = 'doc-text'`;
     try {
       const body = await (await app.request("/documents/doc-text", as("ua"))).json();
-      expect(body.ingest).toEqual({ version: CURRENT_INGEST_VERSION, capabilities: ["pageFacts"], currentVersion: CURRENT_INGEST_VERSION, updateAvailable: false });
+      expect(body.ingest).toEqual({ version: CURRENT_INGEST_VERSION, capabilities: ["pageFacts"], currentVersion: CURRENT_INGEST_VERSION, updateAvailable: false, canReprocess: false });
     } finally {
       await sql`update documents set ingest_version = 0, ingest_capabilities = '{}' where id = 'doc-text'`;
     }

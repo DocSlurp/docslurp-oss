@@ -51,6 +51,8 @@ export const ingestStatusSchema = z.object({
   currentVersion: z.number().int().positive(),
   /** True when a reprocess would bring the document to the current version. */
   updateAvailable: z.boolean(),
+  /** On GET /v1/documents/:id: true only when an update is available and this caller may start the reprocess. */
+  canReprocess: z.boolean().optional(),
 });
 export type IngestStatus = z.infer<typeof ingestStatusSchema>;
 
