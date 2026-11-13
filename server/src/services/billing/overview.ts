@@ -92,11 +92,19 @@ export async function getOrgStorage(
           and ((d.status = 'completed' and d.superseded_at is null
                 and not (${excludeExtracts}::boolean and exists (
                   select 1 from project_runs r where r.id = d.run_id and r.extract_id is not null)))
-            or (d.archived_at is not null and d.purged_at is null))), 0)::text as artifact_bytes
+            or (d.archived_at is not null and d.purged_at is null))), 0)::text as artifact_bytes,
+      -- Figures withheld for PII (on the document's withheld list) are stored but never served: not billed (Low 9).
+      coalesce((select sum(a.bytes) from documents d
+        join document_extraction_levels l on l.document_id = d.id and l.org_id = d.org_id and l.asset_bytes > 0
+        join document_assets a on a.document_id = d.id and a.org_id = d.org_id and a.run_id = l.run_id and a.storage_state = 'stored'
+        where d.org_id = ${orgId} and jsonb_typeof(d.metadata -> 'pii' -> 'withheldArtifactUris') = 'array'
+          and ((d.status = 'completed' and d.superseded_at is null) or (d.archived_at is not null and d.purged_at is null))
+          and exists (select 1 from jsonb_array_elements_text(d.metadata -> 'pii' -> 'withheldArtifactUris') u
+            where right(u, char_length(a.storage_key) + 1) = '/' || a.storage_key)), 0)::text as withheld_bytes
   `;
   const sourceBytes = Number(row?.source_bytes ?? 0);
   const pages = Number(row?.pages ?? 0) + Number(row?.extra_pages ?? 0);
-  const measuredArtifactBytes = Number(row?.artifact_bytes ?? 0);
+  const measuredArtifactBytes = Math.max(0, Number(row?.artifact_bytes ?? 0) - Number(row?.withheld_bytes ?? 0));
   return {
     sourceBytes,
     pages,

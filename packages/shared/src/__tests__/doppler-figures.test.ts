@@ -168,7 +168,8 @@ describe("dopplerShardCoverage: shards plus declared gaps (partial) or the stric
   });
   it("an extracted outcome keeps the strict rule: a hole is refused even with a declared gap", () => {
     expect(dopplerShardCoverage([[1, 4], [5, 9]], null, doc(9, false))).toBeNull();
-    expect(dopplerShardCoverage([[1, 4]], null, doc(9, false))).toBeNull();
+    // A missing tail is not complete (R2 adversarial 8): an extracted outcome reaches the last page.
+    expect(dopplerShardCoverage([[1, 4]], null, doc(9, false))).toBe("shards-not-contiguous");
     expect(dopplerShardCoverage([[2, 4]], null, doc(9, false))).toBe("shards-not-contiguous");
     expect(dopplerShardCoverage([[1, 4], [9, 9]], [g(5, 8)], doc(9, false))).toBe("shards-not-contiguous");
   });

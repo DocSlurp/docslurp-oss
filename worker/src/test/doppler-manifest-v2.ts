@@ -113,8 +113,10 @@ export async function writeV3Folder(dir: string, text: string, files: ReadonlyMa
  * One shard's `manifest.jsonl`: the images and batches of `range` only, with that shard's totals, header `pages` set to
  * the range and its own settings digest (each shard VM runs with its own `-f/-l` and `--images-pages`).
  */
-export function v3ShardText(manifest: V2Manifest, range: [number, number], options: { settings?: string; mutateLines?: (lines: string[]) => void } = {}): string {
-  const images = manifest.images.filter((entry) => (entry.page as number) >= range[0] && (entry.page as number) <= range[1]);
+export function v3ShardText(manifest: V2Manifest, range: [number, number], options: { settings?: string; mutateLines?: (lines: string[]) => void; context?: ReadonlyArray<V2Manifest["images"][number]> } = {}): string {
+  // `context`: entries a real shard also lists for its context pages (outside `range`), in id order with the rest.
+  const images = [...manifest.images.filter((entry) => (entry.page as number) >= range[0] && (entry.page as number) <= range[1]), ...(options.context ?? [])]
+    .sort((a, b) => (a.page as number) - (b.page as number) || String(a.id).localeCompare(String(b.id)));
   const batches = [{ pages: [range[0], range[0] + 63], status: images.some((e) => e.resumable) ? "budget" : "ok", ...(images.some((e) => e.resumable) ? { cut_page: range[1] } : {}) }];
   const count = (status: string) => images.filter((entry) => entry.status === status).length;
   const extracted = images.filter((entry) => entry.status === "extracted");

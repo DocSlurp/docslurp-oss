@@ -89,6 +89,22 @@ describe("figure bytes in getOrgStorage", () => {
     expect((await overview.getOrgStorage("oa", sql as never)).measuredArtifactBytes).toBe(100_101);
   });
 
+  it("figures withheld for PII are stored but never billed (Low 9)", async () => {
+    await doc("d1");
+    await sql`insert into document_extraction_levels (document_id, org_id, project_id, run_id, images_status, asset_bytes, assets_total, assets_extracted)
+      values ('d1', 'oa', 'pa', 'ra', 'complete', 3000, 2, 2)`;
+    const row = (id: string, n: number, bytes: number) => sql`insert into document_assets (document_id, org_id, project_id, run_id, asset_id, page_number,
+        kind, fate, status, format, source, bytes, sha256, width, height, link_path, file_of, storage_key, storage_state)
+      values ('d1', 'oa', 'pa', 'ra', ${id}, ${n}, 'picture', 'block', 'extracted', 'webp', 'render', ${bytes}, ${"a".repeat(64)}, 10, 10,
+        ${`images/page-000${n}/image-001.webp`}, ${id}, ${`ua/ra/doppler/d1/images/page-000${n}/image-001.webp`}, 'stored')`;
+    await row("p1.1", 1, 1000);
+    await row("p2.1", 2, 2000);
+    expect((await overview.getOrgStorage("oa", sql as never)).measuredArtifactBytes).toBe(3000);
+    await sql`update documents set metadata = ${sql.json({ pii: { scope: "pages", pages: [2], withheldArtifactUris: ["s3://bucket/ua/ra/doppler/d1/images/page-0002/image-001.webp"] } })} where id = 'd1'`;
+    expect((await overview.getOrgStorage("oa", sql as never)).measuredArtifactBytes).toBe(1000);
+    await sql`delete from document_assets`;
+  });
+
   it("never counts another organization's figures", async () => {
     await doc("a1");
     await doc("b1", { org: "ob" });

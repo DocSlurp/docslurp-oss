@@ -145,8 +145,8 @@ export type DopplerShardCoverageRule = "shards-not-contiguous" | "gap-overlaps-s
  * - Every shard and gap lies inside `first..last` (`page-outside-document`); no gap overlaps a shard (`gap-overlaps-shard`).
  * - `partial` with declared gaps (a failed batch or shard publishes no folder: app #464): shards and gaps together cover
  *   every page of `first..last` exactly once, so a first, middle or trailing gap keeps the extracted shards.
- * - Otherwise (an `extracted` outcome, or no gap declared): the strict rule, shards from `first` with no hole, ending
- *   within `last`. A hole is never excused by a gap an `extracted` outcome declares.
+ * - Otherwise (an `extracted` outcome, or no gap declared): the strict rule, shards from `first` with no hole; an
+ *   extracted outcome's last shard ends at `last`. A hole is never excused by a gap an `extracted` outcome declares.
  * A gap holds no rows: it is never stored, billed or served; its resume publishes `shards/<first>-<last>/` for it.
  */
 export function dopplerShardCoverage(
@@ -164,6 +164,9 @@ export function dopplerShardCoverage(
       if (first !== next) return "shards-not-contiguous";
       next = last + 1;
     }
+    // An extracted outcome reaches the last asked page: a missing tail is not "complete" (it needs a declared gap, which
+    // only a partial outcome may carry).
+    if (!args.partial && next !== args.last + 1) return "shards-not-contiguous";
     return null;
   }
   const items = [...shards.map(([first, last]) => ({ first, last })), ...declared].sort((a, b) => a.first - b.first);
@@ -613,7 +616,8 @@ export class DopplerManifestV3Validator {
 
   /**
    * `range`: a shard's pages (`shards/<first>-<last>/manifest.jsonl`): its header's `pages` must be exactly that range and
-   * every image and batch must start inside it.
+   * every batch must start inside it; every image too, except context-page entries (`not-extracted`, reason `pages`, no
+   * file, resume, repeat or fallback; their derived link allowed), which are counted but yield no row.
    */
   constructor(private readonly limits: { maxLines: number; maxPage: number; range?: readonly [number, number] }) {}
 
@@ -685,7 +689,7 @@ export class DopplerManifestV3Validator {
     this.fail("unknown-line-type");
   }
 
-  private image(value: Record<string, unknown>): { row: DocumentAsset; file: DopplerManifestFileEntry | null; error?: string } {
+  private image(value: Record<string, unknown>): { row: DocumentAsset; file: DopplerManifestFileEntry | null; error?: string } | null {
     if (this.state !== "images") this.fail("lines-out-of-order");
     const parsed = dopplerManifestV3ImageSchema.safeParse(value);
     if (!parsed.success) this.fail("image-invalid");
@@ -693,7 +697,16 @@ export class DopplerManifestV3Validator {
     const header = this.header!;
     if (entry.page > this.limits.maxPage) this.fail("page-outside-document");
     const range = this.limits.range;
-    if (range && (entry.page < range[0] || entry.page > range[1])) this.fail("shard-range");
+    // A shard's conversion also lists the images on its context pages (`-f`/`-l` around `--images-pages`, bound into its
+    // settings and hash chain), as `not-extracted` with reason `pages`. Such an entry outside the shard's range is counted
+    // for the end line but yields no row: the shard that owns the page lists it (ledger, index, billing and resume).
+    // Anything else outside the range is refused.
+    const context = !!range && (entry.page < range[0] || entry.page > range[1]);
+    // (Its derived path and link are allowed, as Doppler writes them; it never has a file, a resume, a repeat or a fallback.)
+    if (context && !(entry.status === "not-extracted" && entry.reason === "pages" && entry.resumable !== true &&
+        entry.repeat_of === undefined && entry.fallback === undefined && entry.bytes === 0 && entry.sha256 === null)) {
+      this.fail("shard-range");
+    }
     const key = idOrderKey(entry.id);
     if (this.lastId && !idBefore(this.lastId, key)) this.fail("lines-out-of-order");
     this.lastId = key;
@@ -701,11 +714,13 @@ export class DopplerManifestV3Validator {
     if (entry.repeat_of !== undefined) {
       // A repeat names an earlier linked image that is not itself a repeat (no chains, no cycles, no forward names).
       if (!this.repeatTargets.has(entry.repeat_of)) this.fail("repeat-invalid");
-    } else if (entry.path !== null) {
+    } else if (entry.path !== null && !context) {
+      // (A context entry is never a repeat target: the shard that owns its page lists it.)
       this.repeatTargets.add(entry.id);
     }
     const s = this.sum;
     s.images += 1;
+    if (context) { s.notExtracted += 1; if (entry.path !== null) s.linked += 1; return null; }
     if (entry.path !== null) s.linked += 1;
     if (entry.reason === "repeat") s.repeats += 1;
     if (entry.fallback !== undefined) s.fallbacks += 1;
