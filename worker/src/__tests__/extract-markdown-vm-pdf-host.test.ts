@@ -255,6 +255,27 @@ describe("the sandboxed PDF route on the worker host", () => {
     }
   });
 
+  it("writes the page-facts file with figures off, before extract-markdown commits its checkpoint (what route-pages reads, #367)", async () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
+    vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "0");
+    for (const mode of ["store", "use"]) {
+      vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", mode);
+      const h = await harness({ markdown: "One\fTwo\fThree", pageFacts: fullFixture() });
+      // The stage's checkpoint commit: route-pages runs only after it, so the file must already be there.
+      const atCommit: boolean[] = [];
+      (h.state.store as unknown as Record<string, unknown>).completeDocumentStage = vi.fn(async (_state: unknown, documentId: string, stageName: string) => {
+        if (documentId === "doc-1" && stageName === "extract-markdown") atCommit.push(h.bytes.has("user-1/run-1/doppler/doc-1/images/page-facts.jsonl"));
+      });
+      try {
+        await h.stage.run(h.state);
+        expect(h.state.documentStage("doc-1", "extract-markdown")?.status).toBe("completed");
+        expect(h.commands.every((command) => !command.sandboxedPdf?.figures)).toBe(true);
+        expect(atCommit).toEqual([true]);
+        expect(h.state.artifactLedger.readDocument("doc-1", DOPPLER_PAGE_FACTS_SLOT)).toBe("s3://test/user-1/run-1/doppler/doc-1/images/page-facts.jsonl");
+      } finally { await h.cleanup(); }
+    }
+  });
+
   it("writes no page-facts object for malformed, refused or off-mode facts, or when the write fails", async () => {
     vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
     vi.spyOn(console, "warn").mockImplementation(() => {});
