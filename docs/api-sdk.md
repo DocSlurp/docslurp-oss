@@ -1109,18 +1109,62 @@ Current Fast and Rich page prices are on [docslurp.io/pricing](https://docslurp.
 
 ### Chart and diagram export
 
-`pipeline.chartExport` (off by default) re-expresses each detected chart or diagram as text an assistant or a notebook can use. A deployment enables the feature with `DOCSLURP_CHART_EXPORT=on` on the API and worker; while it is off, turning `enabled` on is refused with `400 chart_export_unavailable`, a stored `enabled: true` has no effect, and estimates, chat suggestions and the ingest report never offer it. Set it on the project (`PATCH /v1/projects/:project` with `{ "pipeline": { "chartExport": { "enabled": true } } }`) or per upload in the request's `pipeline` overrides.
+`pipeline.chartExport` re-expresses each detected chart or diagram as text an assistant or a notebook can use. You choose a **tier**, never a model:
+
+| Tier | What runs | Cost |
+| --- | --- | --- |
+| `off` | Nothing. Charts stay images (and their counts are still recorded). | none |
+| `free` | Charts that carry their own data: Office chart parts (DOCX, PPTX, XLSX), embedded Vega, Vega-Lite or Plotly specs, and vector figures with readable axes. No model is called. | no credits |
+| `models` | The free steps, plus reading every other chart or diagram with AI. | billed per chart or diagram read (`feature-chart-export`) |
+
+**Defaults depend on where the request comes from.** A project with no `tier` set uses the caller's default, decided by the server from how you authenticated (never from a request field):
+
+- **API, MCP, SDK and CLI calls** (API keys and OAuth tokens): `off`. Chart reading is off by default for API calls until its cost and speed match ingest without it; turn it on per project or per request.
+- **The DocSlurp app** (signed-in browser sessions, including chat uploads): `free`.
+
+**Precedence**, highest first:
+
+1. The request's own override (below).
+2. The project's `pipeline.chartExport.tier`.
+3. The default for the caller (above).
+4. The deployment ceiling, `DOCSLURP_CHART_EXPORT` (`off`, `free` or `on`), caps all of these: `off` disables chart export everywhere, `free` allows only the free steps, `on` allows `models` too.
+
+The resolved tier is stored on the run (`pipeline.chartExport.tier`), so a retry or resume runs with the same tier.
+
+**Per project:** `PATCH /v1/projects/:project` with `{ "pipeline": { "chartExport": { "tier": "free" } } }` (a server key with `projects:manage`). Remove the field to go back to the caller's default.
+
+**Per request:** upload, URL ingest and direct upload sessions take it in the request's `pipeline` overrides; reprocess and the estimate endpoints take a top-level `chartExport`:
+
+```json
+POST /v1/uploads/url
+{ "urls": ["https://example.com/q3-earnings.pdf"], "pipeline": { "chartExport": { "tier": "free" } } }
+
+POST /v1/runs/:runId/reprocess
+{ "chartExport": { "tier": "models" } }
+
+POST /v1/uploads/estimate
+{ "files": [{ "name": "q3-earnings.pdf", "size": 2400000 }], "chartExport": { "tier": "models" } }
+```
+
+The upload estimate answers `chartExport: { tier, source, credits }`, where `source` is `request`, `project` or `default`. Only `models` adds credits. `POST /v1/runs/:runId/reprocess/estimate` prices the same override.
+
+Other surfaces: SDK `chartExport: { tier }` on `upload`, `uploadUrls`/`ingestUrls`, `reprocessRun`, `reprocessEstimate` and `uploadEstimate`; CLI `--chart-export off|free|models` on `upload`, `ingest-url`, `reprocess` and their `--estimate`; MCP `chartExport` on `upload`, `extract`, `uploadEstimate` and `reprocessEstimate`.
+
+**Billing and refusals for `models`:** a `models` run passes the same spend admission as other model-calling work: credits, budgets, and the `ingest` scope on a server key. It is refused with `400 chart_export_models_unavailable` where the deployment ceiling is not `on`. The tier is never silently lowered. Moving a project to `models` is refused the same way (`400 chart_export_unavailable`). An unknown tier, a `generatorModel` field, or any other unknown key is a validation error. The model that reads charts is chosen by DocSlurp from managed settings; requests cannot pick one.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `enabled` | `false` | Turn export on. Enabling it (or adding formats, or turning `diagrams` on) recommends a reindex: existing documents gain exports only when you reprocess them. |
+| `tier` | unset (caller's default) | `off`, `free` or `models`, as above. Moving up a tier recommends a reindex: a billed one for `models`, an optional free one for `free`. Turning it down or off applies to new uploads only. |
 | `formats` | `["description", "mermaid"]` | Any of `description` (short prose: type, axes, series, ranges and trend), `mermaid` (rendered in chat; GitHub renders it too), `vega-lite` (v5 JSON with inline data), `matplotlib` (a self-contained Python snippet) and `csv` (RFC 4180; diagrams export an edge list). |
 | `diagrams` | `true` | Also export flowcharts, org charts, sequence, state, ER and mind-map diagrams (Mermaid, description and CSV edge list). |
-| `generatorModel` | `null` | Optional `llm://provider/model` override for charts that need a model. Only the worker's chart generator candidates priced at or under $2 per million output tokens are accepted; any other value is ignored (logged) and the default generator is used. Chat proposals never set it. |
 
-Charts that carry their own data (Office chart parts, embedded Vega/Vega-Lite/Plotly specs, vector graphics with readable axes) are exported without a model call; others are read by a model and charged once per chart or diagram the model read (`feature-chart-export`), whatever the outcome: also when the exported data came from the file in the end, when the model found no chart, or when it found a diagram while diagram export is off. A request that failed before the model answered is not charged. Every format is derived from one validated `VisualSpec` (`@docslurp/shared`, `renderVisual`), and a format with no faithful form for a visual (for example a heatmap in Mermaid) is skipped and reported rather than approximated. Labels from documents are escaped for each format, so they cannot add Mermaid directives or click handlers, Python code or spreadsheet formulas. Generated Python is never executed by DocSlurp. Pricing for model-read visuals is on [docslurp.io/pricing](https://docslurp.io/pricing).
+With `models`, each chart or diagram a model read is charged once, whatever the outcome. That includes a read whose exported data came from the file after all, a read that found no chart, and one that found a diagram while diagram export is off. A request that failed before the model answered is not charged. Every format is derived from one validated `VisualSpec` (`@docslurp/shared`, `renderVisual`). A format with no faithful form for a visual (for example a heatmap in Mermaid) is skipped and reported, not approximated. Labels from documents are escaped for each format, so they cannot add Mermaid directives or click handlers, Python code or spreadsheet formulas. DocSlurp never executes the generated Python. Pricing for model-read visuals is on [docslurp.io/pricing](https://docslurp.io/pricing).
 
-Ingest records chart and diagram counts per document even when export is off, so chat suggestions (DocSlurp app) and the ingest report's `export-charts` recommendation can point out charts that were kept only as images.
+Ingest records chart and diagram counts per document whatever the tier. That lets chat suggestions (DocSlurp app) and the ingest report's `export-charts` recommendation point out charts that were not exported as data, and propose `chartExport: { tier: "models" }`.
+
+### Figure extraction
+
+`pipeline.figures` (default `true`) extracts figures from PDFs into the document's image map. Set it to `false` to skip the figure pass for a project's new runs; existing documents keep their figures until they are reprocessed. Turning it back on recommends a reindex, and the figure pass adds sandbox time. The deployment's `DOCSLURP_DOPPLER_IMAGE_EXTRACT` decides whether the pass exists at all. Change it per project (`PATCH /v1/projects/:project` with `{ "pipeline": { "figures": false } }`), per upload in the `pipeline` overrides, or from chat in the DocSlurp app.
 
 ### Credits and budgets
 
