@@ -104,7 +104,8 @@ export const projectSchema = z.object({
   /**
    * This deployment's chart export defaults for a project with no tier: `app` (DocSlurp app uploads) and `machine`
    * (API, MCP, SDK, CLI), after the kill switch; whether the billed `models` tier is offered (`DOCSLURP_CHART_EXPORT=on`);
-   * whether `free` may be chosen explicitly (`DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on`); and the switch itself. Clients
+   * whether `free` may be chosen explicitly (`DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on`, or unset with
+   * `DOCSLURP_CHART_EXPORT_INLINE=1`); and the switch itself. Clients
    * label the default and classify changes from these, never from a code default. Absent (an older server): treat as
    * `CONSERVATIVE_CHART_EXPORT_DEFAULTS` and hide tier controls.
    */

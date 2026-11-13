@@ -44,11 +44,12 @@ describe("chart export in the public quote", () => {
     expect(free.ingest.credits).toEqual(off.ingest.credits);
   });
 
-  it("resolves no tier to off for machine callers (API, MCP, SDK, CLI) and free for the app", () => {
+  it("resolves no tier to off for every caller (app, API, MCP, SDK, CLI) unless the deployment sets a default", () => {
     installTestPricing(DISTINCT_TEST_PRICING);
     expect(quoteEstimate({ files }, { env: ON }).settings.chartExport).toBe("off");
     expect(quoteEstimate({ files }, { env: ON, origin: "machine" }).settings.chartExport).toBe("off");
-    expect(quoteEstimate({ files }, { env: ON, origin: "app" }).settings.chartExport).toBe("free");
+    expect(quoteEstimate({ files }, { env: ON, origin: "app" }).settings.chartExport).toBe("off");
+    expect(quoteEstimate({ files }, { env: { ...ON, DOCSLURP_CHART_EXPORT_APP_DEFAULT: "free" }, origin: "app" }).settings.chartExport).toBe("free");
     expect(quoteEstimate({ files }, { env: { ...ON, DOCSLURP_CHART_EXPORT_API_DEFAULT: "free" }, origin: "machine" }).settings.chartExport).toBe("free");
     expect(quoteEstimate({ files }, { env: { ...ON, DOCSLURP_CHART_EXPORT_APP_DEFAULT: "off" }, origin: "app" }).settings.chartExport).toBe("off");
     // An explicit project tier wins over both defaults; the request wins over the project.

@@ -60,7 +60,8 @@ describe("stampRunChartExport", () => {
   const FREE_OK = { DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: "on" };
   it("resolves an unset tier by origin and keeps an explicit (request or project) tier", () => {
     const base = defaultPipelineFeatures;
-    expect(stampRunChartExport(base, "app", {}).chartExport.tier).toBe("free");
+    expect(stampRunChartExport(base, "app", {}).chartExport.tier).toBe("off");
+    expect(stampRunChartExport(base, "app", { DOCSLURP_CHART_EXPORT_APP_DEFAULT: "free" }).chartExport.tier).toBe("free");
     expect(stampRunChartExport(base, "app", { DOCSLURP_CHART_EXPORT_APP_DEFAULT: "off" }).chartExport.tier).toBe("off");
     expect(stampRunChartExport(base, "machine", {}).chartExport.tier).toBe("off");
     expect(stampRunChartExport(base, "machine", { DOCSLURP_CHART_EXPORT_API_DEFAULT: "free" }).chartExport.tier).toBe("free");

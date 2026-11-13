@@ -1119,24 +1119,30 @@ Current Fast and Rich page prices are on [docslurp.io/pricing](https://docslurp.
 | `free` | Charts that carry their own data: Office chart parts (DOCX, PPTX, XLSX), embedded Vega, Vega-Lite or Plotly specs, and vector figures with readable axes. No model is called. | no credits |
 | `models` | The free steps, plus reading every other chart or diagram with AI. | billed per chart or diagram read (`feature-chart-export`) |
 
-**Defaults depend on where the request comes from.** A project with no `tier` set uses the caller's default, decided by the server from how you authenticated (never from a request field):
+**Chart export is off by default.** A project with no `tier` set uses the caller's default, decided by the server from
+how you authenticated (never from a request field). With no deployment settings, both defaults are `off`:
 
 - **API, MCP, SDK and CLI calls** (API keys and OAuth tokens): `off`.
-- **The DocSlurp app** (signed-in browser sessions, including chat uploads): the deployment's app default. The code
-  default is `free`; a deployment may hold it `off`, and docslurp.io currently does, until the free steps' cost and speed
-  pass their gate.
+- **The DocSlurp app** (signed-in browser sessions, including chat uploads): `off`.
 
-The project record reports what a deployment actually runs as `chartExportDefaults`:
-`{ app, machine, modelsAvailable, freeAvailable, ceiling }`. Read it instead of assuming either default.
+Turn it on per request or per project (below). The project record reports what a deployment actually runs as
+`chartExportDefaults`: `{ app, machine, modelsAvailable, freeAvailable, ceiling }`. Read it instead of assuming either
+default; `freeAvailable` and `modelsAvailable` say which tiers you may choose.
 
 A deployment sets these without a code change. Each value is parsed strictly, and an unknown value is treated as `off`
 and logged at startup:
 
-- `DOCSLURP_CHART_EXPORT_API_DEFAULT=off|free` (default `off`) for API callers.
-- `DOCSLURP_CHART_EXPORT_APP_DEFAULT=free|off` (default `free`) for the app.
-- `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on|off` (default `off`). While it is off, a request or project change that asks
-  for `free` explicitly is refused, and a stored `free` counts as unset. Each free run boots a parser VM that is not
-  billed, so only the deployment's own defaults turn it on for now.
+- `DOCSLURP_CHART_EXPORT=off|free|on` (default `off`): the ceiling for every tier (see precedence below). Self-hosters
+  set it to `free` or `on` to offer chart export at all.
+- `DOCSLURP_CHART_EXPORT_API_DEFAULT=off|free` (default `off`) for API callers on projects with no tier.
+- `DOCSLURP_CHART_EXPORT_APP_DEFAULT=off|free` (default `off`) for the app on projects with no tier.
+- `DOCSLURP_CHART_EXPORT_INLINE=1` (default unset): the free steps run inside the sandboxed inspection every document
+  already gets, instead of a separate sandbox run per document.
+- `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on|off` (default: follows `DOCSLURP_CHART_EXPORT_INLINE`). Whether callers may
+  choose `free` explicitly. Unset, it is allowed exactly when inline extraction is on. While it is refused, a request
+  or project change that asks for `free` is refused, and a stored `free` counts as unset.
+- `DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR` (default `200`): per-organization hourly cap on free-tier sandbox
+  runs, across every worker.
 
 **Precedence**, highest first:
 
@@ -1147,11 +1153,53 @@ and logged at startup:
 
 The resolved tier is stored on the run (`pipeline.chartExport.tier`), so a retry or resume runs with the same tier.
 
-**Per project:** `PATCH /v1/projects/:project` with `{ "pipeline": { "chartExport": { "tier": "models" } } }` (or `"off"`; a server key with `projects:manage`). An explicit `"free"` is accepted only where the deployment allows it (`chartExportDefaults.freeAvailable`, `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on`); elsewhere it is refused with `400 chart_export_tier_unavailable`. Remove the field to go back to the caller's default.
+**Per project:** `PATCH /v1/projects/:project` with `{ "pipeline": { "chartExport": { "tier": "free" } } }` (`"off"`,
+`"free"` or `"models"`; a server key with `projects:manage`, or a project editor's session). New uploads to the project
+then use that tier unless a request overrides it. A tier the deployment does not offer
+(`chartExportDefaults.freeAvailable` / `modelsAvailable` false) is refused with `400 chart_export_tier_unavailable`.
+Remove the field to go back to the caller's default. In a project chat, the settings proposal tool
+(`proposeProjectSettings`) offers the same change as an Apply card: `{ changes: { pipeline: { chartExport: { tier: "free" } } } }`.
+
+```bash
+curl -X PATCH "https://docslurp.io/v1/projects/q3-earnings" \
+  -H "Authorization: Bearer $DOCSLURP_API_KEY" \
+  -H "content-type: application/json" \
+  -d '{ "pipeline": { "chartExport": { "tier": "free" } } }'
+```
+
+```ts
+import { createDocSlurpClient } from "@docslurp/sdk";
+
+const client = createDocSlurpClient(); // Reads DOCSLURP_API_KEY.
+await client.updateProject("q3-earnings", { pipeline: { chartExport: { tier: "free" } } });
+```
 
 **Replays never raise the tier.** Reprocess, bulk reprocess, reindex and full index run each document at its source run's tier capped at what the project resolves to now: after a project moves from `models` to `off` (or unset), a plain reprocess or a later reindex runs without billed chart reads, and a contributor's plain reprocess is not refused. Only an explicit request override (`chartExport: { "tier": "models" }`) raises it, and it then needs project editor rights (and, for an API key, `pipeline:billed-features`).
 
-**Per request:** upload, URL ingest and direct upload sessions take it in the request's `pipeline` overrides; reprocess and the estimate endpoints take a top-level `chartExport`:
+**Per request:** upload, URL ingest and direct upload sessions take it in the request's `pipeline` overrides; reprocess and the estimate endpoints take a top-level `chartExport`. A request override wins over the project's tier (within the deployment ceiling, and `models` above a project's `off`/`free` needs the rights below):
+
+```bash
+curl -X POST "https://docslurp.io/v1/uploads/url" \
+  -H "Authorization: Bearer $DOCSLURP_API_KEY" \
+  -H "content-type: application/json" \
+  -d '{ "urls": ["https://example.com/q3-earnings.pptx"], "pipeline": { "chartExport": { "tier": "free" } } }'
+```
+
+```ts
+import { createReadStream } from "node:fs";
+
+await client.upload(createReadStream("q3-earnings.pptx"), { chartExport: { tier: "free" } });
+await client.upload({ urls: ["https://example.com/q3-earnings.pdf"] }, { chartExport: { tier: "models" } });
+await client.reprocessRun(runId, { chartExport: { tier: "free" } });
+```
+
+```bash
+docslurp upload q3-earnings.pptx --chart-export free
+docslurp ingest-url https://example.com/q3-earnings.pdf --chart-export models --estimate
+docslurp reprocess <runId> --chart-export free
+```
+
+The same bodies over JSON:
 
 ```json
 POST /v1/uploads/url
@@ -1173,7 +1221,7 @@ Other surfaces: SDK `chartExport: { tier }` on `upload`, `uploadUrls`/`ingestUrl
 **Refusals:** a tier the deployment does not offer is refused with `400 chart_export_tier_unavailable` on every surface:
 uploads, URL ingest, direct sessions (at creation and again at confirm), extracts, website ingest, reprocess, the
 estimates and project changes. The tier is never silently lowered. `models` is offered only where the ceiling is `on`,
-and an explicit `free` only where `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on`. The access check comes first, so a caller
+and an explicit `free` only where `chartExportDefaults.freeAvailable` is true. The access check comes first, so a caller
 without access gets its 403 or 404 before any tier refusal.
 
 **A project's tier is a ceiling.** Choosing `models` per request on a project

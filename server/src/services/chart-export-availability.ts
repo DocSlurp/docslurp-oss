@@ -30,7 +30,7 @@ export const CHART_EXPORT_UNAVAILABLE_MESSAGE = "That chart export tier is not a
 
 /**
  * A tier the deployment does not offer, chosen explicitly (a request override or a project change): `models` while the
- * kill switch is not `on`, or `free` while `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT` is not `on`. One code and status on
+ * kill switch is not `on`, or `free` while explicit free is not allowed (`chartExportFreeExplicitAllowed`). One code and status on
  * every surface: 400 `chart_export_tier_unavailable`.
  */
 export class ChartExportUnavailableError extends Error {

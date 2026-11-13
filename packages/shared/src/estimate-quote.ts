@@ -50,8 +50,9 @@ export const quoteSettingsSchema = z.strictObject({
   /** The chat model class the answers use. */
   chatTier: z.enum(CHAT_ANSWER_TIERS as unknown as [string, ...string[]]),
   /**
-   * Chart and diagram export tier. Omitted: the project's tier, else the caller's default (the DocSlurp app: free; API,
-   * MCP, SDK and CLI: off). The deploy switch caps it. Only `models` (reading charts with AI) is priced.
+   * Chart and diagram export tier. Omitted: the project's tier, else the caller's default (`off` for the DocSlurp app and
+   * for API, MCP, SDK and CLI calls unless the deployment sets one). The deploy switch caps it. Only `models` (reading
+   * charts with AI) is priced.
    */
   chartExport: chartExportTierSchema,
   /** Chart export formats and diagrams the `models` tier prices with: the project's own, so the quote's charts line equals the upload's `chartExport.credits`. */
